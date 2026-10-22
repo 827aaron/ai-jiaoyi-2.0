@@ -25,6 +25,8 @@ class TrackedPosition(BaseModel):
     record: PositionRecord
     lifeboat_stop_pct: float
     """开仓指令里的保命止损距离，晚成交（限价单）时用来补挂。"""
+    notional_usdt: float = 0.0
+    """开仓指令里的名义价值；还没成交（没有入场价）时敞口按它算，不能算成 0。"""
     stop_loss_pct: float
     take_profit_pct: float
     requested_close: CloseReason | None = None

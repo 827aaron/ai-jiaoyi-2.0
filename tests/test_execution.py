@@ -587,3 +587,15 @@ async def test_day_base_stays_through_the_day_and_across_restart(rig: Rig, tmp_p
     rig.registry = again
     rig.adapter = rig._adapter()
     assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(1000.0)
+
+
+async def test_unfilled_position_counts_toward_exposure(rig: Rig) -> None:
+    await rig.adapter.open(intent(order_type="limit", limit_price=68000.0))  # 还没成交
+    acc = await rig.adapter.account()
+    assert acc.open_positions == 1
+    assert acc.open_notional_usdt == pytest.approx(1020.6)
+    assert acc.open_notional_by_category == {"major": pytest.approx(1020.6)}
+    rig.api.fill("ex1", 68000.0)  # 成交后改按真实入场价
+    await rig.adapter.positions()
+    acc = await rig.adapter.account()
+    assert acc.open_notional_usdt == pytest.approx(68000.0 * 0.015)

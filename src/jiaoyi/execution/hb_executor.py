@@ -149,6 +149,7 @@ class HbExecutorAdapter:
         tracked = TrackedPosition(
             record=record,
             lifeboat_stop_pct=intent.lifeboat_stop_pct,
+            notional_usdt=intent.notional_usdt,
             stop_loss_pct=intent.stop_loss_pct,
             take_profit_pct=intent.take_profit_pct,
         )
@@ -424,9 +425,9 @@ class HbExecutorAdapter:
         live = self._registry.live()
         by_category: dict[Any, float] = {}
         for t in live:
-            by_category[t.record.category] = by_category.get(t.record.category, 0.0) + (
-                t.record.notional_usdt
-            )
+            # 还没成交的（OPENING）没有入场价，按指令里的名义价值算，否则连发的信号会少算敞口
+            notional = t.record.notional_usdt if t.record.entry_price else t.notional_usdt
+            by_category[t.record.category] = by_category.get(t.record.category, 0.0) + notional
         return AccountState(
             ts=now,
             equity_usdt=equity,
