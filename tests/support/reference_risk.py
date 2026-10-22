@@ -38,8 +38,9 @@ TIME_LIMIT_S = 300
 
 
 class ReferenceRiskGuard:
-    def __init__(self, cfg: RiskConfig) -> None:
+    def __init__(self, cfg: RiskConfig, time_limit_s: int = TIME_LIMIT_S) -> None:
         self._cfg = cfg
+        self._time_limit_s = time_limit_s
 
     def review(
         self,
@@ -174,7 +175,7 @@ class ReferenceRiskGuard:
             risk_usdt=qty * price * stop_pct / 100.0,
             stop_loss_pct=stop_pct,
             take_profit_pct=tp_pct,
-            time_limit_s=TIME_LIMIT_S,
+            time_limit_s=self._time_limit_s,
             lifeboat_stop_pct=stop_pct * cfg.lifeboat_stop_multiplier,
             approved_at=now,
         )

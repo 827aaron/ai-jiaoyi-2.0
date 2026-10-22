@@ -135,12 +135,6 @@ def test_contracts_package_does_not_hand_out_a_factory() -> None:
 
 
 # ---------------------------------------------------------------- JevResponse
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "契约漏洞：ok=False 仍可带 answers。架构师的修复 PR 合并后这条会 XPASS 报错，届时删掉本标记"
-    ),
-)
 def test_failed_jev_response_cannot_carry_answers() -> None:
     ok = load_example("jev_entry_response")
     with pytest.raises(ValidationError):

@@ -201,9 +201,9 @@ def test_latency_is_reproducible() -> None:
 
 
 # ---------------------------------------------------------------- 纸面账户
-def _intent(side: Side = Side.LONG, **over: object) -> OrderIntent:
+def _intent(side: Side = Side.LONG, time_limit_s: int = 300) -> OrderIntent:
     sig = b.signal(side=side)
-    v = ReferenceRiskGuard(b.risk_config()).review(
+    v = ReferenceRiskGuard(b.risk_config(), time_limit_s).review(
         sig,
         b.jev_ok({"direction": "up" if side is Side.LONG else "down"}),
         b.card(),
@@ -211,7 +211,7 @@ def _intent(side: Side = Side.LONG, **over: object) -> OrderIntent:
         b.T0,
     )
     assert v.intent is not None
-    return v.intent.model_copy(update=over)
+    return v.intent
 
 
 def test_long_stop_loss_and_fees() -> None:
