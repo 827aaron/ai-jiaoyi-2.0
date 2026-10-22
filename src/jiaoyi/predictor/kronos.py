@@ -180,6 +180,7 @@ class KronosForecaster:
         self._forecasts: dict[str, Forecast] = {}
         self._busy: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._gate = asyncio.Semaphore(1)
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kronos")
         self._calls = 0
         self._errors = 0
@@ -245,12 +246,15 @@ class KronosForecaster:
         t0 = time.perf_counter()
         loop = asyncio.get_running_loop()
         try:
-            paths = await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._pool, self._backend.predict, bars, self._s.pred_len, self._s.paths
-                ),
-                timeout=self._s.infer_timeout_s,
-            )
+            # 超时从真正开始推理算起，排队等模型的时间不计
+            async with self._gate:
+                t0 = time.perf_counter()
+                paths = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._pool, self._backend.predict, bars, self._s.pred_len, self._s.paths
+                    ),
+                    timeout=self._s.infer_timeout_s,
+                )
             fc = self._summarize(sym, paths, last)
         except Exception as exc:  # 预测员任何故障都不能影响快环
             self._record(sym, (time.perf_counter() - t0) * 1000, None, exc)
