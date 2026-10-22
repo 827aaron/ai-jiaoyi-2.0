@@ -9,7 +9,8 @@ JSON 示例见 ``contracts/examples/order_intent.json``。
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal, NoReturn
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -33,7 +34,26 @@ class AccountState(Contract):
         return (self.equity_usdt / self.day_start_equity_usdt - 1.0) * 100.0
 
 
-class OrderIntent(Contract):
+class _Sealed(Contract):
+    """签发后不能改、也不能跳过校验造一个：``model_copy`` 和 ``model_construct`` 直接报错。
+
+    要换数量或止损，只能让保镖重新签发一张。
+    """
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> NoReturn:
+        raise TypeError(f"{type(self).__name__} 签发后不能修改，请让保镖重新签发")
+
+    # pydantic 的 mypy 插件会为每个模型生成自己的签名，这里故意整体覆盖
+    @classmethod
+    def model_construct(  # type: ignore[override]
+        cls, _fields_set: set[str] | None = None, **values: Any
+    ) -> NoReturn:
+        raise TypeError(f"{cls.__name__} 不能跳过校验构造")
+
+
+class OrderIntent(_Sealed):
     """经保镖批准的开仓指令，交给执行器（hummingbot-api 开仓执行器）。
 
     百分比相对开仓价。止损止盈由执行器每秒检查；保命止损另由 lifeboat 挂到币安。
@@ -68,7 +88,7 @@ class OrderIntent(Contract):
         return self
 
 
-class RiskVerdict(Contract):
+class RiskVerdict(_Sealed):
     """保镖的结论：放行（带 ``intent``）或拒绝（带原因）。"""
 
     signal_id: str = Field(min_length=1)
