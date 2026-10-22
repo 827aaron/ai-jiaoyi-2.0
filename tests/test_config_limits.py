@@ -100,7 +100,8 @@ def test_every_risk_field_is_required(tmp_path: Path, field: str) -> None:
         load_risk_config(_write(tmp_path, data))
 
 
-@pytest.mark.parametrize("field", list(AppConfig.model_fields))
+# fast_loop 是有默认值的可选段，其余字段必填
+@pytest.mark.parametrize("field", [f for f in AppConfig.model_fields if f != "fast_loop"])
 def test_every_app_field_is_required(tmp_path: Path, field: str) -> None:
     data = {k: v for k, v in b.APP_DEFAULTS.items() if k != field}
     with pytest.raises(ConfigError, match=f"{field}: 缺少这一项"):
