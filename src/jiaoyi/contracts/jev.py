@@ -134,7 +134,16 @@ class JevResponse(Contract):
             raise ValueError("ok=True 时必须有 answers")
         if not self.ok and not self.error:
             raise ValueError("ok=False 时必须写 error")
+        if not self.ok and self.answers:
+            raise ValueError("ok=False 时不能带 answers（故障即关闭）")
         return self
 
     def answer(self, question: str) -> JevAnswer | None:
+        """某个问题的回答。``ok=False`` 时永远返回 None。
+
+        这里不检查答案是否覆盖了请求的全部问题（契约拿不到请求）：保镖和管家用之前必须核对，
+        缺任何一问、选项对不上，一律按故障处理，不得用公式补。
+        """
+        if not self.ok:
+            return None
         return next((a for a in self.answers if a.id == question), None)

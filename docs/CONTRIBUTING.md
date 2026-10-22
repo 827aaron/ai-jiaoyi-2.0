@@ -8,12 +8,21 @@
 2. **故障即关闭。** Jev 超时或报错 → 开仓一律不做，盯仓维持现状；没有有效作战卡 → 不开新仓；配置缺项或超范围 → 拒绝启动。不许“出错时换个公式照常交易”。
 3. **硬上限 AI 改不了。** 硬上限只在 `config/risk.toml`，由人改。作战卡和拍板人只能在它的范围里选，代码里不许写死比它更松的数。
 
+## 审查清单（代码审查员逐条核对）
+
+- **上线门槛（执行层）**：只改配置不能进实盘。启动时 `mode = "live"` 但没有本次有效的上线确认（确认词 + 面板密码，连续输错 5 次锁 15 分钟，切换后 Telegram 通知），就拒绝启动或降级为 paper 并告警。
+- **按天清零（快环）**：日亏熔断、Jev 连续错误计数都按 `day_reset_tz` 的 0 点清零（buberlo 的已知 bug：从不清零），测试要覆盖跨日。
+- **答案要完整（保镖、管家）**：`JevResponse.ok=True` 也要核对答案覆盖了请求里的每一问、选项一致、概率和为 1；缺任何一项按故障处理，不得用公式补。
+- **交易所客户端**：AI 角色的包不得导入 ccxt、binance、hummingbot；币安密钥只有 `jiaoyi.execution` 能读（`tests/test_boundaries.py` 检查）。`gate` 调 Jev、`slow` 调 DeepSeek 可以用 httpx / aiohttp，审查时确认它们只连这两个服务。
+- `OrderIntent` / `RiskVerdict` 签发后不能 `model_copy`、不能 `model_construct`；`jiaoyi.risk` 以外只能当类型注解用。
+
 ## 目录和归属
 
 ```
 src/jiaoyi/
   contracts/      共享契约（pydantic）+ examples/*.json      架构师；改动需评审
   interfaces.py   模块接口（Protocol）                        架构师；改动需评审
+  app.py          组装层：选实现或桩、启动/关闭、状态汇总     架构师（模块合并后由架构师接入）
   core/           配置读取、决策日志落盘、密钥读取            架构师
   market/         行情接入、特征、盘口员公式                  快环工程师
   sentinel/       哨兵（触发、去重、冷却）                    快环工程师
@@ -48,7 +57,7 @@ tests/                                                         测试工程师 +
 ## 怎么加一个模块
 
 1. 从 `main` 拉分支，一个 PR 只做一个角色（或一个角色的一部分）。
-2. 在对应包里新建文件实现接口，例如 `src/jiaoyi/gate/jev.py` 里写 `JevDecisionModel`，满足 `interfaces.DecisionModel`。**不要改桩**，桩留给测试和别的模块联调用。
+2. 在对应包里新建文件实现接口（接进 `jiaoyi.app` 由架构师做，模块 PR 不改 app.py），例如 `src/jiaoyi/gate/jev.py` 里写 `JevDecisionModel`，满足 `interfaces.DecisionModel`。**不要改桩**，桩留给测试和别的模块联调用。
 3. 输入输出只用 `jiaoyi.contracts` 里的类型。缺字段或缺类型时，**不要在自己的包里另定义一份**，开一个只改契约的小 PR（附 JSON 示例和测试），在 PR 标题前加 `[契约]`，等合并后再用。
 4. 每次判断都写一条 `DecisionRecord`（`role`、`summary` 一句中文、`input`、`output`、`latency_ms`、`cost_usd`），并定时 `heartbeat` 一条 `ModuleStatus`。团队页和历史页以后直接读这些文件，格式不用再改。
 5. 加测试：至少覆盖正常路径、故障路径（超时、报错、数据缺失时是否关闭），涉及钱和数量的要有边界值。
@@ -58,7 +67,7 @@ tests/                                                         测试工程师 +
 ## 契约规则
 
 - 契约在 `src/jiaoyi/contracts/`，每个类型都有 docstring，每种都有 `examples/*.json`，`tests/test_examples.py` 保证示例能解析且来回一致。
-- 契约是不可变的（`frozen`），未知字段直接报错（`extra="forbid"`）。要改值用 `model_copy(update=...)`。
+- 契约是不可变的（`frozen`），未知字段直接报错（`extra="forbid"`）。要改值用 `model_copy(update=...)`（`OrderIntent`、`RiskVerdict` 除外，它们签发后不能改）。
 - 只加不删。加字段要给默认值，保证旧数据还能读。改含义或删字段要升 `DecisionRecord.SCHEMA_VERSION` 这类版本号，并在 PR 里写清迁移。
 - 时间一律带时区的 UTC（`AwareDatetime`），不带时区直接报错。显示时再换曼谷时间。
 - 金额单位 USDT；百分比字段名带 `_pct`，`1.0` 表示 1%；基点字段带 `_bps`。

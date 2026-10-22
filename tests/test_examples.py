@@ -18,6 +18,7 @@ EXAMPLE_MODELS: dict[str, type[BaseModel]] = {
     "jev_failed_response": c.JevResponse,
     "account_state": c.AccountState,
     "order_intent": c.OrderIntent,
+    "order_intent_trailing": c.OrderIntent,
     "risk_verdict_approved": c.RiskVerdict,
     "risk_verdict_rejected": c.RiskVerdict,
     "position_record": c.PositionRecord,
