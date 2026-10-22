@@ -97,7 +97,7 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 这些是读源码时无法 100% 确认、写代码时已按最稳的假设处理的点：
 
 - `position_executor` 的 `custom_info.current_position_average_price`：开仓成交后应有成交均价，适配器靠它判断“已成交”。如果字段名不同，开仓会一直卡在 opening，15 秒后（`fill_timeout_s`）返回未成交状态，对账员不会误挂保命止损。
-- 追踪止损：契约的 `OrderIntent` 只有 `trailing_stop_pct`，没有激活价，无法对应 hummingbot 的 `TrailingStop(activation_price, trailing_delta)`。M0 遇到就**拒绝执行**（`UnsupportedIntent`），不降级。需要的话由架构师加契约字段。
+- 追踪止损：`trailing_stop_pct`/`trailing_activation_pct` 映射为 `triple_barrier_config.trailing_stop = {activation_price, trailing_delta}`（都是小数，0.003 = 0.3%）。请在测试网确认 hummingbot 接受这个形状。
 - 币安 2025-12 起把条件单挪到 algo 订单接口。`ccxt>=4.5` 会自动走新接口；升级 ccxt 前先在测试网跑第 5 步。
 - 账户权益 = hummingbot 报的 USDT 钱包余额 + 持仓浮动盈亏。请对比币安网页上的“保证金余额”是否一致。
 - 认领标记：建执行器时把 `jy-<position_id>` 写进请求的 `controller_id`（hummingbot-api 会原样存下并在执行器列表里返回、可按它过滤）。超时 / 5xx 这类结果不明的失败，先按标记查，查到就认领；对账员也会按标记认领。请在测试网确认 `POST /executors/search` 带 `controller_ids` 能查到刚建的执行器。

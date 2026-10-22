@@ -58,10 +58,6 @@ _CLOSE_TYPE_MAP = {
 }
 
 
-class UnsupportedIntent(Exception):
-    """开仓指令里有 M0 还不支持的内容。拒绝执行，不降级。"""
-
-
 def _positive(value: Any) -> float | None:
     try:
         number = float(value)
@@ -111,6 +107,11 @@ class HbExecutorAdapter:
             "time_limit": intent.time_limit_s,
             "open_order_type": _ORDER_LIMIT if intent.order_type == "limit" else _ORDER_MARKET,
         }
+        if intent.trailing_stop_pct is not None and intent.trailing_activation_pct is not None:
+            barrier["trailing_stop"] = {
+                "activation_price": str(intent.trailing_activation_pct / 100.0),
+                "trailing_delta": str(intent.trailing_stop_pct / 100.0),
+            }
         config: dict[str, Any] = {
             "type": "position_executor",
             "connector_name": self._connector,
@@ -128,11 +129,6 @@ class HbExecutorAdapter:
         existing = self._registry.by_intent(intent.intent_id)
         if existing is not None:  # 重试同一条指令不重复开仓
             return existing.record
-        if intent.trailing_stop_pct is not None:
-            raise UnsupportedIntent(
-                "M0 不支持追踪止损：OrderIntent 只有 trailing_stop_pct，没有激活价，"
-                "无法对应 hummingbot 的 TrailingStop(activation_price, trailing_delta)"
-            )
         now = self._clock()
         record = PositionRecord(
             position_id=f"pos-{uuid.uuid4().hex[:12]}",
@@ -239,6 +235,17 @@ class HbExecutorAdapter:
                 executor_id=executor_id,
                 status=PositionStatus.OPENING,
                 closed_at=None,
+            )
+
+    def mark_closed_directly(self, position_id: str, reason: CloseReason) -> None:
+        """对账员绕过 hummingbot 直连币安平仓成功后，把账本记为已平，免得每轮重复告警。"""
+        tracked = self._registry.get(position_id)
+        if tracked is not None:
+            self._set(
+                tracked,
+                status=PositionStatus.CLOSED,
+                closed_at=self._clock(),
+                close_reason=reason,
             )
 
     def mark_failed(self, position_id: str) -> None:

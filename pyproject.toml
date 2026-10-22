@@ -12,6 +12,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 预测员（Kronos）才需要；官方源码另拉：make kronos-fetch，见 src/jiaoyi/predictor/README.md
+kronos = [
+    "torch>=2.0,<3",
+    "pandas>=2.2,<3",
+    "numpy>=1.26,<3",
+    "einops==0.8.1",
+    "huggingface_hub==0.33.1",
+    "safetensors==0.6.2",
+]
+# 军师团：TradingAgents v0.7.0（Apache-2.0）作为依赖，不复制代码；M2 才需要装。钉提交号。
+slow = [
+    "tradingagents @ git+https://github.com/TauricResearch/TradingAgents@e8f5503e9b86d5c2710b0c76b1f686703968c9df",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -25,6 +38,9 @@ jiaoyi = "jiaoyi.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jiaoyi"]
@@ -51,5 +67,5 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ccxt", "ccxt.*"]
+module = ["ccxt", "ccxt.*", "tradingagents.*", "langchain_core.*"]
 ignore_missing_imports = true

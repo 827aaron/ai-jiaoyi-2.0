@@ -12,7 +12,7 @@ from jiaoyi.contracts import AlertLevel, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
 from jiaoyi.execution.exchange import ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
-from jiaoyi.execution.hb_executor import HbExecutorAdapter, UnsupportedIntent
+from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.reconciler import ReconcileError, ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry
@@ -130,10 +130,12 @@ async def test_open_is_idempotent_per_intent(rig: Rig) -> None:
     assert len(rig.api.created) == 1
 
 
-async def test_trailing_stop_is_refused(rig: Rig) -> None:
-    with pytest.raises(UnsupportedIntent):
-        await rig.adapter.open(intent(trailing_stop_pct=0.2))
-    assert rig.api.created == []
+async def test_trailing_stop_maps_to_hummingbot_trailing_stop(rig: Rig) -> None:
+    await open_filled(rig, trailing_stop_pct=0.1, trailing_activation_pct=0.3)
+    barrier = rig.api.created[0]["triple_barrier_config"]
+    assert barrier["trailing_stop"] == {"activation_price": "0.003", "trailing_delta": "0.001"}
+    await open_filled(rig, intent_id="int-0002")
+    assert "trailing_stop" not in rig.api.created[1]["triple_barrier_config"]
 
 
 async def test_limit_order_not_filled_yet_has_no_lifeboat_until_fill(rig: Rig) -> None:
@@ -408,6 +410,9 @@ async def test_flatten_falls_back_to_direct_reduce_only_order(rig: Rig) -> None:
     report = await rig.rec.reconcile(rig.t)
     assert report.issues[0].fixed and "直连" in report.issues[0].detail
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    # 账本标记已平：不再为这笔重复补挂 / 平仓；只剩 hummingbot 里没停掉的执行器这一条告警
+    kinds = [i.kind for i in (await rig.rec.reconcile(rig.t)).issues]
+    assert kinds == [ReconcileIssueKind.ORPHAN_POSITION]
 
 
 async def _always_down(executor_id: str, *, keep_position: bool) -> None:

@@ -1,0 +1,22 @@
+{
+  "intent_id": "int-0002",
+  "signal_id": "sig-BTCUSDT-20261022T061700-001",
+  "card_id": "card-20261022-0600",
+  "symbol": "BTCUSDT",
+  "category": "major",
+  "side": "long",
+  "order_type": "market",
+  "limit_price": null,
+  "quantity": 0.015,
+  "notional_usdt": 1020.6,
+  "leverage": 3,
+  "risk_usdt": 2.56,
+  "stop_loss_pct": 0.25,
+  "take_profit_pct": 0.5,
+  "trailing_stop_pct": 0.15,
+  "trailing_activation_pct": 0.4,
+  "time_limit_s": 3600,
+  "lifeboat_stop_pct": 0.375,
+  "approved_by": "risk_guard",
+  "approved_at": "2026-10-22T06:17:00.240000Z"
+}
