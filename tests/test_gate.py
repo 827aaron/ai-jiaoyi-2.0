@@ -1,0 +1,226 @@
+"""拍板人和决策模型客户端：故障即关闭、不兜底、错误计数会清零、只在有卡时问。"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import httpx2
+import pytest
+
+from jiaoyi import contracts as c
+from jiaoyi import interfaces as i
+from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.gate.entry import JevEntryGate
+from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport, TypeSafeTransport, jev_from_secrets
+from jiaoyi.gate.questions import MAX_SNAPSHOT_CHARS, entry_questions, entry_snapshot
+from jiaoyi.gate.rule_model import RuleDecisionModel
+from tests.fastloop_helpers import FAST, GOOD_LONG, answer_with, card, signal
+
+
+def entry_request(now: datetime) -> c.JevRequest:
+    sig = signal(now)
+    return c.JevRequest(
+        request_id="r1",
+        kind="entry",
+        symbol="BTCUSDT",
+        ts=now,
+        signal_id=sig.signal_id,
+        snapshot=entry_snapshot(sig, card(now)),
+        questions=entry_questions(),
+    )
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def model(t: MockJevTransport, **kw: object) -> JevDecisionModel:
+    return JevDecisionModel(t, FAST, timeout_ms=200, **kw)  # type: ignore[arg-type]
+
+
+def test_interfaces() -> None:
+    assert isinstance(model(MockJevTransport()), i.DecisionModel)
+    assert isinstance(RuleDecisionModel(), i.DecisionModel)
+    assert isinstance(JevEntryGate(RuleDecisionModel()), i.EntryGate)
+
+
+async def test_success_returns_probs_and_cost(now: datetime) -> None:
+    t = MockJevTransport(answer=answer_with(GOOD_LONG))
+    r = await model(t).ask(entry_request(now))
+    assert r.ok and r.error is None
+    assert r.answer("take") is not None and r.answer("take").top() == ("take", 0.75)  # type: ignore[union-attr]
+    assert r.cost_usd > 0
+    assert r.model_version == "mock-jev"
+
+
+async def test_timeout_fails_closed(now: datetime) -> None:
+    t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.5)
+    r = await model(t).ask(entry_request(now))
+    assert not r.ok and r.answers == [] and "超时" in (r.error or "")
+
+
+async def test_exception_fails_closed_without_fallback(now: datetime) -> None:
+    t = MockJevTransport(fail=ConnectionError("boom"))
+    r = await model(t).ask(entry_request(now))
+    assert not r.ok and r.answers == []
+    assert "ConnectionError" in (r.error or "")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {k: v for k, v in GOOD_LONG.items() if k != "size"},
+        {**GOOD_LONG, "size": {"S": 0.5, "XL": 0.5}},
+        {**GOOD_LONG, "take": {"take": 0.9, "skip": 0.5}},
+    ],
+)
+async def test_bad_answers_fail_closed(
+    now: datetime, bad: Mapping[str, Mapping[str, float]]
+) -> None:
+    def ans(state: str, qs: Sequence[c.JevQuestion]) -> Mapping[str, Mapping[str, float]]:
+        return bad
+
+    r = await model(MockJevTransport(answer=ans)).ask(entry_request(now))
+    assert not r.ok and r.answers == []
+
+
+async def test_error_counter_cools_down_and_resets_on_success(now: datetime) -> None:
+    clock = Clock()
+    t = MockJevTransport(fail=RuntimeError("x"))
+    m = model(t, clock=clock, wall=lambda: now)
+    for _ in range(FAST.jev_max_consecutive_errors):
+        assert not (await m.ask(entry_request(now))).ok
+    assert m.health == c.Health.DOWN
+    calls = len(t.calls)
+    r = await m.ask(entry_request(now))
+    assert not r.ok and "冷却" in (r.error or "") and len(t.calls) == calls  # 冷却中不再调用
+
+    clock.t += FAST.jev_error_cooldown_s + 1
+    t.fail = None
+    t.answer = answer_with(GOOD_LONG)
+    assert (await m.ask(entry_request(now))).ok
+    assert m.consecutive_errors == 0 and m.health == c.Health.OK
+
+
+async def test_error_counter_resets_at_bangkok_midnight() -> None:
+    wall = [datetime(2026, 10, 22, 16, 0, tzinfo=UTC)]  # 曼谷 23:00
+    t = MockJevTransport(fail=RuntimeError("x"))
+    m = model(t, clock=Clock(), wall=lambda: wall[0])
+    for _ in range(FAST.jev_max_consecutive_errors - 1):
+        await m.ask(entry_request(wall[0]))
+    assert m.consecutive_errors == FAST.jev_max_consecutive_errors - 1
+    wall[0] = datetime(2026, 10, 22, 17, 0, 1, tzinfo=UTC)  # 曼谷 10-23 00:00
+    await m.ask(entry_request(wall[0]))
+    assert m.consecutive_errors == 1  # 跨天清零后只算今天这一次，没有触发冷却
+    assert m.health == c.Health.DEGRADED
+
+
+async def test_entry_gate_without_valid_card_does_not_call_model(now: datetime) -> None:
+    t = MockJevTransport(answer=answer_with(GOOD_LONG))
+    gate = JevEntryGate(model(t))
+    expired = card(now - timedelta(hours=3))
+    r = await gate.evaluate(signal(now), expired, now)
+    assert not r.ok and "作战卡" in (r.error or "") and t.calls == []
+
+    other = signal(now).model_copy(update={"symbol": "ETHUSDT"})
+    r = await gate.evaluate(other, card(now), now)
+    assert not r.ok and t.calls == []
+
+
+async def test_entry_gate_busy_skip(now: datetime) -> None:
+    t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.05)
+    gate = JevEntryGate(model(t))
+    a, b = await asyncio.gather(
+        gate.evaluate(signal(now), card(now), now), gate.evaluate(signal(now), card(now), now)
+    )
+    assert a.ok and not b.ok and "作废" in (b.error or "")
+    assert len(t.calls) == 1
+
+
+async def test_entry_gate_logs(tmp_path: Path, now: datetime) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    t = MockJevTransport(answer=answer_with(GOOD_LONG))
+    gate = JevEntryGate(model(t), RoleRecorder(c.Role.GATE, log))
+    await gate.evaluate(signal(now), card(now), now)
+    t.fail = RuntimeError("down")
+    await gate.evaluate(signal(now), card(now), now)
+    recs = log.read_day(now.date().isoformat())
+    assert [r.outcome for r in recs] == [c.Outcome.PASS, c.Outcome.ERROR]
+    assert recs[0].cost_usd > 0 and recs[0].input["snapshot"]
+    assert recs[1].output["answers"] == {}
+
+
+def test_snapshot_is_compact_json(now: datetime) -> None:
+    s = entry_snapshot(signal(now), card(now))
+    assert len(s) <= MAX_SNAPSHOT_CHARS
+    d = json.loads(s)
+    assert d["side"] == "long" and d["card"]["bias"] == "long" and "book" in d
+    assert len(s) / 4 < 400  # 粗估 token 数
+
+
+async def test_rule_model_answers_every_question(now: datetime) -> None:
+    r = await RuleDecisionModel().ask(entry_request(now))
+    assert r.ok and {a.id for a in r.answers} == {q.value for q in c.EntryQuestion}
+    bad = entry_request(now).model_copy(update={"snapshot": "not json"})
+    assert not (await RuleDecisionModel().ask(bad)).ok
+
+
+async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
+    seen: dict[str, object] = {}
+
+    def handler(req: httpx2.Request) -> httpx2.Response:
+        body = json.loads(req.content)
+        seen["body"] = body
+        seen["auth"] = req.headers.get("authorization")
+        answers = {
+            q: {
+                "type": "choice",
+                "choice": max(GOOD_LONG[q], key=lambda k: GOOD_LONG[q][k]),
+                "confidence": 0.8,
+                "probabilities": GOOD_LONG[q],
+            }
+            for q in body["questions"]
+        }
+        return httpx2.Response(
+            200,
+            headers={"x-typesafe-request-id": "req-123"},
+            json={
+                "model": "jev-2026-10",
+                "answers": answers,
+                "usage": {"input_tokens": 380, "output_tokens": 6},
+            },
+        )
+
+    tr = TypeSafeTransport(
+        "test-key-not-real", "jev-latest", http_transport=httpx2.MockTransport(handler)
+    )
+    m = JevDecisionModel(tr, FAST, timeout_ms=2000)
+    r = await m.ask(entry_request(now))
+    assert r.ok, r.error
+    assert r.model_version == "jev-2026-10"
+    assert r.cost_usd == pytest.approx(380 * FAST.jev_usd_per_mtok / 1e6)
+    assert seen["auth"] == "Bearer test-key-not-real"
+    await tr.aclose()
+
+
+class _Secrets:
+    def __init__(self, v: str | None) -> None:
+        self.v = v
+
+    def get(self, name: str) -> str | None:
+        return self.v if name == "JEV_API_KEY" else None
+
+
+def test_no_key_means_no_jev() -> None:
+    assert jev_from_secrets(_Secrets(None), FAST, timeout_ms=1000, day_reset_tz="UTC") is None
+    m = jev_from_secrets(_Secrets("abc"), FAST, timeout_ms=1000, day_reset_tz="UTC")
+    assert isinstance(m, JevDecisionModel)
