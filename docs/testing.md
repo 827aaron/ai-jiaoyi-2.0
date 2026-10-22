@@ -14,9 +14,11 @@ make check                      # lint + 类型检查 + 全部测试（CI 同款
 ```python
 from tests.support.contracts import RiskGuardApprovalContract, EntryGateBehaviorContract
 
+
 class TestMyRiskGuard(RiskGuardApprovalContract):
     def make_guard(self, cfg):
         return MyRiskGuard(cfg)
+
 
 class TestMyGate(EntryGateBehaviorContract):
     def make_gate(self, model):
