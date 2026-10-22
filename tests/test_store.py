@@ -29,3 +29,12 @@ def test_module_status_keeps_latest_per_role(tmp_path: Path, now: datetime) -> N
     status = log.read_status()
     assert status["gate"].health == c.Health.OK
     assert status["predictor"].health == c.Health.DISABLED
+
+
+def test_mask_hides_short_values() -> None:
+    from jiaoyi.core.secrets import mask
+
+    assert mask(None) == "未配置"
+    assert mask("abcd") == "已配置"
+    assert mask("x" * 11) == "已配置"
+    assert mask("x" * 12 + "WXYZ") == "****WXYZ"

@@ -106,3 +106,28 @@ def test_contracts_are_immutable(now: datetime) -> None:
 def test_naive_datetime_rejected(now: datetime) -> None:
     with pytest.raises(ValidationError):
         c.Alert(ts=now.replace(tzinfo=None) + timedelta(0), level="info", role="gate", title="t")
+
+
+def test_failed_jev_response_cannot_carry_answers() -> None:
+    with pytest.raises(ValidationError, match="故障即关闭"):
+        c.JevResponse(
+            request_id="x",
+            ok=False,
+            error="timeout",
+            model_version="m",
+            latency_ms=1000,
+            answers=[c.JevAnswer(id="take", probs={"take": 0.9, "skip": 0.1})],
+        )
+    failed = c.JevResponse.model_validate(load_example("jev_failed_response"))
+    assert failed.answer("take") is None
+
+
+def test_order_intent_and_verdict_are_sealed() -> None:
+    intent = c.OrderIntent.model_validate(load_example("order_intent"))
+    with pytest.raises(TypeError, match="重新签发"):
+        intent.model_copy(update={"quantity": 9.0})
+    with pytest.raises(TypeError, match="跳过校验"):
+        c.OrderIntent.model_construct()
+    verdict = c.RiskVerdict.model_validate(load_example("risk_verdict_approved"))
+    with pytest.raises(TypeError):
+        verdict.model_copy()

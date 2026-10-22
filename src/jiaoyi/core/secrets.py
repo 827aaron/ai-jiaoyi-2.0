@@ -62,7 +62,9 @@ class ChainedSecretStore:
 
 
 def mask(value: str | None) -> str:
-    """面板和日志里只显示末四位。"""
+    """面板和日志里只显示末四位；太短的值连末四位也不显示。"""
     if not value:
         return "未配置"
+    if len(value) < 12:
+        return "已配置"
     return "****" + value[-4:]
