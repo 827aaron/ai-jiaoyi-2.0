@@ -73,7 +73,14 @@ class OrderIntent(_Sealed):
     risk_usdt: PosFloat = Field(description="打到止损时预计亏损，USDT。")
     stop_loss_pct: PosFloat
     take_profit_pct: PosFloat
-    trailing_stop_pct: PosFloat | None = None
+    trailing_stop_pct: PosFloat | None = Field(
+        default=None, description="移动止损回撤距离（hummingbot TrailingStop.trailing_delta）。"
+    )
+    trailing_activation_pct: PosFloat | None = Field(
+        default=None,
+        description="浮盈达到这个百分比才启动移动止损（hummingbot TrailingStop.activation_price）。"
+        "必须和 trailing_stop_pct 一起给，且大于它。",
+    )
     time_limit_s: int = Field(gt=0)
     lifeboat_stop_pct: PosFloat = Field(description="保命止损距离，必须比正常止损更宽。")
     approved_by: Literal["risk_guard"] = "risk_guard"
@@ -85,6 +92,14 @@ class OrderIntent(_Sealed):
             raise ValueError("保命止损必须比正常止损更宽")
         if self.order_type == "limit" and self.limit_price is None:
             raise ValueError("限价单必须给 limit_price")
+        if (self.trailing_stop_pct is None) != (self.trailing_activation_pct is None):
+            raise ValueError("移动止损的回撤距离和激活价必须同时给或同时不给")
+        if (
+            self.trailing_stop_pct is not None
+            and self.trailing_activation_pct is not None
+            and self.trailing_activation_pct <= self.trailing_stop_pct
+        ):
+            raise ValueError("移动止损激活价必须大于回撤距离")
         return self
 
 

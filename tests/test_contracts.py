@@ -131,3 +131,14 @@ def test_order_intent_and_verdict_are_sealed() -> None:
     verdict = c.RiskVerdict.model_validate(load_example("risk_verdict_approved"))
     with pytest.raises(TypeError):
         verdict.model_copy()
+
+
+def test_trailing_stop_needs_activation() -> None:
+    raw = load_example("order_intent_trailing")
+    assert c.OrderIntent.model_validate(raw).trailing_activation_pct == 0.4
+    with pytest.raises(ValidationError, match="同时给"):
+        c.OrderIntent.model_validate({**raw, "trailing_activation_pct": None})
+    with pytest.raises(ValidationError, match="同时给"):
+        c.OrderIntent.model_validate({**raw, "trailing_stop_pct": None})
+    with pytest.raises(ValidationError, match="大于回撤"):
+        c.OrderIntent.model_validate({**raw, "trailing_activation_pct": 0.1})

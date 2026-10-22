@@ -71,6 +71,18 @@ def test_ai_packages_do_not_reach_exchange() -> None:
     assert not bad, "\n".join(bad)
 
 
+def test_non_execution_packages_do_not_import_execution() -> None:
+    """只有组装层 jiaoyi.app 能把执行层接进来。"""
+    bad = [
+        f"{_rel(f)} 导入了 {m}"
+        for pkg in NON_EXECUTION_PACKAGES
+        for f in _py_files(PKG / pkg)
+        for m in _imports(_tree(f))
+        if m == "jiaoyi.execution" or m.startswith("jiaoyi.execution.")
+    ]
+    assert not bad, "\n".join(bad)
+
+
 def _sealed_violations(tree: ast.Module, label: str) -> list[str]:
     bad: list[str] = []
     in_annotation = _annotation_nodes(tree)

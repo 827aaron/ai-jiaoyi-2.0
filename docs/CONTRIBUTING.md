@@ -22,6 +22,7 @@
 src/jiaoyi/
   contracts/      共享契约（pydantic）+ examples/*.json      架构师；改动需评审
   interfaces.py   模块接口（Protocol）                        架构师；改动需评审
+  app.py          组装层：选实现或桩、启动/关闭、状态汇总     架构师（模块合并后由架构师接入）
   core/           配置读取、决策日志落盘、密钥读取            架构师
   market/         行情接入、特征、盘口员公式                  快环工程师
   sentinel/       哨兵（触发、去重、冷却）                    快环工程师
@@ -56,7 +57,7 @@ tests/                                                         测试工程师 +
 ## 怎么加一个模块
 
 1. 从 `main` 拉分支，一个 PR 只做一个角色（或一个角色的一部分）。
-2. 在对应包里新建文件实现接口，例如 `src/jiaoyi/gate/jev.py` 里写 `JevDecisionModel`，满足 `interfaces.DecisionModel`。**不要改桩**，桩留给测试和别的模块联调用。
+2. 在对应包里新建文件实现接口（接进 `jiaoyi.app` 由架构师做，模块 PR 不改 app.py），例如 `src/jiaoyi/gate/jev.py` 里写 `JevDecisionModel`，满足 `interfaces.DecisionModel`。**不要改桩**，桩留给测试和别的模块联调用。
 3. 输入输出只用 `jiaoyi.contracts` 里的类型。缺字段或缺类型时，**不要在自己的包里另定义一份**，开一个只改契约的小 PR（附 JSON 示例和测试），在 PR 标题前加 `[契约]`，等合并后再用。
 4. 每次判断都写一条 `DecisionRecord`（`role`、`summary` 一句中文、`input`、`output`、`latency_ms`、`cost_usd`），并定时 `heartbeat` 一条 `ModuleStatus`。团队页和历史页以后直接读这些文件，格式不用再改。
 5. 加测试：至少覆盖正常路径、故障路径（超时、报错、数据缺失时是否关闭），涉及钱和数量的要有边界值。
