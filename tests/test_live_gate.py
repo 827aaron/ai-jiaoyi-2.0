@@ -17,6 +17,13 @@ from tests.conftest import ROOT
 
 T0 = datetime(2026, 10, 22, 6, 0, tzinfo=UTC)
 PW = "correct-horse"
+KEYS = (
+    "HUMMINGBOT_API_PASSWORD",
+    "BINANCE_API_KEY",
+    "BINANCE_API_SECRET",
+    "BINANCE_TESTNET_API_KEY",
+    "BINANCE_TESTNET_API_SECRET",
+)
 
 
 class Clk:
@@ -120,7 +127,7 @@ def risk() -> RiskConfig:
 def test_live_mode_refused_without_gate_or_unlock(
     risk: RiskConfig, gate: LiveGate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for name in ("HUMMINGBOT_API_PASSWORD", "BINANCE_API_KEY", "BINANCE_API_SECRET"):
+    for name in KEYS:
         monkeypatch.setenv(name, "x" * 8)
     args = (RunMode.LIVE, risk, tmp_path, EnvSecretStore(), StubAlerter())
     with pytest.raises(LiveGateError):
@@ -132,7 +139,7 @@ def test_live_mode_refused_without_gate_or_unlock(
 async def test_live_mode_allowed_after_unlock_and_paper_needs_no_gate(
     risk: RiskConfig, gate: LiveGate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for name in ("HUMMINGBOT_API_PASSWORD", "BINANCE_API_KEY", "BINANCE_API_SECRET"):
+    for name in KEYS:
         monkeypatch.setenv(name, "x" * 8)
     paper = build_execution(RunMode.PAPER, risk, tmp_path, EnvSecretStore(), StubAlerter())
     await paper.close()
@@ -146,7 +153,7 @@ async def test_live_mode_allowed_after_unlock_and_paper_needs_no_gate(
 def test_missing_secret_names_the_key_not_the_value(
     risk: RiskConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for name in ("HUMMINGBOT_API_PASSWORD", "BINANCE_API_KEY", "BINANCE_API_SECRET"):
+    for name in KEYS:
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(MissingSecret, match="HUMMINGBOT_API_PASSWORD"):
         build_execution(RunMode.PAPER, risk, tmp_path, EnvSecretStore(), StubAlerter())

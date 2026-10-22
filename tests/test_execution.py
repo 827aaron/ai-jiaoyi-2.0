@@ -10,6 +10,7 @@ import pytest
 from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import AlertLevel, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
+from jiaoyi.execution.exchange import ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, UnsupportedIntent
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -58,6 +59,7 @@ class Rig:
             poll_s=1,
             clock=self.clock,
             sleep=self.sleep,
+            income_since=self.ex.income_since,
         )
 
 
@@ -76,8 +78,8 @@ async def open_filled(rig: Rig, price: float = 68044.0, **over: object) -> str:
     rig.api.auto_fill = price  # type: ignore[attr-defined]
     original = rig.api.create_executor
 
-    async def create_and_fill(cfg: dict, acct: str) -> dict:  # type: ignore[type-arg]
-        out = await original(cfg, acct)
+    async def create_and_fill(cfg: dict, acct: str, marker: str) -> dict:  # type: ignore[type-arg]
+        out = await original(cfg, acct, marker)
         rig.api.fill(out["executor_id"], price)
         return out
 
@@ -159,12 +161,10 @@ async def test_lifeboat_failure_on_open_flattens_position(rig: Rig) -> None:
     assert all(a.level is AlertLevel.CRITICAL for a in rig.alerts.sent[:1])
 
 
-async def test_create_executor_failure_marks_failed_and_alerts(rig: Rig) -> None:
-    rig.api.down = True
-    with pytest.raises(HbApiError):
-        await rig.adapter.open(intent())
-    (tracked,) = rig.registry.data.positions.values()
-    assert tracked.record.status is PositionStatus.FAILED
+async def test_hb_unreachable_on_open_is_unknown_not_failed(rig: Rig) -> None:
+    rig.api.down = True  # 建不了也查不了：结果不明，留给对账员按标记认领
+    rec = await rig.adapter.open(intent())
+    assert rec.status is PositionStatus.OPENING and rec.executor_id is None
     assert rig.alerts.sent[0].level is AlertLevel.CRITICAL
 
 
@@ -237,6 +237,7 @@ async def test_registry_survives_restart(rig: Rig, tmp_path: Path) -> None:
 
 
 async def test_account_includes_unrealized_and_day_start(rig: Rig) -> None:
+    rig.ex.income_down = True  # 这条只测“同一天基准不变、曼谷 0 点重置”，不走收入流水倒推
     await open_filled(rig)
     rig.api.pos = [{"unrealized_pnl": 20.0}, {"unrealized_pnl": -5.0}]
     acc = await rig.adapter.account()
@@ -348,7 +349,7 @@ async def test_executor_silent_retry_surfaces_as_alert(rig: Rig) -> None:
 
 
 async def test_unknown_running_executor_is_orphan(rig: Rig) -> None:
-    await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct")
+    await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "other")
     report = await rig.rec.reconcile(rig.t)
     assert report.issues[0].kind is ReconcileIssueKind.ORPHAN_POSITION
 
@@ -369,3 +370,215 @@ async def test_unreachable_raises_and_alerts_critical(rig: Rig, which: str) -> N
     with pytest.raises(ReconcileError):
         await rig.rec.reconcile(rig.t)
     assert rig.alerts.sent[0].level is AlertLevel.CRITICAL
+
+
+# 审查意见 1：补挂失败要自动平仓
+
+
+async def test_lifeboat_replace_failing_twice_flattens_via_hummingbot(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.stops.clear()
+    rig.ex.fail_place = True
+    first = await rig.rec.reconcile(rig.t)
+    assert not first.issues[0].fixed and rig.api.stopped == []  # 第 1 轮只告警
+    second = await rig.rec.reconcile(rig.t)
+    assert second.issues[0].fixed and "已平仓" in second.issues[0].detail
+    assert rig.api.stopped == [("ex1", False)]
+    assert rig.registry.get(pid).record.close_reason is CloseReason.RECONCILER  # type: ignore[union-attr]
+    assert rig.ex.market_closed == []
+
+
+async def test_immediate_trigger_flattens_in_the_same_round(rig: Rig) -> None:
+    await open_filled(rig)
+    rig.ex.stops.clear()
+    rig.ex.fail_place = ExchangeError(
+        "-2021 Order would immediately trigger", immediate_trigger=True
+    )
+    report = await rig.rec.reconcile(rig.t)
+    assert report.issues[0].fixed and "-2021" in report.issues[0].detail
+    assert rig.api.stopped == [("ex1", False)]
+
+
+async def test_flatten_falls_back_to_direct_reduce_only_order(rig: Rig) -> None:
+    await open_filled(rig)
+    rig.ex.stops.clear()
+    rig.ex.fail_place = ExchangeError("-2021", immediate_trigger=True)
+    rig.api.executors["ex1"]["is_active"] = True
+    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    report = await rig.rec.reconcile(rig.t)
+    assert report.issues[0].fixed and "直连" in report.issues[0].detail
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+
+
+async def _always_down(executor_id: str, *, keep_position: bool) -> None:
+    raise HbApiError("hummingbot-api 不可达")
+
+
+async def test_unflattenable_position_alerts_critical_every_round(rig: Rig) -> None:
+    await open_filled(rig)
+    rig.ex.stops.clear()
+    rig.ex.fail_place = ExchangeError("-2021", immediate_trigger=True)
+    rig.ex.fail_market_close = True
+    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    for _ in range(3):
+        report = await rig.rec.reconcile(rig.t)
+        assert not report.issues[0].fixed
+        rig.t += timedelta(seconds=30)
+    critical = [a for a in rig.alerts.sent if a.level is AlertLevel.CRITICAL]
+    assert len(critical) == 3
+    assert len({a.dedup_key for a in critical}) == 3  # 不会被冷却去重吞掉
+
+
+async def test_successful_replace_resets_failure_count(rig: Rig) -> None:
+    await open_filled(rig)
+    rig.ex.stops.clear()
+    rig.ex.fail_place = True
+    await rig.rec.reconcile(rig.t)  # 失败 1 次
+    rig.ex.fail_place = False
+    await rig.rec.reconcile(rig.t)  # 补上了
+    rig.ex.stops.clear()
+    rig.ex.fail_place = True
+    report = await rig.rec.reconcile(rig.t)  # 又丢：重新从 1 次数起
+    assert not report.issues[0].fixed and rig.api.stopped == []
+
+
+async def test_unknown_positions_are_still_only_alerted(rig: Rig) -> None:
+    rig.ex.set_position("ETHUSDT", Side.LONG, 2.0)
+    rig.ex.fail_place = ExchangeError("-2021", immediate_trigger=True)
+    await rig.rec.reconcile(rig.t)
+    assert rig.api.stopped == [] and rig.ex.market_closed == []
+
+
+# 审查意见 2：结果不明的开仓要能认领
+
+
+async def test_open_writes_claim_marker(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    assert rig.api.controller_ids == [f"jy-{pid}"]
+
+
+async def test_create_timeout_but_executor_exists_is_claimed(rig: Rig) -> None:
+    rig.api.create_error = HbApiError("超时")  # 执行器其实已建好
+    rec = await rig.adapter.open(intent())
+    assert rec.executor_id == "ex1"  # 按标记查到，当场认领
+    rig.api.fill("ex1", 68044.0)
+    (pos,) = await rig.adapter.positions()
+    assert pos.status is PositionStatus.OPEN and pos.lifeboat is not None
+    assert len(rig.ex.placed) == 1
+    assert any("已认领" in a.title for a in rig.alerts.sent)
+
+
+async def test_definite_rejection_is_failed_without_lookup(rig: Rig) -> None:
+    rig.api.create_error_before = HbApiError("400", definite_rejection=True)
+    rig.api.find_down = True  # 如果去查就会暴露
+    with pytest.raises(HbApiError):
+        await rig.adapter.open(intent())
+    (tracked,) = rig.registry.data.positions.values()
+    assert tracked.record.status is PositionStatus.FAILED
+
+
+async def test_timeout_and_nothing_found_is_failed(rig: Rig) -> None:
+    rig.api.create_error_before = HbApiError("超时")
+    with pytest.raises(HbApiError):
+        await rig.adapter.open(intent())
+    (tracked,) = rig.registry.data.positions.values()
+    assert tracked.record.status is PositionStatus.FAILED
+
+
+async def test_unknown_outcome_is_claimed_later_by_reconciler(rig: Rig) -> None:
+    rig.api.create_error = HbApiError("超时")
+    rig.api.find_down = True  # 当场也查不了
+    rec = await rig.adapter.open(intent())
+    assert rec.status is PositionStatus.OPENING and rec.executor_id is None
+    assert rig.alerts.sent[-1].level is AlertLevel.CRITICAL
+    rig.api.find_down = False
+    rig.api.fill("ex1", 68044.0)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
+    report = await rig.rec.reconcile(rig.t)
+    assert any(i.fixed and "认领" in i.detail for i in report.issues)
+    pos = rig.registry.get(rec.position_id).record  # type: ignore[union-attr]
+    assert pos.executor_id == "ex1" and pos.status is PositionStatus.OPEN
+    assert pos.lifeboat is not None and len(rig.ex.stops) == 1
+    assert (await rig.rec.reconcile(rig.t)).clean
+
+
+async def test_reconciler_reclaims_marked_executor_of_failed_position(rig: Rig) -> None:
+    rig.api.create_error_before = HbApiError("超时")
+    with pytest.raises(HbApiError):
+        await rig.adapter.open(intent())
+    (tracked,) = rig.registry.data.positions.values()
+    # 之后才发现：其实建好了（请求在 hummingbot 那边慢慢处理完了）
+    rig.api.create_error_before = None
+    await rig.api.create_executor(
+        {"trading_pair": "BTC-USDT"}, "acct", f"jy-{tracked.record.position_id}"
+    )
+    rig.api.fill("ex1", 68044.0)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
+    await rig.rec.reconcile(rig.t)
+    pos = rig.registry.get(tracked.record.position_id).record  # type: ignore[union-attr]
+    assert pos.status is PositionStatus.OPEN and pos.lifeboat is not None
+
+
+async def test_unclaimable_open_is_marked_failed_after_grace(rig: Rig) -> None:
+    rig.api.create_error_before = HbApiError("超时")
+    rig.api.find_down = True  # 当场查不了，留 OPENING
+    rec = await rig.adapter.open(intent())
+    rig.api.find_down = False
+    rig.t += timedelta(seconds=30)
+    await rig.rec.reconcile(rig.t)
+    assert rig.registry.get(rec.position_id).record.status is PositionStatus.OPENING  # type: ignore[union-attr]
+    rig.t += timedelta(seconds=60)
+    report = await rig.rec.reconcile(rig.t)
+    assert rig.registry.get(rec.position_id).record.status is PositionStatus.FAILED  # type: ignore[union-attr]
+    assert any("查不到执行器" in i.detail for i in report.issues)
+
+
+async def test_failed_stop_leaves_position_open_for_next_round(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    with pytest.raises(HbApiError):
+        await rig.adapter.close(pid, CloseReason.KEEPER)
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    assert rig.registry.get(pid).requested_close is None  # type: ignore[union-attr]
+
+
+# 审查意见 3：日亏基准对齐 0 点
+
+
+async def test_late_start_uses_income_to_rebuild_midnight_base(rig: Rig) -> None:
+    # 曼谷 0 点 = UTC 17:00；大脑 UTC 06:17 才第一次读账户，凌晨已亏 20
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    rig.ex.income = -20.0
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(1000.0)  # 不是 980
+    assert acc.day_pnl_pct == pytest.approx(-2.0)
+    assert acc.equity_usdt == pytest.approx(980.0)
+
+
+async def test_late_start_without_income_takes_stricter_and_warns(rig: Rig) -> None:
+    rig.ex.income_down = True
+    rig.registry.data.last_equity_usdt = 1030.0  # 上次落盘的权益更高
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(1030.0)
+    assert any("日亏基准" in a.title and a.level is AlertLevel.WARN for a in rig.alerts.sent)
+
+
+async def test_start_right_after_midnight_uses_current_equity(rig: Rig) -> None:
+    rig.t = datetime(2026, 10, 22, 17, 3, tzinfo=UTC)  # 曼谷 00:03
+    rig.ex.income = -50.0  # 即使有流水也不该用
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(1000.0)
+    assert rig.alerts.sent == []
+
+
+async def test_day_base_stays_through_the_day_and_across_restart(rig: Rig, tmp_path: Path) -> None:
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    rig.ex.income = -20.0
+    await rig.adapter.account()
+    rig.api.balances = [{"token": "USDT", "units": 950.0, "available_units": 900.0}]
+    rig.ex.income = -50.0
+    again = PositionRegistry(tmp_path / "positions.json")  # 重启
+    rig.registry = again
+    rig.adapter = rig._adapter()
+    assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(1000.0)

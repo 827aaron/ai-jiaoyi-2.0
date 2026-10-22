@@ -43,6 +43,8 @@ class RegistryData(BaseModel):
 
     positions: dict[str, TrackedPosition] = {}
     day_start: DayStart | None = None
+    last_equity_usdt: float | None = None
+    """上一次读到的权益，晚启动又拿不到收入流水时用它给日亏基准兜底。"""
 
 
 class PositionRegistry:

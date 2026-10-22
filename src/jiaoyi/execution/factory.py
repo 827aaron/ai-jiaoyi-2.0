@@ -65,9 +65,11 @@ def build_execution(
             raise MissingSecret(f"缺少密钥 {name}，先运行 jiaoyi setup-keys")
         return value
 
+    # 测试网和主网的 key 分开存，不会因为配错模式把主网 key 用在测试网（或反过来）
+    prefix = "BINANCE" if mode is RunMode.LIVE else "BINANCE_TESTNET"
     api = HttpHummingbotApi(hb_url, hb_username, need("HUMMINGBOT_API_PASSWORD"))
     exchange = CcxtBinanceFutures(
-        need("BINANCE_API_KEY"), need("BINANCE_API_SECRET"), testnet=mode is not RunMode.LIVE
+        need(f"{prefix}_API_KEY"), need(f"{prefix}_API_SECRET"), testnet=mode is not RunMode.LIVE
     )
     lifeboat = BinanceLifeboat(exchange)
     registry = PositionRegistry(Path(data_dir) / "positions.json")
@@ -79,6 +81,7 @@ def build_execution(
         account_name=account_name,
         connector_name=CONNECTOR_BY_MODE[mode],
         day_reset_tz=risk.day_reset_tz,
+        income_since=exchange.income_since,
     )
     reconciler = ThreeWayReconciler(
         adapter, api, exchange, lifeboat, registry, alerter, account_name=account_name

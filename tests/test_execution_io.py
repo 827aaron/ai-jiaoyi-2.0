@@ -48,11 +48,14 @@ async def test_hb_client_requests_and_auth() -> None:
         return httpx.Response(200, json={})
 
     api = hb(handler)
-    assert (await api.create_executor({"type": "position_executor"}, "acct"))["executor_id"] == "e1"
+    assert (await api.create_executor({"type": "position_executor"}, "acct", "jy-p1"))[
+        "executor_id"
+    ] == "e1"
     assert seen[0].headers["authorization"].startswith("Basic ")
     assert json.loads(seen[0].content) == {
         "account_name": "acct",
         "executor_config": {"type": "position_executor"},
+        "controller_id": "jy-p1",
     }
     assert await api.running_executors("acct") == [{"executor_id": "e1"}]
     assert json.loads(seen[1].content)["status"] == "RUNNING"

@@ -47,11 +47,11 @@ curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | he
 ## 4. 把密钥放进钥匙串
 
 ```bash
-.venv/bin/jiaoyi setup-keys HUMMINGBOT_API_PASSWORD BINANCE_API_KEY BINANCE_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+.venv/bin/jiaoyi setup-keys HUMMINGBOT_API_PASSWORD BINANCE_TESTNET_API_KEY BINANCE_TESTNET_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 ```
 
 每个会先问要不要写，再由系统的 `security` 命令在终端里提示你输入（输入不回显、不进命令行参数、不进历史）。
-`BINANCE_API_KEY / SECRET` 填**测试网**的，是我们自己的程序（保命止损 + 对账员）直连币安用的；
+`BINANCE_TESTNET_API_KEY / SECRET` 填**测试网**的（主网用另一组 `BINANCE_API_KEY / SECRET`，两组分开存，配错模式也不会串用），是我们自己的程序（保命止损 + 对账员）直连币安用的；
 `HUMMINGBOT_API_PASSWORD` 是第 3 步 setup 里设的 API 密码。检查：
 
 ```bash
@@ -78,6 +78,7 @@ curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | he
 
 - **缺止损会补**：开仓后在测试网网页手动撤掉那张保命止损，等 ≤30 秒（对账间隔，来自 `reconcile_interval_s`；冒烟脚本只在开仓后跑一次对账，持续对账由接线后的主程序负责），应收到 Telegram“保命止损缺失，已补挂”。
 - **孤儿仓位会报**：在测试网网页手动开一笔别的标的，下一轮对账应收到“发现无人管理的仓位”（只告警，不会替你平）。
+- **补不上止损会平仓**：开仓后撤掉保命止损并让币安拒绝补挂（例如把价格推过止损位触发 -2021）应当轮平仓；其它原因连续 2 轮补挂失败后平仓。平仓也失败时每轮都发 critical。
 - **静默重试会露出**：把测试网账户余额花光让开仓被拒，应收到“执行器异常”，里面带 hummingbot 的 `last_error`。
 
 ## 6. Condor（可选，M0 的人用界面）
@@ -99,6 +100,8 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 - 追踪止损：契约的 `OrderIntent` 只有 `trailing_stop_pct`，没有激活价，无法对应 hummingbot 的 `TrailingStop(activation_price, trailing_delta)`。M0 遇到就**拒绝执行**（`UnsupportedIntent`），不降级。需要的话由架构师加契约字段。
 - 币安 2025-12 起把条件单挪到 algo 订单接口。`ccxt>=4.5` 会自动走新接口；升级 ccxt 前先在测试网跑第 5 步。
 - 账户权益 = hummingbot 报的 USDT 钱包余额 + 持仓浮动盈亏。请对比币安网页上的“保证金余额”是否一致。
+- 认领标记：建执行器时把 `jy-<position_id>` 写进请求的 `controller_id`（hummingbot-api 会原样存下并在执行器列表里返回、可按它过滤）。超时 / 5xx 这类结果不明的失败，先按标记查，查到就认领；对账员也会按标记认领。请在测试网确认 `POST /executors/search` 带 `controller_ids` 能查到刚建的执行器。
+- 日亏基准：0 点后第一次读账户若晚于 5 分钟，用币安 income 流水（`fapiPrivateGetIncome`：REALIZED_PNL、COMMISSION、FUNDING_FEE）倒推 0 点的钱包余额；查不到则取当前与上次落盘权益中更大的并告警。
 - 保命止损用 `reduceOnly` + 数量，而不是 `closePosition=true`：后者会平掉该标的**全部**仓位，以后“先平一半”（两个执行器）时会误伤。
 
 ## 8. 切实盘：上线门槛

@@ -9,6 +9,7 @@ Protocol 在这里，ccxt 实现放在最后，测试用内存假件。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
@@ -20,6 +21,11 @@ STOP_PREFIX = "lb-"
 
 class ExchangeError(Exception):
     """交易所调用失败（网络、鉴权、拒单）。调用方按故障即关闭处理。"""
+
+    def __init__(self, message: str, *, immediate_trigger: bool = False) -> None:
+        super().__init__(message)
+        self.immediate_trigger = immediate_trigger
+        """币安 -2021：触发价已被越过，挂上就会立刻成交。意味着价格已经穿过止损位。"""
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,16 @@ class ExchangeClient(Protocol):
         ...
 
     async def open_stops(self, symbol: str | None = None) -> list[ExchangeStop]: ...
+
+    async def close_position_market(
+        self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
+    ) -> None:
+        """只减仓市价单。**兜底专用**：hummingbot 不可达而保命止损又挂不上时，对账员用它平仓。"""
+        ...
+
+    async def income_since(self, since: datetime) -> float:
+        """从 ``since`` 起的已实现盈亏 + 手续费 + 资金费净额（USDT，亏损为负）。"""
+        ...
 
     async def close(self) -> None: ...
 
@@ -162,7 +178,7 @@ class CcxtBinanceFutures:
         except ExchangeError:
             raise
         except Exception as e:
-            raise ExchangeError(f"挂保命止损失败：{e}") from e
+            raise ExchangeError(f"挂保命止损失败：{e}", immediate_trigger="-2021" in str(e)) from e
         stop = self._stop_from(raw) if raw.get("stopPrice") or raw.get("triggerPrice") else None
         if stop is not None:
             return stop
@@ -193,6 +209,40 @@ class CcxtBinanceFutures:
         return [
             self._stop_from(o) for o in raw if str(o.get("type", "")).lower().startswith("stop")
         ]
+
+    async def close_position_market(
+        self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
+    ) -> None:
+        try:
+            await self._ready()
+            ccxt_symbol = to_ccxt_symbol(symbol)
+            await self._ex.create_order(
+                ccxt_symbol,
+                "market",
+                close_side,
+                self._ex.amount_to_precision(ccxt_symbol, quantity),
+                None,
+                {"reduceOnly": True},
+            )
+        except Exception as e:
+            raise ExchangeError(f"直连平仓失败：{e}") from e
+
+    _INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
+
+    async def income_since(self, since: datetime) -> float:
+        total = 0.0
+        start_ms = int(since.timestamp() * 1000)
+        try:
+            while True:
+                rows = await self._ex.fapiPrivateGetIncome({"startTime": start_ms, "limit": 1000})
+                for row in rows:
+                    if row.get("incomeType") in self._INCOME_TYPES:
+                        total += float(row["income"])
+                if len(rows) < 1000:
+                    return total
+                start_ms = max(int(r["time"]) for r in rows) + 1
+        except Exception as e:
+            raise ExchangeError(f"查收入流水失败：{e}") from e
 
     async def close(self) -> None:
         await self._ex.close()

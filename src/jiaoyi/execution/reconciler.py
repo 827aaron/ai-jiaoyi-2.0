@@ -18,13 +18,19 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import Any, Literal
 
-from jiaoyi.contracts import Alert, ReconcileReport, Role
+from jiaoyi.contracts import Alert, ReconcileReport, Role, Side
 from jiaoyi.contracts.module_status import AlertLevel
-from jiaoyi.contracts.position import PositionStatus, ReconcileIssue, ReconcileIssueKind
+from jiaoyi.contracts.position import (
+    CloseReason,
+    PositionStatus,
+    ReconcileIssue,
+    ReconcileIssueKind,
+)
 from jiaoyi.execution.exchange import STOP_PREFIX, ExchangeClient, ExchangeError, ExchangeStop
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
-from jiaoyi.execution.hb_executor import HbExecutorAdapter
+from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
 from jiaoyi.execution.lifeboat import client_order_id, lifeboat_price
 from jiaoyi.execution.registry import PositionRegistry
 from jiaoyi.execution.symbols import from_hb_pair
@@ -58,6 +64,8 @@ class ThreeWayReconciler:
         *,
         account_name: str,
         qty_tolerance_pct: float = 1.0,
+        unclaimed_grace_s: float = 60.0,
+        max_lifeboat_failures: int = 2,
     ) -> None:
         self._adapter = adapter
         self._api = api
@@ -67,13 +75,18 @@ class ThreeWayReconciler:
         self._alerter = alerter
         self._account = account_name
         self._tol = qty_tolerance_pct / 100.0
+        self._grace_s = unclaimed_grace_s
+        self._max_lb_failures = max_lifeboat_failures
+        self._lb_failures: dict[str, int] = {}
 
     async def reconcile(self, now: datetime) -> ReconcileReport:
+        issues: list[ReconcileIssue] = []
         try:
+            running = await self._api.running_executors(self._account)
+            issues += await self._claim_unclaimed(running, now)
             await self._adapter.sync_all()
             exchange_positions = await self._exchange.positions()
             stops = await self._exchange.open_stops()
-            running = await self._api.running_executors(self._account)
         except (HbApiError, ExchangeError) as e:
             await self._send(
                 now,
@@ -85,7 +98,6 @@ class ThreeWayReconciler:
             )
             raise ReconcileError(str(e)) from e
 
-        issues: list[ReconcileIssue] = []
         live = self._registry.live()
         stops_by_cid = {s.client_order_id: s for s in stops}
         exchange_qty: dict[str, float] = {}
@@ -94,6 +106,7 @@ class ThreeWayReconciler:
 
         # 1. 我们以为开着的仓：保命止损在不在、数量对不对
         tracked_qty: dict[str, float] = {}
+        flattened: set[str] = set()
         for t in live:
             rec = t.record
             if rec.status is PositionStatus.OPENING:
@@ -103,13 +116,18 @@ class ThreeWayReconciler:
                 continue
             stop = stops_by_cid.get(client_order_id(rec.position_id))
             if stop is None:
-                issues.append(await self._repair_lifeboat(rec.position_id, now))
+                issue, was_flattened = await self._repair_lifeboat(rec.position_id)
+                issues.append(issue)
+                if was_flattened:
+                    flattened.add(rec.symbol)
             elif rec.lifeboat is None or rec.lifeboat.exchange_order_id != stop.order_id:
                 self._adapter.record_lifeboat(
                     rec.position_id,
                     await self._lifeboat.fetch(rec),
                 )
         for symbol, qty in tracked_qty.items():
+            if symbol in flattened:
+                continue
             actual = exchange_qty.get(symbol, 0.0)
             if abs(actual - qty) > qty * self._tol:
                 issues.append(
@@ -193,7 +211,8 @@ class ThreeWayReconciler:
             await self._send_issue(now, issue)
         return report
 
-    async def _repair_lifeboat(self, position_id: str, now: datetime) -> ReconcileIssue:
+    async def _repair_lifeboat(self, position_id: str) -> tuple[ReconcileIssue, bool]:
+        """补挂保命止损。补不上的账本内持仓不能一直裸着：-2021 当轮平，其它原因连续几轮失败后平。"""
         tracked = self._registry.get(position_id)
         assert tracked is not None
         rec = tracked.record
@@ -202,14 +221,21 @@ class ThreeWayReconciler:
         try:
             order = await self._lifeboat.place(rec, price)
         except Exception as e:
+            fails = self._lb_failures.get(position_id, 0) + 1
+            self._lb_failures[position_id] = fails
             self._adapter.record_lifeboat(position_id, None)
+            immediate = isinstance(e, ExchangeError) and e.immediate_trigger
+            if immediate or fails >= self._max_lb_failures:
+                why = "价格已越过保命止损位（-2021）" if immediate else f"连续 {fails} 轮补挂失败"
+                return await self._flatten(position_id, why)
             return ReconcileIssue(
                 kind=ReconcileIssueKind.LIFEBOAT_MISSING,
                 symbol=rec.symbol,
                 position_id=position_id,
-                detail=f"币安上找不到保命止损，补挂失败：{e!r}",
+                detail=f"币安上找不到保命止损，补挂失败（第 {fails} 次）：{e!r}",
                 fixed=False,
-            )
+            ), False
+        self._lb_failures.pop(position_id, None)
         self._adapter.record_lifeboat(position_id, order)
         return ReconcileIssue(
             kind=ReconcileIssueKind.LIFEBOAT_MISSING,
@@ -217,7 +243,84 @@ class ThreeWayReconciler:
             position_id=position_id,
             detail="币安上找不到保命止损，已补挂",
             fixed=True,
-        )
+        ), False
+
+    async def _flatten(self, position_id: str, why: str) -> tuple[ReconcileIssue, bool]:
+        """平掉没有保命止损的仓。先走 hummingbot；它不可达时直连币安下只减仓市价单兜底。"""
+        tracked = self._registry.get(position_id)
+        assert tracked is not None
+        rec = tracked.record
+
+        def issue(detail: str, fixed: bool) -> ReconcileIssue:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.LIFEBOAT_MISSING,
+                symbol=rec.symbol,
+                position_id=position_id,
+                detail=detail,
+                fixed=fixed,
+            )
+
+        try:
+            await self._adapter.close(position_id, CloseReason.RECONCILER)
+        except Exception as via_hb:
+            close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
+            try:
+                await self._exchange.close_position_market(rec.symbol, close_side, rec.quantity)
+            except Exception as direct:
+                return (
+                    issue(
+                        f"{why}，需平仓但失败：hummingbot {via_hb!r}；直连币安 {direct!r}", False
+                    ),
+                    False,
+                )
+            self._lb_failures.pop(position_id, None)
+            return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
+        self._lb_failures.pop(position_id, None)
+        return issue(f"{why}，保命止损补不上，已平仓", True), True
+
+    async def _claim_unclaimed(
+        self, running: list[dict[str, Any]], now: datetime
+    ) -> list[ReconcileIssue]:
+        """认领带我们标记的执行器：建执行器时结果不明、账本里没有 executor_id 或已标 FAILED。"""
+        issues: list[ReconcileIssue] = []
+        by_marker = {str(e.get("controller_id")): e for e in running}
+        for t in self._registry.data.positions.values():
+            rec = t.record
+            marker = f"{MARKER_PREFIX}{rec.position_id}"
+            if rec.status is PositionStatus.CLOSED:
+                continue
+            if rec.executor_id is not None and rec.status is not PositionStatus.FAILED:
+                continue
+            found = by_marker.get(marker)
+            if found is None and rec.status is not PositionStatus.FAILED:
+                matches = await self._api.find_executors(self._account, marker)
+                found = matches[0] if matches else None
+            if found is not None:
+                await self._adapter.claim_executor(rec.position_id, str(found["executor_id"]))
+                issues.append(
+                    ReconcileIssue(
+                        kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                        symbol=rec.symbol,
+                        position_id=rec.position_id,
+                        detail=f"认领了带我们标记的执行器 {found['executor_id']}，继续挂保命止损",
+                        fixed=True,
+                    )
+                )
+            elif (
+                rec.status is PositionStatus.OPENING
+                and (now - rec.opened_at).total_seconds() > self._grace_s
+            ):
+                self._adapter.mark_failed(rec.position_id)
+                issues.append(
+                    ReconcileIssue(
+                        kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                        symbol=rec.symbol,
+                        position_id=rec.position_id,
+                        detail="开仓结果不明且按标记查不到执行器，已标为失败",
+                        fixed=False,
+                    )
+                )
+        return issues
 
     async def _clear_stale(
         self, stop: ExchangeStop, exchange_qty: dict[str, float]
@@ -259,8 +362,16 @@ class ThreeWayReconciler:
             title,
             f"{issue.symbol} {issue.detail}",
             issue.symbol,
-            f"{issue.kind.value}:{issue.position_id or issue.symbol}",
+            self._dedup_key(now, issue),
         )
+
+    @staticmethod
+    def _dedup_key(now: datetime, issue: ReconcileIssue) -> str:
+        key = f"{issue.kind.value}:{issue.position_id or issue.symbol}"
+        if issue.kind is ReconcileIssueKind.LIFEBOAT_MISSING and not issue.fixed:
+            # 没保命止损又没平掉的仓，每一轮都要响，不能被冷却吞掉
+            key += f":{int(now.timestamp())}"
+        return key
 
     async def _send(
         self,

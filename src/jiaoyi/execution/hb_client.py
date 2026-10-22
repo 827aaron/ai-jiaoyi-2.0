@@ -14,14 +14,28 @@ import httpx
 
 
 class HbApiError(Exception):
-    """hummingbot-api 不可达、鉴权失败或返回错误。"""
+    """hummingbot-api 不可达、鉴权失败或返回错误。
+
+    ``definite_rejection`` 为真表示对方明确拒绝（HTTP 4xx），请求肯定没有生效；
+    超时、断连、5xx 则结果不明——对方可能已经执行了。
+    """
+
+    def __init__(self, message: str, *, definite_rejection: bool = False) -> None:
+        super().__init__(message)
+        self.definite_rejection = definite_rejection
 
 
 @runtime_checkable
 class HummingbotApi(Protocol):
     async def create_executor(
-        self, executor_config: dict[str, Any], account_name: str
-    ) -> dict[str, Any]: ...
+        self, executor_config: dict[str, Any], account_name: str, controller_id: str
+    ) -> dict[str, Any]:
+        """``controller_id`` 是我们的认领标记（``jy-<position_id>``），hummingbot 会原样带回。"""
+        ...
+
+    async def find_executors(self, account_name: str, controller_id: str) -> list[dict[str, Any]]:
+        """按认领标记查执行器，运行中和已结束的都算。"""
+        ...
 
     async def get_executor(self, executor_id: str) -> dict[str, Any] | None:
         """找不到返回 None。"""
@@ -74,12 +88,16 @@ class HttpHummingbotApi:
             raise HbApiError(f"hummingbot-api {path} 返回了非 JSON") from e
 
     async def create_executor(
-        self, executor_config: dict[str, Any], account_name: str
+        self, executor_config: dict[str, Any], account_name: str, controller_id: str
     ) -> dict[str, Any]:
         out = await self._call(
             "POST",
             "/executors/",
-            json={"account_name": account_name, "executor_config": executor_config},
+            json={
+                "account_name": account_name,
+                "executor_config": executor_config,
+                "controller_id": controller_id,
+            },
         )
         if not isinstance(out, dict) or not out.get("executor_id"):
             raise HbApiError(f"建执行器没有返回 executor_id：{out!r}")
@@ -95,6 +113,14 @@ class HttpHummingbotApi:
         )
         if out is None:
             raise HbApiError(f"停执行器时找不到 {executor_id}")
+
+    async def find_executors(self, account_name: str, controller_id: str) -> list[dict[str, Any]]:
+        out = await self._call(
+            "POST",
+            "/executors/search",
+            json={"account_names": [account_name], "controller_ids": [controller_id], "limit": 50},
+        )
+        return [d for d in (out or {}).get("data", []) if isinstance(d, dict)]
 
     async def running_executors(self, account_name: str) -> list[dict[str, Any]]:
         out = await self._call(

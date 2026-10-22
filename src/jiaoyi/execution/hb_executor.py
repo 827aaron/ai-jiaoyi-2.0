@@ -43,6 +43,12 @@ log = logging.getLogger(__name__)
 _ORDER_MARKET = 1
 _ORDER_LIMIT = 2
 
+MARKER_PREFIX = "jy-"
+"""写进 hummingbot ``controller_id`` 的认领标记前缀：``jy-<position_id>``。"""
+DAY_START_TOLERANCE_S = 300.0
+
+IncomeSince = Callable[[datetime], Awaitable[float]]
+
 _CLOSE_TYPE_MAP = {
     "STOP_LOSS": CloseReason.STOP_LOSS,
     "TAKE_PROFIT": CloseReason.TAKE_PROFIT,
@@ -78,6 +84,7 @@ class HbExecutorAdapter:
         fill_timeout_s: float = 15.0,
         poll_s: float = 0.5,
         lifeboat_attempts: int = 3,
+        income_since: IncomeSince | None = None,
         clock: Clock = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -91,6 +98,7 @@ class HbExecutorAdapter:
         self._fill_timeout_s = fill_timeout_s
         self._poll_s = poll_s
         self._lifeboat_attempts = lifeboat_attempts
+        self._income_since = income_since
         self._clock = clock
         self._sleep = sleep
 
@@ -149,19 +157,39 @@ class HbExecutorAdapter:
             take_profit_pct=intent.take_profit_pct,
         )
         self._registry.put(tracked)
+        marker = f"{MARKER_PREFIX}{record.position_id}"
         try:
-            created = await self._api.create_executor(self._executor_config(intent), self._account)
-        except HbApiError:
-            self._set(tracked, status=PositionStatus.FAILED, closed_at=self._clock())
-            await self._alert(
-                AlertLevel.CRITICAL,
-                "开仓失败：建执行器出错",
-                f"{intent.symbol} {record.position_id}",
-                intent.symbol,
-                f"open_failed:{record.position_id}",
+            created = await self._api.create_executor(
+                self._executor_config(intent), self._account, marker
             )
-            raise
-        tracked = self._set(tracked, executor_id=str(created["executor_id"]))
+            executor_id = str(created["executor_id"])
+        except HbApiError as e:
+            if e.definite_rejection:
+                return await self._open_failed(tracked, intent.symbol, raise_error=e)
+            # 超时、断连、5xx：hummingbot 可能已经建好并成交。先按标记查，查到就认领
+            try:
+                found = await self._api.find_executors(self._account, marker)
+            except HbApiError:
+                # 连查都查不了：结果不明。留着 OPENING，由对账员按标记认领，绝不当没发生
+                await self._alert(
+                    AlertLevel.CRITICAL,
+                    "开仓结果不明，等待认领",
+                    f"{intent.symbol} {record.position_id}：{e}",
+                    intent.symbol,
+                    f"open_unknown:{record.position_id}",
+                )
+                return record
+            if not found:
+                return await self._open_failed(tracked, intent.symbol, raise_error=e)
+            executor_id = str(found[0]["executor_id"])
+            await self._alert(
+                AlertLevel.WARN,
+                "建执行器超时但已生效，已认领",
+                f"{intent.symbol} {record.position_id} → {executor_id}",
+                intent.symbol,
+                f"claimed:{record.position_id}",
+            )
+        tracked = self._set(tracked, executor_id=executor_id)
 
         deadline = self._clock().timestamp() + self._fill_timeout_s
         while tracked.record.status is PositionStatus.OPENING:
@@ -184,6 +212,40 @@ class HbExecutorAdapter:
             await self.close(record.position_id, CloseReason.RECONCILER)
         return self._registry.data.positions[record.position_id].record
 
+    async def _open_failed(
+        self, tracked: TrackedPosition, symbol: str, *, raise_error: HbApiError
+    ) -> PositionRecord:
+        self._set(tracked, status=PositionStatus.FAILED, closed_at=self._clock())
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "开仓失败：建执行器出错",
+            f"{symbol} {tracked.record.position_id}",
+            symbol,
+            f"open_failed:{tracked.record.position_id}",
+        )
+        raise raise_error
+
+    async def claim_executor(self, position_id: str, executor_id: str) -> None:
+        """把带我们标记的执行器认领回账本（建执行器时结果不明、之后才发现它存在）。
+
+        已标 FAILED 的也认回来：继续等成交、挂保命止损，由 ``positions()`` 的同步完成。
+        """
+        tracked = self._registry.get(position_id)
+        if tracked is None:
+            return
+        if tracked.record.status in (PositionStatus.FAILED, PositionStatus.OPENING):
+            self._set(
+                tracked,
+                executor_id=executor_id,
+                status=PositionStatus.OPENING,
+                closed_at=None,
+            )
+
+    def mark_failed(self, position_id: str) -> None:
+        tracked = self._registry.get(position_id)
+        if tracked is not None and tracked.record.status is PositionStatus.OPENING:
+            self._set(tracked, status=PositionStatus.FAILED, closed_at=self._clock())
+
     # ------------------------------------------------------------------ 平仓
 
     async def close(self, position_id: str, reason: CloseReason) -> None:
@@ -195,12 +257,18 @@ class HbExecutorAdapter:
         executor_id = tracked.record.executor_id
         if executor_id is None:
             raise HbApiError(f"{position_id} 还没有执行器，无法平仓")
+        before = tracked
         tracked = self._set(
             tracked,
             status=PositionStatus.CLOSING,
             requested_close=tracked.requested_close or reason,
         )
-        await self._api.stop_executor(executor_id, keep_position=False)
+        try:
+            await self._api.stop_executor(executor_id, keep_position=False)
+        except Exception:
+            # 没停成：退回原状态，下一轮对账还能继续处理这笔仓
+            self._registry.put(before)
+            raise
         # 等执行器真的结束再撤保命止损：平仓没成功之前，币安上的保命止损必须还在
         deadline = self._clock().timestamp() + self._fill_timeout_s
         while tracked.record.status is PositionStatus.CLOSING:
@@ -356,20 +424,60 @@ class HbExecutorAdapter:
             ts=now,
             equity_usdt=equity,
             available_usdt=max(available, 0.0),
-            day_start_equity_usdt=self._day_start(now, equity),
+            day_start_equity_usdt=await self._day_start(now, wallet, equity),
             open_notional_usdt=sum(by_category.values()),
             open_notional_by_category=by_category,
             open_positions=len(live),
         )
 
-    def _day_start(self, now: datetime, equity: float) -> float:
-        today = now.astimezone(self._tz).date().isoformat()
-        current = self._registry.data.day_start
+    async def _day_start(self, now: datetime, wallet: float, equity: float) -> float:
+        """日亏熔断的当天基准，必须是 0 点时的权益，不能是“0 点后第一次读到的权益”。
+
+        大脑 0 点前后没在跑（崩溃、重启）时，第一次读取距 0 点已经很久，当时的权益里
+        可能已经亏掉一部分，直接拿来当基准会放宽熔断。所以：
+          - 距 0 点不超过几分钟：当前权益就是基准
+          - 否则用币安收入流水（已实现盈亏 + 手续费 + 资金费）倒推 0 点的钱包余额
+          - 拿不到流水：取“当前权益”和“上次落盘权益”里更大的（更严格），并发 warn
+        """
+        local = now.astimezone(self._tz)
+        today = local.date().isoformat()
+        registry = self._registry
+        current = registry.data.day_start
         if current is None or current.day != today:
-            current = DayStart(day=today, equity_usdt=equity)
-            self._registry.data.day_start = current
-            self._registry.save()
+            midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+            late_s = (now - midnight).total_seconds()
+            if late_s <= DAY_START_TOLERANCE_S:
+                base = equity
+            else:
+                base = await self._late_day_base(midnight, now, wallet, equity)
+            current = DayStart(day=today, equity_usdt=base)
+            registry.data.day_start = current
+        registry.data.last_equity_usdt = equity
+        registry.save()
         return current.equity_usdt
+
+    async def _late_day_base(
+        self, midnight: datetime, now: datetime, wallet: float, equity: float
+    ) -> float:
+        if self._income_since is not None:
+            try:
+                income = await self._income_since(midnight)
+            except Exception as e:
+                log.warning("查收入流水失败，日亏基准改用保守估计：%r", e)
+            else:
+                base = wallet - income
+                if base > 0:
+                    return base
+        previous = self._registry.data.last_equity_usdt
+        base = max(equity, previous) if previous is not None else equity
+        await self._alert(
+            AlertLevel.WARN,
+            "日亏基准无法从 0 点倒推，已取保守值",
+            f"晚于 0 点才读到账户；基准取 {base:.2f} USDT（当前 {equity:.2f}，上次 {previous}）",
+            None,
+            f"day_start_fallback:{midnight.date().isoformat()}",
+        )
+        return base
 
     # ------------------------------------------------------------------ 告警
 
