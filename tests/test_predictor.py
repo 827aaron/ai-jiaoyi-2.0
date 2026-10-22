@@ -44,6 +44,7 @@ class FakeBackend:
 async def feed(f: KronosForecaster, n: int, **kw: float) -> None:
     for k in range(n):
         await f.on_kline(bar(k, **kw))
+    await f.wait_idle()
 
 
 async def test_forecast_after_enough_bars(tmp_path: Path) -> None:
@@ -89,7 +90,9 @@ async def test_backend_error_means_no_forecast_and_down_after_three(tmp_path: Pa
     assert f.latest("BTCUSDT", T0) is None
     assert sink.read_status()["predictor"].health == Health.DEGRADED
     await f.on_kline(bar(3))
+    await f.wait_idle()
     await f.on_kline(bar(4))
+    await f.wait_idle()
     st = sink.read_status()["predictor"]
     assert st.health == Health.DOWN and "MPS" in (st.last_error or "")
     assert sink.read_day("2026-10-22")[-1].outcome == Outcome.ERROR
@@ -129,6 +132,7 @@ async def test_gap_resets_history_and_other_interval_ignored() -> None:
     await f.on_kline(bar(10))  # 重复
     odd = bar(11).model_copy(update={"interval": Interval.M1})
     await f.on_kline(odd)
+    await f.wait_idle()
     assert be.calls == calls
 
 
@@ -138,4 +142,28 @@ async def test_busy_symbol_drops_new_kline() -> None:
     f = KronosForecaster(True, KronosSettings(**{**SET.__dict__, "infer_timeout_s": 2.0}), be)
     await feed(f, 2)
     await asyncio.gather(f.on_kline(bar(2)), f.on_kline(bar(3)))
+    await f.wait_idle()
     assert be.calls == 1
+
+
+async def test_on_kline_returns_immediately_while_model_runs() -> None:
+    be = FakeBackend()
+    be.delay = 1.0
+    f = KronosForecaster(True, KronosSettings(**{**SET.__dict__, "infer_timeout_s": 5.0}), be)
+    await feed(f, 2)
+    t0 = time.perf_counter()
+    await f.on_kline(bar(2))
+    assert time.perf_counter() - t0 < 0.05
+    assert f.latest("BTCUSDT", T0) is None  # 还没算完
+    await f.wait_idle()
+    assert f.latest("BTCUSDT", T0 + timedelta(minutes=15)) is not None
+
+
+async def test_close_cancels_background_inference() -> None:
+    be = FakeBackend()
+    be.delay = 0.5
+    f = KronosForecaster(True, SET, be)
+    await feed(f, 2)
+    await f.on_kline(bar(2))
+    f.close()
+    await f.wait_idle()

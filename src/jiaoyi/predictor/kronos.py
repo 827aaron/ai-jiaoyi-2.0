@@ -63,7 +63,10 @@ class KronosSettings:
     """独立采样几条路径；范围取所有路径的包络，p_up 取收在现价之上的比例。"""
     infer_timeout_s: float = 30.0
     model_id: str = "NeoQuasar/Kronos-small"
+    model_revision: str = "901c26c1332695a2a8f243eb2f37243a37bea320"
+    """HuggingFace 提交号，钉死权重版本；升级要单独评审。"""
     tokenizer_id: str = "NeoQuasar/Kronos-Tokenizer-base"
+    tokenizer_revision: str = "0e0117387f39004a9016484a186a908917e22426"
     repo_dir: str = "vendor/Kronos"
     """官方 Kronos 源码目录（它不是 pip 包），见 predictor/README.md。"""
     device: str = "auto"
@@ -113,8 +116,10 @@ class OfficialKronosBackend:
         if repo not in sys.path:
             sys.path.insert(0, repo)
         mod = importlib.import_module("model")
-        tokenizer = mod.KronosTokenizer.from_pretrained(self._s.tokenizer_id)
-        model = mod.Kronos.from_pretrained(self._s.model_id)
+        tokenizer = mod.KronosTokenizer.from_pretrained(
+            self._s.tokenizer_id, revision=self._s.tokenizer_revision
+        )
+        model = mod.Kronos.from_pretrained(self._s.model_id, revision=self._s.model_revision)
         self._predictor = mod.KronosPredictor(model, tokenizer, device=device, max_context=512)
         self._device = device
         log.info("Kronos 已加载：%s，设备 %s", self._s.model_id, device)
@@ -174,6 +179,7 @@ class KronosForecaster:
         self._bars: dict[str, deque[Kline]] = {}
         self._forecasts: dict[str, Forecast] = {}
         self._busy: set[str] = set()
+        self._tasks: set[asyncio.Task[None]] = set()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kronos")
         self._calls = 0
         self._errors = 0
@@ -218,11 +224,22 @@ class KronosForecaster:
         buf.append(kline)
         if len(buf) < self._s.min_bars or sym in self._busy:
             return
+        # 推理放后台，on_kline 立即返回，不卡行情循环
         self._busy.add(sym)
+        task = asyncio.get_running_loop().create_task(self._run(sym, list(buf), kline))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _run(self, sym: str, bars: list[Kline], last: Kline) -> None:
         try:
-            await self._infer(sym, list(buf), kline)
+            await self._infer(sym, bars, last)
         finally:
             self._busy.discard(sym)
+
+    async def wait_idle(self) -> None:
+        """等后台推理全部结束（测试和优雅退出用）。"""
+        while self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _infer(self, sym: str, bars: list[Kline], last: Kline) -> None:
         t0 = time.perf_counter()
@@ -342,4 +359,6 @@ class KronosForecaster:
             log.exception("预测员上报状态失败")
 
     def close(self) -> None:
+        for task in self._tasks:
+            task.cancel()
         self._pool.shutdown(wait=False, cancel_futures=True)

@@ -10,11 +10,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-<<<<<<< HEAD
-# 预测员（Kronos）才需要；Mac mini 上装好后 make hb-fetch 之外另拉 Kronos 源码，见 src/jiaoyi/predictor/README.md
-kronos = ["torch", "pandas", "numpy", "einops", "huggingface_hub", "safetensors"]
-=======
->>>>>>> origin/main
+# 预测员（Kronos）才需要；官方源码另拉：make kronos-fetch，见 src/jiaoyi/predictor/README.md
+kronos = [
+    "torch>=2.0,<3",
+    "pandas>=2.2,<3",
+    "numpy>=1.26,<3",
+    "einops==0.8.1",
+    "huggingface_hub==0.33.1",
+    "safetensors==0.6.2",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
