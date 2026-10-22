@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def _status(args: argparse.Namespace) -> int:
         return 2
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
+    asyncio.run(app.stop())
     return 0
 
 
