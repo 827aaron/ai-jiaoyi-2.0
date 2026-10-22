@@ -48,6 +48,15 @@ class ExchangeStop:
     reduce_only: bool
 
 
+@dataclass(frozen=True)
+class LotFilter:
+    """币安 exchangeInfo 里一个合约的下单精度。"""
+
+    step_size: float
+    min_qty: float
+    min_notional: float
+
+
 @runtime_checkable
 class ExchangeClient(Protocol):
     async def positions(self) -> list[ExchangePosition]: ...
@@ -73,6 +82,10 @@ class ExchangeClient(Protocol):
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
     ) -> None:
         """只减仓市价单。**兜底专用**：hummingbot 不可达而保命止损又挂不上时，对账员用它平仓。"""
+        ...
+
+    async def lot_filters(self) -> dict[str, LotFilter]:
+        """所有在交易的 USDT 永续合约的 stepSize / minQty / minNotional（读 exchangeInfo）。"""
         ...
 
     async def income_since(self, since: datetime) -> float:
@@ -226,6 +239,31 @@ class CcxtBinanceFutures:
             )
         except Exception as e:
             raise ExchangeError(f"直连平仓失败：{e}") from e
+
+    async def lot_filters(self) -> dict[str, LotFilter]:
+        try:
+            markets = await self._ex.load_markets(True)
+        except Exception as e:
+            raise ExchangeError(f"读 exchangeInfo 失败：{e}") from e
+        self._markets_loaded = True
+        out: dict[str, LotFilter] = {}
+        for m in markets.values():
+            info = m.get("info") or {}
+            if not (m.get("swap") and m.get("linear") and m.get("settle") == "USDT"):
+                continue
+            if info.get("contractType") != "PERPETUAL" or info.get("status") != "TRADING":
+                continue
+            try:
+                symbol = from_ccxt_symbol(str(m["symbol"]))
+                filters = {f["filterType"]: f for f in info.get("filters", [])}
+                lot = filters["LOT_SIZE"]
+                notional = filters.get("MIN_NOTIONAL", {}).get("notional", 0.0)
+                out[symbol] = LotFilter(
+                    float(lot["stepSize"]), float(lot["minQty"]), float(notional)
+                )
+            except (KeyError, ValueError):
+                continue  # 缺字段的合约不给精度，保镖会对它拒单
+        return out
 
     _INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
 

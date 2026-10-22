@@ -1,0 +1,80 @@
+"""保镖要的下单精度：币安 exchangeInfo 的 stepSize / minQty / minNotional，带缓存。
+
+保镖的 ``LotRulesProvider.lot_rules`` 是同步的（快环里不许阻塞），所以这里分两半：
+``refresh`` 异步去币安拉，``lot_rules`` 只读缓存。故障即关闭：
+  - 从没拉成功过 → 返回 None，保镖拒单
+  - 缓存超过 ``max_age_s`` 没刷新成功 → 返回 None（交易所改了精度我们不知道，宁可不下单）
+  - 某个合约不在列表里（下架、暂停交易）→ 返回 None
+刷新失败保留旧缓存，只要没过期就继续用。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from datetime import datetime, timedelta
+
+from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.execution.clock import Clock, utc_now
+from jiaoyi.execution.exchange import ExchangeClient
+from jiaoyi.risk.guard import LotRules
+
+log = logging.getLogger(__name__)
+
+
+class ExchangeInfoLotRules:
+    def __init__(
+        self,
+        exchange: ExchangeClient,
+        *,
+        max_age_s: float = 6 * 3600.0,
+        clock: Clock = utc_now,
+        recorder: RoleRecorder | None = None,
+    ) -> None:
+        self._exchange = exchange
+        self._max_age = timedelta(seconds=max_age_s)
+        self._clock = clock
+        self._rec = recorder
+        self._rules: dict[str, LotRules] = {}
+        self._loaded_at: datetime | None = None
+
+    async def refresh(self) -> bool:
+        """拉一次。成功返回 True；失败保留旧缓存并返回 False。"""
+        now = self._clock()
+        try:
+            filters = await self._exchange.lot_filters()
+        except Exception as e:
+            log.warning("刷新下单精度失败，沿用旧缓存：%r", e)
+            if self._rec is not None:
+                from jiaoyi.contracts import Outcome
+
+                self._rec.record(now, Outcome.ERROR, f"刷新下单精度失败：{e!r}")
+            return False
+        if not filters:
+            log.warning("exchangeInfo 返回空列表，沿用旧缓存")
+            return False
+        self._rules = {
+            sym: LotRules(f.step_size, f.min_qty, f.min_notional) for sym, f in filters.items()
+        }
+        self._loaded_at = now
+        return True
+
+    def lot_rules(self, symbol: str) -> LotRules | None:
+        if self._loaded_at is None or self._clock() - self._loaded_at > self._max_age:
+            return None
+        return self._rules.get(symbol)
+
+    @property
+    def loaded_at(self) -> datetime | None:
+        return self._loaded_at
+
+
+async def run_lot_rules_refresh(
+    provider: ExchangeInfoLotRules, interval_s: float, stop: asyncio.Event
+) -> None:
+    """启动时先拉一次，然后每 ``interval_s`` 秒刷新，直到 ``stop``。"""
+    while not stop.is_set():
+        await provider.refresh()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)

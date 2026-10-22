@@ -16,18 +16,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Literal
 
-from jiaoyi.contracts import Alert, ReconcileReport, Role, Side
-from jiaoyi.contracts.module_status import AlertLevel
+from jiaoyi.contracts import Alert, Outcome, ReconcileReport, Role, Side
+from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import (
     CloseReason,
     PositionStatus,
     ReconcileIssue,
     ReconcileIssueKind,
 )
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.exchange import STOP_PREFIX, ExchangeClient, ExchangeError, ExchangeStop
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
@@ -66,6 +67,8 @@ class ThreeWayReconciler:
         qty_tolerance_pct: float = 1.0,
         unclaimed_grace_s: float = 60.0,
         max_lifeboat_failures: int = 2,
+        recorder: RoleRecorder | None = None,
+        heartbeats: Sequence[Callable[[datetime, Health, str], None]] = (),
     ) -> None:
         self._adapter = adapter
         self._api = api
@@ -78,6 +81,8 @@ class ThreeWayReconciler:
         self._grace_s = unclaimed_grace_s
         self._max_lb_failures = max_lifeboat_failures
         self._lb_failures: dict[str, int] = {}
+        self._rec = recorder
+        self._heartbeats = heartbeats
 
     async def reconcile(self, now: datetime) -> ReconcileReport:
         issues: list[ReconcileIssue] = []
@@ -96,6 +101,9 @@ class ThreeWayReconciler:
                 None,
                 "reconcile_unreachable",
             )
+            if self._rec is not None:
+                self._rec.record(now, Outcome.ERROR, f"对账失败：{e!r}")
+                self._rec.heartbeat(now, Health.DOWN, "连不上 hummingbot-api 或币安")
             raise ReconcileError(str(e)) from e
 
         live = self._registry.live()
@@ -209,7 +217,29 @@ class ThreeWayReconciler:
         report = ReconcileReport(ts=now, checked_positions=len(live), issues=issues)
         for issue in issues:
             await self._send_issue(now, issue)
+            self._record_issue(now, issue)
+        self._beat(now, healthy=all(i.fixed for i in issues), count=len(issues))
         return report
+
+    def _record_issue(self, now: datetime, issue: ReconcileIssue) -> None:
+        """按验收约定：没修好的问题 = error，修好的 = action。"""
+        if self._rec is not None:
+            self._rec.record(
+                now,
+                Outcome.ACTION if issue.fixed else Outcome.ERROR,
+                f"{_TITLES[issue.kind]}{'，已处理' if issue.fixed else ''}：{issue.detail}",
+                symbol=issue.symbol,
+                position_id=issue.position_id,
+                output={"kind": issue.kind.value, "fixed": issue.fixed},
+            )
+
+    def _beat(self, now: datetime, *, healthy: bool, count: int) -> None:
+        health = Health.OK if healthy else Health.DEGRADED
+        headline = "三方一致" if count == 0 else f"发现 {count} 个问题"
+        if self._rec is not None:
+            self._rec.heartbeat(now, health, headline)
+        for beat in self._heartbeats:
+            beat(now, Health.OK, "")
 
     async def _repair_lifeboat(self, position_id: str) -> tuple[ReconcileIssue, bool]:
         """补挂保命止损。补不上的账本内持仓不能一直裸着：-2021 当轮平，其它原因连续几轮失败后平。"""

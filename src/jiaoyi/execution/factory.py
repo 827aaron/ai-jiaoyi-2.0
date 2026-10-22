@@ -5,15 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from jiaoyi.contracts import RiskConfig, RunMode
+from jiaoyi.contracts import RiskConfig, Role, RunMode
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.exchange import CcxtBinanceFutures
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError
+from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
 from jiaoyi.execution.reconciler import ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry
-from jiaoyi.interfaces import Alerter, SecretStore
+from jiaoyi.interfaces import Alerter, DecisionLog, SecretStore
 
 CONNECTOR_BY_MODE: dict[RunMode, str] = {
     # hummingbot 官方没有永续合约的“纯模拟”连接器；paper 与 testnet 都走币安合约测试网，
@@ -29,6 +31,7 @@ class ExecutionStack:
     adapter: HbExecutorAdapter
     lifeboat: BinanceLifeboat
     reconciler: ThreeWayReconciler
+    lot_rules: ExchangeInfoLotRules
     api: HttpHummingbotApi
     exchange: CcxtBinanceFutures
 
@@ -49,6 +52,7 @@ def build_execution(
     alerter: Alerter,
     *,
     live_gate: LiveGate | None = None,
+    decision_log: DecisionLog | None = None,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -71,7 +75,12 @@ def build_execution(
     exchange = CcxtBinanceFutures(
         need(f"{prefix}_API_KEY"), need(f"{prefix}_API_SECRET"), testnet=mode is not RunMode.LIVE
     )
-    lifeboat = BinanceLifeboat(exchange)
+    tz = risk.day_reset_tz
+
+    def recorder(role: Role) -> RoleRecorder:
+        return RoleRecorder(role, decision_log, day_reset_tz=tz)
+
+    lifeboat = BinanceLifeboat(exchange, recorder=recorder(Role.LIFEBOAT))
     registry = PositionRegistry(Path(data_dir) / "positions.json")
     adapter = HbExecutorAdapter(
         api,
@@ -82,8 +91,18 @@ def build_execution(
         connector_name=CONNECTOR_BY_MODE[mode],
         day_reset_tz=risk.day_reset_tz,
         income_since=exchange.income_since,
+        recorder=recorder(Role.EXECUTOR),
     )
     reconciler = ThreeWayReconciler(
-        adapter, api, exchange, lifeboat, registry, alerter, account_name=account_name
+        adapter,
+        api,
+        exchange,
+        lifeboat,
+        registry,
+        alerter,
+        account_name=account_name,
+        recorder=recorder(Role.RECONCILER),
+        heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
     )
-    return ExecutionStack(adapter, lifeboat, reconciler, api, exchange)
+    lot_rules = ExchangeInfoLotRules(exchange, recorder=recorder(Role.EXECUTOR))
+    return ExecutionStack(adapter, lifeboat, reconciler, lot_rules, api, exchange)

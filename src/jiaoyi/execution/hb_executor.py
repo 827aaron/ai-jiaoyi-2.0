@@ -24,12 +24,14 @@ from jiaoyi.contracts import (
     Alert,
     LifeboatOrder,
     OrderIntent,
+    Outcome,
     PositionRecord,
     Role,
     Side,
 )
-from jiaoyi.contracts.module_status import AlertLevel
+from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.lifeboat import lifeboat_price
@@ -81,6 +83,7 @@ class HbExecutorAdapter:
         poll_s: float = 0.5,
         lifeboat_attempts: int = 3,
         income_since: IncomeSince | None = None,
+        recorder: RoleRecorder | None = None,
         clock: Clock = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -95,6 +98,7 @@ class HbExecutorAdapter:
         self._poll_s = poll_s
         self._lifeboat_attempts = lifeboat_attempts
         self._income_since = income_since
+        self._rec = recorder
         self._clock = clock
         self._sleep = sleep
 
@@ -331,6 +335,19 @@ class HbExecutorAdapter:
 
     def _mark_filled(self, tracked: TrackedPosition, entry: float) -> TrackedPosition:
         sign = 1.0 if tracked.record.side is Side.LONG else -1.0
+        rec = tracked.record
+        self._record(
+            Outcome.ACTION,
+            f"{rec.symbol} {rec.side.value} 开仓成交，入场价 {entry}",
+            rec,
+            output={
+                "entry_price": entry,
+                "quantity": rec.quantity,
+                "side": rec.side.value,
+                "intent_id": rec.intent_id,
+                "executor_id": rec.executor_id,
+            },
+        )
         # 止损止盈价只用于展示和对账，真正的触发由 hummingbot 执行器判断
         return self._set(
             tracked,
@@ -376,6 +393,21 @@ class HbExecutorAdapter:
             realized_pnl_usdt=float(detail.get("net_pnl_quote") or 0.0),
             fees_usdt=abs(float(detail.get("cum_fees_quote") or 0.0)),
         )
+        if never_filled:
+            self._record(Outcome.ERROR, f"{rec.symbol} 开仓没成交，执行器已结束", rec)
+        else:
+            closed = tracked.record
+            net = closed.realized_pnl_usdt or 0.0
+            self._record(
+                Outcome.CLOSE,
+                f"{rec.symbol} 平仓（{reason.value if reason else '未知'}），净盈亏 {net:+.2f}U",
+                closed,
+                output={
+                    "net": net,
+                    "reason": reason.value if reason else None,
+                    "fees": closed.fees_usdt,
+                },
+            )
         if never_filled:
             await self._alert(
                 AlertLevel.WARN,
@@ -486,6 +518,34 @@ class HbExecutorAdapter:
             f"day_start_fallback:{midnight.date().isoformat()}",
         )
         return base
+
+    # ------------------------------------------------------------------ 决策日志
+
+    def _record(
+        self,
+        outcome: Outcome,
+        summary: str,
+        rec: PositionRecord,
+        *,
+        output: dict[str, Any] | None = None,
+    ) -> None:
+        """按验收约定写 executor 记录：成交 = action，平仓 = close（output.net 是净盈亏）。"""
+        if self._rec is not None:
+            self._rec.record(
+                self._clock(),
+                outcome,
+                summary,
+                symbol=rec.symbol,
+                signal_id=rec.signal_id,
+                position_id=rec.position_id,
+                card_id=rec.card_id,
+                output=output,
+            )
+
+    def heartbeat(self, now: datetime, health: Health = Health.OK, headline: str = "") -> None:
+        if self._rec is not None:
+            live = len(self._registry.live())
+            self._rec.heartbeat(now, health, headline or f"在管持仓 {live} 笔")
 
     # ------------------------------------------------------------------ 告警
 

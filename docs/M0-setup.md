@@ -120,3 +120,8 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 - 状态文件在 `data/live_gate.json`（权限 600），**不进仓库**
 
 实盘前还需要：主网 key 用**子账户**、只开合约权限、**不开提现**、杠杆在交易所侧设上限（设计文档附录 B）。
+
+## 9. 下单精度与决策日志（接线时用）
+
+- `ExchangeInfoLotRules`（`execution/lot_rules.py`）实现保镖的 `LotRulesProvider`：`await refresh()` 去币安 exchangeInfo 拉 `stepSize / minQty / minNotional`，`lot_rules(symbol)` 只读缓存（同步，快环里可直接调）。启动时先拉一次，之后用 `run_lot_rules_refresh` 每小时刷新。**故障即关闭**：没拉成功过、缓存超过 6 小时、或合约不在列表里，都返回 `None`，保镖就拒单。
+- `build_execution(..., decision_log=JsonlDecisionLog(...))` 会让执行层按 `acceptance.py` 的约定写决策日志：`executor` 成交 = action、平仓 = close（`output.net` 是净盈亏）、`lifeboat` 挂上 = action、`reconciler` 没修好的问题 = error（修好的 = action），三者都发心跳。用 `python -m jiaoyi.acceptance --stage m0 --hours 24` 验收。
