@@ -9,6 +9,8 @@ dependencies = [
     "pydantic>=2.7,<3",
     "httpx>=0.27,<1",
     "ccxt>=4.5,<5",
+    "websockets>=14,<17",       # 币安行情 WebSocket（快环）
+    "typesafe-sdk>=0.7.5,<0.8", # Jev 官方 SDK（TypeSafe AI，MIT）
 ]
 
 [project.optional-dependencies]
