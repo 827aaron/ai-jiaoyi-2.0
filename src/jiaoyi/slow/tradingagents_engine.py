@@ -1,4 +1,7 @@
-"""TradingAgents（Apache-2.0，作为依赖，不复制代码）+ DeepSeek 的会议引擎。
+"""TradingAgents + DeepSeek 的会议引擎。
+
+TradingAgents：Apache-2.0，v0.7.0，提交 e8f5503，钉在 pyproject 的 slow 依赖里；
+不复制它的代码，升级版本要单独开 PR 并重跑真机验证。
 
 只在这个文件里导入 ``tradingagents`` / ``langchain_core``，且都是用到时才导入，
 所以没装 ``jiaoyi[slow]`` 或没有 key 时其余代码和测试照常跑。
@@ -54,7 +57,8 @@ class TradingAgentsSettings:
     risk_rounds: int = 1
     max_tokens: int = 8192
     max_retries: int = 6
-    # 每百万 token 的美元价（输入, 输出）。⚠ 占位值，上线前按 DeepSeek 官网核对。
+    # 每百万 token 的美元价（输入, 输出）。⚠ 占位值，M2 拿到 key 真机验证时按 DeepSeek 官网核对，
+    # 并把核对日期写在这里。只影响资金页的花费统计，不影响下单和风控。
     price_per_mtok: Mapping[str, tuple[float, float]] = field(
         default_factory=lambda: {"flash": (0.15, 0.60), "pro": (0.50, 2.00)}
     )
@@ -258,7 +262,9 @@ class TradingAgentsEngine:
         key = secrets.get("DEEPSEEK_API_KEY")
         if not key:
             raise RuntimeError("缺少 DEEPSEEK_API_KEY：先跑一次 setup-keys")
-        os.environ.setdefault("DEEPSEEK_API_KEY", key)  # TradingAgents 从环境变量读
+        # TradingAgents 只认环境变量。注意子进程会继承：从本进程拉起别的程序时 env= 里要去掉它；
+        # 日志和 DecisionRecord 不得写入请求头或配置字典。
+        os.environ.setdefault("DEEPSEEK_API_KEY", key)
         self._risk = risk
         self._s = settings or TradingAgentsSettings()
         self._today = today

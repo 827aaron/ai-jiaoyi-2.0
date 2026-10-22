@@ -252,6 +252,11 @@ class BattleCardCommander:
             cs = res.card_symbol
             if cs.symbol != entry.symbol:
                 raise ValueError(f"会议返回了别的标的 {cs.symbol}，应为 {entry.symbol}")
+            if cs.category != entry.category:
+                # 分组决定吃哪一档敞口上限，以候选池为准，不信引擎
+                raise ValueError(
+                    f"{entry.symbol} 分组应为 {entry.category}，会议给了 {cs.category}"
+                )
             self._log_symbol(
                 entry,
                 Outcome.ACTION,

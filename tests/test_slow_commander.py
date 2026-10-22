@@ -220,3 +220,23 @@ async def test_refresh_reasons(tmp_path: Path, now: datetime) -> None:
 def test_ttl_range_enforced(tmp_path: Path, now: datetime) -> None:
     with pytest.raises(ValueError):
         make(tmp_path, FakeEngine([]), now, ttl=timedelta(minutes=30))
+
+
+async def test_wrong_category_from_engine_is_rejected(tmp_path: Path, now: datetime) -> None:
+    class LyingEngine(FakeEngine):
+        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+            return Analysis(card_symbol(e.symbol, category=Category.MAJOR), 0.0)
+
+    c, _, _ = make(tmp_path, LyingEngine(["AAUSDT", "BBUSDT"]), now)
+    with pytest.raises(CardRefreshError):  # 全部被拒 = 不出卡
+        await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+
+    # 其中一个正确、一个说谎：卡里只有正确的，且分组是候选池的
+    class HalfLying(FakeEngine):
+        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+            cat = Category.MAJOR if e.symbol == "BBUSDT" else e.category
+            return Analysis(card_symbol(e.symbol, category=cat), 0.0)
+
+    c2, _, _ = make(tmp_path / "b", HalfLying(["AAUSDT", "BBUSDT"]), now)
+    card = await c2.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    assert [(s.symbol, s.category) for s in card.symbols] == [("AAUSDT", Category.ALT)]
