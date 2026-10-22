@@ -1,0 +1,80 @@
+{
+  "pool_id": "pool-20261022T0600",
+  "ts": "2026-10-22T06:00:00Z",
+  "entries": [
+    {
+      "symbol": "BTCUSDT",
+      "category": "major",
+      "score": 0.82,
+      "score_breakdown": {
+        "vol_vs_fees": 0.9,
+        "volume_surge": 0.6,
+        "funding_extreme": 0.1,
+        "oi_change": 0.5,
+        "liquidations": 0.3
+      },
+      "reasons": [
+        "波动足以覆盖手续费",
+        "持仓量回升"
+      ],
+      "filters": {
+        "quote_volume_24h_usdt": 12000000000.0,
+        "spread_bps": 0.15,
+        "depth_usdt": 2000000.0,
+        "listed_days": 2000,
+        "passed": true,
+        "failed_reasons": []
+      },
+      "pinned": true,
+      "blacklisted": false,
+      "manual": false,
+      "in_pool": true,
+      "picked_by_card": true,
+      "pick_reason": "68000 突破"
+    },
+    {
+      "symbol": "NEWCOINUSDT",
+      "category": "alt",
+      "score": 0.0,
+      "score_breakdown": {},
+      "reasons": [],
+      "filters": {
+        "quote_volume_24h_usdt": 30000000.0,
+        "spread_bps": 4.0,
+        "depth_usdt": 40000.0,
+        "listed_days": 3,
+        "passed": false,
+        "failed_reasons": [
+          "上线不满 7 天"
+        ]
+      },
+      "pinned": false,
+      "blacklisted": false,
+      "manual": false,
+      "in_pool": false,
+      "picked_by_card": false,
+      "pick_reason": ""
+    },
+    {
+      "symbol": "LUNAUSDT",
+      "category": "alt",
+      "score": 0.0,
+      "score_breakdown": {},
+      "reasons": [],
+      "filters": {
+        "quote_volume_24h_usdt": 50000000.0,
+        "spread_bps": 3.0,
+        "depth_usdt": 80000.0,
+        "listed_days": 900,
+        "passed": true,
+        "failed_reasons": []
+      },
+      "pinned": false,
+      "blacklisted": true,
+      "manual": false,
+      "in_pool": false,
+      "picked_by_card": false,
+      "pick_reason": ""
+    }
+  ]
+}

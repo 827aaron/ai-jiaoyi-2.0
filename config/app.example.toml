@@ -1,0 +1,13 @@
+# 运行配置。复制成 config/app.toml 再改：make init-config
+# 每一项都必填；超出合理范围拒绝启动。
+
+mode = "paper"               # paper（模拟盘）/ testnet / live；切 live 另需确认词和面板密码
+predictor_enabled = true     # 预测员 Kronos 开关
+signal_dedup_s = 30          # 同一信号冷却 30 秒
+jev_timeout_ms = 1000        # Jev 超时就放弃本次开仓
+keeper_interval_s = 20       # 持仓管家每 20 秒看一次
+reconcile_interval_s = 30    # 对账员每 30 秒核对一次
+slow_loop_interval_min = 30  # 军师团每 30 分钟开会
+pool_size = 40               # 候选池 30–50
+card_pick_max = 20           # 军师每次最多挑 20 个
+data_dir = "data"            # 决策日志、模块状态写在这里

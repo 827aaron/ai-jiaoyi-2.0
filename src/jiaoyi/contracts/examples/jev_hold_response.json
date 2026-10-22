@@ -1,0 +1,31 @@
+{
+  "request_id": "jev-0002",
+  "ok": true,
+  "error": null,
+  "model_version": "systemone-2026-10",
+  "latency_ms": 180.0,
+  "cost_usd": 0.0,
+  "answers": [
+    {
+      "id": "thesis_intact",
+      "probs": {
+        "yes": 0.7,
+        "no": 0.3
+      }
+    },
+    {
+      "id": "adverse_risk",
+      "probs": {
+        "low": 0.65,
+        "high": 0.35
+      }
+    },
+    {
+      "id": "action",
+      "probs": {
+        "hold": 0.78,
+        "close": 0.22
+      }
+    }
+  ]
+}

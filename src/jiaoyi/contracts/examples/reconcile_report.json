@@ -1,0 +1,13 @@
+{
+  "ts": "2026-10-22T06:18:00Z",
+  "checked_positions": 1,
+  "issues": [
+    {
+      "kind": "lifeboat_missing",
+      "symbol": "BTCUSDT",
+      "position_id": "pos-0001",
+      "detail": "成交 5 秒后仍未见保命止损，已补挂",
+      "fixed": true
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "card_id": "card-20261022-0600",
+  "version": 1,
+  "created_at": "2026-10-22T06:00:00Z",
+  "expires_at": "2026-10-22T08:00:00Z",
+  "source": "tradingagents",
+  "regime": "BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。",
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "category": "major",
+      "bias": "long",
+      "key_levels": [
+        {
+          "price": 68000.0,
+          "kind": "resistance",
+          "note": "前高"
+        },
+        {
+          "price": 66500.0,
+          "kind": "support",
+          "note": ""
+        }
+      ],
+      "allowed_signals": [
+        "volume_breakout",
+        "liquidation_rebound"
+      ],
+      "size_tier_max": "L",
+      "notional_usdt": {
+        "min": 500.0,
+        "max": 2000.0
+      },
+      "leverage": {
+        "min": 2.0,
+        "max": 3.0
+      },
+      "stop_atr": {
+        "min": 1.0,
+        "max": 2.0
+      },
+      "take_profit_r": {
+        "min": 1.5,
+        "max": 3.0
+      },
+      "reason": "资金费率中性，持仓量回升，68000 突破后上方空间较大。"
+    },
+    {
+      "symbol": "TSLAUSDT",
+      "category": "us_tech",
+      "bias": "no_trade",
+      "key_levels": [],
+      "allowed_signals": [],
+      "size_tier_max": "S",
+      "notional_usdt": {
+        "min": 0.0,
+        "max": 0.0
+      },
+      "leverage": {
+        "min": 1.0,
+        "max": 1.0
+      },
+      "stop_atr": {
+        "min": 1.0,
+        "max": 1.0
+      },
+      "take_profit_r": {
+        "min": 1.5,
+        "max": 1.5
+      },
+      "reason": "财报前一晚，只看不做。"
+    }
+  ],
+  "refresh_reason": "scheduled",
+  "llm_cost_usd": 0.042
+}
