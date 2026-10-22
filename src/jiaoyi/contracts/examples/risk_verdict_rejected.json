@@ -1,0 +1,9 @@
+{
+  "signal_id": "sig-ETHUSDT-20261022T061900-002",
+  "approved": false,
+  "reasons": [
+    "止盈目标不够付手续费",
+    "方向与作战卡不一致"
+  ],
+  "intent": null
+}

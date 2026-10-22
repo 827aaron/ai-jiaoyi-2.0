@@ -1,0 +1,83 @@
+# 常用命令。make help 看全部。
+SHELL := /bin/bash
+VENV  := .venv
+BIN   := $(VENV)/bin
+
+# 上游仓库钉在设计时读过的提交（设计文档附录 B）。升级先在测试网验证。
+HB_API_REPO := https://github.com/hummingbot/hummingbot-api
+HB_API_REF  := 7ae108f11bf20651682dbdff639a8717068c5883
+CONDOR_REPO := https://github.com/hummingbot/condor
+CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
+
+.PHONY: help install init-config check-config lint format typecheck test check \
+        hb-fetch hb-setup hb-up hb-down hb-logs condor-install condor-run
+
+help:
+	@echo "开发："
+	@echo "  make install        建 .venv 并安装（含开发依赖）"
+	@echo "  make init-config    从示例复制 config/risk.toml、config/app.toml（不覆盖已有）"
+	@echo "  make check-config   检查配置，不合格返回非 0"
+	@echo "  make check          lint + 类型检查 + 测试（同 CI）"
+	@echo "  make format         自动格式化"
+	@echo "执行层（M0，执行工程师）："
+	@echo "  make hb-fetch       拉上游 hummingbot-api 和 Condor 到 vendor/"
+	@echo "  make hb-setup       跑 hummingbot-api 上游 setup（生成它的 .env 和 MQTT 账号）"
+	@echo "  make hb-up / hb-down / hb-logs"
+	@echo "  make condor-install / condor-run   Condor 官方本机运行（uv + tmux）"
+
+install:
+	uv venv $(VENV)
+	uv pip install --python $(BIN)/python -e ".[dev]"
+
+init-config:
+	@for f in risk app; do \
+		if [ -f config/$$f.toml ]; then echo "config/$$f.toml 已存在，跳过"; \
+		else cp config/$$f.example.toml config/$$f.toml && echo "已生成 config/$$f.toml"; fi; \
+	done
+
+check-config:
+	$(BIN)/jiaoyi check-config
+
+lint:
+	$(BIN)/ruff check .
+	$(BIN)/ruff format --check .
+
+format:
+	$(BIN)/ruff format .
+	$(BIN)/ruff check --fix .
+
+typecheck:
+	$(BIN)/mypy
+
+test:
+	$(BIN)/pytest
+
+check: lint typecheck test
+
+hb-fetch:
+	@mkdir -p vendor
+	@for spec in "hummingbot-api $(HB_API_REPO) $(HB_API_REF)" "condor $(CONDOR_REPO) $(CONDOR_REF)"; do \
+		set -- $$spec; \
+		if [ ! -d vendor/$$1/.git ]; then git clone $$2 vendor/$$1; fi; \
+		git -C vendor/$$1 fetch --quiet origin && git -C vendor/$$1 checkout --quiet $$3; \
+		echo "vendor/$$1 @ $$3"; \
+	done
+
+hb-setup:
+	$(MAKE) -C vendor/hummingbot-api setup
+
+hb-up:
+	$(MAKE) -C vendor/hummingbot-api emqx-auth
+	docker compose up -d
+
+hb-down:
+	docker compose down
+
+hb-logs:
+	docker compose logs -f --tail=200
+
+condor-install:
+	CONDOR_TELEMETRY=off $(MAKE) -C vendor/condor install
+
+condor-run:
+	CONDOR_TELEMETRY=off $(MAKE) -C vendor/condor run

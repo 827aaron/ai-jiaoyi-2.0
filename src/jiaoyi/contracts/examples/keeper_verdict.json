@@ -1,0 +1,9 @@
+{
+  "position_id": "pos-0001",
+  "ts": "2026-10-22T06:25:00Z",
+  "action": "hold",
+  "p_close": 0.22,
+  "consecutive": 1,
+  "reason": "论点仍成立",
+  "jev_request_id": "jev-0002"
+}

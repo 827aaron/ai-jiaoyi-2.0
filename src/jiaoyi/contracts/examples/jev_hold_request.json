@@ -1,0 +1,35 @@
+{
+  "request_id": "jev-0002",
+  "kind": "hold",
+  "symbol": "BTCUSDT",
+  "ts": "2026-10-22T06:25:00Z",
+  "signal_id": null,
+  "position_id": "pos-0001",
+  "snapshot": "BTCUSDT 多 持仓8分钟 浮盈+0.4R 现价68110 止损67900 止盈68400 ofi-3 imb-0.05",
+  "questions": [
+    {
+      "id": "thesis_intact",
+      "prompt": "（thesis_intact 的问题说明由 keeper 模块填写）",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "adverse_risk",
+      "prompt": "（adverse_risk 的问题说明由 keeper 模块填写）",
+      "choices": [
+        "low",
+        "high"
+      ]
+    },
+    {
+      "id": "action",
+      "prompt": "（action 的问题说明由 keeper 模块填写）",
+      "choices": [
+        "hold",
+        "close"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# 密钥和本机配置绝不进仓库
+.env
+.env.*
+!.env.example
+config/risk.toml
+config/app.toml
+
+# 上游仓库（make hb-fetch 拉取）
+vendor/
+
+# 运行时数据
+data/
+logs/

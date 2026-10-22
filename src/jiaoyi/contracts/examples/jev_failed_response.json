@@ -1,0 +1,9 @@
+{
+  "request_id": "jev-0003",
+  "ok": false,
+  "error": "timeout after 1000ms",
+  "model_version": "systemone-2026-10",
+  "latency_ms": 1000.0,
+  "cost_usd": 0.0,
+  "answers": []
+}

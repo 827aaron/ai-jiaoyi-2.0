@@ -1,0 +1,12 @@
+# 执行层容器：直接引入上游 hummingbot-api 的 compose（hummingbot-api + EMQX + Postgres），
+# 保留上游的安全设置（端口只绑 127.0.0.1、MQTT 账号密码、默认拒绝的 ACL）。
+#
+# 用法：make hb-fetch && make hb-setup && make hb-up
+# 需要 Docker Compose 2.20+（Docker Desktop 自带）。
+#
+# Condor 官方是本机运行（uv + tmux），不在这里：make condor-install / condor-run。
+# 我们的大脑程序 M0 先在本机跑；以后要容器化时在下面加 services。
+name: jiaoyi
+
+include:
+  - path: vendor/hummingbot-api/docker-compose.yml
