@@ -1,0 +1,55 @@
+{
+  "request_id": "jev-0001",
+  "ok": true,
+  "error": null,
+  "model_version": "systemone-2026-10",
+  "latency_ms": 212.0,
+  "cost_usd": 2e-05,
+  "answers": [
+    {
+      "id": "genuine",
+      "probs": {
+        "real": 0.71,
+        "fake": 0.29
+      }
+    },
+    {
+      "id": "direction",
+      "probs": {
+        "up": 0.64,
+        "down": 0.21,
+        "flat": 0.15
+      }
+    },
+    {
+      "id": "toxicity",
+      "probs": {
+        "low": 0.62,
+        "high": 0.38
+      }
+    },
+    {
+      "id": "take",
+      "probs": {
+        "take": 0.66,
+        "skip": 0.34
+      }
+    },
+    {
+      "id": "stop_width",
+      "probs": {
+        "narrow": 0.2,
+        "mid": 0.55,
+        "wide": 0.25
+      }
+    },
+    {
+      "id": "size",
+      "probs": {
+        "S": 0.3,
+        "M": 0.5,
+        "L": 0.2
+      }
+    }
+  ]
+}

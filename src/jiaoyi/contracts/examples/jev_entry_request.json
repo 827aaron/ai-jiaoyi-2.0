@@ -1,0 +1,62 @@
+{
+  "request_id": "jev-0001",
+  "kind": "entry",
+  "symbol": "BTCUSDT",
+  "ts": "2026-10-22T06:17:00Z",
+  "signal_id": "sig-BTCUSDT-20261022T061700-001",
+  "position_id": null,
+  "snapshot": "BTCUSDT 多 突破68000 量4.2x ret1m+0.31% ofi+12 imb+0.32 spread0.15bp atr85 卡:偏多 区间震荡偏强 kronos30m 67850-68420 p_up0.56",
+  "questions": [
+    {
+      "id": "genuine",
+      "prompt": "（genuine 的问题说明由 gate 模块填写）",
+      "choices": [
+        "real",
+        "fake"
+      ]
+    },
+    {
+      "id": "direction",
+      "prompt": "（direction 的问题说明由 gate 模块填写）",
+      "choices": [
+        "up",
+        "down",
+        "flat"
+      ]
+    },
+    {
+      "id": "toxicity",
+      "prompt": "（toxicity 的问题说明由 gate 模块填写）",
+      "choices": [
+        "low",
+        "high"
+      ]
+    },
+    {
+      "id": "take",
+      "prompt": "（take 的问题说明由 gate 模块填写）",
+      "choices": [
+        "take",
+        "skip"
+      ]
+    },
+    {
+      "id": "stop_width",
+      "prompt": "（stop_width 的问题说明由 gate 模块填写）",
+      "choices": [
+        "narrow",
+        "mid",
+        "wide"
+      ]
+    },
+    {
+      "id": "size",
+      "prompt": "（size 的问题说明由 gate 模块填写）",
+      "choices": [
+        "S",
+        "M",
+        "L"
+      ]
+    }
+  ]
+}

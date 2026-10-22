@@ -1,0 +1,43 @@
+{
+  "signal_id": "sig-BTCUSDT-20261022T061700-001",
+  "symbol": "BTCUSDT",
+  "kind": "volume_breakout",
+  "side_hint": "long",
+  "ts": "2026-10-22T06:17:00Z",
+  "trigger_price": 68042.5,
+  "trigger_desc": "冲过作战卡关键位 68000，1 分钟成交量 4.2 倍均值",
+  "dedup_key": "BTCUSDT:volume_breakout:long",
+  "card_id": "card-20261022-0600",
+  "features": {
+    "symbol": "BTCUSDT",
+    "ts": "2026-10-22T06:17:00Z",
+    "last_price": 68042.5,
+    "atr": 85.2,
+    "values": {
+      "ret_1m": 0.0031,
+      "ret_5m": 0.0054,
+      "vol_ratio_1m": 4.2,
+      "realized_vol_5m": 0.0021
+    },
+    "book": {
+      "mid": 68042.45,
+      "microprice": 68043.1,
+      "spread_bps": 0.15,
+      "depth_usdt": 1850000.0,
+      "imbalance": 0.32,
+      "ofi": 12.4,
+      "cvd": 86.0,
+      "taker_buy_ratio": 0.68
+    }
+  },
+  "forecast": {
+    "symbol": "BTCUSDT",
+    "ts": "2026-10-22T06:17:00Z",
+    "horizon_min": 30,
+    "price_low": 67850.0,
+    "price_high": 68420.0,
+    "p_up": 0.56,
+    "model": "Kronos-small",
+    "stale_after": "2026-10-22T06:18:00Z"
+  }
+}

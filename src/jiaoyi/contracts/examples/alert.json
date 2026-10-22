@@ -1,0 +1,9 @@
+{
+  "ts": "2026-10-22T06:18:00Z",
+  "level": "critical",
+  "role": "reconciler",
+  "title": "保命止损缺失，已补挂",
+  "body": "BTCUSDT pos-0001",
+  "symbol": "BTCUSDT",
+  "dedup_key": "lifeboat_missing:pos-0001"
+}

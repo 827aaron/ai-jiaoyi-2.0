@@ -1,0 +1,16 @@
+{
+  "role": "gate",
+  "health": "ok",
+  "ts": "2026-10-22T06:18:00Z",
+  "headline": "今天判断 37 次，放行 4 次，平均 0.21 秒",
+  "today": {
+    "calls": 37,
+    "passed": 4,
+    "rejected": 33,
+    "errors": 1,
+    "avg_latency_ms": 214.0,
+    "cost_usd": 0.0008
+  },
+  "last_error": null,
+  "version": "0.1.0"
+}

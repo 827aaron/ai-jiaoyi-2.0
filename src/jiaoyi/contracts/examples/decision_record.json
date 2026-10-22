@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "record_id": "dec-0001",
+  "ts": "2026-10-22T06:17:00.215000Z",
+  "role": "gate",
+  "symbol": "BTCUSDT",
+  "signal_id": "sig-BTCUSDT-20261022T061700-001",
+  "position_id": null,
+  "card_id": "card-20261022-0600",
+  "outcome": "pass",
+  "summary": "BTC 放量突破：真 71%、做 66%，止损中档、仓位 M",
+  "input": {
+    "jev_request_id": "jev-0001"
+  },
+  "output": {
+    "take": 0.66,
+    "stop_width": "mid",
+    "size": "M"
+  },
+  "latency_ms": 212.0,
+  "cost_usd": 2e-05,
+  "model_version": "systemone-2026-10"
+}

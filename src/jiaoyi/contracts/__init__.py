@@ -1,0 +1,120 @@
+"""共享契约：所有模块之间传的数据都在这里定义，别处不要再定义一份。
+
+改动规则见 docs/CONTRIBUTING.md：字段只加不删；改含义要升 schema_version 并经架构评审。
+"""
+
+from jiaoyi.contracts.battle_card import BattleCard, CardSymbol, KeyLevel, LevelKind, Range
+from jiaoyi.contracts.common import (
+    Bias,
+    Category,
+    Contract,
+    Role,
+    RunMode,
+    Side,
+    SignalKind,
+    SizeTier,
+    StopTier,
+    Symbol,
+)
+from jiaoyi.contracts.decision_log import DecisionRecord, Outcome
+from jiaoyi.contracts.jev import (
+    ENTRY_CHOICES,
+    HOLD_CHOICES,
+    EntryQuestion,
+    HoldQuestion,
+    JevAnswer,
+    JevQuestion,
+    JevRequest,
+    JevResponse,
+)
+from jiaoyi.contracts.market import (
+    BookMetrics,
+    BookTop,
+    FeatureSnapshot,
+    Forecast,
+    Interval,
+    Kline,
+    Liquidation,
+    MarketEvent,
+    MarkPrice,
+    Trade,
+)
+from jiaoyi.contracts.module_status import Alert, AlertLevel, Health, ModuleStatus, TodayStats
+from jiaoyi.contracts.orders import AccountState, OrderIntent, RiskVerdict
+from jiaoyi.contracts.position import (
+    CloseReason,
+    KeeperVerdict,
+    LifeboatOrder,
+    LifeboatStatus,
+    PatrolAction,
+    PositionRecord,
+    PositionStatus,
+    ReconcileIssue,
+    ReconcileIssueKind,
+    ReconcileReport,
+)
+from jiaoyi.contracts.risk_config import AppConfig, RiskConfig
+from jiaoyi.contracts.signal import CandidateSignal
+from jiaoyi.contracts.symbol_pool import HardFilters, SymbolPool, SymbolPoolEntry
+
+__all__ = [
+    "ENTRY_CHOICES",
+    "HOLD_CHOICES",
+    "AccountState",
+    "Alert",
+    "AlertLevel",
+    "AppConfig",
+    "BattleCard",
+    "Bias",
+    "BookMetrics",
+    "BookTop",
+    "CandidateSignal",
+    "CardSymbol",
+    "Category",
+    "CloseReason",
+    "Contract",
+    "DecisionRecord",
+    "EntryQuestion",
+    "FeatureSnapshot",
+    "Forecast",
+    "HardFilters",
+    "Health",
+    "HoldQuestion",
+    "Interval",
+    "JevAnswer",
+    "JevQuestion",
+    "JevRequest",
+    "JevResponse",
+    "KeeperVerdict",
+    "KeyLevel",
+    "Kline",
+    "LevelKind",
+    "LifeboatOrder",
+    "LifeboatStatus",
+    "Liquidation",
+    "MarkPrice",
+    "MarketEvent",
+    "ModuleStatus",
+    "OrderIntent",
+    "Outcome",
+    "PatrolAction",
+    "PositionRecord",
+    "PositionStatus",
+    "Range",
+    "ReconcileIssue",
+    "ReconcileIssueKind",
+    "ReconcileReport",
+    "RiskConfig",
+    "RiskVerdict",
+    "Role",
+    "RunMode",
+    "Side",
+    "SignalKind",
+    "SizeTier",
+    "StopTier",
+    "Symbol",
+    "SymbolPool",
+    "SymbolPoolEntry",
+    "TodayStats",
+    "Trade",
+]
