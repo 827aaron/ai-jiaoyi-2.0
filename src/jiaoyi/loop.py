@@ -1,0 +1,306 @@
+"""主循环：把行情事件分发给快环各角色，并跑盯仓、对账、选币、开会这些定时任务。
+
+一笔交易的路径（设计文档 §三）::
+
+    行情事件 → 特征 → 巡逻兵（有动作就平仓）→ 成交事件后哨兵出信号
+    → 拍板人 → 保镖 → 放行才交给执行器开仓（执行器成交后自己挂保命止损）
+
+定时任务：
+- 持仓管家：每 ``keeper_interval_s`` 秒复查每个持仓；巡逻兵标记的急查每秒看一次。
+- 对账员：每 ``reconcile_interval_s`` 秒。
+- 选币和下单精度：每小时一次，池子变了就重新订阅（新标的先回填 K 线）。
+- 军师团：每分钟问一次 ``refresh_reason``（卡快到期、关键位突破、新入池……），
+  另外距上次开会超过 ``slow_loop_interval_min`` 也会开；开会在后台跑，快环不等。
+
+这里只做分发和调度，判断都在各角色里。任何一个任务出错只记日志，不拖垮其它任务。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timedelta
+from typing import Protocol, runtime_checkable
+
+from jiaoyi.app import App, is_stub
+from jiaoyi.contracts import (
+    AlertLevel,
+    CandidateSignal,
+    Kline,
+    MarketEvent,
+    PositionRecord,
+    PositionStatus,
+    SymbolPool,
+    Trade,
+)
+from jiaoyi.contracts.position import CloseReason
+from jiaoyi.market.rest import fetch_recent_klines
+
+log = logging.getLogger(__name__)
+
+SCREEN_EVERY = timedelta(hours=1)
+SLOW_CHECK_EVERY_S = 60.0
+URGENT_CHECK_EVERY_S = 1.0
+HEARTBEAT_EVERY_S = 30.0
+BACKFILL_CONCURRENCY = 5
+
+
+@runtime_checkable
+class _Forgets(Protocol):
+    def forget(self, position_id: str) -> None: ...
+
+
+@runtime_checkable
+class _HasUrgent(Protocol):
+    urgent: set[str]
+
+
+@runtime_checkable
+class _RefreshReason(Protocol):
+    def refresh_reason(
+        self, now: datetime, pool: SymbolPool, prices: Mapping[str, float]
+    ) -> str | None: ...
+
+
+KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
+
+
+class Runner:
+    def __init__(self, app: App, *, fetch_klines: KlineFetcher | None = None) -> None:
+        self.app = app
+        self.m = app.m
+        self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym))
+        self.positions: list[PositionRecord] = []
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._loops: list[asyncio.Task[None]] = []
+        self._last_screen: datetime | None = None
+        self._last_card_at: datetime | None = None
+        self._refreshing = False
+
+    # ------------------------------------------------------------ 生命周期
+    async def run(self) -> None:
+        """启动并一直跑，直到被取消。"""
+        await self.app.start()
+        self._last_screen = self.app.clock()
+        if self.app.pool is not None:
+            await self.backfill([e.symbol for e in self.app.pool.in_pool])
+        await self.refresh_positions()
+        cfg = self.app.app_cfg
+        self._loops = [
+            asyncio.create_task(self._market_loop()),
+            self._every(cfg.keeper_interval_s, self.keeper_tick),
+            self._every(URGENT_CHECK_EVERY_S, self.urgent_tick),
+            self._every(cfg.reconcile_interval_s, self.reconcile_tick),
+            self._every(SLOW_CHECK_EVERY_S, self.slow_tick),
+            self._every(HEARTBEAT_EVERY_S, self._heartbeat_tick),
+        ]
+        try:
+            await asyncio.gather(*self._loops)
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self) -> None:
+        for t in [*self._loops, *self._tasks]:
+            t.cancel()
+        for t in [*self._loops, *self._tasks]:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
+        self._loops, self._tasks = [], set()
+        await self.app.stop()
+
+    def _every(self, seconds: float, tick: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
+        async def loop() -> None:
+            while True:
+                await asyncio.sleep(seconds)
+                try:
+                    await tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("定时任务 %s 出错", getattr(tick, "__name__", tick))
+
+        return asyncio.create_task(loop())
+
+    def _spawn(self, coro: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _heartbeat_tick(self) -> None:
+        self.app.heartbeat_all()
+
+    # ------------------------------------------------------------ 行情 → 信号
+    async def _market_loop(self) -> None:
+        async for event in self.m.feed.events():
+            try:
+                await self.on_event(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("处理行情事件出错")
+
+    async def on_event(self, event: MarketEvent) -> None:
+        self.m.features.update(event)
+        if isinstance(event, Kline):
+            await self.m.predictor.on_kline(event)
+        action = self.m.patrol.check(event, self.positions)
+        if action is not None:
+            targets = [
+                p for p in self.positions if not action.symbols or p.symbol in action.symbols
+            ]
+            for pos in targets:
+                await self.close(pos, CloseReason.PATROL)
+        if isinstance(event, Trade):
+            snap = self.m.features.snapshot(event.symbol)
+            if snap is None:
+                return
+            now = self.app.clock()
+            for signal in self.m.trigger.check(snap, self.m.cards.current(now), now):
+                # 拍板要几百毫秒，放后台，不卡行情
+                self._spawn(self.handle_signal(signal))
+
+    async def handle_signal(self, signal: CandidateSignal) -> None:
+        now = self.app.clock()
+        card = self.m.cards.current(now)
+        if card is None:
+            return
+        jev = await self.m.gate.evaluate(signal, card, now)
+        account = await self.m.executor.account()
+        verdict = self.m.risk.review(signal, jev, card, account, self.app.clock())
+        if not verdict.approved or verdict.intent is None:
+            return
+        intent = verdict.intent
+        try:
+            pos = await self.m.executor.open(intent)
+        except Exception as e:
+            log.exception("开仓失败")
+            await self.app._alert(AlertLevel.WARN, f"{intent.symbol} 开仓失败", str(e)[:200])
+            return
+        # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
+        self.positions = [*self.positions, pos]
+
+    # ------------------------------------------------------------ 盯仓
+    async def refresh_positions(self) -> None:
+        try:
+            all_pos = await self.m.executor.positions()
+        except Exception:
+            log.exception("读持仓失败，沿用上一次的列表")
+            return
+        self.positions = [
+            p for p in all_pos if p.status in (PositionStatus.OPEN, PositionStatus.OPENING)
+        ]
+
+    async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
+        try:
+            await self.m.executor.close(pos.position_id, reason)
+        except Exception as e:
+            log.exception("平仓失败")
+            await self.app._alert(AlertLevel.CRITICAL, f"{pos.symbol} 平仓失败", str(e)[:200])
+            return
+        self.positions = [p for p in self.positions if p.position_id != pos.position_id]
+        if isinstance(self.m.keeper, _Forgets):
+            self.m.keeper.forget(pos.position_id)
+        if isinstance(self.m.patrol, _HasUrgent):
+            self.m.patrol.urgent.discard(pos.position_id)
+
+    async def _review(self, pos: PositionRecord) -> None:
+        verdict = await self.m.keeper.review(pos, self.app.clock())
+        if verdict.action == "close":
+            await self.close(pos, CloseReason.KEEPER)
+
+    async def keeper_tick(self) -> None:
+        await self.refresh_positions()
+        for pos in list(self.positions):
+            if pos.status is PositionStatus.OPEN:
+                await self._review(pos)
+
+    async def urgent_tick(self) -> None:
+        if not isinstance(self.m.patrol, _HasUrgent) or not self.m.patrol.urgent:
+            return
+        urgent = set(self.m.patrol.urgent)
+        for pos in list(self.positions):
+            if pos.position_id in urgent:
+                self.m.patrol.urgent.discard(pos.position_id)
+                await self._review(pos)
+        # 已经不在持仓里的也清掉
+        self.m.patrol.urgent -= urgent
+
+    async def reconcile_tick(self) -> None:
+        # 对账员自己发告警（带去重），连不上时抛异常，由 _every 记日志后下一轮再试
+        await self.m.reconciler.reconcile(self.app.clock())
+
+    # ------------------------------------------------------------ 慢环调度
+    async def backfill(self, symbols: list[str]) -> None:
+        """回填 1 分钟 K 线，ATR 不用等 15 分钟。离线（行情是桩）时跳过。"""
+        if is_stub(self.m.feed) or not symbols:
+            return
+        sem = asyncio.Semaphore(BACKFILL_CONCURRENCY)
+
+        async def one(sym: str) -> None:
+            async with sem:
+                try:
+                    for k in await self._fetch_klines(sym):
+                        self.m.features.update(k)
+                except Exception:
+                    log.warning("%s 回填 K 线失败，等实时数据攒够", sym, exc_info=True)
+
+        await asyncio.gather(*(one(s) for s in symbols))
+
+    def _prices(self, pool: SymbolPool) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for e in pool.in_pool:
+            snap = self.m.features.snapshot(e.symbol)
+            if snap is not None:
+                out[e.symbol] = snap.last_price
+        return out
+
+    async def slow_tick(self) -> None:
+        now = self.app.clock()
+        if self._last_screen is None or now - self._last_screen >= SCREEN_EVERY:
+            self._last_screen = now
+            await self.app.refresh_lot_rules()
+            await self._rescreen(now)
+        pool = self.app.pool
+        if pool is None or self._refreshing:
+            return
+        cards = self.m.cards
+        reason = (
+            cards.refresh_reason(now, pool, self._prices(pool))
+            if isinstance(cards, _RefreshReason)
+            else None
+        )
+        interval = timedelta(minutes=self.app.app_cfg.slow_loop_interval_min)
+        if (
+            reason is None
+            and self._last_card_at is not None
+            and now - self._last_card_at >= interval
+        ):
+            reason = "scheduled"
+        if reason is None or is_stub(cards):
+            return
+        self._refreshing = True
+        self._last_card_at = now
+        self._spawn(self._refresh(pool, reason))
+
+    async def _refresh(self, pool: SymbolPool, reason: str) -> None:
+        try:
+            await self.m.cards.refresh(pool, reason)
+        except Exception:
+            log.exception("军师团开会失败，沿用旧卡直到过期")
+        finally:
+            self._refreshing = False
+
+    async def _rescreen(self, now: datetime) -> None:
+        try:
+            pool = await self.m.screener.screen(now)
+        except Exception:
+            log.exception("选币失败，沿用上一份候选池")
+            return
+        old = {e.symbol for e in self.app.pool.in_pool} if self.app.pool else set()
+        new = [e.symbol for e in pool.in_pool]
+        self.app.pool = pool
+        if set(new) != old:
+            await self.backfill([s for s in new if s not in old])
+            await self.m.feed.subscribe(new)

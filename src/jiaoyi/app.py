@@ -2,7 +2,7 @@
 
 - 唯一允许同时导入所有角色包（包括 ``jiaoyi.execution``）的地方。
 - 每个角色按 ``AppConfig`` 选真实现或桩；还没合并的角色一律用桩（故障即关闭）。
-- 这里不写交易逻辑。行情分发和快环主循环由快环接入时加在 ``App`` 上。
+- 这里不写交易逻辑；主循环（事件分发、定时任务）在 ``jiaoyi.loop``。
 
 启动顺序（先能保命，再能看，最后才可能开仓）::
 
@@ -19,13 +19,37 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from jiaoyi.alerting.log import LogAlerter
 from jiaoyi.alerting.stub import StubAlerter
-from jiaoyi.contracts import AppConfig, Health, ModuleStatus, RiskConfig, Role, SymbolPool
+from jiaoyi.alerting.telegram import TelegramAlerter
+from jiaoyi.contracts import (
+    Alert,
+    AlertLevel,
+    AppConfig,
+    Health,
+    ModuleStatus,
+    RiskConfig,
+    Role,
+    RunMode,
+    SymbolPool,
+)
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
-from jiaoyi.execution.stub import StubExecutorAdapter, StubLifeboatStop, StubReconciler
+from jiaoyi.execution.factory import MissingSecret, build_execution
+from jiaoyi.execution.live_gate import LiveGate
+from jiaoyi.execution.stub import (
+    StubExecutorAdapter,
+    StubLifeboatStop,
+    StubLotRules,
+    StubReconciler,
+)
+from jiaoyi.gate.entry import JevEntryGate
+from jiaoyi.gate.jev import decision_model_from_config
+from jiaoyi.gate.rule_model import RuleDecisionModel
 from jiaoyi.gate.stub import StubDecisionModel, StubEntryGate
 from jiaoyi.interfaces import (
     Alerter,
@@ -45,12 +69,15 @@ from jiaoyi.interfaces import (
     SymbolScreener,
     Trigger,
 )
+from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.keeper.stub import StubKeeper
-from jiaoyi.market.stub import StubFeatureEngine, StubMarketDataFeed
-from jiaoyi.patrol.stub import StubPatrol
+from jiaoyi.market.binance_ws import BinanceFuturesFeed
+from jiaoyi.market.features import RollingFeatureEngine
+from jiaoyi.market.stub import StubMarketDataFeed
+from jiaoyi.patrol.rules import RulePatrol
 from jiaoyi.predictor import KronosForecaster
-from jiaoyi.risk.stub import StubRiskGuard
-from jiaoyi.sentinel.stub import StubTrigger
+from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
+from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.commander import BattleCardCommander
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
@@ -61,6 +88,11 @@ log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 Closer = Callable[[], Awaitable[None]]
+
+
+@runtime_checkable
+class _Refreshable(Protocol):
+    async def refresh(self) -> bool: ...
 
 
 @runtime_checkable
@@ -142,6 +174,64 @@ def _build_cards(
     )
 
 
+@dataclass
+class Built:
+    """``build_modules`` 的结果。"""
+
+    modules: Modules
+    closers: list[Closer]
+    recorders: dict[Role, RoleRecorder]
+    gate_mode: str
+    """``jev`` / ``rule``（规则拍板，只在模拟盘）/ ``none``（没有拍板模型，不开新仓）。"""
+    lot_rules: LotRulesProvider
+    """下单精度。不是角色，不进 ``Modules``；``App.start`` 和主循环负责定时刷新。"""
+
+
+def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
+    """有 Telegram 密钥就发 Telegram，否则打到日志里。"""
+    token, chat = secrets.get("TELEGRAM_BOT_TOKEN"), secrets.get("TELEGRAM_CHAT_ID")
+    if not (token and chat):
+        log.warning("没配 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，告警只写日志")
+        return LogAlerter()
+    telegram = TelegramAlerter(token, chat)
+    closers.append(telegram.close)
+    return telegram
+
+
+def _build_execution(
+    risk_cfg: RiskConfig,
+    app_cfg: AppConfig,
+    secrets: SecretStore,
+    alerter: Alerter,
+    clock: Clock,
+    closers: list[Closer],
+    decision_log: JsonlDecisionLog,
+) -> tuple[ExecutorAdapter, LifeboatStop, Reconciler, LotRulesProvider]:
+    """执行层按模式选币安密钥（testnet/paper 用测试网的，live 用主网的）。
+
+    live 没解锁（确认词 + 面板密码）或缺密钥：抛异常，拒绝启动。
+    paper / testnet 缺密钥：执行层用桩，照常看行情但不开仓。
+    """
+    mode = RunMode(app_cfg.mode)
+    try:
+        stack = build_execution(
+            mode,
+            risk_cfg,
+            app_cfg.data_dir,
+            secrets,
+            alerter,
+            live_gate=LiveGate(Path(app_cfg.data_dir) / "live_gate.json"),
+            decision_log=decision_log,
+        )
+    except MissingSecret:
+        if mode is RunMode.LIVE:
+            raise
+        log.warning("执行层缺密钥，%s 模式下不开仓", mode.value, exc_info=True)
+        return StubExecutorAdapter(clock()), StubLifeboatStop(), StubReconciler(), StubLotRules()
+    closers.append(stack.close)
+    return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules
+
+
 def build_modules(
     risk_cfg: RiskConfig,
     app_cfg: AppConfig,
@@ -150,18 +240,34 @@ def build_modules(
     secrets: SecretStore,
     *,
     offline: bool = False,
-) -> tuple[Modules, list[Closer]]:
+) -> Built:
     """按配置选实现。新角色合并后在这里换掉对应的桩。
 
-    ``offline=True`` 时不连任何网络（测试、回放）：选币和军师团都用桩。
-    返回的 ``Closer`` 列表在 ``App.stop`` 里依次调用，关掉网络连接等资源。
+    ``offline=True`` 时不连任何网络（测试、回放）：行情、选币、军师团都用桩，快环其余部分照常。
+    ``closers`` 在 ``App.stop`` 里依次调用，关掉网络连接等资源。
     """
+    fast = app_cfg.fast_loop
+    tz = risk_cfg.day_reset_tz
     closers: list[Closer] = []
+    recorders = {
+        role: RoleRecorder(role, decision_log, day_reset_tz=tz)
+        for role in (
+            Role.SENTINEL,
+            Role.GATE,
+            Role.RISK_GUARD,
+            Role.KEEPER,
+            Role.PATROL,
+        )
+    }
+
     screener: SymbolScreener
     cards: BattleCardProvider
+    feed: MarketDataFeed
     if offline:
+        feed = StubMarketDataFeed()
         screener, cards = StubSymbolScreener(), StubBattleCardProvider()
     else:
+        feed = BinanceFuturesFeed()
         # 选币只读币安公开接口，不需要 key
         source = BinanceStatsSource()
         closers.append(source.aclose)
@@ -175,25 +281,78 @@ def build_modules(
             ),
         )
         cards = _build_cards(risk_cfg, app_cfg, decision_log, secrets, clock)
+
+    alerter: Alerter
+    executor: ExecutorAdapter
+    lifeboat: LifeboatStop
+    reconciler: Reconciler
+    lot_rules: LotRulesProvider
+    if offline:
+        alerter = StubAlerter()
+        executor, lifeboat, reconciler, lot_rules = (
+            StubExecutorAdapter(clock()),
+            StubLifeboatStop(),
+            StubReconciler(),
+            StubLotRules(),
+        )
+    else:
+        alerter = _build_alerter(secrets, closers)
+        executor, lifeboat, reconciler, lot_rules = _build_execution(
+            risk_cfg, app_cfg, secrets, alerter, clock, closers, decision_log
+        )
+
+    predictor = KronosForecaster(app_cfg.predictor_enabled, log_sink=decision_log, clock=clock)
+    features = RollingFeatureEngine()
+
+    # 拍板模型是启动时的一次性选择：有 Jev 用 Jev；模拟盘且明确打开才用规则版；否则不开新仓。
+    # Jev 运行中出错只返回 ok=False，绝不切到规则版。
+    model = decision_model_from_config(
+        secrets, fast, app_cfg.mode, timeout_ms=app_cfg.jev_timeout_ms, day_reset_tz=tz
+    )
+    decision_model: DecisionModel
+    gate: EntryGate
+    keeper: Keeper
+    if model is None:
+        gate_mode = "none"
+        log.warning("没有可用的拍板模型（缺 JEV_API_KEY 或没锁 jev_model），不开新仓")
+        decision_model, gate, keeper = StubDecisionModel(), StubEntryGate(), StubKeeper()
+    else:
+        gate_mode = "rule" if isinstance(model, RuleDecisionModel) else "jev"
+        decision_model = model
+        gate = JevEntryGate(model, recorders[Role.GATE])
+        keeper = JevKeeper(model, fast, features.snapshot, cards.current, recorders[Role.KEEPER])
+
     modules = Modules(
-        feed=StubMarketDataFeed(),
-        features=StubFeatureEngine(),
-        trigger=StubTrigger(),
-        # 开关关闭时 KronosForecaster 不加载模型、不导入 torch，latest() 返回 None
-        predictor=KronosForecaster(app_cfg.predictor_enabled, log_sink=decision_log, clock=clock),
-        decision_model=StubDecisionModel(),
-        gate=StubEntryGate(),
-        risk=StubRiskGuard(),
-        executor=StubExecutorAdapter(clock()),
-        lifeboat=StubLifeboatStop(),
-        keeper=StubKeeper(),
-        patrol=StubPatrol(),
-        reconciler=StubReconciler(),
+        feed=feed,
+        features=features,
+        trigger=RuleTrigger(
+            fast,
+            dedup_s=app_cfg.signal_dedup_s,
+            recorder=recorders[Role.SENTINEL],
+            predictor=predictor,
+        ),
+        predictor=predictor,
+        decision_model=decision_model,
+        gate=gate,
+        risk=RiskGuardImpl(
+            risk_cfg,
+            fast,
+            # 交易所精度由执行层从 exchangeInfo 读；拿不到（没刷新成功、过期、下架）保镖一律拒单
+            lot_rules,
+            recorders[Role.RISK_GUARD],
+            # 日亏熔断状态落盘，重启后当天仍锁住
+            state_dir=app_cfg.data_dir,
+        ),
+        executor=executor,
+        lifeboat=lifeboat,
+        keeper=keeper,
+        patrol=RulePatrol(fast, recorders[Role.PATROL]),
+        reconciler=reconciler,
         screener=screener,
         cards=cards,
-        alerter=StubAlerter(),
+        alerter=alerter,
     )
-    return modules, closers
+    return Built(modules, closers, recorders, gate_mode, lot_rules)
 
 
 class App:
@@ -215,8 +374,11 @@ class App:
         self.clock = clock
         self.log = decision_log or JsonlDecisionLog(app_cfg.data_dir)
         self._closers: list[Closer] = []
+        self.recorders: dict[Role, RoleRecorder] = {}
+        self.gate_mode = "none"
+        self.lot_rules: LotRulesProvider = StubLotRules()
         if modules is None:
-            modules, self._closers = build_modules(
+            built = build_modules(
                 risk_cfg,
                 app_cfg,
                 self.log,
@@ -224,6 +386,9 @@ class App:
                 secrets or ChainedSecretStore(),
                 offline=offline,
             )
+            modules, self._closers = built.modules, built.closers
+            self.recorders, self.gate_mode = built.recorders, built.gate_mode
+            self.lot_rules = built.lot_rules
         self.m = modules
         self.pool: SymbolPool | None = None
         self.started = False
@@ -233,9 +398,14 @@ class App:
         if self.started:
             return
         now = self.clock()
-        report = await self.m.reconciler.reconcile(now)
-        if not report.clean:
-            log.warning("启动对账发现 %d 个问题", len(report.issues))
+        try:
+            report = await self.m.reconciler.reconcile(now)
+            if not report.clean:
+                log.warning("启动对账发现 %d 个问题", len(report.issues))
+        except Exception:
+            # 对账员已发告警；照常启动，主循环里每轮再对
+            log.exception("启动对账失败")
+        await self.refresh_lot_rules()
         try:
             self.pool = await self.m.screener.screen(now)
         except Exception:
@@ -245,6 +415,9 @@ class App:
             await self.m.feed.subscribe([e.symbol for e in self.pool.in_pool])
         self.heartbeat_all()
         self.started = True
+        if self.app_cfg.mode == RunMode.LIVE:
+            # 实盘启动一定要通知（设计文档 §十）；能走到这里说明上线确认已经通过
+            await self._alert(AlertLevel.CRITICAL, "实盘已启动", f"拍板：{self.gate_label()}")
         log.info("已启动：模式 %s，%d 个角色仍是桩", self.app_cfg.mode, len(self.stub_fields()))
 
     async def stop(self) -> None:
@@ -266,15 +439,50 @@ class App:
         self._closers = []
         self.started = False
 
+    async def refresh_lot_rules(self) -> None:
+        """拉一次交易所精度。失败沿用旧缓存，过期后保镖自动拒单。"""
+        if isinstance(self.lot_rules, _Refreshable) and not await self.lot_rules.refresh():
+            log.warning("下单精度刷新失败")
+
+    async def _alert(self, level: AlertLevel, title: str, body: str = "") -> None:
+        try:
+            await self.m.alerter.send(
+                Alert(ts=self.clock(), level=level, role=Role.ALERTING, title=title, body=body)
+            )
+        except Exception:
+            log.exception("发告警失败：%s", title)
+
+    def gate_label(self) -> str:
+        return {
+            "jev": "Jev",
+            "rule": "规则拍板（模拟盘，不是 Jev）",
+            "none": "未接拍板模型，不开新仓",
+        }[self.gate_mode]
+
     def stub_fields(self) -> list[str]:
         return [f.name for f in fields(self.m) if is_stub(getattr(self.m, f.name))]
 
     def heartbeat_all(self) -> None:
-        """让会自己上报的模块各报一次；桩由 ``status`` 补齐。"""
+        """各角色上报一次状态；桩由 ``status`` 补齐。"""
         for f in fields(self.m):
             module = getattr(self.m, f.name)
             if isinstance(module, _SupportsHeartbeat):
                 module.heartbeat()
+        now = self.clock()
+        modules_of = {
+            Role.SENTINEL: self.m.trigger,
+            Role.GATE: self.m.decision_model,
+            Role.RISK_GUARD: self.m.risk,
+            Role.KEEPER: self.m.keeper,
+            Role.PATROL: self.m.patrol,
+        }
+        for role, rec in self.recorders.items():
+            module = modules_of.get(role)
+            if module is None or is_stub(module):
+                continue
+            health = getattr(module, "health", Health.OK)
+            headline = self.gate_label() if role is Role.GATE else ""
+            rec.heartbeat(now, health if isinstance(health, Health) else Health.OK, headline)
 
     def status(self) -> dict[Role, ModuleStatus]:
         """每个角色一条最新状态。没心跳的角色：桩显示“未接入”，真实现显示“启动中”。"""
@@ -293,4 +501,9 @@ class App:
                 headline="未接入（桩，故障即关闭）" if stub else "已接入，等待第一次心跳",
             )
         out.update(reported)
+        if self.gate_mode == "rule" and Role.GATE in out:
+            # 规则拍板一定要在团队页和 jiaoyi status 上标出来，不能被误当成 Jev
+            st = out[Role.GATE]
+            if not st.headline.startswith("【规则拍板】"):
+                out[Role.GATE] = st.model_copy(update={"headline": f"【规则拍板】{st.headline}"})
         return {r: out[r] for r in Role if r in out}

@@ -45,10 +45,12 @@ async def test_start_stop_and_status(tmp_path: Path, now: datetime) -> None:
     assert app.started
     status = app.status()
     assert status[c.Role.PREDICTOR].health == c.Health.DISABLED  # 预测员自己上报
-    assert status[c.Role.RISK_GUARD].health == c.Health.DISABLED  # 桩补的
-    assert "桩" in status[c.Role.RISK_GUARD].headline
+    assert status[c.Role.EXECUTOR].health == c.Health.DISABLED  # 桩补的
+    assert "桩" in status[c.Role.EXECUTOR].headline
+    assert status[c.Role.RISK_GUARD].health == c.Health.OK  # 真保镖，app 代发心跳
     assert "predictor" not in app.stub_fields()
-    assert "risk" in app.stub_fields()
+    assert "risk" not in app.stub_fields()
+    assert "executor" in app.stub_fields()
     await app.stop()
     assert not app.started
 
@@ -137,3 +139,60 @@ async def test_screen_failure_does_not_block_start(tmp_path: Path, now: datetime
     await app.start()
     assert app.started and app.pool is None
     await app.stop()
+
+
+async def test_execution_without_keys_falls_back_to_stubs(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.alerting.log import LogAlerter
+
+    app = _online(tmp_path, now, _Secrets())
+    assert is_stub(app.m.executor) and is_stub(app.m.reconciler)
+    assert isinstance(app.m.alerter, LogAlerter)
+    await app.stop()
+
+
+async def test_execution_with_testnet_keys_is_real(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.alerting.telegram import TelegramAlerter
+    from jiaoyi.execution.hb_executor import HbExecutorAdapter
+    from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
+    from jiaoyi.execution.reconciler import ThreeWayReconciler
+
+    keys = {
+        "HUMMINGBOT_API_PASSWORD": "x" * 8,
+        "BINANCE_TESTNET_API_KEY": "x" * 8,
+        "BINANCE_TESTNET_API_SECRET": "x" * 8,
+        "TELEGRAM_BOT_TOKEN": "x" * 8,
+        "TELEGRAM_CHAT_ID": "1",
+    }
+    app = _online(tmp_path, now, _Secrets(**keys))
+    assert isinstance(app.m.executor, HbExecutorAdapter)
+    assert isinstance(app.m.reconciler, ThreeWayReconciler)
+    assert isinstance(app.m.alerter, TelegramAlerter)
+    assert isinstance(app.lot_rules, ExchangeInfoLotRules)
+    await app.stop()
+
+
+async def test_start_refreshes_lot_rules(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    calls: list[int] = []
+
+    class Lots:
+        async def refresh(self) -> bool:
+            calls.append(1)
+            return False  # 失败也照常启动，保镖拿不到精度就拒单
+
+        def lot_rules(self, symbol: str) -> None:
+            return None
+
+    app.lot_rules = Lots()
+    await app.start()
+    assert calls == [1] and app.started
+    await app.stop()
+
+
+def test_live_without_unlock_refuses_to_build(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.execution.live_gate import LiveGateError
+
+    update = {"data_dir": str(tmp_path), "mode": c.RunMode.LIVE}
+    cfg = load_app_config(APP).model_copy(update=update)
+    with pytest.raises(LiveGateError):
+        App(load_risk_config(RISK), cfg, clock=lambda: now, secrets=_Secrets())

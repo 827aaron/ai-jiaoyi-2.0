@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import getpass
 import shutil
 import subprocess
@@ -27,6 +28,7 @@ from jiaoyi.core.secrets import (
     KeychainSecretStore,
     mask,
 )
+from jiaoyi.execution.factory import MissingSecret
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate, LiveGateError
 
 
@@ -145,12 +147,27 @@ def _status(args: argparse.Namespace) -> int:
 
     try:
         app = App(load_risk_config(Path(args.risk)), load_app_config(Path(args.app)))
-    except ConfigError as e:
+    except (ConfigError, LiveGateError, MissingSecret) as e:
         print(e, file=sys.stderr)
         return 2
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
     asyncio.run(app.stop())
+    return 0
+
+
+def _run(args: argparse.Namespace) -> int:
+    from jiaoyi.app import App
+    from jiaoyi.loop import Runner
+
+    try:
+        app = App(load_risk_config(Path(args.risk)), load_app_config(Path(args.app)))
+    except (ConfigError, LiveGateError, MissingSecret) as e:
+        print(e, file=sys.stderr)
+        return 2
+    print(f"启动：模式 {app.app_cfg.mode.value}，拍板 {app.gate_label()}。Ctrl+C 停止。")
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(Runner(app).run())
     return 0
 
 
@@ -167,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.set_defaults(func=_status)
+
+    p = sub.add_parser("run", help="启动快环主循环（行情、哨兵、拍板、保镖、盯仓、定时开会）")
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.set_defaults(func=_run)
 
     p = sub.add_parser("key-status", help="显示每个密钥配没配（只显示末四位）")
     p.set_defaults(func=_key_status)
