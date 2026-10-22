@@ -14,14 +14,16 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from jiaoyi.alerting.stub import StubAlerter
-from jiaoyi.contracts import AppConfig, Health, ModuleStatus, RiskConfig, Role
+from jiaoyi.contracts import AppConfig, Health, ModuleStatus, RiskConfig, Role, SymbolPool
+from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.stub import StubExecutorAdapter, StubLifeboatStop, StubReconciler
 from jiaoyi.gate.stub import StubDecisionModel, StubEntryGate
@@ -39,6 +41,7 @@ from jiaoyi.interfaces import (
     Predictor,
     Reconciler,
     RiskGuard,
+    SecretStore,
     SymbolScreener,
     Trigger,
 )
@@ -48,11 +51,16 @@ from jiaoyi.patrol.stub import StubPatrol
 from jiaoyi.predictor import KronosForecaster
 from jiaoyi.risk.stub import StubRiskGuard
 from jiaoyi.sentinel.stub import StubTrigger
+from jiaoyi.slow.binance_stats import BinanceStatsSource
+from jiaoyi.slow.commander import BattleCardCommander
+from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
+from jiaoyi.slow.tradingagents_engine import TradingAgentsEngine
 
 log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
+Closer = Callable[[], Awaitable[None]]
 
 
 @runtime_checkable
@@ -114,9 +122,60 @@ def is_stub(module: object) -> bool:
     return type(module).__module__.endswith(".stub")
 
 
-def build_modules(app_cfg: AppConfig, decision_log: JsonlDecisionLog, clock: Clock) -> Modules:
-    """按配置选实现。新角色合并后在这里换掉对应的桩。"""
-    return Modules(
+def _build_cards(
+    risk_cfg: RiskConfig,
+    app_cfg: AppConfig,
+    decision_log: JsonlDecisionLog,
+    secrets: SecretStore,
+    clock: Clock,
+) -> BattleCardProvider:
+    """军师团：有 DeepSeek key 且装了 ``jiaoyi[slow]`` 才用真的，否则用桩（没卡 = 不开新仓）。"""
+    if not secrets.get("DEEPSEEK_API_KEY"):
+        log.warning("没有 DEEPSEEK_API_KEY，军师团用桩：不出作战卡，快环不会开新仓")
+        return StubBattleCardProvider()
+    if importlib.util.find_spec("tradingagents") is None:
+        log.warning("没装 tradingagents（uv pip install -e '.[slow]'），军师团用桩")
+        return StubBattleCardProvider()
+    engine = TradingAgentsEngine(risk_cfg, secrets, today=clock)
+    return BattleCardCommander(
+        engine, risk_cfg, decision_log, pick_max=app_cfg.card_pick_max, clock=clock
+    )
+
+
+def build_modules(
+    risk_cfg: RiskConfig,
+    app_cfg: AppConfig,
+    decision_log: JsonlDecisionLog,
+    clock: Clock,
+    secrets: SecretStore,
+    *,
+    offline: bool = False,
+) -> tuple[Modules, list[Closer]]:
+    """按配置选实现。新角色合并后在这里换掉对应的桩。
+
+    ``offline=True`` 时不连任何网络（测试、回放）：选币和军师团都用桩。
+    返回的 ``Closer`` 列表在 ``App.stop`` 里依次调用，关掉网络连接等资源。
+    """
+    closers: list[Closer] = []
+    screener: SymbolScreener
+    cards: BattleCardProvider
+    if offline:
+        screener, cards = StubSymbolScreener(), StubBattleCardProvider()
+    else:
+        # 选币只读币安公开接口，不需要 key
+        source = BinanceStatsSource()
+        closers.append(source.aclose)
+        screener = CodeSymbolScreener(
+            source,
+            ScreenerConfig(
+                pool_size=app_cfg.pool_size,
+                # 价差和手续费门槛跟硬上限一致，免得进池的币保镖一律拒
+                max_spread_bps=risk_cfg.max_spread_bps,
+                round_trip_fee_bps=risk_cfg.taker_fee_bps * 2,
+            ),
+        )
+        cards = _build_cards(risk_cfg, app_cfg, decision_log, secrets, clock)
+    modules = Modules(
         feed=StubMarketDataFeed(),
         features=StubFeatureEngine(),
         trigger=StubTrigger(),
@@ -130,10 +189,11 @@ def build_modules(app_cfg: AppConfig, decision_log: JsonlDecisionLog, clock: Clo
         keeper=StubKeeper(),
         patrol=StubPatrol(),
         reconciler=StubReconciler(),
-        screener=StubSymbolScreener(),
-        cards=StubBattleCardProvider(),
+        screener=screener,
+        cards=cards,
         alerter=StubAlerter(),
     )
+    return modules, closers
 
 
 class App:
@@ -146,12 +206,26 @@ class App:
         modules: Modules | None = None,
         decision_log: JsonlDecisionLog | None = None,
         clock: Clock = lambda: datetime.now(UTC),
+        secrets: SecretStore | None = None,
+        *,
+        offline: bool = False,
     ) -> None:
         self.risk_cfg = risk_cfg
         self.app_cfg = app_cfg
         self.clock = clock
         self.log = decision_log or JsonlDecisionLog(app_cfg.data_dir)
-        self.m = modules or build_modules(app_cfg, self.log, clock)
+        self._closers: list[Closer] = []
+        if modules is None:
+            modules, self._closers = build_modules(
+                risk_cfg,
+                app_cfg,
+                self.log,
+                clock,
+                secrets or ChainedSecretStore(),
+                offline=offline,
+            )
+        self.m = modules
+        self.pool: SymbolPool | None = None
         self.started = False
 
     async def start(self) -> None:
@@ -162,24 +236,34 @@ class App:
         report = await self.m.reconciler.reconcile(now)
         if not report.clean:
             log.warning("启动对账发现 %d 个问题", len(report.issues))
-        pool = await self.m.screener.screen(now)
-        await self.m.feed.subscribe([e.symbol for e in pool.in_pool])
+        try:
+            self.pool = await self.m.screener.screen(now)
+        except Exception:
+            # 选币失败不阻止启动：没有池子就不订阅、军师不开会，快环自然不开新仓
+            log.exception("启动选币失败，暂不订阅行情，下一轮选币再试")
+        if self.pool is not None:
+            await self.m.feed.subscribe([e.symbol for e in self.pool.in_pool])
         self.heartbeat_all()
         self.started = True
         log.info("已启动：模式 %s，%d 个角色仍是桩", self.app_cfg.mode, len(self.stub_fields()))
 
     async def stop(self) -> None:
-        """先断行情（不再产生新信号），最后才停执行层。"""
-        if not self.started:
-            return
-        await self.m.feed.close()
-        for name in ("predictor", "keeper", "patrol", "gate", "decision_model", "cards"):
-            module = getattr(self.m, name)
-            if isinstance(module, _SupportsClose):
-                try:
-                    module.close()
-                except Exception:
-                    log.exception("关闭 %s 失败", name)
+        """先断行情（不再产生新信号），最后才停执行层；网络连接等资源无论是否启动过都会释放。"""
+        if self.started:
+            await self.m.feed.close()
+            for name in ("predictor", "keeper", "patrol", "gate", "decision_model", "cards"):
+                module = getattr(self.m, name)
+                if isinstance(module, _SupportsClose):
+                    try:
+                        module.close()
+                    except Exception:
+                        log.exception("关闭 %s 失败", name)
+        for closer in self._closers:
+            try:
+                await closer()
+            except Exception:
+                log.exception("释放资源失败")
+        self._closers = []
         self.started = False
 
     def stub_fields(self) -> list[str]:
