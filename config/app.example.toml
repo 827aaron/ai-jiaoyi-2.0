@@ -11,3 +11,36 @@ slow_loop_interval_min = 30  # 军师团每 30 分钟开会
 pool_size = 40               # 候选池 30–50
 card_pick_max = 20           # 军师每次最多挑 20 个
 data_dir = "data"            # 决策日志、模块状态写在这里
+
+# 快环门槛（策略参数，不是硬上限；整段可省略，省略就用下面的默认值）
+[fast_loop]
+jev_model = "jev-latest"          # 锁定 Jev 模型版本，换版本要重新校准门槛
+jev_usd_per_mtok = 0.042          # Jev 每百万输入 token 的价格，记花费用
+jev_max_consecutive_errors = 5    # 连续出错 5 次暂停调用；成功一次就清零
+jev_error_cooldown_s = 60         # 暂停 60 秒后再试
+min_p_genuine = 0.6               # 拍板：真信号概率 ≥ 0.6
+min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6
+min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向
+max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5
+signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
+size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
+size_fraction_m = 0.75            # M 用 7.5 成，L 用满
+stop_level_buffer_atr = 0.1       # 止损放在关键位外侧 0.1 ATR
+max_stop_atr = 4.0                # 作战卡止损超过 4 倍 ATR 就不认（慢环的数保镖再核一遍）
+min_tp_r = 1.0                    # 作战卡止盈倍数要在 1–6 倍止损之间
+max_tp_r = 6.0
+time_limit_s = 7200               # 单笔最长拿 2 小时
+keeper_close_p = 0.6              # 管家：平仓概率 ≥ 0.6 且连续 2 次才平
+keeper_close_p_strong = 0.85      # 管家：≥ 0.85 一次就平
+keeper_confirmations = 2
+patrol_shock_pct_1m = 2.0         # 巡逻兵：1 分钟逆向 2% 直接全平该币
+patrol_alert_pct_1m = 1.0         # 巡逻兵：1 分钟逆向 1% 让管家立刻复查
+breakout_vol_ratio = 3.0          # 哨兵：放量突破要 1 分钟量 ≥ 3 倍均值
+surge_vol_ratio = 4.0             # 哨兵：量能突增 ≥ 4 倍
+surge_taker_ratio = 0.7           # 且主动买（或卖）占 70% 以上
+liq_min_usdt_1m = 100000          # 哨兵：1 分钟爆仓 ≥ 10 万 U
+liq_ratio = 5.0                   # 且是 30 分钟均值的 5 倍
+liq_drop_pct_5m = 1.0             # 且 5 分钟内被砸了 1% 以上
+crowded_funding_rate = 0.0005     # 哨兵：资金费率绝对值 ≥ 0.05% 算拥挤
+session_window_min = 5            # 哨兵：开盘 / 资金费结算前后 5 分钟
+session_vol_ratio = 2.0
