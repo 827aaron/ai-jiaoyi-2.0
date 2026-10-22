@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -245,5 +246,34 @@ def test_writes_decision_log(tmp_path: object, now: datetime) -> None:
     g.review(signal(now), jev(ok=False), card(now), account(now), now)
     recs = log.read_day(now.date().isoformat())
     assert [r.outcome for r in recs] == [c.Outcome.PASS, c.Outcome.REJECT]
-    assert recs[0].output["intent"]["approved_by"] == "risk_guard"
+    # 验收脚本约定：放行记录的 output 顶层就是 OrderIntent
+    assert recs[0].output["approved_by"] == "risk_guard" and recs[0].output["intent_id"]
+    assert recs[0].signal_id == "sig-test-1"
+    assert recs[1].output["reasons"]
     assert all(r.role == c.Role.RISK_GUARD for r in recs)
+
+
+def test_daily_halt_survives_restart(tmp_path: Path) -> None:
+    t = datetime(2026, 10, 22, 13, 0, tzinfo=UTC)  # 曼谷 20:00
+    g1 = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    down = account(t, equity=9_650.0, day_start_equity_usdt=10_000.0)
+    assert not g1.review(signal(t), jev(), card(t), down, t).approved
+
+    # 进程重启：新保镖读回状态，同一天权益回到线内也照样锁住
+    t2 = t + timedelta(hours=1)
+    g2 = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    back = account(t2, equity=10_000.0, day_start_equity_usdt=10_000.0)
+    v = g2.review(signal(t2), jev(), card(t2), back, t2)
+    assert not v.approved and any("熔断" in r for r in v.reasons)
+
+    # 曼谷第二天 0 点后重启，解锁
+    t3 = datetime(2026, 10, 22, 17, 0, 1, tzinfo=UTC)
+    g3 = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    assert g3.review(signal(t3), jev(), card(t3), account(t3), t3).approved
+
+
+def test_corrupt_breaker_state_fails_closed(tmp_path: Path, now: datetime) -> None:
+    (tmp_path / "risk_state.json").write_text("{not json", encoding="utf-8")
+    g = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    v = g.review(signal(now), jev(), card(now), account(now), now)
+    assert not v.approved and any("熔断" in r for r in v.reasons)

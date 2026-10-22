@@ -33,6 +33,8 @@ def test_section_is_optional(tmp_path: Path) -> None:
         "patrol_alert_pct_1m = 5.0",
         "max_stop_atr = 50",
         "unknown_knob = 1",
+        'jev_model = "jev-latest"',
+        "liq_min_usdt_1m = 1e12",
     ],
 )
 def test_out_of_range_refuses(tmp_path: Path, line: str) -> None:
@@ -46,3 +48,16 @@ def test_out_of_range_refuses(tmp_path: Path, line: str) -> None:
     p.write_text("\n".join([*lines, line]) + "\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_app_config(p)
+
+
+def test_rule_gate_switch_only_in_paper(tmp_path: Path) -> None:
+    text = APP_EXAMPLE.read_text(encoding="utf-8").replace(
+        "rule_gate_without_jev = false", "rule_gate_without_jev = true"
+    )
+    p = tmp_path / "app.toml"
+    p.write_text(text, encoding="utf-8")
+    assert load_app_config(p).fast_loop.rule_gate_without_jev
+    for mode in ("testnet", "live"):
+        p.write_text(text.replace('mode = "paper"', f'mode = "{mode}"'), encoding="utf-8")
+        with pytest.raises(ConfigError, match="rule_gate_without_jev"):
+            load_app_config(p)

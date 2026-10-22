@@ -16,7 +16,13 @@ from jiaoyi import interfaces as i
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.gate.entry import JevEntryGate
-from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport, TypeSafeTransport, jev_from_secrets
+from jiaoyi.gate.jev import (
+    JevDecisionModel,
+    MockJevTransport,
+    TypeSafeTransport,
+    decision_model_from_config,
+    jev_from_secrets,
+)
 from jiaoyi.gate.questions import MAX_SNAPSHOT_CHARS, entry_questions, entry_snapshot
 from jiaoyi.gate.rule_model import RuleDecisionModel
 from tests.fastloop_helpers import FAST, GOOD_LONG, answer_with, card, signal
@@ -49,8 +55,8 @@ def model(t: MockJevTransport, **kw: object) -> JevDecisionModel:
 
 def test_interfaces() -> None:
     assert isinstance(model(MockJevTransport()), i.DecisionModel)
-    assert isinstance(RuleDecisionModel(), i.DecisionModel)
-    assert isinstance(JevEntryGate(RuleDecisionModel()), i.EntryGate)
+    assert isinstance(RuleDecisionModel(c.RunMode.PAPER), i.DecisionModel)
+    assert isinstance(JevEntryGate(RuleDecisionModel(c.RunMode.PAPER)), i.EntryGate)
 
 
 async def test_success_returns_probs_and_cost(now: datetime) -> None:
@@ -168,10 +174,10 @@ def test_snapshot_is_compact_json(now: datetime) -> None:
 
 
 async def test_rule_model_answers_every_question(now: datetime) -> None:
-    r = await RuleDecisionModel().ask(entry_request(now))
+    r = await RuleDecisionModel(c.RunMode.PAPER).ask(entry_request(now))
     assert r.ok and {a.id for a in r.answers} == {q.value for q in c.EntryQuestion}
     bad = entry_request(now).model_copy(update={"snapshot": "not json"})
-    assert not (await RuleDecisionModel().ask(bad)).ok
+    assert not (await RuleDecisionModel(c.RunMode.PAPER).ask(bad)).ok
 
 
 async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
@@ -201,7 +207,7 @@ async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
         )
 
     tr = TypeSafeTransport(
-        "test-key-not-real", "jev-latest", http_transport=httpx2.MockTransport(handler)
+        "test-key-not-real", "jev-2026-10-01", http_transport=httpx2.MockTransport(handler)
     )
     m = JevDecisionModel(tr, FAST, timeout_ms=2000)
     r = await m.ask(entry_request(now))
@@ -220,7 +226,32 @@ class _Secrets:
         return self.v if name == "JEV_API_KEY" else None
 
 
-def test_no_key_means_no_jev() -> None:
-    assert jev_from_secrets(_Secrets(None), FAST, timeout_ms=1000, day_reset_tz="UTC") is None
-    m = jev_from_secrets(_Secrets("abc"), FAST, timeout_ms=1000, day_reset_tz="UTC")
+PINNED = FAST.model_copy(update={"jev_model": "jev-2026-10-01"})
+
+
+def test_no_key_or_unpinned_means_no_jev() -> None:
+    assert jev_from_secrets(_Secrets(None), PINNED, timeout_ms=1000, day_reset_tz="UTC") is None
+    assert jev_from_secrets(_Secrets("abc"), FAST, timeout_ms=1000, day_reset_tz="UTC") is None
+    m = jev_from_secrets(_Secrets("abc"), PINNED, timeout_ms=1000, day_reset_tz="UTC")
     assert isinstance(m, JevDecisionModel)
+
+
+def test_rule_gate_only_when_switched_on_in_paper() -> None:
+    paper, live, testnet = c.RunMode.PAPER, c.RunMode.LIVE, c.RunMode.TESTNET
+    kw = {"timeout_ms": 1000, "day_reset_tz": "UTC"}
+    assert decision_model_from_config(_Secrets(None), FAST, paper, **kw) is None  # type: ignore[arg-type]
+    on = FAST.model_copy(update={"rule_gate_without_jev": True})
+    m = decision_model_from_config(_Secrets(None), on, paper, **kw)  # type: ignore[arg-type]
+    assert isinstance(m, RuleDecisionModel)
+    for mode in (testnet, live):
+        assert decision_model_from_config(_Secrets(None), on, mode, **kw) is None  # type: ignore[arg-type]
+    # 有 Jev 时开关不起作用
+    pinned = on.model_copy(update={"jev_model": "jev-x"})
+    m = decision_model_from_config(_Secrets("abc"), pinned, live, **kw)  # type: ignore[arg-type]
+    assert isinstance(m, JevDecisionModel)
+
+
+@pytest.mark.parametrize("mode", [c.RunMode.TESTNET, c.RunMode.LIVE])
+def test_rule_model_refuses_real_money_modes(mode: c.RunMode) -> None:
+    with pytest.raises(ValueError, match="模拟盘"):
+        RuleDecisionModel(mode)

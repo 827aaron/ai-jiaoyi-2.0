@@ -23,10 +23,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
-from jiaoyi.contracts import FastLoopConfig, Health, JevAnswer, JevQuestion, JevRequest, JevResponse
+from jiaoyi.contracts import (
+    FastLoopConfig,
+    Health,
+    JevAnswer,
+    JevQuestion,
+    JevRequest,
+    JevResponse,
+    RunMode,
+)
 from jiaoyi.core.recorder import local_day
 from jiaoyi.gate.questions import CRITERIA
-from jiaoyi.interfaces import SecretStore
+from jiaoyi.interfaces import DecisionModel, SecretStore
 
 logger = logging.getLogger(__name__)
 
@@ -180,12 +188,12 @@ class JevDecisionModel:
             return self._error(request, f"Jev 回复解析失败：{e}", started)
 
         self.consecutive_errors = 0
-        if self._cfg.jev_model != "jev-latest" and raw.model != self._cfg.jev_model:
+        if self._cfg.jev_model is not None and raw.model != self._cfg.jev_model:
             logger.warning("Jev 模型版本变了：锁定 %s，实际 %s", self._cfg.jev_model, raw.model)
         return JevResponse(
             request_id=request.request_id,
             ok=True,
-            model_version=raw.model or self._cfg.jev_model,
+            model_version=raw.model or self._cfg.jev_model or "unpinned",
             latency_ms=latency,
             cost_usd=raw.input_tokens * self._cfg.jev_usd_per_mtok / 1e6,
             answers=answers,
@@ -206,7 +214,7 @@ class JevDecisionModel:
             request_id=request.request_id,
             ok=False,
             error=msg,
-            model_version=self._cfg.jev_model,
+            model_version=self._cfg.jev_model or "unpinned",
             latency_ms=max(latency_ms, 0.0),
         )
 
@@ -234,10 +242,36 @@ def _parse(request: JevRequest, raw: RawJevResult) -> list[JevAnswer]:
 def jev_from_secrets(
     secrets: SecretStore, cfg: FastLoopConfig, *, timeout_ms: int, day_reset_tz: str
 ) -> JevDecisionModel | None:
-    """有 ``JEV_API_KEY`` 就建真 Jev；没有返回 None，由接线代码决定（不许偷偷换成别的模型开仓）。"""
+    """有 ``JEV_API_KEY`` 且锁定了 ``jev_model`` 才建真 Jev，否则返回 None。"""
     key = secrets.get(JEV_KEY_NAME)
     if not key:
+        return None
+    if cfg.jev_model is None:
+        logger.error("有 JEV_API_KEY 但没在 [fast_loop] 锁定 jev_model，不接 Jev")
         return None
     return JevDecisionModel(
         TypeSafeTransport(key, cfg.jev_model), cfg, timeout_ms=timeout_ms, day_reset_tz=day_reset_tz
     )
+
+
+def decision_model_from_config(
+    secrets: SecretStore,
+    cfg: FastLoopConfig,
+    mode: RunMode,
+    *,
+    timeout_ms: int,
+    day_reset_tz: str,
+) -> DecisionModel | None:
+    """接线用：有 Jev 用 Jev；没有时模拟盘且 ``rule_gate_without_jev`` 打开才用规则版；
+    否则 None（用桩，不开仓）。testnet / live 永远不会拿到规则版。
+
+    这是启动时的一次性选择。Jev 运行中出错只会返回 ``ok=False``，不会切到规则版。
+    """
+    jev = jev_from_secrets(secrets, cfg, timeout_ms=timeout_ms, day_reset_tz=day_reset_tz)
+    if jev is not None:
+        return jev
+    if cfg.rule_gate_without_jev and mode == RunMode.PAPER:
+        from jiaoyi.gate.rule_model import RuleDecisionModel
+
+        return RuleDecisionModel(mode)
+    return None

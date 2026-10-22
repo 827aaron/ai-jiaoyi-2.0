@@ -26,9 +26,11 @@
 - 每个候选信号：`gate.evaluate` → `guard.review` → 放行才把 `verdict.intent` 交给执行器。
 - 管家每 `keeper_interval_s` 秒复查一次每个持仓；`patrol.urgent` 里的持仓立刻复查，复查后 `discard`。
 - 持仓平掉后调 `keeper.forget(position_id)`。
+- 保镖构造时传 `state_dir=AppConfig.data_dir`，日亏熔断状态落盘在 `data/risk_state.json`，重启后当天仍锁住。
 - 保镖需要 `LotRulesProvider`（币安 exchangeInfo 的 stepSize / minQty / minNotional），由执行层提供；拿不到就拒单。
-- Jev：`jev_from_secrets(...)` 有 `JEV_API_KEY` 才返回模型；没有 key 时用不用 `RuleDecisionModel` 由配置决定，
-  不许在 Jev 出错时自动换成规则版继续开仓。
+- 拍板模型用 `gate.jev.decision_model_from_config(...)` 选：有 `JEV_API_KEY` 且 `[fast_loop] jev_model` 锁了具体版本 → Jev；
+  否则只有 paper 模式且 `rule_gate_without_jev = true` 才用规则版（testnet / live 构造规则版直接报错），默认返回 None（用桩，不开仓）。
+  这是启动时的一次性选择，Jev 运行中出错只返回 `ok=False`，不会切到规则版。
 
 ## `FeatureSnapshot.values` 的键
 

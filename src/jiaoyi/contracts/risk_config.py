@@ -72,8 +72,16 @@ class FastLoopConfig(Contract):
     """
 
     # ---- 拍板人 / 决策模型
-    jev_model: str = Field(
-        default="jev-latest", min_length=1, description="锁定的 Jev 模型版本，写进日志用于校准。"
+    jev_model: str | None = Field(
+        default=None,
+        min_length=1,
+        description="锁定的 Jev 模型版本（具体版本号，不许用 latest 这类浮动别名），门槛按它校准。"
+        "不填时不能接真 Jev（有 key 也拒绝），只能用规则版或不开仓。",
+    )
+    rule_gate_without_jev: bool = Field(
+        default=False,
+        description="没有 Jev（没 key 或没锁版本）时是否用规则版拍板人。默认关：没有 Jev 就不开仓。"
+        "只允许 paper 模式打开；Jev 运行中出错永远不会切到规则版。",
     )
     jev_usd_per_mtok: float = Field(
         default=0.042, ge=0.0, le=10.0, description="每百万输入 token 美元。"
@@ -125,7 +133,9 @@ class FastLoopConfig(Contract):
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
-    liq_min_usdt_1m: float = Field(default=100_000.0, ge=0.0, description="1 分钟爆仓额下限。")
+    liq_min_usdt_1m: float = Field(
+        default=100_000.0, ge=0.0, le=1e9, description="1 分钟爆仓额下限。"
+    )
     liq_ratio: float = Field(
         default=5.0, ge=1.0, le=100.0, description="1 分钟爆仓额 / 30 分钟均值。"
     )
@@ -145,6 +155,10 @@ class FastLoopConfig(Contract):
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:
+        if self.jev_model is not None and "latest" in self.jev_model.lower():
+            raise ValueError(
+                "jev_model 必须是具体版本号，不能用 latest 这类浮动别名（会让门槛悄悄失效）"
+            )
         if self.size_fraction_s > self.size_fraction_m:
             raise ValueError("size_fraction_s 不能大于 size_fraction_m")
         if self.keeper_close_p_strong < self.keeper_close_p:
@@ -157,7 +171,7 @@ class FastLoopConfig(Contract):
 
 
 class AppConfig(Contract):
-    """运行配置：模式、开关、节奏。同样全部必填，超范围拒绝启动。"""
+    """运行配置：模式、开关、节奏。除 ``fast_loop`` 外全部必填，超范围拒绝启动。"""
 
     mode: RunMode
     predictor_enabled: bool = Field(description="预测员（Kronos）开关。")
@@ -177,4 +191,8 @@ class AppConfig(Contract):
     def _check(self) -> AppConfig:
         if self.card_pick_max > self.pool_size:
             raise ValueError("card_pick_max 不能大于 pool_size")
+        if self.fast_loop.rule_gate_without_jev and self.mode != RunMode.PAPER:
+            raise ValueError(
+                "rule_gate_without_jev 只能在 paper 模式打开，testnet / live 必须用 Jev"
+            )
         return self

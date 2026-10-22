@@ -3,6 +3,9 @@
 和 Jev 走同一个 ``DecisionModel`` 接口、读同一份快照，只是用几条固定公式代替模型。
 它是独立的一个“模型版本”（``rules-v1``），由配置选择，**不是** Jev 出错时的兜底：
 Jev 出错照样故障即关闭。快照解析不了也返回 ``ok=False``。
+
+只能在模拟盘（paper，包括回放）里用：设计文档 M0 用它跑通模拟盘管道、M1 当对比基线。
+testnet / live 模式下构造直接报错，碰真钱的单只能由 Jev 拍板。
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import math
 import time
 from typing import Any
 
-from jiaoyi.contracts import JevAnswer, JevRequest, JevResponse
+from jiaoyi.contracts import JevAnswer, JevRequest, JevResponse, RunMode
 
 MODEL_VERSION = "rules-v1"
 
@@ -34,6 +37,11 @@ def _three(scores: dict[str, float]) -> dict[str, float]:
 
 
 class RuleDecisionModel:
+    def __init__(self, mode: RunMode) -> None:
+        if mode != RunMode.PAPER:
+            raise ValueError(f"规则版拍板人只能在模拟盘用，当前模式 {mode.value}")
+        self.mode = mode
+
     async def ask(self, request: JevRequest) -> JevResponse:
         started = time.perf_counter()
         try:

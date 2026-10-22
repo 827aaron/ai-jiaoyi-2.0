@@ -15,10 +15,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import math
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Protocol
 
 from jiaoyi.contracts import (
@@ -41,6 +45,8 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.recorder import RoleRecorder, local_day
 
+logger = logging.getLogger(__name__)
+
 _TIER_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
 
 
@@ -58,29 +64,75 @@ class LotRulesProvider(Protocol):
 
 
 class DayLossBreaker:
-    """日亏熔断。按 ``day_reset_tz`` 的 0 点清零；当天一旦触发就锁到第二天，权益回升也不解锁。"""
+    """日亏熔断。按 ``day_reset_tz`` 的 0 点清零；当天一旦触发就锁到第二天，权益回升也不解锁。
 
-    def __init__(self, halt_pct: float, tz: str) -> None:
+    给了 ``state_path`` 就把（当天日期、日初权益、是否已触发）落盘，重启后读回，
+    所以“熔断后重启”也照样锁到第二天。状态文件读不懂 → 当天按已触发处理（故障即关闭）。
+    """
+
+    def __init__(self, halt_pct: float, tz: str, state_path: Path | None = None) -> None:
         self._halt = halt_pct
         self._tz = tz
+        self._path = state_path
         self._day: date | None = None
         self._start_equity: float | None = None
         self.tripped = False
+        self._corrupt = False
+        self._load()
+
+    def _load(self) -> None:
+        if self._path is None or not self._path.is_file():
+            return
+        try:
+            d = json.loads(self._path.read_text(encoding="utf-8"))
+            self._day = date.fromisoformat(d["day"])
+            start = d.get("start_equity")
+            self._start_equity = float(start) if start is not None else None
+            self.tripped = bool(d["tripped"])
+        except (ValueError, KeyError, TypeError, OSError):
+            logger.exception("日亏熔断状态文件 %s 读不懂，今天按已熔断处理", self._path)
+            self._corrupt = True
+
+    def _save(self) -> None:
+        if self._path is None or self._day is None:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "day": self._day.isoformat(),
+                        "start_equity": self._start_equity,
+                        "tripped": self.tripped,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._path)
+        except OSError:
+            logger.exception("写日亏熔断状态失败")
 
     def check(self, account: AccountState, now: datetime) -> tuple[bool, float]:
         """返回 (是否熔断, 今日盈亏百分比)。"""
         day = local_day(now, self._tz)
+        if self._corrupt:
+            self._corrupt = False
+            self._day, self._start_equity, self.tripped = day, None, True
+            self._save()
         if day != self._day:
             self._day = day
             self._start_equity = account.day_start_equity_usdt
             self.tripped = False
+            self._save()
         start = self._start_equity or account.day_start_equity_usdt
         # 两个口径取更差的：账户给的日初权益和我们自己记下的日初权益
         pnl_pct = min(
             account.day_pnl_pct, (account.equity_usdt / start - 1.0) * 100.0 if start > 0 else 0.0
         )
-        if pnl_pct <= -self._halt:
+        if pnl_pct <= -self._halt and not self.tripped:
             self.tripped = True
+            self._save()
         return self.tripped, pnl_pct
 
 
@@ -101,12 +153,16 @@ class RiskGuardImpl:
         fast: FastLoopConfig,
         lots: LotRulesProvider,
         recorder: RoleRecorder | None = None,
+        *,
+        state_dir: str | Path | None = None,
     ) -> None:
         self._risk = risk
         self._fast = fast
         self._lots = lots
         self._rec = recorder
-        self.breaker = DayLossBreaker(risk.daily_loss_halt_pct, risk.day_reset_tz)
+        # 接线时传 AppConfig.data_dir，熔断状态写在 data/risk_state.json
+        path = Path(state_dir) / "risk_state.json" if state_dir is not None else None
+        self.breaker = DayLossBreaker(risk.daily_loss_halt_pct, risk.day_reset_tz, path)
 
     def review(
         self,
@@ -434,10 +490,11 @@ class RiskGuardImpl:
             signal_id=signal.signal_id,
             card_id=card.card_id if card is not None else None,
             input={"trigger_price": signal.trigger_price, "kind": signal.kind.value},
-            output={
-                "approved": verdict.approved,
-                "reasons": verdict.reasons,
-                "intent": verdict.intent.model_dump(mode="json") if verdict.intent else None,
-                **detail,
-            },
+            # 放行时 output 顶层就是 OrderIntent 的字段（验收脚本 jiaoyi.acceptance 按这个读），
+            # 计算过程放在 detail 里；拒绝时写原因
+            output=(
+                {**verdict.intent.model_dump(mode="json"), "detail": detail}
+                if verdict.intent is not None
+                else {"approved": False, "reasons": verdict.reasons, "detail": detail}
+            ),
         )

@@ -14,7 +14,8 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用下面的默认值）
 [fast_loop]
-jev_model = "jev-latest"          # 锁定 Jev 模型版本，换版本要重新校准门槛
+# jev_model = "jev-2026-10-01"    # M1 拿到 key 后填具体版本号（不许用 latest）；换版本要重新校准门槛
+rule_gate_without_jev = false     # 没有 Jev 时用不用规则版拍板人；默认不用 = 不开仓；只能 paper 模式打开
 jev_usd_per_mtok = 0.042          # Jev 每百万输入 token 的价格，记花费用
 jev_max_consecutive_errors = 5    # 连续出错 5 次暂停调用；成功一次就清零
 jev_error_cooldown_s = 60         # 暂停 60 秒后再试

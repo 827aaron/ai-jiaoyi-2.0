@@ -123,7 +123,7 @@ async def test_rule_model_hold_path_and_log(tmp_path: Path, now: datetime) -> No
     log = JsonlDecisionLog(tmp_path)
     snap = features(now)
     k = JevKeeper(
-        RuleDecisionModel(),
+        RuleDecisionModel(c.RunMode.PAPER),
         FAST,
         lambda s: snap,
         lambda n: card(now),
