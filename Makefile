@@ -7,9 +7,9 @@ BIN   := $(VENV)/bin
 HB_API_REPO := https://github.com/hummingbot/hummingbot-api
 HB_API_REF  := 7ae108f11bf20651682dbdff639a8717068c5883
 CONDOR_REPO := https://github.com/hummingbot/condor
+CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
 KRONOS_REPO := https://github.com/shiyu-coder/Kronos
 KRONOS_REF  := 67b630e67f6a18c9e9be918d9b4337c960db1e9a
-CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
 
 .PHONY: help install init-config check-config lint format typecheck test check \
         kronos-fetch hb-fetch hb-setup hb-up hb-down hb-logs condor-install condor-run
@@ -21,9 +21,9 @@ help:
 	@echo "  make check-config   检查配置，不合格返回非 0"
 	@echo "  make check          lint + 类型检查 + 测试（同 CI）"
 	@echo "  make format         自动格式化"
-	@echo "执行层（M0，执行工程师）："
 	@echo "预测员："
 	@echo "  make kronos-fetch   拉官方 Kronos 源码到 vendor/Kronos（钉提交号）"
+	@echo "执行层（M0，执行工程师）："
 	@echo "  make hb-fetch       拉上游 hummingbot-api 和 Condor 到 vendor/"
 	@echo "  make hb-setup       跑 hummingbot-api 上游 setup（生成它的 .env 和 MQTT 账号）"
 	@echo "  make hb-up / hb-down / hb-logs"
