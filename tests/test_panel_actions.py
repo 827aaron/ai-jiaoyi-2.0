@@ -373,7 +373,7 @@ def test_settings_endpoints(tmp_path: Path) -> None:
         editable = {i["key"] for i in page["app"] if i["editable"]}
         assert "pool_size" in editable and "mode" not in editable and "data_dir" not in editable
         fl = {i["key"]: i for i in page["fast_loop"]}
-        assert fl["atr_period_min"]["choices"] == [5, 15, 30, 60]
+        assert fl["atr_period_min"]["choices"] == [5, 15, 30, 60, 240]
         assert not fl["jev_model"]["editable"] and not fl["jev_provider"]["editable"]
         pred = {i["key"]: i for i in page["predictor"]}
         assert pred["mode"]["choices"] == ["on_demand", "all_symbols"]

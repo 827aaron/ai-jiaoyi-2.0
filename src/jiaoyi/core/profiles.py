@@ -4,7 +4,8 @@ Aaron 2026-10-23 定、研究 v2 落地：
 
 * ``meeting_interval`` 开会间隔 7 档 15m / 30m / 1h / 2h / 6h / 12h / 24h（默认 1h）：
   军师团每隔多久开一轮会；卡有效期 = 间隔 + 提前量 20 分钟，没有「下限 1 小时」。
-* ``hold`` 最长持仓 4 档 30m / 1h / 2h / 4h（不写 = 跟开会档位的推荐搭配，1h 开会 → 2h）：
+* ``hold`` 最长持仓 7 档 30m / 1h / 2h / 4h / 8h / 12h / 24h
+  （不写 = 跟开会档位的推荐搭配，1h 开会 → 2h）：
   单笔最长拿多久（time barrier）。
   止损 ATR 周期、止损 / 止盈倍数、关键位范围、预测员预测多远、拍板门槛、管家复查频率都跟它走。
 
@@ -149,26 +150,82 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
 }
 
 # 推荐搭配：开会档位 → 最长持仓默认（app.toml 没写 hold 时取它；写了就按用户的）。
-# 8h / 12h / 24h 的持仓表研究补完前，6h 以上先用 4h。
 RECOMMENDED_HOLD = {
     "15m": "30m",
     "30m": "1h",
     "1h": "2h",
     "2h": "4h",
-    "6h": "4h",
-    "12h": "4h",
-    "24h": "4h",
+    "6h": "8h",
+    "12h": "12h",
+    "24h": "24h",
 }
+HOLD.update(
+    {
+        # 长持仓 3 档（研究 2026-10-23 18:40 补）。patrol_*：山寨中档止损 1.6–3.5%，
+        # 按 2% 全平会误杀，所以长档放宽。atr_floor_7d / 预测员 15m·1h K 线见 docs/slow.md「待做」。
+        "8h": {
+            "fast_loop": {
+                "time_limit_s": 28800,
+                "atr_period_min": 60,
+                "min_stop_atr": 1.0,
+                "max_stop_atr": 3.0,
+                "min_tp_r": 1.2,
+                "max_tp_r": 4.0,
+                "stop_level_buffer_atr": 0.1,
+                "min_stop_fee_multiple": 2.0,
+                "funding_against_max_bp": 5.0,
+                "patrol_shock_pct_1m": 2.5,
+                "patrol_alert_pct_1m": 1.2,
+                **_LOOSE_GATE,
+            },
+            "app": {"keeper_interval_s": 45},
+        },
+        "12h": {
+            "fast_loop": {
+                "time_limit_s": 43200,
+                "atr_period_min": 60,
+                "min_stop_atr": 1.2,
+                "max_stop_atr": 3.5,
+                "min_tp_r": 1.2,
+                "max_tp_r": 4.0,
+                "stop_level_buffer_atr": 0.1,
+                "min_stop_fee_multiple": 2.0,
+                "funding_against_max_bp": 5.0,
+                "patrol_shock_pct_1m": 3.0,
+                "patrol_alert_pct_1m": 1.5,
+                **_LOOSE_GATE,
+            },
+            "app": {"keeper_interval_s": 60},
+        },
+        "24h": {
+            "fast_loop": {
+                "time_limit_s": 86400,
+                "atr_period_min": 240,  # 4 小时 ATR，启动回填 3840 根 1 分钟线（分页拉）
+                "min_stop_atr": 0.8,
+                "max_stop_atr": 2.5,
+                "min_tp_r": 1.2,
+                "max_tp_r": 4.0,
+                "stop_level_buffer_atr": 0.1,
+                "min_stop_fee_multiple": 2.0,
+                "funding_against_max_bp": 5.0,
+                "patrol_shock_pct_1m": 3.0,
+                "patrol_alert_pct_1m": 1.5,
+                **_LOOSE_GATE,
+            },
+            "app": {"keeper_interval_s": 90},
+        },
+    }
+)
 
 _HOLD_BY_SECONDS = tuple((h["fast_loop"]["time_limit_s"], name) for name, h in HOLD.items())
 
 
 def hold_for_seconds(time_limit_s: int) -> str:
-    """只写了 ``time_limit_s`` 没写 ``hold`` 时：取不短于它的最近一档（超过 4h 按 4h）。"""
+    """只写了 ``time_limit_s`` 没写 ``hold`` 时：取不短于它的最近一档（超过 24h 按 24h）。"""
     for limit, name in sorted(_HOLD_BY_SECONDS):
         if time_limit_s <= limit:
             return name
-    return "4h"
+    return "24h"
 
 
 def profile_of(raw_app: Mapping[str, Any]) -> str:

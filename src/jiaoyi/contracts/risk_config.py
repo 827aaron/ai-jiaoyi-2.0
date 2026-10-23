@@ -23,7 +23,7 @@ from jiaoyi.contracts.common import Category, Contract, RunMode
 
 # 两套各选各的档位，各档的跨模块默认值见 ``jiaoyi.core.profiles``
 MeetingInterval = Literal["15m", "30m", "1h", "2h", "6h", "12h", "24h"]  # 军师团开会间隔
-HoldProfile = Literal["30m", "1h", "2h", "4h"]  # 单笔最长持仓
+HoldProfile = Literal["30m", "1h", "2h", "4h", "8h", "12h", "24h"]  # 单笔最长持仓
 MEETING_PROFILES: tuple[str, ...] = get_args(MeetingInterval)
 HOLD_PROFILES: tuple[str, ...] = get_args(HoldProfile)
 PAPER_ONLY_HOLDS = frozenset({"30m"})  # 最长持仓 30m：止损贴近手续费，只能 paper
@@ -217,7 +217,7 @@ class FastLoopConfig(Contract):
         default=0.5, gt=0.0, le=1.0, description="S 档用每笔风险的几成。"
     )
     size_fraction_m: float = Field(default=0.75, gt=0.0, le=1.0, description="M 档；L 档固定 1.0。")
-    atr_period_min: Literal[5, 15, 30, 60] = Field(
+    atr_period_min: Literal[5, 15, 30, 60, 240] = Field(
         default=15,
         description="止损用的 ATR 周期（分钟，ATR 取 14 根）。作战卡的止损倍数按这个尺度给，"
         "改了要同时让军师那边按新周期出卡。由 1 分钟 K 线聚合，启动回填 16 根这么长的数据。",
@@ -240,6 +240,13 @@ class FastLoopConfig(Contract):
     min_tp_r: float = Field(default=1.0, ge=0.5, le=5.0, description="作战卡止盈倍数下限。")
     max_tp_r: float = Field(default=6.0, ge=1.0, le=20.0, description="作战卡止盈倍数上限。")
     time_limit_s: int = Field(default=7200, ge=60, le=86400, description="单笔最长持仓时间。")
+    funding_against_max_bp: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description="开仓方向每次要付的资金费超过这么多 bp 就不开（0 = 不查）；"
+        "只对持仓可能跨资金费结算的长持仓档给推荐值。",
+    )
     min_stop_fee_multiple: float = Field(
         default=0.0,
         ge=0.0,

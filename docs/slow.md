@@ -320,7 +320,7 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 两套档位各选各的，都写在 `app.toml`：
 
 - `meeting_interval`（默认 1h）：15m / 30m / 1h / 2h / 6h / 12h / 24h，决定军师团每隔多久开一轮会。卡有效期 = 间隔 + 20 分钟；每档单独给 `max_cards_per_round`（15m / 30m 压到 8 = 一波开完，1h 12，2h 起 15）、失败退避（15m 2/5/10，30m 3/5/10，1h 5/10/15，2h 5/10/30，6h 起 10/30/60）、`min_refresh_gap_min`（2h 60，6h 120，12h 180，24h 240，其余等于间隔）、同币最小间隔、`daily_cost_limit_usd`（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5；你写多少就是多少）。
-- `hold`（不写 = 跟开会档位的推荐搭配：15m→30m、30m→1h、1h→2h、2h→4h、6h 起暂 4h）：单笔最长持仓。30m / 1h / 2h / 4h 各自给 `time_limit_s`、ATR 周期（5 / 15 / 15 / 30）、止损 / 止盈倍数、关键位缓冲、拍板门槛（30m 0.65/0.65/有毒 0.4，其余 0.6/0.6/0.5）、管家复查（10 / 15 / 20 / 30 秒）、预测长度（6 / 12 / 24 / 48 根 5 分钟）。30m 只能 paper。
+- `hold`（不写 = 跟开会档位的推荐搭配：15m→30m、30m→1h、1h→2h、2h→4h、6h→8h、12h→12h、24h→24h）：单笔最长持仓。30m / 1h / 2h / 4h 各自给 `time_limit_s`、ATR 周期（5 / 15 / 15 / 30）、止损 / 止盈倍数、关键位缓冲、拍板门槛（30m 0.65/0.65/有毒 0.4，其余 0.6/0.6/0.5）、管家复查（10 / 15 / 20 / 30 秒）、预测长度（6 / 12 / 24 / 48 根 5 分钟）。30m 只能 paper。
 - 旧 `profile` 键自动映射成 `meeting_interval`（60m → 1h）并告警；只写了 `fast_loop.time_limit_s` 没写 `hold` 时按它取最近一档。`check-config` / `status` 显示「最长持仓 N（跟开会档位 / 自定义）」。
 - 新增 `fast_loop.min_stop_fee_multiple`：止损距离至少是来回手续费的几倍（30m 3.5 / 1h 3.0 / 2h 2.5 / 4h 2.0），保镖低于它就不开仓（0 = 不查，代码默认）。
 - 巡逻兵 / 管家平仓门槛、预测员 interval / paths / lookback、risk.toml 都不随档位变。
@@ -328,3 +328,15 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 ### 默认模型换成 OpenRouter 的 `deepseek-v4.1-flash-1017`（Aaron 18:49）
 
 OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.006）美元每百万 token，不分时段；`deepseek/deepseek-v4.1-flash-1017`（2026-10-17 快照，DeepSeek 官方 `deepseek-flash`）基础价 0.15 / 0.60（缓存读 0.003），只有 UTC 周一到周五 01–04 点和 06–10 点两个时段翻倍到 0.30 / 1.20，周末和其它时段半价；上下文都是 100 万，最大输出 1017 为 393216（旧 id 94 万），都是推理模型。所以默认 openrouter 的 quick / deep 都改成 1017；这只是默认，`[meeting] quick_model / deep_model` 写任何 OpenRouter 模型 id 都按你的。`[prices]` 兜底估价仍按 0.30 / 1.20（偏高，只在通道没报真实花费时用）。会议记录 `output.usage` 现在多带 `cached_tokens`（OpenRouter 报的 `prompt_tokens_details.cached_tokens`），用来看缓存命中率。
+
+### 最长持仓 8h / 12h / 24h 与相关新增
+
+`hold` 现在是 7 档：30m / 1h / 2h / 4h / 8h / 12h / 24h。8h：1h ATR、止损 1.0–3.0、止盈 1.2–4.0、巡逻兵 2.5% / 1.2%、管家 45 秒；12h：1h ATR、止损 1.2–3.5、巡逻 3.0% / 1.5%、管家 60 秒；24h：**4 小时 ATR（`atr_period_min = 240`）**、止损 0.8–2.5、巡逻 3.0% / 1.5%、管家 90 秒。长档的巡逻兵阈值放宽，是因为山寨中档止损 1.6–3.5%，按 2% 全平会误杀。8h 以上还给 `fast_loop.funding_against_max_bp = 5`：开仓方向每次要付的资金费超过 5bp 就不开（拿不到费率不拦；0 = 不查）。
+
+`atr_period_min = 240` 启动要回填 3840 根 1 分钟线，币安一次最多 1500 根，`fetch_recent_klines` 现在往前分页拉。预测员按持仓档取预测长度：5 分钟线 `time_limit_s / 300` 根，限 3–96（回看 400 + 96 ≤ 512），所以 12h 以上盖不满持仓期。
+
+**待做（需快环 / 预测员配合）**：① `atr_floor_7d`（止损 ATR 不低于近 7 天中位 × 0.7，防周末窄止损）要常驻 7 天 ATR 历史；② 预测员 8h+ 档改 15m / 1h K 线（`predictor.interval`）；③ `min_stop_atr` 等倍数是按各档 ATR 周期给的，24h 档切 240 后才对得上。
+
+### 缓存与 token 记录
+
+会议记录的 `llm_calls[]` 现在每次调用多带 `input_tokens`、`cached_tokens`（OpenRouter 的 `prompt_tokens_details.cached_tokens`），`output.usage` 同样有 `cached_tokens`。面板「AI 费用详情」脚注显示「缓存命中 N%」（只算记了缓存字段的调用，旧记录没有就显示「还没有记录」）。默认模型换成 OpenRouter `deepseek/deepseek-v4.1-flash-1017`（基础价 0.15 / 0.60，缓存读 0.003；UTC 周一到五 01–04、06–10 点翻倍到 0.30 / 1.20；旧 id 全天 0.30 / 1.20），仍可在 `[meeting] quick_model / deep_model` 写任何 OpenRouter 模型 id。

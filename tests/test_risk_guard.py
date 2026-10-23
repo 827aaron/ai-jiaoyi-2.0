@@ -421,3 +421,25 @@ def test_realized_loss_shrinks_budget_but_profit_does_not_grow_it(now: datetime)
     assert not guard().review(signal(now), jev(), card(now), lost, now).approved
     won = account(now, open_risk_usdt=budget - new + 1.0, day_realized_pnl_usdt=500.0)
     assert not guard().review(signal(now), jev(), card(now), won, now).approved
+
+
+def test_stop_must_clear_fee_multiple(now: datetime) -> None:
+    taker = RISK.taker_fee_bps
+    bps = 120 / 68000 * 1e4  # 示例卡止损 1.5 ATR = 120
+    ok = guard(min_stop_fee_multiple=bps / (2 * taker) - 0.1)
+    assert ok.review(signal(now), jev(), card(now), account(now), now).approved
+    tight = guard(min_stop_fee_multiple=bps / (2 * taker) + 0.1)
+    v = tight.review(signal(now), jev(), card(now), account(now), now)
+    assert not v.approved and any("离手续费太近" in r for r in v.reasons)
+    assert guard().review(signal(now), jev(), card(now), account(now), now).approved  # 默认 0 不查
+
+
+def test_funding_against_us_rejects_only_the_paying_side(now: datetime) -> None:
+    g = guard(funding_against_max_bp=5.0)
+    paying = signal(now, f=features(now, funding_rate=0.0008))  # 多头要付 8bp
+    v = g.review(paying, jev(), card(now), account(now), now)
+    assert not v.approved and any("资金费" in r for r in v.reasons)
+    getting = signal(now, f=features(now, funding_rate=-0.0008))  # 多头反而收钱
+    assert g.review(getting, jev(), card(now), account(now), now).approved
+    unknown = signal(now, f=features(now))
+    assert g.review(unknown, jev(), card(now), account(now), now).approved  # 没费率不拦

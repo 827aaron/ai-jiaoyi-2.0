@@ -127,8 +127,11 @@ class _Blocks(Protocol):
 
 
 def pred_len_for(time_limit_s: int) -> int:
-    """预测员预测几根 5 分钟线：覆盖单笔最长持仓，限 3–48 根。"""
-    return min(max(round(time_limit_s / 300), 3), 48)
+    """预测员预测几根 5 分钟线：覆盖单笔最长持仓，限 3–96 根。
+
+    回看 400 + 96 ≤ Kronos 上下文 512；12h 以上盖不满（预测员按档位换 15m / 1h K 线另做）。
+    """
+    return min(max(round(time_limit_s / 300), 3), 96)
 
 
 def read_blocked(data_dir: str | Path) -> dict[str, str]:

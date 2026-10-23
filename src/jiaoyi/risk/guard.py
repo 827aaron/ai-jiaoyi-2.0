@@ -396,6 +396,16 @@ class RiskGuardImpl:
             )
             return None
 
+        if self._fast.funding_against_max_bp > 0:
+            rate = f.values.get("funding_rate")  # 拿不到费率就不拦：资金费只是成本，不是风险
+            paying = rate is not None and (rate > 0) == (side == Side.LONG) and rate != 0
+            if paying and rate is not None and abs(rate) * 1e4 > self._fast.funding_against_max_bp:
+                reasons.append(
+                    f"开仓方向每次要付资金费 {abs(rate) * 1e4:.1f}bp，"
+                    f"超过 {self._fast.funding_against_max_bp:g}bp"
+                )
+                return None
+
         # ---- 仓位：档位封顶到作战卡，风险 USDT ÷ 止损距离
         tier = SizeTier(size_ans.top()[0])
         if _TIER_ORDER[tier] > _TIER_ORDER[cs.size_tier_max]:

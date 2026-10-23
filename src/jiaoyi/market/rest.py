@@ -49,6 +49,9 @@ def _get(url: str, timeout_s: float) -> list[list[Any]]:
     return data
 
 
+MAX_KLINES_PER_REQUEST = 1500
+
+
 async def fetch_recent_klines(
     symbol: str,
     *,
@@ -57,6 +60,22 @@ async def fetch_recent_klines(
     base_url: str = DEFAULT_REST_URL,
     timeout_s: float = 5.0,
 ) -> list[Kline]:
-    q = urllib.parse.urlencode({"symbol": symbol, "interval": interval.value, "limit": limit})
-    rows = await asyncio.to_thread(_get, f"{base_url}/fapi/v1/klines?{q}", timeout_s)
+    rows: list[Any] = []
+    end_ms: int | None = None
+    while len(rows) < limit:  # 币安一次最多 1500 根；4 小时 ATR 要回填 3840 根 1 分钟线，往前分页拉
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "interval": interval.value,
+            "limit": min(limit - len(rows), MAX_KLINES_PER_REQUEST),
+        }
+        if end_ms is not None:
+            params["endTime"] = end_ms
+        q = urllib.parse.urlencode(params)
+        page = await asyncio.to_thread(_get, f"{base_url}/fapi/v1/klines?{q}", timeout_s)
+        if not page:
+            break
+        rows = [*page, *rows]
+        end_ms = int(page[0][0]) - 1
+        if len(page) < params["limit"]:
+            break
     return parse_klines(symbol, rows, datetime.now(UTC), interval)
