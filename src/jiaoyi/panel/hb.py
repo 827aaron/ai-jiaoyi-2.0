@@ -54,6 +54,7 @@ class HbReader:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._password = password
+        self._username = username
         self._http = httpx.AsyncClient(
             base_url=base_url,
             auth=httpx.BasicAuth(username, password or ""),
@@ -64,6 +65,12 @@ class HbReader:
         self._connector = connector_name
         self._cache_s = cache_s
         self._cached: tuple[float, HbSnapshot] | None = None
+
+    def update_password(self, password: str) -> None:
+        """首次设置向导刚写进钥匙串的 hummingbot-api 密码，不用重启面板就生效。"""
+        self._password = password
+        self._http.auth = httpx.BasicAuth(self._username, password)
+        self._cached = None
 
     async def snapshot(self) -> HbSnapshot:
         if self._cached and time.monotonic() - self._cached[0] < self._cache_s:

@@ -30,6 +30,7 @@ from jiaoyi.core.secrets import (
     KNOWN_KEYS,
     ChainedSecretStore,
     KeychainSecretStore,
+    KeychainWriter,
     mask,
 )
 from jiaoyi.execution.factory import MissingSecret
@@ -258,6 +259,13 @@ def _panel(args: argparse.Namespace) -> int:
     from jiaoyi.panel.hb import HbReader
     from jiaoyi.panel.server import create_app
 
+    # 新机器第一次开面板：没有配置就从 *.example.toml 复制一份（默认保守值、paper 模式），
+    # 剩下的在首次设置向导里配
+    for target in (Path(args.risk), Path(args.app)):
+        example = target.with_name(target.name.replace(".toml", ".example.toml"))
+        if not target.exists() and example.is_file():
+            shutil.copy2(example, target)
+            print(f"没有 {target}，已从 {example.name} 复制一份")
     try:
         risk = load_risk_config(Path(args.risk))
         app_cfg = load_app_config(Path(args.app))
@@ -274,7 +282,10 @@ def _panel(args: argparse.Namespace) -> int:
     # 设置页只显示每个密钥配没配：在这里查好传进去，密钥的值不进面板的数据和接口
     store = ChainedSecretStore()
     keys = {name: bool(store.get(name)) for name in KNOWN_KEYS}
+    writer = KeychainWriter()
     print(f"面板：http://{args.host}:{args.port}/ （只接受局域网访问，Ctrl+C 停止）")
+    if not all(keys.get(k) for k in ("OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN")):
+        print(f"还没配齐：在这台 Mac 上打开 http://127.0.0.1:{args.port}/setup")
     paths = ConfigPaths(risk=Path(args.risk), app=Path(args.app), slow=Path(args.slow))
     app = create_app(
         risk,
@@ -283,6 +294,8 @@ def _panel(args: argparse.Namespace) -> int:
         key_status=keys,
         config_paths=paths,
         allow_hosts=frozenset(h.lower() for h in args.allow_host),
+        secret_writer=writer.set if writer.available() else None,
+        secret_reader=store.get,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
