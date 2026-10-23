@@ -298,6 +298,23 @@ async def test_clean_reconcile(rig: Rig) -> None:
     assert rig.alerts.sent == []
 
 
+async def test_reconcile_round_updates_team_page_activity(tmp_path: Path, rig: Rig) -> None:
+    from jiaoyi.contracts import Role
+    from jiaoyi.core.recorder import RoleRecorder
+    from jiaoyi.core.store import JsonlDecisionLog
+
+    log = JsonlDecisionLog(tmp_path)
+    rec = ThreeWayReconciler(
+        rig.adapter, rig.api, rig.ex, rig.lifeboat, rig.registry, rig.alerts,
+        account_name="acct", recorder=RoleRecorder(Role.RECONCILER, log),
+    )  # fmt: skip
+    rec.set_next_run(rig.t + timedelta(seconds=30))
+    await rec.reconcile(rig.t)
+    st = log.read_status()[Role.RECONCILER.value]
+    assert st.last_run_at == rig.t and st.summary == "对账：三方一致（在管 0 笔）"
+    assert st.next_run_at == rig.t + timedelta(seconds=30)
+
+
 async def test_missing_lifeboat_is_replaced_and_alerted(rig: Rig) -> None:
     pid = await open_filled(rig)
     rig.ex.stops.clear()  # 有人手动撤了 / 币安丢了
@@ -1062,6 +1079,9 @@ async def test_fixed_issue_does_not_keep_reconcile_lamp_red(rig: Rig) -> None:
 
     class Rec:
         def record(self, *a: object, **k: object) -> None:
+            pass
+
+        def note(self, now: object, summary: str) -> None:
             pass
 
         def heartbeat(self, now: object, health: object, headline: str) -> None:

@@ -549,6 +549,10 @@ class Runner:
             await self.close(pos, CloseReason.KEEPER)
 
     async def keeper_tick(self) -> None:
+        keeper = self.app.recorders.get(Role.KEEPER)
+        if keeper is not None:
+            now = self.app.clock()
+            keeper.set_next_run(now + timedelta(seconds=self.app.app_cfg.keeper_interval_s))
         await self.refresh_positions()
         for pos in list(self.positions):
             if pos.status is PositionStatus.OPEN:
@@ -572,8 +576,12 @@ class Runner:
         if self._leaving:
             return  # 重启已定：不再开始新的一轮（补挂止损可能被退出打断），重启后先对一次账
         self._reconciling = True
+        now = self.app.clock()
+        plan = getattr(self.m.reconciler, "set_next_run", None)
+        if callable(plan):
+            plan(now + timedelta(seconds=self.app.app_cfg.reconcile_interval_s))
         try:
-            await self.m.reconciler.reconcile(self.app.clock())
+            await self.m.reconciler.reconcile(now)
         finally:
             self._reconciling = False
 

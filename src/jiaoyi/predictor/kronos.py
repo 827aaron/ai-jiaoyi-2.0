@@ -301,6 +301,8 @@ class KronosForecaster:
         self._priority: set[str] = set()  # 总盘会挑中、本轮要开会的币（慢环给）
         self._queued = 0
         self._last_model = MODEL_SPECS[self._cfg.model_size].version  # 最近一次实际用的模型
+        self._last_run_at: datetime | None = None
+        self._last_summary: str | None = None
         # 加载失败、已改用标准模型的尺寸 → 原因（重启前不再试）
         self._load_failed: dict[str, str] = {}
         self._forecasts: dict[str, Forecast] = {}
@@ -591,6 +593,7 @@ class KronosForecaster:
     ) -> None:
         now = self._clock()
         self._last_model = model
+        self._last_run_at = now
         if now.date() != self._day:
             self._day = now.date()
             self._calls = self._errors = 0
@@ -611,6 +614,7 @@ class KronosForecaster:
             else:
                 summary = f"{sym} 预测失败，本轮无预测"
                 out = {"error": self._last_error}
+            self._last_summary = summary
             try:
                 self._sink.write(
                     DecisionRecord(
@@ -688,6 +692,8 @@ class KronosForecaster:
                     ),
                     last_error=self._last_error,
                     version=self._last_model,
+                    last_run_at=self._last_run_at,
+                    summary=self._last_summary,
                 )
             )
         except OSError:
