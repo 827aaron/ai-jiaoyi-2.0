@@ -67,6 +67,10 @@ async def test_paper_with_real_execution_starts_and_heartbeats(
     app.heartbeat_all()
     status = json.loads((tmp_path / "module_status.json").read_text(encoding="utf-8"))
     assert {"executor", "lifeboat"} <= set(status)
+    # 面板团队页靠这份名单区分“未启用（桩）”和“还没报到”：换成真实现的角色不在里面
+    runtime = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
+    assert runtime["stub_roles"] == app.stub_roles()
+    assert not {"executor", "lifeboat", "reconciler"} & set(runtime["stub_roles"])
     await app.stop()
 
 

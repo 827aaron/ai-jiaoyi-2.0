@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
 from typing import Literal
@@ -27,6 +28,7 @@ from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
+from jiaoyi.panel.meetings import MeetingSummary, list_meetings
 from jiaoyi.panel.overview import (
     STALE_S,
     LampState,
@@ -86,7 +88,10 @@ class RoleCard(BaseModel):
     role: Role
     name: str
     state: LampState
+    status: str
+    """明确的状态：未启用 / 等待首次运行 / 正常（上次 hh:mm） / 失败：原因 / 无心跳超过 N 分钟。"""
     headline: str
+    """模块自己报的今日要点（可能为空）。"""
     last_beat: datetime | None
     last_error: str | None
     calls: int
@@ -102,6 +107,8 @@ class TeamPage(BaseModel):
     selected: Role
     records: list[TrailItem]
     """所选角色今天的记录，最新在前。"""
+    meetings: list[MeetingSummary] = []
+    """选中军师团时：每个币最近一场会（data/meeting_live/），正在开的在前。"""
 
 
 def build_positions(
@@ -143,41 +150,104 @@ def build_positions(
 def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
-    running = any(now - st.ts <= timedelta(seconds=STALE_S) for st in status.values())
-    cards = [_role_card(role, status.get(role.value), now, running) for role in ROLE_NAMES]
+    run = _run_info(files, status, now)
+    cards = [_role_card(role, status.get(role.value), now, run) for role in ROLE_NAMES]
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
-    return TeamPage(roles=cards, selected=chosen, records=mine)
+    meets = list_meetings(files.root, now) if chosen is Role.COMMANDER else []
+    return TeamPage(roles=cards, selected=chosen, records=mine, meetings=meets)
 
 
-_HEALTH: dict[Health, LampState] = {
-    Health.OK: "ok",
-    Health.DEGRADED: "slow",
-    Health.STARTING: "slow",
-    Health.DOWN: "bad",
-    Health.DISABLED: "off",
-}
+@dataclass(frozen=True)
+class _RunInfo:
+    """团队页判断“没心跳”是哪种情况用：主程序在不在跑、哪些角色这次启动是桩（没接入）。"""
+
+    running: bool
+    started_at: datetime | None
+    stub_roles: frozenset[str]
+    tz: str
 
 
-def _role_card(
-    role: Role, st: ModuleStatus | None, now: datetime, running: bool = True
-) -> RoleCard:
+def _run_info(files: PanelFiles, status: dict[str, ModuleStatus], now: datetime) -> _RunInfo:
+    beats = [s.ts for s in status.values()]
+    running = bool(beats) and now - max(beats) <= timedelta(seconds=STALE_S)
+    rt = files.runtime()
+    started = rt.get("started_at")
+    try:
+        started_at = datetime.fromisoformat(started) if isinstance(started, str) else None
+    except ValueError:
+        started_at = None
+    stubs = rt.get("stub_roles")
+    stub_roles = (
+        frozenset(x for x in stubs if isinstance(x, str))
+        if isinstance(stubs, list)
+        else frozenset()
+    )
+    return _RunInfo(running, started_at, stub_roles, files.tz)
+
+
+def _opt_time(st: ModuleStatus, name: str) -> datetime | None:
+    v = getattr(st, name, None)
+    return v if isinstance(v, datetime) else None
+
+
+def role_state(
+    role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
+) -> tuple[LampState, str]:
+    """灯 + 一句明确的状态（Aaron 2026-10-23：不许写“A 或 B”这种猜测）。
+
+    未启用 / 等待首次运行 / 正常（上次 hh:mm） / 失败：原因 / 无心跳超过 N 分钟。
+    """
+
+    def hm(t: datetime) -> str:
+        return t.astimezone(ZoneInfo(run.tz)).strftime("%H:%M")
+
     if st is None:
-        # 主程序在跑就是还没到这个角色的第一次上报；不在跑就是主程序没启动
-        headline = "等待第一次上报" if running else "主程序没在运行"
+        if role.value in run.stub_roles:
+            return "off", "未启用（这次启动没接入）"
+        if not run.running:
+            return "off", "主程序没在运行"
+        since = f"（主程序 {hm(run.started_at)} 启动）" if run.started_at else ""
+        return "slow", f"等待首次运行{since}"
+    # 选币等定时任务另外报上次 / 下次运行、币数、失败原因（字段由慢环加进契约，旧文件没有就按心跳）
+    last = _opt_time(st, "last_run_at") or st.ts
+    nxt = _opt_time(st, "next_run_at")
+    count = getattr(st, "symbol_count", None)
+    error = getattr(st, "error", None)
+    extra = "".join(
+        [f"，{count} 个币" if isinstance(count, int) else "", f"，下次 {hm(nxt)}" if nxt else ""]
+    )
+    age = now - st.ts
+    if age > timedelta(seconds=STALE_S):
+        mins = max(1, int(age.total_seconds() // 60))
+        return "bad", f"无心跳超过 {mins} 分钟（最后 {hm(st.ts)}）"
+    if st.health is Health.DISABLED:
+        return "off", "未启用"
+    if st.health is Health.DOWN or (isinstance(error, str) and error):
+        why = error if isinstance(error, str) and error else st.last_error or st.headline
+        return "bad", f"失败：{why or '没写原因'}"
+    if st.health is Health.STARTING or (_opt_time(st, "last_run_at") is None and nxt):
+        return "slow", f"等待首次运行{f' {hm(nxt)}' if nxt else ''}"
+    if st.health is Health.DEGRADED:
+        return "slow", f"降级运行（上次 {hm(last)}{extra}）"
+    return "ok", f"正常（上次 {hm(last)}{extra}）"
+
+
+def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo) -> RoleCard:
+    state, text = role_state(role, st, now, run)
+    if st is None:
         return RoleCard(
-            role=role, name=ROLE_NAMES[role], state="off", headline=headline,
+            role=role, name=ROLE_NAMES[role], state=state, status=text, headline="",
             last_beat=None, last_error=None, calls=0, passed=0, rejected=0, errors=0,
             avg_latency_ms=0.0, cost_usd=0.0,
         )  # fmt: skip
-    stale = now - st.ts > timedelta(seconds=STALE_S)
-    state: LampState = "bad" if stale else _HEALTH[st.health]
     t = st.today
     return RoleCard(
         role=role,
         name=ROLE_NAMES[role],
         state=state,
-        headline=st.headline or ("掉线" if stale else ""),
+        status=text,
+        headline=st.headline,
         last_beat=st.ts,
         last_error=st.last_error,
         calls=t.calls,
