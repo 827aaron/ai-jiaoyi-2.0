@@ -158,7 +158,6 @@ class _HoldsAware(Protocol):
 
 
 KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
-PREDICTOR_INTERVAL = Interval.M5
 ATR_INTERVAL = {
     5: Interval.M5,
     15: Interval.M15,
@@ -192,10 +191,11 @@ class Runner:
         fl = app.app_cfg.fast_loop
         limit = backfill_minutes(fl.atr_period_min, fl.atr_long_period_min)
         self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym, limit=limit))
-        # 预测员要的 5 分钟线（至少 64 根），启动时一次拉够，不用等 5 个多小时
+        # 预测员周期的 K 线（5m / 15m / 1h，至少 64 根），启动时一次拉够，不用等几个小时
         bars = app.app_cfg.predictor.backfill_bars
+        pred_interval = Interval(app.app_cfg.predictor.interval)
         self._fetch_predictor_klines = fetch_predictor_klines or (
-            lambda sym: fetch_recent_klines(sym, limit=bars, interval=PREDICTOR_INTERVAL)
+            lambda sym: fetch_recent_klines(sym, limit=bars, interval=pred_interval)
         )
         # 止损 ATR 下限要 7 天 ATR 历史：按 ATR 周期拉 7 天 K 线
         # （一次最多 1500 根，5 分钟线约 5 天）
@@ -579,7 +579,7 @@ class Runner:
                     return
                 try:
                     await self.m.predictor.backfill(sym, await self._fetch_predictor_klines(sym))
-                    # 当前这根 5 分钟线已收盘的几分钟也喂进去，实时 1 分钟线才能接着拼出下一根，
+                    # 当前这根预测员 K 线已收盘的几分钟也喂进去，实时 1 分钟线才能接着拼出下一根，
                     # 否则从半截接入差一根被当成缺口、回填白做（更早的分钟拼出来是重复的，会丢掉）
                     for k in minutes:
                         await self.m.predictor.on_kline(k)

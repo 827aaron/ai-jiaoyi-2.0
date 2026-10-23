@@ -5,8 +5,8 @@
 
 - 开关关闭、数据不够、推理失败、结果过期，``latest`` 一律返回 ``None``，快环无感运行。
 - 推理放在单线程池里，不占事件循环；同一标的上一次没算完就丢弃新的，不排队。
-- 吃 5 分钟线：行情只推 1 分钟线，这里按 UTC 整 5 分钟聚合（缺分钟的整根丢掉）；
-  启动和新币入池时用 REST 回填 5 分钟线（``backfill``），回填后下一根 5 分钟线收盘就出预测。
+- 吃 ``interval`` 周期的线（按最长持仓档：5m / 15m / 1h）：行情只推 1 分钟线，这里按 UTC 整点
+  聚合（缺分钟的整根丢掉）；启动和新币入池时用 REST 回填（``backfill``），回填后下一根收盘就出预测。
 - 按需（``PredictorConfig.mode = on_demand``，默认）：只算要盯的币——作战卡和持仓的币
   （``set_wanted``）加总盘会本轮挑中的币（``set_priority``，排队时先算，挑中就马上补一次）；
   哨兵出信号而这个币没有新鲜预测时 ``request`` 补算一次。都在后台，不卡快环。
@@ -607,7 +607,7 @@ class KronosForecaster:
             return f"{len(ready)} 个币历史已就绪，正在算第一轮预测"
         if self._cfg.mode == "on_demand" and not ready & (self._wanted | self._priority):
             return f"{len(ready)} 个币历史已就绪；按需模式，作战卡或持仓里有币才预测"
-        return f"{len(ready)} 个币历史已就绪，等下一根 5 分钟线"
+        return f"{len(ready)} 个币历史已就绪，等下一根 {self._s.interval.value} K 线"
 
     def _ok_headline(self) -> str:
         now = self._clock()

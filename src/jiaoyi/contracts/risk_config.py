@@ -356,7 +356,7 @@ class PredictorConfig(Contract):
 
     mode: Literal["on_demand", "all_symbols"] = Field(
         default="on_demand",
-        description="on_demand = 只对作战卡里的币和有持仓的币在 5 分钟线收盘时预测，哨兵出信号而"
+        description="on_demand = 只对作战卡里的币和有持仓的币在每根 K 线收盘时预测，哨兵出信号而"
         "没有新鲜预测时临时补算一次；all_symbols = 候选池里所有订阅的币都算（CPU 吃得多）。",
     )
     size_policy: Literal["fixed", "adaptive"] = Field(
@@ -379,7 +379,19 @@ class PredictorConfig(Contract):
         description="adaptive：排队的推理达到这么多时用 mini（更快）；中间用 small。",
     )
     backfill_bars: int = Field(
-        default=400, ge=64, le=1500, description="启动和新币入池时回填多少根 5 分钟 K 线。"
+        default=400, ge=64, le=1500, description="启动和新币入池时回填多少根预测员周期的 K 线。"
+    )
+    interval: Literal["5m", "15m", "1h"] = Field(
+        default="5m",
+        description="喂给模型的 K 线周期（由 1 分钟线拼）。档位按最长持仓给：4h 及以下 5m，"
+        "8h / 12h 15m，24h 1h。每根收完预测一次，过两根没更新算过期。",
+    )
+    pred_len: int = Field(
+        default=12,
+        ge=3,
+        le=112,
+        description="往后预测几根（× interval = 预测多远，档位按最长持仓给）。"
+        "回看 400 + 这个 ≤ 512。",
     )
 
     @model_validator(mode="after")
