@@ -97,6 +97,8 @@ def _check_config(args: argparse.Namespace) -> int:
     print(_profile_line(args, app))
     if caution := _caution_line(risk):
         print(caution)
+    if gap := slow.schedule.caution():
+        print(f"注意：{gap}")
     return 0
 
 
@@ -214,6 +216,8 @@ def _status(args: argparse.Namespace) -> int:
     print(_profile_line(args, app.app_cfg))
     if caution := _caution_line(risk):
         print(caution)
+    if gap := slow.schedule.caution():
+        print(f"注意：{gap}")
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
     from jiaoyi.app import read_blocked
@@ -244,6 +248,8 @@ def _run(args: argparse.Namespace) -> int:
     print(_profile_line(args, app.app_cfg))
     if caution := _caution_line(risk):
         print(caution)
+    if gap := slow.schedule.caution():
+        print(f"注意：{gap}")
     runner = Runner(app, restart_check=lambda: _restart_blocker(args), restart_exit=_restart_exit)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(runner.run())

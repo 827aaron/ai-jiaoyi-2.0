@@ -524,6 +524,8 @@ class SettingsPage(BaseModel):
     predictor: list[SettingItem] = []
     schedule: list[SettingItem] = []
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
+    schedule_caution: str | None = None
+    """节奏配置可能造成换卡空档时的提示（只提示，不拒绝）。"""
     profile: ProfileInfo | None = None
     keys: dict[str, bool]
     key_needs: dict[str, KeyNeed] = {}
@@ -602,6 +604,7 @@ def build_settings(
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),
         schedule=_items((slow or slow_defaults(app.profile)).schedule, "schedule"),
+        schedule_caution=(slow or slow_defaults(app.profile)).schedule.caution(),
         keys=keys,
         key_needs=key_needs(
             app.mode.value,

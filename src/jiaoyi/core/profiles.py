@@ -29,8 +29,8 @@ _SLOW_1H = {
     "symbol_min_interval_hours": 0.75,
     "max_cards_per_round": 5,
     "concurrency": 5,
-    "refresh_lead_min": 15,
-    "min_refresh_gap_min": 45,  # 卡有效期 − 提前量
+    "refresh_lead_min": 20,  # 单币超时 15 分钟 + 5 分钟余量
+    "min_refresh_gap_min": 40,  # 卡有效期 − 提前量
 }
 _STRICT_GATE = {"min_p_genuine": 0.65, "min_p_take": 0.65, "max_p_toxic": 0.4}
 
@@ -51,7 +51,7 @@ DEFAULTS: dict[str, dict[Section, dict[str, Any]]] = {
             "symbol_min_interval_hours": 1.67,
             "max_cards_per_round": 10,
             "concurrency": 4,
-            "refresh_lead_min": 20,  # 一轮 3 波估 7–19 分钟，15 分钟不够
+            "refresh_lead_min": 20,  # 一轮 3 波估 7–19 分钟；单币超时 15 分钟 + 5 分钟余量
             # 关键位突破 / 新入池也要隔这么久：2h 档 = 2 小时一轮会（实测一轮约 $0.7）
             "min_refresh_gap_min": 100,
         },

@@ -1141,7 +1141,7 @@ function advCard(d, ix) {
   const t = ADV.find((x) => x.id === tab);
   const tabs = ADV.map((x) => `<button role="tab" aria-selected="${x.id === tab}" class="${x.id === tab ? "on" : ""}" data-act="st-tab" data-arg="${x.id}">${x.t}</button>`).join("");
   const body = tab === "keys" ? keysTab(d) : tab === "show" ? showTab(d, ix)
-    : `<div class="st-note">${esc(t.note)}</div>` + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${g.items.map((i) => itemRow(i)).join("")}`).join("");
+    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${g.items.map((i) => itemRow(i)).join("")}`).join("");
   return `<section class="card st"><div class="ch"><h2>高级</h2><span class="r">平时不用动</span></div><div class="st-tabs" role="tablist">${tabs}</div>${body}</section>`;
 }
 
