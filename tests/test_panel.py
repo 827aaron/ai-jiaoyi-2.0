@@ -1062,3 +1062,22 @@ async def test_price_decimals_from_tick_size() -> None:
     src = KlineSource(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=info)))
     assert await src.price_decimals() == {"APTUSDT": 4, "BTCUSDT": 1}
     await src.close()
+
+
+async def test_hb_snapshot_asks_for_fresh_balance() -> None:
+    """面板拉总资产时让 hummingbot-api 先从币安重拉余额，并记下拉到的时间。"""
+    seen: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(req.content))
+        if req.url.path == "/portfolio/state":
+            return httpx.Response(200, json={"a": {"c": [{"token": "USDT", "units": 100}]}})
+        return httpx.Response(200, json={"data": []})
+
+    hb = HbReader(
+        "http://hb", "u", "p", account_name="a", connector_name="c",
+        transport=httpx.MockTransport(handler),
+    )  # fmt: skip
+    snap = await hb.snapshot()
+    assert seen[0]["refresh"] is True and snap.wallet_usdt == 100 and snap.fetched_at is not None
+    await hb.close()

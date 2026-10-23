@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -23,6 +24,8 @@ class HbSnapshot:
     """可用保证金（还能开新仓的 USDT）。"""
     positions: list[dict[str, Any]] = field(default_factory=list)
     """hummingbot-api 原样返回的持仓条目（trading_pair、unrealized_pnl、amount ...）。"""
+    fetched_at: datetime | None = None
+    """面板向 hummingbot-api 拉到这份数的时间（要求它先从币安刷新余额）。"""
 
     @property
     def unrealized_usdt(self) -> float:
@@ -49,7 +52,7 @@ class HbReader:
         *,
         account_name: str,
         connector_name: str,
-        timeout_s: float = 2.0,
+        timeout_s: float = 4.0,
         cache_s: float = 3.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -84,7 +87,10 @@ class HbReader:
             return HbSnapshot(ok=False, error="没配 HUMMINGBOT_API_PASSWORD")
         names = {"account_names": [self._account], "connector_names": [self._connector]}
         try:
-            state = await self._post("/portfolio/state", {**names, "skip_gateway": True})
+            # refresh：先让 hummingbot-api 从币安重拉余额，否则是它后台几分钟一次的旧数（同执行层）
+            state = await self._post(
+                "/portfolio/state", {**names, "skip_gateway": True, "refresh": True}
+            )
             pos = await self._post("/trading/positions", names)
         except _HbError as e:
             return HbSnapshot(ok=False, error=str(e))
@@ -95,6 +101,7 @@ class HbReader:
             wallet_usdt=_num(usdt.get("units")) if usdt else None,
             available_usdt=_num(usdt.get("available_units")) if usdt else None,
             positions=[d for d in (pos or {}).get("data", []) if isinstance(d, dict)],
+            fetched_at=datetime.now(UTC),
         )
 
     async def _post(self, path: str, body: dict[str, Any]) -> Any:

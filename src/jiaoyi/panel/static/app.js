@@ -126,7 +126,7 @@ function statusBar() {
   return `<div class="status">
     <div class="lamps">${lamps}</div>
     <div class="kpi"><small>总资产 · 含浮盈浮亏${src}</small><b>${money(k.equity_usdt)} <span class="u">U</span></b></div>
-    <div class="kpi"><small>今日盈亏</small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b></div>
+    <div class="kpi click" ${clickable("daypnl")} title="点开看明细：平仓毛利、手续费、资金费、持仓浮盈变化、AI 费"><small>今日盈亏 · 账户 <span class="dim">ⓘ 明细</span></small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b>${k.as_of ? `<small class="dim">数据截至 ${hms(k.as_of)}</small>` : ""}</div>
     <div class="kpi"><small>离熔断（−${k.halt_pct}%）</small><b class="${k.halted ? "down" : ""}" style="font-size:15px">${k.halted ? "已熔断" : k.to_halt_usdt == null ? "—" : "还差 " + money(k.to_halt_usdt, 0) + " U"}</b><div class="meter ${k.halted ? "full" : ""}"><span style="width:${pct}%"></span></div></div>
     <div class="kpi"><small title="所有持仓名义价值（含杠杆）÷ 本金">敞口（含杠杆）</small><b style="font-size:15px">${k.exposure_x == null ? "—" : k.exposure_x.toFixed(2)} / ${k.max_exposure_x} 倍</b></div>
   </div>`;
@@ -222,6 +222,32 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
     }
   }
   dlgMsg(`${lead}一直没有回执：主程序可能没在运行，下次启动按新配置。`, "down");
+}
+
+// 今日盈亏明细：账户今日盈亏 = 平仓毛利 + 手续费 + 资金费 + 持仓浮盈变化（含转账等）；AI 费不在账户里，另外扣
+async function showDayPnl() {
+  dlg(`<h3>今日盈亏明细</h3><div class="dim">读取中…</div>`);
+  let f;
+  try { f = await getJson("/api/funds"); } catch (e) { return dlg(`<h3>今日盈亏明细</h3><div class="down">${esc(e.message)}</div>`); }
+  const t = (f.pnl || []).find((x) => x.key === "today");
+  const k = data.kpis;
+  const day = k.day_pnl_usdt;
+  if (!t || day == null) return dlg(`<h3>今日盈亏明细</h3><p>还没有日初权益或账户数据，算不出明细。</p>`);
+  const known = t.trading_usdt + t.fees_usdt + (t.funding_usdt || 0);
+  const rest = day - known;
+  const row = (label, v, note = "") => `<tr><td>${label}${note ? `<div class="dim small">${note}</div>` : ""}</td><td class="r num ${cls(v)}">${v == null ? "—" : signed(v, 2) + " U"}</td></tr>`;
+  const src = f.pnl_source === "exchange" ? "币安收入流水（主程序定时拉）" : "账本里今天平掉的单";
+  dlg(`<h3>今日盈亏明细</h3>
+    <div class="tw"><table><tbody>
+      ${row("平仓毛利", t.trading_usdt, "今天平掉的单，扣手续费前")}
+      ${row("手续费", t.fees_usdt)}
+      ${row("资金费", t.funding_usdt, t.funding_usdt == null ? "没有币安收入流水，拿不到" : "")}
+      ${row("持仓浮盈变化及其他", rest, "还没平的单从 0 点到现在的浮盈变化；也含转入转出、流水还没拉到的部分")}
+      <tr class="hi"><td><b>账户今日盈亏</b><div class="dim small">= 总资产 − 0 点的总资产，和顶部一致</div></td><td class="r num ${cls(day)}"><b>${signed(day, 2)} U</b></td></tr>
+      ${row("AI 费", -t.ai_usd, "拍板人、军师团、管家的调用费（美元按 1 U 算），不从交易账户扣")}
+      <tr class="hi"><td><b>扣 AI 费后</b></td><td class="r num ${cls(day - t.ai_usd)}"><b>${signed(day - t.ai_usd, 2)} U</b></td></tr>
+    </tbody></table></div>
+    <p class="dim small">平仓、手续费、资金费来自${src}${k.as_of ? `；总资产截至 ${hms(k.as_of)}` : ""}。平仓赚了但账户今日盈亏还是负的，通常是手续费、别的持仓浮亏，或者流水还没拉到（这时差额先算在「持仓浮盈变化及其他」里）。</p>`);
 }
 
 // 交易模式：模拟盘随时切回；测试网要面板密码；实盘只在 Mac 本机，逐条勾提示 + 确认词 + 面板密码（和终端 go-live 同一套）
@@ -322,6 +348,7 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "st-changes") showChanges();
   else if (act === "profile") switchProfile(arg);
+  else if (act === "daypnl") showDayPnl();
   else if (act === "mode") switchMode(arg);
   else if (act === "hold") switchHold(arg);
   else if (act === "clearpins") askClearPins();
@@ -1102,7 +1129,7 @@ S.tests = false;
 P.history = () => {
   const d = pageData;
   const tiles = [
-    [signed(d.net_pnl_usdt, 2) + "U", "净盈亏（已扣手续费）", cls(d.net_pnl_usdt)],
+    [signed(d.net_pnl_usdt, 2) + "U", "交易净盈亏（已扣手续费，未扣 AI 费）", cls(d.net_pnl_usdt)],
     [d.trades + " 笔", "交易"],
     [d.win_rate == null ? "—" : Math.round(d.win_rate * 100) + "%", "胜率"],
     [d.avg_win_loss == null ? "—" : d.avg_win_loss.toFixed(2), "平均盈亏比"],
@@ -1113,7 +1140,7 @@ P.history = () => {
     const [s, sc] = SIDE[t.side] || [t.side, ""];
     return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num">${hm(t.closed_at)}</td><td class="hi">${coin(t.symbol)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
       <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 保镖：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="num">${price(t.entry_price, t.symbol)}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
-      <td class="num">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${cls(t.pnl_usdt)}">${signed(t.pnl_usdt, 2)}</td><td class="r num dim">${money(t.fees_usdt, 2)}</td></tr>`;
+      <td class="num">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${cls(t.pnl_usdt + t.fees_usdt)}">${signed(t.pnl_usdt + t.fees_usdt, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td></tr>`;
   }).join("");
   window.__recs = d.rejected;
   const rej = S.rej
@@ -1129,7 +1156,7 @@ P.history = () => {
       ${d.curve.length ? '<div class="chart sm" id="hchart-host"></div>' : '<div class="empty"><b>这段时间没有平仓</b></div>'}</section>
     <div class="grid g21 mt">
       <section class="card"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链</span></div>
-        ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>平仓</th><th>币种</th><th>信号</th><th>开仓价</th><th>怎么平的</th><th>持有</th><th class="r">净盈亏</th><th class="r">手续费</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>
+        ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>平仓</th><th>币种</th><th>信号</th><th>开仓价</th><th>怎么平的</th><th>持有</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">净利 = 毛利 − 手续费（已扣手续费，不含 AI 费；AI 费在「资金」页）。</div>` : '<div class="dim">没有。</div>'}</section>
       <section class="card"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
         ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>
     </div>${rej}`;

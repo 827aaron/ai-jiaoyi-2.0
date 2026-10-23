@@ -61,6 +61,8 @@ class Kpis(BaseModel):
     halted: bool
     exposure_x: float | None
     max_exposure_x: float
+    as_of: datetime | None = None
+    """总资产 / 今日盈亏这份数是几点拉到的（hummingbot）；用账本兜底时 None。"""
 
 
 class LevelView(BaseModel):
@@ -340,6 +342,7 @@ def compute_kpis(
         halted=halted,
         exposure_x=exposure,
         max_exposure_x=risk.max_total_exposure_x,
+        as_of=hb.fetched_at if source == "hummingbot" else None,
     )
 
 

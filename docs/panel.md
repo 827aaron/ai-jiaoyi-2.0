@@ -207,3 +207,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 - 角色卡：`RoleCard.last_run_at / next_run_at / summary`，正常时显示「上次 hh:mm · 下次 hh:mm · 刚刚：…」，字段没报就不写。
   总盘会节点读 `Role.MARKET` 的状态（`TeamPage.market_role`）；只在开会时报状态的，没到下次计划时间不算断心跳。
 - 拍板门槛：读 `data/gate_calibration/<hold>.json`，有 `recommended` 就挂在 `min_p_take / min_p_genuine / max_p_toxic` 的推荐上（写样本数、日期），为空时在拍板人分组显示 `note`。不自动套用。
+- 今日盈亏：顶部状态条「今日盈亏 · 账户」可点开明细：平仓毛利 + 手续费 + 资金费 + 持仓浮盈变化及其他 = 账户今日盈亏（= 总资产 − 0 点总资产），
+  再减 AI 费 = 扣 AI 费后。旁边写「数据截至 hh:mm:ss」（`Kpis.as_of` = 面板向 hummingbot-api 拉到的时间）；
+  面板拉余额时带 `refresh: true`，让 hummingbot-api 先从币安重拉（不然是它后台几分钟一次的旧数）。
+- 历史页交易记录：毛利 | 手续费 | 净利（净利已扣手续费、不含 AI 费）；顶部统计改名「交易净盈亏（已扣手续费，未扣 AI 费）」。
