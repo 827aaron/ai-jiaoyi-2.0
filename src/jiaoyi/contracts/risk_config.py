@@ -203,12 +203,19 @@ class FastLoopConfig(Contract):
         default=5, ge=1, le=100, description="连续出错这么多次后暂停调用一段时间；成功一次就清零。"
     )
     jev_error_cooldown_s: int = Field(default=60, ge=5, le=3600)
-    min_p_genuine: float = Field(default=0.6, ge=0.5, le=0.99, description="“真信号”概率门槛。")
-    min_p_take: float = Field(default=0.6, ge=0.5, le=0.99, description="“做”概率门槛。")
+    # 概率门槛只给推荐（档位默认），0–1 之间都收（Aaron：用户设置就是上限，只有不合理才失败）
+    min_p_genuine: float = Field(default=0.6, ge=0.0, le=1.0, description="“真信号”概率门槛。")
+    min_p_take: float = Field(default=0.6, ge=0.0, le=1.0, description="“做”概率门槛。")
     min_p_direction: float = Field(
-        default=0.45, ge=0.34, le=0.99, description="信号方向（up/down）的概率门槛。"
+        default=0.45, ge=0.0, le=1.0, description="信号方向（up/down）的概率门槛。"
     )
-    max_p_toxic: float = Field(default=0.5, ge=0.05, le=0.95, description="订单流有毒概率上限。")
+    max_p_toxic: float = Field(default=0.5, ge=0.0, le=1.0, description="订单流有毒概率上限。")
+    gate_record_only: bool | None = Field(
+        default=None,
+        description="拍板只记不拦：拍板人的概率照常问、照常记，但没过上面这几个门槛也放行"
+        "（订单流有毒概率 ≥ 0.8 仍然拦），用来在 paper 攒样本校准门槛。"
+        "不写 = paper 开、testnet / live 关；testnet / live 写 true 拒绝启动。",
+    )
     # ---- 保镖的档位换算
     signal_max_age_s: float = Field(
         default=5.0, ge=0.5, le=60.0, description="信号从触发到保镖审核超过这么久就作废。"
@@ -449,6 +456,14 @@ class AppConfig(Contract):
         """旧名：开会间隔档（原「持仓档位」）。"""
         return self.meeting_interval
 
+    @property
+    def gate_record_only(self) -> bool:
+        """拍板只记不拦实际开没开：没写时 paper 开；testnet / live 永远关。"""
+        if self.mode != RunMode.PAPER:
+            return False
+        v = self.fast_loop.gate_record_only
+        return True if v is None else v
+
     @model_validator(mode="after")
     def _check(self) -> AppConfig:
         if self.card_pick_max > self.pool_size:
@@ -458,6 +473,8 @@ class AppConfig(Contract):
                 f"最长持仓档 {self.hold} 只能在 paper 模式用（费用占止损太高），"
                 "testnet / live 请用 1h 或 2h 或 4h"
             )
+        if self.fast_loop.gate_record_only and self.mode != RunMode.PAPER:
+            raise ValueError("gate_record_only（拍板只记不拦）只能在 paper 模式打开")
         if self.fast_loop.rule_gate_without_jev and self.mode != RunMode.PAPER:
             raise ValueError(
                 "rule_gate_without_jev 只能在 paper 模式打开，testnet / live 必须用 Jev"

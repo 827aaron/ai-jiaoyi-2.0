@@ -32,7 +32,7 @@ def test_section_is_optional(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "line",
     [
-        "min_p_take = 0.3",
+        "min_p_take = 1.3",
         "keeper_confirmations = 0",
         "keeper_close_p_strong = 0.55",
         "patrol_alert_pct_1m = 5.0",
@@ -66,3 +66,19 @@ def test_rule_gate_switch_only_in_paper(tmp_path: Path) -> None:
         p.write_text(text.replace('mode = "paper"', f'mode = "{mode}"'), encoding="utf-8")
         with pytest.raises(ConfigError, match="rule_gate_without_jev"):
             load_app_config(p)
+
+
+def test_gate_record_only_paper_default_and_never_live() -> None:
+    from jiaoyi.contracts import AppConfig
+
+    base = load_app_config(APP_EXAMPLE)
+    assert base.mode.value == "paper" and base.gate_record_only  # 不写 = paper 开
+    raw = base.model_dump(mode="json")
+    raw["fast_loop"]["gate_record_only"] = False
+    assert not AppConfig.model_validate(raw).gate_record_only
+    raw["mode"] = "testnet"
+    raw["fast_loop"]["gate_record_only"] = None
+    assert not AppConfig.model_validate(raw).gate_record_only  # testnet / live 永远关
+    raw["fast_loop"]["gate_record_only"] = True
+    with pytest.raises(ValueError):
+        AppConfig.model_validate(raw)

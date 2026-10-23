@@ -50,6 +50,8 @@ from jiaoyi.core.recorder import RoleRecorder, local_day
 logger = logging.getLogger(__name__)
 
 _TIER_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
+TOXIC_ALWAYS_BLOCK = 0.8
+"""拍板只记不拦时，订单流有毒概率到这个数仍然拦。"""
 
 
 BANGKOK = ZoneInfo("Asia/Bangkok")
@@ -198,9 +200,12 @@ class RiskGuardImpl:
         recorder: RoleRecorder | None = None,
         *,
         state_dir: str | Path | None = None,
+        gate_record_only: bool = False,
     ) -> None:
+        """``gate_record_only``：拍板人概率没过门槛也放行，只记「拍板本会拦」（paper 校准用）。"""
         self._risk = risk
         self._fast = fast
+        self._record_only = gate_record_only
         self._lots = lots
         self._rec = recorder
         # 接线时传 AppConfig.data_dir，熔断状态写在 data/risk_state.json
@@ -220,11 +225,16 @@ class RiskGuardImpl:
         reasons: list[str] = []
         detail: dict[str, float | str] = {}
         intent: OrderIntent | None = None
+        gate: list[str] = []  # 拍板人概率没过门槛的那几条（reasons 的子集）
         try:
-            intent = self._review(signal, jev, card, account, now, market, reasons, detail)
+            intent = self._review(signal, jev, card, account, now, market, reasons, detail, gate)
         except Exception as e:  # 算不出来就拒绝
             reasons.append(f"保镖计算出错：{type(e).__name__}: {e}")
             intent = None
+        # 从信号触发到保镖审完用了多久（滑点主要看这段：拍板 + 排队 + 读账户）
+        detail["since_trigger_ms"] = round((now - signal.ts).total_seconds() * 1000)
+        if reasons and all(r in gate for r in reasons):
+            detail["by"] = "gate"  # 只因为拍板人说不做：面板显示黄色「拍板放弃」，不算保镖拒绝
         if reasons or intent is None:
             verdict = RiskVerdict(
                 signal_id=signal.signal_id, approved=False, reasons=reasons or ["未通过"]
@@ -246,6 +256,7 @@ class RiskGuardImpl:
         market: FeatureSnapshot | None,
         reasons: list[str],
         detail: dict[str, float | str],
+        gate: list[str],
     ) -> OrderIntent | None:
         risk, fast = self._risk, self._fast
 
@@ -272,7 +283,21 @@ class RiskGuardImpl:
         if not jev.ok:
             reasons.append(f"拍板人不可用：{jev.error}")
         else:
-            reasons += self._check_jev(signal, jev)
+            hard, soft = self._check_jev(signal, jev)
+            reasons += hard
+            if self._record_only:
+                # 只记不拦：门槛没过照样放行，写进 detail；订单流明显有毒（≥ 0.8）还是拦
+                if soft:
+                    detail["gate_would_block"] = "；".join(soft)
+                tox = jev.answer(EntryQuestion.TOXICITY.value)
+                p_tox = tox.probs.get("high") if tox is not None else None
+                if p_tox is not None and p_tox >= TOXIC_ALWAYS_BLOCK:
+                    reasons.append(
+                        f"订单流有毒概率 {p_tox:.2f} ≥ {TOXIC_ALWAYS_BLOCK}（只记不拦模式也拦）"
+                    )
+            else:
+                gate += soft
+                reasons += soft
 
         # ---- 作战卡
         cs = self._card_symbol(signal, card, now, reasons)
@@ -297,18 +322,21 @@ class RiskGuardImpl:
                 reasons.append("没有盘口数据")
             elif book.spread_bps > risk.max_spread_bps:
                 reasons.append(f"价差 {book.spread_bps:.1f}bp 超过 {risk.max_spread_bps}bp")
-            slip = abs(f.last_price / signal.trigger_price - 1.0) * 1e4
-            detail["slippage_bps"] = round(slip, 2)
+            # 只拦不利方向：做多价格比触发时高、做空价格比触发时低；往有利方向走了不拦
+            sign = 1.0 if signal.side_hint == Side.LONG else -1.0
+            slip = sign * (f.last_price / signal.trigger_price - 1.0) * 1e4
+            detail["slippage_bps"] = round(slip, 2)  # 正数 = 不利
             if slip > risk.max_slippage_bps:
                 reasons.append(
-                    f"触发后价格已跑 {slip:.1f}bp，超过滑点上限 {risk.max_slippage_bps}bp"
+                    f"触发后价格往不利方向跑了 {slip:.1f}bp，超过滑点上限 {risk.max_slippage_bps}bp"
                 )
 
         if reasons or cs is None or not jev.ok or f is None:
             return None
         return self._size(signal, f, jev, card, cs, account, now, reasons, detail)
 
-    def _check_jev(self, signal: CandidateSignal, jev: JevResponse) -> list[str]:
+    def _check_jev(self, signal: CandidateSignal, jev: JevResponse) -> tuple[list[str], list[str]]:
+        """（回答不全 / 不对，概率没过门槛）。前者永远拦，后者「只记不拦」时只记。"""
         fast = self._fast
         out: list[str] = []
         # 契约不保证 ok=True 的回复答全了：6 问必须都在，选项必须和问的一模一样
@@ -319,7 +347,7 @@ class RiskGuardImpl:
             elif got[q.value] != set(choices):
                 out.append(f"拍板人“{q.value}”的选项 {sorted(got[q.value])} 不对")
         if out:
-            return out
+            return out, []
 
         def p(q: EntryQuestion, choice: str) -> float | None:
             a = jev.answer(q.value)
@@ -346,10 +374,12 @@ class RiskGuardImpl:
             out.append("拍板人没回答“direction”")
         elif pw < fast.min_p_direction or pw <= po:
             out.append(f"方向 {want} 概率 {pw:.2f} 不够（反方向 {po:.2f}）")
+        hard = []
         for q in (EntryQuestion.STOP_WIDTH, EntryQuestion.SIZE):
             if jev.answer(q.value) is None:
-                out.append(f"拍板人没回答“{q.value}”")
-        return out
+                hard.append(f"拍板人没回答“{q.value}”")
+        missing = [r for r in out if r.startswith("拍板人没回答")]
+        return hard + missing, [r for r in out if r not in missing]
 
     def _card_symbol(
         self, signal: CandidateSignal, card: BattleCard | None, now: datetime, reasons: list[str]
@@ -587,9 +617,13 @@ class RiskGuardImpl:
                 f"{it.leverage}x，止损 {it.stop_loss_pct:.2f}% 止盈 {it.take_profit_pct:.2f}%，"
                 f"风险 {it.risk_usdt:.2f}U"
             )
+            if would := detail.get("gate_would_block"):
+                summary += f"（拍板本会拦，只记不拦放行：{str(would).split('；')[0]}）"
             outcome = Outcome.PASS
         else:
-            summary = f"{signal.symbol} {side} 拒绝：{verdict.reasons[0]}"
+            what = "拍板放弃" if detail.get("by") == "gate" else "拒绝"
+            more = f"（共 {len(verdict.reasons)} 条）" if len(verdict.reasons) > 1 else ""
+            summary = f"{signal.symbol} {side} {what}：{verdict.reasons[0]}{more}"
             outcome = Outcome.REJECT
         self._rec.record(
             now,

@@ -516,3 +516,50 @@ def test_session_factor_table_validated() -> None:
         FAST.model_validate({**FAST.model_dump(), "session_factor_weekday": [1.0] * 23})
     with pytest.raises(ValueError):
         FAST.model_validate({**FAST.model_dump(), "atr_long_period_min": 15})  # 不比短周期长
+
+
+# ---------------------------------------------------------------- 拍板放弃 vs 保镖拒绝
+def test_gate_only_rejection_tagged_as_gate_skip(tmp_path: Path, now: datetime) -> None:
+    """只因为拍板人概率没过门槛：记成「拍板放弃」（detail.by = gate）。
+
+    夹了保镖自己的规则就还是拒绝。
+    """
+    log = JsonlDecisionLog(tmp_path)
+    g = _Guard(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    skip = jev(take={"take": 0.3, "skip": 0.7}, toxicity={"low": 0.4, "high": 0.6})
+    assert not g.review(signal(now), skip, card(now), account(now), now).approved
+    busy = account(now, open_positions=RISK.max_open_positions)
+    assert not g.review(signal(now), skip, card(now), busy, now).approved
+    a, b = log.read_day(now.date().isoformat())
+    assert a.output["detail"]["by"] == "gate" and "拍板放弃" in a.summary and "共 2 条" in a.summary
+    assert "by" not in b.output["detail"] and "拒绝" in b.summary
+    assert a.output["detail"]["since_trigger_ms"] >= 0
+
+
+def test_gate_record_only_lets_threshold_misses_through(tmp_path: Path, now: datetime) -> None:
+    """paper「拍板只记不拦」：门槛没过照样放行并记下；有毒 ≥ 0.8 还是拦；回答不全永远拦。"""
+    log = JsonlDecisionLog(tmp_path)
+    g = _Guard(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log), gate_record_only=True)
+    skip = jev(take={"take": 0.3, "skip": 0.7}, toxicity={"low": 0.4, "high": 0.6})
+    v = g.review(signal(now), skip, card(now), account(now), now)
+    assert v.approved, v.reasons
+    [rec] = log.read_day(now.date().isoformat())
+    assert "做" in rec.output["detail"]["gate_would_block"] and "拍板本会拦" in rec.summary
+    toxic = jev(toxicity={"low": 0.15, "high": 0.85})
+    v = g.review(signal(now), toxic, card(now), account(now), now)
+    assert not v.approved and any("0.8" in r for r in v.reasons)
+    broken = jev()
+    broken = broken.model_copy(update={"answers": broken.answers[:-1]})
+    assert not g.review(signal(now), broken, card(now), account(now), now).approved
+
+
+def test_slippage_only_blocks_adverse_direction(now: datetime) -> None:
+    """做多：价格比触发时高才算滑点；跌了（更便宜）不拦。"""
+    px = 68_000.0 * (1 + (RISK.max_slippage_bps + 5) / 1e4)
+    worse = features(now, atr=80.0).model_copy(update={"last_price": px})
+    v = guard().review(signal(now), jev(), card(now), account(now), now, market=worse)
+    assert not v.approved and any("不利方向" in r for r in v.reasons)
+    px = 68_000.0 * (1 - (RISK.max_slippage_bps + 5) / 1e4)
+    better = features(now, atr=80.0).model_copy(update={"last_price": px})
+    v = guard().review(signal(now), jev(), card(now), account(now), now, market=better)
+    assert not any("滑点" in r for r in v.reasons), v.reasons

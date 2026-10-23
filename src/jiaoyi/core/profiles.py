@@ -377,6 +377,10 @@ for _name, _h in HOLD.items():
         _h["fast_loop"]["session_factor_weekday"] = _wd
         _h["fast_loop"]["session_factor_weekend"] = _we
 
+# 滑点上限（risk.toml max_slippage_bps，只拦不利方向）的推荐值：约止损距离的 1/4。按 BTC 止损中位数
+# 估（研究 v3：2h ≈ 45bp、4h ≈ 64bp，其余按 √时间推），山寨止损更宽，可以再放。只给推荐，不拦。
+SLIPPAGE_BPS = {"30m": 6, "1h": 8, "2h": 11, "4h": 16, "8h": 22, "12h": 28, "24h": 40}
+
 _HOLD_BY_SECONDS = tuple((h["fast_loop"]["time_limit_s"], name) for name, h in HOLD.items())
 
 

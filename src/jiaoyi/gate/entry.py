@@ -2,7 +2,8 @@
 
 拍板人不决定数量、不下单，“过不过门槛”由保镖按配置判断。这里只管：
 - 没有有效作战卡（缺失、过期、卡里没这个标的）→ 不问模型，直接 ``ok=False``。
-- 同一个标的上一次还没判断完，新信号直接作废（“忙就跳过”，借 jarrodwatts/jev-trader 的思路）。
+- 同一个标的上一次还没判断完，新信号直接作废（同币同秒的重复触发，属于去重，不算丢）；
+  不同的币互不等待，可以同时问。
 - 每次判断写一条决策日志（团队页的拍板人卡片读它）。
 """
 
@@ -21,7 +22,12 @@ from jiaoyi.contracts import (
     Side,
 )
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.gate.questions import entry_questions, entry_snapshot, jev_log_fields
+from jiaoyi.gate.questions import (
+    DEFAULT_HOLD_MIN,
+    entry_questions,
+    entry_snapshot,
+    jev_log_fields,
+)
 from jiaoyi.interfaces import DecisionModel
 
 
@@ -53,10 +59,18 @@ def summarize(resp: JevResponse) -> str:
 class JevEntryGate:
     """``EntryGate`` 的实现。"""
 
-    def __init__(self, model: DecisionModel, recorder: RoleRecorder | None = None) -> None:
+    def __init__(
+        self,
+        model: DecisionModel,
+        recorder: RoleRecorder | None = None,
+        *,
+        hold_min: int = DEFAULT_HOLD_MIN,
+    ) -> None:
+        """``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。"""
         self._model = model
         self._rec = recorder
-        self._busy: set[str] = set()
+        self._hold_min = hold_min
+        self._busy: set[str] = set()  # 正在问的币（只按币互斥）
 
     async def evaluate(
         self, signal: CandidateSignal, card: BattleCard, now: datetime
@@ -78,7 +92,7 @@ class JevEntryGate:
             symbol=sym,
             ts=now,
             signal_id=signal.signal_id,
-            snapshot=entry_snapshot(signal, card),
+            snapshot=entry_snapshot(signal, card, self._hold_min),
             questions=entry_questions(),
         )
         self._busy.add(sym)
