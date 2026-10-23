@@ -123,7 +123,7 @@ async def test_refresh_builds_card_with_cost_and_logs(tmp_path: Path, now: datet
     assert c.current(now) == card and c.current(now + timedelta(hours=3)) is None
     recs = log.read_day(now.date().isoformat())
     assert {r.role for r in recs} == {Role.COMMANDER}
-    assert len(recs) == 3  # 两个标的 + 一张卡
+    assert len(recs) == 5  # 两个标的 + 每个币开完一条更新记录 + 整轮一张卡
     assert sum(r.cost_usd for r in recs) == pytest.approx(0.05)
     st = log.read_status()["commander"]
     assert st.today.cost_usd == pytest.approx(0.05)  # 与 card.llm_cost_usd 一致
