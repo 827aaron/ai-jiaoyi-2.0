@@ -276,11 +276,18 @@ async def test_backfill_skipped_for_stub_feed_and_runs_for_real(
         return []
 
     app.m = dataclasses.replace(app.m, feed=Feed())
-    await Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch5).backfill(
-        ["BTCUSDT", "ETHUSDT"]
-    )
+    hist: list[str] = []
+
+    async def fetch_hist(sym: str) -> list[c.Kline]:
+        hist.append(sym)
+        raise RuntimeError("超时")  # 7 天 ATR 历史拉不到：没有下限，不影响别的
+
+    await Runner(
+        app, fetch_klines=fetch, fetch_predictor_klines=fetch5, fetch_atr_history=fetch_hist
+    ).backfill(["BTCUSDT", "ETHUSDT"])
     assert sorted(calls) == ["BTCUSDT", "ETHUSDT"]  # 一个失败不影响别的
     assert sorted(five) == ["BTCUSDT", "ETHUSDT"]  # 预测员的 5 分钟线也补
+    assert sorted(hist) == ["BTCUSDT", "ETHUSDT"]  # 止损 ATR 下限的 7 天历史也补
 
 
 class FakePredictor:
@@ -351,7 +358,7 @@ async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: 
         return []
 
     app.m = dataclasses.replace(app.m, predictor=pred, feed=feed, cards=cards)
-    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch)
+    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch, fetch_atr_history=fetch)
     await r.sync_watch()
     assert feed.subs == [[]]  # 没有要盯的也订一次（全市场强平连接）
     await r.sync_watch()
@@ -362,7 +369,7 @@ async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: 
     await r.sync_watch()
     assert feed.subs[-1] == ["ETHUSDT", "SOLUSDT"]
     assert pred.priority == {"SOLUSDT", "ETHUSDT"}
-    assert sorted(filled) == ["ETHUSDT", "ETHUSDT", "SOLUSDT", "SOLUSDT"]  # 1m + 5m 各回填一次
+    assert sorted(filled) == ["ETHUSDT"] * 3 + ["SOLUSDT"] * 3  # 1m + 5m + 7 天 ATR 各回填一次
 
     card = h.card(now)
     on_card = {s.symbol for s in card.symbols}
@@ -404,7 +411,9 @@ async def test_backfill_feeds_recent_minutes_to_predictor(tmp_path: Path, now: d
     async def fetch5(sym: str) -> list[c.Kline]:
         return [k]
 
-    await Runner(app, fetch_klines=fetch1, fetch_predictor_klines=fetch5).backfill(["BTCUSDT"])
+    await Runner(
+        app, fetch_klines=fetch1, fetch_predictor_klines=fetch5, fetch_atr_history=fetch5
+    ).backfill(["BTCUSDT"])
     assert pred.filled == {"BTCUSDT": 1}
     assert pred.klines == 2  # 1 分钟线也交给预测员接上当前这根 5 分钟线
 
@@ -579,3 +588,15 @@ async def test_app_exposes_predictor_against_card_watch(tmp_path: Path, now: dat
     """慢环通过 App.against 订阅「预测员连续看反作战卡」。"""
     app = _app(tmp_path, now)
     assert app.against is not None and app.against.current(now) == {}
+
+
+def test_every_atr_period_has_a_history_interval() -> None:
+    """配置允许的每个 ATR 周期都要有拉 7 天历史用的 K 线周期，漏了止损下限会静默失效。"""
+    from typing import get_args
+
+    from jiaoyi.loop import ATR_INTERVAL
+
+    periods = get_args(c.FastLoopConfig.model_fields["atr_period_min"].annotation)
+    assert set(periods) == set(ATR_INTERVAL)
+    for p, iv in ATR_INTERVAL.items():
+        assert iv.value == (f"{p}m" if p < 60 else f"{p // 60}h")

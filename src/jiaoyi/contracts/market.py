@@ -62,7 +62,9 @@ class Interval(StrEnum):
     M1 = "1m"
     M5 = "5m"
     M15 = "15m"
+    M30 = "30m"
     H1 = "1h"
+    H4 = "4h"
 
 
 class Kline(Contract):
@@ -113,6 +115,11 @@ class FeatureSnapshot(Contract):
     )
     atr_period_min: int = Field(
         default=15, ge=1, le=240, description="``atr`` 用的 K 线周期（分钟）。"
+    )
+    atr_median_7d: NonNegFloat | None = Field(
+        default=None,
+        description="同一周期 ATR 最近 7 天的中位数（保镖给止损 ATR 设下限，防周末窄止损）。"
+        "历史不够 1 天时为 None。",
     )
     values: dict[str, float] = Field(
         default_factory=dict,

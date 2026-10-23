@@ -365,6 +365,11 @@ class RiskGuardImpl:
         if atr <= 0:
             reasons.append("ATR 为 0，算不出止损")
             return None
+        # 止损 ATR 下限：周末波动约减半，按 7 天中位数兜底，免得周日开的窄止损周一被扫
+        floor = fast.atr_floor_7d * (f.atr_median_7d or 0.0)
+        if floor > atr:
+            detail.update(atr_now=round(atr, 8), atr_floor_7d=round(floor, 8))
+            atr = floor
 
         # ---- 止损：档位 → 作战卡 ATR 范围 → 放到关键位外侧
         stop_ans = jev.answer(EntryQuestion.STOP_WIDTH.value)
