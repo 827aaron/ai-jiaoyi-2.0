@@ -145,5 +145,7 @@ scripts/install_launchd.sh --load-run   # 另外装 jiaoyi run（纸面跑通、
 - `com.jiaoyi.condor`：Condor 前台运行（`make run-fg`），退出后 30 秒自动重启。
 - `com.jiaoyi.backup`：每天 04:10 把 `data/decision_log`、`module_status.json`、`positions.json` 打包到 `data/backups/<日期>/`，保留 30 天。
 - `com.jiaoyi.run`：默认只生成到 `data/launchd/`，**不装**；加 `--load-run` 才进 LaunchAgents（登录后自启，崩溃自动重启），模式取 `config/app.toml`。切 live 仍要走第 8 节的门槛。
+- `com.jiaoyi.watchdog`：每分钟跑一次 `jiaoyi watchdog`。主循环的心跳（`data/module_status.json`，30 秒写一次）超过 2 分钟没更新就发一条 Telegram「主进程停了」，恢复后再发一条；每次掉线只发一次。主循环从没启动过（没有 `data/runtime.json`）时不发。它和主进程分开跑，所以 `jiaoyi run` 崩了、卡死了也能报。验收：`launchctl bootout gui/$(id -u)/com.jiaoyi.run` 或杀掉 `jiaoyi run`，2–3 分钟内收到 Telegram。
+- 看门狗和主进程在同一台机器上：整台 Mac mini 断电、断网时它也发不出去。这种情况要靠机器外面的检查（例如外部定时 ping），还没做。
 - 日志都在 `data/logs/`。脚本只写用户级 LaunchAgents，不需要 sudo；重复运行会先卸载再重装。
 - 备份只有本机一份，不防硬盘损坏；`data_dir` 不是 `data` 时脚本要同步改。
