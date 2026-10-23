@@ -311,7 +311,9 @@ async def run(
     cache: Path = DEFAULT_CACHE,
     seed: int = 0,
     echo: Callable[[str], None] = print,
+    live_timeout_ms: int | None = None,
 ) -> dict[str, Any]:
+    """``live_timeout_ms``：实盘的 Jev 预算，报告里算「按实盘预算会超时几成」。"""
     hold_min = max(fast.time_limit_s // 60, 1)
     found: list[Found] = []
     for sym, cat in symbols:
@@ -331,9 +333,16 @@ async def run(
     out.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     failed = cost = 0.0
+    calls_n = {"ok": 0, "timeout": 0, "error": 0}
+    latencies: list[float] = []
     with (out / "calls.jsonl").open("w", encoding="utf-8") as calls:
         for f, req, resp in answered:
             cost += resp.cost_usd or 0.0
+            if resp.ok:
+                calls_n["ok"] += 1
+                latencies.append(resp.latency_ms)
+            else:
+                calls_n["timeout" if "超时" in (resp.error or "") else "error"] += 1
             calls.write(
                 json.dumps(
                     {
@@ -348,6 +357,8 @@ async def run(
                 )
                 + "\n"
             )
+            if not resp.ok:
+                continue  # 超时 / 出错的不进统计，只记在 calls.jsonl 和汇总里
             c = candidate(f, resp, fast, hold_min)
             if c is None:
                 failed += 1
@@ -377,6 +388,8 @@ async def run(
         "hold_min": hold_min,
         "signals_found": len(found),
         "asked": len(answered),
+        "jev_calls": calls_n,
+        "latency_ms": _latency(latencies, live_timeout_ms),
         "failed": int(failed),
         "jev_cost_usd": round(cost, 4),
         "fee_bps": fee_bps,
@@ -405,6 +418,33 @@ async def run(
     return {**meta, "dir": str(out), "templates": rep}
 
 
+def _latency(ms: list[float], budget_ms: int | None) -> dict[str, Any]:
+    """成功调用的延迟：p50 / p95 / 最大，以及按实盘预算会超时的比例。"""
+    if not ms:
+        return {"n": 0}
+    xs = sorted(ms)
+
+    def q(p: float) -> float:
+        return round(xs[min(len(xs) - 1, int(p * len(xs)))], 1)
+
+    out: dict[str, Any] = {"n": len(xs), "p50": q(0.5), "p95": q(0.95), "max": round(xs[-1], 1)}
+    if budget_ms is not None:
+        out["live_budget_ms"] = budget_ms
+        out["over_live_budget"] = round(sum(1 for x in xs if x > budget_ms) / len(xs), 3)
+    return out
+
+
+def _calls_line(result: dict[str, Any]) -> str:
+    c = result.get("jev_calls") or {}
+    lat = result.get("latency_ms") or {}
+    line = f"Jev 成功 {c.get('ok', 0)} / 超时 {c.get('timeout', 0)} / 出错 {c.get('error', 0)}"
+    if lat.get("n"):
+        line += f"；延迟 p50 {lat['p50']:.0f}ms、p95 {lat['p95']:.0f}ms、最大 {lat['max']:.0f}ms"
+        if "over_live_budget" in lat:
+            line += f"；按实盘预算 {lat['live_budget_ms']}ms 会超时 {lat['over_live_budget']:.0%}"
+    return line
+
+
 def render(result: dict[str, Any]) -> list[str]:
     th = result["current_thresholds"]
     lines = [
@@ -412,6 +452,7 @@ def render(result: dict[str, Any]) -> list[str]:
         f"持仓 {result['hold_min']} 分钟：找到 {result['signals_found']} 个信号，"
         f"问了 {result['asked']} 个，"
         f"没算出结果 {result['failed']} 个，Jev 花费 ${result['jev_cost_usd']:.4f}",
+        _calls_line(result),
         f"注意：{MISSING}",
         f"按现在门槛（做 ≥ {th['min_p_take']}、真 ≥ {th['min_p_genuine']}、"
         f"毒 ≤ {th['max_p_toxic']}）"
