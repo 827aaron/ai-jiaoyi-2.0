@@ -521,13 +521,16 @@ def _items(
         if isinstance(value, BaseModel | dict):
             continue
         lo = hi = None
+        strict = False
         for m in field.metadata:
-            lo = getattr(m, "ge", getattr(m, "gt", lo))
+            if hasattr(m, "gt"):
+                lo, strict = m.gt, True
+            lo = getattr(m, "ge", lo)
             hi = getattr(m, "le", getattr(m, "lt", hi))
         if lo is not None and hi is not None:
             bounds = f"{lo:g}–{hi:g}"
         else:
-            bounds = f"≥{lo:g}" if lo is not None else ""
+            bounds = f"{'>' if strict else '≥'}{lo:g}" if lo is not None else ""
         desc = (field.description or "").split("。")[0]
         spec = specs.get(name)
         out.append(

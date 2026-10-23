@@ -461,9 +461,11 @@ def convert_prompt(
     atr_note: str,
 ) -> str:
     """把会议结论整理成作战指令的提示词（单独成函数，便于快照测试）。"""
+    top = r.max_notional_per_trade_usdt
+    cap = f"账户权益 × {r.max_notional_per_trade_x:g} 倍" + (f"且 ≤ {top:g} USDT" if top else "")
     return (
-        "把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ "
-        f"{r.max_notional_per_trade_usdt:g} USDT，杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
+        f"把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ {cap}，"
+        f"杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
         "矛盾或财报前夜之类就选 no_trade。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
         "倍数区间（如 1.5–3）。key_levels 只填结论里明确提到的价位。reason 用中文。\n"
         f"{atr_note}\n"

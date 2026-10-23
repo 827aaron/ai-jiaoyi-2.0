@@ -412,7 +412,7 @@ class RiskGuardImpl:
 
         caps = {
             "作战卡名义上限": cs.notional_usdt.max,
-            "单笔名义上限": risk.max_notional_per_trade_usdt,
+            "单笔名义上限": risk.notional_cap(equity),
             "总敞口余量": risk.max_total_exposure_x * equity - account.open_notional_usdt,
             "相关组敞口余量": risk.category_exposure_x[cs.category] * equity
             - account.open_notional_by_category.get(cs.category, 0.0),

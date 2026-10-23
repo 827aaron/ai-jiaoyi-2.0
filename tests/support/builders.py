@@ -44,7 +44,7 @@ RISK_DEFAULTS: dict[str, Any] = {
         "other": 0.5,
     },
     "daily_loss_halt_pct": 3.0,
-    "max_notional_per_trade_usdt": 2000.0,
+    "max_notional_per_trade_x": 2.0,
     "max_open_positions": 5,
     "lifeboat_stop_multiplier": 1.5,
     "max_spread_bps": 5.0,

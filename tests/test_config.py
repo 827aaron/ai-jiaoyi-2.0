@@ -67,8 +67,8 @@ def test_missing_field_refuses(tmp_path: Path, field: str) -> None:
     ("field", "value"),
     [
         ("risk_per_trade_pct", 150.0),
-        ("max_leverage", 126),
-        ("max_total_exposure_x", 200.0),
+        ("max_leverage", 0),
+        ("max_total_exposure_x", 0.0),
         ("daily_loss_halt_pct", 0.0),
         ("lifeboat_stop_multiplier", 1.0),
         ("day_reset_tz", "Asia/Tokyo"),

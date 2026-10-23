@@ -4,10 +4,11 @@
 # 比推荐冒险时 check-config / 面板会提示，但不拦。
 
 risk_per_trade_pct = 1.0            # 每笔最多亏总资金 1%（0–100）
-max_leverage = 5                    # 杠杆 ≤ 5 倍（1–125，具体币种以交易所为准）
-max_total_exposure_x = 3.0          # 总敞口 ≤ 总资产 3 倍（0–125）
+max_leverage = 5                    # 杠杆 ≤ 5 倍（≥1，具体币种能开多少以币安为准）
+max_total_exposure_x = 3.0          # 总敞口 ≤ 总资产 3 倍（>0）
 daily_loss_halt_pct = 3.0           # 当日亏 3% 停止开新仓，只允许平仓（0–100）
-max_notional_per_trade_usdt = 2000  # 单笔名义价值上限 USDT（>0）
+max_notional_per_trade_x = 2.0      # 单笔名义价值上限 = 账户权益 × 2，随资金变
+# max_notional_per_trade_usdt = 5000  # 可选：再加一个绝对硬顶（USDT），不写就只按权益倍数
 max_open_positions = 5              # 同时持仓笔数上限（≥1）
 lifeboat_stop_multiplier = 1.5      # 保命止损距离 = 正常止损 × 1.5（>1）
 max_spread_bps = 5.0                # 价差超过 5bp 不开仓

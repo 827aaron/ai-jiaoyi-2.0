@@ -278,8 +278,9 @@ def _intent_problems(r: DecisionRecord, risk: RiskConfig) -> list[str]:
         probs.append(f"{iid} 不是保镖签发")
     if lev > risk.max_leverage:
         probs.append(f"{iid} 杠杆 {lev} 超过 {risk.max_leverage}")
-    if notional > risk.max_notional_per_trade_usdt + 1e-6:
-        probs.append(f"{iid} 名义 {notional:.0f} 超过 {risk.max_notional_per_trade_usdt:.0f}")
+    # 日志里没有下单那一刻的权益，只能核绝对硬顶；权益倍数由保镖下单时封顶（有单测）
+    if notional > risk.notional_cap(None) + 1e-6:
+        probs.append(f"{iid} 名义 {notional:.0f} 超过 {risk.notional_cap(None):.0f}")
     if lifeboat < stop * risk.lifeboat_stop_multiplier * (1 - 1e-6):
         probs.append(f"{iid} 保命止损不够宽")
     if tp * 100 < risk.min_tp_fee_multiple * 2 * risk.taker_fee_bps - 1e-6:
