@@ -23,9 +23,14 @@ from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.market import Interval, KlineError, KlineSource
 from jiaoyi.panel.overview import Overview, build_overview
 from jiaoyi.panel.pages import (
+    FundsPage,
+    HistoryPage,
+    HistoryRange,
     PositionsPage,
     TeamPage,
     TrailItem,
+    build_funds,
+    build_history,
     build_positions,
     build_signal,
     build_team,
@@ -90,6 +95,14 @@ def create_app(
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
         return build_team(files, clock(), role)
+
+    @api.get("/api/history")
+    async def history(range: HistoryRange = "today") -> HistoryPage:
+        return build_history(files, risk, clock(), range)
+
+    @api.get("/api/funds")
+    async def funds() -> FundsPage:
+        return build_funds(files, await hb.snapshot(), risk, clock())
 
     @api.get("/api/signal/{signal_id}")
     async def signal(signal_id: str) -> list[TrailItem]:

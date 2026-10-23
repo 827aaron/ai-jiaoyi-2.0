@@ -49,6 +49,8 @@ const coin = (s) => esc(String(s || "").replace(/USDT$/, ""));
 const price = (p) => (p == null ? "—" : p >= 100 ? money(p, 1) : p >= 1 ? money(p, 3) : String(+p.toPrecision(4)));
 const range = (r, unit = "", d) => (r ? `${money(r[0], d ?? (r[0] < 10 ? 1 : 0))}–${money(r[1], d ?? (r[1] < 10 ? 1 : 0))}${unit}` : "—");
 const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 时 ${m % 60} 分`; };
+// 图表坐标轴按曼谷时间显示：跨天的刻度显示日期，其余显示时分
+const tick = (t) => { const d = new Date(t * 1000); const s = hm(d); return s === "00:00" ? new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, month: "numeric", day: "numeric" }).format(d) : s; };
 const pill = (o) => { const [t, k] = OUTCOME[o] || [o, ""]; return `<span class="pill ${k}">${t}</span>`; };
 
 function route() {
@@ -115,6 +117,9 @@ document.addEventListener("click", (e) => {
   else if (act === "signal") showSignal(arg);
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
+  else if (act === "hist") { S.hist = arg; render(); poll(); }
+  else if (act === "rej") { S.rej = !S.rej; render(); }
+  else if (act === "csv") exportCsv();
 });
 document.addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.dataset && e.target.dataset.act) { e.preventDefault(); e.target.click(); }
@@ -310,7 +315,7 @@ function mountChart() {
       autoSize: true,
       layout: { background: { color: "transparent" }, textColor: getComputedStyle(document.body).getPropertyValue("--dim"), fontFamily: getComputedStyle(document.body).fontFamily },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(0,0,0,0.05)" } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderVisible: false },
+      timeScale: { timeVisible: true, secondsVisible: false, borderVisible: false, tickMarkFormatter: (t) => tick(t) },
       rightPriceScale: { borderVisible: false },
       localization: { timeFormatter: (t) => hm(t * 1000) },
     });
@@ -378,19 +383,141 @@ P.team = () => {
       <div class="foot">最多显示最新 200 条 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 
+/* ---------- 历史 */
+const RANGE = { today: "今天", "7d": "7 天", "30d": "30 天" };
+const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "移动止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
+S.hist = "today";
+S.rej = false;
+
+P.history = () => {
+  const d = pageData;
+  const tiles = [
+    [signed(d.net_pnl_usdt, 2) + "U", "净盈亏（已扣手续费）", cls(d.net_pnl_usdt)],
+    [d.trades + " 笔", "交易"],
+    [d.win_rate == null ? "—" : Math.round(d.win_rate * 100) + "%", "胜率"],
+    [d.avg_win_loss == null ? "—" : d.avg_win_loss.toFixed(2), "平均盈亏比"],
+    [d.max_drawdown_usdt ? "−" + money(d.max_drawdown_usdt, 2) + "U" : "0", "最大回撤", d.max_drawdown_usdt ? "down" : ""],
+  ];
+  const kinds = d.by_kind.map((k) => `<tr><td class="hi">${esc(SIGNAL[k.kind] || (k.kind === "unknown" ? "未知" : k.kind))}</td><td class="r num">${k.trades}</td><td class="r num">${k.win_rate == null ? "—" : Math.round(k.win_rate * 100) + "%"}</td><td class="r num ${cls(k.pnl_usdt)}">${signed(k.pnl_usdt, 2)}</td></tr>`).join("");
+  const rows = d.rows.map((t) => {
+    const [s, sc] = SIDE[t.side] || [t.side, ""];
+    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num">${hm(t.closed_at)}</td><td class="hi">${coin(t.symbol)} <span class="${sc}">${s}</span> ${t.quantity}</td>
+      <td>${esc(SIGNAL[t.signal_kind] || "—")}</td><td class="num">${price(t.entry_price)}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
+      <td class="num">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${cls(t.pnl_usdt)}">${signed(t.pnl_usdt, 2)}</td><td class="r num dim">${money(t.fees_usdt, 2)}</td></tr>`;
+  }).join("");
+  window.__recs = d.rejected;
+  const rej = S.rej
+    ? `<section class="card mt"><div class="ch"><h2>被拒的信号</h2><span class="r">${d.rejected.length} 条 · 拍板放弃和保镖拒绝 · 点一条看快照</span></div>
+      <div class="log trail scroll tall">${d.rejected.map((r, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hm(r.ts)}</span><span>${esc(ROLE[r.role] || r.role)} ${pill(r.outcome)} ${esc(r.text)}</span></div>`).join("") || '<div class="dim">没有。</div>'}</div></section>`
+    : "";
+  return `<div class="toolbar"><span class="seg">${Object.entries(RANGE).map(([k, v]) => `<button class="${S.hist === k ? "on" : ""}" ${clickable("hist", k)}>${v}</button>`).join("")}</span>
+      <button class="chip ${S.rej ? "on" : ""}" ${clickable("rej")}>${S.rej ? "☑" : "☐"} 含被拒的信号</button>
+      <button class="btn b-sm" ${clickable("csv")} ${d.rows.length ? "" : "disabled"}>导出 CSV</button></div>
+    <div class="tiles t5">${tiles.map(([v, l, c]) => `<div class="tile"><small>${l}</small><b class="${c || ""}">${v}</b></div>`).join("")}</div>
+    <section class="card mt"><div class="ch"><h2>资金曲线</h2><span class="r">累计净盈亏，每个点是一笔平仓</span></div>
+      ${d.curve.length ? '<div class="chart sm" id="hchart-host"></div>' : '<div class="empty"><b>这段时间没有平仓</b></div>'}</section>
+    <div class="grid g21 mt">
+      <section class="card"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链</span></div>
+        ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>平仓</th><th>币种</th><th>信号</th><th>开仓价</th><th>怎么平的</th><th>持有</th><th class="r">净盈亏</th><th class="r">手续费</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>
+      <section class="card"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
+        ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>
+    </div>${rej}`;
+};
+
+function exportCsv() {
+  const d = pageData;
+  if (!d || !d.rows) return;
+  const head = ["平仓时间", "开仓时间", "币种", "方向", "数量", "杠杆", "开仓价", "信号", "平仓原因", "净盈亏U", "手续费U", "position_id"];
+  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, t.side, t.quantity, t.leverage, t.entry_price, t.signal_kind, t.close_reason, t.pnl_usdt, t.fees_usdt, t.position_id].map(q).join(","));
+  const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `交易记录-${d.range}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ---------- 资金 */
+P.funds = () => {
+  const d = pageData;
+  const k = data.kpis;
+  const flow = [
+    ["日初权益（曼谷 00:00）", d.day_start_equity_usdt, ""],
+    ["＋ 今天平仓的净盈亏", d.realized_today_usdt, "signed"],
+    ["＋ 持仓浮盈浮亏", d.unrealized_usdt, "signed"],
+    ["＋ 其他（资金费、转账、口径差）", d.other_today_usdt, "signed"],
+    ["＝ 现在", d.equity_usdt, "total"],
+  ].map(([l, v, t]) => `<div class="fr ${t === "total" ? "total" : ""}"><span>${l}</span><b class="num ${t === "signed" ? cls(v) : ""}">${t === "signed" ? signed(v, 2) : money(v, 2)} U</b></div>`).join("");
+  const costs = d.costs.map((c) => `<tr><td class="hi">${esc(c.name)}</td><td class="r num">$${c.today_usd.toFixed(3)}</td><td class="r num">$${c.week_usd.toFixed(3)}</td></tr>`).join("");
+  const tiles = [
+    [money(d.equity_usdt, 2) + " U", "总资产" + (d.equity_source === "ledger" ? "（账本）" : "")],
+    [money(d.wallet_usdt, 2) + " U", "钱包余额"],
+    [money(d.available_usdt, 2) + " U", "可用保证金"],
+    [signed(d.unrealized_usdt, 2) + " U", "浮盈浮亏", cls(d.unrealized_usdt)],
+    [d.halt_line_usdt == null ? "—" : money(d.halt_line_usdt, 0) + " U", d.halted ? "熔断线（已触发）" : "熔断线", d.halted ? "down" : ""],
+  ];
+  return `<div class="tiles t5">${tiles.map(([v, l, c]) => `<div class="tile"><small>${l}</small><b class="${c || ""}">${v}</b></div>`).join("")}</div>
+    <div class="grid g2 mt">
+      <section class="card"><div class="ch"><h2>今天的钱是怎么变的</h2><span class="r">曼谷 00:00 起算</span></div><div class="form">${flow}</div>
+        <div class="foot">${d.equity_source === "hummingbot" ? `账户数字都从币安${data.mode === "live" ? "实盘" : " Demo"}账户实时拉（经 hummingbot-api），不能手填。` : "hummingbot-api 没连上，总资产暂用账本里最后一次记录。"}今天手续费 ${money(d.fees_today_usdt, 2)} U。今日盈亏 ${signed(k.day_pnl_usdt, 2)} U（${k.day_pnl_pct == null ? "—" : signed(k.day_pnl_pct, 2) + "%"}），跌到熔断线就停开新仓到第二天。</div></section>
+      <section class="card"><div class="ch"><h2>运行成本</h2><span class="r">AI 调用花费，不在币安账户里</span></div>
+        <div class="tw"><table><thead><tr><th>角色</th><th class="r">今天</th><th class="r">近 7 天</th></tr></thead><tbody>${costs}
+        <tr class="total"><td class="hi">合计</td><td class="r num hi">$${d.cost_today_usd.toFixed(3)}</td><td class="r num hi">$${d.cost_week_usd.toFixed(3)}</td></tr></tbody></table></div>
+        <div class="foot">机器人只读账户，不能转账。转入转出请在币安上看。</div></section>
+    </div>`;
+};
+
+/* 资金曲线（历史页） */
+let hchart = null, hseries = null, hEl = null, hKey = "";
+function mountHistoryChart() {
+  const host = $("#hchart-host");
+  if (!host || !window.LightweightCharts) return;
+  if (!hEl) {
+    hEl = document.createElement("div");
+    hEl.style.height = "100%";
+    host.appendChild(hEl); // 先挂到页面上再建图，否则初始尺寸是 0
+    hchart = LightweightCharts.createChart(hEl, {
+      autoSize: true,
+      layout: { background: { color: "transparent" }, textColor: getComputedStyle(document.documentElement).getPropertyValue("--dim").trim(), fontFamily: getComputedStyle(document.body).fontFamily },
+      grid: { vertLines: { visible: false }, horzLines: { color: "rgba(0,0,0,0.05)" } },
+      timeScale: { timeVisible: true, borderVisible: false, tickMarkFormatter: (t) => tick(t) },
+      rightPriceScale: { borderVisible: false },
+      localization: { timeFormatter: (t) => hm(t * 1000) },
+    });
+    hseries = hchart.addBaselineSeries({ baseValue: { type: "price", price: 0 } });
+  }
+  host.appendChild(hEl);
+  const css = getComputedStyle(document.documentElement);
+  hseries.applyOptions({ topLineColor: css.getPropertyValue("--up").trim(), bottomLineColor: css.getPropertyValue("--down").trim(), topFillColor1: "rgba(26,127,55,0.15)", topFillColor2: "rgba(26,127,55,0.02)", bottomFillColor1: "rgba(215,0,21,0.02)", bottomFillColor2: "rgba(215,0,21,0.15)" });
+  // 时间要严格递增：同一秒平了几笔就往后挪一秒
+  let last = 0;
+  const pts = pageData.curve.map((c) => { let t = Math.floor(new Date(c.ts).getTime() / 1000); if (t <= last) t = last + 1; last = t; return { time: t, value: c.cum_pnl_usdt }; });
+  hseries.setData(pts);
+  const key = pageData.range + pts.length;
+  if (key !== hKey) hchart.timeScale().fitContent();
+  hKey = key;
+}
+
 function placeholder() {
   return `<div class="card"><div class="empty"><b>这一页还在做</b>按总览的样式接着做。<a href="#overview">回总览 ›</a></div></div>`;
 }
 
 /* ---------- 渲染和拉数 */
-const PAGE_API = { positions: () => "/api/positions", team: (arg) => `/api/team${arg ? "?role=" + encodeURIComponent(arg) : ""}` };
+const PAGE_API = {
+  positions: () => "/api/positions",
+  team: (arg) => `/api/team${arg ? "?role=" + encodeURIComponent(arg) : ""}`,
+  history: () => `/api/history?range=${S.hist}`,
+  funds: () => "/api/funds",
+};
+const pageId = (page, arg) => page + "/" + (arg || "") + (page === "history" ? "/" + S.hist : "");
 
 function render() {
   chrome();
   $("#status").innerHTML = statusBar();
   const { page, arg } = route();
   const needs = PAGE_API[page];
-  if (!data || (needs && (!pageData || pageKey !== page + "/" + (arg || "")))) {
+  if (!data || (needs && (!pageData || pageKey !== pageId(page, arg)))) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
   }
@@ -398,6 +525,7 @@ function render() {
   $("#page").innerHTML = (P[page] || placeholder)(arg);
   document.querySelectorAll("#page .scroll").forEach((e, i) => { e.scrollTop = scrolls[i] || 0; });
   if (page === "positions") mountChart();
+  if (page === "history") mountHistoryChart();
 }
 
 async function getJson(url) {
@@ -414,7 +542,7 @@ async function poll() {
     const api = PAGE_API[page];
     if (api) {
       pageData = await getJson(api(arg));
-      pageKey = page + "/" + (arg || "");
+      pageKey = pageId(page, arg);
     }
     lastOk = Date.now();
     $("#stale").innerHTML = "";

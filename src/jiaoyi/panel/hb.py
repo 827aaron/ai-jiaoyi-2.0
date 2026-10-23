@@ -19,6 +19,8 @@ class HbSnapshot:
     error: str | None = None
     wallet_usdt: float | None = None
     """USDT 钱包余额（不含浮盈浮亏）。"""
+    available_usdt: float | None = None
+    """可用保证金（还能开新仓的 USDT）。"""
     positions: list[dict[str, Any]] = field(default_factory=list)
     """hummingbot-api 原样返回的持仓条目（trading_pair、unrealized_pnl、amount ...）。"""
 
@@ -84,6 +86,7 @@ class HbReader:
         return HbSnapshot(
             ok=True,
             wallet_usdt=_num(usdt.get("units")) if usdt else None,
+            available_usdt=_num(usdt.get("available_units")) if usdt else None,
             positions=[d for d in (pos or {}).get("data", []) if isinstance(d, dict)],
         )
 

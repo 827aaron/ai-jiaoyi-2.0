@@ -212,3 +212,16 @@ tr.click:hover td, tr.sel td { background: var(--bg); }
 .role small { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 1200px) { .roles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 900px) { .roles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .bars { grid-template-columns: repeat(2, 1fr); } .tw { margin: 0 -14px; padding: 0 14px; } }
+
+/* ---- 历史 / 资金 */
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.chip { border: 0; background: var(--fill); border-radius: 980px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.chip.on { background: var(--accent-soft); color: var(--accent); }
+.tiles.t5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.chart.sm { height: 220px; }
+.g21 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+.form { display: flex; flex-direction: column; }
+.form .fr { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.form .fr:last-child { border-bottom: 0; }
+.form .fr.total, tr.total td { font-weight: 600; color: var(--hi); border-top: 1px solid var(--line2); }
+@media (max-width: 900px) { .tiles.t5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .g21 { grid-template-columns: 1fr; } }
