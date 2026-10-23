@@ -1554,7 +1554,7 @@ const PLAIN = {
   day_reset_tz: "“今天”按哪个时区算",
   mode: "运行方式",
   profile: "开会间隔（旧写法）",
-  meeting_interval: "开会间隔（军师团多久开一轮会）",
+  meeting_interval: "开会间隔（军师团多久开一轮会，选币同节奏）",
   hold: "单笔最长持仓",
   predictor_enabled: "用不用 Kronos 预测价格",
   signal_dedup_s: "同一个信号多少秒内只处理一次",
@@ -1562,6 +1562,7 @@ const PLAIN = {
   keeper_interval_s: "管家每隔几秒看一次持仓",
   reconcile_interval_s: "每隔几秒和交易所对一次账",
   slow_loop_interval_min: "军师团每隔几分钟开一次会（档位 = 开会间隔）",
+  screener_interval_min: "选币每隔几分钟跑一次（默认跟开会间隔档位走，最少 15 分钟）",
   pool_size: "候选池放多少个币",
   card_pick_max: "军师团每次最多挑几个币",
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
@@ -1738,7 +1739,7 @@ function switchProfile(p) {
   const holdNote = pf.hold_custom
     ? `最长持仓是你定的 ${profileSpan(pf.hold)}，不跟着换${nextHold !== pf.hold ? `（${profileSpan(p)}开会推荐 ${profileSpan(nextHold)}，只提醒）` : ""}。`
     : `最长持仓跟开会档位走，${nextHold === pf.hold ? `还是 ${profileSpan(nextHold)}` : `从 ${profileSpan(pf.hold)} 换成 ${profileSpan(nextHold)}`}。`;
-  ask(`切换开会间隔：${esc(profileSpan(pf.current))} → ${esc(profileSpan(p))}`, `<p>${esc(profileNote(p))}，作战卡有效期 = 间隔 + 20 分钟。${esc(holdNote)}</p>${warn}${pwField(data.control)}`, "切换", false, async () => {
+  ask(`切换开会间隔：${esc(profileSpan(pf.current))} → ${esc(profileSpan(p))}`, `<p>${esc(profileNote(p))}，作战卡有效期 = 间隔 + 20 分钟，选币也按这个间隔跑。${esc(holdNote)}</p>${warn}${pwField(data.control)}`, "切换", false, async () => {
     const pw = $("#dlg-pw");
     const clear = $("#dlg-clear");
     const pass = pw ? pw.value : "";

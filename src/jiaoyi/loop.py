@@ -53,7 +53,6 @@ from jiaoyi.market.features import ATR_PERIOD, HISTORY_DAYS, backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
-from jiaoyi.slow.screener import SCREEN_EVERY
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +70,8 @@ RESTART_DRAIN_S = 15.0
 RESTART_HARD_EXIT_S = 45.0
 TASK_CANCEL_WAIT_S = 10.0
 PRUNE_EVERY = timedelta(hours=1)
+SCREEN_FRESH = timedelta(minutes=2)
+"""整轮会议前选币：2 分钟内刚选过就不重复。"""
 _POOL_DONE = {
     "pin_symbol": "已固定",
     "unpin_symbol": "已取消固定",
@@ -686,10 +687,10 @@ class Runner:
 
     async def slow_tick(self) -> None:
         now = self.app.clock()
-        if self._last_screen is None or now - self._last_screen >= SCREEN_EVERY:
-            self._last_screen = now
-            await self.app.refresh_lot_rules()
-            await self._rescreen(now)
+        if self._last_screen is None or now - self._last_screen >= timedelta(
+            minutes=self.app.app_cfg.screener_interval_min
+        ):
+            await self._screen_now(now)
         pool = self.app.pool
         if pool is None or self._refreshing:
             return
@@ -724,9 +725,18 @@ class Runner:
                 self._refreshing = True
                 self._spawn(self._refresh_event(events, pool, *event))
             return
+        # 顺序 选币 → 总盘会：每一整轮会议前先把候选池刷新（刚选过就不重复）
+        if self._last_screen is None or now - self._last_screen >= SCREEN_FRESH:
+            await self._screen_now(now)
+            pool = self.app.pool or pool
         self._refreshing = True
         self._last_card_at = now
         self._spawn(self._refresh(pool, reason))
+
+    async def _screen_now(self, now: datetime) -> None:
+        self._last_screen = now
+        await self.app.refresh_lot_rules()
+        await self._rescreen(now)
 
     async def news_tick(self) -> None:
         """拉新闻 / 公告：公告提到候选币 → 军师团提前开会；币安下架公告 → 该币只观察不开新仓。
