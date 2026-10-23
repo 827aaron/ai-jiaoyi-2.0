@@ -521,6 +521,23 @@ def test_funds_pnl_from_exchange_income(tmp_path: Path) -> None:
     assert total.trading_usdt == pytest.approx(120.0) and total.fees_usdt == pytest.approx(-8.0)
 
 
+def test_funds_total_counts_ai_cost_before_first_trade(tmp_path: Path) -> None:
+    """“累计”起点 = 第一笔交易和第一笔 AI 费里更早的那天，交易前开会的钱也算进去。"""
+    from jiaoyi.panel.pages import build_funds
+
+    _seed(tmp_path)
+    log = JsonlDecisionLog(tmp_path)
+    early = c.DecisionRecord(
+        record_id="early", ts=NOW - timedelta(days=20), role=c.Role.COMMANDER,
+        outcome=c.Outcome.ACTION, summary="早期开会", cost_usd=1.5,
+    )  # fmt: skip
+    log.write(early)
+    page = build_funds(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW)
+    total = page.pnl[2]
+    assert str(page.pnl_since) == str((NOW - timedelta(days=20)).date())
+    assert total.ai_usd == pytest.approx(0.21 + 1.5)
+
+
 def test_history_and_funds_endpoints(tmp_path: Path) -> None:
     _seed(tmp_path)
     with _client(tmp_path, "127.0.0.1") as client:

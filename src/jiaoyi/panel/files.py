@@ -145,6 +145,16 @@ class PanelFiles:
         self._old[key] = (size, recs)
         return recs
 
+    def first_log_day(self) -> date | None:
+        """最早一份决策日志的日期（文件按 UTC 日期命名）；没有就是 None。"""
+        days = []
+        for f in (self.root / "decision_log").glob("*.jsonl"):
+            try:
+                days.append(date.fromisoformat(f.stem))
+            except ValueError:
+                continue
+        return min(days, default=None)
+
     def income_daily(self) -> Any:
         """主程序每 5 分钟从币安收入流水汇总的按日盈亏（data/income_daily.json）；没有就是 None。"""
         return self._json("income_daily.json")

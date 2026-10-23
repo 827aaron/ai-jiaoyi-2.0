@@ -584,12 +584,16 @@ def _pnl_periods(
         since: date | None = min(income)
     else:
         since = min((local_day(p.closed_at, tz) for p in closed if p.closed_at), default=None)
-    first = min(since or today, today - timedelta(days=6))
+    # AI 费从最早的决策日志算起（可能早于第一笔交易），“累计”起点取两者更早的那天
+    first = min(since or today, today - timedelta(days=6), files.first_log_day() or today)
     start = datetime.combine(first, time(), tzinfo=ZoneInfo(tz)).astimezone(UTC)
     ai_by_day: dict[date, float] = {}
     for r in files.decisions_since(start, now, _PAID):
         d = local_day(r.ts, tz)
         ai_by_day[d] = ai_by_day.get(d, 0.0) + r.cost_usd
+    first_ai = min((d for d, v in ai_by_day.items() if v > 0), default=None)
+    if first_ai is not None:
+        since = min(since or first_ai, first_ai)
     periods: list[tuple[Literal["today", "7d", "all"], str, date]] = [
         ("today", "今天", today),
         ("7d", "近 7 天", today - timedelta(days=6)),
