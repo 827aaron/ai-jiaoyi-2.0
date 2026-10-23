@@ -35,6 +35,7 @@ from jiaoyi.panel.market import Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
 from jiaoyi.panel.overview import Overview, build_overview
 from jiaoyi.panel.pages import (
+    AiRange,
     FundsPage,
     HistoryPage,
     HistoryRange,
@@ -223,8 +224,8 @@ def create_app(
         return build_history(files, cfg()[0], clock(), range, include_tests=tests)
 
     @api.get("/api/funds")
-    async def funds() -> FundsPage:
-        return build_funds(files, await hb.snapshot(), cfg()[0], clock())
+    async def funds(ai: AiRange = "today") -> FundsPage:
+        return build_funds(files, await hb.snapshot(), cfg()[0], clock(), ai)
 
     @api.get("/api/pool")
     async def pool() -> PoolPage:

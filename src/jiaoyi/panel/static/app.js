@@ -45,6 +45,7 @@ const S = { tf: "1m" };
 
 const hm = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(ts));
 const hms = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(ts));
+const md = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, month: "numeric", day: "numeric" }).format(new Date(ts));
 const money = (x, d = 1) => (x == null ? "—" : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 // U 本位合约的数量按币计；旁边折算成 USDT 名义金额（数量 × 开仓价），一眼看出这单多大
 const qty = (q, px) => `${q}${px ? ` <span class="dim">≈${money(q * px, 0)}U</span>` : ""}`;
@@ -256,6 +257,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
   else if (act === "hist") { S.hist = arg; render(); poll(); }
+  else if (act === "ai") { S.ai = arg; render(); poll(); }
   else if (act === "rej") { S.rej = !S.rej; render(); }
   else if (act === "tests") { S.tests = !S.tests; render(); poll(); }
   else if (act === "csv") exportCsv();
@@ -875,6 +877,26 @@ function pnlCard(d) {
     <div class="foot">净盈亏 = 交易盈亏 + 手续费 + 资金费 − AI 费。不含浮盈浮亏（还没平的仓）。${src}</div></section>`;
 }
 
+// AI 费用明细：每一次调大模型花了多少（OpenRouter 报的 usage.cost），按类别小计
+const AI_RANGE = { today: "今天", "7d": "近 7 天", all: "累计" };
+const AI_RESULT = { ok: ["成功", "p-long"], failed: ["失败", "p-short"], timeout: ["超时", "p-warn"] };
+function aiCard(a) {
+  if (!a) return "";
+  const rng = `<span class="seg">${Object.entries(AI_RANGE).map(([k, v]) => `<button class="${a.range === k ? "on" : ""}" ${clickable("ai", k)}>${v}</button>`).join("")}</span>`;
+  const groups = a.groups.map((g) => `<div class="tile"><small>${esc(g.name)} · ${g.calls} 次</small><b>$${g.cost_usd.toFixed(3)}</b></div>`).join("");
+  const rows = a.rows.map((c) => {
+    const [t, k] = AI_RESULT[c.result];
+    return `<tr><td class="num">${a.range === "today" ? hm(c.ts) : `${md(c.ts)} ${hm(c.ts)}`}</td><td class="hi">${esc(c.who)}</td><td>${c.symbol ? coin(c.symbol) : "—"}</td>
+      <td class="r num" ${c.estimated ? 'title="没拿到实际费用，按 token 估算"' : ""}>$${c.cost_usd.toFixed(4)}${c.estimated ? '<span class="dim small">（估）</span>' : ""}</td><td class="r num ${c.tokens == null ? "dim" : ""}" ${c.tokens == null ? 'title="这条记录没写 tokens"' : ""}>${c.tokens == null ? "没记" : c.tokens.toLocaleString()}</td>
+      <td><span class="pill ${k}">${t}</span></td><td class="txt dim small">${esc(c.detail)}</td></tr>`;
+  }).join("");
+  const more = a.row_count > a.rows.length ? `只列最近 ${a.rows.length} 次，共 ${a.row_count} 次；小计按全部算。` : "";
+  return `<section class="card mt"><div class="ch"><h2>AI 费用详情</h2><span class="r">${rng}</span></div>
+    <div class="tiles t${a.groups.length + 1}"><div class="tile"><small>合计 · ${a.row_count} 次</small><b>$${a.total_usd.toFixed(3)}</b></div>${groups}</div>
+    ${a.rows.length ? `<div class="tw mt"><table><thead><tr><th>时间</th><th>谁</th><th>币</th><th class="r">花费</th><th class="r">tokens</th><th>结果</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="dim mt">${AI_RANGE[a.range]}还没有 AI 调用。</div>`}
+    <div class="foot">花费是 OpenRouter 每次调用报的实际费用（usage.cost），标「估」的是失败时拿不到实际费用、按 token 估的；按 1 美元 ≈ 1 U。${a.since ? `从 ${esc(a.since)} 算起。` : ""}${more}</div></section>`;
+}
+
 P.funds = () => {
   const d = pageData;
   const k = data.kpis;
@@ -902,7 +924,8 @@ P.funds = () => {
         <div class="tw"><table><thead><tr><th>角色</th><th class="r">今天</th><th class="r">近 7 天</th></tr></thead><tbody>${costs}
         <tr class="total"><td class="hi">合计</td><td class="r num hi">$${d.cost_today_usd.toFixed(3)}</td><td class="r num hi">$${d.cost_week_usd.toFixed(3)}</td></tr></tbody></table></div>
         <div class="foot">机器人只读账户，不能转账。转入转出请在币安上看。</div></section>
-    </div>`;
+    </div>
+    ${aiCard(d.ai)}`;
 };
 
 /* ---------- 选币 */
@@ -1499,7 +1522,7 @@ const PAGE_API = {
   positions: () => "/api/positions",
   team: (arg) => `/api/team${arg ? "?role=" + encodeURIComponent(arg) : ""}`,
   history: () => `/api/history?range=${S.hist}${S.tests ? "&tests=true" : ""}`,
-  funds: () => "/api/funds",
+  funds: () => `/api/funds?ai=${S.ai || "today"}`,
   pool: () => "/api/pool",
   settings: () => "/api/settings",
 };
