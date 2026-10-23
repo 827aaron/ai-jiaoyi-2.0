@@ -59,6 +59,12 @@ class Kpis(BaseModel):
     max_exposure_x: float
 
 
+class LevelView(BaseModel):
+    price: float
+    kind: str
+    """support / resistance / pivot；页面按现价上下重新分支撑、压力（同慢环落卡的口径）。"""
+
+
 class CardRow(BaseModel):
     """作战卡里一个标的；点开作战卡时整张表显示。旧记录读不到会议结论时只有币名。"""
 
@@ -72,7 +78,7 @@ class CardRow(BaseModel):
     leverage: tuple[float, float] | None = None
     notional_usdt: tuple[float, float] | None = None
     allowed_signals: list[str] = []
-    key_levels: list[float] = []
+    key_levels: list[LevelView] = []
 
 
 class CardView(BaseModel):
@@ -406,7 +412,7 @@ def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
                 leverage=(cs.leverage.min, cs.leverage.max),
                 notional_usdt=(cs.notional_usdt.min, cs.notional_usdt.max),
                 allowed_signals=[k.value for k in cs.allowed_signals],
-                key_levels=[lv.price for lv in cs.key_levels],
+                key_levels=[LevelView(price=lv.price, kind=lv.kind.value) for lv in cs.key_levels],
             )
             if cs
             else CardRow(symbol=n, bias="unknown", category="other")

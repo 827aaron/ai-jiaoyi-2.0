@@ -171,6 +171,7 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert ov.card is not None
     assert (ov.card.version, ov.card.regime, ov.card.valid) == (3, "震荡偏多", True)
     assert [s.symbol for s in ov.card.symbols] == ["BTCUSDT"]
+    assert ov.card.symbols[0].key_levels[0].model_dump() == {"price": 68000.0, "kind": "resistance"}
     assert ov.card.leverage_max is not None
 
     assert [a.level for a in ov.alerts] == ["warn"]

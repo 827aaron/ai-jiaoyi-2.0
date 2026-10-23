@@ -263,16 +263,41 @@ const json = (o) => (o && Object.keys(o).length ? `<pre class="json">${esc(JSON.
 const splitIdle = (list) => [list.filter((s) => s.bias !== "no_trade"), list.filter((s) => s.bias === "no_trade")];
 const idleLine = (idle) => `观望：${idle.slice(0, 6).map((s) => coin(s.symbol)).join("、")}${idle.length > 6 ? " 等" : ""} 共 ${idle.length} 个`;
 
-function showCard() {
+// 关键位分「支撑 / 压力」：有现价就按在现价下方 / 上方分（同慢环落卡），各自由近到远，标距现价百分比
+S.px = {};
+function levelsHtml(levels, px) {
+  if (!levels || !levels.length) return "";
+  const below = (l) => (px ? l.price < px : l.kind === "support");
+  const dist = (l) => (px ? Math.abs(l.price - px) : 0);
+  const fmt = (l) => `${price(l.price)}${px ? `<span class="dim">（${l.price >= px ? "+" : "−"}${(Math.abs(l.price - px) / px * 100).toFixed(1)}%）</span>` : ""}`;
+  const group = (name, list) => (list.length ? `<div class="small"><span class="dim">${name}</span> ${list.sort((a, b) => dist(a) - dist(b)).map(fmt).join(" · ")}</div>` : "");
+  return `${group("支撑", levels.filter(below))}${group("压力", levels.filter((l) => !below(l)))}${px ? `<div class="dim small">现价 ${price(px)}</div>` : ""}`;
+}
+
+// 弹窗打开时取一次各币现价（1 分钟线最后一根收盘），拿到后重画；取不到就只按类型分组、不标百分比
+async function loadCardPrices(c) {
+  const syms = c.symbols.filter((s) => s.key_levels && s.key_levels.length && !(s.symbol in S.px)).map((s) => s.symbol);
+  if (!syms.length) return;
+  await Promise.all(syms.map(async (sym) => {
+    try {
+      const bars = await getJson(`/api/klines?symbol=${encodeURIComponent(sym)}&interval=1m`);
+      if (bars.length) S.px[sym] = bars[bars.length - 1].close;
+    } catch (e) { /* 拿不到现价：照旧显示 */ }
+  }));
+  if ($("#layer .dlg.wide") && Object.keys(S.px).length) showCard(false);
+}
+
+function showCard(fetchPrices = true) {
   const c = data && data.card;
   if (!c) return;
+  if (fetchPrices) { S.px = {}; loadCardPrices(c); }
   // 观望 = 军师团看过、这一轮不开仓：默认收成一行，只把有方向的币摊开
   const [act, idle] = splitIdle(c.symbols);
   const row = (s) => {
     const [t, k] = BIAS[s.bias] || [s.bias, ""];
     return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(s.size_tier_max || "—")}</td>
-      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${s.key_levels.length ? `<div class="dim small">关键位：${s.key_levels.map(price).join(" / ")}</div>` : ""}</td></tr>`;
+      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}</td></tr>`;
   };
   const head = '<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th>单笔 U</th><th>最大档</th><th>理由</th></tr></thead>';
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
