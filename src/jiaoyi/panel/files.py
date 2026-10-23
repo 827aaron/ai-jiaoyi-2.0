@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord
+from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role
 from jiaoyi.contracts.position import PositionStatus
 from jiaoyi.core.recorder import local_day
 
@@ -79,6 +79,7 @@ class PanelFiles:
         self.root = Path(data_dir)
         self.tz = tz
         self._decisions = DecisionTail(self.root / "decision_log")
+        self._old: dict[tuple[date, frozenset[Role]], tuple[int, list[DecisionRecord]]] = {}
 
     def _json(self, name: str) -> Any:
         try:
@@ -95,6 +96,54 @@ class PanelFiles:
             out += [r for r in self._decisions.read_day(d) if local_day(r.ts, self.tz) == today]
         out.sort(key=lambda r: r.ts)
         return out
+
+    def decisions_since(
+        self, start: datetime, now: datetime, roles: frozenset[Role]
+    ) -> list[DecisionRecord]:
+        """``start`` 以来这几个角色的记录（历史页、资金页用），时间升序。
+
+        今天和昨天走增量缓存；更早的文件先按 ``"role":"…"`` 子串筛行再解析（哨兵一天上万行，
+        没必要全解析），结果按文件大小缓存。
+        """
+        recent = {now.date(), now.date() - timedelta(days=1)}
+        out: list[DecisionRecord] = []
+        d = start.date()
+        while d <= now.date():
+            if d in recent:
+                out += [r for r in self._decisions.read_day(d) if r.role in roles]
+            else:
+                out += self._old_day(d, roles)
+            d += timedelta(days=1)
+        out = [r for r in out if start <= r.ts <= now]
+        out.sort(key=lambda r: r.ts)
+        return out
+
+    def _old_day(self, day: date, roles: frozenset[Role]) -> list[DecisionRecord]:
+        path = self.root / "decision_log" / f"{day.isoformat()}.jsonl"
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return []
+        key = (day, roles)
+        hit = self._old.get(key)
+        if hit and hit[0] == size:
+            return hit[1]
+        needles = [f'"role":"{r.value}"'.encode() for r in roles]
+        recs: list[DecisionRecord] = []
+        with path.open("rb") as f:
+            for line in f:
+                if not any(n in line for n in needles):
+                    continue
+                try:
+                    rec = DecisionRecord.model_validate_json(line)
+                except ValidationError:
+                    continue
+                if rec.role in roles:
+                    recs.append(rec)
+        if len(self._old) > 128:
+            self._old.clear()
+        self._old[key] = (size, recs)
+        return recs
 
     def module_status(self) -> dict[str, ModuleStatus]:
         raw = self._json("module_status.json")

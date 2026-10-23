@@ -243,7 +243,10 @@ async def test_hb_reader_parses_and_caches() -> None:
                 200,
                 json={
                     "master_account": {
-                        "conn": [{"token": "USDT", "units": 1000.0}, {"token": "BNB", "units": 1.0}]
+                        "conn": [
+                            {"token": "USDT", "units": 1000.0, "available_units": 800.0},
+                            {"token": "BNB", "units": 1.0},
+                        ]
                     }
                 },
             )
@@ -261,6 +264,7 @@ async def test_hb_reader_parses_and_caches() -> None:
     )
     snap = await hb.snapshot()
     assert snap.ok and snap.equity_usdt == 1005.0 and snap.unrealized_of("ETHUSDT") == 5.0
+    assert snap.available_usdt == 800.0
     assert snap.unrealized_of("BTCUSDT") is None
     await hb.snapshot()
     assert len(calls) == 2  # 第二次走缓存
@@ -422,3 +426,57 @@ def test_page_endpoints(tmp_path: Path) -> None:
         assert client.get("/api/signal/none").json() == []
         assert client.get("/api/klines?symbol=BTCUSDT&interval=7m").status_code == 422
         assert client.get("/static/lib/lightweight-charts-4.2.0.js").status_code == 200
+
+
+def test_history_page(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    log = JsonlDecisionLog(tmp_path)
+    sig = load_example("position_record")["signal_id"]
+    log.write(
+        _rec(c.Role.SENTINEL, c.Outcome.ACTION, "信号", NOW - timedelta(hours=2), signal_id=sig,
+             output={"kind": "volume_breakout"})
+    )  # fmt: skip
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    page = build_history(files, RISK, NOW, "today")
+    assert page.trades == 1 and page.net_pnl_usdt == pytest.approx(12.5)
+    assert page.win_rate == 1.0 and page.max_drawdown_usdt == 0.0
+    assert [k.kind for k in page.by_kind] == ["volume_breakout"]
+    assert [r.text for r in page.rejected] == ["ETH 拍板放弃"]
+    assert len(page.curve) == 1
+
+
+def test_history_reads_older_days_with_role_filter(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    log = JsonlDecisionLog(tmp_path)
+    old = NOW - timedelta(days=5)
+    log.write(_rec(c.Role.GATE, c.Outcome.REJECT, "五天前放弃", old))
+    log.write(_rec(c.Role.KEEPER, c.Outcome.HOLD, "五天前拿住", old))
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    assert [r.text for r in build_history(files, RISK, NOW, "7d").rejected] == ["五天前放弃"]
+    assert build_history(files, RISK, NOW, "today").rejected == []
+
+
+def test_funds_page(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_funds
+
+    _seed(tmp_path)
+    page = build_funds(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW)
+    assert page.equity_usdt == pytest.approx(10_080.0)
+    assert page.realized_today_usdt == pytest.approx(12.5) and page.fees_today_usdt == 0.4
+    # 10080 = 10000 + 12.5 + (-20) + 其他
+    assert page.other_today_usdt == pytest.approx(87.5)
+    assert page.halt_line_usdt == pytest.approx(10_000 * (1 - RISK.daily_loss_halt_pct / 100))
+    gate = next(r for r in page.costs if r.role is c.Role.GATE)
+    assert gate.today_usd == pytest.approx(0.01)
+    assert page.cost_today_usd == pytest.approx(0.21)
+
+
+def test_history_and_funds_endpoints(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    with _client(tmp_path, "127.0.0.1") as client:
+        assert client.get("/api/history?range=7d").json()["range"] == "7d"
+        assert client.get("/api/history?range=1y").status_code == 422
+        assert client.get("/api/funds").status_code == 200

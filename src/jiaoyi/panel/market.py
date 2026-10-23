@@ -58,6 +58,8 @@ class KlineSource:
             }
             for r in rows
         ]
+        if len(self._cache) >= 64:  # 只画持仓的币，64 个足够；超了就整个清掉
+            self._cache.clear()
         self._cache[key] = (time.monotonic(), bars)
         return bars
 
