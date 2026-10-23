@@ -119,3 +119,18 @@ def test_corrupt_file_at_startup_is_flagged(tmp_path: Path, now: datetime) -> No
     (tmp_path / POOL_OVERRIDES_FILE).write_text("坏了", encoding="utf-8")
     app = _app(tmp_path, now)
     assert app.pool_overrides_corrupt and app.pool_overrides == PoolOverrides()
+    [backup] = list(tmp_path.glob(f"{POOL_OVERRIDES_FILE}.corrupt-*"))
+    assert backup.read_text(encoding="utf-8") == "坏了"
+
+
+async def test_corrupt_file_is_not_overwritten_by_a_panel_action(
+    tmp_path: Path, now: datetime
+) -> None:
+    """文件坏了时不拿“空 + 这一次操作”覆盖，免得原来的拉黑清单丢掉。"""
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    (tmp_path / POOL_OVERRIDES_FILE).write_text("坏了", encoding="utf-8")
+    write_command(tmp_path, _cmd(now, "pin_symbol", symbol="SOLUSDT"))
+    await r.command_tick()
+    res = _result(tmp_path, "cmd-pin_symbol-0001")
+    assert res["status"] == "rejected" and "读不出" in res["detail"]
+    assert (tmp_path / POOL_OVERRIDES_FILE).read_text(encoding="utf-8") == "坏了"
