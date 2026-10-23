@@ -67,7 +67,23 @@ async def test_okx_parses() -> None:
 
     items = await OkxAnnouncements(client(httpx.MockTransport(h))).fetch()
     kinds = {i.kind for i in items}
-    assert NewsKind.DELISTING in kinds and NewsKind.LISTING in kinds and len(items) == 4
+    assert NewsKind.DELISTING in kinds and NewsKind.LISTING in kinds and len(items) == 3
+    assert "announcements-trading-rules" not in OkxAnnouncements.TYPES  # 接口已下线，请求会 400
+
+
+async def test_okx_one_bad_type_does_not_sink_the_source() -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        t = req.url.params["annType"]
+        if t == "announcements-api":
+            return httpx.Response(400, json={"code": "51000", "data": []})  # 类型改名 / 下线
+        d = {"annType": t, "title": f"欧易 {t}", "url": f"https://okx/{t}", "pTime": str(MS)}
+        return httpx.Response(200, json={"code": "0", "data": [{"details": [d]}]})
+
+    items = await OkxAnnouncements(client(httpx.MockTransport(h))).fetch()
+    assert len(items) == 2  # 其它类照常
+    dead = httpx.MockTransport(lambda r: httpx.Response(500))
+    with pytest.raises(ValueError, match="全部失败"):
+        await OkxAnnouncements(client(dead)).fetch()
 
 
 RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
@@ -244,3 +260,23 @@ async def test_delisting_symbols_only_counts_binance() -> None:
     hub = NewsHub([src], clock=lambda: NOW)
     await hub.poll()
     assert hub.delisting_symbols(["AAAAUSDT", "BBBBUSDT"]) == {"AAAAUSDT"}
+
+
+async def test_flapping_source_logs_at_most_one_error_per_gap(tmp_path: Path) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    clock = [NOW]
+    flaky = Fake("okx", RuntimeError("429"))
+    hub = NewsHub([flaky], log, clock=lambda: clock[0])
+    for _ in range(4):  # 反复 失败 → 恢复 → 失败
+        flaky.items = RuntimeError("429")
+        await hub.poll()
+        flaky.items = []
+        await hub.poll()
+        clock[0] += timedelta(minutes=5)
+    errs = [r for r in log.read_day(NOW.date().isoformat()) if r.outcome.value == "error"]
+    assert len(errs) == 1  # 30 分钟内只记一条
+    clock[0] += timedelta(minutes=40)
+    flaky.items = RuntimeError("429")
+    await hub.poll()
+    errs = [r for r in log.read_day(NOW.date().isoformat()) if r.outcome.value == "error"]
+    assert len(errs) == 2

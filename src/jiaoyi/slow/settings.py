@@ -43,6 +43,13 @@ class LlmConfig(_Strict):
     )
 
 
+class SocialConfig(_Strict):
+    reddit: Literal["guarded", "off"] = Field(
+        default="guarded",
+        description="guarded=抓 Reddit 但加闸（缓存、限间隔、失败冷却）；off=不抓。",
+    )
+
+
 class MeetingConfig(_Strict):
     analysts_crypto: tuple[str, ...] = Field(
         default=("market", "social", "news"), description="加密币每次会议请哪几位分析师。"
@@ -141,6 +148,7 @@ class PricesConfig(_Strict):
 class SlowConfig(_Strict):
     llm: LlmConfig = LlmConfig()
     meeting: MeetingConfig = MeetingConfig()
+    social: SocialConfig = SocialConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     budget: BudgetConfig = BudgetConfig()
     prices: PricesConfig = PricesConfig()
@@ -159,6 +167,7 @@ class SlowConfig(_Strict):
             price_per_mtok={"flash": (p.flash_in, p.flash_out), "pro": (p.pro_in, p.pro_out)},
             analysts_crypto=m.analysts_crypto,
             analysts_stock=m.analysts_stock,
+            reddit=self.social.reddit,
             pick_tier=m.pick_tier,
             convert_tier=m.convert_tier,
         )
