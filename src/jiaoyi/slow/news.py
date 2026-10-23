@@ -27,6 +27,7 @@ from defusedxml import ElementTree
 from jiaoyi.contracts import DecisionRecord, Outcome, Role
 from jiaoyi.interfaces import DecisionLog
 
+MAX_RSS_BYTES = 2_000_000
 BLOCK_WINDOW = timedelta(days=7)
 """下架公告多久之内算数。合约真正下架通常在公告后几天。"""
 
@@ -62,7 +63,7 @@ class NewsSource(Protocol):
     async def fetch(self) -> list[NewsItem]: ...
 
 
-_DELIST = re.compile(r"下架|移除|终止|delist|remov", re.I)
+_DELIST = re.compile(r"下架|移除|delist|remov", re.I)
 _LIST = re.compile(r"上线|上新|上市|开启|launch|list(?:ing)?\b|will list", re.I)
 _CONTRACT = re.compile(
     r"调整|杠杆|保证金|合约|永续|adjust|leverage|margin|perpetual|contract", re.I
@@ -124,6 +125,9 @@ class BinanceAnnouncements:
         parts = await asyncio.gather(*(self._one(c) for c in self.CATALOGS))
         return [i for p in parts for i in p]
 
+    async def aclose(self) -> None:
+        await self._c.aclose()
+
 
 class OkxAnnouncements:
     """欧易 v5 公开公告接口（官方文档有）。注意出口 IP 不同看到的站点（全球 / 美国）不同。"""
@@ -160,6 +164,9 @@ class OkxAnnouncements:
                     )
         return out
 
+    async def aclose(self) -> None:
+        await self._c.aclose()
+
 
 DEFAULT_FEEDS = {
     "coindesk": "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -179,9 +186,14 @@ class RssNews:
         )
 
     async def fetch(self) -> list[NewsItem]:
-        r = await self._c.get(self._url)
-        r.raise_for_status()
-        root = ElementTree.fromstring(r.content)
+        async with self._c.stream("GET", self._url) as r:
+            r.raise_for_status()
+            body = b""
+            async for chunk in r.aiter_bytes():
+                body += chunk
+                if len(body) > MAX_RSS_BYTES:
+                    raise ValueError(f"RSS 超过 {MAX_RSS_BYTES} 字节，丢弃")
+        root = ElementTree.fromstring(body)
         out: list[NewsItem] = []
         for it in root.iter("item"):
             title = (it.findtext("title") or "").strip()
@@ -199,6 +211,9 @@ class RssNews:
         if not out:
             raise ValueError("RSS 里没有解析出任何条目")
         return out
+
+    async def aclose(self) -> None:
+        await self._c.aclose()
 
 
 def default_sources() -> list[NewsSource]:
@@ -334,6 +349,13 @@ class NewsHub:
         )[: self._max]
         self._items = {i.key: i for i in keep}
 
+    async def aclose(self) -> None:
+        """关掉各个源持有的 HTTP 客户端。"""
+        for src in self._sources:
+            close = getattr(src, "aclose", None)
+            if close is not None:
+                await close()
+
     @property
     def down_sources(self) -> set[str]:
         return set(self._down)
@@ -359,8 +381,10 @@ class NewsHub:
         return (ann[: limit // 2] + media)[:limit]
 
     def delisting_symbols(self, symbols: Iterable[str], hours: float = 72) -> set[str]:
-        """近期有下架 / 移除公告提到的币。风险信号：给保镖用，命中就不该新开仓。"""
-        items = [i for i in self._recent(hours) if i.kind is NewsKind.DELISTING]
+        """近期币安的下架 / 移除公告提到的币（口径与 ``poll_and_notify`` 的封禁一致）。"""
+        items = [
+            i for i in self._recent(hours) if i.kind is NewsKind.DELISTING and i.source == "binance"
+        ]
         return {s for s in symbols if any(_mentions(i.title, base_of(s)) for i in items)}
 
 

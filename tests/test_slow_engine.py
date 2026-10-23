@@ -16,6 +16,7 @@ from jiaoyi.slow.tradingagents_engine import (
     binance_symbol,
     build_config,
     draft_to_card_symbol,
+    format_derivatives,
     ta_ticker,
 )
 
@@ -138,3 +139,12 @@ async def test_binance_stats_source(now: datetime) -> None:
     assert b.listed_days == 30
     assert b.funding_rate == 0.0005
     await client.aclose()
+
+
+def test_format_derivatives() -> None:
+    funding = [{"fundingRate": "0.0001"}, {"fundingRate": "-0.0002"}, {"fundingRate": "0.0005"}]
+    oi = [{"sumOpenInterestValue": "100"}, {"sumOpenInterestValue": "112"}]
+    text = format_derivatives(funding, oi)
+    assert "+0.0500%" in text and "拥挤做多" in text
+    assert "变化 +12.00%" in text
+    assert "暂无数据" in format_derivatives([], [])

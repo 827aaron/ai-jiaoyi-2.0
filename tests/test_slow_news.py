@@ -221,3 +221,26 @@ async def test_binance_delisting_blocks_symbol_but_okx_and_media_do_not() -> Non
         lambda s, r: blocked.setdefault(s, r),
     )
     assert set(blocked) == {"PTBUSDT", "MITOUSDT"}  # 非币安、超过 7 天、媒体的都不挡
+
+
+async def test_rss_size_cap_and_aclose() -> None:
+    big = b"<rss>" + b"x" * 2_100_000 + b"</rss>"
+    t = httpx.MockTransport(lambda r: httpx.Response(200, content=big))
+    with pytest.raises(ValueError, match="超过"):
+        await RssNews("x", "https://x", client(t)).fetch()
+    src = RssNews("x", "https://x", client(httpx.MockTransport(lambda r: httpx.Response(200))))
+    await NewsHub([src], clock=lambda: NOW).aclose()
+    assert src._c.is_closed
+
+
+async def test_delisting_symbols_only_counts_binance() -> None:
+    src = Fake(
+        "s",
+        [
+            item("binance", "1", "币安将下架 AAAAUSDT", NewsKind.DELISTING),
+            item("okx", "2", "欧易将下架 BBBBUSDT", NewsKind.DELISTING),
+        ],
+    )
+    hub = NewsHub([src], clock=lambda: NOW)
+    await hub.poll()
+    assert hub.delisting_symbols(["AAAAUSDT", "BBBBUSDT"]) == {"AAAAUSDT"}
