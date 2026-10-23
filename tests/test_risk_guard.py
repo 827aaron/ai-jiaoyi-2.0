@@ -376,6 +376,21 @@ def test_guard_uses_configured_atr_timeframe(now: datetime) -> None:
     assert not v.approved and any("ATR 是 1 分钟口径" in r for r in v.reasons)
 
 
+def test_stop_atr_floored_by_7d_median(now: datetime) -> None:
+    """周末 ATR 只有平时一半：止损 ATR 至少按 7 天中位数 × atr_floor_7d 算。"""
+    quiet = features(now, atr=80.0).model_copy(update={"atr_median_7d": 200.0})
+    v = guard().review(signal(now, f=quiet), jev(), card(now), account(now), now)
+    assert v.approved and v.intent is not None, v.reasons
+    floored = v.intent.stop_loss_pct
+    v2 = guard(atr_floor_7d=0.0).review(signal(now, f=quiet), jev(), card(now), account(now), now)
+    assert v2.intent is not None and v2.intent.stop_loss_pct < floored  # 关掉就按当前 ATR
+    busy = features(now, atr=150.0).model_copy(update={"atr_median_7d": 100.0})
+    v3 = guard().review(signal(now, f=busy), jev(), card(now), account(now), now)
+    v4 = guard(atr_floor_7d=0.0).review(signal(now, f=busy), jev(), card(now), account(now), now)
+    assert v3.intent is not None and v4.intent is not None
+    assert v3.intent.stop_loss_pct == v4.intent.stop_loss_pct  # 当前 ATR 更大时不动
+
+
 def test_min_stop_atr_rejects_too_tight_card(now: datetime) -> None:
     tight = card(now, stop_atr={"min": 0.2, "max": 0.4})
     v = guard().review(signal(now), jev(), tight, account(now), now)

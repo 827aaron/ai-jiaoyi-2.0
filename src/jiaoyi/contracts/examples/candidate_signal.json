@@ -15,6 +15,7 @@
     "last_price": 68042.5,
     "atr": 85.2,
     "atr_period_min": 15,
+    "atr_median_7d": null,
     "values": {
       "ret_1m": 0.0031,
       "ret_5m": 0.0054,

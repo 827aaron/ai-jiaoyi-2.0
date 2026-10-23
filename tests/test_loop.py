@@ -276,11 +276,18 @@ async def test_backfill_skipped_for_stub_feed_and_runs_for_real(
         return []
 
     app.m = dataclasses.replace(app.m, feed=Feed())
-    await Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch5).backfill(
-        ["BTCUSDT", "ETHUSDT"]
-    )
+    hist: list[str] = []
+
+    async def fetch_hist(sym: str) -> list[c.Kline]:
+        hist.append(sym)
+        raise RuntimeError("超时")  # 7 天 ATR 历史拉不到：没有下限，不影响别的
+
+    await Runner(
+        app, fetch_klines=fetch, fetch_predictor_klines=fetch5, fetch_atr_history=fetch_hist
+    ).backfill(["BTCUSDT", "ETHUSDT"])
     assert sorted(calls) == ["BTCUSDT", "ETHUSDT"]  # 一个失败不影响别的
     assert sorted(five) == ["BTCUSDT", "ETHUSDT"]  # 预测员的 5 分钟线也补
+    assert sorted(hist) == ["BTCUSDT", "ETHUSDT"]  # 止损 ATR 下限的 7 天历史也补
 
 
 class FakePredictor:
@@ -351,7 +358,7 @@ async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: 
         return []
 
     app.m = dataclasses.replace(app.m, predictor=pred, feed=feed, cards=cards)
-    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch)
+    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch, fetch_atr_history=fetch)
     await r.sync_watch()
     assert feed.subs == [[]]  # 没有要盯的也订一次（全市场强平连接）
     await r.sync_watch()
@@ -362,7 +369,7 @@ async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: 
     await r.sync_watch()
     assert feed.subs[-1] == ["ETHUSDT", "SOLUSDT"]
     assert pred.priority == {"SOLUSDT", "ETHUSDT"}
-    assert sorted(filled) == ["ETHUSDT", "ETHUSDT", "SOLUSDT", "SOLUSDT"]  # 1m + 5m 各回填一次
+    assert sorted(filled) == ["ETHUSDT"] * 3 + ["SOLUSDT"] * 3  # 1m + 5m + 7 天 ATR 各回填一次
 
     card = h.card(now)
     on_card = {s.symbol for s in card.symbols}
@@ -404,7 +411,9 @@ async def test_backfill_feeds_recent_minutes_to_predictor(tmp_path: Path, now: d
     async def fetch5(sym: str) -> list[c.Kline]:
         return [k]
 
-    await Runner(app, fetch_klines=fetch1, fetch_predictor_klines=fetch5).backfill(["BTCUSDT"])
+    await Runner(
+        app, fetch_klines=fetch1, fetch_predictor_klines=fetch5, fetch_atr_history=fetch5
+    ).backfill(["BTCUSDT"])
     assert pred.filled == {"BTCUSDT": 1}
     assert pred.klines == 2  # 1 分钟线也交给预测员接上当前这根 5 分钟线
 
