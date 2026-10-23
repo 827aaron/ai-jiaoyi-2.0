@@ -27,6 +27,7 @@ from pydantic import BaseModel, ValidationError
 
 from jiaoyi.contracts import AppConfig, Category, RiskConfig
 from jiaoyi.contracts.risk_config import FastLoopConfig, PredictorConfig
+from jiaoyi.core import profiles
 from jiaoyi.core.commands import (
     RUNTIME_FILE,
     CommandKind,
@@ -36,11 +37,12 @@ from jiaoyi.core.commands import (
     read_paused,
     write_command,
 )
-from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config
+from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config, with_profile
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码校验；不碰交易所
 from jiaoyi.panel.files import read_live_gate
 from jiaoyi.panel.overview import Control
 from jiaoyi.slow.settings import ScheduleConfig, SlowConfig, load_slow_config
+from jiaoyi.slow.settings import with_profile as slow_with_profile
 
 CHANGES_FILE = "config_changes.jsonl"
 COMMAND_TTL = timedelta(seconds=60)
@@ -139,11 +141,8 @@ class ConfigPaths(BaseModel):
 
 def load_configs(paths: ConfigPaths) -> tuple[RiskConfig, AppConfig, SlowConfig]:
     """和主循环同一套读法（slow.toml 缺了用默认值），指纹才对得上。"""
-    return (
-        load_risk_config(paths.risk),
-        load_app_config(paths.app),
-        load_slow_config(paths.slow),
-    )
+    app = load_app_config(paths.app)
+    return load_risk_config(paths.risk), app, load_slow_config(paths.slow, app.profile)
 
 
 def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
@@ -204,7 +203,7 @@ def update_config(
         log.append({"key": key, "old": old, "new": value})
     if not log:
         return []
-    _validate(section, text)
+    _validate(section, text, paths)
     stamp = now.strftime("%Y%m%dT%H%M%S")
     if exists:
         shutil.copy2(path, path.with_name(f"{path.name}.bak-{stamp}"))
@@ -322,15 +321,17 @@ def _coerce(key: str, raw: Any, spec: FieldSpec) -> Value:
     return float(raw)
 
 
-def _validate(section: Section, text: str) -> None:
+def _validate(section: Section, text: str, paths: ConfigPaths) -> None:
+    """和启动时同一套校验：app / slow 都先垫上档位默认（core/profiles.py）。"""
     try:
         data = tomllib.loads(text)
         if section in ("risk", "category"):
             RiskConfig.model_validate(data)
         elif section == "schedule":
-            SlowConfig.model_validate(data)
+            raw_app = tomllib.loads(paths.app.read_text(encoding="utf-8"))
+            SlowConfig.model_validate(slow_with_profile(data, profiles.profile_of(raw_app)))
         else:
-            AppConfig.model_validate(data)
+            AppConfig.model_validate(with_profile(data))
     except tomllib.TOMLDecodeError as e:  # set_toml_value 出错才会到这
         raise ActionError(f"改完不是合法 TOML，没有保存：{e}") from e
     except ValidationError as e:

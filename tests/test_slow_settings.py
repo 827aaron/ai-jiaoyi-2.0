@@ -6,24 +6,41 @@ from pathlib import Path
 import pytest
 
 from jiaoyi.core.config import ConfigError
-from jiaoyi.slow.settings import SlowConfig, load_slow_config
+from jiaoyi.slow.settings import SlowConfig, load_slow_config, slow_defaults
 from jiaoyi.slow.tradingagents_engine import TradingAgentsSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_missing_file_equals_current_defaults(tmp_path: Path) -> None:
-    cfg = load_slow_config(tmp_path / "nope.toml")
+def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
+    cfg = load_slow_config(tmp_path / "nope.toml")  # 默认 2h 档
     assert cfg.engine_settings() == TradingAgentsSettings()
     kw = cfg.commander_kwargs()
     assert kw["concurrency"] == 4
     assert kw["ttl"] == timedelta(hours=2)
-    assert kw["symbol_min_interval"] == timedelta(hours=2)
+    assert kw["symbol_min_interval"] == timedelta(hours=1.67)
+    assert kw["expiry_lead"] == timedelta(minutes=20)
+    assert kw["symbol_timeout_s"] == 600 and kw["min_refresh_gap"] == timedelta(minutes=5)
+    assert cfg.effective_pick_max(20) == 10
+
+    one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()
+    assert one_hour["ttl"] == timedelta(hours=1) and one_hour["concurrency"] == 5
+    assert one_hour["expiry_lead"] == timedelta(minutes=15)
+    assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
     cfg = load_slow_config(ROOT / "config" / "slow.example.toml")
-    assert cfg == SlowConfig()
+    assert cfg == slow_defaults("2h")
+    assert SlowConfig().schedule.refresh_lead_min == 15  # 不在档位里时的代码默认
+
+
+def test_written_key_beats_profile(tmp_path: Path) -> None:
+    p = tmp_path / "slow.toml"
+    p.write_text("[schedule]\nconcurrency = 2\nrefresh_lead_min = 30\n", encoding="utf-8")
+    cfg = load_slow_config(p, "60m")
+    assert cfg.schedule.concurrency == 2 and cfg.schedule.refresh_lead_min == 30
+    assert cfg.schedule.card_ttl_hours == 1.0  # 没写的仍取档位
 
 
 def test_overrides(tmp_path: Path) -> None:

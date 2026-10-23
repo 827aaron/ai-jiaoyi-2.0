@@ -354,7 +354,7 @@ def test_settings_endpoints(tmp_path: Path) -> None:
         sched = {i["key"]: i for i in page["schedule"]}
         assert (
             sched["max_cards_per_round"]["nullable"]
-            and sched["max_cards_per_round"]["value"] is None
+            and sched["max_cards_per_round"]["value"] == 10  # slow.toml 没写：2h 档默认
         )
         body = {"section": "risk", "changes": {"max_leverage": 4}, "password": PW}
         r = client.post("/api/settings", json=body, headers=HEADERS)
@@ -407,9 +407,44 @@ def test_slow_schedule_created_and_cleared(tmp_path: Path) -> None:
     assert load_slow_config(paths.slow).schedule.max_cards_per_round == 8
     assert not list(paths.slow.parent.glob("slow.toml.bak-*"))  # 原来没有文件，不留备份
     actions.update_config(paths, data, "schedule", {"max_cards_per_round": None}, PW, NOW)
-    assert load_slow_config(paths.slow).schedule.max_cards_per_round is None
+    assert load_slow_config(paths.slow).schedule.max_cards_per_round == 10  # 清掉 = 回到 2h 档默认
     assert "max_cards_per_round" not in paths.slow.read_text(encoding="utf-8")
     with pytest.raises(ActionError, match="concurrency"):
         actions.update_config(paths, data, "schedule", {"concurrency": 20}, PW, NOW)
     rows = actions.recent_changes(data)
     assert rows[0]["key"] == "max_cards_per_round" and rows[0]["new"] is None
+
+
+def test_update_validates_with_profile_defaults(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    text = paths.app.read_text(encoding="utf-8").replace('profile = "2h"', 'profile = "60m"')
+    paths.app.write_text(text, encoding="utf-8")
+    # 示例里 predictor_enabled 等档位键没写：照样能改别的设置
+    actions.update_config(paths, data, "app", {"pool_size": 30}, PW, NOW)
+    # 档位给的 max_stop_atr = 2.0 也参与校验：存得下的值重启时也启动得了
+    with pytest.raises(ActionError, match=r"min_stop_atr|max_stop_atr"):
+        actions.update_config(paths, data, "fast_loop", {"min_stop_atr": 2.5}, PW, NOW)
+    load_app_config(paths.app)
+
+
+def test_config_pending_uses_profile_for_slow(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    text = paths.app.read_text(encoding="utf-8").replace('profile = "2h"', 'profile = "60m"')
+    paths.app.write_text(text, encoding="utf-8")
+    risk, app = load_risk_config(paths.risk), load_app_config(paths.app)
+    slow = load_slow_config(paths.slow, app.profile)  # 主循环就是这样读的
+    write_runtime(data, config_fingerprint=config_fingerprint(risk, app, slow))
+    assert actions.config_pending(paths, data) is False
+
+
+def test_schedule_validates_with_profile_defaults(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    actions.update_config(paths, data, "schedule", {"refresh_lead_min": 45}, PW, NOW)  # 2h 卡
+    text = paths.app.read_text(encoding="utf-8").replace('profile = "2h"', 'profile = "60m"')
+    paths.app.write_text(text, encoding="utf-8")
+    # 60m 档卡只有 1 小时：提前量 60 分钟存不下（启动时同样会被拒）
+    with pytest.raises(ActionError, match="refresh_lead_min"):
+        actions.update_config(paths, data, "schedule", {"refresh_lead_min": 60}, PW, NOW)
+    actions.update_config(paths, data, "schedule", {"refresh_lead_min": 20}, PW, NOW)
+    cfg = load_slow_config(paths.slow, "60m").schedule
+    assert cfg.refresh_lead_min == 20 and cfg.card_ttl_hours == 1.0

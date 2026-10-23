@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from jiaoyi.contracts import AppConfig, RiskConfig
+from jiaoyi.core import profiles
 
 DEFAULT_RISK_PATH = Path("config/risk.toml")
 DEFAULT_APP_PATH = Path("config/app.toml")
@@ -46,8 +47,18 @@ def load_risk_config(path: Path = DEFAULT_RISK_PATH) -> RiskConfig:
         raise _explain(path, e) from e
 
 
+def with_profile(raw: dict[str, object]) -> dict[str, object]:
+    """把档位默认垫到 app.toml 原始内容下面：写了的键优先，没写的用档位的。"""
+    profile = profiles.profile_of(raw)
+    top = {k: v for k, v in raw.items() if k != "fast_loop"}
+    fast = raw.get("fast_loop", {})
+    data = profiles.fill(top, profile, "app")
+    data["fast_loop"] = profiles.fill(fast if isinstance(fast, dict) else {}, profile, "fast_loop")
+    return data
+
+
 def load_app_config(path: Path = DEFAULT_APP_PATH) -> AppConfig:
-    data = _read_toml(path)
+    data = with_profile(_read_toml(path))
     try:
         return AppConfig.model_validate(data)
     except ValidationError as e:

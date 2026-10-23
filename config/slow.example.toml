@@ -1,4 +1,4 @@
-# 慢环（军师团）的成本和节奏。可选：没有 config/slow.toml 就用这里写的默认值（与现在行为一致）。
+# 慢环（军师团）的成本和节奏。可选：没有 config/slow.toml 就用默认值 + 持仓档位的默认。
 # 复制成 config/slow.toml 再改。这里不放任何风控数值，硬上限只在 risk.toml。
 
 [llm]
@@ -17,15 +17,19 @@ max_tokens  = 8192
 max_retries = 6
 
 [schedule]
-# max_cards_per_round = 10         # 每轮最多出几张作战卡（几个标的开会）；不写 = 用 app.toml 的 card_pick_max
-concurrency = 4                    # 同时开几个标的的会议 1–8
-card_ttl_hours = 2.0               # 作战卡有效期 1–4 小时
-symbol_min_interval_hours = 2.0    # 同一个币两次会议的最小间隔 0.5–12 小时
+# 这一段不写的键取 app.toml 所选持仓档位的默认（core/profiles.py）；写了就覆盖档位。下面注释里是 2h 档的值
+# max_cards_per_round = 10         # 每轮最多出几张作战卡（几个标的开会）；不超过 app.toml 的 card_pick_max
+# concurrency = 4                  # 同时开几个标的的会议 1–8
+# card_ttl_hours = 2.0             # 作战卡有效期 1–4 小时
+# symbol_min_interval_hours = 1.67 # 同一个币两次会议的最小间隔 0.5–12 小时（≤ 一轮周期）
+# refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 15）
+# symbol_timeout_s = 600           # 单个标的的会议超时
+# min_refresh_gap_min = 5          # 两轮开会的最小间隔（防抖）
 
 [budget]
 daily_cost_limit_usd = 10.0                # 每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒
 failed_meeting_cost_usd = 0.05             # 失败的会议拿不到真实用量时，按这个估算价计入日花费
-fail_backoff_minutes = [5, 10, 30]         # 开会连续失败后依次等多久再试，成功清零
+# fail_backoff_minutes = [5, 10, 30]       # 档位：开会连续失败后依次等多久再试，成功清零（1 小时卡的档位 5, 10, 15）
 
 [prices]                           # 每百万 token 的美元价，只用于花费统计；M2 真机验证时按官网核对
 flash_in = 0.15

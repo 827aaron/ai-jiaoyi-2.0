@@ -9,12 +9,14 @@ import getpass
 import shutil
 import subprocess
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jiaoyi.alerting.telegram import TelegramAlerter
-from jiaoyi.contracts import Alert, Role
+from jiaoyi.contracts import Alert, AppConfig, RiskConfig, Role
 from jiaoyi.contracts.module_status import AlertLevel
+from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.config import (
     DEFAULT_APP_PATH,
@@ -32,14 +34,39 @@ from jiaoyi.core.secrets import (
 )
 from jiaoyi.execution.factory import MissingSecret
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate, LiveGateError
-from jiaoyi.slow.settings import DEFAULT_SLOW_PATH, load_slow_config
+from jiaoyi.slow.settings import DEFAULT_SLOW_PATH, SlowConfig, load_slow_config
+
+
+def _load(args: argparse.Namespace) -> tuple[RiskConfig, AppConfig, SlowConfig]:
+    """读三份配置；slow.toml 里没写的节奏参数取 app.toml 所选档位的默认。"""
+    app = load_app_config(Path(args.app))
+    return load_risk_config(Path(args.risk)), app, load_slow_config(Path(args.slow), app.profile)
+
+
+def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:
+    """当前档位，以及配置文件里哪些键覆盖了档位默认（覆盖优先）。"""
+    raw_app = tomllib.loads(Path(args.app).read_text(encoding="utf-8"))
+    slow_path = Path(args.slow)
+    raw_slow = tomllib.loads(slow_path.read_text(encoding="utf-8")) if slow_path.is_file() else {}
+    sections: list[tuple[str, dict[str, object], profiles.Section]] = [
+        ("", raw_app, "app"),
+        ("fast_loop.", raw_app.get("fast_loop", {}), "fast_loop"),
+        ("schedule.", raw_slow.get("schedule", {}), "slow.schedule"),
+        ("budget.", raw_slow.get("budget", {}), "slow.budget"),
+    ]
+    keys = [
+        prefix + k
+        for prefix, raw, sec in sections
+        for k in profiles.overrides(raw, app.profile, sec)
+    ]
+    tag = "（仅模拟盘）" if app.profile in profiles.PAPER_ONLY else ""
+    tail = f"；单项覆盖档位默认：{', '.join(keys)}" if keys else ""
+    return f"持仓档位 {app.profile}{tag}{tail}"
 
 
 def _check_config(args: argparse.Namespace) -> int:
     try:
-        risk = load_risk_config(Path(args.risk))
-        app = load_app_config(Path(args.app))
-        load_slow_config(Path(args.slow))
+        risk, app, _ = _load(args)
     except ConfigError as e:
         print(e, file=sys.stderr)
         return 2
@@ -47,6 +74,7 @@ def _check_config(args: argparse.Namespace) -> int:
         f"配置合格。模式 {app.mode}，每笔风险 {risk.risk_per_trade_pct}%，"
         f"最大杠杆 {risk.max_leverage}x，日亏熔断 {risk.daily_loss_halt_pct}%。"
     )
+    print(_profile_line(args, app))
     return 0
 
 
@@ -156,14 +184,12 @@ def _status(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
 
     try:
-        app = App(
-            load_risk_config(Path(args.risk)),
-            load_app_config(Path(args.app)),
-            slow_cfg=load_slow_config(Path(args.slow)),
-        )
+        risk, app_cfg, slow = _load(args)
+        app = App(risk, app_cfg, slow_cfg=slow)
     except (ConfigError, LiveGateError, MissingSecret) as e:
         print(e, file=sys.stderr)
         return 2
+    print(_profile_line(args, app.app_cfg))
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
     from jiaoyi.app import read_blocked
@@ -182,15 +208,13 @@ def _run(args: argparse.Namespace) -> int:
     from jiaoyi.loop import Runner
 
     try:
-        app = App(
-            load_risk_config(Path(args.risk)),
-            load_app_config(Path(args.app)),
-            slow_cfg=load_slow_config(Path(args.slow)),
-        )
+        risk, app_cfg, slow = _load(args)
+        app = App(risk, app_cfg, slow_cfg=slow)
     except (ConfigError, LiveGateError, MissingSecret) as e:
         print(e, file=sys.stderr)
         return 2
     print(f"启动：模式 {app.app_cfg.mode.value}，拍板 {app.gate_label()}。Ctrl+C 停止。")
+    print(_profile_line(args, app.app_cfg))
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(Runner(app).run())
     return 0

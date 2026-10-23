@@ -3,8 +3,9 @@
 只管开会花多少钱、多频繁：分析师数量、辩论轮数、每个环节用 flash 还是 pro、并发、卡片有效期、
 每个币的最小开会间隔。**不放任何风控数值**（硬上限只在 ``risk.toml``）。
 
-和 ``risk.toml`` / ``app.toml`` 不同，这个文件可以不存在：缺文件就用默认值，默认值与不配置时
-完全一致（设计优化 (4) 要求“默认不变”）。写了但不合格（拼错字段、超范围）则报错拒绝启动。
+和 ``risk.toml`` / ``app.toml`` 不同，这个文件可以不存在：缺文件就用默认值。``[schedule]`` /
+``[budget]`` 里没写的键取当前持仓档位的默认（app.toml 的 ``profile``，见 ``core/profiles.py``）。
+写了但不合格（拼错字段、超范围）则报错拒绝启动。
 示例见 ``config/slow.example.toml``。
 """
 
@@ -15,8 +16,9 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.slow.tradingagents_engine import PROVIDER_MODELS, TradingAgentsSettings
 
@@ -79,6 +81,24 @@ class ScheduleConfig(_Strict):
     symbol_min_interval_hours: float = Field(
         default=2.0, ge=0.5, le=12.0, description="同一个币两次会议的最小间隔。"
     )
+    refresh_lead_min: float = Field(
+        default=15.0,
+        ge=5.0,
+        le=60.0,
+        description="作战卡到期前多久开会换卡。要大于一轮会议的耗时，否则卡过期到新卡出来之间不开新仓。",
+    )
+    symbol_timeout_s: float = Field(
+        default=600.0, ge=60.0, le=1800.0, description="单个标的的会议超时。"
+    )
+    min_refresh_gap_min: float = Field(
+        default=5.0, ge=1.0, le=60.0, description="两轮开会的最小间隔（防抖）。"
+    )
+
+    @model_validator(mode="after")
+    def _lead(self) -> ScheduleConfig:
+        if self.refresh_lead_min >= self.card_ttl_hours * 60:
+            raise ValueError("refresh_lead_min 必须小于作战卡有效期（card_ttl_hours × 60）")
+        return self
 
 
 class BudgetConfig(_Strict):
@@ -149,23 +169,47 @@ class SlowConfig(_Strict):
             "concurrency": s.concurrency,
             "ttl": timedelta(hours=s.card_ttl_hours),
             "symbol_min_interval": timedelta(hours=s.symbol_min_interval_hours),
+            "expiry_lead": timedelta(minutes=s.refresh_lead_min),
+            "symbol_timeout_s": s.symbol_timeout_s,
+            "min_refresh_gap": timedelta(minutes=s.min_refresh_gap_min),
             "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
             "failed_meeting_cost_usd": self.budget.failed_meeting_cost_usd,
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
         }
 
 
-def load_slow_config(path: Path = DEFAULT_SLOW_PATH) -> SlowConfig:
-    """缺文件 → 默认值；有文件但不合格 → ``ConfigError``。"""
+def with_profile(raw: dict[str, Any], profile: str) -> dict[str, Any]:
+    """档位默认垫在 slow.toml 下面：写了的键优先（见 core/profiles.py）。"""
+    data = dict(raw)
+    sections: tuple[tuple[str, profiles.Section], ...] = (
+        ("schedule", "slow.schedule"),
+        ("budget", "slow.budget"),
+    )
+    for name, key in sections:
+        section = data.get(name, {})
+        if isinstance(section, dict):
+            data[name] = profiles.fill(section, profile, key)
+    return data
+
+
+def slow_defaults(profile: str = profiles.DEFAULT_PROFILE) -> SlowConfig:
+    """没有 slow.toml 时用的配置：代码默认 + 档位默认。"""
+    return SlowConfig.model_validate(with_profile({}, profile))
+
+
+def load_slow_config(
+    path: Path = DEFAULT_SLOW_PATH, profile: str = profiles.DEFAULT_PROFILE
+) -> SlowConfig:
+    """缺文件 → 默认值（含档位）；有文件但不合格 → ``ConfigError``。"""
     if not path.is_file():
-        return SlowConfig()
+        return slow_defaults(profile)
     try:
         with path.open("rb") as f:
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path} 不是合法的 TOML：{e}") from e
     try:
-        return SlowConfig.model_validate(data)
+        return SlowConfig.model_validate(with_profile(data, profile))
     except ValidationError as e:
         lines = [f"{path} 不合格，拒绝启动："]
         for err in e.errors():

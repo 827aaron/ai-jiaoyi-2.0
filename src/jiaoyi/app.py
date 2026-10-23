@@ -38,6 +38,7 @@ from jiaoyi.contracts import (
     RunMode,
     SymbolPool,
 )
+from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
@@ -80,6 +81,7 @@ from jiaoyi.market.features import RollingFeatureEngine
 from jiaoyi.market.stub import StubMarketDataFeed
 from jiaoyi.patrol.rules import RulePatrol
 from jiaoyi.predictor import KronosForecaster
+from jiaoyi.predictor.kronos import KronosSettings
 from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
@@ -89,7 +91,7 @@ from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
-from jiaoyi.slow.settings import SlowConfig
+from jiaoyi.slow.settings import SlowConfig, slow_defaults
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
 
@@ -207,7 +209,7 @@ def _build_cards(
 
     新闻源只服务军师团（开会素材、大消息触发、下架封禁），军师团是桩时不拉新闻。
     """
-    cfg = slow_cfg or SlowConfig()  # 没有 config/slow.toml 就用默认值，行为不变
+    cfg = slow_cfg or slow_defaults(app_cfg.profile)  # 没有 config/slow.toml：默认值 + 档位
     key_env = PROVIDER_KEY_ENV[cfg.llm.provider]
     if not secrets.get(key_env):
         log.warning("没有 %s，军师团用桩：不出作战卡，快环不会开新仓", key_env)
@@ -399,7 +401,11 @@ def build_modules(
         )
 
     predictor = KronosForecaster(
-        app_cfg.predictor_enabled, log_sink=decision_log, clock=clock, cfg=app_cfg.predictor
+        app_cfg.predictor_enabled,
+        KronosSettings(**profiles.defaults(app_cfg.profile, "predictor")),  # 预测长度跟档位走
+        log_sink=decision_log,
+        clock=clock,
+        cfg=app_cfg.predictor,
     )
     features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
 
@@ -479,7 +485,7 @@ class App:
         self.gate_mode = "none"
         self.lot_rules: LotRulesProvider = StubLotRules()
         self.news: NewsHub | None = None
-        self.slow_cfg = slow_cfg or SlowConfig()
+        self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
         self.paused: dict[str, Any] | None = read_paused(app_cfg.data_dir)
         if modules is None:
