@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jiaoyi.contracts import RiskConfig, Role, RunMode
+from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.exchange import CcxtBinanceFutures
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
@@ -34,6 +36,12 @@ class ExecutionStack:
     lot_rules: ExchangeInfoLotRules
     api: HttpHummingbotApi
     exchange: CcxtBinanceFutures
+    account_name: str = "master_account"
+    connector_name: str = ""
+
+    async def verify_same_account(self) -> None:
+        """启动时调：hummingbot 与我们的 ccxt 必须是同一个币安账户，否则抛 AccountMismatch。"""
+        await verify_same_account(self.api, self.exchange, self.account_name, self.connector_name)
 
     async def close(self) -> None:
         await self.api.close()
@@ -87,7 +95,7 @@ def build_execution(
         # 没有门槛对象或没解锁，一律不建立实盘连接
         if live_gate is None:
             raise LiveGateError("live 模式必须提供 LiveGate")
-        live_gate.require_armed()
+        live_gate.require_armed(config_fingerprint(risk))
 
     def need(name: str) -> str:
         value = secrets.get(name)
@@ -140,4 +148,13 @@ def build_execution(
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
     )
     lot_rules = ExchangeInfoLotRules(exchange, recorder=recorder(Role.EXECUTOR))
-    return ExecutionStack(adapter, lifeboat, reconciler, lot_rules, api, exchange)
+    return ExecutionStack(
+        adapter,
+        lifeboat,
+        reconciler,
+        lot_rules,
+        api,
+        exchange,
+        account_name=account_name,
+        connector_name=CONNECTOR_BY_MODE[mode],
+    )

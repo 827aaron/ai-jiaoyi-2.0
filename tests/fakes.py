@@ -110,6 +110,7 @@ class FakeExchange:
         self.market_closed: list[tuple[str, str, float]] = []
         self.fail_market_close = False
         self.income = 0.0
+        self.wallet = 1000.0
         self.leverage_set: list[tuple[str, int]] = []
         self.leverage_error: str | None = None
         self.filters: dict[str, LotFilter] = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0)}
@@ -176,6 +177,9 @@ class FakeExchange:
         if self.income_down:
             raise ExchangeError("收入流水不可用")
         return self.income
+
+    async def wallet_usdt(self) -> float:
+        return self.wallet
 
     async def ensure_leverage(self, symbol: str, leverage: int) -> None:
         if self.leverage_error:

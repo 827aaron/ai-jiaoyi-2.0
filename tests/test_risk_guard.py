@@ -149,6 +149,15 @@ def test_account_level_rejections(now: datetime) -> None:
     assert not g.review(signal(now), jev(), card(now), full, now).approved
 
 
+def test_symbol_already_held_is_rejected(now: datetime) -> None:
+    sig = signal(now)
+    held = account(now, open_positions=1, open_symbols=[sig.symbol])
+    v = guard().review(sig, jev(), card(now), held, now)
+    assert not v.approved and any("已有在管持仓" in r for r in v.reasons)
+    other = account(now, open_positions=1, open_symbols=["NOTHELDUSDT"])
+    assert guard().review(sig, jev(), card(now), other, now).approved
+
+
 def test_exposure_caps_use_card_category(now: datetime) -> None:
     # major 组上限 2 倍权益 = 20000U，已经占满
     acct = account(now, open_notional_usdt=20_000.0, open_notional_by_category={"major": 20_000.0})

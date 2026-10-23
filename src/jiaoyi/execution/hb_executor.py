@@ -16,7 +16,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
@@ -59,6 +59,10 @@ _CLOSE_TYPE_MAP = {
     "TIME_LIMIT": CloseReason.TIME_LIMIT,
     "EXPIRED": CloseReason.TIME_LIMIT,
 }
+
+
+class SymbolAlreadyHeld(RuntimeError):
+    """同一个币已有在管持仓，执行层拒绝再开。"""
 
 
 _TRADE_BUY = 1
@@ -141,6 +145,13 @@ class HbExecutorAdapter:
         existing = self._registry.by_intent(intent.intent_id)
         if existing is not None:  # 重试同一条指令不重复开仓
             return existing.record
+        # 执行侧兜底（保镖也会拦）：同一个币已有在管持仓就拒绝。单向持仓模式下，第二笔——尤其反向——
+        # 会把原仓对冲掉甚至反手，保命止损还会错位。放在改杠杆之前：ensure_leverage 改的是整个合约。
+        held = next((t for t in self._registry.live() if t.record.symbol == intent.symbol), None)
+        if held is not None:
+            raise SymbolAlreadyHeld(
+                f"{intent.symbol} 已有在管持仓 {held.record.position_id}，拒绝再开"
+            )
         now = self._clock()
         record = PositionRecord(
             position_id=f"pos-{uuid.uuid4().hex[:12]}",
@@ -265,6 +276,35 @@ class HbExecutorAdapter:
                 closed_at=None,
             )
 
+    async def _cancel_lifeboat(self, rec: PositionRecord) -> None:
+        """仓已平后撤掉它的保命止损，失败重试几次。
+
+        残留的只减仓止损在同币随后开新仓时会把新仓平掉，所以直连平仓、执行器结束两条路径都要撤。
+        撤不掉就告警，对账员下一轮会清扫残留。
+        """
+        last: Exception | None = None
+        for attempt in range(self._lifeboat_attempts):
+            try:
+                await self._lifeboat.cancel(rec)
+                return
+            except Exception as e:
+                last = e
+                log.warning("撤保命止损第 %d 次失败 %s：%r", attempt + 1, rec.position_id, e)
+                await self._sleep(self._poll_s)
+        await self._alert(
+            AlertLevel.WARN,
+            "平仓后撤保命止损失败",
+            f"{rec.symbol} {rec.position_id}：{last!r}",
+            rec.symbol,
+            f"lifeboat_cancel_failed:{rec.position_id}",
+        )
+
+    async def release_lifeboat(self, position_id: str) -> None:
+        """对账员直连平仓成功、记为已平之后调：撤掉该仓的保命止损。"""
+        tracked = self._registry.get(position_id)
+        if tracked is not None:
+            await self._cancel_lifeboat(tracked.record)
+
     def mark_closed_directly(self, position_id: str, reason: CloseReason) -> None:
         """对账员绕过 hummingbot 直连币安平仓成功后，把账本记为已平，免得每轮重复告警。"""
         tracked = self._registry.get(position_id)
@@ -300,8 +340,12 @@ class HbExecutorAdapter:
         )
         try:
             await self._api.stop_executor(executor_id, keep_position=False)
-        except Exception:
-            # 没停成：退回原状态，下一轮对账还能继续处理这笔仓
+        except Exception as via_hb:
+            # 没停成。已成交、有币安连接就直连只减仓市价平掉兜底；否则退回原状态，下一轮对账再处理
+            if tracked.record.status is PositionStatus.CLOSING and await self._close_directly(
+                before, reason, via_hb
+            ):
+                return
             self._registry.put(before)
             raise
         # 等执行器真的结束再撤保命止损：平仓没成功之前，币安上的保命止损必须还在
@@ -320,6 +364,40 @@ class HbExecutorAdapter:
                 )
                 return
             await self._sleep(self._poll_s)
+
+    async def _close_directly(
+        self, tracked: TrackedPosition, reason: CloseReason, via_hb: Exception
+    ) -> bool:
+        """hummingbot 停不掉执行器时，直连币安下只减仓市价单。成功返回 True 并记为已平。
+
+        只对已成交的仓做；开仓中的单子币安上可能还没有仓位，直连没有意义。
+        """
+        rec = tracked.record
+        if self._exchange is None or rec.status is not PositionStatus.OPEN:
+            return False
+        close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
+        try:
+            await self._exchange.close_position_market(rec.symbol, close_side, rec.quantity)
+        except Exception as direct:
+            # 两条路都不通：原样抛 hummingbot 的错，由调用方（对账员 / 主循环）告警
+            log.error("直连平仓也失败 %s：%r", rec.position_id, direct)
+            return False
+        self.mark_closed_directly(rec.position_id, reason)
+        await self._cancel_lifeboat(rec)
+        await self._alert(
+            AlertLevel.WARN,
+            "hummingbot 停不掉执行器，已直连币安平仓",
+            f"{rec.symbol} {rec.position_id}：{via_hb!r}",
+            rec.symbol,
+            f"closed_directly:{rec.position_id}",
+        )
+        # 执行器可能还活着：尽力停一次，免得它之后对不存在的仓位再下单（失败不影响已平的结果）
+        if rec.executor_id:
+            try:
+                await self._api.stop_executor(rec.executor_id, keep_position=False)
+            except Exception:
+                log.warning("直连平仓后停执行器仍失败 %s", rec.executor_id, exc_info=True)
+        return True
 
     # ------------------------------------------------------------------ 查询与同步
 
@@ -439,17 +517,7 @@ class HbExecutorAdapter:
                 rec.symbol,
                 f"never_filled:{rec.position_id}",
             )
-        try:
-            await self._lifeboat.cancel(tracked.record)
-        except Exception as e:
-            # 撤不掉不致命（仓位已平，只减仓单不会开出新仓），对账员会清扫残留
-            await self._alert(
-                AlertLevel.WARN,
-                "平仓后撤保命止损失败",
-                f"{rec.symbol} {rec.position_id}：{e!r}",
-                rec.symbol,
-                f"lifeboat_cancel_failed:{rec.position_id}",
-            )
+        await self._cancel_lifeboat(tracked.record)
         return tracked
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
@@ -483,6 +551,22 @@ class HbExecutorAdapter:
             # 还没成交的（OPENING）没有入场价，按指令里的名义价值算，否则连发的信号会少算敞口
             notional = t.record.notional_usdt if t.record.entry_price else t.notional_usdt
             by_category[t.record.category] = by_category.get(t.record.category, 0.0) + notional
+        open_risk = 0.0
+        for t in live:
+            base = (
+                t.record.quantity * t.record.entry_price
+                if t.record.entry_price
+                else t.notional_usdt
+            )
+            open_risk += base * t.lifeboat_stop_pct / 100.0
+        midnight = now.astimezone(self._tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_realized = sum(
+            t.record.realized_pnl_usdt or 0.0
+            for t in self._registry.data.positions.values()
+            if t.record.status is PositionStatus.CLOSED
+            and t.record.closed_at is not None
+            and t.record.closed_at >= midnight
+        )
         return AccountState(
             ts=now,
             equity_usdt=equity,
@@ -491,6 +575,9 @@ class HbExecutorAdapter:
             open_notional_usdt=sum(by_category.values()),
             open_notional_by_category=by_category,
             open_positions=len(live),
+            open_symbols=sorted({t.record.symbol for t in live}),
+            open_risk_usdt=open_risk,
+            day_realized_pnl_usdt=day_realized,
         )
 
     async def _day_start(self, now: datetime, wallet: float, equity: float) -> float:

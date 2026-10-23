@@ -271,3 +271,31 @@ async def test_start_warms_up_decision_model(tmp_path: Path, now: datetime) -> N
     await app.start()
     assert t.calls == ["warmup"] and app.started
     await app.stop()
+
+
+async def test_start_refuses_on_account_mismatch_and_alerts(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.execution.account_check import AccountMismatch
+
+    app = _app(tmp_path, now)
+
+    async def mismatch() -> None:
+        raise AccountMismatch("USDT 余额对不上")
+
+    app._startup_checks = [mismatch]
+    with pytest.raises(AccountMismatch):
+        await app.start()
+    assert not app.started
+
+
+async def test_unreadable_account_check_only_warns_outside_live(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)  # paper
+
+    async def unreadable() -> None:
+        raise RuntimeError("hummingbot 不可达")
+
+    app._startup_checks = [unreadable]
+    await app.start()
+    assert app.started
+    await app.stop()

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -42,6 +42,7 @@ from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, 
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.execution.account_check import AccountMismatch
 from jiaoyi.execution.factory import MissingSecret, build_execution
 from jiaoyi.execution.live_gate import LiveGate
 from jiaoyi.execution.stub import (
@@ -255,6 +256,8 @@ class Built:
     """下单精度。不是角色，不进 ``Modules``；``App.start`` 和主循环负责定时刷新。"""
     news: NewsHub | None = None
     """新闻 / 公告源。只有真军师团时才有；主循环定时 ``poll_and_notify``。"""
+    startup_checks: list[Closer] = field(default_factory=list)
+    """启动前必须通过的核对（hummingbot 与 ccxt 是同一账户）；抛异常即拒绝启动。"""
 
 
 def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
@@ -276,6 +279,7 @@ def _build_execution(
     clock: Clock,
     closers: list[Closer],
     decision_log: JsonlDecisionLog,
+    startup_checks: list[Closer],
 ) -> tuple[ExecutorAdapter, LifeboatStop, Reconciler, LotRulesProvider]:
     """执行层按模式选币安密钥（testnet/paper 用测试网的，live 用主网的）。
 
@@ -301,6 +305,7 @@ def _build_execution(
         log.warning("执行层缺密钥，%s 模式下不开仓", mode.value, exc_info=True)
         return StubExecutorAdapter(clock()), StubLifeboatStop(), StubReconciler(), StubLotRules()
     closers.append(stack.close)
+    startup_checks.append(stack.verify_same_account)
     return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules
 
 
@@ -322,6 +327,7 @@ def build_modules(
     fast = app_cfg.fast_loop
     tz = risk_cfg.day_reset_tz
     closers: list[Closer] = []
+    startup_checks: list[Closer] = []
     recorders = {
         role: RoleRecorder(role, decision_log, day_reset_tz=tz)
         for role in (
@@ -383,7 +389,7 @@ def build_modules(
     else:
         alerter = _build_alerter(secrets, closers)
         executor, lifeboat, reconciler, lot_rules = _build_execution(
-            risk_cfg, app_cfg, secrets, alerter, clock, closers, decision_log
+            risk_cfg, app_cfg, secrets, alerter, clock, closers, decision_log, startup_checks
         )
 
     predictor = KronosForecaster(app_cfg.predictor_enabled, log_sink=decision_log, clock=clock)
@@ -437,7 +443,7 @@ def build_modules(
         cards=cards,
         alerter=alerter,
     )
-    return Built(modules, closers, recorders, gate_mode, lot_rules, news)
+    return Built(modules, closers, recorders, gate_mode, lot_rules, news, startup_checks)
 
 
 class App:
@@ -460,6 +466,7 @@ class App:
         self.clock = clock
         self.log = decision_log or JsonlDecisionLog(app_cfg.data_dir)
         self._closers: list[Closer] = []
+        self._startup_checks: list[Closer] = []
         self.recorders: dict[Role, RoleRecorder] = {}
         self.gate_mode = "none"
         self.lot_rules: LotRulesProvider = StubLotRules()
@@ -478,6 +485,7 @@ class App:
                 slow_cfg=slow_cfg,
             )
             modules, self._closers = built.modules, built.closers
+            self._startup_checks = built.startup_checks
             self.recorders, self.gate_mode = built.recorders, built.gate_mode
             self.lot_rules = built.lot_rules
             self.news = built.news
@@ -485,11 +493,26 @@ class App:
         self.pool: SymbolPool | None = None
         self.started = False
 
+    async def _run_startup_checks(self) -> None:
+        """账户核对不过一律拒绝启动；读不到（网络）时 live 也拒绝，模拟盘只告警。"""
+        for check in self._startup_checks:
+            try:
+                await check()
+            except AccountMismatch as e:
+                await self._alert(AlertLevel.CRITICAL, "拒绝启动：账户核对不一致", str(e))
+                raise
+            except Exception as e:
+                if self.app_cfg.mode == RunMode.LIVE:
+                    await self._alert(AlertLevel.CRITICAL, "拒绝启动：读不到账户做核对", repr(e))
+                    raise
+                log.warning("启动账户核对读不到数据，模拟盘继续：%r", e)
+
     async def start(self) -> None:
         """按保命优先的顺序启动。对账失败不阻止启动，但会告警（重启后先对账）。"""
         if self.started:
             return
         now = self.clock()
+        await self._run_startup_checks()
         try:
             report = await self.m.reconciler.reconcile(now)
             if not report.clean:

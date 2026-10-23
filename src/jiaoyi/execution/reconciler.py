@@ -176,6 +176,23 @@ class ThreeWayReconciler:
         running_ids = {str(e.get("executor_id")) for e in running}
         for t in live:
             if t.record.executor_id and t.record.executor_id not in running_ids:
+                rec = t.record
+                if (
+                    rec.status is PositionStatus.OPEN
+                    and rec.symbol not in flattened
+                    and exchange_qty.get(rec.symbol, 0.0) > 0
+                ):
+                    # 执行器没了（hummingbot 重启 / 丢状态），止盈止损和时间限制都没人管，
+                    # 币安上却还有仓：直连只减仓平掉，不能让它裸奔到只剩保命止损
+                    issue, was_flattened = await self._flatten(
+                        rec.position_id,
+                        "hummingbot 里执行器已消失但币安仍有仓",
+                        kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                    )
+                    issues.append(issue)
+                    if was_flattened:
+                        flattened.add(rec.symbol)
+                        continue
                 issues.append(
                     ReconcileIssue(
                         kind=ReconcileIssueKind.EXECUTOR_FAILED,
@@ -320,7 +337,13 @@ class ThreeWayReconciler:
             fixed=True,
         ), False
 
-    async def _flatten(self, position_id: str, why: str) -> tuple[ReconcileIssue, bool]:
+    async def _flatten(
+        self,
+        position_id: str,
+        why: str,
+        *,
+        kind: ReconcileIssueKind = ReconcileIssueKind.LIFEBOAT_MISSING,
+    ) -> tuple[ReconcileIssue, bool]:
         """平掉没有保命止损的仓。先走 hummingbot；它不可达时直连币安下只减仓市价单兜底。"""
         tracked = self._registry.get(position_id)
         assert tracked is not None
@@ -328,7 +351,7 @@ class ThreeWayReconciler:
 
         def issue(detail: str, fixed: bool) -> ReconcileIssue:
             return ReconcileIssue(
-                kind=ReconcileIssueKind.LIFEBOAT_MISSING,
+                kind=kind,
                 symbol=rec.symbol,
                 position_id=position_id,
                 detail=detail,
@@ -350,6 +373,7 @@ class ThreeWayReconciler:
                 )
             self._lb_failures.pop(position_id, None)
             self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER)
+            await self._adapter.release_lifeboat(position_id)
             return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
         self._lb_failures.pop(position_id, None)
         return issue(f"{why}，保命止损补不上，已平仓", True), True

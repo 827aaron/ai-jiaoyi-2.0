@@ -6,5 +6,8 @@
   "open_notional_usdt": 0.0,
   "open_notional_by_category": {},
   "open_positions": 0,
+  "open_symbols": [],
+  "open_risk_usdt": 0.0,
+  "day_realized_pnl_usdt": 0.0,
   "paused": false
 }
