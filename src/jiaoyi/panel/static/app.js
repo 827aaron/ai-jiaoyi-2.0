@@ -702,6 +702,25 @@ function exportCsv() {
 }
 
 /* ---------- 资金 */
+// 净赚多少：交易盈亏 + 手续费 + 资金费 − AI 费，按 今天 / 近 7 天 / 累计
+function pnlCard(d) {
+  if (!d.pnl || !d.pnl.length) return "";
+  const cell = (v) => (v == null ? '<td class="r num dim">—</td>' : `<td class="r num ${cls(v)}">${signed(v, 2)}</td>`);
+  const rows = [
+    ["交易盈亏", "平仓赚亏，手续费前", (p) => p.trading_usdt],
+    ["手续费", "币安收的，开平各一次", (p) => p.fees_usdt],
+    ["资金费", "持仓过结算点时多空互付", (p) => p.funding_usdt],
+    ["AI 费", "拍板人、军师团等调用大模型，按 1 美元 ≈ 1 U", (p) => -p.ai_usd],
+  ].map(([n, h, f]) => `<tr><td class="hi">${n}<div class="dim small">${h}</div></td>${d.pnl.map((p) => cell(f(p))).join("")}</tr>`).join("");
+  const net = `<tr class="total"><td class="hi">净盈亏</td>${d.pnl.map((p) => `<td class="r num ${cls(p.net_usdt)}"><b>${signed(p.net_usdt, 2)}</b></td>`).join("")}</tr>`;
+  const src = d.pnl_source === "exchange"
+    ? `交易盈亏、手续费、资金费来自币安收入流水（主程序每 5 分钟拉一次）。累计从 ${esc(d.pnl_since)} 算起。`
+    : `主程序还没开始记币安收入流水，交易盈亏和手续费先按账本里平掉的单算，资金费暂时看不到。${d.pnl_since ? `累计从 ${esc(d.pnl_since)} 算起。` : ""}`;
+  return `<section class="card mt"><div class="ch"><h2>扣掉所有成本，净赚多少</h2><span class="r">单位 U · 负数是亏或花出去的</span></div>
+    <div class="tw"><table><thead><tr><th></th>${d.pnl.map((p) => `<th class="r">${esc(p.label)}</th>`).join("")}</tr></thead><tbody>${rows}${net}</tbody></table></div>
+    <div class="foot">净盈亏 = 交易盈亏 + 手续费 + 资金费 − AI 费。不含浮盈浮亏（还没平的仓）。${src}</div></section>`;
+}
+
 P.funds = () => {
   const d = pageData;
   const k = data.kpis;
@@ -721,6 +740,7 @@ P.funds = () => {
     [d.halt_line_usdt == null ? "—" : money(d.halt_line_usdt, 0) + " U", d.halted ? "熔断线（已触发）" : "熔断线", d.halted ? "down" : ""],
   ];
   return `<div class="tiles t5">${tiles.map(([v, l, c]) => `<div class="tile"><small>${l}</small><b class="${c || ""}">${v}</b></div>`).join("")}</div>
+    ${pnlCard(d)}
     <div class="grid g2 mt">
       <section class="card"><div class="ch"><h2>今天的钱是怎么变的</h2><span class="r">曼谷 00:00 起算</span></div><div class="form">${flow}</div>
         <div class="foot">${d.equity_source === "hummingbot" ? `账户数字都从币安${data.mode === "live" ? "实盘" : " Demo"}账户实时拉（经 hummingbot-api），不能手填。` : "hummingbot-api 没连上，总资产暂用账本里最后一次记录。"}今天手续费 ${money(d.fees_today_usdt, 2)} U。今日盈亏 ${signed(k.day_pnl_usdt, 2)} U（${k.day_pnl_pct == null ? "—" : signed(k.day_pnl_pct, 2) + "%"}），跌到熔断线就停开新仓到第二天。</div></section>

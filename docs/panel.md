@@ -37,6 +37,14 @@ Mac mini 本机打开 http://localhost:8090 ；手机 / 其他电脑用 Mac mini
 正常（上次 hh:mm）/ 降级运行（上次 hh:mm）/ 失败：原因 / 无心跳超过 N 分钟（最后 hh:mm）。
 第二行是模块自己报的今日要点。
 
+## 资金页的净盈亏
+
+「扣掉所有成本，净赚多少」按 今天 / 近 7 天 / 累计 列 交易盈亏、手续费、资金费、AI 费、净盈亏
+（净 = 交易 + 手续费 + 资金费 − AI 费，不含浮盈浮亏）。前三项读 `data/income_daily.json`
+（主程序每 5 分钟拉币安收入流水按当地日汇总：`{"tz", "updated_at", "since", "days": {"YYYY-MM-DD":
+{"realized_pnl", "commission", "funding_fee"}}}`，币安原始正负号）；文件没有时退回账本，资金费显示“—”。
+AI 费按决策记录的 `cost_usd`，1 美元按 1 U 算。
+
 ## 首次设置（/setup）
 
 换一台 Mac 不用敲命令：`bootstrap_mac.sh` 装完会在本机打开 http://127.0.0.1:8090/setup 。

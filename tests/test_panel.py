@@ -491,6 +491,35 @@ def test_funds_page(tmp_path: Path) -> None:
     assert gate.today_usd == pytest.approx(0.01)
     assert page.cost_today_usd == pytest.approx(0.21)
 
+    # 没有 income_daily.json：交易盈亏 / 手续费按账本，资金费不知道
+    assert page.pnl_source == "ledger"
+    today = page.pnl[0]
+    assert (today.key, today.funding_usdt) == ("today", None)
+    assert today.trading_usdt == pytest.approx(12.9) and today.fees_usdt == pytest.approx(-0.4)
+    assert today.net_usdt == pytest.approx(12.5 - 0.21)
+
+
+def test_funds_pnl_from_exchange_income(tmp_path: Path) -> None:
+    """有币安收入流水：今天 / 近 7 天 / 累计都按它算，净盈亏扣掉 AI 费；坏的天跳过。"""
+    from jiaoyi.panel.pages import build_funds
+
+    _seed(tmp_path)
+    days = {
+        "2026-10-22": {"realized_pnl": 30.0, "commission": -2.0, "funding_fee": -0.5},
+        "2026-10-18": {"realized_pnl": -10.0, "commission": -1.0, "funding_fee": 0.2},
+        "2026-10-01": {"realized_pnl": 100.0, "commission": -5.0, "funding_fee": 1.0},
+        "bad": {"realized_pnl": 1.0},
+        "2026-10-20": {"realized_pnl": "x"},
+    }
+    (tmp_path / "income_daily.json").write_text(json.dumps({"tz": "Asia/Bangkok", "days": days}))
+    page = build_funds(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW)
+    assert page.pnl_source == "exchange" and str(page.pnl_since) == "2026-10-01"
+    today, week, total = page.pnl
+    assert (today.trading_usdt, today.fees_usdt, today.funding_usdt) == (30.0, -2.0, -0.5)
+    assert today.net_usdt == pytest.approx(27.5 - 0.21)
+    assert week.trading_usdt == pytest.approx(20.0) and week.funding_usdt == pytest.approx(-0.3)
+    assert total.trading_usdt == pytest.approx(120.0) and total.fees_usdt == pytest.approx(-8.0)
+
 
 def test_history_and_funds_endpoints(tmp_path: Path) -> None:
     _seed(tmp_path)
