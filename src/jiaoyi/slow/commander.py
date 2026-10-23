@@ -17,6 +17,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -181,6 +182,8 @@ class BattleCardCommander:
         self._held: dict[str, Side] = {}
         self._progress = ""
         self._last_error: str | None = None
+        self._meeting_costs: deque[float] = deque(maxlen=8)
+        self._pick_costs: deque[float] = deque(maxlen=4)
         self._restored = False
         self._beat_s = 30.0
         self._fails = 0
@@ -438,13 +441,18 @@ class BattleCardCommander:
         pinned = [*pinned, *held_in]
         room = max(self._pick_max - len(pinned), 0)
         free = [e for e in candidates if e not in pinned]
+        est = self._estimate(self._pick_costs)
+        self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
         try:
             picked = await self._engine.pick(free, max(room, 0), self._card)
         except Exception as exc:
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
-            self._charge(self._failure_cost(exc))
+            self._charge(self._failure_cost(exc) - est)
             raise
-        self._charge(picked.cost_usd)  # 选币的花费一出结果就计，哪怕后面所有标的都失败
+        self._charge(
+            picked.cost_usd - est
+        )  # 选币的花费一出结果就改成实际值，哪怕后面所有标的都失败
+        self._pick_costs.append(picked.cost_usd)
         chosen = list(pinned)
         for p in picked.picks:
             e = by_symbol.get(p.symbol)
@@ -566,11 +574,14 @@ class BattleCardCommander:
     async def _analyze_one(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
         async with self._sem:
             started = time.monotonic()
+            est = self._estimate(self._meeting_costs)
+            self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             try:
                 res = await asyncio.wait_for(
                     self._engine.analyze(entry, regime), self._symbol_timeout_s
                 )
             except Exception as exc:
+                self._charge(-est)
                 self._log_symbol(
                     entry,
                     Outcome.ERROR,
@@ -579,6 +590,8 @@ class BattleCardCommander:
                     self._failure_cost(exc),
                 )
                 raise
+            self._charge(-est)
+            self._meeting_costs.append(res.cost_usd)
             try:
                 cs = self._validate(entry, res)
             except Exception as exc:
@@ -636,9 +649,13 @@ class BattleCardCommander:
         """只记花费、不算一次调用（选币步骤，或不属于某个标的的花费）。"""
         self._roll(self._clock())
         self._stats = self._stats.model_copy(
-            update={"cost_usd": round(self._stats.cost_usd + cost, 6)}
+            update={"cost_usd": max(round(self._stats.cost_usd + cost, 6), 0.0)}
         )
         self._save_budget()
+
+    def _estimate(self, recent: deque[float]) -> float:
+        """开会前预记的钱：最近几场的平均实际花费，没有就用 ``failed_meeting_cost_usd``。"""
+        return round(sum(recent) / len(recent), 6) if recent else self._failed_cost
 
     def _failure_cost(self, exc: BaseException) -> float:
         """失败会议的花费：引擎给了真实 usage 就用它，否则（超时、断网等）按估算上限计。"""

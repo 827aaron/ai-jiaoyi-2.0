@@ -648,3 +648,33 @@ def test_heartbeat_when_idle_and_after_restore(tmp_path: Path, now: datetime) ->
     later = now + timedelta(hours=3)
     c2.heartbeat(later)
     assert "过期" in log2.read_status()[Role.COMMANDER.value].headline
+
+
+async def test_in_flight_meeting_cost_is_reserved_and_saved_before_it_finishes(
+    tmp_path: Path, now: datetime
+) -> None:
+    """强退（重启）打断的会议也要记进当日预算：开会前按估算预记并落盘，正常结束再改成实际值。"""
+    bpath = tmp_path / "slow_budget.json"
+    eng = _SlowBB(["AAUSDT", "BBUSDT"])
+    eng.bb_delay = 10
+    c, _, _ = make(tmp_path, eng, now, budget_path=bpath, failed_meeting_cost_usd=0.05)
+    task = asyncio.create_task(c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动"))
+    await asyncio.sleep(0.3)
+    # 选币 0.01 + AA 实际 0.02 + BB 还在开（当时没有完成场次可参考，预记 0.05）
+    saved = json.loads(bpath.read_text(encoding="utf-8"))["cost_usd"]
+    assert saved == pytest.approx(0.01 + 0.02 + 0.05, abs=1e-6)
+    task.cancel()  # 强退：预记的钱不退
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    c2 = BattleCardCommander(
+        FakeEngine([]), RISK, JsonlDecisionLog(tmp_path), clock=lambda: now, budget_path=bpath
+    )
+    assert c2._stats.cost_usd == pytest.approx(0.08, abs=1e-6)  # 重启后日花费没漏
+
+
+async def test_reservation_is_replaced_by_actual_cost_when_meeting_ends(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT", "BBUSDT"]), now, failed_meeting_cost_usd=0.5)
+    card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
+    assert c._stats.cost_usd == pytest.approx(card.llm_cost_usd)  # 0.01 + 2×0.02，没有多记估算
