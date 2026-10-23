@@ -340,3 +340,18 @@ def test_keychain_writer_uses_stdin_and_reads_back(monkeypatch: pytest.MonkeyPat
     with pytest.raises(SecretError) as e:  # 退出码 0 但读回来不对，也算失败
         KeychainWriter(run, lambda _: "something-else").set("OPENROUTER_API_KEY", SECRET)
     assert SECRET not in str(e.value)
+
+
+def test_key_needs_follow_mode_and_providers() -> None:
+    from jiaoyi.core.secrets import KNOWN_KEYS, key_needs
+
+    paper = key_needs("paper", "openrouter", "openrouter")
+    assert set(paper) == set(KNOWN_KEYS)
+    assert paper["OPENROUTER_API_KEY"] == "required"
+    assert paper["JEV_API_KEY"] == paper["DEEPSEEK_API_KEY"] == "unused"
+    assert paper["BINANCE_API_KEY"] == "unused" and paper["BINANCE_TESTNET_API_KEY"] == "required"
+    assert paper["FRED_API_KEY"] == "optional"
+    live = key_needs("live", "typesafe", "deepseek")
+    assert live["BINANCE_API_SECRET"] == "required" and live["BINANCE_TESTNET_API_KEY"] == "unused"
+    assert live["JEV_API_KEY"] == live["DEEPSEEK_API_KEY"] == "required"
+    assert live["OPENROUTER_API_KEY"] == "unused"

@@ -255,3 +255,5 @@ input[type="password"], .su-narrow input[type="number"], .su-narrow select { fon
 .su-keys input[type="password"] { width: 260px; }
 .su-narrow .msg.up { color: var(--up); } .su-narrow .msg.down { color: var(--down); }
 .su-narrow details summary { cursor: pointer; color: var(--accent); font-size: 12px; padding: 4px 0; }
+.form .fr.dimrow label { color: var(--dim); }
+.form .fr > .pill, .form .fr > .lamp, .form .fr > span.dim { flex: none; align-self: center; }

@@ -21,6 +21,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.core.recorder import local_day
+from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
@@ -490,6 +491,8 @@ class SettingsPage(BaseModel):
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
     profile: ProfileInfo | None = None
     keys: dict[str, bool]
+    key_needs: dict[str, KeyNeed] = {}
+    """按当前模式和通道：必须 / 可选 / 用不到。"""
     """密钥名 → 配了没有。只有这个，没有值。"""
     password_set: bool
     live_armed: bool
@@ -556,6 +559,11 @@ def build_settings(
         predictor=_items(app.predictor, "predictor"),
         schedule=_items((slow or slow_defaults(app.profile)).schedule, "schedule"),
         keys=keys,
+        key_needs=key_needs(
+            app.mode.value,
+            app.fast_loop.jev_provider,
+            (slow or slow_defaults(app.profile)).llm.provider,
+        ),
         password_set=password_set,
         live_armed=armed,
         profile=profile,

@@ -320,4 +320,59 @@ def test_restart_blocker_needs_launchd_and_valid_config(
     monkeypatch.setenv("XPC_SERVICE_NAME", "com.jiaoyi.run")
     assert _restart_blocker(args) is None
     (tmp_path / "risk.toml").write_text("max_leverage = 999\n", encoding="utf-8")
-    assert "新配置不合格" in (_restart_blocker(args) or "")
+    assert "不合格" in (_restart_blocker(args) or "")
+
+
+def test_restart_blocker_live_needs_rearm_after_risk_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """面板改了硬上限（risk 指纹变了）：live 新进程会被实盘门槛拒绝，所以重启前就拒绝。"""
+    import argparse
+    import shutil
+
+    from jiaoyi.cli import _restart_blocker, _startup_problem
+    from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate
+
+    data = tmp_path / "data"
+    data.mkdir()
+    shutil.copy(RISK, tmp_path / "risk.toml")
+    text = APP.read_text(encoding="utf-8")
+    text = text.replace('mode = "paper"', 'mode = "live"', 1).replace(
+        'data_dir = "data"', f'data_dir = "{data}"'
+    )
+    (tmp_path / "app.toml").write_text(text, encoding="utf-8")
+    args = argparse.Namespace(
+        risk=str(tmp_path / "risk.toml"), app=str(tmp_path / "app.toml"), slow=str(tmp_path / "x")
+    )
+    monkeypatch.setenv("XPC_SERVICE_NAME", "com.jiaoyi.run")
+    monkeypatch.setattr("jiaoyi.cli.missing_slow_stack", lambda *_: None)
+
+    assert "go-live" in (_restart_blocker(args) or "")  # 还没解锁
+    gate = LiveGate(data / "live_gate.json")
+    gate.set_password("correct horse")
+    gate.unlock(CONFIRM_WORD, "correct horse", config_fingerprint(load_risk_config(RISK)))
+    assert _restart_blocker(args) is None and _startup_problem(args) is None
+
+    risk_text = (tmp_path / "risk.toml").read_text(encoding="utf-8")
+    (tmp_path / "risk.toml").write_text(
+        risk_text.replace("max_leverage = 5", "max_leverage = 4"), encoding="utf-8"
+    )
+    assert load_risk_config(tmp_path / "risk.toml").max_leverage == 4
+    why = _restart_blocker(args) or ""
+    assert "起不来" in why and "go-live" in why
+
+
+def test_restart_blocker_checks_slow_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+    import shutil
+
+    from jiaoyi.cli import _restart_blocker
+
+    shutil.copy(RISK, tmp_path / "risk.toml")
+    shutil.copy(APP, tmp_path / "app.toml")
+    args = argparse.Namespace(
+        risk=str(tmp_path / "risk.toml"), app=str(tmp_path / "app.toml"), slow=str(tmp_path / "x")
+    )
+    monkeypatch.setenv("XPC_SERVICE_NAME", "com.jiaoyi.run")
+    monkeypatch.setattr("jiaoyi.cli.missing_slow_stack", lambda *_: "没装 tradingagents")
+    assert "tradingagents" in (_restart_blocker(args) or "")

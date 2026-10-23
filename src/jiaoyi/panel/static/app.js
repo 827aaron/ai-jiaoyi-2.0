@@ -829,6 +829,23 @@ function editSettings(sec) {
   $("#layer .dlg").classList.add("mid");
 }
 
+// 密钥：按当前模式和通道分“必须 / 可选 / 现在用不到”，只有必须的没配才标红
+const NEED_ORDER = { required: 0, optional: 1, unused: 2 };
+function keyRows(d) {
+  const need = d.key_needs || {};
+  return Object.entries(d.keys)
+    .sort(([a], [b]) => (NEED_ORDER[need[a]] ?? 1) - (NEED_ORDER[need[b]] ?? 1))
+    .map(([k, ok]) => {
+      const n = need[k] || "optional";
+      const st = n === "unused" ? `<span class="dim">现在用不到</span>`
+        : ok ? `<span class="lamp ok"><i></i>已配置</span>`
+        : n === "required" ? `<span class="pill p-short">缺，必须配</span>`
+        : `<span class="dim">可选，不配也行</span>`;
+      const why = n === "unused" ? (k.includes("TESTNET") ? "实盘模式下不用模拟盘的 key" : k.startsWith("BINANCE") ? "实盘才用" : "现在走的通道用不到它") : KEY_HELP[k] || "";
+      return `<div class="fr ${n === "unused" ? "dimrow" : ""}"><label title="${esc(k)}">${esc(KEY_LABEL[k] || KEY_NOTE[k] || k)}<span class="hint">${esc(why)}</span></label>${st}</div>`;
+    }).join("");
+}
+
 P.settings = () => {
   const d = pageData;
   const updown = document.documentElement.dataset.updown === "red-up" ? "red-up" : "green-up";
@@ -836,7 +853,7 @@ P.settings = () => {
   const changes = d.changes.length
     ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old, { key: x.key, choices: [0], nullable: true })} → ${fmtVal(x.new, { key: x.key, choices: [0], nullable: true })}</span></div>`).join("")}</div>`
     : '<div class="dim">还没有在网页上改过。</div>';
-  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label title="${esc(k)}">${esc(KEY_LABEL[k] || KEY_NOTE[k] || k)}<span class="hint">${esc(KEY_HELP[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
+  const keys = keyRows(d) || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
     <section class="card"><div class="ch"><h2>运行模式</h2></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>

@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from typing import Literal
 
 KEYCHAIN_SERVICE = "jiaoyi"
 
@@ -69,6 +70,29 @@ OPTIONAL_KEYS = (
     "DEEPSEEK_API_KEY",
     "FRED_API_KEY",
 )
+
+KeyNeed = Literal["required", "optional", "unused"]
+
+
+def key_needs(mode: str, jev_provider: str, llm_provider: str) -> dict[str, KeyNeed]:
+    """按当前配置，每个密钥是必须、可选还是用不到（设置页据此显示，不让人对着“未配置”发慌）。"""
+    live = mode == "live"
+    openrouter = "openrouter" in (jev_provider, llm_provider)
+    need: dict[str, bool | None] = {
+        "BINANCE_API_KEY": live,
+        "BINANCE_API_SECRET": live,
+        "BINANCE_TESTNET_API_KEY": not live,
+        "BINANCE_TESTNET_API_SECRET": not live,
+        "JEV_API_KEY": jev_provider == "typesafe",
+        "OPENROUTER_API_KEY": openrouter,
+        "DEEPSEEK_API_KEY": llm_provider == "deepseek",
+        "TELEGRAM_BOT_TOKEN": True,
+        "TELEGRAM_CHAT_ID": True,
+        "HUMMINGBOT_API_PASSWORD": True,
+        "FRED_API_KEY": None,
+    }
+    return {k: "optional" if v is None else "required" if v else "unused" for k, v in need.items()}
+
 
 # 密钥只允许常见 token 字符：不含空白、引号、反斜杠，避免拼进 ``security -i`` 命令时出岔子
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9_\-.:+/=@~!#$%^&*()\[\]{},;?|<>]{1,512}$")
