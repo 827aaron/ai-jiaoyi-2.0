@@ -453,6 +453,25 @@ class RiskGuardImpl:
         risk_usdt = qty * dist
         detail.update(qty=qty, notional=round(notional, 2), risk_usdt=round(risk_usdt, 4))
 
+        # ---- 总持仓风险：全部按保命止损算，加上这笔不能超过当天还能亏的额度，否则几笔一起打到
+        # 保命止损会穿过日亏熔断线。只扣已实现亏损：浮亏已经算在各笔的保命止损风险里，不重复扣。
+        lifeboat_pct = stop_pct * risk.lifeboat_stop_multiplier
+        new_risk = notional * lifeboat_pct / 100.0
+        budget = risk.daily_loss_halt_pct / 100.0 * account.day_start_equity_usdt - max(
+            0.0, -account.day_realized_pnl_usdt
+        )
+        detail.update(
+            open_risk_usdt=round(account.open_risk_usdt, 2),
+            new_lifeboat_risk_usdt=round(new_risk, 2),
+            day_risk_budget_usdt=round(budget, 2),
+        )
+        if account.open_risk_usdt + new_risk > budget + 1e-9:
+            reasons.append(
+                f"总风险 {account.open_risk_usdt:.2f}U + 本笔 {new_risk:.2f}U "
+                f"超过当日剩余额度 {max(budget, 0.0):.2f}U"
+            )
+            return None
+
         assert card is not None
         return OrderIntent(
             intent_id=f"int-{uuid.uuid4().hex[:16]}",
@@ -469,7 +488,7 @@ class RiskGuardImpl:
             stop_loss_pct=stop_pct,
             take_profit_pct=tp_pct,
             time_limit_s=fast.time_limit_s,
-            lifeboat_stop_pct=stop_pct * risk.lifeboat_stop_multiplier,
+            lifeboat_stop_pct=lifeboat_pct,
             approved_at=now,
         )
 
