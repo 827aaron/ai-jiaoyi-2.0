@@ -442,6 +442,11 @@ def test_page_endpoints(tmp_path: Path) -> None:
         assert client.get("/api/positions").json()["lifeboats_ok"] == 1
         team = client.get("/api/team?role=gate").json()
         assert team["selected"] == "gate" and team["predictor_mode"] == "on_demand"
+        assert team["gate_thresholds"]["max_p_toxic"] > 0 and team["snapshot"] is None
+        snap = {"ts": "2026-10-22T06:00:00+00:00", "symbols": {"BTCUSDT": {"price": 1.0}}}
+        (tmp_path / "market_snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
+        book = client.get("/api/team?role=book_reader").json()
+        assert book["snapshot"] == snap
         assert client.get("/api/team?role=boss").status_code == 422
         assert client.get("/api/signal/none").json() == []
         assert client.get("/api/klines?symbol=BTCUSDT&interval=7m").status_code == 422

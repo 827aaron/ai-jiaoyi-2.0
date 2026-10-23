@@ -390,7 +390,7 @@ async function showSignal(id) {
     const chain = await r.json();
     window.__recs = chain;
     const steps = chain.map((s, i) => `<div class="step"><div class="t"><span class="n">${hms(s.ts)}</span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)}${s.latency_ms ? `<span class="dim small">${Math.round(s.latency_ms)} ms</span>` : ""}</div>
-      <div>${esc(s.text)}</div>${keyFacts(s)}<details><summary>完整快照</summary><div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}</details></div>`).join("");
+      <div>${esc(s.text)}</div>${keyFacts(s)}<details><summary>看到的和判断</summary>${recordBody(s)}</details></div>`).join("");
     dlg(`<h3>信号详情</h3><p class="dim small">${esc(id)}</p><div class="steps">${steps || '<div class="dim">今天的日志里找不到这个信号。</div>'}</div>`);
   } catch (e) {
     dlg(`<h3>信号详情</h3><div class="down">读取失败</div>`);
@@ -425,12 +425,129 @@ function predictorView(s) {
   const seen = [
     inp.last_close != null ? `现价 ${pxFmt(inp.last_close)}（${bar}）` : `按 ${bar}算`,
     inp.bars ? `用了 ${inp.bars} 根${inp.interval ? ` ${esc(inp.interval)}` : ""} K 线` : "",
+    n ? `跑了 ${n} 条模拟` : "",
   ].filter(Boolean).join("，");
   return `<p><b>${esc(title)}</b></p>
     <div class="small dim">看到的</div><p>${esc(seen)}${inp.last_close == null || !inp.bars ? '<span class="dim small">（现价、用了几根 K 线这条记录里没写）</span>' : ""}</p>
     <div class="small dim">判断</div><p>${o.stale_after ? `这条预测 ${hm(o.stale_after)} 作废` : ""}${o.model ? ` · 模型 ${esc(o.model)}` : ""}</p>
     <p class="dim small">方向只作参考：Kronos 主要估价格范围，方向接近抛硬币，不能单独当开仓理由。</p>
     <details><summary class="dim small">原始数据</summary><div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}</details>`;
+}
+
+// 记录详情：「看到的 / 判断」统一渲染成中文键值行；没有中文名的键才显示英文；原始 JSON 折叠
+// [中文名, 单位或格式]：bps = 万分之几，pct = %，usdt = U，k = 千 U，ms，x = 倍，p = 概率转 %
+const FIELD = {
+  sym: ["币"], symbol: ["币"], side: ["方向"], side_hint: ["方向"], sig: ["信号"], kind: ["类型"], why: ["触发原因"], trigger_desc: ["触发原因"],
+  trigger_price: ["触发价", "px"], price: ["价格", "px"], last_price: ["现价", "px"], px: ["现价", "px"], entry_price: ["开仓价", "px"], limit_price: ["限价", "px"],
+  hold_min: ["最长持仓", "min"], time_limit_s: ["最长持仓", "s"], atr_bps: ["波动幅度 ATR", "bps"], atr: ["波动幅度 ATR", "px"], atr_period_min: ["ATR 用几分钟 K 线", "min"],
+  ret1m_bps: ["1 分钟涨跌", "bps"], ret5m_bps: ["5 分钟涨跌", "bps"], ret_1m: ["1 分钟涨跌", "frac"], ret_5m: ["5 分钟涨跌", "frac"],
+  vol_x: ["1 分钟量 / 平时", "x"], vol_ratio_1m: ["1 分钟量 / 平时", "x"], buy: ["主动买占比", "ratio"], taker_buy_ratio: ["主动买占比", "ratio"], taker_buy_ratio_1m: ["主动买占比", "ratio"],
+  cvd30_k: ["30 秒净主动买", "k"], cvd: ["净主动买"], rv5m_bps: ["5 分钟实际波动", "bps"], realized_vol_5m: ["5 分钟实际波动", "frac"],
+  liq_long_k: ["1 分钟多头强平", "k"], liq_short_k: ["1 分钟空头强平", "k"], fund_bps: ["资金费率", "bps"], funding_rate: ["资金费率", "frac"],
+  book: ["盘口"], spread_bps: ["买卖价差", "bps"], imb: ["买卖挂单失衡", "ratio"], imbalance: ["买卖挂单失衡", "ratio"], micro_bps: ["微观价偏离", "bps"], microprice: ["微观价", "px"], mid: ["中间价", "px"],
+  ofi_k: ["订单流失衡", "k"], ofi: ["订单流失衡"], depth_k: ["盘口深度", "k"], depth_usdt: ["盘口深度", "usdt"],
+  card: ["作战卡"], status: ["状态"], bias: ["方向"], levels_bps: ["关键价位离现价", "bpslist"], stop_atr: ["止损（ATR 倍数）", "range"], tp_r: ["止盈（止损的倍数）", "range"], size_max: ["最大仓位档"], regime: ["大盘判断"],
+  kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["向上的模拟占比", "p"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
+  approved: ["结论"], reasons: ["原因"], detail: ["细节"], day_pnl_pct: ["今天盈亏", "pct"], slippage_bps: ["预计滑点", "bps"],
+  quantity: ["数量"], notional_usdt: ["名义仓位（含杠杆）", "usdt"], leverage: ["杠杆", "x"], risk_usdt: ["这笔最多亏", "usdt"], stop_loss_pct: ["止损距离", "pct"], take_profit_pct: ["止盈距离", "pct"],
+  trailing_stop_pct: ["移动止损", "pct"], trailing_activation_pct: ["移动止损启动", "pct"], lifeboat_stop_pct: ["保命止损距离", "pct"], order_type: ["下单方式"], category: ["分组"],
+  intent_id: ["下单编号"], executor_id: ["执行器编号"], signal_id: ["信号编号"], card_id: ["作战卡编号"], position_id: ["持仓编号"], dedup_key: ["去重键"], request_id: ["请求编号"],
+  action: ["动作"], p_close: ["该平仓的概率", "p"], consecutive: ["连续几次"], reason: ["理由"], fees: ["手续费", "usdt"], fees_usdt: ["手续费", "usdt"], net: ["净盈亏", "usdt"],
+  hi_1m: ["1 分钟最高", "px"], lo_1m: ["1 分钟最低", "px"], positions: ["持仓"], symbols: ["币"], checked_positions: ["核对了几个仓位"], issues: ["发现的问题"], fixed: ["已处理"],
+  estimated: ["估算"], direct: ["直接"], values: ["行情特征"], features: ["行情特征"], forecast: ["预测员"], ts: ["时间", "ts"], stale_after: ["作废时间", "ts"],
+  model: ["模型"], latency_ms: ["耗时", "ms"], cost_usd: ["花费", "usd"], ok: ["调用成功"], error: ["出错"], horizon_min: ["预测多久", "min"], price_low: ["预测下沿", "px"], price_high: ["预测上沿", "px"],
+};
+const VALUE = { ...SIGNAL, long: "多", short: "空", hold: "拿住", close: "平仓", market: "市价", limit: "限价", none: "没有作战卡", symbol_not_in_card: "作战卡里没这个币", both: "双向", no_trade: "观望", ...TIER };
+const fmtNum = (v) => (Math.abs(v) >= 1000 ? money(v, 0) : Math.abs(v) >= 1 ? money(v, 2) : String(+v.toFixed(4)));
+function fieldVal(k, v) {
+  const unit = (FIELD[k] || [])[1];
+  if (typeof v === "boolean") return k === "approved" ? (v ? "通过" : "拒绝") : v ? "是" : "否";
+  if (typeof v === "string") return unit === "ts" ? hms(v) : esc(VALUE[v] || v);
+  if (typeof v !== "number") return esc(String(v));
+  switch (unit) {
+    case "px": return pxFmt(v);
+    case "bps": return `${fmtNum(v)} bp`;
+    case "pct": return `${fmtNum(v)}%`;
+    case "frac": return `${(v * 100).toFixed(2)}%`;
+    case "ratio": case "p": return `${Math.round(v * 100)}%`;
+    case "usdt": return `${fmtNum(v)} U`;
+    case "usd": return `$${v.toFixed(4)}`;
+    case "k": return `${fmtNum(v)} 千 U`;
+    case "x": return `${fmtNum(v)} 倍`;
+    case "ms": return `${Math.round(v)} ms`;
+    case "min": return spanOf(v);
+    case "s": return humanDur(v);
+    default: return fmtNum(v);
+  }
+}
+function kvRows(o, depth = 0) {
+  if (!o || typeof o !== "object") return "";
+  return Object.entries(o).filter(([, v]) => v != null && !(Array.isArray(v) && !v.length)).map(([k, v]) => {
+    const [name, unit] = FIELD[k] || [k];
+    const lab = `<span class="k" title="${esc(k)}">${esc(name)}</span>`;
+    if (Array.isArray(v)) {
+      if (v.every((x) => typeof x !== "object")) {
+        const items = unit === "range" && v.length === 2 ? `${fmtNum(v[0])}–${fmtNum(v[1])}` : unit === "bpslist" ? v.map((x) => `${fmtNum(x)} bp`).join("、") : v.map((x) => fieldVal(k, x)).join("、");
+        return `<div class="kv" style="--d:${depth}">${lab}<span>${items}</span></div>`;
+      }
+      return `<div class="kv" style="--d:${depth}">${lab}</div>${v.map((x) => kvRows(x, depth + 1)).join("")}`;
+    }
+    if (typeof v === "object") return `<div class="kv" style="--d:${depth}">${lab}</div>${kvRows(v, depth + 1)}`;
+    return `<div class="kv" style="--d:${depth}">${lab}<span>${fieldVal(k, v)}</span></div>`;
+  }).join("");
+}
+const rawData = (s) => `<details class="mt"><summary class="dim small">原始数据</summary><div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}</details>`;
+const kvOrEmpty = (o) => kvRows(o) || '<div class="dim small">（这条记录没写）</div>';
+
+// 拍板人：六问各一行；有门槛的标出过没过
+const JEV_Q = [
+  ["genuine", "真信号", (p) => p.real, "min_p_genuine", ">="],
+  ["direction", "方向", null, "min_p_direction", ">="],
+  ["toxicity", "订单流有毒", (p) => p.high, "max_p_toxic", "<="],
+  ["take", "做这笔", (p) => p.take, "min_p_take", ">="],
+  ["stop_width", "止损", null],
+  ["size", "仓位", null],
+];
+const JEV_CHOICE = { up: "向上", down: "向下", flat: "横盘", narrow: "偏窄", mid: "适中", wide: "偏宽", S: "小", M: "中", L: "大" };
+function jevView(s, th) {
+  const inp = (s.input || {}).jev || {};
+  const out = (s.output || {}).jev || {};
+  let snap = inp.snapshot;
+  try { if (typeof snap === "string") snap = JSON.parse(snap); } catch (e) { /* 旧格式是一句话，原样显示 */ }
+  const seen = snap && typeof snap === "object" ? kvRows(snap) : snap ? `<div>${esc(snap)}</div>` : inp.called === false ? '<div class="dim small">没有调用模型（例如没有有效作战卡）</div>' : "";
+  const ans = out.answers || {};
+  const fails = [];
+  const rows = JEV_Q.filter(([id]) => ans[id]).map(([id, name, pick, thKey, op]) => {
+    const p = ans[id];
+    const [top, topP] = Object.entries(p).sort((a, b) => b[1] - a[1])[0];
+    const val = pick ? pick(p) : topP;
+    const shown = pick ? `${Math.round(val * 100)}%` : `${JEV_CHOICE[top] || top} ${Math.round(topP * 100)}%`;
+    let limit = "";
+    let bad = false;
+    if (thKey && th && th[thKey] != null) {
+      limit = `（${op === ">=" ? "门槛" : "上限"} ${Math.round(th[thKey] * 100)}%）`;
+      bad = op === ">=" ? val < th[thKey] : val > th[thKey];
+      if (bad) fails.push(`${name} ${shown} ${op === ">=" ? "低于门槛" : "高于上限"} ${Math.round(th[thKey] * 100)}%`);
+    }
+    return `<div class="kv"><span class="k" title="${esc(id)}">${esc(name)}</span><span class="${bad ? "down" : ""}">${esc(shown)}${esc(limit)}</span></div>`;
+  }).join("");
+  const verdict = !out.ok ? `<div class="note warn">${esc(out.error || "没有拿到回答")}</div>` : fails.length ? `<div class="note warn">按门槛会被拒绝：${esc(fails.join("；"))}</div>` : "";
+  return `<div class="small dim">看到的</div>${seen || '<div class="dim small">（这条记录没写）</div>'}
+    <div class="small dim mt">判断</div>${verdict}${rows || '<div class="dim small">（没有回答）</div>'}
+    <p class="dim small">${[out.model ? `模型 ${esc(out.model)}` : "", out.latency_ms != null ? `${Math.round(out.latency_ms)} ms` : "", out.cost_usd != null ? `$${(+out.cost_usd).toFixed(4)}` : ""].filter(Boolean).join(" · ")}</p>`;
+}
+// 保镖：通过 / 拒绝 + 原因列表 + 细节
+function guardView(s) {
+  const o = s.output || {};
+  const rest = Object.fromEntries(Object.entries(o).filter(([k]) => !["approved", "reasons"].includes(k)));
+  const head = o.approved != null ? `<div class="note ${o.approved ? "" : "warn"}"><b>${o.approved ? "通过" : "拒绝"}</b>${(o.reasons || []).length ? `：${esc(o.reasons.join("；"))}` : ""}</div>` : "";
+  return `<div class="small dim">看到的</div>${kvOrEmpty(s.input)}<div class="small dim mt">判断</div>${head}${kvRows(rest)}`;
+}
+function recordBody(s) {
+  const th = (pageData && pageData.gate_thresholds) || null;
+  const isJev = (s.input && s.input.jev) || (s.output && s.output.jev);
+  const body = isJev ? jevView(s, th) : s.output && "approved" in s.output ? guardView(s) : `<div class="small dim">看到的</div>${kvOrEmpty(s.input)}<div class="small dim mt">判断</div>${kvOrEmpty(s.output)}`;
+  return body + rawData(s);
 }
 
 function showRecord(i) {
@@ -442,9 +559,10 @@ function showRecord(i) {
       <p class="dim small">耗时 ${Math.round(s.latency_ms)} ms · 本地计算，不花钱</p>`);
     return;
   }
-  dlg(`<h3>${esc(ROLE[s.role] || s.role)} · ${hms(s.ts)} ${pill(s.outcome)}</h3><p>${esc(s.text)}</p>${keyFacts(s)}
-    <div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}
-    <p class="dim small">耗时 ${Math.round(s.latency_ms)} ms · 花费 $${s.cost_usd.toFixed(4)}</p>`);
+  const isJev = (s.input && s.input.jev) || (s.output && s.output.jev);
+  dlg(`<h3>${esc(ROLE[s.role] || s.role)} · ${hms(s.ts)} ${pill(s.outcome)}</h3><p>${esc(s.text)}</p>
+    ${recordBody(s)}
+    ${isJev ? "" : `<p class="dim small">${s.latency_ms ? `耗时 ${Math.round(s.latency_ms)} ms · ` : ""}${s.cost_usd ? `花费 $${s.cost_usd.toFixed(4)}` : "不花钱"}</p>`}`);
 }
 
 /* ---------- 开会过程（慢环按阶段写 data/meeting_live/<币>.json；正在开的每 4 秒刷新） */
@@ -851,23 +969,34 @@ function fitTeamFlow() {
   f.style.height = `${(TF_H + 6) * k}px`;
 }
 addEventListener("resize", fitTeamFlow);
-// 盘口员只计数、不逐条写决策日志：把它心跳里的摘要拆成几行；逐币快照要快环另外写文件
-const STREAM = { aggTrade: "逐笔成交", depth: "盘口深度", bookTicker: "最优买卖价", markPrice: "标记价 / 资金费率", kline: "K 线", kline_1m: "1 分钟 K 线", forceOrder: "强平" };
-function bookReaderCard(r) {
+// 盘口员只计数、不逐条写决策日志：心跳摘要拆成几行；逐币行情和各路推送读 data/market_snapshot.json（每 5 秒）
+const STREAM = { trade: "逐笔成交", book: "盘口", kline: "K 线", mark: "标记价 / 资金费率", liquidation: "强平", aggTrade: "逐笔成交", depth: "盘口深度", bookTicker: "最优买卖价", markPrice: "标记价 / 资金费率", kline_1m: "1 分钟 K 线", forceOrder: "强平" };
+const secAgo = (ts) => Math.max(0, Math.round((Date.now() - new Date(ts)) / 1000));
+const agoTxt = (sec) => (sec < 60 ? `${sec} 秒前` : sec < 3600 ? `${Math.round(sec / 60)} 分钟前` : `${Math.round(sec / 3600)} 小时前`);
+const chg = (v, d, unit) => (v == null ? '<span class="dim">—</span>' : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${v.toFixed(d)}${unit}</span>`);
+const kU = (v) => (v == null ? "—" : v >= 1000 ? `${money(v / 1000, 1)} 千 U` : `${Math.round(v)} U`);
+function tapeTables(snap) {
+  if (!snap) return '<div class="foot">还没有逐币行情快照（data/market_snapshot.json）：主程序更新到最新版并在跑后，每 5 秒写一次。</div>';
+  const age = secAgo(snap.ts);
+  const stale = age > 30 ? `<div class="note warn mt">行情快照 ${agoTxt(age)}写的，之后没再更新：主程序可能没在跑。</div>` : "";
+  const syms = Object.entries(snap.symbols || {}).sort(([a], [b]) => a.localeCompare(b));
+  const rows = syms.map(([sym, v]) => `<tr><td>${coin(sym)}</td><td class="r num">${v.price == null ? "—" : pxFmt(v.price)}</td><td class="r num">${chg(v.chg_1m_pct, 2, "%")}</td><td class="r num">${chg(v.chg_5m_pct, 2, "%")}</td>
+    <td class="r num">${v.taker_buy_ratio_1m == null ? "—" : Math.round(v.taker_buy_ratio_1m * 100) + "%"}</td><td class="r num">${v.spread_bps == null ? '<span class="warn">盘口没更新</span>' : v.spread_bps.toFixed(2) + " bp"}</td>
+    <td class="r num">${kU(v.liq_long_usdt_1m)}</td><td class="r num">${kU(v.liq_short_usdt_1m)}</td><td class="r num ${v.book_age_s > 10 ? "warn" : ""}">${v.book_age_s == null ? "—" : v.book_age_s + " 秒"}</td></tr>`).join("");
+  const coins = syms.length ? `<div class="tw mt"><table><thead><tr><th>币</th><th class="r">现价</th><th class="r">1 分钟</th><th class="r">5 分钟</th><th class="r">主动买占比</th><th class="r">买卖价差</th><th class="r">1 分钟多头强平</th><th class="r">1 分钟空头强平</th><th class="r">盘口多久没更新</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim mt">现在没有在盯的币。</div>';
+  const st = Object.entries(snap.streams || {});
+  const streams = st.length ? `<div class="tw mt"><table><thead><tr><th>数据流</th><th class="r">今天收到</th><th class="r">最后一条</th></tr></thead><tbody>${st.map(([k, x]) => `<tr><td title="${esc(k)}">${esc(STREAM[k] || k)}</td><td class="r num">${esc(Number(x.count_today).toLocaleString())} 条</td><td class="r num">${x.last_at ? `${hms(x.last_at)}（${agoTxt(secAgo(x.last_at))}）` : "—"}</td></tr>`).join("")}</tbody></table></div>` : "";
+  return `${stale}<div class="small dim mt">此刻的行情（${hms(snap.ts)}）</div>${coins}${streams ? `<div class="small dim mt">各路数据（今天 0 点起）</div>${streams}` : ""}`;
+}
+function bookReaderCard(r, snap) {
   const h = r.headline || "";
   const parts = h.split("；");
   const head = parts[0] ? parts[0].split("，") : [];
-  const kinds = (parts.find((x) => x.startsWith("累计 ")) || "").slice(3).split(" / ").filter(Boolean).map((x) => x.split(" "));
   const rest = parts.slice(1).filter((x) => !x.startsWith("累计 "));
-  const rows = [
-    ...head.map((x) => `<div>${esc(x)}</div>`),
-    ...rest.map((x) => `<div>${esc(x)}</div>`),
-  ].join("");
-  const streams = kinds.length ? `<div class="tw mt"><table><thead><tr><th>数据流</th><th class="r">这次启动以来收到</th></tr></thead><tbody>${kinds.map(([k, n]) => `<tr><td title="${esc(k)}">${esc(STREAM[k] || k)}</td><td class="r num">${esc(Number(n).toLocaleString())} 条</td></tr>`).join("")}</tbody></table></div>` : "";
+  const rows = [...head, ...rest].map((x) => `<div>${esc(x)}</div>`).join("");
   return `<section class="card mt"><div class="ch"><h2>盘口员 · 现在的状态</h2><span class="r">${r.last_beat ? "心跳 " + hms(r.last_beat) : "没有心跳"}</span></div>
-    <div class="note">盘口员只计数，不逐条记录（一天上万条行情，记下来没法看）。下面是它最近一次报的状态；有信号会交给哨兵，哨兵那里能看到每一条。</div>
-    ${rows ? `<div class="mt">${rows}</div>` : '<div class="dim mt">还没有报过状态。</div>'}${streams}
-    <div class="foot">每个币的现价、1 / 5 分钟涨跌、主动买占比、价差、最近强平，以及每路数据最后收到的时间，要等快环把逐币快照写出来后才能在这里显示。</div></section>`;
+    <div class="note">盘口员只计数，不逐条记录（一天上万条行情，记下来没法看）。有信号会交给哨兵，哨兵那里能看到每一条。</div>
+    ${rows ? `<div class="mt">${rows}</div>` : '<div class="dim mt">还没有报过状态。</div>'}${tapeTables(snap)}</section>`;
 }
 P.team = () => {
   const d = pageData;
@@ -877,7 +1006,7 @@ P.team = () => {
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.symbol ? "" : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
-    ${sel.role === "book_reader" ? bookReaderCard(sel) : ""}
+    ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
       <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}
@@ -1204,6 +1333,7 @@ const PLAIN = {
   move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
   predictor_against_runs: "预测员连续几次看反才算",
   entry_max_card_age_min: "开仓前卡最多旧几分钟（超了先补会再开）",
+  daily_cost_limit_usd: "每日 AI 费用上限",
   over_budget: "花到日上限 80% 时",
   slowdown_interval_min: "放慢后几分钟开一次会",
   sim_environment: "模拟盘连币安哪个环境",
@@ -1232,6 +1362,7 @@ const HINT = {
   event_meeting_enabled: "只给出事的那个币补开一场，不重开整轮；关掉时突破、大消息、新进池照旧重开整轮",
   event_triggers: "不在名单里的事不开会，等下一轮定时会",
   entry_max_card_age_min: "要在“哪些事算出事”里勾上“开仓时卡太旧”才会补会，否则只拦不补",
+  daily_cost_limit_usd: "只算军师团开会（含总盘会）的 AI 费；没写死就跟开会档位走，切档自动换",
   over_budget: "放慢一档 = 开会间隔换成下面那个；不放慢 = 照常开。花到 100% 都停开会，持仓照常管",
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
@@ -1399,7 +1530,7 @@ const ADV = [
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
     { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.schedule_at", "schedule.*"] },
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.predictor_against_runs", "schedule.entry_max_card_age_min"] },
-    { g: "花费快到上限", hint: "花到每天上限的 80% 时怎么办；花到 100% 当天都停开会，持仓照常管。", keys: ["schedule.over_budget", "schedule.slowdown_interval_min"] },
+    { g: "AI 花费上限", hint: "军师团每天最多花多少（曼谷 0 点清零）；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min"] },
     { g: "选币", keys: ["app.pool_size", "app.card_pick_max"] },
     { g: "选币规则：门槛", warn: "screener_cautions", hint: "每小时用代码把全部币安 U 本位永续筛一遍，过不了门槛的不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap"] },
     { g: "选币规则：打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
@@ -1423,7 +1554,7 @@ const UNIT = {
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根",
   min_quote_volume_usdt: " U", min_depth_usdt: " U", min_listed_days: " 天", min_range_24h_pct: "%", max_range_24h_pct: "%",
-  head: " 个", mid: " 个", mid_daily_pick: " 个",
+  head: " 个", mid: " 个", mid_daily_pick: " 个", daily_cost_limit_usd: " 美元",
   default_category_cap: " 个", vol_full_multiple: " 倍", surge_full_multiple: " 倍", oi_full_pct: "%", liq_full_usdt: " U",
 };
 // 推荐值里只有这几项是“越小越冒险”
@@ -1434,7 +1565,7 @@ const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWE
 // 段.键 → 设置项（每类币上限拼成 category 段）
 function settingIndex(d) {
   const ix = {};
-  for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "screener", "tiers"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
+  for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "budget", "screener", "tiers"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
   const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
   for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: CAT[k] || k, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总仓位倍数）`, editable: true, choices: [] };
   return ix;

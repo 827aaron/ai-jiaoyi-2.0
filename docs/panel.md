@@ -166,10 +166,19 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 | 告警 | 决策日志里的出错、对账补救、下架封禁（告警本身直接推 Telegram，不单独落盘） |
 - 高级 →「军师团」：「开会节奏」里加「每天固定几点开整轮会」（`schedule_at`，HH:MM 文字，留空回到档位默认）；
   新分组「临时会」（`event_meeting_enabled` / `event_triggers` 多选勾选 / `event_symbol_gap_min` / `event_max_per_day` /
-  `move_since_card_atr` / `predictor_against_runs` / `entry_max_card_age_min`，0 显示「不查」）和「花费快到上限」
-  （`over_budget` 放慢一档 / 不放慢、`slowdown_interval_min`）。多选项写成 TOML 数组（按选项顺序、去重）；
+  `move_since_card_atr` / `predictor_against_runs` / `entry_max_card_age_min`，0 显示「不查」）和「AI 花费上限」
+  （`[budget] daily_cost_limit_usd` 每日上限，没写死跟档位走；`over_budget` 放慢一档 / 不放慢、`slowdown_interval_min`）。
+  花费段在设置页只能改日上限，失败估价等仍只在首次设置 / 配置文件里改。多选项写成 TOML 数组（按选项顺序、去重）；
   契约里带 `pattern` 的可空文字字段才能在网页上改，写前按 pattern 校验。
 - 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
   持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）
   从 `data/card_review/cards.jsonl` 按天列出过去的指令：出会 → 失效时间、方向、当时的止损 / 止盈 / 杠杆 / 仓位和理由
   （从前后 30 分钟内同方向的军师团结论找）、结局（还在用 / 到期 / 被新结论替换）、有效期内开过几笔和已平盈亏；可按日期翻、按币筛。
+
+### 角色详情卡（#154 起）
+
+- 所有角色记录弹窗的「看到的」「判断」渲染成中文键值行（`app.js` 的 `FIELD` 字典；没收录的键显示英文原名），原始 JSON 一律折叠到「原始数据」。
+- 拍板：六问各一行（真信号 / 方向 / 订单流有毒 / 做这笔 / 止损 / 仓位），门槛来自 `/api/team` 的 `gate_thresholds`（fast_loop 的 `min_p_*` / `max_p_toxic`），没过的标红并写「按门槛会被拒绝：…」；底部 模型 · 耗时 · 花费。
+- 保镖：通过 / 拒绝 + 理由列表 + 细节。
+- 盘口员：`TeamPage.snapshot` = `data/market_snapshot.json`（快环每 5 秒写）：逐币现价、1 / 5 分钟涨跌、主动买占比、价差、1 分钟强平、盘口多久没更新；各路推送今天条数和最后一条时间；快照超过 30 秒没更新时提示主程序可能没在跑。
+- 预测员「看到的」：现价、用了几根几分钟 K 线、跑了几条模拟（预测员记录 `input`）。

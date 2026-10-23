@@ -388,3 +388,5 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 /* 作战卡：快到期的币变灰；历史卡的日期 / 币筛选 */
 tr.fade td { opacity: 0.55; }
 .row-pick { display: flex; gap: 8px; flex-wrap: wrap; }
+.kv { display: flex; gap: 12px; padding: 3px 0 3px calc(var(--d, 0) * 16px); border-bottom: 1px solid var(--line2); }
+.kv .k { min-width: 9em; color: var(--dim); }

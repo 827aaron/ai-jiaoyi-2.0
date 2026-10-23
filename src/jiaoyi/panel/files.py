@@ -159,6 +159,11 @@ class PanelFiles:
         """主程序每 5 分钟从币安收入流水汇总的按日盈亏（data/income_daily.json）；没有就是 None。"""
         return self._json("income_daily.json")
 
+    def market_snapshot(self) -> dict[str, Any] | None:
+        """盘口员每 5 秒写的逐币行情和各路推送计数（data/market_snapshot.json）；没有就是 None。"""
+        raw = self._json("market_snapshot.json")
+        return raw if isinstance(raw, dict) else None
+
     def runtime(self) -> dict[str, Any]:
         """主程序这次启动写的 runtime.json（启动时间、桩角色等）；没有或读不出就是空的。"""
         raw = self._json("runtime.json")

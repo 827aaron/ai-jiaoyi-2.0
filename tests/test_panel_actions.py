@@ -621,12 +621,28 @@ def test_code_fingerprint_changes_when_a_file_changes(tmp_path: Path) -> None:
     assert code_fingerprint(tmp_path) != before
 
 
-def test_llm_and_budget_only_through_setup_wizard(tmp_path: Path) -> None:
+def test_llm_only_through_setup_wizard_budget_limit_in_settings(tmp_path: Path) -> None:
+    """军师团通道只在首次设置里改；花费段设置页只放日上限，留空跟档位走。"""
     paths, data = _setup(tmp_path)
     with pytest.raises(ActionError, match="首次设置"):
         actions.update_config(paths, data, "llm", {"provider": "openrouter"}, PW, NOW)
-    with pytest.raises(ActionError, match="首次设置"):
-        actions.update_config(paths, data, "budget", {"daily_cost_limit_usd": 99}, PW, NOW)
+    assert set(actions.editable_fields("budget")) == {"daily_cost_limit_usd"}
+    assert actions.editable_fields("budget")["daily_cost_limit_usd"].profiled
+    with pytest.raises(ActionError):
+        actions.update_config(paths, data, "budget", {"failed_meeting_cost_usd": 1}, PW, NOW)
+    actions.update_config(paths, data, "budget", {"daily_cost_limit_usd": 35}, PW, NOW)
+    raw = tomllib.loads(paths.slow.read_text(encoding="utf-8"))
+    assert raw["budget"]["daily_cost_limit_usd"] == 35
+    info = actions.profile_info(paths)
+    assert "daily_cost_limit_usd" in info.pinned["budget"]  # 写死了：显示档位默认可恢复
+    with _client(paths) as client:
+        items = client.get("/api/settings").json()["budget"]
+    assert [(i["key"], i["editable"], i["profiled"]) for i in items] == [
+        ("daily_cost_limit_usd", True, True)
+    ]
+    actions.update_config(paths, data, "budget", {"daily_cost_limit_usd": None}, PW, NOW)
+    raw = tomllib.loads(paths.slow.read_text(encoding="utf-8"))
+    assert "daily_cost_limit_usd" not in raw.get("budget", {})
 
 
 def test_overview_rereads_config_files_when_they_change(tmp_path: Path) -> None:
