@@ -296,9 +296,86 @@ def _ema(xs: Sequence[float], n: int) -> list[float]:
     return out
 
 
-def _indicator(
-    name: str, o: list[float], h: list[float], low: list[float], c: list[float]
+SUPPORTED_INDICATORS = (
+    "close_N_sma",
+    "close_N_ema",
+    "rsi",
+    "atr",
+    "macd",
+    "macds",
+    "macdh",
+    "boll",
+    "boll_ub",
+    "boll_lb",
+    "vwma",
+    "mfi",
+)
+BOLL_N = 20
+VWMA_N = 20
+MFI_N = 14
+
+
+def _roll(xs: Sequence[float], n: int, i: int) -> Sequence[float]:
+    return xs[max(0, i - n + 1) : i + 1]
+
+
+def _boll(c: Sequence[float]) -> tuple[list[float], list[float], list[float]]:
+    """布林带（20 根，±2 倍总体标准差）。前面不足 20 根时用已有的根数。"""
+    mid, up, lo = [], [], []
+    for i in range(len(c)):
+        w = _roll(c, BOLL_N, i)
+        m = sum(w) / len(w)
+        sd = (sum((x - m) ** 2 for x in w) / len(w)) ** 0.5
+        mid.append(m)
+        up.append(m + 2 * sd)
+        lo.append(m - 2 * sd)
+    return mid, up, lo
+
+
+def _vwma(c: Sequence[float], v: Sequence[float]) -> list[float]:
+    out = []
+    for i in range(len(c)):
+        cw, vw = _roll(c, VWMA_N, i), _roll(v, VWMA_N, i)
+        vol = sum(vw)
+        out.append(sum(x * y for x, y in zip(cw, vw, strict=True)) / vol if vol else cw[-1])
+    return out
+
+
+def _mfi(
+    h: Sequence[float], low: Sequence[float], c: Sequence[float], v: Sequence[float]
 ) -> list[float]:
+    tp = [(a + b + d) / 3 for a, b, d in zip(h, low, c, strict=True)]
+    flow = [t * x for t, x in zip(tp, v, strict=True)]
+    out = [50.0]
+    for i in range(1, len(c)):
+        pos = neg = 0.0
+        for j in range(max(1, i - MFI_N + 1), i + 1):
+            if tp[j] > tp[j - 1]:
+                pos += flow[j]
+            elif tp[j] < tp[j - 1]:
+                neg += flow[j]
+        if neg == 0:
+            out.append(100.0 if pos > 0 else 50.0)
+        else:
+            out.append(100 - 100 / (1 + pos / neg))
+    return out
+
+
+def _indicator(
+    name: str,
+    o: list[float],
+    h: list[float],
+    low: list[float],
+    c: list[float],
+    v: list[float],
+) -> list[float]:
+    if name in ("boll", "boll_ub", "boll_lb"):
+        mid, up, lo = _boll(c)
+        return {"boll": mid, "boll_ub": up, "boll_lb": lo}[name]
+    if name == "vwma":
+        return _vwma(c, v)
+    if name == "mfi":
+        return _mfi(h, low, c, v)
     if name.endswith("_sma"):
         n = int(name.split("_")[1])
         return [sum(c[max(0, i - n + 1) : i + 1]) / min(i + 1, n) for i in range(len(c))]
@@ -334,8 +411,11 @@ def get_binance_indicators(
     """登记为 TradingAgents 的 ``get_indicators``：对小时线算 TradingAgents 常用的几个指标。"""
     end = datetime.fromisoformat(as_of_date).replace(tzinfo=UTC)
     rows = _klines(symbol, "1h", 500, end)
-    o, h, lo, c = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4))
-    vals = _indicator(indicator, o, h, lo, c)
+    o, h, lo, c, v = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4, 5))
+    try:
+        vals = _indicator(indicator, o, h, lo, c, v)
+    except ValueError as e:  # 不认识的指标别让整场会议失败，告诉分析师换一个
+        return f"## {indicator}\n{e}。可用：{', '.join(SUPPORTED_INDICATORS)}"
     n = min(look_back_days * 24, len(vals))
     out = [
         f"{datetime.fromtimestamp(k[0] / 1000, tz=UTC):%Y-%m-%d %H:%M}: {v:.6g}"

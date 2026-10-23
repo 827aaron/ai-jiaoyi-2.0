@@ -414,3 +414,47 @@ def test_clamp_raises_too_low_take_profit_into_guard_band() -> None:
     assert high.take_profit_r.max == 6.0
     ok = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=1.5, max=3)), RISK, band)
     assert (ok.take_profit_r.min, ok.take_profit_r.max) == (1.5, 3)
+
+
+class _SlowSecond(FakeEngine):
+    """第二个币开会时被打断（模拟重启）：此时第一个币的会早该落盘。"""
+
+    async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        if e.symbol == "BBUSDT":
+            await asyncio.sleep(10)
+        return await super().analyze(e, regime)
+
+
+async def test_each_finished_meeting_publishes_and_saves_card(
+    tmp_path: Path, now: datetime
+) -> None:
+    path = tmp_path / "battle_card.json"
+    c, _, _ = make(tmp_path, _SlowSecond(["AAUSDT", "BBUSDT"]), now, card_path=path)
+    task = asyncio.create_task(c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动"))
+    await asyncio.sleep(0.3)
+    mid = c.current(now)
+    assert mid is not None and [s.symbol for s in mid.symbols] == ["AAUSDT"]
+    # 假装此刻进程被杀：新进程从磁盘捡回已开完的那张
+    c2, _, _ = make(tmp_path, FakeEngine([]), now, card_path=path)
+    back = c2.current(now)
+    assert back is not None and [s.symbol for s in back.symbols] == ["AAUSDT"]
+    assert back.version == mid.version
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_version_bumps_with_every_published_meeting(tmp_path: Path, now: datetime) -> None:
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT", "BBUSDT"]), now)
+    card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
+    assert card.version == 2  # 两场会各出一次：快环拍板中途换了卡能认出来
+    assert {s.symbol for s in card.symbols} == {"AAUSDT", "BBUSDT"}
+
+
+async def test_expired_saved_card_is_not_restored(tmp_path: Path, now: datetime) -> None:
+    path = tmp_path / "battle_card.json"
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, card_path=path)
+    await c.refresh(pool(now, entry("AAUSDT")), "启动")
+    late = now + timedelta(hours=3)
+    c2, _, _ = make(tmp_path, FakeEngine([]), late, card_path=path)
+    assert c2.current(late) is None

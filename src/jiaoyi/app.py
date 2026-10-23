@@ -255,6 +255,8 @@ def _build_cards(
         stop_scale=stop,
         # 当天已花的钱落盘（按曼谷日），重启不会把日上限清零
         budget_path=Path(app_cfg.data_dir) / "slow_budget.json",
+        # 每开完一场会就把卡落盘，重启后还没过期的卡直接接着用
+        card_path=Path(app_cfg.data_dir) / "battle_card.json",
         **cfg.commander_kwargs(),
     )
     return commander, news
