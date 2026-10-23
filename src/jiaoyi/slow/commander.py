@@ -103,6 +103,7 @@ class BattleCardCommander:
         pick_max: int = 20,
         concurrency: int = 4,
         ttl: timedelta = timedelta(hours=2),
+        symbol_min_interval: timedelta = timedelta(hours=2),
         symbol_timeout_s: float = 600.0,
         min_refresh_gap: timedelta = timedelta(minutes=5),
         expiry_lead: timedelta = timedelta(minutes=10),
@@ -117,6 +118,9 @@ class BattleCardCommander:
         self._pick_max = pick_max
         self._sem = asyncio.Semaphore(concurrency)
         self._ttl = ttl
+        self._symbol_min_interval = symbol_min_interval
+        self._last_meeting: dict[str, datetime] = {}
+        self._level_broken: set[str] = set()
         self._symbol_timeout_s = symbol_timeout_s
         self._min_gap = min_refresh_gap
         self._lead = expiry_lead
@@ -153,7 +157,9 @@ class BattleCardCommander:
                 continue
             for lv in cs.key_levels:
                 if self._broken(lv, px):
-                    return "key_level_break"
+                    self._level_broken.add(cs.symbol)
+        if self._level_broken & {c.symbol for c in card.symbols}:
+            return "key_level_break"
         if self._news & {c.symbol for c in card.symbols}:
             return "news"
         if {e.symbol for e in pool.in_pool} - self._seen:
@@ -185,6 +191,7 @@ class BattleCardCommander:
         self._card, self._last_refresh = card, now
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
+        self._level_broken.clear()
         self._record_card(card, started)
         return card
 
@@ -206,16 +213,32 @@ class BattleCardCommander:
         if not chosen:
             raise CardRefreshError("总盘会没有挑出任何标的")
 
+        # 同一个币两次会议至少隔 symbol_min_interval；没有大消息 / 关键位突破就沿用上一张卡的指令
+        forced = self._news | self._level_broken
+        reused: dict[str, CardSymbol] = {}
+        prev_card = self._card
+        for e in chosen:
+            last = self._last_meeting.get(e.symbol)
+            old = prev_card.for_symbol(e.symbol) if prev_card is not None else None
+            if (
+                old is not None
+                and last is not None
+                and now - last < self._symbol_min_interval
+                and e.symbol not in forced
+            ):
+                reused[e.symbol] = old
+        to_meet = [e for e in chosen if e.symbol not in reused]
         results = await asyncio.gather(
-            *(self._analyze_one(e, picked.regime) for e in chosen), return_exceptions=True
+            *(self._analyze_one(e, picked.regime) for e in to_meet), return_exceptions=True
         )
-        symbols: list[CardSymbol] = []
+        symbols: list[CardSymbol] = list(reused.values())
         cost = picked.cost_usd
         failed: list[str] = []
-        for e, res in zip(chosen, results, strict=True):
+        for e, res in zip(to_meet, results, strict=True):
             if isinstance(res, Analysis):
                 symbols.append(clamp_to_risk(res.card_symbol, self._risk))
                 cost += res.cost_usd
+                self._last_meeting[e.symbol] = now
             else:
                 failed.append(f"{e.symbol}: {res!r}")
         if not symbols:
@@ -257,6 +280,13 @@ class BattleCardCommander:
                 raise ValueError(
                     f"{entry.symbol} 分组应为 {entry.category}，会议给了 {cs.category}"
                 )
+            r = self._risk
+            if (
+                cs.notional_usdt.max > r.max_notional_per_trade_usdt
+                or cs.leverage.max > r.max_leverage
+            ):
+                # 会议输出越界：这个币没有结论，不是悄悄夹紧后照用
+                raise ValueError(f"{entry.symbol} 会议给出的名义价值或杠杆超出硬上限")
             self._log_symbol(
                 entry,
                 Outcome.ACTION,

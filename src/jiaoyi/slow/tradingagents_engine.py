@@ -350,6 +350,9 @@ class TradingAgentsEngine:
         for _ in range(2):
             try:
                 draft = llm.invoke(prompt, config={"callbacks": [handler]})
+                if not isinstance(draft, _CardSymbolDraft):
+                    # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
+                    raise ValueError("模型没有返回结构化结果")
                 cs = draft_to_card_symbol(draft, entry)
                 return Analysis(cs, self._cost(handler.usage_metadata))
             except (ValidationError, ValueError) as exc:

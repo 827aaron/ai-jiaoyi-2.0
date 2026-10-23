@@ -164,6 +164,7 @@ async def test_failed_refresh_keeps_old_card_until_expiry(tmp_path: Path, now: d
     old = await c.refresh(p, "scheduled")
     eng.fail.add("AAUSDT")
     clock[0] = now + timedelta(minutes=30)
+    c.notify_news("AAUSDT")  # 大消息才会在间隔内重开会
     with pytest.raises(CardRefreshError):
         await c.refresh(p, "news")
     assert c.current(clock[0]) == old
@@ -177,6 +178,44 @@ async def test_version_increments_within_day(tmp_path: Path, now: datetime) -> N
     clock[0] = now + timedelta(hours=1)
     second = await c.refresh(p, "scheduled")
     assert (first.version, second.version) == (1, 2) and first.card_id == second.card_id
+
+
+async def test_out_of_bounds_meeting_output_means_no_conclusion(
+    tmp_path: Path, now: datetime
+) -> None:
+    class Greedy(FakeEngine):
+        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+            if e.symbol == "BBUSDT":
+                return Analysis(card_symbol(e.symbol, leverage=Range(min=1, max=50)), 0.0)
+            return await super().analyze(e, regime)
+
+    c, _, _ = make(tmp_path, Greedy(["AAUSDT", "BBUSDT"]), now)
+    card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    assert [s.symbol for s in card.symbols] == ["AAUSDT"]
+
+
+async def test_symbol_meeting_interval_reuses_previous_instruction(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, clock = make(tmp_path, eng, now)
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    assert eng.analyzed == ["AAUSDT", "BBUSDT"]
+
+    clock[0] = now + timedelta(minutes=90)  # 不足 2 小时：不再开会，沿用
+    card = await c.refresh(p, "scheduled")
+    assert eng.analyzed == ["AAUSDT", "BBUSDT"] and len(card.symbols) == 2
+    assert card.llm_cost_usd == pytest.approx(0.01)  # 只剩总盘会的花费
+
+    c.notify_news("AAUSDT")  # 大消息：只给 AA 重新开会
+    clock[0] = now + timedelta(minutes=100)
+    await c.refresh(p, "news")
+    assert eng.analyzed == ["AAUSDT", "BBUSDT", "AAUSDT"]
+
+    clock[0] = now + timedelta(hours=3, minutes=50)  # 超过间隔：BB 也重开
+    await c.refresh(p, "scheduled")
+    assert eng.analyzed[-2:] == ["AAUSDT", "BBUSDT"]
 
 
 def test_clamp_to_risk() -> None:
@@ -207,6 +246,7 @@ async def test_refresh_reasons(tmp_path: Path, now: datetime) -> None:
     clock[0] = t
     assert c.refresh_reason(t, p, {"AAUSDT": 99.0}) is None
     assert c.refresh_reason(t, p, {"AAUSDT": 101.0}) == "key_level_break"
+    c._level_broken.clear()  # 突破记录在下次开会前一直有效
     c.notify_news("AAUSDT")
     assert c.refresh_reason(t, p, {}) == "news"
     p2 = pool(now, entry("AAUSDT"), entry("NEWUSDT"))
