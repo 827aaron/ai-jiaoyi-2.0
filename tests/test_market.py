@@ -289,6 +289,43 @@ def test_liquidation_tracker_window() -> None:
     assert tr.liquidations_1h_usdt("NOPEUSDT", T0) == 0.0
 
 
+def test_liquidation_tracker_drops_quiet_symbols() -> None:
+    from jiaoyi.market.liquidations import LiquidationTracker
+
+    tr = LiquidationTracker()
+    tr.record(_liq("ETHUSDT", T0, c.Side.LONG, 1000.0))
+    tr.record(_liq("BTCUSDT", T0 + timedelta(hours=2), c.Side.LONG, 10.0))
+    assert [s.symbol for s in tr.all_stats(T0 + timedelta(hours=2))] == ["BTCUSDT"]
+    assert set(tr._q) == {"BTCUSDT"}  # 很久没有新强平的币整体清掉，不占内存
+
+
+def test_liquidation_tracker_readable_from_worker_thread() -> None:
+    import threading
+
+    from jiaoyi.market.liquidations import LiquidationTracker
+
+    tr = LiquidationTracker()
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                tr.liquidations_1h_usdt("ETHUSDT", T0 + timedelta(minutes=30))
+                tr.all_stats(T0 + timedelta(minutes=30))
+            except BaseException as e:  # 迭代时被改动会抛 RuntimeError
+                errors.append(e)
+                return
+
+    th = threading.Thread(target=reader)
+    th.start()
+    for k in range(20000):
+        tr.record(_liq("ETHUSDT", T0 + timedelta(milliseconds=k), c.Side.LONG, 1.0))
+    stop.set()
+    th.join()
+    assert errors == []
+
+
 def test_features_funding_countdown_and_5m_liquidations() -> None:
     eng = warm_engine()
     t = T0 + timedelta(minutes=21)
