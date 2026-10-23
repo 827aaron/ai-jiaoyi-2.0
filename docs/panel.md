@@ -169,3 +169,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
   `move_since_card_atr` / `predictor_against_runs` / `entry_max_card_age_min`，0 显示「不查」）和「花费快到上限」
   （`over_budget` 放慢一档 / 不放慢、`slowdown_interval_min`）。多选项写成 TOML 数组（按选项顺序、去重）；
   契约里带 `pattern` 的可空文字字段才能在网页上改，写前按 pattern 校验。
+- 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
+  持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）
+  从 `data/card_review/cards.jsonl` 按天列出过去的指令：出会 → 失效时间、方向、当时的止损 / 止盈 / 杠杆 / 仓位和理由
+  （从前后 30 分钟内同方向的军师团结论找）、结局（还在用 / 到期 / 被新结论替换）、有效期内开过几笔和已平盈亏；可按日期翻、按币筛。

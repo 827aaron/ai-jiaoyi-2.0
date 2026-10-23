@@ -252,6 +252,7 @@ document.addEventListener("click", async (e) => {
   if (!el) return;
   const { act, arg } = el.dataset;
   if (act === "card") showCard();
+  else if (act === "cardhist") showCardHistory(arg);
   else if (act === "signal") showSignal(arg);
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
@@ -333,17 +334,52 @@ function showCard(fetchPrices = true) {
   const [act, idle] = splitIdle(c.symbols);
   const row = (s) => {
     const [t, k] = s.pending_label ? [s.pending_label, s.pending_label === "开会中" ? "p-accent" : ""] : BIAS[s.bias] || [s.bias, ""];
-    return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
+    const when = s.source_note ? `<div class="small ${s.fading ? "warn" : "dim"}">${esc(s.source_note)}</div>` : "";
+    return `<tr class="${s.fading ? "fade" : ""}"><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div>${when}</td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(TIER[s.size_tier_max] || s.size_tier_max || "—")}</td>
       <td class="txt">${esc(s.reason || s.pending || "")}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}<div class="small"><a ${clickable("meeting", s.symbol)}>看这个币的开会过程 ›</a></div></td></tr>`;
   };
   const head = `<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th title="军师团建议的名义仓位范围（已含杠杆），最终由保镖按风险算">单笔仓位（含杠杆）U</th><th title="${esc(tierTip(c))}">仓位档</th><th>理由</th></tr></thead>`;
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
-    <p class="dim">${hm(c.created_at)} 出卡 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}${c.valid ? "" : " · <span class='down'>已过期</span>"}</p>
+    <p class="dim">${hm(c.created_at)} 更新 · 每个币按自己那场会的时间到期，到期就从卡上消失（持仓币留着、不再开新仓）${c.valid ? "" : " · <span class='down'>已过期</span>"} · <a ${clickable("cardhist")}>看历史卡 ›</a></p>
     ${c.regime ? `<div class="note"><b>军师纪要</b>　${esc(c.regime)}</div>` : ""}
     ${act.length ? `<div class="tw"><table>${head}<tbody>${act.map(row).join("")}</tbody></table></div>` : '<div class="dim">这一轮没有要做的币，全部观望。</div>'}
     ${idle.length ? `<details class="mt"><summary class="dim">${idleLine(idle)}（这一轮不开仓）· 点开看理由</summary><div class="tw"><table>${head}<tbody>${idle.map(row).join("")}</tbody></table></div></details>` : ""}`);
   $("#layer .dlg").classList.add("wide");
+}
+
+// 历史卡：过去每条指令（一个币一场会的结论）后来怎么样了；按日期翻、按币筛
+const CARD_END = { active: ["还在用", "p-accent"], expired: ["到期", ""], replaced: ["被新结论替换", "p-warn"] };
+async function showCardHistory(arg = "") {
+  const [day, sym] = arg.split("|");
+  const q = new URLSearchParams();
+  if (day) q.set("day", day);
+  if (sym) q.set("symbol", sym);
+  dlg(`<h3>历史卡</h3><div class="dim">读取中…</div>`);
+  $("#layer .dlg").classList.add("wide");
+  let h;
+  try { h = await getJson(`/api/card-history?${q}`); } catch (e) {
+    dlg(`<h3>历史卡</h3><div class="down">读取失败：${esc(e.message)}</div>`);
+    return;
+  }
+  const days = h.days.length ? h.days : [h.day];
+  const pick = `<select id="ch-day">${days.map((d) => `<option ${d === h.day ? "selected" : ""}>${esc(d)}</option>`).join("")}</select>
+    <select id="ch-sym"><option value="">全部币</option>${h.symbols.map((x) => `<option value="${esc(x)}" ${x === sym ? "selected" : ""}>${coin(x)}</option>`).join("")}</select>`;
+  const rows = h.rows.map((r) => {
+    const [bt, bk] = BIAS[r.bias] || [r.bias, ""];
+    const [et, ek] = CARD_END[r.end] || [r.end, ""];
+    const trade = r.trades ? `${r.trades} 笔${r.pnl_usdt != null ? ` · <span class="${r.pnl_usdt >= 0 ? "up" : "down"}">${r.pnl_usdt >= 0 ? "+" : ""}${money(r.pnl_usdt, 2)} U</span>` : " · 还没平"}` : '<span class="dim">没开仓</span>';
+    return `<tr><td class="num">${hm(r.issued_at)} → ${hm(r.ended_at)}</td><td class="hi">${coin(r.symbol)}</td><td><span class="pill ${bk}">${bt}</span></td>
+      <td>${range(r.stop_atr, "", 1)}</td><td>${range(r.take_profit_r, "", 1)}</td><td>${range(r.leverage, "", 0)}</td><td>${range(r.notional_usdt, "", 0)}</td>
+      <td><span class="pill ${ek}">${et}</span></td><td>${trade}</td><td class="txt dim small">${esc(r.reason || "（没找到这场会的结论记录）")}</td></tr>`;
+  }).join("");
+  dlg(`<h3>历史卡</h3><p class="dim">每行是一个币一场会的结论：出会时间 → 失效时间（到期或被同一个币的新结论替换）。<a ${clickable("card")}>‹ 回到现在的作战卡</a></p>
+    <div class="row-pick">${pick}</div>
+    ${rows ? `<div class="tw mt"><table><thead><tr><th>时间</th><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th>单笔仓位 U</th><th>结局</th><th>开过仓</th><th>理由</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="dim mt">${esc(h.day)} 没有出过指令。</div>`}`);
+  $("#layer .dlg").classList.add("wide");
+  const go = () => showCardHistory(`${$("#ch-day").value}|${$("#ch-sym").value}`);
+  $("#ch-day").addEventListener("change", () => { $("#ch-sym").value = ""; go(); });
+  $("#ch-sym").addEventListener("change", go);
 }
 
 async function showSignal(id) {

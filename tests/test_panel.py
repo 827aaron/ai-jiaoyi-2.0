@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -947,3 +947,48 @@ def test_card_pool_rows_show_source_and_hide_expired(tmp_path: Path) -> None:
     )
     assert not by["AAUSDT"].fading and by["BBUSDT"].fading
     assert by["DDUSDT"].source_note is not None and "持仓中，不再开新仓" in by["DDUSDT"].source_note
+
+
+def test_card_history_lists_past_orders(tmp_path: Path) -> None:
+    """历史卡：按日期列出过去的指令，写明到期 / 被替换 / 还在用，带当时参数和开过的仓。"""
+    from jiaoyi.panel.card_history import build_card_history
+
+    card = c.BattleCard.model_validate(load_example("battle_card"))
+    sym = card.symbols[0]
+    j = tmp_path / "card_review" / "cards.jsonl"
+    j.parent.mkdir()
+
+    def row(at: datetime, mins: int, bias: str) -> str:
+        return json.dumps({
+            "card_id": card.card_id, "version": 1, "created_at": at.isoformat(),
+            "expires_at": (at + timedelta(minutes=mins)).isoformat(), "regime": "震荡",
+            "refresh_reason": "scheduled", "symbol": sym.symbol, "category": "major", "bias": bias,
+        })  # fmt: skip
+
+    t0 = NOW - timedelta(hours=3)
+    j.write_text("\n".join([
+        row(t0, 80, "long"),  # 2 小时后出了新结论（到期后），算到期
+        row(t0 + timedelta(hours=2), 80, "short"),  # 1 小时后被替换
+        row(t0 + timedelta(hours=3), 80, "both"),  # 还在用
+        row(t0 - timedelta(days=1), 80, "long"),  # 前一天
+    ]) + "\n")  # fmt: skip
+    log = JsonlDecisionLog(tmp_path)
+    log.write(c.DecisionRecord(record_id="m1", ts=t0 + timedelta(minutes=2), role=c.Role.COMMANDER,
+                               outcome=c.Outcome.ACTION, summary="结论", symbol=sym.symbol,
+                               output=sym.model_dump(mode="json")))  # fmt: skip
+    pos = load_example("position_record")
+    pos.update(symbol=sym.symbol, opened_at=(t0 + timedelta(minutes=30)).isoformat())
+    (tmp_path / "positions.json").write_text(
+        json.dumps({"positions": {"p1": {"record": pos, "notional_usdt": 100}}})
+    )
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    page = build_card_history(files, NOW)
+    assert len(page.days) == 2 and page.day == page.days[0] and page.symbols == [sym.symbol]
+    assert [r.end for r in page.rows] == ["active", "replaced", "expired"]  # 新的在前
+    old = page.rows[-1]
+    assert old.reason == sym.reason and old.leverage == (sym.leverage.min, sym.leverage.max)
+    assert old.trades == 1 and page.rows[0].trades == 0
+    assert page.rows[1].ended_at == t0 + timedelta(hours=3)
+    prev = build_card_history(files, NOW, day=date.fromisoformat(page.days[1]))
+    assert len(prev.rows) == 1 and prev.rows[0].reason == ""  # 那天没有会议记录
+    assert build_card_history(files, NOW, symbol="X").rows == []
