@@ -149,11 +149,11 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
         "fast_loop": {
             "time_limit_s": 1800,
             "atr_period_min": 5,
-            "min_stop_atr": 1.2,
-            "max_stop_atr": 3.0,
+            "min_stop_atr": 0.45,
+            "max_stop_atr": 1.4,
             "min_tp_r": 1.0,
             "max_tp_r": 3.0,
-            "stop_level_buffer_atr": 0.2,  # 5m ATR 约为 15m 的一半
+            "stop_level_buffer_atr": 0.2,
             "min_stop_fee_multiple": 3.5,  # 止损 ≥ 35bp
             **_STRICT_GATE,  # 短持仓费用占比高，要更确定才做
         },
@@ -163,9 +163,9 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
     "1h": {
         "fast_loop": {
             "time_limit_s": 3600,
-            "atr_period_min": 15,
-            "min_stop_atr": 0.8,
-            "max_stop_atr": 2.0,
+            "atr_period_min": 5,
+            "min_stop_atr": 0.6,
+            "max_stop_atr": 2.05,
             "min_tp_r": 1.0,
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.1,
@@ -178,9 +178,9 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
     "2h": {
         "fast_loop": {
             "time_limit_s": 7200,
-            "atr_period_min": 15,
-            "min_stop_atr": 1.0,
-            "max_stop_atr": 3.0,
+            "atr_period_min": 5,
+            "min_stop_atr": 0.9,
+            "max_stop_atr": 2.95,
             "min_tp_r": 1.0,
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.1,
@@ -193,9 +193,9 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
     "4h": {
         "fast_loop": {
             "time_limit_s": 14400,
-            "atr_period_min": 30,  # 30m ATR 适合 2–4 小时
-            "min_stop_atr": 1.0,
-            "max_stop_atr": 3.0,
+            "atr_period_min": 15,
+            "min_stop_atr": 0.65,
+            "max_stop_atr": 2.15,
             "min_tp_r": 1.0,
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.1,
@@ -243,18 +243,16 @@ def analyst_klines(hold: str) -> tuple[str, ...]:
 
 def level_interval(hold: str) -> str:
     return LEVEL_INTERVAL.get(hold, "15m")
-
-
 HOLD.update(
     {
         # 长持仓 3 档（研究 2026-10-23 18:40 补）。patrol_*：山寨中档止损 1.6–3.5%，
-        # 按 2% 全平会误杀，所以长档放宽。atr_floor_7d / 预测员 15m·1h K 线见 docs/slow.md「待做」。
+        # 按 2% 全平会误杀，所以长档放宽。
         "8h": {
             "fast_loop": {
                 "time_limit_s": 28800,
-                "atr_period_min": 60,
-                "min_stop_atr": 1.0,
-                "max_stop_atr": 3.0,
+                "atr_period_min": 30,
+                "min_stop_atr": 0.8,
+                "max_stop_atr": 2.65,
                 "min_tp_r": 1.0,
                 "max_tp_r": 3.0,
                 "stop_level_buffer_atr": 0.1,
@@ -270,8 +268,8 @@ HOLD.update(
             "fast_loop": {
                 "time_limit_s": 43200,
                 "atr_period_min": 60,
-                "min_stop_atr": 1.2,
-                "max_stop_atr": 3.5,
+                "min_stop_atr": 0.8,
+                "max_stop_atr": 2.75,
                 "min_tp_r": 1.0,
                 "max_tp_r": 3.0,
                 "stop_level_buffer_atr": 0.1,
@@ -287,8 +285,8 @@ HOLD.update(
             "fast_loop": {
                 "time_limit_s": 86400,
                 "atr_period_min": 240,  # 4 小时 ATR，启动回填 3840 根 1 分钟线（分页拉）
-                "min_stop_atr": 0.8,
-                "max_stop_atr": 2.5,
+                "min_stop_atr": 0.85,
+                "max_stop_atr": 2.8,
                 "min_tp_r": 1.0,
                 "max_tp_r": 3.0,
                 "stop_level_buffer_atr": 0.1,
@@ -302,6 +300,61 @@ HOLD.update(
         },
     }
 )
+
+
+# K 线表定稿（研究 v3，12 个月数据，2026-10-23）：止损 ATR = √(短周期 ATR × 长周期 ATR) × 曼谷
+# 时段系数（入场那一刻查一次）；min/max_stop_atr、止盈 1–3 R 已按新尺度改；7 天下限关掉
+# （atr_floor_7d 默认 0），止损不再贴关键位（stop_level_snap 默认关）。24h 档只用 4 小时 ATR、
+# 不乘时段系数。系数表每月用最近 9 个月 5 个币重算一次。
+_LONG_ATR = {"30m": 60, "1h": 60, "2h": 60, "4h": 240, "8h": 240, "12h": 240, "24h": 0}
+# 曼谷 0–23 点；工作日 / 周六周日（曼谷日期）
+# fmt: off
+_SESSION: dict[str, tuple[list[float], list[float]]] = {
+    "30m": (
+        [1.10, 1.01, 0.97, 0.97, 0.95, 1.03, 0.90, 1.07, 1.09, 1.00, 0.89, 0.93,
+         0.93, 0.93, 0.97, 1.00, 0.96, 0.88, 0.93, 1.08, 1.37, 1.56, 1.39, 1.16],
+        [0.97, 0.93, 0.82, 0.88, 0.87, 0.91, 0.78, 0.90, 0.93, 0.94, 0.82, 0.90,
+         0.86, 0.93, 0.94, 0.97, 0.96, 0.88, 0.90, 1.04, 1.11, 1.21, 1.08, 1.12],
+    ),
+    "1h": (
+        [1.08, 0.98, 0.97, 0.94, 0.97, 1.00, 0.93, 1.08, 1.07, 0.99, 0.88, 0.96,
+         0.96, 0.93, 0.96, 1.00, 0.93, 0.89, 0.98, 1.10, 1.50, 1.74, 1.31, 1.11],
+        [0.94, 0.87, 0.78, 0.85, 0.87, 0.86, 0.80, 0.87, 0.90, 0.90, 0.81, 0.87,
+         0.85, 0.92, 0.94, 1.00, 0.99, 0.93, 0.92, 1.05, 1.18, 1.20, 1.09, 1.04],
+    ),
+    "2h": (
+        [1.01, 0.94, 0.92, 0.95, 0.97, 0.96, 1.01, 1.06, 1.02, 0.94, 0.92, 0.98,
+         0.94, 0.94, 0.97, 0.98, 0.89, 0.95, 1.04, 1.34, 1.75, 1.62, 1.22, 1.07],
+        [0.89, 0.78, 0.78, 0.82, 0.86, 0.83, 0.81, 0.88, 0.86, 0.86, 0.83, 0.82,
+         0.89, 0.95, 0.99, 0.98, 0.93, 0.92, 1.02, 1.21, 1.23, 1.16, 1.02, 0.98],
+    ),
+    "4h": (
+        [1.01, 0.96, 0.96, 0.94, 0.98, 0.99, 0.99, 1.03, 1.00, 0.95, 0.91, 0.93,
+         0.93, 0.94, 0.94, 0.95, 0.95, 1.14, 1.46, 1.68, 1.76, 1.60, 1.28, 1.10],
+        [0.76, 0.73, 0.76, 0.74, 0.74, 0.74, 0.73, 0.76, 0.77, 0.76, 0.75, 0.79,
+         0.84, 0.86, 0.83, 0.79, 0.85, 0.99, 1.10, 1.13, 1.07, 1.02, 0.95, 0.88],
+    ),
+    "8h": (
+        [1.04, 1.01, 1.00, 0.97, 0.97, 0.97, 0.95, 0.94, 0.91, 0.88, 0.87, 0.89,
+         0.90, 0.97, 1.13, 1.25, 1.34, 1.40, 1.44, 1.47, 1.42, 1.30, 1.13, 0.98],
+        [0.73, 0.70, 0.69, 0.69, 0.69, 0.69, 0.68, 0.71, 0.75, 0.74, 0.74, 0.73,
+         0.76, 0.80, 0.90, 0.95, 0.96, 0.95, 0.96, 0.95, 0.92, 0.97, 1.00, 1.13],
+    ),
+    "12h": (
+        [1.02, 1.00, 0.98, 0.95, 0.95, 0.94, 0.93, 0.91, 0.89, 0.95, 1.01, 1.08,
+         1.13, 1.17, 1.20, 1.23, 1.23, 1.22, 1.22, 1.22, 1.22, 1.16, 1.03, 0.92],
+        [0.69, 0.65, 0.64, 0.66, 0.67, 0.66, 0.65, 0.64, 0.65, 0.70, 0.76, 0.81,
+         0.81, 0.81, 0.80, 0.81, 0.83, 0.91, 0.97, 1.08, 1.10, 1.13, 1.11, 1.11],
+    ),
+}
+# fmt: on
+for _name, _h in HOLD.items():
+    _h["fast_loop"]["atr_long_period_min"] = _LONG_ATR[_name]
+    _h["fast_loop"]["session_factor"] = _name in _SESSION
+    if _name in _SESSION:
+        _wd, _we = _SESSION[_name]
+        _h["fast_loop"]["session_factor_weekday"] = _wd
+        _h["fast_loop"]["session_factor_weekend"] = _we
 
 _HOLD_BY_SECONDS = tuple((h["fast_loop"]["time_limit_s"], name) for name, h in HOLD.items())
 

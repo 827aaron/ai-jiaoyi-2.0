@@ -696,7 +696,7 @@ def test_hold_follows_meeting_unless_custom(tmp_path: Path) -> None:
     assert info.hold_choices == ["30m", "1h", "2h", "4h", "8h", "12h", "24h"]
     assert info.hold_paper_only == ["30m"]
     assert info.hold_specs["4h"].time_limit_s == 14400
-    assert info.hold_specs["4h"].atr_period_min == 30
+    assert info.hold_specs["4h"].atr_period_min == 15
     assert actions.editable_fields("app")["hold"].profiled  # 可以留空
 
     actions.update_config(paths, data, "app", {"hold": None}, PW, NOW)

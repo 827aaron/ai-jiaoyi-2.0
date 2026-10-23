@@ -189,7 +189,8 @@ class Runner:
         self.app = app
         self.m = app.m
         # 回填够算 ATR 的 1 分钟 K 线（15 分钟 ATR 要 240 根）
-        limit = backfill_minutes(app.app_cfg.fast_loop.atr_period_min)
+        fl = app.app_cfg.fast_loop
+        limit = backfill_minutes(fl.atr_period_min, fl.atr_long_period_min)
         self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym, limit=limit))
         # 预测员要的 5 分钟线（至少 64 根），启动时一次拉够，不用等 5 个多小时
         bars = app.app_cfg.predictor.backfill_bars
