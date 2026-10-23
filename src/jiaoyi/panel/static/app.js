@@ -48,11 +48,21 @@ const hms = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-di
 const md = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, month: "numeric", day: "numeric" }).format(new Date(ts));
 const money = (x, d = 1) => (x == null ? "—" : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 // U 本位合约的数量按币计；旁边折算成 USDT 名义金额（数量 × 开仓价），一眼看出这单多大
-const qty = (q, px) => `${q}${px ? ` <span class="dim">≈${money(q * px, 0)}U</span>` : ""}`;
+const qtyFmt = (q) => (q == null ? "—" : q.toLocaleString("en-US", { maximumFractionDigits: 6 }));
+const qty = (q, px) => `<span class="dim small">数量</span> ${qtyFmt(q)}${px ? ` <span class="dim small">· 名义 ${money(q * px, 0)} U</span>` : ""}`;
 const signed = (x, d = 1) => (x == null ? "—" : (x < 0 ? "−" : "+") + money(Math.abs(x), d));
 const cls = (x) => (x == null || x === 0 ? "" : x > 0 ? "up" : "down");
 const coin = (s) => esc(String(s || "").replace(/USDT$/, ""));
-const price = (p) => (p == null ? "—" : p >= 100 ? money(p, 1) : p >= 1 ? money(p, 3) : String(+p.toPrecision(4)));
+// 价格按币安该合约的 tickSize 小数位显示（/api/price-decimals）；拿不到就按量级：≥1000 两位、1–1000 四位、<1 六位
+const PREC = {};
+const pxDigits = (p, sym) => (sym && PREC[sym] != null ? PREC[sym] : Math.abs(p) >= 1000 ? 2 : Math.abs(p) >= 1 ? 4 : 6);
+const price = (p, sym) => (p == null ? "—" : money(p, pxDigits(p, sym)));
+async function loadPrecision() {
+  try {
+    Object.assign(PREC, await getJson("/api/price-decimals"));
+    if (Object.keys(PREC).length) render();
+  } catch (e) { setTimeout(loadPrecision, 60000); } // 币安连不上：先按量级显示，一分钟后再试
+}
 const range = (r, unit = "", d) => (r ? `${money(r[0], d ?? (r[0] < 10 ? 1 : 0))}–${money(r[1], d ?? (r[1] < 10 ? 1 : 0))}${unit}` : "—");
 const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 时 ${m % 60} 分`; };
 // 图表坐标轴按曼谷时间显示：跨天的刻度显示日期，其余显示时分
@@ -116,7 +126,7 @@ function statusBar() {
   return `<div class="status">
     <div class="lamps">${lamps}</div>
     <div class="kpi"><small>总资产 · 含浮盈浮亏${src}</small><b>${money(k.equity_usdt)} <span class="u">U</span></b></div>
-    <div class="kpi"><small>今日盈亏</small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b></div>
+    <div class="kpi click" ${clickable("daypnl")} title="点开看明细：平仓毛利、手续费、资金费、持仓浮盈变化、AI 费"><small>今日盈亏 · 账户 <span class="dim">ⓘ 明细</span></small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b>${k.as_of ? `<small class="dim">数据截至 ${hms(k.as_of)}</small>` : ""}</div>
     <div class="kpi"><small>离熔断（−${k.halt_pct}%）</small><b class="${k.halted ? "down" : ""}" style="font-size:15px">${k.halted ? "已熔断" : k.to_halt_usdt == null ? "—" : "还差 " + money(k.to_halt_usdt, 0) + " U"}</b><div class="meter ${k.halted ? "full" : ""}"><span style="width:${pct}%"></span></div></div>
     <div class="kpi"><small title="所有持仓名义价值（含杠杆）÷ 本金">敞口（含杠杆）</small><b style="font-size:15px">${k.exposure_x == null ? "—" : k.exposure_x.toFixed(2)} / ${k.max_exposure_x} 倍</b></div>
   </div>`;
@@ -212,6 +222,32 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
     }
   }
   dlgMsg(`${lead}一直没有回执：主程序可能没在运行，下次启动按新配置。`, "down");
+}
+
+// 今日盈亏明细：账户今日盈亏 = 平仓毛利 + 手续费 + 资金费 + 持仓浮盈变化（含转账等）；AI 费不在账户里，另外扣
+async function showDayPnl() {
+  dlg(`<h3>今日盈亏明细</h3><div class="dim">读取中…</div>`);
+  let f;
+  try { f = await getJson("/api/funds"); } catch (e) { return dlg(`<h3>今日盈亏明细</h3><div class="down">${esc(e.message)}</div>`); }
+  const t = (f.pnl || []).find((x) => x.key === "today");
+  const k = data.kpis;
+  const day = k.day_pnl_usdt;
+  if (!t || day == null) return dlg(`<h3>今日盈亏明细</h3><p>还没有日初权益或账户数据，算不出明细。</p>`);
+  const known = t.trading_usdt + t.fees_usdt + (t.funding_usdt || 0);
+  const rest = day - known;
+  const row = (label, v, note = "") => `<tr><td>${label}${note ? `<div class="dim small">${note}</div>` : ""}</td><td class="r num ${cls(v)}">${v == null ? "—" : signed(v, 2) + " U"}</td></tr>`;
+  const src = f.pnl_source === "exchange" ? "币安收入流水（主程序定时拉）" : "账本里今天平掉的单";
+  dlg(`<h3>今日盈亏明细</h3>
+    <div class="tw"><table><tbody>
+      ${row("平仓毛利", t.trading_usdt, "今天平掉的单，扣手续费前")}
+      ${row("手续费", t.fees_usdt)}
+      ${row("资金费", t.funding_usdt, t.funding_usdt == null ? "没有币安收入流水，拿不到" : "")}
+      ${row("持仓浮盈变化及其他", rest, "还没平的单从 0 点到现在的浮盈变化；也含转入转出、流水还没拉到的部分")}
+      <tr class="hi"><td><b>账户今日盈亏</b><div class="dim small">= 总资产 − 0 点的总资产，和顶部一致</div></td><td class="r num ${cls(day)}"><b>${signed(day, 2)} U</b></td></tr>
+      ${row("AI 费", -t.ai_usd, "拍板人、军师团、管家的调用费（美元按 1 U 算），不从交易账户扣")}
+      <tr class="hi"><td><b>扣 AI 费后</b></td><td class="r num ${cls(day - t.ai_usd)}"><b>${signed(day - t.ai_usd, 2)} U</b></td></tr>
+    </tbody></table></div>
+    <p class="dim small">平仓、手续费、资金费来自${src}${k.as_of ? `；总资产截至 ${hms(k.as_of)}` : ""}。平仓赚了但账户今日盈亏还是负的，通常是手续费、别的持仓浮亏，或者流水还没拉到（这时差额先算在「持仓浮盈变化及其他」里）。</p>`);
 }
 
 // 交易模式：模拟盘随时切回；测试网要面板密码；实盘只在 Mac 本机，逐条勾提示 + 确认词 + 面板密码（和终端 go-live 同一套）
@@ -312,6 +348,7 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "st-changes") showChanges();
   else if (act === "profile") switchProfile(arg);
+  else if (act === "daypnl") showDayPnl();
   else if (act === "mode") switchMode(arg);
   else if (act === "hold") switchHold(arg);
   else if (act === "clearpins") askClearPins();
@@ -335,13 +372,13 @@ const idleLine = (idle) => `观望：${idle.slice(0, 6).map((s) => coin(s.symbol
 
 // 关键位分「支撑 / 压力」：有现价就按在现价下方 / 上方分（同慢环落卡），各自由近到远，标距现价百分比
 S.px = {};
-function levelsHtml(levels, px) {
+function levelsHtml(levels, px, sym) {
   if (!levels || !levels.length) return "";
   const below = (l) => (px ? l.price < px : l.kind === "support");
   const dist = (l) => (px ? Math.abs(l.price - px) : 0);
-  const fmt = (l) => `${price(l.price)}${px ? `<span class="dim">（${l.price >= px ? "+" : "−"}${(Math.abs(l.price - px) / px * 100).toFixed(1)}%）</span>` : ""}`;
+  const fmt = (l) => `${price(l.price, sym)}${px ? `<span class="dim">（${l.price >= px ? "+" : "−"}${(Math.abs(l.price - px) / px * 100).toFixed(1)}%）</span>` : ""}`;
   const group = (name, list) => (list.length ? `<div class="small"><span class="dim">${name}</span> ${list.sort((a, b) => dist(a) - dist(b)).map(fmt).join(" · ")}</div>` : "");
-  return `${group("支撑", levels.filter(below))}${group("压力", levels.filter((l) => !below(l)))}${px ? `<div class="dim small">现价 ${price(px)}</div>` : ""}`;
+  return `${group("支撑", levels.filter(below))}${group("压力", levels.filter((l) => !below(l)))}${px ? `<div class="dim small">现价 ${price(px, sym)}</div>` : ""}`;
 }
 
 // 弹窗打开时取一次各币现价（1 分钟线最后一根收盘），拿到后重画；取不到就只按类型分组、不标百分比
@@ -375,7 +412,7 @@ function showCard(fetchPrices = true) {
     const when = s.source_note ? `<div class="small ${s.fading ? "warn" : "dim"}">${esc(s.source_note)}</div>` : "";
     return `<tr class="${s.fading ? "fade" : ""}"><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div>${when}</td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(TIER[s.size_tier_max] || s.size_tier_max || "—")}</td>
-      <td class="txt">${esc(s.reason || s.pending || "")}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}<div class="small"><a ${clickable("meeting", s.symbol)}>看这个币的开会过程 ›</a></div></td></tr>`;
+      <td class="txt">${esc(s.reason || s.pending || "")}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol], s.symbol)}<div class="small"><a ${clickable("meeting", s.symbol)}>看这个币的开会过程 ›</a></div></td></tr>`;
   };
   const head = `<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th title="军师团建议的名义仓位范围（已含杠杆），最终由保镖按风险算">单笔仓位（含杠杆）U</th><th title="${esc(tierTip(c))}">仓位档</th><th>理由</th></tr></thead>`;
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
@@ -447,7 +484,7 @@ function keyFacts(s) {
 }
 
 // 预测员一条记录 → 大白话：未来多久、价格范围、几条模拟向上 / 向下；原始 JSON 折叠
-const pxFmt = (v) => money(v, v >= 100 ? 2 : v >= 1 ? 4 : 6);
+const pxFmt = (v, sym) => price(v, sym);
 const spanOf = (min) => (min % 60 ? `${min} 分钟` : `${min / 60} 小时`);
 function predictorView(s) {
   const o = s.output || {};
@@ -458,10 +495,10 @@ function predictorView(s) {
   const votes = n
     ? (up === 0 ? `${n} 条模拟全部向下` : up === n ? `${n} 条模拟全部向上` : `${n} 条模拟里 ${up} 条向上、${n - up} 条向下`)
     : (o.p_up === 0 ? "模拟全部向下" : o.p_up === 1 ? "模拟全部向上" : `${Math.round(o.p_up * 100)}% 的模拟向上`);
-  const title = `${coin(s.symbol || o.symbol)} 未来 ${spanOf(o.horizon_min)}：预计 ${pxFmt(o.price_low)}–${pxFmt(o.price_high)}，${votes}，${lean}`;
+  const title = `${coin(s.symbol || o.symbol)} 未来 ${spanOf(o.horizon_min)}：预计 ${pxFmt(o.price_low, s.symbol || o.symbol)}–${pxFmt(o.price_high, s.symbol || o.symbol)}，${votes}，${lean}`;
   const bar = o.ts ? `${hm(o.ts)} 那根 K 线收盘` : "最新一根 K 线";
   const seen = [
-    inp.last_close != null ? `现价 ${pxFmt(inp.last_close)}（${bar}）` : `按 ${bar}算`,
+    inp.last_close != null ? `现价 ${pxFmt(inp.last_close, s.symbol || o.symbol)}（${bar}）` : `按 ${bar}算`,
     inp.bars ? `用了 ${inp.bars} 根${inp.interval ? ` ${esc(inp.interval)}` : ""} K 线` : "",
     n ? `跑了 ${n} 条模拟` : "",
   ].filter(Boolean).join("，");
@@ -735,8 +772,8 @@ function posSection(list) {
         const lbBad = p.lifeboat_status !== "active";
         return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.entry_price)}</b>
           <span class="pnl ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</span></div>
-          <div class="meta"><span>开 ${price(p.entry_price)} · 损 ${price(p.stop_loss_price)} · 盈 ${price(p.take_profit_price)}</span></div>
-          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
+          <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
+          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
       }).join("")
     : `<div class="empty"><b>没有持仓</b>开仓后这里显示盈亏、保命单和管家判断。</div>`;
   return `<section class="card"><div class="ch"><h2>当前持仓</h2><span class="r">${list.length} 笔 · <a href="#positions">全部 ›</a></span></div><div class="scroll">${body}</div></section>`;
@@ -786,13 +823,33 @@ P.positions = (arg) => {
     const [s, sc] = SIDE[p.side] || [p.side, ""];
     const on = p.position_id === sel.position_id;
     const held = now - new Date(p.opened_at).getTime();
-    return `<tr class="click ${on ? "sel" : ""}" onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'">
-      <td class="hi">${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.entry_price)} <span class="dim">${p.leverage}x</span></td>
-      <td class="num">${price(p.entry_price)}</td><td class="r num ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</td>
-      <td class="num">${price(p.stop_loss_price)} / ${price(p.take_profit_price)}</td>
-      <td class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${price(p.lifeboat_price)}</td>
-      <td class="num">${dur(held)} / ${dur(p.time_limit_s * 1000)}</td><td>${esc(p.keeper || "—")}</td>
-      <td class="r"><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></td></tr>`;
+    const go = `onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'"`;
+    const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
+    const pnl = p.unrealized_usdt == null ? "—" : `${signed(p.unrealized_usdt, 2)} U${p.pnl_pct == null ? "" : ` <span class="small">${signed(p.pnl_pct, 2)}%</span>`}`;
+    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) : ""}</span>`;
+    const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
+    const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
+    return `<tr class="click ${on ? "sel" : ""}" ${go}>
+      <td class="hi">${coin(p.symbol)}</td><td>${side}</td><td class="r num">${qtyFmt(p.quantity)}</td>
+      <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td><td class="r num">${p.leverage}x</td>
+      <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
+      <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}</td>
+      <td class="r num ${cls(p.unrealized_usdt)}">${pnl}</td>
+      <td class="r num">${price(p.stop_loss_price, p.symbol)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
+      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}</td><td class="r">${closeBtn}</td></tr>`;
+  }).join("");
+  // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
+  const cards = d.positions.map((p) => {
+    const [s] = SIDE[p.side] || [p.side, ""];
+    const on = p.position_id === sel.position_id;
+    const held = now - new Date(p.opened_at).getTime();
+    const lbOk = p.lifeboat_status === "active";
+    return `<div class="pm ${on ? "sel" : ""}"><a href="#positions/${encodeURIComponent(p.position_id)}">
+      <div class="l1"><b>${coin(p.symbol)}</b> <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
+        <span class="r num ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : `${signed(p.unrealized_usdt, 2)} U`}${p.pnl_pct == null ? "" : ` · ${signed(p.pnl_pct, 2)}%`}</span></div>
+      <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
+        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
+      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
   const trail = window.__recs.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`).join("");
@@ -803,9 +860,9 @@ P.positions = (arg) => {
       <span>保命止损 <b class="num ${d.lifeboats_ok === d.positions.length ? "up" : "warn"}">${d.lifeboats_ok} / ${d.positions.length} 在位</b></span>
       <div class="bars">${groups}</div>
     </div>
-    <section class="card mt"><div class="tw"><table>
-      <thead><tr><th>币种</th><th>开仓价</th><th class="r">浮盈亏</th><th>止损 / 止盈</th><th>保命单</th><th>已持有 / 上限</th><th>管家</th><th></th></tr></thead>
-      <tbody>${rows}</tbody></table></div></section>
+    <section class="card mt"><div class="tw pos-wide"><table>
+      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r">现价</th><th class="r" title="百分比按名义算，不乘杠杆">浮盈（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
     <section class="card mt">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span></span></div>
@@ -860,6 +917,8 @@ async function loadKlines(force) {
     const r = await fetch(`/api/klines?symbol=${encodeURIComponent(p.symbol)}&interval=${S.tf}`, { cache: "no-store" });
     if (!r.ok) throw new Error(String(r.status));
     series.setData(await r.json());
+    const dg = pxDigits(p.entry_price || 1, p.symbol);
+    series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
     return;
   }
@@ -939,10 +998,17 @@ function tfCardNode() {
   return { key: "card", html: `<span class="nm">作战卡${c && c.version ? " v" + c.version : ""}</span><small>${esc(a)}</small><small class="cnt">关键价位、止损范围</small>`, cls: "doc", act: c ? clickable("card") : "" };
 }
 // 总盘会：军师团先开的那场，挑哪些币上会（给军师团）、哪些币要盯（给盘口员）
-function tfMarketNode(m, p) {
-  const st = !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
+function tfMarketNode(m, p, mr) {
+  if (mr && mr.state !== "ok") return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会${hbBadge(mr)}</span><small>${esc(mr.status)}</small><small class="cnt">挑上会的币、要盯的币</small>`;
+  const line = runLine(mr);
+  const st = line ? line : !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
   const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
+}
+// 统一的「上次 hh:mm · 下次 hh:mm · 刚刚：…」；模块没报的字段就不写（不猜）
+function runLine(r) {
+  if (!r) return "";
+  return [r.last_run_at ? `上次 ${hm(r.last_run_at)}` : "", r.next_run_at ? `下次 ${hm(r.next_run_at)}` : "", r.summary ? `刚刚：${r.summary}` : ""].filter(Boolean).join(" · ");
 }
 // 心跳好坏单独用角标（点只表示流程走到哪）
 function hbBadge(r) {
@@ -961,7 +1027,8 @@ function predictorText(r) {
   return m ? `盯着 ${m[2]} 个币，已算 ${m[1]} 个${m[3]}` : r.headline;
 }
 function tfNode(r) {
-  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.role === "predictor" ? predictorText(r) : r.status;
+  const line = r.state === "ok" ? runLine(r) : "";
+  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : line || (r.role === "predictor" ? predictorText(r) : r.status);
   return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}${hbBadge(r)}</span>
     ${r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
     <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
@@ -972,7 +1039,7 @@ function teamFlow(d) {
   prog.card = data && data.card && data.card.valid ? "done" : "wait";
   prog.market = d.market_progress;
   const node = (k, inCanvas) => {
-    if (k === "market") return `<div class="tf-node ${d.market_progress}" ${clickable("meeting", MARKET)} style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress)}</div>`;
+    if (k === "market") return `<div class="tf-node ${d.market_progress}" ${clickable("meeting", MARKET)} style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress, d.market_role)}</div>`;
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
@@ -1018,7 +1085,7 @@ function tapeTables(snap) {
   const age = secAgo(snap.ts);
   const stale = age > 30 ? `<div class="note warn mt">行情快照 ${agoTxt(age)}写的，之后没再更新：主程序可能没在跑。</div>` : "";
   const syms = Object.entries(snap.symbols || {}).sort(([a], [b]) => a.localeCompare(b));
-  const rows = syms.map(([sym, v]) => `<tr><td>${coin(sym)}</td><td class="r num">${v.price == null ? "—" : pxFmt(v.price)}</td><td class="r num">${chg(v.chg_1m_pct, 2, "%")}</td><td class="r num">${chg(v.chg_5m_pct, 2, "%")}</td>
+  const rows = syms.map(([sym, v]) => `<tr><td>${coin(sym)}</td><td class="r num">${v.price == null ? "—" : pxFmt(v.price, sym)}</td><td class="r num">${chg(v.chg_1m_pct, 2, "%")}</td><td class="r num">${chg(v.chg_5m_pct, 2, "%")}</td>
     <td class="r num">${v.taker_buy_ratio_1m == null ? "—" : Math.round(v.taker_buy_ratio_1m * 100) + "%"}</td><td class="r num">${v.spread_bps == null ? '<span class="warn">盘口没更新</span>' : v.spread_bps.toFixed(2) + " bp"}</td>
     <td class="r num">${kU(v.liq_long_usdt_1m)}</td><td class="r num">${kU(v.liq_short_usdt_1m)}</td><td class="r num ${v.book_age_s > 10 ? "warn" : ""}">${v.book_age_s == null ? "—" : v.book_age_s + " 秒"}</td></tr>`).join("");
   const coins = syms.length ? `<div class="tw mt"><table><thead><tr><th>币</th><th class="r">现价</th><th class="r">1 分钟</th><th class="r">5 分钟</th><th class="r">主动买占比</th><th class="r">买卖价差</th><th class="r">1 分钟多头强平</th><th class="r">1 分钟空头强平</th><th class="r">盘口多久没更新</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim mt">现在没有在盯的币。</div>';
@@ -1062,7 +1129,7 @@ S.tests = false;
 P.history = () => {
   const d = pageData;
   const tiles = [
-    [signed(d.net_pnl_usdt, 2) + "U", "净盈亏（已扣手续费）", cls(d.net_pnl_usdt)],
+    [signed(d.net_pnl_usdt, 2) + "U", "交易净盈亏（已扣手续费，未扣 AI 费）", cls(d.net_pnl_usdt)],
     [d.trades + " 笔", "交易"],
     [d.win_rate == null ? "—" : Math.round(d.win_rate * 100) + "%", "胜率"],
     [d.avg_win_loss == null ? "—" : d.avg_win_loss.toFixed(2), "平均盈亏比"],
@@ -1072,8 +1139,8 @@ P.history = () => {
   const rows = d.rows.map((t) => {
     const [s, sc] = SIDE[t.side] || [t.side, ""];
     return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num">${hm(t.closed_at)}</td><td class="hi">${coin(t.symbol)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 保镖：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="num">${price(t.entry_price)}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
-      <td class="num">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${cls(t.pnl_usdt)}">${signed(t.pnl_usdt, 2)}</td><td class="r num dim">${money(t.fees_usdt, 2)}</td></tr>`;
+      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 保镖：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="num">${price(t.entry_price, t.symbol)}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
+      <td class="num">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${cls(t.pnl_usdt + t.fees_usdt)}">${signed(t.pnl_usdt + t.fees_usdt, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td></tr>`;
   }).join("");
   window.__recs = d.rejected;
   const rej = S.rej
@@ -1089,7 +1156,7 @@ P.history = () => {
       ${d.curve.length ? '<div class="chart sm" id="hchart-host"></div>' : '<div class="empty"><b>这段时间没有平仓</b></div>'}</section>
     <div class="grid g21 mt">
       <section class="card"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链</span></div>
-        ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>平仓</th><th>币种</th><th>信号</th><th>开仓价</th><th>怎么平的</th><th>持有</th><th class="r">净盈亏</th><th class="r">手续费</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>
+        ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>平仓</th><th>币种</th><th>信号</th><th>开仓价</th><th>怎么平的</th><th>持有</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">净利 = 毛利 − 手续费（已扣手续费，不含 AI 费；AI 费在「资金」页）。</div>` : '<div class="dim">没有。</div>'}</section>
       <section class="card"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
         ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>
     </div>${rej}`;
@@ -1562,7 +1629,7 @@ const ADV = [
     { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple"] },
     { g: "止损和止盈", keys: ["risk.lifeboat_stop_multiplier", "fast_loop.atr_period_min", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_buffer_atr", "fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.time_limit_s"] },
     { g: "管家、巡逻兵和对账", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
-    { g: "拍板人（每个信号做不做）", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
+    { g: "拍板人（每个信号做不做）", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
     { g: "信号识别", keys: ["app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio"] },
   ] },
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
@@ -1985,5 +2052,6 @@ if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
   window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
   render();
   poll();
+  loadPrecision();
   setInterval(poll, 5000);
 }

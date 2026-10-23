@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -162,6 +163,13 @@ class PanelFiles:
     def market_snapshot(self) -> dict[str, Any] | None:
         """盘口员每 5 秒写的逐币行情和各路推送计数（data/market_snapshot.json）；没有就是 None。"""
         raw = self._json("market_snapshot.json")
+        return raw if isinstance(raw, dict) else None
+
+    def gate_calibration(self, hold: str) -> dict[str, Any] | None:
+        """快环 ``jiaoyi gate-calibrate`` 写的 data/gate_calibration/<hold>.json；没有就是 None。"""
+        if not re.fullmatch(r"\d+[mh]", hold):
+            return None
+        raw = self._json(f"gate_calibration/{hold}.json")
         return raw if isinstance(raw, dict) else None
 
     def runtime(self) -> dict[str, Any]:

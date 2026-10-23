@@ -1000,3 +1000,84 @@ def test_card_history_lists_past_orders(tmp_path: Path) -> None:
     prev = build_card_history(files, NOW, day=date.fromisoformat(page.days[1]))
     assert len(prev.rows) == 1 and prev.rows[0].reason == ""  # 那天没有会议记录
     assert build_card_history(files, NOW, symbol="X").rows == []
+
+
+def test_position_view_mark_notional_margin(tmp_path: Path) -> None:
+    """持仓表的现价、名义、本金占用、浮盈% 都由 hummingbot 浮盈和账本算出（同一口径）。"""
+    from jiaoyi.panel.pages import build_positions
+
+    _seed(tmp_path)
+    page = build_positions(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW)
+    p = next(x for x in page.positions if x.symbol == "BTCUSDT")
+    # 多单 0.015 个、开仓 68044、浮亏 20U → 现价 68044 − 20 / 0.015
+    assert p.mark_price == pytest.approx(68044 - 20 / 0.015)
+    assert p.notional_usdt == pytest.approx(0.015 * p.mark_price)
+    assert p.margin_usdt == pytest.approx(p.notional_usdt / 3)
+    assert p.pnl_pct == pytest.approx(-20 / p.notional_usdt * 100)
+
+
+def test_market_role_and_run_line_fields(tmp_path: Path) -> None:
+    """总盘会只在开会时报状态：没到下次计划时间不算断心跳；上次 / 下次带给面板。"""
+    from jiaoyi.panel.pages import build_team
+
+    _seed(tmp_path)
+    log = JsonlDecisionLog(tmp_path)
+    log.heartbeat(
+        c.ModuleStatus(
+            role=c.Role.MARKET,
+            health=c.Health.OK,
+            ts=NOW - timedelta(minutes=50),
+            headline="挑了 5 个",
+            last_run_at=NOW - timedelta(minutes=50),
+            next_run_at=NOW + timedelta(minutes=70),
+        )
+    )
+    team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, c.Role.GATE)
+    mr = team.market_role
+    assert mr is not None and mr.state == "ok" and mr.name == "总盘会"
+    assert mr.next_run_at == NOW + timedelta(minutes=70) and mr.summary is None
+    assert (
+        build_team(
+            PanelFiles(tmp_path, RISK.day_reset_tz), NOW + timedelta(hours=3), c.Role.GATE
+        ).market_role.state
+        == "bad"
+    )  # type: ignore[union-attr]
+
+
+async def test_price_decimals_from_tick_size() -> None:
+    from jiaoyi.panel.market import KlineSource, tick_decimals
+
+    assert tick_decimals("0.00010000") == 4 and tick_decimals("1") == 0
+
+    def pf(tick: str) -> list[dict[str, str]]:
+        return [{"filterType": "PRICE_FILTER", "tickSize": tick}]
+
+    info = {
+        "symbols": [
+            {"symbol": "APTUSDT", "filters": pf("0.0001")},
+            {"symbol": "BTCUSDT", "filters": pf("0.10")},
+            {"symbol": "BTCUSDT_251226", "filters": []},
+        ]
+    }
+    src = KlineSource(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=info)))
+    assert await src.price_decimals() == {"APTUSDT": 4, "BTCUSDT": 1}
+    await src.close()
+
+
+async def test_hb_snapshot_asks_for_fresh_balance() -> None:
+    """面板拉总资产时让 hummingbot-api 先从币安重拉余额，并记下拉到的时间。"""
+    seen: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(req.content))
+        if req.url.path == "/portfolio/state":
+            return httpx.Response(200, json={"a": {"c": [{"token": "USDT", "units": 100}]}})
+        return httpx.Response(200, json={"data": []})
+
+    hb = HbReader(
+        "http://hb", "u", "p", account_name="a", connector_name="c",
+        transport=httpx.MockTransport(handler),
+    )  # fmt: skip
+    snap = await hb.snapshot()
+    assert seen[0]["refresh"] is True and snap.wallet_usdt == 100 and snap.fetched_at is not None
+    await hb.close()

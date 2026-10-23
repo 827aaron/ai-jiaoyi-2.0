@@ -334,6 +334,13 @@ def create_app(
     async def signal(signal_id: str) -> list[TrailItem]:
         return build_signal(files, clock(), signal_id)
 
+    @api.get("/api/price-decimals")
+    async def price_decimals() -> dict[str, int]:
+        try:
+            return await market.price_decimals()
+        except KlineError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
     @api.get("/api/klines")
     async def klines_(symbol: str, interval: Interval = "1m") -> list[dict[str, float]]:
         try:

@@ -13,6 +13,15 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 BASE = "https://fapi.binance.com"
 
 
+DECIMALS_CACHE_S = 6 * 3600.0
+
+
+def tick_decimals(tick: str) -> int:
+    """``"0.00010000"`` → 4；``"1"`` → 0。"""
+    frac = tick.split(".", 1)[1].rstrip("0") if "." in tick else ""
+    return len(frac)
+
+
 class KlineError(Exception):
     pass
 
@@ -28,6 +37,28 @@ class KlineSource:
         self._http = httpx.AsyncClient(base_url=base_url, timeout=4.0, transport=transport)
         self._cache_s = cache_s
         self._cache: dict[tuple[str, str], tuple[float, list[dict[str, float]]]] = {}
+        self._decimals: tuple[float, dict[str, int]] | None = None
+
+    async def price_decimals(self) -> dict[str, int]:
+        """每个 USDT 合约价格的小数位（exchangeInfo 的 PRICE_FILTER tickSize），缓存 6 小时。"""
+        if self._decimals and time.monotonic() - self._decimals[0] < DECIMALS_CACHE_S:
+            return self._decimals[1]
+        try:
+            resp = await self._http.get("/fapi/v1/exchangeInfo")
+        except httpx.HTTPError as e:
+            raise KlineError(f"币安行情连不上：{type(e).__name__}") from e
+        if resp.status_code != 200:
+            raise KlineError(f"币安行情返回 {resp.status_code}")
+        out: dict[str, int] = {}
+        for sym in resp.json().get("symbols", []):
+            name = sym.get("symbol", "")
+            if not isinstance(name, str) or not SYMBOL_RE.match(name):
+                continue
+            for f in sym.get("filters", []):
+                if f.get("filterType") == "PRICE_FILTER" and f.get("tickSize"):
+                    out[name] = tick_decimals(str(f["tickSize"]))
+        self._decimals = (time.monotonic(), out)
+        return out
 
     async def klines(
         self, symbol: str, interval: Interval, limit: int = 300

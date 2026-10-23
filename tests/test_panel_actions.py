@@ -809,3 +809,31 @@ def test_settings_meaning_lines() -> None:
     assert "12h 档" in text["按本金推荐"] and "$2.50" in text["按本金推荐"]
     assert recommended_meeting(1000) is None and recommended_meeting(100_000) == "1h"
     assert "拿不到本金" in build_meaning(risk, app, "2h", None, None).lines[-1].text
+
+
+def test_gate_calibration_shown_next_to_thresholds(tmp_path: Path) -> None:
+    """有校准推荐就挂在拍板门槛的推荐上（不自动套用）；推荐为空时显示原因。"""
+    paths, data = _setup(tmp_path)
+    hold = load_app_config(paths.app).hold
+    with _client(paths) as client:
+        page = client.get("/api/settings").json()
+        assert "还没有拍板门槛校准结果" in page["gate_cautions"][0]
+        (data / "gate_calibration").mkdir()
+        cal = {
+            "hold": hold, "kind": "all", "template_fp": "x", "model": "m", "samples": 412,
+            "min_above": 150, "min_samples": 300, "computed_at": "2026-10-24T03:00:00+07:00",
+            "recommended": {"p_take": 0.35, "p_genuine": 0.4, "max_p_toxic": 0.7},
+            "table": [], "note": "",
+        }  # fmt: skip
+        (data / "gate_calibration" / f"{hold}.json").write_text(json.dumps(cal))
+        page = client.get("/api/settings").json()
+        fl = {i["key"]: i for i in page["fast_loop"]}
+        assert (
+            fl["min_p_take"]["recommended"] == 0.35
+            and "412 个样本" in fl["min_p_take"]["recommended_why"]
+        )
+        assert fl["max_p_toxic"]["recommended"] == 0.7 and page["gate_cautions"] == []
+        cal["recommended"], cal["note"] = None, "样本不足：只有 120 个"
+        (data / "gate_calibration" / f"{hold}.json").write_text(json.dumps(cal))
+        page = client.get("/api/settings").json()
+        assert "样本不足" in page["gate_cautions"][0]
