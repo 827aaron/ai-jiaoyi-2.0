@@ -98,6 +98,21 @@ class ScreenerConfig:
     min_listed_days: int = 7
     round_trip_fee_bps: float = 10.0
     default_category_cap: int = 30
+    min_range_24h_pct: float = 0.0
+    """24 小时波动下限（%）；0 = 不设。波动太小的币赚不回手续费。"""
+    max_range_24h_pct: float = 0.0
+    """24 小时波动上限（%）；0 = 不设。波动过大的币止损容易被一根针扫掉。"""
+    # 打分时各项「到多少算满分」
+    vol_full_multiple: float = 20.0
+    """24h 波动是来回手续费的几倍算满分。"""
+    surge_full_multiple: float = 8.0
+    """最近 1 小时成交额是平时的几倍算满分。"""
+    funding_full: float = 0.001
+    """资金费率绝对值到多少算满分（0.001 = 0.1%）。"""
+    oi_full_pct: float = 10.0
+    """持仓量变化绝对值到多少 % 算满分。"""
+    liq_full_usdt: float = 10_000_000.0
+    """近 1 小时强平额到多少美元算满分。"""
     weights: Mapping[str, float] = field(
         default_factory=lambda: {
             "vol_vs_fees": 0.35,
@@ -123,6 +138,10 @@ def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
         reasons.append("盘口深度不足")
     if s.listed_days < cfg.min_listed_days:
         reasons.append(f"上线不满 {cfg.min_listed_days} 天")
+    if cfg.min_range_24h_pct > 0 and s.range_24h_pct < cfg.min_range_24h_pct:
+        reasons.append("24 小时波动太小")
+    if cfg.max_range_24h_pct > 0 and s.range_24h_pct > cfg.max_range_24h_pct:
+        reasons.append("24 小时波动过大")
     return HardFilters(
         quote_volume_24h_usdt=s.quote_volume_24h_usdt,
         spread_bps=s.spread_bps,
@@ -137,12 +156,17 @@ def score(s: SymbolStats, cfg: ScreenerConfig) -> tuple[float, dict[str, float],
     """总分 0–1、各分项、中文入池理由。分项都先压到 0–1。"""
     fee_pct = cfg.round_trip_fee_bps / 100.0
     parts = {
-        # 24h 波动是来回手续费的 20 倍及以上算满分
-        "vol_vs_fees": _clip01(s.range_24h_pct / fee_pct / 20.0),
-        "volume_surge": _clip01(math.log2(max(s.volume_surge, 1e-9)) / 3.0),  # 8 倍封顶
-        "funding_extreme": _clip01(abs(s.funding_rate) / 0.001),  # 0.1% 封顶
-        "oi_change": _clip01(abs(s.oi_change_pct) / 10.0),
-        "liquidations": _clip01(math.log10(max(s.liquidations_1h_usdt, 1.0)) / 7.0),
+        # 默认：24h 波动是来回手续费的 20 倍及以上算满分；量能 8 倍封顶；资金费 0.1% 封顶；
+        # 持仓量变化 10% 封顶；强平 1000 万美元封顶（各项满分点可配，见 ScreenerConfig）
+        "vol_vs_fees": _clip01(s.range_24h_pct / fee_pct / cfg.vol_full_multiple),
+        "volume_surge": _clip01(
+            math.log2(max(s.volume_surge, 1e-9)) / math.log2(cfg.surge_full_multiple)
+        ),
+        "funding_extreme": _clip01(abs(s.funding_rate) / cfg.funding_full),
+        "oi_change": _clip01(abs(s.oi_change_pct) / cfg.oi_full_pct),
+        "liquidations": _clip01(
+            math.log10(max(s.liquidations_1h_usdt, 1.0)) / math.log10(cfg.liq_full_usdt)
+        ),
     }
     total = sum(cfg.weights.get(k, 0.0) * v for k, v in parts.items())
     notes = {

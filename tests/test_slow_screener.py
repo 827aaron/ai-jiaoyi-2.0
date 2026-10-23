@@ -115,3 +115,48 @@ async def test_screener_reports_its_own_status(now: datetime, tmp_path: Path) ->
     assert st.health is Health.OK and st.error is None and st.symbol_count == 1
     assert st.last_run_at == now and st.next_run_at == now + timedelta(hours=1)
     assert "选出 1 个币" in st.headline and "下次" in st.headline
+
+
+def test_screener_section_defaults_equal_the_old_hardcoded_values() -> None:
+    from jiaoyi.slow.settings import SlowConfig
+
+    cfg = SlowConfig().screener_config(
+        pool_size=40, risk_max_spread_bps=5.0, round_trip_fee_bps=10.0
+    )
+    assert cfg == ScreenerConfig()  # [screener] 不写 = 原来写死的值，选币结果不变
+
+
+def test_screener_section_validation_and_cautions() -> None:
+    from pydantic import ValidationError
+
+    from jiaoyi.slow.settings import ScreenerSection
+
+    with pytest.raises(ValidationError, match="权重"):
+        ScreenerSection(
+            weight_volatility=0,
+            weight_volume_surge=0,
+            weight_funding=0,
+            weight_oi=0,
+            weight_liquidations=0,
+        )
+    with pytest.raises(ValidationError, match="下限"):
+        ScreenerSection(min_range_24h_pct=10, max_range_24h_pct=5)
+    assert ScreenerSection().cautions(5.0) == []
+    notes = ScreenerSection(min_quote_volume_usdt=1e6, max_spread_bps=9).cautions(5.0)
+    assert len(notes) == 2 and "保镖" in notes[1]
+
+
+def test_range_filters_and_full_score_points(now: datetime) -> None:
+    from jiaoyi.slow.screener import score
+
+    src = FakeSource([stat("CALMUSDT", range_24h_pct=0.5), stat("WILDUSDT", range_24h_pct=60)])
+    cfg = ScreenerConfig(min_range_24h_pct=1.5, max_range_24h_pct=30)
+    import asyncio
+
+    pool = asyncio.run(CodeSymbolScreener(src, cfg).screen(now))
+    by = {e.symbol: e for e in pool.entries}
+    assert by["CALMUSDT"].filters.failed_reasons == ["24 小时波动太小"]
+    assert by["WILDUSDT"].filters.failed_reasons == ["24 小时波动过大"]
+    # 满分点可配：funding 0.5% 封顶时 0.25% 只有一半分
+    _, parts, _ = score(stat("XUSDT", **{}), ScreenerConfig(funding_full=0.005))
+    assert parts["funding_extreme"] == 0.0
