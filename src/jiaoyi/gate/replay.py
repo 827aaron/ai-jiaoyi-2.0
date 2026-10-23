@@ -72,6 +72,7 @@ from jiaoyi.gate.questions import (
 )
 from jiaoyi.interfaces import DecisionModel
 from jiaoyi.market.features import RollingFeatureEngine, backfill_minutes
+from jiaoyi.market.rest import RateLimited
 from jiaoyi.risk.guard import stop_atr
 from jiaoyi.sentinel.rules import RuleTrigger
 
@@ -377,6 +378,9 @@ async def run(
                 bars = await fetch(
                     c.symbol, c.ts - timedelta(minutes=1), c.ts + timedelta(minutes=hold_min)
                 )
+            except RateLimited:  # 被币安限流：不逐笔刷屏，命令行最后统一说一句
+                failed += 1
+                continue
             except Exception as e:
                 log.warning("%s 拉结果 K 线失败：%s", c.symbol, e)
                 failed += 1

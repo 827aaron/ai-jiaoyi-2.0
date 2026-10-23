@@ -66,6 +66,7 @@ keeper_confirmations = 2
 breakout_vol_ratio = 3.0          # 哨兵：放量突破要 1 分钟量 ≥ 3 倍均值
 surge_vol_ratio = 4.0             # 哨兵：量能突增 ≥ 4 倍
 surge_taker_ratio = 0.7           # 且主动买（或卖）占 70% 以上
+volume_surge_live = true          # 量能突增在 testnet / live 也出；false = 只在 paper 出
 liq_min_usdt_1m = 100000          # 哨兵：1 分钟爆仓 ≥ 10 万 U
 liq_ratio = 5.0                   # 且是 30 分钟均值的 5 倍
 liq_drop_pct_5m = 1.0             # 且 5 分钟内被砸了 1% 以上

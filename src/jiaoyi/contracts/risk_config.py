@@ -375,9 +375,9 @@ class FastLoopConfig(Contract):
     )
     # ---- 哨兵
     volume_surge_live: bool = Field(
-        default=False,
-        description="testnet / live 也出量能突增信号。默认关：顺着放量做比随机入场还差；"
-        "paper 不管这个开关照出（攒校准样本），校准后能过成本线再打开。",
+        default=True,
+        description="testnet / live 也出量能突增信号（默认开，Aaron 2026-10-24）。"
+        "关掉后 testnet / live 不出；paper 不管这个开关照出（攒校准样本）。",
     )
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)

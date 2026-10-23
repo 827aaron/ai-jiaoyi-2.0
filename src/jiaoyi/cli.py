@@ -238,12 +238,24 @@ def _status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _say_rate_limited() -> None:
+    """被币安限流过就整段说一句（不逐币刷屏）。"""
+    from jiaoyi.market.rest import blocked
+
+    lim = blocked()
+    if lim is not None:
+        print(
+            f"被币安限流（HTTP {lim.status}），已停掉所有行情请求；等 {lim.wait_min()} 分钟后重跑",
+            file=sys.stderr,
+        )
+
+
 def _jev_backtest(args: argparse.Namespace) -> int:
     """历史拍板记录 + 币安公开 1 分钟线 → 每个信号「做了会怎样」，按拍板概率分桶，给门槛推荐。"""
     from datetime import timedelta
 
     from jiaoyi.gate import outcomes
-    from jiaoyi.market.rest import fetch_klines_between
+    from jiaoyi.gate.bars import OutcomeBars
 
     try:
         risk = load_risk_config(Path(args.risk))
@@ -265,9 +277,10 @@ def _jev_backtest(args: argparse.Namespace) -> int:
             now=now,
             default_hold_min=max(app_cfg.fast_loop.time_limit_s // 60, 1),
             fee_bps=risk.taker_fee_bps,
-            fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
+            fetch=OutcomeBars(cache=Path(data_dir) / "history"),
         )
     )
+    _say_rate_limited()
     rows = [r for r in outcomes.read_results(data_dir) if r.get("ts", "") >= since.isoformat()]
     rep = outcomes.report(rows)
     path = outcomes.write_report(
@@ -291,7 +304,7 @@ def _gate_calibrate(args: argparse.Namespace) -> int:
     from datetime import timedelta
 
     from jiaoyi.gate import calibrate, outcomes, replay
-    from jiaoyi.market.rest import fetch_klines_between
+    from jiaoyi.gate.bars import OutcomeBars
 
     try:
         risk = load_risk_config(Path(args.risk))
@@ -310,10 +323,11 @@ def _gate_calibrate(args: argparse.Namespace) -> int:
                 now=now,
                 default_hold_min=max(app_cfg.fast_loop.time_limit_s // 60, 1),
                 fee_bps=risk.taker_fee_bps,
-                fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
+                fetch=OutcomeBars(cache=Path(data_dir) / "history"),
             )
         )
         print(f"实盘拍板补算 {new} 个，拉行情失败 {failed} 个（下次再算）")
+        _say_rate_limited()
     rows = calibrate.load_rows(data_dir, calibrate.hold_minutes(hold), replay=not args.no_replay)
     result = calibrate.calibrate(
         rows, hold=hold, now=now, min_above=args.min_above, min_samples=args.min_samples
@@ -331,8 +345,8 @@ def _jev_replay(args: argparse.Namespace) -> int:
 
     from jiaoyi.contracts import Category
     from jiaoyi.gate import replay
+    from jiaoyi.gate.bars import OutcomeBars
     from jiaoyi.gate.jev import jev_from_secrets
-    from jiaoyi.market.rest import fetch_klines_between
 
     try:
         risk = load_risk_config(Path(args.risk))
@@ -382,7 +396,7 @@ def _jev_replay(args: argparse.Namespace) -> int:
             fee_bps=risk.taker_fee_bps,
             dedup_s=dedup_s,
             concurrency=args.concurrency,
-            fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
+            fetch=OutcomeBars(cache=Path(args.cache)),
             now=now,
             cache=Path(args.cache),
             live_timeout_ms=app_cfg.jev_timeout_ms,
@@ -391,6 +405,7 @@ def _jev_replay(args: argparse.Namespace) -> int:
     )
     for line in replay.render(result):
         print(line)
+    _say_rate_limited()
     return 0
 
 
