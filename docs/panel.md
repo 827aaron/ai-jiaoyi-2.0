@@ -58,7 +58,7 @@ Mac mini 本机打开 http://localhost:8090 ；手机 / 其他电脑用 Mac mini
 （净 = 交易 + 手续费 + 资金费 − AI 费，不含浮盈浮亏）。前三项读 `data/income_daily.json`
 （主程序每 5 分钟拉币安收入流水按当地日汇总：`{"tz", "updated_at", "since", "days": {"YYYY-MM-DD":
 {"realized_pnl", "commission", "funding_fee"}}}`，币安原始正负号）；文件没有时退回账本，资金费显示“—”。
-AI 费按决策记录的 `cost_usd`，1 美元按 1 U 算。
+AI 费按决策记录的 `cost_usd`，1 美元按 1 U 算；今天的军师团（总盘会 + 军师团）改读 `data/slow_budget.json`（开会前预记、失败也算，和日上限同一个数，每次刷新都读文件），比日志里已写完的记录多就用它。
 
 「AI 费用详情」（`pages.build_ai_costs`，`/api/funds?ai=today|7d|all`）把军师团、拍板人、持仓管家、预测员的
 决策记录里花了钱或出错的每一条列出来：时间、谁（军师团 · 某币会议 / 总盘会 / Jev 拍板 / Jev 持仓审查）、币、

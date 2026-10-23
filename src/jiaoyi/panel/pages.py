@@ -922,9 +922,16 @@ def _pnl_periods(
     first = min(since or today, today - timedelta(days=6), files.first_log_day() or today)
     start = datetime.combine(first, time(), tzinfo=ZoneInfo(tz)).astimezone(UTC)
     ai_by_day: dict[date, float] = {}
+    commander_today = 0.0
     for r in files.decisions_since(start, now, _PAID):
         d = local_day(r.ts, tz)
         ai_by_day[d] = ai_by_day.get(d, 0.0) + r.cost_usd
+        if d == today and r.role is Role.COMMANDER:
+            commander_today += r.cost_usd
+    # 军师团今天的花费以慢环预算文件为准：开会前预记、失败和还在开的会都算，日志要等会开完才有
+    budget = files.slow_budget_cost(today)
+    if budget is not None and budget > commander_today:
+        ai_by_day[today] = ai_by_day.get(today, 0.0) - commander_today + budget
     first_ai = min((d for d, v in ai_by_day.items() if v > 0), default=None)
     if first_ai is not None:
         since = min(since or first_ai, first_ai)

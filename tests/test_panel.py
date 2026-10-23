@@ -1129,3 +1129,20 @@ async def test_card_atr_same_formula_as_guard() -> None:
     fl = c.FastLoopConfig(atr_long_period_min=60)
     assert blend_atr(1.0, 4.0, fl) == pytest.approx(2.0)
     assert blend_atr(1.0, None, fl) == 1.0
+
+
+def test_today_ai_cost_reads_slow_budget(tmp_path: Path) -> None:
+    """军师团今天的花费以 slow_budget.json 为准（预记、失败都算）；别的日子的文件不认。"""
+    from jiaoyi.core.recorder import local_day
+    from jiaoyi.panel.pages import build_funds
+
+    _seed(tmp_path)
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    base = build_funds(files, HB, RISK, NOW).pnl[0].ai_usd
+    cmd = sum(r.cost_usd for r in files.decisions_today(NOW) if r.role is c.Role.COMMANDER)
+    day = local_day(NOW, RISK.day_reset_tz)
+    budget = tmp_path / "slow_budget.json"
+    budget.write_text(json.dumps({"day": day.isoformat(), "cost_usd": 6.04}))
+    assert build_funds(files, HB, RISK, NOW).pnl[0].ai_usd == pytest.approx(base - cmd + 6.04)
+    budget.write_text(json.dumps({"day": "2026-01-01", "cost_usd": 6.04}))
+    assert build_funds(files, HB, RISK, NOW).pnl[0].ai_usd == pytest.approx(base)
