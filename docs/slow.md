@@ -337,6 +337,15 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 **待做（需快环 / 预测员配合）**：① `atr_floor_7d`（止损 ATR 不低于近 7 天中位 × 0.7，防周末窄止损）要常驻 7 天 ATR 历史；② 预测员 8h+ 档改 15m / 1h K 线（`predictor.interval`）；③ `min_stop_atr` 等倍数是按各档 ATR 周期给的，24h 档切 240 后才对得上。
 
+### 临时会 / 卡龄检查 / 固定时间 / 超额放慢（`[schedule]`）
+
+- **临时会**（`event_meeting_enabled`，2h 起默认开，15m–1h 关）：卡有效期里出了事件，只给那一个币补开一场，结论并进现有卡（版本 +1，有效期不延长，`refresh_reason = event:<触发>`），不重开整轮。关掉时关键位突破 / 大消息 / 新入池照旧重开整轮。触发名单 `event_triggers`（不在名单里的事件不开会）：`key_level_break`（收盘价穿卡上关键位）、`move_since_card`（离该币上次开会的价格 ≥ `move_since_card_atr`=3 倍最长持仓档 ATR）、`new_head_symbol`（新币进头部档）、`predictor_against_card`（预测员连续 `predictor_against_runs`=2 次看反，订阅 `App.against`）、`news_high_impact`（大消息）、`stale_card_on_entry`（见下）。同币间隔 `event_symbol_gap_min`（含正式会）、每天（曼谷日）最多 `event_max_per_day` 场；持仓币优先；排队超过 30 分钟没轮到就丢（事件还在会重排）；失败也算一场（间隔内不重试），花费照常计入日上限。2h：前三项、间隔 60、12 场/天；6h：五项、60、20；12h：六项、90、20；24h：六项、120、24。
+- **开仓前卡龄检查**（`entry_max_card_age_min`，12h 360 / 24h 480，0 = 不查）：该币上次开会距今超过这个值，卡上这个币的信号读成空（方向不动、持仓照常盯），这次信号不开仓；同时排一场补会，新结论出来后的信号再开。名单里没写 `stale_card_on_entry` 就只拦不补。
+- **每天固定时间**（`schedule_at`，24h 档 `"08:00"`，曼谷时间）：整轮会只在这个时间开（当天还没开过的话），不按启动时间漂；主循环的按间隔兜底也停用；重启后看存档卡的出卡时间，不会补开。
+- **日花费放慢**（`over_budget`）：花到 `daily_cost_limit_usd` 的 80% 时，`slow` = 新卡按 `slowdown_interval_min` 出（有效期 = 该间隔 + 提前量）、主循环兜底间隔也换成它，并推送一次提醒；15m→30m、30m→1h、1h→2h、2h→6h；6h 起没有下一档，`stop` = 不放慢。到 100% 一律当天停开会（沿用旧卡到期，持仓管家和 Jev 继续，Jev 费用不计入）。
+
+分析师 K 线表（`meeting_klines`）等研究定稿再做，现在仍是全档 1h×200。
+
 ### 缓存与 token 记录
 
 会议记录的 `llm_calls[]` 现在每次调用多带 `input_tokens`、`cached_tokens`（OpenRouter 的 `prompt_tokens_details.cached_tokens`），`output.usage` 同样有 `cached_tokens`。面板「AI 费用详情」脚注显示「缓存命中 N%」（只算记了缓存字段的调用，旧记录没有就显示「还没有记录」）。默认模型换成 OpenRouter `deepseek/deepseek-v4.1-flash-1017`（基础价 0.15 / 0.60，缓存读 0.003；UTC 周一到五 01–04、06–10 点翻倍到 0.30 / 1.20；旧 id 全天 0.30 / 1.20），仍可在 `[meeting] quick_model / deep_model` 写任何 OpenRouter 模型 id。

@@ -168,6 +168,27 @@ class TierRules:
     mid_size_max: SizeTier = SizeTier.S
 
 
+@dataclass(frozen=True)
+class EventRules:
+    """临时会：卡有效期里出了事件，只给那一个币补开一场（不重开整轮）。
+
+    ``triggers`` 之外的事件不开会。
+    """
+
+    enabled: bool = False
+    triggers: frozenset[str] = frozenset()
+    symbol_gap: timedelta = timedelta(minutes=60)
+    max_per_day: int = 12
+    move_atr: float = 3.0
+    entry_max_age: timedelta = timedelta(0)
+    """开仓前卡龄上限（该币上次开会距今）；0 = 不查。"""
+
+
+PENDING_EXPIRY = timedelta(minutes=30)
+SLOWDOWN_AT = 0.8
+"""日花费到上限的这个比例就放慢开会（over_budget = slow）。"""
+
+
 class BattleCardCommander:
     """满足 ``interfaces.BattleCardProvider``。``current`` 同步、不等开会。"""
 
@@ -200,6 +221,9 @@ class BattleCardCommander:
         tiers: TierRules | None = None,
         tier_path: Path | None = None,
         live_dir: Path | None = None,
+        events: EventRules | None = None,
+        schedule_at: str | None = None,
+        slowdown: tuple[timedelta, timedelta] | None = None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("作战卡有效期必须大于 0")
@@ -254,6 +278,15 @@ class BattleCardCommander:
         self._mid_day = ""
         self._mid_unlocked: set[str] = set()
         self._expand_mid = False
+        self._events = events or EventRules()
+        self._schedule_at = schedule_at
+        self._slowdown = slowdown  # （放慢后的卡有效期，放慢后的开会间隔）
+        self._slow_noticed_day = ""
+        self._pending: dict[str, tuple[str, datetime]] = {}
+        self._event_day = ""
+        self._event_count = 0
+        self._event_last: dict[str, datetime] = {}
+        self._ref: dict[str, tuple[datetime, float]] = {}
         self._restore_tiers()
         self._stats = TodayStats()
         self._stats_day = ""
@@ -266,6 +299,7 @@ class BattleCardCommander:
         c = self._card
         if c is None or not c.is_valid(now):
             return None
+        c = self._mask_stale(c, now)
         if not self._blocked:
             return c
         # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；
@@ -352,6 +386,10 @@ class BattleCardCommander:
         """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
         return self._notices.pop(0) if self._notices else None
 
+    def _ttl_now(self) -> timedelta:
+        """作战卡有效期；日花费到 80% 且设了放慢，新卡按放慢后的间隔出。"""
+        return self._slowdown[0] if self._slowdown is not None and self._slowed() else self._ttl
+
     def _day(self, now: datetime) -> str:
         return now.astimezone(ZoneInfo(self._risk.day_reset_tz)).date().isoformat()
 
@@ -371,14 +409,25 @@ class BattleCardCommander:
         return True
 
     def refresh_reason(
-        self, now: datetime, pool: SymbolPool, prices: Mapping[str, float]
+        self,
+        now: datetime,
+        pool: SymbolPool,
+        prices: Mapping[str, float],
+        atrs: Mapping[str, float] | None = None,
     ) -> str | None:
-        """要不要开会、为什么。距上次开会不足 ``min_refresh_gap`` 一律不开，避免抖动。"""
+        """要不要开整轮会、为什么。距上次开会不足 ``min_refresh_gap`` 一律不开，避免抖动。
+
+        开了临时会的档位：关键位突破 / 大消息 / 新币 / 走了 N 倍 ATR 不重开整轮，只排进临时会队列
+        （``pop_event``），整轮只在到点（卡快到期 / 每天固定时间）才开。
+        """
         if not self.may_refresh(now):
             return None
         card = self.current(now)
         if card is None:
             return "scheduled"
+        if self._events.enabled:
+            self._detect(now, pool, card, prices, atrs or {})
+            return self._due_reason(now, card)
         if self._last_refresh is not None and now - self._last_refresh < self._min_gap:
             return None
         for cs in card.symbols:
@@ -394,9 +443,190 @@ class BattleCardCommander:
             return "news"
         if {e.symbol for e in self._eligible(pool, now, expand=False)} - self._seen:
             return "new_entrant"
-        if card.expires_at - now <= self._lead:
-            return "scheduled"
+        return self._due_reason(now, card)
+
+    def _due_reason(self, now: datetime, card: BattleCard) -> str | None:
+        """定时整轮：每天固定时间（``schedule_at``，曼谷）或卡快到期。"""
+        if self._schedule_at is not None:
+            return "scheduled" if self._schedule_due(now) else None
+        return "scheduled" if card.expires_at - now <= self._lead else None
+
+    def _schedule_at_today(self, now: datetime) -> datetime:
+        hh, mm = (self._schedule_at or "00:00").split(":")
+        local = now.astimezone(ZoneInfo(self._risk.day_reset_tz))
+        return local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+
+    def _schedule_due(self, now: datetime) -> bool:
+        """今天的固定时间到了，而且上一轮整轮会是在它之前开的（重启后看存档的卡，不会补开）。"""
+        at = self._schedule_at_today(now)
+        return now >= at and (self._last_refresh is None or self._last_refresh < at)
+
+    @property
+    def fixed_time(self) -> bool:
+        """每天固定时间开整轮：主循环不要再按开会间隔兜底。"""
+        return self._schedule_at is not None
+
+    def schedule_interval(self, base: timedelta) -> timedelta:
+        """主循环的定时兜底间隔：日花费到 80% 且设了放慢，就换成放慢后的间隔。"""
+        return self._slowdown[1] if self._slowdown is not None and self._slowed() else base
+
+    def _slowed(self) -> bool:
+        """日花费到上限的 80% 了（还没到 100%）。"""
+        if self._slowdown is None or self._cost_limit is None:
+            return False
+        now = self._clock()
+        if self._stats_day != self._day(now):
+            return False
+        if self._stats.cost_usd < self._cost_limit * SLOWDOWN_AT:
+            return False
+        day = self._day(now)
+        if self._slow_noticed_day != day:
+            self._slow_noticed_day = day
+            self._notices.append(
+                f"军师团今天已花 ${self._stats.cost_usd:.2f}，到日上限 ${self._cost_limit:.2f} 的 "
+                f"{SLOWDOWN_AT:.0%}，开会放慢到每 "
+                f"{self._slowdown[1].total_seconds() / 60:g} 分钟一轮"
+            )
+        return True
+
+    # ------------------------------------------------------------ 临时会
+    def _roll_events(self, now: datetime) -> None:
+        day = self._day(now)
+        if day != self._event_day:
+            self._event_day, self._event_count = day, 0
+
+    def _queue(self, symbol: str, trigger: str, now: datetime) -> None:
+        if trigger in self._events.triggers and symbol not in self._pending:
+            self._pending[symbol] = (trigger, now)
+
+    def request_event(self, symbol: str, trigger: str) -> None:
+        """外部事件（预测员连续看反作战卡等）：排进临时会队列，没开临时会 / 不在名单里就忽略。"""
+        if self._events.enabled:
+            self._queue(symbol, trigger, self._clock())
+
+    def _detect(
+        self,
+        now: datetime,
+        pool: SymbolPool,
+        card: BattleCard,
+        prices: Mapping[str, float],
+        atrs: Mapping[str, float],
+    ) -> None:
+        for cs in card.symbols:
+            sym, px = cs.symbol, prices.get(cs.symbol)
+            if px is None:
+                continue
+            for lv in cs.key_levels:
+                if self._broken(lv, px):
+                    self._level_broken.add(sym)
+            if sym in self._level_broken:
+                self._queue(sym, "key_level_break", now)
+            if sym in self._news:
+                self._queue(sym, "news_high_impact", now)
+            lm = self._last_meeting.get(sym)
+            ref = self._ref.get(sym)
+            if ref is None or (lm is not None and ref[0] < lm):
+                ref = self._ref[sym] = (lm or now, px)  # 这个币上次开会（或第一次看到）时的价格
+            atr = atrs.get(sym)
+            if atr and abs(px - ref[1]) >= self._events.move_atr * atr:
+                self._queue(sym, "move_since_card", now)
+        if "new_head_symbol" in self._events.triggers:
+            for e in self._eligible(pool, now, expand=False):
+                if e.symbol not in self._seen and e.tier in (None, "head"):
+                    self._queue(e.symbol, "new_head_symbol", now)
+
+    def _mask_stale(self, card: BattleCard, now: datetime) -> BattleCard:
+        """开仓前卡龄检查：该币上次开会距今超过 ``entry_max_age``，这次信号不开仓（只清空信号，
+        方向不动、持仓照常盯），并排一场补会；新结论出来后的信号再开。"""
+        limit = self._events.entry_max_age
+        if not self._events.enabled or limit <= timedelta(0):
+            return card
+        stale: set[str] = set()
+        for s in card.symbols:
+            if not s.allowed_signals or s.bias is Bias.NO_TRADE:
+                continue
+            if now - self._last_meeting.get(s.symbol, card.created_at) > limit:
+                stale.add(s.symbol)
+                self._queue(s.symbol, "stale_card_on_entry", now)
+        if not stale:
+            return card
+        return card.model_copy(
+            update={
+                "symbols": [self._watch_only(s) if s.symbol in stale else s for s in card.symbols]
+            }
+        )
+
+    def pop_event(self, now: datetime, pool: SymbolPool) -> tuple[str, str] | None:
+        """下一场该开的临时会（币，触发原因）；持仓币优先。没有或还不能开（同币间隔 / 当天次数 /
+        失败退避 / 日花费）返回 None。过期的排队项（超过 30 分钟没轮到）丢掉，事件还在会再排。"""
+        if not self._events.enabled or not self._pending or not self.may_refresh(now):
+            return None
+        self._roll_events(now)
+        if self._event_count >= self._events.max_per_day:
+            return None
+        by_symbol = {e.symbol: e for e in pool.in_pool}
+        for sym in sorted(self._pending, key=lambda x: x not in self._held):
+            trigger, at = self._pending[sym]
+            if now - at > PENDING_EXPIRY or sym not in by_symbol:
+                del self._pending[sym]
+                continue
+            last = max(
+                (t for t in (self._event_last.get(sym), self._last_meeting.get(sym)) if t),
+                default=None,
+            )
+            if last is not None and now - last < self._events.symbol_gap:
+                continue
+            return sym, trigger
         return None
+
+    async def refresh_symbol(
+        self, pool: SymbolPool, symbol: str, trigger: str
+    ) -> BattleCard | None:
+        """临时会：只给一个币补开一场，结论并进现有作战卡（有效期不延长）。开不成返回 None，
+        旧卡照旧；同一个币的间隔照常计，免得失败后每分钟重试。"""
+        now = self._clock()
+        self._loop = asyncio.get_running_loop()
+        self._pending.pop(symbol, None)
+        card = self._card
+        entry = next((e for e in pool.in_pool if e.symbol == symbol), None)
+        if card is None or not card.is_valid(now) or entry is None:
+            return None
+        self._roll_events(now)
+        self._event_count += 1
+        self._event_last[symbol] = now
+        self._progress = f"{symbol} 临时会"
+        beat = asyncio.create_task(self._beat_while_meeting())
+        started = time.monotonic()
+        try:
+            res = await self._analyze_one(entry, card.regime)
+        except Exception:
+            return None  # 失败原因和花费已在各标的记录里
+        finally:
+            beat.cancel()
+            self._progress = ""
+        self._pick_cost = 0.0  # 没有总盘会这一份，别重复记上一轮的
+        new = self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop))
+        symbols = [new if s.symbol == symbol else s for s in card.symbols]
+        if all(s.symbol != symbol for s in card.symbols):
+            symbols.append(new)
+        card = card.model_copy(
+            update={
+                "version": card.version + 1,
+                "symbols": symbols,
+                "refresh_reason": f"event:{trigger}",
+                "llm_cost_usd": round(card.llm_cost_usd + res.cost_usd, 6),
+            }
+        )
+        self._card = card
+        self._last_meeting[symbol] = now
+        self._seen.add(symbol)
+        self._level_broken.discard(symbol)
+        self._news.discard(symbol)
+        self._save_card()
+        if self._journal is not None:
+            self._journal.record(card, [symbol])
+        self._record_card(card, started)
+        return card
 
     @staticmethod
     def _broken(lv: KeyLevel, px: float) -> bool:
@@ -569,7 +799,11 @@ class BattleCardCommander:
         """下一次会议最早什么时候开（按现在的状态估：卡到期前 ``expiry_lead``、退避、最小间隔）。"""
         at: datetime | None = None
         card = self.current(now)
-        if card is not None:
+        if self._schedule_at is not None:
+            at = self._schedule_at_today(now)
+            if now >= at and self._last_refresh is not None and self._last_refresh >= at:
+                at += timedelta(days=1)  # 今天的已经开过，等明天
+        elif card is not None:
             at = card.expires_at - self._lead
             if self._last_refresh is not None:
                 at = max(at, self._last_refresh + self._min_gap)
@@ -703,7 +937,7 @@ class BattleCardCommander:
                 card_id=self._card_id(now),
                 version=base_version + max(published, 1),
                 created_at=now,
-                expires_at=now + self._ttl,
+                expires_at=now + self._ttl_now(),
                 source="tradingagents",
                 regime=picked.regime,
                 symbols=list(symbols.values()),

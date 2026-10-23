@@ -473,8 +473,12 @@ def build_modules(
         display_tz=tz,
     )
     # 预测员连续看反作战卡 → 事件；慢环订阅（App.against.subscribe）用来开单币临时会
-    against = AgainstCardWatch(cards.current)
+    sched = (slow_cfg or slow_defaults(app_cfg.profile)).schedule
+    against = AgainstCardWatch(cards.current, streak=sched.predictor_against_runs)
     predictor.add_listener(against.observe)
+    request_event = getattr(cards, "request_event", None)
+    if callable(request_event):
+        against.subscribe(lambda a: request_event(a.symbol, "predictor_against_card"))
     features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
     if isinstance(feed, BinanceFuturesFeed):
         feed.set_coverage(features.coverage)

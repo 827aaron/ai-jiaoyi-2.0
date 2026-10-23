@@ -31,6 +31,7 @@ from typing import Any, Literal, Protocol, cast, runtime_checkable
 from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
     AlertLevel,
+    BattleCard,
     CandidateSignal,
     Interval,
     Kline,
@@ -106,8 +107,30 @@ class _RefreshGate(Protocol):
 @runtime_checkable
 class _RefreshReason(Protocol):
     def refresh_reason(
-        self, now: datetime, pool: SymbolPool, prices: Mapping[str, float]
+        self,
+        now: datetime,
+        pool: SymbolPool,
+        prices: Mapping[str, float],
+        atrs: Mapping[str, float] | None = None,
     ) -> str | None: ...
+
+
+@runtime_checkable
+class _EventMeetings(Protocol):
+    """临时会：卡有效期里出了事件，只给一个币补开一场（BattleCardCommander）。"""
+
+    def pop_event(self, now: datetime, pool: SymbolPool) -> tuple[str, str] | None: ...
+
+    async def refresh_symbol(
+        self, pool: SymbolPool, symbol: str, trigger: str
+    ) -> BattleCard | None: ...
+
+    def request_event(self, symbol: str, trigger: str) -> None: ...
+
+    def schedule_interval(self, base: timedelta) -> timedelta: ...
+
+    @property
+    def fixed_time(self) -> bool: ...
 
 
 @runtime_checkable
@@ -572,6 +595,15 @@ class Runner:
                 out[e.symbol] = snap.last_price
         return out
 
+    def _atrs(self, pool: SymbolPool) -> dict[str, float]:
+        """各币的 ATR（最长持仓档对应周期），临时会判断「走了几倍 ATR」用。"""
+        out: dict[str, float] = {}
+        for e in pool.in_pool:
+            snap = self.m.features.snapshot(e.symbol)
+            if snap is not None and snap.atr > 0:
+                out[e.symbol] = snap.atr
+        return out
+
     async def slow_tick(self) -> None:
         now = self.app.clock()
         if self._last_screen is None or now - self._last_screen >= SCREEN_EVERY:
@@ -582,16 +614,21 @@ class Runner:
         if pool is None or self._refreshing:
             return
         cards = self.m.cards
-        reason = (
-            cards.refresh_reason(now, pool, self._prices(pool))
-            if isinstance(cards, _RefreshReason)
-            else None
-        )
+        events = cards if isinstance(cards, _EventMeetings) else None
+        reason: str | None = None
+        if isinstance(cards, _RefreshReason):
+            if events is None:
+                reason = cards.refresh_reason(now, pool, self._prices(pool))
+            else:
+                reason = cards.refresh_reason(now, pool, self._prices(pool), self._atrs(pool))
         interval = timedelta(minutes=self.app.app_cfg.slow_loop_interval_min)
+        if events is not None:
+            interval = events.schedule_interval(interval)  # 日花费到 80% 会放慢
         if (
             reason is None
             and self._last_card_at is not None
             and now - self._last_card_at >= interval
+            and not (events is not None and events.fixed_time)  # 每天固定时间开的档不按间隔兜底
         ):
             reason = "scheduled"
         if isinstance(cards, _RefreshGate):
@@ -599,7 +636,13 @@ class Runner:
                 await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice)
             if not cards.may_refresh(now):
                 return  # 失败退避中或当日花费超限；定时兜底也不能绕过
-        if reason is None or is_stub(cards):
+        if is_stub(cards):
+            return
+        if reason is None:
+            event = events.pop_event(now, pool) if events is not None else None
+            if events is not None and event is not None:
+                self._refreshing = True
+                self._spawn(self._refresh_event(events, pool, *event))
             return
         self._refreshing = True
         self._last_card_at = now
@@ -644,6 +687,18 @@ class Runner:
                 await self.sync_watch()
             except Exception:
                 log.exception("开完会重订行情失败，下一轮持仓管家再订")
+
+    async def _refresh_event(
+        self, events: _EventMeetings, pool: SymbolPool, symbol: str, trigger: str
+    ) -> None:
+        try:
+            if isinstance(self.m.cards, _HoldsAware):
+                self.m.cards.set_held({p.symbol: p.side for p in self.positions})
+            await events.refresh_symbol(pool, symbol, trigger)
+        except Exception:
+            log.exception("%s 临时会失败，沿用现有作战卡", symbol)
+        finally:
+            self._refreshing = False
 
     async def _rescreen(self, now: datetime) -> None:
         self.app.reload_pool_overrides()  # 手改 data/pool_overrides.json 也在下一次选币生效

@@ -43,6 +43,25 @@ LEGACY_PROFILE = {"2h": "2h", "60m": "1h", "30m": "30m", "15m": "15m", "1h": "1h
 Section = Literal["app", "fast_loop", "slow.schedule", "slow.budget", "predictor"]
 
 
+_E2 = ("key_level_break", "move_since_card", "new_head_symbol")
+_E6 = (*_E2, "predictor_against_card", "news_high_impact")
+_E12 = (*_E6, "stale_card_on_entry")
+
+
+def _events(
+    triggers: tuple[str, ...], *, gap: int, per_day: int, entry_age: int = 0, at: str | None = None
+) -> dict[str, Any]:
+    """临时会（只重开一个币）：哪些事件能触发、同一个币隔多久、一天最多几次。"""
+    return {
+        "event_meeting_enabled": True,
+        "event_triggers": list(triggers),
+        "event_symbol_gap_min": gap,
+        "event_max_per_day": per_day,
+        "entry_max_card_age_min": entry_age,
+        "schedule_at": at,
+    }
+
+
 def _meeting(
     interval_min: int,
     *,
@@ -52,6 +71,8 @@ def _meeting(
     cards: int,
     backoff: list[float],
     daily_usd: float,
+    slow_to: int | None = None,
+    events: dict[str, Any] | None = None,
 ) -> dict[Section, dict[str, Any]]:
     """开会间隔一档：卡有效期 = 间隔 + 提前量（20 = 单币超时 15 分钟 + 5 分钟余量）。"""
     return {
@@ -63,6 +84,10 @@ def _meeting(
             "concurrency": 8,
             "refresh_lead_min": ttl_extra,
             "min_refresh_gap_min": interval_min if gap is None else gap,
+            # 花到日上限 80%：有下一档就放慢到它（slow），没有（6h 起）直接当天停会（stop）
+            "over_budget": "stop" if slow_to is None else "slow",
+            "slowdown_interval_min": slow_to,
+            **(events or {"event_meeting_enabled": False}),
         },
         "slow.budget": {"fail_backoff_minutes": backoff, "daily_cost_limit_usd": daily_usd},
     }
@@ -70,14 +95,47 @@ def _meeting(
 
 MEETING: dict[str, dict[Section, dict[str, Any]]] = {
     "15m": _meeting(
-        15, sym_gap=12, cards=8, backoff=[2, 5, 10], daily_usd=75.0
+        15, sym_gap=12, cards=8, backoff=[2, 5, 10], daily_usd=75.0, slow_to=30
     ),  # 一波开完约 6–7 分钟
-    "30m": _meeting(30, sym_gap=25, cards=8, backoff=[3, 5, 10], daily_usd=40.0),
-    "1h": _meeting(60, sym_gap=50, cards=12, backoff=[5, 10, 15], daily_usd=30.0),
-    "2h": _meeting(120, gap=60, sym_gap=100, cards=15, backoff=[5, 10, 30], daily_usd=20.0),
-    "6h": _meeting(360, gap=120, sym_gap=300, cards=15, backoff=[10, 30, 60], daily_usd=10.0),
-    "12h": _meeting(720, gap=180, sym_gap=600, cards=15, backoff=[10, 30, 60], daily_usd=5.0),
-    "24h": _meeting(1440, gap=240, sym_gap=1200, cards=15, backoff=[10, 30, 60], daily_usd=5.0),
+    "30m": _meeting(30, sym_gap=25, cards=8, backoff=[3, 5, 10], daily_usd=40.0, slow_to=60),
+    "1h": _meeting(60, sym_gap=50, cards=12, backoff=[5, 10, 15], daily_usd=30.0, slow_to=120),
+    "2h": _meeting(
+        120,
+        gap=60,
+        sym_gap=100,
+        cards=15,
+        backoff=[5, 10, 30],
+        daily_usd=20.0,
+        slow_to=360,
+        events=_events(_E2, gap=60, per_day=12),
+    ),
+    "6h": _meeting(
+        360,
+        gap=120,
+        sym_gap=300,
+        cards=15,
+        backoff=[10, 30, 60],
+        daily_usd=10.0,
+        events=_events(_E6, gap=60, per_day=20),
+    ),
+    "12h": _meeting(
+        720,
+        gap=180,
+        sym_gap=600,
+        cards=15,
+        backoff=[10, 30, 60],
+        daily_usd=5.0,
+        events=_events(_E12, gap=90, per_day=20, entry_age=360),
+    ),
+    "24h": _meeting(
+        1440,
+        gap=240,
+        sym_gap=1200,
+        cards=15,
+        backoff=[10, 30, 60],
+        daily_usd=5.0,
+        events=_events(_E12, gap=120, per_day=24, entry_age=480, at="08:00"),
+    ),
 }
 
 # 与档位无关、保持现值：keeper_close_p 0.6 / strong 0.85 / confirmations 2；
