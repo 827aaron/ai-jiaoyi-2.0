@@ -144,7 +144,7 @@ def build_positions(
     ledger = files.ledger()
     records = files.decisions_today(now)
     live = ledger.live()
-    views = position_views(live, records, hb)
+    views = position_views(live, records, hb, risk.taker_fee_bps)
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt
     groups = []

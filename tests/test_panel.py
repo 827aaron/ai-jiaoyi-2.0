@@ -1017,6 +1017,10 @@ def test_position_view_mark_notional_margin(tmp_path: Path) -> None:
     assert p.notional_usdt == pytest.approx(0.015 * p.mark_price)
     assert p.margin_usdt == pytest.approx(p.notional_usdt / 3)
     assert p.pnl_pct == pytest.approx(-20 / p.notional_usdt * 100)
+    # 扣费后：开仓按开仓名义、平仓按现在名义，各收一次吃单费
+    fees = (0.015 * 68044 + p.notional_usdt) * RISK.taker_fee_bps / 10_000
+    assert p.fees_est_usdt == pytest.approx(fees)
+    assert p.net_unrealized_usdt == pytest.approx(-20 - fees)
 
 
 def test_market_role_and_run_line_fields(tmp_path: Path) -> None:

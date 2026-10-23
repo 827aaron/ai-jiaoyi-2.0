@@ -158,6 +158,11 @@ class PositionView(BaseModel):
     """保镖算的保命止损距离（%）。"""
     pnl_pct: float | None = None
     """浮盈占名义的百分比（不乘杠杆）。"""
+    fees_est_usdt: float | None = None
+    """开平两次手续费：开仓按开仓名义、平仓按现在的名义，都按吃单费率估（币安只在平仓后给实收）。"""
+    net_unrealized_usdt: float | None = None
+    """扣掉 ``fees_est_usdt`` 后的浮盈：现在平掉大概能落袋多少。"""
+    net_pnl_pct: float | None = None
 
 
 class Tiles(BaseModel):
@@ -248,7 +253,7 @@ def build_overview(
 
     kpis = compute_kpis(files, ledger, hb, risk, now)
     halted, halt_pct = kpis.halted, kpis.halt_pct
-    positions = position_views(ledger.live(), records, hb)
+    positions = position_views(ledger.live(), records, hb, risk.taker_fee_bps)
 
     # ---- 今日统计
     tz = risk.day_reset_tz
@@ -362,7 +367,10 @@ def compute_kpis(
 
 
 def position_views(
-    live: list[PositionRecord], records: list[DecisionRecord], hb: HbSnapshot
+    live: list[PositionRecord],
+    records: list[DecisionRecord],
+    hb: HbSnapshot,
+    taker_fee_bps: float = 0.0,
 ) -> list[PositionView]:
     """未结束的持仓，最新开的在前；附上 hummingbot 的浮盈浮亏和管家最新判断。"""
     keeper_last: dict[str, str] = {}
@@ -378,6 +386,12 @@ def position_views(
             mark = p.entry_price + sign * pnl / p.quantity
         ref = mark or p.entry_price
         notional = p.quantity * ref if ref else None
+        fees = (
+            (p.quantity * p.entry_price + notional) * taker_fee_bps / 10_000
+            if notional and p.entry_price
+            else None
+        )
+        net = pnl - fees if pnl is not None and fees is not None else None
         out.append(
             PositionView(
                 position_id=p.position_id,
@@ -403,6 +417,9 @@ def position_views(
                 pnl_pct=pnl / notional * 100 if pnl is not None and notional else None,
                 stop_loss_pct=p.stop_loss_pct,
                 lifeboat_stop_pct=p.lifeboat_stop_pct,
+                fees_est_usdt=fees,
+                net_unrealized_usdt=net,
+                net_pnl_pct=net / notional * 100 if net is not None and notional else None,
             )
         )
     return out
