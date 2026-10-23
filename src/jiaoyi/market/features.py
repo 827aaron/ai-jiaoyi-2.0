@@ -193,9 +193,14 @@ class RollingFeatureEngine:
         if rv is not None:
             v["realized_vol_5m"] = rv
 
-        long_1m = short_1m = total = 0.0
+        long_1m = short_1m = long_5m = short_5m = total = 0.0
         for t, usdt, was_long in st.liqs:
             total += usdt
+            if t >= now - 300.0:
+                if was_long:
+                    long_5m += usdt
+                else:
+                    short_5m += usdt
             if t >= now - 60.0:
                 if was_long:
                     long_1m += usdt
@@ -203,6 +208,8 @@ class RollingFeatureEngine:
                     short_1m += usdt
         v["liq_long_usdt_1m"] = long_1m
         v["liq_short_usdt_1m"] = short_1m
+        v["liq_long_usdt_5m"] = long_5m
+        v["liq_short_usdt_5m"] = short_5m
         per_min = total / (LIQ_WINDOW_S / 60.0)
         v["liq_ratio_1m"] = max(long_1m, short_1m) / per_min if per_min > 0 else 0.0
 
@@ -210,6 +217,9 @@ class RollingFeatureEngine:
             v["funding_rate"] = st.mark.funding_rate
             if st.mark.index_price:
                 v["mark_premium_bps"] = (st.mark.mark_price / st.mark.index_price - 1.0) * 1e4
+            if st.mark.next_funding_at is not None:
+                left = (_ts(st.mark.next_funding_at) - now) / 60.0
+                v["funding_in_min"] = max(left, 0.0)
         return v
 
     def _realized_vol(

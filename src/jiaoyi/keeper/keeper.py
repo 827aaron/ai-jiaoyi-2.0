@@ -28,7 +28,7 @@ from jiaoyi.contracts import (
     PositionRecord,
 )
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.gate.questions import PROMPT_VERSION, hold_questions, hold_snapshot
+from jiaoyi.gate.questions import hold_questions, hold_snapshot, jev_log_fields
 from jiaoyi.interfaces import DecisionModel
 
 
@@ -148,6 +148,7 @@ class JevKeeper:
             outcome = Outcome.CLOSE if v.action == "close" else Outcome.HOLD
             if r is not None and not r.ok:
                 outcome = Outcome.ERROR
+            jev_in, jev_out = jev_log_fields(request, r) if r is not None else ({}, {})
             self._rec.record(
                 now,
                 outcome,
@@ -156,12 +157,12 @@ class JevKeeper:
                 signal_id=position.signal_id,
                 position_id=position.position_id,
                 card_id=position.card_id,
-                input={"snapshot": request.snapshot if request else None, "prompt": PROMPT_VERSION},
+                input=jev_in,
                 output={
                     "action": v.action,
                     "p_close": v.p_close,
                     "consecutive": v.consecutive,
-                    "answers": {a.id: a.probs for a in r.answers} if r is not None and r.ok else {},
+                    **jev_out,
                 },
                 latency_ms=r.latency_ms if r is not None else 0.0,
                 cost_usd=r.cost_usd if r is not None else 0.0,
