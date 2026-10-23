@@ -62,6 +62,7 @@ from jiaoyi.contracts import (
     SizeTier,
     Trade,
 )
+from jiaoyi.core import profiles
 from jiaoyi.gate import outcomes
 from jiaoyi.gate.questions import TEMPLATE_VERSION, entry_questions, entry_snapshot
 from jiaoyi.interfaces import DecisionModel
@@ -312,6 +313,7 @@ async def run(
     seed: int = 0,
     echo: Callable[[str], None] = print,
     live_timeout_ms: int | None = None,
+    hold: str | None = None,
 ) -> dict[str, Any]:
     """``live_timeout_ms``：实盘的 Jev 预算，报告里算「按实盘预算会超时几成」。"""
     hold_min = max(fast.time_limit_s // 60, 1)
@@ -386,6 +388,8 @@ async def run(
         "days": [d.isoformat() for d in days],
         "symbols": [s for s, _ in symbols],
         "hold_min": hold_min,
+        "hold": hold,
+        "grid": grid(rows),
         "signals_found": len(found),
         "asked": len(answered),
         "jev_calls": calls_n,
@@ -409,6 +413,11 @@ async def run(
     (out / "report.json").write_text(
         json.dumps({**meta, "templates": rep}, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    # 每次的结果另存一份 data/replay/jev/<时间>.json，跑多个持仓档 / 天数时方便对比
+    (out.parent / f"{out.name}.json").write_text(
+        json.dumps({**meta, "dir": str(out), "templates": rep}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     path = Path(data_dir) / REPORT_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -416,6 +425,65 @@ async def run(
         encoding="utf-8",
     )
     return {**meta, "dir": str(out), "templates": rep}
+
+
+_GATE_KEYS = {"min_p_genuine", "min_p_take", "min_p_direction", "max_p_toxic"}
+
+
+def hold_tier(text: str) -> str:
+    """``4h`` / ``240``（分钟）→ 持仓档名；不认识就抛 ValueError（列出可选的）。"""
+    t = text.strip().lower()
+    if t in profiles.HOLD:
+        return t
+    if t.isdigit():
+        for name, sections in profiles.HOLD.items():
+            if sections["fast_loop"]["time_limit_s"] == int(t) * 60:
+                return name
+    raise ValueError(f"不认识的持仓档 {text!r}，可选：{' / '.join(profiles.HOLD)}（或对应分钟数）")
+
+
+def fast_for_hold(fast: FastLoopConfig, hold: str) -> tuple[FastLoopConfig, int]:
+    """把这个持仓档的止损 / 止盈 / ATR 周期等盖到现在的配置上（拍板门槛不动），附它的去重冷却。"""
+    tier = profiles.HOLD[hold]
+    update = {k: v for k, v in tier["fast_loop"].items() if k not in _GATE_KEYS}
+    dedup = int(tier.get("app", {}).get("signal_dedup_s", 30))
+    return FastLoopConfig.model_validate({**fast.model_dump(), **update}), dedup
+
+
+GRID_MIN_N = 30
+TAKE_GRID = [round(0.05 * i, 2) for i in range(0, 19)]  # 做 ≥ 0–0.9
+TOXIC_GRID = [round(0.3 + 0.05 * i, 2) for i in range(0, 15)]  # 毒 ≤ 0.3–1.0
+
+
+def grid(rows: list[dict[str, Any]], min_n: int = GRID_MIN_N) -> dict[str, Any]:
+    """做概率 × 毒性两维一起扫：每组门槛下放行的样本至少 ``min_n`` 笔，取总 R 最大的；附前 5 名。"""
+    cells: list[dict[str, Any]] = []
+    for take in TAKE_GRID:
+        for tox in TOXIC_GRID:
+            sel = [
+                r
+                for r in rows
+                if (r.get("p_take") or 0.0) >= take
+                and (r["p_toxic"] if r.get("p_toxic") is not None else 1.0) <= tox
+            ]
+            st = outcomes.stats(sel)
+            if st["n"] >= min_n and st["sum_r"] is not None:
+                cells.append({"min_p_take": take, "max_p_toxic": tox, **st})
+    cells.sort(key=lambda c: (-c["sum_r"], -c["n"]))
+    return {"min_n": min_n, "best": cells[0] if cells else None, "top": cells[:5]}
+
+
+def _grid_lines(result: dict[str, Any]) -> list[str]:
+    g = result.get("grid") or {}
+    if not g.get("top"):
+        return [f"二维推荐（做 × 毒）：没有一组门槛放行够 {g.get('min_n', GRID_MIN_N)} 笔"]
+    out = [f"二维推荐（做 × 毒，至少 {g['min_n']} 笔，按总 R 排）："]
+    for c in g["top"]:
+        out.append(
+            f"   做 ≥ {c['min_p_take']:.2f} 且 毒 ≤ {c['max_p_toxic']:.2f}："
+            f"{outcomes.fmt(c)}，总 {c['sum_r']:+.1f}R"
+        )
+    return out
 
 
 def _latency(ms: list[float], budget_ms: int | None) -> dict[str, Any]:
@@ -447,9 +515,14 @@ def _calls_line(result: dict[str, Any]) -> str:
 
 def render(result: dict[str, Any]) -> list[str]:
     th = result["current_thresholds"]
+    tier = (
+        f"持仓档 {result['hold']}（{result['hold_min']} 分钟）"
+        if result.get("hold")
+        else (f"持仓 {result['hold_min']} 分钟")
+    )
     lines = [
-        f"回放 {result['days'][0]}–{result['days'][-1]}，{len(result['symbols'])} 个币，"
-        f"持仓 {result['hold_min']} 分钟：找到 {result['signals_found']} 个信号，"
+        f"回放 {result['days'][0]}–{result['days'][-1]}（{len(result['days'])} 天），"
+        f"{len(result['symbols'])} 个币，{tier}：找到 {result['signals_found']} 个信号，"
         f"问了 {result['asked']} 个，"
         f"没算出结果 {result['failed']} 个，Jev 花费 ${result['jev_cost_usd']:.4f}",
         _calls_line(result),
@@ -461,6 +534,7 @@ def render(result: dict[str, Any]) -> list[str]:
     ]
     for k, st in result["by_kind"].items():
         lines.append(f"   {k}：{outcomes.fmt(st)}")
+    lines.extend(_grid_lines(result))
     lines.extend(outcomes.render(result["templates"]))
     lines.append(f"明细：{result['dir']}")
     return lines
