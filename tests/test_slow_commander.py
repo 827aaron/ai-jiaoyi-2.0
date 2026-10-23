@@ -280,3 +280,23 @@ async def test_wrong_category_from_engine_is_rejected(tmp_path: Path, now: datet
     c2, _, _ = make(tmp_path / "b", HalfLying(["AAUSDT", "BBUSDT"]), now)
     card = await c2.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
     assert [(s.symbol, s.category) for s in card.symbols] == [("AAUSDT", Category.ALT)]
+
+
+async def test_block_symbol_turns_card_entry_into_no_trade_immediately(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, log, _ = make(tmp_path, FakeEngine(["AAUSDT", "BBUSDT"]), now)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    c.block_symbol("AAUSDT", "币安公告：将下架 AAUSDT")
+    c.block_symbol("AAUSDT", "重复")  # 幂等，只记一次
+    card = c.current(now)
+    assert card is not None
+    aa, bb = card.for_symbol("AAUSDT"), card.for_symbol("BBUSDT")
+    assert aa is not None and aa.bias is Bias.NO_TRADE and aa.allowed_signals == []
+    assert bb is not None and bb.bias is Bias.LONG
+    blocks = [r for r in log.read_day(now.date().isoformat()) if "禁止新开仓" in r.summary]
+    assert len(blocks) == 1
+    c.unblock_symbol("AAUSDT")
+    again = c.current(now)
+    assert again is not None and again.for_symbol("AAUSDT") is not None
+    assert again.for_symbol("AAUSDT").bias is Bias.LONG  # type: ignore[union-attr]

@@ -121,6 +121,7 @@ class BattleCardCommander:
         self._symbol_min_interval = symbol_min_interval
         self._last_meeting: dict[str, datetime] = {}
         self._level_broken: set[str] = set()
+        self._blocked: dict[str, str] = {}
         self._symbol_timeout_s = symbol_timeout_s
         self._min_gap = min_refresh_gap
         self._lead = expiry_lead
@@ -135,7 +136,43 @@ class BattleCardCommander:
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
         c = self._card
-        return c if c is not None and c.is_valid(now) else None
+        if c is None or not c.is_valid(now):
+            return None
+        if not self._blocked:
+            return c
+        # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；已有持仓不受影响
+        return c.model_copy(
+            update={
+                "symbols": [
+                    s.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
+                    if s.symbol in self._blocked and s.bias is not Bias.NO_TRADE
+                    else s
+                    for s in c.symbols
+                ]
+            }
+        )
+
+    def block_symbol(self, symbol: str, reason: str) -> None:
+        """封掉一个币的新开仓（例如币安公告要下架它）。保镖只认作战卡，所以这里改卡。
+
+        只拦新开仓；持仓怎么处理由持仓管家和人决定。进程重启后由新闻源重新补上。
+        """
+        if symbol in self._blocked:
+            return
+        self._blocked[symbol] = reason
+        self._write(
+            symbol=symbol,
+            outcome=Outcome.ACTION,
+            summary=f"{symbol} 禁止新开仓：{reason}"[:200],
+            output={"blocked": True, "reason": reason},
+        )
+
+    def unblock_symbol(self, symbol: str) -> None:
+        self._blocked.pop(symbol, None)
+
+    @property
+    def blocked_symbols(self) -> dict[str, str]:
+        return dict(self._blocked)
 
     # ------------------------------------------------------------ 什么时候开会
     def notify_news(self, symbol: str) -> None:
