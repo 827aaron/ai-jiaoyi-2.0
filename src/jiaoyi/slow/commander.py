@@ -255,7 +255,8 @@ class BattleCardCommander:
     def block_symbol(self, symbol: str, reason: str) -> None:
         """封掉一个币的新开仓（例如币安公告要下架它）。保镖只认作战卡，所以这里改卡。
 
-        只拦新开仓；持仓怎么处理由持仓管家和人决定。进程重启后由新闻源重新补上。
+        封币后卡里该币读成 NO_TRADE：不再开仓，已有持仓会被持仓管家按卡规则平掉（要下架的币留仓更危险）。
+        进程重启后由新闻源重新补上。
         """
         if symbol in self._blocked:
             return
