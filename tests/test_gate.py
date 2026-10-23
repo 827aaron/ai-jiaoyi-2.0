@@ -17,6 +17,7 @@ from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.gate.entry import JevEntryGate
 from jiaoyi.gate.jev import (
+    OPENROUTER_BASE_URL,
     JevDecisionModel,
     MockJevTransport,
     TypeSafeTransport,
@@ -219,11 +220,12 @@ async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
 
 
 class _Secrets:
-    def __init__(self, v: str | None) -> None:
+    def __init__(self, v: str | None, name: str = "JEV_API_KEY") -> None:
         self.v = v
+        self.name = name
 
     def get(self, name: str) -> str | None:
-        return self.v if name == "JEV_API_KEY" else None
+        return self.v if name == self.name else None
 
 
 PINNED = FAST.model_copy(update={"jev_model": "jev-2026-10-01"})
@@ -255,3 +257,68 @@ def test_rule_gate_only_when_switched_on_in_paper() -> None:
 def test_rule_model_refuses_real_money_modes(mode: c.RunMode) -> None:
     with pytest.raises(ValueError, match="模拟盘"):
         RuleDecisionModel(mode)
+
+
+def _openrouter_handler(seen: dict[str, object]) -> object:
+    def handler(req: httpx2.Request) -> httpx2.Response:
+        body = json.loads(req.content)
+        seen["url"] = str(req.url)
+        seen["auth"] = req.headers.get("authorization")
+        seen["encoding"] = req.headers.get("content-encoding")
+        seen["model"] = body.get("model")
+        answers = {
+            q: {"type": "choice", "choice": "x", "confidence": 0.8, "probabilities": GOOD_LONG[q]}
+            for q in body["questions"]
+        }
+        return httpx2.Response(  # OpenRouter 的样子：正文带 id、provider、usage.cost，没有请求号头
+            200,
+            json={
+                "id": "gen-dec-abc",
+                "provider": "TypeSafe",
+                "model": "typesafe/jev-1.14-20261001",
+                "answers": answers,
+                "usage": {"input_tokens": 380, "output_tokens": 6, "cost": 0.0000321},
+            },
+        )
+
+    return handler
+
+
+async def test_openrouter_transport(now: datetime, caplog: pytest.LogCaptureFixture) -> None:
+    seen: dict[str, object] = {}
+    tr = TypeSafeTransport(
+        "test-key-not-real",
+        "typesafe/jev-1.14",
+        base_url=OPENROUTER_BASE_URL,
+        http_transport=httpx2.MockTransport(_openrouter_handler(seen)),  # type: ignore[arg-type]
+    )
+    raw = await tr.evaluate(entry_request(now).snapshot, entry_request(now).questions, 2.0)
+    assert seen["url"] == "https://openrouter.ai/api/v1/systemone"
+    assert seen["auth"] == "Bearer test-key-not-real"
+    assert seen["encoding"] is None and seen["model"] == "typesafe/jev-1.14"
+    assert raw.request_id == "gen-dec-abc" and raw.cost_usd == pytest.approx(0.0000321)
+
+    cfg = FAST.model_copy(update={"jev_model": "typesafe/jev-1.14", "jev_provider": "openrouter"})
+    r = await JevDecisionModel(tr, cfg, timeout_ms=2000).ask(entry_request(now))
+    assert r.ok and r.cost_usd == pytest.approx(0.0000321)  # 用通道报的花费，不按单价估
+    assert r.model_version == "typesafe/jev-1.14-20261001"
+    assert "版本变了" not in caplog.text  # 带日期的全名算同一版本
+    await tr.aclose()
+
+
+def test_provider_picks_its_own_key() -> None:
+    kw = {"timeout_ms": 1000, "day_reset_tz": "UTC"}
+    orc = PINNED.model_copy(update={"jev_provider": "openrouter"})
+    # 只有 JEV_API_KEY 时不接 OpenRouter，反过来也一样
+    assert jev_from_secrets(_Secrets("abc"), orc, **kw) is None  # type: ignore[arg-type]
+    assert jev_from_secrets(_Secrets("abc", "OPENROUTER_API_KEY"), PINNED, **kw) is None  # type: ignore[arg-type]
+    m = jev_from_secrets(_Secrets("abc", "OPENROUTER_API_KEY"), orc, **kw)  # type: ignore[arg-type]
+    assert isinstance(m, JevDecisionModel)
+
+
+def test_provider_config() -> None:
+    with pytest.raises(ValueError):
+        c.FastLoopConfig(jev_provider="other")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="latest"):
+        c.FastLoopConfig(jev_provider="openrouter", jev_model="~typesafe/jev-latest")
+    assert c.FastLoopConfig().jev_provider == "typesafe"
