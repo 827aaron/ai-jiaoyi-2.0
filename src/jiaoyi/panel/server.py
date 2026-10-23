@@ -154,6 +154,14 @@ def create_app(
     """
     data_dir = app_cfg.data_dir
     files = PanelFiles(data_dir, risk.day_reset_tz)
+    live = actions.LiveConfigs(risk, app_cfg, config_paths)
+
+    def cfg() -> tuple[RiskConfig, AppConfig]:
+        """配置文件改了就用新的（data_dir 例外：换目录要重启面板）。"""
+        r, a = live.get()
+        files.tz = r.day_reset_tz
+        return r, a
+
     keys = key_status if key_status is not None else {}
     boot_code = code_fingerprint()
     market = klines or KlineSource()
@@ -183,14 +191,15 @@ def create_app(
 
     @api.get("/api/overview")
     async def overview() -> Overview:
-        ov = build_overview(files, await hb.snapshot(), risk, app_cfg, clock())
+        r, a = cfg()
+        ov = build_overview(files, await hb.snapshot(), r, a, clock())
         ctl = actions.control_state(data_dir, config_paths)
         ctl.panel_stale = code_fingerprint() != boot_code
         return ov.model_copy(update={"control": ctl})
 
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
-        return build_positions(files, await hb.snapshot(), risk, clock())
+        return build_positions(files, await hb.snapshot(), cfg()[0], clock())
 
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
@@ -198,11 +207,11 @@ def create_app(
 
     @api.get("/api/history")
     async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:
-        return build_history(files, risk, clock(), range, include_tests=tests)
+        return build_history(files, cfg()[0], clock(), range, include_tests=tests)
 
     @api.get("/api/funds")
     async def funds() -> FundsPage:
-        return build_funds(files, await hb.snapshot(), risk, clock())
+        return build_funds(files, await hb.snapshot(), cfg()[0], clock())
 
     @api.get("/api/pool")
     async def pool() -> PoolPage:
@@ -210,7 +219,8 @@ def create_app(
 
     @api.get("/api/settings")
     async def settings() -> SettingsPage:
-        r, a, sl, error, prof = risk, app_cfg, None, None, None
+        r, a = cfg()
+        sl, error, prof = None, None, None
         if config_paths:
             try:
                 r, a, sl = actions.load_configs(config_paths)

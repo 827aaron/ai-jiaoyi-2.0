@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -261,8 +263,11 @@ async def test_restart_waits_for_in_flight_open_then_exits(tmp_path: Path, now: 
     assert ex.opened == []
     r._open_lock.release()
     await tick
-    assert _result(tmp_path, "cmd-restart-0001")["status"] == "done"  # 回执先写
     assert r._restart.is_set()
+    # 回执在进程真要退出前一刻才写，面板看到“完成”时进程确实在退
+    assert not (tmp_path / "panel_commands" / "done" / "cmd-restart-0001.json").exists()
+    r._exit_for_restart()
+    assert _result(tmp_path, "cmd-restart-0001")["status"] == "done"
     assert read_paused(tmp_path) is None  # 不落盘暂停：重启后照旧
 
 
@@ -376,3 +381,89 @@ def test_restart_blocker_checks_slow_stack(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setenv("XPC_SERVICE_NAME", "com.jiaoyi.run")
     monkeypatch.setattr("jiaoyi.cli.missing_slow_stack", lambda *_: "没装 tradingagents")
     assert "tradingagents" in (_restart_blocker(args) or "")
+
+
+def _idle_runner(r: Runner) -> None:
+    async def idle() -> None:
+        await asyncio.sleep(3600)
+
+    async def noop() -> None:
+        return None
+
+    r._market_loop = idle  # type: ignore[method-assign]
+    r.news_tick = noop  # type: ignore[method-assign]
+
+
+async def test_restart_exits_even_when_a_task_ignores_cancel(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """线上 bug：回执写了“完成”，进程却没退（开会的工作线程 / 不肯停的任务把退出卡住）。"""
+    monkeypatch.setattr("jiaoyi.loop.COMMAND_POLL_EVERY_S", 0.05)
+    monkeypatch.setattr("jiaoyi.loop.TASK_CANCEL_WAIT_S", 0.1)
+    exits: list[bool] = []
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    receipt_at_exit: list[bool] = []
+
+    def fake_exit() -> None:
+        receipt_at_exit.append(
+            (tmp_path / "panel_commands" / "done" / "cmd-restart-0001.json").exists()
+        )
+        exits.append(True)
+
+    r._restart_exit = fake_exit
+    _idle_runner(r)
+    release = asyncio.Event()
+
+    async def stubborn() -> None:  # 吞掉取消，直到放行
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(10)
+
+    r._spawn(stubborn())
+    write_command(tmp_path, _cmd(now, "restart"))
+    await asyncio.wait_for(r.run(), timeout=5)
+    assert exits == [True] and receipt_at_exit == [True]  # 先写回执再退
+    release.set()
+    await asyncio.sleep(0)
+
+
+async def test_restart_hard_exit_when_shutdown_hangs(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.COMMAND_POLL_EVERY_S", 0.05)
+    monkeypatch.setattr("jiaoyi.loop.RESTART_HARD_EXIT_S", 0.2)
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    exited = threading.Event()
+    r._restart_exit = exited.set
+    _idle_runner(r)
+    release = asyncio.Event()
+
+    async def hung_shutdown() -> None:  # 收尾卡住，连 wait_for 的取消都吞掉
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0.05)
+
+    r.shutdown = hung_shutdown  # type: ignore[method-assign]
+    write_command(tmp_path, _cmd(now, "restart"))
+    run = asyncio.create_task(r.run())
+    for _ in range(100):
+        if exited.is_set():
+            break
+        await asyncio.sleep(0.05)
+    assert exited.is_set()  # 超时线程兜底退出
+    assert _result(tmp_path, "cmd-restart-0001")["status"] == "done"
+    release.set()
+    await asyncio.wait_for(run, timeout=5)
+
+
+async def test_restart_command_older_than_process_is_not_rerun(
+    tmp_path: Path, now: datetime
+) -> None:
+    """上个进程退出前没写成回执：重启后的新进程只补回执，不再重启一次。"""
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    r._started_at = now + timedelta(seconds=10)
+    write_command(tmp_path, _cmd(now, "restart"))
+    await r.command_tick()
+    res = _result(tmp_path, "cmd-restart-0001")
+    assert res["status"] == "done" and res["detail"] == "已重启"
+    assert not r._restarting and not r._restart.is_set()

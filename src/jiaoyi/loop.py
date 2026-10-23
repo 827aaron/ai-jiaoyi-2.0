@@ -22,8 +22,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.app import App, is_stub
@@ -55,6 +57,10 @@ HEARTBEAT_EVERY_S = 30.0
 NEWS_POLL_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
 RESTART_WAIT_CLOSE_S = 60.0
+# 决定重启后：收尾最多等这么久；军师团开会跑在工作线程里取消不掉，收尾超时就直接退出
+RESTART_SHUTDOWN_S = 20.0
+RESTART_HARD_EXIT_S = 45.0
+TASK_CANCEL_WAIT_S = 10.0
 PRUNE_EVERY = timedelta(hours=1)
 BACKFILL_CONCURRENCY = 5
 
@@ -111,9 +117,13 @@ class Runner:
         fetch_klines: KlineFetcher | None = None,
         fetch_predictor_klines: KlineFetcher | None = None,
         restart_check: Callable[[], str | None] | None = None,
+        restart_exit: Callable[[], None] | None = None,
     ) -> None:
         """``restart_check``：面板要求重启前的检查，返回不能重启的原因（None = 可以）。
         由命令行给：要在 launchd 托管下（退出后会被拉起），且新配置能通过校验。不给 = 不支持重启。
+
+        ``restart_exit``：重启时真正结束进程（命令行给 ``os._exit(0)``）。不能靠 ``asyncio.run``
+        正常返回：军师团开会跑在工作线程里，解释器退出前会一直等它开完（十几分钟）。
         """
         self.app = app
         self.m = app.m
@@ -140,10 +150,17 @@ class Runner:
         self._restarting = False
         self._restart = asyncio.Event()
         self.restart_requested = False
+        self._restart_exit = restart_exit
+        # restart 的回执在进程真要退出前一刻才写（面板看到“完成”时进程确实在退）
+        self._restart_receipt: tuple[CommandInbox, Path, CommandResult] | None = None
+        self._exit_lock = threading.Lock()
+        self._exited = False
+        self._started_at: datetime | None = None
 
     # ------------------------------------------------------------ 生命周期
     async def run(self) -> None:
         """启动并一直跑，直到被取消，或面板发来 restart（之后 ``restart_requested`` 为 True）。"""
+        self._started_at = self.app.clock()
         await self.app.start()
         self._last_screen = self.app.clock()
         if self.app.pool is not None:
@@ -174,16 +191,58 @@ class Runner:
             self.restart_requested = stop.done()
         finally:
             stop.cancel()
-            await self.shutdown()
+            if self.restart_requested:
+                await self._shutdown_for_restart()
+            else:
+                await self.shutdown()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await loops
 
+    async def _shutdown_for_restart(self) -> None:
+        """限时收尾，然后写回执、结束进程。收尾卡住（或连限时都卡住）也照样退出。"""
+        if self._restart_exit is not None:
+            timer = threading.Timer(RESTART_HARD_EXIT_S, self._exit_for_restart)
+            timer.daemon = True
+            timer.start()
+        try:
+            await asyncio.wait_for(self.shutdown(), RESTART_SHUTDOWN_S)
+        except TimeoutError:
+            log.warning("重启收尾超过 %s 秒，直接退出", RESTART_SHUTDOWN_S)
+        except Exception:
+            log.exception("重启收尾出错，照样退出")
+        self._exit_for_restart()
+
+    def _exit_for_restart(self) -> None:
+        """写 restart 回执，再结束进程。可能从超时线程调用，只执行一次。"""
+        with self._exit_lock:
+            if self._exited:
+                return
+            self._exited = True
+            if self._restart_receipt is not None:
+                inbox, path, result = self._restart_receipt
+                try:
+                    inbox.finish(path, result)
+                except OSError:
+                    log.exception("写重启回执失败")
+            if self._restart_exit is not None:
+                log.warning("面板要求重启：进程退出，launchd 会重新拉起")
+                for handler in logging.getLogger().handlers:
+                    with contextlib.suppress(Exception):
+                        handler.flush()
+                self._restart_exit()
+
     async def shutdown(self) -> None:
-        for t in [*self._loops, *self._tasks]:
+        tasks = [*self._loops, *self._tasks]
+        for t in tasks:
             t.cancel()
-        for t in [*self._loops, *self._tasks]:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
+        if tasks:
+            # 只等一会儿：吞掉取消、不肯停的任务不能把退出卡死
+            done, stuck = await asyncio.wait(tasks, timeout=TASK_CANCEL_WAIT_S)
+            for t in done:
+                if not t.cancelled():
+                    t.exception()  # 取走异常，免得事件循环报“没人取的异常”
+            if stuck:
+                log.warning("%d 个后台任务取消后 %s 秒还没停", len(stuck), TASK_CANCEL_WAIT_S)
         self._loops, self._tasks = [], set()
         await self.app.stop()
 
@@ -486,6 +545,13 @@ class Runner:
                 result = CommandResult(
                     id=cmd.id, kind=cmd.kind, status="expired", detail=why, ts=now
                 )
+            elif (
+                cmd.kind == "restart" and self._started_at is not None and cmd.ts < self._started_at
+            ):
+                # 上一个进程退出前没来得及写回执：本进程就是重启后的，别再重启一次
+                result = CommandResult(
+                    id=cmd.id, kind=cmd.kind, status="done", detail="已重启", ts=now
+                )
             else:
                 status: Literal["done", "rejected", "failed"]
                 try:
@@ -498,11 +564,14 @@ class Runner:
                 )
                 outcome = Outcome.ACTION if status == "done" else Outcome.REJECT
                 self._guard_note(outcome, f"面板指令 {cmd.kind}（{status}）：{detail}"[:200], now)
+                if cmd.kind == "restart" and status == "done":
+                    self._restart_receipt = (inbox, path, result)
+                    continue
             try:
                 inbox.finish(path, result)
             except OSError:
                 log.exception("写面板指令结果失败")
-        if self._restarting:  # 回执写完再退出，面板才知道指令执行了
+        if self._restarting:  # 其余回执写完再退出；restart 自己的回执在退出前一刻写
             self._restart.set()
 
     async def _prepare_restart(self) -> tuple[Literal["done", "rejected"], str]:
@@ -523,7 +592,7 @@ class Runner:
             self._restarting = False
             return "rejected", f"还有 {len(self._closing)} 笔平仓没做完，没有重启，稍后再试"
         await self.app._alert(AlertLevel.INFO, "主程序重启", "面板指令：重新加载配置")
-        return "done", "在途动作已做完，主程序退出重启（launchd 会自动拉起）"
+        return "done", "在途动作已做完，主程序已退出，launchd 会自动拉起"
 
     async def _run_command(self, cmd: PanelCommand) -> tuple[Literal["done", "rejected"], str]:
         if cmd.kind == "pause":
