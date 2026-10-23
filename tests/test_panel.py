@@ -808,6 +808,13 @@ def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
     assert "40 个币" in role_state(c.Role.SCREENER, ok, NOW, run)[1]
     first = Sched(**base, next_run_at=NOW + timedelta(minutes=10))
     assert role_state(c.Role.SCREENER, first, NOW, run)[1].startswith("等待首次运行 ")
+    # 模块自己说了卡在哪一步：写明那一步，不笼统说“等待首次运行”
+    warming = c.ModuleStatus(role=c.Role.PREDICTOR, health=c.Health.STARTING, ts=NOW,
+                             headline="等待历史 K 线（启动时从币安回填）")  # fmt: skip
+    assert role_state(c.Role.PREDICTOR, warming, NOW, run) == (
+        "slow",
+        "准备中：等待历史 K 线（启动时从币安回填）",
+    )
     bad = Sched(**base, error="币安 451")
     assert role_state(c.Role.SCREENER, bad, NOW, run) == ("bad", "失败：币安 451")
     # 状态里已经有上次 / 币数 / 下次：摘要不再重复显示；没报这些字段的模块照常显示摘要

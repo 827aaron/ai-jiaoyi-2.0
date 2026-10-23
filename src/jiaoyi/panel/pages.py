@@ -380,6 +380,8 @@ def role_state(
         why = error if isinstance(error, str) and error else st.last_error or st.headline
         return "bad", f"失败：{why or '没写原因'}"
     if st.health is Health.STARTING or (_opt_time(st, "last_run_at") is None and nxt):
+        if nxt is None and st.headline:  # 模块自己说了卡在哪一步（例如预测员补 K 线中）
+            return "slow", f"准备中：{st.headline}"
         return "slow", f"等待首次运行{f' {hm(nxt)}' if nxt else ''}"
     if st.health is Health.DEGRADED:
         return "slow", f"降级运行（上次 {hm(last)}{extra}）"
