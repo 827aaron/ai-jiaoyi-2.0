@@ -159,7 +159,9 @@ async def test_rate_limit_pauses_round_and_reopens_after_unban(
     try:
         eng = FakeEngine(["AAUSDT", "BBUSDT"], fail={"AAUSDT", "BBUSDT"})
         c, log, clock = make(tmp_path, eng, now)
-        binance_gate._banned_until = time.time() + 300  # 币安 418：封 5 分钟
+        from jiaoyi.market import rest
+
+        rest._blocked = rest.RateLimited(418, time.time() + 300)  # 快环那边撞了 418：封 5 分钟
         with pytest.raises(CardRefreshError):
             await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
         assert c._fails == 0 and c._retry_at is None  # 不算会议失败、不退避
@@ -206,5 +208,28 @@ def test_gate_parses_retry_after_shares_ban_and_stops_requests(
             binance_gate.get("https://fapi.binance.com/y")  # 封禁期内不再打给币安
         assert calls == ["https://fapi.binance.com/x"]
         assert binance_gate.banned_until() > 0
+    finally:
+        binance_gate.reset()
+
+
+def test_gate_and_market_rest_share_one_ban(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    import httpx
+
+    from jiaoyi.market import rest
+    from jiaoyi.slow import binance_gate
+
+    binance_gate.reset()
+    try:
+        rest._blocked = rest.RateLimited(418, time.time() + 60)  # 快环 / 离线工具先被封
+        monkeypatch.setattr(httpx, "get", lambda *a, **k: pytest.fail("封禁期内不该发请求"))
+        with pytest.raises(rest.RateLimited):
+            binance_gate.get("https://fapi.binance.com/x")
+        binance_gate.reset()
+        rest.mark_blocked(429, {"Retry-After": "30"})  # 分析师先被封
+        with pytest.raises(rest.RateLimited):
+            rest.check_blocked()
+        assert binance_gate.banned_until() > time.time()
     finally:
         binance_gate.reset()
