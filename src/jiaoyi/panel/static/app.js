@@ -621,7 +621,8 @@ const PLAIN = {
   max_leverage: "最多开几倍杠杆",
   max_total_exposure_x: "所有仓位加起来最多是本金的几倍",
   daily_loss_halt_pct: "今天亏到本金的百分之几就停止开新仓",
-  max_notional_per_trade_usdt: "单笔仓位最大多少 USDT",
+  max_notional_per_trade_x: "单笔仓位最大是本金的几倍",
+  max_notional_per_trade_usdt: "单笔仓位绝对上限 USDT（可不填）",
   max_open_positions: "同时最多持几个币",
   lifeboat_stop_multiplier: "交易所兜底止损比正常止损远几倍",
   max_spread_bps: "买卖价差超过万分之几就不开仓",
@@ -708,7 +709,7 @@ const HINT = {
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
-const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
+const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${esc(String(i.recommended))}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
 const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样" };
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
 const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
@@ -880,6 +881,7 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
+      ${(d.risk_cautions || []).length ? `<div class="note warn mt">比推荐值冒险（只提示，不拦）：${d.risk_cautions.map(esc).join("；")}</div>` : ""}
       <div class="lbl">每一类币的仓位加起来最多是本金的几倍 ${editBtn(d, "category")}</div>
       <div class="dim small">比如“山寨币 1 倍”：所有山寨币的仓位加起来不超过本金的 1 倍。同一类币常常一起涨跌，这样一类出事不会亏太多。</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，看不到内容 ${keyBtn()}</span></div><div class="form">${keys}</div>

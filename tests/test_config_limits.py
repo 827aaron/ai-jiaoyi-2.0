@@ -1,7 +1,7 @@
 """硬上限的“拒绝启动”测试：每个字段缺项、越界、拼错都必须被拒，边界值必须被接受。
 
 范围从模型的字段约束里读出来，不手抄一遍：以后有人放宽某个范围，这里的越界用例会跟着变，
-但“放宽到比设计文档更松”要靠评审发现——所以另外钉死了几个最关键的上限（见最后几个测试）。
+硬上限只拦物理 / 交易所约束（Aaron 2026-10-23），最后几个测试钉死这些约束和保守值提示。
 """
 
 from __future__ import annotations
@@ -94,7 +94,12 @@ def test_risk_numeric_bounds(tmp_path: Path, field: str, what: str, value: float
             load_risk_config(path)
 
 
-@pytest.mark.parametrize("field", list(RiskConfig.model_fields))
+OPTIONAL_RISK_FIELDS = {"max_notional_per_trade_x", "max_notional_per_trade_usdt"}
+
+
+@pytest.mark.parametrize(
+    "field", [f for f in RiskConfig.model_fields if f not in OPTIONAL_RISK_FIELDS]
+)
 def test_every_risk_field_is_required(tmp_path: Path, field: str) -> None:
     data = {k: v for k, v in b.RISK_DEFAULTS.items() if k != field}
     with pytest.raises(ConfigError, match=f"{field}: 缺少这一项"):
@@ -143,7 +148,7 @@ def test_defaults_in_builders_match_the_shipped_example() -> None:
     from tests.conftest import ROOT
 
     shipped = load_risk_config(ROOT / "config" / "risk.example.toml")
-    assert shipped == b.risk_config(max_notional_per_trade_usdt=2000)
+    assert shipped == b.risk_config()
 
 
 def test_unknown_risk_field_refuses(tmp_path: Path) -> None:
@@ -179,11 +184,81 @@ def test_category_cap_may_equal_but_not_exceed_total(tmp_path: Path) -> None:
         load_risk_config(_write(tmp_path, bad, "bad.toml"))
 
 
-# ---- 钉死最关键的几个“绝对上限”：设计文档说 AI 和代码都不能比这更松
-def test_absolute_ceilings_match_the_design() -> None:
+# ---- Aaron 2026-10-23：硬上限数值由人定，只拦不合理的值；超出保守值只提示
+def test_only_impossible_values_are_refused() -> None:
+    """Aaron 2026-10-23：硬围栏都删掉，只给推荐；只拦逻辑上不成立的值。"""
     f = RiskConfig.model_fields
-    assert _bounds(f["max_leverage"])["le"] <= 10
-    assert _bounds(f["risk_per_trade_pct"])["le"] <= 2.0
-    assert _bounds(f["max_total_exposure_x"])["le"] <= 5.0
-    assert _bounds(f["daily_loss_halt_pct"])["le"] <= 10.0
-    assert _bounds(f["lifeboat_stop_multiplier"])["ge"] > 1.0, "保命止损必须比正常止损更宽"
+    assert _bounds(f["max_leverage"]) == {"ge": 1.0}, "杠杆能开多少由币安按合约决定"
+    assert _bounds(f["max_total_exposure_x"]) == {"gt": 0.0}
+    assert _bounds(f["risk_per_trade_pct"]) == {"gt": 0.0, "le": 100.0}
+    assert _bounds(f["daily_loss_halt_pct"]) == {"gt": 0.0, "le": 100.0}
+    assert _bounds(f["lifeboat_stop_multiplier"]) == {"gt": 1.0}, "保命止损必须比正常止损更宽"
+
+
+def test_notional_cap_follows_equity() -> None:
+    cfg = b.risk_config(max_notional_per_trade_x=2.0)
+    assert cfg.notional_cap(1_000.0) == 2_000.0
+    assert cfg.notional_cap(5_000.0) == 10_000.0
+    assert cfg.notional_cap(None) == float("inf")  # 不知道权益：保镖按实时权益封顶
+    topped = b.risk_config(max_notional_per_trade_x=2.0, max_notional_per_trade_usdt=3_000.0)
+    assert topped.notional_cap(5_000.0) == 3_000.0
+    assert topped.notional_cap(None) == 3_000.0
+
+
+def test_aaron_paper_values_are_accepted_with_cautions(tmp_path: Path) -> None:
+    data = {
+        **b.RISK_DEFAULTS,
+        "risk_per_trade_pct": 5.0,
+        "daily_loss_halt_pct": 15.0,
+        "max_leverage": 10,
+    }
+    risk = load_risk_config(_write(tmp_path, data))
+    hits = risk.cautions()
+    assert sorted(h.split(" ")[0] for h in hits) == [
+        "daily_loss_halt_pct",
+        "max_leverage",
+        "risk_per_trade_pct",
+    ]
+    assert "推荐 1" in hits[0]
+
+
+def test_conservative_defaults_have_no_cautions() -> None:
+    assert b.risk_config().cautions() == []
+
+
+def test_daily_halt_below_one_lifeboat_loss_is_only_a_caution(tmp_path: Path) -> None:
+    data = {**b.RISK_DEFAULTS, "risk_per_trade_pct": 1.0, "daily_loss_halt_pct": 1.2}
+    hits = load_risk_config(_write(tmp_path, data)).cautions()
+    assert any("满仓位的单子会被保镖全部拒掉" in h for h in hits)
+
+
+@pytest.mark.parametrize(
+    ("equity", "risk", "lev", "positions"),
+    [
+        (None, 1.0, 5, 5),  # 不知道资金：按 1000U
+        (300.0, 1.0, 10, 2),
+        (50_000.0, 0.75, 5, 5),
+        (200_000.0, 0.5, 5, 5),
+    ],
+)
+def test_recommendations_follow_equity(
+    equity: float | None, risk: float, lev: int, positions: int
+) -> None:
+    from jiaoyi.contracts.risk_config import recommended_caps
+
+    rec = recommended_caps(equity)
+    assert rec["risk_per_trade_pct"].value == risk
+    assert rec["daily_loss_halt_pct"].value == risk * 3
+    assert rec["max_leverage"].value == lev
+    assert rec["max_open_positions"].value == positions
+    assert rec["max_notional_per_trade_x"].value == 2.0
+    assert set(rec) <= set(RiskConfig.model_fields)
+
+
+def test_shipped_example_matches_the_1000u_recommendation() -> None:
+    from jiaoyi.contracts.risk_config import recommended_caps
+    from tests.conftest import ROOT
+
+    shipped = load_risk_config(ROOT / "config" / "risk.example.toml")
+    for name, rec in recommended_caps(None).items():
+        assert getattr(shipped, name) == rec.value, name

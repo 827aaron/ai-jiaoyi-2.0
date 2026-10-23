@@ -30,6 +30,18 @@ make check-config
 make hb-fetch           # 拉上游 hummingbot-api 和 Condor 到 vendor/，钉在 Makefile 里的提交
 ```
 
+`config/risk.toml` 的硬上限**只给推荐，不设限制**：你填的就是上限。程序只拦数学上不成立的值（≤0、百分比超过 100、保命止损倍数不大于 1），其余你填什么都收；杠杆能开多少由币安按合约决定（下单前回读校验）。推荐值按账户资金自动算（面板设置页每项旁边显示「推荐 X（按 NU 算）」；终端拿不到资金，按 1000U 算），比推荐冒险时 `check-config` / `status` / `run` 和面板会黄色提示，但不拒绝启动。具体币种能开多少倍杠杆以币安为准。
+
+| 项 | 推荐公式 |
+|---|---|
+| 每笔风险 `risk_per_trade_pct` | 资金 < 2 万U 1%；2–10 万 0.75%；≥ 10 万 0.5% |
+| 日亏熔断 `daily_loss_halt_pct` | 每笔风险 × 3 |
+| 最大杠杆 `max_leverage` | 资金 < 1000U 10 倍（不然凑不够最小下单额），否则 5 倍 |
+| 总敞口 `max_total_exposure_x` | 3 倍 |
+| 同时持仓 `max_open_positions` | 资金 ÷ 200U，取 2–5 |
+| 单笔名义上限 `max_notional_per_trade_x` | 权益 × 2 倍（金额随资金变；`max_notional_per_trade_usdt` 可选再加绝对硬顶，不写就不限） |
+| 保命止损倍数 / 止盈手续费倍数 | 1.5 / 2，和资金无关 |
+
 ## 3. 起 hummingbot-api（Docker）
 
 ```bash

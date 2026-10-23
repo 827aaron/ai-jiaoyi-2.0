@@ -104,13 +104,19 @@ class ScheduleConfig(_Strict):
         default=600.0, ge=60.0, le=1800.0, description="单个标的的会议超时。"
     )
     min_refresh_gap_min: float = Field(
-        default=5.0, ge=1.0, le=60.0, description="两轮开会的最小间隔（防抖）。"
+        default=5.0,
+        ge=1.0,
+        le=1440.0,
+        description="两轮开会的最小间隔（分钟）。关键位突破、大消息、新入池都要等过了这个间隔"
+        "才开会；档位默认 = 卡有效期 − 提前量（2h 档 100 分钟），即「卡多久有效就多久开一次」。",
     )
 
     @model_validator(mode="after")
     def _lead(self) -> ScheduleConfig:
         if self.refresh_lead_min >= self.card_ttl_hours * 60:
             raise ValueError("refresh_lead_min 必须小于作战卡有效期（card_ttl_hours × 60）")
+        if self.min_refresh_gap_min >= self.card_ttl_hours * 60:
+            raise ValueError("min_refresh_gap_min 必须小于作战卡有效期，否则卡会过期断档")
         return self
 
 

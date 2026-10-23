@@ -20,13 +20,15 @@ def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
     assert kw["ttl"] == timedelta(hours=2)
     assert kw["symbol_min_interval"] == timedelta(hours=1.67)
     assert kw["expiry_lead"] == timedelta(minutes=20)
-    assert kw["symbol_timeout_s"] == 600 and kw["min_refresh_gap"] == timedelta(minutes=5)
+    # 2h 档 = 2 小时一轮会：关键位突破 / 新入池也要隔 100 分钟
+    assert kw["symbol_timeout_s"] == 600 and kw["min_refresh_gap"] == timedelta(minutes=100)
     assert cfg.effective_pick_max(20) == 10
 
     one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()
     assert one_hour["ttl"] == timedelta(hours=1) and one_hour["concurrency"] == 5
     assert one_hour["expiry_lead"] == timedelta(minutes=15)
     assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
+    assert one_hour["min_refresh_gap"] == timedelta(minutes=45)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
@@ -180,3 +182,10 @@ def test_missing_slow_stack_only_when_key_present(monkeypatch: pytest.MonkeyPatc
     assert "OPENROUTER_API_KEY" in (missing_slow_stack(orc, S({"OPENROUTER_API_KEY": "k"})) or "")
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     assert missing_slow_stack(cfg, S({"DEEPSEEK_API_KEY": "k"})) is None
+
+
+def test_refresh_gap_must_be_shorter_than_card_ttl(tmp_path: Path) -> None:
+    path = tmp_path / "slow.toml"
+    path.write_text("[schedule]\nmin_refresh_gap_min = 120\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="min_refresh_gap_min"):
+        load_slow_config(path)

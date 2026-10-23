@@ -78,7 +78,7 @@ tests/                                                         测试工程师 +
 - Python 3.11+，`asyncio`。快环里不许有阻塞调用（同步 HTTP、`time.sleep`）；不得已时放线程池。
 - 类型检查是严格模式（`mypy --strict`），lint 用 ruff，行宽 100。`make format` 自动修。
 - 注释和日志用中文，标识符用英文。
-- 配置全部从 `config/*.toml` 读（`jiaoyi.core.config`），不读散落的环境变量。新增配置项必须进 `RiskConfig` / `AppConfig`，带合理范围，示例文件同步更新。
+- 配置全部从 `config/*.toml` 读（`jiaoyi.core.config`），不读散落的环境变量。新增配置项必须进 `RiskConfig` / `AppConfig`，带合理范围（`RiskConfig` 的硬上限只拦数学 / 交易所约束；推荐值写在 `recommended_caps`，按资金算，只提示），示例文件同步更新。
 - 网络调用都要有超时；超时数值来自配置。
 - 每个外部调用（Jev、DeepSeek、hummingbot-api、币安）都记延迟；有花费的记花费。
 

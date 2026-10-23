@@ -1,9 +1,10 @@
 """硬上限（你定，AI 改不了）和运行配置。
 
 规则（设计文档 §四、§十一）：
-- 每个字段都是**必填**，模型里不给默认值。配置缺项、多出未知字段、超出合理范围，
-  程序拒绝启动。保守默认值写在 ``config/risk.example.toml``，第一次用时复制成
-  ``config/risk.toml`` 再按需改。
+- 每个字段都是**必填**，模型里不给默认值。配置缺项、多出未知字段、数值不合理
+  （例如负数、杠杆超过 125），程序拒绝启动。硬上限的数值由人定，不另设保守范围。
+  保守默认值写在 ``config/risk.example.toml``，第一次用时复制成 ``config/risk.toml``
+  再按需改；比推荐值冒险只提示（``recommended_caps`` / ``RiskConfig.cautions``）。
 - 下层只能更紧：作战卡的范围、拍板人的档位都不能超过这里的数。
 
 读文件和报错见 ``jiaoyi.core.config``。
@@ -11,6 +12,8 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -23,33 +26,48 @@ PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
 
 
 class RiskConfig(Contract):
-    """硬上限。范围是“合理范围”，不是建议值；建议值见示例文件。"""
+    """硬上限。Aaron 2026-10-23 定：只给推荐，不设限制，你填的就是上限。程序只拦数学上
+    不成立的值（≤0、百分比超过 100）；杠杆能开多少由币安按合约决定（下单前回读校验）。
+    比推荐值冒险时提示但不拒绝（见 ``cautions``）。
+    """
 
     risk_per_trade_pct: float = Field(
-        ge=0.05, le=2.0, description="每笔最多亏总资金的百分比。保守值 1.0。"
+        gt=0.0,
+        le=100.0,
+        description="每笔最多亏总资金的百分比。推荐 1（按资金算，见 recommended_caps）。",
     )
-    max_leverage: int = Field(ge=1, le=10, description="最大杠杆。保守值 5。")
+    max_leverage: int = Field(
+        ge=1, description="最大杠杆（具体币种能开多少以币安回读为准）。推荐 5。"
+    )
     max_total_exposure_x: float = Field(
-        gt=0.0, le=5.0, description="所有持仓名义价值合计 / 总资产的上限。保守值 3。"
+        gt=0.0, description="所有持仓名义价值合计 / 总资产的上限。推荐 3。"
     )
     category_exposure_x: dict[Category, float] = Field(
         description="每个相关组的敞口上限（总资产的倍数），不能超过总敞口上限。"
     )
     daily_loss_halt_pct: float = Field(
-        ge=0.5, le=10.0, description="当日亏损达到这个百分比后只允许平仓。保守值 3。"
+        gt=0.0, le=100.0, description="当日亏损达到这个百分比后只允许平仓。推荐为每笔风险 × 3。"
     )
-    max_notional_per_trade_usdt: float = Field(
-        ge=10.0, le=100_000.0, description="单笔名义价值上限，USDT。"
+    max_notional_per_trade_x: float = Field(
+        default=2.0,
+        gt=0.0,
+        description="单笔名义价值上限 = 账户权益 × 这个倍数，随资金变。推荐 2。",
     )
-    max_open_positions: int = Field(ge=1, le=50)
+    max_notional_per_trade_usdt: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="可选：单笔名义价值的绝对硬顶，USDT。不写就只按权益倍数。",
+    )
+    max_open_positions: int = Field(ge=1)
     lifeboat_stop_multiplier: float = Field(
-        ge=1.1, le=3.0, description="保命止损距离 = 正常止损距离 × 这个倍数。保守值 1.5。"
+        gt=1.0,
+        description="保命止损距离 = 正常止损距离 × 这个倍数（必须比正常止损宽）。推荐 1.5。",
     )
-    max_spread_bps: float = Field(ge=0.5, le=50.0, description="价差超过就不开仓。")
-    max_slippage_bps: float = Field(ge=1.0, le=100.0)
-    taker_fee_bps: float = Field(ge=0.0, le=20.0, description="单边吃单费率，用于手续费门槛。")
+    max_spread_bps: float = Field(gt=0.0, description="价差超过就不开仓。")
+    max_slippage_bps: float = Field(gt=0.0)
+    taker_fee_bps: float = Field(ge=0.0, description="单边吃单费率，用于手续费门槛。")
     min_tp_fee_multiple: float = Field(
-        ge=1.0, le=10.0, description="止盈距离至少是来回手续费的几倍，不够就拒单。"
+        gt=0.0, description="止盈距离至少是来回手续费的几倍，不够就拒单。推荐 2。"
     )
     day_reset_tz: Literal["Asia/Bangkok", "UTC"] = Field(
         description="“今日盈亏”和日亏熔断按哪个时区 0 点清零。"
@@ -65,6 +83,77 @@ class RiskConfig(Contract):
                 total = self.max_total_exposure_x
                 raise ValueError(f"分组 {cat} 的上限 {cap} 必须在 0 到总敞口上限 {total} 之间")
         return self
+
+    def notional_cap(self, equity_usdt: float | None) -> float:
+        """单笔名义价值上限：权益 × ``max_notional_per_trade_x``，写了绝对硬顶再取小。
+
+        不知道权益（慢环、日志验收）时只剩绝对硬顶；也没写就是 ``inf``，由保镖按实时权益封顶。
+        """
+        caps = (
+            []
+            if not equity_usdt or equity_usdt <= 0
+            else [equity_usdt * self.max_notional_per_trade_x]
+        )
+        if self.max_notional_per_trade_usdt is not None:
+            caps.append(self.max_notional_per_trade_usdt)
+        return min(caps) if caps else math.inf
+
+    def cautions(self, equity_usdt: float | None = None) -> list[str]:
+        """比按资金算出的推荐值更冒险的项（只提示，不拒绝）。资金不知道时按 1000U 算。"""
+        out = []
+        for name, rec in recommended_caps(equity_usdt).items():
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if (value > rec.value) if rec.higher_is_riskier else (value < rec.value):
+                out.append(f"{name} = {value:g}（推荐 {rec.value:g}）")
+        worst = self.risk_per_trade_pct * self.lifeboat_stop_multiplier
+        if worst > self.daily_loss_halt_pct:
+            out.append(
+                f"daily_loss_halt_pct {self.daily_loss_halt_pct:g}% 小于一笔打到保命止损的亏损"
+                f" {worst:g}%：满仓位的单子会被保镖全部拒掉"
+            )
+        return out
+
+
+DEFAULT_EQUITY_USDT = 1000.0
+"""不知道账户资金时（终端 check-config、面板连不上交易所）推荐值按这个算。"""
+
+
+@dataclass(frozen=True)
+class Recommendation:
+    value: float
+    why: str
+    higher_is_riskier: bool = True
+
+
+def recommended_caps(equity_usdt: float | None = None) -> dict[str, Recommendation]:
+    """按账户资金算硬上限的推荐值（Aaron 2026-10-23：只给推荐，不设限制）。
+
+    公式（docs/M0-setup.md §2 有同样的说明）：
+
+    - 每笔风险：2 万 U 以下 1%，2–10 万 0.75%，10 万以上 0.5%（大资金单笔金额本身就大）。
+    - 日亏熔断：每笔风险 × 3，约等于连亏 2 笔满仓（按保命止损 1.5 倍算）后停手。
+    - 杠杆：1000U 以下 10 倍（不然单笔凑不够币安最小下单额），否则 5 倍。
+    - 总敞口：3 倍资金。
+    - 同时持仓：资金 ÷ 200U，取 2–5 笔。
+    - 单笔名义上限：权益 × 2 倍（配置本身就按倍数写，随资金变）。
+    - 保命止损倍数 1.5、止盈至少覆盖手续费 2 倍：和资金无关。
+    """
+    eq = equity_usdt if equity_usdt and equity_usdt > 0 else DEFAULT_EQUITY_USDT
+    basis = f"按 {eq:,.0f}U 算"
+    risk = 1.0 if eq < 20_000 else 0.75 if eq < 100_000 else 0.5
+    exposure = 3.0
+    return {
+        "risk_per_trade_pct": Recommendation(risk, basis),
+        "daily_loss_halt_pct": Recommendation(risk * 3, f"每笔风险 × 3，{basis}"),
+        "max_leverage": Recommendation(10 if eq < 1000 else 5, basis),
+        "max_total_exposure_x": Recommendation(exposure, "和资金无关"),
+        "max_open_positions": Recommendation(min(5, max(2, int(eq // 200))), basis),
+        "max_notional_per_trade_x": Recommendation(2.0, "和资金无关，金额随权益变"),
+        "lifeboat_stop_multiplier": Recommendation(1.5, "和资金无关"),
+        "min_tp_fee_multiple": Recommendation(2.0, "和资金无关", higher_is_riskier=False),
+    }
 
 
 class FastLoopConfig(Contract):

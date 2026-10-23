@@ -70,7 +70,8 @@ def assert_intent_within_limits(
     assert intent.approved_by == "risk_guard"
     assert intent.leverage <= cfg.max_leverage, "杠杆超过硬上限"
     assert intent.leverage <= cs.leverage.max + EPS, "杠杆超过作战卡范围"
-    assert intent.notional_usdt <= cfg.max_notional_per_trade_usdt + EPS, "单笔名义超过硬上限"
+    cap = cfg.notional_cap(account.equity_usdt)
+    assert intent.notional_usdt <= cap + EPS, "单笔名义超过硬上限（权益 × 倍数 / 绝对硬顶）"
     assert intent.notional_usdt <= cs.notional_usdt.max + EPS, "单笔名义超过作战卡范围"
     max_risk = account.equity_usdt * cfg.risk_per_trade_pct / 100.0
     assert intent.risk_usdt <= max_risk * (1 + 1e-6), "单笔风险超过硬上限"
@@ -253,7 +254,8 @@ class RiskGuardApprovalContract(RiskGuardSafetyContract):
                 risk_per_trade_pct=rng.choice([0.1, 0.5, 1.0, 2.0]),
                 max_leverage=rng.choice([1, 2, 5, 10]),
                 max_total_exposure_x=rng.choice([0.5, 1.0, 3.0, 5.0]),
-                max_notional_per_trade_usdt=rng.choice([50.0, 500.0, 5_000.0]),
+                max_notional_per_trade_x=rng.choice([0.05, 0.5, 2.0, 10.0]),
+                max_notional_per_trade_usdt=rng.choice([None, 50.0, 500.0, 5_000.0]),
                 max_open_positions=rng.choice([1, 3, 5]),
                 lifeboat_stop_multiplier=rng.choice([1.1, 1.5, 3.0]),
                 category_exposure_x=dict.fromkeys(b.RISK_DEFAULTS["category_exposure_x"], 0.5),

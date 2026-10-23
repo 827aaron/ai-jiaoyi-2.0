@@ -153,7 +153,7 @@ class ReferenceRiskGuard:
         leverage = max(1, min(int(cs.leverage.max), cfg.max_leverage))
         caps = [
             cs.notional_usdt.max,
-            cfg.max_notional_per_trade_usdt,
+            cfg.notional_cap(account.equity_usdt),
             account.available_usdt * leverage,
             cfg.max_total_exposure_x * account.equity_usdt - account.open_notional_usdt,
             cfg.category_exposure_x[cs.category] * account.equity_usdt

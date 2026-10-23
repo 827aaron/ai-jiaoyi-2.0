@@ -118,7 +118,8 @@ def clamp_to_risk(
         return cs.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
     return cs.model_copy(
         update={
-            "notional_usdt": _clamp_range(cs.notional_usdt, 0.0, risk.max_notional_per_trade_usdt),
+            # 慢环不知道实时权益：只按绝对硬顶夹（没写就不夹），权益倍数由保镖下单时封顶
+            "notional_usdt": _clamp_range(cs.notional_usdt, 0.0, risk.notional_cap(None)),
             "leverage": _clamp_range(cs.leverage, 1.0, float(risk.max_leverage)),
             # 止损倍数落在保镖认的区间内，免得整张卡这个标的被 min/max_stop_atr 拒掉
             "stop_atr": _clamp_range(cs.stop_atr, stop.min_stop_atr, stop.max_stop_atr),
@@ -505,7 +506,7 @@ class BattleCardCommander:
             # 分组决定吃哪一档敞口上限，以候选池为准，不信引擎
             raise ValueError(f"{entry.symbol} 分组应为 {entry.category}，会议给了 {cs.category}")
         r = self._risk
-        if cs.notional_usdt.max > r.max_notional_per_trade_usdt or cs.leverage.max > r.max_leverage:
+        if cs.notional_usdt.max > r.notional_cap(None) or cs.leverage.max > r.max_leverage:
             # 会议输出越界：这个币没有结论，不是悄悄夹紧后照用
             raise ValueError(f"{entry.symbol} 会议给出的名义价值或杠杆超出硬上限")
         return cs

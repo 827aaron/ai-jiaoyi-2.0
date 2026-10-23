@@ -225,8 +225,11 @@ def test_clamp_to_risk() -> None:
     cs = card_symbol(
         "AAUSDT", notional_usdt=Range(min=1e6, max=2e6), leverage=Range(min=20, max=50)
     )
-    out = clamp_to_risk(cs, RISK)
-    assert out.notional_usdt.max == RISK.max_notional_per_trade_usdt
+    # 只按权益倍数时慢环不夹名义价值（不知道实时权益），保镖下单时封顶
+    assert clamp_to_risk(cs, RISK).notional_usdt == cs.notional_usdt
+    topped = RISK.model_copy(update={"max_notional_per_trade_usdt": 2000.0})
+    out = clamp_to_risk(cs, topped)
+    assert out.notional_usdt.max == 2000.0
     assert out.notional_usdt.min <= out.notional_usdt.max
     assert out.leverage.max == RISK.max_leverage and out.leverage.min <= out.leverage.max
 
