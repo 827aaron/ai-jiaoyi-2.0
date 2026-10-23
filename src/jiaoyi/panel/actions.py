@@ -286,26 +286,38 @@ class PinItem(BaseModel):
     """那个档位的默认值（档位没给就是程序默认）。"""
 
 
+class HoldSpec(BaseModel):
+    """最长持仓一档：多少秒、止损按几分钟 K 线 ATR。"""
+
+    time_limit_s: int
+    atr_period_min: int
+
+
 class ProfileInfo(BaseModel):
-    """设置页的档位卡片：当前档位，以及配置文件里写死、不随档位变的键。"""
+    """设置页的档位卡片：开会间隔档、最长持仓档，以及配置文件里写死、不随档位变的键。"""
 
     current: str
+    """开会间隔档（meeting_interval）。"""
     choices: list[str]
     paper_only: list[str]
+    hold: str = profiles.DEFAULT_HOLD
+    """现在生效的最长持仓档。"""
+    hold_custom: bool = False
+    """True = 用户自己定的（写了 hold 或 time_limit_s）；False = 跟开会档位的推荐搭配。"""
+    hold_choices: list[str] = []
+    hold_paper_only: list[str] = []
+    hold_recommended: dict[str, str] = {}
+    """开会间隔档 → 推荐最长持仓档。"""
+    hold_specs: dict[str, HoldSpec] = {}
     pinned: dict[str, dict[str, object]]
     """段 → {键: 当前档位的默认值}：这些键在配置文件里写了值，切档位也不会跟着变。"""
     pins: dict[str, list[PinItem]] = {}
     """档位 → 切到它时会压过档位默认的写死项（任何档位给默认值的键，只要文件里写了就算）。"""
 
 
-def _defaults_for(profile: str, psec: profiles.Section, raw: object) -> dict[str, Any]:
-    """档位默认；止损 / 止盈 / ATR 周期等 fast_loop 键跟单笔最长持仓 time_limit_s 走。"""
-    if psec == "fast_loop":
-        limit = raw.get("time_limit_s") if isinstance(raw, dict) else None
-        return profiles.hold_defaults(
-            limit if isinstance(limit, int) else profiles.DEFAULT_TIME_LIMIT_S
-        )
-    return profiles.defaults(profile, psec)
+def _hold_for(raw_app: dict[str, Any], profile: str) -> str:
+    """开会间隔切到 ``profile`` 时的最长持仓档：自定义的不变，跟档位的换成推荐搭配。"""
+    return profiles.hold_of({**raw_app, "meeting_interval": profile})
 
 
 def _profile_keys(psec: profiles.Section) -> list[str]:
@@ -322,11 +334,12 @@ def profile_pins(paths: ConfigPaths, profile: str) -> list[PinItem]:
     """切到 ``profile`` 后哪些键还按配置文件里的值：文件值 → 档位默认值。"""
     raws: dict[str, dict[str, Any]] = {}
     out: list[PinItem] = []
+    hold = _hold_for(_raw(paths.app), profile)
     for section, psec in _PROFILED:
         raw = _file_table(paths, section, raws)
         if not isinstance(raw, dict):
             continue
-        base = _defaults_for(profile, psec, raw)
+        base = profiles.defaults(profile, psec, hold)
         fields = _PROFILE_MODEL[psec].model_fields
         for k in _profile_keys(psec):
             if k not in raw:
@@ -390,6 +403,7 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
     raw_app = _raw(paths.app)
     raw_slow = _raw(paths.slow)
     current = profiles.profile_of(raw_app)
+    hold = profiles.hold_of(raw_app)
     raws: dict[str, Any] = {
         "app": raw_app,
         "fast_loop": raw_app.get("fast_loop", {}),
@@ -398,7 +412,7 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
     pinned: dict[str, dict[str, object]] = {}
     for section, psec in _PROFILE_SECTION.items():
         raw = raws[section] if isinstance(raws[section], dict) else {}
-        base = _defaults_for(current, psec, raw)
+        base = profiles.defaults(current, psec, hold)
         hit = {k: base[k] for k in base if k in raw}
         if hit:
             pinned[section] = hit
@@ -406,6 +420,18 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
         current=current,
         choices=list(profiles.PROFILES),
         paper_only=[],  # 开会间隔档没有只能 paper 的；最长持仓 30m 在 hold 里校验
+        hold=hold,
+        hold_custom=profiles.hold_is_custom(raw_app),
+        hold_choices=list(profiles.HOLDS),
+        hold_paper_only=sorted(profiles.PAPER_ONLY),
+        hold_recommended=dict(profiles.RECOMMENDED_HOLD),
+        hold_specs={
+            h: HoldSpec(
+                time_limit_s=v["fast_loop"]["time_limit_s"],
+                atr_period_min=v["fast_loop"]["atr_period_min"],
+            )
+            for h, v in profiles.HOLD.items()
+        },
         pinned=pinned,
         pins={p: profile_pins(paths, p) for p in profiles.PROFILES},
     )
@@ -532,6 +558,8 @@ def editable_fields(section: Section) -> dict[str, FieldSpec]:
     if psec is None:
         return fields
     keys = {k for p in profiles.PROFILES for k in profiles.defaults(p, psec)}
+    if section == "app":
+        keys.add("hold")  # 留空 = 删掉这一行，跟开会档位的推荐搭配
     return {k: replace(f, profiled=True) if k in keys else f for k, f in fields.items()}
 
 
