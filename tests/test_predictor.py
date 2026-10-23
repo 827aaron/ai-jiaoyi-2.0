@@ -194,6 +194,66 @@ def test_auto_device_skips_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kmod.OfficialKronosBackend(KronosSettings(device="mps"))._pick_device() == "mps"
 
 
+def test_official_backend_uses_eval_mode_and_open_time_grid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """加载后切 eval（不然推理时 dropout 开着）；时间戳用开盘时间，落在 5 分钟格点上。"""
+    import types
+
+    from jiaoyi.predictor import kronos as kmod
+
+    evals: list[str] = []
+    calls: list[dict[str, Any]] = []
+
+    class Loaded:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def eval(self) -> Loaded:
+            evals.append(self.name)
+            return self
+
+    class Predictor:
+        def __init__(self, model: Loaded, tokenizer: Loaded, **kw: Any) -> None:
+            assert evals == ["tokenizer", "model"]  # 构造前就已经切好
+
+        def predict(self, **kw: Any) -> dict[str, list[float]]:
+            calls.append(kw)
+            n = kw["pred_len"]
+            return {"high": [101.0] * n, "low": [99.0] * n, "close": [100.0] * n}
+
+    class Series(list[Any]):
+        @property
+        def iloc(self) -> Series:
+            return self
+
+    class Stamps(list[Any]):
+        def tz_localize(self, tz: None) -> list[Any]:
+            return [t.replace(tzinfo=tz) for t in self]
+
+    model_mod = types.SimpleNamespace(
+        KronosTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: Loaded("tokenizer")),
+        Kronos=types.SimpleNamespace(from_pretrained=lambda *a, **k: Loaded("model")),
+        KronosPredictor=Predictor,
+    )
+    pd_mod = types.SimpleNamespace(
+        DataFrame=dict,
+        Series=Series,
+        to_datetime=lambda xs, utc: Stamps(xs),
+        Timedelta=timedelta,
+    )
+    mods = {"model": model_mod, "pandas": pd_mod}
+    monkeypatch.setattr(kmod.importlib, "import_module", lambda name: mods[name])
+    be = kmod.OfficialKronosBackend(KronosSettings(device="cpu"), kmod.MODEL_SPECS["small"])
+    out = be.predict([bar(k) for k in range(3)], pred_len=2, paths=1)
+    assert out == [[(101.0, 99.0, 100.0)] * 2]
+    kw = calls[0]
+    stamps = [*kw["x_timestamp"], *kw["y_timestamp"]]
+    assert all(t.minute % 5 == 0 and t.second == 0 and t.microsecond == 0 for t in stamps)
+    assert kw["x_timestamp"][0] == T0.replace(tzinfo=None)
+    assert kw["y_timestamp"][0] == (T0 + timedelta(minutes=15)).replace(tzinfo=None)
+
+
 # ---------------------------------------------------------------- 1m→5m、按需、尺寸策略
 
 
@@ -376,3 +436,13 @@ async def test_backfill_mid_bar_needs_the_closed_minutes() -> None:
         await g.on_kline(m1(minute))
     await g.wait_idle()
     assert be2.calls == 1 and g.latest("BTCUSDT", T0 + timedelta(minutes=20)) is not None
+
+
+async def test_log_and_status_carry_the_model_actually_used(tmp_path: Path) -> None:
+    sink = JsonlDecisionLog(tmp_path)
+    cfg = PredictorConfig(mode="all_symbols", model_size="base")
+    f = KronosForecaster(True, SET, FakeBackend(), sink, clock=lambda: T0, cfg=cfg)
+    await feed(f, 3)
+    rec = sink.read_day("2026-10-22")[-1]
+    assert rec.model_version == "Kronos-base"
+    assert sink.read_status()[Role.PREDICTOR.value].version == "Kronos-base"

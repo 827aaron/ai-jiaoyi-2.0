@@ -161,8 +161,8 @@ class OfficialKronosBackend:
         torch = importlib.import_module("torch")
         if torch.cuda.is_available():
             return "cuda"
-        # Mac mini M4 实测：MPS 每次都报 "scaled_dot_product_attention for MPS does not support
-        # dropout" 再退回 CPU，白白多一次失败。auto 直接用 CPU（约 3.1 秒/币，4 条路径 × 12 根 5m）
+        # Mac mini M4 实测：MPS 报 "scaled_dot_product_attention for MPS does not support dropout"。
+        # 原因是当时没切 eval（已修）；MPS 能不能用要在 Mac mini 重测，之前 auto 先用 CPU
         return "cpu"
 
     def _load(self, device: str) -> None:
@@ -172,10 +172,12 @@ class OfficialKronosBackend:
             sys.path.insert(0, repo)
         mod = importlib.import_module("model")
         sp = self._spec
+        # from_pretrained（safetensors）不会切到 eval：不切的话推理时 dropout 一直开着，
+        # 注意力也变成训练用的因果模式（MPS 报 "does not support dropout" 就是这个原因）
         tokenizer = mod.KronosTokenizer.from_pretrained(
             sp.tokenizer_id, revision=sp.tokenizer_revision
-        )
-        model = mod.Kronos.from_pretrained(sp.model_id, revision=sp.model_revision)
+        ).eval()
+        model = mod.Kronos.from_pretrained(sp.model_id, revision=sp.model_revision).eval()
         self._predictor = mod.KronosPredictor(
             model, tokenizer, device=device, max_context=sp.max_context
         )
@@ -194,7 +196,8 @@ class OfficialKronosBackend:
                 "amount": [b.quote_volume for b in bars],
             }
         )
-        x_ts = pd.Series(pd.to_datetime([b.close_time for b in bars], utc=True).tz_localize(None))
+        # 时间戳用开盘时间，分钟落在 5 分钟格点上（和官方训练数据一致）；收盘时间是 xx:04:59.999
+        x_ts = pd.Series(pd.to_datetime([b.open_time for b in bars], utc=True).tz_localize(None))
         step = pd.Timedelta(minutes=_INTERVAL_MIN[self._s.interval])
         y_ts = pd.Series([x_ts.iloc[-1] + step * (i + 1) for i in range(pred_len)])
         out: list[Path_] = []
@@ -248,6 +251,7 @@ class KronosForecaster:
         self._partial: dict[str, tuple[int, float, float, float, float, float, float, int]] = {}
         self._wanted: set[str] = set()
         self._queued = 0
+        self._last_model = MODEL_SPECS[self._cfg.model_size].name  # 最近一次实际用的模型
         self._forecasts: dict[str, Forecast] = {}
         self._busy: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -433,7 +437,7 @@ class KronosForecaster:
                 )
             fc = self._summarize(sym, paths, last, MODEL_SPECS[size].name)
         except Exception as exc:  # 预测员任何故障都不能影响快环
-            self._record(sym, (time.perf_counter() - t0) * 1000, None, exc)
+            self._record(sym, (time.perf_counter() - t0) * 1000, None, exc, MODEL_SPECS[size].name)
             return
         finally:
             if not dequeued:
@@ -441,7 +445,7 @@ class KronosForecaster:
         if not self._enabled:  # 推理期间被关掉
             return
         self._forecasts[sym] = fc
-        self._record(sym, (time.perf_counter() - t0) * 1000, fc, None)
+        self._record(sym, (time.perf_counter() - t0) * 1000, fc, None, fc.model)
 
     def _summarize(self, sym: str, paths: list[Path_], last: Kline, model: str) -> Forecast:
         if not paths or any(len(p) != self._s.pred_len for p in paths):
@@ -465,9 +469,15 @@ class KronosForecaster:
         )
 
     def _record(
-        self, sym: str, latency_ms: float, fc: Forecast | None, exc: Exception | None
+        self,
+        sym: str,
+        latency_ms: float,
+        fc: Forecast | None,
+        exc: Exception | None,
+        model: str,
     ) -> None:
         now = self._clock()
+        self._last_model = model
         if now.date() != self._day:
             self._day = now.date()
             self._calls = self._errors = 0
@@ -499,7 +509,7 @@ class KronosForecaster:
                         summary=summary,
                         output=out,
                         latency_ms=latency_ms,
-                        model_version=self._s.model_name,
+                        model_version=model,
                     )
                 )
             except OSError:
@@ -535,7 +545,7 @@ class KronosForecaster:
                         avg_latency_ms=avg,
                     ),
                     last_error=self._last_error,
-                    version=self._s.model_name,
+                    version=self._last_model,
                 )
             )
         except OSError:
