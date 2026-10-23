@@ -145,9 +145,13 @@ class _SupportsWarmup(Protocol):
 
 @runtime_checkable
 class _SupportsHeartbeat(Protocol):
-    """模块自己上报 ``ModuleStatus``。"""
+    """模块自己上报 ``ModuleStatus``。统一签名：``heartbeat(now)``，其余参数都要有默认值。
 
-    def heartbeat(self) -> None: ...
+    ``runtime_checkable`` 只查方法名不查签名，签名不一致要到运行时才炸，
+    所以 tests/test_app_startup.py 用真实模块类核对一遍。
+    """
+
+    def heartbeat(self, now: datetime) -> None: ...
 
 
 @dataclass
@@ -665,11 +669,11 @@ class App:
 
     def heartbeat_all(self) -> None:
         """各角色上报一次状态；桩由 ``status`` 补齐。"""
+        now = self.clock()
         for f in fields(self.m):
             module = getattr(self.m, f.name)
             if isinstance(module, _SupportsHeartbeat):
-                module.heartbeat()
-        now = self.clock()
+                module.heartbeat(now)
         modules_of = {
             Role.SENTINEL: self.m.trigger,
             Role.GATE: self.m.decision_model,

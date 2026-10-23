@@ -506,8 +506,11 @@ class KronosForecaster:
                 log.exception("预测员写决策日志失败")
         self.heartbeat()
 
-    def heartbeat(self) -> None:
-        """上报模块状态；外部也可以定时调用，让面板看到它还活着。"""
+    def heartbeat(self, now: datetime | None = None) -> None:
+        """上报模块状态；外部也可以定时调用，让面板看到它还活着。
+
+        时间用自己的 clock，``now`` 只为和其它模块统一签名（App.heartbeat_all）。
+        """
         if self._sink is None:
             return
         if not self._enabled:
