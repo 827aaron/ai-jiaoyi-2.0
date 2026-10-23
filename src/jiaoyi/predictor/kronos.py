@@ -521,7 +521,7 @@ class KronosForecaster:
             fc = self._summarize(sym, paths, last, MODEL_SPECS[size].version)
         except Exception as exc:  # 预测员任何故障都不能影响快环
             ms = (time.perf_counter() - t0) * 1000
-            self._record(sym, ms, None, exc, MODEL_SPECS[size].version)
+            self._record(sym, ms, None, exc, MODEL_SPECS[size].version, self._input(bars, last))
             return
         finally:
             if not dequeued:
@@ -529,7 +529,8 @@ class KronosForecaster:
         if not self._enabled:  # 推理期间被关掉
             return
         self._forecasts[sym] = fc
-        self._record(sym, (time.perf_counter() - t0) * 1000, fc, None, fc.model)
+        ms = (time.perf_counter() - t0) * 1000
+        self._record(sym, ms, fc, None, fc.model, self._input(bars, last))
         for cb in list(self._listeners):
             try:
                 cb(fc)
@@ -570,6 +571,15 @@ class KronosForecaster:
             stale_after=last.close_time + timedelta(minutes=2 * step_min),
         )
 
+    def _input(self, bars: list[Kline], last: Kline) -> dict[str, Any]:
+        """预测员看到了什么（面板「预测员」卡片读）：最后收盘价、用了几根、周期、几条路径。"""
+        return {
+            "last_close": last.close,
+            "bars": len(bars),
+            "interval": self._s.interval.value,
+            "paths": self._s.paths,
+        }
+
     def _record(
         self,
         sym: str,
@@ -577,6 +587,7 @@ class KronosForecaster:
         fc: Forecast | None,
         exc: Exception | None,
         model: str,
+        inp: dict[str, Any] | None = None,
     ) -> None:
         now = self._clock()
         self._last_model = model
@@ -609,6 +620,7 @@ class KronosForecaster:
                         symbol=sym,
                         outcome=Outcome.INFO if fc is not None else Outcome.ERROR,
                         summary=summary,
+                        input=inp or {},
                         output=out,
                         latency_ms=latency_ms,
                         model_version=model,

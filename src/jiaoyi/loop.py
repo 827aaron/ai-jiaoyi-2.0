@@ -50,6 +50,8 @@ from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolActio
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.market.features import ATR_PERIOD, HISTORY_DAYS, backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
+from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
+from jiaoyi.market.snapshot_file import MarketSnapshotFile
 from jiaoyi.slow.screener import SCREEN_EVERY
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ log = logging.getLogger(__name__)
 SLOW_CHECK_EVERY_S = 60.0
 URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
+SNAPSHOT_EVERY_S = SNAPSHOT_WRITE_EVERY_S
 NEWS_POLL_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
 RESTART_WAIT_CLOSE_S = 60.0
@@ -232,6 +235,7 @@ class Runner:
         self._meeting_picks: set[str] = set()
         self._watch_lock = asyncio.Lock()
         self._watched: set[str] | None = None  # 上一次订阅的集合；None = 还没订过
+        self._market_file = MarketSnapshotFile(app.app_cfg.data_dir, app.risk_cfg.day_reset_tz)
         if isinstance(self.m.cards, _PicksAware):
             self.m.cards.set_on_picks(self.set_meeting_picks)
 
@@ -260,6 +264,7 @@ class Runner:
             self._every(cfg.reconcile_interval_s, self.reconcile_tick),
             self._every(SLOW_CHECK_EVERY_S, self.slow_tick),
             self._every(HEARTBEAT_EVERY_S, self._heartbeat_tick),
+            self._every(SNAPSHOT_EVERY_S, self.market_snapshot_tick),
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
             self._every(INCOME_REFRESH_S, self.app.refresh_income),
@@ -364,6 +369,11 @@ class Runner:
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
 
+    async def market_snapshot_tick(self) -> None:
+        """面板「盘口员」读的 data/market_snapshot.json：正在盯的币此刻的行情和各路推送计数。"""
+        symbols = sorted(self._watched or set())
+        self._market_file.write(self.m.features, symbols, self.app.clock())
+
     # ------------------------------------------------------------ 行情 → 信号
     async def _market_loop(self) -> None:
         async for event in self.m.feed.events():
@@ -376,6 +386,7 @@ class Runner:
 
     async def on_event(self, event: MarketEvent) -> None:
         self.m.features.update(event)
+        self._market_file.count(event, self.app.clock())
         if isinstance(event, Kline):
             self._sync_wanted()
             await self.m.predictor.on_kline(event)
