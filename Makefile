@@ -30,7 +30,8 @@ help:
 	@echo "  make condor-install / condor-run   Condor 官方本机运行（uv + tmux）"
 
 install:
-	uv venv $(VENV)
+	@# 已有 .venv 就跳过创建（uv venv 对已存在的目录会报错），重复运行只补装依赖
+	@if [ -x $(BIN)/python ]; then echo "$(VENV) 已存在，跳过创建"; else uv venv $(VENV); fi
 	uv pip install --python $(BIN)/python -e ".[dev]"
 
 init-config:
