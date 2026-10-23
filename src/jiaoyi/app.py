@@ -17,11 +17,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from jiaoyi.alerting.log import LogAlerter
 from jiaoyi.alerting.stub import StubAlerter
@@ -37,6 +38,7 @@ from jiaoyi.contracts import (
     RunMode,
     SymbolPool,
 )
+from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
@@ -455,6 +457,9 @@ class App:
         self.gate_mode = "none"
         self.lot_rules: LotRulesProvider = StubLotRules()
         self.news: NewsHub | None = None
+        self.slow_cfg = slow_cfg or SlowConfig()
+        # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
+        self.paused: dict[str, Any] | None = read_paused(app_cfg.data_dir)
         if modules is None:
             built = build_modules(
                 risk_cfg,
@@ -494,6 +499,7 @@ class App:
         if self.pool is not None:
             await self.m.feed.subscribe([e.symbol for e in self.pool.in_pool])
         self.save_blocked()  # 封禁只在内存里，重启后清掉旧文件，由新闻源重新补上
+        self._write_runtime(now)
         self.heartbeat_all()
         self.started = True
         if self.app_cfg.mode == RunMode.LIVE:
@@ -543,6 +549,34 @@ class App:
     def save_blocked(self) -> None:
         """把封禁名单写到 data_dir，给 ``jiaoyi status`` 和面板读（它们不在主循环进程里）。"""
         self._write_atomic(BLOCKED_FILE, json.dumps(self.blocked_symbols(), ensure_ascii=False))
+
+    def set_paused(self, paused: bool, *, reason: str = "", command_id: str = "") -> None:
+        """人工暂停 / 恢复开新仓。只拦新开仓，已有持仓照常由管家、巡逻兵和止损看着。"""
+        now = self.clock().isoformat()
+        self.paused = (
+            {"paused": True, "since": now, "reason": reason, "command_id": command_id}
+            if paused
+            else None
+        )
+        try:
+            write_paused(
+                self.app_cfg.data_dir, paused, since=now, reason=reason, command_id=command_id
+            )
+        except OSError:
+            log.exception("写暂停状态失败")
+
+    def _write_runtime(self, now: datetime) -> None:
+        """给面板对比：配置指纹不一致 → 总览提示「配置已改、未生效」。"""
+        try:
+            write_runtime(
+                self.app_cfg.data_dir,
+                started_at=now.isoformat(),
+                mode=self.app_cfg.mode.value,
+                pid=os.getpid(),
+                config_fingerprint=config_fingerprint(self.risk_cfg, self.app_cfg, self.slow_cfg),
+            )
+        except OSError:
+            log.exception("写 runtime.json 失败")
 
     def set_pool(self, pool: SymbolPool) -> None:
         """换上新的候选池，并写到 data_dir 给面板选币页读。"""

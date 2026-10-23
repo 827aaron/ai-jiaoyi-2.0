@@ -24,7 +24,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
@@ -32,12 +32,15 @@ from jiaoyi.contracts import (
     CandidateSignal,
     Kline,
     MarketEvent,
+    Outcome,
     PositionRecord,
     PositionStatus,
+    Role,
     SymbolPool,
     Trade,
 )
 from jiaoyi.contracts.position import CloseReason
+from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.market.rest import fetch_recent_klines
 
 log = logging.getLogger(__name__)
@@ -47,6 +50,7 @@ SLOW_CHECK_EVERY_S = 60.0
 URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
 NEWS_POLL_EVERY_S = 120.0
+COMMAND_POLL_EVERY_S = 1.0
 BACKFILL_CONCURRENCY = 5
 
 
@@ -114,6 +118,7 @@ class Runner:
             self._every(SLOW_CHECK_EVERY_S, self.slow_tick),
             self._every(HEARTBEAT_EVERY_S, self._heartbeat_tick),
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
+            self._every(COMMAND_POLL_EVERY_S, self.command_tick),
         ]
         try:
             await asyncio.gather(*self._loops)
@@ -186,6 +191,10 @@ class Runner:
         now = self.app.clock()
         card = self.m.cards.current(now)
         if card is None:
+            return
+        if self.app.paused is not None:
+            # 人工暂停：连 Jev 都不问（省钱），记在保镖名下
+            self._guard_note(Outcome.REJECT, f"{signal.symbol} 人工暂停开新仓，不处理信号", now)
             return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:
@@ -353,3 +362,80 @@ class Runner:
         if set(new) != old:
             await self.backfill([s for s in new if s not in old])
             await self.m.feed.subscribe(new)
+
+    # ------------------------------------------------------------ 面板指令
+    def _guard_note(self, outcome: Outcome, summary: str, now: datetime) -> None:
+        rec = self.app.recorders.get(Role.RISK_GUARD)
+        if rec is not None:
+            rec.record(now, outcome, summary)
+
+    async def command_tick(self) -> None:
+        """执行面板写来的指令（core/commands.py）。每条只执行一次，结果写回 done/。"""
+        inbox = CommandInbox(self.app.app_cfg.data_dir)
+        for path, cmd, error in inbox.pending():
+            now = self.app.clock()
+            if cmd is None:
+                result = CommandResult(
+                    id=path.stem[:64], kind="?", status="rejected", detail=error, ts=now
+                )
+            elif inbox.is_done(cmd.id):
+                result = CommandResult(id=cmd.id, kind=cmd.kind, status="rejected", ts=now)
+            elif (why := inbox.check(cmd, now)) is not None:
+                result = CommandResult(
+                    id=cmd.id, kind=cmd.kind, status="expired", detail=why, ts=now
+                )
+            else:
+                status: Literal["done", "rejected", "failed"]
+                try:
+                    status, detail = await self._run_command(cmd)
+                except Exception as e:
+                    log.exception("面板指令执行失败")
+                    status, detail = "failed", repr(e)[:200]
+                result = CommandResult(
+                    id=cmd.id, kind=cmd.kind, status=status, detail=detail, ts=now
+                )
+                outcome = Outcome.ACTION if status == "done" else Outcome.REJECT
+                self._guard_note(outcome, f"面板指令 {cmd.kind}（{status}）：{detail}"[:200], now)
+            try:
+                inbox.finish(path, result)
+            except OSError:
+                log.exception("写面板指令结果失败")
+
+    async def _run_command(self, cmd: PanelCommand) -> tuple[Literal["done", "rejected"], str]:
+        if cmd.kind == "pause":
+            self.app.set_paused(True, reason=cmd.params.get("reason", ""), command_id=cmd.id)
+            await self.app._alert(AlertLevel.WARN, "已暂停开新仓", "面板指令；已有持仓照常看管")
+            return "done", "已暂停开新仓"
+        if cmd.kind == "resume":
+            self.app.set_paused(False, command_id=cmd.id)
+            await self.app._alert(AlertLevel.INFO, "已恢复开新仓", "面板指令")
+            return "done", "已恢复开新仓"
+        if cmd.kind == "close_all":
+            await self.refresh_positions()
+            targets = list(self.positions)
+            for p in targets:
+                self._spawn(self.close(p, CloseReason.MANUAL))
+            return "done", f"已提交平仓 {len(targets)} 笔"
+        if cmd.kind == "close_position":
+            pid = cmd.params.get("position_id", "")
+            await self.refresh_positions()
+            pos = next((p for p in self.positions if p.position_id == pid), None)
+            if pos is None:
+                return "rejected", f"没有持仓 {pid}"
+            self._spawn(self.close(pos, CloseReason.MANUAL))
+            return "done", f"已提交平仓 {pos.symbol} {pid}"
+        if cmd.kind == "unblock_symbol":
+            sym = cmd.params.get("symbol", "")
+            if not self.app.unblock_symbol(sym):
+                return "rejected", f"{sym} 没有被封"
+            return "done", f"已解封 {sym}（只在本次运行有效）"
+        # refresh_cards
+        pool = self.app.pool
+        if pool is None or is_stub(self.m.cards):
+            return "rejected", "军师团未接入或还没有候选池"
+        if self._refreshing:
+            return "rejected", "军师团正在开会"
+        self._refreshing = True
+        self._last_card_at = self.app.clock()
+        self._spawn(self._refresh(pool, "manual"))
+        return "done", "军师团已开始开会"

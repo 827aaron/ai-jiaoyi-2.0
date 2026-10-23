@@ -162,6 +162,9 @@ def _status(args: argparse.Namespace) -> int:
 
     for sym, reason in read_blocked(app.app_cfg.data_dir).items():
         print(f"禁开新仓     {sym:<12} {reason}")
+    if app.paused is not None:
+        since, reason = app.paused.get("since", ""), app.paused.get("reason", "")
+        print(f"人工暂停     自 {since} 起不开新仓 {reason}")
     asyncio.run(app.stop())
     return 0
 
