@@ -134,3 +134,16 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 
 - `ExchangeInfoLotRules`（`execution/lot_rules.py`）实现保镖的 `LotRulesProvider`：`await refresh()` 去币安 exchangeInfo 拉 `stepSize / minQty / minNotional`，`lot_rules(symbol)` 只读缓存（同步，快环里可直接调）。启动时先拉一次，之后用 `run_lot_rules_refresh` 每小时刷新。**故障即关闭**：没拉成功过、缓存超过 6 小时、或合约不在列表里，都返回 `None`，保镖就拒单。
 - `build_execution(..., decision_log=JsonlDecisionLog(...))` 会让执行层按 `acceptance.py` 的约定写决策日志：`executor` 成交 = action、平仓 = close（`output.net` 是净盈亏）、`lifeboat` 挂上 = action、`reconciler` 没修好的问题 = error（修好的 = action），三者都发心跳。用 `python -m jiaoyi.acceptance --stage m0 --hours 24` 验收。
+
+## 10. 开机自启与每日备份（launchd，Mac mini）
+
+```bash
+scripts/install_launchd.sh              # 装 colima（brew service）、Condor、每日备份
+scripts/install_launchd.sh --load-run   # 另外装 jiaoyi run（纸面跑通、你认可之后再加）
+```
+
+- `com.jiaoyi.condor`：Condor 前台运行（`make run-fg`），退出后 30 秒自动重启。
+- `com.jiaoyi.backup`：每天 04:10 把 `data/decision_log`、`module_status.json`、`positions.json` 打包到 `data/backups/<日期>/`，保留 30 天。
+- `com.jiaoyi.run`：默认只生成到 `data/launchd/`，**不装**；加 `--load-run` 才进 LaunchAgents（登录后自启，崩溃自动重启），模式取 `config/app.toml`。切 live 仍要走第 8 节的门槛。
+- 日志都在 `data/logs/`。脚本只写用户级 LaunchAgents，不需要 sudo；重复运行会先卸载再重装。
+- 备份只有本机一份，不防硬盘损坏；`data_dir` 不是 `data` 时脚本要同步改。
