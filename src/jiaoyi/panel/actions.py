@@ -218,6 +218,34 @@ def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
     return loaded != config_fingerprint(risk, app, slow)
 
 
+# 档位给默认值的全部段（面板段 → 档位段）；比 _PROFILE_SECTION 多预测员和花费段
+_PROFILED: tuple[tuple[Section, profiles.Section], ...] = (
+    ("app", "app"),
+    ("fast_loop", "fast_loop"),
+    ("predictor", "predictor"),
+    ("schedule", "slow.schedule"),
+    ("budget", "slow.budget"),
+)
+_PROFILE_MODEL: dict[profiles.Section, type[BaseModel]] = {
+    "app": AppConfig,
+    "fast_loop": FastLoopConfig,
+    "predictor": PredictorConfig,
+    "slow.schedule": ScheduleConfig,
+    "slow.budget": BudgetConfig,
+}
+
+
+class PinItem(BaseModel):
+    """配置文件里写死的一个档位键：切到某档位后仍按文件里的值。"""
+
+    section: str
+    key: str
+    value: object
+    """文件里的值。"""
+    profile_default: object
+    """那个档位的默认值（档位没给就是程序默认）。"""
+
+
 class ProfileInfo(BaseModel):
     """设置页的档位卡片：当前档位，以及配置文件里写死、不随档位变的键。"""
 
@@ -226,6 +254,86 @@ class ProfileInfo(BaseModel):
     paper_only: list[str]
     pinned: dict[str, dict[str, object]]
     """段 → {键: 当前档位的默认值}：这些键在配置文件里写了值，切档位也不会跟着变。"""
+    pins: dict[str, list[PinItem]] = {}
+    """档位 → 切到它时会压过档位默认的写死项（任何档位给默认值的键，只要文件里写了就算）。"""
+
+
+def _profile_keys(psec: profiles.Section) -> list[str]:
+    return sorted({k for p in profiles.PROFILES for k in profiles.defaults(p, psec)})
+
+
+def _file_table(paths: ConfigPaths, section: Section, raws: dict[str, dict[str, Any]]) -> Any:
+    file, table = _WHERE[section]
+    raw = raws.setdefault(file, _raw(getattr(paths, file)))
+    return raw.get(table, {}) if table else raw
+
+
+def profile_pins(paths: ConfigPaths, profile: str) -> list[PinItem]:
+    """切到 ``profile`` 后哪些键还按配置文件里的值：文件值 → 档位默认值。"""
+    raws: dict[str, dict[str, Any]] = {}
+    out: list[PinItem] = []
+    for section, psec in _PROFILED:
+        raw = _file_table(paths, section, raws)
+        if not isinstance(raw, dict):
+            continue
+        base = profiles.defaults(profile, psec)
+        fields = _PROFILE_MODEL[psec].model_fields
+        for k in _profile_keys(psec):
+            if k not in raw:
+                continue
+            if k in base:
+                default = base[k]
+            else:
+                f = fields.get(k)
+                default = None if f is None or f.is_required() else f.default
+            out.append(PinItem(section=section, key=k, value=raw[k], profile_default=default))
+    return out
+
+
+def clear_profile_pins(
+    paths: ConfigPaths, data_dir: str | Path, password: str, now: datetime
+) -> list[dict[str, Any]]:
+    """删掉配置文件里所有档位键的行，之后完全按档位走。两个文件都校验过才写；各自留备份。"""
+    check_password(data_dir, password)
+    todo: list[tuple[str, Path, str, list[dict[str, Any]]]] = []
+    for file in ("app", "slow"):
+        path: Path = getattr(paths, file)
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        try:
+            current = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as e:
+            raise ActionError(f"{path.name} 现在就不是合法 TOML，先在终端修好：{e}") from e
+        log: list[dict[str, Any]] = []
+        for section, psec in _PROFILED:
+            where, table = _WHERE[section]
+            if where != file:
+                continue
+            raw = current.get(table, {}) if table else current
+            for k in _profile_keys(psec):
+                if isinstance(raw, dict) and k in raw:
+                    text = set_toml_value(text, table, k, None)
+                    log.append({"section": section, "key": k, "old": raw[k], "new": None})
+        if log:
+            todo.append((file, path, text, log))
+    if not todo:
+        raise ActionError("配置文件里没有写死的档位项，已经完全按档位走")
+    for file, _, text, _ in todo:
+        _validate("app" if file == "app" else "schedule", text, paths)
+    stamp = now.strftime("%Y%m%dT%H%M%S")
+    changed: list[dict[str, Any]] = []
+    with (Path(data_dir) / CHANGES_FILE).open("a", encoding="utf-8") as f:
+        for _, path, text, log in todo:
+            shutil.copy2(path, path.with_name(f"{path.name}.bak-{stamp}"))
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(path)
+            for item in log:
+                row = {"ts": now.isoformat(), "file": path.name, **item}
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            changed += log
+    return changed
 
 
 def profile_info(paths: ConfigPaths) -> ProfileInfo:
@@ -249,6 +357,7 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
         choices=list(profiles.PROFILES),
         paper_only=sorted(profiles.PAPER_ONLY),
         pinned=pinned,
+        pins={p: profile_pins(paths, p) for p in profiles.PROFILES},
     )
 
 

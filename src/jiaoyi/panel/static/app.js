@@ -248,6 +248,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "unblock") askCommand("unblock_symbol", { symbol: arg }, arg);
   else if (act === "edit") editSettings(arg);
   else if (act === "profile") switchProfile(arg);
+  else if (act === "clearpins") askClearPins();
   else if (act === "unpin") unpin(arg);
   else if (act === "updown") {
     try { localStorage.setItem("updown", arg); } catch (err) { /* 存不了就只对这次生效 */ }
@@ -792,7 +793,34 @@ function sectionItems(d, sec) {
 
 const PROFILE_NOTE = { "2h": "单笔最长 2 小时（默认）", "60m": "单笔最长 1 小时", "30m": "单笔最长 30 分钟", "15m": "单笔最长 15 分钟" };
 function pinnedList(pf) {
+  if (pf.pins && pf.pins[pf.current]) return pf.pins[pf.current].map((x) => PLAIN[x.key] || x.key);
   return Object.entries(pf.pinned).flatMap(([sec, m]) => Object.keys(m).map((k) => PLAIN[k] || k));
+}
+// 写死项表格：文件值 → 某档位的默认值（一样的标出来）
+function pinTable(list, p) {
+  return `<div class="tw"><table><thead><tr><th>项</th><th class="r">文件里写死</th><th class="r">${esc(p)} 档默认</th></tr></thead><tbody>${list.map((x) => {
+    const i = { key: x.key };
+    const same = JSON.stringify(x.value) === JSON.stringify(x.profile_default);
+    return `<tr><td title="${esc(x.key)}">${esc(PLAIN[x.key] || x.key)}</td><td class="r num ${same ? "dim" : "warn"}">${fmtVal(x.value, i)}</td><td class="r num">${fmtVal(x.profile_default, i)}${same ? ' <span class="dim small">相同</span>' : ""}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+const CLEAR_TEXT = "清掉这些写死项，完全按档位走";
+async function clearPins(pw) {
+  return post("/api/settings/clear-profile-pins", { password: pw });
+}
+function askClearPins() {
+  const pf = pageData && pageData.profile;
+  const list = (pf && pf.pins && pf.pins[pf.current]) || [];
+  if (!list.length) return;
+  ask(CLEAR_TEXT, `<p>删掉配置文件里这些行，之后切档位它们跟着档位变。改前自动备份，重启主程序后生效。</p>${pinTable(list, pf.current)}${pwField(data.control)}`, "清掉", false, async () => {
+    const pw = $("#dlg-pw");
+    const res = await clearPins(pw ? pw.value : "");
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    dlgMsg(`<b class="up">已清掉 ${res.changed.length} 项</b>，点「重启生效」后按档位走。`);
+    poll();
+  });
 }
 function profileCard(d) {
   const pf = d.profile;
@@ -806,7 +834,7 @@ function profileCard(d) {
   const pins = pinnedList(pf);
   return `<section class="card"><div class="ch"><h2>持仓档位</h2><span class="r">一键切换整套节奏</span></div>
     <div class="form"><div class="fr"><label>现在：${esc(pf.current)}<span class="hint">${esc(PROFILE_NOTE[pf.current] || "")}；* 只在模拟盘可用</span></label><span class="seg">${btns}</span></div>
-    <div class="fr"><label>已覆盖档位默认的项<span class="hint">配置文件里写了值的档位键；在对应卡片里点“恢复档位默认”</span></label><b>${pins.length ? esc(pins.join("、")) : "没有"}</b></div></div>
+    <div class="fr"><label>已覆盖档位默认的项<span class="hint">配置文件里写了值的档位键，切档位也不跟着变</span></label><b>${pins.length ? esc(pins.join("、")) : "没有"}${pins.length && d.writable ? ` <button class="btn b-sm" ${clickable("clearpins")}>${CLEAR_TEXT}</button>` : ""}</b></div></div>
     <div class="foot">档位只管节奏和门槛，不碰硬上限。切换要面板密码，重启 jiaoyi run 后生效，只影响之后的作战卡和新开仓。</div></section>`;
 }
 function unpin(arg) {
@@ -828,15 +856,22 @@ function switchProfile(p) {
   const d = pageData;
   const pf = d && d.profile;
   if (!pf) return;
-  const pins = pinnedList(pf);
-  const warn = pins.length ? `<div class="note warn">这些项写死在配置文件里，切到 ${esc(p)} 后仍按文件里的值：${esc(pins.join("、"))}。</div>` : "";
+  const list = (pf.pins && pf.pins[p]) || [];
+  const warn = list.length
+    ? `<div class="note warn">下面这些项写死在配置文件里，切到 ${esc(p)} 后仍按文件里的值，不跟档位走：</div>${pinTable(list, p)}
+      <label class="small"><input type="checkbox" id="dlg-clear" checked> ${CLEAR_TEXT}（改前自动备份）</label>`
+    : "";
   ask(`切换持仓档位：${esc(pf.current)} → ${esc(p)}`, `<p>${esc(PROFILE_NOTE[p] || "")}。作战卡有效期、止损周期、管家频率等跟着档位换。</p>${warn}${pwField(data.control)}`, "切换", false, async () => {
     const pw = $("#dlg-pw");
-    await post("/api/settings", { section: "app", changes: { profile: p }, password: pw ? pw.value : "" });
+    const clear = $("#dlg-clear");
+    const pass = pw ? pw.value : "";
+    // 先清写死项（按当前档位校验），再切档位
+    const cleared = clear && clear.checked ? (await clearPins(pass)).changed.length : 0;
+    await post("/api/settings", { section: "app", changes: { profile: p }, password: pass });
     onOk = null;
     $("#layer [data-ok]").remove();
     $("#layer [data-close].btn").textContent = "关闭";
-    dlgMsg(`<b class="up">已切到 ${esc(p)}</b>，重启 <code>jiaoyi run</code> 后生效。`);
+    dlgMsg(`<b class="up">已切到 ${esc(p)}</b>${cleared ? `，清掉 ${cleared} 个写死项` : ""}。点「重启生效」后按新档位运行。`);
     poll();
   });
 }

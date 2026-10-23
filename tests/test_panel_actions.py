@@ -583,3 +583,36 @@ def test_overview_rereads_config_files_when_they_change(tmp_path: Path) -> None:
         (data / "runtime.json").write_text('{"started_at": "2026-10-22T06:00:00+00:00"}')
         ctl = client.get("/api/overview").json()["control"]
         assert ctl["started_at"] == "2026-10-22T06:00:00+00:00"
+
+
+def test_profile_pins_listed_and_cleared(tmp_path: Path) -> None:
+    """切 15m 时示例里写死的 min_p_* 仍按文件值（0.6），档位要的是 0.65：要列出来、能一键清掉。"""
+    paths, data = _setup(tmp_path)
+    actions.update_config(paths, data, "app", {"keeper_interval_s": 30}, PW, NOW)
+    pins = {x.key: x for x in actions.profile_info(paths).pins["15m"]}
+    assert (pins["keeper_interval_s"].value, pins["keeper_interval_s"].profile_default) == (30, 10)
+    assert (pins["min_p_genuine"].value, pins["min_p_genuine"].profile_default) == (0.6, 0.65)
+    assert pins["min_p_genuine"].section == "fast_loop"
+    # 2h 档不改门槛：默认值取程序默认
+    two = {x.key: x for x in actions.profile_info(paths).pins["2h"]}
+    assert two["min_p_genuine"].profile_default == 0.6
+
+    with _client(paths) as client:
+        bad = client.post(
+            "/api/settings/clear-profile-pins", json={"password": "wrong"}, headers=HEADERS
+        )
+        assert bad.status_code == 400
+        res = client.post(
+            "/api/settings/clear-profile-pins", json={"password": PW}, headers=HEADERS
+        )
+        assert res.status_code == 200
+        keys = {c["key"] for c in res.json()["changed"]}
+        assert {"keeper_interval_s", "min_p_genuine", "min_p_take", "max_p_toxic"} <= keys
+        again = client.post(
+            "/api/settings/clear-profile-pins", json={"password": PW}, headers=HEADERS
+        )
+        assert again.status_code == 400  # 没有写死项了
+    assert actions.profile_info(paths).pins["15m"] == []
+    assert list(paths.app.parent.glob("app.toml.bak-*"))
+    actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
+    assert load_app_config(paths.app).keeper_interval_s == 15  # 现在跟档位走
