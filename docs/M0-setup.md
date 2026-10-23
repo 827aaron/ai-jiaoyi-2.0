@@ -155,3 +155,17 @@ scripts/install_launchd.sh --load-run   # 另外装 jiaoyi run（纸面跑通、
 - 看门狗和主进程在同一台机器上：整台 Mac mini 断电、断网时它也发不出去。这种情况要靠机器外面的检查（例如外部定时 ping），还没做。
 - 日志都在 `data/logs/`。脚本只写用户级 LaunchAgents，不需要 sudo；重复运行会先卸载再重装。
 - 备份只有本机一份，不防硬盘损坏；`data_dir` 不是 `data` 时脚本要同步改。
+
+## 11. 日常更新（装好之后只需要这一条）
+
+```bash
+make update
+```
+
+依次做：`git pull --ff-only` → `make install`（补装依赖）→ `make check-config`（配置不合格就停下，不会重启）→ 若 `com.jiaoyi.run` 已在 launchd 里，`launchctl kickstart -k` 重启它；没装就提示用 `scripts/install_launchd.sh --load-run`。
+
+- 首次安装、`hb-setup`、密钥、`install_launchd.sh` 都只做一次，之后不用再配。
+- 重启只要几秒，看门狗的阈值是 2 分钟，不会误报；但会收到一次「主进程停了」/「心跳已恢复」也属正常。
+- 持仓不受重启影响：交易所上的保命止损单一直在，重启后按交易所实际持仓接管（见执行层的重启恢复）。
+- 本地有未提交改动、或 `main` 不能快进时 `git pull --ff-only` 会失败并停下，不会覆盖你的东西。
+- 改了 `config/risk.toml` 要重新 `go-live` 才能实盘（见第 8 节）。
