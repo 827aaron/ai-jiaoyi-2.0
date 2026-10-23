@@ -138,7 +138,7 @@ def test_check_config_shows_tiers_and_overrides(
 
 
 def test_long_hold_tiers(tmp_path: Path) -> None:
-    for name, atr, patrol in (("8h", 60, 2.5), ("12h", 60, 3.0), ("24h", 240, 3.0)):
+    for name, atr, patrol in (("8h", 30, 2.5), ("12h", 60, 3.0), ("24h", 240, 4.0)):
         cfg = load_app_config(_app_toml(tmp_path, f'hold = "{name}"'))
         assert cfg.fast_loop.atr_period_min == atr
         assert cfg.fast_loop.patrol_shock_pct_1m == patrol

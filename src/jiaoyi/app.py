@@ -479,7 +479,9 @@ def build_modules(
     request_event = getattr(cards, "request_event", None)
     if callable(request_event):
         against.subscribe(lambda a: request_event(a.symbol, "predictor_against_card"))
-    features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
+    features = RollingFeatureEngine(
+        atr_period_min=fast.atr_period_min, atr_long_period_min=fast.atr_long_period_min
+    )
     if isinstance(feed, BinanceFuturesFeed):
         feed.set_coverage(features.coverage)
 

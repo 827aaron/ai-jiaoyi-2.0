@@ -243,9 +243,14 @@ def test_max_qty_cap_below_minimum_rejects(now: datetime) -> None:
 def test_stop_moves_beyond_nearby_key_level(now: datetime) -> None:
     # 多单入场 68000，止损 1.5 ATR=120 → 67880；支撑 67860 在外侧 20 处 → 挪到 67860-8
     levels = [{"price": 67860.0, "kind": "support", "note": ""}]
-    v = guard().review(signal(now), jev(), card(now, key_levels=levels), account(now), now)
+    c = card(now, key_levels=levels)
+    v = guard(stop_level_snap=True).review(signal(now), jev(), c, account(now), now)
     assert v.intent is not None
     assert v.intent.stop_loss_pct == pytest.approx((68000 - 67852) / 68000 * 100)
+    # 默认不贴关键位：止损就是 1.5 ATR
+    v = guard().review(signal(now), jev(), c, account(now), now)
+    assert v.intent is not None
+    assert v.intent.stop_loss_pct == pytest.approx(120 / 68000 * 100)
 
 
 def test_daily_halt_latches_and_resets_at_bangkok_midnight() -> None:
@@ -379,13 +384,13 @@ def test_guard_uses_configured_atr_timeframe(now: datetime) -> None:
 def test_stop_atr_floored_by_7d_median(now: datetime) -> None:
     """周末 ATR 只有平时一半：止损 ATR 至少按 7 天中位数 × atr_floor_7d 算。"""
     quiet = features(now, atr=80.0).model_copy(update={"atr_median_7d": 200.0})
-    v = guard().review(signal(now, f=quiet), jev(), card(now), account(now), now)
+    v = guard(atr_floor_7d=0.7).review(signal(now, f=quiet), jev(), card(now), account(now), now)
     assert v.approved and v.intent is not None, v.reasons
     floored = v.intent.stop_loss_pct
     v2 = guard(atr_floor_7d=0.0).review(signal(now, f=quiet), jev(), card(now), account(now), now)
     assert v2.intent is not None and v2.intent.stop_loss_pct < floored  # 关掉就按当前 ATR
     busy = features(now, atr=150.0).model_copy(update={"atr_median_7d": 100.0})
-    v3 = guard().review(signal(now, f=busy), jev(), card(now), account(now), now)
+    v3 = guard(atr_floor_7d=0.7).review(signal(now, f=busy), jev(), card(now), account(now), now)
     v4 = guard(atr_floor_7d=0.0).review(signal(now, f=busy), jev(), card(now), account(now), now)
     assert v3.intent is not None and v4.intent is not None
     assert v3.intent.stop_loss_pct == v4.intent.stop_loss_pct  # 当前 ATR 更大时不动
@@ -458,3 +463,56 @@ def test_funding_against_us_rejects_only_the_paying_side(now: datetime) -> None:
     assert g.review(getting, jev(), card(now), account(now), now).approved
     unknown = signal(now, f=features(now))
     assert g.review(unknown, jev(), card(now), account(now), now).approved  # 没费率不拦
+
+
+# ---------------------------------------------------------------- 止损 ATR = √(短 × 长) × 时段系数
+def test_stop_atr_geometric_mean_and_session_factor() -> None:
+    from jiaoyi.risk.guard import session_factor, stop_atr
+
+    wd = [1.0] * 24
+    wd[21] = 1.5  # 工作日曼谷 21 点
+    we = [0.8] * 24
+    fast = FAST.model_copy(
+        update={
+            "atr_period_min": 5,
+            "atr_long_period_min": 60,
+            "session_factor": True,
+            "session_factor_weekday": wd,
+            "session_factor_weekend": we,
+        }
+    )
+    f = features(datetime(2026, 10, 22, 14, tzinfo=UTC), atr=40.0).model_copy(
+        update={"atr_period_min": 5, "atr_long": 160.0, "atr_long_period_min": 60}
+    )
+    thu_21 = datetime(2026, 10, 22, 14, tzinfo=UTC)  # 周四 UTC 14 点 = 曼谷 21 点
+    detail: dict[str, float | str] = {}
+    assert stop_atr(f, fast, thu_21, detail) == pytest.approx(80.0 * 1.5)  # √(40×160)=80
+    assert detail["atr_short"] == 40.0 and detail["atr_long"] == 160.0
+    assert detail["session_factor"] == 1.5
+    # 周五 UTC 18 点 = 曼谷周六 1 点：按曼谷日期算周末
+    assert session_factor(fast, datetime(2026, 10, 23, 18, tzinfo=UTC)) == 0.8
+    # 周日 UTC 17:59 = 曼谷周一 0:59：工作日
+    assert session_factor(fast, datetime(2026, 10, 25, 17, 59, tzinfo=UTC)) == 1.0
+    # 关掉时段系数 = 1；长周期没攒够 → 先只用短周期
+    off = fast.model_copy(update={"session_factor": False})
+    cold = f.model_copy(update={"atr_long": None})
+    detail = {}
+    assert stop_atr(cold, off, thu_21, detail) == pytest.approx(40.0)
+    assert detail["session_factor"] == 1.0 and detail["atr_long"] == "未就绪，只用短周期"
+    # 没配长周期：只用短周期
+    assert stop_atr(f, FAST, thu_21, {}) == pytest.approx(40.0)
+
+
+def test_guard_sizes_stop_with_combined_atr(now: datetime) -> None:
+    f = features(now, atr=50.0).model_copy(update={"atr_long": 200.0, "atr_long_period_min": 60})
+    v = guard(atr_long_period_min=60).review(signal(now, f=f), jev(), card(now), account(now), now)
+    assert v.approved and v.intent is not None, v.reasons
+    # 作战卡中档 1.5 倍 × √(50×200)=100 → 止损 150
+    assert v.intent.stop_loss_pct == pytest.approx(150 / 68000 * 100)
+
+
+def test_session_factor_table_validated() -> None:
+    with pytest.raises(ValueError):
+        FAST.model_validate({**FAST.model_dump(), "session_factor_weekday": [1.0] * 23})
+    with pytest.raises(ValueError):
+        FAST.model_validate({**FAST.model_dump(), "atr_long_period_min": 15})  # 不比短周期长

@@ -335,7 +335,7 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 `atr_period_min = 240` 启动要回填 3840 根 1 分钟线，币安一次最多 1500 根，`fetch_recent_klines` 现在往前分页拉。预测员按持仓档取预测长度：5 分钟线 `time_limit_s / 300` 根，限 3–96（回看 400 + 96 ≤ 512），所以 12h 以上盖不满持仓期。
 
-**待做（需快环 / 预测员配合）**：① `atr_floor_7d`（止损 ATR 不低于近 7 天中位 × 0.7，防周末窄止损）要常驻 7 天 ATR 历史；② 预测员 8h+ 档改 15m / 1h K 线（`predictor.interval`）；③ `min_stop_atr` 等倍数是按各档 ATR 周期给的，24h 档切 240 后才对得上。
+**待做（需快环 / 预测员配合）**：① ~~`atr_floor_7d`~~ 已做，研究 v3 后默认关（止损改 √(短 × 长) × 时段系数）；② 预测员 8h+ 档改 15m / 1h K 线（`predictor.interval`）；③ `min_stop_atr` 等倍数是按各档 ATR 周期给的，24h 档切 240 后才对得上。
 
 ### 临时会 / 卡龄检查 / 固定时间 / 超额放慢（`[schedule]`）
 

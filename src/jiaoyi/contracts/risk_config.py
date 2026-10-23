@@ -222,12 +222,32 @@ class FastLoopConfig(Contract):
         description="止损用的 ATR 周期（分钟，ATR 取 14 根）。作战卡的止损倍数按这个尺度给，"
         "改了要同时让军师那边按新周期出卡。由 1 分钟 K 线聚合，启动回填 16 根这么长的数据。",
     )
+    atr_long_period_min: Literal[0, 15, 30, 60, 240] = Field(
+        default=0,
+        description="长周期 ATR（分钟，也取 14 根）。写了止损 ATR 就用 √(短周期 ATR × 长周期 ATR)："
+        "短的跟得上眼前波动，长的不被一两根安静 K 线带窄。"
+        "0 = 只用 atr_period_min 那一个（不开平方）。"
+        "必须比 atr_period_min 长；长周期还没攒够时先只用短周期。",
+    )
+    session_factor: bool = Field(
+        default=False,
+        description="止损 ATR 再乘曼谷时段系数（按开仓时的曼谷小时、工作日 / 周末查表）：美股开盘"
+        "前后波动大放宽，周末和亚洲早盘收窄。",
+    )
+    session_factor_weekday: list[float] = Field(
+        default_factory=lambda: [1.0] * 24,
+        description="工作日曼谷 0–23 点各一个系数（24 个）。",
+    )
+    session_factor_weekend: list[float] = Field(
+        default_factory=lambda: [1.0] * 24,
+        description="周六、周日（曼谷日期）0–23 点各一个系数（24 个）。",
+    )
     atr_floor_7d: float = Field(
-        default=0.7,
+        default=0.0,
         ge=0.0,
         le=1.0,
-        description="止损 ATR 下限系数：止损用 max(当前 ATR, 7 天 ATR 中位数 × 这个数)。"
-        "周末波动约减半，周日按窄 ATR 下的止损周一容易被扫；0 = 关掉。",
+        description="止损 ATR 下限系数：短周期 ATR 先取 max(当前, 7 天中位数 × 这个数)。"
+        "0 = 关掉（默认；用了长短周期开平方后下限只修一半，周末还偏宽）。",
     )
     min_stop_atr: float = Field(
         default=0.5,
@@ -235,8 +255,16 @@ class FastLoopConfig(Contract):
         le=5.0,
         description="作战卡止损 ATR 倍数的下限，低于它整张卡这个标的不做（止损太近会被噪音扫掉）。",
     )
+    stop_level_snap: bool = Field(
+        default=False,
+        description="止损挪到作战卡关键位外侧（再加 stop_level_buffer_atr）。默认关：数据里价格碰到"
+        "关键位后 93% 会穿过 0.1 ATR，和随手画的线一样，挪过去只是让止损更宽。",
+    )
     stop_level_buffer_atr: float = Field(
-        default=0.1, ge=0.0, le=1.0, description="止损放在关键位外侧多少个 ATR。"
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="止损放在关键位外侧多少个 ATR（只在 stop_level_snap 开时用）。",
     )
     max_stop_atr: float = Field(
         default=4.0,
@@ -308,6 +336,12 @@ class FastLoopConfig(Contract):
             raise ValueError("size_fraction_s 不能大于 size_fraction_m")
         if self.keeper_close_p_strong < self.keeper_close_p:
             raise ValueError("keeper_close_p_strong 不能小于 keeper_close_p")
+        if 0 < self.atr_long_period_min <= self.atr_period_min:
+            raise ValueError("atr_long_period_min 必须比 atr_period_min 长")
+        for name in ("session_factor_weekday", "session_factor_weekend"):
+            table = getattr(self, name)
+            if len(table) != 24 or not all(0.3 <= x <= 3.0 for x in table):
+                raise ValueError(f"{name} 要 24 个数（曼谷 0–23 点），每个在 0.3–3.0 之间")
         if self.min_stop_atr >= self.max_stop_atr:
             raise ValueError("min_stop_atr 必须小于 max_stop_atr")
         if self.min_tp_r > self.max_tp_r:

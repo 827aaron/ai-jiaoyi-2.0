@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
     ENTRY_CHOICES,
@@ -49,6 +50,45 @@ from jiaoyi.core.recorder import RoleRecorder, local_day
 logger = logging.getLogger(__name__)
 
 _TIER_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
+
+
+BANGKOK = ZoneInfo("Asia/Bangkok")
+
+
+def session_factor(fast: FastLoopConfig, now: datetime) -> float:
+    """入场时刻的曼谷时段系数：周一到周五查 ``weekday``，周六周日查 ``weekend``，取当前小时。"""
+    if not fast.session_factor:
+        return 1.0
+    local = now.astimezone(BANGKOK)
+    table = fast.session_factor_weekend if local.weekday() >= 5 else fast.session_factor_weekday
+    return table[local.hour]
+
+
+def stop_atr(
+    f: FeatureSnapshot, fast: FastLoopConfig, now: datetime, detail: dict[str, float | str]
+) -> float:
+    """止损用的 ATR = √(短周期 ATR × 长周期 ATR) × 曼谷时段系数，只在入场时算一次。
+
+    短周期先按 7 天中位数 × ``atr_floor_7d`` 兜底（默认 0 = 不兜）；没配长周期、或长周期还没
+    攒够 / 周期对不上时只用短周期。算的过程记进 ``detail``。
+    """
+    short = f.atr
+    floor = fast.atr_floor_7d * (f.atr_median_7d or 0.0)
+    if floor > short:
+        detail.update(atr_now=round(short, 8), atr_floor_7d=round(floor, 8))
+        short = floor
+    atr = short
+    detail["atr_short"] = round(short, 8)
+    if fast.atr_long_period_min:
+        long_ = f.atr_long
+        if long_ and long_ > 0 and f.atr_long_period_min == fast.atr_long_period_min:
+            atr = math.sqrt(short * long_)
+            detail["atr_long"] = round(long_, 8)
+        else:
+            detail["atr_long"] = "未就绪，只用短周期"
+    k = session_factor(fast, now)
+    detail["session_factor"] = k
+    return atr * k
 
 
 @dataclass(frozen=True)
@@ -361,15 +401,10 @@ class RiskGuardImpl:
         risk, fast = self._risk, self._fast
         entry = f.last_price
         side = signal.side_hint
-        atr = f.atr
+        atr = stop_atr(f, fast, now, detail)
         if atr <= 0:
             reasons.append("ATR 为 0，算不出止损")
             return None
-        # 止损 ATR 下限：周末波动约减半，按 7 天中位数兜底，免得周日开的窄止损周一被扫
-        floor = fast.atr_floor_7d * (f.atr_median_7d or 0.0)
-        if floor > atr:
-            detail.update(atr_now=round(atr, 8), atr_floor_7d=round(floor, 8))
-            atr = floor
 
         # ---- 止损：档位 → 作战卡 ATR 范围 → 放到关键位外侧
         stop_ans = jev.answer(EntryQuestion.STOP_WIDTH.value)
@@ -382,7 +417,8 @@ class RiskGuardImpl:
             reasons.append("作战卡止损 ATR 倍数为 0")
             return None
         dist = mult * atr
-        dist = self._beyond_level(cs, side, entry, dist, hi * atr, atr)
+        if fast.stop_level_snap:
+            dist = self._beyond_level(cs, side, entry, dist, hi * atr, atr)
         stop_pct = dist / entry * 100.0
         tp_pct = stop_pct * cs.take_profit_r.min
         detail.update(
