@@ -6,6 +6,9 @@
 #   run           `jiaoyi run` in the mode of config/app.toml; staged in data/launchd/ and only
 #                 installed into LaunchAgents (so it also starts at login) with --load-run
 #   backup        daily tar of the decision log and module status
+#   watchdog      every minute: `jiaoyi watchdog` sends a Telegram alert when the main loop's
+#                 heartbeat (data/module_status.json) is older than 2 minutes; silent until the
+#                 main loop has started once (data/runtime.json)
 #
 # Usage: scripts/install_launchd.sh [--load-run]
 set -euo pipefail
@@ -19,7 +22,7 @@ PATH_ENV="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr
 mkdir -p "$AGENTS" "$LOGS" "$ROOT/data/launchd"
 
 plist() {
-  local label="$1" workdir="$2" keepalive="$3" calendar="$4"
+  local label="$1" workdir="$2" keepalive="$3" calendar="$4" interval="${INTERVAL:-}"
   shift 4
   local file="${PLIST_DIR:-$AGENTS}/$label.plist"
   {
@@ -40,6 +43,9 @@ plist() {
     if [ -n "$calendar" ]; then
       echo "  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>$calendar</integer><key>Minute</key><integer>10</integer></dict>"
     fi
+    if [ -n "$interval" ]; then
+      echo "  <key>StartInterval</key><integer>$interval</integer>"
+    fi
     echo '</dict></plist>'
   } >"$file"
   plutil -lint "$file" >/dev/null
@@ -58,9 +64,11 @@ brew services start colima
 plist com.jiaoyi.condor "$ROOT/vendor/condor" yes "" /bin/bash -lc "exec make run-fg"
 PLIST_DIR="$ROOT/data/launchd" plist com.jiaoyi.run "$ROOT" yes "" "$ROOT/.venv/bin/jiaoyi" run
 plist com.jiaoyi.backup "$ROOT" no 4 /bin/bash "$ROOT/scripts/backup_data.sh"
+INTERVAL=60 plist com.jiaoyi.watchdog "$ROOT" no "" "$ROOT/.venv/bin/jiaoyi" watchdog
 
 load com.jiaoyi.condor
 load com.jiaoyi.backup
+load com.jiaoyi.watchdog
 if [ "${1:-}" = "--load-run" ]; then
   cp "$ROOT/data/launchd/com.jiaoyi.run.plist" "$AGENTS/"
   load com.jiaoyi.run
