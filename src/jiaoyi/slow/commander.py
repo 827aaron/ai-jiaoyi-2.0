@@ -156,6 +156,7 @@ class BattleCardCommander:
         daily_cost_limit_usd: float | None = None,
         failed_meeting_cost_usd: float = 0.05,
         budget_path: Path | None = None,
+        card_path: Path | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
@@ -169,6 +170,7 @@ class BattleCardCommander:
         self._cost_limit = daily_cost_limit_usd
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
+        self._card_path = card_path
         self._fails = 0
         self._retry_at: datetime | None = None
         self._notices: list[str] = []
@@ -194,6 +196,7 @@ class BattleCardCommander:
         self._stats_day = ""
         self._pick_cost = 0.0
         self._restore_budget()
+        self._restore_card()
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
@@ -374,44 +377,54 @@ class BattleCardCommander:
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
-        results = await asyncio.gather(
-            *(self._analyze_one(e, picked.regime) for e in to_meet), return_exceptions=True
-        )
-        symbols: list[CardSymbol] = list(reused.values())
-        cost = picked.cost_usd
-        failed: list[str] = []
-        for e, res in zip(to_meet, results, strict=True):
-            if isinstance(res, Analysis):
-                symbols.append(clamp_to_risk(res.card_symbol, self._risk, self._stop))
-                cost += res.cost_usd
-                self._last_meeting[e.symbol] = now
-            else:
-                failed.append(f"{e.symbol}: {res!r}")
-        if not symbols:
-            raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
-        card = BattleCard(
-            card_id=self._card_id(now),
-            version=prev.version + 1 if prev is not None and same_day else 1,
-            created_at=now,
-            expires_at=now + self._ttl,
-            source="tradingagents",
-            regime=picked.regime,
-            symbols=symbols,
-            refresh_reason=reason,
-            llm_cost_usd=round(cost, 6),
-        )
-        if self._journal is not None:
-            # 只记这次真开了会的标的；沿用旧卡的不重复记
-            self._journal.record(
-                card,
-                [
-                    e.symbol
-                    for e, r in zip(to_meet, results, strict=True)
-                    if isinstance(r, Analysis)
-                ],
+        base_version = prev.version if prev is not None and same_day else 0
+        symbols: dict[str, CardSymbol] = dict(reused)
+        cost = picked.cost_usd
+        published = 0
+
+        def make_card() -> BattleCard:
+            return BattleCard(
+                card_id=self._card_id(now),
+                version=base_version + max(published, 1),
+                created_at=now,
+                expires_at=now + self._ttl,
+                source="tradingagents",
+                regime=picked.regime,
+                symbols=list(symbols.values()),
+                refresh_reason=reason,
+                llm_cost_usd=round(cost, 6),
             )
+
+        async def meet(e: SymbolPoolEntry) -> Analysis:
+            nonlocal cost, published
+            res = await self._analyze_one(e, picked.regime)
+            # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
+            symbols[e.symbol] = clamp_to_risk(res.card_symbol, self._risk, self._stop)
+            cost += res.cost_usd
+            published += 1
+            self._last_meeting[e.symbol] = now
+            card = make_card()
+            self._card = card
+            self._save_card()
+            if self._journal is not None:
+                self._journal.record(card, [e.symbol])
+            return res
+
+        results = await asyncio.gather(*(meet(e) for e in to_meet), return_exceptions=True)
+        failed = [
+            f"{e.symbol}: {r!r}"
+            for e, r in zip(to_meet, results, strict=True)
+            if not isinstance(r, Analysis)
+        ]
+        if not symbols:
+            raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
+        card = make_card()
+        self._card = card
+        self._save_card()
+        if published == 0 and self._journal is not None:
+            self._journal.record(card, [])
         return card
 
     def _card_id(self, now: datetime) -> str:
@@ -526,6 +539,44 @@ class BattleCardCommander:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             # 落盘失败不影响出卡；内存里的统计照常生效
+
+    def _restore_card(self) -> None:
+        """重启后捡回还没过期的作战卡（含各币上次开会时间），不用等下一轮 2 小时的会。"""
+        if self._card_path is None:
+            return
+        try:
+            data = json.loads(self._card_path.read_text(encoding="utf-8"))
+            card = BattleCard.model_validate(data["card"])
+            meets = {str(k): datetime.fromisoformat(v) for k, v in data["last_meeting"].items()}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return
+        now = self._clock()
+        if not card.is_valid(now):
+            return
+        self._card, self._last_refresh = card, card.created_at
+        self._seen = {s.symbol for s in card.symbols}
+        self._last_meeting = meets
+
+    def _save_card(self) -> None:
+        if self._card_path is None or self._card is None:
+            return
+        tmp = self._card_path.with_suffix(".tmp")
+        try:
+            self._card_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "card": self._card.model_dump(mode="json"),
+                        "last_meeting": {k: v.isoformat() for k, v in self._last_meeting.items()},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._card_path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            # 落盘失败不影响出卡；内存里的卡照常生效
 
     def _write(self, **kw: Any) -> None:
         self._log.write(
