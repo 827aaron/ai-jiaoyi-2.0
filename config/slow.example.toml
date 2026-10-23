@@ -17,6 +17,7 @@ max_tokens  = 8192
 max_retries = 6
 
 [schedule]
+# max_cards_per_round = 10         # 每轮最多出几张作战卡（几个标的开会）；不写 = 用 app.toml 的 card_pick_max
 concurrency = 4                    # 同时开几个标的的会议 1–8
 card_ttl_hours = 2.0               # 作战卡有效期 1–4 小时
 symbol_min_interval_hours = 2.0    # 同一个币两次会议的最小间隔 0.5–12 小时

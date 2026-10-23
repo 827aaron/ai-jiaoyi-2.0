@@ -67,6 +67,13 @@ class MeetingConfig(_Strict):
 
 
 class ScheduleConfig(_Strict):
+    max_cards_per_round: int | None = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description="每轮最多出几张作战卡（几个标的开会）。不写 = 用 app.toml 的 card_pick_max；"
+        "写了取两者较小值，不会超过 card_pick_max。",
+    )
     concurrency: int = Field(default=4, ge=1, le=8, description="同时开几个标的的会议。")
     card_ttl_hours: float = Field(default=2.0, ge=1.0, le=4.0, description="作战卡有效期。")
     symbol_min_interval_hours: float = Field(
@@ -123,6 +130,11 @@ class SlowConfig(_Strict):
             pick_tier=m.pick_tier,
             convert_tier=m.convert_tier,
         )
+
+    def effective_pick_max(self, app_pick_max: int) -> int:
+        """每轮最多出几张卡：``max_cards_per_round`` 与 ``card_pick_max`` 取小。"""
+        n = self.schedule.max_cards_per_round
+        return app_pick_max if n is None else min(n, app_pick_max)
 
     def commander_kwargs(self) -> dict[str, Any]:
         """传给 ``BattleCardCommander(...)`` 的节奏参数。"""

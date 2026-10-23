@@ -468,7 +468,11 @@ class BattleCardCommander:
             cost_usd=self._pick_cost,  # 只记总盘会这一份；各标的的花费在各自的记录里，避免重复统计
         )
         self._bump(ok=True, cost=self._pick_cost, ms=(time.monotonic() - started) * 1000)
-        self._heartbeat(Health.OK, f"当前卡 v{card.version}，{tradable} 个可做", None)
+        self._heartbeat(
+            Health.OK,
+            f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张）",
+            None,
+        )
 
     def _record_error(self, reason: str, exc: Exception, started: float) -> None:
         self._write(

@@ -232,7 +232,7 @@ def _build_cards(
         engine,
         risk_cfg,
         decision_log,
-        pick_max=app_cfg.card_pick_max,
+        pick_max=cfg.effective_pick_max(app_cfg.card_pick_max),
         clock=clock,
         brief=brief,
         # 每次真开会的标的追加到 data/card_review/cards.jsonl，供复盘脚本打分（只读，不调参）
