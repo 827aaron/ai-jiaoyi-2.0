@@ -73,6 +73,15 @@ class _NewsAware(Protocol):
 
 
 @runtime_checkable
+class _RefreshGate(Protocol):
+    """军师团开会的总闸：失败退避 / 日花费上限，以及要推送的提示。"""
+
+    def may_refresh(self, now: datetime) -> bool: ...
+
+    def take_notice(self) -> str | None: ...
+
+
+@runtime_checkable
 class _RefreshReason(Protocol):
     def refresh_reason(
         self, now: datetime, pool: SymbolPool, prices: Mapping[str, float]
@@ -329,6 +338,11 @@ class Runner:
             and now - self._last_card_at >= interval
         ):
             reason = "scheduled"
+        if isinstance(cards, _RefreshGate):
+            while (notice := cards.take_notice()) is not None:
+                await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice)
+            if not cards.may_refresh(now):
+                return  # 失败退避中或当日花费超限；定时兜底也不能绕过
         if reason is None or is_stub(cards):
             return
         self._refreshing = True

@@ -107,3 +107,9 @@ python -m jiaoyi.slow.review --json          # 逐条明细
 | openrouter | `deepseek/deepseek-v4.1-flash` | `deepseek/deepseek-v4.1-flash` |
 
 Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模型；想换回 pro 在 `[meeting] deep_model` 写 `deepseek-v4-pro`（OpenRouter 为 `deepseek/deepseek-v4-pro`）。OpenRouter 的 id 核对于 2026-10-23（`/api/v1/models`），`[meeting] quick_model / deep_model` 写了就覆盖默认。结构化输出的重试逻辑、成本统计（按模型名里有没有 `pro` 分档）不变；OpenRouter 的实际单价随上游供应商浮动，`[prices]` 仍是占位，M2 真机后按账单核对。没有对应 key 时军师团退回桩（不出卡、不开新仓）。
+
+## 失败退避与日花费上限
+
+- **失败退避**：开会整轮失败（例如 DeepSeek 结构化输出持续出错）后，依次等 5 → 10 → 30 分钟再试，之后保持 30 分钟，成功一次清零（`[budget] fail_backoff_minutes`）。闸门在 `BattleCardCommander.may_refresh`，主循环的所有触发原因（含定时兜底）都要过它，不会每分钟重开最多 20 个币的会。
+- **日花费上限**：`[budget] daily_cost_limit_usd`（默认 10 美元，按 `day_reset_tz` 的交易日即曼谷 0 点清零）。超了当天不再开会，沿用现有作战卡（到期后不开新仓），并通过 Telegram 推一条提醒（每天一次）。
+- 统计口径：只算成功记录下来的花费（总盘会 + 出了结论的标的）。整轮失败的会议没有可记的 token 用量，所以不进统计，靠上面的退避把这部分兜住。
