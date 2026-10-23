@@ -19,7 +19,7 @@ risk_rounds   = 1        # 风控讨论轮数 0–3
 # （两档默认都是 DeepSeek 4.1：deepseek 直连 deepseek-flash；openrouter deepseek/deepseek-v4.1-flash）
 pick_tier    = "quick"   # 总盘会（挑币）用 quick（flash，便宜）还是 deep（pro）
 convert_tier = "quick"   # 把结论整理成作战指令那一步
-max_tokens  = 4096
+max_tokens  = 8192                        # 思考模型的思考也算在内；4096 实测会让辩论回答变空，别调低
 max_retries = 6
 
 [schedule]

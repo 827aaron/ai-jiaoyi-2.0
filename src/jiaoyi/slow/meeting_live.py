@@ -66,6 +66,8 @@ class MeetingLive:
             "result": None,
             "error": None,
             "cost_usd": 0.0,
+            "llm_calls": [],
+            "truncated": 0,
         }
         self._flush()
 
@@ -112,6 +114,18 @@ class MeetingLive:
         if len(value) > done:
             self._seen[key] = len(value)
             self._add(stage, who, value[done:])
+
+    def note_call(self, finish_reason: str | None, output_tokens: int) -> None:
+        """记一次模型调用怎么结束的：``length`` = 被 max_tokens 截断，实况里一眼能看出。"""
+        if self._closed:
+            return
+        calls = self._doc["llm_calls"]
+        calls.append({"finish_reason": finish_reason, "output_tokens": output_tokens})
+        del calls[:-80]  # 一场会不会超过几十次调用；防万一只留最近的
+        if finish_reason == "length":
+            self._doc["truncated"] += 1
+        self._doc["updated_at"] = self._now().isoformat()
+        self._flush()
 
     def converting(self) -> None:
         """军师团讨论完毕，开始整理成作战指令。"""

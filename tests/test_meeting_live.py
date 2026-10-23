@@ -112,3 +112,15 @@ def test_write_failure_never_raises(tmp_path: Path) -> None:
     live = MeetingLive(blocker, "SOLUSDT", now=Clock())  # 建目录失败只记日志
     live.observe({"market_report": "行情"})
     live.finish("flat", "r", "r", 0.0)
+
+
+def test_note_call_records_finish_reason_and_truncation(tmp_path: Path) -> None:
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    live.note_call("stop", 1500)
+    live.note_call("length", 4096)
+    doc = read(tmp_path)
+    assert doc["truncated"] == 1
+    assert doc["llm_calls"] == [
+        {"finish_reason": "stop", "output_tokens": 1500},
+        {"finish_reason": "length", "output_tokens": 4096},
+    ]

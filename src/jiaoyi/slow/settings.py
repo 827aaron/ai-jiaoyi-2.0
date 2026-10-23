@@ -78,10 +78,11 @@ class MeetingConfig(_Strict):
         default="quick", description="把会议结论整理成作战指令那一步用哪档模型。"
     )
     max_tokens: int = Field(
-        default=4096,
+        default=8192,
         ge=1024,
         le=32768,
-        description="每次回答的长度上限；出作战指令、挑币两步（输出 JSON）另按 8192 起，不被截。",
+        description="每次回答的长度上限，思考模型的思考也算在里面：低于 8192 实测会让多空辩论"
+        "被挤成半句或空壳。出作战指令、挑币两步另按 8192 起。",
     )
     max_retries: int = Field(default=6, ge=0, le=10)
 
