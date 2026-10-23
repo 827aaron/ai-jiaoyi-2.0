@@ -444,8 +444,8 @@ def _raw(path: Path) -> dict[str, Any]:
         return {}
 
 
-Value = bool | int | float | str | None
-"""``None`` = 删掉这一行，回到默认值（只给“不写就用默认”的项）。"""
+Value = bool | int | float | str | list[str] | None
+"""``None`` = 删掉这一行，回到默认值（只给“不写就用默认”的项）；``list`` 只给多选项。"""
 
 
 @dataclass(frozen=True)
@@ -458,6 +458,10 @@ class FieldSpec:
     """留空 = 不写这一项（契约里本来就允许空）。"""
     profiled: bool = False
     """档位给默认值的键：留空 = 删掉这一行，回到档位默认。"""
+    multi: bool = False
+    """多选（``tuple[Literal, ...]``）：值是 ``choices`` 的子集，可以一个都不选。"""
+    pattern: str | None = None
+    """自由填写的字样（例如 ``08:00``）要符合的格式；契约里写了 pattern 才放开在网页上改。"""
 
 
 def update_config(
@@ -599,6 +603,9 @@ def scalar_fields(model: type[BaseModel], skip: set[str]) -> dict[str, FieldSpec
         if name in skip:
             continue
         spec = field_spec(field.annotation)
+        pattern = next((m.pattern for m in field.metadata if getattr(m, "pattern", None)), None)
+        if spec is None and pattern and field.annotation in (str, str | None):
+            spec = FieldSpec(str, nullable=field.annotation is not str, pattern=pattern)
         if spec is not None:
             out[name] = spec
     return out
@@ -608,6 +615,11 @@ def field_spec(annotation: Any) -> FieldSpec | None:
     if annotation in (bool, int, float):
         return FieldSpec(annotation)
     args = get_args(annotation)
+    if get_origin(annotation) is tuple and len(args) == 2 and args[1] is Ellipsis:
+        inner = get_args(args[0])
+        if get_origin(args[0]) is Literal and inner and all(isinstance(a, str) for a in inner):
+            return FieldSpec(str, choices=inner, multi=True)
+        return None
     if get_origin(annotation) is Literal and args:
         kinds = {type(a) for a in args}
         if len(kinds) == 1 and kinds <= {int, str}:
@@ -625,6 +637,24 @@ def _coerce(key: str, raw: Any, spec: FieldSpec) -> Value:
         if spec.nullable or spec.profiled:
             return None
         raise ActionError(f"{key} 不能空着")
+    if spec.multi:
+        if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+            raise ActionError(f"{key} 要从选项里勾")
+        bad = [x for x in raw if x not in spec.choices]
+        if bad:
+            raise ActionError(f"{key} 没有这些选项：{' / '.join(bad)}")
+        return [str(c) for c in spec.choices if c in raw]  # 按选项顺序、去重
+    if spec.kind is str and not spec.choices:
+        if not isinstance(raw, str):
+            raise ActionError(f"{key} 要填文字")
+        text = raw.strip()
+        if not text:
+            if spec.nullable or spec.profiled:
+                return None
+            raise ActionError(f"{key} 不能空着")
+        if spec.pattern and not re.fullmatch(spec.pattern, text):
+            raise ActionError(f"{key} 格式不对：{text}")
+        return text
     if spec.choices:
         for c in spec.choices:  # 1 和 True 不算相等
             if raw == c and isinstance(raw, bool) == isinstance(c, bool):
@@ -695,8 +725,8 @@ _KEY = re.compile(r"^\s*[A-Za-z0-9_]+\s*=")
 def _fmt(value: Value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)  # 只会是 Literal 里的简单字样
+    if isinstance(value, str | list):  # Literal 字样 / 多选列表；JSON 写法就是合法的 TOML
+        return json.dumps(value, ensure_ascii=False)
     return repr(value)
 
 
