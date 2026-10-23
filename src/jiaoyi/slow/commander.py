@@ -149,7 +149,7 @@ class BattleCardCommander:
         concurrency: int = 4,
         ttl: timedelta = timedelta(hours=2),
         symbol_min_interval: timedelta = timedelta(hours=2),
-        symbol_timeout_s: float = 600.0,
+        symbol_timeout_s: float = 900.0,
         min_refresh_gap: timedelta = timedelta(minutes=5),
         expiry_lead: timedelta = timedelta(minutes=10),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -571,6 +571,12 @@ class BattleCardCommander:
     def _card_id(self, now: datetime) -> str:
         return f"card-{now:%Y%m%d}"
 
+    def _why(self, exc: BaseException) -> str:
+        """异常原因文字；超时的 TimeoutError 没有文字，补上类型名和秒数。"""
+        if isinstance(exc, TimeoutError) and not str(exc):
+            return f"超过 {self._symbol_timeout_s:.0f} 秒未完成（TimeoutError）"
+        return str(exc) or type(exc).__name__
+
     async def _analyze_one(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
         async with self._sem:
             started = time.monotonic()
@@ -585,7 +591,7 @@ class BattleCardCommander:
                 self._log_symbol(
                     entry,
                     Outcome.ERROR,
-                    f"{entry.symbol} 开会失败：{exc}",
+                    f"{entry.symbol} 开会失败：{self._why(exc)}",
                     started,
                     self._failure_cost(exc),
                 )
