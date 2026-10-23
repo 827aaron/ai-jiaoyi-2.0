@@ -63,6 +63,10 @@ class Kpis(BaseModel):
     max_exposure_x: float
     as_of: datetime | None = None
     """总资产 / 今日盈亏这份数是几点拉到的（hummingbot）；用账本兜底时 None。"""
+    day_closed_usdt: float | None = None
+    """今天平掉的单的净盈亏（已扣手续费，同历史页「交易净盈亏」）。"""
+    day_floating_usdt: float | None = None
+    """还没平的单现在的浮盈浮亏（hummingbot）；拿不到 None。今日盈亏减掉这两项就是「其它」。"""
 
 
 class LevelView(BaseModel):
@@ -343,6 +347,13 @@ def compute_kpis(
         exposure_x=exposure,
         max_exposure_x=risk.max_total_exposure_x,
         as_of=hb.fetched_at if source == "hummingbot" else None,
+        day_closed_usdt=sum(
+            p.realized_pnl_usdt or 0.0
+            for p in ledger.positions
+            if p.closed_at is not None
+            and local_day(p.closed_at, risk.day_reset_tz).isoformat() == today
+        ),
+        day_floating_usdt=hb.unrealized_usdt if hb.ok else None,
     )
 
 
