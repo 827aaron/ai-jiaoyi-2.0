@@ -41,6 +41,8 @@ from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.pool_overrides import (
+    POOL_OVERRIDES_FILE,
+    POOL_OVERRIDES_PAUSE,
     PoolAction,
     PoolOverrides,
     backup_corrupt_pool_overrides,
@@ -558,6 +560,7 @@ class App:
         if self.started:
             return
         now = self.clock()
+        auto_resumed = self._pause_for_pool_overrides()
         await self._run_startup_checks()
         try:
             report = await self.m.reconciler.reconcile(now)
@@ -590,9 +593,13 @@ class App:
         if self.pool_overrides_corrupt:
             await self._alert(
                 AlertLevel.CRITICAL,
-                "选币覆盖项文件读不出",
-                "data/pool_overrides.json 损坏（已备份成 .corrupt-时间戳）：固定 / 拉黑 / 手动加入"
-                "这次没生效，选币页的操作也会被拒；修好或删掉后重启",
+                "选币覆盖项文件读不出，暂停开新仓",
+                "data/pool_overrides.json 损坏（已备份成 .corrupt-时间戳）：拉黑清单这次没生效，"
+                "所以不开新仓（已有持仓照常看管），选币页的操作也会被拒；修好或删掉后重启主程序恢复",
+            )
+        elif auto_resumed:
+            await self._alert(
+                AlertLevel.INFO, "选币覆盖项已修好，恢复开新仓", "上次因文件损坏自动暂停"
             )
         if self.app_cfg.mode == RunMode.LIVE:
             # 实盘启动一定要通知（设计文档 §十）；能走到这里说明上线确认已经通过
@@ -642,18 +649,38 @@ class App:
         """把封禁名单写到 data_dir，给 ``jiaoyi status`` 和面板读（它们不在主循环进程里）。"""
         self._write_atomic(BLOCKED_FILE, json.dumps(self.blocked_symbols(), ensure_ascii=False))
 
-    def set_paused(self, paused: bool, *, reason: str = "", command_id: str = "") -> None:
+    def _pause_for_pool_overrides(self) -> bool:
+        """覆盖项文件读不出 → 拉黑清单没生效，暂停开新仓（落盘，面板总览显示原因）。
+
+        只有这条自动暂停会在文件修好后的下一次启动自动解除，返回是否解除了；
+        人工暂停照旧要在面板恢复。已经人工暂停着就不改它的原因。
+        """
+        source = (self.paused or {}).get("source")
+        if self.pool_overrides_corrupt:
+            if self.paused is None:
+                self.set_paused(
+                    True,
+                    reason=f"选币覆盖项 data/{POOL_OVERRIDES_FILE} 读不出（拉黑清单没生效）；"
+                    "修好或删掉后重启主程序自动恢复",
+                    source=POOL_OVERRIDES_PAUSE,
+                )
+            return False
+        if source == POOL_OVERRIDES_PAUSE:
+            self.set_paused(False)
+            return True
+        return False
+
+    def set_paused(
+        self, paused: bool, *, reason: str = "", command_id: str = "", source: str = ""
+    ) -> None:
         """人工暂停 / 恢复开新仓。只拦新开仓，已有持仓照常由管家、巡逻兵和止损看着。"""
         now = self.clock().isoformat()
-        self.paused = (
-            {"paused": True, "since": now, "reason": reason, "command_id": command_id}
-            if paused
-            else None
-        )
+        info = {"since": now, "reason": reason, "command_id": command_id}
+        if source:
+            info["source"] = source
+        self.paused = {"paused": True, **info} if paused else None
         try:
-            write_paused(
-                self.app_cfg.data_dir, paused, since=now, reason=reason, command_id=command_id
-            )
+            write_paused(self.app_cfg.data_dir, paused, **info)
         except OSError:
             log.exception("写暂停状态失败")
 
@@ -677,7 +704,10 @@ class App:
     def reload_pool_overrides(self) -> bool:
         """选币前热读文件（手改也生效）。读不出沿用当前的，返回是否有变化。"""
         loaded = read_pool_overrides(self.app_cfg.data_dir)
-        if loaded is None or loaded == self.pool_overrides:
+        if loaded is None:
+            return False
+        self.pool_overrides_corrupt = False  # 运行中修好了：面板可以恢复开新仓
+        if loaded == self.pool_overrides:
             return False
         self.pool_overrides = loaded
         self._push_overrides()

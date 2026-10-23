@@ -12,6 +12,7 @@ from jiaoyi.contracts import SymbolPool
 from jiaoyi.core.commands import write_command
 from jiaoyi.core.pool_overrides import (
     POOL_OVERRIDES_FILE,
+    POOL_OVERRIDES_PAUSE,
     PoolOverrides,
     read_pool_overrides,
     write_pool_overrides,
@@ -134,3 +135,48 @@ async def test_corrupt_file_is_not_overwritten_by_a_panel_action(
     res = _result(tmp_path, "cmd-pin_symbol-0001")
     assert res["status"] == "rejected" and "读不出" in res["detail"]
     assert (tmp_path / POOL_OVERRIDES_FILE).read_text(encoding="utf-8") == "坏了"
+
+
+async def test_corrupt_file_pauses_new_entries_until_fixed(tmp_path: Path, now: datetime) -> None:
+    """拉黑清单没生效 → 失败即关闭：暂停开新仓、面板不能恢复；修好后重启自动恢复。"""
+    from jiaoyi.core.commands import read_paused
+    from tests.test_commands import _app
+
+    (tmp_path / POOL_OVERRIDES_FILE).write_text("坏了", encoding="utf-8")
+    app = _app(tmp_path, now)
+    await app.start()
+    paused = read_paused(tmp_path)
+    assert paused is not None and paused["source"] == POOL_OVERRIDES_PAUSE
+    assert "读不出" in paused["reason"]
+    await app.stop()
+
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    write_command(tmp_path, _cmd(now, "resume"))
+    await r.command_tick()
+    assert _result(tmp_path, "cmd-resume-0001")["status"] == "rejected"
+    assert read_paused(tmp_path) is not None
+
+    (tmp_path / POOL_OVERRIDES_FILE).unlink()  # 修好（删掉也算）
+    app = _app(tmp_path, now)
+    await app.start()
+    assert app.paused is None and read_paused(tmp_path) is None
+    await app.stop()
+
+
+async def test_corrupt_file_keeps_a_manual_pause_as_is(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.core.commands import read_paused
+    from tests.test_commands import _app
+
+    app = _app(tmp_path, now)
+    app.set_paused(True, reason="我手动停的")
+    (tmp_path / POOL_OVERRIDES_FILE).write_text("坏了", encoding="utf-8")
+    app = _app(tmp_path, now)
+    await app.start()
+    assert app.paused is not None and app.paused["reason"] == "我手动停的"
+    await app.stop()
+    (tmp_path / POOL_OVERRIDES_FILE).unlink()
+    app = _app(tmp_path, now)
+    await app.start()  # 人工暂停不会因为文件修好就自动解除
+    paused = read_paused(tmp_path)
+    assert paused is not None and paused["reason"] == "我手动停的"
+    await app.stop()
