@@ -179,8 +179,8 @@ async def test_close_cancels_background_inference() -> None:
     await f.wait_idle()
 
 
-def test_auto_device_skips_mps(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mac mini 上 MPS 每次报 dropout 不支持，auto 直接用 CPU；显式写 mps 仍然尊重。"""
+def test_auto_device_prefers_mps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """切 eval 后 MPS 可用且更快：auto 优先 MPS，没有 MPS 用 CPU；显式写的设备照用。"""
     import types
 
     from jiaoyi.predictor import kronos as kmod
@@ -190,8 +190,35 @@ def test_auto_device_skips_mps(monkeypatch: pytest.MonkeyPatch) -> None:
         backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
     )
     monkeypatch.setattr(kmod.importlib, "import_module", lambda name: fake)
+    assert kmod.OfficialKronosBackend(KronosSettings())._pick_device() == "mps"
+    assert kmod.OfficialKronosBackend(KronosSettings(device="cpu"))._pick_device() == "cpu"
+    fake.backends.mps.is_available = lambda: False
     assert kmod.OfficialKronosBackend(KronosSettings())._pick_device() == "cpu"
-    assert kmod.OfficialKronosBackend(KronosSettings(device="mps"))._pick_device() == "mps"
+
+
+def test_mps_failure_falls_back_to_cpu_and_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiaoyi.predictor import kronos as kmod
+
+    be = kmod.OfficialKronosBackend(KronosSettings())
+    loads: list[str] = []
+    runs: list[str] = []
+
+    def load(device: str) -> None:
+        loads.append(device)
+        be._predictor, be._device = object(), device
+
+    def run(bars: list[Kline], pred_len: int, paths: int) -> list[Path_]:
+        runs.append(be._device)
+        if be._device == "mps":
+            raise RuntimeError("MPS 不支持某个算子")
+        return [[(1.0, 1.0, 1.0)]]
+
+    monkeypatch.setattr(be, "_pick_device", lambda: "mps")
+    monkeypatch.setattr(be, "_load", load)
+    monkeypatch.setattr(be, "_run", run)
+    assert be.predict([], 1, 1) == [[(1.0, 1.0, 1.0)]]
+    be.predict([], 1, 1)
+    assert loads == ["mps", "cpu"] and runs == ["mps", "cpu", "cpu"]
 
 
 def test_official_backend_uses_eval_mode_and_open_time_grid(

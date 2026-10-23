@@ -69,8 +69,9 @@
 ## 预测员（Kronos）实测
 
 - Mac mini M4（2026-10-23）：真推理可用，**约 3.1 秒 / 币**（4 条路径 × 预测 12 根 5 分钟 K 线），CPU。
-- MPS 每次都报 `scaled_dot_product_attention for MPS does not support dropout`，所以 `KronosSettings.device="auto"` 不再选 MPS，直接用 CPU；显式写 `mps` / `cuda` 出错也会退回 CPU 并一直用 CPU。
+- 早先 MPS 每次报 `scaled_dot_product_attention for MPS does not support dropout`，原因是没切 `eval()`（见下条）。
 - 2026-10-23 核对官方用法后修了两处：加载后没切 `eval()`（推理时 dropout 开着，注意力变成因果；MPS 报错的真正原因），时间戳改用开盘时间（落在 5 分钟格点）。修完要在 Mac mini 上重测各尺寸耗时，并再试一次 `device = "mps"`；预测区间分布会变，之前的观察不能直接沿用。
+- 修好后 Mac mini M4 重测 small：MPS 0.8 秒/币（5 币 4.1 秒，峰值 543 MB），CPU 1.4 秒/币（5 币 6.9 秒，500 MB）。`device = "auto"` 现在优先 MPS（CUDA > MPS > CPU），MPS 推理出错会退回 CPU 并一直用 CPU。
 - 推理在后台任务里跑，几秒的耗时不进拍板延迟；开关仍是 `app.toml` 的 `predictor_enabled`（示例为 `true`，关掉时快环照常跑）。
 
 ## 预测员怎么跑（设置页可调）

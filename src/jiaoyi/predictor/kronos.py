@@ -11,7 +11,7 @@
   （``set_wanted``）；哨兵出信号而这个币没有新鲜预测时 ``request`` 补算一次，也在后台。
 - 模型尺寸：fixed 用 ``model_size``；adaptive 按排队深度在 base / small / mini 间切换，
   各尺寸用到才加载，权重都钉 HuggingFace 提交号（``MODEL_SPECS``）。
-- Mac mini 上默认用 CPU（MPS 实测每次报错）；显式选 MPS/CUDA 出错也会退回 CPU 并一直用 CPU。
+- 设备 auto：CUDA > MPS > CPU（Mac mini 上用 MPS）；MPS/CUDA 推理出错会退回 CPU 并一直用 CPU。
   任何异常都只记状态，不向外抛。
 - 每次推理写一条 ``DecisionRecord`` 并上报 ``ModuleStatus``（耗时、成功率、最近错误）。
 """
@@ -117,7 +117,7 @@ class KronosSettings:
     repo_dir: str = "vendor/Kronos"
     """官方 Kronos 源码目录（它不是 pip 包），见 predictor/README.md。"""
     device: str = "auto"
-    """``auto``：有 CUDA 用 CUDA，否则 CPU（不自动选 MPS）；也可写 ``cpu`` / ``mps``。"""
+    """``auto``：CUDA > MPS > CPU；也可写 ``cpu`` / ``mps``。"""
     model_name: str = "Kronos-small"
 
 
@@ -161,8 +161,10 @@ class OfficialKronosBackend:
         torch = importlib.import_module("torch")
         if torch.cuda.is_available():
             return "cuda"
-        # Mac mini M4 实测：MPS 报 "scaled_dot_product_attention for MPS does not support dropout"。
-        # 原因是当时没切 eval（已修）；MPS 能不能用要在 Mac mini 重测，之前 auto 先用 CPU
+        # Mac mini M4 实测（切 eval 之后）：small 在 MPS 上 0.8 秒/币，CPU 1.4 秒/币。
+        # MPS 推理出错时 predict 会退回 CPU 并一直用 CPU
+        if torch.backends.mps.is_available():
+            return "mps"
         return "cpu"
 
     def _load(self, device: str) -> None:
