@@ -157,12 +157,19 @@ function pwField(c) {
   return `<label class="pw">面板密码<input type="password" id="dlg-pw" autocomplete="current-password"></label><div class="dim small">连错 5 次锁 15 分钟。</div>`;
 }
 
+// 设置页常显：有改动没生效时高亮「重启生效」，否则是普通的「重启主程序」（验收时随时要重启）
+function restartBtn() {
+  const pending = data.control.config_pending === true;
+  return `<button class="btn b-sm ${pending ? "b-go" : ""}" ${clickable("cmd", "restart")} ${data.running ? "" : 'disabled title="主程序没在运行"'}>${pending ? "重启生效" : "重启主程序"}</button>`;
+}
+
 function askCommand(kind, params = {}, what = "") {
   const k = CMD[kind];
   const c = data.control;
   const startedBefore = c.started_at || null;
   const warn = data.running ? "" : `<div class="note warn">主程序没在运行，指令 60 秒内没人执行就作废。</div>`;
-  ask(`${k.title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
+  const title = kind === "restart" && c.config_pending !== true ? "重启主程序" : k.title;
+  ask(`${title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
     const pw = $("#dlg-pw");
     const res = await post("/api/command", { kind, params, password: pw ? pw.value : null });
     onOk = null;
@@ -890,8 +897,9 @@ P.settings = () => {
     : '<div class="dim">还没有在网页上改过。</div>';
   const keys = keyRows(d) || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
-    <section class="card"><div class="ch"><h2>运行模式</h2></div>
+    <section class="card"><div class="ch"><h2>运行模式</h2><span class="r">${restartBtn()}</span></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
+      <div class="fr"><label>主程序</label><b>${data.running ? "运行中" : '<span class="warn">没在运行</span>'}${data.control.started_at ? `<span class="dim small"> · ${hm(data.control.started_at)} 启动</span>` : ""}</b></div>
       <div class="fr"><label>面板密码</label><b>${d.password_set ? "已设置" : '<span class="warn">未设置（jiaoyi set-panel-password）</span>'}</b></div>
       <div class="fr"><label>实盘解锁</label><b>${d.live_armed ? '<span class="down">已解锁</span>' : "未解锁"}</b></div></div>
       <div class="foot">切实盘要确认词 + 面板密码，在 Mac mini 终端用 jiaoyi go-live。</div></section>
