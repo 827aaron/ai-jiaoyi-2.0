@@ -21,7 +21,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.core.recorder import local_day
-from jiaoyi.panel.actions import Section, editable_fields
+from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.overview import (
@@ -31,7 +31,7 @@ from jiaoyi.panel.overview import (
     compute_kpis,
     position_views,
 )
-from jiaoyi.slow.settings import SlowConfig
+from jiaoyi.slow.settings import SlowConfig, slow_defaults
 
 ROLE_NAMES: dict[Role, str] = {
     Role.COMMANDER: "军师团",
@@ -471,6 +471,12 @@ class SettingItem(BaseModel):
     """只能从这几个里选（下拉）。"""
     nullable: bool = False
     """可以留空 = 不写这一项，用默认值。"""
+    profiled: bool = False
+    """档位给默认值的键：留空 = 回到档位默认。"""
+    pinned: bool = False
+    """配置文件里写死了值，切档位不会跟着变。"""
+    profile_default: object = None
+    """当前档位给的默认值（``pinned`` 时显示）。"""
 
 
 class SettingsPage(BaseModel):
@@ -482,6 +488,7 @@ class SettingsPage(BaseModel):
     predictor: list[SettingItem] = []
     schedule: list[SettingItem] = []
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
+    profile: ProfileInfo | None = None
     keys: dict[str, bool]
     """密钥名 → 配了没有。只有这个，没有值。"""
     password_set: bool
@@ -521,6 +528,7 @@ def _items(
                 editable=spec is not None,
                 choices=list(spec.choices) if spec else [],
                 nullable=bool(spec and spec.nullable),
+                profiled=bool(spec and spec.profiled),
             )
         )
     return out
@@ -536,17 +544,25 @@ def build_settings(
     app: AppConfig,
     keys: dict[str, bool],
     slow: SlowConfig | None = None,
+    profile: ProfileInfo | None = None,
 ) -> SettingsPage:
     password_set, armed = read_live_gate(files.root)
-    return SettingsPage(
+    page = SettingsPage(
         mode=app.mode.value,
         risk=_items(risk, "risk"),
         category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
         app=_items(app, "app", frozenset({"mode"})),
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),
-        schedule=_items((slow or SlowConfig()).schedule, "schedule"),
+        schedule=_items((slow or slow_defaults(app.profile)).schedule, "schedule"),
         keys=keys,
         password_set=password_set,
         live_armed=armed,
+        profile=profile,
     )
+    if profile:
+        for section, hit in profile.pinned.items():
+            for item in getattr(page, section):
+                if item.key in hit:
+                    item.pinned, item.profile_default = True, hit[item.key]
+    return page

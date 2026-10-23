@@ -448,3 +448,47 @@ def test_schedule_validates_with_profile_defaults(tmp_path: Path) -> None:
     actions.update_config(paths, data, "schedule", {"refresh_lead_min": 20}, PW, NOW)
     cfg = load_slow_config(paths.slow, "60m").schedule
     assert cfg.refresh_lead_min == 20 and cfg.card_ttl_hours == 1.0
+
+
+def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    info = actions.profile_info(paths)
+    assert info.current == "2h" and info.choices == ["2h", "60m", "30m", "15m"]
+    assert set(info.paper_only) == {"30m", "15m"}
+    assert "keeper_interval_s" not in info.pinned.get("app", {})  # 示例里注释掉了，跟档位走
+    actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
+    app = load_app_config(paths.app)
+    assert app.profile == "60m" and app.fast_loop.time_limit_s == 3600
+    assert actions.profile_info(paths).current == "60m"
+    # 网页上填了档位键 = 写死；清空 = 删掉这一行，回到档位默认
+    actions.update_config(paths, data, "app", {"keeper_interval_s": 30}, PW, NOW)
+    assert actions.profile_info(paths).pinned["app"] == {"keeper_interval_s": 15}
+    actions.update_config(paths, data, "app", {"keeper_interval_s": None}, PW, NOW)
+    assert "keeper_interval_s" not in actions.profile_info(paths).pinned.get("app", {})
+    assert load_app_config(paths.app).keeper_interval_s == 15
+    # 不是档位键、也不是可空的，不能清空
+    with pytest.raises(ActionError, match="不能空着"):
+        actions.update_config(paths, data, "app", {"pool_size": None}, PW, NOW)
+
+
+def test_paper_only_profile_rejected_outside_paper(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    text = paths.app.read_text(encoding="utf-8").replace('mode = "paper"', 'mode = "testnet"')
+    paths.app.write_text(text, encoding="utf-8")
+    with pytest.raises(ActionError, match="paper"):
+        actions.update_config(paths, data, "app", {"profile": "15m"}, PW, NOW)
+    assert load_app_config(paths.app).profile == "2h"
+
+
+def test_settings_page_shows_profile(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    actions.update_config(paths, data, "fast_loop", {"time_limit_s": 5000}, PW, NOW)
+    with _client(paths) as client:
+        page = client.get("/api/settings").json()
+    assert page["profile"]["current"] == "2h"
+    assert page["profile"]["pinned"]["fast_loop"] == {"time_limit_s": 7200}
+    fl = {i["key"]: i for i in page["fast_loop"]}
+    assert fl["time_limit_s"]["pinned"] and fl["time_limit_s"]["profile_default"] == 7200
+    assert fl["min_p_take"]["profiled"] and fl["signal_max_age_s"]["profiled"] is False
+    app_items = {i["key"]: i for i in page["app"]}
+    assert app_items["profile"]["editable"] and app_items["profile"]["choices"][0] == "2h"
