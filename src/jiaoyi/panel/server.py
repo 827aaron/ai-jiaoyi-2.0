@@ -133,6 +133,9 @@ class CardAtr(BaseModel):
     period_min: int
     long_period_min: int
     session_factor: float
+    stop_atr_clamp: tuple[float, float] | None = None
+    """保镖把作战卡止损倍数夹到这个范围（``card_range_clamp`` 开着时）；None = 不夹。"""
+    tp_r_clamp: tuple[float, float] | None = None
 
 
 class ModeInfo(BaseModel):
@@ -386,6 +389,8 @@ def create_app(
             period_min=fl.atr_period_min,
             long_period_min=fl.atr_long_period_min,
             session_factor=k,
+            stop_atr_clamp=(fl.min_stop_atr, fl.max_stop_atr) if fl.card_range_clamp else None,
+            tp_r_clamp=(fl.min_tp_r, fl.max_tp_r) if fl.card_range_clamp else None,
         )
 
     def local(request: Request) -> bool:

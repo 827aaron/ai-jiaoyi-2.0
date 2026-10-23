@@ -393,7 +393,10 @@ function cardLevels(s) {
   }
   const a = S.atr[s.symbol];
   if (!a || !s.stop_atr || !s.take_profit_r) return null;
-  const R = s.take_profit_r[0], d = s.stop_atr.map((m) => m * a.atr), dm = (d[0] + d[1]) / 2;
+  // 保镖开着「夹到推荐范围」时，越界的那截不要（没交集时保镖会拒单，这里照原样显示）
+  const clamp = (r, c) => (c && Math.max(r[0], c[0]) <= Math.min(r[1], c[1]) ? [Math.max(r[0], c[0]), Math.min(r[1], c[1])] : r);
+  const sa = clamp(s.stop_atr, a.stop_atr_clamp), tr = clamp(s.take_profit_r, a.tp_r_clamp);
+  const R = tr[0], d = sa.map((m) => m * a.atr), dm = (d[0] + d[1]) / 2;
   const L = { entry: a.price, px: a.price, r: R, distPct: dm / a.price * 100, tpPct: dm * R / a.price * 100 };
   if (s.bias !== "long" && s.bias !== "short") return L;
   const sg = s.bias === "short" ? 1 : -1;
