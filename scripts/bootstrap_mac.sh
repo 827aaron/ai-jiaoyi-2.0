@@ -141,20 +141,35 @@ step pmset   "10/10 防睡眠与断电自启" s_pmset
 # 面板每次都确认一下（重启后它不在了就重新拉起）
 say "启动面板"
 s_panel
-if open "$SETUP_URL" 2>/dev/null; then :; fi
 
-cat <<EOF
+FALLBACK='  .venv/bin/jiaoyi set-panel-password
+  .venv/bin/jiaoyi setup-keys HUMMINGBOT_API_PASSWORD BINANCE_TESTNET_API_KEY BINANCE_TESTNET_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID OPENROUTER_API_KEY
+  .venv/bin/jiaoyi check-config'
+
+if [ "$(curl -s -o /dev/null -w '%{http_code}' "$SETUP_URL" 2>/dev/null)" = 200 ]; then
+  open "$SETUP_URL" 2>/dev/null || true
+  cat <<EOF
 
 ────────────────────────────────────────
 装好了。接下来在浏览器里完成「首次设置」：
   $SETUP_URL
 （没自动打开就手动复制这个地址。）
-（页面打不开时的后备，在终端里做同样的事：
-  .venv/bin/jiaoyi set-panel-password
-  .venv/bin/jiaoyi setup-keys HUMMINGBOT_API_PASSWORD BINANCE_TESTNET_API_KEY BINANCE_TESTNET_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID OPENROUTER_API_KEY
-  .venv/bin/jiaoyi check-config ）
 
-那里依次填：密钥、面板密码、基本配置，最后点自检。
+那里依次填：面板密码、密钥、基本配置，最后点自检。
+页面打不开时的后备，在终端里做同样的事：
+$FALLBACK
+EOF
+else
+  cat <<EOF
+
+────────────────────────────────────────
+装好了。但面板「首次设置」页（$SETUP_URL）还没就绪，请在终端里完成同样的事（密钥只在提示处粘贴）：
+$FALLBACK
+EOF
+fi
+
+cat <<EOF
+
 币安 Demo 的 key 还要交给 hummingbot-api 一次：浏览器开 http://127.0.0.1:8000/docs，
 POST /accounts/add-credential/master_account/binance_perpetual_testnet（详见 docs/M0-setup.md 第 3 步）。
 
