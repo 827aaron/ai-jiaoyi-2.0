@@ -174,7 +174,7 @@ def test_patrol_shock_closes_once(now: datetime) -> None:
 
 def test_patrol_alert_marks_urgent(now: datetime) -> None:
     p = RulePatrol(FAST)
-    pos = [position(now)]
+    pos = [position(now, stop_loss_price=None)]  # 没有止损价：按档位百分比
     p.check(_trade(now, 68000.0), pos)
     assert p.check(_trade(now + timedelta(seconds=10), 67250.0), pos) is None  # -1.1%
     assert p.urgent == {"pos-1"}
@@ -200,12 +200,15 @@ def test_patrol_window_forgets_old_highs(now: datetime) -> None:
     assert p.check(_trade(now + timedelta(minutes=2), 68000.0), pos) is None
 
 
-def test_patrol_lines_never_tighter_than_the_stop(now: datetime) -> None:
-    """冲击线 = max(档位百分比, 1.0 × 止损%)，报警线 = max(档位百分比, 0.5 × 止损%)。"""
+def test_patrol_lines_follow_the_stop(now: datetime) -> None:
+    """冲击线 = 1.0 × 止损%，报警线 = 0.5 × 止损%；没有止损价才用档位百分比。"""
     p = RulePatrol(FAST)
     wide = [position(now, stop_loss_price=68000.0 * (1 - 0.03))]  # 止损 3%
     assert p.lines(wide[0]) == pytest.approx((1.5, 3.0))
-    assert p.lines(position(now)) == (FAST.patrol_alert_pct_1m, FAST.patrol_shock_pct_1m)
+    ethfi = position(now, stop_loss_price=68000.0 * (1 - 0.0102))  # 止损 1.02%：冲击线跟着收紧
+    assert p.lines(ethfi) == pytest.approx((0.51, 1.02))
+    bare = position(now, stop_loss_price=None)
+    assert p.lines(bare) == (FAST.patrol_alert_pct_1m, FAST.patrol_shock_pct_1m)
     p.check(_trade(now, 68000.0), wide)
     # -2.06%：超过档位 2% 但没到止损 3%，只让管家复查
     assert p.check(_trade(now + timedelta(seconds=20), 66600.0), wide) is None

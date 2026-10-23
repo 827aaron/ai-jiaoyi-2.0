@@ -406,7 +406,7 @@ class Runner:
             for pos in targets:
                 # 平仓要等执行器结束（最长十几秒），放后台并行，行情和其它标的不能停
                 if pos.position_id not in self._closing:
-                    self._spawn(self.close(pos, CloseReason.PATROL))
+                    self._spawn(self._patrol_close(pos, action.reason))
         if isinstance(event, Trade):
             snap = self.m.features.snapshot(event.symbol)
             if snap is None:
@@ -522,6 +522,11 @@ class Runner:
         if self.app.ledger is not None:
             self.app.ledger.poke()  # 出场均价、手续费、今日盈亏马上按币安成交回填
 
+    async def _patrol_close(self, pos: PositionRecord, why: str) -> None:
+        """巡逻兵冲击线全平，平完推一条 Telegram。"""
+        await self.close(pos, CloseReason.PATROL)
+        await self.app._alert(AlertLevel.WARN, "巡逻兵已全平", f"巡逻兵：{why}")
+
     async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
         """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""
         if pos.position_id in self._closing:
@@ -561,9 +566,11 @@ class Runner:
             now = self.app.clock()
             keeper.set_next_run(now + timedelta(seconds=self.app.app_cfg.keeper_interval_s))
         await self.refresh_positions()
-        for pos in list(self.positions):
-            if pos.status is PositionStatus.OPEN:
-                await self._review(pos)
+        held = [p for p in self.positions if p.status is PositionStatus.OPEN]
+        for pos in held:
+            await self._review(pos)
+        if keeper is not None and not held:
+            keeper.note(self.app.clock(), "看了一眼：没有持仓，不用审")
         # 开平仓、卡过期都在这里跟上订阅；放在审查之后，回填新币的几秒不推迟审持仓
         await self.sync_watch()
 

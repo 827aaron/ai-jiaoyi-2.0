@@ -217,7 +217,7 @@ async def test_execution_without_keys_falls_back_to_stubs(tmp_path: Path, now: d
 
     app = _online(tmp_path, now, _Secrets())
     assert is_stub(app.m.executor) and is_stub(app.m.reconciler)
-    assert isinstance(app.m.alerter, LogAlerter)
+    assert isinstance(app.m.alerter.inner, LogAlerter)  # type: ignore[attr-defined]
     await app.stop()
 
 
@@ -238,7 +238,7 @@ async def test_execution_with_testnet_keys_is_real(tmp_path: Path, now: datetime
     app = _online(tmp_path, now, _Secrets(**keys))
     assert isinstance(app.m.executor, HbExecutorAdapter)
     assert isinstance(app.m.reconciler, ThreeWayReconciler)
-    assert isinstance(app.m.alerter, TelegramAlerter)
+    assert isinstance(app.m.alerter.inner, TelegramAlerter)  # type: ignore[attr-defined]
     assert isinstance(app.lot_rules, ExchangeInfoLotRules)
     await app.stop()
 

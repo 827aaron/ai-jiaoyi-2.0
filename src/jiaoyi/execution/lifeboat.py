@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
-from jiaoyi.contracts import LifeboatOrder, Outcome, PositionRecord, Side
+from jiaoyi.contracts import LifeboatOrder, Outcome, PositionRecord, Role, Side
 from jiaoyi.contracts.module_status import Health
 from jiaoyi.contracts.position import LifeboatStatus
-from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.core.recorder import RoleRecorder, local_day
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import STOP_PREFIX, ExchangeClient, ExchangeStop
 
@@ -21,6 +21,16 @@ def lifeboat_price(side: Side, entry_price: float, lifeboat_stop_pct: float) -> 
     """多单在入场价下方，空单在上方。"""
     delta = entry_price * lifeboat_stop_pct / 100.0
     return entry_price - delta if side is Side.LONG else entry_price + delta
+
+
+def _kind_of(summary: str) -> str | None:
+    if "保命止损已补挂" in summary:
+        return "补挂"
+    if "保命止损已挂" in summary:
+        return "挂"
+    if "保命止损已撤" in summary:
+        return "撤"
+    return None
 
 
 def client_order_id(position_id: str) -> str:
@@ -42,10 +52,40 @@ class BinanceLifeboat:
         self._exchange = exchange
         self._clock = clock
         self._rec = recorder
+        self._placed_ids: set[str] = set()
+        """挂过的 position_id：同一笔再挂一次算「补挂」。"""
+        self._day: date | None = None
+        self._counts = {"挂": 0, "撤": 0, "补挂": 0}
+
+    def checked(self, now: datetime, summary: str) -> None:
+        """对账员每轮核对过保命止损：团队页「刚刚：…」和今日次数跟着走。"""
+        if self._rec is not None:
+            self._rec.note(now, summary, count=True)
 
     def heartbeat(self, now: datetime, health: Health = Health.OK, headline: str = "") -> None:
         if self._rec is not None:
-            self._rec.heartbeat(now, health, headline or "保命止损待命")
+            c = self._today(now)
+            counts = f"今日 挂 {c['挂']} · 撤 {c['撤']} · 补挂 {c['补挂']}"
+            self._rec.heartbeat(now, health, headline or f"保命止损待命 · {counts}")
+
+    def _today(self, now: datetime) -> dict[str, int]:
+        """今日挂 / 撤 / 补挂各几次。跨天清零；进程重启后从当天的决策日志里数回来。"""
+        tz = self._rec.tz if self._rec is not None else "UTC"
+        day = local_day(now, tz)
+        if day != self._day:
+            self._day = day
+            self._counts = {"挂": 0, "撤": 0, "补挂": 0}
+            log = self._rec.log if self._rec is not None else None
+            read_day = getattr(log, "read_day", None)
+            if callable(read_day):
+                for r in read_day(day.isoformat()):
+                    kind = _kind_of(r.summary) if r.outcome is not Outcome.ERROR else None
+                    if r.role is Role.LIFEBOAT and kind:
+                        self._counts[kind] += 1
+        return self._counts
+
+    def _bump(self, kind: str) -> None:
+        self._today(self._clock())[kind] += 1
 
     def _order(self, stop: ExchangeStop, status: LifeboatStatus, now: datetime) -> LifeboatOrder:
         return LifeboatOrder(
@@ -76,9 +116,12 @@ class BinanceLifeboat:
             self._log(Outcome.ERROR, f"{position.symbol} 保命止损挂单失败：{e!r}", position)
             raise
         order = self._order(stop, LifeboatStatus.ACTIVE, self._clock())
+        again = position.lifeboat is not None or position.position_id in self._placed_ids
+        self._placed_ids.add(position.position_id)
+        self._bump("补挂" if again else "挂")
         self._log(
             Outcome.ACTION,
-            f"{position.symbol} 保命止损已挂在 {stop.stop_price}",
+            f"{position.symbol} 保命止损已{'补挂' if again else '挂'}在 {stop.stop_price}",
             position,
             {"stop_price": stop.stop_price, "client_order_id": stop.client_order_id},
         )
@@ -106,6 +149,7 @@ class BinanceLifeboat:
         stop = await self._find(position)
         if stop is not None:
             await self._exchange.cancel_stop(position.symbol, stop.order_id)
+            self._bump("撤")
             self._log(Outcome.INFO, f"{position.symbol} 保命止损已撤", position)
 
     async def fetch(self, position: PositionRecord) -> LifeboatOrder | None:

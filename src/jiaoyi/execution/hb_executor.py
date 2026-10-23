@@ -73,6 +73,73 @@ _TRADE_BUY = 1
 _TRADE_SELL = 2
 
 
+RELAY_LIFEBOAT_BP = 2.0
+"""真实入场价改了以后，保命止损价差超过这么多（万分之几）才撤旧挂新。"""
+_SIDE_CN = {Side.LONG: "多", Side.SHORT: "空"}
+_REASON_CN = {
+    CloseReason.STOP_LOSS: "止损",
+    CloseReason.TAKE_PROFIT: "止盈",
+    CloseReason.TRAILING_STOP: "移动止损",
+    CloseReason.TIME_LIMIT: "到时平仓",
+    CloseReason.KEEPER: "管家平仓",
+    CloseReason.PATROL: "巡逻兵平仓",
+    CloseReason.LIFEBOAT: "保命止损",
+    CloseReason.MANUAL: "手动 / 外部平仓",
+    CloseReason.RECONCILER: "对账员平仓",
+}
+
+
+def _hold_text(seconds: float) -> str:
+    m = int(seconds // 60)
+    return f"{m // 60} 小时 {m % 60} 分" if m >= 60 else f"{m} 分钟"
+
+
+def _open_text(tracked: TrackedPosition) -> str:
+    """开仓成交的推送：币种 / 方向 / 名义 / 杠杆 / 入场价 / 止损 / 保命止损。"""
+    r = tracked.record
+    entry = r.entry_price or 0.0
+    lines = [
+        f"{r.symbol} 做{_SIDE_CN[r.side]}，名义 {entry * r.quantity:.0f} U，杠杆 {r.leverage} 倍",
+        f"入场价 {entry:g}，数量 {r.quantity:g}",
+        f"止损 {r.stop_loss_price:.6g}（距离 {tracked.stop_loss_pct:.2f}%），"
+        f"止盈 {r.take_profit_price:.6g}",
+    ]
+    if r.lifeboat is not None:
+        lines.append(f"保命止损 {r.lifeboat.stop_price:.6g}（已挂在币安）")
+    else:
+        lines.append("保命止损还没挂上，对账员会补挂")
+    return "\n".join(lines)
+
+
+def _close_text(r: PositionRecord) -> str:
+    """平仓完成的推送：原因、毛利 / 手续费 / 净利、持仓时长。"""
+    reason = _REASON_CN.get(r.close_reason, "未知") if r.close_reason else "未知"
+    lines = [f"{r.symbol} 做{_SIDE_CN[r.side]}，{reason}"]
+    if r.exit_price is not None:
+        lines.append(f"入场 {r.entry_price:g} → 出场 {r.exit_price:g}")
+    net = r.realized_pnl_usdt
+    if net is None:
+        lines.append("盈亏：成交价没拿到，稍后按币安成交回填")
+    else:
+        gross = net + r.fees_usdt
+        lines.append(f"毛利 {gross:+.2f} U，手续费 {r.fees_usdt:.2f} U，净利 {net:+.2f} U")
+    if r.closed_at is not None:
+        lines.append(f"持仓 {_hold_text((r.closed_at - r.opened_at).total_seconds())}")
+    return "\n".join(lines)
+
+
+def _lifeboat_hit(rec: PositionRecord, exit_price: float) -> bool:
+    """出场价到了保命止损价（离它不到入场→保命止损距离的 10%）就算保命止损触发。"""
+    lb, entry = rec.lifeboat, rec.entry_price
+    if lb is None or entry is None:
+        return False
+    dist = abs(entry - lb.stop_price)
+    if dist <= 0:
+        return False
+    beyond = (lb.stop_price - exit_price) if rec.side is Side.LONG else (exit_price - lb.stop_price)
+    return beyond >= -0.1 * dist
+
+
 def _positive(value: Any) -> float | None:
     try:
         number = float(value)
@@ -101,6 +168,7 @@ class HbExecutorAdapter:
         clock: Clock = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         open_fee_bps: float = 0.0,
+        trade_notices: bool = True,
     ) -> None:
         """``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 保镖算的止损 / 止盈距离。"""
@@ -118,6 +186,7 @@ class HbExecutorAdapter:
         self._income_since = income_since
         self._unknown_executor_rounds: dict[str, int] = {}
         self._finalizing: set[str] = set()
+        self._notices = trade_notices
         self.fills_note: str | None = None
         """成交回报通道的状态（「成交回报实时」/「只走 60 秒轮询」），由 LedgerSync 写。"""
         self._exchange = exchange
@@ -442,6 +511,9 @@ class HbExecutorAdapter:
             log.error("直连平仓也失败 %s：%r", rec.position_id, direct)
             return False
         self.mark_closed_directly(rec.position_id, reason, fill)
+        closed = self._registry.get(rec.position_id)
+        if closed is not None:
+            await self._notice("平仓完成", _close_text(closed.record), closed.record, "closed")
         await self._cancel_lifeboat(rec)
         cause = repr(via_hb) if via_hb is not None else "执行器已结束但币安仍有仓"
         await self._alert(
@@ -502,6 +574,7 @@ class HbExecutorAdapter:
         if rec.status is PositionStatus.OPENING and entry is not None:
             tracked = self._mark_filled(tracked, entry)
             tracked = await self._try_place_lifeboat(tracked)
+            await self._notice("开仓成交", _open_text(tracked), tracked.record, "opened")
 
         if not detail.get("is_active", True):
             tracked = await self._finalize(tracked, detail, entry)
@@ -649,6 +722,7 @@ class HbExecutorAdapter:
                     "fees": closed.fees_usdt,
                 },
             )
+            await self._notice("平仓完成", _close_text(closed), closed, "closed")
         if never_filled:
             await self._alert(
                 AlertLevel.WARN,
@@ -697,8 +771,11 @@ class HbExecutorAdapter:
                     take_profit_price=entry.price * (1.0 + sign * tracked.take_profit_pct / 100.0),
                 )
             exit_ = exit_fill(rec, rows, entry) if need_exit else None
+            lifeboat_hit = exit_ is not None and _lifeboat_hit(rec, exit_.price)
             if exit_ is not None:
                 changes["exit_price"] = exit_.price
+                if lifeboat_hit:
+                    changes["close_reason"] = CloseReason.LIFEBOAT
                 if entry.commission_usdt is not None and exit_.commission_usdt is not None:
                     fees = entry.commission_usdt + exit_.commission_usdt
                     changes.update(fees_usdt=fees, realized_pnl_usdt=exit_.realized_pnl - fees)
@@ -706,6 +783,8 @@ class HbExecutorAdapter:
                 continue
             tracked = self._set(tracked, **changes)
             changed += 1
+            if need_entry and tracked.record.status is PositionStatus.OPEN:
+                tracked = await self._relay_lifeboat(tracked)
             parts = []
             if need_entry:
                 parts.append(f"入场 {rec.entry_price:g} → {entry.price:g}")
@@ -720,7 +799,56 @@ class HbExecutorAdapter:
                 tracked.record,
                 output={"backfill": changes},
             )
+            if lifeboat_hit and exit_ is not None:
+                net = tracked.record.realized_pnl_usdt
+                await self._notice(
+                    "保命止损触发",
+                    f"{rec.symbol} {_SIDE_CN[rec.side]} 在 {exit_.price:g} 被保命止损平掉"
+                    + (f"，净盈亏 {net:+.2f}U" if net is not None else ""),
+                    tracked.record,
+                    "lifeboat_hit",
+                )
         return changed
+
+    async def _relay_lifeboat(self, tracked: TrackedPosition) -> TrackedPosition:
+        """入场价按真实成交改了：保命止损按新入场价（仍是 ×倍数的距离）撤旧挂新。
+
+        差不到 ``RELAY_LIFEBOAT_BP`` 就不动（一两个 tick 的差别不值得撤单留空档）。挂新的失败就
+        告警，对账员下一轮按「保命止损缺失」补挂。
+        """
+        rec = tracked.record
+        old = rec.lifeboat
+        if old is None or rec.entry_price is None:
+            return tracked
+        new = lifeboat_price(rec.side, rec.entry_price, tracked.lifeboat_stop_pct)
+        if abs(new - old.stop_price) / old.stop_price * 1e4 <= RELAY_LIFEBOAT_BP:
+            return tracked
+        try:
+            await self._lifeboat.cancel(rec)
+            order = await self._lifeboat.place(rec, new)
+        except Exception as e:
+            log.warning("按真实入场价重挂保命止损失败 %s：%r", rec.position_id, e)
+            await self._alert(
+                AlertLevel.WARN,
+                "按真实入场价重挂保命止损失败",
+                f"{rec.symbol} {rec.position_id}：{e!r}，对账员会补挂",
+                rec.symbol,
+                f"lifeboat_relay_failed:{rec.position_id}",
+            )
+            return tracked
+        tracked = self._set(tracked, lifeboat=order)
+        self._record(
+            Outcome.ACTION,
+            f"{rec.symbol} 保命止损按真实入场价重挂：{old.stop_price:g} → {order.stop_price:g}",
+            tracked.record,
+            output={"old_stop": old.stop_price, "new_stop": order.stop_price},
+        )
+        return tracked
+
+    async def _notice(self, title: str, body: str, rec: PositionRecord, kind: str) -> None:
+        """成功路径的 INFO 通知（开仓成交 / 平仓完成 / 保命止损触发），同一笔同一类只发一次。"""
+        if self._notices:
+            await self._alert(AlertLevel.INFO, title, body, rec.symbol, f"{kind}:{rec.position_id}")
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
         requested = changes.pop("requested_close", tracked.requested_close)

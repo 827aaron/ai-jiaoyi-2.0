@@ -336,10 +336,13 @@ class ThreeWayReconciler:
             headline = f"三方一致（本轮已处理 {fixed} 项）"
         else:
             headline = "三方一致"
+        n = len(self._registry.live())
         if self._rec is not None:
-            n = len(self._registry.live())
-            self._rec.note(now, f"对账：{headline}（在管 {n} 笔）")
+            self._rec.note(now, f"对账：{headline}（在管 {n} 笔）", count=True)
             self._rec.heartbeat(now, health, headline)
+        checked = getattr(self._lifeboat, "checked", None)
+        if callable(checked):
+            checked(now, f"对账员核对了 {n} 笔的保命止损：{headline}")
         for beat in self._heartbeats:
             beat(now, Health.OK, "")
 
