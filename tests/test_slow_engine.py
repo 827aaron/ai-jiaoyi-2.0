@@ -321,3 +321,25 @@ def test_cost_meter_counts_truncated_answers() -> None:
     m.record_response(resp("length", "info"))
     m.record_response(resp("length", "meta"))
     assert m.truncated == 2
+
+
+def test_openrouter_request_body_carries_usage_and_reasoning() -> None:
+    from types import SimpleNamespace
+
+    from jiaoyi.slow.tradingagents_engine import apply_openrouter_options, openrouter_body
+
+    assert openrouter_body("low") == {
+        "usage": {"include": True},
+        "reasoning": {"effort": "low"},
+    }
+    assert openrouter_body("none")["reasoning"] == {"enabled": False}
+    llm = SimpleNamespace(extra_body={"keep": 1})
+    apply_openrouter_options(llm, "medium")
+    assert llm.extra_body == {
+        "keep": 1,
+        "usage": {"include": True},
+        "reasoning": {"effort": "medium"},
+    }
+    bare = SimpleNamespace()
+    apply_openrouter_options(bare, "high")  # 原来没有 extra_body 也行
+    assert bare.extra_body["reasoning"] == {"effort": "high"}

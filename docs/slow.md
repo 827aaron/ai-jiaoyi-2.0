@@ -242,3 +242,7 @@ Mac 实测（#96 把 `max_tokens` 降到 4096 后）：思考模型的思考也�
 | `weight_volatility` / `weight_volume_surge` / `weight_funding` / `weight_oi` / `weight_liquidations` | 0.35 / 0.25 / 0.15 / 0.15 / 0.10 | 同默认 | 五项分数的权重，只看相对大小（不用加起来等于 1），不能全是 0 |
 
 没通过硬门槛的币在选币页显示原因（成交额不足 / 点差过大 / 盘口深度不足 / 上线不满 N 天 / 24 小时波动太小 / 24 小时波动过大）。
+
+## 推理长度（`[meeting] reasoning_effort`，默认 `low`）
+
+Mac 实测（#98 把 `max_tokens` 改回 8192 后）：deepseek-v4.1-flash 是推理模型，推理 token 也算在输出额度里，个别币（ADA / BTC / TIA）的辩论回答只有几千字却用满 8192，`finish_reason=length`，整场失败；加长度治标不治本。所以走 OpenRouter 时，所有会议对话步都带 `reasoning` 参数限制推理：`low`（默认）/ `medium` / `high` 对应 OpenRouter 的 `reasoning.effort`，`none` 对应 `reasoning.enabled=false`（关掉推理）。参数直接设到 TradingAgents 建好的模型对象的 `extra_body`（`apply_openrouter_options`，请求体里还有 `usage.include` 取真实花费），单元测试验证了请求体。直连 DeepSeek（`provider = "deepseek"`）这个参数不生效。推理变短可能略降分析深度；觉得质量不够再调成 `medium`，截断仍然会让整场失败（#98 的兜底）。
