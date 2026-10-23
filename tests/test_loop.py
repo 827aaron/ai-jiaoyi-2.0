@@ -573,3 +573,9 @@ async def test_rescreen_writes_pool_file_for_panel(tmp_path: Path, now: datetime
     await Runner(app)._rescreen(now)  # 每小时重选也写
     assert (tmp_path / POOL_FILE).is_file()
     await app.stop()
+
+
+async def test_app_exposes_predictor_against_card_watch(tmp_path: Path, now: datetime) -> None:
+    """慢环通过 App.against 订阅「预测员连续看反作战卡」。"""
+    app = _app(tmp_path, now)
+    assert app.against is not None and app.against.current(now) == {}

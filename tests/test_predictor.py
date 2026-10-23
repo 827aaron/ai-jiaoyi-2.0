@@ -75,6 +75,19 @@ async def test_forecast_after_enough_bars(tmp_path: Path) -> None:
     assert rec.role == Role.PREDICTOR and rec.latency_ms >= 0
 
 
+async def test_listeners_get_each_new_forecast() -> None:
+    f = make(True, SET, FakeBackend(), clock=lambda: T0 + timedelta(hours=1))
+    got: list[float] = []
+
+    def boom(fc: object) -> None:
+        raise RuntimeError("订阅方坏了")
+
+    f.add_listener(boom)  # 出错不影响别的订阅方和预测员
+    f.add_listener(lambda fc: got.append(fc.p_up))
+    await feed(f, 3)
+    assert got == [1.0]
+
+
 async def test_disabled_returns_none_and_never_calls_model(tmp_path: Path) -> None:
     be = FakeBackend()
     sink = JsonlDecisionLog(tmp_path)

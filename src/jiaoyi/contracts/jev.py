@@ -118,7 +118,10 @@ class JevAnswer(Contract):
 
 
 class JevUsage(Contract):
-    """通道报的 token 用量（面板「AI 费用详情」读 ``output.jev.usage``）。没报的记 0。"""
+    """通道报的 token 用量。决策日志写在 ``output.usage``（面板「AI 费用详情」读这里）。
+
+    没报的记 0。
+    """
 
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)

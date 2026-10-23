@@ -113,6 +113,28 @@ async def test_card_flip_pushes_toward_close_only(now: datetime) -> None:
     assert v2.action == "close"
 
 
+async def test_no_trade_or_missing_from_card_does_not_vote(now: datetime) -> None:
+    """新卡只看不做 / 卡里没有这个币：不投平仓票，交给决策模型、止损、最长持仓时间。"""
+    for cd in (card(now, bias="no_trade"), card(now, symbol="ETHUSDT")):
+        k = keeper(MockJevTransport(answer=close_p(0.1)), now, cd=cd)
+        for _ in range(3):
+            v = await k.review(position(now), now)
+            assert v.action == "hold" and v.consecutive == 1
+
+
+async def test_blocked_symbol_still_votes_close(now: datetime) -> None:
+    """下架公告封掉的币（卡里读成只看不做）照样投平仓票：要下架的币留仓更危险。"""
+    m = JevDecisionModel(MockJevTransport(answer=close_p(0.1)), FAST, timeout_ms=200)
+    snap = features(now)
+    k = JevKeeper(
+        m, FAST, lambda s: snap, lambda n: card(now, bias="no_trade"),
+        blocked=lambda: {"BTCUSDT": "币安下架公告"},
+    )  # fmt: skip
+    v1 = await k.review(position(now), now)
+    assert v1.action == "hold" and "下架" in v1.reason
+    assert (await k.review(position(now), now)).action == "close"
+
+
 async def test_no_features_holds(now: datetime) -> None:
     t = MockJevTransport(answer=close_p(0.99))
     v = await keeper(t, now, feats=False).review(position(now), now)

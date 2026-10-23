@@ -49,7 +49,7 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 - 同步读缓存：`NewsHub.for_symbol / market` 只读内存，TradingAgents 的工作线程直接调用，不碰网络。主循环定时调 `poll_and_notify`（建议公告 1–5 分钟、RSS 15 分钟；目前统一一个周期，按需拆）。
 - 喂给会议：TradingAgents 的 `get_news` / `get_global_news` 路由到 `crypto_news`（加密币读 NewsHub，美股永续回退 yfinance）；总盘会的提示里带市场摘要和每个候选币的最近标题。
 - 触发开会：公告类新条目提到候选币 → `BattleCardCommander.notify_news`。
-- **币安下架公告 → 禁止新开仓**：7 天内的币安下架 / 移除公告提到我们交易的币 → `block_symbol`，作战卡里该币立刻读成“只看不做”（保镖本来就只认卡，所以不用改保镖；封币 = 不再开仓，已有持仓由持仓管家在约 40 秒后平掉并推 Telegram——要下架的币留仓更危险）。宁可多挡：现货交易对移除的公告提到同名币也会挡。进程重启后由新闻源重新补上。
+- **币安下架公告 → 禁止新开仓**：7 天内的币安下架 / 移除公告提到我们交易的币 → `block_symbol`，作战卡里该币立刻读成“只看不做”（保镖本来就只认卡，所以不用改保镖；封币 = 不再开仓，已有持仓由持仓管家在约 40 秒后平掉并推 Telegram——要下架的币留仓更危险；这是持仓管家对「只看不做」唯一还会投平仓票的情况）。宁可多挡：现货交易对移除的公告提到同名币也会挡。进程重启后由新闻源重新补上。
 
 接线（主循环，架构师）：创建 `NewsHub(default_sources(), log)`，传给 `TradingAgentsEngine(news=hub)`，并定时 `await hub.poll_and_notify(pool_symbols, commander.notify_news, commander.block_symbol)`。
 
