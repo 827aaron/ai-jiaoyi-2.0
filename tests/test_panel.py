@@ -175,6 +175,9 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert [s.symbol for s in ov.card.symbols] == ["BTCUSDT"]
     assert ov.card.symbols[0].key_levels[0].model_dump() == {"price": 68000.0, "kind": "resistance"}
     assert ov.card.leverage_max is not None
+    # 摘要行写保镖真会用的：作战卡不约束（默认）时杠杆 = 硬上限；L 档每笔风险 = 总资产 × 风险%
+    assert ov.card.leverage_used == int(RISK.max_leverage)
+    assert ov.card.risk_per_trade_usdt == pytest.approx(10_080 * RISK.risk_per_trade_pct / 100)
     assert ov.card.size_fractions["L"] == 1.0 and 0 < ov.card.size_fractions["S"] <= 1  # 仓位档折扣
 
     assert [a.level for a in ov.alerts] == ["warn"]

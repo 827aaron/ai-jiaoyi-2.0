@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -116,6 +117,10 @@ class CardView(BaseModel):
     notional_usdt: tuple[float, float] | None
     size_fractions: dict[str, float] = {}
     """仓位档 → 每笔风险打几折（保镖按这个算：S / M 来自 app.toml [fast_loop]，L 固定 1）。"""
+    leverage_used: int | None = None
+    """保镖下单实际用的杠杆：作战卡不约束（默认）时就是硬上限；约束时为 None（按各币卡上的）。"""
+    risk_per_trade_usdt: float | None = None
+    """L 档每笔风险 = 总资产 × 每笔风险%；S / M 再乘 ``size_fractions``。拿不到总资产时 None。"""
 
 
 class FeedItem(BaseModel):
@@ -311,6 +316,8 @@ def build_overview(
                 files.tz,
             ),
             app,
+            risk,
+            kpis.equity_usdt,
         ),
         feed=_feed(records),
         positions=positions,
@@ -501,12 +508,23 @@ def _lamps(
     return lamps
 
 
-def _with_fractions(card: CardView | None, app: AppConfig) -> CardView | None:
+def _with_fractions(
+    card: CardView | None, app: AppConfig, risk: RiskConfig, equity: float | None
+) -> CardView | None:
+    """附上保镖真正会用的口径：仓位档折扣、实际杠杆、每笔风险金额（总览摘要行显示这些，不显示军师建议范围）。"""
     if card is None:
         return None
     fl = app.fast_loop
     fr = {"S": fl.size_fraction_s, "M": fl.size_fraction_m, "L": 1.0}
-    return card.model_copy(update={"size_fractions": fr})
+    return card.model_copy(
+        update={
+            "size_fractions": fr,
+            "leverage_used": None
+            if fl.card_caps_binding
+            else max(1, math.floor(float(risk.max_leverage))),
+            "risk_per_trade_usdt": equity * risk.risk_per_trade_pct / 100 if equity else None,
+        }
+    )
 
 
 _STAGE_NAMES = {
