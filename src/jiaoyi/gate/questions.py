@@ -294,6 +294,8 @@ def jev_log_fields(
 
     ``input.jev``：模板版本、指纹、请求号、类型、问题编号、完整快照。
     ``output.jev``：是否成功、错误、模型版本、延迟、花费、每个问题每个选项的概率。
+    ``output.usage``：token 用量 ``{input_tokens, output_tokens, reasoning_tokens}``（面板 AI
+    费用详情读这里）；没真正调用时为 None。
     没有真正调用（例如没有作战卡被拦下）时 ``request`` 为 None，``input.jev.called`` 为 False。
     """
     inp: dict[str, Any] = {
@@ -316,4 +318,5 @@ def jev_log_fields(
         "cost_usd": resp.cost_usd,
         "answers": {a.id: a.probs for a in resp.answers} if resp.ok else {},
     }
-    return {"jev": inp}, {"jev": out}
+    usage = resp.usage.model_dump() if resp.usage is not None else None
+    return {"jev": inp}, {"jev": out, "usage": usage}

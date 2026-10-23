@@ -24,7 +24,12 @@ from jiaoyi.gate.jev import (
     decision_model_from_config,
     jev_from_secrets,
 )
-from jiaoyi.gate.questions import MAX_SNAPSHOT_CHARS, entry_questions, entry_snapshot
+from jiaoyi.gate.questions import (
+    MAX_SNAPSHOT_CHARS,
+    entry_questions,
+    entry_snapshot,
+    jev_log_fields,
+)
 from jiaoyi.gate.rule_model import RuleDecisionModel
 from tests.fastloop_helpers import FAST, GOOD_LONG, answer_with, card, signal
 
@@ -230,6 +235,7 @@ async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
     assert r.ok, r.error
     assert r.model_version == "jev-2026-10"
     assert r.cost_usd == pytest.approx(380 * FAST.jev_usd_per_mtok / 1e6)
+    assert r.usage == c.JevUsage(input_tokens=380, output_tokens=6)  # 没报推理 token 记 0
     assert seen["auth"] == "Bearer test-key-not-real"
     await tr.aclose()
 
@@ -292,7 +298,12 @@ def _openrouter_handler(seen: dict[str, object]) -> object:
                 "provider": "TypeSafe",
                 "model": "typesafe/jev-1.14-20261001",
                 "answers": answers,
-                "usage": {"input_tokens": 380, "output_tokens": 6, "cost": 0.0000321},
+                "usage": {
+                    "input_tokens": 380,
+                    "output_tokens": 6,
+                    "cost": 0.0000321,
+                    "completion_tokens_details": {"reasoning_tokens": 2},
+                },
             },
         )
 
@@ -316,6 +327,9 @@ async def test_openrouter_transport(now: datetime, caplog: pytest.LogCaptureFixt
     cfg = FAST.model_copy(update={"jev_model": "typesafe/jev-1.14", "jev_provider": "openrouter"})
     r = await JevDecisionModel(tr, cfg, timeout_ms=2000).ask(entry_request(now))
     assert r.ok and r.cost_usd == pytest.approx(0.0000321)  # 用通道报的花费，不按单价估
+    assert r.usage == c.JevUsage(input_tokens=380, output_tokens=6, reasoning_tokens=2)
+    _, out = jev_log_fields(entry_request(now), r)  # 面板 AI 费用详情读 output.usage
+    assert out["usage"] == {"input_tokens": 380, "output_tokens": 6, "reasoning_tokens": 2}
     assert r.model_version == "typesafe/jev-1.14-20261001"
     assert "版本变了" not in caplog.text  # 带日期的全名算同一版本
     # 日期快照滚动了要提醒一次

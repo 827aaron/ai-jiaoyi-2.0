@@ -5,5 +5,6 @@
   "model_version": "systemone-2026-10",
   "latency_ms": 1000.0,
   "cost_usd": 0.0,
+  "usage": null,
   "answers": []
 }

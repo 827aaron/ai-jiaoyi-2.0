@@ -26,6 +26,7 @@ from jiaoyi.contracts.jev import (
     JevQuestion,
     JevRequest,
     JevResponse,
+    JevUsage,
 )
 from jiaoyi.contracts.market import (
     BookMetrics,
@@ -86,6 +87,7 @@ __all__ = [
     "JevQuestion",
     "JevRequest",
     "JevResponse",
+    "JevUsage",
     "KeeperVerdict",
     "KeyLevel",
     "Kline",

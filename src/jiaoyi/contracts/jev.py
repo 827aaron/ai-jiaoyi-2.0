@@ -117,6 +117,14 @@ class JevAnswer(Contract):
         return choice, self.probs[choice]
 
 
+class JevUsage(Contract):
+    """通道报的 token 用量（面板「AI 费用详情」读 ``output.jev.usage``）。没报的记 0。"""
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+
+
 class JevResponse(Contract):
     """模型的回复。``ok=False`` 时 ``answers`` 为空，下游必须按故障即关闭处理。"""
 
@@ -126,6 +134,8 @@ class JevResponse(Contract):
     model_version: str = Field(min_length=1, description="锁定的模型版本，写进日志用于校准。")
     latency_ms: NonNegFloat
     cost_usd: NonNegFloat = 0.0
+    usage: JevUsage | None = None
+    """token 用量；没真正调用（故障、规则版）时为 None。"""
     answers: list[JevAnswer] = Field(default_factory=list)
 
     @model_validator(mode="after")
