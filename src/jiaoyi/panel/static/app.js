@@ -678,7 +678,6 @@ const TF_EDGES = [
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
   [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
-  [[TF_POS.card[0] + 24, TF_POS.card[1] + NODE_H], [TF_POS.predictor[0] + NODE_W - 30, TF_POS.predictor[1]], "predictor", "要算的币", "gap-left", "side"],
   [tfR("sentinel"), tfL("gate"), "gate", "信号"],
   [tfR("gate"), tfL("risk_guard"), "risk_guard", "做不做"],
   [tfB("risk_guard"), tfT("executor"), "executor", "仓位"],
@@ -695,7 +694,6 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   if (how === "elbow") { d = `M${x1},${y1} H${x2 - 12} Q${x2},${y1} ${x2},${y1 + 12} V${y2 - 1}`; lx = x2 - 70; ly = y1 - 6; dir = "d"; }
   else if (how === "down-right") { d = `M${x1},${y1} V${y2 - 10} Q${x1},${y2} ${x1 + 10},${y2} H${x2 - 1}`; lx = x1 + 14; ly = y2 - 6; dir = "r"; }
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
-  else if (how === "gap-left") { const ym = 158; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 - 10},${ym} H${x2 + 10} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = x2 + 12; ly = ym + 16; dir = "d"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
