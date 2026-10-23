@@ -307,6 +307,8 @@ class BattleCardCommander:
         self._stats_day = ""
         self._pick_cost = 0.0
         self._restore_budget()
+        self._market_last: tuple[datetime, str, int | None] | None = None
+        self._market_state: tuple[Health, str, str | None] | None = None
         self._restore_card()
 
     # ------------------------------------------------------------ 快环读
@@ -1431,8 +1433,19 @@ class BattleCardCommander:
         self, health: Health, headline: str, count: int | None, err: str | None
     ) -> None:
         """总盘会没有决策记录，团队页靠它自己的模块状态显示「上次 / 下次 / 挑了几个」。"""
+        if health is Health.OK:
+            self._market_last = (self._clock(), f"挑了 {count} 个币上会", count)
+            headline = self._market_last[1]
+        self._market_state = (health, headline, err)
+        self._market_beat()
+
+    def _market_beat(self) -> None:
+        """写总盘会的模块状态。每次心跳都带新的 ts 和下一轮会议时间，不然两轮之间会被标成无心跳。"""
+        if self._market_state is None:
+            return  # 还没开过总盘会：不写，团队页显示「等待首次运行」
+        health, headline, err = self._market_state
         now = self._clock()
-        ran = health is Health.OK
+        last, _, count = self._market_last or (None, "", None)
         self._log.heartbeat(
             ModuleStatus(
                 role=Role.MARKET,
@@ -1442,13 +1455,14 @@ class BattleCardCommander:
                 last_error=err,
                 error=err,
                 version="slow-0.1",
-                last_run_at=now if ran else None,
+                last_run_at=last,
                 next_run_at=self._next_meeting(now),
-                symbol_count=count if ran else None,
+                symbol_count=count,
             )
         )
 
     def _heartbeat(self, health: Health, headline: str, err: str | None) -> None:
+        self._market_beat()
         now = self._clock()
         self._log.heartbeat(
             ModuleStatus(

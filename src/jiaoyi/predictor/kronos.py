@@ -693,6 +693,11 @@ class KronosForecaster:
                     last_error=self._last_error,
                     version=self._last_model,
                     last_run_at=self._last_run_at,
+                    next_run_at=(
+                        self._last_run_at + timedelta(minutes=_INTERVAL_MIN[self._s.interval])
+                        if self._last_run_at is not None
+                        else None
+                    ),
                     summary=self._last_summary,
                 )
             )
