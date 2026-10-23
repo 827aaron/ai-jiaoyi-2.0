@@ -1,6 +1,7 @@
 """持仓档位（profile）：一个开关选档，档位给出跨模块的策略默认值。
 
-Aaron 2026-10-23 定：系统只做 4 个档位 2h / 60m / 30m / 15m，默认 2h。
+Aaron 2026-10-23 定：系统做 7 个档位 24h / 12h / 6h / 2h / 60m / 30m / 15m，
+默认 2h（18:25 加了 6h / 12h / 24h）。
 数值来自研究报告「持仓档位参数表」（币安 U 本位 1m K 线 2026-09-22 → 10-21）。
 
 优先级：配置文件里写了的单项 > 档位默认 > 代码默认。也就是说档位只填你没写的键；
@@ -94,7 +95,23 @@ def hold_defaults(time_limit_s: int) -> dict[str, Any]:
     return dict(_FAST_2H)
 
 
+def _long(interval_min: int) -> dict[Section, dict[str, Any]]:
+    """6h / 12h / 24h 档：只是开会间隔拉长，其余同 2h 档（参数细节等研究结果再调）。"""
+    return {
+        "app": {
+            "keeper_interval_s": 20,
+            "slow_loop_interval_min": interval_min,
+            "predictor_enabled": True,
+        },
+        "slow.schedule": _slow(interval_min, 10),
+        "slow.budget": {"fail_backoff_minutes": [5, 10, 30]},
+    }
+
+
 DEFAULTS: dict[str, dict[Section, dict[str, Any]]] = {
+    "24h": _long(1440),
+    "12h": _long(720),
+    "6h": _long(360),
     "2h": {
         "app": {"keeper_interval_s": 20, "slow_loop_interval_min": 120, "predictor_enabled": True},
         "slow.schedule": _slow(120, 10),

@@ -82,6 +82,7 @@ class PickResult:
 class Analysis:
     card_symbol: CardSymbol
     cost_usd: float = 0.0
+    usage: dict[str, int] | None = None  # input_tokens / output_tokens / reasoning_tokens
 
 
 class MeetingEngine(Protocol):
@@ -410,6 +411,7 @@ class BattleCardCommander:
         now = self._clock()
         started = time.monotonic()
         self._loop = asyncio.get_running_loop()
+        self._pick_cost = 0.0  # 本轮总盘会花费；出卡失败时记在错误记录上，面板净盈亏才不漏 AI 费
         self._tier_of = {e.symbol: e.tier for e in pool.in_pool if e.tier}
         self._expand_mid = self._tiers.enabled and self._mid_day != self._day(now)
         candidates = self._eligible(pool, now, expand=self._expand_mid)
@@ -624,6 +626,7 @@ class BattleCardCommander:
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
             fail_cost = self._failure_cost(exc, "pick")
             self._charge(fail_cost - est)
+            self._pick_cost = fail_cost
             if live is not None:
                 live.fail(self._why(exc), fail_cost)
             raise
@@ -798,7 +801,12 @@ class BattleCardCommander:
             except Exception as exc:
                 # 会议已经烧了 token，没有可用结论也要计入花费
                 self._log_symbol(
-                    entry, Outcome.ERROR, f"{entry.symbol} 结论不合格：{exc}", started, res.cost_usd
+                    entry,
+                    Outcome.ERROR,
+                    f"{entry.symbol} 结论不合格：{exc}",
+                    started,
+                    res.cost_usd,
+                    usage=res.usage,
                 )
                 raise
             self._log_symbol(
@@ -808,6 +816,7 @@ class BattleCardCommander:
                 started,
                 res.cost_usd,
                 cs,
+                usage=res.usage,
             )
             return res
 
@@ -986,6 +995,7 @@ class BattleCardCommander:
         cost: float,
         cs: CardSymbol | None = None,
         estimated: bool = False,
+        usage: dict[str, int] | None = None,
     ) -> None:
         ms = (time.monotonic() - started) * 1000
         self._bump(ok=outcome is not Outcome.ERROR, cost=cost, ms=ms)
@@ -994,10 +1004,21 @@ class BattleCardCommander:
             outcome=outcome,
             summary=summary[:200],
             input={"score": entry.score, "reasons": entry.reasons},
-            output=cs.model_dump(mode="json") if cs is not None else {"cost_estimated": estimated},
+            output=self._symbol_output(cs, estimated, usage),
             latency_ms=ms,
             cost_usd=cost,
         )
+
+    @staticmethod
+    def _symbol_output(
+        cs: CardSymbol | None, estimated: bool, usage: dict[str, int] | None
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = (
+            cs.model_dump(mode="json") if cs is not None else {"cost_estimated": estimated}
+        )
+        if usage is not None:  # 面板「AI 费用」按模型 token 展示
+            out["usage"] = usage
+        return out
 
     def _record_card(self, card: BattleCard, started: float) -> None:
         tradable = sum(1 for s in card.symbols if s.bias is not Bias.NO_TRADE)
@@ -1030,6 +1051,7 @@ class BattleCardCommander:
             outcome=Outcome.ERROR,
             summary=f"开会失败（{reason}）：{exc}"[:200],
             latency_ms=(time.monotonic() - started) * 1000,
+            cost_usd=self._pick_cost,  # 各标的的花费已在各自记录里
         )
         self._last_error = str(exc)[:200]
         self._heartbeat(Health.DEGRADED, "开会失败，沿用旧卡直到过期", self._last_error)

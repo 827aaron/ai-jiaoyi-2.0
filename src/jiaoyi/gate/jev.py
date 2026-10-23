@@ -33,6 +33,7 @@ from jiaoyi.contracts import (
     JevQuestion,
     JevRequest,
     JevResponse,
+    JevUsage,
     RunMode,
 )
 from jiaoyi.core.recorder import local_day
@@ -54,6 +55,8 @@ class RawJevResult:
     model: str
     probs: Mapping[str, Mapping[str, float]]
     input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
     request_id: str | None = None
     cost_usd: float | None = None
     """通道直接报的花费（OpenRouter 的 ``usage.cost``）；没有时按 token 单价估。"""
@@ -117,6 +120,8 @@ class TypeSafeTransport:
             model=resp.model,
             probs=probs,
             input_tokens=resp.usage.input_tokens or 0,
+            output_tokens=resp.usage.output_tokens or 0,
+            reasoning_tokens=_reasoning_tokens(usage),
             request_id=rid if isinstance(rid, str) else None,
             cost_usd=float(cost) if isinstance(cost, int | float) and cost >= 0 else None,
         )
@@ -231,6 +236,11 @@ class JevDecisionModel:
             cost_usd=raw.cost_usd
             if raw.cost_usd is not None
             else raw.input_tokens * self._cfg.jev_usd_per_mtok / 1e6,
+            usage=JevUsage(
+                input_tokens=raw.input_tokens,
+                output_tokens=raw.output_tokens,
+                reasoning_tokens=raw.reasoning_tokens,
+            ),
             answers=answers,
         )
 
@@ -296,6 +306,19 @@ def _parse(request: JevRequest, raw: RawJevResult) -> list[JevAnswer]:
             raise ValueError(f"问题 {q.id} 的概率和为 {total:.3f}")
         out.append(JevAnswer(id=q.id, probs={c: probs[c] / total for c in q.choices}))
     return out
+
+
+def _reasoning_tokens(usage: Any) -> int:
+    """推理 token：OpenRouter 放在 ``completion_tokens_details.reasoning_tokens``，
+    有的通道放在 ``output_tokens_details`` 或直接 ``reasoning_tokens``。都没有记 0。"""
+    if not isinstance(usage, dict):
+        return 0
+    for key in ("completion_tokens_details", "output_tokens_details"):
+        d = usage.get(key)
+        if isinstance(d, dict) and isinstance(d.get("reasoning_tokens"), int):
+            return max(int(d["reasoning_tokens"]), 0)
+    n = usage.get("reasoning_tokens")
+    return max(n, 0) if isinstance(n, int) else 0
 
 
 def _raw_body(resp: Any) -> dict[str, Any]:

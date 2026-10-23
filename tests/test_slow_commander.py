@@ -795,3 +795,11 @@ async def test_market_meeting_is_recorded_in_meeting_live(tmp_path: Path, now: d
     assert "AAUSDT：固定 / 持仓强制开会" in doc["steps"][2]["text"]
     assert "DDUSDT：军师没挑" in doc["steps"][2]["text"]
     assert doc["cost_usd"] == pytest.approx(0.01)
+
+
+async def test_symbol_record_carries_usage(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.slow.commander import Analysis
+
+    out = BattleCardCommander._symbol_output(None, False, {"input_tokens": 1})
+    assert out == {"cost_estimated": False, "usage": {"input_tokens": 1}}
+    assert Analysis.__dataclass_fields__["usage"].default is None

@@ -7,7 +7,7 @@ const BASIC = {
   llm_provider: ["军师团走哪个通道", "openrouter = 用 OPENROUTER_API_KEY；deepseek = 直连 DeepSeek"],
   daily_cost_limit_usd: ["军师团每天花费上限（美元）", "到了就停开会，第二天恢复"],
 };
-const BASIC_CHOICE = { "2h": "2 小时（默认）", "60m": "1 小时", "30m": "30 分钟（只能模拟盘）", "15m": "15 分钟（只能模拟盘）", typesafe: "typesafe（Jev 官方）", openrouter: "OpenRouter", deepseek: "DeepSeek 直连" };
+const BASIC_CHOICE = { "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "2h": "2 小时（默认）", "60m": "1 小时", "30m": "30 分钟（只能模拟盘）", "15m": "15 分钟（只能模拟盘）", typesafe: "typesafe（Jev 官方）", openrouter: "OpenRouter", deepseek: "DeepSeek 直连" };
 const KEY_LABEL = {
   OPENROUTER_API_KEY: "OpenRouter（拍板 + 军师团）",
   BINANCE_TESTNET_API_KEY: "币安 Demo · Key",
