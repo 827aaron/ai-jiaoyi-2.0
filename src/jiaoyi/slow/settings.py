@@ -31,6 +31,7 @@ from jiaoyi.slow.tradingagents_engine import (
     PROVIDER_KEY_ENV,
     PROVIDER_MODELS,
     TradingAgentsSettings,
+    parse_kline_spec,
 )
 
 DEFAULT_SLOW_PATH = Path("config/slow.toml")
@@ -256,6 +257,12 @@ class MeetingConfig(_Strict):
     analysts_stock: tuple[str, ...] = Field(
         default=("market", "social", "news", "fundamentals"), description="美股永续的分析师。"
     )
+    analyst_klines: tuple[str, ...] | None = Field(
+        default=None,
+        description='分析师看的 K 线，每段 "周期 x 根数"，如 ["15m x 96", "1h x 72", "4h x 60"]。'
+        "不写 = 按最长持仓档：30m–2h 15m×96 + 1h×72 + 4h×60；4h 起 1h×72 + 4h×90 + 1d×60。"
+        "开会间隔比最细一段还短，最前面自动补 15m×48。",
+    )
     debate_rounds: int = Field(default=1, ge=0, le=3, description="多空辩论轮数；越多越贵。")
     risk_rounds: int = Field(default=1, ge=0, le=3, description="风控讨论轮数。")
     quick_model: str | None = Field(default=None, description="不写 = 用所选 provider 的默认模型。")
@@ -311,6 +318,16 @@ class MeetingConfig(_Strict):
         bad = [a for a in v if a not in ANALYSTS]
         if bad or len(set(v)) != len(v):
             raise ValueError(f"分析师只能从 {ANALYSTS} 里选且不能重复，收到 {list(v)}")
+        return v
+
+    @field_validator("analyst_klines")
+    @classmethod
+    def _klines(cls, v: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if v is not None:
+            if not v:
+                raise ValueError("至少一段 K 线")
+            for spec in v:
+                parse_kline_spec(spec)
         return v
 
 
@@ -392,7 +409,7 @@ class ScheduleConfig(_Strict):
     entry_max_card_age_min: float = Field(
         default=0.0,
         ge=0.0,
-        le=1440.0,
+        le=4320.0,
         description="开仓前查卡龄：这个币上次开会距今超过这么久，这次信号不开仓（卡上信号暂时清空），"
         "先补开一场该币的会，新结论出来后的信号再开。0 = 不查。要在 event_triggers 里带 "
         "stale_card_on_entry 才会补会，否则只拦不补。",
@@ -507,6 +524,7 @@ class SlowConfig(_Strict):
             max_retries=m.max_retries,
             reasoning_effort=m.reasoning_effort,
             price_per_mtok={"flash": (p.flash_in, p.flash_out), "pro": (p.pro_in, p.pro_out)},
+            analyst_klines=m.analyst_klines,
             analysts_crypto=m.analysts_crypto,
             analysts_stock=m.analysts_stock,
             reddit=self.social.reddit,

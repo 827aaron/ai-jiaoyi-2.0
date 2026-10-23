@@ -259,21 +259,22 @@ def test_profile_defaults_for_events_slowdown_and_schedule() -> None:
     assert s15.slowdown_interval_min == 30
     s2 = slow_defaults("2h").schedule
     assert s2.event_meeting_enabled and s2.slowdown_interval_min == 360
+    assert s2.entry_max_card_age_min == 360
     assert set(s2.event_triggers) == {"key_level_break", "move_since_card", "new_head_symbol"}
     s6 = slow_defaults("6h").schedule
     assert s6.over_budget == "stop" and s6.slowdown_interval_min is None
-    assert "predictor_against_card" in s6.event_triggers and s6.entry_max_card_age_min == 0
+    assert "predictor_against_card" in s6.event_triggers and s6.entry_max_card_age_min == 1080
     s12 = slow_defaults("12h").schedule
-    assert s12.entry_max_card_age_min == 360 and "stale_card_on_entry" in s12.event_triggers
+    assert s12.entry_max_card_age_min == 2160 and "stale_card_on_entry" in s12.event_triggers
     s24 = slow_defaults("24h").schedule
     assert (s24.schedule_at, s24.entry_max_card_age_min, s24.event_max_per_day) == (
         "08:00",
-        480,
+        2160,
         24,
     )
     kw = slow_defaults("24h").commander_kwargs()
     assert kw["schedule_at"] == "08:00" and kw["slowdown"] is None
-    assert kw["events"].entry_max_age == timedelta(minutes=480)  # type: ignore[union-attr]
+    assert kw["events"].entry_max_age == timedelta(minutes=2160)  # type: ignore[union-attr]
     assert slow_defaults("2h").commander_kwargs()["slowdown"] == (
         timedelta(minutes=380),
         timedelta(minutes=360),

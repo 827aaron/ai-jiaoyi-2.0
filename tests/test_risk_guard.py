@@ -243,9 +243,18 @@ def test_max_qty_cap_below_minimum_rejects(now: datetime) -> None:
 def test_stop_moves_beyond_nearby_key_level(now: datetime) -> None:
     # 多单入场 68000，止损 1.5 ATR=120 → 67880；支撑 67860 在外侧 20 处 → 挪到 67860-8
     levels = [{"price": 67860.0, "kind": "support", "note": ""}]
-    v = guard().review(signal(now), jev(), card(now, key_levels=levels), account(now), now)
+    v = guard(stop_level_snap=True).review(
+        signal(now), jev(), card(now, key_levels=levels), account(now), now
+    )
     assert v.intent is not None
     assert v.intent.stop_loss_pct == pytest.approx((68000 - 67852) / 68000 * 100)
+
+
+def test_stop_ignores_key_levels_by_default(now: datetime) -> None:
+    levels = [{"price": 67860.0, "kind": "support", "note": ""}]
+    v = guard().review(signal(now), jev(), card(now, key_levels=levels), account(now), now)
+    assert v.intent is not None
+    assert v.intent.stop_loss_pct == pytest.approx(120 / 68000 * 100)  # 1.5 ATR，不挪
 
 
 def test_daily_halt_latches_and_resets_at_bangkok_midnight() -> None:

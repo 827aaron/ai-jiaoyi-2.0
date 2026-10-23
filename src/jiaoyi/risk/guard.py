@@ -382,7 +382,8 @@ class RiskGuardImpl:
             reasons.append("作战卡止损 ATR 倍数为 0")
             return None
         dist = mult * atr
-        dist = self._beyond_level(cs, side, entry, dist, hi * atr, atr)
+        if self._fast.stop_level_snap:
+            dist = self._beyond_level(cs, side, entry, dist, hi * atr, atr)
         stop_pct = dist / entry * 100.0
         tp_pct = stop_pct * cs.take_profit_r.min
         detail.update(

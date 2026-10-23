@@ -168,8 +168,8 @@ def test_full_wizard_flow(tmp_path: Path) -> None:
         state = client.get("/api/setup").json()
         assert state["local"] and not state["password_set"] and not state["done"]
         assert (
-            state["basic"]["meeting_interval"] == "1h"
-            and state["basic"]["hold"] == "2h"
+            state["basic"]["meeting_interval"] == "2h"
+            and state["basic"]["hold"] == "4h"
             and state["keychain"] is True
         )
 

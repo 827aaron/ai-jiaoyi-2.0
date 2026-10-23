@@ -235,6 +235,11 @@ class FastLoopConfig(Contract):
         le=5.0,
         description="作战卡止损 ATR 倍数的下限，低于它整张卡这个标的不做（止损太近会被噪音扫掉）。",
     )
+    stop_level_snap: bool = Field(
+        default=False,
+        description="止损是否贴关键位：开 = 止损线外侧半个 ATR 内有关键位就挪到它外侧。默认关"
+        "（价格碰到关键位后 93% 会穿过 0.1 ATR，和随手画的线一样）。",
+    )
     stop_level_buffer_atr: float = Field(
         default=0.1, ge=0.0, le=1.0, description="止损放在关键位外侧多少个 ATR。"
     )

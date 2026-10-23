@@ -21,8 +21,8 @@ MISSING_SLOW = ROOT / "config" / "no-such-slow.toml"
 def _app_toml(tmp_path: Path, *lines: str) -> Path:
     text = (
         APP.read_text(encoding="utf-8")
-        .replace('meeting_interval = "1h"', "")
-        .replace('hold = "2h"', "")
+        .replace('meeting_interval = "2h"', "")
+        .replace('hold = "4h"', "")
     )
     text = text.replace('mode = "paper"', "\n".join(['mode = "paper"', *lines]))
     path = tmp_path / "app.toml"
@@ -45,23 +45,23 @@ def test_every_tier_is_complete_and_valid(tmp_path: Path) -> None:
     for name in profiles.HOLDS:
         cfg = load_app_config(_app_toml(tmp_path, f'hold = "{name}"'))
         want = profiles.HOLD[name]["fast_loop"]
-        assert cfg.hold == name and cfg.meeting_interval == "1h"
+        assert cfg.hold == name and cfg.meeting_interval == "2h"
         assert cfg.fast_loop.time_limit_s == want["time_limit_s"]
         assert cfg.fast_loop.atr_period_min == want["atr_period_min"]
         assert cfg.fast_loop.min_stop_fee_multiple == want["min_stop_fee_multiple"]
         assert cfg.keeper_interval_s == profiles.HOLD[name]["app"]["keeper_interval_s"]
 
 
-def test_defaults_are_1h_meeting_and_2h_hold(tmp_path: Path) -> None:
+def test_defaults_are_2h_meeting_and_4h_hold(tmp_path: Path) -> None:
     cfg = load_app_config(_app_toml(tmp_path))
-    assert (cfg.meeting_interval, cfg.hold) == ("1h", "2h")
-    assert cfg.slow_loop_interval_min == 60 and cfg.fast_loop.time_limit_s == 7200
+    assert (cfg.meeting_interval, cfg.hold) == ("2h", "4h")
+    assert cfg.slow_loop_interval_min == 120 and cfg.fast_loop.time_limit_s == 14400
     cfg = load_app_config(_app_toml(tmp_path, 'meeting_interval = "6h"', "keeper_interval_s = 30"))
     assert cfg.keeper_interval_s == 30 and cfg.slow_loop_interval_min == 360  # 写了的优先
 
 
 def test_hold_defaults_to_recommended_pairing(tmp_path: Path) -> None:
-    rec = {"15m": "30m", "30m": "1h", "1h": "2h", "2h": "4h"}
+    rec = {"15m": "1h", "30m": "2h", "1h": "4h", "2h": "4h"}
     for meeting, hold in rec.items():
         cfg = load_app_config(_app_toml(tmp_path, f'meeting_interval = "{meeting}"'))
         assert (
@@ -138,12 +138,12 @@ def test_check_config_shows_tiers_and_overrides(
 
 
 def test_long_hold_tiers(tmp_path: Path) -> None:
-    for name, atr, patrol in (("8h", 60, 2.5), ("12h", 60, 3.0), ("24h", 240, 3.0)):
+    for name, atr, patrol in (("8h", 60, 2.5), ("12h", 60, 3.0), ("24h", 240, 4.0)):
         cfg = load_app_config(_app_toml(tmp_path, f'hold = "{name}"'))
         assert cfg.fast_loop.atr_period_min == atr
         assert cfg.fast_loop.patrol_shock_pct_1m == patrol
         assert cfg.fast_loop.funding_against_max_bp == 5.0
-    rec = {"6h": "8h", "12h": "12h", "24h": "24h"}
+    rec = {"6h": "12h", "12h": "24h", "24h": "24h"}
     for meeting, hold in rec.items():
         assert load_app_config(_app_toml(tmp_path, f'meeting_interval = "{meeting}"')).hold == hold
     assert profiles.hold_for_seconds(30000) == "12h"

@@ -49,6 +49,7 @@ analysts_crypto = ["market", "social", "news"]                 # 分析师越少
 analysts_stock  = ["market", "social", "news", "fundamentals"]
 debate_rounds = 1        # 多空辩论轮数 0–3
 risk_rounds   = 1        # 风控讨论轮数 0–3
+# analyst_klines = ["15m x 96", "1h x 72", "4h x 60"]  # 分析师看的 K 线（周期 x 根数，从细到粗）；不写 = 按最长持仓档（30m–2h 这一组；4h 起 1h x 72 / 4h x 90 / 1d x 60）
 # quick_model / deep_model 不写 = 用所选 provider 的默认模型
 # （两档默认都是 DeepSeek 4.1：deepseek 直连 deepseek-flash；openrouter deepseek/deepseek-v4.1-flash）
 pick_tier    = "quick"   # 总盘会（挑币）用 quick（flash，便宜）还是 deep（pro）
