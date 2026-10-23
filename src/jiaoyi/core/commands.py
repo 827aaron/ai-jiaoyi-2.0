@@ -8,6 +8,9 @@
   同一个 id 只执行一次（防重放）。
 - 过期（``expires_at`` 已过）、时间戳在未来、有效期超过 5 分钟、格式不对的指令一律不执行。
 - 面板密码在面板侧校验（``live_gate.json`` 的哈希）；这里只认文件。面板和 API 只在本机或内网。
+- 安全边界：谁能写 ``data/panel_commands/`` 谁就能暂停和平仓。面板写指令前必须校验面板密码
+  （复用 LiveGate 的 scrypt 和锁定）、CSRF/Origin 和 Host 白名单；本机文件权限是最后一道防线，
+  ``data/`` 只给运行用户读写。
 
 ``data/paused.json``：人工暂停开新仓的状态，由主循环在执行 pause / resume / close_all
 时写，重启后仍生效；文件损坏按已暂停处理。
