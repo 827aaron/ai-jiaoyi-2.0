@@ -226,7 +226,13 @@ def _build_cards(
     brief = MarketBriefService(clock=clock)
     closers.append(brief.aclose)
     fast = app_cfg.fast_loop
-    stop = StopScale(fast.atr_period_min, fast.min_stop_atr, fast.max_stop_atr)
+    stop = StopScale(
+        fast.atr_period_min,
+        fast.min_stop_atr,
+        fast.max_stop_atr,
+        fast.min_tp_r,
+        fast.max_tp_r,
+    )
     engine = TradingAgentsEngine(
         risk_cfg,
         secrets,

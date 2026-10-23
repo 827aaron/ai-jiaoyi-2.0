@@ -259,12 +259,14 @@ def atr_interval(minutes: int) -> str:
     return "1h" if minutes == 60 else f"{minutes}m"
 
 
-def describe_atr(atr: float | None, price: float | None, minutes: int, lo: float, hi: float) -> str:
+def describe_atr(atr: float | None, price: float | None, stop: StopScale) -> str:
     """给会议提示词用的 ATR 说明；拿不到数值时明说，让模型别瞎猜价格尺度。"""
-    name = atr_interval(minutes)
+    name = atr_interval(stop.period_min)
     head = (
         f"止损倍数按 {name} ATR({ATR_PERIOD}) 计（周期由风控配置决定，不是 1h K 线上看到的 ATR），"
-        f"每个标的的止损倍数必须在 {lo:g}–{hi:g} 之间，超出整张卡这个标的会被保镖拒绝"
+        f"每个标的的止损倍数必须在 {stop.min_stop_atr:g}–{stop.max_stop_atr:g} 之间，"
+        f"止盈倍数（止损距离的倍数）必须在 {stop.min_tp_r:g}–{stop.max_tp_r:g} 之间，"
+        "超出整张卡这个标的会被保镖拒绝"
     )
     if atr is None or price is None or price <= 0:
         return head + "；该币当前 ATR 数值暂不可用"
@@ -274,14 +276,13 @@ def describe_atr(atr: float | None, price: float | None, minutes: int, lo: float
 
 def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
     """取与保镖同周期的 K 线算 ATR。失败只说明不可用，不影响开会。"""
-    m, lo, hi = stop.period_min, stop.min_stop_atr, stop.max_stop_atr
     try:
-        rows = _klines(symbol, atr_interval(m), 60, end)
+        rows = _klines(symbol, atr_interval(stop.period_min), 60, end)
         closed = [r for r in rows if r[6] <= int(end.timestamp() * 1000)]  # 去掉还没收盘的那根
         price = float(closed[-1][4]) if closed else None
-        return describe_atr(wilder_atr(closed), price, m, lo, hi)
+        return describe_atr(wilder_atr(closed), price, stop)
     except Exception:
-        return describe_atr(None, None, m, lo, hi)
+        return describe_atr(None, None, stop)
 
 
 def _ema(xs: Sequence[float], n: int) -> list[float]:

@@ -401,3 +401,16 @@ def test_clamp_raises_too_tight_stop_into_guard_band() -> None:
     assert wide.stop_atr.max == 4.0
     ok = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=1, max=2)), RISK, band)
     assert (ok.stop_atr.min, ok.stop_atr.max) == (1, 2)
+
+
+def test_clamp_raises_too_low_take_profit_into_guard_band() -> None:
+    from jiaoyi.contracts import Range
+    from jiaoyi.slow.commander import StopScale
+
+    band = StopScale(15, 0.5, 4.0, 1.0, 6.0)
+    low = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=0.3, max=0.8)), RISK, band)
+    assert low.take_profit_r.min >= 1.0  # 不会被保镖的 min_tp_r 整张拒掉
+    high = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=3, max=12)), RISK, band)
+    assert high.take_profit_r.max == 6.0
+    ok = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=1.5, max=3)), RISK, band)
+    assert (ok.take_profit_r.min, ok.take_profit_r.max) == (1.5, 3)
