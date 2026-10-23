@@ -179,7 +179,8 @@ async def test_entry_gate_logs(tmp_path: Path, now: datetime) -> None:
     t.fail = RuntimeError("down")
     await gate.evaluate(signal(now), card(now), now)
     recs = log.read_day(now.date().isoformat())
-    assert [r.outcome for r in recs] == [c.Outcome.PASS, c.Outcome.ERROR]
+    assert [r.outcome for r in recs] == [c.Outcome.INFO, c.Outcome.ERROR]
+    assert "门槛由保镖判定" in recs[0].summary
     assert recs[0].cost_usd > 0 and recs[0].input["jev"]["snapshot"]
     assert recs[1].output["jev"]["answers"] == {}
 

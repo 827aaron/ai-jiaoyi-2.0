@@ -114,18 +114,18 @@ class JevEntryGate:
         if self._rec is None:
             return
         side = "多" if signal.side_hint == Side.LONG else "空"
+        # 拍板只记概率；放不放行由保镖按当前生效门槛判定（同一份口径），这里不自己标 pass/reject。
         if not resp.ok:
             outcome = Outcome.ERROR if request is not None else Outcome.REJECT
+            tail = ""
         else:
-            take = resp.answer(EntryQuestion.TAKE.value)
-            outcome = (
-                Outcome.PASS if take is not None and take.top()[0] == "take" else Outcome.REJECT
-            )
+            outcome = Outcome.INFO
+            tail = "，门槛由保镖判定"
         inp, out = jev_log_fields(request, resp)
         self._rec.record(
             now,
             outcome,
-            f"{signal.symbol} {side}：{summarize(resp)}（{resp.latency_ms:.0f}ms）",
+            f"{signal.symbol} {side}：{summarize(resp)}（{resp.latency_ms:.0f}ms{tail}）",
             symbol=signal.symbol,
             signal_id=signal.signal_id,
             card_id=card.card_id if card is not None else None,

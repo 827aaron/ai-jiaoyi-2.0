@@ -7,7 +7,7 @@ hold = "4h"                  # 最长持仓档：30m / 1h / 2h / 4h（默认）/
                              # 两个档位各选各的，给出下面标“档位”的键的默认值（数值见 src/jiaoyi/core/profiles.py）；
                              # 你写了的键优先，想让档位生效就别写。切档要重启；旧的 profile 键自动当 meeting_interval
 # predictor_enabled = true   # 档位：预测员 Kronos 开关
-signal_dedup_s = 30          # 同一信号冷却 30 秒
+# signal_dedup_s = 300        # 同一币同信号同方向的冷却秒数；不写跟最长持仓档（30m 60 / 1h 120 / 2h 300 / 4h 及以上 600）
 jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 OpenRouter 首次 963ms，之后约 500ms）
 # keeper_interval_s = 20     # 最长持仓档：持仓管家多久看一次（30m 10 秒 / 1h 15 / 2h 20 / 4h 30）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次

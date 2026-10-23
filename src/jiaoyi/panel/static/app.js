@@ -1473,7 +1473,7 @@ const HINT = {
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
-const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走" };
+const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4" };
 // 这几项填 0 = 不设限
 const ZERO_AS = { min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查" };
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分

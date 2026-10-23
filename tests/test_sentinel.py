@@ -118,3 +118,11 @@ def test_logs_each_signal(tmp_path: Path, now: datetime) -> None:
     breakout(t, now, card(now))
     recs = log.read_day(now.date().isoformat())
     assert len(recs) == 1 and recs[0].role == c.Role.SENTINEL and "放量突破" in recs[0].summary
+
+
+def test_volume_surge_off_outside_paper_by_default(now: datetime) -> None:
+    f = features(now, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8)
+    cd = card(now, allowed_signals=["volume_surge"])
+    assert trig(live=True).check(f, cd, now) == []
+    on = RuleTrigger(FAST.model_copy(update={"volume_surge_live": True}), live=True)
+    assert [s.kind for s in on.check(f, cd, now)] == [c.SignalKind.VOLUME_SURGE]

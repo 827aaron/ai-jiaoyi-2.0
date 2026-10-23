@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jiaoyi import contracts as c
 from jiaoyi import interfaces as i
 from jiaoyi.core.recorder import RoleRecorder
@@ -196,3 +198,17 @@ def test_patrol_window_forgets_old_highs(now: datetime) -> None:
     p.check(_trade(now, 70000.0), pos)
     # 2 分钟后的价格和 1 分钟窗口外的高点比，不算冲击
     assert p.check(_trade(now + timedelta(minutes=2), 68000.0), pos) is None
+
+
+def test_patrol_lines_never_tighter_than_the_stop(now: datetime) -> None:
+    """冲击线 = max(档位百分比, 1.0 × 止损%)，报警线 = max(档位百分比, 0.5 × 止损%)。"""
+    p = RulePatrol(FAST)
+    wide = [position(now, stop_loss_price=68000.0 * (1 - 0.03))]  # 止损 3%
+    assert p.lines(wide[0]) == pytest.approx((1.5, 3.0))
+    assert p.lines(position(now)) == (FAST.patrol_alert_pct_1m, FAST.patrol_shock_pct_1m)
+    p.check(_trade(now, 68000.0), wide)
+    # -2.06%：超过档位 2% 但没到止损 3%，只让管家复查
+    assert p.check(_trade(now + timedelta(seconds=20), 66600.0), wide) is None
+    assert "pos-1" in p.urgent
+    a = p.check(_trade(now + timedelta(seconds=30), 65900.0), wide)  # -3.09%
+    assert a is not None and "≥3.00%" in a.reason

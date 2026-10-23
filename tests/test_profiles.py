@@ -149,3 +149,12 @@ def test_long_hold_tiers(tmp_path: Path) -> None:
     for meeting, hold in rec.items():
         assert load_app_config(_app_toml(tmp_path, f'meeting_interval = "{meeting}"')).hold == hold
     assert profiles.hold_for_seconds(30000) == "12h"
+
+
+def test_signal_dedup_follows_hold_unless_written(tmp_path: Path) -> None:
+    want = {"30m": 60, "1h": 120, "2h": 300, "4h": 600, "8h": 600, "12h": 600, "24h": 600}
+    for hold, s in want.items():
+        cfg = load_app_config(_app_toml(tmp_path, f'hold = "{hold}"'))
+        assert cfg.signal_dedup_s == s, hold
+    cfg = load_app_config(_app_toml(tmp_path, 'hold = "2h"', "signal_dedup_s = 45"))
+    assert cfg.signal_dedup_s == 45

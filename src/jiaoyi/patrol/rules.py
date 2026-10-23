@@ -7,6 +7,10 @@
   让持仓管家马上（不等 15–30 秒）用决策模型复查一次。这就是巡逻兵“规则 + Jev”里 Jev 的部分：
   判断交给管家，巡逻兵本身永远只能平仓、不能开仓或放宽止损。
 同一个标的 30 秒内只要求一次，避免重复下平仓。
+
+两条线都不低于这笔的止损距离：冲击线 = max(档位百分比, ``patrol_shock_stop_mult`` × 止损%)，
+报警线 = max(档位百分比, ``patrol_alert_stop_mult`` × 止损%)。急动后多半会回一部分，冲击线比止损
+还近时巡逻兵会割在低点（orders-spec P1）。
 """
 
 from __future__ import annotations
@@ -43,6 +47,17 @@ class RulePatrol:
         self.urgent: set[str] = set()
         """需要管家马上复查的 position_id；管家复查后由接线代码 ``discard``。"""
 
+    def lines(self, pos: PositionRecord) -> tuple[float, float]:
+        """这笔持仓的（报警线, 冲击线），百分比。没有止损价就只用档位百分比。"""
+        cfg = self._cfg
+        stop = 0.0
+        if pos.entry_price and pos.stop_loss_price:
+            stop = abs(pos.entry_price - pos.stop_loss_price) / pos.entry_price * 100.0
+        return (
+            max(cfg.patrol_alert_pct_1m, cfg.patrol_alert_stop_mult * stop),
+            max(cfg.patrol_shock_pct_1m, cfg.patrol_shock_stop_mult * stop),
+        )
+
     def check(self, event: MarketEvent, positions: Sequence[PositionRecord]) -> PatrolAction | None:
         if isinstance(event, Trade):
             price = event.price
@@ -65,18 +80,21 @@ class RulePatrol:
             return None
         hi = max(p for _, p in dq)
         lo = min(p for _, p in dq)
-        worst = 0.0
+        hit: list[tuple[float, float]] = []  # (逆向波动, 这笔的冲击线)
         for pos in mine:
             # 多单怕从 1 分钟高点跌下来，空单怕从低点涨上去
             adverse = (
                 (1.0 - price / hi) * 100.0 if pos.side == Side.LONG else (price / lo - 1.0) * 100.0
             )
-            worst = max(worst, adverse)
-            if self._cfg.patrol_alert_pct_1m <= adverse < self._cfg.patrol_shock_pct_1m:
+            alert, shock = self.lines(pos)
+            if adverse >= shock:
+                hit.append((adverse, shock))
+            elif adverse >= alert:
                 self.urgent.add(pos.position_id)
 
-        if worst < self._cfg.patrol_shock_pct_1m:
+        if not hit:
             return None
+        worst, shock = max(hit)
         last = self._last_action.get(sym)
         if last is not None and now - last < REPEAT:
             return None
@@ -84,9 +102,7 @@ class RulePatrol:
         action = PatrolAction(
             ts=now,
             symbols=[sym],
-            reason=(
-                f"{sym} 1 分钟内逆向波动 {worst:.2f}%（≥{self._cfg.patrol_shock_pct_1m}%），全平"
-            ),
+            reason=f"{sym} 1 分钟内逆向波动 {worst:.2f}%（≥{shock:.2f}%），全平",
         )
         if self._rec is not None:
             self._rec.record(

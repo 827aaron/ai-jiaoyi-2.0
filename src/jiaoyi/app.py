@@ -521,6 +521,7 @@ def build_modules(
             dedup_s=app_cfg.signal_dedup_s,
             recorder=recorders[Role.SENTINEL],
             predictor=predictor,
+            live=RunMode(app_cfg.mode) is not RunMode.PAPER,
         ),
         predictor=predictor,
         decision_model=decision_model,
