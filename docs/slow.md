@@ -31,7 +31,7 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 |---|---|
 | K 线、技术指标（TradingAgents 的 `get_stock_data` / `get_indicators`） | ✅ 已换成币安 U 本位永续小时线（`binance` 数据源，见 `tradingagents_engine.py`），指标在本地计算 |
 | 选币用的成交额、点差、深度、资金费率、持仓量变化 | ✅ 币安公开接口（`binance_stats.py`），喂给选币和总盘会 |
-| 资金费率、持仓量**喂给 TradingAgents 的分析师** | ❌ 还没有。它的分析师现在看不到资金费率和持仓量，只在总盘会（选币分数）里用到 |
+| 资金费率、持仓量**喂给 TradingAgents 的分析师** | ✅ 附在 `get_stock_data` 的输出后面（最近 6 次资金费率 + 24 小时持仓量变化），拿不到只写“暂不可用”，K 线照常 |
 | 新闻 / 公告 | ✅ 已换成 `slow/news.py` 的 `NewsHub`（见下节）；美股永续仍走 TradingAgents 自带的 yfinance 新闻 |
 | 美股永续的财报、新闻 | 保留 TradingAgents 自带工具（SEC EDGAR / yfinance） |
 
@@ -52,3 +52,7 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 - **币安下架公告 → 禁止新开仓**：7 天内的币安下架 / 移除公告提到我们交易的币 → `block_symbol`，作战卡里该币立刻读成“只看不做”（保镖本来就只认卡，所以不用改保镖；已有持仓不受影响，由持仓管家和人处理）。宁可多挡：现货交易对移除的公告提到同名币也会挡。进程重启后由新闻源重新补上。
 
 接线（主循环，架构师）：创建 `NewsHub(default_sources(), log)`，传给 `TradingAgentsEngine(news=hub)`，并定时 `await hub.poll_and_notify(pool_symbols, commander.notify_news, commander.block_symbol)`。
+
+## 误封后怎么解封
+
+下架公告匹配是宽松的（宁可多挡，例如现货交易对移除公告提到同名币）。目前 `BattleCardCommander.unblock_symbol(symbol)` 只有代码入口；进程重启后会由新闻源按 7 天窗口重新补封。要给人一个入口，需要架构师在 `app.py` / 面板的“设置”页暴露 `blocked_symbols` 和 `unblock_symbol`（同时显示被封的币和原因）。在那之前，误封的处理办法是等公告超出 7 天，或在代码里调用 `unblock_symbol`。

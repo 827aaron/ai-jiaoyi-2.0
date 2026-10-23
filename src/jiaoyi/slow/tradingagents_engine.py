@@ -135,7 +135,56 @@ def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     return (
         f"# {binance_symbol(symbol)} 币安永续 1h K 线（{start_date} → {end_date}）\n"
         + "\n".join(lines)
+        + "\n\n"
+        + derivatives_context(symbol, end)
     )
+
+
+_FAPI = "https://fapi.binance.com"
+
+
+def format_derivatives(
+    funding: Sequence[Mapping[str, Any]], oi: Sequence[Mapping[str, Any]]
+) -> str:
+    """资金费率历史 + 持仓量 24 小时变化 → 给分析师看的一段文字。纯函数，便于测试。"""
+    lines = ["## 衍生品数据（币安 U 本位永续）"]
+    if funding:
+        rates = [float(f["fundingRate"]) * 100 for f in funding]
+        hist = "，".join(f"{r:+.4f}%" for r in rates[-6:])
+        lines.append(f"- 资金费率（%，最近 {min(len(rates), 6)} 次，由旧到新）：{hist}")
+        lines.append(f"- 最新一次资金费率 {rates[-1]:+.4f}%（正：多头付费，拥挤做多；负相反）")
+    if len(oi) >= 2:
+        first, last = float(oi[0]["sumOpenInterestValue"]), float(oi[-1]["sumOpenInterestValue"])
+        if first > 0:
+            chg = (last - first) / first * 100
+            lines.append(
+                f"- 持仓量（USDT 计）{first:,.0f} → {last:,.0f}，{len(oi) - 1} 小时变化 {chg:+.2f}%"
+            )
+    if len(lines) == 1:
+        lines.append("- （暂无数据）")
+    return "\n".join(lines)
+
+
+def derivatives_context(symbol: str, end: datetime) -> str:
+    """资金费率和持仓量变化。失败只说明不可用，不让 K 线数据跟着失败。"""
+    sym = binance_symbol(symbol)
+    try:
+        end_ms = int(end.timestamp() * 1000)
+        f = httpx.get(
+            f"{_FAPI}/fapi/v1/fundingRate",
+            params={"symbol": sym, "limit": 9, "endTime": end_ms},
+            timeout=10.0,
+        )
+        f.raise_for_status()
+        o = httpx.get(
+            f"{_FAPI}/futures/data/openInterestHist",
+            params={"symbol": sym, "period": "1h", "limit": 25, "endTime": end_ms},
+            timeout=10.0,
+        )
+        o.raise_for_status()
+        return format_derivatives(f.json(), o.json())
+    except Exception as exc:  # 衍生品数据只是补充，拿不到不影响会议
+        return f"## 衍生品数据\n- （暂不可用：{type(exc).__name__}）"
 
 
 def _ema(xs: Sequence[float], n: int) -> list[float]:
