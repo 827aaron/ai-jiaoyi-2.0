@@ -7,6 +7,8 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from jiaoyi import interfaces as i
 from jiaoyi.contracts import Health, Kline, Outcome, Role
 from jiaoyi.contracts.market import Interval
@@ -169,3 +171,18 @@ async def test_close_cancels_background_inference() -> None:
     await f.on_kline(bar(2))
     f.close()
     await f.wait_idle()
+
+
+def test_auto_device_skips_mps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mac mini 上 MPS 每次报 dropout 不支持，auto 直接用 CPU；显式写 mps 仍然尊重。"""
+    import types
+
+    from jiaoyi.predictor import kronos as kmod
+
+    fake = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+    )
+    monkeypatch.setattr(kmod.importlib, "import_module", lambda name: fake)
+    assert kmod.OfficialKronosBackend(KronosSettings())._pick_device() == "cpu"
+    assert kmod.OfficialKronosBackend(KronosSettings(device="mps"))._pick_device() == "mps"

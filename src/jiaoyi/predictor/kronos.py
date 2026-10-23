@@ -5,7 +5,8 @@
 
 - 开关关闭、数据不够、推理失败、结果过期，``latest`` 一律返回 ``None``，快环无感运行。
 - 推理放在单线程池里，不占事件循环；同一标的上一次没算完就丢弃新的，不排队。
-- Mac mini 上 MPS 报错自动退回 CPU；任何异常都只记状态，不向外抛。
+- Mac mini 上默认用 CPU（MPS 实测每次报错）；显式选 MPS/CUDA 出错也会退回 CPU 并一直用 CPU。
+  任何异常都只记状态，不向外抛。
 - 每次推理写一条 ``DecisionRecord`` 并上报 ``ModuleStatus``（耗时、成功率、最近错误）。
 """
 
@@ -70,7 +71,7 @@ class KronosSettings:
     repo_dir: str = "vendor/Kronos"
     """官方 Kronos 源码目录（它不是 pip 包），见 predictor/README.md。"""
     device: str = "auto"
-    """``auto``：有 MPS/CUDA 用，否则 CPU；也可写 ``cpu``。"""
+    """``auto``：有 CUDA 用 CUDA，否则 CPU（不自动选 MPS）；也可写 ``cpu`` / ``mps``。"""
     model_name: str = "Kronos-small"
 
 
@@ -106,8 +107,8 @@ class OfficialKronosBackend:
         torch = importlib.import_module("torch")
         if torch.cuda.is_available():
             return "cuda"
-        if torch.backends.mps.is_available():
-            return "mps"
+        # Mac mini M4 实测：MPS 每次都报 "scaled_dot_product_attention for MPS does not support
+        # dropout" 再退回 CPU，白白多一次失败。auto 直接用 CPU（约 3.1 秒/币，4 条路径 × 12 根 5m）
         return "cpu"
 
     def _load(self, device: str) -> None:
