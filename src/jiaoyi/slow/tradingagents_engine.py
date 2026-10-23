@@ -43,7 +43,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow.commander import Analysis, Pick, PickResult
-from jiaoyi.slow.liquidations import LiquidationStats, describe_total
+from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
@@ -378,7 +378,7 @@ class TradingAgentsEngine:
         settings: TradingAgentsSettings | None = None,
         today: Callable[[], datetime] = lambda: datetime.now(UTC),
         news: NewsHub | None = None,
-        liquidations: LiquidationStats | None = None,
+        liquidations: LiquidationSource | None = None,
     ) -> None:
         key = secrets.get("DEEPSEEK_API_KEY")
         if not key:

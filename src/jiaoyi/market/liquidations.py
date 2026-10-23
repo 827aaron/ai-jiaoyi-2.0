@@ -19,7 +19,7 @@ DEFAULT_WINDOW = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
-class LiquidationStats:
+class LiquidationSource:
     """某个标的一段时间内的强平汇总（USDT）。"""
 
     symbol: str
@@ -48,7 +48,7 @@ class LiquidationTracker:
 
     def stats(
         self, symbol: str, now: datetime, window: timedelta = DEFAULT_WINDOW
-    ) -> LiquidationStats:
+    ) -> LiquidationSource:
         long_u = short_u = 0.0
         n = 0
         for ts, usdt, was_long in self._q.get(symbol, ()):
@@ -58,7 +58,7 @@ class LiquidationTracker:
                     long_u += usdt
                 else:
                     short_u += usdt
-        return LiquidationStats(symbol, long_u, short_u, n)
+        return LiquidationSource(symbol, long_u, short_u, n)
 
     def liquidations_1h_usdt(self, symbol: str, now: datetime) -> float:
         """选币要的那个数：近 1 小时强平总额。没有数据返回 0。"""
@@ -66,7 +66,7 @@ class LiquidationTracker:
 
     def all_stats(
         self, now: datetime, window: timedelta = DEFAULT_WINDOW
-    ) -> list[LiquidationStats]:
+    ) -> list[LiquidationSource]:
         """所有有记录的标的，按强平总额从大到小。"""
         out = [self.stats(sym, now, window) for sym in self._q]
         return sorted((s for s in out if s.count), key=lambda s: -s.total_usdt)

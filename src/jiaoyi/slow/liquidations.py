@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Protocol
 
 
-class LiquidationStats(Protocol):
+class LiquidationSource(Protocol):
     def liquidations_1h_usdt(self, symbol: str, now: datetime) -> float:
         """该币近 1 小时被强平的名义额，USDT（多空合计）。"""
         ...
