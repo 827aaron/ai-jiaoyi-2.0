@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import os
@@ -40,6 +39,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
+from jiaoyi.core.config import ConfigError
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
@@ -91,7 +91,7 @@ from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
-from jiaoyi.slow.settings import SlowConfig, slow_defaults
+from jiaoyi.slow.settings import SlowConfig, missing_slow_stack, slow_defaults
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
 
@@ -209,7 +209,7 @@ def _build_cards(
     liquidations: LiquidationSource | None = None,
     slow_cfg: SlowConfig | None = None,
 ) -> tuple[BattleCardProvider, NewsHub | None]:
-    """军师团：有 DeepSeek key 且装了 ``jiaoyi[slow]`` 才用真的，否则用桩（没卡 = 不开新仓）。
+    """军师团：有 key 就用真的（没装 slow 依赖直接报错）；没有 key 才用桩（没卡 = 不开新仓）。
 
     新闻源只服务军师团（开会素材、大消息触发、下架封禁），军师团是桩时不拉新闻。
     """
@@ -218,16 +218,21 @@ def _build_cards(
     if not secrets.get(key_env):
         log.warning("没有 %s，军师团用桩：不出作战卡，快环不会开新仓", key_env)
         return StubBattleCardProvider(), None
-    if importlib.util.find_spec("tradingagents") is None:
-        log.warning("没装 tradingagents（uv pip install -e '.[slow]'），军师团用桩")
-        return StubBattleCardProvider(), None
+    if problem := missing_slow_stack(cfg, secrets):
+        raise ConfigError(problem)  # 有 key 就不许静默用桩，否则 M2 会空跑
     news = NewsHub(default_sources(), decision_log, clock=clock)
     closers.append(news.aclose)
     # 市场简报每轮算一次，总盘会和各币会议共用
     brief = MarketBriefService(clock=clock)
     closers.append(brief.aclose)
     fast = app_cfg.fast_loop
-    stop = StopScale(fast.atr_period_min, fast.min_stop_atr, fast.max_stop_atr)
+    stop = StopScale(
+        fast.atr_period_min,
+        fast.min_stop_atr,
+        fast.max_stop_atr,
+        fast.min_tp_r,
+        fast.max_tp_r,
+    )
     engine = TradingAgentsEngine(
         risk_cfg,
         secrets,

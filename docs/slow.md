@@ -125,4 +125,8 @@ Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模
 
 作战卡里的 `stop_atr` 是 **ATR(14) 的倍数，周期由 `risk.toml` 的 `atr_period_min` 决定**（5/15/30/60 分钟，默认 15；Wilder 平滑，与快环特征层、保镖同一算法）。整理作战指令的提示词里不写死周期：它按配置写明周期，附上该币当前这个周期的 ATR 数值和占价格的百分比（取不到时明说“暂不可用”），并告诉军师止损倍数必须落在 `fast_loop.min_stop_atr`–`max_stop_atr` 之间。会议分析师看到的指标仍是 1h K 线，那是看趋势用的，不是止损尺度。
 
-慢环这边也把 `stop_atr` 夹进 `[min_stop_atr, max_stop_atr]`（`clamp_to_risk`），军师给出 0.2–0.4 倍这类过近的止损会被抬到下限，而不是让保镖把整张卡的这个标的拒掉。
+慢环这边也把 `stop_atr` 夹进 `[min_stop_atr, max_stop_atr]`、`take_profit_r` 夹进 `[min_tp_r, max_tp_r]`（`clamp_to_risk`，都来自 `fast_loop`），提示词里同样写明这两个区间。军师给出 0.2–0.4 倍这类过近的止损、或低于下限的止盈倍数，会被抬到下限，而不是让保镖把整张卡的这个标的拒掉白开会。
+
+## 安装与启动检查
+
+`make install` 默认连军师团依赖（`.[dev,slow]`，TradingAgents 钉提交）一起装。配了军师团的 key（`DEEPSEEK_API_KEY` 或 `OPENROUTER_API_KEY`，看 `[llm] provider`）却没装 `tradingagents` 时，`jiaoyi run / status` 和 `jiaoyi check-config` 直接报错退出，**不再静默用桩**——否则 M2 会空跑（不出卡、不开新仓却看不出来）。没有 key 时仍用桩，M0/M1 照常。
