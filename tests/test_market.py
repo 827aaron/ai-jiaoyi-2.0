@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -388,10 +387,74 @@ def test_features_funding_countdown_and_5m_liquidations() -> None:
     assert v["liq_short_usdt_5m"] == pytest.approx(2000.0)
 
 
-async def test_feed_heartbeat_reports_book_reader_status(tmp_path: Path) -> None:
-    """团队页「盘口员」：订阅、连接、今日消息数、最后消息多久前；断流报 down。"""
+class FakeWs:
+    """``recv`` 依次返回给定消息，发完后关闭（或者一直不来，测看门狗）。"""
+
+    def __init__(self, msgs: list[str], *, hang: bool = False) -> None:
+        self.msgs = list(msgs)
+        self.hang = hang
+
+    async def recv(self) -> str:
+        if self.msgs:
+            return self.msgs.pop(0)
+        if self.hang:
+            await asyncio.Event().wait()
+        from websockets.exceptions import ConnectionClosedOK
+        from websockets.frames import Close
+
+        raise ConnectionClosedOK(Close(1000, ""), Close(1000, ""), True)
+
+
+def _agg(m: bool) -> str:
     import json
 
+    data = {"e": "aggTrade", "E": MS, "s": "BTCUSDT", "p": "1", "q": "1", "T": MS, "m": m}
+    return json.dumps({"stream": "btcusdt@aggTrade", "data": data})
+
+
+def test_streams_split_by_route() -> None:
+    """盘口类走 /public/stream，成交 / 标记价格 / K 线 / 强平走 /market/stream。"""
+    from jiaoyi.market.binance_ws import route_of
+
+    assert route_of("btcusdt@depth5@100ms") == "public"
+    assert route_of("btcusdt@bookTicker") == "public"
+    for s in ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@kline_1m", "!forceOrder@arr"):
+        assert route_of(s) == "market"
+
+
+async def test_subscribe_opens_market_and_public_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = BinanceFuturesFeed()
+    opened: list[tuple[str, str, float | None]] = []
+
+    async def run(conn: str, url: str, silent_after: float | None = None) -> None:
+        opened.append((conn, url, silent_after))
+
+    monkeypatch.setattr(feed, "_run", run)
+    await feed.subscribe([f"C{k}USDT" for k in range(41)])  # 41 个币 → 两组
+    await asyncio.sleep(0)
+    conns = {c: (u, w) for c, u, w in opened}
+    assert set(conns) == {"market-0", "public-0", "market-1", "public-1", "liquidations"}
+    m0, p0 = conns["market-0"][0], conns["public-0"][0]
+    assert m0.startswith("wss://fstream.binance.com/market/stream?streams=")
+    assert "@aggTrade" in m0 and "@kline_1m" in m0 and "@markPrice@1s" in m0 and "@depth" not in m0
+    assert p0.startswith("wss://fstream.binance.com/public/stream?streams=")
+    assert "@depth5@100ms" in p0 and "@aggTrade" not in p0
+    assert conns["liquidations"][0].endswith("/market/stream?streams=!forceOrder@arr")
+    assert conns["liquidations"][1] is None and conns["market-0"][1] == feed._stale_s
+    await feed.close()
+
+
+async def test_silent_connection_times_out_for_reconnect() -> None:
+    """连上但不推消息：看门狗到点抛 TimeoutError，_run 会记断线并重连。"""
+    feed = BinanceFuturesFeed()
+    with pytest.raises(TimeoutError):
+        await feed._pump(FakeWs([], hang=True), "market-0", 0.05)  # type: ignore[arg-type]
+
+
+async def test_feed_heartbeat_reports_book_reader_status(tmp_path: Path) -> None:
+    """团队页「盘口员」：订阅、连接、今日消息数、分类计数；某条连接断流报 down。"""
     from jiaoyi.core.store import JsonlDecisionLog
 
     sink = JsonlDecisionLog(tmp_path)
@@ -412,33 +475,25 @@ async def test_feed_heartbeat_reports_book_reader_status(tmp_path: Path) -> None
     st = status()
     assert st.health == c.Health.STARTING and "等第一条行情" in st.headline
 
-    class Ws:
-        def __aiter__(self) -> Any:
-            async def gen() -> Any:
-                for m in (False, True, True):
-                    yield json.dumps({"stream": "btcusdt@aggTrade", "data": {
-                        "e": "aggTrade", "E": MS, "s": "BTCUSDT", "p": "1", "q": "1",
-                        "T": MS, "m": m}})  # fmt: skip
-
-            return gen()
-
-    await feed._pump(Ws())  # type: ignore[arg-type]
+    feed._last["market-0"] = now
+    await feed._pump(FakeWs([_agg(False), _agg(True), _agg(True)]), "market-0")  # type: ignore[arg-type]
     eng = RollingFeatureEngine()
     eng.update(_book(now, 100.0, 1.0, 100.1, 1.0))
     feed.set_coverage(eng.coverage)
     st = status()
     assert st.health == c.Health.OK and st.today.calls == 3
     assert "订阅 1 个币" in st.headline and "盘口新鲜 1 个" in st.headline
+    assert "成交 3" in st.headline
 
-    feed._down.add(0)
+    feed._down.add("public-0")
     feed.reconnects = 2
     st = status()
     assert (
         st.health == c.Health.DEGRADED and "断 1 条" in st.headline and "重连 2 次" in st.headline
     )
 
-    now = now + timedelta(seconds=45)
+    now = feed._last["market-0"] + timedelta(seconds=45)
     st = status()
-    assert st.health == c.Health.DOWN and "断流 45 秒" in st.headline
+    assert st.health == c.Health.DOWN and "market-0 已 45 秒没消息" in st.headline
     await feed.close()
     assert status().health == c.Health.DOWN
