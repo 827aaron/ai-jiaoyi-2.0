@@ -68,7 +68,9 @@ class CardSymbol(Contract):
     size_tier_max: SizeTier = Field(description="今天这个标的最多用到的仓位档。")
     notional_usdt: Range = Field(description="单笔名义价值范围，USDT。")
     leverage: Range = Field(description="杠杆范围，倍。")
-    stop_atr: Range = Field(description="止损距离范围，ATR 倍数，例如 1–2。")
+    stop_atr: Range = Field(
+        description="止损距离范围，ATR(14) 倍数，如 1–2；周期见 risk.toml atr_period_min。"
+    )
     take_profit_r: Range = Field(description="止盈距离范围，止损距离的倍数，例如 1.5–3。")
     reason: str = Field(min_length=1, description="军师给的理由，中文。")
 

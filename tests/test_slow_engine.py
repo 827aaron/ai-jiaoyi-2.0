@@ -164,3 +164,36 @@ async def test_binance_stats_source_uses_liquidation_stats(now: datetime) -> Non
         by["BTCUSDT"].liquidations_1h_usdt == 123_456.0 and by["ETHUSDT"].liquidations_1h_usdt == 0
     )
     await client.aclose()
+
+
+def test_wilder_atr_matches_fast_loop_formula() -> None:
+    from jiaoyi.slow.tradingagents_engine import wilder_atr
+
+    # 每根 [open_time, o, h, l, c]：区间恒为 2、收盘不跳空 → 每根 TR=2，ATR=2
+    rows = [[i, 100, 101, 99, 100] for i in range(20)]
+    assert wilder_atr(rows) == pytest.approx(2.0)
+    assert wilder_atr(rows[:10]) is None  # 根数不够
+    # 最后一根放大：Wilder 平滑 (2*13 + 15)/14
+    rows.append([20, 100, 108, 93, 100])
+    assert wilder_atr(rows) == pytest.approx((2.0 * 13 + 15) / 14)
+
+
+def test_convert_prompt_states_configured_atr_interval_and_value() -> None:
+    from jiaoyi.contracts import Category
+    from jiaoyi.core.config import load_risk_config
+    from jiaoyi.slow.commander import StopScale
+    from jiaoyi.slow.tradingagents_engine import atr_interval, convert_prompt, describe_atr
+    from tests.conftest import ROOT
+    from tests.test_slow_commander import entry
+
+    risk = load_risk_config(ROOT / "config" / "risk.example.toml")
+    st = StopScale()
+    m, lo, hi = st.period_min, st.min_stop_atr, st.max_stop_atr
+    note = describe_atr(1.5, 100.0, m, lo, hi)
+    p = convert_prompt(entry("AAUSDT", cat=Category.ALT), risk, "震荡", "", "结论正文", note)
+    assert f"{atr_interval(m)} ATR(14)" in p  # 周期跟风控配置，不写死
+    assert "= 1.5" in p and "1.50%" in p
+    assert f"{lo:g}–{hi:g}" in p  # 告诉军师保镖认的倍数区间
+    assert "暂不可用" in describe_atr(None, None, m, lo, hi)
+    assert [atr_interval(x) for x in (5, 15, 30, 60)] == ["5m", "15m", "30m", "1h"]
+    assert "30m ATR(14)" in describe_atr(1.0, 10.0, 30, lo, hi)

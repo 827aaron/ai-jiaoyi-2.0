@@ -93,7 +93,24 @@ def _clamp_range(r: Range, lo: float, hi: float) -> Range:
     return Range(min=min(max(r.min, lo), top), max=top)
 
 
-def clamp_to_risk(cs: CardSymbol, risk: RiskConfig) -> CardSymbol:
+@dataclass(frozen=True)
+class StopScale:
+    """止损倍数的尺度：ATR 周期（分钟）和保镖认的倍数区间，来自 app.toml 的 ``fast_loop``。
+
+    默认值与 ``FastLoopConfig`` 的默认一致；``app.py`` 用真实配置覆盖。
+    """
+
+    period_min: int = 15
+    min_stop_atr: float = 0.5
+    max_stop_atr: float = 4.0
+
+
+DEFAULT_STOP_SCALE = StopScale()
+
+
+def clamp_to_risk(
+    cs: CardSymbol, risk: RiskConfig, stop: StopScale = DEFAULT_STOP_SCALE
+) -> CardSymbol:
     """卡里的范围只能比硬上限更紧：超出的夹回去；分组敞口上限为 0 的类别改成只看不做。"""
     if risk.category_exposure_x.get(cs.category, 0.0) <= 0.0 or cs.bias is Bias.NO_TRADE:
         return cs.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
@@ -101,6 +118,8 @@ def clamp_to_risk(cs: CardSymbol, risk: RiskConfig) -> CardSymbol:
         update={
             "notional_usdt": _clamp_range(cs.notional_usdt, 0.0, risk.max_notional_per_trade_usdt),
             "leverage": _clamp_range(cs.leverage, 1.0, float(risk.max_leverage)),
+            # 止损倍数落在保镖认的区间内，免得整张卡这个标的被 min/max_stop_atr 拒掉
+            "stop_atr": _clamp_range(cs.stop_atr, stop.min_stop_atr, stop.max_stop_atr),
         }
     )
 
@@ -124,6 +143,7 @@ class BattleCardCommander:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         brief: MarketBriefService | None = None,
         journal: CardJournal | None = None,
+        stop_scale: StopScale = DEFAULT_STOP_SCALE,
         fail_backoff: Sequence[timedelta] = (
             timedelta(minutes=5),
             timedelta(minutes=10),
@@ -138,6 +158,7 @@ class BattleCardCommander:
         self._clock = clock
         self._brief = brief
         self._journal = journal
+        self._stop = stop_scale
         if not fail_backoff:
             raise ValueError("fail_backoff 至少要有一档")
         self._backoff = tuple(fail_backoff)
@@ -357,7 +378,7 @@ class BattleCardCommander:
         failed: list[str] = []
         for e, res in zip(to_meet, results, strict=True):
             if isinstance(res, Analysis):
-                symbols.append(clamp_to_risk(res.card_symbol, self._risk))
+                symbols.append(clamp_to_risk(res.card_symbol, self._risk, self._stop))
                 cost += res.cost_usd
                 self._last_meeting[e.symbol] = now
             else:
