@@ -55,6 +55,10 @@ make condor-install # Condor 官方是本机 uv + tmux 运行，不走 Docker
 
 Condor 默认发匿名统计，运行时设 `CONDOR_TELEMETRY=off`。hummingbot-api 端口不要暴露到公网。
 
+## 面板
+
+`jiaoyi panel` 起局域网网页（默认 :8090，只读，只接受局域网访问），见 [docs/panel.md](docs/panel.md)。
+
 ## 密钥
 
 API key **绝不**进仓库、聊天或网页。正式环境用 `setup-keys` 存进 macOS 钥匙串（service `jiaoyi`），开发时可以放在本机 `.env`（已在 `.gitignore`）。`jiaoyi key-status` 只显示末四位。

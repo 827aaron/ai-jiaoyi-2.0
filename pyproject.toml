@@ -12,6 +12,8 @@ dependencies = [
     "ccxt>=4.5,<5",
     "websockets>=14,<17",       # 币安行情 WebSocket（快环）
     "typesafe-sdk>=0.7.5,<0.8", # Jev 官方 SDK（TypeSafe AI，MIT）
+    "fastapi>=0.115,<1",        # 面板（jiaoyi panel）
+    "uvicorn>=0.30,<1",
 ]
 
 [project.optional-dependencies]

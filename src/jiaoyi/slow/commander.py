@@ -409,6 +409,8 @@ class BattleCardCommander:
             input={"refresh_reason": card.refresh_reason},
             output={
                 "regime": card.regime,
+                "version": card.version,
+                "expires_at": card.expires_at.isoformat(),  # 面板据此显示“还有多久有效”
                 "symbols": [s.symbol for s in card.symbols],
                 "total_cost_usd": card.llm_cost_usd,
             },
