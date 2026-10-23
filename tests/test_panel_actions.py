@@ -266,6 +266,21 @@ def test_set_toml_value_keeps_comments_and_layout() -> None:
     }
 
 
+def test_clearing_notional_usdt_cap_deletes_the_line(tmp_path: Path) -> None:
+    """面板上把「单笔绝对上限 USDT」清空 = 删掉 risk.toml 那一行，只按权益倍数。"""
+    paths, data = _setup(tmp_path)
+    text = paths.risk.read_text(encoding="utf-8")
+    paths.risk.write_text("max_notional_per_trade_usdt = 2000\n" + text, encoding="utf-8")
+    assert load_risk_config(paths.risk).max_notional_per_trade_usdt == 2000
+    changed = actions.update_config(
+        paths, data, "risk", {"max_notional_per_trade_usdt": None}, PW, NOW
+    )
+    assert changed == [{"key": "max_notional_per_trade_usdt", "old": 2000, "new": None}]
+    lines = paths.risk.read_text(encoding="utf-8").splitlines()
+    assert not any(ln.startswith("max_notional_per_trade_usdt") for ln in lines)
+    assert load_risk_config(paths.risk).max_notional_per_trade_usdt is None
+
+
 def test_update_risk_writes_backup_and_log(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     before = paths.risk.read_text(encoding="utf-8")
@@ -288,6 +303,7 @@ def test_update_risk_writes_backup_and_log(tmp_path: Path) -> None:
     ("section", "changes", "match"),
     [
         ("risk", {"max_leverage": 0}, "max_leverage"),  # 不合理：杠杆至少 1 倍
+        ("risk", {"max_leverage": 126}, "最高 125 倍"),
         ("risk", {"max_leverage": 2.5}, "整数"),
         ("risk", {"day_reset_tz": 1}, "不能在网页上改"),
         ("category", {"major": 4.0}, "总敞口"),  # 超过总敞口 3 倍

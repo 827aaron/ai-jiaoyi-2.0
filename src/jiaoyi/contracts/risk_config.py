@@ -2,7 +2,7 @@
 
 规则（设计文档 §四、§十一）：
 - 每个字段都是**必填**，模型里不给默认值。配置缺项、多出未知字段、数值不合理
-  （例如负数、百分比超过 100），程序拒绝启动。硬上限的数值由人定，不另设保守范围。
+  （例如负数、百分比超过 100、杠杆超过币安最高 125 倍），程序拒绝启动。硬上限的数值由人定，不另设保守范围。
   保守默认值写在 ``config/risk.example.toml``，第一次用时复制成 ``config/risk.toml``
   再按需改；比推荐值冒险只提示（``recommended_caps`` / ``RiskConfig.cautions``）。
 - 下层只能更紧：作战卡的范围、拍板人的档位都不能超过这里的数。
@@ -25,9 +25,14 @@ HoldingProfile = Literal["2h", "60m", "30m", "15m"]
 PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
 
 
+BINANCE_MAX_LEVERAGE = 125
+"""币安 U 本位合约的物理最高杠杆；超过它的配置不可能生效，拒绝并写明原因。"""
+
+
 class RiskConfig(Contract):
     """硬上限。Aaron 2026-10-23 定：只给推荐，不设限制，你填的就是上限。程序只拦数学上
-    不成立的值（≤0、百分比超过 100）；杠杆能开多少由币安按合约决定（下单前回读校验）。
+    不成立的值（≤0、百分比超过 100、杠杆超过币安最高的 125 倍）；具体币种能开多少由币安
+    按合约决定（下单前回读校验）。
     比推荐值冒险时提示但不拒绝（见 ``cautions``）。
     """
 
@@ -75,6 +80,11 @@ class RiskConfig(Contract):
 
     @model_validator(mode="after")
     def _check(self) -> RiskConfig:
+        if self.max_leverage > BINANCE_MAX_LEVERAGE:
+            raise ValueError(
+                f"max_leverage {self.max_leverage} 不合理：币安 U 本位合约最高 "
+                f"{BINANCE_MAX_LEVERAGE} 倍（具体币种更低，下单前按交易所回读）"
+            )
         missing = set(Category) - set(self.category_exposure_x)
         if missing:
             raise ValueError(f"category_exposure_x 缺少分组：{sorted(missing)}")
