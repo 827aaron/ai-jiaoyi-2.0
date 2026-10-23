@@ -250,3 +250,63 @@ def test_duplicate_klines_ignored() -> None:
     eng.update(_kline(5, 99999.0, rng=5000.0))  # 回填和推送重叠的旧 K 线
     after = eng.snapshot("BTCUSDT")
     assert before is not None and after is not None and before.atr == after.atr
+
+
+def test_streams_without_per_symbol_liquidations() -> None:
+    assert "btcusdt@forceOrder" not in streams_for("BTCUSDT", liquidations=False)
+    assert len(streams_for("BTCUSDT", liquidations=False)) == 4
+
+
+def _liq(sym: str, t: datetime, side: c.Side, usdt: float) -> c.Liquidation:
+    return c.Liquidation(symbol=sym, ts=t, side=side, price=100.0, qty=usdt / 100.0)
+
+
+def test_feed_records_all_market_liquidations_but_forwards_pool_only() -> None:
+    feed = BinanceFuturesFeed()
+    feed._symset = frozenset({"BTCUSDT"})
+    assert feed.accept(_liq("BTCUSDT", T0, c.Side.LONG, 1000.0))
+    assert not feed.accept(_liq("DOGEUSDT", T0, c.Side.SHORT, 5000.0))  # 池外：只记不发
+    trade = c.Trade(symbol="DOGEUSDT", ts=T0, price=1.0, qty=1.0, taker_side=c.Side.LONG)
+    assert not feed.accept(trade)
+    now = T0 + timedelta(minutes=1)
+    assert feed.liquidations.liquidations_1h_usdt("DOGEUSDT", now) == pytest.approx(5000.0)
+    assert [s.symbol for s in feed.liquidations.all_stats(now)] == ["DOGEUSDT", "BTCUSDT"]
+
+
+def test_liquidation_tracker_window() -> None:
+    from jiaoyi.market.liquidations import LiquidationTracker
+
+    tr = LiquidationTracker()
+    tr.record(_liq("ETHUSDT", T0, c.Side.LONG, 1000.0))
+    tr.record(_liq("ETHUSDT", T0 + timedelta(minutes=30), c.Side.SHORT, 400.0))
+    s = tr.stats("ETHUSDT", T0 + timedelta(minutes=45))
+    assert (s.long_usdt, s.short_usdt, s.count) == (pytest.approx(1000.0), pytest.approx(400.0), 2)
+    # 第一笔已超过 1 小时
+    assert tr.liquidations_1h_usdt("ETHUSDT", T0 + timedelta(minutes=61)) == pytest.approx(400.0)
+    # 新事件把太旧的裁掉
+    tr.record(_liq("ETHUSDT", T0 + timedelta(hours=2), c.Side.LONG, 10.0))
+    assert tr.stats("ETHUSDT", T0 + timedelta(hours=2)).count == 1
+    assert tr.liquidations_1h_usdt("NOPEUSDT", T0) == 0.0
+
+
+def test_features_funding_countdown_and_5m_liquidations() -> None:
+    eng = warm_engine()
+    t = T0 + timedelta(minutes=21)
+    eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=68000.0, qty=0.1, taker_side=c.Side.LONG))
+    eng.update(_liq("BTCUSDT", t - timedelta(minutes=3), c.Side.LONG, 7000.0))
+    eng.update(_liq("BTCUSDT", t, c.Side.SHORT, 2000.0))
+    eng.update(
+        c.MarkPrice(
+            symbol="BTCUSDT",
+            ts=t,
+            mark_price=68000.0,
+            funding_rate=0.0001,
+            next_funding_at=t + timedelta(minutes=12),
+        )
+    )
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None
+    v = snap.values
+    assert v["funding_in_min"] == pytest.approx(12.0)
+    assert v["liq_long_usdt_5m"] == pytest.approx(7000.0) and v["liq_long_usdt_1m"] == 0.0
+    assert v["liq_short_usdt_5m"] == pytest.approx(2000.0)

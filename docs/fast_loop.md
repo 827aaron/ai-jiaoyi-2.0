@@ -48,8 +48,10 @@
 | `cvd_1m_usdt`、`cvd_30s_usdt` | 主动买减主动卖，60 / 30 秒 | USDT |
 | `realized_vol_5m` | 5 分钟内每 10 秒对数收益的标准差（不年化） | 小数 |
 | `liq_long_usdt_1m`、`liq_short_usdt_1m` | 最近 60 秒多头 / 空头被强平额 | USDT |
+| `liq_long_usdt_5m`、`liq_short_usdt_5m` | 最近 5 分钟多头 / 空头被强平额 | USDT |
 | `liq_ratio_1m` | 1 分钟较大一边的强平额 ÷ 30 分钟每分钟均值 | 倍 |
 | `funding_rate` | 当期资金费率 | 小数，0.0001 = 0.01% |
+| `funding_in_min` | 离下次资金费结算还有几分钟 | 分钟 |
 | `mark_premium_bps` | 标记价相对指数价 | bp |
 
 `FeatureSnapshot.atr`：1 分钟 K 线 14 根 Wilder ATR。`book`：盘口超过 10 秒没更新就为空（保镖看到空盘口会拒单）。
@@ -57,6 +59,9 @@
 
 ## 已知限制
 
-- 币安 forceOrder 流每个标的每秒最多推一笔强平，爆仓额是下限估计。
+- 币安强平流每个标的每秒最多推一笔，爆仓额是下限估计。
+- 强平走全市场流 `!forceOrder@arr`（一个连接）。`feed.liquidations`（`LiquidationTracker`）记着所有币近 1 小时的强平，
+  选币用 `feed.liquidations.liquidations_1h_usdt(symbol, now)` 填 `SymbolStats.liquidations_1h_usdt`。
+  进程刚启动的一小时里数据不满 1 小时，偏小。
 - WebSocket 没有持仓量，拥挤交易信号第一版只看资金费率；CPI / 议息日历未接入。
 - 这台云端开发机访问币安返回 451（地区限制），实时连通性需要在 Mac mini 上验证。

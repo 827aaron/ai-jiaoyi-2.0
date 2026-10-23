@@ -1,7 +1,10 @@
 """币安 U 本位永续 WebSocket 行情 → ``MarketEvent``。
 
-每个标的订 5 路流：逐笔归集成交（aggTrade）、前 5 档盘口（depth5@100ms）、强平（forceOrder）、
+每个标的订 4 路流：逐笔归集成交（aggTrade）、前 5 档盘口（depth5@100ms）、
 标记价格和资金费率（markPrice@1s）、1 分钟 K 线（kline_1m，只发已收盘的）。
+强平另开一个连接订全市场流（``!forceOrder@arr``）：候选池里的币照样发给下游，
+所有币（包括池外的）都记进 ``liquidations``（``LiquidationTracker``），选币用它算“近 1 小时强平额”。
+关掉 ``all_market_liquidations`` 就退回每个标的单独订 forceOrder。
 币安一个连接最多 200 路流，所以每 40 个标的开一个连接，全部汇进一个队列。
 
 为什么不用 ccxt 的 watch*：ccxt 每类流单独订阅、强平流在 ccxt 里支持不全，而这里一个连接
@@ -34,6 +37,7 @@ from jiaoyi.contracts import (
     Side,
     Trade,
 )
+from jiaoyi.market.liquidations import LiquidationTracker
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +50,16 @@ def _dt(ms: Any) -> datetime:
     return datetime.fromtimestamp(int(ms) / 1000.0, UTC)
 
 
-def streams_for(symbol: str) -> list[str]:
+ALL_MARKET_LIQUIDATIONS = "!forceOrder@arr"
+
+
+def streams_for(symbol: str, *, liquidations: bool = True) -> list[str]:
+    """一个标的要订的流。全市场强平流打开时不再单独订它的 forceOrder，免得重复。"""
     s = symbol.lower()
-    return [
-        f"{s}@aggTrade",
-        f"{s}@depth5@100ms",
-        f"{s}@forceOrder",
-        f"{s}@markPrice@1s",
-        f"{s}@kline_1m",
-    ]
+    out = [f"{s}@aggTrade", f"{s}@depth5@100ms"]
+    if liquidations:
+        out.append(f"{s}@forceOrder")
+    return [*out, f"{s}@markPrice@1s", f"{s}@kline_1m"]
 
 
 def parse_message(msg: dict[str, Any]) -> MarketEvent | None:
@@ -134,8 +139,14 @@ class BinanceFuturesFeed:
         *,
         queue_max: int = 20_000,
         max_backoff_s: float = 30.0,
+        all_market_liquidations: bool = True,
+        liquidations: LiquidationTracker | None = None,
     ) -> None:
         self._url = url
+        self._all_liq = all_market_liquidations
+        self.liquidations = liquidations or LiquidationTracker()
+        """全市场强平统计（含候选池外的币），选币按它补“近 1 小时强平额”。"""
+        self._symset: frozenset[str] = frozenset()
         self._queue: asyncio.Queue[MarketEvent] = asyncio.Queue(maxsize=queue_max)
         self._tasks: list[asyncio.Task[None]] = []
         self._max_backoff = max_backoff_s
@@ -161,10 +172,16 @@ class BinanceFuturesFeed:
             return
         await self._stop_tasks()
         self.symbols = new
+        self._symset = frozenset(new)
         self.dropped = 0
+        per_symbol_liq = not self._all_liq
         for i in range(0, len(new), SYMBOLS_PER_CONN):
             chunk = new[i : i + SYMBOLS_PER_CONN]
-            self._tasks.append(asyncio.create_task(self._run(i, chunk)))
+            streams = [s for sym in chunk for s in streams_for(sym, liquidations=per_symbol_liq)]
+            self._tasks.append(asyncio.create_task(self._run(i, self._url_for(streams))))
+        if self._all_liq:
+            url = self._url_for([ALL_MARKET_LIQUIDATIONS])
+            self._tasks.append(asyncio.create_task(self._run(-1, url)))
 
     async def events(self) -> AsyncIterator[MarketEvent]:
         while not self._closed:
@@ -183,15 +200,14 @@ class BinanceFuturesFeed:
         self._tasks = []
         self._down.clear()
 
-    def _url_for(self, chunk: Sequence[str]) -> str:
-        streams = "/".join(s for sym in chunk for s in streams_for(sym))
-        return f"{self._url}?streams={streams}"
+    def _url_for(self, streams: Sequence[str]) -> str:
+        return f"{self._url}?streams={'/'.join(streams)}"
 
-    async def _run(self, conn_id: int, chunk: Sequence[str]) -> None:
+    async def _run(self, conn_id: int, url: str) -> None:
         backoff = 1.0
         while not self._closed:
             try:
-                async with connect(self._url_for(chunk), ping_interval=20, max_size=2**22) as ws:
+                async with connect(url, ping_interval=20, max_size=2**22) as ws:
                     self._down.discard(conn_id)
                     backoff = 1.0
                     await self._pump(ws)
@@ -204,6 +220,12 @@ class BinanceFuturesFeed:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self._max_backoff)
 
+    def accept(self, ev: MarketEvent) -> bool:
+        """强平先记进全市场统计；只有订阅了的标的的事件才往下游发。"""
+        if isinstance(ev, Liquidation):
+            self.liquidations.record(ev)
+        return ev.symbol in self._symset
+
     async def _pump(self, ws: ClientConnection) -> None:
         async for raw in ws:
             try:
@@ -212,6 +234,8 @@ class BinanceFuturesFeed:
                 logger.debug("忽略解析不了的行情消息：%s", e)
                 continue
             if ev is None:
+                continue
+            if not self.accept(ev):
                 continue
             if self._queue.full():
                 self._queue.get_nowait()
