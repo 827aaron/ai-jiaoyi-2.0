@@ -72,6 +72,23 @@
 - MPS 每次都报 `scaled_dot_product_attention for MPS does not support dropout`，所以 `KronosSettings.device="auto"` 不再选 MPS，直接用 CPU；显式写 `mps` / `cuda` 出错也会退回 CPU 并一直用 CPU。
 - 推理在后台任务里跑，几秒的耗时不进拍板延迟；开关仍是 `app.toml` 的 `predictor_enabled`（示例为 `true`，关掉时快环照常跑）。
 
+## 预测员怎么跑（设置页可调）
+
+实时行情只推 1 分钟 K 线，预测员自己按 UTC 整 5 分钟拼成 5 分钟线（缺分钟的整根丢掉、序列从头攒）；启动和换池时用 REST 拉 `backfill_bars` 根 5 分钟线补历史（只补不算），所以下一根 5 分钟线收盘就能出预测，不用干等 5 个多小时。推理一直在后台单线程跑，`on_kline` / `request` 都立即返回。
+
+| 键（`[predictor]`） | 默认 | 可选 | 作用 |
+|---|---|---|---|
+| `mode` | `on_demand` | `on_demand` / `all_symbols` | 按需：只在 5 分钟收盘时算作战卡里的币和有持仓的币；哨兵出信号而该币没有新鲜预测时，后台补算一次（这次信号不等它）。全部：候选池每个币每根都算 |
+| `size_policy` | `fixed` | `fixed` / `adaptive` | 固定用 `model_size`；自适应按开始推理时还在排队的个数选模型 |
+| `model_size` | `small` | `mini` / `small` / `base` | 固定策略下用的模型 |
+| `adaptive_base_max_queue` | 0 | 0–20，且 < 下一项 | 自适应：排队 ≤ 它用 base |
+| `adaptive_mini_min_queue` | 3 | 1–50 | 自适应：排队 ≥ 它用 mini，中间用 small |
+| `backfill_bars` | 400 | 64–1500 | 启动回填多少根 5 分钟线 |
+
+- 三个模型都钉了 Hugging Face 提交（见 `predictor/kronos.py` 的 `MODEL_SPECS`）：mini 配 Tokenizer-2k（上下文 2048），small / base 配 Tokenizer-base（上下文 512）。用到哪个才加载哪个，加载后常驻。
+- 实测 small：约 3.0 秒 / 币，5 个币排队约 14.9 秒；按需模式下一般只有卡里的几个币，排得开。`Forecast.model` 记着这次用的是哪个。
+- 开关仍是 `predictor_enabled`；运行中关掉会丢掉已有预测。
+
 ## ATR 周期和止损倍数（设置页可调）
 
 止损距离 = 作战卡给的倍数 × ATR，所以 ATR 的周期必须和军师出卡时用的周期一致。原来保镖乘的是 1 分钟 ATR，军师按 1 小时 ATR 想“1–2 倍”，实际止损只有原意的几分之一，落在 1 分钟噪音里。现在全链路统一成一个可配的周期，默认 15 分钟。

@@ -53,7 +53,7 @@ from jiaoyi.contracts.position import (
     ReconcileIssueKind,
     ReconcileReport,
 )
-from jiaoyi.contracts.risk_config import AppConfig, FastLoopConfig, RiskConfig
+from jiaoyi.contracts.risk_config import AppConfig, FastLoopConfig, PredictorConfig, RiskConfig
 from jiaoyi.contracts.signal import CandidateSignal
 from jiaoyi.contracts.symbol_pool import HardFilters, SymbolPool, SymbolPoolEntry
 
@@ -101,6 +101,7 @@ __all__ = [
     "PatrolAction",
     "PositionRecord",
     "PositionStatus",
+    "PredictorConfig",
     "Range",
     "ReconcileIssue",
     "ReconcileIssueKind",

@@ -5,6 +5,12 @@
 
 - 开关关闭、数据不够、推理失败、结果过期，``latest`` 一律返回 ``None``，快环无感运行。
 - 推理放在单线程池里，不占事件循环；同一标的上一次没算完就丢弃新的，不排队。
+- 吃 5 分钟线：行情只推 1 分钟线，这里按 UTC 整 5 分钟聚合（缺分钟的整根丢掉）；
+  启动和新币入池时用 REST 回填 5 分钟线（``backfill``），回填后下一根 5 分钟线收盘就出预测。
+- 按需（``PredictorConfig.mode = on_demand``，默认）：只算作战卡里的币和有持仓的币
+  （``set_wanted``）；哨兵出信号而这个币没有新鲜预测时 ``request`` 补算一次，也在后台。
+- 模型尺寸：fixed 用 ``model_size``；adaptive 按排队深度在 base / small / mini 间切换，
+  各尺寸用到才加载，权重都钉 HuggingFace 提交号（``MODEL_SPECS``）。
 - Mac mini 上默认用 CPU（MPS 实测每次报错）；显式选 MPS/CUDA 出错也会退回 CPU 并一直用 CPU。
   任何异常都只记状态，不向外抛。
 - 每次推理写一条 ``DecisionRecord`` 并上报 ``ModuleStatus``（耗时、成功率、最近错误）。
@@ -35,6 +41,7 @@ from jiaoyi.contracts import (
     Kline,
     ModuleStatus,
     Outcome,
+    PredictorConfig,
     Role,
     TodayStats,
 )
@@ -47,6 +54,45 @@ _INTERVAL_MIN = {Interval.M1: 1, Interval.M5: 5, Interval.M15: 15, Interval.H1: 
 
 # 一条预测路径：每一步的 (最高, 最低, 收盘)。
 Path_ = list[tuple[float, float, float]]
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    model_id: str
+    model_revision: str
+    tokenizer_id: str
+    tokenizer_revision: str
+    max_context: int
+    name: str
+
+
+# 升级权重要单独评审：提交号是钉死的
+MODEL_SPECS: dict[str, ModelSpec] = {
+    "mini": ModelSpec(
+        "NeoQuasar/Kronos-mini",
+        "f4e68697d9d5aed55cef5c96aabc3376bcad9f81",
+        "NeoQuasar/Kronos-Tokenizer-2k",
+        "26966d0035065a0cae0ebad7af8ece35bc1fb51c",
+        2048,
+        "Kronos-mini",
+    ),
+    "small": ModelSpec(
+        "NeoQuasar/Kronos-small",
+        "901c26c1332695a2a8f243eb2f37243a37bea320",
+        "NeoQuasar/Kronos-Tokenizer-base",
+        "0e0117387f39004a9016484a186a908917e22426",
+        512,
+        "Kronos-small",
+    ),
+    "base": ModelSpec(
+        "NeoQuasar/Kronos-base",
+        "2b554741eca47781b64468546e77fef3e85130e6",
+        "NeoQuasar/Kronos-Tokenizer-base",
+        "0e0117387f39004a9016484a186a908917e22426",
+        512,
+        "Kronos-base",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -84,8 +130,16 @@ class KronosBackend(Protocol):
 class OfficialKronosBackend:
     """官方 ``KronosPredictor``。torch / pandas 只在第一次推理时导入。"""
 
-    def __init__(self, settings: KronosSettings) -> None:
+    def __init__(self, settings: KronosSettings, spec: ModelSpec | None = None) -> None:
         self._s = settings
+        self._spec = spec or ModelSpec(
+            settings.model_id,
+            settings.model_revision,
+            settings.tokenizer_id,
+            settings.tokenizer_revision,
+            512,
+            settings.model_name,
+        )
         self._predictor: Any = None
         self._device = ""
 
@@ -117,13 +171,16 @@ class OfficialKronosBackend:
         if repo not in sys.path:
             sys.path.insert(0, repo)
         mod = importlib.import_module("model")
+        sp = self._spec
         tokenizer = mod.KronosTokenizer.from_pretrained(
-            self._s.tokenizer_id, revision=self._s.tokenizer_revision
+            sp.tokenizer_id, revision=sp.tokenizer_revision
         )
-        model = mod.Kronos.from_pretrained(self._s.model_id, revision=self._s.model_revision)
-        self._predictor = mod.KronosPredictor(model, tokenizer, device=device, max_context=512)
+        model = mod.Kronos.from_pretrained(sp.model_id, revision=sp.model_revision)
+        self._predictor = mod.KronosPredictor(
+            model, tokenizer, device=device, max_context=sp.max_context
+        )
         self._device = device
-        log.info("Kronos 已加载：%s，设备 %s", self._s.model_id, device)
+        log.info("Kronos 已加载：%s，设备 %s", sp.model_id, device)
 
     def _run(self, bars: list[Kline], pred_len: int, paths: int) -> list[Path_]:
         pd = importlib.import_module("pandas")
@@ -171,13 +228,26 @@ class KronosForecaster:
         backend: KronosBackend | None = None,
         log_sink: DecisionLog | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        *,
+        cfg: PredictorConfig | None = None,
+        backend_for: Callable[[str], KronosBackend] | None = None,
     ) -> None:
+        """``backend`` 给了就所有尺寸都用它（测试）；否则按尺寸用 ``backend_for`` 现建、缓存。"""
         self._enabled = enabled
         self._s = settings or KronosSettings()
-        self._backend: KronosBackend = backend or OfficialKronosBackend(self._s)
+        self._cfg = cfg or PredictorConfig()
+        self._fixed_backend = backend
+        self._backend_for = backend_for or (
+            lambda size: OfficialKronosBackend(self._s, MODEL_SPECS[size])
+        )
+        self._backends: dict[str, KronosBackend] = {}
         self._sink = log_sink
         self._clock = clock
         self._bars: dict[str, deque[Kline]] = {}
+        # 正在聚合的 5 分钟线：标的 → (起点分钟, 开, 高, 低, 收, 量, 成交额, 已有几根 1 分钟)
+        self._partial: dict[str, tuple[int, float, float, float, float, float, float, int]] = {}
+        self._wanted: set[str] = set()
+        self._queued = 0
         self._forecasts: dict[str, Forecast] = {}
         self._busy: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -202,6 +272,30 @@ class KronosForecaster:
             self._busy.clear()
         self.heartbeat()
 
+    @property
+    def mode(self) -> str:
+        return self._cfg.mode
+
+    def set_wanted(self, symbols: set[str] | frozenset[str]) -> None:
+        """按需模式下要算的币：作战卡里的 + 有持仓的。主循环换卡、刷新持仓时调。"""
+        self._wanted = set(symbols)
+
+    def request(self, symbol: str) -> None:
+        """哨兵出信号时调：这个币没有新鲜预测就在后台补算一次。立即返回，不等结果。"""
+        if not self._enabled:
+            return
+        if self.latest(symbol, self._clock()) is not None:
+            return
+        buf = self._bars.get(symbol)
+        if buf is None or len(buf) < self._s.min_bars or symbol in self._busy:
+            return
+        self._spawn(symbol, list(buf), buf[-1])
+
+    async def backfill(self, symbol: str, bars: list[Kline]) -> None:
+        """用 REST 拉来的 5 分钟线把历史补上，不触发推理；下一根 5 分钟线收盘就能出预测。"""
+        for b in bars:
+            self._append(b)
+
     def latest(self, symbol: str, now: datetime) -> Forecast | None:
         if not self._enabled:
             return None
@@ -211,24 +305,81 @@ class KronosForecaster:
         return fc
 
     async def on_kline(self, kline: Kline) -> None:
-        if not self._enabled or kline.interval != self._s.interval:
+        """收 1 分钟线（聚合）或模型周期的线。只做记账和派活，立即返回，推理在后台。"""
+        if not self._enabled:
             return
+        if kline.interval == Interval.M1 and self._s.interval != Interval.M1:
+            done = self._aggregate(kline)
+            if done is None:
+                return
+            kline = done
+        elif kline.interval != self._s.interval:
+            return
+        if not self._append(kline):
+            return
+        sym = kline.symbol
+        if self._cfg.mode == "on_demand" and sym not in self._wanted:
+            return
+        buf = self._bars[sym]
+        if len(buf) < self._s.min_bars or sym in self._busy:
+            return
+        self._spawn(sym, list(buf), kline)
+
+    def _aggregate(self, k: Kline) -> Kline | None:
+        """1 分钟线按 UTC 整点拼成模型周期的线；拼完一根返回它，缺分钟的整根丢掉。"""
+        n = _INTERVAL_MIN[self._s.interval]
+        minute = int(k.open_time.timestamp() // 60)
+        start = minute - minute % n
+        cur = self._partial.get(k.symbol)
+        if cur is not None and cur[0] != start:
+            cur = None
+        if cur is None:
+            if minute != start:
+                self._partial.pop(k.symbol, None)
+                return None
+            cur = (start, k.open, k.high, k.low, k.close, k.volume, k.quote_volume, 1)
+        else:
+            s, o, h, lo, _, v, q, cnt = cur
+            cur = (
+                s, o, max(h, k.high), min(lo, k.low), k.close,
+                v + k.volume, q + k.quote_volume, cnt + 1,
+            )  # fmt: skip
+        if minute != start + n - 1:
+            self._partial[k.symbol] = cur
+            return None
+        self._partial.pop(k.symbol, None)
+        s, o, h, lo, c, v, q, cnt = cur
+        if cnt != n:
+            return None
+        open_time = datetime.fromtimestamp(s * 60, UTC)
+        return Kline(
+            symbol=k.symbol,
+            interval=self._s.interval,
+            open_time=open_time,
+            close_time=k.close_time,
+            open=o, high=h, low=lo, close=c, volume=v, quote_volume=q,
+        )  # fmt: skip
+
+    def _append(self, kline: Kline) -> bool:
+        """放进缓冲；重复或乱序返回 False。"""
         sym = kline.symbol
         buf = self._bars.setdefault(sym, deque(maxlen=self._s.lookback))
         step = timedelta(minutes=_INTERVAL_MIN[self._s.interval])
         if buf:
             last = buf[-1]
             if kline.open_time <= last.open_time:
-                return  # 重复或乱序
+                return False  # 重复或乱序（回填和实时重叠）
             if kline.open_time - last.open_time > step:
                 buf.clear()  # 有缺口，旧数据不能和新数据拼成一段连续序列
                 self._forecasts.pop(sym, None)
         buf.append(kline)
-        if len(buf) < self._s.min_bars or sym in self._busy:
-            return
-        # 推理放后台，on_kline 立即返回，不卡行情循环
+        return True
+
+    def _spawn(self, sym: str, bars: list[Kline], last: Kline) -> None:
+        # 推理放后台，调用方立即返回，不卡行情循环
         self._busy.add(sym)
-        task = asyncio.get_running_loop().create_task(self._run(sym, list(buf), kline))
+        self._queued += 1
+        task = asyncio.get_running_loop().create_task(self._run(sym, bars, last))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -238,6 +389,24 @@ class KronosForecaster:
         finally:
             self._busy.discard(sym)
 
+    def _pick_size(self, waiting: int) -> str:
+        cfg = self._cfg
+        if cfg.size_policy == "fixed":
+            return cfg.model_size
+        if waiting >= cfg.adaptive_mini_min_queue:
+            return "mini"
+        if waiting <= cfg.adaptive_base_max_queue:
+            return "base"
+        return "small"
+
+    def _backend(self, size: str) -> KronosBackend:
+        if self._fixed_backend is not None:
+            return self._fixed_backend
+        be = self._backends.get(size)
+        if be is None:  # 用到才建，权重第一次推理时才加载
+            be = self._backends[size] = self._backend_for(size)
+        return be
+
     async def wait_idle(self) -> None:
         """等后台推理全部结束（测试和优雅退出用）。"""
         while self._tasks:
@@ -246,26 +415,35 @@ class KronosForecaster:
     async def _infer(self, sym: str, bars: list[Kline], last: Kline) -> None:
         t0 = time.perf_counter()
         loop = asyncio.get_running_loop()
+        size: str = self._cfg.model_size
+        dequeued = False
         try:
             # 超时从真正开始推理算起，排队等模型的时间不计
             async with self._gate:
+                self._queued -= 1
+                dequeued = True
+                size = self._pick_size(self._queued)  # 还在排队的有几个
+                backend = self._backend(size)
                 t0 = time.perf_counter()
                 paths = await asyncio.wait_for(
                     loop.run_in_executor(
-                        self._pool, self._backend.predict, bars, self._s.pred_len, self._s.paths
+                        self._pool, backend.predict, bars, self._s.pred_len, self._s.paths
                     ),
                     timeout=self._s.infer_timeout_s,
                 )
-            fc = self._summarize(sym, paths, last)
+            fc = self._summarize(sym, paths, last, MODEL_SPECS[size].name)
         except Exception as exc:  # 预测员任何故障都不能影响快环
             self._record(sym, (time.perf_counter() - t0) * 1000, None, exc)
             return
+        finally:
+            if not dequeued:
+                self._queued -= 1
         if not self._enabled:  # 推理期间被关掉
             return
         self._forecasts[sym] = fc
         self._record(sym, (time.perf_counter() - t0) * 1000, fc, None)
 
-    def _summarize(self, sym: str, paths: list[Path_], last: Kline) -> Forecast:
+    def _summarize(self, sym: str, paths: list[Path_], last: Kline, model: str) -> Forecast:
         if not paths or any(len(p) != self._s.pred_len for p in paths):
             raise ValueError("模型返回的路径数量或长度不对")
         flat = [v for p in paths for step in p for v in step]
@@ -282,7 +460,7 @@ class KronosForecaster:
             price_low=low,
             price_high=high,
             p_up=p_up,
-            model=self._s.model_name,
+            model=model,
             stale_after=last.close_time + timedelta(minutes=2 * step_min),
         )
 

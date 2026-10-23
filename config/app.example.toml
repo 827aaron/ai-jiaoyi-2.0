@@ -14,6 +14,15 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # sim_environment = "demo"   # paper / testnet 连哪个模拟环境：demo（币安 Demo Trading，默认）/ legacy_testnet（旧测试网，已停用）
 # reconciler_close_unknown_positions = false  # 对账员遇到“不认识的仓位”：false = 只告警（默认）；true = 直接平掉。M4 前由你决定
 
+# 预测员 Kronos 怎么跑（整段可省略，省略就用下面的默认值）；开关是上面的 predictor_enabled
+[predictor]
+mode = "on_demand"                # on_demand = 只算作战卡里的币和有持仓的币（+ 哨兵出信号时补算）；all_symbols = 候选池全算
+size_policy = "fixed"             # fixed = 一直用 model_size；adaptive = 按排队深度换 base / small / mini
+model_size = "small"              # mini / small / base（fixed 时用；small 在 Mac mini 上约 3 秒 / 币）
+adaptive_base_max_queue = 0       # adaptive：后面没人排队（≤ 0）用 base
+adaptive_mini_min_queue = 3       # adaptive：排队 ≥ 3 个用 mini，中间用 small
+backfill_bars = 400               # 启动时回填多少根 5 分钟线（至少 64）
+
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用下面的默认值）
 [fast_loop]
 jev_provider = "typesafe"         # typesafe = 直连（key: JEV_API_KEY）；openrouter = 经 OpenRouter（key: OPENROUTER_API_KEY）

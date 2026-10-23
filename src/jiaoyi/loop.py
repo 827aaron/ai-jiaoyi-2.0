@@ -30,6 +30,7 @@ from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
     AlertLevel,
     CandidateSignal,
+    Interval,
     Kline,
     MarketEvent,
     Outcome,
@@ -90,15 +91,27 @@ class _RefreshReason(Protocol):
 
 
 KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
+PREDICTOR_INTERVAL = Interval.M5
 
 
 class Runner:
-    def __init__(self, app: App, *, fetch_klines: KlineFetcher | None = None) -> None:
+    def __init__(
+        self,
+        app: App,
+        *,
+        fetch_klines: KlineFetcher | None = None,
+        fetch_predictor_klines: KlineFetcher | None = None,
+    ) -> None:
         self.app = app
         self.m = app.m
         # 回填够算 ATR 的 1 分钟 K 线（15 分钟 ATR 要 240 根）
         limit = backfill_minutes(app.app_cfg.fast_loop.atr_period_min)
         self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym, limit=limit))
+        # 预测员要的 5 分钟线（至少 64 根），启动时一次拉够，不用等 5 个多小时
+        bars = app.app_cfg.predictor.backfill_bars
+        self._fetch_predictor_klines = fetch_predictor_klines or (
+            lambda sym: fetch_recent_klines(sym, limit=bars, interval=PREDICTOR_INTERVAL)
+        )
         self.positions: list[PositionRecord] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._loops: list[asyncio.Task[None]] = []
@@ -182,6 +195,7 @@ class Runner:
     async def on_event(self, event: MarketEvent) -> None:
         self.m.features.update(event)
         if isinstance(event, Kline):
+            self._sync_wanted()
             await self.m.predictor.on_kline(event)
         action = self.m.patrol.check(event, self.positions)
         if action is not None:
@@ -200,6 +214,12 @@ class Runner:
             for signal in self.m.trigger.check(snap, self.m.cards.current(now), now):
                 # 拍板要几百毫秒，放后台，不卡行情
                 self._spawn(self.handle_signal(signal))
+
+    def _sync_wanted(self) -> None:
+        """预测员按需模式只算作战卡里的币和有持仓的币。"""
+        card = self.m.cards.current(self.app.clock())
+        wanted = {s.symbol for s in card.symbols} if card is not None else set()
+        self.m.predictor.set_wanted(wanted | {p.symbol for p in self.positions})
 
     async def handle_signal(self, signal: CandidateSignal) -> None:
         now = self.app.clock()
@@ -310,6 +330,12 @@ class Runner:
                         self.m.features.update(k)
                 except Exception:
                     log.warning("%s 回填 K 线失败，等实时数据攒够", sym, exc_info=True)
+                if not self.m.predictor.enabled:
+                    return
+                try:
+                    await self.m.predictor.backfill(sym, await self._fetch_predictor_klines(sym))
+                except Exception:
+                    log.warning("%s 回填预测员 K 线失败，等实时数据攒够", sym, exc_info=True)
 
         await asyncio.gather(*(one(s) for s in symbols))
 
