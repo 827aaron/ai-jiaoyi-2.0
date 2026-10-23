@@ -47,6 +47,7 @@ from jiaoyi.contracts import (
     TodayStats,
 )
 from jiaoyi.interfaces import DecisionLog
+from jiaoyi.slow import binance_gate
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
@@ -263,6 +264,8 @@ class BattleCardCommander:
         self._beat_s = 30.0
         self._fails = 0
         self._retry_at: datetime | None = None
+        self._rl_until: datetime | None = None  # 币安限流：整轮暂停到这时，解封后自动重开
+        self._rl_reason = ""
         self._notices: list[str] = []
         self._budget_noticed_day = ""
         self._engine = engine
@@ -445,9 +448,27 @@ class BattleCardCommander:
         """哨兵 / 新闻源发现大消息时调用，下一次 ``refresh_reason`` 返回 ``news``。"""
         self._news.add(symbol)
 
+    def _rate_limited(self, reason: str) -> bool:
+        """币安还在封禁期：记下解封时间和这一轮的开会原因；不在封禁期返回 False。"""
+        until = binance_gate.banned_until()
+        if not until:
+            return False
+        self._rl_until = datetime.fromtimestamp(until + 5, UTC)  # 留 5 秒余量
+        self._rl_reason = self._rl_reason or reason
+        return True
+
+    def rate_limit_note(self, now: datetime) -> str | None:
+        """限流暂停中的提示，例如「币安限流，3 分钟后重开」；没在暂停返回 None。"""
+        if self._rl_until is None or now >= self._rl_until:
+            return None
+        mins = max(1, math.ceil((self._rl_until - now).total_seconds() / 60))
+        return f"币安限流，{mins} 分钟后重开"
+
     def may_refresh(self, now: datetime) -> bool:
         """开会前的总闸，所有触发原因（含定时兜底）都要过：失败退避中、或当日花费超限就不开。"""
         if self._budget_exhausted(now):
+            return False
+        if self._rl_until is not None and now < self._rl_until:
             return False
         return self._retry_at is None or now >= self._retry_at
 
@@ -491,6 +512,9 @@ class BattleCardCommander:
         """
         if not self.may_refresh(now):
             return None
+        if self._rl_until is not None:  # 解封了：不等下一个间隔，用原来的原因立刻重开这一轮
+            reason, self._rl_reason, self._rl_until = self._rl_reason or "scheduled", "", None
+            return reason
         card = self.current(now)
         if card is None:
             return "scheduled"
@@ -714,6 +738,7 @@ class BattleCardCommander:
         now = self._clock()
         started = time.monotonic()
         self._loop = asyncio.get_running_loop()
+        self._rl_until, self._rl_reason = None, ""  # 重开时清掉上一次的限流暂停
         self._pick_cost = 0.0  # 本轮总盘会花费；出卡失败时记在错误记录上，面板净盈亏才不漏 AI 费
         self._tier_of = {e.symbol: e.tier for e in pool.in_pool if e.tier}
         self._expand_mid = self._tiers.enabled and self._mid_day != self._day(now)
@@ -733,6 +758,8 @@ class BattleCardCommander:
             card = await self._meet(pool, candidates, reason, now)
         except Exception as exc:
             self._record_error(reason, exc, started)
+            if self._rate_limited(reason):
+                raise  # 币安限流不是会议本身的错：不退避，等解封后原样重开
             wait = self._backoff[min(self._fails, len(self._backoff) - 1)]
             self._fails += 1
             self._retry_at = self._clock() + wait  # 连续失败退避，免得每分钟重开一轮会
@@ -923,6 +950,8 @@ class BattleCardCommander:
                 at = max(at, self._last_refresh + self._min_gap)
         if self._retry_at is not None:
             at = max(at, self._retry_at) if at is not None else self._retry_at
+        if self._rl_until is not None:
+            at = self._rl_until
         return at
 
     def heartbeat(self, now: datetime) -> None:
@@ -934,7 +963,9 @@ class BattleCardCommander:
         nxt = self._next_meeting(now)
         when = f"，下次会议 {nxt.astimezone(tz):%H:%M}" if nxt is not None else ""
         card = self.current(now)
-        if self._fails and self._retry_at is not None:
+        if (note := self.rate_limit_note(now)) is not None:
+            self._heartbeat(Health.DEGRADED, note, self._last_error)
+        elif self._fails and self._retry_at is not None:
             self._heartbeat(
                 Health.DEGRADED,
                 f"上轮开会失败，{self._retry_at.astimezone(tz):%H:%M} 后重试",
@@ -1117,6 +1148,8 @@ class BattleCardCommander:
             if e.symbol in self._held and e.symbol in symbols:
                 symbols[e.symbol] = self._watch_only(symbols[e.symbol])  # 开会失败：持仓照常盯
             # 没开成会的币：池里原来的指令照旧，到它自己的点才消失
+        if failed:
+            self._rate_limited(reason)  # 有币因为限流没开成：整轮暂停，解封后重开
         if to_meet and published == 0:  # 旧指令还在池里，但这一轮一场都没开成：记失败、退避重试
             raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         card = make_card()

@@ -48,6 +48,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.interfaces import SecretStore
+from jiaoyi.slow import binance_gate
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
@@ -220,7 +221,7 @@ def _klines(symbol: str, interval: str, limit: int, end: datetime | None = None)
     }
     if end is not None:
         params["endTime"] = int(end.timestamp() * 1000)
-    r = httpx.get(_KL, params=params, timeout=10.0)
+    r = binance_gate.get(_KL, params)
     r.raise_for_status()
     data: list[Any] = r.json()
     return data
@@ -330,22 +331,22 @@ def derivatives_context(symbol: str, end: datetime) -> str:
     sym = binance_symbol(symbol)
     try:
         end_ms = int(end.timestamp() * 1000)
-        f = httpx.get(
+        f = binance_gate.get(
             f"{_FAPI}/fapi/v1/fundingRate",
-            params={"symbol": sym, "limit": 9, "endTime": end_ms},
-            timeout=10.0,
+            {"symbol": sym, "limit": 9, "endTime": end_ms},
         )
         f.raise_for_status()
-        o = httpx.get(
+        o = binance_gate.get(
             f"{_FAPI}/futures/data/openInterestHist",
-            params={"symbol": sym, "period": "1h", "limit": 25, "endTime": end_ms},
-            timeout=10.0,
+            {"symbol": sym, "period": "1h", "limit": 25, "endTime": end_ms},
         )
         o.raise_for_status()
         text = format_derivatives(f.json(), o.json())
         if sym in _LIQ_TOTALS:
             text += "\n" + describe_total(_LIQ_TOTALS[sym])
         return text
+    except binance_gate.RateLimited:
+        raise  # 被封了整轮暂停，不当成“暂不可用”吞掉
     except Exception as exc:  # 衍生品数据只是补充，拿不到不影响会议
         return f"## 衍生品数据\n- （暂不可用：{type(exc).__name__}）"
 
@@ -900,7 +901,6 @@ RETRY_HINT = "直接给结论，不要思考过程。"
 
 
 def _fetch_models() -> list[dict[str, Any]]:
-    import httpx
 
     r = httpx.get(MODELS_URL, timeout=10)
     r.raise_for_status()
