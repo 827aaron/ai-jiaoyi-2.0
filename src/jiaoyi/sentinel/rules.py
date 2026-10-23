@@ -76,7 +76,7 @@ class RuleTrigger:
         live: bool = False,
     ) -> None:
         self._cfg = cfg
-        # testnet / live 默认不出量能突增（顺着做比随机还差，orders-spec S1）；paper 照出攒样本
+        # volume_surge_live 关掉时 testnet / live 不出量能突增；paper 照出攒样本
         self._skip: frozenset[SignalKind] = (
             frozenset({SignalKind.VOLUME_SURGE})
             if live and not cfg.volume_surge_live

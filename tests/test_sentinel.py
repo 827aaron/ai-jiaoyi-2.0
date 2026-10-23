@@ -120,9 +120,13 @@ def test_logs_each_signal(tmp_path: Path, now: datetime) -> None:
     assert len(recs) == 1 and recs[0].role == c.Role.SENTINEL and "放量突破" in recs[0].summary
 
 
-def test_volume_surge_off_outside_paper_by_default(now: datetime) -> None:
+def test_volume_surge_live_switch(now: datetime) -> None:
     f = features(now, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8)
     cd = card(now, allowed_signals=["volume_surge"])
-    assert trig(live=True).check(f, cd, now) == []
+    assert c.FastLoopConfig.model_fields["volume_surge_live"].default is True  # 默认开
     on = RuleTrigger(FAST.model_copy(update={"volume_surge_live": True}), live=True)
     assert [s.kind for s in on.check(f, cd, now)] == [c.SignalKind.VOLUME_SURGE]
+    off = RuleTrigger(FAST.model_copy(update={"volume_surge_live": False}), live=True)
+    assert off.check(f, cd, now) == []
+    paper = RuleTrigger(FAST.model_copy(update={"volume_surge_live": False}))
+    assert [s.kind for s in paper.check(f, cd, now)] == [c.SignalKind.VOLUME_SURGE]
