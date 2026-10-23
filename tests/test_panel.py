@@ -321,7 +321,7 @@ def _client(tmp_path: Path, host: str) -> TestClient:
         transport=httpx.MockTransport(handler),
     )
     app = create_app(RISK, _cfg(tmp_path), hb, clock=lambda: NOW)
-    return TestClient(app, client=(host, 5000))
+    return TestClient(app, client=(host, 5000), base_url="http://localhost:8090")
 
 
 def test_server_serves_lan_and_blocks_public(tmp_path: Path) -> None:
@@ -347,8 +347,11 @@ def test_overview_json_never_contains_secrets(tmp_path: Path) -> None:
     assert '"pw"' not in text and "password" not in text.lower()
 
 
-def test_panel_is_read_only_by_construction() -> None:
-    """面板不导入执行层 / 组装层 / 交易所客户端：从结构上保证它下不了单。"""
+def test_panel_cannot_trade_by_construction() -> None:
+    """面板不导入执行层 / 组装层 / 交易所客户端：从结构上保证它下不了单。
+
+    唯一例外是 ``jiaoyi.execution.live_gate``（校验面板密码），它自己只依赖时钟。
+    """
     import ast
 
     bad = []
@@ -362,10 +365,16 @@ def test_panel_is_read_only_by_construction() -> None:
                 else []
             )
             for m in names:
+                if m == "jiaoyi.execution.live_gate":  # 只用它校验面板密码（本身不碰交易所）
+                    continue
                 if m.startswith(
                     ("jiaoyi.execution", "jiaoyi.app", "ccxt", "binance", "hummingbot")
                 ):
                     bad.append(f"{f.name} 导入了 {m}")
+    gate = ROOT / "src" / "jiaoyi" / "execution" / "live_gate.py"
+    for node in ast.walk(ast.parse(gate.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("jiaoyi"):
+            assert node.module == "jiaoyi.execution.clock", node.module
     assert not bad, bad
 
 

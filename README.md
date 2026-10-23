@@ -57,7 +57,7 @@ Condor 默认发匿名统计，运行时设 `CONDOR_TELEMETRY=off`。hummingbot-
 
 ## 面板
 
-`jiaoyi panel` 起局域网网页（默认 :8090，只读，只接受局域网访问），见 [docs/panel.md](docs/panel.md)。
+`jiaoyi panel` 起局域网网页（默认 :8090，只接受局域网访问；暂停、平仓、改设置走指令文件，面板自己不下单），见 [docs/panel.md](docs/panel.md)。
 
 ## 密钥
 

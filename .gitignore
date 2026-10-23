@@ -15,6 +15,7 @@ build/
 config/risk.toml
 config/app.toml
 config/slow.toml
+config/*.bak-*
 
 # 上游仓库（make hb-fetch 拉取）
 vendor/
