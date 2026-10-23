@@ -134,3 +134,10 @@ def test_note_retry_and_reasoning_tokens(tmp_path: Path) -> None:
     doc = json.loads((tmp_path / "ETHUSDT.json").read_text(encoding="utf-8"))
     assert doc["retries"] == 1 and doc["retry_reasons"][0]["why"] == "length"
     assert doc["llm_calls"][0]["reasoning_tokens"] == 8000
+
+
+def test_fail_marks_estimated_cost(tmp_path: Path) -> None:
+    live = MeetingLive(tmp_path, "LINKUSDT")
+    live.fail("超时取消，会议没有结论", 0.31, estimated=True)
+    doc = json.loads((tmp_path / "LINKUSDT.json").read_text(encoding="utf-8"))
+    assert doc["cost_usd"] == 0.31 and doc["cost_estimated"] is True

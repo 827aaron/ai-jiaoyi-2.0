@@ -242,6 +242,10 @@ class BattleCardCommander:
         self._seen: set[str] = set()
         self._news: set[str] = set()
         self._live_dir = live_dir
+        self._loop: asyncio.AbstractEventLoop | None = None
+        bind = getattr(engine, "bind_late_cost", None)
+        if callable(bind):
+            bind(self._late_cost)
         self._tiers = tiers or TierRules()
         self._tier_path = tier_path
         self._tier_of: dict[str, str] = {}
@@ -399,6 +403,7 @@ class BattleCardCommander:
     async def refresh(self, pool: SymbolPool, reason: str) -> BattleCard:
         now = self._clock()
         started = time.monotonic()
+        self._loop = asyncio.get_running_loop()
         self._tier_of = {e.symbol: e.tier for e in pool.in_pool if e.tier}
         self._expand_mid = self._tiers.enabled and self._mid_day != self._day(now)
         candidates = self._eligible(pool, now, expand=self._expand_mid)
@@ -763,12 +768,16 @@ class BattleCardCommander:
                 )
             except Exception as exc:
                 self._charge(-est)
+                fail_cost = self._failure_cost(exc, entry.symbol)
+                guess = self._cost_estimated(entry.symbol)
                 self._log_symbol(
                     entry,
                     Outcome.ERROR,
-                    f"{entry.symbol} 开会失败：{self._why(exc)}",
+                    f"{entry.symbol} 开会失败：{self._why(exc)}"
+                    + ("（花费含在途请求估算）" if guess else ""),
                     started,
-                    self._failure_cost(exc, entry.symbol),
+                    fail_cost,
+                    estimated=guess,
                 )
                 raise
             self._charge(-est)
@@ -837,6 +846,16 @@ class BattleCardCommander:
     def _estimate(self, recent: deque[float]) -> float:
         """开会前预记的钱：最近几场的平均实际花费，没有就用 ``failed_meeting_cost_usd``。"""
         return round(sum(recent) / len(recent), 6) if recent else self._failed_cost
+
+    def _cost_estimated(self, key: str) -> bool:
+        fn = getattr(self._engine, "cost_estimated", None)
+        return bool(callable(fn) and fn(key))
+
+    def _late_cost(self, key: str, delta: float) -> None:
+        """超时取消的会议，在途请求的真实花费晚到：补正今天的花费（从工作线程回到事件循环里记）。"""
+        loop = self._loop
+        if loop is not None and delta:
+            loop.call_soon_threadsafe(self._charge, delta)
 
     def _failure_cost(self, exc: BaseException, key: str = "") -> float:
         """失败会议的花费：引擎带出了真实花费就用它；超时取消的会议，引擎还在跑，就叫停它并取
@@ -955,6 +974,7 @@ class BattleCardCommander:
         started: float,
         cost: float,
         cs: CardSymbol | None = None,
+        estimated: bool = False,
     ) -> None:
         ms = (time.monotonic() - started) * 1000
         self._bump(ok=outcome is not Outcome.ERROR, cost=cost, ms=ms)
@@ -963,7 +983,7 @@ class BattleCardCommander:
             outcome=outcome,
             summary=summary[:200],
             input={"score": entry.score, "reasons": entry.reasons},
-            output=cs.model_dump(mode="json") if cs is not None else {},
+            output=cs.model_dump(mode="json") if cs is not None else {"cost_estimated": estimated},
             latency_ms=ms,
             cost_usd=cost,
         )
