@@ -85,7 +85,9 @@ async def test_runtime_switch_clears_forecast() -> None:
 
 async def test_backend_error_means_no_forecast_and_down_after_three(tmp_path: Path) -> None:
     sink = JsonlDecisionLog(tmp_path)
-    f = KronosForecaster(True, SET, FakeBackend(error=RuntimeError("MPS 炸了")), sink)
+    f = KronosForecaster(
+        True, SET, FakeBackend(error=RuntimeError("MPS 炸了")), sink, clock=lambda: T0
+    )
     await feed(f, 3)
     assert f.latest("BTCUSDT", T0) is None
     assert sink.read_status()["predictor"].health == Health.DEGRADED

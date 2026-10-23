@@ -20,6 +20,8 @@
 
 ## 接线要点（给 `jiaoyi.app`）
 
+已接好：组装在 `src/jiaoyi/app.py`，主循环在 `src/jiaoyi/loop.py`（`jiaoyi run` 启动）。下面是当时的约定，改接口时同步这里。
+
 - 启动时对每个标的调 `market.rest.fetch_recent_klines` 回填 1 分钟 K 线，再接 WebSocket，否则 ATR 要等 15 分钟。
 - 每个行情事件：`features.update(ev)` → `patrol.check(ev, positions)`（有动作就调执行器平仓）→
   成交事件后 `trigger.check(features.snapshot(sym), card, now)`。

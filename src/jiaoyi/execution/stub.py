@@ -53,3 +53,10 @@ class StubLifeboatStop:
 class StubReconciler:
     async def reconcile(self, now: datetime) -> ReconcileReport:
         return ReconcileReport(ts=now, checked_positions=0)
+
+
+class StubLotRules:
+    """桩：拿不到交易所精度，保镖据此一律拒单。真实现由执行层从 exchangeInfo 读。"""
+
+    def lot_rules(self, symbol: str) -> None:
+        return None
