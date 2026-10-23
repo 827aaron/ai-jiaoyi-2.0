@@ -53,23 +53,21 @@ plist() {
 }
 
 load() {
-  local label="$1" i
+  local label="$1" i err=""
   launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
   sleep 3  # bootout is asynchronous; bootstrapping right away races with it (error 5)
   for i in 1 2 3; do
-    if launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>/dev/null; then
+    if err="$(launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>&1)"; then
       echo "loaded $label"
       return 0
     fi
     sleep 3
   done
-  # still registered from before: loaded is loaded
+  echo "bootstrap $label failed: $err" >&2
+  # bootout did not take effect: the old definition is still registered, the new plist is NOT active
   if launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
-    launchctl kickstart "gui/$UID_NUM/$label" >/dev/null 2>&1 || true
-    echo "loaded $label (already registered)"
-    return 0
+    echo "WARNING: $label still runs the OLD definition; run 'launchctl bootout gui/$UID_NUM/$label' and re-run this script" >&2
   fi
-  echo "FAILED to load $label" >&2
   return 1
 }
 

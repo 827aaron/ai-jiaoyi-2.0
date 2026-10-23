@@ -143,8 +143,9 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 ```bash
 scripts/install_launchd.sh              # 装 colima（brew service）、Condor、每日备份
 scripts/install_launchd.sh --load-run   # 另外装 jiaoyi run（纸面跑通、你认可之后再加）
-脚本可以重复运行：colima 已加载就跳过，其余 agent 先卸载再装。
 ```
+
+脚本可以重复运行：colima 已加载就跳过，其余 agent 先卸载再装；某个 agent 装失败会报错并以非零退出，其余照装。
 
 - `com.jiaoyi.condor`：Condor 前台运行（`make run-fg`），退出后 30 秒自动重启。
 - `com.jiaoyi.backup`：每天 04:10 把 `data/decision_log`、`module_status.json`、`positions.json` 打包到 `data/backups/<日期>/`，保留 30 天。
