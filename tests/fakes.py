@@ -35,6 +35,7 @@ class FakeHbApi:
         self.create_error_before: HbApiError | None = None
         """设了就在建之前抛出，模拟明确拒绝。"""
         self.find_down = False
+        self.stop_error: HbApiError | None = None
         self._n = 0
 
     def _check(self) -> None:
@@ -93,6 +94,8 @@ class FakeHbApi:
 
     async def stop_executor(self, executor_id: str, *, keep_position: bool) -> None:
         self._check()
+        if self.stop_error is not None:
+            raise self.stop_error
         self.stopped.append((executor_id, keep_position))
         if self.auto_terminate_on_stop:
             self.terminate(executor_id, "EARLY_STOP")
@@ -132,6 +135,9 @@ class FakeExchange:
         self.wallet = 1000.0
         self.exit_price: float | None = None
         self.exit_fee: float | None = None
+        self.manual_fill: CloseFill | None = None
+        """手动平仓后“最近一笔只减仓成交”；None = 查不到。"""
+        self.mark: float | None = None
         self.leverage_set: list[tuple[str, int]] = []
         self.leverage_error: str | None = None
         self.filters: dict[str, LotFilter] = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0)}
@@ -194,6 +200,14 @@ class FakeExchange:
         self.market_closed.append((symbol, close_side, quantity))
         self.set_position(symbol, Side.LONG, 0)
         return CloseFill(self.exit_price, self.exit_fee)
+
+    async def reduce_fill_since(
+        self, symbol: str, close_side: Literal["buy", "sell"], since: datetime
+    ) -> CloseFill | None:
+        return self.manual_fill
+
+    async def mark_price(self, symbol: str) -> float | None:
+        return self.mark
 
     async def income_since(self, since: datetime) -> float:
         if self.income_down:

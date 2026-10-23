@@ -57,6 +57,8 @@ class CloseFill:
 
     price: float | None = None
     fee_usdt: float | None = None
+    estimated: bool = False
+    """价格不是真实成交价（例如手动平仓后取不到成交，用的标记价）。"""
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,18 @@ class ExchangeClient(Protocol):
         """只减仓市价单。**兜底专用**：hummingbot 不可达、执行器停不掉或平完仓位还在时用它平仓。
 
         返回成交均价和手续费（拿不到的为 None），用来算盈亏记进当日统计。"""
+        ...
+
+    async def reduce_fill_since(
+        self, symbol: str, close_side: Literal["buy", "sell"], since: datetime
+    ) -> CloseFill | None:
+        """``since`` 之后 ``close_side`` 方向的最近成交（数量加权均价 + USDT 手续费总和）。
+
+        用来给“有人在币安手动平仓”估算平仓价；取不到返回 None，不抛错。"""
+        ...
+
+    async def mark_price(self, symbol: str) -> float | None:
+        """标记价；取不到返回 None，不抛错。"""
         ...
 
     async def wallet_usdt(self) -> float:
@@ -341,6 +355,36 @@ class CcxtBinanceFutures:
             except Exception:
                 log.warning("查直连平仓手续费失败 %s", order_id, exc_info=True)
         return CloseFill(float(price) if price else None, fee)
+
+    async def reduce_fill_since(
+        self, symbol: str, close_side: Literal["buy", "sell"], since: datetime
+    ) -> CloseFill | None:
+        try:
+            await self._ready()
+            trades = await self._ex.fetch_my_trades(
+                to_ccxt_symbol(symbol), int(since.timestamp() * 1000), 100
+            )
+        except Exception:
+            log.warning("查 %s 的最近成交失败", symbol, exc_info=True)
+            return None
+        mine = [t for t in trades if t.get("side") == close_side and t.get("amount")]
+        qty = sum(float(t["amount"]) for t in mine)
+        if qty <= 0:
+            return None
+        price = sum(float(t["amount"]) * float(t["price"]) for t in mine) / qty
+        fees = [_fee_usdt(t.get("fee")) for t in mine]
+        fee = sum(f for f in fees if f is not None) if all(f is not None for f in fees) else None
+        return CloseFill(price, fee)
+
+    async def mark_price(self, symbol: str) -> float | None:
+        try:
+            await self._ready()
+            raw = await self._ex.fapiPublicGetPremiumIndex({"symbol": symbol})
+            row = raw[0] if isinstance(raw, list) else raw
+            return float(row["markPrice"])
+        except Exception:
+            log.warning("查 %s 的标记价失败", symbol, exc_info=True)
+            return None
 
     async def lot_filters(self) -> dict[str, LotFilter]:
         try:
