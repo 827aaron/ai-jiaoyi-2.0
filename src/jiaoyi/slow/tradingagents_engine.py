@@ -43,7 +43,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow.brief import MarketBriefService
-from jiaoyi.slow.commander import Analysis, Pick, PickResult
+from jiaoyi.slow.commander import Analysis, MeetingError, Pick, PickResult
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
 
@@ -464,6 +464,18 @@ class TradingAgentsEngine:
         from langchain_core.callbacks import UsageMetadataCallbackHandler
 
         handler = UsageMetadataCallbackHandler()
+        try:
+            return self._pick_run(candidates, max_n, previous, handler)
+        except Exception as exc:  # 失败时把已烧掉的 token 花费带出去，日花费上限才不漏算
+            raise MeetingError(str(exc), self._cost(handler.usage_metadata)) from exc
+
+    def _pick_run(
+        self,
+        candidates: list[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        handler: Any,
+    ) -> PickResult:
         graph = self._graph(("market",), handler)
         llm = self._llm(graph, self._s.pick_tier).with_structured_output(_PickDraft)
         table = "\n".join(
@@ -513,6 +525,12 @@ class TradingAgentsEngine:
         from langchain_core.callbacks import UsageMetadataCallbackHandler
 
         handler = UsageMetadataCallbackHandler()
+        try:
+            return self._analyze_run(entry, regime, handler)
+        except Exception as exc:  # 同上：失败也带上真实花费
+            raise MeetingError(str(exc), self._cost(handler.usage_metadata)) from exc
+
+    def _analyze_run(self, entry: SymbolPoolEntry, regime: str, handler: Any) -> Analysis:
         ticker, asset_type = ta_ticker(entry)
         analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
         graph = self._graph(analysts, handler)

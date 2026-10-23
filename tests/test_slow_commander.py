@@ -339,3 +339,52 @@ async def test_daily_budget_stops_meetings_and_notifies_once(tmp_path: Path, now
     assert c.take_notice() is None  # 每天只提示一次
     clock[0] += timedelta(days=1)  # 新的一天（曼谷）清零
     assert c.may_refresh(clock[0])
+
+
+async def test_failed_meetings_and_pick_are_charged(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.slow.commander import MeetingError
+
+    class Eng(FakeEngine):
+        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+            if e.symbol == "AAUSDT":
+                raise MeetingError("结构化输出失败", cost_usd=0.03)  # 真实 usage
+            raise RuntimeError("超时")  # 拿不到 usage → 估算
+
+    eng = Eng(["AAUSDT", "BBUSDT"])
+    c, log, _ = make(tmp_path, eng, now, failed_meeting_cost_usd=0.07)
+    with pytest.raises(CardRefreshError):
+        await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    # 选币 0.01（所有标的都失败也要计）+ 真实 0.03 + 估算 0.07
+    assert log.read_status()["commander"].today.cost_usd == pytest.approx(0.11)
+
+
+async def test_invalid_conclusion_still_charges_its_cost(tmp_path: Path, now: datetime) -> None:
+    class Eng(FakeEngine):
+        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+            return Analysis(card_symbol("OTHERUSDT"), 0.04)  # 返回了别的标的 → 不合格
+
+    c, _, _ = make(tmp_path, Eng(["AAUSDT"]), now)
+    with pytest.raises(CardRefreshError):
+        await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    assert c._stats.cost_usd == pytest.approx(0.05)  # 选币 0.01 + 废结论 0.04
+
+
+async def test_daily_cost_survives_restart(tmp_path: Path, now: datetime) -> None:
+    f = tmp_path / "data" / "slow_budget.json"
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, budget_path=f)
+    await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    spent = c._stats.cost_usd
+    assert spent > 0 and f.is_file()
+    # 重启：新实例读回当天花费，日上限不清零
+    c2, _, _ = make(
+        tmp_path, FakeEngine(["AAUSDT"]), now, budget_path=f, daily_cost_limit_usd=spent
+    )
+    assert c2._stats.cost_usd == pytest.approx(spent)
+    assert not c2.may_refresh(now)
+    # 第二天不沿用
+    c3, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now + timedelta(days=1), budget_path=f)
+    assert c3._stats.cost_usd == 0
+    # 坏文件不影响启动
+    f.write_text("not json", encoding="utf-8")
+    c4, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, budget_path=f)
+    assert c4._stats.cost_usd == 0

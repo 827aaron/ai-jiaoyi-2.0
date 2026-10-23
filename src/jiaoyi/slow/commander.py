@@ -11,11 +11,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import os
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -39,6 +43,14 @@ from jiaoyi.contracts import (
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.review import CardJournal
+
+
+class MeetingError(RuntimeError):
+    """会议中途失败。``cost_usd`` 是已烧掉的真实花费；未知为 None，由指挥官按估算计。"""
+
+    def __init__(self, message: str, cost_usd: float | None = None) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
 
 
 class CardRefreshError(RuntimeError):
@@ -118,6 +130,8 @@ class BattleCardCommander:
             timedelta(minutes=30),
         ),
         daily_cost_limit_usd: float | None = None,
+        failed_meeting_cost_usd: float = 0.05,
+        budget_path: Path | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
@@ -128,6 +142,8 @@ class BattleCardCommander:
             raise ValueError("fail_backoff 至少要有一档")
         self._backoff = tuple(fail_backoff)
         self._cost_limit = daily_cost_limit_usd
+        self._failed_cost = failed_meeting_cost_usd
+        self._budget_path = budget_path
         self._fails = 0
         self._retry_at: datetime | None = None
         self._notices: list[str] = []
@@ -152,6 +168,7 @@ class BattleCardCommander:
         self._stats = TodayStats()
         self._stats_day = ""
         self._pick_cost = 0.0
+        self._restore_budget()
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
@@ -300,7 +317,13 @@ class BattleCardCommander:
         pinned = [e for e in candidates if e.pinned][: self._pick_max]
         room = self._pick_max - len(pinned)
         free = [e for e in candidates if not e.pinned]
-        picked = await self._engine.pick(free, max(room, 0), self._card)
+        try:
+            picked = await self._engine.pick(free, max(room, 0), self._card)
+        except Exception as exc:
+            # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
+            self._charge(self._failure_cost(exc))
+            raise
+        self._charge(picked.cost_usd)  # 选币的花费一出结果就计，哪怕后面所有标的都失败
         chosen = list(pinned)
         for p in picked.picks:
             e = by_symbol.get(p.symbol)
@@ -378,24 +401,21 @@ class BattleCardCommander:
                 )
             except Exception as exc:
                 self._log_symbol(
-                    entry, Outcome.ERROR, f"{entry.symbol} 开会失败：{exc}", started, 0.0
+                    entry,
+                    Outcome.ERROR,
+                    f"{entry.symbol} 开会失败：{exc}",
+                    started,
+                    self._failure_cost(exc),
                 )
                 raise
-            cs = res.card_symbol
-            if cs.symbol != entry.symbol:
-                raise ValueError(f"会议返回了别的标的 {cs.symbol}，应为 {entry.symbol}")
-            if cs.category != entry.category:
-                # 分组决定吃哪一档敞口上限，以候选池为准，不信引擎
-                raise ValueError(
-                    f"{entry.symbol} 分组应为 {entry.category}，会议给了 {cs.category}"
+            try:
+                cs = self._validate(entry, res)
+            except Exception as exc:
+                # 会议已经烧了 token，没有可用结论也要计入花费
+                self._log_symbol(
+                    entry, Outcome.ERROR, f"{entry.symbol} 结论不合格：{exc}", started, res.cost_usd
                 )
-            r = self._risk
-            if (
-                cs.notional_usdt.max > r.max_notional_per_trade_usdt
-                or cs.leverage.max > r.max_leverage
-            ):
-                # 会议输出越界：这个币没有结论，不是悄悄夹紧后照用
-                raise ValueError(f"{entry.symbol} 会议给出的名义价值或杠杆超出硬上限")
+                raise
             self._log_symbol(
                 entry,
                 Outcome.ACTION,
@@ -406,12 +426,28 @@ class BattleCardCommander:
             )
             return res
 
+    def _validate(self, entry: SymbolPoolEntry, res: Analysis) -> CardSymbol:
+        cs = res.card_symbol
+        if cs.symbol != entry.symbol:
+            raise ValueError(f"会议返回了别的标的 {cs.symbol}，应为 {entry.symbol}")
+        if cs.category != entry.category:
+            # 分组决定吃哪一档敞口上限，以候选池为准，不信引擎
+            raise ValueError(f"{entry.symbol} 分组应为 {entry.category}，会议给了 {cs.category}")
+        r = self._risk
+        if cs.notional_usdt.max > r.max_notional_per_trade_usdt or cs.leverage.max > r.max_leverage:
+            # 会议输出越界：这个币没有结论，不是悄悄夹紧后照用
+            raise ValueError(f"{entry.symbol} 会议给出的名义价值或杠杆超出硬上限")
+        return cs
+
     # ------------------------------------------------------------ 记录
-    def _bump(self, *, ok: bool, cost: float, ms: float) -> None:
-        now = self._clock()
-        day = now.astimezone(ZoneInfo(self._risk.day_reset_tz)).date().isoformat()
+    def _roll(self, now: datetime) -> None:
+        """跨过交易日（day_reset_tz，曼谷 0 点）就把当天统计清零。"""
+        day = self._day(now)
         if day != self._stats_day:
             self._stats, self._stats_day = TodayStats(), day
+
+    def _bump(self, *, ok: bool, cost: float, ms: float) -> None:
+        self._roll(self._clock())
         s = self._stats
         calls = s.calls + 1
         self._stats = s.model_copy(
@@ -423,6 +459,48 @@ class BattleCardCommander:
                 "avg_latency_ms": (s.avg_latency_ms * s.calls + ms) / calls,
             }
         )
+        self._save_budget()
+
+    def _charge(self, cost: float) -> None:
+        """只记花费、不算一次调用（选币步骤，或不属于某个标的的花费）。"""
+        self._roll(self._clock())
+        self._stats = self._stats.model_copy(
+            update={"cost_usd": round(self._stats.cost_usd + cost, 6)}
+        )
+        self._save_budget()
+
+    def _failure_cost(self, exc: BaseException) -> float:
+        """失败会议的花费：引擎给了真实 usage 就用它，否则（超时、断网等）按估算上限计。"""
+        known = exc.cost_usd if isinstance(exc, MeetingError) else None
+        return self._failed_cost if known is None else known
+
+    def _restore_budget(self) -> None:
+        """重启后恢复当天已花的钱，免得重启就把日上限清零。"""
+        if self._budget_path is None:
+            return
+        try:
+            data = json.loads(self._budget_path.read_text(encoding="utf-8"))
+            day, cost = str(data["day"]), float(data["cost_usd"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if day == self._day(self._clock()) and cost >= 0:
+            self._stats, self._stats_day = TodayStats(cost_usd=cost), day
+
+    def _save_budget(self) -> None:
+        if self._budget_path is None:
+            return
+        tmp = self._budget_path.with_suffix(".tmp")
+        try:
+            self._budget_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps({"day": self._stats_day, "cost_usd": self._stats.cost_usd}),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._budget_path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            # 落盘失败不影响出卡；内存里的统计照常生效
 
     def _write(self, **kw: Any) -> None:
         self._log.write(
@@ -467,7 +545,9 @@ class BattleCardCommander:
             latency_ms=(time.monotonic() - started) * 1000,
             cost_usd=self._pick_cost,  # 只记总盘会这一份；各标的的花费在各自的记录里，避免重复统计
         )
-        self._bump(ok=True, cost=self._pick_cost, ms=(time.monotonic() - started) * 1000)
+        self._bump(
+            ok=True, cost=0.0, ms=(time.monotonic() - started) * 1000
+        )  # 选币花费已在开会时计入
         self._heartbeat(
             Health.OK,
             f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张）",

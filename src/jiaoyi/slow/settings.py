@@ -85,6 +85,12 @@ class BudgetConfig(_Strict):
     daily_cost_limit_usd: float = Field(
         default=10.0, gt=0, le=1000, description="军师团每个交易日（曼谷 0 点清零）最多花多少美元。"
     )
+    failed_meeting_cost_usd: float = Field(
+        default=0.05,
+        ge=0,
+        le=5,
+        description="失败的会议拿不到真实 token 用量时（超时、断网）按这个估算价计入日花费。",
+    )
     fail_backoff_minutes: tuple[float, ...] = Field(
         default=(5.0, 10.0, 30.0), description="开会连续失败后的等待时间，最后一档之后保持不变。"
     )
@@ -144,6 +150,7 @@ class SlowConfig(_Strict):
             "ttl": timedelta(hours=s.card_ttl_hours),
             "symbol_min_interval": timedelta(hours=s.symbol_min_interval_hours),
             "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
+            "failed_meeting_cost_usd": self.budget.failed_meeting_cost_usd,
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
         }
 

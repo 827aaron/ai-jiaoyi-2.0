@@ -24,6 +24,7 @@ symbol_min_interval_hours = 2.0    # 同一个币两次会议的最小间隔 0.5
 
 [budget]
 daily_cost_limit_usd = 10.0                # 每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒
+failed_meeting_cost_usd = 0.05             # 失败的会议拿不到真实用量时，按这个估算价计入日花费
 fail_backoff_minutes = [5, 10, 30]         # 开会连续失败后依次等多久再试，成功清零
 
 [prices]                           # 每百万 token 的美元价，只用于花费统计；M2 真机验证时按官网核对

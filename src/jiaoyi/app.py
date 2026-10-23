@@ -237,6 +237,8 @@ def _build_cards(
         brief=brief,
         # 每次真开会的标的追加到 data/card_review/cards.jsonl，供复盘脚本打分（只读，不调参）
         journal=CardJournal(app_cfg.data_dir),
+        # 当天已花的钱落盘（按曼谷日），重启不会把日上限清零
+        budget_path=Path(app_cfg.data_dir) / "slow_budget.json",
         **cfg.commander_kwargs(),
     )
     return commander, news
