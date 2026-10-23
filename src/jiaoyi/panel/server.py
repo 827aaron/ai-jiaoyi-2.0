@@ -209,7 +209,7 @@ def create_app(
 
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
-        return build_team(files, clock(), role)
+        return build_team(files, clock(), role, cfg()[1].predictor.mode)
 
     @api.get("/api/meeting/{symbol}")
     async def meeting(symbol: str) -> Meeting:
