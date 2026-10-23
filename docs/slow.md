@@ -104,7 +104,7 @@ python -m jiaoyi.slow.review --json          # 逐条明细
 | provider | quick（flash） | deep（pro） |
 |---|---|---|
 | deepseek | `deepseek-flash`（V4.1 Flash） | `deepseek-flash`（同上） |
-| openrouter | `deepseek/deepseek-v4.1-flash` | `deepseek/deepseek-v4.1-flash` |
+| openrouter | `deepseek/deepseek-v4.1-flash-1017` | `deepseek/deepseek-v4.1-flash-1017` |
 
 Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模型；想换回 pro 在 `[meeting] deep_model` 写 `deepseek-v4-pro`（OpenRouter 为 `deepseek/deepseek-v4-pro`）。OpenRouter 的 id 核对于 2026-10-23（`/api/v1/models`），`[meeting] quick_model / deep_model` 写了就覆盖默认。结构化输出的重试逻辑、成本统计（按模型名里有没有 `pro` 分档）不变；OpenRouter 的实际单价随上游供应商浮动，`[prices]` 仍是占位，M2 真机后按账单核对。没有对应 key 时军师团退回桩（不出卡、不开新仓）。
 
@@ -324,3 +324,7 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 - 旧 `profile` 键自动映射成 `meeting_interval`（60m → 1h）并告警；只写了 `fast_loop.time_limit_s` 没写 `hold` 时按它取最近一档。`check-config` / `status` 显示「最长持仓 N（跟开会档位 / 自定义）」。
 - 新增 `fast_loop.min_stop_fee_multiple`：止损距离至少是来回手续费的几倍（30m 3.5 / 1h 3.0 / 2h 2.5 / 4h 2.0），保镖低于它就不开仓（0 = 不查，代码默认）。
 - 巡逻兵 / 管家平仓门槛、预测员 interval / paths / lookback、risk.toml 都不随档位变。
+
+### 默认模型换成 OpenRouter 的 `deepseek-v4.1-flash-1017`（Aaron 18:49）
+
+OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.006）美元每百万 token，不分时段；`deepseek/deepseek-v4.1-flash-1017`（2026-10-17 快照，DeepSeek 官方 `deepseek-flash`）基础价 0.15 / 0.60（缓存读 0.003），只有 UTC 周一到周五 01–04 点和 06–10 点两个时段翻倍到 0.30 / 1.20，周末和其它时段半价；上下文都是 100 万，最大输出 1017 为 393216（旧 id 94 万），都是推理模型。所以默认 openrouter 的 quick / deep 都改成 1017；这只是默认，`[meeting] quick_model / deep_model` 写任何 OpenRouter 模型 id 都按你的。`[prices]` 兜底估价仍按 0.30 / 1.20（偏高，只在通道没报真实花费时用）。会议记录 `output.usage` 现在多带 `cached_tokens`（OpenRouter 报的 `prompt_tokens_details.cached_tokens`），用来看缓存命中率。

@@ -97,8 +97,8 @@ def test_openrouter_provider_picks_namespaced_models(tmp_path: Path) -> None:
     s = load_slow_config(p).engine_settings()
     assert s.provider == "openrouter"
     assert (s.quick_model, s.deep_model) == (
-        "deepseek/deepseek-v4.1-flash",
-        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "deepseek/deepseek-v4.1-flash-1017",
     )
     p.write_text('[llm]\nprovider = "openrouter"\n[meeting]\ndeep_model = "x/y-pro"\n', "utf-8")
     assert load_slow_config(p).engine_settings().deep_model == "x/y-pro"

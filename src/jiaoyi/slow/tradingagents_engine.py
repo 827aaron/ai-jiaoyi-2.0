@@ -81,7 +81,7 @@ PROVIDER_KEY_ENV: Mapping[str, str] = {
 }
 PROVIDER_MODELS: Mapping[str, tuple[str, str]] = {  # (quick, deep)
     "deepseek": ("deepseek-flash", "deepseek-flash"),
-    "openrouter": ("deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash"),
+    "openrouter": ("deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash-1017"),
 }
 
 
@@ -902,7 +902,7 @@ class CostMeter:
         self._flying: dict[str, tuple[int, str]] = {}
         """在途的模型请求：run_id → (估的输入 token 数, 价格档)。"""
         self._outs: list[int] = []
-        self.tokens_in = self.tokens_out = self.tokens_reasoning = 0
+        self.tokens_in = self.tokens_out = self.tokens_reasoning = self.tokens_cached = 0
         self._est_runs: dict[str, float] = {}
         """超时取消时还在途的请求，及各自记入的估算花费；真实结果回来后改成真实值。"""
         self._est_total = 0.0
@@ -1010,6 +1010,7 @@ class CostMeter:
             self.tokens_in += tin
             self.tokens_out += tout
             self.tokens_reasoning += reasoning
+            self.tokens_cached += _cached_tokens(usage)
         self.add(model, tin, tout, cost)
         if self.on_call is not None:
             try:
@@ -1049,6 +1050,14 @@ class CostMeter:
     def check(self) -> None:
         if self._aborted:
             raise RuntimeError("会议已被取消（超时），不再发新的模型请求")
+
+
+def _cached_tokens(usage: Any) -> int:
+    """OpenRouter 原始 usage 的 ``prompt_tokens_details.cached_tokens``（命中缓存的输入）。"""
+    if not isinstance(usage, Mapping):
+        return 0
+    v = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    return int(v) if isinstance(v, int | float) else 0
 
 
 def _reasoning_tokens(usage_metadata: Mapping[str, Any], meta: Mapping[str, Any]) -> int:
@@ -1418,6 +1427,7 @@ class TradingAgentsEngine:
                         "input_tokens": meter.tokens_in,
                         "output_tokens": meter.tokens_out,
                         "reasoning_tokens": meter.tokens_reasoning,
+                        "cached_tokens": meter.tokens_cached,  # 命中缓存的输入 token
                     },
                 )
             except (ValidationError, ValueError) as exc:
