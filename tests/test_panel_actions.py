@@ -670,3 +670,15 @@ def test_profile_pins_listed_and_cleared(tmp_path: Path) -> None:
     assert list(paths.app.parent.glob("app.toml.bak-*"))
     actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
     assert load_app_config(paths.app).keeper_interval_s == 15  # 现在跟档位走
+
+
+def test_fast_loop_pin_defaults_follow_time_limit(tmp_path: Path) -> None:
+    """止损 / ATR 周期等写死项的“默认值”按单笔最长持仓算（900 秒 → 5 分钟 K 线），不按档位。"""
+    from jiaoyi.core import profiles
+
+    paths, data = _setup(tmp_path)
+    actions.update_config(paths, data, "fast_loop", {"time_limit_s": 900}, PW, NOW)
+    actions.update_config(paths, data, "fast_loop", {"atr_period_min": 15}, PW, NOW)
+    pins = {x.key: x for x in actions.profile_info(paths).pins["2h"]}
+    assert pins["atr_period_min"].profile_default == profiles.hold_defaults(900)["atr_period_min"]
+    assert actions.profile_info(paths).pinned["fast_loop"]["atr_period_min"] == 5
