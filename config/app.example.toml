@@ -22,7 +22,7 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 [predictor]
 mode = "on_demand"                # on_demand = 只算作战卡里的币和有持仓的币（+ 哨兵出信号时补算）；all_symbols = 候选池全算
 size_policy = "fixed"             # fixed = 一直用 model_size；adaptive = 按排队深度换 base / small / mini
-model_size = "small"              # mini / small / base（fixed 时用；small 在 Mac mini 上约 3 秒 / 币）
+model_size = "base"               # 预测模型：base = 最大（更准，每个币比标准慢 3–4 倍）/ small = 标准 / mini = 最快
 adaptive_base_max_queue = 0       # adaptive：后面没人排队（≤ 0）用 base
 adaptive_mini_min_queue = 3       # adaptive：排队 ≥ 3 个用 mini，中间用 small
 backfill_bars = 400               # 启动时回填多少根预测员周期的 K 线（至少 64）

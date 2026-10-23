@@ -1008,7 +1008,8 @@ const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安�
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
 const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
-const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
+const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
+const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
 // 设置项的大白话标题；原来的专业说明和英文键名降为灰色小字
@@ -1098,7 +1099,7 @@ const PLAIN = {
   session_vol_ratio: "关键时段成交量是平时几倍才算",
   mode_predictor: "预测哪些币",
   size_policy: "模型大小怎么选",
-  model_size: "固定用哪个大小的模型",
+  model_size: "预测模型",
   adaptive_base_max_queue: "排队不超过几个时用最准的模型",
   adaptive_mini_min_queue: "排队到几个时换最快的模型",
   backfill_bars: "启动时先拉多少根 5 分钟 K 线",
@@ -1134,7 +1135,7 @@ const HINT = {
   sim_environment: "Demo Trading 是币安现在的模拟盘；旧测试网已停用",
   mode_predictor: "按需 = 只算作战卡里和有持仓的币；全算 = 候选池每个币都算（费电脑）",
   size_policy: "固定 = 一直用下面选的模型；自适应 = 排队多时自动换小模型",
-  model_size: "选“固定”时用这个",
+  model_size: "标准 / 最大：最大更准，但每个币算得慢 3–4 倍（Mac mini 每币约 3.5 秒，标准约 1 秒）；加载失败会自动改用标准（选“固定”时用这个）",
   adaptive_base_max_queue: "选“自适应”时生效",
   adaptive_mini_min_queue: "选“自适应”时生效；介于两者之间用中模型",
   profile: "在「运行」卡片的开会间隔里切换",

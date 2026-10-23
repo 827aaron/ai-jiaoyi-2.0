@@ -87,7 +87,7 @@
 |---|---|---|---|
 | `mode` | `on_demand` | `on_demand` / `all_symbols` | 按需：只在 5 分钟收盘时算作战卡里的币、有持仓的币和总盘会刚挑中的币（排队时先算）；哨兵出信号而该币没有新鲜预测时，后台补算一次（这次信号不等它）。全部：候选池每个币每根都算 |
 | `size_policy` | `fixed` | `fixed` / `adaptive` | 固定用 `model_size`；自适应按开始推理时还在排队的个数选模型 |
-| `model_size` | `small` | `mini` / `small` / `base` | 固定策略下用的模型 |
+| `model_size` | `base` | `mini` / `small` / `base` | 固定策略下用的模型（设置页「预测模型」：base 最大，更准但每币约 3.5 秒；small 标准约 1 秒）；加载失败自动改用 small |
 | `adaptive_base_max_queue` | 0 | 0–20，且 < 下一项 | 自适应：排队 ≤ 它用 base |
 | `adaptive_mini_min_queue` | 3 | 1–50 | 自适应：排队 ≥ 它用 mini，中间用 small |
 | `backfill_bars` | 400 | 64–1500 | 启动回填多少根 5 分钟线 |

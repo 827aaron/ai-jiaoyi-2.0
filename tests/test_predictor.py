@@ -16,6 +16,7 @@ from jiaoyi.contracts import Health, Kline, Outcome, PredictorConfig, Role
 from jiaoyi.contracts.market import Interval
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.predictor import KronosForecaster, KronosSettings
+from jiaoyi.predictor import kronos as kmod
 from jiaoyi.predictor.kronos import Path_
 
 T0 = datetime(2026, 10, 22, 0, 0, tzinfo=UTC)
@@ -417,9 +418,7 @@ async def test_adaptive_loads_each_size_on_first_use() -> None:
     assert set(built) == {"mini", "small", "base"}
     models = {s: f.latest(s, T0 + timedelta(minutes=15)) for s in syms}
     assert {fc.model for fc in models.values() if fc} == {
-        "Kronos-mini",
-        "Kronos-small",
-        "Kronos-base",
+        kmod.MODEL_SPECS[n].version for n in ("mini", "small", "base")
     }
 
 
@@ -493,8 +492,8 @@ async def test_log_and_status_carry_the_model_actually_used(tmp_path: Path) -> N
     f = KronosForecaster(True, SET, FakeBackend(), sink, clock=lambda: T0, cfg=cfg)
     await feed(f, 3)
     rec = sink.read_day("2026-10-22")[-1]
-    assert rec.model_version == "Kronos-base"
-    assert sink.read_status()[Role.PREDICTOR.value].version == "Kronos-base"
+    assert rec.model_version == "Kronos-base@2b55474"  # 模型名 @ 钉死的权重提交号
+    assert sink.read_status()[Role.PREDICTOR.value].version == "Kronos-base@2b55474"
 
 
 async def test_newly_wanted_symbol_with_history_predicts_right_away() -> None:
@@ -628,3 +627,63 @@ def test_predictor_interval_follows_hold() -> None:
     # 用户写了就按用户的
     mine = profiles.fill({"interval": "5m"}, "1h", "predictor", "24h")
     assert PredictorConfig.model_validate(mine).interval == "5m"
+
+
+def test_default_model_is_the_largest() -> None:
+    assert PredictorConfig().model_size == "base"
+
+
+async def test_largest_model_load_failure_falls_back_to_standard(tmp_path: Path) -> None:
+    """所选（最大）模型加载失败：这次就改用标准模型出预测，之后一直用标准，状态里写原因。"""
+    built: dict[str, FakeBackend] = {}
+
+    class Broken(FakeBackend):
+        def predict(self, bars: list[Kline], pred_len: int, paths: int) -> list[Path_]:
+            self.calls += 1
+            raise kmod.ModelLoadError("Kronos-base 加载失败：OSError: 没有权重")
+
+    def factory(size: str) -> FakeBackend:
+        built[size] = Broken() if size == "base" else FakeBackend()
+        return built[size]
+
+    sink = JsonlDecisionLog(tmp_path)
+    f = KronosForecaster(True, SET, log_sink=sink, cfg=ALL, backend_for=factory,
+                         clock=lambda: T0 + timedelta(minutes=15))  # fmt: skip
+    await feed(f, 4)
+    fc = f.latest("BTCUSDT", T0 + timedelta(minutes=15))
+    assert fc is not None and fc.model == kmod.MODEL_SPECS["small"].version
+    assert built["base"].calls == 1  # 失败一次后不再试
+    st = sink.read_status()[Role.PREDICTOR.value]
+    assert st.health == Health.OK and "已改用标准模型" in st.headline and "没有权重" in st.headline
+
+
+async def test_standard_model_load_failure_is_an_error() -> None:
+    class Broken(FakeBackend):
+        def predict(self, bars: list[Kline], pred_len: int, paths: int) -> list[Path_]:
+            raise kmod.ModelLoadError("Kronos-small 加载失败")
+
+    f = make(True, SET, cfg=PredictorConfig(mode="all_symbols", model_size="small"),
+             backend_for=lambda size: Broken())  # fmt: skip
+    await feed(f, 3)
+    assert f.latest("BTCUSDT", T0 + timedelta(minutes=15)) is None
+
+
+def test_fetch_weights_pins_revisions(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+
+    from jiaoyi.predictor import fetch_weights
+
+    got: list[tuple[str, str]] = []
+    hub = types.SimpleNamespace(
+        snapshot_download=lambda repo_id, revision: got.append((repo_id, revision))
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    assert fetch_weights.main([]) == 0
+    base, small = kmod.MODEL_SPECS["base"], kmod.MODEL_SPECS["small"]
+    assert got == [
+        (base.model_id, base.model_revision),
+        (base.tokenizer_id, base.tokenizer_revision),
+        (small.model_id, small.model_revision),
+    ]  # 两个模型共用一个分词器，只拉一次
+    assert fetch_weights.main(["huge"]) == 2
