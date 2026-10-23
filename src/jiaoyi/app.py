@@ -19,7 +19,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -450,6 +450,7 @@ def build_modules(
             ),
             recorder=recorders[Role.SCREENER],
             earnings=earnings,
+            every=timedelta(minutes=app_cfg.screener_interval_min),
             tz=tz,
         )
         cards, news = _build_cards(

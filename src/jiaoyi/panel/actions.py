@@ -99,6 +99,7 @@ APP_EDITABLE = frozenset(
         "keeper_interval_s",
         "reconcile_interval_s",
         "slow_loop_interval_min",
+        "screener_interval_min",
         "pool_size",
         "card_pick_max",
         "reconciler_close_unknown_positions",

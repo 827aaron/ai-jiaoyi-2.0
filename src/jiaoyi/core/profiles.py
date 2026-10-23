@@ -76,7 +76,11 @@ def _meeting(
 ) -> dict[Section, dict[str, Any]]:
     """开会间隔一档：卡有效期 = 间隔 + 提前量（20 = 单币超时 15 分钟 + 5 分钟余量）。"""
     return {
-        "app": {"slow_loop_interval_min": interval_min, "predictor_enabled": True},
+        "app": {
+            "slow_loop_interval_min": interval_min,
+            "screener_interval_min": interval_min,  # 选币跟开会同节奏
+            "predictor_enabled": True,
+        },
         "slow.schedule": {
             "card_ttl_min": interval_min + ttl_extra,
             "symbol_min_interval_min": sym_gap,

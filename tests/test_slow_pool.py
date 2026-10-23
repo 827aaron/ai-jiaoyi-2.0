@@ -111,3 +111,14 @@ async def test_market_status_is_refreshed_by_every_heartbeat(tmp_path: Path, now
     c.heartbeat(clock[0])  # 两轮之间的空闲心跳：总盘会也要带新的 ts
     later = log.read_status()["market"]
     assert later.ts == clock[0] and later.last_run_at == now and later.next_run_at is not None
+
+
+def test_screener_follows_meeting_interval_by_default(tmp_path: Path) -> None:
+    from jiaoyi.contracts.risk_config import AppConfig  # noqa: F401
+    from jiaoyi.core.config import with_profile
+
+    for tier, mins in (("15m", 15), ("1h", 60), ("24h", 1440)):
+        data = with_profile({"meeting_interval": tier})
+        assert data["screener_interval_min"] == mins == data["slow_loop_interval_min"]
+    custom = with_profile({"meeting_interval": "1h", "screener_interval_min": 30})
+    assert custom["screener_interval_min"] == 30  # 自己写的优先
