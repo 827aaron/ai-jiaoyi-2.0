@@ -26,12 +26,16 @@ from jiaoyi.panel.pages import (
     FundsPage,
     HistoryPage,
     HistoryRange,
+    PoolPage,
     PositionsPage,
+    SettingsPage,
     TeamPage,
     TrailItem,
     build_funds,
     build_history,
+    build_pool,
     build_positions,
+    build_settings,
     build_signal,
     build_team,
 )
@@ -61,7 +65,9 @@ def create_app(
     clock: Clock = lambda: datetime.now(UTC),
     lan_only: bool = True,
     klines: KlineSource | None = None,
+    key_status: dict[str, bool] | None = None,
 ) -> FastAPI:
+    """``key_status``：密钥名 → 配没配，由启动面板的命令行查好传进来（面板不碰密钥本身）。"""
     files = PanelFiles(app_cfg.data_dir, risk.day_reset_tz)
     market = klines or KlineSource()
 
@@ -103,6 +109,14 @@ def create_app(
     @api.get("/api/funds")
     async def funds() -> FundsPage:
         return build_funds(files, await hb.snapshot(), risk, clock())
+
+    @api.get("/api/pool")
+    async def pool() -> PoolPage:
+        return build_pool(files)
+
+    @api.get("/api/settings")
+    async def settings() -> SettingsPage:
+        return build_settings(files, risk, app_cfg, key_status or {})
 
     @api.get("/api/signal/{signal_id}")
     async def signal(signal_id: str) -> list[TrailItem]:

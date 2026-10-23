@@ -179,7 +179,7 @@ table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
 th { font-weight: 400; font-size: 12px; color: var(--dim); }
 td.r, th.r { text-align: right; }
-td.wrap { white-space: normal; min-width: 220px; }
+td.txt { white-space: normal; min-width: 220px; }
 tbody tr:last-child td { border-bottom: 0; }
 tr.click:hover td, tr.sel td { background: var(--bg); }
 .btn.b-sm { padding: 4px 10px; font-size: 12px; }
@@ -225,3 +225,9 @@ tr.click:hover td, tr.sel td { background: var(--bg); }
 .form .fr:last-child { border-bottom: 0; }
 .form .fr.total, tr.total td { font-weight: 600; color: var(--hi); border-top: 1px solid var(--line2); }
 @media (max-width: 900px) { .tiles.t5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .g21 { grid-template-columns: 1fr; } }
+.tiles.t4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+tr.dimrow td { color: var(--dim); }
+.form .fr label { flex: 1; min-width: 0; }
+.form .fr .hint { display: block; font-size: 11.5px; color: var(--dim); }
+@media (max-width: 900px) { .tiles.t4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.form .fr > b { max-width: 55%; text-align: right; overflow-wrap: anywhere; }

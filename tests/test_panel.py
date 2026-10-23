@@ -480,3 +480,40 @@ def test_history_and_funds_endpoints(tmp_path: Path) -> None:
         assert client.get("/api/history?range=7d").json()["range"] == "7d"
         assert client.get("/api/history?range=1y").status_code == 422
         assert client.get("/api/funds").status_code == 200
+
+
+def test_pool_page(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_pool
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    assert build_pool(files).entries == []
+    (tmp_path / "symbol_pool.json").write_text(json.dumps(load_example("symbol_pool")))
+    page = build_pool(files)
+    assert page.entries[0].in_pool and page.in_pool + page.rejected == len(page.entries)
+    assert all(a.score >= b.score for a, b in zip(page.entries, page.entries[1:], strict=False)
+               if a.in_pool and b.in_pool)  # fmt: skip
+
+
+def test_settings_page_never_has_key_values(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_settings
+
+    (tmp_path / "live_gate.json").write_text(
+        json.dumps({"salt_hex": "00", "hash_hex": "deadbeefcafe", "armed_at": None})
+    )
+    page = build_settings(
+        PanelFiles(tmp_path, RISK.day_reset_tz), RISK, _cfg(tmp_path), {"JEV_API_KEY": True}
+    )
+    assert page.password_set and not page.live_armed
+    lev = next(i for i in page.risk if i.key == "max_leverage")
+    assert lev.value == RISK.max_leverage and lev.bounds == "1–10"
+    assert page.category_caps["major"] == RISK.category_exposure_x[c.Category.MAJOR]
+    assert any(i.key == "min_p_take" for i in page.fast_loop)
+    assert page.keys == {"JEV_API_KEY": True}
+    assert "deadbeefcafe" not in page.model_dump_json()  # 哈希不出面板
+
+
+def test_pool_and_settings_endpoints(tmp_path: Path) -> None:
+    with _client(tmp_path, "127.0.0.1") as client:
+        assert client.get("/api/pool").json()["entries"] == []
+        body = client.get("/api/settings").json()
+        assert body["mode"] == "paper" and body["keys"] == {}
