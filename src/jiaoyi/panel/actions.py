@@ -52,7 +52,7 @@ from jiaoyi.slow.settings import with_profile as slow_with_profile
 
 CHANGES_FILE = "config_changes.jsonl"
 COMMAND_TTL = timedelta(seconds=60)
-NEEDS_PASSWORD: frozenset[CommandKind] = frozenset({"resume", "unblock_symbol"})
+NEEDS_PASSWORD: frozenset[CommandKind] = frozenset({"resume", "unblock_symbol", "restart"})
 
 Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule", "llm", "budget"]
 _SLOW_SECTIONS = ("schedule", "llm", "budget")

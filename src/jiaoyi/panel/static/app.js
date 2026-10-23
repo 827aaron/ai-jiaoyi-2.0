@@ -38,6 +38,8 @@ try { if (localStorage.getItem("updown") === "red-up") document.documentElement.
 let data = null; // /api/overview
 let pageData = null; // 当前页自己的接口
 let pageKey = "";
+let pageErr = null; // [pageId, 出错说明]：读不出就显示错误，不能一直“正在读取…”
+const STALE_HINT = "多半是代码更新了、面板进程还是旧的：在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。";
 let lastOk = 0;
 const S = { tf: "1m" };
 
@@ -88,8 +90,11 @@ function chrome() {
     const since = c.paused_since ? `${hm(c.paused_since)} 起，` : "";
     b += `<div class="banner bn-bad"><b>⏸ ${why}</b><span>${since}${esc(c.paused_reason || "")}${c.paused_reason ? "。" : ""}持仓照常盯；恢复要点右上角“恢复开新仓”并输入面板密码。</span></div>`;
   }
+  if (c && c.panel_stale) {
+    b += `<div class="banner bn-bad"><b>面板版本与代码不一致</b><span>代码已更新、面板进程还是旧的，有的页面会读不出。在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。</span></div>`;
+  }
   if (c && c.config_pending) {
-    b += `<div class="banner bn-paper"><b>配置已改、未生效</b><span>重启 <code>jiaoyi run</code> 后生效。<a href="#settings">看改了什么 ›</a></span></div>`;
+    b += `<div class="banner bn-paper"><b>配置已改、未生效</b><span>重启主程序后生效。<a href="#settings">看改了什么 ›</a></span>${data.running ? `<button class="btn b-sm b-go" ${clickable("cmd", "restart")}>重启生效</button>` : ""}</div>`;
   }
   if (data && data.kpis.halted) {
     b += `<div class="banner bn-bad"><b>⚠ 已熔断</b><span>今日亏损达到 ${data.kpis.halt_pct}%，停开新仓，曼谷 00:00 自动恢复。持仓照常盯。</span></div>`;
@@ -120,6 +125,7 @@ const CMD = {
   close_all: { title: "全部平仓", text: "市价平掉所有持仓、撤掉保命单。会先自动暂停开新仓；平完以后要开新仓，得另外点“恢复开新仓”。", ok: "全部平仓", danger: true },
   close_position: { title: "平仓", text: "市价平掉这一笔，撤掉它的保命单。", ok: "平仓", danger: true },
   unblock_symbol: { title: "解封", text: "这个币因为币安公告被禁开新仓。确认公告已经不影响交易再解封。", ok: "解封", pw: true },
+  restart: { title: "重启生效", text: "主程序先停开新仓、等在途的下单和平仓做完，再退出由 launchd 自动拉起，按新配置运行（约 30–60 秒）。持仓的保命止损一直挂在交易所。", ok: "重启", pw: true },
   refresh_cards: { title: "重新开会出卡", text: "让军师团马上开一次会、重出作战卡（会花一次大模型费用）。", ok: "开会" },
 };
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
@@ -168,12 +174,31 @@ function askCommand(kind, params = {}, what = "") {
       if (st.status !== "pending") {
         const [t, cl] = STATUS[st.status] || [st.status, ""];
         dlgMsg(`<b class="${cl}">${t}</b>${st.detail ? "　" + esc(st.detail) : ""}`);
+        if (kind === "restart" && st.status === "done") return waitRestart(st.detail);
         poll();
         return;
       }
     }
     dlgMsg("一直没有回执：主程序可能没在运行。", "down");
   });
+}
+
+// 重启：等主程序带着新配置回来（runtime.json 的配置指纹和配置文件一致、心跳恢复）
+async function waitRestart(detail) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 180000) {
+    if (!$("#dlg-msg")) return;
+    dlgMsg(`<b>重启中…</b>　已等 ${Math.round((Date.now() - t0) / 1000)} 秒`);
+    await new Promise((r) => setTimeout(r, 2000));
+    let ov;
+    try { ov = await getJson("/api/overview"); } catch (e) { continue; }
+    if (ov.running && ov.control && ov.control.config_pending === false) {
+      dlgMsg(`<b class="up">已按新配置重启</b>`);
+      poll();
+      return;
+    }
+  }
+  dlgMsg("3 分钟还没起来：在 Mac 上看 <code>launchctl list | grep jiaoyi</code> 和 data/logs/。", "down");
 }
 
 /* ---------- 弹窗 */
@@ -705,7 +730,7 @@ function editSettings(sec) {
     $("#layer [data-close].btn").textContent = "关闭";
     const byKey = Object.fromEntries(items.map((i) => [i.key, i]));
     const list = res.changed.map((x) => `${esc(x.key)}：${fmtVal(x.old, byKey[x.key])} → ${fmtVal(x.new, byKey[x.key])}`).join("<br>");
-    dlgMsg(`<b class="up">已保存</b>，重启 <code>jiaoyi run</code> 后生效。<br>${list}`);
+    dlgMsg(`<b class="up">已保存</b>，点页面顶部“重启生效”后用上。<br>${list}`);
     poll();
   });
   $("#layer .dlg").classList.add("mid");
@@ -730,7 +755,7 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
       <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
-      <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>
+      <div class="foot">在 Mac mini 本机打开 <a href="/setup">首次设置</a> 写入（或终端 jiaoyi setup-keys）。</div></section>
     <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app, "app")}</div></section>
     <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop, "fast_loop")}</div></section>
     <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
@@ -739,7 +764,7 @@ P.settings = () => {
     ${profileCard(d)}
     <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>
-  <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，重启 jiaoyi run 后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;
+  <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，点“重启生效”后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;
 };
 
 /* 资金曲线（历史页） */
@@ -793,6 +818,10 @@ function render() {
   $("#status").innerHTML = statusBar();
   const { page, arg } = route();
   const needs = PAGE_API[page];
+  if (needs && pageErr && pageErr[0] === pageId(page, arg)) {
+    $("#page").innerHTML = `<div class="card"><div class="empty"><b>这一页读不出来</b><span>${esc(pageErr[1])}</span><span>${STALE_HINT}</span></div></div>`;
+    return;
+  }
   if (!data || (needs && (!pageData || pageKey !== pageId(page, arg)))) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
@@ -804,10 +833,22 @@ function render() {
   if (page === "history") mountHistoryChart();
 }
 
+// 5 秒没回就算失败；出错带上状态码和接口给的说明
 async function getJson(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(String(r.status));
-  return r.json();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5000);
+  try {
+    let r;
+    try { r = await fetch(url, { cache: "no-store", signal: ctl.signal }); } catch (e) { throw new Error(e.name === "AbortError" ? "5 秒没有回应" : "连不上面板服务"); }
+    if (!r.ok) {
+      let detail = "";
+      try { const j = await r.json(); detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch (e) { /* 不是 JSON */ }
+      throw new Error(`${url.split("?")[0]} 返回 ${r.status}${detail ? "：" + detail : ""}`);
+    }
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function poll() {
@@ -817,8 +858,14 @@ async function poll() {
     TZ = data.display_tz || TZ;
     const api = PAGE_API[page];
     if (api) {
-      pageData = await getJson(api(arg));
-      pageKey = pageId(page, arg);
+      const id = pageId(page, arg);
+      try {
+        pageData = await getJson(api(arg));
+        pageKey = id;
+        pageErr = null;
+      } catch (e) {
+        pageErr = [id, e.message];
+      }
     }
     lastOk = Date.now();
     $("#stale").innerHTML = "";
@@ -826,7 +873,8 @@ async function poll() {
     loadKlines(false);
   } catch (e) {
     const ago = lastOk ? Math.round((Date.now() - lastOk) / 1000) + " 秒前" : "从未";
-    $("#stale").innerHTML = `<div class="stale">面板服务连不上（上次成功：${ago}）</div>`;
+    $("#stale").innerHTML = `<div class="stale">面板服务读不出（${esc(e.message)}；上次成功：${ago}）</div>`;
+    if (!data) $("#page").innerHTML = `<div class="card"><div class="empty"><b>面板读不出数据</b><span>${esc(e.message)}</span><span>${STALE_HINT}</span></div></div>`;
   }
 }
 

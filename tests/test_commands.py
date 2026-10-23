@@ -215,3 +215,109 @@ def test_done_results_are_pruned_after_7_days(tmp_path: Path, now: datetime) -> 
     os.utime(new, (now.timestamp(), now.timestamp()))
     assert CommandInbox(tmp_path).prune(now) == 1
     assert not old.exists() and new.exists()
+
+
+# ---------------------------------------------------------------- 面板“重启生效”
+
+
+def _restart_runner(
+    tmp_path: Path, now: datetime, check: object = None
+) -> tuple[Runner, FakeExecutor]:
+    app = _app(tmp_path, now)
+    ex = FakeExecutor()
+    app.m = dataclasses.replace(
+        app.m, executor=ex, gate=FakeGate(), risk=FakeRisk(True), cards=FakeCards(h.card(now))
+    )
+    return Runner(app, restart_check=check), ex  # type: ignore[arg-type]
+
+
+async def test_restart_rejected_without_supervisor_or_bad_config(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, ex = _restart_runner(tmp_path, now)  # 没给检查 = 不支持
+    write_command(tmp_path, _cmd(now, "restart"))
+    await r.command_tick()
+    assert _result(tmp_path, "cmd-restart-0001")["status"] == "rejected"
+    assert not r._restart.is_set()
+
+    r, ex = _restart_runner(tmp_path, now, lambda: "不是 launchd 托管")
+    write_command(tmp_path, _cmd(now, "restart", 2))
+    await r.command_tick()
+    res = _result(tmp_path, "cmd-restart-0002")
+    assert res["status"] == "rejected" and "launchd" in res["detail"]
+    assert not r._restart.is_set()
+    await r.handle_signal(h.signal(now))
+    assert ex.opened == ["int-0001"]  # 被拒后照常开仓
+
+
+async def test_restart_waits_for_in_flight_open_then_exits(tmp_path: Path, now: datetime) -> None:
+    r, ex = _restart_runner(tmp_path, now, lambda: None)
+    await r._open_lock.acquire()  # 模拟一笔开仓正在下单
+    write_command(tmp_path, _cmd(now, "restart"))
+    tick = asyncio.create_task(r.command_tick())
+    await asyncio.sleep(0.05)
+    assert not tick.done() and r._restarting
+    await r.handle_signal(h.signal(now))  # 重启中：新信号不开仓
+    assert ex.opened == []
+    r._open_lock.release()
+    await tick
+    assert _result(tmp_path, "cmd-restart-0001")["status"] == "done"  # 回执先写
+    assert r._restart.is_set()
+    assert read_paused(tmp_path) is None  # 不落盘暂停：重启后照旧
+
+
+async def test_restart_rolls_back_when_close_does_not_finish(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.RESTART_WAIT_CLOSE_S", 0.3)
+    r, ex = _restart_runner(tmp_path, now, lambda: None)
+    r._closing.add("pos-0001")
+    write_command(tmp_path, _cmd(now, "restart"))
+    await r.command_tick()
+    res = _result(tmp_path, "cmd-restart-0001")
+    assert res["status"] == "rejected" and "平仓" in res["detail"]
+    assert not r._restarting and not r._restart.is_set()
+    await r.handle_signal(h.signal(now))
+    assert ex.opened == ["int-0001"]
+
+
+async def test_run_returns_cleanly_on_restart(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.COMMAND_POLL_EVERY_S", 0.05)
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+
+    async def idle() -> None:
+        await asyncio.sleep(3600)
+
+    async def noop() -> None:
+        return None
+
+    r._market_loop = idle  # type: ignore[method-assign]
+    r.news_tick = noop  # type: ignore[method-assign]
+    write_command(tmp_path, _cmd(now, "restart"))
+    await asyncio.wait_for(r.run(), timeout=5)
+    assert r.restart_requested
+    assert _result(tmp_path, "cmd-restart-0001")["status"] == "done"
+    assert r._loops == [] and r._tasks == set()
+
+
+def test_restart_blocker_needs_launchd_and_valid_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    import shutil
+
+    from jiaoyi.cli import _restart_blocker
+
+    shutil.copy(RISK, tmp_path / "risk.toml")
+    shutil.copy(APP, tmp_path / "app.toml")
+    args = argparse.Namespace(
+        risk=str(tmp_path / "risk.toml"), app=str(tmp_path / "app.toml"), slow=str(tmp_path / "x")
+    )
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    assert "launchd" in (_restart_blocker(args) or "")
+    monkeypatch.setenv("XPC_SERVICE_NAME", "com.jiaoyi.run")
+    assert _restart_blocker(args) is None
+    (tmp_path / "risk.toml").write_text("max_leverage = 999\n", encoding="utf-8")
+    assert "新配置不合格" in (_restart_blocker(args) or "")

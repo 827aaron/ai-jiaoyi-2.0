@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import os
 import shutil
 import subprocess
 import sys
@@ -224,9 +225,26 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     print(f"启动：模式 {app.app_cfg.mode.value}，拍板 {app.gate_label()}。Ctrl+C 停止。")
     print(_profile_line(args, app.app_cfg))
+    runner = Runner(app, restart_check=lambda: _restart_blocker(args))
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(Runner(app).run())
+        asyncio.run(runner.run())
+    if runner.restart_requested:
+        print("面板要求重启：已干净退出，launchd 会重新拉起")
     return 0
+
+
+LAUNCHD_RUN_LABEL = "com.jiaoyi.run"
+
+
+def _restart_blocker(args: argparse.Namespace) -> str | None:
+    """面板“重启生效”前的检查：退出后要有人拉起，新配置要能启动，否则不退。"""
+    if os.environ.get("XPC_SERVICE_NAME") != LAUNCHD_RUN_LABEL:
+        return "不是 launchd 托管（com.jiaoyi.run），退出后不会自动拉起；请在终端手动重启"
+    try:
+        _load(args)
+    except ConfigError as e:
+        return f"新配置不合格，没有重启：{e}"
+    return None
 
 
 def _watchdog(args: argparse.Namespace) -> int:
