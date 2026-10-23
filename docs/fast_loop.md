@@ -66,6 +66,12 @@
 - WebSocket 没有持仓量，拥挤交易信号第一版只看资金费率；CPI / 议息日历未接入。
 - 这台云端开发机访问币安返回 451（地区限制），实时连通性需要在 Mac mini 上验证。
 
+## 预测员（Kronos）实测
+
+- Mac mini M4（2026-10-23）：真推理可用，**约 3.1 秒 / 币**（4 条路径 × 预测 12 根 5 分钟 K 线），CPU。
+- MPS 每次都报 `scaled_dot_product_attention for MPS does not support dropout`，所以 `KronosSettings.device="auto"` 不再选 MPS，直接用 CPU；显式写 `mps` / `cuda` 出错也会退回 CPU 并一直用 CPU。
+- 推理在后台任务里跑，几秒的耗时不进拍板延迟；开关仍是 `app.toml` 的 `predictor_enabled`（示例为 `true`，关掉时快环照常跑）。
+
 ## Jev 问题模板和复盘
 
 - 模板（问题措辞、选项说明、快照格式）在 `gate/questions.py`，版本号 `TEMPLATE_VERSION`，内容指纹 `template_fingerprint()`。
