@@ -89,6 +89,7 @@ def impls(*ifaces: type) -> list[type]:
 SLOTS: dict[type, tuple[type, ...]] = {
     loop_mod._Forgets: (interfaces.Keeper,),
     loop_mod._HasUrgent: (interfaces.Patrol,),
+    loop_mod._HoldsAware: (interfaces.BattleCardProvider,),
     loop_mod._NewsAware: (interfaces.BattleCardProvider,),
     loop_mod._RefreshGate: (interfaces.BattleCardProvider,),
     loop_mod._RefreshReason: (interfaces.BattleCardProvider,),

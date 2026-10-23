@@ -16,8 +16,8 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -171,6 +171,7 @@ class BattleCardCommander:
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
+        self._held: frozenset[str] = frozenset()
         self._fails = 0
         self._retry_at: datetime | None = None
         self._notices: list[str] = []
@@ -216,6 +217,14 @@ class BattleCardCommander:
                 ]
             }
         )
+
+    def set_held(self, symbols: Collection[str]) -> None:
+        """有持仓的币：它们必须一直在卡上（继续盯或只看不做），不然持仓管家会判“不再盯”而平仓。"""
+        self._held = frozenset(symbols)
+
+    @staticmethod
+    def _watch_only(cs: CardSymbol) -> CardSymbol:
+        return cs.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
 
     def block_symbol(self, symbol: str, reason: str) -> None:
         """封掉一个币的新开仓（例如币安公告要下架它）。保镖只认作战卡，所以这里改卡。
@@ -381,6 +390,22 @@ class BattleCardCommander:
         same_day = prev is not None and prev.card_id == self._card_id(now)
         base_version = prev.version if prev is not None and same_day else 0
         symbols: dict[str, CardSymbol] = dict(reused)
+        # 本轮还没轮到 / 开会失败的币：上一张卡的指令先留着，开完哪个换哪个，不然持仓管家会看到
+        # 卡上暂时没有这个币而判“不再盯”。上一张卡已过期就不沿用旧指令，只给有持仓的币留“只看不做”
+        old_ok = prev is not None and prev.is_valid(now)
+        for e in to_meet:
+            old = prev.for_symbol(e.symbol) if prev is not None else None
+            if old is None:
+                continue
+            if old_ok:
+                symbols[e.symbol] = clamp_to_risk(old, self._risk, self._stop)
+            elif e.symbol in self._held:
+                symbols[e.symbol] = self._watch_only(old)
+        # 有持仓但这轮没入选的币：留在卡上，只看不做，别让管家把它当“不再盯”
+        for sym in self._held:
+            old = prev.for_symbol(sym) if prev is not None else None
+            if sym not in symbols and old is not None:
+                symbols[sym] = self._watch_only(old)
         cost = picked.cost_usd
         published = 0
 
@@ -418,6 +443,13 @@ class BattleCardCommander:
             for e, r in zip(to_meet, results, strict=True)
             if not isinstance(r, Analysis)
         ]
+        for e, r in zip(to_meet, results, strict=True):
+            if isinstance(r, Analysis):
+                continue
+            if e.symbol in self._held and e.symbol in symbols:
+                symbols[e.symbol] = self._watch_only(symbols[e.symbol])  # 开会失败：持仓照常盯
+            else:
+                symbols.pop(e.symbol, None)  # 没有新结论的币不留旧指令
         if not symbols:
             raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         card = make_card()
@@ -548,8 +580,11 @@ class BattleCardCommander:
             data = json.loads(self._card_path.read_text(encoding="utf-8"))
             card = BattleCard.model_validate(data["card"])
             meets = {str(k): datetime.fromisoformat(v) for k, v in data["last_meeting"].items()}
+            saved_stop = data["stop"]
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return
+        if saved_stop != asdict(self._stop):
+            return  # 出卡时的档位 / ATR 周期和现在不一致：卡里的止损倍数不能直接用，等下一轮会
         now = self._clock()
         if not card.is_valid(now):
             return
@@ -572,6 +607,7 @@ class BattleCardCommander:
                     {
                         "card": self._card.model_dump(mode="json"),
                         "last_meeting": {k: v.isoformat() for k, v in self._last_meeting.items()},
+                        "stop": asdict(self._stop),
                     }
                 ),
                 encoding="utf-8",
