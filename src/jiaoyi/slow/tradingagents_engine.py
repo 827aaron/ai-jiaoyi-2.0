@@ -43,6 +43,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow.commander import Analysis, Pick, PickResult
+from jiaoyi.slow.news import NewsHub, format_items
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
 
@@ -65,7 +66,9 @@ class TradingAgentsSettings:
     results_dir: str = "data/tradingagents"
 
 
-def build_config(base: Mapping[str, Any], s: TradingAgentsSettings) -> dict[str, Any]:
+def build_config(
+    base: Mapping[str, Any], s: TradingAgentsSettings, *, crypto_news: bool = False
+) -> dict[str, Any]:
     """在 TradingAgents 的 ``DEFAULT_CONFIG`` 上叠加我们的设置，返回新字典。"""
     cfg = dict(base)
     cfg.update(
@@ -83,6 +86,8 @@ def build_config(base: Mapping[str, Any], s: TradingAgentsSettings) -> dict[str,
     )
     vendors = dict(cfg.get("data_vendors", {}))
     vendors.update(core_stock_apis="binance", technical_indicators="binance")
+    if crypto_news:
+        vendors["news_data"] = "crypto_news"
     cfg["data_vendors"] = vendors
     return cfg
 
@@ -197,6 +202,57 @@ def register_binance_vendor() -> None:
     router.VENDOR_METHODS["get_indicators"]["binance"] = get_binance_indicators
 
 
+def make_news_vendors(
+    hub: NewsHub,
+    fallback_news: Callable[..., str] | None = None,
+    fallback_global: Callable[..., str] | None = None,
+) -> tuple[Callable[..., str], Callable[..., str]]:
+    """（get_news, get_global_news）两个数据源函数：加密币读 NewsHub 缓存，美股永续仍走原来的。
+
+    只读内存缓存、不碰网络，所以在 TradingAgents 的工作线程里调用是安全的；
+    新闻源不可用时返回“暂无”并说明，会议照常进行。
+    """
+
+    def _soft(fn: Callable[..., str] | None, *a: Any) -> str:
+        if fn is None:
+            return ""
+        try:
+            return fn(*a)
+        except Exception as exc:  # 原来的 yfinance 新闻挂了也不能拖垮会议
+            return f"（原新闻源不可用：{exc}）"
+
+    def get_news(ticker: str, start_date: str, end_date: str) -> str:
+        if not ticker.upper().endswith("-USD"):
+            return _soft(fallback_news, ticker, start_date, end_date)
+        items = hub.for_symbol(binance_symbol(ticker), hours=48)
+        return f"## {ticker} 近 48 小时公告与新闻\n" + format_items(items)
+
+    def get_global_news(
+        as_of_date: str, look_back_days: int | None = None, limit: int | None = None
+    ) -> str:
+        items = hub.market(hours=(look_back_days or 1) * 24, limit=limit or 10)
+        text = "## 加密市场近期公告与新闻\n" + format_items(items)
+        if not items:
+            text += "\n" + _soft(fallback_global, as_of_date, look_back_days, limit)
+        return text
+
+    return get_news, get_global_news
+
+
+def register_crypto_news_vendor(hub: NewsHub) -> None:
+    """把 ``crypto_news`` 加进 TradingAgents 的 news 路由表，替换默认的 yfinance 新闻（加密币）。"""
+    from tradingagents.dataflows import router
+
+    methods = router.VENDOR_METHODS
+    get_news, get_global = make_news_vendors(
+        hub,
+        methods["get_news"].get("yfinance"),
+        methods["get_global_news"].get("yfinance"),
+    )
+    methods["get_news"]["crypto_news"] = get_news
+    methods["get_global_news"]["crypto_news"] = get_global
+
+
 # ---------------------------------------------------------------- LLM 的结构化输出
 class _LevelDraft(BaseModel):
     price: float = Field(gt=0)
@@ -258,6 +314,7 @@ class TradingAgentsEngine:
         secrets: SecretStore,
         settings: TradingAgentsSettings | None = None,
         today: Callable[[], datetime] = lambda: datetime.now(UTC),
+        news: NewsHub | None = None,
     ) -> None:
         key = secrets.get("DEEPSEEK_API_KEY")
         if not key:
@@ -268,7 +325,10 @@ class TradingAgentsEngine:
         self._risk = risk
         self._s = settings or TradingAgentsSettings()
         self._today = today
+        self._news = news
         register_binance_vendor()
+        if news is not None:
+            register_crypto_news_vendor(news)
 
     def _cost(self, usage: Mapping[str, Mapping[str, Any]]) -> float:
         total = 0.0
@@ -284,7 +344,7 @@ class TradingAgentsEngine:
             TradingAgentsGraph,
         )
 
-        cfg = build_config(build_default_config(), self._s)
+        cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
         return TradingAgentsGraph(selected_analysts=analysts, config=cfg, callbacks=[handler])
 
     async def pick(
@@ -305,18 +365,34 @@ class TradingAgentsEngine:
         )
         table = "\n".join(
             f"{e.symbol} 类别={e.category.value} 分数={e.score:.2f} 理由={'、'.join(e.reasons)}"
+            + self._headlines(e.symbol)
             for e in candidates
         )
+        market = self._market_news()
         prev = f"上一张卡的大盘判断：{previous.regime}\n" if previous else ""
         draft: _PickDraft = llm.invoke(
             f"你是加密永续合约的总盘军师。现在是 {self._today():%Y-%m-%d %H:%M} UTC。\n{prev}"
             f"下面是代码筛出的候选池。请先用一句中文判断大盘，再挑最多 {max_n} 个今天最值得"
-            f"开会研究的标的（只能从表里挑），每个给一句理由。\n{table}",
+            f"开会研究的标的（只能从表里挑），每个给一句理由。{market}\n{table}",
             config={"callbacks": [handler]},
         )
         valid = {e.symbol for e in candidates}
         picks = [Pick(p.symbol, p.reason) for p in draft.picks if p.symbol in valid][:max_n]
         return PickResult(draft.regime, picks, self._cost(handler.usage_metadata))
+
+    def _headlines(self, symbol: str) -> str:
+        if self._news is None:
+            return ""
+        items = self._news.for_symbol(symbol, hours=48, limit=2)
+        return "".join(f"\n    · {i.title}" for i in items)
+
+    def _market_news(self) -> str:
+        if self._news is None:
+            return ""
+        now = self._today()
+        return "\n近期公告与新闻（供判断大盘，可能不完整）：\n" + format_items(
+            self._news.market(hours=24, limit=8), now
+        )
 
     async def analyze(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
         return await asyncio.to_thread(self._analyze_sync, entry, regime)

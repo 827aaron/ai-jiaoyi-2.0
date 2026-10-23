@@ -32,7 +32,23 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 | K 线、技术指标（TradingAgents 的 `get_stock_data` / `get_indicators`） | ✅ 已换成币安 U 本位永续小时线（`binance` 数据源，见 `tradingagents_engine.py`），指标在本地计算 |
 | 选币用的成交额、点差、深度、资金费率、持仓量变化 | ✅ 币安公开接口（`binance_stats.py`），喂给选币和总盘会 |
 | 资金费率、持仓量**喂给 TradingAgents 的分析师** | ❌ 还没有。它的分析师现在看不到资金费率和持仓量，只在总盘会（选币分数）里用到 |
-| 新闻 / 情绪 | ❌ 还是 TradingAgents 自带的 yfinance 新闻（ticker 形如 `BTC-USD`），加密币种的覆盖和质量没验证过 |
+| 新闻 / 公告 | ✅ 已换成 `slow/news.py` 的 `NewsHub`（见下节）；美股永续仍走 TradingAgents 自带的 yfinance 新闻 |
 | 美股永续的财报、新闻 | 保留 TradingAgents 自带工具（SEC EDGAR / yfinance） |
 
 后续（M2 真机验证时一起做）：把资金费率和持仓量作为工具注册进 `VENDOR_METHODS`，并评估加密新闻源。
+
+## 新闻与公告源（`slow/news.py`）
+
+| 源 | 角色 | 说明 |
+|---|---|---|
+| 币安公告 | 主源 | 公开接口（非官方，改版会坏→解析失败直接报错，不猜），中文；上新 48、下架 161、动态 49、API 51 |
+| 欧易公告 | 辅源 | 官方公开接口；注意出口 IP 不同看到的站点（全球 / 美国）不同，上线时在曼谷复查 |
+| CoinDesk / Cointelegraph / The Block RSS | 背景 | 行业新闻，只喂给会议，**不触发开会**；用 defusedxml 解析 |
+
+- 可插拔：实现 `NewsSource.fetch()` 即可加源。每个源独立失败；状态变化（挂 / 恢复）才写一条决策日志，全挂时会议照开，只是没有新闻。
+- 同步读缓存：`NewsHub.for_symbol / market` 只读内存，TradingAgents 的工作线程直接调用，不碰网络。主循环定时调 `poll_and_notify`（建议公告 1–5 分钟、RSS 15 分钟；目前统一一个周期，按需拆）。
+- 喂给会议：TradingAgents 的 `get_news` / `get_global_news` 路由到 `crypto_news`（加密币读 NewsHub，美股永续回退 yfinance）；总盘会的提示里带市场摘要和每个候选币的最近标题。
+- 触发开会：公告类新条目提到候选币 → `BattleCardCommander.notify_news`。
+- **币安下架公告 → 禁止新开仓**：7 天内的币安下架 / 移除公告提到我们交易的币 → `block_symbol`，作战卡里该币立刻读成“只看不做”（保镖本来就只认卡，所以不用改保镖；已有持仓不受影响，由持仓管家和人处理）。宁可多挡：现货交易对移除的公告提到同名币也会挡。进程重启后由新闻源重新补上。
+
+接线（主循环，架构师）：创建 `NewsHub(default_sources(), log)`，传给 `TradingAgentsEngine(news=hub)`，并定时 `await hub.poll_and_notify(pool_symbols, commander.notify_news, commander.block_symbol)`。
