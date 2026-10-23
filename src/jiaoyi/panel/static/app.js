@@ -408,9 +408,40 @@ function keyFacts(s) {
   return facts.length ? `<div class="facts">${facts.map((f) => `<span class="pill">${f}</span>`).join(" ")}</div>` : "";
 }
 
+// 预测员一条记录 → 大白话：未来多久、价格范围、几条模拟向上 / 向下；原始 JSON 折叠
+const pxFmt = (v) => money(v, v >= 100 ? 2 : v >= 1 ? 4 : 6);
+const spanOf = (min) => (min % 60 ? `${min} 分钟` : `${min / 60} 小时`);
+function predictorView(s) {
+  const o = s.output || {};
+  const inp = s.input || {};
+  const n = Number.isInteger(inp.paths) ? inp.paths : null;
+  const up = n ? Math.round(o.p_up * n) : null;
+  const lean = o.p_up > 0.5 ? "偏多" : o.p_up < 0.5 ? "偏空" : "分歧";
+  const votes = n
+    ? (up === 0 ? `${n} 条模拟全部向下` : up === n ? `${n} 条模拟全部向上` : `${n} 条模拟里 ${up} 条向上、${n - up} 条向下`)
+    : (o.p_up === 0 ? "模拟全部向下" : o.p_up === 1 ? "模拟全部向上" : `${Math.round(o.p_up * 100)}% 的模拟向上`);
+  const title = `${coin(s.symbol || o.symbol)} 未来 ${spanOf(o.horizon_min)}：预计 ${pxFmt(o.price_low)}–${pxFmt(o.price_high)}，${votes}，${lean}`;
+  const bar = o.ts ? `${hm(o.ts)} 那根 K 线收盘` : "最新一根 K 线";
+  const seen = [
+    inp.last_close != null ? `现价 ${pxFmt(inp.last_close)}（${bar}）` : `按 ${bar}算`,
+    inp.bars ? `用了 ${inp.bars} 根${inp.interval ? ` ${esc(inp.interval)}` : ""} K 线` : "",
+  ].filter(Boolean).join("，");
+  return `<p><b>${esc(title)}</b></p>
+    <div class="small dim">看到的</div><p>${esc(seen)}${inp.last_close == null || !inp.bars ? '<span class="dim small">（现价、用了几根 K 线这条记录里没写）</span>' : ""}</p>
+    <div class="small dim">判断</div><p>${o.stale_after ? `这条预测 ${hm(o.stale_after)} 作废` : ""}${o.model ? ` · 模型 ${esc(o.model)}` : ""}</p>
+    <p class="dim small">方向只作参考：Kronos 主要估价格范围，方向接近抛硬币，不能单独当开仓理由。</p>
+    <details><summary class="dim small">原始数据</summary><div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}</details>`;
+}
+
 function showRecord(i) {
   const s = (window.__recs || [])[i];
   if (!s) return;
+  const o = s.output || {};
+  if (s.role === "predictor" && o.price_low != null && o.price_high != null && o.horizon_min) {
+    dlg(`<h3>预测员 · ${hms(s.ts)} ${pill(s.outcome)}</h3>${predictorView(s)}
+      <p class="dim small">耗时 ${Math.round(s.latency_ms)} ms · 本地计算，不花钱</p>`);
+    return;
+  }
   dlg(`<h3>${esc(ROLE[s.role] || s.role)} · ${hms(s.ts)} ${pill(s.outcome)}</h3><p>${esc(s.text)}</p>${keyFacts(s)}
     <div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}
     <p class="dim small">耗时 ${Math.round(s.latency_ms)} ms · 花费 $${s.cost_usd.toFixed(4)}</p>`);
@@ -820,6 +851,24 @@ function fitTeamFlow() {
   f.style.height = `${(TF_H + 6) * k}px`;
 }
 addEventListener("resize", fitTeamFlow);
+// 盘口员只计数、不逐条写决策日志：把它心跳里的摘要拆成几行；逐币快照要快环另外写文件
+const STREAM = { aggTrade: "逐笔成交", depth: "盘口深度", bookTicker: "最优买卖价", markPrice: "标记价 / 资金费率", kline: "K 线", kline_1m: "1 分钟 K 线", forceOrder: "强平" };
+function bookReaderCard(r) {
+  const h = r.headline || "";
+  const parts = h.split("；");
+  const head = parts[0] ? parts[0].split("，") : [];
+  const kinds = (parts.find((x) => x.startsWith("累计 ")) || "").slice(3).split(" / ").filter(Boolean).map((x) => x.split(" "));
+  const rest = parts.slice(1).filter((x) => !x.startsWith("累计 "));
+  const rows = [
+    ...head.map((x) => `<div>${esc(x)}</div>`),
+    ...rest.map((x) => `<div>${esc(x)}</div>`),
+  ].join("");
+  const streams = kinds.length ? `<div class="tw mt"><table><thead><tr><th>数据流</th><th class="r">这次启动以来收到</th></tr></thead><tbody>${kinds.map(([k, n]) => `<tr><td title="${esc(k)}">${esc(STREAM[k] || k)}</td><td class="r num">${esc(Number(n).toLocaleString())} 条</td></tr>`).join("")}</tbody></table></div>` : "";
+  return `<section class="card mt"><div class="ch"><h2>盘口员 · 现在的状态</h2><span class="r">${r.last_beat ? "心跳 " + hms(r.last_beat) : "没有心跳"}</span></div>
+    <div class="note">盘口员只计数，不逐条记录（一天上万条行情，记下来没法看）。下面是它最近一次报的状态；有信号会交给哨兵，哨兵那里能看到每一条。</div>
+    ${rows ? `<div class="mt">${rows}</div>` : '<div class="dim mt">还没有报过状态。</div>'}${streams}
+    <div class="foot">每个币的现价、1 / 5 分钟涨跌、主动买占比、价差、最近强平，以及每路数据最后收到的时间，要等快环把逐币快照写出来后才能在这里显示。</div></section>`;
+}
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
@@ -828,10 +877,11 @@ P.team = () => {
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.symbol ? "" : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
+    ${sel.role === "book_reader" ? bookReaderCard(sel) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
       <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}
-      <div class="log trail scroll tall">${recs || '<div class="dim">今天还没有记录。</div>'}</div>
+      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : "今天还没有记录。"}</div>`}</div>
       <div class="foot">最多显示最新 200 条 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 
