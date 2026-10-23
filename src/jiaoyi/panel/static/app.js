@@ -615,12 +615,85 @@ const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols:
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
-const label = (i) => (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
+// 设置项的大白话标题；原来的专业说明和英文键名降为灰色小字
+const PLAIN = {
+  risk_per_trade_pct: "每笔最多亏本金的百分之几",
+  max_leverage: "最多开几倍杠杆",
+  max_total_exposure_x: "所有仓位加起来最多是本金的几倍",
+  daily_loss_halt_pct: "今天亏到本金的百分之几就停止开新仓",
+  max_notional_per_trade_usdt: "单笔仓位最大多少 USDT",
+  max_open_positions: "同时最多持几个币",
+  lifeboat_stop_multiplier: "交易所兜底止损比正常止损远几倍",
+  max_spread_bps: "买卖价差超过万分之几就不开仓",
+  max_slippage_bps: "成交价比预期差太多就不下单（万分之几）",
+  taker_fee_bps: "交易所手续费（万分之几，单边）",
+  min_tp_fee_multiple: "止盈至少能赚回几倍手续费，不够就不做",
+  day_reset_tz: "“今天”按哪个时区算",
+  mode: "运行方式",
+  profile: "持仓档位（单笔最长拿多久）",
+  predictor_enabled: "用不用 Kronos 预测价格",
+  signal_dedup_s: "同一个信号多少秒内只处理一次",
+  jev_timeout_ms: "拍板人多少毫秒不回答就放弃这笔",
+  keeper_interval_s: "管家每隔几秒看一次持仓",
+  reconcile_interval_s: "每隔几秒和交易所对一次账",
+  slow_loop_interval_min: "军师团每隔几分钟开一次会",
+  pool_size: "候选池放多少个币",
+  card_pick_max: "军师团每次最多挑几个币",
+  reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
+  rule_gate_without_jev: "没有拍板人时用规则代替",
+  jev_usd_per_mtok: "拍板人价格（每百万字美元）",
+  jev_max_consecutive_errors: "拍板人连错几次就先歇一会",
+  jev_error_cooldown_s: "拍板人连错后歇几秒",
+  min_p_genuine: "信号至少多大把握是真的（0–1）",
+  min_p_take: "至少多大把握值得做（0–1）",
+  min_p_direction: "方向至少多大把握（0–1）",
+  max_p_toxic: "被大户收割的可能最多多大（0–1）",
+  signal_max_age_s: "信号超过几秒还没处理完就作废",
+  size_fraction_s: "小仓位用正常仓位的几成",
+  size_fraction_m: "中仓位用正常仓位的几成",
+  atr_period_min: "按几分钟 K 线算波动幅度（定止损用）",
+  min_stop_atr: "止损最近几个波动幅度（太近会被扫）",
+  max_stop_atr: "止损最远几个波动幅度（太远不做）",
+  stop_level_buffer_atr: "止损放在关键价位外面多远（波动幅度的几倍）",
+  min_tp_r: "止盈至少是止损的几倍",
+  max_tp_r: "止盈最多是止损的几倍",
+  time_limit_s: "一笔最多拿几秒，到时就平",
+  keeper_close_p: "管家觉得该平的把握过多少就平（0–1）",
+  keeper_close_p_strong: "把握过多少不用再确认直接平（0–1）",
+  keeper_confirmations: "管家连续几次都说平才平",
+  patrol_shock_pct_1m: "1 分钟内往亏的方向走了百分之几就全平",
+  patrol_alert_pct_1m: "1 分钟内往亏的方向走了百分之几就叫管家马上看",
+  breakout_vol_ratio: "成交量是平时几倍算放量突破",
+  surge_vol_ratio: "成交量是平时几倍算量能突增",
+  surge_taker_ratio: "主动买（卖）占比多少算突增",
+  liq_min_usdt_1m: "1 分钟爆仓至少多少 USDT 才算",
+  liq_ratio: "爆仓额是平时几倍才算",
+  liq_drop_pct_5m: "爆仓砸出的 5 分钟跌幅至少百分之几",
+  crowded_funding_rate: "资金费率多高算一边倒（0.0005 = 万分之五）",
+  session_window_min: "开盘、结算前后几分钟算关键时段",
+  session_vol_ratio: "关键时段成交量是平时几倍才算",
+  mode_predictor: "预测哪些币",
+  size_policy: "模型大小怎么选",
+  model_size: "固定用哪个大小的模型",
+  adaptive_base_max_queue: "排队不超过几个时用最准的模型",
+  adaptive_mini_min_queue: "排队到几个时换最快的模型",
+  backfill_bars: "启动时先拉多少根 5 分钟 K 线",
+  max_cards_per_round: "每轮最多给几个币开会",
+  concurrency: "同时开几个会",
+  card_ttl_hours: "作战卡管用几小时",
+  symbol_min_interval_hours: "同一个币至少隔几小时才再开会",
+  refresh_lead_min: "作战卡到期前几分钟开会换新卡",
+  symbol_timeout_s: "一个币的会最多开几秒",
+  min_refresh_gap_min: "两轮会至少隔几分钟",
+};
+const plainOf = (i) => PLAIN[i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key];
+const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
+const techHint = (i) => (plainOf(i) && i.label && i.label !== i.key ? esc(i.label) + " · " : "") + esc(i.key);
 const NULL_AS = { max_cards_per_round: "跟随 card_pick_max" };
 const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : i && i.choices && i.choices.length ? esc(choiceLabel(i.key, v)) : esc(v));
 const pinHint = (i) => (i.pinned ? ` · <span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? " · 跟档位走" : "");
 const unpinBtn = (sec, i) => (sec && i.pinned && pageData && pageData.writable ? `<button class="btn b-sm" ${clickable("unpin", sec + ":" + i.key)}>恢复档位默认</button>` : "");
-const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
+const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${techHint(i)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
 
 const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
 const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
@@ -698,7 +771,7 @@ function editSettings(sec) {
   const d = pageData;
   if (!d || !d.writable) return;
   const items = sectionItems(d, sec);
-  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
+  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${techHint(i)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
   const c = data.control;
   ask(`修改${SECTION[sec]}`, `<div class="form edit scroll tall">${rows}</div>
     <div class="dim small">保存前整份校验，不合格不写；写前留备份。主程序重启后生效。</div>${pwField(c)}`, "保存", false, async () => {
@@ -743,7 +816,7 @@ P.settings = () => {
   const changes = d.changes.length
     ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old, { key: x.key, choices: [0], nullable: true })} → ${fmtVal(x.new, { key: x.key, choices: [0], nullable: true })}</span></div>`).join("")}</div>`
     : '<div class="dim">还没有在网页上改过。</div>';
-  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(k)}<span class="hint">${esc(KEY_NOTE[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
+  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(KEY_LABEL[k] || KEY_NOTE[k] || k)}<span class="hint">${esc(k)}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
     <section class="card"><div class="ch"><h2>运行模式</h2></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
@@ -753,7 +826,7 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
-      <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
+      <div class="lbl">每一类币的仓位加起来最多是本金的几倍 ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
       <div class="foot">在 Mac mini 本机打开 <a href="/setup">首次设置</a> 写入（或终端 jiaoyi setup-keys）。</div></section>
     <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app, "app")}</div></section>
