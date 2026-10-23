@@ -10,7 +10,7 @@ from jiaoyi import app as app_mod
 from jiaoyi import contracts as c
 from jiaoyi.app import App, Modules, is_stub
 from jiaoyi.cli import main
-from jiaoyi.core.config import load_app_config, load_risk_config
+from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config
 from jiaoyi.interfaces import Predictor
 from jiaoyi.market.binance_ws import BinanceFuturesFeed
 from jiaoyi.predictor import KronosForecaster
@@ -107,13 +107,13 @@ async def test_slow_loop_without_key_uses_stub_cards(tmp_path: Path, now: dateti
     await app.stop()  # 没启动也要关掉 httpx 连接
 
 
-async def test_slow_loop_key_but_no_tradingagents_uses_stub(
+async def test_slow_loop_key_but_no_tradingagents_refuses_to_start(
     tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(app_mod.importlib.util, "find_spec", lambda name: None)
-    app = _online(tmp_path, now, _Secrets(DEEPSEEK_API_KEY="x" * 16))
-    assert isinstance(app.m.cards, StubBattleCardProvider)
-    await app.stop()
+    # 有 key 却没装 tradingagents：不能静默用桩（M2 会空跑），直接拒绝启动
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    with pytest.raises(ConfigError, match="tradingagents"):
+        _online(tmp_path, now, _Secrets(DEEPSEEK_API_KEY="x" * 16))
 
 
 async def test_slow_loop_with_key_uses_commander(
@@ -125,7 +125,7 @@ async def test_slow_loop_with_key_uses_commander(
         def __init__(self, *args: object, **kwargs: object) -> None:
             seen.update(kwargs)
 
-    monkeypatch.setattr(app_mod.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
     app = _online(tmp_path, now, _Secrets(DEEPSEEK_API_KEY="x" * 16))
     assert isinstance(app.m.cards, BattleCardCommander)
@@ -155,7 +155,7 @@ async def test_slow_config_and_brief_reach_commander_and_engine(
         def __init__(self, *args: object, **kwargs: object) -> None:
             seen.update(kwargs)
 
-    monkeypatch.setattr(app_mod.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
     slow = SlowConfig.model_validate({"schedule": {"concurrency": 2, "card_ttl_hours": 3}})
     cfg = load_app_config(APP).model_copy(update={"data_dir": str(tmp_path)})

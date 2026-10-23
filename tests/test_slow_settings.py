@@ -158,3 +158,25 @@ def test_max_cards_per_round(tmp_path: Path) -> None:
         p.write_text(f"[schedule]\nmax_cards_per_round = {bad}\n", encoding="utf-8")
         with pytest.raises(ConfigError):
             load_slow_config(p)
+
+
+def test_missing_slow_stack_only_when_key_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiaoyi.slow.settings import missing_slow_stack
+
+    class S:
+        def __init__(self, d: dict[str, str]) -> None:
+            self.d = d
+
+        def get(self, n: str) -> str | None:
+            return self.d.get(n)
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    cfg = SlowConfig()
+    assert missing_slow_stack(cfg, S({})) is None  # 没 key：M0/M1 允许用桩
+    msg = missing_slow_stack(cfg, S({"DEEPSEEK_API_KEY": "k"}))
+    assert msg is not None and "make install" in msg
+    orc = SlowConfig.model_validate({"llm": {"provider": "openrouter"}})
+    assert missing_slow_stack(orc, S({"DEEPSEEK_API_KEY": "k"})) is None  # 只看所选 provider 的 key
+    assert "OPENROUTER_API_KEY" in (missing_slow_stack(orc, S({"OPENROUTER_API_KEY": "k"})) or "")
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    assert missing_slow_stack(cfg, S({"DEEPSEEK_API_KEY": "k"})) is None

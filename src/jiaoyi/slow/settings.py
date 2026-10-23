@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import tomllib
 from datetime import timedelta
 from pathlib import Path
@@ -20,7 +21,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
-from jiaoyi.slow.tradingagents_engine import PROVIDER_MODELS, TradingAgentsSettings
+from jiaoyi.interfaces import SecretStore
+from jiaoyi.slow.tradingagents_engine import (
+    PROVIDER_KEY_ENV,
+    PROVIDER_MODELS,
+    TradingAgentsSettings,
+)
 
 DEFAULT_SLOW_PATH = Path("config/slow.toml")
 ANALYSTS = ("market", "social", "news", "fundamentals")
@@ -216,3 +222,18 @@ def load_slow_config(
             loc = ".".join(str(p) for p in err["loc"]) or "(整体)"
             lines.append(f"  - {loc}: {err['msg']}")
         raise ConfigError("\n".join(lines)) from e
+
+
+def missing_slow_stack(cfg: SlowConfig, secrets: SecretStore) -> str | None:
+    """配了军师团的 key 却没装 ``tradingagents`` 时返回错误说明，否则 None。
+
+    只有“没有 key”才允许用桩（M0/M1 阶段）；有 key 说明想跑真军师团，这时静默退回桩会让
+    整个 M2 空跑（不出卡、不开新仓却看不出来），所以直接报错拒绝启动。
+    """
+    key_env = PROVIDER_KEY_ENV[cfg.llm.provider]
+    if secrets.get(key_env) and importlib.util.find_spec("tradingagents") is None:
+        return (
+            f"已配置 {key_env}，但没装 tradingagents，军师团跑不起来。"
+            "先执行：make install（或 uv pip install -e '.[slow]'），装好再启动。"
+        )
+    return None
