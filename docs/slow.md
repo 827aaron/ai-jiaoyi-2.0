@@ -163,3 +163,10 @@ Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模
 - **落盘与心跳**：作战卡每场会后写 `<data_dir>/battle_card.json`（启动日志会打印它的绝对路径；写失败会记 ERROR 日志，不再静默）。军师团的心跳由应用每 30 秒统一上报：空闲时写“当前卡 vN，M 个可做，下次会议 HH:MM”，重启恢复后写“已恢复卡 vN…”，失败退避中写重试时间，会议中写“开会中：k/N”。
 
 - **会议花费预记（X2）**：每场会议（含总盘会）开始前先按估算（最近几场实际花费的均值，没有就用 `failed_meeting_cost_usd`）记进当日预算并立即落盘，结束后改成实际值。被强退（重启）打断的会议不会漏记，每次重启最多多记一笔估算。
+
+
+## 选币页的固定 / 拉黑 / 手动加入
+
+存在 `data/pool_overrides.json`（`core/pool_overrides.py`），AI 改不了。面板发指令（`pin_symbol`、`unpin_symbol`、`blacklist_symbol`、`unblacklist_symbol`、`add_symbol`、`remove_symbol`，参数 `symbol`），主循环执行：改文件 → 立即重新选币。拉黑的币立即不开新仓（不等军师团下一轮出卡），也不再进池；固定和手动加入的币仍要过硬门槛，不占类别名额。手改文件也行，下一次选币（每小时）读到；文件读不出时运行中沿用上一份，启动时按没有覆盖项跑并发 CRITICAL 告警。
+
+选币其余参数：池子大小 `app.toml` 的 `pool_size`、每轮挑几个 `card_pick_max`（面板设置页可改）；硬门槛（成交额 2000 万 U、深度 10 万 U、上线 7 天）、打分权重、每类上限 30、每小时选一次目前是代码默认（`slow/screener.py` 的 `ScreenerConfig`），点差门槛跟 `risk.toml` 的 `max_spread_bps` 走。

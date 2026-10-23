@@ -40,6 +40,12 @@ from jiaoyi.contracts import (
 from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError
+from jiaoyi.core.pool_overrides import (
+    PoolAction,
+    PoolOverrides,
+    read_pool_overrides,
+    write_pool_overrides,
+)
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
@@ -90,7 +96,7 @@ from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.review import CardJournal
-from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
+from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig, UserOverrides
 from jiaoyi.slow.settings import SlowConfig, missing_slow_stack, slow_defaults
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
@@ -122,6 +128,13 @@ def read_blocked(data_dir: str | Path) -> dict[str, str]:
     except (OSError, ValueError):
         return {}
     return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+@runtime_checkable
+class _TakesOverrides(Protocol):
+    """选币器接受选币页的固定 / 拉黑 / 手动加入（桩选币器没有）。"""
+
+    def set_overrides(self, overrides: UserOverrides) -> None: ...
 
 
 @runtime_checkable
@@ -517,6 +530,11 @@ class App:
         self.m = modules
         self.pool: SymbolPool | None = None
         self.started = False
+        # 选币页的固定 / 拉黑 / 手动加入（data/pool_overrides.json）；读不出按没有覆盖项、启动时告警
+        loaded = read_pool_overrides(app_cfg.data_dir)
+        self.pool_overrides_corrupt = loaded is None
+        self.pool_overrides = loaded or PoolOverrides()
+        self._push_overrides()
 
     async def _run_startup_checks(self) -> None:
         """账户核对不过一律拒绝启动；读不到（网络）时 live 也拒绝，模拟盘只告警。"""
@@ -565,6 +583,13 @@ class App:
                 AlertLevel.CRITICAL,
                 "暂停状态文件损坏，按已暂停处理",
                 "不开新仓；确认后在面板发恢复指令",
+            )
+        if self.pool_overrides_corrupt:
+            await self._alert(
+                AlertLevel.CRITICAL,
+                "选币覆盖项文件读不出",
+                "data/pool_overrides.json 损坏：固定 / 拉黑 / 手动加入这次没生效，"
+                "请修好或删掉后重启",
             )
         if self.app_cfg.mode == RunMode.LIVE:
             # 实盘启动一定要通知（设计文档 §十）；能走到这里说明上线确认已经通过
@@ -641,6 +666,28 @@ class App:
             )
         except OSError:
             log.exception("写 runtime.json 失败")
+
+    def _push_overrides(self) -> None:
+        if isinstance(self.m.screener, _TakesOverrides):
+            self.m.screener.set_overrides(UserOverrides.from_file(self.pool_overrides))
+
+    def reload_pool_overrides(self) -> bool:
+        """选币前热读文件（手改也生效）。读不出沿用当前的，返回是否有变化。"""
+        loaded = read_pool_overrides(self.app_cfg.data_dir)
+        if loaded is None or loaded == self.pool_overrides:
+            return False
+        self.pool_overrides = loaded
+        self._push_overrides()
+        return True
+
+    def apply_pool_override(self, action: PoolAction, symbol: str) -> PoolOverrides:
+        """面板选币页的一次操作：改内存、写文件、交给选币器。下一次选币生效（调用方立即重选）。"""
+        self.reload_pool_overrides()  # 先合上手改的部分，免得覆盖掉
+        new = self.pool_overrides.apply(action, symbol)
+        write_pool_overrides(self.app_cfg.data_dir, new)
+        self.pool_overrides = new
+        self._push_overrides()
+        return new
 
     def set_pool(self, pool: SymbolPool) -> None:
         """换上新的候选池，并写到 data_dir 给面板选币页读。"""

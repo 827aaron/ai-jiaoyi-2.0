@@ -16,6 +16,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from jiaoyi.contracts import Category, HardFilters, SymbolPool, SymbolPoolEntry
+from jiaoyi.core.pool_overrides import PoolOverrides
 
 _MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
 _CRYPTO_STOCKS = frozenset({"COIN", "MSTR", "HOOD", "MARA", "RIOT", "CRCL"})
@@ -68,6 +69,11 @@ class UserOverrides:
     manual: frozenset[str] = frozenset()
     category_caps: Mapping[Category, int] = field(default_factory=dict)
     """每个类别最多进池几个，缺省用 ``ScreenerConfig.default_category_cap``。"""
+
+    @classmethod
+    def from_file(cls, ov: PoolOverrides) -> UserOverrides:
+        """``data/pool_overrides.json``（core/pool_overrides.py）→ 选币用的覆盖项。"""
+        return cls(ov.pinned, ov.blacklist, ov.manual, dict(ov.category_caps))
 
 
 @dataclass(frozen=True)

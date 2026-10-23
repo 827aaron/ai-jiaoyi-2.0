@@ -26,7 +26,7 @@ import threading
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
@@ -45,6 +45,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
+from jiaoyi.core.pool_overrides import POOL_ACTIONS, PoolAction
 from jiaoyi.market.features import backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
 
@@ -64,6 +65,14 @@ RESTART_DRAIN_S = 15.0
 RESTART_HARD_EXIT_S = 45.0
 TASK_CANCEL_WAIT_S = 10.0
 PRUNE_EVERY = timedelta(hours=1)
+_POOL_DONE = {
+    "pin_symbol": "已固定",
+    "unpin_symbol": "已取消固定",
+    "blacklist_symbol": "已拉黑（立即不开新仓）",
+    "unblacklist_symbol": "已取消拉黑",
+    "add_symbol": "已手动加入",
+    "remove_symbol": "已取消手动加入",
+}
 BACKFILL_CONCURRENCY = 5
 
 
@@ -334,6 +343,10 @@ class Runner:
         if self._restarting:
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 主程序正在重启，不处理信号", now)
             return
+        if signal.symbol in self.app.pool_overrides.blacklist:
+            # 刚拉黑的币可能还在旧作战卡里：不等军师团下一轮，立即不开
+            self._guard_note(Outcome.REJECT, f"{signal.symbol} 你拉黑了，不开新仓", now)
+            return
         if self.app.paused is not None:
             # 人工暂停：连 Jev 都不问（省钱），记在保镖名下
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 人工暂停开新仓，不处理信号", now)
@@ -542,6 +555,7 @@ class Runner:
             self._refreshing = False
 
     async def _rescreen(self, now: datetime) -> None:
+        self.app.reload_pool_overrides()  # 手改 data/pool_overrides.json 也在下一次选币生效
         try:
             pool = await self.m.screener.screen(now)
         except Exception:
@@ -660,6 +674,19 @@ class Runner:
                 return "rejected", f"没有持仓 {pid}"
             self._spawn(self.close(pos, CloseReason.MANUAL))
             return "done", f"已提交平仓 {pos.symbol} {pid}"
+        if cmd.kind in POOL_ACTIONS:
+            sym = cmd.params.get("symbol", "")
+            try:
+                self.app.apply_pool_override(cast(PoolAction, cmd.kind), sym)
+            except ValueError as e:
+                return "rejected", str(e)
+            await self._rescreen(self.app.clock())
+            pool = self.app.pool
+            inside = pool is not None and any(e.symbol == sym for e in pool.in_pool)
+            return (
+                "done",
+                f"{_POOL_DONE[cmd.kind]} {sym}；已重新选币，现在{'在' if inside else '不在'}池里",
+            )
         if cmd.kind == "unblock_symbol":
             sym = cmd.params.get("symbol", "")
             if not self.app.unblock_symbol(sym):
