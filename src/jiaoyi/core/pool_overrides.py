@@ -4,7 +4,8 @@
   改文件、立即重新选币。手改文件也行，下一次选币（每小时，或下一条选币指令）读到。
 - 优先级同选币（slow/screener.py）：拉黑 > 固定 / 手动加入 > 打分。拉黑的币立即不再开新仓
   （loop.handle_signal 拦），不用等军师团下一轮出卡。
-- 文件读不出：启动时按“没有覆盖项”跑并告警；运行中沿用上一份（拉黑不会因为文件坏了悄悄失效）。
+- 文件读不出：启动时备份成 ``.corrupt-时间戳``、按“没有覆盖项”跑并告警；运行中沿用上一份。
+  文件坏着时选币页的操作一律拒绝，不拿“空 + 这一次操作”覆盖掉原来的拉黑清单。
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -115,3 +118,17 @@ def write_pool_overrides(data_dir: str | Path, ov: PoolOverrides) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def backup_corrupt_pool_overrides(data_dir: str | Path, now: datetime) -> Path | None:
+    """把读不出的覆盖项文件复制一份 ``.corrupt-时间戳``（原文件不动），返回备份路径。"""
+    path = Path(data_dir) / POOL_OVERRIDES_FILE
+    if not path.is_file():
+        return None
+    backup = path.with_name(f"{path.name}.corrupt-{now:%Y%m%dT%H%M%S}")
+    try:
+        shutil.copy2(path, backup)
+    except OSError:
+        log.exception("备份损坏的 %s 失败", path)
+        return None
+    return backup
