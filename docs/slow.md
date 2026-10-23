@@ -56,3 +56,12 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 ## 误封后怎么解封
 
 下架公告匹配是宽松的（宁可多挡，例如现货交易对移除公告提到同名币）。目前 `BattleCardCommander.unblock_symbol(symbol)` 只有代码入口；进程重启后会由新闻源按 7 天窗口重新补封。要给人一个入口，需要架构师在 `app.py` / 面板的“设置”页暴露 `blocked_symbols` 和 `unblock_symbol`（同时显示被封的币和原因）。在那之前，误封的处理办法是等公告超出 7 天，或在代码里调用 `unblock_symbol`。
+
+## 强平数据
+
+慢环**不另开强平连接**。快环行情层连一路全市场强平流（`!forceOrder@arr`）并滚动统计 1 小时名义额，慢环只依赖窄接口 `slow.liquidations.LiquidationStats.liquidations_1h_usdt(symbol, now)`，没有新契约。
+
+- 选币：`BinanceStatsSource(liquidations=...)` 把它填进 `SymbolStats.liquidations_1h_usdt`，参与打分（占 10% 权重，约 1000 万 USDT 封顶）。
+- 会议：`TradingAgentsEngine(liquidations=...)` 把近 1 小时强平写进 `get_stock_data` 的衍生品段和总盘会的候选表。
+- 接线（架构师）：把快环的统计对象同时传给 `BinanceStatsSource` 和 `TradingAgentsEngine`；没传则强平为 0 / 不显示，不影响其它功能。
+- 多空拆分（多头被强平 vs 空头被强平）等快环 PR 合并后再加，需要对齐它的 `stats()` 返回结构。

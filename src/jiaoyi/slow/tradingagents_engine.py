@@ -43,6 +43,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow.commander import Analysis, Pick, PickResult
+from jiaoyi.slow.liquidations import LiquidationStats, describe_liquidations
 from jiaoyi.slow.news import NewsHub, format_items
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
@@ -141,6 +142,13 @@ def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
 
 
 _FAPI = "https://fapi.binance.com"
+_LIQ: LiquidationStats | None = None
+
+
+def set_liquidation_stats(stats: LiquidationStats | None) -> None:
+    """登记强平统计（快环行情层提供），之后 ``get_stock_data`` 的衍生品段会带上近 1 小时强平。"""
+    global _LIQ
+    _LIQ = stats
 
 
 def format_derivatives(
@@ -182,7 +190,10 @@ def derivatives_context(symbol: str, end: datetime) -> str:
             timeout=10.0,
         )
         o.raise_for_status()
-        return format_derivatives(f.json(), o.json())
+        text = format_derivatives(f.json(), o.json())
+        if _LIQ is not None:
+            text += "\n" + describe_liquidations(_LIQ, sym, end)
+        return text
     except Exception as exc:  # 衍生品数据只是补充，拿不到不影响会议
         return f"## 衍生品数据\n- （暂不可用：{type(exc).__name__}）"
 
@@ -364,6 +375,7 @@ class TradingAgentsEngine:
         settings: TradingAgentsSettings | None = None,
         today: Callable[[], datetime] = lambda: datetime.now(UTC),
         news: NewsHub | None = None,
+        liquidations: LiquidationStats | None = None,
     ) -> None:
         key = secrets.get("DEEPSEEK_API_KEY")
         if not key:
@@ -375,6 +387,8 @@ class TradingAgentsEngine:
         self._s = settings or TradingAgentsSettings()
         self._today = today
         self._news = news
+        self._liq = liquidations
+        set_liquidation_stats(liquidations)
         register_binance_vendor()
         if news is not None:
             register_crypto_news_vendor(news)
@@ -414,6 +428,7 @@ class TradingAgentsEngine:
         )
         table = "\n".join(
             f"{e.symbol} 类别={e.category.value} 分数={e.score:.2f} 理由={'、'.join(e.reasons)}"
+            + self._liq_note(e.symbol)
             + self._headlines(e.symbol)
             for e in candidates
         )
@@ -428,6 +443,12 @@ class TradingAgentsEngine:
         valid = {e.symbol for e in candidates}
         picks = [Pick(p.symbol, p.reason) for p in draft.picks if p.symbol in valid][:max_n]
         return PickResult(draft.regime, picks, self._cost(handler.usage_metadata))
+
+    def _liq_note(self, symbol: str) -> str:
+        if self._liq is None:
+            return ""
+        total = self._liq.liquidations_1h_usdt(symbol, self._today())
+        return f" 近1h强平={total:,.0f}USDT" if total > 0 else ""
 
     def _headlines(self, symbol: str) -> str:
         if self._news is None:

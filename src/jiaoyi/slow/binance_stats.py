@@ -1,8 +1,8 @@
 """币安 U 本位永续的公开行情 → ``SymbolStats``（选币用）。只读公开接口，不需要 key。
 
 先用一次性接口（交易规则、24h 行情、盘口顶、资金费率）筛出成交额最大的 ``top_k`` 个，
-再对这些逐个补深度、近 1 小时量能、持仓量变化，控制请求权重。强平数据要订阅 WebSocket，
-这里先填 0，等盘口员的行情接入后再补。
+再对这些逐个补深度、近 1 小时量能、持仓量变化，控制请求权重。强平数据来自快环行情层的全市场强平统计
+（见 ``liquidations.LiquidationStats``），没传时填 0。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from jiaoyi.slow.liquidations import LiquidationStats
 from jiaoyi.slow.screener import SymbolStats
 
 _BASE = "https://fapi.binance.com"
@@ -25,7 +26,9 @@ class BinanceStatsSource:
         top_k: int = 150,
         concurrency: int = 8,
         timeout_s: float = 10.0,
+        liquidations: LiquidationStats | None = None,
     ) -> None:
+        self._liq = liquidations
         self._client = client or httpx.AsyncClient(base_url=_BASE, timeout=timeout_s)
         self._top_k = top_k
         self._sem = asyncio.Semaphore(concurrency)
@@ -107,7 +110,9 @@ class BinanceStatsSource:
             volume_surge=surge,
             funding_rate=funding.get(sym, 0.0),
             oi_change_pct=oi_change,
-            liquidations_1h_usdt=0.0,
+            liquidations_1h_usdt=(
+                self._liq.liquidations_1h_usdt(sym, now) if self._liq is not None else 0.0
+            ),
         )
 
     async def aclose(self) -> None:
