@@ -440,7 +440,8 @@ def test_page_endpoints(tmp_path: Path) -> None:
     _seed(tmp_path)
     with _client(tmp_path, "10.0.0.2") as client:
         assert client.get("/api/positions").json()["lifeboats_ok"] == 1
-        assert client.get("/api/team?role=gate").json()["selected"] == "gate"
+        team = client.get("/api/team?role=gate").json()
+        assert team["selected"] == "gate" and team["predictor_mode"] == "on_demand"
         assert client.get("/api/team?role=boss").status_code == 422
         assert client.get("/api/signal/none").json() == []
         assert client.get("/api/klines?symbol=BTCUSDT&interval=7m").status_code == 422

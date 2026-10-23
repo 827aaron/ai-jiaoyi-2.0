@@ -678,6 +678,7 @@ const TF_EDGES = [
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
   [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
+  [[TF_POS.card[0] + 24, TF_POS.card[1] + NODE_H], [TF_POS.predictor[0] + NODE_W - 30, TF_POS.predictor[1]], "predictor", "要算的币", "gap-left", "side"],
   [tfR("sentinel"), tfL("gate"), "gate", "信号"],
   [tfR("gate"), tfL("risk_guard"), "risk_guard", "做不做"],
   [tfB("risk_guard"), tfT("executor"), "executor", "仓位"],
@@ -694,6 +695,7 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   if (how === "elbow") { d = `M${x1},${y1} H${x2 - 12} Q${x2},${y1} ${x2},${y1 + 12} V${y2 - 1}`; lx = x2 - 70; ly = y1 - 6; dir = "d"; }
   else if (how === "down-right") { d = `M${x1},${y1} V${y2 - 10} Q${x1},${y2} ${x1 + 10},${y2} H${x2 - 1}`; lx = x1 + 14; ly = y2 - 6; dir = "r"; }
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
+  else if (how === "gap-left") { const ym = 158; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 - 10},${ym} H${x2 + 10} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = x2 + 12; ly = ym + 16; dir = "d"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
@@ -717,8 +719,17 @@ function hbBadge(r) {
   }[r.state];
   return label ? `<em class="hb ${r.state}" title="${esc(r.status)}">${label}</em>` : "";
 }
-function tfNode(r, selected) {
-  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.status;
+// 按需模式：预测员只算作战卡上的币（加有持仓的币）
+function predictorScope(mode) {
+  if (mode !== "on_demand") return "";
+  const c = data && data.card && data.card.valid ? data.card : null;
+  if (!c) return "没有有效作战卡，先不算";
+  const onCard = new Set(c.symbols.map((x) => x.symbol));
+  const held = new Set(((data && data.positions) || []).map((p) => p.symbol).filter((s) => !onCard.has(s)));
+  return `只算作战卡上的 ${onCard.size} 个币${held.size ? ` + ${held.size} 个持仓币` : ""}`;
+}
+function tfNode(r, mode) {
+  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.role === "predictor" && !["bad", "off"].includes(r.state) && predictorScope(mode) || r.status;
   return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}${hbBadge(r)}</span>
     ${r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
     <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
@@ -731,7 +742,7 @@ function teamFlow(d) {
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
-    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r)}</a>`;
+    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.predictor_mode)}</a>`;
   };
   // 盯持仓是常态，放最后说；其余按流程顺序最多说两处
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);

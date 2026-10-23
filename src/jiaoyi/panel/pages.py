@@ -117,6 +117,8 @@ class TeamPage(BaseModel):
     """所选角色今天的记录，最新在前。"""
     meetings: list[MeetingSummary] = []
     """选中军师团时：每个币最近一场会（data/meeting_live/），正在开的在前。"""
+    predictor_mode: Literal["on_demand", "all_symbols"] | None = None
+    """预测员算哪些币（``[predictor] mode``）；流程图按它写“只算作战卡上的 N 个币”。"""
 
 
 def build_positions(
@@ -254,7 +256,12 @@ def _latest_chain(records: list[DecisionRecord], since: datetime | None = None) 
     return {r.role for r in mine}
 
 
-def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamPage:
+def build_team(
+    files: PanelFiles,
+    now: datetime,
+    selected: Role | None,
+    predictor_mode: Literal["on_demand", "all_symbols"] | None = None,
+) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
     run = _run_info(files, status, now)
@@ -274,7 +281,9 @@ def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamP
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
     meets = meetings if chosen is Role.COMMANDER else []
-    return TeamPage(roles=cards, selected=chosen, records=mine, meetings=meets)
+    return TeamPage(
+        roles=cards, selected=chosen, records=mine, meetings=meets, predictor_mode=predictor_mode
+    )
 
 
 @dataclass(frozen=True)
