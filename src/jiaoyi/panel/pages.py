@@ -186,6 +186,11 @@ def _run_info(files: PanelFiles, status: dict[str, ModuleStatus], now: datetime)
     return _RunInfo(running, started_at, stub_roles, files.tz)
 
 
+def _opt_time(st: ModuleStatus, name: str) -> datetime | None:
+    v = getattr(st, name, None)
+    return v if isinstance(v, datetime) else None
+
+
 def role_state(
     role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
 ) -> tuple[LampState, str]:
@@ -204,21 +209,28 @@ def role_state(
             return "off", "主程序没在运行"
         since = f"（主程序 {hm(run.started_at)} 启动）" if run.started_at else ""
         return "slow", f"等待首次运行{since}"
+    # 选币等定时任务另外报上次 / 下次运行、币数、失败原因（字段由慢环加进契约，旧文件没有就按心跳）
+    last = _opt_time(st, "last_run_at") or st.ts
+    nxt = _opt_time(st, "next_run_at")
+    count = getattr(st, "symbol_count", None)
+    error = getattr(st, "error", None)
+    extra = "".join(
+        [f"，{count} 个币" if isinstance(count, int) else "", f"，下次 {hm(nxt)}" if nxt else ""]
+    )
     age = now - st.ts
     if age > timedelta(seconds=STALE_S):
-        return (
-            "bad",
-            f"无心跳超过 {max(1, int(age.total_seconds() // 60))} 分钟（最后 {hm(st.ts)}）",
-        )
+        mins = max(1, int(age.total_seconds() // 60))
+        return "bad", f"无心跳超过 {mins} 分钟（最后 {hm(st.ts)}）"
     if st.health is Health.DISABLED:
         return "off", "未启用"
-    if st.health is Health.DOWN:
-        return "bad", f"失败：{st.last_error or st.headline or '没写原因'}"
-    if st.health is Health.STARTING:
-        return "slow", "等待首次运行"
+    if st.health is Health.DOWN or (isinstance(error, str) and error):
+        why = error if isinstance(error, str) and error else st.last_error or st.headline
+        return "bad", f"失败：{why or '没写原因'}"
+    if st.health is Health.STARTING or (_opt_time(st, "last_run_at") is None and nxt):
+        return "slow", f"等待首次运行{f' {hm(nxt)}' if nxt else ''}"
     if st.health is Health.DEGRADED:
-        return "slow", f"降级运行（上次 {hm(st.ts)}）"
-    return "ok", f"正常（上次 {hm(st.ts)}）"
+        return "slow", f"降级运行（上次 {hm(last)}{extra}）"
+    return "ok", f"正常（上次 {hm(last)}{extra}）"
 
 
 def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo) -> RoleCard:
