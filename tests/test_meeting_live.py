@@ -141,3 +141,11 @@ def test_fail_marks_estimated_cost(tmp_path: Path) -> None:
     live.fail("超时取消，会议没有结论", 0.31, estimated=True)
     doc = json.loads((tmp_path / "LINKUSDT.json").read_text(encoding="utf-8"))
     assert doc["cost_usd"] == 0.31 and doc["cost_estimated"] is True
+
+
+def test_note_model_marks_the_last_call(tmp_path: Path) -> None:
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    live.note_model("ignored")  # 还没有调用记录：不报错
+    live.note_call("stop", 100)
+    live.note_model("deepseek/deepseek-v4.1-flash-1017")
+    assert read(tmp_path)["llm_calls"][0]["model"] == "deepseek/deepseek-v4.1-flash-1017"

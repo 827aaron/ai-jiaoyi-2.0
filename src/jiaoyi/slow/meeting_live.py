@@ -162,6 +162,13 @@ class MeetingLive:
         self._doc["updated_at"] = self._now().isoformat()
         self._flush()
 
+    def note_model(self, model: str) -> None:
+        """补记最近一次调用实际用的模型 id（紧跟在 ``note_call`` 之后），方便和设置核对。"""
+        if self._closed or not self._doc["llm_calls"]:
+            return
+        self._doc["llm_calls"][-1]["model"] = model
+        self._flush()
+
     def note_usage(self, input_tokens: int, cached_tokens: int) -> None:
         """补记最近一次调用的输入 tokens 和命中缓存的输入 tokens（紧跟在 ``note_call`` 之后）。"""
         if self._closed or not self._doc["llm_calls"]:
