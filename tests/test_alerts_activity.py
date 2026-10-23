@@ -200,3 +200,47 @@ async def test_lifeboat_card_counts_place_cancel_replace(tmp_path: Path) -> None
     )
     fresh.heartbeat(START)  # 重启后从当天决策日志数回来
     assert log.read_status()["lifeboat"].headline.endswith("今日 挂 1 · 撤 1 · 补挂 1")
+
+
+async def test_alert_record_shows_event_and_sent_text(tmp_path: Path) -> None:
+    from jiaoyi.alerting.telegram import TelegramAlerter
+
+    log = JsonlDecisionLog(tmp_path)
+    tg = _Tg()
+    tg.format = TelegramAlerter.format  # type: ignore[attr-defined]
+    a = RecordedAlerter(tg, RoleRecorder(Role.ALERTING, log), telegram=True)
+    alert = _alert("平仓完成").model_copy(update={"body": "管家平 · 净利 +1.20 U · 持仓 9 分"})
+    await a.send(alert)
+    (rec,) = [r for r in log.read_day(START.date().isoformat()) if r.role is Role.ALERTING]
+    assert rec.input == {
+        "事件": "平仓完成",
+        "级别": "通知",
+        "币": "APTUSDT",
+        "内容": "管家平 · 净利 +1.20 U · 持仓 9 分",
+    }
+    assert rec.output["Telegram 正文"].endswith("管家平 · 净利 +1.20 U · 持仓 9 分")
+    assert rec.output["结果"] == "已发送" and rec.output["耗时"].endswith("ms")
+
+
+async def test_reconciler_waits_one_round_for_a_closing_position(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig)
+    t = rig.registry.get(pid)
+    assert t is not None
+    closing = t.record.model_copy(update={"status": c.PositionStatus.CLOSING})
+    rig.registry.put(t.model_copy(update={"record": closing}))
+    rig.ex.set_position(closing.symbol, c.Side.LONG, 0)  # 币安已平，执行器还没结算
+
+    async def none(*_: object) -> list[dict[str, object]]:
+        return []
+
+    async def no_sync() -> None:
+        return None
+
+    rig.api.running_executors = none  # type: ignore[method-assign]
+    rig.adapter.sync_all = no_sync  # type: ignore[method-assign]
+    first = await rig.rec.reconcile(rig.t)
+    assert first.issues == []  # 平仓那几秒的差不报错
+    second = await rig.rec.reconcile(rig.t)
+    kinds = {i.kind for i in second.issues}
+    assert c.ReconcileIssueKind.QTY_MISMATCH in kinds  # 连续 2 轮还没结算才报
