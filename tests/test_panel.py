@@ -908,3 +908,42 @@ def test_funds_ai_cost_detail(tmp_path: Path) -> None:
     with _client(tmp_path, "10.0.0.2") as client:
         assert client.get("/api/funds?ai=all").json()["ai"]["range"] == "all"
         assert client.get("/api/funds?ai=year").status_code == 422
+
+
+def test_card_pool_rows_show_source_and_hide_expired(tmp_path: Path) -> None:
+    """卡池：每行写「来自 hh:mm 的会 · hh:mm 到期」，快到期变灰，过期的币不显示，持仓币留着。"""
+    from jiaoyi.panel.overview import _card, _with_pool_notes
+
+    def cs(sym: str) -> dict[str, Any]:
+        return {
+            "symbol": sym, "category": "alt", "bias": "long", "key_levels": [],
+            "allowed_signals": [], "size_tier_max": "S", "notional_usdt": {"min": 10, "max": 20},
+            "leverage": {"min": 1, "max": 2}, "stop_atr": {"min": 1, "max": 2},
+            "take_profit_r": {"min": 1, "max": 2}, "reason": "r",
+        }  # fmt: skip
+
+    t0 = NOW - timedelta(minutes=30)
+    iso = lambda m: (NOW + timedelta(minutes=m)).isoformat()  # noqa: E731
+    pool = {
+        "AAUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(60), "held": False},
+        "BBUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(5), "held": False},
+        "CCUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(-1), "held": False},
+        "DDUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(-1), "held": True},
+    }
+    recs = [
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, f"{s} 结论", t0, symbol=s, output=cs(s))
+        for s in pool
+    ] + [
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "出卡", NOW - timedelta(minutes=1), card_id="k",
+             output={"symbols": list(pool), "pool": pool, "expires_at": iso(60)})
+    ]  # fmt: skip
+    view = _with_pool_notes(_card(recs, NOW), NOW, "UTC")
+    assert view is not None
+    by = {r.symbol: r for r in view.symbols}
+    assert set(by) == {"AAUSDT", "BBUSDT", "DDUSDT"}  # CC 过期消失
+    assert (
+        by["AAUSDT"].source_note
+        == f"来自 {t0:%H:%M} 的会 · {NOW + timedelta(minutes=60):%H:%M} 到期"
+    )
+    assert not by["AAUSDT"].fading and by["BBUSDT"].fading
+    assert by["DDUSDT"].source_note is not None and "持仓中，不再开新仓" in by["DDUSDT"].source_note

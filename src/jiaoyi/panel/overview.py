@@ -87,6 +87,13 @@ class CardRow(BaseModel):
     """没有会议结论（bias = unknown）时方向列的短词：开会中 / 开会失败 / 会中断 / 没开会。"""
     pending: str | None = None
     """同上，理由列的一句明确说明（从 meeting_live/<币>.json 读），不写问号。"""
+    issued_at: datetime | None = None
+    expires_at: datetime | None = None
+    held: bool = False
+    source_note: str | None = None
+    """「来自 hh:mm 的会 · hh:mm 到期」；持仓币到期后写「已到期，持仓中，不再开新仓」。"""
+    fading: bool = False
+    """离到期不到 10 分钟（或已到期的持仓币）：显示成灰色。"""
 
 
 class CardView(BaseModel):
@@ -265,7 +272,12 @@ def build_overview(
         hb_error=hb.error,
         lamps=_lamps(status, hb, now, running),
         kpis=kpis,
-        card=_with_fractions(_with_pending(_card(records, now), files.root, now, files.tz), app),
+        card=_with_fractions(
+            _with_pool_notes(
+                _with_pending(_card(records, now), files.root, now, files.tz), now, files.tz
+            ),
+            app,
+        ),
         feed=_feed(records),
         positions=positions,
         tiles=tiles,
@@ -434,6 +446,32 @@ def _pending(sym: str, card: CardView, root: Path, now: datetime, tz: str) -> tu
     return "没出结论", f"会开完了{when}但没写出结论；这张卡里它没有结论，不会开仓"
 
 
+FADE_BEFORE = timedelta(minutes=10)
+
+
+def _with_pool_notes(card: CardView | None, now: datetime, tz: str) -> CardView | None:
+    """每行写明「来自 hh:mm 的会 · hh:mm 到期」；离到期不到 10 分钟变灰。"""
+    if card is None:
+        return None
+
+    def hm(t: datetime) -> str:
+        return t.astimezone(ZoneInfo(tz)).strftime("%H:%M")
+
+    rows = []
+    for r in card.symbols:
+        if r.issued_at is None or r.expires_at is None:
+            rows.append(r)
+            continue
+        if now >= r.expires_at:  # 只剩持仓币：到期了，继续盯，不再开新仓
+            note = f"来自 {hm(r.issued_at)} 的会 · {hm(r.expires_at)} 已到期，持仓中，不再开新仓"
+            rows.append(r.model_copy(update={"source_note": note, "fading": True}))
+            continue
+        note = f"来自 {hm(r.issued_at)} 的会 · {hm(r.expires_at)} 到期"
+        fading = r.expires_at - now <= FADE_BEFORE
+        rows.append(r.model_copy(update={"source_note": note, "fading": fading}))
+    return card.model_copy(update={"symbols": rows})
+
+
 def _with_pending(card: CardView | None, root: Path, now: datetime, tz: str) -> CardView | None:
     if card is None:
         return None
@@ -462,6 +500,22 @@ def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
         return None
     last = issued[-1]
     names = [str(s) for s in last.output.get("symbols", [])]
+    pool = last.output.get("pool")
+    stamps: dict[str, tuple[datetime | None, datetime | None, bool]] = {}
+    if isinstance(pool, dict):
+        for n, v in pool.items():
+            if isinstance(v, dict):
+                stamps[str(n)] = (
+                    _parse_ts(v.get("issued_at")),
+                    _parse_ts(v.get("expires_at")),
+                    bool(v.get("held")),
+                )
+    # 指令池：过了自己有效期的币不再显示（持仓币留着，标明不再开新仓）
+    names = [
+        n
+        for n in names
+        if n not in stamps or stamps[n][1] is None or now < (stamps[n][1] or now) or stamps[n][2]
+    ]
     per: dict[str, CardSymbol] = {}
     for r in cmd:
         if r.symbol and r.output and r.outcome is Outcome.ACTION and r.ts <= last.ts:
@@ -489,9 +543,19 @@ def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
                 notional_usdt=(cs.notional_usdt.min, cs.notional_usdt.max),
                 allowed_signals=[k.value for k in cs.allowed_signals],
                 key_levels=[LevelView(price=lv.price, kind=lv.kind.value) for lv in cs.key_levels],
+                issued_at=stamps[n][0] if n in stamps else None,
+                expires_at=stamps[n][1] if n in stamps else None,
+                held=stamps[n][2] if n in stamps else False,
             )
             if cs
-            else CardRow(symbol=n, bias="unknown", category="other")
+            else CardRow(
+                symbol=n,
+                bias="unknown",
+                category="other",
+                issued_at=stamps[n][0] if n in stamps else None,
+                expires_at=stamps[n][1] if n in stamps else None,
+                held=stamps[n][2] if n in stamps else False,
+            )
         )
     tradable = [s for s in syms if s.bias.value != "no_trade"]
     version = last.output.get("version")
