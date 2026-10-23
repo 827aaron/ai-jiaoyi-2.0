@@ -617,3 +617,25 @@ def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
         assert client.get("/api/meeting/BTCUSDT").json()["steps"][1]["who"] == "bull"
         assert client.get("/api/meeting/XRPUSDT").status_code == 404
         assert client.get("/api/meeting/btc..").status_code == 404
+
+
+def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
+    """选币等定时任务报 last_run_at / next_run_at / symbol_count / error 时，状态里写出来。"""
+    from jiaoyi.panel.pages import _RunInfo, role_state
+
+    class Sched(c.ModuleStatus):  # 慢环把这几个字段加进契约前，先用子类模拟
+        last_run_at: datetime | None = None
+        next_run_at: datetime | None = None
+        symbol_count: int | None = None
+        error: str | None = None
+
+    run = _RunInfo(True, None, frozenset(), "Asia/Bangkok")  # NOW = 06:20 UTC = 13:20 曼谷
+    base = {"role": c.Role.SCREENER, "health": c.Health.OK, "ts": NOW}
+    ok = Sched(**base, last_run_at=NOW - timedelta(minutes=5), next_run_at=NOW + timedelta(hours=1),
+               symbol_count=40)  # fmt: skip
+    assert role_state(c.Role.SCREENER, ok, NOW, run)[1].startswith("正常（上次 ")
+    assert "40 个币" in role_state(c.Role.SCREENER, ok, NOW, run)[1]
+    first = Sched(**base, next_run_at=NOW + timedelta(minutes=10))
+    assert role_state(c.Role.SCREENER, first, NOW, run)[1].startswith("等待首次运行 ")
+    bad = Sched(**base, error="币安 451")
+    assert role_state(c.Role.SCREENER, bad, NOW, run) == ("bad", "失败：币安 451")
