@@ -30,7 +30,7 @@
 - 持仓平掉后调 `keeper.forget(position_id)`。
 - 保镖构造时传 `state_dir=AppConfig.data_dir`，日亏熔断状态落盘在 `data/risk_state.json`，重启后当天仍锁住。
 - 保镖需要 `LotRulesProvider`（币安 exchangeInfo 的 stepSize / minQty / minNotional），由执行层提供；拿不到就拒单。
-- 拍板模型用 `gate.jev.decision_model_from_config(...)` 选：有 `JEV_API_KEY` 且 `[fast_loop] jev_model` 锁了具体版本 → Jev；
+- 拍板模型用 `gate.jev.decision_model_from_config(...)` 选：有所选通道的 key（`JEV_API_KEY` 或 `OPENROUTER_API_KEY`，见下文“Jev 通道”）且 `[fast_loop] jev_model` 锁了具体版本 → Jev；
   否则只有 paper 模式且 `rule_gate_without_jev = true` 才用规则版（testnet / live 构造规则版直接报错），默认返回 None（用桩，不开仓）。
   这是启动时的一次性选择，Jev 运行中出错只返回 `ok=False`，不会切到规则版。
 
@@ -71,6 +71,24 @@
 - Mac mini M4（2026-10-23）：真推理可用，**约 3.1 秒 / 币**（4 条路径 × 预测 12 根 5 分钟 K 线），CPU。
 - MPS 每次都报 `scaled_dot_product_attention for MPS does not support dropout`，所以 `KronosSettings.device="auto"` 不再选 MPS，直接用 CPU；显式写 `mps` / `cuda` 出错也会退回 CPU 并一直用 CPU。
 - 推理在后台任务里跑，几秒的耗时不进拍板延迟；开关仍是 `app.toml` 的 `predictor_enabled`（示例为 `true`，关掉时快环照常跑）。
+
+## Jev 通道：直连 TypeSafe 或经 OpenRouter
+
+`[fast_loop] jev_provider` 选通道，默认 `typesafe`（直连）。
+
+| | 直连 `typesafe` | 经 OpenRouter `openrouter` |
+|---|---|---|
+| key（`jiaoyi setup-keys`） | `JEV_API_KEY` | `OPENROUTER_API_KEY` |
+| `jev_model` 写法 | `jev-1.14` | `typesafe/jev-1.14` |
+| 地址 | `https://api.typesafe.ai/v1/systemone` | `https://openrouter.ai/api/v1/systemone` |
+| 花费 | 按 `jev_usd_per_mtok` × 输入 token 估 | 用响应里的 `usage.cost` |
+| 请求号 | 响应头 `x-typesafe-request-id` | 响应正文 `id`（`gen-dec-…`） |
+
+- 两条通道都用同一个 `typesafe-sdk`，OpenRouter 只是换了 base URL（[说明](https://openrouter.ai/docs/guides/community/typesafe-sdk)）；问题模板、门槛、`JevResponse`、决策日志格式完全一样。
+- `jev_model` 仍然必须锁具体版本，`~typesafe/jev-latest` 这类别名会被拒绝启动。OpenRouter 回的模型名带日期（例如 `typesafe/jev-1.14-20260917`），日志里记的是这个全名，不算“版本变了”。
+- 只认所选通道的 key：选了 `openrouter` 却只有 `JEV_API_KEY`，不会接 Jev（反过来也一样），等于没有 Jev，按原规则不开新仓。
+- 走 OpenRouter 时多一跳转发，延迟会高一点。`jev_timeout_ms` 不变，M1 实测后再看要不要调。
+- OpenRouter 上 `typesafe/jev-1.13` 不支持 Box 题型；我们只用 Choice，不受影响。
 
 ## Jev 问题模板和复盘
 

@@ -72,6 +72,12 @@ class FastLoopConfig(Contract):
     """
 
     # ---- 拍板人 / 决策模型
+    jev_provider: Literal["typesafe", "openrouter"] = Field(
+        default="typesafe",
+        description="Jev 走哪条通道：typesafe = 直连 TypeSafe（key 用 JEV_API_KEY）；"
+        "openrouter = 经 OpenRouter 转发（key 用 OPENROUTER_API_KEY，jev_model 写 OpenRouter 的"
+        "模型名，例如 typesafe/jev-1.14）。问题、门槛、日志格式两边一样。",
+    )
     jev_model: str | None = Field(
         default=None,
         min_length=1,

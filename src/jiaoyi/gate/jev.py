@@ -10,7 +10,10 @@
 - 只在哨兵触发或管家定时复查时才问，不轮询。
 
 网络部分抽成 ``JevTransport``，测试用 ``MockJevTransport``，不需要真 key。
-key 只从 ``SecretStore``（钥匙串 / 环境变量 ``JEV_API_KEY``）读，不进日志。
+两条通道（``FastLoopConfig.jev_provider``）：直连 TypeSafe，或经 OpenRouter 转发
+（同一个 SDK 换 base URL，见 https://openrouter.ai/docs/guides/community/typesafe-sdk ）。
+key 只从 ``SecretStore``（钥匙串 / 环境变量 ``JEV_API_KEY``、``OPENROUTER_API_KEY``）读，
+不进日志。
 """
 
 from __future__ import annotations
@@ -39,6 +42,9 @@ from jiaoyi.interfaces import DecisionModel, SecretStore
 logger = logging.getLogger(__name__)
 
 JEV_KEY_NAME = "JEV_API_KEY"
+OPENROUTER_KEY_NAME = "OPENROUTER_API_KEY"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"  # SDK 自己拼 /v1/systemone
+PROVIDER_KEYS = {"typesafe": JEV_KEY_NAME, "openrouter": OPENROUTER_KEY_NAME}
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,8 @@ class RawJevResult:
     probs: Mapping[str, Mapping[str, float]]
     input_tokens: int = 0
     request_id: str | None = None
+    cost_usd: float | None = None
+    """通道直接报的花费（OpenRouter 的 ``usage.cost``）；没有时按 token 单价估。"""
 
 
 class JevTransport(Protocol):
@@ -60,7 +68,14 @@ class JevTransport(Protocol):
 class TypeSafeTransport:
     """用 TypeSafe 官方 SDK（``typesafe-sdk``，MIT）调 Jev。SDK 内不重试，超时由外层控制。"""
 
-    def __init__(self, api_key: str, model: str, *, http_transport: Any = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        base_url: str | None = None,
+        http_transport: Any = None,
+    ) -> None:
         # 延迟导入：只用规则版或 mock 时不加载网络库
         from typesafe_sdk import AsyncTypeSafeClient, RetryPolicy
 
@@ -70,6 +85,9 @@ class TypeSafeTransport:
             model=model,
             retry=RetryPolicy(max_retries=0),
             transport=http_transport,  # 测试时传 httpx2.MockTransport
+            base_url=base_url,
+            # 走转发时不压缩请求体：OpenRouter 文档没说收 zstd；请求本来就只有几百 token
+            compression=False if base_url else None,
         )
 
     async def evaluate(
@@ -90,11 +108,17 @@ class TypeSafeTransport:
             rid: Any = resp.request_id
         except Exception:  # 响应没带请求号时 SDK 会抛错；请求号只用于排查，不影响判断
             rid = None
+        body = _raw_body(resp)
+        if not isinstance(rid, str):  # OpenRouter 把请求号放在正文 id（gen-dec-…）
+            rid = body.get("id")
+        usage = body.get("usage")
+        cost = usage.get("cost") if isinstance(usage, dict) else None
         return RawJevResult(
             model=resp.model,
             probs=probs,
             input_tokens=resp.usage.input_tokens or 0,
             request_id=rid if isinstance(rid, str) else None,
+            cost_usd=float(cost) if isinstance(cost, int | float) and cost >= 0 else None,
         )
 
     async def aclose(self) -> None:
@@ -188,14 +212,18 @@ class JevDecisionModel:
             return self._error(request, f"Jev 回复解析失败：{e}", started)
 
         self.consecutive_errors = 0
-        if self._cfg.jev_model is not None and raw.model != self._cfg.jev_model:
-            logger.warning("Jev 模型版本变了：锁定 %s，实际 %s", self._cfg.jev_model, raw.model)
+        pinned = self._cfg.jev_model
+        # OpenRouter 回的是带日期的全名（typesafe/jev-1.14-20260917），算同一版本
+        if pinned is not None and raw.model != pinned and not raw.model.startswith(pinned + "-"):
+            logger.warning("Jev 模型版本变了：锁定 %s，实际 %s", pinned, raw.model)
         return JevResponse(
             request_id=request.request_id,
             ok=True,
             model_version=raw.model or self._cfg.jev_model or "unpinned",
             latency_ms=latency,
-            cost_usd=raw.input_tokens * self._cfg.jev_usd_per_mtok / 1e6,
+            cost_usd=raw.cost_usd
+            if raw.cost_usd is not None
+            else raw.input_tokens * self._cfg.jev_usd_per_mtok / 1e6,
             answers=answers,
         )
 
@@ -239,18 +267,35 @@ def _parse(request: JevRequest, raw: RawJevResult) -> list[JevAnswer]:
     return out
 
 
+def _raw_body(resp: Any) -> dict[str, Any]:
+    """SDK 丢掉了不认识的字段（OpenRouter 加的 id、usage.cost），从原始响应里取。取不到就算了。"""
+    try:
+        body = resp.raw_http_response.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def jev_from_secrets(
     secrets: SecretStore, cfg: FastLoopConfig, *, timeout_ms: int, day_reset_tz: str
 ) -> JevDecisionModel | None:
-    """有 ``JEV_API_KEY`` 且锁定了 ``jev_model`` 才建真 Jev，否则返回 None。"""
-    key = secrets.get(JEV_KEY_NAME)
+    """所选通道的 key 有了、且锁定了 ``jev_model`` 才建真 Jev，否则返回 None。
+
+    直连用 ``JEV_API_KEY``，OpenRouter 用 ``OPENROUTER_API_KEY``；不会拿另一条通道的 key 顶替。
+    """
+    key_name = PROVIDER_KEYS[cfg.jev_provider]
+    key = secrets.get(key_name)
     if not key:
         return None
     if cfg.jev_model is None:
-        logger.error("有 JEV_API_KEY 但没在 [fast_loop] 锁定 jev_model，不接 Jev")
+        logger.error("有 %s 但没在 [fast_loop] 锁定 jev_model，不接 Jev", key_name)
         return None
+    base_url = OPENROUTER_BASE_URL if cfg.jev_provider == "openrouter" else None
     return JevDecisionModel(
-        TypeSafeTransport(key, cfg.jev_model), cfg, timeout_ms=timeout_ms, day_reset_tz=day_reset_tz
+        TypeSafeTransport(key, cfg.jev_model, base_url=base_url),
+        cfg,
+        timeout_ms=timeout_ms,
+        day_reset_tz=day_reset_tz,
     )
 
 
