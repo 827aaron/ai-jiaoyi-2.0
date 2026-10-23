@@ -100,7 +100,7 @@ from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.review import CardJournal
-from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig, UserOverrides
+from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
 from jiaoyi.slow.settings import SlowConfig, missing_slow_stack, slow_defaults
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
@@ -402,11 +402,9 @@ def build_modules(
         closers.append(source.aclose)
         screener = CodeSymbolScreener(
             source,
-            ScreenerConfig(
-                pool_size=app_cfg.pool_size,
-                # 价差和手续费门槛跟硬上限一致，免得进池的币保镖一律拒
-                max_spread_bps=risk_cfg.max_spread_bps,
-                round_trip_fee_bps=risk_cfg.taker_fee_bps * 2,
+            # 门槛和权重来自 slow.toml [screener]；价差默认跟硬上限一致，免得进池的币保镖一律拒
+            (slow_cfg or slow_defaults(app_cfg.profile)).screener_config(
+                app_cfg.pool_size, risk_cfg.max_spread_bps, risk_cfg.taker_fee_bps * 2
             ),
             recorder=recorders[Role.SCREENER],
             tz=tz,

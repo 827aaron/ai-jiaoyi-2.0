@@ -99,6 +99,8 @@ def _check_config(args: argparse.Namespace) -> int:
         print(caution)
     if gap := slow.schedule.caution():
         print(f"注意：{gap}")
+    for note in slow.screener.cautions(risk.max_spread_bps):
+        print(f"注意：选币门槛——{note}")
     return 0
 
 

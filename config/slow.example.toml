@@ -10,6 +10,25 @@ reddit = "guarded"      # guarded=抓 Reddit 但加闸（匿名 RSS 每分钟约
 [levels]
 span_sigma = 1.5      # 关键位范围 = 系数 × 该币 ATR × √(持仓时长/ATR 周期)；所有币所有档位同一条公式
 
+[screener]                         # 选币器：每小时筛一遍全部币安 U 本位永续，过门槛、打分、取前 N 个进候选池（不用 AI）
+min_quote_volume_usdt = 20000000   # 最低 24 小时成交额（美元），推荐 2000 万
+# max_spread_bps = 5               # 最大买卖价差（万分之几）；不写 = 跟硬上限里的「最大价差」走
+min_depth_usdt = 100000            # 盘口最小深度（美元），推荐 10 万
+min_listed_days = 7                # 至少上线几天，推荐 7
+min_range_24h_pct = 0              # 24 小时波动下限（%），0 = 不设；推荐 1.5
+max_range_24h_pct = 0              # 24 小时波动上限（%），0 = 不设；推荐 30
+default_category_cap = 30          # 每一类币默认最多进池几个（选币页单独改过的以选币页为准）
+vol_full_multiple = 20             # 打分：24h 波动是来回手续费的几倍算满分
+surge_full_multiple = 8            # 打分：最近 1 小时成交额是平时的几倍算满分
+funding_full = 0.001               # 打分：资金费率绝对值到多少算满分（0.001 = 0.1%）
+oi_full_pct = 10                   # 打分：持仓量一小时变化多少 % 算满分
+liq_full_usdt = 10000000           # 打分：近 1 小时强平额多少美元算满分
+weight_volatility = 0.35           # 五项权重（不用加起来等于 1，只看相对大小，不能全是 0）
+weight_volume_surge = 0.25
+weight_funding = 0.15
+weight_oi = 0.15
+weight_liquidations = 0.10
+
 [meeting]
 analysts_crypto = ["market", "social", "news"]                 # 分析师越少越省钱
 analysts_stock  = ["market", "social", "news", "fundamentals"]

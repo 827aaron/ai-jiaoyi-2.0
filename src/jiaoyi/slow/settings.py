@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.interfaces import SecretStore
+from jiaoyi.slow.screener import ScreenerConfig
 from jiaoyi.slow.tradingagents_engine import (
     PROVIDER_KEY_ENV,
     PROVIDER_MODELS,
@@ -58,6 +59,124 @@ class LevelsConfig(_Strict):
         description="关键位范围 = 这个系数 × 该币 ATR × √(持仓时长 / ATR 周期)。"
         "对所有币、所有档位用同一条公式：ATR 乘根号时间就是持仓期内价格的典型波动。",
     )
+
+
+class ScreenerSection(_Strict):
+    """选币器的门槛和权重（``[screener]``）。每小时用代码筛一遍全部币安 U 本位永续：先过硬门槛，
+    再按下面的权重打分，取前 N 个进候选池。默认值就是原来写死的值。你定的值就是上限，只提示不拦，
+    除非数学上不成立（权重全 0、下限大于上限）。"""
+
+    min_quote_volume_usdt: float = Field(
+        default=20_000_000.0,
+        ge=0,
+        description="最低 24 小时成交额（美元）。太冷清的币进出容易滑点。",
+    )
+    max_spread_bps: float | None = Field(
+        default=None,
+        gt=0,
+        description="最大买卖价差（万分之几）。不写 = 跟硬上限里的「最大价差」走，"
+        "免得进池的币保镖一律拒。写得比硬上限大会被提示。",
+    )
+    min_depth_usdt: float = Field(
+        default=100_000.0, ge=0, description="盘口最小深度（美元）。太浅的币大单吃不下。"
+    )
+    min_listed_days: int = Field(
+        default=7, ge=0, le=365, description="至少上线几天。新币波动和价差不稳。"
+    )
+    min_range_24h_pct: float = Field(
+        default=0.0,
+        ge=0,
+        le=100,
+        description="24 小时波动下限（%）。0 = 不设；推荐 1.5，波动太小赚不回手续费。",
+    )
+    max_range_24h_pct: float = Field(
+        default=0.0,
+        ge=0,
+        le=500,
+        description="24 小时波动上限（%）。0 = 不设；推荐 30，波动过大止损容易被针扫。",
+    )
+    default_category_cap: int = Field(
+        default=30,
+        ge=1,
+        le=100,
+        description="每一类币（主流 / 山寨 / 币股 / 美股科技 / 贵金属）默认最多进池几个。"
+        "选币页单独改过的类别以选币页为准。",
+    )
+    vol_full_multiple: float = Field(
+        default=20.0,
+        gt=0,
+        le=1000,
+        description="24 小时波动是来回手续费的几倍算「波动分」满分。",
+    )
+    surge_full_multiple: float = Field(
+        default=8.0,
+        gt=1,
+        le=1000,
+        description="最近 1 小时成交额是平时的几倍算「量能分」满分。",
+    )
+    funding_full: float = Field(
+        default=0.001,
+        gt=0,
+        le=0.1,
+        description="资金费率绝对值到多少算「资金费分」满分（0.001 = 0.1%）。",
+    )
+    oi_full_pct: float = Field(
+        default=10.0, gt=0, le=1000, description="持仓量一小时变化多少 % 算「持仓量分」满分。"
+    )
+    liq_full_usdt: float = Field(
+        default=10_000_000.0, gt=10, description="近 1 小时强平额多少美元算「强平分」满分。"
+    )
+    weight_volatility: float = Field(
+        default=0.35, ge=0, le=1, description="波动够不够覆盖手续费，占总分的权重。"
+    )
+    weight_volume_surge: float = Field(
+        default=0.25, ge=0, le=1, description="量能突增，占总分的权重。"
+    )
+    weight_funding: float = Field(
+        default=0.15, ge=0, le=1, description="资金费率极端，占总分的权重。"
+    )
+    weight_oi: float = Field(default=0.15, ge=0, le=1, description="持仓量变化，占总分的权重。")
+    weight_liquidations: float = Field(
+        default=0.10, ge=0, le=1, description="近 1 小时强平，占总分的权重。"
+    )
+
+    @model_validator(mode="after")
+    def _sane(self) -> ScreenerSection:
+        if (
+            self.min_range_24h_pct > 0
+            and self.max_range_24h_pct > 0
+            and self.min_range_24h_pct >= self.max_range_24h_pct
+        ):
+            raise ValueError("波动下限必须小于波动上限（两个都不为 0 时）")
+        if self.weights_total <= 0:
+            raise ValueError("五项权重不能全是 0，否则所有币同分、选不出先后")
+        return self
+
+    @property
+    def weights_total(self) -> float:
+        return (
+            self.weight_volatility
+            + self.weight_volume_surge
+            + self.weight_funding
+            + self.weight_oi
+            + self.weight_liquidations
+        )
+
+    def cautions(self, risk_max_spread_bps: float) -> list[str]:
+        """比推荐冒险的设置（只提示，不拒绝）。"""
+        out: list[str] = []
+        if self.min_quote_volume_usdt < 5_000_000:
+            out.append("最低成交额低于 500 万美元，冷门币进出容易滑点（推荐 2000 万）")
+        if self.min_depth_usdt < 20_000:
+            out.append("盘口最小深度低于 2 万美元，大单可能吃不下（推荐 10 万）")
+        if self.min_listed_days < 3:
+            out.append("上线不满 3 天的新币也会进池，波动和价差不稳（推荐 7 天）")
+        if self.max_spread_bps is not None and self.max_spread_bps > risk_max_spread_bps:
+            out.append(
+                f"选币的最大价差 {self.max_spread_bps:g} 比硬上限里的 {risk_max_spread_bps:g} 宽，"
+                "多出来的币进池后保镖会一律拒绝"
+            )
+        return out
 
 
 class MeetingConfig(_Strict):
@@ -187,6 +306,7 @@ class SlowConfig(_Strict):
     social: SocialConfig = SocialConfig()
     levels: LevelsConfig = LevelsConfig()
     schedule: ScheduleConfig = ScheduleConfig()
+    screener: ScreenerSection = ScreenerSection()
     budget: BudgetConfig = BudgetConfig()
     prices: PricesConfig = PricesConfig()
 
@@ -209,6 +329,35 @@ class SlowConfig(_Strict):
             level_span_sigma=self.levels.span_sigma,
             pick_tier=m.pick_tier,
             convert_tier=m.convert_tier,
+        )
+
+    def screener_config(
+        self, pool_size: int, risk_max_spread_bps: float, round_trip_fee_bps: float
+    ) -> ScreenerConfig:
+        """``[screener]`` → 选币器参数。池大小来自 app.toml，价差默认和手续费跟硬上限走。"""
+        s = self.screener
+        return ScreenerConfig(
+            pool_size=pool_size,
+            min_quote_volume_usdt=s.min_quote_volume_usdt,
+            max_spread_bps=s.max_spread_bps or risk_max_spread_bps,
+            min_depth_usdt=s.min_depth_usdt,
+            min_listed_days=s.min_listed_days,
+            round_trip_fee_bps=round_trip_fee_bps,
+            default_category_cap=s.default_category_cap,
+            min_range_24h_pct=s.min_range_24h_pct,
+            max_range_24h_pct=s.max_range_24h_pct,
+            vol_full_multiple=s.vol_full_multiple,
+            surge_full_multiple=s.surge_full_multiple,
+            funding_full=s.funding_full,
+            oi_full_pct=s.oi_full_pct,
+            liq_full_usdt=s.liq_full_usdt,
+            weights={
+                "vol_vs_fees": s.weight_volatility,
+                "volume_surge": s.weight_volume_surge,
+                "funding_extreme": s.weight_funding,
+                "oi_change": s.weight_oi,
+                "liquidations": s.weight_liquidations,
+            },
         )
 
     def effective_pick_max(self, app_pick_max: int) -> int:
