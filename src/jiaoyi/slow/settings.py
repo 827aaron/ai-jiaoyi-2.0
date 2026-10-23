@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from jiaoyi.contracts import Category
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.interfaces import SecretStore
@@ -58,6 +59,21 @@ class LevelsConfig(_Strict):
         le=5.0,
         description="关键位范围 = 这个系数 × 该币 ATR × √(持仓时长 / ATR 周期)。"
         "对所有币、所有档位用同一条公式：ATR 乘根号时间就是持仓期内价格的典型波动。",
+    )
+
+
+class CategoryRule(_Strict):
+    """一类币的开关和进池上限（``[screener.categories.<类别>]``）。"""
+
+    enabled: bool = Field(
+        default=True,
+        description="关掉后这一类不再靠打分进池；你固定 / 手动加入的币仍进池（要过硬条件）。",
+    )
+    cap: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="这一类最多进池几个；不写 = 用上面的「每类默认上限」。0 = 一个都不要。",
     )
 
 
@@ -101,6 +117,11 @@ class ScreenerSection(_Strict):
         le=100,
         description="每一类币（主流 / 山寨 / 币股 / 美股科技 / 贵金属）默认最多进池几个。"
         "选币页单独改过的类别以选币页为准。",
+    )
+    categories: dict[Category, CategoryRule] = Field(
+        default_factory=dict,
+        description="按类别开关和设上限：major / alt / crypto_stock / us_tech / precious_metal / "
+        "other。不写的类别 = 开、用默认上限。选币页上的设置优先于这里。",
     )
     vol_full_multiple: float = Field(
         default=20.0,
@@ -176,6 +197,10 @@ class ScreenerSection(_Strict):
                 f"选币的最大价差 {self.max_spread_bps:g} 比硬上限里的 {risk_max_spread_bps:g} 宽，"
                 "多出来的币进池后保镖会一律拒绝"
             )
+        if self.categories and not any(
+            self.categories.get(c, CategoryRule()).enabled for c in Category
+        ):
+            out.append("所有类别都关了：除了你固定 / 手动加入的币，候选池会是空的")
         return out
 
 
@@ -351,6 +376,8 @@ class SlowConfig(_Strict):
             min_listed_days=s.min_listed_days,
             round_trip_fee_bps=round_trip_fee_bps,
             default_category_cap=s.default_category_cap,
+            category_caps={c: r.cap for c, r in s.categories.items() if r.cap is not None},
+            category_enabled={c: r.enabled for c, r in s.categories.items()},
             min_range_24h_pct=s.min_range_24h_pct,
             max_range_24h_pct=s.max_range_24h_pct,
             vol_full_multiple=s.vol_full_multiple,

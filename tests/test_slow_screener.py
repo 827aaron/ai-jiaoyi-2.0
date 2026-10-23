@@ -160,3 +160,29 @@ def test_range_filters_and_full_score_points(now: datetime) -> None:
     # 满分点可配：funding 0.5% 封顶时 0.25% 只有一半分
     _, parts, _ = score(stat("XUSDT", **{}), ScreenerConfig(funding_full=0.005))
     assert parts["funding_extreme"] == 0.0
+
+
+async def test_category_off_and_cap_precedence(now: datetime) -> None:
+    from jiaoyi.slow.screener import ScreenerConfig
+
+    src = FakeSource(
+        [stat("AAAUSDT", range_24h_pct=9), stat("BBBUSDT", range_24h_pct=8),
+         stat("TSLAUSDT", range_24h_pct=7), stat("PINUSDT", range_24h_pct=0.1)]
+    )  # fmt: skip
+    cfg = ScreenerConfig(
+        category_enabled={Category.US_TECH: False}, category_caps={Category.ALT: 1}
+    )
+    pool = await CodeSymbolScreener(src, cfg).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT"}  # toml：美股关、山寨只要 1 个
+    tsla = next(e for e in pool.entries if e.symbol == "TSLAUSDT")
+    assert "这一类已关闭" in tsla.reasons
+    # 选币页优先于 toml：重新打开美股、山寨放宽到 3；固定的币在关闭的类别里仍进池
+    ov = UserOverrides(
+        category_enabled={Category.US_TECH: True},
+        category_caps={Category.ALT: 3},
+    )
+    pool = await CodeSymbolScreener(src, cfg, ov).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "BBBUSDT", "PINUSDT", "TSLAUSDT"}
+    off = UserOverrides(category_enabled={Category.ALT: False}, pinned=frozenset({"PINUSDT"}))
+    pool = await CodeSymbolScreener(src, ScreenerConfig(), off).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"TSLAUSDT", "PINUSDT"}

@@ -190,6 +190,15 @@ Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模
 - **今日调用次数不随重启清零**：快环各角色重启时从决策日志读回今天的次数和花费；军师团的统计随 `data/slow_budget.json` 一起落盘恢复。
 - **会议并发 4 → 8**（各档位一致），撞 OpenRouter 限流靠 `llm_max_retries`（6 次退避重试），没有改会议流程。**回答长度上限 8192 → 4096**，出作战指令和挑币两步（要输出 JSON）单独按 8192 起（`json_max_tokens`），不会被截断。
 
+### 类别开关和每类上限
+
+六个类别：`major` 主流币、`alt` 山寨币、`crypto_stock` 加密概念股、`us_tech` 美股科技、`precious_metal` 贵金属、`other`。每类可以关掉（不再靠打分进池）、可以设最多进池几个（0 = 一个都不要）。设置有两处，选币页优先：
+
+- `slow.toml` 的 `[screener.categories.<类别>]`：`enabled`（默认 true）、`cap`（不写 = `default_category_cap`）。
+- 选币页指令（写进 `data/pool_overrides.json` 的 `category_enabled` / `category_caps`，改完立即重新选币，要面板密码）：`set_category`（`params.category` + `params.enabled` = `true` / `false` / `default`）、`set_category_cap`（`params.category` + `params.cap` = 0–100 的整数或 `default`）。`default` = 清掉选币页这一项，回到 slow.toml。
+
+规则：固定和手动加入的币比类别开关更具体，类别关了仍进池（也不占名额、不受上限限制，同以前），但仍要过硬门槛；拉黑最优先。被关掉的类别里没进池的币，选币页理由栏显示「这一类已关闭」。全部类别都关了会在 `check-config` 提示（候选池只剩固定 / 手动加入的币）。
+
 ## 选币状态
 
 选币器自己上报 `module_status.json` 的 `screener`：`last_run_at`、`next_run_at`、`symbol_count`、`error`（`ModuleStatus` 新增的可选字段），headline 写明「等待首次选币 / 上次 HH:MM 选出 N 个币，下次 HH:MM / 上次选币失败，沿用旧候选池：原因」。面板和 `jiaoyi status` 不再出现「未接入或还没启动」：没上报过时，主程序在跑显示「等待第一次上报」，不在跑显示「主程序没在运行」；离线 / 回放模式的桩显示「未启用」。

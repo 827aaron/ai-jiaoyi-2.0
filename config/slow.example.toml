@@ -10,6 +10,11 @@ reddit = "guarded"      # guarded=抓 Reddit 但加闸（匿名 RSS 每分钟约
 [levels]
 span_sigma = 1.5      # 关键位范围 = 系数 × 该币 ATR × √(持仓时长/ATR 周期)；所有币所有档位同一条公式
 
+# 按类别开关和每类上限（选币页上的设置优先于这里）：
+# [screener.categories.us_tech]
+# enabled = false                  # 这一类不再靠打分进池；你固定 / 手动加入的币仍进池
+# [screener.categories.alt]
+# cap = 10                         # 山寨币最多进池 10 个；不写 = 用 default_category_cap
 [screener]                         # 选币器：每小时筛一遍全部币安 U 本位永续，过门槛、打分、取前 N 个进候选池（不用 AI）
 min_quote_volume_usdt = 20000000   # 最低 24 小时成交额（美元），推荐 2000 万
 # max_spread_bps = 5               # 最大买卖价差（万分之几）；不写 = 跟硬上限里的「最大价差」走

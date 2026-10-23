@@ -38,6 +38,11 @@ PoolAction = Literal[
     "add_symbol",
     "remove_symbol",
 ]
+CATEGORY_ACTIONS: frozenset[str] = frozenset({"set_category", "set_category_cap"})
+"""类别指令：params.category（major / alt / crypto_stock / us_tech / precious_metal / other 之一，
+以 ``Category`` 的取值为准）；``set_category`` 再要 params.enabled（true / false / default），
+``set_category_cap`` 再要 params.cap（0–100 的整数，或 default）。
+default = 清掉这里的设置，回到 slow.toml。"""
 POOL_ACTIONS: frozenset[str] = frozenset(
     {
         "pin_symbol",
@@ -60,7 +65,30 @@ class PoolOverrides(BaseModel):
     manual: frozenset[str] = frozenset()
     """手动加入（仍要过硬条件）。"""
     category_caps: dict[Category, int] = Field(default_factory=dict)
-    """每个类别最多进池几个；不写用选币默认。"""
+    """每个类别最多进池几个；不写用 slow.toml ``[screener.categories]`` / 选币默认。"""
+    category_enabled: dict[Category, bool] = Field(default_factory=dict)
+    """类别开关：False = 这一类不再靠打分进池；不写用 slow.toml（默认开）。
+    你固定 / 手动加入的币比类别开关更具体，仍然进池（要过硬条件）。"""
+
+    def set_category(self, category: Category, enabled: bool | None) -> PoolOverrides:
+        """开 / 关一个类别；None = 清掉这里的设置，回到 slow.toml。"""
+        new = dict(self.category_enabled)
+        if enabled is None:
+            new.pop(category, None)
+        else:
+            new[category] = enabled
+        return self.model_copy(update={"category_enabled": new})
+
+    def set_category_cap(self, category: Category, cap: int | None) -> PoolOverrides:
+        """设一个类别最多进池几个（0 = 一个都不要）；None = 清掉，回到 slow.toml。"""
+        if cap is not None and not 0 <= cap <= 100:
+            raise ValueError("每类上限要在 0–100 之间")
+        new = dict(self.category_caps)
+        if cap is None:
+            new.pop(category, None)
+        else:
+            new[category] = cap
+        return self.model_copy(update={"category_caps": new})
 
     def apply(self, action: PoolAction, symbol: str) -> PoolOverrides:
         """执行一条选币页操作，返回新的覆盖项。互斥的一边自动去掉（拉黑会取消固定和手动加入）。"""
@@ -92,6 +120,27 @@ class PoolOverrides(BaseModel):
         )
 
 
+def parse_category_command(kind: str, params: dict[str, str]) -> tuple[Category, bool | int | None]:
+    """把类别指令的 params 解析成 (类别, 开关或上限)；None = default。不合法抛 ValueError。"""
+    raw = params.get("category", "")
+    try:
+        category = Category(raw)
+    except ValueError:
+        names = " / ".join(c.value for c in Category)
+        raise ValueError(f"类别不对：{raw!r}（可选：{names}）") from None
+    if kind == "set_category":
+        word = params.get("enabled", "").lower()
+        if word not in ("true", "false", "default"):
+            raise ValueError("开关要写 true / false / default")
+        return category, None if word == "default" else word == "true"
+    word = params.get("cap", "").lower()
+    if word == "default":
+        return category, None
+    if not word.isdigit() or int(word) > 100:
+        raise ValueError("每类上限要写 0–100 的整数，或 default")
+    return category, int(word)
+
+
 def read_pool_overrides(data_dir: str | Path) -> PoolOverrides | None:
     """读覆盖项。文件不存在 → 空覆盖项；读不出或格式不对 → None（调用方决定怎么兜底）。"""
     path = Path(data_dir) / POOL_OVERRIDES_FILE
@@ -117,6 +166,7 @@ def write_pool_overrides(data_dir: str | Path, ov: PoolOverrides) -> None:
         "blacklist": sorted(ov.blacklist),
         "manual": sorted(ov.manual),
         "category_caps": {c.value: n for c, n in ov.category_caps.items()},
+        "category_enabled": {c.value: on for c, on in ov.category_enabled.items()},
     }
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -45,7 +45,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
-from jiaoyi.core.pool_overrides import POOL_ACTIONS, PoolAction
+from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.market.features import backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
@@ -695,6 +695,14 @@ class Runner:
                 "done",
                 f"{_POOL_DONE[cmd.kind]} {sym}；已重新选币，现在{'在' if inside else '不在'}池里",
             )
+        if cmd.kind in CATEGORY_ACTIONS:
+            try:
+                self.app.apply_category_override(cmd.kind, cmd.params)
+            except ValueError as e:
+                return "rejected", str(e)
+            await self._rescreen(self.app.clock())
+            what = "类别开关" if cmd.kind == "set_category" else "每类上限"
+            return "done", f"已更新{what}（{cmd.params.get('category', '')}）；已重新选币"
         if cmd.kind == "unblock_symbol":
             sym = cmd.params.get("symbol", "")
             if not self.app.unblock_symbol(sym):

@@ -81,12 +81,17 @@ class UserOverrides:
     blacklist: frozenset[str] = frozenset()
     manual: frozenset[str] = frozenset()
     category_caps: Mapping[Category, int] = field(default_factory=dict)
-    """每个类别最多进池几个，缺省用 ``ScreenerConfig.default_category_cap``。"""
+    """每个类别最多进池几个，缺省用 slow.toml 的设置，
+    再缺省用 ``ScreenerConfig.default_category_cap``。"""
+    category_enabled: Mapping[Category, bool] = field(default_factory=dict)
+    """类别开关，缺省用 slow.toml 的设置（默认开）。"""
 
     @classmethod
     def from_file(cls, ov: PoolOverrides) -> UserOverrides:
         """``data/pool_overrides.json``（core/pool_overrides.py）→ 选币用的覆盖项。"""
-        return cls(ov.pinned, ov.blacklist, ov.manual, dict(ov.category_caps))
+        return cls(
+            ov.pinned, ov.blacklist, ov.manual, dict(ov.category_caps), dict(ov.category_enabled)
+        )
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,10 @@ class ScreenerConfig:
     min_listed_days: int = 7
     round_trip_fee_bps: float = 10.0
     default_category_cap: int = 30
+    category_caps: Mapping[Category, int] = field(default_factory=dict)
+    """slow.toml ``[screener.categories]`` 里各类的上限；选币页的设置优先。"""
+    category_enabled: Mapping[Category, bool] = field(default_factory=dict)
+    """slow.toml 里各类的开关；选币页的设置优先。"""
     min_range_24h_pct: float = 0.0
     """24 小时波动下限（%）；0 = 不设。波动太小的币赚不回手续费。"""
     max_range_24h_pct: float = 0.0
@@ -126,6 +135,15 @@ class ScreenerConfig:
 
 def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+
+def _enabled(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> bool:
+    return ov.category_enabled.get(category, cfg.category_enabled.get(category, True))
+
+
+def _cap(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> int:
+    default = cfg.category_caps.get(category, cfg.default_category_cap)
+    return ov.category_caps.get(category, default)
 
 
 def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
@@ -282,7 +300,9 @@ class CodeSymbolScreener:
                     category=classify(s.symbol),
                     score=total,
                     score_breakdown=parts,
-                    reasons=(["你固定的币"] if pinned else []) + reasons,
+                    reasons=(["你固定的币"] if pinned else [])
+                    + (["这一类已关闭"] if not _enabled(classify(s.symbol), cfg, ov) else [])
+                    + reasons,
                     filters=f,
                     pinned=pinned,
                     blacklisted=black,
@@ -304,7 +324,9 @@ class CodeSymbolScreener:
                 break
             if e.symbol in chosen:
                 continue
-            cap = ov.category_caps.get(e.category, cfg.default_category_cap)
+            if not _enabled(e.category, cfg, ov):
+                continue
+            cap = _cap(e.category, cfg, ov)
             if counts.get(e.category, 0) >= cap:
                 continue
             chosen.add(e.symbol)
