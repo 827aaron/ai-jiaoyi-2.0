@@ -59,3 +59,17 @@ async def test_pool_survives_restart_with_original_expiry(tmp_path: Path, now: d
     assert back is not None
     assert back.symbols[0].issued_at == now
     assert back.symbols[0].expires_at == card.symbols[0].expires_at
+
+
+async def test_held_symbol_stays_after_whole_card_expires(tmp_path: Path, now: datetime) -> None:
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, _ = make(tmp_path, eng, now)
+    card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    c.set_held({"AAUSDT": Side.LONG})
+    late = card.expires_at + timedelta(hours=3)
+    cur = c.current(late)
+    assert cur is not None and cur.is_valid(late)
+    assert [s.symbol for s in cur.symbols] == ["AAUSDT"]
+    assert cur.symbols[0].allowed_signals == []  # 只盯不开
+    c.set_held({})
+    assert c.current(late) is None
