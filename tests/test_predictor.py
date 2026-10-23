@@ -427,16 +427,18 @@ async def test_five_symbols_infer_in_background_without_blocking_on_kline() -> N
 
 async def test_backfill_then_first_five_minute_close_forecasts() -> None:
     be = FakeBackend()
-    f = make(True, SET, be, cfg=PredictorConfig())
+    f = make(True, SET, be, cfg=PredictorConfig(), clock=lambda: T0 + timedelta(minutes=16))
     f.set_wanted({"BTCUSDT"})
-    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])  # 补历史不推理
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])  # 补完马上算，不等收盘
     await f.wait_idle()
-    assert be.calls == 0
-    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])  # 重叠的丢掉
+    assert be.calls == 1 and f.latest("BTCUSDT", T0 + timedelta(minutes=15)) is not None
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])  # 重叠的丢掉；已有新鲜预测不重算
+    await f.wait_idle()
+    assert be.calls == 1
     for minute in range(15, 20):  # 实时 1 分钟线拼出第 4 根 5 分钟线
         await f.on_kline(m1(minute))
     await f.wait_idle()
-    assert be.calls == 1
+    assert be.calls == 2
     assert f.latest("BTCUSDT", T0 + timedelta(minutes=20)) is not None
 
 
@@ -450,7 +452,7 @@ async def test_backfill_mid_bar_needs_the_closed_minutes() -> None:
         await f.on_kline(m1(minute))
     await f.on_kline(m1(20))
     await f.wait_idle()
-    assert be.calls == 0  # 15–20 这根拼不完整，回填被当缺口清掉
+    assert be.calls == 1  # 只有回填后那一次；15–20 这根拼不完整，回填被当缺口清掉
 
     be2 = FakeBackend()
     g = make(True, SET, be2)
@@ -458,11 +460,11 @@ async def test_backfill_mid_bar_needs_the_closed_minutes() -> None:
     for minute in range(0, 17):  # Runner 回填时拉到的 1 分钟线（早的拼出来是重复的）
         await g.on_kline(m1(minute))
     await g.wait_idle()
-    assert be2.calls == 0
+    assert be2.calls == 1  # 回填后那一次
     for minute in range(17, 20):
         await g.on_kline(m1(minute))
     await g.wait_idle()
-    assert be2.calls == 1 and g.latest("BTCUSDT", T0 + timedelta(minutes=20)) is not None
+    assert be2.calls == 2 and g.latest("BTCUSDT", T0 + timedelta(minutes=20)) is not None
 
 
 async def test_log_and_status_carry_the_model_actually_used(tmp_path: Path) -> None:
@@ -473,3 +475,47 @@ async def test_log_and_status_carry_the_model_actually_used(tmp_path: Path) -> N
     rec = sink.read_day("2026-10-22")[-1]
     assert rec.model_version == "Kronos-base"
     assert sink.read_status()[Role.PREDICTOR.value].version == "Kronos-base"
+
+
+async def test_newly_wanted_symbol_with_history_predicts_right_away() -> None:
+    """重启后作战卡一到（或首根 K 线触发 set_wanted），历史够的币马上算，不等 5 分钟收盘。"""
+    be = FakeBackend()
+    f = make(True, SET, be, cfg=PredictorConfig())
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])
+    await f.backfill("ETHUSDT", [bar(k, symbol="ETHUSDT") for k in range(3)])
+    await f.wait_idle()
+    assert be.calls == 0  # 按需模式，还没有要算的币
+    f.set_wanted({"BTCUSDT"})
+    await f.wait_idle()
+    assert be.calls == 1
+    f.set_wanted({"BTCUSDT"})  # 没有新增，不重复算
+    f.set_wanted({"BTCUSDT", "SOLUSDT"})  # SOL 没有历史，跳过
+    await f.wait_idle()
+    assert be.calls == 1
+
+
+def test_set_wanted_outside_event_loop_is_safe() -> None:
+    f = make(True, SET, FakeBackend(), cfg=PredictorConfig())
+    f.set_wanted({"BTCUSDT"})
+
+
+async def test_starting_headline_says_what_it_waits_for(tmp_path: Path) -> None:
+    sink = JsonlDecisionLog(tmp_path)
+    be = FakeBackend()
+    be.delay = 0.2
+    f = KronosForecaster(
+        True, KronosSettings(**{**SET.__dict__, "infer_timeout_s": 2.0}), be, sink,
+        clock=lambda: T0, cfg=PredictorConfig(),
+    )  # fmt: skip
+
+    def headline() -> str:
+        f.heartbeat()
+        return sink.read_status()[Role.PREDICTOR.value].headline
+
+    assert "回填" in headline()
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])
+    assert "按需模式" in headline() and "1 个币" in headline()
+    f.set_wanted({"BTCUSDT"})
+    assert "正在算第一轮" in headline()
+    await f.wait_idle()
+    assert "今天预测 1 次" in headline()

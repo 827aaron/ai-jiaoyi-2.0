@@ -283,8 +283,21 @@ class KronosForecaster:
         return self._cfg.mode
 
     def set_wanted(self, symbols: set[str] | frozenset[str]) -> None:
-        """按需模式下要算的币：作战卡里的 + 有持仓的。主循环换卡、刷新持仓时调。"""
+        """按需模式下要算的币：作战卡里的 + 有持仓的。主循环换卡、刷新持仓时调。
+
+        新加进来的币如果历史已经够（启动回填过），马上在后台算一次，不等下一根 5 分钟线收盘。
+        """
+        added = set(symbols) - self._wanted
         self._wanted = set(symbols)
+        for sym in sorted(added):
+            self._request_now(sym)
+
+    def _request_now(self, symbol: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # 不在事件循环里（测试或启动前）：等下一根 5 分钟线
+        self.request(symbol)
 
     def request(self, symbol: str) -> None:
         """哨兵出信号时调：这个币没有新鲜预测就在后台补算一次。立即返回，不等结果。"""
@@ -298,9 +311,11 @@ class KronosForecaster:
         self._spawn(symbol, list(buf), buf[-1])
 
     async def backfill(self, symbol: str, bars: list[Kline]) -> None:
-        """用 REST 拉来的 5 分钟线把历史补上，不触发推理；下一根 5 分钟线收盘就能出预测。"""
+        """用 REST 拉来的 5 分钟线把历史补上。这个币要算（全部模式或在 wanted 里）就马上算一次。"""
         for b in bars:
             self._append(b)
+        if self._cfg.mode == "all_symbols" or symbol in self._wanted:
+            self.request(symbol)
 
     def latest(self, symbol: str, now: datetime) -> Forecast | None:
         if not self._enabled:
@@ -518,6 +533,16 @@ class KronosForecaster:
                 log.exception("预测员写决策日志失败")
         self.heartbeat()
 
+    def _starting_headline(self) -> str:
+        ready = {s for s, b in self._bars.items() if len(b) >= self._s.min_bars}
+        if not ready:
+            return "等待历史 K 线（启动时从币安回填；一直这样说明回填失败，看日志）"
+        if self._busy:
+            return f"{len(ready)} 个币历史已就绪，正在算第一轮预测"
+        if self._cfg.mode == "on_demand" and not ready & self._wanted:
+            return f"{len(ready)} 个币历史已就绪；按需模式，作战卡或持仓里有币才预测"
+        return f"{len(ready)} 个币历史已就绪，等下一根 5 分钟线"
+
     def heartbeat(self, now: datetime | None = None) -> None:
         """上报模块状态；外部也可以定时调用，让面板看到它还活着。
 
@@ -532,7 +557,7 @@ class KronosForecaster:
         elif self._consec_errors > 0:
             health, headline = Health.DEGRADED, "最近一次推理失败"
         elif self._calls == 0:
-            health, headline = Health.STARTING, "等待 K 线攒够再开始预测"
+            health, headline = Health.STARTING, self._starting_headline()
         else:
             health, headline = Health.OK, f"今天预测 {self._calls} 次"
         avg = self._latency_sum / self._calls if self._calls else 0.0
