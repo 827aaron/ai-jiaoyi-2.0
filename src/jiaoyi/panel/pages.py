@@ -85,6 +85,9 @@ class PositionsPage(BaseModel):
     """position_id → 这笔从信号到现在的每一步（今天的记录）。"""
 
 
+Progress = Literal["err", "doing", "done", "wait"]
+
+
 class RoleCard(BaseModel):
     role: Role
     name: str
@@ -103,6 +106,8 @@ class RoleCard(BaseModel):
     cost_usd: float
     doing: str | None = None
     """现在正在做的事（团队页流水线高亮这一步）；没在忙就是 None。见 ``_doing``。"""
+    progress: Progress = "wait"
+    """流程图上的点：出错 > 正在做 > 这一轮做完 > 等待。见 ``_progress``。"""
 
 
 class TeamPage(BaseModel):
@@ -180,18 +185,59 @@ def _doing(
     return None
 
 
+SIGNAL_CHAIN = (Role.SENTINEL, Role.GATE, Role.RISK_GUARD, Role.EXECUTOR, Role.LIFEBOAT)
+"""一个信号从发现到下单依次经过的角色（按 signal_id 串起来）。"""
+_IDLE_WITHOUT_POSITIONS = (Role.KEEPER, Role.PATROL, Role.LIFEBOAT)
+
+
+def _progress(
+    card: RoleCard,
+    st: ModuleStatus | None,
+    chain: set[Role] | None,
+    holding: int,
+    now: datetime,
+    tz: str,
+) -> Progress:
+    """流程图的点（设计稿 team-flow/handoff.md）：出错 > 正在做 > 这一轮做完 > 等待。
+
+    ② 跟最新一个信号的决策链：链上有记录的 = 做完，链后面还没轮到的 = 等待；
+    ③ 没持仓时管家、巡逻兵、保命止损 = 等待；其余看今天有没有心跳。"""
+    if card.state == "bad":
+        return "err"
+    if card.doing:
+        return "doing"
+    role = card.role
+    if chain is not None and role in SIGNAL_CHAIN:
+        return "done" if role in chain else "wait"
+    if role in _IDLE_WITHOUT_POSITIONS and not holding:
+        return "wait"
+    if card.state == "off" or st is None:
+        return "wait"
+    return "done" if local_day(st.ts, tz) == local_day(now, tz) else "wait"
+
+
+def _latest_chain(records: list[DecisionRecord]) -> set[Role] | None:
+    """最新一个信号走到了哪些角色；今天还没有信号就是 None（退回按心跳算）。"""
+    last = next((r.signal_id for r in reversed(records) if r.signal_id), None)
+    if last is None:
+        return None
+    return {r.role for r in records if r.signal_id == last}
+
+
 def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
     run = _run_info(files, status, now)
     meetings = list_meetings(files.root, now)
     holding = len(files.ledger().live())
-    cards = [
-        _role_card(role, status.get(role.value), now, run).model_copy(
-            update={"doing": _doing(role, records, meetings, holding, now)}
-        )
-        for role in ROLE_NAMES
-    ]
+    chain = _latest_chain(records)
+    cards = []
+    for role in ROLE_NAMES:
+        st = status.get(role.value)
+        card = _role_card(role, st, now, run)
+        card.doing = _doing(role, records, meetings, holding, now)
+        card.progress = _progress(card, st, chain, holding, now, run.tz)
+        cards.append(card)
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
     meets = meetings if chosen is Role.COMMANDER else []

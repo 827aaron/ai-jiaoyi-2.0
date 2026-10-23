@@ -326,22 +326,54 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .lnk { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 .lnk:hover { text-decoration: underline; }
 
-/* 团队页流水线：按数据流分段，段内箭头；正在忙的一步强调色 */
-.flow { display: flex; flex-direction: column; }
-.flow-row { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; align-items: center; }
-.flow-lbl { color: var(--dim); font-size: 12px; font-weight: 600; }
-.flow-row.busy .flow-lbl { color: var(--accent); }
-.flow-cards { display: flex; align-items: stretch; }
-.flow-cards .role { flex: 0 0 calc((100% - 3 * 28px) / 4); }
-.flow-arr { flex: 0 0 28px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 15px; }
-.flow-down { margin: 4px 0 4px 124px; width: calc((100% - 124px - 3 * 28px) / 4); text-align: center; color: var(--dim); font-size: 15px; line-height: 18px; }
-.role.busy { box-shadow: inset 3px 0 0 var(--accent), var(--shadow); }
-.role.busy.on { box-shadow: inset 3px 0 0 var(--accent), 0 0 0 2px var(--accent), var(--shadow); }
-.role .doing { color: var(--accent); font-weight: 600; }
-@media (max-width: 900px) {
-  .flow-row { grid-template-columns: 1fr; gap: 6px; }
-  .flow-cards { flex-direction: column; }
-  .flow-cards .role { flex: none; }
-  .flow-arr { flex: 0 0 22px; transform: rotate(90deg); }
-  .flow-down { margin: 6px auto; width: auto; }
+/* 团队页流程图（设计稿 design/team-flow）：画布 1180×570 绝对定位，宽度不够整体缩放；≤700px 改竖排 */
+.tf-legend { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; font-size: 12px; background: var(--card); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); margin-bottom: 12px; }
+.tf-legend .lg { display: inline-flex; align-items: center; gap: 6px; }
+.tf-now { margin-left: auto; color: var(--accent); font-weight: 600; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.done { background: var(--ok-lamp); }
+.dot.doing { background: var(--accent); animation: tf-pulse 1.6s ease-out infinite; }
+.dot.wait { border: 2px solid var(--faint); }
+.dot.err { background: var(--down); }
+@keyframes tf-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
+.card.tf { padding: 12px; overflow: hidden; }
+.tf-fit { position: relative; width: 100%; }
+.tf-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.tf-band { position: absolute; left: 0; width: 1180px; border-radius: 10px; background: color-mix(in srgb, var(--hi) 3%, transparent); }
+.tf-band b, .tf-lane > b { font-size: 12px; font-weight: 600; color: var(--dim); }
+.tf-band b { position: absolute; left: 12px; top: 8px; }
+.tf-band b span, .tf-lane > b span { font-weight: 400; margin-left: 6px; }
+.tf-edges { position: absolute; inset: 0; overflow: visible; }
+.tf-edges .e { fill: none; stroke: var(--line2); stroke-width: 1.5; }
+.tf-edges .e.done { stroke: var(--ok-lamp); }
+.tf-edges .e.doing { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 5; animation: tf-flow 0.8s linear infinite; }
+.tf-edges .e.side { stroke-dasharray: 3 4; }
+.tf-edges .ah { fill: var(--line2); }
+.tf-edges .ah.done { fill: var(--ok-lamp); }
+.tf-edges .ah.doing { fill: var(--accent); }
+.tf-edges text { fill: var(--dim); font: 11px var(--font); }
+@keyframes tf-flow { to { stroke-dashoffset: -11; } }
+.tf-node { position: absolute; width: 168px; min-height: 92px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 9px 11px; display: flex; flex-direction: column; gap: 2px; color: inherit; cursor: pointer; }
+.tf-node:hover { border-color: var(--line2); }
+.tf-node .nm { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 14px; color: var(--hi); }
+.tf-node small { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tf-node .cnt { font-variant-numeric: tabular-nums; color: var(--tx, var(--hi)); }
+.tf-node.doing { border: 2px solid var(--accent); background: linear-gradient(color-mix(in srgb, var(--accent) 10%, transparent), color-mix(in srgb, var(--accent) 10%, transparent)), var(--card); padding: 8px 10px; }
+.tf-node .now { color: var(--accent); font-weight: 600; }
+.tf-node.wait .nm { color: var(--dim); }
+.tf-node.err { border-color: var(--down); }
+.tf-node.doc { border-style: dashed; background: var(--fill); }
+.tf-node.on { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.tf-watch { position: absolute; inset: -6px; border: 1.5px dashed var(--line2); border-radius: 16px; pointer-events: none; }
+.tf-watch span { position: absolute; right: 14px; bottom: -9px; background: var(--card); padding: 0 8px; font-size: 11.5px; color: var(--dim); }
+.tf-stack { display: none; }
+.tf-stack.tf-extra { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.tf-extra .tf-node { position: static; }
+@media (prefers-reduced-motion: reduce) { .dot.doing, .tf-edges .e.doing { animation: none; } }
+@media (max-width: 700px) {
+  .tf-fit { display: none; }
+  .tf-stack { display: flex; flex-direction: column; gap: 14px; }
+  .tf-lane { display: flex; flex-direction: column; gap: 8px; }
+  .tf-stack .tf-node { position: static; width: auto; min-height: 0; }
+  .tf-now { margin-left: 0; }
 }

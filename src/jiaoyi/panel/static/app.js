@@ -651,36 +651,113 @@ async function loadKlines(force) {
 }
 
 /* ---------- 团队 */
-// 按数据流分四段，段内箭头连起来；正在忙的一步（doing）用强调色
-const FLOW = [
-  ["选币、开会", ["screener", "commander"]],
-  ["盯盘、发现信号", ["book_reader", "predictor", "sentinel"]],
-  ["拍板、下单", ["gate", "risk_guard", "executor", "lifeboat"]],
-  ["看管持仓", ["keeper", "patrol", "reconciler"]],
-  ["出事就通知你", ["alerting"]],
+/* 流程图（设计稿 /mnt/project-files/design/team-flow/handoff.md）：三条泳道，节点固定坐标，连线 SVG；
+   宽度不够整体缩放，手机上改成按泳道竖排。点 = 进度 + 健康：出错 > 正在做 > 这一轮做完 > 等待 */
+const TF_W = 1180, TF_H = 570, NODE_W = 168, NODE_H = 92;
+const TF_POS = {
+  screener: [10, 34], commander: [250, 34], card: [490, 34],
+  book_reader: [10, 214], predictor: [250, 290], sentinel: [490, 214], gate: [730, 214], risk_guard: [970, 186], executor: [970, 300],
+  alerting: [10, 446], reconciler: [250, 446], patrol: [490, 446], keeper: [730, 446], lifeboat: [970, 446],
+};
+const TF_LANES = [
+  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "commander", "card"]],
+  ["② 发现信号 → 下单", "几秒内走完", 166, 230, ["book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor"]],
+  ["③ 看着持仓", "有仓位就一直盯", 412, 150, ["lifeboat", "keeper", "patrol", "reconciler", "alerting"]],
 ];
+const tfR = (k) => [TF_POS[k][0] + NODE_W, TF_POS[k][1] + NODE_H / 2];
+const tfL = (k) => [TF_POS[k][0], TF_POS[k][1] + NODE_H / 2];
+const tfT = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1]];
+const tfB = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1] + NODE_H];
+// [起点, 终点, 终点角色（连线颜色跟它）, 标签, 弯法]
+const TF_EDGES = [
+  [tfR("screener"), tfL("commander"), "commander", "候选池"],
+  [tfR("commander"), tfL("card"), "card", "写卡"],
+  [tfB("card"), tfT("sentinel"), "sentinel", "关键价位"],
+  [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
+  [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
+  [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
+  [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
+  [tfR("sentinel"), tfL("gate"), "gate", "信号"],
+  [tfR("gate"), tfL("risk_guard"), "risk_guard", "做不做"],
+  [tfB("risk_guard"), tfT("executor"), "executor", "仓位"],
+  [tfB("executor"), tfT("lifeboat"), "lifeboat", "同时挂"],
+  [tfL("executor"), tfT("keeper"), "keeper", "开出的仓位", "tree"],
+  [tfL("executor"), tfT("patrol"), "patrol", "", "tree"],
+  [tfL("executor"), tfT("reconciler"), "reconciler", "", "tree"],
+];
+function tfEdge([a, b, to, label, how, extra], prog) {
+  const [x1, y1] = a, [x2, y2] = b;
+  const st = prog[to] === "doing" ? "doing" : prog[to] === "done" ? "done" : "";
+  const cls = `e ${st} ${extra || ""}`;
+  let d, lx, ly, dir;
+  if (how === "elbow") { d = `M${x1},${y1} H${x2 - 12} Q${x2},${y1} ${x2},${y1 + 12} V${y2 - 1}`; lx = x2 - 70; ly = y1 - 6; dir = "d"; }
+  else if (how === "down-right") { d = `M${x1},${y1} V${y2 - 10} Q${x1},${y2} ${x1 + 10},${y2} H${x2 - 1}`; lx = x1 + 14; ly = y2 - 6; dir = "r"; }
+  else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
+  else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
+  else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = (y1 + y2) / 2 + 4; dir = "d"; }
+  else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
+  const ah = dir === "r" ? `M${x2},${y2} l-7,-4 v8 z` : `M${x2},${y2} l-4,-7 h8 z`;
+  return `<path class="${cls}" d="${d}"/><path class="ah ${st}" d="${ah}"/>${label ? `<text x="${lx}" y="${ly}">${esc(label)}</text>` : ""}`;
+}
+const PROG_LABEL = { err: "出错", doing: "正在做", done: "这一轮做完", wait: "等待" };
+function tfCardNode() {
+  const c = data && data.card;
+  const tradable = c ? c.symbols.filter((x) => x.bias === "long" || x.bias === "short").length : 0;
+  const a = !c ? "还没有作战卡" : c.valid ? `${tradable} 个可做 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}` : `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）`;
+  return { key: "card", html: `<span class="nm">作战卡${c && c.version ? " v" + c.version : ""}</span><small>${esc(a)}</small><small class="cnt">关键价位、止损范围</small>`, cls: "doc", act: c ? clickable("card") : "" };
+}
+function tfNode(r, selected) {
+  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.status;
+  return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}</span>
+    ${r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
+    <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
+}
+function teamFlow(d) {
+  const by = Object.fromEntries(d.roles.map((r) => [r.role, r]));
+  const prog = Object.fromEntries(d.roles.map((r) => [r.role, r.progress]));
+  prog.card = data && data.card && data.card.valid ? "done" : "wait";
+  const node = (k, inCanvas) => {
+    if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
+    const r = by[k];
+    if (!r) return "";
+    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r)}</a>`;
+  };
+  // 盯持仓是常态，放最后说；其余按流程顺序最多说两处
+  const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
+  const main = busy.filter((r) => !r.doing.startsWith("盯着"));
+  const watching = busy.find((r) => r.doing.startsWith("盯着"));
+  const now = main.length
+    ? `现在走到：${main.slice(0, 2).map((r) => `${esc(r.name)} ${esc(r.doing)}`).join("；")}${main.length > 2 ? ` 等 ${main.length} 处` : ""}`
+    : watching ? `现在走到：看着持仓（${esc(watching.doing)}）` : "现在都在等下一个信号";
+  const legend = `<div class="tf-legend" aria-label="图例">${["done", "doing", "wait", "err"].map((p) => `<span class="lg"><i class="dot ${p}"></i>${{ done: "这一轮已完成", doing: "正在做", wait: "等待（还没轮到 / 没活）", err: "出错或没心跳" }[p]}</span>`).join("")}<span class="tf-now">${now}</span></div>`;
+  const known = new Set([...Object.keys(TF_POS)]);
+  const extra = d.roles.filter((r) => !known.has(r.role));
+  const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");
+  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${TF_EDGES.map((e) => tfEdge(e, prog)).join("")}</svg>`;
+  const canvas = `<div class="tf-fit"><div class="tf-canvas" style="width:${TF_W}px;height:${TF_H}px">${lanes}${edges}${Object.keys(TF_POS).map((k) => node(k, true)).join("")}
+    <div class="tf-watch"><span>看门狗在外面守着：主程序卡住或退出就自动拉起</span></div></div></div>`;
+  // 手机：按泳道竖排，不画线
+  const stack = `<div class="tf-stack">${TF_LANES.map(([t, sub, , , ks]) => `<div class="tf-lane"><b>${t}<span>${sub}</span></b>${ks.map((k) => node(k, false)).join("")}</div>`).join("")}</div>`;
+  const rest = extra.length ? `<div class="tf-stack tf-extra">${extra.map((r) => node(r.role, false)).join("")}</div>` : "";
+  return `${legend}<section class="card tf">${canvas}${stack}${rest}</section>`;
+}
+const FLOW_ORDER = ["screener", "commander", "book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor", "lifeboat", "keeper", "patrol", "reconciler", "alerting"];
+function fitTeamFlow() {
+  const f = $(".tf-fit");
+  if (!f) return;
+  const c = f.firstElementChild;
+  const k = Math.min(1, f.clientWidth / TF_W);
+  c.style.transform = `scale(${k})`;
+  f.style.height = `${(TF_H + 6) * k}px`;
+}
+addEventListener("resize", fitTeamFlow);
 P.team = () => {
   const d = pageData;
-  const byRole = Object.fromEntries(d.roles.map((r) => [r.role, r]));
-  const card = (r) => `<a class="role ${r.role === d.selected ? "on" : ""} ${r.state === "bad" ? "bad" : ""} ${r.doing ? "busy" : ""}" href="#team/${r.role}">
-      <div class="nm"><span class="lamp ${r.state}"><i></i></span>${esc(r.name)}</div>
-      ${r.doing ? `<small class="doing">${esc(r.doing)}</small>` : ""}<small>${esc(r.status)}</small>${r.headline && !r.status.startsWith(r.headline) ? `<small>${esc(r.headline)}</small>` : ""}
-      <small class="num">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small></a>`;
-  const seen = new Set();
-  const stage = (label, roles) => {
-    const rs = roles.map((k) => byRole[k]).filter(Boolean);
-    rs.forEach((r) => seen.add(r.role));
-    if (!rs.length) return "";
-    return `<div class="flow-row ${rs.some((r) => r.doing) ? "busy" : ""}"><div class="flow-lbl">${esc(label)}</div><div class="flow-cards">${rs.map(card).join('<span class="flow-arr" aria-hidden="true">→</span>')}</div></div>`;
-  };
-  const rows = FLOW.map(([l, rs]) => stage(l, rs));
-  const rest = d.roles.filter((r) => !seen.has(r.role));
-  if (rest.length) rows.push(`<div class="flow-row"><div class="flow-lbl">其他</div><div class="flow-cards">${rest.map(card).join("")}</div></div>`);
-  const cards = rows.filter(Boolean).join('<div class="flow-down" aria-hidden="true">↓</div>');
+  const cards = teamFlow(d);
   const sel = d.roles.find((r) => r.role === d.selected);
   window.__recs = d.records;
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.symbol ? "" : ""}${esc(s.text)}</span></div>`).join("");
-  return `<div class="flow">${cards}</div>
+  return `${cards}
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
       <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
@@ -1421,6 +1498,7 @@ function render() {
   if (box && typing) box.focus();
   if (page === "positions") mountChart();
   if (page === "history") mountHistoryChart();
+  if (page === "team") fitTeamFlow();
 }
 
 // 5 秒没回就算失败；出错带上状态码和接口给的说明
