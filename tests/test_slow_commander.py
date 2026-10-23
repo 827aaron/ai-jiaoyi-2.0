@@ -388,3 +388,16 @@ async def test_daily_cost_survives_restart(tmp_path: Path, now: datetime) -> Non
     f.write_text("not json", encoding="utf-8")
     c4, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, budget_path=f)
     assert c4._stats.cost_usd == 0
+
+
+def test_clamp_raises_too_tight_stop_into_guard_band() -> None:
+    from jiaoyi.contracts import Range
+    from jiaoyi.slow.commander import StopScale
+
+    band = StopScale(15, 0.5, 4.0)
+    tight = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=0.2, max=0.4)), RISK, band)
+    assert tight.stop_atr.min >= 0.5  # 不会被保镖的 min_stop_atr 整张拒掉
+    wide = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=3, max=9)), RISK, band)
+    assert wide.stop_atr.max == 4.0
+    ok = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=1, max=2)), RISK, band)
+    assert (ok.stop_atr.min, ok.stop_atr.max) == (1, 2)

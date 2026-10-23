@@ -23,6 +23,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import Any
 
 import httpx
@@ -43,7 +44,14 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow.brief import MarketBriefService
-from jiaoyi.slow.commander import Analysis, MeetingError, Pick, PickResult
+from jiaoyi.slow.commander import (
+    DEFAULT_STOP_SCALE,
+    Analysis,
+    MeetingError,
+    Pick,
+    PickResult,
+    StopScale,
+)
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
 
@@ -221,6 +229,61 @@ def derivatives_context(symbol: str, end: datetime) -> str:
         return f"## 衍生品数据\n- （暂不可用：{type(exc).__name__}）"
 
 
+ATR_PERIOD = 14
+
+
+def wilder_atr(rows: Sequence[Sequence[Any]], period: int = ATR_PERIOD) -> float | None:
+    """币安 K 线行 → Wilder ATR（前 ``period`` 根 TR 的均值起步，再逐根平滑）。
+
+    算法与快环特征层 / 保镖用的 ATR 一致，这样“止损 1–2 倍 ATR”两边说的是同一把尺子。
+    根数不够返回 None。
+    """
+    trs = [
+        max(
+            float(r[2]) - float(r[3]),
+            abs(float(r[2]) - float(p[4])),
+            abs(float(r[3]) - float(p[4])),
+        )
+        for p, r in pairwise(rows)
+    ]
+    if len(trs) < period:
+        return None
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
+def atr_interval(minutes: int) -> str:
+    """``risk.atr_period_min`` → 币安 K 线周期名。"""
+    return "1h" if minutes == 60 else f"{minutes}m"
+
+
+def describe_atr(atr: float | None, price: float | None, minutes: int, lo: float, hi: float) -> str:
+    """给会议提示词用的 ATR 说明；拿不到数值时明说，让模型别瞎猜价格尺度。"""
+    name = atr_interval(minutes)
+    head = (
+        f"止损倍数按 {name} ATR({ATR_PERIOD}) 计（周期由风控配置决定，不是 1h K 线上看到的 ATR），"
+        f"每个标的的止损倍数必须在 {lo:g}–{hi:g} 之间，超出整张卡这个标的会被保镖拒绝"
+    )
+    if atr is None or price is None or price <= 0:
+        return head + "；该币当前 ATR 数值暂不可用"
+    pct = atr / price * 100
+    return f"{head}。该币当前 {name} ATR({ATR_PERIOD}) = {atr:.6g}，约占价格 {pct:.2f}%"
+
+
+def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
+    """取与保镖同周期的 K 线算 ATR。失败只说明不可用，不影响开会。"""
+    m, lo, hi = stop.period_min, stop.min_stop_atr, stop.max_stop_atr
+    try:
+        rows = _klines(symbol, atr_interval(m), 60, end)
+        closed = [r for r in rows if r[6] <= int(end.timestamp() * 1000)]  # 去掉还没收盘的那根
+        price = float(closed[-1][4]) if closed else None
+        return describe_atr(wilder_atr(closed), price, m, lo, hi)
+    except Exception:
+        return describe_atr(None, None, m, lo, hi)
+
+
 def _ema(xs: Sequence[float], n: int) -> list[float]:
     k = 2 / (n + 1)
     out: list[float] = []
@@ -388,6 +451,25 @@ def draft_to_card_symbol(d: _CardSymbolDraft, entry: SymbolPoolEntry) -> CardSym
 
 
 # ---------------------------------------------------------------- 引擎
+def convert_prompt(
+    entry: SymbolPoolEntry,
+    r: RiskConfig,
+    regime: str,
+    brief: str,
+    decision: str,
+    atr_note: str,
+) -> str:
+    """把会议结论整理成作战指令的提示词（单独成函数，便于快照测试）。"""
+    return (
+        "把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ "
+        f"{r.max_notional_per_trade_usdt:g} USDT，杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
+        "矛盾或财报前夜之类就选 no_trade。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
+        "倍数区间（如 1.5–3）。key_levels 只填结论里明确提到的价位。reason 用中文。\n"
+        f"{atr_note}\n"
+        f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{brief}\n结论：\n{decision}"
+    )
+
+
 class TradingAgentsEngine:
     """满足 ``commander.MeetingEngine``。每次开会新建一个 TradingAgents 图（它不是并发安全的）。"""
 
@@ -400,6 +482,7 @@ class TradingAgentsEngine:
         news: NewsHub | None = None,
         liquidations: LiquidationSource | None = None,
         brief: MarketBriefService | None = None,
+        stop_scale: StopScale = DEFAULT_STOP_SCALE,
     ) -> None:
         settings = settings or TradingAgentsSettings()
         key_env = PROVIDER_KEY_ENV.get(settings.provider)
@@ -412,6 +495,7 @@ class TradingAgentsEngine:
         # 日志和 DecisionRecord 不得写入请求头或配置字典。
         os.environ.setdefault(key_env, key)
         self._risk = risk
+        self._stop = stop_scale
         self._s = settings
         self._today = today
         self._news = news
@@ -539,13 +623,13 @@ class TradingAgentsEngine:
         if not decision:
             raise RuntimeError(f"{entry.symbol}：TradingAgents 没有给出结论")
 
-        r = self._risk
-        prompt = (
-            "把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ "
-            f"{r.max_notional_per_trade_usdt:g} USDT，杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
-            "矛盾或财报前夜之类就选 no_trade。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
-            "倍数区间（如 1.5–3）。key_levels 只填结论里明确提到的价位。reason 用中文。\n"
-            f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{self._brief_text()}\n结论：\n{decision}"
+        prompt = convert_prompt(
+            entry,
+            self._risk,
+            regime,
+            self._brief_text(),
+            decision,
+            atr_context(entry.symbol, self._today(), self._stop),
         )
         llm = self._llm(graph, self._s.convert_tier).with_structured_output(_CardSymbolDraft)
         last: Exception | None = None
