@@ -30,6 +30,7 @@ _SLOW_1H = {
     "max_cards_per_round": 5,
     "concurrency": 5,
     "refresh_lead_min": 15,
+    "min_refresh_gap_min": 45,  # 卡有效期 − 提前量
 }
 _STRICT_GATE = {"min_p_genuine": 0.65, "min_p_take": 0.65, "max_p_toxic": 0.4}
 
@@ -51,6 +52,8 @@ DEFAULTS: dict[str, dict[Section, dict[str, Any]]] = {
             "max_cards_per_round": 10,
             "concurrency": 4,
             "refresh_lead_min": 20,  # 一轮 3 波估 7–19 分钟，15 分钟不够
+            # 关键位突破 / 新入池也要隔这么久：2h 档 = 2 小时一轮会（实测一轮约 $0.7）
+            "min_refresh_gap_min": 100,
         },
         "slow.budget": {"fail_backoff_minutes": [5, 10, 30]},
         "predictor": {"pred_len": 24},  # 24 × 5m = 2 小时

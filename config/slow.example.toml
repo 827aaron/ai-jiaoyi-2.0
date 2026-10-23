@@ -24,7 +24,7 @@ max_retries = 6
 # symbol_min_interval_hours = 1.67 # 同一个币两次会议的最小间隔 0.5–12 小时（≤ 一轮周期）
 # refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 15）
 # symbol_timeout_s = 600           # 单个标的的会议超时
-# min_refresh_gap_min = 5          # 两轮开会的最小间隔（防抖）
+# min_refresh_gap_min = 100        # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 卡有效期 − 提前量（2h 档 100）
 
 [budget]
 daily_cost_limit_usd = 10.0                # 每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒
