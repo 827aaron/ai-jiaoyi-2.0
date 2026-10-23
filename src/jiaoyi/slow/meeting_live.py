@@ -162,6 +162,15 @@ class MeetingLive:
         self._doc["updated_at"] = self._now().isoformat()
         self._flush()
 
+    def note_usage(self, input_tokens: int, cached_tokens: int) -> None:
+        """补记最近一次调用的输入 tokens 和命中缓存的输入 tokens（紧跟在 ``note_call`` 之后）。"""
+        if self._closed or not self._doc["llm_calls"]:
+            return
+        last = self._doc["llm_calls"][-1]
+        last["input_tokens"] = input_tokens
+        last["cached_tokens"] = cached_tokens
+        self._flush()
+
     def converting(self) -> None:
         """军师团讨论完毕，开始整理成作战指令。"""
         if self._closed:

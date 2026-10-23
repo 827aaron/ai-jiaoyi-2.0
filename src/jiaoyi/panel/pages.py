@@ -651,6 +651,9 @@ class AiCall(BaseModel):
     detail: str
     estimated: bool = False
     """失败的会拿不到实际费用时，慢环按 token 估的（记录里 ``output.cost_estimated``）。"""
+    input_tokens: int | None = None
+    cached_tokens: int | None = None
+    """命中缓存的输入 tokens（记录里 ``output.usage.cached_tokens``）；旧记录没有就是 None。"""
 
 
 class AiGroup(BaseModel):
@@ -668,6 +671,11 @@ class AiCostDetail(BaseModel):
     groups: list[AiGroup]
     rows: list[AiCall]
     row_count: int
+    input_tokens: int = 0
+    """有缓存记录的调用的输入 tokens 合计（缓存命中率的分母）。"""
+    cached_tokens: int = 0
+    cache_hit_pct: float | None = None
+    """缓存命中 % = cached / input（只算记了 cached_tokens 的调用）；一条都没记就是 None。"""
 
 
 class FundsPage(BaseModel):
@@ -758,6 +766,10 @@ def build_funds(
     )
 
 
+def _int_or_none(v: object) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
 def _ai_call(r: DecisionRecord) -> AiCall | None:
     """决策日志一条 → 一次 AI 调用；没花钱也没出错的（规则拒绝、预测员本地算）不算。"""
     if r.cost_usd <= 0 and r.outcome is not Outcome.ERROR:
@@ -780,13 +792,19 @@ def _ai_call(r: DecisionRecord) -> AiCall | None:
         result = "timeout" if "超时" in r.summary else "failed"
     usage = r.output.get("usage")
     tokens = None
+    in_tok = cached = None
     if isinstance(usage, dict):
+        in_tok, cached = (
+            _int_or_none(usage.get("input_tokens")),
+            _int_or_none(usage.get("cached_tokens")),
+        )
         parts = [usage.get(k) for k in ("input_tokens", "output_tokens")]
         nums = [v for v in parts if isinstance(v, int) and not isinstance(v, bool)]
         tokens = sum(nums) if nums else None
     return AiCall(
         ts=r.ts, kind=kind, who=who, symbol=r.symbol, cost_usd=r.cost_usd, tokens=tokens,
         result=result, detail=r.summary, estimated=r.output.get("cost_estimated") is True,
+        input_tokens=in_tok, cached_tokens=cached,
     )  # fmt: skip
 
 
@@ -814,7 +832,13 @@ def build_ai_costs(files: PanelFiles, now: datetime, tz: str, rng: AiRange) -> A
                     calls=len(mine),
                 )
             )
+    cache_calls = [c for c in calls if c.cached_tokens is not None and c.input_tokens]
+    in_sum = sum(c.input_tokens or 0 for c in cache_calls)
+    cached_sum = sum(c.cached_tokens or 0 for c in cache_calls)
     return AiCostDetail(
+        input_tokens=in_sum,
+        cached_tokens=cached_sum,
+        cache_hit_pct=round(cached_sum / in_sum * 100, 1) if in_sum else None,
         range=rng,
         since=since,
         total_usd=sum(c.cost_usd for c in calls),

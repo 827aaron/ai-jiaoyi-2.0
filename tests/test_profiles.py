@@ -97,7 +97,7 @@ def test_unknown_tier_refuses(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="meeting_interval"):
         load_app_config(_app_toml(tmp_path, 'meeting_interval = "5m"'))
     with pytest.raises(ConfigError, match="hold"):
-        load_app_config(_app_toml(tmp_path, 'hold = "8h"'))
+        load_app_config(_app_toml(tmp_path, 'hold = "9h"'))
 
 
 def test_time_limit_alone_picks_hold_tier(tmp_path: Path) -> None:
@@ -135,3 +135,15 @@ def test_check_config_shows_tiers_and_overrides(
     args[4] = str(path)
     assert main(args) == 0
     assert "最长持仓 30m（仅模拟盘）" in capsys.readouterr().out
+
+
+def test_long_hold_tiers(tmp_path: Path) -> None:
+    for name, atr, patrol in (("8h", 60, 2.5), ("12h", 60, 3.0), ("24h", 240, 3.0)):
+        cfg = load_app_config(_app_toml(tmp_path, f'hold = "{name}"'))
+        assert cfg.fast_loop.atr_period_min == atr
+        assert cfg.fast_loop.patrol_shock_pct_1m == patrol
+        assert cfg.fast_loop.funding_against_max_bp == 5.0
+    rec = {"6h": "8h", "12h": "12h", "24h": "24h"}
+    for meeting, hold in rec.items():
+        assert load_app_config(_app_toml(tmp_path, f'meeting_interval = "{meeting}"')).hold == hold
+    assert profiles.hold_for_seconds(30000) == "12h"

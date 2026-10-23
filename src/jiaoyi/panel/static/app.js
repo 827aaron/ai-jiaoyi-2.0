@@ -891,11 +891,12 @@ function aiCard(a) {
       <td class="r num" ${c.estimated ? 'title="没拿到实际费用，按 token 估算"' : ""}>$${c.cost_usd.toFixed(4)}${c.estimated ? '<span class="dim small">（估）</span>' : ""}</td><td class="r num ${c.tokens == null ? "dim" : ""}" ${c.tokens == null ? 'title="这条记录没写 tokens"' : ""}>${c.tokens == null ? "没记" : c.tokens.toLocaleString()}</td>
       <td><span class="pill ${k}">${t}</span></td><td class="txt dim small">${esc(c.detail)}</td></tr>`;
   }).join("");
+  const cache = a.cache_hit_pct == null ? "缓存命中：还没有记录（旧记录没带缓存字段）。" : `缓存命中 ${a.cache_hit_pct}%（${a.cached_tokens.toLocaleString()} / ${a.input_tokens.toLocaleString()} 输入 tokens）。`;
   const more = a.row_count > a.rows.length ? `只列最近 ${a.rows.length} 次，共 ${a.row_count} 次；小计按全部算。` : "";
   return `<section class="card mt"><div class="ch"><h2>AI 费用详情</h2><span class="r">${rng}</span></div>
     <div class="tiles t${a.groups.length + 1}"><div class="tile"><small>合计 · ${a.row_count} 次</small><b>$${a.total_usd.toFixed(3)}</b></div>${groups}</div>
     ${a.rows.length ? `<div class="tw mt"><table><thead><tr><th>时间</th><th>谁</th><th>币</th><th class="r">花费</th><th class="r">tokens</th><th>结果</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="dim mt">${AI_RANGE[a.range]}还没有 AI 调用。</div>`}
-    <div class="foot">花费是 OpenRouter 每次调用报的实际费用（usage.cost），标「估」的是失败时拿不到实际费用、按 token 估的；按 1 美元 ≈ 1 U。${a.since ? `从 ${esc(a.since)} 算起。` : ""}${more}</div></section>`;
+    <div class="foot">花费是 OpenRouter 每次调用报的实际费用（usage.cost），标「估」的是失败时拿不到实际费用、按 token 估的；按 1 美元 ≈ 1 U。${cache}${a.since ? `从 ${esc(a.since)} 算起。` : ""}${more}</div></section>`;
 }
 
 P.funds = () => {
