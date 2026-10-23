@@ -709,11 +709,46 @@ def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
     ]
     doing = {r.role: r.doing for r in team.roles}
     assert doing[c.Role.COMMANDER] == "开会中：BTC"
+    prog = {r.role: r.progress for r in team.roles}
+    assert prog[c.Role.COMMANDER] == "doing"
+
     with _client(tmp_path, "192.168.1.20") as client:
         assert client.get("/api/meeting/BTCUSDT").json()["steps"][1]["who"] == "bull"
         assert client.get("/api/meeting/XRPUSDT").status_code == 404
         assert client.get("/api/meeting/_MARKET").json()["status"] == "done"
         assert client.get("/api/meeting/btc..").status_code == 404
+
+
+def test_team_progress_follows_latest_signal_chain() -> None:
+    """流程图的点：出错 > 正在做 > 信号链上有的 = 做完、链后面的 = 等待；没持仓的看管 = 等待。"""
+    from jiaoyi.panel.pages import _latest_chain, _progress, _role_card, _RunInfo
+
+    run = _RunInfo(True, None, frozenset(), "Asia/Bangkok")
+
+    def rec(role: c.Role, sig: str, mins: int) -> c.DecisionRecord:
+        ts = NOW - timedelta(minutes=mins)
+        return c.DecisionRecord(
+            record_id=f"{role}{sig}", ts=ts, role=role, outcome=c.Outcome.PASS, summary="x",
+            signal_id=sig,
+        )  # fmt: skip
+
+    s1 = [rec(c.Role.SENTINEL, "s1", 9), rec(c.Role.GATE, "s1", 8), rec(c.Role.RISK_GUARD, "s1", 7)]
+    records = [*s1, rec(c.Role.SENTINEL, "s2", 3), rec(c.Role.GATE, "s2", 2)]
+    chain = _latest_chain(records)
+    assert chain == {c.Role.SENTINEL, c.Role.GATE}
+    assert _latest_chain([]) is None
+
+    def prog(role: c.Role, holding: int = 0, **kw: object) -> str:
+        st = c.ModuleStatus(role=role, health=c.Health.OK, ts=NOW, headline="")
+        card = _role_card(role, st, NOW, run).model_copy(update=kw)
+        return _progress(card, st, chain, holding, NOW, run.tz)
+
+    assert prog(c.Role.GATE) == "done" and prog(c.Role.RISK_GUARD) == "wait"
+    assert prog(c.Role.EXECUTOR) == "wait"
+    assert prog(c.Role.RISK_GUARD, doing="刚刚：算仓位") == "doing"
+    assert prog(c.Role.GATE, state="bad", doing="刚刚：x") == "err"
+    assert prog(c.Role.KEEPER) == "wait" and prog(c.Role.RECONCILER) == "done"
+    assert prog(c.Role.KEEPER, holding=1) == "done"
 
 
 def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
