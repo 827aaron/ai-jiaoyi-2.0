@@ -148,3 +148,19 @@ def test_format_derivatives() -> None:
     assert "+0.0500%" in text and "拥挤做多" in text
     assert "变化 +12.00%" in text
     assert "暂无数据" in format_derivatives([], [])
+
+
+async def test_binance_stats_source_uses_liquidation_stats(now: datetime) -> None:
+    class Liq:
+        def liquidations_1h_usdt(self, symbol: str, at: datetime) -> float:
+            return 123_456.0 if symbol == "BTCUSDT" else 0.0
+
+    client = httpx.AsyncClient(
+        base_url="https://fapi.binance.com", transport=httpx.MockTransport(_binance_handler)
+    )
+    stats = await BinanceStatsSource(client, liquidations=Liq()).fetch(now)
+    by = {s.symbol: s for s in stats}
+    assert (
+        by["BTCUSDT"].liquidations_1h_usdt == 123_456.0 and by["ETHUSDT"].liquidations_1h_usdt == 0
+    )
+    await client.aclose()

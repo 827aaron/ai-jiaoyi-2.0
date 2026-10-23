@@ -43,6 +43,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow.commander import Analysis, Pick, PickResult
+from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
@@ -141,6 +142,16 @@ def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
 
 
 _FAPI = "https://fapi.binance.com"
+_LIQ_TOTALS: Mapping[str, float] = {}
+
+
+def set_liquidation_totals(totals: Mapping[str, float]) -> None:
+    """登记各币近 1 小时强平总额的**快照**（由事件循环取好再传进来）。
+
+    整体替换而不是原地修改，工作线程读到的永远是一份完整的旧字典或新字典。
+    """
+    global _LIQ_TOTALS
+    _LIQ_TOTALS = totals
 
 
 def format_derivatives(
@@ -182,7 +193,10 @@ def derivatives_context(symbol: str, end: datetime) -> str:
             timeout=10.0,
         )
         o.raise_for_status()
-        return format_derivatives(f.json(), o.json())
+        text = format_derivatives(f.json(), o.json())
+        if sym in _LIQ_TOTALS:
+            text += "\n" + describe_total(_LIQ_TOTALS[sym])
+        return text
     except Exception as exc:  # 衍生品数据只是补充，拿不到不影响会议
         return f"## 衍生品数据\n- （暂不可用：{type(exc).__name__}）"
 
@@ -364,6 +378,7 @@ class TradingAgentsEngine:
         settings: TradingAgentsSettings | None = None,
         today: Callable[[], datetime] = lambda: datetime.now(UTC),
         news: NewsHub | None = None,
+        liquidations: LiquidationSource | None = None,
     ) -> None:
         key = secrets.get("DEEPSEEK_API_KEY")
         if not key:
@@ -375,6 +390,7 @@ class TradingAgentsEngine:
         self._s = settings or TradingAgentsSettings()
         self._today = today
         self._news = news
+        self._liq = liquidations
         register_binance_vendor()
         if news is not None:
             register_crypto_news_vendor(news)
@@ -396,11 +412,20 @@ class TradingAgentsEngine:
         cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
         return TradingAgentsGraph(selected_analysts=analysts, config=cfg, callbacks=[handler])
 
+    def _snapshot_liquidations(self, symbols: Sequence[str]) -> None:
+        """在事件循环里取强平快照，再让工作线程去读（统计对象不是线程安全的）。"""
+        if self._liq is None:
+            return
+        now = self._today()
+        fresh = {s: self._liq.liquidations_1h_usdt(s, now) for s in symbols}
+        set_liquidation_totals({**_LIQ_TOTALS, **fresh})
+
     async def pick(
         self, candidates: Sequence[SymbolPoolEntry], max_n: int, previous: BattleCard | None
     ) -> PickResult:
         if max_n <= 0 or not candidates:
             return PickResult(regime=previous.regime if previous else "无新增标的", picks=[])
+        self._snapshot_liquidations([e.symbol for e in candidates])
         return await asyncio.to_thread(self._pick_sync, list(candidates), max_n, previous)
 
     def _pick_sync(
@@ -414,6 +439,7 @@ class TradingAgentsEngine:
         )
         table = "\n".join(
             f"{e.symbol} 类别={e.category.value} 分数={e.score:.2f} 理由={'、'.join(e.reasons)}"
+            + self._liq_note(e.symbol)
             + self._headlines(e.symbol)
             for e in candidates
         )
@@ -428,6 +454,10 @@ class TradingAgentsEngine:
         valid = {e.symbol for e in candidates}
         picks = [Pick(p.symbol, p.reason) for p in draft.picks if p.symbol in valid][:max_n]
         return PickResult(draft.regime, picks, self._cost(handler.usage_metadata))
+
+    def _liq_note(self, symbol: str) -> str:
+        total = _LIQ_TOTALS.get(symbol, 0.0)
+        return f" 近1h强平={total:,.0f}USDT" if total > 0 else ""
 
     def _headlines(self, symbol: str) -> str:
         if self._news is None:
@@ -444,6 +474,7 @@ class TradingAgentsEngine:
         )
 
     async def analyze(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
+        self._snapshot_liquidations([entry.symbol])
         return await asyncio.to_thread(self._analyze_sync, entry, regime)
 
     def _analyze_sync(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
