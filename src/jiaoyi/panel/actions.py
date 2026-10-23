@@ -45,6 +45,7 @@ from jiaoyi.core.pool_overrides import (
     SYMBOL_RE,
     parse_category_command,
 )
+from jiaoyi.core.secrets import key_needs
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码校验；不碰交易所
 from jiaoyi.panel.files import read_live_gate
 from jiaoyi.panel.overview import Control
@@ -484,6 +485,18 @@ def update_config(
     ``fields`` 只给首次设置向导用：放开平时不在网页上改的项（例如 jev_provider）。
     """
     check_password(data_dir, password)
+    return _write_config(paths, data_dir, section, changes, now, fields)
+
+
+def _write_config(
+    paths: ConfigPaths,
+    data_dir: str | Path,
+    section: Section,
+    changes: dict[str, Any],
+    now: datetime,
+    fields: dict[str, FieldSpec] | None,
+) -> list[dict[str, Any]]:
+    """``update_config`` 验完密码之后的部分：校验、备份、写文件、记改动。"""
     if not changes:
         raise ActionError("没有要改的项")
     if section == "app" and "profile" in changes:  # 旧面板写的 profile = 开会间隔档
@@ -524,6 +537,105 @@ def update_config(
             row = {"ts": now.isoformat(), "file": path.name, "section": section, **item}
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     return log
+
+
+# ---------------------------------------------------------------- 交易模式
+
+MODES: tuple[str, ...] = ("paper", "testnet", "live")
+MODE_NAME = {"paper": "模拟盘", "testnet": "测试网", "live": "实盘"}
+
+
+class ModeSwitch(BaseModel):
+    old: str
+    new: str
+    armed_at: datetime | None = None
+    """切到实盘时的解锁时间。"""
+    command_id: str
+    """随后发给主程序的重启指令。"""
+    notified: bool = False
+    """Telegram 推出去了没有（面板接口填）。"""
+
+
+def current_mode(paths: ConfigPaths) -> str:
+    mode = _raw(paths.app).get("mode", "paper")
+    return mode if isinstance(mode, str) else "paper"
+
+
+def mode_cautions(
+    target: str,
+    risk: RiskConfig,
+    keys: dict[str, bool],
+    jev_provider: str,
+    llm_provider: str,
+    equity_usdt: float | None,
+) -> list[str]:
+    """切到 ``target`` 前要逐条看过的提示（只提醒，不拦；拦的只有 LiveGate 的确认词和密码）。"""
+    out = [
+        f"还没配 {k}，这个模式要用到"
+        for k, need in key_needs(target, jev_provider, llm_provider).items()
+        if need == "required" and not keys.get(k, False)
+    ]
+    if target == "live":
+        out += [
+            "实盘用真钱在币安主网下单，亏了就是真亏。",
+            "解锁会绑定现在的 risk.toml：之后改硬上限，主程序会拒绝按实盘启动，要重新解锁。",
+            *(f"硬上限比推荐值冒险：{x}" for x in risk.cautions(equity_usdt)),
+        ]
+    return out
+
+
+def switch_mode(
+    paths: ConfigPaths,
+    data_dir: str | Path,
+    target: str,
+    password: str | None,
+    confirm_word: str | None,
+    now: datetime,
+) -> ModeSwitch:
+    """和命令行 go-live / go-paper 同一套门槛：切实盘 = LiveGate.unlock（确认词 + 面板密码，
+    连错 5 次锁 15 分钟，绑定此刻 risk.toml）；切测试网要面板密码；切回模拟盘不要。
+    离开实盘一律上锁。写完 app.toml 的 mode 再给主程序发重启指令（没在跑就下次启动生效）。"""
+    if target not in MODES:
+        raise ActionError(f"模式只能是：{' / '.join(MODES)}")
+    old = current_mode(paths)
+    gate = LiveGate(Path(data_dir) / "live_gate.json")
+    armed_at = None
+    if target == "live":
+        try:
+            fingerprint = config_fingerprint(load_risk_config(paths.risk))
+        except ConfigError as e:
+            raise ActionError(f"读不了 risk.toml，先修好再切实盘：{e}") from e
+        if old == "live":
+            with contextlib.suppress(LiveGateError):  # 解锁后改过硬上限的，允许重新解锁
+                gate.require_armed(fingerprint)
+                raise ActionError("现在就是实盘，而且已解锁")
+        try:
+            armed_at = gate.unlock(confirm_word or "", password or "", fingerprint)
+        except LiveGateError as e:
+            raise ActionError(str(e)) from e
+    elif old == target:
+        raise ActionError(f"现在就是{MODE_NAME[target]}")
+    elif target == "testnet":
+        check_password(data_dir, password or "")
+    spec = {"mode": FieldSpec(str, choices=MODES)}
+    try:
+        _write_config(paths, data_dir, "app", {"mode": target}, now, spec)
+    except ActionError:
+        if armed_at is not None:  # 文件没写成：刚解的锁收回
+            gate.disarm()
+        raise
+    if target != "live" and gate.armed:
+        gate.disarm()
+    cmd = PanelCommand(
+        id=f"p{now.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(4)}",
+        ts=now,
+        expires_at=now + COMMAND_TTL,
+        kind="restart",
+        params={},
+        by="panel",
+    )
+    write_command(data_dir, cmd)
+    return ModeSwitch(old=old, new=target, armed_at=armed_at, command_id=cmd.id)
 
 
 def recent_changes(data_dir: str | Path, limit: int = 20) -> list[dict[str, Any]]:

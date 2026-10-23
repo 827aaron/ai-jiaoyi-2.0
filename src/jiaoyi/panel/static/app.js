@@ -188,24 +188,61 @@ function askCommand(kind, params = {}, what = "") {
       params = { ...params, cap: String(+v) };
     }
     const res = await post("/api/command", { kind, params, password: pw ? pw.value : null });
-    onOk = null;
-    $("#layer [data-ok]").remove();
-    $("#layer [data-close].btn").textContent = "关闭";
-    dlgMsg("已发给主程序，等它执行…");
-    for (let i = 0; i < 70; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      if (!$("#dlg-msg")) return; // 弹窗关了
-      let st;
-      try { st = await getJson(`/api/command/${encodeURIComponent(res.id)}`); } catch (e) { continue; }
-      if (st.status !== "pending") {
-        const [t, cl] = STATUS[st.status] || [st.status, ""];
-        dlgMsg(`<b class="${cl}">${t}</b>${st.detail ? "　" + esc(st.detail) : ""}`);
-        if (kind === "restart" && st.status === "done") return waitRestart(startedBefore);
-        poll();
-        return;
-      }
+    await watchCommand(res.id, kind, startedBefore);
+  });
+}
+
+// 指令发出后：弹窗只留“关闭”，等主程序回执；重启的再等新进程起来
+async function watchCommand(id, kind, startedBefore, lead = "") {
+  onOk = null;
+  $("#layer [data-ok]").remove();
+  $("#layer [data-close].btn").textContent = "关闭";
+  dlgMsg(`${lead}已发给主程序，等它执行…`);
+  for (let i = 0; i < 70; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (!$("#dlg-msg")) return; // 弹窗关了
+    let st;
+    try { st = await getJson(`/api/command/${encodeURIComponent(id)}`); } catch (e) { continue; }
+    if (st.status !== "pending") {
+      const [t, cl] = STATUS[st.status] || [st.status, ""];
+      dlgMsg(`${lead}<b class="${cl}">${t}</b>${st.detail ? "　" + esc(st.detail) : ""}`);
+      if (kind === "restart" && st.status === "done") return waitRestart(startedBefore);
+      poll();
+      return;
     }
-    dlgMsg("一直没有回执：主程序可能没在运行。", "down");
+  }
+  dlgMsg(`${lead}一直没有回执：主程序可能没在运行，下次启动按新配置。`, "down");
+}
+
+// 交易模式：模拟盘随时切回；测试网要面板密码；实盘只在 Mac 本机，逐条勾提示 + 确认词 + 面板密码（和终端 go-live 同一套）
+async function switchMode(target) {
+  let m;
+  try { m = await getJson("/api/mode"); } catch (e) { return dlg(`<h3>切换交易模式</h3><div class="down">${esc(e.message)}</div>`); }
+  const c = data.control;
+  const startedBefore = c.started_at || null;
+  const name = MODE[target];
+  const notes = m.cautions[target] || [];
+  const warn = data.running ? "<p>切完主程序自动重启，按新模式跑。</p>" : '<div class="note warn">主程序现在没在运行：写进配置，下次启动按新模式跑。</div>';
+  if (target === "live" && !m.local) {
+    return dlg(`<h3>切到实盘</h3><p>切实盘只能在 Mac mini 本机操作：在 Mac 上打开 <code>http://127.0.0.1:8090</code> 再点这里（局域网打开的面板不能切）。</p>`);
+  }
+  const list = notes.length ? `<div class="note warn"><b>切之前看一下：</b><ul class="cautions${target === "live" ? " acks" : ""}">${notes.map((x, i) => target === "live" ? `<li><label><input type="checkbox" class="ack" data-i="${i}"> ${esc(x)}</label></li>` : `<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
+  let body = "", ok = `切到${name}`;
+  if (target === "paper") body = `<p>切回模拟盘：不再真下单${m.armed ? "，实盘同时上锁" : ""}。</p>${warn}`;
+  else if (target === "testnet") body = `<p>切到测试网${m.armed ? "（实盘同时上锁）" : ""}。</p>${list}${warn}${pwField(c)}`;
+  else body = `<p>切到实盘：用真钱在币安主网下单。每条提示都勾上，再原样输入确认词和面板密码。</p>${list}${warn}
+    <label class="pw">确认词（原样输入「${esc(m.confirm_word)}」）<input type="text" id="dlg-word" autocomplete="off"></label>${pwField(c)}`;
+  ask(`切换交易模式 · ${name}`, body, ok, target === "live", async () => {
+    const pw = $("#dlg-pw");
+    const payload = { mode: target, password: pw ? pw.value : null };
+    if (target === "live") {
+      if ([...document.querySelectorAll("#layer .ack")].some((x) => !x.checked)) throw new Error("每条提示都要勾上");
+      payload.confirm_word = $("#dlg-word").value;
+      payload.acknowledged = true;
+    }
+    const res = await post("/api/mode", payload);
+    poll();
+    await watchCommand(res.command_id, "restart", startedBefore, `<b class="up">已切到${name}</b>${res.armed_at ? "，实盘已解锁" : ""}${res.notified ? "，已推 Telegram" : "（Telegram 没推出去：没配或发送失败）"}。重启指令`);
   });
 }
 
@@ -275,6 +312,7 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "st-changes") showChanges();
   else if (act === "profile") switchProfile(arg);
+  else if (act === "mode") switchMode(arg);
   else if (act === "hold") switchHold(arg);
   else if (act === "clearpins") askClearPins();
   else if (act === "cat") { const [kind, cat, v] = arg.split(":"); askCommand(kind, kind === "set_category" ? { category: cat, enabled: v } : { category: cat, cap: v }, CAT[cat] || cat); }
@@ -1744,7 +1782,7 @@ function runCard(d) {
       ${pins.length ? `<div class="st-pins" title="${esc(pins.join("、"))}"><span class="warn">${pins.length} 项写死在配置文件里，不跟默认值变。</span>${d.writable ? ` <button class="btn b-sm" ${clickable("clearpins")}>看是哪几项、清掉</button>` : ` ${esc(pins.join("、"))}`}</div>` : ""}</div>`;
   }
   return `<section class="card st"><div class="ch"><h2>运行</h2></div>
-    <div class="st-row"><div class="k">现在的模式<small>切实盘要在 Mac mini 终端输 <code>jiaoyi go-live</code>，要确认词和面板密码</small></div><span class="pill ${d.mode === "live" ? "p-short" : "p-warn"}">${esc(MODE[d.mode] || d.mode)}</span><span class="pill ${d.live_armed ? "p-short" : ""}">${d.live_armed ? "实盘已解锁" : "实盘未解锁"}</span></div>
+    <div class="st-row"><div class="k">交易模式<small>切回模拟盘随时可以；测试网要面板密码；实盘只能在 Mac 本机切，要逐条确认提示、确认词和面板密码。切完自动重启</small></div><span class="seg">${["paper", "testnet", "live"].map((m) => `<button class="${m === d.mode ? "on" : ""}" ${m === d.mode && (m !== "live" || d.live_armed) || !d.writable ? "disabled" : clickable("mode", m)}>${MODE[m]}</button>`).join("")}</span><span class="pill ${d.live_armed ? "p-short" : ""}">${d.live_armed ? "实盘已解锁" : "实盘未解锁"}</span></div>
     <div class="st-row"><div class="k">主程序<small>${up || "还没有启动记录"}</small></div><span class="lamp ${data.running ? "" : "bad"}"><i></i>${data.running ? "运行中" : "没在运行"}</span>${restartBtn()}</div>
     <div class="st-row"><div class="k">开新仓<small>暂停后只管已有持仓，不开新的</small></div><span class="pill ${c.paused ? "p-short" : ""}">${c.paused ? "已暂停" : "正常开仓"}</span>${c.paused ? `<button class="btn b-sm" ${clickable("cmd", "resume")}>恢复开仓</button>` : `<button class="btn b-sm" ${clickable("cmd", "pause")}>暂停开新仓</button>`}</div>
     ${pfRow}${holdRow(d)}</section>`;

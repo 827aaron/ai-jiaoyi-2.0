@@ -21,7 +21,7 @@ from jiaoyi.core.commands import (
     write_runtime,
 )
 from jiaoyi.core.config import load_app_config, load_risk_config
-from jiaoyi.execution.live_gate import LiveGate
+from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate
 from jiaoyi.panel import actions
 from jiaoyi.panel.actions import ActionError, ConfigPaths, set_toml_value
 from jiaoyi.panel.hb import HbReader
@@ -49,7 +49,7 @@ def _setup(tmp_path: Path, password: bool = True) -> tuple[ConfigPaths, Path]:
     return ConfigPaths(risk=cfg / "risk.toml", app=cfg / "app.toml", slow=cfg / "slow.toml"), data
 
 
-def _client(paths: ConfigPaths, now: datetime = NOW) -> TestClient:
+def _client(paths: ConfigPaths, now: datetime = NOW, ip: str = "192.168.1.20") -> TestClient:
     hb = HbReader(
         "http://hb",
         "u",
@@ -65,7 +65,7 @@ def _client(paths: ConfigPaths, now: datetime = NOW) -> TestClient:
         clock=lambda: now,
         config_paths=paths,
     )
-    return TestClient(app, client=("192.168.1.20", 5000), base_url="http://localhost:8090")
+    return TestClient(app, client=(ip, 5000), base_url="http://localhost:8090")
 
 
 # ---------------------------------------------------------------- 安全
@@ -757,3 +757,38 @@ def test_schedule_event_triggers_and_fixed_time(tmp_path: Path) -> None:
         actions.update_config(paths, data, "schedule", {"event_triggers": ["boom"]}, PW, NOW)
     actions.update_config(paths, data, "schedule", {"schedule_at": None}, PW, NOW)
     assert "schedule_at" not in tomllib.loads(paths.slow.read_text(encoding="utf-8"))["schedule"]
+
+
+def test_switch_mode_goes_through_live_gate(tmp_path: Path) -> None:
+    """面板切模式和命令行同一套门槛：实盘 = 确认词 + 密码，只在本机；离开实盘上锁；都发重启。"""
+    paths, data = _setup(tmp_path)
+    gate = data / "live_gate.json"
+    with _client(paths) as lan:
+        info = lan.get("/api/mode").json()
+        assert info["mode"] == "paper" and not info["local"] and not info["armed"]
+        assert any("真钱" in x for x in info["cautions"]["live"])
+        live = {"mode": "live", "password": PW, "confirm_word": CONFIRM_WORD, "acknowledged": True}
+        r = lan.post("/api/mode", json=live, headers=HEADERS)
+        assert r.status_code == 403 and "本机" in r.json()["detail"]
+        bad = {"mode": "testnet", "password": "wrong-pass"}
+        r = lan.post("/api/mode", json=bad, headers=HEADERS)
+        assert r.status_code == 400 and "密码不对" in r.json()["detail"]
+        r = lan.post("/api/mode", json={"mode": "testnet", "password": PW}, headers=HEADERS)
+        assert r.status_code == 200 and r.json()["new"] == "testnet"
+    assert tomllib.loads(paths.app.read_text(encoding="utf-8"))["mode"] == "testnet"
+    assert actions.command_status(data, r.json()["command_id"]) is None  # 重启指令已排队
+    assert list((data / "panel_commands").glob("*.json"))
+    with _client(paths, ip="127.0.0.1") as mac:
+        r = mac.post("/api/mode", json={**live, "acknowledged": False}, headers=HEADERS)
+        assert r.status_code == 400 and "勾" in r.json()["detail"]
+        r = mac.post("/api/mode", json={**live, "confirm_word": "确认"}, headers=HEADERS)
+        assert r.status_code == 400 and "确认词" in r.json()["detail"]
+        r = mac.post("/api/mode", json=live, headers=HEADERS)
+        assert r.status_code == 200 and r.json()["armed_at"]
+        assert LiveGate(gate).armed
+        r = mac.post("/api/mode", json=live, headers=HEADERS)
+        assert r.status_code == 400 and "已解锁" in r.json()["detail"]
+        r = mac.post("/api/mode", json={"mode": "paper"}, headers=HEADERS)  # 切回不要密码
+        assert r.status_code == 200
+    assert not LiveGate(gate).armed
+    assert tomllib.loads(paths.app.read_text(encoding="utf-8"))["mode"] == "paper"
