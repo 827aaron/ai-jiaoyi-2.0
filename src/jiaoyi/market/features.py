@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import statistics
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from jiaoyi.contracts import (
 from jiaoyi.market import book as bk
 
 ATR_PERIOD = 14
+HISTORY_DAYS = 7
 DEFAULT_ATR_MINUTES = 15
 VOL_AVG_KLINES = 20
 TRADE_WINDOW_S = 300.0
@@ -53,6 +55,8 @@ class _SymbolState:
     prev_close: float | None = None  # 上一根完整 N 分钟 K 线的收盘价
     trs: list[float] = field(default_factory=list)
     atr: float | None = None
+    # 最近 7 天每根 N 分钟线收完时的 (收盘时间戳, ATR)（求中位数给止损 ATR 当下限）
+    atr_hist: deque[tuple[float, float]] = field(default_factory=deque)
     last_price: float | None = None
     last_ts: float = 0.0
     book: BookTop | None = None
@@ -84,10 +88,17 @@ class RollingFeatureEngine:
             raise ValueError("atr_period_min 至少 1 分钟")
         self._levels = depth_levels
         self._atr_min = atr_period_min
+        self._hist_len = HISTORY_DAYS * 1440 // atr_period_min
         self._s: dict[str, _SymbolState] = {}
 
+    def _state(self, symbol: str) -> _SymbolState:
+        st = self._s.get(symbol)
+        if st is None:
+            st = self._s[symbol] = _SymbolState(atr_hist=deque(maxlen=self._hist_len))
+        return st
+
     def update(self, event: MarketEvent) -> None:
-        st = self._s.setdefault(event.symbol, _SymbolState())
+        st = self._state(event.symbol)
         if isinstance(event, Trade):
             self._on_trade(st, event)
         elif isinstance(event, BookTop):
@@ -151,9 +162,9 @@ class RollingFeatureEngine:
             _, _, h, lo, c, cnt = st.bar
             st.bar = None
             if cnt == n:
-                self._on_bar(st, h, lo, c)
+                self._on_bar(st, h, lo, c, _ts(k.close_time))
 
-    def _on_bar(self, st: _SymbolState, high: float, low: float, close: float) -> None:
+    def _on_bar(self, st: _SymbolState, high: float, low: float, close: float, end: float) -> None:
         prev = st.prev_close
         st.prev_close = close
         if prev is None:
@@ -165,6 +176,45 @@ class RollingFeatureEngine:
                 st.atr = sum(st.trs[-ATR_PERIOD:]) / ATR_PERIOD
         else:
             st.atr = (st.atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
+        if st.atr is not None:
+            st.atr_hist.append((end, st.atr))
+
+    def seed_atr_history(self, symbol: str, bars: list[Kline]) -> int:
+        """用 REST 拉的 ``atr_period_min`` 分钟 K 线（已收盘、按时间排）补 7 天 ATR 历史。
+
+        按同样的 TR + Wilder 14 算出每根收完时的 ATR，替换掉这段时间里已有的点（同一个币重新
+        进订阅集再补一次不会重复），之后实时攒的接在后面。只用来求中位数，不动当前 ATR。
+        返回补了几个点。
+        """
+        series: list[tuple[float, float]] = []
+        trs: list[float] = []
+        atr: float | None = None
+        prev: float | None = None
+        for k in bars:
+            if prev is not None:
+                tr = max(k.high - k.low, abs(k.high - prev), abs(k.low - prev))
+                if atr is None:
+                    trs.append(tr)
+                    if len(trs) >= ATR_PERIOD:
+                        atr = sum(trs[-ATR_PERIOD:]) / ATR_PERIOD
+                else:
+                    atr = (atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
+                if atr is not None:
+                    series.append((_ts(k.close_time), atr))
+            prev = k.close
+        st = self._state(symbol)
+        last = series[-1][0] if series else float("-inf")
+        live = [p for p in st.atr_hist if p[0] > last]
+        st.atr_hist.clear()
+        st.atr_hist.extend(series + live)  # maxlen 自动丢掉最老的
+        return len(series)
+
+    def atr_median_7d(self, symbol: str) -> float | None:
+        """最近 7 天 ATR 的中位数；不够 1 天的点数返回 None（不拿半天的数据当下限）。"""
+        st = self._s.get(symbol)
+        if st is None or len(st.atr_hist) < 1440 // self._atr_min:
+            return None
+        return statistics.median(a for _, a in st.atr_hist)
 
     def _prune(self, st: _SymbolState) -> None:
         now = st.last_ts
@@ -198,6 +248,7 @@ class RollingFeatureEngine:
             last_price=st.last_price,
             atr=st.atr,
             atr_period_min=self._atr_min,
+            atr_median_7d=self.atr_median_7d(symbol),
             values=values,
             book=self._book_metrics(st, now),
         )

@@ -47,7 +47,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
-from jiaoyi.market.features import backfill_minutes
+from jiaoyi.market.features import ATR_PERIOD, HISTORY_DAYS, backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.slow.screener import SCREEN_EVERY
 
@@ -111,6 +111,11 @@ class _RefreshReason(Protocol):
 
 
 @runtime_checkable
+class _SeedsAtr(Protocol):
+    def seed_atr_history(self, symbol: str, bars: list[Kline]) -> int: ...
+
+
+@runtime_checkable
 class _PicksAware(Protocol):
     """总盘会一挑完币就回调名单（BattleCardCommander）。"""
 
@@ -131,6 +136,8 @@ class _HoldsAware(Protocol):
 
 KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
 PREDICTOR_INTERVAL = Interval.M5
+ATR_INTERVAL = {5: Interval.M5, 15: Interval.M15, 30: Interval.M30, 60: Interval.H1}
+MAX_REST_KLINES = 1500
 
 
 class Runner:
@@ -140,6 +147,7 @@ class Runner:
         *,
         fetch_klines: KlineFetcher | None = None,
         fetch_predictor_klines: KlineFetcher | None = None,
+        fetch_atr_history: KlineFetcher | None = None,
         restart_check: Callable[[], str | None] | None = None,
         restart_exit: Callable[[], None] | None = None,
     ) -> None:
@@ -158,6 +166,13 @@ class Runner:
         bars = app.app_cfg.predictor.backfill_bars
         self._fetch_predictor_klines = fetch_predictor_klines or (
             lambda sym: fetch_recent_klines(sym, limit=bars, interval=PREDICTOR_INTERVAL)
+        )
+        # 止损 ATR 下限要 7 天 ATR 历史：按 ATR 周期拉 7 天 K 线
+        # （一次最多 1500 根，5 分钟线约 5 天）
+        period = app.app_cfg.fast_loop.atr_period_min
+        hist = min(HISTORY_DAYS * 1440 // period + ATR_PERIOD + 1, MAX_REST_KLINES)
+        self._fetch_atr_history = fetch_atr_history or (
+            lambda sym: fetch_recent_klines(sym, limit=hist, interval=ATR_INTERVAL[period])
         )
         self.positions: list[PositionRecord] = []
         self._tasks: set[asyncio.Task[None]] = set()
@@ -525,6 +540,11 @@ class Runner:
                         self.m.features.update(k)
                 except Exception:
                     log.warning("%s 回填 K 线失败，等实时数据攒够", sym, exc_info=True)
+                if isinstance(self.m.features, _SeedsAtr):
+                    try:
+                        self.m.features.seed_atr_history(sym, await self._fetch_atr_history(sym))
+                    except Exception:  # 没有历史 = 没有下限，止损照当前 ATR 算
+                        log.warning("%s 回填 7 天 ATR 历史失败", sym, exc_info=True)
                 if not self.m.predictor.enabled:
                     return
                 try:

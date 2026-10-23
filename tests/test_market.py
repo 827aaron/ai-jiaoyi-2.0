@@ -209,6 +209,32 @@ def test_atr_aggregates_1m_into_15m_bars() -> None:
     assert snap.atr == pytest.approx(150.0)
 
 
+def test_atr_median_7d_from_seed_and_live_bars() -> None:
+    eng = RollingFeatureEngine(atr_period_min=60)
+    hours = [
+        c.Kline(
+            symbol="BTCUSDT",
+            interval=c.Interval.H1,
+            open=100.0,
+            high=100.0 + w,
+            low=100.0,
+            close=100.0,
+            volume=1.0,
+            open_time=T0 - timedelta(hours=40 - i),
+            close_time=T0 - timedelta(hours=39 - i),
+        )
+        for i, w in enumerate([10.0] * 40)
+    ]
+    assert eng.atr_median_7d("BTCUSDT") is None
+    n = eng.seed_atr_history("BTCUSDT", hours[:20])
+    assert n == 20 - 14  # 第 1 根没有前收，攒 14 个 TR 才有第一个 ATR
+    assert eng.atr_median_7d("BTCUSDT") is None  # 不够 1 天（24 个点）
+    assert eng.seed_atr_history("BTCUSDT", hours) == 40 - 14
+    assert eng.seed_atr_history("BTCUSDT", hours) == 40 - 14  # 再补一次替换，不重复
+    assert len(eng._s["BTCUSDT"].atr_hist) == 26
+    assert eng.atr_median_7d("BTCUSDT") == pytest.approx(10.0)
+
+
 def test_atr_drops_bar_with_missing_minute() -> None:
     eng = RollingFeatureEngine(atr_period_min=5)
     for m in range(5 * 15):

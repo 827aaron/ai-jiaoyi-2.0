@@ -222,6 +222,13 @@ class FastLoopConfig(Contract):
         description="止损用的 ATR 周期（分钟，ATR 取 14 根）。作战卡的止损倍数按这个尺度给，"
         "改了要同时让军师那边按新周期出卡。由 1 分钟 K 线聚合，启动回填 16 根这么长的数据。",
     )
+    atr_floor_7d: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="止损 ATR 下限系数：止损用 max(当前 ATR, 7 天 ATR 中位数 × 这个数)。"
+        "周末波动约减半，周日按窄 ATR 下的止损周一容易被扫；0 = 关掉。",
+    )
     min_stop_atr: float = Field(
         default=0.5,
         ge=0.1,

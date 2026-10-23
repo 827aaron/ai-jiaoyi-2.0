@@ -1074,6 +1074,7 @@ const PLAIN = {
   size_fraction_s: "小仓位用正常仓位的几成",
   size_fraction_m: "中仓位用正常仓位的几成",
   atr_period_min: "按几分钟 K 线算波动幅度（定止损用）",
+  atr_floor_7d: "波动幅度至少按 7 天中位数的几成算（防周末止损太窄）",
   min_stop_atr: "止损最近几个波动幅度（太近会被扫）",
   max_stop_atr: "止损最远几个波动幅度（太远不做）",
   stop_level_buffer_atr: "止损放在关键价位外面多远（波动幅度的几倍）",
