@@ -7,7 +7,13 @@ from datetime import datetime
 from typing import Any, Literal
 
 from jiaoyi.contracts import Side
-from jiaoyi.execution.exchange import ExchangeError, ExchangePosition, ExchangeStop, LotFilter
+from jiaoyi.execution.exchange import (
+    CloseFill,
+    ExchangeError,
+    ExchangePosition,
+    ExchangeStop,
+    LotFilter,
+)
 from jiaoyi.execution.hb_client import HbApiError
 
 
@@ -125,6 +131,7 @@ class FakeExchange:
         self.income = 0.0
         self.wallet = 1000.0
         self.exit_price: float | None = None
+        self.exit_fee: float | None = None
         self.leverage_set: list[tuple[str, int]] = []
         self.leverage_error: str | None = None
         self.filters: dict[str, LotFilter] = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0)}
@@ -181,12 +188,12 @@ class FakeExchange:
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
-    ) -> float | None:
+    ) -> CloseFill:
         if self.fail_market_close:
             raise ExchangeError("直连平仓失败")
         self.market_closed.append((symbol, close_side, quantity))
         self.set_position(symbol, Side.LONG, 0)
-        return self.exit_price
+        return CloseFill(self.exit_price, self.exit_fee)
 
     async def income_since(self, since: datetime) -> float:
         if self.income_down:

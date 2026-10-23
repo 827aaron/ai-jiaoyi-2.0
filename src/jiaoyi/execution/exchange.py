@@ -52,6 +52,14 @@ class ExchangeStop:
 
 
 @dataclass(frozen=True)
+class CloseFill:
+    """直连平仓的成交回报：均价和手续费（USDT）。任一拿不到就是 None。"""
+
+    price: float | None = None
+    fee_usdt: float | None = None
+
+
+@dataclass(frozen=True)
 class LotFilter:
     """币安 exchangeInfo 里一个合约的下单精度。"""
 
@@ -85,10 +93,10 @@ class ExchangeClient(Protocol):
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
-    ) -> float | None:
+    ) -> CloseFill:
         """只减仓市价单。**兜底专用**：hummingbot 不可达、执行器停不掉或平完仓位还在时用它平仓。
 
-        返回成交均价（拿不到返回 None），用来算盈亏记进当日统计。"""
+        返回成交均价和手续费（拿不到的为 None），用来算盈亏记进当日统计。"""
         ...
 
     async def wallet_usdt(self) -> float:
@@ -295,7 +303,7 @@ class CcxtBinanceFutures:
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
-    ) -> float | None:
+    ) -> CloseFill:
         try:
             await self._ready()
             ccxt_symbol = to_ccxt_symbol(symbol)
@@ -309,18 +317,30 @@ class CcxtBinanceFutures:
             )
         except Exception as e:
             raise ExchangeError(f"直连平仓失败：{e}") from e
-        return await self._fill_price(order, ccxt_symbol)
+        return await self._fill_info(order, ccxt_symbol)
 
-    async def _fill_price(self, order: dict[str, Any] | None, ccxt_symbol: str) -> float | None:
-        """成交均价。下单响应里没有就再查这张单；都拿不到返回 None（单已成交，不报错）。"""
+    async def _fill_info(self, order: dict[str, Any] | None, ccxt_symbol: str) -> CloseFill:
+        """成交均价和手续费。下单响应里没有就再查这张单、再查它的成交明细；
+        都拿不到的字段是 None（单已成交，不能因此报错）。"""
         price = (order or {}).get("average")
         order_id = (order or {}).get("id")
-        if not price and order_id:
+        fee = _fee_usdt((order or {}).get("fee"))
+        if order_id and not price:
             try:
                 price = (await self._ex.fetch_order(order_id, ccxt_symbol)).get("average")
             except Exception:
                 log.warning("查直连平仓成交价失败 %s", order_id, exc_info=True)
-        return float(price) if price else None
+        if order_id and fee is None:
+            try:
+                trades = await self._ex.fetch_my_trades(
+                    ccxt_symbol, None, None, {"orderId": order_id}
+                )
+                costs = [_fee_usdt(t.get("fee")) for t in trades]
+                if costs and all(c is not None for c in costs):
+                    fee = sum(c for c in costs if c is not None)
+            except Exception:
+                log.warning("查直连平仓手续费失败 %s", order_id, exc_info=True)
+        return CloseFill(float(price) if price else None, fee)
 
     async def lot_filters(self) -> dict[str, LotFilter]:
         try:
@@ -370,3 +390,12 @@ class CcxtBinanceFutures:
 
     async def close(self) -> None:
         await self._ex.close()
+
+
+def _fee_usdt(fee: dict[str, Any] | None) -> float | None:
+    """ccxt 的 fee 字典 → USDT 数额；币种不是 USDT（如 BNB 抵扣）或没有就返回 None。"""
+    if not fee or fee.get("cost") is None:
+        return None
+    if str(fee.get("currency") or "").upper() not in ("USDT", "USDC", "BUSD"):
+        return None
+    return abs(float(fee["cost"]))

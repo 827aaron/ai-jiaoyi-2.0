@@ -1,5 +1,7 @@
 """模拟环境选择：Demo Trading（默认）与旧测试网回退。"""
 
+import pytest
+
 from jiaoyi.contracts.risk_config import AppConfig
 from jiaoyi.execution.exchange import CcxtBinanceFutures
 
@@ -142,10 +144,10 @@ def test_sim_environment_marker_must_match(tmp_path):
     check_sim_environment(tmp_path, "legacy_testnet")
 
 
-async def test_direct_close_reads_fill_price_from_order_then_falls_back_to_fetch_order():
+async def test_direct_close_reads_fill_price_and_fee_with_fallbacks():
     class FakeCcxt:
-        def __init__(self, response: dict, fetched: dict | None) -> None:
-            self.response, self.fetched, self.params = response, fetched, None
+        def __init__(self, response, fetched=None, trades=None) -> None:
+            self.response, self.fetched, self.trades, self.params = response, fetched, trades, None
 
         async def load_markets(self, *a):
             return {}
@@ -162,11 +164,26 @@ async def test_direct_close_reads_fill_price_from_order_then_falls_back_to_fetch
                 raise RuntimeError("boom")
             return self.fetched
 
+        async def fetch_my_trades(self, sym, since, limit, params):
+            if self.trades is None:
+                raise RuntimeError("boom")
+            return self.trades
+
     ex = CcxtBinanceFutures("k", "s", testnet=True)
-    ex._ex = FakeCcxt({"id": "1", "average": 68100.0}, None)
-    assert await ex.close_position_market("BTCUSDT", "sell", 0.01) == 68100.0
+    # 响应里就有价和手续费
+    ex._ex = FakeCcxt({"id": "1", "average": 68100.0, "fee": {"cost": 0.34, "currency": "USDT"}})
+    fill = await ex.close_position_market("BTCUSDT", "sell", 0.01)
+    assert (fill.price, fill.fee_usdt) == (68100.0, 0.34)
     assert ex._ex.params["reduceOnly"] and ex._ex.params["newOrderRespType"] == "RESULT"
-    ex._ex = FakeCcxt({"id": "2", "average": None}, {"average": 68200.0})
-    assert await ex.close_position_market("BTCUSDT", "sell", 0.01) == 68200.0
-    ex._ex = FakeCcxt({"id": "3", "average": None}, None)  # 查不到：不报错，返回 None
-    assert await ex.close_position_market("BTCUSDT", "sell", 0.01) is None
+    # 价靠 fetch_order，手续费靠成交明细求和
+    ex._ex = FakeCcxt(
+        {"id": "2", "average": None},
+        {"average": 68200.0},
+        [{"fee": {"cost": 0.1, "currency": "USDT"}}, {"fee": {"cost": 0.2, "currency": "USDT"}}],
+    )
+    fill = await ex.close_position_market("BTCUSDT", "sell", 0.01)
+    assert fill.price == 68200.0 and fill.fee_usdt == pytest.approx(0.3)
+    # 都查不到：不报错，字段是 None；非 USDT 手续费（BNB 抵扣）不当 USDT 算
+    ex._ex = FakeCcxt({"id": "3", "average": None, "fee": {"cost": 0.001, "currency": "BNB"}})
+    fill = await ex.close_position_market("BTCUSDT", "sell", 0.01)
+    assert fill.price is None and fill.fee_usdt is None
