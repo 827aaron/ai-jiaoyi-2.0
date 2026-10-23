@@ -8,11 +8,13 @@
   "trigger_desc": "冲过作战卡关键位 68000，1 分钟成交量 4.2 倍均值",
   "dedup_key": "BTCUSDT:volume_breakout:long",
   "card_id": "card-20261022-0600",
+  "card_version": 1,
   "features": {
     "symbol": "BTCUSDT",
     "ts": "2026-10-22T06:17:00Z",
     "last_price": 68042.5,
     "atr": 85.2,
+    "atr_period_min": 15,
     "values": {
       "ret_1m": 0.0031,
       "ret_5m": 0.0054,

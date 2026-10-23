@@ -25,7 +25,7 @@ from tests.test_market import T0, _book, warm_engine
 async def test_breakout_to_order_intent(tmp_path: Path) -> None:
     log = JsonlDecisionLog(tmp_path)
     tz = RISK.day_reset_tz
-    eng: RollingFeatureEngine = warm_engine(rng=80.0)  # 1 分钟 ATR 约 80
+    eng: RollingFeatureEngine = warm_engine(n=240, rng=80.0, period=15)  # 15 分钟 ATR 约 80
     trigger = RuleTrigger(FAST, recorder=RoleRecorder(c.Role.SENTINEL, log, day_reset_tz=tz))
     gate = JevEntryGate(
         JevDecisionModel(MockJevTransport(answer=answer_with(GOOD_LONG)), FAST, timeout_ms=1000),
@@ -33,7 +33,7 @@ async def test_breakout_to_order_intent(tmp_path: Path) -> None:
     )
     guard = RiskGuardImpl(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log, day_reset_tz=tz))
 
-    t = T0 + timedelta(minutes=21)
+    t = T0 + timedelta(minutes=241)
     cd = card(t)
     # 价格在 67990 附近，然后放量冲过作战卡的 68000 压力位
     eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=67990.0, qty=0.1, taker_side=c.Side.LONG))
@@ -62,7 +62,7 @@ async def test_breakout_to_order_intent(tmp_path: Path) -> None:
     signals = trigger.check(snap, cd, now)
     assert [s.kind for s in signals] == [c.SignalKind.VOLUME_BREAKOUT]
     resp = await gate.evaluate(signals[0], cd, now)
-    verdict = guard.review(signals[0], resp, cd, account(now), now)
+    verdict = guard.review(signals[0], resp, cd, account(now), now, market=eng.snapshot("BTCUSDT"))
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     assert verdict.approved, verdict.reasons

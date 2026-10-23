@@ -26,5 +26,11 @@ class CandidateSignal(Contract):
     )
     dedup_key: str = Field(min_length=1, description="去重键，例如 BTCUSDT:volume_breakout:long")
     card_id: str | None = Field(default=None, description="触发时生效的作战卡；没有卡就不该触发。")
+    card_version: int | None = Field(
+        default=None,
+        ge=1,
+        description="触发时作战卡的版本号。同一天的 card_id 不变、每次刷新版本加 1，"
+        "保镖比 (card_id, card_version) 判断拍板期间卡有没有换；没带版本的信号保镖一律拒绝。",
+    )
     features: FeatureSnapshot
     forecast: Forecast | None = Field(default=None, description="预测员关掉或过期时为空。")

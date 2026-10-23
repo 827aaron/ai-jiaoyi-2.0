@@ -30,6 +30,7 @@ from jiaoyi.contracts import (
 from jiaoyi.market import book as bk
 
 ATR_PERIOD = 14
+DEFAULT_ATR_MINUTES = 15
 VOL_AVG_KLINES = 20
 TRADE_WINDOW_S = 300.0
 LIQ_WINDOW_S = 1800.0
@@ -47,6 +48,9 @@ class _SymbolState:
     # (时间戳, OFI 名义价值)
     ofi: deque[tuple[float, float]] = field(default_factory=deque)
     klines: deque[Kline] = field(default_factory=lambda: deque(maxlen=60))
+    # 正在聚合的 N 分钟 K 线：(起点分钟, 开, 高, 低, 收, 已有几根 1 分钟)
+    bar: tuple[int, float, float, float, float, int] | None = None
+    prev_close: float | None = None  # 上一根完整 N 分钟 K 线的收盘价
     trs: list[float] = field(default_factory=list)
     atr: float | None = None
     last_price: float | None = None
@@ -59,11 +63,27 @@ def _ts(dt: datetime) -> float:
     return dt.timestamp()
 
 
-class RollingFeatureEngine:
-    """``FeatureEngine`` 的实现。只认 1 分钟 K 线算 ATR 和均量，其它周期忽略。"""
+def backfill_minutes(atr_period_min: int) -> int:
+    """攒够 ATR 要回填多少根 1 分钟 K 线。
 
-    def __init__(self, depth_levels: int = 5) -> None:
+    14 个 TR 要 15 根完整的 N 分钟线，再加当前没走完的一根。
+    """
+    return (ATR_PERIOD + 2) * atr_period_min
+
+
+class RollingFeatureEngine:
+    """``FeatureEngine`` 的实现。只认 1 分钟 K 线，其它周期忽略。
+
+    ATR 用 1 分钟 K 线聚合成 ``atr_period_min`` 分钟（按 UTC 整点对齐，例如 15 分钟线从 :00、:15
+    开始），每收完一根算一个 TR，Wilder 平滑 14 根。不完整的 N 分钟线（启动回填的第一段）丢掉。
+    均量 ``vol_ratio_1m`` 仍按 1 分钟 K 线算。
+    """
+
+    def __init__(self, depth_levels: int = 5, *, atr_period_min: int = DEFAULT_ATR_MINUTES) -> None:
+        if atr_period_min < 1:
+            raise ValueError("atr_period_min 至少 1 分钟")
         self._levels = depth_levels
+        self._atr_min = atr_period_min
         self._s: dict[str, _SymbolState] = {}
 
     def update(self, event: MarketEvent) -> None:
@@ -108,19 +128,43 @@ class RollingFeatureEngine:
             return
         if st.klines and k.open_time <= st.klines[-1].open_time:
             return  # 重复或乱序（例如回填和推送重叠）
-        prev = st.klines[-1] if st.klines else None
         st.klines.append(k)
-        if prev is not None:
-            tr = max(k.high - k.low, abs(k.high - prev.close), abs(k.low - prev.close))
-            if st.atr is None:
-                st.trs.append(tr)
-                if len(st.trs) >= ATR_PERIOD:
-                    st.atr = sum(st.trs[-ATR_PERIOD:]) / ATR_PERIOD
-            else:
-                st.atr = (st.atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
+        self._aggregate(st, k)
         if st.last_price is None:
             st.last_price = k.close
         st.last_ts = max(st.last_ts, _ts(k.close_time))
+
+    def _aggregate(self, st: _SymbolState, k: Kline) -> None:
+        n = self._atr_min
+        minute = int(k.open_time.timestamp() // 60)
+        start = minute - minute % n
+        if st.bar is not None and st.bar[0] != start:
+            st.bar = None  # 上一根没收齐（中间缺数据或回填起点），丢掉
+        if st.bar is None:
+            if minute != start:
+                return  # 从 N 分钟线中间开始的，等下一根整点
+            st.bar = (start, k.open, k.high, k.low, k.close, 1)
+        else:
+            s, o, h, lo, _, cnt = st.bar
+            st.bar = (s, o, max(h, k.high), min(lo, k.low), k.close, cnt + 1)
+        if minute == start + n - 1:  # 这根 N 分钟线收完了
+            _, _, h, lo, c, cnt = st.bar
+            st.bar = None
+            if cnt == n:
+                self._on_bar(st, h, lo, c)
+
+    def _on_bar(self, st: _SymbolState, high: float, low: float, close: float) -> None:
+        prev = st.prev_close
+        st.prev_close = close
+        if prev is None:
+            return
+        tr = max(high - low, abs(high - prev), abs(low - prev))
+        if st.atr is None:
+            st.trs.append(tr)
+            if len(st.trs) >= ATR_PERIOD:
+                st.atr = sum(st.trs[-ATR_PERIOD:]) / ATR_PERIOD
+        else:
+            st.atr = (st.atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
 
     def _prune(self, st: _SymbolState) -> None:
         now = st.last_ts
@@ -138,7 +182,7 @@ class RollingFeatureEngine:
     def snapshot(self, symbol: str) -> FeatureSnapshot | None:
         st = self._s.get(symbol)
         if st is None or st.last_price is None or st.atr is None:
-            return None  # 还没攒够 15 根 1 分钟 K 线
+            return None  # 还没攒够 15 根 N 分钟 K 线（回填 backfill_minutes 根 1 分钟线就够）
         now = st.last_ts
         values = self._values(st, now)
         return FeatureSnapshot(
@@ -146,6 +190,7 @@ class RollingFeatureEngine:
             ts=datetime.fromtimestamp(now, UTC),
             last_price=st.last_price,
             atr=st.atr,
+            atr_period_min=self._atr_min,
             values=values,
             book=self._book_metrics(st, now),
         )

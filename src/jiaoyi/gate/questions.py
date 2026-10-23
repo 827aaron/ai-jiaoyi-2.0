@@ -35,7 +35,7 @@ from jiaoyi.contracts import (
     Side,
 )
 
-TEMPLATE_VERSION = "q1"
+TEMPLATE_VERSION = "q2"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
 SNAPSHOT_SCHEMA = "s1"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
@@ -44,6 +44,7 @@ MAX_SNAPSHOT_CHARS = 2400
 # 每个模板版本登记一次指纹，历史版本不删，方便对照旧日志
 KNOWN_TEMPLATES: dict[str, str] = {
     "q1": "f79b89bdad4e",
+    "q2": "41997c5bfdef",  # 说明 atr_bps 是 stop_atr 的单位（ATR 改成 15 分钟口径）
 }
 
 _ENTRY_GOAL = (
@@ -54,7 +55,8 @@ _ENTRY_GOAL = (
     "Round-trip taker fees are about 10 bps, so small moves lose money. "
     "Inputs: `sig`/`why` say what fired; `ret*_bps`, `vol_x` (1m volume vs average), "
     "`buy` (taker buy share, 1m), `cvd30_k` (taker buy minus sell, last 30s, kUSDT), "
-    "`liq_*_k` (liquidations 1m, kUSDT), `fund_bps`; `book` has spread, imbalance, "
+    "`liq_*_k` (liquidations 1m, kUSDT), `fund_bps`, `atr_bps` (ATR in bps, the unit "
+    "of `stop_atr`); `book` has spread, imbalance, "
     "order-flow imbalance and depth; `card` is the strategist's plan for today "
     "(bias, key levels as bps from price); `kronos` is an optional price-range forecast."
 )

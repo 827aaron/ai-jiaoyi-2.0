@@ -110,6 +110,17 @@ class FastLoopConfig(Contract):
         default=0.5, gt=0.0, le=1.0, description="S 档用每笔风险的几成。"
     )
     size_fraction_m: float = Field(default=0.75, gt=0.0, le=1.0, description="M 档；L 档固定 1.0。")
+    atr_period_min: Literal[5, 15, 30, 60] = Field(
+        default=15,
+        description="止损用的 ATR 周期（分钟，ATR 取 14 根）。作战卡的止损倍数按这个尺度给，"
+        "改了要同时让军师那边按新周期出卡。由 1 分钟 K 线聚合，启动回填 16 根这么长的数据。",
+    )
+    min_stop_atr: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=5.0,
+        description="作战卡止损 ATR 倍数的下限，低于它整张卡这个标的不做（止损太近会被噪音扫掉）。",
+    )
     stop_level_buffer_atr: float = Field(
         default=0.1, ge=0.0, le=1.0, description="止损放在关键位外侧多少个 ATR。"
     )
@@ -169,6 +180,8 @@ class FastLoopConfig(Contract):
             raise ValueError("size_fraction_s 不能大于 size_fraction_m")
         if self.keeper_close_p_strong < self.keeper_close_p:
             raise ValueError("keeper_close_p_strong 不能小于 keeper_close_p")
+        if self.min_stop_atr >= self.max_stop_atr:
+            raise ValueError("min_stop_atr 必须小于 max_stop_atr")
         if self.min_tp_r > self.max_tp_r:
             raise ValueError("min_tp_r 不能大于 max_tp_r")
         if self.patrol_alert_pct_1m > self.patrol_shock_pct_1m:

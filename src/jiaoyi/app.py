@@ -395,7 +395,7 @@ def build_modules(
         )
 
     predictor = KronosForecaster(app_cfg.predictor_enabled, log_sink=decision_log, clock=clock)
-    features = RollingFeatureEngine()
+    features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
 
     # 拍板模型是启动时的一次性选择：有 Jev 用 Jev；模拟盘且明确打开才用规则版；否则不开新仓。
     # Jev 运行中出错只返回 ok=False，绝不切到规则版。

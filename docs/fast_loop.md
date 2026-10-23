@@ -22,7 +22,7 @@
 
 已接好：组装在 `src/jiaoyi/app.py`，主循环在 `src/jiaoyi/loop.py`（`jiaoyi run` 启动）。下面是当时的约定，改接口时同步这里。
 
-- 启动时对每个标的调 `market.rest.fetch_recent_klines` 回填 1 分钟 K 线，再接 WebSocket，否则 ATR 要等 15 分钟。
+- 启动时对每个标的调 `market.rest.fetch_recent_klines` 回填 1 分钟 K 线（`backfill_minutes(atr_period_min)` 根，15 分钟 ATR 是 240 根），再接 WebSocket，否则 ATR 要干等几个小时。
 - 每个行情事件：`features.update(ev)` → `patrol.check(ev, positions)`（有动作就调执行器平仓）→
   成交事件后 `trigger.check(features.snapshot(sym), card, now)`。
 - 每个候选信号：`gate.evaluate` → `guard.review` → 放行才把 `verdict.intent` 交给执行器。
@@ -54,7 +54,7 @@
 | `funding_in_min` | 离下次资金费结算还有几分钟 | 分钟 |
 | `mark_premium_bps` | 标记价相对指数价 | bp |
 
-`FeatureSnapshot.atr`：1 分钟 K 线 14 根 Wilder ATR。`book`：盘口超过 10 秒没更新就为空（保镖看到空盘口会拒单）。
+`FeatureSnapshot.atr`：`atr_period_min` 分钟 K 线 14 根 Wilder ATR（默认 15 分钟，由 1 分钟 K 线按 UTC 整点聚合，缺分钟的那根整根丢掉），周期写在 `FeatureSnapshot.atr_period_min`。`book`：盘口超过 10 秒没更新就为空（保镖看到空盘口会拒单）。
 `BookMetrics.ofi` 和 `cvd` 都是 60 秒窗口、按 USDT 计。
 
 ## 已知限制
@@ -71,6 +71,22 @@
 - Mac mini M4（2026-10-23）：真推理可用，**约 3.1 秒 / 币**（4 条路径 × 预测 12 根 5 分钟 K 线），CPU。
 - MPS 每次都报 `scaled_dot_product_attention for MPS does not support dropout`，所以 `KronosSettings.device="auto"` 不再选 MPS，直接用 CPU；显式写 `mps` / `cuda` 出错也会退回 CPU 并一直用 CPU。
 - 推理在后台任务里跑，几秒的耗时不进拍板延迟；开关仍是 `app.toml` 的 `predictor_enabled`（示例为 `true`，关掉时快环照常跑）。
+
+## ATR 周期和止损倍数（设置页可调）
+
+止损距离 = 作战卡给的倍数 × ATR，所以 ATR 的周期必须和军师出卡时用的周期一致。原来保镖乘的是 1 分钟 ATR，军师按 1 小时 ATR 想“1–2 倍”，实际止损只有原意的几分之一，落在 1 分钟噪音里。现在全链路统一成一个可配的周期，默认 15 分钟。
+
+| 键（`[fast_loop]`） | 默认 | 范围 | 作用 |
+|---|---|---|---|
+| `atr_period_min` | 15 | 5 / 15 / 30 / 60 | ATR 用几分钟 K 线（14 根）。改了要让军师按新周期出卡 |
+| `min_stop_atr` | 0.5 | 0.1–5，且 < `max_stop_atr` | 作战卡止损倍数下限，低于它这个标的不做 |
+| `max_stop_atr` | 4.0 | 0.5–10 | 作战卡止损倍数上限，超过这个标的不做 |
+| `min_tp_r` / `max_tp_r` | 1.0 / 6.0 | 0.5–5 / 1–20 | 作战卡止盈倍数（相对止损距离）的范围 |
+| `stop_level_buffer_atr` | 0.1 | 0–1 | 止损放在关键位外侧多少个 ATR |
+
+- 保镖会核对快照的 `atr_period_min` 和配置一致，对不上就拒单（接线错了止损会差好几倍）。
+- 拍板人快照里的 `atr_bps` 跟着变成新口径，所以问题模板升到 `q2`（提示里写明 `atr_bps` 是 `stop_atr` 的单位）。
+- 巡逻兵的 1% / 2%（1 分钟逆向波动）是价格百分比，和 ATR 无关，不用改。15 分钟止损变宽后，2% 的冲击线仍然明显宽于正常止损（BTC 15 分钟 ATR 一般 0.1%–0.3%）。
 
 ## Jev 通道：直连 TypeSafe 或经 OpenRouter
 

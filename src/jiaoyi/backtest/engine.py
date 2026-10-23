@@ -186,7 +186,8 @@ class ReplayEngine:
         sig, jev, now = item.signal, item.jev, item.due
         assert jev is not None
         card = self._cards(now)
-        verdict = self._guard.review(sig, jev, card, self._account.state(now), now)
+        market = self._features.snapshot(sig.symbol)  # 拍板回来那一刻的行情
+        verdict = self._guard.review(sig, jev, card, self._account.state(now), now, market=market)
         if not verdict.approved or verdict.intent is None:
             self._m["risk_rejected"] += 1
             reason = verdict.reasons[0] if verdict.reasons else "未写原因"

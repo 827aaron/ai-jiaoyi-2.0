@@ -107,7 +107,13 @@ class FeatureSnapshot(Contract):
     symbol: Symbol
     ts: AwareDatetime
     last_price: PosFloat
-    atr: NonNegFloat = Field(description="用于止损的 ATR（默认 1 分钟 K 线 14 根）。")
+    atr: NonNegFloat = Field(
+        description="用于止损的 ATR：``atr_period_min`` 分钟 K 线 14 根（默认 15 分钟，"
+        "和军师给作战卡止损倍数用的尺度一致）。"
+    )
+    atr_period_min: int = Field(
+        default=15, ge=1, le=240, description="``atr`` 用的 K 线周期（分钟）。"
+    )
     values: dict[str, float] = Field(
         default_factory=dict,
         description="例如 ret_1m、ret_5m、vol_ratio_1m、realized_vol_5m。",

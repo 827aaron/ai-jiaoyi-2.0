@@ -159,6 +159,7 @@ def signal(
         trigger_desc="测试触发",
         dedup_key=f"{symbol}:{kind.value}:{side.value}",
         card_id=card_id,
+        card_version=1 if card_id is not None else None,
         features=features(symbol, price=price, atr=atr, spread_bps=spread_bps, now=now),
     )
 
