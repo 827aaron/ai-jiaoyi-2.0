@@ -710,7 +710,21 @@ const HINT = {
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
 const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样" };
-const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
+// 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
+const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
+function humanDur(sec) {
+  if (sec < 1) return `${Math.round(sec * 1000)} 毫秒`;
+  if (sec < 60) return `${+sec.toFixed(1)} 秒`;
+  const t = sec >= 3600 ? Math.round(sec / 60) * 60 : Math.round(sec); // 一小时以上精确到分
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = t % 60;
+  return [h ? `${h} 小时` : "", m ? `${m} 分` : "", x ? `${x} 秒` : ""].filter(Boolean).join(" ") || "0 秒";
+}
+function durOf(key, v) {
+  if (typeof v !== "number" || key === "atr_period_min") return null;
+  const u = UNIT_S.find(([suf]) => key.endsWith(suf));
+  return u ? humanDur(v * u[1]) : null;
+}
+const fmtVal = (v, i) => (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
 const pinHint = (i) => (i.pinned ? `<span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? "跟档位走" : "");
 const unpinBtn = (sec, i) => (sec && i.pinned && pageData && pageData.writable ? `<button class="btn b-sm" ${clickable("unpin", sec + ":" + i.key)}>恢复档位默认</button>` : "");
 const setRows = (items, sec) => items.map((i) => `<div class="fr"><label title="${esc(i.key)}">${esc(label(i))}<span class="hint">${[techHint(i), pinHint(i)].filter(Boolean).join(" · ")}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
