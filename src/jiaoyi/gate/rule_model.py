@@ -106,7 +106,8 @@ class RuleDecisionModel:
         sign = 1.0 if pos["side"] == "long" else -1.0
         flow = sign * self._flow(d)
         card = d.get("card") or {}
-        against_card = card.get("bias") not in (None, pos["side"], "both")
+        # 和持仓管家同口径：只有卡上方向反了才算；只看不做 / 双向 / 卡里没有都不算
+        against_card = card.get("bias") in ("long", "short") and card.get("bias") != pos["side"]
         pnl = float(pos.get("pnl_bps", 0.0))
         to_stop = pos.get("to_stop_bps")
         near_stop = to_stop is not None and float(to_stop) < 0.25 * float(d.get("atr_bps", 1.0))

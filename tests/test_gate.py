@@ -373,3 +373,14 @@ async def test_warmup_does_not_touch_error_counter() -> None:
     t.fail = ConnectionError("down")
     assert await m.warmup() is None  # 失败不抛、不影响启动
     assert m.consecutive_errors == 0 and m.health == c.Health.OK
+
+
+def test_rule_model_hold_counts_only_flipped_card_as_against() -> None:
+    """规则版和持仓管家同口径：只看不做 / 双向 / 卡里没有 不算看反，方向反了才算。"""
+    m = RuleDecisionModel(c.RunMode.PAPER)
+    base: dict[str, object] = {"pos": {"side": "long", "pnl_bps": 0.0}, "atr_bps": 10.0}
+    p = {
+        bias: m._hold({**base, "card": {"bias": bias}})["thesis_intact"]["yes"]
+        for bias in ("long", "no_trade", "both", None, "short")
+    }
+    assert p["long"] == p["no_trade"] == p["both"] == p[None] > p["short"]
