@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+import typing
 from typing import Any, get_type_hints
 
 import pytest
@@ -42,7 +43,11 @@ CLASSES = _jiaoyi_classes()
 
 
 def _members(proto: type) -> set[str]:
-    return set(getattr(proto, "__protocol_attrs__", set()))
+    # 3.12+ 有 __protocol_attrs__；3.11 要用 typing 的私有函数（CI 矩阵含 3.11）
+    attrs = getattr(proto, "__protocol_attrs__", None)
+    if attrs is None:
+        attrs = typing._get_protocol_attrs(proto)  # type: ignore[attr-defined]
+    return set(attrs)
 
 
 def _params(fn: Any) -> list[str]:
