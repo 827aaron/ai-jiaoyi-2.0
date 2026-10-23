@@ -308,3 +308,16 @@ td.nowrap { white-space: nowrap; }
   .st-sum .aux { grid-column: 1 / 2; grid-row: 2; text-align: left; }
 }
 @media (prefers-reduced-motion: reduce) { .st-sum .chev { transition: none; } }
+
+/* ---- 开会过程 */
+.stgs { margin: 2px 0 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+.stg { padding: 2px 9px; border-radius: 980px; background: var(--fill); color: var(--dim); }
+.stg.done { background: var(--up-soft); color: var(--up); }
+.stg.now { background: var(--accent); color: #fff; font-weight: 600; }
+.stg.stop { background: var(--warn-soft); color: var(--warn); }
+details.say { border-top: 1px solid var(--line); padding: 6px 0; }
+details.say summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+details.say summary b { flex: none; color: var(--hi); font-weight: 600; }
+details.say summary .one { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details.say[open] summary .one { display: none; }
+details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; padding: 6px 0 4px; color: var(--tx); }

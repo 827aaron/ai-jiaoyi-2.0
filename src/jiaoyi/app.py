@@ -694,6 +694,7 @@ class App:
                 mode=self.app_cfg.mode.value,
                 pid=os.getpid(),
                 config_fingerprint=config_fingerprint(self.risk_cfg, self.app_cfg, self.slow_cfg),
+                stub_roles=self.stub_roles(),
             )
         except OSError:
             log.exception("写 runtime.json 失败")
@@ -757,6 +758,14 @@ class App:
 
     def stub_fields(self) -> list[str]:
         return [f.name for f in fields(self.m) if is_stub(getattr(self.m, f.name))]
+
+    def stub_roles(self) -> list[str]:
+        """这次启动全由桩顶着的角色（面板团队页显示“未启用”，不当成还没报到）。"""
+        roles: dict[Role, bool] = {}
+        for f in fields(self.m):
+            role = ROLE_OF[f.name]
+            roles[role] = roles.get(role, True) and is_stub(getattr(self.m, f.name))
+        return sorted(r.value for r, stub in roles.items() if stub)
 
     def heartbeat_all(self) -> None:
         """各角色上报一次状态；桩由 ``status`` 补齐。"""

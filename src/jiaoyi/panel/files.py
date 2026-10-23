@@ -145,6 +145,11 @@ class PanelFiles:
         self._old[key] = (size, recs)
         return recs
 
+    def runtime(self) -> dict[str, Any]:
+        """主程序这次启动写的 runtime.json（启动时间、桩角色等）；没有或读不出就是空的。"""
+        raw = self._json("runtime.json")
+        return raw if isinstance(raw, dict) else {}
+
     def module_status(self) -> dict[str, ModuleStatus]:
         raw = self._json("module_status.json")
         out: dict[str, ModuleStatus] = {}
