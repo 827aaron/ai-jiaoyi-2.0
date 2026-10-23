@@ -595,7 +595,8 @@ const NULL_AS = { max_cards_per_round: "跟随 card_pick_max" };
 const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : i && i.choices && i.choices.length ? esc(choiceLabel(i.key, v)) : esc(v));
 const pinHint = (i) => (i.pinned ? ` · <span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? " · 跟档位走" : "");
 const unpinBtn = (sec, i) => (sec && i.pinned && pageData && pageData.writable ? `<button class="btn b-sm" ${clickable("unpin", sec + ":" + i.key)}>恢复档位默认</button>` : "");
-const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
+const recHint = (i) => (i.recommended == null ? "" : ` · 推荐 ${esc(String(i.recommended))}（${esc(i.recommended_why)}）`);
+const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.recommended != null ? recHint(i) : i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
 
 const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
 const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
@@ -673,7 +674,7 @@ function editSettings(sec) {
   const d = pageData;
   if (!d || !d.writable) return;
   const items = sectionItems(d, sec);
-  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
+  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.recommended != null ? recHint(i) : i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
   const c = data.control;
   ask(`修改${SECTION[sec]}`, `<div class="form edit scroll tall">${rows}</div>
     <div class="dim small">保存前整份校验，不合格不写；写前留备份。主程序重启后生效。</div>${pwField(c)}`, "保存", false, async () => {
@@ -728,7 +729,7 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
-      ${(d.risk_cautions || []).length ? `<div class="note warn mt">超出保守值（只提示，不拦）：${d.risk_cautions.map(esc).join("；")}</div>` : ""}
+      ${(d.risk_cautions || []).length ? `<div class="note warn mt">比推荐值冒险（只提示，不拦）：${d.risk_cautions.map(esc).join("；")}</div>` : ""}
       <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
       <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>

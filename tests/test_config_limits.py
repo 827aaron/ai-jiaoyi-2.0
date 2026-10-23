@@ -197,12 +197,12 @@ def test_aaron_paper_values_are_accepted_with_cautions(tmp_path: Path) -> None:
     }
     risk = load_risk_config(_write(tmp_path, data))
     hits = risk.cautions()
-    assert [h.split(" ")[0] for h in hits] == [
-        "risk_per_trade_pct",
-        "max_leverage",
+    assert sorted(h.split(" ")[0] for h in hits) == [
         "daily_loss_halt_pct",
+        "max_leverage",
+        "risk_per_trade_pct",
     ]
-    assert "保守值 1" in hits[0]
+    assert "推荐 1" in hits[0]
 
 
 def test_conservative_defaults_have_no_cautions() -> None:
@@ -213,3 +213,36 @@ def test_daily_halt_below_one_lifeboat_loss_is_only_a_caution(tmp_path: Path) ->
     data = {**b.RISK_DEFAULTS, "risk_per_trade_pct": 1.0, "daily_loss_halt_pct": 1.2}
     hits = load_risk_config(_write(tmp_path, data)).cautions()
     assert any("满仓位的单子会被保镖全部拒掉" in h for h in hits)
+
+
+@pytest.mark.parametrize(
+    ("equity", "risk", "lev", "positions", "notional"),
+    [
+        (None, 1.0, 5, 5, 2000.0),  # 不知道资金：按 1000U
+        (300.0, 1.0, 10, 2, 600.0),
+        (40.0, 1.0, 10, 2, 100.0),  # 至少 100U，不然连 BTC 都开不了
+        (50_000.0, 0.75, 5, 5, 100_000.0),
+        (200_000.0, 0.5, 5, 5, 400_000.0),
+    ],
+)
+def test_recommendations_follow_equity(
+    equity: float | None, risk: float, lev: int, positions: int, notional: float
+) -> None:
+    from jiaoyi.contracts.risk_config import recommended_caps
+
+    rec = recommended_caps(equity)
+    assert rec["risk_per_trade_pct"].value == risk
+    assert rec["daily_loss_halt_pct"].value == risk * 3
+    assert rec["max_leverage"].value == lev
+    assert rec["max_open_positions"].value == positions
+    assert rec["max_notional_per_trade_usdt"].value == notional
+    assert set(rec) <= set(RiskConfig.model_fields)
+
+
+def test_shipped_example_matches_the_1000u_recommendation() -> None:
+    from jiaoyi.contracts.risk_config import recommended_caps
+    from tests.conftest import ROOT
+
+    shipped = load_risk_config(ROOT / "config" / "risk.example.toml")
+    for name, rec in recommended_caps(None).items():
+        assert getattr(shipped, name) == rec.value, name

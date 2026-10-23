@@ -4,7 +4,7 @@
 - 每个字段都是**必填**，模型里不给默认值。配置缺项、多出未知字段、数值不合理
   （例如负数、杠杆超过 125），程序拒绝启动。硬上限的数值由人定，不另设保守范围。
   保守默认值写在 ``config/risk.example.toml``，第一次用时复制成 ``config/risk.toml``
-  再按需改；超出保守值只提示（``RiskConfig.cautions``）。
+  再按需改；比推荐值冒险只提示（``recommended_caps`` / ``RiskConfig.cautions``）。
 - 下层只能更紧：作战卡的范围、拍板人的档位都不能超过这里的数。
 
 读文件和报错见 ``jiaoyi.core.config``。
@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -24,8 +25,8 @@ PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
 
 
 class RiskConfig(Contract):
-    """硬上限。Aaron 2026-10-23 定：数值由人定，程序只拦“不合理”的值（物理 / 交易所约束），
-    不再替人设保守范围。超出保守值时 ``check-config`` / 面板给提示但不拒绝（见 ``cautions``）。
+    """硬上限。Aaron 2026-10-23 定：只给推荐，不设限制。程序只拦数学上不成立的值
+    （≤0、百分比超过 100、杠杆超过币安的 125），比推荐值冒险时提示但不拒绝（见 ``cautions``）。
     """
 
     risk_per_trade_pct: float = Field(
@@ -70,13 +71,13 @@ class RiskConfig(Contract):
                 raise ValueError(f"分组 {cat} 的上限 {cap} 必须在 0 到总敞口上限 {total} 之间")
         return self
 
-    def cautions(self) -> list[str]:
-        """超出保守值的项（只提示，不拒绝）。"""
+    def cautions(self, equity_usdt: float | None = None) -> list[str]:
+        """比按资金算出的推荐值更冒险的项（只提示，不拒绝）。资金不知道时按 1000U 算。"""
         out = []
-        for name, (safe, higher_is_riskier) in CONSERVATIVE.items():
+        for name, rec in recommended_caps(equity_usdt).items():
             value = getattr(self, name)
-            if (value > safe) if higher_is_riskier else (value < safe):
-                out.append(f"{name} = {value:g}（保守值 {safe:g}）")
+            if (value > rec.value) if rec.higher_is_riskier else (value < rec.value):
+                out.append(f"{name} = {value:g}（推荐 {rec.value:g}）")
         worst = self.risk_per_trade_pct * self.lifeboat_stop_multiplier
         if worst > self.daily_loss_halt_pct:
             out.append(
@@ -86,15 +87,47 @@ class RiskConfig(Contract):
         return out
 
 
-CONSERVATIVE: dict[str, tuple[float, bool]] = {
-    "risk_per_trade_pct": (1.0, True),
-    "max_leverage": (5, True),
-    "max_total_exposure_x": (3.0, True),
-    "daily_loss_halt_pct": (3.0, True),
-    "lifeboat_stop_multiplier": (1.5, True),
-    "min_tp_fee_multiple": (2.0, False),
-}
-"""硬上限的保守值（设计文档 §四、§十一）→ (值, 越大越冒险)。超出只提示。"""
+DEFAULT_EQUITY_USDT = 1000.0
+"""不知道账户资金时（终端 check-config、面板连不上交易所）推荐值按这个算。"""
+MIN_NOTIONAL_USDT = 100.0
+"""币安 U 本位 BTCUSDT 的最小下单名义价值；单笔上限低于它连 BTC 都开不了。"""
+
+
+@dataclass(frozen=True)
+class Recommendation:
+    value: float
+    why: str
+    higher_is_riskier: bool = True
+
+
+def recommended_caps(equity_usdt: float | None = None) -> dict[str, Recommendation]:
+    """按账户资金算硬上限的推荐值（Aaron 2026-10-23：只给推荐，不设限制）。
+
+    公式（docs/M0-setup.md §2 有同样的说明）：
+
+    - 每笔风险：2 万 U 以下 1%，2–10 万 0.75%，10 万以上 0.5%（大资金单笔金额本身就大）。
+    - 日亏熔断：每笔风险 × 3，约等于连亏 2 笔满仓（按保命止损 1.5 倍算）后停手。
+    - 杠杆：1000U 以下 10 倍（不然单笔凑不够币安最小下单额），否则 5 倍。
+    - 总敞口：3 倍资金。
+    - 同时持仓：资金 ÷ 200U，取 2–5 笔。
+    - 单笔名义上限：资金 × 2，按 50U 取整，至少 100U（币安 BTC 最小下单额）。
+    - 保命止损倍数 1.5、止盈至少覆盖手续费 2 倍：和资金无关。
+    """
+    eq = equity_usdt if equity_usdt and equity_usdt > 0 else DEFAULT_EQUITY_USDT
+    basis = f"按 {eq:,.0f}U 算"
+    risk = 1.0 if eq < 20_000 else 0.75 if eq < 100_000 else 0.5
+    exposure = 3.0
+    notional = max(MIN_NOTIONAL_USDT, round(eq * 2 / 50) * 50)
+    return {
+        "risk_per_trade_pct": Recommendation(risk, basis),
+        "daily_loss_halt_pct": Recommendation(risk * 3, f"每笔风险 × 3，{basis}"),
+        "max_leverage": Recommendation(10 if eq < 1000 else 5, basis),
+        "max_total_exposure_x": Recommendation(exposure, "和资金无关"),
+        "max_open_positions": Recommendation(min(5, max(2, int(eq // 200))), basis),
+        "max_notional_per_trade_usdt": Recommendation(notional, f"资金 × 2，{basis}"),
+        "lifeboat_stop_multiplier": Recommendation(1.5, "和资金无关"),
+        "min_tp_fee_multiple": Recommendation(2.0, "和资金无关", higher_is_riskier=False),
+    }
 
 
 class FastLoopConfig(Contract):

@@ -117,4 +117,4 @@ def test_cli_check_config_cautions_but_accepts_aggressive_caps(
     path = _write(tmp_path, data)
     assert main(["check-config", "--risk", str(path), "--app", str(APP_EXAMPLE)]) == 0
     out = capsys.readouterr().out
-    assert "超出保守值" in out and "max_leverage = 10（保守值 5）" in out
+    assert "比推荐值冒险" in out and "max_leverage = 10（推荐 5）" in out

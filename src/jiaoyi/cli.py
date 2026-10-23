@@ -70,9 +70,13 @@ def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:
 
 
 def _caution_line(risk: RiskConfig) -> str | None:
-    """硬上限超出保守值时的提示（不拒绝启动）。"""
+    """硬上限比推荐值冒险时的提示（不拒绝启动）。终端拿不到账户资金，推荐按 1000U 算。"""
     hit = risk.cautions()
-    return f"注意：硬上限超出保守值（只提示，不拦）：{'；'.join(hit)}" if hit else None
+    return (
+        f"注意：硬上限比推荐值冒险（推荐按 1000U 算，只提示不拦）：{'；'.join(hit)}"
+        if hit
+        else None
+    )
 
 
 def _check_config(args: argparse.Namespace) -> int:

@@ -174,7 +174,9 @@ def create_app(
             except ConfigError as e:
                 error = str(e)
             prof = actions.profile_info(config_paths)
-        page = build_settings(files, r, a, key_status or {}, sl, prof)
+        page = build_settings(
+            files, r, a, key_status or {}, sl, prof, (await hb.snapshot()).equity_usdt
+        )
         return page.model_copy(
             update={
                 "writable": config_paths is not None and error is None,

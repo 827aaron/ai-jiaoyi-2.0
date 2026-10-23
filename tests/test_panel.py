@@ -518,7 +518,7 @@ def test_settings_page_never_has_key_values(tmp_path: Path) -> None:
     assert page.risk_cautions == []  # 保守默认没有提示
     hot = RISK.model_copy(update={"max_leverage": 10})
     hot_page = build_settings(PanelFiles(tmp_path, RISK.day_reset_tz), hot, _cfg(tmp_path), {})
-    assert hot_page.risk_cautions == ["max_leverage = 10（保守值 5）"]
+    assert hot_page.risk_cautions == ["max_leverage = 10（推荐 5）"]
     assert page.category_caps["major"] == RISK.category_exposure_x[c.Category.MAJOR]
     assert any(i.key == "min_p_take" for i in page.fast_loop)
     assert page.keys == {"JEV_API_KEY": True}

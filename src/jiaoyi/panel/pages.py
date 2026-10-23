@@ -20,6 +20,7 @@ from jiaoyi.contracts import (
     Role,
     SymbolPoolEntry,
 )
+from jiaoyi.contracts.risk_config import recommended_caps
 from jiaoyi.core.recorder import local_day
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
@@ -477,13 +478,18 @@ class SettingItem(BaseModel):
     """配置文件里写死了值，切档位不会跟着变。"""
     profile_default: object = None
     """当前档位给的默认值（``pinned`` 时显示）。"""
+    recommended: float | None = None
+    """硬上限的推荐值（按资金算，见 ``recommended_caps``）；只提示，填什么都收。"""
+    recommended_why: str = ""
 
 
 class SettingsPage(BaseModel):
     mode: str
     risk: list[SettingItem]
     risk_cautions: list[str] = []
-    """硬上限超出保守值的项（只提示，不拒绝）。"""
+    """硬上限比推荐值冒险的项（只提示，不拒绝）。"""
+    recommend_basis_usdt: float | None = None
+    """推荐值按多少资金算的（账户权益；拿不到时 None，按 1000U 算）。"""
     category_caps: dict[str, float]
     app: list[SettingItem]
     fast_loop: list[SettingItem]
@@ -550,12 +556,14 @@ def build_settings(
     keys: dict[str, bool],
     slow: SlowConfig | None = None,
     profile: ProfileInfo | None = None,
+    equity_usdt: float | None = None,
 ) -> SettingsPage:
     password_set, armed = read_live_gate(files.root)
     page = SettingsPage(
         mode=app.mode.value,
         risk=_items(risk, "risk"),
-        risk_cautions=risk.cautions(),
+        risk_cautions=risk.cautions(equity_usdt),
+        recommend_basis_usdt=equity_usdt,
         category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
         app=_items(app, "app", frozenset({"mode"})),
         fast_loop=_items(app.fast_loop, "fast_loop"),
@@ -566,6 +574,10 @@ def build_settings(
         live_armed=armed,
         profile=profile,
     )
+    recs = recommended_caps(equity_usdt)
+    for item in page.risk:
+        if rec := recs.get(item.key):
+            item.recommended, item.recommended_why = rec.value, rec.why
     if profile:
         for section, hit in profile.pinned.items():
             for item in getattr(page, section):
