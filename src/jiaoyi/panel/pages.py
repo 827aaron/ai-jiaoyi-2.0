@@ -699,6 +699,10 @@ class SettingsPage(BaseModel):
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
     schedule_caution: str | None = None
     """节奏配置可能造成换卡空档时的提示（只提示，不拒绝）。"""
+    screener: list[SettingItem] = []
+    """选币规则（config/slow.toml 的 [screener]）：门槛、打分满分线、权重。"""
+    screener_cautions: list[str] = []
+    """选币规则比推荐冒险的项（只提示，不拒绝）。"""
     profile: ProfileInfo | None = None
     keys: dict[str, bool]
     key_needs: dict[str, KeyNeed] = {}
@@ -712,6 +716,16 @@ class SettingsPage(BaseModel):
     """配置文件现在读不出或不合格（有人在终端改坏了）。"""
     changes: list[dict[str, object]] = []
     """最近的配置改动（data/config_changes.jsonl），新的在前。"""
+
+
+SCREENER_RECOMMENDED: dict[str, tuple[float, str]] = {
+    "min_quote_volume_usdt": (20_000_000.0, "冷门币进出容易滑点"),
+    "min_depth_usdt": (100_000.0, "太浅的币大单吃不下"),
+    "min_listed_days": (7, "新币波动和价差不稳"),
+    "min_range_24h_pct": (1.5, "波动太小赚不回手续费"),
+    "max_range_24h_pct": (30.0, "波动过大止损容易被针扫"),
+}
+"""选币门槛的推荐值（和 config/slow.example.toml 的注释一致）；只提示，填什么都收。"""
 
 
 def _items(
@@ -767,6 +781,7 @@ def build_settings(
     equity_usdt: float | None = None,
 ) -> SettingsPage:
     password_set, armed = read_live_gate(files.root)
+    slow = slow or slow_defaults(app.profile)
     page = SettingsPage(
         mode=app.mode.value,
         risk=_items(risk, "risk"),
@@ -776,13 +791,15 @@ def build_settings(
         app=_items(app, "app", frozenset({"mode"})),
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),
-        schedule=_items((slow or slow_defaults(app.profile)).schedule, "schedule"),
-        schedule_caution=(slow or slow_defaults(app.profile)).schedule.caution(),
+        schedule=_items(slow.schedule, "schedule"),
+        schedule_caution=slow.schedule.caution(),
+        screener=_items(slow.screener, "screener"),
+        screener_cautions=slow.screener.cautions(risk.max_spread_bps),
         keys=keys,
         key_needs=key_needs(
             app.mode.value,
             app.fast_loop.jev_provider,
-            (slow or slow_defaults(app.profile)).llm.provider,
+            slow.llm.provider,
         ),
         password_set=password_set,
         live_armed=armed,
@@ -792,6 +809,9 @@ def build_settings(
     for item in page.risk:
         if rec := recs.get(item.key):
             item.recommended, item.recommended_why = rec.value, rec.why
+    for item in page.screener:
+        if srec := SCREENER_RECOMMENDED.get(item.key):
+            item.recommended, item.recommended_why = srec
     if profile:
         for section, hit in profile.pinned.items():
             for item in getattr(page, section):
