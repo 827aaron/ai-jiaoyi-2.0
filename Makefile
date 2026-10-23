@@ -41,6 +41,9 @@ update:
 	git pull --ff-only
 	$(MAKE) install
 	$(MAKE) check-config
+	@if launchctl print gui/$$(id -u)/com.jiaoyi.panel >/dev/null 2>&1; then \
+		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.panel && echo "已重启 com.jiaoyi.panel"; \
+	fi
 	@if launchctl print gui/$$(id -u)/com.jiaoyi.run >/dev/null 2>&1; then \
 		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.run && echo "已重启 com.jiaoyi.run"; \
 	else \

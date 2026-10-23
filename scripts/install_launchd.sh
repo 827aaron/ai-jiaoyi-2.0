@@ -5,6 +5,8 @@
 #   condor        Condor in the foreground (no tmux), restarted when it dies
 #   run           `jiaoyi run` in the mode of config/app.toml; staged in data/launchd/ and only
 #                 installed into LaunchAgents (so it also starts at login) with --load-run
+#   panel         `jiaoyi panel` on 0.0.0.0:8090 (LAN), restarted when it dies; installed by default
+#                 (it needs no keys: the first-setup page at /setup is served by it)
 #   backup        daily tar of the decision log and module status
 #   watchdog      every minute: `jiaoyi watchdog` sends a Telegram alert when the main loop's
 #                 heartbeat (data/module_status.json) is older than 2 minutes; silent until the
@@ -83,9 +85,18 @@ fi
 plist com.jiaoyi.condor "$ROOT/vendor/condor" yes "" /bin/bash -lc "exec make run-fg"
 PLIST_DIR="$ROOT/data/launchd" plist com.jiaoyi.run "$ROOT" yes "" "$ROOT/.venv/bin/jiaoyi" run
 plist com.jiaoyi.backup "$ROOT" no 4 /bin/bash "$ROOT/scripts/backup_data.sh"
+plist com.jiaoyi.panel "$ROOT" yes "" "$ROOT/.venv/bin/jiaoyi" panel --host 0.0.0.0 --port 8090
 INTERVAL=60 plist com.jiaoyi.watchdog "$ROOT" no "" "$ROOT/.venv/bin/jiaoyi" watchdog
 
+# A panel started by hand in a terminal holds port 8090; the agent would crash-loop against it.
+if ! launchctl print "gui/$UID_NUM/com.jiaoyi.panel" >/dev/null 2>&1 \
+  && curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8090/ 2>/dev/null; then
+  echo "WARNING: something already serves port 8090 (a panel started in a terminal?)." >&2
+  echo "         Stop it (Ctrl+C in that window) so com.jiaoyi.panel can take the port." >&2
+fi
+
 load com.jiaoyi.condor || FAILED=1
+load com.jiaoyi.panel || FAILED=1
 load com.jiaoyi.backup || FAILED=1
 load com.jiaoyi.watchdog || FAILED=1
 if [ "${1:-}" = "--load-run" ]; then
