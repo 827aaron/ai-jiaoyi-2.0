@@ -68,9 +68,12 @@ function chrome() {
   const pg = PAGES.find((p) => p[0] === r);
   const mode = data ? MODE[data.mode] || data.mode : "…";
   const now = data ? hm(data.now) : "--:--";
-  // 暂停 / 全部平仓要主循环配合，接上指令通道前先灰掉，免得以为按了有用
+  const c = data ? data.control : null;
+  const pauseBtn = c && c.paused
+    ? `<button class="btn b-pause" ${clickable("cmd", "resume")}>恢复开新仓</button>`
+    : `<button class="btn b-pause" ${clickable("cmd", "pause")}>暂停开新仓</button>`;
   $("#pghead").innerHTML = `<h1>${pg[1]}</h1><span class="sub">${esc(mode)} · 曼谷 ${now} · ${pg[2]}</span>
-    <div class="acts"><button class="btn b-pause" disabled title="下一版接入">暂停开新仓</button><button class="btn b-kill" disabled title="下一版接入">全部平仓</button></div>`;
+    <div class="acts">${data ? pauseBtn : ""}${data ? `<button class="btn b-kill" ${clickable("cmd", "close_all")}>全部平仓</button>` : ""}</div>`;
 
   let b = "";
   if (data && data.mode !== "live") {
@@ -79,6 +82,14 @@ function chrome() {
   if (data && !data.running) {
     const last = data.last_heartbeat ? `最后心跳 ${hm(data.last_heartbeat)}` : "还没有心跳记录";
     b += `<div class="banner bn-bad"><b>主程序没在运行</b><span>${last}。下面是落盘的最后状态；在 Mac mini 上运行 <code>jiaoyi run</code>。</span></div>`;
+  }
+  if (c && c.paused) {
+    const why = c.paused_corrupt ? "暂停（状态文件损坏）" : "已暂停开新仓";
+    const since = c.paused_since ? `${hm(c.paused_since)} 起，` : "";
+    b += `<div class="banner bn-bad"><b>⏸ ${why}</b><span>${since}${esc(c.paused_reason || "")}${c.paused_reason ? "。" : ""}持仓照常盯；恢复要点右上角“恢复开新仓”并输入面板密码。</span></div>`;
+  }
+  if (c && c.config_pending) {
+    b += `<div class="banner bn-paper"><b>配置已改、未生效</b><span>重启 <code>jiaoyi run</code> 后生效。<a href="#settings">看改了什么 ›</a></span></div>`;
   }
   if (data && data.kpis.halted) {
     b += `<div class="banner bn-bad"><b>⚠ 已熔断</b><span>今日亏损达到 ${data.kpis.halt_pct}%，停开新仓，曼谷 00:00 自动恢复。持仓照常盯。</span></div>`;
@@ -102,15 +113,88 @@ function statusBar() {
   </div>`;
 }
 
+/* ---------- 写操作：发指令、等主循环回执 */
+const CMD = {
+  pause: { title: "暂停开新仓", text: "不再开新仓，已有持仓照常盯、照常止损止盈。随时可以恢复。", ok: "暂停" },
+  resume: { title: "恢复开新仓", text: "恢复后，有作战卡、拍板放行就会开新仓。", ok: "恢复", pw: true },
+  close_all: { title: "全部平仓", text: "市价平掉所有持仓、撤掉保命单。会先自动暂停开新仓；平完以后要开新仓，得另外点“恢复开新仓”。", ok: "全部平仓", danger: true },
+  close_position: { title: "平仓", text: "市价平掉这一笔，撤掉它的保命单。", ok: "平仓", danger: true },
+  unblock_symbol: { title: "解封", text: "这个币因为币安公告被禁开新仓。确认公告已经不影响交易再解封。", ok: "解封", pw: true },
+  refresh_cards: { title: "重新开会出卡", text: "让军师团马上开一次会、重出作战卡（会花一次大模型费用）。", ok: "开会" },
+};
+const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
+let onOk = null;
+
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json", "X-Jiaoyi-Panel": "1" }, body: JSON.stringify(body) });
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* 非 JSON 也当失败 */ }
+  if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : `出错了（${r.status}）`);
+  return j;
+}
+
+// 带确认按钮的弹窗：body 里有 input 就一起交给 submit；submit 抛错会显示在弹窗里
+function ask(title, body, ok, danger, submit) {
+  $("#layer").innerHTML = `<div class="scrim" data-close="1"><div class="dlg" role="dialog" aria-modal="true"><h3>${title}</h3>${body}
+    <div class="msg small" id="dlg-msg"></div>
+    <div class="acts"><button class="btn" data-close="1">取消</button><button class="btn ${danger ? "b-kill" : "b-go"}" data-ok="1">${ok}</button></div></div></div>`;
+  onOk = submit;
+  const first = $("#layer input") || $("#layer [data-ok]");
+  first.focus();
+}
+function dlgMsg(html, k = "") { const m = $("#dlg-msg"); if (m) { m.className = "msg small " + k; m.innerHTML = html; } }
+
+function pwField(c) {
+  if (!c.pw_set) return `<div class="note warn">还没有设置面板密码：先在 Mac mini 终端运行 <code>jiaoyi set-panel-password</code>。</div>`;
+  return `<label class="pw">面板密码<input type="password" id="dlg-pw" autocomplete="current-password"></label><div class="dim small">连错 5 次锁 15 分钟。</div>`;
+}
+
+function askCommand(kind, params = {}, what = "") {
+  const k = CMD[kind];
+  const c = data.control;
+  const warn = data.running ? "" : `<div class="note warn">主程序没在运行，指令 60 秒内没人执行就作废。</div>`;
+  ask(`${k.title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
+    const pw = $("#dlg-pw");
+    const res = await post("/api/command", { kind, params, password: pw ? pw.value : null });
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    dlgMsg("已发给主程序，等它执行…");
+    for (let i = 0; i < 70; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (!$("#dlg-msg")) return; // 弹窗关了
+      let st;
+      try { st = await getJson(`/api/command/${encodeURIComponent(res.id)}`); } catch (e) { continue; }
+      if (st.status !== "pending") {
+        const [t, cl] = STATUS[st.status] || [st.status, ""];
+        dlgMsg(`<b class="${cl}">${t}</b>${st.detail ? "　" + esc(st.detail) : ""}`);
+        poll();
+        return;
+      }
+    }
+    dlgMsg("一直没有回执：主程序可能没在运行。", "down");
+  });
+}
+
 /* ---------- 弹窗 */
 function dlg(html) {
   $("#layer").innerHTML = `<div class="scrim" data-close="1"><div class="dlg" role="dialog" aria-modal="true">${html}<div class="acts"><button class="btn" data-close="1">关闭</button></div></div></div>`;
   $("#layer .acts .btn").focus();
 }
-function closeDlg() { $("#layer").innerHTML = ""; }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDlg(); });
-document.addEventListener("click", (e) => {
+function closeDlg() { $("#layer").innerHTML = ""; onOk = null; }
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeDlg();
+  if (e.key === "Enter" && e.target.closest && e.target.closest("#layer") && e.target.tagName === "INPUT") { e.preventDefault(); const b = $("#layer [data-ok]"); if (b) b.click(); }
+});
+document.addEventListener("click", async (e) => {
   if (e.target.dataset && e.target.dataset.close) return closeDlg();
+  if (e.target.dataset && e.target.dataset.ok && onOk) {
+    const btn = e.target;
+    btn.disabled = true;
+    dlgMsg("处理中…");
+    try { await onOk(); } catch (err) { dlgMsg(esc(err.message), "down"); } finally { btn.disabled = false; }
+    return;
+  }
   const el = e.target.closest("[data-act]");
   if (!el) return;
   const { act, arg } = el.dataset;
@@ -121,6 +205,10 @@ document.addEventListener("click", (e) => {
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "rej") { S.rej = !S.rej; render(); }
   else if (act === "csv") exportCsv();
+  else if (act === "cmd") askCommand(arg);
+  else if (act === "close1") { const p = (pageData && pageData.positions || []).find((x) => x.position_id === arg); askCommand("close_position", { position_id: arg }, p ? `${p.symbol.replace(/USDT$/, "")} ${(SIDE[p.side] || [p.side])[0]} ${p.quantity}` : arg); }
+  else if (act === "unblock") askCommand("unblock_symbol", { symbol: arg }, arg);
+  else if (act === "edit") editSettings(arg);
   else if (act === "updown") {
     try { localStorage.setItem("updown", arg); } catch (err) { /* 存不了就只对这次生效 */ }
     location.reload();
@@ -203,7 +291,7 @@ function cardSection(c) {
   const until = c.expires_at ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
   return `<section class="card click" ${clickable("card")}>
     <div class="ch"><h2>作战卡</h2><span class="pill">军师团${c.version ? " v" + c.version : ""}</span>
-      <span class="r">${hm(c.created_at)} 更新 · ${c.valid ? until : '<span class="down">已过期，不开新仓</span>'}</span></div>
+      <span class="r">${hm(c.created_at)} 更新 · ${c.valid ? until : '<span class="down">已过期，不开新仓</span>'} <button class="btn b-sm" ${clickable("cmd", "refresh_cards")}>重新开会</button></span></div>
     <div class="row">${pills}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
     <dl class="kv"><dt>止损</dt><dd>${range(c.stop_atr, " ATR")}</dd><dt>杠杆</dt><dd>${c.leverage_max == null ? "—" : "≤ " + c.leverage_max + " 倍"}</dd><dt>单笔</dt><dd>${range(c.notional_usdt, " U")}</dd></dl>
     ${c.regime ? `<div class="note"><b>军师纪要</b>　${esc(c.regime)}</div>` : ""}
@@ -257,7 +345,7 @@ function alertsSection(list) {
 function blockedSection(map) {
   const entries = Object.entries(map);
   const body = entries.length
-    ? `<div class="log">${entries.map(([s, r]) => `<div><span class="pill p-short">${coin(s)}</span><span>${esc(r)}</span></div>`).join("")}</div>`
+    ? `<div class="log">${entries.map(([s, r]) => `<div><span class="pill p-short">${coin(s)}</span><span>${esc(r)}</span><button class="btn b-sm" ${clickable("unblock", s)}>解封</button></div>`).join("")}</div>`
     : `<div class="dim">没有被封的币。币安发下架公告时，相关币会自动停止新开仓并列在这里。</div>`;
   return `<section class="card"><div class="ch"><h2>禁开新仓</h2><span class="r">来自币安公告</span></div>${body}</section>`;
 }
@@ -278,13 +366,13 @@ P.positions = (arg) => {
     const [s, sc] = SIDE[p.side] || [p.side, ""];
     const on = p.position_id === sel.position_id;
     const held = now - new Date(p.opened_at).getTime();
-    return `<tr class="click ${on ? "sel" : ""}" onclick="location.hash='positions/${encodeURIComponent(p.position_id)}'">
+    return `<tr class="click ${on ? "sel" : ""}" onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'">
       <td class="hi">${coin(p.symbol)} <span class="${sc}">${s}</span> ${p.quantity} <span class="dim">${p.leverage}x</span></td>
       <td class="num">${price(p.entry_price)}</td><td class="r num ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</td>
       <td class="num">${price(p.stop_loss_price)} / ${price(p.take_profit_price)}</td>
       <td class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${price(p.lifeboat_price)}</td>
       <td class="num">${dur(held)} / ${dur(p.time_limit_s * 1000)}</td><td>${esc(p.keeper || "—")}</td>
-      <td class="r"><button class="btn b-sm b-danger" disabled title="下一版接入">平仓</button></td></tr>`;
+      <td class="r"><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></td></tr>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
   const trail = window.__recs.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`).join("");
@@ -490,7 +578,8 @@ P.pool = () => {
       <div class="tile"><small>没进池</small><b>${d.rejected}</b></div><div class="tile"><small>上次选币</small><b>${d.ts ? hm(d.ts) : "—"}</b></div></div>
     <section class="card mt"><div class="ch"><h2>候选池</h2><span class="r">代码每小时筛一次，军师只能从池里挑；固定、拉黑、手动加入优先</span></div>
       <div class="tw"><table><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="foot">固定 / 拉黑 / 手动加入的修改入口在设置页接上指令通道后开放。</div></section>`;
+      <div class="foot">固定 / 拉黑 / 手动加入：主循环还没有读这几项的地方，等接上再在这里开放修改。</div></section>
+    <div class="mt">${blockedSection(d.blocked)}</div>`;
 };
 
 /* ---------- 设置 */
@@ -498,27 +587,81 @@ const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安�
 const fmtVal = (v) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? "—" : esc(v));
 const setRows = (items) => items.map((i) => `<div class="fr"><label>${esc(i.label)}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label><b class="num">${fmtVal(i.value)}</b></div>`).join("");
 
+const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛" };
+const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
+
+function sectionItems(d, sec) {
+  if (sec === "category") {
+    const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
+    return Object.entries(d.category_caps).map(([k, v]) => ({ key: k, label: CAT[k] || k, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总敞口）` }));
+  }
+  const list = sec === "risk" ? d.risk : sec === "app" ? d.app.filter((i) => d.app_editable.includes(i.key)) : d.fast_loop;
+  return list.filter((i) => typeof i.value === "number" || typeof i.value === "boolean");
+}
+
+function editSettings(sec) {
+  const d = pageData;
+  if (!d || !d.writable) return;
+  const items = sectionItems(d, sec);
+  const rows = items.map((i) => {
+    const inp = typeof i.value === "boolean"
+      ? `<input type="checkbox" data-k="${esc(i.key)}" ${i.value ? "checked" : ""}>`
+      : `<input type="number" step="any" inputmode="decimal" data-k="${esc(i.key)}" value="${esc(i.value)}">`;
+    return `<div class="fr"><label>${esc(i.label)}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label>${inp}</div>`;
+  }).join("");
+  const c = data.control;
+  ask(`修改${SECTION[sec]}`, `<div class="form edit scroll tall">${rows}</div>
+    <div class="dim small">保存前整份校验，不合格不写；写前留备份。主程序重启后生效。</div>${pwField(c)}`, "保存", false, async () => {
+    const changes = {};
+    for (const i of items) {
+      const el = $(`#layer [data-k="${CSS.escape(i.key)}"]`);
+      let v;
+      if (el.type === "checkbox") v = el.checked;
+      else {
+        if (el.value.trim() === "") throw new Error(`${i.label} 不能空着`);
+        v = Number(el.value);
+        if (!Number.isFinite(v)) throw new Error(`${i.label} 要填数字`);
+      }
+      if (v !== i.value) changes[i.key] = v;
+    }
+    if (!Object.keys(changes).length) throw new Error("没有改动");
+    const pw = $("#dlg-pw");
+    const res = await post("/api/settings", { section: sec, changes, password: pw ? pw.value : "" });
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    const list = res.changed.map((x) => `${esc(x.key)}：${fmtVal(x.old)} → ${fmtVal(x.new)}`).join("<br>");
+    dlgMsg(`<b class="up">已保存</b>，重启 <code>jiaoyi run</code> 后生效。<br>${list}`);
+    poll();
+  });
+  $("#layer .dlg").classList.add("mid");
+}
+
 P.settings = () => {
   const d = pageData;
   const updown = document.documentElement.dataset.updown === "red-up" ? "red-up" : "green-up";
   const caps = Object.entries(d.category_caps).map(([k, v]) => `<div class="fr"><label>${esc(CAT[k] || k)}</label><b class="num">${v} 倍</b></div>`).join("");
+  const changes = d.changes.length
+    ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old)} → ${fmtVal(x.new)}</span></div>`).join("")}</div>`
+    : '<div class="dim">还没有在网页上改过。</div>';
   const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(k)}<span class="hint">${esc(KEY_NOTE[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
     <section class="card"><div class="ch"><h2>运行模式</h2></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
       <div class="fr"><label>面板密码</label><b>${d.password_set ? "已设置" : '<span class="warn">未设置（jiaoyi set-panel-password）</span>'}</b></div>
       <div class="fr"><label>实盘解锁</label><b>${d.live_armed ? '<span class="down">已解锁</span>' : "未解锁"}</b></div></div>
-      <div class="foot">切实盘要确认词 + 面板密码，目前在 Mac mini 终端用 jiaoyi go-live。</div></section>
+      <div class="foot">切实盘要确认词 + 面板密码，在 Mac mini 终端用 jiaoyi go-live。</div></section>
     <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
-    <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了</span></div><div class="form">${setRows(d.risk)}</div>
-      <div class="lbl">分组敞口上限（总资产倍数）</div><div class="form">${caps}</div></section>
+    <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
+      <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
       <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>
-    <section class="card"><div class="ch"><h2>运行配置和开关</h2></div><div class="form">${setRows(d.app)}</div></section>
-    <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用</span></div><div class="form scroll tall">${setRows(d.fast_loop)}</div></section>
+    <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app)}</div></section>
+    <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop)}</div></section>
+    <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>
-  <div class="note mt">这一版设置页只读。网页上改硬上限（要面板密码）、开关和门槛，等主循环的指令通道合并后开放；改完重启生效。</div>`;
+  <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，重启 jiaoyi run 后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;
 };
 
 /* 资金曲线（历史页） */

@@ -1,0 +1,370 @@
+"""面板写操作：指令、改配置、密码、Host 白名单和跨站校验。"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import tomllib
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from jiaoyi.contracts import Category
+from jiaoyi.core.commands import (
+    CommandInbox,
+    CommandResult,
+    config_fingerprint,
+    write_paused,
+    write_runtime,
+)
+from jiaoyi.core.config import load_app_config, load_risk_config
+from jiaoyi.execution.live_gate import LiveGate
+from jiaoyi.panel import actions
+from jiaoyi.panel.actions import ActionError, ConfigPaths, set_toml_value
+from jiaoyi.panel.hb import HbReader
+from jiaoyi.panel.server import create_app, host_ok
+from jiaoyi.slow.settings import load_slow_config
+from tests.conftest import ROOT
+
+NOW = datetime(2026, 10, 22, 6, 30, tzinfo=UTC)
+PW = "correct horse"
+HEADERS = {"X-Jiaoyi-Panel": "1", "Origin": "http://localhost:8090"}
+
+
+def _setup(tmp_path: Path, password: bool = True) -> tuple[ConfigPaths, Path]:
+    data = tmp_path / "data"
+    data.mkdir()
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    shutil.copy(ROOT / "config" / "risk.example.toml", cfg / "risk.toml")
+    text = (ROOT / "config" / "app.example.toml").read_text(encoding="utf-8")
+    (cfg / "app.toml").write_text(
+        text.replace('data_dir = "data"', f'data_dir = "{data}"'), encoding="utf-8"
+    )
+    if password:
+        LiveGate(data / "live_gate.json").set_password(PW)
+    return ConfigPaths(risk=cfg / "risk.toml", app=cfg / "app.toml", slow=cfg / "slow.toml"), data
+
+
+def _client(paths: ConfigPaths, now: datetime = NOW) -> TestClient:
+    hb = HbReader(
+        "http://hb",
+        "u",
+        None,
+        account_name="a",
+        connector_name="c",
+        transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+    )
+    app = create_app(
+        load_risk_config(paths.risk),
+        load_app_config(paths.app),
+        hb,
+        clock=lambda: now,
+        config_paths=paths,
+    )
+    return TestClient(app, client=("192.168.1.20", 5000), base_url="http://localhost:8090")
+
+
+# ---------------------------------------------------------------- 安全
+
+
+@pytest.mark.parametrize(
+    ("host", "ok"),
+    [
+        ("localhost:8090", True),
+        ("192.168.1.20:8090", True),
+        ("[::1]:8090", True),
+        ("aarons-mac-mini.local:8090", True),
+        ("10.0.0.5", True),
+        ("evil.example.com:8090", False),
+        ("8.8.8.8:8090", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_host_allowlist(host: str | None, ok: bool) -> None:
+    assert host_ok(host) is ok
+
+
+def test_host_allowlist_extra_names() -> None:
+    assert host_ok("jiaoyi.lan:8090", frozenset({"jiaoyi.lan"}))
+    assert not host_ok("jiaoyi.lan:8090")
+
+
+def test_dns_rebinding_host_is_rejected(tmp_path: Path) -> None:
+    paths, _ = _setup(tmp_path)
+    with _client(paths) as client:
+        r = client.get("/api/overview", headers={"Host": "attacker.example.com"})
+        assert r.status_code == 403
+
+
+def test_post_needs_same_origin_and_custom_header(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    body = {"kind": "pause"}
+    with _client(paths) as client:
+        assert client.post("/api/command", json=body).status_code == 403
+        r = client.post("/api/command", json=body, headers={"X-Jiaoyi-Panel": "1"})
+        assert r.status_code == 403  # 没有 Origin
+        evil = {"X-Jiaoyi-Panel": "1", "Origin": "http://evil.example.com"}
+        assert client.post("/api/command", json=body, headers=evil).status_code == 403
+        no_header = {"Origin": "http://localhost:8090"}
+        assert client.post("/api/command", json=body, headers=no_header).status_code == 403
+        assert not (data / "panel_commands").exists() or not any(
+            (data / "panel_commands").glob("*.json")
+        )
+        assert client.post("/api/command", json=body, headers=HEADERS).status_code == 200
+
+
+# ---------------------------------------------------------------- 指令
+
+
+def _inbox_commands(data: Path) -> list[dict[str, str]]:
+    return [json.loads(p.read_text()) for p in sorted((data / "panel_commands").glob("*.json"))]
+
+
+def test_pause_and_close_need_no_password(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        for kind, params in (
+            ("pause", {}),
+            ("close_all", {}),
+            ("close_position", {"position_id": "pos-0001"}),
+            ("refresh_cards", {}),
+        ):
+            r = client.post("/api/command", json={"kind": kind, "params": params}, headers=HEADERS)
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "pending"
+    cmds = _inbox_commands(data)
+    assert sorted(c["kind"] for c in cmds) == [
+        "close_all",
+        "close_position",
+        "pause",
+        "refresh_cards",
+    ]
+    assert all(c["by"] == "panel" for c in cmds)
+    # 主循环那边能读出来（契约一致、没过期）
+    inbox = CommandInbox(data)
+    got = [cmd for _, cmd, _ in inbox.pending()]
+    assert len(got) == 4
+    assert all(
+        cmd is not None and inbox.check(cmd, NOW + timedelta(seconds=1)) is None for cmd in got
+    )
+
+
+def test_close_position_needs_id(tmp_path: Path) -> None:
+    paths, _ = _setup(tmp_path)
+    with _client(paths) as client:
+        r = client.post("/api/command", json={"kind": "close_position"}, headers=HEADERS)
+    assert r.status_code == 400 and "position_id" in r.json()["detail"]
+
+
+def test_resume_and_unblock_need_password(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        r = client.post("/api/command", json={"kind": "resume"}, headers=HEADERS)
+        assert r.status_code == 400 and "密码不对" in r.json()["detail"]
+        body = {"kind": "unblock_symbol", "params": {"symbol": "XUSDT"}, "password": "nope"}
+        r = client.post("/api/command", json=body, headers=HEADERS)
+        assert r.status_code == 400
+        assert not list((data / "panel_commands").glob("*.json"))
+        r = client.post("/api/command", json={"kind": "resume", "password": PW}, headers=HEADERS)
+        assert r.status_code == 200
+    assert [c["kind"] for c in _inbox_commands(data)] == ["resume"]
+
+
+def test_password_lockout_is_shared_with_cli(tmp_path: Path) -> None:
+    _, data = _setup(tmp_path)
+    for _ in range(5):
+        with pytest.raises(ActionError):
+            actions.check_password(data, "wrong")
+    with pytest.raises(ActionError, match="锁定"):
+        actions.check_password(data, PW)  # 锁住期间对的也不行
+    state = json.loads((data / "live_gate.json").read_text())
+    assert state["locked_until"] is not None  # 落盘：命令行 go-live 也被锁
+
+
+def test_no_password_set_is_explained(tmp_path: Path) -> None:
+    _, data = _setup(tmp_path, password=False)
+    with pytest.raises(ActionError, match="set-panel-password"):
+        actions.check_password(data, "anything")
+
+
+def test_command_result_endpoint(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        cid = client.post("/api/command", json={"kind": "pause"}, headers=HEADERS).json()["id"]
+        assert client.get(f"/api/command/{cid}").json()["status"] == "pending"
+        done = data / "panel_commands" / "done"
+        done.mkdir(parents=True, exist_ok=True)
+        res = CommandResult(id=cid, kind="pause", status="done", detail="已暂停", ts=NOW)
+        (done / f"{cid}.json").write_text(res.model_dump_json())
+        assert client.get(f"/api/command/{cid}").json() == {
+            "id": cid,
+            "status": "done",
+            "detail": "已暂停",
+        }
+        assert client.get("/api/command/..%2F..%2Fx").status_code in (400, 404)
+
+
+def test_overview_shows_pause_and_corrupt_pause(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        ctl = client.get("/api/overview").json()["control"]
+        assert ctl["paused"] is False and ctl["pw_set"] is True and ctl["writable"] is True
+        write_paused(data, True, since=NOW.isoformat(), reason="全部平仓前自动暂停")
+        ctl = client.get("/api/overview").json()["control"]
+        assert ctl["paused"] and not ctl["paused_corrupt"]
+        assert ctl["paused_reason"] == "全部平仓前自动暂停"
+        (data / "paused.json").write_text("{broken")
+        ctl = client.get("/api/overview").json()["control"]
+        assert ctl["paused"] and ctl["paused_corrupt"]
+
+
+# ---------------------------------------------------------------- 改配置
+
+
+def test_set_toml_value_keeps_comments_and_layout() -> None:
+    text = (
+        "# 头注释\n"
+        "a = 1            # 说明 a\n"
+        "# b = 2  被注释掉的不动\n"
+        "\n"
+        "# 段前注释\n"
+        "[fast_loop]\n"
+        "x = 0.5   # 说明 x\n"
+        'name = "keep # not a comment"\n'
+    )
+    out = set_toml_value(text, None, "a", 3)
+    assert "a = 3            # 说明 a\n" in out and "# b = 2" in out
+    out = set_toml_value(out, None, "b", True)
+    lines = out.splitlines()
+    assert lines.index("b = true") == lines.index("a = 3            # 说明 a") + 1
+    out = set_toml_value(out, "fast_loop", "x", 0.7)
+    assert "x = 0.7   # 说明 x" in out
+    out = set_toml_value(out, "fast_loop", "y", 2)
+    assert out.endswith('name = "keep # not a comment"\ny = 2\n')
+    out = set_toml_value(out, "other", "z", 1.5)
+    data = tomllib.loads(out)
+    assert data == {
+        "a": 3,
+        "b": True,
+        "fast_loop": {"x": 0.7, "name": "keep # not a comment", "y": 2},
+        "other": {"z": 1.5},
+    }
+
+
+def test_update_risk_writes_backup_and_log(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    before = paths.risk.read_text(encoding="utf-8")
+    changed = actions.update_config(
+        paths, data, "risk", {"max_leverage": 3, "risk_per_trade_pct": 0.5}, PW, NOW
+    )
+    assert {c["key"] for c in changed} == {"max_leverage", "risk_per_trade_pct"}
+    risk = load_risk_config(paths.risk)
+    assert risk.max_leverage == 3 and risk.risk_per_trade_pct == 0.5
+    text = paths.risk.read_text(encoding="utf-8")
+    assert "max_leverage = 3                    # 杠杆 ≤ 5 倍（1–10）" in text
+    [bak] = list(paths.risk.parent.glob("risk.toml.bak-*"))
+    assert bak.read_text(encoding="utf-8") == before
+    rows = actions.recent_changes(data)
+    assert {r["key"] for r in rows} == {"max_leverage", "risk_per_trade_pct"}
+    assert all(r["file"] == "risk.toml" and r["section"] == "risk" for r in rows)
+
+
+@pytest.mark.parametrize(
+    ("section", "changes", "match"),
+    [
+        ("risk", {"max_leverage": 50}, "max_leverage"),  # 超范围
+        ("risk", {"max_leverage": 2.5}, "整数"),
+        ("risk", {"day_reset_tz": 1}, "不能在网页上改"),
+        ("category", {"major": 4.0}, "总敞口"),  # 超过总敞口 3 倍
+        ("app", {"mode": 1}, "不能在网页上改"),
+        ("app", {"data_dir": 1}, "不能在网页上改"),
+        ("app", {"predictor_enabled": 1}, "开关"),
+        ("fast_loop", {"jev_model": 1}, "不能在网页上改"),
+        ("fast_loop", {"min_p_take": float("nan")}, "数字"),
+        ("fast_loop", {"rule_gate_without_jev": "yes"}, "开关"),
+    ],
+)
+def test_update_rejects_bad_values_without_writing(
+    tmp_path: Path, section: str, changes: dict[str, object], match: str
+) -> None:
+    paths, data = _setup(tmp_path)
+    risk_before = paths.risk.read_text(encoding="utf-8")
+    app_before = paths.app.read_text(encoding="utf-8")
+    with pytest.raises(ActionError, match=match):
+        actions.update_config(paths, data, section, changes, PW, NOW)  # type: ignore[arg-type]
+    assert paths.risk.read_text(encoding="utf-8") == risk_before
+    assert paths.app.read_text(encoding="utf-8") == app_before
+    assert actions.recent_changes(data) == []
+    assert not list(paths.risk.parent.glob("*.bak-*"))
+
+
+def test_update_needs_password(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with pytest.raises(ActionError, match="密码不对"):
+        actions.update_config(paths, data, "risk", {"max_leverage": 3}, "nope", NOW)
+    assert load_risk_config(paths.risk).max_leverage == 5
+
+
+def test_update_app_and_fast_loop_sections(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    actions.update_config(
+        paths, data, "app", {"reconciler_close_unknown_positions": True, "pool_size": 30}, PW, NOW
+    )
+    actions.update_config(paths, data, "fast_loop", {"min_p_take": 0.65}, PW, NOW)
+    actions.update_config(paths, data, "category", {"alt": 0.5}, PW, NOW)
+    app = load_app_config(paths.app)
+    assert app.reconciler_close_unknown_positions is True and app.pool_size == 30
+    assert app.fast_loop.min_p_take == 0.65
+    assert load_risk_config(paths.risk).category_exposure_x[Category.ALT] == 0.5
+    # 原来注释掉的那行还在，新加的在顶层（不会跑进 [fast_loop]）
+    assert tomllib.loads(paths.app.read_text())["reconciler_close_unknown_positions"] is True
+    # 没变的值不算改动
+    assert actions.update_config(paths, data, "app", {"pool_size": 30}, PW, NOW) == []
+
+
+def test_config_pending_compares_runtime_fingerprint(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    assert actions.config_pending(paths, data) is None  # 主循环没跑过
+    risk, app = load_risk_config(paths.risk), load_app_config(paths.app)
+    write_runtime(
+        data, config_fingerprint=config_fingerprint(risk, app, load_slow_config(paths.slow))
+    )
+    assert actions.config_pending(paths, data) is False
+    actions.update_config(paths, data, "risk", {"max_open_positions": 3}, PW, NOW)
+    assert actions.config_pending(paths, data) is True
+
+
+def test_settings_endpoints(tmp_path: Path) -> None:
+    paths, _ = _setup(tmp_path)
+    with _client(paths) as client:
+        page = client.get("/api/settings").json()
+        assert page["writable"] is True and page["changes"] == []
+        assert "pool_size" in page["app_editable"] and "mode" not in page["app_editable"]
+        body = {"section": "risk", "changes": {"max_leverage": 4}, "password": PW}
+        r = client.post("/api/settings", json=body, headers=HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["changed"] == [{"key": "max_leverage", "old": 5, "new": 4}]
+        page = client.get("/api/settings").json()
+        lev = next(i for i in page["risk"] if i["key"] == "max_leverage")
+        assert lev["value"] == 4  # 设置页显示文件里的现值
+        assert page["changes"][0]["key"] == "max_leverage"
+        bad = {"section": "risk", "changes": {"max_leverage": 99}, "password": PW}
+        r = client.post("/api/settings", json=bad, headers=HEADERS)
+        assert r.status_code == 400 and "不合格" in r.json()["detail"]
+        assert PW not in client.get("/api/settings").text
+
+
+def test_read_only_panel_without_paths(tmp_path: Path) -> None:
+    paths, _ = _setup(tmp_path)
+    hb = HbReader("http://hb", "u", None, account_name="a", connector_name="c")
+    app = create_app(load_risk_config(paths.risk), load_app_config(paths.app), hb)
+    with TestClient(app, client=("127.0.0.1", 5000), base_url="http://localhost") as client:
+        assert client.get("/api/settings").json()["writable"] is False
+        body = {"section": "risk", "changes": {"max_leverage": 4}, "password": PW}
+        h = {"X-Jiaoyi-Panel": "1", "Origin": "http://localhost"}
+        assert client.post("/api/settings", json=body, headers=h).status_code == 400

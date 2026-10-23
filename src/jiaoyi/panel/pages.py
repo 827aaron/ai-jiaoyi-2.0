@@ -475,6 +475,14 @@ class SettingsPage(BaseModel):
     """密钥名 → 配了没有。只有这个，没有值。"""
     password_set: bool
     live_armed: bool
+    writable: bool = False
+    """能不能在网页上改（面板拿到了配置文件路径、文件读得出）。"""
+    file_error: str | None = None
+    """配置文件现在读不出或不合格（有人在终端改坏了）。"""
+    changes: list[dict[str, object]] = []
+    """最近的配置改动（data/config_changes.jsonl），新的在前。"""
+    app_editable: list[str] = []
+    """运行配置里能在网页上改的项（模式、目录、模拟环境等不在内）。"""
 
 
 def _items(model: BaseModel, skip: frozenset[str] = frozenset()) -> list[SettingItem]:

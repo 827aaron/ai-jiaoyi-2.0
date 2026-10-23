@@ -189,10 +189,14 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _panel(args: argparse.Namespace) -> int:
-    """面板：独立进程，只读 data 目录和 hummingbot-api。主循环停着也能开。"""
+    """面板：独立进程，读 data 目录和 hummingbot-api；写操作只写指令文件和配置文件。
+
+    主循环停着也能开。
+    """
     import uvicorn
 
     from jiaoyi.execution.factory import CONNECTOR_BY_MODE
+    from jiaoyi.panel.actions import ConfigPaths
     from jiaoyi.panel.hb import HbReader
     from jiaoyi.panel.server import create_app
 
@@ -209,11 +213,19 @@ def _panel(args: argparse.Namespace) -> int:
         account_name="master_account",
         connector_name=CONNECTOR_BY_MODE[app_cfg.mode],
     )
-    # 设置页只显示每个密钥配没配；在这里查好传进去，面板进程里不经手密钥的值
+    # 设置页只显示每个密钥配没配：在这里查好传进去，密钥的值不进面板的数据和接口
     store = ChainedSecretStore()
     keys = {name: bool(store.get(name)) for name in KNOWN_KEYS}
     print(f"面板：http://{args.host}:{args.port}/ （只接受局域网访问，Ctrl+C 停止）")
-    app = create_app(risk, app_cfg, hb, key_status=keys)
+    paths = ConfigPaths(risk=Path(args.risk), app=Path(args.app), slow=Path(args.slow))
+    app = create_app(
+        risk,
+        app_cfg,
+        hb,
+        key_status=keys,
+        config_paths=paths,
+        allow_hosts=frozenset(h.lower() for h in args.allow_host),
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -240,9 +252,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_run)
 
-    p = sub.add_parser("panel", help="启动面板网页（局域网，只读）")
+    p = sub.add_parser("panel", help="启动面板网页（局域网）")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
+    p.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        help="额外允许的主机名（浏览器地址栏里用的名字）；局域网 IP、localhost、*.local 默认允许",
+    )
     p.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = 局域网内其他设备也能打开")
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--hb-url", default="http://127.0.0.1:8000")

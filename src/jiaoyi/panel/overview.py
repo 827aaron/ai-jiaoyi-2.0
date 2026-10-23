@@ -138,6 +138,22 @@ class AlertItem(BaseModel):
     text: str
 
 
+class Control(BaseModel):
+    """暂停状态、配置是否待重启、面板密码设了没有（按钮要不要问密码）。"""
+
+    paused: bool = False
+    paused_corrupt: bool = False
+    """paused.json 读不出：主循环按“已暂停”处理。"""
+    paused_since: str | None = None
+    paused_reason: str | None = None
+    config_pending: bool | None = None
+    """True = 配置文件改过、主循环还在用旧的（重启后生效）；None = 不知道。"""
+    pw_set: bool = False
+    """面板密码设了没有。"""
+    writable: bool = False
+    """面板这次启动有没有拿到配置文件路径（没有就只读）。"""
+
+
 class Overview(BaseModel):
     now: datetime
     mode: str
@@ -156,6 +172,7 @@ class Overview(BaseModel):
     tiles: Tiles
     alerts: list[AlertItem]
     blocked: dict[str, str]
+    control: Control = Control()
 
 
 _HEALTH_LAMP: dict[Health, LampState] = {
