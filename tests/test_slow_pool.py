@@ -98,5 +98,16 @@ async def test_market_and_commander_report_last_and_next_run(tmp_path: Path, now
     await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
     st = log.read_status()
     m, cmd = st["market"], st["commander"]
-    assert m.last_run_at == now and m.symbol_count == 1 and "挑了 1 个 / 落选 1 个" in m.headline
+    assert m.last_run_at == now and m.symbol_count == 1 and "挑了 1 个币上会" in m.headline
     assert cmd.last_run_at == now and cmd.next_run_at is not None
+
+
+async def test_market_status_is_refreshed_by_every_heartbeat(tmp_path: Path, now: datetime) -> None:
+    c, log, clock = make(tmp_path, FakeEngine(["AAUSDT"]), now)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    first = log.read_status()["market"]
+    assert first.headline == "挑了 1 个币上会" and first.next_run_at is not None
+    clock[0] = now + timedelta(minutes=20)
+    c.heartbeat(clock[0])  # 两轮之间的空闲心跳：总盘会也要带新的 ts
+    later = log.read_status()["market"]
+    assert later.ts == clock[0] and later.last_run_at == now and later.next_run_at is not None
