@@ -363,3 +363,62 @@ def test_panel_is_read_only_by_construction() -> None:
                 ):
                     bad.append(f"{f.name} 导入了 {m}")
     assert not bad, bad
+
+
+def test_positions_page_groups_and_trail(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_positions
+
+    _seed(tmp_path)
+    page = build_positions(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW)
+    [p] = page.positions
+    assert page.unrealized_usdt == pytest.approx(-20.0) and page.lifeboats_ok == 1
+    major = next(g for g in page.groups if g.category == "major")
+    assert major.exposure_x == pytest.approx(68044.0 * 0.015 / 10_080)
+    assert major.cap_x == RISK.category_exposure_x[c.Category.MAJOR]
+    assert [t.text for t in page.trails[p.position_id]] == ["BTC 拿住"]
+
+
+def test_team_page_and_signal_chain(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_signal, build_team
+
+    _seed(tmp_path)
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    team = build_team(files, NOW, c.Role.GATE)
+    by_role = {r.role: r for r in team.roles}
+    assert by_role[c.Role.GATE].state == "ok"
+    assert by_role[c.Role.RECONCILER].state == "bad"  # 心跳过期
+    assert by_role[c.Role.PREDICTOR].state == "off"
+    assert [r.text for r in team.records] == ["BTC 放行", "ETH 拍板放弃"]  # 最新在前
+
+    log = JsonlDecisionLog(tmp_path)
+    for role, outcome in ((c.Role.SENTINEL, c.Outcome.ACTION), (c.Role.GATE, c.Outcome.PASS)):
+        log.write(_rec(role, outcome, f"{role.value} 链", NOW, signal_id="sig-1"))
+    chain = build_signal(files, NOW, "sig-1")
+    assert [s.role for s in chain] == [c.Role.SENTINEL, c.Role.GATE]
+    assert build_signal(files, NOW, "nope") == []
+
+
+async def test_kline_source_validates_and_parses() -> None:
+    from jiaoyi.panel.market import KlineError, KlineSource
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.params["symbol"] == "BTCUSDT"
+        return httpx.Response(200, json=[[1_700_000_000_000, "1", "2", "0.5", "1.5", "9"]])
+
+    src = KlineSource(transport=httpx.MockTransport(handler))
+    bars = await src.klines("BTCUSDT", "1m")
+    assert bars == [{"time": 1_700_000_000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]
+    with pytest.raises(KlineError):
+        await src.klines("BTC/../x", "1m")
+    await src.close()
+
+
+def test_page_endpoints(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    with _client(tmp_path, "10.0.0.2") as client:
+        assert client.get("/api/positions").json()["lifeboats_ok"] == 1
+        assert client.get("/api/team?role=gate").json()["selected"] == "gate"
+        assert client.get("/api/team?role=boss").status_code == 422
+        assert client.get("/api/signal/none").json() == []
+        assert client.get("/api/klines?symbol=BTCUSDT&interval=7m").status_code == 422
+        assert client.get("/static/lib/lightweight-charts-4.2.0.js").status_code == 200
