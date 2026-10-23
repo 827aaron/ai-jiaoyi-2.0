@@ -334,3 +334,13 @@ def test_provider_config() -> None:
     with pytest.raises(ValueError, match="latest"):
         c.FastLoopConfig(jev_provider="openrouter", jev_model="~typesafe/jev-latest")
     assert c.FastLoopConfig().jev_provider == "typesafe"
+
+
+async def test_warmup_does_not_touch_error_counter() -> None:
+    t = MockJevTransport()
+    m = model(t)
+    assert await m.warmup() is not None
+    assert t.calls == ["warmup"]
+    t.fail = ConnectionError("down")
+    assert await m.warmup() is None  # 失败不抛、不影响启动
+    assert m.consecutive_errors == 0 and m.health == c.Health.OK

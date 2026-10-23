@@ -87,7 +87,22 @@
 - 两条通道都用同一个 `typesafe-sdk`，OpenRouter 只是换了 base URL（[说明](https://openrouter.ai/docs/guides/community/typesafe-sdk)）；问题模板、门槛、`JevResponse`、决策日志格式完全一样。
 - `jev_model` 仍然必须锁具体版本，`~typesafe/jev-latest` 这类别名会被拒绝启动。OpenRouter 回的模型名带日期（例如 `typesafe/jev-1.14-20260917`），日志里记的是这个全名，不算“版本变了”。
 - 只认所选通道的 key：选了 `openrouter` 却只有 `JEV_API_KEY`，不会接 Jev（反过来也一样），等于没有 Jev，按原规则不开新仓。
-- 走 OpenRouter 时多一跳转发，延迟会高一点。`jev_timeout_ms` 不变，M1 实测后再看要不要调。
+- 走 OpenRouter 时多一跳转发，延迟会高一点，见下面的实测。
+
+### M1 实测（2026-10-23，Mac mini，曼谷，经 OpenRouter）
+
+| | 结果 |
+|---|---|
+| 实际模型 | `typesafe/jev-1.14-20261014` |
+| 3 次调用延迟 | 963 / 549 / 489 ms（第一次是冷启动：DNS + TLS 握手） |
+| 单次花费 | 约 $3.6e-05（6 道开仓题，一次问完） |
+| 解析 | 6 题全部解析成功 |
+
+据此：
+- 示例配置的 `jev_timeout_ms` 从 1000 放宽到 1500。首次 963ms 太贴近 1000，冷启动或网络抖一下就会白白放弃一笔开仓。已有的 `app.toml` 需要自己改。
+- 启动时 `App.start` 会调一次 `JevDecisionModel.warmup()`：发一道很小的探测题把连接建好。探测不进决策日志、不动错误计数，失败只记日志、不影响启动。
+- SDK 连接池空闲约 30 秒后断开，之后第一笔会重新握手（多几百毫秒），1500ms 的超时能盖住。如果实测超时率偏高，再考虑定时保活。
+- 花费：按每天 200 次调用算，约 $0.007/天。
 - OpenRouter 上 `typesafe/jev-1.13` 不支持 Box 题型；我们只用 Choice，不受影响。
 
 ## Jev 问题模板和复盘
