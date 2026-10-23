@@ -672,13 +672,39 @@ def test_profile_pins_listed_and_cleared(tmp_path: Path) -> None:
     assert load_app_config(paths.app).keeper_interval_s == 20  # 现在跟档位走
 
 
-def test_fast_loop_pin_defaults_follow_time_limit(tmp_path: Path) -> None:
-    """止损 / ATR 周期等写死项的“默认值”按单笔最长持仓算（900 秒 → 5 分钟 K 线），不按档位。"""
-    from jiaoyi.core import profiles
-
+def test_fast_loop_pin_defaults_follow_hold(tmp_path: Path) -> None:
+    """止损 / ATR 周期等写死项的“默认值”按最长持仓档算，跟主程序读配置的口径一样。"""
     paths, data = _setup(tmp_path)
-    actions.update_config(paths, data, "fast_loop", {"time_limit_s": 900}, PW, NOW)
+    actions.update_config(paths, data, "app", {"hold": "30m"}, PW, NOW)
     actions.update_config(paths, data, "fast_loop", {"atr_period_min": 15}, PW, NOW)
-    pins = {x.key: x for x in actions.profile_info(paths).pins["2h"]}
-    assert pins["atr_period_min"].profile_default == profiles.hold_defaults(900)["atr_period_min"]
-    assert actions.profile_info(paths).pinned["fast_loop"]["atr_period_min"] == 5
+    info = actions.profile_info(paths)
+    assert info.pinned["fast_loop"]["atr_period_min"] == 5  # 30m 档用 5 分钟 K 线
+    assert {x.key: x for x in info.pins["2h"]}["atr_period_min"].profile_default == 5
+
+
+def test_hold_follows_meeting_unless_custom(tmp_path: Path) -> None:
+    """最长持仓：hold 留空 = 跟开会档位的推荐搭配；写了 = 自定义，切开会间隔也不变。"""
+    paths, data = _setup(tmp_path)
+    info = actions.profile_info(paths)
+    assert (info.hold, info.hold_custom) == ("2h", True)  # 示例文件写了 hold = "2h"
+    assert info.hold_choices == ["30m", "1h", "2h", "4h"] and info.hold_paper_only == ["30m"]
+    assert info.hold_specs["4h"].time_limit_s == 14400
+    assert info.hold_specs["4h"].atr_period_min == 30
+    assert actions.editable_fields("app")["hold"].profiled  # 可以留空
+
+    actions.update_config(paths, data, "app", {"hold": None}, PW, NOW)
+    assert "hold" not in tomllib.loads(paths.app.read_text(encoding="utf-8"))
+    info = actions.profile_info(paths)
+    assert (info.current, info.hold, info.hold_custom) == ("1h", "2h", False)
+
+    actions.update_config(paths, data, "app", {"meeting_interval": "2h"}, PW, NOW)
+    info = actions.profile_info(paths)
+    assert (info.hold, info.hold_custom) == ("4h", False)  # 2h 开会推荐 4h
+    assert load_app_config(paths.app).fast_loop.time_limit_s == 14400
+    # 切到 15m 时写死项的默认值按跟着变的 30m 持仓算
+    pins = {x.key: x for x in actions.profile_info(paths).pins["15m"]}
+    assert all(x.section != "fast_loop" for x in pins.values())
+
+    actions.update_config(paths, data, "app", {"hold": "1h"}, PW, NOW)
+    info = actions.profile_info(paths)
+    assert (info.hold, info.hold_custom) == ("1h", True)

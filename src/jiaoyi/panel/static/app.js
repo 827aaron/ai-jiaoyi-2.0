@@ -274,6 +274,7 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "st-changes") showChanges();
   else if (act === "profile") switchProfile(arg);
+  else if (act === "hold") switchHold(arg);
   else if (act === "clearpins") askClearPins();
   else if (act === "cat") { const [kind, cat, v] = arg.split(":"); askCommand(kind, kind === "set_category" ? { category: cat, enabled: v } : { category: cat, cap: v }, CAT[cat] || cat); }
   else if (act === "pool") { const [kind, sym] = arg.split(":"); askCommand(kind, { symbol: sym }, sym.replace(/USDT$/, "")); }
@@ -1004,7 +1005,7 @@ document.addEventListener("keydown", (e) => {
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
-const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "2h": "2 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
@@ -1048,7 +1049,9 @@ const PLAIN = {
   min_tp_fee_multiple: "止盈至少能赚回几倍手续费，不够就不做",
   day_reset_tz: "“今天”按哪个时区算",
   mode: "运行方式",
-  profile: "持仓档位（单笔最长拿多久）",
+  profile: "开会间隔（旧写法）",
+  meeting_interval: "开会间隔（军师团多久开一轮会）",
+  hold: "单笔最长持仓",
   predictor_enabled: "用不用 Kronos 预测价格",
   signal_dedup_s: "同一个信号多少秒内只处理一次",
   jev_timeout_ms: "拍板人多少毫秒不回答就放弃这笔",
@@ -1121,7 +1124,9 @@ const HINT = {
   model_size: "选“固定”时用这个",
   adaptive_base_max_queue: "选“自适应”时生效",
   adaptive_mini_min_queue: "选“自适应”时生效；介于两者之间用中模型",
-  profile: "在下面的“持仓档位”卡片里一键切换",
+  profile: "在「运行」卡片的开会间隔里切换",
+  meeting_interval: "在「运行」卡片里一键切换",
+  hold: "在「运行」卡片里一键切换；不写 = 跟开会档位走",
   data_dir: "决策记录、状态文件都存在这里",
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
@@ -1148,7 +1153,7 @@ function durOf(key, v) {
 const fmtVal = (v, i) => (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[`${i.sec}.${i.key}`] || NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
 // 档位 = 军师团开会间隔（Aaron 2026-10-23），不是持仓时长；单笔最长持仓另设
 const profileSpan = (p) => { const m = /^(\d+)(h|m)$/.exec(p); return m ? (m[2] === "h" ? `${m[1]} 小时` : `${m[1]} 分钟`) : p; };
-const profileNote = (p) => `军师团每 ${profileSpan(p)}开一次会${p === "2h" ? "（默认）" : ""}`;
+const profileNote = (p) => `军师团每 ${profileSpan(p)}开一次会${p === "1h" ? "（默认）" : ""}`;
 // 止损 ATR 用几分钟 K 线，适合多长的单笔最长持仓（只提醒，不拦）
 const ATR_FIT = { 5: ["≤30 分钟", 0, 1800], 15: ["1–2 小时（推荐）", 1800, 7200], 30: ["2–4 小时", 7200, 14400], 60: ["4 小时以上", 14400, Infinity] };
 const atrFor = (limit) => +Object.keys(ATR_FIT).find((k) => limit > ATR_FIT[k][1] && limit <= ATR_FIT[k][2]);
@@ -1207,17 +1212,47 @@ function switchProfile(p) {
     ? `<div class="note warn">下面这些项写死在配置文件里，切到 ${esc(p)} 后仍按文件里的值，不跟默认走：</div>${pinTable(list, p)}
       <label class="small"><input type="checkbox" id="dlg-clear" checked> ${CLEAR_TEXT}（改前自动备份）</label>`
     : "";
-  ask(`切换持仓档位：${esc(pf.current)} → ${esc(p)}`, `<p>${esc(profileNote(p))}。作战卡有效期、开会节奏、管家频率跟着档位换；止损周期跟「单笔最长持仓」走，不跟档位。</p>${warn}${pwField(data.control)}`, "切换", false, async () => {
+  const nextHold = pf.hold_recommended[p] || pf.hold;
+  const holdNote = pf.hold_custom
+    ? `最长持仓是你定的 ${profileSpan(pf.hold)}，不跟着换${nextHold !== pf.hold ? `（${profileSpan(p)}开会推荐 ${profileSpan(nextHold)}，只提醒）` : ""}。`
+    : `最长持仓跟开会档位走，${nextHold === pf.hold ? `还是 ${profileSpan(nextHold)}` : `从 ${profileSpan(pf.hold)} 换成 ${profileSpan(nextHold)}`}。`;
+  ask(`切换开会间隔：${esc(profileSpan(pf.current))} → ${esc(profileSpan(p))}`, `<p>${esc(profileNote(p))}，作战卡有效期 = 间隔 + 20 分钟。${esc(holdNote)}</p>${warn}${pwField(data.control)}`, "切换", false, async () => {
     const pw = $("#dlg-pw");
     const clear = $("#dlg-clear");
     const pass = pw ? pw.value : "";
     // 先清写死项（按当前档位校验），再切档位
     const cleared = clear && clear.checked ? (await clearPins(pass)).changed.length : 0;
-    await post("/api/settings", { section: "app", changes: { profile: p }, password: pass });
+    await post("/api/settings", { section: "app", changes: { meeting_interval: p }, password: pass });
     onOk = null;
     $("#layer [data-ok]").remove();
     $("#layer [data-close].btn").textContent = "关闭";
-    dlgMsg(`<b class="up">已切到 ${esc(p)}</b>${cleared ? `，清掉 ${cleared} 个写死项` : ""}。点「重启生效」后按新档位运行。`);
+    dlgMsg(`<b class="up">已切到每 ${esc(profileSpan(p))}开会</b>${cleared ? `，清掉 ${cleared} 个写死项` : ""}。点「重启生效」后按新档位运行。`);
+    poll();
+  });
+}
+
+// 单笔最长持仓：「auto」= 删掉 hold 行，跟开会档位的推荐搭配；其余 = 写死成这一档（自定义）
+function switchHold(h) {
+  const d = pageData;
+  const pf = d && d.profile;
+  if (!pf) return;
+  const auto = h === "auto";
+  const target = auto ? pf.hold_recommended[pf.current] || pf.hold : h;
+  const spec = pf.hold_specs[target] || {};
+  const tl = settingIndex(d)["fast_loop.time_limit_s"];
+  const dropTl = tl && tl.pinned;  // 文件里写死的秒数压过 hold，一起删掉才真正按这一档
+  const rec = pf.hold_recommended[pf.current];
+  const tip = !auto && rec && rec !== h ? `<p class="small warn">每 ${esc(profileSpan(pf.current))}开会推荐最长持仓 ${esc(profileSpan(rec))}。只提醒，不拦。</p>` : "";
+  const what = auto ? `跟开会档位走（现在 ${esc(profileSpan(target))}）` : `固定 ${esc(profileSpan(h))}（自定义）`;
+  ask(`单笔最长持仓：${what}`, `<p>到 ${esc(profileSpan(target))}还没走就平；止损按 ${esc(spec.atr_period_min)} 分钟 K 线 ATR，止盈、拍板门槛、管家频率跟着这一档。只对之后新开的仓生效。</p>${tip}${dropTl ? `<p class="small">配置文件里写死的「一笔最多拿 ${esc(humanDur(tl.value))}」会一起删掉。</p>` : ""}${pwField(data.control)}`, "确定", false, async () => {
+    const pw = $("#dlg-pw");
+    const pass = pw ? pw.value : "";
+    await post("/api/settings", { section: "app", changes: { hold: auto ? null : h }, password: pass });
+    if (dropTl) await post("/api/settings", { section: "fast_loop", changes: { time_limit_s: null }, password: pass });
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    dlgMsg(`<b class="up">已改成${what}</b>。点「重启生效」后按新的最长持仓开仓。`);
     poll();
   });
 }
@@ -1270,7 +1305,7 @@ const ADV = [
   { id: "show", t: "显示" },
 ];
 // 别处已经显示的键（运行卡、显示页的系统信息），不再进“其他”
-const SHOWN_ELSEWHERE = ["app.profile", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
+const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
 // 没列到的新键按所在段落到哪个标签的“其他”组
 const SECTION_TAB = { risk: "risk", category: "risk", fast_loop: "exec", app: "exec", schedule: "slow", predictor: "slow", screener: "slow", tiers: "slow" };
 const UNIT = {
@@ -1445,16 +1480,16 @@ function runCard(d) {
   const c = data.control;
   const pf = d.profile;
   const up = c.started_at ? `${hm(c.started_at)} 启动，已跑 ${dur(Date.now() - Date.parse(c.started_at))}` : "";
-  let pfRow = `<div class="st-row"><div class="k">档位 = 开会间隔<small>这次启动的面板没拿到配置文件路径，看不到档位</small></div></div>`;
+  let pfRow = `<div class="st-row"><div class="k">开会间隔<small>这次启动的面板没拿到配置文件路径，看不到档位</small></div></div>`;
   if (pf) {
     const paperOnly = (p) => pf.paper_only.includes(p);
     const btns = pf.choices.map((p) => {
       const off = !d.writable || (paperOnly(p) && d.mode !== "paper");
       const tip = paperOnly(p) && d.mode !== "paper" ? "只在模拟盘可用" : profileNote(p);
-      return `<button class="${p === pf.current ? "on" : ""}" ${off || p === pf.current ? "disabled" : clickable("profile", p)} title="${esc(tip)}">${esc(CHOICE[p] || p)}</button>`;
+      return `<button class="${p === pf.current ? "on" : ""}" ${off || p === pf.current ? "disabled" : clickable("profile", p)} title="${esc(tip)}">${esc(profileSpan(p))}</button>`;
     }).join("");
     const pins = pinnedList(pf);
-    pfRow = `<div class="st-row"><div class="k">档位 = 开会间隔<small>${esc(profileNote(pf.current))}；作战卡有效期、管家频率跟着换。30 分、15 分只在模拟盘用</small></div><span class="seg">${btns}</span>
+    pfRow = `<div class="st-row"><div class="k">开会间隔<small>${esc(profileNote(pf.current))}；作战卡有效期 = 间隔 + 20 分钟</small></div><span class="seg">${btns}</span>
       ${pins.length ? `<div class="st-pins" title="${esc(pins.join("、"))}"><span class="warn">${pins.length} 项写死在配置文件里，不跟默认值变。</span>${d.writable ? ` <button class="btn b-sm" ${clickable("clearpins")}>看是哪几项、清掉</button>` : ` ${esc(pins.join("、"))}`}</div>` : ""}</div>`;
   }
   return `<section class="card st"><div class="ch"><h2>运行</h2></div>
@@ -1464,16 +1499,28 @@ function runCard(d) {
     ${pfRow}${holdRow(d)}</section>`;
 }
 
-// 单笔最长持仓（独立于档位，默认 2 小时）· 止损按几分钟 K 线 ATR；两项各自点开改
+// 单笔最长持仓：默认跟开会档位的推荐搭配，可改成固定一档（自定义）；止损 K 线周期另外点开改
 function holdRow(d) {
   const ix = settingIndex(d);
+  const pf = d.profile;
   const tl = ix["fast_loop.time_limit_s"];
   const atr = ix["fast_loop.atr_period_min"];
-  if (!tl || !atr) return "";
-  const warn = atrMismatch(atr.value, tl.value);
-  return `<div class="st-row"><div class="k">单笔最长持仓 ${humanDur(tl.value)} · 止损按 ${atr.value} 分钟 K 线 ATR
-      <small>推荐 2 小时 · 15 分钟 K 线。到时间还没走就平；K 线周期决定止损放多宽</small>${warn ? `<small class="warn">${esc(warn)}</small>` : ""}</div>
-    ${d.writable ? `<button class="btn b-sm" data-act="edit1" data-arg="fast_loop.time_limit_s">改最长持仓</button><button class="btn b-sm" data-act="edit1" data-arg="fast_loop.atr_period_min">改 K 线周期</button>` : ""}</div>`;
+  if (!pf || !tl || !atr) return "";
+  const rec = pf.hold_recommended[pf.current];
+  const btn = (arg, label, on, off, tip) => `<button class="${on ? "on" : ""}" ${off || on ? "disabled" : clickable("hold", arg)} title="${esc(tip)}">${esc(label)}</button>`;
+  const btns = [btn("auto", `跟开会档位（${profileSpan(rec || pf.hold)}）`, !pf.hold_custom, !d.writable, `每 ${profileSpan(pf.current)}开会推荐 ${profileSpan(rec || pf.hold)}`)]
+    .concat(pf.hold_choices.map((h) => {
+      const paper = pf.hold_paper_only.includes(h) && d.mode !== "paper";
+      return btn(h, profileSpan(h), pf.hold_custom && pf.hold === h, !d.writable || paper, paper ? "只在模拟盘可用" : `止损按 ${(pf.hold_specs[h] || {}).atr_period_min} 分钟 K 线 ATR`);
+    })).join("");
+  const tips = [
+    pf.hold_custom && rec && rec !== pf.hold ? `每 ${profileSpan(pf.current)}开会推荐最长持仓 ${profileSpan(rec)}，现在是自定义 ${profileSpan(pf.hold)}。只提醒，不拦。` : "",
+    atrMismatch(atr.value, tl.value),
+  ].filter(Boolean);
+  return `<div class="st-row"><div class="k">单笔最长持仓 ${humanDur(tl.value)}${pf.hold_custom ? "（自定义）" : "（跟开会档位）"} · 止损按 ${atr.value} 分钟 K 线 ATR
+      <small>到时间还没走就平；止损、止盈、拍板门槛跟着最长持仓走。30 分钟只在模拟盘用</small>${tips.map((t) => `<small class="warn">${esc(t)}</small>`).join("")}</div>
+    <span class="seg">${btns}</span>
+    ${d.writable ? `<button class="btn b-sm" data-act="edit1" data-arg="fast_loop.atr_period_min">改 K 线周期</button>` : ""}</div>`;
 }
 
 function riskCard(d, ix) {
