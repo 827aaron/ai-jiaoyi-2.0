@@ -65,3 +65,13 @@
   进程刚启动的一小时里数据不满 1 小时，偏小。
 - WebSocket 没有持仓量，拥挤交易信号第一版只看资金费率；CPI / 议息日历未接入。
 - 这台云端开发机访问币安返回 451（地区限制），实时连通性需要在 Mac mini 上验证。
+
+## Jev 问题模板和复盘
+
+- 模板（问题措辞、选项说明、快照格式）在 `gate/questions.py`，版本号 `TEMPLATE_VERSION`，内容指纹 `template_fingerprint()`。
+  改了任何一个字，`tests/test_jev_templates.py` 就会失败：升版本号，在 `KNOWN_TEMPLATES` 里登记新指纹，旧版本保留。
+  换模板版本和换 Jev 模型版本一样，门槛要重新校准。
+- 拍板人和持仓管家的每条决策记录都带 `input.jev`（模板版本、指纹、请求号、类型、问题、完整快照）和
+  `output.jev`（是否成功、错误、模型版本、延迟、花费、每个选项的概率）。被作战卡拦下、没真正调用的记录 `input.jev.called = false`。
+- 复盘用 `jiaoyi.gate.review.iter_jev_calls(data_dir)`，把每次真正的调用摊平成一行，可按 `template` / `model` 分组；
+  `template_dump()` 给出当前模板全文。

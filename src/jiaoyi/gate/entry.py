@@ -21,7 +21,7 @@ from jiaoyi.contracts import (
     Side,
 )
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.gate.questions import PROMPT_VERSION, entry_questions, entry_snapshot
+from jiaoyi.gate.questions import entry_questions, entry_snapshot, jev_log_fields
 from jiaoyi.interfaces import DecisionModel
 
 
@@ -107,6 +107,7 @@ class JevEntryGate:
             outcome = (
                 Outcome.PASS if take is not None and take.top()[0] == "take" else Outcome.REJECT
             )
+        inp, out = jev_log_fields(request, resp)
         self._rec.record(
             now,
             outcome,
@@ -114,13 +115,8 @@ class JevEntryGate:
             symbol=signal.symbol,
             signal_id=signal.signal_id,
             card_id=card.card_id if card is not None else None,
-            input={"snapshot": request.snapshot if request else None, "prompt": PROMPT_VERSION},
-            output={
-                "ok": resp.ok,
-                "error": resp.error,
-                "answers": {a.id: a.probs for a in resp.answers} if resp.ok else {},
-                "request_id": resp.request_id,
-            },
+            input=inp,
+            output=out,
             latency_ms=resp.latency_ms,
             cost_usd=resp.cost_usd,
             model_version=resp.model_version,

@@ -6,11 +6,16 @@
 提交 15d089e）：只发紧凑的数字，控制在约 400 token（2400 字符）以内，token 就是钱。
 
 问题编号和选项固定在契约（``ENTRY_CHOICES`` / ``HOLD_CHOICES``）；这里只管措辞。
-措辞一改，校准过的门槛就可能失效，所以改动要记版本号（``PROMPT_VERSION``）。
+措辞一改，校准过的门槛就可能失效，所以模板有版本号（``TEMPLATE_VERSION``）和内容指纹
+（``template_fingerprint()``，问题措辞 + 选项说明 + 快照格式的哈希）。改了任何一个字，
+指纹就变，``tests/test_jev_templates.py`` 会失败，提醒你升版本号并在 ``KNOWN_TEMPLATES``
+里登记新指纹。每次调用 Jev 的决策日志都带版本号和指纹（``jev_log_fields``），M1 之后
+按版本分组复盘、校准（``jiaoyi.gate.review``）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from typing import Any
@@ -24,12 +29,22 @@ from jiaoyi.contracts import (
     FeatureSnapshot,
     HoldQuestion,
     JevQuestion,
+    JevRequest,
+    JevResponse,
     PositionRecord,
     Side,
 )
 
-PROMPT_VERSION = "q1"
+TEMPLATE_VERSION = "q1"
+PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
+SNAPSHOT_SCHEMA = "s1"
+"""快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
 MAX_SNAPSHOT_CHARS = 2400
+
+# 每个模板版本登记一次指纹，历史版本不删，方便对照旧日志
+KNOWN_TEMPLATES: dict[str, str] = {
+    "q1": "f79b89bdad4e",
+}
 
 _ENTRY_GOAL = (
     "Goal: decide whether to open a short-term directional position on a Binance USDT-M "
@@ -240,3 +255,63 @@ def hold_snapshot(
         "card": _card_block(card, pos.symbol, px),
     }
     return _dump(d)
+
+
+# ---------------------------------------------------------------------- 版本和日志
+
+
+def template_fingerprint() -> str:
+    """问题措辞、选项说明和快照格式的哈希（前 12 位）。"""
+    payload = {
+        "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
+        "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
+        "criteria": CRITERIA,
+        "snapshot": SNAPSHOT_SCHEMA,
+        "max_chars": MAX_SNAPSHOT_CHARS,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def template_dump() -> dict[str, Any]:
+    """当前模板全文，复盘时对照用（可以写成 data/jev_templates/<版本>.json）。"""
+    return {
+        "version": TEMPLATE_VERSION,
+        "fingerprint": template_fingerprint(),
+        "snapshot_schema": SNAPSHOT_SCHEMA,
+        "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
+        "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
+        "criteria": CRITERIA,
+    }
+
+
+def jev_log_fields(
+    request: JevRequest | None, resp: JevResponse
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """一次 Jev 调用写进 ``DecisionRecord`` 的 ``input`` / ``output``（拍板人和管家共用同一格式）。
+
+    ``input.jev``：模板版本、指纹、请求号、类型、问题编号、完整快照。
+    ``output.jev``：是否成功、错误、模型版本、延迟、花费、每个问题每个选项的概率。
+    没有真正调用（例如没有作战卡被拦下）时 ``request`` 为 None，``input.jev.called`` 为 False。
+    """
+    inp: dict[str, Any] = {
+        "template": TEMPLATE_VERSION,
+        "template_fp": template_fingerprint(),
+        "called": request is not None,
+    }
+    if request is not None:
+        inp.update(
+            request_id=request.request_id,
+            kind=request.kind,
+            questions=[q.id for q in request.questions],
+            snapshot=request.snapshot,
+        )
+    out: dict[str, Any] = {
+        "ok": resp.ok,
+        "error": resp.error,
+        "model": resp.model_version,
+        "latency_ms": round(resp.latency_ms, 1),
+        "cost_usd": resp.cost_usd,
+        "answers": {a.id: a.probs for a in resp.answers} if resp.ok else {},
+    }
+    return {"jev": inp}, {"jev": out}
