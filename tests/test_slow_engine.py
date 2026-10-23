@@ -431,7 +431,7 @@ def test_record_response_reports_reasoning_tokens() -> None:
 
     meter = CostMeter({"flash": (0.3, 1.2), "pro": (1.0, 4.0)})
     calls: list[tuple[str | None, int, int]] = []
-    meter.on_call = lambda r, t, rt: calls.append((r, t, rt))
+    meter.on_call = lambda r, t, rt, _retry: calls.append((r, t, rt))
     msg = SimpleNamespace(
         response_metadata={"finish_reason": "stop"},
         usage_metadata={
@@ -565,3 +565,28 @@ def test_abort_estimates_inflight_calls_and_late_result_corrects() -> None:
     m2.drop_call("x")
     m2.abort()
     assert m2.cost == 0.0 and not m2.estimated
+
+
+def test_retry_call_is_marked_in_on_call() -> None:
+    from types import SimpleNamespace
+
+    from jiaoyi.slow.tradingagents_engine import CostMeter, add_retry
+
+    meter = CostMeter({"flash": (0.3, 1.2), "pro": (1.0, 4.0)})
+    seen: list[tuple[str | None, int]] = []
+    meter.on_call = lambda r, _t, _rt, retry: seen.append((r, retry))
+
+    def respond(finish: str) -> None:  # 模拟回调：每次请求结束时记一次
+        gen = SimpleNamespace(message=None, generation_info={"finish_reason": finish})
+        meter.record_response(SimpleNamespace(llm_output={}, generations=[[gen]]))
+
+    class Llm(_FakeLlm):
+        def invoke(self, inp: object, config: object = None, **kw: object) -> _Msg:
+            msg = super().invoke(inp, config, **kw)
+            respond(msg.response_metadata["finish_reason"])
+            return msg
+
+    llm = Llm([_Msg("半句", finish="length"), _Msg("重试后的完整回答" * 5)])
+    add_retry(llm, meter, reasoning_off=False, min_chars=20)
+    llm.invoke("q")
+    assert seen == [("length", 0), ("stop", 1)]  # 只有第二次是重试

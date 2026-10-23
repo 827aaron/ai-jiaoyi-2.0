@@ -852,6 +852,8 @@ def add_retry(llm: Any, meter: CostMeter | None, *, reasoning_off: bool, min_cha
         if reasoning_off:
             body = getattr(llm, "extra_body", None) or {}
             retry_kwargs["extra_body"] = {**body, "reasoning": {"enabled": False}}
+        if meter is not None:
+            meter.mark_retry_call()
         res = original(_with_hint(inp), config, **retry_kwargs)
         if meter is not None and reply_problem(res, min_chars) is None:
             meter.note_recovered(why)
@@ -891,8 +893,8 @@ class CostMeter:
         self._unreported: dict[str, list[int]] = {}
         self._aborted = False
         self.calls = 0
-        self.on_call: Callable[[str | None, int, int], None] | None = None
-        """每次响应后回调 (finish_reason, 输出 token 数, 其中推理 token 数)；会议实况用它记调用。"""
+        self.on_call: Callable[[str | None, int, int, int], None] | None = None
+        """每次响应后回调 (finish_reason, 输出 token 数, 其中推理 token 数, 是否重试的那次 0/1)。"""
         self.truncated = 0
         """因为 max_tokens 到顶而被截断的回答数（finish_reason == "length"）；重试成功的不算。"""
         self.retries = 0
@@ -906,6 +908,11 @@ class CostMeter:
         self.on_late: Callable[[float], None] | None = None
         """在途请求的真实花费晚到时回调（真实 - 估算），让日花费补正。"""
         self.on_retry: Callable[[str], None] | None = None
+        self._local = threading.local()
+        """同一线程里同步 invoke：重试那次请求发出前打标，它的回调读到并清掉。"""
+
+    def mark_retry_call(self) -> None:
+        self._local.retry = 1
 
     def note_retry(self, why: str) -> None:
         with self._lock:
@@ -1002,7 +1009,13 @@ class CostMeter:
         self.add(model, tin, tout, cost)
         if self.on_call is not None:
             try:
-                self.on_call(str(reason) if reason else None, tout, reasoning)
+                self.on_call(
+                    str(reason) if reason else None,
+                    tout,
+                    reasoning,
+                    int(getattr(self._local, "retry", 0)),
+                )
+                self._local.retry = 0
             except Exception:
                 logger.exception("记录模型调用信息失败")
 

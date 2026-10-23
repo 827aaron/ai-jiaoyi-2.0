@@ -138,7 +138,11 @@ class MeetingLive:
         self._flush()
 
     def note_call(
-        self, finish_reason: str | None, output_tokens: int, reasoning_tokens: int = 0
+        self,
+        finish_reason: str | None,
+        output_tokens: int,
+        reasoning_tokens: int = 0,
+        retries: int = 0,
     ) -> None:
         """记一次模型调用怎么结束的：``length`` = 被 max_tokens 截断，实况里一眼能看出。"""
         if self._closed:
@@ -149,6 +153,7 @@ class MeetingLive:
                 "finish_reason": finish_reason,
                 "output_tokens": output_tokens,
                 "reasoning_tokens": reasoning_tokens,
+                "retries": retries,  # 1 = 这次调用本身是上一次出问题后的自动重试
             }
         )
         del calls[:-80]  # 一场会不会超过几十次调用；防万一只留最近的

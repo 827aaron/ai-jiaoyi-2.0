@@ -121,8 +121,8 @@ def test_note_call_records_finish_reason_and_truncation(tmp_path: Path) -> None:
     doc = read(tmp_path)
     assert doc["truncated"] == 1
     assert doc["llm_calls"] == [
-        {"finish_reason": "stop", "output_tokens": 1500, "reasoning_tokens": 0},
-        {"finish_reason": "length", "output_tokens": 4096, "reasoning_tokens": 0},
+        {"finish_reason": "stop", "output_tokens": 1500, "reasoning_tokens": 0, "retries": 0},
+        {"finish_reason": "length", "output_tokens": 4096, "reasoning_tokens": 0, "retries": 0},
     ]
 
 

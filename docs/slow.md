@@ -304,3 +304,5 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 ## 超时取消时在途请求的花费
 
 单币会议超过 `symbol_timeout_s` 被取消时，那一刻已经发出、还没返回的模型请求以前记不到钱（返回时会议已结算）。现在叫停（`abort`）的同时，把每个在途请求按估算记一笔：输入 token ≈ 提示字数 / 2（偏高一点）× 输入价 + 本场已完成回答的平均输出 token（一次都没有按 2000）× 输出价，花费标 `estimated`：`meeting_live` 的 `cost_estimated = true`，决策日志里该条失败记录的 `output.cost_estimated = true`、摘要末尾「（花费含在途请求估算）」。后台线程里的请求最终会返回并带上 OpenRouter 的真实花费，这时把估算换成真实值，差额补进今天的花费（`late_cost` → 指挥官 `_charge`，回到事件循环里记）。没有再去查 OpenRouter 的 `/generation` 接口：请求返回时 `usage.cost` 已经是真实值，不需要多一次调用；请求一直不返回（断网）则停留在估算值。
+
+`meeting_live` 的 `llm_calls` 每条多 `retries`：1 = 这次调用本身是上一次出问题后的自动重试，0 = 普通调用（顶层 `retries` / `retry_reasons` 仍是整场的重试次数和原因）。
