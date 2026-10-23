@@ -830,7 +830,9 @@ async function poll() {
   }
 }
 
-window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
-render();
-poll();
-setInterval(poll, 5000);
+if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
+  window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
+  render();
+  poll();
+  setInterval(poll, 5000);
+}

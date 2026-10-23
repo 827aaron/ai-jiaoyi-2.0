@@ -492,3 +492,16 @@ def test_settings_page_shows_profile(tmp_path: Path) -> None:
     assert fl["min_p_take"]["profiled"] and fl["signal_max_age_s"]["profiled"] is False
     app_items = {i["key"]: i for i in page["app"]}
     assert app_items["profile"]["editable"] and app_items["profile"]["choices"][0] == "2h"
+
+
+def test_profile_switch_revalidates_slow_toml(tmp_path: Path) -> None:
+    """审查 C4：写死 refresh_lead_min=90，2h（卡 120 分钟）合格、60m（卡 60 分钟）不合格。"""
+    paths, data = _setup(tmp_path)
+    paths.slow.write_text("[schedule]\nrefresh_lead_min = 90\n", encoding="utf-8")
+    before = paths.app.read_text(encoding="utf-8")
+    with pytest.raises(ActionError, match=r"slow\.toml"):
+        actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
+    assert paths.app.read_text(encoding="utf-8") == before
+    paths.slow.write_text("[schedule]\nrefresh_lead_min = 30\n", encoding="utf-8")
+    actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
+    assert load_slow_config(paths.slow, "60m").schedule.refresh_lead_min == 30

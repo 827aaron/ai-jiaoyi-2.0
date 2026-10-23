@@ -245,3 +245,13 @@ label.pw { display: flex; flex-direction: column; gap: 4px; font-size: 12px; col
 .form.edit .fr { align-items: center; }
 .ch .r .btn { margin-left: 6px; }
 .log .btn { margin-left: auto; }
+
+/* ---- 首次设置 */
+.su-narrow { max-width: 760px; }
+.su-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.su-row label.pw { min-width: 200px; }
+.su-keys .fr > b { display: flex; gap: 8px; align-items: center; justify-content: flex-end; max-width: 60%; }
+input[type="password"], .su-narrow input[type="number"], .su-narrow select { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
+.su-keys input[type="password"] { width: 260px; }
+.su-narrow .msg.up { color: var(--up); } .su-narrow .msg.down { color: var(--down); }
+.su-narrow details summary { cursor: pointer; color: var(--accent); font-size: 12px; padding: 4px 0; }

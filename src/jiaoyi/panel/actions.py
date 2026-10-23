@@ -41,14 +41,21 @@ from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config, w
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码校验；不碰交易所
 from jiaoyi.panel.files import read_live_gate
 from jiaoyi.panel.overview import Control
-from jiaoyi.slow.settings import ScheduleConfig, SlowConfig, load_slow_config
+from jiaoyi.slow.settings import (
+    BudgetConfig,
+    LlmConfig,
+    ScheduleConfig,
+    SlowConfig,
+    load_slow_config,
+)
 from jiaoyi.slow.settings import with_profile as slow_with_profile
 
 CHANGES_FILE = "config_changes.jsonl"
 COMMAND_TTL = timedelta(seconds=60)
 NEEDS_PASSWORD: frozenset[CommandKind] = frozenset({"resume", "unblock_symbol"})
 
-Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule"]
+Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule", "llm", "budget"]
+_SLOW_SECTIONS = ("schedule", "llm", "budget")
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
@@ -230,12 +237,18 @@ def update_config(
     changes: dict[str, Any],
     password: str,
     now: datetime,
+    *,
+    fields: dict[str, FieldSpec] | None = None,
 ) -> list[dict[str, Any]]:
-    """改一组配置。先验密码；全部通过契约校验才写；返回实际改了哪些（key、old、new）。"""
+    """改一组配置。先验密码；全部通过契约校验才写；返回实际改了哪些（key、old、new）。
+
+    ``fields`` 只给首次设置向导用：放开平时不在网页上改的项（例如 jev_provider）。
+    """
     check_password(data_dir, password)
     if not changes:
         raise ActionError("没有要改的项")
-    path, table, fields = _target(paths, section)
+    path, table, editable = _target(paths, section)
+    fields = editable if fields is None else fields
     exists = path.is_file()  # slow.toml 可以没有：没有就新建（其余默认值照旧）
     text = path.read_text(encoding="utf-8") if exists else ""
     try:
@@ -296,6 +309,8 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "fast_loop": ("app", "fast_loop"),
     "predictor": ("app", "predictor"),
     "schedule": ("slow", "schedule"),
+    "llm": ("slow", "llm"),
+    "budget": ("slow", "budget"),
 }
 
 
@@ -320,6 +335,10 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return scalar_fields(PredictorConfig, set())
     if section == "schedule":
         return scalar_fields(ScheduleConfig, set())
+    if section == "llm":
+        return scalar_fields(LlmConfig, set())
+    if section == "budget":
+        return scalar_fields(BudgetConfig, set())
     # jev_provider / jev_model 换通道和模型版本要重新校准，不在网页上改
     return scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
 
@@ -388,11 +407,12 @@ def _validate(section: Section, text: str, paths: ConfigPaths) -> None:
         data = tomllib.loads(text)
         if section in ("risk", "category"):
             RiskConfig.model_validate(data)
-        elif section == "schedule":
+        elif section in _SLOW_SECTIONS:
             raw_app = tomllib.loads(paths.app.read_text(encoding="utf-8"))
             SlowConfig.model_validate(slow_with_profile(data, profiles.profile_of(raw_app)))
         else:
             AppConfig.model_validate(with_profile(data))
+            _validate_slow_for(profiles.profile_of(data), paths)
     except tomllib.TOMLDecodeError as e:  # set_toml_value 出错才会到这
         raise ActionError(f"改完不是合法 TOML，没有保存：{e}") from e
     except ValidationError as e:
@@ -402,6 +422,27 @@ def _validate(section: Section, text: str, paths: ConfigPaths) -> None:
             for err in e.errors()
         ]
         raise ActionError("不合格，没有保存：" + "；".join(msgs)) from e
+
+
+def _validate_slow_for(profile: str, paths: ConfigPaths) -> None:
+    """切档位时 slow.toml 要按新档位再校验一遍，不然这里存成功、下次启动反被拒。"""
+    if not paths.slow.is_file():
+        return
+    try:
+        raw = tomllib.loads(paths.slow.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as e:
+        raise ActionError(f"{paths.slow.name} 不是合法 TOML，先在终端修好：{e}") from e
+    try:
+        SlowConfig.model_validate(slow_with_profile(raw, profile))
+    except ValidationError as e:
+        msgs = [
+            f"{'.'.join(str(p) for p in err['loc']) or '(整体)'}："
+            + err["msg"].removeprefix("Value error, ")
+            for err in e.errors()
+        ]
+        raise ActionError(
+            f"换到档位 {profile} 后 {paths.slow.name} 不合格，没有保存：" + "；".join(msgs)
+        ) from e
 
 
 _SECTION = re.compile(r"^\s*\[([A-Za-z0-9_.]+)\]\s*(#.*)?$")
