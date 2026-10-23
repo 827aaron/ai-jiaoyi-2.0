@@ -16,7 +16,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +27,7 @@ from jiaoyi.contracts import (
     BattleCard,
     Bias,
     CardSymbol,
+    Category,
     DecisionRecord,
     Health,
     KeyLevel,
@@ -36,6 +37,8 @@ from jiaoyi.contracts import (
     Range,
     RiskConfig,
     Role,
+    Side,
+    SizeTier,
     SymbolPool,
     SymbolPoolEntry,
     TodayStats,
@@ -171,7 +174,7 @@ class BattleCardCommander:
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
-        self._held: frozenset[str] = frozenset()
+        self._held: dict[str, Side] = {}
         self._progress = ""
         self._beat_s = 30.0
         self._fails = 0
@@ -221,9 +224,27 @@ class BattleCardCommander:
             }
         )
 
-    def set_held(self, symbols: Collection[str]) -> None:
-        """有持仓的币：它们必须一直在卡上（继续盯，不开新仓），不然持仓管家会判“不再盯”而平仓。"""
-        self._held = frozenset(symbols)
+    def set_held(self, held: Mapping[str, Side]) -> None:
+        """有持仓的币（币 → 持仓方向）：必须强制入选本轮会议，并一直留在卡上继续盯。
+
+        不然持仓管家看到卡上没有它，会判“不再盯”而平仓。
+        """
+        self._held = dict(held)
+
+    def _hold_only(self, symbol: str, side: Side, category: Category) -> CardSymbol:
+        """旧卡里也没有这个持仓币时合成一条：按持仓方向只盯不开（信号清空，不开新仓）。"""
+        return CardSymbol(
+            symbol=symbol,
+            category=category,
+            bias=Bias(side.value),
+            allowed_signals=[],
+            size_tier_max=SizeTier.S,
+            notional_usdt=Range(min=0.0, max=0.0),
+            leverage=Range(min=1.0, max=1.0),
+            stop_atr=Range(min=self._stop.min_stop_atr, max=self._stop.max_stop_atr),
+            take_profit_r=Range(min=self._stop.min_tp_r, max=self._stop.max_tp_r),
+            reason="持仓中，本轮没有新的会议结论：继续盯，不开新仓",
+        )
 
     @staticmethod
     def _watch_only(cs: CardSymbol) -> CardSymbol:
@@ -367,8 +388,11 @@ class BattleCardCommander:
     ) -> BattleCard:
         by_symbol = {e.symbol: e for e in candidates}
         pinned = [e for e in candidates if e.pinned][: self._pick_max]
-        room = self._pick_max - len(pinned)
-        free = [e for e in candidates if not e.pinned]
+        # 有持仓的币强制入选（和置顶一样不占军师的挑选名额），保证它们本轮有新结论、卡上不缺
+        held_in = [e for e in candidates if e.symbol in self._held and e not in pinned]
+        pinned = [*pinned, *held_in]
+        room = max(self._pick_max - len(pinned), 0)
+        free = [e for e in candidates if e not in pinned]
         try:
             picked = await self._engine.pick(free, max(room, 0), self._card)
         except Exception as exc:
@@ -416,11 +440,16 @@ class BattleCardCommander:
                 symbols[e.symbol] = clamp_to_risk(old, self._risk, self._stop)
             elif e.symbol in self._held:
                 symbols[e.symbol] = self._watch_only(old)
-        # 有持仓但这轮没入选的币：留在卡上，不开新仓、方向不动，别让管家把它当“不再盯”
-        for sym in self._held:
+        # 有持仓的币卡上必须有：没有新结论就沿用旧指令（只清空信号），旧卡里也没有就按持仓方向合成
+        for sym, side in self._held.items():
+            if sym in symbols:
+                continue
             old = prev.for_symbol(sym) if prev is not None else None
-            if sym not in symbols and old is not None:
+            if old is not None:
                 symbols[sym] = self._watch_only(old)
+            else:
+                cat = by_symbol[sym].category if sym in by_symbol else Category.ALT
+                symbols[sym] = self._hold_only(sym, side, cat)
         cost = picked.cost_usd
         published = 0
 
