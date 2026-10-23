@@ -171,9 +171,16 @@ async def test_slow_config_and_brief_reach_commander_and_engine(
     assert isinstance(cards, BattleCardCommander)
     brief = seen["brief"]
     assert isinstance(brief, MarketBriefService) and cards._brief is brief  # 一份简报两边共用
-    assert seen["settings"] == replace(
-        slow.engine_settings(), live_dir=str(tmp_path / "meeting_live")
-    )  # 开会过程落在 data_dir/meeting_live
+    want = replace(
+        slow.engine_settings(),
+        live_dir=str(tmp_path / "meeting_live"),  # 开会过程落在 data_dir/meeting_live
+        # 分析师 K 线、关键位周期跟最长持仓档（默认 4h：1h×72 + 4h×90 + 1d×60，候选用 1h）
+        hold_minutes=240,
+        analyst_klines=("1h x 72", "4h x 90", "1d x 60"),
+        meeting_min=cfg.slow_loop_interval_min,
+        level_candidate_interval="1h",
+    )
+    assert seen["settings"] == want
     assert cards._ttl == timedelta(hours=3)
     assert cards._journal is not None
     assert cards._journal.path == tmp_path / "card_review" / "cards.jsonl"  # 复盘流水在 data_dir 下

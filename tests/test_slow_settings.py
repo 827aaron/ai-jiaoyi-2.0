@@ -13,28 +13,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
-    cfg = load_slow_config(tmp_path / "nope.toml")  # 默认开会间隔 1h 档
+    cfg = load_slow_config(tmp_path / "nope.toml")  # 默认开会间隔 2h 档
     assert cfg.engine_settings() == TradingAgentsSettings(max_tokens=None, json_max_tokens=None)
     kw = cfg.commander_kwargs()
     assert kw["concurrency"] == 8
-    assert kw["ttl"] == timedelta(minutes=80)
-    assert kw["symbol_min_interval"] == timedelta(minutes=50)
+    assert kw["ttl"] == timedelta(minutes=140)
+    assert kw["symbol_min_interval"] == timedelta(minutes=100)
     assert kw["expiry_lead"] == timedelta(minutes=20)
-    # 1h 档 = 每 60 分钟一轮会：关键位突破 / 新入池也要隔 60 分钟
+    # 2h 档：关键位突破 / 新入池要隔 60 分钟
     assert kw["symbol_timeout_s"] == 900 and kw["min_refresh_gap"] == timedelta(minutes=60)
-    assert kw["fail_backoff"][-1] == timedelta(minutes=15)
-    assert cfg.budget.daily_cost_limit_usd == 30.0
-    assert cfg.effective_pick_max(20) == 12
+    assert kw["fail_backoff"][-1] == timedelta(minutes=30)
+    assert cfg.budget.daily_cost_limit_usd == 20.0
+    assert cfg.effective_pick_max(20) == 15
 
-    two_hour = load_slow_config(tmp_path / "nope.toml", "2h").commander_kwargs()
-    assert two_hour["ttl"] == timedelta(minutes=140) and two_hour["concurrency"] == 8
-    assert two_hour["fail_backoff"][-1] == timedelta(minutes=30)
-    assert two_hour["min_refresh_gap"] == timedelta(minutes=60)
+    one_hour = load_slow_config(tmp_path / "nope.toml", "1h").commander_kwargs()
+    assert one_hour["ttl"] == timedelta(minutes=80) and one_hour["concurrency"] == 8
+    assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
+    assert one_hour["min_refresh_gap"] == timedelta(minutes=60)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
     cfg = load_slow_config(ROOT / "config" / "slow.example.toml")
-    assert cfg == slow_defaults()  # 示例文件里没有写死的项：全跟默认档位（1h）
+    assert cfg == slow_defaults()  # 示例文件里没有写死的项：全跟默认档位（2h）
     assert SlowConfig().schedule.refresh_lead_min == 20  # 不在档位里时的代码默认
 
 

@@ -166,6 +166,7 @@ def describe_candidates(ctx: LevelContext) -> str:
         f"候选关键位（代码用真实 K 线算的，现价 {ctx.price:g}，只给持仓期内碰得到的："
         f"现价 ±{ctx.span:g}（约 ±{ctx.span / ctx.price * 100:.2f}%）以内，{ctx.basis}，"
         f"距现价从近到远）：\n支撑：{fmt(sup)}\n压力：{fmt(res)}\n"
+        "标「昨日 / 7日」的高低点是突破位：收盘价越过它说明走势在延续，不是反转点。\n"
         f"key_levels 只能从上面的候选里选，直接写候选的价格；支撑最多 {PER_SIDE_KEPT} 个、"
         f"压力最多 {PER_SIDE_KEPT} 个；候选里没有的价位不要写，更不要凭印象编价位。"
     )

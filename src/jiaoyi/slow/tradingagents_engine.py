@@ -122,6 +122,13 @@ class TradingAgentsSettings:
     reddit: str = "guarded"
     # 每笔单最多持有多久（分钟，档位的时间止损）：告诉军师团，止损 / 止盈 / 关键位按这个时长的波动给
     hold_minutes: int = 120
+    # 分析师看的 K 线，每段 "周期 x 根数"（从细到粗）；None = 15m x 96、1h x 72、4h x 60。
+    # 档位默认按最长持仓走（core/profiles.py），app.py 填进来
+    analyst_klines: tuple[str, ...] | None = None
+    # 开会间隔（分钟）：比最细那段 K 线周期还短时，最前面加一段 15m x 48，保证每次开会有新 K 线
+    meeting_min: int = 120
+    # 关键位的摆动 / 成交密集区用哪个周期的 K 线找；None = 跟 ATR 周期
+    level_candidate_interval: str | None = None
     # 关键位范围 = level_span_sigma × ATR × √(持仓时长 / ATR 周期)，见 levels.py
     level_span_sigma: float = SPAN_SIGMA
     # 推理长度（OpenRouter reasoning.effort）：none/low/medium/high；直连 DeepSeek 忽略
@@ -149,8 +156,9 @@ def perp_context(hold_minutes: float) -> str:
     return (
         f"{_PERP_BODY} Every position here is held at most about {hold_minutes:g} minutes (forced "
         "exit at the time limit): size price targets, stops and levels to moves plausible within "
-        "that horizon for this specific asset, never multi-day swing targets. Apply all of this "
-        "to every sentence you write"
+        "that horizon for this specific asset, never multi-day swing targets. Overbought/oversold "
+        "readings and Bollinger band breaches tend to keep going in this market: never treat them "
+        "alone as reversal signals. Apply all of this to every sentence you write"
     )
 
 
@@ -215,20 +223,54 @@ def _klines(symbol: str, interval: str, limit: int, end: datetime | None = None)
     return data
 
 
+DEFAULT_ANALYST_KLINES = ("15m x 96", "1h x 72", "4h x 60")
+FINEST_EXTRA = ("15m", 48)
+_INTERVAL_MIN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+_ANALYST_KLINES: tuple[tuple[str, int], ...] = ()
+
+
+def parse_kline_spec(spec: str) -> tuple[str, int]:
+    """``"15m x 96"`` → ``("15m", 96)``。"""
+    m = re.fullmatch(r"\s*(\d+[mhd])\s*[xX×]\s*(\d+)\s*", spec)
+    if m is None or m[1] not in _INTERVAL_MIN or not 1 <= int(m[2]) <= 1000:
+        raise ValueError(
+            f"K 线写法应为「周期 x 根数」，如 15m x 96（周期 1m/5m/15m/30m/1h/4h/1d）：{spec!r}"
+        )
+    return m[1], int(m[2])
+
+
+def set_analyst_klines(spec: Sequence[str] | None, meeting_min: int = 120) -> None:
+    """设置分析师看的 K 线（模块级）。开会间隔比最细一段还短，最前面补 15m x 48。"""
+    parsed = [parse_kline_spec(s) for s in (spec or DEFAULT_ANALYST_KLINES)]
+    parsed.sort(key=lambda p: _INTERVAL_MIN[p[0]])
+    if meeting_min < _INTERVAL_MIN[parsed[0][0]] and parsed[0][0] != FINEST_EXTRA[0]:
+        parsed.insert(0, FINEST_EXTRA)
+    global _ANALYST_KLINES
+    _ANALYST_KLINES = tuple(parsed)
+
+
 def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
-    """登记为 TradingAgents 的 ``get_stock_data``：小时线 CSV（最近 ~200 根）。"""
+    """登记为 TradingAgents 的 ``get_stock_data``：每周期一段 CSV，从细到粗，已收盘的。"""
     end = datetime.fromisoformat(end_date).replace(tzinfo=UTC)
-    rows = _klines(symbol, "1h", 200, end)
-    lines = ["Date,Open,High,Low,Close,Volume,QuoteVolume"]
-    for k in rows:
-        ts = datetime.fromtimestamp(k[0] / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{ts},{k[1]},{k[2]},{k[3]},{k[4]},{k[5]},{k[7]}")
-    return (
-        f"# {binance_symbol(symbol)} 币安永续 1h K 线（{start_date} → {end_date}）\n"
-        + "\n".join(lines)
-        + "\n\n"
-        + derivatives_context(symbol, end)
-    )
+    end_ms = int(end.timestamp() * 1000)
+    parts: list[str] = []
+    for interval, n in _ANALYST_KLINES or tuple(
+        parse_kline_spec(s) for s in DEFAULT_ANALYST_KLINES
+    ):
+        rows = [k for k in _klines(symbol, interval, n + 1, end) if k[6] <= end_ms][-n:]
+        if not rows:
+            continue
+        fmt = "%Y-%m-%d" if interval == "1d" else "%Y-%m-%d %H:%M"
+        t0, t1 = (datetime.fromtimestamp(rows[i][0] / 1000, tz=UTC).strftime(fmt) for i in (0, -1))
+        lines = ["Date,Open,High,Low,Close,Volume,QuoteVolume"]
+        for k in rows:
+            ts = datetime.fromtimestamp(k[0] / 1000, tz=UTC).strftime(fmt)
+            lines.append(f"{ts},{k[1]},{k[2]},{k[3]},{k[4]},{k[5]},{k[7]}")
+        parts.append(
+            f"# {binance_symbol(symbol)} 币安永续 {interval} K 线，已收盘 {len(rows)} 根"
+            f"（{t0} → {t1}，UTC）\n" + "\n".join(lines)
+        )
+    return "\n\n".join(parts) + "\n\n" + derivatives_context(symbol, end)
 
 
 _FAPI = "https://fapi.binance.com"
@@ -323,13 +365,19 @@ def atr_interval(minutes: int) -> str:
     return "1h" if minutes == 60 else f"{minutes}m"
 
 
+TP_HINT = (1.2, 2.0)
+"""出卡提示词里建议的止盈倍数范围（研究 v3）；硬范围仍是保镖的 min_tp_r–max_tp_r。"""
+
+
 def describe_atr(atr: float | None, price: float | None, stop: StopScale) -> str:
     """给会议提示词用的 ATR 说明；拿不到数值时明说，让模型别瞎猜价格尺度。"""
     name = atr_interval(stop.period_min)
+    tp_lo, tp_hi = max(TP_HINT[0], stop.min_tp_r), min(TP_HINT[1], stop.max_tp_r)
+    tp_hint = f"（建议 {tp_lo:g}–{tp_hi:g}，别贪）" if tp_lo < tp_hi else ""
     head = (
         f"止损倍数按 {name} ATR({ATR_PERIOD}) 计（周期由风控配置决定，不是 1h K 线上看到的 ATR），"
         f"每个标的的止损倍数必须在 {stop.min_stop_atr:g}–{stop.max_stop_atr:g} 之间，"
-        f"止盈倍数（止损距离的倍数）必须在 {stop.min_tp_r:g}–{stop.max_tp_r:g} 之间，"
+        f"止盈倍数（止损距离的倍数）必须在 {stop.min_tp_r:g}–{stop.max_tp_r:g} 之间{tp_hint}，"
         "超出整张卡这个标的会被保镖拒绝"
     )
     if atr is None or price is None or price <= 0:
@@ -350,7 +398,12 @@ def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
 
 
 def level_context(
-    symbol: str, end: datetime, stop: StopScale, hold_min: float, sigma: float = SPAN_SIGMA
+    symbol: str,
+    end: datetime,
+    stop: StopScale,
+    hold_min: float,
+    sigma: float = SPAN_SIGMA,
+    candidate_interval: str | None = None,
 ) -> LevelContext:
     """取档位周期的 K 线 + 日线算关键位候选。范围 = σ × 该币 ATR × √(持仓时长 / ATR 周期)，
     同一条公式适用所有币所有档位。失败返回空背景（不出关键位，不瞎编）。"""
@@ -368,7 +421,11 @@ def level_context(
         basis = (
             f"= {sigma:g}×该币 {name} ATR×√({hold_min:g}/{stop.period_min})，即持仓期内的典型波动"
         )
-        cands = build_candidates(price, atr, closed, daily, span)
+        bars = closed
+        if candidate_interval and candidate_interval != name:  # 摆动 / 成交密集区用另一个周期找
+            raw = _klines(symbol, candidate_interval, 300, end)
+            bars = [r for r in raw if r[6] <= end_ms] or closed
+        cands = build_candidates(price, atr, bars, daily, span)
         return LevelContext(price, atr, span, cands, basis)
     except Exception:
         return LevelContext()
@@ -1155,6 +1212,7 @@ class TradingAgentsEngine:
         self._live: dict[str, MeetingLive] = {}
         self._inflight_lock = threading.Lock()
         register_binance_vendor()
+        set_analyst_klines(settings.analyst_klines, settings.meeting_min)
         self._guard_reddit(settings)
         if news is not None:
             register_crypto_news_vendor(news)
@@ -1396,7 +1454,12 @@ class TradingAgentsEngine:
             live.converting()
 
         levels = level_context(
-            entry.symbol, self._today(), self._stop, self._s.hold_minutes, self._s.level_span_sigma
+            entry.symbol,
+            self._today(),
+            self._stop,
+            self._s.hold_minutes,
+            self._s.level_span_sigma,
+            self._s.level_candidate_interval,
         )
         prompt = convert_prompt(
             entry,

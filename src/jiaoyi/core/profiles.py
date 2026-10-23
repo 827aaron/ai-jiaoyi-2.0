@@ -32,9 +32,9 @@ from jiaoyi.contracts.risk_config import (
 
 PROFILES: tuple[str, ...] = MEETING_PROFILES
 HOLDS: tuple[str, ...] = HOLD_PROFILES
-DEFAULT_PROFILE = "1h"
-DEFAULT_HOLD = "2h"
-DEFAULT_TIME_LIMIT_S = 7200
+DEFAULT_PROFILE = "2h"
+DEFAULT_HOLD = "4h"
+DEFAULT_TIME_LIMIT_S = 14400
 PAPER_ONLY = PAPER_ONLY_HOLDS  # 最长持仓档里只能 paper 的
 
 # 旧 ``profile`` 键 → 开会间隔档（旧值 60m = 现 1h，其余同名）
@@ -107,7 +107,7 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
         backoff=[5, 10, 30],
         daily_usd=20.0,
         slow_to=360,
-        events=_events(_E2, gap=60, per_day=12),
+        events=_events(_E2, gap=60, per_day=12, entry_age=360),
     ),
     "6h": _meeting(
         360,
@@ -116,7 +116,7 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
         cards=15,
         backoff=[10, 30, 60],
         daily_usd=10.0,
-        events=_events(_E6, gap=60, per_day=20),
+        events=_events(_E6, gap=60, per_day=20, entry_age=1080),
     ),
     "12h": _meeting(
         720,
@@ -125,7 +125,7 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
         cards=15,
         backoff=[10, 30, 60],
         daily_usd=5.0,
-        events=_events(_E12, gap=90, per_day=20, entry_age=360),
+        events=_events(_E12, gap=90, per_day=20, entry_age=2160),
     ),
     "24h": _meeting(
         1440,
@@ -134,7 +134,7 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
         cards=15,
         backoff=[10, 30, 60],
         daily_usd=5.0,
-        events=_events(_E12, gap=120, per_day=24, entry_age=480, at="08:00"),
+        events=_events(_E12, gap=120, per_day=24, entry_age=2160, at="08:00"),
     ),
 }
 
@@ -208,15 +208,43 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
 }
 
 # 推荐搭配：开会档位 → 最长持仓默认（app.toml 没写 hold 时取它；写了就按用户的）。
+# 取 7×7 表里「合适」的最长一档（研究 v3，Aaron 2026-10-23 定）。
 RECOMMENDED_HOLD = {
-    "15m": "30m",
-    "30m": "1h",
-    "1h": "2h",
+    "15m": "1h",
+    "30m": "2h",
+    "1h": "4h",
     "2h": "4h",
-    "6h": "8h",
-    "12h": "12h",
+    "6h": "12h",
+    "12h": "24h",
     "24h": "24h",
 }
+
+# 分析师看的 K 线（周期 × 根数）：短持仓看 15m / 1h / 4h，长持仓看 1h / 4h / 1d（研究 v3）。
+_KL_SHORT = ("15m x 96", "1h x 72", "4h x 60")
+_KL_LONG = ("1h x 72", "4h x 90", "1d x 60")
+ANALYST_KLINES = {h: _KL_SHORT for h in ("30m", "1h", "2h")} | {
+    h: _KL_LONG for h in ("4h", "8h", "12h", "24h")
+}
+# 关键位的摆动 / 成交密集区从哪个周期的 K 线找（昨日 / 7 日高低点照旧用日线）。
+LEVEL_INTERVAL = {
+    "30m": "15m",
+    "1h": "15m",
+    "2h": "15m",
+    "4h": "1h",
+    "8h": "1h",
+    "12h": "4h",
+    "24h": "4h",
+}
+
+
+def analyst_klines(hold: str) -> tuple[str, ...]:
+    return ANALYST_KLINES.get(hold, _KL_SHORT)
+
+
+def level_interval(hold: str) -> str:
+    return LEVEL_INTERVAL.get(hold, "15m")
+
+
 HOLD.update(
     {
         # 长持仓 3 档（研究 2026-10-23 18:40 补）。patrol_*：山寨中档止损 1.6–3.5%，

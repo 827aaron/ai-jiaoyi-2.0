@@ -2,8 +2,8 @@
 # 每一项都必填（标“档位”的可以不写，由档位给）；超出合理范围拒绝启动。
 
 mode = "paper"               # paper（模拟盘）/ testnet / live；切 live 另需确认词和面板密码
-meeting_interval = "1h"      # 开会间隔档：15m / 30m / 1h（默认）/ 2h / 6h / 12h / 24h；卡有效期 = 间隔 + 20 分钟
-hold = "2h"                  # 最长持仓档：30m / 1h / 2h（默认）/ 4h；30m 只能 paper
+meeting_interval = "2h"      # 开会间隔档：15m / 30m / 1h / 2h（默认）/ 6h / 12h / 24h；卡有效期 = 间隔 + 20 分钟
+hold = "4h"                  # 最长持仓档：30m / 1h / 2h / 4h（默认）/ 8h / 12h / 24h；30m 只能 paper
                              # 两个档位各选各的，给出下面标“档位”的键的默认值（数值见 src/jiaoyi/core/profiles.py）；
                              # 你写了的键优先，想让档位生效就别写。切档要重启；旧的 profile 键自动当 meeting_interval
 # predictor_enabled = true   # 档位：预测员 Kronos 开关
@@ -46,6 +46,7 @@ signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
 size_fraction_m = 0.75            # M 用 7.5 成，L 用满
 # atr_period_min = 15               # 止损用几分钟 K 线的 ATR（5 / 15 / 30 / 60）；作战卡的止损倍数按这个尺度给（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
+# stop_level_snap = false          # 止损贴关键位（外侧半个 ATR 内有关键位就挪到它外侧）：默认关，价格碰到关键位后 93% 会穿过 0.1 ATR
 # stop_level_buffer_atr = 0.1       # 止损放在关键位外侧 0.1 ATR（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 # atr_long_period_min = 60          # 长周期 ATR：止损 ATR = √(短 × 长)；0 = 只用短周期（档位给推荐值）
 # session_factor = true             # 止损 ATR 再乘曼谷时段系数（表在档位里，档位给推荐值）
@@ -53,14 +54,14 @@ size_fraction_m = 0.75            # M 用 7.5 成，L 用满
 # atr_floor_7d = 0                  # 短周期 ATR 至少取 7 天中位数 × 这个数（0 = 关，默认）
 # min_stop_atr = 0.5                # 作战卡止损低于 0.5 倍 ATR 就不认（太近会被噪音扫掉）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 # max_stop_atr = 4.0                # 作战卡止损超过 4 倍 ATR 就不认（慢环的数保镖再核一遍）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
-# min_tp_r = 1.0                    # 作战卡止盈倍数要在 1–6 倍止损之间（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
-# max_tp_r = 6.0（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
-# time_limit_s = 7200               # 单笔最长拿 2 小时（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
+# min_tp_r = 1.0                    # 作战卡止盈倍数要在 1–3 倍止损之间（档位默认；提示词建议 1.2–2.0）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
+# max_tp_r = 3.0（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
+# time_limit_s = 14400              # 单笔最长拿 4 小时（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 keeper_close_p = 0.6              # 管家：平仓概率 ≥ 0.6 且连续 2 次才平
 keeper_close_p_strong = 0.85      # 管家：≥ 0.85 一次就平
 keeper_confirmations = 2
-# patrol_shock_pct_1m = 2.0         # 巡逻兵：1 分钟逆向 2% 直接全平该币（最长持仓档：8h 2.5 / 12h、24h 3.0，其余 2.0）
-# patrol_alert_pct_1m = 1.0         # 巡逻兵：1 分钟逆向 1% 让管家立刻复查（8h 1.2 / 12h、24h 1.5，其余 1.0）
+# patrol_shock_pct_1m = 2.0         # 巡逻兵：1 分钟逆向 2% 直接全平该币（最长持仓档：8h 2.5 / 12h 3.0 / 24h 4.0，其余 2.0）
+# patrol_alert_pct_1m = 1.0         # 巡逻兵：1 分钟逆向 1% 让管家立刻复查（8h 1.2 / 12h 1.5 / 24h 2.0，其余 1.0）
 breakout_vol_ratio = 3.0          # 哨兵：放量突破要 1 分钟量 ≥ 3 倍均值
 surge_vol_ratio = 4.0             # 哨兵：量能突增 ≥ 4 倍
 surge_taker_ratio = 0.7           # 且主动买（或卖）占 70% 以上

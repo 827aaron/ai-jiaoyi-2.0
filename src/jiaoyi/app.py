@@ -38,6 +38,7 @@ from jiaoyi.contracts import (
     RunMode,
     SymbolPool,
 )
+from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.pool_overrides import (
@@ -261,6 +262,10 @@ def _build_cards(
         settings=replace(
             cfg.engine_settings(),
             hold_minutes=max(fast.time_limit_s // 60, 1),
+            # 分析师 K 线、关键位找候选的周期都按最长持仓档走（slow.toml [meeting] 写了就按写的）
+            analyst_klines=cfg.meeting.analyst_klines or profiles.analyst_klines(app_cfg.hold),
+            meeting_min=app_cfg.slow_loop_interval_min,
+            level_candidate_interval=profiles.level_interval(app_cfg.hold),
             live_dir=str(Path(app_cfg.data_dir) / "meeting_live"),
         ),
         today=clock,
