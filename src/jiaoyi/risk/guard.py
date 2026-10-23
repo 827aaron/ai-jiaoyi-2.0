@@ -632,7 +632,11 @@ class RiskGuardImpl:
             symbol=signal.symbol,
             signal_id=signal.signal_id,
             card_id=card.card_id if card is not None else None,
-            input={"trigger_price": signal.trigger_price, "kind": signal.kind.value},
+            input={
+                "trigger_price": signal.trigger_price,
+                "kind": signal.kind.value,
+                "side": signal.side_hint.value,
+            },
             # 放行时 output 顶层就是 OrderIntent 的字段（验收脚本 jiaoyi.acceptance 按这个读），
             # 计算过程放在 detail 里；拒绝时写原因
             output=(

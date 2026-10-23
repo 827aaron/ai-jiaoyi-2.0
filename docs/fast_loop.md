@@ -160,12 +160,23 @@
 - 复盘用 `jiaoyi.gate.review.iter_jev_calls(data_dir)`，把每次真正的调用摊平成一行，可按 `template` / `model` 分组；
   `template_dump()` 给出当前模板全文。
 
-## 拍板只记不拦（paper 校准）
+## 拍板门槛与校准
 
-`[fast_loop] gate_record_only`：不写时 paper 开、testnet / live 关（testnet / live 写 true 拒绝启动）。
-开着时拍板人照常问、照常记，但「真信号 / 做 / 方向 / 毒性」门槛没过也放行，保镖日志 `detail.gate_would_block`
-记下本会拦的原因，面板信号流写「拍板本会拦，只记不拦放行」；订单流有毒概率 ≥ 0.8 仍然拦，回答不全永远拦。
-攒够约 200 笔后按 `jiaoyi.gate.review` 校准门槛。门槛本身 0–1 都收，档位只给推荐值。
+拍板一票否决：「真信号 / 做 / 方向 / 毒性」任何一个没过就不开。门槛 0–1 都收，档位只给推荐值；
+paper 的临时推荐是 做 ≥ 0.35、真信号 ≥ 0.35、毒性 ≤ 0.7（`profiles.PAPER_GATE`，各持仓档一样，
+配置文件写了的优先），testnet / live 的推荐等校准后再给。
+
+`[fast_loop] gate_record_only`（拍板只记不拦）：不写 = 关；只有 paper 能写 true（testnet / live 写 true 拒绝启动）。
+开着时门槛没过也放行，保镖日志 `detail.gate_would_block` 记下本会拦的原因，面板写「拍板本会拦，只记不拦放行」；
+订单流有毒概率 ≥ 0.8 仍然拦，回答不全永远拦。
+
+**校准：`jiaoyi jev-backtest [--since 2026-10-23T12:47]`**（要能连币安，在 Mac 上跑）。不用等新样本：
+决策日志里每次拍板都记了完整快照和每个选项的概率，命令按快照里的价格、方向、最长持仓，拉之后的 1 分钟线算
+「做了会怎样」——止损 / 止盈用保镖当时算的（没算到那步的按 1.5 × 快照 `atr_bps` 估、止盈 1.5R），
+同一根线两边都碰到按先止损，都没碰到按到时收盘平，扣来回吃单费。放行的、拍板拦的、保镖拦的都算。
+输出按模板版本分开（问法不同的概率不能混比）：做概率分桶、做 × 真信号 × 毒性 →
+笔数 / 胜率 / 平均 R，并扫门槛给推荐（门槛内总 R 最大、至少 10 笔）。
+明细缓存 `data/shadow/outcomes.jsonl`（算过的不重算），汇总 `data/debug/jev_backtest.json`。
 
 - 只因为拍板人概率没过门槛被拦的，保镖记 `detail.by = "gate"`，面板显示黄色「拍板放弃」；红色「保镖拒绝」只留给保镖自己的规则。
 - 滑点（`risk.toml max_slippage_bps`）只拦不利方向（做多价格比触发时高、做空比触发时低），`detail.slippage_bps` 正数 = 不利；

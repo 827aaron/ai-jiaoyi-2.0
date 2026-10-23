@@ -143,6 +143,9 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
 # 预测员 paths 4 / lookback 400；risk.toml 全部不动。
 _LOOSE_GATE = {"min_p_genuine": 0.6, "min_p_take": 0.6, "max_p_toxic": 0.5}
 _STRICT_GATE = {"min_p_genuine": 0.65, "min_p_take": 0.65, "max_p_toxic": 0.4}
+PAPER_GATE = {"min_p_genuine": 0.35, "min_p_take": 0.35, "max_p_toxic": 0.7}
+"""paper 的临时推荐门槛（各持仓档一样），盖在档位默认上面；配置文件写了的仍优先。
+上面两组是 testnet / live 的推荐，等 ``jiaoyi jev-backtest`` 攒够样本校准后再改。"""
 
 HOLD: dict[str, dict[Section, dict[str, Any]]] = {
     "30m": {
