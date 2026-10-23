@@ -112,6 +112,8 @@ class ThreeWayReconciler:
         self._gone_rounds: dict[str, int] = {}
         self._flat_rounds: dict[str, int] = {}
         self._extra_seen: dict[str, int] = {}
+        self._closing_rounds: dict[str, int] = {}
+        """正在平仓的持仓连续几轮还没结算完。"""
         """同一笔多出来的保命止损（order_id）连续看到几轮。"""
         self._rec = recorder
         self._close_unknown = close_unknown_positions
@@ -145,6 +147,14 @@ class ThreeWayReconciler:
             raise ReconcileError(str(e)) from e
 
         live = self._registry.live()
+        # 正在平仓（平仓单已发、执行器还没结算）：币安已平、账本还没结是正常的几秒，
+        # 第 1 轮不报「数量对不上」「执行器异常」，连续 2 轮还在平才报
+        self._closing_rounds = {
+            t.record.position_id: self._closing_rounds.get(t.record.position_id, 0) + 1
+            for t in live
+            if t.record.status is PositionStatus.CLOSING
+        }
+        settling = {pid for pid, n in self._closing_rounds.items() if n < 2}
         stops_by_cid = {s.client_order_id: s for s in stops}
         # 带方向的数量（多 +、空 −）；单向持仓每个币只有一个仓位。exchange_qty 是绝对值
         signed: dict[str, float] = {}
@@ -185,6 +195,8 @@ class ThreeWayReconciler:
                 # 方向反了：补保命止损（按账本方向下只减仓单）会失败，先处理反手仓
                 reversed_.add(rec.symbol)
                 issues.append(await self._side_mismatch(rec, exchange_positions))
+                continue
+            if rec.position_id in settling:
                 continue
             tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + rec.quantity
             if rec.status is not PositionStatus.OPEN:
@@ -255,7 +267,11 @@ class ThreeWayReconciler:
             if live_executor.get(pid) is None or live_executor[pid] in running_now:
                 self._gone_rounds.pop(pid, None)
         for t in live:
-            if t.record.position_id in external or t.record.symbol in reversed_:
+            if (
+                t.record.position_id in external
+                or t.record.position_id in settling
+                or t.record.symbol in reversed_
+            ):
                 continue
             if t.record.executor_id and t.record.executor_id not in running_ids:
                 rec = t.record
