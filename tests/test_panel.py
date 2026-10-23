@@ -149,6 +149,8 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert k.equity_source == "hummingbot" and k.equity_usdt == pytest.approx(10_080.0)
     # 日初权益取熔断器记的 10000（和保镖同一口径），不取账本的 9000
     assert k.day_pnl_usdt == pytest.approx(80.0) and k.day_pnl_pct == pytest.approx(0.8)
+    # 今日盈亏拆成 已平（今天平的净盈亏）+ 浮动（还没平的浮盈）+ 其它
+    assert k.day_closed_usdt == pytest.approx(12.5) and k.day_floating_usdt == pytest.approx(-20.0)
     assert k.to_halt_usdt == pytest.approx(10_080 - 10_000 * (1 - RISK.daily_loss_halt_pct / 100))
     assert not k.halted
     assert k.exposure_x == pytest.approx(68044.0 * 0.015 / 10_080)

@@ -126,7 +126,7 @@ function statusBar() {
   return `<div class="status">
     <div class="lamps">${lamps}</div>
     <div class="kpi"><small>总资产 · 含浮盈浮亏${src}</small><b>${money(k.equity_usdt)} <span class="u">U</span></b></div>
-    <div class="kpi click" ${clickable("daypnl")} title="点开看明细：平仓毛利、手续费、资金费、持仓浮盈变化、AI 费"><small>今日盈亏 · 账户 <span class="dim">ⓘ 明细</span></small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b>${k.as_of ? `<small class="dim">数据截至 ${hms(k.as_of)}</small>` : ""}</div>
+    <div class="kpi click" ${clickable("daypnl")} title="点开看明细：平仓毛利、手续费、资金费、持仓浮盈变化、AI 费"><small>今日盈亏 · 账户 <span class="dim">ⓘ 明细</span></small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b>${dayParts(k)}${k.as_of ? `<small class="dim">数据截至 ${hms(k.as_of)}</small>` : ""}</div>
     <div class="kpi"><small>离熔断（−${k.halt_pct}%）</small><b class="${k.halted ? "down" : ""}" style="font-size:15px">${k.halted ? "已熔断" : k.to_halt_usdt == null ? "—" : "还差 " + money(k.to_halt_usdt, 0) + " U"}</b><div class="meter ${k.halted ? "full" : ""}"><span style="width:${pct}%"></span></div></div>
     <div class="kpi"><small title="所有持仓名义价值（含杠杆）÷ 本金">敞口（含杠杆）</small><b style="font-size:15px">${k.exposure_x == null ? "—" : k.exposure_x.toFixed(2)} / ${k.max_exposure_x} 倍</b></div>
   </div>`;
@@ -225,6 +225,12 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
 }
 
 // 今日盈亏明细：账户今日盈亏 = 平仓毛利 + 手续费 + 资金费 + 持仓浮盈变化（含转账等）；AI 费不在账户里，另外扣
+// 今日盈亏直接拆一行：已平（净，同历史页交易净盈亏）+ 浮动（没平的单现在的浮盈）+ 其它（资金费、0 点前已有持仓的浮盈等）
+function dayParts(k) {
+  if (k.day_pnl_usdt == null || k.day_closed_usdt == null || k.day_floating_usdt == null) return "";
+  const rest = k.day_pnl_usdt - k.day_closed_usdt - k.day_floating_usdt;
+  return `<small class="dim num">已平 ${signed(k.day_closed_usdt, 1)} · 浮动 ${signed(k.day_floating_usdt, 1)} · 其它 ${signed(rest, 1)}</small>`;
+}
 async function showDayPnl() {
   dlg(`<h3>今日盈亏明细</h3><div class="dim">读取中…</div>`);
   let f;
@@ -910,7 +916,7 @@ function posSection(list) {
         const [s, sc] = SIDE[p.side] || [p.side, ""];
         const lb = LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单";
         const lbBad = p.lifeboat_status !== "active";
-        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.entry_price)}</b>
+        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
           <span class="pnl ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</span></div>
           <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
           <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
@@ -1004,7 +1010,7 @@ P.positions = (arg) => {
       <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r">现价</th><th class="r" title="百分比按名义算，不乘杠杆">浮盈（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
     <section class="card mt">
-      <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.entry_price)} · 详情</h2>
+      <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span></div>
@@ -1013,7 +1019,7 @@ P.positions = (arg) => {
 };
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
-let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [];
+let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false;
 function mountChart() {
   const host = $("#kchart-host");
   if (!host || !window.LightweightCharts) return;
@@ -1053,10 +1059,24 @@ async function loadKlines(force) {
   if (!series) return;
   const p = pageData.positions.find((x) => x.position_id === arg) || pageData.positions[0];
   const key = `${p.position_id}|${S.tf}`;
+  const switched = key !== chartKey;
+  if (switched) {
+    // 换了一笔 / 换了周期：先清掉上一个币的 K 线和价格线，价格轴重新自动缩放（不然会停在上一个币的价格区间）
+    chartKey = key;
+    series.setData([]);
+    priceLines.forEach((l) => series.removePriceLine(l));
+    priceLines = [];
+    linePrices = [];
+    chart.priceScale("right").applyOptions({ autoScale: true });
+    needFit = true;
+  }
+  const seq = ++klineSeq;
   try {
     const r = await fetch(`/api/klines?symbol=${encodeURIComponent(p.symbol)}&interval=${S.tf}`, { cache: "no-store" });
     if (!r.ok) throw new Error(String(r.status));
-    series.setData(await r.json());
+    const bars = await r.json();
+    if (seq !== klineSeq || key !== chartKey) return; // 等的时候又换了：这份是旧币的，不画
+    series.setData(bars);
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1073,8 +1093,8 @@ async function loadKlines(force) {
     [p.stop_loss_price, "止损", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
   ].filter(([v]) => v != null).map(([v, t, color, style]) => series.createPriceLine({ price: v, title: t, color, lineStyle: style, lineWidth: 1, axisLabelVisible: true }));
-  if (force || key !== chartKey) chart.timeScale().fitContent();
-  chartKey = key;
+  if (force || needFit) chart.timeScale().fitContent();
+  needFit = false;
 }
 
 /* ---------- 团队 */
