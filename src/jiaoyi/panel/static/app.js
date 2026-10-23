@@ -611,7 +611,7 @@ P.pool = () => {
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
-const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "mini（最快）", small: "small", base: "base（最准）" };
+const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "2h": "2 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
@@ -685,17 +685,37 @@ const PLAIN = {
   refresh_lead_min: "作战卡到期前几分钟开会换新卡",
   symbol_timeout_s: "一个币的会最多开几秒",
   min_refresh_gap_min: "两轮会至少隔几分钟",
+  sim_environment: "模拟盘连币安哪个环境",
+  data_dir: "数据保存在哪个文件夹",
+  jev_provider: "拍板人走哪个通道",
+  jev_model: "拍板人用哪个模型版本",
 };
 const plainOf = (i) => PLAIN[i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key];
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
-const techHint = (i) => (plainOf(i) && i.label && i.label !== i.key ? esc(i.label) + " · " : "") + esc(i.key);
-const NULL_AS = { max_cards_per_round: "跟随 card_pick_max" };
-const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : i && i.choices && i.choices.length ? esc(choiceLabel(i.key, v)) : esc(v));
-const pinHint = (i) => (i.pinned ? ` · <span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? " · 跟档位走" : "");
+// 合约里的说明带英文选项名的，换一句中文
+const HINT = {
+  jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
+  jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
+  jev_usd_per_mtok: "按用量算钱，用来统计花费",
+  sim_environment: "Demo Trading 是币安现在的模拟盘；旧测试网已停用",
+  mode_predictor: "按需 = 只算作战卡里和有持仓的币；全算 = 候选池每个币都算（费电脑）",
+  size_policy: "固定 = 一直用下面选的模型；自适应 = 排队多时自动换小模型",
+  model_size: "选“固定”时用这个",
+  adaptive_base_max_queue: "选“自适应”时生效",
+  adaptive_mini_min_queue: "选“自适应”时生效；介于两者之间用中模型",
+  profile: "在下面的“持仓档位”卡片里一键切换",
+  data_dir: "决策记录、状态文件都存在这里",
+};
+// 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
+const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
+const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
+const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样" };
+const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
+const pinHint = (i) => (i.pinned ? `<span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? "跟档位走" : "");
 const unpinBtn = (sec, i) => (sec && i.pinned && pageData && pageData.writable ? `<button class="btn b-sm" ${clickable("unpin", sec + ":" + i.key)}>恢复档位默认</button>` : "");
-const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${techHint(i)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
+const setRows = (items, sec) => items.map((i) => `<div class="fr"><label title="${esc(i.key)}">${esc(label(i))}<span class="hint">${[techHint(i), pinHint(i)].filter(Boolean).join(" · ")}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
 
-const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
+const SECTION = { risk: "硬上限", category: "每类币仓位上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
 const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
 
 function sectionItems(d, sec) {
@@ -708,7 +728,7 @@ function sectionItems(d, sec) {
 
 const PROFILE_NOTE = { "2h": "单笔最长 2 小时（默认）", "60m": "单笔最长 1 小时", "30m": "单笔最长 30 分钟", "15m": "单笔最长 15 分钟" };
 function pinnedList(pf) {
-  return Object.entries(pf.pinned).flatMap(([sec, m]) => Object.keys(m).map((k) => `${sec === "app" ? "" : sec + "."}${k}`));
+  return Object.entries(pf.pinned).flatMap(([sec, m]) => Object.keys(m).map((k) => PLAIN[k] || k));
 }
 function profileCard(d) {
   const pf = d.profile;
@@ -771,7 +791,7 @@ function editSettings(sec) {
   const d = pageData;
   if (!d || !d.writable) return;
   const items = sectionItems(d, sec);
-  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${techHint(i)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
+  const rows = items.map((i) => `<div class="fr"><label title="${esc(i.key)}">${esc(label(i))}<span class="hint">${[techHint(i), i.nullable ? "可留空" : ""].filter(Boolean).join(" · ")}</span></label>${editInput(i)}</div>`).join("");
   const c = data.control;
   ask(`修改${SECTION[sec]}`, `<div class="form edit scroll tall">${rows}</div>
     <div class="dim small">保存前整份校验，不合格不写；写前留备份。主程序重启后生效。</div>${pwField(c)}`, "保存", false, async () => {
@@ -816,7 +836,7 @@ P.settings = () => {
   const changes = d.changes.length
     ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old, { key: x.key, choices: [0], nullable: true })} → ${fmtVal(x.new, { key: x.key, choices: [0], nullable: true })}</span></div>`).join("")}</div>`
     : '<div class="dim">还没有在网页上改过。</div>';
-  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(KEY_LABEL[k] || KEY_NOTE[k] || k)}<span class="hint">${esc(k)}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
+  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label title="${esc(k)}">${esc(KEY_LABEL[k] || KEY_NOTE[k] || k)}<span class="hint">${esc(KEY_HELP[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
     <section class="card"><div class="ch"><h2>运行模式</h2></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
@@ -826,14 +846,15 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
-      <div class="lbl">每一类币的仓位加起来最多是本金的几倍 ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
+      <div class="lbl">每一类币的仓位加起来最多是本金的几倍 ${editBtn(d, "category")}</div>
+      <div class="dim small">比如“山寨币 1 倍”：所有山寨币的仓位加起来不超过本金的 1 倍。同一类币常常一起涨跌，这样一类出事不会亏太多。</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
       <div class="foot">在 Mac mini 本机打开 <a href="/setup">首次设置</a> 写入（或终端 jiaoyi setup-keys）。</div></section>
     <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app, "app")}</div></section>
     <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop, "fast_loop")}</div></section>
     <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
-      <div class="foot">开关在“运行配置和开关”里（predictor_enabled）。</div></section>
-    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">config/slow.toml ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule, "schedule")}</div></section>
+      <div class="foot">开关在“运行配置和开关”里（“用不用 Kronos 预测价格”）。</div></section>
+    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">多久开一次会 ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule, "schedule")}</div></section>
     ${profileCard(d)}
     <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>
