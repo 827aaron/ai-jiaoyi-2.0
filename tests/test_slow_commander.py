@@ -18,13 +18,16 @@ from jiaoyi.contracts import (
     Outcome,
     Range,
     Role,
+    Side,
     SignalKind,
     SizeTier,
     SymbolPool,
     SymbolPoolEntry,
 )
+from jiaoyi.contracts.position import PositionRecord
 from jiaoyi.core.config import load_risk_config
 from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.slow.commander import (
     Analysis,
     BattleCardCommander,
@@ -515,8 +518,13 @@ async def test_held_symbol_stays_on_card_watch_only_when_not_picked_or_failed(
     eng.picks, eng.fail = ["AAUSDT", "CCUSDT"], {"AAUSDT"}  # AA 开会失败，BB 没被挑中
     card = await c.refresh(p, "到期前")
     by = {s.symbol: s for s in card.symbols}
-    assert by["AAUSDT"].bias is Bias.NO_TRADE and by["BBUSDT"].bias is Bias.NO_TRADE
-    assert by["CCUSDT"].bias is Bias.LONG
+    for sym in ("AAUSDT", "BBUSDT"):
+        assert by[sym].bias is Bias.LONG and by[sym].allowed_signals == []  # 不开新仓，方向不动
+    assert by["CCUSDT"].bias is Bias.LONG and by["CCUSDT"].allowed_signals
+    # 持仓管家不能因为这张卡平掉它们
+    for sym in ("AAUSDT", "BBUSDT"):
+        pos = PositionRecord.model_construct(symbol=sym, side=Side.LONG)
+        assert JevKeeper._card_rule(pos, card, clock[0]) is None
 
 
 async def test_failed_symbol_without_position_is_dropped(tmp_path: Path, now: datetime) -> None:

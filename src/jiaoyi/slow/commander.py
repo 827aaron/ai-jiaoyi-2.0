@@ -219,12 +219,13 @@ class BattleCardCommander:
         )
 
     def set_held(self, symbols: Collection[str]) -> None:
-        """有持仓的币：它们必须一直在卡上（继续盯或只看不做），不然持仓管家会判“不再盯”而平仓。"""
+        """有持仓的币：它们必须一直在卡上（继续盯，不开新仓），不然持仓管家会判“不再盯”而平仓。"""
         self._held = frozenset(symbols)
 
     @staticmethod
     def _watch_only(cs: CardSymbol) -> CardSymbol:
-        return cs.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
+        """留在卡上继续盯、不开新仓：方向不动（NO_TRADE 会被持仓管家当平仓理由），只清空信号。"""
+        return cs.model_copy(update={"allowed_signals": []})
 
     def block_symbol(self, symbol: str, reason: str) -> None:
         """封掉一个币的新开仓（例如币安公告要下架它）。保镖只认作战卡，所以这里改卡。
@@ -391,7 +392,7 @@ class BattleCardCommander:
         base_version = prev.version if prev is not None and same_day else 0
         symbols: dict[str, CardSymbol] = dict(reused)
         # 本轮还没轮到 / 开会失败的币：上一张卡的指令先留着，开完哪个换哪个，不然持仓管家会看到
-        # 卡上暂时没有这个币而判“不再盯”。上一张卡已过期就不沿用旧指令，只给有持仓的币留“只看不做”
+        # 卡上暂时没有这个币而判“不再盯”。上一张卡已过期就不沿用旧指令，只给有持仓的币留“不开新仓”
         old_ok = prev is not None and prev.is_valid(now)
         for e in to_meet:
             old = prev.for_symbol(e.symbol) if prev is not None else None
@@ -401,7 +402,7 @@ class BattleCardCommander:
                 symbols[e.symbol] = clamp_to_risk(old, self._risk, self._stop)
             elif e.symbol in self._held:
                 symbols[e.symbol] = self._watch_only(old)
-        # 有持仓但这轮没入选的币：留在卡上，只看不做，别让管家把它当“不再盯”
+        # 有持仓但这轮没入选的币：留在卡上，不开新仓、方向不动，别让管家把它当“不再盯”
         for sym in self._held:
             old = prev.for_symbol(sym) if prev is not None else None
             if sym not in symbols and old is not None:
