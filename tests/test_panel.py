@@ -719,36 +719,71 @@ def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
         assert client.get("/api/meeting/btc..").status_code == 404
 
 
-def test_team_progress_follows_latest_signal_chain() -> None:
-    """流程图的点：出错 > 正在做 > 信号链上有的 = 做完、链后面的 = 等待；没持仓的看管 = 等待。"""
-    from jiaoyi.panel.pages import _latest_chain, _progress, _role_card, _RunInfo
+def test_team_progress_follows_this_round_not_heartbeat() -> None:
+    """流程图的点 = 本轮走到哪：心跳正常不再等于绿点（Aaron：哨兵什么都没干就绿了）。"""
+    from jiaoyi.panel.pages import _latest_chain, _progress, _role_card, _round_start, _RunInfo
 
     run = _RunInfo(True, None, frozenset(), "Asia/Bangkok")
 
-    def rec(role: c.Role, sig: str, mins: int) -> c.DecisionRecord:
+    def rec(role: c.Role, sig: str | None, mins: int, **kw: object) -> c.DecisionRecord:
         ts = NOW - timedelta(minutes=mins)
         return c.DecisionRecord(
-            record_id=f"{role}{sig}", ts=ts, role=role, outcome=c.Outcome.PASS, summary="x",
-            signal_id=sig,
+            record_id=f"{role}{sig}{mins}", ts=ts, role=role, outcome=c.Outcome.PASS, summary="x",
+            signal_id=sig, **kw,
         )  # fmt: skip
 
-    s1 = [rec(c.Role.SENTINEL, "s1", 9), rec(c.Role.GATE, "s1", 8), rec(c.Role.RISK_GUARD, "s1", 7)]
-    records = [*s1, rec(c.Role.SENTINEL, "s2", 3), rec(c.Role.GATE, "s2", 2)]
-    chain = _latest_chain(records)
+    card = rec(c.Role.COMMANDER, None, 20, card_id="v20")
+    card = card.model_copy(update={"outcome": c.Outcome.ACTION})
+    old = [
+        rec(c.Role.SENTINEL, "s0", 40),
+        rec(c.Role.GATE, "s0", 39),
+        rec(c.Role.RISK_GUARD, "s0", 38),
+    ]
+    # 作战卡之后还没有新信号：上一轮的链不算，② 全部等待
+    assert _latest_chain([*old, card], _round_start([*old, card])) is None
+    records = [*old, card, rec(c.Role.SENTINEL, "s2", 3), rec(c.Role.GATE, "s2", 2)]
+    chain = _latest_chain(records, _round_start(records))
     assert chain == {c.Role.SENTINEL, c.Role.GATE}
     assert _latest_chain([]) is None
 
-    def prog(role: c.Role, holding: int = 0, **kw: object) -> str:
+    def prog(role: c.Role, holding: int = 0, ch: set[c.Role] | None = chain, acted: bool = False,
+             **kw: object) -> str:  # fmt: skip
         st = c.ModuleStatus(role=role, health=c.Health.OK, ts=NOW, headline="")
         card = _role_card(role, st, NOW, run).model_copy(update=kw)
-        return _progress(card, st, chain, holding, NOW, run.tz)
+        return _progress(card, st, ch, holding, acted, NOW, run.tz)
 
     assert prog(c.Role.GATE) == "done" and prog(c.Role.RISK_GUARD) == "wait"
-    assert prog(c.Role.EXECUTOR) == "wait"
+    assert prog(c.Role.GATE, ch=None) == "wait" and prog(c.Role.EXECUTOR) == "wait"
     assert prog(c.Role.RISK_GUARD, doing="刚刚：算仓位") == "doing"
     assert prog(c.Role.GATE, state="bad", doing="刚刚：x") == "err"
-    assert prog(c.Role.KEEPER) == "wait" and prog(c.Role.RECONCILER) == "done"
-    assert prog(c.Role.KEEPER, holding=1) == "done"
+    # 心跳正常但没活 = 等待，不是绿点
+    for role in (c.Role.KEEPER, c.Role.PATROL, c.Role.RECONCILER, c.Role.LIFEBOAT):
+        assert prog(role) == "wait"
+    assert prog(c.Role.SENTINEL) == "wait" and prog(c.Role.ALERTING) == "wait"
+    assert prog(c.Role.ALERTING, acted=True) == "done"
+    assert prog(c.Role.SCREENER) == "done" and prog(c.Role.COMMANDER) == "done"
+    assert prog(c.Role.SCREENER, state="off") == "wait"
+
+
+def test_team_dots_after_card_with_no_signal(tmp_path: Path) -> None:
+    """出卡后没信号：哨兵 / 盘口员在盯（蓝），拍板人 / 保镖 / 执行器等待，没持仓第三层等待。"""
+    from jiaoyi.panel.pages import build_team
+
+    status = {
+        r.value: c.ModuleStatus(role=r, health=c.Health.OK, ts=NOW, headline="") for r in c.Role
+    }
+    dump = {k: v.model_dump(mode="json") for k, v in status.items()}
+    (tmp_path / "module_status.json").write_text(json.dumps(dump))
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    team = build_team(files, NOW, None)
+    prog = {r.role: r.progress for r in team.roles}
+    doing = {r.role: r.doing for r in team.roles}
+    assert prog[c.Role.SENTINEL] == "doing" and doing[c.Role.SENTINEL] == "盯着信号"
+    assert prog[c.Role.BOOK_READER] == "doing"
+    for role in (c.Role.GATE, c.Role.RISK_GUARD, c.Role.EXECUTOR, c.Role.KEEPER,
+                 c.Role.PATROL, c.Role.RECONCILER, c.Role.LIFEBOAT):  # fmt: skip
+        assert prog[role] == "wait", role
+    assert prog[c.Role.SCREENER] == "done"
 
 
 def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:

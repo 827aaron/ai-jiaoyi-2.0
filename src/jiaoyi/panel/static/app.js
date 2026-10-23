@@ -707,9 +707,19 @@ function tfCardNode() {
   const a = !c ? "还没有作战卡" : c.valid ? `${tradable} 个可做 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}` : `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）`;
   return { key: "card", html: `<span class="nm">作战卡${c && c.version ? " v" + c.version : ""}</span><small>${esc(a)}</small><small class="cnt">关键价位、止损范围</small>`, cls: "doc", act: c ? clickable("card") : "" };
 }
+// 心跳好坏单独用角标（点只表示流程走到哪）
+function hbBadge(r) {
+  const label = {
+    ok: "心跳正常",
+    slow: r.status.startsWith("等待首次") ? "等待首次运行" : "降级运行",
+    bad: r.status.startsWith("无心跳") ? "无心跳" : "失败",
+    off: "未启用",
+  }[r.state];
+  return label ? `<em class="hb ${r.state}" title="${esc(r.status)}">${label}</em>` : "";
+}
 function tfNode(r, selected) {
   const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.status;
-  return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}</span>
+  return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}${hbBadge(r)}</span>
     ${r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
     <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
 }
@@ -726,11 +736,11 @@ function teamFlow(d) {
   // 盯持仓是常态，放最后说；其余按流程顺序最多说两处
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
   const main = busy.filter((r) => !r.doing.startsWith("盯着"));
-  const watching = busy.find((r) => r.doing.startsWith("盯着"));
+  const watching = busy.find((r) => r.doing.endsWith("笔持仓"));
   const now = main.length
     ? `现在走到：${main.slice(0, 2).map((r) => `${esc(r.name)} ${esc(r.doing)}`).join("；")}${main.length > 2 ? ` 等 ${main.length} 处` : ""}`
-    : watching ? `现在走到：看着持仓（${esc(watching.doing)}）` : "现在都在等下一个信号";
-  const legend = `<div class="tf-legend" aria-label="图例">${["done", "doing", "wait", "err"].map((p) => `<span class="lg"><i class="dot ${p}"></i>${{ done: "这一轮已完成", doing: "正在做", wait: "等待（还没轮到 / 没活）", err: "出错或没心跳" }[p]}</span>`).join("")}<span class="tf-now">${now}</span></div>`;
+    : watching ? `现在走到：看着持仓（${esc(watching.doing)}）` : "现在走到：哨兵盯着信号，等下一个机会";
+  const legend = `<div class="tf-legend" aria-label="图例">${["done", "doing", "wait", "err"].map((p) => `<span class="lg"><i class="dot ${p}"></i>${{ done: "这一轮已完成", doing: "正在做", wait: "等待（还没轮到 / 没活）", err: "出错或没心跳" }[p]}</span>`).join("")}<span class="lg"><em class="hb ok">心跳正常</em>右上角 = 模块心跳</span><span class="tf-now">${now}</span></div>`;
   const known = new Set([...Object.keys(TF_POS)]);
   const extra = d.roles.filter((r) => !known.has(r.role));
   const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");

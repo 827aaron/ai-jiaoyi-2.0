@@ -363,6 +363,11 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tf-node.wait .nm { color: var(--dim); }
 .tf-node.err { border-color: var(--down); }
 .tf-node.doc { border-style: dashed; background: var(--fill); }
+.hb { margin-left: auto; font-style: normal; font-weight: 500; font-size: 10.5px; line-height: 16px; padding: 0 6px; border-radius: 8px; white-space: nowrap; color: var(--dim); background: var(--fill); }
+.hb.ok { color: color-mix(in srgb, var(--ok-lamp) 75%, var(--hi)); background: color-mix(in srgb, var(--ok-lamp) 14%, transparent); }
+.hb.slow { color: var(--warn); background: var(--warn-soft); }
+.hb.bad { color: var(--down); background: color-mix(in srgb, var(--down) 14%, transparent); }
+.tf-legend .hb { margin: 0 4px 0 0; }
 .tf-node.on { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .tf-watch { position: absolute; inset: -6px; border: 1.5px dashed var(--line2); border-radius: 16px; pointer-events: none; }
 .tf-watch span { position: absolute; right: 14px; bottom: -9px; background: var(--card); padding: 0 8px; font-size: 11.5px; color: var(--dim); }
