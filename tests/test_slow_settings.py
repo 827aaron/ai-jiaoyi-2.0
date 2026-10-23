@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
     cfg = load_slow_config(tmp_path / "nope.toml")  # 默认 2h 档
-    assert cfg.engine_settings() == TradingAgentsSettings()
+    assert cfg.engine_settings() == TradingAgentsSettings(max_tokens=None, json_max_tokens=None)
     kw = cfg.commander_kwargs()
     assert kw["concurrency"] == 8
     assert kw["ttl"] == timedelta(hours=2)

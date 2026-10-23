@@ -343,3 +343,122 @@ def test_openrouter_request_body_carries_usage_and_reasoning() -> None:
     bare = SimpleNamespace()
     apply_openrouter_options(bare, "high")  # 原来没有 extra_body 也行
     assert bare.extra_body["reasoning"] == {"effort": "high"}
+
+
+class _Msg:
+    def __init__(self, content: str, finish: str = "stop", tool_calls: list[object] | None = None):
+        self.content, self.response_metadata = content, {"finish_reason": finish}
+        self.tool_calls = tool_calls or []
+
+
+class _FakeLlm:
+    def __init__(self, replies: list[_Msg]) -> None:
+        self.replies, self.calls = replies, []  # type: ignore[var-annotated]
+        self.extra_body = {"usage": {"include": True}, "reasoning": {"effort": "low"}}
+
+    def invoke(self, inp: object, config: object = None, **kw: object) -> _Msg:
+        self.calls.append((inp, kw))
+        return self.replies.pop(0)
+
+
+def test_reply_problem_kinds() -> None:
+    from jiaoyi.slow.tradingagents_engine import reply_problem
+
+    assert reply_problem(_Msg("很长的回答" * 10), 20) is None
+    assert reply_problem(_Msg("被截断了", finish="length"), 20) == "length"
+    assert reply_problem(_Msg("  "), 20) == "empty"
+    assert reply_problem(_Msg("太短"), 20) == "short"
+    assert reply_problem(_Msg("", tool_calls=[object()]), 20) is None  # 调工具的回答正文可以空
+
+
+def test_bad_step_is_retried_once_without_reasoning() -> None:
+    from jiaoyi.slow.tradingagents_engine import RETRY_HINT, CostMeter, add_retry
+
+    meter = CostMeter({"flash": (0.3, 1.2), "pro": (1.0, 4.0)})
+    meter.truncated = 1  # 回调已经把这次截断记上了
+    seen: list[str] = []
+    meter.on_retry = seen.append
+    llm = _FakeLlm([_Msg("半句", finish="length"), _Msg("这是重试后给出的完整结论" * 3)])
+    add_retry(llm, meter, reasoning_off=True, min_chars=20)
+    out = llm.invoke("请分析", {"callbacks": []}, max_tokens=100)
+    assert out.content.startswith("这是重试")
+    (first_in, first_kw), (second_in, second_kw) = llm.calls
+    assert first_in == "请分析" and "extra_body" not in first_kw
+    assert second_in == f"请分析\n\n{RETRY_HINT}"
+    assert second_kw["extra_body"]["reasoning"] == {"enabled": False}  # type: ignore[index]
+    assert second_kw["extra_body"]["usage"] == {"include": True}  # type: ignore[index]
+    assert second_kw["max_tokens"] == 100
+    assert (meter.retries, meter.truncated, seen) == (1, 0, ["length"])  # 重试成功，不再算截断
+    # 好回答不重试；重试仍坏就原样交回、截断计数保留
+    ok = _FakeLlm([_Msg("没问题的完整回答" * 5)])
+    add_retry(ok, meter, reasoning_off=False, min_chars=20)
+    ok.invoke([("human", "x")])
+    assert len(ok.calls) == 1
+    meter.truncated = 1
+    bad = _FakeLlm([_Msg("", finish="length"), _Msg("", finish="length")])
+    add_retry(bad, meter, reasoning_off=False, min_chars=20)
+    bad.invoke("q")
+    assert "extra_body" not in bad.calls[1][1] and meter.truncated == 1
+
+
+def test_model_max_tokens_from_openrouter_info_or_fallback() -> None:
+    from jiaoyi.slow.tradingagents_engine import FALLBACK_MAX_TOKENS, model_max_tokens
+
+    data = [
+        {"id": "a/x", "top_provider": {"max_completion_tokens": 900_000}},
+        {"id": "a/y", "top_provider": {"max_completion_tokens": 131_072}},
+        {"id": "a/none", "top_provider": {"max_completion_tokens": None}},
+    ]
+    assert model_max_tokens("openrouter", ["a/x"], lambda: data) == 900_000
+    assert model_max_tokens("openrouter", ["a/x", "a/y"], lambda: data) == 131_072  # 取小
+    assert (
+        model_max_tokens("openrouter", ["a/none"], lambda: data)
+        == FALLBACK_MAX_TOKENS["openrouter"]
+    )
+    assert model_max_tokens("openrouter", ["a/missing"], lambda: data) == 384_000
+
+    def boom() -> list[dict[str, object]]:
+        raise OSError("断网")
+
+    assert model_max_tokens("openrouter", ["a/x"], boom) == 384_000
+    assert model_max_tokens("deepseek", ["deepseek-flash"], boom) == 8192
+
+
+def test_record_response_reports_reasoning_tokens() -> None:
+    from types import SimpleNamespace
+
+    from jiaoyi.slow.tradingagents_engine import CostMeter
+
+    meter = CostMeter({"flash": (0.3, 1.2), "pro": (1.0, 4.0)})
+    calls: list[tuple[str | None, int, int]] = []
+    meter.on_call = lambda r, t, rt: calls.append((r, t, rt))
+    msg = SimpleNamespace(
+        response_metadata={"finish_reason": "stop"},
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 500,
+            "output_token_details": {"reasoning": 300},
+        },
+    )
+    gen = SimpleNamespace(message=msg, generation_info={"finish_reason": "stop"})
+    meter.record_response(SimpleNamespace(llm_output={}, generations=[[gen]]))
+    assert calls == [("stop", 500, 300)]
+    raw = SimpleNamespace(
+        response_metadata={"token_usage": {"completion_tokens_details": {"reasoning_tokens": 7}}},
+        usage_metadata={"output_tokens": 9},
+    )
+    meter.record_response(
+        SimpleNamespace(
+            llm_output={}, generations=[[SimpleNamespace(message=raw, generation_info={})]]
+        )
+    )
+    assert calls[1][2] == 7
+
+
+def test_settings_max_tokens_none_means_model_max() -> None:
+    from jiaoyi.slow.settings import SlowConfig
+
+    s = SlowConfig().engine_settings()
+    assert s.max_tokens is None and s.json_max_tokens is None and s.retry_bad_steps
+    s2 = SlowConfig.model_validate({"meeting": {"max_tokens": 4096}}).engine_settings()
+    assert (s2.max_tokens, s2.json_max_tokens) == (4096, 8192)

@@ -281,3 +281,12 @@ Mac 实测（#98 把 `max_tokens` 改回 8192 后）：deepseek-v4.1-flash 是�
 ### 总盘会实况（`meeting_live/_MARKET.json`）
 
 总盘会（大盘基调 + 挑币）和单币会议一样落盘，固定名字 `_MARKET`，字段同单币格式（status / cost_usd / steps…）。steps 依次是：`input`（候选池摘要：每个币的类别、分数、档位、理由，以及固定 / 持仓强制开会几个、还剩几个名额）、`pick`（大盘判断 + 挑中的币和一句理由）、`filter`（没进会议的币和原因：固定 / 持仓强制开会、军师没挑、超出名额、N 分钟前开过会沿用旧指令）。失败时 status = failed，error 里是原因。面板的会议页读得到它。
+
+## 回答出问题自动重试、max_tokens 默认取模型最大
+
+Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 次降到 3 次，但个别币（LINK / SOL）仍有几步被截断或回答为空，整场失败。现在：
+
+- **自动重试一次**（`[meeting] retry_bad_steps`，默认开）：任何一步模型回答 `finish_reason=length`、正文为空、或少于 `retry_min_chars`（默认 20）字（带工具调用的回答不算），自动再问一次：提示里追加「直接给结论，不要思考过程。」，走 OpenRouter 时请求同时带 `reasoning: {"enabled": false}`（关掉推理）。重试拿到好回答就继续，那次截断不再让整场失败；重试仍不行才照旧整场失败（#98 的检查）。实况里 `retries` / `retry_reasons` 记重试次数和原因。
+- **`llm_calls` 多记 `reasoning_tokens`**：每次调用其中推理用了多少 token（来自 OpenRouter 的 `completion_tokens_details.reasoning_tokens`），看推理是不是在吃输出额度。
+- **`max_tokens` 默认取模型最大输出**（slow.toml `[meeting] max_tokens` 不写）：引擎启动时从 `https://openrouter.ai/api/v1/models` 读该模型的 `top_provider.max_completion_tokens`（deepseek-v4.1-flash 约 94 万；quick / deep 两个模型取小）；读不到、没有这个模型时 OpenRouter 用 384000，直连 DeepSeek 用 8192。写了数值就按你写的（出作战指令 / 挑币两步仍至少 8192）。注意：不设上限后，推理失控时一次回答最多能烧到这个长度——`reasoning_effort` 和重试关推理就是用来兜这个的，花费另有日上限。
+- `reasoning_effort` 默认值先不动（仍 `low`），等重试的数据再定是否改 `none`。

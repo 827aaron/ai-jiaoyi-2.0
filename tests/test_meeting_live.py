@@ -121,6 +121,16 @@ def test_note_call_records_finish_reason_and_truncation(tmp_path: Path) -> None:
     doc = read(tmp_path)
     assert doc["truncated"] == 1
     assert doc["llm_calls"] == [
-        {"finish_reason": "stop", "output_tokens": 1500},
-        {"finish_reason": "length", "output_tokens": 4096},
+        {"finish_reason": "stop", "output_tokens": 1500, "reasoning_tokens": 0},
+        {"finish_reason": "length", "output_tokens": 4096, "reasoning_tokens": 0},
     ]
+
+
+def test_note_retry_and_reasoning_tokens(tmp_path: Path) -> None:
+    live = MeetingLive(tmp_path, "ETHUSDT")
+    live.note_call("length", 8192, 8000)
+    live.note_retry("length")
+    live.note_call("stop", 300, 0)
+    doc = json.loads((tmp_path / "ETHUSDT.json").read_text(encoding="utf-8"))
+    assert doc["retries"] == 1 and doc["retry_reasons"][0]["why"] == "length"
+    assert doc["llm_calls"][0]["reasoning_tokens"] == 8000
