@@ -565,3 +565,21 @@ def test_llm_and_budget_only_through_setup_wizard(tmp_path: Path) -> None:
         actions.update_config(paths, data, "llm", {"provider": "openrouter"}, PW, NOW)
     with pytest.raises(ActionError, match="首次设置"):
         actions.update_config(paths, data, "budget", {"daily_cost_limit_usd": 99}, PW, NOW)
+
+
+def test_overview_rereads_config_files_when_they_change(tmp_path: Path) -> None:
+    """主程序按新 risk.toml 重启了，面板总览不能还按启动时读的旧上限算“离熔断”。"""
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        old = client.get("/api/overview").json()["kpis"]["halt_pct"]
+        text = paths.risk.read_text(encoding="utf-8")
+        paths.risk.write_text(
+            set_toml_value(text, None, "daily_loss_halt_pct", 15.0), encoding="utf-8"
+        )
+        assert client.get("/api/overview").json()["kpis"]["halt_pct"] == 15.0 != old
+        paths.risk.write_text("broken = [", encoding="utf-8")  # 读坏了沿用上一份
+        assert client.get("/api/overview").json()["kpis"]["halt_pct"] == 15.0
+        assert client.get("/api/overview").json()["control"]["started_at"] is None
+        (data / "runtime.json").write_text('{"started_at": "2026-10-22T06:00:00+00:00"}')
+        ctl = client.get("/api/overview").json()["control"]
+        assert ctl["started_at"] == "2026-10-22T06:00:00+00:00"

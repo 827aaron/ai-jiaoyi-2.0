@@ -244,7 +244,7 @@ def _run(args: argparse.Namespace) -> int:
     print(_profile_line(args, app.app_cfg))
     if caution := _caution_line(risk):
         print(caution)
-    runner = Runner(app, restart_check=lambda: _restart_blocker(args))
+    runner = Runner(app, restart_check=lambda: _restart_blocker(args), restart_exit=_restart_exit)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(runner.run())
     if runner.restart_requested:
@@ -253,6 +253,14 @@ def _run(args: argparse.Namespace) -> int:
 
 
 LAUNCHD_RUN_LABEL = "com.jiaoyi.run"
+
+
+def _restart_exit() -> None:
+    """面板重启：直接结束进程（不等工作线程里没开完的会），launchd KeepAlive 会拉起。"""
+    with contextlib.suppress(Exception):
+        print("面板要求重启：退出，launchd 会重新拉起", flush=True)
+        sys.stderr.flush()
+    os._exit(0)
 
 
 def _restart_blocker(args: argparse.Namespace) -> str | None:

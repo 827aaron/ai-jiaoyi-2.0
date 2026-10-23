@@ -154,6 +154,8 @@ class Control(BaseModel):
     """磁盘上的代码比面板进程启动时新（git pull 了没重启面板）：接口和页面可能对不上。"""
     writable: bool = False
     """面板这次启动有没有拿到配置文件路径（没有就只读）。"""
+    started_at: str | None = None
+    """主程序这次启动的时间（runtime.json）；面板“重启生效”看它变了才算真的重启了。"""
 
 
 class Overview(BaseModel):

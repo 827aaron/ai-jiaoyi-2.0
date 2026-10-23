@@ -160,6 +160,7 @@ function pwField(c) {
 function askCommand(kind, params = {}, what = "") {
   const k = CMD[kind];
   const c = data.control;
+  const startedBefore = c.started_at || null;
   const warn = data.running ? "" : `<div class="note warn">主程序没在运行，指令 60 秒内没人执行就作废。</div>`;
   ask(`${k.title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
     const pw = $("#dlg-pw");
@@ -176,7 +177,7 @@ function askCommand(kind, params = {}, what = "") {
       if (st.status !== "pending") {
         const [t, cl] = STATUS[st.status] || [st.status, ""];
         dlgMsg(`<b class="${cl}">${t}</b>${st.detail ? "　" + esc(st.detail) : ""}`);
-        if (kind === "restart" && st.status === "done") return waitRestart(st.detail);
+        if (kind === "restart" && st.status === "done") return waitRestart(startedBefore);
         poll();
         return;
       }
@@ -185,8 +186,8 @@ function askCommand(kind, params = {}, what = "") {
   });
 }
 
-// 重启：等主程序带着新配置回来（runtime.json 的配置指纹和配置文件一致、心跳恢复）
-async function waitRestart(detail) {
+// 重启：等新进程起来（runtime.json 的启动时间变了、心跳恢复），再看配置指纹对不对得上
+async function waitRestart(startedBefore) {
   const t0 = Date.now();
   while (Date.now() - t0 < 180000) {
     if (!$("#dlg-msg")) return;
@@ -194,8 +195,10 @@ async function waitRestart(detail) {
     await new Promise((r) => setTimeout(r, 2000));
     let ov;
     try { ov = await getJson("/api/overview"); } catch (e) { continue; }
-    if (ov.running && ov.control && ov.control.config_pending === false) {
-      dlgMsg(`<b class="up">已按新配置重启</b>`);
+    const c = ov.control || {};
+    if (ov.running && c.started_at && c.started_at !== startedBefore) {
+      if (c.config_pending === true) dlgMsg("主程序已重启，但配置和文件还是对不上：再点一次「重启生效」，或看 data/logs/。", "down");
+      else dlgMsg(`<b class="up">已按新配置重启</b>　${hm(c.started_at)} 启动`);
       poll();
       return;
     }

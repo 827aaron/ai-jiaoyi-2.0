@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import re
@@ -142,7 +143,17 @@ def control_state(data_dir: str | Path, paths: ConfigPaths | None) -> Control:
         config_pending=config_pending(paths, data_dir) if paths else None,
         pw_set=password_set,
         writable=paths is not None,
+        started_at=runtime_started_at(data_dir),
     )
+
+
+def runtime_started_at(data_dir: str | Path) -> str | None:
+    try:
+        runtime = json.loads((Path(data_dir) / RUNTIME_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    at = runtime.get("started_at") if isinstance(runtime, dict) else None
+    return at if isinstance(at, str) else None
 
 
 # ---------------------------------------------------------------- 配置
@@ -158,6 +169,40 @@ def load_configs(paths: ConfigPaths) -> tuple[RiskConfig, AppConfig, SlowConfig]
     """和主循环同一套读法（slow.toml 缺了用默认值），指纹才对得上。"""
     app = load_app_config(paths.app)
     return load_risk_config(paths.risk), app, load_slow_config(paths.slow, app.profile)
+
+
+class LiveConfigs:
+    """面板页面用的风控 / 运行配置：文件变了（修改时间或大小）就重读，不用重启面板。
+
+    主程序“重启生效”后面板马上显示新上限（例如离熔断按新的日亏百分比算）。
+    文件读坏了沿用上一份能用的，等下一次改动再试。
+    """
+
+    def __init__(self, risk: RiskConfig, app: AppConfig, paths: ConfigPaths | None) -> None:
+        self.risk, self.app = risk, app
+        self._paths = paths
+        self._stamp = self._stat() if paths else None
+
+    def _stat(self) -> tuple[tuple[int, int] | None, ...]:
+        assert self._paths is not None
+        out: list[tuple[int, int] | None] = []
+        for p in (self._paths.risk, self._paths.app, self._paths.slow):
+            try:
+                st = p.stat()
+                out.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                out.append(None)
+        return tuple(out)
+
+    def get(self) -> tuple[RiskConfig, AppConfig]:
+        if self._paths is not None and (stamp := self._stat()) != self._stamp:
+            self._stamp = stamp
+            # 读坏了沿用上一份；设置页会把错误显示出来
+            with contextlib.suppress(ConfigError):
+                self.risk = load_risk_config(self._paths.risk)
+            with contextlib.suppress(ConfigError):
+                self.app = load_app_config(self._paths.app)
+        return self.risk, self.app
 
 
 def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
