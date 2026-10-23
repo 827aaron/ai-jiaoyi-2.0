@@ -57,6 +57,8 @@ class LotRules:
     step_size: float
     min_qty: float
     min_notional: float
+    max_qty: float | None = None
+    """市价单单笔最大数量；超过交易所会拒单，所以按它封顶。None = 不限。"""
 
 
 class LotRulesProvider(Protocol):
@@ -408,6 +410,9 @@ class RiskGuardImpl:
             reasons.append("没有这个合约的交易所精度，拒绝下单")
             return None
         qty = _floor_step(notional / entry, lot.step_size)
+        if lot.max_qty is not None and qty > lot.max_qty:
+            qty = _floor_step(lot.max_qty, lot.step_size)
+            detail["capped_by_max_qty"] = qty
         if qty < lot.min_qty or qty <= 0:
             reasons.append(f"数量 {qty} 低于交易所最小下单量 {lot.min_qty}")
             return None

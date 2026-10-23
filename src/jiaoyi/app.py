@@ -222,6 +222,7 @@ def _build_execution(
             alerter,
             live_gate=LiveGate(Path(app_cfg.data_dir) / "live_gate.json"),
             decision_log=decision_log,
+            close_unknown_positions=app_cfg.reconciler_close_unknown_positions,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:

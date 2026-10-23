@@ -198,6 +198,20 @@ def test_lot_rules_missing_or_too_small(now: datetime) -> None:
     assert not v.approved
 
 
+def test_market_max_qty_caps_quantity(now: datetime) -> None:
+    lot = LotRules(0.001, 0.001, 5.0, max_qty=0.0105)  # 不封顶时 0.029
+    v = guard(Lots(lot)).review(signal(now), jev(), card(now), account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.quantity == pytest.approx(0.01)  # 向下取整到步长
+    assert v.intent.risk_usdt == pytest.approx(0.01 * 120)  # 风险按封顶后的数量重算
+
+
+def test_max_qty_cap_below_minimum_rejects(now: datetime) -> None:
+    lot = LotRules(0.001, 0.005, 5.0, max_qty=0.002)
+    v = guard(Lots(lot)).review(signal(now), jev(), card(now), account(now), now)
+    assert not v.approved and any("最小下单量" in r for r in v.reasons)
+
+
 def test_stop_moves_beyond_nearby_key_level(now: datetime) -> None:
     # 多单入场 68000，止损 1.5 ATR=120 → 67880；支撑 67860 在外侧 20 处 → 挪到 67860-8
     levels = [{"price": 67860.0, "kind": "support", "note": ""}]

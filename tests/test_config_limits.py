@@ -100,8 +100,13 @@ def test_every_risk_field_is_required(tmp_path: Path, field: str) -> None:
         load_risk_config(_write(tmp_path, data))
 
 
-# fast_loop 是有默认值的可选段，其余字段必填
-@pytest.mark.parametrize("field", [f for f in AppConfig.model_fields if f != "fast_loop"])
+# fast_loop 是有默认值的可选段；reconciler_close_unknown_positions 是默认关的可选开关；其余字段必填
+OPTIONAL_APP_FIELDS = {"fast_loop", "reconciler_close_unknown_positions"}
+
+
+@pytest.mark.parametrize(
+    "field", [f for f in AppConfig.model_fields if f not in OPTIONAL_APP_FIELDS]
+)
 def test_every_app_field_is_required(tmp_path: Path, field: str) -> None:
     data = {k: v for k, v in b.APP_DEFAULTS.items() if k != field}
     with pytest.raises(ConfigError, match=f"{field}: 缺少这一项"):
