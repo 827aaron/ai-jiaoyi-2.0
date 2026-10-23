@@ -1014,6 +1014,7 @@ class CostMeter:
         self.calls = 0
         self.on_call: Callable[[str | None, int, int, int], None] | None = None
         self.on_usage: Callable[[int, int], None] | None = None  # (输入 tokens, 命中缓存的输入)
+        self.on_model: Callable[[str], None] | None = None  # 这次调用实际用的模型 id
         """每次响应后回调 (finish_reason, 输出 token 数, 其中推理 token 数, 是否重试的那次 0/1)。"""
         self.truncated = 0
         """因为 max_tokens 到顶而被截断的回答数（finish_reason == "length"）；重试成功的不算。"""
@@ -1143,6 +1144,11 @@ class CostMeter:
                 self._local.retry = 0
             except Exception:
                 logger.exception("记录模型调用信息失败")
+        if self.on_model is not None and model:
+            try:
+                self.on_model(model)
+            except Exception:
+                logger.exception("记录模型 id 失败")
         if self.on_usage is not None:
             try:
                 self.on_usage(tin, _cached_tokens(usage))
@@ -1463,6 +1469,7 @@ class TradingAgentsEngine:
             self._live[entry.symbol] = live
             meter.on_call = live.note_call
             meter.on_usage = live.note_usage
+            meter.on_model = live.note_model
             meter.on_retry = live.note_retry
         try:
             res = self._analyze_run(entry, regime, handler, meter, live)

@@ -590,3 +590,16 @@ def test_retry_call_is_marked_in_on_call() -> None:
     add_retry(llm, meter, reasoning_off=False, min_chars=20)
     llm.invoke("q")
     assert seen == [("length", 0), ("stop", 1)]  # 只有第二次是重试
+
+
+def test_meter_reports_the_model_of_each_call() -> None:
+    from types import SimpleNamespace
+
+    from jiaoyi.slow.tradingagents_engine import CostMeter
+
+    meter = CostMeter({"flash": (0.3, 1.2)})
+    seen: list[str] = []
+    meter.on_model = seen.append
+    gen = SimpleNamespace(message=None, generation_info={"finish_reason": "stop"})
+    meter.record_response(SimpleNamespace(llm_output={"model_name": "flash"}, generations=[[gen]]))
+    assert seen == ["flash"]
