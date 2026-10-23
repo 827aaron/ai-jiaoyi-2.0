@@ -10,7 +10,7 @@
 #                 heartbeat (data/module_status.json) is older than 2 minutes; silent until the
 #                 main loop has started once (data/runtime.json)
 #
-# Usage: scripts/install_launchd.sh [--load-run]
+# Usage: scripts/install_launchd.sh [--load-run]   (idempotent: safe to run again)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,11 +55,22 @@ plist() {
 load() {
   local label="$1"
   launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist"
+  # bootout is asynchronous; if the agent is still registered after bootstrap fails, that is fine
+  if ! launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>/dev/null; then
+    sleep 1
+    launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>/dev/null \
+      || launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1 \
+      || { echo "failed to load $label" >&2; return 1; }
+  fi
   echo "loaded $label"
 }
 
-brew services start colima
+# Safe to re-run: `brew services start` fails (Bootstrap failed: 5) when colima is already loaded.
+if launchctl print "gui/$UID_NUM/sh.brew.colima" >/dev/null 2>&1; then
+  echo "colima already loaded, skipping"
+else
+  brew services start colima
+fi
 
 plist com.jiaoyi.condor "$ROOT/vendor/condor" yes "" /bin/bash -lc "exec make run-fg"
 PLIST_DIR="$ROOT/data/launchd" plist com.jiaoyi.run "$ROOT" yes "" "$ROOT/.venv/bin/jiaoyi" run
