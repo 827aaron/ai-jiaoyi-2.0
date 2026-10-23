@@ -53,23 +53,33 @@ plist() {
 }
 
 load() {
-  local label="$1"
+  local label="$1" i
   launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
-  # bootout is asynchronous; if the agent is still registered after bootstrap fails, that is fine
-  if ! launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>/dev/null; then
-    sleep 1
-    launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>/dev/null \
-      || launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1 \
-      || { echo "failed to load $label" >&2; return 1; }
+  sleep 3  # bootout is asynchronous; bootstrapping right away races with it (error 5)
+  for i in 1 2 3; do
+    if launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist" 2>/dev/null; then
+      echo "loaded $label"
+      return 0
+    fi
+    sleep 3
+  done
+  # still registered from before: loaded is loaded
+  if launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
+    launchctl kickstart "gui/$UID_NUM/$label" >/dev/null 2>&1 || true
+    echo "loaded $label (already registered)"
+    return 0
   fi
-  echo "loaded $label"
+  echo "FAILED to load $label" >&2
+  return 1
 }
+
+FAILED=0
 
 # Safe to re-run: `brew services start` fails (Bootstrap failed: 5) when colima is already loaded.
 if launchctl print "gui/$UID_NUM/sh.brew.colima" >/dev/null 2>&1; then
   echo "colima already loaded, skipping"
 else
-  brew services start colima
+  brew services start colima || { echo "colima start failed" >&2; FAILED=1; }
 fi
 
 plist com.jiaoyi.condor "$ROOT/vendor/condor" yes "" /bin/bash -lc "exec make run-fg"
@@ -77,12 +87,13 @@ PLIST_DIR="$ROOT/data/launchd" plist com.jiaoyi.run "$ROOT" yes "" "$ROOT/.venv/
 plist com.jiaoyi.backup "$ROOT" no 4 /bin/bash "$ROOT/scripts/backup_data.sh"
 INTERVAL=60 plist com.jiaoyi.watchdog "$ROOT" no "" "$ROOT/.venv/bin/jiaoyi" watchdog
 
-load com.jiaoyi.condor
-load com.jiaoyi.backup
-load com.jiaoyi.watchdog
+load com.jiaoyi.condor || FAILED=1
+load com.jiaoyi.backup || FAILED=1
+load com.jiaoyi.watchdog || FAILED=1
 if [ "${1:-}" = "--load-run" ]; then
   cp "$ROOT/data/launchd/com.jiaoyi.run.plist" "$AGENTS/"
-  load com.jiaoyi.run
+  load com.jiaoyi.run || FAILED=1
 else
   echo "com.jiaoyi.run staged in data/launchd/, not installed (pass --load-run once the paper run is cleared)"
 fi
+exit "$FAILED"
