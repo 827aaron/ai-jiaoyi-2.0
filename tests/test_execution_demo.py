@@ -63,3 +63,80 @@ def test_hummingbot_patch_script_rewrites_constants_idempotently(tmp_path, monke
 
     with pytest.raises(SystemExit):
         runpy.run_path(str(script))
+
+
+# ccxt 解析 algo 条件单后的形态（冒烟在 Demo 上实测）：type 是 "market"，真实类型在 info.orderType
+DEMO_ALGO_STOP = {
+    "id": "1000000012345",
+    "clientOrderId": "lb-pos-abc",
+    "symbol": "BTC/USDT:USDT",
+    "type": "market",
+    "reduceOnly": True,
+    "triggerPrice": 61234.5,
+    "info": {
+        "algoId": "1000000012345",
+        "clientAlgoId": "lb-pos-abc",
+        "algoStatus": "NEW",
+        "orderType": "STOP_MARKET",
+        "triggerPrice": "61234.50",
+        "reduceOnly": True,
+    },
+}
+
+
+def test_algo_stop_market_is_recognised_despite_type_market():
+    assert CcxtBinanceFutures._is_stop(DEMO_ALGO_STOP)
+    stop = CcxtBinanceFutures._stop_from(DEMO_ALGO_STOP)
+    assert stop.client_order_id == "lb-pos-abc"
+    assert stop.stop_price == 61234.5
+
+
+def test_plain_orders_are_not_stops():
+    assert not CcxtBinanceFutures._is_stop({"type": "limit", "info": {"type": "LIMIT"}})
+    assert not CcxtBinanceFutures._is_stop({"type": "market", "info": {}})
+
+
+def test_fetch_open_orders_without_symbol_does_not_warn():
+    ex = CcxtBinanceFutures("k", "s", testnet=True)
+    assert ex._ex.options["fetchOpenOrders"]["warnWithoutSymbol"] is False
+
+
+async def test_ensure_leverage_checks_readback():
+    import pytest
+
+    from jiaoyi.execution.exchange import ExchangeError
+
+    class FakeCcxt:
+        def __init__(self, actual: int) -> None:
+            self.actual = actual
+            self.set_calls: list[tuple[int, str]] = []
+
+        async def load_markets(self):
+            return {}
+
+        async def set_leverage(self, lev, sym):
+            self.set_calls.append((lev, sym))
+
+        async def fetch_leverage(self, sym):
+            return {"longLeverage": self.actual, "shortLeverage": self.actual}
+
+    ex = CcxtBinanceFutures("k", "s", testnet=True)
+    ex._ex = FakeCcxt(2)
+    await ex.ensure_leverage("BTCUSDT", 2)
+    assert ex._ex.set_calls == [(2, "BTC/USDT:USDT")]
+    ex._ex = FakeCcxt(20)
+    with pytest.raises(ExchangeError, match="20x"):
+        await ex.ensure_leverage("BTCUSDT", 2)
+
+
+def test_sim_environment_marker_must_match(tmp_path):
+    import pytest
+
+    from jiaoyi.execution.factory import SimEnvironmentMismatch, check_sim_environment
+
+    with pytest.raises(SimEnvironmentMismatch, match="make hb-up"):
+        check_sim_environment(tmp_path, "demo")  # 没标记
+    (tmp_path / "hb_sim_environment").write_text("legacy_testnet\n")
+    with pytest.raises(SimEnvironmentMismatch, match="必须一致"):
+        check_sim_environment(tmp_path, "demo")
+    check_sim_environment(tmp_path, "legacy_testnet")
