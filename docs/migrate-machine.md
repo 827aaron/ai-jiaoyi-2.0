@@ -10,6 +10,7 @@ git clone https://github.com/827aaron/ai-jiaoyi-2.0 && cd ai-jiaoyi-2.0 && bash 
 装开机自启（colima、Condor、每日备份、看门狗）、设防睡眠，最后启动面板并打开
 <http://127.0.0.1:8090/setup>。**密钥、面板密码、基本配置、自检都在那一页里点完**，不用再敲命令。
 
+- `/setup` 打不开时的后备：终端里 `.venv/bin/jiaoyi set-panel-password`，再 `.venv/bin/jiaoyi setup-keys HUMMINGBOT_API_PASSWORD BINANCE_TESTNET_API_KEY BINANCE_TESTNET_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID OPENROUTER_API_KEY`（只在提示处粘贴），最后 `.venv/bin/jiaoyi check-config`。
 - 中途断了（断网、Ctrl+C）直接重新运行同一条，做完的步骤会跳过；想全部重来加 `--redo`。
 - 唯一要在终端里输入的是 hummingbot-api 的用户名和密码（上游的 setup，向导会提示）。
 - 币安 Demo 的 key 要交给 hummingbot-api 一次，见 `docs/M0-setup.md` 第 3 步末尾。
