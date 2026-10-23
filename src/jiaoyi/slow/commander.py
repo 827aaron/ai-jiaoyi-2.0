@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -123,6 +124,19 @@ class StopScale:
     max_stop_atr: float = 4.0
     min_tp_r: float = 1.0
     max_tp_r: float = 6.0
+    long_period_min: int = 0
+    """长周期 ATR（分钟）；> 0 时止损用的 stop_atr = √(短周期 ATR × 长周期 ATR)。"""
+    stop_hint: tuple[float, float] | None = None
+    """提示词建议的止损倍数范围（窄, 宽）；硬范围仍是 min_stop_atr–max_stop_atr。"""
+
+    @property
+    def eff_period_min(self) -> float:
+        """stop_atr 等效的 K 线周期（几何平均），算「持仓时长 / 周期」用。"""
+        return (
+            math.sqrt(self.period_min * self.long_period_min)
+            if self.long_period_min
+            else self.period_min
+        )
 
 
 DEFAULT_STOP_SCALE = StopScale()

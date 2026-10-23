@@ -237,6 +237,22 @@ LEVEL_INTERVAL = {
 }
 
 
+# 出卡提示词里建议的止损倍数范围（窄—宽，中间 = 随机入场被扫约 35%；研究 v3，按 stop_atr 口径）
+STOP_HINT = {
+    "30m": (0.55, 0.9),
+    "1h": (0.8, 1.25),
+    "2h": (1.15, 1.85),
+    "4h": (0.85, 1.35),
+    "8h": (1.05, 1.65),
+    "12h": (1.1, 1.7),
+    "24h": (1.1, 1.75),
+}
+
+
+def stop_hint(hold: str) -> tuple[float, float]:
+    return STOP_HINT.get(hold, STOP_HINT[DEFAULT_HOLD])
+
+
 def analyst_klines(hold: str) -> tuple[str, ...]:
     return ANALYST_KLINES.get(hold, _KL_SHORT)
 
