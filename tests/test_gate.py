@@ -181,6 +181,21 @@ async def test_rule_model_answers_every_question(now: datetime) -> None:
     assert not (await RuleDecisionModel(c.RunMode.PAPER).ask(bad)).ok
 
 
+def test_rule_model_stop_width_follows_atr_period() -> None:
+    """noise 按 ATR 周期换算：15 分钟 ATR 下正常波动选 mid，不会一律偏 narrow。"""
+
+    def stop(period: int, rv: float, atr: float) -> str:
+        m = RuleDecisionModel(c.RunMode.PAPER, atr_period_min=period)
+        probs = m._entry({"side": "long", "rv5m_bps": rv, "atr_bps": atr})["stop_width"]
+        return max(probs, key=lambda k: probs[k])
+
+    # BTC 常见：10 秒波动约 1.8bp，15 分钟 ATR 约 22bp
+    assert stop(15, 1.8, 22.0) == "mid"
+    assert stop(15, 0.5, 22.0) == "narrow"
+    assert stop(15, 5.0, 22.0) == "wide"
+    assert stop(60, 1.8, 22.0) == "wide"  # 同样的 ATR 数值放在 60 分钟口径下算偏窄的 ATR
+
+
 async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
     seen: dict[str, object] = {}
 
