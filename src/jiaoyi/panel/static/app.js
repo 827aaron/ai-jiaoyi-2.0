@@ -671,6 +671,7 @@ const tfB = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1] + NODE_H];
 // [起点, 终点, 终点角色（连线颜色跟它）, 标签, 弯法]
 const TF_EDGES = [
   [tfR("screener"), tfL("commander"), "commander", "候选池"],
+  [tfB("screener"), tfT("book_reader"), "book_reader", "订阅行情", "v-top"],
   [tfR("commander"), tfL("card"), "card", "写卡"],
   [tfB("card"), tfT("sentinel"), "sentinel", "关键价位"],
   [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
@@ -694,7 +695,7 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   else if (how === "down-right") { d = `M${x1},${y1} V${y2 - 10} Q${x1},${y2} ${x1 + 10},${y2} H${x2 - 1}`; lx = x1 + 14; ly = y2 - 6; dir = "r"; }
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
-  else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = (y1 + y2) / 2 + 4; dir = "d"; }
+  else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
   const ah = dir === "r" ? `M${x2},${y2} l-7,-4 v8 z` : `M${x2},${y2} l-4,-7 h8 z`;
   return `<path class="${cls}" d="${d}"/><path class="ah ${st}" d="${ah}"/>${label ? `<text x="${lx}" y="${ly}">${esc(label)}</text>` : ""}`;
