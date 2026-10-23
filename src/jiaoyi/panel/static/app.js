@@ -810,6 +810,23 @@ const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : CHOICE[v
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
 // 设置项的大白话标题；原来的专业说明和英文键名降为灰色小字
 const PLAIN = {
+  "screener.min_quote_volume_usdt": "24 小时成交额至少多少 U 才进池",
+  "screener.max_spread_bps": "买卖价差超过万分之几就不进池",
+  "screener.min_depth_usdt": "盘口深度至少多少 U",
+  "screener.min_listed_days": "上线至少几天",
+  "screener.min_range_24h_pct": "24 小时波动至少百分之几",
+  "screener.max_range_24h_pct": "24 小时波动最多百分之几",
+  "screener.default_category_cap": "每一类币默认最多进池几个",
+  "screener.vol_full_multiple": "波动是来回手续费的几倍算满分",
+  "screener.surge_full_multiple": "1 小时成交额是平时的几倍算满分",
+  "screener.funding_full": "资金费率到多少算满分",
+  "screener.oi_full_pct": "持仓量 1 小时变百分之几算满分",
+  "screener.liq_full_usdt": "1 小时强平多少 U 算满分",
+  "screener.weight_volatility": "波动的权重",
+  "screener.weight_volume_surge": "量能突增的权重",
+  "screener.weight_funding": "资金费率的权重",
+  "screener.weight_oi": "持仓量变化的权重",
+  "screener.weight_liquidations": "强平的权重",
   risk_per_trade_pct: "每笔最多亏本金的百分之几",
   max_leverage: "最多开几倍杠杆",
   max_total_exposure_x: "所有仓位加起来最多是本金的几倍",
@@ -884,7 +901,7 @@ const PLAIN = {
   jev_provider: "拍板人走哪个通道",
   jev_model: "拍板人用哪个模型版本",
 };
-const plainOf = (i) => PLAIN[i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key];
+const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key];
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
@@ -902,8 +919,10 @@ const HINT = {
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
-const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${esc(String(i.recommended))}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
-const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样" };
+const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
+const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走" };
+// 这几项填 0 = 不设限
+const ZERO_AS = { min_range_24h_pct: "不设", max_range_24h_pct: "不设" };
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
 const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
 function humanDur(sec) {
@@ -919,7 +938,7 @@ function durOf(key, v) {
   const u = UNIT_S.find(([suf]) => key.endsWith(suf));
   return u ? humanDur(v * u[1]) : null;
 }
-const fmtVal = (v, i) => (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
+const fmtVal = (v, i) => (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[`${i.sec}.${i.key}`] || NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
 const PROFILE_NOTE = { "2h": "单笔最长 2 小时（默认）", "60m": "单笔最长 1 小时", "30m": "单笔最长 30 分钟", "15m": "单笔最长 15 分钟" };
 function pinnedList(pf) {
   if (pf.pins && pf.pins[pf.current]) return pf.pins[pf.current].map((x) => PLAIN[x.key] || x.key);
@@ -1027,6 +1046,9 @@ const ADV = [
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
     { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.*"] },
     { g: "选币", keys: ["app.pool_size", "app.card_pick_max"] },
+    { g: "选币规则：门槛", warn: "screener_cautions", hint: "每小时用代码把全部币安 U 本位永续筛一遍，过不了门槛的不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap"] },
+    { g: "选币规则：打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
+    { g: "选币规则：权重", hint: "五项各占多少分量。不用加起来等于 1，只看相对大小；不能全是 0。", keys: ["screener.weight_volatility", "screener.weight_volume_surge", "screener.weight_funding", "screener.weight_oi", "screener.weight_liquidations"] },
     { g: "预测员 Kronos", keys: ["app.predictor_enabled", "predictor.*"] },
   ] },
   { id: "keys", t: "密钥" },
@@ -1035,7 +1057,7 @@ const ADV = [
 // 别处已经显示的键（运行卡、显示页的系统信息），不再进“其他”
 const SHOWN_ELSEWHERE = ["app.profile", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
 // 没列到的新键按所在段落到哪个标签的“其他”组
-const SECTION_TAB = { risk: "risk", category: "risk", fast_loop: "exec", app: "exec", schedule: "slow", predictor: "slow" };
+const SECTION_TAB = { risk: "risk", category: "risk", fast_loop: "exec", app: "exec", schedule: "slow", predictor: "slow", screener: "slow" };
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
@@ -1043,16 +1065,18 @@ const UNIT = {
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根",
+  min_quote_volume_usdt: " U", min_depth_usdt: " U", min_listed_days: " 天", min_range_24h_pct: "%", max_range_24h_pct: "%",
+  default_category_cap: " 个", vol_full_multiple: " 倍", surge_full_multiple: " 倍", oi_full_pct: "%", liq_full_usdt: " U",
 };
 // 推荐值里只有这几项是“越小越冒险”
-const LOWER_RISKIER = ["min_tp_fee_multiple"];
-const valOf = (i, v = i.value) => fmtVal(v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
-const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWER_RISKIER.includes(i.key) ? i.value < i.recommended : i.value > i.recommended);
+const LOWER_RISKIER = ["min_tp_fee_multiple", "min_quote_volume_usdt", "min_depth_usdt", "min_listed_days", "min_range_24h_pct"];
+const valOf = (i, v = i.value) => (v === 0 && ZERO_AS[i.key] && i.sec === "screener" ? ZERO_AS[i.key] : null) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
+const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWER_RISKIER.includes(i.key) ? i.value < i.recommended : i.value > i.recommended || (i.value === 0 && i.key in ZERO_AS));
 
 // 段.键 → 设置项（每类币上限拼成 category 段）
 function settingIndex(d) {
   const ix = {};
-  for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
+  for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "screener"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
   const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
   for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: CAT[k] || k, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总仓位倍数）`, editable: true, choices: [] };
   return ix;
@@ -1067,7 +1091,7 @@ function advGroups(d, ix) {
     out[tab.id] = tab.groups.map((g) => {
       const keys = g.cat ? Object.keys(ix).filter((x) => x.startsWith("category.")) : g.keys.flatMap(expand);
       keys.forEach((k) => used.add(k));
-      return { g: g.g, hint: g.hint, items: keys.map((k) => ix[k]) };
+      return { g: g.g, hint: g.hint, warn: g.warn ? d[g.warn] || [] : [], items: keys.map((k) => ix[k]) };
     });
   }
   const rest = Object.keys(ix).filter((k) => !used.has(k));
@@ -1236,7 +1260,7 @@ function advCard(d, ix) {
   const t = ADV.find((x) => x.id === tab);
   const tabs = ADV.map((x) => `<button role="tab" aria-selected="${x.id === tab}" class="${x.id === tab ? "on" : ""}" data-act="st-tab" data-arg="${x.id}">${x.t}</button>`).join("");
   const body = tab === "keys" ? keysTab(d) : tab === "show" ? showTab(d, ix)
-    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${g.items.map((i) => itemRow(i)).join("")}`).join("");
+    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${g.items.map((i) => itemRow(i)).join("")}`).join("");
   return `<section class="card st"><div class="ch"><h2>高级</h2><span class="r">平时不用动</span></div><div class="st-tabs" role="tablist">${tabs}</div>${body}</section>`;
 }
 

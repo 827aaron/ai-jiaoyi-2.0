@@ -47,6 +47,7 @@ from jiaoyi.slow.settings import (
     BudgetConfig,
     LlmConfig,
     ScheduleConfig,
+    ScreenerSection,
     SlowConfig,
     load_slow_config,
 )
@@ -59,8 +60,10 @@ NEEDS_PASSWORD: frozenset[CommandKind] = frozenset(
     {"resume", "unblock_symbol", "restart", "pin_symbol", "add_symbol", "unblacklist_symbol"}
 )
 
-Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule", "llm", "budget"]
-_SLOW_SECTIONS = ("schedule", "llm", "budget")
+Section = Literal[
+    "risk", "category", "app", "fast_loop", "predictor", "schedule", "llm", "budget", "screener"
+]
+_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener")
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
@@ -474,6 +477,7 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "schedule": ("slow", "schedule"),
     "llm": ("slow", "llm"),
     "budget": ("slow", "budget"),
+    "screener": ("slow", "screener"),
 }
 
 
@@ -502,6 +506,8 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return scalar_fields(LlmConfig, set())
     if section == "budget":
         return scalar_fields(BudgetConfig, set())
+    if section == "screener":
+        return scalar_fields(ScreenerSection, set())
     # jev_provider / jev_model 换通道和模型版本要重新校准，不在网页上改
     return scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
 
