@@ -29,6 +29,7 @@ from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
+from jiaoyi.panel.meaning import SettingsMeaning, build_meaning
 from jiaoyi.panel.meetings import MARKET, MeetingSummary, list_meetings
 from jiaoyi.panel.overview import (
     STALE_S,
@@ -1075,6 +1076,8 @@ class SettingsPage(BaseModel):
     schedule: list[SettingItem] = []
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
     schedule_caution: str | None = None
+    meaning: SettingsMeaning | None = None
+    """「你的设置实际意味着」：按硬上限、最长持仓档、本金算的几行（只提示）。"""
     budget: list[SettingItem] = []
     """军师团每日花费上限（config/slow.toml 的 [budget]，只放日上限）。"""
     """节奏配置可能造成换卡空档时的提示（只提示，不拒绝）。"""
@@ -1199,6 +1202,9 @@ def build_settings(
         password_set=password_set,
         live_armed=armed,
         profile=profile,
+        meaning=build_meaning(
+            risk, app, app.profile, slow.budget.daily_cost_limit_usd, equity_usdt
+        ),
     )
     recs = recommended_caps(equity_usdt)
     for item in page.risk:
@@ -1206,7 +1212,9 @@ def build_settings(
             item.recommended, item.recommended_why = rec.value, rec.why
         elif item.key == "max_slippage_bps" and app.hold in profiles.SLIPPAGE_BPS:
             item.recommended = profiles.SLIPPAGE_BPS[app.hold]
-            item.recommended_why = f"按最长持仓 {app.hold}：约止损距离的 1/4（只拦不利方向）"
+            item.recommended_why = (
+                f"按止损的 1/4（只拦不利方向）；{app.hold} 档 BTC 典型约 {item.recommended:g}bp"
+            )
     for item in page.screener:
         if srec := SCREENER_RECOMMENDED.get(item.key):
             item.recommended, item.recommended_why = srec

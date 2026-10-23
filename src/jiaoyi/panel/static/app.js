@@ -1847,11 +1847,19 @@ function advCard(d, ix) {
   return `<section class="card st"><div class="ch"><h2>高级</h2><span class="r">平时不用动</span></div><div class="st-tabs" role="tablist">${tabs}</div>${body}</section>`;
 }
 
+// 「你的设置实际意味着」：后端按硬上限、最长持仓档、本金算好的几行，只提示
+function meaningCard(d) {
+  const m = d.meaning;
+  if (!m || !m.lines.length) return "";
+  return `<section class="card st"><div class="ch"><h2>你的设置实际意味着</h2><span class="r">只提示，不拦</span></div>
+    ${m.lines.map((x) => `<div class="st-row"><div class="k">${esc(x.label)}<small>${x.warn ? `<span class="warn">${esc(x.text)}</span>` : esc(x.text)}</small></div></div>`).join("")}</section>`;
+}
+
 P.settings = () => {
   const d = pageData;
   const ix = settingIndex(d);
   const note = d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；模式、数据目录、拍板人通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。";
-  return `<div class="st-col">${pendingBanner(d)}${runCard(d)}${riskCard(d, ix)}${advCard(d, ix)}
+  return `<div class="st-col">${pendingBanner(d)}${runCard(d)}${riskCard(d, ix)}${meaningCard(d)}${advCard(d, ix)}
     <div class="st-links"><button data-act="st-changes">最近的修改记录</button><span class="dim small">${note}</span></div></div>`;
 };
 
