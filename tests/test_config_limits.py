@@ -113,8 +113,9 @@ OPTIONAL_APP_FIELDS = {
     "predictor",
     "reconciler_close_unknown_positions",
     "sim_environment",
-    "profile",
-    *profiles.defaults("2h", "app"),
+    "meeting_interval",
+    "hold",
+    *profiles.defaults("1h", "app"),
 }
 
 

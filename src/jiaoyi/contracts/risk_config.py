@@ -15,15 +15,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field, model_validator
 
 from jiaoyi.contracts.common import Category, Contract, RunMode
 
-HoldingProfile = Literal["24h", "12h", "6h", "2h", "60m", "30m", "15m"]
-"""持仓档位。各档的跨模块默认值见 ``jiaoyi.core.profiles``。"""
-PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
+# 两套各选各的档位，各档的跨模块默认值见 ``jiaoyi.core.profiles``
+MeetingInterval = Literal["15m", "30m", "1h", "2h", "6h", "12h", "24h"]  # 军师团开会间隔
+HoldProfile = Literal["30m", "1h", "2h", "4h"]  # 单笔最长持仓
+MEETING_PROFILES: tuple[str, ...] = get_args(MeetingInterval)
+HOLD_PROFILES: tuple[str, ...] = get_args(HoldProfile)
+PAPER_ONLY_HOLDS = frozenset({"30m"})  # 最长持仓 30m：止损贴近手续费，只能 paper
 
 
 BINANCE_MAX_LEVERAGE = 125
@@ -237,6 +240,13 @@ class FastLoopConfig(Contract):
     min_tp_r: float = Field(default=1.0, ge=0.5, le=5.0, description="作战卡止盈倍数下限。")
     max_tp_r: float = Field(default=6.0, ge=1.0, le=20.0, description="作战卡止盈倍数上限。")
     time_limit_s: int = Field(default=7200, ge=60, le=86400, description="单笔最长持仓时间。")
+    min_stop_fee_multiple: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=20.0,
+        description="止损距离至少是来回手续费的几倍（0 = 不查）；持仓越短要求越高，"
+        "档位给推荐值，低于它这张卡的这个标的不开仓。",
+    )
     # ---- 持仓管家
     keeper_close_p: float = Field(default=0.6, ge=0.5, le=0.99, description="平仓概率过线。")
     keeper_close_p_strong: float = Field(
@@ -335,10 +345,15 @@ class AppConfig(Contract):
     """运行配置：模式、开关、节奏。除 ``fast_loop`` 外全部必填，超范围拒绝启动。"""
 
     mode: RunMode
-    profile: HoldingProfile = Field(
+    meeting_interval: MeetingInterval = Field(
+        default="1h",
+        description="开会间隔档：军师团每隔多久开一轮会（卡有效期 = 间隔 + 20 分钟）。"
+        "只填配置文件里没写的策略参数（见 core/profiles.py）。",
+    )
+    hold: HoldProfile = Field(
         default="2h",
-        description="持仓档位。只填配置文件里没写的策略参数（见 core/profiles.py），"
-        "30m / 15m 只能 paper。",
+        description="最长持仓档：单笔最长拿多久；止损 / 止盈 / ATR 周期 / 拍板门槛 / 预测长度"
+        "跟它走。30m 只能 paper。",
     )
     predictor_enabled: bool = Field(description="预测员（Kronos）开关。")
     signal_dedup_s: int = Field(ge=5, le=600, description="同一去重键的冷却时间。")
@@ -366,14 +381,19 @@ class AppConfig(Contract):
         default_factory=FastLoopConfig, description="快环门槛；不写就用默认值（见示例）。"
     )
 
+    @property
+    def profile(self) -> str:
+        """旧名：开会间隔档（原「持仓档位」）。"""
+        return self.meeting_interval
+
     @model_validator(mode="after")
     def _check(self) -> AppConfig:
         if self.card_pick_max > self.pool_size:
             raise ValueError("card_pick_max 不能大于 pool_size")
-        if self.profile in PAPER_ONLY_PROFILES and self.mode != RunMode.PAPER:
+        if self.hold in PAPER_ONLY_HOLDS and self.mode != RunMode.PAPER:
             raise ValueError(
-                f"档位 {self.profile} 只能在 paper 模式用（费用占止损太高），"
-                "testnet / live 请用 2h 或 60m"
+                f"最长持仓档 {self.hold} 只能在 paper 模式用（费用占止损太高），"
+                "testnet / live 请用 1h 或 2h 或 4h"
             )
         if self.fast_loop.rule_gate_without_jev and self.mode != RunMode.PAPER:
             raise ValueError(

@@ -1,4 +1,4 @@
-"""持仓档位：一个开关选档；写了的单项优先于档位默认；30m / 15m 只能 paper。"""
+"""两套档位各选各的：meeting_interval 开会间隔 7 档、hold 最长持仓 4 档；hold 30m 只能 paper。"""
 
 from __future__ import annotations
 
@@ -19,86 +19,119 @@ MISSING_SLOW = ROOT / "config" / "no-such-slow.toml"
 
 
 def _app_toml(tmp_path: Path, *lines: str) -> Path:
-    text = APP.read_text(encoding="utf-8").replace('profile = "2h"', "")
+    text = (
+        APP.read_text(encoding="utf-8")
+        .replace('meeting_interval = "1h"', "")
+        .replace('hold = "2h"', "")
+    )
     text = text.replace('mode = "paper"', "\n".join(['mode = "paper"', *lines]))
     path = tmp_path / "app.toml"
     path.write_text(text, encoding="utf-8")
     return path
 
 
-def test_every_profile_is_complete_and_valid(tmp_path: Path) -> None:
-    sections = {"app", "slow.schedule", "slow.budget"}
-    assert set(profiles.DEFAULTS) == set(profiles.PROFILES)
+def test_every_tier_is_complete_and_valid(tmp_path: Path) -> None:
+    assert set(profiles.MEETING) == set(profiles.PROFILES)
+    assert set(profiles.HOLD) == set(profiles.HOLDS)
     for name in profiles.PROFILES:
-        assert set(profiles.DEFAULTS[name]) == sections
-        cfg = load_app_config(_app_toml(tmp_path, f'profile = "{name}"'))
-        assert cfg.profile == name
-        assert cfg.fast_loop.time_limit_s == 7200  # 单笔最长持仓不随档位变
-        assert cfg.fast_loop.atr_period_min == 15
-        assert cfg.keeper_interval_s == profiles.defaults(name, "app")["keeper_interval_s"]
+        cfg = load_app_config(_app_toml(tmp_path, f'meeting_interval = "{name}"'))
+        assert cfg.meeting_interval == name
+        assert (
+            cfg.slow_loop_interval_min == profiles.defaults(name, "app")["slow_loop_interval_min"]
+        )
+        hold = profiles.RECOMMENDED_HOLD[name]  # 没写 hold = 跟开会档位的推荐搭配
+        assert cfg.hold == hold
+        assert cfg.fast_loop.time_limit_s == profiles.HOLD[hold]["fast_loop"]["time_limit_s"]
+    for name in profiles.HOLDS:
+        cfg = load_app_config(_app_toml(tmp_path, f'hold = "{name}"'))
+        want = profiles.HOLD[name]["fast_loop"]
+        assert cfg.hold == name and cfg.meeting_interval == "1h"
+        assert cfg.fast_loop.time_limit_s == want["time_limit_s"]
+        assert cfg.fast_loop.atr_period_min == want["atr_period_min"]
+        assert cfg.fast_loop.min_stop_fee_multiple == want["min_stop_fee_multiple"]
+        assert cfg.keeper_interval_s == profiles.HOLD[name]["app"]["keeper_interval_s"]
 
 
-def test_default_is_2h_and_written_key_wins(tmp_path: Path) -> None:
+def test_defaults_are_1h_meeting_and_2h_hold(tmp_path: Path) -> None:
     cfg = load_app_config(_app_toml(tmp_path))
-    assert cfg.profile == "2h" and cfg.slow_loop_interval_min == 120
-    cfg = load_app_config(_app_toml(tmp_path, 'profile = "60m"', "keeper_interval_s = 30"))
-    assert cfg.keeper_interval_s == 30  # 写了的优先
+    assert (cfg.meeting_interval, cfg.hold) == ("1h", "2h")
     assert cfg.slow_loop_interval_min == 60 and cfg.fast_loop.time_limit_s == 7200
+    cfg = load_app_config(_app_toml(tmp_path, 'meeting_interval = "6h"', "keeper_interval_s = 30"))
+    assert cfg.keeper_interval_s == 30 and cfg.slow_loop_interval_min == 360  # 写了的优先
 
 
-@pytest.mark.parametrize("profile", ["30m", "15m"])
-@pytest.mark.parametrize("mode", ["testnet", "live"])
-def test_short_profiles_are_paper_only(tmp_path: Path, profile: str, mode: str) -> None:
-    path = _app_toml(tmp_path, f'profile = "{profile}"')
-    path.write_text(path.read_text(encoding="utf-8").replace('mode = "paper"', f'mode = "{mode}"'))
-    with pytest.raises(ConfigError, match="只能在 paper"):
-        load_app_config(path)
+def test_hold_defaults_to_recommended_pairing(tmp_path: Path) -> None:
+    rec = {"15m": "30m", "30m": "1h", "1h": "2h", "2h": "4h"}
+    for meeting, hold in rec.items():
+        cfg = load_app_config(_app_toml(tmp_path, f'meeting_interval = "{meeting}"'))
+        assert (
+            cfg.hold == hold
+            and cfg.fast_loop.time_limit_s == profiles.HOLD[hold]["fast_loop"]["time_limit_s"]
+        )
+    cfg = load_app_config(_app_toml(tmp_path, 'meeting_interval = "2h"', 'hold = "1h"'))
+    assert cfg.hold == "1h"  # 显式写的按用户的
+    assert profiles.hold_is_custom({"hold": "1h"}) and not profiles.hold_is_custom({})
 
 
-def test_unknown_profile_refuses(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="profile"):
-        load_app_config(_app_toml(tmp_path, 'profile = "5m"'))
+def test_legacy_profile_key_maps_to_meeting_interval(tmp_path: Path) -> None:
+    cfg = load_app_config(_app_toml(tmp_path, 'profile = "60m"'))
+    assert cfg.meeting_interval == "1h" and cfg.slow_loop_interval_min == 60
+    cfg = load_app_config(_app_toml(tmp_path, 'profile = "2h"', 'meeting_interval = "30m"'))
+    assert cfg.meeting_interval == "30m"  # 新键优先
+    assert profiles.legacy_notice({"profile": "60m"})
+    assert profiles.legacy_notice({"profile": "60m", "meeting_interval": "1h"}) is None
 
 
-def test_profile_reaches_predictor_and_commander_settings(tmp_path: Path) -> None:
-    path = _app_toml(tmp_path, 'profile = "15m"', f'data_dir = "{tmp_path}"')
-    path.write_text(path.read_text(encoding="utf-8").replace('data_dir = "data"', ""))
-    cfg = load_app_config(path)
-    app = App(load_risk_config(RISK), cfg, clock=lambda: datetime.now(UTC), offline=True)
-    assert app.m.predictor._s.pred_len == 24  # 跟 time_limit_s（7200）走，不跟档位  # type: ignore[attr-defined]
-    assert app.slow_cfg.schedule.card_ttl_min == 35
+def test_hold_30m_is_paper_only(tmp_path: Path) -> None:
+    for mode in ("testnet", "live"):
+        path = _app_toml(tmp_path, 'hold = "30m"')
+        path.write_text(
+            path.read_text(encoding="utf-8").replace('mode = "paper"', f'mode = "{mode}"')
+        )
+        with pytest.raises(ConfigError, match="只能在 paper"):
+            load_app_config(path)
+    load_app_config(_app_toml(tmp_path, 'hold = "30m"', 'meeting_interval = "15m"'))  # paper 可以
 
 
-def test_check_config_shows_profile_and_overrides(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = _app_toml(tmp_path, 'profile = "60m"', "keeper_interval_s = 30")
-    args = ["check-config", "--risk", str(RISK), "--app", str(path), "--slow", str(MISSING_SLOW)]
-    assert main(args) == 0
-    out = capsys.readouterr().out
-    assert "持仓档位 60m" in out and "keeper_interval_s" in out
-
-    path = _app_toml(tmp_path, 'profile = "15m"')
-    args[4] = str(path)
-    assert main(args) == 0
-    assert "持仓档位 15m（仅模拟盘）" in capsys.readouterr().out
+def test_unknown_tier_refuses(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="meeting_interval"):
+        load_app_config(_app_toml(tmp_path, 'meeting_interval = "5m"'))
+    with pytest.raises(ConfigError, match="hold"):
+        load_app_config(_app_toml(tmp_path, 'hold = "8h"'))
 
 
-def test_hold_params_follow_time_limit_not_profile(tmp_path: Path) -> None:
-    path = _app_toml(tmp_path, 'profile = "30m"')
+def test_time_limit_alone_picks_hold_tier(tmp_path: Path) -> None:
+    path = _app_toml(tmp_path)
     path.write_text(
         path.read_text(encoding="utf-8").replace("[fast_loop]", "[fast_loop]\ntime_limit_s = 1800"),
         encoding="utf-8",
     )
     cfg = load_app_config(path)
     assert cfg.fast_loop.atr_period_min == 5
-    cfg = load_app_config(_app_toml(tmp_path, 'profile = "15m"'))
-    assert cfg.fast_loop.time_limit_s == 7200 and cfg.fast_loop.atr_period_min == 15
 
 
-def test_long_profiles_selectable(tmp_path: Path) -> None:
-    for name, mins in (("6h", 360), ("12h", 720), ("24h", 1440)):
-        cfg = load_app_config(_app_toml(tmp_path, f'profile = "{name}"'))
-        assert cfg.slow_loop_interval_min == mins
-        sched = profiles.defaults(name, "slow.schedule")
-        assert sched["card_ttl_min"] == mins + 20
+def test_tiers_reach_predictor_and_commander_settings(tmp_path: Path) -> None:
+    path = _app_toml(
+        tmp_path, 'meeting_interval = "15m"', 'hold = "4h"', f'data_dir = "{tmp_path}"'
+    )
+    path.write_text(path.read_text(encoding="utf-8").replace('data_dir = "data"', ""))
+    cfg = load_app_config(path)
+    app = App(load_risk_config(RISK), cfg, clock=lambda: datetime.now(UTC), offline=True)
+    assert app.m.predictor._s.pred_len == 48  # type: ignore[attr-defined]  # 跟最长持仓走
+    assert app.slow_cfg.schedule.card_ttl_min == 35  # 开会间隔 15m
+
+
+def test_check_config_shows_tiers_and_overrides(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _app_toml(tmp_path, 'meeting_interval = "2h"', "keeper_interval_s = 40")
+    args = ["check-config", "--risk", str(RISK), "--app", str(path), "--slow", str(MISSING_SLOW)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "开会间隔 2h" in out and "最长持仓 4h" in out and "跟开会档位" in out
+    assert "keeper_interval_s" in out
+
+    path = _app_toml(tmp_path, 'hold = "30m"')
+    args[4] = str(path)
+    assert main(args) == 0
+    assert "最长持仓 30m（仅模拟盘）" in capsys.readouterr().out

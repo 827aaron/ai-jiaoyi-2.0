@@ -314,3 +314,13 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 最坏一轮（波数 × `symbol_timeout_s`）不小于开会间隔时只提示，不会自动拉长间隔：15m 档 5 张卡 1 波，单币超时 900 秒 = 15 分钟，`check-config` / `status` / 设置页「军师团节奏」会写明「最坏一轮要 15 分钟，赶不上下一轮」；可调小 `symbol_timeout_s` 或 `max_cards_per_round`。
 
 还有 6h / 12h / 24h 三档（开会间隔 360 / 720 / 1440 分钟，卡有效期 = 间隔 + 20，其余同 2h 档，参数细节等研究再调）。会议记录的 `output.usage = {input_tokens, output_tokens, reasoning_tokens}` 给面板「AI 费用」用；总盘会开完但出卡失败的错误记录带 `cost_usd`（总盘会花费），净盈亏不漏 AI 费。
+
+## 档位 v2：开会间隔 7 档 + 最长持仓档（研究 v2，Aaron 18:30 授权落地）
+
+两套档位各选各的，都写在 `app.toml`：
+
+- `meeting_interval`（默认 1h）：15m / 30m / 1h / 2h / 6h / 12h / 24h，决定军师团每隔多久开一轮会。卡有效期 = 间隔 + 20 分钟；每档单独给 `max_cards_per_round`（15m / 30m 压到 8 = 一波开完，1h 12，2h 起 15）、失败退避（15m 2/5/10，30m 3/5/10，1h 5/10/15，2h 5/10/30，6h 起 10/30/60）、`min_refresh_gap_min`（2h 60，6h 120，12h 180，24h 240，其余等于间隔）、同币最小间隔、`daily_cost_limit_usd`（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5；你写多少就是多少）。
+- `hold`（不写 = 跟开会档位的推荐搭配：15m→30m、30m→1h、1h→2h、2h→4h、6h 起暂 4h）：单笔最长持仓。30m / 1h / 2h / 4h 各自给 `time_limit_s`、ATR 周期（5 / 15 / 15 / 30）、止损 / 止盈倍数、关键位缓冲、拍板门槛（30m 0.65/0.65/有毒 0.4，其余 0.6/0.6/0.5）、管家复查（10 / 15 / 20 / 30 秒）、预测长度（6 / 12 / 24 / 48 根 5 分钟）。30m 只能 paper。
+- 旧 `profile` 键自动映射成 `meeting_interval`（60m → 1h）并告警；只写了 `fast_loop.time_limit_s` 没写 `hold` 时按它取最近一档。`check-config` / `status` 显示「最长持仓 N（跟开会档位 / 自定义）」。
+- 新增 `fast_loop.min_stop_fee_multiple`：止损距离至少是来回手续费的几倍（30m 3.5 / 1h 3.0 / 2h 2.5 / 4h 2.0），保镖低于它就不开仓（0 = 不查，代码默认）。
+- 巡逻兵 / 管家平仓门槛、预测员 interval / paths / lookback、risk.toml 都不随档位变。

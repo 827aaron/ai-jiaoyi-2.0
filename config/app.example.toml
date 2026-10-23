@@ -2,15 +2,16 @@
 # 每一项都必填（标“档位”的可以不写，由档位给）；超出合理范围拒绝启动。
 
 mode = "paper"               # paper（模拟盘）/ testnet / live；切 live 另需确认词和面板密码
-profile = "2h"               # 持仓档位：2h（默认）/ 60m / 30m / 15m；30m、15m 只能 paper
-                             # 档位给出下面标“档位”的键的默认值（各档数值见 src/jiaoyi/core/profiles.py）；
-                             # 你写了的键优先，想让档位生效就别写。切档要重启
-# predictor_enabled = true   # 档位：预测员 Kronos 开关（15m 档默认关）
+meeting_interval = "1h"      # 开会间隔档：15m / 30m / 1h（默认）/ 2h / 6h / 12h / 24h；卡有效期 = 间隔 + 20 分钟
+hold = "2h"                  # 最长持仓档：30m / 1h / 2h（默认）/ 4h；30m 只能 paper
+                             # 两个档位各选各的，给出下面标“档位”的键的默认值（数值见 src/jiaoyi/core/profiles.py）；
+                             # 你写了的键优先，想让档位生效就别写。切档要重启；旧的 profile 键自动当 meeting_interval
+# predictor_enabled = true   # 档位：预测员 Kronos 开关
 signal_dedup_s = 30          # 同一信号冷却 30 秒
 jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 OpenRouter 首次 963ms，之后约 500ms）
-# keeper_interval_s = 20     # 档位：持仓管家多久看一次（2h 20 秒 / 60m 15 / 30m、15m 10）
+# keeper_interval_s = 20     # 最长持仓档：持仓管家多久看一次（30m 10 秒 / 1h 15 / 2h 20 / 4h 30）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
-# slow_loop_interval_min = 120  # 档位 = 军师团开会间隔（2h 120 分钟 / 60m 60 / 30m 30 / 15m 15）
+# slow_loop_interval_min = 60  # 开会间隔档 = 军师团开会间隔（15m 15 分钟 … 1h 60 … 24h 1440）
 pool_size = 40               # 候选池 30–50
 card_pick_max = 20           # 军师每次最多挑 20 个
 data_dir = "data"            # 决策日志、模块状态写在这里
@@ -35,10 +36,10 @@ rule_gate_without_jev = false     # 没有 Jev 时用不用规则版拍板人；
 jev_usd_per_mtok = 0.042          # Jev 每百万输入 token 的价格，记花费用
 jev_max_consecutive_errors = 5    # 连续出错 5 次暂停调用；成功一次就清零
 jev_error_cooldown_s = 60         # 暂停 60 秒后再试
-min_p_genuine = 0.6               # 拍板：真信号概率 ≥ 0.6
-min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6
+# min_p_genuine = 0.6               # 拍板：真信号概率 ≥ 0.6
+# min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6
 min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向
-max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5
+# max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5
 signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
 size_fraction_m = 0.75            # M 用 7.5 成，L 用满

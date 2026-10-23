@@ -39,7 +39,11 @@ SecretReader = Callable[[str], str | None]
 
 # 第三步“基本配置”能改的项：(面板段, 键, 可选值)
 _BASIC: dict[str, tuple[actions.Section, FieldSpec]] = {
-    "profile": ("app", FieldSpec(str, choices=("24h", "12h", "6h", "2h", "60m", "30m", "15m"))),
+    "meeting_interval": (
+        "app",
+        FieldSpec(str, choices=("15m", "30m", "1h", "2h", "6h", "12h", "24h")),
+    ),
+    "hold": ("app", FieldSpec(str, choices=("30m", "1h", "2h", "4h"))),
     "jev_provider": ("fast_loop", FieldSpec(str, choices=("typesafe", "openrouter"))),
     "llm_provider": ("llm", FieldSpec(str, choices=("deepseek", "openrouter"))),
     "daily_cost_limit_usd": ("budget", FieldSpec(float)),
@@ -119,7 +123,8 @@ def setup_state(
             return state
         del risk
         state.basic = {
-            "profile": app.profile,
+            "meeting_interval": app.meeting_interval,
+            "hold": app.hold,
             "jev_provider": app.fast_loop.jev_provider,
             "llm_provider": slow.llm.provider,
             "daily_cost_limit_usd": slow.budget.daily_cost_limit_usd,
@@ -224,7 +229,10 @@ async def self_check(
                 CheckItem(
                     name="配置文件",
                     ok=True,
-                    detail=f"合格：模式 {app.mode.value}，档位 {app.profile}",
+                    detail=(
+                        f"合格：模式 {app.mode.value}，开会间隔 {app.meeting_interval}，"
+                        f"最长持仓 {app.hold}"
+                    ),
                 )
             )
         except ConfigError as e:

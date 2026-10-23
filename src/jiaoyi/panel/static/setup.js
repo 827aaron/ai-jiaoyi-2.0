@@ -2,12 +2,13 @@
    面板密码只留在这个页面的内存里，不进浏览器存储。 */
 const SU = { st: null, pw: "", checks: null, msg: {} };
 const BASIC = {
-  profile: ["持仓档位", "单笔最长持仓时间。30m / 15m 只能跑模拟盘"],
+  meeting_interval: ["开会间隔", "军师团每隔多久开一轮会；卡有效期 = 间隔 + 20 分钟"],
+  hold: ["最长持仓", "单笔最长拿多久；止损 / 止盈 / 门槛跟它走。30m 只能跑模拟盘"],
   jev_provider: ["拍板人走哪个通道", "openrouter = 和军师团共用一把 OpenRouter key"],
   llm_provider: ["军师团走哪个通道", "openrouter = 用 OPENROUTER_API_KEY；deepseek = 直连 DeepSeek"],
   daily_cost_limit_usd: ["军师团每天花费上限（美元）", "到了就停开会，第二天恢复"],
 };
-const BASIC_CHOICE = { "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "2h": "2 小时（默认）", "60m": "1 小时", "30m": "30 分钟（只能模拟盘）", "15m": "15 分钟（只能模拟盘）", typesafe: "typesafe（Jev 官方）", openrouter: "OpenRouter", deepseek: "DeepSeek 直连" };
+const BASIC_CHOICE = { "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "30m": "30 分钟", "15m": "15 分钟", typesafe: "typesafe（Jev 官方）", openrouter: "OpenRouter", deepseek: "DeepSeek 直连" };
 const KEY_LABEL = {
   OPENROUTER_API_KEY: "OpenRouter（拍板 + 军师团）",
   BINANCE_TESTNET_API_KEY: "币安 Demo · Key",

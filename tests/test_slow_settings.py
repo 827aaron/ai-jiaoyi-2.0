@@ -13,34 +13,35 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
-    cfg = load_slow_config(tmp_path / "nope.toml")  # 默认 2h 档
+    cfg = load_slow_config(tmp_path / "nope.toml")  # 默认开会间隔 1h 档
     assert cfg.engine_settings() == TradingAgentsSettings(max_tokens=None, json_max_tokens=None)
     kw = cfg.commander_kwargs()
     assert kw["concurrency"] == 8
-    assert kw["ttl"] == timedelta(minutes=140)
-    assert kw["symbol_min_interval"] == timedelta(minutes=115)
+    assert kw["ttl"] == timedelta(minutes=80)
+    assert kw["symbol_min_interval"] == timedelta(minutes=50)
     assert kw["expiry_lead"] == timedelta(minutes=20)
-    # 2h 档 = 每 120 分钟一轮会：关键位突破 / 新入池也要隔 120 分钟
-    assert kw["symbol_timeout_s"] == 900 and kw["min_refresh_gap"] == timedelta(minutes=120)
-    assert cfg.effective_pick_max(20) == 10
+    # 1h 档 = 每 60 分钟一轮会：关键位突破 / 新入池也要隔 60 分钟
+    assert kw["symbol_timeout_s"] == 900 and kw["min_refresh_gap"] == timedelta(minutes=60)
+    assert kw["fail_backoff"][-1] == timedelta(minutes=15)
+    assert cfg.budget.daily_cost_limit_usd == 30.0
+    assert cfg.effective_pick_max(20) == 12
 
-    one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()
-    assert one_hour["ttl"] == timedelta(minutes=80) and one_hour["concurrency"] == 8
-    assert one_hour["expiry_lead"] == timedelta(minutes=20)
-    assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
-    assert one_hour["min_refresh_gap"] == timedelta(minutes=60)
+    two_hour = load_slow_config(tmp_path / "nope.toml", "2h").commander_kwargs()
+    assert two_hour["ttl"] == timedelta(minutes=140) and two_hour["concurrency"] == 8
+    assert two_hour["fail_backoff"][-1] == timedelta(minutes=30)
+    assert two_hour["min_refresh_gap"] == timedelta(minutes=60)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
     cfg = load_slow_config(ROOT / "config" / "slow.example.toml")
-    assert cfg == slow_defaults("2h")
+    assert cfg == slow_defaults()  # 示例文件里没有写死的项：全跟默认档位（1h）
     assert SlowConfig().schedule.refresh_lead_min == 20  # 不在档位里时的代码默认
 
 
 def test_written_key_beats_profile(tmp_path: Path) -> None:
     p = tmp_path / "slow.toml"
     p.write_text("[schedule]\nconcurrency = 2\nrefresh_lead_min = 30\n", encoding="utf-8")
-    cfg = load_slow_config(p, "60m")
+    cfg = load_slow_config(p, "1h")
     assert cfg.schedule.concurrency == 2 and cfg.schedule.refresh_lead_min == 30
     assert cfg.schedule.card_ttl_min == 80  # 没写的仍取档位
 
@@ -232,11 +233,20 @@ def test_tiers_section_defaults_and_cautions() -> None:
 def test_tier_is_meeting_interval() -> None:
     from jiaoyi.core import profiles
 
-    for name, mins in (("2h", 120), ("60m", 60), ("30m", 30), ("15m", 15)):
+    tiers = (
+        ("15m", 15),
+        ("30m", 30),
+        ("1h", 60),
+        ("2h", 120),
+        ("6h", 360),
+        ("12h", 720),
+        ("24h", 1440),
+    )
+    for name, mins in tiers:
         sched = profiles.defaults(name, "slow.schedule")
         assert profiles.defaults(name, "app")["slow_loop_interval_min"] == mins
-        assert sched["min_refresh_gap_min"] == mins
         assert sched["card_ttl_min"] == mins + sched["refresh_lead_min"]
+        assert sched["min_refresh_gap_min"] <= mins
 
 
 def test_15m_tier_warns_instead_of_stretching() -> None:
