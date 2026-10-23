@@ -134,6 +134,7 @@ def build_execution(
         income_since=exchange.income_since,
         exchange=exchange,
         recorder=recorder(Role.EXECUTOR),
+        open_fee_bps=risk.taker_fee_bps,
     )
     reconciler = ThreeWayReconciler(
         adapter,

@@ -121,6 +121,8 @@ class ReconcileIssueKind(StrEnum):
     """仓位已平但保命止损还挂着。"""
     EXTERNAL_CLOSE = "external_close"
     """账本里还开着，币安上已经没仓位了：有人在币安 App / 网页上手动平了。"""
+    SIDE_MISMATCH = "side_mismatch"
+    """币安上的仓位方向和账本相反（或刚平的仓被反向开了一笔）：多半是平仓单抢跑开出的反手仓。"""
 
 
 class ReconcileIssue(Contract):

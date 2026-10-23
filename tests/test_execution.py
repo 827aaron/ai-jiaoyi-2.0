@@ -122,6 +122,23 @@ async def test_open_builds_executor_and_places_lifeboat(rig: Rig) -> None:
     assert rec.lifeboat is not None and rec.lifeboat.status == "active"
 
 
+async def test_stop_and_take_profit_compensate_open_fee(rig: Rig) -> None:
+    """hummingbot 按扣了开仓手续费的净盈亏触发：止损加 5bp、止盈减 5bp，价格距离才等于保镖算的。"""
+    rig.adapter = HbExecutorAdapter(
+        rig.api, rig.lifeboat, rig.registry, rig.alerts,
+        account_name="acct", connector_name="binance_perpetual_testnet",
+        fill_timeout_s=5, poll_s=1, clock=rig.clock, sleep=rig.sleep,
+        income_since=rig.ex.income_since, exchange=rig.ex, open_fee_bps=5.0,
+    )  # fmt: skip
+    pid = await open_filled(rig)
+    barrier = rig.api.created[0]["triple_barrier_config"]
+    assert barrier["stop_loss"] == "0.003" and barrier["take_profit"] == "0.0045"
+    # 账本、保命止损仍按价格距离算，不受补偿影响
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.stop_loss_price == pytest.approx(67873.89)
+    assert rig.ex.placed[0][3] == pytest.approx(68044.0 * (1 - 0.00375))
+
+
 async def test_short_lifeboat_is_above_entry(rig: Rig) -> None:
     await open_filled(rig, side="short")
     _, side, _, price, _ = rig.ex.placed[0]
@@ -1058,3 +1075,76 @@ async def test_fixed_issue_does_not_keep_reconcile_lamp_red(rig: Rig) -> None:
     second = await rig.rec.reconcile(rig.t)
     assert [i.fixed for i in second.issues] == [True]
     assert beats[-1] == (Health.OK, "三方一致（本轮已处理 1 项）")
+
+
+# ---------------------------------------------------------------- 反手仓（平仓单抢跑开出的反向仓）
+
+
+async def _stopped_then_reversed(rig: Rig) -> tuple[str, float]:
+    """保命止损先平了仓，执行器的止损单又成交一次：执行器 STOP_LOSS 结束，币安出现反向等量仓。"""
+    pid = await open_filled(rig)
+    rig.api.terminate("ex1", "STOP_LOSS", pnl=-5.0)
+    await rig.adapter.positions()
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED
+    rig.ex.set_position(rec.symbol, Side.SHORT, rec.quantity)
+    return pid, rec.quantity
+
+
+async def test_reverse_position_after_executor_end_is_closed_in_the_same_round(rig: Rig) -> None:
+    pid, qty = await _stopped_then_reversed(rig)
+    rig.t += timedelta(minutes=3)
+    report = await rig.rec.reconcile(rig.t)  # 开关默认关也要平：这是我们自己的仓
+    (issue,) = report.issues
+    assert issue.kind is ReconcileIssueKind.SIDE_MISMATCH and issue.fixed
+    assert issue.position_id == pid and "反手仓" in issue.detail
+    assert rig.ex.market_closed == [("BTCUSDT", "buy", qty)]  # 空仓用买单只减仓平
+    assert any(a.level is AlertLevel.CRITICAL for a in rig.alerts.sent)
+
+
+async def test_reverse_position_long_after_window_is_only_an_orphan(rig: Rig) -> None:
+    await _stopped_then_reversed(rig)
+    rig.t += timedelta(minutes=11)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert issue.kind is ReconcileIssueKind.ORPHAN_POSITION and not issue.fixed
+    assert rig.ex.market_closed == []
+
+
+async def test_reverse_position_with_other_quantity_is_only_an_orphan(rig: Rig) -> None:
+    _, qty = await _stopped_then_reversed(rig)
+    rig.ex.set_position("BTCUSDT", Side.SHORT, qty * 3)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert issue.kind is ReconcileIssueKind.ORPHAN_POSITION and rig.ex.market_closed == []
+
+
+async def test_reverse_close_failure_stays_critical_and_unfixed(rig: Rig) -> None:
+    await _stopped_then_reversed(rig)
+    rig.ex.fail_market_close = True
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert issue.kind is ReconcileIssueKind.SIDE_MISMATCH and not issue.fixed
+    assert rig.alerts.sent[-1].level is AlertLevel.CRITICAL
+
+
+async def test_open_ledger_with_opposite_exchange_side_is_flattened_not_relifeboated(
+    rig: Rig,
+) -> None:
+    """账本还开着多单，币安上却是等量空单：不按账本方向补保命止损（会失败），直接平反手仓。"""
+    pid = await open_filled(rig)
+    qty = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
+    rig.ex.stops.clear()  # 保命止损已经触发
+    rig.ex.set_position("BTCUSDT", Side.SHORT, qty)
+    placed_before = len(rig.ex.placed)
+    report = await rig.rec.reconcile(rig.t)
+    kinds = [i.kind for i in report.issues]
+    assert kinds == [ReconcileIssueKind.SIDE_MISMATCH] and report.issues[0].fixed
+    assert len(rig.ex.placed) == placed_before  # 没有补保命止损
+    assert rig.ex.market_closed == [("BTCUSDT", "buy", qty)]
+
+
+async def test_open_ledger_opposite_side_other_quantity_only_alerts(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    qty = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
+    rig.ex.set_position("BTCUSDT", Side.SHORT, qty / 2)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert issue.kind is ReconcileIssueKind.SIDE_MISMATCH and not issue.fixed
+    assert rig.ex.market_closed == []

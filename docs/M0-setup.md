@@ -57,7 +57,9 @@ curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | he
 再打一层，把这两个常量改成 `https://demo-fapi.binance.com/fapi/` 和 `wss://demo-fstream.binance.com/`，重新打成同名本地镜像，上游 compose 不用改。
 补丁找不到原文就构建失败（上游改了要重审）。币安文档只给了这两个 Demo 域名，没有单独的用户数据流 / ws-fapi 域名，
 所以**第一次冒烟要确认 hummingbot 的持仓/订单推送能收到**，收不到就把现象发出来。
-回退旧测试网：`config/app.toml` 里 `sim_environment = "legacy_testnet"`，并用 `HB_SIM=legacy_testnet make hb-up`（会重新拉未打补丁的上游镜像覆盖本地补丁镜像）。两边必须一致，否则保命止损和执行器分在两个环境。冒烟时请确认 Demo 上 algo 条件单能挂、能查、能撤。
+**平仓只减仓补丁**（`docker/hb-demo/patch_reduce_only.py`，Demo / 旧测试网 / 实盘都打）：上游执行器在单向持仓下发的平仓单不带 reduce-only，保命止损先成交后执行器的止损 / 止盈 / 到时平仓单再成交，会反向开出一笔没有止损的仓。补丁让平仓单永远只减仓：仓位已经是 0 时币安拒单，执行器重试到上限后结束，对账员按外部平仓结算。万一还是出现反手仓（例如补丁前的镜像），对账员发现「刚结束 10 分钟内的仓被反向开了等量一笔」会当轮直连币安只减仓平掉并发 critical。升级 hummingbot 镜像后补丁找不到原文会构建失败，要重审。
+
+回退旧测试网：`config/app.toml` 里 `sim_environment = "legacy_testnet"`，并用 `HB_SIM=legacy_testnet make hb-up`（会重新构建本地镜像，只打平仓只减仓补丁、不打 Demo 补丁）。两边必须一致，否则保命止损和执行器分在两个环境。冒烟时请确认 Demo 上 algo 条件单能挂、能查、能撤。
 
 `make hb-up` 会把 hummingbot 连的环境写进 `data/hb_sim_environment`（数据目录不是 `data` 时用 `DATA_DIR=...`），`jiaoyi` 启动时和 `sim_environment` 对比，缺标记或不一致都拒绝启动。上游镜像钉了 digest（Makefile 的 `HB_IMAGE_DIGEST`），升级前先在 Demo 上跑冒烟。
 

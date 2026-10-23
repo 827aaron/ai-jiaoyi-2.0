@@ -107,14 +107,12 @@ HB_IMAGE_TAG := hummingbot/hummingbot-api:latest
 
 hb-patch:
 	docker pull $(HB_IMAGE_PINNED)
-	docker build --build-arg BASE=$(HB_IMAGE_PINNED) -t $(HB_IMAGE_TAG) docker/hb-demo
+	docker build --build-arg BASE=$(HB_IMAGE_PINNED) --build-arg DEMO=$(if $(filter demo,$(HB_SIM)),1,0) -t $(HB_IMAGE_TAG) docker/hb-demo
 
 hb-up:
-	@# 两个分支都要重置本地 :latest 标签：legacy 必须恢复成未打补丁的镜像，否则上次打的 Demo 补丁还在，
-	@# hummingbot 连 Demo 而 ccxt 连旧测试网，保命止损和执行器就分在两个环境
-	@if [ "$(HB_SIM)" = "demo" ]; then $(MAKE) hb-patch; \
-	elif [ "$(HB_SIM)" = "legacy_testnet" ]; then \
-		docker pull $(HB_IMAGE_PINNED) && docker tag $(HB_IMAGE_PINNED) $(HB_IMAGE_TAG); \
+	@# 两个分支都要重建本地 :latest 标签：legacy 不能带上次打的 Demo 补丁，否则 hummingbot 连 Demo
+	@# 而 ccxt 连旧测试网，保命止损和执行器就分在两个环境；平仓只减仓的补丁两边都要打
+	@if [ "$(HB_SIM)" = "demo" ] || [ "$(HB_SIM)" = "legacy_testnet" ]; then $(MAKE) hb-patch; \
 	else echo "HB_SIM 只能是 demo 或 legacy_testnet"; exit 1; fi
 	@# 记下 hummingbot 连的环境，jiaoyi 启动时和 sim_environment 对比，不一致拒绝启动
 	@mkdir -p $(DATA_DIR) && echo "$(HB_SIM)" > $(DATA_DIR)/hb_sim_environment
