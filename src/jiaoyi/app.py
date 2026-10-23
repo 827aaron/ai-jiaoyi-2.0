@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields
@@ -80,6 +81,7 @@ from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.commander import BattleCardCommander
+from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import TradingAgentsEngine
@@ -88,6 +90,27 @@ log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 Closer = Callable[[], Awaitable[None]]
+
+
+BLOCKED_FILE = "blocked_symbols.json"
+
+
+@runtime_checkable
+class _Blocks(Protocol):
+    @property
+    def blocked_symbols(self) -> dict[str, str]: ...
+
+    def unblock_symbol(self, symbol: str) -> None: ...
+
+
+def read_blocked(data_dir: str | Path) -> dict[str, str]:
+    """``jiaoyi status`` 和面板读：被新闻（下架公告）封掉新开仓的币 → 原因。文件坏了当没有。"""
+    path = Path(data_dir) / BLOCKED_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
 
 @runtime_checkable
@@ -160,18 +183,23 @@ def _build_cards(
     decision_log: JsonlDecisionLog,
     secrets: SecretStore,
     clock: Clock,
-) -> BattleCardProvider:
-    """军师团：有 DeepSeek key 且装了 ``jiaoyi[slow]`` 才用真的，否则用桩（没卡 = 不开新仓）。"""
+) -> tuple[BattleCardProvider, NewsHub | None]:
+    """军师团：有 DeepSeek key 且装了 ``jiaoyi[slow]`` 才用真的，否则用桩（没卡 = 不开新仓）。
+
+    新闻源只服务军师团（开会素材、大消息触发、下架封禁），军师团是桩时不拉新闻。
+    """
     if not secrets.get("DEEPSEEK_API_KEY"):
         log.warning("没有 DEEPSEEK_API_KEY，军师团用桩：不出作战卡，快环不会开新仓")
-        return StubBattleCardProvider()
+        return StubBattleCardProvider(), None
     if importlib.util.find_spec("tradingagents") is None:
         log.warning("没装 tradingagents（uv pip install -e '.[slow]'），军师团用桩")
-        return StubBattleCardProvider()
-    engine = TradingAgentsEngine(risk_cfg, secrets, today=clock)
-    return BattleCardCommander(
+        return StubBattleCardProvider(), None
+    news = NewsHub(default_sources(), decision_log, clock=clock)
+    engine = TradingAgentsEngine(risk_cfg, secrets, today=clock, news=news)
+    commander = BattleCardCommander(
         engine, risk_cfg, decision_log, pick_max=app_cfg.card_pick_max, clock=clock
     )
+    return commander, news
 
 
 @dataclass
@@ -185,6 +213,8 @@ class Built:
     """``jev`` / ``rule``（规则拍板，只在模拟盘）/ ``none``（没有拍板模型，不开新仓）。"""
     lot_rules: LotRulesProvider
     """下单精度。不是角色，不进 ``Modules``；``App.start`` 和主循环负责定时刷新。"""
+    news: NewsHub | None = None
+    """新闻 / 公告源。只有真军师团时才有；主循环定时 ``poll_and_notify``。"""
 
 
 def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
@@ -263,6 +293,7 @@ def build_modules(
     screener: SymbolScreener
     cards: BattleCardProvider
     feed: MarketDataFeed
+    news: NewsHub | None = None
     if offline:
         feed = StubMarketDataFeed()
         screener, cards = StubSymbolScreener(), StubBattleCardProvider()
@@ -280,7 +311,7 @@ def build_modules(
                 round_trip_fee_bps=risk_cfg.taker_fee_bps * 2,
             ),
         )
-        cards = _build_cards(risk_cfg, app_cfg, decision_log, secrets, clock)
+        cards, news = _build_cards(risk_cfg, app_cfg, decision_log, secrets, clock)
 
     alerter: Alerter
     executor: ExecutorAdapter
@@ -352,7 +383,7 @@ def build_modules(
         cards=cards,
         alerter=alerter,
     )
-    return Built(modules, closers, recorders, gate_mode, lot_rules)
+    return Built(modules, closers, recorders, gate_mode, lot_rules, news)
 
 
 class App:
@@ -377,6 +408,7 @@ class App:
         self.recorders: dict[Role, RoleRecorder] = {}
         self.gate_mode = "none"
         self.lot_rules: LotRulesProvider = StubLotRules()
+        self.news: NewsHub | None = None
         if modules is None:
             built = build_modules(
                 risk_cfg,
@@ -389,6 +421,7 @@ class App:
             modules, self._closers = built.modules, built.closers
             self.recorders, self.gate_mode = built.recorders, built.gate_mode
             self.lot_rules = built.lot_rules
+            self.news = built.news
         self.m = modules
         self.pool: SymbolPool | None = None
         self.started = False
@@ -413,6 +446,7 @@ class App:
             log.exception("启动选币失败，暂不订阅行情，下一轮选币再试")
         if self.pool is not None:
             await self.m.feed.subscribe([e.symbol for e in self.pool.in_pool])
+        self.save_blocked()  # 封禁只在内存里，重启后清掉旧文件，由新闻源重新补上
         self.heartbeat_all()
         self.started = True
         if self.app_cfg.mode == RunMode.LIVE:
@@ -443,6 +477,31 @@ class App:
         """拉一次交易所精度。失败沿用旧缓存，过期后保镖自动拒单。"""
         if isinstance(self.lot_rules, _Refreshable) and not await self.lot_rules.refresh():
             log.warning("下单精度刷新失败")
+
+    def blocked_symbols(self) -> dict[str, str]:
+        """当前禁止新开仓的币 → 原因（来自币安下架公告）。"""
+        cards = self.m.cards
+        return cards.blocked_symbols if isinstance(cards, _Blocks) else {}
+
+    def unblock_symbol(self, symbol: str) -> bool:
+        """人工解封（面板以后调这里）。只在本进程生效；下一条新的下架公告会再封上。"""
+        cards = self.m.cards
+        if not isinstance(cards, _Blocks) or symbol not in cards.blocked_symbols:
+            return False
+        cards.unblock_symbol(symbol)
+        log.warning("人工解封 %s 的新开仓", symbol)
+        self.save_blocked()
+        return True
+
+    def save_blocked(self) -> None:
+        """把封禁名单写到 data_dir，给 ``jiaoyi status`` 和面板读（它们不在主循环进程里）。"""
+        path = Path(self.app_cfg.data_dir) / BLOCKED_FILE
+        try:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.blocked_symbols(), ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            log.exception("写封禁名单失败")
 
     async def _alert(self, level: AlertLevel, title: str, body: str = "") -> None:
         try:
