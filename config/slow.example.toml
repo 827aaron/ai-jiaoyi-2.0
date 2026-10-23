@@ -57,6 +57,8 @@ reasoning_effort = "low"                  # 推理长度：none/low/medium/high�
 # max_tokens = 8192                       # 不写 = 模型自己的最大输出（启动时读 OpenRouter 模型信息，读不到用 384000）；写了按你的，
                                           # 思考模型的思考也算在内，4096 实测会让辩论回答变空，别调低
 retry_bad_steps = true                    # 某一步回答被截断 / 空 / 过短：自动重试一次（关掉推理、提示直接给结论），仍不行才整场失败
+speech_min_chars = 50                     # 质量门槛：每个辩手每轮发言至少多少字，低于这场会不能用（0 = 只查空）
+report_min_chars = 50                     # 分析师报告至少多少字，低于算缺失（行情技术缺了整场失败；新闻/社交/基本面缺了仓位档位下调一级）
 retry_min_chars = 20                      # 回答少于多少字算过短
 max_retries = 6
 

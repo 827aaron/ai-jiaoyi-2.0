@@ -275,6 +275,19 @@ class MeetingConfig(_Strict):
         description="某一步回答被截断 / 空 / 过短时自动重试一次（关掉推理、提示直接给结论），"
         "重试仍不行才让整场失败。",
     )
+    speech_min_chars: int = Field(
+        default=50,
+        ge=0,
+        le=2000,
+        description="每个辩手每轮发言至少多少字，低于就算没发言，这场会不能用。0 = 只查空。",
+    )
+    report_min_chars: int = Field(
+        default=50,
+        ge=0,
+        le=2000,
+        description="分析师报告至少多少字，低于（或短且像工具报错）算缺失：行情技术缺了这场会不能用；"
+        "新闻 / 社交 / 基本面缺了照常出结论，但仓位档位下调一级。",
+    )
     retry_min_chars: int = Field(
         default=20, ge=0, le=500, description="回答（没有工具调用时）少于这么多字算过短，触发重试。"
     )
@@ -404,6 +417,8 @@ class SlowConfig(_Strict):
             json_max_tokens=None if m.max_tokens is None else max(8192, m.max_tokens),
             retry_bad_steps=m.retry_bad_steps,
             retry_min_chars=m.retry_min_chars,
+            speech_min_chars=m.speech_min_chars,
+            report_min_chars=m.report_min_chars,
             max_retries=m.max_retries,
             reasoning_effort=m.reasoning_effort,
             price_per_mtok={"flash": (p.flash_in, p.flash_out), "pro": (p.pro_in, p.pro_out)},
