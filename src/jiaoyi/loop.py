@@ -46,6 +46,7 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import POOL_ACTIONS, PoolAction
+from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.market.features import backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.slow.screener import SCREEN_EVERY
@@ -185,6 +186,10 @@ class Runner:
             await self.news_tick()
         except Exception:
             log.exception("启动拉新闻失败，主循环里再拉")
+        try:
+            await self.app.refresh_income()
+        except Exception:
+            log.exception("启动拉收入流水失败，主循环里再拉")
         cfg = self.app.app_cfg
         self._loops = [
             asyncio.create_task(self._market_loop()),
@@ -195,6 +200,7 @@ class Runner:
             self._every(HEARTBEAT_EVERY_S, self._heartbeat_tick),
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
+            self._every(INCOME_REFRESH_S, self.app.refresh_income),
         ]
         loops: asyncio.Future[Any] = asyncio.gather(*self._loops)
         stop: asyncio.Future[Any] = asyncio.ensure_future(self._restart.wait())

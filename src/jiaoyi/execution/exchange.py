@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
@@ -59,6 +59,18 @@ class CloseFill:
     fee_usdt: float | None = None
     estimated: bool = False
     """价格不是真实成交价（例如手动平仓后取不到成交，用的标记价）。"""
+
+
+INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
+
+
+@dataclass(frozen=True)
+class IncomeRow:
+    """一条 U 本位收入流水。``kind`` 是币安的 incomeType，``income`` 用币安的正负号。"""
+
+    time: datetime
+    kind: str
+    income: float
 
 
 @dataclass(frozen=True)
@@ -127,6 +139,10 @@ class ExchangeClient(Protocol):
 
     async def income_since(self, since: datetime) -> float:
         """从 ``since`` 起的已实现盈亏 + 手续费 + 资金费净额（USDT，亏损为负）。"""
+        ...
+
+    async def income_rows(self, since: datetime) -> list[IncomeRow]:
+        """从 ``since`` 起的已实现盈亏、手续费、资金费流水（币安正负号），给按日汇总用。"""
         ...
 
     async def close(self) -> None: ...
@@ -415,19 +431,27 @@ class CcxtBinanceFutures:
                 continue  # 缺字段的合约不给精度，保镖会对它拒单
         return out
 
-    _INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
-
     async def income_since(self, since: datetime) -> float:
-        total = 0.0
+        return sum(r.income for r in await self.income_rows(since))
+
+    async def income_rows(self, since: datetime) -> list[IncomeRow]:
+        """从 ``since`` 起的收入流水（只要已实现盈亏、手续费、资金费三种），按币安的正负号。"""
+        out: list[IncomeRow] = []
         start_ms = int(since.timestamp() * 1000)
         try:
             while True:
                 rows = await self._ex.fapiPrivateGetIncome({"startTime": start_ms, "limit": 1000})
                 for row in rows:
-                    if row.get("incomeType") in self._INCOME_TYPES:
-                        total += float(row["income"])
+                    if row.get("incomeType") in INCOME_TYPES:
+                        out.append(
+                            IncomeRow(
+                                datetime.fromtimestamp(int(row["time"]) / 1000, UTC),
+                                str(row["incomeType"]),
+                                float(row["income"]),
+                            )
+                        )
                 if len(rows) < 1000:
-                    return total
+                    return out
                 start_ms = max(int(r["time"]) for r in rows) + 1
         except Exception as e:
             raise ExchangeError(f"查收入流水失败：{e}") from e
