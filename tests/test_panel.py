@@ -1017,10 +1017,24 @@ def test_position_view_mark_notional_margin(tmp_path: Path) -> None:
     assert p.notional_usdt == pytest.approx(0.015 * p.mark_price)
     assert p.margin_usdt == pytest.approx(p.notional_usdt / 3)
     assert p.pnl_pct == pytest.approx(-20 / p.notional_usdt * 100)
-    # 扣费后：开仓按开仓名义、平仓按现在名义，各收一次吃单费
-    fees = (0.015 * 68044 + p.notional_usdt) * RISK.taker_fee_bps / 10_000
+    # 扣费后：开仓那次用账本实收（样例 0.51U），平仓那次按现在名义 × 费率估
+    fees = 0.51 + p.notional_usdt * RISK.taker_fee_bps / 10_000
     assert p.fees_est_usdt == pytest.approx(fees)
     assert p.net_unrealized_usdt == pytest.approx(-20 - fees)
+    assert not p.fee_from_fills and p.fee_bps == RISK.taker_fee_bps
+
+
+def test_fee_rate_from_recent_fills() -> None:
+    """面板不拿密钥：账户实际费率从最近平掉的单实收倒推（Demo 是 0.04%，不是配置的 0.05%）。"""
+    from jiaoyi.panel.overview import fee_rate_bps
+
+    rec = c.PositionRecord.model_validate(load_example("position_record"))
+    closed = rec.model_copy(
+        update={"status": c.PositionStatus.CLOSED, "closed_at": NOW, "quantity": 1.0,
+                "entry_price": 100.0, "exit_price": 100.0, "fees_usdt": 0.08}
+    )  # fmt: skip
+    assert fee_rate_bps([closed]) == pytest.approx(4.0)
+    assert fee_rate_bps([rec]) is None  # 没平过的单：退回配置费率，页面标「估」
 
 
 def test_market_role_and_run_line_fields(tmp_path: Path) -> None:

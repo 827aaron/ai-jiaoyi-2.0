@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import statistics
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -163,6 +164,10 @@ class PositionView(BaseModel):
     net_unrealized_usdt: float | None = None
     """扣掉 ``fees_est_usdt`` 后的浮盈：现在平掉大概能落袋多少。"""
     net_pnl_pct: float | None = None
+    fee_bps: float | None = None
+    """估手续费用的单边费率（bp）。"""
+    fee_from_fills: bool = False
+    """费率是从最近平掉的单实收倒推的（True），还是配置里的 ``taker_fee_bps``（False，只是估）。"""
 
 
 class Tiles(BaseModel):
@@ -253,7 +258,9 @@ def build_overview(
 
     kpis = compute_kpis(files, ledger, hb, risk, now)
     halted, halt_pct = kpis.halted, kpis.halt_pct
-    positions = position_views(ledger.live(), records, hb, risk.taker_fee_bps)
+    positions = position_views(
+        ledger.live(), records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions)
+    )
 
     # ---- 今日统计
     tz = risk.day_reset_tz
@@ -366,11 +373,36 @@ def compute_kpis(
     )
 
 
+FEE_SAMPLE = 20
+"""倒推实际费率用最近多少笔平掉的单。"""
+
+
+def fee_rate_bps(positions: list[PositionRecord]) -> float | None:
+    """最近平掉的单实收手续费 ÷ (开仓名义 + 平仓名义) 的中位数（bp）；一笔都没有就 None。
+
+    面板不拿密钥，查不了币安的账户费率接口；拿成交回报倒推，Demo / VIP 档位都对得上。
+    """
+    closed = sorted(
+        (
+            p
+            for p in positions
+            if p.closed_at and p.fees_usdt > 0 and p.entry_price and p.exit_price
+        ),
+        key=lambda p: p.closed_at or p.opened_at,
+    )[-FEE_SAMPLE:]
+    rates = [
+        p.fees_usdt / (p.quantity * ((p.entry_price or 0.0) + (p.exit_price or 0.0))) * 10_000
+        for p in closed
+    ]
+    return statistics.median(rates) if rates else None
+
+
 def position_views(
     live: list[PositionRecord],
     records: list[DecisionRecord],
     hb: HbSnapshot,
     taker_fee_bps: float = 0.0,
+    fills_fee_bps: float | None = None,
 ) -> list[PositionView]:
     """未结束的持仓，最新开的在前；附上 hummingbot 的浮盈浮亏和管家最新判断。"""
     keeper_last: dict[str, str] = {}
@@ -386,11 +418,12 @@ def position_views(
             mark = p.entry_price + sign * pnl / p.quantity
         ref = mark or p.entry_price
         notional = p.quantity * ref if ref else None
-        fees = (
-            (p.quantity * p.entry_price + notional) * taker_fee_bps / 10_000
-            if notional and p.entry_price
-            else None
-        )
+        bps = fills_fee_bps if fills_fee_bps is not None else taker_fee_bps
+        fees = None
+        if notional and p.entry_price:
+            # 开仓那次账本里有实收就用实收，没有按费率估；平仓那次只能按费率估
+            opened = p.fees_usdt or p.quantity * p.entry_price * bps / 10_000
+            fees = opened + notional * bps / 10_000
         net = pnl - fees if pnl is not None and fees is not None else None
         out.append(
             PositionView(
@@ -420,6 +453,8 @@ def position_views(
                 fees_est_usdt=fees,
                 net_unrealized_usdt=net,
                 net_pnl_pct=net / notional * 100 if net is not None and notional else None,
+                fee_bps=bps,
+                fee_from_fills=fills_fee_bps is not None,
             )
         )
     return out

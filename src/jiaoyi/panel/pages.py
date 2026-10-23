@@ -36,6 +36,7 @@ from jiaoyi.panel.overview import (
     LampState,
     PositionView,
     compute_kpis,
+    fee_rate_bps,
     position_views,
 )
 from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
@@ -144,7 +145,7 @@ def build_positions(
     ledger = files.ledger()
     records = files.decisions_today(now)
     live = ledger.live()
-    views = position_views(live, records, hb, risk.taker_fee_bps)
+    views = position_views(live, records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions))
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt
     groups = []

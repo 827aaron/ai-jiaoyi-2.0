@@ -228,7 +228,8 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
 // 持仓浮盈一律显示扣掉开平两次手续费后的数（现在平掉大概能落袋多少）；拿不到费率估算就退回原始浮盈
 const netPnl = (p) => (p.net_unrealized_usdt != null ? p.net_unrealized_usdt : p.unrealized_usdt);
 const netPct = (p) => (p.net_pnl_pct != null ? p.net_pnl_pct : p.pnl_pct);
-const feeTip = (p) => (p.fees_est_usdt == null || p.unrealized_usdt == null ? "" : `浮动 ${signed(p.unrealized_usdt, 2)} U − 预估手续费 ${money(p.fees_est_usdt, 2)} U（开仓 + 平仓各一次，按吃单费率）`);
+const feeSrc = (p) => (p.fee_from_fills ? `按最近成交实收费率 ${money(p.fee_bps / 100, 3)}%` : `估：按配置费率 ${money(p.fee_bps / 100, 3)}%，还没有平过的单可以对`);
+const feeTip = (p) => (p.fees_est_usdt == null || p.unrealized_usdt == null ? "" : `浮动 ${signed(p.unrealized_usdt, 2)} U − 手续费 ${money(p.fees_est_usdt, 2)} U（开仓 + 平仓各一次，${feeSrc(p)}）`);
 // 今日盈亏直接拆一行：已平（净，同历史页交易净盈亏）+ 浮动（没平的单现在的浮盈）+ 其它（资金费、0 点前已有持仓的浮盈等）
 function dayParts(k) {
   if (k.day_pnl_usdt == null || k.day_closed_usdt == null || k.day_floating_usdt == null) return "";
@@ -979,7 +980,7 @@ P.positions = (arg) => {
     const held = now - new Date(p.opened_at).getTime();
     const go = `onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'"`;
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
-    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}</div>` : "";
+    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}</div>` : "";
     const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
     const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
