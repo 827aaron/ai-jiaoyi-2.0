@@ -107,10 +107,14 @@ APP_EDITABLE = frozenset(
 )
 
 # 面板的段 → 档位里对应的段（core/profiles.py）。这些段里档位给默认值的键可以“清掉”回到档位默认。
+BUDGET_EDITABLE = "daily_cost_limit_usd"
+"""花费段在设置页只能改日上限。"""
+
 _PROFILE_SECTION: dict[str, profiles.Section] = {
     "app": "app",
     "fast_loop": "fast_loop",
     "schedule": "slow.schedule",
+    "budget": "slow.budget",
 }
 
 
@@ -408,6 +412,7 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
         "app": raw_app,
         "fast_loop": raw_app.get("fast_loop", {}),
         "schedule": raw_slow.get("schedule", {}),
+        "budget": raw_slow.get("budget", {}),
     }
     pinned: dict[str, dict[str, object]] = {}
     for section, psec in _PROFILE_SECTION.items():
@@ -484,8 +489,8 @@ def update_config(
     if section == "app" and "profile" in changes:  # 旧面板写的 profile = 开会间隔档
         changes = {("meeting_interval" if k == "profile" else k): v for k, v in changes.items()}
     path, table, editable = _target(paths, section)
-    if fields is None and section in ("llm", "budget"):
-        # 军师团通道和花费上限只在首次设置向导里改（向导会显式给 fields）
+    if fields is None and section == "llm":
+        # 军师团通道只在首次设置向导里改（向导会显式给 fields）；花费段设置页只能改日上限
         raise ActionError(f"{section} 段只能在首次设置里改")
     fields = editable if fields is None else fields
     exists = path.is_file()  # slow.toml 可以没有：没有就新建（其余默认值照旧）
@@ -580,8 +585,8 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return scalar_fields(ScheduleConfig, set())
     if section == "llm":
         return scalar_fields(LlmConfig, set())
-    if section == "budget":
-        return scalar_fields(BudgetConfig, set())
+    if section == "budget":  # 设置页只放日上限；失败估价在首次设置之外不改
+        return scalar_fields(BudgetConfig, set(BudgetConfig.model_fields) - {BUDGET_EDITABLE})
     if section == "screener":
         return scalar_fields(ScreenerSection, set())
     if section == "tiers":

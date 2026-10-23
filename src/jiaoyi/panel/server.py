@@ -211,7 +211,15 @@ def create_app(
 
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
-        return build_team(files, clock(), role, cfg()[1].predictor.mode)
+        ac = cfg()[1]
+        fl = ac.fast_loop
+        th = {
+            "min_p_genuine": fl.min_p_genuine,
+            "min_p_take": fl.min_p_take,
+            "min_p_direction": fl.min_p_direction,
+            "max_p_toxic": fl.max_p_toxic,
+        }
+        return build_team(files, clock(), role, ac.predictor.mode, th)
 
     @api.get("/api/meeting/{symbol}")
     async def meeting(symbol: str) -> Meeting:

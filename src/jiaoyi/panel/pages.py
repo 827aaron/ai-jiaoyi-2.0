@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
@@ -37,7 +37,7 @@ from jiaoyi.panel.overview import (
     compute_kpis,
     position_views,
 )
-from jiaoyi.slow.settings import ScreenerSection, SlowConfig, slow_defaults
+from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
 
 # 团队页按数据流排：选币 → 军师团 → 盘口员 → 预测员 → 哨兵 → 拍板 → 保镖 → 下单 → 持仓看管 → 告警
 ROLE_NAMES: dict[Role, str] = {
@@ -123,7 +123,12 @@ class TeamPage(BaseModel):
     market_progress: Progress = "wait"
     """总盘会节点的点：开会中 = 正在做，今天开完 = 做完，失败 / 中断 = 出错。"""
     predictor_mode: Literal["on_demand", "all_symbols"] | None = None
-    """预测员算哪些币（``[predictor] mode``）；流程图按它写“只算作战卡上的 N 个币”。"""
+    """预测员算哪些币（``[predictor] mode``）。"""
+    gate_thresholds: dict[str, float] = {}
+    """拍板门槛（fast_loop 的 min_p_genuine / min_p_take / min_p_direction / max_p_toxic），
+    拍板记录详情里标出哪一问没过。"""
+    snapshot: dict[str, Any] | None = None
+    """选中盘口员时：data/market_snapshot.json（逐币行情 + 各路推送今天的条数）。"""
 
 
 def build_positions(
@@ -266,6 +271,7 @@ def build_team(
     now: datetime,
     selected: Role | None,
     predictor_mode: Literal["on_demand", "all_symbols"] | None = None,
+    gate_thresholds: dict[str, float] | None = None,
 ) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -293,6 +299,8 @@ def build_team(
         records=mine,
         meetings=meets,
         predictor_mode=predictor_mode,
+        gate_thresholds=gate_thresholds or {},
+        snapshot=files.market_snapshot() if chosen is Role.BOOK_READER else None,
         market=market,
         market_progress=_market_progress(market, now, run.tz),
     )
@@ -1067,6 +1075,8 @@ class SettingsPage(BaseModel):
     schedule: list[SettingItem] = []
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
     schedule_caution: str | None = None
+    budget: list[SettingItem] = []
+    """军师团每日花费上限（config/slow.toml 的 [budget]，只放日上限）。"""
     """节奏配置可能造成换卡空档时的提示（只提示，不拒绝）。"""
     screener: list[SettingItem] = []
     """选币规则（config/slow.toml 的 [screener]）：门槛、打分满分线、权重。"""
@@ -1171,6 +1181,9 @@ def build_settings(
         predictor=_items(app.predictor, "predictor"),
         schedule=_items(slow.schedule, "schedule"),
         schedule_caution=slow.schedule.caution(),
+        budget=_items(
+            slow.budget, "budget", frozenset(BudgetConfig.model_fields) - {"daily_cost_limit_usd"}
+        ),
         screener=_items(slow.screener, "screener"),
         tiers=_items(slow.screener.tiers, "tiers"),
         screener_cautions=[
