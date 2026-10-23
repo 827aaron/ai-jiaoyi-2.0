@@ -82,8 +82,10 @@ class ExchangeClient(Protocol):
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
-    ) -> None:
-        """只减仓市价单。**兜底专用**：hummingbot 不可达而保命止损又挂不上时，对账员用它平仓。"""
+    ) -> float | None:
+        """只减仓市价单。**兜底专用**：hummingbot 不可达、执行器停不掉或平完仓位还在时用它平仓。
+
+        返回成交均价（拿不到返回 None），用来算盈亏记进当日统计。"""
         ...
 
     async def wallet_usdt(self) -> float:
@@ -290,11 +292,11 @@ class CcxtBinanceFutures:
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
-    ) -> None:
+    ) -> float | None:
         try:
             await self._ready()
             ccxt_symbol = to_ccxt_symbol(symbol)
-            await self._ex.create_order(
+            order = await self._ex.create_order(
                 ccxt_symbol,
                 "market",
                 close_side,
@@ -304,6 +306,8 @@ class CcxtBinanceFutures:
             )
         except Exception as e:
             raise ExchangeError(f"直连平仓失败：{e}") from e
+        price = (order or {}).get("average") or (order or {}).get("price")
+        return float(price) if price else None
 
     async def lot_filters(self) -> dict[str, LotFilter]:
         try:

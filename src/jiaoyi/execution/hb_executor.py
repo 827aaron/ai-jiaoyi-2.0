@@ -65,6 +65,9 @@ class SymbolAlreadyHeld(RuntimeError):
     """同一个币已有在管持仓，执行层拒绝再开。"""
 
 
+_STILL_HELD_FRACTION = 0.5
+"""币安上剩余数量不低于账本数量的这个比例，就认为仓还在（容忍部分成交 / 精度差）。"""
+
 _TRADE_BUY = 1
 _TRADE_SELL = 2
 
@@ -305,16 +308,38 @@ class HbExecutorAdapter:
         if tracked is not None:
             await self._cancel_lifeboat(tracked.record)
 
-    def mark_closed_directly(self, position_id: str, reason: CloseReason) -> None:
-        """对账员绕过 hummingbot 直连币安平仓成功后，把账本记为已平，免得每轮重复告警。"""
+    def mark_closed_directly(
+        self, position_id: str, reason: CloseReason, exit_price: float | None = None
+    ) -> None:
+        """直连币安平仓成功后，把账本记为已平，免得每轮重复告警。
+
+        有成交均价就按 数量×(平仓价-入场价) 算毛盈亏记进当日统计（手续费拿不到，不计入）；
+        没有就记 None，并留一条日志，当日统计会漏这一笔。
+        """
         tracked = self._registry.get(position_id)
-        if tracked is not None:
-            self._set(
-                tracked,
-                status=PositionStatus.CLOSED,
-                closed_at=self._clock(),
-                close_reason=reason,
-            )
+        if tracked is None:
+            return
+        rec = tracked.record
+        pnl: float | None = None
+        if exit_price is not None and rec.entry_price is not None:
+            sign = 1.0 if rec.side is Side.LONG else -1.0
+            pnl = sign * rec.quantity * (exit_price - rec.entry_price)
+        else:
+            log.warning("直连平仓拿不到成交价，当日盈亏统计会漏记 %s", position_id)
+        tracked = self._set(
+            tracked,
+            status=PositionStatus.CLOSED,
+            closed_at=self._clock(),
+            close_reason=reason,
+            realized_pnl_usdt=pnl,
+        )
+        self._record(
+            Outcome.CLOSE,
+            f"{rec.symbol} 直连平仓（{reason.value}），毛盈亏 "
+            + (f"{pnl:+.2f}U" if pnl is not None else "未知"),
+            tracked.record,
+            output={"net": pnl, "reason": reason.value, "direct": True},
+        )
 
     def mark_failed(self, position_id: str) -> None:
         tracked = self._registry.get(position_id)
@@ -366,28 +391,33 @@ class HbExecutorAdapter:
             await self._sleep(self._poll_s)
 
     async def _close_directly(
-        self, tracked: TrackedPosition, reason: CloseReason, via_hb: Exception
+        self, tracked: TrackedPosition, reason: CloseReason, via_hb: Exception | None
     ) -> bool:
         """hummingbot 停不掉执行器时，直连币安下只减仓市价单。成功返回 True 并记为已平。
 
         只对已成交的仓做；开仓中的单子币安上可能还没有仓位，直连没有意义。
         """
         rec = tracked.record
-        if self._exchange is None or rec.status is not PositionStatus.OPEN:
+        if self._exchange is None or rec.status not in (
+            PositionStatus.OPEN,
+            PositionStatus.CLOSING,
+        ):
             return False
         close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
         try:
-            await self._exchange.close_position_market(rec.symbol, close_side, rec.quantity)
+            exit_price = await self._exchange.close_position_market(
+                rec.symbol, close_side, rec.quantity
+            )
         except Exception as direct:
             # 两条路都不通：原样抛 hummingbot 的错，由调用方（对账员 / 主循环）告警
             log.error("直连平仓也失败 %s：%r", rec.position_id, direct)
             return False
-        self.mark_closed_directly(rec.position_id, reason)
+        self.mark_closed_directly(rec.position_id, reason, exit_price)
         await self._cancel_lifeboat(rec)
         await self._alert(
             AlertLevel.WARN,
             "hummingbot 停不掉执行器，已直连币安平仓",
-            f"{rec.symbol} {rec.position_id}：{via_hb!r}",
+            f"{rec.symbol} {rec.position_id}：{via_hb!r if via_hb else '执行器已结束但币安仍有仓'}",
             rec.symbol,
             f"closed_directly:{rec.position_id}",
         )
@@ -475,12 +505,55 @@ class HbExecutorAdapter:
         log.error("保命止损挂不上 %s：%r", rec.position_id, last)
         return tracked
 
+    async def _held_quantity(self, symbol: str) -> float | None:
+        """币安上该币的持仓数量；读不到返回 None。"""
+        assert self._exchange is not None
+        try:
+            return sum(p.quantity for p in await self._exchange.positions() if p.symbol == symbol)
+        except ExchangeError as e:
+            log.warning("核对币安持仓失败 %s：%r", symbol, e)
+            return None
+
+    async def _executor_ended_position_remains(
+        self, tracked: TrackedPosition, close_type: str, held: float
+    ) -> TrackedPosition:
+        """执行器已结束但币安仍有仓。
+
+        我们自己要求平仓的：停执行器“成功”却没平掉，直连只减仓市价单补平（并撤保命止损）。
+        执行器自己结束的（hummingbot 重启 / 丢状态）：账本保持持仓，保命止损留着（缺了对账员补挂），
+        由对账员按“执行器消失”流程处理，不能当作已平。
+        """
+        rec = tracked.record
+        if tracked.requested_close is not None:
+            if await self._close_directly(tracked, tracked.requested_close, None):
+                return self._registry.data.positions[rec.position_id]
+            return tracked
+        if rec.status is PositionStatus.CLOSING:
+            tracked = self._set(tracked, status=PositionStatus.OPEN)
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "执行器已终止但币安仍有仓",
+            f"{rec.symbol} {rec.position_id}：执行器结束类型 {close_type or '未知'}，"
+            f"币安持仓 {held}。账本保持持仓，保命止损保留，对账员接管",
+            rec.symbol,
+            f"executor_ended_position_remains:{rec.position_id}",
+        )
+        return tracked
+
     async def _finalize(
         self, tracked: TrackedPosition, detail: dict[str, Any], entry: float | None
     ) -> TrackedPosition:
         rec = tracked.record
         close_type = str(detail.get("close_type") or "").upper().removeprefix("CLOSETYPE.")
         never_filled = rec.entry_price is None and entry is None
+        if not never_filled and self._exchange is not None:
+            # 执行器说它结束了，不等于币安上的仓平了（hummingbot 重启时执行器被 SYSTEM_CLEANUP
+            # 终止，仓位还在）。以币安为准：仓还在就不能记成已平、更不能撤保命止损。
+            held = await self._held_quantity(rec.symbol)
+            if held is None:
+                return tracked  # 读不到币安：先不结账，下一轮同步再核对
+            if held >= rec.quantity * _STILL_HELD_FRACTION:
+                return await self._executor_ended_position_remains(tracked, close_type, held)
         if never_filled:
             status, reason = PositionStatus.FAILED, None
         else:
