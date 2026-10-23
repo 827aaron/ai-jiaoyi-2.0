@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from jiaoyi.contracts import Side
 from tests.test_slow_commander import FakeEngine, entry, make, pool
 
@@ -122,3 +124,22 @@ def test_screener_follows_meeting_interval_by_default(tmp_path: Path) -> None:
         assert data["screener_interval_min"] == mins == data["slow_loop_interval_min"]
     custom = with_profile({"meeting_interval": "1h", "screener_interval_min": 30})
     assert custom["screener_interval_min"] == 30  # 自己写的优先
+
+
+async def test_each_finished_symbol_writes_a_card_record_without_double_cost(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.contracts import Outcome, Role
+
+    c, log, _ = make(tmp_path, FakeEngine(["AAUSDT", "BBUSDT"]), now)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    cards = [
+        r
+        for r in log.read_day(now.date().isoformat())
+        if r.role is Role.COMMANDER and r.card_id and r.outcome is Outcome.ACTION
+    ]
+    assert len(cards) == 3  # 每个币开完一条（面板马上显示）+ 整轮结束一条
+    assert [r.output["symbols"] for r in cards[:2]] and "还在开会" in cards[0].summary
+    assert cards[-1].summary.startswith("出作战卡")
+    assert sum(r.cost_usd for r in cards) == pytest.approx(0.01)  # 总盘会花费只记一次
+    assert set(cards[-1].output["symbols"]) == {"AAUSDT", "BBUSDT"}

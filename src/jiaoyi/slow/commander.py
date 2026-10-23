@@ -1090,6 +1090,7 @@ class BattleCardCommander:
             self._save_card()
             if self._journal is not None:
                 self._journal.record(card, [e.symbol])
+            self._record_card(card, time.monotonic(), partial=True)  # 面板马上显示这个币
             return res
 
         finished = 0
@@ -1384,12 +1385,18 @@ class BattleCardCommander:
             out["usage"] = usage
         return out
 
-    def _record_card(self, card: BattleCard, started: float) -> None:
+    def _record_card(self, card: BattleCard, started: float, *, partial: bool = False) -> None:
+        """写一条出卡记录（面板读最新一条显示作战卡）。``partial`` = 一轮会议中途、某个币刚开完：
+        只为了面板马上显示这个币，不记花费、不算调用次数（整轮结束那条照旧记总盘会花费）。"""
         tradable = sum(1 for s in card.symbols if s.bias is not Bias.NO_TRADE)
         self._write(
             card_id=card.card_id,
             outcome=Outcome.ACTION,
-            summary=f"出作战卡 v{card.version}：{len(card.symbols)} 个标的，{tradable} 个可做",
+            summary=(
+                f"作战卡更新 v{card.version}：{len(card.symbols)} 个标的（这一轮还在开会）"
+                if partial
+                else f"出作战卡 v{card.version}：{len(card.symbols)} 个标的，{tradable} 个可做"
+            ),
             input={"refresh_reason": card.refresh_reason},
             output={
                 "regime": card.regime,
@@ -1408,8 +1415,12 @@ class BattleCardCommander:
                 "total_cost_usd": card.llm_cost_usd,
             },
             latency_ms=(time.monotonic() - started) * 1000,
-            cost_usd=self._pick_cost,  # 只记总盘会这一份；各标的的花费在各自的记录里，避免重复统计
+            cost_usd=0.0
+            if partial
+            else self._pick_cost,  # 只记总盘会这一份；各标的的花费在各自的记录里
         )
+        if partial:
+            return
         self._bump(
             ok=True, cost=0.0, ms=(time.monotonic() - started) * 1000
         )  # 选币花费已在开会时计入
