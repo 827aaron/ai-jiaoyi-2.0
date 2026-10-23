@@ -53,9 +53,11 @@ from jiaoyi.slow.commander import (
     StopScale,
 )
 from jiaoyi.slow.levels import (
+    SPAN_SIGMA,
     LevelContext,
     build_candidates,
     describe_candidates,
+    holding_span,
     select_levels,
 )
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
@@ -102,20 +104,37 @@ class TradingAgentsSettings:
     results_dir: str = "data/tradingagents"
     # Reddit 匿名 RSS 限流很严：guarded=加闸（缓存 + 间隔 + 冷却），off=不抓。见 social_guard.py。
     reddit: str = "guarded"
+    # 每笔单最多持有多久（分钟，档位的时间止损）：告诉军师团，止损 / 止盈 / 关键位按这个时长的波动给
+    hold_minutes: int = 120
+    # 关键位范围 = level_span_sigma × ATR × √(持仓时长 / ATR 周期)，见 levels.py
+    level_span_sigma: float = SPAN_SIGMA
 
 
 # TradingAgents 的提示词是写死的股票语境（Buy/Overweight/Hold/Underweight/Sell，“减持”）。
 # 它会把 output_language 原样拼进每个角色的提示词（"Write your entire response in {lang}, except
 # the labelled lines…"），所以把永续合约的语境放在这里，不用改它的源码。
-PERP_CONTEXT = (
+_PERP_BODY = (
     "Domain context for everything you write: this is Binance USDT-margined PERPETUAL FUTURES "
     "trading (go long, go short, or stay flat; leverage, funding, liquidations), not equities and "
     "there is no existing position to trim. Read the rating scale as: Buy = open or add a long, "
     "Overweight = lean long, Hold = stay flat / no new entry, Underweight = lean short or stay "
     "flat, Sell = open a short or close longs. In prose say long / short / flat and name concrete "
     "price levels from the data; avoid stock wording such as 'overweight', 'underweight', 'trim "
-    "or reduce exposure' and 'earnings'. Apply this to every sentence you write"
+    "or reduce exposure' and 'earnings'."
 )
+
+
+def perp_context(hold_minutes: float) -> str:
+    """永续合约语境 + 持仓时长：目标价、止损、关键位要按这段时间内这个币的正常波动来给。"""
+    return (
+        f"{_PERP_BODY} Every position here is held at most about {hold_minutes:g} minutes (forced "
+        "exit at the time limit): size price targets, stops and levels to moves plausible within "
+        "that horizon for this specific asset, never multi-day swing targets. Apply all of this "
+        "to every sentence you write"
+    )
+
+
+PERP_CONTEXT = perp_context(120)
 
 
 def build_config(
@@ -127,7 +146,7 @@ def build_config(
         llm_provider=s.provider,
         quick_think_llm=s.quick_model,
         deep_think_llm=s.deep_model,
-        output_language=f"{s.output_language}. {PERP_CONTEXT}",
+        output_language=f"{s.output_language}. {perp_context(s.hold_minutes)}",
         max_debate_rounds=s.debate_rounds,
         max_risk_discuss_rounds=s.risk_rounds,
         max_tokens=s.max_tokens,
@@ -308,23 +327,44 @@ def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
         return describe_atr(None, None, stop)
 
 
-def level_context(symbol: str, end: datetime, stop: StopScale) -> LevelContext:
-    """取 1h / 日线 K 线算关键位候选。参考 ATR 取“止损周期 ATR”和“1h ATR”里大的那个，
-    免得 15 分钟 ATR 太小、范围窄得没有候选。失败返回空背景（不出关键位，不瞎编）。"""
+def level_context(
+    symbol: str, end: datetime, stop: StopScale, hold_min: float, sigma: float = SPAN_SIGMA
+) -> LevelContext:
+    """取档位周期的 K 线 + 日线算关键位候选。范围 = σ × 该币 ATR × √(持仓时长 / ATR 周期)，
+    同一条公式适用所有币所有档位。失败返回空背景（不出关键位，不瞎编）。"""
     try:
         end_ms = int(end.timestamp() * 1000)
-        hourly = _klines(symbol, "1h", 200, end)
+        rows = _klines(symbol, atr_interval(stop.period_min), 300, end)
         daily = [r for r in _klines(symbol, "1d", 12, end) if r[6] <= end_ms]
-        stop_rows = _klines(symbol, atr_interval(stop.period_min), 60, end)
-        closed_h = [r for r in hourly if r[6] <= end_ms]
-        closed_s = [r for r in stop_rows if r[6] <= end_ms]
-        atrs = [a for a in (wilder_atr(closed_h), wilder_atr(closed_s)) if a]
-        if not atrs or not hourly:
+        closed = [r for r in rows if r[6] <= end_ms]
+        atr = wilder_atr(closed)
+        if not atr or not rows:
             return LevelContext()
-        price, atr = float(hourly[-1][4]), max(atrs)
-        return LevelContext(price, atr, build_candidates(price, atr, closed_h, daily))
+        price = float(rows[-1][4])
+        span = holding_span(atr, stop.period_min, hold_min, sigma)
+        name = atr_interval(stop.period_min)
+        basis = (
+            f"= {sigma:g}×该币 {name} ATR×√({hold_min:g}/{stop.period_min})，即持仓期内的典型波动"
+        )
+        cands = build_candidates(price, atr, closed, daily, span)
+        return LevelContext(price, atr, span, cands, basis)
     except Exception:
         return LevelContext()
+
+
+def describe_hold(hold_min: float, atr: float | None, price: float | None, stop: StopScale) -> str:
+    """告诉会议每笔单最多拿多久、持仓期内该币的正常波动有多大，止损 / 止盈 / 关键位按这个来。"""
+    head = (
+        f"持仓时长：本系统每笔单最多持有约 {hold_min:g} 分钟（到点强制平仓）。止损、止盈和关键位"
+        "都要按这段时间内的正常波动来给，不要给要几天才可能到的目标"
+    )
+    if atr is None or price is None or price <= 0:
+        return head
+    move = holding_span(atr, stop.period_min, hold_min, 1.0) / price * 100
+    return (
+        f"{head}。该币 {atr_interval(stop.period_min)} ATR 约占价格 {atr / price * 100:.2f}%，"
+        f"持仓期内一个标准差的价格移动约 ±{move:.2f}%（= ATR×√({hold_min:g}/{stop.period_min})）"
+    )
 
 
 def _ema(xs: Sequence[float], n: int) -> list[float]:
@@ -592,6 +632,7 @@ def convert_prompt(
     decision: str,
     atr_note: str,
     level_note: str = "",
+    hold_note: str = "",
 ) -> str:
     """把会议结论整理成作战指令的提示词（单独成函数，便于快照测试）。"""
     top = r.max_notional_per_trade_usdt
@@ -604,7 +645,7 @@ def convert_prompt(
         "偏空或观望，Hold 对应观望（no_trade）；reason 里用多 / 空 / 观望，不要用“减持”“增持”"
         "这类股票持仓词。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的倍数区间（如 1.5–3）。"
         "reason 用中文。\n"
-        f"{atr_note}\n{level_note}\n"
+        f"{atr_note}\n{hold_note}\n{level_note}\n"
         f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{brief}\n结论：\n{decision}"
     )
 
@@ -773,7 +814,9 @@ class TradingAgentsEngine:
         if not decision:
             raise RuntimeError(f"{entry.symbol}：TradingAgents 没有给出结论")
 
-        levels = level_context(entry.symbol, self._today(), self._stop)
+        levels = level_context(
+            entry.symbol, self._today(), self._stop, self._s.hold_minutes, self._s.level_span_sigma
+        )
         prompt = convert_prompt(
             entry,
             self._risk,
@@ -782,6 +825,7 @@ class TradingAgentsEngine:
             decision,
             atr_context(entry.symbol, self._today(), self._stop),
             describe_candidates(levels),
+            describe_hold(self._s.hold_minutes, levels.atr, levels.price, self._stop),
         )
         llm = self._llm(graph, self._s.convert_tier).with_structured_output(_CardSymbolDraft)
         last: Exception | None = None

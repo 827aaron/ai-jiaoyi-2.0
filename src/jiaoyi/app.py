@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -249,7 +249,8 @@ def _build_cards(
     engine = TradingAgentsEngine(
         risk_cfg,
         secrets,
-        settings=cfg.engine_settings(),
+        # 每笔单最多持有多久（档位的时间止损）：军师团的止损 / 止盈 / 关键位按这个时长的波动给
+        settings=replace(cfg.engine_settings(), hold_minutes=max(fast.time_limit_s // 60, 1)),
         today=clock,
         news=news,
         liquidations=liquidations,
