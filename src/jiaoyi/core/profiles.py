@@ -243,6 +243,8 @@ def analyst_klines(hold: str) -> tuple[str, ...]:
 
 def level_interval(hold: str) -> str:
     return LEVEL_INTERVAL.get(hold, "15m")
+
+
 HOLD.update(
     {
         # 长持仓 3 档（研究 2026-10-23 18:40 补）。patrol_*：山寨中档止损 1.6–3.5%，
