@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from jiaoyi.contracts import DecisionRecord, Kline, Outcome, Role
+from jiaoyi.market.rest import RateLimited
 
 log = logging.getLogger(__name__)
 
@@ -287,6 +288,9 @@ async def backfill(
             bars = await fetch(
                 c.symbol, c.ts - timedelta(minutes=1), c.ts + timedelta(minutes=c.hold_min)
             )
+        except RateLimited:  # 被币安限流：剩下的都不请求了，命令行最后统一说一句
+            failed += 1
+            continue
         except Exception as e:
             log.warning("%s 拉行情失败，下次再算：%s", c.symbol, e)
             failed += 1
