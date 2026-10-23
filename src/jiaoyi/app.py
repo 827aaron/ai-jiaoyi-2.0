@@ -503,7 +503,7 @@ def build_modules(
     else:
         gate_mode = "rule" if isinstance(model, RuleDecisionModel) else "jev"
         decision_model = model
-        gate = JevEntryGate(model, recorders[Role.GATE])
+        gate = JevEntryGate(model, recorders[Role.GATE], hold_min=fast.time_limit_s // 60)
         keeper = JevKeeper(
             model,
             fast,
@@ -533,6 +533,8 @@ def build_modules(
             recorders[Role.RISK_GUARD],
             # 日亏熔断状态落盘，重启后当天仍锁住
             state_dir=app_cfg.data_dir,
+            # paper 默认拍板只记不拦（攒样本校准门槛）；testnet / live 永远拦
+            gate_record_only=app_cfg.gate_record_only,
         ),
         executor=executor,
         lifeboat=lifeboat,

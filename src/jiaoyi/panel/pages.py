@@ -22,6 +22,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.contracts.risk_config import recommended_caps
+from jiaoyi.core import profiles
 from jiaoyi.core.pool_overrides import PoolOverrides, read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
@@ -1190,6 +1191,9 @@ def build_settings(
     for item in page.risk:
         if rec := recs.get(item.key):
             item.recommended, item.recommended_why = rec.value, rec.why
+        elif item.key == "max_slippage_bps" and app.hold in profiles.SLIPPAGE_BPS:
+            item.recommended = profiles.SLIPPAGE_BPS[app.hold]
+            item.recommended_why = f"按最长持仓 {app.hold}：约止损距离的 1/4（只拦不利方向）"
     for item in page.screener:
         if srec := SCREENER_RECOMMENDED.get(item.key):
             item.recommended, item.recommended_why = srec

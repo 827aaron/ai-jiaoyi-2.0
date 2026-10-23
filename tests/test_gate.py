@@ -148,7 +148,8 @@ async def test_entry_gate_without_valid_card_does_not_call_model(now: datetime) 
     assert not r.ok and t.calls == []
 
 
-async def test_entry_gate_busy_skip(now: datetime) -> None:
+async def test_entry_gate_busy_skip_only_same_symbol(now: datetime) -> None:
+    """同一个币同时两个信号：第二个作废（去重）；不同的币不互相等。"""
     t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.05)
     gate = JevEntryGate(model(t))
     a, b = await asyncio.gather(
@@ -156,6 +157,18 @@ async def test_entry_gate_busy_skip(now: datetime) -> None:
     )
     assert a.ok and not b.ok and "作废" in (b.error or "")
     assert len(t.calls) == 1
+
+    eth = signal(now).model_copy(update={"symbol": "ETHUSDT"})
+    two = card(now).model_copy(
+        update={"symbols": [*card(now).symbols, card(now).symbols[0].model_copy(
+            update={"symbol": "ETHUSDT"})]}
+    )  # fmt: skip
+    t0 = asyncio.get_running_loop().time()
+    r1, r2 = await asyncio.gather(
+        gate.evaluate(signal(now), two, now), gate.evaluate(eth, two, now)
+    )
+    assert r1.ok and r2.ok
+    assert asyncio.get_running_loop().time() - t0 < 0.09  # 并行：不是 2 × 0.05
 
 
 async def test_entry_gate_logs(tmp_path: Path, now: datetime) -> None:
@@ -176,7 +189,17 @@ def test_snapshot_is_compact_json(now: datetime) -> None:
     assert len(s) <= MAX_SNAPSHOT_CHARS
     d = json.loads(s)
     assert d["side"] == "long" and d["card"]["bias"] == "long" and "book" in d
+    assert d["hold_min"] == 120
     assert len(s) / 4 < 400  # 粗估 token 数
+
+
+def test_snapshot_hold_and_stop_atr(now: datetime) -> None:
+    """问题按最长持仓问时间；atr_bps 是止损用的 ATR（有长周期就 √短×长），和保镖一个口径。"""
+    sig = signal(now)
+    f = sig.features.model_copy(update={"atr": 34.0, "atr_long": 136.0, "atr_long_period_min": 60})
+    d = json.loads(entry_snapshot(sig.model_copy(update={"features": f}), card(now), 240))
+    assert d["hold_min"] == 240
+    assert d["atr_bps"] == pytest.approx(68.0 / f.last_price * 1e4, abs=0.1)  # √(34×136)=68
 
 
 async def test_rule_model_answers_every_question(now: datetime) -> None:

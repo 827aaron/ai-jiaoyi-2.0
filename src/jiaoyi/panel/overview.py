@@ -615,7 +615,7 @@ def _feed(records: list[DecisionRecord]) -> list[FeedItem]:
             FeedItem(
                 ts=r.ts,
                 kind=kind,
-                role=r.role,
+                role=Role.GATE if _gate_skip(r) else r.role,
                 symbol=r.symbol,
                 text=r.summary,
                 signal_id=r.signal_id,
@@ -626,11 +626,21 @@ def _feed(records: list[DecisionRecord]) -> list[FeedItem]:
     return out
 
 
+def _gate_skip(r: DecisionRecord) -> bool:
+    """保镖记的拒绝里，只因为拍板人概率没过门槛的：算「拍板放弃」（黄），不算保镖拒绝（红）。"""
+    if r.role is not Role.RISK_GUARD or r.outcome is not Outcome.REJECT:
+        return False
+    detail = (r.output or {}).get("detail")
+    return isinstance(detail, dict) and detail.get("by") == "gate"
+
+
 def _kind(r: DecisionRecord) -> FeedKind | None:
     o = r.outcome
     if r.role is Role.GATE:
         return "skip" if o in (Outcome.REJECT, Outcome.ERROR) else "info"
     if r.role is Role.RISK_GUARD:
+        if _gate_skip(r):
+            return "skip"
         return "go" if o is Outcome.PASS else "block"
     if r.role is Role.EXECUTOR:
         exec_kinds: dict[Outcome, FeedKind] = {

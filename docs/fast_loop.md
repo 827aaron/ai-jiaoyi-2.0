@@ -159,3 +159,15 @@
   `output.jev`（是否成功、错误、模型版本、延迟、花费、每个选项的概率）。被作战卡拦下、没真正调用的记录 `input.jev.called = false`。
 - 复盘用 `jiaoyi.gate.review.iter_jev_calls(data_dir)`，把每次真正的调用摊平成一行，可按 `template` / `model` 分组；
   `template_dump()` 给出当前模板全文。
+
+## 拍板只记不拦（paper 校准）
+
+`[fast_loop] gate_record_only`：不写时 paper 开、testnet / live 关（testnet / live 写 true 拒绝启动）。
+开着时拍板人照常问、照常记，但「真信号 / 做 / 方向 / 毒性」门槛没过也放行，保镖日志 `detail.gate_would_block`
+记下本会拦的原因，面板信号流写「拍板本会拦，只记不拦放行」；订单流有毒概率 ≥ 0.8 仍然拦，回答不全永远拦。
+攒够约 200 笔后按 `jiaoyi.gate.review` 校准门槛。门槛本身 0–1 都收，档位只给推荐值。
+
+- 只因为拍板人概率没过门槛被拦的，保镖记 `detail.by = "gate"`，面板显示黄色「拍板放弃」；红色「保镖拒绝」只留给保镖自己的规则。
+- 滑点（`risk.toml max_slippage_bps`）只拦不利方向（做多价格比触发时高、做空比触发时低），`detail.slippage_bps` 正数 = 不利；
+  `detail.since_trigger_ms` 记触发到审完用了多久。推荐值按最长持仓档（约止损的 1/4）：30m 6 / 1h 8 / 2h 11 / 4h 16 / 8h 22 / 12h 28 / 24h 40bp。
+- 拍板问题模板 q3：时间按最长持仓问（快照 `hold_min`），`atr_bps` 是止损用的 ATR（√短×长）。

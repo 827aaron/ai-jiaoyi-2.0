@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime
 from typing import Any
 
@@ -35,9 +36,9 @@ from jiaoyi.contracts import (
     Side,
 )
 
-TEMPLATE_VERSION = "q2"
+TEMPLATE_VERSION = "q3"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
-SNAPSHOT_SCHEMA = "s1"
+SNAPSHOT_SCHEMA = "s2"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
 MAX_SNAPSHOT_CHARS = 2400
 
@@ -45,13 +46,15 @@ MAX_SNAPSHOT_CHARS = 2400
 KNOWN_TEMPLATES: dict[str, str] = {
     "q1": "f79b89bdad4e",
     "q2": "41997c5bfdef",  # 说明 atr_bps 是 stop_atr 的单位（ATR 改成 15 分钟口径）
+    # 时间按最长持仓档（快照 hold_min）问，不再写死 5–30 / 15 分钟；atr_bps = 止损 ATR（√短×长）
+    "q3": "cc0b4b385bae",
 }
 
 _ENTRY_GOAL = (
     "Goal: decide whether to open a short-term directional position on a Binance USDT-M "
     "perpetual right now, in the direction `side` proposed by a rule-based trigger. "
-    "Timing: market order now; the position lives minutes to a few hours and is closed by a "
-    "stop at `stop_atr` x ATR, a take-profit at `tp_r` x stop distance, or a time limit. "
+    "Timing: market order now; the position lives up to `hold_min` minutes and is closed by a "
+    "stop at `stop_atr` x ATR, a take-profit at `tp_r` x stop distance, or that time limit. "
     "Round-trip taker fees are about 10 bps, so small moves lose money. "
     "Inputs: `sig`/`why` say what fired; `ret*_bps`, `vol_x` (1m volume vs average), "
     "`buy` (taker buy share, 1m), `cvd30_k` (taker buy minus sell, last 30s, kUSDT), "
@@ -72,10 +75,12 @@ _HOLD_GOAL = (
 
 ENTRY_PROMPTS: dict[EntryQuestion, str] = {
     EntryQuestion.GENUINE: (
-        "Is this trigger a genuine move that will follow through over the next 5-30 minutes, "
-        "or a fake-out that reverses? " + _ENTRY_GOAL
+        "Is this trigger a genuine move that will follow through over the holding period "
+        "(`hold_min` minutes), or a fake-out that reverses? " + _ENTRY_GOAL
     ),
-    EntryQuestion.DIRECTION: "Where is price most likely to go over the next 15 minutes?",
+    EntryQuestion.DIRECTION: (
+        "Where is price most likely to be at the end of the holding period (`hold_min` minutes)?"
+    ),
     EntryQuestion.TOXICITY: (
         "Is the counterparty flow toxic for a trade in direction `side`, i.e. informed traders "
         "or a liquidity trap that will run us over right after we enter?"
@@ -104,8 +109,8 @@ CRITERIA: dict[str, dict[str, str]] = {
         "fake": "Fake-out: likely to fade or reverse soon",
     },
     "direction": {
-        "up": "Price higher in 15 minutes by more than fees",
-        "down": "Price lower in 15 minutes by more than fees",
+        "up": "Price higher at the end of the holding period by more than fees",
+        "down": "Price lower at the end of the holding period by more than fees",
         "flat": "No meaningful move either way",
     },
     "toxicity": {
@@ -157,13 +162,20 @@ def _bps(x: float, ref: float) -> float:
     return _r((x / ref - 1.0) * 1e4) if ref > 0 else 0.0
 
 
+def _stop_atr(f: FeatureSnapshot) -> float:
+    """作战卡 ``stop_atr`` 乘的那个 ATR：有长周期就 √(短 × 长)，和保镖一致（不含时段系数）。"""
+    if f.atr_long:
+        return math.sqrt(f.atr * f.atr_long)
+    return f.atr
+
+
 def market_block(f: FeatureSnapshot) -> dict[str, Any]:
     """特征 → 紧凑字典。键很短，省 token。"""
     v = f.values
     px = f.last_price
     d: dict[str, Any] = {
         "px": px,
-        "atr_bps": _r(f.atr / px * 1e4) if px > 0 else 0.0,
+        "atr_bps": _r(_stop_atr(f) / px * 1e4) if px > 0 else 0.0,
         "ret1m_bps": _r(v.get("ret_1m", 0.0) * 1e4),
         "ret5m_bps": _r(v.get("ret_5m", 0.0) * 1e4),
         "vol_x": _r(v.get("vol_ratio_1m", 0.0), 2),
@@ -212,13 +224,20 @@ def _dump(d: dict[str, Any]) -> str:
     return s[:MAX_SNAPSHOT_CHARS]
 
 
-def entry_snapshot(signal: CandidateSignal, card: BattleCard) -> str:
+DEFAULT_HOLD_MIN = 120
+
+
+def entry_snapshot(
+    signal: CandidateSignal, card: BattleCard, hold_min: int = DEFAULT_HOLD_MIN
+) -> str:
+    """``hold_min``：单笔最长持仓（分钟，``fast_loop.time_limit_s`` / 60），问题按它问时间。"""
     f = signal.features
     d: dict[str, Any] = {
         "sym": signal.symbol,
         "side": "long" if signal.side_hint == Side.LONG else "short",
         "sig": signal.kind.value,
         "why": signal.trigger_desc[:120],
+        "hold_min": hold_min,
         **market_block(f),
         "card": _card_block(card, signal.symbol, f.last_price),
     }
