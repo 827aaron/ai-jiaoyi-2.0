@@ -136,7 +136,13 @@ class _HoldsAware(Protocol):
 
 KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
 PREDICTOR_INTERVAL = Interval.M5
-ATR_INTERVAL = {5: Interval.M5, 15: Interval.M15, 30: Interval.M30, 60: Interval.H1}
+ATR_INTERVAL = {
+    5: Interval.M5,
+    15: Interval.M15,
+    30: Interval.M30,
+    60: Interval.H1,
+    240: Interval.H4,
+}
 MAX_REST_KLINES = 1500
 
 

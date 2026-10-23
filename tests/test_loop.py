@@ -588,3 +588,15 @@ async def test_app_exposes_predictor_against_card_watch(tmp_path: Path, now: dat
     """慢环通过 App.against 订阅「预测员连续看反作战卡」。"""
     app = _app(tmp_path, now)
     assert app.against is not None and app.against.current(now) == {}
+
+
+def test_every_atr_period_has_a_history_interval() -> None:
+    """配置允许的每个 ATR 周期都要有拉 7 天历史用的 K 线周期，漏了止损下限会静默失效。"""
+    from typing import get_args
+
+    from jiaoyi.loop import ATR_INTERVAL
+
+    periods = get_args(c.FastLoopConfig.model_fields["atr_period_min"].annotation)
+    assert set(periods) == set(ATR_INTERVAL)
+    for p, iv in ATR_INTERVAL.items():
+        assert iv.value == (f"{p}m" if p < 60 else f"{p // 60}h")
