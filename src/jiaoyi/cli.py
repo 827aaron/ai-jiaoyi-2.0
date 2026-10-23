@@ -64,12 +64,16 @@ def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:
     keys = [
         prefix + k
         for prefix, raw, sec in sections
-        for k in profiles.overrides(raw, app.profile, sec)
+        for k in profiles.overrides(raw, app.meeting_interval, sec, app.hold)
     ]
-    tag = "（仅模拟盘）" if app.profile in profiles.PAPER_ONLY else ""
+    tag = "（仅模拟盘）" if app.hold in profiles.PAPER_ONLY else ""
     tail = f"；单项覆盖档位默认：{', '.join(keys)}" if keys else ""
-    hold = f"；单笔最长持仓 {app.fast_loop.time_limit_s // 60} 分钟（独立于档位）"
-    return f"持仓档位 {app.profile}{tag}（= 军师团开会间隔）{hold}{tail}"
+    limit = app.fast_loop.time_limit_s // 60
+    why = "自定义" if profiles.hold_is_custom(raw_app) else "跟开会档位"
+    return (
+        f"开会间隔 {app.meeting_interval}（军师团每 {app.slow_loop_interval_min} 分钟一轮）；"
+        f"最长持仓 {app.hold}{tag}（单笔最长 {limit} 分钟，{why}）{tail}"
+    )
 
 
 def _caution_line(risk: RiskConfig) -> str | None:

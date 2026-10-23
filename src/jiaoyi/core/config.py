@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from jiaoyi.core import profiles
 
 DEFAULT_RISK_PATH = Path("config/risk.toml")
 DEFAULT_APP_PATH = Path("config/app.toml")
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -48,12 +51,22 @@ def load_risk_config(path: Path = DEFAULT_RISK_PATH) -> RiskConfig:
 
 
 def with_profile(raw: dict[str, object]) -> dict[str, object]:
-    """把档位默认垫到 app.toml 原始内容下面：写了的键优先，没写的用档位的。"""
+    """把档位默认垫到 app.toml 原始内容下面：写了的键优先，没写的用档位的。
+
+    ``meeting_interval`` 决定开会节奏，``hold`` 决定持仓相关参数；旧 ``profile`` 键映射成
+    ``meeting_interval`` 并告警。"""
     profile = profiles.profile_of(raw)
-    top = {k: v for k, v in raw.items() if k != "fast_loop"}
+    hold = profiles.hold_of(raw)
+    if notice := profiles.legacy_notice(raw):
+        logger.warning(notice)
+    top = {k: v for k, v in raw.items() if k not in ("fast_loop", "profile")}
+    top.setdefault("meeting_interval", profile)
+    top.setdefault("hold", hold)
     fast = raw.get("fast_loop", {})
-    data = profiles.fill(top, profile, "app")
-    data["fast_loop"] = profiles.fill(fast if isinstance(fast, dict) else {}, profile, "fast_loop")
+    data = profiles.fill(top, profile, "app", hold)
+    data["fast_loop"] = profiles.fill(
+        fast if isinstance(fast, dict) else {}, profile, "fast_loop", hold
+    )
     return data
 
 

@@ -73,9 +73,9 @@ max_retries = 6
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
 
 [budget]
-daily_cost_limit_usd = 10.0                # 每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒
+# daily_cost_limit_usd = 20.0              # 档位：每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）；你写多少就是多少
 failed_meeting_cost_usd = 0.05             # 失败的会议拿不到真实用量时，按这个估算价计入日花费
-# fail_backoff_minutes = [5, 10, 30]       # 档位：开会连续失败后依次等多久再试，成功清零（1 小时卡的档位 5, 10, 15）
+# fail_backoff_minutes = [5, 10, 30]       # 档位：开会连续失败后依次等多久再试，成功清零（15m 2,5,10 / 30m 3,5,10 / 1h 5,10,15 / 2h 5,10,30 / 6h+ 10,30,60）
 
 [prices]                           # 每百万 token 的美元价，只在通道没报真实花费时估算用（OpenRouter 直接用它返回的 usage.cost）
 flash_in = 0.30                    # OpenRouter deepseek/deepseek-v4.1-flash 标价，2026-10-23 核对

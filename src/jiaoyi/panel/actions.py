@@ -101,7 +101,8 @@ APP_EDITABLE = frozenset(
         "pool_size",
         "card_pick_max",
         "reconciler_close_unknown_positions",
-        "profile",
+        "meeting_interval",
+        "hold",
     }
 )
 
@@ -404,7 +405,7 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
     return ProfileInfo(
         current=current,
         choices=list(profiles.PROFILES),
-        paper_only=sorted(profiles.PAPER_ONLY),
+        paper_only=[],  # 开会间隔档没有只能 paper 的；最长持仓 30m 在 hold 里校验
         pinned=pinned,
         pins={p: profile_pins(paths, p) for p in profiles.PROFILES},
     )
@@ -450,6 +451,8 @@ def update_config(
     check_password(data_dir, password)
     if not changes:
         raise ActionError("没有要改的项")
+    if section == "app" and "profile" in changes:  # 旧面板写的 profile = 开会间隔档
+        changes = {("meeting_interval" if k == "profile" else k): v for k, v in changes.items()}
     path, table, editable = _target(paths, section)
     if fields is None and section in ("llm", "budget"):
         # 军师团通道和花费上限只在首次设置向导里改（向导会显式给 fields）

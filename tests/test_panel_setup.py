@@ -167,7 +167,11 @@ def test_full_wizard_flow(tmp_path: Path) -> None:
         assert client.get("/setup").status_code == 200
         state = client.get("/api/setup").json()
         assert state["local"] and not state["password_set"] and not state["done"]
-        assert state["basic"]["profile"] == "2h" and state["keychain"] is True
+        assert (
+            state["basic"]["meeting_interval"] == "1h"
+            and state["basic"]["hold"] == "2h"
+            and state["keychain"] is True
+        )
 
         # 1. 面板密码（第一次不要旧密码）
         bad = {"password": PW, "confirm": PW + "x"}

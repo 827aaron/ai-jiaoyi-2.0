@@ -389,6 +389,13 @@ class RiskGuardImpl:
             reasons.append(f"止盈 {tp_pct * 100:.1f}bp 不够付手续费（至少 {fee_floor_bps:.1f}bp）")
             return None
 
+        stop_floor_bps = self._fast.min_stop_fee_multiple * 2.0 * risk.taker_fee_bps
+        if stop_pct * 100.0 < stop_floor_bps:
+            reasons.append(
+                f"止损 {stop_pct * 100:.1f}bp 离手续费太近（至少 {stop_floor_bps:.1f}bp）"
+            )
+            return None
+
         # ---- 仓位：档位封顶到作战卡，风险 USDT ÷ 止损距离
         tier = SizeTier(size_ans.top()[0])
         if _TIER_ORDER[tier] > _TIER_ORDER[cs.size_tier_max]:

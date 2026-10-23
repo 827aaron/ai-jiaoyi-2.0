@@ -380,7 +380,7 @@ def test_settings_endpoints(tmp_path: Path) -> None:
         sched = {i["key"]: i for i in page["schedule"]}
         assert (
             sched["max_cards_per_round"]["nullable"]
-            and sched["max_cards_per_round"]["value"] == 10  # slow.toml 没写：2h 档默认
+            and sched["max_cards_per_round"]["value"] == 12  # slow.toml 没写：1h 档默认
         )
         body = {"section": "risk", "changes": {"max_leverage": 4}, "password": PW}
         r = client.post("/api/settings", json=body, headers=HEADERS)
@@ -433,7 +433,7 @@ def test_slow_schedule_created_and_cleared(tmp_path: Path) -> None:
     assert load_slow_config(paths.slow).schedule.max_cards_per_round == 8
     assert not list(paths.slow.parent.glob("slow.toml.bak-*"))  # 原来没有文件，不留备份
     actions.update_config(paths, data, "schedule", {"max_cards_per_round": None}, PW, NOW)
-    assert load_slow_config(paths.slow).schedule.max_cards_per_round == 10  # 清掉 = 回到 2h 档默认
+    assert load_slow_config(paths.slow).schedule.max_cards_per_round == 12  # 清掉 = 回到 1h 档默认
     assert "max_cards_per_round" not in paths.slow.read_text(encoding="utf-8")
     with pytest.raises(ActionError, match="concurrency"):
         actions.update_config(paths, data, "schedule", {"concurrency": 20}, PW, NOW)
@@ -534,31 +534,31 @@ def test_schedule_validates_with_profile_defaults(tmp_path: Path) -> None:
 def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     info = actions.profile_info(paths)
-    assert info.current == "2h" and info.choices == ["24h", "12h", "6h", "2h", "60m", "30m", "15m"]
-    assert set(info.paper_only) == {"30m", "15m"}
+    assert info.current == "1h" and info.choices == ["15m", "30m", "1h", "2h", "6h", "12h", "24h"]
+    assert info.paper_only == []
     assert "keeper_interval_s" not in info.pinned.get("app", {})  # 示例里注释掉了，跟档位走
-    actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
+    actions.update_config(paths, data, "app", {"profile": "6h"}, PW, NOW)  # 旧面板写 profile
     app = load_app_config(paths.app)
-    assert app.profile == "60m" and app.fast_loop.time_limit_s == 7200  # 不随档位变
-    assert actions.profile_info(paths).current == "60m"
+    assert app.profile == "6h" and app.fast_loop.time_limit_s == 7200  # 不随开会间隔变
+    assert actions.profile_info(paths).current == "6h"
     # 网页上填了档位键 = 写死；清空 = 删掉这一行，回到档位默认
     actions.update_config(paths, data, "app", {"keeper_interval_s": 30}, PW, NOW)
-    assert actions.profile_info(paths).pinned["app"] == {"keeper_interval_s": 15}
+    assert actions.profile_info(paths).pinned["app"] == {"keeper_interval_s": 20}
     actions.update_config(paths, data, "app", {"keeper_interval_s": None}, PW, NOW)
     assert "keeper_interval_s" not in actions.profile_info(paths).pinned.get("app", {})
-    assert load_app_config(paths.app).keeper_interval_s == 15
+    assert load_app_config(paths.app).keeper_interval_s == 20
     # 不是档位键、也不是可空的，不能清空
     with pytest.raises(ActionError, match="不能空着"):
         actions.update_config(paths, data, "app", {"pool_size": None}, PW, NOW)
 
 
-def test_paper_only_profile_rejected_outside_paper(tmp_path: Path) -> None:
+def test_paper_only_hold_rejected_outside_paper(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     text = paths.app.read_text(encoding="utf-8").replace('mode = "paper"', 'mode = "testnet"')
     paths.app.write_text(text, encoding="utf-8")
     with pytest.raises(ActionError, match="paper"):
-        actions.update_config(paths, data, "app", {"profile": "15m"}, PW, NOW)
-    assert load_app_config(paths.app).profile == "2h"
+        actions.update_config(paths, data, "app", {"hold": "30m"}, PW, NOW)
+    assert load_app_config(paths.app).hold == "2h"
 
 
 def test_settings_page_shows_profile(tmp_path: Path) -> None:
@@ -566,26 +566,27 @@ def test_settings_page_shows_profile(tmp_path: Path) -> None:
     actions.update_config(paths, data, "fast_loop", {"time_limit_s": 5000}, PW, NOW)
     with _client(paths) as client:
         page = client.get("/api/settings").json()
-    assert page["profile"]["current"] == "2h"
-    assert "time_limit_s" not in page["profile"]["pinned"].get("fast_loop", {})  # 不随档位
+    assert page["profile"]["current"] == "1h"
+    assert page["profile"]["pinned"]["fast_loop"] == {"time_limit_s": 7200}  # 写死 = 自定义持仓
     fl = {i["key"]: i for i in page["fast_loop"]}
-    assert fl["time_limit_s"]["profiled"] is False
+    assert fl["time_limit_s"]["pinned"] and fl["time_limit_s"]["profile_default"] == 7200
     assert fl["min_p_take"]["profiled"] and fl["signal_max_age_s"]["profiled"] is False
     app_items = {i["key"]: i for i in page["app"]}
-    assert app_items["profile"]["editable"] and app_items["profile"]["choices"][3] == "2h"
+    assert app_items["meeting_interval"]["editable"]
+    assert app_items["meeting_interval"]["choices"][2] == "1h"
 
 
 def test_profile_switch_revalidates_slow_toml(tmp_path: Path) -> None:
-    """审查 C4：写死 refresh_lead_min=90，2h（卡 120 分钟）合格、60m（卡 60 分钟）不合格。"""
+    """审查 C4：写死 refresh_lead_min=50，1h（卡 80 分钟）合格、15m（卡 35 分钟）不合格。"""
     paths, data = _setup(tmp_path)
-    paths.slow.write_text("[schedule]\nrefresh_lead_min = 90\n", encoding="utf-8")
+    paths.slow.write_text("[schedule]\nrefresh_lead_min = 50\n", encoding="utf-8")
     before = paths.app.read_text(encoding="utf-8")
     with pytest.raises(ActionError, match=r"slow\.toml"):
-        actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
+        actions.update_config(paths, data, "app", {"meeting_interval": "15m"}, PW, NOW)
     assert paths.app.read_text(encoding="utf-8") == before
     paths.slow.write_text("[schedule]\nrefresh_lead_min = 30\n", encoding="utf-8")
-    actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
-    assert load_slow_config(paths.slow, "60m").schedule.refresh_lead_min == 30
+    actions.update_config(paths, data, "app", {"meeting_interval": "15m"}, PW, NOW)
+    assert load_slow_config(paths.slow, "15m").schedule.refresh_lead_min == 30
 
 
 def test_overview_flags_panel_older_than_code(
@@ -641,15 +642,14 @@ def test_overview_rereads_config_files_when_they_change(tmp_path: Path) -> None:
 
 
 def test_profile_pins_listed_and_cleared(tmp_path: Path) -> None:
-    """切 15m 时示例里写死的 min_p_* 仍按文件值（0.6），档位要的是 0.65：要列出来、能一键清掉。"""
+    """网页上写死的档位键要列出来、能一键清掉。"""
     paths, data = _setup(tmp_path)
     actions.update_config(paths, data, "app", {"keeper_interval_s": 30}, PW, NOW)
     pins = {x.key: x for x in actions.profile_info(paths).pins["15m"]}
-    assert (pins["keeper_interval_s"].value, pins["keeper_interval_s"].profile_default) == (30, 10)
-    assert pins["min_p_genuine"].section == "fast_loop"  # 门槛跟最长持仓走，不跟档位
-    # 2h 档不改门槛：默认值取程序默认
-    two = {x.key: x for x in actions.profile_info(paths).pins["2h"]}
-    assert two["min_p_genuine"].profile_default == 0.6
+    assert (pins["keeper_interval_s"].value, pins["keeper_interval_s"].profile_default) == (
+        30,
+        20,
+    )  # 管家频率跟最长持仓档
 
     with _client(paths) as client:
         bad = client.post(
@@ -661,15 +661,15 @@ def test_profile_pins_listed_and_cleared(tmp_path: Path) -> None:
         )
         assert res.status_code == 200
         keys = {c["key"] for c in res.json()["changed"]}
-        assert {"keeper_interval_s", "min_p_genuine", "min_p_take", "max_p_toxic"} <= keys
+        assert "keeper_interval_s" in keys
         again = client.post(
             "/api/settings/clear-profile-pins", json={"password": PW}, headers=HEADERS
         )
         assert again.status_code == 400  # 没有写死项了
     assert actions.profile_info(paths).pins["15m"] == []
     assert list(paths.app.parent.glob("app.toml.bak-*"))
-    actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
-    assert load_app_config(paths.app).keeper_interval_s == 15  # 现在跟档位走
+    actions.update_config(paths, data, "app", {"profile": "6h"}, PW, NOW)
+    assert load_app_config(paths.app).keeper_interval_s == 20  # 现在跟档位走
 
 
 def test_fast_loop_pin_defaults_follow_time_limit(tmp_path: Path) -> None:
