@@ -843,6 +843,9 @@ function editSettings(sec) {
   $("#layer .dlg").classList.add("mid");
 }
 
+// 密钥只能在本机改（服务器那边也只认本机），局域网打开时按钮置灰并说明
+const IS_LOCAL = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+const keyBtn = () => (IS_LOCAL ? `<a class="btn b-sm b-go" href="/setup">修改密钥</a>` : `<button class="btn b-sm" disabled title="只能在 Mac 本机打开 http://127.0.0.1:${esc(location.port || "8090")}/setup">修改密钥</button>`);
 // 密钥：按当前模式和通道分“必须 / 可选 / 现在用不到”，只有必须的没配才标红
 const NEED_ORDER = { required: 0, optional: 1, unused: 2 };
 function keyRows(d) {
@@ -879,8 +882,8 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
       <div class="lbl">每一类币的仓位加起来最多是本金的几倍 ${editBtn(d, "category")}</div>
       <div class="dim small">比如“山寨币 1 倍”：所有山寨币的仓位加起来不超过本金的 1 倍。同一类币常常一起涨跌，这样一类出事不会亏太多。</div><div class="form">${caps}</div></section>
-    <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
-      <div class="foot">在 Mac mini 本机打开 <a href="/setup">首次设置</a> 写入（或终端 jiaoyi setup-keys）。</div></section>
+    <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，看不到内容 ${keyBtn()}</span></div><div class="form">${keys}</div>
+      <div class="foot">${IS_LOCAL ? "点“修改密钥”进首次设置页，只填要换的那几项，其余留空不变。" : `出于安全，密钥只能在 Mac mini 本机修改：在 Mac 上打开 <code>http://127.0.0.1:${esc(location.port || "8090")}/setup</code>（或终端 jiaoyi setup-keys）。`}</div></section>
     <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app, "app")}</div></section>
     <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop, "fast_loop")}</div></section>
     <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
