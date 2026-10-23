@@ -307,6 +307,61 @@ async def test_run_returns_cleanly_on_restart(
     assert r._loops == [] and r._tasks == set()
 
 
+async def test_after_restart_is_decided_no_new_close_or_reconcile_starts(
+    tmp_path: Path, now: datetime
+) -> None:
+    """审计 X1：重启已定后，管家 / 巡逻兵 / 对账不再发起会被退出打断的动作。"""
+    r, ex = _restart_runner(tmp_path, now, lambda: None)
+    calls: list[datetime] = []
+
+    class Reconciler:
+        async def reconcile(self, at: datetime) -> None:
+            calls.append(at)
+
+    r.m = dataclasses.replace(r.m, reconciler=Reconciler())  # type: ignore[arg-type]
+    await r.reconcile_tick()
+    assert len(calls) == 1
+    write_command(tmp_path, _cmd(now, "restart"))
+    await r.command_tick()
+    assert r._restart.is_set()
+    await r.close(_position(), CloseReason.PATROL)  # 巡逻兵 / 管家此刻要平
+    assert ex.closed == []  # 不发起：交给重启后的进程，期间靠保命止损
+    await r.reconcile_tick()
+    assert len(calls) == 1
+
+
+async def test_restart_exit_waits_for_close_already_running(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已经在跑的平仓 / 对账：退出前等它做完，不取消到一半。"""
+    r, ex = _restart_runner(tmp_path, now, lambda: None)
+    gate = asyncio.Event()
+    finished: list[str] = []
+
+    async def slow_close(position_id: str, reason: CloseReason) -> None:
+        await gate.wait()
+        finished.append(position_id)
+
+    ex.close = slow_close  # type: ignore[method-assign]
+    closing = asyncio.create_task(r.close(_position(), CloseReason.KEEPER))
+    await asyncio.sleep(0.01)
+    r._reconciling = True
+    drain = asyncio.create_task(r._drain(5))
+    await asyncio.sleep(0.2)
+    assert not drain.done()  # 平仓、对账都还在跑
+    gate.set()
+    await closing
+    await asyncio.sleep(0.2)
+    assert not drain.done()  # 平仓完了，对账还没完
+    r._reconciling = False
+    await asyncio.wait_for(drain, 1)
+    assert finished == [_position().position_id]
+
+    monkeypatch.setattr("jiaoyi.loop.RESTART_DRAIN_S", 0.2)
+    r._closing.add("stuck")  # 卡住的平仓：限时到了照样退
+    await asyncio.wait_for(r._drain(0.2), 1)
+
+
 def test_restart_blocker_needs_launchd_and_valid_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
