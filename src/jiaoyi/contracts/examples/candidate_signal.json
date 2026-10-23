@@ -16,6 +16,8 @@
     "atr": 85.2,
     "atr_period_min": 15,
     "atr_median_7d": null,
+    "atr_long": null,
+    "atr_long_period_min": null,
     "values": {
       "ret_1m": 0.0031,
       "ret_5m": 0.0054,

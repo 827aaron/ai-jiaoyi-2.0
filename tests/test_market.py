@@ -209,6 +209,28 @@ def test_atr_aggregates_1m_into_15m_bars() -> None:
     assert snap.atr == pytest.approx(150.0)
 
 
+def test_long_atr_alongside_short() -> None:
+    """配了长周期：快照多带一个长周期 ATR，和单独按长周期算的一样；没攒够时为 None。"""
+    from jiaoyi.market.features import backfill_minutes
+
+    assert backfill_minutes(5, 60) == 16 * 60
+    both = RollingFeatureEngine(atr_period_min=1, atr_long_period_min=15)
+    alone = RollingFeatureEngine(atr_period_min=15)
+    for m in range(16 * 15):
+        k = _kline(m, 68000.0 + 10.0 * (m % 15))
+        both.update(k)
+        alone.update(k)
+        if m == 30:
+            early = both.snapshot("BTCUSDT")
+            assert early is not None and early.atr_long is None and early.atr_long_period_min == 15
+    snap, ref = both.snapshot("BTCUSDT"), alone.snapshot("BTCUSDT")
+    assert snap is not None and ref is not None
+    assert snap.atr_period_min == 1 and snap.atr_long == pytest.approx(ref.atr)
+    assert RollingFeatureEngine().snapshot("BTCUSDT") is None
+    with pytest.raises(ValueError):
+        RollingFeatureEngine(atr_period_min=15, atr_long_period_min=15)
+
+
 def test_atr_median_7d_from_seed_and_live_bars() -> None:
     eng = RollingFeatureEngine(atr_period_min=60)
     hours = [
