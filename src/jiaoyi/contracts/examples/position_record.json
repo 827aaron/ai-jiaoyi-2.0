@@ -28,5 +28,7 @@
   "realized_pnl_usdt": null,
   "fees_usdt": 0.51,
   "intended_price": 68050.0,
-  "exit_price": null
+  "exit_price": null,
+  "stop_loss_pct": 0.25,
+  "lifeboat_stop_pct": 0.375
 }

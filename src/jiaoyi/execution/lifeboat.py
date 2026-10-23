@@ -33,11 +33,20 @@ def _kind_of(summary: str) -> str | None:
     return None
 
 
-def client_order_id(position_id: str) -> str:
-    cid = f"{STOP_PREFIX}{position_id}"
+RELAY_SUFFIX = "-r"
+"""重挂时新单用的后缀：先挂新（另一个 cid）再撤旧，中间币安上一直有保命止损。"""
+
+
+def client_order_id(position_id: str, *, relay: bool = False) -> str:
+    cid = f"{STOP_PREFIX}{position_id}{RELAY_SUFFIX if relay else ''}"
     if len(cid) > 36:  # 币安 clientOrderId 上限 36 字符
         raise ValueError(f"position_id 太长，生成不了合法的 clientOrderId：{position_id}")
     return cid
+
+
+def lifeboat_cids(position_id: str) -> tuple[str, str]:
+    """一笔仓位的保命止损可能用的两个 cid（原始 / 重挂后缀），place、cancel、对账员都认。"""
+    return client_order_id(position_id), client_order_id(position_id, relay=True)
 
 
 class BinanceLifeboat:
@@ -97,6 +106,33 @@ class BinanceLifeboat:
         )
 
     async def place(self, position: PositionRecord, stop_price: float) -> LifeboatOrder:
+        """挂一张；币安上已有这笔的保命止损（任一 cid）就沿用那个 cid，幂等返回已有的。"""
+        found = await self._find_all(position)
+        cid = found[0].client_order_id if found else client_order_id(position.position_id)
+        return await self._place(position, stop_price, cid)
+
+    async def relay(self, position: PositionRecord, stop_price: float) -> LifeboatOrder:
+        """改价：先用另一个 cid 挂新的，挂上了再撤旧的；挂新失败就抛错，旧的原样留着。"""
+        found = await self._find_all(position)
+        current = self._current(position, found)
+        base, alt = lifeboat_cids(position.position_id)
+        cid = alt if current is not None and current.client_order_id == base else base
+        for leftover in found:  # 目标 cid 上残留的旧单（上次撤失败）：先撤，否则 place 会返回它
+            if leftover.client_order_id == cid:
+                await self._exchange.cancel_stop(position.symbol, leftover.order_id)
+        order = await self._place(position, stop_price, cid)
+        for old in found:
+            if old.client_order_id != cid:
+                await self._exchange.cancel_stop(position.symbol, old.order_id)
+                self._bump("撤")
+                self._log(
+                    Outcome.INFO,
+                    f"{position.symbol} 保命止损已撤（旧价 {old.stop_price}）",
+                    position,
+                )
+        return order
+
+    async def _place(self, position: PositionRecord, stop_price: float, cid: str) -> LifeboatOrder:
         if position.entry_price is None:
             raise ValueError("还没成交，不能挂保命止损")
         if position.side is Side.LONG and stop_price >= position.entry_price:
@@ -110,7 +146,7 @@ class BinanceLifeboat:
                 close_side,
                 position.quantity,
                 stop_price,
-                client_order_id(position.position_id),
+                cid,
             )
         except Exception as e:
             self._log(Outcome.ERROR, f"{position.symbol} 保命止损挂单失败：{e!r}", position)
@@ -146,19 +182,25 @@ class BinanceLifeboat:
             )
 
     async def cancel(self, position: PositionRecord) -> None:
-        stop = await self._find(position)
-        if stop is not None:
+        found = await self._find_all(position)
+        for stop in found:
             await self._exchange.cancel_stop(position.symbol, stop.order_id)
+        if found:
             self._bump("撤")
             self._log(Outcome.INFO, f"{position.symbol} 保命止损已撤", position)
 
     async def fetch(self, position: PositionRecord) -> LifeboatOrder | None:
-        stop = await self._find(position)
+        stop = self._current(position, await self._find_all(position))
         return None if stop is None else self._order(stop, LifeboatStatus.ACTIVE, self._clock())
 
-    async def _find(self, position: PositionRecord) -> ExchangeStop | None:
-        cid = client_order_id(position.position_id)
-        for stop in await self._exchange.open_stops(position.symbol):
-            if stop.client_order_id == cid:
-                return stop
-        return None
+    @staticmethod
+    def _current(position: PositionRecord, found: list[ExchangeStop]) -> ExchangeStop | None:
+        """账本记着的那张优先；账本没记就取第一张。"""
+        known = position.lifeboat.client_order_id if position.lifeboat is not None else None
+        return next((s for s in found if s.client_order_id == known), found[0] if found else None)
+
+    async def _find_all(self, position: PositionRecord) -> list[ExchangeStop]:
+        cids = lifeboat_cids(position.position_id)
+        return [
+            s for s in await self._exchange.open_stops(position.symbol) if s.client_order_id in cids
+        ]

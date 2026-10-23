@@ -89,6 +89,14 @@ class PositionRecord(Contract):
         default=None,
         description="币安平仓成交均价（含外部 / 手动平仓）；None = 没平或还没回填。",
     )
+    stop_loss_pct: PosFloat | None = Field(
+        default=None,
+        description="保镖算的止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
+    )
+    lifeboat_stop_pct: PosFloat | None = Field(
+        default=None,
+        description="保镖算的保命止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
+    )
 
     @property
     def notional_usdt(self) -> float:

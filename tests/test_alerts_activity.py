@@ -75,19 +75,69 @@ async def test_open_and_close_push_plain_text(tmp_path: Path) -> None:
     assert "持仓 1 小时 15 分" in closed.body
 
 
-async def test_lifeboat_relaid_at_real_entry(tmp_path: Path) -> None:
+def _fill_lower(rig: Rig, qty: float) -> None:
+    rig.ex.trades = [TradeFill(START + timedelta(seconds=1), "o1", "buy", 0.7487, qty, 0.05, 0.0)]
+
+
+async def test_lifeboat_relaid_at_real_entry_place_before_cancel(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, price=0.7497, symbol="APTUSDT")
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    old = rec.lifeboat
+    assert old is not None and rec.stop_loss_pct is not None
+    seen: list[int] = []
+    cancel = rig.ex.cancel_stop
+
+    async def counting_cancel(symbol: str, order_id: str) -> None:
+        seen.append(len(rig.ex.stops))  # 撤旧那一刻币安上有几张
+        await cancel(symbol, order_id)
+
+    rig.ex.cancel_stop = counting_cancel  # type: ignore[method-assign]
+    _fill_lower(rig, rec.quantity)
+    await rig.adapter.backfill_fills(rig.ex.user_trades)
+    after = rig.registry.get(pid).record  # type: ignore[union-attr]
+    new = after.lifeboat
+    assert new is not None and new.stop_price < old.stop_price
+    assert seen == [2]  # 先挂新再撤旧：中间一直有保命止损
+    assert len(rig.ex.stops) == 1 and new.client_order_id.endswith("-r")
+    # 保镖算的距离原样保留，不按回填价倒推
+    assert after.stop_loss_pct == rec.stop_loss_pct
+    assert after.lifeboat_stop_pct == rec.lifeboat_stop_pct
+    # 对账员认带后缀的那张：不补挂、不当残留撤
+    placed = len(rig.ex.placed)
+    await rig.rec.reconcile(rig.t)
+    assert len(rig.ex.stops) == 1 and len(rig.ex.placed) == placed
+
+
+async def test_lifeboat_relay_failure_keeps_old_stop(tmp_path: Path) -> None:
+    from jiaoyi.execution.exchange import ExchangeError
+
     rig = Rig(tmp_path)
     pid = await open_filled(rig, price=0.7497, symbol="APTUSDT")
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     old = rec.lifeboat
     assert old is not None
-    rig.ex.trades = [
-        TradeFill(START + timedelta(seconds=1), "o1", "buy", 0.7487, rec.quantity, 0.05, 0.0)
-    ]
+    rig.ex.fail_place = ExchangeError("拒单")
+    _fill_lower(rig, rec.quantity)
     await rig.adapter.backfill_fills(rig.ex.user_trades)
-    new = rig.registry.get(pid).record.lifeboat  # type: ignore[union-attr]
-    assert new is not None and new.stop_price < old.stop_price
-    assert len(rig.ex.stops) == 1  # 撤旧挂新，只剩一张
+    assert [s.stop_price for s in rig.ex.stops.values()] == [old.stop_price]
+    assert rig.registry.get(pid).record.lifeboat == old  # type: ignore[union-attr]
+    warn = rig.alerts.sent[-1]
+    assert warn.level is AlertLevel.WARN and "还在" in warn.body
+
+
+async def test_lifeboat_relay_past_new_stop_closes(tmp_path: Path) -> None:
+    from jiaoyi.execution.exchange import ExchangeError
+
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, price=0.7497, symbol="APTUSDT")
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    rig.ex.fail_place = ExchangeError("-2021 would immediately trigger", immediate_trigger=True)
+    _fill_lower(rig, rec.quantity)
+    await rig.adapter.backfill_fills(rig.ex.user_trades)
+    assert rig.ex.market_closed  # 直连平掉
+    closed = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert closed.status is c.PositionStatus.CLOSED
 
 
 def test_patrol_leaves_a_note_every_round(tmp_path: Path, now: datetime) -> None:
