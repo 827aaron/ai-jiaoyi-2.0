@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
@@ -28,6 +30,8 @@ from jiaoyi.contracts.battle_card import CardSymbol
 from jiaoyi.core.recorder import local_day
 from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
+from jiaoyi.panel.meetings import STAGES, read_meeting
+from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
 
 STALE_S = 120.0
 """主循环每 30 秒心跳一次；4 个周期没更新就当掉线。"""
@@ -79,6 +83,10 @@ class CardRow(BaseModel):
     notional_usdt: tuple[float, float] | None = None
     allowed_signals: list[str] = []
     key_levels: list[LevelView] = []
+    pending_label: str | None = None
+    """没有会议结论（bias = unknown）时方向列的短词：开会中 / 开会失败 / 会中断 / 没开会。"""
+    pending: str | None = None
+    """同上，理由列的一句明确说明（从 meeting_live/<币>.json 读），不写问号。"""
 
 
 class CardView(BaseModel):
@@ -257,7 +265,7 @@ def build_overview(
         hb_error=hb.error,
         lamps=_lamps(status, hb, now, running),
         kpis=kpis,
-        card=_with_fractions(_card(records, now), app),
+        card=_with_fractions(_with_pending(_card(records, now), files.root, now, files.tz), app),
         feed=_feed(records),
         positions=positions,
         tiles=tiles,
@@ -390,6 +398,60 @@ def _with_fractions(card: CardView | None, app: AppConfig) -> CardView | None:
     fl = app.fast_loop
     fr = {"S": fl.size_fraction_s, "M": fl.size_fraction_m, "L": 1.0}
     return card.model_copy(update={"size_fractions": fr})
+
+
+_STAGE_NAMES = {
+    "analysts": "分析师报告",
+    "debate": "多空辩论",
+    "trader": "交易员计划",
+    "risk": "风控辩论",
+    "decision": "结论",
+}
+
+
+def _pending(sym: str, card: CardView, root: Path, now: datetime, tz: str) -> tuple[str, str]:
+    """卡上有这个币却没有它的会议结论：按 meeting_live 说清楚是哪种情况（不许出现问号）。"""
+
+    def hm(t: datetime) -> str:
+        return t.astimezone(ZoneInfo(tz)).strftime("%H:%M")
+
+    m = read_meeting(root, sym, now)
+    if m is None:
+        return "没开会", "这一轮没给这个币开会（没有会议记录），这张卡里它没有结论，不会开仓"
+    if m.status == "running":
+        no = f"第 {STAGES.index(m.stage) + 1} / {len(STAGES)} 步 · " if m.stage in STAGES else ""
+        name = _STAGE_NAMES.get(m.stage or "", m.stage or "刚开始")
+        return "开会中", f"还在开会（{no}{name}），开完后结论进下一张卡"
+    if m.status == "failed":
+        return "开会失败", f"开会失败：{m.error or '没写原因'}；这张卡里它没有结论，不会开仓"
+    if m.status == "stale":
+        mins = MEETING_STALE_S // 60
+        return "会中断", f"开会中断（超过 {mins} 分钟没更新）；这张卡里它没有结论，不会开仓"
+    end = m.finished_at or m.updated_at
+    if end and end > card.created_at:
+        return "开会中", f"这张卡出了以后才开完（{hm(end)}），结论进下一张卡"
+    when = f"（{hm(end)} 开完）" if end else ""
+    return "没出结论", f"会开完了{when}但没写出结论；这张卡里它没有结论，不会开仓"
+
+
+def _with_pending(card: CardView | None, root: Path, now: datetime, tz: str) -> CardView | None:
+    if card is None:
+        return None
+    rows = [
+        r.model_copy(
+            update=dict(
+                zip(
+                    ("pending_label", "pending"),
+                    _pending(r.symbol, card, root, now, tz),
+                    strict=True,
+                )
+            )
+        )
+        if r.bias == "unknown"
+        else r
+        for r in card.symbols
+    ]
+    return card.model_copy(update={"symbols": rows})
 
 
 def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
