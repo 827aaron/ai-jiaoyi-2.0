@@ -35,6 +35,7 @@ from jiaoyi.slow.commander import (
     CardRefreshError,
     Pick,
     PickResult,
+    TierRules,
     clamp_to_risk,
 )
 from tests.conftest import ROOT
@@ -42,7 +43,9 @@ from tests.conftest import ROOT
 RISK = load_risk_config(ROOT / "config" / "risk.example.toml")
 
 
-def entry(sym: str, *, pinned: bool = False, cat: Category = Category.ALT) -> SymbolPoolEntry:
+def entry(
+    sym: str, *, pinned: bool = False, cat: Category = Category.ALT, tier: str | None = None
+) -> SymbolPoolEntry:
     return SymbolPoolEntry(
         symbol=sym,
         category=cat,
@@ -52,6 +55,7 @@ def entry(sym: str, *, pinned: bool = False, cat: Category = Category.ALT) -> Sy
         ),
         pinned=pinned,
         in_pool=True,
+        tier=tier,  # type: ignore[arg-type]
     )
 
 
@@ -715,3 +719,68 @@ async def test_timeout_charges_real_partial_cost_and_aborts(tmp_path: Path, now:
     assert "AAUSDT" in eng.aborted
     # 选币 0.01 + 超时会议已发生的真实花费 0.123（不是固定的 0.07）
     assert c._stats.cost_usd == pytest.approx(0.133)
+
+
+def _tiered_pool(now: datetime) -> SymbolPool:
+    return pool(
+        now,
+        entry("AAUSDT", tier="head"),
+        entry("BBUSDT", tier="mid"),
+        entry("CCUSDT", tier="mid"),
+        entry("DDUSDT", tier="mid"),
+        entry("EEUSDT", tier="tail"),
+    )
+
+
+async def test_tiers_mid_daily_pick_size_cap_and_tail_watch_only(
+    tmp_path: Path, now: datetime
+) -> None:
+    rules = TierRules(enabled=True, mid_daily_pick=2, mid_size_max=SizeTier.S)
+    path = tmp_path / "mid_tier.json"
+    eng = FakeEngine(["AAUSDT", "BBUSDT", "CCUSDT", "DDUSDT", "EEUSDT"])
+    c, _, _ = make(tmp_path, eng, now, tiers=rules, tier_path=path)
+    card = await c.refresh(_tiered_pool(now), "scheduled")
+    # 头部 AA 照常；中间档当天最多挑 2 个（BB、CC），DD 当天不开；尾部 EE 不开会、卡上没有
+    assert [s.symbol for s in card.symbols] == ["AAUSDT", "BBUSDT", "CCUSDT"]
+    sizes = {s.symbol: s.size_tier_max for s in card.symbols}
+    assert sizes == {"AAUSDT": SizeTier.M, "BBUSDT": SizeTier.S, "CCUSDT": SizeTier.S}
+    assert eng.analyzed.count("DDUSDT") == 0 and "EEUSDT" not in eng.analyzed
+    assert json.loads(path.read_text(encoding="utf-8"))["mid"] == ["BBUSDT", "CCUSDT"]
+    # 同一天不再重挑：下一轮没有"新进场"触发，候选里也没有 DD；重启后记录还在
+    assert c.refresh_reason(now + timedelta(minutes=10), _tiered_pool(now), {}) is None
+    c2, _, _ = make(tmp_path, FakeEngine([]), now, tiers=rules, tier_path=path)
+    assert c2.refresh_reason(now, _tiered_pool(now), {}) == "scheduled"
+    assert [e.symbol for e in c2._eligible(_tiered_pool(now), now, expand=False)] == [
+        "AAUSDT",
+        "BBUSDT",
+        "CCUSDT",
+    ]
+
+
+async def test_tiers_held_tail_symbol_still_meets_and_disabled_means_everything(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = FakeEngine(["AAUSDT"])
+    c, _, _ = make(tmp_path, eng, now, tiers=TierRules(enabled=True))
+    c.set_held({"EEUSDT": Side.LONG})
+    card = await c.refresh(_tiered_pool(now), "scheduled")
+    assert "EEUSDT" in {s.symbol for s in card.symbols}  # 有持仓的尾部币也要开会 / 留在卡上
+    off, _, _ = make(tmp_path / "off", FakeEngine([]), now, tiers=TierRules(enabled=False))
+    assert len(off._eligible(_tiered_pool(now), now, expand=False)) == 5
+
+
+async def test_market_meeting_is_recorded_in_meeting_live(tmp_path: Path, now: datetime) -> None:
+    live = tmp_path / "live"
+    eng = FakeEngine(["BBUSDT", "CCUSDT"])
+    c, _, _ = make(tmp_path, eng, now, live_dir=live)
+    c.set_held({"AAUSDT": Side.LONG})
+    await c.refresh(
+        pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT"), entry("DDUSDT")), "x"
+    )
+    doc = json.loads((live / "_MARKET.json").read_text(encoding="utf-8"))
+    assert doc["symbol"] == "_MARKET" and doc["status"] == "done"
+    assert [s["stage"] for s in doc["steps"]] == ["input", "pick", "filter"]
+    assert "区间震荡" in doc["steps"][1]["text"] and "BBUSDT" in doc["steps"][1]["text"]
+    assert "AAUSDT：固定 / 持仓强制开会" in doc["steps"][2]["text"]
+    assert "DDUSDT：军师没挑" in doc["steps"][2]["text"]
+    assert doc["cost_usd"] == pytest.approx(0.01)

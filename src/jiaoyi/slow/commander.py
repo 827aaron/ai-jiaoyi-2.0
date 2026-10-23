@@ -47,6 +47,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,27 @@ def clamp_to_risk(
     )
 
 
+MARKET_LIVE = "_MARKET"
+"""总盘会实况的固定名字：写进 ``meeting_live/_MARKET.json``。"""
+_SIZE_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
+
+
+@dataclass(frozen=True)
+class TierRules:
+    """分档交易（设计文档 §六「头部档先开放，中间档由军师每天挑，尾部只看不做」）怎么落到开会。
+
+    - 头部（head）：每轮都开会，和以前一样。
+    - 中间（mid）：每天（曼谷日）第一轮由总盘会从中间档里挑，最多 ``mid_daily_pick`` 个，挑中的
+      当天才继续开会；其余中间档当天不开会。挑中的币仓位档位最大封到 ``mid_size_max``。
+    - 尾部（tail）：不开会、卡上没有、不开仓，只留在池里让快环录数据。
+    - 有持仓的币不论哪一档都照常开会（不然持仓管家看不到它）。
+    """
+
+    enabled: bool = False
+    mid_daily_pick: int = 5
+    mid_size_max: SizeTier = SizeTier.S
+
+
 class BattleCardCommander:
     """满足 ``interfaces.BattleCardProvider``。``current`` 同步、不等开会。"""
 
@@ -174,6 +196,9 @@ class BattleCardCommander:
         failed_meeting_cost_usd: float = 0.05,
         budget_path: Path | None = None,
         card_path: Path | None = None,
+        tiers: TierRules | None = None,
+        tier_path: Path | None = None,
+        live_dir: Path | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
@@ -216,6 +241,14 @@ class BattleCardCommander:
         self._last_refresh: datetime | None = None
         self._seen: set[str] = set()
         self._news: set[str] = set()
+        self._live_dir = live_dir
+        self._tiers = tiers or TierRules()
+        self._tier_path = tier_path
+        self._tier_of: dict[str, str] = {}
+        self._mid_day = ""
+        self._mid_unlocked: set[str] = set()
+        self._expand_mid = False
+        self._restore_tiers()
         self._stats = TodayStats()
         self._stats_day = ""
         self._pick_cost = 0.0
@@ -348,7 +381,7 @@ class BattleCardCommander:
             return "key_level_break"
         if self._news & {c.symbol for c in card.symbols}:
             return "news"
-        if {e.symbol for e in pool.in_pool} - self._seen:
+        if {e.symbol for e in self._eligible(pool, now, expand=False)} - self._seen:
             return "new_entrant"
         if card.expires_at - now <= self._lead:
             return "scheduled"
@@ -366,7 +399,9 @@ class BattleCardCommander:
     async def refresh(self, pool: SymbolPool, reason: str) -> BattleCard:
         now = self._clock()
         started = time.monotonic()
-        candidates = pool.in_pool
+        self._tier_of = {e.symbol: e.tier for e in pool.in_pool if e.tier}
+        self._expand_mid = self._tiers.enabled and self._mid_day != self._day(now)
+        candidates = self._eligible(pool, now, expand=self._expand_mid)
         if not candidates:
             raise CardRefreshError("候选池为空，不出卡")
         if self._budget_exhausted(now):
@@ -397,6 +432,125 @@ class BattleCardCommander:
         self._level_broken.clear()
         self._record_card(card, started)
         return card
+
+    def _eligible(self, pool: SymbolPool, now: datetime, *, expand: bool) -> list[SymbolPoolEntry]:
+        """这一轮能开会的币：没开分档 = 整个池；开了 = 头部 + 有持仓的 + 中间档里今天挑中的
+        （``expand``：今天还没挑，中间档全部参与挑选）。尾部不开会。"""
+        if not self._tiers.enabled:
+            return pool.in_pool
+        out: list[SymbolPoolEntry] = []
+        for e in pool.in_pool:
+            mid_ok = e.symbol in self._mid_unlocked and self._mid_day == self._day(now)
+            if (
+                e.tier in (None, "head")
+                or e.symbol in self._held
+                or (e.tier == "mid" and (expand or mid_ok))
+            ):
+                out.append(e)
+        return out
+
+    def _unlock_mid(self, chosen: list[SymbolPoolEntry], now: datetime) -> list[SymbolPoolEntry]:
+        """今天第一轮：中间档的挑中的币最多留 ``mid_daily_pick`` 个并记下来（落盘，重启不重挑）。"""
+        keep: list[SymbolPoolEntry] = []
+        mids: list[str] = []
+        for e in chosen:
+            if e.tier == "mid" and e.symbol not in self._held:
+                if len(mids) >= self._tiers.mid_daily_pick:
+                    continue
+                mids.append(e.symbol)
+            keep.append(e)
+        self._mid_day, self._mid_unlocked = self._day(now), set(mids)
+        self._save_tiers()
+        return keep
+
+    def _limit_size(self, cs: CardSymbol) -> CardSymbol:
+        """中间档的币仓位档位封顶（只往小夹）。"""
+        cap = self._tiers.mid_size_max
+        if (
+            self._tiers.enabled
+            and self._tier_of.get(cs.symbol) == "mid"
+            and _SIZE_ORDER[cs.size_tier_max] > _SIZE_ORDER[cap]
+        ):
+            return cs.model_copy(update={"size_tier_max": cap})
+        return cs
+
+    def _save_tiers(self) -> None:
+        if self._tier_path is None:
+            return
+        data = {"day": self._mid_day, "mid": sorted(self._mid_unlocked)}
+        try:
+            tmp = self._tier_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._tier_path)
+        except OSError:
+            logger.exception("写 %s 失败：重启后今天的中间档会重新挑", self._tier_path)
+
+    def _restore_tiers(self) -> None:
+        if self._tier_path is None or not self._tier_path.is_file():
+            return
+        try:
+            data = json.loads(self._tier_path.read_text(encoding="utf-8"))
+            self._mid_day, self._mid_unlocked = str(data["day"]), {str(s) for s in data["mid"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning("%s 读不出，今天的中间档会重新挑", self._tier_path)
+
+    def _market_live(
+        self,
+        candidates: list[SymbolPoolEntry],
+        forced: list[SymbolPoolEntry],
+        free: list[SymbolPoolEntry],
+        room: int,
+    ) -> MeetingLive | None:
+        """总盘会（大盘基调 + 挑币）的实况，写进 meeting_live/_MARKET.json，格式同单币会议。"""
+        if self._live_dir is None:
+            return None
+        live = MeetingLive(self._live_dir, MARKET_LIVE)
+        table = "\n".join(
+            f"{e.symbol}（{e.category.value}，分数 {e.score:.2f}"
+            + (f"，档位 {e.tier}" if e.tier else "")
+            + (f"，{'、'.join(e.reasons)}" if e.reasons else "")
+            + "）"
+            for e in free
+        )
+        prev = f"上一张卡的大盘判断：{self._card.regime}\n" if self._card is not None else ""
+        live.step(
+            "input",
+            "input",
+            f"{prev}候选池 {len(candidates)} 个；固定 / 持仓强制开会 {len(forced)} 个"
+            f"（不占名额）；军师最多再挑 {room} 个。\n{table}",
+        )
+        return live
+
+    def _market_done(
+        self,
+        live: MeetingLive,
+        picked: PickResult,
+        chosen: list[SymbolPoolEntry],
+        candidates: list[SymbolPoolEntry],
+        forced: list[SymbolPoolEntry],
+        reused: Mapping[str, CardSymbol],
+        now: datetime,
+    ) -> None:
+        by_pick = {p.symbol: p.reason for p in picked.picks}
+        out = [f"大盘判断：{picked.regime}", "挑中："]
+        out += [f"{e.symbol}：{by_pick.get(e.symbol, '')}" for e in chosen if e not in forced]
+        live.step("pick", "market", "\n".join(out))
+        keep = {e.symbol for e in chosen}
+        why: list[str] = []
+        why += [f"{e.symbol}：固定 / 持仓强制开会" for e in forced]
+        for e in candidates:
+            if e.symbol in keep:
+                continue
+            if e.symbol in by_pick:
+                why.append(f"{e.symbol}：军师挑了，但超出名额或中间档当天名额已满")
+            else:
+                why.append(f"{e.symbol}：军师没挑")
+        for sym in reused:
+            last = self._last_meeting.get(sym)
+            ago = f"{(now - last).total_seconds() / 60:.0f} 分钟前" if last else "不久前"
+            why.append(f"{sym}：{ago}开过会、没有大消息 / 关键位突破，沿用上一张卡的指令")
+        live.step("filter", "filter", "\n".join(why))
+        live.finish("market", picked.regime, "", picked.cost_usd)
 
     def _next_meeting(self, now: datetime) -> datetime | None:
         """下一次会议最早什么时候开（按现在的状态估：卡到期前 ``expiry_lead``、退避、最小间隔）。"""
@@ -452,11 +606,15 @@ class BattleCardCommander:
         free = [e for e in candidates if e not in pinned]
         est = self._estimate(self._pick_costs)
         self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
+        live = self._market_live(candidates, pinned, free, max(room, 0))
         try:
             picked = await self._engine.pick(free, max(room, 0), self._card)
         except Exception as exc:
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
-            self._charge(self._failure_cost(exc, "pick") - est)
+            fail_cost = self._failure_cost(exc, "pick")
+            self._charge(fail_cost - est)
+            if live is not None:
+                live.fail(self._why(exc), fail_cost)
             raise
         self._charge(
             picked.cost_usd - est
@@ -468,8 +626,12 @@ class BattleCardCommander:
             if e is None or e.pinned or len(chosen) >= self._pick_max:
                 continue  # 军师只能从池里挑，池外的丢掉
             chosen.append(e)
+        if self._expand_mid:
+            chosen = self._unlock_mid(chosen, now)
         self._pick_cost = picked.cost_usd
         if not chosen:
+            if live is not None:
+                live.fail("总盘会没有挑出任何标的", picked.cost_usd)
             raise CardRefreshError("总盘会没有挑出任何标的")
 
         # 同一个币两次会议至少隔 symbol_min_interval；没有大消息 / 关键位突破就沿用上一张卡的指令
@@ -487,6 +649,8 @@ class BattleCardCommander:
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
+        if live is not None:
+            self._market_done(live, picked, chosen, candidates, pinned, reused, now)
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
         base_version = prev.version if prev is not None and same_day else 0
@@ -532,7 +696,9 @@ class BattleCardCommander:
             nonlocal cost, published
             res = await self._analyze_one(e, picked.regime)
             # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
-            symbols[e.symbol] = clamp_to_risk(res.card_symbol, self._risk, self._stop)
+            symbols[e.symbol] = self._limit_size(
+                clamp_to_risk(res.card_symbol, self._risk, self._stop)
+            )
             cost += res.cost_usd
             published += 1
             self._last_meeting[e.symbol] = now

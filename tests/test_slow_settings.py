@@ -213,3 +213,17 @@ def test_screener_categories_from_toml_and_cautions() -> None:
         {"categories": {c.value: {"enabled": False} for c in Category}}
     )
     assert any("所有类别都关了" in c for c in all_off.cautions(8.0))
+
+
+def test_tiers_section_defaults_and_cautions() -> None:
+    from jiaoyi.slow.settings import SlowConfig, TiersSection
+
+    t = TiersSection()
+    assert (t.enabled, t.head, t.mid, t.mid_daily_pick, t.mid_size_max) == (True, 10, 15, 5, "S")
+    assert not t.cautions()
+    odd = TiersSection(mid=2, mid_daily_pick=5, mid_size_max="L")
+    assert len(odd.cautions()) == 2
+    cfg = SlowConfig.model_validate({"screener": {"tiers": {"head": 3, "mid": 4}}})
+    sc = cfg.screener_config(40, 8.0, 8.0)
+    assert (sc.tiers, sc.tier_head, sc.tier_mid) == (True, 3, 4)
+    assert cfg.commander_kwargs()["tiers"].mid_daily_pick == 5

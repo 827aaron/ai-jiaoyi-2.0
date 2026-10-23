@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from jiaoyi.core.pool_overrides import SYMBOL_RE
+from jiaoyi.slow.commander import MARKET_LIVE as MARKET_MEETING
 
 MEETING_DIR = "meeting_live"
 STAGES = ("analysts", "debate", "trader", "risk", "decision")
@@ -108,7 +109,7 @@ def _parse(symbol: str, raw: Any, now: datetime) -> Meeting | None:
 
 def read_meeting(data_dir: Path, symbol: str, now: datetime) -> Meeting | None:
     """这个币最近一场会（正在开或上一场）；没有文件、读不出都是 None。``symbol`` 先过白名单。"""
-    if not SYMBOL_RE.match(symbol):
+    if symbol != MARKET_MEETING and not SYMBOL_RE.match(symbol):
         return None
     try:
         raw = json.loads((data_dir / MEETING_DIR / f"{symbol}.json").read_text(encoding="utf-8"))

@@ -186,3 +186,42 @@ async def test_category_off_and_cap_precedence(now: datetime) -> None:
     off = UserOverrides(category_enabled={Category.ALT: False}, pinned=frozenset({"PINUSDT"}))
     pool = await CodeSymbolScreener(src, ScreenerConfig(), off).screen(now)
     assert {e.symbol for e in pool.in_pool} == {"TSLAUSDT", "PINUSDT"}
+
+
+async def test_tiers_and_us_events(now: datetime) -> None:
+    import httpx
+
+    from jiaoyi.slow.screener import ScreenerConfig
+    from jiaoyi.slow.us_market import EarningsCalendar
+
+    open_now = datetime(2026, 10, 23, 14, 0, tzinfo=now.tzinfo)  # 周五 10:00 美东：开盘中
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        rows = [{"symbol": "TSLA", "time": "time-after-hours"}]
+        return httpx.Response(200, json={"data": {"rows": rows if "10-23" in str(req.url) else []}})
+
+    cal = EarningsCalendar(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    src = FakeSource(
+        [stat("AAAUSDT", range_24h_pct=9), stat("BBBUSDT", range_24h_pct=8),
+         stat("CCCUSDT", range_24h_pct=7), stat("DDDUSDT", range_24h_pct=6),
+         stat("PINUSDT", range_24h_pct=0.1), stat("TSLAUSDT", range_24h_pct=1.0)]
+    )  # fmt: skip
+    cfg = ScreenerConfig(tier_head=2, tier_mid=2)
+    ov = UserOverrides(pinned=frozenset({"PINUSDT"}))
+    scr = CodeSymbolScreener(src, cfg, ov, earnings=cal)
+    pool = await scr.screen(open_now)
+    tiers = {e.symbol: e.tier for e in pool.in_pool}
+    # 固定的币算头部并占名额：头部 = PIN + 分最高的 1 个，接着 2 个中间，其余尾部
+    assert tiers["PINUSDT"] == "head" and sum(t == "head" for t in tiers.values()) == 2
+    assert sum(t == "mid" for t in tiers.values()) == 2 and "tail" in tiers.values()
+    tsla = next(e for e in pool.entries if e.symbol == "TSLAUSDT")
+    assert "美股开盘中" in tsla.reasons and "财报：10-23 盘后（今天）" in tsla.reasons
+    assert tsla.score_breakdown["us_open"] == cfg.us_open_bonus
+    assert scr.us_tickers() == {"TSLA"}
+    # 休市时不加分；关掉分档 / 美股开关各自生效
+    closed = datetime(2026, 10, 24, 14, 0, tzinfo=now.tzinfo)
+    pool = await CodeSymbolScreener(src, ScreenerConfig(tiers=False, us_events=False)).screen(
+        closed
+    )
+    assert all(e.tier is None for e in pool.entries)
+    assert "us_open" not in next(e for e in pool.entries if e.symbol == "TSLAUSDT").score_breakdown

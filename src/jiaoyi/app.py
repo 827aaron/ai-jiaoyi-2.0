@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,12 +99,13 @@ from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.liquidations import LiquidationSource
-from jiaoyi.slow.news import NewsHub, default_sources
+from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
 from jiaoyi.slow.settings import SlowConfig, missing_slow_stack, slow_defaults
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
+from jiaoyi.slow.us_market import EarningsCalendar, EarningsNews
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +227,7 @@ def _build_cards(
     closers: list[Closer],
     liquidations: LiquidationSource | None = None,
     slow_cfg: SlowConfig | None = None,
+    extra_news: Sequence[NewsSource] = (),
 ) -> tuple[BattleCardProvider, NewsHub | None]:
     """军师团：有 key 就用真的（没装 slow 依赖直接报错）；没有 key 才用桩（没卡 = 不开新仓）。
 
@@ -238,7 +240,7 @@ def _build_cards(
         return StubBattleCardProvider(), None
     if problem := missing_slow_stack(cfg, secrets):
         raise ConfigError(problem)  # 有 key 就不许静默用桩，否则 M2 会空跑
-    news = NewsHub(default_sources(), decision_log, clock=clock)
+    news = NewsHub([*default_sources(), *extra_news], decision_log, clock=clock)
     closers.append(news.aclose)
     # 市场简报每轮算一次，总盘会和各币会议共用
     brief = MarketBriefService(clock=clock)
@@ -280,6 +282,10 @@ def _build_cards(
         budget_path=Path(app_cfg.data_dir) / "slow_budget.json",
         # 每开完一场会就把卡落盘，重启后还没过期的卡直接接着用
         card_path=Path(app_cfg.data_dir) / "battle_card.json",
+        # 分档交易：中间档今天挑中了哪几个（曼谷日），重启不重挑
+        tier_path=Path(app_cfg.data_dir) / "mid_tier.json",
+        # 总盘会（大盘基调 + 挑币）的实况，和各币会议一起放 meeting_live/_MARKET.json
+        live_dir=Path(app_cfg.data_dir) / "meeting_live",
         **cfg.commander_kwargs(),
     )
     return commander, news
@@ -401,6 +407,10 @@ def build_modules(
         # 强平统计由行情层的全市场强平流产出，选币和军师团共用，不另开连接
         source = BinanceStatsSource(liquidations=bfeed.liquidations)
         closers.append(source.aclose)
+        scfg = slow_cfg or slow_defaults(app_cfg.profile)
+        earnings = EarningsCalendar() if scfg.screener.us_events else None
+        if earnings is not None:
+            closers.append(earnings.aclose)
         screener = CodeSymbolScreener(
             source,
             # 门槛和权重来自 slow.toml [screener]；价差默认跟硬上限一致，免得进池的币保镖一律拒
@@ -408,6 +418,7 @@ def build_modules(
                 app_cfg.pool_size, risk_cfg.max_spread_bps, risk_cfg.taker_fee_bps * 2
             ),
             recorder=recorders[Role.SCREENER],
+            earnings=earnings,
             tz=tz,
         )
         cards, news = _build_cards(
@@ -419,6 +430,8 @@ def build_modules(
             closers,
             bfeed.liquidations,
             slow_cfg,
+            # 美股类别近期的财报日作为背景新闻进军师团（按选币器最近选出的美股代码拉）
+            [EarningsNews(earnings, screener.us_tickers, clock)] if earnings is not None else [],
         )
 
     alerter: Alerter
