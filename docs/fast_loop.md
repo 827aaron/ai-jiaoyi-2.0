@@ -178,6 +178,15 @@ paper 的临时推荐是 做 ≥ 0.35、真信号 ≥ 0.35、毒性 ≤ 0.7（`p
 笔数 / 胜率 / 平均 R，并扫门槛给推荐（门槛内总 R 最大、至少 10 笔）。
 明细缓存 `data/shadow/outcomes.jsonl`（算过的不重算），汇总 `data/debug/jev_backtest.json`。
 
+**回放测试：`jiaoyi jev-replay --days 3 --n 400`**（要 Jev key 和币安，在 Mac 上跑）。实盘信号太少时用：
+从 data.binance.vision 下载过去几天的 1 分钟线和逐笔成交（缓存 `data/history`），灌进和实盘同一个特征引擎、
+同一个哨兵规则造信号（作战卡用回放卡：两边都可以、所有信号类型、关键位取前 24h / 4h 高低点、
+止损 ATR / 止盈 R 用当前最长持仓档推荐），均匀抽 `--n` 个按当前模板和最长持仓真问 Jev；
+止损 = Jev 选的止损档 × 和保镖同一个止损 ATR，止盈 = 止损 × 最小 R，结果算法同上。
+默认选币 = 总盘会最常选的 8 个（`data/card_review/cards.jsonl`），可 `--symbols BTCUSDT,ETHUSDT`。
+历史数据没有盘口（快照 `book` 写 null）、爆仓（为 0，不出「强平瀑布反弹」）、资金费率（不出「拥挤交易反向」）和预测员。
+输出同样的分桶表 + 按现在门槛会放行多少 + 按信号类型，存 `data/replay/jev/<时间>/` 和 `data/debug/jev_replay.json`。
+
 - 只因为拍板人概率没过门槛被拦的，保镖记 `detail.by = "gate"`，面板显示黄色「拍板放弃」；红色「保镖拒绝」只留给保镖自己的规则。
 - 滑点（`risk.toml max_slippage_bps`）只拦不利方向（做多价格比触发时高、做空比触发时低），`detail.slippage_bps` 正数 = 不利；
   `detail.since_trigger_ms` 记触发到审完用了多久。推荐值按最长持仓档（约止损的 1/4）：30m 6 / 1h 8 / 2h 11 / 4h 16 / 8h 22 / 12h 28 / 24h 40bp。

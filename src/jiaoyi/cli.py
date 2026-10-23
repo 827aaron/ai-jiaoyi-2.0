@@ -286,6 +286,61 @@ def _jev_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _jev_replay(args: argparse.Namespace) -> int:
+    """历史行情重建信号 → 真问 Jev → 按之后的 K 线算结果，给门槛校准用。"""
+    from datetime import date, timedelta
+
+    from jiaoyi.contracts import Category
+    from jiaoyi.gate import replay
+    from jiaoyi.gate.jev import jev_from_secrets
+    from jiaoyi.market.rest import fetch_klines_between
+
+    try:
+        risk = load_risk_config(Path(args.risk))
+        app_cfg = load_app_config(Path(args.app))
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    fast = app_cfg.fast_loop
+    model = jev_from_secrets(
+        ChainedSecretStore(),
+        fast,
+        timeout_ms=app_cfg.jev_timeout_ms,
+        day_reset_tz=risk.day_reset_tz,
+    )
+    if model is None:
+        print("没有 Jev（缺 key 或没锁 jev_model），回放必须真问 Jev", file=sys.stderr)
+        return 2
+    now = datetime.now(UTC)
+    # data.binance.vision 的日包第二天才有：默认到昨天（UTC）
+    end = date.fromisoformat(args.end) if args.end else now.date() - timedelta(days=1)
+    days = [end - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
+    if args.symbols:
+        symbols = [(s.strip().upper(), Category.ALT) for s in args.symbols.split(",") if s.strip()]
+    else:
+        symbols = replay.default_symbols(app_cfg.data_dir, args.top)
+    print(f"回放 {days[0]}–{days[-1]}：{', '.join(s for s, _ in symbols)}（首次要下载历史数据）")
+    result = asyncio.run(
+        replay.run(
+            data_dir=app_cfg.data_dir,
+            model=model,
+            fast=fast,
+            symbols=symbols,
+            days=days,
+            n=args.n,
+            fee_bps=risk.taker_fee_bps,
+            dedup_s=app_cfg.signal_dedup_s,
+            concurrency=args.concurrency,
+            fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
+            now=now,
+            cache=Path(args.cache),
+        )
+    )
+    for line in replay.render(result):
+        print(line)
+    return 0
+
+
 def _run(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
     from jiaoyi.loop import Runner
@@ -454,6 +509,20 @@ def main(argv: list[str] | None = None) -> int:
         "--since", default="", help="从什么时候起（ISO，如 2026-10-23T12:47）；默认 7 天"
     )
     p.set_defaults(func=_jev_backtest)
+
+    p = sub.add_parser(
+        "jev-replay", help="用历史行情造信号、真问 Jev，算「做了会怎样」（校准门槛）"
+    )
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--days", type=int, default=3, help="回放几天（到 --end 为止）")
+    p.add_argument("--end", default="", help="最后一天（UTC，YYYY-MM-DD）；默认昨天")
+    p.add_argument("--n", type=int, default=400, help="最多问 Jev 几个信号")
+    p.add_argument("--symbols", default="", help="逗号分隔；默认总盘会最常选的币")
+    p.add_argument("--top", type=int, default=8, help="默认选币时取前几个")
+    p.add_argument("--concurrency", type=int, default=8, help="同时问 Jev 几个")
+    p.add_argument("--cache", default="data/history", help="历史数据下载缓存")
+    p.set_defaults(func=_jev_replay)
 
     p = sub.add_parser("watchdog", help="看一次主循环心跳，停了就发 Telegram（launchd 每分钟跑）")
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
