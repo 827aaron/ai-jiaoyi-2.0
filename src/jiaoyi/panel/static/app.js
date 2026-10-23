@@ -1541,7 +1541,7 @@ const PLAIN = {
   "screener.weight_liquidations": "强平的权重",
   risk_per_trade_pct: "每笔最多亏本金的百分之几",
   max_leverage: "最多开几倍杠杆",
-  max_total_exposure_x: "所有仓位加起来（含杠杆）最多是本金的几倍",
+  max_total_exposure_x: "所有仓位加起来（含杠杆）最多是本金的几倍（不是杠杆，杠杆看「最多开几倍杠杆」）",
   daily_loss_halt_pct: "今天亏到本金的百分之几就停止开新仓",
   max_notional_per_trade_x: "单笔仓位（含杠杆）最大是本金的几倍",
   max_notional_per_trade_usdt: "单笔仓位绝对上限（含杠杆）USDT（可不填）",
@@ -1805,7 +1805,7 @@ const CORE = ["risk.risk_per_trade_pct", "risk.daily_loss_halt_pct", "risk.max_l
 const ADV = [
   { id: "risk", t: "风控细项", note: "首屏三项之外的仓位上限。都是你定的上限，AI 改不了。", groups: [
     { g: "仓位上限", keys: ["risk.max_total_exposure_x", "risk.max_notional_per_trade_x", "risk.max_notional_per_trade_usdt", "risk.max_open_positions"] },
-    { g: "每类币仓位上限（含杠杆，本金的几倍）", cat: true, hint: "同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的总仓位倍数。" },
+    { g: "每类币总仓位上限（这一类所有仓位加起来，含杠杆，最多是本金的几倍）", cat: true, hint: "这里不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。比如山寨币 5 倍 = 所有山寨币仓位的名义价值加起来不超过本金 × 5。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的总仓位倍数。" },
   ] },
   { id: "exec", t: "执行", note: "下单时的门槛、止损止盈、管家和拍板人。带“跟最长持仓走”的改单笔最长持仓时自动换，带“跟档位走”的切档位自动换。", groups: [
     { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple"] },
@@ -1854,7 +1854,7 @@ function settingIndex(d) {
   const ix = {};
   for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "budget", "screener", "tiers"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
   const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
-  for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: CAT[k] || k, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总仓位倍数）`, editable: true, choices: [] };
+  for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: `${CAT[k] || k} · 这一类仓位加起来最多是本金的`, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总仓位倍数）`, editable: true, choices: [] };
   return ix;
 }
 // 把五个标签展开成 [标签, [组名, 提示, 项…]]；没列到的键收进对应标签的“其他”
