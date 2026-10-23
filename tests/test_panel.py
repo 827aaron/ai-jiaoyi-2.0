@@ -983,7 +983,8 @@ def test_card_history_lists_past_orders(tmp_path: Path) -> None:
     log = JsonlDecisionLog(tmp_path)
     log.write(c.DecisionRecord(record_id="m1", ts=t0 + timedelta(minutes=2), role=c.Role.COMMANDER,
                                outcome=c.Outcome.ACTION, summary="结论", symbol=sym.symbol,
-                               output=sym.model_dump(mode="json")))  # fmt: skip
+                               output={**sym.model_dump(mode="json"),
+                                       "usage": {"prompt_tokens": 1}}))  # fmt: skip
     pos = load_example("position_record")
     pos.update(symbol=sym.symbol, opened_at=(t0 + timedelta(minutes=30)).isoformat())
     (tmp_path / "positions.json").write_text(

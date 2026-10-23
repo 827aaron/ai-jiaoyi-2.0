@@ -133,7 +133,10 @@ def _conclusion(recs: list[DecisionRecord], row: JournalRow) -> CardSymbol | Non
         if gap > MATCH_WINDOW or (best and gap >= best[0]):
             continue
         try:
-            cs = CardSymbol.model_validate(rec.output)
+            # 记录里还夹着 usage（token 用量）等不属于指令的键，契约禁止多余字段，先去掉
+            cs = CardSymbol.model_validate(
+                {k: v for k, v in rec.output.items() if k in CardSymbol.model_fields}
+            )
         except ValidationError:
             continue
         if cs.bias.value != row.bias:  # 方向对不上就不是这场会
