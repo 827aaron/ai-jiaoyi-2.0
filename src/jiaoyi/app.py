@@ -196,7 +196,7 @@ class Modules:
 
 # 字段 → 角色，用于没有心跳时在团队页上补一条状态
 ROLE_OF: dict[str, Role] = {
-    "feed": Role.SENTINEL,
+    "feed": Role.BOOK_READER,
     "features": Role.BOOK_READER,
     "trigger": Role.SENTINEL,
     "predictor": Role.PREDICTOR,
@@ -401,7 +401,7 @@ def build_modules(
         feed = StubMarketDataFeed()
         screener, cards = StubSymbolScreener(), StubBattleCardProvider()
     else:
-        bfeed = BinanceFuturesFeed()
+        bfeed = BinanceFuturesFeed(status_sink=decision_log, day_reset_tz=tz)
         feed = bfeed
         # 选币只读币安公开接口，不需要 key
         # 强平统计由行情层的全市场强平流产出，选币和军师团共用，不另开连接
@@ -462,6 +462,8 @@ def build_modules(
         cfg=app_cfg.predictor,
     )
     features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
+    if isinstance(feed, BinanceFuturesFeed):
+        feed.set_coverage(features.coverage)
 
     # 拍板模型是启动时的一次性选择：有 Jev 用 Jev；模拟盘且明确打开才用规则版；否则不开新仓。
     # Jev 运行中出错只返回 ok=False，绝不切到规则版。
