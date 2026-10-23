@@ -37,6 +37,7 @@ from jiaoyi.contracts import (
     TodayStats,
 )
 from jiaoyi.interfaces import DecisionLog
+from jiaoyi.slow.brief import MarketBriefService
 
 
 class CardRefreshError(RuntimeError):
@@ -108,10 +109,12 @@ class BattleCardCommander:
         min_refresh_gap: timedelta = timedelta(minutes=5),
         expiry_lead: timedelta = timedelta(minutes=10),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        brief: MarketBriefService | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
         self._clock = clock
+        self._brief = brief
         self._engine = engine
         self._risk = risk
         self._log = log
@@ -220,6 +223,11 @@ class BattleCardCommander:
         candidates = pool.in_pool
         if not candidates:
             raise CardRefreshError("候选池为空，不出卡")
+        if self._brief is not None:
+            try:
+                await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
+            except Exception as exc:
+                self._write(outcome=Outcome.ERROR, summary=f"市场简报失败，会议继续：{exc}"[:200])
         try:
             card = await self._meet(pool, candidates, reason, now)
         except Exception as exc:

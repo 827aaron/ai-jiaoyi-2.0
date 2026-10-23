@@ -42,6 +42,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.interfaces import SecretStore
+from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import Analysis, Pick, PickResult
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
@@ -379,6 +380,7 @@ class TradingAgentsEngine:
         today: Callable[[], datetime] = lambda: datetime.now(UTC),
         news: NewsHub | None = None,
         liquidations: LiquidationSource | None = None,
+        brief: MarketBriefService | None = None,
     ) -> None:
         key = secrets.get("DEEPSEEK_API_KEY")
         if not key:
@@ -390,6 +392,7 @@ class TradingAgentsEngine:
         self._s = settings or TradingAgentsSettings()
         self._today = today
         self._news = news
+        self._brief = brief
         self._liq = liquidations
         register_binance_vendor()
         if news is not None:
@@ -443,7 +446,7 @@ class TradingAgentsEngine:
             + self._headlines(e.symbol)
             for e in candidates
         )
-        market = self._market_news()
+        market = self._brief_text() + self._market_news()
         prev = f"上一张卡的大盘判断：{previous.regime}\n" if previous else ""
         draft: _PickDraft = llm.invoke(
             f"你是加密永续合约的总盘军师。现在是 {self._today():%Y-%m-%d %H:%M} UTC。\n{prev}"
@@ -464,6 +467,9 @@ class TradingAgentsEngine:
             return ""
         items = self._news.for_symbol(symbol, hours=48, limit=2)
         return "".join(f"\n    · {i.title}" for i in items)
+
+    def _brief_text(self) -> str:
+        return f"\n{self._brief.text}\n" if self._brief is not None and self._brief.text else ""
 
     def _market_news(self) -> str:
         if self._news is None:
@@ -499,7 +505,7 @@ class TradingAgentsEngine:
             f"{r.max_notional_per_trade_usdt:g} USDT，杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
             "矛盾或财报前夜之类就选 no_trade。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
             "倍数区间（如 1.5–3）。key_levels 只填结论里明确提到的价位。reason 用中文。\n"
-            f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}\n结论：\n{decision}"
+            f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{self._brief_text()}\n结论：\n{decision}"
         )
         llm = graph.quick_thinking_llm.with_structured_output(_CardSymbolDraft)
         last: Exception | None = None
