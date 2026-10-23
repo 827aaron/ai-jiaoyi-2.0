@@ -1,13 +1,16 @@
 # 慢环（军师团）的成本和节奏。可选：没有 config/slow.toml 就用这里写的默认值（与现在行为一致）。
 # 复制成 config/slow.toml 再改。这里不放任何风控数值，硬上限只在 risk.toml。
 
+[llm]
+provider = "deepseek"    # deepseek=直连（DEEPSEEK_API_KEY）；openrouter=经 OpenRouter（OPENROUTER_API_KEY）
+
 [meeting]
 analysts_crypto = ["market", "social", "news"]                 # 分析师越少越省钱
 analysts_stock  = ["market", "social", "news", "fundamentals"]
 debate_rounds = 1        # 多空辩论轮数 0–3
 risk_rounds   = 1        # 风控讨论轮数 0–3
-quick_model = "deepseek-flash"
-deep_model  = "deepseek-v4-pro"
+# quick_model / deep_model 不写 = 用所选 provider 的默认模型
+# （两档默认都是 DeepSeek 4.1：deepseek 直连 deepseek-flash；openrouter deepseek/deepseek-v4.1-flash）
 pick_tier    = "quick"   # 总盘会（挑币）用 quick（flash，便宜）还是 deep（pro）
 convert_tier = "quick"   # 把结论整理成作战指令那一步
 max_tokens  = 8192

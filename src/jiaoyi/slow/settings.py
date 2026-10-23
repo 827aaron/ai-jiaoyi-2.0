@@ -18,7 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from jiaoyi.core.config import ConfigError
-from jiaoyi.slow.tradingagents_engine import TradingAgentsSettings
+from jiaoyi.slow.tradingagents_engine import PROVIDER_MODELS, TradingAgentsSettings
 
 DEFAULT_SLOW_PATH = Path("config/slow.toml")
 ANALYSTS = ("market", "social", "news", "fundamentals")
@@ -26,6 +26,13 @@ ANALYSTS = ("market", "social", "news", "fundamentals")
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class LlmConfig(_Strict):
+    provider: Literal["deepseek", "openrouter"] = Field(
+        default="deepseek",
+        description="deepseek=直连；openrouter=经 OpenRouter（各自的 API key）",
+    )
 
 
 class MeetingConfig(_Strict):
@@ -37,8 +44,8 @@ class MeetingConfig(_Strict):
     )
     debate_rounds: int = Field(default=1, ge=0, le=3, description="多空辩论轮数；越多越贵。")
     risk_rounds: int = Field(default=1, ge=0, le=3, description="风控讨论轮数。")
-    quick_model: str = "deepseek-flash"
-    deep_model: str = "deepseek-v4-pro"
+    quick_model: str | None = Field(default=None, description="不写 = 用所选 provider 的默认模型。")
+    deep_model: str | None = Field(default=None, description="不写 = 用所选 provider 的默认模型。")
     pick_tier: Literal["quick", "deep"] = Field(
         default="quick", description="总盘会（挑币）用哪档模型：quick=flash（便宜），deep=pro。"
     )
@@ -77,15 +84,18 @@ class PricesConfig(_Strict):
 
 
 class SlowConfig(_Strict):
+    llm: LlmConfig = LlmConfig()
     meeting: MeetingConfig = MeetingConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     prices: PricesConfig = PricesConfig()
 
     def engine_settings(self) -> TradingAgentsSettings:
         m, p = self.meeting, self.prices
+        quick, deep = PROVIDER_MODELS[self.llm.provider]
         return TradingAgentsSettings(
-            quick_model=m.quick_model,
-            deep_model=m.deep_model,
+            provider=self.llm.provider,
+            quick_model=m.quick_model or quick,
+            deep_model=m.deep_model or deep,
             debate_rounds=m.debate_rounds,
             risk_rounds=m.risk_rounds,
             max_tokens=m.max_tokens,

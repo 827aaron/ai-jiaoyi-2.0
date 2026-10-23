@@ -88,7 +88,7 @@ from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
 from jiaoyi.slow.settings import SlowConfig
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
-from jiaoyi.slow.tradingagents_engine import TradingAgentsEngine
+from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
 
 log = logging.getLogger(__name__)
 
@@ -197,13 +197,14 @@ def _build_cards(
 
     新闻源只服务军师团（开会素材、大消息触发、下架封禁），军师团是桩时不拉新闻。
     """
-    if not secrets.get("DEEPSEEK_API_KEY"):
-        log.warning("没有 DEEPSEEK_API_KEY，军师团用桩：不出作战卡，快环不会开新仓")
+    cfg = slow_cfg or SlowConfig()  # 没有 config/slow.toml 就用默认值，行为不变
+    key_env = PROVIDER_KEY_ENV[cfg.llm.provider]
+    if not secrets.get(key_env):
+        log.warning("没有 %s，军师团用桩：不出作战卡，快环不会开新仓", key_env)
         return StubBattleCardProvider(), None
     if importlib.util.find_spec("tradingagents") is None:
         log.warning("没装 tradingagents（uv pip install -e '.[slow]'），军师团用桩")
         return StubBattleCardProvider(), None
-    cfg = slow_cfg or SlowConfig()  # 没有 config/slow.toml 就用默认值，行为不变
     news = NewsHub(default_sources(), decision_log, clock=clock)
     closers.append(news.aclose)
     # 市场简报每轮算一次，总盘会和各币会议共用
