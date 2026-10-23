@@ -225,6 +225,11 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
 }
 
 // 今日盈亏明细：账户今日盈亏 = 平仓毛利 + 手续费 + 资金费 + 持仓浮盈变化（含转账等）；AI 费不在账户里，另外扣
+// 持仓浮盈一律显示扣掉开平两次手续费后的数（现在平掉大概能落袋多少）；拿不到费率估算就退回原始浮盈
+const netPnl = (p) => (p.net_unrealized_usdt != null ? p.net_unrealized_usdt : p.unrealized_usdt);
+const netPct = (p) => (p.net_pnl_pct != null ? p.net_pnl_pct : p.pnl_pct);
+const feeSrc = (p) => (p.fee_from_fills ? `按最近成交实收费率 ${money(p.fee_bps / 100, 3)}%` : `估：按配置费率 ${money(p.fee_bps / 100, 3)}%，还没有平过的单可以对`);
+const feeTip = (p) => (p.fees_est_usdt == null || p.unrealized_usdt == null ? "" : `浮动 ${signed(p.unrealized_usdt, 2)} U − 手续费 ${money(p.fees_est_usdt, 2)} U（开仓 + 平仓各一次，${feeSrc(p)}）`);
 // 今日盈亏直接拆一行：已平（净，同历史页交易净盈亏）+ 浮动（没平的单现在的浮盈）+ 其它（资金费、0 点前已有持仓的浮盈等）
 function dayParts(k) {
   if (k.day_pnl_usdt == null || k.day_closed_usdt == null || k.day_floating_usdt == null) return "";
@@ -921,7 +926,7 @@ function posSection(list) {
         const lb = LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单";
         const lbBad = p.lifeboat_status !== "active";
         return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
-          <span class="pnl ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</span></div>
+          <span class="pnl ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${netPnl(p) == null ? "—" : signed(netPnl(p), 2) + "U"}</span></div>
           <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
           <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
       }).join("")
@@ -975,7 +980,8 @@ P.positions = (arg) => {
     const held = now - new Date(p.opened_at).getTime();
     const go = `onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'"`;
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
-    const pnl = p.unrealized_usdt == null ? "—" : `${signed(p.unrealized_usdt, 2)} U${p.pnl_pct == null ? "" : ` <span class="small">${signed(p.pnl_pct, 2)}%</span>`}`;
+    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}</div>` : "";
+    const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
     const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
@@ -984,7 +990,7 @@ P.positions = (arg) => {
       <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td><td class="r num">${p.leverage}x</td>
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}</td>
-      <td class="r num ${cls(p.unrealized_usdt)}">${pnl}</td>
+      <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
       <td class="r num">${price(p.stop_loss_price, p.symbol)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
       <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
@@ -996,7 +1002,7 @@ P.positions = (arg) => {
     const lbOk = p.lifeboat_status === "active";
     return `<div class="pm ${on ? "sel" : ""}"><a href="#positions/${encodeURIComponent(p.position_id)}">
       <div class="l1"><b>${coin(p.symbol)}</b> <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
-        <span class="r num ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : `${signed(p.unrealized_usdt, 2)} U`}${p.pnl_pct == null ? "" : ` · ${signed(p.pnl_pct, 2)}%`}</span></div>
+        <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
         开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
       <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
@@ -1011,7 +1017,7 @@ P.positions = (arg) => {
       <div class="bars">${groups}</div>
     </div>
     <section class="card mt"><div class="tw pos-wide"><table>
-      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r">现价</th><th class="r" title="百分比按名义算，不乘杠杆">浮盈（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
+      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
     <section class="card mt">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
@@ -2154,16 +2160,19 @@ function render() {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
   }
-  const scrolls = [...document.querySelectorAll("#page .scroll")].map((e) => e.scrollTop);
+  // 页面里能自己滚的块（竖着的日志、横着的宽表格）：重画前记住位置，画完按顺序放回去
+  const boxes = () => [...document.querySelectorAll("#page .scroll, #page .tw")];
+  const scrolls = boxes().map((e) => [e.scrollTop, e.scrollLeft]);
   // 页面上的输入框（选币页“手动加币”）：定时刷新重画时保住正在输入的内容和焦点
   const typing = document.activeElement && document.activeElement.id === "pool-add";
   const typed = $("#pool-add") ? $("#pool-add").value : "";
   // 定时刷新整页重画：先用旧高度撑住页面，免得重画中途变矮把滚动位置夹回顶部（团队页尤其明显）
-  const pg = $("#page"), y = window.scrollY, same = pg.dataset.key === pageId(page, arg);
+  const pg = $("#page"), y = window.scrollY, same = pg.dataset.key === pageId(page, arg), samePage = pg.dataset.page === page;
   pg.style.minHeight = same ? pg.offsetHeight + "px" : "";
   pg.dataset.key = pageId(page, arg);
+  pg.dataset.page = page;
   pg.innerHTML = (P[page] || placeholder)(arg);
-  document.querySelectorAll("#page .scroll").forEach((e, i) => { e.scrollTop = scrolls[i] || 0; });
+  if (samePage) boxes().forEach((e, i) => { if (scrolls[i]) [e.scrollTop, e.scrollLeft] = scrolls[i]; });
   const box = $("#pool-add");
   if (box && typed) box.value = typed;
   if (box && typing) box.focus();
