@@ -80,6 +80,15 @@ class PositionRecord(Contract):
     close_reason: CloseReason | None = None
     realized_pnl_usdt: float | None = None
     fees_usdt: NonNegFloat = 0.0
+    intended_price: PosFloat | None = Field(
+        default=None,
+        description="按币安成交均价回填入场价之前账本里的入场价（执行器报的 / 意向价）；"
+        "None = 还没回填。",
+    )
+    exit_price: PosFloat | None = Field(
+        default=None,
+        description="币安平仓成交均价（含外部 / 手动平仓）；None = 没平或还没回填。",
+    )
 
     @property
     def notional_usdt(self) -> float:

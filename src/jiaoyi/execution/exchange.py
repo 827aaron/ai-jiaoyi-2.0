@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
+from jiaoyi.execution.fills import TradeFill
 from jiaoyi.execution.symbols import from_ccxt_symbol, to_ccxt_symbol
 
 log = logging.getLogger(__name__)
@@ -455,6 +456,45 @@ class CcxtBinanceFutures:
                 start_ms = max(int(r["time"]) for r in rows) + 1
         except Exception as e:
             raise ExchangeError(f"查收入流水失败：{e}") from e
+
+    async def user_trades(self, symbol: str, since: datetime) -> list[TradeFill]:
+        """``since`` 起这个币的成交明细（/fapi/v1/userTrades，最多 1000 条，账本回填够用）。"""
+        try:
+            rows = await self._ex.fapiPrivateGetUserTrades(
+                {"symbol": symbol, "startTime": int(since.timestamp() * 1000), "limit": 1000}
+            )
+        except Exception as e:
+            raise ExchangeError(f"查成交明细失败：{e}") from e
+        out = []
+        for r in rows:
+            usdt = str(r.get("commissionAsset") or "").upper() in ("USDT", "USDC", "BUSD")
+            out.append(
+                TradeFill(
+                    time=datetime.fromtimestamp(int(r["time"]) / 1000, UTC),
+                    order_id=str(r.get("orderId")),
+                    side=str(r["side"]).lower(),
+                    price=float(r["price"]),
+                    qty=float(r["qty"]),
+                    commission_usdt=abs(float(r.get("commission") or 0.0)) if usdt else None,
+                    realized_pnl=float(r.get("realizedPnl") or 0.0),
+                )
+            )
+        return sorted(out, key=lambda t: t.time)
+
+    async def new_listen_key(self) -> str:
+        """开用户数据流（POST /fapi/v1/listenKey）。已有有效的会返回同一个并顺带续期。"""
+        try:
+            raw = await self._ex.fapiPrivatePostListenKey()
+        except Exception as e:
+            raise ExchangeError(f"申请用户数据流失败：{e}") from e
+        return str(raw["listenKey"])
+
+    async def keepalive_listen_key(self) -> None:
+        """续期（PUT /fapi/v1/listenKey），60 分钟不续就失效。"""
+        try:
+            await self._ex.fapiPrivatePutListenKey()
+        except Exception as e:
+            raise ExchangeError(f"续期用户数据流失败：{e}") from e
 
     async def close(self) -> None:
         await self._ex.close()

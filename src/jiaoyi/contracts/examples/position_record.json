@@ -26,5 +26,7 @@
   "closed_at": null,
   "close_reason": null,
   "realized_pnl_usdt": null,
-  "fees_usdt": 0.51
+  "fees_usdt": 0.51,
+  "intended_price": 68050.0,
+  "exit_price": null
 }

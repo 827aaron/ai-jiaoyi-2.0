@@ -15,6 +15,7 @@ from jiaoyi.execution.exchange import (
     IncomeRow,
     LotFilter,
 )
+from jiaoyi.execution.fills import TradeFill
 from jiaoyi.execution.hb_client import HbApiError
 
 
@@ -133,6 +134,8 @@ class FakeExchange:
         self.market_closed: list[tuple[str, str, float]] = []
         self.fail_market_close = False
         self.income = 0.0
+        self.trades: list[TradeFill] = []
+        self.listen_keys = 0
         self.wallet = 1000.0
         self.exit_price: float | None = None
         self.exit_fee: float | None = None
@@ -221,6 +224,16 @@ class FakeExchange:
         if self.income_down:
             raise ExchangeError("收入流水不可用")
         return self.income
+
+    async def user_trades(self, symbol: str, since: datetime) -> list[TradeFill]:
+        return [t for t in self.trades if t.time >= since]
+
+    async def new_listen_key(self) -> str:
+        self.listen_keys += 1
+        return f"key-{self.listen_keys}"
+
+    async def keepalive_listen_key(self) -> None:
+        return None
 
     async def income_rows(self, since: datetime) -> list[IncomeRow]:
         if self.income_down:

@@ -57,12 +57,19 @@ from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.account_check import AccountMismatch
 from jiaoyi.execution.factory import MissingSecret, build_execution
 from jiaoyi.execution.income_daily import IncomeDaily
+from jiaoyi.execution.ledger_sync import LedgerSync
 from jiaoyi.execution.live_gate import LiveGate
 from jiaoyi.execution.stub import (
     StubExecutorAdapter,
     StubLifeboatStop,
     StubLotRules,
     StubReconciler,
+)
+from jiaoyi.execution.user_stream import (
+    DEMO_WS_BASE,
+    LEGACY_TESTNET_WS_BASE,
+    LIVE_WS_BASE,
+    UserStream,
 )
 from jiaoyi.gate.entry import JevEntryGate
 from jiaoyi.gate.jev import decision_model_from_config
@@ -316,6 +323,8 @@ class Built:
     """启动前必须通过的核对（hummingbot 与 ccxt 是同一账户）；抛异常即拒绝启动。"""
     income: IncomeDaily | None = None
     """币安收入流水按日汇总（data/income_daily.json）；没连交易所时没有。主循环定时刷新。"""
+    ledger: LedgerSync | None = None
+    """账本按币安成交回填 + 收入流水刷新（用户数据流叫醒，60 秒兜底）；没连交易所时没有。"""
     against: AgainstCardWatch | None = None
     """预测员连续看反作战卡的事件 / 查询（慢环订阅它开单币临时会）。"""
 
@@ -340,7 +349,7 @@ def _build_execution(
     closers: list[Closer],
     decision_log: JsonlDecisionLog,
     startup_checks: list[Closer],
-) -> tuple[ExecutorAdapter, LifeboatStop, Reconciler, LotRulesProvider, IncomeDaily | None]:
+) -> tuple[ExecutorAdapter, LifeboatStop, Reconciler, LotRulesProvider, LedgerSync | None]:
     """执行层按模式选币安密钥（testnet/paper 用测试网的，live 用主网的）。
 
     live 没解锁（确认词 + 面板密码）或缺密钥：抛异常，拒绝启动。
@@ -369,7 +378,16 @@ def _build_execution(
     startup_checks.append(stack.verify_same_account)
     # Demo / paper 也拉：面板的盈利口径看的就是这个账户的流水
     income = IncomeDaily(stack.exchange.income_rows, app_cfg.data_dir, risk_cfg.day_reset_tz)
-    return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules, income
+    ex = stack.exchange
+    if mode is RunMode.LIVE:
+        ws_base = LIVE_WS_BASE
+    else:
+        ws_base = DEMO_WS_BASE if app_cfg.sim_environment == "demo" else LEGACY_TESTNET_WS_BASE
+    ledger = LedgerSync(stack.adapter, ex.user_trades, income, clock=clock)
+    ledger.attach(
+        UserStream(ex.new_listen_key, ex.keepalive_listen_key, ledger.on_fill, ws_base=ws_base)
+    )
+    return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules, ledger
 
 
 def build_modules(
@@ -450,6 +468,7 @@ def build_modules(
     reconciler: Reconciler
     lot_rules: LotRulesProvider
     income: IncomeDaily | None = None
+    ledger: LedgerSync | None = None
     if offline:
         alerter = StubAlerter()
         executor, lifeboat, reconciler, lot_rules = (
@@ -460,9 +479,10 @@ def build_modules(
         )
     else:
         alerter = _build_alerter(secrets, closers)
-        executor, lifeboat, reconciler, lot_rules, income = _build_execution(
+        executor, lifeboat, reconciler, lot_rules, ledger = _build_execution(
             risk_cfg, app_cfg, secrets, alerter, clock, closers, decision_log, startup_checks
         )
+        income = ledger.income if ledger is not None else None
 
     predictor = KronosForecaster(
         app_cfg.predictor_enabled,
@@ -547,7 +567,16 @@ def build_modules(
         alerter=alerter,
     )
     return Built(
-        modules, closers, recorders, gate_mode, lot_rules, news, startup_checks, income, against
+        modules,
+        closers,
+        recorders,
+        gate_mode,
+        lot_rules,
+        news,
+        startup_checks,
+        income,
+        ledger,
+        against,
     )
 
 
@@ -576,6 +605,7 @@ class App:
         self.gate_mode = "none"
         self.lot_rules: LotRulesProvider = StubLotRules()
         self.income: IncomeDaily | None = None
+        self.ledger: LedgerSync | None = None
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
@@ -596,6 +626,7 @@ class App:
             self.recorders, self.gate_mode = built.recorders, built.gate_mode
             self.lot_rules = built.lot_rules
             self.income = built.income
+            self.ledger = built.ledger
             self.news = built.news
             self.against = built.against
         self.m = modules
