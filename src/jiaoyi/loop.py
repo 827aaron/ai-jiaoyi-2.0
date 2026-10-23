@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -37,6 +37,7 @@ from jiaoyi.contracts import (
     PositionRecord,
     PositionStatus,
     Role,
+    Side,
     SymbolPool,
     Trade,
 )
@@ -95,7 +96,7 @@ class _RefreshReason(Protocol):
 class _HoldsAware(Protocol):
     """开会前告诉军师团手上有哪些持仓币：它们要一直留在卡上，不然持仓管家会判“不再盯”。"""
 
-    def set_held(self, symbols: Collection[str]) -> None: ...
+    def set_held(self, held: Mapping[str, Side]) -> None: ...
 
 
 KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
@@ -432,13 +433,15 @@ class Runner:
         for sym, reason in self.app.blocked_symbols().items():
             if sym not in before:
                 await self.app._alert(
-                    AlertLevel.WARN, f"{sym} 禁止新开仓", f"{reason}（已有持仓不动）"
+                    AlertLevel.WARN,
+                    f"{sym} 禁止新开仓",
+                    f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
                 )
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:
         try:
             if isinstance(self.m.cards, _HoldsAware):
-                self.m.cards.set_held({p.symbol for p in self.positions})
+                self.m.cards.set_held({p.symbol: p.side for p in self.positions})
             await self.m.cards.refresh(pool, reason)
         except Exception:
             log.exception("军师团开会失败，沿用旧卡直到过期")

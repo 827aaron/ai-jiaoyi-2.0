@@ -509,17 +509,16 @@ async def test_pending_symbols_keep_previous_instruction_during_round(
         await task
 
 
-async def test_held_symbol_stays_on_card_watch_only_when_not_picked_or_failed(
+async def test_held_symbol_stays_on_card_watch_only_when_failed_or_outside_pool(
     tmp_path: Path, now: datetime
 ) -> None:
     eng = FakeEngine(["AAUSDT", "BBUSDT", "CCUSDT"])
     c, _, clock = make(tmp_path, eng, now, symbol_min_interval=timedelta(minutes=30))
-    p = pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT"))
-    await c.refresh(p, "启动")
-    c.set_held({"AAUSDT", "BBUSDT"})
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT")), "启动")
+    c.set_held({"AAUSDT": Side.LONG, "BBUSDT": Side.LONG})
     clock[0] = now + timedelta(minutes=115)
-    eng.picks, eng.fail = ["AAUSDT", "CCUSDT"], {"AAUSDT"}  # AA 开会失败，BB 没被挑中
-    card = await c.refresh(p, "到期前")
+    eng.picks, eng.fail = ["AAUSDT", "CCUSDT"], {"AAUSDT"}  # AA 开会失败，BB 已不在候选池里
+    card = await c.refresh(pool(clock[0], entry("AAUSDT"), entry("CCUSDT")), "到期前")
     by = {s.symbol: s for s in card.symbols}
     for sym in ("AAUSDT", "BBUSDT"):
         assert by[sym].bias is Bias.LONG and by[sym].allowed_signals == []  # 不开新仓，方向不动
@@ -528,6 +527,35 @@ async def test_held_symbol_stays_on_card_watch_only_when_not_picked_or_failed(
     for sym in ("AAUSDT", "BBUSDT"):
         pos = PositionRecord.model_construct(symbol=sym, side=Side.LONG)
         assert JevKeeper._card_rule(pos, card, clock[0]) is None
+
+
+async def test_held_symbol_is_forced_into_the_round(tmp_path: Path, now: datetime) -> None:
+    eng = FakeEngine(["AAUSDT"])  # 军师只挑了 AA，但 BB 手上有仓
+    c, _, _ = make(tmp_path, eng, now)
+    c.set_held({"BBUSDT": Side.SHORT})
+    card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
+    assert set(eng.analyzed) == {"AAUSDT", "BBUSDT"}
+    assert {s.symbol for s in card.symbols} == {"AAUSDT", "BBUSDT"}
+
+
+async def test_held_symbol_without_any_old_instruction_gets_synthesized_hold_only(
+    tmp_path: Path, now: datetime
+) -> None:
+    """切档重启（旧卡故意丢掉）/ 卡文件丢了 / 旧卡本来没有它：按持仓方向合成一条只盯不开。"""
+    eng = FakeEngine(["AAUSDT"], fail={"BBUSDT"})
+    c, _, _ = make(tmp_path, eng, now)
+    c.set_held({"BBUSDT": Side.SHORT})
+    card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
+    bb = card.for_symbol("BBUSDT")
+    assert bb is not None and bb.bias is Bias.SHORT and bb.allowed_signals == []
+    pos = PositionRecord.model_construct(symbol="BBUSDT", side=Side.SHORT)
+    assert JevKeeper._card_rule(pos, card, now) is None
+    # 池外的持仓币也一样
+    c2, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now)
+    c2.set_held({"ZZUSDT": Side.LONG})
+    card2 = await c2.refresh(pool(now, entry("AAUSDT")), "启动")
+    zz = card2.for_symbol("ZZUSDT")
+    assert zz is not None and zz.bias is Bias.LONG and zz.allowed_signals == []
 
 
 async def test_failed_symbol_without_position_is_dropped(tmp_path: Path, now: datetime) -> None:
@@ -557,3 +585,17 @@ async def test_saved_card_not_restored_when_stop_scale_changed(
         stop_scale=StopScale(period_min=60),
     )
     assert c2.current(now) is None
+
+
+async def test_heartbeat_reports_progress_while_meeting(tmp_path: Path, now: datetime) -> None:
+    eng = _SlowBB(["AAUSDT", "BBUSDT"])
+    eng.bb_delay = 10
+    c, log, _ = make(tmp_path, eng, now)
+    c._beat_s = 0.05
+    task = asyncio.create_task(c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动"))
+    await asyncio.sleep(0.4)
+    st = log.read_status()[Role.COMMANDER.value]
+    assert st.headline == "开会中：1/2"  # AA 开完了，BB 还在开
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

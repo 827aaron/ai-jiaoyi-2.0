@@ -16,7 +16,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +27,7 @@ from jiaoyi.contracts import (
     BattleCard,
     Bias,
     CardSymbol,
+    Category,
     DecisionRecord,
     Health,
     KeyLevel,
@@ -36,6 +37,8 @@ from jiaoyi.contracts import (
     Range,
     RiskConfig,
     Role,
+    Side,
+    SizeTier,
     SymbolPool,
     SymbolPoolEntry,
     TodayStats,
@@ -172,7 +175,9 @@ class BattleCardCommander:
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
-        self._held: frozenset[str] = frozenset()
+        self._held: dict[str, Side] = {}
+        self._progress = ""
+        self._beat_s = 30.0
         self._fails = 0
         self._retry_at: datetime | None = None
         self._notices: list[str] = []
@@ -207,7 +212,8 @@ class BattleCardCommander:
             return None
         if not self._blocked:
             return c
-        # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；已有持仓不受影响
+        # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；
+        # 已有持仓会被持仓管家按“改成只看不做”平掉
         return c.model_copy(
             update={
                 "symbols": [
@@ -219,9 +225,27 @@ class BattleCardCommander:
             }
         )
 
-    def set_held(self, symbols: Collection[str]) -> None:
-        """有持仓的币：它们必须一直在卡上（继续盯，不开新仓），不然持仓管家会判“不再盯”而平仓。"""
-        self._held = frozenset(symbols)
+    def set_held(self, held: Mapping[str, Side]) -> None:
+        """有持仓的币（币 → 持仓方向）：必须强制入选本轮会议，并一直留在卡上继续盯。
+
+        不然持仓管家看到卡上没有它，会判“不再盯”而平仓。
+        """
+        self._held = dict(held)
+
+    def _hold_only(self, symbol: str, side: Side, category: Category) -> CardSymbol:
+        """旧卡里也没有这个持仓币时合成一条：按持仓方向只盯不开（信号清空，不开新仓）。"""
+        return CardSymbol(
+            symbol=symbol,
+            category=category,
+            bias=Bias(side.value),
+            allowed_signals=[],
+            size_tier_max=SizeTier.S,
+            notional_usdt=Range(min=0.0, max=0.0),
+            leverage=Range(min=1.0, max=1.0),
+            stop_atr=Range(min=self._stop.min_stop_atr, max=self._stop.max_stop_atr),
+            take_profit_r=Range(min=self._stop.min_tp_r, max=self._stop.max_tp_r),
+            reason="持仓中，本轮没有新的会议结论：继续盯，不开新仓",
+        )
 
     @staticmethod
     def _watch_only(cs: CardSymbol) -> CardSymbol:
@@ -333,6 +357,8 @@ class BattleCardCommander:
                 await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
             except Exception as exc:
                 self._write(outcome=Outcome.ERROR, summary=f"市场简报失败，会议继续：{exc}"[:200])
+        self._progress = "选币中"
+        beat = asyncio.create_task(self._beat_while_meeting())
         try:
             card = await self._meet(pool, candidates, reason, now)
         except Exception as exc:
@@ -341,6 +367,9 @@ class BattleCardCommander:
             self._fails += 1
             self._retry_at = self._clock() + wait  # 连续失败退避，免得每分钟重开一轮会
             raise
+        finally:
+            beat.cancel()
+            self._progress = ""
         self._fails, self._retry_at = 0, None
         self._card, self._last_refresh = card, now
         self._seen = {e.symbol for e in candidates}
@@ -349,13 +378,22 @@ class BattleCardCommander:
         self._record_card(card, started)
         return card
 
+    async def _beat_while_meeting(self) -> None:
+        """一轮会议要十几分钟：期间每 30 秒报一次心跳，面板才不会把慢环标红。"""
+        while True:
+            self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+            await asyncio.sleep(self._beat_s)
+
     async def _meet(
         self, pool: SymbolPool, candidates: list[SymbolPoolEntry], reason: str, now: datetime
     ) -> BattleCard:
         by_symbol = {e.symbol: e for e in candidates}
         pinned = [e for e in candidates if e.pinned][: self._pick_max]
-        room = self._pick_max - len(pinned)
-        free = [e for e in candidates if not e.pinned]
+        # 有持仓的币强制入选（和置顶一样不占军师的挑选名额），保证它们本轮有新结论、卡上不缺
+        held_in = [e for e in candidates if e.symbol in self._held and e not in pinned]
+        pinned = [*pinned, *held_in]
+        room = max(self._pick_max - len(pinned), 0)
+        free = [e for e in candidates if e not in pinned]
         try:
             picked = await self._engine.pick(free, max(room, 0), self._card)
         except Exception as exc:
@@ -403,11 +441,16 @@ class BattleCardCommander:
                 symbols[e.symbol] = clamp_to_risk(old, self._risk, self._stop)
             elif e.symbol in self._held:
                 symbols[e.symbol] = self._watch_only(old)
-        # 有持仓但这轮没入选的币：留在卡上，不开新仓、方向不动，别让管家把它当“不再盯”
-        for sym in self._held:
+        # 有持仓的币卡上必须有：没有新结论就沿用旧指令（只清空信号），旧卡里也没有就按持仓方向合成
+        for sym, side in self._held.items():
+            if sym in symbols:
+                continue
             old = prev.for_symbol(sym) if prev is not None else None
-            if sym not in symbols and old is not None:
+            if old is not None:
                 symbols[sym] = self._watch_only(old)
+            else:
+                cat = by_symbol[sym].category if sym in by_symbol else Category.ALT
+                symbols[sym] = self._hold_only(sym, side, cat)
         cost = picked.cost_usd
         published = 0
 
@@ -439,7 +482,19 @@ class BattleCardCommander:
                 self._journal.record(card, [e.symbol])
             return res
 
-        results = await asyncio.gather(*(meet(e) for e in to_meet), return_exceptions=True)
+        finished = 0
+        self._progress = f"0/{len(to_meet)}"
+
+        async def counted(e: SymbolPoolEntry) -> Analysis:
+            nonlocal finished
+            try:
+                return await meet(e)
+            finally:
+                finished += 1  # 成功失败都算开完一场
+                self._progress = f"{finished}/{len(to_meet)}"
+                self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+
+        results = await asyncio.gather(*(counted(e) for e in to_meet), return_exceptions=True)
         failed = [
             f"{e.symbol}: {r!r}"
             for e, r in zip(to_meet, results, strict=True)
