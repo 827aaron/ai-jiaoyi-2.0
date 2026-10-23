@@ -109,6 +109,26 @@ async def test_lifeboat_relaid_at_real_entry_place_before_cancel(tmp_path: Path)
     assert len(rig.ex.stops) == 1 and len(rig.ex.placed) == placed
 
 
+async def test_extra_lifeboat_after_failed_cancel_is_dropped(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, price=0.7497, symbol="APTUSDT")
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    old = rec.lifeboat
+    assert old is not None
+    rig.ex.fail_cancel = True  # 新单挂上了，旧单撤不掉
+    _fill_lower(rig, rec.quantity)
+    await rig.adapter.backfill_fills(rig.ex.user_trades)
+    new = rig.registry.get(pid).record.lifeboat  # type: ignore[union-attr]
+    assert new is not None and new.client_order_id.endswith("-r")  # 账本指新的
+    assert len(rig.ex.stops) == 2
+    rig.ex.fail_cancel = False
+    await rig.rec.reconcile(rig.t)  # 第一轮只记下（可能是重挂进行中），不撤
+    assert len(rig.ex.stops) == 2
+    report = await rig.rec.reconcile(rig.t)
+    assert [s.client_order_id for s in rig.ex.stops.values()] == [new.client_order_id]
+    assert any("多挂了一张" in i.detail and i.fixed for i in report.issues)
+
+
 async def test_lifeboat_relay_failure_keeps_old_stop(tmp_path: Path) -> None:
     from jiaoyi.execution.exchange import ExchangeError
 
