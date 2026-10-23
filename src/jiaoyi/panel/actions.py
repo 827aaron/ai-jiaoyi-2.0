@@ -39,6 +39,7 @@ from jiaoyi.core.commands import (
     write_command,
 )
 from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config, with_profile
+from jiaoyi.core.pool_overrides import POOL_ACTIONS, SYMBOL_RE
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码校验；不碰交易所
 from jiaoyi.panel.files import read_live_gate
 from jiaoyi.panel.overview import Control
@@ -53,7 +54,10 @@ from jiaoyi.slow.settings import with_profile as slow_with_profile
 
 CHANGES_FILE = "config_changes.jsonl"
 COMMAND_TTL = timedelta(seconds=60)
-NEEDS_PASSWORD: frozenset[CommandKind] = frozenset({"resume", "unblock_symbol", "restart"})
+# 会让系统多做交易的指令要密码（固定、手动加币、取消拉黑）；拉黑、取消固定只会更保守，不要
+NEEDS_PASSWORD: frozenset[CommandKind] = frozenset(
+    {"resume", "unblock_symbol", "restart", "pin_symbol", "add_symbol", "unblacklist_symbol"}
+)
 
 Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule", "llm", "budget"]
 _SLOW_SECTIONS = ("schedule", "llm", "budget")
@@ -109,6 +113,8 @@ def send_command(
         raise ActionError("平单笔要给 position_id")
     if kind == "unblock_symbol" and not params.get("symbol"):
         raise ActionError("解封要给币种")
+    if kind in POOL_ACTIONS and not SYMBOL_RE.match(params.get("symbol", "")):
+        raise ActionError("选币页操作要给币种代码，例如 BTCUSDT")
     cmd = PanelCommand(
         id=f"p{now.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(4)}",
         ts=now,

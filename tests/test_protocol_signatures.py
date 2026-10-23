@@ -104,6 +104,7 @@ SLOTS: dict[type, tuple[type, ...]] = {
         interfaces.BattleCardProvider,
     ),
     app_mod._Refreshable: (LotRulesProvider,),
+    app_mod._TakesOverrides: (interfaces.SymbolScreener,),
     # heartbeat_all 遍历 Modules 的每个字段
     app_mod._SupportsHeartbeat: tuple(get_type_hints(app_mod.Modules).values()),
 }

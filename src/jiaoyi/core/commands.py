@@ -39,15 +39,29 @@ CLOCK_SKEW = timedelta(seconds=30)
 DONE_KEEP = timedelta(days=7)
 
 CommandKind = Literal[
-    "pause", "resume", "close_all", "close_position", "unblock_symbol", "refresh_cards", "restart"
+    "pause",
+    "resume",
+    "close_all",
+    "close_position",
+    "unblock_symbol",
+    "refresh_cards",
+    "restart",
+    # 选币页（core/pool_overrides.py），都要 params.symbol
+    "pin_symbol",
+    "unpin_symbol",
+    "blacklist_symbol",
+    "unblacklist_symbol",
+    "add_symbol",
+    "remove_symbol",
 ]
 
 
 class PanelCommand(BaseModel):
     """一条面板指令。
 
-    ``params``：close_position 要 ``position_id``，unblock_symbol 要 ``symbol``，
-    pause 可带 ``reason``。
+    ``params``：close_position 要 ``position_id``，unblock_symbol 和选币页指令
+    （pin_symbol / unpin_symbol / blacklist_symbol / unblacklist_symbol / add_symbol /
+    remove_symbol）要 ``symbol``，pause 可带 ``reason``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
