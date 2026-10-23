@@ -141,6 +141,52 @@ async def test_slow_loop_with_key_uses_commander(
     await app.stop()
 
 
+async def test_slow_config_and_brief_reach_commander_and_engine(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    from jiaoyi.slow.brief import MarketBriefService
+    from jiaoyi.slow.settings import SlowConfig
+
+    seen: dict[str, object] = {}
+
+    class FakeEngine:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+    monkeypatch.setattr(app_mod.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
+    slow = SlowConfig.model_validate({"schedule": {"concurrency": 2, "card_ttl_hours": 3}})
+    cfg = load_app_config(APP).model_copy(update={"data_dir": str(tmp_path)})
+    app = App(
+        load_risk_config(RISK),
+        cfg,
+        clock=lambda: now,
+        secrets=_Secrets(DEEPSEEK_API_KEY="x" * 16),
+        slow_cfg=slow,
+    )
+    cards = app.m.cards
+    assert isinstance(cards, BattleCardCommander)
+    brief = seen["brief"]
+    assert isinstance(brief, MarketBriefService) and cards._brief is brief  # 一份简报两边共用
+    assert seen["settings"] == slow.engine_settings()
+    assert cards._ttl == timedelta(hours=3)
+    assert brief.aclose in list(app._closers)
+    await app.stop()
+
+
+def test_check_config_rejects_bad_slow_toml(tmp_path: Path) -> None:
+    bad = tmp_path / "slow.toml"
+    bad.write_text("[schedule]\nconcurrency = 99\n", encoding="utf-8")
+    args = ["check-config", "--risk", str(RISK), "--app", str(APP), "--slow", str(bad)]
+    assert main(args) == 2
+    missing = tmp_path / "nope.toml"  # 没有文件 = 默认值
+    assert (
+        main(["check-config", "--risk", str(RISK), "--app", str(APP), "--slow", str(missing)]) == 0
+    )
+
+
 async def test_screen_failure_does_not_block_start(tmp_path: Path, now: datetime) -> None:
     app = _app(tmp_path, now)
 
