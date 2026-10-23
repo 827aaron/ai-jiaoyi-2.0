@@ -823,3 +823,23 @@ async def test_symbol_record_carries_usage(tmp_path: Path, now: datetime) -> Non
     out = BattleCardCommander._symbol_output(None, False, {"input_tokens": 1})
     assert out == {"cost_estimated": False, "usage": {"input_tokens": 1}}
     assert Analysis.__dataclass_fields__["usage"].default is None
+
+
+async def test_saved_card_with_stop_hint_survives_restart(tmp_path: Path, now: datetime) -> None:
+    """存盘→读盘→恢复：stop_hint 是 tuple，JSON 读回是 list，不能因此判成「档位变了」。"""
+    from jiaoyi.slow.commander import StopScale
+
+    scale = StopScale(15, 0.9, 2.95, 1.0, 3.0, long_period_min=60, stop_hint=(1.15, 1.85))
+    path = tmp_path / "battle_card.json"
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, card_path=path, stop_scale=scale)
+    card = await c.refresh(pool(now, entry("AAUSDT")), "启动")
+    c2 = BattleCardCommander(
+        FakeEngine([]),
+        RISK,
+        JsonlDecisionLog(tmp_path),
+        clock=lambda: now,
+        card_path=path,
+        stop_scale=StopScale(15, 0.9, 2.95, 1.0, 3.0, long_period_min=60, stop_hint=(1.15, 1.85)),
+    )
+    restored = c2.current(now)
+    assert restored is not None and restored.card_id == card.card_id

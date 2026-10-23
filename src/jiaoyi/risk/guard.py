@@ -40,6 +40,7 @@ from jiaoyi.contracts import (
     LevelKind,
     OrderIntent,
     Outcome,
+    Range,
     RiskConfig,
     RiskVerdict,
     Side,
@@ -181,6 +182,26 @@ class DayLossBreaker:
         return self.tripped, pnl_pct
 
 
+@dataclass(frozen=True)
+class _Stop:
+    dist: float
+    """止损距离，价格单位。"""
+    pct: float
+    """止损距离占入场价的百分比。"""
+
+
+def _limit(
+    fixed_bps: float | None, frac: float, stop_bps: float | None
+) -> tuple[float, str] | None:
+    """价差 / 滑点上限：止损 × 比例，设置里写了固定 bp 就取小。两样都没有返回 None（不查）。"""
+    opts: list[tuple[float, str]] = []
+    if stop_bps is not None:
+        opts.append((frac * stop_bps, f"止损 {stop_bps:.0f}bp 的 {frac:g}"))
+    if fixed_bps is not None:
+        opts.append((fixed_bps, "你设的上限"))
+    return min(opts) if opts else None
+
+
 def _floor_step(qty: float, step: float) -> float:
     if step <= 0:
         return 0.0
@@ -316,24 +337,35 @@ class RiskGuardImpl:
             )
         elif now - f.ts > timedelta(seconds=fast.signal_max_age_s):
             reasons.append(f"最新行情已过 {(now - f.ts).total_seconds():.1f} 秒")
+        # ---- 止损距离先算出来，价差和滑点按它的比例卡（理由照样全收集，不早退）
+        stop = (
+            self._stop(signal, f, jev, cs, now, reasons, detail)
+            if f is not None and cs is not None and jev.ok
+            else None
+        )
         if f is not None:
+            stop_bps = stop.pct * 100.0 if stop is not None else None
             book = f.book
             if book is None:
                 reasons.append("没有盘口数据")
-            elif book.spread_bps > risk.max_spread_bps:
-                reasons.append(f"价差 {book.spread_bps:.1f}bp 超过 {risk.max_spread_bps}bp")
+            else:
+                lim = _limit(risk.max_spread_bps, fast.max_spread_stop_frac, stop_bps)
+                if lim is not None and book.spread_bps > lim[0]:
+                    reasons.append(f"价差 {book.spread_bps:.1f}bp 超过 {lim[0]:.1f}bp（{lim[1]}）")
             # 只拦不利方向：做多价格比触发时高、做空价格比触发时低；往有利方向走了不拦
             sign = 1.0 if signal.side_hint == Side.LONG else -1.0
             slip = sign * (f.last_price / signal.trigger_price - 1.0) * 1e4
             detail["slippage_bps"] = round(slip, 2)  # 正数 = 不利
-            if slip > risk.max_slippage_bps:
+            lim = _limit(risk.max_slippage_bps, fast.max_slippage_stop_frac, stop_bps)
+            if lim is not None and slip > lim[0]:
                 reasons.append(
-                    f"触发后价格往不利方向跑了 {slip:.1f}bp，超过滑点上限 {risk.max_slippage_bps}bp"
+                    f"触发后价格往不利方向跑了 {slip:.1f}bp，"
+                    f"超过滑点上限 {lim[0]:.1f}bp（{lim[1]}）"
                 )
 
-        if reasons or cs is None or not jev.ok or f is None:
+        if reasons or cs is None or not jev.ok or f is None or stop is None:
             return None
-        return self._size(signal, f, jev, card, cs, account, now, reasons, detail)
+        return self._size(signal, f, jev, card, cs, stop, account, now, reasons, detail)
 
     def _check_jev(self, signal: CandidateSignal, jev: JevResponse) -> tuple[list[str], list[str]]:
         """（回答不全 / 不对，概率没过门槛）。前者永远拦，后者「只记不拦」时只记。"""
@@ -404,17 +436,52 @@ class RiskGuardImpl:
         if signal.kind not in cs.allowed_signals:
             reasons.append(f"作战卡不允许 {signal.kind.value} 信号")
         fast = self._fast
-        if cs.stop_atr.min < fast.min_stop_atr or cs.stop_atr.max > fast.max_stop_atr:
-            reasons.append(
-                f"作战卡止损 {cs.stop_atr.min}–{cs.stop_atr.max} ATR 超出 "
-                f"{fast.min_stop_atr}–{fast.max_stop_atr}"
-            )
-        if cs.take_profit_r.min < fast.min_tp_r or cs.take_profit_r.max > fast.max_tp_r:
-            reasons.append(
-                f"作战卡止盈 {cs.take_profit_r.min}–{cs.take_profit_r.max} 倍超出 "
-                f"{fast.min_tp_r}–{fast.max_tp_r}"
-            )
-        return cs
+        upd: dict[str, Range] = {}
+        for name, rng, lo, hi, what, unit in (
+            ("stop_atr", cs.stop_atr, fast.min_stop_atr, fast.max_stop_atr, "止损", " ATR "),
+            ("take_profit_r", cs.take_profit_r, fast.min_tp_r, fast.max_tp_r, "止盈", " 倍"),
+        ):
+            if lo <= rng.min and rng.max <= hi:
+                continue
+            a, b = max(rng.min, lo), min(rng.max, hi)
+            if fast.card_range_clamp and a <= b:
+                upd[name] = Range(min=a, max=b)  # 越界的那截不要，剩下的照用
+                continue
+            empty = "（没有交集）" if fast.card_range_clamp else ""
+            reasons.append(f"作战卡{what} {rng.min}–{rng.max}{unit}超出 {lo}–{hi}{empty}")
+        return cs.model_copy(update=upd) if upd else cs
+
+    def _stop(
+        self,
+        signal: CandidateSignal,
+        f: FeatureSnapshot,
+        jev: JevResponse,
+        cs: CardSymbol,
+        now: datetime,
+        reasons: list[str],
+        detail: dict[str, float | str],
+    ) -> _Stop | None:
+        """止损：档位 → 作战卡 ATR 范围 → 放到关键位外侧。回答不全时返回 None（理由别处已记）。"""
+        stop_ans = jev.answer(EntryQuestion.STOP_WIDTH.value)
+        if stop_ans is None:
+            return None
+        atr = stop_atr(f, self._fast, now, detail)
+        if atr <= 0:
+            reasons.append("ATR 为 0，算不出止损")
+            return None
+        stop_tier = stop_ans.top()[0]
+        lo, hi = cs.stop_atr.min, cs.stop_atr.max
+        mult = {"narrow": lo, "mid": (lo + hi) / 2.0, "wide": hi}.get(stop_tier, 0.0)
+        if mult <= 0:
+            reasons.append("作战卡止损 ATR 倍数为 0")
+            return None
+        entry = f.last_price
+        dist = mult * atr
+        if self._fast.stop_level_snap:
+            dist = self._beyond_level(cs, signal.side_hint, entry, dist, hi * atr, atr)
+        pct = dist / entry * 100.0
+        detail.update(stop_tier=stop_tier, stop_atr=round(dist / atr, 3), stop_pct=round(pct, 4))
+        return _Stop(dist=dist, pct=pct)
 
     def _size(
         self,
@@ -423,6 +490,7 @@ class RiskGuardImpl:
         jev: JevResponse,
         card: BattleCard | None,
         cs: CardSymbol,
+        stop: _Stop,
         account: AccountState,
         now: datetime,
         reasons: list[str],
@@ -431,29 +499,10 @@ class RiskGuardImpl:
         risk, fast = self._risk, self._fast
         entry = f.last_price
         side = signal.side_hint
-        atr = stop_atr(f, fast, now, detail)
-        if atr <= 0:
-            reasons.append("ATR 为 0，算不出止损")
-            return None
-
-        # ---- 止损：档位 → 作战卡 ATR 范围 → 放到关键位外侧
-        stop_ans = jev.answer(EntryQuestion.STOP_WIDTH.value)
         size_ans = jev.answer(EntryQuestion.SIZE.value)
-        assert stop_ans is not None and size_ans is not None
-        stop_tier = stop_ans.top()[0]
-        lo, hi = cs.stop_atr.min, cs.stop_atr.max
-        mult = {"narrow": lo, "mid": (lo + hi) / 2.0, "wide": hi}[stop_tier]
-        if mult <= 0:
-            reasons.append("作战卡止损 ATR 倍数为 0")
-            return None
-        dist = mult * atr
-        if fast.stop_level_snap:
-            dist = self._beyond_level(cs, side, entry, dist, hi * atr, atr)
-        stop_pct = dist / entry * 100.0
+        assert size_ans is not None
+        dist, stop_pct = stop.dist, stop.pct
         tp_pct = stop_pct * cs.take_profit_r.min
-        detail.update(
-            stop_tier=stop_tier, stop_atr=round(dist / atr, 3), stop_pct=round(stop_pct, 4)
-        )
 
         fee_floor_bps = risk.min_tp_fee_multiple * 2.0 * risk.taker_fee_bps
         if tp_pct * 100.0 < fee_floor_bps:
@@ -490,16 +539,25 @@ class RiskGuardImpl:
         risk_budget = equity * risk.risk_per_trade_pct / 100.0 * frac
         notional = risk_budget / dist * entry
 
-        # ---- 杠杆：作战卡上限和硬上限取小
-        lev = math.floor(min(cs.leverage.max, float(risk.max_leverage)))
-        if lev < 1 or lev < cs.leverage.min:
-            reasons.append(
-                f"作战卡杠杆 {cs.leverage.min}–{cs.leverage.max} 超出硬上限 {risk.max_leverage}"
+        # ---- 杠杆：作战卡约束时和硬上限取小；不约束（默认）就用硬上限，卡上的只当建议记下
+        binding_card = fast.card_caps_binding
+        if binding_card:
+            lev = math.floor(min(cs.leverage.max, float(risk.max_leverage)))
+            if lev < 1 or lev < cs.leverage.min:
+                reasons.append(
+                    f"作战卡杠杆 {cs.leverage.min}–{cs.leverage.max} 超出硬上限 {risk.max_leverage}"
+                )
+                return None
+        else:
+            lev = max(1, math.floor(float(risk.max_leverage)))
+            detail.update(
+                card_notional_min=cs.notional_usdt.min,
+                card_notional_max=cs.notional_usdt.max,
+                card_leverage_max=cs.leverage.max,
             )
-            return None
 
         caps = {
-            "作战卡名义上限": cs.notional_usdt.max,
+            **({"作战卡名义上限": cs.notional_usdt.max} if binding_card else {}),
             "单笔名义上限": risk.notional_cap(equity),
             "总敞口余量": risk.max_total_exposure_x * equity - account.open_notional_usdt,
             "相关组敞口余量": risk.category_exposure_x[cs.category] * equity
@@ -514,7 +572,7 @@ class RiskGuardImpl:
         if notional <= 0:
             reasons.append(f"{binding}已用完")
             return None
-        if notional < cs.notional_usdt.min:
+        if binding_card and notional < cs.notional_usdt.min:
             reasons.append(
                 f"按{binding}只能开 {notional:.0f}U，低于作战卡下限 {cs.notional_usdt.min:.0f}U"
             )
@@ -535,7 +593,7 @@ class RiskGuardImpl:
         if notional < lot.min_notional:
             reasons.append(f"名义价值 {notional:.2f}U 低于交易所最小 {lot.min_notional}U")
             return None
-        if notional < cs.notional_usdt.min:
+        if binding_card and notional < cs.notional_usdt.min:
             reasons.append(f"取整后 {notional:.0f}U 低于作战卡下限 {cs.notional_usdt.min:.0f}U")
             return None
         risk_usdt = qty * dist

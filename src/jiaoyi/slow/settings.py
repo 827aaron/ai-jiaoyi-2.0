@@ -36,6 +36,8 @@ from jiaoyi.slow.tradingagents_engine import (
 
 DEFAULT_SLOW_PATH = Path("config/slow.toml")
 ANALYSTS = ("market", "social", "news", "fundamentals")
+SCREENER_SPREAD_BPS = ScreenerConfig.max_spread_bps
+"""选币价差门槛：选币和硬上限都没写时的兜底（万分之几）。"""
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +230,7 @@ class ScreenerSection(_Strict):
             + self.weight_liquidations
         )
 
-    def cautions(self, risk_max_spread_bps: float) -> list[str]:
+    def cautions(self, risk_max_spread_bps: float | None) -> list[str]:
         """比推荐冒险的设置（只提示，不拒绝）。"""
         out: list[str] = []
         if self.min_quote_volume_usdt < 5_000_000:
@@ -237,10 +239,16 @@ class ScreenerSection(_Strict):
             out.append("盘口最小深度低于 2 万美元，大单可能吃不下（推荐 10 万）")
         if self.min_listed_days < 3:
             out.append("上线不满 3 天的新币也会进池，波动和价差不稳（推荐 7 天）")
-        if self.max_spread_bps is not None and self.max_spread_bps > risk_max_spread_bps:
+        if self.max_spread_bps is not None and risk_max_spread_bps is not None:
+            if self.max_spread_bps > risk_max_spread_bps:
+                out.append(
+                    f"选币的最大价差 {self.max_spread_bps:g} 比硬上限里的 "
+                    f"{risk_max_spread_bps:g} 宽，多出来的币进池后保镖会一律拒绝"
+                )
+        elif self.max_spread_bps is not None and self.max_spread_bps > SCREENER_SPREAD_BPS:
             out.append(
-                f"选币的最大价差 {self.max_spread_bps:g} 比硬上限里的 {risk_max_spread_bps:g} 宽，"
-                "多出来的币进池后保镖会一律拒绝"
+                f"选币的最大价差 {self.max_spread_bps:g} 比推荐的 {SCREENER_SPREAD_BPS:g} 宽，"
+                "保镖按止损的 1/10 卡价差，价差大的币进池后多半开不了仓"
             )
         out.extend(self.tiers.cautions())
         if self.categories and not any(
@@ -534,14 +542,15 @@ class SlowConfig(_Strict):
         )
 
     def screener_config(
-        self, pool_size: int, risk_max_spread_bps: float, round_trip_fee_bps: float
+        self, pool_size: int, risk_max_spread_bps: float | None, round_trip_fee_bps: float
     ) -> ScreenerConfig:
         """``[screener]`` → 选币器参数。池大小来自 app.toml，价差默认和手续费跟硬上限走。"""
         s = self.screener
         return ScreenerConfig(
             pool_size=pool_size,
             min_quote_volume_usdt=s.min_quote_volume_usdt,
-            max_spread_bps=s.max_spread_bps or risk_max_spread_bps,
+            # 硬上限也没写（保镖只按止损比例）时用选币器自己的默认
+            max_spread_bps=s.max_spread_bps or risk_max_spread_bps or SCREENER_SPREAD_BPS,
             min_depth_usdt=s.min_depth_usdt,
             min_listed_days=s.min_listed_days,
             round_trip_fee_bps=round_trip_fee_bps,

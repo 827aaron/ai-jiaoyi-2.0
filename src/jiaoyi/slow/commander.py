@@ -1300,7 +1300,8 @@ class BattleCardCommander:
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             logger.info("没有可恢复的作战卡（%s）", exc.__class__.__name__)
             return
-        if saved_stop != asdict(self._stop):
+        # 存盘是 JSON：tuple（stop_hint）读回来是 list，两边都过一遍 JSON 再比
+        if saved_stop != json.loads(json.dumps(asdict(self._stop))):
             logger.info("存档的作战卡档位 / ATR 周期与现在不一致，不恢复")
             return  # 出卡时的档位 / ATR 周期和现在不一致：卡里的止损倍数不能直接用，等下一轮会
         now = self._clock()

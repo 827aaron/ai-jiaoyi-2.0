@@ -73,8 +73,15 @@ class RuleTrigger:
         dedup_s: int = 30,
         recorder: RoleRecorder | None = None,
         predictor: Predictor | None = None,
+        live: bool = False,
     ) -> None:
         self._cfg = cfg
+        # testnet / live 默认不出量能突增（顺着做比随机还差，orders-spec S1）；paper 照出攒样本
+        self._skip: frozenset[SignalKind] = (
+            frozenset({SignalKind.VOLUME_SURGE})
+            if live and not cfg.volume_surge_live
+            else frozenset()
+        )
         self._dedup = timedelta(seconds=dedup_s)
         self._rec = recorder
         self._predictor = predictor
@@ -97,7 +104,7 @@ class RuleTrigger:
         for kind, side, desc in self._rules(
             features, prev, [lv.price for lv in cs.key_levels], now
         ):
-            if kind not in cs.allowed_signals:
+            if kind not in cs.allowed_signals or kind in self._skip:
                 continue
             if cs.bias == Bias.LONG and side != Side.LONG:
                 continue

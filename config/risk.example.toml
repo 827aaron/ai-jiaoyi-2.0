@@ -11,8 +11,8 @@ max_notional_per_trade_x = 2.0      # 单笔名义价值上限 = 账户权益 ×
 # max_notional_per_trade_usdt = 5000  # 可选：再加一个绝对硬顶（USDT），不写就只按权益倍数
 max_open_positions = 5              # 同时持仓笔数上限（≥1）
 lifeboat_stop_multiplier = 1.5      # 保命止损距离 = 正常止损 × 1.5（>1）
-max_spread_bps = 5.0                # 价差超过 5bp 不开仓
-max_slippage_bps = 10.0
+# max_spread_bps = 5.0              # 价差固定上限（bp）；不写 = 按这笔止损的 1/10（fast_loop.max_spread_stop_frac），写了取小
+# max_slippage_bps = 10.0           # 不利滑点固定上限（bp）；不写 = 按这笔止损的 1/4（fast_loop.max_slippage_stop_frac），写了取小
 taker_fee_bps = 5.0                 # 单边吃单 0.05%，来回约 0.1%
 min_tp_fee_multiple = 2.0           # 止盈至少覆盖来回手续费 2 倍
 day_reset_tz = "Asia/Bangkok"       # 今日盈亏按曼谷 0 点清零；可改 "UTC"

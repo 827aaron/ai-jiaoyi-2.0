@@ -94,7 +94,12 @@ def test_risk_numeric_bounds(tmp_path: Path, field: str, what: str, value: float
             load_risk_config(path)
 
 
-OPTIONAL_RISK_FIELDS = {"max_notional_per_trade_x", "max_notional_per_trade_usdt"}
+OPTIONAL_RISK_FIELDS = {
+    "max_notional_per_trade_x",
+    "max_notional_per_trade_usdt",
+    "max_spread_bps",
+    "max_slippage_bps",
+}
 
 
 @pytest.mark.parametrize(
@@ -149,7 +154,9 @@ def test_defaults_in_builders_match_the_shipped_example() -> None:
     from tests.conftest import ROOT
 
     shipped = load_risk_config(ROOT / "config" / "risk.example.toml")
-    assert shipped == b.risk_config()
+    # 示例里价差 / 滑点的固定 bp 注释掉了（只按止损比例），夹具保留固定值好测「取小」
+    fixed = {"max_spread_bps": None, "max_slippage_bps": None}
+    assert shipped == b.risk_config().model_copy(update=fixed)
 
 
 def test_unknown_risk_field_refuses(tmp_path: Path) -> None:

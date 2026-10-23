@@ -44,7 +44,7 @@ def test_satisfies_interface() -> None:
 
 
 def test_happy_path_sizes_by_risk_and_caps(now: datetime) -> None:
-    v = guard().review(signal(now), jev(), card(now), account(now), now)
+    v = guard(card_caps_binding=True).review(signal(now), jev(), card(now), account(now), now)
     assert v.approved, v.reasons
     it = v.intent
     assert it is not None and it.approved_by == "risk_guard"
@@ -131,21 +131,47 @@ def test_card_direction_and_signal_kind(now: datetime) -> None:
 
 
 def test_card_ranges_are_rechecked(now: datetime) -> None:
-    v = guard().review(
-        signal(now), jev(), card(now, stop_atr={"min": 1, "max": 9}), account(now), now
-    )
+    g = guard(card_range_clamp=False)
+    v = g.review(signal(now), jev(), card(now, stop_atr={"min": 1, "max": 9}), account(now), now)
     assert not v.approved and any("止损" in r for r in v.reasons)
-    v = guard().review(
+    v = g.review(
         signal(now), jev(), card(now, take_profit_r={"min": 0.6, "max": 3}), account(now), now
     )
     assert not v.approved and any("止盈" in r for r in v.reasons)
 
 
+def test_card_ranges_are_clamped_to_tier(now: datetime) -> None:
+    """默认取交集：越界的那截不要，剩下的照用；交集为空才不做。"""
+    lo, hi = FAST.min_stop_atr, FAST.max_stop_atr
+    cd = card(now, stop_atr={"min": lo, "max": hi + 5}, take_profit_r={"min": 0.6, "max": 3})
+    v = guard().review(signal(now), jev(), cd, account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None
+    assert v.intent.stop_loss_pct == pytest.approx((lo + hi) / 2 * 80 / 68000 * 100)  # mid 档
+    assert v.intent.take_profit_pct == pytest.approx(v.intent.stop_loss_pct * FAST.min_tp_r)
+    out = card(now, stop_atr={"min": hi + 1, "max": hi + 2})
+    v = guard().review(signal(now), jev(), out, account(now), now)
+    assert not v.approved and any("没有交集" in r for r in v.reasons)
+
+
 def test_card_leverage_above_hard_cap_rejects(now: datetime) -> None:
-    v = guard().review(
+    v = guard(card_caps_binding=True).review(
         signal(now), jev(), card(now, leverage={"min": 6, "max": 8}), account(now), now
     )
     assert not v.approved and any("杠杆" in r for r in v.reasons)
+
+
+def test_card_caps_are_advice_by_default(now: datetime) -> None:
+    """默认卡上的名义 / 杠杆只当建议：仓位按风险和硬上限算，杠杆用硬上限，建议写进 detail。"""
+    cd = card(now, leverage={"min": 6, "max": 8}, notional_usdt={"min": 50_000, "max": 60_000})
+    v = guard().review(signal(now), jev(), cd, account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.leverage == RISK.max_leverage
+    cd = card(now)
+    v = guard().review(signal(now), jev(), cd, account(now), now)
+    assert v.intent is not None
+    cs = cd.for_symbol(v.intent.symbol)
+    assert cs is not None and v.intent.notional_usdt > cs.notional_usdt.max  # 不再被卡封顶
 
 
 def test_size_tier_capped_by_card(now: datetime) -> None:
@@ -189,7 +215,7 @@ def test_exposure_caps_use_card_category(now: datetime) -> None:
 
 def test_total_exposure_cap(now: datetime) -> None:
     acct = account(now, open_notional_usdt=29_900.0)
-    v = guard().review(signal(now), jev(), card(now), acct, now)
+    v = guard(card_caps_binding=True).review(signal(now), jev(), card(now), acct, now)
     assert not v.approved  # 只剩 100U，低于作战卡下限 500U
 
 
@@ -563,3 +589,24 @@ def test_slippage_only_blocks_adverse_direction(now: datetime) -> None:
     better = features(now, atr=80.0).model_copy(update={"last_price": px})
     v = guard().review(signal(now), jev(), card(now), account(now), now, market=better)
     assert not any("滑点" in r for r in v.reasons), v.reasons
+
+
+def test_slippage_and_spread_limits_scale_with_stop(now: datetime) -> None:
+    """不写固定 bp 时只按止损比例：滑点 ≤ 1/4 止损，价差 ≤ 1/10 止损。"""
+    risk = RISK.model_copy(update={"max_spread_bps": None, "max_slippage_bps": None})
+    g = RiskGuardImpl(risk, FAST, Lots())
+    stop_bps = 1.5 * 800 / 68000 * 1e4  # mid 1.5 ATR，ATR 800 → 约 176bp
+    ok = features(now, atr=800.0, price=68000 * (1 + 0.2 * stop_bps / 1e4))
+    sig = signal(now, f=features(now, atr=800.0))
+    big = card(now, notional_usdt={"min": 10, "max": 1_000_000})
+    v = g.review(sig, jev(), big, account(now), now, market=ok)
+    assert not any("滑点" in r for r in v.reasons), v.reasons
+    bad = features(now, atr=800.0, price=68000 * (1 + 0.3 * stop_bps / 1e4))
+    v = g.review(sig, jev(), big, account(now), now, market=bad)
+    assert any("滑点" in r and "止损" in r for r in v.reasons), v.reasons
+    wide = features(now, atr=800.0)
+    wide = wide.model_copy(
+        update={"book": wide.book.model_copy(update={"spread_bps": 0.12 * stop_bps})}  # type: ignore[union-attr]
+    )
+    v = g.review(sig, jev(), big, account(now), now, market=wide)
+    assert any("价差" in r for r in v.reasons), v.reasons

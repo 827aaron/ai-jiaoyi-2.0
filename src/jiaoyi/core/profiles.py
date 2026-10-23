@@ -160,7 +160,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "min_stop_fee_multiple": 3.5,  # 止损 ≥ 35bp
             **_STRICT_GATE,  # 短持仓费用占比高，要更确定才做
         },
-        "app": {"keeper_interval_s": 10},
+        "app": {"keeper_interval_s": 10, "signal_dedup_s": 60},
         "predictor": {"interval": "5m", "pred_len": 6},  # 6 × 5m = 30 分钟
     },
     "1h": {
@@ -175,7 +175,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "min_stop_fee_multiple": 3.0,  # ≥ 30bp
             **_LOOSE_GATE,
         },
-        "app": {"keeper_interval_s": 15},
+        "app": {"keeper_interval_s": 15, "signal_dedup_s": 120},
         "predictor": {"interval": "5m", "pred_len": 12},
     },
     "2h": {
@@ -190,7 +190,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "min_stop_fee_multiple": 2.5,  # ≥ 25bp
             **_LOOSE_GATE,
         },
-        "app": {"keeper_interval_s": 20},
+        "app": {"keeper_interval_s": 20, "signal_dedup_s": 300},
         "predictor": {"interval": "5m", "pred_len": 24},
     },
     "4h": {
@@ -205,7 +205,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "min_stop_fee_multiple": 2.0,  # ≥ 20bp（4h 止损本来就宽，基本不会卡）
             **_LOOSE_GATE,
         },
-        "app": {"keeper_interval_s": 30},
+        "app": {"keeper_interval_s": 30, "signal_dedup_s": 600},
         "predictor": {"interval": "5m", "pred_len": 48},  # 48 × 5m = 4 小时；回看 400 + 48 ≤ 512
     },
 }
@@ -283,7 +283,7 @@ HOLD.update(
                 "patrol_alert_pct_1m": 1.2,
                 **_LOOSE_GATE,
             },
-            "app": {"keeper_interval_s": 45},
+            "app": {"keeper_interval_s": 45, "signal_dedup_s": 600},
             "predictor": {"interval": "15m", "pred_len": 32},  # 32 × 15m = 8 小时
         },
         "12h": {
@@ -301,7 +301,7 @@ HOLD.update(
                 "patrol_alert_pct_1m": 1.5,
                 **_LOOSE_GATE,
             },
-            "app": {"keeper_interval_s": 60},
+            "app": {"keeper_interval_s": 60, "signal_dedup_s": 600},
             "predictor": {"interval": "15m", "pred_len": 48},
         },
         "24h": {
@@ -319,7 +319,7 @@ HOLD.update(
                 "patrol_alert_pct_1m": 2.0,
                 **_LOOSE_GATE,
             },
-            "app": {"keeper_interval_s": 90},
+            "app": {"keeper_interval_s": 90, "signal_dedup_s": 600},
             "predictor": {"interval": "1h", "pred_len": 24},
         },
     }

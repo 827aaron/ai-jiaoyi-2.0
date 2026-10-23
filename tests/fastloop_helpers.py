@@ -11,7 +11,10 @@ from jiaoyi.core.config import load_risk_config
 from jiaoyi.risk.guard import LotRules
 from tests.conftest import ROOT, load_example
 
-RISK = load_risk_config(ROOT / "config" / "risk.example.toml")
+# 示例里价差 / 滑点固定 bp 默认不写（只按止损比例）；这里写上，顺带测「写了就和比例取小」
+RISK = load_risk_config(ROOT / "config" / "risk.example.toml").model_copy(
+    update={"max_spread_bps": 5.0, "max_slippage_bps": 10.0}
+)
 FAST = c.FastLoopConfig()
 
 

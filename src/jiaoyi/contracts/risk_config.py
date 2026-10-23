@@ -72,8 +72,18 @@ class RiskConfig(Contract):
         gt=1.0,
         description="保命止损距离 = 正常止损距离 × 这个倍数（必须比正常止损宽）。推荐 1.5。",
     )
-    max_spread_bps: float = Field(gt=0.0, description="价差超过就不开仓。")
-    max_slippage_bps: float = Field(gt=0.0)
+    max_spread_bps: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="价差超过就不开仓（万分之几）。不写 = 只按止损的比例"
+        "（fast_loop.max_spread_stop_frac）；写了就和比例那条取小。",
+    )
+    max_slippage_bps: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="拍板期间价格往不利方向跑超过这么多就不开（万分之几）。不写 = 只按止损的比例"
+        "（fast_loop.max_slippage_stop_frac）；写了就和比例那条取小。",
+    )
     taker_fee_bps: float = Field(ge=0.0, description="单边吃单费率，用于手续费门槛。")
     min_tp_fee_multiple: float = Field(
         gt=0.0, description="止盈距离至少是来回手续费的几倍，不够就拒单。推荐 2。"
@@ -217,6 +227,28 @@ class FastLoopConfig(Contract):
         "不写 = 关（拍板一票否决）；只有 paper 能写 true，testnet / live 写 true 拒绝启动。",
     )
     # ---- 保镖的档位换算
+    max_slippage_stop_frac: float = Field(
+        default=0.25,
+        gt=0.0,
+        le=1.0,
+        description="不利滑点上限 = 这笔止损距离 × 这个比例（推荐 1/4）。",
+    )
+    max_spread_stop_frac: float = Field(
+        default=0.10,
+        gt=0.0,
+        le=1.0,
+        description="价差上限 = 这笔止损距离 × 这个比例（推荐 1/10）。",
+    )
+    card_caps_binding: bool = Field(
+        default=False,
+        description="作战卡上的名义价值 / 杠杆范围当硬约束。默认关：只当军师建议记下来，"
+        "仓位按风险金额和你的硬上限算，杠杆用 max_leverage。",
+    )
+    card_range_clamp: bool = Field(
+        default=True,
+        description="作战卡的止损 ATR / 止盈 R 范围超出档位范围时取交集，交集为空才不做；"
+        "关掉 = 一端越界整个币不做。",
+    )
     signal_max_age_s: float = Field(
         default=5.0, ge=0.5, le=60.0, description="信号从触发到保镖审核超过这么久就作废。"
     )
@@ -309,7 +341,25 @@ class FastLoopConfig(Contract):
     patrol_alert_pct_1m: float = Field(
         default=1.0, ge=0.1, le=20.0, description="达到这个百分比就让管家立刻复查。"
     )
+    patrol_shock_stop_mult: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=5.0,
+        description="冲击线不低于这笔止损距离的几倍：冲击线 = max(上面的百分比, 这个 × 止损%)。"
+        "0 = 只看百分比。",
+    )
+    patrol_alert_stop_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=5.0,
+        description="报警线不低于这笔止损距离的几倍：报警线 = max(上面的百分比, 这个 × 止损%)。",
+    )
     # ---- 哨兵
+    volume_surge_live: bool = Field(
+        default=False,
+        description="testnet / live 也出量能突增信号。默认关：顺着放量做比随机入场还差；"
+        "paper 不管这个开关照出（攒校准样本），校准后能过成本线再打开。",
+    )
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
