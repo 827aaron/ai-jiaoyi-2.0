@@ -143,3 +143,68 @@ async def test_each_finished_symbol_writes_a_card_record_without_double_cost(
     assert cards[-1].summary.startswith("出作战卡")
     assert sum(r.cost_usd for r in cards) == pytest.approx(0.01)  # 总盘会花费只记一次
     assert set(cards[-1].output["symbols"]) == {"AAUSDT", "BBUSDT"}
+
+
+# ---------------------------------------------------------------- 币安限流
+async def test_rate_limit_pauses_round_and_reopens_after_unban(
+    tmp_path: Path, now: datetime
+) -> None:
+    import time
+
+    from jiaoyi.contracts import Health
+    from jiaoyi.slow import binance_gate
+    from jiaoyi.slow.commander import CardRefreshError
+
+    binance_gate.reset()
+    try:
+        eng = FakeEngine(["AAUSDT", "BBUSDT"], fail={"AAUSDT", "BBUSDT"})
+        c, log, clock = make(tmp_path, eng, now)
+        binance_gate._banned_until = time.time() + 300  # 币安 418：封 5 分钟
+        with pytest.raises(CardRefreshError):
+            await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+        assert c._fails == 0 and c._retry_at is None  # 不算会议失败、不退避
+        assert c.may_refresh(now) is False
+        c.heartbeat(now)
+        st = log.read_status()["commander"]
+        assert (
+            st.health is Health.DEGRADED
+            and "币安限流，" in st.headline
+            and "分钟后重开" in st.headline
+        )
+        assert c.refresh_reason(now, pool(now, entry("AAUSDT")), {}) is None
+        binance_gate.reset()
+        assert c._rl_until is not None
+        clock[0] = c._rl_until + timedelta(seconds=1)
+        eng.fail.clear()
+        assert c.refresh_reason(clock[0], pool(clock[0], entry("AAUSDT")), {}) == "scheduled"
+        await c.refresh(pool(clock[0], entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+        assert c._rl_until is None and c.rate_limit_note(clock[0]) is None
+    finally:
+        binance_gate.reset()
+
+
+def test_gate_parses_retry_after_shares_ban_and_stops_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from jiaoyi.slow import binance_gate
+
+    binance_gate.reset()
+    calls: list[str] = []
+
+    def fake_get(url: str, params: object = None, timeout: float = 10.0) -> httpx.Response:
+        calls.append(url)
+        return httpx.Response(418, headers={"Retry-After": "90"}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    try:
+        with pytest.raises(binance_gate.RateLimited) as ei:
+            binance_gate.get("https://fapi.binance.com/x")
+        assert 80 < ei.value.until - __import__("time").time() <= 91
+        with pytest.raises(binance_gate.RateLimited):
+            binance_gate.get("https://fapi.binance.com/y")  # 封禁期内不再打给币安
+        assert calls == ["https://fapi.binance.com/x"]
+        assert binance_gate.banned_until() > 0
+    finally:
+        binance_gate.reset()
