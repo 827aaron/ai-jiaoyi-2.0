@@ -390,3 +390,34 @@ def test_atr_config_validation() -> None:
         c.FastLoopConfig(atr_period_min=7)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="min_stop_atr"):
         c.FastLoopConfig(min_stop_atr=4.0, max_stop_atr=4.0)
+
+
+# ---------------------------------------------------------------- I3：总持仓风险上限
+def _new_lifeboat_risk(now: datetime) -> float:
+    v = guard().review(signal(now), jev(), card(now), account(now), now)
+    assert v.intent is not None
+    return v.intent.notional_usdt * v.intent.lifeboat_stop_pct / 100.0
+
+
+def test_total_lifeboat_risk_within_day_budget(now: datetime) -> None:
+    new = _new_lifeboat_risk(now)
+    budget = RISK.daily_loss_halt_pct / 100.0 * 10_000.0
+    # 刚好等于额度：放行
+    ok = account(now, open_risk_usdt=budget - new)
+    assert guard().review(signal(now), jev(), card(now), ok, now).approved
+    # 多 1U：拒绝，原因写明三个数
+    over = account(now, open_risk_usdt=budget - new + 1.0)
+    v = guard().review(signal(now), jev(), card(now), over, now)
+    assert not v.approved
+    assert any("总风险" in r and "超过当日剩余额度" in r for r in v.reasons), v.reasons
+
+
+def test_realized_loss_shrinks_budget_but_profit_does_not_grow_it(now: datetime) -> None:
+    new = _new_lifeboat_risk(now)
+    budget = RISK.daily_loss_halt_pct / 100.0 * 10_000.0
+    acct = account(now, open_risk_usdt=budget - new - 50.0)
+    assert guard().review(signal(now), jev(), card(now), acct, now).approved
+    lost = acct.model_copy(update={"day_realized_pnl_usdt": -60.0})
+    assert not guard().review(signal(now), jev(), card(now), lost, now).approved
+    won = account(now, open_risk_usdt=budget - new + 1.0, day_realized_pnl_usdt=500.0)
+    assert not guard().review(signal(now), jev(), card(now), won, now).approved

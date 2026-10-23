@@ -189,6 +189,44 @@ class FastLoopConfig(Contract):
         return self
 
 
+class PredictorConfig(Contract):
+    """预测员（Kronos）怎么跑。开关仍是 ``AppConfig.predictor_enabled``。键在 ``[predictor]``。"""
+
+    mode: Literal["on_demand", "all_symbols"] = Field(
+        default="on_demand",
+        description="on_demand = 只对作战卡里的币和有持仓的币在 5 分钟线收盘时预测，哨兵出信号而"
+        "没有新鲜预测时临时补算一次；all_symbols = 候选池里所有订阅的币都算（CPU 吃得多）。",
+    )
+    size_policy: Literal["fixed", "adaptive"] = Field(
+        default="fixed",
+        description="fixed = 一直用 model_size；adaptive = 按排队深度在 base/small/mini 间切换。",
+    )
+    model_size: Literal["mini", "small", "base"] = Field(
+        default="small", description="fixed 时用的模型。Mac mini 实测 small 约 3 秒/币。"
+    )
+    adaptive_base_max_queue: int = Field(
+        default=0,
+        ge=0,
+        le=20,
+        description="adaptive：排队的推理不超过这么多时用 base（更准更慢）。",
+    )
+    adaptive_mini_min_queue: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="adaptive：排队的推理达到这么多时用 mini（更快）；中间用 small。",
+    )
+    backfill_bars: int = Field(
+        default=400, ge=64, le=1500, description="启动和新币入池时回填多少根 5 分钟 K 线。"
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> PredictorConfig:
+        if self.adaptive_base_max_queue >= self.adaptive_mini_min_queue:
+            raise ValueError("adaptive_base_max_queue 必须小于 adaptive_mini_min_queue")
+        return self
+
+
 class AppConfig(Contract):
     """运行配置：模式、开关、节奏。除 ``fast_loop`` 外全部必填，超范围拒绝启动。"""
 
@@ -211,6 +249,9 @@ class AppConfig(Contract):
         default=False,
         description="对账员遇到不在账本里的币安仓位 / hummingbot 执行器时直接平掉。"
         "默认只告警（可能是你手动开的）；要打开请在 M4 小额实盘前自己决定。",
+    )
+    predictor: PredictorConfig = Field(
+        default_factory=PredictorConfig, description="预测员运行方式，见 ``[predictor]``。"
     )
     fast_loop: FastLoopConfig = Field(
         default_factory=FastLoopConfig, description="快环门槛；不写就用默认值（见示例）。"

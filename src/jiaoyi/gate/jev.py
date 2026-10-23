@@ -349,5 +349,5 @@ def decision_model_from_config(
     if cfg.rule_gate_without_jev and mode == RunMode.PAPER:
         from jiaoyi.gate.rule_model import RuleDecisionModel
 
-        return RuleDecisionModel(mode)
+        return RuleDecisionModel(mode, atr_period_min=cfg.atr_period_min)
     return None

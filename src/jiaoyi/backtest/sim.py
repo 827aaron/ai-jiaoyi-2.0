@@ -109,6 +109,7 @@ class PaperAccount:
         self.last_price: dict[str, float] = {}
         self._day: object = None
         self._day_start_equity = initial_equity
+        self._day_start_realized = 0.0
         self.paused = False
 
     # ---- 权益与日清零
@@ -132,10 +133,12 @@ class PaperAccount:
         if self._day is None:
             self._day = key
             self._day_start_equity = self.equity()
+            self._day_start_realized = self.realized
             return False
         if key != self._day:
             self._day = key
             self._day_start_equity = self.equity()
+            self._day_start_realized = self.realized
             return True
         return False
 
@@ -158,6 +161,12 @@ class PaperAccount:
             open_notional_usdt=total,
             open_notional_by_category=by_cat,
             open_positions=len(self.positions),
+            open_symbols=sorted({p.intent.symbol for p in self.positions.values()}),
+            open_risk_usdt=sum(
+                p.entry_price * p.intent.quantity * p.intent.lifeboat_stop_pct / 100.0
+                for p in self.positions.values()
+            ),
+            day_realized_pnl_usdt=self.realized - self._day_start_realized,
             paused=self.paused,
         )
 

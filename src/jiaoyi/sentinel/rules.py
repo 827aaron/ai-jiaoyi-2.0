@@ -139,7 +139,10 @@ class RuleTrigger:
     def _forecast(self, symbol: str, now: datetime) -> Forecast | None:
         if self._predictor is None or not self._predictor.enabled:
             return None
-        return self._predictor.latest(symbol, now)
+        fc = self._predictor.latest(symbol, now)
+        if fc is None:
+            self._predictor.request(symbol)  # 后台补算，这次信号不等它
+        return fc
 
     def _rules(
         self,

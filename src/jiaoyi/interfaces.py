@@ -89,6 +89,18 @@ class Predictor(Protocol):
 
     def latest(self, symbol: str, now: datetime) -> Forecast | None: ...
 
+    def set_wanted(self, symbols: set[str] | frozenset[str]) -> None:
+        """按需模式下要预测的币（作战卡里的 + 有持仓的）。"""
+        ...
+
+    def request(self, symbol: str) -> None:
+        """没有新鲜预测就在后台补算一次；立即返回，不等结果。"""
+        ...
+
+    async def backfill(self, symbol: str, bars: list[Kline]) -> None:
+        """启动时用 REST 拉的历史 K 线补历史，不触发推理。"""
+        ...
+
 
 # ---------------------------------------------------------------- 快环：判断 → 风控
 

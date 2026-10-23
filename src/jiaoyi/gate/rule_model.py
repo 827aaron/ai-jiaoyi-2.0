@@ -37,10 +37,12 @@ def _three(scores: dict[str, float]) -> dict[str, float]:
 
 
 class RuleDecisionModel:
-    def __init__(self, mode: RunMode) -> None:
+    def __init__(self, mode: RunMode, *, atr_period_min: int = 15) -> None:
         if mode != RunMode.PAPER:
             raise ValueError(f"规则版拍板人只能在模拟盘用，当前模式 {mode.value}")
         self.mode = mode
+        # rv5m 是 10 秒收益的标准差，乘 √(每个 ATR 周期的 10 秒数) 换到 ATR 同一尺度
+        self._noise_scale = math.sqrt(6 * atr_period_min)
 
     async def ask(self, request: JevRequest) -> JevResponse:
         started = time.perf_counter()
@@ -86,7 +88,7 @@ class RuleDecisionModel:
         direction = _three({"up": up, "down": -up, "flat": 0.3})
         p_take = _sig(2.5 * (p_real - 0.5) - 2.0 * (p_toxic - 0.5) + 0.5 * flow)
         rv, atr = float(d.get("rv5m_bps", 0.0)), float(d.get("atr_bps", 0.0)) or 1.0
-        noise = rv * math.sqrt(30) / atr  # 5 分钟波动相对 ATR
+        noise = rv * self._noise_scale / atr  # 一个 ATR 周期的波动相对 ATR
         stop = _three({"narrow": 1.0 - noise, "mid": 0.5, "wide": noise - 1.0})
         conv = p_take - 0.5
         size = _three({"S": -conv * 4, "M": 0.5, "L": conv * 4 - 0.5})
