@@ -204,8 +204,16 @@ class Runner:
                 # 问 Jev 期间下达的暂停 / 全平：在途信号也要拦住
                 self._guard_note(Outcome.REJECT, f"{signal.symbol} 拍板期间已暂停，不开仓", now)
                 return
+            # 问 Jev 期间可能换了新卡或封了币：按锁里这一刻的卡审，和问 Jev 时的卡不是同一版就不开
+            now = self.app.clock()
+            fresh = self.m.cards.current(now)
+            if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
+                self._guard_note(
+                    Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡已变，按新卡重新等信号", now
+                )
+                return
             account = await self.m.executor.account()
-            verdict = self.m.risk.review(signal, jev, card, account, self.app.clock())
+            verdict = self.m.risk.review(signal, jev, fresh, account, now)
             if not verdict.approved or verdict.intent is None:
                 return
             intent = verdict.intent
