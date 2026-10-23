@@ -175,6 +175,16 @@ def test_resume_and_unblock_need_password(tmp_path: Path) -> None:
     assert [c["kind"] for c in _inbox_commands(data)] == ["resume"]
 
 
+def test_restart_needs_password(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        r = client.post("/api/command", json={"kind": "restart"}, headers=HEADERS)
+        assert r.status_code == 400
+        r = client.post("/api/command", json={"kind": "restart", "password": PW}, headers=HEADERS)
+        assert r.status_code == 200
+    assert [c["kind"] for c in _inbox_commands(data)] == ["restart"]
+
+
 def test_password_lockout_is_shared_with_cli(tmp_path: Path) -> None:
     _, data = _setup(tmp_path)
     for _ in range(5):
@@ -505,3 +515,37 @@ def test_profile_switch_revalidates_slow_toml(tmp_path: Path) -> None:
     paths.slow.write_text("[schedule]\nrefresh_lead_min = 30\n", encoding="utf-8")
     actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
     assert load_slow_config(paths.slow, "60m").schedule.refresh_lead_min == 30
+
+
+def test_overview_flags_panel_older_than_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """git pull 了没重启面板：总览提示“面板版本与代码不一致”，不让页面无声地卡在读取中。"""
+    from jiaoyi.panel import server
+
+    paths, _ = _setup(tmp_path)
+    monkeypatch.setattr(server, "code_fingerprint", lambda: "boot")
+    with _client(paths) as client:
+        assert client.get("/api/overview").json()["control"]["panel_stale"] is False
+        monkeypatch.setattr(server, "code_fingerprint", lambda: "pulled")
+        assert client.get("/api/overview").json()["control"]["panel_stale"] is True
+
+
+def test_code_fingerprint_changes_when_a_file_changes(tmp_path: Path) -> None:
+    from jiaoyi.panel.server import code_fingerprint
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "__pycache__").mkdir()
+    before = code_fingerprint(tmp_path)
+    (tmp_path / "__pycache__" / "a.pyc.py").write_text("ignored")
+    assert code_fingerprint(tmp_path) == before
+    (tmp_path / "a.py").write_text("x = 22\n")
+    assert code_fingerprint(tmp_path) != before
+
+
+def test_llm_and_budget_only_through_setup_wizard(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with pytest.raises(ActionError, match="首次设置"):
+        actions.update_config(paths, data, "llm", {"provider": "openrouter"}, PW, NOW)
+    with pytest.raises(ActionError, match="首次设置"):
+        actions.update_config(paths, data, "budget", {"daily_cost_limit_usd": 99}, PW, NOW)

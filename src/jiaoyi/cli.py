@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import os
 import shutil
 import subprocess
 import sys
@@ -216,6 +217,9 @@ def _run(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
     from jiaoyi.loop import Runner
 
+    if problem := _startup_problem(args):
+        print(problem, file=sys.stderr)
+        return 2
     try:
         risk, app_cfg, slow = _load(args)
         app = App(risk, app_cfg, slow_cfg=slow)
@@ -224,9 +228,44 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     print(f"启动：模式 {app.app_cfg.mode.value}，拍板 {app.gate_label()}。Ctrl+C 停止。")
     print(_profile_line(args, app.app_cfg))
+    runner = Runner(app, restart_check=lambda: _restart_blocker(args))
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(Runner(app).run())
+        asyncio.run(runner.run())
+    if runner.restart_requested:
+        print("面板要求重启：已干净退出，launchd 会重新拉起")
     return 0
+
+
+LAUNCHD_RUN_LABEL = "com.jiaoyi.run"
+
+
+def _restart_blocker(args: argparse.Namespace) -> str | None:
+    """面板“重启生效”前的检查：退出后要有人拉起，新配置要能启动，否则不退。"""
+    if os.environ.get("XPC_SERVICE_NAME") != LAUNCHD_RUN_LABEL:
+        return "不是 launchd 托管（com.jiaoyi.run），退出后不会自动拉起；请在终端手动重启"
+    if problem := _startup_problem(args):
+        return f"按现在的配置主程序起不来，没有重启：{problem}"
+    return None
+
+
+def _startup_problem(args: argparse.Namespace) -> str | None:
+    """``jiaoyi run`` 启动前就能查出的拒绝启动原因（启动路径和面板重启前共用，两边口径一致）。
+
+    配置校验；军师团有 key 却没装依赖；实盘没解锁、或解锁后 risk.toml 改过（指纹对不上）。
+    """
+    try:
+        risk, app_cfg, slow = _load(args)
+    except ConfigError as e:
+        return str(e)
+    if problem := missing_slow_stack(slow, ChainedSecretStore()):
+        return problem
+    if app_cfg.mode == "live":
+        try:
+            gate = LiveGate(Path(app_cfg.data_dir) / "live_gate.json")
+            gate.require_armed(config_fingerprint(risk))
+        except LiveGateError as e:
+            return f"{e}（硬上限改过的话，先在终端运行 jiaoyi go-live）"
+    return None
 
 
 def _watchdog(args: argparse.Namespace) -> int:

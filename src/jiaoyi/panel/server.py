@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -51,6 +52,18 @@ from jiaoyi.panel.pages import (
 )
 
 STATIC = Path(__file__).parent / "static"
+PACKAGE = Path(__file__).parent.parent
+
+
+def code_fingerprint(root: Path = PACKAGE) -> str:
+    """jiaoyi 包下源码和静态文件的 (路径, 修改时间, 大小) 指纹；只 stat 不读内容，几毫秒。"""
+    h = hashlib.sha256()
+    for f in sorted(root.rglob("*")):
+        if f.suffix in (".py", ".js", ".css", ".html") and "__pycache__" not in f.parts:
+            st = f.stat()
+            h.update(f"{f.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}\n".encode())
+    return h.hexdigest()[:16]
+
 
 Clock = Callable[[], datetime]
 
@@ -142,6 +155,7 @@ def create_app(
     data_dir = app_cfg.data_dir
     files = PanelFiles(data_dir, risk.day_reset_tz)
     keys = key_status if key_status is not None else {}
+    boot_code = code_fingerprint()
     market = klines or KlineSource()
 
     @asynccontextmanager
@@ -170,7 +184,9 @@ def create_app(
     @api.get("/api/overview")
     async def overview() -> Overview:
         ov = build_overview(files, await hb.snapshot(), risk, app_cfg, clock())
-        return ov.model_copy(update={"control": actions.control_state(data_dir, config_paths)})
+        ctl = actions.control_state(data_dir, config_paths)
+        ctl.panel_stale = code_fingerprint() != boot_code
+        return ov.model_copy(update={"control": ctl})
 
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
