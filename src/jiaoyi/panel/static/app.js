@@ -382,8 +382,9 @@ function showRecord(i) {
 
 /* ---------- 开会过程（慢环按阶段写 data/meeting_live/<币>.json；正在开的每 4 秒刷新） */
 // 总盘会不走五步流程：看数据 → 挑币 → 排除，发言人另起名字
-const MARKET_STAGE = { input: "看到的市场数据", pick: "挑哪些币上会", filter: "排除了哪些、为什么" };
-const MARKET_WHO = { input: "数据", market: "军师团", filter: "筛选" };
+const MARKET_STAGE = { input: "看到的市场数据", pick: "挑中上会的币", filter: "没挑中的币和原因" };
+const MARKET_DOING = { input: "看市场数据", pick: "挑上会的币", filter: "整理名单" };
+const MARKET_WHO = { input: "候选池", market: "总盘会", filter: "名单整理" };
 const STAGE = { analysts: "分析师报告", debate: "多空辩论", trader: "交易员计划", risk: "风控辩论", decision: "结论" };
 const WHO = {
   market: "市场分析师", social: "情绪分析师", news: "新闻分析师", fundamentals: "基本面分析师",
@@ -396,12 +397,13 @@ const stageNo = (s) => Object.keys(STAGE).indexOf(s) + 1;
 const meetTime = (m) => (m.status === "running" && m.started_at ? `已开 ${dur(Date.now() - Date.parse(m.started_at))}` : m.started_at && (m.finished_at || m.updated_at) ? `${hm(m.started_at)} 开，用时 ${dur(Date.parse(m.finished_at || m.updated_at) - Date.parse(m.started_at))}` : "");
 const meetBias = (m) => (m.bias ? (() => { const [t, k] = BIAS[m.bias] || [m.bias, ""]; return `<span class="pill ${k}">${t}</span>`; })() : "");
 
-function meetingsCard(list) {
-  const market = list.some((m) => m.symbol === MARKET) ? "" : `<div class="click" ${clickable("meeting", MARKET)}><span class="n"></span><span><b>总盘会</b> <span class="dim small">还没有记录：看大盘、挑哪些币上会</span></span></div>`;
-  const rows = market + list.map((m) => `<div class="click" ${clickable("meeting", m.symbol)}><span class="n">${m.updated_at ? hm(m.updated_at) : ""}</span><span><b>${meetName(m.symbol)}</b> ${meetPill(m.status)} ${meetBias(m)}
+// 军师团：只列各币的会；总盘会在团队图上单独点开
+function meetingsCard(all) {
+  const list = all.filter((m) => m.symbol !== MARKET);
+  const rows = list.map((m) => `<div class="click" ${clickable("meeting", m.symbol)}><span class="n">${m.updated_at ? hm(m.updated_at) : ""}</span><span><b>${meetName(m.symbol)}</b> ${meetPill(m.status)} ${meetBias(m)}
     <span class="dim small">${m.status === "running" && m.stage ? `${stageNo(m.stage) ? `第 ${stageNo(m.stage)} / 5 步 · ` : ""}${esc((m.symbol === MARKET ? MARKET_STAGE : STAGE)[m.stage] || m.stage)} · ` : ""}${meetTime(m)}</span></span></div>`).join("");
   return `<section class="card mt"><div class="ch"><h2>开会过程</h2><span class="r">每个币最近一场会 · 点开看每个人说了什么</span></div>
-    <div class="log">${rows}</div></section>`;
+    <div class="log">${rows || '<div class="dim">还没有开过会。</div>'}</div></section>`;
 }
 
 // 总盘会：先看大盘、挑哪些币上会，文件名 _MARKET，团队页固定在最上面
@@ -716,30 +718,27 @@ function tfCardNode() {
 // 总盘会：军师团先开的那场，挑哪些币上会（给军师团）、哪些币要盯（给盘口员）
 function tfMarketNode(m, p) {
   const st = !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
-  const now = m && m.status === "running" ? `开会中：${MARKET_STAGE[m.stage] || m.stage || "开始"}` : "";
+  const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
 }
 // 心跳好坏单独用角标（点只表示流程走到哪）
 function hbBadge(r) {
   const label = {
     ok: "心跳正常",
-    slow: r.status.startsWith("等待首次") ? "等待首次运行" : "降级运行",
+    slow: r.status.startsWith("等待首次") ? "等待首次运行" : r.status.startsWith("准备中") ? "准备中" : "降级运行",
     bad: r.status.startsWith("无心跳") ? "无心跳" : "失败",
     off: "未启用",
   }[r.state];
   return label ? `<em class="hb ${r.state}" title="${esc(r.status)}">${label}</em>` : "";
 }
-// 按需模式：预测员只算作战卡上的币（加有持仓的币）
-function predictorScope(mode) {
-  if (mode !== "on_demand") return "";
-  const c = data && data.card && data.card.valid ? data.card : null;
-  if (!c) return "没有有效作战卡，先不算";
-  const onCard = new Set(c.symbols.map((x) => x.symbol));
-  const held = new Set(((data && data.positions) || []).map((p) => p.symbol).filter((s) => !onCard.has(s)));
-  return `只算作战卡上的 ${onCard.size} 个币${held.size ? ` + ${held.size} 个持仓币` : ""}`;
+// 预测员：正常时用它自己报的「已算 N/M 个币，上次 hh:mm」，M = 盯着的币（总盘会挑中 + 作战卡 + 持仓）
+function predictorText(r) {
+  if (r.state !== "ok" || !r.headline) return r.status;
+  const m = /^已算 (\d+)\/(\d+) 个币(.*?)(（今天预测 \d+ 次）)?$/.exec(r.headline);
+  return m ? `盯着 ${m[2]} 个币，已算 ${m[1]} 个${m[3]}` : r.headline;
 }
-function tfNode(r, mode) {
-  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.role === "predictor" && !["bad", "off"].includes(r.state) && predictorScope(mode) || r.status;
+function tfNode(r) {
+  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : r.role === "predictor" ? predictorText(r) : r.status;
   return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}${hbBadge(r)}</span>
     ${r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
     <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
@@ -754,7 +753,7 @@ function teamFlow(d) {
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
-    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.predictor_mode)}</a>`;
+    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r)}</a>`;
   };
   // 盯持仓是常态，放最后说；其余按流程顺序最多说两处
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);

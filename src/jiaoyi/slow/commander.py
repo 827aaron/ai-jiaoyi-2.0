@@ -795,13 +795,17 @@ class BattleCardCommander:
         keep = {e.symbol for e in chosen}
         why: list[str] = []
         why += [f"{e.symbol}：固定 / 持仓强制开会" for e in forced]
+        rank = {e.symbol: i + 1 for i, e in enumerate(sorted(candidates, key=lambda e: -e.score))}
         for e in candidates:
             if e.symbol in keep:
                 continue
             if e.symbol in by_pick:
-                why.append(f"{e.symbol}：军师挑了，但超出名额或中间档当天名额已满")
+                why.append(f"{e.symbol}：总盘会挑了，但这轮上会名额已满（或中间档当天名额已满）")
             else:
-                why.append(f"{e.symbol}：军师没挑")
+                why.append(
+                    f"{e.symbol}：总盘会这轮没挑中（候选池第 {rank[e.symbol]} 名，"
+                    f"{e.score:.0f} 分；没写单币理由）"
+                )
         for sym in reused:
             last = self._last_meeting.get(sym)
             ago = f"{(now - last).total_seconds() / 60:.0f} 分钟前" if last else "不久前"

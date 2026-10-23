@@ -793,7 +793,7 @@ async def test_market_meeting_is_recorded_in_meeting_live(tmp_path: Path, now: d
     assert [s["stage"] for s in doc["steps"]] == ["input", "pick", "filter"]
     assert "区间震荡" in doc["steps"][1]["text"] and "BBUSDT" in doc["steps"][1]["text"]
     assert "AAUSDT：固定 / 持仓强制开会" in doc["steps"][2]["text"]
-    assert "DDUSDT：军师没挑" in doc["steps"][2]["text"]
+    assert "DDUSDT：总盘会这轮没挑中（候选池第" in doc["steps"][2]["text"]
     assert doc["cost_usd"] == pytest.approx(0.01)
 
 
