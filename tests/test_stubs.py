@@ -50,7 +50,7 @@ async def test_fast_loop_stubs_never_open(now: datetime) -> None:
 
     jev = await StubEntryGate().evaluate(signal, card, now)
     assert not jev.ok
-    verdict = StubRiskGuard().review(signal, jev, card, account, now)
+    verdict = StubRiskGuard().review(signal, jev, card, account, now, market=None)
     assert not verdict.approved and verdict.intent is None
 
     intent = c.OrderIntent.model_validate(load_example("order_intent"))

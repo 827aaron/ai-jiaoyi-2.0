@@ -222,7 +222,9 @@ class Runner:
                 )
                 return
             account = await self.m.executor.account()
-            verdict = self.m.risk.review(signal, jev, fresh, account, now)
+            # 拍板要几百毫秒，滑点和价差按现在的行情算，不按触发时那份
+            market = self.m.features.snapshot(signal.symbol)
+            verdict = self.m.risk.review(signal, jev, fresh, account, now, market=market)
             if not verdict.approved or verdict.intent is None:
                 return
             intent = verdict.intent

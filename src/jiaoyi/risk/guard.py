@@ -34,6 +34,7 @@ from jiaoyi.contracts import (
     CardSymbol,
     EntryQuestion,
     FastLoopConfig,
+    FeatureSnapshot,
     JevResponse,
     LevelKind,
     OrderIntent,
@@ -173,12 +174,14 @@ class RiskGuardImpl:
         card: BattleCard | None,
         account: AccountState,
         now: datetime,
+        *,
+        market: FeatureSnapshot | None,
     ) -> RiskVerdict:
         reasons: list[str] = []
         detail: dict[str, float | str] = {}
         intent: OrderIntent | None = None
         try:
-            intent = self._review(signal, jev, card, account, now, reasons, detail)
+            intent = self._review(signal, jev, card, account, now, market, reasons, detail)
         except Exception as e:  # 算不出来就拒绝
             reasons.append(f"保镖计算出错：{type(e).__name__}: {e}")
             intent = None
@@ -200,11 +203,11 @@ class RiskGuardImpl:
         card: BattleCard | None,
         account: AccountState,
         now: datetime,
+        market: FeatureSnapshot | None,
         reasons: list[str],
         detail: dict[str, float | str],
     ) -> OrderIntent | None:
         risk, fast = self._risk, self._fast
-        f = signal.features
 
         # ---- 账户级
         halted, day_pnl = self.breaker.check(account, now)
@@ -234,19 +237,31 @@ class RiskGuardImpl:
         # ---- 作战卡
         cs = self._card_symbol(signal, card, now, reasons)
 
-        # ---- 盘口
-        book = f.book
-        if book is None:
-            reasons.append("没有盘口数据")
-        elif book.spread_bps > risk.max_spread_bps:
-            reasons.append(f"价差 {book.spread_bps:.1f}bp 超过 {risk.max_spread_bps}bp")
-        slip = abs(f.last_price / signal.trigger_price - 1.0) * 1e4
-        if slip > risk.max_slippage_bps:
-            reasons.append(f"触发后价格已跑 {slip:.1f}bp，超过滑点上限 {risk.max_slippage_bps}bp")
+        # ---- 盘口：用拍板回来后重新取的行情，不用触发时那份（那份的最新价就是触发价）
+        f = market
+        if f is None:
+            reasons.append("没有拍板后的最新行情，无法核对滑点和价差")
+        elif f.symbol != signal.symbol:
+            reasons.append(f"最新行情是 {f.symbol}，和信号 {signal.symbol} 不符")
+            f = None
+        elif now - f.ts > timedelta(seconds=fast.signal_max_age_s):
+            reasons.append(f"最新行情已过 {(now - f.ts).total_seconds():.1f} 秒")
+        if f is not None:
+            book = f.book
+            if book is None:
+                reasons.append("没有盘口数据")
+            elif book.spread_bps > risk.max_spread_bps:
+                reasons.append(f"价差 {book.spread_bps:.1f}bp 超过 {risk.max_spread_bps}bp")
+            slip = abs(f.last_price / signal.trigger_price - 1.0) * 1e4
+            detail["slippage_bps"] = round(slip, 2)
+            if slip > risk.max_slippage_bps:
+                reasons.append(
+                    f"触发后价格已跑 {slip:.1f}bp，超过滑点上限 {risk.max_slippage_bps}bp"
+                )
 
-        if reasons or cs is None or not jev.ok:
+        if reasons or cs is None or not jev.ok or f is None:
             return None
-        return self._size(signal, jev, card, cs, account, now, reasons, detail)
+        return self._size(signal, f, jev, card, cs, account, now, reasons, detail)
 
     def _check_jev(self, signal: CandidateSignal, jev: JevResponse) -> list[str]:
         fast = self._fast
@@ -297,8 +312,12 @@ class RiskGuardImpl:
         if card is None or not card.is_valid(now):
             reasons.append("没有有效作战卡，不开新仓")
             return None
-        if signal.card_id is not None and signal.card_id != card.card_id:
-            reasons.append("信号触发时的作战卡已被替换")
+        # 同一天 card_id 不变、刷新只加版本号，所以两个都要比
+        if (signal.card_id, signal.card_version) != (card.card_id, card.version):
+            reasons.append(
+                f"信号触发时的作战卡（{signal.card_id} v{signal.card_version}）已换成 "
+                f"{card.card_id} v{card.version}"
+            )
         cs = card.for_symbol(signal.symbol)
         if cs is None:
             reasons.append("作战卡里没有这个标的")
@@ -324,6 +343,7 @@ class RiskGuardImpl:
     def _size(
         self,
         signal: CandidateSignal,
+        f: FeatureSnapshot,
         jev: JevResponse,
         card: BattleCard | None,
         cs: CardSymbol,
@@ -333,7 +353,6 @@ class RiskGuardImpl:
         detail: dict[str, float | str],
     ) -> OrderIntent | None:
         risk, fast = self._risk, self._fast
-        f = signal.features
         entry = f.last_price
         side = signal.side_hint
         atr = f.atr

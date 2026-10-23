@@ -57,7 +57,7 @@ class FakeRisk:
     def __init__(self, approve: bool) -> None:
         self.approve = approve
 
-    def review(self, *args: object) -> c.RiskVerdict:
+    def review(self, *args: object, **kw: object) -> c.RiskVerdict:
         name = "risk_verdict_approved" if self.approve else "risk_verdict_rejected"
         return c.RiskVerdict.model_validate(load_example(name))
 
@@ -304,7 +304,7 @@ async def test_concurrent_signals_respect_max_open_positions(tmp_path: Path, now
     class OneSlot:
         """max_open_positions=1 / 敞口只够一笔：已有持仓就拒。"""
 
-        def review(self, *args: object) -> c.RiskVerdict:
+        def review(self, *args: object, **kw: object) -> c.RiskVerdict:
             account = args[3]
             assert isinstance(account, c.AccountState)
             ok = account.open_positions == 0

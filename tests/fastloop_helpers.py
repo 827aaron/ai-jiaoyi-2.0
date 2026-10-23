@@ -59,6 +59,7 @@ def signal(
     kind: c.SignalKind = c.SignalKind.VOLUME_BREAKOUT,
     f: c.FeatureSnapshot | None = None,
     card_id: str = "card-20261022-0600",
+    card_version: int = 1,
 ) -> c.CandidateSignal:
     f = f or features(now)
     return c.CandidateSignal(
@@ -71,6 +72,7 @@ def signal(
         trigger_desc="测试",
         dedup_key=f"BTCUSDT:{kind.value}:{side.value}",
         card_id=card_id,
+        card_version=card_version,
         features=f,
     )
 

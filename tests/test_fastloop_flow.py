@@ -62,7 +62,7 @@ async def test_breakout_to_order_intent(tmp_path: Path) -> None:
     signals = trigger.check(snap, cd, now)
     assert [s.kind for s in signals] == [c.SignalKind.VOLUME_BREAKOUT]
     resp = await gate.evaluate(signals[0], cd, now)
-    verdict = guard.review(signals[0], resp, cd, account(now), now)
+    verdict = guard.review(signals[0], resp, cd, account(now), now, market=eng.snapshot("BTCUSDT"))
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     assert verdict.approved, verdict.reasons

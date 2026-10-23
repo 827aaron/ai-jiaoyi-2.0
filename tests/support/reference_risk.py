@@ -21,6 +21,7 @@ from jiaoyi.contracts import (
     BattleCard,
     Bias,
     CandidateSignal,
+    FeatureSnapshot,
     JevResponse,
     OrderIntent,
     RiskConfig,
@@ -49,6 +50,8 @@ class ReferenceRiskGuard:
         card: BattleCard | None,
         account: AccountState,
         now: datetime,
+        *,
+        market: FeatureSnapshot | None = None,
     ) -> RiskVerdict:
         reasons = self._reasons(signal, jev, card, account, now)
         if reasons:

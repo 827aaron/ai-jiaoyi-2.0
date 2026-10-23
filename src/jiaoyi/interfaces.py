@@ -121,6 +121,9 @@ class RiskGuard(Protocol):
 
     查硬上限、作战卡方向和范围、相关组敞口、日亏熔断、价差和手续费门槛；
     按“风险金额 ÷ 止损距离”算数量。``jev`` 为 ``ok=False`` 时必须拒绝。
+
+    ``market`` 是拍板回来、拿到开仓锁之后重新取的行情快照（``features.snapshot(symbol)``）：
+    滑点、价差、入场价都按它算。没有（``None``）就拒绝。
     """
 
     def review(
@@ -130,6 +133,8 @@ class RiskGuard(Protocol):
         card: BattleCard | None,
         account: AccountState,
         now: datetime,
+        *,
+        market: FeatureSnapshot | None,
     ) -> RiskVerdict: ...
 
 

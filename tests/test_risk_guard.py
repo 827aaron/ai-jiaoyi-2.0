@@ -14,10 +14,29 @@ from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.risk.guard import LotRules, RiskGuardImpl
 from tests.fastloop_helpers import FAST, RISK, Lots, account, card, features, jev, signal
 
+_SAME = c.FeatureSnapshot.__new__(c.FeatureSnapshot)  # 哨兵值：没传 market 时用信号自带的快照
 
-def guard(lots: Lots | None = None, **fast: object) -> RiskGuardImpl:
+
+class _Guard(RiskGuardImpl):
+    """测试方便：不传 ``market`` 时当作“拍板期间行情没动”。要测行情变化就显式传。"""
+
+    def review(  # type: ignore[override]
+        self,
+        signal: c.CandidateSignal,
+        jev: c.JevResponse,
+        card: c.BattleCard | None,
+        account: c.AccountState,
+        now: datetime,
+        *,
+        market: c.FeatureSnapshot | None = _SAME,
+    ) -> c.RiskVerdict:
+        m = signal.features if market is _SAME else market
+        return super().review(signal, jev, card, account, now, market=m)
+
+
+def guard(lots: Lots | None = None, **fast: object) -> _Guard:
     cfg = FAST.model_copy(update=fast) if fast else FAST
-    return RiskGuardImpl(RISK, cfg, lots or Lots())
+    return _Guard(RISK, cfg, lots or Lots())
 
 
 def test_satisfies_interface() -> None:
@@ -264,7 +283,7 @@ def test_writes_decision_log(tmp_path: object, now: datetime) -> None:
     from pathlib import Path
 
     log = JsonlDecisionLog(Path(str(tmp_path)))
-    g = RiskGuardImpl(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    g = _Guard(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
     g.review(signal(now), jev(), card(now), account(now), now)
     g.review(signal(now), jev(ok=False), card(now), account(now), now)
     recs = log.read_day(now.date().isoformat())
@@ -278,25 +297,63 @@ def test_writes_decision_log(tmp_path: object, now: datetime) -> None:
 
 def test_daily_halt_survives_restart(tmp_path: Path) -> None:
     t = datetime(2026, 10, 22, 13, 0, tzinfo=UTC)  # 曼谷 20:00
-    g1 = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    g1 = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
     down = account(t, equity=9_650.0, day_start_equity_usdt=10_000.0)
     assert not g1.review(signal(t), jev(), card(t), down, t).approved
 
     # 进程重启：新保镖读回状态，同一天权益回到线内也照样锁住
     t2 = t + timedelta(hours=1)
-    g2 = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    g2 = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
     back = account(t2, equity=10_000.0, day_start_equity_usdt=10_000.0)
     v = g2.review(signal(t2), jev(), card(t2), back, t2)
     assert not v.approved and any("熔断" in r for r in v.reasons)
 
     # 曼谷第二天 0 点后重启，解锁
     t3 = datetime(2026, 10, 22, 17, 0, 1, tzinfo=UTC)
-    g3 = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    g3 = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
     assert g3.review(signal(t3), jev(), card(t3), account(t3), t3).approved
 
 
 def test_corrupt_breaker_state_fails_closed(tmp_path: Path, now: datetime) -> None:
     (tmp_path / "risk_state.json").write_text("{not json", encoding="utf-8")
-    g = RiskGuardImpl(RISK, FAST, Lots(), state_dir=tmp_path)
+    g = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
     v = g.review(signal(now), jev(), card(now), account(now), now)
     assert not v.approved and any("熔断" in r for r in v.reasons)
+
+
+# ---------------------------------------------------------------- 逻辑审查 I1 / I2
+def test_slippage_and_spread_use_fresh_market(now: datetime) -> None:
+    sig = signal(now)
+    later = now + timedelta(milliseconds=800)
+    # 拍板期间价格跑了 30bp（上限见 RISK.max_slippage_bps）
+    moved = features(later, price=sig.trigger_price * (1 + (RISK.max_slippage_bps + 5) / 1e4))
+    v = guard().review(sig, jev(), card(now), account(later), later, market=moved)
+    assert not v.approved and any("滑点" in r for r in v.reasons)
+    # 价差变宽
+    fresh = features(later)
+    wide = fresh.model_copy(
+        update={"book": fresh.book.model_copy(update={"spread_bps": RISK.max_spread_bps + 1})}  # type: ignore[union-attr]
+    )
+    v = guard().review(sig, jev(), card(now), account(later), later, market=wide)
+    assert not v.approved and any("价差" in r for r in v.reasons)
+    # 没有最新行情、拿错币、行情太旧：都拒
+    v = guard().review(sig, jev(), card(now), account(later), later, market=None)
+    assert not v.approved and any("最新行情" in r for r in v.reasons)
+    eth = fresh.model_copy(update={"symbol": "ETHUSDT"})
+    assert not guard().review(sig, jev(), card(now), account(later), later, market=eth).approved
+    stale = features(now - timedelta(seconds=FAST.signal_max_age_s + 1))
+    assert not guard().review(sig, jev(), card(now), account(later), later, market=stale).approved
+    # 行情没怎么动：放行，入场价按最新价
+    ok = features(later, price=sig.trigger_price * 1.0001)
+    v = guard().review(sig, jev(), card(now), account(later), later, market=ok)
+    assert v.approved, v.reasons
+
+
+def test_card_refreshed_during_jev_is_rejected(now: datetime) -> None:
+    cd = card(now)
+    newer = cd.model_copy(update={"version": cd.version + 1})
+    v = guard().review(signal(now), jev(), newer, account(now), now)
+    assert not v.approved and any("作战卡" in r and "已换成" in r for r in v.reasons)
+    no_version = signal(now).model_copy(update={"card_version": None})
+    assert not guard().review(no_version, jev(), cd, account(now), now).approved
+    assert guard().review(signal(now), jev(), cd, account(now), now).approved

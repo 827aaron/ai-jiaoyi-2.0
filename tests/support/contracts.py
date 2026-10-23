@@ -110,8 +110,9 @@ class RiskGuardSafetyContract:
         signal: CandidateSignal | None = None,
     ) -> RiskVerdict:
         the_card = b.card() if isinstance(card, str) else card
+        sig = signal or b.signal()
         return self.make_guard(cfg).review(
-            signal or b.signal(), jev or b.jev_ok(), the_card, account or b.account(), b.T0
+            sig, jev or b.jev_ok(), the_card, account or b.account(), b.T0, market=sig.features
         )
 
     @staticmethod
@@ -283,7 +284,9 @@ class RiskGuardApprovalContract(RiskGuardSafetyContract):
                     )
                 ]
             )
-            v = self.make_guard(cfg).review(sig, b.jev_ok(answers), card, acct, b.T0)
+            v = self.make_guard(cfg).review(
+                sig, b.jev_ok(answers), card, acct, b.T0, market=sig.features
+            )
             if v.approved:
                 approvals += 1
                 assert v.intent is not None

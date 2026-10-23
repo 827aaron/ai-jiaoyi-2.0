@@ -118,6 +118,7 @@ class RuleTrigger:
                 trigger_desc=desc,
                 dedup_key=key,
                 card_id=card.card_id,
+                card_version=card.version,
                 features=features,
                 forecast=self._forecast(sym, now),
             )
