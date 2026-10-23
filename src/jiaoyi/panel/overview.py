@@ -274,7 +274,11 @@ def build_overview(
         kpis=kpis,
         card=_with_fractions(
             _with_pool_notes(
-                _with_pending(_card(records, now), files.root, now, files.tz), now, files.tz
+                _with_pending(
+                    _card(records, now, {p.symbol for p in positions}), files.root, now, files.tz
+                ),
+                now,
+                files.tz,
             ),
             app,
         ),
@@ -463,7 +467,7 @@ def _with_pool_notes(card: CardView | None, now: datetime, tz: str) -> CardView 
             rows.append(r)
             continue
         if now >= r.expires_at:  # 只剩持仓币：到期了，继续盯，不再开新仓
-            note = f"来自 {hm(r.issued_at)} 的会 · {hm(r.expires_at)} 已到期，持仓中，不再开新仓"
+            note = f"来自 {hm(r.issued_at)} 的会 · {hm(r.expires_at)} 已过期·持仓中，不再开新仓"
             rows.append(r.model_copy(update={"source_note": note, "fading": True}))
             continue
         note = f"来自 {hm(r.issued_at)} 的会 · {hm(r.expires_at)} 到期"
@@ -492,7 +496,9 @@ def _with_pending(card: CardView | None, root: Path, now: datetime, tz: str) -> 
     return card.model_copy(update={"symbols": rows})
 
 
-def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
+def _card(
+    records: list[DecisionRecord], now: datetime, held: set[str] | None = None
+) -> CardView | None:
     """今天最新一张作战卡：军师出卡记录 + 每个标的最新的会议结论（output 就是 CardSymbol）。"""
     cmd = [r for r in records if r.role is Role.COMMANDER]
     issued = [r for r in cmd if r.card_id and r.outcome is Outcome.ACTION]
@@ -508,7 +514,8 @@ def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
                 stamps[str(n)] = (
                     _parse_ts(v.get("issued_at")),
                     _parse_ts(v.get("expires_at")),
-                    bool(v.get("held")),
+                    # 出卡时的快照可能过时：有实时持仓就以实时为准
+                    (str(n) in held) if held is not None else bool(v.get("held")),
                 )
     # 指令池：过了自己有效期的币不再显示（持仓币留着，标明不再开新仓）
     names = [

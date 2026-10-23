@@ -946,7 +946,10 @@ def test_card_pool_rows_show_source_and_hide_expired(tmp_path: Path) -> None:
         == f"来自 {t0:%H:%M} 的会 · {NOW + timedelta(minutes=60):%H:%M} 到期"
     )
     assert not by["AAUSDT"].fading and by["BBUSDT"].fading
-    assert by["DDUSDT"].source_note is not None and "持仓中，不再开新仓" in by["DDUSDT"].source_note
+    assert (
+        by["DDUSDT"].source_note is not None
+        and "已过期·持仓中，不再开新仓" in by["DDUSDT"].source_note
+    )
 
 
 def test_card_history_lists_past_orders(tmp_path: Path) -> None:
