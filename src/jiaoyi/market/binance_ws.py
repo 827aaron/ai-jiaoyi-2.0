@@ -5,16 +5,20 @@
 强平另开一个连接订全市场流（``!forceOrder@arr``）：候选池里的币照样发给下游，
 所有币（包括池外的）都记进 ``liquidations``（``LiquidationTracker``），选币用它算“近 1 小时强平额”。
 关掉 ``all_market_liquidations`` 就退回每个标的单独订 forceOrder。
-币安一个连接最多 200 路流，所以每 40 个标的开一个连接，全部汇进一个队列。
+币安把 U 本位 WS 按流的类型分了路由：盘口类（depth / bookTicker）走 ``/public/stream``，
+成交、标记价格、K 线、强平走 ``/market/stream``。旧的 ``/stream`` 只剩盘口在推（Mac mini 实测），
+所以每 40 个标的开两条连接（market 一条、public 一条），全部汇进一个队列。
 
 为什么不用 ccxt 的 watch*：ccxt 每类流单独订阅、强平流在 ccxt 里支持不全，而这里一个连接
 就能拿齐五类，少一层依赖、少一次转换。下单、查持仓、保命止损仍由执行层用 ccxt。
 
 断线自动重连（1、2、4……最多 30 秒退避），重连期间 ``health`` 为 degraded。
+看门狗：按标的订的连接（每秒都有标记价格 / 盘口）超过 ``stale_after_s`` 秒没有消息，
+记警告并断开重连（连上但不推消息也算断流）；全市场强平流可以长时间安静，不看。
 队列满时丢最旧的事件并计数，说明消费跟不上，也报 degraded。
 
-团队页的「盘口员」卡由 ``heartbeat`` 上报：订阅几个币、连接几条（断几条）、今天收到多少条消息、
-最后一条消息多久前、重连几次。超过 ``stale_after_s`` 秒一条消息都没有就报 down（断流）。
+团队页的「盘口员」卡由 ``heartbeat`` 上报：订阅几个币、连接几条（断几条）、今天收到多少条消息
+（分成交 / 盘口 / K 线 / 标记价格）、重连几次。有连接超过 ``stale_after_s`` 秒没消息就报 down。
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosedOK
 
 from jiaoyi.contracts import (
     BookTop,
@@ -49,7 +54,9 @@ from jiaoyi.market.liquidations import LiquidationTracker
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WS_URL = "wss://fstream.binance.com/stream"
+DEFAULT_WS_BASE = "wss://fstream.binance.com"
+ROUTE_PATHS = {"market": "/market/stream", "public": "/public/stream"}
+_PUBLIC_MARKERS = ("@depth", "@bookTicker")
 STREAMS_PER_SYMBOL = 5
 SYMBOLS_PER_CONN = 40
 STALE_AFTER_S = 30.0
@@ -60,6 +67,14 @@ def _dt(ms: Any) -> datetime:
 
 
 ALL_MARKET_LIQUIDATIONS = "!forceOrder@arr"
+
+
+def route_of(stream: str) -> str:
+    """流走哪条路由：盘口类走 public，其余（成交、标记价格、K 线、强平）走 market。"""
+    return "public" if any(m in stream for m in _PUBLIC_MARKERS) else "market"
+
+
+_KIND = {Trade: "成交", BookTop: "盘口", Kline: "K 线", MarkPrice: "标记价", Liquidation: "强平"}
 
 
 def streams_for(symbol: str, *, liquidations: bool = True) -> list[str]:
@@ -144,7 +159,7 @@ class BinanceFuturesFeed:
 
     def __init__(
         self,
-        url: str = DEFAULT_WS_URL,
+        base_url: str = DEFAULT_WS_BASE,
         *,
         queue_max: int = 20_000,
         max_backoff_s: float = 30.0,
@@ -154,7 +169,7 @@ class BinanceFuturesFeed:
         day_reset_tz: str = "UTC",
         stale_after_s: float = STALE_AFTER_S,
     ) -> None:
-        self._url = url
+        self._base = base_url.rstrip("/")
         self._all_liq = all_market_liquidations
         self.liquidations = liquidations or LiquidationTracker()
         """全市场强平统计（含候选池外的币），选币按它补“近 1 小时强平额”。"""
@@ -162,7 +177,9 @@ class BinanceFuturesFeed:
         self._queue: asyncio.Queue[MarketEvent] = asyncio.Queue(maxsize=queue_max)
         self._tasks: list[asyncio.Task[None]] = []
         self._max_backoff = max_backoff_s
-        self._down: set[int] = set()
+        self._down: set[str] = set()
+        self._last: dict[str, datetime] = {}  # 连接 → 最后一条消息（或连上）的时间，看门狗用
+        self.by_kind: dict[str, int] = {}
         self._closed = False
         self.symbols: list[str] = []
         self.dropped = 0
@@ -202,10 +219,20 @@ class BinanceFuturesFeed:
         for i in range(0, len(new), SYMBOLS_PER_CONN):
             chunk = new[i : i + SYMBOLS_PER_CONN]
             streams = [s for sym in chunk for s in streams_for(sym, liquidations=per_symbol_liq)]
-            self._tasks.append(asyncio.create_task(self._run(i, self._url_for(streams))))
+            for route in ROUTE_PATHS:
+                mine = [s for s in streams if route_of(s) == route]
+                if mine:
+                    conn = f"{route}-{i // SYMBOLS_PER_CONN}"
+                    self._spawn_conn(conn, self._url_for(route, mine), watch=True)
         if self._all_liq:
-            url = self._url_for([ALL_MARKET_LIQUIDATIONS])
-            self._tasks.append(asyncio.create_task(self._run(-1, url)))
+            # 全市场强平可以几分钟没有一条，不上看门狗
+            self._spawn_conn("liquidations", self._url_for("market", [ALL_MARKET_LIQUIDATIONS]))
+
+    def _spawn_conn(self, conn: str, url: str, *, watch: bool = False) -> None:
+        if watch:
+            self._last[conn] = datetime.now(UTC)
+        silent_after = self._stale_s if watch else None
+        self._tasks.append(asyncio.create_task(self._run(conn, url, silent_after)))
 
     async def events(self) -> AsyncIterator[MarketEvent]:
         while not self._closed:
@@ -223,18 +250,21 @@ class BinanceFuturesFeed:
                 await t
         self._tasks = []
         self._down.clear()
+        self._last.clear()
 
-    def _url_for(self, streams: Sequence[str]) -> str:
-        return f"{self._url}?streams={'/'.join(streams)}"
+    def _url_for(self, route: str, streams: Sequence[str]) -> str:
+        return f"{self._base}{ROUTE_PATHS[route]}?streams={'/'.join(streams)}"
 
-    async def _run(self, conn_id: int, url: str) -> None:
+    async def _run(self, conn_id: str, url: str, silent_after: float | None = None) -> None:
         backoff = 1.0
         while not self._closed:
             try:
                 async with connect(url, ping_interval=20, max_size=2**22) as ws:
                     self._down.discard(conn_id)
+                    if conn_id in self._last:
+                        self._last[conn_id] = datetime.now(UTC)
                     backoff = 1.0
-                    await self._pump(ws)
+                    await self._pump(ws, conn_id, silent_after)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -250,8 +280,18 @@ class BinanceFuturesFeed:
             self.liquidations.record(ev)
         return ev.symbol in self._symset
 
-    async def _pump(self, ws: ClientConnection) -> None:
-        async for raw in ws:
+    async def _pump(
+        self, ws: ClientConnection, conn_id: str = "", silent_after: float | None = None
+    ) -> None:
+        """读到连接关闭为止；``silent_after`` 秒没有消息就抛 ``TimeoutError``，由 ``_run`` 重连。"""
+        while True:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), silent_after)
+            except TimeoutError:
+                logger.warning("币安行情连接 %s %.0f 秒没有消息，断开重连", conn_id, silent_after)
+                raise
+            except ConnectionClosedOK:
+                return
             try:
                 ev = parse_message(json.loads(raw))
             except (ValueError, KeyError, TypeError) as e:
@@ -261,6 +301,10 @@ class BinanceFuturesFeed:
                 continue
             self.messages += 1
             self.last_message_at = datetime.now(UTC)
+            if conn_id in self._last:
+                self._last[conn_id] = self.last_message_at
+            kind = _KIND.get(type(ev), "其它")
+            self.by_kind[kind] = self.by_kind.get(kind, 0) + 1
             if not self.accept(ev):
                 continue
             if self._queue.full():
@@ -300,12 +344,22 @@ class BinanceFuturesFeed:
         conns, down = len(self._tasks), len(self._down)
         links = f"{conns} 条连接" + (f"（断 {down} 条）" if down else "正常")
         tail = f"，重连 {self.reconnects} 次" if self.reconnects else ""
+        silent = sorted(
+            c for c, t in self._last.items() if (now - t).total_seconds() > self._stale_s
+        )
+        if silent:
+            age = max((now - self._last[c]).total_seconds() for c in silent)
+            return (
+                Health.DOWN,
+                f"行情断流：{'、'.join(silent)} 已 {age:.0f} 秒没消息，{links}{tail}",
+            )
         if self.last_message_at is None:
             return Health.STARTING, f"订阅 {len(self.symbols)} 个币，{links}，等第一条行情{tail}"
         age = (now - self.last_message_at).total_seconds()
-        if age > self._stale_s:
-            return Health.DOWN, f"行情断流 {age:.0f} 秒，{links}{tail}"
+        kinds = " / ".join(f"{k} {n}" for k, n in sorted(self.by_kind.items(), key=lambda x: -x[1]))
         head = f"订阅 {len(self.symbols)} 个币，{links}，最后消息 {max(age, 0):.0f} 秒前{tail}"
+        if kinds:
+            head += f"；累计 {kinds}"
         if self._coverage is not None:
             books, ready = self._coverage(now)
             head += f"；盘口新鲜 {books} 个，ATR 就绪 {ready} 个"
