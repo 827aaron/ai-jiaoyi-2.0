@@ -270,7 +270,12 @@ class Runner:
             self._every(SNAPSHOT_EVERY_S, self.market_snapshot_tick),
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
-            self._every(INCOME_REFRESH_S, self.app.refresh_income),
+            # 有交易所连接时账本回填和收入流水由 LedgerSync 管（成交回报叫醒，60 秒兜底）
+            (
+                asyncio.create_task(self.app.ledger.run())
+                if self.app.ledger is not None
+                else self._every(INCOME_REFRESH_S, self.app.refresh_income)
+            ),
         ]
         loops: asyncio.Future[Any] = asyncio.gather(*self._loops)
         stop: asyncio.Future[Any] = asyncio.ensure_future(self._restart.wait())
@@ -514,6 +519,8 @@ class Runner:
         """平仓后立刻对一次账：万一平仓单在保命止损之后又成交开出反手仓，不等下一个 30 秒。"""
         if not self._reconciling and not self._leaving:
             self._spawn(self.reconcile_tick())
+        if self.app.ledger is not None:
+            self.app.ledger.poke()  # 出场均价、手续费、今日盈亏马上按币安成交回填
 
     async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
         """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""

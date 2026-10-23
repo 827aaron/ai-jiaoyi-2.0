@@ -34,6 +34,7 @@ from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatu
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import CloseFill, ExchangeClient, ExchangeError
+from jiaoyi.execution.fills import LOOKBACK, OPEN_SLACK, UserTrades, entry_fill, exit_fill
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
@@ -116,6 +117,9 @@ class HbExecutorAdapter:
         self._lifeboat_attempts = lifeboat_attempts
         self._income_since = income_since
         self._unknown_executor_rounds: dict[str, int] = {}
+        self._finalizing: set[str] = set()
+        self.fills_note: str | None = None
+        """成交回报通道的状态（「成交回报实时」/「只走 60 秒轮询」），由 LedgerSync 写。"""
         self._exchange = exchange
         self._rec = recorder
         self._clock = clock
@@ -586,6 +590,20 @@ class HbExecutorAdapter:
     async def _finalize(
         self, tracked: TrackedPosition, detail: dict[str, Any], entry: float | None
     ) -> TrackedPosition:
+        """结账只做一次：平仓里的等待循环和主循环的同步可能同时走到这里（APT 那笔记了两条
+        平仓、两条「止损已撤」）。正在结账或已经结完的直接返回账本里的那份。"""
+        pid = tracked.record.position_id
+        if pid in self._finalizing:
+            return self._registry.get(pid) or tracked
+        self._finalizing.add(pid)
+        try:
+            return await self._finalize_once(tracked, detail, entry)
+        finally:
+            self._finalizing.discard(pid)
+
+    async def _finalize_once(
+        self, tracked: TrackedPosition, detail: dict[str, Any], entry: float | None
+    ) -> TrackedPosition:
         rec = tracked.record
         close_type = str(detail.get("close_type") or "").upper().removeprefix("CLOSETYPE.")
         never_filled = rec.entry_price is None and entry is None
@@ -597,6 +615,12 @@ class HbExecutorAdapter:
                 return tracked  # 读不到币安：先不结账，下一轮同步再核对
             if held > 0:  # 币安只返回非零持仓；部分成交只剩零头也算还在
                 return await self._executor_ended_position_remains(tracked, close_type, held)
+        current = self._registry.get(rec.position_id)
+        if current is not None and current.record.status in (
+            PositionStatus.CLOSED,
+            PositionStatus.FAILED,
+        ):
+            return current  # 等币安回话的时候别的路径（直连平仓 / 对账员）已经结过账
         if never_filled:
             status, reason = PositionStatus.FAILED, None
         else:
@@ -635,6 +659,68 @@ class HbExecutorAdapter:
             )
         await self._cancel_lifeboat(tracked.record)
         return self._registry.get(rec.position_id) or tracked
+
+    # ------------------------------------------------------------------ 按币安成交回填
+
+    async def backfill_fills(self, trades: UserTrades) -> int:
+        """账本的入场 / 出场均价、手续费、净盈亏按币安实际成交回填（见 ``fills``）。
+
+        返回改了几笔。"""
+        now = self._clock()
+        changed = 0
+        for tracked in list(self._registry.data.positions.values()):
+            rec = tracked.record
+            if rec.entry_price is None or rec.status in (
+                PositionStatus.OPENING,
+                PositionStatus.FAILED,
+            ):
+                continue
+            need_entry = rec.intended_price is None
+            need_exit = rec.status is PositionStatus.CLOSED and rec.exit_price is None
+            if not (need_entry or need_exit) or (rec.closed_at or now) < now - LOOKBACK:
+                continue
+            try:
+                rows = await trades(rec.symbol, rec.opened_at - OPEN_SLACK)
+            except Exception:
+                log.warning("查 %s 的成交明细失败，下一轮再回填", rec.symbol, exc_info=True)
+                continue
+            entry = entry_fill(rec, rows)
+            if entry is None:
+                continue  # 开仓成交还没查到（或数量对不上）：都不动
+            changes: dict[str, Any] = {}
+            if need_entry:
+                sign = 1.0 if rec.side is Side.LONG else -1.0
+                changes.update(
+                    intended_price=rec.entry_price,
+                    entry_price=entry.price,
+                    stop_loss_price=entry.price * (1.0 - sign * tracked.stop_loss_pct / 100.0),
+                    take_profit_price=entry.price * (1.0 + sign * tracked.take_profit_pct / 100.0),
+                )
+            exit_ = exit_fill(rec, rows, entry) if need_exit else None
+            if exit_ is not None:
+                changes["exit_price"] = exit_.price
+                if entry.commission_usdt is not None and exit_.commission_usdt is not None:
+                    fees = entry.commission_usdt + exit_.commission_usdt
+                    changes.update(fees_usdt=fees, realized_pnl_usdt=exit_.realized_pnl - fees)
+            if not changes:
+                continue
+            tracked = self._set(tracked, **changes)
+            changed += 1
+            parts = []
+            if need_entry:
+                parts.append(f"入场 {rec.entry_price:g} → {entry.price:g}")
+            if exit_ is not None:
+                parts.append(f"出场 {exit_.price:g}")
+            if "realized_pnl_usdt" in changes:
+                fees, net = changes["fees_usdt"], changes["realized_pnl_usdt"]
+                parts.append(f"手续费 {fees:.4f}U，净盈亏 {net:+.2f}U")
+            self._record(
+                Outcome.INFO,
+                f"{rec.symbol} 账本按币安成交回填：" + "，".join(parts),
+                tracked.record,
+                output={"backfill": changes},
+            )
+        return changed
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
         requested = changes.pop("requested_close", tracked.requested_close)
@@ -771,7 +857,8 @@ class HbExecutorAdapter:
     def heartbeat(self, now: datetime, health: Health = Health.OK, headline: str = "") -> None:
         if self._rec is not None:
             live = len(self._registry.live())
-            self._rec.heartbeat(now, health, headline or f"在管持仓 {live} 笔")
+            note = f"；{self.fills_note}" if self.fills_note else ""
+            self._rec.heartbeat(now, health, headline or f"在管持仓 {live} 笔{note}")
 
     # ------------------------------------------------------------------ 告警
 
