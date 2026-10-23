@@ -5,14 +5,16 @@
 - 决策模型失败、没有行情 → hold（维持现状），并且连续计数清零，不拿旧结论凑次数。
 - 平仓要概率明显过线（``keeper_close_p_strong``），或者过线（``keeper_close_p``）且连续
   ``keeper_confirmations`` 次一致，防止反复横跳。
-- 代码规则加一票：作战卡已经没有这个标的、改成只看不做或方向相反，平仓概率至少按过线算
-  （仍需连续确认）。规则只会推向更安全，不会把模型的“平”改成“拿”。
+- 代码规则加一票：只有新作战卡的方向和持仓相反时，平仓概率至少按过线算（仍需连续确认）。
+  新卡改成只看不做、或卡里没有这个币：不投票，持仓交给决策模型 / 止损 / 最长持仓时间处理
+  （不开新仓由拍板人和保镖按卡管）。例外：被封的币（币安下架公告等，``blocked``）照样投票，
+  要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 
 from jiaoyi.contracts import (
@@ -42,8 +44,11 @@ class JevKeeper:
         features: Callable[[str], FeatureSnapshot | None],
         card: Callable[[datetime], BattleCard | None],
         recorder: RoleRecorder | None = None,
+        blocked: Callable[[], Mapping[str, str]] | None = None,
     ) -> None:
+        """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。"""
         self._model = model
+        self._blocked = blocked or dict
         self._cfg = cfg
         self._features = features
         self._card = card
@@ -94,7 +99,12 @@ class JevKeeper:
 
         p_close = ans.probs.get("close", 0.0)
         why = [f"平仓概率 {p_close:.2f}"]
-        rule = self._card_rule(position, card, now)
+        why_blocked = self._blocked().get(position.symbol)
+        rule = (
+            f"已禁止新开仓（{why_blocked}）"
+            if why_blocked is not None
+            else self._card_rule(position, card, now)
+        )
         if rule is not None:
             p_close = max(p_close, self._cfg.keeper_close_p)
             why.append(rule)
@@ -116,11 +126,10 @@ class JevKeeper:
         if card is None or not card.is_valid(now):
             return None  # 卡过期只停开新仓，已有持仓照常盯
         cs = card.for_symbol(position.symbol)
-        if cs is None:
-            return "新作战卡已不再盯这个标的"
-        if cs.bias == Bias.NO_TRADE:
-            return "新作战卡改成只看不做"
-        if cs.bias != Bias.BOTH and cs.bias.value != position.side.value:
+        # 卡里没有 / 只看不做：不投平仓票（研究 v2：只有方向反了才投）
+        if cs is None or cs.bias in (Bias.NO_TRADE, Bias.BOTH):
+            return None
+        if cs.bias.value != position.side.value:
             return f"新作战卡方向改成 {cs.bias.value}"
         return None
 

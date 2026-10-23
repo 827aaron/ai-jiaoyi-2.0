@@ -311,6 +311,7 @@ class KronosForecaster:
         self._latency_sum = 0.0
         self._last_error: str | None = None
         self._day = self._clock().date()
+        self._listeners: list[Callable[[Forecast], None]] = []
 
     @property
     def enabled(self) -> bool:
@@ -519,6 +520,15 @@ class KronosForecaster:
             return
         self._forecasts[sym] = fc
         self._record(sym, (time.perf_counter() - t0) * 1000, fc, None, fc.model)
+        for cb in list(self._listeners):
+            try:
+                cb(fc)
+            except Exception:  # 订阅方出错不影响预测员
+                log.exception("预测结果回调出错")
+
+    def add_listener(self, callback: Callable[[Forecast], None]) -> None:
+        """每出一条新预测回调一次（在事件循环线程里），例如 ``AgainstCardWatch.observe``。"""
+        self._listeners.append(callback)
 
     def _summarize(self, sym: str, paths: list[Path_], last: Kline, model: str) -> Forecast:
         if not paths or any(len(p) != self._s.pred_len for p in paths):

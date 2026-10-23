@@ -91,6 +91,7 @@ from jiaoyi.market.features import RollingFeatureEngine
 from jiaoyi.market.stub import StubMarketDataFeed
 from jiaoyi.patrol.rules import RulePatrol
 from jiaoyi.predictor import KronosForecaster
+from jiaoyi.predictor.against import AgainstCardWatch
 from jiaoyi.predictor.kronos import KronosSettings
 from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
@@ -312,6 +313,8 @@ class Built:
     """启动前必须通过的核对（hummingbot 与 ccxt 是同一账户）；抛异常即拒绝启动。"""
     income: IncomeDaily | None = None
     """币安收入流水按日汇总（data/income_daily.json）；没连交易所时没有。主循环定时刷新。"""
+    against: AgainstCardWatch | None = None
+    """预测员连续看反作战卡的事件 / 查询（慢环订阅它开单币临时会）。"""
 
 
 def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
@@ -466,6 +469,9 @@ def build_modules(
         cfg=app_cfg.predictor,
         display_tz=tz,
     )
+    # 预测员连续看反作战卡 → 事件；慢环订阅（App.against.subscribe）用来开单币临时会
+    against = AgainstCardWatch(cards.current)
+    predictor.add_listener(against.observe)
     features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
     if isinstance(feed, BinanceFuturesFeed):
         feed.set_coverage(features.coverage)
@@ -486,7 +492,14 @@ def build_modules(
         gate_mode = "rule" if isinstance(model, RuleDecisionModel) else "jev"
         decision_model = model
         gate = JevEntryGate(model, recorders[Role.GATE])
-        keeper = JevKeeper(model, fast, features.snapshot, cards.current, recorders[Role.KEEPER])
+        keeper = JevKeeper(
+            model,
+            fast,
+            features.snapshot,
+            cards.current,
+            recorders[Role.KEEPER],
+            blocked=(lambda: cards.blocked_symbols) if isinstance(cards, _Blocks) else None,
+        )
 
     modules = Modules(
         feed=feed,
@@ -518,7 +531,9 @@ def build_modules(
         cards=cards,
         alerter=alerter,
     )
-    return Built(modules, closers, recorders, gate_mode, lot_rules, news, startup_checks, income)
+    return Built(
+        modules, closers, recorders, gate_mode, lot_rules, news, startup_checks, income, against
+    )
 
 
 class App:
@@ -547,6 +562,7 @@ class App:
         self.lot_rules: LotRulesProvider = StubLotRules()
         self.income: IncomeDaily | None = None
         self.news: NewsHub | None = None
+        self.against: AgainstCardWatch | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
         self.paused: dict[str, Any] | None = read_paused(app_cfg.data_dir)
@@ -566,6 +582,7 @@ class App:
             self.lot_rules = built.lot_rules
             self.income = built.income
             self.news = built.news
+            self.against = built.against
         self.m = modules
         self.pool: SymbolPool | None = None
         self.started = False
