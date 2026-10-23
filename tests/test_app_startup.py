@@ -23,11 +23,15 @@ from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.reconciler import ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry
 from jiaoyi.predictor.kronos import KronosForecaster
+from jiaoyi.slow.commander import BattleCardCommander
 from tests.fakes import FakeExchange, FakeHbApi
 from tests.test_loop import _app
+from tests.test_slow_commander import RISK, FakeEngine
 
 
-@pytest.mark.parametrize("cls", [HbExecutorAdapter, BinanceLifeboat, KronosForecaster])
+@pytest.mark.parametrize(
+    "cls", [HbExecutorAdapter, BinanceLifeboat, KronosForecaster, BattleCardCommander]
+)
 def test_module_heartbeat_takes_now(cls: type, now: datetime) -> None:
     # 和 App.heartbeat_all 的调用方式一致：heartbeat(now)，其余参数有默认值
     inspect.signature(cls.heartbeat).bind(object(), now)
@@ -64,3 +68,15 @@ async def test_paper_with_real_execution_starts_and_heartbeats(
     status = json.loads((tmp_path / "module_status.json").read_text(encoding="utf-8"))
     assert {"executor", "lifeboat"} <= set(status)
     await app.stop()
+
+
+async def test_real_commander_heartbeats_through_app_heartbeat_all(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    log = JsonlDecisionLog(tmp_path)
+    commander = BattleCardCommander(FakeEngine([]), RISK, log, clock=app.clock)
+    app.m = dataclasses.replace(app.m, cards=commander)
+    app.heartbeat_all()  # 签名对不上会在这里 TypeError，让所有角色的心跳一起断
+    status = json.loads((tmp_path / "module_status.json").read_text(encoding="utf-8"))
+    assert "等第一轮会议" in status[Role.COMMANDER.value]["headline"]
