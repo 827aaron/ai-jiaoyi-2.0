@@ -469,3 +469,4 @@ tr.fade td { opacity: 0.55; }
   .bc-c { font-size: 12px; }
   .bc-c::before { content: attr(data-k) " "; color: var(--dim); font-size: 11px; }
 }
+.card-eff { margin: 6px 0 2px; line-height: 1.5; }

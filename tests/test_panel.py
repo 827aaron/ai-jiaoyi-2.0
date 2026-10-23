@@ -175,6 +175,9 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert [s.symbol for s in ov.card.symbols] == ["BTCUSDT"]
     assert ov.card.symbols[0].key_levels[0].model_dump() == {"price": 68000.0, "kind": "resistance"}
     assert ov.card.leverage_max is not None
+    # 摘要行写保镖真会用的：作战卡不约束（默认）时杠杆 = 硬上限；L 档每笔风险 = 总资产 × 风险%
+    assert ov.card.leverage_used == int(RISK.max_leverage)
+    assert ov.card.risk_per_trade_usdt == pytest.approx(10_080 * RISK.risk_per_trade_pct / 100)
     assert ov.card.size_fractions["L"] == 1.0 and 0 < ov.card.size_fractions["S"] <= 1  # 仓位档折扣
 
     assert [a.level for a in ov.alerts] == ["warn"]
@@ -1126,3 +1129,20 @@ async def test_card_atr_same_formula_as_guard() -> None:
     fl = c.FastLoopConfig(atr_long_period_min=60)
     assert blend_atr(1.0, 4.0, fl) == pytest.approx(2.0)
     assert blend_atr(1.0, None, fl) == 1.0
+
+
+def test_today_ai_cost_reads_slow_budget(tmp_path: Path) -> None:
+    """军师团今天的花费以 slow_budget.json 为准（预记、失败都算）；别的日子的文件不认。"""
+    from jiaoyi.core.recorder import local_day
+    from jiaoyi.panel.pages import build_funds
+
+    _seed(tmp_path)
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    base = build_funds(files, HB, RISK, NOW).pnl[0].ai_usd
+    cmd = sum(r.cost_usd for r in files.decisions_today(NOW) if r.role is c.Role.COMMANDER)
+    day = local_day(NOW, RISK.day_reset_tz)
+    budget = tmp_path / "slow_budget.json"
+    budget.write_text(json.dumps({"day": day.isoformat(), "cost_usd": 6.04}))
+    assert build_funds(files, HB, RISK, NOW).pnl[0].ai_usd == pytest.approx(base - cmd + 6.04)
+    budget.write_text(json.dumps({"day": "2026-01-01", "cost_usd": 6.04}))
+    assert build_funds(files, HB, RISK, NOW).pnl[0].ai_usd == pytest.approx(base)

@@ -255,7 +255,7 @@ async function showDayPnl() {
       ${row("资金费", t.funding_usdt, t.funding_usdt == null ? "没有币安收入流水，拿不到" : "")}
       ${row("持仓浮盈变化及其他", rest, "还没平的单从 0 点到现在的浮盈变化；也含转入转出、流水还没拉到的部分")}
       <tr class="hi"><td><b>账户今日盈亏</b><div class="dim small">= 总资产 − 0 点的总资产，和顶部一致</div></td><td class="r num ${cls(day)}"><b>${signed(day, 2)} U</b></td></tr>
-      ${row("AI 费", -t.ai_usd, "拍板人、军师团、管家的调用费（美元按 1 U 算），不从交易账户扣")}
+      ${row("AI 费", -t.ai_usd, "拍板人、管家、预测员的调用费加军师团今天已花（读慢环预算文件，含正在开的会），美元按 1 U 算，不从交易账户扣")}
       <tr class="hi"><td><b>扣 AI 费后</b></td><td class="r num ${cls(day - t.ai_usd)}"><b>${signed(day - t.ai_usd, 2)} U</b></td></tr>
     </tbody></table></div>
     <p class="dim small">平仓、手续费、资金费来自${src}${k.as_of ? `；总资产截至 ${hms(k.as_of)}` : ""}。平仓赚了但账户今日盈亏还是负的，通常是手续费、别的持仓浮亏，或者流水还没拉到（这时差额先算在「持仓浮盈变化及其他」里）。</p>`);
@@ -490,7 +490,8 @@ function cardRow(s, now) {
     stop = `${range(s.stop_atr, "", 1)} 倍波动`;
     tp = s.take_profit_r ? `${s.take_profit_r[0]} 倍止损` : "—";
   }
-  const lev = p ? `${p.leverage} 倍` : s.leverage ? `${range(s.leverage, "", 0)} 倍` : "—";
+  const used = data && data.card && data.card.leverage_used;
+  const lev = p ? `${p.leverage} 倍` : used ? `${used} 倍` : s.leverage ? `${range(s.leverage, "", 0)} 倍` : "—";
   const size = s.size_tier_max ? `${esc(TIER[s.size_tier_max] || s.size_tier_max)}档` : "—";
   const sum = `<summary class="bc-row">
     <span class="bc-sym"><b>${coin(sym)}</b> <span class="dim small">${esc(CAT[s.category] || s.category)}</span></span>
@@ -524,7 +525,7 @@ function cardBody(s, L) {
       <div><span class="tag-ref">参考</span><span class="dim small">原话里的价是军师说的，系统不会等这个价，只按信号和上面的止损 / 止盈下单。</span></div>
       <div class="txt">${esc(s.reason || "（这场会没写理由）")}</div>
       ${levelsLine(s)}
-      <dl class="bc-kv small"><dt>止损倍数</dt><dd>${range(s.stop_atr, "", 1)} 倍 ATR（拍板人选窄 / 中 / 宽）</dd><dt>止盈倍数</dt><dd>${range(s.take_profit_r, "", 1)} 倍止损距离（保镖用下限）</dd><dt>单笔仓位</dt><dd>${range(s.notional_usdt, "", 0)} U（含杠杆，最终保镖按风险算）</dd></dl>
+      <dl class="bc-kv small"><dt>军师建议止损</dt><dd>${range(s.stop_atr, "", 1)} 倍 ATR（拍板人选窄 / 中 / 宽）</dd><dt>军师建议止盈</dt><dd>${range(s.take_profit_r, "", 1)} 倍止损距离（保镖用下限）</dd><dt>军师建议杠杆</dt><dd>${range(s.leverage, "", 0)} 倍（只是建议，实际用设置里的杠杆）</dd><dt>军师建议仓位</dt><dd>${range(s.notional_usdt, "", 0)} U（只是建议，实际由保镖按风险算）</dd></dl>
     </div></details>`;
   return `<div class="plan">${plan}</div>${from}${calc}${lad}<div class="bc-foot">${raw}<a class="small" ${clickable("meeting", sym)}>开会过程 ›</a></div>`;
 }
@@ -905,10 +906,19 @@ function cardSection(c) {
       <span class="r">${hm(c.created_at)} 更新 · ${c.valid ? until : '<span class="down">已过期，不开新仓</span>'} <button class="btn b-sm" ${clickable("cmd", "refresh_cards")}>重新开会</button></span></div>
     <div class="row">${pills || '<span class="dim">这一轮没有要做的币</span>'}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
     ${idle.length ? `<div class="dim small">${idleLine(idle)}（不开仓）</div>` : ""}
-    <dl class="kv"><dt>止损</dt><dd>${range(c.stop_atr, " ATR")}</dd><dt>杠杆</dt><dd>${c.leverage_max == null ? "—" : "≤ " + c.leverage_max + " 倍"}</dd><dt title="军师团建议的名义仓位范围（已含杠杆），最终由保镖按风险算">单笔仓位（含杠杆）</dt><dd title="军师团建议的名义仓位范围（已含杠杆），最终由保镖按风险算">${range(c.notional_usdt, " U")}</dd></dl>
+    ${cardEffective(c)}
     ${c.regime ? `<div class="note"><b>军师纪要</b>　${esc(c.regime)}</div>` : ""}
     <div class="foot">点开看每个币的方向、止损、杠杆和理由 ›</div>
   </section>`;
+}
+
+// 作战卡摘要：只写保镖下单真会用的数（杠杆、每笔风险金额）；军师团给的范围只是建议，点开每个币才看得到
+function cardEffective(c) {
+  const f = c.size_fractions || {};
+  const r = c.risk_per_trade_usdt;
+  const risk = r == null ? "拿不到总资产，算不出每笔风险" : `每笔最多亏 ${["S", "M", "L"].filter((k) => f[k] != null).map((k) => `${TIER[k]}档 ${money(r * f[k], 0)}`).join(" / ")} U`;
+  const lev = c.leverage_used == null ? "杠杆按各币卡上的" : `杠杆 ${c.leverage_used}x`;
+  return `<div class="small card-eff"><span class="dim">实际下单：</span>${lev} · ${risk} · 止损按每个币自己的波动算，名义 = 风险 ÷ 止损距离</div>`;
 }
 
 function feedSection(feed, signals) {

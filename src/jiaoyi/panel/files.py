@@ -160,6 +160,17 @@ class PanelFiles:
         """主程序每 5 分钟从币安收入流水汇总的按日盈亏（data/income_daily.json）；没有就是 None。"""
         return self._json("income_daily.json")
 
+    def slow_budget_cost(self, day: date) -> float | None:
+        """军师团今天已花的钱（data/slow_budget.json，开会前就预记、失败也算，和日上限同一个数）。
+
+        文件的日子不是 ``day`` 或读不懂就是 None。每次都读文件，不缓存。
+        """
+        raw = self._json("slow_budget.json")
+        if not isinstance(raw, dict) or raw.get("day") != day.isoformat():
+            return None
+        cost = raw.get("cost_usd")
+        return float(cost) if isinstance(cost, int | float) and cost >= 0 else None
+
     def market_snapshot(self) -> dict[str, Any] | None:
         """盘口员每 5 秒写的逐币行情和各路推送计数（data/market_snapshot.json）；没有就是 None。"""
         raw = self._json("market_snapshot.json")
