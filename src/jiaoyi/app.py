@@ -81,6 +81,7 @@ from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.commander import BattleCardCommander
+from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
@@ -183,6 +184,8 @@ def _build_cards(
     decision_log: JsonlDecisionLog,
     secrets: SecretStore,
     clock: Clock,
+    closers: list[Closer],
+    liquidations: LiquidationSource | None = None,
 ) -> tuple[BattleCardProvider, NewsHub | None]:
     """军师团：有 DeepSeek key 且装了 ``jiaoyi[slow]`` 才用真的，否则用桩（没卡 = 不开新仓）。
 
@@ -195,7 +198,10 @@ def _build_cards(
         log.warning("没装 tradingagents（uv pip install -e '.[slow]'），军师团用桩")
         return StubBattleCardProvider(), None
     news = NewsHub(default_sources(), decision_log, clock=clock)
-    engine = TradingAgentsEngine(risk_cfg, secrets, today=clock, news=news)
+    closers.append(news.aclose)
+    engine = TradingAgentsEngine(
+        risk_cfg, secrets, today=clock, news=news, liquidations=liquidations
+    )
     commander = BattleCardCommander(
         engine, risk_cfg, decision_log, pick_max=app_cfg.card_pick_max, clock=clock
     )
@@ -299,9 +305,11 @@ def build_modules(
         feed = StubMarketDataFeed()
         screener, cards = StubSymbolScreener(), StubBattleCardProvider()
     else:
-        feed = BinanceFuturesFeed()
+        bfeed = BinanceFuturesFeed()
+        feed = bfeed
         # 选币只读币安公开接口，不需要 key
-        source = BinanceStatsSource()
+        # 强平统计由行情层的全市场强平流产出，选币和军师团共用，不另开连接
+        source = BinanceStatsSource(liquidations=bfeed.liquidations)
         closers.append(source.aclose)
         screener = CodeSymbolScreener(
             source,
@@ -312,7 +320,9 @@ def build_modules(
                 round_trip_fee_bps=risk_cfg.taker_fee_bps * 2,
             ),
         )
-        cards, news = _build_cards(risk_cfg, app_cfg, decision_log, secrets, clock)
+        cards, news = _build_cards(
+            risk_cfg, app_cfg, decision_log, secrets, clock, closers, bfeed.liquidations
+        )
 
     alerter: Alerter
     executor: ExecutorAdapter

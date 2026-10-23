@@ -12,6 +12,7 @@ from jiaoyi.app import App, Modules, is_stub
 from jiaoyi.cli import main
 from jiaoyi.core.config import load_app_config, load_risk_config
 from jiaoyi.interfaces import Predictor
+from jiaoyi.market.binance_ws import BinanceFuturesFeed
 from jiaoyi.predictor import KronosForecaster
 from jiaoyi.predictor.stub import StubPredictor
 from jiaoyi.slow.commander import BattleCardCommander
@@ -118,9 +119,11 @@ async def test_slow_loop_key_but_no_tradingagents_uses_stub(
 async def test_slow_loop_with_key_uses_commander(
     tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    seen: dict[str, object] = {}
+
     class FakeEngine:
         def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
+            seen.update(kwargs)
 
     monkeypatch.setattr(app_mod.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
@@ -128,6 +131,13 @@ async def test_slow_loop_with_key_uses_commander(
     assert isinstance(app.m.cards, BattleCardCommander)
     assert isinstance(app.news, NewsHub)  # 真军师团才拉新闻
     assert app.m.cards.current(now) is None  # 还没开会就没有卡
+    # 强平统计：行情层一份，选币和军师团共用
+    assert isinstance(app.m.feed, BinanceFuturesFeed)
+    assert seen["liquidations"] is app.m.feed.liquidations
+    assert isinstance(app.m.screener, CodeSymbolScreener)
+    assert app.m.screener._source._liq is app.m.feed.liquidations  # type: ignore[attr-defined]
+    closers = list(app._closers)
+    assert app.news.aclose in closers  # 退出时关新闻源连接
     await app.stop()
 
 
