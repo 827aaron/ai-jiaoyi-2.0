@@ -78,7 +78,7 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 
 开会花多少钱、多频繁，都能在 `config/slow.toml` 里调（示例见 `config/slow.example.toml`）：
 
-- `[meeting]`：每类标的请哪几位分析师（`market/social/news/fundamentals`，至少一位、不重复）、多空辩论和风控讨论轮数（0–3）、flash/pro 模型名、挑币会议和“整理作战指令”两步各用 `quick`（flash，便宜）还是 `deep`（pro）、`max_tokens`、重试次数。
+- `[meeting]`：每类标的请哪几位分析师（`market/social/news/fundamentals`，至少一位、不重复）、多空辩论和风控讨论轮数（0–3）、flash/pro 模型名、挑币会议和“整理作战指令”两步各用 `quick`（flash，便宜）还是 `deep`（深度档模型，默认与 quick 同为 4.1）、`max_tokens`、重试次数。
 - `[schedule]`：并发（1–8）、作战卡有效期（1–4 小时）、同一个币两次会议最小间隔（0.5–12 小时）。
 - `[prices]`：每百万 token 美元价，只用于花费统计（占位值，M2 真机按官网核对）。
 
@@ -96,3 +96,14 @@ python -m jiaoyi.slow.review --json          # 逐条明细
 ```
 
 用公开 5 分钟 K 线，在卡的有效期内算收盘涨跌、最大有利 / 不利波动；long/short 才算命中（方向收益 > 0），both / no_trade 只看波动。**只读报告，不会自动改任何权重、阈值或提示词。**样本少（几十条以内）时别当结论。接线（架构师）：创建 commander 时传 `journal=CardJournal(data_dir)`。
+
+## 大模型来源：DeepSeek 直连或 OpenRouter
+
+`config/slow.toml` 的 `[llm] provider` 选来源，默认 `deepseek`（直连，`DEEPSEEK_API_KEY`），行为不变。改成 `openrouter` 后走 TradingAgents 自带的 OpenRouter provider（`OPENROUTER_API_KEY`，`jiaoyi setup-keys OPENROUTER_API_KEY` 录入），仍是同一批 DeepSeek 模型：
+
+| provider | quick（flash） | deep（pro） |
+|---|---|---|
+| deepseek | `deepseek-flash`（V4.1 Flash） | `deepseek-flash`（同上） |
+| openrouter | `deepseek/deepseek-v4.1-flash` | `deepseek/deepseek-v4.1-flash` |
+
+Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模型；想换回 pro 在 `[meeting] deep_model` 写 `deepseek-v4-pro`（OpenRouter 为 `deepseek/deepseek-v4-pro`）。OpenRouter 的 id 核对于 2026-10-23（`/api/v1/models`），`[meeting] quick_model / deep_model` 写了就覆盖默认。结构化输出的重试逻辑、成本统计（按模型名里有没有 `pro` 分档）不变；OpenRouter 的实际单价随上游供应商浮动，`[prices]` 仍是占位，M2 真机后按账单核对。没有对应 key 时军师团退回桩（不出卡、不开新仓）。

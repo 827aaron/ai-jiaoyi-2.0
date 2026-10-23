@@ -50,11 +50,24 @@ from jiaoyi.slow.news import NewsHub, format_items
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
 
 
+# 军师团可选的大模型来源：直连 DeepSeek（默认），或经 OpenRouter 用同一批 DeepSeek 模型。
+# 模型 id 核对于 2026-10-23（OpenRouter /api/v1/models）：deepseek-flash 对应 V4.1 Flash。
+# Aaron 2026-10-23 决定：深度档也用 4.1（flash），不用 v4-pro；想换回去在 slow.toml 写 deep_model。
+PROVIDER_KEY_ENV: Mapping[str, str] = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+PROVIDER_MODELS: Mapping[str, tuple[str, str]] = {  # (quick, deep)
+    "deepseek": ("deepseek-flash", "deepseek-flash"),
+    "openrouter": ("deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash"),
+}
+
+
 @dataclass(frozen=True)
 class TradingAgentsSettings:
     provider: str = "deepseek"
     quick_model: str = "deepseek-flash"
-    deep_model: str = "deepseek-v4-pro"
+    deep_model: str = "deepseek-flash"
     output_language: str = "Chinese"
     debate_rounds: int = 1
     risk_rounds: int = 1
@@ -63,7 +76,7 @@ class TradingAgentsSettings:
     # 每类标的请哪几位分析师（越少越省钱）；默认与 TradingAgents 的完整阵容一致。
     analysts_crypto: tuple[str, ...] = ("market", "social", "news")
     analysts_stock: tuple[str, ...] = ("market", "social", "news", "fundamentals")
-    # 挑币会议、整理作战指令这两步用哪档模型："quick"=flash，"deep"=pro。
+    # 挑币会议、整理作战指令这两步用哪档模型："quick"=flash，"deep"=深度档模型。
     pick_tier: str = "quick"
     convert_tier: str = "quick"
     # 每百万 token 的美元价（输入, 输出）。⚠ 占位值，M2 拿到 key 真机验证时按 DeepSeek 官网核对，
@@ -388,14 +401,18 @@ class TradingAgentsEngine:
         liquidations: LiquidationSource | None = None,
         brief: MarketBriefService | None = None,
     ) -> None:
-        key = secrets.get("DEEPSEEK_API_KEY")
+        settings = settings or TradingAgentsSettings()
+        key_env = PROVIDER_KEY_ENV.get(settings.provider)
+        if key_env is None:
+            raise RuntimeError(f"不支持的 provider：{settings.provider}")
+        key = secrets.get(key_env)
         if not key:
-            raise RuntimeError("缺少 DEEPSEEK_API_KEY：先跑一次 setup-keys")
+            raise RuntimeError(f"缺少 {key_env}：先跑一次 setup-keys")
         # TradingAgents 只认环境变量。注意子进程会继承：从本进程拉起别的程序时 env= 里要去掉它；
         # 日志和 DecisionRecord 不得写入请求头或配置字典。
-        os.environ.setdefault("DEEPSEEK_API_KEY", key)
+        os.environ.setdefault(key_env, key)
         self._risk = risk
-        self._s = settings or TradingAgentsSettings()
+        self._s = settings
         self._today = today
         self._news = news
         self._brief = brief

@@ -71,3 +71,47 @@ def test_engine_tier_selection() -> None:
     g = SimpleNamespace(quick_thinking_llm="flash", deep_thinking_llm="pro")
     assert TradingAgentsEngine._llm(g, "quick") == "flash"
     assert TradingAgentsEngine._llm(g, "deep") == "pro"
+
+
+def test_openrouter_provider_picks_namespaced_models(tmp_path: Path) -> None:
+    p = tmp_path / "slow.toml"
+    p.write_text('[llm]\nprovider = "openrouter"\n', encoding="utf-8")
+    s = load_slow_config(p).engine_settings()
+    assert s.provider == "openrouter"
+    assert (s.quick_model, s.deep_model) == (
+        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash",
+    )
+    p.write_text('[llm]\nprovider = "openrouter"\n[meeting]\ndeep_model = "x/y-pro"\n', "utf-8")
+    assert load_slow_config(p).engine_settings().deep_model == "x/y-pro"
+
+
+def test_unknown_provider_refuses(tmp_path: Path) -> None:
+    p = tmp_path / "slow.toml"
+    p.write_text('[llm]\nprovider = "openai"\n', encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_slow_config(p)
+
+
+def test_engine_reads_key_for_its_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiaoyi.slow.tradingagents_engine import TradingAgentsEngine
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # CI 没装 tradingagents（可选依赖），只测密钥选择
+    monkeypatch.setattr("jiaoyi.slow.tradingagents_engine.register_binance_vendor", lambda: None)
+
+    class S:
+        def __init__(self, d: dict[str, str]) -> None:
+            self.d = d
+
+        def get(self, n: str) -> str | None:
+            return self.d.get(n)
+
+    cfg = SlowConfig.model_validate({"llm": {"provider": "openrouter"}})
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        TradingAgentsEngine(None, S({"DEEPSEEK_API_KEY": "k"}), cfg.engine_settings())  # type: ignore[arg-type]
+    TradingAgentsEngine(None, S({"OPENROUTER_API_KEY": "k"}), cfg.engine_settings())  # type: ignore[arg-type]
+    import os
+
+    assert os.environ["OPENROUTER_API_KEY"] == "k"
+    monkeypatch.delenv("OPENROUTER_API_KEY")
