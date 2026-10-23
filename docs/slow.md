@@ -360,3 +360,16 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 ### 缓存与 token 记录
 
 会议记录的 `llm_calls[]` 现在每次调用多带 `input_tokens`、`cached_tokens`（OpenRouter 的 `prompt_tokens_details.cached_tokens`），`output.usage` 同样有 `cached_tokens`。面板「AI 费用详情」脚注显示「缓存命中 N%」（只算记了缓存字段的调用，旧记录没有就显示「还没有记录」）。默认模型换成 OpenRouter `deepseek/deepseek-v4.1-flash-1017`（基础价 0.15 / 0.60，缓存读 0.003；UTC 周一到五 01–04、06–10 点翻倍到 0.30 / 1.20；旧 id 全天 0.30 / 1.20），仍可在 `[meeting] quick_model / deep_model` 写任何 OpenRouter 模型 id。
+
+## 作战卡 = 指令池
+
+作战卡不再是「一轮一张、整张到期」，而是按币各自有效期的指令池：
+
+- 每场会出一条币指令，带 `issued_at`（哪一刻开的会）、`expires_at`（该轮开会间隔 + 提前量）、`meeting_id`。
+- 新一轮只替换这轮开过会的币；没开会的币原样留着，到各自的点自动消失（观望指令也一样）。
+- 持仓币的指令不因到期消失，只清空信号（不再开新仓），直到被新结论替换。
+- 临时会只更新那一个币，到期时间跟当前这一轮走。
+- `commander.current()` 返回的是过滤后的视图（快环 / 保镖 / 持仓管家都读它），池空了返回 None。
+- 落盘：`data/battle_card.json`（原子写）带各币时间戳，重启按原到期时间恢复；复盘流水 `card_review/cards.jsonl` 每条指令的窗口用币自己的出会 / 到期时间。
+- 面板每行显示「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟变灰，过期的币不显示（持仓币标「已到期，持仓中，不再开新仓」）。
+- 一轮一场都没开成：照旧记失败并退避重试，池里原来的指令不动。

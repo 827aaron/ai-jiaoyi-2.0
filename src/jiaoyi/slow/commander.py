@@ -314,6 +314,9 @@ class BattleCardCommander:
         c = self._card
         if c is None or not c.is_valid(now):
             return None
+        c = self._pool_view(c, now)
+        if c is None:
+            return None
         c = self._mask_stale(c, now)
         if not self._blocked:
             return c
@@ -341,6 +344,44 @@ class BattleCardCommander:
         """总盘会一挑完币就回调（本轮要开会的币，含置顶和持仓）：主循环马上订阅它们的行情、
         让预测员先算，不用等十几分钟后作战卡出来。"""
         self._on_picks = callback
+
+    def _pool_view(self, card: BattleCard, now: datetime) -> BattleCard | None:
+        """指令池：每个币的指令按自己的有效期到点消失；持仓币的指令不消失，只是不再开新仓，
+        直到被新结论替换。池空了返回 None。"""
+        kept: list[CardSymbol] = []
+        for s in card.symbols:
+            if now < (s.expires_at or card.expires_at):
+                kept.append(s)
+            elif s.symbol in self._held:
+                kept.append(self._watch_only(s))
+        if not kept:
+            return None
+        if kept == card.symbols:
+            return card
+        return card.model_copy(update={"symbols": kept})
+
+    @staticmethod
+    def _stamp(cs: CardSymbol, issued: datetime, expires: datetime) -> CardSymbol:
+        """给一条指令盖上「哪一刻开的会、到几点到期」。"""
+        return cs.model_copy(
+            update={
+                "issued_at": issued,
+                "expires_at": expires,
+                "meeting_id": f"{cs.symbol}-{issued:%Y%m%dT%H%M%S}",
+            }
+        )
+
+    def _fit(self, syms: list[CardSymbol]) -> list[CardSymbol]:
+        """池子装不下（卡最多 50 个币）时先丢最早到期的，持仓币不丢。"""
+        extra = len(syms) - 50
+        if extra <= 0:
+            return syms
+        order = sorted(
+            (s for s in syms if s.symbol not in self._held),
+            key=lambda s: s.expires_at or datetime.min.replace(tzinfo=UTC),
+        )
+        drop = {s.symbol for s in order[:extra]}
+        return [s for s in syms if s.symbol not in drop]
 
     def _hold_only(self, symbol: str, side: Side, category: Category) -> CardSymbol:
         """旧卡里也没有这个持仓币时合成一条：按持仓方向只盯不开（信号清空，不开新仓）。"""
@@ -620,7 +661,11 @@ class BattleCardCommander:
             beat.cancel()
             self._progress = ""
         self._pick_cost = 0.0  # 没有总盘会这一份，别重复记上一轮的
-        new = self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop))
+        new = self._stamp(
+            self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
+            now,
+            card.expires_at,  # 临时会不改整轮的节奏：到期时间跟这一轮走
+        )
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
         if all(s.symbol != symbol for s in card.symbols):
             symbols.append(new)
@@ -936,10 +981,12 @@ class BattleCardCommander:
             last = self._last_meeting.get(e.symbol)
             old = prev_card.for_symbol(e.symbol) if prev_card is not None else None
             if (
-                old is not None
+                prev_card is not None
+                and old is not None
                 and last is not None
                 and now - last < self._symbol_min_interval
                 and e.symbol not in forced
+                and now < (old.expires_at or prev_card.expires_at)
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
@@ -948,18 +995,19 @@ class BattleCardCommander:
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
         base_version = prev.version if prev is not None and same_day else 0
-        symbols: dict[str, CardSymbol] = dict(reused)
-        # 本轮还没轮到 / 开会失败的币：上一张卡的指令先留着，开完哪个换哪个，不然持仓管家会看到
-        # 卡上暂时没有这个币而判“不再盯”。上一张卡已过期就不沿用旧指令，只给有持仓的币留“不开新仓”
-        old_ok = prev is not None and prev.is_valid(now)
-        for e in to_meet:
-            old = prev.for_symbol(e.symbol) if prev is not None else None
-            if old is None:
+        # 指令池：上一张卡里还没到期的币原样留着（这轮没开会的币不动），开完哪个换哪个；
+        # 持仓币的指令到期也不消失，只清空信号。池外（已被筛掉）的币不留
+        in_pool = {e.symbol for e in pool.in_pool}
+        symbols: dict[str, CardSymbol] = {}
+        for old in prev.symbols if prev is not None else []:
+            exp = old.expires_at or (prev.expires_at if prev is not None else now)
+            if old.symbol not in in_pool and old.symbol not in self._held:
                 continue
-            if old_ok:
-                symbols[e.symbol] = clamp_to_risk(old, self._risk, self._stop)
-            elif e.symbol in self._held:
-                symbols[e.symbol] = self._watch_only(old)
+            if now < exp:
+                symbols[old.symbol] = clamp_to_risk(old, self._risk, self._stop)
+            elif old.symbol in self._held:
+                symbols[old.symbol] = self._watch_only(old)
+        symbols.update(reused)
         # 有持仓的币卡上必须有：没有新结论就沿用旧指令（只清空信号），旧卡里也没有就按持仓方向合成
         for sym, side in self._held.items():
             if sym in symbols:
@@ -973,15 +1021,17 @@ class BattleCardCommander:
         cost = picked.cost_usd
         published = 0
 
+        round_expiry = now + self._ttl_now()
+
         def make_card() -> BattleCard:
             return BattleCard(
                 card_id=self._card_id(now),
                 version=base_version + max(published, 1),
                 created_at=now,
-                expires_at=now + self._ttl_now(),
+                expires_at=round_expiry,
                 source="tradingagents",
                 regime=picked.regime,
-                symbols=list(symbols.values()),
+                symbols=self._fit(list(symbols.values())),
                 refresh_reason=reason,
                 llm_cost_usd=round(cost, 6),
             )
@@ -990,8 +1040,10 @@ class BattleCardCommander:
             nonlocal cost, published
             res = await self._analyze_one(e, picked.regime)
             # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
-            symbols[e.symbol] = self._limit_size(
-                clamp_to_risk(res.card_symbol, self._risk, self._stop)
+            symbols[e.symbol] = self._stamp(
+                self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
+                now,
+                round_expiry,
             )
             cost += res.cost_usd
             published += 1
@@ -1026,9 +1078,8 @@ class BattleCardCommander:
                 continue
             if e.symbol in self._held and e.symbol in symbols:
                 symbols[e.symbol] = self._watch_only(symbols[e.symbol])  # 开会失败：持仓照常盯
-            else:
-                symbols.pop(e.symbol, None)  # 没有新结论的币不留旧指令
-        if not symbols:
+            # 没开成会的币：池里原来的指令照旧，到它自己的点才消失
+        if to_meet and published == 0:  # 旧指令还在池里，但这一轮一场都没开成：记失败、退避重试
             raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         card = make_card()
         self._card = card
@@ -1307,6 +1358,15 @@ class BattleCardCommander:
                 "version": card.version,
                 "expires_at": card.expires_at.isoformat(),  # 面板据此显示“还有多久有效”
                 "symbols": [s.symbol for s in card.symbols],
+                # 指令池：每个币自己的出会时间和到期时间，面板据此显示 / 到期隐藏
+                "pool": {
+                    s.symbol: {
+                        "issued_at": (s.issued_at or card.created_at).isoformat(),
+                        "expires_at": (s.expires_at or card.expires_at).isoformat(),
+                        "held": s.symbol in self._held,
+                    }
+                    for s in card.symbols
+                },
                 "total_cost_usd": card.llm_cost_usd,
             },
             latency_ms=(time.monotonic() - started) * 1000,

@@ -533,7 +533,7 @@ async def test_held_symbol_stays_on_card_watch_only_when_failed_or_outside_pool(
     c, _, clock = make(tmp_path, eng, now, symbol_min_interval=timedelta(minutes=30))
     await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT")), "启动")
     c.set_held({"AAUSDT": Side.LONG, "BBUSDT": Side.LONG})
-    clock[0] = now + timedelta(minutes=115)
+    clock[0] = now + timedelta(minutes=125)  # 旧指令到期了
     eng.picks, eng.fail = ["AAUSDT", "CCUSDT"], {"AAUSDT"}  # AA 开会失败，BB 已不在候选池里
     card = await c.refresh(pool(clock[0], entry("AAUSDT"), entry("CCUSDT")), "到期前")
     by = {s.symbol: s for s in card.symbols}
@@ -579,7 +579,7 @@ async def test_failed_symbol_without_position_is_dropped(tmp_path: Path, now: da
     eng = FakeEngine(["AAUSDT", "BBUSDT"])
     c, _, clock = make(tmp_path, eng, now, symbol_min_interval=timedelta(minutes=30))
     await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
-    clock[0] = now + timedelta(minutes=115)
+    clock[0] = now + timedelta(minutes=125)  # 旧指令到期了
     eng.fail = {"AAUSDT"}
     card = await c.refresh(pool(clock[0], entry("AAUSDT"), entry("BBUSDT")), "到期前")
     assert {s.symbol for s in card.symbols} == {"BBUSDT"}

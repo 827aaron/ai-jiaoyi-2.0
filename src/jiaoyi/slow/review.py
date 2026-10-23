@@ -64,8 +64,8 @@ class CardJournal:
             JournalRow(
                 card_id=card.card_id,
                 version=card.version,
-                created_at=card.created_at,
-                expires_at=card.expires_at,
+                created_at=s.issued_at or card.created_at,
+                expires_at=s.expires_at or card.expires_at,
                 regime=card.regime,
                 refresh_reason=card.refresh_reason,
                 symbol=s.symbol,

@@ -73,6 +73,16 @@ class CardSymbol(Contract):
     )
     take_profit_r: Range = Field(description="止盈距离范围，止损距离的倍数，例如 1.5–3。")
     reason: str = Field(min_length=1, description="军师给的理由，中文。")
+    issued_at: AwareDatetime | None = Field(
+        default=None,
+        description="这条指令是哪一刻开会出的；没有（旧卡 / 手写卡）按卡的 created_at。",
+    )
+    expires_at: AwareDatetime | None = Field(
+        default=None,
+        description="这条指令自己的到期时间（该轮开会间隔 + 提前量）；没有按卡的 expires_at。"
+        "持仓币的指令不因到期消失，只是不再开新仓。",
+    )
+    meeting_id: str | None = Field(default=None, description="出这条指令的会议编号。")
 
 
 class BattleCard(Contract):
@@ -103,6 +113,11 @@ class BattleCard(Contract):
     def is_valid(self, now: datetime) -> bool:
         """``now`` 在有效期内才算有效。"""
         return self.created_at <= now < self.expires_at
+
+    def symbol_expires_at(self, symbol: str) -> datetime | None:
+        """这个币的指令何时到期：币自己的，没有就按整张卡的。"""
+        cs = self.for_symbol(symbol)
+        return None if cs is None else (cs.expires_at or self.expires_at)
 
     def for_symbol(self, symbol: str) -> CardSymbol | None:
         return next((s for s in self.symbols if s.symbol == symbol), None)
