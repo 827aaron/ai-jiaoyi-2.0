@@ -21,6 +21,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.contracts.risk_config import recommended_caps
+from jiaoyi.core.pool_overrides import read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
@@ -457,10 +458,17 @@ class PoolPage(BaseModel):
     entries: list[SymbolPoolEntry]
     """进池的在前，按分数从高到低；没进池的（没过硬条件、拉黑）在后。"""
     blocked: dict[str, str]
+    pinned: list[str] = []
+    """你固定的币（data/pool_overrides.json，比候选池文件新：改完要等主循环重新选币才进池）。"""
+    blacklist: list[str] = []
+    manual: list[str] = []
+    overrides_error: bool = False
+    """pool_overrides.json 读不出：主循环沿用上一份，页面不让改。"""
 
 
 def build_pool(files: PanelFiles) -> PoolPage:
     pool = read_pool(files.root)
+    ov = read_pool_overrides(files.root)
     entries = sorted(pool.entries, key=lambda e: (not e.in_pool, -e.score)) if pool else []
     return PoolPage(
         ts=pool.ts if pool else None,
@@ -470,6 +478,10 @@ def build_pool(files: PanelFiles) -> PoolPage:
         rejected=sum(1 for e in entries if not e.in_pool),
         entries=entries,
         blocked=files.blocked(),
+        pinned=sorted(ov.pinned) if ov else [],
+        blacklist=sorted(ov.blacklist) if ov else [],
+        manual=sorted(ov.manual) if ov else [],
+        overrides_error=ov is None,
     )
 
 

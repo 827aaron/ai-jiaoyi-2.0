@@ -128,6 +128,12 @@ const CMD = {
   close_position: { title: "平仓", text: "市价平掉这一笔，撤掉它的保命单。", ok: "平仓", danger: true },
   unblock_symbol: { title: "解封", text: "这个币因为币安公告被禁开新仓。确认公告已经不影响交易再解封。", ok: "解封", pw: true },
   restart: { title: "重启生效", text: "主程序先停开新仓、等在途的下单和平仓做完，再退出由 launchd 自动拉起，按新配置运行（约 30–60 秒）。持仓的保命止损一直挂在交易所。", ok: "重启", pw: true },
+  pin_symbol: { title: "固定这个币", text: "固定后每次选币都把它放进候选池（仍要过成交量、价差这些硬条件），不受分组名额限制。会让系统多做这个币。", ok: "固定", pw: true },
+  unpin_symbol: { title: "取消固定", text: "以后按打分决定它进不进候选池。", ok: "取消固定" },
+  blacklist_symbol: { title: "拉黑这个币", text: "永远不进候选池，立刻不再开新仓。已有持仓照常看管、照常止损止盈。", ok: "拉黑", danger: true },
+  unblacklist_symbol: { title: "取消拉黑", text: "取消后它重新参加选币，分数够就可能进池、被开仓。", ok: "取消拉黑", pw: true },
+  add_symbol: { title: "手动加币", text: "把这个币加进候选池（仍要过成交量、价差这些硬条件，不够就进不去）。主程序马上重新选一次币。", ok: "加入", pw: true },
+  remove_symbol: { title: "移除手动加的币", text: "撤掉手动加入，以后按打分决定它进不进候选池。", ok: "移除" },
   refresh_cards: { title: "重新开会出卡", text: "让军师团马上开一次会、重出作战卡（会花一次大模型费用）。", ok: "开会" },
 };
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
@@ -249,6 +255,8 @@ document.addEventListener("click", async (e) => {
   else if (act === "edit") editSettings(arg);
   else if (act === "profile") switchProfile(arg);
   else if (act === "clearpins") askClearPins();
+  else if (act === "pool") { const [kind, sym] = arg.split(":"); askCommand(kind, { symbol: sym }, sym.replace(/USDT$/, "")); }
+  else if (act === "pooladd") addSymbol();
   else if (act === "unpin") unpin(arg);
   else if (act === "updown") {
     try { localStorage.setItem("updown", arg); } catch (err) { /* 存不了就只对这次生效 */ }
@@ -642,22 +650,53 @@ P.funds = () => {
 /* ---------- 选币 */
 P.pool = () => {
   const d = pageData;
-  if (!d.entries.length) {
+  if (!d.entries.length && !d.pinned.length && !d.manual.length && !d.blacklist.length) {
     return `<div class="card"><div class="empty"><b>还没有选币结果</b>主循环每次选完币会写一份候选池，这里就能看到。</div></div>`;
   }
-  const flag = (e) => [e.pinned && '<span class="pill p-accent">固定</span>', e.manual && '<span class="pill p-accent">手动</span>', e.blacklisted && '<span class="pill p-short">拉黑</span>', d.blocked[e.symbol] && '<span class="pill p-short">禁开新仓</span>'].filter(Boolean).join(" ");
+  // 标签和按钮按 pool_overrides.json（你的设置，立刻生效）；候选池文件要等下一次选币才更新
+  const has = (list, sym) => list.includes(sym);
+  const flag = (sym) => [has(d.pinned, sym) && '<span class="pill p-accent">固定</span>', has(d.manual, sym) && '<span class="pill p-accent">手动加的</span>', has(d.blacklist, sym) && '<span class="pill p-short">拉黑</span>', d.blocked[sym] && '<span class="pill p-short">禁开新仓</span>'].filter(Boolean).join(" ");
+  const canEdit = !d.overrides_error;
+  const btn = (kind, sym, text, danger) => `<button class="btn b-sm ${danger ? "b-danger" : ""}" ${clickable("pool", kind + ":" + sym)}>${text}</button>`;
+  const ops = (sym) => (canEdit ? [
+    has(d.pinned, sym) ? btn("unpin_symbol", sym, "取消固定") : has(d.blacklist, sym) ? "" : btn("pin_symbol", sym, "固定"),
+    has(d.blacklist, sym) ? btn("unblacklist_symbol", sym, "取消拉黑") : btn("blacklist_symbol", sym, "拉黑", true),
+    has(d.manual, sym) ? btn("remove_symbol", sym, "移除") : "",
+  ].filter(Boolean).join(" ") : "");
+  const listed = new Set(d.entries.map((e) => e.symbol));
+  // 你设置过、但候选池文件里还没有的币（刚加的、早就拉黑的）：单列出来，也能撤销
+  const extra = [...new Set([...d.pinned, ...d.manual, ...d.blacklist])].filter((s) => !listed.has(s)).sort();
+  const extraRows = extra.map((sym) => `<tr class="dimrow"><td class="hi">${coin(sym)} ${flag(sym)}</td><td colspan="2" class="dim">${has(d.blacklist, sym) ? "你拉黑的" : "等下一次选币"}</td><td class="r">${ops(sym)}</td></tr>`).join("");
   const rows = d.entries.map((e) => `<tr class="${e.in_pool ? "" : "dimrow"}">
-      <td class="hi">${coin(e.symbol)} ${flag(e)}</td><td>${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
+      <td class="hi">${coin(e.symbol)} ${flag(e.symbol)}</td><td>${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
       <td>${e.in_pool ? (e.picked_by_card ? '<span class="pill p-long">军师选中</span>' : '<span class="pill">在池里</span>') : '<span class="pill">没进池</span>'}</td>
       <td class="txt">${e.in_pool ? esc(e.reasons.join("；")) + (e.pick_reason ? `<div class="dim small">军师：${esc(e.pick_reason)}</div>` : "") : esc(e.filters.failed_reasons.join("；") || (e.blacklisted ? "你拉黑的" : ""))}</td>
-      <td class="r num dim">${money(e.filters.quote_volume_24h_usdt / 1e6, 0)}M</td><td class="r num dim">${e.filters.spread_bps.toFixed(2)}</td></tr>`).join("");
+      <td class="r num dim">${money(e.filters.quote_volume_24h_usdt / 1e6, 0)}M</td><td class="r num dim">${e.filters.spread_bps.toFixed(2)}</td><td class="r nowrap">${ops(e.symbol)}</td></tr>`).join("");
+  const addBox = canEdit
+    ? `<div class="toolbar"><input id="pool-add" class="inp" placeholder="币种，例如 SUI 或 SUIUSDT" autocomplete="off" spellcheck="false" style="max-width:240px"><button class="btn b-sm" ${clickable("pooladd")}>手动加币</button>
+        <span class="dim small">固定、手动加币、取消拉黑要面板密码；拉黑、取消固定、移除只要确认。改完主程序马上重新选币。</span></div>`
+    : '<div class="note warn">data/pool_overrides.json 读不出来：主程序沿用上一份设置。先在 Mac 上修好这个文件再在这里改。</div>';
   return `<div class="tiles t4"><div class="tile"><small>候选池</small><b>${d.in_pool}</b></div><div class="tile"><small>军师选中</small><b>${d.picked}</b></div>
       <div class="tile"><small>没进池</small><b>${d.rejected}</b></div><div class="tile"><small>上次选币</small><b>${d.ts ? hm(d.ts) : "—"}</b></div></div>
     <section class="card mt"><div class="ch"><h2>候选池</h2><span class="r">代码每小时筛一次，军师只能从池里挑；固定、拉黑、手动加入优先</span></div>
-      <div class="tw"><table><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="foot">固定 / 拉黑 / 手动加入：主循环还没有读这几项的地方，等接上再在这里开放修改。</div></section>
+      ${addBox}
+      <div class="tw"><table><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${extraRows ? `<div class="ch mt"><h2>你设置过、还不在候选池里的币</h2></div><div class="tw"><table><tbody>${extraRows}</tbody></table></div>` : ""}
+      <div class="foot">固定：每次都进池（仍要过硬条件）；拉黑：永不进池、立刻不开新仓；手动加的：加进候选（仍要过硬条件），“移除”就撤掉。</div></section>
     <div class="mt">${blockedSection(d.blocked)}</div>`;
 };
+
+function addSymbol() {
+  const el = $("#pool-add");
+  let sym = (el && el.value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!sym) return el && el.focus();
+  if (!sym.endsWith("USDT")) sym += "USDT";
+  el.value = "";
+  askCommand("add_symbol", { symbol: sym }, sym.replace(/USDT$/, ""));
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target && e.target.id === "pool-add") { e.preventDefault(); addSymbol(); }
+});
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
@@ -1042,8 +1081,14 @@ function render() {
     return;
   }
   const scrolls = [...document.querySelectorAll("#page .scroll")].map((e) => e.scrollTop);
+  // 页面上的输入框（选币页“手动加币”）：定时刷新重画时保住正在输入的内容和焦点
+  const typing = document.activeElement && document.activeElement.id === "pool-add";
+  const typed = $("#pool-add") ? $("#pool-add").value : "";
   $("#page").innerHTML = (P[page] || placeholder)(arg);
   document.querySelectorAll("#page .scroll").forEach((e, i) => { e.scrollTop = scrolls[i] || 0; });
+  const box = $("#pool-add");
+  if (box && typed) box.value = typed;
+  if (box && typing) box.focus();
   if (page === "positions") mountChart();
   if (page === "history") mountHistoryChart();
 }
