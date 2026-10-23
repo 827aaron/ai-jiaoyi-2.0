@@ -52,6 +52,12 @@ from jiaoyi.slow.commander import (
     PickResult,
     StopScale,
 )
+from jiaoyi.slow.levels import (
+    LevelContext,
+    build_candidates,
+    describe_candidates,
+    select_levels,
+)
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
 from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
@@ -98,6 +104,20 @@ class TradingAgentsSettings:
     reddit: str = "guarded"
 
 
+# TradingAgents 的提示词是写死的股票语境（Buy/Overweight/Hold/Underweight/Sell，“减持”）。
+# 它会把 output_language 原样拼进每个角色的提示词（"Write your entire response in {lang}, except
+# the labelled lines…"），所以把永续合约的语境放在这里，不用改它的源码。
+PERP_CONTEXT = (
+    "Domain context for everything you write: this is Binance USDT-margined PERPETUAL FUTURES "
+    "trading (go long, go short, or stay flat; leverage, funding, liquidations), not equities and "
+    "there is no existing position to trim. Read the rating scale as: Buy = open or add a long, "
+    "Overweight = lean long, Hold = stay flat / no new entry, Underweight = lean short or stay "
+    "flat, Sell = open a short or close longs. In prose say long / short / flat and name concrete "
+    "price levels from the data; avoid stock wording such as 'overweight', 'underweight', 'trim "
+    "or reduce exposure' and 'earnings'. Apply this to every sentence you write"
+)
+
+
 def build_config(
     base: Mapping[str, Any], s: TradingAgentsSettings, *, crypto_news: bool = False
 ) -> dict[str, Any]:
@@ -107,7 +127,7 @@ def build_config(
         llm_provider=s.provider,
         quick_think_llm=s.quick_model,
         deep_think_llm=s.deep_model,
-        output_language=s.output_language,
+        output_language=f"{s.output_language}. {PERP_CONTEXT}",
         max_debate_rounds=s.debate_rounds,
         max_risk_discuss_rounds=s.risk_rounds,
         max_tokens=s.max_tokens,
@@ -286,6 +306,25 @@ def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
         return describe_atr(wilder_atr(closed), price, stop)
     except Exception:
         return describe_atr(None, None, stop)
+
+
+def level_context(symbol: str, end: datetime, stop: StopScale) -> LevelContext:
+    """取 1h / 日线 K 线算关键位候选。参考 ATR 取“止损周期 ATR”和“1h ATR”里大的那个，
+    免得 15 分钟 ATR 太小、范围窄得没有候选。失败返回空背景（不出关键位，不瞎编）。"""
+    try:
+        end_ms = int(end.timestamp() * 1000)
+        hourly = _klines(symbol, "1h", 200, end)
+        daily = [r for r in _klines(symbol, "1d", 12, end) if r[6] <= end_ms]
+        stop_rows = _klines(symbol, atr_interval(stop.period_min), 60, end)
+        closed_h = [r for r in hourly if r[6] <= end_ms]
+        closed_s = [r for r in stop_rows if r[6] <= end_ms]
+        atrs = [a for a in (wilder_atr(closed_h), wilder_atr(closed_s)) if a]
+        if not atrs or not hourly:
+            return LevelContext()
+        price, atr = float(hourly[-1][4]), max(atrs)
+        return LevelContext(price, atr, build_candidates(price, atr, closed_h, daily))
+    except Exception:
+        return LevelContext()
 
 
 def _ema(xs: Sequence[float], n: int) -> list[float]:
@@ -515,7 +554,13 @@ class _PickDraft(BaseModel):
     picks: list[_P]
 
 
-def draft_to_card_symbol(d: _CardSymbolDraft, entry: SymbolPoolEntry) -> CardSymbol:
+def draft_to_card_symbol(
+    d: _CardSymbolDraft,
+    entry: SymbolPoolEntry,
+    levels: LevelContext | None = None,
+) -> CardSymbol:
+    """会议结论 → 作战指令。给了 ``levels`` 就只认候选关键位（对不上的丢），不给才照单全收。"""
+
     def rng(lo: float, hi: float) -> Range:
         return Range(min=min(lo, hi), max=max(lo, hi))
 
@@ -523,7 +568,11 @@ def draft_to_card_symbol(d: _CardSymbolDraft, entry: SymbolPoolEntry) -> CardSym
         symbol=entry.symbol,
         category=entry.category,
         bias=d.bias,
-        key_levels=[KeyLevel(price=x.price, kind=x.kind, note=x.note) for x in d.key_levels],
+        key_levels=(
+            [KeyLevel(price=x.price, kind=x.kind, note=x.note) for x in d.key_levels]
+            if levels is None
+            else select_levels([(x.price, x.note) for x in d.key_levels], levels)
+        ),
         allowed_signals=d.allowed_signals if d.bias is not Bias.NO_TRADE else [],
         size_tier_max=d.size_tier_max,
         notional_usdt=rng(d.notional_min, d.notional_max),
@@ -542,6 +591,7 @@ def convert_prompt(
     brief: str,
     decision: str,
     atr_note: str,
+    level_note: str = "",
 ) -> str:
     """把会议结论整理成作战指令的提示词（单独成函数，便于快照测试）。"""
     top = r.max_notional_per_trade_usdt
@@ -549,9 +599,12 @@ def convert_prompt(
     return (
         f"把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ {cap}，"
         f"杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
-        "矛盾或财报前夜之类就选 no_trade。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
-        "倍数区间（如 1.5–3）。key_levels 只填结论里明确提到的价位。reason 用中文。\n"
-        f"{atr_note}\n"
+        "矛盾或重大事件（如议息会议）前夜之类就选 no_trade。这是币安永续合约，只有做多 / 做空 / "
+        "观望：结论里的 Buy / Overweight 对应偏多（long），Sell 对应偏空（short），Underweight 对应"
+        "偏空或观望，Hold 对应观望（no_trade）；reason 里用多 / 空 / 观望，不要用“减持”“增持”"
+        "这类股票持仓词。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的倍数区间（如 1.5–3）。"
+        "reason 用中文。\n"
+        f"{atr_note}\n{level_note}\n"
         f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{brief}\n结论：\n{decision}"
     )
 
@@ -720,6 +773,7 @@ class TradingAgentsEngine:
         if not decision:
             raise RuntimeError(f"{entry.symbol}：TradingAgents 没有给出结论")
 
+        levels = level_context(entry.symbol, self._today(), self._stop)
         prompt = convert_prompt(
             entry,
             self._risk,
@@ -727,6 +781,7 @@ class TradingAgentsEngine:
             self._brief_text(),
             decision,
             atr_context(entry.symbol, self._today(), self._stop),
+            describe_candidates(levels),
         )
         llm = self._llm(graph, self._s.convert_tier).with_structured_output(_CardSymbolDraft)
         last: Exception | None = None
@@ -736,7 +791,7 @@ class TradingAgentsEngine:
                 if not isinstance(draft, _CardSymbolDraft):
                     # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
                     raise ValueError("模型没有返回结构化结果")
-                cs = draft_to_card_symbol(draft, entry)
+                cs = draft_to_card_symbol(draft, entry, levels)
                 return Analysis(cs, self._cost(handler.usage_metadata))
             except (ValidationError, ValueError) as exc:
                 last = exc

@@ -39,7 +39,8 @@ def test_build_config_overrides_without_mutating_base() -> None:
     cfg = build_config(base, TradingAgentsSettings())
     assert cfg["llm_provider"] == "deepseek"
     assert cfg["quick_think_llm"] == "deepseek-flash" and cfg["deep_think_llm"] == "deepseek-flash"
-    assert cfg["output_language"] == "Chinese"
+    assert cfg["output_language"].startswith("Chinese.")
+    assert "PERPETUAL" in cfg["output_language"]  # 永续合约语境，不是股票
     assert (cfg["max_debate_rounds"], cfg["max_risk_discuss_rounds"]) == (1, 1)
     assert (cfg["max_tokens"], cfg["llm_max_retries"]) == (8192, 6)
     assert cfg["data_vendors"]["core_stock_apis"] == "binance"
