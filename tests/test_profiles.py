@@ -143,6 +143,8 @@ def test_long_hold_tiers(tmp_path: Path) -> None:
         assert cfg.fast_loop.atr_period_min == atr
         assert cfg.fast_loop.patrol_shock_pct_1m == patrol
         assert cfg.fast_loop.funding_against_max_bp == 5.0
+    assert load_app_config(_app_toml(tmp_path, 'hold = "24h"')).predictor.interval == "1h"
+    assert load_app_config(_app_toml(tmp_path, 'hold = "12h"')).predictor.pred_len == 48
     rec = {"6h": "12h", "12h": "24h", "24h": "24h"}
     for meeting, hold in rec.items():
         assert load_app_config(_app_toml(tmp_path, f'meeting_interval = "{meeting}"')).hold == hold

@@ -59,13 +59,17 @@ def with_profile(raw: dict[str, object]) -> dict[str, object]:
     hold = profiles.hold_of(raw)
     if notice := profiles.legacy_notice(raw):
         logger.warning(notice)
-    top = {k: v for k, v in raw.items() if k not in ("fast_loop", "profile")}
+    top = {k: v for k, v in raw.items() if k not in ("fast_loop", "predictor", "profile")}
     top.setdefault("meeting_interval", profile)
     top.setdefault("hold", hold)
     fast = raw.get("fast_loop", {})
     data = profiles.fill(top, profile, "app", hold)
     data["fast_loop"] = profiles.fill(
         fast if isinstance(fast, dict) else {}, profile, "fast_loop", hold
+    )
+    pred = raw.get("predictor", {})
+    data["predictor"] = profiles.fill(
+        pred if isinstance(pred, dict) else {}, profile, "predictor", hold
     )
     return data
 
