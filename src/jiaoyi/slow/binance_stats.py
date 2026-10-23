@@ -81,7 +81,7 @@ class BinanceStatsSource:
         bid, ask = float(b["bidPrice"]), float(b["askPrice"])
         mid = (bid + ask) / 2 or last
         depth, klines, oi = await asyncio.gather(
-            self._get("/fapi/v1/depth", symbol=sym, limit=20),
+            self._get("/fapi/v1/depth", symbol=sym, limit=100),
             self._get("/fapi/v1/klines", symbol=sym, interval="1h", limit=25),
             self._get("/futures/data/openInterestHist", symbol=sym, period="1h", limit=2),
         )

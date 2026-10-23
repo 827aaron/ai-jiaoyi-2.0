@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import logging
 import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -228,6 +229,8 @@ class Runner:
         self._restart_exit = restart_exit
         # restart 的回执在进程真要退出前一刻才写（面板看到“完成”时进程确实在退）
         self._restart_receipt: tuple[CommandInbox, Path, CommandResult] | None = None
+        self._inflight: set[str] = set()  # 还在跑、回执要等跑完才写的面板指令（重新开会）
+        self._cmd_path: Path | None = None
         self._exit_lock = threading.Lock()
         self._exited = False
         self._started_at: datetime | None = None
@@ -684,11 +687,18 @@ class Runner:
                 )
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:
+        await self._refresh_run(pool, reason)
+
+    async def _refresh_run(self, pool: SymbolPool, reason: str) -> tuple[BattleCard | None, str]:
+        """开一整轮会；返回 (新卡, 失败原因)，开会失败时新卡是 None。"""
+        card: BattleCard | None = None
+        err = ""
         try:
             if isinstance(self.m.cards, _HoldsAware):
                 self.m.cards.set_held({p.symbol: p.side for p in self.positions})
-            await self.m.cards.refresh(pool, reason)
-        except Exception:
+            card = await self.m.cards.refresh(pool, reason)
+        except Exception as exc:
+            err = str(exc) or type(exc).__name__
             log.exception("军师团开会失败，沿用旧卡直到过期")
         finally:
             self._refreshing = False
@@ -699,6 +709,57 @@ class Runner:
                 await self.sync_watch()
             except Exception:
                 log.exception("开完会重订行情失败，下一轮持仓管家再订")
+        return card, err
+
+    async def _refresh_chain(self, cmd: PanelCommand, path: Path | None) -> None:
+        """面板「重新开会」：整条链真跑一遍——按同一套筛选重新选币（写 symbol_pool.json）→ 总盘会 →
+        每个币完整分析会 → 新卡；不沿用上一轮结论。跑完才写回执：选了几个、上会几个、用时、花费。"""
+        t0 = time.monotonic()
+        started = self.app.clock()
+        status: Literal["done", "failed"] = "failed"
+        detail = ""
+        try:
+            try:
+                await self.app.refresh_lot_rules()
+                await self._rescreen(self.app.clock())
+            except Exception:
+                log.exception("重新开会前选币失败，沿用上一份候选池")
+            pool = self.app.pool
+            if pool is None:
+                self._refreshing = False
+                detail = "重新开会取消：还没有候选池"
+            else:
+                card, err = await self._refresh_run(pool, "manual")
+                if card is None:
+                    detail = f"重新开会失败（沿用旧卡）：{err}"
+                else:
+                    met = sum(1 for s in card.symbols if s.issued_at and s.issued_at >= started)
+                    secs = int(time.monotonic() - t0)
+                    status = "done"
+                    detail = (
+                        f"已重新开会：选了 {len(pool.in_pool)} 币 / 上会 {met} 币 / "
+                        f"用时 {secs // 60} 分 {secs % 60} 秒 / 花费 ${card.llm_cost_usd:.3f}"
+                    )
+        except Exception as exc:
+            self._refreshing = False
+            detail = f"重新开会出错：{exc!r}"[:200]
+            log.exception("重新开会出错")
+        finally:
+            self._inflight.discard(cmd.id)
+        now = self.app.clock()
+        self._guard_note(
+            Outcome.ACTION if status == "done" else Outcome.REJECT,
+            f"面板指令 refresh_cards（{status}）：{detail}"[:200],
+            now,
+        )
+        if path is not None:
+            try:
+                CommandInbox(self.app.app_cfg.data_dir).finish(
+                    path,
+                    CommandResult(id=cmd.id, kind=cmd.kind, status=status, detail=detail, ts=now),
+                )
+            except OSError:
+                log.exception("写重新开会回执失败")
 
     async def _refresh_event(
         self, events: _EventMeetings, pool: SymbolPool, symbol: str, trigger: str
@@ -736,6 +797,8 @@ class Runner:
             inbox.prune(now)
         for path, cmd, error in inbox.pending():
             now = self.app.clock()
+            if cmd is not None and cmd.id in self._inflight:
+                continue
             if cmd is None:
                 result = CommandResult(
                     id=path.stem[:64], kind="?", status="rejected", detail=error, ts=now
@@ -755,6 +818,7 @@ class Runner:
                 )
             else:
                 status: Literal["done", "rejected", "failed"]
+                self._cmd_path = path
                 try:
                     status, detail = await self._run_command(cmd)
                 except Exception as e:
@@ -768,6 +832,8 @@ class Runner:
                 if cmd.kind == "restart" and status == "done":
                     self._restart_receipt = (inbox, path, result)
                     continue
+                if cmd.kind == "refresh_cards" and status == "done":
+                    continue  # 回执等整条链跑完再写（见 _refresh_chain）
             try:
                 inbox.finish(path, result)
             except OSError:
@@ -855,13 +921,14 @@ class Runner:
             if not self.app.unblock_symbol(sym):
                 return "rejected", f"{sym} 没有被封"
             return "done", f"已解封 {sym}（只在本次运行有效）"
-        # refresh_cards
-        pool = self.app.pool
-        if pool is None or is_stub(self.m.cards):
-            return "rejected", "军师团未接入或还没有候选池"
+        # refresh_cards：整条链重跑 选币 → 总盘会 → 军师团
+        if is_stub(self.m.cards):
+            return "rejected", "军师团未接入"
         if self._refreshing:
             return "rejected", "军师团正在开会"
         self._refreshing = True
-        self._last_card_at = self.app.clock()
-        self._spawn(self._refresh(pool, "manual"))
-        return "done", "军师团已开始开会"
+        now = self.app.clock()
+        self._last_card_at = self._last_screen = now
+        self._inflight.add(cmd.id)
+        self._spawn(self._refresh_chain(cmd, self._cmd_path))
+        return "done", "已开始：选币 → 总盘会 → 军师团"

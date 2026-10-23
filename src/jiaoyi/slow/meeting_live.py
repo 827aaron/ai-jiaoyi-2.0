@@ -182,6 +182,10 @@ class MeetingLive:
         """总盘会没挑中的币和各自的理由（结构化：``symbol`` / ``reason``），面板按币显示。"""
         self._doc["rejections"] = rows
 
+    def set_summary(self, text: str) -> None:
+        """一句话摘要（总盘会：「挑了 N 个 / 落选 M 个」），团队页节点显示。"""
+        self._doc["summary"] = text
+
     def converting(self) -> None:
         """军师团讨论完毕，开始整理成作战指令。"""
         if self._closed:

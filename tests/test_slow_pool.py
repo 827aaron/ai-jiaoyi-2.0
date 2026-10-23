@@ -73,3 +73,30 @@ async def test_held_symbol_stays_after_whole_card_expires(tmp_path: Path, now: d
     assert cur.symbols[0].allowed_signals == []  # 只盯不开
     c.set_held({})
     assert c.current(late) is None
+
+
+async def test_manual_refresh_reruns_every_meeting_even_inside_min_interval(
+    tmp_path: Path, now: datetime
+) -> None:
+    from datetime import timedelta as td
+
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, clock = make(tmp_path, eng, now, symbol_min_interval=td(minutes=30))
+    p = lambda t: pool(t, entry("AAUSDT"), entry("BBUSDT"))  # noqa: E731
+    await c.refresh(p(now), "scheduled")
+    clock[0] = now + td(minutes=5)
+    eng.analyzed.clear()
+    await c.refresh(p(clock[0]), "scheduled")
+    assert eng.analyzed == []  # 间隔内沿用上一张卡
+    clock[0] = now + td(minutes=6)
+    await c.refresh(p(clock[0]), "manual")
+    assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT"]  # 手动：整条链真跑
+
+
+async def test_market_and_commander_report_last_and_next_run(tmp_path: Path, now: datetime) -> None:
+    c, log, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    st = log.read_status()
+    m, cmd = st["market"], st["commander"]
+    assert m.last_run_at == now and m.symbol_count == 1 and "挑了 1 个 / 落选 1 个" in m.headline
+    assert cmd.last_run_at == now and cmd.next_run_at is not None

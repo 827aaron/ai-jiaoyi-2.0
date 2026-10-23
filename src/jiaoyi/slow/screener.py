@@ -311,7 +311,7 @@ class CodeSymbolScreener:
             self._rec.record(
                 now,
                 Outcome.PASS,
-                f"选出 {self._count} 个币",
+                f"候选 {self._count} 个币",
                 latency_ms=(time.monotonic() - started) * 1000,
             )
         self.heartbeat(now)

@@ -868,8 +868,23 @@ class BattleCardCommander:
             ago = f"{(now - last).total_seconds() / 60:.0f} 分钟前" if last else "不久前"
             why.append(f"{sym}：{ago}开过会、没有大消息 / 关键位突破，沿用上一张卡的指令")
         live.step("filter", "filter", "\n".join(why))
-        live.set_rejections(self._rejections(picked, chosen, candidates, by_pick))
+        rejections, summary = self._market_summary(picked, chosen, candidates, by_pick)
+        live.set_rejections(rejections)
+        live.set_summary(summary)
         live.finish("market", picked.regime, "", picked.cost_usd)
+
+    def _market_summary(
+        self,
+        picked: PickResult,
+        chosen: list[SymbolPoolEntry],
+        candidates: list[SymbolPoolEntry],
+        by_pick: Mapping[str, str],
+    ) -> tuple[list[dict[str, str]], str]:
+        """总盘会这一场的落选理由和一句话摘要；同时写总盘会自己的模块状态（团队页用）。"""
+        rejections = self._rejections(picked, chosen, candidates, by_pick)
+        summary = f"挑了 {len(chosen)} 个 / 落选 {len(rejections)} 个"
+        self._market_status(Health.OK, summary, len(chosen), None)
+        return rejections, summary
 
     @staticmethod
     def _rejections(
@@ -960,6 +975,9 @@ class BattleCardCommander:
             self._pick_cost = fail_cost
             if live is not None:
                 live.fail(self._why(exc), fail_cost)
+            self._market_status(
+                Health.DEGRADED, f"总盘会失败：{self._why(exc)}", None, self._why(exc)
+            )
             raise
         self._charge(
             picked.cost_usd - est
@@ -986,6 +1004,8 @@ class BattleCardCommander:
 
         # 同一个币两次会议至少隔 symbol_min_interval；没有大消息 / 关键位突破就沿用上一张卡的指令
         forced = self._news | self._level_broken
+        if reason == "manual":  # 面板「重新开会」：整条链真跑，不沿用上一张卡、不受同币最小间隔限制
+            forced = forced | {e.symbol for e in chosen}
         reused: dict[str, CardSymbol] = {}
         prev_card = self._card
         for e in chosen:
@@ -1003,6 +1023,10 @@ class BattleCardCommander:
         to_meet = [e for e in chosen if e.symbol not in reused]
         if live is not None:
             self._market_done(live, picked, chosen, candidates, pinned, reused, now)
+        else:
+            self._market_summary(
+                picked, chosen, candidates, {p.symbol: p.reason for p in picked.picks}
+            )
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
         base_version = prev.version if prev is not None and same_day else 0
@@ -1402,15 +1426,39 @@ class BattleCardCommander:
         self._last_error = str(exc)[:200]
         self._heartbeat(Health.DEGRADED, "开会失败，沿用旧卡直到过期", self._last_error)
 
+    def _market_status(
+        self, health: Health, headline: str, count: int | None, err: str | None
+    ) -> None:
+        """总盘会没有决策记录，团队页靠它自己的模块状态显示「上次 / 下次 / 挑了几个」。"""
+        now = self._clock()
+        ran = health is Health.OK
+        self._log.heartbeat(
+            ModuleStatus(
+                role=Role.MARKET,
+                health=health,
+                ts=now,
+                headline=headline,
+                last_error=err,
+                error=err,
+                version="slow-0.1",
+                last_run_at=now if ran else None,
+                next_run_at=self._next_meeting(now),
+                symbol_count=count if ran else None,
+            )
+        )
+
     def _heartbeat(self, health: Health, headline: str, err: str | None) -> None:
+        now = self._clock()
         self._log.heartbeat(
             ModuleStatus(
                 role=Role.COMMANDER,
                 health=health,
-                ts=self._clock(),
+                ts=now,
                 headline=headline,
                 today=self._stats,
                 last_error=err,
                 version="slow-0.1",
+                last_run_at=self._last_refresh,
+                next_run_at=self._next_meeting(now),
             )
         )
