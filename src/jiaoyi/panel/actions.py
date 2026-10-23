@@ -297,6 +297,16 @@ class ProfileInfo(BaseModel):
     """档位 → 切到它时会压过档位默认的写死项（任何档位给默认值的键，只要文件里写了就算）。"""
 
 
+def _defaults_for(profile: str, psec: profiles.Section, raw: object) -> dict[str, Any]:
+    """档位默认；止损 / 止盈 / ATR 周期等 fast_loop 键跟单笔最长持仓 time_limit_s 走。"""
+    if psec == "fast_loop":
+        limit = raw.get("time_limit_s") if isinstance(raw, dict) else None
+        return profiles.hold_defaults(
+            limit if isinstance(limit, int) else profiles.DEFAULT_TIME_LIMIT_S
+        )
+    return profiles.defaults(profile, psec)
+
+
 def _profile_keys(psec: profiles.Section) -> list[str]:
     return sorted({k for p in profiles.PROFILES for k in profiles.defaults(p, psec)})
 
@@ -315,7 +325,7 @@ def profile_pins(paths: ConfigPaths, profile: str) -> list[PinItem]:
         raw = _file_table(paths, section, raws)
         if not isinstance(raw, dict):
             continue
-        base = profiles.defaults(profile, psec)
+        base = _defaults_for(profile, psec, raw)
         fields = _PROFILE_MODEL[psec].model_fields
         for k in _profile_keys(psec):
             if k not in raw:
@@ -387,7 +397,7 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
     pinned: dict[str, dict[str, object]] = {}
     for section, psec in _PROFILE_SECTION.items():
         raw = raws[section] if isinstance(raws[section], dict) else {}
-        base = profiles.defaults(current, psec)
+        base = _defaults_for(current, psec, raw)
         hit = {k: base[k] for k in base if k in raw}
         if hit:
             pinned[section] = hit
