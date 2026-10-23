@@ -22,13 +22,13 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.contracts.risk_config import recommended_caps
-from jiaoyi.core.pool_overrides import read_pool_overrides
+from jiaoyi.core.pool_overrides import PoolOverrides, read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
-from jiaoyi.panel.meetings import MeetingSummary, list_meetings
+from jiaoyi.panel.meetings import MARKET, MeetingSummary, list_meetings
 from jiaoyi.panel.overview import (
     STALE_S,
     LampState,
@@ -36,14 +36,15 @@ from jiaoyi.panel.overview import (
     compute_kpis,
     position_views,
 )
-from jiaoyi.slow.settings import SlowConfig, slow_defaults
+from jiaoyi.slow.settings import ScreenerSection, SlowConfig, slow_defaults
 
+# 团队页按数据流排：选币 → 军师团 → 盘口员 → 预测员 → 哨兵 → 拍板 → 保镖 → 下单 → 持仓看管 → 告警
 ROLE_NAMES: dict[Role, str] = {
-    Role.COMMANDER: "军师团",
     Role.SCREENER: "选币",
-    Role.SENTINEL: "哨兵",
+    Role.COMMANDER: "军师团",
     Role.BOOK_READER: "盘口员",
     Role.PREDICTOR: "预测员 Kronos",
+    Role.SENTINEL: "哨兵",
     Role.GATE: "拍板人",
     Role.RISK_GUARD: "保镖",
     Role.EXECUTOR: "执行器",
@@ -100,6 +101,8 @@ class RoleCard(BaseModel):
     errors: int
     avg_latency_ms: float
     cost_usd: float
+    doing: str | None = None
+    """现在正在做的事（团队页流水线高亮这一步）；没在忙就是 None。见 ``_doing``。"""
 
 
 class TeamPage(BaseModel):
@@ -147,14 +150,51 @@ def build_positions(
     )
 
 
+ACTIVE_S = 120
+"""角色这么多秒内写过决策记录，就算“正在忙”（团队页高亮这一步）。"""
+_HOLDING_ROLES = (Role.EXECUTOR, Role.LIFEBOAT, Role.KEEPER, Role.PATROL)
+"""有持仓时一直在干活的角色。"""
+
+
+def _doing(
+    role: Role,
+    records: list[DecisionRecord],
+    meetings: list[MeetingSummary],
+    holding: int,
+    now: datetime,
+) -> str | None:
+    """这一步现在在做什么：正在开的会 > 刚写的记录 > 盯着的持仓；都没有 = None（不猜）。"""
+    if role is Role.COMMANDER:
+        live = [m for m in meetings if m.status == "running"]
+        if live:
+            names = "、".join(
+                "总盘会" if m.symbol == MARKET else m.symbol.removesuffix("USDT") for m in live[:3]
+            )
+            return f"开会中：{names}{f' 等 {len(live)} 场' if len(live) > 3 else ''}"
+    last = next((r for r in reversed(records) if r.role is role), None)
+    if last and (now - last.ts).total_seconds() <= ACTIVE_S:
+        text = last.summary if len(last.summary) <= 40 else last.summary[:40] + "…"
+        return f"刚刚：{text}"
+    if role in _HOLDING_ROLES and holding:
+        return f"盯着 {holding} 笔持仓"
+    return None
+
+
 def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
     run = _run_info(files, status, now)
-    cards = [_role_card(role, status.get(role.value), now, run) for role in ROLE_NAMES]
+    meetings = list_meetings(files.root, now)
+    holding = len(files.ledger().live())
+    cards = [
+        _role_card(role, status.get(role.value), now, run).model_copy(
+            update={"doing": _doing(role, records, meetings, holding, now)}
+        )
+        for role in ROLE_NAMES
+    ]
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
-    meets = list_meetings(files.root, now) if chosen is Role.COMMANDER else []
+    meets = meetings if chosen is Role.COMMANDER else []
     return TeamPage(roles=cards, selected=chosen, records=mine, meetings=meets)
 
 
@@ -184,6 +224,9 @@ def _run_info(files: PanelFiles, status: dict[str, ModuleStatus], now: datetime)
         else frozenset()
     )
     return _RunInfo(running, started_at, stub_roles, files.tz)
+
+
+_SCHEDULE_FIELDS = ("last_run_at", "next_run_at", "symbol_count")
 
 
 def _opt_time(st: ModuleStatus, name: str) -> datetime | None:
@@ -247,7 +290,10 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
         name=ROLE_NAMES[role],
         state=state,
         status=text,
-        headline=st.headline,
+        # 定时任务（选币）的上次 / 下次 / 币数已经写进状态，摘要再写一遍就重复了
+        headline=""
+        if any(getattr(st, n, None) is not None for n in _SCHEDULE_FIELDS)
+        else st.headline,
         last_beat=st.ts,
         last_error=st.last_error,
         calls=t.calls,
@@ -622,6 +668,24 @@ def _pnl_periods(
 # ---------------------------------------------------------------- 选币
 
 
+CategorySource = Literal["pool", "slow", "default"]
+"""这一项的值从哪来：选币页设的（pool_overrides.json）/ slow.toml / 都没写，用默认。"""
+
+
+class PoolCategory(BaseModel):
+    category: str
+    enabled: bool
+    """现在开着没有（选币页 > slow.toml > 默认开）。"""
+    enabled_from: CategorySource
+    cap: int
+    """最多进池几个（选币页 > slow.toml 这一类 > 每类默认上限）。"""
+    cap_from: CategorySource
+    in_pool: int
+    """上次选币这一类进池了几个（选币页改了要等下一次选币才变）。"""
+    total: int
+    """上次选币这一类一共看了几个。"""
+
+
 class PoolPage(BaseModel):
     ts: datetime | None
     pool_id: str | None
@@ -637,12 +701,53 @@ class PoolPage(BaseModel):
     manual: list[str] = []
     overrides_error: bool = False
     """pool_overrides.json 读不出：主循环沿用上一份，页面不让改。"""
+    categories: list[PoolCategory] = []
+    """每类币的开关和进池上限，固定顺序（``Category``）。"""
+    default_category_cap: int = 30
+    slow_error: str | None = None
+    """slow.toml 读不出：“slow.toml 的值”按默认显示，以这句为准。"""
 
 
-def build_pool(files: PanelFiles) -> PoolPage:
+def _pool_categories(
+    entries: list[SymbolPoolEntry], ov: PoolOverrides | None, scr: ScreenerSection
+) -> list[PoolCategory]:
+    out = []
+    for c in Category:
+        rule = scr.categories.get(c)
+        mine_on = ov.category_enabled.get(c) if ov else None
+        mine_cap = ov.category_caps.get(c) if ov else None
+        slow_cap = rule.cap if rule else None
+        enabled_from: CategorySource = (
+            "pool" if mine_on is not None else "slow" if rule is not None else "default"
+        )
+        cap_from: CategorySource = (
+            "pool" if mine_cap is not None else "slow" if slow_cap is not None else "default"
+        )
+        mine = [e for e in entries if e.category is c]
+        out.append(
+            PoolCategory(
+                category=c.value,
+                enabled=mine_on if mine_on is not None else (rule.enabled if rule else True),
+                enabled_from=enabled_from,
+                cap=next(
+                    v for v in (mine_cap, slow_cap, scr.default_category_cap) if v is not None
+                ),
+                cap_from=cap_from,
+                in_pool=sum(1 for e in mine if e.in_pool),
+                total=len(mine),
+            )
+        )
+    return out
+
+
+def build_pool(
+    files: PanelFiles, screener: ScreenerSection | None = None, slow_error: str | None = None
+) -> PoolPage:
+    """``screener``：slow.toml 的 ``[screener]``；读不出时给 None 和 ``slow_error``，按默认显示。"""
     pool = read_pool(files.root)
     ov = read_pool_overrides(files.root)
     entries = sorted(pool.entries, key=lambda e: (not e.in_pool, -e.score)) if pool else []
+    scr = screener or ScreenerSection()
     return PoolPage(
         ts=pool.ts if pool else None,
         pool_id=pool.pool_id if pool else None,
@@ -655,6 +760,9 @@ def build_pool(files: PanelFiles) -> PoolPage:
         blacklist=sorted(ov.blacklist) if ov else [],
         manual=sorted(ov.manual) if ov else [],
         overrides_error=ov is None,
+        categories=_pool_categories(entries, ov, scr),
+        default_category_cap=scr.default_category_cap,
+        slow_error=slow_error,
     )
 
 
@@ -701,8 +809,12 @@ class SettingsPage(BaseModel):
     """节奏配置可能造成换卡空档时的提示（只提示，不拒绝）。"""
     screener: list[SettingItem] = []
     """选币规则（config/slow.toml 的 [screener]）：门槛、打分满分线、权重。"""
+    tiers: list[SettingItem] = []
+    """分档交易（config/slow.toml 的 [screener.tiers]）。"""
     screener_cautions: list[str] = []
     """选币规则比推荐冒险的项（只提示，不拒绝）。"""
+    tiers_cautions: list[str] = []
+    """分档交易设置里用不上或不像设计稿的地方（只提示）。"""
     profile: ProfileInfo | None = None
     keys: dict[str, bool]
     key_needs: dict[str, KeyNeed] = {}
@@ -782,6 +894,7 @@ def build_settings(
 ) -> SettingsPage:
     password_set, armed = read_live_gate(files.root)
     slow = slow or slow_defaults(app.profile)
+    tier_cautions = slow.screener.tiers.cautions()
     page = SettingsPage(
         mode=app.mode.value,
         risk=_items(risk, "risk"),
@@ -794,7 +907,11 @@ def build_settings(
         schedule=_items(slow.schedule, "schedule"),
         schedule_caution=slow.schedule.caution(),
         screener=_items(slow.screener, "screener"),
-        screener_cautions=slow.screener.cautions(risk.max_spread_bps),
+        tiers=_items(slow.screener.tiers, "tiers"),
+        screener_cautions=[
+            x for x in slow.screener.cautions(risk.max_spread_bps) if x not in tier_cautions
+        ],
+        tiers_cautions=tier_cautions,
         keys=keys,
         key_needs=key_needs(
             app.mode.value,

@@ -173,6 +173,7 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert [s.symbol for s in ov.card.symbols] == ["BTCUSDT"]
     assert ov.card.symbols[0].key_levels[0].model_dump() == {"price": 68000.0, "kind": "resistance"}
     assert ov.card.leverage_max is not None
+    assert ov.card.size_fractions["L"] == 1.0 and 0 < ov.card.size_fractions["S"] <= 1  # 仓位档折扣
 
     assert [a.level for a in ov.alerts] == ["warn"]
     assert ov.blocked == {"XYZUSDT": "币安下架公告"}
@@ -574,6 +575,40 @@ def test_pool_page_shows_your_overrides(tmp_path: Path) -> None:
     assert build_pool(files).overrides_error  # 读不出：页面不让改
 
 
+def test_pool_page_categories_layered(tmp_path: Path) -> None:
+    """类别开关 / 上限：选币页设的 > slow.toml [screener.categories] > 默认。"""
+    from jiaoyi.core.pool_overrides import PoolOverrides, write_pool_overrides
+    from jiaoyi.panel.pages import build_pool
+    from jiaoyi.slow.settings import CategoryRule, ScreenerSection
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    (tmp_path / "symbol_pool.json").write_text(json.dumps(load_example("symbol_pool")))
+    page = build_pool(files)
+    cats = {x.category: x for x in page.categories}
+    assert list(cats) == [x.value for x in c.Category]
+    assert all(x.enabled and x.cap == 30 and x.enabled_from == x.cap_from == "default"
+               for x in cats.values())  # fmt: skip
+    assert sum(x.total for x in cats.values()) == len(page.entries)
+    assert sum(x.in_pool for x in cats.values()) == page.in_pool
+    scr = ScreenerSection(
+        default_category_cap=20,
+        categories={
+            c.Category.US_TECH: CategoryRule(enabled=False),
+            c.Category.ALT: CategoryRule(cap=10),
+        },
+    )
+    ov = PoolOverrides().set_category(c.Category.US_TECH, True)
+    write_pool_overrides(tmp_path, ov.set_category_cap(c.Category.MAJOR, 3))
+    cats = {x.category: x for x in build_pool(files, scr).categories}
+    assert (cats["us_tech"].enabled, cats["us_tech"].enabled_from) == (True, "pool")
+    assert (cats["us_tech"].cap, cats["us_tech"].cap_from) == (20, "default")
+    assert (cats["alt"].cap, cats["alt"].cap_from, cats["alt"].enabled_from) == (10, "slow", "slow")
+    assert (cats["major"].cap, cats["major"].cap_from) == (3, "pool")
+    write_pool_overrides(tmp_path, PoolOverrides())
+    cats = {x.category: x for x in build_pool(files, scr).categories}
+    assert (cats["us_tech"].enabled, cats["us_tech"].enabled_from) == (False, "slow")
+
+
 def test_settings_page_never_has_key_values(tmp_path: Path) -> None:
     from jiaoyi.panel.pages import build_settings
 
@@ -598,7 +633,8 @@ def test_settings_page_never_has_key_values(tmp_path: Path) -> None:
 
 def test_pool_and_settings_endpoints(tmp_path: Path) -> None:
     with _client(tmp_path, "127.0.0.1") as client:
-        assert client.get("/api/pool").json()["entries"] == []
+        pool = client.get("/api/pool").json()
+        assert pool["entries"] == [] and len(pool["categories"]) == len(c.Category)
         body = client.get("/api/settings").json()
         assert body["mode"] == "paper" and body["keys"] == {}
 
@@ -655,19 +691,34 @@ def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
         ("BTCUSDT", "running"), ("SOLUSDT", "stale"), ("ETHUSDT", "done"),
     ]  # fmt: skip
     assert summary[2].bias == "short" and summary[2].reason == "资金费率过热"
+    # 总盘会：同格式，文件名 _MARKET，固定排第一（哪怕已经开完）
+    (folder / "_MARKET.json").write_text(json.dumps(done | {"symbol": "_MARKET"}))
+    assert [s.symbol for s in list_meetings(tmp_path, NOW)][:2] == ["_MARKET", "BTCUSDT"]
+    assert read_meeting(tmp_path, "_MARKET", NOW) is not None
+    assert read_meeting(tmp_path, "_OTHER", NOW) is None
 
     files = PanelFiles(tmp_path, RISK.day_reset_tz)
     assert build_team(files, NOW, c.Role.GATE).meetings == []
-    assert len(build_team(files, NOW, c.Role.COMMANDER).meetings) == 3
+    assert len(build_team(files, NOW, c.Role.COMMANDER).meetings) == 4
+    # 流水线按数据流排；正在开会的军师团高亮“开会中”，总盘会排第一但已开完不算
+    team = build_team(files, NOW, c.Role.COMMANDER)
+    assert [r.role for r in team.roles][:3] == [
+        c.Role.SCREENER,
+        c.Role.COMMANDER,
+        c.Role.BOOK_READER,
+    ]
+    doing = {r.role: r.doing for r in team.roles}
+    assert doing[c.Role.COMMANDER] == "开会中：BTC"
     with _client(tmp_path, "192.168.1.20") as client:
         assert client.get("/api/meeting/BTCUSDT").json()["steps"][1]["who"] == "bull"
         assert client.get("/api/meeting/XRPUSDT").status_code == 404
+        assert client.get("/api/meeting/_MARKET").json()["status"] == "done"
         assert client.get("/api/meeting/btc..").status_code == 404
 
 
 def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
     """选币等定时任务报 last_run_at / next_run_at / symbol_count / error 时，状态里写出来。"""
-    from jiaoyi.panel.pages import _RunInfo, role_state
+    from jiaoyi.panel.pages import _role_card, _RunInfo, role_state
 
     class Sched(c.ModuleStatus):  # 慢环把这几个字段加进契约前，先用子类模拟
         last_run_at: datetime | None = None
@@ -685,3 +736,8 @@ def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
     assert role_state(c.Role.SCREENER, first, NOW, run)[1].startswith("等待首次运行 ")
     bad = Sched(**base, error="币安 451")
     assert role_state(c.Role.SCREENER, bad, NOW, run) == ("bad", "失败：币安 451")
+    # 状态里已经有上次 / 币数 / 下次：摘要不再重复显示；没报这些字段的模块照常显示摘要
+    assert _role_card(c.Role.SCREENER, ok.model_copy(update={"headline": "选出 40 个币"}), NOW,
+                      run).headline == ""  # fmt: skip
+    plain = c.ModuleStatus(**base, headline="池子 40 个")
+    assert _role_card(c.Role.SCREENER, plain, NOW, run).headline == "池子 40 个"

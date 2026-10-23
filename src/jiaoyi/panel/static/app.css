@@ -321,3 +321,27 @@ details.say summary b { flex: none; color: var(--hi); font-weight: 600; }
 details.say summary .one { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 details.say[open] summary .one { display: none; }
 details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; padding: 6px 0 4px; color: var(--tx); }
+
+/* 选币页类别区：行内的小文字按钮 */
+.lnk { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.lnk:hover { text-decoration: underline; }
+
+/* 团队页流水线：按数据流分段，段内箭头；正在忙的一步强调色 */
+.flow { display: flex; flex-direction: column; }
+.flow-row { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; align-items: center; }
+.flow-lbl { color: var(--dim); font-size: 12px; font-weight: 600; }
+.flow-row.busy .flow-lbl { color: var(--accent); }
+.flow-cards { display: flex; align-items: stretch; }
+.flow-cards .role { flex: 0 0 calc((100% - 3 * 28px) / 4); }
+.flow-arr { flex: 0 0 28px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 15px; }
+.flow-down { margin: 4px 0 4px 124px; width: calc((100% - 124px - 3 * 28px) / 4); text-align: center; color: var(--dim); font-size: 15px; line-height: 18px; }
+.role.busy { box-shadow: inset 3px 0 0 var(--accent), var(--shadow); }
+.role.busy.on { box-shadow: inset 3px 0 0 var(--accent), 0 0 0 2px var(--accent), var(--shadow); }
+.role .doing { color: var(--accent); font-weight: 600; }
+@media (max-width: 900px) {
+  .flow-row { grid-template-columns: 1fr; gap: 6px; }
+  .flow-cards { flex-direction: column; }
+  .flow-cards .role { flex: none; }
+  .flow-arr { flex: 0 0 22px; transform: rotate(90deg); }
+  .flow-down { margin: 6px auto; width: auto; }
+}
