@@ -150,6 +150,8 @@ class Control(BaseModel):
     """True = 配置文件改过、主循环还在用旧的（重启后生效）；None = 不知道。"""
     pw_set: bool = False
     """面板密码设了没有。"""
+    panel_stale: bool = False
+    """磁盘上的代码比面板进程启动时新（git pull 了没重启面板）：接口和页面可能对不上。"""
     writable: bool = False
     """面板这次启动有没有拿到配置文件路径（没有就只读）。"""
 

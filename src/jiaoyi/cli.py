@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import os
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from jiaoyi.core.secrets import (
     KNOWN_KEYS,
     ChainedSecretStore,
     KeychainSecretStore,
+    KeychainWriter,
     mask,
 )
 from jiaoyi.execution.factory import MissingSecret
@@ -229,6 +231,9 @@ def _run(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
     from jiaoyi.loop import Runner
 
+    if problem := _startup_problem(args):
+        print(problem, file=sys.stderr)
+        return 2
     try:
         risk, app_cfg, slow = _load(args)
         app = App(risk, app_cfg, slow_cfg=slow)
@@ -239,9 +244,44 @@ def _run(args: argparse.Namespace) -> int:
     print(_profile_line(args, app.app_cfg))
     if caution := _caution_line(risk):
         print(caution)
+    runner = Runner(app, restart_check=lambda: _restart_blocker(args))
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(Runner(app).run())
+        asyncio.run(runner.run())
+    if runner.restart_requested:
+        print("面板要求重启：已干净退出，launchd 会重新拉起")
     return 0
+
+
+LAUNCHD_RUN_LABEL = "com.jiaoyi.run"
+
+
+def _restart_blocker(args: argparse.Namespace) -> str | None:
+    """面板“重启生效”前的检查：退出后要有人拉起，新配置要能启动，否则不退。"""
+    if os.environ.get("XPC_SERVICE_NAME") != LAUNCHD_RUN_LABEL:
+        return "不是 launchd 托管（com.jiaoyi.run），退出后不会自动拉起；请在终端手动重启"
+    if problem := _startup_problem(args):
+        return f"按现在的配置主程序起不来，没有重启：{problem}"
+    return None
+
+
+def _startup_problem(args: argparse.Namespace) -> str | None:
+    """``jiaoyi run`` 启动前就能查出的拒绝启动原因（启动路径和面板重启前共用，两边口径一致）。
+
+    配置校验；军师团有 key 却没装依赖；实盘没解锁、或解锁后 risk.toml 改过（指纹对不上）。
+    """
+    try:
+        risk, app_cfg, slow = _load(args)
+    except ConfigError as e:
+        return str(e)
+    if problem := missing_slow_stack(slow, ChainedSecretStore()):
+        return problem
+    if app_cfg.mode == "live":
+        try:
+            gate = LiveGate(Path(app_cfg.data_dir) / "live_gate.json")
+            gate.require_armed(config_fingerprint(risk))
+        except LiveGateError as e:
+            return f"{e}（硬上限改过的话，先在终端运行 jiaoyi go-live）"
+    return None
 
 
 def _watchdog(args: argparse.Namespace) -> int:
@@ -274,6 +314,13 @@ def _panel(args: argparse.Namespace) -> int:
     from jiaoyi.panel.hb import HbReader
     from jiaoyi.panel.server import create_app
 
+    # 新机器第一次开面板：没有配置就从 *.example.toml 复制一份（默认保守值、paper 模式），
+    # 剩下的在首次设置向导里配
+    for target in (Path(args.risk), Path(args.app)):
+        example = target.with_name(target.name.replace(".toml", ".example.toml"))
+        if not target.exists() and example.is_file():
+            shutil.copy2(example, target)
+            print(f"没有 {target}，已从 {example.name} 复制一份")
     try:
         risk = load_risk_config(Path(args.risk))
         app_cfg = load_app_config(Path(args.app))
@@ -290,7 +337,10 @@ def _panel(args: argparse.Namespace) -> int:
     # 设置页只显示每个密钥配没配：在这里查好传进去，密钥的值不进面板的数据和接口
     store = ChainedSecretStore()
     keys = {name: bool(store.get(name)) for name in KNOWN_KEYS}
+    writer = KeychainWriter()
     print(f"面板：http://{args.host}:{args.port}/ （只接受局域网访问，Ctrl+C 停止）")
+    if not all(keys.get(k) for k in ("OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN")):
+        print(f"还没配齐：在这台 Mac 上打开 http://127.0.0.1:{args.port}/setup")
     paths = ConfigPaths(risk=Path(args.risk), app=Path(args.app), slow=Path(args.slow))
     app = create_app(
         risk,
@@ -299,6 +349,8 @@ def _panel(args: argparse.Namespace) -> int:
         key_status=keys,
         config_paths=paths,
         allow_hosts=frozenset(h.lower() for h in args.allow_host),
+        secret_writer=writer.set if writer.available() else None,
+        secret_reader=store.get,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

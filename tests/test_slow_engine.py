@@ -17,6 +17,7 @@ from jiaoyi.slow.tradingagents_engine import (
     build_config,
     draft_to_card_symbol,
     format_derivatives,
+    get_binance_indicators,
     ta_ticker,
 )
 
@@ -56,12 +57,38 @@ def test_ticker_mapping() -> None:
 def test_indicators() -> None:
     c = [float(x) for x in range(1, 61)]
     o = h = low = c
-    assert _indicator("close_10_sma", o, h, low, c)[-1] == pytest.approx(55.5)
-    assert _indicator("rsi", o, h, low, c)[-1] == 100.0
-    assert len(_indicator("macdh", o, h, low, c)) == 60
-    assert _indicator("atr", o, h, low, c)[-1] == pytest.approx(1.0, abs=1e-2)
+    v = [1.0] * 60
+    assert _indicator("close_10_sma", o, h, low, c, v)[-1] == pytest.approx(55.5)
+    assert _indicator("rsi", o, h, low, c, v)[-1] == 100.0
+    assert len(_indicator("macdh", o, h, low, c, v)) == 60
+    assert _indicator("atr", o, h, low, c, v)[-1] == pytest.approx(1.0, abs=1e-2)
     with pytest.raises(ValueError):
-        _indicator("nope", o, h, low, c)
+        _indicator("nope", o, h, low, c, v)
+
+
+def test_boll_vwma_mfi() -> None:
+    c = [10.0] * 30
+    v = [1.0] * 30
+    assert _indicator("boll", c, c, c, c, v)[-1] == pytest.approx(10.0)
+    assert _indicator("boll_ub", c, c, c, c, v)[-1] == pytest.approx(10.0)  # 价格不动→带宽为 0
+    rising = [float(x) for x in range(1, 41)]
+    mid = _indicator("boll", rising, rising, rising, rising, [1.0] * 40)[-1]
+    ub = _indicator("boll_ub", rising, rising, rising, rising, [1.0] * 40)[-1]
+    lb = _indicator("boll_lb", rising, rising, rising, rising, [1.0] * 40)[-1]
+    assert lb < mid < ub
+    assert mid - lb == pytest.approx(ub - mid)
+    # 成交量全压在最新一根：VWMA 就等于它的收盘价
+    heavy = [0.0] * 39 + [5.0]
+    assert _indicator("vwma", rising, rising, rising, rising, heavy)[-1] == pytest.approx(40.0)
+    assert _indicator("mfi", rising, rising, rising, rising, [1.0] * 40)[-1] == 100.0
+    assert len(_indicator("mfi", rising, rising, rising, rising, [1.0] * 40)) == 40
+
+
+def test_unknown_indicator_does_not_fail_the_meeting(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [[i * 3_600_000, "1", "2", "0.5", "1.5", "10", 0, "15"] for i in range(30)]
+    monkeypatch.setattr("jiaoyi.slow.tradingagents_engine._klines", lambda *a, **k: rows)
+    out = get_binance_indicators("BTC", "nope", "2026-10-23", 2)
+    assert "boll_ub" in out and "nope" in out
 
 
 def test_draft_conversion_normalizes_and_blocks_no_trade_signals() -> None:

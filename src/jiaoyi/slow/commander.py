@@ -16,8 +16,8 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -157,6 +157,7 @@ class BattleCardCommander:
         daily_cost_limit_usd: float | None = None,
         failed_meeting_cost_usd: float = 0.05,
         budget_path: Path | None = None,
+        card_path: Path | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
@@ -170,6 +171,8 @@ class BattleCardCommander:
         self._cost_limit = daily_cost_limit_usd
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
+        self._card_path = card_path
+        self._held: frozenset[str] = frozenset()
         self._fails = 0
         self._retry_at: datetime | None = None
         self._notices: list[str] = []
@@ -195,6 +198,7 @@ class BattleCardCommander:
         self._stats_day = ""
         self._pick_cost = 0.0
         self._restore_budget()
+        self._restore_card()
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
@@ -214,6 +218,15 @@ class BattleCardCommander:
                 ]
             }
         )
+
+    def set_held(self, symbols: Collection[str]) -> None:
+        """有持仓的币：它们必须一直在卡上（继续盯，不开新仓），不然持仓管家会判“不再盯”而平仓。"""
+        self._held = frozenset(symbols)
+
+    @staticmethod
+    def _watch_only(cs: CardSymbol) -> CardSymbol:
+        """留在卡上继续盯、不开新仓：方向不动（NO_TRADE 会被持仓管家当平仓理由），只清空信号。"""
+        return cs.model_copy(update={"allowed_signals": []})
 
     def block_symbol(self, symbol: str, reason: str) -> None:
         """封掉一个币的新开仓（例如币安公告要下架它）。保镖只认作战卡，所以这里改卡。
@@ -375,44 +388,77 @@ class BattleCardCommander:
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
-        results = await asyncio.gather(
-            *(self._analyze_one(e, picked.regime) for e in to_meet), return_exceptions=True
-        )
-        symbols: list[CardSymbol] = list(reused.values())
-        cost = picked.cost_usd
-        failed: list[str] = []
-        for e, res in zip(to_meet, results, strict=True):
-            if isinstance(res, Analysis):
-                symbols.append(clamp_to_risk(res.card_symbol, self._risk, self._stop))
-                cost += res.cost_usd
-                self._last_meeting[e.symbol] = now
-            else:
-                failed.append(f"{e.symbol}: {res!r}")
-        if not symbols:
-            raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
-        card = BattleCard(
-            card_id=self._card_id(now),
-            version=prev.version + 1 if prev is not None and same_day else 1,
-            created_at=now,
-            expires_at=now + self._ttl,
-            source="tradingagents",
-            regime=picked.regime,
-            symbols=symbols,
-            refresh_reason=reason,
-            llm_cost_usd=round(cost, 6),
-        )
-        if self._journal is not None:
-            # 只记这次真开了会的标的；沿用旧卡的不重复记
-            self._journal.record(
-                card,
-                [
-                    e.symbol
-                    for e, r in zip(to_meet, results, strict=True)
-                    if isinstance(r, Analysis)
-                ],
+        base_version = prev.version if prev is not None and same_day else 0
+        symbols: dict[str, CardSymbol] = dict(reused)
+        # 本轮还没轮到 / 开会失败的币：上一张卡的指令先留着，开完哪个换哪个，不然持仓管家会看到
+        # 卡上暂时没有这个币而判“不再盯”。上一张卡已过期就不沿用旧指令，只给有持仓的币留“不开新仓”
+        old_ok = prev is not None and prev.is_valid(now)
+        for e in to_meet:
+            old = prev.for_symbol(e.symbol) if prev is not None else None
+            if old is None:
+                continue
+            if old_ok:
+                symbols[e.symbol] = clamp_to_risk(old, self._risk, self._stop)
+            elif e.symbol in self._held:
+                symbols[e.symbol] = self._watch_only(old)
+        # 有持仓但这轮没入选的币：留在卡上，不开新仓、方向不动，别让管家把它当“不再盯”
+        for sym in self._held:
+            old = prev.for_symbol(sym) if prev is not None else None
+            if sym not in symbols and old is not None:
+                symbols[sym] = self._watch_only(old)
+        cost = picked.cost_usd
+        published = 0
+
+        def make_card() -> BattleCard:
+            return BattleCard(
+                card_id=self._card_id(now),
+                version=base_version + max(published, 1),
+                created_at=now,
+                expires_at=now + self._ttl,
+                source="tradingagents",
+                regime=picked.regime,
+                symbols=list(symbols.values()),
+                refresh_reason=reason,
+                llm_cost_usd=round(cost, 6),
             )
+
+        async def meet(e: SymbolPoolEntry) -> Analysis:
+            nonlocal cost, published
+            res = await self._analyze_one(e, picked.regime)
+            # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
+            symbols[e.symbol] = clamp_to_risk(res.card_symbol, self._risk, self._stop)
+            cost += res.cost_usd
+            published += 1
+            self._last_meeting[e.symbol] = now
+            card = make_card()
+            self._card = card
+            self._save_card()
+            if self._journal is not None:
+                self._journal.record(card, [e.symbol])
+            return res
+
+        results = await asyncio.gather(*(meet(e) for e in to_meet), return_exceptions=True)
+        failed = [
+            f"{e.symbol}: {r!r}"
+            for e, r in zip(to_meet, results, strict=True)
+            if not isinstance(r, Analysis)
+        ]
+        for e, r in zip(to_meet, results, strict=True):
+            if isinstance(r, Analysis):
+                continue
+            if e.symbol in self._held and e.symbol in symbols:
+                symbols[e.symbol] = self._watch_only(symbols[e.symbol])  # 开会失败：持仓照常盯
+            else:
+                symbols.pop(e.symbol, None)  # 没有新结论的币不留旧指令
+        if not symbols:
+            raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
+        card = make_card()
+        self._card = card
+        self._save_card()
+        if published == 0 and self._journal is not None:
+            self._journal.record(card, [])
         return card
 
     def _card_id(self, now: datetime) -> str:
@@ -527,6 +573,52 @@ class BattleCardCommander:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             # 落盘失败不影响出卡；内存里的统计照常生效
+
+    def _restore_card(self) -> None:
+        """重启后捡回还没过期的作战卡（含各币上次开会时间），不用等下一轮 2 小时的会。"""
+        if self._card_path is None:
+            return
+        try:
+            data = json.loads(self._card_path.read_text(encoding="utf-8"))
+            card = BattleCard.model_validate(data["card"])
+            meets = {str(k): datetime.fromisoformat(v) for k, v in data["last_meeting"].items()}
+            saved_stop = data["stop"]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return
+        if saved_stop != asdict(self._stop):
+            return  # 出卡时的档位 / ATR 周期和现在不一致：卡里的止损倍数不能直接用，等下一轮会
+        now = self._clock()
+        if not card.is_valid(now):
+            return
+        # 重启前后可能改过硬上限或切了档位：按现在的配置再夹一遍，免得保镖整个拒掉
+        card = card.model_copy(
+            update={"symbols": [clamp_to_risk(sym, self._risk, self._stop) for sym in card.symbols]}
+        )
+        self._card, self._last_refresh = card, card.created_at
+        self._seen = {s.symbol for s in card.symbols}
+        self._last_meeting = meets
+
+    def _save_card(self) -> None:
+        if self._card_path is None or self._card is None:
+            return
+        tmp = self._card_path.with_suffix(".tmp")
+        try:
+            self._card_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "card": self._card.model_dump(mode="json"),
+                        "last_meeting": {k: v.isoformat() for k, v in self._last_meeting.items()},
+                        "stop": asdict(self._stop),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._card_path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            # 落盘失败不影响出卡；内存里的卡照常生效
 
     def _write(self, **kw: Any) -> None:
         self._log.write(

@@ -28,6 +28,7 @@ from jiaoyi.contracts import DecisionRecord, Outcome, Role
 from jiaoyi.interfaces import DecisionLog
 
 MAX_RSS_BYTES = 2_000_000
+ERROR_NOTE_GAP = timedelta(minutes=30)  # 同一个源的失败记录最多每 30 分钟一条
 BLOCK_WINDOW = timedelta(days=7)
 """下架公告多久之内算数。合约真正下架通常在公告后几天。"""
 
@@ -134,10 +135,12 @@ class OkxAnnouncements:
 
     name = "okx"
     URL = "https://www.okx.com/api/v5/support/announcements"
+    # 2026-10-23 核对 /api/v5/support/announcement-types：announcements-trading-rules 已下线
+    # （请求返回 400 / code 51000，之前会让整个源失败）。trading-updates-us-aus 是美国 / 澳洲站的
+    # 交易动态，与币安永续无关，不拉。
     TYPES = (
         "announcements-new-listings",
         "announcements-delistings",
-        "announcements-trading-rules",
         "announcements-api",
     )  # fmt: skip
 
@@ -145,24 +148,33 @@ class OkxAnnouncements:
         self._c = client or httpx.AsyncClient(timeout=10.0, headers={"Accept-Language": "zh-CN"})
 
     async def fetch(self) -> list[NewsItem]:
+        """每个公告类型各拉一次；某一类失败（接口改名、限流）不拖垮其它类，全部失败才算源失败。"""
         out: list[NewsItem] = []
+        errors: list[str] = []
         for t in self.TYPES:  # 限速 5 次 / 2 秒：顺序请求足够
-            r = await self._c.get(self.URL, params={"annType": t, "page": 1})
-            r.raise_for_status()
-            body = r.json()
-            if body.get("code") != "0":
-                raise ValueError(f"欧易公告接口返回 code={body.get('code')}")
-            for page in body["data"]:
-                for d in page["details"]:
-                    kind = {
-                        "announcements-new-listings": NewsKind.LISTING,
-                        "announcements-delistings": NewsKind.DELISTING,
-                        "announcements-trading-rules": NewsKind.CONTRACT,
-                    }.get(t, NewsKind.ANNOUNCEMENT)
-                    out.append(
-                        NewsItem("okx", d["url"], str(d["title"]), _ms(d["pTime"]), d["url"], kind)
-                    )
+            try:
+                out.extend(await self._one(t))
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                errors.append(f"{t}: {exc!r}")
+        if errors and len(errors) == len(self.TYPES):
+            raise ValueError("欧易公告全部失败：" + "；".join(errors))
         return out
+
+    async def _one(self, t: str) -> list[NewsItem]:
+        r = await self._c.get(self.URL, params={"annType": t, "page": 1})
+        r.raise_for_status()
+        body = r.json()
+        if body.get("code") != "0":
+            raise ValueError(f"欧易公告接口返回 code={body.get('code')}")
+        kind = {
+            "announcements-new-listings": NewsKind.LISTING,
+            "announcements-delistings": NewsKind.DELISTING,
+        }.get(t, NewsKind.ANNOUNCEMENT)
+        return [
+            NewsItem("okx", d["url"], str(d["title"]), _ms(d["pTime"]), d["url"], kind)
+            for page in body["data"]
+            for d in page["details"]
+        ]
 
     async def aclose(self) -> None:
         await self._c.aclose()
@@ -270,6 +282,7 @@ class NewsHub:
         self._clock = clock
         self._items: dict[str, NewsItem] = {}
         self._down: set[str] = set()
+        self._last_err_note: dict[str, datetime] = {}
 
     # ------------------------------------------------------------ 拉取（异步，主循环定时调）
     async def poll(self) -> list[NewsItem]:
@@ -323,9 +336,13 @@ class NewsHub:
             self._note(Outcome.INFO, f"新闻源 {name} 恢复")
         elif not ok and not was_down:
             self._down.add(name)
-            self._note(
-                Outcome.ERROR, f"新闻源 {name} 失败，会议在没有它的情况下继续：{detail}"[:200]
-            )
+            now = self._clock()
+            last = self._last_err_note.get(name)
+            if last is None or now - last >= ERROR_NOTE_GAP:  # 反复上下线的源别刷屏
+                self._last_err_note[name] = now
+                self._note(
+                    Outcome.ERROR, f"新闻源 {name} 失败，会议在没有它的情况下继续：{detail}"[:200]
+                )
 
     def _note(self, outcome: Outcome, summary: str) -> None:
         if self._log is None:

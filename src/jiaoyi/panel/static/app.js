@@ -38,6 +38,8 @@ try { if (localStorage.getItem("updown") === "red-up") document.documentElement.
 let data = null; // /api/overview
 let pageData = null; // 当前页自己的接口
 let pageKey = "";
+let pageErr = null; // [pageId, 出错说明]：读不出就显示错误，不能一直“正在读取…”
+const STALE_HINT = "多半是代码更新了、面板进程还是旧的：在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。";
 let lastOk = 0;
 const S = { tf: "1m" };
 
@@ -88,8 +90,11 @@ function chrome() {
     const since = c.paused_since ? `${hm(c.paused_since)} 起，` : "";
     b += `<div class="banner bn-bad"><b>⏸ ${why}</b><span>${since}${esc(c.paused_reason || "")}${c.paused_reason ? "。" : ""}持仓照常盯；恢复要点右上角“恢复开新仓”并输入面板密码。</span></div>`;
   }
+  if (c && c.panel_stale) {
+    b += `<div class="banner bn-bad"><b>面板版本与代码不一致</b><span>代码已更新、面板进程还是旧的，有的页面会读不出。在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。</span></div>`;
+  }
   if (c && c.config_pending) {
-    b += `<div class="banner bn-paper"><b>配置已改、未生效</b><span>重启 <code>jiaoyi run</code> 后生效。<a href="#settings">看改了什么 ›</a></span></div>`;
+    b += `<div class="banner bn-paper"><b>配置已改、未生效</b><span>重启主程序后生效。<a href="#settings">看改了什么 ›</a></span>${data.running ? `<button class="btn b-sm b-go" ${clickable("cmd", "restart")}>重启生效</button>` : ""}</div>`;
   }
   if (data && data.kpis.halted) {
     b += `<div class="banner bn-bad"><b>⚠ 已熔断</b><span>今日亏损达到 ${data.kpis.halt_pct}%，停开新仓，曼谷 00:00 自动恢复。持仓照常盯。</span></div>`;
@@ -120,6 +125,7 @@ const CMD = {
   close_all: { title: "全部平仓", text: "市价平掉所有持仓、撤掉保命单。会先自动暂停开新仓；平完以后要开新仓，得另外点“恢复开新仓”。", ok: "全部平仓", danger: true },
   close_position: { title: "平仓", text: "市价平掉这一笔，撤掉它的保命单。", ok: "平仓", danger: true },
   unblock_symbol: { title: "解封", text: "这个币因为币安公告被禁开新仓。确认公告已经不影响交易再解封。", ok: "解封", pw: true },
+  restart: { title: "重启生效", text: "主程序先停开新仓、等在途的下单和平仓做完，再退出由 launchd 自动拉起，按新配置运行（约 30–60 秒）。持仓的保命止损一直挂在交易所。", ok: "重启", pw: true },
   refresh_cards: { title: "重新开会出卡", text: "让军师团马上开一次会、重出作战卡（会花一次大模型费用）。", ok: "开会" },
 };
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
@@ -168,12 +174,31 @@ function askCommand(kind, params = {}, what = "") {
       if (st.status !== "pending") {
         const [t, cl] = STATUS[st.status] || [st.status, ""];
         dlgMsg(`<b class="${cl}">${t}</b>${st.detail ? "　" + esc(st.detail) : ""}`);
+        if (kind === "restart" && st.status === "done") return waitRestart(st.detail);
         poll();
         return;
       }
     }
     dlgMsg("一直没有回执：主程序可能没在运行。", "down");
   });
+}
+
+// 重启：等主程序带着新配置回来（runtime.json 的配置指纹和配置文件一致、心跳恢复）
+async function waitRestart(detail) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 180000) {
+    if (!$("#dlg-msg")) return;
+    dlgMsg(`<b>重启中…</b>　已等 ${Math.round((Date.now() - t0) / 1000)} 秒`);
+    await new Promise((r) => setTimeout(r, 2000));
+    let ov;
+    try { ov = await getJson("/api/overview"); } catch (e) { continue; }
+    if (ov.running && ov.control && ov.control.config_pending === false) {
+      dlgMsg(`<b class="up">已按新配置重启</b>`);
+      poll();
+      return;
+    }
+  }
+  dlgMsg("3 分钟还没起来：在 Mac 上看 <code>launchctl list | grep jiaoyi</code> 和 data/logs/。", "down");
 }
 
 /* ---------- 弹窗 */
@@ -586,19 +611,126 @@ P.pool = () => {
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
-const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "mini（最快）", small: "small", base: "base（最准）" };
+const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "2h": "2 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
-const label = (i) => (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
-const NULL_AS = { max_cards_per_round: "跟随 card_pick_max" };
-const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : i && i.choices && i.choices.length ? esc(choiceLabel(i.key, v)) : esc(v));
-const pinHint = (i) => (i.pinned ? ` · <span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? " · 跟档位走" : "");
+// 设置项的大白话标题；原来的专业说明和英文键名降为灰色小字
+const PLAIN = {
+  risk_per_trade_pct: "每笔最多亏本金的百分之几",
+  max_leverage: "最多开几倍杠杆",
+  max_total_exposure_x: "所有仓位加起来最多是本金的几倍",
+  daily_loss_halt_pct: "今天亏到本金的百分之几就停止开新仓",
+  max_notional_per_trade_x: "单笔仓位最大是本金的几倍",
+  max_notional_per_trade_usdt: "单笔仓位绝对上限 USDT（可不填）",
+  max_open_positions: "同时最多持几个币",
+  lifeboat_stop_multiplier: "交易所兜底止损比正常止损远几倍",
+  max_spread_bps: "买卖价差超过万分之几就不开仓",
+  max_slippage_bps: "成交价比预期差太多就不下单（万分之几）",
+  taker_fee_bps: "交易所手续费（万分之几，单边）",
+  min_tp_fee_multiple: "止盈至少能赚回几倍手续费，不够就不做",
+  day_reset_tz: "“今天”按哪个时区算",
+  mode: "运行方式",
+  profile: "持仓档位（单笔最长拿多久）",
+  predictor_enabled: "用不用 Kronos 预测价格",
+  signal_dedup_s: "同一个信号多少秒内只处理一次",
+  jev_timeout_ms: "拍板人多少毫秒不回答就放弃这笔",
+  keeper_interval_s: "管家每隔几秒看一次持仓",
+  reconcile_interval_s: "每隔几秒和交易所对一次账",
+  slow_loop_interval_min: "军师团每隔几分钟开一次会",
+  pool_size: "候选池放多少个币",
+  card_pick_max: "军师团每次最多挑几个币",
+  reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
+  rule_gate_without_jev: "没有拍板人时用规则代替",
+  jev_usd_per_mtok: "拍板人价格（每百万字美元）",
+  jev_max_consecutive_errors: "拍板人连错几次就先歇一会",
+  jev_error_cooldown_s: "拍板人连错后歇几秒",
+  min_p_genuine: "信号至少多大把握是真的（0–1）",
+  min_p_take: "至少多大把握值得做（0–1）",
+  min_p_direction: "方向至少多大把握（0–1）",
+  max_p_toxic: "被大户收割的可能最多多大（0–1）",
+  signal_max_age_s: "信号超过几秒还没处理完就作废",
+  size_fraction_s: "小仓位用正常仓位的几成",
+  size_fraction_m: "中仓位用正常仓位的几成",
+  atr_period_min: "按几分钟 K 线算波动幅度（定止损用）",
+  min_stop_atr: "止损最近几个波动幅度（太近会被扫）",
+  max_stop_atr: "止损最远几个波动幅度（太远不做）",
+  stop_level_buffer_atr: "止损放在关键价位外面多远（波动幅度的几倍）",
+  min_tp_r: "止盈至少是止损的几倍",
+  max_tp_r: "止盈最多是止损的几倍",
+  time_limit_s: "一笔最多拿几秒，到时就平",
+  keeper_close_p: "管家觉得该平的把握过多少就平（0–1）",
+  keeper_close_p_strong: "把握过多少不用再确认直接平（0–1）",
+  keeper_confirmations: "管家连续几次都说平才平",
+  patrol_shock_pct_1m: "1 分钟内往亏的方向走了百分之几就全平",
+  patrol_alert_pct_1m: "1 分钟内往亏的方向走了百分之几就叫管家马上看",
+  breakout_vol_ratio: "成交量是平时几倍算放量突破",
+  surge_vol_ratio: "成交量是平时几倍算量能突增",
+  surge_taker_ratio: "主动买（卖）占比多少算突增",
+  liq_min_usdt_1m: "1 分钟爆仓至少多少 USDT 才算",
+  liq_ratio: "爆仓额是平时几倍才算",
+  liq_drop_pct_5m: "爆仓砸出的 5 分钟跌幅至少百分之几",
+  crowded_funding_rate: "资金费率多高算一边倒（0.0005 = 万分之五）",
+  session_window_min: "开盘、结算前后几分钟算关键时段",
+  session_vol_ratio: "关键时段成交量是平时几倍才算",
+  mode_predictor: "预测哪些币",
+  size_policy: "模型大小怎么选",
+  model_size: "固定用哪个大小的模型",
+  adaptive_base_max_queue: "排队不超过几个时用最准的模型",
+  adaptive_mini_min_queue: "排队到几个时换最快的模型",
+  backfill_bars: "启动时先拉多少根 5 分钟 K 线",
+  max_cards_per_round: "每轮最多给几个币开会",
+  concurrency: "同时开几个会",
+  card_ttl_hours: "作战卡管用几小时",
+  symbol_min_interval_hours: "同一个币至少隔几小时才再开会",
+  refresh_lead_min: "作战卡到期前几分钟开会换新卡",
+  symbol_timeout_s: "一个币的会最多开几秒",
+  min_refresh_gap_min: "两轮会至少隔几分钟",
+  sim_environment: "模拟盘连币安哪个环境",
+  data_dir: "数据保存在哪个文件夹",
+  jev_provider: "拍板人走哪个通道",
+  jev_model: "拍板人用哪个模型版本",
+};
+const plainOf = (i) => PLAIN[i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key];
+const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
+// 合约里的说明带英文选项名的，换一句中文
+const HINT = {
+  jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
+  jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
+  jev_usd_per_mtok: "按用量算钱，用来统计花费",
+  sim_environment: "Demo Trading 是币安现在的模拟盘；旧测试网已停用",
+  mode_predictor: "按需 = 只算作战卡里和有持仓的币；全算 = 候选池每个币都算（费电脑）",
+  size_policy: "固定 = 一直用下面选的模型；自适应 = 排队多时自动换小模型",
+  model_size: "选“固定”时用这个",
+  adaptive_base_max_queue: "选“自适应”时生效",
+  adaptive_mini_min_queue: "选“自适应”时生效；介于两者之间用中模型",
+  profile: "在下面的“持仓档位”卡片里一键切换",
+  data_dir: "决策记录、状态文件都存在这里",
+};
+// 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
+const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
+const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${esc(String(i.recommended))}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
+const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样" };
+// 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
+const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
+function humanDur(sec) {
+  if (sec < 1) return `${Math.round(sec * 1000)} 毫秒`;
+  if (sec < 60) return `${+sec.toFixed(1)} 秒`;
+  const t = sec >= 3600 ? Math.round(sec / 60) * 60 : Math.round(sec); // 一小时以上精确到分
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = t % 60;
+  return [h ? `${h} 小时` : "", m ? `${m} 分` : "", x ? `${x} 秒` : ""].filter(Boolean).join(" ") || "0 秒";
+}
+function durOf(key, v) {
+  if (typeof v !== "number" || key === "atr_period_min") return null;
+  const u = UNIT_S.find(([suf]) => key.endsWith(suf));
+  return u ? humanDur(v * u[1]) : null;
+}
+const fmtVal = (v, i) => (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
+const pinHint = (i) => (i.pinned ? `<span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? "跟档位走" : "");
 const unpinBtn = (sec, i) => (sec && i.pinned && pageData && pageData.writable ? `<button class="btn b-sm" ${clickable("unpin", sec + ":" + i.key)}>恢复档位默认</button>` : "");
-const recHint = (i) => (i.recommended == null ? "" : ` · 推荐 ${esc(String(i.recommended))}（${esc(i.recommended_why)}）`);
-const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.recommended != null ? recHint(i) : i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
+const setRows = (items, sec) => items.map((i) => `<div class="fr"><label title="${esc(i.key)}">${esc(label(i))}<span class="hint">${[techHint(i), pinHint(i)].filter(Boolean).join(" · ")}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
 
-const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
+const SECTION = { risk: "硬上限", category: "每类币仓位上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
 const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
 
 function sectionItems(d, sec) {
@@ -611,7 +743,7 @@ function sectionItems(d, sec) {
 
 const PROFILE_NOTE = { "2h": "单笔最长 2 小时（默认）", "60m": "单笔最长 1 小时", "30m": "单笔最长 30 分钟", "15m": "单笔最长 15 分钟" };
 function pinnedList(pf) {
-  return Object.entries(pf.pinned).flatMap(([sec, m]) => Object.keys(m).map((k) => `${sec === "app" ? "" : sec + "."}${k}`));
+  return Object.entries(pf.pinned).flatMap(([sec, m]) => Object.keys(m).map((k) => PLAIN[k] || k));
 }
 function profileCard(d) {
   const pf = d.profile;
@@ -674,7 +806,7 @@ function editSettings(sec) {
   const d = pageData;
   if (!d || !d.writable) return;
   const items = sectionItems(d, sec);
-  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.recommended != null ? recHint(i) : i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
+  const rows = items.map((i) => `<div class="fr"><label title="${esc(i.key)}">${esc(label(i))}<span class="hint">${[techHint(i), i.nullable ? "可留空" : ""].filter(Boolean).join(" · ")}</span></label>${editInput(i)}</div>`).join("");
   const c = data.control;
   ask(`修改${SECTION[sec]}`, `<div class="form edit scroll tall">${rows}</div>
     <div class="dim small">保存前整份校验，不合格不写；写前留备份。主程序重启后生效。</div>${pwField(c)}`, "保存", false, async () => {
@@ -706,10 +838,27 @@ function editSettings(sec) {
     $("#layer [data-close].btn").textContent = "关闭";
     const byKey = Object.fromEntries(items.map((i) => [i.key, i]));
     const list = res.changed.map((x) => `${esc(x.key)}：${fmtVal(x.old, byKey[x.key])} → ${fmtVal(x.new, byKey[x.key])}`).join("<br>");
-    dlgMsg(`<b class="up">已保存</b>，重启 <code>jiaoyi run</code> 后生效。<br>${list}`);
+    dlgMsg(`<b class="up">已保存</b>，点页面顶部“重启生效”后用上。<br>${list}`);
     poll();
   });
   $("#layer .dlg").classList.add("mid");
+}
+
+// 密钥：按当前模式和通道分“必须 / 可选 / 现在用不到”，只有必须的没配才标红
+const NEED_ORDER = { required: 0, optional: 1, unused: 2 };
+function keyRows(d) {
+  const need = d.key_needs || {};
+  return Object.entries(d.keys)
+    .sort(([a], [b]) => (NEED_ORDER[need[a]] ?? 1) - (NEED_ORDER[need[b]] ?? 1))
+    .map(([k, ok]) => {
+      const n = need[k] || "optional";
+      const st = n === "unused" ? `<span class="dim">现在用不到</span>`
+        : ok ? `<span class="lamp ok"><i></i>已配置</span>`
+        : n === "required" ? `<span class="pill p-short">缺，必须配</span>`
+        : `<span class="dim">可选，不配也行</span>`;
+      const why = n === "unused" ? (k.includes("TESTNET") ? "实盘模式下不用模拟盘的 key" : k.startsWith("BINANCE") ? "实盘才用" : "现在走的通道用不到它") : KEY_HELP[k] || "";
+      return `<div class="fr ${n === "unused" ? "dimrow" : ""}"><label title="${esc(k)}">${esc(KEY_LABEL[k] || KEY_NOTE[k] || k)}<span class="hint">${esc(why)}</span></label>${st}</div>`;
+    }).join("");
 }
 
 P.settings = () => {
@@ -719,7 +868,7 @@ P.settings = () => {
   const changes = d.changes.length
     ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old, { key: x.key, choices: [0], nullable: true })} → ${fmtVal(x.new, { key: x.key, choices: [0], nullable: true })}</span></div>`).join("")}</div>`
     : '<div class="dim">还没有在网页上改过。</div>';
-  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(k)}<span class="hint">${esc(KEY_NOTE[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
+  const keys = keyRows(d) || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
     <section class="card"><div class="ch"><h2>运行模式</h2></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
@@ -730,18 +879,19 @@ P.settings = () => {
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
       ${(d.risk_cautions || []).length ? `<div class="note warn mt">比推荐值冒险（只提示，不拦）：${d.risk_cautions.map(esc).join("；")}</div>` : ""}
-      <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
+      <div class="lbl">每一类币的仓位加起来最多是本金的几倍 ${editBtn(d, "category")}</div>
+      <div class="dim small">比如“山寨币 1 倍”：所有山寨币的仓位加起来不超过本金的 1 倍。同一类币常常一起涨跌，这样一类出事不会亏太多。</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
-      <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>
+      <div class="foot">在 Mac mini 本机打开 <a href="/setup">首次设置</a> 写入（或终端 jiaoyi setup-keys）。</div></section>
     <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app, "app")}</div></section>
     <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop, "fast_loop")}</div></section>
     <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
-      <div class="foot">开关在“运行配置和开关”里（predictor_enabled）。</div></section>
-    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">config/slow.toml ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule, "schedule")}</div></section>
+      <div class="foot">开关在“运行配置和开关”里（“用不用 Kronos 预测价格”）。</div></section>
+    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">多久开一次会 ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule, "schedule")}</div></section>
     ${profileCard(d)}
     <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>
-  <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，重启 jiaoyi run 后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;
+  <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，点“重启生效”后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;
 };
 
 /* 资金曲线（历史页） */
@@ -795,6 +945,10 @@ function render() {
   $("#status").innerHTML = statusBar();
   const { page, arg } = route();
   const needs = PAGE_API[page];
+  if (needs && pageErr && pageErr[0] === pageId(page, arg)) {
+    $("#page").innerHTML = `<div class="card"><div class="empty"><b>这一页读不出来</b><span>${esc(pageErr[1])}</span><span>${STALE_HINT}</span></div></div>`;
+    return;
+  }
   if (!data || (needs && (!pageData || pageKey !== pageId(page, arg)))) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
@@ -806,10 +960,22 @@ function render() {
   if (page === "history") mountHistoryChart();
 }
 
+// 5 秒没回就算失败；出错带上状态码和接口给的说明
 async function getJson(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(String(r.status));
-  return r.json();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5000);
+  try {
+    let r;
+    try { r = await fetch(url, { cache: "no-store", signal: ctl.signal }); } catch (e) { throw new Error(e.name === "AbortError" ? "5 秒没有回应" : "连不上面板服务"); }
+    if (!r.ok) {
+      let detail = "";
+      try { const j = await r.json(); detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch (e) { /* 不是 JSON */ }
+      throw new Error(`${url.split("?")[0]} 返回 ${r.status}${detail ? "：" + detail : ""}`);
+    }
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function poll() {
@@ -819,8 +985,14 @@ async function poll() {
     TZ = data.display_tz || TZ;
     const api = PAGE_API[page];
     if (api) {
-      pageData = await getJson(api(arg));
-      pageKey = pageId(page, arg);
+      const id = pageId(page, arg);
+      try {
+        pageData = await getJson(api(arg));
+        pageKey = id;
+        pageErr = null;
+      } catch (e) {
+        pageErr = [id, e.message];
+      }
     }
     lastOk = Date.now();
     $("#stale").innerHTML = "";
@@ -828,11 +1000,14 @@ async function poll() {
     loadKlines(false);
   } catch (e) {
     const ago = lastOk ? Math.round((Date.now() - lastOk) / 1000) + " 秒前" : "从未";
-    $("#stale").innerHTML = `<div class="stale">面板服务连不上（上次成功：${ago}）</div>`;
+    $("#stale").innerHTML = `<div class="stale">面板服务读不出（${esc(e.message)}；上次成功：${ago}）</div>`;
+    if (!data) $("#page").innerHTML = `<div class="card"><div class="empty"><b>面板读不出数据</b><span>${esc(e.message)}</span><span>${STALE_HINT}</span></div></div>`;
   }
 }
 
-window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
-render();
-poll();
-setInterval(poll, 5000);
+if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
+  window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
+  render();
+  poll();
+  setInterval(poll, 5000);
+}

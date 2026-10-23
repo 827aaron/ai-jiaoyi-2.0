@@ -39,7 +39,7 @@ CLOCK_SKEW = timedelta(seconds=30)
 DONE_KEEP = timedelta(days=7)
 
 CommandKind = Literal[
-    "pause", "resume", "close_all", "close_position", "unblock_symbol", "refresh_cards"
+    "pause", "resume", "close_all", "close_position", "unblock_symbol", "refresh_cards", "restart"
 ]
 
 

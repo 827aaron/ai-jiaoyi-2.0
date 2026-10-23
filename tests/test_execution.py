@@ -10,7 +10,7 @@ import pytest
 from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import AlertLevel, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
-from jiaoyi.execution.exchange import ExchangeError
+from jiaoyi.execution.exchange import CloseFill, ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, SymbolAlreadyHeld
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -892,3 +892,148 @@ async def test_lifeboat_recorded_as_cancelled_after_normal_close(rig: Rig) -> No
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     assert rec.status is PositionStatus.CLOSED
     assert rec.lifeboat is not None and rec.lifeboat.status.value == "cancelled"
+
+
+# ---------------------------------------------------------------- 外部平仓（币安 App 手动平）
+
+
+def _manual_close(rig: Rig) -> None:
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0)
+
+
+async def test_manual_close_two_flat_rounds_settles_the_position(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.manual_fill = CloseFill(68544.0, 0.2)
+    _manual_close(rig)
+
+    first = await rig.rec.reconcile(rig.t)
+    assert first.issues == [] and rig.api.stopped == []  # 第 1 轮不动作
+    second = await rig.rec.reconcile(rig.t)
+
+    assert [i.kind for i in second.issues] == [ReconcileIssueKind.EXTERNAL_CLOSE]
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED
+    assert rec.close_reason is CloseReason.MANUAL
+    assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68544.0 - 68044.0) - 0.2)
+    assert rig.api.stopped == [("ex1", True)]  # 停执行器但不让它再发平仓单
+    assert rig.ex.market_closed == []  # 不再直连平仓
+    assert len(rig.ex.placed) == 1  # 没有补挂保命止损
+    assert rig.ex.stops == {}  # 残留的保命止损撤掉了
+    info = [a for a in rig.alerts.sent if "手动平仓" in a.title]
+    assert len(info) == 1 and info[0].level is AlertLevel.INFO
+    # 之后不再有任何问题
+    assert (await rig.rec.reconcile(rig.t)).issues == []
+
+
+async def test_manual_close_never_reports_mismatch_or_replaces_lifeboat(rig: Rig) -> None:
+    await open_filled(rig)
+    rig.ex.manual_fill = CloseFill(68544.0, 0.2)
+    rig.ex.stops.clear()  # 连保命止损也不在了，更不该去补
+    _manual_close(rig)
+    kinds: list[ReconcileIssueKind] = []
+    for _ in range(3):
+        kinds += [i.kind for i in (await rig.rec.reconcile(rig.t)).issues]
+    assert kinds == [ReconcileIssueKind.EXTERNAL_CLOSE]
+    assert len(rig.ex.placed) == 1
+
+
+async def test_single_flat_round_does_nothing(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    _manual_close(rig)
+    report = await rig.rec.reconcile(rig.t)
+    assert report.issues == []
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    assert rig.api.stopped == [] and len(rig.ex.stops) == 1
+
+
+async def test_flat_counter_resets_when_the_position_reappears(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    _manual_close(rig)
+    await rig.rec.reconcile(rig.t)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)  # 一次读取抖动
+    await rig.rec.reconcile(rig.t)
+    _manual_close(rig)
+    await rig.rec.reconcile(rig.t)  # 重新数第 1 轮
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+
+
+async def test_manual_close_without_fill_waits_then_uses_mark_price(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.manual_fill = None
+    rig.ex.mark = 68100.0
+    _manual_close(rig)
+    await rig.rec.reconcile(rig.t)  # 第 1 轮：只记数
+    for _ in range(4):  # 第 2–5 轮：空仓但没有成交证据，只告警，保命止损保留
+        report = await rig.rec.reconcile(rig.t)
+        assert not report.issues[0].fixed and "找不到平仓方向的成交" in report.issues[0].detail
+        assert len(rig.ex.stops) == 1 and rig.api.stopped == []
+    report = await rig.rec.reconcile(rig.t)  # 第 6 轮才结算
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED
+    assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68100.0 - 68044.0))
+    assert "标记价（估算）" in report.issues[0].detail
+    assert rig.ex.stops == {}
+
+
+async def test_manual_close_with_no_price_at_all_still_closes_eventually(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.manual_fill = None
+    rig.ex.mark = None
+    _manual_close(rig)
+    for _ in range(6):
+        await rig.rec.reconcile(rig.t)
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED and rec.realized_pnl_usdt is None
+
+
+async def test_phantom_empty_reads_do_not_cancel_the_lifeboat(rig: Rig) -> None:
+    """两轮读到空仓、结算前单独重读又读到有仓：接口抖动，不能撤保命止损。"""
+    pid = await open_filled(rig)
+    rig.ex.manual_fill = CloseFill(68544.0, 0.2)  # 就算成交查询碰巧有结果
+    pos = list(rig.ex.pos)
+    rig.ex.positions_queue = [[], [], pos]  # 第 1 轮空、第 2 轮空、第 2 轮的重读有仓
+    await rig.rec.reconcile(rig.t)
+    report = await rig.rec.reconcile(rig.t)
+    assert report.issues == []
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    assert len(rig.ex.stops) == 1 and rig.ex.cancelled == [] and rig.api.stopped == []
+    # 计数已清零：之后再有一次空读，也要重新数 2 轮
+    rig.ex.positions_queue = [[]]
+    await rig.rec.reconcile(rig.t)
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+
+
+async def test_failed_recheck_abandons_settlement(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.manual_fill = CloseFill(68544.0, 0.2)
+    rig.ex.positions_queue = [[], [], ExchangeError("币安 502")]
+    await rig.rec.reconcile(rig.t)
+    report = await rig.rec.reconcile(rig.t)
+    assert not report.issues[0].fixed and "重读失败" in report.issues[0].detail
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    assert len(rig.ex.stops) == 1 and rig.api.stopped == []
+
+
+async def test_manual_close_retries_when_stopping_the_executor_fails(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.manual_fill = CloseFill(68544.0, 0.2)
+    _manual_close(rig)
+    rig.api.stop_error = HbApiError("503")
+    await rig.rec.reconcile(rig.t)
+    failed = await rig.rec.reconcile(rig.t)
+    assert not failed.issues[0].fixed
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    rig.api.stop_error = None
+    done = await rig.rec.reconcile(rig.t)
+    assert done.issues[0].fixed
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+
+
+async def test_manual_partial_reduce_only_warns(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.005)  # 手动减了一部分
+    for _ in range(3):
+        report = await rig.rec.reconcile(rig.t)
+        assert {i.kind for i in report.issues} == {ReconcileIssueKind.QTY_MISMATCH}
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    assert rig.api.stopped == [] and rig.ex.market_closed == []

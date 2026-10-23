@@ -22,9 +22,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import datetime, timedelta
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
@@ -53,6 +53,7 @@ URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
 NEWS_POLL_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
+RESTART_WAIT_CLOSE_S = 60.0
 PRUNE_EVERY = timedelta(hours=1)
 BACKFILL_CONCURRENCY = 5
 
@@ -90,6 +91,13 @@ class _RefreshReason(Protocol):
     ) -> str | None: ...
 
 
+@runtime_checkable
+class _HoldsAware(Protocol):
+    """开会前告诉军师团手上有哪些持仓币：它们要一直留在卡上，不然持仓管家会判“不再盯”。"""
+
+    def set_held(self, symbols: Collection[str]) -> None: ...
+
+
 KlineFetcher = Callable[[str], Awaitable[list[Kline]]]
 PREDICTOR_INTERVAL = Interval.M5
 
@@ -101,7 +109,11 @@ class Runner:
         *,
         fetch_klines: KlineFetcher | None = None,
         fetch_predictor_klines: KlineFetcher | None = None,
+        restart_check: Callable[[], str | None] | None = None,
     ) -> None:
+        """``restart_check``：面板要求重启前的检查，返回不能重启的原因（None = 可以）。
+        由命令行给：要在 launchd 托管下（退出后会被拉起），且新配置能通过校验。不给 = 不支持重启。
+        """
         self.app = app
         self.m = app.m
         # 回填够算 ATR 的 1 分钟 K 线（15 分钟 ATR 要 240 根）
@@ -122,10 +134,15 @@ class Runner:
         self._open_lock = asyncio.Lock()
         self._closing: set[str] = set()
         self._last_prune: datetime | None = None
+        # 面板“重启生效”：不开新仓，等在途动作做完再退出（launchd KeepAlive 拉起）
+        self._restart_check = restart_check
+        self._restarting = False
+        self._restart = asyncio.Event()
+        self.restart_requested = False
 
     # ------------------------------------------------------------ 生命周期
     async def run(self) -> None:
-        """启动并一直跑，直到被取消。"""
+        """启动并一直跑，直到被取消，或面板发来 restart（之后 ``restart_requested`` 为 True）。"""
         await self.app.start()
         self._last_screen = self.app.clock()
         if self.app.pool is not None:
@@ -147,10 +164,18 @@ class Runner:
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
         ]
+        loops: asyncio.Future[Any] = asyncio.gather(*self._loops)
+        stop: asyncio.Future[Any] = asyncio.ensure_future(self._restart.wait())
         try:
-            await asyncio.gather(*self._loops)
+            await asyncio.wait([loops, stop], return_when=asyncio.FIRST_COMPLETED)
+            if loops.done():
+                loops.result()  # 循环异常退出：照旧抛出去
+            self.restart_requested = stop.done()
         finally:
+            stop.cancel()
             await self.shutdown()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await loops
 
     async def shutdown(self) -> None:
         for t in [*self._loops, *self._tasks]:
@@ -226,14 +251,17 @@ class Runner:
         card = self.m.cards.current(now)
         if card is None:
             return
+        if self._restarting:
+            self._guard_note(Outcome.REJECT, f"{signal.symbol} 主程序正在重启，不处理信号", now)
+            return
         if self.app.paused is not None:
             # 人工暂停：连 Jev 都不问（省钱），记在保镖名下
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 人工暂停开新仓，不处理信号", now)
             return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:
-            if self.app.paused is not None:
-                # 问 Jev 期间下达的暂停 / 全平：在途信号也要拦住
+            if self.app.paused is not None or self._restarting:
+                # 问 Jev 期间下达的暂停 / 全平 / 重启：在途信号也要拦住
                 self._guard_note(Outcome.REJECT, f"{signal.symbol} 拍板期间已暂停，不开仓", now)
                 return
             # 问 Jev 期间可能换了新卡或封了币：按锁里这一刻的卡审，和问 Jev 时的卡不是同一版就不开
@@ -409,6 +437,8 @@ class Runner:
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:
         try:
+            if isinstance(self.m.cards, _HoldsAware):
+                self.m.cards.set_held({p.symbol for p in self.positions})
             await self.m.cards.refresh(pool, reason)
         except Exception:
             log.exception("军师团开会失败，沿用旧卡直到过期")
@@ -469,6 +499,28 @@ class Runner:
                 inbox.finish(path, result)
             except OSError:
                 log.exception("写面板指令结果失败")
+        if self._restarting:  # 回执写完再退出，面板才知道指令执行了
+            self._restart.set()
+
+    async def _prepare_restart(self) -> tuple[Literal["done", "rejected"], str]:
+        """不再接新信号 → 等在途开仓（开仓锁）和平仓做完 → 回执写完后退出（见 command_tick）。
+
+        不写 paused.json：重启后按重启前的暂停状态继续。平仓一直没做完就放弃重启，免得打断平仓。
+        """
+        why = "这个进程不支持面板重启" if self._restart_check is None else self._restart_check()
+        if why is not None:
+            return "rejected", why
+        self._restarting = True  # 只拦新开仓；管家、巡逻兵、对账、平仓照常跑
+        async with self._open_lock:
+            pass
+        deadline = asyncio.get_running_loop().time() + RESTART_WAIT_CLOSE_S
+        while self._closing and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+        if self._closing:
+            self._restarting = False
+            return "rejected", f"还有 {len(self._closing)} 笔平仓没做完，没有重启，稍后再试"
+        await self.app._alert(AlertLevel.INFO, "主程序重启", "面板指令：重新加载配置")
+        return "done", "在途动作已做完，主程序退出重启（launchd 会自动拉起）"
 
     async def _run_command(self, cmd: PanelCommand) -> tuple[Literal["done", "rejected"], str]:
         if cmd.kind == "pause":
@@ -479,6 +531,8 @@ class Runner:
             self.app.set_paused(False, command_id=cmd.id)
             await self.app._alert(AlertLevel.INFO, "已恢复开新仓", "面板指令")
             return "done", "已恢复开新仓"
+        if cmd.kind == "restart":
+            return await self._prepare_restart()
         if cmd.kind == "close_all":
             # 先暂停再平：否则平的同时可能又开新仓。拿开仓锁等在途开仓做完，再读持仓
             self.app.set_paused(True, reason="面板全部平仓", command_id=cmd.id)

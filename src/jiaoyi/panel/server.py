@@ -4,11 +4,14 @@
 - Host 头也要是局域网 IP、localhost、``*.local`` 或 ``--allow-host`` 给的名字，挡 DNS 重绑定。
 - 写操作（POST）另要 ``Origin`` 和 Host 一致、带 ``X-Jiaoyi-Panel: 1`` 头（别的网站发不出来），
   具体动作和密码规则见 ``jiaoyi.panel.actions``。面板只写指令文件和配置文件，自己不下单。
+- ``/setup`` 首次设置向导（密钥、面板密码、基本配置、自检）只对本机开放，
+  规则见 ``jiaoyi.panel.setup``。
 - 页面是 ``static/`` 下的静态文件，数据走 ``/api/*``；换皮只动 ``static/theme.css``。
 """
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -17,14 +20,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jiaoyi.contracts import AppConfig, RiskConfig, Role
 from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
-from jiaoyi.panel import actions
+from jiaoyi.panel import actions, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.files import PanelFiles
 from jiaoyi.panel.hb import HbReader
@@ -49,6 +52,18 @@ from jiaoyi.panel.pages import (
 )
 
 STATIC = Path(__file__).parent / "static"
+PACKAGE = Path(__file__).parent.parent
+
+
+def code_fingerprint(root: Path = PACKAGE) -> str:
+    """jiaoyi 包下源码和静态文件的 (路径, 修改时间, 大小) 指纹；只 stat 不读内容，几毫秒。"""
+    h = hashlib.sha256()
+    for f in sorted(root.rglob("*")):
+        if f.suffix in (".py", ".js", ".css", ".html") and "__pycache__" not in f.parts:
+            st = f.stat()
+            h.update(f"{f.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}\n".encode())
+    return h.hexdigest()[:16]
+
 
 Clock = Callable[[], datetime]
 
@@ -91,6 +106,25 @@ class SettingsBody(BaseModel):
     password: str = Field(max_length=256)
 
 
+class SetupPasswordBody(BaseModel):
+    password: str = Field(max_length=256)
+    confirm: str = Field(max_length=256)
+
+
+class SetupKeysBody(BaseModel):
+    values: dict[str, str] = Field(max_length=32)
+    password: str = Field(max_length=256)
+
+
+class SetupBasicBody(BaseModel):
+    values: dict[str, Any]
+    password: str = Field(max_length=256)
+
+
+class SetupCheckBody(BaseModel):
+    password: str = Field(max_length=256)
+
+
 class CommandState(BaseModel):
     id: str
     status: Literal["pending", "done", "rejected", "expired", "failed"]
@@ -108,13 +142,20 @@ def create_app(
     key_status: dict[str, bool] | None = None,
     config_paths: ConfigPaths | None = None,
     allow_hosts: frozenset[str] = frozenset(),
+    secret_writer: setup.SecretWriter | None = None,
+    secret_reader: setup.SecretReader | None = None,
 ) -> FastAPI:
     """``key_status``：密钥名 → 配没配，由命令行查好传进来（密钥的值不进面板的数据和接口）。
 
     ``config_paths``：给了才能在网页上改配置；设置页也按文件里的现值显示（主循环重启后才用上）。
+
+    ``secret_writer`` / ``secret_reader``：首次设置向导写钥匙串、自检时读 Telegram 密钥用；
+    不给就只能看不能写（例如不是 Mac）。
     """
     data_dir = app_cfg.data_dir
     files = PanelFiles(data_dir, risk.day_reset_tz)
+    keys = key_status if key_status is not None else {}
+    boot_code = code_fingerprint()
     market = klines or KlineSource()
 
     @asynccontextmanager
@@ -143,7 +184,9 @@ def create_app(
     @api.get("/api/overview")
     async def overview() -> Overview:
         ov = build_overview(files, await hb.snapshot(), risk, app_cfg, clock())
-        return ov.model_copy(update={"control": actions.control_state(data_dir, config_paths)})
+        ctl = actions.control_state(data_dir, config_paths)
+        ctl.panel_stale = code_fingerprint() != boot_code
+        return ov.model_copy(update={"control": ctl})
 
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
@@ -175,7 +218,7 @@ def create_app(
                 error = str(e)
             prof = actions.profile_info(config_paths)
         page = build_settings(
-            files, r, a, key_status or {}, sl, prof, (await hb.snapshot()).equity_usdt
+            files, r, a, keys, sl, prof, (await hb.snapshot()).equity_usdt
         )
         return page.model_copy(
             update={
@@ -226,8 +269,79 @@ def create_app(
         except KlineError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
 
-    @api.get("/")
-    async def index() -> FileResponse:
+    def local(request: Request) -> bool:
+        return setup.is_local(
+            request.client.host if request.client else None, request.headers.get("host")
+        )
+
+    def local_only(request: Request) -> None:
+        if not local(request):
+            raise HTTPException(
+                status_code=403, detail="首次设置只能在 Mac 本机打开 http://127.0.0.1:8090/setup"
+            )
+
+    def setup_state(request: Request) -> setup.SetupState:
+        return setup.setup_state(
+            data_dir, keys, config_paths, local=local(request), keychain=secret_writer is not None
+        )
+
+    @api.get("/api/setup")
+    async def setup_get(request: Request) -> setup.SetupState:
+        return setup_state(request)
+
+    @api.post("/api/setup/password")
+    async def setup_password(request: Request, body: SetupPasswordBody) -> setup.SetupState:
+        local_only(request)
+        try:
+            setup.set_password(data_dir, body.password, body.confirm)
+        except setup.SetupError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return setup_state(request)
+
+    @api.post("/api/setup/keys")
+    async def setup_keys(request: Request, body: SetupKeysBody) -> dict[str, Any]:
+        local_only(request)
+        if secret_writer is None:
+            raise HTTPException(
+                status_code=400, detail="这台机器写不了钥匙串；请在终端运行 jiaoyi setup-keys"
+            )
+        try:
+            written = setup.write_keys(data_dir, body.values, body.password, secret_writer, keys)
+        except setup.SetupError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if "HUMMINGBOT_API_PASSWORD" in written:
+            hb.update_password(body.values["HUMMINGBOT_API_PASSWORD"].strip())
+        return {"written": written, "state": setup_state(request)}
+
+    @api.post("/api/setup/basic")
+    async def setup_basic(request: Request, body: SetupBasicBody) -> dict[str, Any]:
+        local_only(request)
+        if config_paths is None:
+            raise HTTPException(status_code=400, detail="面板启动时没给配置文件路径")
+        try:
+            changed = setup.write_basic(config_paths, data_dir, body.values, body.password, clock())
+        except setup.SetupError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"changed": changed, "state": setup_state(request)}
+
+    @api.post("/api/setup/check")
+    async def setup_check(request: Request, body: SetupCheckBody) -> list[setup.CheckItem]:
+        local_only(request)
+        try:  # 会发一条 Telegram：也要密码，免得被刷
+            actions.check_password(data_dir, body.password)
+        except ActionError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return await setup.self_check(config_paths, hb, secret_reader or (lambda _: None), clock())
+
+    @api.get("/", response_model=None)
+    async def index(request: Request) -> FileResponse | RedirectResponse:
+        # 本机打开、还没配齐：直接进首次设置。局域网打开照常进总览（设置页会提示）
+        if local(request) and not setup_state(request).done:
+            return RedirectResponse("/setup", status_code=303)
+        return FileResponse(STATIC / "index.html")
+
+    @api.get("/setup")
+    async def setup_page() -> FileResponse:
         return FileResponse(STATIC / "index.html")
 
     api.mount("/static", StaticFiles(directory=STATIC), name="static")

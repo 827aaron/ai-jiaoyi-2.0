@@ -54,6 +54,7 @@ from jiaoyi.slow.commander import (
 )
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
+from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
 
@@ -93,6 +94,8 @@ class TradingAgentsSettings:
         default_factory=lambda: {"flash": (0.15, 0.60), "pro": (0.50, 2.00)}
     )
     results_dir: str = "data/tradingagents"
+    # Reddit 匿名 RSS 限流很严：guarded=加闸（缓存 + 间隔 + 冷却），off=不抓。见 social_guard.py。
+    reddit: str = "guarded"
 
 
 def build_config(
@@ -293,9 +296,86 @@ def _ema(xs: Sequence[float], n: int) -> list[float]:
     return out
 
 
-def _indicator(
-    name: str, o: list[float], h: list[float], low: list[float], c: list[float]
+SUPPORTED_INDICATORS = (
+    "close_N_sma",
+    "close_N_ema",
+    "rsi",
+    "atr",
+    "macd",
+    "macds",
+    "macdh",
+    "boll",
+    "boll_ub",
+    "boll_lb",
+    "vwma",
+    "mfi",
+)
+BOLL_N = 20
+VWMA_N = 20
+MFI_N = 14
+
+
+def _roll(xs: Sequence[float], n: int, i: int) -> Sequence[float]:
+    return xs[max(0, i - n + 1) : i + 1]
+
+
+def _boll(c: Sequence[float]) -> tuple[list[float], list[float], list[float]]:
+    """布林带（20 根，±2 倍总体标准差）。前面不足 20 根时用已有的根数。"""
+    mid, up, lo = [], [], []
+    for i in range(len(c)):
+        w = _roll(c, BOLL_N, i)
+        m = sum(w) / len(w)
+        sd = (sum((x - m) ** 2 for x in w) / len(w)) ** 0.5
+        mid.append(m)
+        up.append(m + 2 * sd)
+        lo.append(m - 2 * sd)
+    return mid, up, lo
+
+
+def _vwma(c: Sequence[float], v: Sequence[float]) -> list[float]:
+    out = []
+    for i in range(len(c)):
+        cw, vw = _roll(c, VWMA_N, i), _roll(v, VWMA_N, i)
+        vol = sum(vw)
+        out.append(sum(x * y for x, y in zip(cw, vw, strict=True)) / vol if vol else cw[-1])
+    return out
+
+
+def _mfi(
+    h: Sequence[float], low: Sequence[float], c: Sequence[float], v: Sequence[float]
 ) -> list[float]:
+    tp = [(a + b + d) / 3 for a, b, d in zip(h, low, c, strict=True)]
+    flow = [t * x for t, x in zip(tp, v, strict=True)]
+    out = [50.0]
+    for i in range(1, len(c)):
+        pos = neg = 0.0
+        for j in range(max(1, i - MFI_N + 1), i + 1):
+            if tp[j] > tp[j - 1]:
+                pos += flow[j]
+            elif tp[j] < tp[j - 1]:
+                neg += flow[j]
+        if neg == 0:
+            out.append(100.0 if pos > 0 else 50.0)
+        else:
+            out.append(100 - 100 / (1 + pos / neg))
+    return out
+
+
+def _indicator(
+    name: str,
+    o: list[float],
+    h: list[float],
+    low: list[float],
+    c: list[float],
+    v: list[float],
+) -> list[float]:
+    if name in ("boll", "boll_ub", "boll_lb"):
+        mid, up, lo = _boll(c)
+        return {"boll": mid, "boll_ub": up, "boll_lb": lo}[name]
+    if name == "vwma":
+        return _vwma(c, v)
+    if name == "mfi":
+        return _mfi(h, low, c, v)
     if name.endswith("_sma"):
         n = int(name.split("_")[1])
         return [sum(c[max(0, i - n + 1) : i + 1]) / min(i + 1, n) for i in range(len(c))]
@@ -331,8 +411,11 @@ def get_binance_indicators(
     """登记为 TradingAgents 的 ``get_indicators``：对小时线算 TradingAgents 常用的几个指标。"""
     end = datetime.fromisoformat(as_of_date).replace(tzinfo=UTC)
     rows = _klines(symbol, "1h", 500, end)
-    o, h, lo, c = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4))
-    vals = _indicator(indicator, o, h, lo, c)
+    o, h, lo, c, v = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4, 5))
+    try:
+        vals = _indicator(indicator, o, h, lo, c, v)
+    except ValueError as e:  # 不认识的指标别让整场会议失败，告诉分析师换一个
+        return f"## {indicator}\n{e}。可用：{', '.join(SUPPORTED_INDICATORS)}"
     n = min(look_back_days * 24, len(vals))
     out = [
         f"{datetime.fromtimestamp(k[0] / 1000, tz=UTC):%Y-%m-%d %H:%M}: {v:.6g}"
@@ -505,8 +588,19 @@ class TradingAgentsEngine:
         self._brief = brief
         self._liq = liquidations
         register_binance_vendor()
+        self._guard_reddit(settings)
         if news is not None:
             register_crypto_news_vendor(news)
+
+    @staticmethod
+    def _guard_reddit(settings: TradingAgentsSettings) -> None:
+        try:
+            from tradingagents.agents.analysts import sentiment_analyst
+        except ImportError:  # 慢环依赖没装时，引擎本来也跑不起来；不在这里报错
+            return
+        original = getattr(sentiment_analyst.fetch_reddit_posts, "_fetch", None)
+        fetch = original or sentiment_analyst.fetch_reddit_posts  # 重复构造引擎不叠加包装
+        register_reddit_guard(RedditGuard(fetch, mode=settings.reddit))
 
     def _cost(self, usage: Mapping[str, Mapping[str, Any]]) -> float:
         total = 0.0
