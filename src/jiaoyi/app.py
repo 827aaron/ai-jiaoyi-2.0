@@ -372,6 +372,7 @@ def build_modules(
             Role.RISK_GUARD,
             Role.KEEPER,
             Role.PATROL,
+            Role.SCREENER,
         )
     }
 
@@ -397,6 +398,8 @@ def build_modules(
                 max_spread_bps=risk_cfg.max_spread_bps,
                 round_trip_fee_bps=risk_cfg.taker_fee_bps * 2,
             ),
+            recorder=recorders[Role.SCREENER],
+            tz=tz,
         )
         cards, news = _build_cards(
             risk_cfg,
@@ -794,7 +797,7 @@ class App:
                 role=role,
                 health=Health.DISABLED if stub else Health.STARTING,
                 ts=now,
-                headline="未接入（桩，故障即关闭）" if stub else "已接入，等待第一次心跳",
+                headline="未启用（离线 / 回放模式，故障即关闭）" if stub else "等待第一次上报",
             )
         out.update(reported)
         if self.gate_mode == "rule" and Role.GATE in out:

@@ -44,6 +44,16 @@ class ModuleStatus(Contract):
     today: TodayStats = Field(default_factory=TodayStats)
     last_error: str | None = None
     version: str = ""
+    last_run_at: AwareDatetime | None = Field(
+        default=None, description="按计划周期干活的角色（选币）：上次成功跑完的时间。"
+    )
+    next_run_at: AwareDatetime | None = Field(
+        default=None, description="按计划周期干活的角色：下次计划运行的时间。"
+    )
+    symbol_count: int | None = Field(default=None, ge=0, description="选币：上次选出的币数。")
+    error: str | None = Field(
+        default=None, description="当前还没恢复的失败原因（上次运行失败）；正常时为 None。"
+    )
 
 
 class AlertLevel(StrEnum):

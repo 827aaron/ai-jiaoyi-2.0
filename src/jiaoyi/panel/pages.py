@@ -143,7 +143,8 @@ def build_positions(
 def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
-    cards = [_role_card(role, status.get(role.value), now) for role in ROLE_NAMES]
+    running = any(now - st.ts <= timedelta(seconds=STALE_S) for st in status.values())
+    cards = [_role_card(role, status.get(role.value), now, running) for role in ROLE_NAMES]
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
     return TeamPage(roles=cards, selected=chosen, records=mine)
@@ -158,10 +159,14 @@ _HEALTH: dict[Health, LampState] = {
 }
 
 
-def _role_card(role: Role, st: ModuleStatus | None, now: datetime) -> RoleCard:
+def _role_card(
+    role: Role, st: ModuleStatus | None, now: datetime, running: bool = True
+) -> RoleCard:
     if st is None:
+        # 主程序在跑就是还没到这个角色的第一次上报；不在跑就是主程序没启动
+        headline = "等待第一次上报" if running else "主程序没在运行"
         return RoleCard(
-            role=role, name=ROLE_NAMES[role], state="off", headline="没有心跳（未接入或还没启动）",
+            role=role, name=ROLE_NAMES[role], state="off", headline=headline,
             last_beat=None, last_error=None, calls=0, passed=0, rejected=0, errors=0,
             avg_latency_ms=0.0, cost_usd=0.0,
         )  # fmt: skip

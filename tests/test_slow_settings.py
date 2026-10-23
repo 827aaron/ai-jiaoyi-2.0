@@ -16,7 +16,7 @@ def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
     cfg = load_slow_config(tmp_path / "nope.toml")  # 默认 2h 档
     assert cfg.engine_settings() == TradingAgentsSettings()
     kw = cfg.commander_kwargs()
-    assert kw["concurrency"] == 4
+    assert kw["concurrency"] == 8
     assert kw["ttl"] == timedelta(hours=2)
     assert kw["symbol_min_interval"] == timedelta(hours=1.67)
     assert kw["expiry_lead"] == timedelta(minutes=20)
@@ -25,7 +25,7 @@ def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
     assert cfg.effective_pick_max(20) == 10
 
     one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()
-    assert one_hour["ttl"] == timedelta(hours=1) and one_hour["concurrency"] == 5
+    assert one_hour["ttl"] == timedelta(hours=1) and one_hour["concurrency"] == 8
     assert one_hour["expiry_lead"] == timedelta(minutes=20)
     assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
     assert one_hour["min_refresh_gap"] == timedelta(minutes=40)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -88,7 +89,9 @@ class TradingAgentsSettings:
     output_language: str = "Chinese"
     debate_rounds: int = 1
     risk_rounds: int = 1
-    max_tokens: int = 8192
+    max_tokens: int = 4096
+    # 整理作战指令 / 挑币要输出结构化 JSON，单独给足长度，免得被 max_tokens 截断
+    json_max_tokens: int = 8192
     max_retries: int = 6
     # 每类标的请哪几位分析师（越少越省钱）；默认与 TradingAgents 的完整阵容一致。
     analysts_crypto: tuple[str, ...] = ("market", "social", "news")
@@ -96,10 +99,11 @@ class TradingAgentsSettings:
     # 挑币会议、整理作战指令这两步用哪档模型："quick"=flash，"deep"=深度档模型。
     pick_tier: str = "quick"
     convert_tier: str = "quick"
-    # 每百万 token 的美元价（输入, 输出）。⚠ 占位值，M2 拿到 key 真机验证时按 DeepSeek 官网核对，
-    # 并把核对日期写在这里。只影响资金页的花费统计，不影响下单和风控。
+    # 每百万 token 的美元价（输入, 输出），只在拿不到通道报的真实花费时估算用（见 CostMeter）。
+    # flash：OpenRouter deepseek/deepseek-v4.1-flash 标价 0.30 / 1.20（2026-10-23 Aaron 核对；
+    # 缓存命中输入 0.006 不单算，估算会偏高）。pro 仍是占位值，用到前按官网核对。
     price_per_mtok: Mapping[str, tuple[float, float]] = field(
-        default_factory=lambda: {"flash": (0.15, 0.60), "pro": (0.50, 2.00)}
+        default_factory=lambda: {"flash": (0.30, 1.20), "pro": (0.50, 2.00)}
     )
     results_dir: str = "data/tradingagents"
     # Reddit 匿名 RSS 限流很严：guarded=加闸（缓存 + 间隔 + 冷却），off=不抓。见 social_guard.py。
@@ -650,6 +654,97 @@ def convert_prompt(
     )
 
 
+def _reported_cost(usage: Any) -> float | None:
+    """通道在 usage 里直接报的花费（OpenRouter 的 ``usage.cost``，美元）；没有返回 None。"""
+    if isinstance(usage, Mapping):
+        cost = usage.get("cost")
+        if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+            return float(cost)
+    return None
+
+
+class CostMeter:
+    """一场会议（或总盘会）的花费累计。线程安全：模型请求发生在后台线程里。
+
+    费用一律用通道报的真实值（OpenRouter 的 ``usage.cost``）；某次请求没报（直连 DeepSeek、
+    通道没带这个字段）才按 token 和 ``price_per_mtok`` 估这一次，估的部分会偏高（缓存命中价没算）。
+    ``abort`` 之后新的模型请求直接失败，超时取消的会议不会在后台继续烧钱。
+    """
+
+    def __init__(self, prices: Mapping[str, tuple[float, float]]) -> None:
+        self._prices = prices
+        self._lock = threading.Lock()
+        self._reported = 0.0
+        self._unreported: dict[str, list[int]] = {}
+        self._aborted = False
+        self.calls = 0
+
+    def add(self, model: str, input_tokens: int, output_tokens: int, cost: float | None) -> None:
+        with self._lock:
+            self.calls += 1
+            if cost is not None:
+                self._reported += cost
+                return
+            tokens = self._unreported.setdefault(model, [0, 0])
+            tokens[0] += input_tokens
+            tokens[1] += output_tokens
+
+    def record_response(self, response: Any) -> None:
+        """喂一次 LangChain 的 ``LLMResult``：取真实花费，没有就记 token 留着估。"""
+        usage = (getattr(response, "llm_output", None) or {}).get("token_usage")
+        cost = _reported_cost(usage)
+        model = str((getattr(response, "llm_output", None) or {}).get("model_name") or "")
+        tin = tout = 0
+        for gens in getattr(response, "generations", None) or []:
+            for gen in gens:
+                msg = getattr(gen, "message", None)
+                if msg is None:
+                    continue
+                meta = getattr(msg, "response_metadata", None) or {}
+                um = getattr(msg, "usage_metadata", None) or {}
+                tin += int(um.get("input_tokens", 0) or 0)
+                tout += int(um.get("output_tokens", 0) or 0)
+                model = str(meta.get("model_name") or model)
+                if cost is None:
+                    cost = _reported_cost(meta.get("token_usage"))
+        self.add(model, tin, tout, cost)
+
+    @property
+    def cost(self) -> float:
+        with self._lock:
+            total = self._reported
+            for model, (tin, tout) in self._unreported.items():
+                pin, pout = self._prices["pro" if "pro" in model else "flash"]
+                total += (tin * pin + tout * pout) / 1e6
+        return round(total, 6)
+
+    def abort(self) -> None:
+        self._aborted = True
+
+    def check(self) -> None:
+        if self._aborted:
+            raise RuntimeError("会议已被取消（超时），不再发新的模型请求")
+
+
+def cost_handler(meter: CostMeter) -> Any:
+    """把 ``CostMeter`` 接到 LangChain 的回调上（LangChain 只在真跑时才导入）。"""
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class _CostHandler(BaseCallbackHandler):  # type: ignore[misc]
+        raise_error = True  # 被取消的会议要让下一次请求真的失败，不能被回调管理器吞掉
+
+        def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+            meter.check()
+
+        def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
+            meter.check()
+
+        def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+            meter.record_response(response)
+
+    return _CostHandler()
+
+
 class TradingAgentsEngine:
     """满足 ``commander.MeetingEngine``。每次开会新建一个 TradingAgents 图（它不是并发安全的）。"""
 
@@ -681,6 +776,8 @@ class TradingAgentsEngine:
         self._news = news
         self._brief = brief
         self._liq = liquidations
+        self._inflight: dict[str, CostMeter] = {}
+        self._inflight_lock = threading.Lock()
         register_binance_vendor()
         self._guard_reddit(settings)
         if news is not None:
@@ -696,13 +793,29 @@ class TradingAgentsEngine:
         fetch = original or sentiment_analyst.fetch_reddit_posts  # 重复构造引擎不叠加包装
         register_reddit_guard(RedditGuard(fetch, mode=settings.reddit))
 
-    def _cost(self, usage: Mapping[str, Mapping[str, Any]]) -> float:
-        total = 0.0
-        for model, u in usage.items():
-            tier = "pro" if "pro" in model else "flash"
-            pin, pout = self._s.price_per_mtok[tier]
-            total += (u.get("input_tokens", 0) * pin + u.get("output_tokens", 0) * pout) / 1e6
-        return round(total, 6)
+    def _meter(self, key: str) -> CostMeter:
+        meter = CostMeter(self._s.price_per_mtok)
+        with self._inflight_lock:
+            self._inflight[key] = meter
+        return meter
+
+    def _done(self, key: str, meter: CostMeter) -> None:
+        with self._inflight_lock:
+            if self._inflight.get(key) is meter:
+                del self._inflight[key]
+
+    def partial_cost(self, key: str) -> float | None:
+        """进行中（或刚超时取消）的会议已经花了多少；没有这场会议返回 None。"""
+        with self._inflight_lock:
+            meter = self._inflight.get(key)
+        return meter.cost if meter else None
+
+    def abort(self, key: str) -> None:
+        """叫停一场会议：它的后台线程里不再发新的模型请求（已发出的那一个照常结束）。"""
+        with self._inflight_lock:
+            meter = self._inflight.get(key)
+        if meter:
+            meter.abort()
 
     @staticmethod
     def _llm(graph: Any, tier: str) -> Any:
@@ -715,7 +828,16 @@ class TradingAgentsEngine:
         )
 
         cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
-        return TradingAgentsGraph(selected_analysts=analysts, config=cfg, callbacks=[handler])
+        graph = TradingAgentsGraph(selected_analysts=analysts, config=cfg, callbacks=[handler])
+        if self._s.provider == "openrouter":
+            # 让 OpenRouter 在每次响应的 usage 里带上真实花费（usage.cost）；TradingAgents 不透传，
+            # 所以直接设到它建好的模型对象上
+            for llm in {
+                id(x): x for x in (graph.deep_thinking_llm, graph.quick_thinking_llm)
+            }.values():
+                body = getattr(llm, "extra_body", None) or {}
+                llm.extra_body = {**body, "usage": {"include": True}}
+        return graph
 
     def _snapshot_liquidations(self, symbols: Sequence[str]) -> None:
         """在事件循环里取强平快照，再让工作线程去读（统计对象不是线程安全的）。"""
@@ -736,13 +858,14 @@ class TradingAgentsEngine:
     def _pick_sync(
         self, candidates: list[SymbolPoolEntry], max_n: int, previous: BattleCard | None
     ) -> PickResult:
-        from langchain_core.callbacks import UsageMetadataCallbackHandler
-
-        handler = UsageMetadataCallbackHandler()
+        meter = self._meter("pick")
+        handler = cost_handler(meter)
         try:
-            return self._pick_run(candidates, max_n, previous, handler)
-        except Exception as exc:  # 失败时把已烧掉的 token 花费带出去，日花费上限才不漏算
-            raise MeetingError(str(exc), self._cost(handler.usage_metadata)) from exc
+            return self._pick_run(candidates, max_n, previous, handler, meter)
+        except Exception as exc:  # 失败时把已烧掉的花费带出去，日花费上限才不漏算
+            raise MeetingError(str(exc), meter.cost) from exc
+        finally:
+            self._done("pick", meter)
 
     def _pick_run(
         self,
@@ -750,9 +873,14 @@ class TradingAgentsEngine:
         max_n: int,
         previous: BattleCard | None,
         handler: Any,
+        meter: CostMeter,
     ) -> PickResult:
         graph = self._graph(("market",), handler)
-        llm = self._llm(graph, self._s.pick_tier).with_structured_output(_PickDraft)
+        llm = (
+            self._llm(graph, self._s.pick_tier)
+            .with_structured_output(_PickDraft)
+            .bind(max_tokens=self._s.json_max_tokens)
+        )
         table = "\n".join(
             f"{e.symbol} 类别={e.category.value} 分数={e.score:.2f} 理由={'、'.join(e.reasons)}"
             + self._liq_note(e.symbol)
@@ -769,7 +897,7 @@ class TradingAgentsEngine:
         )
         valid = {e.symbol for e in candidates}
         picks = [Pick(p.symbol, p.reason) for p in draft.picks if p.symbol in valid][:max_n]
-        return PickResult(draft.regime, picks, self._cost(handler.usage_metadata))
+        return PickResult(draft.regime, picks, meter.cost)
 
     def _liq_note(self, symbol: str) -> str:
         total = _LIQ_TOTALS.get(symbol, 0.0)
@@ -797,15 +925,18 @@ class TradingAgentsEngine:
         return await asyncio.to_thread(self._analyze_sync, entry, regime)
 
     def _analyze_sync(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
-        from langchain_core.callbacks import UsageMetadataCallbackHandler
-
-        handler = UsageMetadataCallbackHandler()
+        meter = self._meter(entry.symbol)
+        handler = cost_handler(meter)
         try:
-            return self._analyze_run(entry, regime, handler)
+            return self._analyze_run(entry, regime, handler, meter)
         except Exception as exc:  # 同上：失败也带上真实花费
-            raise MeetingError(str(exc), self._cost(handler.usage_metadata)) from exc
+            raise MeetingError(str(exc), meter.cost) from exc
+        finally:
+            self._done(entry.symbol, meter)
 
-    def _analyze_run(self, entry: SymbolPoolEntry, regime: str, handler: Any) -> Analysis:
+    def _analyze_run(
+        self, entry: SymbolPoolEntry, regime: str, handler: Any, meter: CostMeter
+    ) -> Analysis:
         ticker, asset_type = ta_ticker(entry)
         analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
         graph = self._graph(analysts, handler)
@@ -827,7 +958,11 @@ class TradingAgentsEngine:
             describe_candidates(levels),
             describe_hold(self._s.hold_minutes, levels.atr, levels.price, self._stop),
         )
-        llm = self._llm(graph, self._s.convert_tier).with_structured_output(_CardSymbolDraft)
+        llm = (
+            self._llm(graph, self._s.convert_tier)
+            .with_structured_output(_CardSymbolDraft)
+            .bind(max_tokens=self._s.json_max_tokens)
+        )
         last: Exception | None = None
         for _ in range(2):
             try:
@@ -836,7 +971,7 @@ class TradingAgentsEngine:
                     # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
                     raise ValueError("模型没有返回结构化结果")
                 cs = draft_to_card_symbol(draft, entry, levels)
-                return Analysis(cs, self._cost(handler.usage_metadata))
+                return Analysis(cs, meter.cost)
             except (ValidationError, ValueError) as exc:
                 last = exc
         raise RuntimeError(f"{entry.symbol}：作战指令格式不合格：{last}")

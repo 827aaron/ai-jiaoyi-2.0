@@ -387,6 +387,7 @@ async def test_daily_cost_survives_restart(tmp_path: Path, now: datetime) -> Non
         tmp_path, FakeEngine(["AAUSDT"]), now, budget_path=f, daily_cost_limit_usd=spent
     )
     assert c2._stats.cost_usd == pytest.approx(spent)
+    assert c2._stats.calls == c._stats.calls > 0  # 调用次数也恢复，面板不清零
     assert not c2.may_refresh(now)
     # 第二天不沿用
     c3, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now + timedelta(days=1), budget_path=f)
@@ -687,3 +688,30 @@ def test_timeout_reason_is_not_empty() -> None:
     c._symbol_timeout_s = 900.0
     assert "900" in c._why(TimeoutError())
     assert c._why(ValueError("x")) == "x"
+
+
+async def test_timeout_charges_real_partial_cost_and_aborts(tmp_path: Path, now: datetime) -> None:
+    class Eng(FakeEngine):
+        aborted: list[str]
+
+        def __init__(self) -> None:
+            super().__init__(["AAUSDT"])
+            self.aborted = []
+
+        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+            await asyncio.sleep(5)  # 超过 symbol_timeout_s
+            raise AssertionError("不该走到这里")
+
+        def partial_cost(self, key: str) -> float | None:
+            return 0.123 if key == "AAUSDT" else None
+
+        def abort(self, key: str) -> None:
+            self.aborted.append(key)
+
+    eng = Eng()
+    c, _, _ = make(tmp_path, eng, now, failed_meeting_cost_usd=0.07, symbol_timeout_s=0.05)
+    with pytest.raises(CardRefreshError):
+        await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    assert "AAUSDT" in eng.aborted
+    # 选币 0.01 + 超时会议已发生的真实花费 0.123（不是固定的 0.07）
+    assert c._stats.cost_usd == pytest.approx(0.133)

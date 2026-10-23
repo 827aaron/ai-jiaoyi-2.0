@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
@@ -93,6 +93,15 @@ class MeetingEngine(Protocol):
     async def analyze(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
         """单标的会议：多空辩论 + 风控讨论，输出这个标的的作战指令。"""
         ...
+
+
+@runtime_checkable
+class _CostReporting(Protocol):
+    """可选：引擎能报告「进行中的会议已花了多少」并叫停它（超时取消时用）。"""
+
+    def partial_cost(self, key: str) -> float | None: ...
+
+    def abort(self, key: str) -> None: ...
 
 
 def _clamp_range(r: Range, lo: float, hi: float) -> Range:
@@ -447,7 +456,7 @@ class BattleCardCommander:
             picked = await self._engine.pick(free, max(room, 0), self._card)
         except Exception as exc:
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
-            self._charge(self._failure_cost(exc) - est)
+            self._charge(self._failure_cost(exc, "pick") - est)
             raise
         self._charge(
             picked.cost_usd - est
@@ -593,7 +602,7 @@ class BattleCardCommander:
                     Outcome.ERROR,
                     f"{entry.symbol} 开会失败：{self._why(exc)}",
                     started,
-                    self._failure_cost(exc),
+                    self._failure_cost(exc, entry.symbol),
                 )
                 raise
             self._charge(-est)
@@ -663,9 +672,13 @@ class BattleCardCommander:
         """开会前预记的钱：最近几场的平均实际花费，没有就用 ``failed_meeting_cost_usd``。"""
         return round(sum(recent) / len(recent), 6) if recent else self._failed_cost
 
-    def _failure_cost(self, exc: BaseException) -> float:
-        """失败会议的花费：引擎给了真实 usage 就用它，否则（超时、断网等）按估算上限计。"""
+    def _failure_cost(self, exc: BaseException, key: str = "") -> float:
+        """失败会议的花费：引擎带出了真实花费就用它；超时取消的会议，引擎还在跑，就叫停它并取
+        已经发生的真实花费；都拿不到（断网等）才按估算上限计。"""
         known = exc.cost_usd if isinstance(exc, MeetingError) else None
+        if known is None and key and isinstance(self._engine, _CostReporting):
+            self._engine.abort(key)  # 超时后后台线程还在烧钱：不再发新的模型请求
+            known = self._engine.partial_cost(key)
         return self._failed_cost if known is None else known
 
     def _restore_budget(self) -> None:
@@ -678,7 +691,13 @@ class BattleCardCommander:
         except (OSError, ValueError, KeyError, TypeError):
             return
         if day == self._day(self._clock()) and cost >= 0:
-            self._stats, self._stats_day = TodayStats(cost_usd=cost), day
+            try:  # 调用次数等一并恢复，面板重启后不清零；旧文件只有花费
+                stats = TodayStats.model_validate(data["stats"]).model_copy(
+                    update={"cost_usd": cost}
+                )
+            except (KeyError, ValueError):
+                stats = TodayStats(cost_usd=cost)
+            self._stats, self._stats_day = stats, day
 
     def _save_budget(self) -> None:
         if self._budget_path is None:
@@ -687,7 +706,13 @@ class BattleCardCommander:
         try:
             self._budget_path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(
-                json.dumps({"day": self._stats_day, "cost_usd": self._stats.cost_usd}),
+                json.dumps(
+                    {
+                        "day": self._stats_day,
+                        "cost_usd": self._stats.cost_usd,
+                        "stats": self._stats.model_dump(mode="json"),
+                    }
+                ),
                 encoding="utf-8",
             )
             os.replace(tmp, self._budget_path)

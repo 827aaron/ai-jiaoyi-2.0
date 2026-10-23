@@ -12,5 +12,9 @@
     "cost_usd": 0.0008
   },
   "last_error": null,
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "last_run_at": null,
+  "next_run_at": null,
+  "symbol_count": null,
+  "error": null
 }

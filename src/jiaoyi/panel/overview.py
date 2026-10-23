@@ -353,7 +353,7 @@ def _lamps(
     def one(role: Role) -> tuple[LampState, str]:
         st = status.get(role.value)
         if st is None:
-            return "off", "没有心跳（未接入或还没启动）"
+            return "off", "等待第一次上报" if running else "主程序没在运行"
         if now - st.ts > timedelta(seconds=STALE_S):
             return "bad", f"最后心跳 {int((now - st.ts).total_seconds() // 60)} 分钟前"
         state = _HEALTH_LAMP[st.health]

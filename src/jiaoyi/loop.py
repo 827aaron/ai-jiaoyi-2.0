@@ -48,10 +48,10 @@ from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import POOL_ACTIONS, PoolAction
 from jiaoyi.market.features import backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
+from jiaoyi.slow.screener import SCREEN_EVERY
 
 log = logging.getLogger(__name__)
 
-SCREEN_EVERY = timedelta(hours=1)
 SLOW_CHECK_EVERY_S = 60.0
 URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
