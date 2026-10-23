@@ -183,7 +183,8 @@ def test_run_asks_jev_and_writes_report(tmp_path: Path, monkeypatch: pytest.Monk
     run_dir = Path(res["dir"])
     assert len((run_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()) == 4
     text = "\n".join(replay.render(res))
-    assert "按现在门槛" in text and "盘口" in text
+    assert "按现在门槛" in text and "盘口" in text and "二维推荐" in text
+    assert (run_dir.parent / f"{run_dir.name}.json").exists()  # 另存一份 <时间>.json
 
 
 class _Flaky(_Model):
@@ -232,3 +233,23 @@ def test_run_counts_timeouts_and_latency(tmp_path: Path, monkeypatch: pytest.Mon
     assert lat["p50"] == 2000.0 and lat["over_live_budget"] == 1.0
     text = "\n".join(replay.render(res))
     assert "Jev 成功 3 / 超时 1 / 出错 1" in text and "会超时 100%" in text
+
+
+def test_hold_tier_and_profile_overlay() -> None:
+    assert replay.hold_tier("4h") == "4h" and replay.hold_tier("240") == "4h"
+    with pytest.raises(ValueError, match="可选"):
+        replay.hold_tier("5h")
+    fast, dedup = replay.fast_for_hold(FAST.model_copy(update={"min_p_take": 0.35}), "4h")
+    assert fast.time_limit_s == 4 * 3600 and dedup == 600
+    assert fast.min_p_take == 0.35  # 拍板门槛保持现在生效的
+
+
+def test_grid_picks_best_take_x_toxic_cell() -> None:
+    def row(take: float, tox: float, r: float) -> dict[str, Any]:
+        return {"p_take": take, "p_toxic": tox, "r": r, "net_bps": r * 10}
+
+    rows = [row(0.6, 0.2, 0.5)] * 30 + [row(0.6, 0.9, -1.0)] * 30 + [row(0.3, 0.2, -0.2)] * 30
+    g = replay.grid(rows)
+    assert g["best"]["min_p_take"] >= 0.35 and g["best"]["max_p_toxic"] < 0.9
+    assert g["best"]["n"] == 30 and g["best"]["sum_r"] == 15.0
+    assert replay.grid(rows[:10])["best"] is None  # 不够 30 笔不推荐

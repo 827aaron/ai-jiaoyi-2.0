@@ -301,7 +301,18 @@ def _jev_replay(args: argparse.Namespace) -> int:
     except ConfigError as e:
         print(e, file=sys.stderr)
         return 2
-    fast = app_cfg.fast_loop
+    if not 1 <= args.days <= 30:
+        print("--days 要在 1–30 之间", file=sys.stderr)
+        return 2
+    fast, dedup_s = app_cfg.fast_loop, app_cfg.signal_dedup_s
+    try:
+        hold = replay.hold_tier(args.hold) if args.hold else app_cfg.hold
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    if args.hold:
+        # 按指定持仓档的止损 / 止盈 / ATR 周期 / 去重冷却回放；拍板门槛仍用现在生效的
+        fast, dedup_s = replay.fast_for_hold(fast, hold)
     # 回放是离线的：不用实盘 1.5 秒预算，也别连错几次就暂停（超时 / 出错的记下来继续）
     model = jev_from_secrets(
         ChainedSecretStore(),
@@ -330,12 +341,13 @@ def _jev_replay(args: argparse.Namespace) -> int:
             days=days,
             n=args.n,
             fee_bps=risk.taker_fee_bps,
-            dedup_s=app_cfg.signal_dedup_s,
+            dedup_s=dedup_s,
             concurrency=args.concurrency,
             fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
             now=now,
             cache=Path(args.cache),
             live_timeout_ms=app_cfg.jev_timeout_ms,
+            hold=hold,
         )
     )
     for line in replay.render(result):
@@ -517,7 +529,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
-    p.add_argument("--days", type=int, default=3, help="回放几天（到 --end 为止）")
+    p.add_argument("--days", type=int, default=3, help="回放几天（到 --end 为止），最多 30")
+    p.add_argument(
+        "--hold", default="", help="按哪个持仓档回放：4h / 240（分钟）；默认 app.toml 现在的档"
+    )
     p.add_argument("--end", default="", help="最后一天（UTC，YYYY-MM-DD）；默认昨天")
     p.add_argument("--n", type=int, default=400, help="最多问 Jev 几个信号")
     p.add_argument("--symbols", default="", help="逗号分隔；默认总盘会最常选的币")
