@@ -342,7 +342,11 @@ class ThreeWayReconciler:
             self._adapter.record_lifeboat(position_id, None)
             immediate = isinstance(e, ExchangeError) and e.immediate_trigger
             if immediate or fails >= self._max_lb_failures:
-                why = "价格已越过保命止损位（-2021）" if immediate else f"连续 {fails} 轮补挂失败"
+                why = (
+                    "价格已越过保命止损位（-2021），保命止损补不上"
+                    if immediate
+                    else f"保命止损连续 {fails} 轮补挂失败"
+                )
                 return await self._flatten(position_id, why)
             return ReconcileIssue(
                 kind=ReconcileIssueKind.LIFEBOAT_MISSING,
@@ -402,7 +406,7 @@ class ThreeWayReconciler:
             await self._adapter.release_lifeboat(position_id)
             return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
         self._lb_failures.pop(position_id, None)
-        return issue(f"{why}，保命止损补不上，已平仓", True), True
+        return issue(f"{why}，已平仓", True), True
 
     async def _claim_unclaimed(
         self, running: list[dict[str, Any]], now: datetime

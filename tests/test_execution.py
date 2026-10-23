@@ -810,3 +810,29 @@ async def test_open_refused_when_leverage_cannot_be_set(rig: Rig) -> None:
     assert rig.api.created == []  # 没建执行器
     statuses = [p.record.status for p in rig.registry.data.positions.values()]
     assert statuses == [PositionStatus.FAILED]
+
+
+async def test_partial_fill_then_restart_is_not_treated_as_closed(rig: Rig) -> None:
+    """限价只成交 40% 后 hummingbot 重启：以币安实际持仓为准，账本数量同步，不当作已平。"""
+    pid = await open_filled(rig)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.006)  # 下单 0.015，只成交 0.006
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    await rig.adapter.positions()
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.OPEN
+    assert rec.quantity == pytest.approx(0.006)
+    assert len(rig.ex.stops) == 1
+    rig.api.auto_terminate_on_stop = False
+    await rig.rec.reconcile(rig.t)
+    await rig.rec.reconcile(rig.t)
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.006)]  # 按实际持仓平
+
+
+async def test_reconciler_wording_matches_the_cause(rig: Rig) -> None:
+    await open_filled(rig)
+    rig.api.auto_terminate_on_stop = False
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    await rig.rec.reconcile(rig.t)
+    second = await rig.rec.reconcile(rig.t)
+    detail = next(i.detail for i in second.issues if i.kind is ReconcileIssueKind.EXECUTOR_FAILED)
+    assert "执行器已消失" in detail and "保命止损补不上" not in detail
