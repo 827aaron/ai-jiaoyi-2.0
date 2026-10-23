@@ -290,3 +290,13 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 - **`llm_calls` 多记 `reasoning_tokens`**：每次调用其中推理用了多少 token（来自 OpenRouter 的 `completion_tokens_details.reasoning_tokens`），看推理是不是在吃输出额度。
 - **`max_tokens` 默认取模型最大输出**（slow.toml `[meeting] max_tokens` 不写）：引擎启动时从 `https://openrouter.ai/api/v1/models` 读该模型的 `top_provider.max_completion_tokens`（deepseek-v4.1-flash 约 94 万；quick / deep 两个模型取小）；读不到、没有这个模型时 OpenRouter 用 384000，直连 DeepSeek 用 8192。写了数值就按你写的（出作战指令 / 挑币两步仍至少 8192）。注意：不设上限后，推理失控时一次回答最多能烧到这个长度——`reasoning_effort` 和重试关推理就是用来兜这个的，花费另有日上限。
 - `reasoning_effort` 默认值先不动（仍 `low`），等重试的数据再定是否改 `none`。
+
+## 会议质量门槛
+
+一场会开完、转成作战指令之前（以及转完之后）按下面几条检查；不合格的会**整场失败**：没有持仓的币不留旧指令（卡上去掉），有持仓的币改成只看不做继续盯（同以前的失败处理）。门槛都在 `[meeting]` 里可调，只对失败的这一场生效，不影响其它币。
+
+1. **分析师报告**（`report_min_chars`，默认 50）：请来的每位分析师的报告，为空、少于该字数、或短于 300 字且含工具报错字样（Traceback、rate limit、无法获取……）算缺失。**行情技术**缺失 → 整场失败；**新闻 / 社交 / 基本面**缺失 → 照常出结论，但卡上该币的仓位档位下调一级（L→M→S），理由里注明「X 报告缺失，仓位档位下调一级」，实况多一步 `quality`。
+2. **每个辩手每轮发言**（`speech_min_chars`，默认 50 字；0 = 只查空）：多空、三位风控每人每轮至少这么多字（多轮时历史各轮拼接，按「轮数 × 字数」查）。不够 → 整场失败，提示是哪几位。
+3. **方向一致**：转出来的作战指令是做多 / 做空时，会议自己的结论不能相反——组合经理评级是 Sell / Underweight 却要做多，或 Buy / Overweight 却要做空，交易员的 `FINAL TRANSACTION PROPOSAL` 是 SELL 却要做多、BUY 却要做空，都整场失败（观望 / 持有 / 解析不出来不算矛盾；NO_TRADE 不检查）。
+
+代码对「请不请某位分析师」不做判断，只查请来了的。决定按这套门槛放行的会，行为同以前。

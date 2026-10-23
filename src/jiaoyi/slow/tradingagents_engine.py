@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -100,6 +101,9 @@ class TradingAgentsSettings:
     # 某一步回答被截断（length）/ 空 / 过短：自动重试一次，重试关掉推理并提示直接给结论
     retry_bad_steps: bool = True
     retry_min_chars: int = 20
+    # 会议质量门槛：每个辩手每轮发言至少多少字；分析师报告至少多少字（低于就算缺失）
+    speech_min_chars: int = 50
+    report_min_chars: int = 50
     max_retries: int = 6
     # 每类标的请哪几位分析师（越少越省钱）；默认与 TradingAgents 的完整阵容一致。
     analysts_crypto: tuple[str, ...] = ("market", "social", "news")
@@ -686,18 +690,81 @@ _SPEAKERS = (
 )
 
 
-def empty_speeches(state: Mapping[str, Any], debate_rounds: int, risk_rounds: int) -> list[str]:
-    """该开口却只剩「Bull Analyst:」这种空壳的辩手。TradingAgents 把模型空回答照样记进历史，
-    研究经理看着空记录也会给结论，所以这里直接查出来，会议按失败处理。"""
+def empty_speeches(
+    state: Mapping[str, Any], debate_rounds: int, risk_rounds: int, min_chars: int = 0
+) -> list[str]:
+    """该开口却只剩「Bull Analyst:」这种空壳（或短于 ``min_chars`` 字）的辩手。TradingAgents 把模型
+    空回答照样记进历史，研究经理看着空记录也会给结论，所以这里直接查出来，会议按失败处理。
+    多轮辩论时历史是各轮拼在一起的，每轮至少 ``min_chars`` 字。"""
     out: list[str] = []
     for outer, key, label, name, is_debate in _SPEAKERS:
-        if (debate_rounds if is_debate else risk_rounds) <= 0:
+        rounds = debate_rounds if is_debate else risk_rounds
+        if rounds <= 0:
             continue
         inner = state.get(outer)
         history = inner.get(key, "") if isinstance(inner, Mapping) else ""
-        if not str(history).replace(label, "").strip():
+        text = str(history).replace(label, "").strip()
+        if not text or len(text) < min_chars * rounds:
             out.append(name)
     return out
+
+
+_REPORTS = (
+    ("market", "market_report", "行情技术"),
+    ("social", "sentiment_report", "社交情绪"),
+    ("news", "news_report", "新闻"),
+    ("fundamentals", "fundamentals_report", "基本面"),
+)
+_ERROR_MARK = re.compile(
+    r"traceback|exception|error (?:code|calling|fetching)|failed to|unable to (?:fetch|retrieve)|"
+    r"rate.?limit|tool (?:call )?(?:failed|error)|无法获取|获取失败|调用失败|接口(?:报错|错误)",
+    re.IGNORECASE,
+)
+
+
+def broken_reports(
+    state: Mapping[str, Any], analysts: Sequence[str], min_chars: int
+) -> list[tuple[str, str]]:
+    """请来的分析师里，报告为空 / 短于 ``min_chars`` 字 / 短且像工具报错的：[(分析师, 中文名)]。"""
+    out: list[tuple[str, str]] = []
+    for analyst, key, zh in _REPORTS:
+        if analyst not in analysts:
+            continue
+        text = str(state.get(key) or "").strip()
+        if not text or len(text) < min_chars or (len(text) < 300 and _ERROR_MARK.search(text)):
+            out.append((analyst, zh))
+    return out
+
+
+_BUY = {"buy", "overweight"}
+_SELL = {"sell", "underweight"}
+_PROPOSAL = re.compile(r"FINAL TRANSACTION PROPOSAL:\s*\**\s*(BUY|HOLD|SELL)", re.IGNORECASE)
+
+
+def direction_conflict(bias: Bias, rating: str | None, trader_plan: str) -> str | None:
+    """卡上的方向和会议自己的结论（组合经理评级、交易员建议）是否相反；相反返回说明。
+    只比相反的方向（做多 vs 卖出 / 做空 vs 买入）；观望 / 持有 / 解析不出不算矛盾。"""
+    if bias is Bias.NO_TRADE:
+        return None
+    proposal = _PROPOSAL.findall(trader_plan or "")
+    signals = {("评级", (rating or "").lower())}
+    if proposal:
+        signals.add(("交易员建议", proposal[-1].lower()))
+    against = _SELL if bias is Bias.LONG else _BUY
+    for who, value in sorted(signals):
+        if value in against:
+            way = "做多" if bias is Bias.LONG else "做空"
+            return f"{who}是 {value}，和作战指令的方向（{way}）相反"
+    return None
+
+
+def degrade_size(cs: CardSymbol, missing: Sequence[str]) -> CardSymbol:
+    """新闻 / 社交 / 基本面报告缺失：仓位档位下调一级（L→M→S），理由里注明。"""
+    lower = {SizeTier.L: SizeTier.M, SizeTier.M: SizeTier.S, SizeTier.S: SizeTier.S}
+    note = f"（{'、'.join(missing)}报告缺失，仓位档位下调一级）"
+    return cs.model_copy(
+        update={"size_tier_max": lower[cs.size_tier_max], "reason": (cs.reason + note)[:500]}
+    )
 
 
 FALLBACK_MAX_TOKENS = {"openrouter": 384_000, "deepseek": 8192}
@@ -1175,7 +1242,7 @@ class TradingAgentsEngine:
         graph = self._graph(analysts, handler)
         if live:
             tap_graph(graph, live)
-        state, _rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
+        state, rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
         decision = str(state.get("final_trade_decision", ""))
         if not decision:
             raise RuntimeError(f"{entry.symbol}：TradingAgents 没有给出结论")
@@ -1184,12 +1251,23 @@ class TradingAgentsEngine:
                 f"{entry.symbol}：{meter.truncated} 次模型回答被 max_tokens 截断"
                 f"（当前 {self._s.max_tokens}），辩论 / 决定不完整，这场会不能用；调大 max_tokens"
             )
-        if empty := empty_speeches(state, self._s.debate_rounds, self._s.risk_rounds):
+        if empty := empty_speeches(
+            state, self._s.debate_rounds, self._s.risk_rounds, self._s.speech_min_chars
+        ):
             # 辩论没产出还给结论，等于没开会（实测 max_tokens 太小时研究经理看着空记录给 Hold）
             raise RuntimeError(
-                f"{entry.symbol}：{'、'.join(empty)}的发言是空的（模型回答为空，多半被 max_tokens "
-                "挤掉了），这场会不能用"
+                f"{entry.symbol}：{'、'.join(empty)}的发言是空的或太短（少于 "
+                f"{self._s.speech_min_chars} 字；模型回答为空，多半被 max_tokens 挤掉了），"
+                "这场会不能用"
             )
+        broken = broken_reports(state, analysts, self._s.report_min_chars)
+        if any(a == "market" for a, _ in broken):
+            raise RuntimeError(
+                f"{entry.symbol}：行情技术分析师的报告是空的或工具报错，这场会不能用"
+            )
+        missing = [zh for _, zh in broken]
+        if live and missing:
+            live.step("quality", "gate", f"{'、'.join(missing)}报告缺失（空 / 太短 / 工具报错）")
         if live:
             live.converting()
 
@@ -1219,6 +1297,12 @@ class TradingAgentsEngine:
                     # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
                     raise ValueError("模型没有返回结构化结果")
                 cs = draft_to_card_symbol(draft, entry, levels)
+                if why := direction_conflict(
+                    cs.bias, rating, str(state.get("trader_investment_plan", ""))
+                ):
+                    raise RuntimeError(f"{entry.symbol}：会议结论自相矛盾：{why}，这场会不能用")
+                if missing:
+                    cs = degrade_size(cs, missing)
                 return Analysis(cs, meter.cost)
             except (ValidationError, ValueError) as exc:
                 last = exc

@@ -462,3 +462,59 @@ def test_settings_max_tokens_none_means_model_max() -> None:
     assert s.max_tokens is None and s.json_max_tokens is None and s.retry_bad_steps
     s2 = SlowConfig.model_validate({"meeting": {"max_tokens": 4096}}).engine_settings()
     assert (s2.max_tokens, s2.json_max_tokens) == (4096, 8192)
+
+
+def test_quality_gate_short_speech_and_broken_reports() -> None:
+    from jiaoyi.slow.tradingagents_engine import broken_reports, empty_speeches
+
+    state = {
+        "investment_debate_state": {
+            "bull_history": "Bull Analyst: " + "多" * 60,
+            "bear_history": "Bear Analyst: 太短",
+        },
+        "risk_debate_state": {
+            k: f"{lab}: " + "字" * 60
+            for k, lab in (
+                ("aggressive_history", "Aggressive Analyst"),
+                ("conservative_history", "Conservative Analyst"),
+                ("neutral_history", "Neutral Analyst"),
+            )
+        },
+    }
+    assert empty_speeches(state, 1, 1, min_chars=50) == ["空头"]
+    assert empty_speeches(state, 1, 1) == []  # 不设下限只查空
+    assert empty_speeches(state, 2, 1, min_chars=50) == ["多头", "空头"]  # 两轮 = 至少 100 字
+    reports = {
+        "market_report": "技术面" * 30,
+        "sentiment_report": "",
+        "news_report": "Error calling tool: rate limit exceeded",
+        "fundamentals_report": "基本面良好" * 20,
+    }
+    assert broken_reports(reports, ("market", "social", "news"), 50) == [
+        ("social", "社交情绪"),
+        ("news", "新闻"),
+    ]
+    assert broken_reports(reports, ("fundamentals",), 50) == []  # 没请的分析师不查
+    long_ok = {"news_report": "The error rate of the order book is low. " * 20}
+    assert broken_reports(long_ok, ("news",), 50) == []  # 长报告里提到 error 不算报错
+
+
+def test_direction_conflict_and_size_degrade() -> None:
+    from jiaoyi.contracts import Bias, SizeTier
+    from jiaoyi.slow.tradingagents_engine import degrade_size, direction_conflict
+    from tests.test_slow_commander import card_symbol
+
+    plan = "...\nFINAL TRANSACTION PROPOSAL: **SELL**"
+    assert "做多" in (direction_conflict(Bias.LONG, "Buy", plan) or "")  # 交易员说卖
+    assert direction_conflict(Bias.LONG, "Underweight", "") is not None
+    assert direction_conflict(Bias.SHORT, "Overweight", "") is not None
+    assert direction_conflict(Bias.SHORT, "Sell", plan) is None
+    assert direction_conflict(Bias.LONG, "Hold", "FINAL TRANSACTION PROPOSAL: **HOLD**") is None
+    assert direction_conflict(Bias.LONG, None, "") is None  # 解析不出不算矛盾
+    assert direction_conflict(Bias.NO_TRADE, "Sell", plan) is None
+    cs = degrade_size(card_symbol("AAUSDT", size_tier_max=SizeTier.L), ["新闻", "社交情绪"])
+    assert cs.size_tier_max is SizeTier.M and "新闻、社交情绪报告缺失" in cs.reason
+    assert (
+        degrade_size(card_symbol("AAUSDT", size_tier_max=SizeTier.S), ["新闻"]).size_tier_max
+        is SizeTier.S
+    )
