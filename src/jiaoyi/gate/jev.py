@@ -172,6 +172,7 @@ class JevDecisionModel:
         self._day: date | None = None
         self.consecutive_errors = 0
         self._cooldown_until: float | None = None
+        self._served_model: str | None = None
 
     @property
     def health(self) -> Health:
@@ -216,6 +217,12 @@ class JevDecisionModel:
         # OpenRouter 回的是带日期的全名（typesafe/jev-1.14-20260917），算同一版本
         if pinned is not None and raw.model != pinned and not raw.model.startswith(pinned + "-"):
             logger.warning("Jev 模型版本变了：锁定 %s，实际 %s", pinned, raw.model)
+        elif self._served_model is not None and raw.model != self._served_model:
+            # 同一版本下带日期的快照滚动了（OpenRouter 会这样），门槛可能要重新校准
+            logger.warning(
+                "Jev 实际模型从 %s 换成了 %s，建议复盘后重新校准门槛", self._served_model, raw.model
+            )
+        self._served_model = raw.model
         return JevResponse(
             request_id=request.request_id,
             ok=True,

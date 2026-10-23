@@ -303,6 +303,18 @@ async def test_openrouter_transport(now: datetime, caplog: pytest.LogCaptureFixt
     assert r.ok and r.cost_usd == pytest.approx(0.0000321)  # 用通道报的花费，不按单价估
     assert r.model_version == "typesafe/jev-1.14-20261001"
     assert "版本变了" not in caplog.text  # 带日期的全名算同一版本
+    # 日期快照滚动了要提醒一次
+    tr2 = TypeSafeTransport(
+        "test-key-not-real",
+        "typesafe/jev-1.14",
+        base_url=OPENROUTER_BASE_URL,
+        http_transport=httpx2.MockTransport(_openrouter_handler({})),  # type: ignore[arg-type]
+    )
+    m = JevDecisionModel(tr2, cfg, timeout_ms=2000)
+    m._served_model = "typesafe/jev-1.14-20260917"
+    assert (await m.ask(entry_request(now))).ok
+    assert "重新校准" in caplog.text
+    await tr2.aclose()
     await tr.aclose()
 
 
