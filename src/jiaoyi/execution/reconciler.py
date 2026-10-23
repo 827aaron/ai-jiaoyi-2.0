@@ -45,6 +45,7 @@ from jiaoyi.interfaces import Alerter, LifeboatStop
 
 log = logging.getLogger(__name__)
 
+_GONE_ROUNDS_BEFORE_FLATTEN = 2
 _CRITICAL = {ReconcileIssueKind.LIFEBOAT_MISSING, ReconcileIssueKind.ORPHAN_POSITION}
 _TITLES = {
     ReconcileIssueKind.LIFEBOAT_MISSING: "保命止损缺失",
@@ -88,6 +89,7 @@ class ThreeWayReconciler:
         self._grace_s = unclaimed_grace_s
         self._max_lb_failures = max_lifeboat_failures
         self._lb_failures: dict[str, int] = {}
+        self._gone_rounds: dict[str, int] = {}
         self._rec = recorder
         self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
@@ -173,6 +175,12 @@ class ThreeWayReconciler:
 
         # 4. 执行器：报错、消失、没人认领
         known_ids = {t.record.executor_id for t in live if t.record.executor_id}
+        # 执行器回来了 / 仓位没了的，清掉“消失”计数
+        live_executor = {t.record.position_id: t.record.executor_id for t in live}
+        running_now = {str(e.get("executor_id")) for e in running}
+        for pid in list(self._gone_rounds):
+            if live_executor.get(pid) is None or live_executor[pid] in running_now:
+                self._gone_rounds.pop(pid, None)
         running_ids = {str(e.get("executor_id")) for e in running}
         for t in live:
             if t.record.executor_id and t.record.executor_id not in running_ids:
@@ -183,7 +191,22 @@ class ThreeWayReconciler:
                     and exchange_qty.get(rec.symbol, 0.0) > 0
                 ):
                     # 执行器没了（hummingbot 重启 / 丢状态），止盈止损和时间限制都没人管，
-                    # 币安上却还有仓：直连只减仓平掉，不能让它裸奔到只剩保命止损
+                    # 币安上却还有仓。第 1 轮：本轮第 1 步已补挂保命止损兜底，只告警；
+                    # 连续 2 轮仍没有执行器：直连只减仓平掉（避免一次读取抖动就平仓）。
+                    rounds = self._gone_rounds.get(rec.position_id, 0) + 1
+                    self._gone_rounds[rec.position_id] = rounds
+                    if rounds < _GONE_ROUNDS_BEFORE_FLATTEN:
+                        issues.append(
+                            ReconcileIssue(
+                                kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                                symbol=rec.symbol,
+                                position_id=rec.position_id,
+                                detail="hummingbot 里执行器已消失但币安仍有仓；保命止损在位，"
+                                "下一轮仍然没有就直连平仓",
+                                fixed=False,
+                            )
+                        )
+                        continue
                     issue, was_flattened = await self._flatten(
                         rec.position_id,
                         "hummingbot 里执行器已消失但币安仍有仓",
@@ -191,6 +214,7 @@ class ThreeWayReconciler:
                     )
                     issues.append(issue)
                     if was_flattened:
+                        self._gone_rounds.pop(rec.position_id, None)
                         flattened.add(rec.symbol)
                         continue
                 issues.append(
@@ -363,7 +387,9 @@ class ThreeWayReconciler:
         except Exception as via_hb:
             close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
             try:
-                await self._exchange.close_position_market(rec.symbol, close_side, rec.quantity)
+                exit_price = await self._exchange.close_position_market(
+                    rec.symbol, close_side, rec.quantity
+                )
             except Exception as direct:
                 return (
                     issue(
@@ -372,7 +398,7 @@ class ThreeWayReconciler:
                     False,
                 )
             self._lb_failures.pop(position_id, None)
-            self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER)
+            self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER, exit_price)
             await self._adapter.release_lifeboat(position_id)
             return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
         self._lb_failures.pop(position_id, None)
