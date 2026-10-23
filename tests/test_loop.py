@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from jiaoyi import contracts as c
-from jiaoyi.app import App
+from jiaoyi.app import App, read_blocked
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.config import load_app_config, load_risk_config
 from jiaoyi.loop import Runner
@@ -343,3 +343,70 @@ async def test_stuck_close_does_not_block_market_events(tmp_path: Path, now: dat
     release.set()
     await asyncio.gather(*r._tasks)
     assert r.positions == []
+
+
+class FakeHub:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def poll_and_notify(
+        self,
+        symbols: Sequence[str],
+        notify: Callable[[str], None],
+        block: Callable[[str, str], None] | None = None,
+    ) -> list[object]:
+        self.calls.append(list(symbols))
+        notify("BTCUSDT")
+        assert block is not None
+        block("ETHUSDT", "币安公告：下架 ETHUSDT")
+        return []
+
+
+class NewsCards(FakeCards):
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.news: list[str] = []
+        self.blocked: dict[str, str] = {}
+
+    def notify_news(self, symbol: str) -> None:
+        self.news.append(symbol)
+
+    def block_symbol(self, symbol: str, reason: str) -> None:
+        self.blocked[symbol] = reason
+
+    @property
+    def blocked_symbols(self) -> dict[str, str]:
+        return dict(self.blocked)
+
+    def unblock_symbol(self, symbol: str) -> None:
+        self.blocked.pop(symbol, None)
+
+
+async def test_news_tick_notifies_and_blocks(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    app.pool = c.SymbolPool.model_validate(load_example("symbol_pool"))
+    hub, cards = FakeHub(), NewsCards()
+    app.news = hub  # type: ignore[assignment]
+    app.m = dataclasses.replace(app.m, cards=cards)
+    r = Runner(app)
+    r.positions = [_position(symbol="DOGEUSDT")]
+    await r.news_tick()
+    pool_syms = {e.symbol for e in app.pool.in_pool}
+    assert set(hub.calls[0]) == pool_syms | {"DOGEUSDT"}  # 候选池 + 持仓
+    assert cards.news == ["BTCUSDT"] and "ETHUSDT" in cards.blocked
+    # 封禁名单落盘给 jiaoyi status / 面板读；人工解封后文件同步
+    assert set(read_blocked(tmp_path)) == {"ETHUSDT"}
+    assert app.unblock_symbol("ETHUSDT") and not app.unblock_symbol("ETHUSDT")
+    assert read_blocked(tmp_path) == {}
+
+
+async def test_news_tick_skipped_without_hub_or_real_cards(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    app.pool = c.SymbolPool.model_validate(load_example("symbol_pool"))
+    hub = FakeHub()
+    app.news = hub  # type: ignore[assignment]
+    await Runner(app).news_tick()  # 军师团是桩：不拉
+    assert hub.calls == []
+    app.news = None
+    app.m = dataclasses.replace(app.m, cards=NewsCards())
+    await Runner(app).news_tick()  # 没有新闻源：什么都不做

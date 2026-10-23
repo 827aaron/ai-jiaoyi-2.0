@@ -152,6 +152,10 @@ def _status(args: argparse.Namespace) -> int:
         return 2
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
+    from jiaoyi.app import read_blocked
+
+    for sym, reason in read_blocked(app.app_cfg.data_dir).items():
+        print(f"禁开新仓     {sym:<12} {reason}")
     asyncio.run(app.stop())
     return 0
 

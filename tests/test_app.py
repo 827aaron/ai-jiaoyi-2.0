@@ -15,6 +15,7 @@ from jiaoyi.interfaces import Predictor
 from jiaoyi.predictor import KronosForecaster
 from jiaoyi.predictor.stub import StubPredictor
 from jiaoyi.slow.commander import BattleCardCommander
+from jiaoyi.slow.news import NewsHub
 from jiaoyi.slow.screener import CodeSymbolScreener
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from tests.conftest import ROOT
@@ -101,6 +102,7 @@ async def test_slow_loop_without_key_uses_stub_cards(tmp_path: Path, now: dateti
     assert isinstance(app.m.screener, CodeSymbolScreener)  # 选币不需要 key
     assert isinstance(app.m.cards, StubBattleCardProvider)
     assert app.m.cards.current(now) is None
+    assert app.news is None
     await app.stop()  # 没启动也要关掉 httpx 连接
 
 
@@ -124,6 +126,7 @@ async def test_slow_loop_with_key_uses_commander(
     monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
     app = _online(tmp_path, now, _Secrets(DEEPSEEK_API_KEY="x" * 16))
     assert isinstance(app.m.cards, BattleCardCommander)
+    assert isinstance(app.news, NewsHub)  # 真军师团才拉新闻
     assert app.m.cards.current(now) is None  # 还没开会就没有卡
     await app.stop()
 
