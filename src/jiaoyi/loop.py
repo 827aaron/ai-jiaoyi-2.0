@@ -649,6 +649,8 @@ class Runner:
             await self.app._alert(AlertLevel.WARN, "已暂停开新仓", "面板指令；已有持仓照常看管")
             return "done", "已暂停开新仓"
         if cmd.kind == "resume":
+            if self.app.pool_overrides_corrupt:
+                return "rejected", "选币覆盖项文件读不出（拉黑清单没生效），修好或删掉后重启主程序"
             self.app.set_paused(False, command_id=cmd.id)
             await self.app._alert(AlertLevel.INFO, "已恢复开新仓", "面板指令")
             return "done", "已恢复开新仓"

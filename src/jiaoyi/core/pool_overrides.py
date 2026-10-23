@@ -4,8 +4,9 @@
   改文件、立即重新选币。手改文件也行，下一次选币（每小时，或下一条选币指令）读到。
 - 优先级同选币（slow/screener.py）：拉黑 > 固定 / 手动加入 > 打分。拉黑的币立即不再开新仓
   （loop.handle_signal 拦），不用等军师团下一轮出卡。
-- 文件读不出：启动时备份成 ``.corrupt-时间戳``、按“没有覆盖项”跑并告警；运行中沿用上一份。
-  文件坏着时选币页的操作一律拒绝，不拿“空 + 这一次操作”覆盖掉原来的拉黑清单。
+- 文件读不出：启动时备份成 ``.corrupt-时间戳``、告警并**暂停开新仓**（拉黑清单没生效，失败即关闭；
+  已有持仓照常看管），修好后重启自动恢复；运行中读不出沿用上一份。
+  文件坏着时选币页的操作和面板“恢复开新仓”一律拒绝，不拿“空 + 这一次操作”覆盖掉原来的拉黑清单。
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ from jiaoyi.contracts.common import Category
 log = logging.getLogger(__name__)
 
 POOL_OVERRIDES_FILE = "pool_overrides.json"
+POOL_OVERRIDES_PAUSE = "pool_overrides_corrupt"
+"""paused.json 的 ``source``：因为这个文件读不出而自动暂停，文件修好后重启自动恢复。"""
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 
 PoolAction = Literal[
