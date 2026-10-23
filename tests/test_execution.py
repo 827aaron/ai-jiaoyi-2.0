@@ -60,6 +60,7 @@ class Rig:
             clock=self.clock,
             sleep=self.sleep,
             income_since=self.ex.income_since,
+            exchange=self.ex,
         )
 
 
@@ -97,7 +98,7 @@ async def test_open_builds_executor_and_places_lifeboat(rig: Rig) -> None:
     cfg = rig.api.created[0]
     assert cfg["type"] == "position_executor"
     assert cfg["trading_pair"] == "BTC-USDT"
-    assert cfg["side"] == "BUY"
+    assert cfg["side"] == 1  # hummingbot TradeType.BUY
     assert cfg["amount"] == "0.015"
     assert cfg["triple_barrier_config"]["stop_loss"] == "0.0025"
     assert cfg["triple_barrier_config"]["take_profit"] == "0.005"
@@ -646,3 +647,17 @@ async def test_unfilled_position_counts_toward_exposure(rig: Rig) -> None:
     await rig.adapter.positions()
     acc = await rig.adapter.account()
     assert acc.open_notional_usdt == pytest.approx(68000.0 * 0.015)
+
+
+async def test_open_sets_leverage_before_creating_executor(rig: Rig) -> None:
+    await open_filled(rig)
+    assert rig.ex.leverage_set == [("BTCUSDT", intent().leverage)]
+
+
+async def test_open_refused_when_leverage_cannot_be_set(rig: Rig) -> None:
+    rig.ex.leverage_error = "杠杆对不上"
+    with pytest.raises(ExchangeError):
+        await rig.adapter.open(intent())
+    assert rig.api.created == []  # 没建执行器
+    statuses = [p.record.status for p in rig.registry.data.positions.values()]
+    assert statuses == [PositionStatus.FAILED]

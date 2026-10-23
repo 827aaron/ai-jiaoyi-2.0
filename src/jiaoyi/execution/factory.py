@@ -44,6 +44,30 @@ class MissingSecret(Exception):
     """缺密钥。消息里只写名字，不写值。"""
 
 
+HB_SIM_MARKER = "hb_sim_environment"
+
+
+def check_sim_environment(data_dir: str | Path, expected: str) -> None:
+    """hummingbot（`make hb-up` 写标记）与我们自己的 ccxt 必须连同一个模拟环境，否则执行器和
+    保命止损会分处两个环境、仓位没有保护。标记缺失或不一致都拒绝启动。"""
+    marker = Path(data_dir) / HB_SIM_MARKER
+    try:
+        actual = marker.read_text().strip()
+    except OSError as e:
+        raise SimEnvironmentMismatch(
+            f"找不到 {marker}：先运行 make hb-up（它会记录 hummingbot 连的模拟环境）"
+        ) from e
+    if actual != expected:
+        raise SimEnvironmentMismatch(
+            f"hummingbot 连的是 {actual}，但配置 sim_environment 是 {expected}；"
+            "两边必须一致（见 docs/M0-setup.md 第 3 步）"
+        )
+
+
+class SimEnvironmentMismatch(RuntimeError):
+    pass
+
+
 def build_execution(
     mode: RunMode,
     risk: RiskConfig,
@@ -73,10 +97,14 @@ def build_execution(
 
     # 测试网和主网的 key 分开存，不会因为配错模式把主网 key 用在测试网（或反过来）
     prefix = "BINANCE" if mode is RunMode.LIVE else "BINANCE_TESTNET"
-    api = HttpHummingbotApi(hb_url, hb_username, need("HUMMINGBOT_API_PASSWORD"))
+    hb_password = need("HUMMINGBOT_API_PASSWORD")
+    api_key, api_secret = need(f"{prefix}_API_KEY"), need(f"{prefix}_API_SECRET")
+    if mode is not RunMode.LIVE:
+        check_sim_environment(data_dir, "demo" if demo_trading else "legacy_testnet")
+    api = HttpHummingbotApi(hb_url, hb_username, hb_password)
     exchange = CcxtBinanceFutures(
-        need(f"{prefix}_API_KEY"),
-        need(f"{prefix}_API_SECRET"),
+        api_key,
+        api_secret,
         testnet=mode is not RunMode.LIVE,
         demo=demo_trading,
     )
@@ -96,6 +124,7 @@ def build_execution(
         connector_name=CONNECTOR_BY_MODE[mode],
         day_reset_tz=risk.day_reset_tz,
         income_since=exchange.income_since,
+        exchange=exchange,
         recorder=recorder(Role.EXECUTOR),
     )
     reconciler = ThreeWayReconciler(

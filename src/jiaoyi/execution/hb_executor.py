@@ -33,6 +33,7 @@ from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
+from jiaoyi.execution.exchange import ExchangeClient, ExchangeError
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
@@ -60,6 +61,10 @@ _CLOSE_TYPE_MAP = {
 }
 
 
+_TRADE_BUY = 1
+_TRADE_SELL = 2
+
+
 def _positive(value: Any) -> float | None:
     try:
         number = float(value)
@@ -83,6 +88,7 @@ class HbExecutorAdapter:
         poll_s: float = 0.5,
         lifeboat_attempts: int = 3,
         income_since: IncomeSince | None = None,
+        exchange: ExchangeClient | None = None,
         recorder: RoleRecorder | None = None,
         clock: Clock = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -98,6 +104,7 @@ class HbExecutorAdapter:
         self._poll_s = poll_s
         self._lifeboat_attempts = lifeboat_attempts
         self._income_since = income_since
+        self._exchange = exchange
         self._rec = recorder
         self._clock = clock
         self._sleep = sleep
@@ -120,7 +127,8 @@ class HbExecutorAdapter:
             "type": "position_executor",
             "connector_name": self._connector,
             "trading_pair": to_hb_pair(intent.symbol),
-            "side": "BUY" if intent.side is Side.LONG else "SELL",
+            # hummingbot 的 TradeType 枚举：1 = BUY，2 = SELL；传字符串会被 HTTP 400 拒绝
+            "side": _TRADE_BUY if intent.side is Side.LONG else _TRADE_SELL,
             "amount": str(intent.quantity),
             "leverage": intent.leverage,
             "triple_barrier_config": barrier,
@@ -158,6 +166,21 @@ class HbExecutorAdapter:
             take_profit_pct=intent.take_profit_pct,
         )
         self._registry.put(tracked)
+        if self._exchange is not None:
+            # hummingbot 建执行器时不会替我们设杠杆（冒烟实测账户仍是 20x）。开仓前先设并回读，
+            # 对不上就不开：杠杆直接决定爆仓线，宁可不开。
+            try:
+                await self._exchange.ensure_leverage(intent.symbol, intent.leverage)
+            except ExchangeError as e:
+                self._set(tracked, status=PositionStatus.FAILED, closed_at=self._clock())
+                await self._alert(
+                    AlertLevel.CRITICAL,
+                    "开仓取消：杠杆没设成功",
+                    f"{intent.symbol} 目标 {intent.leverage}x：{e}",
+                    intent.symbol,
+                    f"leverage_failed:{record.position_id}",
+                )
+                raise
         marker = f"{MARKER_PREFIX}{record.position_id}"
         try:
             created = await self._api.create_executor(

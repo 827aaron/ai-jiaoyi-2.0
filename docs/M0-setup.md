@@ -47,6 +47,8 @@ curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | he
 所以**第一次冒烟要确认 hummingbot 的持仓/订单推送能收到**，收不到就把现象发出来。
 回退旧测试网：`config/app.toml` 里 `sim_environment = "legacy_testnet"`，并用 `HB_SIM=legacy_testnet make hb-up`（会重新拉未打补丁的上游镜像覆盖本地补丁镜像）。两边必须一致，否则保命止损和执行器分在两个环境。冒烟时请确认 Demo 上 algo 条件单能挂、能查、能撤。
 
+`make hb-up` 会把 hummingbot 连的环境写进 `data/hb_sim_environment`（数据目录不是 `data` 时用 `DATA_DIR=...`），`jiaoyi` 启动时和 `sim_environment` 对比，缺标记或不一致都拒绝启动。上游镜像钉了 digest（Makefile 的 `HB_IMAGE_DIGEST`），升级前先在 Demo 上跑冒烟。
+
 把币安 Demo key 交给 hummingbot-api（它加密保存）：浏览器开 <http://127.0.0.1:8000/docs>，登录后用
 `POST /accounts/add-credential/master_account/binance_perpetual_testnet`，在页面里直接填 key / secret。
 不要把 key 发到聊天里。

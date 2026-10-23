@@ -86,6 +86,10 @@ class ExchangeClient(Protocol):
         """只减仓市价单。**兜底专用**：hummingbot 不可达而保命止损又挂不上时，对账员用它平仓。"""
         ...
 
+    async def ensure_leverage(self, symbol: str, leverage: int) -> None:
+        """把该合约的杠杆设成 ``leverage`` 并回读核对；设不成或对不上抛 ExchangeError。"""
+        ...
+
     async def lot_filters(self) -> dict[str, LotFilter]:
         """所有在交易的 USDT 永续合约的 stepSize / minQty / minNotional（读 exchangeInfo）。"""
         ...
@@ -123,7 +127,11 @@ class CcxtBinanceFutures:
                 "secret": api_secret,
                 "timeout": timeout_ms,
                 "enableRateLimit": True,
-                "options": {"defaultType": "future"},
+                # 不带 symbol 查全部挂单是对账员的正常用法，别让 ccxt 为此抛警告异常
+                "options": {
+                    "defaultType": "future",
+                    "fetchOpenOrders": {"warnWithoutSymbol": False},
+                },
             }
         )
         if testnet:
@@ -234,9 +242,35 @@ class CcxtBinanceFutures:
             raw = await self._ex.fetch_open_orders(ccxt_symbol, None, None, {"trigger": True})
         except Exception as e:
             raise ExchangeError(f"查条件单失败：{e}") from e
-        return [
-            self._stop_from(o) for o in raw if str(o.get("type", "")).lower().startswith("stop")
-        ]
+        return [self._stop_from(o) for o in raw if self._is_stop(o)]
+
+    @staticmethod
+    def _is_stop(raw: dict[str, Any]) -> bool:
+        """是不是 STOP_MARKET 条件单。algo 接口返回的单子 ccxt 解析出的 type 是 "market"，
+        不能靠 type；以币安原始的 orderType 为准。"""
+        info = raw.get("info") or {}
+        order_type = str(info.get("orderType") or info.get("type") or raw.get("type") or "")
+        return order_type.upper().startswith("STOP")
+
+    async def ensure_leverage(self, symbol: str, leverage: int) -> None:
+        try:
+            await self._ready()
+            ccxt_symbol = to_ccxt_symbol(symbol)
+            await self._ex.set_leverage(leverage, ccxt_symbol)
+            got = await self._ex.fetch_leverage(ccxt_symbol)
+        except Exception as e:
+            raise ExchangeError(f"设杠杆失败：{e}") from e
+        raw = (
+            got.get("longLeverage")
+            or got.get("leverage")
+            or (got.get("info") or {}).get("leverage")
+        )
+        try:
+            actual = int(float(str(raw)))
+        except (TypeError, ValueError) as e:
+            raise ExchangeError(f"读不到 {symbol} 的杠杆：{got}") from e
+        if actual != leverage:
+            raise ExchangeError(f"{symbol} 杠杆 {actual}x，不是目标 {leverage}x")
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float

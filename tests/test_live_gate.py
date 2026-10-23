@@ -141,6 +141,7 @@ async def test_live_mode_allowed_after_unlock_and_paper_needs_no_gate(
 ) -> None:
     for name in KEYS:
         monkeypatch.setenv(name, "x" * 8)
+    (tmp_path / "hb_sim_environment").write_text("demo")
     paper = build_execution(RunMode.PAPER, risk, tmp_path, EnvSecretStore(), StubAlerter())
     await paper.close()
     gate.unlock(CONFIRM_WORD, PW)

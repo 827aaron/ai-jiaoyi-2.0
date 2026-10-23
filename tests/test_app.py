@@ -224,6 +224,7 @@ async def test_execution_with_testnet_keys_is_real(tmp_path: Path, now: datetime
         "TELEGRAM_BOT_TOKEN": "x" * 8,
         "TELEGRAM_CHAT_ID": "1",
     }
+    (tmp_path / "hb_sim_environment").write_text("demo")
     app = _online(tmp_path, now, _Secrets(**keys))
     assert isinstance(app.m.executor, HbExecutorAdapter)
     assert isinstance(app.m.reconciler, ThreeWayReconciler)

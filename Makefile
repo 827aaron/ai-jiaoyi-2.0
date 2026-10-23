@@ -80,17 +80,26 @@ hb-setup:
 
 # 币安已用 Demo Trading 取代旧测试网；hummingbot 连接器写死旧域名，这里打补丁（见 docs/M0-setup.md）。
 # 回退旧测试网：HB_SIM=legacy_testnet make hb-up（同时把 config/app.toml 的 sim_environment 改成 legacy_testnet）。
+# 镜像钉 digest（2026-10-15 推送的 latest，多架构 index）：升级先在 Demo 上跑冒烟，再改这里。
 HB_SIM ?= demo
+DATA_DIR ?= data
+HB_IMAGE_DIGEST ?= sha256:c2406ccccd943bc361e3fb4cd06394ae27bae9318c71e30d079e7328c8103c14
+HB_IMAGE_PINNED := hummingbot/hummingbot-api@$(HB_IMAGE_DIGEST)
+HB_IMAGE_TAG := hummingbot/hummingbot-api:latest
+
 hb-patch:
-	docker pull hummingbot/hummingbot-api:latest
-	docker build --build-arg BASE=hummingbot/hummingbot-api:latest -t hummingbot/hummingbot-api:latest docker/hb-demo
+	docker pull $(HB_IMAGE_PINNED)
+	docker build --build-arg BASE=$(HB_IMAGE_PINNED) -t $(HB_IMAGE_TAG) docker/hb-demo
 
 hb-up:
-	@# 两个分支都要重置镜像：legacy 必须拉回未打补丁的上游镜像，否则上次打的 Demo 补丁还在，
+	@# 两个分支都要重置本地 :latest 标签：legacy 必须恢复成未打补丁的镜像，否则上次打的 Demo 补丁还在，
 	@# hummingbot 连 Demo 而 ccxt 连旧测试网，保命止损和执行器就分在两个环境
 	@if [ "$(HB_SIM)" = "demo" ]; then $(MAKE) hb-patch; \
-	elif [ "$(HB_SIM)" = "legacy_testnet" ]; then docker pull hummingbot/hummingbot-api:latest; \
+	elif [ "$(HB_SIM)" = "legacy_testnet" ]; then \
+		docker pull $(HB_IMAGE_PINNED) && docker tag $(HB_IMAGE_PINNED) $(HB_IMAGE_TAG); \
 	else echo "HB_SIM 只能是 demo 或 legacy_testnet"; exit 1; fi
+	@# 记下 hummingbot 连的环境，jiaoyi 启动时和 sim_environment 对比，不一致拒绝启动
+	@mkdir -p $(DATA_DIR) && echo "$(HB_SIM)" > $(DATA_DIR)/hb_sim_environment
 	$(MAKE) -C vendor/hummingbot-api emqx-auth
 	docker compose up -d
 
