@@ -853,6 +853,28 @@ def test_card_rows_without_conclusion_say_why(tmp_path: Path) -> None:
     assert got["LTCUSDT"][0] == "没开会"
 
 
+def test_card_row_survives_usage_in_record(tmp_path: Path) -> None:
+    """会议记录里夹着 token 用量时，观望的币也要显示成观望，不能变成「没出结论」。"""
+    from jiaoyi.panel.overview import _card
+
+    cs = {
+        "symbol": "WLDUSDT", "category": "alt", "bias": "no_trade", "key_levels": [],
+        "allowed_signals": [], "size_tier_max": "S", "notional_usdt": {"min": 10, "max": 20},
+        "leverage": {"min": 1, "max": 2}, "stop_atr": {"min": 1, "max": 2},
+        "take_profit_r": {"min": 1, "max": 2}, "reason": "触发区间不可达",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }  # fmt: skip
+    t = NOW - timedelta(minutes=10)
+    recs = [
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "WLD 开会结论", t, symbol="WLDUSDT", output=cs),
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "出卡", t + timedelta(minutes=1), card_id="card-1",
+             output={"symbols": ["WLDUSDT"], "expires_at": (NOW + timedelta(hours=1)).isoformat()}),
+    ]  # fmt: skip
+    view = _card(recs, NOW)
+    assert view is not None
+    assert view.symbols[0].bias == "no_trade" and view.symbols[0].reason == "触发区间不可达"
+
+
 def test_funds_ai_cost_detail(tmp_path: Path) -> None:
     """资金页 AI 费用明细：每次调用谁 / 币 / 花费 / tokens / 结果，按军师团 / 总盘会 / Jev 小计。"""
     from jiaoyi.panel.pages import build_funds

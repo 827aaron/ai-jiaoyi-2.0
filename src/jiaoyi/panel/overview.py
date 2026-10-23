@@ -464,9 +464,12 @@ def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
     names = [str(s) for s in last.output.get("symbols", [])]
     per: dict[str, CardSymbol] = {}
     for r in cmd:
-        if r.symbol and r.output and r.ts <= last.ts:
+        if r.symbol and r.output and r.outcome is Outcome.ACTION and r.ts <= last.ts:
             try:
-                per[r.symbol] = CardSymbol.model_validate(r.output)
+                # 记录里还夹着 usage（token 用量），不属于作战指令：不去掉的话契约校验会整条丢掉
+                per[r.symbol] = CardSymbol.model_validate(
+                    {k: v for k, v in r.output.items() if k != "usage"}
+                )
             except ValueError:
                 continue
     rows: list[CardRow] = []

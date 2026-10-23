@@ -171,6 +171,10 @@ class MeetingLive:
         last["cached_tokens"] = cached_tokens
         self._flush()
 
+    def set_rejections(self, rows: list[dict[str, str]]) -> None:
+        """总盘会没挑中的币和各自的理由（结构化：``symbol`` / ``reason``），面板按币显示。"""
+        self._doc["rejections"] = rows
+
     def converting(self) -> None:
         """军师团讨论完毕，开始整理成作战指令。"""
         if self._closed:

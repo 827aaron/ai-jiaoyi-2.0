@@ -127,3 +127,10 @@ def test_level_span_uses_stop_hint_and_both_periods(monkeypatch: pytest.MonkeyPa
     assert "止损倍数中值" in ctx.basis
     legacy = eng.level_context("ETHUSDT", END, StopScale(15), 240)
     assert legacy.atr and legacy.span == pytest.approx(1.5 * legacy.atr * (240 / 15) ** 0.5)
+
+
+def test_as_of_today_means_now_and_past_means_midnight() -> None:
+    """TradingAgents 只传日期：今天要取现在（不然分析师看到的是最多 24 小时前的价格）。"""
+    now = datetime(2026, 10, 23, 19, 36, tzinfo=UTC)
+    assert eng.as_of("2026-10-23", now) == now
+    assert eng.as_of("2026-10-22", now) == datetime(2026, 10, 22, tzinfo=UTC)
