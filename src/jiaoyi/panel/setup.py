@@ -23,6 +23,7 @@ import httpx
 from pydantic import BaseModel
 
 from jiaoyi.contracts import Alert, AlertLevel, Role
+from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.secrets import OPTIONAL_KEYS, REQUIRED_KEYS, SecretError, check_secret_value
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码；不碰交易所
@@ -41,9 +42,9 @@ SecretReader = Callable[[str], str | None]
 _BASIC: dict[str, tuple[actions.Section, FieldSpec]] = {
     "meeting_interval": (
         "app",
-        FieldSpec(str, choices=("15m", "30m", "1h", "2h", "6h", "12h", "24h")),
+        FieldSpec(str, choices=profiles.PROFILES),
     ),
-    "hold": ("app", FieldSpec(str, choices=("30m", "1h", "2h", "4h"))),
+    "hold": ("app", FieldSpec(str, choices=profiles.HOLDS)),
     "jev_provider": ("fast_loop", FieldSpec(str, choices=("typesafe", "openrouter"))),
     "llm_provider": ("llm", FieldSpec(str, choices=("deepseek", "openrouter"))),
     "daily_cost_limit_usd": ("budget", FieldSpec(float)),

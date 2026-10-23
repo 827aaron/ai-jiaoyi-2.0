@@ -1006,7 +1006,9 @@ document.addEventListener("keydown", (e) => {
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
-const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+// 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
+const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
+const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
@@ -1108,6 +1110,16 @@ const PLAIN = {
   refresh_lead_min: "作战卡到期前几分钟开会换新卡",
   symbol_timeout_s: "一个币的会最多开几秒",
   min_refresh_gap_min: "两轮会至少隔几分钟",
+  schedule_at: "每天固定几点开整轮会（曼谷时间）",
+  event_meeting_enabled: "出事时给那一个币开临时会",
+  event_triggers: "哪些事算“出事”",
+  event_symbol_gap_min: "同一个币两场会至少隔几分钟",
+  event_max_per_day: "一天最多开几场临时会",
+  move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
+  predictor_against_runs: "预测员连续几次看反才算",
+  entry_max_card_age_min: "开仓前卡最多旧几分钟（超了先补会再开）",
+  over_budget: "花到日上限 80% 时",
+  slowdown_interval_min: "放慢后几分钟开一次会",
   sim_environment: "模拟盘连币安哪个环境",
   data_dir: "数据保存在哪个文件夹",
   jev_provider: "拍板人走哪个通道",
@@ -1130,13 +1142,18 @@ const HINT = {
   meeting_interval: "在「运行」卡片里一键切换",
   hold: "在「运行」卡片里一键切换；不写 = 跟开会档位走",
   data_dir: "决策记录、状态文件都存在这里",
+  schedule_at: "填了就每天这个时间开，不按启动时间漂；留空 = 按开会间隔",
+  event_meeting_enabled: "只给出事的那个币补开一场，不重开整轮；关掉时突破、大消息、新进池照旧重开整轮",
+  event_triggers: "不在名单里的事不开会，等下一轮定时会",
+  entry_max_card_age_min: "要在“哪些事算出事”里勾上“开仓时卡太旧”才会补会，否则只拦不补",
+  over_budget: "放慢一档 = 开会间隔换成下面那个；不放慢 = 照常开。花到 100% 都停开会，持仓照常管",
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
-const NULL_AS = { max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走" };
+const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走" };
 // 这几项填 0 = 不设限
-const ZERO_AS = { min_range_24h_pct: "不设", max_range_24h_pct: "不设" };
+const ZERO_AS = { min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查" };
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
 const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
 function humanDur(sec) {
@@ -1152,7 +1169,7 @@ function durOf(key, v) {
   const u = UNIT_S.find(([suf]) => key.endsWith(suf));
   return u ? humanDur(v * u[1]) : null;
 }
-const fmtVal = (v, i) => (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[`${i.sec}.${i.key}`] || NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
+const fmtVal = (v, i) => Array.isArray(v) ? esc(v.map((c) => choiceLabel(i ? i.key : "", c)).join("、") || "一个都不选") : (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[`${i.sec}.${i.key}`] || NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
 // 档位 = 军师团开会间隔（Aaron 2026-10-23），不是持仓时长；单笔最长持仓另设
 const profileSpan = (p) => { const m = /^(\d+)(h|m)$/.exec(p); return m ? (m[2] === "h" ? `${m[1]} 小时` : `${m[1]} 分钟`) : p; };
 const profileNote = (p) => `军师团每 ${profileSpan(p)}开一次会${p === "1h" ? "（默认）" : ""}`;
@@ -1294,7 +1311,9 @@ const ADV = [
     { g: "信号识别", keys: ["app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio"] },
   ] },
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
-    { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.*"] },
+    { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.schedule_at", "schedule.*"] },
+    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.predictor_against_runs", "schedule.entry_max_card_age_min"] },
+    { g: "花费快到上限", hint: "花到每天上限的 80% 时怎么办；花到 100% 当天都停开会，持仓照常管。", keys: ["schedule.over_budget", "schedule.slowdown_interval_min"] },
     { g: "选币", keys: ["app.pool_size", "app.card_pick_max"] },
     { g: "选币规则：门槛", warn: "screener_cautions", hint: "每小时用代码把全部币安 U 本位永续筛一遍，过不了门槛的不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap"] },
     { g: "选币规则：打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
@@ -1323,7 +1342,7 @@ const UNIT = {
 };
 // 推荐值里只有这几项是“越小越冒险”
 const LOWER_RISKIER = ["min_tp_fee_multiple", "min_quote_volume_usdt", "min_depth_usdt", "min_listed_days", "min_range_24h_pct"];
-const valOf = (i, v = i.value) => (v === 0 && ZERO_AS[i.key] && i.sec === "screener" ? ZERO_AS[i.key] : null) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
+const valOf = (i, v = i.value) => (v === 0 && ZERO_AS[i.key] && (i.sec === "screener" || i.sec === "schedule") ? ZERO_AS[i.key] : null) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
 const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWER_RISKIER.includes(i.key) ? i.value < i.recommended : i.value > i.recommended || (i.value === 0 && i.key in ZERO_AS));
 
 // 段.键 → 设置项（每类币上限拼成 category 段）
@@ -1337,7 +1356,9 @@ function settingIndex(d) {
 // 把五个标签展开成 [标签, [组名, 提示, 项…]]；没列到的键收进对应标签的“其他”
 function advGroups(d, ix) {
   const used = new Set([...CORE, ...SHOWN_ELSEWHERE]);
-  const expand = (k) => (k.endsWith(".*") ? Object.keys(ix).filter((x) => x.startsWith(k.slice(0, -1))) : ix[k] ? [k] : []);
+  // 「段.*」只收别处没点名的键，点名的归到点名的那一组
+  const named = new Set(ADV.flatMap((t) => (t.groups || []).flatMap((g) => g.keys || [])).filter((k) => !k.endsWith(".*")));
+  const expand = (k) => (k.endsWith(".*") ? Object.keys(ix).filter((x) => x.startsWith(k.slice(0, -1)) && !named.has(x)) : ix[k] ? [k] : []);
   const out = {};
   for (const tab of ADV) {
     if (!tab.groups) continue;
@@ -1395,11 +1416,13 @@ function editOne(id, useRec) {
   const i = d && settingIndex(d)[id];
   if (!i || !d.writable || !i.editable) return;
   let input;
-  if (typeof i.value === "boolean") input = `<select id="dlg-v"><option value="true" ${i.value ? "selected" : ""}>开</option><option value="false" ${i.value ? "" : "selected"}>关</option></select>`;
+  if (i.multi) input = `<span id="dlg-v" class="multi">${i.choices.map((c) => `<label class="small"><input type="checkbox" value="${esc(c)}" ${(i.value || []).includes(c) ? "checked" : ""}> ${esc(choiceLabel(i.key, c))}</label>`).join("")}</span>`;
+  else if (typeof i.value === "boolean") input = `<select id="dlg-v"><option value="true" ${i.value ? "selected" : ""}>开</option><option value="false" ${i.value ? "" : "selected"}>关</option></select>`;
   else if (i.choices && i.choices.length) {
     const fit = (c) => (i.key === "atr_period_min" && ATR_FIT[c] ? ` · 适合最长持仓 ${ATR_FIT[c][0]}` : "");
     input = `<select id="dlg-v">${i.choices.map((c) => `<option value="${esc(JSON.stringify(c))}" ${c === i.value ? "selected" : ""}>${esc(choiceLabel(i.key, c) + fit(c))}</option>`).join("")}</select>`;
-  } else if (i.key === "time_limit_s") input = `<input id="dlg-v" type="number" step="0.25" min="0.25" inputmode="decimal" value="${esc(useRec ? 2 : i.value / 3600)}"> 小时`;
+  } else if (i.pattern) input = `<input id="dlg-v" type="text" value="${esc(i.pinned || !i.profiled ? i.value || "" : "")}" placeholder="${esc(i.key === "schedule_at" ? "如 08:00；留空 = " + (i.profiled ? `跟档位（${fmtVal(i.pinned ? i.profile_default : i.value, i)}）` : "不定点") : "")}">`;
+  else if (i.key === "time_limit_s") input = `<input id="dlg-v" type="number" step="0.25" min="0.25" inputmode="decimal" value="${esc(useRec ? 2 : i.value / 3600)}"> 小时`;
   else {
     // 档位给默认的键：没写死时留空（= 跟档位走），写死了才填文件里的值
     const shown = useRec ? i.recommended : i.value == null || (i.profiled && !i.pinned) ? "" : i.value;
@@ -1407,12 +1430,21 @@ function editOne(id, useRec) {
     input = `<input id="dlg-v" type="number" step="any" inputmode="decimal" value="${esc(shown)}" placeholder="${esc(ph)}">`;
   }
   const now = [`现在 ${valOf(i)}`, i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : "", i.pinned ? `${i.sec === "fast_loop" ? "最长持仓" : "档位"}默认 ${valOf(i, i.profile_default)}` : i.profiled ? `现在跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}走` : "", i.bounds ? `范围 ${esc(i.bounds)}` : ""].filter(Boolean).join("，");
-  ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p><label class="pw">改成${input}</label>${pwField(data.control)}
+  ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${input}</label>`}${pwField(data.control)}
     ${i.key === "atr_period_min" || i.key === "time_limit_s" ? '<div class="small warn" id="dlg-fit"></div>' : ""}
     <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。改完点「重启生效」才用上。</div>`, "保存", false, async () => {
     const el = $("#dlg-v");
     let v;
-    if (el.tagName === "SELECT") v = JSON.parse(el.value);
+    if (i.multi) {
+      v = [...el.querySelectorAll("input:checked")].map((x) => x.value);
+      if (JSON.stringify(v) === JSON.stringify(i.value) && !(i.profiled && !i.pinned)) throw new Error("没有改动");
+    } else if (el.tagName === "SELECT") v = JSON.parse(el.value);
+    else if (i.pattern) {
+      v = el.value.trim() || null;
+      if (v === null && !i.nullable && !i.profiled) throw new Error("不能空着");
+      if (v === null && i.profiled && !i.pinned) throw new Error("没有改动");
+      if (v !== null && !new RegExp(i.pattern).test(v)) throw new Error("格式不对，例如 08:00");
+    }
     else if (el.value.trim() === "") {
       if (!i.nullable && !i.profiled) throw new Error("不能空着");
       if (i.profiled && !i.pinned) throw new Error("没有改动");
@@ -1423,7 +1455,7 @@ function editOne(id, useRec) {
       if (i.key === "time_limit_s") v = Math.round(v * 3600);
     }
     // 档位键填了数就算写死（哪怕和档位一样），其余和原值一样算没改
-    if (v === i.value && !(i.profiled && !i.pinned && v !== null)) throw new Error("没有改动");
+    if (!i.multi && v === i.value && !(i.profiled && !i.pinned && v !== null)) throw new Error("没有改动");
     const pw = $("#dlg-pw");
     const res = await post("/api/settings", { section: i.sec, changes: { [i.key]: v }, password: pw ? pw.value : "" });
     onOk = null;

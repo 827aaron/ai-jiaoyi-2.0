@@ -709,3 +709,29 @@ def test_hold_follows_meeting_unless_custom(tmp_path: Path) -> None:
     actions.update_config(paths, data, "app", {"hold": "1h"}, PW, NOW)
     info = actions.profile_info(paths)
     assert (info.hold, info.hold_custom) == ("1h", True)
+
+
+def test_schedule_event_triggers_and_fixed_time(tmp_path: Path) -> None:
+    """临时会触发事件是多选、开会定点是 HH:MM 文字；都写成合法 TOML，留空回到档位默认。"""
+    paths, data = _setup(tmp_path)
+    shutil.copy(ROOT / "config" / "slow.example.toml", paths.slow)
+    specs = actions.editable_fields("schedule")
+    assert specs["event_triggers"].multi and specs["schedule_at"].pattern
+    actions.update_config(
+        paths,
+        data,
+        "schedule",
+        {"event_triggers": ["move_since_card", "key_level_break", "move_since_card"]},
+        PW,
+        NOW,
+    )
+    actions.update_config(paths, data, "schedule", {"schedule_at": " 09:30 "}, PW, NOW)
+    sched = tomllib.loads(paths.slow.read_text(encoding="utf-8"))["schedule"]
+    assert sched["event_triggers"] == ["key_level_break", "move_since_card"]  # 按选项顺序、去重
+    assert sched["schedule_at"] == "09:30"
+    with pytest.raises(ActionError, match="格式不对"):
+        actions.update_config(paths, data, "schedule", {"schedule_at": "25:00"}, PW, NOW)
+    with pytest.raises(ActionError, match="没有这些选项"):
+        actions.update_config(paths, data, "schedule", {"event_triggers": ["boom"]}, PW, NOW)
+    actions.update_config(paths, data, "schedule", {"schedule_at": None}, PW, NOW)
+    assert "schedule_at" not in tomllib.loads(paths.slow.read_text(encoding="utf-8"))["schedule"]

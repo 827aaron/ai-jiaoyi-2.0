@@ -238,7 +238,7 @@ tr.dimrow td { color: var(--dim); }
 .dlg.mid { width: min(720px, 100%); }
 .dlg .msg:empty { display: none; }
 .dlg .msg.down { color: var(--down); }
-label.pw { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+label.pw, div.pw { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
 .dlg input[type="password"], .form.edit input[type="number"], .form.edit select { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
 .dlg input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
 .form.edit input[type="number"] { width: 120px; text-align: right; font-variant-numeric: tabular-nums; }
@@ -250,6 +250,8 @@ label.pw { display: flex; flex-direction: column; gap: 4px; font-size: 12px; col
 .su-narrow { max-width: 760px; }
 .su-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
 .su-row label.pw { min-width: 200px; }
+.multi { display: flex; flex-direction: column; gap: 6px; color: var(--tx); }
+.multi label { display: flex; gap: 6px; align-items: center; }
 .su-keys .fr > b { display: flex; gap: 8px; align-items: center; justify-content: flex-end; max-width: 60%; }
 input[type="password"], .su-narrow input[type="number"], .su-narrow select { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
 .su-keys input[type="password"] { width: 260px; }

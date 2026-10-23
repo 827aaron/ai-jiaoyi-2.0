@@ -164,3 +164,8 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 | 作战卡 | 今天最新一条军师出卡记录 + 各标的最新会议结论 |
 | 信号与决策流 | 拍板、保镖、执行、管家 / 巡逻兵平仓；哨兵只计数 |
 | 告警 | 决策日志里的出错、对账补救、下架封禁（告警本身直接推 Telegram，不单独落盘） |
+- 高级 →「军师团」：「开会节奏」里加「每天固定几点开整轮会」（`schedule_at`，HH:MM 文字，留空回到档位默认）；
+  新分组「临时会」（`event_meeting_enabled` / `event_triggers` 多选勾选 / `event_symbol_gap_min` / `event_max_per_day` /
+  `move_since_card_atr` / `predictor_against_runs` / `entry_max_card_age_min`，0 显示「不查」）和「花费快到上限」
+  （`over_budget` 放慢一档 / 不放慢、`slowdown_interval_min`）。多选项写成 TOML 数组（按选项顺序、去重）；
+  契约里带 `pattern` 的可空文字字段才能在网页上改，写前按 pattern 校验。

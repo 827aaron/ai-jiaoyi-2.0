@@ -1044,6 +1044,10 @@ class SettingItem(BaseModel):
     recommended: float | None = None
     """硬上限的推荐值（按资金算，见 ``recommended_caps``）；只提示，填什么都收。"""
     recommended_why: str = ""
+    multi: bool = False
+    """多选：值是 ``choices`` 的子集（列表）。"""
+    pattern: str | None = None
+    """自由填写的字样要符合的格式（例如开会定点 ``08:00``）。"""
 
 
 class SettingsPage(BaseModel):
@@ -1128,12 +1132,16 @@ def _items(
                 choices=list(spec.choices) if spec else [],
                 nullable=bool(spec and spec.nullable),
                 profiled=bool(spec and spec.profiled),
+                multi=bool(spec and spec.multi),
+                pattern=spec.pattern if spec else None,
             )
         )
     return out
 
 
 def _plain(v: object) -> object:
+    if isinstance(v, tuple):
+        return [_plain(x) for x in v]
     return v.value if isinstance(v, StrEnum) else v
 
 
