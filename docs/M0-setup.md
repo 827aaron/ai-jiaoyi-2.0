@@ -45,7 +45,7 @@ curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | he
 再打一层，把这两个常量改成 `https://demo-fapi.binance.com/fapi/` 和 `wss://demo-fstream.binance.com/`，重新打成同名本地镜像，上游 compose 不用改。
 补丁找不到原文就构建失败（上游改了要重审）。币安文档只给了这两个 Demo 域名，没有单独的用户数据流 / ws-fapi 域名，
 所以**第一次冒烟要确认 hummingbot 的持仓/订单推送能收到**，收不到就把现象发出来。
-回退旧测试网：`config/app.toml` 里 `sim_environment = "legacy_testnet"`，并用 `HB_SIM=legacy_testnet make hb-up`（不打补丁）。
+回退旧测试网：`config/app.toml` 里 `sim_environment = "legacy_testnet"`，并用 `HB_SIM=legacy_testnet make hb-up`（会重新拉未打补丁的上游镜像覆盖本地补丁镜像）。两边必须一致，否则保命止损和执行器分在两个环境。冒烟时请确认 Demo 上 algo 条件单能挂、能查、能撤。
 
 把币安 Demo key 交给 hummingbot-api（它加密保存）：浏览器开 <http://127.0.0.1:8000/docs>，登录后用
 `POST /accounts/add-credential/master_account/binance_perpetual_testnet`，在页面里直接填 key / secret。

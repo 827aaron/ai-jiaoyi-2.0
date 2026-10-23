@@ -86,7 +86,11 @@ hb-patch:
 	docker build --build-arg BASE=hummingbot/hummingbot-api:latest -t hummingbot/hummingbot-api:latest docker/hb-demo
 
 hb-up:
-	@if [ "$(HB_SIM)" = "demo" ]; then $(MAKE) hb-patch; fi
+	@# 两个分支都要重置镜像：legacy 必须拉回未打补丁的上游镜像，否则上次打的 Demo 补丁还在，
+	@# hummingbot 连 Demo 而 ccxt 连旧测试网，保命止损和执行器就分在两个环境
+	@if [ "$(HB_SIM)" = "demo" ]; then $(MAKE) hb-patch; \
+	elif [ "$(HB_SIM)" = "legacy_testnet" ]; then docker pull hummingbot/hummingbot-api:latest; \
+	else echo "HB_SIM 只能是 demo 或 legacy_testnet"; exit 1; fi
 	$(MAKE) -C vendor/hummingbot-api emqx-auth
 	docker compose up -d
 
