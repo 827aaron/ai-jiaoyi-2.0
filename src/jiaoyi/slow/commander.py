@@ -312,9 +312,10 @@ class BattleCardCommander:
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
         c = self._card
-        if c is None or not c.is_valid(now):
+        if c is None:
             return None
-        c = self._pool_view(c, now)
+        # 整张卡到期了：持仓币的指令还留着，只是不开新仓
+        c = self._pool_view(c, now) if c.is_valid(now) else self._held_view(c, now)
         if c is None:
             return None
         c = self._mask_stale(c, now)
@@ -359,6 +360,16 @@ class BattleCardCommander:
         if kept == card.symbols:
             return card
         return card.model_copy(update={"symbols": kept})
+
+    def _held_view(self, card: BattleCard, now: datetime) -> BattleCard | None:
+        """整张卡到期后只剩持仓币：指令不按时间过期，等该币有新结论才换；信号清空，不开新仓。
+        有效期只往后顶一分钟，``refresh_reason`` 照样会判「到点了」去开新一轮。"""
+        kept = [self._watch_only(s) for s in card.symbols if s.symbol in self._held]
+        if not kept or now < card.created_at:
+            return None
+        return card.model_copy(
+            update={"symbols": kept, "expires_at": max(card.expires_at, now + timedelta(minutes=1))}
+        )
 
     @staticmethod
     def _stamp(cs: CardSymbol, issued: datetime, expires: datetime) -> CardSymbol:
