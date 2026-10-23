@@ -184,3 +184,51 @@ def test_run_asks_jev_and_writes_report(tmp_path: Path, monkeypatch: pytest.Monk
     assert len((run_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()) == 4
     text = "\n".join(replay.render(res))
     assert "按现在门槛" in text and "盘口" in text
+
+
+class _Flaky(_Model):
+    """第 1 个超时、第 2 个出错，其余正常（延迟 2000ms）。"""
+
+    async def ask(self, request: JevRequest) -> JevResponse:
+        self.seen.append(request)
+        n = len(self.seen)
+        if n == 1:
+            return b.jev_failed("Jev 超时（>30000ms）", request_id=request.request_id)
+        if n == 2:
+            return b.jev_failed("HTTP 500", request_id=request.request_id)
+        return b.jev_ok(request_id=request.request_id).model_copy(update={"latency_ms": 2000.0})
+
+
+def test_run_counts_timeouts_and_latency(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(replay, "_scan_all", lambda *a: [_found(i) for i in range(5)])
+
+    async def fetch(sym: str, a: datetime, b2: datetime) -> list[Kline]:
+        return [
+            _bar(a + timedelta(minutes=m), hi=100 + 0.2 * m, lo=100.0)
+            for m in range(int((b2 - a).total_seconds() // 60))
+        ]
+
+    res: dict[str, Any] = asyncio.run(
+        replay.run(
+            data_dir=tmp_path,
+            model=_Flaky(),  # type: ignore[arg-type]
+            fast=FAST,
+            symbols=[("BTCUSDT", Category.MAJOR)],
+            days=[DAY],
+            n=5,
+            fee_bps=5.0,
+            dedup_s=30,
+            concurrency=1,
+            fetch=fetch,
+            now=DAY0 + timedelta(days=2),
+            echo=lambda _: None,
+            live_timeout_ms=1500,
+        )
+    )
+    assert res["jev_calls"] == {"ok": 3, "timeout": 1, "error": 1}
+    assert res["failed"] == 0  # 超时 / 出错不算「没算出结果」，也不进统计
+    assert res["current_thresholds"]["would_pass"] == 3
+    lat = res["latency_ms"]
+    assert lat["p50"] == 2000.0 and lat["over_live_budget"] == 1.0
+    text = "\n".join(replay.render(res))
+    assert "Jev 成功 3 / 超时 1 / 出错 1" in text and "会超时 100%" in text

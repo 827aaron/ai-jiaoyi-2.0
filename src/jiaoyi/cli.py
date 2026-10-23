@@ -302,10 +302,11 @@ def _jev_replay(args: argparse.Namespace) -> int:
         print(e, file=sys.stderr)
         return 2
     fast = app_cfg.fast_loop
+    # 回放是离线的：不用实盘 1.5 秒预算，也别连错几次就暂停（超时 / 出错的记下来继续）
     model = jev_from_secrets(
         ChainedSecretStore(),
-        fast,
-        timeout_ms=app_cfg.jev_timeout_ms,
+        fast.model_copy(update={"jev_max_consecutive_errors": 10_000}),
+        timeout_ms=int(args.timeout * 1000),
         day_reset_tz=risk.day_reset_tz,
     )
     if model is None:
@@ -334,6 +335,7 @@ def _jev_replay(args: argparse.Namespace) -> int:
             fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
             now=now,
             cache=Path(args.cache),
+            live_timeout_ms=app_cfg.jev_timeout_ms,
         )
     )
     for line in replay.render(result):
@@ -521,6 +523,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--symbols", default="", help="逗号分隔；默认总盘会最常选的币")
     p.add_argument("--top", type=int, default=8, help="默认选币时取前几个")
     p.add_argument("--concurrency", type=int, default=8, help="同时问 Jev 几个")
+    p.add_argument(
+        "--timeout", type=float, default=30.0, help="每次问 Jev 最多等几秒（离线回放，默认 30）"
+    )
     p.add_argument("--cache", default="data/history", help="历史数据下载缓存")
     p.set_defaults(func=_jev_replay)
 
