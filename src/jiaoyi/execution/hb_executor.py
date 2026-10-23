@@ -99,8 +99,12 @@ class HbExecutorAdapter:
         recorder: RoleRecorder | None = None,
         clock: Clock = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        open_fee_bps: float = 0.0,
     ) -> None:
+        """``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
+        触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 保镖算的止损 / 止盈距离。"""
         self._api = api
+        self._open_fee = open_fee_bps / 1e4
         self._lifeboat = lifeboat
         self._registry = registry
         self._alerter = alerter
@@ -120,9 +124,13 @@ class HbExecutorAdapter:
     # ------------------------------------------------------------------ 开仓
 
     def _executor_config(self, intent: OrderIntent) -> dict[str, Any]:
+        # hummingbot 的止损止盈看 net_pnl_pct（已扣开仓手续费）：不补的话价格止损比保镖算的近一个
+        # 手续费（约 5bp），市价止盈远一个手续费。止损加上、止盈减去，触发价就和 OrderIntent 一致
+        stop = intent.stop_loss_pct / 100.0 + self._open_fee
+        take = max(intent.take_profit_pct / 100.0 - self._open_fee, 0.0001)
         barrier: dict[str, Any] = {
-            "stop_loss": str(intent.stop_loss_pct / 100.0),
-            "take_profit": str(intent.take_profit_pct / 100.0),
+            "stop_loss": str(round(stop, 8)),
+            "take_profit": str(round(take, 8)),
             "time_limit": intent.time_limit_s,
             "open_order_type": _ORDER_LIMIT if intent.order_type == "limit" else _ORDER_MARKET,
         }

@@ -1,0 +1,72 @@
+# 上游 hummingbot master position_executor.py 节选（2026-10，close_position_action 附近），补丁测试用
+from __future__ import annotations
+
+from enum import Enum
+
+
+class PositionAction(Enum):
+    OPEN = "OPEN"
+    CLOSE = "CLOSE"
+
+
+class PositionMode(Enum):
+    ONEWAY = "ONEWAY"
+    HEDGE = "HEDGE"
+
+
+class PositionExecutor:
+    def __init__(self, connector):
+        self.is_perpetual = True
+        self.connectors = {"c": connector}
+        self.config = type("C", (), {"connector_name": "c"})()
+
+    @property
+    def close_order_side(self):
+        return TradeType.BUY if self.config.side == TradeType.SELL else TradeType.SELL
+
+    @property
+    def close_position_action(self) -> PositionAction:
+        """
+        Position action used for the close orders (take profit / stop loss / time limit).
+
+        In ONEWAY position mode the account holds a single netted position, so tagging the close as
+        ``PositionAction.CLOSE`` — which Binance and Hyperliquid translate into a reduce-only order — is both
+        unnecessary and harmful: opposite-side level executors net against the shared position and their
+        genuine reducing / round-trip orders get rejected ("reduce-only would increase position" / "ReduceOnly
+        Order is rejected.", issues #8269 and #8283). OKX and Gate.io already treat ONEWAY as a plain netting
+        account; we mirror that here by sending the close as a normal order (``PositionAction.OPEN`` carries no
+        reduce-only flag) so buys and sells net freely. HEDGE mode keeps ``PositionAction.CLOSE`` because long
+        and short positions are tracked separately and the close must target the right side.
+        """
+        if self.is_perpetual:
+            connector = self.connectors[self.config.connector_name]
+            if connector.position_mode == PositionMode.ONEWAY:
+                return PositionAction.OPEN
+        return PositionAction.CLOSE
+
+    @property
+    def trade_pnl_pct(self) -> Decimal:
+        """
+        Calculate the trade pnl (Pure pnl without fees)
+
+        :return: The trade pnl percentage.
+        """
+        if self.open_filled_amount != Decimal("0") and self.close_type not in [CloseType.FAILED, CloseType.POSITION_HOLD]:
+            if self.config.side == TradeType.BUY:
+                return (self.close_price - self.entry_price) / self.entry_price
+            else:
+                return (self.entry_price - self.close_price) / self.entry_price
+        else:
+            return Decimal("0")
+
+    @property
+    def trade_pnl_quote(self) -> Decimal:
+        """
+        Calculate the trade pnl in quote asset
+
+        :return: The trade pnl in quote asset.
+        """
+        return self.trade_pnl_pct * self.open_filled_amount * self.entry_price
+
+    def get_net_pnl_quote(self) -> Decimal:
+        return 0

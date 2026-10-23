@@ -500,9 +500,17 @@ class Runner:
         except Exception:
             log.exception("读持仓失败，沿用上一次的列表")
             return
+        before = {p.position_id for p in self.positions}
         self.positions = [
             p for p in all_pos if p.status in (PositionStatus.OPEN, PositionStatus.OPENING)
         ]
+        if before - {p.position_id for p in self.positions}:
+            self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
+
+    def _reconcile_soon(self) -> None:
+        """平仓后立刻对一次账：万一平仓单在保命止损之后又成交开出反手仓，不等下一个 30 秒。"""
+        if not self._reconciling and not self._leaving:
+            self._spawn(self.reconcile_tick())
 
     async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
         """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""
@@ -526,6 +534,7 @@ class Runner:
         finally:
             self._closing.discard(pos.position_id)
         self.positions = [p for p in self.positions if p.position_id != pos.position_id]
+        self._reconcile_soon()
         if isinstance(self.m.keeper, _Forgets):
             self.m.keeper.forget(pos.position_id)
         if isinstance(self.m.patrol, _HasUrgent):

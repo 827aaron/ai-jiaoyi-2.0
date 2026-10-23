@@ -8,6 +8,8 @@
   币安有仓位但不是我们开的 / 没有执行器管 → 只告警，不动（可能是 Aaron 手动开的）
   仓位已平但保命止损还挂着 → 撤掉
   数量对不上、执行器报错或消失 → 告警，人看
+  方向对不上（币安和账本反向）/ 刚结束的仓被反向开了一笔等量的（平仓单在保命止损之后又成交，
+  「抢跑反手仓」）→ 不管开关，当轮直连币安只减仓平掉，critical 告警；对不上方向时不补保命止损
   账本 OPEN 但币安连续 2 轮没有仓位 → 判定有人在币安手动平了：停执行器、按手动平仓结算、撤保命止损
 重启后第一件事就是调一次 ``reconcile``。
 """
@@ -18,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from jiaoyi.contracts import Alert, Outcome, ReconcileReport, Role, Side
@@ -52,7 +54,13 @@ _GONE_ROUNDS_BEFORE_FLATTEN = 2
 _FLAT_ROUNDS_BEFORE_EXTERNAL_CLOSE = 2
 _FLAT_ROUNDS_WITHOUT_FILL = 6
 """连续空仓但查不到任何平仓成交（没有第二个证据）时，要更多轮才结算，再用标记价估算。"""
-_CRITICAL = {ReconcileIssueKind.LIFEBOAT_MISSING, ReconcileIssueKind.ORPHAN_POSITION}
+REVERSE_WINDOW = timedelta(minutes=10)
+"""执行器结束后这么久之内，币安上冒出同一个币、方向相反、数量相同的仓，就认定是我们的反手仓。"""
+_CRITICAL = {
+    ReconcileIssueKind.LIFEBOAT_MISSING,
+    ReconcileIssueKind.ORPHAN_POSITION,
+    ReconcileIssueKind.SIDE_MISMATCH,
+}
 _TITLES = {
     ReconcileIssueKind.LIFEBOAT_MISSING: "保命止损缺失",
     ReconcileIssueKind.ORPHAN_POSITION: "发现无人管理的仓位或执行器",
@@ -60,7 +68,12 @@ _TITLES = {
     ReconcileIssueKind.QTY_MISMATCH: "持仓数量对不上",
     ReconcileIssueKind.STALE_LIFEBOAT: "仓位已平但保命止损还在",
     ReconcileIssueKind.EXTERNAL_CLOSE: "检测到手动平仓",
+    ReconcileIssueKind.SIDE_MISMATCH: "币安仓位方向不对（反手仓）",
 }
+
+
+def _signed(side: Side, qty: float) -> float:
+    return qty if side is Side.LONG else -qty
 
 
 class ReconcileError(Exception):
@@ -126,9 +139,11 @@ class ThreeWayReconciler:
 
         live = self._registry.live()
         stops_by_cid = {s.client_order_id: s for s in stops}
-        exchange_qty: dict[str, float] = {}
+        # 带方向的数量（多 +、空 −）；单向持仓每个币只有一个仓位。exchange_qty 是绝对值
+        signed: dict[str, float] = {}
         for p in exchange_positions:
-            exchange_qty[p.symbol] = exchange_qty.get(p.symbol, 0.0) + p.quantity
+            signed[p.symbol] = signed.get(p.symbol, 0.0) + _signed(p.side, p.quantity)
+        exchange_qty = {sym: abs(q) for sym, q in signed.items() if q != 0.0}
 
         # 0. 账本 OPEN 但币安上已经没仓位：有人在币安手动平了。第 1 轮只记数（避免读取抖动），
         #    连续 2 轮才结算；这期间不补保命止损、不报数量对不上、不当成执行器丢失去平仓。
@@ -149,12 +164,19 @@ class ThreeWayReconciler:
                 if found is not None:
                     issues.append(found)
 
-        # 1. 我们以为开着的仓：保命止损在不在、数量对不对
+        # 1. 我们以为开着的仓：方向对不对、保命止损在不在、数量对不对
         tracked_qty: dict[str, float] = {}
         flattened: set[str] = set()
+        reversed_: set[str] = set()
         for t in live:
             rec = t.record
             if rec.status is PositionStatus.OPENING or rec.position_id in external:
+                continue
+            actual = signed.get(rec.symbol, 0.0)
+            if actual != 0.0 and (actual > 0) != (rec.side is Side.LONG):
+                # 方向反了：补保命止损（按账本方向下只减仓单）会失败，先处理反手仓
+                reversed_.add(rec.symbol)
+                issues.append(await self._side_mismatch(rec, exchange_positions))
                 continue
             tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + rec.quantity
             if rec.status is not PositionStatus.OPEN:
@@ -184,11 +206,13 @@ class ThreeWayReconciler:
                     )
                 )
 
-        # 2. 币安上有仓位但账本里没有：不是我们开的，只告警
+        # 2. 币安上有仓位但账本里没有：刚结束的仓被反向开了等量的一笔 → 我们的反手仓，当轮平；
+        #    其它不是我们开的，只告警（开关打开才平）
         live_symbols = {t.record.symbol for t in live}
         for symbol in exchange_qty:
             if symbol not in live_symbols:
-                issues.append(await self._unknown_position(symbol, exchange_positions))
+                rev = await self._recent_reverse(symbol, exchange_positions, now)
+                issues.append(rev or await self._unknown_position(symbol, exchange_positions))
 
         # 3. 残留的保命止损
         live_cids = {client_order_id(t.record.position_id) for t in live}
@@ -196,6 +220,7 @@ class ThreeWayReconciler:
             if (
                 not stop.client_order_id.startswith(STOP_PREFIX)
                 or stop.client_order_id in live_cids
+                or stop.symbol in reversed_
             ):
                 continue
             issues.append(await self._clear_stale(stop, exchange_qty))
@@ -209,7 +234,7 @@ class ThreeWayReconciler:
             if live_executor.get(pid) is None or live_executor[pid] in running_now:
                 self._gone_rounds.pop(pid, None)
         for t in live:
-            if t.record.position_id in external:
+            if t.record.position_id in external or t.record.symbol in reversed_:
                 continue
             if t.record.executor_id and t.record.executor_id not in running_ids:
                 rec = t.record
@@ -310,6 +335,85 @@ class ThreeWayReconciler:
             self._rec.heartbeat(now, health, headline)
         for beat in self._heartbeats:
             beat(now, Health.OK, "")
+
+    def _same_qty(self, a: float, b: float) -> bool:
+        return abs(a - b) <= max(a, b) * self._tol
+
+    async def _close_on_exchange(
+        self, symbol: str, mine: list[ExchangePosition]
+    ) -> ExchangeError | None:
+        """直连币安只减仓市价平掉这个币在币安上的仓位（按币安上的方向），返回失败原因。"""
+        try:
+            for p in mine:
+                side: Literal["buy", "sell"] = "sell" if p.side is Side.LONG else "buy"
+                await self._exchange.close_position_market(symbol, side, p.quantity)
+        except ExchangeError as e:
+            return e
+        return None
+
+    async def _side_mismatch(
+        self, rec: PositionRecord, exchange_positions: list[ExchangePosition]
+    ) -> ReconcileIssue:
+        """账本开着，但币安上同一个币的仓位方向相反。数量和账本一样 → 认定是平仓单抢跑开出的反手仓
+        （原仓已被保命止损平掉），当轮平掉；数量不一样只告警，人看。账本那笔下一轮按空仓结算。"""
+        mine = [p for p in exchange_positions if p.symbol == rec.symbol]
+        qty = sum(p.quantity for p in mine)
+        side_cn = "空" if rec.side is Side.LONG else "多"
+        detail = (
+            f"账本是{'多' if rec.side is Side.LONG else '空'} {rec.quantity}，币安是{side_cn} {qty}"
+        )
+
+        def issue(text: str, fixed: bool) -> ReconcileIssue:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.SIDE_MISMATCH,
+                symbol=rec.symbol,
+                position_id=rec.position_id,
+                detail=text,
+                fixed=fixed,
+            )
+
+        if not self._same_qty(qty, rec.quantity):
+            return issue(f"{detail}，数量也对不上，未自动处理", False)
+        err = await self._close_on_exchange(rec.symbol, mine)
+        if err is not None:
+            return issue(f"{detail}（反手仓），直连币安平仓失败：{err!r}", False)
+        return issue(f"{detail}（反手仓），已直连币安只减仓平掉", True)
+
+    async def _recent_reverse(
+        self, symbol: str, exchange_positions: list[ExchangePosition], now: datetime
+    ) -> ReconcileIssue | None:
+        """币安上这个币的仓位，和最近 ``REVERSE_WINDOW`` 内刚结束的我们的仓方向相反、数量相同 →
+        是平仓单在保命止损之后又成交开出来的反手仓：不管 close_unknown_positions 开关，当轮平掉。"""
+        mine = [p for p in exchange_positions if p.symbol == symbol]
+        if len(mine) != 1:
+            return None
+        pos = mine[0]
+        recent = [
+            t.record
+            for t in self._registry.data.positions.values()
+            if t.record.symbol == symbol
+            and t.record.status is PositionStatus.CLOSED
+            and t.record.closed_at is not None
+            and timedelta(0) <= now - t.record.closed_at <= REVERSE_WINDOW
+            and t.record.side is not pos.side
+            and self._same_qty(pos.quantity, t.record.quantity)
+        ]
+        if not recent:
+            return None
+        rec = max(recent, key=lambda r: r.closed_at or now)
+        detail = (
+            f"{rec.position_id} 刚结束（{rec.close_reason.value if rec.close_reason else '?'}），"
+            f"币安上却出现反向等量仓 {pos.quantity}（反手仓）"
+        )
+        err = await self._close_on_exchange(symbol, mine)
+        fixed = err is None
+        return ReconcileIssue(
+            kind=ReconcileIssueKind.SIDE_MISMATCH,
+            symbol=symbol,
+            position_id=rec.position_id,
+            detail=f"{detail}，{'已直连币安只减仓平掉' if fixed else f'直连平仓失败：{err!r}'}",
+            fixed=fixed,
+        )
 
     async def _unknown_position(
         self, symbol: str, exchange_positions: list[ExchangePosition]
@@ -575,8 +679,8 @@ class ThreeWayReconciler:
         level = (
             AlertLevel.CRITICAL if issue.kind in _CRITICAL and not issue.fixed else AlertLevel.WARN
         )
-        if issue.kind is ReconcileIssueKind.LIFEBOAT_MISSING:
-            level = AlertLevel.CRITICAL  # 补上了也要让人知道为什么会丢
+        if issue.kind in (ReconcileIssueKind.LIFEBOAT_MISSING, ReconcileIssueKind.SIDE_MISMATCH):
+            level = AlertLevel.CRITICAL  # 处理好了也要让人知道为什么会发生
         if issue.kind is ReconcileIssueKind.EXTERNAL_CLOSE and issue.fixed:
             level = AlertLevel.INFO
         title = _TITLES[issue.kind] + ("，已处理" if issue.fixed else "")
