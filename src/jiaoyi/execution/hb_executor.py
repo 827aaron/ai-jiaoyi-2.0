@@ -276,6 +276,35 @@ class HbExecutorAdapter:
                 closed_at=None,
             )
 
+    async def _cancel_lifeboat(self, rec: PositionRecord) -> None:
+        """仓已平后撤掉它的保命止损，失败重试几次。
+
+        残留的只减仓止损在同币随后开新仓时会把新仓平掉，所以直连平仓、执行器结束两条路径都要撤。
+        撤不掉就告警，对账员下一轮会清扫残留。
+        """
+        last: Exception | None = None
+        for attempt in range(self._lifeboat_attempts):
+            try:
+                await self._lifeboat.cancel(rec)
+                return
+            except Exception as e:
+                last = e
+                log.warning("撤保命止损第 %d 次失败 %s：%r", attempt + 1, rec.position_id, e)
+                await self._sleep(self._poll_s)
+        await self._alert(
+            AlertLevel.WARN,
+            "平仓后撤保命止损失败",
+            f"{rec.symbol} {rec.position_id}：{last!r}",
+            rec.symbol,
+            f"lifeboat_cancel_failed:{rec.position_id}",
+        )
+
+    async def release_lifeboat(self, position_id: str) -> None:
+        """对账员直连平仓成功、记为已平之后调：撤掉该仓的保命止损。"""
+        tracked = self._registry.get(position_id)
+        if tracked is not None:
+            await self._cancel_lifeboat(tracked.record)
+
     def mark_closed_directly(self, position_id: str, reason: CloseReason) -> None:
         """对账员绕过 hummingbot 直连币安平仓成功后，把账本记为已平，免得每轮重复告警。"""
         tracked = self._registry.get(position_id)
@@ -354,6 +383,7 @@ class HbExecutorAdapter:
             log.error("直连平仓也失败 %s：%r", rec.position_id, direct)
             return False
         self.mark_closed_directly(rec.position_id, reason)
+        await self._cancel_lifeboat(rec)
         await self._alert(
             AlertLevel.WARN,
             "hummingbot 停不掉执行器，已直连币安平仓",
@@ -487,17 +517,7 @@ class HbExecutorAdapter:
                 rec.symbol,
                 f"never_filled:{rec.position_id}",
             )
-        try:
-            await self._lifeboat.cancel(tracked.record)
-        except Exception as e:
-            # 撤不掉不致命（仓位已平，只减仓单不会开出新仓），对账员会清扫残留
-            await self._alert(
-                AlertLevel.WARN,
-                "平仓后撤保命止损失败",
-                f"{rec.symbol} {rec.position_id}：{e!r}",
-                rec.symbol,
-                f"lifeboat_cancel_failed:{rec.position_id}",
-            )
+        await self._cancel_lifeboat(tracked.record)
         return tracked
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:

@@ -373,6 +373,7 @@ class ThreeWayReconciler:
                 )
             self._lb_failures.pop(position_id, None)
             self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER)
+            await self._adapter.release_lifeboat(position_id)
             return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
         self._lb_failures.pop(position_id, None)
         return issue(f"{why}，保命止损补不上，已平仓", True), True

@@ -459,6 +459,7 @@ async def test_flatten_falls_back_to_direct_reduce_only_order(rig: Rig) -> None:
     # 执行层自己的 close() 在 hummingbot 停不掉时就会直连兜底，对账员看到的是已平仓
     assert report.issues[0].fixed
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rig.ex.stops == {}
     # 账本标记已平：不再为这笔重复补挂 / 平仓；只剩 hummingbot 里没停掉的执行器这一条告警
     kinds = [i.kind for i in (await rig.rec.reconcile(rig.t)).issues]
     assert kinds == [ReconcileIssueKind.ORPHAN_POSITION]
@@ -628,6 +629,17 @@ async def test_close_falls_back_to_direct_reduce_only_when_stop_executor_fails(r
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
     assert any("直连" in a.title for a in rig.alerts.sent)
+    assert rig.ex.stops == {}  # 保命止损同时撤掉，不会误平之后同币的新仓
+
+
+async def test_direct_close_retries_lifeboat_cancel_then_alerts(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    rig.ex.fail_cancel = True
+    await rig.adapter.close(pid, CloseReason.KEEPER)
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+    assert len(rig.ex.stops) == 1  # 撤不掉：留给对账员清扫
+    assert any("撤保命止损失败" in a.title for a in rig.alerts.sent)
 
 
 async def test_vanished_executor_with_exchange_position_is_flattened_directly(rig: Rig) -> None:
@@ -639,6 +651,7 @@ async def test_vanished_executor_with_exchange_position_is_flattened_directly(ri
     assert issue.fixed
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+    assert rig.ex.stops == {}  # 对账员直连平仓后也撤了保命止损
 
 
 async def test_account_reports_open_risk_and_day_realized_pnl(rig: Rig) -> None:
