@@ -252,9 +252,21 @@ def set_analyst_klines(spec: Sequence[str] | None, meeting_min: int = 120) -> No
     _ANALYST_KLINES = tuple(parsed)
 
 
+def as_of(date_str: str, now: datetime | None = None) -> datetime:
+    """TradingAgents 只传日期：今天（或更晚）取现在，过去的日子取当天 0 点。
+
+    不这样的话「今天」被当成 0 点，分析师看到的最新一根 K 线最多是 24 小时前的价格。
+    """
+    now = now or datetime.now(UTC)
+    d = datetime.fromisoformat(date_str)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=UTC)
+    return now if d.date() >= now.date() else d
+
+
 def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     """登记为 TradingAgents 的 ``get_stock_data``：每周期一段 CSV，从细到粗，已收盘的。"""
-    end = datetime.fromisoformat(end_date).replace(tzinfo=UTC)
+    end = as_of(end_date)
     end_ms = int(end.timestamp() * 1000)
     parts: list[str] = []
     for interval, n in _ANALYST_KLINES or tuple(
@@ -613,8 +625,9 @@ def get_binance_indicators(
     symbol: str, indicator: str, as_of_date: str, look_back_days: int
 ) -> str:
     """登记为 TradingAgents 的 ``get_indicators``：对小时线算 TradingAgents 常用的几个指标。"""
-    end = datetime.fromisoformat(as_of_date).replace(tzinfo=UTC)
-    rows = _klines(symbol, "1h", 500, end)
+    end = as_of(as_of_date)
+    end_ms = int(end.timestamp() * 1000)
+    rows = [k for k in _klines(symbol, "1h", 500, end) if k[6] <= end_ms]  # 只用已收盘的
     o, h, lo, c, v = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4, 5))
     try:
         vals = _indicator(indicator, o, h, lo, c, v)
@@ -717,6 +730,9 @@ class _PickDraft(BaseModel):
 
     regime: str = Field(min_length=1, description="对大盘的一句话判断，中文")
     picks: list[_P]
+    rejections: list[_P] = Field(
+        default_factory=list, description="没挑中的候选币，每个一句话理由（为什么今天不值得开会）"
+    )
 
 
 def draft_to_card_symbol(
@@ -1401,12 +1417,18 @@ class TradingAgentsEngine:
         draft: _PickDraft = llm.invoke(
             f"你是加密永续合约的总盘军师。现在是 {self._today():%Y-%m-%d %H:%M} UTC。\n{prev}"
             f"下面是代码筛出的候选池。请先用一句中文判断大盘，再挑最多 {max_n} 个今天最值得"
-            f"开会研究的标的（只能从表里挑），每个给一句理由。{market}\n{table}",
+            f"开会研究的标的（只能从表里挑），每个给一句理由；"
+            f"没挑中的候选币也各给一句不上会的理由（rejections）。{market}\n{table}",
             config={"callbacks": [handler]},
         )
         valid = {e.symbol for e in candidates}
         picks = [Pick(p.symbol, p.reason) for p in draft.picks if p.symbol in valid][:max_n]
-        return PickResult(draft.regime, picks, meter.cost)
+        rejections = [
+            Pick(p.symbol, p.reason)
+            for p in draft.rejections
+            if p.symbol in valid and p.symbol not in {x.symbol for x in picks}
+        ]
+        return PickResult(draft.regime, picks, meter.cost, rejections)
 
     def _liq_note(self, symbol: str) -> str:
         total = _LIQ_TOTALS.get(symbol, 0.0)

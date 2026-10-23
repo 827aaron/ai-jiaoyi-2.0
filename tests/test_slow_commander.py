@@ -797,6 +797,26 @@ async def test_market_meeting_is_recorded_in_meeting_live(tmp_path: Path, now: d
     assert doc["cost_usd"] == pytest.approx(0.01)
 
 
+async def test_market_meeting_records_rejection_reasons(tmp_path: Path, now: datetime) -> None:
+    live = tmp_path / "live"
+
+    class Eng(FakeEngine):
+        async def pick(
+            self, candidates: Sequence[SymbolPoolEntry], max_n: int, previous: BattleCard | None
+        ) -> PickResult:
+            return PickResult(
+                "区间震荡", [Pick("BBUSDT", "r")], 0.01, [Pick("CCUSDT", "量能萎缩，不值得开会")]
+            )
+
+    c, _, _ = make(tmp_path, Eng(["BBUSDT"]), now, live_dir=live)
+    await c.refresh(pool(now, entry("BBUSDT"), entry("CCUSDT"), entry("DDUSDT")), "x")
+    doc = json.loads((live / "_MARKET.json").read_text(encoding="utf-8"))
+    assert doc["rejections"] == [
+        {"symbol": "CCUSDT", "reason": "量能萎缩，不值得开会"},
+        {"symbol": "DDUSDT", "reason": "军师没挑，也没给理由"},
+    ]
+
+
 async def test_symbol_record_carries_usage(tmp_path: Path, now: datetime) -> None:
     from jiaoyi.slow.commander import Analysis
 

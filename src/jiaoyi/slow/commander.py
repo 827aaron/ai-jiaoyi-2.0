@@ -20,7 +20,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -77,6 +77,7 @@ class PickResult:
     regime: str
     picks: list[Pick]
     cost_usd: float = 0.0
+    rejections: list[Pick] = field(default_factory=list)  # 没挑中的币：一句理由
 
 
 @dataclass(frozen=True)
@@ -807,7 +808,29 @@ class BattleCardCommander:
             ago = f"{(now - last).total_seconds() / 60:.0f} 分钟前" if last else "不久前"
             why.append(f"{sym}：{ago}开过会、没有大消息 / 关键位突破，沿用上一张卡的指令")
         live.step("filter", "filter", "\n".join(why))
+        live.set_rejections(self._rejections(picked, chosen, candidates, by_pick))
         live.finish("market", picked.regime, "", picked.cost_usd)
+
+    @staticmethod
+    def _rejections(
+        picked: PickResult,
+        chosen: list[SymbolPoolEntry],
+        candidates: list[SymbolPoolEntry],
+        by_pick: Mapping[str, str],
+    ) -> list[dict[str, str]]:
+        """没上会的候选币各一句理由：军师给了用军师的，没给就写明原因（不留空白、不猜）。"""
+        keep = {e.symbol for e in chosen}
+        said = {r.symbol: r.reason for r in picked.rejections}
+        rows: list[dict[str, str]] = []
+        for e in candidates:
+            if e.symbol in keep:
+                continue
+            if e.symbol in by_pick:
+                reason = "军师挑了，但超出名额或中间档当天名额已满"
+            else:
+                reason = said.get(e.symbol) or "军师没挑，也没给理由"
+            rows.append({"symbol": e.symbol, "reason": reason})
+        return rows
 
     def _next_meeting(self, now: datetime) -> datetime | None:
         """下一次会议最早什么时候开（按现在的状态估：卡到期前 ``expiry_lead``、退避、最小间隔）。"""
