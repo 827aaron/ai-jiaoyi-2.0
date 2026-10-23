@@ -504,6 +504,22 @@ def test_pool_page(tmp_path: Path) -> None:
                if a.in_pool and b.in_pool)  # fmt: skip
 
 
+def test_pool_page_shows_your_overrides(tmp_path: Path) -> None:
+    """选币页的标签和按钮按 pool_overrides.json（立刻生效），不等候选池文件更新。"""
+    from jiaoyi.core.pool_overrides import PoolOverrides, write_pool_overrides
+    from jiaoyi.panel.pages import build_pool
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    page = build_pool(files)
+    assert (page.pinned, page.blacklist, page.manual, page.overrides_error) == ([], [], [], False)
+    ov = PoolOverrides().apply("pin_symbol", "SOLUSDT").apply("add_symbol", "SUIUSDT")
+    write_pool_overrides(tmp_path, ov.apply("blacklist_symbol", "DOGEUSDT"))
+    page = build_pool(files)
+    assert (page.pinned, page.blacklist, page.manual) == (["SOLUSDT"], ["DOGEUSDT"], ["SUIUSDT"])
+    (tmp_path / "pool_overrides.json").write_text("{broken")
+    assert build_pool(files).overrides_error  # 读不出：页面不让改
+
+
 def test_settings_page_never_has_key_values(tmp_path: Path) -> None:
     from jiaoyi.panel.pages import build_settings
 

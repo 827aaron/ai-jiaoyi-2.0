@@ -257,3 +257,7 @@ input[type="password"], .su-narrow input[type="number"], .su-narrow select { fon
 .su-narrow details summary { cursor: pointer; color: var(--accent); font-size: 12px; padding: 4px 0; }
 .form .fr.dimrow label { color: var(--dim); }
 .form .fr > .pill, .form .fr > .lamp, .form .fr > span.dim { flex: none; align-self: center; }
+
+/* 选币页：手动加币输入框、行尾操作按钮 */
+.inp { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
+td.nowrap { white-space: nowrap; }
