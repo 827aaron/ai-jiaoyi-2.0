@@ -598,3 +598,33 @@ async def test_ok_headline_counts_fresh_symbols_and_last_time(tmp_path: Path) ->
     st = sink.read_status()[Role.PREDICTOR.value]
     # 最后一根 5 分钟线 00:10–00:15 UTC → 曼谷 07:15
     assert st.headline == "已算 1/1 个币，上次 07:15（今天预测 1 次）"
+
+
+async def test_hourly_interval_for_long_hold() -> None:
+    """24h 档：1 分钟线拼成 1 小时线，预测 pred_len 根 1h，过两根（120 分钟）算过期。"""
+    be = SpyBackend()
+    s = KronosSettings(**{**SET.__dict__, "interval": Interval.H1, "pred_len": 2})
+    f = make(True, s, be)
+    for minute in range(3 * 60):  # 3 根完整 1 小时线
+        await f.on_kline(m1(minute))
+    await f.wait_idle()
+    assert be.calls == 1 and [b.interval for b in be.seen[0]] == [Interval.H1] * 3
+    fc = f.latest("BTCUSDT", T0 + timedelta(hours=3))
+    assert fc is not None and fc.horizon_min == 120
+    assert fc.stale_after == T0 + timedelta(hours=5)
+
+
+def test_predictor_interval_follows_hold() -> None:
+    from jiaoyi.core import profiles
+
+    want = {
+        "30m": ("5m", 6), "1h": ("5m", 12), "2h": ("5m", 24), "4h": ("5m", 48),
+        "8h": ("15m", 32), "12h": ("15m", 48), "24h": ("1h", 24),
+    }  # fmt: skip
+    for hold, (interval, n) in want.items():
+        cfg = PredictorConfig.model_validate(profiles.fill({}, "1h", "predictor", hold))
+        assert (cfg.interval, cfg.pred_len) == (interval, n)
+        assert 400 + cfg.pred_len <= 512
+    # 用户写了就按用户的
+    mine = profiles.fill({"interval": "5m"}, "1h", "predictor", "24h")
+    assert PredictorConfig.model_validate(mine).interval == "5m"

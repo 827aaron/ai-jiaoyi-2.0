@@ -141,7 +141,7 @@ class Forecast(Contract):
 
     symbol: Symbol
     ts: AwareDatetime = Field(description="基于哪根 K 线收盘算的。")
-    horizon_min: int = Field(gt=0, le=240)
+    horizon_min: int = Field(gt=0, le=1440)
     price_low: PosFloat
     price_high: PosFloat
     p_up: Probability

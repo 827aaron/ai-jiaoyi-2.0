@@ -140,7 +140,7 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
 
 # 与档位无关、保持现值：keeper_close_p 0.6 / strong 0.85 / confirmations 2；
 # 巡逻兵 patrol_shock_pct_1m 2.0 / patrol_alert_pct_1m 1.0（价格百分比的崩盘线）；
-# 预测员 interval 5m / paths 4 / lookback 400；risk.toml 全部不动。
+# 预测员 paths 4 / lookback 400；risk.toml 全部不动。
 _LOOSE_GATE = {"min_p_genuine": 0.6, "min_p_take": 0.6, "max_p_toxic": 0.5}
 _STRICT_GATE = {"min_p_genuine": 0.65, "min_p_take": 0.65, "max_p_toxic": 0.4}
 
@@ -158,7 +158,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_STRICT_GATE,  # 短持仓费用占比高，要更确定才做
         },
         "app": {"keeper_interval_s": 10},
-        "predictor": {"pred_len": 6},  # 6 × 5m = 30 分钟
+        "predictor": {"interval": "5m", "pred_len": 6},  # 6 × 5m = 30 分钟
     },
     "1h": {
         "fast_loop": {
@@ -173,7 +173,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 15},
-        "predictor": {"pred_len": 12},
+        "predictor": {"interval": "5m", "pred_len": 12},
     },
     "2h": {
         "fast_loop": {
@@ -188,7 +188,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 20},
-        "predictor": {"pred_len": 24},
+        "predictor": {"interval": "5m", "pred_len": 24},
     },
     "4h": {
         "fast_loop": {
@@ -203,7 +203,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 30},
-        "predictor": {"pred_len": 48},  # 48 × 5m = 4 小时；回看 400 + 48 ≤ Kronos 上下文 512
+        "predictor": {"interval": "5m", "pred_len": 48},  # 48 × 5m = 4 小时；回看 400 + 48 ≤ 512
     },
 }
 
@@ -237,6 +237,7 @@ HOLD.update(
                 **_LOOSE_GATE,
             },
             "app": {"keeper_interval_s": 45},
+            "predictor": {"interval": "15m", "pred_len": 32},  # 32 × 15m = 8 小时
         },
         "12h": {
             "fast_loop": {
@@ -254,6 +255,7 @@ HOLD.update(
                 **_LOOSE_GATE,
             },
             "app": {"keeper_interval_s": 60},
+            "predictor": {"interval": "15m", "pred_len": 48},
         },
         "24h": {
             "fast_loop": {
@@ -271,6 +273,7 @@ HOLD.update(
                 **_LOOSE_GATE,
             },
             "app": {"keeper_interval_s": 90},
+            "predictor": {"interval": "1h", "pred_len": 24},
         },
     }
 )
