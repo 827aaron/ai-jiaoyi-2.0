@@ -441,6 +441,37 @@ def test_slow_schedule_created_and_cleared(tmp_path: Path) -> None:
     assert rows[0]["key"] == "max_cards_per_round" and rows[0]["new"] is None
 
 
+def test_screener_rules_edited_from_settings(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        page = client.get("/api/settings").json()
+        scr = {i["key"]: i for i in page["screener"]}
+        assert scr["min_range_24h_pct"]["recommended"] == 1.5
+        assert scr["max_range_24h_pct"]["recommended"] == 30
+        assert scr["max_spread_bps"]["nullable"] and scr["max_spread_bps"]["value"] is None
+        assert all(i["editable"] for i in scr.values()) and "weight_oi" in scr
+        assert page["screener_cautions"] == []
+    actions.update_config(paths, data, "screener", {"min_range_24h_pct": 1.5}, PW, NOW)
+    actions.update_config(paths, data, "screener", {"max_spread_bps": 50}, PW, NOW)
+    slow = load_slow_config(paths.slow)
+    assert slow.screener.min_range_24h_pct == 1.5 and slow.screener.max_spread_bps == 50
+    assert "[screener]" in paths.slow.read_text(encoding="utf-8")
+    with _client(paths) as client:
+        page = client.get("/api/settings").json()
+        assert any("价差" in c for c in page["screener_cautions"])  # 比硬上限宽：只提示
+    # 数学上不成立的才拒：下限 ≥ 上限、权重全 0
+    with pytest.raises(ActionError, match="波动下限"):
+        actions.update_config(paths, data, "screener", {"max_range_24h_pct": 1}, PW, NOW)
+    zero = {k: 0 for k in ("weight_volatility", "weight_volume_surge", "weight_funding")}
+    actions.update_config(paths, data, "screener", zero, PW, NOW)
+    with pytest.raises(ActionError, match="权重"):
+        actions.update_config(
+            paths, data, "screener", {"weight_oi": 0, "weight_liquidations": 0}, PW, NOW
+        )
+    actions.update_config(paths, data, "screener", {"max_spread_bps": None}, PW, NOW)
+    assert load_slow_config(paths.slow).screener.max_spread_bps is None
+
+
 def test_update_validates_with_profile_defaults(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     text = paths.app.read_text(encoding="utf-8").replace('profile = "2h"', 'profile = "60m"')
