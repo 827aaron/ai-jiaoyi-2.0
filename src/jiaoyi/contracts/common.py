@@ -103,6 +103,8 @@ class Role(StrEnum):
     """军师团（慢环，TradingAgents）。"""
     SCREENER = "screener"
     """选币：每小时代码筛候选池。"""
+    MARKET = "market"
+    """总盘会：每轮挑上会的币、要盯的币（只有模块状态，没有决策记录）。"""
     SENTINEL = "sentinel"
     """哨兵。"""
     BOOK_READER = "book_reader"

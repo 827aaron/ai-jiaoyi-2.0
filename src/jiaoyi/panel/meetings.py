@@ -49,6 +49,10 @@ class MeetingSummary(BaseModel):
     reason: str | None = None
     error: str | None = None
     cost_usd: float | None = None
+    summary: str | None = None
+    """总盘会：「挑了 N 个 / 落选 M 个」（团队页节点用）。"""
+    rejections: list[dict[str, str]] = []
+    """总盘会：没挑中的币和各自的理由。"""
 
 
 class Meeting(MeetingSummary):
@@ -105,6 +109,12 @@ def _parse(symbol: str, raw: Any, now: datetime) -> Meeting | None:
         reason=_str(result.get("reason")),
         error=_str(raw.get("error")),
         cost_usd=float(cost) if isinstance(cost, int | float) else None,
+        summary=_str(raw.get("summary")),
+        rejections=[
+            {"symbol": str(r.get("symbol", "")), "reason": str(r.get("reason", ""))}
+            for r in raw.get("rejections") or []
+            if isinstance(r, dict)
+        ],
         steps=steps,
     )
 

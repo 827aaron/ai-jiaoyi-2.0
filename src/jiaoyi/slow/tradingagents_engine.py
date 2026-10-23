@@ -745,6 +745,12 @@ def draft_to_card_symbol(
     def rng(lo: float, hi: float) -> Range:
         return Range(min=min(lo, hi), max=max(lo, hi))
 
+    signals = d.allowed_signals if d.bias is not Bias.NO_TRADE else []
+    reason = d.reason
+    if d.bias is not Bias.NO_TRADE and not signals:
+        # 方向卡信号列表为空 = 这个币一个信号都出不来：按默认信号集（全部）填上，并在理由里记一笔
+        signals = list(SignalKind)
+        reason = f"{reason}（会议没选信号类型，按默认全部信号）"
     return CardSymbol(
         symbol=entry.symbol,
         category=entry.category,
@@ -754,13 +760,13 @@ def draft_to_card_symbol(
             if levels is None
             else select_levels([(x.price, x.note) for x in d.key_levels], levels)
         ),
-        allowed_signals=d.allowed_signals if d.bias is not Bias.NO_TRADE else [],
+        allowed_signals=signals,
         size_tier_max=d.size_tier_max,
         notional_usdt=rng(d.notional_min, d.notional_max),
         leverage=rng(d.leverage_min, d.leverage_max),
         stop_atr=rng(d.stop_atr_min, d.stop_atr_max),
         take_profit_r=rng(d.take_profit_r_min, d.take_profit_r_max),
-        reason=d.reason,
+        reason=reason,
     )
 
 
@@ -785,7 +791,7 @@ def convert_prompt(
         "观望：结论里的 Buy / Overweight 对应偏多（long），Sell 对应偏空（short），Underweight 对应"
         "偏空或观望，Hold 对应观望（no_trade）；reason 里用多 / 空 / 观望，不要用“减持”“增持”"
         "这类股票持仓词。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的倍数区间（如 1.5–3）。"
-        "reason 用中文。\n"
+        "做多 / 做空时 allowed_signals 不许为空（没有特别偏好就全选）。reason 用中文。\n"
         f"{atr_note}\n{hold_note}\n{level_note}\n"
         f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{brief}\n结论：\n{decision}"
     )

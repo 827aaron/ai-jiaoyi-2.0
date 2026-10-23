@@ -522,3 +522,34 @@ async def test_restart_command_older_than_process_is_not_rerun(
     res = _result(tmp_path, "cmd-restart-0001")
     assert res["status"] == "done" and res["detail"] == "已重启"
     assert not r._restarting and not r._restart.is_set()
+
+
+async def test_refresh_cards_reruns_whole_chain_and_receipt_has_result(
+    tmp_path: Path, now: datetime
+) -> None:
+    """面板「重新开会」：先重新选币再开整轮会（reason=manual），回执等跑完才写，带结果。"""
+    from jiaoyi.contracts import SymbolPool
+    from tests.conftest import load_example
+
+    pool = SymbolPool.model_validate(load_example("symbol_pool"))
+    screened: list[datetime] = []
+
+    class Screener:
+        async def screen(self, at: datetime) -> SymbolPool:
+            screened.append(at)
+            return pool
+
+    app = _app(tmp_path, now)
+    cards = FakeCards(h.card(now))
+    app.m = dataclasses.replace(app.m, cards=cards, screener=Screener())
+    r = Runner(app)
+    write_command(tmp_path, _cmd(now, "refresh_cards"))
+    await r.command_tick()
+    assert not (tmp_path / COMMANDS_DIR / "done" / "cmd-refresh_cards-0001.json").exists()
+    await r.command_tick()  # 还在跑：不重复执行、不提前写回执
+    await asyncio.gather(*r._tasks)
+    assert screened and cards.refreshed == ["manual"]
+    res = _result(tmp_path, "cmd-refresh_cards-0001")
+    assert res["status"] == "done" and res["detail"].startswith("已重新开会：选了")
+    assert "上会" in res["detail"] and "花费" in res["detail"]
+    assert (tmp_path / "symbol_pool.json").exists()

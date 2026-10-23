@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from jiaoyi.contracts import Bias, Category, HardFilters, SizeTier, SymbolPoolEntry
+from jiaoyi.contracts import Bias, Category, HardFilters, SignalKind, SizeTier, SymbolPoolEntry
 from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.tradingagents_engine import (
     TradingAgentsSettings,
@@ -110,6 +110,26 @@ def test_draft_conversion_normalizes_and_blocks_no_trade_signals() -> None:
     cs = draft_to_card_symbol(d, entry("TSLAUSDT", Category.US_TECH))
     assert cs.allowed_signals == [] and cs.category is Category.US_TECH
     assert (cs.notional_usdt.min, cs.notional_usdt.max) == (100, 500)
+
+
+def test_directional_card_with_empty_signals_gets_default_set() -> None:
+    d = _CardSymbolDraft(
+        bias=Bias.SHORT,
+        allowed_signals=[],
+        size_tier_max=SizeTier.S,
+        notional_min=100,
+        notional_max=500,
+        leverage_min=1,
+        leverage_max=2,
+        stop_atr_min=1,
+        stop_atr_max=2,
+        take_profit_r_min=1.5,
+        take_profit_r_max=3,
+        reason="偏空",
+    )
+    cs = draft_to_card_symbol(d, entry("XRPUSDT", Category.ALT))
+    assert set(cs.allowed_signals) == set(SignalKind)  # 方向卡信号不许为空
+    assert "按默认全部信号" in cs.reason
 
 
 VOLS = (("BTCUSDT", "9e9"), ("ETHUSDT", "5e9"), ("XUSDT", "1e9"))
