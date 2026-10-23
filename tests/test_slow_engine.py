@@ -512,6 +512,7 @@ def test_direction_conflict_and_size_degrade() -> None:
     assert direction_conflict(Bias.LONG, "Hold", "FINAL TRANSACTION PROPOSAL: **HOLD**") is None
     assert direction_conflict(Bias.LONG, None, "") is None  # 解析不出不算矛盾
     assert direction_conflict(Bias.NO_TRADE, "Sell", plan) is None
+    assert direction_conflict(Bias.BOTH, "Buy", plan) is None  # 双向：不算矛盾
     cs = degrade_size(card_symbol("AAUSDT", size_tier_max=SizeTier.L), ["新闻", "社交情绪"])
     assert cs.size_tier_max is SizeTier.M and "新闻、社交情绪报告缺失" in cs.reason
     assert (

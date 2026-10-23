@@ -744,7 +744,7 @@ _PROPOSAL = re.compile(r"FINAL TRANSACTION PROPOSAL:\s*\**\s*(BUY|HOLD|SELL)", r
 def direction_conflict(bias: Bias, rating: str | None, trader_plan: str) -> str | None:
     """卡上的方向和会议自己的结论（组合经理评级、交易员建议）是否相反；相反返回说明。
     只比相反的方向（做多 vs 卖出 / 做空 vs 买入）；观望 / 持有 / 解析不出不算矛盾。"""
-    if bias is Bias.NO_TRADE:
+    if bias in (Bias.NO_TRADE, Bias.BOTH):  # 观望 / 双向都没有"相反"可言
         return None
     proposal = _PROPOSAL.findall(trader_plan or "")
     signals = {("评级", (rating or "").lower())}
