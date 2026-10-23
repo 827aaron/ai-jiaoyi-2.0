@@ -16,11 +16,9 @@ def test_missing_file_equals_current_defaults(tmp_path: Path) -> None:
     cfg = load_slow_config(tmp_path / "nope.toml")
     assert cfg.engine_settings() == TradingAgentsSettings()
     kw = cfg.commander_kwargs()
-    assert kw == {
-        "concurrency": 4,
-        "ttl": timedelta(hours=2),
-        "symbol_min_interval": timedelta(hours=2),
-    }
+    assert kw["concurrency"] == 4
+    assert kw["ttl"] == timedelta(hours=2)
+    assert kw["symbol_min_interval"] == timedelta(hours=2)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
@@ -115,3 +113,18 @@ def test_engine_reads_key_for_its_provider(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert os.environ["OPENROUTER_API_KEY"] == "k"
     monkeypatch.delenv("OPENROUTER_API_KEY")
+
+
+def test_budget_defaults_and_validation(tmp_path: Path) -> None:
+    kw = SlowConfig().commander_kwargs()
+    assert kw["daily_cost_limit_usd"] == 10.0
+    assert kw["fail_backoff"] == (
+        timedelta(minutes=5),
+        timedelta(minutes=10),
+        timedelta(minutes=30),
+    )
+    for body in ("[budget]\ndaily_cost_limit_usd = 0\n", "[budget]\nfail_backoff_minutes = []\n"):
+        p = tmp_path / "slow.toml"
+        p.write_text(body, encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_slow_config(p)

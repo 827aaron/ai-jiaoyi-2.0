@@ -47,6 +47,10 @@ Mac mini 本机打开 http://localhost:8090 ；手机 / 其他电脑用 Mac mini
 - `paused.json` 读不出时主循环按“已暂停”处理，总览显示“暂停（状态文件损坏）”。
 - 安全：只认局域网来源 IP；Host 头必须是局域网 IP、localhost、`*.local` 或 `--allow-host` 给的名字
   （防 DNS 重绑定）；POST 要 `Origin` 与 Host 一致并带 `X-Jiaoyi-Panel: 1` 头（防别的网站代发）。
+- 面板走明文 HTTP，密码在局域网里是明文传的：家里的网络可以接受，**不要从外网直接访问**；
+  以后要在外面用，先上 HTTPS 或 VPN（例如 Tailscale，再用 `--allow-host` 放行它的名字）。
+- 配置备份 `config/*.bak-*` 已在 `.gitignore` 里（里面有你的真实硬上限，不进仓库）。
+- 网页改了硬上限后，实盘要重新 go-live 的保护在 #43 里；M4 上实盘前 #43 必须先合并。
 - 持仓页 K 线取币安 U 本位公开接口（不需要 key，只用于画图）。图表库 TradingView Lightweight Charts 4.2.0
   （Apache-2.0）放在 `static/lib/`，不依赖外网 CDN。
 - 换皮只改 `src/jiaoyi/panel/static/theme.css`（颜色、字体、圆角、阴影令牌）。涨跌色默认绿涨红跌。

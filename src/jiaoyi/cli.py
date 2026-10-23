@@ -9,6 +9,7 @@ import getpass
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from jiaoyi.alerting.telegram import TelegramAlerter
@@ -188,6 +189,24 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _watchdog(args: argparse.Namespace) -> int:
+    """主进程外的心跳检查，由 launchd 每分钟跑一次（com.jiaoyi.watchdog）。"""
+    from jiaoyi.watchdog import run_once
+
+    try:
+        data_dir = load_app_config(Path(args.app)).data_dir
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    store = ChainedSecretStore()
+    return run_once(
+        data_dir,
+        store.get("TELEGRAM_BOT_TOKEN"),
+        store.get("TELEGRAM_CHAT_ID"),
+        datetime.now(UTC),
+    )
+
+
 def _panel(args: argparse.Namespace) -> int:
     """面板：独立进程，读 data 目录和 hummingbot-api；写操作只写指令文件和配置文件。
 
@@ -251,6 +270,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_run)
+
+    p = sub.add_parser("watchdog", help="看一次主循环心跳，停了就发 Telegram（launchd 每分钟跑）")
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.set_defaults(func=_watchdog)
 
     p = sub.add_parser("panel", help="启动面板网页（局域网）")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
