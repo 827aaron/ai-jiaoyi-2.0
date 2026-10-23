@@ -157,8 +157,10 @@ def build_positions(
 
 ACTIVE_S = 120
 """角色这么多秒内写过决策记录，就算“正在忙”（团队页高亮这一步）。"""
-_HOLDING_ROLES = (Role.EXECUTOR, Role.LIFEBOAT, Role.KEEPER, Role.PATROL)
-"""有持仓时一直在干活的角色。"""
+_HOLDING_ROLES = (Role.LIFEBOAT, Role.KEEPER, Role.PATROL, Role.RECONCILER)
+"""③ 第三层：有持仓时一直在干活，没持仓时等待。"""
+_WATCHERS = {Role.BOOK_READER: "盯着行情", Role.SENTINEL: "盯着信号"}
+"""主程序在跑、心跳正常时一直在干活的角色（常驻）。"""
 
 
 def _doing(
@@ -168,7 +170,9 @@ def _doing(
     holding: int,
     now: datetime,
 ) -> str | None:
-    """这一步现在在做什么：正在开的会 > 刚写的记录 > 盯着的持仓；都没有 = None（不猜）。"""
+    """这一步现在在做什么：正在开的会 > 刚写的记录 > 盯着的持仓；都没有 = None（不猜）。
+
+    常驻的盘口员 / 哨兵在 ``build_team`` 里按心跳补上“盯着行情 / 盯着信号”。"""
     if role is Role.COMMANDER:
         live = [m for m in meetings if m.status == "running"]
         if live:
@@ -185,9 +189,16 @@ def _doing(
     return None
 
 
-SIGNAL_CHAIN = (Role.SENTINEL, Role.GATE, Role.RISK_GUARD, Role.EXECUTOR, Role.LIFEBOAT)
-"""一个信号从发现到下单依次经过的角色（按 signal_id 串起来）。"""
-_IDLE_WITHOUT_POSITIONS = (Role.KEEPER, Role.PATROL, Role.LIFEBOAT)
+SIGNAL_CHAIN = (Role.GATE, Role.RISK_GUARD, Role.EXECUTOR)
+"""哨兵发出信号后依次经过的角色（按 signal_id 串起来）；没信号时它们都在等。"""
+_RAN_TODAY = (Role.SCREENER, Role.COMMANDER, Role.PREDICTOR)
+"""① 定时干活的：今天跑过一轮 = 完成。"""
+
+
+def _healthy(card: RoleCard, st: ModuleStatus | None) -> bool:
+    return st is not None and (
+        card.state == "ok" or (card.state == "slow" and st.health is Health.DEGRADED)
+    )
 
 
 def _progress(
@@ -195,33 +206,52 @@ def _progress(
     st: ModuleStatus | None,
     chain: set[Role] | None,
     holding: int,
+    acted_today: bool,
     now: datetime,
     tz: str,
 ) -> Progress:
-    """流程图的点（设计稿 team-flow/handoff.md）：出错 > 正在做 > 这一轮做完 > 等待。
+    """流程图的点 = 本轮流程走到哪（设计稿 team-flow/handoff.md）；心跳好坏另用角标，不看这里。
 
-    ② 跟最新一个信号的决策链：链上有记录的 = 做完，链后面还没轮到的 = 等待；
-    ③ 没持仓时管家、巡逻兵、保命止损 = 等待；其余看今天有没有心跳。"""
+    出错 > 正在做 > 这一轮做完 > 等待：
+    ① 选币 / 军师团 / 预测员今天跑过 = 做完；盘口员、哨兵心跳正常 = 一直在盯；
+    ② 拍板人 / 保镖 / 执行器只跟本轮（最新作战卡之后）最新一个信号：链上有的 = 做完，其余 = 等待；
+    ③ 管家 / 巡逻兵 / 对账员 / 保命止损有持仓 = 正在做，没持仓 = 等待；报警员今天推过 = 做完。"""
     if card.state == "bad":
         return "err"
     if card.doing:
         return "doing"
     role = card.role
-    if chain is not None and role in SIGNAL_CHAIN:
-        return "done" if role in chain else "wait"
-    if role in _IDLE_WITHOUT_POSITIONS and not holding:
+    if card.state == "off" or not _healthy(card, st) or st is None:
         return "wait"
-    if card.state == "off" or st is None:
-        return "wait"
-    return "done" if local_day(st.ts, tz) == local_day(now, tz) else "wait"
+    if role in SIGNAL_CHAIN:
+        return "done" if chain and role in chain else "wait"
+    if role in _RAN_TODAY:
+        ran = _opt_time(st, "last_run_at") or st.ts
+        return "done" if local_day(ran, tz) == local_day(now, tz) else "wait"
+    if role is Role.ALERTING:
+        return "done" if acted_today else "wait"
+    return "wait"
 
 
-def _latest_chain(records: list[DecisionRecord]) -> set[Role] | None:
-    """最新一个信号走到了哪些角色；今天还没有信号就是 None（退回按心跳算）。"""
-    last = next((r.signal_id for r in reversed(records) if r.signal_id), None)
+def _round_start(records: list[DecisionRecord]) -> datetime | None:
+    """本轮从最新一张作战卡发出算起；今天还没出卡就是 None（今天整天算一轮）。"""
+    issued = [
+        r.ts
+        for r in records
+        if r.role is Role.COMMANDER and r.card_id and r.outcome is Outcome.ACTION
+    ]
+    return issued[-1] if issued else None
+
+
+def _latest_chain(records: list[DecisionRecord], since: datetime | None = None) -> set[Role] | None:
+    """本轮最新一个信号走到了哪些角色；本轮还没有信号就是 None（② 全部等待）。"""
+    last = next((r for r in reversed(records) if r.signal_id), None)
     if last is None:
         return None
-    return {r.role for r in records if r.signal_id == last}
+    mine = [r for r in records if r.signal_id == last.signal_id]
+    if since is not None and min(r.ts for r in mine) < since:
+        return None
+    return {r.role for r in mine}
 
 
 def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamPage:
@@ -230,13 +260,16 @@ def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamP
     run = _run_info(files, status, now)
     meetings = list_meetings(files.root, now)
     holding = len(files.ledger().live())
-    chain = _latest_chain(records)
+    chain = _latest_chain(records, _round_start(records))
+    acted = {r.role for r in records}
     cards = []
     for role in ROLE_NAMES:
         st = status.get(role.value)
         card = _role_card(role, st, now, run)
         card.doing = _doing(role, records, meetings, holding, now)
-        card.progress = _progress(card, st, chain, holding, now, run.tz)
+        if card.doing is None and role in _WATCHERS and run.running and _healthy(card, st):
+            card.doing = _WATCHERS[role]
+        card.progress = _progress(card, st, chain, holding, role in acted, now, run.tz)
         cards.append(card)
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
