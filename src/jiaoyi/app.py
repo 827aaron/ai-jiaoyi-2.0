@@ -134,6 +134,13 @@ class _SupportsClose(Protocol):
 
 
 @runtime_checkable
+class _SupportsWarmup(Protocol):
+    """启动预热，例如 Jev 先打一次探测请求建好连接。"""
+
+    async def warmup(self) -> float | None: ...
+
+
+@runtime_checkable
 class _SupportsHeartbeat(Protocol):
     """模块自己上报 ``ModuleStatus``。"""
 
@@ -500,6 +507,9 @@ class App:
             await self.m.feed.subscribe([e.symbol for e in self.pool.in_pool])
         self.save_blocked()  # 封禁只在内存里，重启后清掉旧文件，由新闻源重新补上
         self._write_runtime(now)
+        if isinstance(self.m.decision_model, _SupportsWarmup):
+            # 先打一次很小的探测请求把连接建好，第一笔真信号不吃冷启动；失败不影响启动
+            await self.m.decision_model.warmup()
         self.heartbeat_all()
         self.started = True
         if self.paused is not None and self.paused.get("corrupt"):

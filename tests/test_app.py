@@ -258,3 +258,16 @@ def test_live_without_unlock_refuses_to_build(tmp_path: Path, now: datetime) -> 
     cfg = load_app_config(APP).model_copy(update=update)
     with pytest.raises(LiveGateError):
         App(load_risk_config(RISK), cfg, clock=lambda: now, secrets=_Secrets())
+
+
+async def test_start_warms_up_decision_model(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+
+    app = _app(tmp_path, now)
+    t = MockJevTransport()
+    app.m = dataclasses.replace(
+        app.m, decision_model=JevDecisionModel(t, c.FastLoopConfig(), timeout_ms=1500)
+    )
+    await app.start()
+    assert t.calls == ["warmup"] and app.started
+    await app.stop()

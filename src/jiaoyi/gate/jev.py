@@ -234,6 +234,25 @@ class JevDecisionModel:
             answers=answers,
         )
 
+    async def warmup(self, timeout_s: float = 5.0) -> float | None:
+        """启动时发一次很小的探测请求，把 DNS、TLS 握手和连接池先建好，免得第一笔真信号吃冷启动
+        （M1 实测首次 963ms，之后约 500ms）。返回延迟毫秒；失败返回 None。
+
+        探测不算拍板：不进决策日志、不动错误计数和冷却，失败只记一行日志。
+        连接空闲超过约 30 秒（SDK 连接池的保活时间）会重新握手，所以这只管启动后第一笔。
+        """
+        started = time.perf_counter()
+        try:
+            await asyncio.wait_for(
+                self._t.evaluate("warmup", _WARMUP_QUESTIONS, timeout_s), timeout=timeout_s
+            )
+        except Exception as e:  # 包括超时；预热失败不影响启动，真信号来了照常按超时规则走
+            logger.warning("Jev 预热失败：%s: %s", type(e).__name__, e)
+            return None
+        ms = (time.perf_counter() - started) * 1000.0
+        logger.info("Jev 预热完成，%.0f ms", ms)
+        return ms
+
     def _error(self, request: JevRequest, msg: str, started: float) -> JevResponse:
         self.consecutive_errors += 1
         if self.consecutive_errors >= self._cfg.jev_max_consecutive_errors:
@@ -252,6 +271,11 @@ class JevDecisionModel:
             model_version=self._cfg.jev_model or "unpinned",
             latency_ms=max(latency_ms, 0.0),
         )
+
+
+_WARMUP_QUESTIONS = (
+    JevQuestion(id="warmup", prompt="Connection check. Pick either option.", choices=("a", "b")),
+)
 
 
 def _parse(request: JevRequest, raw: RawJevResult) -> list[JevAnswer]:

@@ -4,7 +4,7 @@
 mode = "paper"               # paper（模拟盘）/ testnet / live；切 live 另需确认词和面板密码
 predictor_enabled = true     # 预测员 Kronos 开关
 signal_dedup_s = 30          # 同一信号冷却 30 秒
-jev_timeout_ms = 1000        # Jev 超时就放弃本次开仓
+jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 OpenRouter 首次 963ms，之后约 500ms）
 keeper_interval_s = 20       # 持仓管家每 20 秒看一次
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
 slow_loop_interval_min = 30  # 军师团每 30 分钟开会
