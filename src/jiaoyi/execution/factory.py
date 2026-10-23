@@ -54,6 +54,7 @@ def build_execution(
     live_gate: LiveGate | None = None,
     decision_log: DecisionLog | None = None,
     close_unknown_positions: bool = False,
+    demo_trading: bool = True,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -74,7 +75,10 @@ def build_execution(
     prefix = "BINANCE" if mode is RunMode.LIVE else "BINANCE_TESTNET"
     api = HttpHummingbotApi(hb_url, hb_username, need("HUMMINGBOT_API_PASSWORD"))
     exchange = CcxtBinanceFutures(
-        need(f"{prefix}_API_KEY"), need(f"{prefix}_API_SECRET"), testnet=mode is not RunMode.LIVE
+        need(f"{prefix}_API_KEY"),
+        need(f"{prefix}_API_SECRET"),
+        testnet=mode is not RunMode.LIVE,
+        demo=demo_trading,
     )
     tz = risk.day_reset_tz
 
