@@ -17,14 +17,14 @@ CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
 help:
 	@echo "开发："
 	@echo "  make install        建 .venv 并安装（含开发依赖和军师团 slow 依赖）"
-	@echo "  make update         日常更新：git pull --ff-only → install → check-config → 重启 jiaoyi run"
+	@echo "  make update         日常更新：git pull --ff-only → install → 拉预测模型权重 → check-config → 重启 jiaoyi run"
 	@echo "  make init-config    从示例复制 config/risk.toml、config/app.toml（不覆盖已有）"
 	@echo "  make check-config   检查配置，不合格返回非 0"
 	@echo "  make check          lint + 类型检查 + 测试（同 CI）"
 	@echo "  make format         自动格式化"
 	@echo "执行层（M0，执行工程师）："
 	@echo "预测员："
-	@echo "  make kronos-fetch   拉官方 Kronos 源码到 vendor/Kronos（钉提交号）"
+	@echo "  make kronos-fetch   拉官方 Kronos 源码到 vendor/Kronos，并预先拉最大 / 标准模型权重（都钉提交号）"
 	@echo "  make hb-fetch       拉上游 hummingbot-api 和 Condor 到 vendor/"
 	@echo "  make hb-setup       跑 hummingbot-api 上游 setup（生成它的 .env 和 MQTT 账号）"
 	@echo "  make hb-patch       给 hummingbot-api 镜像打 Demo Trading 补丁（hb-up 会自动做）"
@@ -40,6 +40,8 @@ install:
 update:
 	git pull --ff-only
 	$(MAKE) install
+	@# 预测员权重（最大 / 标准）先拉好，已有缓存就跳过；失败不挡更新，第一次推理时会再下载
+	-@if [ -d vendor/Kronos ]; then $(BIN)/python -m jiaoyi.predictor.fetch_weights; fi
 	$(MAKE) check-config
 	@if launchctl print gui/$$(id -u)/com.jiaoyi.panel >/dev/null 2>&1; then \
 		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.panel && echo "已重启 com.jiaoyi.panel"; \
@@ -89,6 +91,7 @@ kronos-fetch:
 	@if [ ! -d vendor/Kronos/.git ]; then git clone $(KRONOS_REPO) vendor/Kronos; fi
 	@git -C vendor/Kronos fetch --quiet origin && git -C vendor/Kronos checkout --quiet $(KRONOS_REF)
 	@echo "vendor/Kronos @ $(KRONOS_REF)"
+	$(BIN)/python -m jiaoyi.predictor.fetch_weights
 
 hb-setup:
 	$(MAKE) -C vendor/hummingbot-api setup

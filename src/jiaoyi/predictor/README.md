@@ -1,6 +1,6 @@
 # 预测员（Kronos）
 
-官方 [shiyu-coder/Kronos](https://github.com/shiyu-coder/Kronos)（MIT），Kronos-small，零训练。
+官方 [shiyu-coder/Kronos](https://github.com/shiyu-coder/Kronos)（MIT），默认 Kronos-base（最大），零训练。
 **只用来估波动范围**，方向近似抛硬币，`Forecast.p_up` 不要当方向信号。
 
 ## 行为
@@ -17,16 +17,15 @@
 
 ```bash
 uv pip install --python .venv/bin/python -e ".[kronos]"      # torch、pandas 等
-make kronos-fetch   # 官方源码（不是 pip 包），钉在 Makefile 里的提交号，vendor/ 已被忽略
+make kronos-fetch   # 官方源码（不是 pip 包，vendor/ 已被忽略）+ 预先拉最大 / 标准模型权重，都钉提交号
 ```
 
-权重 `NeoQuasar/Kronos-small` 与分词器 `NeoQuasar/Kronos-Tokenizer-base` 第一次推理时按 `KronosSettings` 里钉的提交号由
-HuggingFace 自动下载到 `~/.cache/huggingface`。要提前下载：
+权重和分词器按 `MODEL_SPECS` 里钉的提交号放在 `~/.cache/huggingface`：`make kronos-fetch` 和 `make update`
+都会跑 `python -m jiaoyi.predictor.fetch_weights`（默认拉 base 和 small，已有缓存就跳过）。没拉到的话第一次推理时会现下载。
 
-```bash
-.venv/bin/huggingface-cli download NeoQuasar/Kronos-small --revision 901c26c1332695a2a8f243eb2f37243a37bea320
-.venv/bin/huggingface-cli download NeoQuasar/Kronos-Tokenizer-base --revision 0e0117387f39004a9016484a186a908917e22426
-```
+- 模型：`[predictor] model_size`，设置页「预测模型」：最大（base，Mac mini MPS 每币约 3.5 秒、峰值约 1.2 GB）/ 标准（small，约 1 秒、约 0.5 GB）/ 最快（mini）。
+- 所选模型加载失败（权重没拉下来、内存不够）就改用标准模型，直到重启；面板状态写原因。标准模型也加载不了就当推理失败。
+- 决策日志和模块状态里的版本写成「模型名@权重提交号前 7 位」，例如 `Kronos-base@2b55474`。
 
 接线示例（`jiaoyi.app` 里）：
 

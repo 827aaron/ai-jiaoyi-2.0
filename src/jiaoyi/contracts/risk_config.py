@@ -364,7 +364,10 @@ class PredictorConfig(Contract):
         description="fixed = 一直用 model_size；adaptive = 按排队深度在 base/small/mini 间切换。",
     )
     model_size: Literal["mini", "small", "base"] = Field(
-        default="small", description="fixed 时用的模型。Mac mini 实测 small 约 3 秒/币。"
+        default="base",
+        description="预测模型（fixed 时用）。base = 最大，更准但每个币算得比标准慢 3–4 倍"
+        "（Mac mini 每币约 3.5 秒）"
+        "；small = 标准；mini = 最快最粗。加载失败自动改用标准。",
     )
     adaptive_base_max_queue: int = Field(
         default=0,

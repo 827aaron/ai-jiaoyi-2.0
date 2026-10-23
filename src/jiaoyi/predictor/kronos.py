@@ -10,8 +10,9 @@
 - 按需（``PredictorConfig.mode = on_demand``，默认）：只算要盯的币——作战卡和持仓的币
   （``set_wanted``）加总盘会本轮挑中的币（``set_priority``，排队时先算，挑中就马上补一次）；
   哨兵出信号而这个币没有新鲜预测时 ``request`` 补算一次。都在后台，不卡快环。
-- 模型尺寸：fixed 用 ``model_size``；adaptive 按排队深度在 base / small / mini 间切换，
-  各尺寸用到才加载，权重都钉 HuggingFace 提交号（``MODEL_SPECS``）。
+- 模型尺寸：fixed 用 ``model_size``（默认 base = 最大）；adaptive 按排队深度在 base / small / mini
+  间切换，各尺寸用到才加载，权重都钉 HuggingFace 提交号（``MODEL_SPECS``，``make kronos-fetch``
+  预先拉好）。所选模型加载失败就改用标准模型（small），原因写进模块状态。
 - 设备 auto：CUDA > MPS > CPU（Mac mini 上用 MPS）；MPS/CUDA 推理出错会退回 CPU 并一直用 CPU。
   任何异常都只记状态，不向外抛。
 - 每次推理写一条 ``DecisionRecord`` 并上报 ``ModuleStatus``（耗时、成功率、最近错误）。
@@ -69,6 +70,15 @@ class ModelSpec:
     max_context: int
     name: str
 
+    @property
+    def version(self) -> str:
+        """写进决策日志 / 模块状态的版本：模型名 @ 权重提交号前 7 位。"""
+        return f"{self.name}@{self.model_revision[:7]}"
+
+
+class ModelLoadError(RuntimeError):
+    """模型 / 分词器加载失败（权重没拉下来、内存不够等），不是某一次推理出错。"""
+
 
 # 升级权重要单独评审：提交号是钉死的
 MODEL_SPECS: dict[str, ModelSpec] = {
@@ -97,6 +107,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         "Kronos-base",
     ),
 }
+FALLBACK_SIZE = "small"
+"""所选模型加载失败时退回的尺寸（标准模型）。"""
 
 
 @dataclass(frozen=True)
@@ -113,16 +125,10 @@ class KronosSettings:
     paths: int = 4
     """独立采样几条路径；范围取所有路径的包络，p_up 取收在现价之上的比例。"""
     infer_timeout_s: float = 30.0
-    model_id: str = "NeoQuasar/Kronos-small"
-    model_revision: str = "901c26c1332695a2a8f243eb2f37243a37bea320"
-    """HuggingFace 提交号，钉死权重版本；升级要单独评审。"""
-    tokenizer_id: str = "NeoQuasar/Kronos-Tokenizer-base"
-    tokenizer_revision: str = "0e0117387f39004a9016484a186a908917e22426"
     repo_dir: str = "vendor/Kronos"
     """官方 Kronos 源码目录（它不是 pip 包），见 predictor/README.md。"""
     device: str = "auto"
     """``auto``：CUDA > MPS > CPU；也可写 ``cpu`` / ``mps``。"""
-    model_name: str = "Kronos-small"
 
 
 class KronosBackend(Protocol):
@@ -136,14 +142,7 @@ class OfficialKronosBackend:
 
     def __init__(self, settings: KronosSettings, spec: ModelSpec | None = None) -> None:
         self._s = settings
-        self._spec = spec or ModelSpec(
-            settings.model_id,
-            settings.model_revision,
-            settings.tokenizer_id,
-            settings.tokenizer_revision,
-            512,
-            settings.model_name,
-        )
+        self._spec = spec or MODEL_SPECS[FALLBACK_SIZE]
         self._predictor: Any = None
         self._device = ""
 
@@ -176,17 +175,20 @@ class OfficialKronosBackend:
         repo = str(Path(self._s.repo_dir).resolve())
         if repo not in sys.path:
             sys.path.insert(0, repo)
-        mod = importlib.import_module("model")
         sp = self._spec
-        # from_pretrained（safetensors）不会切到 eval：不切的话推理时 dropout 一直开着，
-        # 注意力也变成训练用的因果模式（MPS 报 "does not support dropout" 就是这个原因）
-        tokenizer = mod.KronosTokenizer.from_pretrained(
-            sp.tokenizer_id, revision=sp.tokenizer_revision
-        ).eval()
-        model = mod.Kronos.from_pretrained(sp.model_id, revision=sp.model_revision).eval()
-        self._predictor = mod.KronosPredictor(
-            model, tokenizer, device=device, max_context=sp.max_context
-        )
+        try:
+            mod = importlib.import_module("model")
+            # from_pretrained（safetensors）不会切到 eval：不切的话推理时 dropout 一直开着，
+            # 注意力也变成训练用的因果模式（MPS 报 "does not support dropout" 就是这个原因）
+            tokenizer = mod.KronosTokenizer.from_pretrained(
+                sp.tokenizer_id, revision=sp.tokenizer_revision
+            ).eval()
+            model = mod.Kronos.from_pretrained(sp.model_id, revision=sp.model_revision).eval()
+            self._predictor = mod.KronosPredictor(
+                model, tokenizer, device=device, max_context=sp.max_context
+            )
+        except Exception as exc:
+            raise ModelLoadError(f"{sp.name} 加载失败：{type(exc).__name__}: {exc}") from exc
         self._device = device
         log.info("Kronos 已加载：%s，设备 %s", sp.model_id, device)
 
@@ -298,7 +300,9 @@ class KronosForecaster:
         self._wanted: set[str] = set()
         self._priority: set[str] = set()  # 总盘会挑中、本轮要开会的币（慢环给）
         self._queued = 0
-        self._last_model = MODEL_SPECS[self._cfg.model_size].name  # 最近一次实际用的模型
+        self._last_model = MODEL_SPECS[self._cfg.model_size].version  # 最近一次实际用的模型
+        # 加载失败、已改用标准模型的尺寸 → 原因（重启前不再试）
+        self._load_failed: dict[str, str] = {}
         self._forecasts: dict[str, Forecast] = {}
         self._busy: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -470,12 +474,14 @@ class KronosForecaster:
     def _pick_size(self, waiting: int) -> str:
         cfg = self._cfg
         if cfg.size_policy == "fixed":
-            return cfg.model_size
-        if waiting >= cfg.adaptive_mini_min_queue:
-            return "mini"
-        if waiting <= cfg.adaptive_base_max_queue:
-            return "base"
-        return "small"
+            size = cfg.model_size
+        elif waiting >= cfg.adaptive_mini_min_queue:
+            size = "mini"
+        elif waiting <= cfg.adaptive_base_max_queue:
+            size = "base"
+        else:
+            size = "small"
+        return FALLBACK_SIZE if size in self._load_failed else size
 
     def _backend(self, size: str) -> KronosBackend:
         if self._fixed_backend is not None:
@@ -492,7 +498,6 @@ class KronosForecaster:
 
     async def _infer(self, sym: str, bars: list[Kline], last: Kline) -> None:
         t0 = time.perf_counter()
-        loop = asyncio.get_running_loop()
         size: str = self._cfg.model_size
         dequeued = False
         try:
@@ -501,17 +506,22 @@ class KronosForecaster:
                 self._queued -= 1
                 dequeued = True
                 size = self._pick_size(self._queued)  # 还在排队的有几个
-                backend = self._backend(size)
                 t0 = time.perf_counter()
-                paths = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._pool, backend.predict, bars, self._s.pred_len, self._s.paths
-                    ),
-                    timeout=self._s.infer_timeout_s,
-                )
-            fc = self._summarize(sym, paths, last, MODEL_SPECS[size].name)
+                try:
+                    paths = await self._predict(size, bars)
+                except ModelLoadError as exc:
+                    if size == FALLBACK_SIZE:
+                        raise
+                    # 选的模型（例如最大）加载不了：这次起改用标准模型，原因写进模块状态
+                    log.warning("%s，改用标准模型 %s", exc, MODEL_SPECS[FALLBACK_SIZE].name)
+                    self._load_failed[size] = str(exc)[:300]
+                    size = FALLBACK_SIZE
+                    t0 = time.perf_counter()
+                    paths = await self._predict(size, bars)
+            fc = self._summarize(sym, paths, last, MODEL_SPECS[size].version)
         except Exception as exc:  # 预测员任何故障都不能影响快环
-            self._record(sym, (time.perf_counter() - t0) * 1000, None, exc, MODEL_SPECS[size].name)
+            ms = (time.perf_counter() - t0) * 1000
+            self._record(sym, ms, None, exc, MODEL_SPECS[size].version)
             return
         finally:
             if not dequeued:
@@ -525,6 +535,15 @@ class KronosForecaster:
                 cb(fc)
             except Exception:  # 订阅方出错不影响预测员
                 log.exception("预测结果回调出错")
+
+    async def _predict(self, size: str, bars: list[Kline]) -> list[Path_]:
+        backend = self._backend(size)
+        return await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                self._pool, backend.predict, bars, self._s.pred_len, self._s.paths
+            ),
+            timeout=self._s.infer_timeout_s,
+        )
 
     def add_listener(self, callback: Callable[[Forecast], None]) -> None:
         """每出一条新预测回调一次（在事件循环线程里），例如 ``AgainstCardWatch.observe``。"""
@@ -638,6 +657,9 @@ class KronosForecaster:
             health, headline = Health.STARTING, self._starting_headline()
         else:
             health, headline = Health.OK, self._ok_headline()
+        if self._enabled and self._load_failed:
+            why = "；".join(self._load_failed.values())
+            headline += f"。所选模型没加载成功，已改用标准模型（{why}）"
         avg = self._latency_sum / self._calls if self._calls else 0.0
         try:
             self._sink.heartbeat(
