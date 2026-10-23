@@ -19,6 +19,7 @@ TradingAgents：Apache-2.0，v0.7.0，提交 e8f5503，钉在 pyproject 的 slow
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -91,7 +92,7 @@ class TradingAgentsSettings:
     output_language: str = "Chinese"
     debate_rounds: int = 1
     risk_rounds: int = 1
-    max_tokens: int = 4096
+    max_tokens: int = 8192  # 思考模型的思考也算在里面；4096 实测会把辩论回答挤成空的
     # 整理作战指令 / 挑币要输出结构化 JSON，单独给足长度，免得被 max_tokens 截断
     json_max_tokens: int = 8192
     max_retries: int = 6
@@ -220,6 +221,8 @@ def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
 
 
 _FAPI = "https://fapi.binance.com"
+logger = logging.getLogger(__name__)
+
 _LIQ_TOTALS: Mapping[str, float] = {}
 
 
@@ -667,6 +670,29 @@ def _reported_cost(usage: Any) -> float | None:
     return None
 
 
+_SPEAKERS = (
+    ("investment_debate_state", "bull_history", "Bull Analyst:", "多头", True),
+    ("investment_debate_state", "bear_history", "Bear Analyst:", "空头", True),
+    ("risk_debate_state", "aggressive_history", "Aggressive Analyst:", "激进派", False),
+    ("risk_debate_state", "conservative_history", "Conservative Analyst:", "保守派", False),
+    ("risk_debate_state", "neutral_history", "Neutral Analyst:", "中立派", False),
+)
+
+
+def empty_speeches(state: Mapping[str, Any], debate_rounds: int, risk_rounds: int) -> list[str]:
+    """该开口却只剩「Bull Analyst:」这种空壳的辩手。TradingAgents 把模型空回答照样记进历史，
+    研究经理看着空记录也会给结论，所以这里直接查出来，会议按失败处理。"""
+    out: list[str] = []
+    for outer, key, label, name, is_debate in _SPEAKERS:
+        if (debate_rounds if is_debate else risk_rounds) <= 0:
+            continue
+        inner = state.get(outer)
+        history = inner.get(key, "") if isinstance(inner, Mapping) else ""
+        if not str(history).replace(label, "").strip():
+            out.append(name)
+    return out
+
+
 class CostMeter:
     """一场会议（或总盘会）的花费累计。线程安全：模型请求发生在后台线程里。
 
@@ -682,6 +708,10 @@ class CostMeter:
         self._unreported: dict[str, list[int]] = {}
         self._aborted = False
         self.calls = 0
+        self.on_call: Callable[[str | None, int], None] | None = None
+        """每次模型响应后回调 (finish_reason, 输出 token 数)；会议实况用它记每次调用的结束原因。"""
+        self.truncated = 0
+        """因为 max_tokens 到顶而被截断的回答数（finish_reason == "length"）。"""
 
     def add(self, model: str, input_tokens: int, output_tokens: int, cost: float | None) -> None:
         with self._lock:
@@ -699,12 +729,22 @@ class CostMeter:
         cost = _reported_cost(usage)
         model = str((getattr(response, "llm_output", None) or {}).get("model_name") or "")
         tin = tout = 0
+        reason: str | None = None
         for gens in getattr(response, "generations", None) or []:
             for gen in gens:
+                info = getattr(gen, "generation_info", None) or {}
+                reason = info.get("finish_reason") or reason
+                if info.get("finish_reason") == "length":
+                    with self._lock:
+                        self.truncated += 1
                 msg = getattr(gen, "message", None)
                 if msg is None:
                     continue
                 meta = getattr(msg, "response_metadata", None) or {}
+                reason = meta.get("finish_reason") or reason
+                if meta.get("finish_reason") == "length" and info.get("finish_reason") != "length":
+                    with self._lock:
+                        self.truncated += 1
                 um = getattr(msg, "usage_metadata", None) or {}
                 tin += int(um.get("input_tokens", 0) or 0)
                 tout += int(um.get("output_tokens", 0) or 0)
@@ -712,6 +752,11 @@ class CostMeter:
                 if cost is None:
                     cost = _reported_cost(meta.get("token_usage"))
         self.add(model, tin, tout, cost)
+        if self.on_call is not None:
+            try:
+                self.on_call(str(reason) if reason else None, tout)
+            except Exception:
+                logger.exception("记录模型调用信息失败")
 
     @property
     def cost(self) -> float:
@@ -938,6 +983,7 @@ class TradingAgentsEngine:
         live = MeetingLive(Path(self._s.live_dir), entry.symbol) if self._s.live_dir else None
         if live:
             self._live[entry.symbol] = live
+            meter.on_call = live.note_call
         try:
             res = self._analyze_run(entry, regime, handler, meter, live)
         except Exception as exc:  # 同上：失败也带上真实花费
@@ -970,6 +1016,17 @@ class TradingAgentsEngine:
         decision = str(state.get("final_trade_decision", ""))
         if not decision:
             raise RuntimeError(f"{entry.symbol}：TradingAgents 没有给出结论")
+        if meter.truncated:
+            raise RuntimeError(
+                f"{entry.symbol}：{meter.truncated} 次模型回答被 max_tokens 截断"
+                f"（当前 {self._s.max_tokens}），辩论 / 决定不完整，这场会不能用；调大 max_tokens"
+            )
+        if empty := empty_speeches(state, self._s.debate_rounds, self._s.risk_rounds):
+            # 辩论没产出还给结论，等于没开会（实测 max_tokens 太小时研究经理看着空记录给 Hold）
+            raise RuntimeError(
+                f"{entry.symbol}：{'、'.join(empty)}的发言是空的（模型回答为空，多半被 max_tokens "
+                "挤掉了），这场会不能用"
+            )
         if live:
             live.converting()
 

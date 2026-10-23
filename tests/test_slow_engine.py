@@ -42,7 +42,7 @@ def test_build_config_overrides_without_mutating_base() -> None:
     assert cfg["output_language"].startswith("Chinese.")
     assert "PERPETUAL" in cfg["output_language"]  # 永续合约语境，不是股票
     assert (cfg["max_debate_rounds"], cfg["max_risk_discuss_rounds"]) == (1, 1)
-    assert (cfg["max_tokens"], cfg["llm_max_retries"]) == (4096, 6)
+    assert (cfg["max_tokens"], cfg["llm_max_retries"]) == (8192, 6)
     assert cfg["data_vendors"]["core_stock_apis"] == "binance"
     assert cfg["data_vendors"]["x"] == "y"
     assert base["data_vendors"]["core_stock_apis"] == "yfinance"  # type: ignore[index]
@@ -281,3 +281,43 @@ def test_engine_reports_partial_cost_and_aborts() -> None:
         meter.check()
     eng._done("SOLUSDT", meter)
     assert eng.partial_cost("SOLUSDT") is None
+
+
+def test_empty_speeches_detects_label_only_debate() -> None:
+    from jiaoyi.slow.tradingagents_engine import empty_speeches
+
+    shell = {
+        "investment_debate_state": {
+            "bull_history": "\nBull Analyst: ",
+            "bear_history": "\nBear Analyst: 有内容",
+        },
+        "risk_debate_state": {
+            "aggressive_history": "\nAggressive Analyst: 激进",
+            "conservative_history": "\nConservative Analyst: 保守",
+            "neutral_history": "",
+        },
+    }
+    assert empty_speeches(shell, 1, 1) == ["多头", "中立派"]
+    assert empty_speeches(shell, 0, 0) == []  # 轮数为 0：本来就没人发言
+    assert empty_speeches({}, 1, 1) == ["多头", "空头", "激进派", "保守派", "中立派"]
+
+
+def test_cost_meter_counts_truncated_answers() -> None:
+    from types import SimpleNamespace as NS
+
+    from jiaoyi.slow.tradingagents_engine import CostMeter
+
+    m = CostMeter({"flash": (0.3, 1.2), "pro": (0.5, 2.0)})
+
+    def resp(reason: str, where: str) -> NS:
+        msg = NS(
+            usage_metadata={},
+            response_metadata={"finish_reason": reason} if where == "meta" else {},
+        )
+        info = {"finish_reason": reason} if where == "info" else {}
+        return NS(llm_output={}, generations=[[NS(message=msg, generation_info=info)]])
+
+    m.record_response(resp("stop", "info"))
+    m.record_response(resp("length", "info"))
+    m.record_response(resp("length", "meta"))
+    assert m.truncated == 2
