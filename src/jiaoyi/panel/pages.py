@@ -77,6 +77,9 @@ class GroupExposure(BaseModel):
     category: str
     exposure_x: float
     cap_x: float
+    notional_usdt: float
+    cap_usdt: float | None
+    """上限折合金额 = cap_x × 现在的本金；没拿到本金就是 None。"""
 
 
 class PositionsPage(BaseModel):
@@ -156,6 +159,8 @@ def build_positions(
                 category=cat.value,
                 exposure_x=notional / equity if equity else 0.0,
                 cap_x=risk.category_exposure_x[cat],
+                notional_usdt=notional,
+                cap_usdt=risk.category_exposure_x[cat] * equity if equity else None,
             )
         )
     trails: dict[str, list[TrailItem]] = {}
