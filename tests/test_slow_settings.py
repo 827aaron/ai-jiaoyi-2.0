@@ -21,7 +21,7 @@ def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
     assert kw["symbol_min_interval"] == timedelta(hours=1.67)
     assert kw["expiry_lead"] == timedelta(minutes=20)
     # 2h 档 = 2 小时一轮会：关键位突破 / 新入池也要隔 100 分钟
-    assert kw["symbol_timeout_s"] == 600 and kw["min_refresh_gap"] == timedelta(minutes=100)
+    assert kw["symbol_timeout_s"] == 900 and kw["min_refresh_gap"] == timedelta(minutes=100)
     assert cfg.effective_pick_max(20) == 10
 
     one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()

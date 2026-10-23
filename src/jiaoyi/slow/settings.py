@@ -111,7 +111,7 @@ class ScheduleConfig(_Strict):
         description="作战卡到期前多久开会换卡。要大于一轮会议的耗时，否则卡过期到新卡出来之间不开新仓。",
     )
     symbol_timeout_s: float = Field(
-        default=600.0, ge=60.0, le=1800.0, description="单个标的的会议超时。"
+        default=900.0, ge=60.0, le=1800.0, description="单个标的的会议超时。"
     )
     min_refresh_gap_min: float = Field(
         default=5.0,

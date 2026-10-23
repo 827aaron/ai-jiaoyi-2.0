@@ -678,3 +678,12 @@ async def test_reservation_is_replaced_by_actual_cost_when_meeting_ends(
     c, _, _ = make(tmp_path, FakeEngine(["AAUSDT", "BBUSDT"]), now, failed_meeting_cost_usd=0.5)
     card = await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
     assert c._stats.cost_usd == pytest.approx(card.llm_cost_usd)  # 0.01 + 2×0.02，没有多记估算
+
+
+def test_timeout_reason_is_not_empty() -> None:
+    from jiaoyi.slow.commander import BattleCardCommander
+
+    c = BattleCardCommander.__new__(BattleCardCommander)
+    c._symbol_timeout_s = 900.0
+    assert "900" in c._why(TimeoutError())
+    assert c._why(ValueError("x")) == "x"
