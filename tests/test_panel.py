@@ -710,6 +710,9 @@ def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
     ]
     doing = {r.role: r.doing for r in team.roles}
     assert doing[c.Role.COMMANDER] == "开会中：BTC"
+    # 总盘会单独一个节点（流程图：选币 → 总盘会 → 军师团 / 盘口员）
+    assert team.market is not None and team.market.symbol == "_MARKET"
+    assert team.market_progress == "done"
     prog = {r.role: r.progress for r in team.roles}
     assert prog[c.Role.COMMANDER] == "doing"
 

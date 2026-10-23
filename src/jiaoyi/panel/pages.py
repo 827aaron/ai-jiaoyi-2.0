@@ -117,6 +117,10 @@ class TeamPage(BaseModel):
     """所选角色今天的记录，最新在前。"""
     meetings: list[MeetingSummary] = []
     """选中军师团时：每个币最近一场会（data/meeting_live/），正在开的在前。"""
+    market: MeetingSummary | None = None
+    """最近一场总盘会（挑哪些币上会、盘口员盯哪些币）；流程图上单独一个节点。"""
+    market_progress: Progress = "wait"
+    """总盘会节点的点：开会中 = 正在做，今天开完 = 做完，失败 / 中断 = 出错。"""
     predictor_mode: Literal["on_demand", "all_symbols"] | None = None
     """预测员算哪些币（``[predictor] mode``）；流程图按它写“只算作战卡上的 N 个币”。"""
 
@@ -281,9 +285,27 @@ def build_team(
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
     meets = meetings if chosen is Role.COMMANDER else []
+    market = next((m for m in meetings if m.symbol == MARKET), None)
     return TeamPage(
-        roles=cards, selected=chosen, records=mine, meetings=meets, predictor_mode=predictor_mode
+        roles=cards,
+        selected=chosen,
+        records=mine,
+        meetings=meets,
+        predictor_mode=predictor_mode,
+        market=market,
+        market_progress=_market_progress(market, now, run.tz),
     )
+
+
+def _market_progress(m: MeetingSummary | None, now: datetime, tz: str) -> Progress:
+    if m is None:
+        return "wait"
+    if m.status == "running":
+        return "doing"
+    if m.status in ("failed", "stale"):
+        return "err"
+    end = m.finished_at or m.updated_at
+    return "done" if end and local_day(end, tz) == local_day(now, tz) else "wait"
 
 
 @dataclass(frozen=True)

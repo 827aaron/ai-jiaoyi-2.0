@@ -655,12 +655,12 @@ async function loadKlines(force) {
    宽度不够整体缩放，手机上改成按泳道竖排。点 = 进度 + 健康：出错 > 正在做 > 这一轮做完 > 等待 */
 const TF_W = 1180, TF_H = 570, NODE_W = 168, NODE_H = 92;
 const TF_POS = {
-  screener: [10, 34], commander: [250, 34], card: [490, 34],
+  screener: [10, 34], market: [250, 34], commander: [490, 34], card: [730, 34],
   book_reader: [10, 214], predictor: [250, 290], sentinel: [490, 214], gate: [730, 214], risk_guard: [970, 186], executor: [970, 300],
   alerting: [10, 446], reconciler: [250, 446], patrol: [490, 446], keeper: [730, 446], lifeboat: [970, 446],
 };
 const TF_LANES = [
-  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "commander", "card"]],
+  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "market", "commander", "card"]],
   ["② 发现信号 → 下单", "几秒内走完", 166, 230, ["book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor"]],
   ["③ 看着持仓", "有仓位就一直盯", 412, 150, ["lifeboat", "keeper", "patrol", "reconciler", "alerting"]],
 ];
@@ -670,10 +670,11 @@ const tfT = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1]];
 const tfB = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1] + NODE_H];
 // [起点, 终点, 终点角色（连线颜色跟它）, 标签, 弯法]
 const TF_EDGES = [
-  [tfR("screener"), tfL("commander"), "commander", "候选池"],
-  [tfB("screener"), tfT("book_reader"), "book_reader", "订阅行情", "v-top"],
+  [tfR("screener"), tfL("market"), "market", "候选池"],
+  [tfR("market"), tfL("commander"), "commander", "上会名单"],
+  [tfB("market"), tfT("book_reader"), "book_reader", "要盯的币", "gap"],
   [tfR("commander"), tfL("card"), "card", "写卡"],
-  [tfB("card"), tfT("sentinel"), "sentinel", "关键价位"],
+  [tfB("card"), tfT("sentinel"), "sentinel", "关键价位", "gap"],
   [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
@@ -694,6 +695,8 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   if (how === "elbow") { d = `M${x1},${y1} H${x2 - 12} Q${x2},${y1} ${x2},${y1 + 12} V${y2 - 1}`; lx = x2 - 70; ly = y1 - 6; dir = "d"; }
   else if (how === "down-right") { d = `M${x1},${y1} V${y2 - 10} Q${x1},${y2} ${x1 + 10},${y2} H${x2 - 1}`; lx = x1 + 14; ly = y2 - 6; dir = "r"; }
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
+  // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
+  else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
@@ -706,6 +709,12 @@ function tfCardNode() {
   const tradable = c ? c.symbols.filter((x) => x.bias === "long" || x.bias === "short").length : 0;
   const a = !c ? "还没有作战卡" : c.valid ? `${tradable} 个可做 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}` : `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）`;
   return { key: "card", html: `<span class="nm">作战卡${c && c.version ? " v" + c.version : ""}</span><small>${esc(a)}</small><small class="cnt">关键价位、止损范围</small>`, cls: "doc", act: c ? clickable("card") : "" };
+}
+// 总盘会：军师团先开的那场，挑哪些币上会（给军师团）、哪些币要盯（给盘口员）
+function tfMarketNode(m, p) {
+  const st = !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 10 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
+  const now = m && m.status === "running" ? `开会中：${MARKET_STAGE[m.stage] || m.stage || "开始"}` : "";
+  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
 }
 // 心跳好坏单独用角标（点只表示流程走到哪）
 function hbBadge(r) {
@@ -736,7 +745,9 @@ function teamFlow(d) {
   const by = Object.fromEntries(d.roles.map((r) => [r.role, r]));
   const prog = Object.fromEntries(d.roles.map((r) => [r.role, r.progress]));
   prog.card = data && data.card && data.card.valid ? "done" : "wait";
+  prog.market = d.market_progress;
   const node = (k, inCanvas) => {
+    if (k === "market") return `<div class="tf-node ${d.market_progress}" ${clickable("meeting", MARKET)} style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress)}</div>`;
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
