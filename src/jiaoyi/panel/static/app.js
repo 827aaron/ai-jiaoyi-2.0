@@ -128,7 +128,7 @@ function statusBar() {
     <div class="kpi"><small>总资产 · 含浮盈浮亏${src}</small><b>${money(k.equity_usdt)} <span class="u">U</span></b></div>
     <div class="kpi click" ${clickable("daypnl")} title="点开看明细：平仓毛利、手续费、资金费、持仓浮盈变化、AI 费"><small>今日盈亏 · 账户 <span class="dim">ⓘ 明细</span></small><b class="${cls(k.day_pnl_usdt)}">${signed(k.day_pnl_usdt)} U <span class="p">${k.day_pnl_pct == null ? "" : signed(k.day_pnl_pct, 2) + "%"}</span></b>${dayParts(k)}${k.as_of ? `<small class="dim">数据截至 ${hms(k.as_of)}</small>` : ""}</div>
     <div class="kpi"><small>离熔断（−${k.halt_pct}%）</small><b class="${k.halted ? "down" : ""}" style="font-size:15px">${k.halted ? "已熔断" : k.to_halt_usdt == null ? "—" : "还差 " + money(k.to_halt_usdt, 0) + " U"}</b><div class="meter ${k.halted ? "full" : ""}"><span style="width:${pct}%"></span></div></div>
-    <div class="kpi"><small title="所有持仓名义价值（含杠杆）÷ 本金">敞口（含杠杆）</small><b style="font-size:15px">${k.exposure_x == null ? "—" : k.exposure_x.toFixed(2)} / ${k.max_exposure_x} 倍</b></div>
+    <div class="kpi"><small title="所有持仓名义价值（含杠杆）加起来，和上限比；不是杠杆">总仓位（含杠杆）</small><b style="font-size:15px">${k.equity_usdt && k.exposure_x != null ? `${money(k.exposure_x * k.equity_usdt, 0)} / ${money(k.max_exposure_x * k.equity_usdt, 0)} U` : `${k.exposure_x == null ? "—" : k.exposure_x.toFixed(2)} / ${k.max_exposure_x} 倍本金`}</b>${k.equity_usdt && k.exposure_x != null ? `<div class="dim small">本金的 ${k.exposure_x.toFixed(2)} / ${k.max_exposure_x} 倍</div>` : ""}</div>
   </div>`;
 }
 
@@ -981,7 +981,7 @@ P.positions = (arg) => {
   const sel = d.positions.find((p) => p.position_id === arg) || d.positions[0];
   const groups = d.groups.filter((g) => g.cap_x > 0 || g.exposure_x > 0).map((g) => {
     const r = g.cap_x ? g.exposure_x / g.cap_x : 1;
-    return `<div class="bar ${r >= 1 ? "full" : r >= 0.7 ? "hot" : ""}"><div class="lab"><span>${esc(CAT[g.category] || g.category)}</span><span class="num">${g.exposure_x.toFixed(2)} / ${g.cap_x} 倍</span></div><div class="tr"><span style="width:${Math.min(100, r * 100)}%"></span></div></div>`;
+    return `<div class="bar ${r >= 1 ? "full" : r >= 0.7 ? "hot" : ""}"><div class="lab"><span>${esc(CAT[g.category] || g.category)}</span><span class="num" title="这一类合计 / 上限（本金 ${g.cap_x} 倍，不是杠杆）">${g.cap_usdt != null ? `${money(g.notional_usdt, 0)} / ${money(g.cap_usdt, 0)} U` : `${g.exposure_x.toFixed(2)} / ${g.cap_x} 倍本金`}</span></div><div class="tr"><span style="width:${Math.min(100, r * 100)}%"></span></div></div>`;
   }).join("");
   const now = new Date(data.now).getTime();
   const rows = d.positions.map((p) => {
@@ -1541,9 +1541,9 @@ const PLAIN = {
   "screener.weight_liquidations": "强平的权重",
   risk_per_trade_pct: "每笔最多亏本金的百分之几",
   max_leverage: "最多开几倍杠杆",
-  max_total_exposure_x: "所有仓位加起来（含杠杆）最多是本金的几倍（不是杠杆，杠杆看「最多开几倍杠杆」）",
+  max_total_exposure_x: "所有仓位合计最多（含杠杆，不是杠杆倍数）",
   daily_loss_halt_pct: "今天亏到本金的百分之几就停止开新仓",
-  max_notional_per_trade_x: "单笔仓位（含杠杆）最大是本金的几倍",
+  max_notional_per_trade_x: "单笔仓位最大（含杠杆，不是杠杆倍数）",
   max_notional_per_trade_usdt: "单笔仓位绝对上限（含杠杆）USDT（可不填）",
   max_open_positions: "同时最多持几个币",
   lifeboat_stop_multiplier: "交易所兜底止损比正常止损远几倍",
@@ -1805,7 +1805,7 @@ const CORE = ["risk.risk_per_trade_pct", "risk.daily_loss_halt_pct", "risk.max_l
 const ADV = [
   { id: "risk", t: "风控细项", note: "首屏三项之外的仓位上限。都是你定的上限，AI 改不了。", groups: [
     { g: "仓位上限", keys: ["risk.max_total_exposure_x", "risk.max_notional_per_trade_x", "risk.max_notional_per_trade_usdt", "risk.max_open_positions"] },
-    { g: "每类币总仓位上限（这一类所有仓位加起来，含杠杆，最多是本金的几倍）", cat: true, hint: "这里不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。比如山寨币 5 倍 = 所有山寨币仓位的名义价值加起来不超过本金 × 5。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的总仓位倍数。" },
+    { g: "每类币合计仓位上限（这一类所有仓位的名义价值加起来，含杠杆）", cat: true, hint: "不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。金额按现在的本金实时折算，设置里填的是本金的几倍，本金变了金额跟着变。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的所有仓位合计上限。" },
   ] },
   { id: "exec", t: "执行", note: "下单时的门槛、止损止盈、管家和拍板人。带“跟最长持仓走”的改单笔最长持仓时自动换，带“跟档位走”的切档位自动换。", groups: [
     { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple"] },
@@ -1846,7 +1846,13 @@ const UNIT = {
 };
 // 推荐值里只有这几项是“越小越冒险”
 const LOWER_RISKIER = ["min_tp_fee_multiple", "min_quote_volume_usdt", "min_depth_usdt", "min_listed_days", "min_range_24h_pct"];
-const valOf = (i, v = i.value) => (v === 0 && ZERO_AS[i.key] && (i.sec === "screener" || i.sec === "schedule") ? ZERO_AS[i.key] : null) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
+// 按本金几倍设的上限：金额为主、倍数为辅（金额按现在的本金折算），免得和杠杆倍数混
+const EQ_X = ["max_total_exposure_x", "max_notional_per_trade_x"];
+const eqBasis = () => (pageData && pageData.recommend_basis_usdt) || null;
+const eqX = (i) => i.cat || (i.sec === "risk" && EQ_X.includes(i.key));
+const eqAmt = (x) => (eqBasis() ? `≈${money(x * eqBasis(), 0)} U` : "");
+const valOf = (i, v = i.value) => (eqX(i) && typeof v === "number" && eqBasis() ? `${eqAmt(v)}（本金 ${+v.toFixed(2)} 倍）` : valRaw(i, v));
+const valRaw = (i, v = i.value) => (v === 0 && ZERO_AS[i.key] && (i.sec === "screener" || i.sec === "schedule") ? ZERO_AS[i.key] : null) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
 const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWER_RISKIER.includes(i.key) ? i.value < i.recommended : i.value > i.recommended || (i.value === 0 && i.key in ZERO_AS));
 
 // 段.键 → 设置项（每类币上限拼成 category 段）
@@ -1854,7 +1860,7 @@ function settingIndex(d) {
   const ix = {};
   for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "budget", "screener", "tiers"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
   const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
-  for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: `${CAT[k] || k} · 这一类仓位加起来最多是本金的`, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总仓位倍数）`, editable: true, choices: [] };
+  for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: `${CAT[k] || k}合计最多`, value: v, bounds: tot == null ? "" : `本金的 0–${tot} 倍（不超过所有仓位合计上限）`, editable: true, choices: [] };
   return ix;
 }
 // 把五个标签展开成 [标签, [组名, 提示, 项…]]；没列到的键收进对应标签的“其他”
@@ -1931,11 +1937,12 @@ function editOne(id, useRec) {
     // 档位给默认的键：没写死时留空（= 跟档位走），写死了才填文件里的值
     const shown = useRec ? i.recommended : i.value == null || (i.profiled && !i.pinned) ? "" : i.value;
     const ph = i.profiled ? `留空 = 跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}（${fmtVal(i.pinned ? i.profile_default : i.value, i)}）` : i.nullable ? "留空 = 用默认" : "";
-    input = `<input id="dlg-v" type="number" step="any" inputmode="decimal" value="${esc(shown)}" placeholder="${esc(ph)}">`;
+    input = `<input id="dlg-v" type="number" step="any" inputmode="decimal" value="${esc(shown)}" placeholder="${esc(ph)}">`
   }
   const now = [`现在 ${valOf(i)}`, i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : "", i.pinned ? `${i.sec === "fast_loop" ? "最长持仓" : "档位"}默认 ${valOf(i, i.profile_default)}` : i.profiled ? `现在跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}走` : "", i.bounds ? `范围 ${esc(i.bounds)}` : ""].filter(Boolean).join("，");
-  ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${input}</label>`}${pwField(data.control)}
+  ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${eqX(i) ? "（填本金的几倍）" : ""}${input}</label>`}${pwField(data.control)}
     ${i.key === "atr_period_min" || i.key === "time_limit_s" ? '<div class="small warn" id="dlg-fit"></div>' : ""}
+    ${eqX(i) && eqBasis() ? `<div class="small" id="dlg-amt"></div>` : ""}
     <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。改完点「重启生效」才用上。</div>`, "保存", false, async () => {
     const el = $("#dlg-v");
     let v;
@@ -1969,6 +1976,17 @@ function editOne(id, useRec) {
     dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。点「重启生效」后用上。`);
     poll();
   });
+  // 填的是本金几倍，旁边实时写折合多少 U
+  const amtEl = $("#dlg-amt");
+  if (amtEl) {
+    const show = () => {
+      const raw = $("#dlg-v").value.trim();
+      const x = raw === "" ? i.value : Number(raw);
+      amtEl.textContent = Number.isFinite(x) ? `填的是本金的几倍：${+x.toFixed(2)} 倍 = 合计最多 ${eqAmt(x)}（按现在本金 ${money(eqBasis(), 0)} U 算，不是杠杆）` : "";
+    };
+    $("#dlg-v").addEventListener("input", show);
+    show();
+  }
   // 最长持仓和 K 线周期对不上时，边选边提醒（不拦）
   const fitEl = $("#dlg-fit");
   if (fitEl) {

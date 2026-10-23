@@ -395,6 +395,8 @@ def test_positions_page_groups_and_trail(tmp_path: Path) -> None:
     major = next(g for g in page.groups if g.category == "major")
     assert major.exposure_x == pytest.approx(68044.0 * 0.015 / 10_080)
     assert major.cap_x == RISK.category_exposure_x[c.Category.MAJOR]
+    assert major.notional_usdt == pytest.approx(68044.0 * 0.015)
+    assert major.cap_usdt == pytest.approx(major.cap_x * 10_080)
     assert [t.text for t in page.trails[p.position_id]] == ["BTC 拿住"]
 
 
