@@ -157,12 +157,19 @@ function pwField(c) {
   return `<label class="pw">面板密码<input type="password" id="dlg-pw" autocomplete="current-password"></label><div class="dim small">连错 5 次锁 15 分钟。</div>`;
 }
 
+// 设置页常显：有改动没生效时高亮「重启生效」，否则是普通的「重启主程序」（验收时随时要重启）
+function restartBtn() {
+  const pending = data.control.config_pending === true;
+  return `<button class="btn b-sm ${pending ? "b-go" : ""}" ${clickable("cmd", "restart")} ${data.running ? "" : 'disabled title="主程序没在运行"'}>${pending ? "重启生效" : "重启主程序"}</button>`;
+}
+
 function askCommand(kind, params = {}, what = "") {
   const k = CMD[kind];
   const c = data.control;
   const startedBefore = c.started_at || null;
   const warn = data.running ? "" : `<div class="note warn">主程序没在运行，指令 60 秒内没人执行就作废。</div>`;
-  ask(`${k.title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
+  const title = kind === "restart" && c.config_pending !== true ? "重启主程序" : k.title;
+  ask(`${title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
     const pw = $("#dlg-pw");
     const res = await post("/api/command", { kind, params, password: pw ? pw.value : null });
     onOk = null;
@@ -256,16 +263,41 @@ const json = (o) => (o && Object.keys(o).length ? `<pre class="json">${esc(JSON.
 const splitIdle = (list) => [list.filter((s) => s.bias !== "no_trade"), list.filter((s) => s.bias === "no_trade")];
 const idleLine = (idle) => `观望：${idle.slice(0, 6).map((s) => coin(s.symbol)).join("、")}${idle.length > 6 ? " 等" : ""} 共 ${idle.length} 个`;
 
-function showCard() {
+// 关键位分「支撑 / 压力」：有现价就按在现价下方 / 上方分（同慢环落卡），各自由近到远，标距现价百分比
+S.px = {};
+function levelsHtml(levels, px) {
+  if (!levels || !levels.length) return "";
+  const below = (l) => (px ? l.price < px : l.kind === "support");
+  const dist = (l) => (px ? Math.abs(l.price - px) : 0);
+  const fmt = (l) => `${price(l.price)}${px ? `<span class="dim">（${l.price >= px ? "+" : "−"}${(Math.abs(l.price - px) / px * 100).toFixed(1)}%）</span>` : ""}`;
+  const group = (name, list) => (list.length ? `<div class="small"><span class="dim">${name}</span> ${list.sort((a, b) => dist(a) - dist(b)).map(fmt).join(" · ")}</div>` : "");
+  return `${group("支撑", levels.filter(below))}${group("压力", levels.filter((l) => !below(l)))}${px ? `<div class="dim small">现价 ${price(px)}</div>` : ""}`;
+}
+
+// 弹窗打开时取一次各币现价（1 分钟线最后一根收盘），拿到后重画；取不到就只按类型分组、不标百分比
+async function loadCardPrices(c) {
+  const syms = c.symbols.filter((s) => s.key_levels && s.key_levels.length && !(s.symbol in S.px)).map((s) => s.symbol);
+  if (!syms.length) return;
+  await Promise.all(syms.map(async (sym) => {
+    try {
+      const bars = await getJson(`/api/klines?symbol=${encodeURIComponent(sym)}&interval=1m`);
+      if (bars.length) S.px[sym] = bars[bars.length - 1].close;
+    } catch (e) { /* 拿不到现价：照旧显示 */ }
+  }));
+  if ($("#layer .dlg.wide") && Object.keys(S.px).length) showCard(false);
+}
+
+function showCard(fetchPrices = true) {
   const c = data && data.card;
   if (!c) return;
+  if (fetchPrices) { S.px = {}; loadCardPrices(c); }
   // 观望 = 军师团看过、这一轮不开仓：默认收成一行，只把有方向的币摊开
   const [act, idle] = splitIdle(c.symbols);
   const row = (s) => {
     const [t, k] = BIAS[s.bias] || [s.bias, ""];
     return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(s.size_tier_max || "—")}</td>
-      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${s.key_levels.length ? `<div class="dim small">关键位：${s.key_levels.map(price).join(" / ")}</div>` : ""}</td></tr>`;
+      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}</td></tr>`;
   };
   const head = '<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th>单笔 U</th><th>最大档</th><th>理由</th></tr></thead>';
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
@@ -890,8 +922,9 @@ P.settings = () => {
     : '<div class="dim">还没有在网页上改过。</div>';
   const keys = keyRows(d) || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
-    <section class="card"><div class="ch"><h2>运行模式</h2></div>
+    <section class="card"><div class="ch"><h2>运行模式</h2><span class="r">${restartBtn()}</span></div>
       <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
+      <div class="fr"><label>主程序</label><b>${data.running ? "运行中" : '<span class="warn">没在运行</span>'}${data.control.started_at ? `<span class="dim small"> · ${hm(data.control.started_at)} 启动</span>` : ""}</b></div>
       <div class="fr"><label>面板密码</label><b>${d.password_set ? "已设置" : '<span class="warn">未设置（jiaoyi set-panel-password）</span>'}</b></div>
       <div class="fr"><label>实盘解锁</label><b>${d.live_armed ? '<span class="down">已解锁</span>' : "未解锁"}</b></div></div>
       <div class="foot">切实盘要确认词 + 面板密码，在 Mac mini 终端用 jiaoyi go-live。</div></section>
