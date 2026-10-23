@@ -17,18 +17,18 @@ def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
     assert cfg.engine_settings() == TradingAgentsSettings(max_tokens=None, json_max_tokens=None)
     kw = cfg.commander_kwargs()
     assert kw["concurrency"] == 8
-    assert kw["ttl"] == timedelta(hours=2)
-    assert kw["symbol_min_interval"] == timedelta(hours=1.67)
+    assert kw["ttl"] == timedelta(minutes=140)
+    assert kw["symbol_min_interval"] == timedelta(minutes=115)
     assert kw["expiry_lead"] == timedelta(minutes=20)
-    # 2h 档 = 2 小时一轮会：关键位突破 / 新入池也要隔 100 分钟
-    assert kw["symbol_timeout_s"] == 900 and kw["min_refresh_gap"] == timedelta(minutes=100)
+    # 2h 档 = 每 120 分钟一轮会：关键位突破 / 新入池也要隔 120 分钟
+    assert kw["symbol_timeout_s"] == 900 and kw["min_refresh_gap"] == timedelta(minutes=120)
     assert cfg.effective_pick_max(20) == 10
 
     one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()
-    assert one_hour["ttl"] == timedelta(hours=1) and one_hour["concurrency"] == 8
+    assert one_hour["ttl"] == timedelta(minutes=80) and one_hour["concurrency"] == 8
     assert one_hour["expiry_lead"] == timedelta(minutes=20)
     assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
-    assert one_hour["min_refresh_gap"] == timedelta(minutes=40)
+    assert one_hour["min_refresh_gap"] == timedelta(minutes=60)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
@@ -42,7 +42,7 @@ def test_written_key_beats_profile(tmp_path: Path) -> None:
     p.write_text("[schedule]\nconcurrency = 2\nrefresh_lead_min = 30\n", encoding="utf-8")
     cfg = load_slow_config(p, "60m")
     assert cfg.schedule.concurrency == 2 and cfg.schedule.refresh_lead_min == 30
-    assert cfg.schedule.card_ttl_hours == 1.0  # 没写的仍取档位
+    assert cfg.schedule.card_ttl_min == 80  # 没写的仍取档位
 
 
 def test_overrides(tmp_path: Path) -> None:
@@ -68,7 +68,7 @@ def test_overrides(tmp_path: Path) -> None:
         "[meeting]\ndebate_rounds = 9\n",
         '[meeting]\npick_tier = "huge"\n',
         "[schedule]\nconcurrency = 99\n",
-        "[schedule]\ncard_ttl_hours = 24\n",
+        "[schedule]\ncard_ttl_min = 2400\n",
         "[meeting]\ntypo_field = 1\n",
         "not = [valid",
     ],
@@ -186,7 +186,7 @@ def test_missing_slow_stack_only_when_key_present(monkeypatch: pytest.MonkeyPatc
 
 def test_refresh_gap_must_be_shorter_than_card_ttl(tmp_path: Path) -> None:
     path = tmp_path / "slow.toml"
-    path.write_text("[schedule]\nmin_refresh_gap_min = 120\n", encoding="utf-8")
+    path.write_text("[schedule]\nmin_refresh_gap_min = 150\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="min_refresh_gap_min"):
         load_slow_config(path)
 
@@ -227,3 +227,31 @@ def test_tiers_section_defaults_and_cautions() -> None:
     sc = cfg.screener_config(40, 8.0, 8.0)
     assert (sc.tiers, sc.tier_head, sc.tier_mid) == (True, 3, 4)
     assert cfg.commander_kwargs()["tiers"].mid_daily_pick == 5
+
+
+def test_tier_is_meeting_interval() -> None:
+    from jiaoyi.core import profiles
+
+    for name, mins in (("2h", 120), ("60m", 60), ("30m", 30), ("15m", 15)):
+        sched = profiles.defaults(name, "slow.schedule")
+        assert profiles.defaults(name, "app")["slow_loop_interval_min"] == mins
+        assert sched["min_refresh_gap_min"] == mins
+        assert sched["card_ttl_min"] == mins + sched["refresh_lead_min"]
+
+
+def test_15m_tier_warns_instead_of_stretching() -> None:
+    from jiaoyi.core import profiles
+    from jiaoyi.slow.settings import ScheduleConfig
+
+    cfg = ScheduleConfig(**profiles.defaults("15m", "slow.schedule"))
+    assert cfg.min_refresh_gap_min == 15
+    hint = cfg.caution()
+    assert hint is not None and "开会间隔 15" in hint
+    assert ScheduleConfig(**profiles.defaults("30m", "slow.schedule")).caution() is None
+
+
+def test_legacy_hour_keys_get_a_clear_message(tmp_path: Path) -> None:
+    path = tmp_path / "slow.toml"
+    path.write_text("[schedule]\ncard_ttl_hours = 2\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"card_ttl_min.*乘 60"):
+        load_slow_config(path)

@@ -37,7 +37,6 @@ from jiaoyi.contracts import (
     RunMode,
     SymbolPool,
 )
-from jiaoyi.core import profiles
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.pool_overrides import (
@@ -124,6 +123,11 @@ class _Blocks(Protocol):
     def blocked_symbols(self) -> dict[str, str]: ...
 
     def unblock_symbol(self, symbol: str) -> None: ...
+
+
+def pred_len_for(time_limit_s: int) -> int:
+    """预测员预测几根 5 分钟线：覆盖单笔最长持仓，限 3–48 根。"""
+    return min(max(round(time_limit_s / 300), 3), 48)
 
 
 def read_blocked(data_dir: str | Path) -> dict[str, str]:
@@ -456,7 +460,7 @@ def build_modules(
 
     predictor = KronosForecaster(
         app_cfg.predictor_enabled,
-        KronosSettings(**profiles.defaults(app_cfg.profile, "predictor")),  # 预测长度跟档位走
+        KronosSettings(pred_len=pred_len_for(fast.time_limit_s)),  # 预测长度跟单笔最长持仓走
         log_sink=decision_log,
         clock=clock,
         cfg=app_cfg.predictor,

@@ -200,8 +200,8 @@ class BattleCardCommander:
         tier_path: Path | None = None,
         live_dir: Path | None = None,
     ) -> None:
-        if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
-            raise ValueError("作战卡有效期应在 1–4 小时")
+        if ttl <= timedelta(0):
+            raise ValueError("作战卡有效期必须大于 0")
         self._clock = clock
         self._brief = brief
         self._journal = journal
