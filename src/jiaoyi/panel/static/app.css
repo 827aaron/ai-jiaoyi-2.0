@@ -384,3 +384,7 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
   .tf-stack .tf-node { position: static; width: auto; min-height: 0; }
   .tf-now { margin-left: 0; }
 }
+
+/* 作战卡：快到期的币变灰；历史卡的日期 / 币筛选 */
+tr.fade td { opacity: 0.55; }
+.row-pick { display: flex; gap: 8px; flex-wrap: wrap; }

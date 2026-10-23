@@ -15,7 +15,7 @@ import hashlib
 import ipaddress
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,6 +29,7 @@ from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
 from jiaoyi.panel import actions, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
+from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles
 from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.market import Interval, KlineError, KlineSource
@@ -218,6 +219,10 @@ def create_app(
         if m is None:
             raise HTTPException(404, "这个币还没有开会记录")
         return m
+
+    @api.get("/api/card-history")
+    async def card_history(day: date | None = None, symbol: str | None = None) -> CardHistoryPage:
+        return build_card_history(files, clock(), day, symbol)
 
     @api.get("/api/history")
     async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:
