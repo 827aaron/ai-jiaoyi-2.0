@@ -414,10 +414,11 @@ class HbExecutorAdapter:
             return False
         self.mark_closed_directly(rec.position_id, reason, exit_price)
         await self._cancel_lifeboat(rec)
+        cause = repr(via_hb) if via_hb is not None else "执行器已结束但币安仍有仓"
         await self._alert(
             AlertLevel.WARN,
-            "hummingbot 停不掉执行器，已直连币安平仓",
-            f"{rec.symbol} {rec.position_id}：{via_hb!r if via_hb else '执行器已结束但币安仍有仓'}",
+            "hummingbot 没能平掉仓位，已直连币安平仓",
+            f"{rec.symbol} {rec.position_id}：{cause}",
             rec.symbol,
             f"closed_directly:{rec.position_id}",
         )
