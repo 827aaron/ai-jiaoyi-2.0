@@ -5,6 +5,11 @@
   "model_version": "systemone-2026-10",
   "latency_ms": 212.0,
   "cost_usd": 2e-05,
+  "usage": {
+    "input_tokens": 412,
+    "output_tokens": 8,
+    "reasoning_tokens": 0
+  },
   "answers": [
     {
       "id": "genuine",
