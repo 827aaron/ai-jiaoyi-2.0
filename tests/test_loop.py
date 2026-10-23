@@ -418,3 +418,23 @@ async def test_news_tick_skipped_without_hub_or_real_cards(tmp_path: Path, now: 
     app.news = None
     app.m = dataclasses.replace(app.m, cards=NewsCards())
     await Runner(app).news_tick()  # 没有新闻源：什么都不做
+
+
+async def test_rescreen_writes_pool_file_for_panel(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.app import POOL_FILE
+
+    app = _app(tmp_path, now)
+    pool = c.SymbolPool.model_validate(load_example("symbol_pool"))
+
+    class Screener:
+        async def screen(self, now: datetime) -> c.SymbolPool:
+            return pool
+
+    app.m = dataclasses.replace(app.m, screener=Screener())
+    await app.start()  # 启动选币就写一次
+    saved = c.SymbolPool.model_validate_json((tmp_path / POOL_FILE).read_text(encoding="utf-8"))
+    assert saved == pool
+    (tmp_path / POOL_FILE).unlink()
+    await Runner(app)._rescreen(now)  # 每小时重选也写
+    assert (tmp_path / POOL_FILE).is_file()
+    await app.stop()
