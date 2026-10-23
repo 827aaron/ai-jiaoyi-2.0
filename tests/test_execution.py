@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from jiaoyi.alerting.stub import StubAlerter
-from jiaoyi.contracts import AlertLevel, OrderIntent, Side
+from jiaoyi.contracts import AlertLevel, Health, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
 from jiaoyi.execution.exchange import CloseFill, ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
@@ -1037,3 +1037,24 @@ async def test_manual_partial_reduce_only_warns(rig: Rig) -> None:
         assert {i.kind for i in report.issues} == {ReconcileIssueKind.QTY_MISMATCH}
     assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
     assert rig.api.stopped == [] and rig.ex.market_closed == []
+
+
+async def test_fixed_issue_does_not_keep_reconcile_lamp_red(rig: Rig) -> None:
+    """手动平仓已同步（fixed）后，对账灯不再报“发现 1 个问题”。"""
+    beats: list[tuple[object, str]] = []
+
+    class Rec:
+        def record(self, *a: object, **k: object) -> None:
+            pass
+
+        def heartbeat(self, now: object, health: object, headline: str) -> None:
+            beats.append((health, headline))
+
+    rig.rec._rec = Rec()  # type: ignore[assignment]
+    await open_filled(rig)
+    rig.ex.manual_fill = CloseFill(68544.0, 0.2)
+    _manual_close(rig)
+    await rig.rec.reconcile(rig.t)
+    second = await rig.rec.reconcile(rig.t)
+    assert [i.fixed for i in second.issues] == [True]
+    assert beats[-1] == (Health.OK, "三方一致（本轮已处理 1 项）")
