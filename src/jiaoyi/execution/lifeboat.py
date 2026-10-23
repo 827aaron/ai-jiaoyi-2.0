@@ -122,14 +122,19 @@ class BinanceLifeboat:
                 await self._exchange.cancel_stop(position.symbol, leftover.order_id)
         order = await self._place(position, stop_price, cid)
         for old in found:
-            if old.client_order_id != cid:
+            if old.client_order_id == cid:
+                continue
+            try:
                 await self._exchange.cancel_stop(position.symbol, old.order_id)
-                self._bump("撤")
-                self._log(
-                    Outcome.INFO,
-                    f"{position.symbol} 保命止损已撤（旧价 {old.stop_price}）",
-                    position,
-                )
+            except Exception as e:  # 新的已经挂上：旧的撤不掉留给对账员撤，账本指新的
+                self._log(Outcome.ERROR, f"{position.symbol} 旧保命止损撤销失败：{e!r}", position)
+                continue
+            self._bump("撤")
+            self._log(
+                Outcome.INFO,
+                f"{position.symbol} 保命止损已撤（旧价 {old.stop_price}）",
+                position,
+            )
         return order
 
     async def _place(self, position: PositionRecord, stop_price: float, cid: str) -> LifeboatOrder:

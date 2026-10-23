@@ -190,6 +190,11 @@ class ThreeWayReconciler:
             known = rec.lifeboat.client_order_id if rec.lifeboat is not None else None
             cids = sorted(lifeboat_cids(rec.position_id), key=lambda c: c != known)
             stop = next((stops_by_cid[c] for c in cids if c in stops_by_cid), None)
+            if stop is not None:
+                for c in cids:
+                    extra = stops_by_cid.get(c)
+                    if extra is not None and extra.order_id != stop.order_id:
+                        issues.append(await self._drop_extra(rec, extra, stop))
             if stop is None:
                 issue, was_flattened = await self._repair_lifeboat(rec.position_id)
                 issues.append(issue)
@@ -660,6 +665,28 @@ class ThreeWayReconciler:
                     )
                 )
         return issues
+
+    async def _drop_extra(
+        self, rec: PositionRecord, extra: ExchangeStop, keep: ExchangeStop
+    ) -> ReconcileIssue:
+        """同一笔仓位挂着两张保命止损（重挂时撤旧失败）：撤掉账本没记的那张。"""
+        try:
+            await self._exchange.cancel_stop(extra.symbol, extra.order_id)
+        except ExchangeError as e:
+            detail, fixed = f"多出的保命止损 {extra.client_order_id} 撤销失败：{e!r}", False
+        else:
+            detail, fixed = (
+                f"同一笔多挂了一张保命止损 {extra.client_order_id}（{extra.stop_price:g}），"
+                f"已撤，保留 {keep.client_order_id}（{keep.stop_price:g}）",
+                True,
+            )
+        return ReconcileIssue(
+            kind=ReconcileIssueKind.STALE_LIFEBOAT,
+            symbol=rec.symbol,
+            position_id=rec.position_id,
+            detail=detail,
+            fixed=fixed,
+        )
 
     async def _clear_stale(
         self, stop: ExchangeStop, exchange_qty: dict[str, float]
