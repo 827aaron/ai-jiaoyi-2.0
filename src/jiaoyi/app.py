@@ -43,6 +43,7 @@ from jiaoyi.core.config import ConfigError
 from jiaoyi.core.pool_overrides import (
     PoolAction,
     PoolOverrides,
+    backup_corrupt_pool_overrides,
     read_pool_overrides,
     write_pool_overrides,
 )
@@ -534,6 +535,8 @@ class App:
         # 选币页的固定 / 拉黑 / 手动加入（data/pool_overrides.json）；读不出按没有覆盖项、启动时告警
         loaded = read_pool_overrides(app_cfg.data_dir)
         self.pool_overrides_corrupt = loaded is None
+        if loaded is None:
+            backup_corrupt_pool_overrides(app_cfg.data_dir, clock())
         self.pool_overrides = loaded or PoolOverrides()
         self._push_overrides()
 
@@ -589,8 +592,8 @@ class App:
             await self._alert(
                 AlertLevel.CRITICAL,
                 "选币覆盖项文件读不出",
-                "data/pool_overrides.json 损坏：固定 / 拉黑 / 手动加入这次没生效，"
-                "请修好或删掉后重启",
+                "data/pool_overrides.json 损坏（已备份成 .corrupt-时间戳）：固定 / 拉黑 / 手动加入"
+                "这次没生效，选币页的操作也会被拒；修好或删掉后重启",
             )
         if self.app_cfg.mode == RunMode.LIVE:
             # 实盘启动一定要通知（设计文档 §十）；能走到这里说明上线确认已经通过
@@ -683,6 +686,9 @@ class App:
 
     def apply_pool_override(self, action: PoolAction, symbol: str) -> PoolOverrides:
         """面板选币页的一次操作：改内存、写文件、交给选币器。下一次选币生效（调用方立即重选）。"""
+        if read_pool_overrides(self.app_cfg.data_dir) is None:
+            # 文件坏了：内存里可能是空的，写回去会把原来的拉黑清单冲掉
+            raise ValueError("data/pool_overrides.json 读不出，先在终端修好或删掉再操作")
         self.reload_pool_overrides()  # 先合上手改的部分，免得覆盖掉
         new = self.pool_overrides.apply(action, symbol)
         write_pool_overrides(self.app_cfg.data_dir, new)
