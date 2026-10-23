@@ -2134,7 +2134,11 @@ function render() {
   // 页面上的输入框（选币页“手动加币”）：定时刷新重画时保住正在输入的内容和焦点
   const typing = document.activeElement && document.activeElement.id === "pool-add";
   const typed = $("#pool-add") ? $("#pool-add").value : "";
-  $("#page").innerHTML = (P[page] || placeholder)(arg);
+  // 定时刷新整页重画：先用旧高度撑住页面，免得重画中途变矮把滚动位置夹回顶部（团队页尤其明显）
+  const pg = $("#page"), y = window.scrollY, same = pg.dataset.key === pageId(page, arg);
+  pg.style.minHeight = same ? pg.offsetHeight + "px" : "";
+  pg.dataset.key = pageId(page, arg);
+  pg.innerHTML = (P[page] || placeholder)(arg);
   document.querySelectorAll("#page .scroll").forEach((e, i) => { e.scrollTop = scrolls[i] || 0; });
   const box = $("#pool-add");
   if (box && typed) box.value = typed;
@@ -2142,6 +2146,15 @@ function render() {
   if (page === "positions") mountChart();
   if (page === "history") mountHistoryChart();
   if (page === "team") fitTeamFlow();
+  if (same) {
+    if (window.scrollY !== y) window.scrollTo(0, y);
+    // 新内容够高就放开；不够高（比如列表变短了）留着撑住，换页时再放开
+    requestAnimationFrame(() => {
+      const last = pg.lastElementChild;
+      const bottom = last ? last.getBoundingClientRect().bottom + window.scrollY : 0;
+      if (bottom >= window.scrollY + innerHeight) pg.style.minHeight = "";
+    });
+  }
 }
 
 // 5 秒没回就算失败；出错带上状态码和接口给的说明
