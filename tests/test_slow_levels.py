@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from jiaoyi.contracts import Bias, Category, HardFilters, LevelKind, SizeTier, SymbolPoolEntry
+from jiaoyi.slow.commander import StopScale
 from jiaoyi.slow.levels import (
     Candidate,
     LevelContext,
     build_candidates,
     describe_candidates,
+    holding_span,
     nice_step,
     round_numbers,
     select_levels,
@@ -18,7 +22,9 @@ from jiaoyi.slow.tradingagents_engine import (
     _CardSymbolDraft,
     _LevelDraft,
     convert_prompt,
+    describe_hold,
     draft_to_card_symbol,
+    perp_context,
 )
 
 
@@ -53,10 +59,11 @@ def test_swing_points_find_local_extremes() -> None:
 
 def test_candidates_stay_within_span_and_are_distinct() -> None:
     price, atr = 81600.0, 400.0
+    span = holding_span(atr, 15, 120)  # 1.5×400×√8 ≈ 1697
     daily = [[0, "0", "86000", "72859.5", "0", "0", 1, "0"]] * 7  # 远得离谱的日线高低点
-    cands = build_candidates(price, atr, hourly_wave(), daily)
+    cands = build_candidates(price, atr, hourly_wave(), daily, span)
     assert cands, "应该有候选"
-    assert all(abs(c.price - price) <= 4 * atr + 1e-9 for c in cands)
+    assert all(abs(c.price - price) <= span + 1e-9 for c in cands)
     assert all(c.price not in (86000.0, 72859.5) for c in cands)  # 超出 ±4×ATR 的不要
     prices = [c.price for c in cands]
     assert all(abs(a - b) >= 0.3 * atr for i, a in enumerate(prices) for b in prices[i + 1 :])
@@ -67,6 +74,7 @@ def test_prompt_lists_supports_and_resistances_sorted_by_distance() -> None:
     ctx = LevelContext(
         100.0,
         2.0,
+        10.0,
         (Candidate(99.0, "昨日低点"), Candidate(103.0, "摆动高点"), Candidate(96.0, "整数关口")),
     )
     text = describe_candidates(ctx)
@@ -80,6 +88,7 @@ def test_select_levels_snaps_to_candidates_drops_invented_and_groups() -> None:
     ctx = LevelContext(
         100.0,
         2.0,
+        10.0,
         (
             Candidate(99.0, "昨日低点"),
             Candidate(97.0, "摆动低点"),
@@ -134,7 +143,7 @@ def test_draft_levels_are_replaced_by_candidates_when_context_given() -> None:
         take_profit_r_max=3,
         reason="测试",
     )
-    ctx = LevelContext(81600.0, 400.0, (Candidate(81000.0, "摆动低点"),))
+    ctx = LevelContext(81600.0, 400.0, 2000.0, (Candidate(81000.0, "摆动低点"),))
     cs = draft_to_card_symbol(d, _entry(), ctx)
     assert [(x.price, x.kind) for x in cs.key_levels] == [(81000.0, LevelKind.SUPPORT)]
     assert len(draft_to_card_symbol(d, _entry()).key_levels) == 2  # 不给背景才照单全收
@@ -145,7 +154,7 @@ def test_convert_prompt_is_perp_flavoured_and_forbids_inventing_levels() -> None
     from tests.conftest import ROOT
 
     risk = load_risk_config(ROOT / "config" / "risk.example.toml")
-    ctx = LevelContext(100.0, 2.0, (Candidate(99.0, "昨日低点"),))
+    ctx = LevelContext(100.0, 2.0, 10.0, (Candidate(99.0, "昨日低点"),))
     p = convert_prompt(_entry(), risk, "震荡", "", "结论", "ATR 说明", describe_candidates(ctx))
     assert "永续合约" in p and "减持" in p and "99（昨日低点）" in p
     assert "财报" not in p
@@ -153,3 +162,56 @@ def test_convert_prompt_is_perp_flavoured_and_forbids_inventing_levels() -> None
 
 def test_perp_context_replaces_stock_rating_words() -> None:
     assert "PERPETUAL" in PERP_CONTEXT and "Underweight = lean short" in PERP_CONTEXT
+
+
+def test_span_is_one_formula_scaled_by_own_volatility_and_holding_time() -> None:
+    """同一条公式：σ×ATR×√(持仓时长/ATR 周期)，不分币种、不用百分比表。"""
+    eth_like = holding_span(6.0, 15, 120)  # 现价 2390、15m ATR≈0.25%
+    assert eth_like == pytest.approx(1.5 * 6 * 8**0.5)
+    assert eth_like / 2390 < 0.015  # 约 1.1%，不是上次的 ±9.8%
+    # 同一个币：持仓越久范围越宽，√ 时间比例
+    assert holding_span(6.0, 15, 60) < holding_span(6.0, 15, 120)
+    assert holding_span(6.0, 15, 120) / holding_span(6.0, 15, 30) == pytest.approx(2.0)
+    # 波动大的币自动更宽：范围只跟自己的 ATR 成正比
+    assert holding_span(60.0, 15, 120) == pytest.approx(10 * eth_like)
+
+
+def test_hold_note_and_perp_context_tell_the_meeting_the_holding_time() -> None:
+    note = describe_hold(120, 6.0, 2390.0, StopScale(period_min=15))
+    assert "120 分钟" in note and "±" in note and "ATR×√(120/15)" in note
+    assert "几天" in describe_hold(30, None, None, StopScale(period_min=5))
+    assert "about 45 minutes" in perp_context(45)
+
+
+def test_level_context_end_to_end_stays_inside_holding_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ETH 量级：现价 2390、15m 振幅约 0.3%，2h 档范围约 ±1%，不会出现 −9.8% / +6.6% 这种价位。"""
+    from datetime import UTC, datetime
+
+    import jiaoyi.slow.tradingagents_engine as eng
+
+    end = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    end_ms = int(end.timestamp() * 1000)
+
+    def fake(symbol: str, interval: str, limit: int, end_dt: object = None) -> list[list[object]]:
+        n = 300 if interval == "15m" else 12
+        step = 900_000 if interval == "15m" else 86_400_000
+        rows = []
+        for i in range(n):
+            t = end_ms - (n - i) * step
+            mid = 2390 + (12 if (i // 8) % 2 == 0 else -12) + (i % 3)
+            if interval == "1d":
+                rows.append([t, "0", "2492", "2156", "2390", "1", t + step - 1, "0"])
+            else:
+                rows.append(
+                    [t, str(mid), str(mid + 4), str(mid - 4), str(mid), "10", t + step - 1, "0"]
+                )
+        return rows
+
+    monkeypatch.setattr(eng, "_klines", fake)
+    ctx = eng.level_context("ETHUSDT", end, StopScale(period_min=15), 120)
+    assert ctx.price and ctx.span and ctx.candidates
+    assert ctx.span / ctx.price < 0.03
+    assert all(abs(c.price - ctx.price) <= ctx.span + 1e-9 for c in ctx.candidates)
+    assert all(c.price not in (2492.0, 2156.0) for c in ctx.candidates)  # 远处的日线高低点被滤掉

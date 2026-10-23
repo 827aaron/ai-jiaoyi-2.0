@@ -2,8 +2,11 @@
 
 大模型凭记忆报价位会报出远离现价、精度可疑的数（BTC 现价 81600 报 72859.5）。这里改成：
 代码用 K 线算一批候选（昨日 / 7 日高低点、近期摆动高低点、成交密集区、整数关口），
-只保留现价 ±``span_atr`` 倍 ATR 以内的，按支撑 / 压力分组、距现价从近到远排好喂给会议；
-会议给出的价位再对回候选（容差 ``snap_atr`` 倍 ATR），对不上的丢掉，最终每边最多 3 个。
+只保留“持仓期内碰得到”的：范围 = ``span_sigma`` × 该币自己的 ATR（档位对应的周期）
+× √(持仓时长 / ATR 周期)——ATR 乘根号时间就是持仓期内价格的典型波动，所以同一条公式适用于
+所有币、所有档位（波动大的币范围自动宽，BTC / ETH 自动窄），没有按币种的特例或百分比表。
+候选按支撑 / 压力分组、距现价从近到远喂给会议；会议给出的价位再对回候选（容差 ``snap_atr``
+倍 ATR），对不上的丢掉，最终每边最多 3 个。
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from jiaoyi.contracts import KeyLevel, LevelKind
 
 Rows = Sequence[Sequence[Any]]
 
-SPAN_ATR = 4.0
+SPAN_SIGMA = 1.5
 SNAP_ATR = 0.5
 MERGE_ATR = 0.3
 MIN_GAP_ATR = 0.2
@@ -37,13 +40,20 @@ class Candidate:
         return _PRIORITY[self.source[:2]]
 
 
+def holding_span(atr: float, period_min: int, hold_min: float, sigma: float = SPAN_SIGMA) -> float:
+    """持仓期内价格的典型波动：``sigma`` × ATR × √(持仓时长 / ATR 周期)。"""
+    return sigma * atr * math.sqrt(max(hold_min, 1.0) / max(period_min, 1))
+
+
 @dataclass(frozen=True)
 class LevelContext:
-    """某个币开会时的关键位背景：现价、参考 ATR、候选。拿不到就是空（不出关键位，也不瞎编）。"""
+    """某个币开会时的关键位背景：现价、ATR、范围、候选。拿不到就是空（不出关键位，也不瞎编）。"""
 
     price: float | None = None
     atr: float | None = None
+    span: float | None = None
     candidates: tuple[Candidate, ...] = ()
+    basis: str = ""
 
     def kind(self, price: float) -> LevelKind:
         assert self.price is not None
@@ -105,13 +115,12 @@ def round_numbers(price: float, span: float) -> list[float]:
 def build_candidates(
     price: float,
     atr: float,
-    hourly: Rows,
+    bars: Rows,
     daily: Rows,
-    *,
-    span_atr: float = SPAN_ATR,
+    span: float,
 ) -> tuple[Candidate, ...]:
-    """现价 ±span_atr×ATR 内的候选，已去重（相近的留优先级高的），按距现价从近到远。"""
-    span = span_atr * atr
+    """现价 ±span 内的候选（``bars`` 是档位周期的 K 线），已去重（相近的留优先级高的），
+    按距现价从近到远。"""
     raw: list[Candidate] = []
     if daily:
         last = daily[-1]
@@ -120,9 +129,9 @@ def build_candidates(
             Candidate(max(float(r[2]) for r in daily[-7:]), "7日高点"),
             Candidate(min(float(r[3]) for r in daily[-7:]), "7日低点"),
         ]
-    highs, lows = swing_points(hourly)
+    highs, lows = swing_points(bars)
     raw += [Candidate(h, "摆动高点") for h in highs] + [Candidate(x, "摆动低点") for x in lows]
-    raw += [Candidate(_sig(v), "成交密集区") for v in volume_nodes(hourly, atr * 0.5)]
+    raw += [Candidate(_sig(v), "成交密集区") for v in volume_nodes(bars, atr * 0.5)]
     raw += [Candidate(_sig(v), "整数关口") for v in round_numbers(price, span)]
     near = [c for c in raw if MIN_GAP_ATR * atr <= abs(c.price - price) <= span]
     kept: list[Candidate] = []
@@ -143,15 +152,19 @@ def split_sides(
 
 def describe_candidates(ctx: LevelContext) -> str:
     """给会议提示词用的候选关键位说明。"""
-    if ctx.price is None or ctx.atr is None or not ctx.candidates:
-        return "候选关键位：暂无（行情数据不可用）——key_levels 请留空，不要自己编价位。"
+    if ctx.price is None or ctx.atr is None or ctx.span is None or not ctx.candidates:
+        return (
+            "候选关键位：暂无（行情数据不可用或持仓期内没有合适的价位）"
+            "——key_levels 请留空，不要自己编价位。"
+        )
     sup, res = split_sides(ctx.candidates, ctx.price, PER_SIDE_OFFERED)
 
     def fmt(cs: list[Candidate]) -> str:
         return "、".join(f"{c.price:g}（{c.source}）" for c in cs) or "无"
 
     return (
-        f"候选关键位（代码用真实 K 线算的，现价 {ctx.price:g}，范围现价 ±{SPAN_ATR:g}×ATR 以内，"
+        f"候选关键位（代码用真实 K 线算的，现价 {ctx.price:g}，只给持仓期内碰得到的："
+        f"现价 ±{ctx.span:g}（约 ±{ctx.span / ctx.price * 100:.2f}%）以内，{ctx.basis}，"
         f"距现价从近到远）：\n支撑：{fmt(sup)}\n压力：{fmt(res)}\n"
         f"key_levels 只能从上面的候选里选，直接写候选的价格；支撑最多 {PER_SIDE_KEPT} 个、"
         f"压力最多 {PER_SIDE_KEPT} 个；候选里没有的价位不要写，更不要凭印象编价位。"

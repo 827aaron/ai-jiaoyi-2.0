@@ -50,6 +50,16 @@ class SocialConfig(_Strict):
     )
 
 
+class LevelsConfig(_Strict):
+    span_sigma: float = Field(
+        default=1.5,
+        ge=0.5,
+        le=5.0,
+        description="关键位范围 = 这个系数 × 该币 ATR × √(持仓时长 / ATR 周期)。"
+        "对所有币、所有档位用同一条公式：ATR 乘根号时间就是持仓期内价格的典型波动。",
+    )
+
+
 class MeetingConfig(_Strict):
     analysts_crypto: tuple[str, ...] = Field(
         default=("market", "social", "news"), description="加密币每次会议请哪几位分析师。"
@@ -155,6 +165,7 @@ class SlowConfig(_Strict):
     llm: LlmConfig = LlmConfig()
     meeting: MeetingConfig = MeetingConfig()
     social: SocialConfig = SocialConfig()
+    levels: LevelsConfig = LevelsConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     budget: BudgetConfig = BudgetConfig()
     prices: PricesConfig = PricesConfig()
@@ -174,6 +185,7 @@ class SlowConfig(_Strict):
             analysts_crypto=m.analysts_crypto,
             analysts_stock=m.analysts_stock,
             reddit=self.social.reddit,
+            level_span_sigma=self.levels.span_sigma,
             pick_tier=m.pick_tier,
             convert_tier=m.convert_tier,
         )

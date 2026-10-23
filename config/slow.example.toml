@@ -7,6 +7,9 @@ provider = "deepseek"    # deepseek=直连（DEEPSEEK_API_KEY）；openrouter=�
 [social]
 reddit = "guarded"      # guarded=抓 Reddit 但加闸（匿名 RSS 每分钟约 1 次，失败后冷却 10 分钟）；off=不抓
 
+[levels]
+span_sigma = 1.5      # 关键位范围 = 系数 × 该币 ATR × √(持仓时长/ATR 周期)；所有币所有档位同一条公式
+
 [meeting]
 analysts_crypto = ["market", "social", "news"]                 # 分析师越少越省钱
 analysts_stock  = ["market", "social", "news", "fundamentals"]
