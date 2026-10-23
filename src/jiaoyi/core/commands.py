@@ -53,6 +53,9 @@ CommandKind = Literal[
     "unblacklist_symbol",
     "add_symbol",
     "remove_symbol",
+    # 类别开关和每类进池上限（core/pool_overrides.py ``CATEGORY_ACTIONS``）
+    "set_category",
+    "set_category_cap",
 ]
 
 

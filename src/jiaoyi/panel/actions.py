@@ -39,7 +39,12 @@ from jiaoyi.core.commands import (
     write_command,
 )
 from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config, with_profile
-from jiaoyi.core.pool_overrides import POOL_ACTIONS, SYMBOL_RE
+from jiaoyi.core.pool_overrides import (
+    CATEGORY_ACTIONS,
+    POOL_ACTIONS,
+    SYMBOL_RE,
+    parse_category_command,
+)
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码校验；不碰交易所
 from jiaoyi.panel.files import read_live_gate
 from jiaoyi.panel.overview import Control
@@ -56,7 +61,17 @@ CHANGES_FILE = "config_changes.jsonl"
 COMMAND_TTL = timedelta(seconds=60)
 # 会让系统多做交易的指令要密码（固定、手动加币、取消拉黑）；拉黑、取消固定只会更保守，不要
 NEEDS_PASSWORD: frozenset[CommandKind] = frozenset(
-    {"resume", "unblock_symbol", "restart", "pin_symbol", "add_symbol", "unblacklist_symbol"}
+    {
+        "resume",
+        "unblock_symbol",
+        "restart",
+        "pin_symbol",
+        "add_symbol",
+        "unblacklist_symbol",
+        # 类别开关 / 每类上限：同一条指令既可能放宽也可能收紧，一律要密码
+        "set_category",
+        "set_category_cap",
+    }
 )
 
 Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule", "llm", "budget"]
@@ -115,6 +130,11 @@ def send_command(
         raise ActionError("解封要给币种")
     if kind in POOL_ACTIONS and not SYMBOL_RE.match(params.get("symbol", "")):
         raise ActionError("选币页操作要给币种代码，例如 BTCUSDT")
+    if kind in CATEGORY_ACTIONS:
+        try:
+            parse_category_command(kind, params)
+        except ValueError as e:
+            raise ActionError(str(e)) from e
     cmd = PanelCommand(
         id=f"p{now.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(4)}",
         ts=now,

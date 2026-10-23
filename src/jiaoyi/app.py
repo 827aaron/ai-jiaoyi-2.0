@@ -46,6 +46,7 @@ from jiaoyi.core.pool_overrides import (
     PoolAction,
     PoolOverrides,
     backup_corrupt_pool_overrides,
+    parse_category_command,
     read_pool_overrides,
     write_pool_overrides,
 )
@@ -741,6 +742,23 @@ class App:
             raise ValueError("data/pool_overrides.json 读不出，先在终端修好或删掉再操作")
         self.reload_pool_overrides()  # 先合上手改的部分，免得覆盖掉
         new = self.pool_overrides.apply(action, symbol)
+        write_pool_overrides(self.app_cfg.data_dir, new)
+        self.pool_overrides = new
+        self._push_overrides()
+        return new
+
+    def apply_category_override(self, kind: str, params: dict[str, str]) -> PoolOverrides:
+        """面板选币页的类别开关 / 每类上限：和 ``apply_pool_override`` 同样的读-改-写流程。"""
+        if read_pool_overrides(self.app_cfg.data_dir) is None:
+            raise ValueError("data/pool_overrides.json 读不出，先在终端修好或删掉再操作")
+        category, value = parse_category_command(kind, params)
+        self.reload_pool_overrides()
+        if kind == "set_category":
+            assert value is None or isinstance(value, bool)
+            new = self.pool_overrides.set_category(category, value)
+        else:
+            assert value is None or isinstance(value, int)
+            new = self.pool_overrides.set_category_cap(category, value)
         write_pool_overrides(self.app_cfg.data_dir, new)
         self.pool_overrides = new
         self._push_overrides()

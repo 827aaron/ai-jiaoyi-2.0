@@ -198,3 +198,18 @@ def test_gap_caution_only_hints() -> None:
     hint = ScheduleConfig(refresh_lead_min=15.0).caution()
     assert hint is not None and "900" in hint and "15" in hint
     assert ScheduleConfig(symbol_timeout_s=300.0, refresh_lead_min=10.0).caution() is None
+
+
+def test_screener_categories_from_toml_and_cautions() -> None:
+    from jiaoyi.contracts import Category
+    from jiaoyi.slow.settings import ScreenerSection
+
+    s = ScreenerSection.model_validate(
+        {"categories": {"us_tech": {"enabled": False}, "alt": {"cap": 5}}}
+    )
+    assert s.categories[Category.US_TECH].enabled is False and s.categories[Category.ALT].cap == 5
+    assert not any("类别" in c for c in s.cautions(8.0))
+    all_off = ScreenerSection.model_validate(
+        {"categories": {c.value: {"enabled": False} for c in Category}}
+    )
+    assert any("所有类别都关了" in c for c in all_off.cautions(8.0))

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from jiaoyi.contracts import SymbolPool
+from jiaoyi.contracts import Category, SymbolPool
 from jiaoyi.core.commands import write_command
 from jiaoyi.core.pool_overrides import (
     POOL_OVERRIDES_FILE,
@@ -180,3 +180,50 @@ async def test_corrupt_file_keeps_a_manual_pause_as_is(tmp_path: Path, now: date
     paused = read_paused(tmp_path)
     assert paused is not None and paused["reason"] == "我手动停的"
     await app.stop()
+
+
+def test_category_overrides_roundtrip_and_validate(tmp_path: Path) -> None:
+    from jiaoyi.contracts import Category
+    from jiaoyi.core.pool_overrides import parse_category_command
+
+    ov = PoolOverrides().set_category(Category.US_TECH, False).set_category_cap(Category.ALT, 5)
+    write_pool_overrides(tmp_path, ov)
+    assert read_pool_overrides(tmp_path) == ov
+    assert ov.set_category(Category.US_TECH, None).category_enabled == {}
+    assert ov.set_category_cap(Category.ALT, None).category_caps == {}
+    assert parse_category_command("set_category", {"category": "alt", "enabled": "false"}) == (
+        Category.ALT,
+        False,
+    )
+    assert parse_category_command("set_category_cap", {"category": "alt", "cap": "default"}) == (
+        Category.ALT,
+        None,
+    )
+    for kind, params in [
+        ("set_category", {"category": "nope", "enabled": "true"}),
+        ("set_category", {"category": "alt", "enabled": "maybe"}),
+        ("set_category_cap", {"category": "alt", "cap": "101"}),
+        ("set_category_cap", {"category": "alt", "cap": "-1"}),
+    ]:
+        with pytest.raises(ValueError):
+            parse_category_command(kind, params)
+
+
+def test_panel_category_commands_need_password_and_valid_params(
+    tmp_path: Path, now: datetime
+) -> None:
+    assert {"set_category", "set_category_cap"} <= actions.NEEDS_PASSWORD
+    with pytest.raises(ActionError):
+        actions.send_command(tmp_path, "set_category", {"category": "x"}, now, "pw")
+
+
+async def test_category_command_updates_file_and_repicks(tmp_path: Path, now: datetime) -> None:
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    write_command(tmp_path, _cmd(now, "set_category", category="us_tech", enabled="false"))
+    await r.command_tick()
+    assert _result(tmp_path, "cmd-set_category-0001")["status"] == "done"
+    ov = read_pool_overrides(tmp_path)
+    assert ov is not None and ov.category_enabled == {Category.US_TECH: False}
+    write_command(tmp_path, _cmd(now, "set_category_cap", category="alt", cap="x"))
+    await r.command_tick()
+    assert _result(tmp_path, "cmd-set_category_cap-0001")["status"] == "rejected"
