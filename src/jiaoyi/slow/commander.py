@@ -38,6 +38,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.review import CardJournal
 
 
 class CardRefreshError(RuntimeError):
@@ -110,11 +111,13 @@ class BattleCardCommander:
         expiry_lead: timedelta = timedelta(minutes=10),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         brief: MarketBriefService | None = None,
+        journal: CardJournal | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
         self._clock = clock
         self._brief = brief
+        self._journal = journal
         self._engine = engine
         self._risk = risk
         self._log = log
@@ -290,7 +293,7 @@ class BattleCardCommander:
             raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
-        return BattleCard(
+        card = BattleCard(
             card_id=self._card_id(now),
             version=prev.version + 1 if prev is not None and same_day else 1,
             created_at=now,
@@ -301,6 +304,17 @@ class BattleCardCommander:
             refresh_reason=reason,
             llm_cost_usd=round(cost, 6),
         )
+        if self._journal is not None:
+            # 只记这次真开了会的标的；沿用旧卡的不重复记
+            self._journal.record(
+                card,
+                [
+                    e.symbol
+                    for e, r in zip(to_meet, results, strict=True)
+                    if isinstance(r, Analysis)
+                ],
+            )
+        return card
 
     def _card_id(self, now: datetime) -> str:
         return f"card-{now:%Y%m%d}"

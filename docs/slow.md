@@ -85,3 +85,14 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 没有这个文件就用默认值，**与不配置时行为完全一致**。写错字段或超范围直接拒绝启动（`ConfigError`）。这里**不放任何风控数值**，硬上限仍只在 `risk.toml`。
 
 接线（架构师）：`cfg = load_slow_config()`，`TradingAgentsEngine(settings=cfg.engine_settings(), ...)`，`BattleCardCommander(..., **cfg.commander_kwargs())`。
+
+## 作战卡复盘（`slow/review.py`）
+
+出卡时 `BattleCardCommander(journal=CardJournal(data_dir))` 把**这次真开了会**的每个标的追加到 `data/card_review/cards.jsonl`（沿用旧卡的不重复记）。卡过期后：
+
+```
+python -m jiaoyi.slow.review --days 7        # 按方向 / 类别 / 出卡原因汇总
+python -m jiaoyi.slow.review --json          # 逐条明细
+```
+
+用公开 5 分钟 K 线，在卡的有效期内算收盘涨跌、最大有利 / 不利波动；long/short 才算命中（方向收益 > 0），both / no_trade 只看波动。**只读报告，不会自动改任何权重、阈值或提示词。**样本少（几十条以内）时别当结论。接线（架构师）：创建 commander 时传 `journal=CardJournal(data_dir)`。
