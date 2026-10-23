@@ -4,6 +4,9 @@
 [llm]
 provider = "deepseek"    # deepseek=直连（DEEPSEEK_API_KEY）；openrouter=经 OpenRouter（OPENROUTER_API_KEY）
 
+[social]
+reddit = "guarded"      # guarded=抓 Reddit 但加闸（匿名 RSS 每分钟约 1 次，失败后冷却 10 分钟）；off=不抓
+
 [meeting]
 analysts_crypto = ["market", "social", "news"]                 # 分析师越少越省钱
 analysts_stock  = ["market", "social", "news", "fundamentals"]

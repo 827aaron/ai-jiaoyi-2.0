@@ -54,6 +54,7 @@ from jiaoyi.slow.commander import (
 )
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.news import NewsHub, format_items
+from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
 
@@ -93,6 +94,8 @@ class TradingAgentsSettings:
         default_factory=lambda: {"flash": (0.15, 0.60), "pro": (0.50, 2.00)}
     )
     results_dir: str = "data/tradingagents"
+    # Reddit 匿名 RSS 限流很严：guarded=加闸（缓存 + 间隔 + 冷却），off=不抓。见 social_guard.py。
+    reddit: str = "guarded"
 
 
 def build_config(
@@ -503,8 +506,19 @@ class TradingAgentsEngine:
         self._brief = brief
         self._liq = liquidations
         register_binance_vendor()
+        self._guard_reddit(settings)
         if news is not None:
             register_crypto_news_vendor(news)
+
+    @staticmethod
+    def _guard_reddit(settings: TradingAgentsSettings) -> None:
+        try:
+            from tradingagents.agents.analysts import sentiment_analyst
+        except ImportError:  # 慢环依赖没装时，引擎本来也跑不起来；不在这里报错
+            return
+        original = getattr(sentiment_analyst.fetch_reddit_posts, "_fetch", None)
+        fetch = original or sentiment_analyst.fetch_reddit_posts  # 重复构造引擎不叠加包装
+        register_reddit_guard(RedditGuard(fetch, mode=settings.reddit))
 
     def _cost(self, usage: Mapping[str, Mapping[str, Any]]) -> float:
         total = 0.0

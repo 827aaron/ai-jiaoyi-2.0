@@ -130,3 +130,9 @@ Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模
 ## 安装与启动检查
 
 `make install` 默认连军师团依赖（`.[dev,slow]`，TradingAgents 钉提交）一起装。配了军师团的 key（`DEEPSEEK_API_KEY` 或 `OPENROUTER_API_KEY`，看 `[llm] provider`）却没装 `tradingagents` 时，`jiaoyi run / status` 和 `jiaoyi check-config` 直接报错退出，**不再静默用桩**——否则 M2 会空跑（不出卡、不开新仓却看不出来）。没有 key 时仍用桩，M0/M1 照常。
+
+## M2 实跑后的三处小修
+
+- **欧易公告**：原来的 `announcements-trading-rules` 类型已下线（返回 400），换成 `new-listings / delistings / api`；某一类型失败不影响其余，只有全部失败才算该来源失败。同一来源的报错记录最多每 30 分钟一条。
+- **Reddit 限流**：匿名 RSS 约每分钟一次，多标的并发开会必然 429。`[social] reddit = "guarded"`（默认）给抓取加闸：同币 30 分钟缓存、两次真实请求至少隔 65 秒（其间不等待，返回“不可用”占位）、失败后冷却 10 分钟；`"off"` 则完全不抓。占位文字写明“不可用不等于没人讨论”，Reddit 只是情绪的背景数据之一。
+- **结构化输出回退**：DeepSeek 偶尔让 Research Manager / Trader 的结构化输出失败（约每轮一次），TradingAgents 会改用自由文本再调一次。这一次调用同样挂在带计费回调的 LLM 客户端上，所以费用照常计入当日预算；回退得到的是自由文本，由后面的作战卡转换步骤统一解析，解析不了则该标的本轮不出卡。
