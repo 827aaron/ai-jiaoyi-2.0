@@ -792,3 +792,20 @@ def test_switch_mode_goes_through_live_gate(tmp_path: Path) -> None:
         assert r.status_code == 200
     assert not LiveGate(gate).armed
     assert tomllib.loads(paths.app.read_text(encoding="utf-8"))["mode"] == "paper"
+
+
+def test_settings_meaning_lines() -> None:
+    """R1 / R2：每笔实际风险、同时满仓数、按本金推荐开会档和日上限。"""
+    from jiaoyi.panel.meaning import build_meaning, recommended_meeting
+
+    risk = load_risk_config(ROOT / "config" / "risk.example.toml").model_copy(
+        update={"risk_per_trade_pct": 5.0, "daily_loss_halt_pct": 15.0}
+    )
+    app = load_app_config(ROOT / "config" / "app.example.toml")
+    m = build_meaning(risk, app, "2h", 20.0, 5000.0)
+    text = {x.label: x.text for x in m.lines}
+    assert "2.5%" in text["每笔实际风险"]
+    assert "= 2 笔" in text["同时最多几笔满仓"] and "S 档时 4 笔" in text["同时最多几笔满仓"]
+    assert "12h 档" in text["按本金推荐"] and "$2.50" in text["按本金推荐"]
+    assert recommended_meeting(1000) is None and recommended_meeting(100_000) == "1h"
+    assert "拿不到本金" in build_meaning(risk, app, "2h", None, None).lines[-1].text
