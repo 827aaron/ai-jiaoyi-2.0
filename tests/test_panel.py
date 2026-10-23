@@ -530,3 +530,20 @@ def test_pool_and_settings_endpoints(tmp_path: Path) -> None:
         assert client.get("/api/pool").json()["entries"] == []
         body = client.get("/api/settings").json()
         assert body["mode"] == "paper" and body["keys"] == {}
+
+
+def test_history_hides_test_trades_by_default(tmp_path: Path) -> None:
+    """没有哨兵 / 拍板 / 保镖记录的平仓（冒烟测试、手动单）默认不算进记录和统计。"""
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)  # 种子里的那笔平仓没有任何决策记录 → 测试单
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    page = build_history(files, RISK, NOW, "today")
+    assert page.trades == 0 and page.rows == [] and page.curve == []
+    assert page.net_pnl_usdt == 0.0 and page.test_trades == 1
+    shown = build_history(files, RISK, NOW, "today", include_tests=True)
+    assert shown.trades == 1 and shown.rows[0].test
+    assert [k.kind for k in shown.by_kind] == ["test"]
+    with _client(tmp_path, "10.0.0.2") as client:
+        assert client.get("/api/history").json()["rows"] == []
+        assert client.get("/api/history?tests=true").json()["rows"][0]["test"] is True

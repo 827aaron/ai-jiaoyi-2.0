@@ -46,6 +46,8 @@ const S = { tf: "1m" };
 const hm = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(ts));
 const hms = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(ts));
 const money = (x, d = 1) => (x == null ? "—" : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
+// U 本位合约的数量按币计；旁边折算成 USDT 名义金额（数量 × 开仓价），一眼看出这单多大
+const qty = (q, px) => `${q}${px ? ` <span class="dim">≈${money(q * px, 0)}U</span>` : ""}`;
 const signed = (x, d = 1) => (x == null ? "—" : (x < 0 ? "−" : "+") + money(Math.abs(x), d));
 const cls = (x) => (x == null || x === 0 ? "" : x > 0 ? "up" : "down");
 const coin = (s) => esc(String(s || "").replace(/USDT$/, ""));
@@ -229,6 +231,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "rej") { S.rej = !S.rej; render(); }
+  else if (act === "tests") { S.tests = !S.tests; render(); poll(); }
   else if (act === "csv") exportCsv();
   else if (act === "cmd") askCommand(arg);
   else if (act === "close1") { const p = (pageData && pageData.positions || []).find((x) => x.position_id === arg); askCommand("close_position", { position_id: arg }, p ? `${p.symbol.replace(/USDT$/, "")} ${(SIDE[p.side] || [p.side])[0]} ${p.quantity}` : arg); }
@@ -247,19 +250,26 @@ document.addEventListener("keydown", (e) => {
 const clickable = (act, arg = "") => `data-act="${act}" data-arg="${esc(arg)}" tabindex="0" role="button"`;
 const json = (o) => (o && Object.keys(o).length ? `<pre class="json">${esc(JSON.stringify(o, null, 2))}</pre>` : `<span class="dim">（空）</span>`);
 
+const splitIdle = (list) => [list.filter((s) => s.bias !== "no_trade"), list.filter((s) => s.bias === "no_trade")];
+const idleLine = (idle) => `观望：${idle.slice(0, 6).map((s) => coin(s.symbol)).join("、")}${idle.length > 6 ? " 等" : ""} 共 ${idle.length} 个`;
+
 function showCard() {
   const c = data && data.card;
   if (!c) return;
-  const rows = c.symbols.map((s) => {
+  // 观望 = 军师团看过、这一轮不开仓：默认收成一行，只把有方向的币摊开
+  const [act, idle] = splitIdle(c.symbols);
+  const row = (s) => {
     const [t, k] = BIAS[s.bias] || [s.bias, ""];
     return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(s.size_tier_max || "—")}</td>
       <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${s.key_levels.length ? `<div class="dim small">关键位：${s.key_levels.map(price).join(" / ")}</div>` : ""}</td></tr>`;
-  }).join("");
+  };
+  const head = '<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th>单笔 U</th><th>最大档</th><th>理由</th></tr></thead>';
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
     <p class="dim">${hm(c.created_at)} 出卡 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}${c.valid ? "" : " · <span class='down'>已过期</span>"}</p>
     ${c.regime ? `<div class="note"><b>军师纪要</b>　${esc(c.regime)}</div>` : ""}
-    <div class="tw"><table><thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th>单笔 U</th><th>最大档</th><th>理由</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    ${act.length ? `<div class="tw"><table>${head}<tbody>${act.map(row).join("")}</tbody></table></div>` : '<div class="dim">这一轮没有要做的币，全部观望。</div>'}
+    ${idle.length ? `<details class="mt"><summary class="dim">${idleLine(idle)}（这一轮不开仓）· 点开看理由</summary><div class="tw"><table>${head}<tbody>${idle.map(row).join("")}</tbody></table></div></details>` : ""}`);
   $("#layer .dlg").classList.add("wide");
 }
 
@@ -312,17 +322,19 @@ function cardSection(c) {
     return `<section class="card"><div class="ch"><h2>作战卡</h2><span class="pill">军师团</span></div>
       <div class="empty"><b>今天还没有作战卡</b>没有有效作战卡就不开新仓；已有持仓照常盯。</div></section>`;
   }
-  const shown = c.symbols.slice(0, 8);
-  const more = c.symbols.length - shown.length;
+  const [act, idle] = splitIdle(c.symbols);
+  const shown = act.slice(0, 8);
+  const more = act.length - shown.length;
   const pills = shown.map((s) => { const [t, k] = BIAS[s.bias] || [s.bias, ""]; return `<span class="pill ${k}">${coin(s.symbol)} ${t}</span>`; }).join("");
   const until = c.expires_at ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
   return `<section class="card click" ${clickable("card")}>
     <div class="ch"><h2>作战卡</h2><span class="pill">军师团${c.version ? " v" + c.version : ""}</span>
       <span class="r">${hm(c.created_at)} 更新 · ${c.valid ? until : '<span class="down">已过期，不开新仓</span>'} <button class="btn b-sm" ${clickable("cmd", "refresh_cards")}>重新开会</button></span></div>
-    <div class="row">${pills}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
+    <div class="row">${pills || '<span class="dim">这一轮没有要做的币</span>'}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
+    ${idle.length ? `<div class="dim small">${idleLine(idle)}（不开仓）</div>` : ""}
     <dl class="kv"><dt>止损</dt><dd>${range(c.stop_atr, " ATR")}</dd><dt>杠杆</dt><dd>${c.leverage_max == null ? "—" : "≤ " + c.leverage_max + " 倍"}</dd><dt>单笔</dt><dd>${range(c.notional_usdt, " U")}</dd></dl>
     ${c.regime ? `<div class="note"><b>军师纪要</b>　${esc(c.regime)}</div>` : ""}
-    <div class="foot">点开看全部 ${c.symbols.length} 个标的的方向、止损、杠杆和理由 ›</div>
+    <div class="foot">点开看每个币的方向、止损、杠杆和理由 ›</div>
   </section>`;
 }
 
@@ -340,7 +352,7 @@ function posSection(list) {
         const [s, sc] = SIDE[p.side] || [p.side, ""];
         const lb = LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单";
         const lbBad = p.lifeboat_status !== "active";
-        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${p.quantity}</b>
+        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.entry_price)}</b>
           <span class="pnl ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</span></div>
           <div class="meta"><span>开 ${price(p.entry_price)} · 损 ${price(p.stop_loss_price)} · 盈 ${price(p.take_profit_price)}</span></div>
           <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
@@ -394,7 +406,7 @@ P.positions = (arg) => {
     const on = p.position_id === sel.position_id;
     const held = now - new Date(p.opened_at).getTime();
     return `<tr class="click ${on ? "sel" : ""}" onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'">
-      <td class="hi">${coin(p.symbol)} <span class="${sc}">${s}</span> ${p.quantity} <span class="dim">${p.leverage}x</span></td>
+      <td class="hi">${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.entry_price)} <span class="dim">${p.leverage}x</span></td>
       <td class="num">${price(p.entry_price)}</td><td class="r num ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : signed(p.unrealized_usdt, 2) + "U"}</td>
       <td class="num">${price(p.stop_loss_price)} / ${price(p.take_profit_price)}</td>
       <td class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${price(p.lifeboat_price)}</td>
@@ -414,7 +426,7 @@ P.positions = (arg) => {
       <thead><tr><th>币种</th><th>开仓价</th><th class="r">浮盈亏</th><th>止损 / 止盈</th><th>保命单</th><th>已持有 / 上限</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div></section>
     <section class="card mt">
-      <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${sel.quantity} · 详情</h2>
+      <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span></div>
@@ -508,6 +520,7 @@ const RANGE = { today: "今天", "7d": "7 天", "30d": "30 天" };
 const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "移动止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
 S.hist = "today";
 S.rej = false;
+S.tests = false;
 
 P.history = () => {
   const d = pageData;
@@ -518,11 +531,11 @@ P.history = () => {
     [d.avg_win_loss == null ? "—" : d.avg_win_loss.toFixed(2), "平均盈亏比"],
     [d.max_drawdown_usdt ? "−" + money(d.max_drawdown_usdt, 2) + "U" : "0", "最大回撤", d.max_drawdown_usdt ? "down" : ""],
   ];
-  const kinds = d.by_kind.map((k) => `<tr><td class="hi">${esc(SIGNAL[k.kind] || (k.kind === "unknown" ? "未知" : k.kind))}</td><td class="r num">${k.trades}</td><td class="r num">${k.win_rate == null ? "—" : Math.round(k.win_rate * 100) + "%"}</td><td class="r num ${cls(k.pnl_usdt)}">${signed(k.pnl_usdt, 2)}</td></tr>`).join("");
+  const kinds = d.by_kind.map((k) => `<tr><td class="hi">${esc(SIGNAL[k.kind] || ({ unknown: "未知", test: "测试单" })[k.kind] || k.kind)}</td><td class="r num">${k.trades}</td><td class="r num">${k.win_rate == null ? "—" : Math.round(k.win_rate * 100) + "%"}</td><td class="r num ${cls(k.pnl_usdt)}">${signed(k.pnl_usdt, 2)}</td></tr>`).join("");
   const rows = d.rows.map((t) => {
     const [s, sc] = SIDE[t.side] || [t.side, ""];
-    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num">${hm(t.closed_at)}</td><td class="hi">${coin(t.symbol)} <span class="${sc}">${s}</span> ${t.quantity}</td>
-      <td>${esc(SIGNAL[t.signal_kind] || "—")}</td><td class="num">${price(t.entry_price)}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
+    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num">${hm(t.closed_at)}</td><td class="hi">${coin(t.symbol)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
+      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 保镖：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="num">${price(t.entry_price)}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
       <td class="num">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${cls(t.pnl_usdt)}">${signed(t.pnl_usdt, 2)}</td><td class="r num dim">${money(t.fees_usdt, 2)}</td></tr>`;
   }).join("");
   window.__recs = d.rejected;
@@ -532,6 +545,7 @@ P.history = () => {
     : "";
   return `<div class="toolbar"><span class="seg">${Object.entries(RANGE).map(([k, v]) => `<button class="${S.hist === k ? "on" : ""}" ${clickable("hist", k)}>${v}</button>`).join("")}</span>
       <button class="chip ${S.rej ? "on" : ""}" ${clickable("rej")}>${S.rej ? "☑" : "☐"} 含被拒的信号</button>
+      ${d.test_trades ? `<button class="chip ${S.tests ? "on" : ""}" ${clickable("tests")} title="冒烟测试、手动下的单，不是机器人自己的交易">${S.tests ? "☑" : "☐"} 含测试单（${d.test_trades} 笔）</button>` : ""}
       <button class="btn b-sm" ${clickable("csv")} ${d.rows.length ? "" : "disabled"}>导出 CSV</button></div>
     <div class="tiles t5">${tiles.map(([v, l, c]) => `<div class="tile"><small>${l}</small><b class="${c || ""}">${v}</b></div>`).join("")}</div>
     <section class="card mt"><div class="ch"><h2>资金曲线</h2><span class="r">累计净盈亏，每个点是一笔平仓</span></div>
@@ -547,10 +561,10 @@ P.history = () => {
 function exportCsv() {
   const d = pageData;
   if (!d || !d.rows) return;
-  const head = ["平仓时间", "开仓时间", "币种", "方向", "数量", "杠杆", "开仓价", "信号", "平仓原因", "净盈亏U", "手续费U", "position_id"];
+  const head = ["平仓时间", "开仓时间", "币种", "方向", "数量", "名义金额U", "杠杆", "开仓价", "信号", "平仓原因", "净盈亏U", "手续费U", "position_id"];
   // 文字字段以 = + - @ 开头时加 ' 前缀，免得表格软件当公式执行（数字照常）
   const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
-  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, t.side, t.quantity, t.leverage, t.entry_price, t.signal_kind, t.close_reason, t.pnl_usdt, t.fees_usdt, t.position_id].map(q).join(","));
+  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.test ? "测试" : t.signal_kind, t.close_reason, t.pnl_usdt, t.fees_usdt, t.position_id].map(q).join(","));
   const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -936,12 +950,12 @@ function placeholder() {
 const PAGE_API = {
   positions: () => "/api/positions",
   team: (arg) => `/api/team${arg ? "?role=" + encodeURIComponent(arg) : ""}`,
-  history: () => `/api/history?range=${S.hist}`,
+  history: () => `/api/history?range=${S.hist}${S.tests ? "&tests=true" : ""}`,
   funds: () => "/api/funds",
   pool: () => "/api/pool",
   settings: () => "/api/settings",
 };
-const pageId = (page, arg) => page + "/" + (arg || "") + (page === "history" ? "/" + S.hist : "");
+const pageId = (page, arg) => page + "/" + (arg || "") + (page === "history" ? "/" + S.hist + (S.tests ? "/t" : "") : "");
 
 function render() {
   chrome();

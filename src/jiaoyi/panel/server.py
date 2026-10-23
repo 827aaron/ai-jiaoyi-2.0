@@ -197,8 +197,8 @@ def create_app(
         return build_team(files, clock(), role)
 
     @api.get("/api/history")
-    async def history(range: HistoryRange = "today") -> HistoryPage:
-        return build_history(files, risk, clock(), range)
+    async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:
+        return build_history(files, risk, clock(), range, include_tests=tests)
 
     @api.get("/api/funds")
     async def funds() -> FundsPage:

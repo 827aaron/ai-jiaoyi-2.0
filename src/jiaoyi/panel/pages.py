@@ -222,6 +222,8 @@ class TradeRow(BaseModel):
     """hummingbot 的 net_pnl_quote（已扣手续费）。"""
     fees_usdt: float
     signal_kind: str | None
+    test: bool = False
+    """没有哨兵 / 拍板 / 保镖记录的单：冒烟测试或手动下的，不是机器人自己的交易。"""
 
 
 class KindStats(BaseModel):
@@ -249,6 +251,8 @@ class HistoryPage(BaseModel):
     by_kind: list[KindStats]
     rows: list[TradeRow]
     """最新在前。"""
+    test_trades: int = 0
+    """范围内的测试单笔数；``include_tests`` 为假时它们不在 rows 和各项统计里。"""
     rejected: list[TrailItem]
     """范围内被拍板放弃 / 保镖拒绝的信号，最新在前，最多 ``REJECT_LIMIT`` 条。"""
 
@@ -260,7 +264,11 @@ def _range_start(now: datetime, tz: str, rng: HistoryRange) -> datetime:
 
 
 def build_history(
-    files: PanelFiles, risk: RiskConfig, now: datetime, rng: HistoryRange
+    files: PanelFiles,
+    risk: RiskConfig,
+    now: datetime,
+    rng: HistoryRange,
+    include_tests: bool = False,
 ) -> HistoryPage:
     start = _range_start(now, risk.day_reset_tz, rng)
     closed = sorted(
@@ -289,7 +297,12 @@ def build_history(
     rows: list[TradeRow] = []
     cum = peak = dd = 0.0
     curve: list[CurvePoint] = []
+    tests = 0
     for p in closed:
+        test = p.signal_id not in kind_of
+        tests += test
+        if test and not include_tests:
+            continue
         pnl = p.realized_pnl_usdt or 0.0
         cum += pnl
         peak = max(peak, cum)
@@ -311,13 +324,14 @@ def build_history(
                 pnl_usdt=pnl,
                 fees_usdt=p.fees_usdt,
                 signal_kind=kind_of.get(p.signal_id),
+                test=test,
             )
         )
     wins = [t.pnl_usdt for t in rows if t.pnl_usdt > 0]
     losses = [-t.pnl_usdt for t in rows if t.pnl_usdt < 0]
     by: dict[str, list[float]] = {}
     for t in rows:
-        by.setdefault(t.signal_kind or "unknown", []).append(t.pnl_usdt)
+        by.setdefault("test" if t.test else (t.signal_kind or "unknown"), []).append(t.pnl_usdt)
     rejected = [
         _item(r)
         for r in reversed(recs)
@@ -347,6 +361,7 @@ def build_history(
             for k, v in sorted(by.items(), key=lambda kv: -sum(kv[1]))
         ],
         rows=list(reversed(rows)),
+        test_trades=tests,
         rejected=rejected,
     )
 
