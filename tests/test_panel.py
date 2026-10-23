@@ -401,7 +401,15 @@ def test_team_page_and_signal_chain(tmp_path: Path) -> None:
     by_role = {r.role: r for r in team.roles}
     assert by_role[c.Role.GATE].state == "ok"
     assert by_role[c.Role.RECONCILER].state == "bad"  # 心跳过期
-    assert by_role[c.Role.PREDICTOR].state == "off"
+    assert by_role[c.Role.PREDICTOR].state == "slow"  # 主程序在跑、它还没报到
+    assert by_role[c.Role.PREDICTOR].status == "等待首次运行"
+    assert by_role[c.Role.RECONCILER].status.startswith("无心跳超过")
+    assert by_role[c.Role.GATE].status.startswith("正常（上次 ")
+    (tmp_path / "runtime.json").write_text(json.dumps({"stub_roles": ["predictor"]}))
+    stubbed = {r.role: r for r in build_team(files, NOW, c.Role.GATE).roles}
+    assert (stubbed[c.Role.PREDICTOR].state, stubbed[c.Role.PREDICTOR].status) == (
+        "off", "未启用（这次启动没接入）",
+    )  # fmt: skip
     assert [r.text for r in team.records] == ["BTC 放行", "ETH 拍板放弃"]  # 最新在前
 
     log = JsonlDecisionLog(tmp_path)

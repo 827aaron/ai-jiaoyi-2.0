@@ -629,7 +629,7 @@ P.team = () => {
   const d = pageData;
   const cards = d.roles.map((r) => `<a class="role ${r.role === d.selected ? "on" : ""} ${r.state === "bad" ? "bad" : ""}" href="#team/${r.role}">
       <div class="nm"><span class="lamp ${r.state}"><i></i></span>${esc(r.name)}</div>
-      <small>${esc(r.headline || "—")}</small>
+      <small>${esc(r.status)}</small>${r.headline && !r.status.startsWith(r.headline) ? `<small>${esc(r.headline)}</small>` : ""}
       <small class="num">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small></a>`).join("");
   const sel = d.roles.find((r) => r.role === d.selected);
   window.__recs = d.records;
