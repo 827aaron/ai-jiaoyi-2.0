@@ -40,7 +40,9 @@ class Candidate:
         return _PRIORITY[self.source[:2]]
 
 
-def holding_span(atr: float, period_min: int, hold_min: float, sigma: float = SPAN_SIGMA) -> float:
+def holding_span(
+    atr: float, period_min: float, hold_min: float, sigma: float = SPAN_SIGMA
+) -> float:
     """持仓期内价格的典型波动：``sigma`` × ATR × √(持仓时长 / ATR 周期)。"""
     return sigma * atr * math.sqrt(max(hold_min, 1.0) / max(period_min, 1))
 

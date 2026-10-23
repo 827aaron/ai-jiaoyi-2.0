@@ -254,6 +254,8 @@ def _build_cards(
         fast.max_stop_atr,
         fast.min_tp_r,
         fast.max_tp_r,
+        long_period_min=fast.atr_long_period_min,
+        stop_hint=profiles.stop_hint(app_cfg.hold),
     )
     engine = TradingAgentsEngine(
         risk_cfg,

@@ -178,7 +178,7 @@ def test_span_is_one_formula_scaled_by_own_volatility_and_holding_time() -> None
 
 def test_hold_note_and_perp_context_tell_the_meeting_the_holding_time() -> None:
     note = describe_hold(120, 6.0, 2390.0, StopScale(period_min=15))
-    assert "120 分钟" in note and "±" in note and "ATR×√(120/15)" in note
+    assert "120 分钟" in note and "±" in note and "stop_atr×√(120/15)" in note
     assert "几天" in describe_hold(30, None, None, StopScale(period_min=5))
     assert "about 45 minutes" in perp_context(45)
 

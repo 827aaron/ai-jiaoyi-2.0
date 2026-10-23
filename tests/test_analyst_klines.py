@@ -101,3 +101,29 @@ def test_prompts_carry_tp_hint_breakout_note_and_oscillator_note() -> None:
     ctx = LevelContext(100.0, 1.0, 5.0, (Candidate(101.0, "昨日高点"),), "basis")
     assert "突破位" in describe_candidates(ctx)
     assert "never treat them alone as reversal signals" in eng.perp_context(120)
+
+
+def test_stop_atr_is_geometric_mean_of_short_and_long() -> None:
+    two_tf = StopScale(5, 0.9, 2.95, 1.0, 3.0, long_period_min=60, stop_hint=(1.15, 1.85))
+    assert eng.stop_atr_name(two_tf) == "√(5m ATR × 1h ATR)"
+    assert eng.combine_atr(4.0, 9.0, two_tf) == pytest.approx(6.0)
+    assert eng.combine_atr(4.0, None, two_tf) == 4.0  # 长周期拿不到：先只用短周期
+    assert eng.combine_atr(4.0, 9.0, StopScale(15)) == 4.0  # 没有长周期
+    assert two_tf.eff_period_min == pytest.approx((5 * 60) ** 0.5)
+    text = eng.describe_atr(6.0, 1000.0, two_tf)
+    assert "√(5m ATR × 1h ATR)" in text and "建议 1.15–1.85" in text and "stop_atr = 6" in text
+    assert profiles.stop_hint("2h") == (1.15, 1.85) and profiles.stop_hint("24h") == (1.1, 1.75)
+
+
+def test_level_span_uses_stop_hint_and_both_periods(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(eng, "_klines", fake_klines(calls))
+    scale = StopScale(15, 0.5, 4.0, 1.0, 3.0, long_period_min=60, stop_hint=(1.0, 2.0))
+    ctx = eng.level_context("ETHUSDT", END, scale, 240, 1.5, None, 2.5)
+    assert ("15m", 300) in calls and ("1h", 60) in calls
+    assert ctx.atr and ctx.span == pytest.approx(
+        2.5 * 1.5 * ctx.atr
+    )  # 2.5 × 倍数中值 1.5 × stop_atr
+    assert "止损倍数中值" in ctx.basis
+    legacy = eng.level_context("ETHUSDT", END, StopScale(15), 240)
+    assert legacy.atr and legacy.span == pytest.approx(1.5 * legacy.atr * (240 / 15) ** 0.5)

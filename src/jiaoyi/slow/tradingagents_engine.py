@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import threading
@@ -131,6 +132,8 @@ class TradingAgentsSettings:
     level_candidate_interval: str | None = None
     # 关键位范围 = level_span_sigma × ATR × √(持仓时长 / ATR 周期)，见 levels.py
     level_span_sigma: float = SPAN_SIGMA
+    # 有止损倍数建议（StopScale.stop_hint）时，关键位范围 = level_span_stops × 倍数中值 × stop_atr
+    level_span_stops: float = 2.5
     # 推理长度（OpenRouter reasoning.effort）：none/low/medium/high；直连 DeepSeek 忽略
     reasoning_effort: str = "low"
     # 开会过程实时落盘的目录（面板读）；空 = 不落盘。见 meeting_live.py
@@ -369,30 +372,58 @@ TP_HINT = (1.2, 2.0)
 """出卡提示词里建议的止盈倍数范围（研究 v3）；硬范围仍是保镖的 min_tp_r–max_tp_r。"""
 
 
+def stop_atr_name(stop: StopScale) -> str:
+    """提示词里 stop_atr 的叫法：只有短周期 = ``15m ATR``；带长周期 = ``√(5m ATR × 1h ATR)``。"""
+    short = f"{atr_interval(stop.period_min)} ATR"
+    if not stop.long_period_min:
+        return short
+    return f"√({short} × {atr_interval(stop.long_period_min)} ATR)"
+
+
+def combine_atr(short: float | None, long: float | None, stop: StopScale) -> float | None:
+    """stop_atr = √(短 × 长)；没有长周期用短周期；长周期拿不到先只用短周期（同保镖）。"""
+    if short is None or not stop.long_period_min or long is None:
+        return short
+    return math.sqrt(short * long)
+
+
+def _closed_atr(symbol: str, minutes: int, end: datetime) -> tuple[float | None, float | None]:
+    """(已收盘 K 线算的 ATR, 最新收盘价)。"""
+    rows = _klines(symbol, atr_interval(minutes), 60, end)
+    closed = [r for r in rows if r[6] <= int(end.timestamp() * 1000)]  # 去掉还没收盘的那根
+    return wilder_atr(closed), (float(closed[-1][4]) if closed else None)
+
+
 def describe_atr(atr: float | None, price: float | None, stop: StopScale) -> str:
     """给会议提示词用的 ATR 说明；拿不到数值时明说，让模型别瞎猜价格尺度。"""
-    name = atr_interval(stop.period_min)
+    name = stop_atr_name(stop)
+    sl_hint = (
+        f"（建议 {stop.stop_hint[0]:g}–{stop.stop_hint[1]:g}，"
+        "窄 / 中 / 宽取这个范围的下沿 / 中 / 上沿）"
+        if stop.stop_hint
+        else ""
+    )
     tp_lo, tp_hi = max(TP_HINT[0], stop.min_tp_r), min(TP_HINT[1], stop.max_tp_r)
     tp_hint = f"（建议 {tp_lo:g}–{tp_hi:g}，别贪）" if tp_lo < tp_hi else ""
     head = (
-        f"止损倍数按 {name} ATR({ATR_PERIOD}) 计（周期由风控配置决定，不是 1h K 线上看到的 ATR），"
-        f"每个标的的止损倍数必须在 {stop.min_stop_atr:g}–{stop.max_stop_atr:g} 之间，"
+        f"止损倍数按 stop_atr = {name}（各 ATR 都是 Wilder {ATR_PERIOD} 根，周期由风控配置决定，"
+        "不是 1h K 线上看到的 ATR）计，"
+        f"每个标的的止损倍数必须在 {stop.min_stop_atr:g}–{stop.max_stop_atr:g} 之间{sl_hint}，"
         f"止盈倍数（止损距离的倍数）必须在 {stop.min_tp_r:g}–{stop.max_tp_r:g} 之间{tp_hint}，"
         "超出整张卡这个标的会被保镖拒绝"
     )
     if atr is None or price is None or price <= 0:
         return head + "；该币当前 ATR 数值暂不可用"
     pct = atr / price * 100
-    return f"{head}。该币当前 {name} ATR({ATR_PERIOD}) = {atr:.6g}，约占价格 {pct:.2f}%"
+    return f"{head}。该币当前 stop_atr = {atr:.6g}，约占价格 {pct:.2f}%"
 
 
 def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
-    """取与保镖同周期的 K 线算 ATR。失败只说明不可用，不影响开会。"""
+    """取与保镖同周期的 K 线算 stop_atr（不乘时段系数）。失败只说明不可用，不影响开会。"""
     try:
-        rows = _klines(symbol, atr_interval(stop.period_min), 60, end)
-        closed = [r for r in rows if r[6] <= int(end.timestamp() * 1000)]  # 去掉还没收盘的那根
-        price = float(closed[-1][4]) if closed else None
-        return describe_atr(wilder_atr(closed), price, stop)
+        short, price = _closed_atr(symbol, stop.period_min, end)
+        long = _closed_atr(symbol, stop.long_period_min, end)[0] if stop.long_period_min else None
+        return describe_atr(combine_atr(short, long, stop), price, stop)
     except Exception:
         return describe_atr(None, None, stop)
 
@@ -404,23 +435,37 @@ def level_context(
     hold_min: float,
     sigma: float = SPAN_SIGMA,
     candidate_interval: str | None = None,
+    span_stops: float = 2.5,
 ) -> LevelContext:
-    """取档位周期的 K 线 + 日线算关键位候选。范围 = σ × 该币 ATR × √(持仓时长 / ATR 周期)，
-    同一条公式适用所有币所有档位。失败返回空背景（不出关键位，不瞎编）。"""
+    """取档位周期的 K 线 + 日线算关键位候选。范围：有止损倍数建议（``stop.stop_hint``）时 =
+    ``span_stops`` × 倍数中值 × stop_atr（持仓期内价格 94% 的时候不会走到 2.5 个止损以外）；
+    否则 = σ × 该币 ATR × √(持仓时长 / ATR 周期)。同一条公式适用所有币所有档位。
+    失败返回空背景（不出关键位，不瞎编）。"""
     try:
         end_ms = int(end.timestamp() * 1000)
         rows = _klines(symbol, atr_interval(stop.period_min), 300, end)
         daily = [r for r in _klines(symbol, "1d", 12, end) if r[6] <= end_ms]
         closed = [r for r in rows if r[6] <= end_ms]
-        atr = wilder_atr(closed)
+        short = wilder_atr(closed)
+        long = _closed_atr(symbol, stop.long_period_min, end)[0] if stop.long_period_min else None
+        atr = combine_atr(short, long, stop)
         if not atr or not rows:
             return LevelContext()
         price = float(rows[-1][4])
-        span = holding_span(atr, stop.period_min, hold_min, sigma)
         name = atr_interval(stop.period_min)
-        basis = (
-            f"= {sigma:g}×该币 {name} ATR×√({hold_min:g}/{stop.period_min})，即持仓期内的典型波动"
-        )
+        if stop.stop_hint:
+            mid = sum(stop.stop_hint) / 2
+            span = span_stops * mid * atr
+            basis = (
+                f"= {span_stops:g}×止损倍数中值 {mid:g}×该币 stop_atr（{stop_atr_name(stop)}），"
+                "即持仓期内价格几乎不会走到的范围"
+            )
+        else:
+            span = holding_span(atr, stop.eff_period_min, hold_min, sigma)
+            basis = (
+                f"= {sigma:g}×该币 {name} ATR×√({hold_min:g}/{stop.period_min})，"
+                "即持仓期内的典型波动"
+            )
         bars = closed
         if candidate_interval and candidate_interval != name:  # 摆动 / 成交密集区用另一个周期找
             raw = _klines(symbol, candidate_interval, 300, end)
@@ -439,10 +484,11 @@ def describe_hold(hold_min: float, atr: float | None, price: float | None, stop:
     )
     if atr is None or price is None or price <= 0:
         return head
-    move = holding_span(atr, stop.period_min, hold_min, 1.0) / price * 100
+    period = stop.eff_period_min
+    move = holding_span(atr, period, hold_min, 1.0) / price * 100
     return (
-        f"{head}。该币 {atr_interval(stop.period_min)} ATR 约占价格 {atr / price * 100:.2f}%，"
-        f"持仓期内一个标准差的价格移动约 ±{move:.2f}%（= ATR×√({hold_min:g}/{stop.period_min})）"
+        f"{head}。该币 stop_atr 约占价格 {atr / price * 100:.2f}%，"
+        f"持仓期内一个标准差的价格移动约 ±{move:.2f}%（= stop_atr×√({hold_min:g}/{period:g})）"
     )
 
 
@@ -1460,6 +1506,7 @@ class TradingAgentsEngine:
             self._s.hold_minutes,
             self._s.level_span_sigma,
             self._s.level_candidate_interval,
+            self._s.level_span_stops,
         )
         prompt = convert_prompt(
             entry,
