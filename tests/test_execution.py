@@ -28,6 +28,7 @@ class Rig:
         self.api = FakeHbApi()
         self.ex = FakeExchange()
         self.alerts = StubAlerter()
+        self.api.on_terminate = self._flatten_exchange
         self.registry = PositionRegistry(tmp_path / "positions.json")
         self.lifeboat = BinanceLifeboat(self.ex, clock=self.clock)
         self.adapter = self._adapter()
@@ -40,6 +41,10 @@ class Rig:
             self.alerts,
             account_name="acct",
         )
+
+    def _flatten_exchange(self, executor_id: str) -> None:
+        pair = str(self.api.executors[executor_id]["trading_pair"])
+        self.ex.set_position(pair.replace("-", ""), Side.LONG, 0)
 
     def clock(self) -> datetime:
         return self.t
@@ -367,18 +372,75 @@ async def test_stale_lifeboat_cancelled_when_flat(rig: Rig) -> None:
     assert pid  # 账本里这笔已 CLOSED
 
 
-async def test_stale_lifeboat_kept_when_position_still_open(rig: Rig) -> None:
-    await open_filled(rig)
-    rig.api.terminate("ex1", "STOP_LOSS")
-    rig.ex.fail_cancel = True
+async def test_executor_terminated_but_position_remains_keeps_ledger_and_lifeboat(
+    rig: Rig,
+) -> None:
+    """hummingbot 重启：执行器被 SYSTEM_CLEANUP 终止、仓位还在。不能记已平，更不能撤保命止损。"""
+    pid = await open_filled(rig)
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
     await rig.adapter.positions()
-    rig.ex.fail_cancel = False
-    # 账本说平了，币安还有仓位：绝不撤保命止损
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.OPEN and rec.close_reason is None
+    assert len(rig.ex.stops) == 1  # 保命止损没被撤
+    assert any("执行器已终止但币安仍有仓" in a.title for a in rig.alerts.sent)
+
+
+async def test_executor_terminated_position_remains_is_flattened_after_two_rounds(
+    rig: Rig,
+) -> None:
+    pid = await open_filled(rig)
+    rig.api.auto_terminate_on_stop = False  # 已终止的执行器，停止请求什么也不会做
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    first = await rig.rec.reconcile(rig.t)
+    assert any(i.kind is ReconcileIssueKind.EXECUTOR_FAILED and not i.fixed for i in first.issues)
+    assert rig.ex.market_closed == [] and len(rig.ex.stops) == 1  # 第 1 轮：止损兜底，不平
+    second = await rig.rec.reconcile(rig.t)
+    assert any(i.kind is ReconcileIssueKind.EXECUTOR_FAILED and i.fixed for i in second.issues)
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+    assert rig.ex.stops == {}
+
+
+async def test_lifeboat_replaced_when_hummingbot_cleanup_cancelled_it(rig: Rig) -> None:
+    """重启时 hummingbot 把币安上的挂单一并撤了（保命止损不见了）：对账员补挂。"""
+    pid = await open_filled(rig)
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    rig.ex.stops.clear()
     report = await rig.rec.reconcile(rig.t)
-    kinds = {i.kind for i in report.issues}
-    assert ReconcileIssueKind.STALE_LIFEBOAT in kinds
-    assert ReconcileIssueKind.ORPHAN_POSITION in kinds
     assert len(rig.ex.stops) == 1
+    assert pid and any(
+        i.kind is ReconcileIssueKind.LIFEBOAT_MISSING and i.fixed for i in report.issues
+    )
+
+
+async def test_close_verifies_exchange_flat_and_falls_back_to_direct(rig: Rig) -> None:
+    """停执行器返回成功、执行器也结束了，但币安仓位还在：直连只减仓补平，盈亏记进当日统计。"""
+    pid = await open_filled(rig)
+    rig.api.auto_terminate_on_stop = False
+    rig.ex.exit_price = 68144.0
+
+    async def stop_and_leave(executor_id: str, *, keep_position: bool) -> None:
+        rig.api.terminate(executor_id, "EARLY_STOP", leaves_position=True)
+
+    rig.api.stop_executor = stop_and_leave  # type: ignore[method-assign]
+    await rig.adapter.close(pid, CloseReason.MANUAL)
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68144.0 - 68044.0))
+    assert rig.ex.stops == {}
+    assert (await rig.adapter.account()).day_realized_pnl_usdt == pytest.approx(1.5)
+
+
+async def test_unverifiable_exchange_keeps_position_open(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.api.terminate("ex1", "TAKE_PROFIT")
+    rig.ex.down = True  # 币安读不到：不结账
+    await rig.adapter.positions()
+    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
+    rig.ex.down = False
+    await rig.adapter.positions()
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
 
 
 async def test_quantity_mismatch(rig: Rig) -> None:
@@ -646,6 +708,9 @@ async def test_vanished_executor_with_exchange_position_is_flattened_directly(ri
     pid = await open_filled(rig)
     rig.api.executors.clear()  # hummingbot 重启丢了执行器
     rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
+    first = await rig.rec.reconcile(rig.t)
+    assert rig.ex.market_closed == []  # 第 1 轮只告警
+    assert any(not i.fixed for i in first.issues if i.kind is ReconcileIssueKind.EXECUTOR_FAILED)
     report = await rig.rec.reconcile(rig.t)
     issue = next(i for i in report.issues if i.kind is ReconcileIssueKind.EXECUTOR_FAILED)
     assert issue.fixed

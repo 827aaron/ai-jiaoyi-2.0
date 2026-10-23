@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
 
@@ -13,6 +14,7 @@ from jiaoyi.execution.hb_client import HbApiError
 class FakeHbApi:
     def __init__(self) -> None:
         self.executors: dict[str, dict[str, Any]] = {}
+        self.on_terminate: Callable[[str], None] | None = None
         self.created: list[dict[str, Any]] = []
         self.stopped: list[tuple[str, bool]] = []
         self.balances: list[dict[str, Any]] = [
@@ -63,8 +65,19 @@ class FakeHbApi:
     def fill(self, eid: str, price: float) -> None:
         self.executors[eid]["custom_info"]["current_position_average_price"] = price
 
-    def terminate(self, eid: str, close_type: str, pnl: float | None = None) -> None:
+    def terminate(
+        self,
+        eid: str,
+        close_type: str,
+        pnl: float | None = None,
+        *,
+        leaves_position: bool = False,
+    ) -> None:
+        """执行器结束。默认像真的 hummingbot 一样把仓位一起平掉；``leaves_position=True`` 模拟
+        重启被 SYSTEM_CLEANUP 终止、币安上仓位还在。"""
         self.executors[eid].update(status="TERMINATED", is_active=False, close_type=close_type)
+        if self.on_terminate is not None and not leaves_position:
+            self.on_terminate(eid)
         if pnl is not None:
             self.executors[eid]["net_pnl_quote"] = pnl
 
@@ -111,6 +124,7 @@ class FakeExchange:
         self.fail_market_close = False
         self.income = 0.0
         self.wallet = 1000.0
+        self.exit_price: float | None = None
         self.leverage_set: list[tuple[str, int]] = []
         self.leverage_error: str | None = None
         self.filters: dict[str, LotFilter] = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0)}
@@ -167,11 +181,12 @@ class FakeExchange:
 
     async def close_position_market(
         self, symbol: str, close_side: Literal["buy", "sell"], quantity: float
-    ) -> None:
+    ) -> float | None:
         if self.fail_market_close:
             raise ExchangeError("直连平仓失败")
         self.market_closed.append((symbol, close_side, quantity))
         self.set_position(symbol, Side.LONG, 0)
+        return self.exit_price
 
     async def income_since(self, since: datetime) -> float:
         if self.income_down:
