@@ -217,6 +217,8 @@ class Runner:
         # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
         self._closing: set[str] = set()
+        self._tp_past: dict[str, datetime] = {}
+        """限价止盈：价格第一次越过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
         self._last_prune: datetime | None = None
         # 面板“重启生效”：不开新仓，等在途动作做完再退出（launchd KeepAlive 拉起）
         self._restart_check = restart_check
@@ -407,6 +409,8 @@ class Runner:
                 # 平仓要等执行器结束（最长十几秒），放后台并行，行情和其它标的不能停
                 if pos.position_id not in self._closing:
                     self._spawn(self._patrol_close(pos, action.reason))
+        if isinstance(event, Trade) and self.app.app_cfg.limit_take_profit_on:
+            self._tp_fallback(event)
         if isinstance(event, Trade):
             snap = self.m.features.snapshot(event.symbol)
             if snap is None:
@@ -415,6 +419,36 @@ class Runner:
             for signal in self.m.trigger.check(snap, self.m.cards.current(now), now):
                 # 拍板要几百毫秒，放后台，不卡行情
                 self._spawn(self.handle_signal(signal))
+
+    def _tp_fallback(self, t: Trade) -> None:
+        """限价止盈挂着却没成交：价格在止盈价外面待满 ``tp_limit_fallback_s`` 秒，改市价平。"""
+        now = self.app.clock()
+        wait = self.app.app_cfg.fast_loop.tp_limit_fallback_s
+        for pos in self.positions:
+            tp, pid = pos.take_profit_price, pos.position_id
+            if pos.symbol != t.symbol or pos.status is not PositionStatus.OPEN or tp is None:
+                continue
+            past = t.price >= tp if pos.side is Side.LONG else t.price <= tp
+            if not past:
+                self._tp_past.pop(pid, None)
+                continue
+            first = self._tp_past.setdefault(pid, now)
+            if (now - first).total_seconds() >= wait and pid not in self._closing:
+                self._tp_past.pop(pid, None)
+                self._spawn(self._tp_market(pos, t.price, wait))
+
+    async def _tp_market(self, pos: PositionRecord, price: float, wait: float) -> None:
+        log.warning(
+            "%s 越过止盈价 %s 已 %.0f 秒没成交，改市价平", pos.symbol, pos.take_profit_price, wait
+        )
+        await self.close(pos, CloseReason.TAKE_PROFIT)
+        if any(p.position_id == pos.position_id for p in self.positions):
+            return  # 没平掉（close 已发 CRITICAL）
+        await self.app._alert(
+            AlertLevel.INFO,
+            "限价止盈没成交，已改市价平",
+            f"{pos.symbol} 止盈价 {pos.take_profit_price:g}，现价 {price:g}，越过 {wait:.0f} 秒",
+        )
 
     def _sync_wanted(self) -> None:
         """预测员按需模式只算作战卡里的币和有持仓的币（总盘会挑中的走 ``set_priority``）。"""

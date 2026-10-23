@@ -489,6 +489,17 @@ class RiskGuardImpl:
         detail.update(stop_tier=stop_tier, stop_atr=round(dist / atr, 3), stop_pct=round(pct, 4))
         return _Stop(dist=dist, pct=pct)
 
+    def _book_cap(self, f: FeatureSnapshot, side: Side) -> float | None:
+        """吃单那一侧前 5 档挂单额 × ``max_notional_book_frac``；关了或没有盘口返回 None。"""
+        frac = self._fast.max_notional_book_frac
+        if frac <= 0 or f.book is None:
+            return None
+        b = f.book
+        depth = b.ask_depth_usdt if side is Side.LONG else b.bid_depth_usdt
+        if depth is None:
+            depth = b.depth_usdt / 2.0  # 旧快照没分两侧：按一半估
+        return depth * frac
+
     def _size(
         self,
         signal: CandidateSignal,
@@ -570,6 +581,10 @@ class RiskGuardImpl:
             - account.open_notional_by_category.get(cs.category, 0.0),
             "可用保证金": account.available_usdt * lev,
         }
+        book_cap = self._book_cap(f, side)
+        if book_cap is not None:
+            caps["盘口深度"] = book_cap
+            detail["book_cap_usdt"] = round(book_cap, 2)
         binding = "风险金额"
         for name, cap in caps.items():
             if cap < notional:
