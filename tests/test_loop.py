@@ -322,6 +322,36 @@ async def test_predictor_wants_card_and_held_symbols(tmp_path: Path, now: dateti
     assert pred.wanted == {s.symbol for s in card.symbols} | {"XRPUSDT"}
 
 
+async def test_backfill_feeds_recent_minutes_to_predictor(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    pred = FakePredictor()
+
+    class Feed:
+        async def subscribe(self, symbols: Sequence[str]) -> None: ...
+
+        async def events(self) -> AsyncIterator[c.MarketEvent]:
+            if False:
+                yield  # pragma: no cover
+
+        async def close(self) -> None: ...
+
+    app.m = dataclasses.replace(app.m, predictor=pred, feed=Feed())
+    k = c.Kline(
+        symbol="BTCUSDT", interval=c.Interval.M1, open_time=now - timedelta(minutes=1),
+        close_time=now, open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
+    )  # fmt: skip
+
+    async def fetch1(sym: str) -> list[c.Kline]:
+        return [k, k]
+
+    async def fetch5(sym: str) -> list[c.Kline]:
+        return [k]
+
+    await Runner(app, fetch_klines=fetch1, fetch_predictor_klines=fetch5).backfill(["BTCUSDT"])
+    assert pred.filled == {"BTCUSDT": 1}
+    assert pred.klines == 2  # 1 分钟线也交给预测员接上当前这根 5 分钟线
+
+
 async def test_run_until_cancelled_then_stops(tmp_path: Path, now: datetime) -> None:
     app = _app(tmp_path, now)
     r = Runner(app)

@@ -325,8 +325,10 @@ class Runner:
 
         async def one(sym: str) -> None:
             async with sem:
+                minutes: list[Kline] = []
                 try:
-                    for k in await self._fetch_klines(sym):
+                    minutes = await self._fetch_klines(sym)
+                    for k in minutes:
                         self.m.features.update(k)
                 except Exception:
                     log.warning("%s 回填 K 线失败，等实时数据攒够", sym, exc_info=True)
@@ -334,6 +336,10 @@ class Runner:
                     return
                 try:
                     await self.m.predictor.backfill(sym, await self._fetch_predictor_klines(sym))
+                    # 当前这根 5 分钟线已收盘的几分钟也喂进去，实时 1 分钟线才能接着拼出下一根，
+                    # 否则从半截接入差一根被当成缺口、回填白做（更早的分钟拼出来是重复的，会丢掉）
+                    for k in minutes:
+                        await self.m.predictor.on_kline(k)
                 except Exception:
                     log.warning("%s 回填预测员 K 线失败，等实时数据攒够", sym, exc_info=True)
 

@@ -351,3 +351,28 @@ async def test_backfill_then_first_five_minute_close_forecasts() -> None:
     await f.wait_idle()
     assert be.calls == 1
     assert f.latest("BTCUSDT", T0 + timedelta(minutes=20)) is not None
+
+
+async def test_backfill_mid_bar_needs_the_closed_minutes() -> None:
+    """启动在 5 分钟线中间（第 17 分钟）：只有 5 分钟回填会差一根被当缺口；
+    把当前这根已收盘的 15、16 分钟也喂进去，第 20 分钟就接上了。"""
+    be = FakeBackend()
+    f = make(True, SET, be)
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])  # 0/5/10 分
+    for minute in range(17, 20):  # 只有实时线
+        await f.on_kline(m1(minute))
+    await f.on_kline(m1(20))
+    await f.wait_idle()
+    assert be.calls == 0  # 15–20 这根拼不完整，回填被当缺口清掉
+
+    be2 = FakeBackend()
+    g = make(True, SET, be2)
+    await g.backfill("BTCUSDT", [bar(k) for k in range(3)])
+    for minute in range(0, 17):  # Runner 回填时拉到的 1 分钟线（早的拼出来是重复的）
+        await g.on_kline(m1(minute))
+    await g.wait_idle()
+    assert be2.calls == 0
+    for minute in range(17, 20):
+        await g.on_kline(m1(minute))
+    await g.wait_idle()
+    assert be2.calls == 1 and g.latest("BTCUSDT", T0 + timedelta(minutes=20)) is not None
