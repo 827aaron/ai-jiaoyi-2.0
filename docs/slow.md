@@ -73,3 +73,15 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 - 进入会议：总盘会提示、单标的结论整理提示、都带这份简报。
 - **美元指数（DXY）暂未接**：没有稳定的免费无 key 来源（试过的站点会拦截脚本请求）。要加就实现一个 `BriefPart` 加进 `default_parts()`。
 - 接线（架构师）：创建一个 `MarketBriefService()`，同时传给 `BattleCardCommander(brief=...)` 和 `TradingAgentsEngine(brief=...)`，退出时 `aclose()`。
+
+## 成本与节奏配置（`slow/settings.py`，可选 `config/slow.toml`）
+
+开会花多少钱、多频繁，都能在 `config/slow.toml` 里调（示例见 `config/slow.example.toml`）：
+
+- `[meeting]`：每类标的请哪几位分析师（`market/social/news/fundamentals`，至少一位、不重复）、多空辩论和风控讨论轮数（0–3）、flash/pro 模型名、挑币会议和“整理作战指令”两步各用 `quick`（flash，便宜）还是 `deep`（pro）、`max_tokens`、重试次数。
+- `[schedule]`：并发（1–8）、作战卡有效期（1–4 小时）、同一个币两次会议最小间隔（0.5–12 小时）。
+- `[prices]`：每百万 token 美元价，只用于花费统计（占位值，M2 真机按官网核对）。
+
+没有这个文件就用默认值，**与不配置时行为完全一致**。写错字段或超范围直接拒绝启动（`ConfigError`）。这里**不放任何风控数值**，硬上限仍只在 `risk.toml`。
+
+接线（架构师）：`cfg = load_slow_config()`，`TradingAgentsEngine(settings=cfg.engine_settings(), ...)`，`BattleCardCommander(..., **cfg.commander_kwargs())`。
