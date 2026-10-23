@@ -432,7 +432,9 @@ class Runner:
         for sym, reason in self.app.blocked_symbols().items():
             if sym not in before:
                 await self.app._alert(
-                    AlertLevel.WARN, f"{sym} 禁止新开仓", f"{reason}（已有持仓不动）"
+                    AlertLevel.WARN,
+                    f"{sym} 禁止新开仓",
+                    f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
                 )
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:

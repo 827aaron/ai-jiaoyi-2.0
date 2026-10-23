@@ -554,3 +554,17 @@ async def test_saved_card_not_restored_when_stop_scale_changed(
         stop_scale=StopScale(period_min=60),
     )
     assert c2.current(now) is None
+
+
+async def test_heartbeat_reports_progress_while_meeting(tmp_path: Path, now: datetime) -> None:
+    eng = _SlowBB(["AAUSDT", "BBUSDT"])
+    eng.bb_delay = 10
+    c, log, _ = make(tmp_path, eng, now)
+    c._beat_s = 0.05
+    task = asyncio.create_task(c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动"))
+    await asyncio.sleep(0.4)
+    st = log.read_status()[Role.COMMANDER.value]
+    assert st.headline == "开会中：1/2"  # AA 开完了，BB 还在开
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

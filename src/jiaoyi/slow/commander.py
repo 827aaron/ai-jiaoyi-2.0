@@ -172,6 +172,8 @@ class BattleCardCommander:
         self._budget_path = budget_path
         self._card_path = card_path
         self._held: frozenset[str] = frozenset()
+        self._progress = ""
+        self._beat_s = 30.0
         self._fails = 0
         self._retry_at: datetime | None = None
         self._notices: list[str] = []
@@ -206,7 +208,8 @@ class BattleCardCommander:
             return None
         if not self._blocked:
             return c
-        # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；已有持仓不受影响
+        # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；
+        # 已有持仓会被持仓管家按“改成只看不做”平掉
         return c.model_copy(
             update={
                 "symbols": [
@@ -332,6 +335,8 @@ class BattleCardCommander:
                 await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
             except Exception as exc:
                 self._write(outcome=Outcome.ERROR, summary=f"市场简报失败，会议继续：{exc}"[:200])
+        self._progress = "选币中"
+        beat = asyncio.create_task(self._beat_while_meeting())
         try:
             card = await self._meet(pool, candidates, reason, now)
         except Exception as exc:
@@ -340,6 +345,9 @@ class BattleCardCommander:
             self._fails += 1
             self._retry_at = self._clock() + wait  # 连续失败退避，免得每分钟重开一轮会
             raise
+        finally:
+            beat.cancel()
+            self._progress = ""
         self._fails, self._retry_at = 0, None
         self._card, self._last_refresh = card, now
         self._seen = {e.symbol for e in candidates}
@@ -347,6 +355,12 @@ class BattleCardCommander:
         self._level_broken.clear()
         self._record_card(card, started)
         return card
+
+    async def _beat_while_meeting(self) -> None:
+        """一轮会议要十几分钟：期间每 30 秒报一次心跳，面板才不会把慢环标红。"""
+        while True:
+            self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+            await asyncio.sleep(self._beat_s)
 
     async def _meet(
         self, pool: SymbolPool, candidates: list[SymbolPoolEntry], reason: str, now: datetime
@@ -438,7 +452,19 @@ class BattleCardCommander:
                 self._journal.record(card, [e.symbol])
             return res
 
-        results = await asyncio.gather(*(meet(e) for e in to_meet), return_exceptions=True)
+        finished = 0
+        self._progress = f"0/{len(to_meet)}"
+
+        async def counted(e: SymbolPoolEntry) -> Analysis:
+            nonlocal finished
+            try:
+                return await meet(e)
+            finally:
+                finished += 1  # 成功失败都算开完一场
+                self._progress = f"{finished}/{len(to_meet)}"
+                self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+
+        results = await asyncio.gather(*(counted(e) for e in to_meet), return_exceptions=True)
         failed = [
             f"{e.symbol}: {r!r}"
             for e, r in zip(to_meet, results, strict=True)
