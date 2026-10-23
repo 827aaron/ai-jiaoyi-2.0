@@ -1082,3 +1082,27 @@ async def test_hb_snapshot_asks_for_fresh_balance() -> None:
     snap = await hb.snapshot()
     assert seen[0]["refresh"] is True and snap.wallet_usdt == 100 and snap.fetched_at is not None
     await hb.close()
+
+
+async def test_card_atr_same_formula_as_guard() -> None:
+    """作战卡的 ATR：币安原生 N 分钟线丢掉没走完的最后一根，Wilder 14；短长周期按保镖公式合起来。"""
+    from jiaoyi.market.features import wilder_atr
+    from jiaoyi.panel.market import KlineSource
+    from jiaoyi.risk.guard import blend_atr
+
+    assert wilder_atr([(11.0, 9.0, 10.0)] * 14) is None  # 14 根只有 13 个 TR
+    assert wilder_atr([(11.0, 9.0, 10.0)] * 15) == pytest.approx(2.0)
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.params["interval"])
+        rows = [[i * 60_000, "10", "11", "9", "10"] for i in range(30)]
+        rows.append([30 * 60_000, "10", "30", "1", "10"])  # 没走完的一根，不算
+        return httpx.Response(200, json=rows)
+
+    src = KlineSource(transport=httpx.MockTransport(handler))
+    assert await src.atr("APTUSDT", 15) == pytest.approx(2.0) and seen == ["15m"]
+    await src.close()
+    fl = c.FastLoopConfig(atr_long_period_min=60)
+    assert blend_atr(1.0, 4.0, fl) == pytest.approx(2.0)
+    assert blend_atr(1.0, None, fl) == 1.0

@@ -67,6 +67,13 @@ def session_factor(fast: FastLoopConfig, now: datetime) -> float:
     return table[local.hour]
 
 
+def blend_atr(short: float, long_: float | None, fast: FastLoopConfig) -> float:
+    """短周期 ATR 和长周期 ATR 的几何平均；没配长周期或长周期没就绪时只用短周期（不含时段系数）。"""
+    if fast.atr_long_period_min and long_ and long_ > 0:
+        return math.sqrt(short * long_)
+    return short
+
+
 def stop_atr(
     f: FeatureSnapshot, fast: FastLoopConfig, now: datetime, detail: dict[str, float | str]
 ) -> float:
@@ -80,12 +87,11 @@ def stop_atr(
     if floor > short:
         detail.update(atr_now=round(short, 8), atr_floor_7d=round(floor, 8))
         short = floor
-    atr = short
     detail["atr_short"] = round(short, 8)
+    long_ = f.atr_long if f.atr_long_period_min == fast.atr_long_period_min else None
+    atr = blend_atr(short, long_, fast)
     if fast.atr_long_period_min:
-        long_ = f.atr_long
-        if long_ and long_ > 0 and f.atr_long_period_min == fast.atr_long_period_min:
-            atr = math.sqrt(short * long_)
+        if long_ and long_ > 0:
             detail["atr_long"] = round(long_, 8)
         else:
             detail["atr_long"] = "未就绪，只用短周期"

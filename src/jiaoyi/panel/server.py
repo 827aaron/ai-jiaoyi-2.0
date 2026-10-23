@@ -55,6 +55,7 @@ from jiaoyi.panel.pages import (
     build_signal,
     build_team,
 )
+from jiaoyi.risk.guard import blend_atr, session_factor
 from jiaoyi.slow.settings import slow_defaults
 from jiaoyi.watchdog import send as send_telegram
 
@@ -119,6 +120,22 @@ class ModeBody(BaseModel):
     confirm_word: str | None = Field(default=None, max_length=64)
     acknowledged: bool = False
     """切实盘：提示已逐条勾过。"""
+
+
+class CardAtr(BaseModel):
+    symbol: str
+    price: float
+    """现价（1 分钟线最后一根收盘）。"""
+    atr: float
+    """保镖止损用的 ATR（价格单位）：止损距离 = 作战卡倍数 × 它。"""
+    atr_short: float
+    atr_long: float | None
+    period_min: int
+    long_period_min: int
+    session_factor: float
+    stop_atr_clamp: tuple[float, float] | None = None
+    """保镖把作战卡止损倍数夹到这个范围（``card_range_clamp`` 开着时）；None = 不夹。"""
+    tp_r_clamp: tuple[float, float] | None = None
 
 
 class ModeInfo(BaseModel):
@@ -347,6 +364,34 @@ def create_app(
             return await market.klines(symbol, interval)
         except KlineError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
+
+    @api.get("/api/card-atr")
+    async def card_atr(symbol: str) -> CardAtr:
+        """作战卡按保镖口径估止损：√(短 ATR × 长 ATR) × 曼谷时段系数（不含 7 天兜底）。"""
+        fl = cfg()[1].fast_loop
+        try:
+            short = await market.atr(symbol, fl.atr_period_min)
+            long_ = (
+                await market.atr(symbol, fl.atr_long_period_min) if fl.atr_long_period_min else None
+            )
+            bars = await market.klines(symbol, "1m")
+        except KlineError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        if not short or not bars:
+            raise HTTPException(status_code=502, detail="K 线不够，算不出 ATR")
+        k = session_factor(fl, clock())
+        return CardAtr(
+            symbol=symbol,
+            price=bars[-1]["close"],
+            atr=blend_atr(short, long_, fl) * k,
+            atr_short=short,
+            atr_long=long_,
+            period_min=fl.atr_period_min,
+            long_period_min=fl.atr_long_period_min,
+            session_factor=k,
+            stop_atr_clamp=(fl.min_stop_atr, fl.max_stop_atr) if fl.card_range_clamp else None,
+            tp_r_clamp=(fl.min_tp_r, fl.max_tp_r) if fl.card_range_clamp else None,
+        )
 
     def local(request: Request) -> bool:
         return setup.is_local(

@@ -8,7 +8,11 @@ from typing import Any, Literal
 
 import httpx
 
-Interval = Literal["1m", "5m", "15m", "1h"]
+from jiaoyi.market.features import wilder_atr
+
+Interval = Literal["1m", "5m", "15m", "30m", "1h", "4h"]
+ATR_INTERVAL: dict[int, Interval] = {5: "5m", 15: "15m", 30: "30m", 60: "1h", 240: "4h"}
+"""保镖 ATR 用的分钟周期 → 币安原生 K 线周期（同样按 UTC 整点对齐）。"""
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 BASE = "https://fapi.binance.com"
 
@@ -93,6 +97,14 @@ class KlineSource:
             self._cache.clear()
         self._cache[key] = (time.monotonic(), bars)
         return bars
+
+    async def atr(self, symbol: str, period_min: int) -> float | None:
+        """``period_min`` 分钟线的 ATR（Wilder 14，同实时引擎），最后一根没走完的不算。"""
+        interval = ATR_INTERVAL.get(period_min)
+        if interval is None:
+            raise KlineError(f"没有 {period_min} 分钟的 K 线周期")
+        bars = (await self.klines(symbol, interval))[:-1]
+        return wilder_atr((b["high"], b["low"], b["close"]) for b in bars)
 
     async def close(self) -> None:
         await self._http.aclose()

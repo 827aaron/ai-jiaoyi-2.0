@@ -13,6 +13,7 @@ import bisect
 import math
 import statistics
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -96,6 +97,14 @@ def _on_bar(tr: _AtrTrack, high: float, low: float, close: float) -> None:
             tr.trs.clear()
     else:
         tr.atr = (tr.atr * (ATR_PERIOD - 1) + x) / ATR_PERIOD
+
+
+def wilder_atr(bars: Iterable[tuple[float, float, float]]) -> float | None:
+    """完整 N 分钟线 ``(高, 低, 收)``（升序）→ 同实时引擎算法的 ATR；不够 15 根为 None。"""
+    tr = _AtrTrack()
+    for high, low, close in bars:
+        _on_bar(tr, high, low, close)
+    return tr.atr
 
 
 class RollingFeatureEngine:
