@@ -1014,7 +1014,7 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop, "fast_loop")}</div></section>
     <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
       <div class="foot">开关在“运行配置和开关”里（“用不用 Kronos 预测价格”）。</div></section>
-    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">多久开一次会 ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule, "schedule")}</div></section>
+    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">多久开一次会 ${editBtn(d, "schedule")}</span></div>${d.schedule_caution ? `<div class="note warn mt">${esc(d.schedule_caution)}（只提示，不拦）</div>` : ""}<div class="form">${setRows(d.schedule, "schedule")}</div></section>
     ${profileCard(d)}
     <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>

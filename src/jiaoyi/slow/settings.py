@@ -105,7 +105,7 @@ class ScheduleConfig(_Strict):
         default=2.0, ge=0.5, le=12.0, description="同一个币两次会议的最小间隔。"
     )
     refresh_lead_min: float = Field(
-        default=15.0,
+        default=20.0,
         ge=5.0,
         le=60.0,
         description="作战卡到期前多久开会换卡。要大于一轮会议的耗时，否则卡过期到新卡出来之间不开新仓。",
@@ -128,6 +128,18 @@ class ScheduleConfig(_Strict):
         if self.min_refresh_gap_min >= self.card_ttl_hours * 60:
             raise ValueError("min_refresh_gap_min 必须小于作战卡有效期，否则卡会过期断档")
         return self
+
+    def caution(self) -> str | None:
+        """单币超时 + 5 分钟余量比提前量还长时的提示（只提示不拒绝）：
+        一个币拖到超时，旧卡过期后到新卡出来之间就不开新仓。"""
+        need = self.symbol_timeout_s / 60 + 5
+        if need <= self.refresh_lead_min:
+            return None
+        return (
+            f"单币会议超时 {self.symbol_timeout_s:.0f} 秒（加 5 分钟余量约 {need:.0f} 分钟）"
+            f"比换卡提前量 {self.refresh_lead_min:g} 分钟长，个别币拖到超时时旧卡过期后"
+            "到新卡出来之间可能不开新仓"
+        )
 
 
 class BudgetConfig(_Strict):

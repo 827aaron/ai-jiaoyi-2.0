@@ -28,7 +28,7 @@ max_retries = 6
 # concurrency = 4                  # 同时开几个标的的会议 1–8
 # card_ttl_hours = 2.0             # 作战卡有效期 1–4 小时
 # symbol_min_interval_hours = 1.67 # 同一个币两次会议的最小间隔 0.5–12 小时（≤ 一轮周期）
-# refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 15）
+# refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 20）
 # symbol_timeout_s = 900           # 单个标的的会议超时
 # min_refresh_gap_min = 100        # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 卡有效期 − 提前量（2h 档 100）
 

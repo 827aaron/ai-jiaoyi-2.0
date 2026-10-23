@@ -26,15 +26,15 @@ def test_missing_file_uses_profile_defaults(tmp_path: Path) -> None:
 
     one_hour = load_slow_config(tmp_path / "nope.toml", "60m").commander_kwargs()
     assert one_hour["ttl"] == timedelta(hours=1) and one_hour["concurrency"] == 5
-    assert one_hour["expiry_lead"] == timedelta(minutes=15)
+    assert one_hour["expiry_lead"] == timedelta(minutes=20)
     assert one_hour["fail_backoff"][-1] == timedelta(minutes=15)
-    assert one_hour["min_refresh_gap"] == timedelta(minutes=45)
+    assert one_hour["min_refresh_gap"] == timedelta(minutes=40)
 
 
 def test_example_file_is_valid_and_matches_defaults() -> None:
     cfg = load_slow_config(ROOT / "config" / "slow.example.toml")
     assert cfg == slow_defaults("2h")
-    assert SlowConfig().schedule.refresh_lead_min == 15  # 不在档位里时的代码默认
+    assert SlowConfig().schedule.refresh_lead_min == 20  # 不在档位里时的代码默认
 
 
 def test_written_key_beats_profile(tmp_path: Path) -> None:
@@ -189,3 +189,12 @@ def test_refresh_gap_must_be_shorter_than_card_ttl(tmp_path: Path) -> None:
     path.write_text("[schedule]\nmin_refresh_gap_min = 120\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="min_refresh_gap_min"):
         load_slow_config(path)
+
+
+def test_gap_caution_only_hints() -> None:
+    from jiaoyi.slow.settings import ScheduleConfig
+
+    assert ScheduleConfig().caution() is None  # 900 秒 + 5 分钟 = 20 分钟，不超过提前量 20
+    hint = ScheduleConfig(refresh_lead_min=15.0).caution()
+    assert hint is not None and "900" in hint and "15" in hint
+    assert ScheduleConfig(symbol_timeout_s=300.0, refresh_lead_min=10.0).caution() is None
