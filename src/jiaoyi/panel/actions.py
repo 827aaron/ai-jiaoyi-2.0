@@ -106,10 +106,10 @@ APP_EDITABLE = frozenset(
     }
 )
 
-# 面板的段 → 档位里对应的段（core/profiles.py）。这些段里档位给默认值的键可以“清掉”回到档位默认。
 BUDGET_EDITABLE = "daily_cost_limit_usd"
 """花费段在设置页只能改日上限。"""
 
+# 面板的段 → 档位里对应的段（core/profiles.py）。这些段里档位给默认值的键可以“清掉”回到档位默认。
 _PROFILE_SECTION: dict[str, profiles.Section] = {
     "app": "app",
     "fast_loop": "fast_loop",
