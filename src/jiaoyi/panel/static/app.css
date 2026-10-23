@@ -239,7 +239,7 @@ tr.dimrow td { color: var(--dim); }
 .dlg .msg:empty { display: none; }
 .dlg .msg.down { color: var(--down); }
 label.pw { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
-.dlg input[type="password"], .form.edit input[type="number"] { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
+.dlg input[type="password"], .form.edit input[type="number"], .form.edit select { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
 .dlg input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
 .form.edit input[type="number"] { width: 120px; text-align: right; font-variant-numeric: tabular-nums; }
 .form.edit .fr { align-items: center; }

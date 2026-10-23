@@ -167,19 +167,18 @@ def create_app(
 
     @api.get("/api/settings")
     async def settings() -> SettingsPage:
-        r, a, error = risk, app_cfg, None
+        r, a, sl, error = risk, app_cfg, None, None
         if config_paths:
             try:
-                r, a, _ = actions.load_configs(config_paths)
+                r, a, sl = actions.load_configs(config_paths)
             except ConfigError as e:
                 error = str(e)
-        page = build_settings(files, r, a, key_status or {})
+        page = build_settings(files, r, a, key_status or {}, sl)
         return page.model_copy(
             update={
                 "writable": config_paths is not None and error is None,
                 "file_error": error,
                 "changes": actions.recent_changes(data_dir),
-                "app_editable": sorted(actions.APP_EDITABLE),
             }
         )
 

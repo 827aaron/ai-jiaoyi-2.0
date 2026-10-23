@@ -584,31 +584,38 @@ P.pool = () => {
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
-const fmtVal = (v) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? "—" : esc(v));
-const setRows = (items) => items.map((i) => `<div class="fr"><label>${esc(i.label)}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label><b class="num">${fmtVal(i.value)}</b></div>`).join("");
+const CHOICE = { on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "mini（最快）", small: "small", base: "base（最准）" };
+const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : CHOICE[v] || String(v));
+// 描述太长的项给个短名字（完整说明仍在契约里）
+const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
+const label = (i) => (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
+const NULL_AS = { max_cards_per_round: "跟随 card_pick_max" };
+const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : i && i.choices && i.choices.length ? esc(choiceLabel(i.key, v)) : esc(v));
+const setRows = (items) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label><b class="num">${fmtVal(i.value, i)}</b></div>`).join("");
 
-const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛" };
+const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
 const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
 
 function sectionItems(d, sec) {
   if (sec === "category") {
     const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
-    return Object.entries(d.category_caps).map(([k, v]) => ({ key: k, label: CAT[k] || k, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总敞口）` }));
+    return Object.entries(d.category_caps).map(([k, v]) => ({ key: k, label: CAT[k] || k, value: v, bounds: tot == null ? "" : `0–${tot}（不超过总敞口）`, editable: true, choices: [] }));
   }
-  const list = sec === "risk" ? d.risk : sec === "app" ? d.app.filter((i) => d.app_editable.includes(i.key)) : d.fast_loop;
-  return list.filter((i) => typeof i.value === "number" || typeof i.value === "boolean");
+  return (d[sec] || []).filter((i) => i.editable);
+}
+
+function editInput(i) {
+  const k = `data-k="${esc(i.key)}"`;
+  if (typeof i.value === "boolean") return `<input type="checkbox" ${k} ${i.value ? "checked" : ""}>`;
+  if (i.choices.length) return `<select ${k}>${i.choices.map((c) => `<option value="${esc(JSON.stringify(c))}" ${c === i.value ? "selected" : ""}>${esc(choiceLabel(i.key, c))}</option>`).join("")}</select>`;
+  return `<input type="number" step="any" inputmode="decimal" ${k} value="${i.value == null ? "" : esc(i.value)}" placeholder="${i.nullable ? "留空 = 用默认" : ""}">`;
 }
 
 function editSettings(sec) {
   const d = pageData;
   if (!d || !d.writable) return;
   const items = sectionItems(d, sec);
-  const rows = items.map((i) => {
-    const inp = typeof i.value === "boolean"
-      ? `<input type="checkbox" data-k="${esc(i.key)}" ${i.value ? "checked" : ""}>`
-      : `<input type="number" step="any" inputmode="decimal" data-k="${esc(i.key)}" value="${esc(i.value)}">`;
-    return `<div class="fr"><label>${esc(i.label)}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label>${inp}</div>`;
-  }).join("");
+  const rows = items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${i.nullable ? " · 可留空" : ""}</span></label>${editInput(i)}</div>`).join("");
   const c = data.control;
   ask(`修改${SECTION[sec]}`, `<div class="form edit scroll tall">${rows}</div>
     <div class="dim small">保存前整份校验，不合格不写；写前留备份。主程序重启后生效。</div>${pwField(c)}`, "保存", false, async () => {
@@ -617,8 +624,11 @@ function editSettings(sec) {
       const el = $(`#layer [data-k="${CSS.escape(i.key)}"]`);
       let v;
       if (el.type === "checkbox") v = el.checked;
-      else {
-        if (el.value.trim() === "") throw new Error(`${i.label} 不能空着`);
+      else if (el.tagName === "SELECT") v = JSON.parse(el.value);
+      else if (el.value.trim() === "") {
+        if (!i.nullable) throw new Error(`${i.label} 不能空着`);
+        v = null;
+      } else {
         v = Number(el.value);
         if (!Number.isFinite(v)) throw new Error(`${i.label} 要填数字`);
       }
@@ -630,7 +640,8 @@ function editSettings(sec) {
     onOk = null;
     $("#layer [data-ok]").remove();
     $("#layer [data-close].btn").textContent = "关闭";
-    const list = res.changed.map((x) => `${esc(x.key)}：${fmtVal(x.old)} → ${fmtVal(x.new)}`).join("<br>");
+    const byKey = Object.fromEntries(items.map((i) => [i.key, i]));
+    const list = res.changed.map((x) => `${esc(x.key)}：${fmtVal(x.old, byKey[x.key])} → ${fmtVal(x.new, byKey[x.key])}`).join("<br>");
     dlgMsg(`<b class="up">已保存</b>，重启 <code>jiaoyi run</code> 后生效。<br>${list}`);
     poll();
   });
@@ -642,7 +653,7 @@ P.settings = () => {
   const updown = document.documentElement.dataset.updown === "red-up" ? "red-up" : "green-up";
   const caps = Object.entries(d.category_caps).map(([k, v]) => `<div class="fr"><label>${esc(CAT[k] || k)}</label><b class="num">${v} 倍</b></div>`).join("");
   const changes = d.changes.length
-    ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old)} → ${fmtVal(x.new)}</span></div>`).join("")}</div>`
+    ? `<div class="log scroll">${d.changes.map((x) => `<div><span class="n">${x.ts ? hm(x.ts) : ""}</span><span>${esc(SECTION[x.section] || x.section)} · ${esc(x.key)}：${fmtVal(x.old, { key: x.key, choices: [0], nullable: true })} → ${fmtVal(x.new, { key: x.key, choices: [0], nullable: true })}</span></div>`).join("")}</div>`
     : '<div class="dim">还没有在网页上改过。</div>';
   const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(k)}<span class="hint">${esc(KEY_NOTE[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
   return `<div class="grid g2">
@@ -659,6 +670,12 @@ P.settings = () => {
       <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>
     <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app)}</div></section>
     <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop)}</div></section>
+    <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
+      <div class="foot">开关在“运行配置和开关”里（predictor_enabled）。</div></section>
+    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">config/slow.toml ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule)}</div></section>
+    <section class="card"><div class="ch"><h2>持仓档位</h2><span class="r">一键切换整套节奏</span></div>
+      <div class="form"><div class="fr"><label>档位<span class="hint">2h 默认；30m / 15m 只在模拟盘可用</span></label><span class="seg">${["2h", "60m", "30m", "15m"].map((p) => `<button disabled title="档位功能合并后开放" class="${p === "2h" ? "on" : ""}">${p}</button>`).join("")}</span></div></div>
+      <div class="foot">档位功能还在审查，合并后这里能一键切换，并列出哪些项覆盖了档位默认值。</div></section>
     <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>
   <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，重启 jiaoyi run 后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;

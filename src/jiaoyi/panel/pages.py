@@ -21,6 +21,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.core.recorder import local_day
+from jiaoyi.panel.actions import Section, editable_fields
 from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.overview import (
@@ -30,6 +31,7 @@ from jiaoyi.panel.overview import (
     compute_kpis,
     position_views,
 )
+from jiaoyi.slow.settings import SlowConfig
 
 ROLE_NAMES: dict[Role, str] = {
     Role.COMMANDER: "军师团",
@@ -463,6 +465,12 @@ class SettingItem(BaseModel):
     value: object
     bounds: str
     """合理范围，例如 “1–10”。超出程序拒绝启动。"""
+    editable: bool = False
+    """能在网页上改（要面板密码）。"""
+    choices: list[object] = []
+    """只能从这几个里选（下拉）。"""
+    nullable: bool = False
+    """可以留空 = 不写这一项，用默认值。"""
 
 
 class SettingsPage(BaseModel):
@@ -471,6 +479,9 @@ class SettingsPage(BaseModel):
     category_caps: dict[str, float]
     app: list[SettingItem]
     fast_loop: list[SettingItem]
+    predictor: list[SettingItem] = []
+    schedule: list[SettingItem] = []
+    """慢环节奏（config/slow.toml 的 [schedule]）。"""
     keys: dict[str, bool]
     """密钥名 → 配了没有。只有这个，没有值。"""
     password_set: bool
@@ -481,11 +492,12 @@ class SettingsPage(BaseModel):
     """配置文件现在读不出或不合格（有人在终端改坏了）。"""
     changes: list[dict[str, object]] = []
     """最近的配置改动（data/config_changes.jsonl），新的在前。"""
-    app_editable: list[str] = []
-    """运行配置里能在网页上改的项（模式、目录、模拟环境等不在内）。"""
 
 
-def _items(model: BaseModel, skip: frozenset[str] = frozenset()) -> list[SettingItem]:
+def _items(
+    model: BaseModel, section: Section, skip: frozenset[str] = frozenset()
+) -> list[SettingItem]:
+    specs = editable_fields(section)
     out = []
     for name, field in type(model).model_fields.items():
         if name in skip:
@@ -499,7 +511,18 @@ def _items(model: BaseModel, skip: frozenset[str] = frozenset()) -> list[Setting
             hi = getattr(m, "le", getattr(m, "lt", hi))
         bounds = f"{lo:g}–{hi:g}" if lo is not None and hi is not None else ""
         desc = (field.description or "").split("。")[0]
-        out.append(SettingItem(key=name, label=desc or name, value=_plain(value), bounds=bounds))
+        spec = specs.get(name)
+        out.append(
+            SettingItem(
+                key=name,
+                label=desc or name,
+                value=_plain(value),
+                bounds=bounds,
+                editable=spec is not None,
+                choices=list(spec.choices) if spec else [],
+                nullable=bool(spec and spec.nullable),
+            )
+        )
     return out
 
 
@@ -508,15 +531,21 @@ def _plain(v: object) -> object:
 
 
 def build_settings(
-    files: PanelFiles, risk: RiskConfig, app: AppConfig, keys: dict[str, bool]
+    files: PanelFiles,
+    risk: RiskConfig,
+    app: AppConfig,
+    keys: dict[str, bool],
+    slow: SlowConfig | None = None,
 ) -> SettingsPage:
     password_set, armed = read_live_gate(files.root)
     return SettingsPage(
         mode=app.mode.value,
-        risk=_items(risk),
+        risk=_items(risk, "risk"),
         category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
-        app=_items(app, frozenset({"mode"})),
-        fast_loop=_items(app.fast_loop),
+        app=_items(app, "app", frozenset({"mode"})),
+        fast_loop=_items(app.fast_loop, "fast_loop"),
+        predictor=_items(app.predictor, "predictor"),
+        schedule=_items((slow or SlowConfig()).schedule, "schedule"),
         keys=keys,
         password_set=password_set,
         live_armed=armed,

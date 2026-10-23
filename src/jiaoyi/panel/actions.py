@@ -17,14 +17,16 @@ import re
 import secrets
 import shutil
 import tomllib
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
 from jiaoyi.contracts import AppConfig, Category, RiskConfig
-from jiaoyi.contracts.risk_config import FastLoopConfig
+from jiaoyi.contracts.risk_config import FastLoopConfig, PredictorConfig
 from jiaoyi.core.commands import (
     RUNTIME_FILE,
     CommandKind,
@@ -38,13 +40,13 @@ from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError  # 只用密码校验；不碰交易所
 from jiaoyi.panel.files import read_live_gate
 from jiaoyi.panel.overview import Control
-from jiaoyi.slow.settings import SlowConfig, load_slow_config
+from jiaoyi.slow.settings import ScheduleConfig, SlowConfig, load_slow_config
 
 CHANGES_FILE = "config_changes.jsonl"
 COMMAND_TTL = timedelta(seconds=60)
 NEEDS_PASSWORD: frozenset[CommandKind] = frozenset({"resume", "unblock_symbol"})
 
-Section = Literal["risk", "category", "app", "fast_loop"]
+Section = Literal["risk", "category", "app", "fast_loop", "predictor", "schedule"]
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
@@ -157,7 +159,17 @@ def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
     return loaded != config_fingerprint(risk, app, slow)
 
 
-Value = bool | int | float
+Value = bool | int | float | str | None
+"""``None`` = 删掉这一行，回到默认值（只给“不写就用默认”的项）。"""
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    kind: type
+    """bool / int / float / str"""
+    choices: tuple[object, ...] = ()
+    """``Literal`` 的可选值；空 = 不限。"""
+    nullable: bool = False
 
 
 def update_config(
@@ -173,7 +185,8 @@ def update_config(
     if not changes:
         raise ActionError("没有要改的项")
     path, table, fields = _target(paths, section)
-    text = path.read_text(encoding="utf-8")
+    exists = path.is_file()  # slow.toml 可以没有：没有就新建（其余默认值照旧）
+    text = path.read_text(encoding="utf-8") if exists else ""
     try:
         current = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
@@ -185,7 +198,7 @@ def update_config(
             raise ActionError(f"{key} 不能在网页上改")
         value = _coerce(key, raw, fields[key])
         old = olds.get(key) if isinstance(olds, dict) else None
-        if old is not None and old == value and isinstance(old, bool) == isinstance(value, bool):
+        if old == value and isinstance(old, bool) == isinstance(value, bool):
             continue
         text = set_toml_value(text, table, key, value)
         log.append({"key": key, "old": old, "new": value})
@@ -193,7 +206,8 @@ def update_config(
         return []
     _validate(section, text)
     stamp = now.strftime("%Y%m%dT%H%M%S")
-    shutil.copy2(path, path.with_name(f"{path.name}.bak-{stamp}"))
+    if exists:
+        shutil.copy2(path, path.with_name(f"{path.name}.bak-{stamp}"))
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
@@ -223,27 +237,78 @@ def recent_changes(data_dir: str | Path, limit: int = 20) -> list[dict[str, Any]
     return out
 
 
-def _target(paths: ConfigPaths, section: Section) -> tuple[Path, str | None, dict[str, type]]:
-    """(文件, 段名, 可改字段 → 类型)。"""
+# 段 → (哪个文件, TOML 段名)
+_WHERE: dict[Section, tuple[str, str | None]] = {
+    "risk": ("risk", None),
+    "category": ("risk", "category_exposure_x"),
+    "app": ("app", None),
+    "fast_loop": ("app", "fast_loop"),
+    "predictor": ("app", "predictor"),
+    "schedule": ("slow", "schedule"),
+}
+
+
+def editable_fields(section: Section) -> dict[str, FieldSpec]:
+    """这一段里能在网页上改的字段。设置页据此决定哪些项出现在“修改”弹窗里。"""
     if section == "category":
-        return paths.risk, "category_exposure_x", {c.value: float for c in Category}
+        return {c.value: FieldSpec(float) for c in Category}
     if section == "risk":
-        return paths.risk, None, _scalar_fields(RiskConfig, set())
+        return scalar_fields(RiskConfig, {"day_reset_tz"})
     if section == "app":
-        skip = set(AppConfig.model_fields) - APP_EDITABLE
-        return paths.app, None, _scalar_fields(AppConfig, skip)
-    return paths.app, "fast_loop", _scalar_fields(FastLoopConfig, set())
+        return scalar_fields(AppConfig, set(AppConfig.model_fields) - APP_EDITABLE)
+    if section == "predictor":
+        return scalar_fields(PredictorConfig, set())
+    if section == "schedule":
+        return scalar_fields(ScheduleConfig, set())
+    # jev_provider / jev_model 换通道和模型版本要重新校准，不在网页上改
+    return scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
 
 
-def _scalar_fields(model: type[BaseModel], skip: set[str]) -> dict[str, type]:
-    out: dict[str, type] = {}
+def _target(paths: ConfigPaths, section: Section) -> tuple[Path, str | None, dict[str, FieldSpec]]:
+    """(文件, 段名, 可改字段)。"""
+    file, table = _WHERE[section]
+    return getattr(paths, file), table, editable_fields(section)
+
+
+def scalar_fields(model: type[BaseModel], skip: set[str]) -> dict[str, FieldSpec]:
+    """模型里能在网页上改的字段：开关、数字、可选值（Literal）、“不写就用默认”的数字。"""
+    out: dict[str, FieldSpec] = {}
     for name, field in model.model_fields.items():
-        if name not in skip and field.annotation in (bool, int, float):
-            out[name] = field.annotation  # type: ignore[assignment]
+        if name in skip:
+            continue
+        spec = field_spec(field.annotation)
+        if spec is not None:
+            out[name] = spec
     return out
 
 
-def _coerce(key: str, raw: Any, kind: type) -> Value:
+def field_spec(annotation: Any) -> FieldSpec | None:
+    if annotation in (bool, int, float):
+        return FieldSpec(annotation)
+    args = get_args(annotation)
+    if get_origin(annotation) is Literal and args:
+        kinds = {type(a) for a in args}
+        if len(kinds) == 1 and kinds <= {int, str}:
+            return FieldSpec(kinds.pop(), choices=args)
+        return None
+    if get_origin(annotation) in (Union, UnionType) and type(None) in args:
+        rest = [a for a in args if a is not type(None)]
+        if len(rest) == 1 and rest[0] in (int, float):
+            return FieldSpec(rest[0], nullable=True)
+    return None
+
+
+def _coerce(key: str, raw: Any, spec: FieldSpec) -> Value:
+    if raw is None:
+        if spec.nullable:
+            return None
+        raise ActionError(f"{key} 不能空着")
+    if spec.choices:
+        for c in spec.choices:  # 1 和 True 不算相等
+            if raw == c and isinstance(raw, bool) == isinstance(c, bool):
+                return c  # type: ignore[return-value]
+        raise ActionError(f"{key} 只能选：{' / '.join(str(c) for c in spec.choices)}")
+    kind = spec.kind
     if kind is bool:
         if isinstance(raw, bool):
             return raw
@@ -262,6 +327,8 @@ def _validate(section: Section, text: str) -> None:
         data = tomllib.loads(text)
         if section in ("risk", "category"):
             RiskConfig.model_validate(data)
+        elif section == "schedule":
+            SlowConfig.model_validate(data)
         else:
             AppConfig.model_validate(data)
     except tomllib.TOMLDecodeError as e:  # set_toml_value 出错才会到这
@@ -282,6 +349,8 @@ _KEY = re.compile(r"^\s*[A-Za-z0-9_]+\s*=")
 def _fmt(value: Value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)  # 只会是 Literal 里的简单字样
     return repr(value)
 
 
@@ -289,6 +358,7 @@ def set_toml_value(text: str, table: str | None, key: str, value: Value) -> str:
     """把 ``[table]``（``None`` = 顶层）里 ``key = …`` 那一行的值换掉，行尾注释原样留着。
 
     没有这一行就加在该段最后一个键后面；段也没有就在文件末尾新开一段。
+    ``value`` 为 ``None`` 时删掉这一行（回到默认值）。
     只对付我们自己的扁平配置（键 = 标量），不是通用 TOML 编辑器；改完由调用方整份重新校验。
     """
     lines = text.splitlines(keepends=True)
@@ -310,11 +380,16 @@ def set_toml_value(text: str, table: str | None, key: str, value: Value) -> str:
         body = line.rstrip("\r\n")
         hit = own.match(body)
         if hit:
+            if value is None:
+                del lines[i]
+                return "".join(lines)
             nl = line[len(body) :]
             lines[i] = f"{hit.group(1)}{key}{hit.group(2)}{_fmt(value)}{hit.group(3)}{nl}"
             return "".join(lines)
         if _KEY.match(line):
             last_key = i
+    if value is None:
+        return text
     new = f"{key} = {_fmt(value)}\n"
     if table is not None and header is None:
         sep = "" if not text or text.endswith("\n") else "\n"

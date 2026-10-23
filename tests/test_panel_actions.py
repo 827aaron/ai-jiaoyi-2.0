@@ -344,7 +344,18 @@ def test_settings_endpoints(tmp_path: Path) -> None:
     with _client(paths) as client:
         page = client.get("/api/settings").json()
         assert page["writable"] is True and page["changes"] == []
-        assert "pool_size" in page["app_editable"] and "mode" not in page["app_editable"]
+        editable = {i["key"] for i in page["app"] if i["editable"]}
+        assert "pool_size" in editable and "mode" not in editable and "data_dir" not in editable
+        fl = {i["key"]: i for i in page["fast_loop"]}
+        assert fl["atr_period_min"]["choices"] == [5, 15, 30, 60]
+        assert not fl["jev_model"]["editable"] and not fl["jev_provider"]["editable"]
+        pred = {i["key"]: i for i in page["predictor"]}
+        assert pred["mode"]["choices"] == ["on_demand", "all_symbols"]
+        sched = {i["key"]: i for i in page["schedule"]}
+        assert (
+            sched["max_cards_per_round"]["nullable"]
+            and sched["max_cards_per_round"]["value"] is None
+        )
         body = {"section": "risk", "changes": {"max_leverage": 4}, "password": PW}
         r = client.post("/api/settings", json=body, headers=HEADERS)
         assert r.status_code == 200, r.text
@@ -368,3 +379,37 @@ def test_read_only_panel_without_paths(tmp_path: Path) -> None:
         body = {"section": "risk", "changes": {"max_leverage": 4}, "password": PW}
         h = {"X-Jiaoyi-Panel": "1", "Origin": "http://localhost"}
         assert client.post("/api/settings", json=body, headers=h).status_code == 400
+
+
+def test_choices_and_nullable_fields(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    actions.update_config(paths, data, "fast_loop", {"atr_period_min": 30}, PW, NOW)
+    actions.update_config(
+        paths, data, "predictor", {"mode": "all_symbols", "size_policy": "adaptive"}, PW, NOW
+    )
+    app = load_app_config(paths.app)
+    assert app.fast_loop.atr_period_min == 30
+    assert app.predictor.mode == "all_symbols" and app.predictor.size_policy == "adaptive"
+    assert 'mode = "all_symbols"' in paths.app.read_text(encoding="utf-8")
+    for bad in ({"atr_period_min": 20}, {"atr_period_min": True}):
+        with pytest.raises(ActionError, match="只能选"):
+            actions.update_config(paths, data, "fast_loop", bad, PW, NOW)
+    with pytest.raises(ActionError, match="只能选"):
+        actions.update_config(paths, data, "predictor", {"model_size": "huge"}, PW, NOW)
+    with pytest.raises(ActionError, match="不能空着"):
+        actions.update_config(paths, data, "predictor", {"backfill_bars": None}, PW, NOW)
+
+
+def test_slow_schedule_created_and_cleared(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    assert not paths.slow.exists()
+    actions.update_config(paths, data, "schedule", {"max_cards_per_round": 8}, PW, NOW)
+    assert load_slow_config(paths.slow).schedule.max_cards_per_round == 8
+    assert not list(paths.slow.parent.glob("slow.toml.bak-*"))  # 原来没有文件，不留备份
+    actions.update_config(paths, data, "schedule", {"max_cards_per_round": None}, PW, NOW)
+    assert load_slow_config(paths.slow).schedule.max_cards_per_round is None
+    assert "max_cards_per_round" not in paths.slow.read_text(encoding="utf-8")
+    with pytest.raises(ActionError, match="concurrency"):
+        actions.update_config(paths, data, "schedule", {"concurrency": 20}, PW, NOW)
+    rows = actions.recent_changes(data)
+    assert rows[0]["key"] == "max_cards_per_round" and rows[0]["new"] is None
