@@ -130,3 +130,47 @@ def test_volume_surge_live_switch(now: datetime) -> None:
     assert off.check(f, cd, now) == []
     paper = RuleTrigger(FAST.model_copy(update={"volume_surge_live": False}))
     assert [s.kind for s in paper.check(f, cd, now)] == [c.SignalKind.VOLUME_SURGE]
+
+
+def test_detail_lines_say_why_no_signal(now: datetime) -> None:
+    t = trig()
+    cd = card(now, bias="short", allowed_signals=["volume_surge"])
+    # 量 2.5 倍、主动买 60%：离量能突增还差 1.5 倍
+    assert t.check(features(now, vol_ratio_1m=2.5, taker_buy_ratio_1m=0.6), cd, now) == []
+    lines = t.detail_lines(now)
+    btc = next(x for x in lines if x.startswith("BTCUSDT"))
+    assert "量 2.5 倍" in btc and "主动买 60%" in btc and "还差 1.5 倍" in btc
+    # 够量能突增但方向是多、卡上只做空 → 记跳过原因
+    later = now + timedelta(seconds=5)
+    t.check(features(later, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8), cd, later)
+    btc = next(x for x in t.detail_lines(later) if x.startswith("BTCUSDT"))
+    assert "量能突增（多）：和卡上方向相反" in btc and "1 小时内最高 5.0 倍" in btc
+    assert "只做空 1" in t.brief(later)
+
+
+def test_detail_lines_flag_card_symbols_without_trades(now: datetime) -> None:
+    t = trig()
+    cd = card(now)
+    t.check(features(now), cd, now)
+    others = [s.symbol for s in cd.symbols if s.symbol != "BTCUSDT"]
+    lines = t.detail_lines(now)
+    for sym in others:
+        assert any(x.startswith(f"{sym} 没收到行情") for x in lines)
+    stale = now + timedelta(minutes=3)  # BTC 也 3 分钟没来成交
+    assert any(x.startswith("BTCUSDT 没收到行情（最后一笔") for x in t.detail_lines(stale))
+
+
+def test_detail_lines_cooldown_reason(now: datetime) -> None:
+    t = trig()
+    cd = card(now, allowed_signals=["volume_surge"])
+    f = features(now, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8)
+    assert len(t.check(f, cd, now)) == 1
+    t.check(f, cd, now + timedelta(seconds=1))
+    btc = next(x for x in t.detail_lines(now) if x.startswith("BTCUSDT"))
+    assert "冷却中" in btc
+
+
+def test_app_heartbeat_picks_up_detail() -> None:
+    from jiaoyi.app import _SentinelDetail
+
+    assert isinstance(trig(), _SentinelDetail)

@@ -56,6 +56,10 @@ class ModuleStatus(Contract):
         default=None, description="最近一次动作的一句话（团队页「刚刚：…」），没有动作过为 None。"
     )
     symbol_count: int | None = Field(default=None, ge=0, description="选币：上次选出的币数。")
+    detail: list[str] = Field(
+        default_factory=list,
+        description="每个币一行的现状（哨兵：量比 / 主动占比 / 离阈值多远 / 跳过原因）。",
+    )
     error: str | None = Field(
         default=None, description="当前还没恢复的失败原因（上次运行失败）；正常时为 None。"
     )

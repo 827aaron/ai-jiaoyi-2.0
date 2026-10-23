@@ -173,6 +173,15 @@ class _SupportsWarmup(Protocol):
 
 
 @runtime_checkable
+class _SentinelDetail(Protocol):
+    """哨兵给团队页的一句话和每币一行（为什么没信号）。"""
+
+    def brief(self, now: datetime) -> str: ...
+
+    def detail_lines(self, now: datetime, tz: str = "UTC") -> list[str]: ...
+
+
+@runtime_checkable
 class _SupportsHeartbeat(Protocol):
     """模块自己上报 ``ModuleStatus``。统一签名：``heartbeat(now)``，其余参数都要有默认值。
 
@@ -913,7 +922,11 @@ class App:
                 continue
             health = getattr(module, "health", Health.OK)
             headline = self.gate_label() if role is Role.GATE else ""
-            rec.heartbeat(now, health if isinstance(health, Health) else Health.OK, headline)
+            extra: dict[str, Any] | None = None
+            if isinstance(module, _SentinelDetail):  # 为什么没信号：每币一行
+                headline = module.brief(now)
+                extra = {"detail": module.detail_lines(now, rec.tz)}
+            rec.heartbeat(now, health if isinstance(health, Health) else Health.OK, headline, extra)
 
     def status(self) -> dict[Role, ModuleStatus]:
         """每个角色一条最新状态。没心跳的角色：桩显示“未接入”，真实现显示“启动中”。"""
