@@ -21,7 +21,7 @@ from pydantic import Field, model_validator
 
 from jiaoyi.contracts.common import Category, Contract, RunMode
 
-HoldingProfile = Literal["2h", "60m", "30m", "15m"]
+HoldingProfile = Literal["24h", "12h", "6h", "2h", "60m", "30m", "15m"]
 """持仓档位。各档的跨模块默认值见 ``jiaoyi.core.profiles``。"""
 PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
 
@@ -345,7 +345,7 @@ class AppConfig(Contract):
     jev_timeout_ms: int = Field(ge=100, le=5000, description="超时即放弃本次开仓。")
     keeper_interval_s: int = Field(ge=5, le=120)
     reconcile_interval_s: int = Field(ge=10, le=300)
-    slow_loop_interval_min: int = Field(ge=15, le=240)
+    slow_loop_interval_min: int = Field(ge=15, le=1440)
     pool_size: int = Field(ge=5, le=100, description="候选池大小，设计值 30–50。")
     card_pick_max: int = Field(ge=1, le=50, description="军师每次最多挑几个，设计值 10–20。")
     data_dir: str = Field(min_length=1, description="决策日志、模块状态等写在这里。")

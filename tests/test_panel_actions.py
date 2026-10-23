@@ -534,7 +534,7 @@ def test_schedule_validates_with_profile_defaults(tmp_path: Path) -> None:
 def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     info = actions.profile_info(paths)
-    assert info.current == "2h" and info.choices == ["2h", "60m", "30m", "15m"]
+    assert info.current == "2h" and info.choices == ["24h", "12h", "6h", "2h", "60m", "30m", "15m"]
     assert set(info.paper_only) == {"30m", "15m"}
     assert "keeper_interval_s" not in info.pinned.get("app", {})  # 示例里注释掉了，跟档位走
     actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
@@ -572,7 +572,7 @@ def test_settings_page_shows_profile(tmp_path: Path) -> None:
     assert fl["time_limit_s"]["profiled"] is False
     assert fl["min_p_take"]["profiled"] and fl["signal_max_age_s"]["profiled"] is False
     app_items = {i["key"]: i for i in page["app"]}
-    assert app_items["profile"]["editable"] and app_items["profile"]["choices"][0] == "2h"
+    assert app_items["profile"]["editable"] and app_items["profile"]["choices"][3] == "2h"
 
 
 def test_profile_switch_revalidates_slow_toml(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import math
 import tomllib
 from datetime import timedelta
@@ -34,6 +35,8 @@ from jiaoyi.slow.tradingagents_engine import (
 
 DEFAULT_SLOW_PATH = Path("config/slow.toml")
 ANALYSTS = ("market", "social", "news", "fundamentals")
+
+logger = logging.getLogger(__name__)
 
 
 class _Strict(BaseModel):
@@ -323,11 +326,11 @@ class ScheduleConfig(_Strict):
     card_ttl_min: float = Field(
         default=140.0,
         ge=10.0,
-        le=720.0,
+        le=1560.0,
         description="作战卡有效期（分钟）。档位默认 = 开会间隔 + 换卡提前量。",
     )
     symbol_min_interval_min: float = Field(
-        default=115.0, ge=5.0, le=720.0, description="同一个币两次会议的最小间隔（分钟）。"
+        default=115.0, ge=5.0, le=1440.0, description="同一个币两次会议的最小间隔（分钟）。"
     )
     refresh_lead_min: float = Field(
         default=20.0,
@@ -539,8 +542,7 @@ def load_slow_config(
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path} 不是合法的 TOML：{e}") from e
-    if legacy := legacy_schedule_keys(data):
-        raise ConfigError(f"{path} 用了旧的小时写法，拒绝启动：{legacy}")
+    data = upgrade_legacy_schedule(data)
     try:
         return SlowConfig.model_validate(with_profile(data, profile))
     except ValidationError as e:
@@ -551,17 +553,28 @@ def load_slow_config(
         raise ConfigError("\n".join(lines)) from e
 
 
-def legacy_schedule_keys(data: dict[str, Any]) -> str | None:
-    """slow.toml [schedule] 里还在用按小时的旧键时给明确换算提示（现在按分钟）。"""
-    section = data.get("schedule", {})
+def upgrade_legacy_schedule(data: dict[str, Any]) -> dict[str, Any]:
+    """slow.toml [schedule] 里按小时的旧键（card_ttl_hours / symbol_min_interval_hours）
+    自动换算成分钟键并告警；两个键都写了以新键为准。返回新 dict，不改 ``data``。"""
+    section = data.get("schedule")
     if not isinstance(section, dict):
-        return None
+        return data
     renamed = {
-        "card_ttl_hours": "card_ttl_min（作战卡有效期，分钟；档位默认 = 开会间隔 + 提前量）",
-        "symbol_min_interval_hours": "symbol_min_interval_min（同币最小间隔，分钟）",
+        "card_ttl_hours": "card_ttl_min",
+        "symbol_min_interval_hours": "symbol_min_interval_min",
     }
-    hits = [f"{old} → {new}，数值乘 60" for old, new in renamed.items() if old in section]
-    return "；".join(hits) or None
+    if not any(old in section for old in renamed):
+        return data
+    new = {k: v for k, v in section.items() if k not in renamed}
+    for old, key in renamed.items():
+        if old in section:
+            hours = section[old]
+            if key not in section and isinstance(hours, int | float):
+                new[key] = hours * 60
+            logger.warning(
+                "slow.toml [schedule] 的 %s 已改名 %s（分钟），已自动 ×60 换算", old, key
+            )
+    return {**data, "schedule": new}
 
 
 def missing_slow_stack(cfg: SlowConfig, secrets: SecretStore) -> str | None:

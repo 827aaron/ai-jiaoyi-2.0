@@ -39,7 +39,7 @@ SecretReader = Callable[[str], str | None]
 
 # 第三步“基本配置”能改的项：(面板段, 键, 可选值)
 _BASIC: dict[str, tuple[actions.Section, FieldSpec]] = {
-    "profile": ("app", FieldSpec(str, choices=("2h", "60m", "30m", "15m"))),
+    "profile": ("app", FieldSpec(str, choices=("24h", "12h", "6h", "2h", "60m", "30m", "15m"))),
     "jev_provider": ("fast_loop", FieldSpec(str, choices=("typesafe", "openrouter"))),
     "llm_provider": ("llm", FieldSpec(str, choices=("deepseek", "openrouter"))),
     "daily_cost_limit_usd": ("budget", FieldSpec(float)),

@@ -902,6 +902,7 @@ class CostMeter:
         self._flying: dict[str, tuple[int, str]] = {}
         """在途的模型请求：run_id → (估的输入 token 数, 价格档)。"""
         self._outs: list[int] = []
+        self.tokens_in = self.tokens_out = self.tokens_reasoning = 0
         self._est_runs: dict[str, float] = {}
         """超时取消时还在途的请求，及各自记入的估算花费；真实结果回来后改成真实值。"""
         self._est_total = 0.0
@@ -1006,6 +1007,9 @@ class CostMeter:
         with self._lock:
             if tout:
                 self._outs.append(tout)
+            self.tokens_in += tin
+            self.tokens_out += tout
+            self.tokens_reasoning += reasoning
         self.add(model, tin, tout, cost)
         if self.on_call is not None:
             try:
@@ -1407,7 +1411,15 @@ class TradingAgentsEngine:
                     raise RuntimeError(f"{entry.symbol}：会议结论自相矛盾：{why}，这场会不能用")
                 if missing:
                     cs = degrade_size(cs, missing)
-                return Analysis(cs, meter.cost)
+                return Analysis(
+                    cs,
+                    meter.cost,
+                    {
+                        "input_tokens": meter.tokens_in,
+                        "output_tokens": meter.tokens_out,
+                        "reasoning_tokens": meter.tokens_reasoning,
+                    },
+                )
             except (ValidationError, ValueError) as exc:
                 last = exc
         raise RuntimeError(f"{entry.symbol}：作战指令格式不合格：{last}")
