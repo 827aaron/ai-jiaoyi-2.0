@@ -59,6 +59,8 @@ COMMAND_POLL_EVERY_S = 1.0
 RESTART_WAIT_CLOSE_S = 60.0
 # 决定重启后：收尾最多等这么久；军师团开会跑在工作线程里取消不掉，收尾超时就直接退出
 RESTART_SHUTDOWN_S = 20.0
+# 取消任务前先等已经在跑的平仓 / 对账做完（不再发起新的），最多这么久
+RESTART_DRAIN_S = 15.0
 RESTART_HARD_EXIT_S = 45.0
 TASK_CANCEL_WAIT_S = 10.0
 PRUNE_EVERY = timedelta(hours=1)
@@ -148,6 +150,9 @@ class Runner:
         # 面板“重启生效”：不开新仓，等在途动作做完再退出（launchd KeepAlive 拉起）
         self._restart_check = restart_check
         self._restarting = False
+        # 重启已定：不再发起新的平仓 / 对账（交给重启后的进程，期间靠币安上的保命止损）
+        self._leaving = False
+        self._reconciling = False
         self._restart = asyncio.Event()
         self.restart_requested = False
         self._restart_exit = restart_exit
@@ -204,6 +209,7 @@ class Runner:
             timer = threading.Timer(RESTART_HARD_EXIT_S, self._exit_for_restart)
             timer.daemon = True
             timer.start()
+        await self._drain(RESTART_DRAIN_S)
         try:
             await asyncio.wait_for(self.shutdown(), RESTART_SHUTDOWN_S)
         except TimeoutError:
@@ -211,6 +217,20 @@ class Runner:
         except Exception:
             log.exception("重启收尾出错，照样退出")
         self._exit_for_restart()
+
+    async def _drain(self, timeout: float) -> None:
+        """等已经在跑的平仓、对账做完，免得被取消打断（半平、止损补挂一半）。"""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while (self._closing or self._reconciling) and loop.time() < deadline:
+            await asyncio.sleep(0.1)
+        if self._closing or self._reconciling:
+            log.warning(
+                "重启：%s 秒内还有 %d 笔平仓%s没做完，照样退出",
+                timeout,
+                len(self._closing),
+                "、对账" if self._reconciling else "",
+            )
 
     def _exit_for_restart(self) -> None:
         """写 restart 回执，再结束进程。可能从超时线程调用，只执行一次。"""
@@ -360,8 +380,16 @@ class Runner:
         ]
 
     async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
-        """同一笔正在平就不重复提交。"""
+        """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""
         if pos.position_id in self._closing:
+            return
+        if self._leaving:
+            log.warning("%s 要平仓（%s），但主程序正在重启：交给重启后的进程", pos.symbol, reason)
+            self._guard_note(
+                Outcome.REJECT,
+                f"{pos.symbol} 平仓（{reason.value}）留给重启后的进程，期间靠保命止损",
+                self.app.clock(),
+            )
             return
         self._closing.add(pos.position_id)
         try:
@@ -402,7 +430,13 @@ class Runner:
 
     async def reconcile_tick(self) -> None:
         # 对账员自己发告警（带去重），连不上时抛异常，由 _every 记日志后下一轮再试
-        await self.m.reconciler.reconcile(self.app.clock())
+        if self._leaving:
+            return  # 重启已定：不再开始新的一轮（补挂止损可能被退出打断），重启后先对一次账
+        self._reconciling = True
+        try:
+            await self.m.reconciler.reconcile(self.app.clock())
+        finally:
+            self._reconciling = False
 
     # ------------------------------------------------------------ 慢环调度
     async def backfill(self, symbols: list[str]) -> None:
@@ -591,6 +625,7 @@ class Runner:
         if self._closing:
             self._restarting = False
             return "rejected", f"还有 {len(self._closing)} 笔平仓没做完，没有重启，稍后再试"
+        self._leaving = True
         await self.app._alert(AlertLevel.INFO, "主程序重启", "面板指令：重新加载配置")
         return "done", "在途动作已做完，主程序已退出，launchd 会自动拉起"
 

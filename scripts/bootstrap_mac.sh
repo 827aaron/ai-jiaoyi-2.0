@@ -113,18 +113,17 @@ s_pmset() {
 }
 
 s_panel() {
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PANEL_PORT/" 2>/dev/null; then
-    note "面板已经在 $PANEL_PORT 端口运行"
-  else
-    nohup .venv/bin/jiaoyi panel --host 127.0.0.1 --port "$PANEL_PORT" \
-      >>data/logs/panel-setup.log 2>&1 &
-    disown
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      sleep 1
-      curl -fsS -o /dev/null "http://127.0.0.1:$PANEL_PORT/" 2>/dev/null && break
-    done
+  # 面板是 launchd 常驻服务（com.jiaoyi.panel，由 install_launchd.sh 装）；
+  # 更早装过 launchd 的机器没有它，这里补装一次
+  if ! launchctl print "gui/$(id -u)/com.jiaoyi.panel" >/dev/null 2>&1; then
+    scripts/install_launchd.sh
   fi
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    curl -fsS -o /dev/null "http://127.0.0.1:$PANEL_PORT/" 2>/dev/null && return 0
+    sleep 1
+  done
+  note "面板 15 秒内没起来，日志：data/logs/com.jiaoyi.panel.log"
 }
 
 step brew    "1/10 装 Homebrew 和依赖（uv colima docker tmux node …）" s_brew
@@ -138,8 +137,8 @@ step condor  "8/10 安装 Condor" s_condor
 step launchd "9/10 开机自启：colima、Condor、每日备份、看门狗" s_launchd
 step pmset   "10/10 防睡眠与断电自启" s_pmset
 
-# 面板每次都确认一下（重启后它不在了就重新拉起）
-say "启动面板"
+# 面板每次都确认一下
+say "确认面板在运行"
 s_panel
 
 FALLBACK='  .venv/bin/jiaoyi set-panel-password
