@@ -66,9 +66,9 @@ def test_missing_field_refuses(tmp_path: Path, field: str) -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("risk_per_trade_pct", 5.0),
-        ("max_leverage", 20),
-        ("max_total_exposure_x", 10.0),
+        ("risk_per_trade_pct", 150.0),
+        ("max_leverage", 126),
+        ("max_total_exposure_x", 200.0),
         ("daily_loss_halt_pct", 0.0),
         ("lifeboat_stop_multiplier", 1.0),
         ("day_reset_tz", "Asia/Tokyo"),
@@ -103,3 +103,18 @@ def test_missing_category_refuses(tmp_path: Path) -> None:
 def test_cli_check_config(tmp_path: Path) -> None:
     assert main(["check-config", "--risk", str(RISK_EXAMPLE), "--app", str(APP_EXAMPLE)]) == 0
     assert main(["check-config", "--risk", str(tmp_path / "x"), "--app", str(APP_EXAMPLE)]) == 2
+
+
+def test_cli_check_config_cautions_but_accepts_aggressive_caps(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = {
+        **_example(),
+        "risk_per_trade_pct": 5.0,
+        "daily_loss_halt_pct": 15.0,
+        "max_leverage": 10,
+    }
+    path = _write(tmp_path, data)
+    assert main(["check-config", "--risk", str(path), "--app", str(APP_EXAMPLE)]) == 0
+    out = capsys.readouterr().out
+    assert "超出保守值" in out and "max_leverage = 10（保守值 5）" in out

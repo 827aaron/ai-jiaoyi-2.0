@@ -1,14 +1,15 @@
 # 硬上限（你定，AI 改不了）。复制成 config/risk.toml 再改：make init-config
-# 每一项都必填；缺项、拼错、超出合理范围，程序拒绝启动。
-# 下面是保守默认值（设计文档 §四、§十一）。
+# 每一项都必填；缺项、拼错、数值不合理（负数、杠杆超过 125 等），程序拒绝启动。
+# 数值由你定，程序不另设范围；下面是保守默认值（设计文档 §四、§十一），
+# 超出保守值时 check-config / 面板会提示，但不拦。
 
-risk_per_trade_pct = 1.0            # 每笔最多亏总资金 1%（合理范围 0.05–2）
-max_leverage = 5                    # 杠杆 ≤ 5 倍（1–10）
-max_total_exposure_x = 3.0          # 总敞口 ≤ 总资产 3 倍（0–5）
-daily_loss_halt_pct = 3.0           # 当日亏 3% 停止开新仓，只允许平仓（0.5–10）
-max_notional_per_trade_usdt = 2000  # 单笔名义价值上限 USDT（10–100000）
-max_open_positions = 5              # 同时持仓笔数上限（1–50）
-lifeboat_stop_multiplier = 1.5      # 保命止损距离 = 正常止损 × 1.5（1.1–3）
+risk_per_trade_pct = 1.0            # 每笔最多亏总资金 1%（0–100）
+max_leverage = 5                    # 杠杆 ≤ 5 倍（1–125，具体币种以交易所为准）
+max_total_exposure_x = 3.0          # 总敞口 ≤ 总资产 3 倍（0–125）
+daily_loss_halt_pct = 3.0           # 当日亏 3% 停止开新仓，只允许平仓（0–100）
+max_notional_per_trade_usdt = 2000  # 单笔名义价值上限 USDT（>0）
+max_open_positions = 5              # 同时持仓笔数上限（≥1）
+lifeboat_stop_multiplier = 1.5      # 保命止损距离 = 正常止损 × 1.5（>1）
 max_spread_bps = 5.0                # 价差超过 5bp 不开仓
 max_slippage_bps = 10.0
 taker_fee_bps = 5.0                 # 单边吃单 0.05%，来回约 0.1%

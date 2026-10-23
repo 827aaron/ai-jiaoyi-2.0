@@ -30,6 +30,8 @@ make check-config
 make hb-fetch           # 拉上游 hummingbot-api 和 Condor 到 vendor/，钉在 Makefile 里的提交
 ```
 
+`config/risk.toml` 的硬上限数值由你定，程序只拦不合理的值（负数或 0、百分比超过 100、杠杆超过 125、保命止损倍数不大于 1）。超出保守默认值（每笔 1%、杠杆 5x、总敞口 3x、日亏 3%）时，`check-config` / `status` / `run` 和面板设置页会提示，但不会拒绝启动。具体币种能开多少倍杠杆以币安为准。
+
 ## 3. 起 hummingbot-api（Docker）
 
 ```bash

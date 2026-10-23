@@ -69,6 +69,12 @@ def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:
     return f"持仓档位 {app.profile}{tag}{tail}"
 
 
+def _caution_line(risk: RiskConfig) -> str | None:
+    """硬上限超出保守值时的提示（不拒绝启动）。"""
+    hit = risk.cautions()
+    return f"注意：硬上限超出保守值（只提示，不拦）：{'；'.join(hit)}" if hit else None
+
+
 def _check_config(args: argparse.Namespace) -> int:
     try:
         risk, app, slow = _load(args)
@@ -83,6 +89,8 @@ def _check_config(args: argparse.Namespace) -> int:
         f"最大杠杆 {risk.max_leverage}x，日亏熔断 {risk.daily_loss_halt_pct}%。"
     )
     print(_profile_line(args, app))
+    if caution := _caution_line(risk):
+        print(caution)
     return 0
 
 
@@ -198,6 +206,8 @@ def _status(args: argparse.Namespace) -> int:
         print(e, file=sys.stderr)
         return 2
     print(_profile_line(args, app.app_cfg))
+    if caution := _caution_line(risk):
+        print(caution)
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
     from jiaoyi.app import read_blocked
@@ -223,6 +233,8 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     print(f"启动：模式 {app.app_cfg.mode.value}，拍板 {app.gate_label()}。Ctrl+C 停止。")
     print(_profile_line(args, app.app_cfg))
+    if caution := _caution_line(risk):
+        print(caution)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(Runner(app).run())
     return 0

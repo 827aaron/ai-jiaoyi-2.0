@@ -482,6 +482,8 @@ class SettingItem(BaseModel):
 class SettingsPage(BaseModel):
     mode: str
     risk: list[SettingItem]
+    risk_cautions: list[str] = []
+    """硬上限超出保守值的项（只提示，不拒绝）。"""
     category_caps: dict[str, float]
     app: list[SettingItem]
     fast_loop: list[SettingItem]
@@ -516,7 +518,10 @@ def _items(
         for m in field.metadata:
             lo = getattr(m, "ge", getattr(m, "gt", lo))
             hi = getattr(m, "le", getattr(m, "lt", hi))
-        bounds = f"{lo:g}–{hi:g}" if lo is not None and hi is not None else ""
+        if lo is not None and hi is not None:
+            bounds = f"{lo:g}–{hi:g}"
+        else:
+            bounds = f"≥{lo:g}" if lo is not None else ""
         desc = (field.description or "").split("。")[0]
         spec = specs.get(name)
         out.append(
@@ -550,6 +555,7 @@ def build_settings(
     page = SettingsPage(
         mode=app.mode.value,
         risk=_items(risk, "risk"),
+        risk_cautions=risk.cautions(),
         category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
         app=_items(app, "app", frozenset({"mode"})),
         fast_loop=_items(app.fast_loop, "fast_loop"),

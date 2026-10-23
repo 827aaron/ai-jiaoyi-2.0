@@ -728,6 +728,7 @@ P.settings = () => {
     <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
       <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
     <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了 ${editBtn(d, "risk")}</span></div><div class="form">${setRows(d.risk)}</div>
+      ${(d.risk_cautions || []).length ? `<div class="note warn mt">超出保守值（只提示，不拦）：${d.risk_cautions.map(esc).join("；")}</div>` : ""}
       <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
       <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>

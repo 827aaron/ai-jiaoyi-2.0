@@ -266,7 +266,7 @@ def test_update_risk_writes_backup_and_log(tmp_path: Path) -> None:
     risk = load_risk_config(paths.risk)
     assert risk.max_leverage == 3 and risk.risk_per_trade_pct == 0.5
     text = paths.risk.read_text(encoding="utf-8")
-    assert "max_leverage = 3                    # 杠杆 ≤ 5 倍（1–10）" in text
+    assert "max_leverage = 3                    # 杠杆 ≤ 5 倍（1–125" in text
     [bak] = list(paths.risk.parent.glob("risk.toml.bak-*"))
     assert bak.read_text(encoding="utf-8") == before
     rows = actions.recent_changes(data)
@@ -277,7 +277,7 @@ def test_update_risk_writes_backup_and_log(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("section", "changes", "match"),
     [
-        ("risk", {"max_leverage": 50}, "max_leverage"),  # 超范围
+        ("risk", {"max_leverage": 126}, "max_leverage"),  # 超过交易所上限
         ("risk", {"max_leverage": 2.5}, "整数"),
         ("risk", {"day_reset_tz": 1}, "不能在网页上改"),
         ("category", {"major": 4.0}, "总敞口"),  # 超过总敞口 3 倍
@@ -364,7 +364,7 @@ def test_settings_endpoints(tmp_path: Path) -> None:
         lev = next(i for i in page["risk"] if i["key"] == "max_leverage")
         assert lev["value"] == 4  # 设置页显示文件里的现值
         assert page["changes"][0]["key"] == "max_leverage"
-        bad = {"section": "risk", "changes": {"max_leverage": 99}, "password": PW}
+        bad = {"section": "risk", "changes": {"max_leverage": 200}, "password": PW}
         r = client.post("/api/settings", json=bad, headers=HEADERS)
         assert r.status_code == 400 and "不合格" in r.json()["detail"]
         assert PW not in client.get("/api/settings").text

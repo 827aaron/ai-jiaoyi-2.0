@@ -1,9 +1,10 @@
 """硬上限（你定，AI 改不了）和运行配置。
 
 规则（设计文档 §四、§十一）：
-- 每个字段都是**必填**，模型里不给默认值。配置缺项、多出未知字段、超出合理范围，
-  程序拒绝启动。保守默认值写在 ``config/risk.example.toml``，第一次用时复制成
-  ``config/risk.toml`` 再按需改。
+- 每个字段都是**必填**，模型里不给默认值。配置缺项、多出未知字段、数值不合理
+  （例如负数、杠杆超过 125），程序拒绝启动。硬上限的数值由人定，不另设保守范围。
+  保守默认值写在 ``config/risk.example.toml``，第一次用时复制成 ``config/risk.toml``
+  再按需改；超出保守值只提示（``RiskConfig.cautions``）。
 - 下层只能更紧：作战卡的范围、拍板人的档位都不能超过这里的数。
 
 读文件和报错见 ``jiaoyi.core.config``。
@@ -23,33 +24,36 @@ PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
 
 
 class RiskConfig(Contract):
-    """硬上限。范围是“合理范围”，不是建议值；建议值见示例文件。"""
+    """硬上限。Aaron 2026-10-23 定：数值由人定，程序只拦“不合理”的值（物理 / 交易所约束），
+    不再替人设保守范围。超出保守值时 ``check-config`` / 面板给提示但不拒绝（见 ``cautions``）。
+    """
 
     risk_per_trade_pct: float = Field(
-        ge=0.05, le=2.0, description="每笔最多亏总资金的百分比。保守值 1.0。"
+        gt=0.0, le=100.0, description="每笔最多亏总资金的百分比。保守值 1.0。"
     )
-    max_leverage: int = Field(ge=1, le=10, description="最大杠杆。保守值 5。")
+    max_leverage: int = Field(
+        ge=1, le=125, description="最大杠杆（币安最高 125，具体币种以交易所回读为准）。保守值 5。"
+    )
     max_total_exposure_x: float = Field(
-        gt=0.0, le=5.0, description="所有持仓名义价值合计 / 总资产的上限。保守值 3。"
+        gt=0.0, le=125.0, description="所有持仓名义价值合计 / 总资产的上限。保守值 3。"
     )
     category_exposure_x: dict[Category, float] = Field(
         description="每个相关组的敞口上限（总资产的倍数），不能超过总敞口上限。"
     )
     daily_loss_halt_pct: float = Field(
-        ge=0.5, le=10.0, description="当日亏损达到这个百分比后只允许平仓。保守值 3。"
+        gt=0.0, le=100.0, description="当日亏损达到这个百分比后只允许平仓。保守值 3。"
     )
-    max_notional_per_trade_usdt: float = Field(
-        ge=10.0, le=100_000.0, description="单笔名义价值上限，USDT。"
-    )
-    max_open_positions: int = Field(ge=1, le=50)
+    max_notional_per_trade_usdt: float = Field(gt=0.0, description="单笔名义价值上限，USDT。")
+    max_open_positions: int = Field(ge=1)
     lifeboat_stop_multiplier: float = Field(
-        ge=1.1, le=3.0, description="保命止损距离 = 正常止损距离 × 这个倍数。保守值 1.5。"
+        gt=1.0,
+        description="保命止损距离 = 正常止损距离 × 这个倍数（必须比正常止损宽）。保守值 1.5。",
     )
-    max_spread_bps: float = Field(ge=0.5, le=50.0, description="价差超过就不开仓。")
-    max_slippage_bps: float = Field(ge=1.0, le=100.0)
-    taker_fee_bps: float = Field(ge=0.0, le=20.0, description="单边吃单费率，用于手续费门槛。")
+    max_spread_bps: float = Field(gt=0.0, description="价差超过就不开仓。")
+    max_slippage_bps: float = Field(gt=0.0)
+    taker_fee_bps: float = Field(ge=0.0, description="单边吃单费率，用于手续费门槛。")
     min_tp_fee_multiple: float = Field(
-        ge=1.0, le=10.0, description="止盈距离至少是来回手续费的几倍，不够就拒单。"
+        ge=1.0, description="止盈距离至少是来回手续费的几倍，不够就拒单。"
     )
     day_reset_tz: Literal["Asia/Bangkok", "UTC"] = Field(
         description="“今日盈亏”和日亏熔断按哪个时区 0 点清零。"
@@ -65,6 +69,32 @@ class RiskConfig(Contract):
                 total = self.max_total_exposure_x
                 raise ValueError(f"分组 {cat} 的上限 {cap} 必须在 0 到总敞口上限 {total} 之间")
         return self
+
+    def cautions(self) -> list[str]:
+        """超出保守值的项（只提示，不拒绝）。"""
+        out = []
+        for name, (safe, higher_is_riskier) in CONSERVATIVE.items():
+            value = getattr(self, name)
+            if (value > safe) if higher_is_riskier else (value < safe):
+                out.append(f"{name} = {value:g}（保守值 {safe:g}）")
+        worst = self.risk_per_trade_pct * self.lifeboat_stop_multiplier
+        if worst > self.daily_loss_halt_pct:
+            out.append(
+                f"daily_loss_halt_pct {self.daily_loss_halt_pct:g}% 小于一笔打到保命止损的亏损"
+                f" {worst:g}%：满仓位的单子会被保镖全部拒掉"
+            )
+        return out
+
+
+CONSERVATIVE: dict[str, tuple[float, bool]] = {
+    "risk_per_trade_pct": (1.0, True),
+    "max_leverage": (5, True),
+    "max_total_exposure_x": (3.0, True),
+    "daily_loss_halt_pct": (3.0, True),
+    "lifeboat_stop_multiplier": (1.5, True),
+    "min_tp_fee_multiple": (2.0, False),
+}
+"""硬上限的保守值（设计文档 §四、§十一）→ (值, 越大越冒险)。超出只提示。"""
 
 
 class FastLoopConfig(Contract):
