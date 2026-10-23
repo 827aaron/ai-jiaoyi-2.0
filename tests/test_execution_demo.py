@@ -140,3 +140,33 @@ def test_sim_environment_marker_must_match(tmp_path):
     with pytest.raises(SimEnvironmentMismatch, match="必须一致"):
         check_sim_environment(tmp_path, "demo")
     check_sim_environment(tmp_path, "legacy_testnet")
+
+
+async def test_direct_close_reads_fill_price_from_order_then_falls_back_to_fetch_order():
+    class FakeCcxt:
+        def __init__(self, response: dict, fetched: dict | None) -> None:
+            self.response, self.fetched, self.params = response, fetched, None
+
+        async def load_markets(self, *a):
+            return {}
+
+        def amount_to_precision(self, sym, qty):
+            return str(qty)
+
+        async def create_order(self, sym, kind, side, amount, price, params):
+            self.params = params
+            return self.response
+
+        async def fetch_order(self, order_id, sym):
+            if self.fetched is None:
+                raise RuntimeError("boom")
+            return self.fetched
+
+    ex = CcxtBinanceFutures("k", "s", testnet=True)
+    ex._ex = FakeCcxt({"id": "1", "average": 68100.0}, None)
+    assert await ex.close_position_market("BTCUSDT", "sell", 0.01) == 68100.0
+    assert ex._ex.params["reduceOnly"] and ex._ex.params["newOrderRespType"] == "RESULT"
+    ex._ex = FakeCcxt({"id": "2", "average": None}, {"average": 68200.0})
+    assert await ex.close_position_market("BTCUSDT", "sell", 0.01) == 68200.0
+    ex._ex = FakeCcxt({"id": "3", "average": None}, None)  # 查不到：不报错，返回 None
+    assert await ex.close_position_market("BTCUSDT", "sell", 0.01) is None

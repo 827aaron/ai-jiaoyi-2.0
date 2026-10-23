@@ -8,12 +8,15 @@ Protocol 在这里，ccxt 实现放在最后，测试用内存假件。
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
 from jiaoyi.execution.symbols import from_ccxt_symbol, to_ccxt_symbol
+
+log = logging.getLogger(__name__)
 
 STOP_PREFIX = "lb-"
 """保命止损的 clientOrderId 前缀，对账员靠它认出“自己的”条件单。"""
@@ -302,11 +305,21 @@ class CcxtBinanceFutures:
                 close_side,
                 self._ex.amount_to_precision(ccxt_symbol, quantity),
                 None,
-                {"reduceOnly": True},
+                {"reduceOnly": True, "newOrderRespType": "RESULT"},
             )
         except Exception as e:
             raise ExchangeError(f"直连平仓失败：{e}") from e
-        price = (order or {}).get("average") or (order or {}).get("price")
+        return await self._fill_price(order, ccxt_symbol)
+
+    async def _fill_price(self, order: dict[str, Any] | None, ccxt_symbol: str) -> float | None:
+        """成交均价。下单响应里没有就再查这张单；都拿不到返回 None（单已成交，不报错）。"""
+        price = (order or {}).get("average")
+        order_id = (order or {}).get("id")
+        if not price and order_id:
+            try:
+                price = (await self._ex.fetch_order(order_id, ccxt_symbol)).get("average")
+            except Exception:
+                log.warning("查直连平仓成交价失败 %s", order_id, exc_info=True)
         return float(price) if price else None
 
     async def lot_filters(self) -> dict[str, LotFilter]:

@@ -65,9 +65,6 @@ class SymbolAlreadyHeld(RuntimeError):
     """同一个币已有在管持仓，执行层拒绝再开。"""
 
 
-_STILL_HELD_FRACTION = 0.5
-"""币安上剩余数量不低于账本数量的这个比例，就认为仓还在（容忍部分成交 / 精度差）。"""
-
 _TRADE_BUY = 1
 _TRADE_SELL = 2
 
@@ -525,6 +522,10 @@ class HbExecutorAdapter:
         由对账员按“执行器消失”流程处理，不能当作已平。
         """
         rec = tracked.record
+        if held != rec.quantity:
+            # 账本数量是下单数量；限价单可能只成交一部分。以币安实际持仓为准，直连平仓和对账都按它算
+            tracked = self._set(tracked, quantity=held)
+            rec = tracked.record
         if tracked.requested_close is not None:
             if await self._close_directly(tracked, tracked.requested_close, None):
                 return self._registry.data.positions[rec.position_id]
@@ -553,7 +554,7 @@ class HbExecutorAdapter:
             held = await self._held_quantity(rec.symbol)
             if held is None:
                 return tracked  # 读不到币安：先不结账，下一轮同步再核对
-            if held >= rec.quantity * _STILL_HELD_FRACTION:
+            if held > 0:  # 币安只返回非零持仓；部分成交只剩零头也算还在
                 return await self._executor_ended_position_remains(tracked, close_type, held)
         if never_filled:
             status, reason = PositionStatus.FAILED, None
