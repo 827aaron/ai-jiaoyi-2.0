@@ -42,7 +42,10 @@ CLASSES = _jiaoyi_classes()
 
 
 def _members(proto: type) -> set[str]:
-    return set(getattr(proto, "__protocol_attrs__", set()))
+    """Protocol 自己声明的成员（Python 3.11 没有 ``__protocol_attrs__``，自己从类体里取）。"""
+    names = set(getattr(proto, "__annotations__", {}))
+    names |= {n for n in vars(proto) if not n.startswith("_")}
+    return names
 
 
 def _params(fn: Any) -> list[str]:
