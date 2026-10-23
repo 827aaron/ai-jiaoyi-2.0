@@ -391,7 +391,7 @@ class ThreeWayReconciler:
         except Exception as via_hb:
             close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
             try:
-                exit_price = await self._exchange.close_position_market(
+                fill = await self._exchange.close_position_market(
                     rec.symbol, close_side, rec.quantity
                 )
             except Exception as direct:
@@ -402,7 +402,7 @@ class ThreeWayReconciler:
                     False,
                 )
             self._lb_failures.pop(position_id, None)
-            self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER, exit_price)
+            self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER, fill)
             await self._adapter.release_lifeboat(position_id)
             return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
         self._lb_failures.pop(position_id, None)

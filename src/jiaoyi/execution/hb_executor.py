@@ -30,10 +30,10 @@ from jiaoyi.contracts import (
     Side,
 )
 from jiaoyi.contracts.module_status import AlertLevel, Health
-from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatus
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
-from jiaoyi.execution.exchange import ExchangeClient, ExchangeError
+from jiaoyi.execution.exchange import CloseFill, ExchangeClient, ExchangeError
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
@@ -64,6 +64,9 @@ _CLOSE_TYPE_MAP = {
 class SymbolAlreadyHeld(RuntimeError):
     """同一个币已有在管持仓，执行层拒绝再开。"""
 
+
+_UNKNOWN_EXECUTOR_ROUNDS_BEFORE_SETTLE = 2
+"""平仓中（CLOSING）的仓，连续这么多次同步都查不到执行器，就按币安持仓结账。"""
 
 _TRADE_BUY = 1
 _TRADE_SELL = 2
@@ -108,6 +111,7 @@ class HbExecutorAdapter:
         self._poll_s = poll_s
         self._lifeboat_attempts = lifeboat_attempts
         self._income_since = income_since
+        self._unknown_executor_rounds: dict[str, int] = {}
         self._exchange = exchange
         self._rec = recorder
         self._clock = clock
@@ -286,6 +290,7 @@ class HbExecutorAdapter:
         for attempt in range(self._lifeboat_attempts):
             try:
                 await self._lifeboat.cancel(rec)
+                self._mark_lifeboat_cancelled(rec.position_id)
                 return
             except Exception as e:
                 last = e
@@ -299,6 +304,15 @@ class HbExecutorAdapter:
             f"lifeboat_cancel_failed:{rec.position_id}",
         )
 
+    def _mark_lifeboat_cancelled(self, position_id: str) -> None:
+        """撤成功后账本里的保命止损状态改成 cancelled，免得平仓记录里还显示 active。"""
+        tracked = self._registry.get(position_id)
+        if tracked is not None and tracked.record.lifeboat is not None:
+            order = tracked.record.lifeboat.model_copy(
+                update={"status": LifeboatStatus.CANCELLED, "updated_at": self._clock()}
+            )
+            self._set(tracked, lifeboat=order)
+
     async def release_lifeboat(self, position_id: str) -> None:
         """对账员直连平仓成功、记为已平之后调：撤掉该仓的保命止损。"""
         tracked = self._registry.get(position_id)
@@ -306,21 +320,22 @@ class HbExecutorAdapter:
             await self._cancel_lifeboat(tracked.record)
 
     def mark_closed_directly(
-        self, position_id: str, reason: CloseReason, exit_price: float | None = None
+        self, position_id: str, reason: CloseReason, fill: CloseFill | None = None
     ) -> None:
         """直连币安平仓成功后，把账本记为已平，免得每轮重复告警。
 
-        有成交均价就按 数量×(平仓价-入场价) 算毛盈亏记进当日统计（手续费拿不到，不计入）；
-        没有就记 None，并留一条日志，当日统计会漏这一笔。
+        有成交均价就按 数量×(平仓价-入场价) 算毛盈亏，扣掉成交回报里的手续费后记进当日统计；
+        没有成交价就记 None，并留一条日志，当日统计会漏这一笔。
         """
         tracked = self._registry.get(position_id)
         if tracked is None:
             return
         rec = tracked.record
         pnl: float | None = None
-        if exit_price is not None and rec.entry_price is not None:
+        fee = (fill.fee_usdt if fill is not None else None) or 0.0
+        if fill is not None and fill.price is not None and rec.entry_price is not None:
             sign = 1.0 if rec.side is Side.LONG else -1.0
-            pnl = sign * rec.quantity * (exit_price - rec.entry_price)
+            pnl = sign * rec.quantity * (fill.price - rec.entry_price) - fee
         else:
             log.warning("直连平仓拿不到成交价，当日盈亏统计会漏记 %s", position_id)
         tracked = self._set(
@@ -329,10 +344,11 @@ class HbExecutorAdapter:
             closed_at=self._clock(),
             close_reason=reason,
             realized_pnl_usdt=pnl,
+            fees_usdt=fee,
         )
         self._record(
             Outcome.CLOSE,
-            f"{rec.symbol} 直连平仓（{reason.value}），毛盈亏 "
+            f"{rec.symbol} 直连平仓（{reason.value}），净盈亏 "
             + (f"{pnl:+.2f}U" if pnl is not None else "未知"),
             tracked.record,
             output={"net": pnl, "reason": reason.value, "direct": True},
@@ -402,14 +418,12 @@ class HbExecutorAdapter:
             return False
         close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
         try:
-            exit_price = await self._exchange.close_position_market(
-                rec.symbol, close_side, rec.quantity
-            )
+            fill = await self._exchange.close_position_market(rec.symbol, close_side, rec.quantity)
         except Exception as direct:
             # 两条路都不通：原样抛 hummingbot 的错，由调用方（对账员 / 主循环）告警
             log.error("直连平仓也失败 %s：%r", rec.position_id, direct)
             return False
-        self.mark_closed_directly(rec.position_id, reason, exit_price)
+        self.mark_closed_directly(rec.position_id, reason, fill)
         await self._cancel_lifeboat(rec)
         cause = repr(via_hb) if via_hb is not None else "执行器已结束但币安仍有仓"
         await self._alert(
@@ -450,7 +464,20 @@ class HbExecutorAdapter:
             return tracked
         detail = await self._api.get_executor(rec.executor_id)
         if detail is None:
-            return tracked  # hummingbot 不认识这个执行器：交给对账员报 EXECUTOR_FAILED
+            # hummingbot 不认识这个执行器。OPEN 的交给对账员（EXECUTOR_FAILED，2 轮后直连平）；
+            # 我们已经要求平仓（CLOSING）的，连续几轮都查不到就按“执行器已结束”走以币安为准的结账，
+            # 否则账本会一直卡在 CLOSING。
+            if rec.status is not PositionStatus.CLOSING or self._exchange is None:
+                return tracked
+            rounds = self._unknown_executor_rounds.get(rec.position_id, 0) + 1
+            self._unknown_executor_rounds[rec.position_id] = rounds
+            if rounds < _UNKNOWN_EXECUTOR_ROUNDS_BEFORE_SETTLE:
+                return tracked
+            self._unknown_executor_rounds.pop(rec.position_id, None)
+            return await self._finalize(
+                tracked, {"close_type": "EXECUTOR_UNKNOWN"}, rec.entry_price
+            )
+        self._unknown_executor_rounds.pop(rec.position_id, None)
         info = detail.get("custom_info") or {}
         entry = _positive(info.get("current_position_average_price"))
 
@@ -593,7 +620,7 @@ class HbExecutorAdapter:
                 f"never_filled:{rec.position_id}",
             )
         await self._cancel_lifeboat(tracked.record)
-        return tracked
+        return self._registry.get(rec.position_id) or tracked
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
         requested = changes.pop("requested_close", tracked.requested_close)

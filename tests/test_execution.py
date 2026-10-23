@@ -418,6 +418,7 @@ async def test_close_verifies_exchange_flat_and_falls_back_to_direct(rig: Rig) -
     pid = await open_filled(rig)
     rig.api.auto_terminate_on_stop = False
     rig.ex.exit_price = 68144.0
+    rig.ex.exit_fee = 0.02
 
     async def stop_and_leave(executor_id: str, *, keep_position: bool) -> None:
         rig.api.terminate(executor_id, "EARLY_STOP", leaves_position=True)
@@ -427,9 +428,11 @@ async def test_close_verifies_exchange_flat_and_falls_back_to_direct(rig: Rig) -
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     assert rec.status is PositionStatus.CLOSED
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
-    assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68144.0 - 68044.0))
+    assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68144.0 - 68044.0) - 0.02)
+    assert rec.fees_usdt == pytest.approx(0.02)
+    assert rec.lifeboat is not None and rec.lifeboat.status.value == "cancelled"
     assert rig.ex.stops == {}
-    assert (await rig.adapter.account()).day_realized_pnl_usdt == pytest.approx(1.5)
+    assert (await rig.adapter.account()).day_realized_pnl_usdt == pytest.approx(1.48)
 
 
 async def test_unverifiable_exchange_keeps_position_open(rig: Rig) -> None:
@@ -836,3 +839,56 @@ async def test_reconciler_wording_matches_the_cause(rig: Rig) -> None:
     second = await rig.rec.reconcile(rig.t)
     detail = next(i.detail for i in second.issues if i.kind is ReconcileIssueKind.EXECUTOR_FAILED)
     assert "执行器已消失" in detail and "保命止损补不上" not in detail
+
+
+async def _closing_with_slow_executor(rig: Rig) -> str:
+    pid = await open_filled(rig)
+    rig.api.auto_terminate_on_stop = False  # 停止请求发出了，执行器却一直不结束
+    await rig.adapter.close(pid, CloseReason.MANUAL)
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSING  # type: ignore[union-attr]
+    return pid
+
+
+async def test_closing_with_unknown_executor_and_flat_exchange_is_settled(rig: Rig) -> None:
+    pid = await _closing_with_slow_executor(rig)
+    rig.api.executors.clear()  # hummingbot 查不到（返回空，不是 TERMINATED）
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0)  # 币安上已经平了
+    await rig.adapter.positions()
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSING  # type: ignore[union-attr]
+    await rig.adapter.positions()  # 连续第 2 次
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED and rec.close_reason is CloseReason.MANUAL
+    assert rig.ex.market_closed == [] and rig.ex.stops == {}
+
+
+async def test_closing_with_unknown_executor_and_position_remaining_is_closed_directly(
+    rig: Rig,
+) -> None:
+    pid = await _closing_with_slow_executor(rig)
+    rig.api.executors.clear()
+    await rig.adapter.positions()
+    await rig.adapter.positions()
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+    assert rig.ex.stops == {}
+
+
+async def test_unknown_executor_counter_resets_when_it_comes_back(rig: Rig) -> None:
+    pid = await _closing_with_slow_executor(rig)
+    saved = dict(rig.api.executors)
+    rig.api.executors.clear()
+    await rig.adapter.positions()  # 第 1 次查不到
+    rig.api.executors.update(saved)
+    await rig.adapter.positions()  # 回来了：计数清零
+    rig.api.executors.clear()
+    await rig.adapter.positions()  # 又是第 1 次，不结账
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSING  # type: ignore[union-attr]
+
+
+async def test_lifeboat_recorded_as_cancelled_after_normal_close(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.api.terminate("ex1", "TAKE_PROFIT")
+    await rig.adapter.positions()
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.CLOSED
+    assert rec.lifeboat is not None and rec.lifeboat.status.value == "cancelled"
