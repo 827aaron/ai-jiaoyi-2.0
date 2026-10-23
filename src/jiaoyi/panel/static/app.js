@@ -223,9 +223,9 @@ async function waitRestart(startedBefore) {
 /* ---------- 弹窗 */
 function dlg(html) {
   $("#layer").innerHTML = `<div class="scrim" data-close="1"><div class="dlg" role="dialog" aria-modal="true">${html}<div class="acts"><button class="btn" data-close="1">关闭</button></div></div></div>`;
-  $("#layer .acts .btn").focus();
+  $("#layer .acts .btn").focus({ preventScroll: true });
 }
-function closeDlg() { $("#layer").innerHTML = ""; onOk = null; }
+function closeDlg() { $("#layer").innerHTML = ""; onOk = null; clearTimeout(meetTimer); }
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDlg();
   if (e.key === "Enter" && e.target.closest && e.target.closest("#layer") && e.target.tagName === "INPUT") { e.preventDefault(); const b = $("#layer [data-ok]"); if (b) b.click(); }
@@ -244,6 +244,7 @@ document.addEventListener("click", async (e) => {
   const { act, arg } = el.dataset;
   if (act === "card") showCard();
   else if (act === "signal") showSignal(arg);
+  else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
   else if (act === "hist") { S.hist = arg; render(); poll(); }
@@ -315,7 +316,7 @@ function showCard(fetchPrices = true) {
     const [t, k] = BIAS[s.bias] || [s.bias, ""];
     return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(s.size_tier_max || "—")}</td>
-      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}</td></tr>`;
+      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}<div class="small"><a ${clickable("meeting", s.symbol)}>看这个币的开会过程 ›</a></div></td></tr>`;
   };
   const head = '<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th title="军师团建议的名义仓位范围（已含杠杆），最终由保镖按风险算">单笔仓位（含杠杆）U</th><th>最大档</th><th>理由</th></tr></thead>';
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
@@ -359,6 +360,79 @@ function showRecord(i) {
     <div class="small dim">看到的</div>${json(s.input)}<div class="small dim">判断</div>${json(s.output)}
     <p class="dim small">耗时 ${Math.round(s.latency_ms)} ms · 花费 $${s.cost_usd.toFixed(4)}</p>`);
 }
+
+/* ---------- 开会过程（慢环按阶段写 data/meeting_live/<币>.json；正在开的每 4 秒刷新） */
+const STAGE = { analysts: "分析师报告", debate: "多空辩论", trader: "交易员计划", risk: "风控辩论", decision: "结论" };
+const WHO = {
+  market: "市场分析师", social: "情绪分析师", news: "新闻分析师", fundamentals: "基本面分析师",
+  bull: "多头研究员", bear: "空头研究员", research_manager: "研究主管", trader: "交易员",
+  aggressive: "激进派风控", conservative: "保守派风控", neutral: "中立派风控", risk_manager: "风控主管", convert: "出作战卡",
+};
+const MEET_STATUS = { running: ["正在开", "p-accent"], done: ["开完了", "p-long"], failed: ["没开成", "p-short"], stale: ["中断了", "p-warn"] };
+const meetPill = (s) => { const [t, k] = MEET_STATUS[s] || [s, ""]; return `<span class="pill ${k}">${t}</span>`; };
+const stageNo = (s) => Object.keys(STAGE).indexOf(s) + 1;
+const meetTime = (m) => (m.status === "running" && m.started_at ? `已开 ${dur(Date.now() - Date.parse(m.started_at))}` : m.started_at && (m.finished_at || m.updated_at) ? `${hm(m.started_at)} 开，用时 ${dur(Date.parse(m.finished_at || m.updated_at) - Date.parse(m.started_at))}` : "");
+const meetBias = (m) => (m.bias ? (() => { const [t, k] = BIAS[m.bias] || [m.bias, ""]; return `<span class="pill ${k}">${t}</span>`; })() : "");
+
+function meetingsCard(list) {
+  const rows = list.map((m) => `<div class="click" ${clickable("meeting", m.symbol)}><span class="n">${m.updated_at ? hm(m.updated_at) : ""}</span><span><b>${coin(m.symbol)}</b> ${meetPill(m.status)} ${meetBias(m)}
+    <span class="dim small">${m.status === "running" && m.stage ? `第 ${stageNo(m.stage) || "?"} / 5 步 · ${esc(STAGE[m.stage] || m.stage)} · ` : ""}${meetTime(m)}</span></span></div>`).join("");
+  return `<section class="card mt"><div class="ch"><h2>开会过程</h2><span class="r">每个币最近一场会 · 点开看每个人说了什么</span></div>
+    <div class="log">${rows || '<div class="dim">还没有开会记录。慢环升级以后，每场会的过程都会记下来。</div>'}</div></section>`;
+}
+
+let meetTimer = null;
+S.meetOpen = new Set();
+function showMeeting(sym) {
+  dlg(`<h3>${coin(sym)} · 开会过程</h3><div id="meet"><div class="dim">读取中…</div></div>`);
+  $("#layer .dlg").classList.add("mid");
+  $("#meet").dataset.sym = sym;
+  S.meetOpen = new Set();
+  loadMeeting(sym);
+}
+async function loadMeeting(sym) {
+  clearTimeout(meetTimer);
+  const box = () => { const b = $("#meet"); return b && b.dataset.sym === sym ? b : null; };
+  let m;
+  try { m = await getJson(`/api/meeting/${encodeURIComponent(sym)}`); } catch (e) {
+    if (box()) box().innerHTML = `<div class="dim">${/ 404/.test(e.message) ? "这个币还没有开会记录。慢环升级以后，每场会的过程都会记下来。" : esc(e.message)}</div>`;
+    return;
+  }
+  if (!box()) return; // 弹窗关了或换了币
+  const dl = $("#layer .dlg");
+  const follow = dl.scrollTop + dl.clientHeight >= dl.scrollHeight - 40; // 在底部就跟着新发言往下走
+  if (!S.meetOpen.size && m.steps.length) S.meetOpen.add(m.steps.length - 1);
+  box().innerHTML = meetingHtml(m);
+  if (follow && m.status === "running") dl.scrollTop = dl.scrollHeight;
+  if (m.status === "running") meetTimer = setTimeout(() => loadMeeting(sym), 4000);
+}
+function meetingHtml(m) {
+  const cur = m.status === "done" ? 6 : stageNo(m.stage);
+  const chips = Object.entries(STAGE).map(([k, t], i) => {
+    const st = i + 1 < cur ? "done" : i + 1 === cur ? (m.status === "running" ? "now" : "stop") : "";
+    return `<span class="stg ${st}">${st === "done" ? "✓ " : ""}${t}</span>`;
+  }).join('<span class="dim">›</span>');
+  const known = Object.keys(STAGE);
+  const stages = [...known, ...new Set(m.steps.map((s) => s.stage).filter((s) => !known.includes(s)))];
+  const groups = stages.map((st) => {
+    const items = m.steps.map((s, i) => [s, i]).filter(([s]) => s.stage === st);
+    if (!items.length) return "";
+    return `<div class="lbl">${esc(STAGE[st] || st || "其他")}</div>${items.map(([s, i]) => `<details class="say" data-step="${i}" ${S.meetOpen.has(i) ? "open" : ""}>
+      <summary><b>${esc(WHO[s.who] || s.who || "—")}</b><span class="dim small">${s.ts ? hms(s.ts) : ""}</span><span class="dim small one">${esc(s.text.slice(0, 80))}</span></summary><div class="txt">${esc(s.text)}</div></details>`).join("")}`;
+  }).join("");
+  return `<p class="dim">${meetPill(m.status)} ${meetBias(m)} ${meetTime(m)}${m.cost_usd ? ` · 花费 $${m.cost_usd.toFixed(2)}` : ""}${m.status === "running" ? " · 自动刷新" : ""}</p>
+    <div class="stgs">${chips}</div>
+    ${m.status === "stale" ? '<div class="note warn">标着“正在开”，但 15 分钟没有新进展：多半是主程序重启把会打断了，下一轮会重开。</div>' : ""}
+    ${m.error ? `<div class="note warn">出错：${esc(m.error)}</div>` : ""}
+    ${m.reason ? `<div class="note"><b>结论</b>　${esc(m.reason)}</div>` : ""}
+    ${groups || '<div class="dim">还没有人发言。</div>'}`;
+}
+document.addEventListener("toggle", (e) => {
+  const i = e.target.dataset && e.target.dataset.step;
+  if (i == null) return;
+  if (e.target.open) S.meetOpen.add(+i);
+  else S.meetOpen.delete(+i);
+}, true);
 
 /* ---------- 总览 */
 const P = {};
@@ -561,6 +635,7 @@ P.team = () => {
   window.__recs = d.records;
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.symbol ? "" : ""}${esc(s.text)}</span></div>`).join("");
   return `<div class="roles">${cards}</div>
+    ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
       <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}

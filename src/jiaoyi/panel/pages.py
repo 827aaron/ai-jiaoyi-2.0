@@ -27,6 +27,7 @@ from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
+from jiaoyi.panel.meetings import MeetingSummary, list_meetings
 from jiaoyi.panel.overview import (
     STALE_S,
     LampState,
@@ -102,6 +103,8 @@ class TeamPage(BaseModel):
     selected: Role
     records: list[TrailItem]
     """所选角色今天的记录，最新在前。"""
+    meetings: list[MeetingSummary] = []
+    """选中军师团时：每个币最近一场会（data/meeting_live/），正在开的在前。"""
 
 
 def build_positions(
@@ -146,7 +149,8 @@ def build_team(files: PanelFiles, now: datetime, selected: Role | None) -> TeamP
     cards = [_role_card(role, status.get(role.value), now) for role in ROLE_NAMES]
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
-    return TeamPage(roles=cards, selected=chosen, records=mine)
+    meets = list_meetings(files.root, now) if chosen is Role.COMMANDER else []
+    return TeamPage(roles=cards, selected=chosen, records=mine, meetings=meets)
 
 
 _HEALTH: dict[Health, LampState] = {

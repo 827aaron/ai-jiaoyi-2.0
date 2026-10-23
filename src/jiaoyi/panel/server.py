@@ -32,6 +32,7 @@ from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.files import PanelFiles
 from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.market import Interval, KlineError, KlineSource
+from jiaoyi.panel.meetings import Meeting, read_meeting
 from jiaoyi.panel.overview import Overview, build_overview
 from jiaoyi.panel.pages import (
     FundsPage,
@@ -208,6 +209,13 @@ def create_app(
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
         return build_team(files, clock(), role)
+
+    @api.get("/api/meeting/{symbol}")
+    async def meeting(symbol: str) -> Meeting:
+        m = read_meeting(Path(data_dir), symbol, clock())
+        if m is None:
+            raise HTTPException(404, "这个币还没有开会记录")
+        return m
 
     @api.get("/api/history")
     async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:

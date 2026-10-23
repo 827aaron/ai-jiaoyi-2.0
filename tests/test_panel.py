@@ -564,3 +564,48 @@ def test_history_hides_test_trades_by_default(tmp_path: Path) -> None:
     with _client(tmp_path, "10.0.0.2") as client:
         assert client.get("/api/history").json()["rows"] == []
         assert client.get("/api/history?tests=true").json()["rows"][0]["test"] is True
+
+
+def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
+    """开会过程：正在开的排前面、太久没更新算中断、坏步骤跳过、长文截断、币名过白名单。"""
+    from jiaoyi.panel.meetings import MAX_TEXT, list_meetings, read_meeting
+    from jiaoyi.panel.pages import build_team
+
+    _seed(tmp_path)
+    folder = tmp_path / "meeting_live"
+    folder.mkdir()
+    t = lambda m: (NOW - timedelta(minutes=m)).isoformat()  # noqa: E731
+    live = {
+        "symbol": "BTCUSDT", "status": "running", "stage": "debate",
+        "started_at": t(4), "updated_at": t(1),
+        "steps": [
+            {"stage": "analysts", "who": "market", "ts": t(3), "text": "x" * (MAX_TEXT + 50)},
+            {"stage": "debate", "who": "bull", "ts": t(1), "text": "放量突破，看多"},
+            {"stage": "debate", "who": "bear"},  # 没有 text：跳过
+        ],
+    }  # fmt: skip
+    done = {"status": "done", "stage": "decision", "started_at": t(90), "updated_at": t(80),
+            "finished_at": t(80), "steps": [],
+            "result": {"bias": "short", "reason": "资金费率过热"}}  # fmt: skip
+    (folder / "BTCUSDT.json").write_text(json.dumps(live))
+    (folder / "ETHUSDT.json").write_text(json.dumps(done))
+    (folder / "SOLUSDT.json").write_text(json.dumps(live | {"updated_at": t(30)}))
+    (folder / "BAD.json").write_text("{broken")
+
+    m = read_meeting(tmp_path, "BTCUSDT", NOW)
+    assert m and m.status == "running" and m.step_count == 2
+    assert m.steps[0].text.endswith("后面省略）") and len(m.steps[0].text) < MAX_TEXT + 20
+    assert read_meeting(tmp_path, "../BTCUSDT", NOW) is None
+    summary = list_meetings(tmp_path, NOW)
+    assert [(s.symbol, s.status) for s in summary] == [
+        ("BTCUSDT", "running"), ("SOLUSDT", "stale"), ("ETHUSDT", "done"),
+    ]  # fmt: skip
+    assert summary[2].bias == "short" and summary[2].reason == "资金费率过热"
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    assert build_team(files, NOW, c.Role.GATE).meetings == []
+    assert len(build_team(files, NOW, c.Role.COMMANDER).meetings) == 3
+    with _client(tmp_path, "192.168.1.20") as client:
+        assert client.get("/api/meeting/BTCUSDT").json()["steps"][1]["who"] == "bull"
+        assert client.get("/api/meeting/XRPUSDT").status_code == 404
+        assert client.get("/api/meeting/btc..").status_code == 404
