@@ -203,6 +203,12 @@ class MeetingConfig(_Strict):
         description="每次回答的长度上限，思考模型的思考也算在里面：低于 8192 实测会让多空辩论"
         "被挤成半句或空壳。出作战指令、挑币两步另按 8192 起。",
     )
+    reasoning_effort: Literal["none", "low", "medium", "high"] = Field(
+        default="low",
+        description="推理模型想多久：none 关掉推理，low / medium / high 越高想得越久。"
+        "思考也算在 max_tokens 里，不限的话个别币会把额度想完、回答被截断。只对走 OpenRouter 的"
+        "通道生效。",
+    )
     max_retries: int = Field(default=6, ge=0, le=10)
 
     @field_validator("analysts_crypto", "analysts_stock")
@@ -322,6 +328,7 @@ class SlowConfig(_Strict):
             max_tokens=m.max_tokens,
             json_max_tokens=max(8192, m.max_tokens),
             max_retries=m.max_retries,
+            reasoning_effort=m.reasoning_effort,
             price_per_mtok={"flash": (p.flash_in, p.flash_out), "pro": (p.pro_in, p.pro_out)},
             analysts_crypto=m.analysts_crypto,
             analysts_stock=m.analysts_stock,

@@ -115,6 +115,8 @@ class TradingAgentsSettings:
     hold_minutes: int = 120
     # 关键位范围 = level_span_sigma × ATR × √(持仓时长 / ATR 周期)，见 levels.py
     level_span_sigma: float = SPAN_SIGMA
+    # 推理长度（OpenRouter reasoning.effort）：none/low/medium/high；直连 DeepSeek 忽略
+    reasoning_effort: str = "low"
     # 开会过程实时落盘的目录（面板读）；空 = 不落盘。见 meeting_live.py
     live_dir: str = ""
 
@@ -693,6 +695,22 @@ def empty_speeches(state: Mapping[str, Any], debate_rounds: int, risk_rounds: in
     return out
 
 
+def openrouter_body(reasoning_effort: str) -> dict[str, Any]:
+    """OpenRouter 请求里额外带的参数：``usage.include`` 让响应带真实花费（usage.cost）；
+    ``reasoning`` 限制推理长度——推理模型的思考也算在 max_tokens 里，不限的话个别币的思考
+    会把额度用满、回答被截断。``none`` = 关掉推理，其余是 OpenRouter 的 effort 档。"""
+    reasoning: dict[str, Any] = (
+        {"enabled": False} if reasoning_effort == "none" else {"effort": reasoning_effort}
+    )
+    return {"usage": {"include": True}, "reasoning": reasoning}
+
+
+def apply_openrouter_options(llm: Any, reasoning_effort: str) -> None:
+    """把 ``openrouter_body`` 合进模型对象的 ``extra_body``（ChatOpenAI 会原样放进请求体）。"""
+    body = getattr(llm, "extra_body", None) or {}
+    llm.extra_body = {**body, **openrouter_body(reasoning_effort)}
+
+
 class CostMeter:
     """一场会议（或总盘会）的花费累计。线程安全：模型请求发生在后台线程里。
 
@@ -883,13 +901,11 @@ class TradingAgentsEngine:
         cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
         graph = TradingAgentsGraph(selected_analysts=analysts, config=cfg, callbacks=[handler])
         if self._s.provider == "openrouter":
-            # 让 OpenRouter 在每次响应的 usage 里带上真实花费（usage.cost）；TradingAgents 不透传，
-            # 所以直接设到它建好的模型对象上
+            # TradingAgents 不透传这些请求参数，所以直接设到它建好的模型对象上
             for llm in {
                 id(x): x for x in (graph.deep_thinking_llm, graph.quick_thinking_llm)
             }.values():
-                body = getattr(llm, "extra_body", None) or {}
-                llm.extra_body = {**body, "usage": {"include": True}}
+                apply_openrouter_options(llm, self._s.reasoning_effort)
         return graph
 
     def _snapshot_liquidations(self, symbols: Sequence[str]) -> None:
