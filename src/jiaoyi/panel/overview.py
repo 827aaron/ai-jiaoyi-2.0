@@ -92,6 +92,8 @@ class CardView(BaseModel):
     stop_atr: tuple[float, float] | None
     leverage_max: float | None
     notional_usdt: tuple[float, float] | None
+    size_fractions: dict[str, float] = {}
+    """仓位档 → 每笔风险打几折（保镖按这个算：S / M 来自 app.toml [fast_loop]，L 固定 1）。"""
 
 
 class FeedItem(BaseModel):
@@ -255,7 +257,7 @@ def build_overview(
         hb_error=hb.error,
         lamps=_lamps(status, hb, now, running),
         kpis=kpis,
-        card=_card(records, now),
+        card=_with_fractions(_card(records, now), app),
         feed=_feed(records),
         positions=positions,
         tiles=tiles,
@@ -368,8 +370,9 @@ def _lamps(
         return Lamp(key=key, label=label, state=worst[0], detail=worst[1])
 
     lamps = [
+        # 和团队页一样按数据流：慢环（选币、军师团）→ 快环 → 拍板 → 执行器 → hummingbot → 对账
+        group("slow", "慢环", (Role.SCREENER, Role.COMMANDER)),
         group("fast", "快环", (Role.SENTINEL, Role.RISK_GUARD, Role.KEEPER, Role.PATROL)),
-        group("slow", "慢环", (Role.COMMANDER, Role.SCREENER)),
         group("gate", "拍板", (Role.GATE,)),
         group("exec", "执行器", (Role.EXECUTOR, Role.LIFEBOAT)),
         group("recon", "对账", (Role.RECONCILER,)),
@@ -379,6 +382,14 @@ def _lamps(
     if not running:
         lamps.insert(0, Lamp(key="main", label="主程序", state="bad", detail="没在运行"))
     return lamps
+
+
+def _with_fractions(card: CardView | None, app: AppConfig) -> CardView | None:
+    if card is None:
+        return None
+    fl = app.fast_loop
+    fr = {"S": fl.size_fraction_s, "M": fl.size_fraction_m, "L": 1.0}
+    return card.model_copy(update={"size_fractions": fr})
 
 
 def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:

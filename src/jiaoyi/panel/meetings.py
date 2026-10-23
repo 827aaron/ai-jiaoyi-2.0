@@ -14,9 +14,11 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from jiaoyi.core.pool_overrides import SYMBOL_RE
-from jiaoyi.slow.commander import MARKET_LIVE as MARKET_MEETING
+from jiaoyi.slow.commander import MARKET_LIVE
 
 MEETING_DIR = "meeting_live"
+MARKET = MARKET_LIVE
+"""总盘会（看大盘、挑币）的文件名，和币的会同一格式；团队页固定排在最上面。"""
 STAGES = ("analysts", "debate", "trader", "risk", "decision")
 """分析师报告 → 多空辩论 → 交易员计划 → 风控辩论 → 结论。"""
 MAX_TEXT = 8000
@@ -109,7 +111,7 @@ def _parse(symbol: str, raw: Any, now: datetime) -> Meeting | None:
 
 def read_meeting(data_dir: Path, symbol: str, now: datetime) -> Meeting | None:
     """这个币最近一场会（正在开或上一场）；没有文件、读不出都是 None。``symbol`` 先过白名单。"""
-    if symbol != MARKET_MEETING and not SYMBOL_RE.match(symbol):
+    if symbol != MARKET and not SYMBOL_RE.match(symbol):
         return None
     try:
         raw = json.loads((data_dir / MEETING_DIR / f"{symbol}.json").read_text(encoding="utf-8"))
@@ -119,12 +121,18 @@ def read_meeting(data_dir: Path, symbol: str, now: datetime) -> Meeting | None:
 
 
 def list_meetings(data_dir: Path, now: datetime) -> list[MeetingSummary]:
-    """所有币最近一场会的概要：正在开的在前，其余按更新时间新到旧。"""
+    """所有币最近一场会的概要：总盘会固定第一，然后正在开的在前，其余按更新时间新到旧。"""
     folder = data_dir / MEETING_DIR
     out: list[MeetingSummary] = []
     for f in folder.glob("*.json") if folder.is_dir() else []:
         m = read_meeting(data_dir, f.stem, now)
         if m:
             out.append(MeetingSummary.model_validate(m.model_dump(exclude={"steps"})))
-    out.sort(key=lambda m: (m.status != "running", -(m.updated_at or now).timestamp()))
+    out.sort(
+        key=lambda m: (
+            m.symbol != MARKET,
+            m.status != "running",
+            -(m.updated_at or now).timestamp(),
+        )
+    )
     return out

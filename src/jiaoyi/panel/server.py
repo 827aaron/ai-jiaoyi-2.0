@@ -51,6 +51,7 @@ from jiaoyi.panel.pages import (
     build_signal,
     build_team,
 )
+from jiaoyi.slow.settings import slow_defaults
 
 STATIC = Path(__file__).parent / "static"
 PACKAGE = Path(__file__).parent.parent
@@ -227,7 +228,12 @@ def create_app(
 
     @api.get("/api/pool")
     async def pool() -> PoolPage:
-        return build_pool(files)
+        if not config_paths:
+            return build_pool(files, slow_defaults(cfg()[1].profile).screener)
+        try:
+            return build_pool(files, actions.load_configs(config_paths)[2].screener)
+        except ConfigError as e:
+            return build_pool(files, None, str(e))
 
     @api.get("/api/settings")
     async def settings() -> SettingsPage:

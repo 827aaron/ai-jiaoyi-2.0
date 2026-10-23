@@ -470,6 +470,30 @@ def test_screener_rules_edited_from_settings(tmp_path: Path) -> None:
         )
     actions.update_config(paths, data, "screener", {"max_spread_bps": None}, PW, NOW)
     assert load_slow_config(paths.slow).screener.max_spread_bps is None
+    # 分档交易：[screener.tiers] 子表，选项只能 S / M / L；中部挑得比中部还多只提示
+    actions.update_config(
+        paths, data, "tiers", {"mid_size_max": "M", "mid_daily_pick": 20}, PW, NOW
+    )
+    tiers = load_slow_config(paths.slow).screener.tiers
+    assert (tiers.mid_size_max, tiers.mid_daily_pick) == ("M", 20)
+    assert "[screener.tiers]" in paths.slow.read_text(encoding="utf-8")
+    with pytest.raises(ActionError, match="只能选"):
+        actions.update_config(paths, data, "tiers", {"mid_size_max": "XL"}, PW, NOW)
+    with _client(paths) as client:
+        page = client.get("/api/settings").json()
+        assert {i["key"] for i in page["tiers"]} >= {"enabled", "head", "mid", "mid_size_max"}
+        assert page["tiers_cautions"] and not any("中间档" in x for x in page["screener_cautions"])
+
+
+def test_pool_categories_read_slow_toml(tmp_path: Path) -> None:
+    paths, _ = _setup(tmp_path)
+    paths.slow.write_text("[screener.categories.us_tech]\nenabled = false\n", encoding="utf-8")
+    with _client(paths) as client:
+        cats = {x["category"]: x for x in client.get("/api/pool").json()["categories"]}
+        assert (cats["us_tech"]["enabled"], cats["us_tech"]["enabled_from"]) == (False, "slow")
+        paths.slow.write_text("[screener]\nweight_oi = -1\n", encoding="utf-8")
+        page = client.get("/api/pool").json()
+        assert page["slow_error"] and all(x["enabled"] for x in page["categories"])
 
 
 def test_update_validates_with_profile_defaults(tmp_path: Path) -> None:
