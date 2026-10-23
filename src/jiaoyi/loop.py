@@ -11,6 +11,8 @@
 - 选币和下单精度：每小时一次，池子变了就重新订阅（新标的先回填 K 线）。
 - 军师团：每分钟问一次 ``refresh_reason``（卡快到期、关键位突破、新入池……），
   另外距上次开会超过 ``slow_loop_interval_min`` 也会开；开会在后台跑，快环不等。
+- 新闻 / 公告：每 2 分钟拉一次（docs/slow.md），大消息让军师团提前开会，
+  币安下架公告封掉该币的新开仓。
 
 这里只做分发和调度，判断都在各角色里。任何一个任务出错只记日志，不拖垮其它任务。
 """
@@ -44,6 +46,7 @@ SCREEN_EVERY = timedelta(hours=1)
 SLOW_CHECK_EVERY_S = 60.0
 URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
+NEWS_POLL_EVERY_S = 120.0
 BACKFILL_CONCURRENCY = 5
 
 
@@ -55,6 +58,13 @@ class _Forgets(Protocol):
 @runtime_checkable
 class _HasUrgent(Protocol):
     urgent: set[str]
+
+
+@runtime_checkable
+class _NewsAware(Protocol):
+    def notify_news(self, symbol: str) -> None: ...
+
+    def block_symbol(self, symbol: str, reason: str) -> None: ...
 
 
 @runtime_checkable
@@ -90,6 +100,11 @@ class Runner:
         if self.app.pool is not None:
             await self.backfill([e.symbol for e in self.app.pool.in_pool])
         await self.refresh_positions()
+        # 重启后先拉一轮公告，下架封禁在第一个信号之前就生效
+        try:
+            await self.news_tick()
+        except Exception:
+            log.exception("启动拉新闻失败，主循环里再拉")
         cfg = self.app.app_cfg
         self._loops = [
             asyncio.create_task(self._market_loop()),
@@ -98,6 +113,7 @@ class Runner:
             self._every(cfg.reconcile_interval_s, self.reconcile_tick),
             self._every(SLOW_CHECK_EVERY_S, self.slow_tick),
             self._every(HEARTBEAT_EVERY_S, self._heartbeat_tick),
+            self._every(NEWS_POLL_EVERY_S, self.news_tick),
         ]
         try:
             await asyncio.gather(*self._loops)
@@ -295,6 +311,21 @@ class Runner:
         self._refreshing = True
         self._last_card_at = now
         self._spawn(self._refresh(pool, reason))
+
+    async def news_tick(self) -> None:
+        """拉新闻 / 公告：公告提到候选币 → 军师团提前开会；币安下架公告 → 该币只观察不开新仓。
+
+        单个源失败 NewsHub 自己降级记日志；整轮失败也只记日志，下一轮再拉。
+        """
+        hub, cards = self.app.news, self.m.cards
+        if hub is None or not isinstance(cards, _NewsAware):
+            return
+        # 候选池 + 手上的持仓，都算“我们交易的币”
+        symbols = {e.symbol for e in self.app.pool.in_pool} if self.app.pool else set()
+        symbols |= {p.symbol for p in self.positions}
+        if symbols:
+            await hub.poll_and_notify(sorted(symbols), cards.notify_news, cards.block_symbol)
+        self.app.save_blocked()
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:
         try:

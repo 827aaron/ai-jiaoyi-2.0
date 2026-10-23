@@ -183,6 +183,11 @@ class AppConfig(Contract):
     pool_size: int = Field(ge=5, le=100, description="候选池大小，设计值 30–50。")
     card_pick_max: int = Field(ge=1, le=50, description="军师每次最多挑几个，设计值 10–20。")
     data_dir: str = Field(min_length=1, description="决策日志、模块状态等写在这里。")
+    reconciler_close_unknown_positions: bool = Field(
+        default=False,
+        description="对账员遇到不在账本里的币安仓位 / hummingbot 执行器时直接平掉。"
+        "默认只告警（可能是你手动开的）；要打开请在 M4 小额实盘前自己决定。",
+    )
     fast_loop: FastLoopConfig = Field(
         default_factory=FastLoopConfig, description="快环门槛；不写就用默认值（见示例）。"
     )

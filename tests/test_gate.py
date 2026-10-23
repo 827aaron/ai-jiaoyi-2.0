@@ -161,8 +161,8 @@ async def test_entry_gate_logs(tmp_path: Path, now: datetime) -> None:
     await gate.evaluate(signal(now), card(now), now)
     recs = log.read_day(now.date().isoformat())
     assert [r.outcome for r in recs] == [c.Outcome.PASS, c.Outcome.ERROR]
-    assert recs[0].cost_usd > 0 and recs[0].input["snapshot"]
-    assert recs[1].output["answers"] == {}
+    assert recs[0].cost_usd > 0 and recs[0].input["jev"]["snapshot"]
+    assert recs[1].output["jev"]["answers"] == {}
 
 
 def test_snapshot_is_compact_json(now: datetime) -> None:

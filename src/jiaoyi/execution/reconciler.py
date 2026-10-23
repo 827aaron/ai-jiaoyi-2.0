@@ -29,7 +29,13 @@ from jiaoyi.contracts.position import (
     ReconcileIssueKind,
 )
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.execution.exchange import STOP_PREFIX, ExchangeClient, ExchangeError, ExchangeStop
+from jiaoyi.execution.exchange import (
+    STOP_PREFIX,
+    ExchangeClient,
+    ExchangeError,
+    ExchangePosition,
+    ExchangeStop,
+)
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
 from jiaoyi.execution.lifeboat import client_order_id, lifeboat_price
@@ -69,6 +75,7 @@ class ThreeWayReconciler:
         max_lifeboat_failures: int = 2,
         recorder: RoleRecorder | None = None,
         heartbeats: Sequence[Callable[[datetime, Health, str], None]] = (),
+        close_unknown_positions: bool = False,
     ) -> None:
         self._adapter = adapter
         self._api = api
@@ -82,6 +89,7 @@ class ThreeWayReconciler:
         self._max_lb_failures = max_lifeboat_failures
         self._lb_failures: dict[str, int] = {}
         self._rec = recorder
+        self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
 
     async def reconcile(self, now: datetime) -> ReconcileReport:
@@ -149,16 +157,9 @@ class ThreeWayReconciler:
 
         # 2. 币安上有仓位但账本里没有：不是我们开的，只告警
         live_symbols = {t.record.symbol for t in live}
-        for symbol, qty in exchange_qty.items():
+        for symbol in exchange_qty:
             if symbol not in live_symbols:
-                issues.append(
-                    ReconcileIssue(
-                        kind=ReconcileIssueKind.ORPHAN_POSITION,
-                        symbol=symbol,
-                        detail=f"币安有 {qty} 的仓位，但没有执行器在管",
-                        fixed=False,
-                    )
-                )
+                issues.append(await self._unknown_position(symbol, exchange_positions))
 
         # 3. 残留的保命止损
         live_cids = {client_order_id(t.record.position_id) for t in live}
@@ -191,14 +192,7 @@ class ThreeWayReconciler:
             except ValueError:
                 continue
             if str(ex.get("executor_id")) not in known_ids:
-                issues.append(
-                    ReconcileIssue(
-                        kind=ReconcileIssueKind.ORPHAN_POSITION,
-                        symbol=symbol,
-                        detail=f"hummingbot 里有运行中的执行器 {ex.get('executor_id')} 不在账本里",
-                        fixed=False,
-                    )
-                )
+                issues.append(await self._unknown_executor(symbol, str(ex.get("executor_id"))))
             elif int(ex.get("error_count") or 0) > 0:
                 # main loop 的静默重试在这里露出来
                 owner = next(
@@ -240,6 +234,57 @@ class ThreeWayReconciler:
             self._rec.heartbeat(now, health, headline)
         for beat in self._heartbeats:
             beat(now, Health.OK, "")
+
+    async def _unknown_position(
+        self, symbol: str, exchange_positions: list[ExchangePosition]
+    ) -> ReconcileIssue:
+        """币安有仓位但账本里没有。默认只告警；打开开关后直连币安只减仓市价平掉。"""
+        mine = [p for p in exchange_positions if p.symbol == symbol]
+        qty = sum(p.quantity for p in mine)
+        detail = f"币安有 {qty} 的仓位，但没有执行器在管"
+        if not self._close_unknown or not mine:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=detail, fixed=False
+            )
+        try:
+            for p in mine:
+                side: Literal["buy", "sell"] = "sell" if p.side is Side.LONG else "buy"
+                await self._exchange.close_position_market(symbol, side, p.quantity)
+        except ExchangeError as e:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.ORPHAN_POSITION,
+                symbol=symbol,
+                detail=f"{detail}；开关已打开但平仓失败：{e!r}",
+                fixed=False,
+            )
+        return ReconcileIssue(
+            kind=ReconcileIssueKind.ORPHAN_POSITION,
+            symbol=symbol,
+            detail=f"{detail}；已按开关直连币安平仓",
+            fixed=True,
+        )
+
+    async def _unknown_executor(self, symbol: str, executor_id: str) -> ReconcileIssue:
+        detail = f"hummingbot 里有运行中的执行器 {executor_id} 不在账本里"
+        if not self._close_unknown:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=detail, fixed=False
+            )
+        try:
+            await self._api.stop_executor(executor_id, keep_position=False)
+        except HbApiError as e:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.ORPHAN_POSITION,
+                symbol=symbol,
+                detail=f"{detail}；开关已打开但停止失败：{e!r}",
+                fixed=False,
+            )
+        return ReconcileIssue(
+            kind=ReconcileIssueKind.ORPHAN_POSITION,
+            symbol=symbol,
+            detail=f"{detail}；已按开关停止并平仓",
+            fixed=True,
+        )
 
     async def _repair_lifeboat(self, position_id: str) -> tuple[ReconcileIssue, bool]:
         """补挂保命止损。补不上的账本内持仓不能一直裸着：-2021 当轮平，其它原因连续几轮失败后平。"""

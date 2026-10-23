@@ -55,6 +55,8 @@ class LotFilter:
     step_size: float
     min_qty: float
     min_notional: float
+    max_qty: float | None = None
+    """市价单单笔最大数量（MARKET_LOT_SIZE.maxQty）；没有就是不限。"""
 
 
 @runtime_checkable
@@ -258,8 +260,12 @@ class CcxtBinanceFutures:
                 filters = {f["filterType"]: f for f in info.get("filters", [])}
                 lot = filters["LOT_SIZE"]
                 notional = filters.get("MIN_NOTIONAL", {}).get("notional", 0.0)
+                market_max = float(filters.get("MARKET_LOT_SIZE", {}).get("maxQty") or 0.0)
                 out[symbol] = LotFilter(
-                    float(lot["stepSize"]), float(lot["minQty"]), float(notional)
+                    float(lot["stepSize"]),
+                    float(lot["minQty"]),
+                    float(notional),
+                    max_qty=market_max if market_max > 0 else None,
                 )
             except (KeyError, ValueError):
                 continue  # 缺字段的合约不给精度，保镖会对它拒单
