@@ -18,13 +18,16 @@ from jiaoyi.contracts import (
     Outcome,
     Range,
     Role,
+    Side,
     SignalKind,
     SizeTier,
     SymbolPool,
     SymbolPoolEntry,
 )
+from jiaoyi.contracts.position import PositionRecord
 from jiaoyi.core.config import load_risk_config
 from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.slow.commander import (
     Analysis,
     BattleCardCommander,
@@ -458,3 +461,96 @@ async def test_expired_saved_card_is_not_restored(tmp_path: Path, now: datetime)
     late = now + timedelta(hours=3)
     c2, _, _ = make(tmp_path, FakeEngine([]), late, card_path=path)
     assert c2.current(late) is None
+
+
+async def test_restored_card_is_clamped_to_current_risk(tmp_path: Path, now: datetime) -> None:
+    path = tmp_path / "battle_card.json"
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, card_path=path)
+    await c.refresh(pool(now, entry("AAUSDT")), "启动")
+    tighter = RISK.model_copy(update={"max_leverage": 1})
+    c2 = BattleCardCommander(
+        FakeEngine([]), tighter, JsonlDecisionLog(tmp_path), clock=lambda: now, card_path=path
+    )
+    back = c2.current(now)
+    assert back is not None
+    assert back.symbols[0].leverage.max <= 1.0
+
+
+class _SlowBB(FakeEngine):
+    def __init__(self, picks: list[str]) -> None:
+        super().__init__(picks)
+        self.bb_delay = 0.0
+
+    async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        if e.symbol == "BBUSDT":
+            await asyncio.sleep(self.bb_delay)
+        return await super().analyze(e, regime)
+
+
+async def test_pending_symbols_keep_previous_instruction_during_round(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = _SlowBB(["AAUSDT", "BBUSDT"])
+    c, _, clock = make(tmp_path, eng, now, symbol_min_interval=timedelta(minutes=30))
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "启动")
+    clock[0] = now + timedelta(minutes=115)
+    eng.bb_delay = 10
+    task = asyncio.create_task(c.refresh(p, "到期前"))
+    await asyncio.sleep(0.3)
+    mid = c.current(clock[0])
+    assert mid is not None
+    assert {s.symbol for s in mid.symbols} == {"AAUSDT", "BBUSDT"}  # BB 还在开会，旧指令不能消失
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_held_symbol_stays_on_card_watch_only_when_not_picked_or_failed(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = FakeEngine(["AAUSDT", "BBUSDT", "CCUSDT"])
+    c, _, clock = make(tmp_path, eng, now, symbol_min_interval=timedelta(minutes=30))
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT"))
+    await c.refresh(p, "启动")
+    c.set_held({"AAUSDT", "BBUSDT"})
+    clock[0] = now + timedelta(minutes=115)
+    eng.picks, eng.fail = ["AAUSDT", "CCUSDT"], {"AAUSDT"}  # AA 开会失败，BB 没被挑中
+    card = await c.refresh(p, "到期前")
+    by = {s.symbol: s for s in card.symbols}
+    for sym in ("AAUSDT", "BBUSDT"):
+        assert by[sym].bias is Bias.LONG and by[sym].allowed_signals == []  # 不开新仓，方向不动
+    assert by["CCUSDT"].bias is Bias.LONG and by["CCUSDT"].allowed_signals
+    # 持仓管家不能因为这张卡平掉它们
+    for sym in ("AAUSDT", "BBUSDT"):
+        pos = PositionRecord.model_construct(symbol=sym, side=Side.LONG)
+        assert JevKeeper._card_rule(pos, card, clock[0]) is None
+
+
+async def test_failed_symbol_without_position_is_dropped(tmp_path: Path, now: datetime) -> None:
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, clock = make(tmp_path, eng, now, symbol_min_interval=timedelta(minutes=30))
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动")
+    clock[0] = now + timedelta(minutes=115)
+    eng.fail = {"AAUSDT"}
+    card = await c.refresh(pool(clock[0], entry("AAUSDT"), entry("BBUSDT")), "到期前")
+    assert {s.symbol for s in card.symbols} == {"BBUSDT"}
+
+
+async def test_saved_card_not_restored_when_stop_scale_changed(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.slow.commander import StopScale
+
+    path = tmp_path / "battle_card.json"
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, card_path=path)
+    await c.refresh(pool(now, entry("AAUSDT")), "启动")
+    c2 = BattleCardCommander(
+        FakeEngine([]),
+        RISK,
+        JsonlDecisionLog(tmp_path),
+        clock=lambda: now,
+        card_path=path,
+        stop_scale=StopScale(period_min=60),
+    )
+    assert c2.current(now) is None
