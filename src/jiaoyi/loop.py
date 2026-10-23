@@ -323,9 +323,15 @@ class Runner:
         # 候选池 + 手上的持仓，都算“我们交易的币”
         symbols = {e.symbol for e in self.app.pool.in_pool} if self.app.pool else set()
         symbols |= {p.symbol for p in self.positions}
+        before = self.app.blocked_symbols()
         if symbols:
             await hub.poll_and_notify(sorted(symbols), cards.notify_news, cards.block_symbol)
         self.app.save_blocked()
+        for sym, reason in self.app.blocked_symbols().items():
+            if sym not in before:
+                await self.app._alert(
+                    AlertLevel.WARN, f"{sym} 禁止新开仓", f"{reason}（已有持仓不动）"
+                )
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:
         try:

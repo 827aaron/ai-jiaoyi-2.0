@@ -386,14 +386,22 @@ async def test_news_tick_notifies_and_blocks(tmp_path: Path, now: datetime) -> N
     app = _app(tmp_path, now)
     app.pool = c.SymbolPool.model_validate(load_example("symbol_pool"))
     hub, cards = FakeHub(), NewsCards()
+    sent: list[c.Alert] = []
+
+    class Alerter:
+        async def send(self, alert: c.Alert) -> None:
+            sent.append(alert)
+
     app.news = hub  # type: ignore[assignment]
-    app.m = dataclasses.replace(app.m, cards=cards)
+    app.m = dataclasses.replace(app.m, cards=cards, alerter=Alerter())
     r = Runner(app)
     r.positions = [_position(symbol="DOGEUSDT")]
     await r.news_tick()
+    await r.news_tick()  # 已封的不重复推
+    assert [a.title for a in sent] == ["ETHUSDT 禁止新开仓"]
     pool_syms = {e.symbol for e in app.pool.in_pool}
     assert set(hub.calls[0]) == pool_syms | {"DOGEUSDT"}  # 候选池 + 持仓
-    assert cards.news == ["BTCUSDT"] and "ETHUSDT" in cards.blocked
+    assert cards.news == ["BTCUSDT", "BTCUSDT"] and "ETHUSDT" in cards.blocked
     # 封禁名单落盘给 jiaoyi status / 面板读；人工解封后文件同步
     assert set(read_blocked(tmp_path)) == {"ETHUSDT"}
     assert app.unblock_symbol("ETHUSDT") and not app.unblock_symbol("ETHUSDT")
