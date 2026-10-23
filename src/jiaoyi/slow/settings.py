@@ -25,7 +25,7 @@ from jiaoyi.contracts import Category, SizeTier
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.interfaces import SecretStore
-from jiaoyi.slow.commander import TierRules
+from jiaoyi.slow.commander import EventRules, TierRules
 from jiaoyi.slow.screener import ScreenerConfig
 from jiaoyi.slow.tradingagents_engine import (
     PROVIDER_KEY_ENV,
@@ -314,6 +314,16 @@ class MeetingConfig(_Strict):
         return v
 
 
+EventTrigger = Literal[
+    "key_level_break",
+    "move_since_card",
+    "new_head_symbol",
+    "predictor_against_card",
+    "news_high_impact",
+    "stale_card_on_entry",
+]
+
+
 class ScheduleConfig(_Strict):
     max_cards_per_round: int | None = Field(
         default=None,
@@ -348,6 +358,61 @@ class ScheduleConfig(_Strict):
         description="两轮开会的最小间隔（分钟）。关键位突破、大消息、新入池都要等过了这个间隔"
         "才开会；档位默认 = 档位分钟数（2h 档 120 / 60m 60 / 30m 30 / 15m 15），"
         "即「档位 = 开会间隔」。",
+    )
+
+    event_meeting_enabled: bool = Field(
+        default=False,
+        description="开临时会：卡有效期里出了事件（关键位突破、走了 3 倍 ATR 等），"
+        "只给那一个币补开一场，不重开整轮。开会间隔 2h 起默认开；15m–1h 一轮本身够勤，默认关。"
+        "关掉时关键位突破 / 大消息 / 新入池照旧重开整轮。",
+    )
+    event_triggers: tuple[EventTrigger, ...] = Field(
+        default=(),
+        description="哪些事件能触发临时会。不在名单里的事件不会开会，等下一轮定时会。",
+    )
+    event_symbol_gap_min: float = Field(
+        default=60.0, ge=1.0, le=1440.0, description="同一个币两场临时会（含正式会）至少隔多久。"
+    )
+    event_max_per_day: int = Field(
+        default=12, ge=1, le=200, description="每个交易日（曼谷）最多开几场临时会。"
+    )
+    move_since_card_atr: float = Field(
+        default=3.0,
+        gt=0,
+        le=20.0,
+        description="move_since_card：价格离开上次开会时的价格 ≥ 这么多倍 ATR（最长持仓档的 ATR）"
+        "就开临时会。",
+    )
+    predictor_against_runs: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="predictor_against_card：预测员连续几次（每次 5 分钟）看反作战卡的方向才算。",
+    )
+    entry_max_card_age_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        description="开仓前查卡龄：这个币上次开会距今超过这么久，这次信号不开仓（卡上信号暂时清空），"
+        "先补开一场该币的会，新结论出来后的信号再开。0 = 不查。要在 event_triggers 里带 "
+        "stale_card_on_entry 才会补会，否则只拦不补。",
+    )
+    schedule_at: str | None = Field(
+        default=None,
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="每天固定时间开整轮会（曼谷时间，如 08:00），不按启动时间漂。"
+        "不写 = 按开会间隔。",
+    )
+    over_budget: Literal["slow", "stop"] = Field(
+        default="slow",
+        description="花到日上限的 80% 怎么办：slow = 把开会间隔放慢到 slowdown_interval_min（没写则"
+        "直接 stop）；stop = 不放慢。不管选哪个，花到 100% 当天都停开会（持仓照常管）。",
+    )
+    slowdown_interval_min: float | None = Field(
+        default=None,
+        ge=5.0,
+        le=1440.0,
+        description="放慢后的开会间隔（分钟）。档位默认 = 下一档（15m→30m→1h→2h→6h）。",
     )
 
     @model_validator(mode="after")
@@ -491,6 +556,14 @@ class SlowConfig(_Strict):
         n = self.schedule.max_cards_per_round
         return app_pick_max if n is None else min(n, app_pick_max)
 
+    def _slowdown(self) -> tuple[timedelta, timedelta] | None:
+        """日花费到 80% 后的（卡有效期，开会间隔）；不放慢返回 None。"""
+        s = self.schedule
+        if s.over_budget != "slow" or s.slowdown_interval_min is None:
+            return None
+        every = timedelta(minutes=s.slowdown_interval_min)
+        return every + timedelta(minutes=s.refresh_lead_min), every
+
     def commander_kwargs(self) -> dict[str, Any]:
         """传给 ``BattleCardCommander(...)`` 的节奏参数。"""
         s = self.schedule
@@ -502,6 +575,16 @@ class SlowConfig(_Strict):
             "symbol_timeout_s": s.symbol_timeout_s,
             "min_refresh_gap": timedelta(minutes=s.min_refresh_gap_min),
             "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
+            "events": EventRules(
+                enabled=s.event_meeting_enabled,
+                triggers=frozenset(s.event_triggers),
+                symbol_gap=timedelta(minutes=s.event_symbol_gap_min),
+                max_per_day=s.event_max_per_day,
+                move_atr=s.move_since_card_atr,
+                entry_max_age=timedelta(minutes=s.entry_max_card_age_min),
+            ),
+            "schedule_at": s.schedule_at,
+            "slowdown": self._slowdown(),
             "failed_meeting_cost_usd": self.budget.failed_meeting_cost_usd,
             "tiers": TierRules(
                 enabled=self.screener.tiers.enabled,

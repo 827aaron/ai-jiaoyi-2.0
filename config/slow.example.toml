@@ -71,6 +71,16 @@ max_retries = 6
 # refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 20）
 # symbol_timeout_s = 900           # 单个标的的会议超时
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
+# event_meeting_enabled = true    # 临时会：出了事件只给那一个币补开一场（2h 起默认开，15m–1h 关）
+# event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / news_high_impact / stale_card_on_entry
+# event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久
+# event_max_per_day = 12          # 每个交易日最多几场临时会
+# move_since_card_atr = 3.0       # 离上次开会的价格走了几倍 ATR 算 move_since_card
+# predictor_against_runs = 2      # 预测员连续几次看反作战卡才算
+# entry_max_card_age_min = 360    # 开仓前卡龄上限（分钟，12h 360 / 24h 480；0 = 不查）：超了这次信号不开，先补会
+# schedule_at = "08:00"           # 每天固定时间（曼谷）开整轮会，24h 档默认；不写 = 按开会间隔
+# over_budget = "slow"            # 花到日上限 80%：slow = 放慢一档；stop = 不放慢（15m–2h 默认 slow，6h 起 stop）
+# slowdown_interval_min = 360     # 放慢后的开会间隔（分钟）；默认 = 下一档
 
 [budget]
 # daily_cost_limit_usd = 20.0              # 档位：每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）；你写多少就是多少
