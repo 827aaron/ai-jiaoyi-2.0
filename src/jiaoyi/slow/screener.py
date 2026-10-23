@@ -8,15 +8,28 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from jiaoyi.contracts import Category, HardFilters, SymbolPool, SymbolPoolEntry
+from jiaoyi.contracts import (
+    Category,
+    HardFilters,
+    Health,
+    Outcome,
+    SymbolPool,
+    SymbolPoolEntry,
+)
 from jiaoyi.core.pool_overrides import PoolOverrides
+from jiaoyi.core.recorder import RoleRecorder
+
+SCREEN_EVERY = timedelta(hours=1)
+"""主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
 
 _MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
 _CRYPTO_STOCKS = frozenset({"COIN", "MSTR", "HOOD", "MARA", "RIOT", "CRCL"})
@@ -151,16 +164,82 @@ class CodeSymbolScreener:
         source: MarketStatsSource,
         cfg: ScreenerConfig | None = None,
         overrides: UserOverrides | None = None,
+        recorder: RoleRecorder | None = None,
+        every: timedelta = SCREEN_EVERY,
+        tz: str = "Asia/Bangkok",
     ) -> None:
         self._source = source
         self._cfg = cfg or ScreenerConfig()
         self._ov = overrides or UserOverrides()
+        self._rec = recorder
+        self._every = every
+        self._tz = ZoneInfo(tz)
+        self._last_run: datetime | None = None
+        self._count = 0
+        self._error: str | None = None
+
+    def heartbeat(self, now: datetime) -> None:
+        """上报选币状态：从没跑过 / 正常（上次时间、币数、下次时间）/ 失败（原因）。"""
+        if self._rec is None:
+            return
+        last = self._last_run
+        nxt = last + self._every if last else None
+
+        def hm(t: datetime) -> str:
+            return t.astimezone(self._tz).strftime("%H:%M")
+
+        if self._error is not None:
+            health = Health.DEGRADED
+            headline = f"上次选币失败，沿用旧候选池：{self._error}"
+        elif last is None or nxt is None:
+            health, headline = Health.STARTING, "等待首次选币"
+        else:
+            health = Health.OK
+            headline = f"上次 {hm(last)} 选出 {self._count} 个币，下次 {hm(nxt)}"
+        self._rec.heartbeat(
+            now,
+            health,
+            headline,
+            extra={
+                "last_run_at": last,
+                "next_run_at": nxt,
+                "symbol_count": self._count if last else None,
+                "error": self._error,
+            },
+        )
 
     def set_overrides(self, overrides: UserOverrides) -> None:
         """选币页改了置顶 / 黑名单后调用，下一次 ``screen`` 生效。"""
         self._ov = overrides
 
     async def screen(self, now: datetime) -> SymbolPool:
+        started = time.monotonic()
+        try:
+            pool = await self._screen(now)
+        except Exception as exc:
+            self._error = str(exc) or type(exc).__name__
+            if self._rec is not None:
+                self._rec.record(
+                    now,
+                    Outcome.ERROR,
+                    f"选币失败：{self._error}",
+                    latency_ms=(time.monotonic() - started) * 1000,
+                )
+            self.heartbeat(now)
+            raise
+        self._last_run, self._error = now, None
+        self._count = len(pool.in_pool)
+        if self._rec is not None:
+            self._rec.record(
+                now,
+                Outcome.PASS,
+                f"选出 {self._count} 个币",
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+        self.heartbeat(now)
+        return pool
+
+    async def _screen(self, now: datetime) -> SymbolPool:
         stats = await self._source.fetch(now)
         if not stats:
             raise RuntimeError("行情数据源返回空列表，沿用上一份候选池")

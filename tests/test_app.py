@@ -48,7 +48,7 @@ async def test_start_stop_and_status(tmp_path: Path, now: datetime) -> None:
     status = app.status()
     assert status[c.Role.PREDICTOR].health == c.Health.DISABLED  # 预测员自己上报
     assert status[c.Role.EXECUTOR].health == c.Health.DISABLED  # 桩补的
-    assert "桩" in status[c.Role.EXECUTOR].headline
+    assert "未启用" in status[c.Role.EXECUTOR].headline
     assert status[c.Role.RISK_GUARD].health == c.Health.OK  # 真保镖，app 代发心跳
     assert "predictor" not in app.stub_fields()
     assert "risk" not in app.stub_fields()

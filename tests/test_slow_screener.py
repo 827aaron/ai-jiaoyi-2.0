@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -88,3 +89,29 @@ def test_classify() -> None:
     assert classify("COINUSDT") is Category.CRYPTO_STOCK
     assert classify("XAUUSDT") is Category.PRECIOUS_METAL
     assert classify("PEPEUSDT") is Category.ALT
+
+
+async def test_screener_reports_its_own_status(now: datetime, tmp_path: Path) -> None:
+    from jiaoyi.contracts import Health, Role
+    from jiaoyi.core.recorder import RoleRecorder
+    from jiaoyi.core.store import JsonlDecisionLog
+
+    log = JsonlDecisionLog(tmp_path)
+    src = FakeSource([])
+    scr = CodeSymbolScreener(src, recorder=RoleRecorder(Role.SCREENER, log), tz="Asia/Bangkok")
+    scr.heartbeat(now)  # 还没跑过
+    st = log.read_status()["screener"]
+    assert st.health is Health.STARTING and st.headline == "等待首次选币" and st.last_run_at is None
+
+    with pytest.raises(RuntimeError):  # 数据源空：选币失败
+        await scr.screen(now)
+    st = log.read_status()["screener"]
+    assert st.health is Health.DEGRADED and st.error and "沿用旧候选池" in st.headline
+    assert st.today.errors == 1
+
+    src.stats = [stat("OKUSDT")]
+    await scr.screen(now)
+    st = log.read_status()["screener"]
+    assert st.health is Health.OK and st.error is None and st.symbol_count == 1
+    assert st.last_run_at == now and st.next_run_at == now + timedelta(hours=1)
+    assert "选出 1 个币" in st.headline and "下次" in st.headline

@@ -77,7 +77,12 @@ class MeetingConfig(_Strict):
     convert_tier: Literal["quick", "deep"] = Field(
         default="quick", description="把会议结论整理成作战指令那一步用哪档模型。"
     )
-    max_tokens: int = Field(default=8192, ge=1024, le=32768)
+    max_tokens: int = Field(
+        default=4096,
+        ge=1024,
+        le=32768,
+        description="每次回答的长度上限；出作战指令、挑币两步（输出 JSON）另按 8192 起，不被截。",
+    )
     max_retries: int = Field(default=6, ge=0, le=10)
 
     @field_validator("analysts_crypto", "analysts_stock")
@@ -99,7 +104,7 @@ class ScheduleConfig(_Strict):
         description="每轮最多出几张作战卡（几个标的开会）。不写 = 用 app.toml 的 card_pick_max；"
         "写了取两者较小值，不会超过 card_pick_max。",
     )
-    concurrency: int = Field(default=4, ge=1, le=8, description="同时开几个标的的会议。")
+    concurrency: int = Field(default=8, ge=1, le=8, description="同时开几个标的的会议。")
     card_ttl_hours: float = Field(default=2.0, ge=1.0, le=4.0, description="作战卡有效期。")
     symbol_min_interval_hours: float = Field(
         default=2.0, ge=0.5, le=12.0, description="同一个币两次会议的最小间隔。"
@@ -165,10 +170,12 @@ class BudgetConfig(_Strict):
 
 
 class PricesConfig(_Strict):
-    """每百万 token 的美元价，只用于花费统计。⚠ 占位值，M2 真机验证时按官网核对。"""
+    """每百万 token 的美元价。只在通道没报真实花费时估算用：走 OpenRouter 时用它返回的
+    ``usage.cost``，不看这里。flash 按 OpenRouter deepseek/deepseek-v4.1-flash 标价（2026-10-23
+    核对）；pro 是占位值。"""
 
-    flash_in: float = Field(default=0.15, ge=0)
-    flash_out: float = Field(default=0.60, ge=0)
+    flash_in: float = Field(default=0.30, ge=0)
+    flash_out: float = Field(default=1.20, ge=0)
     pro_in: float = Field(default=0.50, ge=0)
     pro_out: float = Field(default=2.00, ge=0)
 
@@ -192,6 +199,7 @@ class SlowConfig(_Strict):
             debate_rounds=m.debate_rounds,
             risk_rounds=m.risk_rounds,
             max_tokens=m.max_tokens,
+            json_max_tokens=max(8192, m.max_tokens),
             max_retries=m.max_retries,
             price_per_mtok={"flash": (p.flash_in, p.flash_out), "pro": (p.pro_in, p.pro_out)},
             analysts_crypto=m.analysts_crypto,

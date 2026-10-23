@@ -115,7 +115,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 
 | 项 | 来源 |
 |---|---|
-| 状态灯 | `module_status.json` 每个角色最新心跳；超过 120 秒没更新算掉线；没心跳 = 未接入（空心） |
+| 状态灯 | `module_status.json` 每个角色最新心跳；超过 120 秒没更新算掉线；没上报过 = 空心（主程序在跑：等待第一次上报；不在跑：主程序没在运行） |
 | 总资产 | hummingbot USDT 钱包余额 + 未实现盈亏（同执行层口径） |
 | 今日盈亏 / 离熔断 | 日初权益优先取 `risk_state.json`（保镖同口径），其次 `positions.json` 的 `day_start` |
 | 敞口 | 未结束持仓的名义价值合计 ÷ 总资产 |

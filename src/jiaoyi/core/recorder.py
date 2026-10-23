@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -60,16 +60,9 @@ class RoleRecorder:
         model_version: str | None = None,
     ) -> DecisionRecord:
         self._roll(now)
-        self._calls += 1
-        if outcome in (Outcome.PASS, Outcome.ACTION, Outcome.CLOSE):
-            self._passed += 1
-        elif outcome == Outcome.REJECT:
-            self._rejected += 1
-        elif outcome == Outcome.ERROR:
-            self._errors += 1
+        self._count(outcome, latency_ms, cost_usd)
+        if outcome == Outcome.ERROR:
             self.last_error = summary
-        self._latency_total += latency_ms
-        self._cost += cost_usd
         rec = DecisionRecord(
             record_id=f"{self.role.value}-{uuid.uuid4().hex[:16]}",
             ts=now,
@@ -105,7 +98,13 @@ class RoleRecorder:
             cost_usd=self._cost,
         )
 
-    def heartbeat(self, now: datetime, health: Health, headline: str = "") -> ModuleStatus:
+    def heartbeat(
+        self,
+        now: datetime,
+        health: Health,
+        headline: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> ModuleStatus:
         status = ModuleStatus(
             role=self.role,
             health=health,
@@ -114,6 +113,7 @@ class RoleRecorder:
             today=self.today(now),
             last_error=self.last_error,
             version=self._version,
+            **(extra or {}),
         )
         if self._log is not None:
             try:
@@ -122,10 +122,38 @@ class RoleRecorder:
                 logger.exception("写模块状态失败")
         return status
 
+    def _count(self, outcome: Outcome, latency_ms: float, cost_usd: float) -> None:
+        self._calls += 1
+        if outcome in (Outcome.PASS, Outcome.ACTION, Outcome.CLOSE):
+            self._passed += 1
+        elif outcome == Outcome.REJECT:
+            self._rejected += 1
+        elif outcome == Outcome.ERROR:
+            self._errors += 1
+        self._latency_total += latency_ms
+        self._cost += cost_usd
+
     def _roll(self, now: datetime) -> None:
         day = local_day(now, self._tz)
         if day != self._day:
+            first = self._day is None
             self._day = day
             self._calls = self._passed = self._rejected = self._errors = 0
             self._latency_total = 0.0
             self._cost = 0.0
+            if first:
+                self._restore(day)
+
+    def _restore(self, day: date) -> None:
+        """进程重启后，今天的次数和花费从决策日志里捡回来，面板不清零。"""
+        read_day = getattr(self._log, "read_day", None)
+        if read_day is None:
+            return
+        try:
+            # 本地一天横跨两个 UTC 日（曼谷 0 点 = 前一天 UTC 17 点）
+            for utc_day in (day - timedelta(days=1), day):
+                for rec in read_day(utc_day.isoformat()):
+                    if rec.role == self.role and local_day(rec.ts, self._tz) == day:
+                        self._count(rec.outcome, rec.latency_ms, rec.cost_usd)
+        except Exception:  # 读不出来就从零开始，不影响交易
+            logger.exception("从决策日志恢复今日统计失败")

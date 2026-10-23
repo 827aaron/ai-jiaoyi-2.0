@@ -42,7 +42,7 @@ def test_build_config_overrides_without_mutating_base() -> None:
     assert cfg["output_language"].startswith("Chinese.")
     assert "PERPETUAL" in cfg["output_language"]  # 永续合约语境，不是股票
     assert (cfg["max_debate_rounds"], cfg["max_risk_discuss_rounds"]) == (1, 1)
-    assert (cfg["max_tokens"], cfg["llm_max_retries"]) == (8192, 6)
+    assert (cfg["max_tokens"], cfg["llm_max_retries"]) == (4096, 6)
     assert cfg["data_vendors"]["core_stock_apis"] == "binance"
     assert cfg["data_vendors"]["x"] == "y"
     assert base["data_vendors"]["core_stock_apis"] == "yfinance"  # type: ignore[index]
@@ -226,3 +226,57 @@ def test_convert_prompt_states_configured_atr_interval_and_value() -> None:
     assert "暂不可用" in describe_atr(None, None, st)
     assert [atr_interval(x) for x in (5, 15, 30, 60)] == ["5m", "15m", "30m", "1h"]
     assert "30m ATR(14)" in describe_atr(1.0, 10.0, StopScale(period_min=30))
+
+
+def test_cost_meter_prefers_reported_cost_and_estimates_the_rest() -> None:
+    from types import SimpleNamespace as NS
+
+    from jiaoyi.slow.tradingagents_engine import CostMeter
+
+    prices = {"flash": (0.30, 1.20), "pro": (0.50, 2.00)}
+    m = CostMeter(prices)
+
+    def resp(cost: float | None, tin: int, tout: int, where: str = "llm_output") -> NS:
+        usage = {} if cost is None else {"cost": cost}
+        msg = NS(
+            usage_metadata={"input_tokens": tin, "output_tokens": tout},
+            response_metadata={
+                "model_name": "deepseek/deepseek-v4.1-flash",
+                **({"token_usage": usage} if where == "message" else {}),
+            },
+        )
+        return NS(
+            llm_output={"token_usage": usage} if where == "llm_output" else {},
+            generations=[[NS(message=msg)]],
+        )
+
+    m.record_response(resp(0.01, 5000, 500))  # 通道报了：用真实值
+    m.record_response(resp(0.002, 100, 10, where="message"))  # 在消息的 response_metadata 里
+    assert m.cost == pytest.approx(0.012)
+    m.record_response(resp(None, 1_000_000, 1_000_000))  # 没报：按单价估这一次 = 0.30 + 1.20
+    assert m.cost == pytest.approx(1.512)
+    assert m.calls == 3
+    m.abort()
+    with pytest.raises(RuntimeError, match="取消"):
+        m.check()
+
+
+def test_engine_reports_partial_cost_and_aborts() -> None:
+    import threading
+
+    from jiaoyi.slow.tradingagents_engine import TradingAgentsEngine, TradingAgentsSettings
+
+    eng = TradingAgentsEngine.__new__(
+        TradingAgentsEngine
+    )  # 构造函数要 tradingagents 包，这里不需要
+    eng._s = TradingAgentsSettings()
+    eng._inflight = {}
+    eng._inflight_lock = threading.Lock()
+    meter = eng._meter("SOLUSDT")
+    meter.add("deepseek/deepseek-v4.1-flash", 0, 0, 0.04)
+    assert eng.partial_cost("SOLUSDT") == pytest.approx(0.04)
+    eng.abort("SOLUSDT")
+    with pytest.raises(RuntimeError):
+        meter.check()
+    eng._done("SOLUSDT", meter)
+    assert eng.partial_cost("SOLUSDT") is None
