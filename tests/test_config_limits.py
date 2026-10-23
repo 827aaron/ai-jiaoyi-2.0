@@ -195,6 +195,13 @@ def test_only_impossible_values_are_refused() -> None:
     assert _bounds(f["lifeboat_stop_multiplier"]) == {"gt": 1.0}, "保命止损必须比正常止损更宽"
 
 
+def test_leverage_above_binance_max_refuses_with_reason(tmp_path: Path) -> None:
+    ok = load_risk_config(_write(tmp_path, {**b.RISK_DEFAULTS, "max_leverage": 125}))
+    assert ok.max_leverage == 125
+    with pytest.raises(ConfigError, match="币安 U 本位合约最高 125 倍"):
+        load_risk_config(_write(tmp_path, {**b.RISK_DEFAULTS, "max_leverage": 126}, "b.toml"))
+
+
 def test_notional_cap_follows_equity() -> None:
     cfg = b.risk_config(max_notional_per_trade_x=2.0)
     assert cfg.notional_cap(1_000.0) == 2_000.0
