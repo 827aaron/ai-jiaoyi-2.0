@@ -1,0 +1,116 @@
+"""面板用的 hummingbot-api 只读客户端：只查余额和持仓，没有下单 / 停执行器的方法。
+
+接口形状同 ``jiaoyi.execution.hb_client``（那边是执行层的读写客户端，面板不导入执行层）。
+结果缓存几秒，面板几个人同时开、几秒刷新一次也不会打爆 hummingbot-api。
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+
+
+@dataclass
+class HbSnapshot:
+    ok: bool
+    error: str | None = None
+    wallet_usdt: float | None = None
+    """USDT 钱包余额（不含浮盈浮亏）。"""
+    positions: list[dict[str, Any]] = field(default_factory=list)
+    """hummingbot-api 原样返回的持仓条目（trading_pair、unrealized_pnl、amount ...）。"""
+
+    @property
+    def unrealized_usdt(self) -> float:
+        return sum(_num(p.get("unrealized_pnl")) for p in self.positions)
+
+    @property
+    def equity_usdt(self) -> float | None:
+        """口径同执行层：钱包余额 + 未实现盈亏。"""
+        return None if self.wallet_usdt is None else self.wallet_usdt + self.unrealized_usdt
+
+    def unrealized_of(self, symbol: str) -> float | None:
+        """``BTCUSDT`` → 该币的未实现盈亏；hummingbot 用 ``BTC-USDT``。"""
+        pair = symbol.removesuffix("USDT") + "-USDT"
+        hits = [p for p in self.positions if str(p.get("trading_pair")) in (pair, symbol)]
+        return sum(_num(p.get("unrealized_pnl")) for p in hits) if hits else None
+
+
+class HbReader:
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str | None,
+        *,
+        account_name: str,
+        connector_name: str,
+        timeout_s: float = 2.0,
+        cache_s: float = 3.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._password = password
+        self._http = httpx.AsyncClient(
+            base_url=base_url,
+            auth=httpx.BasicAuth(username, password or ""),
+            timeout=timeout_s,
+            transport=transport,
+        )
+        self._account = account_name
+        self._connector = connector_name
+        self._cache_s = cache_s
+        self._cached: tuple[float, HbSnapshot] | None = None
+
+    async def snapshot(self) -> HbSnapshot:
+        if self._cached and time.monotonic() - self._cached[0] < self._cache_s:
+            return self._cached[1]
+        snap = await self._fetch()
+        self._cached = (time.monotonic(), snap)
+        return snap
+
+    async def _fetch(self) -> HbSnapshot:
+        if not self._password:
+            return HbSnapshot(ok=False, error="没配 HUMMINGBOT_API_PASSWORD")
+        names = {"account_names": [self._account], "connector_names": [self._connector]}
+        try:
+            state = await self._post("/portfolio/state", {**names, "skip_gateway": True})
+            pos = await self._post("/trading/positions", names)
+        except _HbError as e:
+            return HbSnapshot(ok=False, error=str(e))
+        entries = ((state or {}).get(self._account) or {}).get(self._connector) or []
+        usdt = next((e for e in entries if isinstance(e, dict) and e.get("token") == "USDT"), None)
+        return HbSnapshot(
+            ok=True,
+            wallet_usdt=_num(usdt.get("units")) if usdt else None,
+            positions=[d for d in (pos or {}).get("data", []) if isinstance(d, dict)],
+        )
+
+    async def _post(self, path: str, body: dict[str, Any]) -> Any:
+        try:
+            resp = await self._http.post(path, json=body)
+        except httpx.HTTPError as e:
+            raise _HbError(f"hummingbot-api 连不上：{type(e).__name__}") from e
+        if resp.status_code >= 400:
+            raise _HbError(f"hummingbot-api {path} 返回 {resp.status_code}")
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise _HbError(f"hummingbot-api {path} 返回了非 JSON") from e
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+
+class _HbError(Exception):
+    pass
+
+
+def _num(v: object) -> float:
+    if isinstance(v, int | float | str) and not isinstance(v, bool):
+        try:
+            return float(v)
+        except ValueError:
+            return 0.0
+    return 0.0

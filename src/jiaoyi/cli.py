@@ -185,6 +185,32 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _panel(args: argparse.Namespace) -> int:
+    """面板：独立进程，只读 data 目录和 hummingbot-api。主循环停着也能开。"""
+    import uvicorn
+
+    from jiaoyi.execution.factory import CONNECTOR_BY_MODE
+    from jiaoyi.panel.hb import HbReader
+    from jiaoyi.panel.server import create_app
+
+    try:
+        risk = load_risk_config(Path(args.risk))
+        app_cfg = load_app_config(Path(args.app))
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    hb = HbReader(
+        args.hb_url,
+        "admin",
+        ChainedSecretStore().get("HUMMINGBOT_API_PASSWORD"),
+        account_name="master_account",
+        connector_name=CONNECTOR_BY_MODE[app_cfg.mode],
+    )
+    print(f"面板：http://{args.host}:{args.port}/ （只接受局域网访问，Ctrl+C 停止）")
+    uvicorn.run(create_app(risk, app_cfg, hb), host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jiaoyi")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -206,6 +232,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_run)
+
+    p = sub.add_parser("panel", help="启动面板网页（局域网，只读）")
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = 局域网内其他设备也能打开")
+    p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--hb-url", default="http://127.0.0.1:8000")
+    p.set_defaults(func=_panel)
 
     p = sub.add_parser("key-status", help="显示每个密钥配没配（只显示末四位）")
     p.set_defaults(func=_key_status)
