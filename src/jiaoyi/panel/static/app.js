@@ -209,6 +209,8 @@ document.addEventListener("click", async (e) => {
   else if (act === "close1") { const p = (pageData && pageData.positions || []).find((x) => x.position_id === arg); askCommand("close_position", { position_id: arg }, p ? `${p.symbol.replace(/USDT$/, "")} ${(SIDE[p.side] || [p.side])[0]} ${p.quantity}` : arg); }
   else if (act === "unblock") askCommand("unblock_symbol", { symbol: arg }, arg);
   else if (act === "edit") editSettings(arg);
+  else if (act === "profile") switchProfile(arg);
+  else if (act === "unpin") unpin(arg);
   else if (act === "updown") {
     try { localStorage.setItem("updown", arg); } catch (err) { /* 存不了就只对这次生效 */ }
     location.reload();
@@ -591,7 +593,9 @@ const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
 const label = (i) => (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 const NULL_AS = { max_cards_per_round: "跟随 card_pick_max" };
 const fmtVal = (v, i) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[i.key] || "不写（用默认）" : "—") : i && i.choices && i.choices.length ? esc(choiceLabel(i.key, v)) : esc(v));
-const setRows = (items) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label><b class="num">${fmtVal(i.value, i)}</b></div>`).join("");
+const pinHint = (i) => (i.pinned ? ` · <span class="warn">已覆盖档位默认（档位是 ${fmtVal(i.profile_default, i)}）</span>` : i.profiled ? " · 跟档位走" : "");
+const unpinBtn = (sec, i) => (sec && i.pinned && pageData && pageData.writable ? `<button class="btn b-sm" ${clickable("unpin", sec + ":" + i.key)}>恢复档位默认</button>` : "");
+const setRows = (items, sec) => items.map((i) => `<div class="fr"><label>${esc(label(i))}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}${pinHint(i)}</span></label><b class="num">${fmtVal(i.value, i)} ${unpinBtn(sec, i)}</b></div>`).join("");
 
 const SECTION = { risk: "硬上限", category: "分组敞口上限", app: "运行配置和开关", fast_loop: "快环门槛", predictor: "预测员", schedule: "军师团节奏" };
 const editBtn = (d, sec) => (d.writable ? `<button class="btn b-sm" ${clickable("edit", sec)}>修改</button>` : "");
@@ -604,11 +608,65 @@ function sectionItems(d, sec) {
   return (d[sec] || []).filter((i) => i.editable);
 }
 
+const PROFILE_NOTE = { "2h": "单笔最长 2 小时（默认）", "60m": "单笔最长 1 小时", "30m": "单笔最长 30 分钟", "15m": "单笔最长 15 分钟" };
+function pinnedList(pf) {
+  return Object.entries(pf.pinned).flatMap(([sec, m]) => Object.keys(m).map((k) => `${sec === "app" ? "" : sec + "."}${k}`));
+}
+function profileCard(d) {
+  const pf = d.profile;
+  if (!pf) return `<section class="card"><div class="ch"><h2>持仓档位</h2></div><div class="dim">这次启动的面板没拿到配置文件路径，看不到档位。</div></section>`;
+  const paperOnly = (p) => pf.paper_only.includes(p);
+  const btns = pf.choices.map((p) => {
+    const off = !d.writable || (paperOnly(p) && d.mode !== "paper");
+    const tip = paperOnly(p) && d.mode !== "paper" ? "仅模拟盘" : PROFILE_NOTE[p] || "";
+    return `<button class="${p === pf.current ? "on" : ""}" ${off || p === pf.current ? "disabled" : clickable("profile", p)} title="${esc(tip)}">${esc(p)}${paperOnly(p) ? "*" : ""}</button>`;
+  }).join("");
+  const pins = pinnedList(pf);
+  return `<section class="card"><div class="ch"><h2>持仓档位</h2><span class="r">一键切换整套节奏</span></div>
+    <div class="form"><div class="fr"><label>现在：${esc(pf.current)}<span class="hint">${esc(PROFILE_NOTE[pf.current] || "")}；* 只在模拟盘可用</span></label><span class="seg">${btns}</span></div>
+    <div class="fr"><label>已覆盖档位默认的项<span class="hint">配置文件里写了值的档位键；在对应卡片里点“恢复档位默认”</span></label><b>${pins.length ? esc(pins.join("、")) : "没有"}</b></div></div>
+    <div class="foot">档位只管节奏和门槛，不碰硬上限。切换要面板密码，重启 jiaoyi run 后生效，只影响之后的作战卡和新开仓。</div></section>`;
+}
+function unpin(arg) {
+  const [sec, key] = arg.split(":");
+  const i = ((pageData && pageData[sec]) || []).find((x) => x.key === key);
+  if (!i) return;
+  ask(`恢复档位默认 · ${esc(key)}`, `<p>删掉配置文件里的这一行：${fmtVal(i.value, i)} → 档位默认 ${fmtVal(i.profile_default, i)}，以后切档位也跟着变。</p>${pwField(data.control)}`, "恢复", false, async () => {
+    const pw = $("#dlg-pw");
+    await post("/api/settings", { section: sec, changes: { [key]: null }, password: pw ? pw.value : "" });
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    dlgMsg(`<b class="up">已恢复</b>，重启 <code>jiaoyi run</code> 后生效。`);
+    poll();
+  });
+}
+
+function switchProfile(p) {
+  const d = pageData;
+  const pf = d && d.profile;
+  if (!pf) return;
+  const pins = pinnedList(pf);
+  const warn = pins.length ? `<div class="note warn">这些项写死在配置文件里，切到 ${esc(p)} 后仍按文件里的值：${esc(pins.join("、"))}。</div>` : "";
+  ask(`切换持仓档位：${esc(pf.current)} → ${esc(p)}`, `<p>${esc(PROFILE_NOTE[p] || "")}。作战卡有效期、止损周期、管家频率等跟着档位换。</p>${warn}${pwField(data.control)}`, "切换", false, async () => {
+    const pw = $("#dlg-pw");
+    await post("/api/settings", { section: "app", changes: { profile: p }, password: pw ? pw.value : "" });
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    dlgMsg(`<b class="up">已切到 ${esc(p)}</b>，重启 <code>jiaoyi run</code> 后生效。`);
+    poll();
+  });
+}
+
 function editInput(i) {
   const k = `data-k="${esc(i.key)}"`;
   if (typeof i.value === "boolean") return `<input type="checkbox" ${k} ${i.value ? "checked" : ""}>`;
   if (i.choices.length) return `<select ${k}>${i.choices.map((c) => `<option value="${esc(JSON.stringify(c))}" ${c === i.value ? "selected" : ""}>${esc(choiceLabel(i.key, c))}</option>`).join("")}</select>`;
-  return `<input type="number" step="any" inputmode="decimal" ${k} value="${i.value == null ? "" : esc(i.value)}" placeholder="${i.nullable ? "留空 = 用默认" : ""}">`;
+  // 档位给默认的键：没写死时输入框留空（= 跟档位走），写死了才填上文件里的值
+  const shown = i.value == null || (i.profiled && !i.pinned) ? "" : esc(i.value);
+  const ph = i.profiled ? `档位 ${i.pinned ? fmtVal(i.profile_default, i) : fmtVal(i.value, i)}` : i.nullable ? "留空 = 用默认" : "";
+  return `<input type="number" step="any" inputmode="decimal" ${k} value="${shown}" placeholder="${ph}">`;
 }
 
 function editSettings(sec) {
@@ -626,11 +684,16 @@ function editSettings(sec) {
       if (el.type === "checkbox") v = el.checked;
       else if (el.tagName === "SELECT") v = JSON.parse(el.value);
       else if (el.value.trim() === "") {
-        if (!i.nullable) throw new Error(`${i.label} 不能空着`);
+        if (!i.nullable && !i.profiled) throw new Error(`${i.label} 不能空着`);
         v = null;
       } else {
         v = Number(el.value);
         if (!Number.isFinite(v)) throw new Error(`${i.label} 要填数字`);
+      }
+      // 档位键：留空且本来就没写死 = 没改；填了和档位一样的数也算写死（切档不再跟着变）
+      if (i.profiled && el.type === "number") {
+        if (v === null ? i.pinned : !i.pinned || v !== i.value) changes[i.key] = v;
+        continue;
       }
       if (v !== i.value) changes[i.key] = v;
     }
@@ -668,14 +731,12 @@ P.settings = () => {
       <div class="lbl">分组敞口上限（总资产倍数） ${editBtn(d, "category")}</div><div class="form">${caps}</div></section>
     <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
       <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>
-    <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app)}</div></section>
-    <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop)}</div></section>
+    <section class="card"><div class="ch"><h2>运行配置和开关</h2><span class="r">${editBtn(d, "app")}</span></div><div class="form">${setRows(d.app, "app")}</div></section>
+    <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用 ${editBtn(d, "fast_loop")}</span></div><div class="form scroll tall">${setRows(d.fast_loop, "fast_loop")}</div></section>
     <section class="card"><div class="ch"><h2>预测员</h2><span class="r">Kronos 怎么跑 ${editBtn(d, "predictor")}</span></div><div class="form">${setRows(d.predictor)}</div>
       <div class="foot">开关在“运行配置和开关”里（predictor_enabled）。</div></section>
-    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">config/slow.toml ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule)}</div></section>
-    <section class="card"><div class="ch"><h2>持仓档位</h2><span class="r">一键切换整套节奏</span></div>
-      <div class="form"><div class="fr"><label>档位<span class="hint">2h 默认；30m / 15m 只在模拟盘可用</span></label><span class="seg">${["2h", "60m", "30m", "15m"].map((p) => `<button disabled title="档位功能合并后开放" class="${p === "2h" ? "on" : ""}">${p}</button>`).join("")}</span></div></div>
-      <div class="foot">档位功能还在审查，合并后这里能一键切换，并列出哪些项覆盖了档位默认值。</div></section>
+    <section class="card"><div class="ch"><h2>军师团节奏</h2><span class="r">config/slow.toml ${editBtn(d, "schedule")}</span></div><div class="form">${setRows(d.schedule, "schedule")}</div></section>
+    ${profileCard(d)}
     <section class="card"><div class="ch"><h2>最近的修改</h2><span class="r">data/config_changes.jsonl</span></div>${changes}</section>
   </div>
   <div class="note mt">${d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；保存前整份校验，写前留备份，重启 jiaoyi run 后生效。模式、数据目录、Jev 通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。"}</div>`;

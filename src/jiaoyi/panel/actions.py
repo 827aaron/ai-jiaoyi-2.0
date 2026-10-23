@@ -17,7 +17,7 @@ import re
 import secrets
 import shutil
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import UnionType
@@ -61,8 +61,16 @@ APP_EDITABLE = frozenset(
         "pool_size",
         "card_pick_max",
         "reconciler_close_unknown_positions",
+        "profile",
     }
 )
+
+# 面板的段 → 档位里对应的段（core/profiles.py）。这些段里档位给默认值的键可以“清掉”回到档位默认。
+_PROFILE_SECTION: dict[str, profiles.Section] = {
+    "app": "app",
+    "fast_loop": "fast_loop",
+    "schedule": "slow.schedule",
+}
 
 
 class ActionError(Exception):
@@ -158,6 +166,47 @@ def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
     return loaded != config_fingerprint(risk, app, slow)
 
 
+class ProfileInfo(BaseModel):
+    """设置页的档位卡片：当前档位，以及配置文件里写死、不随档位变的键。"""
+
+    current: str
+    choices: list[str]
+    paper_only: list[str]
+    pinned: dict[str, dict[str, object]]
+    """段 → {键: 当前档位的默认值}：这些键在配置文件里写了值，切档位也不会跟着变。"""
+
+
+def profile_info(paths: ConfigPaths) -> ProfileInfo:
+    raw_app = _raw(paths.app)
+    raw_slow = _raw(paths.slow)
+    current = profiles.profile_of(raw_app)
+    raws: dict[str, Any] = {
+        "app": raw_app,
+        "fast_loop": raw_app.get("fast_loop", {}),
+        "schedule": raw_slow.get("schedule", {}),
+    }
+    pinned: dict[str, dict[str, object]] = {}
+    for section, psec in _PROFILE_SECTION.items():
+        raw = raws[section] if isinstance(raws[section], dict) else {}
+        base = profiles.defaults(current, psec)
+        hit = {k: base[k] for k in base if k in raw}
+        if hit:
+            pinned[section] = hit
+    return ProfileInfo(
+        current=current,
+        choices=list(profiles.PROFILES),
+        paper_only=sorted(profiles.PAPER_ONLY),
+        pinned=pinned,
+    )
+
+
+def _raw(path: Path) -> dict[str, Any]:
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
 Value = bool | int | float | str | None
 """``None`` = 删掉这一行，回到默认值（只给“不写就用默认”的项）。"""
 
@@ -169,6 +218,9 @@ class FieldSpec:
     choices: tuple[object, ...] = ()
     """``Literal`` 的可选值；空 = 不限。"""
     nullable: bool = False
+    """留空 = 不写这一项（契约里本来就允许空）。"""
+    profiled: bool = False
+    """档位给默认值的键：留空 = 删掉这一行，回到档位默认。"""
 
 
 def update_config(
@@ -249,6 +301,15 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
 
 def editable_fields(section: Section) -> dict[str, FieldSpec]:
     """这一段里能在网页上改的字段。设置页据此决定哪些项出现在“修改”弹窗里。"""
+    fields = _base_fields(section)
+    psec = _PROFILE_SECTION.get(section)
+    if psec is None:
+        return fields
+    keys = {k for p in profiles.PROFILES for k in profiles.defaults(p, psec)}
+    return {k: replace(f, profiled=True) if k in keys else f for k, f in fields.items()}
+
+
+def _base_fields(section: Section) -> dict[str, FieldSpec]:
     if section == "category":
         return {c.value: FieldSpec(float) for c in Category}
     if section == "risk":
@@ -299,7 +360,7 @@ def field_spec(annotation: Any) -> FieldSpec | None:
 
 def _coerce(key: str, raw: Any, spec: FieldSpec) -> Value:
     if raw is None:
-        if spec.nullable:
+        if spec.nullable or spec.profiled:
             return None
         raise ActionError(f"{key} 不能空着")
     if spec.choices:
