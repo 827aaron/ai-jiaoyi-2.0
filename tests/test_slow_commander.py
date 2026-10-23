@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -599,3 +600,51 @@ async def test_heartbeat_reports_progress_while_meeting(tmp_path: Path, now: dat
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_card_file_exists_after_every_finished_meeting(tmp_path: Path, now: datetime) -> None:
+    path = tmp_path / "data" / "battle_card.json"  # 目录一开始不存在
+    eng = _SlowBB(["AAUSDT", "BBUSDT"])
+    eng.bb_delay = 10
+    c, _, _ = make(tmp_path, eng, now, card_path=path)
+    task = asyncio.create_task(c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "启动"))
+    await asyncio.sleep(0.3)
+    assert path.is_file()  # AA 开完、BB 还在开：文件已经在了
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [s["symbol"] for s in saved["card"]["symbols"]] == ["AAUSDT"]
+    assert saved["stop"]["period_min"] == 15
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_save_failure_is_logged_and_does_not_fail_the_meeting(
+    tmp_path: Path, now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    blocker = tmp_path / "data"
+    blocker.write_text("我是个文件，目录建不出来", encoding="utf-8")
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, card_path=blocker / "battle_card.json")
+    with caplog.at_level("ERROR"):
+        card = await c.refresh(pool(now, entry("AAUSDT")), "启动")
+    assert [s.symbol for s in card.symbols] == ["AAUSDT"]  # 会照常算成功
+    assert "作战卡写不进" in caplog.text
+
+
+def test_heartbeat_when_idle_and_after_restore(tmp_path: Path, now: datetime) -> None:
+    path = tmp_path / "battle_card.json"
+    eng = FakeEngine(["AAUSDT"])
+    c, log, _ = make(tmp_path, eng, now, card_path=path)
+    c.heartbeat(now)
+    assert log.read_status()[Role.COMMANDER.value].headline == "还没有作战卡，等第一轮会议"
+    asyncio.run(c.refresh(pool(now, entry("AAUSDT")), "启动"))
+    c.heartbeat(now)
+    head = log.read_status()[Role.COMMANDER.value].headline
+    assert head.startswith("当前卡 v1") and "下次会议" in head
+    # 重启后立刻上报“已恢复卡 vN，下次会议 HH:MM”
+    c2, log2, _ = make(tmp_path / "other", FakeEngine([]), now, card_path=path)
+    c2.heartbeat(now)
+    head2 = log2.read_status()[Role.COMMANDER.value].headline
+    assert head2.startswith("已恢复卡 v1") and "下次会议" in head2
+    later = now + timedelta(hours=3)
+    c2.heartbeat(later)
+    assert "过期" in log2.read_status()[Role.COMMANDER.value].headline

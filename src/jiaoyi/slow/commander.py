@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -46,6 +47,8 @@ from jiaoyi.contracts import (
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.review import CardJournal
+
+logger = logging.getLogger(__name__)
 
 
 class MeetingError(RuntimeError):
@@ -177,6 +180,8 @@ class BattleCardCommander:
         self._card_path = card_path
         self._held: dict[str, Side] = {}
         self._progress = ""
+        self._last_error: str | None = None
+        self._restored = False
         self._beat_s = 30.0
         self._fails = 0
         self._retry_at: datetime | None = None
@@ -372,13 +377,50 @@ class BattleCardCommander:
         finally:
             beat.cancel()
             self._progress = ""
-        self._fails, self._retry_at = 0, None
+        self._fails, self._retry_at, self._last_error = 0, None, None
+        self._restored = False
         self._card, self._last_refresh = card, now
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
         self._level_broken.clear()
         self._record_card(card, started)
         return card
+
+    def _next_meeting(self, now: datetime) -> datetime | None:
+        """下一次会议最早什么时候开（按现在的状态估：卡到期前 ``expiry_lead``、退避、最小间隔）。"""
+        at: datetime | None = None
+        card = self.current(now)
+        if card is not None:
+            at = card.expires_at - self._lead
+            if self._last_refresh is not None:
+                at = max(at, self._last_refresh + self._min_gap)
+        if self._retry_at is not None:
+            at = max(at, self._retry_at) if at is not None else self._retry_at
+        return at
+
+    def heartbeat(self, now: datetime) -> None:
+        """应用每 30 秒调一次：空闲期间也持续上报，面板才不会在两轮会议之间把慢环标红。"""
+        if self._progress:
+            self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+            return
+        tz = ZoneInfo(self._risk.day_reset_tz)
+        nxt = self._next_meeting(now)
+        when = f"，下次会议 {nxt.astimezone(tz):%H:%M}" if nxt is not None else ""
+        card = self.current(now)
+        if self._fails and self._retry_at is not None:
+            self._heartbeat(
+                Health.DEGRADED,
+                f"上轮开会失败，{self._retry_at.astimezone(tz):%H:%M} 后重试",
+                self._last_error,
+            )
+        elif card is not None:
+            tradable = sum(1 for s in card.symbols if s.bias is not Bias.NO_TRADE)
+            head = "已恢复卡" if self._restored else "当前卡"
+            self._heartbeat(Health.OK, f"{head} v{card.version}，{tradable} 个可做{when}", None)
+        elif self._card is not None:
+            self._heartbeat(Health.OK, "作战卡已过期，等下一轮会议", None)
+        else:
+            self._heartbeat(Health.OK, "还没有作战卡，等第一轮会议", None)
 
     async def _beat_while_meeting(self) -> None:
         """一轮会议要十几分钟：期间每 30 秒报一次心跳，面板才不会把慢环标红。"""
@@ -635,17 +677,21 @@ class BattleCardCommander:
         """重启后捡回还没过期的作战卡（含各币上次开会时间），不用等下一轮 2 小时的会。"""
         if self._card_path is None:
             return
+        logger.info("作战卡落盘位置：%s", self._card_path.resolve())
         try:
             data = json.loads(self._card_path.read_text(encoding="utf-8"))
             card = BattleCard.model_validate(data["card"])
             meets = {str(k): datetime.fromisoformat(v) for k, v in data["last_meeting"].items()}
             saved_stop = data["stop"]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            logger.info("没有可恢复的作战卡（%s）", exc.__class__.__name__)
             return
         if saved_stop != asdict(self._stop):
+            logger.info("存档的作战卡档位 / ATR 周期与现在不一致，不恢复")
             return  # 出卡时的档位 / ATR 周期和现在不一致：卡里的止损倍数不能直接用，等下一轮会
         now = self._clock()
         if not card.is_valid(now):
+            logger.info("存档的作战卡已过期，不恢复")
             return
         # 重启前后可能改过硬上限或切了档位：按现在的配置再夹一遍，免得保镖整个拒掉
         card = card.model_copy(
@@ -654,6 +700,10 @@ class BattleCardCommander:
         self._card, self._last_refresh = card, card.created_at
         self._seen = {s.symbol for s in card.symbols}
         self._last_meeting = meets
+        self._restored = True
+        logger.info(
+            "已恢复作战卡 %s v%d（%d 个标的）", card.card_id, card.version, len(card.symbols)
+        )
 
     def _save_card(self) -> None:
         if self._card_path is None or self._card is None:
@@ -672,10 +722,11 @@ class BattleCardCommander:
                 encoding="utf-8",
             )
             os.replace(tmp, self._card_path)
-        except OSError:
+        except Exception:  # 落盘失败（磁盘、权限、序列化）不能让一场开完的会算失败；但要看得见
+            logger.exception("作战卡写不进 %s：重启后会丢卡", self._card_path)
             with contextlib.suppress(OSError):
                 tmp.unlink()
-            # 落盘失败不影响出卡；内存里的卡照常生效
+            # 内存里的卡照常生效
 
     def _write(self, **kw: Any) -> None:
         self._log.write(
@@ -735,7 +786,8 @@ class BattleCardCommander:
             summary=f"开会失败（{reason}）：{exc}"[:200],
             latency_ms=(time.monotonic() - started) * 1000,
         )
-        self._heartbeat(Health.DEGRADED, "开会失败，沿用旧卡直到过期", str(exc)[:200])
+        self._last_error = str(exc)[:200]
+        self._heartbeat(Health.DEGRADED, "开会失败，沿用旧卡直到过期", self._last_error)
 
     def _heartbeat(self, health: Health, headline: str, err: str | None) -> None:
         self._log.heartbeat(
