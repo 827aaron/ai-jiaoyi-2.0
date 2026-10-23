@@ -323,11 +323,11 @@ class ScheduleConfig(_Strict):
     card_ttl_min: float = Field(
         default=140.0,
         ge=10.0,
-        le=720.0,
+        le=1560.0,
         description="作战卡有效期（分钟）。档位默认 = 开会间隔 + 换卡提前量。",
     )
     symbol_min_interval_min: float = Field(
-        default=115.0, ge=5.0, le=720.0, description="同一个币两次会议的最小间隔（分钟）。"
+        default=115.0, ge=5.0, le=1440.0, description="同一个币两次会议的最小间隔（分钟）。"
     )
     refresh_lead_min: float = Field(
         default=20.0,

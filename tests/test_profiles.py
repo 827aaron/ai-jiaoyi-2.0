@@ -94,3 +94,11 @@ def test_hold_params_follow_time_limit_not_profile(tmp_path: Path) -> None:
     assert cfg.fast_loop.atr_period_min == 5
     cfg = load_app_config(_app_toml(tmp_path, 'profile = "15m"'))
     assert cfg.fast_loop.time_limit_s == 7200 and cfg.fast_loop.atr_period_min == 15
+
+
+def test_long_profiles_selectable(tmp_path: Path) -> None:
+    for name, mins in (("6h", 360), ("12h", 720), ("24h", 1440)):
+        cfg = load_app_config(_app_toml(tmp_path, f'profile = "{name}"'))
+        assert cfg.slow_loop_interval_min == mins
+        sched = profiles.defaults(name, "slow.schedule")
+        assert sched["card_ttl_min"] == mins + 20
