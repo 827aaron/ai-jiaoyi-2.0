@@ -349,7 +349,7 @@ class Runner:
             return
         old = {e.symbol for e in self.app.pool.in_pool} if self.app.pool else set()
         new = [e.symbol for e in pool.in_pool]
-        self.app.pool = pool
+        self.app.set_pool(pool)
         if set(new) != old:
             await self.backfill([s for s in new if s not in old])
             await self.m.feed.subscribe(new)

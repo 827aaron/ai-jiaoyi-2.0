@@ -97,6 +97,8 @@ Closer = Callable[[], Awaitable[None]]
 
 
 BLOCKED_FILE = "blocked_symbols.json"
+POOL_FILE = "symbol_pool.json"
+"""最新候选池（``SymbolPool`` JSON），每次选币后覆盖写；面板选币页只读它。"""
 
 
 @runtime_checkable
@@ -484,7 +486,7 @@ class App:
             log.exception("启动对账失败")
         await self.refresh_lot_rules()
         try:
-            self.pool = await self.m.screener.screen(now)
+            self.set_pool(await self.m.screener.screen(now))
         except Exception:
             # 选币失败不阻止启动：没有池子就不订阅、军师不开会，快环自然不开新仓
             log.exception("启动选币失败，暂不订阅行情，下一轮选币再试")
@@ -539,13 +541,21 @@ class App:
 
     def save_blocked(self) -> None:
         """把封禁名单写到 data_dir，给 ``jiaoyi status`` 和面板读（它们不在主循环进程里）。"""
-        path = Path(self.app_cfg.data_dir) / BLOCKED_FILE
+        self._write_atomic(BLOCKED_FILE, json.dumps(self.blocked_symbols(), ensure_ascii=False))
+
+    def set_pool(self, pool: SymbolPool) -> None:
+        """换上新的候选池，并写到 data_dir 给面板选币页读。"""
+        self.pool = pool
+        self._write_atomic(POOL_FILE, pool.model_dump_json())
+
+    def _write_atomic(self, name: str, text: str) -> None:
+        path = Path(self.app_cfg.data_dir) / name
         try:
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.blocked_symbols(), ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(text, encoding="utf-8")
             tmp.replace(path)
         except OSError:
-            log.exception("写封禁名单失败")
+            log.exception("写 %s 失败", name)
 
     async def _alert(self, level: AlertLevel, title: str, body: str = "") -> None:
         try:
