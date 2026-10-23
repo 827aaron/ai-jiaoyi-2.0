@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role
+from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role, SymbolPool
 from jiaoyi.contracts.position import PositionStatus
 from jiaoyi.core.recorder import local_day
 
@@ -226,3 +226,24 @@ def _float(v: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def read_pool(root: Path) -> SymbolPool | None:
+    """最新一次选币（主循环每次选完写 ``symbol_pool.json``）。"""
+    try:
+        return SymbolPool.model_validate_json(
+            (root / "symbol_pool.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValidationError):
+        return None
+
+
+def read_live_gate(root: Path) -> tuple[bool, bool]:
+    """(面板密码设了没有, 实盘解锁了没有)。只看字段有没有值，不碰哈希本身。"""
+    try:
+        raw = json.loads((root / "live_gate.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, False
+    if not isinstance(raw, dict):
+        return False, False
+    return bool(raw.get("hash_hex")), raw.get("armed_at") is not None

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
+from enum import StrEnum
 from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
 from jiaoyi.contracts import (
+    AppConfig,
     Category,
     DecisionRecord,
     Health,
@@ -16,9 +18,10 @@ from jiaoyi.contracts import (
     Outcome,
     RiskConfig,
     Role,
+    SymbolPoolEntry,
 )
 from jiaoyi.core.recorder import local_day
-from jiaoyi.panel.files import PanelFiles
+from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.overview import (
     STALE_S,
@@ -420,4 +423,93 @@ def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: dateti
         costs=costs,
         cost_today_usd=sum(c.today_usd for c in costs),
         cost_week_usd=sum(c.week_usd for c in costs),
+    )
+
+
+# ---------------------------------------------------------------- 选币
+
+
+class PoolPage(BaseModel):
+    ts: datetime | None
+    pool_id: str | None
+    in_pool: int
+    picked: int
+    rejected: int
+    entries: list[SymbolPoolEntry]
+    """进池的在前，按分数从高到低；没进池的（没过硬条件、拉黑）在后。"""
+    blocked: dict[str, str]
+
+
+def build_pool(files: PanelFiles) -> PoolPage:
+    pool = read_pool(files.root)
+    entries = sorted(pool.entries, key=lambda e: (not e.in_pool, -e.score)) if pool else []
+    return PoolPage(
+        ts=pool.ts if pool else None,
+        pool_id=pool.pool_id if pool else None,
+        in_pool=sum(1 for e in entries if e.in_pool),
+        picked=sum(1 for e in entries if e.picked_by_card),
+        rejected=sum(1 for e in entries if not e.in_pool),
+        entries=entries,
+        blocked=files.blocked(),
+    )
+
+
+# ---------------------------------------------------------------- 设置
+
+
+class SettingItem(BaseModel):
+    key: str
+    label: str
+    value: object
+    bounds: str
+    """合理范围，例如 “1–10”。超出程序拒绝启动。"""
+
+
+class SettingsPage(BaseModel):
+    mode: str
+    risk: list[SettingItem]
+    category_caps: dict[str, float]
+    app: list[SettingItem]
+    fast_loop: list[SettingItem]
+    keys: dict[str, bool]
+    """密钥名 → 配了没有。只有这个，没有值。"""
+    password_set: bool
+    live_armed: bool
+
+
+def _items(model: BaseModel, skip: frozenset[str] = frozenset()) -> list[SettingItem]:
+    out = []
+    for name, field in type(model).model_fields.items():
+        if name in skip:
+            continue
+        value = getattr(model, name)
+        if isinstance(value, BaseModel | dict):
+            continue
+        lo = hi = None
+        for m in field.metadata:
+            lo = getattr(m, "ge", getattr(m, "gt", lo))
+            hi = getattr(m, "le", getattr(m, "lt", hi))
+        bounds = f"{lo:g}–{hi:g}" if lo is not None and hi is not None else ""
+        desc = (field.description or "").split("。")[0]
+        out.append(SettingItem(key=name, label=desc or name, value=_plain(value), bounds=bounds))
+    return out
+
+
+def _plain(v: object) -> object:
+    return v.value if isinstance(v, StrEnum) else v
+
+
+def build_settings(
+    files: PanelFiles, risk: RiskConfig, app: AppConfig, keys: dict[str, bool]
+) -> SettingsPage:
+    password_set, armed = read_live_gate(files.root)
+    return SettingsPage(
+        mode=app.mode.value,
+        risk=_items(risk),
+        category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
+        app=_items(app, frozenset({"mode"})),
+        fast_loop=_items(app.fast_loop),
+        keys=keys,
+        password_set=password_set,
+        live_armed=armed,
     )

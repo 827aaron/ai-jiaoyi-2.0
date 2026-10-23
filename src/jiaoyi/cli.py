@@ -209,8 +209,12 @@ def _panel(args: argparse.Namespace) -> int:
         account_name="master_account",
         connector_name=CONNECTOR_BY_MODE[app_cfg.mode],
     )
+    # 设置页只显示每个密钥配没配；在这里查好传进去，面板进程里不经手密钥的值
+    store = ChainedSecretStore()
+    keys = {name: bool(store.get(name)) for name in KNOWN_KEYS}
     print(f"面板：http://{args.host}:{args.port}/ （只接受局域网访问，Ctrl+C 停止）")
-    uvicorn.run(create_app(risk, app_cfg, hb), host=args.host, port=args.port, log_level="warning")
+    app = create_app(risk, app_cfg, hb, key_status=keys)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
 

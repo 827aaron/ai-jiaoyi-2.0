@@ -34,6 +34,7 @@ const CAT = { major: "主流币", alt: "山寨币", crypto_stock: "加密概念�
 const SIGNAL = { volume_breakout: "放量突破", volume_surge: "量能突增", liquidation_rebound: "爆仓反弹", crowded_reversal: "拥挤反向", session_event: "时段与事件" };
 
 let TZ = "Asia/Bangkok";
+try { if (localStorage.getItem("updown") === "red-up") document.documentElement.dataset.updown = "red-up"; } catch (err) { /* 隐私模式等读不了就用默认 */ }
 let data = null; // /api/overview
 let pageData = null; // 当前页自己的接口
 let pageKey = "";
@@ -120,6 +121,10 @@ document.addEventListener("click", (e) => {
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "rej") { S.rej = !S.rej; render(); }
   else if (act === "csv") exportCsv();
+  else if (act === "updown") {
+    try { localStorage.setItem("updown", arg); } catch (err) { /* 存不了就只对这次生效 */ }
+    location.reload();
+  }
 });
 document.addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.dataset && e.target.dataset.act) { e.preventDefault(); e.target.click(); }
@@ -134,7 +139,7 @@ function showCard() {
     const [t, k] = BIAS[s.bias] || [s.bias, ""];
     return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(s.size_tier_max || "—")}</td>
-      <td class="wrap">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${s.key_levels.length ? `<div class="dim small">关键位：${s.key_levels.map(price).join(" / ")}</div>` : ""}</td></tr>`;
+      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${s.key_levels.length ? `<div class="dim small">关键位：${s.key_levels.map(price).join(" / ")}</div>` : ""}</td></tr>`;
   }).join("");
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
     <p class="dim">${hm(c.created_at)} 出卡 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}${c.valid ? "" : " · <span class='down'>已过期</span>"}</p>
@@ -428,7 +433,8 @@ function exportCsv() {
   const d = pageData;
   if (!d || !d.rows) return;
   const head = ["平仓时间", "开仓时间", "币种", "方向", "数量", "杠杆", "开仓价", "信号", "平仓原因", "净盈亏U", "手续费U", "position_id"];
-  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  // 文字字段以 = + - @ 开头时加 ' 前缀，免得表格软件当公式执行（数字照常）
+  const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
   const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, t.side, t.quantity, t.leverage, t.entry_price, t.signal_kind, t.close_reason, t.pnl_usdt, t.fees_usdt, t.position_id].map(q).join(","));
   const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
@@ -466,6 +472,53 @@ P.funds = () => {
         <tr class="total"><td class="hi">合计</td><td class="r num hi">$${d.cost_today_usd.toFixed(3)}</td><td class="r num hi">$${d.cost_week_usd.toFixed(3)}</td></tr></tbody></table></div>
         <div class="foot">机器人只读账户，不能转账。转入转出请在币安上看。</div></section>
     </div>`;
+};
+
+/* ---------- 选币 */
+P.pool = () => {
+  const d = pageData;
+  if (!d.entries.length) {
+    return `<div class="card"><div class="empty"><b>还没有选币结果</b>主循环每次选完币会写一份候选池，这里就能看到。</div></div>`;
+  }
+  const flag = (e) => [e.pinned && '<span class="pill p-accent">固定</span>', e.manual && '<span class="pill p-accent">手动</span>', e.blacklisted && '<span class="pill p-short">拉黑</span>', d.blocked[e.symbol] && '<span class="pill p-short">禁开新仓</span>'].filter(Boolean).join(" ");
+  const rows = d.entries.map((e) => `<tr class="${e.in_pool ? "" : "dimrow"}">
+      <td class="hi">${coin(e.symbol)} ${flag(e)}</td><td>${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
+      <td>${e.in_pool ? (e.picked_by_card ? '<span class="pill p-long">军师选中</span>' : '<span class="pill">在池里</span>') : '<span class="pill">没进池</span>'}</td>
+      <td class="txt">${e.in_pool ? esc(e.reasons.join("；")) + (e.pick_reason ? `<div class="dim small">军师：${esc(e.pick_reason)}</div>` : "") : esc(e.filters.failed_reasons.join("；") || (e.blacklisted ? "你拉黑的" : ""))}</td>
+      <td class="r num dim">${money(e.filters.quote_volume_24h_usdt / 1e6, 0)}M</td><td class="r num dim">${e.filters.spread_bps.toFixed(2)}</td></tr>`).join("");
+  return `<div class="tiles t4"><div class="tile"><small>候选池</small><b>${d.in_pool}</b></div><div class="tile"><small>军师选中</small><b>${d.picked}</b></div>
+      <div class="tile"><small>没进池</small><b>${d.rejected}</b></div><div class="tile"><small>上次选币</small><b>${d.ts ? hm(d.ts) : "—"}</b></div></div>
+    <section class="card mt"><div class="ch"><h2>候选池</h2><span class="r">代码每小时筛一次，军师只能从池里挑；固定、拉黑、手动加入优先</span></div>
+      <div class="tw"><table><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="foot">固定 / 拉黑 / 手动加入的修改入口在设置页接上指令通道后开放。</div></section>`;
+};
+
+/* ---------- 设置 */
+const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
+const fmtVal = (v) => (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? "—" : esc(v));
+const setRows = (items) => items.map((i) => `<div class="fr"><label>${esc(i.label)}<span class="hint">${esc(i.key)}${i.bounds ? " · 范围 " + esc(i.bounds) : ""}</span></label><b class="num">${fmtVal(i.value)}</b></div>`).join("");
+
+P.settings = () => {
+  const d = pageData;
+  const updown = document.documentElement.dataset.updown === "red-up" ? "red-up" : "green-up";
+  const caps = Object.entries(d.category_caps).map(([k, v]) => `<div class="fr"><label>${esc(CAT[k] || k)}</label><b class="num">${v} 倍</b></div>`).join("");
+  const keys = Object.entries(d.keys).map(([k, ok]) => `<div class="fr"><label>${esc(k)}<span class="hint">${esc(KEY_NOTE[k] || "")}</span></label><span class="lamp ${ok ? "ok" : "off"}"><i></i>${ok ? "已配置" : "未配置"}</span></div>`).join("") || '<div class="dim">启动面板时没有查密钥状态。</div>';
+  return `<div class="grid g2">
+    <section class="card"><div class="ch"><h2>运行模式</h2></div>
+      <div class="form"><div class="fr"><label>现在</label><b>${esc(MODE[d.mode] || d.mode)}</b></div>
+      <div class="fr"><label>面板密码</label><b>${d.password_set ? "已设置" : '<span class="warn">未设置（jiaoyi set-panel-password）</span>'}</b></div>
+      <div class="fr"><label>实盘解锁</label><b>${d.live_armed ? '<span class="down">已解锁</span>' : "未解锁"}</b></div></div>
+      <div class="foot">切实盘要确认词 + 面板密码，目前在 Mac mini 终端用 jiaoyi go-live。</div></section>
+    <section class="card"><div class="ch"><h2>显示</h2><span class="r">只影响这台设备</span></div>
+      <div class="form"><div class="fr"><label>涨跌颜色</label><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div></div></section>
+    <section class="card"><div class="ch"><h2>硬上限</h2><span class="r">你定，AI 改不了</span></div><div class="form">${setRows(d.risk)}</div>
+      <div class="lbl">分组敞口上限（总资产倍数）</div><div class="form">${caps}</div></section>
+    <section class="card"><div class="ch"><h2>密钥</h2><span class="r">只显示配没配，网页上看不到也改不了</span></div><div class="form">${keys}</div>
+      <div class="foot">在 Mac mini 终端用 jiaoyi setup-keys 写入钥匙串；改完重启面板这里才会更新。</div></section>
+    <section class="card"><div class="ch"><h2>运行配置和开关</h2></div><div class="form">${setRows(d.app)}</div></section>
+    <section class="card"><div class="ch"><h2>快环门槛</h2><span class="r">在硬上限以内起作用</span></div><div class="form scroll tall">${setRows(d.fast_loop)}</div></section>
+  </div>
+  <div class="note mt">这一版设置页只读。网页上改硬上限（要面板密码）、开关和门槛，等主循环的指令通道合并后开放；改完重启生效。</div>`;
 };
 
 /* 资金曲线（历史页） */
@@ -509,6 +562,8 @@ const PAGE_API = {
   team: (arg) => `/api/team${arg ? "?role=" + encodeURIComponent(arg) : ""}`,
   history: () => `/api/history?range=${S.hist}`,
   funds: () => "/api/funds",
+  pool: () => "/api/pool",
+  settings: () => "/api/settings",
 };
 const pageId = (page, arg) => page + "/" + (arg || "") + (page === "history" ? "/" + S.hist : "");
 
