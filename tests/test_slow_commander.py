@@ -300,3 +300,42 @@ async def test_block_symbol_turns_card_entry_into_no_trade_immediately(
     again = c.current(now)
     assert again is not None and again.for_symbol("AAUSDT") is not None
     assert again.for_symbol("AAUSDT").bias is Bias.LONG  # type: ignore[union-attr]
+
+
+async def test_failures_back_off_and_success_resets(tmp_path: Path, now: datetime) -> None:
+    eng = FakeEngine(["AAUSDT"], fail={"AAUSDT"})
+    c, _, clock = make(tmp_path, eng, now)
+    p = pool(now, entry("AAUSDT"))
+    waits = []
+    for _ in range(5):
+        assert c.may_refresh(clock[0]) and c.refresh_reason(clock[0], p, {}) == "scheduled"
+        with pytest.raises(CardRefreshError):
+            await c.refresh(p, "scheduled")
+        t0 = clock[0]
+        assert not c.may_refresh(t0) and c.refresh_reason(t0, p, {}) is None
+        step = 0
+        while not c.may_refresh(clock[0] + timedelta(minutes=step)):
+            step += 1
+        waits.append(step)
+        clock[0] = t0 + timedelta(minutes=step)
+    assert waits == [5, 10, 30, 30, 30]  # 5→10→30 分钟，之后保持
+    eng.fail.clear()
+    await c.refresh(p, "scheduled")
+    assert c.may_refresh(clock[0])  # 成功后清零
+
+
+async def test_daily_budget_stops_meetings_and_notifies_once(tmp_path: Path, now: datetime) -> None:
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, clock = make(tmp_path, eng, now, daily_cost_limit_usd=0.04)
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    assert c.may_refresh(clock[0])
+    await c.refresh(p, "scheduled")  # 0.01 + 2×0.02 = 0.05 ≥ 0.04
+    clock[0] += timedelta(minutes=10)
+    assert not c.may_refresh(clock[0]) and c.refresh_reason(clock[0], p, {}) is None
+    with pytest.raises(CardRefreshError, match="上限"):
+        await c.refresh(p, "scheduled")
+    notice = c.take_notice()
+    assert notice is not None and "日上限" in notice
+    assert c.take_notice() is None  # 每天只提示一次
+    clock[0] += timedelta(days=1)  # 新的一天（曼谷）清零
+    assert c.may_refresh(clock[0])

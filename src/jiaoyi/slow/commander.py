@@ -112,12 +112,26 @@ class BattleCardCommander:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         brief: MarketBriefService | None = None,
         journal: CardJournal | None = None,
+        fail_backoff: Sequence[timedelta] = (
+            timedelta(minutes=5),
+            timedelta(minutes=10),
+            timedelta(minutes=30),
+        ),
+        daily_cost_limit_usd: float | None = None,
     ) -> None:
         if not timedelta(hours=1) <= ttl <= timedelta(hours=4):
             raise ValueError("作战卡有效期应在 1–4 小时")
         self._clock = clock
         self._brief = brief
         self._journal = journal
+        if not fail_backoff:
+            raise ValueError("fail_backoff 至少要有一档")
+        self._backoff = tuple(fail_backoff)
+        self._cost_limit = daily_cost_limit_usd
+        self._fails = 0
+        self._retry_at: datetime | None = None
+        self._notices: list[str] = []
+        self._budget_noticed_day = ""
         self._engine = engine
         self._risk = risk
         self._log = log
@@ -185,10 +199,40 @@ class BattleCardCommander:
         """哨兵 / 新闻源发现大消息时调用，下一次 ``refresh_reason`` 返回 ``news``。"""
         self._news.add(symbol)
 
+    def may_refresh(self, now: datetime) -> bool:
+        """开会前的总闸，所有触发原因（含定时兜底）都要过：失败退避中、或当日花费超限就不开。"""
+        if self._budget_exhausted(now):
+            return False
+        return self._retry_at is None or now >= self._retry_at
+
+    def take_notice(self) -> str | None:
+        """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
+        return self._notices.pop(0) if self._notices else None
+
+    def _day(self, now: datetime) -> str:
+        return now.astimezone(ZoneInfo(self._risk.day_reset_tz)).date().isoformat()
+
+    def _budget_exhausted(self, now: datetime) -> bool:
+        """今天（按 day_reset_tz，曼谷）开会花费 ≥ 上限。每天只提示一次。"""
+        if self._cost_limit is None or self._stats_day != self._day(now):
+            return False
+        if self._stats.cost_usd < self._cost_limit:
+            return False
+        day = self._day(now)
+        if self._budget_noticed_day != day:
+            self._budget_noticed_day = day
+            self._notices.append(
+                f"军师团今天已花 ${self._stats.cost_usd:.2f}，达到日上限 ${self._cost_limit:.2f}，"
+                "今天不再开会（沿用现有作战卡，到期后不开新仓）"
+            )
+        return True
+
     def refresh_reason(
         self, now: datetime, pool: SymbolPool, prices: Mapping[str, float]
     ) -> str | None:
         """要不要开会、为什么。距上次开会不足 ``min_refresh_gap`` 一律不开，避免抖动。"""
+        if not self.may_refresh(now):
+            return None
         card = self.current(now)
         if card is None:
             return "scheduled"
@@ -226,6 +270,8 @@ class BattleCardCommander:
         candidates = pool.in_pool
         if not candidates:
             raise CardRefreshError("候选池为空，不出卡")
+        if self._budget_exhausted(now):
+            raise CardRefreshError("军师团当日花费已达上限，今天不再开会")
         if self._brief is not None:
             try:
                 await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
@@ -235,7 +281,11 @@ class BattleCardCommander:
             card = await self._meet(pool, candidates, reason, now)
         except Exception as exc:
             self._record_error(reason, exc, started)
+            wait = self._backoff[min(self._fails, len(self._backoff) - 1)]
+            self._fails += 1
+            self._retry_at = self._clock() + wait  # 连续失败退避，免得每分钟重开一轮会
             raise
+        self._fails, self._retry_at = 0, None
         self._card, self._last_refresh = card, now
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
