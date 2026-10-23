@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -24,13 +25,14 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from jiaoyi.contracts import AppConfig, RiskConfig, Role
+from jiaoyi.contracts import Alert, AlertLevel, AppConfig, RiskConfig, Role
 from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
+from jiaoyi.execution.live_gate import CONFIRM_WORD
 from jiaoyi.panel import actions, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
-from jiaoyi.panel.files import PanelFiles
+from jiaoyi.panel.files import PanelFiles, read_live_gate
 from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.market import Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
@@ -54,6 +56,7 @@ from jiaoyi.panel.pages import (
     build_team,
 )
 from jiaoyi.slow.settings import slow_defaults
+from jiaoyi.watchdog import send as send_telegram
 
 STATIC = Path(__file__).parent / "static"
 PACKAGE = Path(__file__).parent.parent
@@ -108,6 +111,25 @@ class SettingsBody(BaseModel):
     section: Section
     changes: dict[str, Any]
     password: str = Field(max_length=256)
+
+
+class ModeBody(BaseModel):
+    mode: Literal["paper", "testnet", "live"]
+    password: str | None = Field(default=None, max_length=256)
+    confirm_word: str | None = Field(default=None, max_length=64)
+    acknowledged: bool = False
+    """切实盘：提示已逐条勾过。"""
+
+
+class ModeInfo(BaseModel):
+    mode: str
+    """app.toml 里写的模式（主程序重启后才用上）。"""
+    armed: bool
+    local: bool
+    """这次请求来自 Mac 本机；切实盘只在本机开放。"""
+    confirm_word: str
+    cautions: dict[str, list[str]]
+    """目标模式 → 切过去前要逐条看过的提示。"""
 
 
 class PasswordBody(BaseModel):
@@ -329,6 +351,60 @@ def create_app(
             raise HTTPException(
                 status_code=403, detail="首次设置只能在 Mac 本机打开 http://127.0.0.1:8090/setup"
             )
+
+    def mode_paths() -> ConfigPaths:
+        if config_paths is None:
+            raise HTTPException(status_code=400, detail="面板启动时没给配置文件路径，只能看不能改")
+        return config_paths
+
+    @api.get("/api/mode")
+    async def mode_get(request: Request) -> ModeInfo:
+        paths = mode_paths()
+        try:
+            r, a, sl = actions.load_configs(paths)
+        except ConfigError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        eq = (await hb.snapshot()).equity_usdt
+        jev, llm = a.fast_loop.jev_provider, sl.llm.provider
+        return ModeInfo(
+            mode=actions.current_mode(paths),
+            armed=read_live_gate(files.root)[1],
+            local=local(request),
+            confirm_word=CONFIRM_WORD,
+            cautions={m: actions.mode_cautions(m, r, keys, jev, llm, eq) for m in actions.MODES},
+        )
+
+    @api.post("/api/mode")
+    async def mode_post(request: Request, body: ModeBody) -> actions.ModeSwitch:
+        paths = mode_paths()
+        if body.mode == "live" and not local(request):
+            raise HTTPException(
+                status_code=403, detail="切实盘只能在 Mac 本机打开 http://127.0.0.1:8090 操作"
+            )
+        if body.mode == "live" and not body.acknowledged:
+            raise HTTPException(status_code=400, detail="先把提示逐条勾上")
+        now = clock()
+        try:
+            res = actions.switch_mode(
+                paths, data_dir, body.mode, body.password, body.confirm_word, now
+            )
+        except ActionError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        read = secret_reader or (lambda _: None)
+        token, chat = read("TELEGRAM_BOT_TOKEN"), read("TELEGRAM_CHAT_ID")
+        if token and chat:
+            name = actions.MODE_NAME
+            if res.new == "live":
+                title, body_text = "实盘已解锁", "面板上切到实盘，主程序重启后真连币安主网下单。"
+            else:
+                title = f"交易模式切到{name[res.new]}"
+                body_text = f"面板上从{name.get(res.old, res.old)}切到{name[res.new]}，实盘已上锁。"
+            alert = Alert(
+                ts=now, level=AlertLevel.CRITICAL, role=Role.EXECUTOR, title=title, body=body_text
+            )
+            sent = await asyncio.to_thread(send_telegram, token, chat, alert, None)
+            res = res.model_copy(update={"notified": sent})
+        return res
 
     def setup_state(request: Request) -> setup.SetupState:
         return setup.setup_state(

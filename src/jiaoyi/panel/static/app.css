@@ -390,3 +390,6 @@ tr.fade td { opacity: 0.55; }
 .row-pick { display: flex; gap: 8px; flex-wrap: wrap; }
 .kv { display: flex; gap: 12px; padding: 3px 0 3px calc(var(--d, 0) * 16px); border-bottom: 1px solid var(--line2); }
 .kv .k { min-width: 9em; color: var(--dim); }
+
+.cautions { margin: 6px 0 0; padding-left: 18px; } .cautions li { margin: 4px 0; } .cautions label { display: inline; font-weight: normal; }
+.cautions.acks { list-style: none; padding-left: 0; }
