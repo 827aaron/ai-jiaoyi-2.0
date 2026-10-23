@@ -357,3 +357,36 @@ def test_card_refreshed_during_jev_is_rejected(now: datetime) -> None:
     no_version = signal(now).model_copy(update={"card_version": None})
     assert not guard().review(no_version, jev(), cd, account(now), now).approved
     assert guard().review(signal(now), jev(), cd, account(now), now).approved
+
+
+# ---------------------------------------------------------------- T1：止损按 15 分钟 ATR
+def test_guard_uses_configured_atr_timeframe(now: datetime) -> None:
+    f15 = features(now, atr=150.0)
+    assert f15.atr_period_min == 15 == FAST.atr_period_min
+    v = guard().review(signal(now, f=f15), jev(), card(now), account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None
+    # 止损距离 = 作战卡倍数 × 15 分钟 ATR（不是 1 分钟 ATR）
+    lo, hi = card(now).symbols[0].stop_atr.min, card(now).symbols[0].stop_atr.max
+    dist = v.intent.stop_loss_pct / 100.0 * f15.last_price
+    assert lo * 150.0 - 1e-6 <= dist <= hi * 150.0 + 80.0  # 关键位外侧最多再挪半个 ATR 左右
+    # 快照是别的周期：拒绝（接线错了，止损会差好几倍）
+    f1 = f15.model_copy(update={"atr_period_min": 1})
+    v = guard().review(signal(now, f=f1), jev(), card(now), account(now), now)
+    assert not v.approved and any("ATR 是 1 分钟口径" in r for r in v.reasons)
+
+
+def test_min_stop_atr_rejects_too_tight_card(now: datetime) -> None:
+    tight = card(now, stop_atr={"min": 0.2, "max": 0.4})
+    v = guard().review(signal(now), jev(), tight, account(now), now)
+    assert not v.approved and any("止损" in r and "ATR 超出" in r for r in v.reasons)
+    v = guard(min_stop_atr=0.1).review(signal(now), jev(), tight, account(now), now)
+    assert not any("ATR 超出" in r for r in v.reasons)
+
+
+def test_atr_config_validation() -> None:
+    assert c.FastLoopConfig().atr_period_min == 15
+    with pytest.raises(ValueError):
+        c.FastLoopConfig(atr_period_min=7)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="min_stop_atr"):
+        c.FastLoopConfig(min_stop_atr=4.0, max_stop_atr=4.0)

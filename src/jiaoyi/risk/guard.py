@@ -244,6 +244,11 @@ class RiskGuardImpl:
         elif f.symbol != signal.symbol:
             reasons.append(f"最新行情是 {f.symbol}，和信号 {signal.symbol} 不符")
             f = None
+        elif f.atr_period_min != fast.atr_period_min:
+            # 作战卡的止损倍数按配置的周期给，ATR 周期对不上止损会差好几倍
+            reasons.append(
+                f"行情 ATR 是 {f.atr_period_min} 分钟口径，配置要 {fast.atr_period_min} 分钟"
+            )
         elif now - f.ts > timedelta(seconds=fast.signal_max_age_s):
             reasons.append(f"最新行情已过 {(now - f.ts).total_seconds():.1f} 秒")
         if f is not None:
@@ -329,9 +334,10 @@ class RiskGuardImpl:
         if signal.kind not in cs.allowed_signals:
             reasons.append(f"作战卡不允许 {signal.kind.value} 信号")
         fast = self._fast
-        if cs.stop_atr.min <= 0 or cs.stop_atr.max > fast.max_stop_atr:
+        if cs.stop_atr.min < fast.min_stop_atr or cs.stop_atr.max > fast.max_stop_atr:
             reasons.append(
-                f"作战卡止损 {cs.stop_atr.min}–{cs.stop_atr.max} ATR 超出 0–{fast.max_stop_atr}"
+                f"作战卡止损 {cs.stop_atr.min}–{cs.stop_atr.max} ATR 超出 "
+                f"{fast.min_stop_atr}–{fast.max_stop_atr}"
             )
         if cs.take_profit_r.min < fast.min_tp_r or cs.take_profit_r.max > fast.max_tp_r:
             reasons.append(

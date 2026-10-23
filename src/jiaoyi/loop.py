@@ -41,6 +41,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
+from jiaoyi.market.features import backfill_minutes
 from jiaoyi.market.rest import fetch_recent_klines
 
 log = logging.getLogger(__name__)
@@ -95,7 +96,9 @@ class Runner:
     def __init__(self, app: App, *, fetch_klines: KlineFetcher | None = None) -> None:
         self.app = app
         self.m = app.m
-        self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym))
+        # 回填够算 ATR 的 1 分钟 K 线（15 分钟 ATR 要 240 根）
+        limit = backfill_minutes(app.app_cfg.fast_loop.atr_period_min)
+        self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym, limit=limit))
         self.positions: list[PositionRecord] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._loops: list[asyncio.Task[None]] = []
@@ -295,7 +298,7 @@ class Runner:
 
     # ------------------------------------------------------------ 慢环调度
     async def backfill(self, symbols: list[str]) -> None:
-        """回填 1 分钟 K 线，ATR 不用等 15 分钟。离线（行情是桩）时跳过。"""
+        """回填 1 分钟 K 线，ATR 不用干等几个小时。离线（行情是桩）时跳过。"""
         if is_stub(self.m.feed) or not symbols:
             return
         sem = asyncio.Semaphore(BACKFILL_CONCURRENCY)

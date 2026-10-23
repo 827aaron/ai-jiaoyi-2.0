@@ -167,21 +167,57 @@ def _kline(i: int, close: float, rng: float = 10.0, qv: float = 1_000_000.0) -> 
     )
 
 
-def warm_engine(n: int = 20, rng: float = 10.0) -> RollingFeatureEngine:
-    eng = RollingFeatureEngine()
+def warm_engine(n: int = 20, rng: float = 10.0, period: int = 1) -> RollingFeatureEngine:
+    """默认按 1 分钟 ATR 攒数据，测其它特征用；要测 15 分钟 ATR 就传 period=15、n≥240。"""
+    eng = RollingFeatureEngine(atr_period_min=period)
     for k in range(n):
         eng.update(_kline(k, 68000.0, rng=rng))
     return eng
 
 
 def test_snapshot_none_until_atr_ready() -> None:
-    eng = RollingFeatureEngine()
+    eng = RollingFeatureEngine(atr_period_min=1)
     for k in range(14):
         eng.update(_kline(k, 68000.0))
     assert eng.snapshot("BTCUSDT") is None
     eng.update(_kline(14, 68000.0))
     snap = eng.snapshot("BTCUSDT")
-    assert snap is not None and snap.atr == pytest.approx(10.0)
+    assert snap is not None and snap.atr == pytest.approx(10.0) and snap.atr_period_min == 1
+
+
+def test_atr_aggregates_1m_into_15m_bars() -> None:
+    from jiaoyi.market.features import backfill_minutes
+
+    eng = RollingFeatureEngine()  # 默认 15 分钟
+    assert backfill_minutes(15) == 240
+    # 从 06:07 开始：第一段 06:07–06:14 不完整，丢掉；之后每 15 根 1 分钟线一根 15 分钟线
+    start = 7
+    # 每根 15 分钟线内价格从 c 走到 c+150（1 分钟幅度 10，15 分钟幅度约 150+10）
+    i = start
+    while i < start + 8 + 15 * 15:
+        bar_pos = i % 15
+        close = 68000.0 + 10.0 * bar_pos
+        eng.update(_kline(i, close))
+        i += 1
+        if i < start + 8 + 15 * 14:
+            assert eng.snapshot("BTCUSDT") is None  # 还没攒够 15 根完整的 15 分钟线
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and snap.atr_period_min == 15
+    # 每根 15 分钟线：高 68140+5，低 68000-5，前收 68140 → TR = 150
+    assert snap.atr == pytest.approx(150.0)
+
+
+def test_atr_drops_bar_with_missing_minute() -> None:
+    eng = RollingFeatureEngine(atr_period_min=5)
+    for m in range(5 * 15):
+        if m == 12:  # 第 3 根 5 分钟线缺一分钟：整根丢掉，不当完整线算 TR
+            continue
+        eng.update(_kline(m, 68000.0))
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is None  # 丢一根后只剩 14 根完整线 → 13 个 TR，不够
+    for m in range(5 * 15, 5 * 16):
+        eng.update(_kline(m, 68000.0))
+    assert eng.snapshot("BTCUSDT") is not None
 
 
 def test_features_from_trades_book_liqs_and_mark() -> None:
