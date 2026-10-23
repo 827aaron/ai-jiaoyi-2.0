@@ -280,7 +280,7 @@ async def backfill(
 TAKE_BUCKETS = ((0.0, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6), (0.6, 1.01))
 
 
-def _stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     rs = [float(r["r"]) for r in rows if r.get("r") is not None]
     nets = [float(r["net_bps"]) for r in rows]
     return {
@@ -311,7 +311,7 @@ def _best_threshold(rows: list[dict[str, Any]], key: str, above: bool) -> dict[s
     for i in range(20, 81, 5):
         t = i / 100
         sel = [r for r in rows if r.get(key) is not None and (r[key] >= t if above else r[key] < t)]
-        st = _stats(sel)
+        st = stats(sel)
         if st["n"] < MIN_N or st["sum_r"] is None:
             continue
         if best is None or st["sum_r"] > best["sum_r"]:
@@ -332,18 +332,18 @@ def report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for r in sel:
             by_take.setdefault(_bucket(r.get("p_take")), []).append(r)
         all_r = [r for r in sel if r.get("r") is not None]
-        base = _stats(all_r)
+        base = stats(all_r)
         take = _best_threshold(all_r, "p_take", above=True)
         real = _best_threshold(all_r, "p_real", above=True)
         toxic = _best_threshold(all_r, "p_toxic", above=False)
         out[tpl] = {
-            "all": _stats(sel),
+            "all": stats(sel),
             "by_exit": {
-                e: _stats([r for r in sel if r.get("exit") == e]) for e in ("stop", "tp", "time")
+                e: stats([r for r in sel if r.get("exit") == e]) for e in ("stop", "tp", "time")
             },
-            "by_take": {k: _stats(v) for k, v in sorted(by_take.items())},
+            "by_take": {k: stats(v) for k, v in sorted(by_take.items())},
             "table": [
-                {"take": k[0], "real": k[1], "toxic": k[2], **_stats(v)}
+                {"take": k[0], "real": k[1], "toxic": k[2], **stats(v)}
                 for k, v in sorted(cells.items())
             ],
             "recommend": {
@@ -356,7 +356,7 @@ def report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _fmt(st: dict[str, Any]) -> str:
+def fmt(st: dict[str, Any]) -> str:
     if not st["n"]:
         return "0 笔"
     r = f"平均 {st['avg_r']:+.2f}R" if st["avg_r"] is not None else "无 R"
@@ -366,15 +366,15 @@ def _fmt(st: dict[str, Any]) -> str:
 def render(rep: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     for tpl, t in rep.items():
-        lines.append(f"== 模板 {tpl}：{_fmt(t['all'])}（已扣来回手续费）")
+        lines.append(f"== 模板 {tpl}：{fmt(t['all'])}（已扣来回手续费）")
         ex = t["by_exit"]
         lines.append(f"   止损 {ex['stop']['n']} / 止盈 {ex['tp']['n']} / 到时平 {ex['time']['n']}")
         lines.append("   做概率分桶：")
         for k, st in t["by_take"].items():
-            lines.append(f"     {k}：{_fmt(st)}")
+            lines.append(f"     {k}：{fmt(st)}")
         lines.append("   做概率 × 真信号 × 毒性：")
         for row in t["table"]:
-            lines.append(f"     做 {row['take']} 真 {row['real']} 毒 {row['toxic']}：{_fmt(row)}")
+            lines.append(f"     做 {row['take']} 真 {row['real']} 毒 {row['toxic']}：{fmt(row)}")
         rec = t["recommend"]
         lines.append(f"   推荐（总 R 最大，至少 {MIN_N} 笔；全做总 R = {rec['baseline_sum_r']}）：")
         for name, key, op in (
@@ -387,7 +387,7 @@ def render(rep: dict[str, Any]) -> list[str]:
                 lines.append(f"     {name}：样本不够，先不改")
             else:
                 lines.append(
-                    f"     {name} {op} {b['threshold']:.2f}：{_fmt(b)}，总 {b['sum_r']:+.1f}R"
+                    f"     {name} {op} {b['threshold']:.2f}：{fmt(b)}，总 {b['sum_r']:+.1f}R"
                 )
     if not lines:
         lines.append("没有可算的拍板记录（窗口还没走完，或日志里没有拍板调用）")
