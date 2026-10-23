@@ -79,3 +79,34 @@ async def fetch_recent_klines(
         if len(page) < params["limit"]:
             break
     return parse_klines(symbol, rows, datetime.now(UTC), interval)
+
+
+async def fetch_klines_between(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    *,
+    interval: Interval = Interval.M1,
+    base_url: str = DEFAULT_REST_URL,
+    timeout_s: float = 5.0,
+) -> list[Kline]:
+    """``start``–``end`` 之间已收盘的 K 线（往后分页拉，复盘回填用）。"""
+    rows: list[Any] = []
+    start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+    while start_ms <= end_ms:
+        params = {
+            "symbol": symbol,
+            "interval": interval.value,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "limit": MAX_KLINES_PER_REQUEST,
+        }
+        q = urllib.parse.urlencode(params)
+        page = await asyncio.to_thread(_get, f"{base_url}/fapi/v1/klines?{q}", timeout_s)
+        if not page:
+            break
+        rows.extend(page)
+        start_ms = int(page[-1][0]) + 1
+        if len(page) < MAX_KLINES_PER_REQUEST:
+            break
+    return parse_klines(symbol, rows, datetime.now(UTC), interval)

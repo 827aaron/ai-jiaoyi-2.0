@@ -238,6 +238,54 @@ def _status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _jev_backtest(args: argparse.Namespace) -> int:
+    """历史拍板记录 + 币安公开 1 分钟线 → 每个信号「做了会怎样」，按拍板概率分桶，给门槛推荐。"""
+    from datetime import timedelta
+
+    from jiaoyi.gate import outcomes
+    from jiaoyi.market.rest import fetch_klines_between
+
+    try:
+        risk = load_risk_config(Path(args.risk))
+        app_cfg = load_app_config(Path(args.app))
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    now = datetime.now(UTC)
+    if args.since:
+        since = datetime.fromisoformat(args.since)
+        since = since if since.tzinfo is not None else since.replace(tzinfo=UTC)
+    else:
+        since = now - timedelta(days=7)
+    data_dir = app_cfg.data_dir
+    new, failed = asyncio.run(
+        outcomes.backfill(
+            data_dir,
+            since=since,
+            now=now,
+            default_hold_min=max(app_cfg.fast_loop.time_limit_s // 60, 1),
+            fee_bps=risk.taker_fee_bps,
+            fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
+        )
+    )
+    rows = [r for r in outcomes.read_results(data_dir) if r.get("ts", "") >= since.isoformat()]
+    rep = outcomes.report(rows)
+    path = outcomes.write_report(
+        data_dir,
+        rep,
+        {
+            "since": since.isoformat(),
+            "generated_at": now.isoformat(),
+            "fee_bps": risk.taker_fee_bps,
+        },
+    )
+    print(f"新算 {new} 个，拉行情失败 {failed} 个（下次再算）；窗口没走完的不算")
+    for line in outcomes.render(rep):
+        print(line)
+    print(f"明细：{Path(data_dir) / outcomes.OUTCOMES_FILE}  汇总：{path}")
+    return 0
+
+
 def _run(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
     from jiaoyi.loop import Runner
@@ -398,6 +446,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_run)
+
+    p = sub.add_parser("jev-backtest", help="拿历史拍板记录算「做了会怎样」，按概率分桶给门槛推荐")
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument(
+        "--since", default="", help="从什么时候起（ISO，如 2026-10-23T12:47）；默认 7 天"
+    )
+    p.set_defaults(func=_jev_backtest)
 
     p = sub.add_parser("watchdog", help="看一次主循环心跳，停了就发 Telegram（launchd 每分钟跑）")
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))

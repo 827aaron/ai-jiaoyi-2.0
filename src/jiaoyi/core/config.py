@@ -63,10 +63,11 @@ def with_profile(raw: dict[str, object]) -> dict[str, object]:
     top.setdefault("meeting_interval", profile)
     top.setdefault("hold", hold)
     fast = raw.get("fast_loop", {})
+    fast = fast if isinstance(fast, dict) else {}
     data = profiles.fill(top, profile, "app", hold)
-    data["fast_loop"] = profiles.fill(
-        fast if isinstance(fast, dict) else {}, profile, "fast_loop", hold
-    )
+    if raw.get("mode") == "paper":  # paper 的拍板门槛先放宽，写了的仍优先
+        fast = {**profiles.PAPER_GATE, **fast}
+    data["fast_loop"] = profiles.fill(fast, profile, "fast_loop", hold)
     pred = raw.get("predictor", {})
     data["predictor"] = profiles.fill(
         pred if isinstance(pred, dict) else {}, profile, "predictor", hold

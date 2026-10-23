@@ -214,7 +214,7 @@ class FastLoopConfig(Contract):
         default=None,
         description="拍板只记不拦：拍板人的概率照常问、照常记，但没过上面这几个门槛也放行"
         "（订单流有毒概率 ≥ 0.8 仍然拦），用来在 paper 攒样本校准门槛。"
-        "不写 = paper 开、testnet / live 关；testnet / live 写 true 拒绝启动。",
+        "不写 = 关（拍板一票否决）；只有 paper 能写 true，testnet / live 写 true 拒绝启动。",
     )
     # ---- 保镖的档位换算
     signal_max_age_s: float = Field(
@@ -458,11 +458,8 @@ class AppConfig(Contract):
 
     @property
     def gate_record_only(self) -> bool:
-        """拍板只记不拦实际开没开：没写时 paper 开；testnet / live 永远关。"""
-        if self.mode != RunMode.PAPER:
-            return False
-        v = self.fast_loop.gate_record_only
-        return True if v is None else v
+        """拍板只记不拦实际开没开：没写时关；只有 paper 能开，testnet / live 永远关。"""
+        return self.mode == RunMode.PAPER and bool(self.fast_loop.gate_record_only)
 
     @model_validator(mode="after")
     def _check(self) -> AppConfig:
