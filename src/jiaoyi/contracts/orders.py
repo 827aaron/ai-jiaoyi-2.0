@@ -27,6 +27,19 @@ class AccountState(Contract):
     open_notional_usdt: NonNegFloat = Field(description="所有持仓名义价值合计。")
     open_notional_by_category: dict[Category, NonNegFloat] = Field(default_factory=dict)
     open_positions: int = Field(ge=0)
+    open_symbols: list[str] = Field(
+        default_factory=list,
+        description="已有在管持仓（含开仓中、平仓中）的币。同一个币不许再开第二笔："
+        "单向持仓模式下反向单会把原仓对冲掉。",
+    )
+    open_risk_usdt: NonNegFloat = Field(
+        default=0.0,
+        description="所有在管持仓按保命止损距离算的风险之和：已成交 数量×入场价×止损%，"
+        "未成交按指令名义价值。保镖用它限制总风险。",
+    )
+    day_realized_pnl_usdt: float = Field(
+        default=0.0, description="当日（曼谷 0 点起）已平仓位的净盈亏，亏损为负。"
+    )
     paused: bool = Field(default=False, description="面板“暂停开新仓”按钮。")
 
     @property

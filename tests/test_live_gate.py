@@ -9,6 +9,7 @@ import pytest
 
 from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import RiskConfig, RunMode
+from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.config import load_risk_config
 from jiaoyi.core.secrets import EnvSecretStore
 from jiaoyi.execution.factory import MissingSecret, build_execution
@@ -17,6 +18,7 @@ from tests.conftest import ROOT
 
 T0 = datetime(2026, 10, 22, 6, 0, tzinfo=UTC)
 PW = "correct-horse"
+FP = "fp-1"
 KEYS = (
     "HUMMINGBOT_API_PASSWORD",
     "BINANCE_API_KEY",
@@ -49,41 +51,41 @@ def gate(tmp_path: Path, clk: Clk) -> LiveGate:
 def test_default_is_not_armed(gate: LiveGate) -> None:
     assert not gate.armed
     with pytest.raises(LiveGateError):
-        gate.require_armed()
+        gate.require_armed(FP)
 
 
 def test_unlock_needs_word_and_password(gate: LiveGate) -> None:
     with pytest.raises(LiveGateError, match="确认词"):
-        gate.unlock("好的", PW)
+        gate.unlock("好的", PW, FP)
     assert not gate.armed
     with pytest.raises(LiveGateError, match="密码不对"):
-        gate.unlock(CONFIRM_WORD, "wrong")
+        gate.unlock(CONFIRM_WORD, "wrong", FP)
     assert not gate.armed
-    gate.unlock(CONFIRM_WORD, PW)
+    gate.unlock(CONFIRM_WORD, PW, FP)
     assert gate.armed
-    gate.require_armed()
+    gate.require_armed(FP)
 
 
 def test_five_wrong_passwords_lock_for_15_minutes(gate: LiveGate, clk: Clk) -> None:
     for _ in range(5):
         with pytest.raises(LiveGateError):
-            gate.unlock(CONFIRM_WORD, "wrong")
+            gate.unlock(CONFIRM_WORD, "wrong", FP)
     # 锁定期间连对的密码也不行
     with pytest.raises(LiveGateError, match="锁定"):
-        gate.unlock(CONFIRM_WORD, PW)
+        gate.unlock(CONFIRM_WORD, PW, FP)
     clk.t = T0 + timedelta(minutes=14)
     with pytest.raises(LiveGateError, match="锁定"):
-        gate.unlock(CONFIRM_WORD, PW)
+        gate.unlock(CONFIRM_WORD, PW, FP)
     clk.t = T0 + timedelta(minutes=16)
-    gate.unlock(CONFIRM_WORD, PW)
+    gate.unlock(CONFIRM_WORD, PW, FP)
     assert gate.armed
 
 
 def test_wrong_word_does_not_count_as_password_failure(gate: LiveGate) -> None:
     for _ in range(10):
         with pytest.raises(LiveGateError, match="确认词"):
-            gate.unlock("nope", PW)
-    gate.unlock(CONFIRM_WORD, PW)
+            gate.unlock("nope", PW, FP)
+    gate.unlock(CONFIRM_WORD, PW, FP)
 
 
 def test_lock_survives_restart(tmp_path: Path, clk: Clk) -> None:
@@ -92,9 +94,9 @@ def test_lock_survives_restart(tmp_path: Path, clk: Clk) -> None:
     g.set_password(PW)
     for _ in range(5):
         with pytest.raises(LiveGateError):
-            g.unlock(CONFIRM_WORD, "wrong")
+            g.unlock(CONFIRM_WORD, "wrong", FP)
     with pytest.raises(LiveGateError, match="锁定"):
-        LiveGate(path, clock=clk).unlock(CONFIRM_WORD, PW)
+        LiveGate(path, clock=clk).unlock(CONFIRM_WORD, PW, FP)
 
 
 def test_password_stored_hashed(gate: LiveGate, tmp_path: Path) -> None:
@@ -102,7 +104,7 @@ def test_password_stored_hashed(gate: LiveGate, tmp_path: Path) -> None:
 
 
 def test_change_password_needs_old_and_disarms(gate: LiveGate) -> None:
-    gate.unlock(CONFIRM_WORD, PW)
+    gate.unlock(CONFIRM_WORD, PW, FP)
     with pytest.raises(LiveGateError):
         gate.set_password("another-pass1", "wrong")
     gate.set_password("another-pass1", PW)
@@ -116,7 +118,7 @@ def test_short_password_refused(tmp_path: Path) -> None:
 
 def test_unlock_without_password_set(tmp_path: Path) -> None:
     with pytest.raises(LiveGateError, match="还没有设置"):
-        LiveGate(tmp_path / "g.json").unlock(CONFIRM_WORD, "x")
+        LiveGate(tmp_path / "g.json").unlock(CONFIRM_WORD, "x", FP)
 
 
 @pytest.fixture
@@ -144,7 +146,7 @@ async def test_live_mode_allowed_after_unlock_and_paper_needs_no_gate(
     (tmp_path / "hb_sim_environment").write_text("demo")
     paper = build_execution(RunMode.PAPER, risk, tmp_path, EnvSecretStore(), StubAlerter())
     await paper.close()
-    gate.unlock(CONFIRM_WORD, PW)
+    gate.unlock(CONFIRM_WORD, PW, config_fingerprint(risk))
     live = build_execution(
         RunMode.LIVE, risk, tmp_path, EnvSecretStore(), StubAlerter(), live_gate=gate
     )
@@ -158,3 +160,22 @@ def test_missing_secret_names_the_key_not_the_value(
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(MissingSecret, match="HUMMINGBOT_API_PASSWORD"):
         build_execution(RunMode.PAPER, risk, tmp_path, EnvSecretStore(), StubAlerter())
+
+
+def test_live_refused_after_risk_config_changes(
+    risk: RiskConfig, gate: LiveGate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in KEYS:
+        monkeypatch.setenv(name, "x" * 8)
+    gate.unlock(CONFIRM_WORD, PW, config_fingerprint(risk))
+    changed = risk.model_copy(update={"max_leverage": risk.max_leverage - 1})
+    with pytest.raises(LiveGateError, match="改过"):
+        build_execution(
+            RunMode.LIVE, changed, tmp_path, EnvSecretStore(), StubAlerter(), live_gate=gate
+        )
+
+
+def test_unlock_record_without_fingerprint_is_rejected(gate: LiveGate) -> None:
+    gate.unlock(CONFIRM_WORD, PW, FP)
+    with pytest.raises(LiveGateError, match="改过"):
+        gate.require_armed("another")

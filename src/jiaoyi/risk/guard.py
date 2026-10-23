@@ -217,6 +217,8 @@ class RiskGuardImpl:
             reasons.append("面板已暂停开新仓")
         if account.open_positions >= risk.max_open_positions:
             reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
+        if signal.symbol in account.open_symbols:
+            reasons.append(f"{signal.symbol} 已有在管持仓，不开第二笔（含反向）")
         if account.equity_usdt <= 0:
             reasons.append("账户权益为 0")
         if now - signal.ts > timedelta(seconds=fast.signal_max_age_s):

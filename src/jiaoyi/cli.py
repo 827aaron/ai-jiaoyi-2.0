@@ -14,6 +14,7 @@ from pathlib import Path
 from jiaoyi.alerting.telegram import TelegramAlerter
 from jiaoyi.contracts import Alert, Role
 from jiaoyi.contracts.module_status import AlertLevel
+from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.config import (
     DEFAULT_APP_PATH,
     DEFAULT_RISK_PATH,
@@ -108,10 +109,16 @@ def _set_panel_password(args: argparse.Namespace) -> int:
 def _go_live(args: argparse.Namespace) -> int:
     """切实盘：确认词 + 面板密码。成功后发通知（有 Telegram 密钥就发 Telegram，否则打印）。"""
     gate = _gate(args)
+    try:
+        # 解锁绑定此刻的 risk.toml：之后改了硬上限，实盘启动会被拒，要重新 go-live
+        fingerprint = config_fingerprint(load_risk_config(Path(args.risk)))
+    except Exception as e:
+        print(f"读不了 risk 配置：{e}", file=sys.stderr)
+        return 1
     word = input(f"输入确认词“{CONFIRM_WORD}”：")
     password = getpass.getpass("面板密码：")
     try:
-        armed_at = gate.unlock(word, password)
+        armed_at = gate.unlock(word, password, fingerprint)
     except LiveGateError as e:
         print(e, file=sys.stderr)
         return 1
@@ -262,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         p = sub.add_parser(name, help=text)
         p.add_argument("--data-dir", default="data")
+        p.add_argument("--risk", default=str(DEFAULT_RISK_PATH), help="go-live 用：绑定这份硬上限")
         p.set_defaults(func=func)
 
     args = parser.parse_args(argv)

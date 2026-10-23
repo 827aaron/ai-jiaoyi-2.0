@@ -12,7 +12,7 @@ from jiaoyi.contracts import AlertLevel, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
 from jiaoyi.execution.exchange import ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
-from jiaoyi.execution.hb_executor import HbExecutorAdapter
+from jiaoyi.execution.hb_executor import HbExecutorAdapter, SymbolAlreadyHeld
 from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.reconciler import ReconcileError, ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry
@@ -135,7 +135,7 @@ async def test_trailing_stop_maps_to_hummingbot_trailing_stop(rig: Rig) -> None:
     await open_filled(rig, trailing_stop_pct=0.1, trailing_activation_pct=0.3)
     barrier = rig.api.created[0]["triple_barrier_config"]
     assert barrier["trailing_stop"] == {"activation_price": "0.003", "trailing_delta": "0.001"}
-    await open_filled(rig, intent_id="int-0002")
+    await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT")
     assert "trailing_stop" not in rig.api.created[1]["triple_barrier_config"]
 
 
@@ -456,7 +456,8 @@ async def test_flatten_falls_back_to_direct_reduce_only_order(rig: Rig) -> None:
     rig.api.executors["ex1"]["is_active"] = True
     rig.api.stop_executor = _always_down  # type: ignore[method-assign]
     report = await rig.rec.reconcile(rig.t)
-    assert report.issues[0].fixed and "直连" in report.issues[0].detail
+    # 执行层自己的 close() 在 hummingbot 停不掉时就会直连兜底，对账员看到的是已平仓
+    assert report.issues[0].fixed
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
     # 账本标记已平：不再为这笔重复补挂 / 平仓；只剩 hummingbot 里没停掉的执行器这一条告警
     kinds = [i.kind for i in (await rig.rec.reconcile(rig.t)).issues]
@@ -589,10 +590,80 @@ async def test_unclaimable_open_is_marked_failed_after_grace(rig: Rig) -> None:
 async def test_failed_stop_leaves_position_open_for_next_round(rig: Rig) -> None:
     pid = await open_filled(rig)
     rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    rig.ex.fail_market_close = True  # 直连兜底也不通
     with pytest.raises(HbApiError):
         await rig.adapter.close(pid, CloseReason.KEEPER)
     assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
     assert rig.registry.get(pid).requested_close is None  # type: ignore[union-attr]
+
+
+# 逻辑审查 B1 / I4 / 总风险字段
+
+
+async def test_second_position_on_same_symbol_is_refused_before_touching_leverage(
+    rig: Rig,
+) -> None:
+    await open_filled(rig)
+    rig.ex.leverage_set.clear()
+    for side in ("long", "short"):  # 同向、反向都拒
+        with pytest.raises(SymbolAlreadyHeld):
+            await rig.adapter.open(intent(intent_id=f"int-x-{side}", side=side))
+    assert rig.ex.leverage_set == []  # 没改过杠杆
+    assert len(rig.api.created) == 1  # 没建第二个执行器
+    assert (await rig.adapter.account()).open_symbols == ["BTCUSDT"]
+
+
+async def test_symbol_can_be_reopened_after_close(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    await rig.adapter.close(pid, CloseReason.KEEPER)
+    rig.api.executors["ex1"]["is_active"] = False
+    await rig.adapter.positions()
+    assert (await rig.adapter.account()).open_symbols == []
+
+
+async def test_close_falls_back_to_direct_reduce_only_when_stop_executor_fails(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    await rig.adapter.close(pid, CloseReason.KEEPER)
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+    assert any("直连" in a.title for a in rig.alerts.sent)
+
+
+async def test_vanished_executor_with_exchange_position_is_flattened_directly(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    rig.api.executors.clear()  # hummingbot 重启丢了执行器
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
+    report = await rig.rec.reconcile(rig.t)
+    issue = next(i for i in report.issues if i.kind is ReconcileIssueKind.EXECUTOR_FAILED)
+    assert issue.fixed
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+
+
+async def test_account_reports_open_risk_and_day_realized_pnl(rig: Rig) -> None:
+    pid = await open_filled(rig)
+    acc = await rig.adapter.account()
+    # 已成交：数量 × 入场价 × lifeboat_stop_pct / 100
+    expected = 0.015 * 68044.0 * intent().lifeboat_stop_pct / 100.0
+    assert acc.open_risk_usdt == pytest.approx(expected)
+    assert acc.day_realized_pnl_usdt == 0.0
+    rig.registry.put(
+        rig.registry.get(pid).model_copy(  # type: ignore[union-attr]
+            update={
+                "record": rig.registry.get(pid).record.model_copy(  # type: ignore[union-attr]
+                    update={
+                        "status": PositionStatus.CLOSED,
+                        "closed_at": rig.t,
+                        "realized_pnl_usdt": -12.5,
+                    }
+                )
+            }
+        )
+    )
+    acc = await rig.adapter.account()
+    assert acc.open_risk_usdt == 0.0
+    assert acc.day_realized_pnl_usdt == pytest.approx(-12.5)
 
 
 # 审查意见 3：日亏基准对齐 0 点

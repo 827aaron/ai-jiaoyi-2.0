@@ -40,6 +40,8 @@ class _State(BaseModel):
     failures: int = 0
     locked_until: datetime | None = None
     armed_at: datetime | None = None
+    risk_fingerprint: str | None = None
+    """解锁时 risk.toml 的指纹。硬上限改过就要重新解锁（设计：改硬上限需面板密码）。"""
 
 
 def _hash(password: str, salt: bytes) -> bytes:
@@ -109,13 +111,18 @@ class LiveGate:
             raise LiveGateError(f"连错 {MAX_FAILURES} 次，锁定 15 分钟")
         raise LiveGateError(f"密码不对（还能试 {MAX_FAILURES - failures} 次）")
 
-    def unlock(self, confirm_word: str, password: str) -> datetime:
-        """两样都对才解锁实盘，返回解锁时间。调用方负责随后发通知。"""
+    def unlock(self, confirm_word: str, password: str, risk_fingerprint: str) -> datetime:
+        """两样都对才解锁实盘，返回解锁时间。调用方负责随后发通知。
+
+        ``risk_fingerprint`` 是此刻 risk.toml 的指纹，之后改了硬上限，实盘启动会被拒。
+        """
         if confirm_word.strip() != CONFIRM_WORD:
             raise LiveGateError(f"确认词不对，需要原样输入：{CONFIRM_WORD}")
         self._verify(password)
         armed_at = self._clock()
-        self._state = self._state.model_copy(update={"armed_at": armed_at})
+        self._state = self._state.model_copy(
+            update={"armed_at": armed_at, "risk_fingerprint": risk_fingerprint}
+        )
         self._save()
         return armed_at
 
@@ -127,8 +134,13 @@ class LiveGate:
     def armed(self) -> bool:
         return self._state.armed_at is not None
 
-    def require_armed(self) -> None:
+    def require_armed(self, risk_fingerprint: str) -> None:
         if not self.armed:
             raise LiveGateError(
                 "实盘未解锁：配置里写 live 不够，先运行 jiaoyi go-live 输入确认词和面板密码"
+            )
+        if self._state.risk_fingerprint != risk_fingerprint:
+            raise LiveGateError(
+                "risk.toml 在解锁之后改过（或解锁记录没有指纹）：改硬上限要重新确认，"
+                "先运行 jiaoyi go-live"
             )

@@ -86,6 +86,10 @@ class ExchangeClient(Protocol):
         """只减仓市价单。**兜底专用**：hummingbot 不可达而保命止损又挂不上时，对账员用它平仓。"""
         ...
 
+    async def wallet_usdt(self) -> float:
+        """合约账户 USDT 钱包余额（不含浮动盈亏）。"""
+        ...
+
     async def ensure_leverage(self, symbol: str, leverage: int) -> None:
         """把该合约的杠杆设成 ``leverage`` 并回读核对；设不成或对不上抛 ExchangeError。"""
         ...
@@ -251,6 +255,18 @@ class CcxtBinanceFutures:
         info = raw.get("info") or {}
         order_type = str(info.get("orderType") or info.get("type") or raw.get("type") or "")
         return order_type.upper().startswith("STOP")
+
+    async def wallet_usdt(self) -> float:
+        try:
+            await self._ready()
+            bal = await self._ex.fetch_balance()
+            info_assets = (bal.get("info") or {}).get("assets") or []
+            for a in info_assets:  # 币安的 walletBalance 才是不含浮盈的钱包余额
+                if a.get("asset") == "USDT" and a.get("walletBalance") is not None:
+                    return float(a["walletBalance"])
+            return float((bal.get("total") or {}).get("USDT") or 0.0)
+        except Exception as e:
+            raise ExchangeError(f"查钱包余额失败：{e}") from e
 
     async def ensure_leverage(self, symbol: str, leverage: int) -> None:
         try:
