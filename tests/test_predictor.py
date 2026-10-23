@@ -74,6 +74,9 @@ async def test_forecast_after_enough_bars(tmp_path: Path) -> None:
     assert st.health == Health.OK and st.today.calls >= 1
     rec = sink.read_day("2026-10-22")[0]
     assert rec.role == Role.PREDICTOR and rec.latency_ms >= 0
+    # 面板「预测员」卡片读它看到了什么
+    assert set(rec.input) == {"last_close", "bars", "interval", "paths"}
+    assert rec.input["bars"] >= 3 and rec.input["interval"] == SET.interval.value
 
 
 async def test_listeners_get_each_new_forecast() -> None:

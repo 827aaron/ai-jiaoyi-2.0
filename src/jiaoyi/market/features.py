@@ -281,6 +281,16 @@ class RollingFeatureEngine:
             book=self._book_metrics(st, now),
         )
 
+    def book_age_s(self, symbol: str, now: datetime) -> float | None:
+        """最近一次盘口更新距 ``now`` 几秒；没收到过盘口返回 None（面板看盘口员是否在线）。"""
+        st = self._s.get(symbol)
+        if st is None or st.book is None:
+            return None
+        return max(0.0, now.timestamp() - _ts(st.book.ts))
+
+    def symbols(self) -> list[str]:
+        return sorted(self._s)
+
     def _price_at(self, st: _SymbolState, t: float) -> float | None:
         if not st.prices:
             return None
