@@ -65,3 +65,11 @@ TradingAgents 每个标的一次会议大约 16–22 次 LLM 调用，DeepSeek �
 - 会议：`TradingAgentsEngine(liquidations=...)` 把近 1 小时强平写进 `get_stock_data` 的衍生品段和总盘会的候选表。
 - 接线（架构师）：把快环的统计对象同时传给 `BinanceStatsSource` 和 `TradingAgentsEngine`；没传则强平为 0 / 不显示，不影响其它功能。
 - 多空拆分（多头被强平 vs 空头被强平）等快环 PR 合并后再加，需要对齐它的 `stats()` 返回结构。
+
+## 共享市场简报（`slow/brief.py`）
+
+每轮开会前由 `BattleCardCommander` 调一次 `MarketBriefService.refresh()`，所有标的的会议共用，不再每个会议各查一遍大盘。内容：BTC / ETH 趋势（日线、4 小时线）、恐慌贪婪指数（alternative.me，免费无 key）。每部分独立失败，全失败则沿用上一份，简报挂了会议照开（记一条错误日志）。
+
+- 进入会议：总盘会提示、单标的结论整理提示、都带这份简报。
+- **美元指数（DXY）暂未接**：没有稳定的免费无 key 来源（试过的站点会拦截脚本请求）。要加就实现一个 `BriefPart` 加进 `default_parts()`。
+- 接线（架构师）：创建一个 `MarketBriefService()`，同时传给 `BattleCardCommander(brief=...)` 和 `TradingAgentsEngine(brief=...)`，退出时 `aclose()`。
