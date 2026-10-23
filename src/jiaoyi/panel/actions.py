@@ -248,6 +248,9 @@ def update_config(
     if not changes:
         raise ActionError("没有要改的项")
     path, table, editable = _target(paths, section)
+    if fields is None and section in ("llm", "budget"):
+        # 军师团通道和花费上限只在首次设置向导里改（向导会显式给 fields）
+        raise ActionError(f"{section} 段只能在首次设置里改")
     fields = editable if fields is None else fields
     exists = path.is_file()  # slow.toml 可以没有：没有就新建（其余默认值照旧）
     text = path.read_text(encoding="utf-8") if exists else ""

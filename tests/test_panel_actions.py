@@ -541,3 +541,11 @@ def test_code_fingerprint_changes_when_a_file_changes(tmp_path: Path) -> None:
     assert code_fingerprint(tmp_path) == before
     (tmp_path / "a.py").write_text("x = 22\n")
     assert code_fingerprint(tmp_path) != before
+
+
+def test_llm_and_budget_only_through_setup_wizard(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    with pytest.raises(ActionError, match="首次设置"):
+        actions.update_config(paths, data, "llm", {"provider": "openrouter"}, PW, NOW)
+    with pytest.raises(ActionError, match="首次设置"):
+        actions.update_config(paths, data, "budget", {"daily_cost_limit_usd": 99}, PW, NOW)

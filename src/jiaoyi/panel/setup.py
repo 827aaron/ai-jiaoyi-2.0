@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from collections.abc import Callable
 from datetime import datetime
@@ -249,7 +250,8 @@ async def self_check(
             title="面板首次设置：测试消息",
             body="收到这条说明告警能发到你的 Telegram。",
         )
-        ok = send_telegram(token, chat, alert, transport)
+        # 同步发送最长 10 秒：放到线程里，别卡住面板的事件循环
+        ok = await asyncio.to_thread(send_telegram, token, chat, alert, transport)
         out.append(
             CheckItem(
                 name="Telegram",

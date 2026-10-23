@@ -94,6 +94,7 @@ function suStep3(st) {
     return `<div class="fr"><label>${esc(lab)}<span class="hint">${esc(hint)}</span></label><b>${input}</b></div>`;
   }).join("");
   return `<section class="card"><div class="ch"><h2>3. 基本配置</h2><div class="r">运行方式：${esc(MODE[st.mode] || st.mode)}（实盘走 <code>jiaoyi go-live</code>）</div></div>
+    <div class="note">硬上限（每笔风险、杠杆、总敞口、日亏熔断等）现在是示例里的保守默认值，配完后可以在面板“设置”页改。</div>
     <div class="form edit">${rows}</div>
     <div class="su-row"><button class="btn b-go" data-su="basic" ${off ? "disabled" : ""}>保存配置</button><span class="dim small">写进 config/*.toml，主程序重启后生效。其余设置在面板“设置”页改。</span></div>${suMsg(3)}</section>`;
 }
