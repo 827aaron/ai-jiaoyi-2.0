@@ -553,6 +553,10 @@ class BattleCardCommander:
         now = self._clock()
         if not card.is_valid(now):
             return
+        # 重启前后可能改过硬上限或切了档位：按现在的配置再夹一遍，免得保镖整个拒掉
+        card = card.model_copy(
+            update={"symbols": [clamp_to_risk(sym, self._risk, self._stop) for sym in card.symbols]}
+        )
         self._card, self._last_refresh = card, card.created_at
         self._seen = {s.symbol for s in card.symbols}
         self._last_meeting = meets

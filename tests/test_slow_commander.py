@@ -458,3 +458,16 @@ async def test_expired_saved_card_is_not_restored(tmp_path: Path, now: datetime)
     late = now + timedelta(hours=3)
     c2, _, _ = make(tmp_path, FakeEngine([]), late, card_path=path)
     assert c2.current(late) is None
+
+
+async def test_restored_card_is_clamped_to_current_risk(tmp_path: Path, now: datetime) -> None:
+    path = tmp_path / "battle_card.json"
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, card_path=path)
+    await c.refresh(pool(now, entry("AAUSDT")), "启动")
+    tighter = RISK.model_copy(update={"max_leverage": 1})
+    c2 = BattleCardCommander(
+        FakeEngine([]), tighter, JsonlDecisionLog(tmp_path), clock=lambda: now, card_path=path
+    )
+    back = c2.current(now)
+    assert back is not None
+    assert back.symbols[0].leverage.max <= 1.0
