@@ -66,6 +66,7 @@ class MeetingLive:
             "result": None,
             "error": None,
             "cost_usd": 0.0,
+            "cost_estimated": False,
             "llm_calls": [],
             "truncated": 0,
             "retries": 0,
@@ -171,10 +172,10 @@ class MeetingLive:
         self._doc.update(result={"bias": bias, "reason": reason}, status="done", cost_usd=cost_usd)
         self._close()
 
-    def fail(self, error: str, cost_usd: float) -> None:
+    def fail(self, error: str, cost_usd: float, estimated: bool = False) -> None:
         if self._closed:  # 超时取消时已经标成失败；后台线程之后才结束，不能改回去
             return
-        self._doc.update(status="failed", error=error, cost_usd=cost_usd)
+        self._doc.update(status="failed", error=error, cost_usd=cost_usd, cost_estimated=estimated)
         self._close()
 
     def _close(self) -> None:

@@ -519,3 +519,49 @@ def test_direction_conflict_and_size_degrade() -> None:
         degrade_size(card_symbol("AAUSDT", size_tier_max=SizeTier.S), ["新闻"]).size_tier_max
         is SizeTier.S
     )
+
+
+def test_abort_estimates_inflight_calls_and_late_result_corrects() -> None:
+    from types import SimpleNamespace
+
+    from jiaoyi.slow.tradingagents_engine import CostMeter
+
+    prices = {"flash": (0.30, 1.20), "pro": (1.0, 4.0)}
+    meter = CostMeter(prices)
+    corrections: list[float] = []
+    meter.on_late = corrections.append
+    # 一次已完成的回答（真实花费 0.001、输出 3000 token），一次还在途（输入 20000 字）
+    done = SimpleNamespace(
+        llm_output={"token_usage": {"cost": 0.001}, "model_name": "m"},
+        generations=[
+            [
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        response_metadata={},
+                        usage_metadata={"input_tokens": 10, "output_tokens": 3000},
+                    ),
+                    generation_info={},
+                )
+            ]
+        ],
+    )
+    meter.start_call("done", 100, "deepseek/flash")
+    meter.record_response(done, "done")
+    meter.start_call("fly", 20_000, "deepseek/flash")
+    assert meter.cost == 0.001 and not meter.estimated
+    meter.abort()
+    est = round((10_000 * 0.30 + 3000 * 1.20) / 1e6, 6)  # 估的输入 1 万 token + 平均输出 3000
+    assert meter.estimated and meter.cost == round(0.001 + est, 6)
+    # 真实结果晚到：估算换成真实值，差额回调；不会重复计
+    late = SimpleNamespace(
+        llm_output={"token_usage": {"cost": 0.02}, "model_name": "m"}, generations=[]
+    )
+    meter.record_response(late, "fly")
+    assert not meter.estimated and meter.cost == 0.021
+    assert corrections == [round(0.02 - est, 6)]
+    # 在途请求报错结束：不再算在途
+    m2 = CostMeter(prices)
+    m2.start_call("x", 4000, "")
+    m2.drop_call("x")
+    m2.abort()
+    assert m2.cost == 0.0 and not m2.estimated

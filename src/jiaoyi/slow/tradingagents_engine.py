@@ -897,6 +897,14 @@ class CostMeter:
         """因为 max_tokens 到顶而被截断的回答数（finish_reason == "length"）；重试成功的不算。"""
         self.retries = 0
         """自动重试的次数（回答被截断 / 空 / 过短）。"""
+        self._flying: dict[str, tuple[int, str]] = {}
+        """在途的模型请求：run_id → (估的输入 token 数, 价格档)。"""
+        self._outs: list[int] = []
+        self._est_runs: dict[str, float] = {}
+        """超时取消时还在途的请求，及各自记入的估算花费；真实结果回来后改成真实值。"""
+        self._est_total = 0.0
+        self.on_late: Callable[[float], None] | None = None
+        """在途请求的真实花费晚到时回调（真实 - 估算），让日花费补正。"""
         self.on_retry: Callable[[str], None] | None = None
 
     def note_retry(self, why: str) -> None:
@@ -914,6 +922,24 @@ class CostMeter:
             with self._lock:
                 self.truncated = max(self.truncated - 1, 0)
 
+    @property
+    def estimated(self) -> bool:
+        """花费里是否含超时取消时在途请求的估算。"""
+        with self._lock:
+            return bool(self._est_runs)
+
+    def start_call(self, run_id: str, chars: int, model: str) -> None:
+        """一次模型请求发出：记下估的输入 token（字数 / 2，偏高一点，偏保守）。"""
+        tier = "pro" if "pro" in model else "flash"
+        with self._lock:
+            self._flying[run_id] = (max(chars // 2, 1), tier)
+
+    def drop_call(self, run_id: str) -> None:
+        """请求没拿到结果就结束了（报错）：不再算在途。"""
+        with self._lock:
+            self._flying.pop(run_id, None)
+            self._est_total -= self._est_runs.pop(run_id, 0.0)
+
     def add(self, model: str, input_tokens: int, output_tokens: int, cost: float | None) -> None:
         with self._lock:
             self.calls += 1
@@ -924,8 +950,25 @@ class CostMeter:
             tokens[0] += input_tokens
             tokens[1] += output_tokens
 
-    def record_response(self, response: Any) -> None:
-        """喂一次 LangChain 的 ``LLMResult``：取真实花费，没有就记 token 留着估。"""
+    def record_response(self, response: Any, run_id: str | None = None) -> None:
+        """喂一次 LangChain 的 ``LLMResult``：取真实花费，没有就记 token 留着估。
+        超时取消时按估算记过的在途请求，真实结果回来后换成真实值，差额通过 ``on_late`` 补正。"""
+        before = self.cost
+        est: float | None = None
+        if run_id is not None:
+            with self._lock:
+                self._flying.pop(run_id, None)
+                est = self._est_runs.pop(run_id, None)
+                if est is not None:
+                    self._est_total -= est
+        self._record(response)
+        if est is not None and self.on_late is not None:
+            try:
+                self.on_late(round(self.cost - before, 6))
+            except Exception:
+                logger.exception("补正在途请求的花费失败")
+
+    def _record(self, response: Any) -> None:
         usage = (getattr(response, "llm_output", None) or {}).get("token_usage")
         cost = _reported_cost(usage)
         model = str((getattr(response, "llm_output", None) or {}).get("model_name") or "")
@@ -953,6 +996,9 @@ class CostMeter:
                 model = str(meta.get("model_name") or model)
                 if cost is None:
                     cost = _reported_cost(meta.get("token_usage"))
+        with self._lock:
+            if tout:
+                self._outs.append(tout)
         self.add(model, tin, tout, cost)
         if self.on_call is not None:
             try:
@@ -967,10 +1013,21 @@ class CostMeter:
             for model, (tin, tout) in self._unreported.items():
                 pin, pout = self._prices["pro" if "pro" in model else "flash"]
                 total += (tin * pin + tout * pout) / 1e6
+            total += self._est_total
         return round(total, 6)
 
     def abort(self) -> None:
-        self._aborted = True
+        """叫停：新请求直接失败；此刻还在途的请求按估算记一笔（估的输入 token × 输入价 +
+        本场已完成回答的平均输出 × 输出价），真实花费晚到时再补正，见 ``record_response``。"""
+        with self._lock:
+            self._aborted = True
+            avg_out = sum(self._outs) / len(self._outs) if self._outs else 2000.0
+            for run_id, (tin, tier) in self._flying.items():
+                pin, pout = self._prices[tier]
+                est = round((tin * pin + avg_out * pout) / 1e6, 6)
+                self._est_runs[run_id] = est
+                self._est_total += est
+            self._flying.clear()
 
     def check(self) -> None:
         if self._aborted:
@@ -996,12 +1053,28 @@ def cost_handler(meter: CostMeter) -> Any:
 
         def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
             meter.check()
+            chars = sum(len(str(getattr(m, "content", m))) for batch in messages for m in batch)
+            self._begin(chars, kwargs)
 
         def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
             meter.check()
+            self._begin(sum(len(str(p)) for p in prompts), kwargs)
+
+        @staticmethod
+        def _begin(chars: int, kwargs: Mapping[str, Any]) -> None:
+            run_id = kwargs.get("run_id")
+            model = str((kwargs.get("invocation_params") or {}).get("model") or "")
+            if run_id is not None:
+                meter.start_call(str(run_id), chars, model)
 
         def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-            meter.record_response(response)
+            run_id = kwargs.get("run_id")
+            meter.record_response(response, str(run_id) if run_id is not None else None)
+
+        def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+            run_id = kwargs.get("run_id")
+            if run_id is not None:
+                meter.drop_call(str(run_id))
 
     handler = _CostHandler()
     handler.meter = meter  # 引擎给模型对象加自动重试时要用
@@ -1045,6 +1118,7 @@ class TradingAgentsEngine:
         self._news = news
         self._brief = brief
         self._liq = liquidations
+        self._late_cost: Callable[[str, float], None] | None = None
         self._inflight: dict[str, CostMeter] = {}
         self._live: dict[str, MeetingLive] = {}
         self._inflight_lock = threading.Lock()
@@ -1065,6 +1139,9 @@ class TradingAgentsEngine:
 
     def _meter(self, key: str) -> CostMeter:
         meter = CostMeter(self._s.price_per_mtok)
+        late = getattr(self, "_late_cost", None)
+        if late is not None:
+            meter.on_late = lambda delta: late(key, delta)
         with self._inflight_lock:
             self._inflight[key] = meter
         return meter
@@ -1073,6 +1150,16 @@ class TradingAgentsEngine:
         with self._inflight_lock:
             if self._inflight.get(key) is meter:
                 del self._inflight[key]
+
+    def bind_late_cost(self, callback: Callable[[str, float], None]) -> None:
+        """超时取消的会议，在途请求的真实花费晚到时 ``callback(key, 差额)``（在工作线程里调）。"""
+        self._late_cost = callback
+
+    def cost_estimated(self, key: str) -> bool:
+        """这场会议的花费里是否含超时取消时在途请求的估算。"""
+        with self._inflight_lock:
+            meter = self._inflight.get(key)
+        return bool(meter and meter.estimated)
 
     def partial_cost(self, key: str) -> float | None:
         """进行中（或刚超时取消）的会议已经花了多少；没有这场会议返回 None。"""
@@ -1088,7 +1175,11 @@ class TradingAgentsEngine:
             meter.abort()
         live = self._live.get(key)
         if live:
-            live.fail("超时取消，会议没有结论", meter.cost if meter else 0.0)
+            live.fail(
+                "超时取消，会议没有结论",
+                meter.cost if meter else 0.0,
+                estimated=bool(meter and meter.estimated),
+            )
 
     @staticmethod
     def _llm(graph: Any, tier: str) -> Any:
