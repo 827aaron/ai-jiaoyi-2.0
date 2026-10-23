@@ -74,6 +74,22 @@ class ScheduleConfig(_Strict):
     )
 
 
+class BudgetConfig(_Strict):
+    daily_cost_limit_usd: float = Field(
+        default=10.0, gt=0, le=1000, description="军师团每个交易日（曼谷 0 点清零）最多花多少美元。"
+    )
+    fail_backoff_minutes: tuple[float, ...] = Field(
+        default=(5.0, 10.0, 30.0), description="开会连续失败后的等待时间，最后一档之后保持不变。"
+    )
+
+    @field_validator("fail_backoff_minutes")
+    @classmethod
+    def _backoff(cls, v: tuple[float, ...]) -> tuple[float, ...]:
+        if not v or any(not 1 <= m <= 240 for m in v):
+            raise ValueError("至少一档，每档 1–240 分钟")
+        return v
+
+
 class PricesConfig(_Strict):
     """每百万 token 的美元价，只用于花费统计。⚠ 占位值，M2 真机验证时按官网核对。"""
 
@@ -87,6 +103,7 @@ class SlowConfig(_Strict):
     llm: LlmConfig = LlmConfig()
     meeting: MeetingConfig = MeetingConfig()
     schedule: ScheduleConfig = ScheduleConfig()
+    budget: BudgetConfig = BudgetConfig()
     prices: PricesConfig = PricesConfig()
 
     def engine_settings(self) -> TradingAgentsSettings:
@@ -114,6 +131,8 @@ class SlowConfig(_Strict):
             "concurrency": s.concurrency,
             "ttl": timedelta(hours=s.card_ttl_hours),
             "symbol_min_interval": timedelta(hours=s.symbol_min_interval_hours),
+            "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
+            "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
         }
 
 

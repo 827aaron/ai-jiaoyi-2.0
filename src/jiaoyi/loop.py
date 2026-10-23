@@ -73,6 +73,15 @@ class _NewsAware(Protocol):
 
 
 @runtime_checkable
+class _RefreshGate(Protocol):
+    """军师团开会的总闸：失败退避 / 日花费上限，以及要推送的提示。"""
+
+    def may_refresh(self, now: datetime) -> bool: ...
+
+    def take_notice(self) -> str | None: ...
+
+
+@runtime_checkable
 class _RefreshReason(Protocol):
     def refresh_reason(
         self, now: datetime, pool: SymbolPool, prices: Mapping[str, float]
@@ -204,8 +213,16 @@ class Runner:
                 # 问 Jev 期间下达的暂停 / 全平：在途信号也要拦住
                 self._guard_note(Outcome.REJECT, f"{signal.symbol} 拍板期间已暂停，不开仓", now)
                 return
+            # 问 Jev 期间可能换了新卡或封了币：按锁里这一刻的卡审，和问 Jev 时的卡不是同一版就不开
+            now = self.app.clock()
+            fresh = self.m.cards.current(now)
+            if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
+                self._guard_note(
+                    Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡已变，按新卡重新等信号", now
+                )
+                return
             account = await self.m.executor.account()
-            verdict = self.m.risk.review(signal, jev, card, account, self.app.clock())
+            verdict = self.m.risk.review(signal, jev, fresh, account, now)
             if not verdict.approved or verdict.intent is None:
                 return
             intent = verdict.intent
@@ -321,6 +338,11 @@ class Runner:
             and now - self._last_card_at >= interval
         ):
             reason = "scheduled"
+        if isinstance(cards, _RefreshGate):
+            while (notice := cards.take_notice()) is not None:
+                await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice)
+            if not cards.may_refresh(now):
+                return  # 失败退避中或当日花费超限；定时兜底也不能绕过
         if reason is None or is_stub(cards):
             return
         self._refreshing = True
