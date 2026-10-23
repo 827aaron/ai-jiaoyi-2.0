@@ -29,6 +29,8 @@
       "microprice": 68043.1,
       "spread_bps": 0.15,
       "depth_usdt": 1850000.0,
+      "bid_depth_usdt": 900000.0,
+      "ask_depth_usdt": 950000.0,
       "imbalance": 0.32,
       "ofi": 12.4,
       "cvd": 86.0,

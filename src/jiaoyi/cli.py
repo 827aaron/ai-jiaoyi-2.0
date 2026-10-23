@@ -286,6 +286,45 @@ def _jev_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gate_calibrate(args: argparse.Namespace) -> int:
+    """影子结果（实盘拍板 + 回放）扫拍板门槛 → data/gate_calibration/<hold>.json，不自动套用。"""
+    from datetime import timedelta
+
+    from jiaoyi.gate import calibrate, outcomes, replay
+    from jiaoyi.market.rest import fetch_klines_between
+
+    try:
+        risk = load_risk_config(Path(args.risk))
+        app_cfg = load_app_config(Path(args.app))
+        hold = replay.hold_tier(args.hold or app_cfg.hold)
+    except (ConfigError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 2
+    now = datetime.now(UTC)
+    data_dir = app_cfg.data_dir
+    if not args.no_backfill:  # 先把实盘拍板里窗口已走完的补算掉
+        new, failed = asyncio.run(
+            outcomes.backfill(
+                data_dir,
+                since=now - timedelta(days=args.days),
+                now=now,
+                default_hold_min=max(app_cfg.fast_loop.time_limit_s // 60, 1),
+                fee_bps=risk.taker_fee_bps,
+                fetch=lambda sym, a, b: fetch_klines_between(sym, a, b),
+            )
+        )
+        print(f"实盘拍板补算 {new} 个，拉行情失败 {failed} 个（下次再算）")
+    rows = calibrate.load_rows(data_dir, calibrate.hold_minutes(hold), replay=not args.no_replay)
+    result = calibrate.calibrate(
+        rows, hold=hold, now=now, min_above=args.min_above, min_samples=args.min_samples
+    )
+    path = calibrate.write(data_dir, result)
+    for line in calibrate.render(result):
+        print(line)
+    print(f"结果：{path}（设置页拍板门槛旁边显示，不自动套用）")
+    return 0
+
+
 def _jev_replay(args: argparse.Namespace) -> int:
     """历史行情重建信号 → 真问 Jev → 按之后的 K 线算结果，给门槛校准用。"""
     from datetime import date, timedelta
@@ -543,6 +582,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--cache", default="data/history", help="历史数据下载缓存")
     p.set_defaults(func=_jev_replay)
+
+    p = sub.add_parser(
+        "gate-calibrate", help="拿影子结果扫拍板门槛，给推荐值（写 data/gate_calibration/）"
+    )
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--hold", default="", help="持仓档：2h / 120（分钟）；默认 app.toml 现在的档")
+    p.add_argument("--days", type=int, default=30, help="补算最近几天的实盘拍板")
+    p.add_argument("--min-above", type=int, default=150, help="门槛以上至少几笔才算数")
+    p.add_argument("--min-samples", type=int, default=300, help="总样本少于这个只出表")
+    p.add_argument("--no-replay", action="store_true", help="不用 jev-replay 的回放样本")
+    p.add_argument("--no-backfill", action="store_true", help="不补算，只用已有的影子结果")
+    p.set_defaults(func=_gate_calibrate)
 
     p = sub.add_parser("watchdog", help="看一次主循环心跳，停了就发 Telegram（launchd 每分钟跑）")
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))

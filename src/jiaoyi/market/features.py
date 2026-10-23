@@ -406,6 +406,8 @@ class RollingFeatureEngine:
             microprice=bk.microprice(b),
             spread_bps=bk.spread_bps(b),
             depth_usdt=bid + ask,
+            bid_depth_usdt=bid,
+            ask_depth_usdt=ask,
             imbalance=bk.imbalance(b, self._levels),
             ofi=sum(e for _, e in st.ofi),
             cvd=buy - sell,

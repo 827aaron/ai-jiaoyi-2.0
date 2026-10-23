@@ -600,3 +600,30 @@ def test_every_atr_period_has_a_history_interval() -> None:
     assert set(periods) == set(ATR_INTERVAL)
     for p, iv in ATR_INTERVAL.items():
         assert iv.value == (f"{p}m" if p < 60 else f"{p // 60}h")
+
+
+async def test_limit_take_profit_falls_back_to_market(tmp_path: Path, now: datetime) -> None:
+    t = [now]
+    cfg = load_app_config(APP).model_copy(update={"data_dir": str(tmp_path)})
+    app = App(load_risk_config(RISK), cfg, clock=lambda: t[0], offline=True)
+    assert app.app_cfg.limit_take_profit_on  # paper 默认开
+    ex = FakeExecutor()
+    app.m = dataclasses.replace(app.m, executor=ex, patrol=FakePatrol())
+    r = Runner(app)
+    pos = _position()  # 做多，止盈 68384.2
+    r.positions = [pos]
+
+    def trade(px: float) -> c.Trade:
+        return c.Trade(symbol="BTCUSDT", ts=t[0], price=px, qty=0.01, taker_side=c.Side.LONG)
+
+    await r.on_event(trade(68390.0))  # 越过止盈价，开始计时
+    t[0] = now + timedelta(seconds=5)
+    await r.on_event(trade(68380.0))  # 回到止盈价里面：重新计时
+    t[0] = now + timedelta(seconds=12)
+    await r.on_event(trade(68390.0))
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == []
+    t[0] = now + timedelta(seconds=23)
+    await r.on_event(trade(68395.0))  # 越过满 10 秒还在：改市价平
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == [("pos-0001", CloseReason.TAKE_PROFIT)]

@@ -610,3 +610,18 @@ def test_slippage_and_spread_limits_scale_with_stop(now: datetime) -> None:
     )
     v = g.review(sig, jev(), big, account(now), now, market=wide)
     assert any("价差" in r for r in v.reasons), v.reasons
+
+
+def test_book_depth_shrinks_size_without_rejecting(now: datetime) -> None:
+    f = features(now, atr=4000.0)
+    assert f.book is not None
+    thin = f.book.model_copy(update={"ask_depth_usdt": 1000.0, "bid_depth_usdt": 900_000.0})
+    f = f.model_copy(update={"book": thin})
+    cd = card(now, notional_usdt={"min": 10, "max": 100_000})
+    size = jev(size={"S": 0.1, "M": 0.1, "L": 0.8})
+    acct = account(now, equity=10_000.0)
+    v = guard().review(signal(now, f=f), size, cd, acct, now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.notional_usdt <= 500.0  # 做多吃卖盘 1000U × 0.5
+    off = guard(max_notional_book_frac=0.0).review(signal(now, f=f), size, cd, acct, now)
+    assert off.intent is not None and off.intent.notional_usdt > 1000.0  # 关掉不看盘口

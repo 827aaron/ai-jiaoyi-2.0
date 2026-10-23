@@ -64,7 +64,12 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core import profiles
 from jiaoyi.gate import outcomes
-from jiaoyi.gate.questions import TEMPLATE_VERSION, entry_questions, entry_snapshot
+from jiaoyi.gate.questions import (
+    TEMPLATE_VERSION,
+    entry_questions,
+    entry_snapshot,
+    template_fingerprint,
+)
 from jiaoyi.interfaces import DecisionModel
 from jiaoyi.market.features import RollingFeatureEngine, backfill_minutes
 from jiaoyi.risk.guard import stop_atr
@@ -293,6 +298,9 @@ def candidate(
         p_take=p_take,
         p_real=p_real,
         p_toxic=p_toxic,
+        template_fp=template_fingerprint(),
+        model=resp.model_version,
+        sig=sig.kind.value,
     )
 
 

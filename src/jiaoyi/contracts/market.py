@@ -97,6 +97,12 @@ class BookMetrics(Contract):
     microprice: PosFloat
     spread_bps: NonNegFloat
     depth_usdt: NonNegFloat = Field(description="买卖各前 N 档合计名义价值。")
+    bid_depth_usdt: NonNegFloat | None = Field(
+        default=None, description="买盘前 N 档名义价值（做空吃这一侧）；旧数据为 None。"
+    )
+    ask_depth_usdt: NonNegFloat | None = Field(
+        default=None, description="卖盘前 N 档名义价值（做多吃这一侧）；旧数据为 None。"
+    )
     imbalance: float = Field(ge=-1.0, le=1.0, description="(买量-卖量)/(买量+卖量)")
     ofi: float = Field(description="订单流失衡（窗口累计），正数偏买。")
     cvd: float = Field(description="累计主动买卖差（窗口内），正数偏买。")

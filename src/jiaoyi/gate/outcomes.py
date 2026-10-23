@@ -58,6 +58,12 @@ class Candidate:
     p_take: float | None
     p_real: float | None
     p_toxic: float | None
+    template_fp: str | None = None
+    model: str | None = None
+    sig: str | None = None
+    """信号种类（breakout / volume_surge…），校准分组用。"""
+    stop_tier: str | None = None
+    size_tier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,13 @@ class Result:
     mfe_bps: float
     mae_bps: float
     r: float | None
+    template_fp: str | None = None
+    model: str | None = None
+    sig: str | None = None
+    stop_bps: float | None = None
+    stop_tier: str | None = None
+    """拍板人选的止损宽窄（narrow / mid / wide），校准分组用。"""
+    size_tier: str | None = None
 
 
 def _num(x: Any) -> float | None:
@@ -169,6 +182,11 @@ def candidates(data_dir: str | Path, since: datetime, default_hold_min: int) -> 
                 p_take=_p(answers, "take", "take"),
                 p_real=_p(answers, "genuine", "real"),
                 p_toxic=_p(answers, "toxicity", "high"),
+                template_fp=str(inp.get("template_fp") or "") or None,
+                model=str(out.get("model") or "") or None,
+                sig=str(snap.get("sig") or "") or None,
+                stop_tier=str(detail["stop_tier"]) if detail.get("stop_tier") else None,
+                size_tier=str(detail["size_tier"]) if detail.get("size_tier") else None,
             )
         )
     return res
@@ -220,6 +238,13 @@ def simulate(c: Candidate, bars: list[Kline], fee_bps: float) -> Result | None:
         mfe_bps=round(mfe, 2),
         mae_bps=round(mae, 2),
         r=round(net / c.stop_bps, 3) if c.stop_bps else None,
+        template_fp=c.template_fp,
+        model=c.model,
+        sig=c.sig,
+        stop_bps=round(c.stop_bps, 2) if c.stop_bps else None,
+        stop_tier=c.stop_tier
+        or (c.stop_src.split(":", 1)[1] if c.stop_src.startswith("jev:") else None),
+        size_tier=c.size_tier,
     )
 
 

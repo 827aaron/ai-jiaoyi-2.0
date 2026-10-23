@@ -23,8 +23,9 @@ START = datetime(2026, 10, 22, 6, 17, tzinfo=UTC)
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, *, notices: bool = False) -> None:
+    def __init__(self, tmp_path: Path, *, notices: bool = False, limit_tp: bool = False) -> None:
         self.t = START
+        self.limit_tp = limit_tp
         self.notices = notices  # 开平仓成功的 INFO 推送；老测试只看告警，默认关
         self.api = FakeHbApi()
         self.ex = FakeExchange()
@@ -68,6 +69,7 @@ class Rig:
             income_since=self.ex.income_since,
             exchange=self.ex,
             trade_notices=self.notices,
+            limit_take_profit=self.limit_tp,
         )
 
 
@@ -161,6 +163,20 @@ async def test_trailing_stop_maps_to_hummingbot_trailing_stop(rig: Rig) -> None:
     assert barrier["trailing_stop"] == {"activation_price": "0.003", "trailing_delta": "0.001"}
     await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT")
     assert "trailing_stop" not in rig.api.created[1]["triple_barrier_config"]
+
+
+async def test_take_profit_order_type_follows_switch(tmp_path: Path) -> None:
+    market = Rig(tmp_path / "m")
+    await open_filled(market)
+    barrier = market.api.created[0]["triple_barrier_config"]
+    assert barrier["take_profit_order_type"] == 1  # 默认市价止盈
+    limit = Rig(tmp_path / "l", limit_tp=True)
+    await open_filled(limit)
+    lb = limit.api.created[0]["triple_barrier_config"]
+    assert lb["take_profit_order_type"] == 2  # 只减仓限价止盈
+    # 限价止盈按入场价 × 止盈% 挂，不减开仓手续费；止损照样补手续费
+    assert lb["stop_loss"] == barrier["stop_loss"]
+    assert float(lb["take_profit"]) >= float(barrier["take_profit"])
 
 
 async def test_limit_order_not_filled_yet_has_no_lifeboat_until_fill(rig: Rig) -> None:

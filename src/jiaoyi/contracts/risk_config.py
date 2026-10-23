@@ -249,6 +249,26 @@ class FastLoopConfig(Contract):
         description="作战卡的止损 ATR / 止盈 R 范围超出档位范围时取交集，交集为空才不做；"
         "关掉 = 一端越界整个币不做。",
     )
+    max_notional_book_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=5.0,
+        description="单笔名义 ≤ 吃单一侧前 5 档挂单额 × 这个比例，超了缩单不拒（0 = 不看盘口）。",
+    )
+    limit_take_profit: bool = Field(
+        default=True,
+        description="paper：开仓成交后挂只减仓限价止盈（挂单费 2bp，碰到价位就成交）。改了要重启。",
+    )
+    limit_take_profit_live: bool = Field(
+        default=False,
+        description="testnet / live 也用限价止盈。默认关，Demo 验收后再开。改了要重启。",
+    )
+    tp_limit_fallback_s: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=300.0,
+        description="限价止盈：价格越过止盈价这么多秒仍没平掉，改市价平。",
+    )
     signal_max_age_s: float = Field(
         default=5.0, ge=0.5, le=60.0, description="信号从触发到保镖审核超过这么久就作废。"
     )
@@ -504,6 +524,12 @@ class AppConfig(Contract):
     def profile(self) -> str:
         """旧名：开会间隔档（原「持仓档位」）。"""
         return self.meeting_interval
+
+    @property
+    def limit_take_profit_on(self) -> bool:
+        """用不用限价止盈：paper 看 ``limit_take_profit``，testnet / live 看 ``…_live``。"""
+        fast = self.fast_loop
+        return fast.limit_take_profit if self.mode == RunMode.PAPER else fast.limit_take_profit_live
 
     @property
     def gate_record_only(self) -> bool:

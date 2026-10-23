@@ -87,6 +87,7 @@ def build_execution(
     decision_log: DecisionLog | None = None,
     close_unknown_positions: bool = False,
     demo_trading: bool = True,
+    limit_take_profit: bool = False,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -135,6 +136,7 @@ def build_execution(
         exchange=exchange,
         recorder=recorder(Role.EXECUTOR),
         open_fee_bps=risk.taker_fee_bps,
+        limit_take_profit=limit_take_profit,
     )
     reconciler = ThreeWayReconciler(
         adapter,
