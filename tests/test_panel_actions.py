@@ -687,7 +687,8 @@ def test_hold_follows_meeting_unless_custom(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     info = actions.profile_info(paths)
     assert (info.hold, info.hold_custom) == ("2h", True)  # 示例文件写了 hold = "2h"
-    assert info.hold_choices == ["30m", "1h", "2h", "4h"] and info.hold_paper_only == ["30m"]
+    assert info.hold_choices == ["30m", "1h", "2h", "4h", "8h", "12h", "24h"]
+    assert info.hold_paper_only == ["30m"]
     assert info.hold_specs["4h"].time_limit_s == 14400
     assert info.hold_specs["4h"].atr_period_min == 30
     assert actions.editable_fields("app")["hold"].profiled  # 可以留空
