@@ -20,12 +20,13 @@ from jiaoyi.contracts import (
     Health,
     ModuleStatus,
     Outcome,
+    PositionRecord,
     RiskConfig,
     Role,
 )
 from jiaoyi.contracts.battle_card import CardSymbol
 from jiaoyi.core.recorder import local_day
-from jiaoyi.panel.files import PanelFiles
+from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
 
 STALE_S = 120.0
@@ -47,6 +48,7 @@ class Lamp(BaseModel):
 class Kpis(BaseModel):
     equity_usdt: float | None
     equity_source: Literal["hummingbot", "ledger", "none"]
+    day_start_equity_usdt: float | None
     day_pnl_usdt: float | None
     day_pnl_pct: float | None
     halt_pct: float
@@ -58,10 +60,19 @@ class Kpis(BaseModel):
 
 
 class CardRow(BaseModel):
+    """作战卡里一个标的；点开作战卡时整张表显示。旧记录读不到会议结论时只有币名。"""
+
     symbol: str
     bias: str
     category: str
     reason: str = ""
+    size_tier_max: str | None = None
+    stop_atr: tuple[float, float] | None = None
+    take_profit_r: tuple[float, float] | None = None
+    leverage: tuple[float, float] | None = None
+    notional_usdt: tuple[float, float] | None = None
+    allowed_signals: list[str] = []
+    key_levels: list[float] = []
 
 
 class CardView(BaseModel):
@@ -83,11 +94,14 @@ class FeedItem(BaseModel):
     role: Role
     symbol: str | None
     text: str
+    signal_id: str | None
+    """点开时按它取这个信号从哨兵到执行的整条链。"""
 
 
 class PositionView(BaseModel):
     position_id: str
     symbol: str
+    category: str
     side: str
     status: str
     quantity: float
@@ -98,6 +112,8 @@ class PositionView(BaseModel):
     lifeboat_status: str | None
     lifeboat_price: float | None
     opened_at: datetime
+    time_limit_s: int
+    signal_id: str
     unrealized_usdt: float | None
     keeper: str | None
     """管家对这笔的最新判断（拿住 / 平仓）。"""
@@ -168,67 +184,9 @@ def build_overview(
     last_beat = max(beats) if beats else None
     running = last_beat is not None and now - last_beat <= timedelta(seconds=STALE_S)
 
-    # ---- 资金
-    if hb.ok and hb.equity_usdt is not None:
-        equity, source = hb.equity_usdt, "hummingbot"
-    elif ledger.last_equity is not None:
-        equity, source = ledger.last_equity, "ledger"
-    else:
-        equity, source = None, "none"
-    breaker = files.breaker()
-    start = None
-    if breaker is not None and breaker.day == today:
-        start = breaker.start_equity
-    if start is None and ledger.day_start_day == today:
-        start = ledger.day_start_equity
-    halted = bool(breaker and breaker.day == today and breaker.tripped)
-    day_pnl = equity - start if equity is not None and start else None
-    halt_pct = risk.daily_loss_halt_pct
-    to_halt = None
-    if equity is not None and start:
-        to_halt = 0.0 if halted else max(equity - start * (1 - halt_pct / 100.0), 0.0)
-    live = ledger.live()
-    exposure = (
-        sum(ledger.notional(p) for p in live) / equity
-        if equity is not None and equity > 0
-        else None
-    )
-    kpis = Kpis(
-        equity_usdt=equity,
-        equity_source=source,
-        day_pnl_usdt=day_pnl,
-        day_pnl_pct=day_pnl / start * 100.0 if day_pnl is not None and start else None,
-        halt_pct=halt_pct,
-        to_halt_usdt=to_halt,
-        halted=halted,
-        exposure_x=exposure,
-        max_exposure_x=risk.max_total_exposure_x,
-    )
-
-    # ---- 持仓
-    keeper_last: dict[str, str] = {}
-    for r in records:
-        if r.role is Role.KEEPER and r.position_id:
-            keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
-    positions = [
-        PositionView(
-            position_id=p.position_id,
-            symbol=p.symbol,
-            side=p.side.value,
-            status=p.status.value,
-            quantity=p.quantity,
-            leverage=p.leverage,
-            entry_price=p.entry_price,
-            stop_loss_price=p.stop_loss_price,
-            take_profit_price=p.take_profit_price,
-            lifeboat_status=p.lifeboat.status.value if p.lifeboat else None,
-            lifeboat_price=p.lifeboat.stop_price if p.lifeboat else None,
-            opened_at=p.opened_at,
-            unrealized_usdt=hb.unrealized_of(p.symbol) if hb.ok else None,
-            keeper=keeper_last.get(p.position_id),
-        )
-        for p in sorted(live, key=lambda p: p.opened_at, reverse=True)
-    ]
+    kpis = compute_kpis(files, ledger, hb, risk, now)
+    halted, halt_pct = kpis.halted, kpis.halt_pct
+    positions = position_views(ledger.live(), records, hb)
 
     # ---- 今日统计
     tz = risk.day_reset_tz
@@ -277,6 +235,83 @@ def build_overview(
         alerts=_alerts(records, halted, halt_pct),
         blocked=files.blocked(),
     )
+
+
+def compute_kpis(
+    files: PanelFiles, ledger: Ledger, hb: HbSnapshot, risk: RiskConfig, now: datetime
+) -> Kpis:
+    """总资产、今日盈亏、离熔断、敞口。各页顶部的状态条共用这一份口径。"""
+    today = local_day(now, risk.day_reset_tz).isoformat()
+    equity: float | None
+    source: Literal["hummingbot", "ledger", "none"]
+    if hb.ok and hb.equity_usdt is not None:
+        equity, source = hb.equity_usdt, "hummingbot"
+    elif ledger.last_equity is not None:
+        equity, source = ledger.last_equity, "ledger"
+    else:
+        equity, source = None, "none"
+    breaker = files.breaker()
+    start = None
+    if breaker is not None and breaker.day == today:
+        start = breaker.start_equity
+    if start is None and ledger.day_start_day == today:
+        start = ledger.day_start_equity
+    halted = bool(breaker and breaker.day == today and breaker.tripped)
+    day_pnl = equity - start if equity is not None and start else None
+    halt_pct = risk.daily_loss_halt_pct
+    to_halt = None
+    if equity is not None and start:
+        to_halt = 0.0 if halted else max(equity - start * (1 - halt_pct / 100.0), 0.0)
+    live = ledger.live()
+    exposure = (
+        sum(ledger.notional(p) for p in live) / equity
+        if equity is not None and equity > 0
+        else None
+    )
+    return Kpis(
+        equity_usdt=equity,
+        equity_source=source,
+        day_start_equity_usdt=start,
+        day_pnl_usdt=day_pnl,
+        day_pnl_pct=day_pnl / start * 100.0 if day_pnl is not None and start else None,
+        halt_pct=halt_pct,
+        to_halt_usdt=to_halt,
+        halted=halted,
+        exposure_x=exposure,
+        max_exposure_x=risk.max_total_exposure_x,
+    )
+
+
+def position_views(
+    live: list[PositionRecord], records: list[DecisionRecord], hb: HbSnapshot
+) -> list[PositionView]:
+    """未结束的持仓，最新开的在前；附上 hummingbot 的浮盈浮亏和管家最新判断。"""
+    keeper_last: dict[str, str] = {}
+    for r in records:
+        if r.role is Role.KEEPER and r.position_id:
+            keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
+    return [
+        PositionView(
+            position_id=p.position_id,
+            symbol=p.symbol,
+            category=p.category.value,
+            side=p.side.value,
+            status=p.status.value,
+            quantity=p.quantity,
+            leverage=p.leverage,
+            entry_price=p.entry_price,
+            stop_loss_price=p.stop_loss_price,
+            take_profit_price=p.take_profit_price,
+            lifeboat_status=p.lifeboat.status.value if p.lifeboat else None,
+            lifeboat_price=p.lifeboat.stop_price if p.lifeboat else None,
+            opened_at=p.opened_at,
+            time_limit_s=p.time_limit_s,
+            signal_id=p.signal_id,
+            unrealized_usdt=hb.unrealized_of(p.symbol) if hb.ok else None,
+            keeper=keeper_last.get(p.position_id),
+        )
+        for p in sorted(live, key=lambda p: p.opened_at, reverse=True)
+    ]
 
 
 def _gate_label(st: ModuleStatus | None) -> str:
@@ -339,7 +374,19 @@ def _card(records: list[DecisionRecord], now: datetime) -> CardView | None:
     for n in names:
         cs = per.get(n)
         rows.append(
-            CardRow(symbol=n, bias=cs.bias.value, category=cs.category.value, reason=cs.reason)
+            CardRow(
+                symbol=n,
+                bias=cs.bias.value,
+                category=cs.category.value,
+                reason=cs.reason,
+                size_tier_max=cs.size_tier_max.value,
+                stop_atr=(cs.stop_atr.min, cs.stop_atr.max),
+                take_profit_r=(cs.take_profit_r.min, cs.take_profit_r.max),
+                leverage=(cs.leverage.min, cs.leverage.max),
+                notional_usdt=(cs.notional_usdt.min, cs.notional_usdt.max),
+                allowed_signals=[k.value for k in cs.allowed_signals],
+                key_levels=[lv.price for lv in cs.key_levels],
+            )
             if cs
             else CardRow(symbol=n, bias="unknown", category="other")
         )
@@ -390,7 +437,16 @@ def _feed(records: list[DecisionRecord]) -> list[FeedItem]:
         kind = _kind(r)
         if kind is None:
             continue
-        out.append(FeedItem(ts=r.ts, kind=kind, role=r.role, symbol=r.symbol, text=r.summary))
+        out.append(
+            FeedItem(
+                ts=r.ts,
+                kind=kind,
+                role=r.role,
+                symbol=r.symbol,
+                text=r.summary,
+                signal_id=r.signal_id,
+            )
+        )
         if len(out) >= FEED_LIMIT:
             break
     return out

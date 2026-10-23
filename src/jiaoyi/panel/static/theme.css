@@ -17,13 +17,14 @@
 
   --accent: #0066CC;
   --accent-soft: rgba(0, 102, 204, 0.09);
-  --up: #248A3D;
+  --up: #1A7F37; /* 苹果系统绿在白底对比度不够，文字用深一档 */
   --up-soft: #E8F5EC;
   --down: #D70015;
   --down-soft: #FFECEE;
   --warn: #B25000;
   --warn-soft: #FFF4E0;
   --amber: #FF9F0A;
+  --sl: #D48A00; /* K 线止损线 */
   --ok-lamp: #34C759;
 
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC",

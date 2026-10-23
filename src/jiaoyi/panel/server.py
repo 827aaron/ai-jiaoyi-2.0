@@ -13,14 +13,23 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from jiaoyi.contracts import AppConfig, RiskConfig
+from jiaoyi.contracts import AppConfig, RiskConfig, Role
 from jiaoyi.panel.files import PanelFiles
 from jiaoyi.panel.hb import HbReader
+from jiaoyi.panel.market import Interval, KlineError, KlineSource
 from jiaoyi.panel.overview import Overview, build_overview
+from jiaoyi.panel.pages import (
+    PositionsPage,
+    TeamPage,
+    TrailItem,
+    build_positions,
+    build_signal,
+    build_team,
+)
 
 STATIC = Path(__file__).parent / "static"
 
@@ -46,13 +55,16 @@ def create_app(
     *,
     clock: Clock = lambda: datetime.now(UTC),
     lan_only: bool = True,
+    klines: KlineSource | None = None,
 ) -> FastAPI:
     files = PanelFiles(app_cfg.data_dir, risk.day_reset_tz)
+    market = klines or KlineSource()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         await hb.close()
+        await market.close()
 
     api = FastAPI(title="jiaoyi 面板", docs_url=None, redoc_url=None, lifespan=lifespan)
 
@@ -70,6 +82,25 @@ def create_app(
     @api.get("/api/overview")
     async def overview() -> Overview:
         return build_overview(files, await hb.snapshot(), risk, app_cfg, clock())
+
+    @api.get("/api/positions")
+    async def positions() -> PositionsPage:
+        return build_positions(files, await hb.snapshot(), risk, clock())
+
+    @api.get("/api/team")
+    async def team(role: Role | None = None) -> TeamPage:
+        return build_team(files, clock(), role)
+
+    @api.get("/api/signal/{signal_id}")
+    async def signal(signal_id: str) -> list[TrailItem]:
+        return build_signal(files, clock(), signal_id)
+
+    @api.get("/api/klines")
+    async def klines_(symbol: str, interval: Interval = "1m") -> list[dict[str, float]]:
+        try:
+            return await market.klines(symbol, interval)
+        except KlineError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
 
     @api.get("/")
     async def index() -> FileResponse:
