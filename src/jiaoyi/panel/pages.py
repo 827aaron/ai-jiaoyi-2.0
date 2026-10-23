@@ -110,6 +110,10 @@ class RoleCard(BaseModel):
     """现在正在做的事（团队页流水线高亮这一步）；没在忙就是 None。见 ``_doing``。"""
     progress: Progress = "wait"
     """流程图上的点：出错 > 正在做 > 这一轮做完 > 等待。见 ``_progress``。"""
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    summary: str | None = None
+    """模块报的「刚刚做了什么」；没报就是 None（面板不显示这一行，不猜）。"""
 
 
 class TeamPage(BaseModel):
@@ -128,6 +132,8 @@ class TeamPage(BaseModel):
     gate_thresholds: dict[str, float] = {}
     """拍板门槛（fast_loop 的 min_p_genuine / min_p_take / min_p_direction / max_p_toxic），
     拍板记录详情里标出哪一问没过。"""
+    market_role: RoleCard | None = None
+    """总盘会的模块状态（``Role.MARKET``：上次 / 下次 / 挑了几个）；主程序没报过就是 None。"""
     snapshot: dict[str, Any] | None = None
     """选中盘口员时：data/market_snapshot.json（逐币行情 + 各路推送今天的条数）。"""
 
@@ -302,6 +308,11 @@ def build_team(
         predictor_mode=predictor_mode,
         gate_thresholds=gate_thresholds or {},
         snapshot=files.market_snapshot() if chosen is Role.BOOK_READER else None,
+        market_role=(
+            _role_card(Role.MARKET, status[Role.MARKET.value], now, run)
+            if Role.MARKET.value in status
+            else None
+        ),
         market=market,
         market_progress=_market_progress(market, now, run.tz),
     )
@@ -349,6 +360,11 @@ def _run_info(files: PanelFiles, status: dict[str, ModuleStatus], now: datetime)
 _SCHEDULE_FIELDS = ("last_run_at", "next_run_at", "symbol_count")
 
 
+def _opt_str(st: ModuleStatus, name: str) -> str | None:
+    v = getattr(st, name, None)
+    return v if isinstance(v, str) and v else None
+
+
 def _opt_time(st: ModuleStatus, name: str) -> datetime | None:
     v = getattr(st, name, None)
     return v if isinstance(v, datetime) else None
@@ -381,7 +397,9 @@ def role_state(
         [f"，{count} 个币" if isinstance(count, int) else "", f"，下次 {hm(nxt)}" if nxt else ""]
     )
     age = now - st.ts
-    if age > timedelta(seconds=STALE_S):
+    # 只在开会时报状态的（总盘会）：还没到下次计划时间就不算断心跳
+    planned = nxt is not None and now <= nxt + timedelta(seconds=STALE_S)
+    if age > timedelta(seconds=STALE_S) and not planned:
         mins = max(1, int(age.total_seconds() // 60))
         return "bad", f"无心跳超过 {mins} 分钟（最后 {hm(st.ts)}）"
     if st.health is Health.DISABLED:
@@ -402,16 +420,19 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
     state, text = role_state(role, st, now, run)
     if st is None:
         return RoleCard(
-            role=role, name=ROLE_NAMES[role], state=state, status=text, headline="",
+            role=role, name=ROLE_NAMES.get(role, "总盘会"), state=state, status=text, headline="",
             last_beat=None, last_error=None, calls=0, passed=0, rejected=0, errors=0,
             avg_latency_ms=0.0, cost_usd=0.0,
         )  # fmt: skip
     t = st.today
     return RoleCard(
         role=role,
-        name=ROLE_NAMES[role],
+        name=ROLE_NAMES.get(role, "总盘会"),
         state=state,
         status=text,
+        last_run_at=_opt_time(st, "last_run_at"),
+        next_run_at=_opt_time(st, "next_run_at"),
+        summary=_opt_str(st, "summary"),
         # 定时任务（选币）的上次 / 下次 / 币数已经写进状态，摘要再写一遍就重复了
         headline=""
         if any(getattr(st, n, None) is not None for n in _SCHEDULE_FIELDS)
@@ -1076,6 +1097,8 @@ class SettingsPage(BaseModel):
     schedule: list[SettingItem] = []
     """慢环节奏（config/slow.toml 的 [schedule]）。"""
     schedule_caution: str | None = None
+    gate_cautions: list[str] = []
+    """拍板门槛校准的说明（还没校准推荐时写原因）；有推荐值时直接挂在门槛项的推荐上。"""
     meaning: SettingsMeaning | None = None
     """「你的设置实际意味着」：按硬上限、最长持仓档、本金算的几行（只提示）。"""
     budget: list[SettingItem] = []
@@ -1161,6 +1184,33 @@ def _plain(v: object) -> object:
     return v.value if isinstance(v, StrEnum) else v
 
 
+_GATE_CALIBRATED = {
+    "min_p_take": "p_take",
+    "min_p_genuine": "p_genuine",
+    "max_p_toxic": "max_p_toxic",
+}
+
+
+def _gate_calibration(page: SettingsPage, files: PanelFiles, hold: str) -> None:
+    """拍板门槛旁边显示校准推荐值 + 样本数 + 日期；不自动套用。"""
+    cal = files.gate_calibration(hold)
+    if cal is None:
+        page.gate_cautions = [f"{hold} 档还没有拍板门槛校准结果（跑过 jiaoyi gate-calibrate 才有）"]
+        return
+    rec = cal.get("recommended")
+    samples = cal.get("samples")
+    when = cal.get("computed_at")
+    day = str(when)[:10] if when else "日期不明"
+    if not isinstance(rec, dict):
+        page.gate_cautions = [f"{hold} 档拍板门槛还没有校准推荐：{cal.get('note') or '没写原因'}"]
+        return
+    why = f"校准推荐（{hold} 档，{samples} 个样本，{day}）"
+    for item in page.fast_loop:
+        v = rec.get(_GATE_CALIBRATED.get(item.key, ""))
+        if isinstance(v, int | float) and not isinstance(v, bool):
+            item.recommended, item.recommended_why = float(v), why
+
+
 def build_settings(
     files: PanelFiles,
     risk: RiskConfig,
@@ -1215,6 +1265,7 @@ def build_settings(
             item.recommended_why = (
                 f"按止损的 1/4（只拦不利方向）；{app.hold} 档 BTC 典型约 {item.recommended:g}bp"
             )
+    _gate_calibration(page, files, app.hold)
     for item in page.screener:
         if srec := SCREENER_RECOMMENDED.get(item.key):
             item.recommended, item.recommended_why = srec

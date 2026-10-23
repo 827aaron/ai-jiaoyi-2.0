@@ -140,6 +140,14 @@ class PositionView(BaseModel):
     unrealized_usdt: float | None
     keeper: str | None
     """管家对这笔的最新判断（拿住 / 平仓）。"""
+    mark_price: float | None = None
+    """现价：由 hummingbot 的浮盈倒推（开仓价 ± 浮盈 ÷ 数量），和浮盈同一口径。"""
+    notional_usdt: float | None = None
+    """名义 = 数量 × 现价（没有现价用开仓价）。"""
+    margin_usdt: float | None = None
+    """本金占用 = 名义 ÷ 杠杆。"""
+    pnl_pct: float | None = None
+    """浮盈占名义的百分比（不乘杠杆）。"""
 
 
 class Tiles(BaseModel):
@@ -343,28 +351,41 @@ def position_views(
     for r in records:
         if r.role is Role.KEEPER and r.position_id:
             keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
-    return [
-        PositionView(
-            position_id=p.position_id,
-            symbol=p.symbol,
-            category=p.category.value,
-            side=p.side.value,
-            status=p.status.value,
-            quantity=p.quantity,
-            leverage=p.leverage,
-            entry_price=p.entry_price,
-            stop_loss_price=p.stop_loss_price,
-            take_profit_price=p.take_profit_price,
-            lifeboat_status=p.lifeboat.status.value if p.lifeboat else None,
-            lifeboat_price=p.lifeboat.stop_price if p.lifeboat else None,
-            opened_at=p.opened_at,
-            time_limit_s=p.time_limit_s,
-            signal_id=p.signal_id,
-            unrealized_usdt=hb.unrealized_of(p.symbol) if hb.ok else None,
-            keeper=keeper_last.get(p.position_id),
+    out = []
+    for p in sorted(live, key=lambda p: p.opened_at, reverse=True):
+        pnl = hb.unrealized_of(p.symbol) if hb.ok else None
+        mark = None
+        if pnl is not None and p.entry_price and p.quantity > 0:
+            sign = 1 if p.side.value == "long" else -1
+            mark = p.entry_price + sign * pnl / p.quantity
+        ref = mark or p.entry_price
+        notional = p.quantity * ref if ref else None
+        out.append(
+            PositionView(
+                position_id=p.position_id,
+                symbol=p.symbol,
+                category=p.category.value,
+                side=p.side.value,
+                status=p.status.value,
+                quantity=p.quantity,
+                leverage=p.leverage,
+                entry_price=p.entry_price,
+                stop_loss_price=p.stop_loss_price,
+                take_profit_price=p.take_profit_price,
+                lifeboat_status=p.lifeboat.status.value if p.lifeboat else None,
+                lifeboat_price=p.lifeboat.stop_price if p.lifeboat else None,
+                opened_at=p.opened_at,
+                time_limit_s=p.time_limit_s,
+                signal_id=p.signal_id,
+                unrealized_usdt=pnl,
+                keeper=keeper_last.get(p.position_id),
+                mark_price=mark,
+                notional_usdt=notional,
+                margin_usdt=notional / p.leverage if notional and p.leverage else None,
+                pnl_pct=pnl / notional * 100 if pnl is not None and notional else None,
+            )
         )
-        for p in sorted(live, key=lambda p: p.opened_at, reverse=True)
-    ]
+    return out
 
 
 def _gate_label(st: ModuleStatus | None) -> str:
