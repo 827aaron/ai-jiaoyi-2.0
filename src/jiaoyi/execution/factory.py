@@ -53,6 +53,7 @@ def build_execution(
     *,
     live_gate: LiveGate | None = None,
     decision_log: DecisionLog | None = None,
+    close_unknown_positions: bool = False,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -102,6 +103,7 @@ def build_execution(
         alerter,
         account_name=account_name,
         recorder=recorder(Role.RECONCILER),
+        close_unknown_positions=close_unknown_positions,
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
     )
     lot_rules = ExchangeInfoLotRules(exchange, recorder=recorder(Role.EXECUTOR))

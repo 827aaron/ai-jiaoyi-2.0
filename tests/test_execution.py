@@ -305,6 +305,53 @@ async def test_orphan_exchange_position_is_reported_not_touched(rig: Rig) -> Non
     assert rig.api.stopped == [] and rig.ex.cancelled == []
 
 
+def with_close_unknown(rig: Rig) -> ThreeWayReconciler:
+    return ThreeWayReconciler(
+        rig.adapter,
+        rig.api,
+        rig.ex,
+        rig.lifeboat,
+        rig.registry,
+        rig.alerts,
+        account_name="acct",
+        close_unknown_positions=True,
+    )
+
+
+async def test_close_unknown_switch_flattens_unknown_position(rig: Rig) -> None:
+    rig.ex.set_position("ETHUSDT", Side.SHORT, 2.0)
+    report = await with_close_unknown(rig).reconcile(rig.t)
+    (issue,) = report.issues
+    assert issue.kind is ReconcileIssueKind.ORPHAN_POSITION and issue.fixed
+    assert rig.ex.market_closed == [("ETHUSDT", "buy", 2.0)]  # 空单用买单平
+
+
+async def test_close_unknown_switch_stops_unknown_executor(rig: Rig) -> None:
+    await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "someone-else")
+    report = await with_close_unknown(rig).reconcile(rig.t)
+    assert report.issues[0].fixed
+    assert rig.api.stopped == [("ex1", False)]
+
+
+async def test_close_unknown_switch_failure_stays_unfixed(rig: Rig) -> None:
+    rig.ex.set_position("ETHUSDT", Side.LONG, 2.0)
+    rig.ex.fail_market_close = True
+    (issue,) = (await with_close_unknown(rig).reconcile(rig.t)).issues
+    assert not issue.fixed and "平仓失败" in issue.detail
+
+
+async def test_close_unknown_switch_never_touches_our_own_position(rig: Rig) -> None:
+    await open_filled(rig)
+    report = await with_close_unknown(rig).reconcile(rig.t)
+    assert report.clean and rig.ex.market_closed == [] and rig.api.stopped == []
+
+
+async def test_close_unknown_defaults_to_alert_only(rig: Rig) -> None:
+    from jiaoyi.contracts import AppConfig
+
+    assert AppConfig.model_fields["reconciler_close_unknown_positions"].default is False
+
+
 async def test_stale_lifeboat_cancelled_when_flat(rig: Rig) -> None:
     pid = await open_filled(rig)
     rig.api.terminate("ex1", "STOP_LOSS")

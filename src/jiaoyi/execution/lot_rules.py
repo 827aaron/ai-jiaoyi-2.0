@@ -55,7 +55,8 @@ class ExchangeInfoLotRules:
             log.warning("exchangeInfo 返回空列表，沿用旧缓存")
             return False
         self._rules = {
-            sym: LotRules(f.step_size, f.min_qty, f.min_notional) for sym, f in filters.items()
+            sym: LotRules(f.step_size, f.min_qty, f.min_notional, f.max_qty)
+            for sym, f in filters.items()
         }
         self._loaded_at = now
         return True
