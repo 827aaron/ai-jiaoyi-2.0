@@ -1,0 +1,25 @@
+# 慢环（军师团）的成本和节奏。可选：没有 config/slow.toml 就用这里写的默认值（与现在行为一致）。
+# 复制成 config/slow.toml 再改。这里不放任何风控数值，硬上限只在 risk.toml。
+
+[meeting]
+analysts_crypto = ["market", "social", "news"]                 # 分析师越少越省钱
+analysts_stock  = ["market", "social", "news", "fundamentals"]
+debate_rounds = 1        # 多空辩论轮数 0–3
+risk_rounds   = 1        # 风控讨论轮数 0–3
+quick_model = "deepseek-flash"
+deep_model  = "deepseek-v4-pro"
+pick_tier    = "quick"   # 总盘会（挑币）用 quick（flash，便宜）还是 deep（pro）
+convert_tier = "quick"   # 把结论整理成作战指令那一步
+max_tokens  = 8192
+max_retries = 6
+
+[schedule]
+concurrency = 4                    # 同时开几个标的的会议 1–8
+card_ttl_hours = 2.0               # 作战卡有效期 1–4 小时
+symbol_min_interval_hours = 2.0    # 同一个币两次会议的最小间隔 0.5–12 小时
+
+[prices]                           # 每百万 token 的美元价，只用于花费统计；M2 真机验证时按官网核对
+flash_in = 0.15
+flash_out = 0.60
+pro_in = 0.50
+pro_out = 2.00

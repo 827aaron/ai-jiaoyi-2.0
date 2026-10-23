@@ -14,6 +14,7 @@ build/
 !.env.example
 config/risk.toml
 config/app.toml
+config/slow.toml
 
 # 上游仓库（make hb-fetch 拉取）
 vendor/

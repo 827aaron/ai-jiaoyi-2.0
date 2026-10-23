@@ -60,6 +60,12 @@ class TradingAgentsSettings:
     risk_rounds: int = 1
     max_tokens: int = 8192
     max_retries: int = 6
+    # 每类标的请哪几位分析师（越少越省钱）；默认与 TradingAgents 的完整阵容一致。
+    analysts_crypto: tuple[str, ...] = ("market", "social", "news")
+    analysts_stock: tuple[str, ...] = ("market", "social", "news", "fundamentals")
+    # 挑币会议、整理作战指令这两步用哪档模型："quick"=flash，"deep"=pro。
+    pick_tier: str = "quick"
+    convert_tier: str = "quick"
     # 每百万 token 的美元价（输入, 输出）。⚠ 占位值，M2 拿到 key 真机验证时按 DeepSeek 官网核对，
     # 并把核对日期写在这里。只影响资金页的花费统计，不影响下单和风控。
     price_per_mtok: Mapping[str, tuple[float, float]] = field(
@@ -406,6 +412,10 @@ class TradingAgentsEngine:
             total += (u.get("input_tokens", 0) * pin + u.get("output_tokens", 0) * pout) / 1e6
         return round(total, 6)
 
+    @staticmethod
+    def _llm(graph: Any, tier: str) -> Any:
+        return graph.deep_thinking_llm if tier == "deep" else graph.quick_thinking_llm
+
     def _graph(self, analysts: tuple[str, ...], handler: Any) -> Any:
         from tradingagents.default_config import build_default_config
         from tradingagents.graph.trading_graph import (
@@ -437,9 +447,8 @@ class TradingAgentsEngine:
         from langchain_core.callbacks import UsageMetadataCallbackHandler
 
         handler = UsageMetadataCallbackHandler()
-        llm = self._graph(("market",), handler).quick_thinking_llm.with_structured_output(
-            _PickDraft
-        )
+        graph = self._graph(("market",), handler)
+        llm = self._llm(graph, self._s.pick_tier).with_structured_output(_PickDraft)
         table = "\n".join(
             f"{e.symbol} 类别={e.category.value} 分数={e.score:.2f} 理由={'、'.join(e.reasons)}"
             + self._liq_note(e.symbol)
@@ -488,11 +497,7 @@ class TradingAgentsEngine:
 
         handler = UsageMetadataCallbackHandler()
         ticker, asset_type = ta_ticker(entry)
-        analysts = (
-            ("market", "social", "news", "fundamentals")
-            if asset_type == "stock"
-            else ("market", "social", "news")
-        )
+        analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
         graph = self._graph(analysts, handler)
         state, _rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
         decision = str(state.get("final_trade_decision", ""))
@@ -507,7 +512,7 @@ class TradingAgentsEngine:
             "倍数区间（如 1.5–3）。key_levels 只填结论里明确提到的价位。reason 用中文。\n"
             f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{self._brief_text()}\n结论：\n{decision}"
         )
-        llm = graph.quick_thinking_llm.with_structured_output(_CardSymbolDraft)
+        llm = self._llm(graph, self._s.convert_tier).with_structured_output(_CardSymbolDraft)
         last: Exception | None = None
         for _ in range(2):
             try:
