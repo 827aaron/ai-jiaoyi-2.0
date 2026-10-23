@@ -179,6 +179,7 @@ async def test_patrol_action_closes_and_keeper_forgets(tmp_path: Path, now: date
     r = Runner(app)
     r.positions = [_position(), _position(position_id="pos-0002", symbol="ETHUSDT")]
     await r.on_event(c.MarkPrice.model_validate(_mark(now)))
+    await asyncio.gather(*r._tasks)
     assert ex.closed == [("pos-0001", CloseReason.PATROL)]
     assert keeper.forgotten == ["pos-0001"] and not patrol.urgent
     assert [p.position_id for p in r.positions] == ["pos-0002"]
@@ -286,3 +287,59 @@ async def test_run_until_cancelled_then_stops(tmp_path: Path, now: datetime) -> 
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not app.started
+
+
+async def test_concurrent_signals_respect_max_open_positions(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+
+    class SlowExecutor(FakeExecutor):
+        async def open(self, intent: c.OrderIntent) -> c.PositionRecord:
+            await asyncio.sleep(0.01)  # 开仓要等成交，期间另一个信号到达
+            return await super().open(intent)
+
+        async def account(self) -> c.AccountState:
+            acc = await super().account()
+            return acc.model_copy(update={"open_positions": len(self.opened)})
+
+    class OneSlot:
+        """max_open_positions=1 / 敞口只够一笔：已有持仓就拒。"""
+
+        def review(self, *args: object) -> c.RiskVerdict:
+            account = args[3]
+            assert isinstance(account, c.AccountState)
+            ok = account.open_positions == 0
+            name = "risk_verdict_approved" if ok else "risk_verdict_rejected"
+            return c.RiskVerdict.model_validate(load_example(name))
+
+    ex = SlowExecutor()
+    app.m = dataclasses.replace(
+        app.m, executor=ex, gate=FakeGate(), risk=OneSlot(), cards=FakeCards(h.card(now))
+    )
+    r = Runner(app)
+    await asyncio.gather(r.handle_signal(h.signal(now)), r.handle_signal(h.signal(now)))
+    assert len(ex.opened) == 1
+
+
+async def test_stuck_close_does_not_block_market_events(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    release = asyncio.Event()
+
+    class StuckExecutor(FakeExecutor):
+        async def close(self, position_id: str, reason: CloseReason) -> None:
+            self.closed.append((position_id, reason))
+            await release.wait()
+
+    ex = StuckExecutor()
+    patrol = FakePatrol(c.PatrolAction(ts=now, symbols=["BTCUSDT"], reason="1 分钟急跌"))
+    app.m = dataclasses.replace(app.m, executor=ex, keeper=FakeKeeper(), patrol=patrol)
+    r = Runner(app)
+    r.positions = [_position(), _position(position_id="pos-0002")]
+    ev = c.MarkPrice.model_validate(_mark(now))
+    await asyncio.wait_for(r.on_event(ev), 0.5)  # 平仓卡住，行情照常处理
+    await asyncio.sleep(0)
+    await asyncio.wait_for(r.on_event(ev), 0.5)  # 同一笔不重复提交
+    await asyncio.sleep(0)
+    assert sorted(pid for pid, _ in ex.closed) == ["pos-0001", "pos-0002"]  # 两笔并行
+    release.set()
+    await asyncio.gather(*r._tasks)
+    assert r.positions == []

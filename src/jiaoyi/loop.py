@@ -78,6 +78,9 @@ class Runner:
         self._last_screen: datetime | None = None
         self._last_card_at: datetime | None = None
         self._refreshing = False
+        # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
+        self._open_lock = asyncio.Lock()
+        self._closing: set[str] = set()
 
     # ------------------------------------------------------------ 生命周期
     async def run(self) -> None:
@@ -151,7 +154,9 @@ class Runner:
                 p for p in self.positions if not action.symbols or p.symbol in action.symbols
             ]
             for pos in targets:
-                await self.close(pos, CloseReason.PATROL)
+                # 平仓要等执行器结束（最长十几秒），放后台并行，行情和其它标的不能停
+                if pos.position_id not in self._closing:
+                    self._spawn(self.close(pos, CloseReason.PATROL))
         if isinstance(event, Trade):
             snap = self.m.features.snapshot(event.symbol)
             if snap is None:
@@ -166,20 +171,21 @@ class Runner:
         card = self.m.cards.current(now)
         if card is None:
             return
-        jev = await self.m.gate.evaluate(signal, card, now)
-        account = await self.m.executor.account()
-        verdict = self.m.risk.review(signal, jev, card, account, self.app.clock())
-        if not verdict.approved or verdict.intent is None:
-            return
-        intent = verdict.intent
-        try:
-            pos = await self.m.executor.open(intent)
-        except Exception as e:
-            log.exception("开仓失败")
-            await self.app._alert(AlertLevel.WARN, f"{intent.symbol} 开仓失败", str(e)[:200])
-            return
-        # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
-        self.positions = [*self.positions, pos]
+        jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
+        async with self._open_lock:
+            account = await self.m.executor.account()
+            verdict = self.m.risk.review(signal, jev, card, account, self.app.clock())
+            if not verdict.approved or verdict.intent is None:
+                return
+            intent = verdict.intent
+            try:
+                pos = await self.m.executor.open(intent)
+            except Exception as e:
+                log.exception("开仓失败")
+                await self.app._alert(AlertLevel.WARN, f"{intent.symbol} 开仓失败", str(e)[:200])
+                return
+            # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
+            self.positions = [*self.positions, pos]
 
     # ------------------------------------------------------------ 盯仓
     async def refresh_positions(self) -> None:
@@ -193,12 +199,18 @@ class Runner:
         ]
 
     async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
+        """同一笔正在平就不重复提交。"""
+        if pos.position_id in self._closing:
+            return
+        self._closing.add(pos.position_id)
         try:
             await self.m.executor.close(pos.position_id, reason)
         except Exception as e:
             log.exception("平仓失败")
             await self.app._alert(AlertLevel.CRITICAL, f"{pos.symbol} 平仓失败", str(e)[:200])
             return
+        finally:
+            self._closing.discard(pos.position_id)
         self.positions = [p for p in self.positions if p.position_id != pos.position_id]
         if isinstance(self.m.keeper, _Forgets):
             self.m.keeper.forget(pos.position_id)
