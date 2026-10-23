@@ -261,3 +261,50 @@ input[type="password"], .su-narrow input[type="number"], .su-narrow select { fon
 /* 选币页：手动加币输入框、行尾操作按钮 */
 .inp { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
 td.nowrap { white-space: nowrap; }
+
+/* ---- 设置页 v2：单列（最宽 760），每项一行可展开 */
+.st-col { max-width: 760px; display: flex; flex-direction: column; gap: 16px; }
+.card.st { padding: 0; gap: 0; }
+.card.st > .ch { padding: 14px 18px 4px; }
+.st-row { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line); min-height: 52px; flex-wrap: wrap; }
+.card.st > .ch + .st-row { border-top: 0; }
+.st-row .k { flex: 1; min-width: 160px; color: var(--hi); font-size: 14px; }
+.st-row .k small { display: block; color: var(--dim); font-size: 12px; }
+.st-pins { flex-basis: 100%; font-size: 12px; color: var(--dim); }
+.st-item { border-top: 1px solid var(--line); }
+.card.st > .ch + .st-item, .st-sub + .st-item, .st-note + .st-item { border-top: 0; }
+.st-sum { width: 100%; border: 0; background: transparent; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(64px, auto) 14px; align-items: center; gap: 14px; padding: 11px 18px; min-height: 52px; text-align: left; cursor: pointer; }
+.st-sum:hover { background: var(--bg); }
+.st-sum .nm { color: var(--hi); font-size: 14px; min-width: 0; }
+.st-sum .cur { font: 600 15px var(--font-disp); color: var(--hi); text-align: right; white-space: nowrap; }
+.st-sum .cur.warn { color: var(--warn); }
+.st-item.big .cur { font-size: 20px; }
+.st-item.ro .cur { color: var(--dim); font-weight: 500; }
+.st-sum .aux { font-size: 12px; color: var(--dim); text-align: right; white-space: nowrap; }
+.st-sum .aux b { color: var(--up); font-weight: 600; }
+.st-sum .chev { color: var(--faint); transition: transform 0.15s; }
+.st-item.open .chev { transform: rotate(90deg); }
+.st-body { display: none; padding: 0 18px 14px; font-size: 13px; color: var(--dim); flex-direction: column; gap: 8px; }
+.st-item.open .st-body { display: flex; }
+.st-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.st-key { font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; color: var(--faint); }
+.st-sub { font-size: 12px; font-weight: 600; color: var(--dim); padding: 16px 18px 6px; border-top: 1px solid var(--line); }
+.st-tabs + .st-sub, .st-note + .st-sub, .card.st > .ch + .st-sub { border-top: 0; }
+.st-note { font-size: 12.5px; color: var(--dim); padding: 0 18px 4px; }
+.st-pad { padding: 0 18px; }
+.st-foot { padding: 10px 18px 14px; font-size: 12px; color: var(--dim); border-top: 1px solid var(--line); }
+.st-tabs { display: flex; gap: 4px; padding: 6px 18px 10px; overflow-x: auto; }
+.st-tabs button { border: 0; background: var(--fill); border-radius: 980px; padding: 6px 14px; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.st-tabs button.on { background: var(--hi); color: var(--card); font-weight: 600; }
+.st-pending { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: var(--accent-soft); border-radius: 12px; padding: 12px 16px; }
+.st-pending .t { flex: 1; min-width: 0; }
+.st-pending .t b { color: var(--hi); }
+.st-pending .t div { font-size: 12.5px; color: var(--dim); }
+.st-links { display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline; padding: 0 4px; font-size: 13px; }
+.st-links button { border: 0; background: none; color: var(--accent); padding: 0; cursor: pointer; }
+.dlg select#dlg-v, .dlg input#dlg-v { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
+@media (max-width: 720px) {
+  .st-sum { grid-template-columns: minmax(0, 1fr) auto 14px; row-gap: 2px; }
+  .st-sum .aux { grid-column: 1 / 2; grid-row: 2; text-align: left; }
+}
+@media (prefers-reduced-motion: reduce) { .st-sum .chev { transition: none; } }
