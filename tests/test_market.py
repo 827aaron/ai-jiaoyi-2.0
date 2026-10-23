@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -383,3 +386,59 @@ def test_features_funding_countdown_and_5m_liquidations() -> None:
     assert v["funding_in_min"] == pytest.approx(12.0)
     assert v["liq_long_usdt_5m"] == pytest.approx(7000.0) and v["liq_long_usdt_1m"] == 0.0
     assert v["liq_short_usdt_5m"] == pytest.approx(2000.0)
+
+
+async def test_feed_heartbeat_reports_book_reader_status(tmp_path: Path) -> None:
+    """团队页「盘口员」：订阅、连接、今日消息数、最后消息多久前；断流报 down。"""
+    import json
+
+    from jiaoyi.core.store import JsonlDecisionLog
+
+    sink = JsonlDecisionLog(tmp_path)
+    feed = BinanceFuturesFeed(status_sink=sink, day_reset_tz="Asia/Bangkok", stale_after_s=30)
+    now = datetime.now(UTC)
+
+    def status() -> c.ModuleStatus:
+        feed.heartbeat(now)
+        return sink.read_status()[c.Role.BOOK_READER.value]
+
+    assert status().health == c.Health.STARTING  # 还没订阅
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    feed.symbols, feed._symset = ["BTCUSDT"], frozenset({"BTCUSDT"})
+    feed._tasks = [asyncio.create_task(forever())]
+    st = status()
+    assert st.health == c.Health.STARTING and "等第一条行情" in st.headline
+
+    class Ws:
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                for m in (False, True, True):
+                    yield json.dumps({"stream": "btcusdt@aggTrade", "data": {
+                        "e": "aggTrade", "E": MS, "s": "BTCUSDT", "p": "1", "q": "1",
+                        "T": MS, "m": m}})  # fmt: skip
+
+            return gen()
+
+    await feed._pump(Ws())  # type: ignore[arg-type]
+    eng = RollingFeatureEngine()
+    eng.update(_book(now, 100.0, 1.0, 100.1, 1.0))
+    feed.set_coverage(eng.coverage)
+    st = status()
+    assert st.health == c.Health.OK and st.today.calls == 3
+    assert "订阅 1 个币" in st.headline and "盘口新鲜 1 个" in st.headline
+
+    feed._down.add(0)
+    feed.reconnects = 2
+    st = status()
+    assert (
+        st.health == c.Health.DEGRADED and "断 1 条" in st.headline and "重连 2 次" in st.headline
+    )
+
+    now = now + timedelta(seconds=45)
+    st = status()
+    assert st.health == c.Health.DOWN and "断流 45 秒" in st.headline
+    await feed.close()
+    assert status().health == c.Health.DOWN

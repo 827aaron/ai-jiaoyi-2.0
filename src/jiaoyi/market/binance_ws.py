@@ -12,6 +12,9 @@
 
 断线自动重连（1、2、4……最多 30 秒退避），重连期间 ``health`` 为 degraded。
 队列满时丢最旧的事件并计数，说明消费跟不上，也报 degraded。
+
+团队页的「盘口员」卡由 ``heartbeat`` 上报：订阅几个币、连接几条（断几条）、今天收到多少条消息、
+最后一条消息多久前、重连几次。超过 ``stale_after_s`` 秒一条消息都没有就报 down（断流）。
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Callable, Sequence
+from datetime import UTC, date, datetime
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -34,9 +37,14 @@ from jiaoyi.contracts import (
     Liquidation,
     MarketEvent,
     MarkPrice,
+    ModuleStatus,
+    Role,
     Side,
+    TodayStats,
     Trade,
 )
+from jiaoyi.core.recorder import local_day
+from jiaoyi.interfaces import DecisionLog
 from jiaoyi.market.liquidations import LiquidationTracker
 
 logger = logging.getLogger(__name__)
@@ -44,6 +52,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_WS_URL = "wss://fstream.binance.com/stream"
 STREAMS_PER_SYMBOL = 5
 SYMBOLS_PER_CONN = 40
+STALE_AFTER_S = 30.0
 
 
 def _dt(ms: Any) -> datetime:
@@ -141,6 +150,9 @@ class BinanceFuturesFeed:
         max_backoff_s: float = 30.0,
         all_market_liquidations: bool = True,
         liquidations: LiquidationTracker | None = None,
+        status_sink: DecisionLog | None = None,
+        day_reset_tz: str = "UTC",
+        stale_after_s: float = STALE_AFTER_S,
     ) -> None:
         self._url = url
         self._all_liq = all_market_liquidations
@@ -155,6 +167,18 @@ class BinanceFuturesFeed:
         self.symbols: list[str] = []
         self.dropped = 0
         self.reconnects = 0
+        self.messages = 0
+        self.last_message_at: datetime | None = None
+        self._sink = status_sink
+        self._tz = day_reset_tz
+        self._stale_s = stale_after_s
+        self._day: date | None = None
+        self._day_base = 0  # 今天开始时 messages 的值
+        self._coverage: Callable[[datetime], tuple[int, int]] | None = None
+
+    def set_coverage(self, coverage: Callable[[datetime], tuple[int, int]]) -> None:
+        """接上特征引擎的 ``coverage``：盘口员卡顺带报盘口新鲜几个币、ATR 就绪几个币。"""
+        self._coverage = coverage
 
     @property
     def health(self) -> Health:
@@ -235,9 +259,58 @@ class BinanceFuturesFeed:
                 continue
             if ev is None:
                 continue
+            self.messages += 1
+            self.last_message_at = datetime.now(UTC)
             if not self.accept(ev):
                 continue
             if self._queue.full():
                 self._queue.get_nowait()
                 self.dropped += 1
             self._queue.put_nowait(ev)
+
+    # ------------------------------------------------------------------ 状态上报
+
+    def heartbeat(self, now: datetime) -> None:
+        """团队页「盘口员」卡：连接、消息量、断流。没给 ``status_sink`` 就不报。"""
+        if self._sink is None:
+            return
+        day = local_day(now, self._tz)
+        if day != self._day:
+            self._day, self._day_base = day, self.messages
+        health, headline = self._status(now)
+        try:
+            self._sink.heartbeat(
+                ModuleStatus(
+                    role=Role.BOOK_READER,
+                    health=health,
+                    ts=now,
+                    headline=headline,
+                    today=TodayStats(calls=self.messages - self._day_base),
+                    version="binance-ws",
+                )
+            )
+        except OSError:
+            logger.exception("盘口员上报状态失败")
+
+    def _status(self, now: datetime) -> tuple[Health, str]:
+        if self._closed:
+            return Health.DOWN, "行情连接已关闭"
+        if not self._tasks:
+            return Health.STARTING, "等候选池出来再订阅行情"
+        conns, down = len(self._tasks), len(self._down)
+        links = f"{conns} 条连接" + (f"（断 {down} 条）" if down else "正常")
+        tail = f"，重连 {self.reconnects} 次" if self.reconnects else ""
+        if self.last_message_at is None:
+            return Health.STARTING, f"订阅 {len(self.symbols)} 个币，{links}，等第一条行情{tail}"
+        age = (now - self.last_message_at).total_seconds()
+        if age > self._stale_s:
+            return Health.DOWN, f"行情断流 {age:.0f} 秒，{links}{tail}"
+        head = f"订阅 {len(self.symbols)} 个币，{links}，最后消息 {max(age, 0):.0f} 秒前{tail}"
+        if self._coverage is not None:
+            books, ready = self._coverage(now)
+            head += f"；盘口新鲜 {books} 个，ATR 就绪 {ready} 个"
+        if self.dropped:
+            return Health.DEGRADED, f"{head}；下游处理不过来，丢了 {self.dropped} 条"
+        if down:
+            return Health.DEGRADED, head
+        return Health.OK, head

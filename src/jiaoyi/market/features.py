@@ -179,6 +179,13 @@ class RollingFeatureEngine:
 
     # ------------------------------------------------------------------ 输出
 
+    def coverage(self, now: datetime) -> tuple[int, int]:
+        """（盘口 10 秒内更新过的币数，ATR 已攒够的币数），给团队页「盘口员」卡用。"""
+        t = _ts(now)
+        books = sum(1 for st in self._s.values() if st.book and t - _ts(st.book.ts) <= 10.0)
+        ready = sum(1 for st in self._s.values() if st.atr is not None)
+        return books, ready
+
     def snapshot(self, symbol: str) -> FeatureSnapshot | None:
         st = self._s.get(symbol)
         if st is None or st.last_price is None or st.atr is None:
