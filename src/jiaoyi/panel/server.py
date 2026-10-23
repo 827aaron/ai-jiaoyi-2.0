@@ -106,6 +106,10 @@ class SettingsBody(BaseModel):
     password: str = Field(max_length=256)
 
 
+class PasswordBody(BaseModel):
+    password: str = Field(max_length=256)
+
+
 class SetupPasswordBody(BaseModel):
     password: str = Field(max_length=256)
     confirm: str = Field(max_length=256)
@@ -244,6 +248,16 @@ def create_app(
             changed = actions.update_config(
                 config_paths, data_dir, body.section, body.changes, body.password, clock()
             )
+        except ActionError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"changed": changed, "pending": actions.config_pending(config_paths, data_dir)}
+
+    @api.post("/api/settings/clear-profile-pins")
+    async def clear_profile_pins(body: PasswordBody) -> dict[str, Any]:
+        if config_paths is None:
+            raise HTTPException(status_code=400, detail="面板启动时没给配置文件路径，只能看不能改")
+        try:
+            changed = actions.clear_profile_pins(config_paths, data_dir, body.password, clock())
         except ActionError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"changed": changed, "pending": actions.config_pending(config_paths, data_dir)}
