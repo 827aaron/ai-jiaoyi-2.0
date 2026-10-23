@@ -67,6 +67,13 @@ class MeetingConfig(_Strict):
 
 
 class ScheduleConfig(_Strict):
+    max_cards_per_round: int | None = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description="每轮最多出几张作战卡（几个标的开会）。不写 = 用 app.toml 的 card_pick_max；"
+        "写了取两者较小值，不会超过 card_pick_max。",
+    )
     concurrency: int = Field(default=4, ge=1, le=8, description="同时开几个标的的会议。")
     card_ttl_hours: float = Field(default=2.0, ge=1.0, le=4.0, description="作战卡有效期。")
     symbol_min_interval_hours: float = Field(
@@ -77,6 +84,12 @@ class ScheduleConfig(_Strict):
 class BudgetConfig(_Strict):
     daily_cost_limit_usd: float = Field(
         default=10.0, gt=0, le=1000, description="军师团每个交易日（曼谷 0 点清零）最多花多少美元。"
+    )
+    failed_meeting_cost_usd: float = Field(
+        default=0.05,
+        ge=0,
+        le=5,
+        description="失败的会议拿不到真实 token 用量时（超时、断网）按这个估算价计入日花费。",
     )
     fail_backoff_minutes: tuple[float, ...] = Field(
         default=(5.0, 10.0, 30.0), description="开会连续失败后的等待时间，最后一档之后保持不变。"
@@ -124,6 +137,11 @@ class SlowConfig(_Strict):
             convert_tier=m.convert_tier,
         )
 
+    def effective_pick_max(self, app_pick_max: int) -> int:
+        """每轮最多出几张卡：``max_cards_per_round`` 与 ``card_pick_max`` 取小。"""
+        n = self.schedule.max_cards_per_round
+        return app_pick_max if n is None else min(n, app_pick_max)
+
     def commander_kwargs(self) -> dict[str, Any]:
         """传给 ``BattleCardCommander(...)`` 的节奏参数。"""
         s = self.schedule
@@ -132,6 +150,7 @@ class SlowConfig(_Strict):
             "ttl": timedelta(hours=s.card_ttl_hours),
             "symbol_min_interval": timedelta(hours=s.symbol_min_interval_hours),
             "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
+            "failed_meeting_cost_usd": self.budget.failed_meeting_cost_usd,
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
         }
 

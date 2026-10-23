@@ -128,3 +128,16 @@ def test_budget_defaults_and_validation(tmp_path: Path) -> None:
         p.write_text(body, encoding="utf-8")
         with pytest.raises(ConfigError):
             load_slow_config(p)
+
+
+def test_max_cards_per_round(tmp_path: Path) -> None:
+    assert SlowConfig().effective_pick_max(20) == 20  # 不写 = 用 card_pick_max
+    p = tmp_path / "slow.toml"
+    p.write_text("[schedule]\nmax_cards_per_round = 8\n", encoding="utf-8")
+    cfg = load_slow_config(p)
+    assert cfg.effective_pick_max(20) == 8
+    assert cfg.effective_pick_max(5) == 5  # 不会超过 card_pick_max
+    for bad in ("0", "51"):
+        p.write_text(f"[schedule]\nmax_cards_per_round = {bad}\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_slow_config(p)
