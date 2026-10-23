@@ -172,6 +172,8 @@ async def test_slow_config_and_brief_reach_commander_and_engine(
     assert isinstance(brief, MarketBriefService) and cards._brief is brief  # 一份简报两边共用
     assert seen["settings"] == slow.engine_settings()
     assert cards._ttl == timedelta(hours=3)
+    assert cards._journal is not None
+    assert cards._journal.path == tmp_path / "card_review" / "cards.jsonl"  # 复盘流水在 data_dir 下
     assert brief.aclose in list(app._closers)
     await app.stop()
 
