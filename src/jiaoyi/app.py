@@ -54,6 +54,7 @@ from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.account_check import AccountMismatch
 from jiaoyi.execution.factory import MissingSecret, build_execution
+from jiaoyi.execution.income_daily import IncomeDaily
 from jiaoyi.execution.live_gate import LiveGate
 from jiaoyi.execution.stub import (
     StubExecutorAdapter,
@@ -298,6 +299,8 @@ class Built:
     """新闻 / 公告源。只有真军师团时才有；主循环定时 ``poll_and_notify``。"""
     startup_checks: list[Closer] = field(default_factory=list)
     """启动前必须通过的核对（hummingbot 与 ccxt 是同一账户）；抛异常即拒绝启动。"""
+    income: IncomeDaily | None = None
+    """币安收入流水按日汇总（data/income_daily.json）；没连交易所时没有。主循环定时刷新。"""
 
 
 def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
@@ -320,7 +323,7 @@ def _build_execution(
     closers: list[Closer],
     decision_log: JsonlDecisionLog,
     startup_checks: list[Closer],
-) -> tuple[ExecutorAdapter, LifeboatStop, Reconciler, LotRulesProvider]:
+) -> tuple[ExecutorAdapter, LifeboatStop, Reconciler, LotRulesProvider, IncomeDaily | None]:
     """执行层按模式选币安密钥（testnet/paper 用测试网的，live 用主网的）。
 
     live 没解锁（确认词 + 面板密码）或缺密钥：抛异常，拒绝启动。
@@ -343,10 +346,13 @@ def _build_execution(
         if mode is RunMode.LIVE:
             raise
         log.warning("执行层缺密钥，%s 模式下不开仓", mode.value, exc_info=True)
-        return StubExecutorAdapter(clock()), StubLifeboatStop(), StubReconciler(), StubLotRules()
+        stubs = StubExecutorAdapter(clock()), StubLifeboatStop(), StubReconciler()
+        return *stubs, StubLotRules(), None
     closers.append(stack.close)
     startup_checks.append(stack.verify_same_account)
-    return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules
+    # Demo / paper 也拉：面板的盈利口径看的就是这个账户的流水
+    income = IncomeDaily(stack.exchange.income_rows, app_cfg.data_dir, risk_cfg.day_reset_tz)
+    return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules, income
 
 
 def build_modules(
@@ -421,6 +427,7 @@ def build_modules(
     lifeboat: LifeboatStop
     reconciler: Reconciler
     lot_rules: LotRulesProvider
+    income: IncomeDaily | None = None
     if offline:
         alerter = StubAlerter()
         executor, lifeboat, reconciler, lot_rules = (
@@ -431,7 +438,7 @@ def build_modules(
         )
     else:
         alerter = _build_alerter(secrets, closers)
-        executor, lifeboat, reconciler, lot_rules = _build_execution(
+        executor, lifeboat, reconciler, lot_rules, income = _build_execution(
             risk_cfg, app_cfg, secrets, alerter, clock, closers, decision_log, startup_checks
         )
 
@@ -492,7 +499,7 @@ def build_modules(
         cards=cards,
         alerter=alerter,
     )
-    return Built(modules, closers, recorders, gate_mode, lot_rules, news, startup_checks)
+    return Built(modules, closers, recorders, gate_mode, lot_rules, news, startup_checks, income)
 
 
 class App:
@@ -519,6 +526,7 @@ class App:
         self.recorders: dict[Role, RoleRecorder] = {}
         self.gate_mode = "none"
         self.lot_rules: LotRulesProvider = StubLotRules()
+        self.income: IncomeDaily | None = None
         self.news: NewsHub | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
@@ -537,6 +545,7 @@ class App:
             self._startup_checks = built.startup_checks
             self.recorders, self.gate_mode = built.recorders, built.gate_mode
             self.lot_rules = built.lot_rules
+            self.income = built.income
             self.news = built.news
         self.m = modules
         self.pool: SymbolPool | None = None
@@ -637,6 +646,11 @@ class App:
         """拉一次交易所精度。失败沿用旧缓存，过期后保镖自动拒单。"""
         if isinstance(self.lot_rules, _Refreshable) and not await self.lot_rules.refresh():
             log.warning("下单精度刷新失败")
+
+    async def refresh_income(self) -> None:
+        """刷新 data/income_daily.json（面板的盈利口径）。拉不到沿用文件里的旧数。"""
+        if self.income is not None:
+            await self.income.refresh(self.clock())
 
     def blocked_symbols(self) -> dict[str, str]:
         """当前禁止新开仓的币 → 原因（来自币安下架公告）。"""

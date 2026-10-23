@@ -12,6 +12,7 @@ from jiaoyi.execution.exchange import (
     ExchangeError,
     ExchangePosition,
     ExchangeStop,
+    IncomeRow,
     LotFilter,
 )
 from jiaoyi.execution.hb_client import HbApiError
@@ -220,6 +221,11 @@ class FakeExchange:
         if self.income_down:
             raise ExchangeError("收入流水不可用")
         return self.income
+
+    async def income_rows(self, since: datetime) -> list[IncomeRow]:
+        if self.income_down:
+            raise ExchangeError("收入流水不可用")
+        return [IncomeRow(since, "REALIZED_PNL", self.income)] if self.income else []
 
     async def wallet_usdt(self) -> float:
         return self.wallet
