@@ -625,6 +625,51 @@ class PnlPeriod(BaseModel):
     """交易盈亏 + 手续费 + 资金费 − AI 费（资金费拿不到时不算它）。"""
 
 
+AiRange = Literal["today", "7d", "all"]
+AiKind = Literal["commander", "market", "jev", "other"]
+AI_KIND_NAMES: dict[str, str] = {
+    "commander": "军师团",
+    "market": "总盘会",
+    "jev": "Jev",
+    "other": "其他",
+}
+AI_ROW_LIMIT = 300
+"""明细最多给前端这么多条（最新在前）；小计按全部记录算。"""
+
+
+class AiCall(BaseModel):
+    """一次花了钱（或失败）的 AI 调用，来自决策日志。"""
+
+    ts: datetime
+    kind: AiKind
+    who: str
+    symbol: str | None
+    cost_usd: float
+    tokens: int | None
+    """输入 + 输出 tokens；这条记录没写就是 None（面板显示“没记”）。"""
+    result: Literal["ok", "failed", "timeout"]
+    detail: str
+    estimated: bool = False
+    """失败的会拿不到实际费用时，慢环按 token 估的（记录里 ``output.cost_estimated``）。"""
+
+
+class AiGroup(BaseModel):
+    kind: AiKind
+    name: str
+    cost_usd: float
+    calls: int
+
+
+class AiCostDetail(BaseModel):
+    range: AiRange
+    since: date | None
+    """这段从哪天算起（累计 = 最早一份决策日志那天）。"""
+    total_usd: float
+    groups: list[AiGroup]
+    rows: list[AiCall]
+    row_count: int
+
+
 class FundsPage(BaseModel):
     equity_usdt: float | None
     equity_source: str
@@ -650,9 +695,17 @@ class FundsPage(BaseModel):
     ledger = 账本（已平仓的单），没有资金费。"""
     pnl_since: date | None = None
     """“累计”从哪天算起。"""
+    ai: AiCostDetail | None = None
+    """AI 费用明细（资金页下半部分）。"""
 
 
-def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: datetime) -> FundsPage:
+def build_funds(
+    files: PanelFiles,
+    hb: HbSnapshot,
+    risk: RiskConfig,
+    now: datetime,
+    ai_range: AiRange = "today",
+) -> FundsPage:
     ledger = files.ledger()
     kpis = compute_kpis(files, ledger, hb, risk, now)
     tz = risk.day_reset_tz
@@ -701,6 +754,73 @@ def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: dateti
         costs=costs,
         cost_today_usd=sum(c.today_usd for c in costs),
         cost_week_usd=sum(c.week_usd for c in costs),
+        ai=build_ai_costs(files, now, tz, ai_range),
+    )
+
+
+def _ai_call(r: DecisionRecord) -> AiCall | None:
+    """决策日志一条 → 一次 AI 调用；没花钱也没出错的（规则拒绝、预测员本地算）不算。"""
+    if r.cost_usd <= 0 and r.outcome is not Outcome.ERROR:
+        return None
+    coin = r.symbol.removesuffix("USDT") if r.symbol else None
+    kind: AiKind
+    if r.role is Role.COMMANDER:
+        if r.card_id and r.outcome is Outcome.ACTION:
+            kind, who = "market", "总盘会（挑币上会）"
+        else:
+            kind, who = "commander", f"军师团 · {coin} 会议" if coin else "军师团"
+    elif r.role is Role.GATE:
+        kind, who = "jev", "Jev 拍板"
+    elif r.role is Role.KEEPER:
+        kind, who = "jev", "Jev 持仓审查"
+    else:
+        kind, who = "other", ROLE_NAMES.get(r.role, r.role.value)
+    result: Literal["ok", "failed", "timeout"] = "ok"
+    if r.outcome is Outcome.ERROR:
+        result = "timeout" if "超时" in r.summary else "failed"
+    usage = r.output.get("usage")
+    tokens = None
+    if isinstance(usage, dict):
+        parts = [usage.get(k) for k in ("input_tokens", "output_tokens")]
+        nums = [v for v in parts if isinstance(v, int) and not isinstance(v, bool)]
+        tokens = sum(nums) if nums else None
+    return AiCall(
+        ts=r.ts, kind=kind, who=who, symbol=r.symbol, cost_usd=r.cost_usd, tokens=tokens,
+        result=result, detail=r.summary, estimated=r.output.get("cost_estimated") is True,
+    )  # fmt: skip
+
+
+def build_ai_costs(files: PanelFiles, now: datetime, tz: str, rng: AiRange) -> AiCostDetail:
+    """资金页的 AI 费用明细：谁、哪个币、花多少、多少 tokens、成没成，按类别小计。"""
+    since: date | None
+    if rng == "all":
+        since = files.first_log_day()
+        day0 = since or local_day(now, tz)
+        start = datetime.combine(day0, time(), tzinfo=ZoneInfo(tz)).astimezone(UTC)
+    else:
+        start = _range_start(now, tz, rng)
+        since = local_day(start, tz)
+    calls = [c for r in files.decisions_since(start, now, _PAID) if (c := _ai_call(r))]
+    groups = []
+    kinds: tuple[AiKind, ...] = ("commander", "market", "jev", "other")
+    for kind in kinds:
+        mine = [c for c in calls if c.kind == kind]
+        if mine or kind != "other":
+            groups.append(
+                AiGroup(
+                    kind=kind,
+                    name=AI_KIND_NAMES[kind],
+                    cost_usd=sum(c.cost_usd for c in mine),
+                    calls=len(mine),
+                )
+            )
+    return AiCostDetail(
+        range=rng,
+        since=since,
+        total_usd=sum(c.cost_usd for c in calls),
+        groups=groups,
+        rows=list(reversed(calls))[:AI_ROW_LIMIT],
+        row_count=len(calls),
     )
 
 

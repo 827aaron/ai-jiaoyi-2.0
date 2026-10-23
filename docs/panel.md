@@ -60,6 +60,12 @@ Mac mini 本机打开 http://localhost:8090 ；手机 / 其他电脑用 Mac mini
 {"realized_pnl", "commission", "funding_fee"}}}`，币安原始正负号）；文件没有时退回账本，资金费显示“—”。
 AI 费按决策记录的 `cost_usd`，1 美元按 1 U 算。
 
+「AI 费用详情」（`pages.build_ai_costs`，`/api/funds?ai=today|7d|all`）把军师团、拍板人、持仓管家、预测员的
+决策记录里花了钱或出错的每一条列出来：时间、谁（军师团 · 某币会议 / 总盘会 / Jev 拍板 / Jev 持仓审查）、币、
+花费、tokens（读 `output.usage.input_tokens + output_tokens`，没写就显示“没记”）、结果（ERROR 且摘要含“超时” = 超时，
+其余 ERROR = 失败）。总盘会花费在出卡记录（`card_id` + ACTION）的 `cost_usd` 里；`output.cost_estimated` 为真的标「估」。
+顶部按 军师团 / 总盘会 / Jev 小计；明细最多列最近 300 条。
+
 ## 首次设置（/setup）
 
 换一台 Mac 不用敲命令：`bootstrap_mac.sh` 装完会在本机打开 http://127.0.0.1:8090/setup 。

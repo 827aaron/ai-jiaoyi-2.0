@@ -844,3 +844,38 @@ def test_card_rows_without_conclusion_say_why(tmp_path: Path) -> None:
     assert got["ADAUSDT"] == ("开会失败", "开会失败：超时；这张卡里它没有结论，不会开仓")
     assert got["DOTUSDT"][0] == "会中断" and "15 分钟" in got["DOTUSDT"][1]
     assert got["LTCUSDT"][0] == "没开会"
+
+
+def test_funds_ai_cost_detail(tmp_path: Path) -> None:
+    """资金页 AI 费用明细：每次调用谁 / 币 / 花费 / tokens / 结果，按军师团 / 总盘会 / Jev 小计。"""
+    from jiaoyi.panel.pages import build_funds
+
+    log = JsonlDecisionLog(tmp_path)
+    t = lambda m: NOW - timedelta(minutes=m)  # noqa: E731
+    usage = {"usage": {"input_tokens": 900, "output_tokens": 100}}
+    log.write(_rec(c.Role.COMMANDER, c.Outcome.ACTION, "BTCUSDT 开会结论：long", t(30),
+                   symbol="BTCUSDT", cost_usd=0.08))  # fmt: skip
+    log.write(_rec(c.Role.COMMANDER, c.Outcome.ERROR, "ETHUSDT 开会失败：超时", t(29),
+                   symbol="ETHUSDT", cost_usd=0.02))  # fmt: skip
+    log.write(_rec(c.Role.COMMANDER, c.Outcome.ACTION, "出作战卡 v3", t(28), card_id="v3",
+                   cost_usd=0.01))  # fmt: skip
+    log.write(_rec(c.Role.GATE, c.Outcome.PASS, "BTC 拍板", t(10), cost_usd=0.002, output=usage))
+    log.write(_rec(c.Role.GATE, c.Outcome.REJECT, "规则拒绝", t(9)))  # 没调 AI，不算
+    log.write(_rec(c.Role.KEEPER, c.Outcome.HOLD, "BTC 拿住", t(5), cost_usd=0.001))
+    page = build_funds(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW)
+    ai = page.ai
+    assert ai is not None and ai.range == "today" and ai.row_count == 5
+    assert ai.total_usd == pytest.approx(0.113)
+    groups = {g.kind: (g.cost_usd, g.calls) for g in ai.groups}
+    assert groups["commander"] == (pytest.approx(0.1), 2)
+    assert groups["market"] == (pytest.approx(0.01), 1) and groups["jev"][1] == 2
+    first, *_, last = ai.rows  # 最新在前
+    assert first.who == "Jev 持仓审查" and first.tokens is None
+    assert last.who == "军师团 · BTC 会议"
+    by_who = {r.who: r for r in ai.rows}
+    assert by_who["军师团 · ETH 会议"].result == "timeout"
+    assert by_who["Jev 拍板"].tokens == 1000
+    assert by_who["总盘会（挑币上会）"].cost_usd == pytest.approx(0.01)
+    with _client(tmp_path, "10.0.0.2") as client:
+        assert client.get("/api/funds?ai=all").json()["ai"]["range"] == "all"
+        assert client.get("/api/funds?ai=year").status_code == 422
