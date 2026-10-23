@@ -9,8 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from jiaoyi.contracts import LifeboatOrder, PositionRecord, Side
+from jiaoyi.contracts import LifeboatOrder, Outcome, PositionRecord, Side
+from jiaoyi.contracts.module_status import Health
 from jiaoyi.contracts.position import LifeboatStatus
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import STOP_PREFIX, ExchangeClient, ExchangeStop
 
@@ -31,9 +33,19 @@ def client_order_id(position_id: str) -> str:
 class BinanceLifeboat:
     """``LifeboatStop`` 的实现。place 幂等：同一仓位重复调用不会挂两张。"""
 
-    def __init__(self, exchange: ExchangeClient, clock: Clock = utc_now) -> None:
+    def __init__(
+        self,
+        exchange: ExchangeClient,
+        clock: Clock = utc_now,
+        recorder: RoleRecorder | None = None,
+    ) -> None:
         self._exchange = exchange
         self._clock = clock
+        self._rec = recorder
+
+    def heartbeat(self, now: datetime, health: Health = Health.OK, headline: str = "") -> None:
+        if self._rec is not None:
+            self._rec.heartbeat(now, health, headline or "保命止损待命")
 
     def _order(self, stop: ExchangeStop, status: LifeboatStatus, now: datetime) -> LifeboatOrder:
         return LifeboatOrder(
@@ -52,19 +64,49 @@ class BinanceLifeboat:
         if position.side is Side.SHORT and stop_price <= position.entry_price:
             raise ValueError("空单的保命止损必须高于入场价")
         close_side: Literal["buy", "sell"] = "sell" if position.side is Side.LONG else "buy"
-        stop = await self._exchange.place_stop(
-            position.symbol,
-            close_side,
-            position.quantity,
-            stop_price,
-            client_order_id(position.position_id),
+        try:
+            stop = await self._exchange.place_stop(
+                position.symbol,
+                close_side,
+                position.quantity,
+                stop_price,
+                client_order_id(position.position_id),
+            )
+        except Exception as e:
+            self._log(Outcome.ERROR, f"{position.symbol} 保命止损挂单失败：{e!r}", position)
+            raise
+        order = self._order(stop, LifeboatStatus.ACTIVE, self._clock())
+        self._log(
+            Outcome.ACTION,
+            f"{position.symbol} 保命止损已挂在 {stop.stop_price}",
+            position,
+            {"stop_price": stop.stop_price, "client_order_id": stop.client_order_id},
         )
-        return self._order(stop, LifeboatStatus.ACTIVE, self._clock())
+        return order
+
+    def _log(
+        self,
+        outcome: Outcome,
+        summary: str,
+        position: PositionRecord,
+        output: dict[str, float | str] | None = None,
+    ) -> None:
+        if self._rec is not None:
+            self._rec.record(
+                self._clock(),
+                outcome,
+                summary,
+                symbol=position.symbol,
+                signal_id=position.signal_id,
+                position_id=position.position_id,
+                output=dict(output or {}),
+            )
 
     async def cancel(self, position: PositionRecord) -> None:
         stop = await self._find(position)
         if stop is not None:
             await self._exchange.cancel_stop(position.symbol, stop.order_id)
+            self._log(Outcome.INFO, f"{position.symbol} 保命止损已撤", position)
 
     async def fetch(self, position: PositionRecord) -> LifeboatOrder | None:
         stop = await self._find(position)

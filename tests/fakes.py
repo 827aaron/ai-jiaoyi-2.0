@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from jiaoyi.contracts import Side
-from jiaoyi.execution.exchange import ExchangeError, ExchangePosition, ExchangeStop
+from jiaoyi.execution.exchange import ExchangeError, ExchangePosition, ExchangeStop, LotFilter
 from jiaoyi.execution.hb_client import HbApiError
 
 
@@ -63,10 +63,10 @@ class FakeHbApi:
     def fill(self, eid: str, price: float) -> None:
         self.executors[eid]["custom_info"]["current_position_average_price"] = price
 
-    def terminate(self, eid: str, close_type: str, pnl: float = 0.0) -> None:
-        self.executors[eid].update(
-            status="TERMINATED", is_active=False, close_type=close_type, net_pnl_quote=pnl
-        )
+    def terminate(self, eid: str, close_type: str, pnl: float | None = None) -> None:
+        self.executors[eid].update(status="TERMINATED", is_active=False, close_type=close_type)
+        if pnl is not None:
+            self.executors[eid]["net_pnl_quote"] = pnl
 
     async def get_executor(self, executor_id: str) -> dict[str, Any] | None:
         self._check()
@@ -110,6 +110,8 @@ class FakeExchange:
         self.market_closed: list[tuple[str, str, float]] = []
         self.fail_market_close = False
         self.income = 0.0
+        self.filters: dict[str, LotFilter] = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0)}
+        self.filters_down = False
         self.income_down = False
         self.down = False
         self._n = 0
@@ -172,3 +174,8 @@ class FakeExchange:
         if self.income_down:
             raise ExchangeError("收入流水不可用")
         return self.income
+
+    async def lot_filters(self) -> dict[str, LotFilter]:
+        if self.filters_down:
+            raise ExchangeError("exchangeInfo 不可用")
+        return dict(self.filters)
