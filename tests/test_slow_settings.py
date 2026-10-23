@@ -250,8 +250,7 @@ def test_15m_tier_warns_instead_of_stretching() -> None:
     assert ScheduleConfig(**profiles.defaults("30m", "slow.schedule")).caution() is None
 
 
-def test_legacy_hour_keys_get_a_clear_message(tmp_path: Path) -> None:
+def test_legacy_hour_keys_are_converted(tmp_path: Path) -> None:
     path = tmp_path / "slow.toml"
-    path.write_text("[schedule]\ncard_ttl_hours = 2\n", encoding="utf-8")
-    with pytest.raises(ConfigError, match=r"card_ttl_min.*乘 60"):
-        load_slow_config(path)
+    path.write_text("[schedule]\ncard_ttl_hours = 3\n", encoding="utf-8")
+    assert load_slow_config(path).schedule.card_ttl_min == 180

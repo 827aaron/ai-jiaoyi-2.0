@@ -68,7 +68,8 @@ def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:
     ]
     tag = "（仅模拟盘）" if app.profile in profiles.PAPER_ONLY else ""
     tail = f"；单项覆盖档位默认：{', '.join(keys)}" if keys else ""
-    return f"持仓档位 {app.profile}{tag}{tail}"
+    hold = f"；单笔最长持仓 {app.fast_loop.time_limit_s // 60} 分钟（独立于档位）"
+    return f"持仓档位 {app.profile}{tag}（= 军师团开会间隔）{hold}{tail}"
 
 
 def _caution_line(risk: RiskConfig) -> str | None:
