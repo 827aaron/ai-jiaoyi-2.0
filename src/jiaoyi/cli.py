@@ -34,7 +34,12 @@ from jiaoyi.core.secrets import (
 )
 from jiaoyi.execution.factory import MissingSecret
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate, LiveGateError
-from jiaoyi.slow.settings import DEFAULT_SLOW_PATH, SlowConfig, load_slow_config
+from jiaoyi.slow.settings import (
+    DEFAULT_SLOW_PATH,
+    SlowConfig,
+    load_slow_config,
+    missing_slow_stack,
+)
 
 
 def _load(args: argparse.Namespace) -> tuple[RiskConfig, AppConfig, SlowConfig]:
@@ -66,9 +71,12 @@ def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:
 
 def _check_config(args: argparse.Namespace) -> int:
     try:
-        risk, app, _ = _load(args)
+        risk, app, slow = _load(args)
     except ConfigError as e:
         print(e, file=sys.stderr)
+        return 2
+    if problem := missing_slow_stack(slow, ChainedSecretStore()):
+        print(problem, file=sys.stderr)
         return 2
     print(
         f"配置合格。模式 {app.mode}，每笔风险 {risk.risk_per_trade_pct}%，"

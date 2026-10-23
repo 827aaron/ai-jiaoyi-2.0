@@ -16,7 +16,7 @@ CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
 
 help:
 	@echo "开发："
-	@echo "  make install        建 .venv 并安装（含开发依赖）"
+	@echo "  make install        建 .venv 并安装（含开发依赖和军师团 slow 依赖）"
 	@echo "  make update         日常更新：git pull --ff-only → install → check-config → 重启 jiaoyi run"
 	@echo "  make init-config    从示例复制 config/risk.toml、config/app.toml（不覆盖已有）"
 	@echo "  make check-config   检查配置，不合格返回非 0"
@@ -34,7 +34,7 @@ help:
 install:
 	@# 已有 .venv 就跳过创建（uv venv 对已存在的目录会报错），重复运行只补装依赖
 	@if [ -x $(BIN)/python ]; then echo "$(VENV) 已存在，跳过创建"; else uv venv $(VENV); fi
-	uv pip install --python $(BIN)/python -e ".[dev]"
+	uv pip install --python $(BIN)/python -e ".[dev,slow]"
 
 # 日常更新（Mac mini）。依赖装完、配置检查通过之后才重启，重启本身几秒，不会触发看门狗（2 分钟阈值）。
 update:

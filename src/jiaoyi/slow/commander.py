@@ -95,7 +95,7 @@ def _clamp_range(r: Range, lo: float, hi: float) -> Range:
 
 @dataclass(frozen=True)
 class StopScale:
-    """止损倍数的尺度：ATR 周期（分钟）和保镖认的倍数区间，来自 app.toml 的 ``fast_loop``。
+    """止损 / 止盈倍数的尺度：ATR 周期（分钟）和保镖认的两个倍数区间，来自 ``fast_loop``。
 
     默认值与 ``FastLoopConfig`` 的默认一致；``app.py`` 用真实配置覆盖。
     """
@@ -103,6 +103,8 @@ class StopScale:
     period_min: int = 15
     min_stop_atr: float = 0.5
     max_stop_atr: float = 4.0
+    min_tp_r: float = 1.0
+    max_tp_r: float = 6.0
 
 
 DEFAULT_STOP_SCALE = StopScale()
@@ -120,6 +122,8 @@ def clamp_to_risk(
             "leverage": _clamp_range(cs.leverage, 1.0, float(risk.max_leverage)),
             # 止损倍数落在保镖认的区间内，免得整张卡这个标的被 min/max_stop_atr 拒掉
             "stop_atr": _clamp_range(cs.stop_atr, stop.min_stop_atr, stop.max_stop_atr),
+            # 止盈倍数同理：低于 min_tp_r 整张卡这个标的会被保镖拒掉
+            "take_profit_r": _clamp_range(cs.take_profit_r, stop.min_tp_r, stop.max_tp_r),
         }
     )
 
