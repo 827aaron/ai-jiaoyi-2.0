@@ -84,6 +84,7 @@ from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import BattleCardCommander
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
+from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
 from jiaoyi.slow.settings import SlowConfig
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
@@ -222,6 +223,8 @@ def _build_cards(
         pick_max=app_cfg.card_pick_max,
         clock=clock,
         brief=brief,
+        # 每次真开会的标的追加到 data/card_review/cards.jsonl，供复盘脚本打分（只读，不调参）
+        journal=CardJournal(app_cfg.data_dir),
         **cfg.commander_kwargs(),
     )
     return commander, news
