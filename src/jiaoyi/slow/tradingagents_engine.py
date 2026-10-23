@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
@@ -92,9 +92,14 @@ class TradingAgentsSettings:
     output_language: str = "Chinese"
     debate_rounds: int = 1
     risk_rounds: int = 1
-    max_tokens: int = 8192  # 思考模型的思考也算在里面；4096 实测会把辩论回答挤成空的
-    # 整理作战指令 / 挑币要输出结构化 JSON，单独给足长度，免得被 max_tokens 截断
-    json_max_tokens: int = 8192
+    # None = 用模型自己的最大输出（引擎启动时读 OpenRouter 模型信息，读不到用兜底值）。
+    # 思考模型的思考也算在里面；4096 实测会把辩论回答挤成空的
+    max_tokens: int | None = 8192
+    # 整理作战指令 / 挑币要输出结构化 JSON，单独给足长度，免得被截断；None = max(8192, max_tokens)
+    json_max_tokens: int | None = 8192
+    # 某一步回答被截断（length）/ 空 / 过短：自动重试一次，重试关掉推理并提示直接给结论
+    retry_bad_steps: bool = True
+    retry_min_chars: int = 20
     max_retries: int = 6
     # 每类标的请哪几位分析师（越少越省钱）；默认与 TradingAgents 的完整阵容一致。
     analysts_crypto: tuple[str, ...] = ("market", "social", "news")
@@ -695,6 +700,99 @@ def empty_speeches(state: Mapping[str, Any], debate_rounds: int, risk_rounds: in
     return out
 
 
+FALLBACK_MAX_TOKENS = {"openrouter": 384_000, "deepseek": 8192}
+"""读不到模型信息时的输出上限：OpenRouter 上 deepseek-v4 系列文档标的最大输出是 384000；
+直连 DeepSeek 按它官方接口的 8192 保守处理。"""
+MODELS_URL = "https://openrouter.ai/api/v1/models"
+RETRY_HINT = "直接给结论，不要思考过程。"
+
+
+def _fetch_models() -> list[dict[str, Any]]:
+    import httpx
+
+    r = httpx.get(MODELS_URL, timeout=10)
+    r.raise_for_status()
+    return list(r.json()["data"])
+
+
+def model_max_tokens(
+    provider: str,
+    models: Sequence[str],
+    fetch: Callable[[], list[dict[str, Any]]] = _fetch_models,
+) -> int:
+    """模型的最大输出 token 数：OpenRouter 模型信息里的 ``top_provider.max_completion_tokens``
+    （几个模型取最小）；读不到、没有这个模型 = ``FALLBACK_MAX_TOKENS``。"""
+    fallback = FALLBACK_MAX_TOKENS.get(provider, 8192)
+    if provider != "openrouter":
+        return fallback
+    try:
+        by_id = {str(m.get("id")): m for m in fetch()}
+        found = []
+        for name in models:
+            top = (by_id.get(name) or {}).get("top_provider") or {}
+            v = top.get("max_completion_tokens")
+            if isinstance(v, int) and v > 0:
+                found.append(v)
+        if found and len(found) == len(models):
+            return min(found)
+    except Exception:
+        logger.warning("读 OpenRouter 模型信息失败，max_tokens 用 %d", fallback, exc_info=True)
+        return fallback
+    logger.warning("OpenRouter 模型信息里没有 %s，max_tokens 用 %d", list(models), fallback)
+    return fallback
+
+
+def reply_problem(res: Any, min_chars: int) -> str | None:
+    """一次模型回答有没有问题：被 max_tokens 截断 → ``length``；正文空 → ``empty``；
+    过短 → ``short``；没问题 None。带工具调用的回答正文可以是空的。"""
+    meta = getattr(res, "response_metadata", None) or {}
+    if meta.get("finish_reason") == "length":
+        return "length"
+    if getattr(res, "tool_calls", None):
+        return None
+    content = getattr(res, "content", "")
+    if isinstance(content, list):
+        content = "".join(
+            str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content
+        )
+    text = str(content).strip()
+    if not text:
+        return "empty"
+    return "short" if len(text) < min_chars else None
+
+
+def _with_hint(inp: Any) -> Any:
+    if isinstance(inp, str):
+        return f"{inp}\n\n{RETRY_HINT}"
+    to_messages = getattr(inp, "to_messages", None)
+    msgs = list(to_messages()) if callable(to_messages) else list(inp)
+    return [*msgs, ("human", RETRY_HINT)]
+
+
+def add_retry(llm: Any, meter: CostMeter | None, *, reasoning_off: bool, min_chars: int) -> None:
+    """让这个模型对象的每次 ``invoke`` 在回答有问题时自动重试一次：提示「直接给结论」，
+    OpenRouter 下同时关掉推理。重试仍有问题就原样交回去，由会议末尾的检查让整场失败。"""
+    original = llm.invoke
+
+    def invoke(inp: Any, config: Any = None, **kwargs: Any) -> Any:
+        res = original(inp, config, **kwargs)
+        why = reply_problem(res, min_chars)
+        if why is None:
+            return res
+        if meter is not None:
+            meter.note_retry(why)
+        retry_kwargs = dict(kwargs)
+        if reasoning_off:
+            body = getattr(llm, "extra_body", None) or {}
+            retry_kwargs["extra_body"] = {**body, "reasoning": {"enabled": False}}
+        res = original(_with_hint(inp), config, **retry_kwargs)
+        if meter is not None and reply_problem(res, min_chars) is None:
+            meter.note_recovered(why)
+        return res
+
+    object.__setattr__(llm, "invoke", invoke)
+
+
 def openrouter_body(reasoning_effort: str) -> dict[str, Any]:
     """OpenRouter 请求里额外带的参数：``usage.include`` 让响应带真实花费（usage.cost）；
     ``reasoning`` 限制推理长度——推理模型的思考也算在 max_tokens 里，不限的话个别币的思考
@@ -726,10 +824,28 @@ class CostMeter:
         self._unreported: dict[str, list[int]] = {}
         self._aborted = False
         self.calls = 0
-        self.on_call: Callable[[str | None, int], None] | None = None
-        """每次模型响应后回调 (finish_reason, 输出 token 数)；会议实况用它记每次调用的结束原因。"""
+        self.on_call: Callable[[str | None, int, int], None] | None = None
+        """每次响应后回调 (finish_reason, 输出 token 数, 其中推理 token 数)；会议实况用它记调用。"""
         self.truncated = 0
-        """因为 max_tokens 到顶而被截断的回答数（finish_reason == "length"）。"""
+        """因为 max_tokens 到顶而被截断的回答数（finish_reason == "length"）；重试成功的不算。"""
+        self.retries = 0
+        """自动重试的次数（回答被截断 / 空 / 过短）。"""
+        self.on_retry: Callable[[str], None] | None = None
+
+    def note_retry(self, why: str) -> None:
+        with self._lock:
+            self.retries += 1
+        if self.on_retry is not None:
+            try:
+                self.on_retry(why)
+            except Exception:
+                logger.exception("记录重试失败")
+
+    def note_recovered(self, why: str) -> None:
+        """重试拿到了好回答：之前那次被截断的不再让整场失败。"""
+        if why == "length":
+            with self._lock:
+                self.truncated = max(self.truncated - 1, 0)
 
     def add(self, model: str, input_tokens: int, output_tokens: int, cost: float | None) -> None:
         with self._lock:
@@ -746,7 +862,7 @@ class CostMeter:
         usage = (getattr(response, "llm_output", None) or {}).get("token_usage")
         cost = _reported_cost(usage)
         model = str((getattr(response, "llm_output", None) or {}).get("model_name") or "")
-        tin = tout = 0
+        tin = tout = reasoning = 0
         reason: str | None = None
         for gens in getattr(response, "generations", None) or []:
             for gen in gens:
@@ -766,13 +882,14 @@ class CostMeter:
                 um = getattr(msg, "usage_metadata", None) or {}
                 tin += int(um.get("input_tokens", 0) or 0)
                 tout += int(um.get("output_tokens", 0) or 0)
+                reasoning += _reasoning_tokens(um, meta)
                 model = str(meta.get("model_name") or model)
                 if cost is None:
                     cost = _reported_cost(meta.get("token_usage"))
         self.add(model, tin, tout, cost)
         if self.on_call is not None:
             try:
-                self.on_call(str(reason) if reason else None, tout)
+                self.on_call(str(reason) if reason else None, tout, reasoning)
             except Exception:
                 logger.exception("记录模型调用信息失败")
 
@@ -793,6 +910,16 @@ class CostMeter:
             raise RuntimeError("会议已被取消（超时），不再发新的模型请求")
 
 
+def _reasoning_tokens(usage_metadata: Mapping[str, Any], meta: Mapping[str, Any]) -> int:
+    """一次回答里推理（思考）用了多少 token：langchain 的 ``output_token_details.reasoning``，
+    或 OpenRouter 原始 usage 的 ``completion_tokens_details.reasoning_tokens``。"""
+    v = (usage_metadata.get("output_token_details") or {}).get("reasoning")
+    if v is None:
+        raw = meta.get("token_usage") or {}
+        v = (raw.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    return int(v or 0)
+
+
 def cost_handler(meter: CostMeter) -> Any:
     """把 ``CostMeter`` 接到 LangChain 的回调上（LangChain 只在真跑时才导入）。"""
     from langchain_core.callbacks import BaseCallbackHandler
@@ -809,7 +936,9 @@ def cost_handler(meter: CostMeter) -> Any:
         def on_llm_end(self, response: Any, **kwargs: Any) -> None:
             meter.record_response(response)
 
-    return _CostHandler()
+    handler = _CostHandler()
+    handler.meter = meter  # 引擎给模型对象加自动重试时要用
+    return handler
 
 
 class TradingAgentsEngine:
@@ -836,6 +965,12 @@ class TradingAgentsEngine:
         # TradingAgents 只认环境变量。注意子进程会继承：从本进程拉起别的程序时 env= 里要去掉它；
         # 日志和 DecisionRecord 不得写入请求头或配置字典。
         os.environ.setdefault(key_env, key)
+        if settings.max_tokens is None:  # 没写 = 用模型自己的最大输出
+            mt = model_max_tokens(settings.provider, [settings.quick_model, settings.deep_model])
+            logger.info("max_tokens 用模型最大输出：%d", mt)
+            settings = replace(settings, max_tokens=mt)
+        if settings.json_max_tokens is None:
+            settings = replace(settings, json_max_tokens=max(8192, settings.max_tokens or 0))
         self._risk = risk
         self._stop = stop_scale
         self._s = settings
@@ -906,6 +1041,17 @@ class TradingAgentsEngine:
                 id(x): x for x in (graph.deep_thinking_llm, graph.quick_thinking_llm)
             }.values():
                 apply_openrouter_options(llm, self._s.reasoning_effort)
+        if self._s.retry_bad_steps:
+            meter = getattr(handler, "meter", None)
+            for llm in {
+                id(x): x for x in (graph.deep_thinking_llm, graph.quick_thinking_llm)
+            }.values():
+                add_retry(
+                    llm,
+                    meter,
+                    reasoning_off=self._s.provider == "openrouter",
+                    min_chars=self._s.retry_min_chars,
+                )
         return graph
 
     def _snapshot_liquidations(self, symbols: Sequence[str]) -> None:
@@ -1000,6 +1146,7 @@ class TradingAgentsEngine:
         if live:
             self._live[entry.symbol] = live
             meter.on_call = live.note_call
+            meter.on_retry = live.note_retry
         try:
             res = self._analyze_run(entry, regime, handler, meter, live)
         except Exception as exc:  # 同上：失败也带上真实花费

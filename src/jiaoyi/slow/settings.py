@@ -262,12 +262,21 @@ class MeetingConfig(_Strict):
     convert_tier: Literal["quick", "deep"] = Field(
         default="quick", description="把会议结论整理成作战指令那一步用哪档模型。"
     )
-    max_tokens: int = Field(
-        default=8192,
+    max_tokens: int | None = Field(
+        default=None,
         ge=1024,
-        le=32768,
-        description="每次回答的长度上限，思考模型的思考也算在里面：低于 8192 实测会让多空辩论"
-        "被挤成半句或空壳。出作战指令、挑币两步另按 8192 起。",
+        le=2_000_000,
+        description="每次回答的长度上限，思考模型的思考也算在里面。不写 = 模型自己的最大输出"
+        "（OpenRouter 模型信息里的 max_completion_tokens，读不到用 384000）；写了就按你的。"
+        "低于 8192 实测会让多空辩论被挤成半句或空壳。出作战指令、挑币两步另按 8192 起。",
+    )
+    retry_bad_steps: bool = Field(
+        default=True,
+        description="某一步回答被截断 / 空 / 过短时自动重试一次（关掉推理、提示直接给结论），"
+        "重试仍不行才让整场失败。",
+    )
+    retry_min_chars: int = Field(
+        default=20, ge=0, le=500, description="回答（没有工具调用时）少于这么多字算过短，触发重试。"
     )
     reasoning_effort: Literal["none", "low", "medium", "high"] = Field(
         default="low",
@@ -392,7 +401,9 @@ class SlowConfig(_Strict):
             debate_rounds=m.debate_rounds,
             risk_rounds=m.risk_rounds,
             max_tokens=m.max_tokens,
-            json_max_tokens=max(8192, m.max_tokens),
+            json_max_tokens=None if m.max_tokens is None else max(8192, m.max_tokens),
+            retry_bad_steps=m.retry_bad_steps,
+            retry_min_chars=m.retry_min_chars,
             max_retries=m.max_retries,
             reasoning_effort=m.reasoning_effort,
             price_per_mtok={"flash": (p.flash_in, p.flash_out), "pro": (p.pro_in, p.pro_out)},
