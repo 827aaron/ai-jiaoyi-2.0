@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 from jiaoyi.contracts import AppConfig, RiskConfig
+from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config
 from tests.support import builders as b
 
@@ -100,12 +101,15 @@ def test_every_risk_field_is_required(tmp_path: Path, field: str) -> None:
         load_risk_config(_write(tmp_path, data))
 
 
-# fast_loop、predictor 是有默认值的可选段；reconciler_close_unknown_positions 默认关；其余必填
+# fast_loop、predictor 是有默认值的可选段；reconciler_close_unknown_positions 是默认关的可选开关；
+# profile 默认 2h，档位管的键不写就取档位默认（core/profiles.py）；其余字段必填
 OPTIONAL_APP_FIELDS = {
     "fast_loop",
     "predictor",
     "reconciler_close_unknown_positions",
     "sim_environment",
+    "profile",
+    *profiles.defaults("2h", "app"),
 }
 
 

@@ -24,7 +24,7 @@ from jiaoyi.core.commands import (
 )
 from jiaoyi.core.config import load_app_config, load_risk_config
 from jiaoyi.loop import Runner
-from jiaoyi.slow.settings import SlowConfig
+from jiaoyi.slow.settings import slow_defaults
 from tests import fastloop_helpers as h
 from tests.test_loop import APP, RISK, FakeCards, FakeExecutor, FakeGate, FakeRisk, _position
 
@@ -154,11 +154,12 @@ async def test_runtime_json_has_config_fingerprint(tmp_path: Path, now: datetime
     runtime = json.loads((tmp_path / RUNTIME_FILE).read_text(encoding="utf-8"))
     # 面板用同一个函数、同样顺序算 config/*.toml 的指纹，不一致就提示「配置已改、未生效」
     assert runtime["config_fingerprint"] == config_fingerprint(
-        app.risk_cfg, app.app_cfg, SlowConfig()
+        app.risk_cfg, app.app_cfg, slow_defaults(app.app_cfg.profile)
     )
     assert runtime["mode"] == app.app_cfg.mode.value
     changed = app.risk_cfg.model_copy(update={"max_leverage": app.risk_cfg.max_leverage - 1})
-    assert config_fingerprint(changed, app.app_cfg, SlowConfig()) != runtime["config_fingerprint"]
+    slow = slow_defaults(app.app_cfg.profile)
+    assert config_fingerprint(changed, app.app_cfg, slow) != runtime["config_fingerprint"]
     await app.stop()
 
 

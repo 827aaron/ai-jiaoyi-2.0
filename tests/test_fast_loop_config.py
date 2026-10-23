@@ -7,21 +7,26 @@ from pathlib import Path
 import pytest
 
 from jiaoyi.contracts import FastLoopConfig
+from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError, load_app_config
 from tests.conftest import ROOT
 
 APP_EXAMPLE = ROOT / "config" / "app.example.toml"
 
 
+TWO_HOURS = FastLoopConfig(**profiles.defaults("2h", "fast_loop"))
+
+
 def test_example_matches_defaults() -> None:
-    assert load_app_config(APP_EXAMPLE).fast_loop == FastLoopConfig()
+    # 示例里档位管的键都注释掉了：代码默认 + 2h 档默认
+    assert load_app_config(APP_EXAMPLE).fast_loop == TWO_HOURS
 
 
 def test_section_is_optional(tmp_path: Path) -> None:
     text = APP_EXAMPLE.read_text(encoding="utf-8").split("[fast_loop]")[0]
     p = tmp_path / "app.toml"
     p.write_text(text, encoding="utf-8")
-    assert load_app_config(p).fast_loop == FastLoopConfig()
+    assert load_app_config(p).fast_loop == TWO_HOURS
 
 
 @pytest.mark.parametrize(

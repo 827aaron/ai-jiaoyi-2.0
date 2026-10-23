@@ -1,13 +1,16 @@
 # 运行配置。复制成 config/app.toml 再改：make init-config
-# 每一项都必填；超出合理范围拒绝启动。
+# 每一项都必填（标“档位”的可以不写，由档位给）；超出合理范围拒绝启动。
 
 mode = "paper"               # paper（模拟盘）/ testnet / live；切 live 另需确认词和面板密码
-predictor_enabled = true     # 预测员 Kronos 开关
+profile = "2h"               # 持仓档位：2h（默认）/ 60m / 30m / 15m；30m、15m 只能 paper
+                             # 档位给出下面标“档位”的键的默认值（各档数值见 src/jiaoyi/core/profiles.py）；
+                             # 你写了的键优先，想让档位生效就别写。切档要重启
+# predictor_enabled = true   # 档位：预测员 Kronos 开关（15m 档默认关）
 signal_dedup_s = 30          # 同一信号冷却 30 秒
 jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 OpenRouter 首次 963ms，之后约 500ms）
-keeper_interval_s = 20       # 持仓管家每 20 秒看一次
+# keeper_interval_s = 20     # 档位：持仓管家多久看一次（2h 20 秒 / 60m 15 / 30m、15m 10）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
-slow_loop_interval_min = 30  # 军师团每 30 分钟开会
+# slow_loop_interval_min = 100  # 档位：军师团定时兜底开会间隔 = 卡有效期 − 提前量（2h 100 分钟 / 其它 45）
 pool_size = 40               # 候选池 30–50
 card_pick_max = 20           # 军师每次最多挑 20 个
 data_dir = "data"            # 决策日志、模块状态写在这里
@@ -23,7 +26,7 @@ adaptive_base_max_queue = 0       # adaptive：后面没人排队（≤ 0）用 
 adaptive_mini_min_queue = 3       # adaptive：排队 ≥ 3 个用 mini，中间用 small
 backfill_bars = 400               # 启动时回填多少根 5 分钟线（至少 64）
 
-# 快环门槛（策略参数，不是硬上限；整段可省略，省略就用下面的默认值）
+# 快环门槛（策略参数，不是硬上限；整段可省略，省略就用默认值；注释掉的是档位给的 2h 档旧默认，见 core/profiles.py）
 [fast_loop]
 jev_provider = "typesafe"         # typesafe = 直连（key: JEV_API_KEY）；openrouter = 经 OpenRouter（key: OPENROUTER_API_KEY）
 # jev_model = "jev-1.14"          # M1 拿到 key 后填具体版本号（不许用 latest）；换版本要重新校准门槛
@@ -39,13 +42,13 @@ max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5
 signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
 size_fraction_m = 0.75            # M 用 7.5 成，L 用满
-atr_period_min = 15               # 止损用几分钟 K 线的 ATR（5 / 15 / 30 / 60）；作战卡的止损倍数按这个尺度给
-stop_level_buffer_atr = 0.1       # 止损放在关键位外侧 0.1 ATR
-min_stop_atr = 0.5                # 作战卡止损低于 0.5 倍 ATR 就不认（太近会被噪音扫掉）
-max_stop_atr = 4.0                # 作战卡止损超过 4 倍 ATR 就不认（慢环的数保镖再核一遍）
-min_tp_r = 1.0                    # 作战卡止盈倍数要在 1–6 倍止损之间
-max_tp_r = 6.0
-time_limit_s = 7200               # 单笔最长拿 2 小时
+# atr_period_min = 15               # 止损用几分钟 K 线的 ATR（5 / 15 / 30 / 60）；作战卡的止损倍数按这个尺度给（档位）
+# stop_level_buffer_atr = 0.1       # 止损放在关键位外侧 0.1 ATR（档位）
+# min_stop_atr = 0.5                # 作战卡止损低于 0.5 倍 ATR 就不认（太近会被噪音扫掉）（档位）
+# max_stop_atr = 4.0                # 作战卡止损超过 4 倍 ATR 就不认（慢环的数保镖再核一遍）（档位）
+# min_tp_r = 1.0                    # 作战卡止盈倍数要在 1–6 倍止损之间（档位）
+# max_tp_r = 6.0（档位）
+# time_limit_s = 7200               # 单笔最长拿 2 小时（档位）
 keeper_close_p = 0.6              # 管家：平仓概率 ≥ 0.6 且连续 2 次才平
 keeper_close_p_strong = 0.85      # 管家：≥ 0.85 一次就平
 keeper_confirmations = 2

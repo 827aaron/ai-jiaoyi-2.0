@@ -17,6 +17,10 @@ from pydantic import Field, model_validator
 
 from jiaoyi.contracts.common import Category, Contract, RunMode
 
+HoldingProfile = Literal["2h", "60m", "30m", "15m"]
+"""持仓档位。各档的跨模块默认值见 ``jiaoyi.core.profiles``。"""
+PAPER_ONLY_PROFILES = frozenset({"30m", "15m"})
+
 
 class RiskConfig(Contract):
     """硬上限。范围是“合理范围”，不是建议值；建议值见示例文件。"""
@@ -231,6 +235,11 @@ class AppConfig(Contract):
     """运行配置：模式、开关、节奏。除 ``fast_loop`` 外全部必填，超范围拒绝启动。"""
 
     mode: RunMode
+    profile: HoldingProfile = Field(
+        default="2h",
+        description="持仓档位。只填配置文件里没写的策略参数（见 core/profiles.py），"
+        "30m / 15m 只能 paper。",
+    )
     predictor_enabled: bool = Field(description="预测员（Kronos）开关。")
     signal_dedup_s: int = Field(ge=5, le=600, description="同一去重键的冷却时间。")
     jev_timeout_ms: int = Field(ge=100, le=5000, description="超时即放弃本次开仓。")
@@ -261,6 +270,11 @@ class AppConfig(Contract):
     def _check(self) -> AppConfig:
         if self.card_pick_max > self.pool_size:
             raise ValueError("card_pick_max 不能大于 pool_size")
+        if self.profile in PAPER_ONLY_PROFILES and self.mode != RunMode.PAPER:
+            raise ValueError(
+                f"档位 {self.profile} 只能在 paper 模式用（费用占止损太高），"
+                "testnet / live 请用 2h 或 60m"
+            )
         if self.fast_loop.rule_gate_without_jev and self.mode != RunMode.PAPER:
             raise ValueError(
                 "rule_gate_without_jev 只能在 paper 模式打开，testnet / live 必须用 Jev"
