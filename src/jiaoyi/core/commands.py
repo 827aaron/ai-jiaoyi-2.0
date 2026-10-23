@@ -4,11 +4,13 @@
 
 - 面板把一条指令原子写到 ``data/panel_commands/<id>.json``（用 ``write_command``）。
 - 主循环每秒扫一次（``CommandInbox.pending``），执行后把结果写到
-  ``data/panel_commands/done/<id>.json`` 并删掉原文件。同一个 id 只执行一次（防重放）。
+  ``data/panel_commands/done/<id>.json`` 并删掉原文件（结果保留 7 天）。
+  同一个 id 只执行一次（防重放）。
 - 过期（``expires_at`` 已过）、时间戳在未来、有效期超过 5 分钟、格式不对的指令一律不执行。
 - 面板密码在面板侧校验（``live_gate.json`` 的哈希）；这里只认文件。面板和 API 只在本机或内网。
 
-``data/paused.json``：人工暂停开新仓的状态，由主循环在执行 pause / resume 时写，重启后仍生效。
+``data/paused.json``：人工暂停开新仓的状态，由主循环在执行 pause / resume / close_all
+时写，重启后仍生效；文件损坏按已暂停处理。
 ``data/runtime.json``：主循环启动时写，含已加载配置的指纹（``config_fingerprint``）。面板用同一个函数
 算当前 ``config/*.toml`` 的指纹，不一致就在总览上提示「配置已改、未生效（重启后生效）」。
 """
@@ -31,6 +33,7 @@ PAUSED_FILE = "paused.json"
 RUNTIME_FILE = "runtime.json"
 MAX_TTL = timedelta(minutes=5)
 CLOCK_SKEW = timedelta(seconds=30)
+DONE_KEEP = timedelta(days=7)
 
 CommandKind = Literal[
     "pause", "resume", "close_all", "close_position", "unblock_symbol", "refresh_cards"
@@ -111,6 +114,21 @@ class CommandInbox:
             _write_atomic(done, result.model_dump_json())
         path.unlink(missing_ok=True)
 
+    def prune(self, now: datetime, keep: timedelta = DONE_KEEP) -> int:
+        """删掉超过 ``keep`` 的结果文件，返回删了几个。"""
+        if not self._done.is_dir():
+            return 0
+        cutoff = (now - keep).timestamp()
+        n = 0
+        for path in self._done.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    n += 1
+            except OSError:
+                log.warning("清理指令结果 %s 失败", path)
+        return n
+
     def check(self, cmd: PanelCommand, now: datetime) -> str | None:
         """不该执行的原因（过期 / 时间戳在未来），可以执行返回 None。"""
         if now > cmd.expires_at:
@@ -121,12 +139,26 @@ class CommandInbox:
 
 
 def read_paused(data_dir: str | Path) -> dict[str, Any] | None:
-    """暂停中返回 ``{"since", "reason", "command_id"}``，没暂停或文件坏了返回 None。"""
-    try:
-        raw = json.loads((Path(data_dir) / PAUSED_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    """暂停中返回 ``{"paused", "since", "reason", "command_id"}``，没暂停返回 None。
+
+    失败即关闭：文件存在但读不出或损坏，按“已暂停”处理（带 ``corrupt: True``），
+    由调用方发 CRITICAL。只有文件不存在或明确写着没暂停才算没暂停。
+    """
+    path = Path(data_dir) / PAUSED_FILE
+    if not path.exists():
         return None
-    return raw if isinstance(raw, dict) and raw.get("paused") else None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or not isinstance(raw.get("paused"), bool):
+            raise ValueError("格式不对")
+    except (OSError, ValueError) as e:
+        log.critical("暂停状态文件 %s 读不出或损坏（%s），按已暂停处理", path, e)
+        return {
+            "paused": True,
+            "reason": f"{PAUSED_FILE} 读不出或损坏，按已暂停处理",
+            "corrupt": True,
+        }
+    return raw if raw["paused"] else None
 
 
 def write_paused(data_dir: str | Path, paused: bool, **info: str) -> None:

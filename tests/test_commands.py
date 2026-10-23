@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,7 +14,9 @@ from jiaoyi.app import App
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import (
     COMMANDS_DIR,
+    PAUSED_FILE,
     RUNTIME_FILE,
+    CommandInbox,
     PanelCommand,
     config_fingerprint,
     read_paused,
@@ -157,3 +160,57 @@ async def test_runtime_json_has_config_fingerprint(tmp_path: Path, now: datetime
     changed = app.risk_cfg.model_copy(update={"max_leverage": app.risk_cfg.max_leverage - 1})
     assert config_fingerprint(changed, app.app_cfg, SlowConfig()) != runtime["config_fingerprint"]
     await app.stop()
+
+
+async def test_pause_during_jev_blocks_in_flight_signal(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    ex = FakeExecutor()
+
+    class PausingGate(FakeGate):
+        async def evaluate(self, signal, card, now):  # type: ignore[no-untyped-def]
+            app.set_paused(True, reason="问 Jev 期间暂停")
+            return await super().evaluate(signal, card, now)
+
+    app.m = dataclasses.replace(
+        app.m, executor=ex, gate=PausingGate(), risk=FakeRisk(True), cards=FakeCards(h.card(now))
+    )
+    await Runner(app).handle_signal(h.signal(now))
+    assert ex.opened == []
+
+
+async def test_close_all_pauses_first(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    ex = FakeExecutor()
+    ex.held = [_position()]
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    write_command(tmp_path, _cmd(now, "close_all"))
+    await r.command_tick()
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == [("pos-0001", CloseReason.MANUAL)]
+    assert read_paused(tmp_path) is not None
+
+
+def test_corrupt_paused_file_counts_as_paused(tmp_path: Path, now: datetime) -> None:
+    assert read_paused(tmp_path) is None  # 没有文件 = 没暂停
+    (tmp_path / PAUSED_FILE).write_text("{broken", encoding="utf-8")
+    paused = read_paused(tmp_path)
+    assert paused is not None and paused["corrupt"] is True
+    (tmp_path / PAUSED_FILE).write_text('"yes"', encoding="utf-8")
+    assert read_paused(tmp_path) is not None
+    (tmp_path / PAUSED_FILE).write_text('{"paused": false}', encoding="utf-8")
+    assert read_paused(tmp_path) is None
+    assert _app(tmp_path, now).paused is None
+
+
+def test_done_results_are_pruned_after_7_days(tmp_path: Path, now: datetime) -> None:
+    done = tmp_path / COMMANDS_DIR / "done"
+    done.mkdir(parents=True)
+    old, new = done / "old-00001.json", done / "new-00001.json"
+    old.write_text("{}", encoding="utf-8")
+    new.write_text("{}", encoding="utf-8")
+    eight_days_ago = (now - timedelta(days=8)).timestamp()
+    os.utime(old, (eight_days_ago, eight_days_ago))
+    os.utime(new, (now.timestamp(), now.timestamp()))
+    assert CommandInbox(tmp_path).prune(now) == 1
+    assert not old.exists() and new.exists()

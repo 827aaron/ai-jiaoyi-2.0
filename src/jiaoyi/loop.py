@@ -51,6 +51,7 @@ URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
 NEWS_POLL_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
+PRUNE_EVERY = timedelta(hours=1)
 BACKFILL_CONCURRENCY = 5
 
 
@@ -95,6 +96,7 @@ class Runner:
         # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
         self._closing: set[str] = set()
+        self._last_prune: datetime | None = None
 
     # ------------------------------------------------------------ 生命周期
     async def run(self) -> None:
@@ -198,6 +200,10 @@ class Runner:
             return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:
+            if self.app.paused is not None:
+                # 问 Jev 期间下达的暂停 / 全平：在途信号也要拦住
+                self._guard_note(Outcome.REJECT, f"{signal.symbol} 拍板期间已暂停，不开仓", now)
+                return
             account = await self.m.executor.account()
             verdict = self.m.risk.review(signal, jev, card, account, self.app.clock())
             if not verdict.approved or verdict.intent is None:
@@ -372,6 +378,10 @@ class Runner:
     async def command_tick(self) -> None:
         """执行面板写来的指令（core/commands.py）。每条只执行一次，结果写回 done/。"""
         inbox = CommandInbox(self.app.app_cfg.data_dir)
+        now = self.app.clock()
+        if self._last_prune is None or now - self._last_prune >= PRUNE_EVERY:
+            self._last_prune = now
+            inbox.prune(now)
         for path, cmd, error in inbox.pending():
             now = self.app.clock()
             if cmd is None:
@@ -411,11 +421,17 @@ class Runner:
             await self.app._alert(AlertLevel.INFO, "已恢复开新仓", "面板指令")
             return "done", "已恢复开新仓"
         if cmd.kind == "close_all":
-            await self.refresh_positions()
-            targets = list(self.positions)
+            # 先暂停再平：否则平的同时可能又开新仓。拿开仓锁等在途开仓做完，再读持仓
+            self.app.set_paused(True, reason="面板全部平仓", command_id=cmd.id)
+            async with self._open_lock:
+                await self.refresh_positions()
+                targets = list(self.positions)
             for p in targets:
                 self._spawn(self.close(p, CloseReason.MANUAL))
-            return "done", f"已提交平仓 {len(targets)} 笔"
+            await self.app._alert(
+                AlertLevel.WARN, "面板全部平仓", "已同时暂停开新仓，恢复需另发指令"
+            )
+            return "done", f"已暂停开新仓并提交平仓 {len(targets)} 笔"
         if cmd.kind == "close_position":
             pid = cmd.params.get("position_id", "")
             await self.refresh_positions()

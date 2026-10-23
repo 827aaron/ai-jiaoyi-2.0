@@ -502,6 +502,12 @@ class App:
         self._write_runtime(now)
         self.heartbeat_all()
         self.started = True
+        if self.paused is not None and self.paused.get("corrupt"):
+            await self._alert(
+                AlertLevel.CRITICAL,
+                "暂停状态文件损坏，按已暂停处理",
+                "不开新仓；确认后在面板发恢复指令",
+            )
         if self.app_cfg.mode == RunMode.LIVE:
             # 实盘启动一定要通知（设计文档 §十）；能走到这里说明上线确认已经通过
             await self._alert(AlertLevel.CRITICAL, "实盘已启动", f"拍板：{self.gate_label()}")
