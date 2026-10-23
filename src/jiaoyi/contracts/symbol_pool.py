@@ -8,6 +8,8 @@ JSON 示例见 ``contracts/examples/symbol_pool.json``。
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AwareDatetime, Field, model_validator
 
 from jiaoyi.contracts.common import Category, Contract, NonNegFloat, Symbol
@@ -38,6 +40,11 @@ class SymbolPoolEntry(Contract):
     blacklisted: bool = False
     manual: bool = False
     in_pool: bool = Field(description="最终是否进池。拉黑的永远为 False。")
+    tier: Literal["head", "mid", "tail"] | None = Field(
+        default=None,
+        description="分档（设计文档 §六）：head 头部档，开放交易；mid 中间档，军师每天挑几个，"
+        "仓位档位封顶；tail 尾部档，只录数据看，不做。None = 没开分档或没进池。",
+    )
     picked_by_card: bool = False
     pick_reason: str = ""
 

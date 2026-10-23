@@ -29,6 +29,7 @@
       "blacklisted": false,
       "manual": false,
       "in_pool": true,
+      "tier": "head",
       "picked_by_card": true,
       "pick_reason": "68000 突破"
     },
@@ -52,6 +53,7 @@
       "blacklisted": false,
       "manual": false,
       "in_pool": false,
+      "tier": "mid",
       "picked_by_card": false,
       "pick_reason": ""
     },
@@ -73,6 +75,7 @@
       "blacklisted": true,
       "manual": false,
       "in_pool": false,
+      "tier": "tail",
       "picked_by_card": false,
       "pick_reason": ""
     }

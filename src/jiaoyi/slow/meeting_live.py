@@ -83,6 +83,14 @@ class MeetingLive:
         self._doc["steps"].append({"stage": stage, "who": who, "ts": ts, "text": text})
         self._doc["stage"] = stage
 
+    def step(self, stage: str, who: str, text: str) -> None:
+        """直接记一条发言（不从图状态里取）：总盘会这类不走 TradingAgents 图的会议用。"""
+        if self._closed:
+            return
+        self._add(stage, who, text)
+        self._doc["updated_at"] = self._now().isoformat()
+        self._flush()
+
     def observe(self, state: Mapping[str, Any]) -> None:
         """看一份（部分）图状态，把新出现的发言记下来。可重复喂同一份。"""
         if self._closed:

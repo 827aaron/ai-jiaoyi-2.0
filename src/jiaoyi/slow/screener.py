@@ -27,6 +27,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.pool_overrides import PoolOverrides
 from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.slow.us_market import EarningsCalendar, us_session
 
 SCREEN_EVERY = timedelta(hours=1)
 """主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
@@ -103,6 +104,16 @@ class ScreenerConfig:
     min_listed_days: int = 7
     round_trip_fee_bps: float = 10.0
     default_category_cap: int = 30
+    tiers: bool = True
+    """是否分档（头部 / 中间 / 尾部）。"""
+    tier_head: int = 10
+    """头部档几个：池里分数最高的前几个（固定 / 手动加入的币一律算头部）。"""
+    tier_mid: int = 15
+    """中间档几个：头部之后的几个；再往后是尾部。"""
+    us_events: bool = True
+    """美股类别（crypto_stock / us_tech）是否用开盘时段和财报日历。"""
+    us_open_bonus: float = 0.08
+    """美股常规盘开盘期间，美股类别的币总分加这么多（0 = 不加）。"""
     category_caps: Mapping[Category, int] = field(default_factory=dict)
     """slow.toml ``[screener.categories]`` 里各类的上限；选币页的设置优先。"""
     category_enabled: Mapping[Category, bool] = field(default_factory=dict)
@@ -135,6 +146,24 @@ class ScreenerConfig:
 
 def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+
+_US_CATEGORIES = frozenset({Category.CRYPTO_STOCK, Category.US_TECH})
+
+
+def _assign_tiers(entries: list[SymbolPoolEntry], cfg: ScreenerConfig) -> list[SymbolPoolEntry]:
+    """进池的币分档：固定 / 手动加入的币和分数最高的凑满 ``tier_head`` 个算头部，接着
+    ``tier_mid`` 个算中间，其余尾部。``entries`` 已按（进池优先、分数从高到低）排好。"""
+    pooled = [e for e in entries if e.in_pool]
+    user = [e for e in pooled if e.pinned or e.manual]
+    rest = [e for e in pooled if not (e.pinned or e.manual)]
+    head_room = max(cfg.tier_head - len(user), 0)
+    tiers: dict[str, str] = {e.symbol: "head" for e in user}
+    for i, e in enumerate(rest):
+        tiers[e.symbol] = (
+            "head" if i < head_room else "mid" if i < head_room + cfg.tier_mid else "tail"
+        )
+    return [e.model_copy(update={"tier": tiers.get(e.symbol)}) for e in entries]
 
 
 def _enabled(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> bool:
@@ -207,6 +236,7 @@ class CodeSymbolScreener:
         cfg: ScreenerConfig | None = None,
         overrides: UserOverrides | None = None,
         recorder: RoleRecorder | None = None,
+        earnings: EarningsCalendar | None = None,
         every: timedelta = SCREEN_EVERY,
         tz: str = "Asia/Bangkok",
     ) -> None:
@@ -214,6 +244,8 @@ class CodeSymbolScreener:
         self._cfg = cfg or ScreenerConfig()
         self._ov = overrides or UserOverrides()
         self._rec = recorder
+        self._earnings = earnings
+        self._us_tickers: frozenset[str] = frozenset()
         self._every = every
         self._tz = ZoneInfo(tz)
         self._last_run: datetime | None = None
@@ -250,6 +282,10 @@ class CodeSymbolScreener:
             },
         )
 
+    def us_tickers(self) -> frozenset[str]:
+        """最近一次选出的池子里，美股类别的代码（财报新闻源按它拉）。"""
+        return self._us_tickers
+
     def set_overrides(self, overrides: UserOverrides) -> None:
         """选币页改了置顶 / 黑名单后调用，下一次 ``screen`` 生效。"""
         self._ov = overrides
@@ -281,27 +317,57 @@ class CodeSymbolScreener:
         self.heartbeat(now)
         return pool
 
+    def _us_adjust(
+        self,
+        symbol: str,
+        now: datetime,
+        us_open: bool,
+        total: float,
+        parts: dict[str, float],
+        reasons: list[str],
+    ) -> tuple[float, dict[str, float], list[str]]:
+        """美股类别：开盘期间加分；财报日前后在理由里标注（只标注，不改分）。"""
+        bonus = self._cfg.us_open_bonus
+        if us_open and bonus > 0:
+            total = round(total + bonus, 4)
+            parts = {**parts, "us_open": bonus}
+            reasons = ["美股开盘中", *reasons]
+        if self._earnings is not None:
+            note = self._earnings.note(symbol.removesuffix("USDT"), now)
+            if note:
+                reasons = [*reasons, note]
+        return total, parts, reasons
+
     async def _screen(self, now: datetime) -> SymbolPool:
         stats = await self._source.fetch(now)
         if not stats:
             raise RuntimeError("行情数据源返回空列表，沿用上一份候选池")
         cfg, ov = self._cfg, self._ov
+        us_on = cfg.us_events
+        if us_on and self._earnings is not None:
+            await self._earnings.refresh(now)  # 拉不到沿用旧缓存，内部已记日志，不影响选币
+        us_open = us_on and us_session(now) == "open"
         entries: dict[str, SymbolPoolEntry] = {}
         ranked: list[SymbolPoolEntry] = []
         for s in stats:
             f = _hard_filters(s, cfg)
             total, parts, reasons = score(s, cfg)
+            category = classify(s.symbol)
+            if us_on and category in _US_CATEGORIES:
+                total, parts, reasons = self._us_adjust(
+                    s.symbol, now, us_open, total, parts, reasons
+                )
             black = s.symbol in ov.blacklist
             pinned = s.symbol in ov.pinned and not black
             manual = s.symbol in ov.manual and not black
             try:
                 entry = SymbolPoolEntry(
                     symbol=s.symbol,
-                    category=classify(s.symbol),
+                    category=category,
                     score=total,
                     score_breakdown=parts,
                     reasons=(["你固定的币"] if pinned else [])
-                    + (["这一类已关闭"] if not _enabled(classify(s.symbol), cfg, ov) else [])
+                    + (["这一类已关闭"] if not _enabled(category, cfg, ov) else [])
                     + reasons,
                     filters=f,
                     pinned=pinned,
@@ -334,4 +400,11 @@ class CodeSymbolScreener:
 
         final = [e.model_copy(update={"in_pool": e.symbol in chosen}) for e in entries.values()]
         final.sort(key=lambda e: (not e.in_pool, -e.score, e.symbol))
+        if cfg.tiers:
+            final = _assign_tiers(final, cfg)
+        self._us_tickers = frozenset(
+            e.symbol.removesuffix("USDT")
+            for e in final
+            if e.in_pool and e.category in _US_CATEGORIES
+        )
         return SymbolPool(pool_id=f"pool-{now:%Y%m%dT%H%M}", ts=now, entries=final)

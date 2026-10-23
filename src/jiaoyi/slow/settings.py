@@ -19,10 +19,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from jiaoyi.contracts import Category
+from jiaoyi.contracts import Category, SizeTier
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.interfaces import SecretStore
+from jiaoyi.slow.commander import TierRules
 from jiaoyi.slow.screener import ScreenerConfig
 from jiaoyi.slow.tradingagents_engine import (
     PROVIDER_KEY_ENV,
@@ -77,6 +78,33 @@ class CategoryRule(_Strict):
     )
 
 
+class TiersSection(_Strict):
+    """分档交易（``[screener.tiers]``，设计文档 §六）：头部档开放交易；中间档军师每天挑几个、
+    仓位档位封顶；尾部档只看不做。池里的币按分数从高到低依次分进三档。"""
+
+    enabled: bool = Field(
+        default=True, description="关掉 = 不分档，整个候选池都参与开会（原来的做法）。"
+    )
+    head: int = Field(
+        default=10, ge=1, le=100, description="头部档几个（你固定 / 手动加入的币一律算头部）。"
+    )
+    mid: int = Field(default=15, ge=0, le=100, description="中间档几个；头部之后的都是尾部。")
+    mid_daily_pick: int = Field(
+        default=5, ge=0, le=100, description="中间档每天（曼谷日）最多挑几个来交易，当天第一轮挑。"
+    )
+    mid_size_max: Literal["S", "M", "L"] = Field(
+        default="S", description="中间档的币仓位档位最大封到哪一档（S 最小）。"
+    )
+
+    def cautions(self) -> list[str]:
+        out: list[str] = []
+        if self.mid_daily_pick > self.mid:
+            out.append("中间档每天挑的个数比中间档本身还多，多出来的名额用不上")
+        if self.mid_size_max == "L":
+            out.append("中间档仓位档位不封顶，和头部档一样大（设计稿的意思是比头部谨慎）")
+        return out
+
+
 class ScreenerSection(_Strict):
     """选币器的门槛和权重（``[screener]``）。每小时用代码筛一遍全部币安 U 本位永续：先过硬门槛，
     再按下面的权重打分，取前 N 个进候选池。默认值就是原来写死的值。你定的值就是上限，只提示不拦，
@@ -117,6 +145,18 @@ class ScreenerSection(_Strict):
         le=100,
         description="每一类币（主流 / 山寨 / 币股 / 美股科技 / 贵金属）默认最多进池几个。"
         "选币页单独改过的类别以选币页为准。",
+    )
+    tiers: TiersSection = TiersSection()
+    us_events: bool = Field(
+        default=True,
+        description="美股类别（加密概念股 / 美股科技）用美股开盘时段和财报日历：开盘期间加分，"
+        "财报日前后在选币理由里标注，军师团新闻里带上财报日。",
+    )
+    us_open_bonus: float = Field(
+        default=0.08,
+        ge=0,
+        le=0.3,
+        description="美股常规盘开盘期间，美股类别的币总分加多少（总分满分约 1；0 = 不加）。",
     )
     categories: dict[Category, CategoryRule] = Field(
         default_factory=dict,
@@ -197,6 +237,7 @@ class ScreenerSection(_Strict):
                 f"选币的最大价差 {self.max_spread_bps:g} 比硬上限里的 {risk_max_spread_bps:g} 宽，"
                 "多出来的币进池后保镖会一律拒绝"
             )
+        out.extend(self.tiers.cautions())
         if self.categories and not any(
             self.categories.get(c, CategoryRule()).enabled for c in Category
         ):
@@ -376,6 +417,11 @@ class SlowConfig(_Strict):
             min_listed_days=s.min_listed_days,
             round_trip_fee_bps=round_trip_fee_bps,
             default_category_cap=s.default_category_cap,
+            tiers=s.tiers.enabled,
+            tier_head=s.tiers.head,
+            tier_mid=s.tiers.mid,
+            us_events=s.us_events,
+            us_open_bonus=s.us_open_bonus,
             category_caps={c: r.cap for c, r in s.categories.items() if r.cap is not None},
             category_enabled={c: r.enabled for c, r in s.categories.items()},
             min_range_24h_pct=s.min_range_24h_pct,
@@ -411,6 +457,11 @@ class SlowConfig(_Strict):
             "min_refresh_gap": timedelta(minutes=s.min_refresh_gap_min),
             "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
             "failed_meeting_cost_usd": self.budget.failed_meeting_cost_usd,
+            "tiers": TierRules(
+                enabled=self.screener.tiers.enabled,
+                mid_daily_pick=self.screener.tiers.mid_daily_pick,
+                mid_size_max=SizeTier(self.screener.tiers.mid_size_max),
+            ),
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
         }
 
