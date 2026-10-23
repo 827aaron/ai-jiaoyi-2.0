@@ -25,7 +25,7 @@ const ICON = {
   settings: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
 };
 const MODE = { paper: "模拟盘", testnet: "测试网", live: "实盘" };
-const BIAS = { long: ["偏多", "p-long"], short: ["偏空", "p-short"], both: ["双向", "p-accent"], no_trade: ["观望", ""], unknown: ["?", ""] };
+const BIAS = { long: ["偏多", "p-long"], short: ["偏空", "p-short"], both: ["双向", "p-accent"], no_trade: ["观望", ""], unknown: ["没结论", ""] };
 const SIDE = { long: ["多", "up"], short: ["空", "down"] };
 const LIFEBOAT = { active: "保命 ✓", pending: "⚠ 保命挂单中", missing: "⚠ 保命缺失", triggered: "保命已触发", cancelled: "保命已撤" };
 const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "保镖", commander: "军师团", keeper: "管家", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
@@ -329,10 +329,10 @@ function showCard(fetchPrices = true) {
   // 观望 = 军师团看过、这一轮不开仓：默认收成一行，只把有方向的币摊开
   const [act, idle] = splitIdle(c.symbols);
   const row = (s) => {
-    const [t, k] = BIAS[s.bias] || [s.bias, ""];
+    const [t, k] = s.pending_label ? [s.pending_label, s.pending_label === "开会中" ? "p-accent" : ""] : BIAS[s.bias] || [s.bias, ""];
     return `<tr><td class="hi">${coin(s.symbol)}<div class="dim small">${esc(CAT[s.category] || s.category)}</div></td><td><span class="pill ${k}">${t}</span></td>
       <td>${range(s.stop_atr, "", 1)}</td><td>${range(s.take_profit_r, "", 1)}</td><td>${range(s.leverage, "", 0)}</td><td>${range(s.notional_usdt, "", 0)}</td><td>${esc(TIER[s.size_tier_max] || s.size_tier_max || "—")}</td>
-      <td class="txt">${esc(s.reason)}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}<div class="small"><a ${clickable("meeting", s.symbol)}>看这个币的开会过程 ›</a></div></td></tr>`;
+      <td class="txt">${esc(s.reason || s.pending || "")}${s.allowed_signals.length && s.allowed_signals.length < 5 ? `<div class="dim small">只做：${s.allowed_signals.map((x) => esc(SIGNAL[x] || x)).join("、")}</div>` : ""}${levelsHtml(s.key_levels, S.px[s.symbol])}<div class="small"><a ${clickable("meeting", s.symbol)}>看这个币的开会过程 ›</a></div></td></tr>`;
   };
   const head = `<thead><tr><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th title="军师团建议的名义仓位范围（已含杠杆），最终由保镖按风险算">单笔仓位（含杠杆）U</th><th title="${esc(tierTip(c))}">仓位档</th><th>理由</th></tr></thead>`;
   dlg(`<h3>作战卡${c.version ? " v" + c.version : ""} · ${c.symbols.length} 个标的</h3>
@@ -478,7 +478,7 @@ function cardSection(c) {
   const [act, idle] = splitIdle(c.symbols);
   const shown = act.slice(0, 8);
   const more = act.length - shown.length;
-  const pills = shown.map((s) => { const [t, k] = BIAS[s.bias] || [s.bias, ""]; return `<span class="pill ${k}">${coin(s.symbol)} ${t}</span>`; }).join("");
+  const pills = shown.map((s) => { const [t, k] = s.pending_label ? [s.pending_label, ""] : BIAS[s.bias] || [s.bias, ""]; return `<span class="pill ${k}">${coin(s.symbol)} ${t}</span>`; }).join("");
   const until = c.expires_at ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
   return `<section class="card click" ${clickable("card")}>
     <div class="ch"><h2>作战卡</h2><span class="pill">军师团${c.version ? " v" + c.version : ""}</span>
@@ -712,7 +712,7 @@ function tfCardNode() {
 }
 // 总盘会：军师团先开的那场，挑哪些币上会（给军师团）、哪些币要盯（给盘口员）
 function tfMarketNode(m, p) {
-  const st = !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 10 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
+  const st = !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
   const now = m && m.status === "running" ? `开会中：${MARKET_STAGE[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
 }

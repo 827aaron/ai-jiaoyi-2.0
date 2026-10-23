@@ -815,3 +815,32 @@ def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
                       run).headline == ""  # fmt: skip
     plain = c.ModuleStatus(**base, headline="池子 40 个")
     assert _role_card(c.Role.SCREENER, plain, NOW, run).headline == "池子 40 个"
+
+
+def test_card_rows_without_conclusion_say_why(tmp_path: Path) -> None:
+    """作战卡里没有结论的币不显示问号：按会议实况写开会中 / 失败 / 中断 / 没开会。"""
+    from jiaoyi.panel.overview import CardRow, CardView, _with_pending
+
+    folder = tmp_path / "meeting_live"
+    folder.mkdir()
+    t = lambda m: (NOW - timedelta(minutes=m)).isoformat()  # noqa: E731
+    base = {"started_at": t(8), "updated_at": t(1), "steps": []}
+    (folder / "XRPUSDT.json").write_text(
+        json.dumps(base | {"symbol": "XRPUSDT", "status": "running", "stage": "debate"})
+    )
+    (folder / "ADAUSDT.json").write_text(
+        json.dumps(base | {"symbol": "ADAUSDT", "status": "failed", "error": "超时"})
+    )
+    (folder / "DOTUSDT.json").write_text(
+        json.dumps(base | {"symbol": "DOTUSDT", "status": "running", "updated_at": t(30)})
+    )
+    syms = ["XRPUSDT", "ADAUSDT", "DOTUSDT", "LTCUSDT"]
+    rows = [CardRow(symbol=s, bias="unknown", category="other") for s in syms]
+    card = CardView.model_construct(created_at=NOW - timedelta(minutes=5), symbols=rows)
+    out = _with_pending(card, tmp_path, NOW, "Asia/Bangkok")
+    assert out is not None
+    got = {r.symbol: (r.pending_label, r.pending or "") for r in out.symbols}
+    assert got["XRPUSDT"][0] == "开会中" and "第 2 / 5 步 · 多空辩论" in got["XRPUSDT"][1]
+    assert got["ADAUSDT"] == ("开会失败", "开会失败：超时；这张卡里它没有结论，不会开仓")
+    assert got["DOTUSDT"][0] == "会中断" and "15 分钟" in got["DOTUSDT"][1]
+    assert got["LTCUSDT"][0] == "没开会"
