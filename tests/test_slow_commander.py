@@ -268,9 +268,10 @@ async def test_refresh_reasons(tmp_path: Path, now: datetime) -> None:
     assert c.refresh_reason(now + timedelta(minutes=2), p2, {}) is None  # 防抖
 
 
-def test_ttl_range_enforced(tmp_path: Path, now: datetime) -> None:
+def test_ttl_must_be_positive(tmp_path: Path, now: datetime) -> None:
     with pytest.raises(ValueError):
-        make(tmp_path, FakeEngine([]), now, ttl=timedelta(minutes=30))
+        make(tmp_path, FakeEngine([]), now, ttl=timedelta(0))
+    make(tmp_path, FakeEngine([]), now, ttl=timedelta(minutes=35))  # 15m 档
 
 
 async def test_wrong_category_from_engine_is_rejected(tmp_path: Path, now: datetime) -> None:

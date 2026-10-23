@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import tomllib
 from datetime import timedelta
 from pathlib import Path
@@ -319,9 +320,14 @@ class ScheduleConfig(_Strict):
         "写了取两者较小值，不会超过 card_pick_max。",
     )
     concurrency: int = Field(default=8, ge=1, le=8, description="同时开几个标的的会议。")
-    card_ttl_hours: float = Field(default=2.0, ge=1.0, le=4.0, description="作战卡有效期。")
-    symbol_min_interval_hours: float = Field(
-        default=2.0, ge=0.5, le=12.0, description="同一个币两次会议的最小间隔。"
+    card_ttl_min: float = Field(
+        default=140.0,
+        ge=10.0,
+        le=720.0,
+        description="作战卡有效期（分钟）。档位默认 = 开会间隔 + 换卡提前量。",
+    )
+    symbol_min_interval_min: float = Field(
+        default=115.0, ge=5.0, le=720.0, description="同一个币两次会议的最小间隔（分钟）。"
     )
     refresh_lead_min: float = Field(
         default=20.0,
@@ -333,32 +339,43 @@ class ScheduleConfig(_Strict):
         default=900.0, ge=60.0, le=1800.0, description="单个标的的会议超时。"
     )
     min_refresh_gap_min: float = Field(
-        default=5.0,
+        default=120.0,
         ge=1.0,
         le=1440.0,
         description="两轮开会的最小间隔（分钟）。关键位突破、大消息、新入池都要等过了这个间隔"
-        "才开会；档位默认 = 卡有效期 − 提前量（2h 档 100 分钟），即「卡多久有效就多久开一次」。",
+        "才开会；档位默认 = 档位分钟数（2h 档 120 / 60m 60 / 30m 30 / 15m 15），"
+        "即「档位 = 开会间隔」。",
     )
 
     @model_validator(mode="after")
     def _lead(self) -> ScheduleConfig:
-        if self.refresh_lead_min >= self.card_ttl_hours * 60:
-            raise ValueError("refresh_lead_min 必须小于作战卡有效期（card_ttl_hours × 60）")
-        if self.min_refresh_gap_min >= self.card_ttl_hours * 60:
+        if self.refresh_lead_min >= self.card_ttl_min:
+            raise ValueError("refresh_lead_min 必须小于作战卡有效期（card_ttl_min）")
+        if self.min_refresh_gap_min >= self.card_ttl_min:
             raise ValueError("min_refresh_gap_min 必须小于作战卡有效期，否则卡会过期断档")
         return self
 
     def caution(self) -> str | None:
-        """单币超时 + 5 分钟余量比提前量还长时的提示（只提示不拒绝）：
-        一个币拖到超时，旧卡过期后到新卡出来之间就不开新仓。"""
+        """只提示不拒绝：①单币超时 + 5 分钟余量比提前量长，个别币拖到超时时旧卡过期后到新卡出来
+        之间不开新仓；②最坏一轮（每波都拖到超时）跑不完开会间隔，下一轮会晚开 / 与上一轮重叠。"""
+        notes: list[str] = []
         need = self.symbol_timeout_s / 60 + 5
-        if need <= self.refresh_lead_min:
-            return None
-        return (
-            f"单币会议超时 {self.symbol_timeout_s:.0f} 秒（加 5 分钟余量约 {need:.0f} 分钟）"
-            f"比换卡提前量 {self.refresh_lead_min:g} 分钟长，个别币拖到超时时旧卡过期后"
-            "到新卡出来之间可能不开新仓"
-        )
+        if need > self.refresh_lead_min:
+            notes.append(
+                f"单币会议超时 {self.symbol_timeout_s:.0f} 秒（加 5 分钟余量约 {need:.0f} 分钟）"
+                f"比换卡提前量 {self.refresh_lead_min:g} 分钟长，个别币拖到超时时旧卡过期后"
+                "到新卡出来之间可能不开新仓"
+            )
+        waves = math.ceil((self.max_cards_per_round or self.concurrency) / self.concurrency)
+        worst = waves * self.symbol_timeout_s / 60
+        if worst >= self.min_refresh_gap_min:
+            notes.append(
+                f"开会间隔 {self.min_refresh_gap_min:g} 分钟，最坏一轮（{waves} 波 × 单币超时 "
+                f"{self.symbol_timeout_s:.0f} 秒）要 {worst:g} 分钟，个别币拖到超时就赶不上下一轮；"
+                "可调小 symbol_timeout_s、减少 max_cards_per_round，或换大一点的档位"
+                "（不会自动拉长间隔）"
+            )
+        return "；".join(notes) or None
 
 
 class BudgetConfig(_Strict):
@@ -476,8 +493,8 @@ class SlowConfig(_Strict):
         s = self.schedule
         return {
             "concurrency": s.concurrency,
-            "ttl": timedelta(hours=s.card_ttl_hours),
-            "symbol_min_interval": timedelta(hours=s.symbol_min_interval_hours),
+            "ttl": timedelta(minutes=s.card_ttl_min),
+            "symbol_min_interval": timedelta(minutes=s.symbol_min_interval_min),
             "expiry_lead": timedelta(minutes=s.refresh_lead_min),
             "symbol_timeout_s": s.symbol_timeout_s,
             "min_refresh_gap": timedelta(minutes=s.min_refresh_gap_min),
@@ -522,6 +539,8 @@ def load_slow_config(
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path} 不是合法的 TOML：{e}") from e
+    if legacy := legacy_schedule_keys(data):
+        raise ConfigError(f"{path} 用了旧的小时写法，拒绝启动：{legacy}")
     try:
         return SlowConfig.model_validate(with_profile(data, profile))
     except ValidationError as e:
@@ -530,6 +549,19 @@ def load_slow_config(
             loc = ".".join(str(p) for p in err["loc"]) or "(整体)"
             lines.append(f"  - {loc}: {err['msg']}")
         raise ConfigError("\n".join(lines)) from e
+
+
+def legacy_schedule_keys(data: dict[str, Any]) -> str | None:
+    """slow.toml [schedule] 里还在用按小时的旧键时给明确换算提示（现在按分钟）。"""
+    section = data.get("schedule", {})
+    if not isinstance(section, dict):
+        return None
+    renamed = {
+        "card_ttl_hours": "card_ttl_min（作战卡有效期，分钟；档位默认 = 开会间隔 + 提前量）",
+        "symbol_min_interval_hours": "symbol_min_interval_min（同币最小间隔，分钟）",
+    }
+    hits = [f"{old} → {new}，数值乘 60" for old, new in renamed.items() if old in section]
+    return "；".join(hits) or None
 
 
 def missing_slow_stack(cfg: SlowConfig, secrets: SecretStore) -> str | None:

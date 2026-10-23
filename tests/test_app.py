@@ -158,7 +158,7 @@ async def test_slow_config_and_brief_reach_commander_and_engine(
 
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
-    slow = SlowConfig.model_validate({"schedule": {"concurrency": 2, "card_ttl_hours": 3}})
+    slow = SlowConfig.model_validate({"schedule": {"concurrency": 2, "card_ttl_min": 180}})
     cfg = load_app_config(APP).model_copy(update={"data_dir": str(tmp_path)})
     app = App(
         load_risk_config(RISK),

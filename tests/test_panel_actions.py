@@ -502,9 +502,9 @@ def test_update_validates_with_profile_defaults(tmp_path: Path) -> None:
     paths.app.write_text(text, encoding="utf-8")
     # 示例里 predictor_enabled 等档位键没写：照样能改别的设置
     actions.update_config(paths, data, "app", {"pool_size": 30}, PW, NOW)
-    # 档位给的 max_stop_atr = 2.0 也参与校验：存得下的值重启时也启动得了
+    # 默认的 max_stop_atr = 3.0 也参与校验：存得下的值重启时也启动得了
     with pytest.raises(ActionError, match=r"min_stop_atr|max_stop_atr"):
-        actions.update_config(paths, data, "fast_loop", {"min_stop_atr": 2.5}, PW, NOW)
+        actions.update_config(paths, data, "fast_loop", {"min_stop_atr": 3.5}, PW, NOW)
     load_app_config(paths.app)
 
 
@@ -523,12 +523,12 @@ def test_schedule_validates_with_profile_defaults(tmp_path: Path) -> None:
     actions.update_config(paths, data, "schedule", {"refresh_lead_min": 45}, PW, NOW)  # 2h 卡
     text = paths.app.read_text(encoding="utf-8").replace('profile = "2h"', 'profile = "60m"')
     paths.app.write_text(text, encoding="utf-8")
-    # 60m 档卡只有 1 小时：提前量 60 分钟存不下（启动时同样会被拒）
-    with pytest.raises(ActionError, match="refresh_lead_min"):
-        actions.update_config(paths, data, "schedule", {"refresh_lead_min": 60}, PW, NOW)
+    # 60m 档卡有效期 80 分钟：开会间隔 90 分钟存不下（启动时同样会被拒）
+    with pytest.raises(ActionError, match="min_refresh_gap_min"):
+        actions.update_config(paths, data, "schedule", {"min_refresh_gap_min": 90}, PW, NOW)
     actions.update_config(paths, data, "schedule", {"refresh_lead_min": 20}, PW, NOW)
     cfg = load_slow_config(paths.slow, "60m").schedule
-    assert cfg.refresh_lead_min == 20 and cfg.card_ttl_hours == 1.0
+    assert cfg.refresh_lead_min == 20 and cfg.card_ttl_min == 80
 
 
 def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
@@ -539,7 +539,7 @@ def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
     assert "keeper_interval_s" not in info.pinned.get("app", {})  # 示例里注释掉了，跟档位走
     actions.update_config(paths, data, "app", {"profile": "60m"}, PW, NOW)
     app = load_app_config(paths.app)
-    assert app.profile == "60m" and app.fast_loop.time_limit_s == 3600
+    assert app.profile == "60m" and app.fast_loop.time_limit_s == 7200  # 不随档位变
     assert actions.profile_info(paths).current == "60m"
     # 网页上填了档位键 = 写死；清空 = 删掉这一行，回到档位默认
     actions.update_config(paths, data, "app", {"keeper_interval_s": 30}, PW, NOW)
@@ -567,9 +567,9 @@ def test_settings_page_shows_profile(tmp_path: Path) -> None:
     with _client(paths) as client:
         page = client.get("/api/settings").json()
     assert page["profile"]["current"] == "2h"
-    assert page["profile"]["pinned"]["fast_loop"] == {"time_limit_s": 7200}
+    assert "time_limit_s" not in page["profile"]["pinned"].get("fast_loop", {})  # 不随档位
     fl = {i["key"]: i for i in page["fast_loop"]}
-    assert fl["time_limit_s"]["pinned"] and fl["time_limit_s"]["profile_default"] == 7200
+    assert fl["time_limit_s"]["profiled"] is False
     assert fl["min_p_take"]["profiled"] and fl["signal_max_age_s"]["profiled"] is False
     app_items = {i["key"]: i for i in page["app"]}
     assert app_items["profile"]["editable"] and app_items["profile"]["choices"][0] == "2h"
@@ -646,8 +646,7 @@ def test_profile_pins_listed_and_cleared(tmp_path: Path) -> None:
     actions.update_config(paths, data, "app", {"keeper_interval_s": 30}, PW, NOW)
     pins = {x.key: x for x in actions.profile_info(paths).pins["15m"]}
     assert (pins["keeper_interval_s"].value, pins["keeper_interval_s"].profile_default) == (30, 10)
-    assert (pins["min_p_genuine"].value, pins["min_p_genuine"].profile_default) == (0.6, 0.65)
-    assert pins["min_p_genuine"].section == "fast_loop"
+    assert pins["min_p_genuine"].section == "fast_loop"  # 门槛跟最长持仓走，不跟档位
     # 2h 档不改门槛：默认值取程序默认
     two = {x.key: x for x in actions.profile_info(paths).pins["2h"]}
     assert two["min_p_genuine"].profile_default == 0.6
