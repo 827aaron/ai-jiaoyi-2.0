@@ -145,6 +145,10 @@ class PanelFiles:
         self._old[key] = (size, recs)
         return recs
 
+    def income_daily(self) -> Any:
+        """主程序每 5 分钟从币安收入流水汇总的按日盈亏（data/income_daily.json）；没有就是 None。"""
+        return self._json("income_daily.json")
+
     def runtime(self) -> dict[str, Any]:
         """主程序这次启动写的 runtime.json（启动时间、桩角色等）；没有或读不出就是空的。"""
         raw = self._json("runtime.json")

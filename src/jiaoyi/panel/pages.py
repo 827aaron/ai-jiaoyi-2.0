@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -26,7 +26,7 @@ from jiaoyi.core.pool_overrides import read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
 from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
-from jiaoyi.panel.files import PanelFiles, read_live_gate, read_pool
+from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meetings import MeetingSummary, list_meetings
 from jiaoyi.panel.overview import (
@@ -452,6 +452,23 @@ class CostRow(BaseModel):
     week_usd: float
 
 
+class PnlPeriod(BaseModel):
+    """一段时间里钱是怎么赚 / 亏的。负数 = 亏 / 花出去。"""
+
+    key: Literal["today", "7d", "all"]
+    label: str
+    trading_usdt: float
+    """平仓盈亏（扣手续费前）。"""
+    fees_usdt: float
+    """手续费（负数）。"""
+    funding_usdt: float | None
+    """资金费（可正可负）；没有币安收入流水时拿不到。"""
+    ai_usd: float
+    """AI 调用花费（美元，按 1 U 算）。"""
+    net_usdt: float
+    """交易盈亏 + 手续费 + 资金费 − AI 费（资金费拿不到时不算它）。"""
+
+
 class FundsPage(BaseModel):
     equity_usdt: float | None
     equity_source: str
@@ -470,6 +487,13 @@ class FundsPage(BaseModel):
     costs: list[CostRow]
     cost_today_usd: float
     cost_week_usd: float
+    pnl: list[PnlPeriod] = []
+    """今天 / 近 7 天 / 累计。"""
+    pnl_source: Literal["exchange", "ledger"] = "ledger"
+    """exchange = 币安收入流水（data/income_daily.json，主程序每 5 分钟拉）；
+    ledger = 账本（已平仓的单），没有资金费。"""
+    pnl_since: date | None = None
+    """“累计”从哪天算起。"""
 
 
 def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: datetime) -> FundsPage:
@@ -490,8 +514,7 @@ def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: dateti
     other = None
     if kpis.equity_usdt is not None and start is not None and unrealized is not None:
         other = kpis.equity_usdt - start - realized - unrealized
-    paid = frozenset({Role.GATE, Role.KEEPER, Role.COMMANDER, Role.PREDICTOR})
-    week = files.decisions_since(_range_start(now, tz, "7d"), now, paid)
+    week = files.decisions_since(_range_start(now, tz, "7d"), now, _PAID)
     costs = []
     for role in (Role.GATE, Role.KEEPER, Role.COMMANDER, Role.PREDICTOR):
         mine = [r for r in week if r.role is role]
@@ -503,7 +526,11 @@ def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: dateti
                 week_usd=sum(r.cost_usd for r in mine),
             )
         )
+    pnl, source, since = _pnl_periods(files, ledger, now, tz)
     return FundsPage(
+        pnl=pnl,
+        pnl_source=source,
+        pnl_since=since,
         equity_usdt=kpis.equity_usdt,
         equity_source=kpis.equity_source,
         wallet_usdt=hb.wallet_usdt if hb.ok else None,
@@ -519,6 +546,73 @@ def build_funds(files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: dateti
         cost_today_usd=sum(c.today_usd for c in costs),
         cost_week_usd=sum(c.week_usd for c in costs),
     )
+
+
+_PAID = frozenset({Role.GATE, Role.KEEPER, Role.COMMANDER, Role.PREDICTOR})
+
+
+def _income_days(raw: object) -> dict[date, tuple[float, float, float]]:
+    """income_daily.json 的 days：当地日 → (realized_pnl, commission, funding_fee)。坏的天跳过。"""
+    out: dict[date, tuple[float, float, float]] = {}
+    days = raw.get("days") if isinstance(raw, dict) else None
+    for k, v in (days or {}).items() if isinstance(days, dict) else []:
+        try:
+            d = date.fromisoformat(k)
+            row = tuple(float(v[f]) for f in ("realized_pnl", "commission", "funding_fee"))
+        except (TypeError, ValueError, KeyError):
+            continue
+        out[d] = (row[0], row[1], row[2])
+    return out
+
+
+def _pnl_periods(
+    files: PanelFiles, ledger: Ledger, now: datetime, tz: str
+) -> tuple[list[PnlPeriod], Literal["exchange", "ledger"], date | None]:
+    """今天 / 近 7 天 / 累计的 交易盈亏、手续费、资金费、AI 费、净盈亏。
+
+    有 income_daily.json 就按币安收入流水（含资金费）；没有就按账本（已平仓的单），资金费不知道。
+    """
+    today = local_day(now, tz)
+    income = _income_days(files.income_daily())
+    closed = [
+        p
+        for p in ledger.positions
+        if p.closed_at is not None
+        and p.realized_pnl_usdt is not None  # 测试单也是真金白银，和币安流水口径一致
+    ]
+    if income:
+        since: date | None = min(income)
+    else:
+        since = min((local_day(p.closed_at, tz) for p in closed if p.closed_at), default=None)
+    first = min(since or today, today - timedelta(days=6))
+    start = datetime.combine(first, time(), tzinfo=ZoneInfo(tz)).astimezone(UTC)
+    ai_by_day: dict[date, float] = {}
+    for r in files.decisions_since(start, now, _PAID):
+        d = local_day(r.ts, tz)
+        ai_by_day[d] = ai_by_day.get(d, 0.0) + r.cost_usd
+    periods: list[tuple[Literal["today", "7d", "all"], str, date]] = [
+        ("today", "今天", today),
+        ("7d", "近 7 天", today - timedelta(days=6)),
+        ("all", "累计", since or today),
+    ]
+    out = []
+    for key, label, lo in periods:
+        ai = sum(v for d, v in ai_by_day.items() if lo <= d <= today)
+        funding: float | None
+        if income:
+            rows = [v for d, v in income.items() if lo <= d <= today]
+            trading = sum(r[0] for r in rows)
+            fees = sum(r[1] for r in rows)
+            funding = sum(r[2] for r in rows)
+        else:
+            mine = [p for p in closed if p.closed_at and lo <= local_day(p.closed_at, tz) <= today]
+            fees = -sum(p.fees_usdt for p in mine)
+            trading = sum(p.realized_pnl_usdt or 0.0 for p in mine) - fees
+            funding = None
+        net = trading + fees + (funding or 0.0) - ai
+        out.append(PnlPeriod(key=key, label=label, trading_usdt=trading, fees_usdt=fees,
+                             funding_usdt=funding, ai_usd=ai, net_usdt=net))  # fmt: skip
+    return out, ("exchange" if income else "ledger"), since
 
 
 # ---------------------------------------------------------------- 选币
