@@ -253,7 +253,11 @@ def _build_cards(
         risk_cfg,
         secrets,
         # 每笔单最多持有多久（档位的时间止损）：军师团的止损 / 止盈 / 关键位按这个时长的波动给
-        settings=replace(cfg.engine_settings(), hold_minutes=max(fast.time_limit_s // 60, 1)),
+        settings=replace(
+            cfg.engine_settings(),
+            hold_minutes=max(fast.time_limit_s // 60, 1),
+            live_dir=str(Path(app_cfg.data_dir) / "meeting_live"),
+        ),
         today=clock,
         news=news,
         liquidations=liquidations,

@@ -25,6 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -62,6 +63,7 @@ from jiaoyi.slow.levels import (
     select_levels,
 )
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
+from jiaoyi.slow.meeting_live import MeetingLive, tap_graph
 from jiaoyi.slow.news import NewsHub, format_items
 from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
 
@@ -112,6 +114,8 @@ class TradingAgentsSettings:
     hold_minutes: int = 120
     # 关键位范围 = level_span_sigma × ATR × √(持仓时长 / ATR 周期)，见 levels.py
     level_span_sigma: float = SPAN_SIGMA
+    # 开会过程实时落盘的目录（面板读）；空 = 不落盘。见 meeting_live.py
+    live_dir: str = ""
 
 
 # TradingAgents 的提示词是写死的股票语境（Buy/Overweight/Hold/Underweight/Sell，“减持”）。
@@ -777,6 +781,7 @@ class TradingAgentsEngine:
         self._brief = brief
         self._liq = liquidations
         self._inflight: dict[str, CostMeter] = {}
+        self._live: dict[str, MeetingLive] = {}
         self._inflight_lock = threading.Lock()
         register_binance_vendor()
         self._guard_reddit(settings)
@@ -816,6 +821,9 @@ class TradingAgentsEngine:
             meter = self._inflight.get(key)
         if meter:
             meter.abort()
+        live = self._live.get(key)
+        if live:
+            live.fail("超时取消，会议没有结论", meter.cost if meter else 0.0)
 
     @staticmethod
     def _llm(graph: Any, tier: str) -> Any:
@@ -927,23 +935,43 @@ class TradingAgentsEngine:
     def _analyze_sync(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
         meter = self._meter(entry.symbol)
         handler = cost_handler(meter)
+        live = MeetingLive(Path(self._s.live_dir), entry.symbol) if self._s.live_dir else None
+        if live:
+            self._live[entry.symbol] = live
         try:
-            return self._analyze_run(entry, regime, handler, meter)
+            res = self._analyze_run(entry, regime, handler, meter, live)
         except Exception as exc:  # 同上：失败也带上真实花费
+            if live:
+                live.fail(str(exc) or type(exc).__name__, meter.cost)
             raise MeetingError(str(exc), meter.cost) from exc
+        else:
+            if live:
+                cs = res.card_symbol
+                live.finish(cs.bias.value, cs.reason, cs.reason, res.cost_usd)
+            return res
         finally:
             self._done(entry.symbol, meter)
+            self._live.pop(entry.symbol, None)
 
     def _analyze_run(
-        self, entry: SymbolPoolEntry, regime: str, handler: Any, meter: CostMeter
+        self,
+        entry: SymbolPoolEntry,
+        regime: str,
+        handler: Any,
+        meter: CostMeter,
+        live: MeetingLive | None = None,
     ) -> Analysis:
         ticker, asset_type = ta_ticker(entry)
         analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
         graph = self._graph(analysts, handler)
+        if live:
+            tap_graph(graph, live)
         state, _rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
         decision = str(state.get("final_trade_decision", ""))
         if not decision:
             raise RuntimeError(f"{entry.symbol}：TradingAgents 没有给出结论")
+        if live:
+            live.converting()
 
         levels = level_context(
             entry.symbol, self._today(), self._stop, self._s.hold_minutes, self._s.level_span_sigma
