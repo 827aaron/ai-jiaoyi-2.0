@@ -281,7 +281,8 @@ class ThreeWayReconciler:
         for issue in issues:
             await self._send_issue(now, issue)
             self._record_issue(now, issue)
-        self._beat(now, healthy=all(i.fixed for i in issues), count=len(issues))
+        open_ = sum(not i.fixed for i in issues)
+        self._beat(now, healthy=open_ == 0, count=open_, fixed=len(issues) - open_)
         return report
 
     def _record_issue(self, now: datetime, issue: ReconcileIssue) -> None:
@@ -296,9 +297,15 @@ class ThreeWayReconciler:
                 output={"kind": issue.kind.value, "fixed": issue.fixed},
             )
 
-    def _beat(self, now: datetime, *, healthy: bool, count: int) -> None:
+    def _beat(self, now: datetime, *, healthy: bool, count: int, fixed: int = 0) -> None:
+        """``count`` 只算没处理好的问题；已自动处理的（例如手动平仓已同步）不让对账灯继续报问题。"""
         health = Health.OK if healthy else Health.DEGRADED
-        headline = "三方一致" if count == 0 else f"发现 {count} 个问题"
+        if count:
+            headline = f"发现 {count} 个问题"
+        elif fixed:
+            headline = f"三方一致（本轮已处理 {fixed} 项）"
+        else:
+            headline = "三方一致"
         if self._rec is not None:
             self._rec.heartbeat(now, health, headline)
         for beat in self._heartbeats:
