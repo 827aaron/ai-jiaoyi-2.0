@@ -482,7 +482,7 @@ async def test_feed_heartbeat_reports_book_reader_status(tmp_path: Path) -> None
     feed.set_coverage(eng.coverage)
     st = status()
     assert st.health == c.Health.OK and st.today.calls == 3
-    assert "订阅 1 个币" in st.headline and "盘口新鲜 1 个" in st.headline
+    assert "盯着 1 个币" in st.headline and "盘口新鲜 1 个" in st.headline
     assert "成交 3" in st.headline
 
     feed._down.add("public-0")

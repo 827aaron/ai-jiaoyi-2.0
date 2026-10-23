@@ -460,6 +460,7 @@ def build_modules(
         log_sink=decision_log,
         clock=clock,
         cfg=app_cfg.predictor,
+        display_tz=tz,
     )
     features = RollingFeatureEngine(atr_period_min=fast.atr_period_min)
     if isinstance(feed, BinanceFuturesFeed):
@@ -604,10 +605,9 @@ class App:
         try:
             self.set_pool(await self.m.screener.screen(now))
         except Exception:
-            # 选币失败不阻止启动：没有池子就不订阅、军师不开会，快环自然不开新仓
-            log.exception("启动选币失败，暂不订阅行情，下一轮选币再试")
-        if self.pool is not None:
-            await self.m.feed.subscribe([e.symbol for e in self.pool.in_pool])
+            # 选币失败不阻止启动：没有池子军师不开会，快环自然不开新仓
+            log.exception("启动选币失败，下一轮选币再试")
+        # 行情只订要盯的币（总盘会挑中 + 作战卡 + 持仓），由主循环 Runner.sync_watch 订
         self.save_blocked()  # 封禁只在内存里，重启后清掉旧文件，由新闻源重新补上
         self._write_runtime(now)
         if isinstance(self.m.decision_model, _SupportsWarmup):

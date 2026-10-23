@@ -182,6 +182,8 @@ class BinanceFuturesFeed:
         self.by_kind: dict[str, int] = {}
         self._closed = False
         self.symbols: list[str] = []
+        self.watch_note = ""
+        """主循环写进来的订阅说明（「盯着 N 个币（总盘会 n 持仓 m）」），团队页卡片开头用。"""
         self.dropped = 0
         self.reconnects = 0
         self.messages = 0
@@ -340,7 +342,9 @@ class BinanceFuturesFeed:
         if self._closed:
             return Health.DOWN, "行情连接已关闭"
         if not self._tasks:
-            return Health.STARTING, "等候选池出来再订阅行情"
+            return Health.STARTING, "等总盘会挑币再订阅行情"
+        if not self.symbols:
+            return Health.OK, "没有要盯的币（等总盘会 / 作战卡 / 持仓）"
         conns, down = len(self._tasks), len(self._down)
         links = f"{conns} 条连接" + (f"（断 {down} 条）" if down else "正常")
         tail = f"，重连 {self.reconnects} 次" if self.reconnects else ""
@@ -353,11 +357,12 @@ class BinanceFuturesFeed:
                 Health.DOWN,
                 f"行情断流：{'、'.join(silent)} 已 {age:.0f} 秒没消息，{links}{tail}",
             )
+        watching = self.watch_note or f"盯着 {len(self.symbols)} 个币"
         if self.last_message_at is None:
-            return Health.STARTING, f"订阅 {len(self.symbols)} 个币，{links}，等第一条行情{tail}"
+            return Health.STARTING, f"{watching}，{links}，等第一条行情{tail}"
         age = (now - self.last_message_at).total_seconds()
         kinds = " / ".join(f"{k} {n}" for k, n in sorted(self.by_kind.items(), key=lambda x: -x[1]))
-        head = f"订阅 {len(self.symbols)} 个币，{links}，最后消息 {max(age, 0):.0f} 秒前{tail}"
+        head = f"{watching}，{links}，最后消息 {max(age, 0):.0f} 秒前{tail}"
         if kinds:
             head += f"；累计 {kinds}"
         if self._coverage is not None:

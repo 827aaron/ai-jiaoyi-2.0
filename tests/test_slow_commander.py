@@ -129,6 +129,16 @@ async def test_refresh_builds_card_with_cost_and_logs(tmp_path: Path, now: datet
     assert st.today.cost_usd == pytest.approx(0.05)  # 与 card.llm_cost_usd 一致
 
 
+async def test_picks_are_reported_before_symbol_meetings(tmp_path: Path, now: datetime) -> None:
+    """总盘会一挑完就回调名单（含置顶），主循环马上订行情，不等作战卡。"""
+    eng = FakeEngine(["BBUSDT", "NOPEUSDT"])
+    c, _, _ = make(tmp_path, eng, now)
+    got: list[list[str]] = []
+    c.set_on_picks(got.append)
+    await c.refresh(pool(now, entry("AAUSDT", pinned=True), entry("BBUSDT")), "scheduled")
+    assert got == [["AAUSDT", "BBUSDT"]]
+
+
 async def test_pinned_always_analyzed_and_pick_max(tmp_path: Path, now: datetime) -> None:
     eng = FakeEngine(["BBUSDT", "CCUSDT", "DDUSDT"])
     c, _, _ = make(tmp_path, eng, now, pick_max=2)

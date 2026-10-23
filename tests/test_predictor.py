@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -334,7 +335,7 @@ async def test_missing_minute_drops_the_whole_bar() -> None:
 
 async def test_on_demand_only_predicts_wanted_symbols() -> None:
     be = FakeBackend()
-    f = make(True, SET, be, cfg=PredictorConfig())
+    f = make(True, SET, be, cfg=PredictorConfig(mode="on_demand"))
     assert f.mode == "on_demand"
     await feed(f, 4)
     assert be.calls == 0 and f.latest("BTCUSDT", T0) is None
@@ -351,7 +352,7 @@ async def test_request_fills_in_once_without_blocking() -> None:
     be.delay = 0.2
     now = T0 + timedelta(minutes=20)
     f = make(True, KronosSettings(**{**SET.__dict__, "infer_timeout_s": 2.0}), be,
-             cfg=PredictorConfig(), clock=lambda: now)  # fmt: skip
+             cfg=PredictorConfig(mode="on_demand"), clock=lambda: now)  # fmt: skip
     await feed(f, 4)  # 不在 wanted 里，没算
     assert be.calls == 0
     t0 = time.perf_counter()
@@ -427,7 +428,13 @@ async def test_five_symbols_infer_in_background_without_blocking_on_kline() -> N
 
 async def test_backfill_then_first_five_minute_close_forecasts() -> None:
     be = FakeBackend()
-    f = make(True, SET, be, cfg=PredictorConfig(), clock=lambda: T0 + timedelta(minutes=16))
+    f = make(
+        True,
+        SET,
+        be,
+        cfg=PredictorConfig(mode="on_demand"),
+        clock=lambda: T0 + timedelta(minutes=16),
+    )
     f.set_wanted({"BTCUSDT"})
     await f.backfill("BTCUSDT", [bar(k) for k in range(3)])  # 补完马上算，不等收盘
     await f.wait_idle()
@@ -480,7 +487,7 @@ async def test_log_and_status_carry_the_model_actually_used(tmp_path: Path) -> N
 async def test_newly_wanted_symbol_with_history_predicts_right_away() -> None:
     """重启后作战卡一到（或首根 K 线触发 set_wanted），历史够的币马上算，不等 5 分钟收盘。"""
     be = FakeBackend()
-    f = make(True, SET, be, cfg=PredictorConfig())
+    f = make(True, SET, be, cfg=PredictorConfig(mode="on_demand"))
     await f.backfill("BTCUSDT", [bar(k) for k in range(3)])
     await f.backfill("ETHUSDT", [bar(k, symbol="ETHUSDT") for k in range(3)])
     await f.wait_idle()
@@ -495,7 +502,7 @@ async def test_newly_wanted_symbol_with_history_predicts_right_away() -> None:
 
 
 def test_set_wanted_outside_event_loop_is_safe() -> None:
-    f = make(True, SET, FakeBackend(), cfg=PredictorConfig())
+    f = make(True, SET, FakeBackend(), cfg=PredictorConfig(mode="on_demand"))
     f.set_wanted({"BTCUSDT"})
 
 
@@ -505,7 +512,7 @@ async def test_starting_headline_says_what_it_waits_for(tmp_path: Path) -> None:
     be.delay = 0.2
     f = KronosForecaster(
         True, KronosSettings(**{**SET.__dict__, "infer_timeout_s": 2.0}), be, sink,
-        clock=lambda: T0, cfg=PredictorConfig(),
+        clock=lambda: T0, cfg=PredictorConfig(mode="on_demand"),
     )  # fmt: skip
 
     def headline() -> str:
@@ -519,3 +526,62 @@ async def test_starting_headline_says_what_it_waits_for(tmp_path: Path) -> None:
     assert "正在算第一轮" in headline()
     await f.wait_idle()
     assert "今天预测 1 次" in headline()
+
+
+class OrderBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.order: list[str] = []
+        self.delay = 0.05
+
+    def predict(self, bars: list[Kline], pred_len: int, paths: int) -> list[Path_]:
+        self.order.append(bars[-1].symbol)
+        return super().predict(bars, pred_len, paths)
+
+
+async def test_held_card_and_meeting_symbols_jump_the_queue() -> None:
+    """同一根 5 分钟线收盘、几个币排队时，作战卡/持仓（wanted）和总盘会（priority）的币先算。"""
+    be = OrderBackend()
+    f = make(True, KronosSettings(**{**SET.__dict__, "infer_timeout_s": 2.0}), be,
+             clock=lambda: T0)  # fmt: skip
+    syms = ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"]
+    for s in syms:
+        f._bars[s] = deque([bar(k, symbol=s) for k in range(2)], maxlen=SET.lookback)
+    f.set_wanted({"DDDUSDT"})
+    f.set_priority({"EEEUSDT"})  # 历史还不够：不算
+    await f.wait_idle()
+    assert be.order == []
+    for s in syms:  # 按到达顺序 A..E
+        await f.on_kline(bar(2, symbol=s))
+    await f.wait_idle()
+    # A 先到直接开始；排队的 B..E 里 D（持仓/卡）和 E（总盘会）插到前面
+    assert be.order == ["AAAUSDT", "DDDUSDT", "EEEUSDT", "BBBUSDT", "CCCUSDT"]
+
+
+async def test_set_priority_fills_missing_forecasts_right_away() -> None:
+    be = FakeBackend()
+    f = make(True, SET, be, cfg=PredictorConfig(mode="on_demand"), clock=lambda: T0)
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])
+    await f.backfill("ETHUSDT", [bar(k, symbol="ETHUSDT") for k in range(3)])
+    await f.wait_idle()
+    assert be.calls == 0
+    f.set_priority({"ETHUSDT"})  # 总盘会挑中 → 按需模式下也马上算
+    await f.wait_idle()
+    assert be.calls == 1 and f.latest("ETHUSDT", T0) is not None
+    f.set_priority({"ETHUSDT"})  # 已有新鲜预测，不重算
+    await f.wait_idle()
+    assert be.calls == 1
+
+
+async def test_ok_headline_counts_fresh_symbols_and_last_time(tmp_path: Path) -> None:
+    sink = JsonlDecisionLog(tmp_path)
+    now = T0 + timedelta(minutes=16)
+    f = KronosForecaster(True, SET, FakeBackend(), sink, clock=lambda: now,
+                         cfg=ALL, display_tz="Asia/Bangkok")  # fmt: skip
+    await f.backfill("BTCUSDT", [bar(k) for k in range(3)])
+    await f.backfill("ETHUSDT", [bar(k, symbol="ETHUSDT") for k in range(2)])  # 不够，不算数
+    await f.wait_idle()
+    f.heartbeat()
+    st = sink.read_status()[Role.PREDICTOR.value]
+    # 最后一根 5 分钟线 00:10–00:15 UTC → 曼谷 07:15
+    assert st.headline == "已算 1/1 个币，上次 07:15（今天预测 1 次）"

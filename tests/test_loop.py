@@ -302,6 +302,9 @@ class FakePredictor:
 
     def request(self, symbol: str) -> None: ...
 
+    def set_priority(self, symbols: set[str] | frozenset[str]) -> None:
+        self.priority = set(symbols)
+
     async def backfill(self, symbol: str, bars: list[c.Kline]) -> None:
         self.filled[symbol] = len(bars)
 
@@ -320,6 +323,60 @@ async def test_predictor_wants_card_and_held_symbols(tmp_path: Path, now: dateti
     await r.on_event(k)
     assert pred.klines == 1
     assert pred.wanted == {s.symbol for s in card.symbols} | {"XRPUSDT"}
+
+
+class WatchFeed:
+    def __init__(self) -> None:
+        self.subs: list[list[str]] = []
+        self.watch_note = ""
+
+    async def subscribe(self, symbols: Sequence[str]) -> None:
+        self.subs.append(list(symbols))
+
+    async def events(self) -> AsyncIterator[c.MarketEvent]:
+        if False:
+            yield  # pragma: no cover
+
+    async def close(self) -> None: ...
+
+
+async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: datetime) -> None:
+    """盘口员只订总盘会挑中 + 作战卡 + 持仓的币；新币回填，卡过期 / 平仓后退订。"""
+    app = _app(tmp_path, now)
+    pred, feed, cards = FakePredictor(), WatchFeed(), FakeCards(None)
+    filled: list[str] = []
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        filled.append(sym)
+        return []
+
+    app.m = dataclasses.replace(app.m, predictor=pred, feed=feed, cards=cards)
+    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch)
+    await r.sync_watch()
+    assert feed.subs == [[]]  # 没有要盯的也订一次（全市场强平连接）
+    await r.sync_watch()
+    assert len(feed.subs) == 1  # 没变不重订
+
+    r.set_meeting_picks(["SOLUSDT", "ETHUSDT"])  # 总盘会刚挑完，卡还没出
+    await asyncio.sleep(0)
+    await r.sync_watch()
+    assert feed.subs[-1] == ["ETHUSDT", "SOLUSDT"]
+    assert pred.priority == {"SOLUSDT", "ETHUSDT"}
+    assert sorted(filled) == ["ETHUSDT", "ETHUSDT", "SOLUSDT", "SOLUSDT"]  # 1m + 5m 各回填一次
+
+    card = h.card(now)
+    on_card = {s.symbol for s in card.symbols}
+    cards.card = card
+    r.positions = [_position(symbol="XRPUSDT")]
+    await r._refresh(c.SymbolPool.model_validate(load_example("symbol_pool")), "scheduled")
+    assert pred.priority == set()  # 挑中的币已上卡
+    assert set(feed.subs[-1]) == on_card | {"XRPUSDT"}
+    n = len(on_card - {"XRPUSDT"})
+    assert feed.watch_note == f"盯着 {len(on_card | {'XRPUSDT'})} 个币（总盘会 {n} 持仓 1）"
+
+    cards.card, r.positions = None, []  # 卡过期、平仓
+    await r.sync_watch()
+    assert feed.subs[-1] == []
 
 
 async def test_backfill_feeds_recent_minutes_to_predictor(tmp_path: Path, now: datetime) -> None:
