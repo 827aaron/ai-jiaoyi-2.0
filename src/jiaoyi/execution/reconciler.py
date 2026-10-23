@@ -111,6 +111,8 @@ class ThreeWayReconciler:
         self._lb_failures: dict[str, int] = {}
         self._gone_rounds: dict[str, int] = {}
         self._flat_rounds: dict[str, int] = {}
+        self._extra_seen: dict[str, int] = {}
+        """同一笔多出来的保命止损（order_id）连续看到几轮。"""
         self._rec = recorder
         self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
@@ -170,6 +172,7 @@ class ThreeWayReconciler:
                     issues.append(found)
 
         # 1. 我们以为开着的仓：方向对不对、保命止损在不在、数量对不对
+        extra_now: set[str] = set()
         tracked_qty: dict[str, float] = {}
         flattened: set[str] = set()
         reversed_: set[str] = set()
@@ -193,7 +196,11 @@ class ThreeWayReconciler:
             if stop is not None:
                 for c in cids:
                     extra = stops_by_cid.get(c)
-                    if extra is not None and extra.order_id != stop.order_id:
+                    if extra is None or extra.order_id == stop.order_id:
+                        continue
+                    # 重挂进行中也会短暂两张（新单已挂、账本还没改）：同一张连续两轮都多出来才撤
+                    extra_now.add(extra.order_id)
+                    if self._extra_seen.get(extra.order_id, 0) >= 1:
                         issues.append(await self._drop_extra(rec, extra, stop))
             if stop is None:
                 issue, was_flattened = await self._repair_lifeboat(rec.position_id)
@@ -205,6 +212,7 @@ class ThreeWayReconciler:
                     rec.position_id,
                     await self._lifeboat.fetch(rec),
                 )
+        self._extra_seen = {oid: self._extra_seen.get(oid, 0) + 1 for oid in extra_now}
         for symbol, qty in tracked_qty.items():
             if symbol in flattened:
                 continue

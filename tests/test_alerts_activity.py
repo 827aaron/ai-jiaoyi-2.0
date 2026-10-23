@@ -122,6 +122,8 @@ async def test_extra_lifeboat_after_failed_cancel_is_dropped(tmp_path: Path) -> 
     assert new is not None and new.client_order_id.endswith("-r")  # 账本指新的
     assert len(rig.ex.stops) == 2
     rig.ex.fail_cancel = False
+    await rig.rec.reconcile(rig.t)  # 第一轮只记下（可能是重挂进行中），不撤
+    assert len(rig.ex.stops) == 2
     report = await rig.rec.reconcile(rig.t)
     assert [s.client_order_id for s in rig.ex.stops.values()] == [new.client_order_id]
     assert any("多挂了一张" in i.detail and i.fixed for i in report.issues)
