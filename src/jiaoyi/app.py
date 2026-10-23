@@ -80,10 +80,12 @@ from jiaoyi.predictor import KronosForecaster
 from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
+from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import BattleCardCommander
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.news import NewsHub, default_sources
 from jiaoyi.slow.screener import CodeSymbolScreener, ScreenerConfig
+from jiaoyi.slow.settings import SlowConfig
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import TradingAgentsEngine
 
@@ -186,6 +188,7 @@ def _build_cards(
     clock: Clock,
     closers: list[Closer],
     liquidations: LiquidationSource | None = None,
+    slow_cfg: SlowConfig | None = None,
 ) -> tuple[BattleCardProvider, NewsHub | None]:
     """军师团：有 DeepSeek key 且装了 ``jiaoyi[slow]`` 才用真的，否则用桩（没卡 = 不开新仓）。
 
@@ -197,13 +200,29 @@ def _build_cards(
     if importlib.util.find_spec("tradingagents") is None:
         log.warning("没装 tradingagents（uv pip install -e '.[slow]'），军师团用桩")
         return StubBattleCardProvider(), None
+    cfg = slow_cfg or SlowConfig()  # 没有 config/slow.toml 就用默认值，行为不变
     news = NewsHub(default_sources(), decision_log, clock=clock)
     closers.append(news.aclose)
+    # 市场简报每轮算一次，总盘会和各币会议共用
+    brief = MarketBriefService(clock=clock)
+    closers.append(brief.aclose)
     engine = TradingAgentsEngine(
-        risk_cfg, secrets, today=clock, news=news, liquidations=liquidations
+        risk_cfg,
+        secrets,
+        settings=cfg.engine_settings(),
+        today=clock,
+        news=news,
+        liquidations=liquidations,
+        brief=brief,
     )
     commander = BattleCardCommander(
-        engine, risk_cfg, decision_log, pick_max=app_cfg.card_pick_max, clock=clock
+        engine,
+        risk_cfg,
+        decision_log,
+        pick_max=app_cfg.card_pick_max,
+        clock=clock,
+        brief=brief,
+        **cfg.commander_kwargs(),
     )
     return commander, news
 
@@ -277,6 +296,7 @@ def build_modules(
     secrets: SecretStore,
     *,
     offline: bool = False,
+    slow_cfg: SlowConfig | None = None,
 ) -> Built:
     """按配置选实现。新角色合并后在这里换掉对应的桩。
 
@@ -321,7 +341,14 @@ def build_modules(
             ),
         )
         cards, news = _build_cards(
-            risk_cfg, app_cfg, decision_log, secrets, clock, closers, bfeed.liquidations
+            risk_cfg,
+            app_cfg,
+            decision_log,
+            secrets,
+            clock,
+            closers,
+            bfeed.liquidations,
+            slow_cfg,
         )
 
     alerter: Alerter
@@ -410,6 +437,7 @@ class App:
         secrets: SecretStore | None = None,
         *,
         offline: bool = False,
+        slow_cfg: SlowConfig | None = None,
     ) -> None:
         self.risk_cfg = risk_cfg
         self.app_cfg = app_cfg
@@ -428,6 +456,7 @@ class App:
                 clock,
                 secrets or ChainedSecretStore(),
                 offline=offline,
+                slow_cfg=slow_cfg,
             )
             modules, self._closers = built.modules, built.closers
             self.recorders, self.gate_mode = built.recorders, built.gate_mode

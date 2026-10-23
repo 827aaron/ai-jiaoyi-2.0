@@ -30,12 +30,14 @@ from jiaoyi.core.secrets import (
 )
 from jiaoyi.execution.factory import MissingSecret
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate, LiveGateError
+from jiaoyi.slow.settings import DEFAULT_SLOW_PATH, load_slow_config
 
 
 def _check_config(args: argparse.Namespace) -> int:
     try:
         risk = load_risk_config(Path(args.risk))
         app = load_app_config(Path(args.app))
+        load_slow_config(Path(args.slow))
     except ConfigError as e:
         print(e, file=sys.stderr)
         return 2
@@ -146,7 +148,11 @@ def _status(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
 
     try:
-        app = App(load_risk_config(Path(args.risk)), load_app_config(Path(args.app)))
+        app = App(
+            load_risk_config(Path(args.risk)),
+            load_app_config(Path(args.app)),
+            slow_cfg=load_slow_config(Path(args.slow)),
+        )
     except (ConfigError, LiveGateError, MissingSecret) as e:
         print(e, file=sys.stderr)
         return 2
@@ -165,7 +171,11 @@ def _run(args: argparse.Namespace) -> int:
     from jiaoyi.loop import Runner
 
     try:
-        app = App(load_risk_config(Path(args.risk)), load_app_config(Path(args.app)))
+        app = App(
+            load_risk_config(Path(args.risk)),
+            load_app_config(Path(args.app)),
+            slow_cfg=load_slow_config(Path(args.slow)),
+        )
     except (ConfigError, LiveGateError, MissingSecret) as e:
         print(e, file=sys.stderr)
         return 2
@@ -182,16 +192,19 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("check-config", help="检查硬上限和运行配置，不合格返回非 0")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_check_config)
 
     p = sub.add_parser("status", help="团队页的文字版：每个角色的状态")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_status)
 
     p = sub.add_parser("run", help="启动快环主循环（行情、哨兵、拍板、保镖、盯仓、定时开会）")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_run)
 
     p = sub.add_parser("key-status", help="显示每个密钥配没配（只显示末四位）")
