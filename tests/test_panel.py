@@ -477,6 +477,11 @@ def test_history_page(tmp_path: Path) -> None:
     assert [k.kind for k in page.by_kind] == ["volume_breakout"]
     assert [r.text for r in page.rejected] == ["ETH 拍板放弃"]
     assert len(page.curve) == 1
+    [row] = page.rows
+    ex = load_example("position_record")
+    assert row.stop_loss_price == ex["stop_loss_price"]
+    assert row.take_profit_price == ex["take_profit_price"]
+    assert row.exit_price is None and not row.pnl_missing  # 有盈亏数，只是平仓价没回填
 
 
 def test_history_reads_older_days_with_role_filter(tmp_path: Path) -> None:
@@ -1148,3 +1153,17 @@ def test_today_ai_cost_reads_slow_budget(tmp_path: Path) -> None:
     assert build_funds(files, HB, RISK, NOW).pnl[0].ai_usd == pytest.approx(base - cmd + 6.04)
     budget.write_text(json.dumps({"day": "2026-01-01", "cost_usd": 6.04}))
     assert build_funds(files, HB, RISK, NOW).pnl[0].ai_usd == pytest.approx(base)
+
+
+def test_history_flags_trade_without_numbers(tmp_path: Path) -> None:
+    """执行器没报盈亏和手续费、也没回填平仓价：标成没取到，不当成 0。"""
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    raw = json.loads((tmp_path / "positions.json").read_text())
+    for t in raw["positions"].values():
+        t["record"].update(realized_pnl_usdt=0.0, fees_usdt=0.0, exit_price=None)
+    (tmp_path / "positions.json").write_text(json.dumps(raw))
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    [row] = build_history(files, RISK, NOW, "today", include_tests=True).rows
+    assert row.pnl_missing

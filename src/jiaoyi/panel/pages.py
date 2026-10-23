@@ -486,12 +486,19 @@ class TradeRow(BaseModel):
     quantity: float
     leverage: int
     entry_price: float | None
+    exit_price: float | None = None
+    """币安平仓成交均价；None = 还没按成交回填。"""
+    stop_loss_price: float | None = None
+    take_profit_price: float | None = None
+    """下单时的止损 / 止盈（按开仓成交价回填后的）。"""
     opened_at: datetime
     closed_at: datetime
     close_reason: str | None
     pnl_usdt: float
-    """hummingbot 的 net_pnl_quote（已扣手续费）。"""
+    """净盈亏（已扣开平手续费）：按币安成交回填后是币安实扣，否则是 hummingbot 报的。"""
     fees_usdt: float
+    pnl_missing: bool = False
+    """没回填出场价、净盈亏和手续费又都是 0：多半是执行器没报数，不是真的 0。"""
     signal_kind: str | None
     test: bool = False
     """没有哨兵 / 拍板 / 保镖记录的单：冒烟测试或手动下的，不是机器人自己的交易。"""
@@ -589,11 +596,15 @@ def build_history(
                 quantity=p.quantity,
                 leverage=p.leverage,
                 entry_price=p.entry_price,
+                exit_price=p.exit_price,
+                stop_loss_price=p.stop_loss_price,
+                take_profit_price=p.take_profit_price,
                 opened_at=p.opened_at,
                 closed_at=p.closed_at,
                 close_reason=p.close_reason.value if p.close_reason else None,
                 pnl_usdt=pnl,
                 fees_usdt=p.fees_usdt,
+                pnl_missing=p.exit_price is None and pnl == 0.0 and p.fees_usdt == 0.0,
                 signal_kind=kind_of.get(p.signal_id),
                 test=test,
             )
