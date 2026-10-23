@@ -16,7 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
@@ -93,6 +93,12 @@ class ScheduleConfig(_Strict):
     min_refresh_gap_min: float = Field(
         default=5.0, ge=1.0, le=60.0, description="两轮开会的最小间隔（防抖）。"
     )
+
+    @model_validator(mode="after")
+    def _lead(self) -> ScheduleConfig:
+        if self.refresh_lead_min >= self.card_ttl_hours * 60:
+            raise ValueError("refresh_lead_min 必须小于作战卡有效期（card_ttl_hours × 60）")
+        return self
 
 
 class BudgetConfig(_Strict):
