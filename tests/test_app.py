@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -170,7 +171,9 @@ async def test_slow_config_and_brief_reach_commander_and_engine(
     assert isinstance(cards, BattleCardCommander)
     brief = seen["brief"]
     assert isinstance(brief, MarketBriefService) and cards._brief is brief  # 一份简报两边共用
-    assert seen["settings"] == slow.engine_settings()
+    assert seen["settings"] == replace(
+        slow.engine_settings(), live_dir=str(tmp_path / "meeting_live")
+    )  # 开会过程落在 data_dir/meeting_live
     assert cards._ttl == timedelta(hours=3)
     assert cards._journal is not None
     assert cards._journal.path == tmp_path / "card_review" / "cards.jsonl"  # 复盘流水在 data_dir 下

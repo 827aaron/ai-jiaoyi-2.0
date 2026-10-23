@@ -193,3 +193,20 @@ Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模
 ## 选币状态
 
 选币器自己上报 `module_status.json` 的 `screener`：`last_run_at`、`next_run_at`、`symbol_count`、`error`（`ModuleStatus` 新增的可选字段），headline 写明「等待首次选币 / 上次 HH:MM 选出 N 个币，下次 HH:MM / 上次选币失败，沿用旧候选池：原因」。面板和 `jiaoyi status` 不再出现「未接入或还没启动」：没上报过时，主程序在跑显示「等待第一次上报」，不在跑显示「主程序没在运行」；离线 / 回放模式的桩显示「未启用」。
+
+## 开会过程实况（`data/meeting_live/<SYMBOL>.json`）
+
+每个标的一个文件，开会时每走一步整份重写（临时文件 + rename，面板读到的永远是完整 JSON）；会开完文件保留，就是这个币上一场会的完整过程，下一场开会时覆盖。**只旁听，不改决策、不多一次模型调用**：引擎把 TradingAgents 图的 `invoke` 换成同一张图的 `stream`（`stream_mode=["values","tasks"]` + 子图，与 TradingAgents 自带的 `stream_run` 相同，最终状态与 `invoke` 一致），每个新出现的发言记一步。写盘失败只记日志，不影响会议；开了 checkpoint（默认关）时图被重编译，实况会静默缺失，会议本身不受影响。
+
+| 字段 | 说明 |
+|---|---|
+| `symbol`、`meeting_id` | 币和这场会的编号（`SYMBOL-时间`） |
+| `status` | `running` 开会中 / `done` 有结论 / `failed` 失败（含超时取消，`error` 写原因） |
+| `started_at`、`updated_at`、`finished_at` | ISO 时间（带时区），`finished_at` 开会中为 null |
+| `stage` | 现在开到哪：`analysts` 分析师报告 → `debate` 多空辩论 + 研究经理 → `trader` 交易员计划 → `risk` 风控辩论 + 组合经理 → `decision` 整理成作战指令 |
+| `steps[]` | 按发生顺序追加：`{stage, who, ts, text}`。`who`：`market` / `social` / `news` / `fundamentals`（分析师报告，并行跑，几乎同时到）、`bull` / `bear`（每轮新增的发言）、`research_manager`、`trader`、`aggressive` / `conservative` / `neutral`、`risk_manager`（最终决定原文）、`convert`（整理出的作战指令理由）。`text` 是原文 |
+| `result` | `{bias, reason}`，`done` 才有，否则 null |
+| `error` | 失败原因，否则 null |
+| `cost_usd` | 这场会的花费（会议结束 / 失败时写入，开会中为 0） |
+
+超时取消的会议会被指挥官叫停并立刻标成 `failed`（`超时取消，会议没有结论`）；后台线程之后才结束，不会把它改回成功。

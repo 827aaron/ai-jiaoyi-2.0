@@ -271,6 +271,7 @@ def test_engine_reports_partial_cost_and_aborts() -> None:
     )  # 构造函数要 tradingagents 包，这里不需要
     eng._s = TradingAgentsSettings()
     eng._inflight = {}
+    eng._live = {}
     eng._inflight_lock = threading.Lock()
     meter = eng._meter("SOLUSDT")
     meter.add("deepseek/deepseek-v4.1-flash", 0, 0, 0.04)
