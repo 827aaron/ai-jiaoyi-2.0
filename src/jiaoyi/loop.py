@@ -111,6 +111,18 @@ class _RefreshReason(Protocol):
 
 
 @runtime_checkable
+class _PicksAware(Protocol):
+    """总盘会一挑完币就回调名单（BattleCardCommander）。"""
+
+    def set_on_picks(self, callback: Callable[[list[str]], None]) -> None: ...
+
+
+@runtime_checkable
+class _WatchNote(Protocol):
+    watch_note: str
+
+
+@runtime_checkable
 class _HoldsAware(Protocol):
     """开会前告诉军师团手上有哪些持仓币：它们要一直留在卡上，不然持仓管家会判“不再盯”。"""
 
@@ -171,6 +183,12 @@ class Runner:
         self._exit_lock = threading.Lock()
         self._exited = False
         self._started_at: datetime | None = None
+        # 盘口员 / 预测员只盯：总盘会本轮挑中的 + 有效作战卡上的 + 有持仓的币（不盯整个候选池）
+        self._meeting_picks: set[str] = set()
+        self._watch_lock = asyncio.Lock()
+        self._watched: set[str] | None = None  # 上一次订阅的集合；None = 还没订过
+        if isinstance(self.m.cards, _PicksAware):
+            self.m.cards.set_on_picks(self.set_meeting_picks)
 
     # ------------------------------------------------------------ 生命周期
     async def run(self) -> None:
@@ -178,9 +196,8 @@ class Runner:
         self._started_at = self.app.clock()
         await self.app.start()
         self._last_screen = self.app.clock()
-        if self.app.pool is not None:
-            await self.backfill([e.symbol for e in self.app.pool.in_pool])
         await self.refresh_positions()
+        await self.sync_watch()
         # 重启后先拉一轮公告，下架封禁在第一个信号之前就生效
         try:
             await self.news_tick()
@@ -336,10 +353,43 @@ class Runner:
                 self._spawn(self.handle_signal(signal))
 
     def _sync_wanted(self) -> None:
-        """预测员按需模式只算作战卡里的币和有持仓的币。"""
+        """预测员按需模式只算作战卡里的币和有持仓的币（总盘会挑中的走 ``set_priority``）。"""
         card = self.m.cards.current(self.app.clock())
         wanted = {s.symbol for s in card.symbols} if card is not None else set()
         self.m.predictor.set_wanted(wanted | {p.symbol for p in self.positions})
+
+    # ------------------------------------------------------------ 盯哪些币
+    def set_meeting_picks(self, symbols: list[str]) -> None:
+        """总盘会挑完币（作战卡还要十几分钟）：预测员先算这几个，行情马上订上。"""
+        self._meeting_picks = set(symbols)
+        self.m.predictor.set_priority(self._meeting_picks)
+        self._spawn(self.sync_watch())
+
+    def watch_set(self) -> tuple[set[str], set[str], set[str]]:
+        """（要盯的全部，其中总盘会 / 作战卡的，其中持仓的）。卡过期、平仓后自然掉出去。"""
+        card = self.m.cards.current(self.app.clock())
+        meeting = set(self._meeting_picks)
+        if card is not None:
+            meeting |= {s.symbol for s in card.symbols}
+        held = {p.symbol for p in self.positions}
+        return meeting | held, meeting - held, held
+
+    async def sync_watch(self) -> None:
+        """订阅集变了就重订：新加的币先回填 K 线（ATR、预测员不用干等），退掉不再盯的。"""
+        async with self._watch_lock:
+            watch, meeting, held = self.watch_set()
+            feed = self.m.feed
+            if isinstance(feed, _WatchNote):
+                feed.watch_note = (
+                    f"盯着 {len(watch)} 个币（总盘会 {len(meeting)} 持仓 {len(held)}）"
+                )
+            self._sync_wanted()
+            if watch == self._watched:
+                return
+            await self.backfill(sorted(watch - (self._watched or set())))
+            # 空集也订一次：全市场强平那条连接要开着（选币用）
+            await feed.subscribe(sorted(watch))
+            self._watched = watch
 
     async def handle_signal(self, signal: CandidateSignal) -> None:
         now = self.app.clock()
@@ -432,6 +482,7 @@ class Runner:
 
     async def keeper_tick(self) -> None:
         await self.refresh_positions()
+        await self.sync_watch()  # 开平仓、卡过期都在这里跟上（持仓管家每几十秒一轮）
         for pos in list(self.positions):
             if pos.status is PositionStatus.OPEN:
                 await self._review(pos)
@@ -559,6 +610,13 @@ class Runner:
             log.exception("军师团开会失败，沿用旧卡直到过期")
         finally:
             self._refreshing = False
+            # 挑中的币已经在新卡上（开会失败就不再盯它们）
+            self._meeting_picks = set()
+            self.m.predictor.set_priority(set())
+            try:
+                await self.sync_watch()
+            except Exception:
+                log.exception("开完会重订行情失败，下一轮持仓管家再订")
 
     async def _rescreen(self, now: datetime) -> None:
         self.app.reload_pool_overrides()  # 手改 data/pool_overrides.json 也在下一次选币生效
@@ -567,12 +625,7 @@ class Runner:
         except Exception:
             log.exception("选币失败，沿用上一份候选池")
             return
-        old = {e.symbol for e in self.app.pool.in_pool} if self.app.pool else set()
-        new = [e.symbol for e in pool.in_pool]
         self.app.set_pool(pool)
-        if set(new) != old:
-            await self.backfill([s for s in new if s not in old])
-            await self.m.feed.subscribe(new)
 
     # ------------------------------------------------------------ 面板指令
     def _guard_note(self, outcome: Outcome, summary: str, now: datetime) -> None:

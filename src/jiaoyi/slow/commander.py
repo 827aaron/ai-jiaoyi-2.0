@@ -214,6 +214,7 @@ class BattleCardCommander:
         self._budget_path = budget_path
         self._card_path = card_path
         self._held: dict[str, Side] = {}
+        self._on_picks: Callable[[list[str]], None] | None = None
         self._progress = ""
         self._last_error: str | None = None
         self._meeting_costs: deque[float] = deque(maxlen=8)
@@ -285,6 +286,11 @@ class BattleCardCommander:
         不然持仓管家看到卡上没有它，会判“不再盯”而平仓。
         """
         self._held = dict(held)
+
+    def set_on_picks(self, callback: Callable[[list[str]], None]) -> None:
+        """总盘会一挑完币就回调（本轮要开会的币，含置顶和持仓）：主循环马上订阅它们的行情、
+        让预测员先算，不用等十几分钟后作战卡出来。"""
+        self._on_picks = callback
 
     def _hold_only(self, symbol: str, side: Side, category: Category) -> CardSymbol:
         """旧卡里也没有这个持仓币时合成一条：按持仓方向只盯不开（信号清空，不开新仓）。"""
@@ -638,6 +644,11 @@ class BattleCardCommander:
             if live is not None:
                 live.fail("总盘会没有挑出任何标的", picked.cost_usd)
             raise CardRefreshError("总盘会没有挑出任何标的")
+        if self._on_picks is not None:
+            try:
+                self._on_picks([e.symbol for e in chosen])
+            except Exception:
+                logger.exception("通知总盘会名单失败，等作战卡出来再订阅")
 
         # 同一个币两次会议至少隔 symbol_min_interval；没有大消息 / 关键位突破就沿用上一张卡的指令
         forced = self._news | self._level_broken

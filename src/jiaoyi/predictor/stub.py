@@ -24,5 +24,8 @@ class StubPredictor:
     def request(self, symbol: str) -> None:
         return None
 
+    def set_priority(self, symbols: set[str] | frozenset[str]) -> None:
+        return None
+
     async def backfill(self, symbol: str, bars: list[Kline]) -> None:
         return None

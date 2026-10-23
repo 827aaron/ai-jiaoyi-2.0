@@ -97,6 +97,10 @@ class Predictor(Protocol):
         """没有新鲜预测就在后台补算一次；立即返回，不等结果。"""
         ...
 
+    def set_priority(self, symbols: set[str] | frozenset[str]) -> None:
+        """总盘会挑中的本轮开会币：排队优先，没有新鲜预测的马上补算（开会时可参考）。"""
+        ...
+
     async def backfill(self, symbol: str, bars: list[Kline]) -> None:
         """启动时用 REST 拉的历史 K 线补历史，不触发推理。"""
         ...

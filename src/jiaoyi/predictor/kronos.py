@@ -7,8 +7,9 @@
 - 推理放在单线程池里，不占事件循环；同一标的上一次没算完就丢弃新的，不排队。
 - 吃 5 分钟线：行情只推 1 分钟线，这里按 UTC 整 5 分钟聚合（缺分钟的整根丢掉）；
   启动和新币入池时用 REST 回填 5 分钟线（``backfill``），回填后下一根 5 分钟线收盘就出预测。
-- 按需（``PredictorConfig.mode = on_demand``，默认）：只算作战卡里的币和有持仓的币
-  （``set_wanted``）；哨兵出信号而这个币没有新鲜预测时 ``request`` 补算一次，也在后台。
+- 按需（``PredictorConfig.mode = on_demand``，默认）：只算要盯的币——作战卡和持仓的币
+  （``set_wanted``）加总盘会本轮挑中的币（``set_priority``，排队时先算，挑中就马上补一次）；
+  哨兵出信号而这个币没有新鲜预测时 ``request`` 补算一次。都在后台，不卡快环。
 - 模型尺寸：fixed 用 ``model_size``；adaptive 按排队深度在 base / small / mini 间切换，
   各尺寸用到才加载，权重都钉 HuggingFace 提交号（``MODEL_SPECS``）。
 - 设备 auto：CUDA > MPS > CPU（Mac mini 上用 MPS）；MPS/CUDA 推理出错会退回 CPU 并一直用 CPU。
@@ -19,6 +20,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import heapq
 import importlib
 import logging
 import math
@@ -27,12 +30,13 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
     DecisionRecord,
@@ -223,6 +227,45 @@ class OfficialKronosBackend:
         return out
 
 
+class _PriorityGate:
+    """一次只放一个进去；排队的按优先级（小的先）、同级按先来后到放行。"""
+
+    def __init__(self) -> None:
+        self._held = False
+        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._seq = 0
+
+    @contextlib.asynccontextmanager
+    async def slot(self, priority: int) -> AsyncIterator[None]:
+        await self._acquire(priority)
+        try:
+            yield
+        finally:
+            self._release()
+
+    async def _acquire(self, priority: int) -> None:
+        if not self._held and not self._waiters:
+            self._held = True
+            return
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._seq += 1
+        heapq.heappush(self._waiters, (priority, self._seq, fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self._release()  # 刚轮到就被取消：把位置让给下一个
+            raise
+
+    def _release(self) -> None:
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():
+                fut.set_result(None)  # 位置直接交给它，_held 保持 True
+                return
+        self._held = False
+
+
 class KronosForecaster:
     """满足 ``interfaces.Predictor``。"""
 
@@ -236,6 +279,7 @@ class KronosForecaster:
         *,
         cfg: PredictorConfig | None = None,
         backend_for: Callable[[str], KronosBackend] | None = None,
+        display_tz: str = "UTC",
     ) -> None:
         """``backend`` 给了就所有尺寸都用它（测试）；否则按尺寸用 ``backend_for`` 现建、缓存。"""
         self._enabled = enabled
@@ -252,12 +296,14 @@ class KronosForecaster:
         # 正在聚合的 5 分钟线：标的 → (起点分钟, 开, 高, 低, 收, 量, 成交额, 已有几根 1 分钟)
         self._partial: dict[str, tuple[int, float, float, float, float, float, float, int]] = {}
         self._wanted: set[str] = set()
+        self._priority: set[str] = set()  # 总盘会挑中、本轮要开会的币（慢环给）
         self._queued = 0
         self._last_model = MODEL_SPECS[self._cfg.model_size].name  # 最近一次实际用的模型
         self._forecasts: dict[str, Forecast] = {}
         self._busy: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
-        self._gate = asyncio.Semaphore(1)
+        self._gate = _PriorityGate()  # 一次只跑一个推理；排队时作战卡和持仓的币先算
+        self._tz = display_tz
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kronos")
         self._calls = 0
         self._errors = 0
@@ -292,6 +338,16 @@ class KronosForecaster:
         for sym in sorted(added):
             self._request_now(sym)
 
+    def set_priority(self, symbols: set[str] | frozenset[str]) -> None:
+        """总盘会挑中的币：排队时和作战卡、持仓的币一样先算；没有新鲜预测的马上补一次，
+        开会时就有得看。不影响按需模式“算哪些币”的范围之外的事（按需模式下也会算这些币）。"""
+        self._priority = set(symbols)
+        for sym in sorted(self._priority):
+            self._request_now(sym)
+
+    def _first(self, symbol: str) -> bool:
+        return symbol in self._wanted or symbol in self._priority
+
     def _request_now(self, symbol: str) -> None:
         try:
             asyncio.get_running_loop()
@@ -314,7 +370,7 @@ class KronosForecaster:
         """用 REST 拉来的 5 分钟线把历史补上。这个币要算（全部模式或在 wanted 里）就马上算一次。"""
         for b in bars:
             self._append(b)
-        if self._cfg.mode == "all_symbols" or symbol in self._wanted:
+        if self._cfg.mode == "all_symbols" or self._first(symbol):
             self.request(symbol)
 
     def latest(self, symbol: str, now: datetime) -> Forecast | None:
@@ -339,7 +395,7 @@ class KronosForecaster:
         if not self._append(kline):
             return
         sym = kline.symbol
-        if self._cfg.mode == "on_demand" and sym not in self._wanted:
+        if self._cfg.mode == "on_demand" and not self._first(sym):
             return
         buf = self._bars[sym]
         if len(buf) < self._s.min_bars or sym in self._busy:
@@ -440,7 +496,7 @@ class KronosForecaster:
         dequeued = False
         try:
             # 超时从真正开始推理算起，排队等模型的时间不计
-            async with self._gate:
+            async with self._gate.slot(0 if self._first(sym) else 1):
                 self._queued -= 1
                 dequeued = True
                 size = self._pick_size(self._queued)  # 还在排队的有几个
@@ -539,9 +595,21 @@ class KronosForecaster:
             return "等待历史 K 线（启动时从币安回填；一直这样说明回填失败，看日志）"
         if self._busy:
             return f"{len(ready)} 个币历史已就绪，正在算第一轮预测"
-        if self._cfg.mode == "on_demand" and not ready & self._wanted:
+        if self._cfg.mode == "on_demand" and not ready & (self._wanted | self._priority):
             return f"{len(ready)} 个币历史已就绪；按需模式，作战卡或持仓里有币才预测"
         return f"{len(ready)} 个币历史已就绪，等下一根 5 分钟线"
+
+    def _ok_headline(self) -> str:
+        now = self._clock()
+        ready = {s for s, b in self._bars.items() if len(b) >= self._s.min_bars}
+        if self._cfg.mode == "on_demand":
+            ready &= self._wanted | self._priority
+        fresh = [fc for s, fc in self._forecasts.items() if s in ready and now < fc.stale_after]
+        head = f"已算 {len(fresh)}/{len(ready)} 个币"
+        if self._forecasts:
+            last = max(fc.ts for fc in self._forecasts.values())
+            head += f"，上次 {last.astimezone(ZoneInfo(self._tz)):%H:%M}"
+        return f"{head}（今天预测 {self._calls} 次）"
 
     def heartbeat(self, now: datetime | None = None) -> None:
         """上报模块状态；外部也可以定时调用，让面板看到它还活着。
@@ -559,7 +627,7 @@ class KronosForecaster:
         elif self._calls == 0:
             health, headline = Health.STARTING, self._starting_headline()
         else:
-            health, headline = Health.OK, f"今天预测 {self._calls} 次"
+            health, headline = Health.OK, self._ok_headline()
         avg = self._latency_sum / self._calls if self._calls else 0.0
         try:
             self._sink.heartbeat(
