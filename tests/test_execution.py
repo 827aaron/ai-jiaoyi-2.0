@@ -23,8 +23,9 @@ START = datetime(2026, 10, 22, 6, 17, tzinfo=UTC)
 
 
 class Rig:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, notices: bool = False) -> None:
         self.t = START
+        self.notices = notices  # 开平仓成功的 INFO 推送；老测试只看告警，默认关
         self.api = FakeHbApi()
         self.ex = FakeExchange()
         self.alerts = StubAlerter()
@@ -66,6 +67,7 @@ class Rig:
             sleep=self.sleep,
             income_since=self.ex.income_since,
             exchange=self.ex,
+            trade_notices=self.notices,
         )
 
 
@@ -1081,7 +1083,7 @@ async def test_fixed_issue_does_not_keep_reconcile_lamp_red(rig: Rig) -> None:
         def record(self, *a: object, **k: object) -> None:
             pass
 
-        def note(self, now: object, summary: str) -> None:
+        def note(self, now: object, summary: str, count: bool = False) -> None:
             pass
 
         def heartbeat(self, now: object, health: object, headline: str) -> None:

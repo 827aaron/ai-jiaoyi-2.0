@@ -345,14 +345,13 @@ class FastLoopConfig(Contract):
         default=1.0,
         ge=0.0,
         le=5.0,
-        description="冲击线不低于这笔止损距离的几倍：冲击线 = max(上面的百分比, 这个 × 止损%)。"
-        "0 = 只看百分比。",
+        description="冲击线 = 这个 × 这笔止损距离（%）。没有止损价或写 0 时用上面的百分比兜底。",
     )
     patrol_alert_stop_mult: float = Field(
         default=0.5,
         ge=0.0,
         le=5.0,
-        description="报警线不低于这笔止损距离的几倍：报警线 = max(上面的百分比, 这个 × 止损%)。",
+        description="报警线 = 这个 × 这笔止损距离（%）。没有止损价或写 0 时用上面的百分比兜底。",
     )
     # ---- 哨兵
     volume_surge_live: bool = Field(

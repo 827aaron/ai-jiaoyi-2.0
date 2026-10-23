@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from jiaoyi.alerting.log import LogAlerter
+from jiaoyi.alerting.recorded import RecordedAlerter
 from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.alerting.telegram import TelegramAlerter
 from jiaoyi.contracts import (
@@ -418,6 +419,7 @@ def build_modules(
             Role.KEEPER,
             Role.PATROL,
             Role.SCREENER,
+            Role.ALERTING,
         )
     }
 
@@ -478,7 +480,10 @@ def build_modules(
             StubLotRules(),
         )
     else:
-        alerter = _build_alerter(secrets, closers)
+        inner = _build_alerter(secrets, closers)
+        alerter = RecordedAlerter(
+            inner, recorders[Role.ALERTING], telegram=isinstance(inner, TelegramAlerter)
+        )
         executor, lifeboat, reconciler, lot_rules, ledger = _build_execution(
             risk_cfg, app_cfg, secrets, alerter, clock, closers, decision_log, startup_checks
         )

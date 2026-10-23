@@ -94,9 +94,22 @@ class RoleRecorder:
                 logger.exception("写决策日志失败")
         return rec
 
-    def note(self, now: datetime, summary: str) -> None:
-        """只更新「刚刚：…」不写决策记录（例如对账员一轮三方一致，不值得每 30 秒写一条）。"""
+    @property
+    def tz(self) -> str:
+        return self._tz
+
+    @property
+    def log(self) -> DecisionLog | None:
+        return self._log
+
+    def note(self, now: datetime, summary: str, *, count: bool = False) -> None:
+        """只更新「刚刚：…」不写决策记录（例如对账员一轮三方一致，不值得每 30 秒写一条）。
+
+        ``count=True``：这次检查也算进今日次数（团队页「今日 N 次」= 干了几次活）。"""
         self.last_run_at, self.last_summary = now, summary[:SUMMARY_MAX]
+        if count:
+            self._roll(now)
+            self._calls += 1
 
     def set_next_run(self, at: datetime | None) -> None:
         """按周期干活的角色（管家、对账员）：下次计划什么时候跑，下一次心跳带出去。"""

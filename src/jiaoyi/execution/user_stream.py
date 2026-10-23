@@ -36,6 +36,11 @@ def ws_urls(base: str, key: str) -> list[str]:
     return [f"{base}/private/ws?listenKey={key}", f"{base}/ws/{key}"]
 
 
+def mask(text: str, key: str) -> str:
+    """日志和状态里不出现完整 listenKey（拿到它就能读这个账户的成交推送）。"""
+    return text.replace(key, f"{key[:4]}…") if key else text
+
+
 def is_fill(msg: dict[str, Any]) -> bool:
     """要不要回填：订单有成交，或账户余额 / 持仓变了。"""
     e = msg.get("e")
@@ -82,6 +87,7 @@ class UserStream:
         """一直跑到被取消。"""
         backoff = 1.0
         while True:
+            key = ""
             try:
                 key = await self._new_key()
                 await self._session(key)
@@ -89,7 +95,7 @@ class UserStream:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.status.last_error = f"{type(e).__name__}: {e}"[:200]
+                self.status.last_error = mask(f"{type(e).__name__}: {e}", key)[:200]
                 log.warning("用户数据流断了（%s），%.0f 秒后重连", self.status.last_error, backoff)
             self.status.connected = False
             await self._sleep(backoff)
@@ -102,10 +108,10 @@ class UserStream:
             try:
                 ws = await self._connect(url)
             except Exception as e:
-                last = e
+                last = RuntimeError(mask(f"{type(e).__name__}: {e}", key))
                 continue
             async with ws:
-                self.status.connected, self.status.url = True, url.split("?")[0]
+                self.status.connected, self.status.url = True, mask(url, key)
                 self.status.last_error = None
                 log.info("用户数据流已连：%s", self.status.url)
                 ticker = asyncio.create_task(self._keep_alive())

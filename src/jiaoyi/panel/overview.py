@@ -152,6 +152,10 @@ class PositionView(BaseModel):
     """名义 = 数量 × 现价（没有现价用开仓价）。"""
     margin_usdt: float | None = None
     """本金占用 = 名义 ÷ 杠杆。"""
+    stop_loss_pct: float | None = None
+    """保镖算的止损距离（%），不用回填后的价格倒推；旧记录为 None。"""
+    lifeboat_stop_pct: float | None = None
+    """保镖算的保命止损距离（%）。"""
     pnl_pct: float | None = None
     """浮盈占名义的百分比（不乘杠杆）。"""
 
@@ -397,6 +401,8 @@ def position_views(
                 notional_usdt=notional,
                 margin_usdt=notional / p.leverage if notional and p.leverage else None,
                 pnl_pct=pnl / notional * 100 if pnl is not None and notional else None,
+                stop_loss_pct=p.stop_loss_pct,
+                lifeboat_stop_pct=p.lifeboat_stop_pct,
             )
         )
     return out

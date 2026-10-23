@@ -388,6 +388,9 @@ const tierTip = (c) => {
 };
 const DIR = { long: ["做多", "p-long"], short: ["做空", "p-short"], both: ["双向", "p-accent"] };
 const signedPct = (a, b) => { const p = (a - b) / b * 100; return `${p >= 0 ? "+" : "−"}${Math.abs(p).toFixed(2)}%`; };
+// 保镖算的距离（不随成交价回填变）：止损 / 保命在亏钱一侧，止盈在赚钱一侧
+const guardPct = (pct, side, loss) => `${(side === "long") === loss ? "−" : "+"}${pct.toFixed(2)}%`;
+const lbPct = p => p.lifeboat_stop_pct != null ? ` <span class="dim">${guardPct(p.lifeboat_stop_pct, p.side, true)}</span>` : "";
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
 // 系统值：持仓用持仓自己的开仓 / 止损 / 止盈；没持仓按现价 + ATR 估（双向只给距离）
@@ -469,7 +472,8 @@ function cardRow(s, now) {
   const fade = s.fading && !p ? '<span class="pill p-warn">快到期</span>' : "";
   let stop = "—", tp = "—";
   if (p) {
-    stop = p.stop_loss_price ? `${price(p.stop_loss_price, sym)} <span class="dim">${signedPct(p.stop_loss_price, p.entry_price)}</span>` : "—";
+    const sp = p.stop_loss_pct != null ? guardPct(p.stop_loss_pct, p.side, true) : signedPct(p.stop_loss_price, p.entry_price);
+    stop = p.stop_loss_price ? `${price(p.stop_loss_price, sym)} <span class="dim">${sp}</span>` : "—";
     tp = p.take_profit_price ? `${price(p.take_profit_price, sym)} <span class="dim">${signedPct(p.take_profit_price, p.entry_price)}</span>` : "—";
   } else if (L && L.stop) {
     stop = `≈${signedPct(L.stopMid, L.entry)}`;
@@ -972,7 +976,7 @@ P.positions = (arg) => {
     const go = `onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'"`;
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
     const pnl = p.unrealized_usdt == null ? "—" : `${signed(p.unrealized_usdt, 2)} U${p.pnl_pct == null ? "" : ` <span class="small">${signed(p.pnl_pct, 2)}%</span>`}`;
-    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) : ""}</span>`;
+    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
@@ -995,7 +999,7 @@ P.positions = (arg) => {
         <span class="r num ${cls(p.unrealized_usdt)}">${p.unrealized_usdt == null ? "—" : `${signed(p.unrealized_usdt, 2)} U`}${p.pnl_pct == null ? "" : ` · ${signed(p.pnl_pct, 2)}%`}</span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
         开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
-      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
+      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
   const trail = window.__recs.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`).join("");

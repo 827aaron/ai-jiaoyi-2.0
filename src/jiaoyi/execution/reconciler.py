@@ -43,7 +43,7 @@ from jiaoyi.execution.exchange import (
 )
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
-from jiaoyi.execution.lifeboat import client_order_id, lifeboat_price
+from jiaoyi.execution.lifeboat import lifeboat_cids, lifeboat_price
 from jiaoyi.execution.registry import PositionRegistry
 from jiaoyi.execution.symbols import from_hb_pair
 from jiaoyi.interfaces import Alerter, LifeboatStop
@@ -186,7 +186,10 @@ class ThreeWayReconciler:
             tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + rec.quantity
             if rec.status is not PositionStatus.OPEN:
                 continue
-            stop = stops_by_cid.get(client_order_id(rec.position_id))
+            # 重挂时短暂会有两张（新 cid 带后缀）：账本记着的那张优先
+            known = rec.lifeboat.client_order_id if rec.lifeboat is not None else None
+            cids = sorted(lifeboat_cids(rec.position_id), key=lambda c: c != known)
+            stop = next((stops_by_cid[c] for c in cids if c in stops_by_cid), None)
             if stop is None:
                 issue, was_flattened = await self._repair_lifeboat(rec.position_id)
                 issues.append(issue)
@@ -220,7 +223,7 @@ class ThreeWayReconciler:
                 issues.append(rev or await self._unknown_position(symbol, exchange_positions))
 
         # 3. 残留的保命止损
-        live_cids = {client_order_id(t.record.position_id) for t in live}
+        live_cids = {c for t in live for c in lifeboat_cids(t.record.position_id)}
         for stop in stops:
             if (
                 not stop.client_order_id.startswith(STOP_PREFIX)
@@ -336,10 +339,13 @@ class ThreeWayReconciler:
             headline = f"三方一致（本轮已处理 {fixed} 项）"
         else:
             headline = "三方一致"
+        n = len(self._registry.live())
         if self._rec is not None:
-            n = len(self._registry.live())
-            self._rec.note(now, f"对账：{headline}（在管 {n} 笔）")
+            self._rec.note(now, f"对账：{headline}（在管 {n} 笔）", count=True)
             self._rec.heartbeat(now, health, headline)
+        checked = getattr(self._lifeboat, "checked", None)
+        if callable(checked):
+            checked(now, f"对账员核对了 {n} 笔的保命止损：{headline}")
         for beat in self._heartbeats:
             beat(now, Health.OK, "")
 

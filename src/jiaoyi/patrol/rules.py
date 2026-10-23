@@ -8,9 +8,9 @@
   判断交给管家，巡逻兵本身永远只能平仓、不能开仓或放宽止损。
 同一个标的 30 秒内只要求一次，避免重复下平仓。
 
-两条线都不低于这笔的止损距离：冲击线 = max(档位百分比, ``patrol_shock_stop_mult`` × 止损%)，
-报警线 = max(档位百分比, ``patrol_alert_stop_mult`` × 止损%)。急动后多半会回一部分，冲击线比止损
-还近时巡逻兵会割在低点（orders-spec P1）。
+两条线按这笔的止损距离定：冲击线 = ``patrol_shock_stop_mult`` × 止损%（默认 1.0），
+报警线 = ``patrol_alert_stop_mult`` × 止损%（默认 0.5）。档位百分比只在没有止损价（或倍数设成 0）时
+兜底：取 max 的话，ETHFI 止损 1.02% 冲击线却是 2%，巡逻兵永远赶不在止损前面。
 """
 
 from __future__ import annotations
@@ -34,6 +34,15 @@ from jiaoyi.core.recorder import RoleRecorder
 
 WINDOW = timedelta(seconds=60)
 REPEAT = timedelta(seconds=30)
+ROUND = timedelta(seconds=10)
+"""团队页「刚刚：…」每 10 秒汇总一次（逐笔成交都在查，每笔都写会刷屏）；今日次数 = 巡检轮数。"""
+
+
+def _stop_pct(pos: PositionRecord) -> float:
+    """这笔的止损距离（%）；没有止损价是 0。"""
+    if pos.entry_price and pos.stop_loss_price:
+        return abs(pos.entry_price - pos.stop_loss_price) / pos.entry_price * 100.0
+    return 0.0
 
 
 class RulePatrol:
@@ -44,19 +53,35 @@ class RulePatrol:
         self._rec = recorder
         self._px: dict[str, deque[tuple[datetime, float]]] = {}
         self._last_action: dict[str, datetime] = {}
+        self._round_at: datetime | None = None
+        self._seen: dict[str, tuple[int, float, float, float]] = {}
+        """这一轮看过的币 → (持仓笔数, 最大逆向波动 ÷ 止损距离, 报警线%, 冲击线%)。"""
         self.urgent: set[str] = set()
         """需要管家马上复查的 position_id；管家复查后由接线代码 ``discard``。"""
 
     def lines(self, pos: PositionRecord) -> tuple[float, float]:
-        """这笔持仓的（报警线, 冲击线），百分比。没有止损价就只用档位百分比。"""
+        """这笔持仓的（报警线, 冲击线），百分比。没有止损价就用档位百分比兜底。"""
         cfg = self._cfg
-        stop = 0.0
-        if pos.entry_price and pos.stop_loss_price:
-            stop = abs(pos.entry_price - pos.stop_loss_price) / pos.entry_price * 100.0
-        return (
-            max(cfg.patrol_alert_pct_1m, cfg.patrol_alert_stop_mult * stop),
-            max(cfg.patrol_shock_pct_1m, cfg.patrol_shock_stop_mult * stop),
+        stop = _stop_pct(pos)
+        alert = cfg.patrol_alert_stop_mult * stop or cfg.patrol_alert_pct_1m
+        shock = cfg.patrol_shock_stop_mult * stop or cfg.patrol_shock_pct_1m
+        return min(alert, shock), shock
+
+    def _round(self, now: datetime) -> None:
+        if self._rec is None or (self._round_at is not None and now - self._round_at < ROUND):
+            return
+        self._round_at = now
+        parts = [
+            f"{sym.removesuffix('USDT')} {n} 笔（1 分钟最大逆向 {r:.1f} 个止损距离，"
+            f"冲击线 {shock:.2f}% · 报警线 {alert:.2f}%）"
+            for sym, (n, r, alert, shock) in sorted(self._seen.items())
+        ]
+        calm = all(v[1] < 0.5 for v in self._seen.values())
+        self._rec.note(
+            now, f"查了 {'、'.join(parts)}，{'没异常' if calm else '波动偏大，盯着'}", count=True
         )
+        self._rec.set_next_run(now + ROUND)
+        self._seen = {}
 
     def check(self, event: MarketEvent, positions: Sequence[PositionRecord]) -> PatrolAction | None:
         if isinstance(event, Trade):
@@ -87,11 +112,16 @@ class RulePatrol:
                 (1.0 - price / hi) * 100.0 if pos.side == Side.LONG else (price / lo - 1.0) * 100.0
             )
             alert, shock = self.lines(pos)
+            stop = _stop_pct(pos)
+            ratio = adverse / stop if stop > 0 else 0.0
+            worst_ratio = self._seen.get(sym, (0, 0.0, 0.0, 0.0))[1]
+            self._seen[sym] = (len(mine), max(worst_ratio, ratio), alert, shock)
             if adverse >= shock:
                 hit.append((adverse, shock))
             elif adverse >= alert:
                 self.urgent.add(pos.position_id)
 
+        self._round(now)
         if not hit:
             return None
         worst, shock = max(hit)
