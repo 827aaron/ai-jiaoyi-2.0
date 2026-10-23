@@ -11,6 +11,7 @@ slow_loop_interval_min = 30  # 军师团每 30 分钟开会
 pool_size = 40               # 候选池 30–50
 card_pick_max = 20           # 军师每次最多挑 20 个
 data_dir = "data"            # 决策日志、模块状态写在这里
+# sim_environment = "demo"   # paper / testnet 连哪个模拟环境：demo（币安 Demo Trading，默认）/ legacy_testnet（旧测试网，已停用）
 # reconciler_close_unknown_positions = false  # 对账员遇到“不认识的仓位”：false = 只告警（默认）；true = 直接平掉。M4 前由你决定
 
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用下面的默认值）

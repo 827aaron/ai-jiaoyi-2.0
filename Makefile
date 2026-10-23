@@ -12,7 +12,7 @@ KRONOS_REF  := 67b630e67f6a18c9e9be918d9b4337c960db1e9a
 CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
 
 .PHONY: help install init-config check-config lint format typecheck test check \
-        kronos-fetch hb-fetch hb-setup hb-up hb-down hb-logs condor-install condor-run
+        kronos-fetch hb-fetch hb-patch hb-setup hb-up hb-down hb-logs condor-install condor-run
 
 help:
 	@echo "开发："
@@ -26,6 +26,7 @@ help:
 	@echo "  make kronos-fetch   拉官方 Kronos 源码到 vendor/Kronos（钉提交号）"
 	@echo "  make hb-fetch       拉上游 hummingbot-api 和 Condor 到 vendor/"
 	@echo "  make hb-setup       跑 hummingbot-api 上游 setup（生成它的 .env 和 MQTT 账号）"
+	@echo "  make hb-patch       给 hummingbot-api 镜像打 Demo Trading 补丁（hb-up 会自动做）"
 	@echo "  make hb-up / hb-down / hb-logs"
 	@echo "  make condor-install / condor-run   Condor 官方本机运行（uv + tmux）"
 
@@ -77,7 +78,19 @@ kronos-fetch:
 hb-setup:
 	$(MAKE) -C vendor/hummingbot-api setup
 
+# 币安已用 Demo Trading 取代旧测试网；hummingbot 连接器写死旧域名，这里打补丁（见 docs/M0-setup.md）。
+# 回退旧测试网：HB_SIM=legacy_testnet make hb-up（同时把 config/app.toml 的 sim_environment 改成 legacy_testnet）。
+HB_SIM ?= demo
+hb-patch:
+	docker pull hummingbot/hummingbot-api:latest
+	docker build --build-arg BASE=hummingbot/hummingbot-api:latest -t hummingbot/hummingbot-api:latest docker/hb-demo
+
 hb-up:
+	@# 两个分支都要重置镜像：legacy 必须拉回未打补丁的上游镜像，否则上次打的 Demo 补丁还在，
+	@# hummingbot 连 Demo 而 ccxt 连旧测试网，保命止损和执行器就分在两个环境
+	@if [ "$(HB_SIM)" = "demo" ]; then $(MAKE) hb-patch; \
+	elif [ "$(HB_SIM)" = "legacy_testnet" ]; then docker pull hummingbot/hummingbot-api:latest; \
+	else echo "HB_SIM 只能是 demo 或 legacy_testnet"; exit 1; fi
 	$(MAKE) -C vendor/hummingbot-api emqx-auth
 	docker compose up -d
 

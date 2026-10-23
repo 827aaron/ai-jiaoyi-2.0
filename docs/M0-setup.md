@@ -2,7 +2,7 @@
 
 目标：在币安合约**测试网**上跑通一笔完整的 开仓 → 止损/止盈 → 平仓，并确认**保命止损同时挂出、平仓后撤销**。全程不碰真钱。
 
-> **关于“模拟盘”**：hummingbot 官方只有现货的纯模拟连接器，永续合约没有。所以 `mode = "paper"` 和 `"testnet"` 都连**币安合约测试网**（`binance_perpetual_testnet`），区别只在模式标记和面板横幅。测试网的钱是假的，行情撮合是真实币安测试环境。`live` 才连主网，而且要过上线门槛（见最后一节）。
+> **关于“模拟盘”**：hummingbot 官方只有现货的纯模拟连接器，永续合约没有。所以 `mode = "paper"` 和 `"testnet"` 都连**币安 Demo Trading**（hummingbot 里仍叫 `binance_perpetual_testnet`，见第 3 步的补丁），区别只在模式标记和面板横幅。Demo 的钱是假的。币安已停用旧的 testnet.binancefuture.com；要回退旧环境见第 3 步末尾。`live` 才连主网，而且要过上线门槛（见最后一节）。
 
 ## 0. 先说清楚哪些已验证、哪些要你在 Mac mini 上验证
 
@@ -17,8 +17,8 @@
 
 - macOS，已装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)（并已启动）、`uv`、`tmux`、`git`、`make`
 - 一个 Telegram bot（找 @BotFather 建）和你自己的数字 ID（找 @userinfobot）
-- **币安合约测试网**账号和 API key：<https://testnet.binancefuture.com>（登录后右下角 API Key）。测试网账户自带假 USDT。
-- 币安**测试网**账户要用**单向持仓模式**（One-way Mode），不能是对冲模式，否则保命止损的只减仓单会被拒
+- **币安 Demo Trading** 账号和 API key：<https://demo.binance.com>（登录后在 API 管理里建 Demo 的 key；主账号的真实 key 不能用在这里）。Demo 账户自带假 USDT。Demo 接口域名：REST `https://demo-fapi.binance.com`，WS `wss://demo-fstream.binance.com`（币安官方文档）。
+- 币安 **Demo** 账户要用**单向持仓模式**（One-way Mode），不能是对冲模式，否则保命止损的只减仓单会被拒
 
 ## 2. 拉代码并装依赖
 
@@ -34,13 +34,20 @@ make hb-fetch           # 拉上游 hummingbot-api 和 Condor 到 vendor/，钉�
 
 ```bash
 make hb-setup           # 上游的交互式 setup：它会问 API 用户名 / 密码 / 配置密码，生成 vendor/hummingbot-api/.env
-make hb-up              # 起 hummingbot-api + EMQX + Postgres，端口只绑 127.0.0.1:8000
+make hb-up              # 先给 hummingbot-api 镜像打 Demo 补丁（见下），再起 hummingbot-api + EMQX + Postgres，端口只绑 127.0.0.1:8000
 curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | head -c 300
 ```
 
 最后一条能返回执行器类型列表，说明 API 通了。**记下你在 setup 里设的 API 用户名**（默认 `admin`）。
 
-把币安测试网 key 交给 hummingbot-api（它加密保存）：浏览器开 <http://127.0.0.1:8000/docs>，登录后用
+**Demo 补丁**：上游 hummingbot 的 `binance_perpetual_testnet` 连接器把旧测试网域名写死（`TESTNET_BASE_URL` / `TESTNET_WS_URL`），
+上游暂无 Demo 支持。`make hb-up` 会先跑 `make hb-patch`：拉 `hummingbot/hummingbot-api:latest`，用 `docker/hb-demo/` 在上面
+再打一层，把这两个常量改成 `https://demo-fapi.binance.com/fapi/` 和 `wss://demo-fstream.binance.com/`，重新打成同名本地镜像，上游 compose 不用改。
+补丁找不到原文就构建失败（上游改了要重审）。币安文档只给了这两个 Demo 域名，没有单独的用户数据流 / ws-fapi 域名，
+所以**第一次冒烟要确认 hummingbot 的持仓/订单推送能收到**，收不到就把现象发出来。
+回退旧测试网：`config/app.toml` 里 `sim_environment = "legacy_testnet"`，并用 `HB_SIM=legacy_testnet make hb-up`（会重新拉未打补丁的上游镜像覆盖本地补丁镜像）。两边必须一致，否则保命止损和执行器分在两个环境。冒烟时请确认 Demo 上 algo 条件单能挂、能查、能撤。
+
+把币安 Demo key 交给 hummingbot-api（它加密保存）：浏览器开 <http://127.0.0.1:8000/docs>，登录后用
 `POST /accounts/add-credential/master_account/binance_perpetual_testnet`，在页面里直接填 key / secret。
 不要把 key 发到聊天里。
 
@@ -51,7 +58,7 @@ curl -s -u 用户名:密码 http://127.0.0.1:8000/executors/types/available | he
 ```
 
 每个会先问要不要写，再由系统的 `security` 命令在终端里提示你输入（输入不回显、不进命令行参数、不进历史）。
-`BINANCE_TESTNET_API_KEY / SECRET` 填**测试网**的（主网用另一组 `BINANCE_API_KEY / SECRET`，两组分开存，配错模式也不会串用），是我们自己的程序（保命止损 + 对账员）直连币安用的；
+`BINANCE_TESTNET_API_KEY / SECRET` 填 **Demo** 的（变量名沿用，不改）（主网用另一组 `BINANCE_API_KEY / SECRET`，两组分开存，配错模式也不会串用），是我们自己的程序（保命止损 + 对账员）直连币安用的；
 `HUMMINGBOT_API_PASSWORD` 是第 3 步 setup 里设的 API 密码。检查：
 
 ```bash

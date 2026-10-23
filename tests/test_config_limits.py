@@ -101,7 +101,7 @@ def test_every_risk_field_is_required(tmp_path: Path, field: str) -> None:
 
 
 # fast_loop 是有默认值的可选段；reconciler_close_unknown_positions 是默认关的可选开关；其余字段必填
-OPTIONAL_APP_FIELDS = {"fast_loop", "reconciler_close_unknown_positions"}
+OPTIONAL_APP_FIELDS = {"fast_loop", "reconciler_close_unknown_positions", "sim_environment"}
 
 
 @pytest.mark.parametrize(

@@ -98,13 +98,23 @@ class ExchangeClient(Protocol):
 
 
 class CcxtBinanceFutures:
-    """ccxt 实现。``testnet=True`` 走币安合约测试网。
+    """ccxt 实现。``testnet=True`` 走币安的模拟环境：``demo=True``（默认）是 Demo Trading
+    （demo-fapi.binance.com，币安已用它取代旧测试网），``demo=False`` 是旧的
+    testnet.binancefuture.com（仅保留作回退）。
 
     币安 2025-12 起把条件单挪到 algo 订单接口，ccxt 4.5 的 ``trigger`` 参数会自动走新接口；
     升级 ccxt 要先在测试网验证挂单、查单、撤单三步（docs/M0-setup.md）。
     """
 
-    def __init__(self, api_key: str, api_secret: str, *, testnet: bool, timeout_ms: int = 5000):
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        testnet: bool,
+        demo: bool = True,
+        timeout_ms: int = 5000,
+    ):
         import ccxt.async_support as ccxt
 
         self._ex: Any = ccxt.binanceusdm(
@@ -117,7 +127,10 @@ class CcxtBinanceFutures:
             }
         )
         if testnet:
-            self._ex.set_sandbox_mode(True)
+            if demo:
+                self._ex.enable_demo_trading(True)
+            else:
+                self._ex.set_sandbox_mode(True)
         self._markets_loaded = False
 
     async def _ready(self) -> None:

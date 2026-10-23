@@ -183,6 +183,11 @@ class AppConfig(Contract):
     pool_size: int = Field(ge=5, le=100, description="候选池大小，设计值 30–50。")
     card_pick_max: int = Field(ge=1, le=50, description="军师每次最多挑几个，设计值 10–20。")
     data_dir: str = Field(min_length=1, description="决策日志、模块状态等写在这里。")
+    sim_environment: Literal["demo", "legacy_testnet"] = Field(
+        default="demo",
+        description="paper / testnet 连哪个币安模拟环境：demo = Demo Trading，"
+        "legacy_testnet = 旧测试网（已停用，仅回退）。hummingbot 侧补丁要与此一致。",
+    )
     reconciler_close_unknown_positions: bool = Field(
         default=False,
         description="对账员遇到不在账本里的币安仓位 / hummingbot 执行器时直接平掉。"
