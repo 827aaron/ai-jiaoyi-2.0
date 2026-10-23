@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 
 _GONE_ROUNDS_BEFORE_FLATTEN = 2
 _FLAT_ROUNDS_BEFORE_EXTERNAL_CLOSE = 2
+_FLAT_ROUNDS_WITHOUT_FILL = 6
+"""连续空仓但查不到任何平仓成交（没有第二个证据）时，要更多轮才结算，再用标记价估算。"""
 _CRITICAL = {ReconcileIssueKind.LIFEBOAT_MISSING, ReconcileIssueKind.ORPHAN_POSITION}
 _TITLES = {
     ReconcileIssueKind.LIFEBOAT_MISSING: "保命止损缺失",
@@ -143,7 +145,9 @@ class ThreeWayReconciler:
             rounds = self._flat_rounds.get(rec.position_id, 0) + 1
             self._flat_rounds[rec.position_id] = rounds
             if rounds >= _FLAT_ROUNDS_BEFORE_EXTERNAL_CLOSE:
-                issues.append(await self._external_close(t.record, running_ids))
+                found = await self._external_close(t.record, running_ids, rounds)
+                if found is not None:
+                    issues.append(found)
 
         # 1. 我们以为开着的仓：保命止损在不在、数量对不对
         tracked_qty: dict[str, float] = {}
@@ -389,11 +393,16 @@ class ThreeWayReconciler:
             fixed=True,
         ), False
 
-    async def _external_close(self, rec: PositionRecord, running_ids: set[str]) -> ReconcileIssue:
+    async def _external_close(
+        self, rec: PositionRecord, running_ids: set[str], rounds: int
+    ) -> ReconcileIssue | None:
         """币安上已没有这笔仓位（连续 2 轮）：按“有人手动平仓”结算。
 
-        不补止损、不再下平仓单（仓位已经是 0）。停执行器用 keep_position=True，免得它再发平仓单、
-        在空仓上开出反向仓。平仓价取手动平仓之后最近的只减仓成交，取不到用标记价（记为估算）。"""
+        撤保命止损是不可逆的，所以结算前要有两个依据：(1) 单独再读一次持仓，读到有仓或读取失败
+        就放弃并清零计数（接口连续误返回空列表不能让真实仓位失去止损）；(2) 平仓方向确有成交。
+        没有成交时只告警，连续 ``_FLAT_ROUNDS_WITHOUT_FILL`` 轮仍空仓才结算并用标记价估算。
+        不补止损、不再下平仓单（仓位已经是 0）；停执行器用 keep_position=True，免得它再发平仓单、
+        在空仓上开出反向仓。"""
         pid = rec.position_id
 
         def issue(detail: str, fixed: bool) -> ReconcileIssue:
@@ -405,6 +414,21 @@ class ThreeWayReconciler:
                 fixed=fixed,
             )
 
+        try:
+            fresh = await self._exchange.positions()
+        except ExchangeError as e:
+            self._flat_rounds.pop(pid, None)
+            return issue(f"币安上读不到持仓为空（重读失败），不按手动平仓处理：{e!r}", False)
+        if any(p.symbol == rec.symbol and p.quantity > 0 for p in fresh):
+            self._flat_rounds.pop(pid, None)  # 之前读到空是假象
+            return None
+        close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
+        fill = await self._exchange.reduce_fill_since(rec.symbol, close_side, rec.opened_at)
+        have_fill = fill is not None and fill.price is not None
+        if not have_fill and rounds < _FLAT_ROUNDS_WITHOUT_FILL:
+            return issue(
+                "币安上已无仓位，但找不到平仓方向的成交，暂不按手动平仓结算（保命止损保留）", False
+            )
         if rec.executor_id and rec.executor_id in running_ids:
             try:
                 await self._api.stop_executor(rec.executor_id, keep_position=True)
@@ -412,8 +436,6 @@ class ThreeWayReconciler:
                 return issue(
                     f"币安上已无仓位（疑似手动平仓），但停执行器失败，下一轮重试：{e!r}", False
                 )
-        close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
-        fill = await self._exchange.reduce_fill_since(rec.symbol, close_side, rec.opened_at)
         source = "最近一笔只减仓成交"
         if fill is None or fill.price is None:
             fill = CloseFill(await self._exchange.mark_price(rec.symbol), None, estimated=True)

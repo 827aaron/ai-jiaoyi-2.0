@@ -135,6 +135,8 @@ class FakeExchange:
         self.wallet = 1000.0
         self.exit_price: float | None = None
         self.exit_fee: float | None = None
+        self.positions_queue: list[list[ExchangePosition] | ExchangeError] = []
+        """非空时 positions() 依次返回这些结果，用完才回到 self.pos（模拟读取抖动）。"""
         self.manual_fill: CloseFill | None = None
         """手动平仓后“最近一笔只减仓成交”；None = 查不到。"""
         self.mark: float | None = None
@@ -154,6 +156,11 @@ class FakeExchange:
     async def positions(self) -> list[ExchangePosition]:
         if self.down:
             raise ExchangeError("币安不可达")
+        if self.positions_queue:
+            nxt = self.positions_queue.pop(0)
+            if isinstance(nxt, ExchangeError):
+                raise nxt
+            return nxt
         return list(self.pos)
 
     async def place_stop(
