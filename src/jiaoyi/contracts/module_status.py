@@ -45,10 +45,15 @@ class ModuleStatus(Contract):
     last_error: str | None = None
     version: str = ""
     last_run_at: AwareDatetime | None = Field(
-        default=None, description="按计划周期干活的角色（选币）：上次成功跑完的时间。"
+        default=None,
+        description="上次干活的时间：按计划周期的角色（选币）是上次成功跑完；"
+        "快环角色是最近一次写决策记录（有动作）的时间。",
     )
     next_run_at: AwareDatetime | None = Field(
-        default=None, description="按计划周期干活的角色：下次计划运行的时间。"
+        default=None, description="按周期干活的角色（选币、管家、对账员）：下次计划运行的时间。"
+    )
+    summary: str | None = Field(
+        default=None, description="最近一次动作的一句话（团队页「刚刚：…」），没有动作过为 None。"
     )
     symbol_count: int | None = Field(default=None, ge=0, description="选币：上次选出的币数。")
     error: str | None = Field(

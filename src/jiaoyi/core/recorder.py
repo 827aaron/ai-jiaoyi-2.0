@@ -18,6 +18,8 @@ from jiaoyi.interfaces import DecisionLog
 
 logger = logging.getLogger(__name__)
 
+SUMMARY_MAX = 120
+
 
 def local_day(now: datetime, tz: str) -> date:
     """``now`` 在 ``tz`` 时区里是哪一天。日亏熔断和今日统计都用它判断跨天。"""
@@ -42,6 +44,10 @@ class RoleRecorder:
         self._latency_total = 0.0
         self._cost = 0.0
         self.last_error: str | None = None
+        # 团队页「刚刚：…」：最近一次动作的时间和一句话；有周期的角色另报下次运行时间
+        self.last_run_at: datetime | None = None
+        self.last_summary: str | None = None
+        self.next_run_at: datetime | None = None
 
     def record(
         self,
@@ -63,6 +69,7 @@ class RoleRecorder:
         self._count(outcome, latency_ms, cost_usd)
         if outcome == Outcome.ERROR:
             self.last_error = summary
+        self.last_run_at, self.last_summary = now, summary[:SUMMARY_MAX]
         rec = DecisionRecord(
             record_id=f"{self.role.value}-{uuid.uuid4().hex[:16]}",
             ts=now,
@@ -86,6 +93,14 @@ class RoleRecorder:
                 self.last_error = f"写决策日志失败：{e}"
                 logger.exception("写决策日志失败")
         return rec
+
+    def note(self, now: datetime, summary: str) -> None:
+        """只更新「刚刚：…」不写决策记录（例如对账员一轮三方一致，不值得每 30 秒写一条）。"""
+        self.last_run_at, self.last_summary = now, summary[:SUMMARY_MAX]
+
+    def set_next_run(self, at: datetime | None) -> None:
+        """按周期干活的角色（管家、对账员）：下次计划什么时候跑，下一次心跳带出去。"""
+        self.next_run_at = at
 
     def today(self, now: datetime) -> TodayStats:
         self._roll(now)
@@ -113,7 +128,12 @@ class RoleRecorder:
             today=self.today(now),
             last_error=self.last_error,
             version=self._version,
-            **(extra or {}),
+            **{
+                "last_run_at": self.last_run_at,
+                "next_run_at": self.next_run_at,
+                "summary": self.last_summary,
+                **(extra or {}),
+            },
         )
         if self._log is not None:
             try:

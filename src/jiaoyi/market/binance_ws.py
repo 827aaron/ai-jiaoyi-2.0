@@ -333,10 +333,19 @@ class BinanceFuturesFeed:
                     headline=headline,
                     today=TodayStats(calls=self.messages - self._day_base),
                     version="binance-ws",
+                    last_run_at=self.last_message_at,
+                    summary=self._summary(now),
                 )
             )
         except OSError:
             logger.exception("盘口员上报状态失败")
+
+    def _summary(self, now: datetime) -> str | None:
+        """团队页「刚刚：…」：盯着几个币、最后一条行情多久前。"""
+        if self.last_message_at is None:
+            return None
+        age = max((now - self.last_message_at).total_seconds(), 0.0)
+        return f"盯着 {len(self.symbols)} 个币，最后一条行情 {age:.0f} 秒前"
 
     def _status(self, now: datetime) -> tuple[Health, str]:
         if self._closed:

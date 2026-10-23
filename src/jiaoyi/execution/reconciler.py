@@ -115,6 +115,11 @@ class ThreeWayReconciler:
         self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
 
+    def set_next_run(self, at: datetime | None) -> None:
+        """主循环按 ``reconcile_interval_s`` 排下一轮，团队页显示「下次对账」。"""
+        if self._rec is not None:
+            self._rec.set_next_run(at)
+
     async def reconcile(self, now: datetime) -> ReconcileReport:
         issues: list[ReconcileIssue] = []
         try:
@@ -332,6 +337,8 @@ class ThreeWayReconciler:
         else:
             headline = "三方一致"
         if self._rec is not None:
+            n = len(self._registry.live())
+            self._rec.note(now, f"对账：{headline}（在管 {n} 笔）")
             self._rec.heartbeat(now, health, headline)
         for beat in self._heartbeats:
             beat(now, Health.OK, "")
