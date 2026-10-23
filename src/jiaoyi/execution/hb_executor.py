@@ -349,9 +349,15 @@ class HbExecutorAdapter:
         self._record(
             Outcome.CLOSE,
             f"{rec.symbol} 直连平仓（{reason.value}），净盈亏 "
-            + (f"{pnl:+.2f}U" if pnl is not None else "未知"),
+            + (f"{pnl:+.2f}U" if pnl is not None else "未知")
+            + ("（平仓价为估算）" if fill is not None and fill.estimated else ""),
             tracked.record,
-            output={"net": pnl, "reason": reason.value, "direct": True},
+            output={
+                "net": pnl,
+                "reason": reason.value,
+                "direct": True,
+                "estimated": bool(fill is not None and fill.estimated),
+            },
         )
 
     def mark_failed(self, position_id: str) -> None:

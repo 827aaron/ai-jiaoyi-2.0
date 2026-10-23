@@ -119,6 +119,8 @@ class ReconcileIssueKind(StrEnum):
     QTY_MISMATCH = "qty_mismatch"
     STALE_LIFEBOAT = "stale_lifeboat"
     """仓位已平但保命止损还挂着。"""
+    EXTERNAL_CLOSE = "external_close"
+    """账本里还开着，币安上已经没仓位了：有人在币安 App / 网页上手动平了。"""
 
 
 class ReconcileIssue(Contract):

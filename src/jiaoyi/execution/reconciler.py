@@ -8,6 +8,7 @@
   币安有仓位但不是我们开的 / 没有执行器管 → 只告警，不动（可能是 Aaron 手动开的）
   仓位已平但保命止损还挂着 → 撤掉
   数量对不上、执行器报错或消失 → 告警，人看
+  账本 OPEN 但币安连续 2 轮没有仓位 → 判定有人在币安手动平了：停执行器、按手动平仓结算、撤保命止损
 重启后第一件事就是调一次 ``reconcile``。
 """
 
@@ -24,6 +25,7 @@ from jiaoyi.contracts import Alert, Outcome, ReconcileReport, Role, Side
 from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import (
     CloseReason,
+    PositionRecord,
     PositionStatus,
     ReconcileIssue,
     ReconcileIssueKind,
@@ -31,6 +33,7 @@ from jiaoyi.contracts.position import (
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.exchange import (
     STOP_PREFIX,
+    CloseFill,
     ExchangeClient,
     ExchangeError,
     ExchangePosition,
@@ -46,6 +49,9 @@ from jiaoyi.interfaces import Alerter, LifeboatStop
 log = logging.getLogger(__name__)
 
 _GONE_ROUNDS_BEFORE_FLATTEN = 2
+_FLAT_ROUNDS_BEFORE_EXTERNAL_CLOSE = 2
+_FLAT_ROUNDS_WITHOUT_FILL = 6
+"""连续空仓但查不到任何平仓成交（没有第二个证据）时，要更多轮才结算，再用标记价估算。"""
 _CRITICAL = {ReconcileIssueKind.LIFEBOAT_MISSING, ReconcileIssueKind.ORPHAN_POSITION}
 _TITLES = {
     ReconcileIssueKind.LIFEBOAT_MISSING: "保命止损缺失",
@@ -53,6 +59,7 @@ _TITLES = {
     ReconcileIssueKind.EXECUTOR_FAILED: "执行器异常",
     ReconcileIssueKind.QTY_MISMATCH: "持仓数量对不上",
     ReconcileIssueKind.STALE_LIFEBOAT: "仓位已平但保命止损还在",
+    ReconcileIssueKind.EXTERNAL_CLOSE: "检测到手动平仓",
 }
 
 
@@ -90,6 +97,7 @@ class ThreeWayReconciler:
         self._max_lb_failures = max_lifeboat_failures
         self._lb_failures: dict[str, int] = {}
         self._gone_rounds: dict[str, int] = {}
+        self._flat_rounds: dict[str, int] = {}
         self._rec = recorder
         self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
@@ -122,12 +130,31 @@ class ThreeWayReconciler:
         for p in exchange_positions:
             exchange_qty[p.symbol] = exchange_qty.get(p.symbol, 0.0) + p.quantity
 
+        # 0. 账本 OPEN 但币安上已经没仓位：有人在币安手动平了。第 1 轮只记数（避免读取抖动），
+        #    连续 2 轮才结算；这期间不补保命止损、不报数量对不上、不当成执行器丢失去平仓。
+        running_ids = {str(e.get("executor_id")) for e in running}
+        external: set[str] = set()
+        for t in live:
+            rec = t.record
+            if rec.status is not PositionStatus.OPEN:
+                continue
+            if exchange_qty.get(rec.symbol, 0.0) > 0:
+                self._flat_rounds.pop(rec.position_id, None)
+                continue
+            external.add(rec.position_id)
+            rounds = self._flat_rounds.get(rec.position_id, 0) + 1
+            self._flat_rounds[rec.position_id] = rounds
+            if rounds >= _FLAT_ROUNDS_BEFORE_EXTERNAL_CLOSE:
+                found = await self._external_close(t.record, running_ids, rounds)
+                if found is not None:
+                    issues.append(found)
+
         # 1. 我们以为开着的仓：保命止损在不在、数量对不对
         tracked_qty: dict[str, float] = {}
         flattened: set[str] = set()
         for t in live:
             rec = t.record
-            if rec.status is PositionStatus.OPENING:
+            if rec.status is PositionStatus.OPENING or rec.position_id in external:
                 continue
             tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + rec.quantity
             if rec.status is not PositionStatus.OPEN:
@@ -181,8 +208,9 @@ class ThreeWayReconciler:
         for pid in list(self._gone_rounds):
             if live_executor.get(pid) is None or live_executor[pid] in running_now:
                 self._gone_rounds.pop(pid, None)
-        running_ids = {str(e.get("executor_id")) for e in running}
         for t in live:
+            if t.record.position_id in external:
+                continue
             if t.record.executor_id and t.record.executor_id not in running_ids:
                 rec = t.record
                 if (
@@ -365,6 +393,63 @@ class ThreeWayReconciler:
             fixed=True,
         ), False
 
+    async def _external_close(
+        self, rec: PositionRecord, running_ids: set[str], rounds: int
+    ) -> ReconcileIssue | None:
+        """币安上已没有这笔仓位（连续 2 轮）：按“有人手动平仓”结算。
+
+        撤保命止损是不可逆的，所以结算前要有两个依据：(1) 单独再读一次持仓，读到有仓或读取失败
+        就放弃并清零计数（接口连续误返回空列表不能让真实仓位失去止损）；(2) 平仓方向确有成交。
+        没有成交时只告警，连续 ``_FLAT_ROUNDS_WITHOUT_FILL`` 轮仍空仓才结算并用标记价估算。
+        不补止损、不再下平仓单（仓位已经是 0）；停执行器用 keep_position=True，免得它再发平仓单、
+        在空仓上开出反向仓。"""
+        pid = rec.position_id
+
+        def issue(detail: str, fixed: bool) -> ReconcileIssue:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.EXTERNAL_CLOSE,
+                symbol=rec.symbol,
+                position_id=pid,
+                detail=detail,
+                fixed=fixed,
+            )
+
+        try:
+            fresh = await self._exchange.positions()
+        except ExchangeError as e:
+            self._flat_rounds.pop(pid, None)
+            return issue(f"币安上读不到持仓为空（重读失败），不按手动平仓处理：{e!r}", False)
+        if any(p.symbol == rec.symbol and p.quantity > 0 for p in fresh):
+            self._flat_rounds.pop(pid, None)  # 之前读到空是假象
+            return None
+        close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
+        fill = await self._exchange.reduce_fill_since(rec.symbol, close_side, rec.opened_at)
+        have_fill = fill is not None and fill.price is not None
+        if not have_fill and rounds < _FLAT_ROUNDS_WITHOUT_FILL:
+            return issue(
+                "币安上已无仓位，但找不到平仓方向的成交，暂不按手动平仓结算（保命止损保留）", False
+            )
+        if rec.executor_id and rec.executor_id in running_ids:
+            try:
+                await self._api.stop_executor(rec.executor_id, keep_position=True)
+            except HbApiError as e:
+                return issue(
+                    f"币安上已无仓位（疑似手动平仓），但停执行器失败，下一轮重试：{e!r}", False
+                )
+        source = "最近一笔只减仓成交"
+        if fill is None or fill.price is None:
+            fill = CloseFill(await self._exchange.mark_price(rec.symbol), None, estimated=True)
+            source = "标记价（估算）" if fill.price is not None else "未取到价格，盈亏未记"
+        self._adapter.mark_closed_directly(pid, CloseReason.MANUAL, fill)
+        try:
+            await self._adapter.release_lifeboat(pid)
+        except Exception:
+            log.exception("手动平仓后撤保命止损失败 %s", pid)
+        self._flat_rounds.pop(pid, None)
+        self._gone_rounds.pop(pid, None)
+        self._lb_failures.pop(pid, None)
+        return issue(f"币安上已无仓位，账本按手动平仓结算；平仓价取{source}", True)
+
     async def _flatten(
         self,
         position_id: str,
@@ -485,6 +570,8 @@ class ThreeWayReconciler:
         )
         if issue.kind is ReconcileIssueKind.LIFEBOAT_MISSING:
             level = AlertLevel.CRITICAL  # 补上了也要让人知道为什么会丢
+        if issue.kind is ReconcileIssueKind.EXTERNAL_CLOSE and issue.fixed:
+            level = AlertLevel.INFO
         title = _TITLES[issue.kind] + ("，已处理" if issue.fixed else "")
         await self._send(
             now,
