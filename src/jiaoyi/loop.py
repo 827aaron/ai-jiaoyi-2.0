@@ -482,10 +482,11 @@ class Runner:
 
     async def keeper_tick(self) -> None:
         await self.refresh_positions()
-        await self.sync_watch()  # 开平仓、卡过期都在这里跟上（持仓管家每几十秒一轮）
         for pos in list(self.positions):
             if pos.status is PositionStatus.OPEN:
                 await self._review(pos)
+        # 开平仓、卡过期都在这里跟上订阅；放在审查之后，回填新币的几秒不推迟审持仓
+        await self.sync_watch()
 
     async def urgent_tick(self) -> None:
         if not isinstance(self.m.patrol, _HasUrgent) or not self.m.patrol.urgent:
