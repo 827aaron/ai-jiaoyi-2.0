@@ -1478,6 +1478,17 @@ def test_team_predictor_meetings_recent_only(tmp_path: Path) -> None:
         ("AUSDT", "short"),
     ]
 
+    # 流水很长时只读末尾：前面塞满旧行，结果不变
+    from jiaoyi.panel import pages
+
+    path = tmp_path / "card_review" / "cards.jsonl"
+    tail = path.read_text()
+    filler = (row(600, "scheduled", "XUSDT") + "\n") * (pages.TAIL_BYTES // 200 + 10)
+    path.write_text(filler + tail)
+    assert path.stat().st_size > pages.TAIL_BYTES
+    again = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, None).predictor_meetings
+    assert again == team.predictor_meetings
+
 
 def test_pnl_curve_backfill_from_ledger_and_klines(tmp_path: Path) -> None:
     """记录开始前那段：已平的按净盈亏（0 点前那段扣掉），开着的按 5 分钟收盘价算浮盈。"""
