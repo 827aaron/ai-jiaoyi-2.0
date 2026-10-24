@@ -694,7 +694,21 @@ class PredictorConfig(Contract):
         ge=3,
         le=112,
         description="往后预测几根（× interval = 预测多远，档位按最长持仓给）。"
-        "回看 400 + 这个 ≤ 512。",
+        "回看根数 + 这个 ≤ 512。",
+    )
+    lookback: int = Field(
+        default=400,
+        ge=64,
+        le=500,
+        description="喂给模型多少根历史 K 线（模型上下文上限 512，回看 + 往后预测 ≤ 512）。"
+        "越多看得越久远，越少越贴近最近的走势。",
+    )
+    paths: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description="每次独立模拟几条走势；看涨概率 = 收在现价之上的条数占比。"
+        "越多概率越细、算得越慢（每条都要跑一遍模型）。",
     )
     against_card_meeting: bool = Field(
         default=False,
@@ -706,6 +720,11 @@ class PredictorConfig(Contract):
     def _check(self) -> PredictorConfig:
         if self.adaptive_base_max_queue >= self.adaptive_mini_min_queue:
             raise ValueError("adaptive_base_max_queue 必须小于 adaptive_mini_min_queue")
+        if self.lookback + self.pred_len > 512:
+            raise ValueError(
+                f"回看 {self.lookback} + 往后预测 {self.pred_len} 超过模型上下文 512，"
+                "请调小其中一个"
+            )
         return self
 
 

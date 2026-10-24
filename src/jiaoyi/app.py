@@ -551,7 +551,10 @@ def build_modules(
         app_cfg.predictor_enabled,
         # 周期和预测长度跟最长持仓档走（4h 及以下 5m，8h / 12h 15m，24h 1h）
         KronosSettings(
-            interval=Interval(app_cfg.predictor.interval), pred_len=app_cfg.predictor.pred_len
+            interval=Interval(app_cfg.predictor.interval),
+            pred_len=app_cfg.predictor.pred_len,
+            lookback=app_cfg.predictor.lookback,
+            paths=app_cfg.predictor.paths,
         ),
         log_sink=decision_log,
         clock=clock,

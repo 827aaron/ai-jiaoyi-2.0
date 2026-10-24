@@ -323,7 +323,7 @@ Mac 实测（#103 把推理限制成 `low` 后）：`length` 次数从每轮 8 �
 - `hold`（不写 = 跟开会档位的推荐搭配：15m→1h、30m→2h、1h→4h、2h→4h、6h→12h、12h→24h、24h→24h（7×7 表里「合适」的最长一档，研究 v3，Aaron 2026-10-23 定；默认 2h 开会 + 4h 持仓））：单笔最长持仓。30m / 1h / 2h / 4h 各自给 `time_limit_s`、ATR 周期（5 / 15 / 15 / 30）、止损 / 止盈倍数、关键位缓冲、拍板门槛（30m 0.65/0.65/有毒 0.4，其余 0.6/0.6/0.5）、管家复查（10 / 15 / 20 / 30 秒）、预测长度（6 / 12 / 24 / 48 根 5 分钟）。30m 只能 paper。
 - 旧 `profile` 键自动映射成 `meeting_interval`（60m → 1h）并告警；只写了 `fast_loop.time_limit_s` 没写 `hold` 时按它取最近一档。`check-config` / `status` 显示「最长持仓 N（跟开会档位 / 自定义）」。
 - 新增 `fast_loop.min_stop_fee_multiple`：止损距离至少是来回手续费的几倍（30m 3.5 / 1h 3.0 / 2h 2.5 / 4h 2.0），保镖低于它就不开仓（0 = 不查，代码默认）。
-- 巡逻兵 / 管家平仓门槛、预测员 interval / paths / lookback、risk.toml 都不随档位变。
+- 巡逻兵 / 管家平仓门槛、预测员回看 lookback 400 / 模拟 paths 4（各档一样）、risk.toml 都不随档位变。
 
 ### 默认模型换成 OpenRouter 的 `deepseek-v4.1-flash-1017`（Aaron 18:49）
 

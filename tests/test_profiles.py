@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from jiaoyi import contracts as c
 from jiaoyi.app import App
 from jiaoyi.cli import main
 from jiaoyi.core import profiles
@@ -118,6 +119,8 @@ def test_tiers_reach_predictor_and_commander_settings(tmp_path: Path) -> None:
     cfg = load_app_config(path)
     app = App(load_risk_config(RISK), cfg, clock=lambda: datetime.now(UTC), offline=True)
     assert app.m.predictor._s.pred_len == 48  # type: ignore[attr-defined]  # 跟最长持仓走
+    assert app.m.predictor._s.lookback == 400  # type: ignore[attr-defined]
+    assert app.m.predictor._s.paths == 4  # type: ignore[attr-defined]
     assert app.slow_cfg.schedule.card_ttl_min == 35  # 开会间隔 15m
 
 
@@ -158,3 +161,21 @@ def test_signal_dedup_follows_hold_unless_written(tmp_path: Path) -> None:
         assert cfg.signal_dedup_s == s, hold
     cfg = load_app_config(_app_toml(tmp_path, 'hold = "2h"', "signal_dedup_s = 45"))
     assert cfg.signal_dedup_s == 45
+
+
+def test_predictor_lookback_and_paths_are_settings(tmp_path: Path) -> None:
+    """回看根数、模拟条数：各档默认 400 / 4，配置写了就用配置的；回看 + 往后预测 ≤ 512。"""
+    for hold in ("30m", "4h", "24h"):
+        p = load_app_config(_app_toml(tmp_path, f'hold = "{hold}"')).predictor
+        assert (p.lookback, p.paths) == (400, 4)
+    path = _app_toml(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "[predictor]", "[predictor]\nlookback = 128\npaths = 16", 1
+        ),
+        encoding="utf-8",
+    )
+    p = load_app_config(path).predictor
+    assert (p.lookback, p.paths) == (128, 16)
+    with pytest.raises(ValueError, match="512"):
+        c.PredictorConfig(lookback=480, pred_len=48)
