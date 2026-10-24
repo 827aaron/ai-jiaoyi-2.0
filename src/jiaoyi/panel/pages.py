@@ -42,7 +42,7 @@ from jiaoyi.panel.overview import (
     fee_rate_bps,
     position_views,
 )
-from jiaoyi.slow.review import CardJournal
+from jiaoyi.slow.review import CardJournal, JournalRow
 from jiaoyi.slow.screener import FALLBACK_MAJORS
 from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
 
@@ -365,10 +365,36 @@ def _same(r: DecisionRecord, e: AgainstSignalEvent) -> bool:
 PREDICTOR_EVENT = "event:predictor_against_card"
 
 
+TAIL_BYTES = 256 * 1024
+"""出卡流水只增不减；30 分钟内的行一定在末尾，只读最后这么多（够几千行）。"""
+
+
+def _journal_tail(files: PanelFiles) -> list[JournalRow]:
+    """出卡流水末尾的行（团队页每 5 秒读一次，不整份读）；读不了就是空。"""
+    path = CardJournal(files.root).path
+    try:
+        with path.open("rb") as f:
+            size = f.seek(0, 2)
+            f.seek(max(0, size - TAIL_BYTES))
+            raw = f.read()
+    except OSError:
+        return []
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if size > TAIL_BYTES:
+        lines = lines[1:]  # 第一行多半被截了半截
+    rows = []
+    for ln in lines:
+        try:
+            rows.append(JournalRow.model_validate_json(ln))
+        except ValueError:
+            continue
+    return rows
+
+
 def _predictor_meetings(files: PanelFiles, now: datetime) -> list[PredictorMeeting]:
     rows = [
         r
-        for r in CardJournal(files.root).read()
+        for r in _journal_tail(files)
         if r.refresh_reason == PREDICTOR_EVENT
         and timedelta(0) <= now - r.created_at <= AGAINST_SHOW
     ]
