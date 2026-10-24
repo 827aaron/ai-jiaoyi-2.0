@@ -1009,6 +1009,10 @@ class PoolCategory(BaseModel):
     cap: int
     """最多进池几个（选币页 > slow.toml 这一类 > 每类默认上限）。"""
     cap_from: CategorySource
+    enabled_base: bool = True
+    """不算选币页的话是开还是关（slow.toml > 默认开）：「恢复默认」后的值。"""
+    cap_base: int = 30
+    """不算选币页的话最多进池几个（slow.toml > 每类默认上限）：「恢复默认」后的值。"""
     in_pool: int
     """上次选币这一类进池了几个（选币页改了要等下一次选币才变）。"""
     total: int
@@ -1062,6 +1066,8 @@ def _pool_categories(
                     v for v in (mine_cap, slow_cap, scr.default_category_cap) if v is not None
                 ),
                 cap_from=cap_from,
+                enabled_base=rule.enabled if rule else True,
+                cap_base=slow_cap if slow_cap is not None else scr.default_category_cap,
                 in_pool=sum(1 for e in mine if e.in_pool),
                 total=len(mine),
             )
