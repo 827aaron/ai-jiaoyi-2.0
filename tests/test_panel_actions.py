@@ -860,3 +860,16 @@ def test_profile_info_tier_defaults_for_tier_page(tmp_path: Path) -> None:
     assert "pred_len" in actions.profile_info(paths).pinned["predictor"]
     actions.update_config(paths, data, "predictor", {"pred_len": None}, PW, NOW)  # 恢复跟档
     assert "predictor" not in actions.profile_info(paths).pinned
+
+
+def test_restore_key_only_some_holds_give(tmp_path: Path) -> None:
+    """巡逻兵线只有长持仓档给默认：4h 档上写了也能清空恢复跟档，一键清写死项也清得掉。"""
+    paths, data = _setup(tmp_path)
+    assert actions.editable_fields("fast_loop")["patrol_shock_pct_1m"].profiled
+    actions.update_config(paths, data, "fast_loop", {"patrol_shock_pct_1m": 2.5}, PW, NOW)
+    assert "patrol_shock_pct_1m" in actions.profile_info(paths).pinned["fast_loop"]
+    actions.update_config(paths, data, "fast_loop", {"patrol_shock_pct_1m": None}, PW, NOW)
+    assert "patrol_shock_pct_1m" not in actions.profile_info(paths).pinned.get("fast_loop", {})
+    actions.update_config(paths, data, "fast_loop", {"patrol_alert_pct_1m": 1.2}, PW, NOW)
+    keys = {c["key"] for c in actions.clear_profile_pins(paths, data, PW, NOW)}
+    assert "patrol_alert_pct_1m" in keys
