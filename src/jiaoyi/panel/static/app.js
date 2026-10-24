@@ -243,20 +243,68 @@ function dayParts(k) {
   const rest = k.day_pnl_usdt - k.day_closed_usdt - k.day_floating_usdt;
   return `<small class="dim num">已平 ${signed(k.day_closed_usdt, 1)} · 浮动 ${signed(k.day_floating_usdt, 1)} · 其它 ${signed(rest, 1)}</small>`;
 }
+// 今日盈亏曲线（面板每分钟记一个点，按现在的 0 点基准算）：标最高、最低和现在
+function pnlChart(c) {
+  const pts = (c && c.points) || [];
+  if (pts.length < 2) return `<div class="pnl-curve"><p class="dim small">曲线从面板更新后开始记，每分钟一个点，过几分钟再来看。</p></div>`;
+  const W = 600, H = 220, L = 8, R = 8, T = 10, B = 10;
+  const t0 = Date.parse(pts[0].ts), t1 = Date.parse(pts[pts.length - 1].ts);
+  const vs = pts.map((p) => p.pnl_usdt);
+  let lo = Math.min(0, ...vs), hi = Math.max(0, ...vs);
+  if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+  const x = (p) => L + ((Date.parse(p.ts) - t0) / Math.max(t1 - t0, 1)) * (W - L - R);
+  const y = (v) => T + ((hi - v) / (hi - lo)) * (H - T - B);
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${x(p).toFixed(1)},${y(p.pnl_usdt).toFixed(1)}`).join("");
+  const z = y(0).toFixed(1);
+  const dot = (p, k) => (p ? `<circle class="${k}" cx="${x(p).toFixed(1)}" cy="${y(p.pnl_usdt).toFixed(1)}" r="4"/>` : "");
+  const stat = (name, p) => (p ? `<span>${name} <b class="num ${cls(p.pnl_usdt)}">${signed(p.pnl_usdt, 2)} U</b> <small class="dim">${hm(p.ts)}</small></span>` : "");
+  return `<div class="pnl-curve">
+    <div class="pc-stats">${stat("最高", c.high)}${stat("最低", c.low)}${stat("现在", c.now)}</div>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="今日盈亏曲线">
+      <clipPath id="pc-up"><rect x="0" y="0" width="${W}" height="${z}"/></clipPath><clipPath id="pc-dn"><rect x="0" y="${z}" width="${W}" height="${H}"/></clipPath>
+      <path class="pc-fill up" clip-path="url(#pc-up)" d="${line}L${x(pts[pts.length - 1]).toFixed(1)},${z}L${x(pts[0]).toFixed(1)},${z}Z"/>
+      <path class="pc-fill dn" clip-path="url(#pc-dn)" d="${line}L${x(pts[pts.length - 1]).toFixed(1)},${z}L${x(pts[0]).toFixed(1)},${z}Z"/>
+      <line class="pc-zero" x1="0" x2="${W}" y1="${z}" y2="${z}"/>
+      <path class="pc-line" d="${line}"/>${dot(c.high, "hi")}${dot(c.low, "lo")}${dot(c.now, "now")}
+      <line class="pc-cur" x1="-9" x2="-9" y1="0" y2="${H}"/>
+    </svg>
+    <div class="pc-axis dim small"><span>${hm(pts[0].ts)}</span><span class="pc-read"></span><span>${hm(pts[pts.length - 1].ts)}</span></div>
+  </div>`;
+}
+// 手指 / 鼠标划过曲线：读出那一分钟的盈亏
+function bindPnlChart(c) {
+  const svg = $("#layer .pnl-curve svg");
+  if (!svg || !c || c.points.length < 2) return;
+  const pts = c.points, t0 = Date.parse(pts[0].ts), t1 = Date.parse(pts[pts.length - 1].ts);
+  const read = $("#layer .pc-read"), cur = svg.querySelector(".pc-cur");
+  const move = (e) => {
+    const r = svg.getBoundingClientRect();
+    const t = t0 + Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1) * (t1 - t0);
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(Date.parse(p.ts) - t) < Math.abs(Date.parse(best.ts) - t)) best = p;
+    const bx = 8 + ((Date.parse(best.ts) - t0) / Math.max(t1 - t0, 1)) * 584;
+    cur.setAttribute("x1", bx); cur.setAttribute("x2", bx);
+    read.innerHTML = `${hm(best.ts)} <b class="num ${cls(best.pnl_usdt)}">${signed(best.pnl_usdt, 2)} U</b>`;
+  };
+  svg.addEventListener("pointermove", move);
+  svg.addEventListener("pointerdown", move);
+}
 async function showDayPnl() {
   dlg(`<h3>今日盈亏明细</h3><div class="dim">读取中…</div>`);
-  let f;
-  try { f = await getJson("/api/funds"); } catch (e) { return dlg(`<h3>今日盈亏明细</h3><div class="down">${esc(e.message)}</div>`); }
+  let f, curve = null;
+  try {
+    [f, curve] = await Promise.all([getJson("/api/funds"), getJson("/api/pnl-curve").catch(() => null)]);
+  } catch (e) { return dlg(`<h3>今日盈亏明细</h3><div class="down">${esc(e.message)}</div>`); }
   const t = (f.pnl || []).find((x) => x.key === "today");
   const k = data.kpis;
   const day = k.day_pnl_usdt;
-  if (!t || day == null) return dlg(`<h3>今日盈亏明细</h3><p>还没有日初权益或账户数据，算不出明细。</p>`);
+  if (!t || day == null) return dlg(`<h3>今日盈亏明细</h3>${pnlChart(curve)}<p>还没有日初权益或账户数据，算不出明细。</p>`);
   const known = t.trading_usdt + t.fees_usdt + (t.funding_usdt || 0);
   const rest = day - known;
   const row = (label, v, note = "") => `<tr><td>${label}${note ? `<div class="dim small">${note}</div>` : ""}</td><td class="r num ${cls(v)}">${v == null ? "—" : signed(v, 2) + " U"}</td></tr>`;
   const src = f.pnl_source === "exchange" ? "币安收入流水（主程序定时拉）" : "账本里今天平掉的单";
-  dlg(`<h3>今日盈亏明细</h3>
-    <div class="tw"><table><tbody>
+  dlg(`<h3>今日盈亏明细</h3>${pnlChart(curve)}
+    <div class="tw"><table class="wrap1"><tbody>
       ${row("平仓毛利", t.trading_usdt, "今天平掉的单，扣手续费前")}
       ${row("手续费", t.fees_usdt)}
       ${row("资金费", t.funding_usdt, t.funding_usdt == null ? "没有币安收入流水，拿不到" : "")}
@@ -265,7 +313,8 @@ async function showDayPnl() {
       ${row("AI 费", -t.ai_usd, "拍板人、管家、预测员的调用费加军师团今天已花（读慢环预算文件，含正在开的会），美元按 1 U 算，不从交易账户扣")}
       <tr class="hi"><td><b>扣 AI 费后</b></td><td class="r num ${cls(day - t.ai_usd)}"><b>${signed(day - t.ai_usd, 2)} U</b></td></tr>
     </tbody></table></div>
-    <p class="dim small">平仓、手续费、资金费来自${src}${k.as_of ? `；总资产截至 ${hms(k.as_of)}` : ""}。平仓赚了但账户今日盈亏还是负的，通常是手续费、别的持仓浮亏，或者流水还没拉到（这时差额先算在「持仓浮盈变化及其他」里）。</p>`);
+    <p class="dim small">平仓、手续费、资金费来自${src}${k.as_of ? `；总资产截至 ${hms(k.as_of)}` : ""}。平仓赚了但账户今日盈亏还是负的，通常是手续费、别的持仓浮亏，或者流水还没拉到（这时差额先算在「持仓浮盈变化及其他」里）。曲线每分钟一个点（含浮动，按现在的 0 点总资产算），面板没开或连不上 hummingbot-api 的时段没有点。</p>`);
+  bindPnlChart(curve);
 }
 
 // 交易模式：模拟盘随时切回；测试网要面板密码；实盘只在 Mac 本机，逐条勾提示 + 确认词 + 面板密码（和终端 go-live 同一套）

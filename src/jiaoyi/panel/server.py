@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
@@ -28,15 +29,16 @@ from pydantic import BaseModel, Field
 from jiaoyi.contracts import Alert, AlertLevel, AppConfig, RiskConfig, Role
 from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
+from jiaoyi.core.recorder import local_day
 from jiaoyi.execution.live_gate import CONFIRM_WORD
-from jiaoyi.panel import actions, setup
+from jiaoyi.panel import actions, pnl_curve, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
 from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.market import Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
-from jiaoyi.panel.overview import Overview, build_overview
+from jiaoyi.panel.overview import Overview, build_overview, compute_kpis
 from jiaoyi.panel.pages import (
     AiRange,
     FundsPage,
@@ -58,6 +60,8 @@ from jiaoyi.panel.pages import (
 from jiaoyi.risk.guard import blend_atr, session_factor
 from jiaoyi.slow.settings import slow_defaults
 from jiaoyi.watchdog import send as send_telegram
+
+log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 PACKAGE = Path(__file__).parent.parent
@@ -191,6 +195,7 @@ def create_app(
     allow_hosts: frozenset[str] = frozenset(),
     secret_writer: setup.SecretWriter | None = None,
     secret_reader: setup.SecretReader | None = None,
+    pnl_sample_s: float | None = None,
 ) -> FastAPI:
     """``key_status``：密钥名 → 配没配，由命令行查好传进来（密钥的值不进面板的数据和接口）。
 
@@ -198,6 +203,8 @@ def create_app(
 
     ``secret_writer`` / ``secret_reader``：首次设置向导写钥匙串、自检时读 Telegram 密钥用；
     不给就只能看不能写（例如不是 Mac）。
+
+    ``pnl_sample_s``：今日盈亏曲线多久记一个点（None = 每分钟，0 = 不记）。
     """
     data_dir = app_cfg.data_dir
     files = PanelFiles(data_dir, risk.day_reset_tz)
@@ -213,9 +220,26 @@ def create_app(
     boot_code = code_fingerprint()
     market = klines or KlineSource()
 
+    async def sample_pnl() -> None:
+        """今日盈亏曲线：每分钟记一个点（只记 hummingbot-api 拿得到总资产的时候）。"""
+        while True:
+            await asyncio.sleep(pnl_sample_s or pnl_curve.SAMPLE_EVERY_S)
+            try:
+                r = cfg()[0]
+                now = clock()
+                k = compute_kpis(files, files.ledger(), await hb.snapshot(), r, now)
+                if k.equity_source == "hummingbot" and k.equity_usdt and k.day_start_equity_usdt:
+                    day = local_day(now, r.day_reset_tz).isoformat()
+                    pnl_curve.record(data_dir, day, now, k.equity_usdt, k.day_start_equity_usdt)
+            except Exception:
+                log.warning("记今日盈亏曲线失败", exc_info=True)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        task = asyncio.create_task(sample_pnl()) if pnl_sample_s != 0 else None
         yield
+        if task is not None:
+            task.cancel()
         await hb.close()
         await market.close()
 
@@ -274,6 +298,19 @@ def create_app(
     @api.get("/api/history")
     async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:
         return build_history(files, cfg()[0], clock(), range, include_tests=tests)
+
+    @api.get("/api/pnl-curve")
+    async def pnl_curve_today() -> pnl_curve.PnlCurve:
+        r = cfg()[0]
+        now = clock()
+        k = compute_kpis(files, files.ledger(), await hb.snapshot(), r, now)
+        cur = (
+            pnl_curve.PnlPoint(ts=now, pnl_usdt=k.day_pnl_usdt)
+            if k.day_pnl_usdt is not None
+            else None
+        )
+        day = local_day(now, r.day_reset_tz).isoformat()
+        return pnl_curve.read(data_dir, day, k.day_start_equity_usdt, cur)
 
     @api.get("/api/funds")
     async def funds(ai: AiRange = "today") -> FundsPage:
