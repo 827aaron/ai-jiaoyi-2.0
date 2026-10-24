@@ -480,6 +480,7 @@ def test_history_page(tmp_path: Path) -> None:
     [row] = page.rows
     ex = load_example("position_record")
     assert row.stop_loss_price == ex["stop_loss_price"]
+    assert row.category == ex["category"]
     assert row.take_profit_price == ex["take_profit_price"]
     assert row.exit_price is None and not row.pnl_missing  # 有盈亏数，只是平仓价没回填
 
