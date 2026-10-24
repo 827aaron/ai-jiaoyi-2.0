@@ -1809,6 +1809,37 @@ const PLAIN = {
   "screener.major_exclude": "手动排除出主流的币",
   "screener.allow_tradfi": "美股、金属这类传统资产永续也进池",
   "predictor.interval": "喂给模型几分钟的 K 线",
+  against_signal_on: "看到和作战卡反向的信号时叫管家急查、反复出就开临时会",
+  against_dedup_s: "同一个币同一种反向信号几秒内只算 1 次",
+  against_grace_s: "开仓后几秒内的反向信号不算（刚进场的噪音）",
+  against_recheck_cooldown_s: "同一笔仓几秒内最多因反向信号急查 1 次",
+  against_strong_breakout_vol_ratio: "成交量是平时几倍才算强反向信号（管家判 1 次就平）",
+  against_loss_stop_frac: "已亏到止损距离的几成时，反向信号也按强的算",
+  against_meeting_count: "反向信号出几次就申请这个币的临时会",
+  against_meeting_window_s: "上面「几次」在几秒内算",
+  against_meeting_gap_s: "同一个币因反向信号最多几秒申请 1 次临时会",
+  margin_safety_pct: "可用保证金留出百分之几不用（不够就缩单）",
+  max_notional_book_frac: "单笔最多吃掉盘口前 5 档的几成（超了缩单，0 = 不看）",
+  card_caps_binding: "作战卡上的仓位、杠杆范围当硬约束",
+  max_slippage_stop_frac: "滑点最多是止损距离的几成",
+  max_spread_stop_frac: "价差最多是止损距离的几成",
+  min_stop_fee_multiple: "止损至少是来回手续费的几倍（0 = 不查）",
+  funding_against_max_bp: "开仓方向要付的资金费超过万分之几就不开（0 = 不查）",
+  us_hours_gate: "美股类合约只在美股开盘时段开新仓",
+  us_open_delay_min: "美股开盘后几分钟才开新仓",
+  us_close_lead_min: "美股收盘前几分钟停开新仓",
+  atr_long_period_min: "再参考长周期的波动（K 线分钟数）",
+  stop_level_snap: "止损挪到作战卡关键价位外侧",
+  session_factor: "止损按曼谷时段放宽或收窄",
+  session_factor_weekday: "工作日每个钟点的止损系数",
+  session_factor_weekend: "周末每个钟点的止损系数",
+  card_range_clamp: "作战卡的止损止盈范围超出档位时取重叠部分（关 = 整个币不做）",
+  limit_take_profit: "模拟盘用限价单止盈",
+  limit_take_profit_live: "测试网 / 实盘也用限价单止盈",
+  tp_limit_fallback_s: "价格穿过止盈价几秒还没平就改市价平",
+  tp_limit_fallback_through_bps: "价格越过止盈价万分之几才算「没成交」",
+  patrol_alert_stop_mult: "报警线是止损距离的几倍",
+  patrol_shock_stop_mult: "全平线是止损距离的几倍",
   "predictor.pred_len": "往后预测几根 K 线",
   "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
@@ -1967,7 +1998,7 @@ const HINT = {
   event_meeting_enabled: "只给出事的那个币补开一场，不重开整轮；关掉时突破、大消息、新进池照旧重开整轮",
   event_triggers: "不在名单里的事不开会，等下一轮定时会",
   entry_max_card_age_min: "要在“哪些事算出事”里勾上“开仓时卡太旧”才会补会，否则只拦不补",
-  daily_cost_limit_usd: "只算军师团开会（含总盘会）的 AI 费；没写死就跟开会档位走，切档自动换",
+  daily_cost_limit_usd: "只算军师团开会（含总盘会）的 AI 费；没手动固定就跟开会档位走，切档自动换",
   over_budget: "放慢一档 = 开会间隔换成下面那个；不放慢 = 照常开。花到 100% 都停开会，持仓照常管",
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
@@ -2001,13 +2032,13 @@ const atrFor = (limit) => +Object.keys(ATR_FIT).find((k) => limit > ATR_FIT[k][1
 const atrMismatch = (atr, limit) => (ATR_FIT[atr] && atrFor(limit) !== +atr ? `${atr} 分钟 K 线适合最长持仓 ${ATR_FIT[atr][0].replace("（推荐）", "")}，现在最长持仓 ${humanDur(limit)}；建议 ${atrFor(limit)} 分钟。只提醒，不拦。` : "");
 // 写死项表格：文件值 → 某档位的默认值（一样的标出来）
 function pinTable(list, p) {
-  return `<div class="tw"><table><thead><tr><th>项</th><th class="r">文件里写死</th><th class="r">${esc(p)} 档默认</th></tr></thead><tbody>${list.map((x) => {
+  return `<div class="tw"><table><thead><tr><th>项</th><th class="r">手动固定</th><th class="r">${esc(p)} 档默认</th></tr></thead><tbody>${list.map((x) => {
     const i = { key: x.key };
     const same = JSON.stringify(x.value) === JSON.stringify(x.profile_default);
     return `<tr><td title="${esc(x.key)}">${esc(PLAIN[x.key] || x.key)}</td><td class="r num ${same ? "dim" : "warn"}">${fmtVal(x.value, i)}</td><td class="r num">${fmtVal(x.profile_default, i)}${same ? ' <span class="dim small">相同</span>' : ""}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
-const CLEAR_TEXT = "清掉这些写死项，完全按档位走";
+const CLEAR_TEXT = "清掉这些手动固定的项，完全按档位走";
 async function clearPins(pw) {
   return post("/api/settings/clear-profile-pins", { password: pw });
 }
@@ -2070,7 +2101,7 @@ function switchHold(h) {
   const rec = pf.hold_recommended[pf.current];
   const tip = !auto && rec && rec !== h ? `<p class="small warn">每 ${esc(profileSpan(pf.current))}开会推荐最长持仓 ${esc(profileSpan(rec))}。只提醒，不拦。</p>` : "";
   const what = auto ? `跟开会档位走（现在 ${esc(profileSpan(target))}）` : `固定 ${esc(profileSpan(h))}（自定义）`;
-  ask(`单笔最长持仓：${what}`, `<p>到 ${esc(profileSpan(target))}还没走就平；止损按 ${esc(spec.atr_period_min)} 分钟 K 线 ATR，止盈、拍板门槛、管家频率跟着这一档。只对之后新开的仓生效。</p>${tip}${dropTl ? `<p class="small">配置文件里写死的「一笔最多拿 ${esc(humanDur(tl.value))}」会一起删掉。</p>` : ""}${pwField(data.control)}`, "确定", false, async () => {
+  ask(`单笔最长持仓：${what}`, `<p>到 ${esc(profileSpan(target))}还没走就平；止损按 ${esc(spec.atr_period_min)} 分钟 K 线 ATR，止盈、拍板门槛、管家频率跟着这一档。只对之后新开的仓生效。</p>${tip}${dropTl ? `<p class="small">手动固定的「一笔最多拿 ${esc(humanDur(tl.value))}」会一起删掉。</p>` : ""}${pwField(data.control)}`, "确定", false, async () => {
     const pw = $("#dlg-pw");
     const pass = pw ? pw.value : "";
     await post("/api/settings", { section: "app", changes: { hold: auto ? null : h }, password: pass });
@@ -2132,28 +2163,30 @@ const ROLES = [
   ] },
   { id: "sentinel", t: "哨兵", strip: ["哨兵"], what: "盯行情，发现信号就交给拍板人", groups: [
     { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
+    { g: "新信号：持仓量变化、大户散户分歧、BTC 先动", keys: ["fast_loop.burst_*", "fast_loop.oi_*", "fast_loop.top_crowd_*", "fast_loop.btc_lead_*"] },
     { g: "去重和过期", keys: ["app.signal_dedup_s", "fast_loop.signal_max_age_s"] },
     { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
   ] },
   { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做、真不真、方向对不对", groups: [
     { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.gate_record_only"] },
-    { g: "超时和出错", keys: ["app.jev_timeout_ms", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
-    { g: "仓位大小", keys: ["fast_loop.size_fraction_s", "fast_loop.size_fraction_m"] },
+    { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
-  { id: "risk_guard", t: "保镖（风控）", strip: ["保镖"], what: "下单前最后一道关：仓位上限、下单门槛。都是你定的上限，AI 改不了", groups: [
+  { id: "risk_guard", t: "保镖（风控）", strip: ["保镖"], what: "下单前最后一道关：仓位多大、门槛、止损止盈放哪。上限都是你定的，AI 改不了", groups: [
     { g: "最要紧的三项（和页面上面「风控硬上限」是同一份）", keys: CORE },
     { g: "仓位上限", keys: ["risk.max_total_exposure_x", "risk.max_notional_per_trade_x", "risk.max_notional_per_trade_usdt", "risk.max_open_positions"] },
+    { g: "小仓、中仓用几成", hint: "拍板人给的仓位档：小仓、中仓按正常仓位打折，大仓用满。", keys: ["fast_loop.size_fraction_s", "fast_loop.size_fraction_m"] },
     { g: "每类币合计仓位上限（这一类所有仓位的名义价值加起来，含杠杆）", cat: true, hint: "不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。金额按现在的本金实时折算，设置里填的是本金的几倍，本金变了金额跟着变。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的所有仓位合计上限。" },
     { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple", "fast_loop.max_spread_stop_frac", "fast_loop.max_slippage_stop_frac", "fast_loop.min_stop_fee_multiple", "fast_loop.funding_against_max_bp"] },
-    { g: "仓位太大时缩单", keys: ["fast_loop.max_notional_book_frac", "fast_loop.margin_safety_pct"] },
-    { g: "作战卡上的范围", keys: ["fast_loop.card_caps_binding", "fast_loop.card_range_clamp"] },
-    { g: "美股合约的开仓时段", keys: ["fast_loop.us_hours_gate", "fast_loop.us_open_delay_min", "fast_loop.us_close_lead_min"] },
-  ] },
-  { id: "executor", t: "执行", what: "下单、放止损止盈、挂限价止盈。带「跟最长持仓走」的改单笔最长持仓时自动换", groups: [
-    { g: "止损放多远", keys: ["fast_loop.atr_period_min", "fast_loop.atr_long_period_min", "fast_loop.atr_floor_7d", "fast_loop.session_factor", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_snap", "fast_loop.stop_level_buffer_atr"] },
-    { g: "止盈", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
+    { g: "仓位太大时缩单", keys: ["fast_loop.max_notional_book_frac", "fast_loop.margin_safety_pct", "fast_loop.card_caps_binding"] },
+    { g: "哪些币先不做", keys: ["fast_loop.us_hours_gate", "fast_loop.us_open_delay_min", "fast_loop.us_close_lead_min", "fast_loop.new_listing_*", "fast_loop.adl_*"] },
+    { g: "止损放多远", hint: "带「跟最长持仓走」的改单笔最长持仓时自动换。", keys: ["fast_loop.atr_period_min", "fast_loop.atr_long_period_min", "fast_loop.atr_floor_7d", "fast_loop.session_factor", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_snap", "fast_loop.stop_level_buffer_atr"] },
+    { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp"] },
     { g: "一笔最多拿多久", keys: ["fast_loop.time_limit_s"] },
+  ] },
+  { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
+    { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
+    { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
@@ -2173,7 +2206,7 @@ const ROLES = [
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
 const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
 // 没列到的新键按所在段落到哪个角色的“其他”组
-const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "executor", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener" };
+const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener" };
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
@@ -2254,7 +2287,7 @@ function auxOf(i) {
   if (!i.editable) return "网页不改";
   if (i.recommended != null) return `推荐 <b>${valOf(i, i.recommended)}</b>`;
   const by = i.sec === "fast_loop" ? "最长持仓" : "档位";
-  if (i.pinned) return `<span class="warn">已写死（${by}默认是 ${valOf(i, i.profile_default)}）</span>`;
+  if (i.pinned) return `<span class="warn">手动固定（${by}默认是 ${valOf(i, i.profile_default)}）</span>`;
   return i.profiled ? `跟${by}走` : "";
 }
 // 时间类的值已经换成“1 小时 40 分”，标题里的“几秒 / 几分钟”就改说“多久”
