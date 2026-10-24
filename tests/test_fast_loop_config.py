@@ -92,7 +92,8 @@ def test_gate_record_only_default_off_and_never_live() -> None:
 def test_paper_gate_thresholds_only_in_paper(tmp_path: Path) -> None:
     text = APP_EXAMPLE.read_text(encoding="utf-8")
     paper = load_app_config(APP_EXAMPLE).fast_loop
-    assert (paper.min_p_take, paper.min_p_genuine, paper.max_p_toxic) == (0.35, 0.35, 0.7)
+    gate = (paper.min_p_take, paper.min_p_genuine, paper.max_p_toxic, paper.min_p_direction)
+    assert gate == (0.20, 0.35, 0.60, 0.45)  # 不写就跟档位走（不写死）
     p = tmp_path / "app.toml"
     p.write_text(text.replace("[fast_loop]", "[fast_loop]\nmin_p_take = 0.5", 1), encoding="utf-8")
     assert load_app_config(p).fast_loop.min_p_take == 0.5  # 写了的优先
