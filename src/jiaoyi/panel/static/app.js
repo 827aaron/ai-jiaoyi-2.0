@@ -783,6 +783,9 @@ const FIELD = {
   book: ["盘口"], spread_bps: ["买卖价差", "bps"], imb: ["买卖挂单失衡", "ratio"], imbalance: ["买卖挂单失衡", "ratio"], micro_bps: ["微观价偏离", "bps"], microprice: ["微观价", "px"], mid: ["中间价", "px"],
   ofi_k: ["订单流失衡", "k"], ofi: ["订单流失衡"], depth_k: ["盘口深度", "k"], depth_usdt: ["盘口深度", "usdt"],
   card: ["作战卡"], status: ["状态"], bias: ["方向"], levels_bps: ["关键价位离现价", "bpslist"], stop_atr: ["止损（ATR 倍数）", "range"], tp_r: ["止盈（止损的倍数）", "range"], size_max: ["最大仓位档"], regime: ["大盘判断"],
+  pos: ["持仓"], pnl_bps: ["浮盈", "bps"], age_min: ["已持仓", "min"], to_stop_bps: ["离止损", "bps"], to_tp_bps: ["离止盈", "bps"], time_left_min: ["离最长持仓还剩", "min"],
+  entry_px: ["进场价", "px"], peak_bps: ["开仓以来最高浮盈", "bps"], giveback_bps: ["从最高回吐", "bps"], pnl_r: ["浮盈（止损的倍数）"], peak_r: ["最高浮盈（止损的倍数）"], be_bps: ["扣来回手续费后浮盈", "bps"], path_bps: ["之前几次复查的浮盈", "bpslist"],
+  entry: ["进场理由"], p_real: ["进场时「是真信号」", "p"], p_take: ["进场时「值得做」", "p"], trail: ["移动止损"], on: ["这笔带了移动止损"], active: ["已经启动"], stop_bps: ["现价离移动止损", "bps"], agree: ["4 条模拟里和持仓同方向的条数"],
   kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["向上的模拟占比", "p"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
   approved: ["结论"], reasons: ["原因"], detail: ["细节"], day_pnl_pct: ["今天盈亏", "pct"], slippage_bps: ["预计滑点", "bps"], predictor: ["预测员"], predictor_p_up: ["预测员看涨概率", "p"], predictor_nudge: ["预测员把“做”挪了"], take_raw: ["“做”概率（拍板人原话）"], take_adj: ["“做”概率（加上预测员）"],
   quantity: ["数量"], notional_usdt: ["名义仓位（含杠杆）", "usdt"], leverage: ["杠杆", "x"], risk_usdt: ["这笔最多亏", "usdt"], stop_loss_pct: ["止损距离", "pct"], take_profit_pct: ["止盈距离", "pct"],
@@ -1037,6 +1040,15 @@ function feedSection(feed, signals) {
     <div class="foot">绿 = 放行 / 开仓 · 黄 = 拍板放弃 · 红 = 保镖拒绝 · 蓝 = 平仓。点一条看整条链和快照。</div></section>`;
 }
 
+// 管家快照里的最高浮盈 / 回吐 / 移动止损（方案 E 之后的记录才有）
+function keeperPeak(p) {
+  if (p.keeper_peak_usdt == null) return "";
+  const r = p.keeper_peak_r == null ? "" : `（${signed(p.keeper_peak_r, 2)}R）`;
+  const give = p.keeper_giveback_usdt == null ? "" : ` · 已回吐 ${money(p.keeper_giveback_usdt, 2)}U`;
+  const trail = p.keeper_trail_active == null ? "" : p.keeper_trail_active ? " · 移动止损已启动" : " · 移动止损未启动";
+  return `最高浮盈 ${signed(p.keeper_peak_usdt, 2)}U${r}${give}${trail}`;
+}
+
 function posSection(list) {
   const body = list.length
     ? list.map((p) => {
@@ -1046,7 +1058,7 @@ function posSection(list) {
         return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)}${catTag(p.category)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
           <span class="pnl ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${netPnl(p) == null ? "—" : signed(netPnl(p), 2) + "U"}</span></div>
           <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
-          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
+          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${keeperPeak(p) ? `<span>${esc(keeperPeak(p))}</span>` : ""}${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
       }).join("")
     : `<div class="empty"><b>没有持仓</b>开仓后这里显示盈亏、保命单和管家判断。</div>`;
   return `<section class="card"><div class="ch"><h2>当前持仓</h2><span class="r">${list.length} 笔 · <a href="#positions">全部 ›</a></span></div><div class="scroll">${body}</div></section>`;
@@ -1110,7 +1122,7 @@ P.positions = (arg) => {
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
       <td class="r num">${price(p.stop_loss_price, p.symbol)}${trailTag(p)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
-      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}</td><td class="r">${closeBtn}</td></tr>`;
+      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
   // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
   const cards = d.positions.map((p) => {

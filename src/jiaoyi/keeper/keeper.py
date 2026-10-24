@@ -11,6 +11,9 @@
   新卡改成只看不做、或卡里没有这个币：不投票，持仓交给决策模型 / 止损 / 最长持仓时间处理
   （不开新仓由拍板人和保镖按卡管）。例外：被封的币（币安下架公告等，``blocked``）照样投票，
   要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
+- 快照带这笔仓的来历（管家方案 E，Aaron 10-24）：之前历次复查的浮盈（算最高浮盈、回吐、走势）、
+  进场拍板（信号种类、触发说明、「真」「做」概率）、移动止损状态、预测员。历次浮盈和进场拍板
+  第一次复查这笔仓时从决策日志里找回（重启后也接得上），找不到就从这次开始记。
 - 和卡相反的信号（``note_against``，主循环按账本持仓判断后叫来的急查）：信号写进这次的快照
   （``against``）；强反向信号或已亏到一定倍数止损时，这次过线（``keeper_close_p``）就平，
   不等连续确认。查成了只用一次；没查成（没行情 / Jev 出错）留给下一次复查，不算查过。
@@ -19,10 +22,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
+from typing import Any
 
 from jiaoyi.contracts import (
     AgainstSignalEvent,
@@ -30,19 +36,25 @@ from jiaoyi.contracts import (
     Bias,
     FastLoopConfig,
     FeatureSnapshot,
+    Forecast,
     HoldQuestion,
     JevRequest,
     JevResponse,
     KeeperVerdict,
     Outcome,
     PositionRecord,
+    Role,
 )
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.jev import error_kind
-from jiaoyi.gate.questions import hold_questions, hold_snapshot, jev_log_fields
+from jiaoyi.gate.questions import hold_pnl_bps, hold_questions, hold_snapshot, jev_log_fields
 from jiaoyi.interfaces import DecisionModel
 
+log = logging.getLogger(__name__)
+
 RETRY_AFTER_S = 1.0
+MAX_HISTORY = 400  # 每笔仓最多记这么多次复查的浮盈（20 秒一次 ≈ 2 小时多）
+_LOOKBACK_DAYS = 3  # 找回历史最多往前翻几天的决策日志
 _FAIL_TEXT = {
     "busy": "Jev 服务方繁忙（已重试 1 次），本轮维持现状",
     "timeout": "Jev 超时（已重试 1 次），本轮维持现状",
@@ -63,8 +75,15 @@ class JevKeeper:
         recorder: RoleRecorder | None = None,
         blocked: Callable[[], Mapping[str, str]] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        *,
+        fee_bps: float = 5.0,
+        forecast: Callable[[str, datetime], Forecast | None] | None = None,
+        scan_day: Callable[[str, str], list[dict[str, Any]]] | None = None,
     ) -> None:
-        """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。"""
+        """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
+
+        ``fee_bps``：单边吃单手续费（快照的扣费后浮盈）；``forecast``：预测员最新预测；
+        ``scan_day(UTC 日期, 关键字)``：读决策日志里含关键字的记录，找回复查历史和进场拍板。"""
         self._model = model
         self._sleep = sleep
         self._blocked = blocked or dict
@@ -74,11 +93,60 @@ class JevKeeper:
         self._rec = recorder
         self._streak: dict[str, int] = {}  # 每个持仓连续“该平”的次数
         self._against: dict[str, tuple[AgainstSignalEvent, bool]] = {}
+        self._fee_bps = fee_bps
+        self._forecast = forecast
+        self._scan_day = scan_day
+        self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
+        self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
 
     def forget(self, position_id: str) -> None:
         """持仓平掉后调用，清掉它的计数。"""
         self._streak.pop(position_id, None)
         self._against.pop(position_id, None)
+        self._history.pop(position_id, None)
+        self._entry.pop(position_id, None)
+
+    def history(self, position_id: str) -> list[float]:
+        """这笔仓之前历次复查的浮盈（基点，从早到晚）。"""
+        return list(self._history.get(position_id, ()))
+
+    async def _recall(self, pos: PositionRecord, now: datetime) -> None:
+        """第一次复查这笔仓：从决策日志找回历次浮盈和进场拍板（放线程里读，不卡事件循环）。"""
+        pid = pos.position_id
+        history: list[float] = []
+        entry: dict[str, Any] | None = None
+        if self._scan_day is not None:
+            try:
+                history, entry = await asyncio.to_thread(self._read_log, pos, now)
+            except Exception:  # 日志读不了就从这次开始记，不影响复查
+                log.warning("管家找回 %s 的复查历史失败", pid, exc_info=True)
+        self._history[pid] = history[-MAX_HISTORY:]
+        self._entry[pid] = entry
+
+    def _read_log(
+        self, pos: PositionRecord, now: datetime
+    ) -> tuple[list[float], dict[str, Any] | None]:
+        assert self._scan_day is not None
+        first = (pos.opened_at - timedelta(minutes=5)).date()
+        last = now.date()
+        days = [first + timedelta(days=i) for i in range((last - first).days + 1)]
+        days = days[-_LOOKBACK_DAYS:]
+        checks: list[tuple[str, float]] = []
+        entry: dict[str, Any] | None = None
+        for day in days:
+            iso = day.isoformat()
+            for rec in self._scan_day(iso, pos.position_id):
+                mine = rec.get("position_id") == pos.position_id
+                if rec.get("role") != Role.KEEPER.value or not mine:
+                    continue
+                pnl = _snapshot_pnl(rec)
+                if pnl is not None:
+                    checks.append((str(rec.get("ts", "")), pnl))
+            for rec in self._scan_day(iso, pos.signal_id):
+                if rec.get("role") == Role.GATE.value and rec.get("signal_id") == pos.signal_id:
+                    entry = _entry_block(rec) or entry
+        checks.sort(key=lambda c: c[0])
+        return [pnl for _, pnl in checks], entry
 
     def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None:
         """下一次复查带上这个反向信号；``one_shot`` = 这次过线就平，不等连续确认。"""
@@ -108,6 +176,10 @@ class JevKeeper:
             self._keep_against(pid, against, now)
             return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
         card = self._card(now)
+        if pid not in self._history:
+            await self._recall(position, now)
+        history = self._history.setdefault(pid, [])
+        fc = self._forecast(position.symbol, now) if self._forecast is not None else None
         request = JevRequest(
             request_id=f"hold-{pid}-{uuid.uuid4().hex[:6]}",
             kind="hold",
@@ -115,10 +187,20 @@ class JevKeeper:
             ts=now,
             position_id=pid,
             snapshot=hold_snapshot(
-                position, f, card, now, against=against[0] if against is not None else None
+                position,
+                f,
+                card,
+                now,
+                against=against[0] if against is not None else None,
+                history=history,
+                entry=self._entry.get(pid),
+                forecast=fc,
+                fee_bps=self._fee_bps,
             ),
             questions=hold_questions(),
         )
+        history.append(hold_pnl_bps(position, f.last_price))
+        del history[:-MAX_HISTORY]
         resp = await self._model.ask(request)
         if not resp.ok and error_kind(resp.error) in ("busy", "timeout"):
             await self._sleep(RETRY_AFTER_S)  # 服务方一时过载 / 超时：本轮再问一次
@@ -248,3 +330,27 @@ class JevKeeper:
                 model_version=r.model_version if r is not None else None,
             )
         return v
+
+
+def _snapshot_pnl(rec: Mapping[str, Any]) -> float | None:
+    """管家决策记录 ``input.jev.snapshot`` 里的 ``pos.pnl_bps``（没有就 None）。"""
+    try:
+        snap = json.loads(rec["input"]["jev"]["snapshot"])
+        return float(snap["pos"]["pnl_bps"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _entry_block(rec: Mapping[str, Any]) -> dict[str, Any] | None:
+    """拍板记录 → ``{sig, why, p_real, p_take}``；没真正问过拍板人（排队那条）返回 None。"""
+    try:
+        snap = json.loads(rec["input"]["jev"]["snapshot"])
+        answers = rec["output"]["jev"]["answers"]
+        return {
+            "sig": snap["sig"],
+            "why": str(snap.get("why", ""))[:100],
+            "p_real": round(float(answers["genuine"]["real"]), 2),
+            "p_take": round(float(answers["take"]["take"]), 2),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None

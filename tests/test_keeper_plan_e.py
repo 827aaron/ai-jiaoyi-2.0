@@ -1,0 +1,216 @@
+"""管家方案 E（Aaron 10-24）：持仓快照带最高浮盈、回吐、进场理由、移动止损、预测员。"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jiaoyi import contracts as c
+from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+from jiaoyi.gate.questions import (
+    HOLD_PROMPTS,
+    MAX_SNAPSHOT_CHARS,
+    hold_snapshot,
+)
+from jiaoyi.keeper.keeper import JevKeeper
+from tests.fastloop_helpers import FAST, card, features
+from tests.test_keeper_patrol import close_p, position
+
+
+def _fc(now: datetime, p_up: float, *, stale: bool = False) -> c.Forecast:
+    return c.Forecast(
+        symbol="BTCUSDT",
+        ts=now - timedelta(minutes=5),
+        horizon_min=60,
+        price_low=67000.0,
+        price_high=69000.0,
+        p_up=p_up,
+        model="Kronos-small",
+        stale_after=now + timedelta(minutes=-1 if stale else 5),
+    )
+
+
+def _snap(s: str) -> dict[str, Any]:
+    d: dict[str, Any] = json.loads(s)
+    return d
+
+
+def test_snapshot_new_fields_with_stop_trailing_entry_and_kronos(now: datetime) -> None:
+    pos = position(now, trailing_activation_pct=0.2, trailing_stop_pct=0.1)  # 启动 20bp、回撤 10bp
+    f = features(now, price=68204.0)  # 浮盈 30bp
+    entry = {"sig": "volume_surge", "why": "量能突增", "p_real": 0.4, "p_take": 0.3}
+    d = _snap(
+        hold_snapshot(
+            pos,
+            f,
+            card(now),
+            now,
+            history=[0.0, 10.0, 35.0, 30.0],
+            entry=entry,
+            forecast=_fc(now, 0.75),
+            fee_bps=5.0,
+        )
+    )
+    p = d["pos"]
+    assert p["entry_px"] == 68000.0 and p["pnl_bps"] == 30.0
+    assert p["peak_bps"] == 35.0 and p["giveback_bps"] == 5.0
+    stop = abs(68000 / 67880 - 1) * 1e4  # ≈ 17.7bp
+    assert p["pnl_r"] == round(30 / stop, 2) and p["peak_r"] == round(35 / stop, 2)
+    assert p["be_bps"] == 20.0 and p["path_bps"] == [0, 10, 35, 30]
+    assert d["entry"] == entry
+    assert d["trail"] == {"on": True, "active": True, "stop_bps": 5.0}  # 30 −（35 − 10）
+    assert d["kronos"] == {"p_up": 0.75, "agree": 3}
+    assert "imb" not in d["book"] and "micro_bps" not in d["book"] and "spread_bps" in d["book"]
+
+
+def test_snapshot_without_stop_entry_forecast_or_trailing(now: datetime) -> None:
+    pos = position(now, stop_loss_price=None, side="short")
+    d = _snap(
+        hold_snapshot(pos, features(now), card(now), now, forecast=_fc(now, 0.75, stale=True))
+    )
+    p = d["pos"]
+    assert "pnl_r" not in p and "peak_r" not in p and "path_bps" not in p
+    assert p["peak_bps"] == p["pnl_bps"] and p["giveback_bps"] == 0.0
+    assert "entry" not in d and "kronos" not in d
+    assert d["trail"] == {"on": False, "active": False}
+    pos2 = position(now, trailing_activation_pct=0.5, trailing_stop_pct=0.2)
+    d2 = _snap(hold_snapshot(pos2, features(now, price=68068.0), card(now), now))
+    assert d2["trail"] == {"on": True, "active": False}  # 浮盈 10bp，没到 50bp
+
+
+def test_path_samples_five_points_oldest_first(now: datetime) -> None:
+    hist = [float(i) for i in range(9)]
+    d = _snap(hold_snapshot(position(now), features(now), card(now), now, history=hist))
+    assert d["pos"]["path_bps"] == [0, 2, 4, 6, 8]
+
+
+def test_snapshot_stays_valid_json_under_limit(now: datetime) -> None:
+    entry = {"sig": "volume_surge", "why": "很长" * 50, "p_real": 0.4, "p_take": 0.3}
+    against = c.AgainstSignalEvent.model_validate(
+        {
+            "ts": now.isoformat(),
+            "symbol": "BTCUSDT",
+            "kind": "volume_surge",
+            "side": "short",
+            "desc": "反向",
+            "strong": True,
+            "vol_ratio": 9.0,
+            "buy_ratio": 0.2,
+        }
+    )
+    s = hold_snapshot(
+        position(now, trailing_activation_pct=0.2, trailing_stop_pct=0.1),
+        features(now, oi15=1.0, oi60=2.0, oi4h=3.0, top_ls=1.1, crowd_ls=0.9, div4h=1.0),
+        card(now), now, against=against, history=[float(i) for i in range(400)],
+        entry=entry, forecast=_fc(now, 0.5),
+    )  # fmt: skip
+    assert len(s) <= MAX_SNAPSHOT_CHARS and json.loads(s)["pos"]["peak_bps"] == 399.0
+
+
+def test_prompts_use_spec_wording() -> None:
+    action = HOLD_PROMPTS[c.HoldQuestion.ACTION]
+    assert "If the position is in profit after fees (`pos.be_bps` > 0)" in action
+    assert "is not by itself a reason to close: the stop already limits that loss." in action
+    thesis = HOLD_PROMPTS[c.HoldQuestion.THESIS_INTACT]
+    assert thesis.startswith("Is the reason we entered this position (`entry.sig`, `entry.why`)")
+    assert "`against` (only on urgent checks)" in thesis
+
+
+def _keeper(t: MockJevTransport, now: datetime, prices: list[float], **kw: Any) -> JevKeeper:
+    it = iter(prices)
+    return JevKeeper(
+        JevDecisionModel(t, FAST, timeout_ms=200),
+        FAST,
+        lambda s: features(now, price=next(it)),
+        lambda n: card(now),
+        **kw,
+    )
+
+
+async def test_keeper_tracks_peak_and_forgets(now: datetime) -> None:
+    t = MockJevTransport(answer=close_p(0.1))
+    k = _keeper(t, now, [68068.0, 68204.0, 68034.0])  # 浮盈 10 / 30 / 5bp
+    pos = position(now)
+    for _ in range(3):
+        assert (await k.review(pos, now)).action == "hold"
+    last = _snap(t.calls[-1])["pos"]
+    assert last["peak_bps"] == 30.0 and last["giveback_bps"] == 25.0
+    assert last["path_bps"] == [10, 30]
+    assert k.history("pos-1") == [10.0, 30.0, 5.0]
+    k.forget("pos-1")
+    assert k.history("pos-1") == []
+
+
+async def test_keeper_recalls_history_and_entry_after_restart(
+    tmp_path: Path, now: datetime
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    pos = position(now)
+    gate = RoleRecorder(c.Role.GATE, log)
+    gate.record(
+        now - timedelta(minutes=5), c.Outcome.PASS, "拍板",
+        symbol="BTCUSDT", signal_id=pos.signal_id,
+        input={"jev": {"snapshot": json.dumps({"sig": "volume_surge", "why": "量能突增 5 倍"})}},
+        output={"jev": {"answers": {"genuine": {"real": 0.41, "fake": 0.59},
+                                    "take": {"take": 0.33, "skip": 0.67}}}},
+    )  # fmt: skip
+    t1 = MockJevTransport(answer=close_p(0.1))
+    k1 = _keeper(
+        t1, now, [68204.0, 68102.0], recorder=RoleRecorder(c.Role.KEEPER, log),
+        scan_day=log.scan_day,
+    )  # fmt: skip
+    await k1.review(pos, now)
+    await k1.review(pos, now)
+    assert _snap(t1.calls[0])["entry"]["sig"] == "volume_surge"
+
+    t2 = MockJevTransport(answer=close_p(0.1))  # 重启：新管家从日志找回
+    k2 = _keeper(t2, now, [68034.0], scan_day=log.scan_day)
+    await k2.review(pos, now)
+    d = _snap(t2.calls[0])
+    assert d["pos"]["peak_bps"] == 30.0 and d["pos"]["path_bps"] == [30, 15]
+    assert d["entry"] == {"sig": "volume_surge", "why": "量能突增 5 倍", "p_real": 0.41,
+                          "p_take": 0.33}  # fmt: skip
+
+
+async def test_keeper_passes_forecast_and_fee(now: datetime) -> None:
+    t = MockJevTransport(answer=close_p(0.1))
+    k = _keeper(t, now, [68068.0], forecast=lambda s, n: _fc(now, 0.0), fee_bps=2.0)
+    await k.review(position(now), now)
+    d = _snap(t.calls[0])
+    assert d["kronos"] == {"p_up": 0.0, "agree": 0} and d["pos"]["be_bps"] == 6.0
+
+
+def test_positions_page_shows_keeper_peak_and_giveback(now: datetime) -> None:
+    from jiaoyi.panel.hb import HbSnapshot
+    from jiaoyi.panel.overview import position_views
+
+    pos = position(now, trailing_activation_pct=0.2, trailing_stop_pct=0.1)
+    snap = hold_snapshot(
+        pos, features(now, price=68204.0), card(now), now, history=[35.0]
+    )  # 最高 35bp、现在 30bp
+    old = json.dumps({"sym": "BTCUSDT", "pos": {"pnl_bps": 1.0}})  # 方案 E 之前的快照
+    recs = [
+        c.DecisionRecord(
+            record_id=f"k{i}",
+            ts=now,
+            role=c.Role.KEEPER,
+            outcome=c.Outcome.HOLD,
+            summary="拿住",
+            position_id="pos-1",
+            input={"jev": {"snapshot": s}},
+        )
+        for i, s in enumerate([old, snap])
+    ]
+    [v] = position_views([pos], recs, HbSnapshot(ok=False))
+    base = 68000.0 * pos.quantity
+    assert v.keeper_peak_usdt == pytest.approx(base * 35 / 1e4)
+    assert v.keeper_giveback_usdt == pytest.approx(base * 5 / 1e4)
+    assert v.keeper_peak_r is not None and v.keeper_trail_active is True
+    [v] = position_views([pos], recs[:1], HbSnapshot(ok=False))
+    assert v.keeper_peak_usdt is None and v.keeper_trail_active is None
