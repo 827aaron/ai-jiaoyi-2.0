@@ -637,9 +637,9 @@ def test_meter_reports_the_model_of_each_call() -> None:
 
 def test_convert_instructions_describe_new_signal_kinds() -> None:
     from jiaoyi.core.config import load_risk_config
-    from tests.conftest import ROOT
     from jiaoyi.slow import ta_prompts
     from jiaoyi.slow.tradingagents_engine import convert_instructions
+    from tests.conftest import ROOT
 
     risk = load_risk_config(ROOT / "config" / "risk.example.toml")
     short = convert_instructions(risk, ta_prompts.PromptParams.for_hold("1h"))
