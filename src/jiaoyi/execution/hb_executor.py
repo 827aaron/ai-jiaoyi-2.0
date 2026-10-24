@@ -55,6 +55,8 @@ log = logging.getLogger(__name__)
 # hummingbot 的 OrderType 枚举值
 _ORDER_MARKET = 1
 _ORDER_LIMIT = 2
+_ORDER_LIMIT_MAKER = 3
+"""hummingbot OrderType.LIMIT_MAKER：只挂单（post-only），挂单等回踩进场用。"""
 
 MARKER_PREFIX = "jy-"
 """写进 hummingbot ``controller_id`` 的认领标记前缀：``jy-<position_id>``。"""
@@ -255,7 +257,9 @@ class HbExecutorAdapter:
 
     # ------------------------------------------------------------------ 开仓
 
-    def _executor_config(self, intent: OrderIntent) -> dict[str, Any]:
+    def _executor_config(self, intent: OrderIntent, *, market: bool = False) -> dict[str, Any]:
+        """``market``：挂单等回踩没成交、改市价追进时用同一份指令下市价单。"""
+        limit = intent.order_type == "limit" and not market
         # hummingbot 的止损止盈看 net_pnl_pct（已扣开仓手续费）：不补的话价格止损比保镖算的近一个
         # 手续费（约 5bp），市价止盈远一个手续费。止损加上、止盈减去，触发价就和 OrderIntent 一致
         # 限价止盈（E4）：hummingbot 按「入场价 × (1 ± 止盈%)」直接挂只减仓限价单，不看净盈亏，不减
@@ -270,11 +274,17 @@ class HbExecutorAdapter:
                 take = max(take - tick / ref, 0.0001)
         else:
             take = max(intent.take_profit_pct / 100.0 - self._open_fee, 0.0001)
+        if limit:
+            # 挂单等回踩：只挂单；执行器的时限从建执行器算，所以加上等待时间（持仓时长我们按成交
+            # 时刻自己卡，见 _limit_housekeeping）
+            open_type = _ORDER_LIMIT_MAKER if intent.limit_wait_s else _ORDER_LIMIT
+        else:
+            open_type = _ORDER_MARKET
         barrier: dict[str, Any] = {
             "stop_loss": str(round(stop, 8)),
             "take_profit": str(round(take, 8)),
-            "time_limit": intent.time_limit_s,
-            "open_order_type": _ORDER_LIMIT if intent.order_type == "limit" else _ORDER_MARKET,
+            "time_limit": intent.time_limit_s + (intent.limit_wait_s or 0 if limit else 0),
+            "open_order_type": open_type,
             "take_profit_order_type": _ORDER_LIMIT if self._limit_tp else _ORDER_MARKET,
         }
         if intent.trailing_stop_pct is not None and intent.trailing_activation_pct is not None:
@@ -292,12 +302,18 @@ class HbExecutorAdapter:
             "leverage": intent.leverage,
             "triple_barrier_config": barrier,
         }
-        if intent.order_type == "limit":
+        if limit:
             config["entry_price"] = str(intent.limit_price)
         return config
 
     async def open(self, intent: OrderIntent) -> PositionRecord:
-        existing = self._registry.by_intent(intent.intent_id)
+        return await self._open(intent)
+
+    async def _open(self, intent: OrderIntent, *, chase: bool = False) -> PositionRecord:
+        """``chase``：挂单没成交后按同一份保镖指令改市价追进（账本里另记一笔，指令号带 -chase）。"""
+        intent_id = f"{intent.intent_id}-chase" if chase else intent.intent_id
+        limit = intent.order_type == "limit" and not chase
+        existing = self._registry.by_intent(intent_id)
         if existing is not None:  # 重试同一条指令不重复开仓
             return existing.record
         # 执行侧兜底（保镖也会拦）：同一个币已有在管持仓就拒绝。单向持仓模式下，第二笔——尤其反向——
@@ -311,7 +327,7 @@ class HbExecutorAdapter:
         record = PositionRecord(
             position_id=f"pos-{uuid.uuid4().hex[:12]}",
             group_id=f"grp-{uuid.uuid4().hex[:12]}",
-            intent_id=intent.intent_id,
+            intent_id=intent_id,
             signal_id=intent.signal_id,
             card_id=intent.card_id,
             symbol=intent.symbol,
@@ -333,6 +349,9 @@ class HbExecutorAdapter:
             stop_loss_pct=intent.stop_loss_pct,
             take_profit_pct=intent.take_profit_pct,
             tp_tick=self._tick_size(intent.symbol) if self._limit_tp else None,
+            limit_wait_s=intent.limit_wait_s if limit else None,
+            hold_s=intent.time_limit_s if limit and intent.limit_wait_s else None,
+            chase=intent if limit and intent.limit_wait_s and intent.limit_chase else None,
         )
         self._registry.put(tracked)
         if self._exchange is not None:
@@ -353,7 +372,7 @@ class HbExecutorAdapter:
         marker = f"{MARKER_PREFIX}{record.position_id}"
         try:
             created = await self._api.create_executor(
-                self._executor_config(intent), self._account, marker
+                self._executor_config(intent, market=chase), self._account, marker
             )
             executor_id = str(created["executor_id"])
         except HbApiError as e:
@@ -613,8 +632,61 @@ class HbExecutorAdapter:
 
     async def positions(self) -> list[PositionRecord]:
         for tracked in self._registry.live():
-            await self._sync_one(tracked)
+            tracked = await self._sync_one(tracked)
+            if tracked.limit_wait_s:
+                await self._limit_housekeeping(tracked)
         return [t.record for t in self._registry.live()]
+
+    async def _limit_housekeeping(self, tracked: TrackedPosition) -> None:
+        """挂单等回踩：等到时还没成交就撤单（8h 以上档改市价追）；成交后按成交时刻卡最长持仓。"""
+        rec, now = tracked.record, self._clock()
+        if (
+            rec.status is PositionStatus.OPENING
+            and rec.executor_id is not None
+            and tracked.limit_wait_s is not None
+            and (now - rec.opened_at).total_seconds() >= tracked.limit_wait_s
+        ):
+            await self._cancel_unfilled_limit(tracked)
+        elif (
+            rec.status is PositionStatus.OPEN
+            and tracked.hold_s is not None
+            and tracked.filled_at is not None
+            and (now - tracked.filled_at).total_seconds() >= tracked.hold_s
+        ):
+            try:
+                await self.close(rec.position_id, CloseReason.TIME_LIMIT)
+            except Exception:
+                log.warning(
+                    "挂单进场的仓到时平仓失败 %s，下一轮再试", rec.position_id, exc_info=True
+                )
+
+    async def _cancel_unfilled_limit(self, tracked: TrackedPosition) -> None:
+        rec = tracked.record
+        assert rec.executor_id is not None
+        try:
+            await self._api.stop_executor(rec.executor_id, keep_position=False)
+        except Exception:
+            log.warning("撤挂单失败 %s，下一轮再试", rec.position_id, exc_info=True)
+            return
+        current = self._registry.get(rec.position_id)
+        if current is None or current.record.status is not PositionStatus.OPENING:
+            return  # 撤的同时成交了 / 别的路径已经结账：按正常流程走
+        minutes = (tracked.limit_wait_s or 0) // 60
+        chase = tracked.chase
+        self._set(current, status=PositionStatus.FAILED, closed_at=self._clock())
+        self._record(
+            Outcome.INFO,
+            f"{rec.symbol} 挂单没成交已撤（等了 {minutes} 分钟）"
+            + ("，改市价追进" if chase is not None else "，不开仓"),
+            rec,
+            output={"not_filled": True, "limit_cancelled": True, "chase": chase is not None},
+        )
+        if chase is None:
+            return
+        try:
+            await self._open(chase, chase=True)
+        except Exception as e:
+            log.warning("挂单没成交后市价追进失败 %s：%r", rec.position_id, e)
 
     def live_positions(self) -> list[PositionRecord]:
         """账本里此刻还没结束的持仓（开仓中 / 持有中 / 平仓中），不查 hummingbot，马上返回。"""
@@ -680,6 +752,7 @@ class HbExecutorAdapter:
         return self._set(
             tracked,
             status=PositionStatus.OPEN,
+            filled_at=self._clock() if tracked.limit_wait_s else tracked.filled_at,
             entry_price=entry,
             stop_loss_price=entry * (1.0 - sign * tracked.stop_loss_pct / 100.0),
             take_profit_price=tp_price(tracked, entry),
@@ -1021,8 +1094,11 @@ class HbExecutorAdapter:
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
         requested = changes.pop("requested_close", tracked.requested_close)
+        filled_at = changes.pop("filled_at", tracked.filled_at)
         record = tracked.record.model_copy(update=changes)
-        updated = tracked.model_copy(update={"record": record, "requested_close": requested})
+        updated = tracked.model_copy(
+            update={"record": record, "requested_close": requested, "filled_at": filled_at}
+        )
         self._registry.put(updated)
         return updated
 

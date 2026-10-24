@@ -243,6 +243,7 @@ class RiskGuardImpl:
         gate_record_only: bool = False,
         blocked: Callable[[], Mapping[str, str]] | None = None,
         adl_risk: Callable[[str], str | None] | None = None,
+        live: bool = False,
     ) -> None:
         """``gate_record_only``：拍板人概率没过门槛也放行，只记「拍板本会拦」（paper 校准用）。
 
@@ -251,6 +252,7 @@ class RiskGuardImpl:
         （拿不到 None = 不挡）。"""
         self._blocked = blocked
         self._adl = adl_risk
+        self._live = live  # testnet / live：挂单等回踩还要 entry_limit_pullback_live
         self._risk = risk
         self._fast = fast
         self._record_only = gate_record_only
@@ -699,14 +701,20 @@ class RiskGuardImpl:
             return None
 
         assert card is not None
+        limit = self._pullback_price(side, entry, dist, lot)
+        if limit is not None:
+            detail["limit_price"] = limit
         return OrderIntent(
+            order_type="limit" if limit is not None else "market",
+            limit_price=limit,
+            limit_wait_s=fast.entry_limit_wait_min * 60 if limit is not None else None,
+            limit_chase=limit is not None and fast.entry_limit_chase,
             intent_id=f"int-{uuid.uuid4().hex[:16]}",
             signal_id=signal.signal_id,
             card_id=card.card_id,
             symbol=signal.symbol,
             category=cs.category,
             side=side,
-            order_type="market",
             quantity=qty,
             notional_usdt=notional,
             leverage=lev,
@@ -717,6 +725,25 @@ class RiskGuardImpl:
             lifeboat_stop_pct=lifeboat_pct,
             approved_at=now,
         )
+
+    def _pullback_price(self, side: Side, entry: float, dist: float, lot: LotRules) -> float | None:
+        """挂单等回踩的挂单价：触发价往有利方向让 ``entry_limit_offset_stop`` × 止损距离，
+        按最小跳动价取整（买单往下、卖单往上）。没开 / 让 0 / 算不出来 → None（市价进）。"""
+        fast = self._fast
+        if not fast.entry_limit_pullback or (self._live and not fast.entry_limit_pullback_live):
+            return None
+        off = fast.entry_limit_offset_stop * dist
+        if off <= 0:
+            return None
+        raw = entry - off if side == Side.LONG else entry + off
+        tick = lot.tick_size
+        if tick:
+            steps = raw / tick
+            raw = (
+                math.floor(steps + 1e-9) if side == Side.LONG else math.ceil(steps - 1e-9)
+            ) * tick
+            raw = round(raw, 12)
+        return raw if raw > 0 else None
 
     def _beyond_level(
         self, cs: CardSymbol, side: Side, entry: float, dist: float, max_dist: float, atr: float

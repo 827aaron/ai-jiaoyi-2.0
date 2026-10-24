@@ -418,6 +418,29 @@ class FastLoopConfig(Contract):
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
+    entry_limit_pullback: bool = Field(
+        default=False,
+        description="进场用挂单等回踩（默认关，关 = 市价进）：保镖按触发价往有利方向让一段"
+        "（止损距离的几成，跟档位走）挂只挂单的限价单，等够时间没成交就撤（8h 以上档改市价追）。"
+        "成交后才挂保命止损。",
+    )
+    entry_limit_pullback_live: bool = Field(
+        default=False, description="testnet / live 也用挂单等回踩（默认关，先在模拟盘看）。"
+    )
+    entry_limit_offset_stop: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="挂单比触发价让多少，按止损距离的几成算。档位推荐 30m 0.6、1h 0.4、"
+        "2h / 4h 0.25、8h 以上 0.1（量能突增研究 v3）。",
+    )
+    entry_limit_wait_min: int = Field(
+        default=60, ge=1, le=240, description="挂单最多等几分钟，没成交就撤（或市价追）。"
+    )
+    entry_limit_chase: bool = Field(
+        default=False,
+        description="挂单等到时没成交改市价追进。档位推荐 8h 以上开，4h 以下关（撤单不开）。",
+    )
     new_listing_block_h: float = Field(
         default=24.0,
         ge=0.0,

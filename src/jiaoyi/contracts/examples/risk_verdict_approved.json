@@ -22,6 +22,8 @@
     "time_limit_s": 3600,
     "lifeboat_stop_pct": 0.375,
     "approved_by": "risk_guard",
-    "approved_at": "2026-10-22T06:17:00.240000Z"
+    "approved_at": "2026-10-22T06:17:00.240000Z",
+    "limit_wait_s": null,
+    "limit_chase": false
   }
 }
