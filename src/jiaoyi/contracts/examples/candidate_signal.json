@@ -43,7 +43,11 @@
     "horizon_min": 30,
     "price_low": 67850.0,
     "price_high": 68420.0,
-    "p_up": 0.56,
+    "p_up": 1.0,
+    "score": 0.0012,
+    "rank_pct": 0.9,
+    "rank_n": 21,
+    "rank_view": "top",
     "model": "Kronos-small",
     "stale_after": "2026-10-22T06:18:00Z"
   }

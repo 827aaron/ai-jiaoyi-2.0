@@ -23,7 +23,7 @@ from jiaoyi.core.commands import (
 )
 from jiaoyi.core.config import load_app_config, load_risk_config
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate
-from jiaoyi.panel import actions
+from jiaoyi.panel import actions, pages
 from jiaoyi.panel.actions import ActionError, ConfigPaths, set_toml_value
 from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.server import create_app, host_ok
@@ -423,8 +423,17 @@ def test_choices_and_nullable_fields(tmp_path: Path) -> None:
             actions.update_config(paths, data, "fast_loop", bad, PW, NOW)
     with pytest.raises(ActionError, match="只能选"):
         actions.update_config(paths, data, "predictor", {"model_size": "huge"}, PW, NOW)
+    # 文件里写了的不随档位变的键：清空 = 删掉这一行，回到程序默认（设置页「恢复默认」）
+    actions.update_config(paths, data, "fast_loop", {"surge_vol_ratio": 3.5}, PW, NOW)
+    fl = load_app_config(paths.app).fast_loop
+    item = next(i for i in pages._items(fl, "fast_loop") if i.key == "surge_vol_ratio")
+    assert item.resettable and item.code_default == 5.0 and not item.pinned
+    actions.update_config(paths, data, "fast_loop", {"surge_vol_ratio": None}, PW, NOW)
+    assert "surge_vol_ratio" not in paths.app.read_text(encoding="utf-8")
+    assert load_app_config(paths.app).fast_loop.surge_vol_ratio == 5.0
+    # 文件里没写的，清空没意义
     with pytest.raises(ActionError, match="不能空着"):
-        actions.update_config(paths, data, "predictor", {"backfill_bars": None}, PW, NOW)
+        actions.update_config(paths, data, "fast_loop", {"surge_vol_ratio": None}, PW, NOW)
 
 
 def test_slow_schedule_created_and_cleared(tmp_path: Path) -> None:
@@ -554,9 +563,10 @@ def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
     actions.update_config(paths, data, "app", {"keeper_interval_s": None}, PW, NOW)
     assert "keeper_interval_s" not in actions.profile_info(paths).pinned.get("app", {})
     assert load_app_config(paths.app).keeper_interval_s == 30
-    # 不是档位键、也不是可空的，不能清空
-    with pytest.raises(ActionError, match="不能空着"):
+    # 必填、没有程序默认的键：删了过不了校验，不保存
+    with pytest.raises(ActionError, match="reconcile_interval_s"):
         actions.update_config(paths, data, "app", {"reconcile_interval_s": None}, PW, NOW)
+    assert "reconcile_interval_s = 30" in paths.app.read_text(encoding="utf-8")
 
 
 def test_paper_only_hold_rejected_outside_paper(tmp_path: Path) -> None:

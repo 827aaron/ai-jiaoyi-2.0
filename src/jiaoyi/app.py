@@ -557,6 +557,7 @@ def build_modules(
             pred_len=app_cfg.predictor.pred_len,
             lookback=app_cfg.predictor.lookback,
             paths=app_cfg.predictor.paths,
+            temperature=app_cfg.predictor.temperature,
         ),
         log_sink=decision_log,
         clock=clock,

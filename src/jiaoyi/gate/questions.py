@@ -41,7 +41,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.gate.context import HORIZONS, EntryExtras, Horizon, horizon_for, horizon_words
 
-TEMPLATE_VERSION = "q6"
+TEMPLATE_VERSION = "q7"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
 SNAPSHOT_SCHEMA = "s5"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
@@ -62,6 +62,8 @@ KNOWN_TEMPLATES: dict[str, str] = {
     # 拍板人一道题（Aaron 10-24）：只问「做不做」，按持仓档问时长（2h 档问 30 分钟）；快照加
     # 技术面 / 成交流 / 衍生品 / 24 小时行情 / 完整作战卡，不带预测员；上限 3200 字
     "q6": "b514926fcf43",
+    # 预测员改官方用法（Aaron 10-24）：管家快照的 kronos 改成「平均路径是否同向」+ 全池名次
+    "q7": "2937b035dde4",
 }
 
 _ENTRY_GOAL = (
@@ -93,8 +95,10 @@ _HOLD_GOAL = (
     "in units of the initial stop distance; `pos.be_bps` = PnL after round-trip fees; "
     "`pos.path_bps` = unrealized PnL at earlier checks, oldest first; `entry` = why we entered "
     "(signal type, trigger text, entry-time genuine/take probabilities); `trail` = trailing "
-    "stop: on, active, and bps from price to the trailing stop; `kronos.agree` = how many of 4 "
-    "simulated paths end in the position's direction; `against` (only on urgent checks) = a "
+    "stop: on, active, and bps from price to the trailing stop; `kronos.agree` = 1 if the "
+    "forecast model's averaged path ends in the position's direction, else 0; `kronos.rank` = "
+    "where this coin's forecast return ranks among all coins forecast now (top/mid/bottom); "
+    "`against` (only on urgent checks) = a "
     "rule trigger just fired in the OPPOSITE direction of our position: its type, side, volume "
     "multiple, taker buy share, whether it is a strong type, seconds ago."
 )
@@ -532,7 +536,10 @@ def hold_snapshot(
     d["card"] = _card_block(card, pos.symbol, px)
     if forecast is not None and forecast.stale_after > now:
         up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
-        d["kronos"] = {"p_up": _r(forecast.p_up, 2), "agree": round(up * 4)}
+        kr: dict[str, Any] = {"agree": 1 if up > 0.5 else 0}
+        if forecast.rank_view is not None:
+            kr["rank"] = forecast.rank_view
+        d["kronos"] = kr
     if against is not None:
         d["against"] = {
             "sig": against.kind.value,

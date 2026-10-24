@@ -118,9 +118,10 @@ def test_tiers_reach_predictor_and_commander_settings(tmp_path: Path) -> None:
     path.write_text(path.read_text(encoding="utf-8").replace('data_dir = "data"', ""))
     cfg = load_app_config(path)
     app = App(load_risk_config(RISK), cfg, clock=lambda: datetime.now(UTC), offline=True)
-    assert app.m.predictor._s.pred_len == 48  # type: ignore[attr-defined]  # 跟最长持仓走
-    assert app.m.predictor._s.lookback == 400  # type: ignore[attr-defined]
-    assert app.m.predictor._s.paths == 4  # type: ignore[attr-defined]
+    assert app.m.predictor._s.pred_len == 16  # type: ignore[attr-defined]  # 跟最长持仓走
+    assert app.m.predictor._s.lookback == 80  # type: ignore[attr-defined]
+    assert app.m.predictor._s.paths == 10  # type: ignore[attr-defined]
+    assert app.m.predictor._s.temperature == 0.6  # type: ignore[attr-defined]
     assert app.slow_cfg.schedule.card_ttl_min == 35  # 开会间隔 15m
 
 
@@ -164,10 +165,10 @@ def test_signal_dedup_follows_hold_unless_written(tmp_path: Path) -> None:
 
 
 def test_predictor_lookback_and_paths_are_settings(tmp_path: Path) -> None:
-    """回看根数、模拟条数：各档默认 400 / 4，配置写了就用配置的；回看 + 往后预测 ≤ 512。"""
-    for hold in ("30m", "4h", "24h"):
+    """回看根数、模拟条数：各档默认按官方（回看 ≈ 5 倍、10 条），配置写了就用配置的；≤ 512。"""
+    for hold, back in (("30m", 64), ("4h", 80), ("24h", 120)):
         p = load_app_config(_app_toml(tmp_path, f'hold = "{hold}"')).predictor
-        assert (p.lookback, p.paths) == (400, 4)
+        assert (p.lookback, p.paths) == (back, 10)
     path = _app_toml(tmp_path)
     path.write_text(
         path.read_text(encoding="utf-8").replace(

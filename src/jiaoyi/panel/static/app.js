@@ -1903,7 +1903,10 @@ const PLAIN = {
   patrol_shock_stop_mult: "全平线是止损距离的几倍",
   "predictor.pred_len": "往后预测几根 K 线",
   "predictor.lookback": "回看几根 K 线",
-  "predictor.paths": "模拟几条路径",
+  "predictor.paths": "模拟几条路径（模型平均成一条）",
+  "predictor.temperature": "采样温度",
+  "predictor.rank_band": "排名前 / 后多少算看好 / 看坏",
+  "predictor.rank_min_peers": "至少几个币一起预测才排名",
   "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
   "tiers.head": "头部几个币（开放交易）",
@@ -1954,7 +1957,7 @@ const PLAIN = {
   predictor_nudge_mode: "预测员怎样算和信号一致",
   entry_zone_only: "只在卡的进场区间内开仓",
   min_p_direction: "方向至少多大把握（0–1）",
-  predictor_weight: "预测员意见占几成：与卡方向一致时加分，相反不扣",
+  predictor_weight: "预测员意见占几成：排名和卡方向一致时加分，相反不扣",
   max_p_toxic: "被大户收割的可能最多多大（0–1）",
   signal_max_age_s: "信号超过几秒还没处理完就作废",
   size_fraction_s: "小仓位用正常仓位的几成",
@@ -2053,8 +2056,7 @@ const HINT = {
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
   entry_zone_only: "开 = 卡上这个币写了进场区间（例如反抽做空区、回调做多区），触发价在区间外就不开，连拍板人都不问，团队页保镖那一行写「没到区间」；往交易方向最多放宽 0.1R（做多可以比区间上沿高一点，做空可以比下沿低一点）。卡上没写区间照旧不限。关 = 不看区间。默认开",
   stop_floor_widen: "开 = 止损离手续费太近（不到上面那个倍数）时，把止损拉宽到这条线再下单：每笔最多亏的钱不变，所以仓位会小一些，止盈也按新止损重算。关 = 这一单不做。默认开",
-  predictor_weight: "预测员（Kronos）对这个币涨跌的看法占几成：拿拍板人的「做」和门槛比之前先加一点。只有预测员报 100% 看涨才算看涨，其余（0–75%）都算看跌；和卡的方向（也就是信号方向）一致就加，加多少 = 这个数 × 0.5，0.2 时加 0.10（比如做多信号「做」0.50，预测员报 100% 看涨算成 0.60）；相反不扣。只动「做」这一道门，预测员不进拍板人看到的数据。填 0 = 不听；预测员关掉或预测过期时不加。档位默认都是 0.2",
-  predictor_nudge_mode: "预测员报的是「几条模拟路径里有几条收在现价之上」。第一种：只有全部在上面（100%）算看涨，其余都算看跌，所以做空信号几乎每次都加分。第二种：做多要全部在上面、做空要全部在下面（0%）才加分，其余不加。两种都是不一致时不扣",
+  predictor_weight: "预测员（Kronos，照官方用法）：每个币算一个分数（平均走势终点比现价高多少），同一时刻所有币一起排名，排在前段算看好、后段算看坏（段多大看预测员那组的「排名前 / 后多少」）。做多信号碰上看好、做空信号碰上看坏，拍板人的「做」先加 这个数 × 0.5 再和门槛比，0.2 时加 0.10；其余情况不加也不扣。单个币的涨跌方向不看（官方也只看名次）。填 0 = 不听；预测员关掉、预测过期或一起预测的币太少时不加。档位默认都是 0.2",
   min_p_take: "拍板人只答一道题：现在按信号方向开这一单，接下来一段时间（2 小时档看 30 分钟）扣完手续费能不能赚。它给出「做」的把握（0–1），加上预测员的分以后至少要到这个数才放行。默认 0.55；想多做一些，可以放到 0.50",
   gate_questions: "一道题 = 只问「做不做」（真假、方向、盘口有没有毒都并进这一道，再看技术面和完整作战卡），只看上面「做的把握至少」。6 道题 = 以前的问法，真信号 / 方向 / 盘口有毒三个门槛也生效，留着回放对照用。默认一道题",
   trailing_on: "开 = 赚到下面的线以后，止损跟着这笔最好时的盈利往上挪，只收紧不放松，保住最高利润的一大半；关 = 只有原来的止损止盈。默认开，改了只对之后新开的仓生效，止损由执行器（hummingbot）实时盯着，不是只改面板上的数",
@@ -2082,8 +2084,11 @@ const HINT = {
   sim_environment: "Demo Trading 是币安现在的模拟盘；旧测试网已停用",
   mode_predictor: "按需 = 只算作战卡里和有持仓的币；全算 = 候选池每个币都算（费电脑）",
   size_policy: "固定 = 一直用下面选的模型；自适应 = 排队多时自动换小模型",
-  lookback: "每次预测喂给模型多少根历史 K 线。多 = 看得更久远（400 根 5 分钟线 ≈ 33 小时），少 = 更贴近最近的走势。回看 + 往后预测不能超过 512。档位默认 400",
-  paths: "每次独立模拟几条走势，看涨概率 = 收在现价之上的条数占比。多 = 概率更细（4 条只能是 0/25/50/75/100%），但每条都要跑一遍模型，算得更慢。档位默认 4",
+  lookback: "每次预测喂给模型多少根历史 K 线。官方论文的做法是回看 ≈ 往后预测的 5 倍（5 分钟线 480/96、15 分钟线 160/32）；至少 64 根才开算。回看 + 往后预测不能超过 512。档位默认 2 小时档 120、4 小时档 80（15 分钟线）",
+  paths: "官方用法：一次模拟这么多条走势，模型自己平均成一条，用平均走势的终点打分。多 = 更稳，但更慢。官方和档位默认都是 10",
+  temperature: "模拟走势时的随机程度：小 = 每条更像，大 = 更分散。官方回测用 0.6，档位默认 0.6",
+  rank_band: "所有一起预测的币按分数排队：排在最前这么多算看好（做多加分），最后这么多算看坏（做空加分），中间不加。1/6 ≈ 0.17 = 前六分之一 / 后六分之一。看坏这一头是我们为做空加的，官方只做多",
+  rank_min_peers: "一起预测的币少于这个数就不排名、不加分（按需模式只算卡上和持仓的币，币少时名次没意义）。想币多一点，可把预测范围改成「全算」",
   model_size: "标准 / 最大：最大更准，但每个币算得慢 3–4 倍（Mac mini 每币约 3.5 秒，标准约 1 秒）；加载失败会自动改用标准（选“固定”时用这个）",
   adaptive_base_max_queue: "选“自适应”时生效",
   adaptive_mini_min_queue: "选“自适应”时生效；介于两者之间用中模型",
@@ -2157,7 +2162,10 @@ function unpin(arg) {
   const [sec, key] = arg.split(":");
   const i = ((pageData && pageData[sec]) || []).find((x) => x.key === key);
   if (!i) return;
-  ask(`恢复档位默认 · ${esc(key)}`, `<p>去掉你改过的值：${fmtVal(i.value, i)} → 档位默认 ${fmtVal(i.profile_default, i)}，以后切档位也跟着变。</p>${pwField(data.control)}`, "恢复", false, async () => {
+  const body = i.pinned
+    ? `<p>去掉你改过的值：${fmtVal(i.value, i)} → 档位默认 ${fmtVal(i.profile_default, i)}，以后切档位也跟着变。</p>`
+    : `<p>去掉你改过的值：${fmtVal(i.value, i)} → 程序默认 ${fmtVal(i.code_default, i)}。</p>`;
+  ask(`${i.pinned ? "恢复档位默认" : "恢复默认"} · ${esc(key)}`, `${body}${pwField(data.control)}`, "恢复", false, async () => {
     const pw = $("#dlg-pw");
     await post("/api/settings", { section: sec, changes: { [key]: null }, password: pw ? pw.value : "" });
     onOk = null;
@@ -2267,7 +2275,7 @@ const ROLES = [
     { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
   ] },
   { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做", groups: [
-    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.predictor_nudge_mode", "fast_loop.gate_record_only", "fast_loop.gate_questions", "fast_loop.entry_zone_only"] },
+    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.gate_record_only", "fast_loop.gate_questions", "fast_loop.entry_zone_only"] },
     { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
@@ -2306,7 +2314,7 @@ const ROLES = [
 ];
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
 // 真 / 毒 / 方向三个门槛只在旧的 6 道题问法下生效；burst_* 10 秒提前触发已取消（Aaron 10-24）：都不显示
-const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio"];
+const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio", "fast_loop.predictor_nudge_mode"];
 // 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
 const PREFIX_ROLE = [
   ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],
@@ -2428,6 +2436,7 @@ function itemRow(i, big, strip) {
     w ? `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">修改</button>` : "",
     w && i.recommended != null && i.value !== i.recommended ? `<button class="btn b-sm" data-act="rec1" data-arg="${esc(id)}">用推荐值</button>` : "",
     w && i.pinned ? `<button class="btn b-sm" ${clickable("unpin", i.sec + ":" + i.key)}>恢复档位默认</button>` : "",
+    w && i.resettable ? `<button class="btn b-sm" ${clickable("unpin", i.sec + ":" + i.key)}>恢复默认</button>` : "",
     `<span class="st-key">${esc(i.key)}</span>`,
   ].join("");
   return `<div class="st-item ${big ? "big" : ""} ${open ? "open" : ""} ${i.editable ? "" : "ro"}">
@@ -2732,9 +2741,10 @@ const TIER_GROUPS = [
   { g: "预测员", hold: true, rows: [
     ["interval", "predictor", "看几分钟的 K 线", "", "kl"],
     ["pred_len", "predictor", "往后预测几根", "正好盖住最长持仓", "n"],
-    ["lookback", "predictor", "回看几根 K 线", "回看 + 往后预测 ≤ 512", "n"],
-    ["paths", "predictor", "模拟几条路径", "多 = 概率更细、更慢", "n"],
-    ["predictor_weight", "fast_loop", "预测员意见占几成", "与卡方向一致时加分（0.2 加 0.10），相反不扣", "p"],
+    ["lookback", "predictor", "回看几根 K 线", "官方 ≈ 往后预测的 5 倍，至少 64", "n"],
+    ["paths", "predictor", "模拟几条路径", "模型平均成一条，官方 10", "n"],
+    ["temperature", "predictor", "采样温度", "官方 0.6", "n"],
+    ["predictor_weight", "fast_loop", "预测员意见占几成", "排名和卡方向一致时加分（0.2 加 0.10），相反不扣", "p"],
   ] },
 ];
 // 档位给了、上面没列的键进哪一组的「其他」；不出行的：开会间隔本身、24 格时段系数、最长持仓秒数（= 第一行）

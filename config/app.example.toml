@@ -27,10 +27,13 @@ model_size = "base"               # 预测模型：base = 最大（更准，每�
 adaptive_base_max_queue = 0       # adaptive：后面没人排队（≤ 0）用 base
 adaptive_mini_min_queue = 3       # adaptive：排队 ≥ 3 个用 mini，中间用 small
 backfill_bars = 400               # 启动时回填多少根预测员周期的 K 线（至少 64）
-# interval = "5m"                   # 预测员 K 线周期（档位给：4h 及以下 5m，8h / 12h 15m，24h 1h）
+# interval = "5m"                   # 预测员 K 线周期（档位给：2h 及以下 5m，4h / 8h / 12h 15m，24h 1h）
 # pred_len = 24                     # 往后预测几根（档位给，× interval = 覆盖最长持仓）
-# lookback = 400                    # 回看几根 K 线（档位给 400；回看 + pred_len ≤ 512）
-# paths = 4                         # 模拟几条路径（档位给 4；多 = 看涨概率更细、更慢）
+# lookback = 120                    # 回看几根 K 线（档位按官方 ≈ 5 × pred_len，至少 64；回看 + pred_len ≤ 512）
+# paths = 10                        # 一次采样几条路径、模型平均成一条（官方 10）
+# temperature = 0.6                 # 采样温度（官方 0.6）
+# rank_band = 0.1667                # 全池排名前 / 后多少算看好 / 看坏（和卡一致才加分）
+# rank_min_peers = 6                # 至少几个币一起预测才排名
 against_card_meeting = false      # 预测员连续看反作战卡时申请单币临时会；false = 只记录（预测员还在观察）
 
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用默认值；注释掉的是档位给的 2h 档旧默认，见 core/profiles.py）

@@ -65,7 +65,7 @@ def test_snapshot_new_fields_with_stop_trailing_entry_and_kronos(now: datetime) 
     assert p["be_bps"] == 20.0 and p["path_bps"] == [0, 10, 35, 30]
     assert d["entry"] == entry
     assert d["trail"] == {"on": True, "active": True, "stop_bps": 5.0}  # 30 −（35 − 10）
-    assert d["kronos"] == {"p_up": 0.75, "agree": 3}
+    assert d["kronos"] == {"agree": 1}  # 平均路径收在现价之上，做多同向
     assert "imb" not in d["book"] and "micro_bps" not in d["book"] and "spread_bps" in d["book"]
 
 
@@ -183,7 +183,16 @@ async def test_keeper_passes_forecast_and_fee(now: datetime) -> None:
     k = _keeper(t, now, [68068.0], forecast=lambda s, n: _fc(now, 0.0), fee_bps=2.0)
     await k.review(position(now), now)
     d = _snap(t.calls[0])
-    assert d["kronos"] == {"p_up": 0.0, "agree": 0} and d["pos"]["be_bps"] == 6.0
+    assert d["kronos"] == {"agree": 0} and d["pos"]["be_bps"] == 6.0
+
+
+def test_keeper_sees_forecast_rank(now: datetime) -> None:
+    """官方用法：管家看到平均路径是否同向 + 全池名次（做空碰上看坏 = 同向）。"""
+    fc = _fc(now, 0.0).model_copy(update={"score": -0.01, "rank_pct": 0.0, "rank_n": 12,
+                                          "rank_view": "bottom"})  # fmt: skip
+    pos = position(now, side=c.Side.SHORT)
+    d = _snap(hold_snapshot(pos, features(now), card(now), now, forecast=fc))
+    assert d["kronos"] == {"agree": 1, "rank": "bottom"}
 
 
 def test_positions_page_shows_keeper_peak_and_giveback(now: datetime) -> None:

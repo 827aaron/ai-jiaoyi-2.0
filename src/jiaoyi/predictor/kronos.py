@@ -1,6 +1,9 @@
 """预测员：官方 Kronos（shiyu-coder/Kronos，MIT）的适配，带开关。
 
-只用来估价格范围（波动区间），方向近似抛硬币，``p_up`` 不能当方向信号用。
+用法照官方回测（``finetune/qlib_test.py`` / 论文，Aaron 10-24「直接改成官方的」）：每个币一次采样
+``paths`` 条（温度 0.6、top_p 0.9，``sample_count`` 一次算完），模型自己平均成一条；分数 = 平均路径
+终点收盘 ÷ 现价 − 1；同一时刻所有新鲜预测按分数排名（``latest`` 现算），前 / 后 ``rank_band``
+算看好 / 看坏。单个币的方向不可信（论文里方向相关只有 0.037），只看名次。
 设计要点：
 
 - 开关关闭、数据不够、推理失败、结果过期，``latest`` 一律返回 ``None``，快环无感运行。
@@ -122,8 +125,10 @@ class KronosSettings:
     """攒够这么多根才开始预测。"""
     pred_len: int = 12
     """往后预测几根（5 分钟线 × 12 = 1 小时）。"""
-    paths: int = 4
-    """独立采样几条路径；范围取所有路径的包络，p_up 取收在现价之上的比例。"""
+    paths: int = 10
+    """一次采样几条路径，模型内部平均成一条（官方 ``sample_count``）。"""
+    temperature: float = 0.6
+    top_p: float = 0.9
     infer_timeout_s: float = 30.0
     repo_dir: str = "vendor/Kronos"
     """官方 Kronos 源码目录（它不是 pip 包），见 predictor/README.md。"""
@@ -208,25 +213,23 @@ class OfficialKronosBackend:
         x_ts = pd.Series(pd.to_datetime([b.open_time for b in bars], utc=True).tz_localize(None))
         step = pd.Timedelta(minutes=_INTERVAL_MIN[self._s.interval])
         y_ts = pd.Series([x_ts.iloc[-1] + step * (i + 1) for i in range(pred_len)])
-        out: list[Path_] = []
-        for _ in range(paths):
-            pred = self._predictor.predict(
-                df=df,
-                x_timestamp=x_ts,
-                y_timestamp=y_ts,
-                pred_len=pred_len,
-                T=1.0,
-                top_p=0.9,
-                sample_count=1,
-                verbose=False,
-            )
-            out.append(
-                [
-                    (float(h), float(lo), float(c))
-                    for h, lo, c in zip(pred["high"], pred["low"], pred["close"], strict=True)
-                ]
-            )
-        return out
+        # 官方用法：一次采样 paths 条，模型内部（auto_regressive_inference）平均成一条返回
+        pred = self._predictor.predict(
+            df=df,
+            x_timestamp=x_ts,
+            y_timestamp=y_ts,
+            pred_len=pred_len,
+            T=self._s.temperature,
+            top_p=self._s.top_p,
+            sample_count=paths,
+            verbose=False,
+        )
+        return [
+            [
+                (float(h), float(lo), float(c))
+                for h, lo, c in zip(pred["high"], pred["low"], pred["close"], strict=True)
+            ]
+        ]
 
 
 class _PriorityGate:
@@ -396,12 +399,30 @@ class KronosForecaster:
         return gaps
 
     def latest(self, symbol: str, now: datetime) -> Forecast | None:
+        """这个币最新一条没过期的预测，带上此刻在所有新鲜预测里的名次（官方用法：排名用）。"""
         if not self._enabled:
             return None
         fc = self._forecasts.get(symbol)
         if fc is None or now >= fc.stale_after:
             return None
-        return fc
+        return self._ranked(fc, now)
+
+    def _ranked(self, fc: Forecast, now: datetime) -> Forecast:
+        """名次：同一时刻（都没过期）所有有分数的预测里，比它低的占几成；1 = 最看好。"""
+        if fc.score is None:
+            return fc
+        peers = [
+            f.score for f in self._forecasts.values() if f.score is not None and now < f.stale_after
+        ]
+        n = len(peers)
+        if n < self._cfg.rank_min_peers:
+            return fc
+        below = sum(1 for x in peers if x < fc.score)
+        same = sum(1 for x in peers if x == fc.score) - 1  # 并列的取中间
+        pct = (below + same / 2.0) / (n - 1)
+        band = self._cfg.rank_band
+        view = "top" if pct >= 1.0 - band else "bottom" if pct <= band else "mid"
+        return fc.model_copy(update={"rank_pct": round(pct, 4), "rank_n": n, "rank_view": view})
 
     async def on_kline(self, kline: Kline) -> None:
         """收 1 分钟线（聚合）或模型周期的线。只做记账和派活，立即返回，推理在后台。"""
@@ -578,7 +599,10 @@ class KronosForecaster:
             raise ValueError("模型返回了非正数或非有限数")
         low = min(min(s[1], s[2]) for p in paths for s in p)
         high = max(max(s[0], s[2]) for p in paths for s in p)
-        p_up = sum(1 for p in paths if p[-1][2] > last.close) / len(paths)
+        # 官方返回一条平均路径；测试的假模型可能给多条，就再平均一次终点
+        end = sum(p[-1][2] for p in paths) / len(paths)
+        score = end / last.close - 1.0
+        p_up = 1.0 if score > 0 else 0.0 if score < 0 else 0.5
         step_min = _INTERVAL_MIN[self._s.interval]
         return Forecast(
             symbol=sym,
@@ -587,6 +611,7 @@ class KronosForecaster:
             price_low=low,
             price_high=high,
             p_up=p_up,
+            score=round(score, 6),
             model=model,
             stale_after=last.close_time + timedelta(minutes=2 * step_min),
         )
@@ -598,6 +623,7 @@ class KronosForecaster:
             "bars": len(bars),
             "interval": self._s.interval.value,
             "paths": self._s.paths,
+            "temperature": self._s.temperature,
         }
 
     def _record(

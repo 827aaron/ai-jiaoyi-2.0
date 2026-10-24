@@ -1419,6 +1419,10 @@ class SettingItem(BaseModel):
     """配置文件里写死了值，切档位不会跟着变。"""
     profile_default: object = None
     """当前档位给的默认值（``pinned`` 时显示）。"""
+    code_default: object = None
+    """不随档位变的键：程序默认值（``resettable`` 时显示）。"""
+    resettable: bool = False
+    """不随档位变、现在的值和程序默认不同（配置文件写了）：可以「恢复默认」（删掉那一行）。"""
     recommended: float | None = None
     """硬上限的推荐值（按资金算，见 ``recommended_caps``）；只提示，填什么都收。"""
     recommended_why: str = ""
@@ -1538,6 +1542,14 @@ def _items(
         spec = specs.get(name)
         if value is None and spec is not None and spec.kind is bool:
             value = False  # 开关不写 = 关
+        default = None if field.is_required() else field.default
+        resettable = (
+            spec is not None
+            and not spec.profiled
+            and not field.is_required()
+            and _plain(value) != _plain(default)
+            and not (spec.kind is bool and value is False and default is None)
+        )
         out.append(
             SettingItem(
                 key=name,
@@ -1552,6 +1564,8 @@ def _items(
                 names=bool(spec and spec.names),
                 pattern=spec.pattern if spec else None,
                 paper_only=section == "fast_loop" and name in PAPER_ONLY_SWITCHES,
+                code_default=_plain(default) if resettable else None,
+                resettable=resettable,
             )
         )
     return out

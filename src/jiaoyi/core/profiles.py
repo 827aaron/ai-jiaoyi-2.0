@@ -148,7 +148,9 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
 # 与档位无关、保持现值：keeper_close_p 0.6 / strong 0.85 / confirmations 2；
 # 巡逻兵 patrol_shock_pct_1m 2.0 / patrol_alert_pct_1m 1.0（价格百分比的崩盘线）；
 # risk.toml 全部不动。
-_KRONOS = {"lookback": 400, "paths": 4}
+# 官方用法（Aaron 10-24「直接改成官方的」）：10 条路径一次采样、模型平均，温度 0.6；回看 ≈ 5 × 预测
+# 根数（论文表 8：5m 480/96、15m 160/32、1h 80/12），短档凑不够 64 根就用 64（攒够 64 根才开算）
+_KRONOS = {"paths": 10, "temperature": 0.6}
 """预测员回看几根、模拟几条，各档一样（10-24 现值；预测员研究在 Mac 上比 128 / 16，出结果再定）。"""
 
 _LOOSE_GATE = {
@@ -197,7 +199,12 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_STRICT_GATE,  # 短持仓费用占比高，要更确定才做
         },
         "app": {"keeper_interval_s": 10, "signal_dedup_s": 60},
-        "predictor": {"interval": "5m", "pred_len": 6, **_KRONOS},  # 6 × 5m = 30 分钟
+        "predictor": {
+            "interval": "5m",
+            "pred_len": 6,
+            "lookback": 64,
+            **_KRONOS,
+        },  # 6 × 5m = 30 分钟
     },
     "1h": {
         "fast_loop": {
@@ -222,7 +229,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 15, "signal_dedup_s": 120},
-        "predictor": {"interval": "5m", "pred_len": 12, **_KRONOS},
+        "predictor": {"interval": "5m", "pred_len": 12, "lookback": 64, **_KRONOS},
     },
     "2h": {
         "fast_loop": {
@@ -247,7 +254,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 20, "signal_dedup_s": 300},
-        "predictor": {"interval": "5m", "pred_len": 24, **_KRONOS},
+        "predictor": {"interval": "5m", "pred_len": 24, "lookback": 120, **_KRONOS},
     },
     "4h": {
         "fast_loop": {
@@ -272,8 +279,8 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 30, "signal_dedup_s": 600},
-        # 48 × 5m = 4 小时；回看 400 + 48 ≤ 512
-        "predictor": {"interval": "5m", "pred_len": 48, **_KRONOS},
+        # 16 × 15m = 4 小时；回看 80 根 15 分钟线（论文 5:1）
+        "predictor": {"interval": "15m", "pred_len": 16, "lookback": 80, **_KRONOS},
     },
 }
 
@@ -431,7 +438,12 @@ HOLD.update(
                 **_LOOSE_GATE,
             },
             "app": {"keeper_interval_s": 45, "signal_dedup_s": 600},
-            "predictor": {"interval": "15m", "pred_len": 32, **_KRONOS},  # 32 × 15m = 8 小时
+            "predictor": {
+                "interval": "15m",
+                "pred_len": 32,
+                "lookback": 160,
+                **_KRONOS,
+            },  # 32 × 15m = 8 小时
         },
         "12h": {
             "fast_loop": {
@@ -459,7 +471,7 @@ HOLD.update(
                 **_LOOSE_GATE,
             },
             "app": {"keeper_interval_s": 60, "signal_dedup_s": 600},
-            "predictor": {"interval": "15m", "pred_len": 48, **_KRONOS},
+            "predictor": {"interval": "15m", "pred_len": 48, "lookback": 240, **_KRONOS},
         },
         "24h": {
             "fast_loop": {
@@ -487,7 +499,7 @@ HOLD.update(
                 **_LOOSE_GATE,
             },
             "app": {"keeper_interval_s": 90, "signal_dedup_s": 600},
-            "predictor": {"interval": "1h", "pred_len": 24, **_KRONOS},
+            "predictor": {"interval": "1h", "pred_len": 24, "lookback": 120, **_KRONOS},
         },
     }
 )
