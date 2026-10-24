@@ -97,6 +97,14 @@ class PositionRecord(Contract):
         default=None,
         description="保镖算的保命止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
     )
+    trailing_activation_pct: PosFloat | None = Field(
+        default=None,
+        description="保本 / 移动止损启动线（%，按扣过开仓手续费的盈亏算），同 OrderIntent；"
+        "None = 这笔没带移动止损（或是旧记录）。",
+    )
+    trailing_stop_pct: PosFloat | None = Field(
+        default=None, description="移动止损回撤距离（%），同 OrderIntent。"
+    )
 
     @property
     def notional_usdt(self) -> float:

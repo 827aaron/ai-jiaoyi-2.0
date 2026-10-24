@@ -167,11 +167,15 @@ async def test_open_is_idempotent_per_intent(rig: Rig) -> None:
 
 
 async def test_trailing_stop_maps_to_hummingbot_trailing_stop(rig: Rig) -> None:
-    await open_filled(rig, trailing_stop_pct=0.1, trailing_activation_pct=0.3)
+    pid = await open_filled(rig, trailing_stop_pct=0.1, trailing_activation_pct=0.3)
     barrier = rig.api.created[0]["triple_barrier_config"]
     assert barrier["trailing_stop"] == {"activation_price": "0.003", "trailing_delta": "0.001"}
-    await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT")
+    # 账本也记一份，面板画启动线 / 移动止损线用
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert (rec.trailing_activation_pct, rec.trailing_stop_pct) == (0.3, 0.1)
+    pid2 = await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT")
     assert "trailing_stop" not in rig.api.created[1]["triple_barrier_config"]
+    assert rig.registry.get(pid2).record.trailing_stop_pct is None  # type: ignore[union-attr]
 
 
 async def test_take_profit_order_type_follows_switch(tmp_path: Path) -> None:

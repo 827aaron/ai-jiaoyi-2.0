@@ -349,6 +349,8 @@ class HbExecutorAdapter:
             opened_at=now,
             stop_loss_pct=intent.stop_loss_pct,
             lifeboat_stop_pct=intent.lifeboat_stop_pct,
+            trailing_activation_pct=intent.trailing_activation_pct,
+            trailing_stop_pct=intent.trailing_stop_pct,
         )
         # 先落账再建执行器：中途崩溃时重启能看到“有一笔开到一半的仓”
         tracked = TrackedPosition(

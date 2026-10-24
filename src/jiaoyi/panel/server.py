@@ -32,7 +32,7 @@ from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.recorder import local_day
 from jiaoyi.execution.live_gate import CONFIRM_WORD
-from jiaoyi.panel import actions, pnl_curve, setup
+from jiaoyi.panel import actions, pnl_curve, setup, trailing
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
@@ -40,7 +40,13 @@ from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.live_price import DEMO_WS_BASE, WS_BASE, LivePrices, merge_live
 from jiaoyi.panel.market import BASE, DEMO_BASE, Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
-from jiaoyi.panel.overview import Overview, PriceSrc, build_overview, compute_kpis
+from jiaoyi.panel.overview import (
+    Overview,
+    PositionView,
+    PriceSrc,
+    build_overview,
+    compute_kpis,
+)
 from jiaoyi.panel.pages import (
     AiRange,
     FundsPage,
@@ -333,7 +339,28 @@ def create_app(
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
         page = build_positions(files, await hb.snapshot(), cfg()[0], clock(), await last_prices())
-        return page.model_copy(update={"price_env": quote_env()})
+        q = quotes()
+        src = q[0] if q else market
+
+        async def with_trail(v: PositionView) -> PositionView:
+            act, delta = v.trailing_activation_pct, v.trailing_stop_pct
+            if act is None or delta is None or not v.entry_price:
+                return v
+            try:
+                best = await trailing.fetch_best(
+                    v.side, v.opened_at, lambda tf: src.klines(v.symbol, tf)
+                )
+            except KlineError:
+                best = None
+            # K 线拿到了才把现价算进去：拿不到就说「不知道」，不拿一个现价充数
+            mark = v.mark_price if best is not None else None
+            est = trailing.estimate(
+                v.side, v.entry_price, act, delta, v.entry_fee_pct or 0.0, best, mark
+            )
+            return v.model_copy(update={"trail": est})
+
+        views = list(await asyncio.gather(*(with_trail(v) for v in page.positions)))
+        return page.model_copy(update={"price_env": quote_env(), "positions": views})
 
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
