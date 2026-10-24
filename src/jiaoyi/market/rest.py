@@ -100,6 +100,28 @@ def blocked() -> RateLimited | None:
     return _blocked
 
 
+def mark_blocked(status: int, headers: Any) -> RateLimited:
+    """别的请求通道（慢环分析师的 httpx）收到 429 / 418 时登记，全进程共用同一个封禁状态。"""
+    global _blocked
+    until = time.time() + _retry_after(headers, status)
+    if _blocked is None or until > _blocked.until:
+        _blocked = RateLimited(status, until)
+    return _blocked
+
+
+def note_used_weight(header: str | None) -> None:
+    """记下响应头 ``X-MBX-USED-WEIGHT-1M``（本 IP 这一分钟已用权重，含同机其他程序）。"""
+    global _used_weight
+    _used_weight = int(header) if header and header.isdigit() else None
+
+
+def take_used_weight() -> int | None:
+    """取走并清掉最近的已用权重读数（清掉是为了等过一个窗口后不再重复等）。"""
+    global _used_weight
+    used, _used_weight = _used_weight, None
+    return used
+
+
 def _get(url: str, timeout_s: float) -> list[list[Any]]:
     global _blocked, _used_weight
     check_blocked()
