@@ -305,9 +305,9 @@ class MeetingConfig(_Strict):
         default=None,
         ge=1024,
         le=2_000_000,
-        description="每次回答的长度上限，思考模型的思考也算在里面。不写 = 模型自己的最大输出"
-        "（OpenRouter 模型信息里的 max_completion_tokens，读不到用 384000）；写了就按你的。"
-        "低于 8192 实测会让多空辩论被挤成半句或空壳。出作战指令、挑币两步另按 8192 起。",
+        description="每次回答的长度上限，思考模型的思考也算在里面。不写 = 16384（和模型最大输出"
+        "取小）：OpenRouter 按它预留额度，写成模型最大 384000 会让并发开会很快撞 402；写了就按"
+        "你的。低于 8192 实测会让多空辩论被挤成半句或空壳。出作战指令、挑币两步另按 8192 起。",
     )
     retry_bad_steps: bool = Field(
         default=True,

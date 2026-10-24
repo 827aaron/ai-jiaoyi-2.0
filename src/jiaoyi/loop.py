@@ -62,6 +62,8 @@ URGENT_CHECK_EVERY_S = 1.0
 HEARTBEAT_EVERY_S = 30.0
 SNAPSHOT_EVERY_S = SNAPSHOT_WRITE_EVERY_S
 NEWS_POLL_EVERY_S = 120.0
+CREDIT_CHECK_EVERY_S = 120.0
+"""模型额度看护多久看一眼（撞 402 要及时发；余额每小时才真去查一次）。"""
 COMMAND_POLL_EVERY_S = 1.0
 KEEPER_CONCURRENCY = 5
 """持仓管家一轮里最多几笔一起问 Jev。"""
@@ -302,6 +304,7 @@ class Runner:
             self._every(HEARTBEAT_EVERY_S, self._heartbeat_tick),
             self._every(SNAPSHOT_EVERY_S, self.market_snapshot_tick),
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
+            self._every(CREDIT_CHECK_EVERY_S, self.app.credit_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
             # 有交易所连接时账本回填和收入流水由 LedgerSync 管（成交回报叫醒，60 秒兜底）
             (

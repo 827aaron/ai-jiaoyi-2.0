@@ -59,7 +59,7 @@ risk_rounds   = 1        # 风控讨论轮数 0–3
 pick_tier    = "quick"   # 总盘会（挑币）用 quick（flash，便宜）还是 deep（pro）
 convert_tier = "quick"   # 把结论整理成作战指令那一步
 reasoning_effort = "low"                  # 推理长度：none/low/medium/high；只对走 OpenRouter 的通道生效，思考太长会把 max_tokens 用满
-# max_tokens = 8192                       # 不写 = 模型自己的最大输出（启动时读 OpenRouter 模型信息，读不到用 384000）；写了按你的，
+# max_tokens = 16384                      # 不写 = 16384（和模型最大输出取小）：OpenRouter 按它预留额度，写太大并发开会会因余额预留不够成批 402；写了按你的，
                                           # 思考模型的思考也算在内，4096 实测会让辩论回答变空，别调低
 retry_bad_steps = true                    # 某一步回答被截断 / 空 / 过短：自动重试一次（关掉推理、提示直接给结论），仍不行才整场失败
 speech_min_chars = 50                     # 质量门槛：每个辩手每轮发言至少多少字，低于这场会不能用（0 = 只查空）

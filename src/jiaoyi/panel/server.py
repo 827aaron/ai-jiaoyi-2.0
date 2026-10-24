@@ -61,6 +61,7 @@ from jiaoyi.panel.pages import (
     prompts_info,
 )
 from jiaoyi.risk.guard import blend_atr, session_factor
+from jiaoyi.slow.credits import banner as credit_banner
 from jiaoyi.slow.settings import slow_defaults
 from jiaoyi.watchdog import send as send_telegram
 
@@ -326,6 +327,7 @@ def create_app(
         ov = build_overview(files, await hb.snapshot(), r, a, clock(), await last_prices())
         ctl = actions.control_state(data_dir, config_paths)
         ctl.panel_stale = code_fingerprint() != boot_code
+        ctl.llm_credit = credit_banner(files.llm_credits(), clock())
         return ov.model_copy(update={"control": ctl})
 
     @api.get("/api/positions")
