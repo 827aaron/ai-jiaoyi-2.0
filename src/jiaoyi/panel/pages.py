@@ -42,6 +42,7 @@ from jiaoyi.panel.overview import (
     fee_rate_bps,
     position_views,
 )
+from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import FALLBACK_MAJORS
 from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
 
@@ -156,6 +157,16 @@ class AgainstCheck(BaseModel):
     """管家这次没问成（行情没有 / 决策模型出错），按规矩维持现状。"""
 
 
+class PredictorMeeting(BaseModel):
+    """预测员连续看反作战卡、申请的单币临时会（作战卡流水里 ``event:predictor_against_card``）。"""
+
+    symbol: str
+    ts: datetime
+    """临时会出结论的时间。"""
+    bias: str
+    """会上给的新方向。"""
+
+
 class TeamPage(BaseModel):
     roles: list[RoleCard]
     selected: Role
@@ -178,6 +189,8 @@ class TeamPage(BaseModel):
     """选中盘口员时：data/market_snapshot.json（逐币行情 + 各路推送今天的条数）。"""
     against: list[AgainstSignalEvent] = []
     """最近 30 分钟哨兵交出去的反向信号（新的在前）；流程图上对应的线平时不画，有才亮。"""
+    predictor_meetings: list[PredictorMeeting] = []
+    """最近 30 分钟预测员申请、已经开完的临时会（新的在前）；流程图上预测员 → 军师团的线有才亮。"""
     against_checks: list[AgainstCheck] = []
     """最近 30 分钟叫管家急查的反向信号和管家的判断（新的在前），不被例行复查冲掉。"""
 
@@ -349,6 +362,20 @@ def _same(r: DecisionRecord, e: AgainstSignalEvent) -> bool:
         return True
 
 
+PREDICTOR_EVENT = "event:predictor_against_card"
+
+
+def _predictor_meetings(files: PanelFiles, now: datetime) -> list[PredictorMeeting]:
+    rows = [
+        r
+        for r in CardJournal(files.root).read()
+        if r.refresh_reason == PREDICTOR_EVENT
+        and timedelta(0) <= now - r.created_at <= AGAINST_SHOW
+    ]
+    rows.sort(key=lambda r: r.created_at, reverse=True)
+    return [PredictorMeeting(symbol=r.symbol, ts=r.created_at, bias=r.bias) for r in rows]
+
+
 def _against_checks(
     events: list[AgainstSignalEvent], records: list[DecisionRecord]
 ) -> list[AgainstCheck]:
@@ -444,6 +471,7 @@ def build_team(
         market_progress=_market_progress(market, now, run.tz),
         against=against,
         against_checks=_against_checks(against, records),
+        predictor_meetings=_predictor_meetings(files, now),
     )
 
 

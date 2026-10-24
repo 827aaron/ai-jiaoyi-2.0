@@ -1452,6 +1452,33 @@ def test_team_against_checks_pinned_and_tagged(tmp_path: Path) -> None:
     assert (new.verdict, new.p_close, new.failed) == ("close", 0.8, False)
 
 
+def test_team_predictor_meetings_recent_only(tmp_path: Path) -> None:
+    """预测员 → 军师团的线：作战卡流水里 30 分钟内的 event:predictor_against_card 才亮。"""
+    from jiaoyi.panel.pages import build_team
+
+    def row(mins: int, reason: str, sym: str) -> str:
+        return json.dumps({
+            "card_id": "c", "version": 2, "created_at": (NOW - timedelta(minutes=mins)).isoformat(),
+            "expires_at": (NOW + timedelta(hours=1)).isoformat(), "regime": "x",
+            "refresh_reason": reason, "symbol": sym, "category": "alt", "bias": "short",
+        })  # fmt: skip
+
+    (tmp_path / "card_review").mkdir()
+    (tmp_path / "card_review" / "cards.jsonl").write_text(
+        "\n".join([
+            row(45, "event:predictor_against_card", "OLDUSDT"),  # 太久了
+            row(20, "event:key_level_break", "KEYUSDT"),  # 别的原因
+            row(12, "event:predictor_against_card", "AUSDT"),
+            row(4, "event:predictor_against_card", "BUSDT"),
+        ]) + "\n"
+    )  # fmt: skip
+    team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, None)
+    assert [(m.symbol, m.bias) for m in team.predictor_meetings] == [
+        ("BUSDT", "short"),
+        ("AUSDT", "short"),
+    ]
+
+
 def test_pnl_curve_backfill_from_ledger_and_klines(tmp_path: Path) -> None:
     """记录开始前那段：已平的按净盈亏（0 点前那段扣掉），开着的按 5 分钟收盘价算浮盈。"""
     import asyncio

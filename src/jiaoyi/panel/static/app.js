@@ -1220,7 +1220,8 @@ const TF_EDGES = [
   [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
-  [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
+  // 预测只给拍板人（Jev）参考：从哨兵底下绕过去进拍板人底部（哨兵只是顺手转交，不看不改）
+  [tfR("predictor"), [TF_POS.gate[0] + 40, TF_POS.gate[1] + NODE_H], "gate", "预测（给拍板人参考）", "under"],
   [tfR("sentinel"), tfL("gate"), "gate", "信号"],
   [tfR("gate"), tfL("risk_guard"), "risk_guard", "做不做"],
   [tfB("risk_guard"), tfT("executor"), "executor", "仓位"],
@@ -1241,6 +1242,14 @@ function againstEdges(list) {
   if (m.length) out.push([[TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], [TF_POS.commander[0] + 40, TF_POS.commander[1] + NODE_H], "commander", tag(m, "反向 → 临时会"), "up", "against"]);
   return out;
 }
+// 预测员连续看反作战卡 → 单币临时会：同样平时不画，最近 30 分钟开过才亮
+const BIAS_WORD = { long: "改做多", short: "改做空", both: "两边都可", no_trade: "改不做" };
+function predictorMeetingEdges(list) {
+  if (!list || !list.length) return [];
+  const p = list[0];
+  const label = `${p.symbol.replace(/USDT$/, "")} ${hm(p.ts)} 预测看反 → 临时会${BIAS_WORD[p.bias] ? "：" + BIAS_WORD[p.bias] : ""}${list.length > 1 ? `（30 分钟内 ${list.length} 次）` : ""}`;
+  return [[[TF_POS.predictor[0] + 150, TF_POS.predictor[1]], [TF_POS.commander[0] + 14, TF_POS.commander[1] + NODE_H], "commander", label, "climb", "against"]];
+}
 function tfEdge([a, b, to, label, how, extra], prog) {
   const [x1, y1] = a, [x2, y2] = b;
   const st = prog[to] === "doing" ? "doing" : prog[to] === "done" ? "done" : "";
@@ -1252,6 +1261,9 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
   else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
   else if (how === "drop") { const yy = 402; d = `M${x1},${y1} V${yy} H${x2} V${y2 - 1}`; lx = x1 + 8; ly = yy - 5; dir = "d"; }
+  else if (how === "under") { d = `M${x1},${y1} H${x2 - 10} Q${x2},${y1} ${x2},${y1 - 10} V${y2 + 1}`; lx = x1 + 10; ly = y1 - 6; dir = "u"; }
+  // 从下面的节点顶上往上，在第一、二泳道之间横过去，再往上进目标节点底
+  else if (how === "climb") { const yy = 182; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x1 - 140; ly = yy - 5; dir = "u"; }
   else if (how === "up") { d = `M${x1},${y1} V${y2 + 1}`; lx = x1 - 8; ly = (y1 + y2) / 2 + 22; dir = "u"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
@@ -1298,8 +1310,8 @@ function predictorText(r) {
 // 管家卡固定一行：最近 30 分钟的反向急查（不被例行复查的「刚刚」冲掉）
 function againstLine(c) {
   if (!c) return "";
-  const v = c.failed ? "没问成，维持现状" : c.verdict ? (c.verdict === "close" ? "判平仓" : "判继续拿") : "急查中";
-  return `反向急查 ${coin(c.symbol)} ${hm(c.ts)} → ${v}`;
+  const v = c.failed ? "没问成" : c.verdict ? (c.verdict === "close" ? "平仓" : "拿住") : "查着";
+  return `急查 ${coin(c.symbol)} ${hm(c.ts)} → ${v}`;
 }
 function tfNode(r, checks) {
   const line = r.state === "ok" ? runLine(r) : "";
@@ -1350,7 +1362,7 @@ function teamFlow(d) {
   const known = new Set([...Object.keys(TF_POS)]);
   const extra = d.roles.filter((r) => !known.has(r.role));
   const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");
-  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${[...TF_EDGES, ...againstEdges(d.against)].map((e) => tfEdge(e, prog)).join("")}</svg>`;
+  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${[...TF_EDGES, ...againstEdges(d.against), ...predictorMeetingEdges(d.predictor_meetings)].map((e) => tfEdge(e, prog)).join("")}</svg>`;
   const canvas = `<div class="tf-fit"><div class="tf-canvas" style="width:${TF_W}px;height:${TF_H}px">${lanes}${edges}${Object.keys(TF_POS).map((k) => node(k, true)).join("")}
     <div class="tf-watch"><span>看门狗在外面守着：主程序卡住或退出就自动拉起</span></div></div></div>`;
   // 手机：按泳道竖排，不画线
@@ -1420,7 +1432,7 @@ function sentinelCard(r) {
 // 管家：最近 30 分钟每次反向急查（哪个信号、判了什么、理由）
 function againstCard(list) {
   if (!list.length) return "";
-  const rows = list.map((c) => `<div><span class="n">${hm(c.ts)}</span><span><b>${coin(c.symbol)}</b> ${esc(c.desc || "反向信号")}${c.strong ? "（强）" : ""} → <b class="${c.verdict === "close" ? "down" : ""}">${esc(againstLine(c).split("→ ")[1])}</b>${c.p_close != null ? ` · 平仓概率 ${c.p_close.toFixed(2)}` : ""}${c.checked_at ? ` · ${hms(c.checked_at)} 查完` : ""}${c.reason ? `<br><span class="dim small">${esc(c.reason)}</span>` : ""}</span></div>`).join("");
+  const rows = list.map((c) => `<div><span class="n">${hm(c.ts)}</span><span><b>${coin(c.symbol)}</b> ${esc(c.desc || "反向信号")}${c.strong ? "（强）" : ""} → <b class="${c.verdict === "close" ? "down" : ""}">${esc(c.failed ? "没问成，维持现状" : c.verdict ? (c.verdict === "close" ? "判平仓" : "判继续拿") : "还在查")}</b>${c.p_close != null ? ` · 平仓概率 ${c.p_close.toFixed(2)}` : ""}${c.checked_at ? ` · ${hms(c.checked_at)} 查完` : ""}${c.reason ? `<br><span class="dim small">${esc(c.reason)}</span>` : ""}</span></div>`).join("");
   return `<section class="card mt"><div class="ch"><h2>反向急查 · 最近 30 分钟</h2></div><div class="log trail">${rows}</div>
     <div class="foot">哨兵看到和作战卡相反的信号、手里又有这个币的仓，就叫管家马上复查一次；下面「今天做了什么」里这几条标了「反向急查」。</div></section>`;
 }
