@@ -287,6 +287,8 @@ def _build_cards(
         settings=replace(
             cfg.engine_settings(),
             hold_minutes=max(fast.time_limit_s // 60, 1),
+            # 提示词写法 / 指标周期 / 手续费占比按最长持仓档走（core/profiles.py 的 7 档词表）
+            hold=app_cfg.hold,
             # 分析师 K 线、关键位找候选的周期都按最长持仓档走（slow.toml [meeting] 写了就按写的）
             analyst_klines=cfg.meeting.analyst_klines or profiles.analyst_klines(app_cfg.hold),
             meeting_min=app_cfg.slow_loop_interval_min,

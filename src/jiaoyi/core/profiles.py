@@ -227,12 +227,85 @@ RECOMMENDED_HOLD = {
     "24h": "24h",
 }
 
-# 分析师看的 K 线（周期 × 根数）：短持仓看 15m / 1h / 4h，长持仓看 1h / 4h / 1d（研究 v3）。
-_KL_SHORT = ("15m x 96", "1h x 72", "4h x 60")
+# 分析师看的 K 线（周期 × 根数）：越短的持仓越要看细的（tier-prompts-spec §2）。
+_KL_30M = ("5m x 48", "15m x 48", "1h x 48")
+_KL_1H = ("5m x 48", "15m x 96", "1h x 72")
+_KL_4H = ("15m x 96", "1h x 72", "4h x 60")
 _KL_LONG = ("1h x 72", "4h x 90", "1d x 60")
-ANALYST_KLINES = {h: _KL_SHORT for h in ("30m", "1h", "2h")} | {
-    h: _KL_LONG for h in ("4h", "8h", "12h", "24h")
+_KL_SHORT = _KL_4H  # 查不到档位时的兜底（老默认）
+ANALYST_KLINES = {
+    "30m": _KL_30M,
+    "1h": _KL_1H,
+    "2h": _KL_1H,
+    "4h": _KL_4H,
+    "8h": _KL_LONG,
+    "12h": _KL_LONG,
+    "24h": _KL_LONG,
 }
+
+# 军师团 / 总盘会提示词按最长持仓档分三种写法：short（≤2h）/ mid（4h）/ long（≥8h）。
+PROMPT_STYLE = {
+    "30m": "short",
+    "1h": "short",
+    "2h": "short",
+    "4h": "mid",
+    "8h": "long",
+    "12h": "long",
+    "24h": "long",
+}
+# 行情分析师的指标 / 价格快照周期
+INDICATOR_INTERVAL = {
+    "30m": "5m",
+    "1h": "5m",
+    "2h": "15m",
+    "4h": "1h",
+    "8h": "4h",
+    "12h": "4h",
+    "24h": "4h",
+}
+# 一个来回手续费占该档典型波动的百分比（研究 v3 区间中值；12h 按 √时长从 8h 推算）
+FEE_SHARE_PCT = {"30m": 70, "1h": 50, "2h": 35, "4h": 25, "8h": 17, "12h": 14, "24h": 9}
+# 提示词里写的持仓时长（英文 / 中文）
+HORIZON_EN = {
+    "30m": "30 minutes",
+    "1h": "1 hour",
+    "2h": "2 hours",
+    "4h": "4 hours",
+    "8h": "8 hours",
+    "12h": "12 hours",
+    "24h": "24 hours",
+}
+HORIZON_ZH = {
+    "30m": "30 分钟",
+    "1h": "1 小时",
+    "2h": "2 小时",
+    "4h": "4 小时",
+    "8h": "8 小时",
+    "12h": "12 小时",
+    "24h": "24 小时",
+}
+
+
+# 卡上必须有进场区间的档（30m–4h）；8h 以上尽量给（tier-prompts-spec §2.1）
+ZONE_REQUIRED = frozenset({"30m", "1h", "2h", "4h"})
+
+
+def zone_required(hold: str) -> bool:
+    return hold in ZONE_REQUIRED
+
+
+def prompt_style(hold: str) -> str:
+    return PROMPT_STYLE.get(hold, PROMPT_STYLE[DEFAULT_HOLD])
+
+
+def indicator_interval(hold: str) -> str:
+    return INDICATOR_INTERVAL.get(hold, INDICATOR_INTERVAL[DEFAULT_HOLD])
+
+
+def fee_share_pct(hold: str) -> int:
+    return FEE_SHARE_PCT.get(hold, FEE_SHARE_PCT[DEFAULT_HOLD])
+
+
 # 关键位的摆动 / 成交密集区从哪个周期的 K 线找（昨日 / 7 日高低点照旧用日线）。
 LEVEL_INTERVAL = {
     "30m": "15m",

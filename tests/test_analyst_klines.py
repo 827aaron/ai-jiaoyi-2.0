@@ -43,10 +43,13 @@ def test_spec_parsing() -> None:
 
 
 def test_hold_tables() -> None:
+    assert profiles.analyst_klines("30m") == ("5m x 48", "15m x 48", "1h x 48")
+    for hold in ("1h", "2h"):
+        assert profiles.analyst_klines(hold) == ("5m x 48", "15m x 96", "1h x 72")
+    assert profiles.analyst_klines("4h") == ("15m x 96", "1h x 72", "4h x 60")
     for hold in ("30m", "1h", "2h"):
-        assert profiles.analyst_klines(hold) == ("15m x 96", "1h x 72", "4h x 60")
         assert profiles.level_interval(hold) == "15m"
-    for hold in ("4h", "8h", "12h", "24h"):
+    for hold in ("8h", "12h", "24h"):
         assert profiles.analyst_klines(hold) == ("1h x 72", "4h x 90", "1d x 60")
     assert [profiles.level_interval(h) for h in ("4h", "8h", "12h", "24h")] == [
         "1h",
@@ -61,7 +64,7 @@ def test_csv_has_one_closed_section_per_period_finest_first(
 ) -> None:
     monkeypatch.setattr(eng, "_klines", fake_klines())
     monkeypatch.setattr(eng, "derivatives_context", lambda *a, **k: "DERIV")
-    eng.set_analyst_klines(profiles.analyst_klines("2h"), 120)
+    eng.set_analyst_klines(profiles.analyst_klines("4h"), 120)
     out = eng.get_binance_stock_data("BTC", "2026-10-20", END.isoformat())
     heads = [ln for ln in out.splitlines() if ln.startswith("# ")]
     assert [("15m" in h, "1h" in h, "4h" in h) for h in heads] == [
@@ -74,12 +77,12 @@ def test_csv_has_one_closed_section_per_period_finest_first(
 
 
 def test_short_meeting_interval_adds_15m_section(monkeypatch: pytest.MonkeyPatch) -> None:
-    long = profiles.analyst_klines("4h")
+    long = profiles.analyst_klines("8h")
     eng.set_analyst_klines(long, 30)  # 30 分钟开一次会，最细一段是 1h
     assert eng._ANALYST_KLINES[0] == ("15m", 48) and len(eng._ANALYST_KLINES) == 4
     eng.set_analyst_klines(long, 120)
     assert eng._ANALYST_KLINES[0] == ("1h", 72) and len(eng._ANALYST_KLINES) == 3
-    eng.set_analyst_klines(profiles.analyst_klines("2h"), 15)  # 本来就有 15m 段：不重复加
+    eng.set_analyst_klines(profiles.analyst_klines("4h"), 15)  # 本来就有 15m 段：不重复加
     assert [p[0] for p in eng._ANALYST_KLINES] == ["15m", "1h", "4h"]
 
 
@@ -100,7 +103,9 @@ def test_prompts_carry_tp_hint_breakout_note_and_oscillator_note() -> None:
     assert "建议" not in narrow  # 硬上限比建议区间还低：不给矛盾的建议
     ctx = LevelContext(100.0, 1.0, 5.0, (Candidate(101.0, "昨日高点"),), "basis")
     assert "突破位" in describe_candidates(ctx)
-    assert "never treat them alone as reversal signals" in eng.perp_context(120)
+    assert "tend to keep going" not in eng.perp_context(
+        eng.prompt_params(eng.TradingAgentsSettings())
+    )
 
 
 def test_stop_atr_is_geometric_mean_of_short_and_long() -> None:

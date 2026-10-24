@@ -174,9 +174,10 @@ async def test_slow_config_and_brief_reach_commander_and_engine(
     want = replace(
         slow.engine_settings(),
         live_dir=str(tmp_path / "meeting_live"),  # 开会过程落在 data_dir/meeting_live
-        # 分析师 K 线、关键位周期跟最长持仓档（默认 4h：1h×72 + 4h×90 + 1d×60，候选用 1h）
+        # 分析师 K 线、关键位周期跟最长持仓档（默认 4h：15m×96 + 1h×72 + 4h×60，候选用 1h）
         hold_minutes=240,
-        analyst_klines=("1h x 72", "4h x 90", "1d x 60"),
+        hold="4h",
+        analyst_klines=("15m x 96", "1h x 72", "4h x 60"),
         meeting_min=cfg.slow_loop_interval_min,
         level_candidate_interval="1h",
     )
