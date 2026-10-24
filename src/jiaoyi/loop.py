@@ -63,7 +63,7 @@ from jiaoyi.market.features import (
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
-from jiaoyi.risk.guard import DELIST_WINDOW
+from jiaoyi.risk.guard import DELIST_WINDOW, entry_zone_miss
 
 log = logging.getLogger(__name__)
 
@@ -701,6 +701,22 @@ class Runner:
         if self.app.paused is not None:
             # 人工暂停：连 Jev 都不问（省钱），记在保镖名下
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 人工暂停开新仓，不处理信号", now)
+            return
+        miss = entry_zone_miss(signal, card, self.app.app_cfg.fast_loop, now)
+        if miss is not None:
+            # 卡的进场区间外：连 Jev 都不问（省钱），记在保镖名下
+            rec = self.app.recorders.get(Role.RISK_GUARD)
+            if rec is not None:
+                side = "多" if signal.side_hint == Side.LONG else "空"
+                rec.record(
+                    now,
+                    Outcome.REJECT,
+                    f"{signal.symbol} {side}：{miss}",
+                    symbol=signal.symbol,
+                    signal_id=signal.signal_id,
+                    card_id=card.card_id,
+                    output={"approved": False, "reasons": [miss], "detail": {"by": "entry_zone"}},
+                )
             return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:

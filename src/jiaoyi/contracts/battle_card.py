@@ -75,7 +75,7 @@ class CardSymbol(Contract):
     entry_zone: Range | None = Field(
         default=None,
         description="会议结论里的进场价格区间（反抽做空区 / 回调做多区），币安价格；None = 不限。"
-        "快环还不按它限制进场，先只显示；旧卡没有这个字段也能读。",
+        "快环只在区间内开仓（``fast_loop.entry_zone_only``，默认开）；旧卡没有这个字段也能读。",
     )
     reason: str = Field(min_length=1, description="军师给的理由，中文。")
     issued_at: AwareDatetime | None = Field(

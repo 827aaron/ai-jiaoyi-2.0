@@ -457,6 +457,12 @@ class FastLoopConfig(Contract):
         description="量能突增：1 分钟成交额至少是平时几倍（Aaron 10-24 定 5 倍）。",
     )
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
+    entry_zone_only: bool = Field(
+        default=True,
+        description="只在卡的进场区间内开仓（Aaron 10-24「让快环尊重卡的进场区间」）：卡上这个币"
+        "写了进场区间、触发价在区间外就不开，连拍板人都不问；往交易方向（做多往上、做空往下）"
+        "最多放宽 0.1R（R ≈ 卡上止损倍数中值 × 止损 ATR）。卡上没写区间照旧不限。",
+    )
     entry_limit_pullback: bool = Field(
         default=False,
         description="进场用挂单等回踩（默认关，关 = 市价进）：保镖按触发价往有利方向让一段"
