@@ -102,3 +102,13 @@ async def test_screener_marks_majors_with_rank_and_include_exclude(
         and "主流币（你手动加入）" in by["LINKUSDT"].reasons
     )
     assert by["DOGEUSDT"].category is Category.ALT  # 手动排除
+
+
+async def test_failed_fetch_cools_down_for_an_hour() -> None:
+    calls: list[int] = []
+    src = MajorsSource(None, _client(calls, fail=True), top_n=3)
+    await src.refresh(NOW)
+    await src.refresh(NOW + timedelta(minutes=59))  # 冷却中：不再请求
+    assert len(calls) == 1
+    await src.refresh(NOW + timedelta(minutes=61))
+    assert len(calls) == 2
