@@ -62,6 +62,8 @@ HEARTBEAT_EVERY_S = 30.0
 SNAPSHOT_EVERY_S = SNAPSHOT_WRITE_EVERY_S
 NEWS_POLL_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
+KEEPER_CONCURRENCY = 5
+"""持仓管家一轮里最多几笔一起问 Jev。"""
 RESTART_WAIT_CLOSE_S = 60.0
 # 决定重启后：收尾最多等这么久；军师团开会跑在工作线程里取消不掉，收尾超时就直接退出
 RESTART_SHUTDOWN_S = 20.0
@@ -595,6 +597,20 @@ class Runner:
         if verdict.action == "close":
             await self.close(pos, CloseReason.KEEPER)
 
+    async def _review_all(self, positions: list[PositionRecord]) -> None:
+        """并发审（最多 ``KEEPER_CONCURRENCY`` 笔一起）：Jev 繁忙重试时每笔多等几秒，
+        持仓多了按顺序问会拖过下一轮。每笔的「连续几次该平」各算各的。"""
+        sem = asyncio.Semaphore(KEEPER_CONCURRENCY)
+
+        async def one(pos: PositionRecord) -> None:
+            async with sem:
+                await self._review(pos)
+
+        results = await asyncio.gather(*(one(p) for p in positions), return_exceptions=True)
+        for pos, r in zip(positions, results, strict=True):
+            if isinstance(r, BaseException):
+                log.error("%s 持仓管家审查出错", pos.symbol, exc_info=r)
+
     async def keeper_tick(self) -> None:
         keeper = self.app.recorders.get(Role.KEEPER)
         if keeper is not None:
@@ -602,8 +618,7 @@ class Runner:
             keeper.set_next_run(now + timedelta(seconds=self.app.app_cfg.keeper_interval_s))
         await self.refresh_positions()
         held = [p for p in self.positions if p.status is PositionStatus.OPEN]
-        for pos in held:
-            await self._review(pos)
+        await self._review_all(held)
         if keeper is not None and not held:
             keeper.note(self.app.clock(), "看了一眼：没有持仓，不用审")
         # 开平仓、卡过期都在这里跟上订阅；放在审查之后，回填新币的几秒不推迟审持仓
