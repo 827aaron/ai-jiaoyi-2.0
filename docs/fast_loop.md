@@ -204,3 +204,12 @@ testnet / live 的推荐等校准后再给。
 - 滑点（`risk.toml max_slippage_bps`）只拦不利方向（做多价格比触发时高、做空比触发时低），`detail.slippage_bps` 正数 = 不利；
   `detail.since_trigger_ms` 记触发到审完用了多久。推荐值按最长持仓档（约止损的 1/4）：30m 6 / 1h 8 / 2h 11 / 4h 16 / 8h 22 / 12h 28 / 24h 40bp。
 - 拍板问题模板 q3：时间按最长持仓问（快照 `hold_min`），`atr_bps` 是止损用的 ATR（√短×长）。
+
+## 进场挂单等回踩（默认关）
+
+`entry_limit_pullback`（testnet / live 还要 `entry_limit_pullback_live`）打开后，保镖不再出市价单：
+挂单价 = 现价 ∓ `entry_limit_offset_stop` × 止损距离（按档 30m 0.6 / 1h 0.4 / 2h·4h 0.25 / 8h 起 0.1，按最小跳动往有利方向取整），
+OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase`。执行层只挂单（LIMIT_MAKER），成交前不挂保命止损；
+等满没成交就撤单，记「挂单没成交已撤」（不报警）。`entry_limit_chase`（8h 起默认开）时改市价追进，
+追之前主循环按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖（`RiskGuardImpl.recheck_chase`），没过就记「不追了：…」。
+持仓时长从成交时刻算。

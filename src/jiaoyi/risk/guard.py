@@ -443,6 +443,44 @@ class RiskGuardImpl:
         missing = [r for r in out if r.startswith("拍板人没回答")]
         return hard + missing, [r for r in out if r not in missing]
 
+    def recheck_chase(
+        self, intent: OrderIntent, card: BattleCard | None, account: AccountState, now: datetime
+    ) -> list[str]:
+        """挂单等回踩没成交、要改市价追进前再审一遍（批准是最多一小时前给的）。
+
+        查此刻的熔断、暂停、持仓笔数、同币持仓、封币 / 临时停 / 要下架、作战卡（有效、还有这个币、
+        方向没反、没改成只看不做）和总 / 相关组敞口。返回拦下的理由，空 = 可以追。"""
+        risk, reasons = self._risk, []
+        sym = intent.symbol
+        halted, day_pnl = self.breaker.check(account, now)
+        if halted:
+            reasons.append(f"今日亏损 {day_pnl:.2f}% 已触发熔断，只允许平仓")
+        if account.paused:
+            reasons.append("面板已暂停开新仓")
+        if account.open_positions >= risk.max_open_positions:
+            reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
+        if sym in account.open_symbols:
+            reasons.append(f"{sym} 已有在管持仓")
+        self._symbol_filters(sym, now, reasons)
+        cs = card.for_symbol(sym) if card is not None and card.is_valid(now) else None
+        why_blocked = self._blocked().get(sym) if self._blocked is not None else None
+        if cs is None:
+            reasons.append("作战卡已过期或没有这个币了")
+        elif why_blocked:
+            reasons.append(f"{why_blocked}，不开新仓")
+        elif cs.bias == Bias.NO_TRADE:
+            reasons.append("作战卡已改成只看不做")
+        elif cs.bias.value not in ("both", intent.side.value):
+            reasons.append(f"作战卡方向已改成 {cs.bias.value}")
+        equity = account.equity_usdt
+        if account.open_notional_usdt + intent.notional_usdt > risk.max_total_exposure_x * equity:
+            reasons.append("加上这笔会超过总敞口上限")
+        if cs is not None:
+            used = account.open_notional_by_category.get(cs.category, 0.0)
+            if used + intent.notional_usdt > risk.category_exposure_x[cs.category] * equity:
+                reasons.append("加上这笔会超过这一类币的合计仓位上限")
+        return reasons
+
     def _symbol_filters(self, sym: str, now: datetime, reasons: list[str]) -> None:
         """「不做」过滤：要下架、刚上线、自动减仓风险高。数据拿不到就不挡。"""
         fast = self._fast

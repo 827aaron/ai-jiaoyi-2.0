@@ -31,6 +31,7 @@ from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
+    AccountState,
     AgainstSignalEvent,
     AlertLevel,
     BattleCard,
@@ -38,6 +39,7 @@ from jiaoyi.contracts import (
     Interval,
     Kline,
     MarketEvent,
+    OrderIntent,
     Outcome,
     PositionRecord,
     PositionStatus,
@@ -136,6 +138,20 @@ class _NewsAware(Protocol):
     def notify_news(self, symbol: str) -> None: ...
 
     def block_symbol(self, symbol: str, reason: str) -> None: ...
+
+
+@runtime_checkable
+class _ChaseRecheck(Protocol):
+    """保镖：挂单没成交改市价追进前按此刻状态再审（``RiskGuardImpl.recheck_chase``）。"""
+
+    def recheck_chase(
+        self, intent: OrderIntent, card: BattleCard | None, account: AccountState, now: datetime
+    ) -> list[str]: ...
+
+
+@runtime_checkable
+class _ChaseHook(Protocol):
+    def set_chase_check(self, check: Callable[[OrderIntent], Awaitable[list[str]]]) -> None: ...
 
 
 @runtime_checkable
@@ -256,6 +272,8 @@ class Runner:
         self._refreshing = False
         # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
+        if isinstance(self.m.executor, _ChaseHook):
+            self.m.executor.set_chase_check(self._may_chase)
         self._closing: set[str] = set()
         self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
         self._reviewing: set[str] = set()  # 管家正在问 Jev 的持仓：同一笔不同时问两次
@@ -612,6 +630,22 @@ class Runner:
                 f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
             )
         )
+
+    async def _may_chase(self, intent: OrderIntent) -> list[str]:
+        """挂单没成交、要改市价追进：按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖。"""
+        now = self.app.clock()
+        why: list[str] = []
+        if self.app.paused is not None:
+            why.append("人工暂停开新仓")
+        if self._restarting:
+            why.append("主程序正在重启")
+        if intent.symbol in self.app.pool_overrides.blacklist:
+            why.append("你拉黑了这个币")
+        if not isinstance(self.m.risk, _ChaseRecheck):
+            return [*why, "保镖不支持追单复核"]
+        account = await self.m.executor.account()
+        card = self.m.cards.current(now)
+        return why + self.m.risk.recheck_chase(intent, card, account, now)
 
     async def handle_signal(self, signal: CandidateSignal) -> None:
         now = self.app.clock()
