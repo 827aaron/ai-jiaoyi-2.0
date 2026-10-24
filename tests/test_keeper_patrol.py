@@ -66,6 +66,72 @@ def keeper(
     )
 
 
+async def _no_sleep(s: float) -> None:
+    return None
+
+
+class _Overloaded(Exception):
+    """模拟 OpenRouter 529：TypeSafeInternalServerError … 529 system_overloaded。"""
+
+
+class _FlakyTransport(MockJevTransport):
+    """前 ``fails`` 次报 529，之后正常作答。"""
+
+    def __init__(self, fails: int, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.fails = fails
+
+    async def evaluate(
+        self, state: str, questions: Sequence[c.JevQuestion], timeout_s: float
+    ) -> Any:
+        if self.fails > 0:
+            self.fails -= 1
+            self.calls.append(state)
+            raise _Overloaded("HTTP 529: system_overloaded")
+        return await super().evaluate(state, questions, timeout_s)
+
+
+async def test_busy_jev_retried_once_in_round(now: datetime) -> None:
+    slept: list[float] = []
+
+    async def sleep(s: float) -> None:
+        slept.append(s)
+
+    t = _FlakyTransport(1, answer=close_p(0.2))
+    v = await keeper(t, now, sleep=sleep).review(position(now), now)
+    assert len(t.calls) == 2 and slept == [1.0]
+    assert v.action == "hold" and "平仓概率 0.20" in v.reason
+
+
+async def test_busy_jev_twice_holds_with_plain_text(now: datetime, tmp_path: Path) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    rec = RoleRecorder(c.Role.KEEPER, log)
+    t = _FlakyTransport(2, answer=close_p(0.2))
+    v = await keeper(t, now, sleep=_no_sleep, recorder=rec).review(position(now), now)
+    assert len(t.calls) == 2
+    assert v.reason == "Jev 服务方繁忙（已重试 1 次），本轮维持现状"
+    r = log.read_day(now.date().isoformat())[-1]
+    assert r.outcome is c.Outcome.ERROR and "529" not in r.summary
+    assert "529" in str(r.output["jev"]["error"])  # 原始报错留在 output 里
+
+
+async def test_other_jev_error_not_retried(now: datetime) -> None:
+    t = MockJevTransport(answer=close_p(0.2))
+    t.fail = PermissionError("401 invalid key")
+    v = await keeper(t, now, sleep=_no_sleep).review(position(now), now)
+    assert len(t.calls) == 1 and v.reason == "Jev 调用出错，本轮维持现状"
+
+
+def test_jev_error_kind() -> None:
+    from jiaoyi.gate.jev import error_kind
+
+    assert error_kind("Jev 调用失败：TypeSafeInternalServerError: … 529 HTTP 529") == "busy"
+    assert error_kind("Jev 调用失败：APIStatusError: 503 Service Unavailable") == "busy"
+    assert error_kind("Jev 超时（>1500ms）") == "timeout"
+    assert error_kind("Jev 连续出错，冷却中（还剩 30 秒）") == "cooldown"
+    assert error_kind("Jev 回复解析失败：缺少问题 action") == "other"
+
+
 def test_interfaces() -> None:
     assert isinstance(keeper(MockJevTransport(), datetime.now().astimezone()), i.Keeper)
     assert isinstance(RulePatrol(FAST), i.Patrol)
@@ -73,7 +139,7 @@ def test_interfaces() -> None:
 
 async def test_jev_failure_holds_and_resets_streak(now: datetime) -> None:
     t = MockJevTransport(answer=close_p(0.7))
-    k = keeper(t, now)
+    k = keeper(t, now, sleep=_no_sleep)
     v1 = await k.review(position(now), now)
     assert v1.action == "hold" and v1.consecutive == 1
     t.fail = TimeoutError()
