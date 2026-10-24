@@ -580,6 +580,13 @@ class AppConfig(Contract):
     predictor_enabled: bool = Field(description="预测员（Kronos）开关。")
     signal_dedup_s: int = Field(ge=5, le=600, description="同一去重键的冷却时间。")
     jev_timeout_ms: int = Field(ge=100, le=5000, description="超时即放弃本次开仓。")
+    jev_max_concurrent: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+        description="拍板人同时最多判几个信号（不同的币并行；同一个币一次只判一个，"
+        "后来的排队、只留最新一条）。OpenRouter 和开会共用并发，别开太大。",
+    )
     keeper_interval_s: int = Field(ge=5, le=120)
     reconcile_interval_s: int = Field(ge=10, le=300)
     slow_loop_interval_min: int = Field(ge=15, le=1440)

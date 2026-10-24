@@ -585,7 +585,13 @@ def build_modules(
     else:
         gate_mode = "rule" if isinstance(model, RuleDecisionModel) else "jev"
         decision_model = model
-        gate = JevEntryGate(model, recorders[Role.GATE], hold_min=fast.time_limit_s // 60)
+        gate = JevEntryGate(
+            model,
+            recorders[Role.GATE],
+            hold_min=fast.time_limit_s // 60,
+            max_concurrent=app_cfg.jev_max_concurrent,
+            max_wait_s=fast.signal_max_age_s,
+        )
         keeper = JevKeeper(
             model,
             fast,

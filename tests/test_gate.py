@@ -148,15 +148,66 @@ async def test_entry_gate_without_valid_card_does_not_call_model(now: datetime) 
     assert not r.ok and t.calls == []
 
 
-async def test_entry_gate_busy_skip_only_same_symbol(now: datetime) -> None:
-    """同一个币同时两个信号：第二个作废（去重）；不同的币不互相等。"""
+def _cards_for(now: datetime, *symbols: str) -> c.BattleCard:
+    base = card(now)
+    extra = [base.symbols[0].model_copy(update={"symbol": s}) for s in symbols]
+    return base.model_copy(update={"symbols": [*base.symbols, *extra]})
+
+
+async def test_entry_gate_same_symbol_queues_instead_of_voiding(
+    tmp_path: Path, now: datetime
+) -> None:
+    """同一个币同时两个信号：第二个排队，等第一个判完再问（以前直接作废）。"""
+    log = JsonlDecisionLog(tmp_path)
     t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.05)
-    gate = JevEntryGate(model(t))
+    gate = JevEntryGate(model(t), RoleRecorder(c.Role.GATE, log))
+    t0 = asyncio.get_running_loop().time()
     a, b = await asyncio.gather(
         gate.evaluate(signal(now), card(now), now), gate.evaluate(signal(now), card(now), now)
     )
-    assert a.ok and not b.ok and "作废" in (b.error or "")
+    assert a.ok and b.ok and len(t.calls) == 2
+    assert asyncio.get_running_loop().time() - t0 >= 0.09  # 同币串行：2 × 0.05
+    assert any("排队等拍板人" in r.summary for r in log.read_day(now.date().isoformat()))
+
+
+async def test_entry_gate_queue_keeps_only_newest(now: datetime) -> None:
+    """同币排队只留最新一条：更早排队的让位作废，不问 Jev。"""
+    t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.05)
+    gate = JevEntryGate(model(t))
+    first = asyncio.ensure_future(gate.evaluate(signal(now), card(now), now))
+    await asyncio.sleep(0.01)
+    older = asyncio.ensure_future(gate.evaluate(signal(now), card(now), now))
+    await asyncio.sleep(0.01)
+    newer = asyncio.ensure_future(gate.evaluate(signal(now), card(now), now))
+    a, b, n = await asyncio.gather(first, older, newer)
+    assert a.ok and n.ok
+    assert not b.ok and "让位" in (b.error or "")
+    assert len(t.calls) == 2
+
+
+async def test_entry_gate_queue_gives_up_after_signal_max_age(now: datetime) -> None:
+    t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.1)
+    gate = JevEntryGate(model(t), max_wait_s=0.02)
+    a, b = await asyncio.gather(
+        gate.evaluate(signal(now), card(now), now), gate.evaluate(signal(now), card(now), now)
+    )
+    assert a.ok and not b.ok and "有效期" in (b.error or "")
     assert len(t.calls) == 1
+    assert (await gate.evaluate(signal(now), card(now), now)).ok  # 锁放干净了
+
+
+async def test_entry_gate_caps_concurrent_calls(now: datetime) -> None:
+    """不同的币并行，但同时最多 max_concurrent 个。"""
+    t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.05)
+    syms = ["ETHUSDT", "SOLUSDT", "XRPUSDT"]
+    two = _cards_for(now, *syms)
+    gate = JevEntryGate(model(t), max_concurrent=2)
+    sigs = [signal(now), *(signal(now).model_copy(update={"symbol": s}) for s in syms)]
+    t0 = asyncio.get_running_loop().time()
+    out = await asyncio.gather(*(gate.evaluate(s, two, now) for s in sigs))
+    took = asyncio.get_running_loop().time() - t0
+    assert all(r.ok for r in out) and len(t.calls) == 4
+    assert 0.09 <= took < 0.14  # 4 个分两批，不是一起也不是一个一个
 
     eth = signal(now).model_copy(update={"symbol": "ETHUSDT"})
     two = card(now).model_copy(

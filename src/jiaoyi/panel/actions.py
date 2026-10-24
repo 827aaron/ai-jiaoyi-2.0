@@ -96,6 +96,7 @@ APP_EDITABLE = frozenset(
         "predictor_enabled",
         "signal_dedup_s",
         "jev_timeout_ms",
+        "jev_max_concurrent",
         "keeper_interval_s",
         "reconcile_interval_s",
         "slow_loop_interval_min",
