@@ -55,3 +55,7 @@ class TickSizes:
                     logger.warning("读 exchangeInfo 的 tickSize 失败", exc_info=True)
                     self._at = self._clock() - CACHE_S + RETRY_S  # 一分钟后再试，不要每场会都打
             return self._ticks.get(symbol)
+
+
+TICKS = TickSizes()
+"""进程内共用一份（快照、会议说明、简报都读它）。"""

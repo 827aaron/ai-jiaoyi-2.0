@@ -268,7 +268,7 @@ def _build_cards(
     news = NewsHub([*default_sources(), *extra_news], decision_log, clock=clock)
     closers.append(news.aclose)
     # 市场简报每轮算一次，总盘会和各币会议共用
-    brief = MarketBriefService(clock=clock)
+    brief = MarketBriefService(clock=clock, style=profiles.prompt_style(app_cfg.hold))
     closers.append(brief.aclose)
     fast = app_cfg.fast_loop
     stop = StopScale(

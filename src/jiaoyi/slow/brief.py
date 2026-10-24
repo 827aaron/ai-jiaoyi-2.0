@@ -1,6 +1,7 @@
 """共享市场简报：每轮开会前算一次，所有标的的会议复用（设计优化 (3)）。
 
-内容：BTC / ETH 趋势（币安日线与 4 小时线）、恐慌贪婪指数（alternative.me，免费无 key）。
+内容：BTC / ETH 各一行（字段按最长持仓档的写法取，见 ta_prompts.WORDS）、
+恐慌贪婪指数（alternative.me，免费无 key）。
 美元指数（DXY）没有稳定的免费无 key 来源（试过的站点会拦截云端 / 脚本请求），先不接，
 需要时加一个 ``BriefPart`` 即可，不用改别处。
 
@@ -17,6 +18,10 @@ from itertools import pairwise
 from typing import Any
 
 import httpx
+
+from jiaoyi.core.ticks import price_formatter
+from jiaoyi.slow.ta_prompts import BRIEF_FIELDS_ZH, WORDS
+from jiaoyi.slow.ticks import TICKS
 
 _FAPI = "https://fapi.binance.com"
 _FNG = "https://api.alternative.me/fng/"
@@ -36,32 +41,113 @@ def _rsi(closes: Sequence[float], n: int = 14) -> float:
     return 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
 
 
-def describe_trend(name: str, daily: Sequence[float], h4: Sequence[float]) -> str:
-    """日线 / 4 小时收盘价 → 一行趋势描述。纯函数，便于测试。"""
-    last = daily[-1]
-    chg_1d = (last / daily[-2] - 1) * 100 if len(daily) >= 2 else 0.0
-    chg_7d = (last / daily[-8] - 1) * 100 if len(daily) >= 8 else 0.0
-    sma20 = _sma(daily, 20)
-    side = "上方" if last >= sma20 else "下方"
-    rsi = _rsi(h4) if len(h4) > 14 else float("nan")
-    return (
-        f"- {name}：{last:,.1f}，24h {chg_1d:+.1f}%，7d {chg_7d:+.1f}%，"
-        f"位于 20 日均线{side}（{sma20:,.1f}），4h RSI {rsi:.0f}"
-    )
+SHORT_FIELDS = {"chg_1h", "chg_4h", "chg_24h", "range_24h", "vol_1h"}
+HOURLY_FIELDS = {"chg_3d", "range_3d", "rsi_1h"}
+DAILY_FIELDS = {"chg_7d", "sma20", "rsi_1d"}
+H4_FIELDS = {"rsi_4h"}
+_BARS_5M = 289  # 24 小时 + 1：1 小时 / 4 小时 / 24 小时涨跌、24 小时区间、成交倍数都用 5 分钟线算
+_BARS_1H = 73  # 3 天 + 1
+_BARS_1D = 21
+_BARS_4H = 30
 
 
-async def _closes(c: httpx.AsyncClient, symbol: str, interval: str, limit: int) -> list[float]:
+def _pct(last: float, then: float) -> float:
+    return (last / then - 1) * 100
+
+
+def _range_pos(
+    price: float, highs: Sequence[float], lows: Sequence[float]
+) -> tuple[float, float, float]:
+    hi, lo = max(highs), min(lows)
+    return ((price - lo) / (hi - lo) * 100 if hi > lo else 50.0), lo, hi
+
+
+def describe_trend(
+    name: str,
+    fields: Sequence[str],
+    background: Sequence[str],
+    m5: Sequence[Sequence[Any]],
+    h1: Sequence[Sequence[Any]],
+    h4: Sequence[Sequence[Any]],
+    d1: Sequence[Sequence[Any]],
+    fmt: Callable[[float], str] = lambda x: f"{x:,.1f}",
+) -> str:
+    """一个币一行：现价 + 这一档的主字段 + 背景字段。每个字段只用自己要的数据。纯函数，便于测试。
+
+    K 线行是币安原样（开、高、低、收、量在第 1–5 列）；最后一根可能还没收盘，当作现价。
+    """
+
+    def cl(rows: Sequence[Sequence[Any]]) -> list[float]:
+        return [float(k[4]) for k in rows]
+
+    def text(field: str) -> str:
+        zh = BRIEF_FIELDS_ZH[field]
+        if field in ("chg_1h", "chg_4h", "chg_24h"):
+            n = {"chg_1h": 12, "chg_4h": 48, "chg_24h": 288}[field]
+            c = cl(m5)
+            return f"{zh} {_pct(c[-1], c[-1 - n]):+.1f}%"
+        if field == "chg_3d":
+            c = cl(h1)
+            return f"{zh} {_pct(c[-1], c[-73]):+.1f}%"
+        if field == "chg_7d":
+            c = cl(d1)
+            return f"{zh} {_pct(c[-1], c[-8]):+.1f}%"
+        if field in ("range_24h", "range_3d"):
+            rows, n = (m5, 288) if field == "range_24h" else (h1, 72)
+            pos, lo, hi = _range_pos(
+                float(rows[-1][4]),
+                [float(k[2]) for k in rows[-n:]],
+                [float(k[3]) for k in rows[-n:]],
+            )
+            return f"{zh} {pos:.0f}%（低 {fmt(lo)} – 高 {fmt(hi)}）"
+        if field == "vol_1h":
+            v = [float(k[5]) for k in m5[-288:]]
+            avg = sum(v) / 24
+            return f"{zh} {sum(v[-12:]) / avg:.1f} 倍" if avg > 0 else f"{zh} 暂不可用"
+        if field == "sma20":
+            c = cl(d1)
+            sma = _sma(c, 20)
+            return f"{zh} {'上方' if c[-1] >= sma else '下方'}（{fmt(sma)}）"
+        rows = {"rsi_1h": h1, "rsi_4h": h4, "rsi_1d": d1}[field]
+        c = cl(rows)
+        return f"{zh} {_rsi(c):.0f}" if len(c) > 14 else f"{zh} 暂不可用"
+
+    price = float((m5 or h1 or h4 or d1)[-1][4]) if (m5 or h1 or h4 or d1) else float("nan")
+    main = "，".join(text(f) for f in fields)
+    bg = f"；背景：{'，'.join(text(f) for f in background)}" if background else ""
+    return f"- {name} 现价 {fmt(price)}：{main}{bg}"
+
+
+async def _rows(c: httpx.AsyncClient, symbol: str, interval: str, limit: int) -> list[list[Any]]:
     r = await c.get(
         f"{_FAPI}/fapi/v1/klines", params={"symbol": symbol, "interval": interval, "limit": limit}
     )
     r.raise_for_status()
-    return [float(k[4]) for k in r.json()]
+    rows: list[list[Any]] = r.json()
+    return rows
 
 
-def trend_part(symbol: str, name: str) -> BriefPart:
+def trend_part(symbol: str, name: str, style: str = "short") -> BriefPart:
+    """BTC / ETH 一行：这一档（short / mid / long）的字段（``ta_prompts.WORDS`` 里的简报字段）。
+    按字段取数：5m x 289 / 1h x 73 / 4h x 30 / 1d x 21，只取用得到的。"""
+    w = WORDS.get(style, WORDS["short"])
+    fields, background = w.brief_main, w.brief_bg
+    used = set(fields) | set(background)
+
     async def part(c: httpx.AsyncClient) -> str:
-        daily, h4 = await asyncio.gather(_closes(c, symbol, "1d", 30), _closes(c, symbol, "4h", 30))
-        return describe_trend(name, daily, h4)
+        async def get(want: set[str], interval: str, n: int) -> list[list[Any]]:
+            return await _rows(c, symbol, interval, n) if used & want else []
+
+        m5, h1, h4, d1 = await asyncio.gather(
+            get(SHORT_FIELDS, "5m", _BARS_5M),
+            get(HOURLY_FIELDS, "1h", _BARS_1H),
+            get(H4_FIELDS, "4h", _BARS_4H),
+            get(DAILY_FIELDS, "1d", _BARS_1D),
+        )
+        tick = await asyncio.to_thread(TICKS.get, symbol)
+        return describe_trend(
+            name, fields, background, m5, h1, h4, d1, price_formatter(tick, thousands=True)
+        )
 
     return part
 
@@ -75,8 +161,12 @@ async def fear_greed_part(c: httpx.AsyncClient) -> str:
     return f"- 恐慌贪婪指数：{now['value']}（{now['value_classification']}）{tail}"
 
 
-def default_parts() -> list[BriefPart]:
-    return [trend_part("BTCUSDT", "BTC"), trend_part("ETHUSDT", "ETH"), fear_greed_part]
+def default_parts(style: str = "short") -> list[BriefPart]:
+    return [
+        trend_part("BTCUSDT", "BTC", style),
+        trend_part("ETHUSDT", "ETH", style),
+        fear_greed_part,
+    ]
 
 
 class MarketBriefService:
@@ -88,8 +178,9 @@ class MarketBriefService:
         client: httpx.AsyncClient | None = None,
         min_age: timedelta = timedelta(minutes=10),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        style: str = "short",
     ) -> None:
-        self._parts = list(parts) if parts is not None else default_parts()
+        self._parts = list(parts) if parts is not None else default_parts(style)
         self._c = client or httpx.AsyncClient(timeout=10.0)
         self._min_age = min_age
         self._clock = clock
