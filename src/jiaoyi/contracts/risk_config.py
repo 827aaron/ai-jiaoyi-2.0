@@ -334,6 +334,17 @@ class FastLoopConfig(Contract):
     min_tp_r: float = Field(default=1.0, ge=0.5, le=5.0, description="作战卡止盈倍数下限。")
     max_tp_r: float = Field(default=6.0, ge=1.0, le=20.0, description="作战卡止盈倍数上限。")
     time_limit_s: int = Field(default=7200, ge=60, le=86400, description="单笔最长持仓时间。")
+    us_hours_gate: bool = Field(
+        default=True,
+        description="美股 / 加密股合约只在美股常规盘的开仓时段开新仓（见下面两项）；金属不受限。"
+        "已有持仓不强平，止损和持仓管家照常。",
+    )
+    us_open_delay_min: int = Field(
+        default=15, ge=0, le=120, description="美股开盘后多少分钟才开始开新仓。"
+    )
+    us_close_lead_min: int = Field(
+        default=15, ge=0, le=120, description="美股收盘前多少分钟停止开新仓。"
+    )
     funding_against_max_bp: float = Field(
         default=0.0,
         ge=0.0,

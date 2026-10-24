@@ -102,6 +102,17 @@ def us_session(now: datetime) -> Session:
     return "closed"
 
 
+def us_entry_window(now: datetime, open_delay_min: int = 15, close_lead_min: int = 15) -> bool:
+    """美股 / 加密股合约现在能不能开新仓：常规盘开盘后 ``open_delay_min`` 分钟到收盘前
+    ``close_lead_min`` 分钟之间。按美东时间算（自动跟夏令时），周末和 NYSE 休市日都不行。"""
+    t = now.astimezone(NY)
+    if t.weekday() >= 5 or t.date() in us_holidays(t.year):
+        return False
+    start = datetime.combine(t.date(), time(9, 30), NY) + timedelta(minutes=open_delay_min)
+    end = datetime.combine(t.date(), time(16, 0), NY) - timedelta(minutes=close_lead_min)
+    return start <= t < end
+
+
 @dataclass(frozen=True)
 class EarningsEvent:
     ticker: str

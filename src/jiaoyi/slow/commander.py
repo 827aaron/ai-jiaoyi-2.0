@@ -51,6 +51,7 @@ from jiaoyi.slow import binance_gate
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
+from jiaoyi.slow.us_market import us_entry_window
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,7 @@ class BattleCardCommander:
         brief: MarketBriefService | None = None,
         journal: CardJournal | None = None,
         stop_scale: StopScale = DEFAULT_STOP_SCALE,
+        us_hours: tuple[int, int] | None = None,
         fail_backoff: Sequence[timedelta] = (
             timedelta(minutes=5),
             timedelta(minutes=10),
@@ -254,6 +256,7 @@ class BattleCardCommander:
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
+        self._us_hours = us_hours  # (开盘后几分钟, 收盘前几分钟)；None = 不按美股时段限制
         self._held: dict[str, Side] = {}
         self._on_picks: Callable[[list[str]], None] | None = None
         self._progress = ""
@@ -323,7 +326,7 @@ class BattleCardCommander:
         c = self._pool_view(c, now) if c.is_valid(now) else self._held_view(c, now)
         if c is None:
             return None
-        c = self._mask_stale(c, now)
+        c = self._mask_us_closed(self._mask_stale(c, now), now)
         if not self._blocked:
             return c
         # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；
@@ -627,6 +630,27 @@ class BattleCardCommander:
             for e in self._eligible(pool, now, expand=False):
                 if e.symbol not in self._seen and e.tier in (None, "head"):
                     self._queue(e.symbol, "new_head_symbol", now)
+
+    def _mask_us_closed(self, card: BattleCard, now: datetime) -> BattleCard:
+        """美股 / 加密股合约不在开仓时段：卡上标「休市不可做」，清空信号（方向不动、持仓照常盯）。
+        金属不受限。保镖那边另有同样的闸。"""
+        if self._us_hours is None or us_entry_window(now, *self._us_hours):
+            return card
+        us = (Category.US_TECH, Category.CRYPTO_STOCK)
+        if not any(s.category in us and s.allowed_signals for s in card.symbols):
+            return card
+        return card.model_copy(
+            update={
+                "symbols": [
+                    self._watch_only(s).model_copy(
+                        update={"reason": f"休市不可做：{s.reason}"[:400]}
+                    )
+                    if s.category in us and s.allowed_signals
+                    else s
+                    for s in card.symbols
+                ]
+            }
+        )
 
     def _mask_stale(self, card: BattleCard, now: datetime) -> BattleCard:
         """开仓前卡龄检查：该币上次开会距今超过 ``entry_max_age``，这次信号不开仓（只清空信号，

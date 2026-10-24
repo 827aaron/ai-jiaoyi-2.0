@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
+from jiaoyi.contracts.common import PERPETUAL_CONTRACT_TYPES
 from jiaoyi.execution.fills import TradeFill
 from jiaoyi.execution.symbols import from_ccxt_symbol, to_ccxt_symbol
 
@@ -412,12 +413,20 @@ class CcxtBinanceFutures:
         out: dict[str, LotFilter] = {}
         for m in markets.values():
             info = m.get("info") or {}
-            if not (m.get("swap") and m.get("linear") and m.get("settle") == "USDT"):
+            if info.get("contractType") not in PERPETUAL_CONTRACT_TYPES:
                 continue
-            if info.get("contractType") != "PERPETUAL" or info.get("status") != "TRADING":
+            tradfi = (
+                info.get("contractType") != "PERPETUAL"
+            )  # 美股 / 金属永续：ccxt 不一定标成 swap
+            if tradfi:
+                if info.get("quoteAsset") != "USDT":
+                    continue
+            elif not (m.get("swap") and m.get("linear") and m.get("settle") == "USDT"):
+                continue
+            if info.get("status") != "TRADING":
                 continue
             try:
-                symbol = from_ccxt_symbol(str(m["symbol"]))
+                symbol = str(info["symbol"]) if tradfi else from_ccxt_symbol(str(m["symbol"]))
                 filters = {f["filterType"]: f for f in info.get("filters", [])}
                 lot = filters["LOT_SIZE"]
                 notional = filters.get("MIN_NOTIONAL", {}).get("notional", 0.0)

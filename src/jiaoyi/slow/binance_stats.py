@@ -13,10 +13,18 @@ from typing import Any
 
 import httpx
 
+from jiaoyi.contracts.common import PERPETUAL_CONTRACT_TYPES
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.screener import SymbolStats
 
 _BASE = "https://fapi.binance.com"
+
+
+def _kind(sym: dict[str, Any]) -> str:
+    """exchangeInfo 里说明标的是什么的字段拼成一段小写文字，给选币分类用。"""
+    sub = sym.get("underlyingSubType") or []
+    parts = [sym.get("contractType", ""), sym.get("underlyingType", ""), *map(str, sub)]
+    return " ".join(str(p) for p in parts if p).lower()
 
 
 class BinanceStatsSource:
@@ -46,13 +54,15 @@ class BinanceStatsSource:
             self._get("/fapi/v1/ticker/bookTicker"),
             self._get("/fapi/v1/premiumIndex"),
         )
-        onboard = {
-            s["symbol"]: int(s["onboardDate"])
+        live = [
+            s
             for s in info["symbols"]
             if s["status"] == "TRADING"
-            and s["contractType"] == "PERPETUAL"
+            and s["contractType"] in PERPETUAL_CONTRACT_TYPES  # 含美股 / 金属的 TRADIFI_PERPETUAL
             and s["quoteAsset"] == "USDT"
-        }
+        ]
+        onboard = {s["symbol"]: int(s["onboardDate"]) for s in live}
+        kinds = {s["symbol"]: _kind(s) for s in live}
         books = {b["symbol"]: b for b in book}
         funding = {p["symbol"]: float(p["lastFundingRate"] or 0.0) for p in premium}
         top = sorted(
@@ -60,7 +70,8 @@ class BinanceStatsSource:
             key=lambda t: -float(t["quoteVolume"]),
         )[: self._top_k]
         results = await asyncio.gather(
-            *(self._one(t, onboard, books, funding, now) for t in top), return_exceptions=True
+            *(self._one(t, onboard, books, funding, kinds, now) for t in top),
+            return_exceptions=True,
         )
         stats = [r for r in results if isinstance(r, SymbolStats)]
         if not stats:
@@ -73,6 +84,7 @@ class BinanceStatsSource:
         onboard: dict[str, int],
         books: dict[str, Any],
         funding: dict[str, float],
+        kinds: dict[str, str],
         now: datetime,
     ) -> SymbolStats:
         sym = t["symbol"]
@@ -108,6 +120,7 @@ class BinanceStatsSource:
             listed_days=max((now - listed).days, 0),
             range_24h_pct=(float(t["highPrice"]) - float(t["lowPrice"])) / last * 100.0,
             volume_surge=surge,
+            kind=kinds.get(sym, ""),
             funding_rate=funding.get(sym, 0.0),
             oi_change_pct=oi_change,
             liquidations_1h_usdt=(

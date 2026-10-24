@@ -394,3 +394,13 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 开会时只要有币因此没开成，军师团整轮暂停：不算会议失败、不退避，模块状态显示「币安限流，X 分钟后重开」；
 解封（+5 秒）后用原来的开会原因自动重开这一轮，不等下一个间隔。
+
+## 美股 / 金属永续（TRADIFI_PERPETUAL）
+
+币安把美股、金属永续的 `contractType` 标成 `TRADIFI_PERPETUAL`。选币（`binance_stats`）和执行层的下单精度（`lot_filters`）都放行它，
+常量在 `contracts/common.py::PERPETUAL_CONTRACT_TYPES`。分类先看名单（含 PAXG / XAUT 归金属），名单外的按 exchangeInfo 的
+`contractType / underlyingType / underlyingSubType` 自动识别：商品 / 金属 → 金属，其余传统资产 → 美股科技。
+
+美股 / 加密股合约只在美股常规盘的开仓时段开新仓：**开盘后 15 分钟到收盘前 15 分钟**（美东时间，自动跟夏令时，周末和 NYSE 休市日不开）。
+可配置：`app.toml [fast_loop]` 的 `us_hours_gate`（默认开）、`us_open_delay_min`、`us_close_lead_min`。时段外：休市时照常进池参与选币，
+卡上该币标「休市不可做」（信号清空），保镖也拦开仓；已有持仓不强平，止损和持仓管家照常。金属不受限。

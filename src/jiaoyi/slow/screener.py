@@ -35,11 +35,18 @@ SCREEN_EVERY = timedelta(hours=1)
 _MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
 _CRYPTO_STOCKS = frozenset({"COIN", "MSTR", "HOOD", "MARA", "RIOT", "CRCL"})
 _US_TECH = frozenset({"TSLA", "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD", "QQQ", "SPY"})
-_METALS = frozenset({"XAU", "XAG", "XPT", "XPD"})
+_METALS = frozenset(
+    {"XAU", "XAG", "XPT", "XPD", "PAXG", "XAUT"}
+)  # PAXG / XAUT 是链上黄金，也按金属算
+_METAL_HINTS = ("commodit", "metal", "gold", "silver", "precious")
+_EQUITY_HINTS = ("equity", "stock", "tradifi")
 
 
-def classify(symbol: str) -> Category:
-    """按代码给相关性分组。币安新上的传统资产合约名不在表里时按山寨币算（更保守的是调小上限）。"""
+def classify(symbol: str, kind: str = "") -> Category:
+    """按代码给相关性分组：先看名单，名单外的再看交易所给的标的类型（``kind``，见 binance_stats）。
+
+    币安把美股和金属永续标成 TRADIFI_PERPETUAL；名单外的传统资产合约按 kind 自动归类，
+    认不出是金属的当美股科技（它们跟着美股走）。什么都认不出才算山寨币。"""
     base = symbol.removesuffix("USDT")
     if base in _MAJORS:
         return Category.MAJOR
@@ -49,6 +56,10 @@ def classify(symbol: str) -> Category:
         return Category.US_TECH
     if base in _METALS:
         return Category.PRECIOUS_METAL
+    if any(h in kind for h in _METAL_HINTS):
+        return Category.PRECIOUS_METAL
+    if any(h in kind for h in _EQUITY_HINTS):
+        return Category.US_TECH
     return Category.ALT
 
 
@@ -68,6 +79,8 @@ class SymbolStats:
     funding_rate: float = 0.0
     oi_change_pct: float = 0.0
     liquidations_1h_usdt: float = 0.0
+    kind: str = ""
+    """交易所给的标的类型（小写，含 contractType / underlyingType 等），给 ``classify`` 用。"""
 
 
 class MarketStatsSource(Protocol):
@@ -352,7 +365,7 @@ class CodeSymbolScreener:
         for s in stats:
             f = _hard_filters(s, cfg)
             total, parts, reasons = score(s, cfg)
-            category = classify(s.symbol)
+            category = classify(s.symbol, s.kind)
             if us_on and category in _US_CATEGORIES:
                 total, parts, reasons = self._us_adjust(
                     s.symbol, now, us_open, total, parts, reasons

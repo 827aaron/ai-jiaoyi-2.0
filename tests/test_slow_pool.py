@@ -233,3 +233,43 @@ def test_gate_and_market_rest_share_one_ban(monkeypatch: pytest.MonkeyPatch) -> 
         assert binance_gate.banned_until() > time.time()
     finally:
         binance_gate.reset()
+
+
+def test_us_entry_window_follows_new_york_time_and_holidays() -> None:
+    from datetime import UTC
+
+    from jiaoyi.slow.us_market import us_entry_window as w
+
+    assert w(datetime(2026, 10, 23, 13, 44, tzinfo=UTC)) is False  # 夏令时 9:44
+    assert w(datetime(2026, 10, 23, 13, 45, tzinfo=UTC)) is True
+    assert w(datetime(2026, 10, 23, 19, 44, tzinfo=UTC)) is True
+    assert w(datetime(2026, 10, 23, 19, 45, tzinfo=UTC)) is False  # 15:45 收盘前 15 分钟
+    assert w(datetime(2026, 12, 1, 14, 44, tzinfo=UTC)) is False  # 冬令时 9:44
+    assert w(datetime(2026, 12, 1, 14, 45, tzinfo=UTC)) is True
+    assert w(datetime(2026, 10, 24, 15, 0, tzinfo=UTC)) is False  # 周六
+    assert w(datetime(2026, 12, 25, 16, 0, tzinfo=UTC)) is False  # 圣诞节
+    assert w(datetime(2026, 10, 23, 13, 31, tzinfo=UTC), 0, 0) is True  # 可配置
+
+
+async def test_card_marks_us_symbols_closed_but_not_metals(tmp_path: Path) -> None:
+    from datetime import UTC
+
+    from jiaoyi.contracts import Category
+
+    open_t = datetime(2026, 10, 23, 14, 0, tzinfo=UTC)
+    eng = FakeEngine(["TSLAUSDT", "XAUUSDT", "AAUSDT"])
+    c, _, clock = make(tmp_path, eng, open_t, us_hours=(15, 15))
+    await c.refresh(pool(open_t, entry("TSLAUSDT"), entry("XAUUSDT"), entry("AAUSDT")), "scheduled")
+    assert c._card is not None
+    cats = {"TSLAUSDT": Category.US_TECH, "XAUUSDT": Category.PRECIOUS_METAL}
+    c._card = c._card.model_copy(
+        update={"symbols": [s.model_copy(update={"category": cats.get(s.symbol, s.category)})
+                            for s in c._card.symbols]}
+    )  # fmt: skip
+    by = {s.symbol: s for s in c.current(open_t).symbols}  # type: ignore[union-attr]
+    assert by["TSLAUSDT"].allowed_signals and "休市" not in by["TSLAUSDT"].reason
+    clock[0] = datetime(2026, 10, 23, 13, 40, tzinfo=UTC)  # 开盘后不满 15 分钟（卡仍有效）
+    c._card = c._card.model_copy(update={"created_at": clock[0] - H / 2})
+    by = {s.symbol: s for s in c.current(clock[0]).symbols}  # type: ignore[union-attr]
+    assert by["TSLAUSDT"].allowed_signals == [] and by["TSLAUSDT"].reason.startswith("休市不可做")
+    assert by["XAUUSDT"].allowed_signals and by["AAUSDT"].allowed_signals

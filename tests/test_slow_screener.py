@@ -89,6 +89,11 @@ def test_classify() -> None:
     assert classify("COINUSDT") is Category.CRYPTO_STOCK
     assert classify("XAUUSDT") is Category.PRECIOUS_METAL
     assert classify("PEPEUSDT") is Category.ALT
+    assert classify("PAXGUSDT") is Category.PRECIOUS_METAL  # 链上黄金按金属算
+    assert classify("INTCUSDT", "tradifi_perpetual equity") is Category.US_TECH  # 名单外按类型识别
+    assert classify("XPDUSDT", "") is Category.PRECIOUS_METAL
+    assert classify("WTIUSDT", "tradifi_perpetual commodity") is Category.PRECIOUS_METAL
+    assert classify("NEWUSDT", "tradifi_perpetual") is Category.US_TECH  # 认不出的传统资产跟美股走
 
 
 async def test_screener_reports_its_own_status(now: datetime, tmp_path: Path) -> None:
