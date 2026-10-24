@@ -53,15 +53,20 @@ def test_no_trade_scored_by_missed_move() -> None:
     assert s and s.dir_net_pct is None and round(s.missed_pct, 1) == 4.0
 
 
+calls: list[str] = []
+
+
 def mk_book(tmp_path: Path, rows: int, now: datetime) -> L.LessonBook:
+    calls.clear()
     j = tmp_path / "card_review"
     j.mkdir(parents=True)
     with (j / "cards.jsonl").open("w") as f:
         for i in range(rows):
             f.write(row(at=T0 + timedelta(minutes=i)).model_dump_json() + "\n")
 
-    async def fetch(sym: str, a: datetime, b: datetime) -> list[Bar]:
-        return bars(a, 100, 99)
+    def fetch(sym: str, a: datetime, b: datetime) -> list[Bar]:
+        calls.append(sym)
+        return bars(a, 100, 99, n=int((b - a) / timedelta(minutes=5)) + 1)
 
     return L.LessonBook(
         tmp_path,
@@ -132,3 +137,62 @@ def test_engine_lessons_and_refresh_failure_is_harmless(tmp_path: Path) -> None:
     e._graph = boom  # type: ignore[method-assign]
     e._refresh_lessons(object())  # 吞掉异常，不影响开会
     assert e._lessons() == ""
+
+
+def test_one_fetch_per_symbol_and_btc_once(tmp_path: Path) -> None:
+    b = mk_book(tmp_path, 40, T0)
+    b.since(T0)
+    assert b.refresh(T0 + timedelta(days=5), ask_ok) is not None
+    assert sorted(calls) == ["BTCUSDT", "SOLUSDT"]  # 40 张卡只拉 2 次
+
+
+def test_cards_are_capped(tmp_path: Path) -> None:
+    b = mk_book(tmp_path, 450, T0)
+    b.since(T0)
+    sc = b._scored(T0 + timedelta(days=5), T0)
+    assert len(sc) == L.MAX_CARDS
+
+
+def test_rate_limited_aborts_and_writes_nothing(tmp_path: Path) -> None:
+    b = mk_book(tmp_path, 40, T0)
+    b.since(T0)
+    n = []
+
+    def limited(sym: str, a: datetime, c: datetime) -> list[Bar]:
+        n.append(sym)
+        raise L.binance_gate.RateLimited(429, 0.0)
+
+    b._fetch = limited
+    later = T0 + timedelta(days=5)
+    try:
+        b.refresh(later, ask_ok)
+        raise AssertionError("应该抛 RateLimited")
+    except L.binance_gate.RateLimited:
+        pass
+    assert len(n) == 1  # 限流后不再发请求
+    assert b.text() == "" and not b.due(later)  # 今天不再试，留到明天
+
+
+def test_gate_bars_pages_and_sizes_limit() -> None:
+    calls_: list[int] = []
+
+    class R:
+        def __init__(self, rows: list[list[float]]) -> None:
+            self.rows = rows
+
+        def raise_for_status(self) -> None: ...
+
+        def json(self) -> list[list[float]]:
+            return self.rows
+
+    def get(url: str, params: dict[str, object]) -> R:
+        calls_.append(int(params["limit"]))  # type: ignore[call-overload]
+        t0 = int(params["startTime"])  # type: ignore[call-overload]
+        n = int(params["limit"])  # type: ignore[call-overload]
+        return R([[t0 + i * 300_000, 1, 1, 1, 1] for i in range(n)])
+
+    out = L.gate_bars("SOLUSDT", T0, T0 + timedelta(minutes=120), get)
+    assert calls_ == [25] and len(out) == 25  # 2 小时只要 25 根
+    calls_.clear()
+    L.gate_bars("SOLUSDT", T0, T0 + timedelta(days=5), get)
+    assert calls_[0] == 1000 and len(calls_) == 2

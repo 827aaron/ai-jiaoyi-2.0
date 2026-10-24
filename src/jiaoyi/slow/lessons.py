@@ -10,13 +10,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -24,15 +23,55 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from jiaoyi.contracts import Bias
-from jiaoyi.slow.review import _BASE, Bar, BarFetcher, CardJournal, JournalRow, binance_bars
+from jiaoyi.slow import binance_gate
+from jiaoyi.slow.review import Bar, CardJournal, JournalRow
 
 logger = logging.getLogger(__name__)
 
 EVERY_DAYS = 5
 MIN_CARDS = 30
 MAX_LESSONS = 5
+MAX_CARDS = 300  # 卡太多就均匀抽样，K 线请求和总盘会被挡住的时间都有上限
+_PAGE = 1000
+_BAR = timedelta(minutes=5)
 BTC = "BTCUSDT"
 _DIRECTION = {Bias.LONG.value: 1.0, Bias.SHORT.value: -1.0}
+
+
+RangeFetcher = Callable[[str, datetime, datetime], list[Bar]]
+"""(币, 起, 止) → 这段时间的 5 分钟 K 线（升序）。限流抛 ``binance_gate.RateLimited``。"""
+
+
+def gate_bars(
+    symbol: str, start: datetime, end: datetime, get: Callable[..., Any] = binance_gate.get
+) -> list[Bar]:
+    """走全局限流闸的 5 分钟 K 线，只要这一段需要的根数（每页最多 1000 根）。"""
+    out: list[Bar] = []
+    cur = start
+    while cur < end:
+        limit = min(_PAGE, int((end - cur) / _BAR) + 1)
+        r = get(
+            "https://fapi.binance.com/fapi/v1/klines",
+            params={
+                "symbol": symbol,
+                "interval": "5m",
+                "startTime": int(cur.timestamp() * 1000),
+                "endTime": int(end.timestamp() * 1000),
+                "limit": limit,
+            },
+        )
+        r.raise_for_status()
+        page = [
+            Bar(datetime.fromtimestamp(int(k[0]) / 1000, UTC), *(float(x) for x in k[1:5]))
+            for k in r.json()
+        ]
+        if not page:
+            break
+        out.extend(page)
+        if len(page) < limit:
+            break
+        cur = page[-1].open_time + _BAR
+    return out
 
 
 @dataclass(frozen=True)
@@ -192,7 +231,7 @@ class LessonBook:
         hold_minutes: int,
         horizon_zh: str,
         fee_pct: float,
-        fetch: BarFetcher | None = None,
+        fetch: RangeFetcher | None = None,
     ) -> None:
         self._dir = Path(data_dir) / "memory"
         self._journal = CardJournal(data_dir)
@@ -201,7 +240,7 @@ class LessonBook:
         self._horizon_zh = horizon_zh
         self._hold_label = f"{hold_minutes}m"
         self._fee = fee_pct
-        self._fetch = fetch
+        self._fetch: RangeFetcher = fetch or gate_bars
 
     # ---- 读
     @property
@@ -256,38 +295,52 @@ class LessonBook:
         return (today - anchor).days >= EVERY_DAYS
 
     # ---- 写
-    async def _scored(self, now: datetime, since: datetime) -> list[Scored]:
-        rows = [
-            r
-            for r in self._journal.read()
-            if r.created_at >= since and r.created_at + self._hold <= now
-        ]
-        if not rows:
-            return []
-        sem = asyncio.Semaphore(4)
-        btc_cache: dict[tuple[datetime, datetime], list[Bar]] = {}
+    def _scored(self, now: datetime, since: datetime) -> list[Scored]:
+        """每个币只拉一段覆盖全部卡的 5 分钟 K 线（BTC 也只拉一次），在本地按卡切片。
+        限流（RateLimited）不吞，直接抛出让这次汇总作罢；其他失败只丢掉那个币。"""
+        rows = sorted(
+            (
+                r
+                for r in self._journal.read()
+                if r.created_at >= since and r.created_at + self._hold <= now
+            ),
+            key=lambda r: r.created_at,
+        )
+        if len(rows) > MAX_CARDS:  # 均匀抽样，封顶
+            step = len(rows) / MAX_CARDS
+            rows = [rows[int(i * step)] for i in range(MAX_CARDS)]
+        by_sym: dict[str, list[JournalRow]] = defaultdict(list)
+        for r in rows:
+            by_sym[r.symbol].append(r)
+        need_btc = any(r.symbol != BTC and r.bias in _DIRECTION for r in rows)
+        if need_btc and BTC not in by_sym:
+            by_sym[BTC] = []
 
-        async def bars(sym: str, a: datetime, b: datetime) -> list[Bar]:
-            async with sem:
-                if self._fetch is not None:
-                    return await self._fetch(sym, a, b)
-                async with httpx.AsyncClient(base_url=_BASE, timeout=15.0) as c:
-                    return await binance_bars(c, sym, a, b)
+        def span(rs: Sequence[JournalRow]) -> tuple[datetime, datetime]:
+            return min(r.created_at for r in rs), max(r.created_at for r in rs) + self._hold
 
-        async def one(r: JournalRow) -> Scored | None:
-            end = r.created_at + self._hold
+        cache: dict[str, list[Bar]] = {}
+        spans = {sym: span(rs) for sym, rs in by_sym.items() if rs}
+        if need_btc:
+            lo = min(a for a, _ in spans.values())
+            hi = max(b for _, b in spans.values())
+            spans[BTC] = (lo, hi)
+        for sym, (lo, hi) in spans.items():
             try:
-                own = await bars(r.symbol, r.created_at, end)
-                key = (r.created_at, end)
-                if r.symbol != BTC and r.bias in _DIRECTION and key not in btc_cache:
-                    btc_cache[key] = await bars(BTC, r.created_at, end)
-            except (httpx.HTTPError, ValueError, KeyError) as e:
-                logger.warning("%s 的 K 线拉不到：%s", r.symbol, e)
-                return None
-            return score_card(r, own, self._hold, self._fee, btc_cache.get((r.created_at, end), ()))
-
-        res = await asyncio.gather(*(one(r) for r in rows))
-        return [s for s in res if s is not None]
+                cache[sym] = self._fetch(sym, lo, hi)
+            except binance_gate.RateLimited:
+                raise
+            except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
+                logger.warning("%s 的 K 线拉不到：%s", sym, e)
+        out: list[Scored] = []
+        for r in rows:
+            own = cache.get(r.symbol)
+            if own is None:
+                continue
+            sc = score_card(r, own, self._hold, self._fee, cache.get(BTC, ()))
+            if sc is not None:
+                out.append(sc)
+        return out
 
     def refresh(self, now: datetime, ask: SummarizeFn) -> Batch | None:
         """到期就打分、汇总、写新的一批；不到 30 张或没有站得住的教训就不换（上一批照用）。
@@ -298,7 +351,7 @@ class LessonBook:
         st["attempt"] = now.astimezone(self._tz).date().isoformat()
         self._save_state(st)
         since = self.since(now)
-        scored = asyncio.run(self._scored(now, since))
+        scored = self._scored(now, since)
         if len(scored) < MIN_CARDS:
             logger.info(
                 "教训本：打完分的卡只有 %d 张（要 %d 张），这次不写", len(scored), MIN_CARDS
