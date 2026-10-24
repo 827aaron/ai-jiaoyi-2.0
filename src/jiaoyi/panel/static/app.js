@@ -105,6 +105,9 @@ function chrome() {
     const since = c.paused_since ? `${hm(c.paused_since)} 起，` : "";
     b += `<div class="banner bn-bad"><b>⏸ ${why}</b><span>${since}${esc(c.paused_reason || "")}${c.paused_reason ? "。" : ""}持仓照常盯；恢复要点右上角“恢复开新仓”并输入面板密码。</span></div>`;
   }
+  if (c && c.llm_credit) {
+    b += `<div class="banner bn-bad"><b>💳 ${esc(c.llm_credit)}</b></div>`;
+  }
   if (c && c.panel_stale) {
     b += `<div class="banner bn-bad"><b>面板版本与代码不一致</b><span>代码已更新、面板进程还是旧的，有的页面会读不出。在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。</span></div>`;
   }

@@ -50,6 +50,7 @@ from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow import binance_gate
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
 
@@ -273,6 +274,7 @@ class BattleCardCommander:
         self._rl_reason = ""
         self._notices: list[str] = []
         self._budget_noticed_day = ""
+        self._credit_alarm: Callable[[], None] | None = None
         self._engine = engine
         self._risk = risk
         self._log = log
@@ -1312,10 +1314,19 @@ class BattleCardCommander:
         if loop is not None and delta:
             loop.call_soon_threadsafe(self._charge, delta)
 
+    def bind_credit_alarm(self, fn: Callable[[], None]) -> None:
+        """模型额度不足（402）时调一下：让主程序发告警、面板显示横幅。"""
+        self._credit_alarm = fn
+
     def _failure_cost(self, exc: BaseException, key: str = "") -> float:
         """失败会议的花费：引擎带出了真实花费就用它；超时取消的会议，引擎还在跑，就叫停它并取
-        已经发生的真实花费；都拿不到（断网等）才按估算上限计。"""
+        已经发生的真实花费；都拿不到（断网等）才按估算上限计。额度不足（402）被拒的请求没有
+        烧 token，按 0 计，免得日花费虚高。"""
         known = exc.cost_usd if isinstance(exc, MeetingError) else None
+        if is_credit_error(exc):
+            if self._credit_alarm is not None:
+                self._credit_alarm()
+            return 0.0 if known is None else known
         if known is None and key and isinstance(self._engine, _CostReporting):
             self._engine.abort(key)  # 超时后后台线程还在烧钱：不再发新的模型请求
             known = self._engine.partial_cost(key)

@@ -393,6 +393,23 @@ async def test_failed_meetings_and_pick_are_charged(tmp_path: Path, now: datetim
     assert log.read_status()["commander"].today.cost_usd == pytest.approx(0.11)
 
 
+async def test_credit_errors_cost_nothing_and_raise_the_alarm(
+    tmp_path: Path, now: datetime
+) -> None:
+    class Eng(FakeEngine):
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+            raise RuntimeError("Error code: 402 - in_flight_budget_exhausted, Retry-After 120")
+
+    c, log, _ = make(tmp_path, Eng(["AAUSDT"]), now, failed_meeting_cost_usd=0.07)
+    alarms: list[int] = []
+    c.bind_credit_alarm(lambda: alarms.append(1))
+    with pytest.raises(CardRefreshError):
+        await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    assert alarms  # 额度不足：告警
+    # 只有选币 0.01；被 402 拒的会议没烧 token，不按估算 0.07 计
+    assert log.read_status()["commander"].today.cost_usd == pytest.approx(0.01)
+
+
 async def test_invalid_conclusion_still_charges_its_cost(tmp_path: Path, now: datetime) -> None:
     class Eng(FakeEngine):
         async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:

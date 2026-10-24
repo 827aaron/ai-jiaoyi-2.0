@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -113,6 +114,7 @@ from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import BattleCardCommander, StopScale
+from jiaoyi.slow.credits import CreditMonitor
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.majors import MajorsSource
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
@@ -666,6 +668,7 @@ class App:
         self.ledger: LedgerSync | None = None
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
+        self.credits: CreditMonitor | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
         self.paused: dict[str, Any] | None = read_paused(app_cfg.data_dir)
@@ -687,9 +690,17 @@ class App:
             self.ledger = built.ledger
             self.news = built.news
             self.against = built.against
+            if self.slow_cfg.llm.provider == "openrouter" and self.news is not None:
+                store = secrets or ChainedSecretStore()  # 真军师团才有 news；桩没有额度可看
+                self.credits = CreditMonitor(
+                    app_cfg.data_dir, lambda: store.get("OPENROUTER_API_KEY")
+                )
         self.m = modules
         # 和卡相反的信号：主循环按账本持仓分流（有仓叫管家急查、反复出申请单币临时会）
         cards = modules.cards
+        bind_credit = getattr(cards, "bind_credit_alarm", None)
+        if callable(bind_credit) and self.credits is not None:
+            bind_credit(lambda: self.credits.note_exhausted(self.clock()))
         request_event = getattr(cards, "request_event", None)
         accepts = getattr(cards, "accepts_event", None)
         self.against_desk = AgainstSignalDesk(
@@ -795,6 +806,20 @@ class App:
         """拉一次交易所精度。失败沿用旧缓存，过期后保镖自动拒单。"""
         if isinstance(self.lot_rules, _Refreshable) and not await self.lot_rules.refresh():
             log.warning("下单精度刷新失败")
+
+    async def credit_tick(self) -> None:
+        """模型额度看护：每小时只读查一次 OpenRouter 余额，快用完或会议撞 402 就推 Telegram。"""
+        if self.credits is None:
+            return
+        try:
+            alerts = await asyncio.to_thread(self.credits.tick, self.clock())
+        except Exception:
+            log.exception("额度看护出错（不影响交易）")
+            return
+        for level, title, body in alerts:
+            await self._alert(
+                AlertLevel.CRITICAL if level == "critical" else AlertLevel.WARN, title, body
+            )
 
     async def refresh_income(self) -> None:
         """刷新 data/income_daily.json（面板的盈利口径）。拉不到沿用文件里的旧数。"""

@@ -1184,6 +1184,10 @@ def degrade_size(cs: CardSymbol, missing: Sequence[str]) -> CardSymbol:
 FALLBACK_MAX_TOKENS = {"openrouter": 384_000, "deepseek": 8192}
 """读不到模型信息时的输出上限：OpenRouter 上 deepseek-v4 系列文档标的最大输出是 384000；
 直连 DeepSeek 按它官方接口的 8192 保守处理。"""
+DEFAULT_MAX_TOKENS = 16384
+"""没写 max_tokens 时的上限。OpenRouter 按每次请求的 max_tokens 预留额度：写成模型最大的
+384000，8 场会议并发每次预留约 $0.1，余额一低就成批 402。多空辩论和三位经理的回答实测
+都在几千 token 以内，16384 已有余量；要更长在 slow.toml 的 [meeting] max_tokens 里写。"""
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 RETRY_HINT = "Give the conclusion directly; no thinking out loud."
 
@@ -1220,6 +1224,15 @@ def model_max_tokens(
         return fallback
     logger.warning("OpenRouter 模型信息里没有 %s，max_tokens 用 %d", list(models), fallback)
     return fallback
+
+
+def default_max_tokens(
+    provider: str,
+    models: Sequence[str],
+    fetch: Callable[[], list[dict[str, Any]]] = _fetch_models,
+) -> int:
+    """没写 max_tokens 时用的值：模型最大输出和 ``DEFAULT_MAX_TOKENS`` 里小的那个。"""
+    return min(model_max_tokens(provider, models, fetch), DEFAULT_MAX_TOKENS)
 
 
 def reply_problem(res: Any, min_chars: int) -> str | None:
@@ -1556,9 +1569,9 @@ class TradingAgentsEngine:
         # TradingAgents 只认环境变量。注意子进程会继承：从本进程拉起别的程序时 env= 里要去掉它；
         # 日志和 DecisionRecord 不得写入请求头或配置字典。
         os.environ.setdefault(key_env, key)
-        if settings.max_tokens is None:  # 没写 = 用模型自己的最大输出
-            mt = model_max_tokens(settings.provider, [settings.quick_model, settings.deep_model])
-            logger.info("max_tokens 用模型最大输出：%d", mt)
+        if settings.max_tokens is None:  # 没写 = 模型最大输出和 DEFAULT_MAX_TOKENS 里小的那个
+            mt = default_max_tokens(settings.provider, [settings.quick_model, settings.deep_model])
+            logger.info("max_tokens 用 %d（模型最大输出和 %d 取小）", mt, DEFAULT_MAX_TOKENS)
             settings = replace(settings, max_tokens=mt)
         if settings.json_max_tokens is None:
             settings = replace(settings, json_max_tokens=max(8192, settings.max_tokens or 0))
