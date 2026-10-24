@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from jiaoyi.contracts import (
     FastLoopConfig,
@@ -281,6 +282,25 @@ class JevDecisionModel:
             model_version=self._cfg.jev_model or "unpinned",
             latency_ms=max(latency_ms, 0.0),
         )
+
+
+_BUSY = re.compile(
+    r"\b5\d\d\b|overload|InternalServerError|ServiceUnavailable|BadGateway|Bad Gateway",
+    re.IGNORECASE,
+)
+
+
+def error_kind(error: str | None) -> Literal["busy", "timeout", "cooldown", "other"]:
+    """Jev 失败按类型分：busy = 服务方繁忙（5xx / 529 过载），timeout = 超时，cooldown = 我们自己
+    连续出错后的冷却，other = 鉴权、解析失败等。"""
+    msg = error or ""
+    if "冷却中" in msg:
+        return "cooldown"
+    if "超时" in msg or "Timeout" in msg:
+        return "timeout"
+    if _BUSY.search(msg):
+        return "busy"
+    return "other"
 
 
 _WARMUP_QUESTIONS = (

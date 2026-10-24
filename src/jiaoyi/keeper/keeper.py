@@ -3,6 +3,8 @@
 规则（设计文档 §五）：
 - 只能让仓位更安全：v1 只有 hold / close（全平），不加仓、不放宽止损、不部分减仓。
 - 决策模型失败、没有行情 → hold（维持现状），并且连续计数清零，不拿旧结论凑次数。
+  Jev 服务方繁忙（5xx / 529）或超时：本轮隔 ``RETRY_AFTER_S`` 秒再问 1 次，还不行才维持现状
+  （两次加起来几秒，赶得上下一轮）。面板上写大白话，原始报错留在决策记录的 output 里。
 - 平仓要概率明显过线（``keeper_close_p_strong``），或者过线（``keeper_close_p``）且连续
   ``keeper_confirmations`` 次一致，防止反复横跳。
 - 代码规则加一票：只有新作战卡的方向和持仓相反时，平仓概率至少按过线算（仍需连续确认）。
@@ -13,8 +15,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 
 from jiaoyi.contracts import (
@@ -30,8 +33,17 @@ from jiaoyi.contracts import (
     PositionRecord,
 )
 from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.gate.jev import error_kind
 from jiaoyi.gate.questions import hold_questions, hold_snapshot, jev_log_fields
 from jiaoyi.interfaces import DecisionModel
+
+RETRY_AFTER_S = 1.0
+_FAIL_TEXT = {
+    "busy": "Jev 服务方繁忙（已重试 1 次），本轮维持现状",
+    "timeout": "Jev 超时（已重试 1 次），本轮维持现状",
+    "cooldown": "Jev 连续出错在冷却，本轮维持现状",
+    "other": "Jev 调用出错，本轮维持现状",
+}
 
 
 class JevKeeper:
@@ -45,9 +57,11 @@ class JevKeeper:
         card: Callable[[datetime], BattleCard | None],
         recorder: RoleRecorder | None = None,
         blocked: Callable[[], Mapping[str, str]] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。"""
         self._model = model
+        self._sleep = sleep
         self._blocked = blocked or dict
         self._cfg = cfg
         self._features = features
@@ -78,6 +92,10 @@ class JevKeeper:
             questions=hold_questions(),
         )
         resp = await self._model.ask(request)
+        if not resp.ok and error_kind(resp.error) in ("busy", "timeout"):
+            await self._sleep(RETRY_AFTER_S)  # 服务方一时过载 / 超时：本轮再问一次
+            request = request.model_copy(update={"request_id": f"{request.request_id}-r"})
+            resp = await self._model.ask(request)
         if not resp.ok:
             self._streak.pop(pid, None)
             return self._verdict(
@@ -86,7 +104,7 @@ class JevKeeper:
                 "hold",
                 0.0,
                 1,
-                f"决策模型不可用，维持现状：{resp.error}",
+                _FAIL_TEXT[error_kind(resp.error)],
                 request,
                 resp,
             )
