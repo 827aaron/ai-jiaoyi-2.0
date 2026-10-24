@@ -89,6 +89,11 @@ def test_classify() -> None:
     assert classify("COINUSDT") is Category.CRYPTO_STOCK
     assert classify("XAUUSDT") is Category.PRECIOUS_METAL
     assert classify("PEPEUSDT") is Category.ALT
+    assert classify("PAXGUSDT") is Category.PRECIOUS_METAL  # 链上黄金按金属算
+    assert classify("INTCUSDT", "tradifi_perpetual equity") is Category.US_TECH  # 名单外按类型识别
+    assert classify("XPDUSDT", "") is Category.PRECIOUS_METAL
+    assert classify("WTIUSDT", "tradifi_perpetual commodity") is Category.PRECIOUS_METAL
+    assert classify("NEWUSDT", "tradifi_perpetual") is Category.US_TECH  # 认不出的传统资产跟美股走
 
 
 async def test_screener_reports_its_own_status(now: datetime, tmp_path: Path) -> None:
@@ -225,3 +230,17 @@ async def test_tiers_and_us_events(now: datetime) -> None:
     )
     assert all(e.tier is None for e in pool.entries)
     assert "us_open" not in next(e for e in pool.entries if e.symbol == "TSLAUSDT").score_breakdown
+
+
+async def test_tradfi_perps_stay_out_until_allowed(now: datetime) -> None:
+    from jiaoyi.slow.screener import ScreenerConfig
+
+    src = FakeSource([stat("AAAUSDT"), stat("INTCUSDT", kind="tradifi_perpetual equity")])
+    pool = await CodeSymbolScreener(src, ScreenerConfig()).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT"}
+    intc = next(e for e in pool.entries if e.symbol == "INTCUSDT")
+    assert (
+        intc.category is Category.US_TECH and "传统资产永续暂未开放" in intc.filters.failed_reasons
+    )
+    pool = await CodeSymbolScreener(src, ScreenerConfig(allow_tradfi=True)).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "INTCUSDT"}

@@ -49,6 +49,10 @@ class Bias(StrEnum):
     """只看不做。"""
 
 
+PERPETUAL_CONTRACT_TYPES = frozenset({"PERPETUAL", "TRADIFI_PERPETUAL"})
+"""币安永续的 contractType：加密币是 PERPETUAL，美股 / 金属等传统资产永续是 TRADIFI_PERPETUAL。"""
+
+
 class Category(StrEnum):
     """相关性分组，用于分组敞口上限（设计文档 §六）。"""
 

@@ -46,7 +46,9 @@ from jiaoyi.contracts import (
     Side,
     SizeTier,
 )
+from jiaoyi.contracts.common import Category
 from jiaoyi.core.recorder import RoleRecorder, local_day
+from jiaoyi.core.us_hours import us_entry_window
 
 logger = logging.getLogger(__name__)
 
@@ -435,6 +437,16 @@ class RiskGuardImpl:
         if cs is None:
             reasons.append("作战卡里没有这个标的")
             return None
+        f_ = self._fast
+        if (
+            f_.us_hours_gate
+            and cs.category in (Category.US_TECH, Category.CRYPTO_STOCK)
+            and not us_entry_window(now, f_.us_open_delay_min, f_.us_close_lead_min)
+        ):
+            reasons.append(
+                f"美股休市或不在开仓时段（开盘后 {f_.us_open_delay_min} 分钟到收盘前 "
+                f"{f_.us_close_lead_min} 分钟），{signal.symbol} 不开新仓"
+            )
         if cs.bias == Bias.NO_TRADE:
             reasons.append("作战卡：这个标的只看不做")
         elif cs.bias.value != "both" and cs.bias.value != signal.side_hint.value:

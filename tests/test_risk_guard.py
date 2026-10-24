@@ -625,3 +625,26 @@ def test_book_depth_shrinks_size_without_rejecting(now: datetime) -> None:
     assert v.intent is not None and v.intent.notional_usdt <= 500.0  # 做多吃卖盘 1000U × 0.5
     off = guard(max_notional_book_frac=0.0).review(signal(now, f=f), size, cd, acct, now)
     assert off.intent is not None and off.intent.notional_usdt > 1000.0  # 关掉不看盘口
+
+
+def test_us_hours_gate_blocks_equity_entries_outside_window() -> None:
+    from datetime import UTC, datetime
+
+    def verdict(at: datetime, category: str, **fast: object) -> c.RiskVerdict:
+        return guard(**fast).review(signal(at), jev(), card(at, category=category), account(at), at)
+
+    ok = datetime(2026, 10, 23, 14, 0, tzinfo=UTC)  # 周五 10:00 美东
+    assert verdict(ok, "us_tech").approved
+    for at in (
+        datetime(2026, 10, 23, 13, 40, tzinfo=UTC),  # 9:40，开盘后不满 15 分钟
+        datetime(2026, 10, 23, 19, 50, tzinfo=UTC),  # 15:50，收盘前 15 分钟内
+        datetime(2026, 10, 24, 14, 0, tzinfo=UTC),  # 周六
+    ):
+        v = verdict(at, "crypto_stock")
+        assert not v.approved and any("美股休市" in r for r in v.reasons)
+    closed = datetime(2026, 10, 24, 14, 0, tzinfo=UTC)
+    assert verdict(closed, "precious_metal").approved  # 金属不受美股时段限制
+    assert verdict(closed, "us_tech", us_hours_gate=False).approved  # 开关关掉
+    assert verdict(
+        datetime(2026, 10, 23, 13, 40, tzinfo=UTC), "us_tech", us_open_delay_min=0
+    ).approved

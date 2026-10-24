@@ -154,6 +154,11 @@ class ScreenerSection(_Strict):
         "选币页单独改过的类别以选币页为准。",
     )
     tiers: TiersSection = TiersSection()
+    allow_tradfi: bool = Field(
+        default=False,
+        description="让币安 TRADIFI_PERPETUAL（美股 / 金属等传统资产永续）进池。"
+        "默认关：等在 Demo 上把开平仓、保命止损、行情流整条链验证完再开。",
+    )
     us_events: bool = Field(
         default=True,
         description="美股类别（加密概念股 / 美股科技）用美股开盘时段和财报日历：开盘期间加分，"
@@ -558,6 +563,7 @@ class SlowConfig(_Strict):
             tiers=s.tiers.enabled,
             tier_head=s.tiers.head,
             tier_mid=s.tiers.mid,
+            allow_tradfi=s.allow_tradfi,
             us_events=s.us_events,
             us_open_bonus=s.us_open_bonus,
             category_caps={c: r.cap for c, r in s.categories.items() if r.cap is not None},

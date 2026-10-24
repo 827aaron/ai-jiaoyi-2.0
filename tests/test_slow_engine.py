@@ -132,7 +132,7 @@ def test_directional_card_with_empty_signals_gets_default_set() -> None:
     assert "按默认全部信号" in cs.reason
 
 
-VOLS = (("BTCUSDT", "9e9"), ("ETHUSDT", "5e9"), ("XUSDT", "1e9"))
+VOLS = (("BTCUSDT", "9e9"), ("ETHUSDT", "5e9"), ("XUSDT", "1e9"), ("TSLAUSDT", "2e9"))
 
 
 def _binance_handler(req: httpx.Request) -> httpx.Response:
@@ -144,6 +144,9 @@ def _binance_handler(req: httpx.Request) -> httpx.Response:
              "onboardDate": now_ms - 30 * 86_400_000}
             for s in ("BTCUSDT", "ETHUSDT")
         ]  # fmt: skip
+        syms.append({"symbol": "TSLAUSDT", "status": "TRADING", "contractType": "TRADIFI_PERPETUAL",
+                     "quoteAsset": "USDT", "underlyingType": "EQUITY",
+                     "onboardDate": now_ms - 30 * 86_400_000})  # fmt: skip
         return httpx.Response(200, json={"symbols": syms})
     if p == "/fapi/v1/ticker/24hr":
         return httpx.Response(200, json=[
@@ -152,11 +155,12 @@ def _binance_handler(req: httpx.Request) -> httpx.Response:
         ])  # fmt: skip
     if p == "/fapi/v1/ticker/bookTicker":
         return httpx.Response(200, json=[
-            {"symbol": s, "bidPrice": "99.99", "askPrice": "100.01"} for s in ("BTCUSDT", "ETHUSDT")
+            {"symbol": s, "bidPrice": "99.99", "askPrice": "100.01"}
+            for s in ("BTCUSDT", "ETHUSDT", "TSLAUSDT")
         ])  # fmt: skip
     if p == "/fapi/v1/premiumIndex":
         return httpx.Response(200, json=[
-            {"symbol": s, "lastFundingRate": "0.0005"} for s in ("BTCUSDT", "ETHUSDT")
+            {"symbol": s, "lastFundingRate": "0.0005"} for s in ("BTCUSDT", "ETHUSDT", "TSLAUSDT")
         ])  # fmt: skip
     if p == "/fapi/v1/depth":
         return httpx.Response(200, json={"bids": [["99.9", "1000"]], "asks": [["100.1", "500"]]})
@@ -177,7 +181,8 @@ async def test_binance_stats_source(now: datetime) -> None:
     )
     stats = await BinanceStatsSource(client).fetch(now)
     by = {s.symbol: s for s in stats}
-    assert set(by) == {"BTCUSDT", "ETHUSDT"}  # XUSDT 不是在交易的永续，被排除
+    assert set(by) == {"BTCUSDT", "ETHUSDT", "TSLAUSDT"}  # XUSDT 不是在交易的永续，被排除
+    assert "tradifi_perpetual" in by["TSLAUSDT"].kind and "equity" in by["TSLAUSDT"].kind
     b = by["BTCUSDT"]
     assert b.spread_bps == pytest.approx(2.0, rel=0.01)
     assert b.depth_usdt == pytest.approx(100.1 * 500)  # 取较小的一边

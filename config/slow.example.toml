@@ -31,6 +31,7 @@ min_listed_days = 7                # 至少上线几天，推荐 7
 min_range_24h_pct = 0              # 24 小时波动下限（%），0 = 不设；推荐 1.5
 max_range_24h_pct = 0              # 24 小时波动上限（%），0 = 不设；推荐 30
 default_category_cap = 30          # 每一类币默认最多进池几个（选币页单独改过的以选币页为准）
+allow_tradfi = false               # 美股 / 金属永续（TRADIFI_PERPETUAL）是否进池：默认关，Demo 上验证完整条链再开
 us_events = true                   # 美股类别（币股 / 美股科技）：开盘期间加分、财报日前后标注，军师团新闻带上财报日
 us_open_bonus = 0.08               # 美股常规盘开盘期间加多少分（总分满分约 1；0 = 不加）
 vol_full_multiple = 20             # 打分：24h 波动是来回手续费的几倍算满分

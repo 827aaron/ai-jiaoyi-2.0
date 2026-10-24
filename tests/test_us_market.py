@@ -4,7 +4,8 @@ from datetime import UTC, date, datetime
 
 import httpx
 
-from jiaoyi.slow.us_market import EarningsCalendar, EarningsNews, us_holidays, us_session
+from jiaoyi.core.us_hours import us_holidays, us_session
+from jiaoyi.slow.us_market import EarningsCalendar, EarningsNews
 
 
 def test_us_session_hours_weekends_and_holidays() -> None:

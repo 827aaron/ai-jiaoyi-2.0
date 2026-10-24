@@ -109,6 +109,17 @@ class FakeCcxtMarkets:
             "c": market("ETH/USDT:USDT", info={"contractType": "PERPETUAL", "status": "BREAK"}),
             "d": market("SOL/USDT", swap=False),  # 现货，跳过
             "e": market("XRP/USDT:USDT", info={"contractType": "PERPETUAL", "status": "TRADING"}),
+            "f": market(  # 美股永续：ccxt 不一定标成 swap，按 exchangeInfo 的字段认
+                "TSLA/USDC",
+                swap=False,
+                info={
+                    "symbol": "TSLAUSDT",
+                    "contractType": "TRADIFI_PERPETUAL",
+                    "quoteAsset": "USDT",
+                    "status": "TRADING",
+                    "filters": [{"filterType": "LOT_SIZE", "stepSize": "0.01", "minQty": "0.01"}],
+                },
+            ),
         }
 
 
@@ -116,7 +127,10 @@ async def test_ccxt_lot_filters_mapping() -> None:
     ex = CcxtBinanceFutures("k", "s", testnet=True)
     await ex._ex.close()
     ex._ex = FakeCcxtMarkets()
-    assert await ex.lot_filters() == {"BTCUSDT": LotFilter(0.001, 0.002, 100.0, max_qty=120.0)}
+    assert await ex.lot_filters() == {
+        "BTCUSDT": LotFilter(0.001, 0.002, 100.0, max_qty=120.0),
+        "TSLAUSDT": LotFilter(0.01, 0.01, 0.0),
+    }
 
 
 async def test_max_qty_flows_through_provider() -> None:
