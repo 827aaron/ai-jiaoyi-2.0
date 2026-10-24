@@ -627,3 +627,27 @@ async def test_limit_take_profit_falls_back_to_market(tmp_path: Path, now: datet
     await r.on_event(trade(68395.0))  # 越过满 10 秒还在：改市价平
     await asyncio.gather(*r._tasks)
     assert ex.closed == [("pos-0001", CloseReason.TAKE_PROFIT)]
+
+
+async def test_keeper_tick_reviews_positions_concurrently(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi import loop
+
+    app = _app(tmp_path, now)
+    ex = FakeExecutor()
+    ex.held = [_position(position_id=f"pos-{i}", symbol=f"S{i}USDT") for i in range(7)]
+    running = peak = 0
+
+    class SlowKeeper(FakeKeeper):
+        async def review(self, position: c.PositionRecord, at: datetime) -> c.KeeperVerdict:
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0.01)
+            running -= 1
+            return await super().review(position, at)
+
+    keeper = SlowKeeper("hold")
+    app.m = dataclasses.replace(app.m, executor=ex, keeper=keeper)
+    await Runner(app).keeper_tick()
+    assert sorted(keeper.reviewed) == sorted(p.position_id for p in ex.held)
+    assert peak == loop.KEEPER_CONCURRENCY  # 并发问，但不超过上限
