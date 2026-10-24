@@ -255,6 +255,14 @@ class FastLoopConfig(Contract):
         le=5.0,
         description="单笔名义 ≤ 吃单一侧前 5 档挂单额 × 这个比例，超了缩单不拒（0 = 不看盘口）。",
     )
+    margin_safety_pct: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=50.0,
+        description="开仓要的保证金（名义 ÷ 杠杆 + 开仓手续费）最多用到可用保证金的 (100 − 这个)%，"
+        "超了缩单不拒。留的余量给下单前的价格变动和币安市价单的开仓损失，"
+        "否则 hummingbot 会报「Not enough budget」不下单。",
+    )
     limit_take_profit: bool = Field(
         default=True,
         description="paper：开仓成交后挂只减仓限价止盈（挂单费 2bp，碰到价位就成交）。改了要重启。",

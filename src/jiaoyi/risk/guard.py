@@ -593,7 +593,11 @@ class RiskGuardImpl:
             "总敞口余量": risk.max_total_exposure_x * equity - account.open_notional_usdt,
             "相关组敞口余量": risk.category_exposure_x[cs.category] * equity
             - account.open_notional_by_category.get(cs.category, 0.0),
-            "可用保证金": account.available_usdt * lev,
+            # hummingbot 下单前按「名义 ÷ 杠杆 + 开仓手续费」核保证金，不够就整笔不下
+            # （BTC 那几笔：要 2,871U，可用 2,852U）。按同样的口径算，再留一点余量
+            "可用保证金": account.available_usdt
+            * (1.0 - fast.margin_safety_pct / 100.0)
+            / (1.0 / lev + risk.taker_fee_bps / 1e4),
         }
         book_cap = self._book_cap(f, side)
         if book_cap is not None:
