@@ -219,3 +219,24 @@ async def test_phantom_with_wrongly_backfilled_entry_is_fixed(tmp_path: Path) ->
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     assert rec.status is PositionStatus.FAILED
     assert rec.entry_price == 68044.0 and rec.intended_price is None
+
+
+async def test_closed_position_entry_not_taken_from_later_trades(tmp_path: Path) -> None:
+    """没开成的单不能把之后同币另一笔仓的开仓成交认成自己的入场（ENA pos-a25378cb3244）。"""
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, price=68044.0)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    q = tracked.record.quantity
+    rig.adapter._set(
+        tracked,
+        status=PositionStatus.CLOSED,
+        close_reason=CloseReason.MANUAL,
+        closed_at=START + timedelta(seconds=2),
+        realized_pnl_usdt=0.0,
+    )
+    rig.ex.trades = [_t(3600, "buy", 67000.0, q, 0.1)]  # 一小时后另一笔多单开仓
+    rig.t = START + timedelta(hours=2)
+    assert await rig.adapter.backfill_fills(rig.ex.user_trades) == 1
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.FAILED and rec.entry_price == 68044.0

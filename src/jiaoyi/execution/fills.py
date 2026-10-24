@@ -90,9 +90,14 @@ def close_side(side: Side) -> str:
 
 
 def entry_fill(rec: PositionRecord, trades: Iterable[TradeFill]) -> Fill | None:
-    """开仓成交只认没有已实现盈亏的：同币上一笔仓在开仓前 10 秒内平掉时，它的平仓成交方向可能
-    和这笔开仓一样（空单止盈买入 → 多单开仓也是买），不能当成这笔的入场。"""
-    opens = [t for t in trades if t.realized_pnl == 0]
+    """开仓成交只认这笔仓自己的时间窗（开仓前 10 秒到平仓后 60 秒）里、没有已实现盈亏的成交。
+
+    - 已平的仓不能往后找：没开成的单会把之后同币另一笔仓的开仓成交认成自己的入场
+      （ENA 03:02 那笔就这样被回填了入场价）。
+    - 同币上一笔仓在开仓前 10 秒内平掉时，它的平仓成交方向可能和这笔开仓一样
+      （空单止盈买入 → 多单开仓也是买），平仓成交有已实现盈亏，不算。"""
+    end = rec.closed_at + CLOSE_SLACK if rec.closed_at is not None else None
+    opens = [t for t in trades if t.realized_pnl == 0 and (end is None or t.time <= end)]
     return _take(opens, open_side(rec.side), rec.quantity, rec.opened_at - OPEN_SLACK)
 
 
