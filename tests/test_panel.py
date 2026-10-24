@@ -1219,3 +1219,31 @@ def test_settings_majors_list_and_names_edit(tmp_path: Path) -> None:
     assert _coerce_names("k", []) == []
     with pytest.raises(ActionError):
         _coerce_names("k", ["BTC-1"])
+
+
+def test_pnl_curve_record_and_read(tmp_path: Path) -> None:
+    from jiaoyi.panel import pnl_curve
+
+    t = datetime(2026, 10, 24, 1, 0, tzinfo=UTC)
+    (tmp_path / "pnl_curve").mkdir()
+    (tmp_path / "pnl_curve" / "2026-10-01.jsonl").write_text("")  # 超过 14 天的删掉
+    for i, eq in enumerate([1000.0, 1030.0, 990.0, 1010.0]):
+        pnl_curve.record(tmp_path, "2026-10-24", t + timedelta(minutes=i), eq, 1000.0)
+    assert not (tmp_path / "pnl_curve" / "2026-10-01.jsonl").exists()
+    with (tmp_path / "pnl_curve" / "2026-10-24.jsonl").open("a") as f:
+        f.write('{"ts": "2026-10-24T01:0')  # 写到一半的行跳过
+    now = pnl_curve.PnlPoint(ts=t + timedelta(minutes=4), pnl_usdt=5.0)
+    c = pnl_curve.read(tmp_path, "2026-10-24", 1000.0, now)
+    assert [p.pnl_usdt for p in c.points] == [0.0, 30.0, -10.0, 10.0, 5.0]
+    assert c.high and c.high.pnl_usdt == 30.0 and c.high.ts == t + timedelta(minutes=1)
+    assert c.low and c.low.pnl_usdt == -10.0 and c.now == now
+    # 基准按现在的算（0 点基准事后改了，整条曲线跟着平移）
+    assert pnl_curve.read(tmp_path, "2026-10-24", 990.0).high.pnl_usdt == 40.0  # type: ignore[union-attr]
+    assert pnl_curve.read(tmp_path, "2026-10-23", None).points == []
+
+
+def test_pnl_curve_endpoint(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    with _client(tmp_path, "127.0.0.1") as client:
+        body = client.get("/api/pnl-curve").json()
+        assert body["day"] == "2026-10-22" and isinstance(body["points"], list)

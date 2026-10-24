@@ -488,3 +488,18 @@ tr.fade td { opacity: 0.55; }
   .bc-c::before { content: attr(data-k) " "; color: var(--dim); font-size: 11px; }
 }
 .card-eff { margin: 6px 0 2px; line-height: 1.5; }
+
+/* 今日盈亏曲线（总览「今日盈亏」点开） */
+.pnl-curve { margin: 4px 0 14px; }
+.pnl-curve svg { display: block; width: 100%; height: auto; touch-action: pan-y; cursor: crosshair; }
+.pc-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; margin-bottom: 6px; }
+.pc-line { fill: none; stroke: var(--hi); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.pc-fill { stroke: none; opacity: 0.14; }
+.pc-fill.up { fill: var(--up); } .pc-fill.dn { fill: var(--down); }
+.pc-zero { stroke: var(--dim); stroke-dasharray: 4 4; stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.6; }
+.pc-cur { stroke: var(--dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.pnl-curve circle { vector-effect: non-scaling-stroke; stroke: var(--card); stroke-width: 2; }
+.pnl-curve circle.hi { fill: var(--up); } .pnl-curve circle.lo { fill: var(--down); } .pnl-curve circle.now { fill: var(--hi); }
+.pc-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
+/* 说明列可以折行，数字列留在框里（今日盈亏明细） */
+table.wrap1 td:first-child { white-space: normal; }
