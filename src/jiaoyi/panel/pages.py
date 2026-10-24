@@ -35,6 +35,7 @@ from jiaoyi.panel.overview import (
     STALE_S,
     LampState,
     PositionView,
+    _card,
     compute_kpis,
     fee_rate_bps,
     position_views,
@@ -118,6 +119,11 @@ class RoleCard(BaseModel):
     next_run_at: datetime | None = None
     summary: str | None = None
     """模块报的「刚刚做了什么」；没报就是 None（面板不显示这一行，不猜）。"""
+    detail: list[str] = []
+    """模块报的每币一行（哨兵：量比 / 主动占比 / 离阈值多远 / 跳过原因）。
+    哨兵只留现在作战卡上的币和持仓币（它会列启动以来看过的所有币）。"""
+    detail_hidden: int = 0
+    """哨兵：掉出作战卡、也没持仓、所以没显示的币数。"""
 
 
 class TeamPage(BaseModel):
@@ -290,7 +296,8 @@ def build_team(
     records = files.decisions_today(now)
     run = _run_info(files, status, now)
     meetings = list_meetings(files.root, now)
-    holding = len(files.ledger().live())
+    live = files.ledger().live()
+    holding = len(live)
     chain = _latest_chain(records, _round_start(records))
     acted = {r.role for r in records}
     cards = []
@@ -301,6 +308,13 @@ def build_team(
         if card.doing is None and role in _WATCHERS and run.running and _healthy(card, st):
             card.doing = _WATCHERS[role]
         card.progress = _progress(card, st, chain, holding, role in acted, now, run.tz)
+        if role is Role.SENTINEL and card.detail:
+            held = {p.symbol for p in live}
+            cv = _card(records, now, held)
+            keep = held | ({r.symbol for r in cv.symbols} if cv is not None and cv.valid else set())
+            shown = [ln for ln in card.detail if ln.split(" ", 1)[0] in keep]
+            card.detail_hidden = len(card.detail) - len(shown)
+            card.detail = shown
         cards.append(card)
     chosen = selected or Role.GATE
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
@@ -451,6 +465,7 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
         errors=t.errors,
         avg_latency_ms=t.avg_latency_ms,
         cost_usd=t.cost_usd,
+        detail=st.detail,
     )
 
 

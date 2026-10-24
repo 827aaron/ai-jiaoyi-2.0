@@ -1284,6 +1284,25 @@ function bookReaderCard(r, snap) {
     <div class="note">盘口员只计数，不逐条记录（一天上万条行情，记下来没法看）。有信号会交给哨兵，哨兵那里能看到每一条。</div>
     ${rows ? `<div class="mt">${rows}</div>` : '<div class="dim mt">还没有报过状态。</div>'}${tapeTables(snap)}</section>`;
 }
+// 哨兵每币一行（module_status.detail）拆成表：币 | 现在 | 离出信号还差 | 1 小时内最高 | 没出的原因
+function sentinelCard(r) {
+  const rows = (r.detail || []).map((line) => {
+    const sp = line.indexOf(" ");
+    const sym = sp > 0 ? line.slice(0, sp) : line;
+    const segs = (sp > 0 ? line.slice(sp + 1) : "").split("；");
+    let now = segs[0] || "", need = "";
+    const k = now.lastIndexOf("，");
+    if (k > 0 && /还差|够/.test(now.slice(k + 1))) [now, need] = [now.slice(0, k), now.slice(k + 1)];
+    const peak = (segs.find((x) => x.startsWith("1 小时内最高")) || "").replace(/^1 小时内最高\s*/, "");
+    const why = segs.filter((x) => x.startsWith("上次跳过") || x.startsWith("不在作战卡上")).join("；");
+    const ok = need === "够量能突增";
+    return `<tr><td class="hi nowrap">${coin(sym)}</td><td>${esc(now)}</td><td class="${ok ? "up" : ""}">${esc(need) || '<span class="dim">—</span>'}</td><td class="num">${esc(peak) || '<span class="dim">—</span>'}</td><td>${esc(why) || '<span class="dim">—</span>'}</td></tr>`;
+  }).join("");
+  return `<section class="card mt"><div class="ch"><h2>哨兵 · 每个币为什么还没出信号</h2><span class="r">${r.last_beat ? "心跳 " + hms(r.last_beat) : "没有心跳"}</span></div>
+    ${r.headline ? `<div class="note">${esc(r.headline)}</div>` : ""}
+    ${rows ? `<div class="tw scroll"><table><thead><tr><th>币</th><th>现在（成交量是平时几倍 · 主动买卖哪边多）</th><th>离出信号还差</th><th>1 小时内最高</th><th>上次没出的原因</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="foot">只列现在作战卡上的币和持仓币${r.detail_hidden ? `（另有 ${r.detail_hidden} 个已掉出作战卡的币没列）` : ""}。阈值在「设置 › 执行 › 信号识别」：量能突增要量够倍数、而且主动买或卖占比够高；放量突破还要价格突破关键位。没出信号不一定是坏事，可能只是没行情。</div>` : `<div class="dim">${r.detail_hidden ? `现在作战卡上没有币、也没持仓（另有 ${r.detail_hidden} 个已掉出作战卡的币没列）。` : "哨兵还没报每个币的情况（主程序更新后才有）。"}</div>`}</section>`;
+}
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
@@ -1293,6 +1312,7 @@ P.team = () => {
   return `${cards}
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
+    ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
       <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}

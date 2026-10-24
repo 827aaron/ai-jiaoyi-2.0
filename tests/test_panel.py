@@ -1167,3 +1167,23 @@ def test_history_flags_trade_without_numbers(tmp_path: Path) -> None:
     files = PanelFiles(tmp_path, RISK.day_reset_tz)
     [row] = build_history(files, RISK, NOW, "today", include_tests=True).rows
     assert row.pnl_missing
+
+
+def test_team_shows_sentinel_detail(tmp_path: Path) -> None:
+    """哨兵报的每币一行带到团队页；掉出作战卡、也没持仓的币不列，只记个数。"""
+    from jiaoyi.panel.pages import build_team
+
+    _seed(tmp_path)  # BTC 有持仓
+    line = "BTCUSDT 量 1.2 倍（突增要 4、突破要 3）主动买 55%，量能突增还差 2.8 倍"
+    gone = "DOGEUSDT 量 0.9 倍（突增要 4、突破要 3）主动卖 52%，量能突增还差 3.1 倍；不在作战卡上"
+    st = c.ModuleStatus(
+        role=c.Role.SENTINEL, health=c.Health.OK, ts=NOW, headline="卡上能出信号的 1 个币",
+        detail=[line, gone],
+    )  # fmt: skip
+    (tmp_path / "module_status.json").write_text(
+        json.dumps({st.role.value: st.model_dump(mode="json")})
+    )
+    team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, c.Role.SENTINEL)
+    sent = next(r for r in team.roles if r.role is c.Role.SENTINEL)
+    assert sent.detail == [line] and sent.detail_hidden == 1
+    assert sent.headline == "卡上能出信号的 1 个币"
