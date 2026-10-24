@@ -79,6 +79,8 @@ def _meeting(
         "app": {
             "slow_loop_interval_min": interval_min,
             "screener_interval_min": interval_min,  # 选币跟开会同节奏
+            "pool_size": 40,  # 每次选多少个币进候选池（各档同值，改它在网页上按档位自定义）
+            "card_pick_max": 20,  # 军师团每次最多挑几个（真正开会的数再被 max_cards_per_round 压）
             "predictor_enabled": True,
         },
         "slow.schedule": {

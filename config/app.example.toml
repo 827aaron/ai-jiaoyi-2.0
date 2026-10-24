@@ -13,8 +13,8 @@ jev_max_concurrent = 4       # 拍板人同时最多判几个信号（不同币�
 # keeper_interval_s = 20     # 最长持仓档：持仓管家多久看一次（30m 10 秒 / 1h 15 / 2h 20 / 4h 30）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
 # slow_loop_interval_min = 60  # 开会间隔档 = 军师团开会间隔（15m 15 分钟 … 1h 60 … 24h 1440）
-pool_size = 40               # 候选池 30–50
-card_pick_max = 20           # 军师每次最多挑 20 个
+# pool_size = 40             # 每次选多少个币进候选池；不写 = 跟档位（现在各档都是 40）
+# card_pick_max = 20         # 军师每次最多挑几个；不写 = 跟档位（现在各档都是 20）
 data_dir = "data"            # 决策日志、模块状态写在这里
 # sim_environment = "demo"   # paper / testnet 连哪个模拟环境：demo（币安 Demo Trading，默认）/ legacy_testnet（旧测试网，已停用）
 # reconciler_close_unknown_positions = false  # 对账员遇到“不认识的仓位”：false = 只告警（默认）；true = 直接平掉。M4 前由你决定
