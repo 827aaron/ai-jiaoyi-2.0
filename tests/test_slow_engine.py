@@ -633,3 +633,18 @@ def test_meter_reports_the_model_of_each_call() -> None:
     gen = SimpleNamespace(message=None, generation_info={"finish_reason": "stop"})
     meter.record_response(SimpleNamespace(llm_output={"model_name": "flash"}, generations=[[gen]]))
     assert seen == ["flash"]
+
+
+def test_convert_instructions_describe_new_signal_kinds() -> None:
+    from jiaoyi.core.config import load_risk_config
+    from jiaoyi.slow import ta_prompts
+    from jiaoyi.slow.tradingagents_engine import convert_instructions
+    from tests.conftest import ROOT
+
+    risk = load_risk_config(ROOT / "config" / "risk.example.toml")
+    short = convert_instructions(risk, ta_prompts.PromptParams.for_hold("1h"))
+    long_ = convert_instructions(risk, ta_prompts.PromptParams.for_hold("24h"))
+    for kind in ("oi_follow", "top_vs_crowd", "btc_lead"):
+        assert kind in short and kind in long_
+    assert "Best fit at this horizon: btc_lead" in short
+    assert "Best fit at this horizon: oi_follow" in long_ and "top_vs_crowd (" in long_

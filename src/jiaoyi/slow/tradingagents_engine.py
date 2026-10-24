@@ -944,6 +944,30 @@ def draft_to_card_symbol(
 
 
 # ---------------------------------------------------------------- 引擎
+def signal_kinds_note(hold_minutes: int) -> str:
+    """allowed_signals 里三种新信号怎么选：默认放宽，有方向又没有排除理由就都允许。"""
+    kinds = [
+        "oi_follow (open interest building in the direction of the move; trend-following)"
+        if hold_minutes >= 120
+        else "",
+        "top_vs_crowd (fade the crowd when top traders lean the other way; contrarian)"
+        if hold_minutes >= 480
+        else "",
+        "btc_lead (BTC moved first and this alt follows; alt cards only)"
+        if hold_minutes <= 120 and hold_minutes >= 30
+        else "",
+    ]
+    fit = "; ".join(k for k in kinds if k)
+    return (
+        "Besides the older signals, three newer ones may be allowed: oi_follow, top_vs_crowd "
+        "and btc_lead. Be generous: when the card has a direction and you have no reason to "
+        "exclude them, allow them too. Best fit at this horizon: "
+        f"{fit or 'none specially'}. "
+        "Leave oi_follow out only if the conclusion fades the move, top_vs_crowd out only if "
+        "it is a pure breakout chase, and btc_lead out for BTC itself.\n"
+    )
+
+
 def convert_instructions(
     r: RiskConfig,
     p: ta_prompts.PromptParams | None = None,
@@ -987,6 +1011,7 @@ def convert_instructions(
         "as above. An Entry Zone of none gives no zone.\n"
         "Choose allowed_signals to match the entry method in the conclusion; do not pick only "
         "chase-style signals when the conclusion waits for a zone.\n"
+        f"{signal_kinds_note(p.hold_minutes)}"
         "reason: in Chinese (at most 500 characters); state the direction, entry zone, "
         "invalidation price and why this is a view of the next {H}.",
         p,
