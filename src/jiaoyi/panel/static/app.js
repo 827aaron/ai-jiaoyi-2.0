@@ -1560,6 +1560,9 @@ const PLAIN = {
   "screener.liq_full_usdt": "1 小时强平多少 U 算满分",
   "screener.us_events": "美股类用开盘时段和财报日历",
   "screener.us_open_bonus": "美股开盘期间，美股类的币总分加多少",
+  "screener.major_top_n": "主流币按市值前几名算",
+  "screener.major_include": "手动算主流的币",
+  "screener.major_exclude": "手动排除出主流的币",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
   "tiers.head": "头部几个币（开放交易）",
   "tiers.mid": "中部几个币",
@@ -1690,7 +1693,7 @@ const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.val
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
 const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4" };
 // 这几项填 0 = 不设限
-const ZERO_AS = { min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查" };
+const ZERO_AS = { major_top_n: "只用固定 7 个", min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查" };
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
 const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
 function humanDur(sec) {
@@ -1706,7 +1709,7 @@ function durOf(key, v) {
   const u = UNIT_S.find(([suf]) => key.endsWith(suf));
   return u ? humanDur(v * u[1]) : null;
 }
-const fmtVal = (v, i) => Array.isArray(v) ? esc(v.map((c) => choiceLabel(i ? i.key : "", c)).join("、") || "一个都不选") : (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[`${i.sec}.${i.key}`] || NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
+const fmtVal = (v, i) => i && i.names ? esc((v || []).join(" ") || "没有") : Array.isArray(v) ? esc(v.map((c) => choiceLabel(i ? i.key : "", c)).join("、") || "一个都不选") : (i && !(i.choices && i.choices.length) && durOf(i.key, v)) || (typeof v === "boolean" ? (v ? "开" : "关") : v == null ? (i && i.nullable ? NULL_AS[`${i.sec}.${i.key}`] || NULL_AS[i.key] || "不写（用默认）" : "—") : (i && i.choices && i.choices.length) || (typeof v === "string" && CHOICE[v]) ? esc(choiceLabel(i ? i.key : "", v)) : esc(v));
 // 档位 = 军师团开会间隔（Aaron 2026-10-23），不是持仓时长；单笔最长持仓另设
 const profileSpan = (p) => { const m = /^(\d+)(h|m)$/.exec(p); return m ? (m[2] === "h" ? `${m[1]} 小时` : `${m[1]} 分钟`) : p; };
 const profileNote = (p) => `军师团每 ${profileSpan(p)}开一次会${p === "1h" ? "（默认）" : ""}`;
@@ -1852,6 +1855,7 @@ const ADV = [
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.predictor_against_runs", "schedule.entry_max_card_age_min"] },
     { g: "AI 花费上限", hint: "军师团每天最多花多少（曼谷 0 点清零）；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min"] },
     { g: "选币", keys: ["app.pool_size", "app.card_pick_max"] },
+    { g: "主流币名单", extra: "majors", hint: "「主流币」这一类按市值前几名算，每天自动更新一次（去掉稳定币和包装币）。填 0 = 只用固定 7 个（BTC ETH BNB SOL XRP DOGE ADA）。手动算主流 / 排除的填币名，空格隔开。", keys: ["screener.major_top_n", "screener.major_include", "screener.major_exclude"] },
     { g: "选币规则：门槛", warn: "screener_cautions", hint: "每小时用代码把全部币安 U 本位永续筛一遍，过不了门槛的不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap"] },
     { g: "选币规则：打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
     { g: "分档交易", warn: "tiers_cautions", hint: "候选池按分数从高到低分三档：头部开放交易；中部每天挑几个来做、仓位封顶；其余尾部只看不做。你固定、手动加的币算头部。", keys: ["tiers.enabled", "tiers.head", "tiers.mid", "tiers.mid_daily_pick", "tiers.mid_size_max"] },
@@ -1908,7 +1912,7 @@ function advGroups(d, ix) {
     out[tab.id] = tab.groups.map((g) => {
       const keys = g.cat ? Object.keys(ix).filter((x) => x.startsWith("category.")) : g.keys.flatMap(expand);
       keys.forEach((k) => used.add(k));
-      return { g: g.g, hint: g.hint, warn: g.warn ? d[g.warn] || [] : [], items: keys.map((k) => ix[k]) };
+      return { g: g.g, hint: g.hint, extra: g.extra, warn: g.warn ? d[g.warn] || [] : [], items: keys.map((k) => ix[k]) };
     });
   }
   const rest = Object.keys(ix).filter((k) => !used.has(k));
@@ -1964,13 +1968,25 @@ function toggleItem(el, id) {
   el.setAttribute("aria-expanded", S.stOpen.has(id));
 }
 
+// 现在算主流币的名单（data/majors.json + 手动加入 / 排除）
+function majorsBox(m) {
+  if (!m) return "";
+  const when = m.fetched_at ? `${md(m.fetched_at)} ${hm(m.fetched_at)} 更新` : "";
+  const head = m.fallback
+    ? (m.top_n > 0 ? "还没拉到市值排名，先用固定 7 个" : "只用固定 7 个")
+    : `市值前 ${m.fetched_top_n ?? m.top_n} 名 · ${when}${m.fetched_top_n != null && m.fetched_top_n !== m.top_n ? `（改成前 ${m.top_n} 名后，下一次选币重新拉）` : ""}`;
+  const chip = (r) => `<span class="mj" title="${esc(r.why)}">${esc(r.name)}<small>${r.rank != null ? `#${r.rank}` : r.why === "你手动加入" ? "手动" : ""}</small></span>`;
+  return `<div class="st-majors"><div class="dim small">现在算主流的 ${m.rows.length} 个：${esc(head)}</div><div class="mj-list">${m.rows.map(chip).join("")}</div>${m.excluded.length ? `<div class="dim small">你排除的（按山寨币算）：${esc(m.excluded.join(" "))}</div>` : ""}</div>`;
+}
+
 // 改一项：一个输入框 + 面板密码；段按键自动带
 function editOne(id, useRec) {
   const d = pageData;
   const i = d && settingIndex(d)[id];
   if (!i || !d.writable || !i.editable) return;
   let input;
-  if (i.multi) input = `<span id="dlg-v" class="multi">${i.choices.map((c) => `<label class="small"><input type="checkbox" value="${esc(c)}" ${(i.value || []).includes(c) ? "checked" : ""}> ${esc(choiceLabel(i.key, c))}</label>`).join("")}</span>`;
+  if (i.names) input = `<input id="dlg-v" type="text" autocapitalize="characters" value="${esc((i.value || []).join(" "))}" placeholder="币名空格隔开，如 LINK AVAX；留空 = 没有">`;
+  else if (i.multi) input = `<span id="dlg-v" class="multi">${i.choices.map((c) => `<label class="small"><input type="checkbox" value="${esc(c)}" ${(i.value || []).includes(c) ? "checked" : ""}> ${esc(choiceLabel(i.key, c))}</label>`).join("")}</span>`;
   else if (typeof i.value === "boolean") input = `<select id="dlg-v"><option value="true" ${i.value ? "selected" : ""}>开</option><option value="false" ${i.value ? "" : "selected"}>关</option></select>`;
   else if (i.choices && i.choices.length) {
     const fit = (c) => (i.key === "atr_period_min" && ATR_FIT[c] ? ` · 适合最长持仓 ${ATR_FIT[c][0]}` : "");
@@ -1990,7 +2006,10 @@ function editOne(id, useRec) {
     <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。改完点「重启生效」才用上。</div>`, "保存", false, async () => {
     const el = $("#dlg-v");
     let v;
-    if (i.multi) {
+    if (i.names) {
+      v = [...new Set(el.value.toUpperCase().split(/[\s,，、]+/).filter(Boolean))];
+      if (JSON.stringify(v) === JSON.stringify(i.value || [])) throw new Error("没有改动");
+    } else if (i.multi) {
       v = [...el.querySelectorAll("input:checked")].map((x) => x.value);
       if (JSON.stringify(v) === JSON.stringify(i.value) && !(i.profiled && !i.pinned)) throw new Error("没有改动");
     } else if (el.tagName === "SELECT") v = JSON.parse(el.value);
@@ -2010,7 +2029,7 @@ function editOne(id, useRec) {
       if (i.key === "time_limit_s") v = Math.round(v * 3600);
     }
     // 档位键填了数就算写死（哪怕和档位一样），其余和原值一样算没改
-    if (!i.multi && v === i.value && !(i.profiled && !i.pinned && v !== null)) throw new Error("没有改动");
+    if (!i.multi && !i.names && v === i.value && !(i.profiled && !i.pinned && v !== null)) throw new Error("没有改动");
     const pw = $("#dlg-pw");
     const res = await post("/api/settings", { section: i.sec, changes: { [i.key]: v }, password: pw ? pw.value : "" });
     onOk = null;
@@ -2154,7 +2173,7 @@ function advCard(d, ix) {
   const t = ADV.find((x) => x.id === tab);
   const tabs = ADV.map((x) => `<button role="tab" aria-selected="${x.id === tab}" class="${x.id === tab ? "on" : ""}" data-act="st-tab" data-arg="${x.id}">${x.t}</button>`).join("");
   const body = tab === "keys" ? keysTab(d) : tab === "show" ? showTab(d, ix)
-    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${g.items.map((i) => itemRow(i)).join("")}`).join("");
+    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${g.items.map((i) => itemRow(i)).join("")}${g.extra === "majors" ? majorsBox(d.majors) : ""}`).join("");
   return `<section class="card st"><div class="ch"><h2>高级</h2><span class="r">平时不用动</span></div><div class="st-tabs" role="tablist">${tabs}</div>${body}</section>`;
 }
 

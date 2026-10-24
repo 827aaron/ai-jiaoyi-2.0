@@ -278,6 +278,10 @@ td.nowrap { white-space: nowrap; }
 .st-sum { width: 100%; border: 0; background: transparent; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(64px, auto) 14px; align-items: center; gap: 14px; padding: 11px 18px; min-height: 52px; text-align: left; cursor: pointer; }
 .st-sum:hover { background: var(--bg); }
 .st-arr { padding: 0 18px 12px; }
+.st-majors { padding: 8px 18px 14px; }
+.mj-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.mj { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 8px; border-radius: 6px; background: var(--fill); font-size: 13px; font-weight: 500; }
+.mj small { color: var(--dim); font-weight: 400; font-size: 11px; }
 .hgrid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 4px; margin-bottom: 6px; }
 .hgrid div { text-align: center; font: 500 12px var(--font-disp); font-variant-numeric: tabular-nums; padding: 4px 0; border-radius: 6px; background: var(--bg); color: var(--hi); }
 .hgrid div.hot { background: var(--warn-soft); }
@@ -287,12 +291,12 @@ td.nowrap { white-space: nowrap; }
 @media (max-width: 600px) {
   .hgrid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .st-sum.arr { grid-template-columns: minmax(0, 1fr) 14px; }
-  .st-sum.arr .cur { grid-column: 1 / 2; grid-row: 2; text-align: left; font-size: 13px; white-space: normal; }
+  .st-sum.arr .cur { grid-column: 1 / 2; grid-row: 2; text-align: left; font-size: 13px; white-space: normal; max-width: none; }
   .st-sum.arr .aux { grid-row: 3; }
   .st-sum.arr .chev { grid-column: 2; grid-row: 1; }
 }
 .st-sum .nm { color: var(--hi); font-size: 14px; min-width: 0; }
-.st-sum .cur { font: 600 15px var(--font-disp); color: var(--hi); text-align: right; white-space: nowrap; }
+.st-sum .cur { font: 600 15px var(--font-disp); color: var(--hi); text-align: right; white-space: nowrap; max-width: min(420px, 45vw); overflow: hidden; text-overflow: ellipsis; }
 .st-sum .cur.warn { color: var(--warn); }
 .st-item.big .cur { font-size: 20px; }
 .st-item.ro .cur { color: var(--dim); font-weight: 500; }
