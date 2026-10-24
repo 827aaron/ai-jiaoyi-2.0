@@ -118,6 +118,8 @@ class RoleCard(BaseModel):
     next_run_at: datetime | None = None
     summary: str | None = None
     """模块报的「刚刚做了什么」；没报就是 None（面板不显示这一行，不猜）。"""
+    detail: list[str] = []
+    """模块报的每币一行（哨兵：量比 / 主动占比 / 离阈值多远 / 跳过原因）。"""
 
 
 class TeamPage(BaseModel):
@@ -451,6 +453,7 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
         errors=t.errors,
         avg_latency_ms=t.avg_latency_ms,
         cost_usd=t.cost_usd,
+        detail=st.detail,
     )
 
 

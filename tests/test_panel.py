@@ -1167,3 +1167,20 @@ def test_history_flags_trade_without_numbers(tmp_path: Path) -> None:
     files = PanelFiles(tmp_path, RISK.day_reset_tz)
     [row] = build_history(files, RISK, NOW, "today", include_tests=True).rows
     assert row.pnl_missing
+
+
+def test_team_shows_sentinel_detail(tmp_path: Path) -> None:
+    """哨兵报的每币一行原样带到团队页（页面拆成表）。"""
+    from jiaoyi.panel.pages import build_team
+
+    line = "BTCUSDT 量 1.2 倍（突增要 4、突破要 3）主动买 55%，量能突增还差 2.8 倍"
+    st = c.ModuleStatus(
+        role=c.Role.SENTINEL, health=c.Health.OK, ts=NOW, headline="卡上能出信号的 1 个币",
+        detail=[line],
+    )  # fmt: skip
+    (tmp_path / "module_status.json").write_text(
+        json.dumps({st.role.value: st.model_dump(mode="json")})
+    )
+    team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, c.Role.SENTINEL)
+    sent = next(r for r in team.roles if r.role is c.Role.SENTINEL)
+    assert sent.detail == [line] and sent.headline == "卡上能出信号的 1 个币"
