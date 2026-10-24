@@ -120,7 +120,7 @@ Write these sections, in this order, starting with the rating on its own line:
 - **Take Profit**: one price
 - **Size Tier**: S, M or L
 - **Investment Thesis**: the evidence that decided it, and what would change it within 4 hours
-For Hold, write "none" on the four trade lines.
+For Hold, write "none" on the four trade lines. For every other rating they must hold the same entry zone, invalidation, take-profit and size as the summary, even when the entry is a resting limit order that waits for a pullback: never write "none" there.
 Size is a tier: L = the full normal risk per trade, M = reduced, S = small, where risk is what is lost if the stop is hit.
 
 Use only the evidence provided in this prompt. Do not call external tools or search the web; if something is missing, say so explicitly.

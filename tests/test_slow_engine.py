@@ -648,3 +648,54 @@ def test_convert_instructions_describe_new_signal_kinds() -> None:
         assert kind in short and kind in long_
     assert "Best fit at this horizon: btc_lead" in short
     assert "Best fit at this horizon: oi_follow" in long_ and "top_vs_crowd (" in long_
+
+
+def _pm_logs() -> dict[str, dict[str, str]]:
+    import json
+    from pathlib import Path
+
+    return json.loads(
+        (Path(__file__).parent / "fixtures" / "pm_empty_lines.json").read_text("utf-8")
+    )
+
+
+def test_empty_trade_lines_are_filled_from_the_portfolio_summary() -> None:
+    from jiaoyi.slow.tradingagents_engine import fill_trade_lines
+
+    expect = {
+        "1625_SOLUSDT": ("98.60–98.80", "98.00", "100.30", "S"),
+        "1656_1000PEPEUSDT": ("0.0042530–0.0042600", "0.0042280", "0.0043150", "S"),
+        "1656_SOLUSDT": ("100.60–100.75", "101.55", "99.30", "S"),
+    }
+    for name, (zone, stop, target, size) in expect.items():
+        log = _pm_logs()[name]
+        text, filled = fill_trade_lines(log["decision"], log["trader"])
+        assert filled == ["Entry Zone", "Invalidation", "Take Profit", "Size Tier"], name
+        assert f"**Entry Zone**: {zone}" in text, name
+        assert f"**Invalidation**: {stop}" in text, name
+        assert f"**Take Profit**: {target}" in text, name
+        assert f"**Size Tier**: {size}" in text, name
+
+
+def test_trade_lines_fall_back_to_the_trader_then_stay_empty() -> None:
+    from jiaoyi.slow.tradingagents_engine import fill_trade_lines
+
+    log = _pm_logs()["1625_SOLUSDT"]
+    bare = (
+        log["decision"]
+        .replace("98.60–98.80", "回踩带")
+        .replace("失效 98.00", "")
+        .replace("目标 100.30", "")
+    )
+    text, filled = fill_trade_lines(bare, log["trader"])
+    assert "**Entry Zone**: 98.60–99.00" in text and "Entry Zone" in filled  # 交易员那行
+    none_text, none_filled = fill_trade_lines(bare, "")
+    assert none_filled == ["Size Tier"] and "**Entry Zone**: none" in none_text  # 两处都没有 → 照旧
+
+
+def test_hold_rating_keeps_none_lines() -> None:
+    from jiaoyi.slow.tradingagents_engine import fill_trade_lines
+
+    log = _pm_logs()["1625_SOLUSDT"]
+    hold = log["decision"].replace("**Rating**: Overweight", "**Rating**: Hold")
+    assert fill_trade_lines(hold, log["trader"]) == (hold, [])
