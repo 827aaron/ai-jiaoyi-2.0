@@ -420,8 +420,10 @@ class RuleTrigger:
         price = f.last_price
         vol_ratio = v.get("vol_ratio_1m", 0.0)
         buy_ratio = v.get("taker_buy_ratio_1m", 0.5)
-        # 最近 10 秒折算每分钟（关掉时当没有）
+        # 最近 10 秒折算每分钟（关掉、或 1 分钟量还不到 burst_min_1m_ratio 倍时当没有）
         vr10 = v.get("vol_ratio_10s", 0.0) if c.burst_10s_on else 0.0
+        if vol_ratio < c.burst_min_1m_ratio:
+            vr10 = 0.0
         br10 = v.get("taker_buy_ratio_10s", 0.5)
         ret_1m = v.get("ret_1m", 0.0)
         ret_5m = v.get("ret_5m", 0.0)
@@ -432,7 +434,7 @@ class RuleTrigger:
         if vol_ratio >= c.breakout_vol_ratio:
             vol_desc = f"1 分钟量 {vol_ratio:.1f} 倍"
         elif vr10 >= c.breakout_vol_ratio:
-            vol_desc = f"最近 10 秒折算每分钟量 {vr10:.1f} 倍"
+            vol_desc = f"最近 10 秒折算每分钟量 {vr10:.1f} 倍（1 分钟 {vol_ratio:.1f} 倍）"
         else:
             vol_desc = ""
         if prev is not None and vol_desc:
@@ -451,6 +453,8 @@ class RuleTrigger:
         ):
             if ratio < c.surge_vol_ratio:
                 continue
+            if span.startswith("最近"):
+                span = f"1 分钟量 {vol_ratio:.1f} 倍，{span}"
             if buy >= c.surge_taker_ratio:
                 hits.append(
                     (
