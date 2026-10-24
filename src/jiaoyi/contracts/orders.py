@@ -80,6 +80,15 @@ class OrderIntent(_Sealed):
     side: Side
     order_type: Literal["market", "limit"] = "market"
     limit_price: PosFloat | None = None
+    limit_wait_s: int | None = Field(
+        default=None,
+        gt=0,
+        description="限价进场（挂单等回踩）最多等几秒；到时没成交执行层撤单。只对 limit 有意义。",
+    )
+    limit_chase: bool = Field(
+        default=False,
+        description="限价等到时没成交：True = 撤单后市价追进（8h 以上档），False = 撤单不开。",
+    )
     quantity: PosFloat = Field(description="已按交易所精度取整的合约数量。")
     notional_usdt: PosFloat
     leverage: int = Field(ge=1, le=125)
@@ -105,6 +114,8 @@ class OrderIntent(_Sealed):
             raise ValueError("保命止损必须比正常止损更宽")
         if self.order_type == "limit" and self.limit_price is None:
             raise ValueError("限价单必须给 limit_price")
+        if self.order_type == "market" and (self.limit_wait_s is not None or self.limit_chase):
+            raise ValueError("市价单不能带挂单等待 / 追单设置")
         if (self.trailing_stop_pct is None) != (self.trailing_activation_pct is None):
             raise ValueError("移动止损的回撤距离和激活价必须同时给或同时不给")
         if (

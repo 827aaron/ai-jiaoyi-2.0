@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from jiaoyi.contracts import PositionRecord
+from jiaoyi.contracts import OrderIntent, PositionRecord
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 
 
@@ -33,6 +34,14 @@ class TrackedPosition(BaseModel):
     """限价止盈：开仓时用的价格最小变动（tickSize）；有就按挂单价取整记止盈价。None = 市价止盈。"""
     requested_close: CloseReason | None = None
     """我们主动要求平仓的原因；执行器自己结束（止损、止盈等）时为空。"""
+    limit_wait_s: int | None = None
+    """挂单等回踩：最多等几秒（从建执行器算），到时没成交撤单。None = 市价进。"""
+    hold_s: int | None = None
+    """挂单进场时按成交时刻算的最长持仓（执行器的 time_limit 加了等待时间，这里自己卡）。"""
+    filled_at: datetime | None = None
+    """挂单成交的时间（按它算最长持仓）。"""
+    chase: OrderIntent | None = None
+    """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
 
 
 class DayStart(BaseModel):

@@ -170,6 +170,8 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "stop_level_buffer_atr": 0.2,
             "min_stop_fee_multiple": 6.0,  # 止损 ≥ 60bp（哨兵研究 10-24：更窄的扣费后亏得最多）
             "session_cme_open": True,  # CME 周日开盘：只有 30m–2h 比随便进好（时段研究 10-24）
+            "entry_limit_offset_stop": 0.6,  # 挂单回踩让止损几成（量能突增研究 v3）
+            "entry_limit_chase": False,
             # 新信号研究 10-24：BTC 先动 30m–2h；持仓量 2h–24h；大户散户（反着大户）4h–24h
             "btc_lead_on": True,
             "oi_follow_on": False,
@@ -192,6 +194,8 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "stop_level_buffer_atr": 0.1,
             "min_stop_fee_multiple": 6.0,  # ≥ 60bp
             "session_cme_open": True,
+            "entry_limit_offset_stop": 0.4,
+            "entry_limit_chase": False,
             "btc_lead_on": True,
             "oi_follow_on": False,
             "oi_window_min": 60,
@@ -213,6 +217,8 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "stop_level_buffer_atr": 0.1,
             "min_stop_fee_multiple": 5.0,  # ≥ 50bp
             "session_cme_open": True,
+            "entry_limit_offset_stop": 0.25,
+            "entry_limit_chase": False,
             "btc_lead_on": True,
             "oi_follow_on": True,  # 新信号研究 10-24：2h 用 60 分钟、价格 2 倍
             "oi_window_min": 60,
@@ -234,6 +240,8 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "stop_level_buffer_atr": 0.1,
             "min_stop_fee_multiple": 4.0,  # ≥ 40bp
             "session_cme_open": False,  # 4h 以上 CME 周日开盘没好处
+            "entry_limit_offset_stop": 0.25,
+            "entry_limit_chase": False,
             "btc_lead_on": False,
             "oi_follow_on": True,
             "oi_window_min": 240,
@@ -385,6 +393,8 @@ HOLD.update(
                 "stop_level_buffer_atr": 0.1,
                 "min_stop_fee_multiple": 2.0,
                 "session_cme_open": False,
+                "entry_limit_offset_stop": 0.1,
+                "entry_limit_chase": True,
                 "btc_lead_on": False,
                 "oi_follow_on": True,
                 "oi_window_min": 240,
@@ -409,6 +419,8 @@ HOLD.update(
                 "stop_level_buffer_atr": 0.1,
                 "min_stop_fee_multiple": 2.0,
                 "session_cme_open": False,
+                "entry_limit_offset_stop": 0.1,
+                "entry_limit_chase": True,
                 "btc_lead_on": False,
                 "oi_follow_on": True,
                 "oi_window_min": 240,
@@ -433,6 +445,8 @@ HOLD.update(
                 "stop_level_buffer_atr": 0.1,
                 "min_stop_fee_multiple": 2.0,
                 "session_cme_open": False,
+                "entry_limit_offset_stop": 0.1,
+                "entry_limit_chase": True,
                 "btc_lead_on": False,
                 "oi_follow_on": True,
                 "oi_window_min": 240,

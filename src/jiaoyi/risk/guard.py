@@ -243,6 +243,7 @@ class RiskGuardImpl:
         gate_record_only: bool = False,
         blocked: Callable[[], Mapping[str, str]] | None = None,
         adl_risk: Callable[[str], str | None] | None = None,
+        live: bool = False,
     ) -> None:
         """``gate_record_only``：拍板人概率没过门槛也放行，只记「拍板本会拦」（paper 校准用）。
 
@@ -251,6 +252,7 @@ class RiskGuardImpl:
         （拿不到 None = 不挡）。"""
         self._blocked = blocked
         self._adl = adl_risk
+        self._live = live  # testnet / live：挂单等回踩还要 entry_limit_pullback_live
         self._risk = risk
         self._fast = fast
         self._record_only = gate_record_only
@@ -440,6 +442,44 @@ class RiskGuardImpl:
                 hard.append(f"拍板人没回答“{q.value}”")
         missing = [r for r in out if r.startswith("拍板人没回答")]
         return hard + missing, [r for r in out if r not in missing]
+
+    def recheck_chase(
+        self, intent: OrderIntent, card: BattleCard | None, account: AccountState, now: datetime
+    ) -> list[str]:
+        """挂单等回踩没成交、要改市价追进前再审一遍（批准是最多一小时前给的）。
+
+        查此刻的熔断、暂停、持仓笔数、同币持仓、封币 / 临时停 / 要下架、作战卡（有效、还有这个币、
+        方向没反、没改成只看不做）和总 / 相关组敞口。返回拦下的理由，空 = 可以追。"""
+        risk, reasons = self._risk, []
+        sym = intent.symbol
+        halted, day_pnl = self.breaker.check(account, now)
+        if halted:
+            reasons.append(f"今日亏损 {day_pnl:.2f}% 已触发熔断，只允许平仓")
+        if account.paused:
+            reasons.append("面板已暂停开新仓")
+        if account.open_positions >= risk.max_open_positions:
+            reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
+        if sym in account.open_symbols:
+            reasons.append(f"{sym} 已有在管持仓")
+        self._symbol_filters(sym, now, reasons)
+        cs = card.for_symbol(sym) if card is not None and card.is_valid(now) else None
+        why_blocked = self._blocked().get(sym) if self._blocked is not None else None
+        if cs is None:
+            reasons.append("作战卡已过期或没有这个币了")
+        elif why_blocked:
+            reasons.append(f"{why_blocked}，不开新仓")
+        elif cs.bias == Bias.NO_TRADE:
+            reasons.append("作战卡已改成只看不做")
+        elif cs.bias.value not in ("both", intent.side.value):
+            reasons.append(f"作战卡方向已改成 {cs.bias.value}")
+        equity = account.equity_usdt
+        if account.open_notional_usdt + intent.notional_usdt > risk.max_total_exposure_x * equity:
+            reasons.append("加上这笔会超过总敞口上限")
+        if cs is not None:
+            used = account.open_notional_by_category.get(cs.category, 0.0)
+            if used + intent.notional_usdt > risk.category_exposure_x[cs.category] * equity:
+                reasons.append("加上这笔会超过这一类币的合计仓位上限")
+        return reasons
 
     def _symbol_filters(self, sym: str, now: datetime, reasons: list[str]) -> None:
         """「不做」过滤：要下架、刚上线、自动减仓风险高。数据拿不到就不挡。"""
@@ -699,14 +739,20 @@ class RiskGuardImpl:
             return None
 
         assert card is not None
+        limit = self._pullback_price(side, entry, dist, lot)
+        if limit is not None:
+            detail["limit_price"] = limit
         return OrderIntent(
+            order_type="limit" if limit is not None else "market",
+            limit_price=limit,
+            limit_wait_s=fast.entry_limit_wait_min * 60 if limit is not None else None,
+            limit_chase=limit is not None and fast.entry_limit_chase,
             intent_id=f"int-{uuid.uuid4().hex[:16]}",
             signal_id=signal.signal_id,
             card_id=card.card_id,
             symbol=signal.symbol,
             category=cs.category,
             side=side,
-            order_type="market",
             quantity=qty,
             notional_usdt=notional,
             leverage=lev,
@@ -717,6 +763,25 @@ class RiskGuardImpl:
             lifeboat_stop_pct=lifeboat_pct,
             approved_at=now,
         )
+
+    def _pullback_price(self, side: Side, entry: float, dist: float, lot: LotRules) -> float | None:
+        """挂单等回踩的挂单价：触发价往有利方向让 ``entry_limit_offset_stop`` × 止损距离，
+        按最小跳动价取整（买单往下、卖单往上）。没开 / 让 0 / 算不出来 → None（市价进）。"""
+        fast = self._fast
+        if not fast.entry_limit_pullback or (self._live and not fast.entry_limit_pullback_live):
+            return None
+        off = fast.entry_limit_offset_stop * dist
+        if off <= 0:
+            return None
+        raw = entry - off if side == Side.LONG else entry + off
+        tick = lot.tick_size
+        if tick:
+            steps = raw / tick
+            raw = (
+                math.floor(steps + 1e-9) if side == Side.LONG else math.ceil(steps - 1e-9)
+            ) * tick
+            raw = round(raw, 12)
+        return raw if raw > 0 else None
 
     def _beyond_level(
         self, cs: CardSymbol, side: Side, entry: float, dist: float, max_dist: float, atr: float

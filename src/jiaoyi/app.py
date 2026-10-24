@@ -638,6 +638,7 @@ def build_modules(
             # 「不做」过滤：封币理由写全；自动减仓风险高不开新仓（新信号研究 10-24）
             blocked=(lambda: cards.blocked_symbols) if isinstance(cards, _Blocks) else None,
             adl_risk=derivs.adl_risk if derivs is not None else None,
+            live=RunMode(app_cfg.mode) is not RunMode.PAPER,
         ),
         executor=executor,
         lifeboat=lifeboat,
