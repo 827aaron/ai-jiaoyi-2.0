@@ -430,6 +430,7 @@ def position_views(
         last = (prices or {}).get(p.symbol)
         src: Literal["last", "mark"] | None = None
         mark: float | None = None
+        pnl: float | None = None
         if last and p.entry_price:
             mark, pnl, src = last, sign * p.quantity * (last - p.entry_price), "last"
         else:
