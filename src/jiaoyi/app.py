@@ -40,6 +40,7 @@ from jiaoyi.contracts import (
     SymbolPool,
 )
 from jiaoyi.core import profiles
+from jiaoyi.core.against import MEETING_TRIGGER, AgainstSignalDesk
 from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.pool_overrides import (
@@ -651,6 +652,16 @@ class App:
             self.news = built.news
             self.against = built.against
         self.m = modules
+        # 和卡相反的信号：主循环按账本持仓分流（有仓叫管家急查、反复出申请单币临时会）
+        cards = modules.cards
+        request_event = getattr(cards, "request_event", None)
+        accepts = getattr(cards, "accepts_event", None)
+        self.against_desk = AgainstSignalDesk(
+            app_cfg.fast_loop,
+            request_event=request_event if callable(request_event) else None,
+            meeting_ok=(lambda: bool(accepts(MEETING_TRIGGER))) if callable(accepts) else None,
+            recorder=self.recorders.get(Role.SENTINEL),
+        )
         self.pool: SymbolPool | None = None
         self.started = False
         # 选币页的固定 / 拉黑 / 手动加入（data/pool_overrides.json）；读不出按没有覆盖项、启动时告警
@@ -930,7 +941,10 @@ class App:
             extra: dict[str, Any] | None = None
             if isinstance(module, _SentinelDetail):  # 为什么没信号：每币一行
                 headline = module.brief(now)
-                extra = {"detail": module.detail_lines(now, rec.tz)}
+                extra = {
+                    "detail": module.detail_lines(now, rec.tz),
+                    "against_signals": self.against_desk.recent(now),
+                }
             rec.heartbeat(now, health if isinstance(health, Health) else Health.OK, headline, extra)
 
     def status(self) -> dict[Role, ModuleStatus]:

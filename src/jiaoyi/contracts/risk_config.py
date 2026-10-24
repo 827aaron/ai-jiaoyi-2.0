@@ -412,6 +412,47 @@ class FastLoopConfig(Contract):
         default=5, ge=1, le=60, description="开盘 / 资金费结算前后几分钟。"
     )
     session_vol_ratio: float = Field(default=2.0, ge=1.0, le=50.0)
+    # ---- 和作战卡相反的信号（研究 2026-10-24：有仓交管家急查，反复出才开单币临时会）
+    against_signal_on: bool = Field(
+        default=True,
+        description="哨兵看到和卡方向相反的信号时：有仓叫管家急查、反复出开临时会。"
+        "关掉 = 只记录（和以前一样）。不会因此开反方向的仓。",
+    )
+    against_dedup_s: int = Field(
+        default=300, ge=10, le=3600, description="同一个币同一种反向信号多久内只算 1 次（秒）。"
+    )
+    against_grace_s: int = Field(
+        default=180, ge=0, le=3600, description="开仓后多久内的反向信号不算（刚进场的噪音，秒）。"
+    )
+    against_recheck_cooldown_s: int = Field(
+        default=300, ge=10, le=3600, description="同一笔仓多久内最多因反向信号急查 1 次（秒）。"
+    )
+    against_strong_breakout_vol_ratio: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=50.0,
+        description="放量突破量 ≥ 这么多倍才算强反向信号（强平瀑布反弹一律算强）。"
+        "强的管家判 1 次翻向就平，别的要连续确认。",
+    )
+    against_loss_stop_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="持仓已亏到这么多倍止损距离时，反向信号也按强的算（管家判 1 次就平）。"
+        "0 = 不用。",
+    )
+    against_meeting_count: int = Field(
+        default=2, ge=1, le=20, description="同一个币多久内出几次反向信号就申请单币临时会。"
+    )
+    against_meeting_window_s: int = Field(
+        default=1800, ge=60, le=14400, description="上面「几次」的时间窗（秒）。"
+    )
+    against_meeting_gap_s: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="同一个币因反向信号最多多久申请 1 次临时会（秒）。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:

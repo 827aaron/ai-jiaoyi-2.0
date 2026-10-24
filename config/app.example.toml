@@ -73,3 +73,13 @@ liq_drop_pct_5m = 1.0             # 且 5 分钟内被砸了 1% 以上
 crowded_funding_rate = 0.0005     # 哨兵：资金费率绝对值 ≥ 0.05% 算拥挤
 session_window_min = 5            # 哨兵：开盘 / 资金费结算前后 5 分钟
 session_vol_ratio = 2.0
+# 和作战卡相反的信号：有仓叫管家急查，同一个币反复出就申请单币临时会；不会开反方向的仓
+against_signal_on = true          # false = 只记录（和以前一样）
+against_dedup_s = 300             # 同一个币同一种反向信号 5 分钟内只算 1 次
+against_grace_s = 180             # 开仓 3 分钟内的反向信号不算
+against_recheck_cooldown_s = 300  # 同一笔仓 5 分钟内最多急查 1 次
+against_strong_breakout_vol_ratio = 3.0  # 放量突破量 ≥ 3 倍算强（瀑布反弹一律算强）：判 1 次就平
+against_loss_stop_frac = 0.5      # 已亏到 0.5 倍止损时也判 1 次就平；0 = 不用
+against_meeting_count = 2         # 30 分钟内 2 次反向信号 → 申请单币临时会
+against_meeting_window_s = 1800
+against_meeting_gap_s = 3600      # 同一个币 60 分钟内最多申请 1 次

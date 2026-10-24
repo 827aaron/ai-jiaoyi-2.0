@@ -31,6 +31,7 @@ from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from jiaoyi.app import App, is_stub
 from jiaoyi.contracts import (
+    AgainstSignalEvent,
     AlertLevel,
     BattleCard,
     CandidateSignal,
@@ -93,6 +94,29 @@ class _Forgets(Protocol):
 @runtime_checkable
 class _HasUrgent(Protocol):
     urgent: set[str]
+
+
+@runtime_checkable
+class _AgainstAware(Protocol):
+    """哨兵：和卡方向相反的信号（RuleTrigger）。"""
+
+    def pop_against(self) -> list[AgainstSignalEvent]: ...
+
+    def note_against_result(self, sig: AgainstSignalEvent, result: str) -> None: ...
+
+
+@runtime_checkable
+class _NotesAgainst(Protocol):
+    """管家：下一次复查带上反向信号（JevKeeper）。"""
+
+    def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None: ...
+
+
+@runtime_checkable
+class _LedgerPositions(Protocol):
+    """执行器：账本里此刻还没结束的持仓，不查 hummingbot（HbExecutorAdapter）。"""
+
+    def live_positions(self) -> list[PositionRecord]: ...
 
 
 @runtime_checkable
@@ -220,6 +244,7 @@ class Runner:
         # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
         self._closing: set[str] = set()
+        self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
         self._tp_past: dict[str, datetime] = {}
         """限价止盈：价格第一次越过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
         self._last_prune: datetime | None = None
@@ -422,6 +447,36 @@ class Runner:
             for signal in self.m.trigger.check(snap, self.m.cards.current(now), now):
                 # 拍板要几百毫秒，放后台，不卡行情
                 self._spawn(self.handle_signal(signal))
+            if isinstance(self.m.trigger, _AgainstAware):
+                for sig in self.m.trigger.pop_against():
+                    self._route_against(self.m.trigger, sig, now)
+
+    def _ledger_positions(self) -> list[PositionRecord]:
+        """账本里此刻的持仓（含正在开 / 正在平），读不到才用上一轮刷新的列表。"""
+        ex = self.m.executor
+        if isinstance(ex, _LedgerPositions):
+            try:
+                return ex.live_positions()
+            except Exception:
+                log.exception("读账本持仓失败，用上一轮的持仓列表")
+        return list(self.positions)
+
+    def _route_against(
+        self, trigger: _AgainstAware, sig: AgainstSignalEvent, now: datetime
+    ) -> None:
+        """和卡相反的信号：按账本持仓分流（``jiaoyi.core.against``），要急查的放进急查通道。"""
+        ev, rechecks = self.app.against_desk.route(
+            sig, self._ledger_positions(), self._closing, now
+        )
+        trigger.note_against_result(sig, ev.result)
+        for pos, one_shot in rechecks:
+            if isinstance(self.m.keeper, _NotesAgainst):
+                self.m.keeper.note_against(pos.position_id, sig, one_shot)
+            self._against_pending.add(pos.position_id)
+            if isinstance(self.m.patrol, _HasUrgent):
+                self.m.patrol.urgent.add(pos.position_id)  # 和巡逻兵报警线同一条急查通道
+            else:
+                self._spawn(self._review(pos))
 
     def _tp_fallback(self, t: Trade) -> None:
         """限价止盈挂着却没成交：价格在止盈价外面待满 ``tp_limit_fallback_s`` 秒，改市价平。"""
@@ -591,9 +646,13 @@ class Runner:
             self.m.keeper.forget(pos.position_id)
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
+        self.app.against_desk.forget(pos.position_id)
 
     async def _review(self, pos: PositionRecord) -> None:
         verdict = await self.m.keeper.review(pos, self.app.clock())
+        if pos.position_id in self._against_pending:  # 这次复查带了反向信号：结论写回团队页
+            self._against_pending.discard(pos.position_id)
+            self.app.against_desk.settle(pos.position_id, verdict.action)
         if verdict.action == "close":
             await self.close(pos, CloseReason.KEEPER)
 

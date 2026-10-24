@@ -44,7 +44,7 @@ Section = Literal["app", "fast_loop", "slow.schedule", "slow.budget", "predictor
 
 
 _E2 = ("key_level_break", "move_since_card", "new_head_symbol")
-_E6 = (*_E2, "predictor_against_card", "news_high_impact")
+_E6 = (*_E2, "predictor_against_card", "signal_against_card", "news_high_impact")
 _E12 = (*_E6, "stale_card_on_entry")
 
 
@@ -111,7 +111,8 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
         backoff=[5, 10, 30],
         daily_usd=20.0,
         slow_to=360,
-        events=_events(_E2, gap=60, per_day=12, entry_age=360),
+        # 反向信号反复出（30 分钟 2 次）的单币临时会，研究 2026-10-24
+        events=_events((*_E2, "signal_against_card"), gap=60, per_day=12, entry_age=360),
     ),
     "6h": _meeting(
         360,

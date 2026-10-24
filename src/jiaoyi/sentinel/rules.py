@@ -13,6 +13,12 @@
 没有有效作战卡 → 不出信号；卡里没有这个标的、只看不做、不允许这类信号、方向和卡相反 → 不出。
 同一个去重键（标的:信号:方向）冷却期内只发一次。
 
+和卡方向相反（也在「卡上没允许这类信号」之前判）：不出交易信号，但发一个「反向信号」事件（:meth:`RuleTrigger.pop_against`，
+同一个币同一种信号 ``against_dedup_s`` 内只发 1 次）。哨兵不看持仓：有没有仓、叫不叫管家、
+开不开临时会，由主循环按账本里此刻的持仓判断（``jiaoyi.core.against``），结果再写回这里
+（:meth:`RuleTrigger.note_against_result`），面板那一行「和卡上方向相反」后面接着显示。
+卡上信号被清空但方向还在（只盯不开）照样判反向；卡上方向是不做（NO_TRADE）的不判。
+
 为什么没信号：每个币记最近一次的量比 / 主动买卖占比、最近 1 小时量比最高的那一刻、最近一次被
 跳过的原因；卡上有但一直没收到成交的币标「没收到行情」。心跳时每币一行写进 module_status 的
 ``detail``（:meth:`RuleTrigger.detail_lines`）。
@@ -27,6 +33,7 @@ from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
+    AgainstSignalEvent,
     BattleCard,
     Bias,
     CandidateSignal,
@@ -113,6 +120,9 @@ class RuleTrigger:
         self._last_fired: dict[str, datetime] = {}
         self._watch: dict[str, _Watch] = {}
         self._card: BattleCard | None = None
+        self._against: list[AgainstSignalEvent] = []  # 还没交给主循环的反向信号
+        self._against_at: dict[str, datetime] = {}  # 去重键 → 上次发反向信号的时间
+        self._against_result: dict[str, str] = {}  # 去重键 → 主循环给的处理结果
 
     def _observe(self, f: FeatureSnapshot, now: datetime) -> _Watch:
         vr = f.values.get("vol_ratio_1m")
@@ -144,27 +154,36 @@ class RuleTrigger:
         if cs is None:
             self._note_skip(w, "不在作战卡上", now)
             return []
-        if cs.bias == Bias.NO_TRADE or not cs.allowed_signals:
+        if cs.bias == Bias.NO_TRADE:
             self._note_skip(w, "卡上是只看不做", now)
             return []
+        if not cs.allowed_signals:
+            self._note_skip(w, "卡上是只看不做", now)  # 方向还在：下面照样判反向
 
         out: list[CandidateSignal] = []
         for kind, side, desc in self._rules(
             features, prev, [lv.price for lv in cs.key_levels], now
         ):
             name = f"{_KIND_CN[kind]}（{'多' if side == Side.LONG else '空'}）"
+            key = f"{sym}:{kind.value}:{side.value}"
+            # 反向先于种类过滤判：卡上没列这类信号、或卡上信号被清空（只盯不开）也要能叫管家
+            # （只发反向事件，不放开开仓）
+            if (cs.bias == Bias.LONG and side != Side.LONG) or (
+                cs.bias == Bias.SHORT and side != Side.SHORT
+            ):
+                self._against_hit(features, kind, side, desc, key, now)
+                done = self._against_result.get(key)
+                self._note_skip(w, f"{name}：和卡上方向相反" + (f"，{done}" if done else ""), now)
+                continue
+            if not cs.allowed_signals:
+                self._note_skip(w, "卡上是只看不做", now)
+                continue
             if kind in self._skip:
                 self._note_skip(w, f"{name}：测试网 / 实盘关了量能突增", now)
                 continue
             if kind not in cs.allowed_signals:
                 self._note_skip(w, f"{name}：卡上没允许这类信号", now)
                 continue
-            if (cs.bias == Bias.LONG and side != Side.LONG) or (
-                cs.bias == Bias.SHORT and side != Side.SHORT
-            ):
-                self._note_skip(w, f"{name}：和卡上方向相反", now)
-                continue
-            key = f"{sym}:{kind.value}:{side.value}"
             last = self._last_fired.get(key)
             if last is not None and now - last < self._dedup:
                 self._note_skip(w, f"{name}：冷却中（上次 {last:%H:%M:%S}）", now)
@@ -197,6 +216,53 @@ class RuleTrigger:
                     output={"kind": kind.value, "side": side.value, "dedup_key": key},
                 )
         return out
+
+    def _against_hit(
+        self,
+        f: FeatureSnapshot,
+        kind: SignalKind,
+        side: Side,
+        desc: str,
+        key: str,
+        now: datetime,
+    ) -> None:
+        """和卡相反：同一个去重键 ``against_dedup_s`` 内只发 1 次反向信号事件。"""
+        last = self._against_at.get(key)
+        if last is not None and (now - last).total_seconds() < self._cfg.against_dedup_s:
+            return
+        self._against_at[key] = now
+        self._against_result.pop(key, None)
+        vr = f.values.get("vol_ratio_1m")
+        strong = kind is SignalKind.LIQUIDATION_REBOUND or (
+            kind is SignalKind.VOLUME_BREAKOUT
+            and (vr or 0.0) >= self._cfg.against_strong_breakout_vol_ratio
+        )
+        self._against.append(
+            AgainstSignalEvent(
+                symbol=f.symbol,
+                ts=now,
+                kind=kind,
+                side=side,
+                desc=desc,
+                price=f.last_price if f.last_price > 0 else None,
+                vol_ratio=vr,
+                buy_ratio=min(max(f.values.get("taker_buy_ratio_1m", 0.5), 0.0), 1.0),
+                strong=strong,
+            )
+        )
+
+    def pop_against(self) -> list[AgainstSignalEvent]:
+        """取走还没处理的反向信号（主循环每笔成交后调用）。"""
+        out, self._against = self._against, []
+        return out
+
+    def note_against_result(self, sig: AgainstSignalEvent, result: str) -> None:
+        """主循环处理完一个反向信号：结果接在面板那一行「和卡上方向相反」后面。"""
+        key = f"{sig.symbol}:{sig.kind.value}:{sig.side.value}"
+        self._against_result[key] = result
+        w = self._watch.get(sig.symbol)
+        if w is not None and w.skip.endswith("和卡上方向相反"):
+            w.skip = f"{w.skip}，{result}"
 
     def brief(self, now: datetime) -> str:
         """团队页一句话：卡上能出信号的有几个币、各只做哪边、离阈值最近的是谁。"""
