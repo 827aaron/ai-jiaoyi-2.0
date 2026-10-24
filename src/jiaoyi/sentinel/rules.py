@@ -157,6 +157,8 @@ class RuleTrigger:
         if cs.bias == Bias.NO_TRADE:
             self._note_skip(w, "卡上是只看不做", now)
             return []
+        if not cs.allowed_signals:
+            self._note_skip(w, "卡上是只看不做", now)  # 方向还在：下面照样判反向
 
         out: list[CandidateSignal] = []
         for kind, side, desc in self._rules(
