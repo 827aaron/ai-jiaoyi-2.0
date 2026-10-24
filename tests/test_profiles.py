@@ -179,3 +179,9 @@ def test_predictor_lookback_and_paths_are_settings(tmp_path: Path) -> None:
     assert (p.lookback, p.paths) == (128, 16)
     with pytest.raises(ValueError, match="512"):
         c.PredictorConfig(lookback=480, pred_len=48)
+
+
+def test_pool_size_and_pick_max_follow_the_tier_with_todays_values() -> None:
+    for p in profiles.PROFILES:
+        d = profiles.defaults(p, "app")
+        assert d["pool_size"] == 40 and d["card_pick_max"] == 20, p

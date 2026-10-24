@@ -556,7 +556,7 @@ def test_profile_switch_and_pinned_keys(tmp_path: Path) -> None:
     assert load_app_config(paths.app).keeper_interval_s == 30
     # 不是档位键、也不是可空的，不能清空
     with pytest.raises(ActionError, match="不能空着"):
-        actions.update_config(paths, data, "app", {"pool_size": None}, PW, NOW)
+        actions.update_config(paths, data, "app", {"reconcile_interval_s": None}, PW, NOW)
 
 
 def test_paper_only_hold_rejected_outside_paper(tmp_path: Path) -> None:
