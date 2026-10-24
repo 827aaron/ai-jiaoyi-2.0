@@ -1194,3 +1194,28 @@ def test_team_shows_sentinel_detail(tmp_path: Path) -> None:
     sent = next(r for r in team.roles if r.role is c.Role.SENTINEL)
     assert sent.detail == [line] and sent.detail_hidden == 1
     assert sent.headline == "卡上能出信号的 1 个币"
+
+
+def test_settings_majors_list_and_names_edit(tmp_path: Path) -> None:
+    from jiaoyi.panel.actions import ActionError, _coerce_names, editable_fields
+    from jiaoyi.panel.pages import _majors
+    from jiaoyi.slow.settings import ScreenerSection
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    scr = ScreenerSection(major_include=["link"], major_exclude=["DOGE"])
+    m = _majors(files, scr)  # 还没缓存：固定 7 个 + 手动加入 − 排除
+    assert m.fallback and "DOGE" not in [r.name for r in m.rows] and m.excluded == ["DOGE"]
+    assert m.rows[-1].name == "LINK" and m.rows[-1].why == "你手动加入"
+    (tmp_path / "majors.json").write_text(json.dumps(
+        {"fetched_at": "2026-10-24T00:00:00+00:00", "top_n": 20, "ranks": {"ETH": 2, "BTC": 1}}
+    ))  # fmt: skip
+    m = _majors(files, scr)
+    assert not m.fallback and m.fetched_top_n == 20
+    assert [(r.name, r.rank) for r in m.rows] == [("BTC", 1), ("ETH", 2), ("LINK", None)]
+    assert _majors(files, ScreenerSection(major_top_n=0)).fallback  # 0 = 只用固定 7 个
+    spec = editable_fields("screener")["major_include"]
+    assert spec.names
+    assert _coerce_names("k", "link, avaxusdt LINK") == ["LINK", "AVAX"]
+    assert _coerce_names("k", []) == []
+    with pytest.raises(ActionError):
+        _coerce_names("k", ["BTC-1"])

@@ -40,6 +40,7 @@ from jiaoyi.panel.overview import (
     fee_rate_bps,
     position_views,
 )
+from jiaoyi.slow.screener import FALLBACK_MAJORS
 from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
 
 # 团队页按数据流排：选币 → 军师团 → 盘口员 → 预测员 → 哨兵 → 拍板 → 保镖 → 下单 → 持仓看管 → 告警
@@ -1129,6 +1130,30 @@ class SettingItem(BaseModel):
     """多选：值是 ``choices`` 的子集（列表）。"""
     pattern: str | None = None
     """自由填写的字样要符合的格式（例如开会定点 ``08:00``）。"""
+    names: bool = False
+    """币名名单：自由填，空格隔开，可以一个都没有。"""
+
+
+class MajorRow(BaseModel):
+    name: str
+    rank: int | None = None
+    """市值名次；手动加入 / 固定名单里的是 None。"""
+    why: str
+    """「市值第 3 名」/「你手动加入」/「固定名单」。"""
+
+
+class MajorsInfo(BaseModel):
+    """现在算「主流币」的名单（data/majors.json + slow.toml 的手动加入 / 排除）。"""
+
+    top_n: int
+    rows: list[MajorRow]
+    excluded: list[str] = []
+    """你手动排除、本来会算主流的币（按山寨币算）。"""
+    fetched_at: datetime | None = None
+    fetched_top_n: int | None = None
+    """缓存是按前几名拉的；和 ``top_n`` 不同时，下一次选币会重拉。"""
+    fallback: bool = False
+    """用的是写死的 7 个（major_top_n = 0，或还没拉到排名）。"""
 
 
 class SettingsPage(BaseModel):
@@ -1158,6 +1183,8 @@ class SettingsPage(BaseModel):
     """分档交易（config/slow.toml 的 [screener.tiers]）。"""
     screener_cautions: list[str] = []
     """选币规则比推荐冒险的项（只提示，不拒绝）。"""
+    majors: MajorsInfo | None = None
+    """现在算主流币的名单。"""
     tiers_cautions: list[str] = []
     """分档交易设置里用不上或不像设计稿的地方（只提示）。"""
     profile: ProfileInfo | None = None
@@ -1194,9 +1221,7 @@ def _items(
         if name in skip:
             continue
         value = getattr(model, name)
-        if isinstance(
-            value, BaseModel | dict | list
-        ):  # 名单类先不在设置页列出（面板还没有名单编辑）
+        if isinstance(value, BaseModel | dict):
             continue
         lo = hi = None
         strict = False
@@ -1222,10 +1247,46 @@ def _items(
                 nullable=bool(spec and spec.nullable),
                 profiled=bool(spec and spec.profiled),
                 multi=bool(spec and spec.multi),
+                names=bool(spec and spec.names),
                 pattern=spec.pattern if spec else None,
             )
         )
     return out
+
+
+def _majors(files: PanelFiles, scr: ScreenerSection) -> MajorsInfo:
+    """和选币器同一个口径：前 N 名（或固定 7 个）+ 手动加入 − 手动排除。"""
+    inc = [x.strip().upper() for x in scr.major_include if x.strip()]
+    exc = {x.strip().upper() for x in scr.major_exclude}
+    raw = files.majors() if scr.major_top_n > 0 else None
+    ranks: dict[str, int] = {}
+    at: datetime | None = None
+    got_n: int | None = None
+    if isinstance(raw, dict) and isinstance(raw.get("ranks"), dict):
+        try:
+            ranks = {str(k): int(v) for k, v in raw["ranks"].items()}
+            at = datetime.fromisoformat(str(raw["fetched_at"]))
+            got_n = int(raw.get("top_n", 0))
+        except (KeyError, TypeError, ValueError):
+            ranks, at, got_n = {}, None, None
+    rows: list[MajorRow] = []
+    if ranks:
+        rows = [
+            MajorRow(name=k, rank=v, why=f"市值第 {v} 名")
+            for k, v in sorted(ranks.items(), key=lambda kv: kv[1])
+        ]
+    else:
+        rows = [MajorRow(name=k, why="固定名单") for k in sorted(FALLBACK_MAJORS)]
+    seen = {r.name for r in rows}
+    rows += [MajorRow(name=k, why="你手动加入") for k in inc if k not in seen]
+    return MajorsInfo(
+        top_n=scr.major_top_n,
+        rows=[r for r in rows if r.name not in exc],
+        excluded=[r.name for r in rows if r.name in exc],
+        fetched_at=at,
+        fetched_top_n=got_n,
+        fallback=not ranks,
+    )
 
 
 def _plain(v: object) -> object:
@@ -1316,6 +1377,7 @@ def build_settings(
                 f"按止损的 1/4（只拦不利方向）；{app.hold} 档 BTC 典型约 {item.recommended:g}bp"
             )
     _gate_calibration(page, files, app.hold)
+    page.majors = _majors(files, slow.screener)
     for item in page.screener:
         if srec := SCREENER_RECOMMENDED.get(item.key):
             item.recommended, item.recommended_why = srec

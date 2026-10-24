@@ -469,6 +469,8 @@ class FieldSpec:
     """多选（``tuple[Literal, ...]``）：值是 ``choices`` 的子集，可以一个都不选。"""
     pattern: str | None = None
     """自由填写的字样（例如 ``08:00``）要符合的格式；契约里写了 pattern 才放开在网页上改。"""
+    names: bool = False
+    """币名名单（``list[str]``，例如主流币手动加入 / 排除）：自由填，可以一个都没有。"""
 
 
 def update_config(
@@ -732,6 +734,8 @@ def scalar_fields(model: type[BaseModel], skip: set[str]) -> dict[str, FieldSpec
 def field_spec(annotation: Any) -> FieldSpec | None:
     if annotation in (bool, int, float):
         return FieldSpec(annotation)
+    if annotation == list[str]:
+        return FieldSpec(str, names=True)
     args = get_args(annotation)
     if get_origin(annotation) is tuple and len(args) == 2 and args[1] is Ellipsis:
         inner = get_args(args[0])
@@ -755,6 +759,8 @@ def _coerce(key: str, raw: Any, spec: FieldSpec) -> Value:
         if spec.nullable or spec.profiled:
             return None
         raise ActionError(f"{key} 不能空着")
+    if spec.names:
+        return _coerce_names(key, raw)
     if spec.multi:
         if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
             raise ActionError(f"{key} 要从选项里勾")
@@ -790,6 +796,28 @@ def _coerce(key: str, raw: Any, spec: FieldSpec) -> Value:
             raise ActionError(f"{key} 要填整数")
         return int(raw)
     return float(raw)
+
+
+_NAME = re.compile(r"[A-Z0-9]{1,20}")
+
+
+def _coerce_names(key: str, raw: Any) -> list[str]:
+    """币名名单：列表或用空格 / 逗号隔开的一串；转大写、去掉 USDT 后缀、去重，顺序照填的。"""
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,，、]+", raw)
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise ActionError(f"{key} 要填币名，例如 LINK")
+    out: list[str] = []
+    for x in raw:
+        name = x.strip().upper()
+        if name.endswith("USDT") and len(name) > 4:
+            name = name.removesuffix("USDT")
+        if not name or name in out:
+            continue
+        if not _NAME.fullmatch(name):
+            raise ActionError(f"{key} 里的 {x.strip()} 不像币名（只要字母数字，例如 LINK）")
+        out.append(name)
+    return out
 
 
 def _validate(section: Section, text: str, paths: ConfigPaths) -> None:

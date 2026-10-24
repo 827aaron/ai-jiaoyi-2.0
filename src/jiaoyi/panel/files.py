@@ -171,6 +171,11 @@ class PanelFiles:
         cost = raw.get("cost_usd")
         return float(cost) if isinstance(cost, int | float) and cost >= 0 else None
 
+    def majors(self) -> dict[str, Any] | None:
+        """选币器每天拉的市值排名缓存（data/majors.json）；没有就是 None。"""
+        raw = self._json("majors.json")
+        return raw if isinstance(raw, dict) else None
+
     def market_snapshot(self) -> dict[str, Any] | None:
         """盘口员每 5 秒写的逐币行情和各路推送计数（data/market_snapshot.json）；没有就是 None。"""
         raw = self._json("market_snapshot.json")
