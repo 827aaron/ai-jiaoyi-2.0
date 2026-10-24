@@ -337,6 +337,18 @@ def _recent_against(status: dict[str, ModuleStatus], now: datetime) -> list[Agai
     return sorted(hits, key=lambda e: e.ts, reverse=True)
 
 
+def _same(r: DecisionRecord, e: AgainstSignalEvent) -> bool:
+    """管家记录对的是不是这次信号：带 ``output.against.ts`` 的按时间对，旧记录不带就算。"""
+    ag = r.output.get("against")
+    ts = ag.get("ts") if isinstance(ag, dict) else None
+    if not isinstance(ts, str):
+        return True
+    try:
+        return datetime.fromisoformat(ts) == e.ts
+    except ValueError:
+        return True
+
+
 def _against_checks(
     events: list[AgainstSignalEvent], records: list[DecisionRecord]
 ) -> list[AgainstCheck]:
@@ -349,7 +361,12 @@ def _against_checks(
     for e in events:
         if "keeper_recheck" not in e.actions:
             continue
-        hit = next((r for r in keeper if r.position_id == e.position_id and r.ts >= e.ts), None)
+        mine = [
+            r for r in keeper if r.position_id == e.position_id and r.ts >= e.ts and _same(r, e)
+        ]
+        # 没查成的急查会留到下一轮再查（记录里带同一个 against）：有查成的取最后一次查成的
+        ok = [r for r in mine if r.outcome is not Outcome.ERROR]
+        hit = (ok or mine)[-1] if mine else None
         verdict = e.keeper_verdict
         p_close = reason = None
         if hit is not None:
