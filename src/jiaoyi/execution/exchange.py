@@ -27,10 +27,26 @@ STOP_PREFIX = "lb-"
 class ExchangeError(Exception):
     """交易所调用失败（网络、鉴权、拒单）。调用方按故障即关闭处理。"""
 
-    def __init__(self, message: str, *, immediate_trigger: bool = False) -> None:
+    def __init__(
+        self, message: str, *, immediate_trigger: bool = False, transient: bool = False
+    ) -> None:
         super().__init__(message)
         self.immediate_trigger = immediate_trigger
         """币安 -2021：触发价已被越过，挂上就会立刻成交。意味着价格已经穿过止损位。"""
+        self.transient = transient
+        """网络层一时失败（超时、断连、交易所暂不可用），只读查询可以稍后重试。
+        限流 / 封 IP（418、429）、时间戳（-1021）、鉴权（-2015）这类明确错误不算。"""
+
+
+def is_transient(e: BaseException) -> bool:
+    """ccxt 的网络层一时失败：超时、断连、交易所暂不可用。限流和时间戳错误不算。"""
+    try:
+        import ccxt
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(e, ccxt.NetworkError) and not isinstance(
+        e, ccxt.DDoSProtection | ccxt.RateLimitExceeded | ccxt.InvalidNonce
+    )
 
 
 @dataclass(frozen=True)
@@ -214,7 +230,7 @@ class CcxtBinanceFutures:
             await self._ready()
             raw = await self._ex.fetch_positions()
         except Exception as e:
-            raise ExchangeError(f"查持仓失败：{e}") from e
+            raise ExchangeError(f"查持仓失败：{e}", transient=is_transient(e)) from e
         out: list[ExchangePosition] = []
         for p in raw:
             qty = abs(float(p.get("contracts") or 0.0))
@@ -290,7 +306,7 @@ class CcxtBinanceFutures:
             ccxt_symbol = to_ccxt_symbol(symbol) if symbol else None
             raw = await self._ex.fetch_open_orders(ccxt_symbol, None, None, {"trigger": True})
         except Exception as e:
-            raise ExchangeError(f"查条件单失败：{e}") from e
+            raise ExchangeError(f"查条件单失败：{e}", transient=is_transient(e)) from e
         return [self._stop_from(o) for o in raw if self._is_stop(o)]
 
     @staticmethod
