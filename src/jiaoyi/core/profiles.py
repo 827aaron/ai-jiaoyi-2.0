@@ -163,6 +163,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.2,
             "min_stop_fee_multiple": 6.0,  # 止损 ≥ 60bp（哨兵研究 10-24：更窄的扣费后亏得最多）
+            "session_cme_open": True,  # CME 周日开盘：只有 30m–2h 比随便进好（时段研究 10-24）
             **_STRICT_GATE,  # 短持仓费用占比高，要更确定才做
         },
         "app": {"keeper_interval_s": 10, "signal_dedup_s": 60},
@@ -178,6 +179,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.1,
             "min_stop_fee_multiple": 6.0,  # ≥ 60bp
+            "session_cme_open": True,
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 15, "signal_dedup_s": 120},
@@ -193,6 +195,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.1,
             "min_stop_fee_multiple": 5.0,  # ≥ 50bp
+            "session_cme_open": True,
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 20, "signal_dedup_s": 300},
@@ -208,6 +211,7 @@ HOLD: dict[str, dict[Section, dict[str, Any]]] = {
             "max_tp_r": 3.0,
             "stop_level_buffer_atr": 0.1,
             "min_stop_fee_multiple": 4.0,  # ≥ 40bp
+            "session_cme_open": False,  # 4h 以上 CME 周日开盘没好处
             **_LOOSE_GATE,
         },
         "app": {"keeper_interval_s": 30, "signal_dedup_s": 600},
@@ -353,6 +357,7 @@ HOLD.update(
                 "max_tp_r": 3.0,
                 "stop_level_buffer_atr": 0.1,
                 "min_stop_fee_multiple": 2.0,
+                "session_cme_open": False,
                 "funding_against_max_bp": 5.0,
                 "patrol_shock_pct_1m": 2.5,
                 "patrol_alert_pct_1m": 1.2,
@@ -371,6 +376,7 @@ HOLD.update(
                 "max_tp_r": 3.0,
                 "stop_level_buffer_atr": 0.1,
                 "min_stop_fee_multiple": 2.0,
+                "session_cme_open": False,
                 "funding_against_max_bp": 5.0,
                 "patrol_shock_pct_1m": 3.0,
                 "patrol_alert_pct_1m": 1.5,
@@ -389,6 +395,7 @@ HOLD.update(
                 "max_tp_r": 3.0,
                 "stop_level_buffer_atr": 0.1,
                 "min_stop_fee_multiple": 2.0,
+                "session_cme_open": False,
                 "funding_against_max_bp": 5.0,
                 "patrol_shock_pct_1m": 4.0,
                 "patrol_alert_pct_1m": 2.0,

@@ -1867,6 +1867,8 @@ const PLAIN = {
   surge_vol_ratio: "成交量是平时几倍算量能突增",
   surge_taker_ratio: "主动买（卖）占比多少算突增",
   volume_surge_live: "量能突增信号（测试网 / 实盘）",
+  session_cme_open: "关键时段也看 CME 周日开盘",
+  session_cme_open_live: "CME 周日开盘（测试网 / 实盘）",
   liq_min_usdt_1m: "1 分钟爆仓至少多少 USDT 才算",
   liq_ratio: "爆仓额是平时几倍才算",
   liq_drop_pct_5m: "爆仓砸出的 5 分钟跌幅至少百分之几",
@@ -1908,6 +1910,8 @@ const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[
 const HINT = {
   gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
   volume_surge_live: "开 = 成交量突然放大、而且买卖一边倒时顺着那一边做。历史回测不稳定，觉得不对可以关；模拟盘不管开关都照出（攒样本）",
+  session_cme_open: "开 = 芝加哥 CME 比特币期货周日开盘（曼谷周一早上 5 点或 6 点）前后几分钟，放量又大涨大跌时顺着做。回测只有 30 分钟到 2 小时这三档比随便进好，档位默认只在这三档开",
+  session_cme_open_live: "开 = 测试网 / 实盘也出 CME 周日开盘信号。证据还不够（主要靠 4 个周日），默认关，只在模拟盘攒样本",
   jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
   jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
   jev_usd_per_mtok: "按用量算钱，用来统计花费",
@@ -2073,7 +2077,7 @@ const ADV = [
     { g: "止损和止盈", keys: ["risk.lifeboat_stop_multiplier", "fast_loop.atr_period_min", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_buffer_atr", "fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.time_limit_s"] },
     { g: "管家、巡逻兵和对账", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
     { g: "拍板人（每个信号做不做）", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.gate_record_only", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
-    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio"] },
+    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
   ] },
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
     { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.schedule_at", "schedule.*"] },

@@ -53,10 +53,14 @@ _SESSION_OPENS = (
     ("America/New_York", time(9, 30), "纽约开盘"),
 )
 _FUNDING_HOURS_UTC = (0, 8, 16)
+_CME_OPEN = ("America/Chicago", time(17, 0))
+"""CME 比特币期货周日 17:00（芝加哥）开盘：周末憋着的价格一次补上（时段研究 10-24）。"""
 
 
-def session_event(now: datetime, window_min: int) -> str | None:
-    """``now`` 落在哪个时段窗口里（前后 ``window_min`` 分钟），不在返回 None。"""
+def session_event(now: datetime, window_min: int, *, cme: bool = False) -> str | None:
+    """``now`` 落在哪个时段窗口里（前后 ``window_min`` 分钟），不在返回 None。
+
+    ``cme``：也看 CME 周日开盘（档位 / 模式开关决定）。"""
     win = timedelta(minutes=window_min)
     utc = now.astimezone(UTC)
     for h in _FUNDING_HOURS_UTC:
@@ -72,6 +76,12 @@ def session_event(now: datetime, window_min: int) -> str | None:
         at = datetime.combine(local_now.date(), local, z)
         if abs(now - at) <= win:
             return name
+    if cme:
+        z = ZoneInfo(_CME_OPEN[0])
+        local_now = now.astimezone(z)
+        at = datetime.combine(local_now.date(), _CME_OPEN[1], z)
+        if local_now.weekday() == 6 and abs(now - at) <= win:
+            return "CME 周日开盘"
     return None
 
 
@@ -113,6 +123,8 @@ class RuleTrigger:
             if live and not cfg.volume_surge_live
             else frozenset()
         )
+        # CME 周日开盘：档位开了才看；testnet / live 还要 session_cme_open_live
+        self._cme = cfg.session_cme_open and (not live or cfg.session_cme_open_live)
         self._dedup = timedelta(seconds=dedup_s)
         self._rec = recorder
         self._predictor = predictor
@@ -451,7 +463,7 @@ class RuleTrigger:
         # 时段与事件
         rv = v.get("realized_vol_5m")
         if rv and vol_ratio >= c.session_vol_ratio:
-            name = session_event(now, c.session_window_min)
+            name = session_event(now, c.session_window_min, cme=self._cme)
             sigma_5m = rv * math.sqrt(30)  # realized_vol_5m 是 10 秒收益的标准差
             if name is not None and abs(ret_5m) >= sigma_5m > 0:
                 side = Side.LONG if ret_5m > 0 else Side.SHORT

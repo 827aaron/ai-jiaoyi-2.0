@@ -406,6 +406,15 @@ class FastLoopConfig(Contract):
         description="testnet / live 也出量能突增信号（默认开，Aaron 2026-10-24）。"
         "关掉后 testnet / live 不出；paper 不管这个开关照出（攒校准样本）。",
     )
+    session_cme_open: bool = Field(
+        default=False,
+        description="时段与事件多看一个「CME 周日开盘」（芝加哥周日 17:00，曼谷周一 5:00 / 6:00）。"
+        "档位推荐 30m / 1h / 2h 开（时段研究 10-24：只有这三档比随便进好），其它档关。",
+    )
+    session_cme_open_live: bool = Field(
+        default=False,
+        description="CME 周日开盘在 testnet / live 也出（默认关：证据还不够，只在模拟盘攒样本）。",
+    )
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
