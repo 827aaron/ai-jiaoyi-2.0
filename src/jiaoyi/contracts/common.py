@@ -98,6 +98,12 @@ class SignalKind(StrEnum):
     """拥挤交易反向。"""
     SESSION_EVENT = "session_event"
     """时段与事件。"""
+    OI_FOLLOW = "oi_follow"
+    """持仓量变化：持仓量涨 + 价格同向走 = 新钱进场，跟着做（新信号研究 2026-10-24）。"""
+    TOP_VS_CROWD = "top_vs_crowd"
+    """大户散户分歧：大户加多、散户减多跟大户，反过来做空。"""
+    BTC_LEAD = "btc_lead"
+    """BTC 先动、小币跟：BTC 5 分钟大动、这个币还没动，按 BTC 方向做它。"""
 
 
 class Role(StrEnum):

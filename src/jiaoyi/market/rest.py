@@ -263,3 +263,17 @@ async def fetch_klines_between(
         if len(page) < limit:
             break
     return parse_klines(symbol, rows, datetime.now(UTC), interval)
+
+
+async def fetch_json(
+    path: str,
+    params: dict[str, Any],
+    *,
+    weight: int = 1,
+    base_url: str = DEFAULT_REST_URL,
+    timeout_s: float = 5.0,
+    budget: WeightBudget | None = None,
+) -> Any:
+    """任意公开 GET 接口（持仓量、多空比……），返回解析后的 JSON。限流规则同上。"""
+    url = f"{base_url}{path}?{urllib.parse.urlencode(params)}"
+    return await _page(url, timeout_s, weight, budget)

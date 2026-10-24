@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import bisect
+import contextlib
+import itertools
 import math
 import statistics
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -38,6 +40,17 @@ VOL_AVG_KLINES = 20
 TRADE_WINDOW_S = 300.0
 LIQ_WINDOW_S = 1800.0
 FLOW_WINDOW_S = 60.0
+BURST_WINDOW_S = 10.0
+"""放量提前发现：最近这么多秒的成交额折算成每分钟，和 1 分钟均量比。"""
+CLOSES_KEEP = 1500
+"""留多少根 1 分钟收盘价：24 小时波动（1440）+ 4 小时涨跌。"""
+VOL_24H_MINUTES = 1441
+"""24 小时 1 分钟波动要的收盘价个数（启动回填至少这么多根）。"""
+VOL_24H_MIN_POINTS = 60
+"""1 分钟收益不够这么多个就不算 24 小时波动（刚上线的币 / 回填失败）。"""
+BTC = "BTCUSDT"
+ExtraValues = Callable[[str, datetime], Mapping[str, float]]
+"""快照的额外键（持仓量、多空比等，来自 REST 轮询）：(币, 现在) → 键值。"""
 
 
 @dataclass
@@ -62,6 +75,10 @@ class _SymbolState:
     # (时间戳, OFI 名义价值)
     ofi: deque[tuple[float, float]] = field(default_factory=deque)
     klines: deque[Kline] = field(default_factory=lambda: deque(maxlen=60))
+    # (开盘分钟, 收盘价)：算 15 分钟到 4 小时涨跌、24 小时 1 分钟波动
+    closes: deque[tuple[int, float]] = field(default_factory=lambda: deque(maxlen=CLOSES_KEEP))
+    vol_24h: float | None = None  # 过去 24 小时 1 分钟对数收益的标准差
+    vol_dirty: bool = False  # 收了新线还没重算（用到时才算：回填 1500 根时不用算 1500 遍）
     short: _AtrTrack = field(default_factory=_AtrTrack)
     long: _AtrTrack = field(default_factory=_AtrTrack)  # 没配长周期就一直空着
     # 最近 7 天每根 N 分钟线收完时的 (收盘时间戳, ATR)（求中位数给止损 ATR 当下限）
@@ -99,6 +116,47 @@ def _on_bar(tr: _AtrTrack, high: float, low: float, close: float) -> None:
         tr.atr = (tr.atr * (ATR_PERIOD - 1) + x) / ATR_PERIOD
 
 
+def _vol_1m(closes: deque[tuple[int, float]]) -> float | None:
+    """最近 24 小时相邻 1 分钟收盘价的对数收益标准差；点太少返回 None。"""
+    pts = list(closes)[-VOL_24H_MINUTES:]
+    rets = [math.log(b / a) for (_, a), (_, b) in itertools.pairwise(pts) if a > 0 and b > 0]
+    if len(rets) < VOL_24H_MIN_POINTS:
+        return None
+    mean = sum(rets) / len(rets)
+    return math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
+
+
+def _ret_minutes(st: _SymbolState, now: float, minutes: int) -> float | None:
+    """现价相对 ``minutes`` 分钟前那根 1 分钟线收盘价的涨跌。
+
+    那时候的线缺了（差 5 分钟以上）返回 None。"""
+    if st.last_price is None or not st.closes:
+        return None
+    target = int(now // 60) - minutes
+    i = bisect.bisect_right(st.closes, (target, math.inf)) - 1
+    if i < 0:
+        return None
+    minute, close = st.closes[i]
+    if target - minute > 5 or close <= 0:
+        return None
+    return st.last_price / close - 1.0
+
+
+def _move_z(st: _SymbolState, now: float, minutes: int) -> float | None:
+    """``minutes`` 分钟涨跌 ÷（24 小时 1 分钟波动 × √分钟数），带正负号。"""
+    r = _ret_minutes(st, now, minutes)
+    vol = _vol_24h(st)
+    if r is None or not vol:
+        return None
+    return round(r / (vol * math.sqrt(minutes)), 3)
+
+
+def _vol_24h(st: _SymbolState) -> float | None:
+    if st.vol_dirty:
+        st.vol_24h, st.vol_dirty = _vol_1m(st.closes), False
+    return st.vol_24h
+
+
 def wilder_atr(bars: Iterable[tuple[float, float, float]]) -> float | None:
     """完整 N 分钟线 ``(高, 低, 收)``（升序）→ 同实时引擎算法的 ATR；不够 15 根为 None。"""
     tr = _AtrTrack()
@@ -122,7 +180,9 @@ class RollingFeatureEngine:
         *,
         atr_period_min: int = DEFAULT_ATR_MINUTES,
         atr_long_period_min: int = 0,
+        oi_window_min: int = 240,
     ) -> None:
+        """``oi_window_min``：持仓量变化信号的窗口，按它多算一个 ``ret_oiw``（同窗口价格涨跌）。"""
         if atr_period_min < 1:
             raise ValueError("atr_period_min 至少 1 分钟")
         if 0 < atr_long_period_min <= atr_period_min:
@@ -131,7 +191,13 @@ class RollingFeatureEngine:
         self._atr_min = atr_period_min
         self._long_min = atr_long_period_min
         self._hist_len = HISTORY_DAYS * 1440 // atr_period_min
+        self._oi_min = oi_window_min
         self._s: dict[str, _SymbolState] = {}
+        self._extra: ExtraValues | None = None
+
+    def set_extra(self, extra: ExtraValues | None) -> None:
+        """快照里并进的额外键（持仓量、多空比，见 ``market.derivs``）。拿不到的键不写。"""
+        self._extra = extra
 
     def _state(self, symbol: str) -> _SymbolState:
         st = self._s.get(symbol)
@@ -182,6 +248,8 @@ class RollingFeatureEngine:
         if st.klines and k.open_time <= st.klines[-1].open_time:
             return  # 重复或乱序（例如回填和推送重叠）
         st.klines.append(k)
+        st.closes.append((int(k.open_time.timestamp() // 60), k.close))
+        st.vol_dirty = True
         end = self._aggregate(st.short, k, self._atr_min)
         if end is not None and st.short.atr is not None:
             st.atr_hist.append((end, st.short.atr))
@@ -277,6 +345,15 @@ class RollingFeatureEngine:
             return None  # 还没攒够 15 根 N 分钟 K 线（回填 backfill_minutes 根 1 分钟线就够）
         now = st.last_ts
         values = self._values(st, now)
+        btc = self._s.get(BTC)
+        if btc is not None and btc.last_price is not None:
+            z = _move_z(btc, btc.last_ts, 5)
+            if z is not None:
+                values["btc5z"] = z
+        if self._extra is not None:
+            # 额外数据只是参考，出错不能让快照（和信号、管家）跟着挂
+            with contextlib.suppress(Exception):
+                values.update(self._extra(symbol, datetime.fromtimestamp(now, UTC)))
         return FeatureSnapshot(
             symbol=symbol,
             ts=datetime.fromtimestamp(now, UTC),
@@ -315,6 +392,7 @@ class RollingFeatureEngine:
                 v[name] = st.last_price / past - 1.0
 
         buy = sell = 0.0
+        buy_10 = sell_10 = 0.0
         cvd_30 = 0.0
         n = 0
         for t, usdt, is_buy in st.trades:
@@ -327,6 +405,11 @@ class RollingFeatureEngine:
                 sell += usdt
             if t >= now - 30.0:
                 cvd_30 += usdt if is_buy else -usdt
+            if t >= now - BURST_WINDOW_S:
+                if is_buy:
+                    buy_10 += usdt
+                else:
+                    sell_10 += usdt
         v["vol_1m_usdt"] = buy + sell
         v["trades_1m"] = float(n)
         v["taker_buy_ratio_1m"] = buy / (buy + sell) if buy + sell > 0 else 0.5
@@ -338,10 +421,27 @@ class RollingFeatureEngine:
             avg = sum(k.quote_volume for k in recent) / len(recent)
             if avg > 0:
                 v["vol_ratio_1m"] = (buy + sell) / avg
+                # 最近 10 秒折算成每分钟：放量开头几秒就能看出来，不用等满 1 分钟
+                v["vol_ratio_10s"] = (buy_10 + sell_10) * (60.0 / BURST_WINDOW_S) / avg
+        if buy_10 + sell_10 > 0:
+            v["taker_buy_ratio_10s"] = buy_10 / (buy_10 + sell_10)
 
         rv = self._realized_vol(st, now, 300.0, 10.0)
         if rv is not None:
             v["realized_vol_5m"] = rv
+
+        for name, minutes in (
+            ("ret_15m", 15),
+            ("ret_60m", 60),
+            ("ret_240m", 240),
+            ("ret_oiw", self._oi_min),
+        ):
+            r = _ret_minutes(st, now, minutes)
+            if r is not None:
+                v[name] = r
+        vol = _vol_24h(st)
+        if vol is not None:
+            v["vol_1m_24h"] = vol
 
         long_1m = short_1m = long_5m = short_5m = total = 0.0
         for t, usdt, was_long in st.liqs:

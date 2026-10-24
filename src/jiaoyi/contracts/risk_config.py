@@ -418,6 +418,11 @@ class FastLoopConfig(Contract):
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
+    burst_10s_on: bool = Field(
+        default=True,
+        description="最近 10 秒成交额折算成每分钟也算放量：量能突增、放量突破在放量开头几秒就能出，"
+        "不用等满 1 分钟（1 分钟或 10 秒任一条够倍数就算；主动买卖占比用同一段时间）。",
+    )
     liq_min_usdt_1m: float = Field(
         default=100_000.0, ge=0.0, le=1e9, description="1 分钟爆仓额下限。"
     )
@@ -437,6 +442,64 @@ class FastLoopConfig(Contract):
         default=5, ge=1, le=60, description="开盘 / 资金费结算前后几分钟。"
     )
     session_vol_ratio: float = Field(default=2.0, ge=1.0, le=50.0)
+    # ---- 新信号（研究 2026-10-24）：都先在模拟盘出，testnet / live 各一个开关默认关
+    oi_follow_on: bool = Field(
+        default=False,
+        description="出「持仓量变化」信号。档位推荐 2h–24h 开，30m / 1h 关。",
+    )
+    oi_window_min: int = Field(
+        default=240,
+        ge=15,
+        le=720,
+        description="持仓量变化看多长时间（分钟），同一个币同一个方向这么久只出一次。"
+        "档位推荐 2h 60、4h 以上 240。",
+    )
+    oi_min_pct: float = Field(
+        default=1.0, ge=0.2, le=10.0, description="持仓量变化：持仓量至少涨百分之几。"
+    )
+    oi_price_z: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=5.0,
+        description="持仓量变化：同一段时间价格至少走几倍平时波动"
+        "（过去 24 小时 1 分钟收益标准差 × √分钟数）。档位推荐 2h 2、4h 以上 1。",
+    )
+    oi_follow_live: bool = Field(
+        default=False, description="testnet / live 也出持仓量变化信号（默认关，只在模拟盘出）。"
+    )
+    top_crowd_on: bool = Field(
+        default=False,
+        description="出「大户散户分歧」信号（反着大户做）。档位推荐 4h–24h 开，2h 以下关。",
+    )
+    top_crowd_min_pct: float = Field(
+        default=5.0,
+        ge=0.5,
+        le=20.0,
+        description="大户散户分歧：大户持仓多空比和全市场人数多空比各至少反向变百分之几"
+        "（研究 16:38Z：5%；想多出信号可调到 2%）。",
+    )
+    top_crowd_window_min: int = Field(
+        default=240,
+        ge=15,
+        le=720,
+        description="大户散户分歧看多长时间（分钟），同一个币同一个方向这么久只出一次。",
+    )
+    top_crowd_live: bool = Field(
+        default=False, description="testnet / live 也出大户散户分歧信号（默认关，只在模拟盘出）。"
+    )
+    btc_lead_on: bool = Field(
+        default=False, description="出「BTC 先动、小币跟」信号。档位推荐 30m–2h 开，4h 以上关。"
+    )
+    btc_lead_z: float = Field(
+        default=3.0,
+        ge=1.5,
+        le=10.0,
+        description="BTC 先动：BTC 5 分钟至少走几倍平时波动"
+        "（过去 24 小时 1 分钟收益标准差 × √5）。",
+    )
+    btc_lead_live: bool = Field(
+        default=False, description="testnet / live 也出 BTC 先动信号（默认关，只在模拟盘出）。"
+    )
     # ---- 和作战卡相反的信号（研究 2026-10-24：有仓交管家急查，反复出才开单币临时会）
     against_signal_on: bool = Field(
         default=True,

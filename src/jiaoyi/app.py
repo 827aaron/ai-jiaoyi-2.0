@@ -103,6 +103,7 @@ from jiaoyi.interfaces import (
 from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.keeper.stub import StubKeeper
 from jiaoyi.market.binance_ws import BinanceFuturesFeed
+from jiaoyi.market.derivs import DerivsFeed
 from jiaoyi.market.features import RollingFeatureEngine
 from jiaoyi.market.stub import StubMarketDataFeed
 from jiaoyi.patrol.rules import RulePatrol
@@ -348,6 +349,8 @@ class Built:
     """账本按币安成交回填 + 收入流水刷新（用户数据流叫醒，60 秒兜底）；没连交易所时没有。"""
     against: AgainstCardWatch | None = None
     """预测员连续看反作战卡的事件 / 查询（慢环订阅它开单币临时会）。"""
+    derivs: DerivsFeed | None = None
+    """持仓量 / 多空比轮询（新信号 + 拍板人快照）；没连币安时没有。主循环跑 ``run``。"""
 
 
 def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
@@ -563,10 +566,17 @@ def build_modules(
     else:  # 默认关：只记录，不申请会（预测员还在观察）
         against.subscribe(lambda a: _note_predictor_against(decision_log, a))
     features = RollingFeatureEngine(
-        atr_period_min=fast.atr_period_min, atr_long_period_min=fast.atr_long_period_min
+        atr_period_min=fast.atr_period_min,
+        atr_long_period_min=fast.atr_long_period_min,
+        oi_window_min=fast.oi_window_min,
     )
+    derivs: DerivsFeed | None = None
     if isinstance(feed, BinanceFuturesFeed):
         feed.set_coverage(features.coverage)
+        derivs = DerivsFeed(
+            oi_window_min=fast.oi_window_min, ratio_window_min=fast.top_crowd_window_min
+        )
+        features.set_extra(derivs.values)
 
     # 拍板模型是启动时的一次性选择：有 Jev 用 Jev；模拟盘且明确打开才用规则版；否则不开新仓。
     # Jev 运行中出错只返回 ok=False，绝不切到规则版。
@@ -590,7 +600,8 @@ def build_modules(
             recorders[Role.GATE],
             hold_min=fast.time_limit_s // 60,
             max_concurrent=app_cfg.jev_max_concurrent,
-            max_wait_s=fast.signal_max_age_s,
+            # 排队再等就来不及在信号有效期内判完（保镖按年龄拒，白花一次 Jev）
+            max_wait_s=max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0),
         )
         keeper = JevKeeper(
             model,
@@ -645,6 +656,7 @@ def build_modules(
         income,
         ledger,
         against,
+        derivs,
     )
 
 
@@ -676,6 +688,7 @@ class App:
         self.ledger: LedgerSync | None = None
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
+        self.derivs: DerivsFeed | None = None
         self.credits: CreditMonitor | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
@@ -698,6 +711,7 @@ class App:
             self.ledger = built.ledger
             self.news = built.news
             self.against = built.against
+            self.derivs = built.derivs
             if self.slow_cfg.llm.provider == "openrouter" and self.news is not None:
                 store = secrets or ChainedSecretStore()  # 真军师团才有 news；桩没有额度可看
                 self.credits = CreditMonitor(
