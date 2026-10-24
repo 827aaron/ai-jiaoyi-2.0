@@ -576,6 +576,8 @@ def build_modules(
     decision_model: DecisionModel
     gate: EntryGate
     keeper: Keeper
+    for name in app_cfg.ignored_paper_switches:
+        log.warning("%s 只在模拟盘生效，已忽略", name)
     if model is None:
         gate_mode = "none"
         log.warning("没有可用的拍板模型（缺 JEV_API_KEY 或没锁 jev_model），不开新仓")

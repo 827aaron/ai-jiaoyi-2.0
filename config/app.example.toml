@@ -35,7 +35,7 @@ against_card_meeting = false      # 预测员连续看反作战卡时申请单�
 jev_provider = "typesafe"         # typesafe = 直连（key: JEV_API_KEY）；openrouter = 经 OpenRouter（key: OPENROUTER_API_KEY）
 # jev_model = "jev-1.14"          # M1 拿到 key 后填具体版本号（不许用 latest）；换版本要重新校准门槛
                                   # 走 openrouter 时写 OpenRouter 的名字，例如 "typesafe/jev-1.14"
-rule_gate_without_jev = false     # 没有 Jev 时用不用规则版拍板人；默认不用 = 不开仓；只能 paper 模式打开
+rule_gate_without_jev = false     # 没有 Jev 时用不用规则版拍板人；默认不用 = 不开仓；只在 paper 生效，testnet / live 写了当关
 jev_usd_per_mtok = 0.042          # Jev 每百万输入 token 的价格，记花费用
 jev_max_consecutive_errors = 5    # 连续出错 5 次暂停调用；成功一次就清零
 jev_error_cooldown_s = 60         # 暂停 60 秒后再试
@@ -43,7 +43,7 @@ jev_error_cooldown_s = 60         # 暂停 60 秒后再试
 # min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6（paper 不写 = 0.35）
 min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向
 # max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.7）
-# gate_record_only = false         # 拍板只记不拦（不写 = 关；只有 paper 能开）：门槛没过也放行并记下，毒性 ≥ 0.8 仍拦
+# gate_record_only = false         # 拍板只记不拦（不写 = 关；只在 paper 生效，testnet / live 写了当关）：门槛没过也放行并记下，毒性 ≥ 0.8 仍拦
 signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
 size_fraction_m = 0.75            # M 用 7.5 成，L 用满

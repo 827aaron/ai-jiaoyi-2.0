@@ -777,6 +777,28 @@ def test_schedule_event_triggers_and_fixed_time(tmp_path: Path) -> None:
     assert "schedule_at" not in tomllib.loads(paths.slow.read_text(encoding="utf-8"))["schedule"]
 
 
+def test_switch_mode_turns_off_paper_only_switches(tmp_path: Path) -> None:
+    """切测试网时「拍板只记不拦」顺手关掉并记原因；手改留着的只提示、不拒绝启动。"""
+    paths, data = _setup(tmp_path)
+    actions.update_config(paths, data, "fast_loop", {"gate_record_only": True}, PW, NOW)
+    actions.switch_mode(paths, data, "testnet", PW, None, NOW)
+    app = load_app_config(paths.app)
+    assert app.mode.value == "testnet" and app.fast_loop.gate_record_only is False
+    row = actions.recent_changes(data)[0]
+    assert row["key"] == "gate_record_only" and row["new"] is False and "自动关掉" in row["note"]
+    assert actions.paper_only_ignored(paths) == []
+    text = paths.app.read_text(encoding="utf-8").replace(
+        "gate_record_only = false", "gate_record_only = true"
+    )
+    paths.app.write_text(text, encoding="utf-8")
+    assert load_app_config(paths.app).ignored_paper_switches == ["拍板只记不拦"]
+    assert actions.paper_only_ignored(paths) == ["拍板只记不拦"]
+    assert actions.control_state(data, paths).paper_only_ignored == ["拍板只记不拦"]
+    # 测试网下开着的还能在网页上关掉
+    actions.update_config(paths, data, "fast_loop", {"gate_record_only": False}, PW, NOW)
+    assert actions.paper_only_ignored(paths) == []
+
+
 def test_switch_mode_goes_through_live_gate(tmp_path: Path) -> None:
     """面板切模式和命令行同一套门槛：实盘 = 确认词 + 密码，只在本机；离开实盘上锁；都发重启。"""
     paths, data = _setup(tmp_path)

@@ -204,7 +204,7 @@ class FastLoopConfig(Contract):
     rule_gate_without_jev: bool = Field(
         default=False,
         description="没有 Jev（没 key 或没锁版本）时是否用规则版拍板人。默认关：没有 Jev 就不开仓。"
-        "只允许 paper 模式打开；Jev 运行中出错永远不会切到规则版。",
+        "只在 paper 生效（testnet / live 写了也当关）；Jev 运行中出错永远不会切到规则版。",
     )
     jev_usd_per_mtok: float = Field(
         default=0.042, ge=0.0, le=10.0, description="每百万输入 token 美元。"
@@ -224,7 +224,7 @@ class FastLoopConfig(Contract):
         default=None,
         description="拍板只记不拦：拍板人的概率照常问、照常记，但没过上面这几个门槛也放行"
         "（订单流有毒概率 ≥ 0.8 仍然拦），用来在 paper 攒样本校准门槛。"
-        "不写 = 关（拍板一票否决）；只有 paper 能写 true，testnet / live 写 true 拒绝启动。",
+        "不写 = 关（拍板一票否决）；只在 paper 生效，testnet / live 写 true 当关（启动时警告）。",
     )
     # ---- 保镖的档位换算
     max_slippage_stop_frac: float = Field(
@@ -621,6 +621,18 @@ class AppConfig(Contract):
         return fast.limit_take_profit if self.mode == RunMode.PAPER else fast.limit_take_profit_live
 
     @property
+    def ignored_paper_switches(self) -> list[str]:
+        """写着开、但只在 paper 生效的开关（testnet / live 下当关，不拒绝启动）。"""
+        if self.mode == RunMode.PAPER:
+            return []
+        fast = self.fast_loop
+        on = {
+            "拍板只记不拦": fast.gate_record_only,
+            "没有拍板人时用规则代替": fast.rule_gate_without_jev,
+        }
+        return [name for name, v in on.items() if v]
+
+    @property
     def gate_record_only(self) -> bool:
         """拍板只记不拦实际开没开：没写时关；只有 paper 能开，testnet / live 永远关。"""
         return self.mode == RunMode.PAPER and bool(self.fast_loop.gate_record_only)
@@ -633,11 +645,5 @@ class AppConfig(Contract):
             raise ValueError(
                 f"最长持仓档 {self.hold} 只能在 paper 模式用（费用占止损太高），"
                 "testnet / live 请用 1h 或 2h 或 4h"
-            )
-        if self.fast_loop.gate_record_only and self.mode != RunMode.PAPER:
-            raise ValueError("gate_record_only（拍板只记不拦）只能在 paper 模式打开")
-        if self.fast_loop.rule_gate_without_jev and self.mode != RunMode.PAPER:
-            raise ValueError(
-                "rule_gate_without_jev 只能在 paper 模式打开，testnet / live 必须用 Jev"
             )
         return self

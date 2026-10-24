@@ -105,6 +105,9 @@ function chrome() {
     const since = c.paused_since ? `${hm(c.paused_since)} 起，` : "";
     b += `<div class="banner bn-bad"><b>⏸ ${why}</b><span>${since}${esc(c.paused_reason || "")}${c.paused_reason ? "。" : ""}持仓照常盯；恢复要点右上角“恢复开新仓”并输入面板密码。</span></div>`;
   }
+  if (c && c.paper_only_ignored && c.paper_only_ignored.length) {
+    b += `<div class="banner bn-paper"><b>${esc(c.paper_only_ignored.join("、"))} 只在模拟盘生效，已忽略</b><span>配置里还开着，但现在不是模拟盘，主程序按“关”跑。到 设置 → 高级 → 执行 把它关掉，这条就不显示了。</span></div>`;
+  }
   if (c && c.llm_credit) {
     b += `<div class="banner bn-bad"><b>💳 ${esc(c.llm_credit)}</b></div>`;
   }
@@ -2156,7 +2159,7 @@ try { S.stTab = localStorage.getItem("settings-tab") || "risk"; } catch (err) { 
 
 const lockedPaper = (i) => i.paper_only && pageData.mode !== "paper";
 function auxOf(i) {
-  if (lockedPaper(i)) return "只有模拟盘能开";
+  if (lockedPaper(i)) return i.value === true ? '<span class="warn">只在模拟盘生效，已忽略</span>' : "只有模拟盘能开";
   if (!i.editable) return "网页不改";
   if (i.recommended != null) return `推荐 <b>${valOf(i, i.recommended)}</b>`;
   const by = i.sec === "fast_loop" ? "最长持仓" : "档位";
@@ -2179,7 +2182,7 @@ function arrCells(v) {
 function itemRow(i, big) {
   const id = `${i.sec}.${i.key}`;
   const open = S.stOpen.has(id);
-  const w = pageData.writable && i.editable && !lockedPaper(i);
+  const w = pageData.writable && i.editable && !(lockedPaper(i) && i.value !== true);  // 非模拟盘：开着的还能关
   const desc = techHint(i);
   const acts = [
     w ? `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">修改</button>` : "",
@@ -2307,7 +2310,7 @@ function pendingChanges(d) {
 function changeText(x, ix) {
   const i = ix[`${x.section}.${x.key}`] || { key: x.key, label: x.key, nullable: true, choices: [] };
   const name = i.cat ? i.label : PLAIN[x.key] || i.label || x.key;
-  return `${esc(name)}：${valOf({ ...i, nullable: true }, x.old)} → <b>${valOf({ ...i, nullable: true }, x.new)}</b>`;
+  return `${esc(name)}：${valOf({ ...i, nullable: true }, x.old)} → <b>${valOf({ ...i, nullable: true }, x.new)}</b>${x.note ? `<span class="dim small">（${esc(x.note)}）</span>` : ""}`;
 }
 function showChanges() {
   const d = pageData;

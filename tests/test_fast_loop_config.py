@@ -63,10 +63,10 @@ def test_rule_gate_switch_only_in_paper(tmp_path: Path) -> None:
     p = tmp_path / "app.toml"
     p.write_text(text, encoding="utf-8")
     assert load_app_config(p).fast_loop.rule_gate_without_jev
-    for mode in ("testnet", "live"):
+    assert load_app_config(p).ignored_paper_switches == []
+    for mode in ("testnet", "live"):  # 写了也不拒绝启动：当关，启动时警告
         p.write_text(text.replace('mode = "paper"', f'mode = "{mode}"'), encoding="utf-8")
-        with pytest.raises(ConfigError, match="rule_gate_without_jev"):
-            load_app_config(p)
+        assert load_app_config(p).ignored_paper_switches == ["没有拍板人时用规则代替"]
 
 
 def test_gate_record_only_default_off_and_never_live() -> None:
@@ -81,8 +81,8 @@ def test_gate_record_only_default_off_and_never_live() -> None:
     raw["fast_loop"]["gate_record_only"] = None
     assert not AppConfig.model_validate(raw).gate_record_only  # testnet / live 永远关
     raw["fast_loop"]["gate_record_only"] = True
-    with pytest.raises(ValueError):
-        AppConfig.model_validate(raw)
+    cfg = AppConfig.model_validate(raw)  # 不拒绝启动，只是当关
+    assert not cfg.gate_record_only and cfg.ignored_paper_switches == ["拍板只记不拦"]
 
 
 def test_paper_gate_thresholds_only_in_paper(tmp_path: Path) -> None:

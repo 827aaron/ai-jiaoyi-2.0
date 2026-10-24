@@ -218,6 +218,8 @@ class Control(BaseModel):
     """面板这次启动有没有拿到配置文件路径（没有就只读）。"""
     started_at: str | None = None
     """主程序这次启动的时间（runtime.json）；面板“重启生效”看它变了才算真的重启了。"""
+    paper_only_ignored: list[str] = []
+    """配置里开着、但现在不是模拟盘所以被忽略的开关（中文名）。"""
     llm_credit: str | None = None
     """模型额度（OpenRouter 余额）快用完或刚撞 402 时的提示语，总览顶部显示横幅。"""
 
