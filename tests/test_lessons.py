@@ -72,7 +72,7 @@ def mk_book(tmp_path: Path, rows: int, now: datetime) -> L.LessonBook:
         tmp_path,
         tz="Asia/Bangkok",
         hold_minutes=120,
-        horizon_zh="2 小时",
+        horizon="2 hours",
         fee_pct=0.08,
         fetch=fetch,
     )
@@ -92,7 +92,7 @@ def test_due_after_five_bangkok_days_and_threshold(tmp_path: Path) -> None:
     assert batch and len(batch.lessons) == 1  # 空文本的丢掉
     files = list((tmp_path / "memory" / "lessons").glob("*.json"))
     assert len(files) == 1 and json.loads(files[0].read_text())["n_cards"] == 40
-    assert "别追空" in b.text() and "依据" in b.text()
+    assert "别追空" in b.text() and "evidence" in b.text()
     assert not b.due(later + timedelta(days=1))  # 5 天内不再来
 
 

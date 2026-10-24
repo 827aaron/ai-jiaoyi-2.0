@@ -141,7 +141,7 @@ async def test_all_sources_down_means_empty_not_error() -> None:
     hub = NewsHub([Fake("a", RuntimeError("x"))], clock=lambda: NOW)
     assert await hub.poll() == []
     assert hub.for_symbol("BTCUSDT") == [] and hub.market() == []
-    assert "暂无" in format_items([])
+    assert "no relevant news" in format_items([])
 
 
 async def test_poll_and_notify_only_for_announcements() -> None:
@@ -202,7 +202,9 @@ def test_vendors_use_hub_for_crypto_and_fall_back_for_stocks() -> None:
     assert get_news("TSLA", "2026-10-22", "2026-10-23") == "yf news" and calls == ["TSLA"]
     assert "Bitcoin ETF" in get_global("2026-10-23")
     empty = make_news_vendors(NewsHub([], clock=lambda: NOW), None, boom)[1]("2026-10-23")
-    assert "暂无" in empty and "yahoo down" in empty  # 没新闻 + 原源也挂：会议照常，文本说明
+    assert (
+        "no relevant news" in empty and "yahoo down" in empty
+    )  # 没新闻 + 原源也挂：会议照常，文本说明
 
 
 def test_build_config_switches_news_vendor() -> None:

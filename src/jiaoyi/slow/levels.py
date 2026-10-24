@@ -156,21 +156,25 @@ def describe_candidates(ctx: LevelContext) -> str:
     """给会议提示词用的候选关键位说明。"""
     if ctx.price is None or ctx.atr is None or ctx.span is None or not ctx.candidates:
         return (
-            "候选关键位：暂无（行情数据不可用或持仓期内没有合适的价位）"
-            "——key_levels 请留空，不要自己编价位。"
+            "Candidate key levels: none (market data unavailable, or no suitable price inside the "
+            "holding window). Leave key_levels empty; do not invent prices."
         )
     sup, res = split_sides(ctx.candidates, ctx.price, PER_SIDE_OFFERED)
 
     def fmt(cs: list[Candidate]) -> str:
-        return "、".join(f"{c.price:g}（{c.source}）" for c in cs) or "无"
+        return ", ".join(f"{c.price:g} ({c.source})" for c in cs) or "none"
 
     return (
-        f"候选关键位（代码用真实 K 线算的，现价 {ctx.price:g}，只给持仓期内碰得到的："
-        f"现价 ±{ctx.span:g}（约 ±{ctx.span / ctx.price * 100:.2f}%）以内，{ctx.basis}，"
-        f"距现价从近到远）：\n支撑：{fmt(sup)}\n压力：{fmt(res)}\n"
-        "标「昨日 / 7日」的高低点是突破位：收盘价越过它说明走势在延续，不是反转点。\n"
-        f"key_levels 只能从上面的候选里选，直接写候选的价格；支撑最多 {PER_SIDE_KEPT} 个、"
-        f"压力最多 {PER_SIDE_KEPT} 个；候选里没有的价位不要写，更不要凭印象编价位。"
+        "Candidate key levels (computed by code from real klines; the current price is "
+        f"{ctx.price:g}; only levels reachable inside the holding window are given, i.e. within "
+        f"price ±{ctx.span:g} (about ±{ctx.span / ctx.price * 100:.2f}%), {ctx.basis}; nearest "
+        f"first):\nSupport: {fmt(sup)}\nResistance: {fmt(res)}\n"
+        "Source labels: 昨日 = yesterday's high/low, 7日 = 7-day high/low, 摆动 = swing high/low, "
+        "成交密集区 = volume node, 整数关口 = round number. Yesterday's and 7-day highs/lows are "
+        "breakout levels: a close beyond one means the move is continuing, not reversing.\n"
+        "key_levels must be chosen from the candidates above, written as the candidate's price; "
+        f"at most {PER_SIDE_KEPT} support and {PER_SIDE_KEPT} resistance; never write a price that "
+        "is not a candidate and never make one up from memory."
     )
 
 

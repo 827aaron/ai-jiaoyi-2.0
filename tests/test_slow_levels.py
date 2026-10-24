@@ -79,10 +79,10 @@ def test_prompt_lists_supports_and_resistances_sorted_by_distance() -> None:
         (Candidate(99.0, "昨日低点"), Candidate(103.0, "摆动高点"), Candidate(96.0, "整数关口")),
     )
     text = describe_candidates(ctx)
-    assert "支撑：99（昨日低点）、96（整数关口）" in text
-    assert "压力：103（摆动高点）" in text
-    assert "不要凭印象编价位" in text
-    assert "暂无" in describe_candidates(LevelContext())
+    assert "Support: 99 (昨日低点), 96 (整数关口)" in text
+    assert "Resistance: 103 (摆动高点)" in text
+    assert "never make one up from memory" in text
+    assert "none" in describe_candidates(LevelContext())
 
 
 def test_select_levels_snaps_to_candidates_drops_invented_and_groups() -> None:
@@ -157,7 +157,7 @@ def test_convert_prompt_is_perp_flavoured_and_forbids_inventing_levels() -> None
     risk = load_risk_config(ROOT / "config" / "risk.example.toml")
     ctx = LevelContext(100.0, 2.0, 10.0, (Candidate(99.0, "昨日低点"),))
     p = convert_prompt(_entry(), risk, "震荡", "", "结论", "ATR 说明", describe_candidates(ctx))
-    assert "永续合约" in p and "减持" in p and "99（昨日低点）" in p
+    assert "perpetual" in p and "trim" in p and "99 (昨日低点)" in p
     assert "财报" not in p
 
 
@@ -179,8 +179,8 @@ def test_span_is_one_formula_scaled_by_own_volatility_and_holding_time() -> None
 
 def test_hold_note_and_perp_context_tell_the_meeting_the_holding_time() -> None:
     note = describe_hold(120, 6.0, 2390.0, StopScale(period_min=15))
-    assert "120 分钟" in note and "±" in note and "stop_atr×√(120/15)" in note
-    assert "几天" in describe_hold(30, None, None, StopScale(period_min=5))
+    assert "120 minutes" in note and "±" in note and "sqrt(120/15)" in note
+    assert "days" in describe_hold(30, None, None, StopScale(period_min=5))
     assert "about 45 minutes" in perp_context(PromptParams(hold_minutes=45))
 
 

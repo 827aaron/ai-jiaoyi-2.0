@@ -34,12 +34,16 @@ def test_describe_trend_short_uses_five_minute_windows_and_background() -> None:
         bars(21),
         lambda x: f"{x:.1f}",
     )
-    assert text.startswith("- BTC 现价 200.0：")
-    assert "1 小时涨跌 +0.6%" in text  # 12 根 × 0.1 = 1.2
-    assert "4 小时涨跌 +2.5%" in text and "24 小时涨跌 +16.8%" in text
-    assert "在 24 小时区间里的位置 97%（低 170.3 – 高 201.0）" in text
-    assert "近 1 小时成交量（相对 24 小时均值） 1.0 倍" in text
-    assert "；背景：相对 20 日均线 上方（" in text and "7 天涨跌 +" in text and "RSI" not in text
+    assert text.startswith("- BTC price 200.0:")
+    assert "1h % change +0.6%" in text  # 12 根 × 0.1 = 1.2
+    assert "4h % change +2.5%" in text and "24h % change +16.8%" in text
+    assert "position in the 24h range 97% (low 170.3 – high 201.0)" in text
+    assert "last-hour volume versus the 24h average 1.0x" in text
+    assert (
+        "; background: distance from the 20-day MA above (" in text
+        and "7-day % change +" in text
+        and "RSI" not in text
+    )
 
 
 def test_describe_trend_mid_and_long_show_only_their_fields() -> None:
@@ -56,13 +60,13 @@ def test_describe_trend_mid_and_long_show_only_their_fields() -> None:
         bars(21),
         lambda x: f"{x:.1f}",
     )
-    assert "3 天涨跌" in m and "在 3 天区间里的位置" in m and "1 小时 RSI 100" in m
-    assert "1 小时涨跌" not in m and "背景：相对 20 日均线 上方" in m
+    assert "3-day % change" in m and "position in the 3-day range" in m and "1h RSI 100" in m
+    assert "1h % change" not in m and "background: distance from the 20-day MA above" in m
     lg = describe_trend(
         "ETH", long_.brief_main, long_.brief_bg, bars(289), bars(73), bars(30), bars(21)
     )
-    assert "4 小时 RSI 100" in lg and "日线 RSI 100" in lg and "背景" not in lg
-    assert "1 小时涨跌" not in lg and "7 天涨跌" in lg
+    assert "4h RSI 100" in lg and "daily RSI 100" in lg and "background" not in lg
+    assert "1h % change" not in lg and "7-day % change" in lg
 
 
 def transport(fail_fng: bool = False, fail_klines: bool = False) -> httpx.MockTransport:
@@ -91,7 +95,11 @@ async def test_brief_builds_once_per_round_and_is_cached() -> None:
     t = transport()
     svc = MarketBriefService(client=httpx.AsyncClient(transport=t), clock=lambda: NOW, style="mid")
     text = await svc.refresh()
-    assert "BTC" in text and "ETH" in text and "恐慌贪婪指数：50（Neutral）（前一日 68）" in text
+    assert (
+        "BTC" in text
+        and "ETH" in text
+        and "Fear & Greed index: 50 (Neutral) (previous day 68)" in text
+    )
     n = len(t.calls)  # type: ignore[attr-defined]
     assert await svc.refresh() == text and len(t.calls) == n  # type: ignore[attr-defined]
 
@@ -102,7 +110,7 @@ async def test_brief_part_failure_is_soft_and_all_failed_keeps_old() -> None:
         client=httpx.AsyncClient(transport=transport(fail_fng=True)), clock=lambda: clock[0]
     )
     text = await svc.refresh()
-    assert "BTC" in text and "暂不可用" in text and svc.failed_parts == 1
+    assert "BTC" in text and "unavailable" in text and svc.failed_parts == 1
 
     clock[0] = NOW + timedelta(hours=1)
     svc._c = httpx.AsyncClient(transport=transport(fail_fng=True, fail_klines=True))

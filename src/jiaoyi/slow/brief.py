@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from jiaoyi.core.ticks import price_formatter
-from jiaoyi.slow.ta_prompts import BRIEF_FIELDS_ZH, WORDS
+from jiaoyi.slow.ta_prompts import BRIEF_FIELDS, WORDS
 from jiaoyi.slow.ticks import TICKS
 
 _FAPI = "https://fapi.binance.com"
@@ -81,7 +81,7 @@ def describe_trend(
         return [float(k[4]) for k in rows]
 
     def text(field: str) -> str:
-        zh = BRIEF_FIELDS_ZH[field]
+        zh = BRIEF_FIELDS[field]
         if field in ("chg_1h", "chg_4h", "chg_24h"):
             n = {"chg_1h": 12, "chg_4h": 48, "chg_24h": 288}[field]
             c = cl(m5)
@@ -99,23 +99,23 @@ def describe_trend(
                 [float(k[2]) for k in rows[-n:]],
                 [float(k[3]) for k in rows[-n:]],
             )
-            return f"{zh} {pos:.0f}%（低 {fmt(lo)} – 高 {fmt(hi)}）"
+            return f"{zh} {pos:.0f}% (low {fmt(lo)} – high {fmt(hi)})"
         if field == "vol_1h":
             v = [float(k[5]) for k in m5[-288:]]
             avg = sum(v) / 24
-            return f"{zh} {sum(v[-12:]) / avg:.1f} 倍" if avg > 0 else f"{zh} 暂不可用"
+            return f"{zh} {sum(v[-12:]) / avg:.1f}x" if avg > 0 else f"{zh} unavailable"
         if field == "sma20":
             c = cl(d1)
             sma = _sma(c, 20)
-            return f"{zh} {'上方' if c[-1] >= sma else '下方'}（{fmt(sma)}）"
+            return f"{zh} {'above' if c[-1] >= sma else 'below'} ({fmt(sma)})"
         rows = {"rsi_1h": h1, "rsi_4h": h4, "rsi_1d": d1}[field]
         c = cl(rows)
-        return f"{zh} {_rsi(c):.0f}" if len(c) > 14 else f"{zh} 暂不可用"
+        return f"{zh} {_rsi(c):.0f}" if len(c) > 14 else f"{zh} unavailable"
 
     price = float((m5 or h1 or h4 or d1)[-1][4]) if (m5 or h1 or h4 or d1) else float("nan")
-    main = "，".join(text(f) for f in fields)
-    bg = f"；背景：{'，'.join(text(f) for f in background)}" if background else ""
-    return f"- {name} 现价 {fmt(price)}：{main}{bg}"
+    main = ", ".join(text(f) for f in fields)
+    bg = f"; background: {', '.join(text(f) for f in background)}" if background else ""
+    return f"- {name} price {fmt(price)}: {main}{bg}"
 
 
 async def _rows(c: httpx.AsyncClient, symbol: str, interval: str, limit: int) -> list[list[Any]]:
@@ -157,8 +157,8 @@ async def fear_greed_part(c: httpx.AsyncClient) -> str:
     r.raise_for_status()
     rows: list[dict[str, Any]] = r.json()["data"]
     now, prev = rows[0], rows[1] if len(rows) > 1 else None
-    tail = f"（前一日 {prev['value']}）" if prev else ""
-    return f"- 恐慌贪婪指数：{now['value']}（{now['value_classification']}）{tail}"
+    tail = f" (previous day {prev['value']})" if prev else ""
+    return f"- Fear & Greed index: {now['value']} ({now['value_classification']}){tail}"
 
 
 def default_parts(style: str = "short") -> list[BriefPart]:
@@ -198,13 +198,14 @@ class MarketBriefService:
         if self._at is not None and now - self._at < self._min_age:
             return self._text
         results = await asyncio.gather(*(p(self._c) for p in self._parts), return_exceptions=True)
-        lines = [r if isinstance(r, str) else "- （一项数据暂不可用）" for r in results]
+        lines = [r if isinstance(r, str) else "- (one data item is unavailable)" for r in results]
         self.failed_parts = sum(1 for r in results if not isinstance(r, str))
         if self.failed_parts == len(self._parts):
             # 全部失败：保留上一份（可能为空），不更新时间，下一轮再试
             return self._text
-        self._text = f"## 市场简报（{now:%Y-%m-%d %H:%M} UTC，本轮所有会议共用）\n" + "\n".join(
-            lines
+        self._text = (
+            f"## Market brief ({now:%Y-%m-%d %H:%M} UTC, shared by every meeting this round)\n"
+            + "\n".join(lines)
         )
         self._at = now
         return self._text
