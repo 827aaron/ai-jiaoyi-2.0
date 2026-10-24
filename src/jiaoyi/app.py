@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
@@ -31,9 +32,12 @@ from jiaoyi.contracts import (
     Alert,
     AlertLevel,
     AppConfig,
+    Bias,
+    DecisionRecord,
     Health,
     Interval,
     ModuleStatus,
+    Outcome,
     RiskConfig,
     Role,
     RunMode,
@@ -102,7 +106,7 @@ from jiaoyi.market.features import RollingFeatureEngine
 from jiaoyi.market.stub import StubMarketDataFeed
 from jiaoyi.patrol.rules import RulePatrol
 from jiaoyi.predictor import KronosForecaster
-from jiaoyi.predictor.against import AgainstCardWatch
+from jiaoyi.predictor.against import AgainstCard, AgainstCardWatch
 from jiaoyi.predictor.kronos import KronosSettings
 from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
@@ -342,6 +346,34 @@ class Built:
     """预测员连续看反作战卡的事件 / 查询（慢环订阅它开单币临时会）。"""
 
 
+def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
+    """预测员连续看反作战卡、但临时会开关关着：决策日志里记一条，事后对比用。"""
+    side = "多" if a.card_bias is Bias.LONG else "空"
+    try:
+        sink.write(
+            DecisionRecord(
+                record_id=uuid.uuid4().hex,
+                ts=a.ts,
+                role=Role.PREDICTOR,
+                symbol=a.symbol,
+                outcome=Outcome.INFO,
+                summary=f"{a.symbol} 预测员连续 {a.streak} 次看反作战卡（卡做{side}，上涨概率 "
+                f"{a.p_up:.2f}）；临时会开关关着，只记录",
+                card_id=a.card_id,
+                output={
+                    "predictor_against_card": True,
+                    "card_bias": a.card_bias.value,
+                    "p_up": a.p_up,
+                    "streak": a.streak,
+                    "since": a.since.isoformat(),
+                    "meeting_requested": False,
+                },
+            )
+        )
+    except OSError:
+        log.exception("写预测员看反记录失败")
+
+
 def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
     """有 Telegram 密钥就发 Telegram，否则打到日志里。"""
     token, chat = secrets.get("TELEGRAM_BOT_TOKEN"), secrets.get("TELEGRAM_CHAT_ID")
@@ -522,8 +554,10 @@ def build_modules(
     against = AgainstCardWatch(cards.current, streak=sched.predictor_against_runs)
     predictor.add_listener(against.observe)
     request_event = getattr(cards, "request_event", None)
-    if callable(request_event):
+    if app_cfg.predictor.against_card_meeting and callable(request_event):
         against.subscribe(lambda a: request_event(a.symbol, "predictor_against_card"))
+    else:  # 默认关：只记录，不申请会（预测员还在观察）
+        against.subscribe(lambda a: _note_predictor_against(decision_log, a))
     features = RollingFeatureEngine(
         atr_period_min=fast.atr_period_min, atr_long_period_min=fast.atr_long_period_min
     )
