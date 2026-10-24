@@ -27,7 +27,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -155,9 +155,9 @@ def prompt_params(s: TradingAgentsSettings) -> ta_prompts.PromptParams:
     return ta_prompts.PromptParams.for_hold(s.hold, s.hold_minutes)
 
 
-def perp_context(p: ta_prompts.PromptParams) -> str:
+def perp_context(p: ta_prompts.PromptParams, group: str = "manager") -> str:
     """永续合约语境 + 持仓时长 + 这一档的市场习性（所有角色共用，拼在 output_language 后）。"""
-    return ta_prompts.perp_context(p)
+    return ta_prompts.perp_context(p, group)
 
 
 PERP_CONTEXT = perp_context(ta_prompts.PromptParams())
@@ -178,6 +178,7 @@ def build_config(
                 "hold": prompt_params(s).hold,
                 "hold_minutes": s.hold_minutes,
                 "lean": s.lean_size_tier.value,
+                "lang": s.output_language,
             }
         },
         max_debate_rounds=s.debate_rounds,
@@ -1662,7 +1663,12 @@ class TradingAgentsEngine:
                 "hold": p.hold,
                 "style": p.style,
                 "shared": perp_context(p),
+                "shared_reporter": perp_context(p, "reporter"),
+                "shared_analyst": perp_context(p, "analyst"),
+                "shared_risk": perp_context(p, "risk"),
                 "placeholders": {
+                    "{start}": "开会时填开会时间（UTC）",
+                    "{end}": "开会时填开会时间加最长持仓（UTC）",
                     "{now}": "开会时填当前 UTC 时间",
                     "{max_n}": "开会时填这轮最多挑几个（卡容量减去固定 / 持仓币）",
                     "{prev}": "开会时填上一轮的大盘判断（没有就整行去掉）",
@@ -1676,7 +1682,7 @@ class TradingAgentsEngine:
                     self._risk, p, s.lean_size_tier, "{research_manager}", "{portfolio_manager}"
                 ),
                 "meeting_note": ta_prompts.meeting_note(
-                    p, "{ticker}", "{SYMBOL}", "{regime}", "{pick_reason}", None
+                    p, "{ticker}", "{SYMBOL}", "{regime}", "{pick_reason}", None, "{start}", "{end}"
                 ),
                 "position_note": ta_prompts.position_note(p, "{SYMBOL}"),
                 "roles": {
@@ -1903,7 +1909,17 @@ class TradingAgentsEngine:
             raise
         except Exception:
             tick = None
-        note = ta_prompts.meeting_note(params, ticker, entry.symbol, regime, pick_reason, tick)
+        now = self._today()
+        note = ta_prompts.meeting_note(
+            params,
+            ticker,
+            entry.symbol,
+            regime,
+            pick_reason,
+            tick,
+            f"{now:%Y-%m-%d %H:%M}",
+            f"{now + timedelta(minutes=params.hold_minutes):%Y-%m-%d %H:%M}",
+        )
         graph = self._graph(analysts, handler, note, ta_prompts.position_note(params, entry.symbol))
         if live:
             live.step("input", "meeting_note", note)

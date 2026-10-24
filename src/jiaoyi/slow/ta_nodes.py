@@ -48,13 +48,21 @@ def lean_from_config() -> str:
 
 
 def language(role: str | None = None) -> str:
-    """替换 TradingAgents 的 ``get_language_instruction()``：按角色说清哪些标签行保持英文。
-    原版对每个角色都点名 Rating / FINAL TRANSACTION PROPOSAL，没有这些行的角色被带出多余评级行。"""
+    """替换 TradingAgents 的 ``get_language_instruction()``：按角色说清哪些标签行保持英文，
+    共用说明也按角色组给（新闻 / 情绪不收评级和进场规则，见 ``ta_prompts.ROLE_GROUP``）。"""
     from tradingagents.dataflows.config import get_config
 
-    lang = str(get_config().get("output_language", "English"))
-    if lang.strip().lower() == "english":
-        return ""
+    cfg = get_config()
+    base = (cfg.get(PROMPT_KEY) or {}).get("lang")
+    if base:
+        if str(base).strip().lower() == "english":
+            return ""
+        group = ta_prompts.ROLE_GROUP.get(role or "", "manager")
+        lang = f"{base}. {ta_prompts.perp_context(params_from_config(), group)}"
+    else:  # 老配置：整段 output_language
+        lang = str(cfg.get("output_language", "English"))
+        if lang.strip().lower() == "english":
+            return ""
     return ta_roles.language_line(lang, role)
 
 
@@ -103,7 +111,7 @@ def _researcher(role: str, label: str, other: str) -> Factory:
                 + f"Conversation history of the debate: {history}\n"
                 + f"Last {other} argument: {reply}\n"
                 + f"Use this information to deliver your argument and engage directly with the "
-                f"{other}'s latest points." + language()
+                f"{other}'s latest points." + language(role)
             )
             response = llm.invoke(prompt)
             argument = f"{label} Analyst: {response.content}"
@@ -154,10 +162,10 @@ def _debator(key: str, label: str) -> Factory:
                 lines.append(f"Last argument from the {o} analyst: {said}")
             lines.append(
                 "Respond directly to the other analysts' latest points with data. Keep it "
-                "conversational and without special formatting; name the size, the entry zone "
-                "and the stop you would accept."
+                "conversational and without special formatting; name the size tier (S, M or L), "
+                "the entry zone and the stop you would accept."
             )
-            response = llm.invoke("\n".join(lines) + language())
+            response = llm.invoke("\n".join(lines) + language(key))
             argument = f"{label} Analyst: {response.content}"
             new = {
                 "history": history + "\n" + argument,
@@ -214,11 +222,9 @@ def create_news_analyst(llm: Any) -> Node:
 
         tools = (get_news, get_global_news, get_prediction_markets)
         p = params_from_config()
-        system_message = (
-            ta_prompts.news_prompt(p, binance_symbol_of(str(state["company_of_interest"])))
-            + " Make sure to append a short Markdown table at the end of the report."
-            + language()
-        )
+        system_message = ta_prompts.news_prompt(
+            p, binance_symbol_of(str(state["company_of_interest"]))
+        ) + language("news")
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
@@ -256,11 +262,15 @@ def set_news_hub(hub: Any) -> None:
     _NEWS_HUB = hub
 
 
+CROWD_MAX = 600
 _CROWD = (
     "You are the crowd-positioning analyst for {SYMBOL} perpetual. Report who is positioned "
     "which way over the last hours and whether that crowd is likely to be squeezed within the "
     "next {H}. End with a one-line verdict: crowd leaning long / short / neutral, and whether "
-    "that positioning is fuel for a move against it."
+    "that positioning is fuel for a move against it. The verdict is about the crowd, not a "
+    "trade: do not recommend one (no long, short or flat call for this coin, no size, entry, "
+    "stop or target); later roles decide those. Keep the text within about {CROWD_MAX} Chinese "
+    "characters before the short table."
 )
 CROWD_UNAVAILABLE = (
     "Crowd-positioning data for {SYMBOL} is unavailable this round (the Binance positioning "
@@ -295,14 +305,16 @@ def create_sentiment_analyst(llm: Any) -> Node:
             return {"messages": [AIMessage(content=text)], "sentiment_report": text}
         headlines = format_items(items)
         system_message = (
-            ta_prompts.fill(_CROWD.replace("{SYMBOL}", sym), p)
+            ta_prompts.fill(
+                _CROWD.replace("{SYMBOL}", sym).replace("{CROWD_MAX}", str(CROWD_MAX)), p
+            )
             + "\n\nThe data below was collected for you from Binance public endpoints (each "
             "block is a time series summarized for the last 24 hours) and from the exchange/news "
             "feed; report on it and do not invent numbers. If a block says unavailable, say so.\n\n"
             + "\n\n".join(blocks)
             + f"\n\n### Headlines mentioning this coin, last 24 hours\n{headlines}"
             + "\n\nMake sure to append a short Markdown table at the end of the report."
-            + language()
+            + language("sentiment")
         )
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -444,7 +456,9 @@ def create_market_analyst(llm: Any) -> Node:
 
         p = params_from_config()
         text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config())
-        system_message = _subst(text, {"target": str(state["company_of_interest"])}) + language()
+        system_message = _subst(text, {"target": str(state["company_of_interest"])}) + language(
+            "market"
+        )
         prompt = ChatPromptTemplate.from_messages(
             [
                 (

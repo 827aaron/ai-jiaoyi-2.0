@@ -1466,7 +1466,10 @@ function quietHead(sel) {
 // 军师团现在用的提示词（data/prompts_active.json，引擎启动时写；按最长持仓档分短线 / 中线 / 长线写法）
 const PROMPT_STYLE = { short: "短线写法", mid: "中线写法", long: "长线写法" };
 const PROMPT_PART = [
-  ["shared", "公共说明（每个角色都读）"],
+  ["shared_reporter", "公共说明 · 新闻和情绪分析师"],
+  ["shared_analyst", "公共说明 · 行情分析师和多空"],
+  ["shared_risk", "公共说明 · 风控三人"],
+  ["shared", "公共说明 · 三个经理"],
   ["pick", "总盘会挑币"],
   ["meeting_note", "每场会的说明（花括号里的开会时填）"],
   ["position_note", "手上有这个币的仓时加的说明"],

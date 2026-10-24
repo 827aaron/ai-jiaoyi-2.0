@@ -125,7 +125,7 @@ def test_roles_have_no_stock_talk(hold: str) -> None:
         for word in ("growth", "revenue", "branding", "diversification", "competitive adv"):
             assert word not in body.replace("long-term adoption", "")
     cons = tp.role_prompt("conservative", p)
-    assert "leverage" in cons and "funding" in cons
+    assert "funding" in cons and "liquidation" not in cons and "funding" in cons
 
 
 def test_researcher_price_line_follows_the_tier_words() -> None:
@@ -224,7 +224,12 @@ def test_build_config_has_tier_context_and_stops_the_original_memory() -> None:
     assert cfg["memory_log_path"] == ""
     assert "Re-judge every round" in cfg["output_language"]
     assert cfg["output_language"].startswith("Chinese. ")
-    assert cfg["jiaoyi_prompt"] == {"hold": "12h", "hold_minutes": 720, "lean": "M"}
+    assert cfg["jiaoyi_prompt"] == {
+        "hold": "12h",
+        "hold_minutes": 720,
+        "lean": "M",
+        "lang": "Chinese",
+    }
     # output_language 只跟档位有关：每场会一样，每场会不同的东西走 state
     assert cfg["output_language"] == eng.build_config({"data_vendors": {}}, s)["output_language"]
 
@@ -346,3 +351,60 @@ def test_data_window_comes_from_one_constant() -> None:
     p = tp.PromptParams.for_hold("2h")
     assert profiles.DATA_WINDOW in tp.perp_context(p) and "{DATA_WINDOW}" not in tp.perp_context(p)
     assert profiles.DATA_WINDOW in tp.pick_prompt(p, "t", 3)
+
+
+# ---------------------------------------------------------------- 10-24 会议复盘的提示词修改
+@pytest.mark.parametrize("hold", sorted(profiles.PROMPT_STYLE))
+def test_shared_groups_render_without_open_slots(hold: str) -> None:
+    p = tp.PromptParams.for_hold(hold)
+    for group in tp.GROUPS:
+        text = tp.perp_context(p, group)
+        assert not re.search(r"\{[A-Za-z_]+\}", text), (hold, group)
+        assert text.endswith("Apply all of this to every sentence you write")
+        assert "keeper" not in text and "Role notes" not in text
+    reporter = tp.perp_context(p, "reporter")
+    for bad in ("Rating", "Costs:", "Entries:", "Execution:", "Size is a tier", "53 right"):
+        assert bad not in reporter, (hold, bad)
+    assert "Size is a tier" not in tp.perp_context(p, "analyst")
+    assert "Size is a tier" in tp.perp_context(p, "risk")
+    assert "Rating rule" not in tp.perp_context(p, "risk")
+    assert "Rating rule" in tp.perp_context(p, "manager")
+    assert tp.perp_context(p) == tp.perp_context(p, "manager")  # 默认是经理组
+    assert {tp.ROLE_GROUP[r] for r in ("news", "sentiment")} == {"reporter"}
+
+
+def test_news_prompt_only_reports_events() -> None:
+    text = tp.news_prompt(tp.PromptParams.for_hold("2h"), "BTCUSDT")
+    assert "Do not recommend a trade" in text and "do not add a table" in text
+    assert "250 Chinese characters" in text and "{" not in text
+
+
+def test_meeting_note_has_the_window_only_when_given() -> None:
+    p = tp.PromptParams.for_hold("2h")
+    plain = tp.meeting_note(p, "WLD-USD", "WLDUSDT", "x", "y")
+    assert "The meeting starts at" not in plain
+    note = tp.meeting_note(
+        p, "WLD-USD", "WLDUSDT", "x", "y", None, "2026-10-24 14:01", "2026-10-24 16:01"
+    )
+    window = "starts at 2026-10-24 14:01 UTC; the window for the next 2 hours ends at "
+    assert window + "2026-10-24 16:01 UTC" in note
+
+
+def test_pick_prompt_describes_the_market_without_directions() -> None:
+    text = tp.pick_prompt(tp.PromptParams.for_hold("2h"), "now", 8)
+    assert "Describe the market only" in text and "without choosing a direction" in text
+    assert "bounce, a drop or a breakout" not in text
+
+
+def test_short_habit_only_applies_right_after_a_sharp_move() -> None:
+    short = tp.words(tp.PromptParams.for_hold("2h")).habit
+    assert "applies only right after such a move" in short and "spread over the last day" in short
+    assert "applies only right after" not in tp.words(tp.PromptParams.for_hold("4h")).habit
+
+
+def test_risk_trio_speaks_in_size_tiers() -> None:
+    p = tp.PromptParams.for_hold("2h")
+    for role in ("aggressive", "conservative", "neutral"):
+        text = tp.role_prompt(role, p)
+        assert "standard" not in text.lower()
+    assert "size tier (S, M or L)" in tp.role_prompt("neutral", p)

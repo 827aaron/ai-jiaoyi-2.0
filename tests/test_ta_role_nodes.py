@@ -231,3 +231,33 @@ def test_build_config_carries_the_lean_size(tmp_path: Path) -> None:
         rm.with_structured_output = None  # type: ignore[assignment]
         ta_nodes.create_research_manager(rm)(_full_state())
     assert "size S or smaller" in rm.prompts[0]
+
+
+def test_language_gives_each_role_its_own_shared_group(tmp_path: Path) -> None:
+    with run_config(_cfg(tmp_path)):
+        news, bull, neutral, pm = (
+            ta_nodes.language("news"),
+            ta_nodes.language("bull"),
+            ta_nodes.language("neutral"),
+            ta_nodes.language("pm"),
+        )
+        assert "Rating rule" in ta_nodes.language()  # 不带角色 = 经理组（最全）
+    assert "Rating rule" not in news and "Costs:" not in news
+    assert "Costs:" in bull and "Size is a tier" not in bull
+    assert "Size is a tier" in neutral and "Rating rule" not in neutral
+    assert "Rating rule" in pm and "Apply all of this to every sentence you write" in pm
+
+
+def test_old_config_without_lang_falls_back_to_output_language(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    cfg["jiaoyi_prompt"] = {"hold": "2h", "hold_minutes": 120}
+    with run_config(cfg):
+        assert "Rating rule" in ta_nodes.language("news")
+
+
+def test_debators_ask_for_a_size_tier(tmp_path: Path) -> None:
+    llm = Llm()
+    with run_config(_cfg(tmp_path)):
+        ta_nodes.create_conservative_debator(llm)(_state())
+    assert "name the size tier (S, M or L)" in llm.prompts[0]
+    assert "liquidation distance" not in llm.prompts[0]
