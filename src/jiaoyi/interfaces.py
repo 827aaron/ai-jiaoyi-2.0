@@ -102,7 +102,11 @@ class Predictor(Protocol):
         ...
 
     async def backfill(self, symbol: str, bars: list[Kline]) -> None:
-        """启动时用 REST 拉的历史 K 线补历史，不触发推理。"""
+        """用 REST 拉的历史 K 线补历史（启动、新币、断档后），和已有的合并。"""
+        ...
+
+    def take_gaps(self) -> set[str]:
+        """取走实时 K 线断档、需要用 REST 补历史的币。"""
         ...
 
 

@@ -298,6 +298,7 @@ class KronosForecaster:
         # 正在聚合的 5 分钟线：标的 → (起点分钟, 开, 高, 低, 收, 量, 成交额, 已有几根 1 分钟)
         self._partial: dict[str, tuple[int, float, float, float, float, float, float, int]] = {}
         self._wanted: set[str] = set()
+        self._gaps: set[str] = set()  # 实时 K 线断档、缓冲清空了的币，等主循环用 REST 补回来
         self._priority: set[str] = set()  # 总盘会挑中、本轮要开会的币（慢环给）
         self._queued = 0
         self._last_model = MODEL_SPECS[self._cfg.model_size].version  # 最近一次实际用的模型
@@ -374,11 +375,25 @@ class KronosForecaster:
         self._spawn(symbol, list(buf), buf[-1])
 
     async def backfill(self, symbol: str, bars: list[Kline]) -> None:
-        """用 REST 拉来的 5 分钟线把历史补上。这个币要算（全部模式或在 wanted 里）就马上算一次。"""
-        for b in bars:
-            self._append(b)
+        """用 REST 拉来的 5 分钟线把历史补上。这个币要算（全部模式或在 wanted 里）就马上算一次。
+
+        和缓冲里已有的线合并（同一根以实时拼出来的为准），只留最后一段连续的：断档后补回来时，
+        缓冲里已经有断档之后的新线，不能因为 REST 的线更旧就丢掉。"""
+        step = timedelta(minutes=_INTERVAL_MIN[self._s.interval])
+        by_time = {b.open_time: b for b in bars if b.interval == self._s.interval}
+        by_time.update({b.open_time: b for b in self._bars.get(symbol, ())})
+        seq = sorted(by_time.values(), key=lambda b: b.open_time)
+        start = len(seq) - 1
+        while start > 0 and seq[start].open_time - seq[start - 1].open_time == step:
+            start -= 1
+        self._bars[symbol] = deque(seq[max(start, 0) :], maxlen=self._s.lookback)
         if self._cfg.mode == "all_symbols" or self._first(symbol):
             self.request(symbol)
+
+    def take_gaps(self) -> set[str]:
+        """取走（并清空）实时 K 线断档、缓冲被清空的币，由主循环用 REST 补历史。"""
+        gaps, self._gaps = self._gaps, set()
+        return gaps
 
     def latest(self, symbol: str, now: datetime) -> Forecast | None:
         if not self._enabled:
@@ -456,6 +471,9 @@ class KronosForecaster:
             if kline.open_time - last.open_time > step:
                 buf.clear()  # 有缺口，旧数据不能和新数据拼成一段连续序列
                 self._forecasts.pop(sym, None)
+                # 不补的话要重新攒 min_bars 根（5 分钟线 64 根 ≈ 5 小时）才会再算，期间一声不吭
+                self._gaps.add(sym)
+                log.info("预测员 %s K 线断档（%s 之后缺线），等 REST 补历史", sym, last.open_time)
         buf.append(kline)
         return True
 

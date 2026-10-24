@@ -272,6 +272,7 @@ class Runner:
         self._last_screen: datetime | None = None
         self._last_card_at: datetime | None = None
         self._refreshing = False
+        self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
         if isinstance(self.m.executor, _ChaseHook):
@@ -468,6 +469,9 @@ class Runner:
         if isinstance(event, Kline):
             self._sync_wanted()
             await self.m.predictor.on_kline(event)
+            for sym in self.m.predictor.take_gaps() - self._predictor_refilling:
+                self._predictor_refilling.add(sym)
+                self._spawn(self._refill_predictor(sym))
         action = self.m.patrol.check(event, self.positions)
         if action is not None:
             targets = [
@@ -906,6 +910,15 @@ class Runner:
                     log.warning("%s 回填预测员 K 线失败，等实时数据攒够", sym, exc_info=True)
 
         await asyncio.gather(*(one(s) for s in symbols))
+
+    async def _refill_predictor(self, sym: str) -> None:
+        """实时 K 线断档、预测员缓冲被清空：用 REST 把预测员周期的历史补回来，马上能接着算。"""
+        try:
+            await self.m.predictor.backfill(sym, await self._fetch_predictor_klines(sym))
+        except Exception:
+            log.warning("%s 断档后补预测员 K 线失败，等实时数据攒够", sym, exc_info=True)
+        finally:
+            self._predictor_refilling.discard(sym)
 
     def _prices(self, pool: SymbolPool) -> dict[str, float]:
         out: dict[str, float] = {}

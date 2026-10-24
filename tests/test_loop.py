@@ -297,6 +297,7 @@ class FakePredictor:
         self.wanted: set[str] = set()
         self.filled: dict[str, int] = {}
         self.klines = 0
+        self.gaps: set[str] = set()
 
     async def on_kline(self, kline: c.Kline) -> None:
         self.klines += 1
@@ -314,6 +315,43 @@ class FakePredictor:
 
     async def backfill(self, symbol: str, bars: list[c.Kline]) -> None:
         self.filled[symbol] = len(bars)
+
+    def take_gaps(self) -> set[str]:
+        gaps, self.gaps = self.gaps, set()
+        return gaps
+
+
+async def test_predictor_gap_triggers_rest_refill(tmp_path: Path, now: datetime) -> None:
+    """预测员 K 线断档：主循环在后台用 REST 补它的历史，同一个币补完前不重复拉。"""
+    app = _app(tmp_path, now)
+    pred = FakePredictor()
+    app.m = dataclasses.replace(app.m, predictor=pred)
+    fetched: list[str] = []
+    gate = asyncio.Event()
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        fetched.append(sym)
+        await gate.wait()
+        return []
+
+    r = Runner(app, fetch_predictor_klines=fetch)
+    k = c.Kline(
+        symbol="BTCUSDT", interval=c.Interval.M1, open_time=now - timedelta(minutes=1),
+        close_time=now, open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
+    )  # fmt: skip
+    pred.gaps = {"BTCUSDT"}
+    await r.on_event(k)
+    pred.gaps = {"BTCUSDT"}
+    await r.on_event(k)
+    await asyncio.sleep(0)
+    assert fetched == ["BTCUSDT"]
+    gate.set()
+    await asyncio.sleep(0.01)
+    assert pred.filled == {"BTCUSDT": 0}
+    pred.gaps = {"BTCUSDT"}
+    await r.on_event(k)
+    await asyncio.sleep(0.01)
+    assert fetched == ["BTCUSDT", "BTCUSDT"]
 
 
 async def test_predictor_wants_card_and_held_symbols(tmp_path: Path, now: datetime) -> None:
