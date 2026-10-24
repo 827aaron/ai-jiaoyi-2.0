@@ -265,7 +265,9 @@ PM = (
     "- **Take Profit**: one price\n"
     "- **Size Tier**: S, M or L\n"
     "- **Investment Thesis**: the evidence that decided it, and what would change it within {H}\n"
-    'For Hold, write "none" on the four trade lines.\n'
+    'For Hold, write "none" on the four trade lines. For every other rating they must hold '
+    "the same entry zone, invalidation, take-profit and size as the summary, even when the "
+    'entry is a resting limit order that waits for a pullback: never write "none" there.\n'
     f"{SIZE_TIERS}\n"
     "\n"
     "{NO_EXTERNAL_TOOLS}"
@@ -322,11 +324,12 @@ RM_FIELDS = {
 TRADE_FIELDS = {
     "entry_zone": (
         "The entry zone as two absolute prices, low–high, at the coin's tick precision (for "
-        "example 2361.50–2365.00); never a percentage. Leave empty for Hold."
+        "example 2361.50–2365.00); never a percentage. Leave empty only for Hold; "
+        "for any other rating fill it, even when the entry waits for a pullback."
     ),
-    "invalidation": "One absolute price at which the idea is wrong. Leave empty for Hold.",
-    "take_profit": "One absolute target price for this trade. Leave empty for Hold.",
-    "size_tier": "S, M or L. Leave empty for Hold.",
+    "invalidation": "One absolute price at which the idea is wrong. Leave empty only for Hold.",
+    "take_profit": "One absolute target price for this trade. Leave empty only for Hold.",
+    "size_tier": "S, M or L. Leave empty only for Hold.",
 }
 TRADER_FIELDS = {
     "action": (

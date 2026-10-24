@@ -1129,6 +1129,65 @@ def direction_conflict(bias: Bias, rating: str | None, trader_plan: str) -> str 
     return None
 
 
+_NUM = r"\d[\d,]*(?:\.\d+)?"
+_RANGE = rf"({_NUM})\s*[–—~\-到至]\s*({_NUM})"
+_ZONE_IN_TEXT = re.compile(
+    rf"(?:区间|承接带|入场|进入|挂单|挂限价|在|zone|entry)\D{{0,6}}?{_RANGE}", re.I
+)
+_STOP_IN_TEXT = re.compile(rf"(?:失效(?:价)?|止损|invalidation|stop)\D{{0,4}}?({_NUM})", re.I)
+_TARGET_IN_TEXT = re.compile(rf"(?:目标|止盈|take[- ]profit|target)\D{{0,4}}?({_NUM})", re.I)
+_SIZE_IN_TEXT = re.compile(r"(?:仓位|size)\D{0,3}?([SML])\b|\b([SML])\s*档", re.I)
+_RATING_LINE = re.compile(r"\*\*Rating\*\*\s*:\s*\**\s*(\w+)", re.I)
+_SUMMARY = re.compile(r"\*\*Executive Summary\*\*\s*:(.*?)(?=\n\s*\*\*|\Z)", re.I | re.S)
+
+
+def _line_re(label: str) -> re.Pattern[str]:
+    return re.compile(rf"(\*\*{label}\*\*\s*:)[ \t]*([^\n]*)", re.I)
+
+
+def _is_empty(value: str) -> bool:
+    return value.strip(" *").lower() in {"", "none", "n/a", "-", "无"}
+
+
+def fill_trade_lines(decision: str, trader_plan: str) -> tuple[str, list[str]]:
+    """组合经理评级不是 Hold，可它单独的区间 / 失效价 / 止盈 / 仓位档几行写了 none
+    （等回踩的挂单它常这样留空）时，把这些行补上：先取它自己摘要里写的，取不到再用交易员那几行。
+    不是 Hold 且两处都没有的行保持原样（转卡照旧按没有区间处理）。返回（新结论, 补了哪些行）。"""
+    rated = _RATING_LINE.search(decision)
+    rating = rated.group(1).lower() if rated else ""
+    if not rating or rating == "hold":
+        return decision, []
+    summary_match = _SUMMARY.search(decision)
+    summary = summary_match.group(1) if summary_match else ""
+    from_summary: dict[str, str] = {}
+    if m := _ZONE_IN_TEXT.search(summary):
+        lo, hi = sorted((m.group(1), m.group(2)), key=lambda v: float(v.replace(",", "")))
+        from_summary["Entry Zone"] = f"{lo}–{hi}"
+    if m := _STOP_IN_TEXT.search(summary):
+        from_summary["Invalidation"] = m.group(1)
+    if m := _TARGET_IN_TEXT.search(summary):
+        from_summary["Take Profit"] = m.group(1)
+    if m := _SIZE_IN_TEXT.search(summary):
+        from_summary["Size Tier"] = (m.group(1) or m.group(2)).upper()
+    filled: list[str] = []
+    for label in ("Entry Zone", "Invalidation", "Take Profit", "Size Tier"):
+        pm_line = _line_re(label).search(decision)
+        if not pm_line or not _is_empty(pm_line.group(2)):
+            continue
+        value = from_summary.get(label)
+        if value is None:
+            tl = _line_re(label).search(trader_plan or "")
+            if tl and not _is_empty(tl.group(2)):
+                value = tl.group(2).strip()
+        if value is None:
+            continue
+        decision = (
+            decision[: pm_line.start()] + f"{pm_line.group(1)} {value}" + decision[pm_line.end() :]
+        )
+        filled.append(label)
+    return decision, filled
+
+
 _RECOMMENDATION = re.compile(
     r"\*\*Recommendation\*\*\s*:\s*\**\s*(Buy|Overweight|Hold|Underweight|Sell)", re.IGNORECASE
 )
@@ -1989,6 +2048,13 @@ class TradingAgentsEngine:
         missing = [zh for _, zh in broken]
         if live and missing:
             live.step("quality", "gate", f"{'、'.join(missing)}报告缺失（空 / 太短 / 工具报错）")
+        decision, filled = fill_trade_lines(decision, str(state.get("trader_investment_plan", "")))
+        if live and filled:
+            live.step(
+                "quality",
+                "gate",
+                f"组合经理单独的{'、'.join(filled)}行是空的，已从摘要 / 交易员补上",
+            )
         if live:
             live.converting()
 
