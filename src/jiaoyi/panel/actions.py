@@ -191,7 +191,18 @@ def control_state(data_dir: str | Path, paths: ConfigPaths | None) -> Control:
         pw_set=password_set,
         writable=paths is not None,
         started_at=runtime_started_at(data_dir),
+        paper_only_ignored=paper_only_ignored(paths) if paths else [],
     )
+
+
+def paper_only_ignored(paths: ConfigPaths) -> list[str]:
+    """app.toml 里开着、但不是模拟盘所以主程序当关的开关。"""
+    raw = _raw(paths.app)
+    if raw.get("mode", "paper") == "paper":
+        return []
+    fast = raw.get("fast_loop")
+    fast = fast if isinstance(fast, dict) else {}
+    return [name for key, name in PAPER_ONLY_SWITCHES.items() if fast.get(key) is True]
 
 
 def runtime_started_at(data_dir: str | Path) -> str | None:
@@ -534,8 +545,10 @@ def _write_config(
     changes: dict[str, Any],
     now: datetime,
     fields: dict[str, FieldSpec] | None,
+    *,
+    note: str | None = None,
 ) -> list[dict[str, Any]]:
-    """``update_config`` 验完密码之后的部分：校验、备份、写文件、记改动。"""
+    """``update_config`` 验完密码之后：校验、备份、写文件、记改动（``note`` 写进记录）。"""
     if not changes:
         raise ActionError("没有要改的项")
     if section == "app" and "profile" in changes:  # 旧面板写的 profile = 开会间隔档
@@ -577,6 +590,8 @@ def _write_config(
     with (Path(data_dir) / CHANGES_FILE).open("a", encoding="utf-8") as f:
         for item in log:
             row = {"ts": now.isoformat(), "file": path.name, "section": section, **item}
+            if note:
+                row["note"] = note
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     return log
 
@@ -666,6 +681,13 @@ def switch_mode(
         if armed_at is not None:  # 文件没写成：刚解的锁收回
             gate.disarm()
         raise
+    if target != "paper":  # 只在模拟盘生效的开关顺手关掉，修改记录里写明原因
+        fast = _raw(paths.app).get("fast_loop")
+        on = [k for k in PAPER_ONLY_SWITCHES if isinstance(fast, dict) and fast.get(k) is True]
+        if on:
+            note = f"切到{MODE_NAME[target]}时自动关掉（只在模拟盘生效）"
+            changes = dict.fromkeys(on, False)
+            _write_config(paths, data_dir, "fast_loop", changes, now, None, note=note)
     if target != "live" and gate.armed:
         gate.disarm()
     cmd = PanelCommand(

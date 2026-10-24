@@ -166,7 +166,7 @@
 paper 的临时推荐是 做 ≥ 0.35、真信号 ≥ 0.35、毒性 ≤ 0.7（`profiles.PAPER_GATE`，各持仓档一样，
 配置文件写了的优先），testnet / live 的推荐等校准后再给。
 
-`[fast_loop] gate_record_only`（拍板只记不拦）：不写 = 关；只有 paper 能写 true（testnet / live 写 true 拒绝启动）。
+`[fast_loop] gate_record_only`（拍板只记不拦）：不写 = 关；只在 paper 生效；testnet / live 写 true 当关、启动时日志警告「拍板只记不拦 只在模拟盘生效，已忽略」，面板总览顶部也提示；面板切到测试网 / 实盘时自动把它关掉并记进修改记录。
 开着时门槛没过也放行，保镖日志 `detail.gate_would_block` 记下本会拦的原因，面板写「拍板本会拦，只记不拦放行」；
 订单流有毒概率 ≥ 0.8 仍然拦，回答不全永远拦。
 
