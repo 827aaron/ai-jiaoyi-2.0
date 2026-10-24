@@ -28,12 +28,14 @@ from jiaoyi.contracts import (
 from jiaoyi.core.pool_overrides import PoolOverrides
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.us_hours import us_session
+from jiaoyi.slow.majors import MajorsSource, base_of
 from jiaoyi.slow.us_market import EarningsCalendar
 
 SCREEN_EVERY = timedelta(hours=1)
 """主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
 
-_MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
+FALLBACK_MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
+"""拿不到市值排名（没缓存、接口失败、major_top_n = 0）时的主流币名单。"""
 _CRYPTO_STOCKS = frozenset({"COIN", "MSTR", "HOOD", "MARA", "RIOT", "CRCL"})
 _US_TECH = frozenset({"TSLA", "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD", "QQQ", "SPY"})
 _METALS = frozenset(
@@ -45,13 +47,20 @@ _FOREIGN_HINTS = ("hk_", "kr_", "cn_", "jp_", "eu_", "premarket", "fx", "forex",
 """非美股的传统资产（港股 / 韩股 / A 股 / 盘前 / 外汇…）：没有对应的交易时段，先一律不放行。"""
 
 
-def classify(symbol: str, kind: str = "") -> Category:
+def classify(
+    symbol: str,
+    kind: str = "",
+    majors: Mapping[str, int] | None = None,
+    include: frozenset[str] = frozenset(),
+    exclude: frozenset[str] = frozenset(),
+) -> Category:
     """按代码给相关性分组：先看名单，名单外的再看交易所给的标的类型（``kind``，见 binance_stats）。
 
     币安把美股和金属永续标成 TRADIFI_PERPETUAL；名单外的传统资产合约按 kind 自动归类，
     标明是股票的当美股科技；什么都认不出才算山寨币（传统资产认不出时不放行，见 tradfi_block）。"""
     base = symbol.removesuffix("USDT")
-    if base in _MAJORS:
+    mbase = base_of(symbol)  # 1000PEPEUSDT → PEPE，按市值排名对
+    if mbase not in exclude and (mbase in include or mbase in (majors or FALLBACK_MAJORS)):
         return Category.MAJOR
     if base in _CRYPTO_STOCKS:
         return Category.CRYPTO_STOCK
@@ -128,6 +137,12 @@ class ScreenerConfig:
     """头部档几个：池里分数最高的前几个（固定 / 手动加入的币一律算头部）。"""
     tier_mid: int = 15
     """中间档几个：头部之后的几个；再往后是尾部。"""
+    major_top_n: int = 20
+    """主流币 = 市值前几名（每天自动更新，去掉稳定币和包装币）；0 = 用写死的 7 个。"""
+    major_include: frozenset[str] = frozenset()
+    """手动加入主流币的币名（如 LINK），不管市值排名。"""
+    major_exclude: frozenset[str] = frozenset()
+    """手动排除出主流币的币名；被排除的按山寨币算。"""
     allow_tradfi: bool = False
     """是否让币安 TRADIFI_PERPETUAL（美股 / 金属等传统资产永续）进池。默认关：等 Demo 上把开平仓、
     保命止损、行情流整条链验证完再开。"""
@@ -194,6 +209,15 @@ def _enabled(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> bool
 def _cap(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> int:
     default = cfg.category_caps.get(category, cfg.default_category_cap)
     return ov.category_caps.get(category, default)
+
+
+def _major_note(symbol: str, ranks: Mapping[str, int], cfg: ScreenerConfig) -> str:
+    base = base_of(symbol)
+    if base in ranks:
+        return f"主流币 · 市值第 {ranks[base]} 名"
+    if base in cfg.major_include:
+        return "主流币（你手动加入）"
+    return "主流币（固定名单，没拿到市值排名）"
 
 
 def tradfi_block(s: SymbolStats, cfg: ScreenerConfig) -> str | None:
@@ -276,6 +300,7 @@ class CodeSymbolScreener:
         overrides: UserOverrides | None = None,
         recorder: RoleRecorder | None = None,
         earnings: EarningsCalendar | None = None,
+        majors: MajorsSource | None = None,
         every: timedelta = SCREEN_EVERY,
         tz: str = "Asia/Bangkok",
     ) -> None:
@@ -284,6 +309,7 @@ class CodeSymbolScreener:
         self._ov = overrides or UserOverrides()
         self._rec = recorder
         self._earnings = earnings
+        self._majors = majors
         self._us_tickers: frozenset[str] = frozenset()
         self._every = every
         self._tz = ZoneInfo(tz)
@@ -386,12 +412,21 @@ class CodeSymbolScreener:
         if us_on and self._earnings is not None:
             await self._earnings.refresh(now)  # 拉不到沿用旧缓存，内部已记日志，不影响选币
         us_open = us_on and us_session(now) == "open"
+        ranks: Mapping[str, int] = {}
+        if self._majors is not None and cfg.major_top_n > 0:
+            self._majors.top_n = cfg.major_top_n
+            await self._majors.refresh(now)  # 一天拉一次；失败沿用上次，再不行回退写死的名单
+            ranks = self._majors.ranks()
         entries: dict[str, SymbolPoolEntry] = {}
         ranked: list[SymbolPoolEntry] = []
         for s in stats:
             f = _hard_filters(s, cfg)
             total, parts, reasons = score(s, cfg)
-            category = classify(s.symbol, s.kind)
+            category = classify(
+                s.symbol, s.kind, ranks or None, cfg.major_include, cfg.major_exclude
+            )
+            if category is Category.MAJOR:
+                reasons = [*reasons, _major_note(s.symbol, ranks, cfg)]
             if us_on and category in _US_CATEGORIES:
                 total, parts, reasons = self._us_adjust(
                     s.symbol, now, us_open, total, parts, reasons

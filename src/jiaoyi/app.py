@@ -109,6 +109,7 @@ from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.liquidations import LiquidationSource
+from jiaoyi.slow.majors import MajorsSource
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
@@ -452,6 +453,8 @@ def build_modules(
         earnings = EarningsCalendar() if scfg.screener.us_events else None
         if earnings is not None:
             closers.append(earnings.aclose)
+        majors = MajorsSource(Path(app_cfg.data_dir) / "majors.json")
+        closers.append(majors.aclose)
         screener = CodeSymbolScreener(
             source,
             # 门槛和权重来自 slow.toml [screener]；价差默认跟硬上限一致，免得进池的币保镖一律拒
@@ -460,6 +463,7 @@ def build_modules(
             ),
             recorder=recorders[Role.SCREENER],
             earnings=earnings,
+            majors=majors,
             every=timedelta(minutes=app_cfg.screener_interval_min),
             tz=tz,
         )
