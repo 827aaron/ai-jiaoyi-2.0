@@ -835,6 +835,12 @@ class _CardSymbolDraft(BaseModel):
     stop_atr_max: float = Field(ge=0)
     take_profit_r_min: float = Field(ge=0)
     take_profit_r_max: float = Field(ge=0)
+    entry_min: float | None = Field(
+        default=None, ge=0, description="进场区间下沿（价格）；结论没给就留空"
+    )
+    entry_max: float | None = Field(
+        default=None, ge=0, description="进场区间上沿（价格）；结论没给就留空"
+    )
     reason: str = Field(min_length=1, description="中文，一两句话")
 
 
@@ -850,26 +856,45 @@ class _PickDraft(BaseModel):
     )
 
 
+def entry_zone_of(d: _CardSymbolDraft, levels: LevelContext | None) -> Range | None:
+    """会议给的进场区间；上下沿必须落在「现价 ± span」里，超出就当没给。
+    拿不到背景（现价 / span）时只查 0 < entry_min ≤ entry_max。"""
+    lo, hi = d.entry_min, d.entry_max
+    if lo is None or hi is None or lo <= 0 or hi <= 0 or lo > hi:
+        return None
+    if levels is not None and levels.price is not None and levels.span:
+        near = levels.price - levels.span <= lo and hi <= levels.price + levels.span
+        if not near:
+            return None
+    return Range(min=lo, max=hi)
+
+
 def draft_to_card_symbol(
     d: _CardSymbolDraft,
     entry: SymbolPoolEntry,
     levels: LevelContext | None = None,
+    zone_required: bool = False,
 ) -> CardSymbol:
-    """会议结论 → 作战指令。给了 ``levels`` 就只认候选关键位（对不上的丢），不给才照单全收。"""
+    """会议结论 → 作战指令。给了 ``levels`` 就只认候选关键位（对不上的丢），不给才照单全收。
+    ``zone_required``（30m–4h 档）：做多 / 做空没有能用的进场区间就出观望。"""
 
     def rng(lo: float, hi: float) -> Range:
         return Range(min=min(lo, hi), max=max(lo, hi))
 
-    signals = d.allowed_signals if d.bias is not Bias.NO_TRADE else []
+    bias = d.bias
+    signals = d.allowed_signals if bias is not Bias.NO_TRADE else []
     reason = d.reason
-    if d.bias is not Bias.NO_TRADE and not signals:
+    zone = entry_zone_of(d, levels)
+    if bias in (Bias.LONG, Bias.SHORT) and zone_required and zone is None:
+        bias, signals, reason = Bias.NO_TRADE, [], f"{reason}（会议没给进场区间）"[:500]
+    elif bias is not Bias.NO_TRADE and not signals:
         # 方向卡信号列表为空 = 这个币一个信号都出不来：按默认信号集（全部）填上，并在理由里记一笔
         signals = list(SignalKind)
         reason = f"{reason}（会议没选信号类型，按默认全部信号）"
     return CardSymbol(
         symbol=entry.symbol,
         category=entry.category,
-        bias=d.bias,
+        bias=bias,
         key_levels=(
             [KeyLevel(price=x.price, kind=x.kind, note=x.note) for x in d.key_levels]
             if levels is None
@@ -881,11 +906,49 @@ def draft_to_card_symbol(
         leverage=rng(d.leverage_min, d.leverage_max),
         stop_atr=rng(d.stop_atr_min, d.stop_atr_max),
         take_profit_r=rng(d.take_profit_r_min, d.take_profit_r_max),
+        entry_zone=zone if bias is not Bias.NO_TRADE else None,
         reason=reason,
     )
 
 
 # ---------------------------------------------------------------- 引擎
+def convert_instructions(
+    r: RiskConfig,
+    p: ta_prompts.PromptParams | None = None,
+    lean_tier: SizeTier = SizeTier.M,
+    rm: str = "",
+    pm: str = "",
+) -> str:
+    """整理成作战指令的规则部分（不含 ATR / 关键位说明和标的、结论正文）。"""
+    p = p or ta_prompts.PromptParams()
+    w = ta_prompts.words(p)
+    top = r.max_notional_per_trade_usdt
+    cap = f"账户权益 × {r.max_notional_per_trade_x:g} 倍" + (f"且 ≤ {top:g} USDT" if top else "")
+    zone_rule = "，而且必须有进场区间" if p.zone_required else ""
+    zone = (
+        "做多 / 做空必须给 entry_min / entry_max，就是结论里写的反抽做空区或回调做多区；"
+        "结论没给出能用的区间就出观望（no_trade）。"
+        if p.zone_required
+        else "尽量给 entry_min / entry_max，结论没给就留空。"
+    )
+    return ta_prompts.fill(
+        f"把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ {cap}，"
+        f"杠杆 ≤ {r.max_leverage} 倍。结论偏弱、矛盾或重大事件（如议息会议）前夜之类就选 "
+        "no_trade。这是币安永续合约，只有做多 / 做空 / 观望；reason 里用多 / 空 / 观望，"
+        "不要用“减持”“增持”这类股票持仓词。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
+        "倍数区间（如 1.5–3）。\n"
+        f"本系统每笔单最多拿 {{H_zh}}，会议结论按未来 {{H_zh}} 来读。这个尺度上市场的习性："
+        f"{w.habit_zh}。\n"
+        "评级对应：Buy 做多，Sell 做空，Hold 观望。Overweight / Underweight 只是偏向：照样出"
+        f"做多 / 做空，但 size_tier_max 最多是 {lean_tier.value}{zone_rule}。\n"
+        f"研究经理的建议是 {rm or '（未知）'}，组合经理的评级是 {pm or '（未知）'}。\n"
+        f"进场区间：{zone}\n"
+        "allowed_signals 按结论写的进场方式选，等区间进场的不要只选追单类。\n"
+        "reason：中文，写清方向、进场区间、作废价位、为什么是未来 {H_zh}，500 字以内。",
+        p,
+    )
+
+
 def convert_prompt(
     entry: SymbolPoolEntry,
     r: RiskConfig,
@@ -895,18 +958,14 @@ def convert_prompt(
     atr_note: str,
     level_note: str = "",
     hold_note: str = "",
+    params: ta_prompts.PromptParams | None = None,
+    lean_tier: SizeTier = SizeTier.M,
+    rm: str = "",
+    pm: str = "",
 ) -> str:
     """把会议结论整理成作战指令的提示词（单独成函数，便于快照测试）。"""
-    top = r.max_notional_per_trade_usdt
-    cap = f"账户权益 × {r.max_notional_per_trade_x:g} 倍" + (f"且 ≤ {top:g} USDT" if top else "")
     return (
-        f"把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ {cap}，"
-        f"杠杆 ≤ {r.max_leverage} 倍。结论偏弱、"
-        "矛盾或重大事件（如议息会议）前夜之类就选 no_trade。这是币安永续合约，只有做多 / 做空 / "
-        "观望：结论里的 Buy / Overweight 对应偏多（long），Sell 对应偏空（short），Underweight 对应"
-        "偏空或观望，Hold 对应观望（no_trade）；reason 里用多 / 空 / 观望，不要用“减持”“增持”"
-        "这类股票持仓词。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的倍数区间（如 1.5–3）。"
-        "做多 / 做空时 allowed_signals 不许为空（没有特别偏好就全选）。reason 用中文。\n"
+        f"{convert_instructions(r, params, lean_tier, rm, pm)}\n"
         f"{atr_note}\n{hold_note}\n{level_note}\n"
         f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{brief}\n结论：\n{decision}"
     )
@@ -1547,6 +1606,9 @@ class TradingAgentsEngine:
                 "style": p.style,
                 "shared": perp_context(p),
                 "pick": ta_prompts.pick_prompt(p, "{now}", 0, "{prev}", "{market}", "{table}"),
+                "convert": convert_instructions(
+                    self._risk, p, s.lean_size_tier, "{research_manager}", "{portfolio_manager}"
+                ),
                 "meeting_note": ta_prompts.meeting_note(
                     p, "{ticker}", "{SYMBOL}", "{regime}", "{pick_reason}", None
                 ),
@@ -1795,6 +1857,10 @@ class TradingAgentsEngine:
             atr_context(entry.symbol, self._today(), self._stop),
             describe_candidates(levels),
             describe_hold(self._s.hold_minutes, levels.atr, levels.price, self._stop),
+            params,
+            self._s.lean_size_tier,
+            rm or "",
+            str(rating or ""),
         )
         llm = (
             self._llm(graph, self._s.convert_tier)
@@ -1808,13 +1874,17 @@ class TradingAgentsEngine:
                 if not isinstance(draft, _CardSymbolDraft):
                     # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
                     raise ValueError("模型没有返回结构化结果")
-                cs = draft_to_card_symbol(draft, entry, levels)
+                cs = draft_to_card_symbol(draft, entry, levels, params.zone_required)
                 if why := direction_conflict(
                     cs.bias, rating, str(state.get("trader_investment_plan", ""))
                 ):
                     raise RuntimeError(f"{entry.symbol}：会议结论自相矛盾：{why}，这场会不能用")
                 cs = rating_guard(
-                    cs, rm, str(rating or "").lower() or None, lean_tier=self._s.lean_size_tier
+                    cs,
+                    rm,
+                    str(rating or "").lower() or None,
+                    zone_ok=(cs.entry_zone is not None) if params.zone_required else None,
+                    lean_tier=self._s.lean_size_tier,
                 )
                 if missing:
                     cs = degrade_size(cs, missing)

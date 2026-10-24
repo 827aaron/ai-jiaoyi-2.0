@@ -72,6 +72,11 @@ class CardSymbol(Contract):
         description="止损距离范围，ATR(14) 倍数，如 1–2；周期见 risk.toml atr_period_min。"
     )
     take_profit_r: Range = Field(description="止盈距离范围，止损距离的倍数，例如 1.5–3。")
+    entry_zone: Range | None = Field(
+        default=None,
+        description="会议结论里的进场价格区间（反抽做空区 / 回调做多区），币安价格；None = 不限。"
+        "快环还不按它限制进场，先只显示；旧卡没有这个字段也能读。",
+    )
     reason: str = Field(min_length=1, description="军师给的理由，中文。")
     issued_at: AwareDatetime | None = Field(
         default=None,

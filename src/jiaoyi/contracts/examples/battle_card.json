@@ -43,6 +43,10 @@
         "min": 1.5,
         "max": 3.0
       },
+      "entry_zone": {
+        "min": 66800.0,
+        "max": 67300.0
+      },
       "reason": "资金费率中性，持仓量回升，68000 突破后上方空间较大。",
       "issued_at": "2026-10-22T06:00:00Z",
       "expires_at": "2026-10-22T08:00:00Z",
@@ -71,6 +75,7 @@
         "min": 1.5,
         "max": 1.5
       },
+      "entry_zone": null,
       "reason": "财报前一晚，只看不做。",
       "issued_at": null,
       "expires_at": null,
