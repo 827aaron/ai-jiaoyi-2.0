@@ -87,16 +87,30 @@ def entry_zone_miss(
 
     往交易方向放宽 ``ENTRY_ZONE_SLACK_R`` 个 R（做多可以比区间上沿高一点、做空可以比下沿低一点），
     R ≈ 卡上止损倍数的中值 × 止损 ATR（拍板前还不知道止损档，用中档估）。另一侧不放宽。"""
+    return entry_zone_miss_at(
+        signal.symbol, signal.side_hint, signal.trigger_price, signal.features, card, fast, now
+    )
+
+
+def entry_zone_miss_at(
+    symbol: str,
+    side_hint: Side,
+    px: float,
+    features: FeatureSnapshot,
+    card: BattleCard,
+    fast: FastLoopConfig,
+    now: datetime,
+) -> str | None:
+    """同 ``entry_zone_miss``，按给定价格查：挂单没成交改市价追进时用此刻的价格再查一次。"""
     if not fast.entry_zone_only:
         return None
-    cs = card.for_symbol(signal.symbol)
+    cs = card.for_symbol(symbol)
     if cs is None or cs.entry_zone is None:
         return None
     z = cs.entry_zone
-    px = signal.trigger_price
-    r = (cs.stop_atr.min + cs.stop_atr.max) / 2.0 * stop_atr(signal.features, fast, now, {})
+    r = (cs.stop_atr.min + cs.stop_atr.max) / 2.0 * stop_atr(features, fast, now, {})
     slack = ENTRY_ZONE_SLACK_R * max(r, 0.0)
-    if signal.side_hint == Side.LONG:
+    if side_hint == Side.LONG:
         lo, hi, side = z.min, z.max + slack, "多"
     else:
         lo, hi, side = z.min - slack, z.max, "空"
