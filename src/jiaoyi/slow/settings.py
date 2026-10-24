@@ -364,6 +364,7 @@ EventTrigger = Literal[
     "move_since_card",
     "new_head_symbol",
     "predictor_against_card",
+    "signal_against_card",
     "news_high_impact",
     "stale_card_on_entry",
 ]
@@ -413,7 +414,9 @@ class ScheduleConfig(_Strict):
     )
     event_triggers: tuple[EventTrigger, ...] = Field(
         default=(),
-        description="哪些事件能触发临时会。不在名单里的事件不会开会，等下一轮定时会。",
+        description="哪些事件能触发临时会。不在名单里的事件不会开会，等下一轮定时会。"
+        "signal_against_card = 同一个币 30 分钟内哨兵 2 次看到和卡相反的信号"
+        "（次数和时间窗在 app.toml [fast_loop] against_meeting_*）。",
     )
     event_symbol_gap_min: float = Field(
         default=60.0, ge=1.0, le=1440.0, description="同一个币两场临时会（含正式会）至少隔多久。"

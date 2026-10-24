@@ -11,6 +11,9 @@
   新卡改成只看不做、或卡里没有这个币：不投票，持仓交给决策模型 / 止损 / 最长持仓时间处理
   （不开新仓由拍板人和保镖按卡管）。例外：被封的币（币安下架公告等，``blocked``）照样投票，
   要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
+- 和卡相反的信号（``note_against``，主循环按账本持仓判断后叫来的急查）：信号写进这次的快照
+  （``against``）；强反向信号或已亏到一定倍数止损时，这次过线（``keeper_close_p``）就平，
+  不等连续确认。只用一次，下一轮常规复查不再带。
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 
 from jiaoyi.contracts import (
+    AgainstSignalEvent,
     BattleCard,
     Bias,
     FastLoopConfig,
@@ -68,13 +72,20 @@ class JevKeeper:
         self._card = card
         self._rec = recorder
         self._streak: dict[str, int] = {}  # 每个持仓连续“该平”的次数
+        self._against: dict[str, tuple[AgainstSignalEvent, bool]] = {}
 
     def forget(self, position_id: str) -> None:
         """持仓平掉后调用，清掉它的计数。"""
         self._streak.pop(position_id, None)
+        self._against.pop(position_id, None)
+
+    def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None:
+        """下一次复查带上这个反向信号；``one_shot`` = 这次过线就平，不等连续确认。"""
+        self._against[position_id] = (sig, one_shot)
 
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
         pid = position.position_id
+        against = self._against.pop(pid, None)
         f = self._features(position.symbol)
         if f is None:
             self._streak.pop(pid, None)
@@ -88,7 +99,9 @@ class JevKeeper:
             symbol=position.symbol,
             ts=now,
             position_id=pid,
-            snapshot=hold_snapshot(position, f, card, now),
+            snapshot=hold_snapshot(
+                position, f, card, now, against=against[0] if against is not None else None
+            ),
             questions=hold_questions(),
         )
         resp = await self._model.ask(request)
@@ -126,11 +139,18 @@ class JevKeeper:
         if rule is not None:
             p_close = max(p_close, self._cfg.keeper_close_p)
             why.append(rule)
+        one_shot = against is not None and against[1]
+        if against is not None:
+            why.append(f"反向信号急查（{against[0].desc}）" + ("，过线即平" if one_shot else ""))
 
         if p_close >= self._cfg.keeper_close_p:
             n = self._streak.get(pid, 0) + 1
             self._streak[pid] = n
-            if p_close >= self._cfg.keeper_close_p_strong or n >= self._cfg.keeper_confirmations:
+            if (
+                one_shot
+                or p_close >= self._cfg.keeper_close_p_strong
+                or n >= self._cfg.keeper_confirmations
+            ):
                 return self._verdict(
                     position, now, "close", p_close, n, "，".join(why), request, resp
                 )

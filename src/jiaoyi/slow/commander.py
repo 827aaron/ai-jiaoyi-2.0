@@ -595,6 +595,10 @@ class BattleCardCommander:
         if trigger in self._events.triggers and symbol not in self._pending:
             self._pending[symbol] = (trigger, now)
 
+    def accepts_event(self, trigger: str) -> bool:
+        """开了临时会、且这类事件在名单里（不然 ``request_event`` 会被忽略）。"""
+        return self._events.enabled and trigger in self._events.triggers
+
     def request_event(self, symbol: str, trigger: str) -> None:
         """外部事件（预测员连续看反作战卡等）：排进临时会队列，没开临时会 / 不在名单里就忽略。"""
         if self._events.enabled:

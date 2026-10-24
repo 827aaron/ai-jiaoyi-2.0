@@ -552,6 +552,10 @@ class HbExecutorAdapter:
             await self._sync_one(tracked)
         return [t.record for t in self._registry.live()]
 
+    def live_positions(self) -> list[PositionRecord]:
+        """账本里此刻还没结束的持仓（开仓中 / 持有中 / 平仓中），不查 hummingbot，马上返回。"""
+        return [t.record for t in self._registry.live()]
+
     async def sync_all(self) -> None:
         """只同步，不返回；对账员用。"""
         await self.positions()

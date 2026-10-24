@@ -77,7 +77,7 @@ max_retries = 6
 # symbol_timeout_s = 900           # 单个标的的会议超时
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
 # event_meeting_enabled = true    # 临时会：出了事件只给那一个币补开一场（2h 起默认开，15m–1h 关）
-# event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / news_high_impact / stale_card_on_entry
+# event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / signal_against_card / news_high_impact / stale_card_on_entry
 # event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久
 # event_max_per_day = 12          # 每个交易日最多几场临时会
 # move_since_card_atr = 3.0       # 离上次开会的价格走了几倍 ATR 算 move_since_card

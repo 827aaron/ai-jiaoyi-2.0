@@ -24,6 +24,7 @@ from typing import Any
 from jiaoyi.contracts import (
     ENTRY_CHOICES,
     HOLD_CHOICES,
+    AgainstSignalEvent,
     BattleCard,
     CandidateSignal,
     EntryQuestion,
@@ -253,8 +254,16 @@ def entry_snapshot(
 
 
 def hold_snapshot(
-    pos: PositionRecord, f: FeatureSnapshot, card: BattleCard | None, now: datetime
+    pos: PositionRecord,
+    f: FeatureSnapshot,
+    card: BattleCard | None,
+    now: datetime,
+    *,
+    against: AgainstSignalEvent | None = None,
 ) -> str:
+    """``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
+
+    这是持仓快照里可选的键，进场快照和指纹不变（进场门槛校准按模板版本分组，不受影响）。"""
     px = f.last_price
     entry = pos.entry_price or px
     sign = 1.0 if pos.side == Side.LONG else -1.0
@@ -275,6 +284,15 @@ def hold_snapshot(
         **market_block(f),
         "card": _card_block(card, pos.symbol, px),
     }
+    if against is not None:
+        d["against"] = {
+            "sig": against.kind.value,
+            "side": against.side.value,
+            "vol_x": _r(against.vol_ratio) if against.vol_ratio is not None else None,
+            "buy": _r(against.buy_ratio, 2),
+            "strong": against.strong,
+            "age_s": _r((now - against.ts).total_seconds()),
+        }
     return _dump(d)
 
 

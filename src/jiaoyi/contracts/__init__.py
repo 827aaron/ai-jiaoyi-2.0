@@ -40,7 +40,14 @@ from jiaoyi.contracts.market import (
     MarkPrice,
     Trade,
 )
-from jiaoyi.contracts.module_status import Alert, AlertLevel, Health, ModuleStatus, TodayStats
+from jiaoyi.contracts.module_status import (
+    AgainstSignalEvent,
+    Alert,
+    AlertLevel,
+    Health,
+    ModuleStatus,
+    TodayStats,
+)
 from jiaoyi.contracts.orders import AccountState, OrderIntent, RiskVerdict
 from jiaoyi.contracts.position import (
     CloseReason,
@@ -62,6 +69,7 @@ __all__ = [
     "ENTRY_CHOICES",
     "HOLD_CHOICES",
     "AccountState",
+    "AgainstSignalEvent",
     "Alert",
     "AlertLevel",
     "AppConfig",

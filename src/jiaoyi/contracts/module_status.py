@@ -9,10 +9,11 @@ JSON 示例见 ``contracts/examples/module_status.json``。
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import AwareDatetime, Field
 
-from jiaoyi.contracts.common import Contract, NonNegFloat, Role, Symbol
+from jiaoyi.contracts.common import Contract, NonNegFloat, Role, Side, SignalKind, Symbol
 
 
 class Health(StrEnum):
@@ -34,6 +35,30 @@ class TodayStats(Contract):
     errors: int = Field(default=0, ge=0)
     avg_latency_ms: NonNegFloat = 0.0
     cost_usd: NonNegFloat = 0.0
+
+
+class AgainstSignalEvent(Contract):
+    """哨兵看到一次和作战卡方向相反的信号，以及主程序怎么处理的（团队页流程图亮线用）。
+
+    ``actions`` 空 = 只记录；``keeper_recheck`` = 叫管家急查了（``position_id`` 是哪笔仓，
+    ``keeper_verdict`` 是管家这次的结论，还没查完为 None）；``meeting`` = 申请了单币临时会。
+    """
+
+    symbol: Symbol
+    ts: AwareDatetime
+    kind: SignalKind
+    side: Side = Field(description="信号的方向（和卡相反的那边）。")
+    desc: str = ""
+    price: float | None = Field(default=None, gt=0, description="触发时的成交价。")
+    vol_ratio: float | None = None
+    buy_ratio: float = Field(default=0.5, ge=0.0, le=1.0, description="1 分钟主动买占比。")
+    strong: bool = Field(
+        default=False, description="强反向信号（强平瀑布反弹 / 放量突破且量够）：管家判 1 次就平。"
+    )
+    actions: list[Literal["keeper_recheck", "meeting"]] = Field(default_factory=list)
+    result: str = Field(default="", description="大白话结果，例如「已叫管家复查」「只记录」。")
+    position_id: str | None = None
+    keeper_verdict: Literal["close", "hold"] | None = None
 
 
 class ModuleStatus(Contract):
@@ -59,6 +84,10 @@ class ModuleStatus(Contract):
     detail: list[str] = Field(
         default_factory=list,
         description="每个币一行的现状（哨兵：量比 / 主动占比 / 离阈值多远 / 跳过原因）。",
+    )
+    against_signals: list[AgainstSignalEvent] = Field(
+        default_factory=list,
+        description="哨兵：最近 30 分钟和作战卡方向相反的信号，以及处理结果（新的在后）。",
     )
     error: str | None = Field(
         default=None, description="当前还没恢复的失败原因（上次运行失败）；正常时为 None。"
