@@ -97,6 +97,7 @@ class FakeCcxtMarkets:
                         {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.002"},
                         {"filterType": "MIN_NOTIONAL", "notional": "100"},
                         {"filterType": "MARKET_LOT_SIZE", "stepSize": "0.001", "maxQty": "120"},
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
                     ],
                 },
             }
@@ -128,17 +129,17 @@ async def test_ccxt_lot_filters_mapping() -> None:
     await ex._ex.close()
     ex._ex = FakeCcxtMarkets()
     assert await ex.lot_filters() == {
-        "BTCUSDT": LotFilter(0.001, 0.002, 100.0, max_qty=120.0),
+        "BTCUSDT": LotFilter(0.001, 0.002, 100.0, max_qty=120.0, tick_size=0.1),
         "TSLAUSDT": LotFilter(0.01, 0.01, 0.0),
     }
 
 
 async def test_max_qty_flows_through_provider() -> None:
     ex, clk = FakeExchange(), Clk()
-    ex.filters = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0, max_qty=120.0)}
+    ex.filters = {"BTCUSDT": LotFilter(0.001, 0.001, 100.0, max_qty=120.0, tick_size=0.1)}
     lots = ExchangeInfoLotRules(ex, clock=clk)
     await lots.refresh()
-    assert lots.lot_rules("BTCUSDT") == LotRules(0.001, 0.001, 100.0, 120.0)
+    assert lots.lot_rules("BTCUSDT") == LotRules(0.001, 0.001, 100.0, 120.0, 0.1)
 
 
 async def test_ccxt_lot_filters_failure_is_exchange_error() -> None:

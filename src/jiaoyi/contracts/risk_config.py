@@ -267,7 +267,15 @@ class FastLoopConfig(Contract):
         default=10.0,
         ge=1.0,
         le=300.0,
-        description="限价止盈：价格越过止盈价这么多秒仍没平掉，改市价平。",
+        description="限价止盈：价格穿过止盈价（见 tp_limit_fallback_through_bps）这么多秒仍没平掉，"
+        "改市价平。",
+    )
+    tp_limit_fallback_through_bps: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=100.0,
+        description="限价止盈：价格要越过止盈价这么多 bp（0.01%）才开始算「没成交」。只碰到止盈价时"
+        "限价单还在排队，不算；穿过去还没成交才改市价。0 = 碰到就算（旧行为）。",
     )
     signal_max_age_s: float = Field(
         default=5.0, ge=0.5, le=60.0, description="信号从触发到保镖审核超过这么久就作废。"

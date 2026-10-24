@@ -23,9 +23,17 @@ START = datetime(2026, 10, 22, 6, 17, tzinfo=UTC)
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, *, notices: bool = False, limit_tp: bool = False) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        notices: bool = False,
+        limit_tp: bool = False,
+        tick: float | None = None,
+    ) -> None:
         self.t = START
         self.limit_tp = limit_tp
+        self.tick = tick
         self.notices = notices  # 开平仓成功的 INFO 推送；老测试只看告警，默认关
         self.api = FakeHbApi()
         self.ex = FakeExchange()
@@ -70,6 +78,7 @@ class Rig:
             exchange=self.ex,
             trade_notices=self.notices,
             limit_take_profit=self.limit_tp,
+            tick_size=lambda _s: self.tick,
         )
 
 
@@ -177,6 +186,45 @@ async def test_take_profit_order_type_follows_switch(tmp_path: Path) -> None:
     # 限价止盈按入场价 × 止盈% 挂，不减开仓手续费；止损照样补手续费
     assert lb["stop_loss"] == barrier["stop_loss"]
     assert float(lb["take_profit"]) >= float(barrier["take_profit"])
+
+
+def _hb_limit(entry: float, side: Side, take: float, tick: float) -> float:
+    """hummingbot 挂限价止盈的价：入场价 × (1 ± take)，按 tick 往下取整。"""
+    from decimal import ROUND_FLOOR, Decimal
+
+    raw = Decimal(str(entry)) * (1 + (1 if side is Side.LONG else -1) * Decimal(str(take)))
+    q = Decimal(str(tick))
+    return float((raw / q).to_integral_value(ROUND_FLOOR) * q)
+
+
+async def test_limit_tp_short_rounds_toward_fill(tmp_path: Path) -> None:
+    # DASH 2026-10-24：空单止盈 50.6677 被 hummingbot 往下取整挂成 50.66，最低到 50.67 没成交
+    r = Rig(tmp_path, limit_tp=True, tick=0.1)
+    pid = await open_filled(r, price=68044.0, side="short")
+    take = float(r.api.created[0]["triple_barrier_config"]["take_profit"])
+    rec = r.registry.get(pid).record  # type: ignore[union-attr]
+    target = 68044.0 * (1 - 0.005)  # 67703.78
+    assert rec.take_profit_price == pytest.approx(67703.8)  # 止盈价上方最近一档
+    assert _hb_limit(68044.0, Side.SHORT, take, 0.1) == pytest.approx(67703.8)
+    assert rec.take_profit_price >= target
+
+
+async def test_limit_tp_long_already_rounds_toward_fill(tmp_path: Path) -> None:
+    r = Rig(tmp_path, limit_tp=True, tick=0.1)
+    pid = await open_filled(r, price=68044.0)
+    take = float(r.api.created[0]["triple_barrier_config"]["take_profit"])
+    assert take == pytest.approx(0.005)  # 多单卖出往下取整本来就离成交近，不调
+    rec = r.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.take_profit_price == pytest.approx(68384.2)
+    assert _hb_limit(68044.0, Side.LONG, take, 0.1) == pytest.approx(68384.2)
+
+
+async def test_limit_tp_without_tick_keeps_raw_price(tmp_path: Path) -> None:
+    r = Rig(tmp_path, limit_tp=True)
+    pid = await open_filled(r, price=68044.0, side="short")
+    assert float(r.api.created[0]["triple_barrier_config"]["take_profit"]) == pytest.approx(0.005)
+    rec = r.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.take_profit_price == pytest.approx(68044.0 * 0.995)
 
 
 async def test_limit_order_not_filled_yet_has_no_lifeboat_until_fill(rig: Rig) -> None:

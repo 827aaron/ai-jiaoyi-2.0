@@ -123,6 +123,12 @@ def build_execution(
         return RoleRecorder(role, decision_log, day_reset_tz=tz)
 
     lifeboat = BinanceLifeboat(exchange, recorder=recorder(Role.LIFEBOAT))
+    lot_rules = ExchangeInfoLotRules(exchange, recorder=recorder(Role.EXECUTOR))
+
+    def tick_size(symbol: str) -> float | None:
+        rules = lot_rules.lot_rules(symbol)
+        return rules.tick_size if rules is not None else None
+
     registry = PositionRegistry(Path(data_dir) / "positions.json")
     adapter = HbExecutorAdapter(
         api,
@@ -137,6 +143,7 @@ def build_execution(
         recorder=recorder(Role.EXECUTOR),
         open_fee_bps=risk.taker_fee_bps,
         limit_take_profit=limit_take_profit,
+        tick_size=tick_size,
     )
     reconciler = ThreeWayReconciler(
         adapter,
@@ -150,7 +157,6 @@ def build_execution(
         close_unknown_positions=close_unknown_positions,
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
     )
-    lot_rules = ExchangeInfoLotRules(exchange, recorder=recorder(Role.EXECUTOR))
     return ExecutionStack(
         adapter,
         lifeboat,
