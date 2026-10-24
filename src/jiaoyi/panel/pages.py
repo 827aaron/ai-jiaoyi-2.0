@@ -36,6 +36,7 @@ from jiaoyi.panel.overview import (
     STALE_S,
     LampState,
     PositionView,
+    PriceSrc,
     _card,
     compute_kpis,
     fee_rate_bps,
@@ -157,7 +158,7 @@ def build_positions(
     hb: HbSnapshot,
     risk: RiskConfig,
     now: datetime,
-    prices: dict[str, float] | None = None,
+    prices: dict[str, tuple[float, PriceSrc]] | None = None,
 ) -> PositionsPage:
     ledger = files.ledger()
     records = files.decisions_today(now)

@@ -37,9 +37,10 @@ from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
 from jiaoyi.panel.hb import HbReader
+from jiaoyi.panel.live_price import LivePrices, merge_live
 from jiaoyi.panel.market import Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
-from jiaoyi.panel.overview import Overview, build_overview, compute_kpis
+from jiaoyi.panel.overview import Overview, PriceSrc, build_overview, compute_kpis
 from jiaoyi.panel.pages import (
     AiRange,
     FundsPage,
@@ -191,6 +192,7 @@ def create_app(
     clock: Clock = lambda: datetime.now(UTC),
     lan_only: bool = True,
     klines: KlineSource | None = None,
+    live_prices: LivePrices | None = None,
     key_status: dict[str, bool] | None = None,
     config_paths: ConfigPaths | None = None,
     allow_hosts: frozenset[str] = frozenset(),
@@ -221,20 +223,27 @@ def create_app(
     boot_code = code_fingerprint()
     market = klines or KlineSource()
 
-    async def last_prices() -> dict[str, float]:
-        """持仓币的币安最新成交价：取持仓页 K 线图同一份 1 分钟 K 线（5 秒缓存）的最后一根收盘价。
-        拿不到的币不放进来，持仓那边退回 hummingbot 的浮盈。"""
+    ticks = live_prices or LivePrices()
 
-        async def one(sym: str) -> tuple[str, float | None]:
+    async def last_prices() -> dict[str, tuple[float, PriceSrc]]:
+        """持仓币的现价：币安 WebSocket 推送（``ticks``）；推送断了的币退回一次全量 ticker
+        （2 秒缓存，限流时不发）；都拿不到的不放进来，持仓那边退回 hummingbot 的浮盈。"""
+        held = {p.symbol for p in files.ledger().live()}
+        ticks.watch(held)
+        out: dict[str, tuple[float, PriceSrc]] = {}
+        for s in held:
+            px = ticks.price(s)
+            if px:
+                out[s] = (px, "push")
+        if held - out.keys():
             try:
-                bars = await asyncio.wait_for(market.klines(sym, "1m"), 3.0)
+                rest = await asyncio.wait_for(market.last_prices(), 3.0)
             except (KlineError, TimeoutError):
-                return sym, None
-            return sym, bars[-1]["close"] if bars else None
-
-        syms = sorted({p.symbol for p in files.ledger().live()})
-        got = await asyncio.gather(*(one(s) for s in syms))
-        return {s: px for s, px in got if px}
+                rest = {}
+            for s in held - out.keys():
+                if rest.get(s):
+                    out[s] = (rest[s], "rest")
+        return out
 
     async def sample_pnl() -> None:
         """今日盈亏曲线：每分钟记一个点（只记 hummingbot-api 拿得到总资产的时候）。"""
@@ -258,6 +267,7 @@ def create_app(
             task.cancel()
         await hb.close()
         await market.close()
+        await ticks.close()
 
     api = FastAPI(title="jiaoyi 面板", docs_url=None, redoc_url=None, lifespan=lifespan)
 
@@ -435,9 +445,11 @@ def create_app(
     @api.get("/api/klines")
     async def klines_(symbol: str, interval: Interval = "1m") -> list[dict[str, float]]:
         try:
-            return await market.klines(symbol, interval)
+            bars = await market.klines(symbol, interval)
         except KlineError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
+        # 最后一根接上推送，和持仓表现价同一个数
+        return merge_live(bars, ticks.bar(symbol), interval)
 
     @api.get("/api/card-atr")
     async def card_atr(symbol: str) -> CardAtr:

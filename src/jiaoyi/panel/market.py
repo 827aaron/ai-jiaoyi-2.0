@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from typing import Any, Literal
@@ -18,6 +19,9 @@ BASE = "https://fapi.binance.com"
 
 
 DECIMALS_CACHE_S = 6 * 3600.0
+PRICES_CACHE_S = 2.0
+DEFAULT_RETRY_AFTER_S = {429: 60.0, 418: 120.0}
+"""币安没给 ``Retry-After`` 时的保守等待（同 ``market/rest.py``）。"""
 
 
 def tick_decimals(tick: str) -> int:
@@ -35,26 +39,62 @@ class KlineSource:
         self,
         base_url: str = BASE,
         *,
-        cache_s: float = 1.5,
+        cache_s: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._http = httpx.AsyncClient(base_url=base_url, timeout=4.0, transport=transport)
         self._cache_s = cache_s
         self._cache: dict[tuple[str, str], tuple[float, list[dict[str, float]]]] = {}
         self._decimals: tuple[float, dict[str, int]] | None = None
+        self._prices: tuple[float, dict[str, float]] | None = None
+        self._prices_lock = asyncio.Lock()
+        self._kline_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._blocked_until = 0.0
+        """被币安 429 / 418 之后，到这个时刻（monotonic）之前一个请求都不发。"""
+
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """发一个公开 GET。面板和交易程序是同一个 IP：被限流就按 ``Retry-After`` 停发，
+        免得 429 升级成 418 封 IP，连累交易程序平仓。"""
+        left = self._blocked_until - time.monotonic()
+        if left > 0:
+            raise KlineError(f"币安限流中，{left:.0f} 秒后再试")
+        try:
+            resp = await self._http.get(path, params=params)
+        except httpx.HTTPError as e:
+            raise KlineError(f"币安行情连不上：{type(e).__name__}") from e
+        if resp.status_code in DEFAULT_RETRY_AFTER_S:
+            try:
+                wait = max(float(resp.headers.get("Retry-After", "")), 1.0)
+            except ValueError:
+                wait = DEFAULT_RETRY_AFTER_S[resp.status_code]
+            self._blocked_until = time.monotonic() + wait
+            raise KlineError(f"币安限流（{resp.status_code}），{wait:.0f} 秒内不再请求")
+        if resp.status_code != 200:
+            raise KlineError(f"币安行情返回 {resp.status_code}")
+        return resp.json()
+
+    async def last_prices(self) -> dict[str, float]:
+        """全部 U 本位合约的最新成交价：一次 ``/fapi/v1/ticker/price`` 拿全，缓存 2 秒；
+        同时进来的请求共用同一次拉取。"""
+        async with self._prices_lock:
+            if self._prices and time.monotonic() - self._prices[0] < PRICES_CACHE_S:
+                return self._prices[1]
+            rows = await self._get("/fapi/v1/ticker/price")
+            out = {
+                str(r["symbol"]): float(r["price"])
+                for r in rows
+                if isinstance(r, dict) and "symbol" in r and "price" in r
+            }
+            self._prices = (time.monotonic(), out)
+            return out
 
     async def price_decimals(self) -> dict[str, int]:
         """每个 USDT 合约价格的小数位（exchangeInfo 的 PRICE_FILTER tickSize），缓存 6 小时。"""
         if self._decimals and time.monotonic() - self._decimals[0] < DECIMALS_CACHE_S:
             return self._decimals[1]
-        try:
-            resp = await self._http.get("/fapi/v1/exchangeInfo")
-        except httpx.HTTPError as e:
-            raise KlineError(f"币安行情连不上：{type(e).__name__}") from e
-        if resp.status_code != 200:
-            raise KlineError(f"币安行情返回 {resp.status_code}")
+        info = await self._get("/fapi/v1/exchangeInfo")
         out: dict[str, int] = {}
-        for sym in resp.json().get("symbols", []):
+        for sym in info.get("symbols", []):
             name = sym.get("symbol", "")
             if not isinstance(name, str) or not SYMBOL_RE.match(name):
                 continue
@@ -71,18 +111,17 @@ class KlineSource:
         if not SYMBOL_RE.match(symbol):
             raise KlineError("币种代码不对")
         key = (symbol, interval)
-        hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < self._cache_s:
-            return hit[1]
-        try:
-            resp = await self._http.get(
-                "/fapi/v1/klines", params={"symbol": symbol, "interval": interval, "limit": limit}
-            )
-        except httpx.HTTPError as e:
-            raise KlineError(f"币安行情连不上：{type(e).__name__}") from e
-        if resp.status_code != 200:
-            raise KlineError(f"币安行情返回 {resp.status_code}")
-        rows: list[Any] = resp.json()
+        async with self._kline_locks.setdefault(key, asyncio.Lock()):  # 同时进来的共用一次拉取
+            hit = self._cache.get(key)
+            if hit and time.monotonic() - hit[0] < self._cache_s:
+                return hit[1]
+            return await self._fetch_klines(key, limit)
+
+    async def _fetch_klines(self, key: tuple[str, str], limit: int) -> list[dict[str, float]]:
+        symbol, interval = key
+        rows: list[Any] = await self._get(
+            "/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit}
+        )
         bars = [
             {
                 "time": int(r[0]) // 1000,

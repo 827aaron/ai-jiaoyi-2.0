@@ -41,6 +41,9 @@ FEED_LIMIT = 30
 ALERT_LIMIT = 12
 
 LampState = Literal["ok", "slow", "bad", "off"]
+PriceSrc = Literal["push", "rest", "mark"]
+"""持仓现价哪来的：push = 币安 WebSocket 推送；rest = 推送断了，退回一次全量 REST 行情；
+mark = 都拿不到，按 hummingbot 的浮盈（币安标记价）倒推。"""
 FeedKind = Literal["go", "skip", "block", "close", "info"]
 
 
@@ -153,9 +156,9 @@ class PositionView(BaseModel):
     keeper: str | None
     """管家对这笔的最新判断（拿住 / 平仓）。"""
     mark_price: float | None = None
-    """现价，和浮盈同一口径：``price_src`` 为 last 是币安最新成交价（和 K 线图同源），
+    """现价，和浮盈同一口径：``price_src`` 为 push / rest 是币安最新成交价（和 K 线图同源），
     为 mark 是由 hummingbot 的浮盈倒推（开仓价 ± 浮盈 ÷ 数量，币安按标记价算）。"""
-    price_src: Literal["last", "mark"] | None = None
+    price_src: PriceSrc | None = None
     notional_usdt: float | None = None
     """名义 = 数量 × 现价（没有现价用开仓价）。"""
     margin_usdt: float | None = None
@@ -253,7 +256,7 @@ def build_overview(
     risk: RiskConfig,
     app: AppConfig,
     now: datetime,
-    prices: dict[str, float] | None = None,
+    prices: dict[str, tuple[float, PriceSrc]] | None = None,
 ) -> Overview:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -413,12 +416,12 @@ def position_views(
     hb: HbSnapshot,
     taker_fee_bps: float = 0.0,
     fills_fee_bps: float | None = None,
-    prices: dict[str, float] | None = None,
+    prices: dict[str, tuple[float, PriceSrc]] | None = None,
 ) -> list[PositionView]:
     """未结束的持仓，最新开的在前；附上浮盈浮亏和管家最新判断。
 
-    ``prices`` 是币安最新成交价（和持仓页 K 线图同一个来源）：有就按它算现价和浮盈，
-    图上最后一根和表里的现价对得上；拿不到退回 hummingbot 的浮盈（币安按标记价算）倒推。
+    ``prices`` 是币安最新成交价和来源（推送 / REST，和持仓页 K 线图最后一根同一个数）：有就按它
+    算现价和浮盈；拿不到退回 hummingbot 的浮盈（币安按标记价算）倒推。
     """
     keeper_last: dict[str, str] = {}
     for r in records:
@@ -428,11 +431,12 @@ def position_views(
     for p in sorted(live, key=lambda p: p.opened_at, reverse=True):
         sign = 1 if p.side.value == "long" else -1
         last = (prices or {}).get(p.symbol)
-        src: Literal["last", "mark"] | None = None
+        src: PriceSrc | None = None
         mark: float | None = None
         pnl: float | None = None
         if last and p.entry_price:
-            mark, pnl, src = last, sign * p.quantity * (last - p.entry_price), "last"
+            mark, src = last
+            pnl = sign * p.quantity * (mark - p.entry_price)
         else:
             pnl = hb.unrealized_of(p.symbol) if hb.ok else None
             if pnl is not None and p.entry_price and p.quantity > 0:

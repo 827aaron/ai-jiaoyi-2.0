@@ -315,8 +315,13 @@ def test_is_lan(host: str | None, ok: bool) -> None:
     assert is_lan(host) is ok
 
 
-def _client(tmp_path: Path, host: str) -> TestClient:
+def _client(tmp_path: Path, host: str, live: Any = None) -> TestClient:
+    from jiaoyi.panel.live_price import LivePrices
+    from jiaoyi.panel.market import KlineSource
+
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/fapi/v1/klines":  # 面板 K 线：一根旧的 1 分钟线
+            return httpx.Response(200, json=[[1_699_999_940_000, "1", "1", "1", "1", "9"]])
         return httpx.Response(503)
 
     hb = HbReader(
@@ -327,7 +332,14 @@ def _client(tmp_path: Path, host: str) -> TestClient:
         connector_name="c",
         transport=httpx.MockTransport(handler),
     )
-    app = create_app(RISK, _cfg(tmp_path), hb, clock=lambda: NOW)
+    app = create_app(
+        RISK,
+        _cfg(tmp_path),
+        hb,
+        clock=lambda: NOW,
+        klines=KlineSource(transport=httpx.MockTransport(handler)),
+        live_prices=live or LivePrices("ws://127.0.0.1:9"),  # 测试里不连币安
+    )
     return TestClient(app, client=(host, 5000), base_url="http://localhost:8090")
 
 
@@ -400,11 +412,11 @@ def test_positions_page_groups_and_trail(tmp_path: Path) -> None:
     assert [t.text for t in page.trails[p.position_id]] == ["BTC 拿住"]
     assert p.price_src == "mark"  # 没给最新价：按 hummingbot 浮盈倒推
 
-    # 给了币安最新价（和 K 线图同源）：现价、浮盈都按它算，不再用 hummingbot 的标记价浮盈
+    # 给了币安最新价（推送，和 K 线图同源）：现价、浮盈都按它算，不再用 hummingbot 的标记价浮盈
     files = PanelFiles(tmp_path, RISK.day_reset_tz)
-    [q] = build_positions(files, HB, RISK, NOW, {"BTCUSDT": 68_100.0}).positions
+    [q] = build_positions(files, HB, RISK, NOW, {"BTCUSDT": (68_100.0, "push")}).positions
     sign = 1 if q.side == "long" else -1
-    assert (q.mark_price, q.price_src) == (68_100.0, "last")
+    assert (q.mark_price, q.price_src) == (68_100.0, "push")
     assert q.unrealized_usdt == pytest.approx(sign * 0.015 * (68_100.0 - 68_044.0))
 
 
@@ -449,6 +461,81 @@ async def test_kline_source_validates_and_parses() -> None:
     with pytest.raises(KlineError):
         await src.klines("BTC/../x", "1m")
     await src.close()
+
+
+async def test_kline_source_prices_shared_and_backs_off_on_429() -> None:
+    import asyncio
+
+    from jiaoyi.panel.market import KlineError, KlineSource
+
+    calls: list[str] = []
+    status = {"code": 200}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req.url.path)
+        if status["code"] != 200:
+            return httpx.Response(status["code"], headers={"Retry-After": "30"})
+        return httpx.Response(200, json=[{"symbol": "XLMUSDT", "price": "0.17317"}])
+
+    src = KlineSource(transport=httpx.MockTransport(handler))
+    a, b = await asyncio.gather(src.last_prices(), src.last_prices())  # 同时进来：只拉一次
+    assert a == b == {"XLMUSDT": 0.17317} and calls == ["/fapi/v1/ticker/price"]
+
+    status["code"] = 429
+    with pytest.raises(KlineError):
+        await src.klines("XLMUSDT", "1m")
+    n = len(calls)
+    for _ in range(3):  # Retry-After 到期前一个请求都不发
+        with pytest.raises(KlineError, match="限流"):
+            await src.klines("BTCUSDT", "1m")
+    assert len(calls) == n
+    await src.close()
+
+
+def test_live_prices_push_and_merge_into_chart() -> None:
+    from jiaoyi.panel.live_price import LivePrices, merge_live
+
+    live = LivePrices()
+    k = {
+        "t": 1_700_000_060_000,
+        "s": "XLMUSDT",
+        "o": "0.1733",
+        "h": "0.1734",
+        "l": "0.1731",
+        "c": "0.17317",
+    }
+    live.on_message(json.dumps({"stream": "xlmusdt@kline_1m", "data": {"e": "kline", "k": k}}))
+    live.on_message("not json")  # 坏消息忽略
+    assert live.price("XLMUSDT") == 0.17317 and live.price("BTCUSDT") is None
+    bar = live.bar("XLMUSDT")
+    old = [{"time": 1_700_000_000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}]
+    assert merge_live(old, bar, "1m")[-1] == bar and len(merge_live(old, bar, "1m")) == 2
+    assert merge_live(old, bar, "5m") == [{**old[0], "close": 0.17317, "low": 0.17317}]
+    assert old[0]["close"] == 1.0  # 不动缓存里的
+    stale = LivePrices(fresh_s=0.0)
+    stale.on_message(json.dumps({"data": {"k": k}}))
+    assert stale.price("XLMUSDT") is None  # 断流太久的不算
+
+
+def test_positions_and_chart_use_pushed_price(tmp_path: Path) -> None:
+    from jiaoyi.panel.live_price import LivePrices
+
+    _seed(tmp_path)
+    live = LivePrices("ws://127.0.0.1:9")
+    k = {
+        "t": 1_700_000_000_000,
+        "s": "BTCUSDT",
+        "o": "68000",
+        "h": "68120",
+        "l": "67990",
+        "c": "68100",
+    }
+    live.on_message(json.dumps({"data": {"k": k}}))
+    with _client(tmp_path, "10.0.0.2", live) as client:
+        [p] = client.get("/api/positions").json()["positions"]
+        assert (p["mark_price"], p["price_src"]) == (68_100.0, "push")
+        bars = client.get("/api/klines?symbol=BTCUSDT&interval=1m").json()
+        assert bars[-1]["close"] == 68_100.0 and len(bars) == 2  # 图最后一根 = 表里现价
 
 
 def test_page_endpoints(tmp_path: Path) -> None:
