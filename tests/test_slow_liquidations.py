@@ -19,7 +19,7 @@ class FakeLiq:
 
 def test_describe() -> None:
     assert "2,500,000" in describe_total(2_500_000)
-    assert "无强平记录" in describe_total(0.0)
+    assert "No liquidations recorded" in describe_total(0.0)
 
 
 class Src:

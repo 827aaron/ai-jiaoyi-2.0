@@ -45,7 +45,7 @@ def test_every_tier_renders_with_all_slots_filled(hold: str) -> None:
     assert "BTCUSDT" in shared and "Binance USDT-margined PERPETUAL" in shared
     w = tp.words(p)
     for field in w.brief_main:  # 挑币提示词里的依据字段 = 这一档简报显示的字段
-        assert tp.BRIEF_FIELDS_ZH[field] in tp.pick_prompt(p, "t", 3)
+        assert tp.BRIEF_FIELDS[field] in tp.pick_prompt(p, "t", 3)
     assert shared.rstrip().endswith("Apply all of this to every sentence you write")
 
 
@@ -89,11 +89,12 @@ def test_custom_hold_minutes_use_the_tier_words() -> None:
 def test_pick_prompt_snapshot_and_previous_round_line() -> None:
     p = tp.PromptParams.for_hold("2h")
     text = tp.pick_prompt(p, "2026-10-24 12:00", 8, "BTC 压在 20 日线下 {x}", "【简报】", "表")
-    assert "本系统每笔单最多拿 2 小时，你判断的是未来 2 小时 的大盘，不是今天、也不是这周" in text
-    assert "上一轮的大盘判断只作参考，不要照抄" in text and "BTC 压在 20 日线下 {x}" in text
-    assert "20 日线、日线 RSI、7 天涨跌只作背景，不能单独决定方向" in text
-    assert "再挑最多 8 个" in text and "【简报】" in text and text.rstrip().endswith("表")
-    assert "上一轮" not in tp.pick_prompt(p, "t", 8)  # 没有上一轮：整行去掉
+    assert "held at most 2 hours; you judge the market for the next 2 hours, not today" in text
+    assert "reference only; do not copy it" in text and "BTC 压在 20 日线下 {x}" in text
+    assert "must never decide the direction on their own" in text
+    assert "pick at most 8 symbols" in text and "【简报】" in text
+    assert "in Chinese" in text and text.rstrip().endswith("表")
+    assert "previous round" not in tp.pick_prompt(p, "t", 8)  # 没有上一轮：整行去掉
 
 
 def test_meeting_note_carries_regime_reason_and_tick() -> None:
@@ -226,7 +227,7 @@ def test_build_config_has_tier_context_and_stops_the_original_memory() -> None:
 def test_profile_tables_cover_every_tier() -> None:
     for h in HOLDS:
         assert h in profiles.ANALYST_KLINES and h in profiles.INDICATOR_INTERVAL
-        assert profiles.fee_share_pct(h) > 0 and profiles.HORIZON_EN[h] and profiles.HORIZON_ZH[h]
+        assert profiles.fee_share_pct(h) > 0 and profiles.HORIZON_EN[h]
     assert [profiles.fee_share_pct(h) for h in HOLDS] == [70, 50, 35, 25, 17, 14, 9]
     assert [profiles.indicator_interval(h) for h in HOLDS] == [
         "5m", "5m", "15m", "1h", "4h", "4h", "4h",
@@ -248,7 +249,7 @@ def test_prompts_active_file_is_written(tmp_path) -> None:  # type: ignore[no-un
     assert doc["hold"] == "4h" and doc["style"] == "mid" and doc["indicator_interval"] == "1h"
     assert "both effects are weak" in doc["shared"] and "{SYMBOL}" in doc["position_note"]
     assert doc["brief_fields"]["main"][0] == "chg_4h"
-    assert "最多 {max_n} 个" in doc["pick"]  # 预览留占位符，不写成「最多 0 个」
+    assert "pick at most {max_n} symbols" in doc["pick"]  # 预览留占位符，不写成「最多 0 个」
 
 
 # ---------------------------------------------------------------- tickSize
@@ -302,8 +303,8 @@ def test_entry_zone_rules() -> None:
 
     risk = load_risk_config(ROOT / "config" / "risk.example.toml")
     text = convert_instructions(risk, ta_prompts.PromptParams.for_hold("2h"))
-    assert "必须给 entry_min" in text
-    assert "尽量给" in convert_instructions(risk, ta_prompts.PromptParams.for_hold("24h"))
+    assert "must have entry_min" in text
+    assert "when you can" in convert_instructions(risk, ta_prompts.PromptParams.for_hold("24h"))
 
 
 def test_zone_required_turns_card_into_no_trade() -> None:
@@ -334,7 +335,5 @@ def test_data_window_comes_from_one_constant() -> None:
     from jiaoyi.core import profiles
 
     p = tp.PromptParams.for_hold("2h")
-    assert profiles.DATA_WINDOW[0] in tp.perp_context(p) and "{DATA_WINDOW}" not in tp.perp_context(
-        p
-    )
-    assert profiles.DATA_WINDOW[1] in tp.pick_prompt(p, "t", 3)
+    assert profiles.DATA_WINDOW in tp.perp_context(p) and "{DATA_WINDOW}" not in tp.perp_context(p)
+    assert profiles.DATA_WINDOW in tp.pick_prompt(p, "t", 3)

@@ -285,8 +285,9 @@ def get_binance_stock_data(symbol: str, start_date: str, end_date: str) -> str:
             ts = datetime.fromtimestamp(k[0] / 1000, tz=UTC).strftime(fmt)
             lines.append(f"{ts},{k[1]},{k[2]},{k[3]},{k[4]},{k[5]},{k[7]}")
         parts.append(
-            f"# {binance_symbol(symbol)} 币安永续 {interval} K 线，已收盘 {len(rows)} 根"
-            f"（{t0} → {t1}，UTC）\n" + "\n".join(lines)
+            f"# {binance_symbol(symbol)} Binance perpetual {interval} klines, "
+            f"{len(rows)} closed bars "
+            f"({t0} -> {t1}, UTC)\n" + "\n".join(lines)
         )
     return "\n\n".join(parts) + "\n\n" + derivatives_context(symbol, end)
 
@@ -310,21 +311,27 @@ def format_derivatives(
     funding: Sequence[Mapping[str, Any]], oi: Sequence[Mapping[str, Any]]
 ) -> str:
     """资金费率历史 + 持仓量 24 小时变化 → 给分析师看的一段文字。纯函数，便于测试。"""
-    lines = ["## 衍生品数据（币安 U 本位永续）"]
+    lines = ["## Derivatives data (Binance USDT-M perpetual)"]
     if funding:
         rates = [float(f["fundingRate"]) * 100 for f in funding]
-        hist = "，".join(f"{r:+.4f}%" for r in rates[-6:])
-        lines.append(f"- 资金费率（%，最近 {min(len(rates), 6)} 次，由旧到新）：{hist}")
-        lines.append(f"- 最新一次资金费率 {rates[-1]:+.4f}%（正：多头付费，拥挤做多；负相反）")
+        hist = ", ".join(f"{r:+.4f}%" for r in rates[-6:])
+        lines.append(
+            f"- Funding rate (%, last {min(len(rates), 6)} settlements, oldest to newest): {hist}"
+        )
+        lines.append(
+            f"- Latest funding rate {rates[-1]:+.4f}% "
+            "(positive: longs pay, crowded long; negative: the opposite)"
+        )
     if len(oi) >= 2:
         first, last = float(oi[0]["sumOpenInterestValue"]), float(oi[-1]["sumOpenInterestValue"])
         if first > 0:
             chg = (last - first) / first * 100
             lines.append(
-                f"- 持仓量（USDT 计）{first:,.0f} → {last:,.0f}，{len(oi) - 1} 小时变化 {chg:+.2f}%"
+                f"- Open interest (USDT) {first:,.0f} -> {last:,.0f}, "
+                f"change over {len(oi) - 1}h {chg:+.2f}%"
             )
     if len(lines) == 1:
-        lines.append("- （暂无数据）")
+        lines.append("- (no data)")
     return "\n".join(lines)
 
 
@@ -350,7 +357,7 @@ def derivatives_context(symbol: str, end: datetime) -> str:
     except binance_gate.RateLimited:
         raise  # 被封了整轮暂停，不当成“暂不可用”吞掉
     except Exception as exc:  # 衍生品数据只是补充，拿不到不影响会议
-        return f"## 衍生品数据\n- （暂不可用：{type(exc).__name__}）"
+        return f"## Derivatives data\n- (unavailable: {type(exc).__name__})"
 
 
 ATR_PERIOD = 14
@@ -413,24 +420,25 @@ def describe_atr(atr: float | None, price: float | None, stop: StopScale) -> str
     """给会议提示词用的 ATR 说明；拿不到数值时明说，让模型别瞎猜价格尺度。"""
     name = stop_atr_name(stop)
     sl_hint = (
-        f"（建议 {stop.stop_hint[0]:g}–{stop.stop_hint[1]:g}，"
-        "窄 / 中 / 宽取这个范围的下沿 / 中 / 上沿）"
+        f" (suggested {stop.stop_hint[0]:g}-{stop.stop_hint[1]:g}; tight / medium / wide take "
+        "the lower end / middle / upper end of that range)"
         if stop.stop_hint
         else ""
     )
     tp_lo, tp_hi = max(TP_HINT[0], stop.min_tp_r), min(TP_HINT[1], stop.max_tp_r)
-    tp_hint = f"（建议 {tp_lo:g}–{tp_hi:g}，别贪）" if tp_lo < tp_hi else ""
+    tp_hint = f" (suggested {tp_lo:g}-{tp_hi:g}; do not be greedy)" if tp_lo < tp_hi else ""
     head = (
-        f"止损倍数按 stop_atr = {name}（各 ATR 都是 Wilder {ATR_PERIOD} 根，周期由风控配置决定，"
-        "不是 1h K 线上看到的 ATR）计，"
-        f"每个标的的止损倍数必须在 {stop.min_stop_atr:g}–{stop.max_stop_atr:g} 之间{sl_hint}，"
-        f"止盈倍数（止损距离的倍数）必须在 {stop.min_tp_r:g}–{stop.max_tp_r:g} 之间{tp_hint}，"
-        "超出整张卡这个标的会被保镖拒绝"
+        f"Stop distance is measured in stop_atr = {name} (every ATR is a Wilder {ATR_PERIOD}-bar "
+        "ATR on the period set by the risk config, not the ATR you see on 1h klines). "
+        f"Each symbol's stop multiple must be between {stop.min_stop_atr:g} and "
+        f"{stop.max_stop_atr:g}{sl_hint}; the take-profit multiple (a multiple of the stop "
+        f"distance) must be between {stop.min_tp_r:g} and {stop.max_tp_r:g}{tp_hint}. Outside "
+        "these ranges the risk guard rejects the symbol on the card"
     )
     if atr is None or price is None or price <= 0:
-        return head + "；该币当前 ATR 数值暂不可用"
+        return head + ". This coin's current ATR value is unavailable"
     pct = atr / price * 100
-    return f"{head}。该币当前 stop_atr = {atr:.6g}，约占价格 {pct:.2f}%"
+    return f"{head}. This coin's current stop_atr = {atr:.6g}, about {pct:.2f}% of price"
 
 
 def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
@@ -472,14 +480,15 @@ def level_context(
             mid = sum(stop.stop_hint) / 2
             span = span_stops * mid * atr
             basis = (
-                f"= {span_stops:g}×止损倍数中值 {mid:g}×该币 stop_atr（{stop_atr_name(stop)}），"
-                "即持仓期内价格几乎不会走到的范围"
+                f"= {span_stops:g} x the median stop multiple {mid:g} x this coin's stop_atr "
+                f"({stop_atr_name(stop)}), a range price almost never leaves inside the holding "
+                "window"
             )
         else:
             span = holding_span(atr, stop.eff_period_min, hold_min, sigma)
             basis = (
-                f"= {sigma:g}×该币 {name} ATR×√({hold_min:g}/{stop.period_min})，"
-                "即持仓期内的典型波动"
+                f"= {sigma:g} x this coin's {name} ATR x sqrt({hold_min:g}/{stop.period_min}), "
+                "a typical move inside the holding window"
             )
         bars = closed
         if candidate_interval and candidate_interval != name:  # 摆动 / 成交密集区用另一个周期找
@@ -494,16 +503,18 @@ def level_context(
 def describe_hold(hold_min: float, atr: float | None, price: float | None, stop: StopScale) -> str:
     """告诉会议每笔单最多拿多久、持仓期内该币的正常波动有多大，止损 / 止盈 / 关键位按这个来。"""
     head = (
-        f"持仓时长：本系统每笔单最多持有约 {hold_min:g} 分钟（到点强制平仓）。止损、止盈和关键位"
-        "都要按这段时间内的正常波动来给，不要给要几天才可能到的目标"
+        f"Holding time: every trade in this system is held at most about {hold_min:g} minutes "
+        "(force-closed at the deadline). Set stops, targets and key levels from the normal "
+        "move inside that time; do not give targets that would take days"
     )
     if atr is None or price is None or price <= 0:
         return head
     period = stop.eff_period_min
     move = holding_span(atr, period, hold_min, 1.0) / price * 100
     return (
-        f"{head}。该币 stop_atr 约占价格 {atr / price * 100:.2f}%，"
-        f"持仓期内一个标准差的价格移动约 ±{move:.2f}%（= stop_atr×√({hold_min:g}/{period:g})）"
+        f"{head}. This coin's stop_atr is about {atr / price * 100:.2f}% of price; one standard "
+        f"deviation of price movement inside the holding window is about ±{move:.2f}% "
+        f"(= stop_atr x sqrt({hold_min:g}/{period:g}))"
     )
 
 
@@ -647,7 +658,7 @@ def get_binance_indicators(
     try:
         vals = _indicator(indicator, o, h, lo, c, v)
     except ValueError as e:  # 不认识的指标别让整场会议失败，告诉分析师换一个
-        return f"## {indicator}\n{e}。可用：{', '.join(SUPPORTED_INDICATORS)}"
+        return f"## {indicator}\n{e}. Available: {', '.join(SUPPORTED_INDICATORS)}"
     n = min(look_back_days * (1440 // _INTERVAL_MIN[interval]), len(vals))
     out = [
         f"{datetime.fromtimestamp(k[0] / 1000, tz=UTC):%Y-%m-%d %H:%M}: {v:.6g}"
@@ -782,19 +793,19 @@ def make_news_vendors(
         try:
             return fn(*a)
         except Exception as exc:  # 原来的 yfinance 新闻挂了也不能拖垮会议
-            return f"（原新闻源不可用：{exc}）"
+            return f"(original news source unavailable: {exc})"
 
     def get_news(ticker: str, start_date: str, end_date: str) -> str:
         if not ticker.upper().endswith("-USD"):
             return _soft(fallback_news, ticker, start_date, end_date)
         items = hub.for_symbol(binance_symbol(ticker), hours=48)
-        return f"## {ticker} 近 48 小时公告与新闻\n" + format_items(items)
+        return f"## {ticker} announcements and news, last 48 hours\n" + format_items(items)
 
     def get_global_news(
         as_of_date: str, look_back_days: int | None = None, limit: int | None = None
     ) -> str:
         items = hub.market(hours=(look_back_days or 1) * 24, limit=limit or 10)
-        text = "## 加密市场近期公告与新闻\n" + format_items(items)
+        text = "## Recent crypto market announcements and news\n" + format_items(items)
         if not items:
             text += "\n" + _soft(fallback_global, as_of_date, look_back_days, limit)
         return text
@@ -837,20 +848,26 @@ class _CardSymbolDraft(BaseModel):
     take_profit_r_min: float = Field(ge=0)
     take_profit_r_max: float = Field(ge=0)
     entry_min: float | None = Field(
-        default=None, ge=0, description="进场区间下沿（价格）；结论没给就留空"
+        default=None,
+        ge=0,
+        description="Lower edge of the entry zone (price); leave empty if the conclusion gave none",
     )
     entry_max: float | None = Field(
-        default=None, ge=0, description="进场区间上沿（价格）；结论没给就留空"
+        default=None,
+        ge=0,
+        description="Upper edge of the entry zone (price); leave empty if the conclusion gave none",
     )
-    reason: str = Field(min_length=1, description="中文，一两句话")
+    reason: str = Field(min_length=1, description="Chinese, one or two sentences")
 
 
 class _LessonDraft(BaseModel):
     class _L(BaseModel):
         text: str
-        evidence: str = Field(description="哪一类卡、多少张、平均结果")
+        evidence: str = Field(
+            description="Chinese: which kind of card, how many, the average result"
+        )
 
-    lessons: list[_L] = Field(default_factory=list, description="最多 5 条；没有站得住的就留空")
+    lessons: list[_L] = Field(default_factory=list, description="At most 5; empty if none stand up")
 
 
 class _PickDraft(BaseModel):
@@ -858,10 +875,11 @@ class _PickDraft(BaseModel):
         symbol: str
         reason: str
 
-    regime: str = Field(min_length=1, description="对大盘的一句话判断，中文")
+    regime: str = Field(min_length=1, description="One-sentence market view, in Chinese")
     picks: list[_P]
     rejections: list[_P] = Field(
-        default_factory=list, description="没挑中的候选币，每个一句话理由（为什么今天不值得开会）"
+        default_factory=list,
+        description="Candidates not picked: one Chinese sentence each on why not worth a meeting",
     )
 
 
@@ -932,28 +950,37 @@ def convert_instructions(
     p = p or ta_prompts.PromptParams()
     w = ta_prompts.words(p)
     top = r.max_notional_per_trade_usdt
-    cap = f"账户权益 × {r.max_notional_per_trade_x:g} 倍" + (f"且 ≤ {top:g} USDT" if top else "")
-    zone_rule = "，而且必须有进场区间" if p.zone_required else ""
+    cap = f"account equity x {r.max_notional_per_trade_x:g}" + (
+        f" and at most {top:g} USDT" if top else ""
+    )
+    zone_rule = " and must have an entry zone" if p.zone_required else ""
     zone = (
-        "做多 / 做空必须给 entry_min / entry_max，就是结论里写的反抽做空区或回调做多区；"
-        "结论没给出能用的区间就出观望（no_trade）。"
+        "A long or short must have entry_min / entry_max, which is the bounce-short zone or "
+        "pullback-long zone written in the conclusion; if the conclusion gives no usable zone, "
+        "choose no_trade."
         if p.zone_required
-        else "尽量给 entry_min / entry_max，结论没给就留空。"
+        else "Give entry_min / entry_max when you can; leave empty if the conclusion gave none."
     )
     return ta_prompts.fill(
-        f"把下面的交易结论整理成作战指令。所有数值必须落在硬上限内：单笔名义价值 ≤ {cap}，"
-        f"杠杆 ≤ {r.max_leverage} 倍。结论偏弱、矛盾或重大事件（如议息会议）前夜之类就选 "
-        "no_trade。这是币安永续合约，只有做多 / 做空 / 观望；reason 里用多 / 空 / 观望，"
-        "不要用“减持”“增持”这类股票持仓词。止损用 ATR 倍数区间（如 1–2），止盈用止损距离的"
-        "倍数区间（如 1.5–3）。\n"
-        f"本系统每笔单最多拿 {{H_zh}}，会议结论按未来 {{H_zh}} 来读。这个尺度上市场的习性："
-        f"{w.habit_zh}。\n"
-        "评级对应：Buy 做多，Sell 做空，Hold 观望。Overweight / Underweight 只是偏向：照样出"
-        f"做多 / 做空，但 size_tier_max 最多是 {lean_tier.value}{zone_rule}。\n"
-        f"研究经理的建议是 {rm or '（未知）'}，组合经理的评级是 {pm or '（未知）'}。\n"
-        f"进场区间：{zone}\n"
-        "allowed_signals 按结论写的进场方式选，等区间进场的不要只选追单类。\n"
-        "reason：中文，写清方向、进场区间、作废价位、为什么是未来 {H_zh}，500 字以内。",
+        "Turn the trading conclusion below into an operations card. Every number must stay "
+        f"inside the hard limits: notional per trade <= {cap}, leverage <= {r.max_leverage}x. "
+        "Choose no_trade when the conclusion is weak, self-contradictory, or sits on the eve of a "
+        "major event (such as a rate decision). This is Binance perpetual futures, so the only "
+        "directions are long, short and no_trade; avoid stock-holding words such as 'trim' or "
+        "'accumulate'. Give the stop as a range of ATR multiples (e.g. 1-2) and the take-profit as "
+        "a range of multiples of the stop distance (e.g. 1.5-3).\n"
+        "Every position here is held at most {H}; read the conclusion as a view of the next {H}. "
+        f"How this market behaves at this horizon: {w.habit}\n"
+        "Rating mapping: Buy = long, Sell = short, Hold = no_trade. Overweight / Underweight are "
+        "only leans: still output long / short, but size_tier_max is at most "
+        f"{lean_tier.value}{zone_rule}.\n"
+        f"The Research Manager's recommendation is {rm or '(unknown)'}; the Portfolio Manager's "
+        f"rating is {pm or '(unknown)'}.\n"
+        f"Entry zone: {zone}\n"
+        "Choose allowed_signals to match the entry method in the conclusion; do not pick only "
+        "chase-style signals when the conclusion waits for a zone.\n"
+        "reason: in Chinese (at most 500 characters); state the direction, entry zone, "
+        "invalidation price and why this is a view of the next {H}.",
         p,
     )
 
@@ -976,7 +1003,8 @@ def convert_prompt(
     return (
         f"{convert_instructions(r, params, lean_tier, rm, pm)}\n"
         f"{atr_note}\n{hold_note}\n{level_note}\n"
-        f"标的：{entry.symbol}（{entry.category.value}）\n大盘：{regime}{brief}\n结论：\n{decision}"
+        f"Symbol: {entry.symbol} ({entry.category.value})\nMarket view: {regime}{brief}\n"
+        f"Conclusion:\n{decision}"
     )
 
 
@@ -1149,7 +1177,7 @@ FALLBACK_MAX_TOKENS = {"openrouter": 384_000, "deepseek": 8192}
 """读不到模型信息时的输出上限：OpenRouter 上 deepseek-v4 系列文档标的最大输出是 384000；
 直连 DeepSeek 按它官方接口的 8192 保守处理。"""
 MODELS_URL = "https://openrouter.ai/api/v1/models"
-RETRY_HINT = "直接给结论，不要思考过程。"
+RETRY_HINT = "Give the conclusion directly; no thinking out loud."
 
 
 def _fetch_models() -> list[dict[str, Any]]:
@@ -1547,7 +1575,7 @@ class TradingAgentsEngine:
                 Path(settings.results_dir).parent,
                 tz=risk.day_reset_tz,
                 hold_minutes=pp.hold_minutes,
-                horizon_zh=pp.horizon_zh,
+                horizon=pp.horizon,
                 fee_pct=risk.taker_fee_bps * 2 / 100,
             )
             if risk is not None
@@ -1762,9 +1790,8 @@ class TradingAgentsEngine:
             .bind(max_tokens=self._s.json_max_tokens)
         )
         table = "\n".join(
-            f"{e.symbol} 类别={e.category.value} 分数={e.score:.2f} 理由={'、'.join(e.reasons)}"
-            + self._liq_note(e.symbol)
-            + self._headlines(e.symbol)
+            f"{e.symbol} category={e.category.value} score={e.score:.2f} "
+            f"reasons={'; '.join(e.reasons)}" + self._liq_note(e.symbol) + self._headlines(e.symbol)
             for e in candidates
         )
         market = self._brief_text() + self._market_news()
@@ -1790,7 +1817,7 @@ class TradingAgentsEngine:
 
     def _liq_note(self, symbol: str) -> str:
         total = _LIQ_TOTALS.get(symbol, 0.0)
-        return f" 近1h强平={total:,.0f}USDT" if total > 0 else ""
+        return f" liquidated_1h={total:,.0f}USDT" if total > 0 else ""
 
     def _headlines(self, symbol: str) -> str:
         if self._news is None:
@@ -1805,8 +1832,9 @@ class TradingAgentsEngine:
         if self._news is None:
             return ""
         now = self._today()
-        return "\n近期公告与新闻（供判断大盘，可能不完整）：\n" + format_items(
-            self._news.market(hours=24, limit=8), now
+        return (
+            "\nRecent announcements and news (for judging the market; may be incomplete):\n"
+            + format_items(self._news.market(hours=24, limit=8), now)
         )
 
     async def analyze(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:

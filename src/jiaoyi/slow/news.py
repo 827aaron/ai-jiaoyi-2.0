@@ -409,10 +409,13 @@ def format_items(items: Sequence[NewsItem], now: datetime | None = None) -> str:
     """给 LLM 看的文本：每条一行，带来源、类型、时间。"""
     now = now or datetime.now(UTC)
     if not items:
-        return "（暂无相关新闻或公告；新闻源可能不可用，不代表没有消息）"
+        return (
+            "(no relevant news or announcements; the news sources may be down, which does not "
+            "mean nothing happened)"
+        )
     lines = []
     for i in items:
         age_h = max((now - i.published_at).total_seconds() / 3600, 0)
-        tail = f" —— {i.summary}" if i.summary else ""
-        lines.append(f"- [{i.source}/{i.kind.value}，{age_h:.0f} 小时前] {i.title}{tail}")
+        tail = f" -- {i.summary}" if i.summary else ""
+        lines.append(f"- [{i.source}/{i.kind.value}, {age_h:.0f}h ago] {i.title}{tail}")
     return "\n".join(lines)

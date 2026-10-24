@@ -198,9 +198,9 @@ def test_format_derivatives() -> None:
     funding = [{"fundingRate": "0.0001"}, {"fundingRate": "-0.0002"}, {"fundingRate": "0.0005"}]
     oi = [{"sumOpenInterestValue": "100"}, {"sumOpenInterestValue": "112"}]
     text = format_derivatives(funding, oi)
-    assert "+0.0500%" in text and "拥挤做多" in text
-    assert "变化 +12.00%" in text
-    assert "暂无数据" in format_derivatives([], [])
+    assert "+0.0500%" in text and "crowded long" in text
+    assert "+12.00%" in text
+    assert "no data" in format_derivatives([], [])
 
 
 async def test_binance_stats_source_uses_liquidation_stats(now: datetime) -> None:
@@ -246,9 +246,9 @@ def test_convert_prompt_states_configured_atr_interval_and_value() -> None:
     p = convert_prompt(entry("AAUSDT", cat=Category.ALT), risk, "震荡", "", "结论正文", note)
     assert f"stop_atr = {atr_interval(m)} ATR" in p  # 周期跟风控配置，不写死
     assert "stop_atr = 1.5" in p and "1.50%" in p
-    assert f"{lo:g}–{hi:g}" in p  # 告诉军师保镖认的倍数区间
-    assert f"{st.min_tp_r:g}–{st.max_tp_r:g}" in p  # 止盈倍数区间也写明
-    assert "暂不可用" in describe_atr(None, None, st)
+    assert f"between {lo:g} and {hi:g}" in p  # 告诉军师保镖认的倍数区间
+    assert f"between {st.min_tp_r:g} and {st.max_tp_r:g}" in p  # 止盈倍数区间也写明
+    assert "unavailable" in describe_atr(None, None, st)
     assert [atr_interval(x) for x in (5, 15, 30, 60)] == ["5m", "15m", "30m", "1h"]
     assert "stop_atr = 30m ATR" in describe_atr(1.0, 10.0, StopScale(period_min=30))
 

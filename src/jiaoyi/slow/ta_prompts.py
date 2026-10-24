@@ -23,7 +23,6 @@ class PromptParams:
     style: str = "short"
     hold_minutes: int = 120  # {HM}
     horizon: str = "2 hours"  # {H}
-    horizon_zh: str = "2 小时"  # {H_zh}
     indicator: str = "15m"  # {IND}
     fee_pct: int = 35  # {FEE}
     zone_required: bool = True
@@ -36,7 +35,6 @@ class PromptParams:
             style=profiles.prompt_style(h),
             hold_minutes=hold_minutes or _MINUTES[h],
             horizon=profiles.HORIZON_EN[h],
-            horizon_zh=profiles.HORIZON_ZH[h],
             indicator=profiles.indicator_interval(h),
             fee_pct=profiles.fee_share_pct(h),
             zone_required=profiles.zone_required(h),
@@ -48,16 +46,11 @@ class Words:
     """一组文字（一种写法）。"""
 
     not_this: str
-    not_this_zh: str
     window: str
-    window_zh: str
     evidence: str
     background: str
-    background_zh: str
     habit: str
-    habit_zh: str
     change: str
-    change_zh: str
     price_action: str  # 多空研究员「价格行为」那一行的周期和内容
     brief_main: tuple[str, ...]  # 简报主字段
     brief_bg: tuple[str, ...]  # 简报背景字段
@@ -66,9 +59,7 @@ class Words:
 WORDS: dict[str, Words] = {
     "short": Words(
         not_this=", not today or this week",
-        not_this_zh="，不是今天、也不是这周",
         window="the last 15 minutes to 5 hours",
-        window_zh="最近 15 分钟到 5 小时",
         evidence=(
             "the % change over the last 15m, 1h and 4h, where price sits in its 24h range, "
             "whether volume is rising or fading, taker buy/sell flow, funding, open-interest "
@@ -78,7 +69,6 @@ WORDS: dict[str, Words] = {
             "Daily and multi-day readings (20-day MA, daily RSI, 50/200-period averages, 7-day "
             "change) are background only and must never decide the direction on their own."
         ),
-        background_zh="20 日线、日线 RSI、7 天涨跌只作背景，不能单独决定方向",
         habit=(
             "after a sharp move over the last few hours, the next {H} more often gives back part "
             "of it than extends it, in both directions. The edge is small (about 53 right calls "
@@ -88,19 +78,10 @@ WORDS: dict[str, Words] = {
             "extreme RSI or a Bollinger-band breach is more often followed by a pullback than by "
             "continuation at this horizon."
         ),
-        habit_zh=(
-            "最近几小时涨跌多了，接下来 {H_zh} 更容易回头一部分，涨跌两个方向都是；但优势很小，"
-            "大约 100 次对 53 次。不追涨杀跌：急跌后不在低点追空，急涨后不在高点追多，"
-            "改成反弹到区间再空、回调到区间再多"
-        ),
         change=(
             "Weigh the last few hours over the earlier trend: if the last 1-4 hours contradict "
             "it (for example a rebound off the low on rising volume, or a break below a level "
             "that had held), say so and change the view."
-        ),
-        change_zh=(
-            "最近 1–4 小时和之前的走势不一致（比如放量从低点反弹，或者跌破守了很久的位置），"
-            "就直说并改判断"
         ),
         price_action=(
             "the % change over the last 15m / 1h / 4h, position in the 24h range, {price_tail}"
@@ -110,27 +91,19 @@ WORDS: dict[str, Words] = {
     ),
     "mid": Words(
         not_this=", not this week",
-        not_this_zh="，不是这周",
         window="the last 1 hour to 1 day",
-        window_zh="最近 1 小时到 1 天",
         evidence=(
             "the % change over the last 1h, 4h and 24h, where price sits in its 24h and 3-day "
             "range, volume, taker flow, funding, open-interest change and liquidations"
         ),
         background="Multi-week readings (20-day MA, daily RSI) are background only.",
-        background_zh="20 日线、日线 RSI 只作背景",
         habit=(
             "both effects are weak. A sharp move of the last 1-5 hours tends to give back a "
             "little, while the move of the last day tends to continue a little. Neither alone "
             "decides the direction: look for the two to agree, otherwise stay flat. Do not chase "
             "a move that is already stretched; prefer a stated entry zone."
         ),
-        habit_zh=(
-            "两种习性都很弱：最近 1–5 小时的急涨急跌容易回一点，最近一天的走势容易再走一点。"
-            "两者一致才算有方向，否则观望；不追已经走远的行情，优先在区间里等"
-        ),
         change="When the last few hours contradict the earlier view, say so and change it.",
-        change_zh="最近几小时和之前的判断不一致，就直说并改判断",
         price_action=(
             "the % change over the last 1h / 4h / 24h, position in the 24h and 3-day range, "
             "{price_tail}"
@@ -140,32 +113,21 @@ WORDS: dict[str, Words] = {
     ),
     "long": Words(
         not_this="",
-        not_this_zh="",
         window="the last 1 to 20 days",
-        window_zh="最近 1 到 20 天",
         evidence=(
             "the daily and 4h trend, distance from the 20-day MA, 3-day and 7-day change, daily "
             "RSI, funding and open-interest trend"
         ),
         background="Use the last 4-12 hours only to check whether that trend is still intact.",
-        background_zh="最近 4–12 小时只用来检查趋势还在不在",
         habit=(
             "multi-day trends tend to continue slightly, and overbought/oversold readings on 4h "
             "or daily bars are not reversal signals on their own. The edge is small, so trade "
             "only a clear trend; otherwise stay flat."
         ),
-        habit_zh=(
-            "几天的趋势容易再延续一点，4 小时或日线的超买超卖本身不算反转信号；"
-            "优势很小，只做清楚的趋势，否则观望"
-        ),
         change=(
             "Trends end. Re-judge every round from fresh data; when the last 4-12 hours break "
             "the trend structure (for example a close back above the previous day's high in a "
             "downtrend), say so and reduce or flip the view."
-        ),
-        change_zh=(
-            "趋势会结束，每轮重新判断；最近 4–12 小时打破了趋势结构"
-            "（比如下跌中收回到前一天高点上方），就直说并减弱或反转判断"
         ),
         price_action=(
             "the daily and 4h trend, 3-day and 7-day change, distance from the 20-day MA, "
@@ -176,35 +138,19 @@ WORDS: dict[str, Words] = {
     ),
 }
 
-BRIEF_FIELDS_ZH = {
-    "chg_1h": "1 小时涨跌",
-    "chg_4h": "4 小时涨跌",
-    "chg_24h": "24 小时涨跌",
-    "chg_3d": "3 天涨跌",
-    "chg_7d": "7 天涨跌",
-    "range_24h": "在 24 小时区间里的位置",
-    "range_3d": "在 3 天区间里的位置",
-    "vol_1h": "近 1 小时成交量（相对 24 小时均值）",
-    "sma20": "相对 20 日均线",
-    "rsi_1h": "1 小时 RSI",
-    "rsi_4h": "4 小时 RSI",
-    "rsi_1d": "日线 RSI",
-}
-
 
 def words(p: PromptParams) -> Words:
     return WORDS.get(p.style, WORDS["short"])
 
 
 def fill(text: str, p: PromptParams) -> str:
-    """填 {H} {H_zh} {HM} {FEE} {IND}（其余花括号原样留下）。"""
+    """填 {H} {HM} {FEE} {IND}（其余花括号原样留下）。"""
     return (
         text.replace("{HM}", f"{p.hold_minutes:g}")
-        .replace("{H_zh}", p.horizon_zh)
         .replace("{H}", p.horizon)
         .replace("{FEE}", f"{p.fee_pct:g}")
         .replace("{IND}", p.indicator)
-        .replace("{DATA_WINDOW}", profiles.DATA_WINDOW[0])
+        .replace("{DATA_WINDOW}", profiles.DATA_WINDOW)
     )
 
 
@@ -409,8 +355,24 @@ def news_prompt(p: PromptParams, symbol: str) -> str:
 
 
 # ---------------------------------------------------------------- 3.2 总盘会挑币
-def brief_fields_zh(names: tuple[str, ...]) -> str:
-    return "、".join(BRIEF_FIELDS_ZH[n] for n in names)
+BRIEF_FIELDS = {
+    "chg_1h": "1h % change",
+    "chg_4h": "4h % change",
+    "chg_24h": "24h % change",
+    "chg_3d": "3-day % change",
+    "chg_7d": "7-day % change",
+    "range_24h": "position in the 24h range",
+    "range_3d": "position in the 3-day range",
+    "vol_1h": "last-hour volume versus the 24h average",
+    "sma20": "distance from the 20-day MA",
+    "rsi_1h": "1h RSI",
+    "rsi_4h": "4h RSI",
+    "rsi_1d": "daily RSI",
+}
+
+
+def brief_fields(names: tuple[str, ...]) -> str:
+    return ", ".join(BRIEF_FIELDS[n] for n in names)
 
 
 def pick_prompt(
@@ -421,22 +383,29 @@ def pick_prompt(
     market: str = "",
     table: str = "",
 ) -> str:
-    """总盘会挑币提示词。上一轮的判断只作参考；没有上一轮就不写那一行。"""
+    """总盘会挑币提示词（英文正文，输出的文字字段要求中文）。上一轮的判断只作参考；没有就不写那一行。"""
     w = words(p)
     prev_line = (
-        f"上一轮的大盘判断只作参考，不要照抄；{w.change_zh}。上一轮的判断是：{{prev}}\n"
+        "The previous round's market view is a reference only; do not copy it. "
+        f"{w.change} The previous view was: {{prev}}\n"
         if prev_regime
         else ""
     )
     text = fill(
-        f"你是加密永续合约的总盘军师。现在是 {{now}} UTC。本系统每笔单最多拿 {{H_zh}}，"
-        f"你判断的是未来 {{H_zh}} 的大盘{w.not_this_zh}。\n"
-        f"这个尺度上市场的习性（币安永续，{profiles.DATA_WINDOW[1]}）：{w.habit_zh}。\n"
+        "You are the chief strategist for crypto perpetual futures. The time now is {now} UTC. "
+        f"Every position in this system is held at most {{H}}; you judge the market for the next "
+        f"{{H}}{w.not_this}.\n"
+        "How this market behaves at this horizon (Binance perpetuals, {DATA_WINDOW}): "
+        f"{w.habit}\n"
         f"{prev_line}"
-        "下面是代码筛出的候选池和大盘简报。请先用一句中文判断未来 {H_zh} 大盘偏多、偏空还是"
-        f"震荡，依据写简报里的{brief_fields_zh(w.brief_main)}；{w.background_zh}。"
-        "再挑最多 {max_n} 个未来 {H_zh} 最值得开会研究的标的（只能从表里挑），每个给一句理由，"
-        "写清楚看的是反弹、回落还是突破；没挑中的候选币也各给一句不上会的理由（rejections）。"
+        "Below are the candidate pool selected by code and the market brief. First judge in one "
+        "sentence whether the market is bullish, bearish or range-bound for the next {H}, citing "
+        f"the brief's {brief_fields(w.brief_main)}; {w.background} "
+        "Then pick at most {max_n} symbols that are most worth a full meeting for the next {H} "
+        "(only from the table), each with one sentence saying whether you are watching a "
+        "bounce, a drop or a breakout; and give each candidate you did not pick one sentence on "
+        "why it is not worth a meeting (rejections).\n"
+        "Write the market view and every reason in Chinese.\n"
         "{market}\n{table}",
         p,
     )

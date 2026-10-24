@@ -118,9 +118,9 @@ def group_stats(scored: Sequence[Scored]) -> list[Group]:
     """按 方向 × 山寨 / 主流 分组。"""
     groups: dict[str, list[Scored]] = defaultdict(list)
     for s in scored:
-        side = {"long": "做多", "short": "做空"}.get(s.row.bias, "观望")
-        kind = "主流币" if s.row.category == "major" else "其他币"
-        groups[f"{side}·{kind}"].append(s)
+        side = {"long": "long", "short": "short"}.get(s.row.bias, "no_trade")
+        kind = "major" if s.row.category == "major" else "other"
+        groups[f"{side} / {kind}"].append(s)
     out: list[Group] = []
     for key, g in sorted(groups.items()):
         nets = [x.dir_net_pct for x in g if x.dir_net_pct is not None]
@@ -143,30 +143,38 @@ def render_stats(groups: Sequence[Group]) -> str:
     for g in groups:
         if g.hit_rate is None:
             lines.append(
-                f"- {g.key}：{g.n} 张，之后一个持仓期内最大单边波动平均 {g.mean_missed_pct:.2f}%"
+                f"- {g.key}: {g.n} cards; average largest one-sided move over the following "
+                f"holding period {g.mean_missed_pct:.2f}%"
             )
             continue
         rel = (
-            f"，比同期 BTC 多走 {g.mean_vs_btc_pct:+.2f}%" if g.mean_vs_btc_pct is not None else ""
+            f"; {g.mean_vs_btc_pct:+.2f}% more than BTC over the same period"
+            if g.mean_vs_btc_pct is not None
+            else ""
         )
         lines.append(
-            f"- {g.key}：{g.n} 张，方向对 {g.hit_rate:.0%}，扣手续费后平均 "
+            f"- {g.key}: {g.n} cards; right direction {g.hit_rate:.0%}; average after fees "
             f"{g.mean_net_pct:+.2f}%{rel}"
         )
     return "\n".join(lines)
 
 
-def lessons_prompt(stats: str, n: int, days: int, horizon_zh: str) -> str:
+def lessons_prompt(stats: str, n: int, days: int, horizon: str) -> str:
     return (
-        f"下面是军师团最近 {days} 天 {n} 张作战卡，各自在会后一个持仓期（{horizon_zh}）里的结果"
-        "（币安永续 5 分钟 K 线打分，做多 / 做空已扣往返手续费，“比同期 BTC”只算山寨币）：\n"
-        f"{stats}\n\n"
-        f"请汇总成最多 {MAX_LESSONS} 条教训，给以后开会的组合经理参考。要求：\n"
-        "1. 每条都要写依据：哪一类卡、多少张、平均结果是多少，只能用上面的数字，不要编。\n"
-        "2. 样本只有几张、结果接近 0 的不要写成教训。\n"
-        "3. 教训写成“遇到什么情况要更谨慎 / 要求更多证据”，不要写成“多做某个方向”；"
-        "大盘一天的涨跌会让同方向的卡一起对或一起错，样本全在同一天要说明。\n"
-        "4. 中文，每条一两句话。没有站得住的教训就返回空列表。"
+        f"Below are {n} operations cards from the last {days} days, each scored over the holding "
+        f"period after the meeting ({horizon}) on Binance perpetual 5-minute klines. Long and "
+        "short results are net of the round-trip fee; 'more than BTC' is computed for "
+        f"non-BTC coins only:\n{stats}\n\n"
+        f"Condense this into at most {MAX_LESSONS} lessons for the portfolio manager of future "
+        "meetings. Rules:\n"
+        "1. Every lesson needs its evidence: which kind of card, how many, the average result. "
+        "Use only the numbers above; do not invent any.\n"
+        "2. Do not write a lesson from a handful of cards or a result close to zero.\n"
+        "3. Phrase each lesson as 'in this situation be more careful / ask for more evidence', "
+        "never as 'trade this direction more'. One day's market move makes same-direction cards "
+        "right or wrong together; say so when the sample sits in a single day.\n"
+        "4. Write each lesson and its evidence in Chinese, one or two sentences. If no lesson "
+        "stands up, return an empty list."
     )
 
 
@@ -209,10 +217,10 @@ def lessons_text(b: Batch | None) -> str:
     """交给组合经理的那段文字；没有教训就是空（原版的 past_context 也是空）。"""
     if b is None or not b.lessons:
         return ""
-    rows = "\n".join(f"{i}. {x.text}（依据：{x.evidence}）" for i, x in enumerate(b.lessons, 1))
+    rows = "\n".join(f"{i}. {x.text} (evidence: {x.evidence})" for i, x in enumerate(b.lessons, 1))
     return (
-        "过去几天军师团作战卡的复盘教训（只作参考；不能因此把结论放大，最终以这场会的证据为准）：\n"
-        + rows
+        "Lessons from reviewing recent operations cards (reference only; they must never make "
+        "the conclusion more aggressive, and this meeting's own evidence decides):\n" + rows
     )
 
 
@@ -229,7 +237,7 @@ class LessonBook:
         *,
         tz: str,
         hold_minutes: int,
-        horizon_zh: str,
+        horizon: str,
         fee_pct: float,
         fetch: RangeFetcher | None = None,
     ) -> None:
@@ -237,7 +245,7 @@ class LessonBook:
         self._journal = CardJournal(data_dir)
         self._tz = ZoneInfo(tz)
         self._hold = timedelta(minutes=hold_minutes)
-        self._horizon_zh = horizon_zh
+        self._horizon = horizon
         self._hold_label = f"{hold_minutes}m"
         self._fee = fee_pct
         self._fetch: RangeFetcher = fetch or gate_bars
@@ -359,7 +367,7 @@ class LessonBook:
             return None
         stats = render_stats(group_stats(scored))
         days = max(1, (now - since).days)
-        lessons = ask(lessons_prompt(stats, len(scored), days, self._horizon_zh))
+        lessons = ask(lessons_prompt(stats, len(scored), days, self._horizon))
         lessons = [x for x in lessons if x.text.strip() and x.evidence.strip()][:MAX_LESSONS]
         if not lessons:
             return None

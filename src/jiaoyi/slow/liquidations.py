@@ -23,5 +23,11 @@ class LiquidationSource(Protocol):
 
 def describe_total(total: float) -> str:
     if total <= 0:
-        return "- 近 1 小时无强平记录（也可能是强平流刚连上或断线）"
-    return f"- 近 1 小时被强平约 {total:,.0f} USDT（集中强平常伴随瀑布 / 逼空后的反向波动）"
+        return (
+            "- No liquidations recorded in the last hour (or the liquidation stream has just "
+            "connected or dropped)"
+        )
+    return (
+        f"- About {total:,.0f} USDT liquidated in the last hour (clustered liquidations are "
+        "often followed by a reversal after a cascade or squeeze)"
+    )
