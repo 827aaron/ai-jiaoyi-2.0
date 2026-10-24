@@ -415,3 +415,19 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 `slow.toml [screener]`：`major_top_n`、`major_include`（手动加入，如 `["LINK"]`）、`major_exclude`（手动排除，按山寨币算）。
 选币记录里每个主流币的理由写「主流币 · 市值第 N 名」（手动加入 / 回退名单也各有说明）。
+
+## 军师团 / 总盘会的提示词（按最长持仓档）
+
+提示词不再是股票那套，改成币安永续写法，跟 app.toml 的 `hold`（最长持仓档）走，重启生效，不加新开关。
+
+- **一张 7 档词表**：数字在 `core/profiles.py`（持仓时长、指标周期、手续费占比、必须有进场区间），文字在
+  `slow/ta_prompts.py`（short ≤2h / mid 4h / long ≥8h 三组）。公共说明、总盘会挑币、大盘简报、转卡都只从这里取词。
+- **公共说明**（所有 TradingAgents 角色共用）只跟档位有关；**每场会不同的东西**（总盘会的判断、挑这个币的
+  理由、tickSize、持仓说明）走 `PerpGraph` 的 state（`slow/ta_nodes.py`），不进配置，同时开几场也不会串。
+  固定币 / 持仓强制开会的币不是总盘会挑的，写成「这轮不是挑的，每轮都开会」，不提持仓。
+- **替换的角色**：多空研究员、风控三人、新闻分析师（加密币；美股永续照旧走原版）。状态读写和原版一致。
+- **评级兜底**（代码，`rating_guard`）：卡不能比研究经理和组合经理里较弱的那个更强。任一 Hold 或方向相反 →
+  观望；偏向（Overweight / Underweight）→ 仓位档最多 M（`lean_size_tier`）；两人都明确 Buy 或都 Sell 才到 L。
+- **TradingAgents 原版记忆停用**（`memory_log_path=""`，股票口径；`memory.md` 不删）。
+- `data/prompts_active.json`：启动时写入当前生效的提示词原文，给面板显示。
+- 已知限制：自定义持仓时长按不短于它的那档写，`{HM}` 写实际分钟数，`{H}` / `{FEE}` 写那一档的。

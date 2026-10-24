@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 import httpx
 
+from jiaoyi.core.ticks import tick_decimals
 from jiaoyi.market.features import wilder_atr
 
 Interval = Literal["1m", "5m", "15m", "30m", "1h", "4h"]
@@ -24,12 +25,6 @@ DECIMALS_CACHE_S = 6 * 3600.0
 PRICES_CACHE_S = 2.0
 DEFAULT_RETRY_AFTER_S = {429: 60.0, 418: 120.0}
 """币安没给 ``Retry-After`` 时的保守等待（同 ``market/rest.py``）。"""
-
-
-def tick_decimals(tick: str) -> int:
-    """``"0.00010000"`` → 4；``"1"`` → 0。"""
-    frac = tick.split(".", 1)[1].rstrip("0") if "." in tick else ""
-    return len(frac)
 
 
 class KlineError(Exception):

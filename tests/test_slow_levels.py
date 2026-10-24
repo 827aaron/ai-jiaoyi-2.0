@@ -17,6 +17,7 @@ from jiaoyi.slow.levels import (
     select_levels,
     swing_points,
 )
+from jiaoyi.slow.ta_prompts import PromptParams
 from jiaoyi.slow.tradingagents_engine import (
     PERP_CONTEXT,
     _CardSymbolDraft,
@@ -180,7 +181,7 @@ def test_hold_note_and_perp_context_tell_the_meeting_the_holding_time() -> None:
     note = describe_hold(120, 6.0, 2390.0, StopScale(period_min=15))
     assert "120 分钟" in note and "±" in note and "stop_atr×√(120/15)" in note
     assert "几天" in describe_hold(30, None, None, StopScale(period_min=5))
-    assert "about 45 minutes" in perp_context(45)
+    assert "about 45 minutes" in perp_context(PromptParams(hold_minutes=45))
 
 
 def test_level_context_end_to_end_stays_inside_holding_span(

@@ -84,6 +84,7 @@ class FakeEngine:
     def __init__(self, picks: list[str], fail: set[str] | None = None) -> None:
         self.picks, self.fail = picks, fail or set()
         self.analyzed: list[str] = []
+        self.briefs: dict[str, tuple[str, str]] = {}  # 币 → (总盘会判断, 挑币理由)
         self.running = self.peak = 0
 
     async def pick(
@@ -91,12 +92,13 @@ class FakeEngine:
     ) -> PickResult:
         return PickResult("区间震荡", [Pick(s, "r") for s in self.picks][:max_n], 0.01)
 
-    async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
         self.running += 1
         self.peak = max(self.peak, self.running)
         await asyncio.sleep(0.01)
         self.running -= 1
         self.analyzed.append(e.symbol)
+        self.briefs[e.symbol] = (regime, pick_reason)
         if e.symbol in self.fail:
             raise RuntimeError("deepseek 超时")
         return Analysis(card_symbol(e.symbol), 0.02)
@@ -137,6 +139,17 @@ async def test_picks_are_reported_before_symbol_meetings(tmp_path: Path, now: da
     c.set_on_picks(got.append)
     await c.refresh(pool(now, entry("AAUSDT", pinned=True), entry("BBUSDT")), "scheduled")
     assert got == [["AAUSDT", "BBUSDT"]]
+
+
+async def test_symbol_meetings_get_the_regime_and_why_the_coin_was_picked(
+    tmp_path: Path, now: datetime
+) -> None:
+    """总盘会的判断和挑币理由要进单币会；固定币不是挑的，理由留空（不提持仓）。"""
+    eng = FakeEngine(["BBUSDT"])
+    c, _, _ = make(tmp_path, eng, now)
+    await c.refresh(pool(now, entry("AAUSDT", pinned=True), entry("BBUSDT")), "scheduled")
+    assert eng.briefs["BBUSDT"] == ("区间震荡", "r")
+    assert eng.briefs["AAUSDT"] == ("区间震荡", "")
 
 
 async def test_pinned_always_analyzed_and_pick_max(tmp_path: Path, now: datetime) -> None:
@@ -202,7 +215,7 @@ async def test_out_of_bounds_meeting_output_means_no_conclusion(
     tmp_path: Path, now: datetime
 ) -> None:
     class Greedy(FakeEngine):
-        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
             if e.symbol == "BBUSDT":
                 return Analysis(card_symbol(e.symbol, leverage=Range(min=1, max=50)), 0.0)
             return await super().analyze(e, regime)
@@ -286,7 +299,7 @@ def test_ttl_must_be_positive(tmp_path: Path, now: datetime) -> None:
 
 async def test_wrong_category_from_engine_is_rejected(tmp_path: Path, now: datetime) -> None:
     class LyingEngine(FakeEngine):
-        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
             return Analysis(card_symbol(e.symbol, category=Category.MAJOR), 0.0)
 
     c, _, _ = make(tmp_path, LyingEngine(["AAUSDT", "BBUSDT"]), now)
@@ -295,7 +308,7 @@ async def test_wrong_category_from_engine_is_rejected(tmp_path: Path, now: datet
 
     # 其中一个正确、一个说谎：卡里只有正确的，且分组是候选池的
     class HalfLying(FakeEngine):
-        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
             cat = Category.MAJOR if e.symbol == "BBUSDT" else e.category
             return Analysis(card_symbol(e.symbol, category=cat), 0.0)
 
@@ -367,7 +380,7 @@ async def test_failed_meetings_and_pick_are_charged(tmp_path: Path, now: datetim
     from jiaoyi.slow.commander import MeetingError
 
     class Eng(FakeEngine):
-        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
             if e.symbol == "AAUSDT":
                 raise MeetingError("结构化输出失败", cost_usd=0.03)  # 真实 usage
             raise RuntimeError("超时")  # 拿不到 usage → 估算
@@ -382,7 +395,7 @@ async def test_failed_meetings_and_pick_are_charged(tmp_path: Path, now: datetim
 
 async def test_invalid_conclusion_still_charges_its_cost(tmp_path: Path, now: datetime) -> None:
     class Eng(FakeEngine):
-        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
             return Analysis(card_symbol("OTHERUSDT"), 0.04)  # 返回了别的标的 → 不合格
 
     c, _, _ = make(tmp_path, Eng(["AAUSDT"]), now)
@@ -442,7 +455,7 @@ def test_clamp_raises_too_low_take_profit_into_guard_band() -> None:
 class _SlowSecond(FakeEngine):
     """第二个币开会时被打断（模拟重启）：此时第一个币的会早该落盘。"""
 
-    async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
         if e.symbol == "BBUSDT":
             await asyncio.sleep(10)
         return await super().analyze(e, regime)
@@ -501,7 +514,7 @@ class _SlowBB(FakeEngine):
         super().__init__(picks)
         self.bb_delay = 0.0
 
-    async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
         if e.symbol == "BBUSDT":
             await asyncio.sleep(self.bb_delay)
         return await super().analyze(e, regime)
@@ -713,7 +726,7 @@ async def test_timeout_charges_real_partial_cost_and_aborts(tmp_path: Path, now:
             super().__init__(["AAUSDT"])
             self.aborted = []
 
-        async def analyze(self, e: SymbolPoolEntry, regime: str) -> Analysis:
+        async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
             await asyncio.sleep(5)  # 超过 symbol_timeout_s
             raise AssertionError("不该走到这里")
 

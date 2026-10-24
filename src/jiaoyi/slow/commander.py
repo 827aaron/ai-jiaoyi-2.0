@@ -96,8 +96,10 @@ class MeetingEngine(Protocol):
         """总盘会：看大盘和池子，挑最多 ``max_n`` 个值得开会的，并写一句大盘判断。"""
         ...
 
-    async def analyze(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
-        """单标的会议：多空辩论 + 风控讨论，输出这个标的的作战指令。"""
+    async def analyze(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+        """单标的会议：多空辩论 + 风控讨论，输出这个标的的作战指令。
+        ``regime`` / ``pick_reason`` 是总盘会这一轮的判断和挑这个币的理由，只作背景；
+        固定币 / 持仓强制开会的币传空字符串。"""
         ...
 
 
@@ -719,7 +721,7 @@ class BattleCardCommander:
         beat = asyncio.create_task(self._beat_while_meeting())
         started = time.monotonic()
         try:
-            res = await self._analyze_one(entry, card.regime)
+            res = await self._analyze_one(entry, card.regime, "")
         except Exception:
             return None  # 失败原因和花费已在各标的记录里
         finally:
@@ -1132,9 +1134,13 @@ class BattleCardCommander:
                 llm_cost_usd=round(cost, 6),
             )
 
+        # 总盘会挑的币带上挑它的理由；固定 / 持仓强制开会的币不是挑的，理由留空（引擎写成
+        # 「这轮不是挑的，每轮都开会」，不提持仓，免得会议被现有仓位带着走）
+        reasons = {p.symbol: p.reason for p in picked.picks}
+
         async def meet(e: SymbolPoolEntry) -> Analysis:
             nonlocal cost, published
-            res = await self._analyze_one(e, picked.regime)
+            res = await self._analyze_one(e, picked.regime, reasons.get(e.symbol, ""))
             # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
             symbols[e.symbol] = self._stamp(
                 self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
@@ -1196,14 +1202,16 @@ class BattleCardCommander:
             return f"超过 {self._symbol_timeout_s:.0f} 秒未完成（TimeoutError）"
         return str(exc) or type(exc).__name__
 
-    async def _analyze_one(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
+    async def _analyze_one(
+        self, entry: SymbolPoolEntry, regime: str, pick_reason: str = ""
+    ) -> Analysis:
         async with self._sem:
             started = time.monotonic()
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             try:
                 res = await asyncio.wait_for(
-                    self._engine.analyze(entry, regime), self._symbol_timeout_s
+                    self._engine.analyze(entry, regime, pick_reason), self._symbol_timeout_s
                 )
             except Exception as exc:
                 self._charge(-est)

@@ -65,7 +65,7 @@ async def test_engine_snapshots_in_event_loop_before_worker_thread() -> None:
         ),
     )  # fmt: skip
 
-    def fake_sync(e: object, regime: str) -> None:
+    def fake_sync(e: object, regime: str, pick_reason: str) -> None:
         seen.append(threading.get_ident())
         raise RuntimeError("stop")  # 只关心线程，不跑真会议
 

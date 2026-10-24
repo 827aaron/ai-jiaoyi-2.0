@@ -19,6 +19,7 @@ TradingAgents：Apache-2.0，v0.7.0，提交 e8f5503，钉在 pyproject 的 slow
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -48,7 +49,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
 )
 from jiaoyi.interfaces import SecretStore
-from jiaoyi.slow import binance_gate
+from jiaoyi.slow import binance_gate, ta_nodes, ta_prompts
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
@@ -70,6 +71,7 @@ from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.meeting_live import MeetingLive, tap_graph
 from jiaoyi.slow.news import NewsHub, format_items
 from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
+from jiaoyi.slow.ticks import TickSizes
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
 
@@ -124,6 +126,11 @@ class TradingAgentsSettings:
     reddit: str = "guarded"
     # 每笔单最多持有多久（分钟，档位的时间止损）：告诉军师团，止损 / 止盈 / 关键位按这个时长的波动给
     hold_minutes: int = 120
+    # 最长持仓档（30m…24h）：提示词写法（short / mid / long）、指标周期、手续费占比都跟它走，
+    # 见 core/profiles.py 的 7 档词表和 slow/ta_prompts.py；app.py 按 app.toml 的 hold 填进来
+    hold: str = "2h"
+    # 研究经理 / 组合经理只给「偏向」（Overweight / Underweight）时，卡的仓位档最多到哪一档
+    lean_size_tier: SizeTier = SizeTier.M
     # 分析师看的 K 线，每段 "周期 x 根数"（从细到粗）；None = 15m x 96、1h x 72、4h x 60。
     # 档位默认按最长持仓走（core/profiles.py），app.py 填进来
     analyst_klines: tuple[str, ...] | None = None
@@ -141,32 +148,17 @@ class TradingAgentsSettings:
     live_dir: str = ""
 
 
-# TradingAgents 的提示词是写死的股票语境（Buy/Overweight/Hold/Underweight/Sell，“减持”）。
-# 它会把 output_language 原样拼进每个角色的提示词（"Write your entire response in {lang}, except
-# the labelled lines…"），所以把永续合约的语境放在这里，不用改它的源码。
-_PERP_BODY = (
-    "Domain context for everything you write: this is Binance USDT-margined PERPETUAL FUTURES "
-    "trading (go long, go short, or stay flat; leverage, funding, liquidations), not equities and "
-    "there is no existing position to trim. Read the rating scale as: Buy = open or add a long, "
-    "Overweight = lean long, Hold = stay flat / no new entry, Underweight = lean short or stay "
-    "flat, Sell = open a short or close longs. In prose say long / short / flat and name concrete "
-    "price levels from the data; avoid stock wording such as 'overweight', 'underweight', 'trim "
-    "or reduce exposure' and 'earnings'."
-)
+def prompt_params(s: TradingAgentsSettings) -> ta_prompts.PromptParams:
+    """这套设置对应的提示词参数（持仓时长、写法、指标周期、手续费占比）。"""
+    return ta_prompts.PromptParams.for_hold(s.hold, s.hold_minutes)
 
 
-def perp_context(hold_minutes: float) -> str:
-    """永续合约语境 + 持仓时长：目标价、止损、关键位要按这段时间内这个币的正常波动来给。"""
-    return (
-        f"{_PERP_BODY} Every position here is held at most about {hold_minutes:g} minutes (forced "
-        "exit at the time limit): size price targets, stops and levels to moves plausible within "
-        "that horizon for this specific asset, never multi-day swing targets. Overbought/oversold "
-        "readings and Bollinger band breaches tend to keep going in this market: never treat them "
-        "alone as reversal signals. Apply all of this to every sentence you write"
-    )
+def perp_context(p: ta_prompts.PromptParams) -> str:
+    """永续合约语境 + 持仓时长 + 这一档的市场习性（所有角色共用，拼在 output_language 后）。"""
+    return ta_prompts.perp_context(p)
 
 
-PERP_CONTEXT = perp_context(120)
+PERP_CONTEXT = perp_context(ta_prompts.PromptParams())
 
 
 def build_config(
@@ -178,14 +170,22 @@ def build_config(
         llm_provider=s.provider,
         quick_think_llm=s.quick_model,
         deep_think_llm=s.deep_model,
-        output_language=f"{s.output_language}. {perp_context(s.hold_minutes)}",
+        output_language=f"{s.output_language}. {perp_context(prompt_params(s))}",
+        **{
+            ta_nodes.PROMPT_KEY: {
+                "hold": prompt_params(s).hold,
+                "hold_minutes": s.hold_minutes,
+            }
+        },
         max_debate_rounds=s.debate_rounds,
         max_risk_discuss_rounds=s.risk_rounds,
         max_tokens=s.max_tokens,
         llm_max_retries=s.max_retries,
         results_dir=os.path.join(s.results_dir, "logs"),
         data_cache_dir=os.path.join(s.results_dir, "cache"),
-        memory_log_path=os.path.join(s.results_dir, "memory.md"),
+        # 停掉 TradingAgents 原版的记忆：它按「天」算收益、跟 SPY 比，是股票口径。教训改由
+        # PerpGraph 交当前这一批（加密版，见 §4.7）；现有 memory.md 不删
+        memory_log_path="",
     )
     vendors = dict(cfg.get("data_vendors", {}))
     vendors.update(core_stock_apis="binance", technical_indicators="binance")
@@ -648,6 +648,7 @@ def register_binance_vendor() -> None:
 
     router.VENDOR_METHODS["get_stock_data"]["binance"] = get_binance_stock_data
     router.VENDOR_METHODS["get_indicators"]["binance"] = get_binance_indicators
+    ta_nodes.install()  # 同时换掉写死股票口径的多空研究员、风控三人、新闻分析师
 
 
 def make_news_vendors(
@@ -882,6 +883,75 @@ def direction_conflict(bias: Bias, rating: str | None, trader_plan: str) -> str 
             way = "做多" if bias is Bias.LONG else "做空"
             return f"{who}是 {value}，和作战指令的方向（{way}）相反"
     return None
+
+
+_RECOMMENDATION = re.compile(
+    r"\*\*Recommendation\*\*\s*:\s*\**\s*(Buy|Overweight|Hold|Underweight|Sell)", re.IGNORECASE
+)
+_DIRECTION = {"buy": 1, "overweight": 1, "hold": 0, "underweight": -1, "sell": -1}
+_STRENGTH = {"buy": 2, "sell": 2, "overweight": 1, "underweight": 1, "hold": 0}
+
+
+def research_recommendation(plan: str | None) -> str | None:
+    """研究经理方案里的 ``**Recommendation**: X``（小写）；解析不出返回 None。"""
+    found = _RECOMMENDATION.findall(plan or "")
+    return found[-1].lower() if found else None
+
+
+def _no_trade(cs: CardSymbol, why: str) -> CardSymbol:
+    return cs.model_copy(
+        update={
+            "bias": Bias.NO_TRADE,
+            "allowed_signals": [],
+            "reason": (f"{cs.reason}（{why}）")[:500],
+        }
+    )
+
+
+_TIER_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
+
+
+def rating_guard(
+    cs: CardSymbol,
+    rm: str | None,
+    pm: str | None,
+    zone_ok: bool | None = None,
+    lean_tier: SizeTier = SizeTier.M,
+) -> CardSymbol:
+    """评级兜底（只会把卡变弱，不会变强）：卡不能比研究经理和组合经理里较弱的那个更强。
+
+    - 两人方向相反 → 观望；任何一个是 Hold → 观望。
+    - 同方向、较弱的是偏向（Overweight / Underweight）→ 仓位档压到 ``lean_tier``（可配置，
+      默认 M；只压低不抬高）；必须有进场区间的档
+      （``zone_ok`` 为 False，即没有可用区间）→ 观望。
+    - 两人都是 Buy 或都是 Sell → 照转卡结果。转卡的方向和他们相反 → 观望。
+    ``zone_ok``：None = 这一档不要求区间（或卡还没有区间字段），False = 要求但没有。
+    """
+    if cs.bias is Bias.NO_TRADE:
+        return cs
+    given = [r for r in (rm, pm) if r in _DIRECTION]
+    if not given:
+        return cs
+    if "hold" in given:
+        who = "研究经理" if rm == "hold" else "组合经理"
+        return _no_trade(cs, f"{who}是观望，这一轮不做")
+    dirs = {_DIRECTION[r] for r in given}
+    if len(dirs) > 1:
+        return _no_trade(cs, "研究经理和组合经理方向相反")
+    agreed = dirs.pop()
+    if cs.bias in (Bias.LONG, Bias.SHORT) and (cs.bias is Bias.LONG) != (agreed > 0):
+        return _no_trade(cs, "转卡方向和会议评级相反")
+    weakest = min(_STRENGTH[r] for r in given)
+    if weakest >= 2:
+        return cs
+    if zone_ok is False:
+        return _no_trade(cs, "只是偏向，要等进场区间，会议没给")
+    lean = "偏多" if agreed > 0 else "偏空"
+    who = "研究经理" if rm in _DIRECTION and _STRENGTH[rm] == 1 else "组合经理"
+    note = f"（{who}只是{lean}，仓位最多 {lean_tier.value}、等区间）"
+    reason = cs.reason if note in cs.reason else (cs.reason + note)[:500]
+    tier = min(cs.size_tier_max, lean_tier, key=_TIER_ORDER.__getitem__)
+    return cs.model_copy(update={"size_tier_max": tier, "reason": reason})
 
 
 def degrade_size(cs: CardSymbol, missing: Sequence[str]) -> CardSymbol:
@@ -1287,6 +1357,8 @@ class TradingAgentsEngine:
         self._inflight_lock = threading.Lock()
         register_binance_vendor()
         set_analyst_klines(settings.analyst_klines, settings.meeting_min)
+        self._ticks = TickSizes()
+        self._write_active_prompts(settings)
         self._guard_reddit(settings)
         if news is not None:
             register_crypto_news_vendor(news)
@@ -1349,14 +1421,50 @@ class TradingAgentsEngine:
     def _llm(graph: Any, tier: str) -> Any:
         return graph.deep_thinking_llm if tier == "deep" else graph.quick_thinking_llm
 
-    def _graph(self, analysts: tuple[str, ...], handler: Any) -> Any:
+    def _write_active_prompts(self, s: TradingAgentsSettings) -> None:
+        """把当前生效的提示词原文写到 ``data/prompts_active.json``，给面板显示。"""
+        try:
+            p = prompt_params(s)
+            w = ta_prompts.words(p)
+            out = {
+                "hold": p.hold,
+                "style": p.style,
+                "shared": perp_context(p),
+                "pick": ta_prompts.pick_prompt(p, "{now}", 0, "{prev}", "{market}", "{table}"),
+                "meeting_note": ta_prompts.meeting_note(
+                    p, "{ticker}", "{SYMBOL}", "{regime}", "{pick_reason}", None
+                ),
+                "position_note": ta_prompts.position_note(p, "{SYMBOL}"),
+                "brief_fields": {"main": list(w.brief_main), "background": list(w.brief_bg)},
+                "indicator_interval": p.indicator,
+                "analyst_klines": list(s.analyst_klines or DEFAULT_ANALYST_KLINES),
+            }
+            path = Path(s.results_dir).parent / "prompts_active.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            logger.exception("写 prompts_active.json 失败（只影响面板显示）")
+
+    def _graph(
+        self,
+        analysts: tuple[str, ...],
+        handler: Any,
+        meeting_note: str = "",
+        position_note: str = "",
+    ) -> Any:
         from tradingagents.default_config import build_default_config
-        from tradingagents.graph.trading_graph import (
-            TradingAgentsGraph,
-        )
 
         cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
-        graph = TradingAgentsGraph(selected_analysts=analysts, config=cfg, callbacks=[handler])
+        graph = ta_nodes.perp_graph_class()(
+            selected_analysts=analysts,
+            config=cfg,
+            callbacks=[handler],
+            meeting_note=meeting_note,
+            position_note=position_note,
+            lessons=self._lessons(),
+        )
         if self._s.provider == "openrouter":
             # TradingAgents 不透传这些请求参数，所以直接设到它建好的模型对象上
             for llm in {
@@ -1375,6 +1483,10 @@ class TradingAgentsEngine:
                     min_chars=self._s.retry_min_chars,
                 )
         return graph
+
+    def _lessons(self) -> str:
+        """当前这一批教训（交给组合经理）。加密版记忆见 §4.7，没有就是空。"""
+        return ""
 
     def _snapshot_liquidations(self, symbols: Sequence[str]) -> None:
         """在事件循环里取强平快照，再让工作线程去读（统计对象不是线程安全的）。"""
@@ -1425,12 +1537,15 @@ class TradingAgentsEngine:
             for e in candidates
         )
         market = self._brief_text() + self._market_news()
-        prev = f"上一张卡的大盘判断：{previous.regime}\n" if previous else ""
         draft: _PickDraft = llm.invoke(
-            f"你是加密永续合约的总盘军师。现在是 {self._today():%Y-%m-%d %H:%M} UTC。\n{prev}"
-            f"下面是代码筛出的候选池。请先用一句中文判断大盘，再挑最多 {max_n} 个今天最值得"
-            f"开会研究的标的（只能从表里挑），每个给一句理由；"
-            f"没挑中的候选币也各给一句不上会的理由（rejections）。{market}\n{table}",
+            ta_prompts.pick_prompt(
+                prompt_params(self._s),
+                f"{self._today():%Y-%m-%d %H:%M}",
+                max_n,
+                previous.regime if previous else "",
+                market,
+                table,
+            ),
             config={"callbacks": [handler]},
         )
         valid = {e.symbol for e in candidates}
@@ -1463,11 +1578,11 @@ class TradingAgentsEngine:
             self._news.market(hours=24, limit=8), now
         )
 
-    async def analyze(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
+    async def analyze(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
         self._snapshot_liquidations([entry.symbol])
-        return await asyncio.to_thread(self._analyze_sync, entry, regime)
+        return await asyncio.to_thread(self._analyze_sync, entry, regime, pick_reason)
 
-    def _analyze_sync(self, entry: SymbolPoolEntry, regime: str) -> Analysis:
+    def _analyze_sync(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
         meter = self._meter(entry.symbol)
         handler = cost_handler(meter)
         live = MeetingLive(Path(self._s.live_dir), entry.symbol) if self._s.live_dir else None
@@ -1478,7 +1593,7 @@ class TradingAgentsEngine:
             meter.on_model = live.note_model
             meter.on_retry = live.note_retry
         try:
-            res = self._analyze_run(entry, regime, handler, meter, live)
+            res = self._analyze_run(entry, regime, handler, meter, live, pick_reason)
         except Exception as exc:  # 同上：失败也带上真实花费
             if live:
                 live.fail(str(exc) or type(exc).__name__, meter.cost)
@@ -1499,10 +1614,21 @@ class TradingAgentsEngine:
         handler: Any,
         meter: CostMeter,
         live: MeetingLive | None = None,
+        pick_reason: str = "",
     ) -> Analysis:
         ticker, asset_type = ta_ticker(entry)
         analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
-        graph = self._graph(analysts, handler)
+        params = prompt_params(self._s)
+        try:
+            tick = self._ticks.get(entry.symbol)
+        except binance_gate.RateLimited:
+            raise
+        except Exception:
+            tick = None
+        note = ta_prompts.meeting_note(params, ticker, entry.symbol, regime, pick_reason, tick)
+        graph = self._graph(analysts, handler, note, ta_prompts.position_note(params, entry.symbol))
+        if live:
+            live.step("input", "meeting_note", note)
         if live:
             tap_graph(graph, live)
         state, rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
@@ -1543,6 +1669,7 @@ class TradingAgentsEngine:
             self._s.level_candidate_interval,
             self._s.level_span_stops,
         )
+        rm = research_recommendation(str(state.get("investment_plan", "")))
         prompt = convert_prompt(
             entry,
             self._risk,
@@ -1570,6 +1697,9 @@ class TradingAgentsEngine:
                     cs.bias, rating, str(state.get("trader_investment_plan", ""))
                 ):
                     raise RuntimeError(f"{entry.symbol}：会议结论自相矛盾：{why}，这场会不能用")
+                cs = rating_guard(
+                    cs, rm, str(rating or "").lower() or None, lean_tier=self._s.lean_size_tier
+                )
                 if missing:
                     cs = degrade_size(cs, missing)
                 return Analysis(
