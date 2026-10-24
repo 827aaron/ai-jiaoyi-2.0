@@ -150,6 +150,23 @@ class Forecast(Contract):
     horizon_min: int = Field(gt=0, le=1440)
     price_low: PosFloat
     price_high: PosFloat
-    p_up: Probability
+    p_up: Probability = Field(
+        description="平均路径终点在现价之上 = 1，之下 = 0，持平 0.5"
+        "（官方用法：多条路径平均成一条）。"
+    )
+    score: float | None = Field(
+        default=None,
+        description="平均路径终点收盘 ÷ 现在收盘 − 1（官方回测的打分）；旧记录没有。",
+    )
+    rank_pct: float | None = Field(
+        default=None,
+        description="这个分数在同一时刻所有新鲜预测里的名次：1 = 最看好，0 = 最看坏。"
+        "``latest()`` 取的时候现算，币太少（不到 rank_min_peers）为 None。",
+    )
+    rank_n: int | None = Field(default=None, description="排名时一共几个币。")
+    rank_view: Literal["top", "bottom", "mid"] | None = Field(
+        default=None,
+        description="名次在前段（看好）/ 后段（看坏）/ 中间；段多大按 ``[predictor] rank_band``。",
+    )
     model: str = Field(min_length=1, description="例如 Kronos-small。")
     stale_after: AwareDatetime = Field(description="过期后当作没有这条输入。")

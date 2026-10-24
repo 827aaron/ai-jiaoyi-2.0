@@ -516,12 +516,12 @@ class RiskGuardImpl:
     def _predictor_nudge(
         self, signal: CandidateSignal, detail: dict[str, float | str] | None
     ) -> float:
-        """预测员给“做”概率挪多少：只有看涨概率报 1.0（所有路径都收在现价之上）才算看涨，
-        其余（0 / 0.25 / 0.5 / 0.75）都算看跌；和信号方向（也就是卡的方向）一致 + 权重 × 0.5，
-        相反不扣（Aaron 10-24「预测员和卡片一致就加分。相反就不扣」）。
+        """预测员给“做”概率加多少（官方 Kronos 用法，Aaron 10-24「直接改成官方的」）：
 
-        Aaron 10-24：本地记录里 p_up 不到 1 的几档实际上涨只有 10–12%，和报 0 一样。
-        预测员关掉、过期（``stale_after`` 不晚于信号时间）、或权重 0 时不挪。"""
+        同一时刻所有币按预测涨幅（10 条路径平均后的终点）排名，做多信号排在前段、做空信号排在
+        后段（``[predictor] rank_band``，默认各 1/6）就 + 权重 × 0.5，其余不加也不扣（「预测员和
+        卡片一致就加分。相反就不扣」；信号方向就是卡的方向）。看坏那一头给做空用是我们的镜像，
+        官方只做多。预测员关掉、过期、币太少排不出名次、或权重 0 时不加。"""
         weight = self._fast.predictor_weight
         fc = signal.forecast
         if weight <= 0:
@@ -530,21 +530,22 @@ class RiskGuardImpl:
             if detail is not None:
                 detail["predictor"] = "没有预测"
             return 0.0
+        if fc.rank_view is None or fc.rank_pct is None:
+            if detail is not None:
+                detail["predictor"] = "排不出名次（一起预测的币太少）"
+            return 0.0
         long = signal.side_hint == Side.LONG
-        if self._fast.predictor_nudge_mode == "symmetric":
-            # 对称：所有路径都收在现价之上才算看涨、都在之下才算看跌，其余不表态
-            view = "看涨" if fc.p_up >= 1.0 else "看跌" if fc.p_up <= 0.0 else "不表态"
-            agrees = (long and fc.p_up >= 1.0) or (not long and fc.p_up <= 0.0)
-        else:
-            # 和卡一致（Aaron 10-24）：只有报 1.0 算看涨，其余都算看跌
-            view = "看涨" if fc.p_up >= 1.0 else "看跌"
-            agrees = (fc.p_up >= 1.0) == long
-        # 和卡（信号跟着卡的方向）一致就加分，相反不扣
+        agrees = fc.rank_view == ("top" if long else "bottom")
         nudge = weight * 0.5 if agrees else 0.0
         if detail is not None:
-            agree = "同向" if nudge > 0 else "不同向，不扣分"
-            detail["predictor"] = f"{agree}（{view}，涨的路径占 {fc.p_up:.2f}）"
-            detail["predictor_p_up"] = round(fc.p_up, 4)
+            view = {"top": "看好", "bottom": "看坏", "mid": "不表态"}[fc.rank_view]
+            agree = "同向" if agrees else "不同向，不扣分"
+            n = fc.rank_n or 0
+            place = round((1.0 - fc.rank_pct) * (n - 1)) + 1 if n > 1 else 1
+            detail["predictor"] = f"{agree}（{view}，{n} 个币里排第 {place}）"
+            detail["predictor_rank_pct"] = round(fc.rank_pct, 4)
+            if fc.score is not None:
+                detail["predictor_score_bps"] = round(fc.score * 1e4, 1)
             detail["predictor_nudge"] = round(nudge, 4)
         return nudge
 

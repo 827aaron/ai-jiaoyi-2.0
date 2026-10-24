@@ -224,9 +224,7 @@ class FastLoopConfig(Contract):
     )
     predictor_nudge_mode: Literal["card_agree", "symmetric"] = Field(
         default="card_agree",
-        description="预测员什么时候算和信号一致（一致就给「做」加分，不一致不扣）："
-        "card_agree = 只有报 1.0（所有路径收在现价之上）算看涨，其余都算看跌，所以做空几乎总加分；"
-        "symmetric = 做多要报 1.0、做空要报 0（所有路径都在现价之下）才加，其余不加。",
+        description="已停用：预测员改成官方的排名用法（[predictor] rank_band），写了也不生效。",
     )
     gate_questions: Literal["one", "six"] = Field(
         default="one",
@@ -242,9 +240,9 @@ class FastLoopConfig(Contract):
         default=0.2,
         ge=0.0,
         le=1.0,
-        description="预测员（Kronos）意见占几成：拿“做”概率和门槛比之前，按预测员的看法挪一点："
-        "只有看涨概率报 1.0 才算看涨，其余都算看跌；与卡方向一致时加 这个数 × 0.5"
-        "（0.2 时加 0.10），相反不扣。"
+        description="预测员（Kronos）意见占几成：拿“做”概率和门槛比之前，按预测员的看法加一点："
+        "同一时刻所有币按预测涨幅排名，做多信号排在前段、做空信号排在后段（[predictor] rank_band）"
+        "就加 这个数 × 0.5（0.2 时加 0.10），其余不加也不扣。"
         "只动“做”这一道门，预测员不进拍板人的快照。0 = 不听；没有有效预测时不挪。",
     )
     gate_record_only: bool | None = Field(
@@ -733,11 +731,30 @@ class PredictorConfig(Contract):
         "越多看得越久远，越少越贴近最近的走势。",
     )
     paths: int = Field(
-        default=4,
+        default=10,
         ge=1,
         le=64,
-        description="每次独立模拟几条走势；看涨概率 = 收在现价之上的条数占比。"
-        "越多概率越细、算得越慢（每条都要跑一遍模型）。",
+        description="每次模拟几条走势，模型自己平均成一条（官方用法，论文 10 条）。"
+        "越多越稳、算得越慢（一次批量算完）。",
+    )
+    temperature: float = Field(
+        default=0.6,
+        ge=0.1,
+        le=2.0,
+        description="采样温度（官方回测和论文猜方向用 0.6；越高走势越乱）。",
+    )
+    rank_band: float = Field(
+        default=1.0 / 6.0,
+        ge=0.05,
+        le=0.5,
+        description="同一时刻所有币按预测涨幅排名，前这么多算预测员看好、后这么多算看坏"
+        "（官方回测买前 1/6；看坏这一头是我们做空用的镜像，官方没有）。",
+    )
+    rank_min_peers: int = Field(
+        default=6,
+        ge=2,
+        le=200,
+        description="一起排名的新鲜预测至少几个币才算名次；不够就当预测员不表态。",
     )
     against_card_meeting: bool = Field(
         default=False,

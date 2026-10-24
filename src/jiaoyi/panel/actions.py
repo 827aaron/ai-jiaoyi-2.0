@@ -570,7 +570,10 @@ def _write_config(
     for key, raw in changes.items():
         if key not in fields:
             raise ActionError(f"{key} 不能在网页上改")
-        value = _coerce(key, raw, fields[key])
+        if raw is None and isinstance(olds, dict) and key in olds:
+            value = None  # 删掉这一行 = 回到默认（档位默认或程序默认）；必填项删了过不了下面的校验
+        else:
+            value = _coerce(key, raw, fields[key])
         on = section == "fast_loop" and key in PAPER_ONLY_SWITCHES and value is True
         if on and current_mode(paths) != "paper":
             raise ActionError(f"{PAPER_ONLY_SWITCHES[key]}只有模拟盘能开")

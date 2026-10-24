@@ -75,7 +75,7 @@ async def test_forecast_after_enough_bars(tmp_path: Path) -> None:
     rec = sink.read_day("2026-10-22")[0]
     assert rec.role == Role.PREDICTOR and rec.latency_ms >= 0
     # 面板「预测员」卡片读它看到了什么
-    assert set(rec.input) == {"last_close", "bars", "interval", "paths"}
+    assert set(rec.input) == {"last_close", "bars", "interval", "paths", "temperature"}
     assert rec.input["bars"] >= 3 and rec.input["interval"] == SET.interval.value
 
 
@@ -319,13 +319,68 @@ def test_official_backend_uses_eval_mode_and_open_time_grid(
     mods = {"model": model_mod, "pandas": pd_mod}
     monkeypatch.setattr(kmod.importlib, "import_module", lambda name: mods[name])
     be = kmod.OfficialKronosBackend(KronosSettings(device="cpu"), kmod.MODEL_SPECS["small"])
-    out = be.predict([bar(k) for k in range(3)], pred_len=2, paths=1)
+    out = be.predict([bar(k) for k in range(3)], pred_len=2, paths=10)
     assert out == [[(101.0, 99.0, 100.0)] * 2]
     kw = calls[0]
+    # 官方用法：一次调用采样 10 条、模型内部平均；温度 0.6、top_p 0.9
+    assert len(calls) == 1 and kw["sample_count"] == 10
+    assert (kw["T"], kw["top_p"]) == (0.6, 0.9)
     stamps = [*kw["x_timestamp"], *kw["y_timestamp"]]
     assert all(t.minute % 5 == 0 and t.second == 0 and t.microsecond == 0 for t in stamps)
     assert kw["x_timestamp"][0] == T0.replace(tzinfo=None)
     assert kw["y_timestamp"][0] == (T0 + timedelta(minutes=15)).replace(tzinfo=None)
+
+
+class ByCoin(FakeBackend):
+    """每个币平均路径终点 = 现价 × (1 + 涨幅)，看排名用。"""
+
+    def __init__(self, ups: dict[str, float]) -> None:
+        super().__init__()
+        self.ups = ups
+
+    def predict(self, bars: list[Kline], pred_len: int, paths: int) -> list[Path_]:
+        end = bars[-1].close * (1 + self.ups[bars[-1].symbol])
+        return [[(end + 1, end - 1, end)] * pred_len]
+
+
+async def _feed_coins(f: KronosForecaster, coins: list[str]) -> None:
+    for k in range(3):
+        for sym in coins:
+            await f.on_kline(bar(k, symbol=sym))
+    await f.wait_idle()
+
+
+async def test_forecasts_are_ranked_across_coins(tmp_path: Path) -> None:
+    """官方用法：同一时刻所有币按预测涨幅排名；前 1/6 看好、后 1/6 看坏，中间不表态。"""
+    ups = {"A": 0.03, "B": 0.01, "C": 0.004, "D": 0.0, "E": -0.002, "F": -0.02}
+    coins = [f"{k}{k}USDT" for k in ups]
+    be = ByCoin({f"{k}{k}USDT": v for k, v in ups.items()})
+    f = make(True, SET, be, JsonlDecisionLog(tmp_path), clock=lambda: T0 + timedelta(hours=1))
+    await _feed_coins(f, coins)
+    now = T0 + timedelta(minutes=15)
+    got = {s: f.latest(s, now) for s in coins}
+    assert all(fc is not None and fc.rank_n == 6 for fc in got.values())
+    a, d, fz = got["AAUSDT"], got["DDUSDT"], got["FFUSDT"]
+    assert a is not None and a.rank_view == "top" and a.rank_pct == 1.0
+    assert a.score == pytest.approx(0.03) and a.p_up == 1.0
+    assert fz is not None and fz.rank_view == "bottom" and fz.rank_pct == 0.0 and fz.p_up == 0.0
+    assert d is not None and d.rank_view == "mid" and d.p_up == 0.5
+    assert got["BBUSDT"].rank_view == "mid"  # type: ignore[union-attr]
+
+
+async def test_too_few_coins_are_not_ranked(tmp_path: Path) -> None:
+    be = ByCoin({"AAUSDT": 0.03, "BBUSDT": -0.03})
+    f = make(True, SET, be, JsonlDecisionLog(tmp_path), clock=lambda: T0 + timedelta(hours=1))
+    await _feed_coins(f, ["AAUSDT", "BBUSDT"])
+    fc = f.latest("AAUSDT", T0 + timedelta(minutes=15))
+    assert fc is not None and fc.score is not None and fc.rank_view is None
+    loose = make(
+        True, SET, be, JsonlDecisionLog(tmp_path), clock=lambda: T0 + timedelta(hours=1),
+        cfg=PredictorConfig(mode="all_symbols", rank_min_peers=2),
+    )  # fmt: skip
+    await _feed_coins(loose, ["AAUSDT", "BBUSDT"])
+    fc = loose.latest("AAUSDT", T0 + timedelta(minutes=15))
+    assert fc is not None and fc.rank_view == "top" and fc.rank_n == 2
 
 
 # ---------------------------------------------------------------- 1m→5m、按需、尺寸策略
@@ -648,14 +703,16 @@ async def test_hourly_interval_for_long_hold() -> None:
 def test_predictor_interval_follows_hold() -> None:
     from jiaoyi.core import profiles
 
+    # 官方论文：回看 ≈ 5 × 往后预测；凑不够 64 根（攒够才开算）就用 64
     want = {
-        "30m": ("5m", 6), "1h": ("5m", 12), "2h": ("5m", 24), "4h": ("5m", 48),
-        "8h": ("15m", 32), "12h": ("15m", 48), "24h": ("1h", 24),
+        "30m": ("5m", 6, 64), "1h": ("5m", 12, 64), "2h": ("5m", 24, 120),
+        "4h": ("15m", 16, 80), "8h": ("15m", 32, 160), "12h": ("15m", 48, 240),
+        "24h": ("1h", 24, 120),
     }  # fmt: skip
-    for hold, (interval, n) in want.items():
+    for hold, (interval, n, back) in want.items():
         cfg = PredictorConfig.model_validate(profiles.fill({}, "1h", "predictor", hold))
-        assert (cfg.interval, cfg.pred_len) == (interval, n)
-        assert 400 + cfg.pred_len <= 512
+        assert (cfg.interval, cfg.pred_len, cfg.lookback) == (interval, n, back)
+        assert (cfg.paths, cfg.temperature) == (10, 0.6)
     # 用户写了就按用户的
     mine = profiles.fill({"interval": "5m"}, "1h", "predictor", "24h")
     assert PredictorConfig.model_validate(mine).interval == "5m"
