@@ -17,5 +17,6 @@
   "next_run_at": null,
   "symbol_count": null,
   "error": null,
+  "detail": [],
   "summary": "SOLUSDT 空：真 real 0.41 / 做 skip 0.66 / 毒性 low 0.58 / 止损 mid 0.47 / 仓位 S 0.52（312ms）"
 }

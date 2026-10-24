@@ -12,12 +12,17 @@
 规则只负责“这里可能有机会”，真假交给拍板人。
 没有有效作战卡 → 不出信号；卡里没有这个标的、只看不做、不允许这类信号、方向和卡相反 → 不出。
 同一个去重键（标的:信号:方向）冷却期内只发一次。
+
+为什么没信号：每个币记最近一次的量比 / 主动买卖占比、最近 1 小时量比最高的那一刻、最近一次被
+跳过的原因；卡上有但一直没收到成交的币标「没收到行情」。心跳时每币一行写进 module_status 的
+``detail``（:meth:`RuleTrigger.detail_lines`）。
 """
 
 from __future__ import annotations
 
 import math
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -63,6 +68,25 @@ def session_event(now: datetime, window_min: int) -> str | None:
     return None
 
 
+PEAK_WINDOW = timedelta(hours=1)
+QUIET_AFTER = timedelta(minutes=2)
+"""卡上的币这么久没来一笔成交，就算「没收到行情」。"""
+
+
+@dataclass
+class _Watch:
+    """一个币最近的情况，给「为什么没信号」用。"""
+
+    seen_at: datetime
+    vol_ratio: float | None
+    buy_ratio: float
+    peak_at: datetime
+    peak_vol: float | None
+    peak_buy: float
+    skip: str = ""
+    skip_at: datetime | None = None
+
+
 class RuleTrigger:
     """``Trigger`` 的实现。"""
 
@@ -87,6 +111,23 @@ class RuleTrigger:
         self._predictor = predictor
         self._prev_price: dict[str, float] = {}
         self._last_fired: dict[str, datetime] = {}
+        self._watch: dict[str, _Watch] = {}
+        self._card: BattleCard | None = None
+
+    def _observe(self, f: FeatureSnapshot, now: datetime) -> _Watch:
+        vr = f.values.get("vol_ratio_1m")
+        br = f.values.get("taker_buy_ratio_1m", 0.5)
+        w = self._watch.get(f.symbol)
+        if w is None:
+            w = self._watch[f.symbol] = _Watch(now, vr, br, now, vr, br)
+        w.seen_at, w.vol_ratio, w.buy_ratio = now, vr, br
+        if now - w.peak_at > PEAK_WINDOW or (vr or 0.0) >= (w.peak_vol or 0.0):
+            w.peak_at, w.peak_vol, w.peak_buy = now, vr, br
+        return w
+
+    @staticmethod
+    def _note_skip(w: _Watch, reason: str, now: datetime) -> None:
+        w.skip, w.skip_at = reason, now
 
     def check(
         self, features: FeatureSnapshot, card: BattleCard | None, now: datetime
@@ -94,25 +135,39 @@ class RuleTrigger:
         sym = features.symbol
         prev = self._prev_price.get(sym)
         self._prev_price[sym] = features.last_price
+        w = self._observe(features, now)
+        self._card = card
         if card is None or not card.is_valid(now):
+            self._note_skip(w, "没有有效作战卡", now)
             return []
         cs = card.for_symbol(sym)
-        if cs is None or cs.bias == Bias.NO_TRADE or not cs.allowed_signals:
+        if cs is None:
+            self._note_skip(w, "不在作战卡上", now)
+            return []
+        if cs.bias == Bias.NO_TRADE or not cs.allowed_signals:
+            self._note_skip(w, "卡上是只看不做", now)
             return []
 
         out: list[CandidateSignal] = []
         for kind, side, desc in self._rules(
             features, prev, [lv.price for lv in cs.key_levels], now
         ):
-            if kind not in cs.allowed_signals or kind in self._skip:
+            name = f"{_KIND_CN[kind]}（{'多' if side == Side.LONG else '空'}）"
+            if kind in self._skip:
+                self._note_skip(w, f"{name}：测试网 / 实盘关了量能突增", now)
                 continue
-            if cs.bias == Bias.LONG and side != Side.LONG:
+            if kind not in cs.allowed_signals:
+                self._note_skip(w, f"{name}：卡上没允许这类信号", now)
                 continue
-            if cs.bias == Bias.SHORT and side != Side.SHORT:
+            if (cs.bias == Bias.LONG and side != Side.LONG) or (
+                cs.bias == Bias.SHORT and side != Side.SHORT
+            ):
+                self._note_skip(w, f"{name}：和卡上方向相反", now)
                 continue
             key = f"{sym}:{kind.value}:{side.value}"
             last = self._last_fired.get(key)
             if last is not None and now - last < self._dedup:
+                self._note_skip(w, f"{name}：冷却中（上次 {last:%H:%M:%S}）", now)
                 continue
             self._last_fired[key] = now
             sig = CandidateSignal(
@@ -142,6 +197,80 @@ class RuleTrigger:
                     output={"kind": kind.value, "side": side.value, "dedup_key": key},
                 )
         return out
+
+    def brief(self, now: datetime) -> str:
+        """团队页一句话：卡上能出信号的有几个币、各只做哪边、离阈值最近的是谁。"""
+        card = self._card if self._card is not None and self._card.is_valid(now) else None
+        if card is None:
+            return "没有有效作战卡，不出信号"
+        live = [s for s in card.symbols if s.bias is not Bias.NO_TRADE and s.allowed_signals]
+        if not live:
+            return f"卡上 {len(card.symbols)} 个币都是只看不做，不出信号"
+        sides = {b: sum(1 for s in live if s.bias is b) for b in (Bias.LONG, Bias.SHORT)}
+        parts = [f"只做多 {sides[Bias.LONG]}" if sides[Bias.LONG] else ""]
+        parts.append(f"只做空 {sides[Bias.SHORT]}" if sides[Bias.SHORT] else "")
+        both = len(live) - sides[Bias.LONG] - sides[Bias.SHORT]
+        parts.append(f"两边都可 {both}" if both else "")
+        text = f"卡上能出信号的 {len(live)} 个币（{'、'.join(p for p in parts if p)}）"
+        fresh = [
+            (w.vol_ratio, sym)
+            for sym, w in self._watch.items()
+            if sym in {s.symbol for s in live}
+            and w.vol_ratio is not None
+            and now - w.seen_at <= QUIET_AFTER
+        ]
+        if fresh:
+            vr, sym = max(fresh)
+            text += f"，现在量比最高 {sym} {vr:.1f} 倍（突增要 {self._cfg.surge_vol_ratio:g}）"
+        return text
+
+    def detail_lines(self, now: datetime, tz: str = "UTC") -> list[str]:
+        """每币一行：卡上的币 + 最近看过的币。量比 / 主动占比 / 离阈值多远 / 最近 1 小时最高 /
+        最近一次跳过原因；卡上有但没来成交的标「没收到行情」。"""
+        z = ZoneInfo(tz)
+        c = self._cfg
+        card = self._card if self._card is not None and self._card.is_valid(now) else None
+        on_card = {s.symbol for s in card.symbols} if card is not None else set()
+        lines: list[str] = []
+        for sym in sorted(on_card | set(self._watch)):
+            w = self._watch.get(sym)
+            if w is None or now - w.seen_at > QUIET_AFTER:
+                if sym in on_card:
+                    since = "" if w is None else f"（最后一笔 {w.seen_at.astimezone(z):%H:%M}）"
+                    lines.append(f"{sym} 没收到行情{since}：没订上或没人成交，不会出信号")
+                continue
+            side = "买" if w.buy_ratio >= 0.5 else "卖"
+            share = max(w.buy_ratio, 1.0 - w.buy_ratio)
+            if w.vol_ratio is None:
+                head = f"{sym} K 线还不够算均量（主动{side} {share:.0%}）"
+            else:
+                gap = c.surge_vol_ratio - w.vol_ratio
+                need = (
+                    f"量能突增还差 {gap:.1f} 倍"
+                    if gap > 0
+                    else (
+                        f"量够了，主动{side}还差 {c.surge_taker_ratio - share:.0%}"
+                        if share < c.surge_taker_ratio
+                        else "够量能突增"
+                    )
+                )
+                head = (
+                    f"{sym} 量 {w.vol_ratio:.1f} 倍（突增要 {c.surge_vol_ratio:g}、"
+                    f"突破要 {c.breakout_vol_ratio:g}）主动{side} {share:.0%}，{need}"
+                )
+            if w.peak_vol is not None and now - w.peak_at <= PEAK_WINDOW:
+                pside = "买" if w.peak_buy >= 0.5 else "卖"
+                pshare = max(w.peak_buy, 1.0 - w.peak_buy)
+                head += (
+                    f"；1 小时内最高 {w.peak_vol:.1f} 倍 主动{pside} {pshare:.0%}"
+                    f"（{w.peak_at.astimezone(z):%H:%M}）"
+                )
+            if sym not in on_card and card is not None:
+                head += "；不在作战卡上"
+            elif w.skip and w.skip_at is not None and now - w.skip_at <= PEAK_WINDOW:
+                head += f"；上次跳过 {w.skip_at.astimezone(z):%H:%M}：{w.skip}"
+            lines.append(head)
+        return lines
 
     def _forecast(self, symbol: str, now: datetime) -> Forecast | None:
         if self._predictor is None or not self._predictor.enabled:
