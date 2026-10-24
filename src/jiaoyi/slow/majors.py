@@ -5,7 +5,8 @@
   所以「前 20」是 20 个真币，名次是它们在 CoinGecko 上的原始市值名次。
 - 映射到币安 USDT 永续：基础币名一致即可；币安给小币种加的 1000 / 1000000 / 1M 前缀（1000PEPE）
   在 :func:`base_of` 里去掉再比。
-- 拉取失败沿用缓存（不管多旧），1 小时内不再重试；没有缓存就回退 ``screener.FALLBACK_MAJORS`` 那 7 个。
+- 拉取失败沿用缓存（不管多旧），1 小时内不再重试；没有缓存就回退
+  ``screener.FALLBACK_MAJORS`` 那 7 个。
 """
 
 from __future__ import annotations
