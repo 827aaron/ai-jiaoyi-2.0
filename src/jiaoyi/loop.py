@@ -246,7 +246,7 @@ class Runner:
         self._closing: set[str] = set()
         self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
         self._tp_past: dict[str, datetime] = {}
-        """限价止盈：价格第一次越过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
+        """限价止盈：价格第一次穿过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
         self._last_prune: datetime | None = None
         # 面板“重启生效”：不开新仓，等在途动作做完再退出（launchd KeepAlive 拉起）
         self._restart_check = restart_check
@@ -479,14 +479,24 @@ class Runner:
                 self._spawn(self._review(pos))
 
     def _tp_fallback(self, t: Trade) -> None:
-        """限价止盈挂着却没成交：价格在止盈价外面待满 ``tp_limit_fallback_s`` 秒，改市价平。"""
+        """限价止盈挂着却没成交：价格穿过止盈价 ``tp_limit_fallback_through_bps`` 以上、
+        连续待满 ``tp_limit_fallback_s`` 秒，改市价平。
+
+        只碰到止盈价不算：成交价等于限价时，限价单可能还排在别人后面没轮到（DASH 2026-10-24
+        就是碰到 50.66 后 10 秒被改成市价、吃了 0.04% 手续费）。价格穿过去了还没成交才是真没挂上。
+        """
         now = self.app.clock()
-        wait = self.app.app_cfg.fast_loop.tp_limit_fallback_s
+        fl = self.app.app_cfg.fast_loop
+        wait, through = fl.tp_limit_fallback_s, fl.tp_limit_fallback_through_bps / 1e4
         for pos in self.positions:
             tp, pid = pos.take_profit_price, pos.position_id
             if pos.symbol != t.symbol or pos.status is not PositionStatus.OPEN or tp is None:
                 continue
-            past = t.price >= tp if pos.side is Side.LONG else t.price <= tp
+            past = (
+                t.price >= tp * (1.0 + through)
+                if pos.side is Side.LONG
+                else t.price <= tp * (1.0 - through)
+            )
             if not past:
                 self._tp_past.pop(pid, None)
                 continue
@@ -497,7 +507,7 @@ class Runner:
 
     async def _tp_market(self, pos: PositionRecord, price: float, wait: float) -> None:
         log.warning(
-            "%s 越过止盈价 %s 已 %.0f 秒没成交，改市价平", pos.symbol, pos.take_profit_price, wait
+            "%s 穿过止盈价 %s 已 %.0f 秒没成交，改市价平", pos.symbol, pos.take_profit_price, wait
         )
         await self.close(pos, CloseReason.TAKE_PROFIT)
         if any(p.position_id == pos.position_id for p in self.positions):

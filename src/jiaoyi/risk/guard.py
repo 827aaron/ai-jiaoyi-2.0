@@ -111,6 +111,8 @@ class LotRules:
     min_notional: float
     max_qty: float | None = None
     """市价单单笔最大数量；超过交易所会拒单，所以按它封顶。None = 不限。"""
+    tick_size: float | None = None
+    """价格最小变动（PRICE_FILTER.tickSize）；限价止盈取整用。None = 不知道。"""
 
 
 class LotRulesProvider(Protocol):

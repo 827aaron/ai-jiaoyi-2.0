@@ -616,15 +616,48 @@ async def test_limit_take_profit_falls_back_to_market(tmp_path: Path, now: datet
     def trade(px: float) -> c.Trade:
         return c.Trade(symbol="BTCUSDT", ts=t[0], price=px, qty=0.01, taker_side=c.Side.LONG)
 
-    await r.on_event(trade(68390.0))  # 越过止盈价，开始计时
-    t[0] = now + timedelta(seconds=5)
-    await r.on_event(trade(68380.0))  # 回到止盈价里面：重新计时
-    t[0] = now + timedelta(seconds=12)
-    await r.on_event(trade(68390.0))
+    # 只碰到止盈价、或越过不到 5bp（68418.4）：限价单可能在排队，不算没成交
+    await r.on_event(trade(68384.2))
+    t[0] = now + timedelta(seconds=30)
+    await r.on_event(trade(68410.0))
     await asyncio.gather(*r._tasks)
     assert ex.closed == []
-    t[0] = now + timedelta(seconds=23)
-    await r.on_event(trade(68395.0))  # 越过满 10 秒还在：改市价平
+    await r.on_event(trade(68430.0))  # 穿过 5bp，开始计时
+    t[0] = now + timedelta(seconds=35)
+    await r.on_event(trade(68400.0))  # 回到 5bp 里面：重新计时
+    t[0] = now + timedelta(seconds=42)
+    await r.on_event(trade(68430.0))
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == []
+    t[0] = now + timedelta(seconds=53)
+    await r.on_event(trade(68435.0))  # 穿过满 10 秒还没平：改市价平
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == [("pos-0001", CloseReason.TAKE_PROFIT)]
+
+
+async def test_limit_take_profit_short_needs_price_through(tmp_path: Path, now: datetime) -> None:
+    t = [now]
+    cfg = load_app_config(APP).model_copy(update={"data_dir": str(tmp_path)})
+    app = App(load_risk_config(RISK), cfg, clock=lambda: t[0], offline=True)
+    ex = FakeExecutor()
+    app.m = dataclasses.replace(app.m, executor=ex, patrol=FakePatrol())
+    r = Runner(app)
+    # 做空，止盈 50.66（DASH 那笔）：价格停在 50.66 不改市价，跌穿 50.6347 以下满 10 秒才改
+    r.positions = [
+        _position(symbol="DASHUSDT", side="short", entry_price=51.0, take_profit_price=50.66)
+    ]
+
+    def trade(px: float) -> c.Trade:
+        return c.Trade(symbol="DASHUSDT", ts=t[0], price=px, qty=1.0, taker_side=c.Side.SHORT)
+
+    await r.on_event(trade(50.66))
+    t[0] = now + timedelta(seconds=20)
+    await r.on_event(trade(50.66))
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == []
+    await r.on_event(trade(50.63))
+    t[0] = now + timedelta(seconds=31)
+    await r.on_event(trade(50.62))
     await asyncio.gather(*r._tasks)
     assert ex.closed == [("pos-0001", CloseReason.TAKE_PROFIT)]
 

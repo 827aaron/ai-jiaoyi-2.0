@@ -29,6 +29,8 @@ class TrackedPosition(BaseModel):
     """开仓指令里的名义价值；还没成交（没有入场价）时敞口按它算，不能算成 0。"""
     stop_loss_pct: float
     take_profit_pct: float
+    tp_tick: float | None = None
+    """限价止盈：开仓时用的价格最小变动（tickSize）；有就按挂单价取整记止盈价。None = 市价止盈。"""
     requested_close: CloseReason | None = None
     """我们主动要求平仓的原因；执行器自己结束（止损、止盈等）时为空。"""
 

@@ -16,6 +16,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -148,6 +149,21 @@ def _positive(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def tp_price(tracked: TrackedPosition, entry: float) -> float:
+    """账本里的止盈价。限价止盈 = 币安上那张限价单的价格（按 tickSize 往有利方向取整：多单卖出
+    向下、空单买入向上，和 ``_executor_config`` 的挂法一致），快环判「穿过止盈价没成交」也按它。"""
+    side = tracked.record.side
+    sign = 1.0 if side is Side.LONG else -1.0
+    raw = entry * (1.0 + sign * tracked.take_profit_pct / 100.0)
+    tick = tracked.tp_tick
+    if not tick:
+        return raw
+    q = Decimal(str(tick))
+    steps = Decimal(str(raw)) / q
+    steps = steps.to_integral_value(ROUND_FLOOR if side is Side.LONG else ROUND_CEILING)
+    return float(steps * q)
+
+
 class HbExecutorAdapter:
     def __init__(
         self,
@@ -170,8 +186,11 @@ class HbExecutorAdapter:
         open_fee_bps: float = 0.0,
         trade_notices: bool = True,
         limit_take_profit: bool = False,
+        tick_size: Callable[[str], float | None] | None = None,
     ) -> None:
-        """``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
+        """``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
+
+        ``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 保镖算的止损 / 止盈距离。"""
         self._api = api
         self._open_fee = open_fee_bps / 1e4
@@ -189,6 +208,7 @@ class HbExecutorAdapter:
         self._finalizing: set[str] = set()
         self._notices = trade_notices
         self._limit_tp = limit_take_profit
+        self._tick_size = tick_size or (lambda _s: None)
         self.fills_note: str | None = None
         """成交回报通道的状态（「成交回报实时」/「只走 60 秒轮询」），由 LedgerSync 写。"""
         self._exchange = exchange
@@ -205,6 +225,12 @@ class HbExecutorAdapter:
         stop = intent.stop_loss_pct / 100.0 + self._open_fee
         if self._limit_tp:
             take = intent.take_profit_pct / 100.0
+            tick = self._tick_size(intent.symbol)
+            if intent.side is Side.SHORT and tick:
+                # hummingbot 把限价往下取整：空单的买入平仓价会比止盈价远一档（DASH 50.6677 挂成
+                # 50.66，最低只到 50.67 没成交）。少算一档，取整后正好落在止盈价上方最近一档
+                ref = intent.notional_usdt / intent.quantity
+                take = max(take - tick / ref, 0.0001)
         else:
             take = max(intent.take_profit_pct / 100.0 - self._open_fee, 0.0001)
         barrier: dict[str, Any] = {
@@ -269,6 +295,7 @@ class HbExecutorAdapter:
             notional_usdt=intent.notional_usdt,
             stop_loss_pct=intent.stop_loss_pct,
             take_profit_pct=intent.take_profit_pct,
+            tp_tick=self._tick_size(intent.symbol) if self._limit_tp else None,
         )
         self._registry.put(tracked)
         if self._exchange is not None:
@@ -619,7 +646,7 @@ class HbExecutorAdapter:
             status=PositionStatus.OPEN,
             entry_price=entry,
             stop_loss_price=entry * (1.0 - sign * tracked.stop_loss_pct / 100.0),
-            take_profit_price=entry * (1.0 + sign * tracked.take_profit_pct / 100.0),
+            take_profit_price=tp_price(tracked, entry),
         )
 
     async def _try_place_lifeboat(self, tracked: TrackedPosition) -> TrackedPosition:
@@ -786,7 +813,7 @@ class HbExecutorAdapter:
                     intended_price=rec.entry_price,
                     entry_price=entry.price,
                     stop_loss_price=entry.price * (1.0 - sign * tracked.stop_loss_pct / 100.0),
-                    take_profit_price=entry.price * (1.0 + sign * tracked.take_profit_pct / 100.0),
+                    take_profit_price=tp_price(tracked, entry.price),
                 )
             exit_ = exit_fill(rec, rows, entry) if need_exit else None
             lifeboat_hit = exit_ is not None and _lifeboat_hit(rec, exit_.price)
