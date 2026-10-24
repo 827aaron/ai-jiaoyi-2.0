@@ -68,3 +68,38 @@ def test_role_ids_match_team_page() -> None:
     assert {"screener", "market", "commander", "predictor", "sentinel", "gate"} <= set(ids)
     assert {"risk_guard", "executor", "keeper", "patrol", "reconciler", "lifeboat"} <= set(ids)
     assert set(ids) - {"ai_cost", "keys", "show"} <= team
+
+
+def test_tier_rows_use_the_same_role_registry(tmp_path: Path) -> None:
+    """档位参数页按同一张 ROLES 表分角色：档位给的每个键都点名在某个角色里（或有键名前缀）。"""
+    js = APP_JS.read_text(encoding="utf-8")
+    assert "roleGroups(d, ix)" in js[js.index("function tierRoleOf") :]
+    block = _roles_block()
+    named = set(re.findall(r'"([a-z_]+\.[a-z_0-9]+)"', block))
+    globs = re.findall(r'"([a-z_]+\.[a-z_0-9]*)\*"', block)
+    pblock = js[
+        js.index("const PREFIX_ROLE = [") : js.index("];", js.index("const PREFIX_ROLE = ["))
+    ]
+    prefixes = re.findall(r'\["([a-z_]+\.[a-z_0-9]*)", "[a-z_]+"\]', pblock)
+    tier_role = set(
+        re.findall(r'"([a-z_]+\.[a-z_0-9]+)": "', js[js.index("const TIER_ROLE") :][:200])
+    )
+    hide = set(
+        re.findall(
+            r'"([a-z_]+\.[a-z_0-9]+)"',
+            next(x for x in js.splitlines() if x.startswith("const TIER_HIDE")),
+        )
+    )
+
+    paths, _ = _setup(tmp_path)
+    with _client(paths) as client:
+        pf = client.get("/api/settings").json()["profile"]
+    keys = {f"{sec}.{k}" for t in pf["defaults"].values() for sec, ks in t.items() for k in ks}
+    keys.add("app.hold")
+    assert len(keys) > 20
+    loose = sorted(
+        k
+        for k in keys - hide - tier_role
+        if k not in named and not any(k.startswith(g) for g in [*globs, *prefixes])
+    )
+    assert loose == [], f"这些档位参数没分到角色：{loose}"

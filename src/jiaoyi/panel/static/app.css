@@ -619,3 +619,11 @@ section.card > .prompt-line { padding: 2px 0; }
 .json.prompt { flex-shrink: 0; max-height: 360px; word-break: normal; overflow-wrap: anywhere; }
 .symtab tr.sub td { background: var(--fill); font-size: 12px; }
 .chev-s { color: var(--faint); font-size: 11px; }
+/* 档位参数按角色分块：沿用设置页角色块的折叠样式，嵌在档位卡里不再套卡片 */
+.tier-role { display: block; background: transparent; box-shadow: none; padding: 0; border-radius: 0; border-top: 1px solid var(--line); gap: 0; }
+.tier-role:hover { background: transparent; }
+.tier-role .role-h { border-radius: 0; }
+.tier-role .rm .accent { color: var(--accent); }
+.tier-role .role-b > .tier-row:first-child { border-top: 0; }
+.tier-role .role-b > .st-note:first-child { margin-top: 10px; }
+.tier-search { flex-basis: 100%; margin-top: 0; }
