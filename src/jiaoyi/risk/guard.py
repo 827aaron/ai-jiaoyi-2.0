@@ -336,7 +336,7 @@ class RiskGuardImpl:
         if not jev.ok:
             reasons.append(f"拍板人不可用：{jev.error}")
         else:
-            hard, soft = self._check_jev(signal, jev)
+            hard, soft = self._check_jev(signal, jev, detail)
             reasons += hard
             if self._record_only:
                 # 只记不拦：门槛没过照样放行，写进 detail；订单流明显有毒（≥ 0.8）还是拦
@@ -399,8 +399,16 @@ class RiskGuardImpl:
             return None
         return self._size(signal, f, jev, card, cs, stop, account, now, reasons, detail)
 
-    def _check_jev(self, signal: CandidateSignal, jev: JevResponse) -> tuple[list[str], list[str]]:
-        """（回答不全 / 不对，概率没过门槛）。前者永远拦，后者「只记不拦」时只记。"""
+    def _check_jev(
+        self,
+        signal: CandidateSignal,
+        jev: JevResponse,
+        detail: dict[str, float | str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """（回答不全 / 不对，概率没过门槛）。前者永远拦，后者「只记不拦」时只记。
+
+        “做”概率和门槛比之前先按预测员挪一点（``predictor_weight``），原始值和挪后的值写进
+        ``detail``。"""
         fast = self._fast
         out: list[str] = []
         # 契约不保证 ok=True 的回复答全了：6 问必须都在，选项必须和问的一模一样
@@ -423,10 +431,19 @@ class RiskGuardImpl:
         )
         for q, choice, floor, cn in checks:
             v = p(q, choice)
+            note = ""
+            if v is not None and q == EntryQuestion.TAKE:
+                raw, nudge = v, self._predictor_nudge(signal, detail)
+                v = min(1.0, max(0.0, raw + nudge))
+                if detail is not None and "predictor" in detail:
+                    detail["take_raw"] = round(raw, 4)
+                    detail["take_adj"] = round(v, 4)
+                if nudge:
+                    note = f"（预测员 {nudge:+.2f}）"
             if v is None:
                 out.append(f"拍板人没回答“{q.value}”")
             elif v < floor:
-                out.append(f"“{cn}”概率 {v:.2f} 低于门槛 {floor}")
+                out.append(f"“{cn}”概率 {v:.2f}{note} 低于门槛 {floor}")
         tox = p(EntryQuestion.TOXICITY, "high")
         if tox is None:
             out.append("拍板人没回答“toxicity”")
@@ -444,6 +461,29 @@ class RiskGuardImpl:
                 hard.append(f"拍板人没回答“{q.value}”")
         missing = [r for r in out if r.startswith("拍板人没回答")]
         return hard + missing, [r for r in out if r not in missing]
+
+    def _predictor_nudge(
+        self, signal: CandidateSignal, detail: dict[str, float | str] | None
+    ) -> float:
+        """预测员给“做”概率挪多少：权重 × 0.5 ×（2 × 看涨概率 − 1），做空反号。
+
+        预测员关掉、过期（``stale_after`` 不晚于信号时间）、或权重 0 时不挪。"""
+        weight = self._fast.predictor_weight
+        fc = signal.forecast
+        if weight <= 0:
+            return 0.0
+        if fc is None or fc.stale_after <= signal.ts:
+            if detail is not None:
+                detail["predictor"] = "没有预测"
+            return 0.0
+        sign = 1.0 if signal.side_hint == Side.LONG else -1.0
+        nudge = weight * 0.5 * (2.0 * fc.p_up - 1.0) * sign
+        if detail is not None:
+            agree = "同向" if nudge > 0 else "反向" if nudge < 0 else "中性"
+            detail["predictor"] = f"{agree}（看涨 {fc.p_up:.2f}）"
+            detail["predictor_p_up"] = round(fc.p_up, 4)
+            detail["predictor_nudge"] = round(nudge, 4)
+        return nudge
 
     def recheck_chase(
         self, intent: OrderIntent, card: BattleCard | None, account: AccountState, now: datetime

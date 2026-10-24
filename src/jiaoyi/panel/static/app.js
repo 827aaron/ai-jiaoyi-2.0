@@ -784,7 +784,7 @@ const FIELD = {
   ofi_k: ["订单流失衡", "k"], ofi: ["订单流失衡"], depth_k: ["盘口深度", "k"], depth_usdt: ["盘口深度", "usdt"],
   card: ["作战卡"], status: ["状态"], bias: ["方向"], levels_bps: ["关键价位离现价", "bpslist"], stop_atr: ["止损（ATR 倍数）", "range"], tp_r: ["止盈（止损的倍数）", "range"], size_max: ["最大仓位档"], regime: ["大盘判断"],
   kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["向上的模拟占比", "p"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
-  approved: ["结论"], reasons: ["原因"], detail: ["细节"], day_pnl_pct: ["今天盈亏", "pct"], slippage_bps: ["预计滑点", "bps"],
+  approved: ["结论"], reasons: ["原因"], detail: ["细节"], day_pnl_pct: ["今天盈亏", "pct"], slippage_bps: ["预计滑点", "bps"], predictor: ["预测员"], predictor_p_up: ["预测员看涨概率", "p"], predictor_nudge: ["预测员把“做”挪了"], take_raw: ["“做”概率（拍板人原话）"], take_adj: ["“做”概率（加上预测员）"],
   quantity: ["数量"], notional_usdt: ["名义仓位（含杠杆）", "usdt"], leverage: ["杠杆", "x"], risk_usdt: ["这笔最多亏", "usdt"], stop_loss_pct: ["止损距离", "pct"], take_profit_pct: ["止盈距离", "pct"],
   trailing_stop_pct: ["移动止损", "pct"], trailing_activation_pct: ["移动止损启动", "pct"], lifeboat_stop_pct: ["保命止损距离", "pct"], order_type: ["下单方式"], category: ["分组"],
   intent_id: ["下单编号"], executor_id: ["执行器编号"], signal_id: ["信号编号"], card_id: ["作战卡编号"], position_id: ["持仓编号"], dedup_key: ["去重键"], request_id: ["请求编号"],
@@ -1914,6 +1914,7 @@ const PLAIN = {
   min_p_genuine: "信号至少多大把握是真的（0–1）",
   min_p_take: "至少多大把握值得做（0–1）",
   min_p_direction: "方向至少多大把握（0–1）",
+  predictor_weight: "预测员意见占几成（0–1）",
   max_p_toxic: "被大户收割的可能最多多大（0–1）",
   signal_max_age_s: "信号超过几秒还没处理完就作废",
   size_fraction_s: "小仓位用正常仓位的几成",
@@ -2014,6 +2015,7 @@ const HINT = {
   entry_limit_wait_min: "从下单开始算；最长持仓按成交那一刻算，不会因为等挂单少拿",
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
   burst_10s_ratio: "量能突增、放量突破提前触发用：最近 10 秒成交额折算成每分钟，至少是平时（20 根 1 分钟平均）的几倍才算；同时 1 分钟量还要过下一行。只看 1 分钟的那条仍按「量能突增 / 放量突破要几倍」。档位默认都是 5",
+  predictor_weight: "预测员（Kronos）对这个币涨跌的看法占几成：拿拍板人的「值得做」和门槛比之前先挪一点。预测员和信号同方向就往上挪，反方向就往下挪，挪多少 = 这个数 × 0.5 ×（2 × 看涨概率 − 1）。0.2 时最多挪 0.10（比如「值得做」0.15 遇上预测员 100% 看同方向，算成 0.25）。只动「值得做」这一道门，拍板人的提问不变。填 0 = 不听；预测员关掉或预测过期时不挪。档位默认都是 0.2",
   burst_min_1m_ratio: "量能突增、放量突破靠最近 10 秒提前触发时，还要这 1 分钟的量至少是平时（20 根平均）的几倍，挡掉只是一阵快单、整分钟其实不放量的假突增；只看 1 分钟够倍数的那条不受影响。填 0 = 不看。档位默认都是 2",
   trailing_on: "开 = 赚到下面的线以后，止损跟着这笔最好时的盈利往上挪，只收紧不放松，保住最高利润的一大半；关 = 只有原来的止损止盈。默认开，改了只对之后新开的仓生效，止损由执行器（hummingbot）实时盯着，不是只改面板上的数",
   trail_start_r: "单位是止损距离：1 = 一个止损距离。例如这笔止损离进场价 1%，填 0.7 就是赚到 0.7% 才开始跟（同时至少要够把止损挪到保本价）；刚开的仓不碰。档位默认都是 0.7",
@@ -2224,7 +2226,7 @@ const ROLES = [
     { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
   ] },
   { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做、真不真、方向对不对", groups: [
-    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.gate_record_only"] },
+    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.predictor_weight", "fast_loop.gate_record_only"] },
     { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
@@ -2688,6 +2690,7 @@ const TIER_GROUPS = [
   { g: "预测员", hold: true, rows: [
     ["interval", "predictor", "看几分钟的 K 线", "", "kl"],
     ["pred_len", "predictor", "往后预测几根", "正好盖住最长持仓", "n"],
+    ["predictor_weight", "fast_loop", "预测员意见占几成", "0.2 时最多把「做」挪 0.10", "p"],
   ] },
 ];
 // 档位给了、上面没列的键进哪一组的「其他」；不出行的：开会间隔本身、24 格时段系数、最长持仓秒数（= 第一行）
