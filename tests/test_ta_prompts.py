@@ -237,7 +237,11 @@ def test_profile_tables_cover_every_tier() -> None:
 def test_prompts_active_file_is_written(tmp_path) -> None:  # type: ignore[no-untyped-def]
     import json
 
+    from jiaoyi.core.config import load_risk_config
+    from tests.conftest import ROOT
+
     e = eng.TradingAgentsEngine.__new__(eng.TradingAgentsEngine)
+    e._risk = load_risk_config(ROOT / "config" / "risk.example.toml")
     s = eng.TradingAgentsSettings(results_dir=str(tmp_path / "ta"), hold="4h", hold_minutes=240)
     e._write_active_prompts(s)
     doc = json.loads((tmp_path / "prompts_active.json").read_text())
@@ -265,3 +269,61 @@ def test_tick_sizes_are_cached_and_retry_after_a_failure() -> None:
     assert t.get("STRKUSDT") == "0.00010000" and len(calls) == 2
     now[0] += CACHE_S - 1
     assert t.get("STRKUSDT") == "0.00010000" and len(calls) == 2  # 6 小时内走缓存
+
+
+def test_entry_zone_rules() -> None:
+    from jiaoyi.slow.tradingagents_engine import (
+        _CardSymbolDraft,
+        convert_instructions,
+        entry_zone_of,
+    )
+
+    base = dict(
+        bias="short",
+        size_tier_max="M",
+        notional_min=0,
+        notional_max=1,
+        leverage_min=1,
+        leverage_max=2,
+        stop_atr_min=1,
+        stop_atr_max=2,
+        take_profit_r_min=1,
+        take_profit_r_max=2,
+        reason="x",
+    )
+    ok = _CardSymbolDraft(**base, entry_min=100, entry_max=101)
+    assert entry_zone_of(ok, None) is not None
+    assert entry_zone_of(_CardSymbolDraft(**base, entry_min=102, entry_max=101), None) is None
+    assert entry_zone_of(_CardSymbolDraft(**base), None) is None
+    from jiaoyi.core.config import load_risk_config
+    from jiaoyi.slow import ta_prompts
+    from tests.conftest import ROOT
+
+    risk = load_risk_config(ROOT / "config" / "risk.example.toml")
+    text = convert_instructions(risk, ta_prompts.PromptParams.for_hold("2h"))
+    assert "必须给 entry_min" in text
+    assert "尽量给" in convert_instructions(risk, ta_prompts.PromptParams.for_hold("24h"))
+
+
+def test_zone_required_turns_card_into_no_trade() -> None:
+    from jiaoyi.contracts import SymbolPoolEntry
+    from jiaoyi.slow.tradingagents_engine import _CardSymbolDraft, draft_to_card_symbol
+
+    d = _CardSymbolDraft(
+        bias="short",
+        size_tier_max="M",
+        notional_min=0,
+        notional_max=1,
+        leverage_min=1,
+        leverage_max=2,
+        stop_atr_min=1,
+        stop_atr_max=2,
+        take_profit_r_min=1,
+        take_profit_r_max=2,
+        reason="x",
+        allowed_signals=["volume_breakout"],
+    )
+    entry = SymbolPoolEntry.model_construct(symbol="BTCUSDT", category="major")
+    c = draft_to_card_symbol(d, entry, None, zone_required=True)
+    assert c.bias.value == "no_trade" and "会议没给进场区间" in c.reason
+    assert draft_to_card_symbol(d, entry, None, zone_required=False).bias.value == "short"
