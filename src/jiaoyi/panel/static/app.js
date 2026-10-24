@@ -453,6 +453,8 @@ document.addEventListener("click", async (e) => {
   else if (act === "pool") { const [kind, sym] = arg.split(":"); askCommand(kind, { symbol: sym }, sym.replace(/USDT$/, "")); }
   else if (act === "pooladd") addSymbol();
   else if (act === "unpin") unpin(arg);
+  else if (act === "sound") { setSoundOn(arg === "on"); render(); }
+  else if (act === "sound-test") playTone(arg);
   else if (act === "updown") {
     try { localStorage.setItem("updown", arg); } catch (err) { /* 存不了就只对这次生效 */ }
     location.reload();
@@ -2209,7 +2211,7 @@ const ROLES = [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
   ] },
   { id: "keys", t: "密钥", what: "币安、OpenRouter、Telegram 等的 key，只显示配没配", find: "密钥 key api 币安 binance openrouter telegram jev typesafe 测试网" },
-  { id: "show", t: "显示", what: "涨跌颜色、面板密码、时区等", find: "显示 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
+  { id: "show", t: "显示", what: "成交提示音、涨跌颜色、面板密码、时区等", find: "显示 币安风格成交提示音 成交提示音 声音 音量 下单声音 平单声音 提示音 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
 ];
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
 const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
@@ -2508,6 +2510,8 @@ function showTab(d, ix) {
   const updown = document.documentElement.dataset.updown === "red-up" ? "red-up" : "green-up";
   const info = (k, name) => (ix[k] ? `<div class="st-row"><div class="k">${name}</div><span class="pill">${valOf(ix[k])}</span></div>` : "");
   return `<div class="st-note">只影响你现在用的这台设备，不用密码。</div>
+    <div class="st-row"><div class="k">币安风格成交提示音<small>开仓成交响一声往上的双音铃，平仓响一声往下的（测试单也响）。仿币安的声音现合成，不是币安的原声。浏览器要先在页面上点一下才允许出声。</small></div><span class="seg"><button class="${soundOn() ? "on" : ""}" ${clickable("sound", "on")}>开</button><button class="${soundOn() ? "" : "on"}" ${clickable("sound", "off")}>关</button></span></div>
+    <div class="st-row"><div class="k">提示音音量<small>拖完会响一声开仓的试听</small></div><input id="sound-vol" class="vol" type="range" min="0" max="100" step="5" value="${soundVol()}" aria-label="提示音音量"><button class="btn b-sm" ${clickable("sound-test", "open")}>听开仓</button><button class="btn b-sm" ${clickable("sound-test", "close")}>听平仓</button></div>
     <div class="st-row"><div class="k">涨跌颜色</div><span class="seg"><button class="${updown === "green-up" ? "on" : ""}" ${clickable("updown", "green-up")}>绿涨红跌</button><button class="${updown === "red-up" ? "on" : ""}" ${clickable("updown", "red-up")}>红涨绿跌</button></span></div>
     <div class="st-sub">系统信息（只看）</div>
     <div class="st-row"><div class="k">面板密码</div>${d.password_set ? '<span class="pill">已设置</span>' : '<span class="pill p-warn">未设置（终端 jiaoyi set-panel-password）</span>'}</div>
@@ -2956,11 +2960,67 @@ async function getJson(url) {
   }
 }
 
+/* 币安风格成交提示音：开仓成交（持仓变成「持仓中」）响一声上扬的双音铃，平掉（持仓从列表里消失）响一声下沉的。
+   声音是用 Web Audio 现合成的仿币安提示音（不带币安的音频文件）；只在这台设备、这个浏览器里响，
+   浏览器要先在页面上点过一下才允许出声。测试单一样响。 */
+const soundOn = () => { try { return localStorage.getItem("trade-sound") !== "off"; } catch (err) { return true; } };
+function setSoundOn(on) { try { localStorage.setItem("trade-sound", on ? "on" : "off"); } catch (err) { /* 存不了就只对这次生效 */ } }
+const soundVol = () => { try { const v = +localStorage.getItem("trade-sound-vol"); return localStorage.getItem("trade-sound-vol") == null || !Number.isFinite(v) ? 60 : Math.max(0, Math.min(100, v)); } catch (err) { return 60; } };
+let audioCtx = null;
+function audio() {
+  if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (err) { return null; } }
+  if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+// 浏览器要求先有一次点击 / 按键才放声音：第一次操作时把声音通道准备好
+["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, () => { if (soundOn()) audio(); }, { once: true, capture: true }));
+// 两个音、隔 0.09 秒、每个带一点八度泛音、0.25 秒衰减完，整段约 0.3 秒：开仓往上走（E6 → A6），平仓往下走（A5 → E5）
+const TONES = { open: [1318.5, 1760], close: [880, 659.3] };
+function playTone(kind) {
+  const ctx = audio();
+  const vol = soundVol() / 100;
+  if (!ctx || !TONES[kind] || vol <= 0) return;
+  const t0 = ctx.currentTime + 0.02;
+  TONES[kind].forEach((f, n) => {
+    const t = t0 + n * 0.09;
+    [[f, 1], [f * 2, 0.18]].forEach(([hz, part]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = hz;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, 0.35 * vol * part), t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+      o.connect(g).connect(ctx.destination);
+      o.start(t);
+      o.stop(t + 0.26);
+    });
+  });
+}
+document.addEventListener("change", (e) => {
+  if (!e.target || e.target.id !== "sound-vol") return;
+  try { localStorage.setItem("trade-sound-vol", String(+e.target.value)); } catch (err) { /* 存不了就只对这次生效 */ }
+  playTone("open");
+});
+let seenPos = null;  // position_id → status；第一次拉到只记下来不响
+function tradeSounds(list) {
+  const now = new Map(list.map((p) => [p.position_id, p.status]));
+  if (seenPos && soundOn()) {
+    const opened = [...now].some(([id, st]) => st === "open" && seenPos.get(id) !== "open" && seenPos.get(id) !== "closing");
+    // 成交过的（持仓中 / 平仓中）才算平单；还在挂单就没了的是没成交，不响
+    const closed = [...seenPos].some(([id, st]) => (st === "open" || st === "closing") && !now.has(id));
+    if (opened) playTone("open");
+    if (closed && opened) setTimeout(() => playTone("close"), 400);
+    else if (closed) playTone("close");
+  }
+  seenPos = now;
+}
+
 async function poll() {
   const { page, arg } = route();
   try {
     data = await getJson("/api/overview");
     TZ = data.display_tz || TZ;
+    tradeSounds(data.positions || []);
     const api = PAGE_API[page];
     if (api) {
       const id = pageId(page, arg);
