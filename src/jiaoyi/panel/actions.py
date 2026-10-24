@@ -332,7 +332,15 @@ def _hold_for(raw_app: dict[str, Any], profile: str) -> str:
 
 
 def _profile_keys(psec: profiles.Section) -> list[str]:
-    return sorted({k for p in profiles.PROFILES for k in profiles.defaults(p, psec)})
+    """档位给默认值的键：每个开会档 × 每个最长持仓档都算（有的键只有长持仓档给，如巡逻兵线）。"""
+    return sorted(
+        {
+            k
+            for p in profiles.PROFILES
+            for h in profiles.HOLDS
+            for k in profiles.defaults(p, psec, h)
+        }
+    )
 
 
 def _tier_defaults(raw_app: dict[str, Any], profile: str) -> dict[str, dict[str, object]]:
@@ -344,14 +352,8 @@ def _tier_defaults(raw_app: dict[str, Any], profile: str) -> dict[str, dict[str,
         if psec == "fast_loop" and raw_app.get("mode") == "paper":
             base = {**base, **profiles.PAPER_GATE}  # 和 core/config.py 一样
         fields = _PROFILE_MODEL[psec].model_fields
-        keys = {
-            k
-            for p in profiles.PROFILES
-            for h in profiles.HOLDS
-            for k in profiles.defaults(p, psec, h)
-        }
         row: dict[str, object] = {}
-        for k in sorted(keys):
+        for k in _profile_keys(psec):
             if k in base:
                 row[k] = base[k]
             elif (f := fields.get(k)) is not None and not f.is_required():
@@ -715,7 +717,7 @@ def editable_fields(section: Section) -> dict[str, FieldSpec]:
     psec = _PROFILE_SECTION.get(section)
     if psec is None:
         return fields
-    keys = {k for p in profiles.PROFILES for k in profiles.defaults(p, psec)}
+    keys = set(_profile_keys(psec))
     if section == "app":
         keys.add("hold")  # 留空 = 删掉这一行，跟开会档位的推荐搭配
     return {k: replace(f, profiled=True) if k in keys else f for k, f in fields.items()}
