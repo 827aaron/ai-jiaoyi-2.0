@@ -5,7 +5,8 @@
   所以「前 20」是 20 个真币，名次是它们在 CoinGecko 上的原始市值名次。
 - 映射到币安 USDT 永续：基础币名一致即可；币安给小币种加的 1000 / 1000000 / 1M 前缀（1000PEPE）
   在 :func:`base_of` 里去掉再比。
-- 拉取失败沿用缓存（不管多旧）；没有缓存就回退 ``screener.FALLBACK_MAJORS`` 那 7 个。
+- 拉取失败沿用缓存（不管多旧），1 小时内不再重试；没有缓存就回退
+  ``screener.FALLBACK_MAJORS`` 那 7 个。
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ log = logging.getLogger(__name__)
 
 URL = "https://api.coingecko.com/api/v3/coins/markets"
 REFRESH_EVERY = timedelta(hours=24)
+RETRY_AFTER_FAIL = timedelta(hours=1)
+"""拉取失败后多久内不再试（直接用缓存），免得接口长期挂着时每轮选币都多等一次超时。"""
 
 STABLES = frozenset(
     {"USDT", "USDC", "DAI", "USDE", "FDUSD", "TUSD", "USDD", "PYUSD", "USDS", "USDY", "BUIDL",
@@ -82,6 +85,7 @@ class MajorsSource:
         self.top_n = top_n
         self.state = self._load()
         self.error: str | None = None
+        self._failed_at: datetime | None = None
 
     def _load(self) -> MajorRanks:
         if self._path is None or not self._path.is_file():
@@ -125,6 +129,8 @@ class MajorsSource:
     async def refresh(self, now: datetime) -> None:
         """超过一天（或 top_n 变了）才重新拉；失败沿用旧缓存，只记 ``error``。"""
         st = self.state
+        if self._failed_at is not None and now - self._failed_at < RETRY_AFTER_FAIL:
+            return
         if (
             st.fetched_at is not None
             and st.top_n == self.top_n
@@ -146,10 +152,11 @@ class MajorsSource:
             if not ranks:
                 raise ValueError("市值排名是空的")
         except Exception as exc:
+            self._failed_at = now
             self.error = f"{type(exc).__name__}: {exc}"[:200]
             log.warning("拉市值排名失败，沿用上次（%s）", self.error)
             return
-        self.error = None
+        self.error, self._failed_at = None, None
         self.state = MajorRanks(ranks, now.astimezone(UTC), self.top_n)
         self._save()
 
