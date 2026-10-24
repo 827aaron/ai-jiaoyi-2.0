@@ -94,7 +94,7 @@ def test_jev_failure_rejects(now: datetime) -> None:
     ],
 )
 def test_below_thresholds_rejects(now: datetime, over: dict[str, dict[str, float]]) -> None:
-    v = guard().review(signal(now), jev(**over), card(now), account(now), now)
+    v = guard(gate_questions="six").review(signal(now), jev(**over), card(now), account(now), now)
     assert not v.approved
 
 
@@ -578,7 +578,8 @@ def test_gate_only_rejection_tagged_as_gate_skip(tmp_path: Path, now: datetime) 
     夹了保镖自己的规则就还是拒绝。
     """
     log = JsonlDecisionLog(tmp_path)
-    g = _Guard(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    six = FAST.model_copy(update={"gate_questions": "six"})
+    g = _Guard(RISK, six, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
     skip = jev(take={"take": 0.3, "skip": 0.7}, toxicity={"low": 0.4, "high": 0.6})
     assert not g.review(signal(now), skip, card(now), account(now), now).approved
     busy = account(now, open_positions=RISK.max_open_positions)

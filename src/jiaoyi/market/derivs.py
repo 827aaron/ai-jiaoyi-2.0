@@ -54,6 +54,10 @@ async def _rest(path: str, params: dict[str, Any], weight: int) -> Any:
     return await fetch_json(path, params, weight=weight)
 
 
+rest_fetch: Fetch = _rest
+"""公开 REST 的默认 ``Fetch``（拍板人快照补拉也用它）。"""
+
+
 class _Series:
     """(秒级时间戳, 值)，按时间排，只留 24 小时。"""
 

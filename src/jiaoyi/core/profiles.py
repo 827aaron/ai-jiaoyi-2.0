@@ -153,21 +153,23 @@ _KRONOS = {"lookback": 400, "paths": 4}
 
 _LOOSE_GATE = {
     "min_p_genuine": 0.6,
-    "min_p_take": 0.6,
+    "min_p_take": 0.55,  # 一道题问法的门槛（Aaron 10-24），测试网 / 实盘暂时也用它
     "max_p_toxic": 0.5,
     "min_p_direction": 0.45,
     "predictor_weight": 0.2,  # 预测员意见占两成（Aaron 10-24），各档一样
 }
 _STRICT_GATE = {
     "min_p_genuine": 0.65,
-    "min_p_take": 0.65,
+    "min_p_take": 0.55,
     "max_p_toxic": 0.4,
     "min_p_direction": 0.45,
     "predictor_weight": 0.2,
 }
-PAPER_GATE = {"min_p_genuine": 0.35, "min_p_take": 0.20, "max_p_toxic": 0.60}
+PAPER_GATE = {"min_p_genuine": 0.35, "min_p_take": 0.55, "max_p_toxic": 0.60}
 """paper 的临时推荐门槛（各持仓档一样），盖在档位默认上面；配置文件写了的仍优先。
-2026-10-24 Aaron（按 125 个本地信号回测）：模拟盘 做 0.20、真 0.35、毒 0.60；方向跟档位 0.45。
+2026-10-24 Aaron（按 125 个本地信号回测）：模拟盘 真 0.35、毒 0.60；方向跟档位 0.45。
+同日拍板人改成只问一道「做不做」（``gate_questions = "one"``），做 ≥ 0.55；真 / 毒 / 方向只在
+旧的 6 道题问法下生效。
 上面两组是 testnet / live 的推荐，等 ``jiaoyi jev-backtest`` 攒够样本校准后再改。"""
 
 HOLD: dict[str, dict[Section, dict[str, Any]]] = {

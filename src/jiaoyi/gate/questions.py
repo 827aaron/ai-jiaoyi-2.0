@@ -18,12 +18,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
 from jiaoyi.contracts import (
     ENTRY_CHOICES,
+    ENTRY_ONE,
     HOLD_CHOICES,
     AgainstSignalEvent,
     BattleCard,
@@ -38,12 +39,14 @@ from jiaoyi.contracts import (
     PositionRecord,
     Side,
 )
+from jiaoyi.gate.context import HORIZONS, EntryExtras, Horizon, horizon_for, horizon_words
 
-TEMPLATE_VERSION = "q5"
+TEMPLATE_VERSION = "q6"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
-SNAPSHOT_SCHEMA = "s4"
+SNAPSHOT_SCHEMA = "s5"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
-MAX_SNAPSHOT_CHARS = 2400
+MAX_SNAPSHOT_CHARS = 3200
+"""一道题问法加了技术面、成交流、衍生品、完整作战卡，中位约 1750 字，最长约 2600（spec §3e）。"""
 
 # 每个模板版本登记一次指纹，历史版本不删，方便对照旧日志
 KNOWN_TEMPLATES: dict[str, str] = {
@@ -56,6 +59,9 @@ KNOWN_TEMPLATES: dict[str, str] = {
     # 管家方案 E（Aaron 10-24）：持仓快照加进场价 / 最高浮盈 / 回吐 / R / 扣费后 / 历次浮盈、
     # 进场理由、移动止损状态、预测员；第 1、3 题措辞改；进场题目和快照不变
     "q5": "359a65892452",
+    # 拍板人一道题（Aaron 10-24）：只问「做不做」，按持仓档问时长（2h 档问 30 分钟）；快照加
+    # 技术面 / 成交流 / 衍生品 / 24 小时行情 / 完整作战卡，不带预测员；上限 3200 字
+    "q6": "b514926fcf43",
 }
 
 _ENTRY_GOAL = (
@@ -114,6 +120,50 @@ ENTRY_PROMPTS: dict[EntryQuestion, str] = {
     EntryQuestion.SIZE: "How large should the position be within today's allowed sizes?",
 }
 
+_ONE_TAKE = (
+    "Should we open this trade in direction `side` right now? Judge it on the next {H} after "
+    "round-trip fees (about 10 bps); after that a trailing stop and a position manager handle "
+    "the exit. Take it only if all of these hold together: price is likely to be further in "
+    "direction `side` in {H} by more than fees; the trigger is a genuine move backed by flow, "
+    "not a fake-out; and the counterparty flow is not toxic (informed traders or a liquidity "
+    "trap that runs us over right after entry). Weigh the longer context in `tech`: whether the "
+    "{mid_words} trend (`tech.trend_{mid}`, `tech.chg_{mid}_bps`) points in direction `side`, "
+    "whether the {rsi_short_words} RSI (`tech.rsi14_{rsi_short}`) leans in direction `side`, "
+    "and whether BTC's last {mid_last} (`tech.btc_{mid}_bps`) moved the same way. Inputs: "
+    "`sig`/`why` say what fired; `ret*_bps`, `vol_x` (1m volume vs average), `buy` (taker buy "
+    "share, 1m), `cvd30_k` (taker buy minus sell, last 30s, kUSDT), `liq_*_k` (liquidations 1m, "
+    "kUSDT), `fund_bps`, `atr_bps`; when present: `vol10_x`, `oi15`/`oi60`/`oi4h` open interest "
+    "change %, `top_ls`/`crowd_ls` long/short ratios, `div4h`, `btc5z` BTC 5-minute move in "
+    "noise units; `book` has spread, imbalance, order-flow imbalance and depth; `card` is "
+    "today's strategist plan for this coin: bias, the strategist's own reason (`card.reason`), "
+    "the entry zone, key levels with type (support/resistance) as bps from price, "
+    "stop/take-profit ranges, size cap, which signal types it allows, how old the plan is, and "
+    "the meeting's market view (`card.regime`). `tech` (when present) = technical context from "
+    "5-minute candles: price change and trend (up/down/flat) over {periods}, RSI(14) on "
+    "{rsi_short} and {rsi_long} candles, where price sits in its recent range (`range_hours` "
+    "long, 0 = low, 100 = high), distance from today's VWAP in bps, distance to the nearest "
+    "card key level above and below in ATR units, and BTC's {mid} change in bps."
+    # 下面这句是快环加的：spec §3 的新块原文没说明，没测过，和 §3 一样要上线后验证
+    " `flow` (when present) = taker flow over 5m/15m/1h: buy minus sell (`cvd_*_k`, kUSDT), "
+    "taker buy share (`buy_*`), Binance's taker buy/sell volume ratio (`taker_ratio_1h`/"
+    "`taker_ratio_4h`), large trades of at least 10k USDT in the last 15 minutes (`big_15m`: "
+    "buys, sells, share of turnover %), and liquidations in the last 15 minutes "
+    "(`liq_15m_long_k`/`liq_15m_short_k`); `book.imb_1m`/`book.imb_5m` = average book "
+    "imbalance over 1 and 5 minutes; `deriv` = mark minus index premium in bps, minutes to the "
+    "next funding, the last funding rates in bps (oldest first), top-trader account long/short "
+    "ratio, and auto-deleveraging risk; `day` = 24h change %, 24h turnover in million USDT, and "
+    "bps from price to the 24h high and low."
+)
+"""拍板人一道题（Aaron 10-24「改成一题」）。原文见 spec；「30 minutes」、周期和键名按持仓档替换
+（``take_prompt``），不手写多份。预测员不进快照（Aaron「不要加预测员的」），所以去掉了原文
+里说明 ``kronos`` 的半句。"""
+
+
+def take_prompt(h: Horizon) -> str:
+    """按持仓档出「做不做」的题目说明。"""
+    return _ONE_TAKE.format(**horizon_words(h))
+
+
 HOLD_PROMPTS: dict[HoldQuestion, str] = {
     HoldQuestion.THESIS_INTACT: (
         "Is the reason we entered this position (`entry.sig`, `entry.why`) still valid? "
@@ -166,7 +216,22 @@ CRITERIA: dict[str, dict[str, str]] = {
 }
 
 
-def entry_questions() -> list[JevQuestion]:
+GateQuestions = str
+"""``"one"``：一道「做不做」（+ 止损档、仓位档两题给保镖）；``"six"``：旧的 6 道题（回放对照）。"""
+
+
+def entry_questions(mode: GateQuestions = "six", hold_min: int = 120) -> list[JevQuestion]:
+    """``mode="one"`` 时 ``take`` 用按持仓档的一道题说明，只问 ``ENTRY_ONE``。"""
+    if mode == "one":
+        take = take_prompt(horizon_for(hold_min))
+        return [
+            JevQuestion(
+                id=q.value,
+                prompt=take if q == EntryQuestion.TAKE else ENTRY_PROMPTS[q],
+                choices=ENTRY_CHOICES[q],
+            )
+            for q in ENTRY_ONE
+        ]
     return [
         JevQuestion(id=q.value, prompt=ENTRY_PROMPTS[q], choices=ENTRY_CHOICES[q])
         for q in EntryQuestion
@@ -258,27 +323,114 @@ def _card_block(card: BattleCard | None, symbol: str, px: float) -> dict[str, An
     }
 
 
+def _js(d: dict[str, Any]) -> str:
+    return json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+
+
 def _dump(d: dict[str, Any]) -> str:
-    s = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
-    if len(s) > MAX_SNAPSHOT_CHARS and isinstance(d.get("card"), dict):
-        d["card"].pop("regime", None)
-        d.pop("why", None)
-        s = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
-    for key in ("kronos", "book"):  # 还超就再去掉可有可无的块，免得硬截断成坏 JSON
+    """超长按顺序删：``card.regime`` → ``day`` → ``flow.big_15m`` → ``kronos`` → ``book``
+    （spec §3e），再不行删 ``why`` 和 ``card.reason``，免得硬截断成坏 JSON。"""
+    s = _js(d)
+    card = d.get("card")
+    steps: list[Callable[[], object]] = [
+        lambda: card.pop("regime", None) if isinstance(card, dict) else None,
+        lambda: d.pop("day", None),
+        lambda: d["flow"].pop("big_15m", None) if isinstance(d.get("flow"), dict) else None,
+        lambda: d.pop("kronos", None),
+        lambda: d.pop("book", None),
+        lambda: d.pop("why", None),
+        lambda: card.pop("reason", None) if isinstance(card, dict) else None,
+        lambda: d.pop("deriv", None),  # 正常到不了这里（最长约 2600 字）；兜底别出坏 JSON
+        lambda: d.pop("flow", None),
+        lambda: d.pop("tech", None),
+    ]
+    for step in steps:
         if len(s) <= MAX_SNAPSHOT_CHARS:
             break
-        if d.pop(key, None) is not None:
-            s = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+        if step() is not None:
+            s = _js(d)
     return s[:MAX_SNAPSHOT_CHARS]
+
+
+def _card_full(
+    card: BattleCard, symbol: str, px: float, hold_min: int, now: datetime
+) -> dict[str, Any]:
+    """一道题问法的完整作战卡（Aaron「加上我们出的卡」，spec §3d）。"""
+    cs = card.for_symbol(symbol)
+    if cs is None:
+        return {"status": "symbol_not_in_card", "regime": card.regime[:200]}
+    d: dict[str, Any] = {"bias": cs.bias.value, "reason": cs.reason[:200]}
+    if cs.entry_zone is not None:
+        lo, hi = _bps(cs.entry_zone.min, px), _bps(cs.entry_zone.max, px)
+        d["entry_zone_bps"] = [lo, hi]
+        d["in_zone"] = cs.entry_zone.contains(px)
+    d["levels"] = [[_bps(lv.price, px), lv.kind.value] for lv in cs.key_levels][:6]
+    d["stop_atr"] = [cs.stop_atr.min, cs.stop_atr.max]
+    d["tp_r"] = [cs.take_profit_r.min, cs.take_profit_r.max]
+    d["size_max"] = cs.size_tier_max.value
+    d["signals"] = [k.value for k in cs.allowed_signals]
+    issued = cs.issued_at or card.created_at
+    d["age_min"] = round((now - issued).total_seconds() / 60.0)
+    expires = cs.expires_at or card.expires_at
+    d["left_min"] = round((expires - now).total_seconds() / 60.0)
+    d["hold"] = f"{hold_min // 60}h" if hold_min % 60 == 0 else f"{hold_min}m"
+    d["regime"] = card.regime[:200]
+    return d
 
 
 DEFAULT_HOLD_MIN = 120
 
 
+def entry_levels_bps(signal: CandidateSignal, card: BattleCard) -> list[float]:
+    """作战卡关键位离触发价多少基点（技术面块算「离最近关键位几个 ATR」用）。"""
+    cs = card.for_symbol(signal.symbol)
+    px = signal.features.last_price
+    return [] if cs is None else [_bps(lv.price, px) for lv in cs.key_levels]
+
+
+def entry_atr_bps(signal: CandidateSignal) -> float:
+    f = signal.features
+    return _r(_stop_atr(f) / f.last_price * 1e4) if f.last_price > 0 else 0.0
+
+
+def entry_snapshot_one(
+    signal: CandidateSignal,
+    card: BattleCard,
+    hold_min: int = DEFAULT_HOLD_MIN,
+    extras: EntryExtras | None = None,
+) -> str:
+    """一道题问法的进场快照：市场块 + 完整作战卡 + 技术面 / 成交流 / 衍生品 / 24 小时行情。
+
+    不带预测员（Aaron 10-24：预测员只在保镖那里按方向加分）。盘口失衡用 1 / 5 分钟平均，
+    不用一瞬间的 ``imb``。"""
+    f = signal.features
+    d: dict[str, Any] = {
+        "sym": signal.symbol,
+        "side": "long" if signal.side_hint == Side.LONG else "short",
+        "sig": signal.kind.value,
+        "why": signal.trigger_desc[:120],
+        "hold_min": hold_min,
+        **market_block(f),
+    }
+    blocks = extras.blocks if extras is not None else {}
+    book = d.get("book")
+    if isinstance(book, dict):
+        book.pop("imb", None)
+        for k, v in (blocks.get("book_imb") or {}).items():
+            book[f"imb_{k}"] = v
+    for key in ("tech", "flow", "deriv", "day"):
+        if blocks.get(key):
+            d[key] = json.loads(json.dumps(blocks[key]))  # 拷一份：超长删键不动日志里的原值
+    d["card"] = _card_full(card, signal.symbol, f.last_price, hold_min, signal.ts)
+    return _dump(d)
+
+
 def entry_snapshot(
     signal: CandidateSignal, card: BattleCard, hold_min: int = DEFAULT_HOLD_MIN
 ) -> str:
-    """``hold_min``：单笔最长持仓（分钟，``fast_loop.time_limit_s`` / 60），问题按它问时间。"""
+    """旧的 6 道题问法的进场快照（``gate_questions = "six"``，回放对照用）。
+
+    ``hold_min``：单笔最长持仓（分钟，``fast_loop.time_limit_s`` / 60），问题按它问时间。"""
     f = signal.features
     d: dict[str, Any] = {
         "sym": signal.symbol,
@@ -400,6 +552,7 @@ def template_fingerprint() -> str:
     """问题措辞、选项说明和快照格式的哈希（前 12 位）。"""
     payload = {
         "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
+        "entry_one": [take_prompt(h) for _, h in HORIZONS],
         "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
         "criteria": CRITERIA,
         "snapshot": SNAPSHOT_SCHEMA,
@@ -416,17 +569,18 @@ def template_dump() -> dict[str, Any]:
         "fingerprint": template_fingerprint(),
         "snapshot_schema": SNAPSHOT_SCHEMA,
         "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
+        "entry_one": {str(h.minutes): take_prompt(h) for _, h in HORIZONS},
         "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
         "criteria": CRITERIA,
     }
 
 
 def jev_log_fields(
-    request: JevRequest | None, resp: JevResponse
+    request: JevRequest | None, resp: JevResponse, extra: Mapping[str, Any] | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """一次 Jev 调用写进 ``DecisionRecord`` 的 ``input`` / ``output``（拍板人和管家共用同一格式）。
 
-    ``input.jev``：模板版本、指纹、请求号、类型、问题编号、完整快照。
+    ``input.jev``：模板版本、指纹、请求号、类型、问题编号、完整快照；一道题问法还有 ``extra``。
     ``output.jev``：是否成功、错误、模型版本、延迟、花费、每个问题每个选项的概率。
     ``output.usage``：token 用量 ``{input_tokens, output_tokens, reasoning_tokens}``（面板 AI
     费用详情读这里）；没真正调用时为 None。
@@ -444,6 +598,8 @@ def jev_log_fields(
             questions=[q.id for q in request.questions],
             snapshot=request.snapshot,
         )
+    if extra is not None:
+        inp["extra"] = dict(extra)  # 一道题问法的额外原始值（含快照超长删掉的），上线后逐项验证
     out: dict[str, Any] = {
         "ok": resp.ok,
         "error": resp.error,

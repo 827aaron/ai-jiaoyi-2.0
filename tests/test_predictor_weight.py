@@ -38,11 +38,11 @@ def _take(p: float) -> c.JevResponse:
     ("side", "p_up", "take", "approved"),
     [
         (c.Side.LONG, 1.0, 0.55, True),  # 同向：0.55 + 0.10 = 0.65 ≥ 0.6
-        (c.Side.LONG, 0.0, 0.65, False),  # 反向：0.65 − 0.10 = 0.55 < 0.6
-        (c.Side.LONG, 0.75, 0.65, False),  # 不到 1.0 都算看跌：0.65 − 0.10 < 0.6
+        (c.Side.LONG, 0.0, 0.65, True),  # 反向不扣（Aaron 10-24）：0.65 ≥ 0.6
+        (c.Side.LONG, 0.75, 0.55, False),  # 不到 1.0 都算看跌：不加分，0.55 < 0.6
         (c.Side.SHORT, 0.0, 0.55, True),  # 做空看跌 = 同向
         (c.Side.SHORT, 0.75, 0.55, True),  # 0.75 也算看跌，做空同向
-        (c.Side.SHORT, 1.0, 0.65, False),
+        (c.Side.SHORT, 1.0, 0.55, False),  # 反向不加也不扣
     ],
 )
 def test_nudge_moves_take_only(
@@ -89,28 +89,28 @@ def test_record_has_raw_and_adjusted(tmp_path: Path, now: datetime) -> None:
         Lots(),
         RoleRecorder(c.Role.RISK_GUARD, log),
     )
-    v = g.review(_with_forecast(signal(now), 0.0), _take(0.65), card(now), account(now), now)
-    assert any("“做”概率 0.55（预测员 -0.10） 低于门槛 0.6" in r for r in v.reasons), v.reasons
+    v = g.review(_with_forecast(signal(now), 1.0), _take(0.45), card(now), account(now), now)
+    assert any("“做”概率 0.55（预测员 +0.10） 低于门槛 0.6" in r for r in v.reasons), v.reasons
     g.review(signal(now), _take(0.65), card(now), account(now), now)
     a, b = log.read_day(now.date().isoformat())
     d = a.output["detail"]
-    assert d["predictor"].startswith("反向") and d["predictor_p_up"] == 0.0
-    assert d["predictor_nudge"] == pytest.approx(-0.1)
-    assert d["take_raw"] == 0.65 and d["take_adj"] == pytest.approx(0.55)
+    assert d["predictor"].startswith("同向") and d["predictor_p_up"] == 1.0
+    assert d["predictor_nudge"] == pytest.approx(0.1)
+    assert d["take_raw"] == 0.45 and d["take_adj"] == pytest.approx(0.55)
     assert b.output["detail"]["predictor"] == "没有预测" and "take_raw" in b.output["detail"]
 
 
 @pytest.mark.parametrize(
-    ("p_up", "nudge"), [(1.0, 0.1), (0.75, -0.1), (0.5, -0.1), (0.25, -0.1), (0.0, -0.1)]
+    ("p_up", "nudge"), [(1.0, 0.1), (0.75, 0.0), (0.5, 0.0), (0.25, 0.0), (0.0, 0.0)]
 )
 def test_only_full_up_counts_as_up(
     tmp_path: Path, now: datetime, p_up: float, nudge: float
 ) -> None:
-    """Aaron 10-24：只有报 100% 才算看涨，0 / 0.25 / 0.5 / 0.75 都按看跌挪。"""
+    """Aaron 10-24：只有报 100% 才算看涨，0 / 0.25 / 0.5 / 0.75 都算看跌；和卡相反不扣分。"""
     log = JsonlDecisionLog(tmp_path)
     g = _Guard(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
     g.review(_with_forecast(signal(now), p_up), _take(0.65), card(now), account(now), now)
     [rec] = log.read_day(now.date().isoformat())
     d = rec.output["detail"]
     assert d["predictor_nudge"] == pytest.approx(nudge)
-    assert d["predictor"].startswith("同向（看涨" if nudge > 0 else "反向（看跌")
+    assert d["predictor"].startswith("同向（看涨" if nudge > 0 else "不同向，不扣分（看跌")

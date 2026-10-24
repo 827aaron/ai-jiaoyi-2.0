@@ -342,15 +342,16 @@ def _snapshot_pnl(rec: Mapping[str, Any]) -> float | None:
 
 
 def _entry_block(rec: Mapping[str, Any]) -> dict[str, Any] | None:
-    """拍板记录 → ``{sig, why, p_real, p_take}``；没真正问过拍板人（排队那条）返回 None。"""
+    """拍板记录 → ``{sig, why, p_real, p_take}``；没真正问过拍板人（排队那条）返回 None。
+
+    一道题问法（q6 起）没有「真」，就不写 ``p_real``。"""
     try:
         snap = json.loads(rec["input"]["jev"]["snapshot"])
         answers = rec["output"]["jev"]["answers"]
-        return {
-            "sig": snap["sig"],
-            "why": str(snap.get("why", ""))[:100],
-            "p_real": round(float(answers["genuine"]["real"]), 2),
-            "p_take": round(float(answers["take"]["take"]), 2),
-        }
+        out: dict[str, Any] = {"sig": snap["sig"], "why": str(snap.get("why", ""))[:100]}
+        if "genuine" in answers:
+            out["p_real"] = round(float(answers["genuine"]["real"]), 2)
+        out["p_take"] = round(float(answers["take"]["take"]), 2)
+        return out
     except (KeyError, TypeError, ValueError):
         return None

@@ -78,6 +78,7 @@ from jiaoyi.execution.user_stream import (
     LIVE_WS_BASE,
     UserStream,
 )
+from jiaoyi.gate.context import EntryContextSource
 from jiaoyi.gate.entry import JevEntryGate
 from jiaoyi.gate.jev import decision_model_from_config
 from jiaoyi.gate.rule_model import RuleDecisionModel
@@ -104,6 +105,7 @@ from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.keeper.stub import StubKeeper
 from jiaoyi.market.binance_ws import BinanceFuturesFeed
 from jiaoyi.market.derivs import DerivsFeed
+from jiaoyi.market.derivs import rest_fetch as derivs_rest
 from jiaoyi.market.features import RollingFeatureEngine
 from jiaoyi.market.stub import StubMarketDataFeed
 from jiaoyi.patrol.rules import RulePatrol
@@ -608,6 +610,18 @@ def build_modules(
             max_concurrent=app_cfg.jev_max_concurrent,
             # 排队再等就来不及在信号有效期内判完（保镖按年龄拒，白花一次 Jev）
             max_wait_s=max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0),
+            questions=fast.gate_questions,
+            # 一道题问法的额外快照：技术面 / 成交流 / 盘口平均（内存）
+            # + 信号来时补拉的 REST（实盘行情才拉）
+            context=EntryContextSource(
+                features.entry_context,
+                adl=derivs.adl_risk if derivs is not None else None,
+                fetch=derivs_rest if isinstance(feed, BinanceFuturesFeed) else None,
+                # 补拉最多等 1 秒，但不能把信号拖过有效期（有效期 − 拍板超时）
+                timeout_s=min(
+                    1.0, max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0)
+                ),
+            ),
         )
         keeper = JevKeeper(
             model,

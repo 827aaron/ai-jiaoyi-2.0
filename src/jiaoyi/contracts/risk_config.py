@@ -215,7 +215,25 @@ class FastLoopConfig(Contract):
     jev_error_cooldown_s: int = Field(default=60, ge=5, le=3600)
     # 概率门槛只给推荐（档位默认），0–1 之间都收（Aaron：用户设置就是上限，只有不合理才失败）
     min_p_genuine: float = Field(default=0.6, ge=0.0, le=1.0, description="“真信号”概率门槛。")
-    min_p_take: float = Field(default=0.6, ge=0.0, le=1.0, description="“做”概率门槛。")
+    min_p_take: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="拍板人：做的把握至少多少。一道题问法下这是唯一的放行门槛"
+        "（Aaron 10-24 定 0.55），预测员的加减分加在这个概率上。",
+    )
+    predictor_nudge_mode: Literal["card_agree", "symmetric"] = Field(
+        default="card_agree",
+        description="预测员什么时候算和信号一致（一致就给「做」加分，不一致不扣）："
+        "card_agree = 只有报 1.0（所有路径收在现价之上）算看涨，其余都算看跌，所以做空几乎总加分；"
+        "symmetric = 做多要报 1.0、做空要报 0（所有路径都在现价之下）才加，其余不加。",
+    )
+    gate_questions: Literal["one", "six"] = Field(
+        default="one",
+        description="拍板人怎么问：one = 只问一道「做不做」（按之后 30 分钟、扣手续费后判断，"
+        "方向、真假、盘口有毒都并进这一道），只看 min_p_take；six = 旧的 6 道题，"
+        "真信号 / 方向 / 有毒三个门槛也生效（留着回放对照用）。止损档、仓位档两题两种都问。",
+    )
     min_p_direction: float = Field(
         default=0.45, ge=0.0, le=1.0, description="信号方向（up/down）的概率门槛。"
     )
@@ -225,9 +243,9 @@ class FastLoopConfig(Contract):
         ge=0.0,
         le=1.0,
         description="预测员（Kronos）意见占几成：拿“做”概率和门槛比之前，按预测员的看法挪一点："
-        "只有看涨概率报 1.0 才算看涨，其余都算看跌；和信号同向加 这个数 × 0.5，反向减；"
-        "0.2 时挪 0.10。"
-        "只动“做”这一道门，拍板人的提示词不变。0 = 不听；没有有效预测时不挪。",
+        "只有看涨概率报 1.0 才算看涨，其余都算看跌；与卡方向一致时加 这个数 × 0.5"
+        "（0.2 时加 0.10），相反不扣。"
+        "只动“做”这一道门，预测员不进拍板人的快照。0 = 不听；没有有效预测时不挪。",
     )
     gate_record_only: bool | None = Field(
         default=None,

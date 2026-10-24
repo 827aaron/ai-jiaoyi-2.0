@@ -56,6 +56,14 @@ ENTRY_CHOICES: dict[EntryQuestion, tuple[str, ...]] = {
     EntryQuestion.SIZE: ("S", "M", "L"),
 }
 
+ENTRY_ONE: tuple[EntryQuestion, ...] = (
+    EntryQuestion.TAKE,
+    EntryQuestion.STOP_WIDTH,
+    EntryQuestion.SIZE,
+)
+"""拍板人「一道题」问法（Aaron 2026-10-24）：放不放行只看 ``take``；``stop_width`` / ``size``
+只给保镖定止损档和仓位档，不参与放行。旧的 6 道题（``ENTRY_CHOICES`` 全部）仍可用。"""
+
 HOLD_CHOICES: dict[HoldQuestion, tuple[str, ...]] = {
     HoldQuestion.THESIS_INTACT: ("yes", "no"),
     HoldQuestion.ADVERSE_RISK: ("low", "high"),
@@ -70,7 +78,7 @@ class JevQuestion(Contract):
 
 
 class JevRequest(Contract):
-    """一次调用。``snapshot`` 是压缩后的状态文本，控制在约 400 token 以内。"""
+    """一次调用。``snapshot`` 是压缩后的状态文本，最多 3200 字（一道题问法加了技术面等块）。"""
 
     request_id: str = Field(min_length=1)
     kind: Literal["entry", "hold"]
@@ -78,7 +86,7 @@ class JevRequest(Contract):
     ts: AwareDatetime
     signal_id: str | None = None
     position_id: str | None = None
-    snapshot: str = Field(min_length=1, max_length=2400)
+    snapshot: str = Field(min_length=1, max_length=3200)
     questions: list[JevQuestion] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -89,7 +97,8 @@ class JevRequest(Contract):
             else {q.value: c for q, c in HOLD_CHOICES.items()}
         )
         got = {q.id: q.choices for q in self.questions}
-        if got != expected:
+        one = {q.value: ENTRY_CHOICES[q] for q in ENTRY_ONE}
+        if got != expected and not (self.kind == "entry" and got == one):
             raise ValueError(f"{self.kind} 请求的问题和选项必须正好是 {expected}")
         if self.kind == "entry" and not self.signal_id:
             raise ValueError("开仓请求必须带 signal_id")
