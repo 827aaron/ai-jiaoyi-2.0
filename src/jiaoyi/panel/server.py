@@ -58,6 +58,7 @@ from jiaoyi.panel.pages import (
     build_settings,
     build_signal,
     build_team,
+    prompts_info,
 )
 from jiaoyi.risk.guard import blend_atr, session_factor
 from jiaoyi.slow.settings import slow_defaults
@@ -342,7 +343,16 @@ def create_app(
             "min_p_direction": fl.min_p_direction,
             "max_p_toxic": fl.max_p_toxic,
         }
-        return build_team(files, clock(), role, ac.predictor.mode, th)
+        page = build_team(files, clock(), role, ac.predictor.mode, th)
+        return page.model_copy(update={"prompts": prompts_info(files)})
+
+    @api.get("/api/prompts")
+    async def prompts() -> dict[str, Any]:
+        """军师团现在生效的提示词原文（data/prompts_active.json），只读。"""
+        got = files.prompts_active()
+        if got is None:
+            raise HTTPException(404, "还没有提示词记录：军师团引擎启动后才写")
+        return got[0]
 
     @api.get("/api/meeting/{symbol}")
     async def meeting(symbol: str) -> Meeting:
@@ -422,6 +432,7 @@ def create_app(
                 "writable": config_paths is not None and error is None,
                 "file_error": error,
                 "changes": actions.recent_changes(data_dir),
+                "prompts": prompts_info(files),
             }
         )
 

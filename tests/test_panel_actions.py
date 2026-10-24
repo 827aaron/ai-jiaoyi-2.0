@@ -873,3 +873,17 @@ def test_restore_key_only_some_holds_give(tmp_path: Path) -> None:
     actions.update_config(paths, data, "fast_loop", {"patrol_alert_pct_1m": 1.2}, PW, NOW)
     keys = {c["key"] for c in actions.clear_profile_pins(paths, data, PW, NOW)}
     assert "patrol_alert_pct_1m" in keys
+
+
+def test_prompts_active_shown_read_only(tmp_path: Path) -> None:
+    """军师团现在用的提示词：设置页 / 团队页报档位，/api/prompts 给原文；没文件时 404。"""
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        assert client.get("/api/settings").json()["prompts"] is None
+        assert client.get("/api/prompts").status_code == 404
+        body = {"hold": "2h", "style": "short", "shared": "永续合约……", "pick": "挑币 {now}"}
+        (data / "prompts_active.json").write_text(json.dumps(body, ensure_ascii=False))
+        info = client.get("/api/settings").json()["prompts"]
+        assert (info["hold"], info["style"]) == ("2h", "short") and info["written_at"]
+        assert client.get("/api/team?role=commander").json()["prompts"]["hold"] == "2h"
+        assert client.get("/api/prompts").json() == body

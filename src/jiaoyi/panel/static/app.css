@@ -592,3 +592,7 @@ table.wrap1 td:first-child { white-space: normal; }
   .tier-row .tv { max-width: 52vw; }
 }
 @media (prefers-reduced-motion: reduce) { .tier { transition: none; } .tier:hover, .tier.sel { transform: none; } }
+.prompt-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+section.card > .prompt-line { padding: 2px 0; }
+.dlg.wide { width: min(860px, 100%); }
+.json.prompt { flex-shrink: 0; max-height: 360px; word-break: normal; overflow-wrap: anywhere; }

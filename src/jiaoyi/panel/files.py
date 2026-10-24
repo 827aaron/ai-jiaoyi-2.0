@@ -16,7 +16,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +187,18 @@ class PanelFiles:
             return None
         raw = self._json(f"gate_calibration/{hold}.json")
         return raw if isinstance(raw, dict) else None
+
+    def prompts_active(self) -> tuple[dict[str, Any], datetime] | None:
+        """军师团引擎启动时写的 data/prompts_active.json（生效的提示词原文）和写的时间。"""
+        path = self.root / "prompts_active.json"
+        raw = self._json("prompts_active.json")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        except OSError:
+            return None
+        return raw, at
 
     def runtime(self) -> dict[str, Any]:
         """主程序这次启动写的 runtime.json（启动时间、桩角色等）；没有或读不出就是空的。"""

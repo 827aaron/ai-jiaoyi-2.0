@@ -168,6 +168,28 @@ class PredictorMeeting(BaseModel):
     """会上给的新方向。"""
 
 
+class PromptsInfo(BaseModel):
+    """军师团现在用的提示词是哪一档（data/prompts_active.json）；原文走 /api/prompts。"""
+
+    hold: str
+    """按哪个最长持仓档写的提示词。"""
+    style: str
+    """short / mid / long（短线 / 中线 / 长线写法）。"""
+    written_at: datetime
+    """引擎启动写文件的时间（= 这份提示词从什么时候开始用）。"""
+
+
+def prompts_info(files: PanelFiles) -> PromptsInfo | None:
+    got = files.prompts_active()
+    if got is None:
+        return None
+    raw, at = got
+    hold, style = raw.get("hold"), raw.get("style")
+    if not isinstance(hold, str) or not isinstance(style, str):
+        return None
+    return PromptsInfo(hold=hold, style=style, written_at=at)
+
+
 class TeamPage(BaseModel):
     roles: list[RoleCard]
     selected: Role
@@ -194,6 +216,8 @@ class TeamPage(BaseModel):
     """最近 30 分钟预测员申请、已经开完的临时会（新的在前）；流程图上预测员 → 军师团的线有才亮。"""
     against_checks: list[AgainstCheck] = []
     """最近 30 分钟叫管家急查的反向信号和管家的判断（新的在前），不被例行复查冲掉。"""
+    prompts: PromptsInfo | None = None
+    """军师团现在用的提示词档（团队页军师团 / 总盘会显示）。"""
 
 
 def build_positions(
@@ -1361,6 +1385,8 @@ class SettingsPage(BaseModel):
     tiers_cautions: list[str] = []
     """分档交易设置里用不上或不像设计稿的地方（只提示）。"""
     profile: ProfileInfo | None = None
+    prompts: PromptsInfo | None = None
+    """军师团现在用的提示词档（引擎启动时写的；换档后要重启才变）。"""
     keys: dict[str, bool]
     key_needs: dict[str, KeyNeed] = {}
     """按当前模式和通道：必须 / 可选 / 用不到。"""
