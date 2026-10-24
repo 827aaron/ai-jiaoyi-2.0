@@ -35,6 +35,7 @@ from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meetings import STAGES, read_meeting
 from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
+from jiaoyi.panel.trailing import TrailEstimate
 
 STALE_S = 120.0
 """主循环每 30 秒心跳一次；4 个周期没更新就当掉线。"""
@@ -168,6 +169,14 @@ class PositionView(BaseModel):
     """保镖算的止损距离（%），不用回填后的价格倒推；旧记录为 None。"""
     lifeboat_stop_pct: float | None = None
     """保镖算的保命止损距离（%）。"""
+    trailing_activation_pct: float | None = None
+    """移动止损启动线（%，扣过开仓手续费的盈亏）；None = 这笔没带移动止损。"""
+    trailing_stop_pct: float | None = None
+    """移动止损回撤距离（%）。"""
+    entry_fee_pct: float | None = None
+    """开仓手续费占名义的百分比（账本实收，没有按吃单费率估），算启动价用。"""
+    trail: TrailEstimate | None = None
+    """持仓页按 K 线估的启动价 / 移动止损价（``jiaoyi.panel.trailing``）；总览不算。"""
     pnl_pct: float | None = None
     """浮盈占名义的百分比（不乘杠杆）。"""
     fees_est_usdt: float | None = None
@@ -433,6 +442,14 @@ def position_views(
     for r in records:
         if r.role is Role.KEEPER and r.position_id:
             keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
+    # 账本加移动止损字段之前开的仓：从保镖放行记录（output 顶层是 OrderIntent）补
+    trail_of: dict[str, tuple[float, float]] = {}
+    for r in records:
+        o = r.output
+        if r.role is Role.RISK_GUARD and o.get("intent_id") and o.get("trailing_stop_pct"):
+            act, delta = o.get("trailing_activation_pct"), o.get("trailing_stop_pct")
+            if isinstance(act, int | float) and isinstance(delta, int | float):
+                trail_of[str(o["intent_id"])] = (float(act), float(delta))
     out = []
     for p in sorted(live, key=lambda p: p.opened_at, reverse=True):
         sign = 1 if p.side.value == "long" else -1
@@ -456,6 +473,15 @@ def position_views(
             opened = p.fees_usdt or p.quantity * p.entry_price * bps / 10_000
             fees = opened + notional * bps / 10_000
         net = pnl - fees if pnl is not None and fees is not None else None
+        trail = (
+            (p.trailing_activation_pct, p.trailing_stop_pct)
+            if p.trailing_activation_pct is not None and p.trailing_stop_pct is not None
+            else trail_of.get(p.intent_id)
+        )
+        entry_fee_pct = None
+        if p.entry_price:
+            paid = p.fees_usdt / (p.quantity * p.entry_price) * 100 if p.fees_usdt else None
+            entry_fee_pct = paid if paid is not None else bps / 100
         out.append(
             PositionView(
                 position_id=p.position_id,
@@ -482,6 +508,9 @@ def position_views(
                 pnl_pct=pnl / notional * 100 if pnl is not None and notional else None,
                 stop_loss_pct=p.stop_loss_pct,
                 lifeboat_stop_pct=p.lifeboat_stop_pct,
+                trailing_activation_pct=trail[0] if trail else None,
+                trailing_stop_pct=trail[1] if trail else None,
+                entry_fee_pct=entry_fee_pct,
                 fees_est_usdt=fees,
                 net_unrealized_usdt=net,
                 net_pnl_pct=net / notional * 100 if net is not None and notional else None,

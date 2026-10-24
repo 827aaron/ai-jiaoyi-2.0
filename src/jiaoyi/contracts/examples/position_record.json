@@ -30,5 +30,7 @@
   "intended_price": 68050.0,
   "exit_price": null,
   "stop_loss_pct": 0.25,
-  "lifeboat_stop_pct": 0.375
+  "lifeboat_stop_pct": 0.375,
+  "trailing_activation_pct": null,
+  "trailing_stop_pct": null
 }

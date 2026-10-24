@@ -484,6 +484,23 @@ const signedPct = (a, b) => { const p = (a - b) / b * 100; return `${p >= 0 ? "+
 // 保镖算的距离（不随成交价回填变）：止损 / 保命在亏钱一侧，止盈在赚钱一侧
 const guardPct = (pct, side, loss) => `${(side === "long") === loss ? "−" : "+"}${pct.toFixed(2)}%`;
 const lbPct = p => p.lifeboat_stop_pct != null ? ` <span class="dim">${guardPct(p.lifeboat_stop_pct, p.side, true)}</span>` : "";
+// 移动止损：账本 / 保镖记录里的启动线和回撤距离 + 持仓页按 K 线估的状态（hummingbot 不吐当前移动止损价）
+const TRAIL_TIP = "按开仓以后的 1 分钟 K 线最高 / 最低估：执行器是逐笔看价，实际触发价可能差一点。盈利按扣过开仓手续费算。";
+function trailNote(p) {
+  const t = p.trail, act = `${(+p.trailing_activation_pct).toFixed(2)}%`, back = `${(+p.trailing_stop_pct).toFixed(2)}%`;
+  const head = `移动止损：赚到 ${act}（扣开仓手续费后）开始跟，之后离最高盈利 ${back} 跟着收紧，只往有利方向挪。`;
+  if (!t || t.active == null) return head + "现在 K 线拿不到，看不出启动没有。";
+  if (t.active) return `${head}已经启动：开仓以后最${p.side === "long" ? "高" : "低"} ${price(t.best_price, p.symbol)}，移动止损约 ${price(t.stop_price, p.symbol)}（估算）。`;
+  return `${head}还没启动：价格到 ${price(t.activation_price, p.symbol)} 才开始跟（开仓以后最${p.side === "long" ? "高" : "低"} ${price(t.best_price, p.symbol)}）。`;
+}
+function trailTag(p, brief) {
+  if (p.trailing_stop_pct == null) return `<div class="small dim" title="开仓那会儿移动止损没开（设置 → 持仓管家），这笔不会跟着收紧">没带移动止损</div>`;
+  const t = p.trail, act = `${(+p.trailing_activation_pct).toFixed(2)}%`, back = `${(+p.trailing_stop_pct).toFixed(2)}%`;
+  const tip = esc(`赚到 ${act} 开始跟，之后离最高盈利 ${back} 跟着收紧。${TRAIL_TIP}`);
+  if (!t || t.active == null) return `<div class="small dim" title="${tip}">移动止损 · 状态不知道（K 线拿不到）</div>`;
+  if (t.active) return `<div class="small" title="${tip}"><span class="pill p-accent">跟踪中</span>${brief ? "" : ` ${price(t.stop_price, p.symbol)}`} <span class="dim">估算</span></div>`;
+  return `<div class="small dim" title="${tip}"><span class="pill">未启动</span>${brief ? "" : ` 赚到 ${act} 开始跟`}</div>`;
+}
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
 // 系统值：持仓用持仓自己的开仓 / 止损 / 止盈；没持仓按现价 + ATR 估（双向只给距离）
@@ -1092,7 +1109,7 @@ P.positions = (arg) => {
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
-      <td class="r num">${price(p.stop_loss_price, p.symbol)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
+      <td class="r num">${price(p.stop_loss_price, p.symbol)}${trailTag(p)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
       <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
   // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
@@ -1105,7 +1122,7 @@ P.positions = (arg) => {
       <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
-        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
+        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
       <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
@@ -1124,7 +1141,8 @@ P.positions = (arg) => {
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span></span></div>
       <div class="chart" id="kchart-host"></div>
-      <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span></div>
+      <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${sel.trailing_stop_pct != null ? `<span><i style="border-color:var(--accent);border-style:solid"></i>移动止损（启动后，估算）</span><span><i style="border-color:var(--accent);opacity:.45"></i>启动线（赚到这里开始跟）</span>` : ""}</div>
+      ${sel.trailing_stop_pct != null ? `<div class="small dim trail-note">${trailNote(sel)}</div>` : ""}
       <div><div class="lbl">从信号到现在的每一步（今天）· 点一条看快照</div><div class="log trail">${trail || '<div class="dim">今天的日志里没有这笔的记录。</div>'}</div></div>
     </section>`;
 };
@@ -1194,7 +1212,9 @@ async function loadKlines(force) {
     return;
   }
   priceLines.forEach((l) => series.removePriceLine(l));
-  linePrices = [p.take_profit_price, p.entry_price, p.stop_loss_price, p.lifeboat_price];
+  const t = p.trail;
+  const trailLine = t && t.active ? t.stop_price : null, startLine = t && !t.active ? t.activation_price : null;
+  linePrices = [p.take_profit_price, p.entry_price, p.stop_loss_price, p.lifeboat_price, trailLine, startLine];
   const css = getComputedStyle(document.documentElement);
   const c = (v) => css.getPropertyValue(v).trim();
   const L = LightweightCharts.LineStyle;
@@ -1203,7 +1223,9 @@ async function loadKlines(force) {
     [p.entry_price, "开仓", c("--faint"), L.Solid],
     [p.stop_loss_price, "止损", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
-  ].filter(([v]) => v != null).map(([v, t, color, style]) => series.createPriceLine({ price: v, title: t, color, lineStyle: style, lineWidth: 1, axisLabelVisible: true }));
+    [trailLine, "移动止损", c("--accent"), L.Solid, 2],
+    [startLine, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
+  ].filter(([v]) => v != null).map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
   if (force || needFit) chart.timeScale().fitContent();
   needFit = false;
 }
