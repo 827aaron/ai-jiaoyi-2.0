@@ -174,3 +174,45 @@ def test_app_heartbeat_picks_up_detail() -> None:
     from jiaoyi.app import _SentinelDetail
 
     assert isinstance(trig(), _SentinelDetail)
+
+
+def test_session_cme_sunday_open() -> None:
+    # 芝加哥周日 17:00：夏令时 22:00 UTC，冬令时 23:00 UTC
+    summer = datetime(2026, 10, 25, 22, 3, tzinfo=UTC)
+    winter = datetime(2026, 11, 8, 22, 57, tzinfo=UTC)
+    assert session_event(summer, 5) is None  # 没开就不看
+    assert session_event(summer, 5, cme=True) == "CME 周日开盘"
+    assert session_event(winter, 5, cme=True) == "CME 周日开盘"
+    assert session_event(datetime(2026, 11, 8, 22, 3, tzinfo=UTC), 5, cme=True) is None
+    assert session_event(datetime(2026, 10, 26, 22, 0, tzinfo=UTC), 5, cme=True) is None  # 周一
+    # 原有时段不受影响
+    assert session_event(datetime(2026, 10, 22, 8, 3, tzinfo=UTC), 5, cme=True) == (
+        "资金费结算 08:00 UTC"
+    )
+
+
+def test_session_cme_switches() -> None:
+    on = FAST.model_copy(update={"session_cme_open": True})
+    assert c.FastLoopConfig.model_fields["session_cme_open_live"].default is False
+    assert RuleTrigger(on)._cme
+    assert not RuleTrigger(on, live=True)._cme  # 实盘 / 测试网默认不出
+    assert RuleTrigger(on.model_copy(update={"session_cme_open_live": True}), live=True)._cme
+    assert not RuleTrigger(FAST)._cme
+
+
+def test_session_cme_tiers() -> None:
+    from jiaoyi.core.profiles import HOLD
+
+    on = {h for h, p in HOLD.items() if p["fast_loop"]["session_cme_open"]}
+    assert on == {"30m", "1h", "2h"}
+
+
+def test_session_cme_signal_paper_only() -> None:
+    now = datetime(2026, 10, 25, 22, 2, tzinfo=UTC)
+    cd = card(now, allowed_signals=["session_event"])
+    f = features(now, vol_ratio_1m=2.5, ret_5m=0.004, realized_vol_5m=0.0004)
+    on = FAST.model_copy(update={"session_cme_open": True})
+    out = RuleTrigger(on).check(f, cd, now)
+    assert [(s.kind, s.side_hint) for s in out] == [(c.SignalKind.SESSION_EVENT, c.Side.LONG)]
+    assert "CME 周日开盘" in out[0].trigger_desc
+    assert RuleTrigger(on, live=True).check(f, cd, now) == []
