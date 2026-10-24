@@ -899,7 +899,10 @@ const WHO = {
 const MEET_STATUS = { running: ["正在开", "p-accent"], done: ["开完了", "p-long"], failed: ["没开成", "p-short"], stale: ["中断了", "p-warn"] };
 const meetPill = (s) => { const [t, k] = MEET_STATUS[s] || [s, ""]; return `<span class="pill ${k}">${t}</span>`; };
 const stageNo = (s) => Object.keys(STAGE).indexOf(s) + 1;
-const meetTime = (m) => (m.status === "running" && m.started_at ? `已开 ${dur(Date.now() - Date.parse(m.started_at))}` : m.started_at && (m.finished_at || m.updated_at) ? `${hm(m.started_at)} 开，用时 ${dur(Date.parse(m.finished_at || m.updated_at) - Date.parse(m.started_at))}` : "");
+// 开会用时：不到 1 分钟写秒，1 小时内写「X 分 Y 秒」，再长同 dur；花费不到 1 分钱写到 4 位小数
+const meetDur = (ms) => { const t = Math.max(0, Math.round(ms / 1000)); return t < 60 ? `${t} 秒` : t < 3600 ? `${Math.floor(t / 60)} 分 ${t % 60} 秒` : dur(ms); };
+const meetCost = (v) => `$${v.toFixed(v < 0.01 ? 4 : 2)}`;
+const meetTime = (m) => (m.status === "running" && m.started_at ? `已开 ${meetDur(Date.now() - Date.parse(m.started_at))}` : m.started_at && (m.finished_at || m.updated_at) ? `${hm(m.started_at)} 开，用时 ${meetDur(Date.parse(m.finished_at || m.updated_at) - Date.parse(m.started_at))}` : "");
 const meetBias = (m) => (m.bias ? (() => { const [t, k] = BIAS[m.bias] || [m.bias, ""]; return `<span class="pill ${k}">${t}</span>`; })() : "");
 
 // 军师团：只列各币的会；总盘会在团队图上单独点开
@@ -956,7 +959,7 @@ function meetingHtml(m) {
     return `<div class="lbl">${esc(stageName[st] || st || "其他")}</div>${items.map(([s, i]) => `<details class="say" data-step="${i}" ${S.meetOpen.has(i) ? "open" : ""}>
       <summary><b>${esc(whoName[s.who] || s.who || "—")}</b><span class="dim small">${s.ts ? hms(s.ts) : ""}</span><span class="dim small one">${esc(s.text.slice(0, 80))}</span></summary><div class="txt">${esc(s.text)}</div></details>`).join("")}`;
   }).join("");
-  return `<p class="dim">${meetPill(m.status)} ${meetBias(m)} ${meetTime(m)}${m.cost_usd ? ` · 花费 $${m.cost_usd.toFixed(2)}` : ""}${m.status === "running" ? " · 自动刷新" : ""}</p>
+  return `<p class="dim">${meetPill(m.status)} ${meetBias(m)} ${meetTime(m)}${m.cost_usd ? ` · 花费 ${meetCost(m.cost_usd)}` : ""}${m.status === "running" ? " · 自动刷新" : ""}</p>
     ${isMkt ? "" : `<div class="stgs">${chips}</div>`}
     ${m.status === "stale" ? '<div class="note warn">标着“正在开”，但 15 分钟没有新进展：多半是主程序重启把会打断了，下一轮会重开。</div>' : ""}
     ${m.error ? `<div class="note warn">出错：${esc(m.error)}</div>` : ""}
