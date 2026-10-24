@@ -244,12 +244,14 @@ class RiskGuardImpl:
         blocked: Callable[[], Mapping[str, str]] | None = None,
         adl_risk: Callable[[str], str | None] | None = None,
         live: bool = False,
+        halted: Callable[[str], str | None] | None = None,
     ) -> None:
         """``gate_record_only``：拍板人概率没过门槛也放行，只记「拍板本会拦」（paper 校准用）。
 
         ``blocked``：被封的币 → 原因（下架公告等），拒单时把原因写全；
         ``adl_risk``：币 → 币安自动减仓风险 ``low`` / ``medium`` / ``high``
-        （拿不到 None = 不挡）。"""
+        （拿不到 None = 不挡）；``halted``：币 → 合约临时不在交易的原因（只挡新开仓）。"""
+        self._halted = halted
         self._blocked = blocked
         self._adl = adl_risk
         self._live = live  # testnet / live：挂单等回踩还要 entry_limit_pullback_live
@@ -484,6 +486,9 @@ class RiskGuardImpl:
     def _symbol_filters(self, sym: str, now: datetime, reasons: list[str]) -> None:
         """「不做」过滤：要下架、刚上线、自动减仓风险高。数据拿不到就不挡。"""
         fast = self._fast
+        why_halted = self._halted(sym) if self._halted is not None else None
+        if why_halted:
+            reasons.append(f"{why_halted}，先不开新仓（恢复交易后自动放开）")
         lot = self._lots.lot_rules(sym)
         if lot is not None and lot.delist_at is not None and lot.delist_at - now <= DELIST_WINDOW:
             reasons.append(

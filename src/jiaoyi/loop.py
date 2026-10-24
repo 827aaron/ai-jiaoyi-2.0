@@ -52,7 +52,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
-from jiaoyi.market.binance_ws import ContractInfo
+from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
     ATR_PERIOD,
     BTC,
@@ -603,26 +603,32 @@ class Runner:
             self._watched = watch
 
     def on_contract_info(self, info: ContractInfo) -> None:
-        """币安合约信息推送：盯着的币 / 候选池的币 / 持仓的币要下架或不再交易 → 封新开仓。
+        """币安合约信息推送：盯着的币 / 候选池的币 / 持仓的币。
 
-        和新闻源（币安下架公告）走同一个 ``block_symbol``：卡里读成只看不做，已有持仓由持仓
-        管家平掉。推送是即时的，公告要轮询，所以这是更快的第二来源。"""
+        - 真下架（排了 7 天内的下架时间，或状态是交割 / 已关）：和新闻源（币安下架公告）走同一个
+          ``block_symbol``，卡里读成只看不做，已有持仓由持仓管家平掉，要手动解封。推送是即时的，
+          公告要轮询，所以这是更快的第二来源。
+        - 临时不在交易（结算中、待上线等）：只记进 ``app.halted``，保镖挡新开仓，已有持仓不动；
+          状态回到 TRADING 自动放开。"""
         now = self.app.clock()
+        sym = info.symbol
         soon = info.delist_at is not None and info.delist_at - now <= DELIST_WINDOW
-        if info.status == "TRADING" and not soon:
+        if not soon and info.status not in FINAL_STATUSES:
+            self._contract_halt(info)
             return
         ours = set(self._watched or set()) | {p.symbol for p in self.positions}
         if self.app.pool is not None:
             ours |= {e.symbol for e in self.app.pool.in_pool}
         cards = self.m.cards
-        if info.symbol not in ours or not isinstance(cards, _NewsAware):
+        if sym not in ours or not isinstance(cards, _NewsAware):
             return
-        if info.symbol in self.app.blocked_symbols():
+        self.app.halted.pop(sym, None)  # 封了就不用再记临时停
+        if sym in self.app.blocked_symbols():
             return
         if soon and info.delist_at is not None:
-            reason = f"币安合约信息：{info.symbol} 将于 {info.delist_at:%m-%d %H:%M} UTC 下架"
+            reason = f"币安合约信息：{sym} 将于 {info.delist_at:%m-%d %H:%M} UTC 下架"
         else:
-            reason = f"币安合约信息：{info.symbol} 状态变成 {info.status}，不再正常交易"
+            reason = f"币安合约信息：{sym} 状态变成 {info.status}（交割 / 下线），不再交易"
         cards.block_symbol(info.symbol, reason)
         self.app.save_blocked()
         self._spawn(
@@ -735,6 +741,18 @@ class Runner:
         ]
         if before - {p.position_id for p in self.positions}:
             self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
+
+    def _contract_halt(self, info: ContractInfo) -> None:
+        """临时不在交易 → 记进 ``app.halted``（只挡新开仓）；回到 TRADING → 放开。都只记日志。"""
+        sym, halted = info.symbol, self.app.halted
+        if info.status == "TRADING":
+            if halted.pop(sym, None) is not None:
+                log.info("%s 恢复交易（币安合约状态 TRADING），重新允许开新仓", sym)
+            return
+        reason = f"币安合约信息：{sym} 暂时不在交易（状态 {info.status}）"
+        if halted.get(sym) != reason:
+            halted[sym] = reason
+            log.info("%s，先不开新仓；已有持仓不动，恢复交易后自动放开", reason)
 
     def _reconcile_soon(self) -> None:
         """平仓后立刻对一次账：万一平仓单在保命止损之后又成交开出反手仓，不等下一个 30 秒。"""

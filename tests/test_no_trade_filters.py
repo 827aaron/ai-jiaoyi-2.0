@@ -136,3 +136,37 @@ async def test_contract_info_push_blocks_watched_symbol(tmp_path: Path, now: dat
     assert "下架" in cards.blocked["BTCUSDT"]
     await asyncio.sleep(0)
     assert (tmp_path / "blocked_symbols.json").is_file()
+
+
+def test_halted_symbol_only_blocks_new_opens(now: datetime) -> None:
+    halted = {"BTCUSDT": "币安合约信息：BTCUSDT 暂时不在交易（状态 SETTLING）"}
+    v = _review(now, halted=halted.get)
+    assert not v.approved
+    assert any("恢复交易后自动放开" in r for r in v.reasons), v.reasons
+    assert _review(now, halted={}.get).approved
+
+
+async def test_transient_status_halts_then_clears_without_blocking(
+    tmp_path: Path, now: datetime
+) -> None:
+    cfg = load_app_config(ROOT / "config" / "app.example.toml").model_copy(
+        update={"data_dir": str(tmp_path)}
+    )
+    app = App(
+        load_risk_config(ROOT / "config" / "risk.example.toml"),
+        cfg,
+        clock=lambda: now,
+        offline=True,
+    )
+    cards = BlockCards(card(now))
+    app.m = dataclasses.replace(app.m, cards=cards)
+    r = Runner(app)
+    r._watched = {"BTCUSDT"}
+    r.on_contract_info(ContractInfo("BTCUSDT", "SETTLING", None))
+    assert cards.blocked == {}  # 不封币 = 持仓管家不会平仓
+    assert "SETTLING" in app.halted["BTCUSDT"]
+    r.on_contract_info(ContractInfo("BTCUSDT", "TRADING", None))
+    assert app.halted == {}  # 恢复交易自动放开
+    r.on_contract_info(ContractInfo("BTCUSDT", "CLOSE", None))  # 真下线照旧封
+    assert "CLOSE" in cards.blocked["BTCUSDT"]
+    await asyncio.sleep(0)
