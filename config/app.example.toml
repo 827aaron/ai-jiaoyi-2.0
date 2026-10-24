@@ -70,6 +70,8 @@ surge_vol_ratio = 4.0             # 哨兵：量能突增 ≥ 4 倍
 surge_taker_ratio = 0.7           # 且主动买（或卖）占 70% 以上
 volume_surge_live = true          # 量能突增在 testnet / live 也出；false = 只在 paper 出
 session_cme_open_live = false     # CME 周日开盘在 testnet / live 也出；默认只在 paper 出（session_cme_open 跟档位走）
+new_listing_block_h = 24          # 保镖：新上线不到 24 小时的币不开新仓（0 = 不挡）
+adl_high_block = true             # 保镖：币安自动减仓风险「高」的币不开新仓（查不到不挡）
 burst_10s_on = true               # 最近 10 秒成交额折算每分钟也算放量（量能突增 / 放量突破不用等满 1 分钟）
 # 新信号（2026-10-24 研究）：出不出跟档位走（oi_follow_on / top_crowd_on / btc_lead_on），testnet / live 默认不出
 oi_min_pct = 1.0                  # 持仓量变化：窗口内持仓量至少涨 1%（窗口 oi_window_min、价格倍数 oi_price_z 跟档位走）

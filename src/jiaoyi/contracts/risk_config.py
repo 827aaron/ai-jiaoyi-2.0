@@ -418,6 +418,17 @@ class FastLoopConfig(Contract):
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
     surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
+    new_listing_block_h: float = Field(
+        default=24.0,
+        ge=0.0,
+        le=168.0,
+        description="新上线的币多少小时内不开新仓（按币安上线时间，价格还不稳）；0 = 不挡。",
+    )
+    adl_high_block: bool = Field(
+        default=True,
+        description="币安自动减仓风险是「高」的币不开新仓（每 30 分钟查一次，查不到不挡；"
+        "已有持仓不管）。",
+    )
     burst_10s_on: bool = Field(
         default=True,
         description="最近 10 秒成交额折算成每分钟也算放量：量能突增、放量突破在放量开头几秒就能出，"

@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -113,6 +114,14 @@ class LotRules:
     """市价单单笔最大数量；超过交易所会拒单，所以按它封顶。None = 不限。"""
     tick_size: float | None = None
     """价格最小变动（PRICE_FILTER.tickSize）；限价止盈取整用。None = 不知道。"""
+    onboard_at: datetime | None = None
+    """上线时间（exchangeInfo onboardDate）；None = 不知道（不挡）。"""
+    delist_at: datetime | None = None
+    """排了下架的时间（deliveryDate）；None = 没排。"""
+
+
+DELIST_WINDOW = timedelta(days=7)
+"""排了下架、离下架不到这么久就不开新仓（新信号研究 10-24「不做」过滤）。"""
 
 
 class LotRulesProvider(Protocol):
@@ -232,8 +241,16 @@ class RiskGuardImpl:
         *,
         state_dir: str | Path | None = None,
         gate_record_only: bool = False,
+        blocked: Callable[[], Mapping[str, str]] | None = None,
+        adl_risk: Callable[[str], str | None] | None = None,
     ) -> None:
-        """``gate_record_only``：拍板人概率没过门槛也放行，只记「拍板本会拦」（paper 校准用）。"""
+        """``gate_record_only``：拍板人概率没过门槛也放行，只记「拍板本会拦」（paper 校准用）。
+
+        ``blocked``：被封的币 → 原因（下架公告等），拒单时把原因写全；
+        ``adl_risk``：币 → 币安自动减仓风险 ``low`` / ``medium`` / ``high``
+        （拿不到 None = 不挡）。"""
+        self._blocked = blocked
+        self._adl = adl_risk
         self._risk = risk
         self._fast = fast
         self._record_only = gate_record_only
@@ -309,6 +326,7 @@ class RiskGuardImpl:
         if now - signal.ts > timedelta(seconds=fast.signal_max_age_s):
             age = (now - signal.ts).total_seconds()
             reasons.append(f"信号已过 {age:.1f} 秒，超过 {fast.signal_max_age_s} 秒作废")
+        self._symbol_filters(signal.symbol, now, reasons)
 
         # ---- 拍板人：先看 ok，再读答案
         if not jev.ok:
@@ -423,6 +441,26 @@ class RiskGuardImpl:
         missing = [r for r in out if r.startswith("拍板人没回答")]
         return hard + missing, [r for r in out if r not in missing]
 
+    def _symbol_filters(self, sym: str, now: datetime, reasons: list[str]) -> None:
+        """「不做」过滤：要下架、刚上线、自动减仓风险高。数据拿不到就不挡。"""
+        fast = self._fast
+        lot = self._lots.lot_rules(sym)
+        if lot is not None and lot.delist_at is not None and lot.delist_at - now <= DELIST_WINDOW:
+            reasons.append(
+                f"币安合约信息：{sym} 将于 {lot.delist_at:%m-%d %H:%M} UTC 下架，不开新仓"
+            )
+        hours = fast.new_listing_block_h
+        if hours > 0 and lot is not None and lot.onboard_at is not None:
+            age_h = (now - lot.onboard_at).total_seconds() / 3600.0
+            if age_h < hours:
+                reasons.append(
+                    f"{sym} 上线不到 {hours:g} 小时（{age_h:.0f} 小时），价格还不稳，不开新仓"
+                )
+        if fast.adl_high_block and self._adl is not None and self._adl(sym) == "high":
+            reasons.append(
+                "这个币被自动减仓的风险是高（币安每 30 分钟更新），赚钱的仓可能被强制减掉，不开新仓"
+            )
+
     def _card_symbol(
         self, signal: CandidateSignal, card: BattleCard | None, now: datetime, reasons: list[str]
     ) -> CardSymbol | None:
@@ -449,7 +487,10 @@ class RiskGuardImpl:
                 f"美股休市或不在开仓时段（开盘后 {f_.us_open_delay_min} 分钟到收盘前 "
                 f"{f_.us_close_lead_min} 分钟），{signal.symbol} 不开新仓"
             )
-        if cs.bias == Bias.NO_TRADE:
+        why_blocked = self._blocked().get(signal.symbol) if self._blocked is not None else None
+        if why_blocked:
+            reasons.append(f"{why_blocked}，不开新仓")  # 封币的理由写全，别只写「只看不做」
+        elif cs.bias == Bias.NO_TRADE:
             reasons.append("作战卡：这个标的只看不做")
         elif cs.bias.value != "both" and cs.bias.value != signal.side_hint.value:
             reasons.append(f"方向 {signal.side_hint.value} 和作战卡 {cs.bias.value} 相反")

@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -67,6 +68,30 @@ def _dt(ms: Any) -> datetime:
 
 
 ALL_MARKET_LIQUIDATIONS = "!forceOrder@arr"
+ALL_CONTRACT_INFO = "!contractInfo"
+"""全市场合约信息（上新、下架、状态变化），和强平同一条连接；交给 ``contract_listener``。"""
+
+
+@dataclass(frozen=True)
+class ContractInfo:
+    """``!contractInfo`` 推送的一条：合约状态（``TRADING`` 等）和排的交割 / 下架时间。"""
+
+    symbol: str
+    status: str
+    delist_at: datetime | None
+    """永续没排下架时币安给 2100 年，这里当 None。"""
+
+
+def parse_contract_info(d: dict[str, Any]) -> ContractInfo | None:
+    if d.get("e") != "contractInfo" or not d.get("s"):
+        return None
+    dt = int(d.get("dt") or 0)
+    at = _dt(dt) if dt > 0 else None
+    return ContractInfo(
+        symbol=str(d["s"]),
+        status=str(d.get("cs") or ""),
+        delist_at=at if at is not None and at.year < 2099 else None,
+    )
 
 
 def route_of(stream: str) -> str:
@@ -194,6 +219,8 @@ class BinanceFuturesFeed:
         self._day: date | None = None
         self._day_base = 0  # 今天开始时 messages 的值
         self._coverage: Callable[[datetime], tuple[int, int]] | None = None
+        self.contract_listener: Callable[[ContractInfo], None] | None = None
+        """主循环接上：合约要下架 / 不再交易时封新开仓（第二来源，比公告快）。"""
 
     def set_coverage(self, coverage: Callable[[datetime], tuple[int, int]]) -> None:
         """接上特征引擎的 ``coverage``：盘口员卡顺带报盘口新鲜几个币、ATR 就绪几个币。"""
@@ -228,7 +255,8 @@ class BinanceFuturesFeed:
                     self._spawn_conn(conn, self._url_for(route, mine), watch=True)
         if self._all_liq:
             # 全市场强平可以几分钟没有一条，不上看门狗
-            self._spawn_conn("liquidations", self._url_for("market", [ALL_MARKET_LIQUIDATIONS]))
+            streams = [ALL_MARKET_LIQUIDATIONS, ALL_CONTRACT_INFO]
+            self._spawn_conn("liquidations", self._url_for("market", streams))
 
     def _spawn_conn(self, conn: str, url: str, *, watch: bool = False) -> None:
         if watch:
@@ -276,6 +304,14 @@ class BinanceFuturesFeed:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self._max_backoff)
 
+    def _on_contract(self, info: ContractInfo) -> None:
+        if self.contract_listener is None:
+            return
+        try:
+            self.contract_listener(info)
+        except Exception:  # 只是第二来源，出错不能断行情
+            logger.exception("处理合约信息推送出错：%s", info)
+
     def accept(self, ev: MarketEvent) -> bool:
         """强平先记进全市场统计；只有订阅了的标的的事件才往下游发。"""
         if isinstance(ev, Liquidation):
@@ -295,7 +331,12 @@ class BinanceFuturesFeed:
             except ConnectionClosedOK:
                 return
             try:
-                ev = parse_message(json.loads(raw))
+                msg = json.loads(raw)
+                info = parse_contract_info(msg.get("data", msg)) if isinstance(msg, dict) else None
+                if info is not None:
+                    self._on_contract(info)
+                    continue
+                ev = parse_message(msg)
             except (ValueError, KeyError, TypeError) as e:
                 logger.debug("忽略解析不了的行情消息：%s", e)
                 continue

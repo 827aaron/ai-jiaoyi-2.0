@@ -7,6 +7,8 @@
 - 大户持仓多空比 / 全市场人数多空比（至少 4 小时）：每 5 分钟查
   ``/futures/data/topLongShortPositionRatio``、``globalLongShortAccountRatio``
   （权重 0，各 5 分钟限 1000 次）。
+- 自动减仓风险：每 30 分钟查一次 ``/fapi/v1/symbolAdlRisk``（全市场，权重 1），保镖遇到「高」
+  不开新仓（``adl_risk``）；查不到 / 超过 2 小时没更新当没有，不挡。
 - 查失败就跳过这一轮：不出信号、不报错刷屏（同一个币连着失败只记一行日志）。
 
 ``values()`` 的键（登记在 docs/fast_loop.md）：
@@ -35,6 +37,8 @@ log = logging.getLogger(__name__)
 
 OI_EVERY_S = 60.0
 RATIO_EVERY_S = 300.0
+ADL_EVERY_S = 1800.0
+ADL_STALE_S = 7200.0
 KEEP_S = 24 * 3600.0 + 600.0
 STALE_GAP_S = 600.0
 """找「W 分钟前」的点时允许差多少秒（5 分钟一根的历史 + 轮询抖动）。"""
@@ -102,6 +106,8 @@ class DerivsFeed:
         self._crowd: dict[str, _Series] = {}
         self._seeded: set[str] = set()
         self._failing: set[str] = set()
+        self._adl: dict[str, str] = {}
+        self._adl_at: float | None = None
 
     # ------------------------------------------------------------------ 读
 
@@ -134,11 +140,17 @@ class DerivsFeed:
                 out["div4h"] = round(a - b, 3)
         return out
 
+    def adl_risk(self, symbol: str) -> str | None:
+        """币安自动减仓风险 ``low`` / ``medium`` / ``high``；没查到或太旧返回 None（不挡）。"""
+        if self._adl_at is None or self._clock() - self._adl_at > ADL_STALE_S:
+            return None
+        return self._adl.get(symbol)
+
     # ------------------------------------------------------------------ 轮询
 
     async def run(self, symbols: Callable[[], Collection[str]]) -> None:
         """一直跑：每 60 秒持仓量、每 5 分钟多空比。``symbols`` 每轮现取（作战卡上的币）。"""
-        last_ratio = 0.0
+        last_ratio = last_adl = -math.inf
         while True:
             try:
                 syms = sorted(symbols())
@@ -146,6 +158,9 @@ class DerivsFeed:
                 if self._clock() - last_ratio >= RATIO_EVERY_S:
                     last_ratio = self._clock()
                     await self.poll_ratios(syms)
+                if self._clock() - last_adl >= ADL_EVERY_S:
+                    last_adl = self._clock()
+                    await self.poll_adl()
             except asyncio.CancelledError:
                 raise
             except Exception:  # 只是参考数据：出错不能让主循环跟着退出
@@ -185,6 +200,18 @@ class DerivsFeed:
                         s.add(t, v)
 
         await asyncio.gather(*(one(s) for s in symbols))
+
+    async def poll_adl(self) -> None:
+        data = await self._get("*", "/fapi/v1/symbolAdlRisk", {}, 1)
+        if not isinstance(data, list):
+            return
+        out = {
+            str(r["symbol"]): str(r["adlRisk"]).lower()
+            for r in data
+            if isinstance(r, dict) and r.get("symbol") and r.get("adlRisk")
+        }
+        if out:
+            self._adl, self._adl_at = out, self._clock()
 
     async def _seed(self, sym: str) -> None:
         params = {"symbol": sym, "period": "5m", "limit": 288}

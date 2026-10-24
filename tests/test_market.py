@@ -489,7 +489,7 @@ async def test_subscribe_opens_market_and_public_connections(
     assert "@aggTrade" in m0 and "@kline_1m" in m0 and "@markPrice@1s" in m0 and "@depth" not in m0
     assert p0.startswith("wss://fstream.binance.com/public/stream?streams=")
     assert "@depth5@100ms" in p0 and "@aggTrade" not in p0
-    assert conns["liquidations"][0].endswith("/market/stream?streams=!forceOrder@arr")
+    assert conns["liquidations"][0].endswith("/market/stream?streams=!forceOrder@arr/!contractInfo")
     assert conns["liquidations"][1] is None and conns["market-0"][1] == feed._stale_s
     await feed.close()
 
