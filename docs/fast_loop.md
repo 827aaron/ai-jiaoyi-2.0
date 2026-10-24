@@ -53,6 +53,16 @@
 | `funding_rate` | 当期资金费率 | 小数，0.0001 = 0.01% |
 | `funding_in_min` | 离下次资金费结算还有几分钟 | 分钟 |
 | `mark_premium_bps` | 标记价相对指数价 | bp |
+| `vol_ratio_10s` | 最近 10 秒成交额 × 6 ÷ 最近 20 根 1 分钟 K 线平均成交额（放量提前发现） | 倍 |
+| `taker_buy_ratio_10s` | 最近 10 秒主动买成交额占比（10 秒内有成交才有） | 0–1 |
+| `ret_15m`、`ret_60m`、`ret_240m` | 最新价相对 15 / 60 / 240 分钟前那根 1 分钟线收盘价（那根缺了差 5 分钟以上就没有） | 小数 |
+| `ret_oiw` | 同上，窗口 = `oi_window_min`（持仓量变化信号用） | 小数 |
+| `vol_1m_24h` | 过去 24 小时 1 分钟对数收益的标准差（至少 60 个才有） | 小数 |
+| `btc5z` | BTC 5 分钟涨跌 ÷（BTC 的 `vol_1m_24h` × √5），每个币都带 | 倍 |
+| `oi15`、`oi60`、`oi4h`、`oi_w_pct` | 持仓量 15 / 60 / 240 / `oi_window_min` 分钟变化（`market.derivs`，REST 每 60 秒） | % |
+| `top_ls`、`crowd_ls` | 大户持仓多空比、全市场人数多空比（最新，REST 每 5 分钟） | 比值 |
+| `top_w_pct`、`crowd_w_pct` | 上面两个在 `top_crowd_window_min` 内的对数变化 | % |
+| `div4h` | 大户比 4 小时对数变化 − 散户比 4 小时对数变化（正 = 大户比散户更看多） | % |
 
 `FeatureSnapshot.atr`：`atr_period_min` 分钟 K 线 14 根 Wilder ATR（默认 15 分钟，由 1 分钟 K 线按 UTC 整点聚合，缺分钟的那根整根丢掉），周期写在 `FeatureSnapshot.atr_period_min`。`book`：盘口超过 10 秒没更新就为空（保镖看到空盘口会拒单）。
 `BookMetrics.ofi` 和 `cvd` 都是 60 秒窗口、按 USDT 计。
@@ -66,7 +76,8 @@
 - 强平走全市场流 `!forceOrder@arr`（一个连接）。`feed.liquidations`（`LiquidationTracker`）记着所有币近 1 小时的强平，
   选币用 `feed.liquidations.liquidations_1h_usdt(symbol, now)` 填 `SymbolStats.liquidations_1h_usdt`。
   进程刚启动的一小时里数据不满 1 小时，偏小。
-- WebSocket 没有持仓量，拥挤交易信号第一版只看资金费率；CPI / 议息日历未接入。
+- WebSocket 没有持仓量：持仓量和多空比由 `market.derivs.DerivsFeed` 轮询 REST（只查总盘会 / 作战卡上的币；查失败跳过不刷屏），拥挤交易信号仍只看资金费率；CPI / 议息日历未接入。
+- BTCUSDT 一直订（不在卡上也订）：「BTC 先动」信号和每个币快照里的 `btc5z` 要它。启动回填至少 1441 根 1 分钟线（24 小时波动）。
 - 这台云端开发机访问币安返回 451（地区限制），实时连通性需要在 Mac mini 上验证。
 
 ## 预测员（Kronos）实测

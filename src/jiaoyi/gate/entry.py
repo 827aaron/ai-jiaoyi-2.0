@@ -4,7 +4,8 @@
 - 没有有效作战卡（缺失、过期、卡里没这个标的）→ 不问模型，直接 ``ok=False``。
 - 不同的币同时问，最多 ``max_concurrent`` 个（面板「拍板人同时最多判几个」）。
 - 同一个币一次只问一个：上一次还没判完，新信号排队（记一行「排队等拍板人」），排队的只留
-  最新一条（更早排队的让位作废）；等到超过信号有效期（``max_wait_s``）也作废。
+  最新一条（更早排队的让位作废）；等过 ``max_wait_s``（信号有效期减拍板超时：再问也来不及，
+  保镖会按年龄拒，白花一次钱）也作废。
   以前是直接作废（10-24 一天作废的信号里大半是这个）。
 - 每次判断写一条决策日志（团队页的拍板人卡片读它）。
 """
@@ -75,7 +76,7 @@ class JevEntryGate:
         """``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。
 
         ``max_concurrent``：同时最多问几个（不同的币）；``max_wait_s``：同币排队最多等几秒
-        （信号有效期，从信号触发算起）。"""
+        （信号有效期 − 拍板超时，从信号触发算起）。"""
         self._model = model
         self._rec = recorder
         self._hold_min = hold_min
@@ -150,7 +151,7 @@ class JevEntryGate:
             return None  # 撤的那一刻刚好拿到锁：照常问
         if me.is_set():
             return "同一个币来了更新的信号，这条让位作废"
-        return f"排队等拍板人超过信号有效期 {self._max_wait_s:g} 秒，本次信号作废"
+        return f"排队太久已作废（等了 {self._max_wait_s:g} 秒，再问就判不完在信号有效期内）"
 
     async def _ask(
         self, rid: str, signal: CandidateSignal, card: BattleCard, now: datetime

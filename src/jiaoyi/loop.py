@@ -50,7 +50,13 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
-from jiaoyi.market.features import ATR_PERIOD, HISTORY_DAYS, backfill_minutes
+from jiaoyi.market.features import (
+    ATR_PERIOD,
+    BTC,
+    HISTORY_DAYS,
+    VOL_24H_MINUTES,
+    backfill_minutes,
+)
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
@@ -224,7 +230,8 @@ class Runner:
         self.m = app.m
         # 回填够算 ATR 的 1 分钟 K 线（15 分钟 ATR 要 240 根）
         fl = app.app_cfg.fast_loop
-        limit = backfill_minutes(fl.atr_period_min, fl.atr_long_period_min)
+        # 至少 24 小时：新信号要 24 小时 1 分钟波动、4 小时涨跌（一次请求最多 1500 根）
+        limit = max(backfill_minutes(fl.atr_period_min, fl.atr_long_period_min), VOL_24H_MINUTES)
         self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym, limit=limit))
         # 预测员周期的 K 线（5m / 15m / 1h，至少 64 根），启动时一次拉够，不用等几个小时
         bars = app.app_cfg.predictor.backfill_bars
@@ -313,6 +320,9 @@ class Runner:
                 else self._every(INCOME_REFRESH_S, self.app.refresh_income)
             ),
         ]
+        if self.app.derivs is not None:
+            # 持仓量每 60 秒、多空比每 5 分钟（盯着的币；查失败自己跳过）
+            self._loops.append(asyncio.create_task(self.app.derivs.run(self._derivs_symbols)))
         loops: asyncio.Future[Any] = asyncio.gather(*self._loops)
         stop: asyncio.Future[Any] = asyncio.ensure_future(self._restart.wait())
         try:
@@ -544,7 +554,12 @@ class Runner:
         if card is not None:
             meeting |= {s.symbol for s in card.symbols}
         held = {p.symbol for p in self.positions}
-        return meeting | held, meeting - held, held
+        # BTC 一直订：「BTC 先动、小币跟」和拍板人快照的 btc5z 要它（不在卡上也订）
+        return meeting | held | {BTC}, meeting - held, held
+
+    def _derivs_symbols(self) -> set[str]:
+        """查持仓量 / 多空比的币：总盘会 / 作战卡上的（持仓的不另查，新信号只在卡上的币出）。"""
+        return self.watch_set()[1]
 
     async def sync_watch(self) -> None:
         """订阅集变了就重订：新加的币先回填 K 线（ATR、预测员不用干等），退掉不再盯的。"""

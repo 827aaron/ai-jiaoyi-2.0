@@ -191,7 +191,7 @@ async def test_entry_gate_queue_gives_up_after_signal_max_age(now: datetime) -> 
     a, b = await asyncio.gather(
         gate.evaluate(signal(now), card(now), now), gate.evaluate(signal(now), card(now), now)
     )
-    assert a.ok and not b.ok and "有效期" in (b.error or "")
+    assert a.ok and not b.ok and "排队太久" in (b.error or "")
     assert len(t.calls) == 1
     assert (await gate.evaluate(signal(now), card(now), now)).ok  # 锁放干净了
 

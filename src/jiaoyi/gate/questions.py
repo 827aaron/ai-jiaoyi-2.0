@@ -37,9 +37,9 @@ from jiaoyi.contracts import (
     Side,
 )
 
-TEMPLATE_VERSION = "q3"
+TEMPLATE_VERSION = "q4"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
-SNAPSHOT_SCHEMA = "s2"
+SNAPSHOT_SCHEMA = "s3"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
 MAX_SNAPSHOT_CHARS = 2400
 
@@ -49,6 +49,8 @@ KNOWN_TEMPLATES: dict[str, str] = {
     "q2": "41997c5bfdef",  # 说明 atr_bps 是 stop_atr 的单位（ATR 改成 15 分钟口径）
     # 时间按最长持仓档（快照 hold_min）问，不再写死 5–30 / 15 分钟；atr_bps = 止损 ATR（√短×长）
     "q3": "cc0b4b385bae",
+    # 新信号研究 10-24：快照加持仓量、多空比、BTC 5 分钟倍数、10 秒折算量比（拿不到不写）
+    "q4": "8422594b5239",
 }
 
 _ENTRY_GOAL = (
@@ -60,7 +62,10 @@ _ENTRY_GOAL = (
     "Inputs: `sig`/`why` say what fired; `ret*_bps`, `vol_x` (1m volume vs average), "
     "`buy` (taker buy share, 1m), `cvd30_k` (taker buy minus sell, last 30s, kUSDT), "
     "`liq_*_k` (liquidations 1m, kUSDT), `fund_bps`, `atr_bps` (ATR in bps, the unit "
-    "of `stop_atr`); `book` has spread, imbalance, "
+    "of `stop_atr`); when present: `vol10_x` (last 10s volume scaled to 1m vs average), "
+    "`oi15`/`oi60`/`oi4h` = open interest change %, `top_ls`/`crowd_ls` = top-trader "
+    "position and all-account long/short ratios, `div4h` = top minus crowd 4h change %, "
+    "`btc5z` = BTC 5-minute move in noise units; `book` has spread, imbalance, "
     "order-flow imbalance and depth; `card` is the strategist's plan for today "
     "(bias, key levels as bps from price); `kronos` is an optional price-range forecast."
 )
@@ -188,6 +193,20 @@ def market_block(f: FeatureSnapshot) -> dict[str, Any]:
     }
     if "funding_rate" in v:
         d["fund_bps"] = _r(v["funding_rate"] * 1e4, 2)
+    # 新信号的数据（REST 轮询 / BTC）：拿不到的不写，不写 0
+    if "vol_ratio_10s" in v:
+        d["vol10_x"] = _r(v["vol_ratio_10s"], 2)
+    for key, src, nd in (
+        ("oi15", "oi15", 2),
+        ("oi60", "oi60", 2),
+        ("oi4h", "oi4h", 2),
+        ("top_ls", "top_ls", 3),
+        ("crowd_ls", "crowd_ls", 3),
+        ("div4h", "div4h", 2),
+        ("btc5z", "btc5z", 2),
+    ):
+        if src in v:
+            d[key] = _r(v[src], nd)
     if f.book is not None:
         b = f.book
         d["book"] = {
@@ -222,6 +241,11 @@ def _dump(d: dict[str, Any]) -> str:
         d["card"].pop("regime", None)
         d.pop("why", None)
         s = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+    for key in ("kronos", "book"):  # 还超就再去掉可有可无的块，免得硬截断成坏 JSON
+        if len(s) <= MAX_SNAPSHOT_CHARS:
+            break
+        if d.pop(key, None) is not None:
+            s = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
     return s[:MAX_SNAPSHOT_CHARS]
 
 

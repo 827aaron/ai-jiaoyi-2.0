@@ -33,7 +33,7 @@ const OUTCOME = { pass: ["放行", "p-long"], reject: ["拒绝", "p-short"], hol
 const CAT = { major: "主流币", alt: "山寨币", crypto_stock: "加密概念股", us_tech: "美股科技", precious_metal: "贵金属", other: "其他" };
 // 币名旁的类型小字（主流币 / 山寨币 …），和作战卡同写法
 const catTag = (c) => (c ? ` <span class="dim small">${esc(CAT[c] || c)}</span>` : "");
-const SIGNAL = { volume_breakout: "放量突破", volume_surge: "量能突增", liquidation_rebound: "爆仓反弹", crowded_reversal: "拥挤反向", session_event: "时段与事件" };
+const SIGNAL = { volume_breakout: "放量突破", volume_surge: "量能突增", liquidation_rebound: "爆仓反弹", crowded_reversal: "拥挤反向", session_event: "时段与事件", oi_follow: "持仓量变化", top_vs_crowd: "大户散户分歧", btc_lead: "BTC 先动" };
 
 let TZ = "Asia/Bangkok";
 try { if (localStorage.getItem("updown") === "red-up") document.documentElement.dataset.updown = "red-up"; } catch (err) { /* 隐私模式等读不了就用默认 */ }
@@ -601,7 +601,7 @@ function cardBody(s, L) {
   const sym = s.symbol, p = L && L.held;
   if (s.pending_label) return `<div class="txt">${esc(s.pending || s.pending_label)}</div><div class="small"><a ${clickable("meeting", sym)}>开会过程 ›</a></div>`;
   const [dt] = DIR[s.bias] || [""];
-  const sigs = s.allowed_signals.length && s.allowed_signals.length < 5 ? s.allowed_signals.map((x) => `「${esc(SIGNAL[x] || x)}」`).join("或") : "任一信号";
+  const sigs = s.allowed_signals.length && s.allowed_signals.length < Object.keys(SIGNAL).length ? s.allowed_signals.map((x) => `「${esc(SIGNAL[x] || x)}」`).join("或") : "任一信号";
   const plan = p
     ? `已在 <span class="num">${price(p.entry_price, sym)}</span> ${(DIR[p.side] || [p.side])[0]}，拿着等止盈${p.stop_loss_price ? `；${p.side === "long" ? "跌破" : "涨过"} <span class="num">${price(p.stop_loss_price, sym)}</span> 止损` : ""}。`
     : `等哨兵发现${sigs}，按当时价格${dt}。`;
@@ -1873,6 +1873,19 @@ const PLAIN = {
   volume_surge_live: "量能突增信号（测试网 / 实盘）",
   session_cme_open: "关键时段也看 CME 周日开盘",
   session_cme_open_live: "CME 周日开盘（测试网 / 实盘）",
+  burst_10s_on: "最近 10 秒折算每分钟也算放量",
+  oi_follow_on: "持仓量变化：出这个信号",
+  oi_window_min: "持仓量变化：看多长时间（分钟）",
+  oi_min_pct: "持仓量变化：持仓量至少涨（%）",
+  oi_price_z: "持仓量变化：价格至少走（倍平时波动）",
+  oi_follow_live: "实盘也出持仓量变化信号",
+  top_crowd_on: "大户散户分歧：出这个信号",
+  top_crowd_min_pct: "大户散户分歧：两边各至少变（%）",
+  top_crowd_window_min: "大户散户分歧：看多长时间（分钟）",
+  top_crowd_live: "实盘也出大户散户分歧信号",
+  btc_lead_on: "BTC 先动：出这个信号",
+  btc_lead_z: "BTC 先动：BTC 5 分钟至少走（倍平时波动）",
+  btc_lead_live: "实盘也出 BTC 先动信号",
   liq_min_usdt_1m: "1 分钟爆仓至少多少 USDT 才算",
   liq_ratio: "爆仓额是平时几倍才算",
   liq_drop_pct_5m: "爆仓砸出的 5 分钟跌幅至少百分之几",
@@ -1917,6 +1930,19 @@ const HINT = {
   session_cme_open: "开 = 芝加哥 CME 比特币期货周日开盘（曼谷周一早上 5 点或 6 点）前后几分钟，放量又大涨大跌时顺着做。回测只有 30 分钟到 2 小时这三档比随便进好，档位默认只在这三档开",
   session_cme_open_live: "开 = 测试网 / 实盘也出 CME 周日开盘信号。证据还不够（主要靠 4 个周日），默认关，只在模拟盘攒样本",
   jev_max_concurrent: "不同的币可以同时判，最多这么多个；同一个币一次只判一个，新信号排队等上一个判完，排队的只留最新一条，等太久（超过信号有效期）就作废",
+  burst_10s_on: "开 = 量能突增、放量突破不用等满 1 分钟：最近 10 秒的成交额乘 6 也够倍数就算（主动买卖占比也看这 10 秒），放量开头几秒就能发现。关 = 只看 1 分钟",
+  oi_follow_on: "持仓量在涨、价格也在涨 = 新多头进场，跟着做多；价格在跌就是新空头，跟着做空。持仓量在跌不出信号。回测 2 小时到 24 小时这几档不比现有信号差，档位默认在这几档开",
+  oi_window_min: "同一个币同一个方向这么久只出一次。档位默认 2 小时档 60、4 小时以上 240",
+  oi_min_pct: "这段时间持仓量至少涨这么多才算新钱进场",
+  oi_price_z: "平时波动 = 过去 24 小时每分钟涨跌的标准差，按时间长短放大。填 0 = 不看价格走多远，只看方向",
+  oi_follow_live: "开 = 测试网 / 实盘也出持仓量变化信号。默认关，先在模拟盘攒样本",
+  top_crowd_on: "大户（保证金最多的那批账户）一边倒加仓、散户往另一边走时，反着大户做：大户加多散户减多就做空，反过来做多。过去半年 8–24 小时持有扣费后不亏，档位默认 4 小时以上开",
+  top_crowd_min_pct: "大户多空比和全市场人数多空比要往相反方向各变这么多。默认 5；想多出信号可以调到 2",
+  top_crowd_window_min: "同一个币同一个方向这么久只出一次",
+  top_crowd_live: "开 = 测试网 / 实盘也出大户散户分歧信号。默认关，先在模拟盘攒样本",
+  btc_lead_on: "BTC 突然大动、这个币还没跟着动时，按 BTC 的方向做这个币，赌它补涨补跌。回测 30 分钟到 2 小时这三档最好，档位默认在这三档开",
+  btc_lead_z: "BTC 最近 5 分钟走了几倍平时波动才算「突然大动」",
+  btc_lead_live: "开 = 测试网 / 实盘也出 BTC 先动信号。默认关，先在模拟盘攒样本",
   jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
   jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
   jev_usd_per_mtok: "按用量算钱，用来统计花费",
@@ -2082,7 +2108,7 @@ const ADV = [
     { g: "止损和止盈", keys: ["risk.lifeboat_stop_multiplier", "fast_loop.atr_period_min", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_buffer_atr", "fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.time_limit_s"] },
     { g: "管家、巡逻兵和对账", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
     { g: "拍板人（每个信号做不做）", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.gate_record_only", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
-    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
+    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.burst_10s_on", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live", "fast_loop.oi_follow_on", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_follow_live", "fast_loop.top_crowd_on", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_live", "fast_loop.btc_lead_on", "fast_loop.btc_lead_z", "fast_loop.btc_lead_live"] },
   ] },
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
     { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.schedule_at", "schedule.*"] },

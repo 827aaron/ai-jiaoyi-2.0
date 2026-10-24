@@ -44,6 +44,9 @@ _KIND_CN = {
     "volume_surge": "量能突增",
     "liquidation_rebound": "强平瀑布反弹",
     "crowded_reversal": "拥挤交易反向",
+    "oi_follow": "持仓量变化",
+    "top_vs_crowd": "大户散户分歧",
+    "btc_lead": "BTC 先动",
     "session_event": "时段与事件",
 }
 
