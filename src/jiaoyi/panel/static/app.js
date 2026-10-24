@@ -2162,8 +2162,10 @@ const ROLES = [
     { g: "", keys: ["app.predictor_enabled", "predictor.*", "schedule.predictor_against_runs"] },
   ] },
   { id: "sentinel", t: "哨兵", strip: ["哨兵"], what: "盯行情，发现信号就交给拍板人", groups: [
-    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
-    { g: "新信号：持仓量变化、大户散户分歧、BTC 先动", keys: ["fast_loop.burst_*", "fast_loop.oi_*", "fast_loop.top_crowd_*", "fast_loop.btc_lead_*"] },
+    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.burst_10s_on", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
+    { g: "持仓量变化", keys: ["fast_loop.oi_follow_on", "fast_loop.oi_follow_live", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_*"] },
+    { g: "大户散户分歧（反着大户）", keys: ["fast_loop.top_crowd_on", "fast_loop.top_crowd_live", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_*"] },
+    { g: "BTC 先动，小币跟", keys: ["fast_loop.btc_lead_on", "fast_loop.btc_lead_live", "fast_loop.btc_lead_z", "fast_loop.btc_lead_*"] },
     { g: "去重和过期", keys: ["app.signal_dedup_s", "fast_loop.signal_max_age_s"] },
     { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
   ] },
@@ -2205,7 +2207,16 @@ const ROLES = [
 ];
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
 const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
-// 没列到的新键按所在段落到哪个角色的“其他”组
+// 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
+const PREFIX_ROLE = [
+  ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],
+  ["fast_loop.liq_", "sentinel"], ["fast_loop.crowded_", "sentinel"], ["fast_loop.session_cme", "sentinel"], ["fast_loop.session_vol", "sentinel"], ["fast_loop.session_window", "sentinel"],
+  ["fast_loop.oi_", "sentinel"], ["fast_loop.top_crowd_", "sentinel"], ["fast_loop.btc_lead_", "sentinel"], ["fast_loop.volume_", "sentinel"],
+  ["fast_loop.min_p_", "gate"], ["fast_loop.max_p_", "gate"], ["fast_loop.jev_", "gate"], ["fast_loop.gate_", "gate"], ["app.jev_", "gate"],
+  ["fast_loop.keeper_", "keeper"], ["app.keeper_", "keeper"], ["fast_loop.patrol_", "patrol"], ["app.reconcil", "reconciler"],
+  ["fast_loop.limit_take_", "executor"], ["fast_loop.tp_limit_", "executor"], ["fast_loop.entry_limit_", "executor"],
+  ["app.predictor_", "predictor"], ["app.screener_", "screener"],
+];
 const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener" };
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
@@ -2253,7 +2264,7 @@ function roleGroups(d, ix) {
     });
   }
   const rest = Object.keys(ix).filter((k) => !used.has(k));
-  const roleOf = (k) => SECTION_ROLE[ix[k].sec] || "executor";
+  const roleOf = (k) => ((PREFIX_ROLE.find(([pre]) => k.startsWith(pre)) || [])[1]) || SECTION_ROLE[ix[k].sec] || "risk_guard";
   for (const id of new Set(rest.map(roleOf))) out[id].push({ g: "其他", items: rest.filter((k) => roleOf(k) === id).map((k) => ix[k]) });
   return out;
 }

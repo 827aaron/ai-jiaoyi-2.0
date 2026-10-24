@@ -1,7 +1,8 @@
 """设置页按角色分块：接口给的每个设置项都点名分到了某个角色，不掉进「其他」。
 
 前端没有 JS 测试，这里直接读 app.js 里的 ROLES 表（「段.键」字符串和「段.前缀*」通配）。
-新加的配置键没分进角色时这个测试会失败，提醒把它放进对应角色那一块。
+新加的键按 PREFIX_ROLE 的键名前缀也能自动归角色；连前缀也对不上（只能按段兜底）时
+这个测试会失败，提醒把它点名放进对应角色那一块，或者在 PREFIX_ROLE 加一个前缀。
 """
 
 from __future__ import annotations
@@ -42,9 +43,17 @@ def test_every_setting_belongs_to_a_role(tmp_path: Path) -> None:
     keys = {f"{sec}.{i['key']}" for sec in SECTIONS for i in d.get(sec) or []}
     assert len(keys) > 100
 
+    js = APP_JS.read_text(encoding="utf-8")
+    pblock = js[
+        js.index("const PREFIX_ROLE = [") : js.index("];", js.index("const PREFIX_ROLE = ["))
+    ]
+    prefixes = re.findall(r'\["([a-z_]+\.[a-z_0-9]*)", "[a-z_]+"\]', pblock)
+    assert prefixes
     skip = _shown_elsewhere()
     loose = sorted(
-        k for k in keys - skip if k not in named and not any(k.startswith(g) for g in globs)
+        k
+        for k in keys - skip
+        if k not in named and not any(k.startswith(g) for g in [*globs, *prefixes])
     )
     assert loose == [], f"这些设置没分到角色（会掉进「其他」）：{loose}"
     unknown = sorted(named - keys - skip)
