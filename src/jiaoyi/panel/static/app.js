@@ -1839,6 +1839,7 @@ const PLAIN = {
   card_pick_max: "军师团每次最多挑几个币",
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
   rule_gate_without_jev: "没有拍板人时用规则代替",
+  gate_record_only: "拍板只记不拦（门槛没过也放行，只记下来）",
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",
   jev_max_consecutive_errors: "拍板人连错几次就先歇一会",
   jev_error_cooldown_s: "拍板人连错后歇几秒",
@@ -1905,6 +1906,7 @@ const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && t
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
+  gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
   volume_surge_live: "开 = 成交量突然放大、而且买卖一边倒时顺着那一边做。历史回测不稳定，觉得不对可以关；模拟盘不管开关都照出（攒样本）",
   jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
   jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
@@ -2070,7 +2072,7 @@ const ADV = [
     { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple"] },
     { g: "止损和止盈", keys: ["risk.lifeboat_stop_multiplier", "fast_loop.atr_period_min", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_buffer_atr", "fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.time_limit_s"] },
     { g: "管家、巡逻兵和对账", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
-    { g: "拍板人（每个信号做不做）", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
+    { g: "拍板人（每个信号做不做）", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.gate_record_only", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
     { g: "信号识别", keys: ["fast_loop.volume_surge_live", "app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio"] },
   ] },
   { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
@@ -2148,7 +2150,9 @@ function advGroups(d, ix) {
 S.stOpen = new Set();
 try { S.stTab = localStorage.getItem("settings-tab") || "risk"; } catch (err) { S.stTab = "risk"; }
 
+const lockedPaper = (i) => i.paper_only && pageData.mode !== "paper";
 function auxOf(i) {
+  if (lockedPaper(i)) return "只有模拟盘能开";
   if (!i.editable) return "网页不改";
   if (i.recommended != null) return `推荐 <b>${valOf(i, i.recommended)}</b>`;
   const by = i.sec === "fast_loop" ? "最长持仓" : "档位";
@@ -2171,7 +2175,7 @@ function arrCells(v) {
 function itemRow(i, big) {
   const id = `${i.sec}.${i.key}`;
   const open = S.stOpen.has(id);
-  const w = pageData.writable && i.editable;
+  const w = pageData.writable && i.editable && !lockedPaper(i);
   const desc = techHint(i);
   const acts = [
     w ? `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">修改</button>` : "",

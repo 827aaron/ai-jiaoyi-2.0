@@ -557,6 +557,9 @@ def _write_config(
         if key not in fields:
             raise ActionError(f"{key} 不能在网页上改")
         value = _coerce(key, raw, fields[key])
+        on = section == "fast_loop" and key in PAPER_ONLY_SWITCHES and value is True
+        if on and current_mode(paths) != "paper":
+            raise ActionError(f"{PAPER_ONLY_SWITCHES[key]}只有模拟盘能开")
         old = olds.get(key) if isinstance(olds, dict) else None
         if old == value and isinstance(old, bool) == isinstance(value, bool):
             continue
@@ -696,6 +699,12 @@ def recent_changes(data_dir: str | Path, limit: int = 20) -> list[dict[str, Any]
     return out
 
 
+# 只有 paper 能打开的开关（testnet / live 写 true 拒绝启动，见 AppConfig._check）
+PAPER_ONLY_SWITCHES = {
+    "gate_record_only": "拍板只记不拦",
+    "rule_gate_without_jev": "没有拍板人时用规则代替",
+}
+
 # 段 → (哪个文件, TOML 段名)
 _WHERE: dict[Section, tuple[str, str | None]] = {
     "risk": ("risk", None),
@@ -768,8 +777,8 @@ def scalar_fields(model: type[BaseModel], skip: set[str]) -> dict[str, FieldSpec
 
 
 def field_spec(annotation: Any) -> FieldSpec | None:
-    if annotation in (bool, int, float):
-        return FieldSpec(annotation)
+    if annotation in (bool, int, float, bool | None):
+        return FieldSpec(bool if annotation == bool | None else annotation)  # 开关“不写 = 关”
     if annotation == list[str]:
         return FieldSpec(str, names=True)
     args = get_args(annotation)

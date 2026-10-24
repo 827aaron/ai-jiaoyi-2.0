@@ -29,7 +29,7 @@ from jiaoyi.core import profiles
 from jiaoyi.core.pool_overrides import PoolOverrides, read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
-from jiaoyi.panel.actions import ProfileInfo, Section, editable_fields
+from jiaoyi.panel.actions import PAPER_ONLY_SWITCHES, ProfileInfo, Section, editable_fields
 from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meaning import SettingsMeaning, build_meaning
@@ -1424,6 +1424,8 @@ class SettingItem(BaseModel):
     recommended_why: str = ""
     multi: bool = False
     """多选：值是 ``choices`` 的子集（列表）。"""
+    paper_only: bool = False
+    """只有模拟盘能打开的开关；testnet / live 下面板只读。"""
     pattern: str | None = None
     """自由填写的字样要符合的格式（例如开会定点 ``08:00``）。"""
     names: bool = False
@@ -1534,6 +1536,8 @@ def _items(
             bounds = f"{'>' if strict else '≥'}{lo:g}" if lo is not None else ""
         desc = (field.description or "").split("。")[0]
         spec = specs.get(name)
+        if value is None and spec is not None and spec.kind is bool:
+            value = False  # 开关不写 = 关
         out.append(
             SettingItem(
                 key=name,
@@ -1547,6 +1551,7 @@ def _items(
                 multi=bool(spec and spec.multi),
                 names=bool(spec and spec.names),
                 pattern=spec.pattern if spec else None,
+                paper_only=section == "fast_loop" and name in PAPER_ONLY_SWITCHES,
             )
         )
     return out
