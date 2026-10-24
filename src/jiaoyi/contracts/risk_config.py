@@ -441,6 +441,32 @@ class FastLoopConfig(Contract):
         default=False,
         description="挂单等到时没成交改市价追进。档位推荐 8h 以上开，4h 以下关（撤单不开）。",
     )
+    breakeven_on: bool = Field(
+        default=False,
+        description="保本：赚到 breakeven_trigger_r 倍止损距离后，最坏按保本价（扣完手续费）平。"
+        "默认关；开了只对之后新开的仓生效。",
+    )
+    breakeven_trigger_r: float = Field(
+        default=0.8, ge=0.1, le=10.0, description="赚到几倍止损距离（R）启动保本。"
+    )
+    trailing_on: bool = Field(
+        default=False,
+        description="移动止损：赚到 trail_start_r 以后，止损跟着最高盈利往上挪，只收紧不放松，"
+        "保住最高利润的一大半。默认关；开了只对之后新开的仓生效。",
+    )
+    trail_start_r: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=10.0,
+        description="赚到几倍止损距离（R）才开始移动止损，刚开的仓不碰。",
+    )
+    trail_distance_r: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=10.0,
+        description="移动止损离最高盈利多远（止损距离的几倍），放宽一点平时不碍事。"
+        "档位推荐 30m–2h 1.0、4h 以上 1.2。",
+    )
     new_listing_block_h: float = Field(
         default=24.0,
         ge=0.0,

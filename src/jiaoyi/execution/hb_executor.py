@@ -105,7 +105,7 @@ _SIDE_CN = {Side.LONG: "多", Side.SHORT: "空"}
 _REASON_CN = {
     CloseReason.STOP_LOSS: "止损",
     CloseReason.TAKE_PROFIT: "止盈",
-    CloseReason.TRAILING_STOP: "移动止损",
+    CloseReason.TRAILING_STOP: "保本 / 移动止损",
     CloseReason.TIME_LIMIT: "到时平仓",
     CloseReason.KEEPER: "管家平仓",
     CloseReason.PATROL: "巡逻兵平仓",
