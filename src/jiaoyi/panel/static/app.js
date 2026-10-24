@@ -1472,6 +1472,15 @@ const PROMPT_PART = [
   ["position_note", "手上有这个币的仓时加的说明"],
   ["convert", "会议结论转成作战卡"],
 ];
+// roles：四个原版角色换成的加密版提示词，按角色拆开显示
+const ROLE_PART = [
+  ["market_analyst", "市场分析师"],
+  ["research_manager", "研究经理"],
+  ["trader_system", "交易员（系统说明）"],
+  ["trader_user", "交易员（每场会的问题）"],
+  ["portfolio_manager", "组合经理"],
+  ["lessons_line", "带上过往教训的那一句"],
+];
 function promptLine(pr, holdNow) {
   if (!pr) return `<div class="prompt-line dim small">现在用的提示词：还没有记录（军师团引擎启动后才写）</div>`;
   const later = holdNow && holdNow !== pr.hold ? `<span class="warn">（设置已改成 ${esc(profileSpan(holdNow))}，重启后换）</span>` : "";
@@ -1482,7 +1491,9 @@ async function showPrompts() {
   let p;
   try { p = await getJson("/api/prompts"); } catch (e) { return dlg(`<h3>军师团现在用的提示词</h3><div class="down">${esc(e.message)}</div>`); }
   const block = (t, v) => `<div class="st-sub">${esc(t)}</div><pre class="json prompt">${esc(typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre>`;
-  const known = new Set(["hold", "style", "brief_fields", "indicator_interval", "analyst_klines", ...PROMPT_PART.map(([k]) => k)]);
+  const known = new Set(["hold", "style", "brief_fields", "indicator_interval", "analyst_klines", "roles", ...PROMPT_PART.map(([k]) => k)]);
+  const roles = p.roles && typeof p.roles === "object" ? p.roles : {};
+  const roleKnown = new Set(ROLE_PART.map(([k]) => k));
   const bf = p.brief_fields || {};
   const facts = [
     p.analyst_klines ? `分析师看的 K 线：${p.analyst_klines.join("、")}` : "",
@@ -1494,6 +1505,8 @@ async function showPrompts() {
     <p class="dim small">只读。按最长持仓档写，换档后重启主程序才换。</p>
     ${facts.length ? `<ul class="small">${facts.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
     ${PROMPT_PART.filter(([k]) => p[k]).map(([k, t]) => block(t, p[k])).join("")}
+    ${ROLE_PART.filter(([k]) => roles[k]).map(([k, t]) => block(t, roles[k])).join("")}
+    ${Object.keys(roles).filter((k) => !roleKnown.has(k)).map((k) => block(k, roles[k])).join("")}
     ${Object.keys(p).filter((k) => !known.has(k)).map((k) => block(k, p[k])).join("")}`);
   $("#layer .dlg").classList.add("wide");
 }
@@ -2344,7 +2357,7 @@ function advCard(d, ix) {
   const t = ADV.find((x) => x.id === tab);
   const tabs = ADV.map((x) => `<button role="tab" aria-selected="${x.id === tab}" class="${x.id === tab ? "on" : ""}" data-act="st-tab" data-arg="${x.id}">${x.t}</button>`).join("");
   const body = tab === "keys" ? keysTab(d) : tab === "show" ? showTab(d, ix)
-    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${g.items.map((i) => itemRow(i)).join("")}${g.extra === "majors" ? majorsBox(d.majors) : ""}`).join("");
+    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" ? `<div class="st-note">拍板人（每个信号做不做、多少毫秒不回答就放弃）不归军师团管，设置在 <button class="lnk" data-act="st-tab" data-arg="exec">「执行」页签</button> 里。</div>` : "") + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${g.items.map((i) => itemRow(i)).join("")}${g.extra === "majors" ? majorsBox(d.majors) : ""}`).join("");
   return `<section class="card st" id="st-adv"><div class="ch"><h2>高级</h2><span class="r">平时不用动</span></div><div class="st-tabs" role="tablist">${tabs}</div>${body}</section>`;
 }
 
