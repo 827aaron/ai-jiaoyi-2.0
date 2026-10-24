@@ -40,14 +40,16 @@ _METALS = frozenset(
     {"XAU", "XAG", "XPT", "XPD", "PAXG", "XAUT"}
 )  # PAXG / XAUT 是链上黄金，也按金属算
 _METAL_HINTS = ("commodit", "metal", "gold", "silver", "precious")
-_EQUITY_HINTS = ("equity", "stock", "tradifi")
+_EQUITY_HINTS = ("equity", "stock")
+_FOREIGN_HINTS = ("hk_", "kr_", "cn_", "jp_", "eu_", "premarket", "fx", "forex", "currency")
+"""非美股的传统资产（港股 / 韩股 / A 股 / 盘前 / 外汇…）：没有对应的交易时段，先一律不放行。"""
 
 
 def classify(symbol: str, kind: str = "") -> Category:
     """按代码给相关性分组：先看名单，名单外的再看交易所给的标的类型（``kind``，见 binance_stats）。
 
     币安把美股和金属永续标成 TRADIFI_PERPETUAL；名单外的传统资产合约按 kind 自动归类，
-    认不出是金属的当美股科技（它们跟着美股走）。什么都认不出才算山寨币。"""
+    标明是股票的当美股科技；什么都认不出才算山寨币（传统资产认不出时不放行，见 tradfi_block）。"""
     base = symbol.removesuffix("USDT")
     if base in _MAJORS:
         return Category.MAJOR
@@ -59,6 +61,8 @@ def classify(symbol: str, kind: str = "") -> Category:
         return Category.PRECIOUS_METAL
     if any(h in kind for h in _METAL_HINTS):
         return Category.PRECIOUS_METAL
+    if any(h in kind for h in _FOREIGN_HINTS):
+        return Category.ALT  # 不套美股时段；选币也不放行（见 tradfi_block）
     if any(h in kind for h in _EQUITY_HINTS):
         return Category.US_TECH
     return Category.ALT
@@ -192,6 +196,22 @@ def _cap(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> int:
     return ov.category_caps.get(category, default)
 
 
+def tradfi_block(s: SymbolStats, cfg: ScreenerConfig) -> str | None:
+    """传统资产永续（TRADIFI）不让进池的原因；不是传统资产或放行返回 None。
+
+    打开 ``allow_tradfi`` 也只放行美股和贵金属 / 商品；港股、韩股、A 股、盘前、外汇等没有对应的
+    交易时段，等各自的时段做好再放。"""
+    if "tradifi" not in s.kind:
+        return None
+    if not cfg.allow_tradfi:
+        return "传统资产永续暂未开放"
+    if classify(s.symbol, s.kind) is Category.ALT:
+        return (
+            f"暂不支持的传统资产类型（{s.kind.replace('tradifi_perpetual', '').strip() or '未知'}）"
+        )
+    return None
+
+
 def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
     reasons: list[str] = []
     if s.quote_volume_24h_usdt < cfg.min_quote_volume_usdt:
@@ -202,8 +222,8 @@ def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
         reasons.append("盘口深度不足")
     if s.listed_days < cfg.min_listed_days:
         reasons.append(f"上线不满 {cfg.min_listed_days} 天")
-    if not cfg.allow_tradfi and "tradifi" in s.kind:
-        reasons.append("传统资产永续暂未开放")
+    if (why := tradfi_block(s, cfg)) is not None:
+        reasons.append(why)
     if cfg.min_range_24h_pct > 0 and s.range_24h_pct < cfg.min_range_24h_pct:
         reasons.append("24 小时波动太小")
     if cfg.max_range_24h_pct > 0 and s.range_24h_pct > cfg.max_range_24h_pct:
