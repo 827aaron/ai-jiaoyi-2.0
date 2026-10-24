@@ -12,7 +12,7 @@ from jiaoyi.slow import ta_prompts as tp
 from jiaoyi.slow import ta_roles as r
 
 HOLDS = ("30m", "1h", "2h", "4h", "8h", "12h", "24h")
-DATA = Path(__file__).parent / "data" / "ta_roles"
+DATA = Path(__file__).parent / "fixtures" / "ta_roles"
 RUNTIME = {
     "{target}",
     "{instrument_context}",
