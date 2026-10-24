@@ -73,7 +73,7 @@ session_cme_open_live = false     # CME 周日开盘在 testnet / live 也出；
 entry_limit_pullback = false      # 进场用挂单等回踩（默认关 = 市价进）；让多少 / 追不追跟档位走
 entry_limit_pullback_live = false # testnet / live 也用挂单等回踩
 entry_limit_wait_min = 60         # 挂单最多等 60 分钟，没成交就撤（8h 以上档改市价追）
-# trailing_on = false              # 移动止损（持仓管家）：赚到 trail_start_r 后止损跟着最高盈利收紧，只收紧不放松（不写 = 关）
+# trailing_on = true               # 移动止损（持仓管家）：赚到 trail_start_r 后止损跟着最高盈利收紧，只收紧不放松（不写 = 开）
 # trail_start_r = 0.7              # 赚到几个止损距离后开始跟（1 = 一个止损距离；不写 = 跟档位 0.7）
 # trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 0.7、4h 以上 1.0）
 # breakeven_on = false             # 保本：赚到 breakeven_trigger_r 后最坏按保本价平（不写 = 关）

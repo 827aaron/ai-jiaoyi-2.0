@@ -214,7 +214,7 @@ OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase
 执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在保镖名下记「不追了：…」。
 持仓时长从成交时刻算。
 
-## 保本和移动止损（持仓管家的开关，默认关）
+## 保本和移动止损（持仓管家的开关：移动止损默认开，保本默认关）
 
 `trailing_on` / `breakeven_on` 打开后，保镖在 OrderIntent 里带上 `trailing_activation_pct` / `trailing_stop_pct`，执行器交给
 hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时盈利 − 回撤距离」，之后只往上挪不往下放，由 hummingbot 实时盯着平仓

@@ -1989,7 +1989,7 @@ const HINT = {
   entry_limit_offset_stop: "例如止损离进场价 1%，填 0.25 就挂在比触发价便宜 0.25% 的地方。档位默认 30 分钟 0.6、1 小时 0.4、2 / 4 小时 0.25、8 小时以上 0.1",
   entry_limit_wait_min: "从下单开始算；最长持仓按成交那一刻算，不会因为等挂单少拿",
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
-  trailing_on: "开 = 赚到下面的线以后，止损跟着这笔最好时的盈利往上挪，只收紧不放松，保住最高利润的一大半；关 = 只有原来的止损止盈。默认关，只对之后新开的仓生效，止损由执行器（hummingbot）实时盯着，不是只改面板上的数",
+  trailing_on: "开 = 赚到下面的线以后，止损跟着这笔最好时的盈利往上挪，只收紧不放松，保住最高利润的一大半；关 = 只有原来的止损止盈。默认开，改了只对之后新开的仓生效，止损由执行器（hummingbot）实时盯着，不是只改面板上的数",
   trail_start_r: "单位是止损距离：1 = 一个止损距离。例如这笔止损离进场价 1%，填 0.7 就是赚到 0.7% 才开始跟（同时至少要够把止损挪到保本价）；刚开的仓不碰。档位默认都是 0.7",
   trail_distance_r: "单位是止损距离：1 = 一个止损距离。例如止损离进场价 1%，填 1.2 就是止损一直跟在这笔最高价往回 1.2% 的地方；填大一点平时不碍事，只在大回撤时锁住利润。档位默认 30 分钟–2 小时 0.7、4 小时以上 1.0",
   breakeven_on: "开 = 赚到下面的线以后，最坏按保本价平（开平两次手续费扣完不亏）。和移动止损可以一起开：一起开时从保本线就开始跟。默认关，只对之后新开的仓生效",
@@ -2221,7 +2221,7 @@ const ROLES = [
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
-    { g: "赚了之后别变亏", hint: "两个开关默认都关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
+    { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
   ] },
   { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
     { g: "", keys: ["fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "fast_loop.patrol_alert_stop_mult", "fast_loop.patrol_shock_stop_mult"] },
