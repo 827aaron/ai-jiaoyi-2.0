@@ -39,8 +39,9 @@ def _take(p: float) -> c.JevResponse:
     [
         (c.Side.LONG, 1.0, 0.55, True),  # 同向：0.55 + 0.10 = 0.65 ≥ 0.6
         (c.Side.LONG, 0.0, 0.65, False),  # 反向：0.65 − 0.10 = 0.55 < 0.6
-        (c.Side.LONG, 0.5, 0.55, False),  # 中性不挪
+        (c.Side.LONG, 0.75, 0.65, False),  # 不到 1.0 都算看跌：0.65 − 0.10 < 0.6
         (c.Side.SHORT, 0.0, 0.55, True),  # 做空看跌 = 同向
+        (c.Side.SHORT, 0.75, 0.55, True),  # 0.75 也算看跌，做空同向
         (c.Side.SHORT, 1.0, 0.65, False),
     ],
 )
@@ -97,3 +98,19 @@ def test_record_has_raw_and_adjusted(tmp_path: Path, now: datetime) -> None:
     assert d["predictor_nudge"] == pytest.approx(-0.1)
     assert d["take_raw"] == 0.65 and d["take_adj"] == pytest.approx(0.55)
     assert b.output["detail"]["predictor"] == "没有预测" and "take_raw" in b.output["detail"]
+
+
+@pytest.mark.parametrize(
+    ("p_up", "nudge"), [(1.0, 0.1), (0.75, -0.1), (0.5, -0.1), (0.25, -0.1), (0.0, -0.1)]
+)
+def test_only_full_up_counts_as_up(
+    tmp_path: Path, now: datetime, p_up: float, nudge: float
+) -> None:
+    """Aaron 10-24：只有报 100% 才算看涨，0 / 0.25 / 0.5 / 0.75 都按看跌挪。"""
+    log = JsonlDecisionLog(tmp_path)
+    g = _Guard(RISK, FAST, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    g.review(_with_forecast(signal(now), p_up), _take(0.65), card(now), account(now), now)
+    [rec] = log.read_day(now.date().isoformat())
+    d = rec.output["detail"]
+    assert d["predictor_nudge"] == pytest.approx(nudge)
+    assert d["predictor"].startswith("同向（看涨" if nudge > 0 else "反向（看跌")

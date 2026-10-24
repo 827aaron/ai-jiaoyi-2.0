@@ -465,8 +465,10 @@ class RiskGuardImpl:
     def _predictor_nudge(
         self, signal: CandidateSignal, detail: dict[str, float | str] | None
     ) -> float:
-        """预测员给“做”概率挪多少：权重 × 0.5 ×（2 × 看涨概率 − 1），做空反号。
+        """预测员给“做”概率挪多少：只有看涨概率报 1.0（所有路径都收在现价之上）才算看涨，
+        其余（0 / 0.25 / 0.5 / 0.75）都算看跌；同向 + 权重 × 0.5，反向 − 权重 × 0.5。
 
+        Aaron 10-24：本地记录里 p_up 不到 1 的几档实际上涨只有 10–12%，和报 0 一样。
         预测员关掉、过期（``stale_after`` 不晚于信号时间）、或权重 0 时不挪。"""
         weight = self._fast.predictor_weight
         fc = signal.forecast
@@ -477,10 +479,12 @@ class RiskGuardImpl:
                 detail["predictor"] = "没有预测"
             return 0.0
         sign = 1.0 if signal.side_hint == Side.LONG else -1.0
-        nudge = weight * 0.5 * (2.0 * fc.p_up - 1.0) * sign
+        up = 1.0 if fc.p_up >= 1.0 else -1.0
+        nudge = weight * 0.5 * up * sign
         if detail is not None:
-            agree = "同向" if nudge > 0 else "反向" if nudge < 0 else "中性"
-            detail["predictor"] = f"{agree}（看涨 {fc.p_up:.2f}）"
+            agree = "同向" if nudge > 0 else "反向"
+            view = "看涨" if up > 0 else "看跌"
+            detail["predictor"] = f"{agree}（{view}，涨的路径占 {fc.p_up:.2f}）"
             detail["predictor_p_up"] = round(fc.p_up, 4)
             detail["predictor_nudge"] = round(nudge, 4)
         return nudge
