@@ -146,12 +146,19 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
 # 与档位无关、保持现值：keeper_close_p 0.6 / strong 0.85 / confirmations 2；
 # 巡逻兵 patrol_shock_pct_1m 2.0 / patrol_alert_pct_1m 1.0（价格百分比的崩盘线）；
 # 预测员 paths 4 / lookback 400；risk.toml 全部不动。
-_LOOSE_GATE = {"min_p_genuine": 0.6, "min_p_take": 0.6, "max_p_toxic": 0.5, "min_p_direction": 0.45}
+_LOOSE_GATE = {
+    "min_p_genuine": 0.6,
+    "min_p_take": 0.6,
+    "max_p_toxic": 0.5,
+    "min_p_direction": 0.45,
+    "predictor_weight": 0.2,  # 预测员意见占两成（Aaron 10-24），各档一样
+}
 _STRICT_GATE = {
     "min_p_genuine": 0.65,
     "min_p_take": 0.65,
     "max_p_toxic": 0.4,
     "min_p_direction": 0.45,
+    "predictor_weight": 0.2,
 }
 PAPER_GATE = {"min_p_genuine": 0.35, "min_p_take": 0.20, "max_p_toxic": 0.60}
 """paper 的临时推荐门槛（各持仓档一样），盖在档位默认上面；配置文件写了的仍优先。

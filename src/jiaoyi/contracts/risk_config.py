@@ -220,6 +220,14 @@ class FastLoopConfig(Contract):
         default=0.45, ge=0.0, le=1.0, description="信号方向（up/down）的概率门槛。"
     )
     max_p_toxic: float = Field(default=0.5, ge=0.0, le=1.0, description="订单流有毒概率上限。")
+    predictor_weight: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="预测员（Kronos）意见占几成：拿“做”概率和门槛比之前，按预测员看涨的概率挪一点，"
+        "挪多少 = 这个数 × 0.5 ×（2 × 看涨概率 − 1），做空反过来；0.2 时最多挪 0.10。"
+        "只动“做”这一道门，拍板人的提示词不变。0 = 不听；没有有效预测时不挪。",
+    )
     gate_record_only: bool | None = Field(
         default=None,
         description="拍板只记不拦：拍板人的概率照常问、照常记，但没过上面这几个门槛也放行"

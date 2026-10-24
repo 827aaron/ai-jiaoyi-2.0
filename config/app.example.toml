@@ -44,6 +44,7 @@ jev_error_cooldown_s = 60         # 暂停 60 秒后再试
 # min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6（paper 不写 = 0.20）
 # min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向（不写 = 0.45）
 # max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.60）
+# predictor_weight = 0.2            # 预测员意见占几成：按看涨概率把“做”挪一点，0.2 时最多 ±0.10；0 = 不听
 # gate_record_only = false         # 拍板只记不拦（不写 = 关；只在 paper 生效，testnet / live 写了当关）：门槛没过也放行并记下，毒性 ≥ 0.8 仍拦
 signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
