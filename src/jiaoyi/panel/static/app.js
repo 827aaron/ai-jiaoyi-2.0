@@ -435,24 +435,14 @@ document.addEventListener("click", async (e) => {
   else if (act === "edit1") editOne(arg, false);
   else if (act === "rec1") editOne(arg, true);
   else if (act === "st-item") toggleItem(el, arg);
-  else if (act === "st-tab") {
-    S.stTab = arg;
-    try { localStorage.setItem("settings-tab", arg); } catch (err) { /* 记不住就每次回到默认 */ }
-    render();
-  }
+  else if (act === "st-role") toggleRole(arg);
   else if (act === "st-changes") showChanges();
   else if (act === "profile") switchProfile(arg);
   else if (act === "tier") { S.tierSel = arg; render(); }
   else if (act === "tier-cancel") { S.tierSel = null; render(); }
   else if (act === "tier-go") switchProfile(arg);
   else if (act === "tier-filter") { S.tierOnlyCustom = arg === "1"; render(); }
-  else if (act === "st-more") {
-    S.stTab = "risk";
-    try { localStorage.setItem("settings-tab", "risk"); } catch (err) { /* 记不住就每次回到默认 */ }
-    render();
-    const adv = $("#st-adv");
-    if (adv) adv.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
+  else if (act === "st-more") openRole("risk_guard");
   else if (act === "daypnl") showDayPnl();
   else if (act === "prompts") showPrompts();
   else if (act === "mode") switchMode(arg);
@@ -1532,7 +1522,7 @@ P.team = () => {
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
-      <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
+      <span class="r">${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
       <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "今天还没有记录。"}</div>`}</div>
       <div class="foot">最多显示最新 200 条 · 点一条看它看到了什么、怎么判断的</div></section>`;
@@ -1775,6 +1765,19 @@ function addSymbol() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target && e.target.id === "pool-add") { e.preventDefault(); addSymbol(); }
 });
+// 设置页搜索：边打边筛（中文输入法拼字时先不筛，选定字再筛）
+document.addEventListener("input", (e) => {
+  if (!e.target || e.target.id !== "st-q" || e.isComposing) return;
+  S.stQ = e.target.value;
+  render();
+});
+document.addEventListener("compositionstart", (e) => { if (e.target && e.target.id === "st-q") S.stComposing = true; });
+document.addEventListener("compositionend", (e) => {
+  if (!e.target || e.target.id !== "st-q") return;
+  S.stComposing = false;
+  S.stQ = e.target.value;
+  render();
+});
 
 /* ---------- 设置 */
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
@@ -1804,6 +1807,41 @@ const PLAIN = {
   "screener.major_top_n": "主流币按市值前几名算",
   "screener.major_include": "手动算主流的币",
   "screener.major_exclude": "手动排除出主流的币",
+  "screener.allow_tradfi": "美股、金属这类传统资产永续也进池",
+  "predictor.interval": "喂给模型几分钟的 K 线",
+  against_signal_on: "看到和作战卡反向的信号时叫管家急查、反复出就开临时会",
+  against_dedup_s: "同一个币同一种反向信号几秒内只算 1 次",
+  against_grace_s: "开仓后几秒内的反向信号不算（刚进场的噪音）",
+  against_recheck_cooldown_s: "同一笔仓几秒内最多因反向信号急查 1 次",
+  against_strong_breakout_vol_ratio: "成交量是平时几倍才算强反向信号（管家判 1 次就平）",
+  against_loss_stop_frac: "已亏到止损距离的几成时，反向信号也按强的算",
+  against_meeting_count: "反向信号出几次就申请这个币的临时会",
+  against_meeting_window_s: "上面「几次」在几秒内算",
+  against_meeting_gap_s: "同一个币因反向信号最多几秒申请 1 次临时会",
+  margin_safety_pct: "可用保证金留出百分之几不用（不够就缩单）",
+  max_notional_book_frac: "单笔最多吃掉盘口前 5 档的几成（超了缩单，0 = 不看）",
+  card_caps_binding: "作战卡上的仓位、杠杆范围当硬约束",
+  max_slippage_stop_frac: "滑点最多是止损距离的几成",
+  max_spread_stop_frac: "价差最多是止损距离的几成",
+  min_stop_fee_multiple: "止损至少是来回手续费的几倍（0 = 不查）",
+  funding_against_max_bp: "开仓方向要付的资金费超过万分之几就不开（0 = 不查）",
+  us_hours_gate: "美股类合约只在美股开盘时段开新仓",
+  us_open_delay_min: "美股开盘后几分钟才开新仓",
+  us_close_lead_min: "美股收盘前几分钟停开新仓",
+  atr_long_period_min: "再参考长周期的波动（K 线分钟数）",
+  stop_level_snap: "止损挪到作战卡关键价位外侧",
+  session_factor: "止损按曼谷时段放宽或收窄",
+  session_factor_weekday: "工作日每个钟点的止损系数",
+  session_factor_weekend: "周末每个钟点的止损系数",
+  card_range_clamp: "作战卡的止损止盈范围超出档位时取重叠部分（关 = 整个币不做）",
+  limit_take_profit: "模拟盘用限价单止盈",
+  limit_take_profit_live: "测试网 / 实盘也用限价单止盈",
+  tp_limit_fallback_s: "价格穿过止盈价几秒还没平就改市价平",
+  tp_limit_fallback_through_bps: "价格越过止盈价万分之几才算「没成交」",
+  patrol_alert_stop_mult: "报警线是止损距离的几倍",
+  patrol_shock_stop_mult: "全平线是止损距离的几倍",
+  "predictor.pred_len": "往后预测几根 K 线",
+  "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
   "tiers.head": "头部几个币（开放交易）",
   "tiers.mid": "中部几个币",
@@ -1960,7 +1998,7 @@ const HINT = {
   event_meeting_enabled: "只给出事的那个币补开一场，不重开整轮；关掉时突破、大消息、新进池照旧重开整轮",
   event_triggers: "不在名单里的事不开会，等下一轮定时会",
   entry_max_card_age_min: "要在“哪些事算出事”里勾上“开仓时卡太旧”才会补会，否则只拦不补",
-  daily_cost_limit_usd: "只算军师团开会（含总盘会）的 AI 费；没写死就跟开会档位走，切档自动换",
+  daily_cost_limit_usd: "只算军师团开会（含总盘会）的 AI 费；没手动固定就跟开会档位走，切档自动换",
   over_budget: "放慢一档 = 开会间隔换成下面那个；不放慢 = 照常开。花到 100% 都停开会，持仓照常管",
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
@@ -1994,13 +2032,13 @@ const atrFor = (limit) => +Object.keys(ATR_FIT).find((k) => limit > ATR_FIT[k][1
 const atrMismatch = (atr, limit) => (ATR_FIT[atr] && atrFor(limit) !== +atr ? `${atr} 分钟 K 线适合最长持仓 ${ATR_FIT[atr][0].replace("（推荐）", "")}，现在最长持仓 ${humanDur(limit)}；建议 ${atrFor(limit)} 分钟。只提醒，不拦。` : "");
 // 写死项表格：文件值 → 某档位的默认值（一样的标出来）
 function pinTable(list, p) {
-  return `<div class="tw"><table><thead><tr><th>项</th><th class="r">文件里写死</th><th class="r">${esc(p)} 档默认</th></tr></thead><tbody>${list.map((x) => {
+  return `<div class="tw"><table><thead><tr><th>项</th><th class="r">手动固定</th><th class="r">${esc(p)} 档默认</th></tr></thead><tbody>${list.map((x) => {
     const i = { key: x.key };
     const same = JSON.stringify(x.value) === JSON.stringify(x.profile_default);
     return `<tr><td title="${esc(x.key)}">${esc(PLAIN[x.key] || x.key)}</td><td class="r num ${same ? "dim" : "warn"}">${fmtVal(x.value, i)}</td><td class="r num">${fmtVal(x.profile_default, i)}${same ? ' <span class="dim small">相同</span>' : ""}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
-const CLEAR_TEXT = "清掉这些写死项，完全按档位走";
+const CLEAR_TEXT = "清掉这些手动固定的项，完全按档位走";
 async function clearPins(pw) {
   return post("/api/settings/clear-profile-pins", { password: pw });
 }
@@ -2063,7 +2101,7 @@ function switchHold(h) {
   const rec = pf.hold_recommended[pf.current];
   const tip = !auto && rec && rec !== h ? `<p class="small warn">每 ${esc(profileSpan(pf.current))}开会推荐最长持仓 ${esc(profileSpan(rec))}。只提醒，不拦。</p>` : "";
   const what = auto ? `跟开会档位走（现在 ${esc(profileSpan(target))}）` : `固定 ${esc(profileSpan(h))}（自定义）`;
-  ask(`单笔最长持仓：${what}`, `<p>到 ${esc(profileSpan(target))}还没走就平；止损按 ${esc(spec.atr_period_min)} 分钟 K 线 ATR，止盈、拍板门槛、管家频率跟着这一档。只对之后新开的仓生效。</p>${tip}${dropTl ? `<p class="small">配置文件里写死的「一笔最多拿 ${esc(humanDur(tl.value))}」会一起删掉。</p>` : ""}${pwField(data.control)}`, "确定", false, async () => {
+  ask(`单笔最长持仓：${what}`, `<p>到 ${esc(profileSpan(target))}还没走就平；止损按 ${esc(spec.atr_period_min)} 分钟 K 线 ATR，止盈、拍板门槛、管家频率跟着这一档。只对之后新开的仓生效。</p>${tip}${dropTl ? `<p class="small">手动固定的「一笔最多拿 ${esc(humanDur(tl.value))}」会一起删掉。</p>` : ""}${pwField(data.control)}`, "确定", false, async () => {
     const pw = $("#dlg-pw");
     const pass = pw ? pw.value : "";
     await post("/api/settings", { section: "app", changes: { hold: auto ? null : h }, password: pass });
@@ -2096,40 +2134,90 @@ function keyRows(d) {
     }).join("");
 }
 
-// 设置页 v2：首屏只放“运行”和三个核心风险，其余收进“高级”的五个标签；每项一行，点开再改，一次改一项
+// 设置页 v3：首屏放档位、风控硬上限和运行；其余按角色分组，顺序跟交易流程走，每个角色一块、默认收起，点开就是它的全部设置。
+// 角色 id 和团队页一样（#team/gate ↔ #settings/gate）。strip = 行名开头是本角色名字的去掉（在哪一块已经说明了是谁）
 const CORE = ["risk.risk_per_trade_pct", "risk.daily_loss_halt_pct", "risk.max_leverage"];
-const ADV = [
-  { id: "risk", t: "风控细项", note: "首屏三项之外的仓位上限。都是你定的上限，AI 改不了。", groups: [
-    { g: "仓位上限", keys: ["risk.max_total_exposure_x", "risk.max_notional_per_trade_x", "risk.max_notional_per_trade_usdt", "risk.max_open_positions"] },
-    { g: "每类币合计仓位上限（这一类所有仓位的名义价值加起来，含杠杆）", cat: true, hint: "不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。金额按现在的本金实时折算，设置里填的是本金的几倍，本金变了金额跟着变。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的所有仓位合计上限。" },
-  ] },
-  { id: "exec", t: "执行", note: "下单时的门槛、止损止盈、管家和拍板人。带“跟最长持仓走”的改单笔最长持仓时自动换，带“跟档位走”的切档位自动换。", groups: [
-    { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple"] },
-    { g: "止损和止盈", keys: ["risk.lifeboat_stop_multiplier", "fast_loop.atr_period_min", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_buffer_atr", "fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.time_limit_s"] },
-    { g: "管家、巡逻兵和对账", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
-    { g: "拍板人（每个信号做不做）", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.size_fraction_s", "fast_loop.size_fraction_m", "app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev", "fast_loop.gate_record_only", "fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
-    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "app.signal_dedup_s", "fast_loop.signal_max_age_s", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.burst_10s_on", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live", "fast_loop.oi_follow_on", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_follow_live", "fast_loop.top_crowd_on", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_live", "fast_loop.btc_lead_on", "fast_loop.btc_lead_z", "fast_loop.btc_lead_live"] },
-  ] },
-  { id: "slow", t: "军师团", note: "军师团多久开一次会、挑多少个币，还有 Kronos 预测员。", groups: [
-    { g: "开会节奏", keys: ["app.slow_loop_interval_min", "schedule.schedule_at", "schedule.*"] },
-    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.predictor_against_runs", "schedule.entry_max_card_age_min"] },
-    { g: "AI 花费上限", hint: "军师团每天最多花多少（曼谷 0 点清零）；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min"] },
-    { g: "选币", keys: ["app.pool_size", "app.card_pick_max"] },
+const ROLES = [
+  { id: "screener", t: "选币员", what: "用代码把全部币安永续筛一遍，挑出候选池", groups: [
+    { g: "多久选一次、池子多大", keys: ["app.screener_interval_min", "app.pool_size"] },
+    { g: "门槛", warn: "screener_cautions", hint: "过不了门槛的币不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap", "screener.allow_tradfi"] },
+    { g: "打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
+    { g: "权重", hint: "五项各占多少分量。不用加起来等于 1，只看相对大小；不能全是 0。", keys: ["screener.weight_volatility", "screener.weight_volume_surge", "screener.weight_funding", "screener.weight_oi", "screener.weight_liquidations"] },
     { g: "主流币名单", extra: "majors", hint: "「主流币」这一类按市值前几名算，每天自动更新一次（去掉稳定币和包装币）。填 0 = 只用固定 7 个（BTC ETH BNB SOL XRP DOGE ADA）。手动算主流 / 排除的填币名，空格隔开。", keys: ["screener.major_top_n", "screener.major_include", "screener.major_exclude"] },
-    { g: "选币规则：门槛", warn: "screener_cautions", hint: "每小时用代码把全部币安 U 本位永续筛一遍，过不了门槛的不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap"] },
-    { g: "选币规则：打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
     { g: "分档交易", warn: "tiers_cautions", hint: "候选池按分数从高到低分三档：头部开放交易；中部每天挑几个来做、仓位封顶；其余尾部只看不做。你固定、手动加的币算头部。", keys: ["tiers.enabled", "tiers.head", "tiers.mid", "tiers.mid_daily_pick", "tiers.mid_size_max"] },
     { g: "美股类别", keys: ["screener.us_events", "screener.us_open_bonus"] },
-    { g: "选币规则：权重", hint: "五项各占多少分量。不用加起来等于 1，只看相对大小；不能全是 0。", keys: ["screener.weight_volatility", "screener.weight_volume_surge", "screener.weight_funding", "screener.weight_oi", "screener.weight_liquidations"] },
-    { g: "预测员 Kronos", keys: ["app.predictor_enabled", "predictor.*"] },
   ] },
-  { id: "keys", t: "密钥" },
-  { id: "show", t: "显示" },
+  { id: "market", t: "总盘会", what: "整轮开会的节奏：多久一轮、挑几个币、作战卡管多久", caution: "schedule_caution", groups: [
+    { g: "", hint: "开会间隔和单笔最长持仓在页面上面「选档位」里换。", keys: ["app.slow_loop_interval_min", "app.card_pick_max", "schedule.max_cards_per_round", "schedule.schedule_at", "schedule.card_ttl_min", "schedule.refresh_lead_min", "schedule.min_refresh_gap_min"] },
+  ] },
+  { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
+    { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
+    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
+  ] },
+  { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [
+    { g: "", hint: "曼谷 0 点清零；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min", "budget.*"] },
+  ] },
+  { id: "book_reader", t: "盘口员", what: "盯着上会币的盘口和成交", groups: [] },
+  { id: "predictor", t: "预测员 Kronos", strip: ["预测员"], what: "用 Kronos 模型预测接下来的价格", groups: [
+    { g: "", keys: ["app.predictor_enabled", "predictor.*", "schedule.predictor_against_runs"] },
+  ] },
+  { id: "sentinel", t: "哨兵", strip: ["哨兵"], what: "盯行情，发现信号就交给拍板人", groups: [
+    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.burst_10s_on", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
+    { g: "持仓量变化", keys: ["fast_loop.oi_follow_on", "fast_loop.oi_follow_live", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_*"] },
+    { g: "大户散户分歧（反着大户）", keys: ["fast_loop.top_crowd_on", "fast_loop.top_crowd_live", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_*"] },
+    { g: "BTC 先动，小币跟", keys: ["fast_loop.btc_lead_on", "fast_loop.btc_lead_live", "fast_loop.btc_lead_z", "fast_loop.btc_lead_*"] },
+    { g: "去重和过期", keys: ["app.signal_dedup_s", "fast_loop.signal_max_age_s"] },
+    { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
+  ] },
+  { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做、真不真、方向对不对", groups: [
+    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.gate_record_only"] },
+    { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
+    { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
+  ] },
+  { id: "risk_guard", t: "保镖（风控）", strip: ["保镖"], what: "下单前最后一道关：仓位多大、门槛、止损止盈放哪。上限都是你定的，AI 改不了", groups: [
+    { g: "最要紧的三项（和页面上面「风控硬上限」是同一份）", keys: CORE },
+    { g: "仓位上限", keys: ["risk.max_total_exposure_x", "risk.max_notional_per_trade_x", "risk.max_notional_per_trade_usdt", "risk.max_open_positions"] },
+    { g: "小仓、中仓用几成", hint: "拍板人给的仓位档：小仓、中仓按正常仓位打折，大仓用满。", keys: ["fast_loop.size_fraction_s", "fast_loop.size_fraction_m"] },
+    { g: "每类币合计仓位上限（这一类所有仓位的名义价值加起来，含杠杆）", cat: true, hint: "不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。金额按现在的本金实时折算，设置里填的是本金的几倍，本金变了金额跟着变。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的所有仓位合计上限。" },
+    { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple", "fast_loop.max_spread_stop_frac", "fast_loop.max_slippage_stop_frac", "fast_loop.min_stop_fee_multiple", "fast_loop.funding_against_max_bp"] },
+    { g: "仓位太大时缩单", keys: ["fast_loop.max_notional_book_frac", "fast_loop.margin_safety_pct", "fast_loop.card_caps_binding"] },
+    { g: "哪些币先不做", keys: ["fast_loop.us_hours_gate", "fast_loop.us_open_delay_min", "fast_loop.us_close_lead_min", "fast_loop.new_listing_*", "fast_loop.adl_*"] },
+    { g: "止损放多远", hint: "带「跟最长持仓走」的改单笔最长持仓时自动换。", keys: ["fast_loop.atr_period_min", "fast_loop.atr_long_period_min", "fast_loop.atr_floor_7d", "fast_loop.session_factor", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_snap", "fast_loop.stop_level_buffer_atr"] },
+    { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp"] },
+    { g: "一笔最多拿多久", keys: ["fast_loop.time_limit_s"] },
+  ] },
+  { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
+    { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
+    { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
+  ] },
+  { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
+    { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
+  ] },
+  { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
+    { g: "", keys: ["fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "fast_loop.patrol_alert_stop_mult", "fast_loop.patrol_shock_stop_mult"] },
+  ] },
+  { id: "reconciler", t: "对账员", strip: ["对账员"], what: "定时和交易所对账，账本和币安对不上时处理", groups: [
+    { g: "", keys: ["app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
+  ] },
+  { id: "lifeboat", t: "保命止损", what: "在交易所挂的兜底止损，程序挂了也能止损", groups: [
+    { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
+  ] },
+  { id: "keys", t: "密钥", what: "币安、OpenRouter、Telegram 等的 key，只显示配没配", find: "密钥 key api 币安 binance openrouter telegram jev typesafe 测试网" },
+  { id: "show", t: "显示", what: "涨跌颜色、面板密码、时区等", find: "显示 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
 ];
-// 别处已经显示的键（运行卡、显示页的系统信息），不再进“其他”
+// 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
 const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
-// 没列到的新键按所在段落到哪个标签的“其他”组
-const SECTION_TAB = { risk: "risk", category: "risk", fast_loop: "exec", app: "exec", schedule: "slow", predictor: "slow", screener: "slow", tiers: "slow" };
+// 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
+const PREFIX_ROLE = [
+  ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],
+  ["fast_loop.liq_", "sentinel"], ["fast_loop.crowded_", "sentinel"], ["fast_loop.session_cme", "sentinel"], ["fast_loop.session_vol", "sentinel"], ["fast_loop.session_window", "sentinel"],
+  ["fast_loop.oi_", "sentinel"], ["fast_loop.top_crowd_", "sentinel"], ["fast_loop.btc_lead_", "sentinel"], ["fast_loop.volume_", "sentinel"],
+  ["fast_loop.min_p_", "gate"], ["fast_loop.max_p_", "gate"], ["fast_loop.jev_", "gate"], ["fast_loop.gate_", "gate"], ["app.jev_", "gate"],
+  ["fast_loop.keeper_", "keeper"], ["app.keeper_", "keeper"], ["fast_loop.patrol_", "patrol"], ["app.reconcil", "reconciler"],
+  ["fast_loop.limit_take_", "executor"], ["fast_loop.tp_limit_", "executor"], ["fast_loop.entry_limit_", "executor"],
+  ["app.predictor_", "predictor"], ["app.screener_", "screener"],
+];
+const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener" };
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
@@ -2160,30 +2248,49 @@ function settingIndex(d) {
   for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: `${CAT[k] || k}合计最多`, value: v, bounds: tot == null ? "" : `本金的 0–${tot} 倍（不超过所有仓位合计上限）`, editable: true, choices: [] };
   return ix;
 }
-// 把五个标签展开成 [标签, [组名, 提示, 项…]]；没列到的键收进对应标签的“其他”
-function advGroups(d, ix) {
-  const used = new Set([...CORE, ...SHOWN_ELSEWHERE]);
-  // 「段.*」只收别处没点名的键，点名的归到点名的那一组
-  const named = new Set(ADV.flatMap((t) => (t.groups || []).flatMap((g) => g.keys || [])).filter((k) => !k.endsWith(".*")));
-  const expand = (k) => (k.endsWith(".*") ? Object.keys(ix).filter((x) => x.startsWith(k.slice(0, -1)) && !named.has(x)) : ix[k] ? [k] : []);
+// 把每个角色展开成 {角色 id: [{组名, 提示, 项…}]}；没列到的键收进对应角色的“其他”
+function roleGroups(d, ix) {
+  const used = new Set(SHOWN_ELSEWHERE);
+  // 「…*」只收别处没点名的键，点名的归到点名的那一组
+  const named = new Set(ROLES.flatMap((r) => (r.groups || []).flatMap((g) => g.keys || [])).filter((k) => !k.endsWith("*")));
+  const expand = (k) => (k.endsWith("*") ? Object.keys(ix).filter((x) => x.startsWith(k.slice(0, -1)) && !named.has(x) && !used.has(x)) : ix[k] ? [k] : []);
   const out = {};
-  for (const tab of ADV) {
-    if (!tab.groups) continue;
-    out[tab.id] = tab.groups.map((g) => {
+  for (const role of ROLES) {
+    if (!role.groups) continue;
+    out[role.id] = role.groups.map((g) => {
       const keys = g.cat ? Object.keys(ix).filter((x) => x.startsWith("category.")) : g.keys.flatMap(expand);
       keys.forEach((k) => used.add(k));
       return { g: g.g, hint: g.hint, extra: g.extra, warn: g.warn ? d[g.warn] || [] : [], items: keys.map((k) => ix[k]) };
     });
   }
   const rest = Object.keys(ix).filter((k) => !used.has(k));
-  for (const tab of new Set(rest.map((k) => SECTION_TAB[ix[k].sec] || "exec"))) {
-    out[tab].push({ g: "其他", items: rest.filter((k) => (SECTION_TAB[ix[k].sec] || "exec") === tab).map((k) => ix[k]) });
-  }
+  const roleOf = (k) => ((PREFIX_ROLE.find(([pre]) => k.startsWith(pre)) || [])[1]) || SECTION_ROLE[ix[k].sec] || "risk_guard";
+  for (const id of new Set(rest.map(roleOf))) out[id].push({ g: "其他", items: rest.filter((k) => roleOf(k) === id).map((k) => ix[k]) });
   return out;
 }
 
 S.stOpen = new Set();
-try { S.stTab = localStorage.getItem("settings-tab") || "risk"; } catch (err) { S.stTab = "risk"; }
+S.stQ = "";
+try { S.roleOpen = new Set(JSON.parse(localStorage.getItem("settings-roles") || "[]")); } catch (err) { S.roleOpen = new Set(); }
+const saveRoles = () => { try { localStorage.setItem("settings-roles", JSON.stringify([...S.roleOpen])); } catch (err) { /* 记不住就每次都收起 */ } };
+function toggleRole(id) {
+  if (S.roleOpen.has(id)) S.roleOpen.delete(id);
+  else S.roleOpen.add(id);
+  saveRoles();
+  const sec = $(`#st-r-${id}`);
+  if (!sec || S.stQ) return render();
+  sec.classList.toggle("open", S.roleOpen.has(id));
+  sec.querySelector(".role-h").setAttribute("aria-expanded", S.roleOpen.has(id));
+}
+// 别处点进来（首屏按钮、团队页、#settings/角色）：展开那一块并滚过去
+function openRole(id) {
+  S.roleOpen.add(id);
+  saveRoles();
+  S.stQ = "";
+  render();
+  const sec = $(`#st-r-${id}`);
+  if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 const lockedPaper = (i) => i.paper_only && pageData.mode !== "paper";
 function auxOf(i) {
@@ -2191,7 +2298,7 @@ function auxOf(i) {
   if (!i.editable) return "网页不改";
   if (i.recommended != null) return `推荐 <b>${valOf(i, i.recommended)}</b>`;
   const by = i.sec === "fast_loop" ? "最长持仓" : "档位";
-  if (i.pinned) return `<span class="warn">已写死（${by}默认是 ${valOf(i, i.profile_default)}）</span>`;
+  if (i.pinned) return `<span class="warn">手动固定（${by}默认是 ${valOf(i, i.profile_default)}）</span>`;
   return i.profiled ? `跟${by}走` : "";
 }
 // 时间类的值已经换成“1 小时 40 分”，标题里的“几秒 / 几分钟”就改说“多久”
@@ -2207,7 +2314,12 @@ function arrCells(v) {
   if (v.length !== 24) return `<div class="arr-chips">${v.map((x) => `<span>${esc(x)}</span>`).join("")}</div>`;
   return `<div class="hgrid">${v.map((x, h) => `<div class="${x > 1 ? "hot" : ""}"><small>${h} 点</small>${esc(x)}</div>`).join("")}</div><div class="dim small">曼谷时间每小时一个系数；高于 1 标浅色 = 这个钟点止损放宽。</div>`;
 }
-function itemRow(i, big) {
+// 行名开头是所在角色的名字就去掉（「拍板人多久不回答就放弃这笔」在拍板人那块里显示「多久不回答就放弃这笔」）
+const stripRole = (name, strip) => {
+  const p = (strip || []).find((x) => name.startsWith(x) && name.length > x.length);
+  return p ? name.slice(p.length) : name;
+};
+function itemRow(i, big, strip) {
   const id = `${i.sec}.${i.key}`;
   const open = S.stOpen.has(id);
   const w = pageData.writable && i.editable && !(lockedPaper(i) && i.value !== true);  // 非模拟盘：开着的还能关
@@ -2219,7 +2331,7 @@ function itemRow(i, big) {
     `<span class="st-key">${esc(i.key)}</span>`,
   ].join("");
   return `<div class="st-item ${big ? "big" : ""} ${open ? "open" : ""} ${i.editable ? "" : "ro"}">
-    <button class="st-sum${numArr(i.value) ? " arr" : ""}" data-act="st-item" data-arg="${esc(id)}" aria-expanded="${open}" title="${esc(i.key)}"><span class="nm">${esc(i.cat ? i.label : nameOf(i))}</span><span class="cur num ${hot(i) ? "warn" : ""}">${numArr(i.value) ? arrSummary(i.value) : valOf(i)}</span><span class="aux">${auxOf(i)}</span><span class="chev">›</span></button>
+    <button class="st-sum${numArr(i.value) ? " arr" : ""}" data-act="st-item" data-arg="${esc(id)}" aria-expanded="${open}" title="${esc(i.key)}"><span class="nm">${esc(i.cat ? i.label : stripRole(nameOf(i), strip))}</span><span class="cur num ${hot(i) ? "warn" : ""}">${numArr(i.value) ? arrSummary(i.value) : valOf(i)}</span><span class="aux">${auxOf(i)}</span><span class="chev">›</span></button>
     ${numArr(i.value) ? `<div class="st-arr">${arrCells(i.value)}</div>` : ""}<div class="st-body">${desc ? `<div>${desc}</div>` : ""}<div class="st-acts">${acts}</div></div></div>`;
 }
 function toggleItem(el, id) {
@@ -2376,7 +2488,7 @@ function riskCard(d, ix) {
   return `<section class="card st"><div class="ch"><h2>风控硬上限</h2><span class="r">不跟档位 · 你定的上限，AI 改不了 · ${basis}</span></div>
     ${CORE.filter((k) => ix[k]).map((k) => itemRow(ix[k], true)).join("")}
     <div class="st-foot">${cautions.length ? `<span class="warn">${cautions.length} 项比推荐冒险：</span>${cautions.join("；")}。只提示，不拦。` : "都在推荐范围内。"}
-      <button class="btn b-sm" data-act="st-more">更多风控细项 ›</button></div></section>`;
+      <button class="btn b-sm" data-act="st-more">保镖的全部设置 ›</button></div></section>`;
 }
 
 function keysTab(d) {
@@ -2396,14 +2508,47 @@ function showTab(d, ix) {
     ${info("risk.day_reset_tz", "“今天”按哪个时区算")}${info("app.sim_environment", "模拟盘连币安哪个环境")}${info("app.data_dir", "数据保存在哪个文件夹")}`;
 }
 
-function advCard(d, ix) {
-  const groups = advGroups(d, ix);
-  const tab = ADV.some((t) => t.id === S.stTab) ? S.stTab : "risk";
-  const t = ADV.find((x) => x.id === tab);
-  const tabs = ADV.map((x) => `<button role="tab" aria-selected="${x.id === tab}" class="${x.id === tab ? "on" : ""}" data-act="st-tab" data-arg="${x.id}">${x.t}</button>`).join("");
-  const body = tab === "keys" ? keysTab(d) : tab === "show" ? showTab(d, ix)
-    : `<div class="st-note">${esc(t.note)}</div>` + (tab === "slow" ? `<div class="st-note">拍板人（每个信号做不做、多少毫秒不回答就放弃）不归军师团管，设置在 <button class="lnk" data-act="st-tab" data-arg="exec">「执行」页签</button> 里。</div>` : "") + (tab === "slow" && d.schedule_caution ? `<div class="note warn">${esc(d.schedule_caution)}（只提示，不拦）</div>` : "") + groups[tab].filter((g) => g.items.length).map((g) => `<div class="st-sub">${esc(g.g)}</div>${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${g.items.map((i) => itemRow(i)).join("")}${g.extra === "majors" ? majorsBox(d.majors) : ""}`).join("");
-  return `<section class="card st" id="st-adv"><div class="ch"><h2>高级</h2><span class="r">平时不用动</span></div><div class="st-tabs" role="tablist">${tabs}</div>${body}</section>`;
+// 搜索：每个词都要在行名、原始说明、键名、组名或角色名里出现（不分大小写）
+const qTerms = () => S.stQ.trim().toLowerCase().split(/\s+/).filter(Boolean);
+const hitAll = (text, terms) => { const t = text.toLowerCase(); return terms.every((w) => t.includes(w)); };
+function roleBody(role, d, ix, groups, terms) {
+  if (role.id === "keys") return keysTab(d);
+  if (role.id === "show") return showTab(d, ix);
+  const roleText = role.t;  // 只按角色名整块命中；说明里的词（比如「止损」）不算，免得一搜出来整块
+  const html = groups.map((g) => {
+    const items = terms.length && !hitAll(roleText, terms) && !hitAll(g.g || "", terms)
+      ? g.items.filter((i) => hitAll(`${i.cat ? i.label : nameOf(i)} ${i.label} ${i.key} ${i.sec}.${i.key} ${g.g || ""} ${roleText}`, terms))
+      : g.items;
+    if (!items.length) return "";
+    return `${g.g ? `<div class="st-sub">${esc(g.g)}</div>` : ""}${g.hint ? `<div class="st-note">${esc(g.hint)}</div>` : ""}${(g.warn || []).map((c) => `<div class="note warn">${esc(c)}（只提示，不拦）</div>`).join("")}${items.map((i) => itemRow(i, false, role.strip)).join("")}${g.extra === "majors" && !terms.length ? majorsBox(d.majors) : ""}`;
+  }).join("");
+  if (!html) return "";
+  const caution = role.caution && d[role.caution] ? `<div class="note warn">${esc(d[role.caution])}（只提示，不拦）</div>` : "";
+  const prompts = role.prompts && !terms.length ? `<div class="st-row"><div class="k">现在用的提示词<small>只读，按最长持仓档写</small></div><button class="btn b-sm" ${clickable("prompts")}>看提示词</button></div>` : "";
+  return caution + html + prompts;
+}
+function rolesCard(d, ix) {
+  const groups = roleGroups(d, ix);
+  const terms = qTerms();
+  const sections = ROLES.map((role) => {
+    const g = groups[role.id] || [];
+    const all = g.flatMap((x) => x.items);
+    if (role.groups && !all.length) return "";  // 这个角色现在没有可调的设置
+    const matchName = terms.length && hitAll(`${role.t} ${role.find || ""}`, terms);
+    const body = terms.length && !role.groups && !matchName ? "" : roleBody(role, d, ix, g, terms);
+    if (terms.length && !body) return "";
+    const open = terms.length > 0 || S.roleOpen.has(role.id);
+    const hotN = all.filter(hot).length;
+    const found = terms.length && role.groups ? (body.match(/class="st-item /g) || []).length : 0;
+    const meta = !role.groups ? "" : terms.length ? `找到 ${found} 项` : `${all.length} 项${hotN ? ` · <span class="warn">${hotN} 项比推荐冒险</span>` : ""}`;
+    return `<section class="card st role ${open ? "open" : ""}" id="st-r-${role.id}">
+      <button class="role-h" ${terms.length ? "disabled" : `data-act="st-role" data-arg="${role.id}"`} aria-expanded="${open}"><span class="rn">${esc(role.t)}</span><span class="rw">${esc(role.what)}</span><span class="rm">${meta}</span><span class="chev">${terms.length ? "" : "›"}</span></button>
+      <div class="role-b">${body}</div></section>`;
+  }).join("");
+  const empty = terms.length && !sections ? `<div class="card st"><div class="st-pad dim">没找到「${esc(S.stQ.trim())}」。换个词试试，比如「超时」「止损」「杠杆」，或者直接打键名。</div></div>` : "";
+  return `<div class="roles-head"><h2>按角色的全部设置</h2><span class="dim small">顺序跟交易流程走：选币 → 开会 → 发现信号 → 拍板 → 风控 → 下单 → 看着持仓。点一个角色展开它的全部设置。</span>
+      <div class="st-search"><input id="st-q" class="inp" type="search" placeholder="搜设置：比如「超时」「放弃」「jev_timeout」" autocomplete="off" spellcheck="false" value="${esc(S.stQ)}"></div></div>
+    ${sections}${empty}`;
 }
 
 // 「你的设置实际意味着」：后端按硬上限、最长持仓档、本金算好的几行，只提示
@@ -2629,11 +2774,14 @@ function tierSection(d) {
     <div class="tiers-scroll"><div class="tiers" role="radiogroup" aria-label="开会档位">${tierCards(d)}</div></div>${tierPreview(d)}</section>${tierTable(d)}`;
 }
 
-P.settings = () => {
+P.settings = (arg) => {
   const d = pageData;
+  // #settings/gate：第一次带着这个角色进来时展开它（渲染完由 render 滚过去）
+  if (arg && S.stArg !== arg) { S.roleOpen.add(arg); saveRoles(); S.stQ = ""; S.stScroll = arg; }
+  S.stArg = arg;
   const ix = settingIndex(d);
   const note = d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；模式、数据目录、拍板人通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。";
-  return `<div class="st-col st-wide">${pendingBanner(d)}${tierSection(d)}${riskCard(d, ix)}${runCard(d)}${meaningCard(d)}${advCard(d, ix)}
+  return `<div class="st-col st-wide">${pendingBanner(d)}${tierSection(d)}${riskCard(d, ix)}${runCard(d)}${meaningCard(d)}${rolesCard(d, ix)}
     <div class="st-links"><button data-act="st-changes">最近的修改记录</button><span class="dim small">${note}</span></div></div>`;
 };
 
@@ -2687,6 +2835,8 @@ function render() {
   chrome();
   $("#status").innerHTML = statusBar();
   const { page, arg } = route();
+  // 搜索框里正在用输入法拼字：这次定时刷新先不重画，免得把拼到一半的字打断
+  if (page === "settings" && S.stComposing) return;
   const needs = PAGE_API[page];
   if (needs && pageErr && pageErr[0] === pageId(page, arg)) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>这一页读不出来</b><span>${esc(pageErr[1])}</span><span>${STALE_HINT}</span></div></div>`;
@@ -2702,6 +2852,8 @@ function render() {
   // 页面上的输入框（选币页“手动加币”）：定时刷新重画时保住正在输入的内容和焦点
   const typing = document.activeElement && document.activeElement.id === "pool-add";
   const typed = $("#pool-add") ? $("#pool-add").value : "";
+  // 设置页搜索框：每打一个字整页重画，焦点和光标要放回去
+  const q = document.activeElement && document.activeElement.id === "st-q" ? [$("#st-q").selectionStart, $("#st-q").selectionEnd] : null;
   // 定时刷新整页重画：先用旧高度撑住页面，免得重画中途变矮把滚动位置夹回顶部（团队页尤其明显）
   const pg = $("#page"), y = window.scrollY, same = pg.dataset.key === pageId(page, arg), samePage = pg.dataset.page === page;
   pg.style.minHeight = same ? pg.offsetHeight + "px" : "";
@@ -2712,6 +2864,13 @@ function render() {
   const box = $("#pool-add");
   if (box && typed) box.value = typed;
   if (box && typing) box.focus();
+  const qbox = $("#st-q");
+  if (qbox && q) { qbox.focus(); qbox.setSelectionRange(...q); }
+  if (page === "settings" && S.stScroll) {
+    const sec = $(`#st-r-${S.stScroll}`);
+    S.stScroll = null;
+    if (sec) requestAnimationFrame(() => sec.scrollIntoView({ block: "start" }));
+  }
   if (page === "positions") mountChart();
   if (page === "history") mountHistoryChart();
   if (page === "team") fitTeamFlow();
