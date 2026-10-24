@@ -13,10 +13,11 @@
 没有有效作战卡 → 不出信号；卡里没有这个标的、只看不做、不允许这类信号、方向和卡相反 → 不出。
 同一个去重键（标的:信号:方向）冷却期内只发一次。
 
-和卡方向相反：不出交易信号，但发一个「反向信号」事件（:meth:`RuleTrigger.pop_against`，
+和卡方向相反（也在「卡上没允许这类信号」之前判）：不出交易信号，但发一个「反向信号」事件（:meth:`RuleTrigger.pop_against`，
 同一个币同一种信号 ``against_dedup_s`` 内只发 1 次）。哨兵不看持仓：有没有仓、叫不叫管家、
 开不开临时会，由主循环按账本里此刻的持仓判断（``jiaoyi.core.against``），结果再写回这里
 （:meth:`RuleTrigger.note_against_result`），面板那一行「和卡上方向相反」后面接着显示。
+卡上信号被清空但方向还在（只盯不开）照样判反向；卡上方向是不做（NO_TRADE）的不判。
 
 为什么没信号：每个币记最近一次的量比 / 主动买卖占比、最近 1 小时量比最高的那一刻、最近一次被
 跳过的原因；卡上有但一直没收到成交的币标「没收到行情」。心跳时每币一行写进 module_status 的
@@ -153,7 +154,7 @@ class RuleTrigger:
         if cs is None:
             self._note_skip(w, "不在作战卡上", now)
             return []
-        if cs.bias == Bias.NO_TRADE or not cs.allowed_signals:
+        if cs.bias == Bias.NO_TRADE:
             self._note_skip(w, "卡上是只看不做", now)
             return []
 
@@ -162,19 +163,24 @@ class RuleTrigger:
             features, prev, [lv.price for lv in cs.key_levels], now
         ):
             name = f"{_KIND_CN[kind]}（{'多' if side == Side.LONG else '空'}）"
-            if kind in self._skip:
-                self._note_skip(w, f"{name}：测试网 / 实盘关了量能突增", now)
-                continue
-            if kind not in cs.allowed_signals:
-                self._note_skip(w, f"{name}：卡上没允许这类信号", now)
-                continue
             key = f"{sym}:{kind.value}:{side.value}"
+            # 反向先于种类过滤判：卡上没列这类信号、或卡上信号被清空（只盯不开）也要能叫管家
+            # （只发反向事件，不放开开仓）
             if (cs.bias == Bias.LONG and side != Side.LONG) or (
                 cs.bias == Bias.SHORT and side != Side.SHORT
             ):
                 self._against_hit(features, kind, side, desc, key, now)
                 done = self._against_result.get(key)
                 self._note_skip(w, f"{name}：和卡上方向相反" + (f"，{done}" if done else ""), now)
+                continue
+            if not cs.allowed_signals:
+                self._note_skip(w, "卡上是只看不做", now)
+                continue
+            if kind in self._skip:
+                self._note_skip(w, f"{name}：测试网 / 实盘关了量能突增", now)
+                continue
+            if kind not in cs.allowed_signals:
+                self._note_skip(w, f"{name}：卡上没允许这类信号", now)
                 continue
             last = self._last_fired.get(key)
             if last is not None and now - last < self._dedup:

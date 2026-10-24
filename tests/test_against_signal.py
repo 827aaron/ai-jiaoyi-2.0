@@ -433,3 +433,62 @@ async def test_runner_heartbeat_lists_recent_against(tmp_path: Path, now: dateti
 
 def _position_now(now: datetime, **over: Any) -> c.PositionRecord:
     return pos(now, **over)
+
+
+# ------------------------------------------------------------------ 过滤顺序（逻辑审查 #199）
+
+
+def test_against_detected_before_allowed_kinds(now: datetime) -> None:
+    # 卡偏空、只允许量能突增：瀑布反弹（多）不在名单里，也要发反向事件
+    cd = h.card(now, bias="short", allowed_signals=["volume_surge"])
+    liq = h.features(
+        now,
+        liq_long_usdt_1m=500_000.0,
+        liq_ratio_1m=8.0,
+        ret_5m=-0.015,
+        cvd_30s_usdt=20_000.0,
+        vol_ratio_1m=1.0,
+    )
+    t = RuleTrigger(FAST)
+    assert t.check(liq, cd, now) == []
+    [ev] = t.pop_against()
+    assert ev.kind is c.SignalKind.LIQUIDATION_REBOUND and ev.strong
+
+
+def test_against_detected_when_live_switch_hides_surge(now: datetime) -> None:
+    off = FAST.model_copy(update={"volume_surge_live": False})
+    t = RuleTrigger(off, live=True)
+    assert t.check(h.features(now, **SURGE_LONG), short_card(now), now) == []
+    assert len(t.pop_against()) == 1
+
+
+def test_cleared_signals_still_report_against(now: datetime) -> None:
+    """卡过期变只盯不开（信号清空、方向还在）的持仓币：瀑布反弹反向照样叫管家急查。"""
+    cd = h.card(now, bias="short", allowed_signals=[])
+    liq = h.features(
+        now,
+        liq_long_usdt_1m=500_000.0,
+        liq_ratio_1m=8.0,
+        ret_5m=-0.015,
+        cvd_30s_usdt=20_000.0,
+        vol_ratio_1m=1.0,
+    )
+    t = RuleTrigger(FAST)
+    assert t.check(liq, cd, now) == []
+    [ev] = t.pop_against()
+    assert ev.kind is c.SignalKind.LIQUIDATION_REBOUND and ev.strong
+    held = pos(now, side="short", entry_price=68000.0, stop_loss_price=68120.0)
+    ev2, rechecks = desk().route(ev, [held], set(), now)
+    assert [(p.position_id, one) for p, one in rechecks] == [("pos-1", True)]
+    assert ev2.actions == ["keeper_recheck"]
+    # 顺卡方向的信号仍然不开仓，面板写只看不做
+    t2 = RuleTrigger(FAST)
+    surge_short = h.features(now, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.2)
+    assert t2.check(surge_short, cd, now) == [] and t2.pop_against() == []
+    assert "卡上是只看不做" in next(x for x in t2.detail_lines(now) if x.startswith("BTCUSDT"))
+
+
+def test_no_trade_card_skipped(now: datetime) -> None:
+    t = RuleTrigger(FAST)
+    assert t.check(h.features(now, **SURGE_LONG), h.card(now, bias="no_trade"), now) == []
+    assert t.pop_against() == []
