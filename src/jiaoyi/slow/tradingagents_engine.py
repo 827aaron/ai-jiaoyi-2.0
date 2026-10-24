@@ -1626,7 +1626,16 @@ class TradingAgentsEngine:
                 "hold": p.hold,
                 "style": p.style,
                 "shared": perp_context(p),
-                "pick": ta_prompts.pick_prompt(p, "{now}", 0, "{prev}", "{market}", "{table}"),
+                "placeholders": {
+                    "{now}": "开会时填当前 UTC 时间",
+                    "{max_n}": "开会时填这轮最多挑几个（卡容量减去固定 / 持仓币）",
+                    "{prev}": "开会时填上一轮的大盘判断（没有就整行去掉）",
+                    "{market}": "开会时填大盘简报和近期新闻",
+                    "{table}": "开会时填候选池表",
+                },
+                "pick": ta_prompts.pick_prompt(
+                    p, "{now}", "{max_n}", "{prev}", "{market}", "{table}"
+                ),
                 "convert": convert_instructions(
                     self._risk, p, s.lean_size_tier, "{research_manager}", "{portfolio_manager}"
                 ),

@@ -286,6 +286,9 @@ HORIZON_ZH = {
 }
 
 
+# 「市场习性」那几句话背后的研究统计取自哪段数据（币安永续）。重做统计后只改这里，两种写法都跟着变
+DATA_WINDOW = ("Jan 2025 to Oct 2026", "2025-01 到 2026-10")
+
 # 卡上必须有进场区间的档（30m–4h）；8h 以上尽量给（tier-prompts-spec §2.1）
 ZONE_REQUIRED = frozenset({"30m", "1h", "2h", "4h"})
 

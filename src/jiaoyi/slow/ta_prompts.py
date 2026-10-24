@@ -204,6 +204,7 @@ def fill(text: str, p: PromptParams) -> str:
         .replace("{H}", p.horizon)
         .replace("{FEE}", f"{p.fee_pct:g}")
         .replace("{IND}", p.indicator)
+        .replace("{DATA_WINDOW}", profiles.DATA_WINDOW[0])
     )
 
 
@@ -222,7 +223,7 @@ _SHARED = (
     "You are judging the next {H} for this coin{not_this}; size targets, stops and levels to "
     "moves plausible within {H}.\n"
     "Evidence that matters at this horizon is {window}: {evidence}. {background}\n"
-    "How this market behaves at this horizon (Binance perpetuals, Jan 2025 to Oct 2026): "
+    "How this market behaves at this horizon (Binance perpetuals, {DATA_WINDOW}): "
     "{habit}\n"
     "Follow the market as it changes: base the call on fresh data, not on what an earlier "
     "meeting concluded. {change}\n"
@@ -415,7 +416,7 @@ def brief_fields_zh(names: tuple[str, ...]) -> str:
 def pick_prompt(
     p: PromptParams,
     now: str,
-    max_n: int,
+    max_n: int | str,
     prev_regime: str = "",
     market: str = "",
     table: str = "",
@@ -430,7 +431,7 @@ def pick_prompt(
     text = fill(
         f"你是加密永续合约的总盘军师。现在是 {{now}} UTC。本系统每笔单最多拿 {{H_zh}}，"
         f"你判断的是未来 {{H_zh}} 的大盘{w.not_this_zh}。\n"
-        f"这个尺度上市场的习性（币安永续，2025-01 到 2026-10）：{w.habit_zh}。\n"
+        f"这个尺度上市场的习性（币安永续，{profiles.DATA_WINDOW[1]}）：{w.habit_zh}。\n"
         f"{prev_line}"
         "下面是代码筛出的候选池和大盘简报。请先用一句中文判断未来 {H_zh} 大盘偏多、偏空还是"
         f"震荡，依据写简报里的{brief_fields_zh(w.brief_main)}；{w.background_zh}。"
