@@ -568,6 +568,23 @@ def test_paper_only_hold_rejected_outside_paper(tmp_path: Path) -> None:
     assert load_app_config(paths.app).hold == "4h"
 
 
+def test_gate_record_only_editable_in_paper_only(tmp_path: Path) -> None:
+    """拍板只记不拦：模拟盘能在网页上开 / 关；测试网 / 实盘面板只读，服务端也拒绝打开。"""
+    paths, data = _setup(tmp_path)
+    with _client(paths) as client:
+        fl = {i["key"]: i for i in client.get("/api/settings").json()["fast_loop"]}
+    item = fl["gate_record_only"]
+    assert item["editable"] and item["paper_only"] and item["value"] is False  # 不写 = 关
+    actions.update_config(paths, data, "fast_loop", {"gate_record_only": True}, PW, NOW)
+    assert load_app_config(paths.app).gate_record_only
+    actions.update_config(paths, data, "fast_loop", {"gate_record_only": False}, PW, NOW)
+    text = paths.app.read_text(encoding="utf-8").replace('mode = "paper"', 'mode = "testnet"')
+    paths.app.write_text(text, encoding="utf-8")
+    with pytest.raises(ActionError, match="拍板只记不拦只有模拟盘能开"):
+        actions.update_config(paths, data, "fast_loop", {"gate_record_only": True}, PW, NOW)
+    assert not load_app_config(paths.app).fast_loop.gate_record_only
+
+
 def test_settings_page_shows_profile(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     actions.update_config(paths, data, "fast_loop", {"time_limit_s": 5000}, PW, NOW)
