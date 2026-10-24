@@ -828,6 +828,11 @@ async def test_market_meeting_records_rejection_reasons(tmp_path: Path, now: dat
         {"symbol": "CCUSDT", "reason": "量能萎缩，不值得开会"},
         {"symbol": "DDUSDT", "reason": "军师没挑，也没给理由"},
     ]
+    filt = doc["steps"][2]["text"]
+    assert (
+        "CCUSDT：总盘会这轮没挑中" in filt and "量能萎缩，不值得开会" in filt
+    )  # 步骤文字也写军师的理由
+    assert "分）" not in filt and "选币分 0." in filt  # 0–1 的分数不能四舍五入成 0
 
 
 async def test_symbol_record_carries_usage(tmp_path: Path, now: datetime) -> None:

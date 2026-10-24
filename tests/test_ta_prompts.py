@@ -248,6 +248,7 @@ def test_prompts_active_file_is_written(tmp_path) -> None:  # type: ignore[no-un
     assert doc["hold"] == "4h" and doc["style"] == "mid" and doc["indicator_interval"] == "1h"
     assert "both effects are weak" in doc["shared"] and "{SYMBOL}" in doc["position_note"]
     assert doc["brief_fields"]["main"][0] == "chg_4h"
+    assert "最多 {max_n} 个" in doc["pick"]  # 预览留占位符，不写成「最多 0 个」
 
 
 # ---------------------------------------------------------------- tickSize
@@ -327,3 +328,13 @@ def test_zone_required_turns_card_into_no_trade() -> None:
     c = draft_to_card_symbol(d, entry, None, zone_required=True)
     assert c.bias.value == "no_trade" and "会议没给进场区间" in c.reason
     assert draft_to_card_symbol(d, entry, None, zone_required=False).bias.value == "short"
+
+
+def test_data_window_comes_from_one_constant() -> None:
+    from jiaoyi.core import profiles
+
+    p = tp.PromptParams.for_hold("2h")
+    assert profiles.DATA_WINDOW[0] in tp.perp_context(p) and "{DATA_WINDOW}" not in tp.perp_context(
+        p
+    )
+    assert profiles.DATA_WINDOW[1] in tp.pick_prompt(p, "t", 3)
