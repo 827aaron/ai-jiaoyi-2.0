@@ -50,6 +50,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
+from jiaoyi.market.binance_ws import ContractInfo
 from jiaoyi.market.features import (
     ATR_PERIOD,
     BTC,
@@ -60,6 +61,7 @@ from jiaoyi.market.features import (
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
+from jiaoyi.risk.guard import DELIST_WINDOW
 
 log = logging.getLogger(__name__)
 
@@ -280,6 +282,8 @@ class Runner:
         self._meeting_picks: set[str] = set()
         self._watch_lock = asyncio.Lock()
         self._watched: set[str] | None = None  # 上一次订阅的集合；None = 还没订过
+        if hasattr(self.m.feed, "contract_listener"):
+            self.m.feed.contract_listener = self.on_contract_info  # 币安行情层：下架推送
         self._market_file = MarketSnapshotFile(app.app_cfg.data_dir, app.risk_cfg.day_reset_tz)
         if isinstance(self.m.cards, _PicksAware):
             self.m.cards.set_on_picks(self.set_meeting_picks)
@@ -577,6 +581,37 @@ class Runner:
             # 空集也订一次：全市场强平那条连接要开着（选币用）
             await feed.subscribe(sorted(watch))
             self._watched = watch
+
+    def on_contract_info(self, info: ContractInfo) -> None:
+        """币安合约信息推送：盯着的币 / 候选池的币 / 持仓的币要下架或不再交易 → 封新开仓。
+
+        和新闻源（币安下架公告）走同一个 ``block_symbol``：卡里读成只看不做，已有持仓由持仓
+        管家平掉。推送是即时的，公告要轮询，所以这是更快的第二来源。"""
+        now = self.app.clock()
+        soon = info.delist_at is not None and info.delist_at - now <= DELIST_WINDOW
+        if info.status == "TRADING" and not soon:
+            return
+        ours = set(self._watched or set()) | {p.symbol for p in self.positions}
+        if self.app.pool is not None:
+            ours |= {e.symbol for e in self.app.pool.in_pool}
+        cards = self.m.cards
+        if info.symbol not in ours or not isinstance(cards, _NewsAware):
+            return
+        if info.symbol in self.app.blocked_symbols():
+            return
+        if soon and info.delist_at is not None:
+            reason = f"币安合约信息：{info.symbol} 将于 {info.delist_at:%m-%d %H:%M} UTC 下架"
+        else:
+            reason = f"币安合约信息：{info.symbol} 状态变成 {info.status}，不再正常交易"
+        cards.block_symbol(info.symbol, reason)
+        self.app.save_blocked()
+        self._spawn(
+            self.app._alert(
+                AlertLevel.WARN,
+                f"{info.symbol} 禁止新开仓",
+                f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
+            )
+        )
 
     async def handle_signal(self, signal: CandidateSignal) -> None:
         now = self.app.clock()

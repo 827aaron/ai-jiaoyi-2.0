@@ -635,6 +635,9 @@ def build_modules(
             state_dir=app_cfg.data_dir,
             # paper 默认拍板只记不拦（攒样本校准门槛）；testnet / live 永远拦
             gate_record_only=app_cfg.gate_record_only,
+            # 「不做」过滤：封币理由写全；自动减仓风险高不开新仓（新信号研究 10-24）
+            blocked=(lambda: cards.blocked_symbols) if isinstance(cards, _Blocks) else None,
+            adl_risk=derivs.adl_risk if derivs is not None else None,
         ),
         executor=executor,
         lifeboat=lifeboat,

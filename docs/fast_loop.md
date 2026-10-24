@@ -72,6 +72,7 @@
 - 币安 U 本位 WS 按类型分路由：盘口类（depth / bookTicker）走 `wss://fstream.binance.com/public/stream`，成交 / 标记价格 / K 线 / 强平走 `/market/stream`；旧的 `/stream` 只剩盘口在推（2026-10-23 Mac mini 实测）。行情层每 40 个币各开一条 market、一条 public 连接；按币订的连接 30 秒没消息就断开重连（看门狗），盘口员卡同时报 down。
 - 只订要盯的币：总盘会本轮挑中的（挑完马上回调 `Runner.set_meeting_picks`，不等作战卡）+ 有效作战卡上的 + 有持仓的，不订整个候选池。新加的币先回填 K 线；卡过期、平仓后下一轮持仓管家（`keeper_tick`）里退订。全市场强平连接一直开着（选币要用）。盘口员卡开头写「盯着 N 个币（总盘会 n 持仓 m）」。
 
+- 全市场连接同时订 `!contractInfo`：盯着 / 候选池 / 持仓的币状态不再是 TRADING、或排了 7 天内下架 → `block_symbol`（和下架公告同一条路，原因写「币安合约信息：…」）。保镖另按 exchangeInfo 的 `deliveryDate` / `onboardDate` 拒「7 天内下架」「上线不到 `new_listing_block_h` 小时」，按 `symbolAdlRisk`（30 分钟一查）拒自动减仓风险「高」（`adl_high_block`），查不到都不挡。
 - 币安强平流每个标的每秒最多推一笔，爆仓额是下限估计。
 - 强平走全市场流 `!forceOrder@arr`（一个连接）。`feed.liquidations`（`LiquidationTracker`）记着所有币近 1 小时的强平，
   选币用 `feed.liquidations.liquidations_1h_usdt(symbol, now)` 填 `SymbolStats.liquidations_1h_usdt`。

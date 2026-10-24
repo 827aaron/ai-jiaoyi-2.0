@@ -102,6 +102,22 @@ class LotFilter:
     """市价单单笔最大数量（MARKET_LOT_SIZE.maxQty）；没有就是不限。"""
     tick_size: float | None = None
     """价格最小变动（PRICE_FILTER.tickSize）；没有就是不知道。"""
+    onboard_at: datetime | None = None
+    """上线时间（onboardDate）；没有就是不知道。"""
+    delist_at: datetime | None = None
+    """排了下架 / 交割的时间（deliveryDate；永续没排时是 2100 年，当没有）。"""
+
+
+def _ms_time(raw: object) -> datetime | None:
+    """exchangeInfo 的毫秒时间戳；没有、读不懂或 2099 年以后（永续的「不交割」）返回 None。"""
+    try:
+        ms = int(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    t = datetime.fromtimestamp(ms / 1000, UTC)
+    return None if t.year >= 2099 else t
 
 
 @runtime_checkable
@@ -456,6 +472,8 @@ class CcxtBinanceFutures:
                     float(notional),
                     max_qty=market_max if market_max > 0 else None,
                     tick_size=tick if tick > 0 else None,
+                    onboard_at=_ms_time(info.get("onboardDate")),
+                    delist_at=_ms_time(info.get("deliveryDate")),
                 )
             except (KeyError, ValueError):
                 continue  # 缺字段的合约不给精度，保镖会对它拒单
