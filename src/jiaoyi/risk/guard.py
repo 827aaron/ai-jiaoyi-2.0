@@ -747,6 +747,9 @@ class RiskGuardImpl:
         limit = self._pullback_price(side, entry, dist, lot)
         if limit is not None:
             detail["limit_price"] = limit
+        trail_act, trail_delta, trail_note = self._trailing(stop_pct)
+        if trail_note:
+            detail["trailing"] = trail_note
         return OrderIntent(
             order_type="limit" if limit is not None else "market",
             limit_price=limit,
@@ -766,8 +769,42 @@ class RiskGuardImpl:
             take_profit_pct=tp_pct,
             time_limit_s=fast.time_limit_s,
             lifeboat_stop_pct=lifeboat_pct,
+            trailing_activation_pct=trail_act,
+            trailing_stop_pct=trail_delta,
             approved_at=now,
         )
+
+    def _trailing(self, stop_pct: float) -> tuple[float | None, float | None, str]:
+        """保本 / 移动止损（持仓管家的开关，默认关）→ hummingbot trailing_stop（启动线, 回撤距离）。
+
+        单位都是价格百分比、按扣过开仓手续费的盈亏算（和执行器止损同口径）。hummingbot 盈利过启动线
+        后把止损线定在「当时盈利 − 回撤距离」，之后只往上挪不往下放。``fee`` = 平仓手续费：止损线
+        在它上面，平掉时开平两次手续费扣完不亏。
+        - 只开移动：启动线 = max(开始 R, 移动距离 + fee)，回撤距离 = 移动距离
+          （启动那一刻止损线不低于保本价，之后跟着最高盈利收紧）；
+        - 只开保本：启动线 = 保本 R，回撤距离 = 启动线 − fee（启动那一刻止损在保本价）；
+        - 都开：启动线 = 保本 R，回撤距离 = min(移动距离, 启动线 − fee)。
+        算不出（距离 ≤ 0）就不加，理由写进记录。"""
+        fast = self._fast
+        if not (fast.breakeven_on or fast.trailing_on):
+            return None, None, ""
+        fee = self._risk.taker_fee_bps / 100.0
+        trail = fast.trail_distance_r * stop_pct
+        if fast.breakeven_on:
+            act = fast.breakeven_trigger_r * stop_pct
+            delta = act - fee
+            if fast.trailing_on:
+                delta = min(delta, trail)
+        else:
+            act, delta = max(fast.trail_start_r * stop_pct, trail + fee), trail
+        if delta <= 0:
+            return None, None, f"保本启动线 {act:.3f}% 不到手续费 {fee:.3f}%，这笔不加保本"
+        if fast.breakeven_on and fast.trailing_on:
+            what = "保本 + 移动止损"
+        else:
+            what = "保本" if fast.breakeven_on else "移动止损"
+        note = f"{what}：赚到 {act:.2f}% 起止损不低于保本价，之后离最高盈利 {delta:.2f}% 跟着收紧"
+        return round(act, 6), round(delta, 6), note
 
     def _pullback_price(self, side: Side, entry: float, dist: float, lot: LotRules) -> float | None:
         """挂单等回踩的挂单价：触发价往有利方向让 ``entry_limit_offset_stop`` × 止损距离，
@@ -825,6 +862,8 @@ class RiskGuardImpl:
                 f"{it.leverage}x，止损 {it.stop_loss_pct:.2f}% 止盈 {it.take_profit_pct:.2f}%，"
                 f"风险 {it.risk_usdt:.2f}U"
             )
+            if trail := detail.get("trailing"):
+                summary += f"；{str(trail).split('：')[0]}开"
             if would := detail.get("gate_would_block"):
                 summary += f"（拍板本会拦，只记不拦放行：{str(would).split('；')[0]}）"
             outcome = Outcome.PASS

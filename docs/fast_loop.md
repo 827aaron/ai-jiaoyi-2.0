@@ -213,3 +213,15 @@ OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase
 等满没成交就撤单，记「挂单没成交已撤」（不报警）。`entry_limit_chase`（8h 起默认开）时改市价追进，
 执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在保镖名下记「不追了：…」。
 持仓时长从成交时刻算。
+
+## 保本和移动止损（持仓管家的开关，默认关）
+
+`trailing_on` / `breakeven_on` 打开后，保镖在 OrderIntent 里带上 `trailing_activation_pct` / `trailing_stop_pct`，执行器交给
+hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时盈利 − 回撤距离」，之后只往上挪不往下放，由 hummingbot 实时盯着平仓
+（平仓原因「保本 / 移动止损」）。数字都按止损距离（R）给：
+
+- 只开移动：启动线 = max(`trail_start_r`, `trail_distance_r` + 平仓手续费)，回撤距离 = `trail_distance_r`（档位 30m–2h 1.0、4h 起 1.2）；
+- 只开保本：启动线 = `breakeven_trigger_r`，回撤距离 = 启动线 − 平仓手续费（启动时止损正好在保本价）；
+- 都开：启动线 = `breakeven_trigger_r`，回撤距离 = min(`trail_distance_r`, 启动线 − 平仓手续费)。
+
+只对之后新开的仓生效；保命止损（币安上的兜底单）不跟着挪，仍是程序挂了时的最后一道。拍板人管家的逻辑不变。
