@@ -907,12 +907,12 @@ class HbExecutorAdapter:
     @staticmethod
     def _phantom(rec: PositionRecord, rows: list[TradeFill], now: datetime) -> bool:
         """修旧账：以前把 hummingbot 的计划价当成交（保证金不够根本没下单），对账员几秒后见币安
-        没仓又记成「手动平」。这种记录币安上前后一笔开仓成交都没有，平仓价也从没回填过。"""
+        没仓又记成「手动平」。这种记录币安上前后一笔开仓成交都没有，平仓价也从没回填过。
+        入场价可能被上一笔同币的平仓成交错误回填过（ENA），所以不看 ``intended_price``。"""
         return (
             rec.status is PositionStatus.CLOSED
             and rec.close_reason is CloseReason.MANUAL
             and rec.exit_price is None
-            and rec.intended_price is None
             and rec.closed_at is not None
             and rec.closed_at + PHANTOM_SETTLE <= now
             and no_open_fill(rec, rows)
@@ -920,12 +920,16 @@ class HbExecutorAdapter:
 
     def _mark_never_opened(self, tracked: TrackedPosition) -> None:
         rec = tracked.record
+        # 以前可能把上一笔同币的平仓成交当成了入场回填过：入场价改回计划价
+        planned = rec.intended_price if rec.intended_price is not None else rec.entry_price
         self._set(
             tracked,
             status=PositionStatus.FAILED,
             close_reason=None,
             realized_pnl_usdt=0.0,
             fees_usdt=0.0,
+            entry_price=planned,
+            intended_price=None,
         )
         self._record(
             Outcome.INFO,
