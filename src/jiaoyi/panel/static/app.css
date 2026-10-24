@@ -627,3 +627,4 @@ section.card > .prompt-line { padding: 2px 0; }
 .tier-role .role-b > .tier-row:first-child { border-top: 0; }
 .tier-role .role-b > .st-note:first-child { margin-top: 10px; }
 .tier-search { flex-basis: 100%; margin-top: 0; }
+.st-row .vol { width: 160px; accent-color: var(--accent); }
