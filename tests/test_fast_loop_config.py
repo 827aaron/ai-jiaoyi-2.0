@@ -81,8 +81,12 @@ def test_gate_record_only_default_off_and_never_live() -> None:
     raw["fast_loop"]["gate_record_only"] = None
     assert not AppConfig.model_validate(raw).gate_record_only  # testnet / live 永远关
     raw["fast_loop"]["gate_record_only"] = True
-    cfg = AppConfig.model_validate(raw)  # 不拒绝启动，只是当关
-    assert not cfg.gate_record_only and cfg.ignored_paper_switches == ["拍板只记不拦"]
+    raw["fast_loop"]["rule_gate_without_jev"] = True
+    for mode in ("testnet", "live"):  # 不拒绝启动，只是当关；传给保镖的 record_only 也是关
+        raw["mode"] = mode
+        cfg = AppConfig.model_validate(raw)
+        assert not cfg.gate_record_only
+        assert cfg.ignored_paper_switches == ["拍板只记不拦", "没有拍板人时用规则代替"]
 
 
 def test_paper_gate_thresholds_only_in_paper(tmp_path: Path) -> None:
