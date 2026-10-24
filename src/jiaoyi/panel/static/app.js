@@ -1445,6 +1445,18 @@ function againstCard(list) {
   return `<section class="card mt"><div class="ch"><h2>反向急查 · 最近 30 分钟</h2></div><div class="log trail">${rows}</div>
     <div class="foot">哨兵看到和作战卡相反的信号、手里又有这个币的仓，就叫管家马上复查一次；下面「今天做了什么」里这几条标了「反向急查」。</div></section>`;
 }
+// 平时只记次数、不写逐条记录的角色（「今日 N 次」是查了几遍，列表只记出事的那几条）
+const QUIET_ROLE = {
+  patrol: "巡逻兵每 10 秒把持仓币过一遍 1 分钟波动；没碰到报警线、全平线只记次数，不写逐条记录。碰到全平线直接全平才记一条；碰到报警线是叫管家马上复查，记在管家那边。",
+  reconciler: "对账员每轮核对交易所、执行器、账本；三方一致只记次数，对不上或自动处理了才记一条。",
+  lifeboat: "保命止损每轮跟着对账员核对一遍；挂好了只记次数，挂 / 撤 / 补挂才记一条。",
+};
+function quietHead(sel) {
+  const why = QUIET_ROLE[sel.role];
+  if (!why) return "";
+  const last = sel.summary ? `<div><span class="n">${sel.last_run_at ? hms(sel.last_run_at) : ""}</span><span><span class="pill">最近一轮</span> ${esc(sel.summary)}</span></div>` : "";
+  return `<div class="note">${esc(why)}今日查了 ${sel.calls || 0} 次。</div>${last ? `<div class="log trail">${last}</div>` : ""}`;
+}
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
@@ -1458,8 +1470,8 @@ P.team = () => {
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
       <span class="r">${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
-      ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}
-      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : "今天还没有记录。"}</div>`}</div>
+      ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
+      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "今天还没有记录。"}</div>`}</div>
       <div class="foot">最多显示最新 200 条 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 
