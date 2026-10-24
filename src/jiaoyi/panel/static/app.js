@@ -1220,8 +1220,7 @@ const TF_EDGES = [
   [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
-  // 预测只给拍板人（Jev）参考：从哨兵底下绕过去进拍板人底部（哨兵只是顺手转交，不看不改）
-  [tfR("predictor"), [TF_POS.gate[0] + 40, TF_POS.gate[1] + NODE_H], "gate", "预测（给拍板人参考）", "under"],
+  [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
   [tfR("sentinel"), tfL("gate"), "gate", "信号"],
   [tfR("gate"), tfL("risk_guard"), "risk_guard", "做不做"],
   [tfB("risk_guard"), tfT("executor"), "executor", "仓位"],
@@ -1261,7 +1260,6 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
   else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
   else if (how === "drop") { const yy = 402; d = `M${x1},${y1} V${yy} H${x2} V${y2 - 1}`; lx = x1 + 8; ly = yy - 5; dir = "d"; }
-  else if (how === "under") { d = `M${x1},${y1} H${x2 - 10} Q${x2},${y1} ${x2},${y1 - 10} V${y2 + 1}`; lx = x1 + 10; ly = y1 - 6; dir = "u"; }
   // 从下面的节点顶上往上，在第一、二泳道之间横过去，再往上进目标节点底
   else if (how === "climb") { const yy = 182; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x1 - 140; ly = yy - 5; dir = "u"; }
   else if (how === "up") { d = `M${x1},${y1} V${y2 + 1}`; lx = x1 - 8; ly = (y1 + y2) / 2 + 22; dir = "u"; }
