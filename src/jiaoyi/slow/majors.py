@@ -71,6 +71,10 @@ class MajorRanks:
     ranks: dict[str, int] = field(default_factory=dict)
     fetched_at: datetime | None = None
     version: int = 0
+    effective: dict[str, int] = field(default_factory=dict)
+    """最近一次选币实际生效的前 N 个（已过滤币安没有永续的）；面板显示用这个。"""
+    effective_top_n: int = 0
+    effective_at: datetime | None = None
 
 
 class MajorsSource:
@@ -91,10 +95,14 @@ class MajorsSource:
             return MajorRanks()
         try:
             d = json.loads(self._path.read_text(encoding="utf-8"))
+            eff_at = d.get("effective_at")
             return MajorRanks(
                 {str(k): int(v) for k, v in d["ranks"].items()},
                 datetime.fromisoformat(d["fetched_at"]),
                 int(d.get("v", 0)),
+                {str(k): int(v) for k, v in (d.get("effective") or {}).items()},
+                int(d.get("effective_top_n", 0)),
+                datetime.fromisoformat(eff_at) if eff_at else None,
             )
         except (ValueError, KeyError, TypeError, OSError):
             log.warning("市值排名缓存 %s 读不懂，忽略", self._path)
@@ -112,6 +120,11 @@ class MajorsSource:
                         "fetched_at": self.state.fetched_at.isoformat(),
                         "v": self.state.version,
                         "ranks": self.state.ranks,
+                        "effective": self.state.effective,
+                        "effective_top_n": self.state.effective_top_n,
+                        "effective_at": (
+                            self.state.effective_at.isoformat() if self.state.effective_at else None
+                        ),
                     },
                     ensure_ascii=False,
                 ),
@@ -134,6 +147,20 @@ class MajorsSource:
             if available is None or base in available:
                 out[base] = rank
         return out
+
+    def set_effective(self, effective: Mapping[str, int], top_n: int, now: datetime) -> None:
+        """选币器每轮把实际生效的前 N 个记下来（有变化才落盘），面板读这个，不自己重算。"""
+        st = self.state
+        if st.fetched_at is None or (
+            dict(effective) == st.effective and top_n == st.effective_top_n
+        ):
+            return
+        st.effective, st.effective_top_n, st.effective_at = (
+            dict(effective),
+            top_n,
+            now.astimezone(UTC),
+        )
+        self._save()
 
     async def refresh(self, now: datetime) -> None:
         """超过一天（或缓存格式旧了）才重新拉；失败沿用旧缓存，只记 ``error``。"""
@@ -166,7 +193,14 @@ class MajorsSource:
             log.warning("拉市值排名失败，沿用上次（%s）", self.error)
             return
         self.error, self._failed_at = None, None
-        self.state = MajorRanks(ranks, now.astimezone(UTC), CACHE_VERSION)
+        self.state = MajorRanks(
+            ranks,
+            now.astimezone(UTC),
+            CACHE_VERSION,
+            st.effective,
+            st.effective_top_n,
+            st.effective_at,
+        )
         self._save()
 
     async def aclose(self) -> None:

@@ -127,3 +127,19 @@ async def test_old_cache_without_version_is_refetched(tmp_path: Path) -> None:
     src = MajorsSource(path, _client(calls))
     await src.refresh(NOW + timedelta(hours=1))  # 旧格式的缓存只有前 N 个：不到一天也要重拉
     assert len(calls) == 1 and "LINK" in src.ranks(20)
+
+
+async def test_screener_records_effective_majors_for_the_panel(
+    tmp_path: Path, now: datetime
+) -> None:
+    import json
+
+    path = tmp_path / "m.json"
+    src = MajorsSource(path, _client([]))
+    fake = FakeSource([stat("SOLUSDT"), stat("DOGEUSDT"), stat("PEPE1USDT")])
+    await CodeSymbolScreener(fake, ScreenerConfig(major_top_n=2), majors=src).screen(now)
+    d = json.loads(path.read_text(encoding="utf-8"))
+    assert d["effective"] == {"SOL": 6, "DOGE": 10} and d["effective_top_n"] == 2
+    assert len(d["ranks"]) > 2  # 候选表还是全的，面板不能拿它当名单
+    again = MajorsSource(path, _client([]))
+    assert again.state.effective == {"SOL": 6, "DOGE": 10}

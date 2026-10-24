@@ -417,6 +417,7 @@ class CodeSymbolScreener:
             await self._majors.refresh(now)  # 一天拉一次；失败沿用上次，再不行回退写死的名单
             # 币安没有永续的（只在市值榜上）不占名额：往下补满 major_top_n 个
             ranks = self._majors.ranks(cfg.major_top_n, {base_of(s.symbol) for s in stats})
+            self._majors.set_effective(ranks, cfg.major_top_n, now)
         entries: dict[str, SymbolPoolEntry] = {}
         ranked: list[SymbolPoolEntry] = []
         for s in stats:
