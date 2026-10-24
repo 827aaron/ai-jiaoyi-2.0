@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from jiaoyi.contracts import Category
+from jiaoyi.core import profiles
 from jiaoyi.core.commands import (
     CommandInbox,
     CommandResult,
@@ -837,3 +838,25 @@ def test_gate_calibration_shown_next_to_thresholds(tmp_path: Path) -> None:
         (data / "gate_calibration" / f"{hold}.json").write_text(json.dumps(cal))
         page = client.get("/api/settings").json()
         assert "样本不足" in page["gate_cautions"][0]
+
+
+def test_profile_info_tier_defaults_for_tier_page(tmp_path: Path) -> None:
+    """档位设置页：每档全部档位键的值、止损约多宽；预测员和花费段写了也算自定义。"""
+    paths, data = _setup(tmp_path)
+    info = actions.profile_info(paths)
+    assert set(info.defaults) == set(info.choices)
+    for tier in info.defaults.values():
+        assert set(tier) == {"app", "fast_loop", "predictor", "schedule", "budget"}
+        assert "funding_against_max_bp" in tier["fast_loop"]  # 档位没给的用程序默认，每档齐全
+    assert info.defaults["24h"]["budget"]["daily_cost_limit_usd"] == 5
+    assert info.defaults["15m"]["schedule"]["card_ttl_min"] == 35
+    hold_24h = info.hold if info.hold_custom else info.hold_recommended["24h"]  # 自定义的不跟档
+    assert info.defaults["24h"]["predictor"] == profiles.defaults("24h", "predictor", hold_24h)
+    paper = load_app_config(paths.app).mode == "paper"
+    if paper:
+        assert info.defaults["2h"]["fast_loop"]["min_p_take"] == profiles.PAPER_GATE["min_p_take"]
+    assert info.stop_pct == profiles.BTC_STOP_PCT and info.stop_pct["4h"] == 0.64
+    actions.update_config(paths, data, "predictor", {"pred_len": 30}, PW, NOW)
+    assert "pred_len" in actions.profile_info(paths).pinned["predictor"]
+    actions.update_config(paths, data, "predictor", {"pred_len": None}, PW, NOW)  # 恢复跟档
+    assert "predictor" not in actions.profile_info(paths).pinned

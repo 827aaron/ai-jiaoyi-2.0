@@ -115,6 +115,7 @@ BUDGET_EDITABLE = "daily_cost_limit_usd"
 _PROFILE_SECTION: dict[str, profiles.Section] = {
     "app": "app",
     "fast_loop": "fast_loop",
+    "predictor": "predictor",
     "schedule": "slow.schedule",
     "budget": "slow.budget",
 }
@@ -264,7 +265,7 @@ def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
     return loaded != config_fingerprint(risk, app, slow)
 
 
-# 档位给默认值的全部段（面板段 → 档位段）；比 _PROFILE_SECTION 多预测员和花费段
+# 档位给默认值的全部段（面板段 → 档位段）
 _PROFILED: tuple[tuple[Section, profiles.Section], ...] = (
     ("app", "app"),
     ("fast_loop", "fast_loop"),
@@ -319,6 +320,10 @@ class ProfileInfo(BaseModel):
     """段 → {键: 当前档位的默认值}：这些键在配置文件里写了值，切档位也不会跟着变。"""
     pins: dict[str, list[PinItem]] = {}
     """档位 → 切到它时会压过档位默认的写死项（任何档位给默认值的键，只要文件里写了就算）。"""
+    defaults: dict[str, dict[str, dict[str, object]]] = {}
+    """开会档位 → 段 → {键: 换到这档后的默认值}（最长持仓按换档后的算；paper 盖临时拍板门槛）。"""
+    stop_pct: dict[str, float] = {}
+    """最长持仓档 → BTC 止损约多宽（%），只显示。"""
 
 
 def _hold_for(raw_app: dict[str, Any], profile: str) -> str:
@@ -328,6 +333,31 @@ def _hold_for(raw_app: dict[str, Any], profile: str) -> str:
 
 def _profile_keys(psec: profiles.Section) -> list[str]:
     return sorted({k for p in profiles.PROFILES for k in profiles.defaults(p, psec)})
+
+
+def _tier_defaults(raw_app: dict[str, Any], profile: str) -> dict[str, dict[str, object]]:
+    """换到 ``profile`` 后各段档位键的值：档位没给的键用程序默认，每档键齐全，前端好比。"""
+    hold = _hold_for(raw_app, profile)
+    out: dict[str, dict[str, object]] = {}
+    for section, psec in _PROFILED:
+        base = profiles.defaults(profile, psec, hold)
+        if psec == "fast_loop" and raw_app.get("mode") == "paper":
+            base = {**base, **profiles.PAPER_GATE}  # 和 core/config.py 一样
+        fields = _PROFILE_MODEL[psec].model_fields
+        keys = {
+            k
+            for p in profiles.PROFILES
+            for h in profiles.HOLDS
+            for k in profiles.defaults(p, psec, h)
+        }
+        row: dict[str, object] = {}
+        for k in sorted(keys):
+            if k in base:
+                row[k] = base[k]
+            elif (f := fields.get(k)) is not None and not f.is_required():
+                row[k] = f.get_default(call_default_factory=True)
+        out[section] = row
+    return out
 
 
 def _file_table(paths: ConfigPaths, section: Section, raws: dict[str, dict[str, Any]]) -> Any:
@@ -413,13 +443,15 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
     raws: dict[str, Any] = {
         "app": raw_app,
         "fast_loop": raw_app.get("fast_loop", {}),
+        "predictor": raw_app.get("predictor", {}),
         "schedule": raw_slow.get("schedule", {}),
         "budget": raw_slow.get("budget", {}),
     }
+    tiers = {p: _tier_defaults(raw_app, p) for p in profiles.PROFILES}
     pinned: dict[str, dict[str, object]] = {}
-    for section, psec in _PROFILE_SECTION.items():
+    for section in _PROFILE_SECTION:
         raw = raws[section] if isinstance(raws[section], dict) else {}
-        base = profiles.defaults(current, psec, hold)
+        base = tiers[current][section]
         hit = {k: base[k] for k in base if k in raw}
         if hit:
             pinned[section] = hit
@@ -441,6 +473,8 @@ def profile_info(paths: ConfigPaths) -> ProfileInfo:
         },
         pinned=pinned,
         pins={p: profile_pins(paths, p) for p in profiles.PROFILES},
+        defaults=tiers,
+        stop_pct=dict(profiles.BTC_STOP_PCT),
     )
 
 
