@@ -22,6 +22,8 @@ def card(now: datetime, **sym_over: Any) -> c.BattleCard:
     data = load_example("battle_card")
     data["created_at"] = (now - timedelta(minutes=10)).isoformat()
     data["expires_at"] = (now + timedelta(hours=1)).isoformat()
+    # 示例卡的进场区间（66800–67300）不含测试价 68000：默认去掉，要测区间就显式传 entry_zone
+    data["symbols"][0]["entry_zone"] = None
     data["symbols"][0].update(sym_over)
     return c.BattleCard.model_validate(data)
 

@@ -57,6 +57,8 @@ logger = logging.getLogger(__name__)
 _TIER_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
 TOXIC_ALWAYS_BLOCK = 0.8
 """拍板只记不拦时，订单流有毒概率到这个数仍然拦。"""
+ENTRY_ZONE_SLACK_R = 0.1
+"""进场区间往交易方向最多放宽几个 R（研究：0.1R 内追进和区间内差不多）。"""
 
 
 BANGKOK = ZoneInfo("Asia/Bangkok")
@@ -76,6 +78,34 @@ def blend_atr(short: float, long_: float | None, fast: FastLoopConfig) -> float:
     if fast.atr_long_period_min and long_ and long_ > 0:
         return math.sqrt(short * long_)
     return short
+
+
+def entry_zone_miss(
+    signal: CandidateSignal, card: BattleCard, fast: FastLoopConfig, now: datetime
+) -> str | None:
+    """触发价不在卡的进场区间里 → 返回「没到区间」的原因；在区间里、卡上没写区间、开关关了 → None。
+
+    往交易方向放宽 ``ENTRY_ZONE_SLACK_R`` 个 R（做多可以比区间上沿高一点、做空可以比下沿低一点），
+    R ≈ 卡上止损倍数的中值 × 止损 ATR（拍板前还不知道止损档，用中档估）。另一侧不放宽。"""
+    if not fast.entry_zone_only:
+        return None
+    cs = card.for_symbol(signal.symbol)
+    if cs is None or cs.entry_zone is None:
+        return None
+    z = cs.entry_zone
+    px = signal.trigger_price
+    r = (cs.stop_atr.min + cs.stop_atr.max) / 2.0 * stop_atr(signal.features, fast, now, {})
+    slack = ENTRY_ZONE_SLACK_R * max(r, 0.0)
+    if signal.side_hint == Side.LONG:
+        lo, hi, side = z.min, z.max + slack, "多"
+    else:
+        lo, hi, side = z.min - slack, z.max, "空"
+    if lo <= px <= hi:
+        return None
+    return (
+        f"没到区间：触发价 {px:g}，卡的进场区间 {z.min:g}–{z.max:g}"
+        f"（做{side}往交易方向最多放宽 {ENTRY_ZONE_SLACK_R:g}R，可接受 {lo:g}–{hi:g}）"
+    )
 
 
 def stop_atr(
