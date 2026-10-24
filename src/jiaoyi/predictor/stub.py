@@ -29,3 +29,6 @@ class StubPredictor:
 
     async def backfill(self, symbol: str, bars: list[Kline]) -> None:
         return None
+
+    def take_gaps(self) -> set[str]:
+        return set()

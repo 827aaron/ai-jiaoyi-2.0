@@ -164,6 +164,35 @@ async def test_gap_resets_history_and_other_interval_ignored() -> None:
     assert be.calls == calls
 
 
+async def test_gap_is_reported_and_refill_merges_with_newer_bars() -> None:
+    """断档后不用再干等 min_bars 根：报给主循环，REST 补回的旧线和新线合起来马上能算。"""
+    be = FakeBackend()
+    f = make(True, SET, be)
+    await feed(f, 3)
+    assert f.take_gaps() == set()
+    await f.on_kline(bar(5))  # 3、4 两根没收到
+    assert f.take_gaps() == {"BTCUSDT"} and f.take_gaps() == set()
+    calls = be.calls
+    await f.backfill("BTCUSDT", [bar(k) for k in range(5)])  # REST 拉到 0–4（不含刚收盘的 5）
+    await f.wait_idle()
+    assert be.calls == calls + 1
+    assert f.latest("BTCUSDT", T0 + timedelta(minutes=30)) is not None
+    await f.on_kline(bar(6))  # 接着实时线照常往后拼
+    await f.wait_idle()
+    assert be.calls == calls + 2
+
+
+async def test_backfill_keeps_only_the_last_continuous_run() -> None:
+    be = FakeBackend()
+    f = make(True, SET, be)
+    await f.backfill("BTCUSDT", [bar(0), bar(1), bar(5), bar(6)])  # 中间缺 2–4
+    await f.wait_idle()
+    assert be.calls == 0  # 只剩 5、6 两根，不够 3 根
+    await f.backfill("BTCUSDT", [bar(k) for k in range(2, 6)])
+    await f.wait_idle()
+    assert be.calls == 1
+
+
 async def test_busy_symbol_drops_new_kline() -> None:
     be = FakeBackend()
     be.delay = 0.2
