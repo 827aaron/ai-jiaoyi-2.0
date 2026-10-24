@@ -12,11 +12,16 @@
 
 from __future__ import annotations
 
+import functools
+import logging
+import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from jiaoyi.slow import ta_prompts
+from jiaoyi.slow import ta_prompts, ta_roles
+
+logger = logging.getLogger(__name__)
 
 PROMPT_KEY = "jiaoyi_prompt"
 
@@ -31,6 +36,26 @@ def params_from_config() -> ta_prompts.PromptParams:
     return ta_prompts.PromptParams.for_hold(
         str(raw.get("hold") or "2h"), int(raw["hold_minutes"]) if raw.get("hold_minutes") else None
     )
+
+
+def lean_from_config() -> str:
+    """偏向（Overweight / Underweight）最多给到的仓位档（S / M / L），由 ``build_config`` 写入。"""
+    from tradingagents.dataflows.config import get_config
+
+    raw = get_config().get(PROMPT_KEY) or {}
+    lean = str(raw.get("lean") or "M").upper()
+    return lean if lean in ("S", "M", "L") else "M"
+
+
+def language(role: str | None = None) -> str:
+    """替换 TradingAgents 的 ``get_language_instruction()``：按角色说清哪些标签行保持英文。
+    原版对每个角色都点名 Rating / FINAL TRANSACTION PROPOSAL，没有这些行的角色被带出多余评级行。"""
+    from tradingagents.dataflows.config import get_config
+
+    lang = str(get_config().get("output_language", "English"))
+    if lang.strip().lower() == "english":
+        return ""
+    return ta_roles.language_line(lang, role)
 
 
 def _reports(state: Any) -> dict[str, str]:
@@ -62,10 +87,7 @@ def _researcher(role: str, label: str, other: str) -> Factory:
 
     def create(llm: Any) -> Node:
         def node(state: Any) -> dict[str, Any]:
-            from tradingagents.agents.context import (
-                get_language_instruction,
-                opponent_argument_or_opening,
-            )
+            from tradingagents.agents.context import opponent_argument_or_opening
 
             debate = state["investment_debate_state"]
             history = debate.get("history", "")
@@ -81,7 +103,7 @@ def _researcher(role: str, label: str, other: str) -> Factory:
                 + f"Conversation history of the debate: {history}\n"
                 + f"Last {other} argument: {reply}\n"
                 + f"Use this information to deliver your argument and engage directly with the "
-                f"{other}'s latest points." + get_language_instruction()
+                f"{other}'s latest points." + language()
             )
             response = llm.invoke(prompt)
             argument = f"{label} Analyst: {response.content}"
@@ -107,7 +129,6 @@ def _debator(key: str, label: str) -> Factory:
     def create(llm: Any) -> Node:
         def node(state: Any) -> dict[str, Any]:
             from tradingagents.agents.context import (
-                get_language_instruction,
                 get_portfolio_context_from_state,
                 opponent_argument_or_opening,
             )
@@ -136,7 +157,7 @@ def _debator(key: str, label: str) -> Factory:
                 "conversational and without special formatting; name the size, the entry zone "
                 "and the stop you would accept."
             )
-            response = llm.invoke("\n".join(lines) + get_language_instruction())
+            response = llm.invoke("\n".join(lines) + language())
             argument = f"{label} Analyst: {response.content}"
             new = {
                 "history": history + "\n" + argument,
@@ -184,7 +205,6 @@ def create_news_analyst(llm: Any) -> Node:
         from tradingagents.agents.analysts.turn import take_turn
         from tradingagents.agents.context import (
             get_instrument_context_from_state,
-            get_language_instruction,
         )
         from tradingagents.agents.tools import (
             get_global_news,
@@ -197,7 +217,7 @@ def create_news_analyst(llm: Any) -> Node:
         system_message = (
             ta_prompts.news_prompt(p, binance_symbol_of(str(state["company_of_interest"])))
             + " Make sure to append a short Markdown table at the end of the report."
-            + get_language_instruction()
+            + language()
         )
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -261,7 +281,6 @@ def create_sentiment_analyst(llm: Any) -> Node:
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
         from tradingagents.agents.context import (
             get_instrument_context_from_state,
-            get_language_instruction,
         )
 
         from jiaoyi.slow import crowd
@@ -283,7 +302,7 @@ def create_sentiment_analyst(llm: Any) -> Node:
             + "\n\n".join(blocks)
             + f"\n\n### Headlines mentioning this coin, last 24 hours\n{headlines}"
             + "\n\nMake sure to append a short Markdown table at the end of the report."
-            + get_language_instruction()
+            + language()
         )
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -309,6 +328,297 @@ def create_sentiment_analyst(llm: Any) -> Node:
     return node
 
 
+# ------------------------------------------------------- 另外四个角色（行情分析师、三位经理）
+_SLOT = re.compile(
+    r"\{(target|ticker|instrument_context|history|report_section|portfolio_context|"
+    r"investment_plan|research_plan|trader_plan|lessons_line)\}"
+)
+
+
+def _subst(text: str, values: Mapping[str, str]) -> str:
+    """一次替换运行时槽位：填进去的内容（辩论记录等）里再有花括号也不会被当成槽位二次替换。"""
+    return _SLOT.sub(lambda m: values.get(m.group(1), m.group(0)), text)
+
+
+def _tier_letter(v: Any) -> str | None:
+    m = re.search(r"\b([SML])\b", str(v).upper()) if v is not None else None
+    return m.group(1) if m else None
+
+
+def _as_text(v: Any) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple)):
+        return "–".join(f"{x:g}" if isinstance(x, (int, float)) else str(x) for x in v)
+    return str(v).strip() or None
+
+
+@functools.cache
+def _schemas() -> tuple[Any, Any, Any]:
+    """研究经理 / 交易员 / 组合经理的结构化输出模型（字段说明见 ``ta_roles``）。"""
+    from pydantic import BaseModel, Field, field_validator
+    from tradingagents.agents.schemas import (
+        PortfolioRating,
+        ResearchPlan,
+        TraderAction,
+    )
+
+    class PerpResearchPlan(ResearchPlan):  # type: ignore[misc]
+        recommendation: PortfolioRating = Field(description=ta_roles.RM_FIELDS["recommendation"])
+        rationale: str = Field(description=ta_roles.RM_FIELDS["rationale"])
+        strategic_actions: str = Field(description=ta_roles.RM_FIELDS["strategic_actions"])
+
+    class _Trade(BaseModel):
+        entry_zone: str | None = Field(
+            default=None, description=ta_roles.TRADE_FIELDS["entry_zone"]
+        )
+        invalidation: str | None = Field(
+            default=None, description=ta_roles.TRADE_FIELDS["invalidation"]
+        )
+        take_profit: str | None = Field(
+            default=None, description=ta_roles.TRADE_FIELDS["take_profit"]
+        )
+        size_tier: str | None = Field(default=None, description=ta_roles.TRADE_FIELDS["size_tier"])
+
+        @field_validator("entry_zone", "invalidation", "take_profit", mode="before")
+        @classmethod
+        def _text(cls, v: Any) -> str | None:
+            return _as_text(v)
+
+        @field_validator("size_tier", mode="before")
+        @classmethod
+        def _tier(cls, v: Any) -> str | None:
+            return _tier_letter(v)
+
+    class PerpTraderProposal(_Trade):
+        action: TraderAction = Field(description=ta_roles.TRADER_FIELDS["action"])
+        reasoning: str = Field(description=ta_roles.TRADER_FIELDS["reasoning"])
+
+    class PerpPortfolioDecision(_Trade):
+        rating: PortfolioRating = Field(description=ta_roles.PM_FIELDS["rating"])
+        executive_summary: str = Field(description=ta_roles.PM_FIELDS["executive_summary"])
+        investment_thesis: str = Field(description=ta_roles.PM_FIELDS["investment_thesis"])
+
+    return PerpResearchPlan, PerpTraderProposal, PerpPortfolioDecision
+
+
+def _bind(llm: Any, schema: Any, name: str) -> Any | None:
+    """结构化输出绑定（带原始回答，解析失败时直接用原始回答，不再多发一次请求）。"""
+    try:
+        return llm.with_structured_output(schema, include_raw=True)
+    except (NotImplementedError, AttributeError, TypeError) as exc:
+        logger.warning("%s: no structured output (%s); using free text", name, exc)
+        return None
+
+
+def _ask(structured: Any | None, plain: Any, prompt: Any, name: str) -> tuple[Any | None, str]:
+    """(解析好的对象, "") 或 (None, 文字)。结构化解析失败但模型答了文字，就直接用这段文字；
+    只有一个字都没答（或请求本身出错）才再发一次普通请求。"""
+    if structured is not None:
+        try:
+            out = structured.invoke(prompt)
+        except Exception as exc:
+            logger.warning("%s: structured call failed (%s); retrying as free text", name, exc)
+            out = None
+        if isinstance(out, dict):
+            if out.get("parsed") is not None:
+                return out["parsed"], ""
+            raw = out.get("raw")
+            text = getattr(raw, "content", "") if raw is not None else ""
+            if isinstance(text, str) and text.strip():
+                logger.info("%s: structured parse failed; using the model's own text", name)
+                return None, text
+        elif out is not None:  # 测试替身直接返回解析后的对象
+            return out, ""
+    return None, str(plain.invoke(prompt).content)
+
+
+def create_market_analyst(llm: Any) -> Node:
+    """行情分析师：加密永续版提示词；状态读写和原版一样（写 messages 和 market_report）。"""
+
+    def node(state: Any) -> dict[str, Any]:
+        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        from tradingagents.agents.analysts.market_analyst import TOOLS
+        from tradingagents.agents.analysts.turn import take_turn
+        from tradingagents.agents.context import get_instrument_context_from_state
+
+        p = params_from_config()
+        text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config())
+        system_message = _subst(text, {"target": str(state["company_of_interest"])}) + language()
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a helpful AI assistant, collaborating with other assistants."
+                    " Use the provided tools to progress towards answering the question."
+                    " If you are unable to fully answer, that's OK; another assistant with"
+                    " different tools will help where you left off. Execute what you can to make"
+                    " progress. Report what your tools support; another agent decides the trade."
+                    " You have access to the following tools: {tool_names}."
+                    " Today's date is {current_date}; treat it as 'now' for all analysis and"
+                    " tool-call date ranges. {instrument_context}\n{system_message}",
+                ),
+                MessagesPlaceholder(variable_name="messages"),
+            ]
+        )
+        prompt = prompt.partial(
+            system_message=system_message,
+            tool_names=", ".join(t.name for t in TOOLS),
+            current_date=state["trade_date"],
+            instrument_context=get_instrument_context_from_state(state),
+        )
+        result, report = take_turn(prompt, llm, TOOLS, state["messages"])
+        return {"messages": [result], "market_report": report}
+
+    return node
+
+
+def create_research_manager(llm: Any) -> Node:
+    """研究经理：写 investment_debate_state 和 investment_plan，和原版一样。"""
+    schema = _schemas()[0]
+    structured = _bind(llm, schema, "Research Manager")
+
+    def node(state: Any) -> dict[str, Any]:
+        from tradingagents.agents.context import get_instrument_context_from_state
+        from tradingagents.agents.schemas import render_research_plan
+
+        debate = state["investment_debate_state"]
+        p = params_from_config()
+        prompt = _subst(
+            ta_roles.fill(ta_roles.RM, p, lean_from_config()),
+            {
+                "target": str(state["company_of_interest"]),
+                "instrument_context": get_instrument_context_from_state(state),
+                "history": debate.get("history", ""),
+            },
+        ) + language("rm")
+        parsed, text = _ask(structured, llm, prompt, "Research Manager")
+        plan = render_research_plan(parsed) if parsed is not None else text
+        new = {
+            "history": debate.get("history", ""),
+            "bear_history": debate.get("bear_history", ""),
+            "bull_history": debate.get("bull_history", ""),
+            "current_response": plan,
+            "count": debate["count"],
+        }
+        return {"investment_debate_state": new, "investment_plan": plan}
+
+    return node
+
+
+def create_trader(llm: Any) -> Node:
+    """交易员：写 messages（一条 AIMessage）和 trader_investment_plan，和原版一样。"""
+    schema = _schemas()[1]
+    structured = _bind(llm, schema, "Trader")
+
+    def node(state: Any) -> dict[str, Any]:
+        from langchain_core.messages import AIMessage
+        from tradingagents.agents.context import (
+            get_instrument_context_from_state,
+            get_portfolio_context_from_state,
+        )
+
+        p = params_from_config()
+        lean = lean_from_config()
+        report = (state["market_report"] or "").strip()
+        system = ta_roles.TRADER_SYSTEM
+        if not report:  # 没有行情报告就不让它「从报告里取价位」
+            system = system.replace("{GROUNDING}", "")
+        values = {
+            "target": str(state["company_of_interest"]),
+            "ticker": str(state["company_of_interest"]),
+            "instrument_context": get_instrument_context_from_state(state),
+            "report_section": f"Technical Market Report:\n{report}\n\n" if report else "",
+            "portfolio_context": get_portfolio_context_from_state(state),
+            "investment_plan": state["investment_plan"],
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": _subst(ta_roles.fill(system, p, lean), values) + language("trader"),
+            },
+            {
+                "role": "user",
+                "content": _subst(ta_roles.fill(ta_roles.TRADER_USER, p, lean), values),
+            },
+        ]
+        parsed, text = _ask(structured, llm, messages, "Trader")
+        if parsed is not None:
+            text = ta_roles.render_trader(
+                parsed.action.value,
+                parsed.reasoning,
+                parsed.entry_zone,
+                parsed.invalidation,
+                parsed.take_profit,
+                parsed.size_tier,
+            )
+        return {"messages": [AIMessage(content=text)], "trader_investment_plan": text}
+
+    return node
+
+
+def create_portfolio_manager(llm: Any) -> Node:
+    """组合经理：写 risk_debate_state、final_trade_decision、final_rating，和原版一样。"""
+    schema = _schemas()[2]
+    structured = _bind(llm, schema, "Portfolio Manager")
+
+    def node(state: Any) -> dict[str, Any]:
+        from tradingagents.agents.context import (
+            get_instrument_context_from_state,
+            get_portfolio_context_from_state,
+        )
+        from tradingagents.agents.rating import parse_rating
+
+        rs = state["risk_debate_state"]
+        p = params_from_config()
+        past = state.get("past_context", "")
+        lessons = ta_roles.LESSONS_LINE.replace("{past_context}", str(past)) if past else ""
+        prompt = _subst(
+            ta_roles.fill(ta_roles.PM, p, lean_from_config()),
+            {
+                "target": str(state["company_of_interest"]),
+                "instrument_context": get_instrument_context_from_state(state),
+                "portfolio_context": get_portfolio_context_from_state(state),
+                "research_plan": str(state["investment_plan"]),
+                "trader_plan": str(state["trader_investment_plan"]),
+                "lessons_line": lessons,
+                "history": rs["history"],
+            },
+        ) + language("pm")
+        parsed, text = _ask(structured, llm, prompt, "Portfolio Manager")
+        if parsed is not None:
+            decision = ta_roles.render_pm(
+                parsed.rating.value,
+                parsed.executive_summary,
+                parsed.investment_thesis,
+                parsed.entry_zone,
+                parsed.invalidation,
+                parsed.take_profit,
+                parsed.size_tier,
+            )
+            rating = parsed.rating.value
+        else:
+            decision, rating = text, parse_rating(text)
+        new = {
+            "history": rs["history"],
+            "aggressive_history": rs["aggressive_history"],
+            "conservative_history": rs["conservative_history"],
+            "neutral_history": rs["neutral_history"],
+            "latest_speaker": "Judge",
+            "current_aggressive_response": rs["current_aggressive_response"],
+            "current_conservative_response": rs["current_conservative_response"],
+            "current_neutral_response": rs["current_neutral_response"],
+            "count": rs["count"],
+        }
+        return {
+            "risk_debate_state": new,
+            "final_trade_decision": decision,
+            "final_rating": rating,
+        }
+
+    return node
+
+
 _REPLACEMENTS: dict[str, Factory] = {
     "create_bull_researcher": create_bull_researcher,
     "create_bear_researcher": create_bear_researcher,
@@ -317,6 +627,10 @@ _REPLACEMENTS: dict[str, Factory] = {
     "create_neutral_debator": create_neutral_debator,
     "create_news_analyst": create_news_analyst,
     "create_sentiment_analyst": create_sentiment_analyst,
+    "create_market_analyst": create_market_analyst,
+    "create_research_manager": create_research_manager,
+    "create_trader": create_trader,
+    "create_portfolio_manager": create_portfolio_manager,
 }
 
 

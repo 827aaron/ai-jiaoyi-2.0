@@ -50,7 +50,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
-from jiaoyi.slow import binance_gate, ta_nodes, ta_prompts
+from jiaoyi.slow import binance_gate, ta_nodes, ta_prompts, ta_roles
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
@@ -177,6 +177,7 @@ def build_config(
             ta_nodes.PROMPT_KEY: {
                 "hold": prompt_params(s).hold,
                 "hold_minutes": s.hold_minutes,
+                "lean": s.lean_size_tier.value,
             }
         },
         max_debate_rounds=s.debate_rounds,
@@ -887,7 +888,10 @@ def entry_zone_of(d: _CardSymbolDraft, levels: LevelContext | None) -> Range | N
     """会议给的进场区间；上下沿必须落在「现价 ± span」里，超出就当没给。
     拿不到背景（现价 / span）时只查 0 < entry_min ≤ entry_max。"""
     lo, hi = d.entry_min, d.entry_max
-    if lo is None or hi is None or lo <= 0 or hi <= 0 or lo > hi:
+    if lo is None or hi is None:
+        return None
+    lo, hi = min(lo, hi), max(lo, hi)  # 模型把上下沿写反很常见：先排序再检查
+    if lo <= 0:
         return None
     if levels is not None and levels.price is not None and levels.span:
         near = levels.price - levels.span <= lo and hi <= levels.price + levels.span
@@ -977,6 +981,9 @@ def convert_instructions(
         f"The Research Manager's recommendation is {rm or '(unknown)'}; the Portfolio Manager's "
         f"rating is {pm or '(unknown)'}.\n"
         f"Entry zone: {zone}\n"
+        "The decision gives its trade on labelled lines: entry_min and entry_max are the two "
+        "prices on its **Entry Zone** line, and size_tier_max is its **Size Tier** line, capped "
+        "as above. An Entry Zone of none gives no zone.\n"
         "Choose allowed_signals to match the entry method in the conclusion; do not pick only "
         "chase-style signals when the conclusion waits for a zone.\n"
         "reason: in Chinese (at most 500 characters); state the direction, entry zone, "
@@ -1076,6 +1083,7 @@ def broken_reports(
 _BUY = {"buy", "overweight"}
 _SELL = {"sell", "underweight"}
 _PROPOSAL = re.compile(r"FINAL TRANSACTION PROPOSAL:\s*\**\s*(BUY|HOLD|SELL)", re.IGNORECASE)
+_ACTION = re.compile(r"\*\*Action\*\*\s*:\s*\**\s*(BUY|HOLD|SELL)", re.IGNORECASE)
 
 
 def direction_conflict(bias: Bias, rating: str | None, trader_plan: str) -> str | None:
@@ -1083,7 +1091,7 @@ def direction_conflict(bias: Bias, rating: str | None, trader_plan: str) -> str 
     只比相反的方向（做多 vs 卖出 / 做空 vs 买入）；观望 / 持有 / 解析不出不算矛盾。"""
     if bias in (Bias.NO_TRADE, Bias.BOTH):  # 观望 / 双向都没有"相反"可言
         return None
-    proposal = _PROPOSAL.findall(trader_plan or "")
+    proposal = _PROPOSAL.findall(trader_plan or "") or _ACTION.findall(trader_plan or "")
     signals = {("评级", (rating or "").lower())}
     if proposal:
         signals.add(("交易员建议", proposal[-1].lower()))
@@ -1105,7 +1113,7 @@ _STRENGTH = {"buy": 2, "sell": 2, "overweight": 1, "underweight": 1, "hold": 0}
 def research_recommendation(plan: str | None) -> str | None:
     """研究经理方案里的 ``**Recommendation**: X``（小写）；解析不出返回 None。"""
     found = _RECOMMENDATION.findall(plan or "")
-    return found[-1].lower() if found else None
+    return found[0].lower() if found else None  # 取第一处：正文里引用别的评级不算
 
 
 def _no_trade(cs: CardSymbol, why: str) -> CardSymbol:
@@ -1671,6 +1679,17 @@ class TradingAgentsEngine:
                     p, "{ticker}", "{SYMBOL}", "{regime}", "{pick_reason}", None
                 ),
                 "position_note": ta_prompts.position_note(p, "{SYMBOL}"),
+                "roles": {
+                    name: ta_roles.fill(text, p, s.lean_size_tier.value)
+                    for name, text in (
+                        ("market_analyst", ta_roles.MARKET),
+                        ("research_manager", ta_roles.RM),
+                        ("trader_system", ta_roles.TRADER_SYSTEM),
+                        ("trader_user", ta_roles.TRADER_USER),
+                        ("portfolio_manager", ta_roles.PM),
+                        ("lessons_line", ta_roles.LESSONS_LINE),
+                    )
+                },
                 "brief_fields": {"main": list(w.brief_main), "background": list(w.brief_bg)},
                 "indicator_interval": p.indicator,
                 "analyst_klines": list(s.analyst_klines or DEFAULT_ANALYST_KLINES),
