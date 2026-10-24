@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from jiaoyi import contracts as c
 from jiaoyi.predictor.against import AgainstCard, AgainstCardWatch
@@ -59,3 +60,35 @@ def test_no_trade_both_missing_or_flipped_card_do_not_count(now: datetime) -> No
     assert w.current(now) == {}
     w.observe(fc(now, 2, 1.0))
     assert w.current(now) == {}  # 新方向从头数
+
+
+async def test_predictor_against_meeting_off_by_default_only_records(
+    tmp_path: Path, now: datetime
+) -> None:
+    """Aaron 2026-10-24：预测员看反不申请临时会，只记一条；开关打开才申请。"""
+    from jiaoyi.app import App
+    from jiaoyi.contracts import Role
+    from jiaoyi.core.config import load_app_config, load_risk_config
+    from tests.conftest import ROOT
+
+    cfg = load_app_config(ROOT / "config" / "app.example.toml").model_copy(
+        update={"data_dir": str(tmp_path)}
+    )
+    assert not cfg.predictor.against_card_meeting
+    app = App(load_risk_config(ROOT / "config" / "risk.example.toml"), cfg, offline=True)
+    assert app.against is not None
+    a = AgainstCard(
+        symbol="BTCUSDT",
+        card_bias=c.Bias.SHORT,
+        p_up=0.75,
+        streak=2,
+        since=now,
+        ts=now,
+        card_id="card-1",
+        card_version=3,
+    )
+    for cb in app.against._listeners:
+        cb(a)
+    recs = [r for r in app.log.read_day(now.date().isoformat()) if r.role is Role.PREDICTOR]
+    assert len(recs) == 1 and "只记录" in recs[0].summary
+    assert recs[0].output["meeting_requested"] is False

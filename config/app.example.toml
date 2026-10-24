@@ -28,6 +28,7 @@ adaptive_mini_min_queue = 3       # adaptive：排队 ≥ 3 个用 mini，中间
 backfill_bars = 400               # 启动时回填多少根预测员周期的 K 线（至少 64）
 # interval = "5m"                   # 预测员 K 线周期（档位给：4h 及以下 5m，8h / 12h 15m，24h 1h）
 # pred_len = 24                     # 往后预测几根（档位给，× interval = 覆盖最长持仓）
+against_card_meeting = false      # 预测员连续看反作战卡时申请单币临时会；false = 只记录（预测员还在观察）
 
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用默认值；注释掉的是档位给的 2h 档旧默认，见 core/profiles.py）
 [fast_loop]

@@ -532,6 +532,11 @@ class PredictorConfig(Contract):
         description="往后预测几根（× interval = 预测多远，档位按最长持仓给）。"
         "回看 400 + 这个 ≤ 512。",
     )
+    against_card_meeting: bool = Field(
+        default=False,
+        description="预测员连续几次看反作战卡时申请单币临时会。默认关（Aaron 2026-10-24：预测员还要"
+        "观察）：关着时只在决策日志里记一条，不申请会；预测照常给 Jev、照常落盘。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> PredictorConfig:
