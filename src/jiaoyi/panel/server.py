@@ -239,7 +239,9 @@ def create_app(
         if env is None:
             return None
         if klines is not None or live_prices is not None:
-            return market, live_prices or LivePrices("ws://127.0.0.1:9")
+            if "test" not in quote_srcs:  # 只缓存一份，别每次都起新的重连任务
+                quote_srcs["test"] = (market, live_prices or LivePrices("ws://127.0.0.1:9"))
+            return quote_srcs["test"]
         if env not in quote_srcs:
             rest, ws = QUOTE_BASES[env]
             quote_srcs[env] = (market if rest == BASE else KlineSource(rest), LivePrices(ws))

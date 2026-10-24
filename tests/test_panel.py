@@ -1426,6 +1426,31 @@ def test_team_against_checks_pinned_and_tagged(tmp_path: Path) -> None:
     assert old.reason == "平仓概率 0.41，反向信号急查（放量拉升）"
     assert [r.tag for r in team.records] == [None, "反向急查", None]
 
+    # 新格式 output.against：第一次没问成留到下一轮，取查成的那次；对的是哪次信号按时间认
+    ag = {"ts": (NOW - timedelta(minutes=1)).isoformat(), "desc": "放量拉升", "strong": False}
+    log.write(
+        _rec(
+            k,
+            c.Outcome.ERROR,
+            "ZECUSDT 拿住：Jev 服务方繁忙",
+            NOW - timedelta(seconds=40),
+            position_id="p2",
+            output={"action": "hold", "against": ag},
+        )
+    )
+    log.write(
+        _rec(
+            k,
+            c.Outcome.CLOSE,
+            "ZECUSDT 全平：平仓概率 0.80",
+            NOW - timedelta(seconds=20),
+            position_id="p2",
+            output={"action": "close", "p_close": 0.8, "against": ag},
+        )
+    )
+    new = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, k).against_checks[0]
+    assert (new.verdict, new.p_close, new.failed) == ("close", 0.8, False)
+
 
 def test_pnl_curve_backfill_from_ledger_and_klines(tmp_path: Path) -> None:
     """记录开始前那段：已平的按净盈亏（0 点前那段扣掉），开着的按 5 分钟收盘价算浮盈。"""
