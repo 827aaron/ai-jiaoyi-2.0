@@ -82,6 +82,10 @@ class ContractInfo:
     """永续没排下架时币安给 2100 年，这里当 None。"""
 
 
+FINAL_STATUSES = frozenset({"PRE_DELIVERING", "DELIVERING", "DELIVERED", "CLOSE"})
+"""合约要交割 / 已下线的状态：当真下架处理。其余非 TRADING（结算中、待上线等）当临时停。"""
+
+
 def parse_contract_info(d: dict[str, Any]) -> ContractInfo | None:
     if d.get("e") != "contractInfo" or not d.get("s"):
         return None

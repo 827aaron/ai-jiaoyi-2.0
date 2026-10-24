@@ -351,6 +351,8 @@ class Built:
     """预测员连续看反作战卡的事件 / 查询（慢环订阅它开单币临时会）。"""
     derivs: DerivsFeed | None = None
     """持仓量 / 多空比轮询（新信号 + 拍板人快照）；没连币安时没有。主循环跑 ``run``。"""
+    halted: dict[str, str] = field(default_factory=dict)
+    """合约临时不在交易（结算中等）的币 → 原因。主循环按币安推送增删，保镖只挡新开仓。"""
 
 
 def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
@@ -571,6 +573,7 @@ def build_modules(
         oi_window_min=fast.oi_window_min,
     )
     derivs: DerivsFeed | None = None
+    halted: dict[str, str] = {}
     if isinstance(feed, BinanceFuturesFeed):
         feed.set_coverage(features.coverage)
         derivs = DerivsFeed(
@@ -639,6 +642,7 @@ def build_modules(
             blocked=(lambda: cards.blocked_symbols) if isinstance(cards, _Blocks) else None,
             adl_risk=derivs.adl_risk if derivs is not None else None,
             live=RunMode(app_cfg.mode) is not RunMode.PAPER,
+            halted=halted.get,
         ),
         executor=executor,
         lifeboat=lifeboat,
@@ -661,6 +665,7 @@ def build_modules(
         ledger,
         against,
         derivs,
+        halted,
     )
 
 
@@ -693,6 +698,8 @@ class App:
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
+        # 合约临时不在交易的币（主循环按 !contractInfo 推送增删），和保镖共用一个 dict
+        self.halted: dict[str, str] = {}
         self.credits: CreditMonitor | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
@@ -716,6 +723,7 @@ class App:
             self.news = built.news
             self.against = built.against
             self.derivs = built.derivs
+            self.halted = built.halted
             if self.slow_cfg.llm.provider == "openrouter" and self.news is not None:
                 store = secrets or ChainedSecretStore()  # 真军师团才有 news；桩没有额度可看
                 self.credits = CreditMonitor(
