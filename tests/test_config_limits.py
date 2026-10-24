@@ -111,12 +111,14 @@ def test_every_risk_field_is_required(tmp_path: Path, field: str) -> None:
         load_risk_config(_write(tmp_path, data))
 
 
-# fast_loop、predictor 是有默认值的可选段；reconciler_close_unknown_positions 是默认关的可选开关；
+# fast_loop、predictor 是有默认值的可选段；reconciler_close_unknown_positions 是默认关的可选开关、
+# jev_max_concurrent 默认 4；
 # profile 默认 2h，档位管的键不写就取档位默认（core/profiles.py）；其余字段必填
 OPTIONAL_APP_FIELDS = {
     "fast_loop",
     "predictor",
     "reconciler_close_unknown_positions",
+    "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",
     "hold",

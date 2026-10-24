@@ -2,13 +2,17 @@
 
 拍板人不决定数量、不下单，“过不过门槛”由保镖按配置判断。这里只管：
 - 没有有效作战卡（缺失、过期、卡里没这个标的）→ 不问模型，直接 ``ok=False``。
-- 同一个标的上一次还没判断完，新信号直接作废（同币同秒的重复触发，属于去重，不算丢）；
-  不同的币互不等待，可以同时问。
+- 不同的币同时问，最多 ``max_concurrent`` 个（面板「拍板人同时最多判几个」）。
+- 同一个币一次只问一个：上一次还没判完，新信号排队（记一行「排队等拍板人」），排队的只留
+  最新一条（更早排队的让位作废）；等到超过信号有效期（``max_wait_s``）也作废。
+  以前是直接作废（10-24 一天作废的信号里大半是这个）。
 - 每次判断写一条决策日志（团队页的拍板人卡片读它）。
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from datetime import datetime
 
@@ -65,12 +69,20 @@ class JevEntryGate:
         recorder: RoleRecorder | None = None,
         *,
         hold_min: int = DEFAULT_HOLD_MIN,
+        max_concurrent: int = 4,
+        max_wait_s: float = 10.0,
     ) -> None:
-        """``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。"""
+        """``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。
+
+        ``max_concurrent``：同时最多问几个（不同的币）；``max_wait_s``：同币排队最多等几秒
+        （信号有效期，从信号触发算起）。"""
         self._model = model
         self._rec = recorder
         self._hold_min = hold_min
-        self._busy: set[str] = set()  # 正在问的币（只按币互斥）
+        self._max_wait_s = max_wait_s
+        self._slots = asyncio.Semaphore(max_concurrent)
+        self._locks: dict[str, asyncio.Lock] = {}  # 每个币一把：同币一次只问一个
+        self._queued: dict[str, asyncio.Event] = {}  # 同币排队的那一条；set() = 被更新的让掉
 
     async def evaluate(
         self, signal: CandidateSignal, card: BattleCard, now: datetime
@@ -81,11 +93,69 @@ class JevEntryGate:
             resp = _fail(rid, "没有有效作战卡，不开新仓")
             self._log(now, signal, card, resp, None)
             return resp
-        if sym in self._busy:
-            resp = _fail(rid, "上一次判断还没完成，本次信号作废")
-            self._log(now, signal, card, resp, None)
-            return resp
+        lock = self._locks.setdefault(sym, asyncio.Lock())
+        if lock.locked():
+            wait_s = self._max_wait_s - (now - signal.ts).total_seconds()
+            why = await self._queue(sym, lock, signal, card, now, wait_s)
+            if why is not None:
+                resp = _fail(rid, why)
+                self._log(now, signal, card, resp, None)
+                return resp
+        else:
+            await lock.acquire()
+        try:
+            return await self._ask(rid, signal, card, now)
+        finally:
+            lock.release()
 
+    async def _queue(
+        self,
+        sym: str,
+        lock: asyncio.Lock,
+        signal: CandidateSignal,
+        card: BattleCard,
+        now: datetime,
+        wait_s: float,
+    ) -> str | None:
+        """同币上一次还没判完：排队等。拿到锁返回 None（调用方负责放锁），否则返回作废原因。"""
+        old = self._queued.pop(sym, None)
+        if old is not None:
+            old.set()  # 只留最新一条：更早排队的让位
+        me = self._queued[sym] = asyncio.Event()
+        if self._rec is not None:
+            side = "多" if signal.side_hint == Side.LONG else "空"
+            self._rec.record(
+                now,
+                Outcome.INFO,
+                f"{sym} {side}：排队等拍板人（同一个币上一个信号还在判）",
+                symbol=sym,
+                signal_id=signal.signal_id,
+                card_id=card.card_id,
+            )
+        acquire = asyncio.ensure_future(lock.acquire())
+        replaced = asyncio.ensure_future(me.wait())
+        try:
+            await asyncio.wait({acquire, replaced}, timeout=max(wait_s, 0.0),
+                               return_when=asyncio.FIRST_COMPLETED)  # fmt: skip
+        finally:
+            replaced.cancel()
+            if self._queued.get(sym) is me:
+                del self._queued[sym]
+        if acquire.done() and not acquire.cancelled():
+            return None
+        acquire.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await acquire
+        if acquire.done() and not acquire.cancelled():
+            return None  # 撤的那一刻刚好拿到锁：照常问
+        if me.is_set():
+            return "同一个币来了更新的信号，这条让位作废"
+        return f"排队等拍板人超过信号有效期 {self._max_wait_s:g} 秒，本次信号作废"
+
+    async def _ask(
+        self, rid: str, signal: CandidateSignal, card: BattleCard, now: datetime
+    ) -> JevResponse:
+        sym = signal.symbol
         request = JevRequest(
             request_id=rid,
             kind="entry",
@@ -95,11 +165,8 @@ class JevEntryGate:
             snapshot=entry_snapshot(signal, card, self._hold_min),
             questions=entry_questions(),
         )
-        self._busy.add(sym)
-        try:
+        async with self._slots:
             resp = await self._model.ask(request)
-        finally:
-            self._busy.discard(sym)
         self._log(now, signal, card, resp, request)
         return resp
 
