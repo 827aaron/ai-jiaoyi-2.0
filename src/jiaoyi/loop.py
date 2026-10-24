@@ -63,7 +63,7 @@ from jiaoyi.market.features import (
 from jiaoyi.market.rest import fetch_recent_klines
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
-from jiaoyi.risk.guard import DELIST_WINDOW, entry_zone_miss
+from jiaoyi.risk.guard import DELIST_WINDOW, entry_zone_miss, entry_zone_miss_at
 
 log = logging.getLogger(__name__)
 
@@ -684,7 +684,25 @@ class Runner:
             return [*why, "保镖不支持追单复核"]
         account = await self.m.executor.account()
         card = self.m.cards.current(now)
-        return why + self.m.risk.recheck_chase(intent, card, account, now)
+        return (
+            why
+            + self._chase_zone(intent, card, now)
+            + self.m.risk.recheck_chase(intent, card, account, now)
+        )
+
+    def _chase_zone(self, intent: OrderIntent, card: BattleCard | None, now: datetime) -> list[str]:
+        """改市价追进 = 按此刻价格成交，所以按此刻价格再查一次卡的进场区间（只在区间内开仓）。"""
+        fast = self.app.app_cfg.fast_loop
+        cs = card.for_symbol(intent.symbol) if card is not None else None
+        if card is None or cs is None or cs.entry_zone is None or not fast.entry_zone_only:
+            return []
+        snap = self.m.features.snapshot(intent.symbol)
+        if snap is None:
+            return ["没到区间：拿不到现价，没法确认还在卡的进场区间里"]
+        miss = entry_zone_miss_at(
+            intent.symbol, intent.side, snap.last_price, snap, card, fast, now
+        )
+        return [] if miss is None else [miss]
 
     async def handle_signal(self, signal: CandidateSignal) -> None:
         now = self.app.clock()

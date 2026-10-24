@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from jiaoyi import contracts as c
 from jiaoyi.loop import Runner
@@ -58,3 +59,30 @@ async def test_loop_rejects_before_asking_jev(tmp_path: Path, now: datetime) -> 
     recs = [x for x in app.log.read_day(now.date().isoformat()) if x.role == c.Role.RISK_GUARD]
     assert recs and "没到区间" in recs[-1].summary and recs[-1].outcome == c.Outcome.REJECT
     assert recs[-1].output["detail"] == {"by": "entry_zone"}
+
+
+class _Feats:
+    def __init__(self, snap: c.FeatureSnapshot | None) -> None:
+        self.snap = snap
+
+    def snapshot(self, symbol: str) -> c.FeatureSnapshot | None:
+        return self.snap
+
+
+def _intent(side: c.Side) -> SimpleNamespace:
+    return SimpleNamespace(symbol="BTCUSDT", side=side)
+
+
+def test_chase_rechecks_zone_at_current_price(tmp_path: Path, now: datetime) -> None:
+    """挂单没成交改市价追进：按此刻价格再查区间（评审 #265）。"""
+    app = _app(tmp_path, now)
+    r = Runner(app)
+    cd = h.card(now, entry_zone=ZONE, bias="both")
+    r.m = dataclasses.replace(r.m, features=_Feats(h.features(now, price=67900.0)))
+    assert r._chase_zone(_intent(c.Side.LONG), cd, now) == []  # type: ignore[arg-type]
+    r.m = dataclasses.replace(r.m, features=_Feats(h.features(now, price=68100.0)))
+    why = r._chase_zone(_intent(c.Side.LONG), cd, now)  # type: ignore[arg-type]
+    assert len(why) == 1 and why[0].startswith("没到区间")
+    r.m = dataclasses.replace(r.m, features=_Feats(None))
+    assert r._chase_zone(_intent(c.Side.LONG), cd, now)[0].startswith("没到区间")  # type: ignore[arg-type]
+    assert r._chase_zone(_intent(c.Side.LONG), h.card(now), now) == []  # type: ignore[arg-type]
