@@ -175,3 +175,47 @@ def test_history_lists_unfilled_but_does_not_count_it(tmp_path: Path) -> None:
     [row] = page.rows
     assert row.unfilled and not row.pnl_missing
     assert page.trades == 0 and page.curve == [] and page.win_rate is None and page.by_kind == []
+
+
+async def test_phantom_found_even_when_previous_close_trade_is_same_side(tmp_path: Path) -> None:
+    """同币上一笔仓刚好在开仓前几秒平掉，平仓成交方向和这笔开仓方向一样：仍然认出没开成。"""
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig)  # 多单：开仓方向是买
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    q = tracked.record.quantity
+    rig.adapter._set(
+        tracked,
+        status=PositionStatus.CLOSED,
+        close_reason=CloseReason.MANUAL,
+        closed_at=START + timedelta(seconds=4),
+        realized_pnl_usdt=0.0,
+    )
+    # 上一笔空单在开仓前 3 秒止盈买入平仓（有已实现盈亏）
+    rig.ex.trades = [_t(-3, "buy", 68000.0, q, 0.1, pnl=12.0)]
+    rig.t = START + timedelta(minutes=10)
+    assert await rig.adapter.backfill_fills(rig.ex.user_trades) == 1
+    assert rig.registry.get(pid).record.status is PositionStatus.FAILED  # type: ignore[union-attr]
+
+
+async def test_phantom_with_wrongly_backfilled_entry_is_fixed(tmp_path: Path) -> None:
+    """上一笔的平仓成交被当成入场回填过（intended_price 有值）：也改记未成交，入场价改回计划价。"""
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, price=68044.0)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    rig.adapter._set(
+        tracked,
+        status=PositionStatus.CLOSED,
+        close_reason=CloseReason.MANUAL,
+        closed_at=START + timedelta(seconds=4),
+        realized_pnl_usdt=0.0,
+        intended_price=68044.0,
+        entry_price=68000.0,
+    )
+    rig.ex.trades = [_t(-3, "buy", 68000.0, tracked.record.quantity, 0.1, pnl=12.0)]
+    rig.t = START + timedelta(minutes=10)
+    assert await rig.adapter.backfill_fills(rig.ex.user_trades) == 1
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    assert rec.status is PositionStatus.FAILED
+    assert rec.entry_price == 68044.0 and rec.intended_price is None

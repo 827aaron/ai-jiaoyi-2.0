@@ -90,7 +90,10 @@ def close_side(side: Side) -> str:
 
 
 def entry_fill(rec: PositionRecord, trades: Iterable[TradeFill]) -> Fill | None:
-    return _take(trades, open_side(rec.side), rec.quantity, rec.opened_at - OPEN_SLACK)
+    """开仓成交只认没有已实现盈亏的：同币上一笔仓在开仓前 10 秒内平掉时，它的平仓成交方向可能
+    和这笔开仓一样（空单止盈买入 → 多单开仓也是买），不能当成这笔的入场。"""
+    opens = [t for t in trades if t.realized_pnl == 0]
+    return _take(opens, open_side(rec.side), rec.quantity, rec.opened_at - OPEN_SLACK)
 
 
 def exit_fill(rec: PositionRecord, trades: Iterable[TradeFill], entry: Fill | None) -> Fill | None:
@@ -104,9 +107,16 @@ def exit_fill(rec: PositionRecord, trades: Iterable[TradeFill], entry: Fill | No
 
 
 def no_open_fill(rec: PositionRecord, trades: Iterable[TradeFill]) -> bool:
-    """开仓前 10 秒到平仓后 60 秒之间，这个币一笔开仓方向的成交都没有：这笔仓根本没开成。"""
+    """开仓前 10 秒到平仓后 60 秒之间，这个币一笔开仓方向的开仓成交都没有：这笔仓根本没开成。
+
+    只认没有已实现盈亏的成交（开仓成交 realizedPnl 为 0）：前一笔同币的仓刚好在这时平掉，
+    平仓成交方向可能和这笔的开仓方向一样（多单止盈卖出 → 紧接着的空单开仓也是卖），
+    不能算成这笔开成了。"""
     if rec.closed_at is None:
         return False
     start, end = rec.opened_at - OPEN_SLACK, rec.closed_at + CLOSE_SLACK
     side = open_side(rec.side)
-    return not any(t.side == side and start <= t.time <= end and t.qty > 0 for t in trades)
+    return not any(
+        t.side == side and start <= t.time <= end and t.qty > 0 and t.realized_pnl == 0
+        for t in trades
+    )
