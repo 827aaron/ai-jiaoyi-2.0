@@ -474,10 +474,37 @@ def test_stop_must_clear_fee_multiple(now: datetime) -> None:
     bps = 120 / 68000 * 1e4  # 示例卡止损 1.5 ATR = 120
     ok = guard(min_stop_fee_multiple=bps / (2 * taker) - 0.1)
     assert ok.review(signal(now), jev(), card(now), account(now), now).approved
-    tight = guard(min_stop_fee_multiple=bps / (2 * taker) + 0.1)
+    tight = guard(min_stop_fee_multiple=bps / (2 * taker) + 0.1, stop_floor_widen=False)
     v = tight.review(signal(now), jev(), card(now), account(now), now)
     assert not v.approved and any("离手续费太近" in r for r in v.reasons)
     assert guard().review(signal(now), jev(), card(now), account(now), now).approved  # 默认 0 不查
+
+
+def test_too_tight_stop_is_widened_and_resized(tmp_path: Path, now: datetime) -> None:
+    """止损离手续费太近（默认开 stop_floor_widen）：拉宽到下限。
+
+    风险金额不变、张数变少，止盈和救生艇按新止损算。"""
+    taker = RISK.taker_fee_bps
+    bps = 120 / 68000 * 1e4  # 示例卡止损 1.5 ATR = 120 ≈ 17.6bp
+    mult = 4 * bps / (2 * taker)  # 下限 = 原止损的 4 倍（原仓位被敞口封顶，拉宽后不封顶）
+    cd = card(now, notional_usdt={"min": 10, "max": 100_000})
+    base = guard().review(signal(now), jev(), cd, account(now), now)
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update={"min_stop_fee_multiple": mult})
+    g = _Guard(RISK, cfg, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    v = g.review(signal(now), jev(), cd, account(now), now)
+    assert base.approved and v.approved, v.reasons
+    a, b = base.intent, v.intent
+    assert a is not None and b is not None
+    assert b.stop_loss_pct == pytest.approx(4 * a.stop_loss_pct)
+    assert b.take_profit_pct == pytest.approx(b.stop_loss_pct * 1.5)
+    assert b.lifeboat_stop_pct == pytest.approx(b.stop_loss_pct * 1.5)
+    # 风险金额照旧：1% × M 档 0.75 = 75U；止损 4 × 120 = 480 → 0.156 张，向下取整
+    assert b.quantity == pytest.approx(0.156)
+    assert b.risk_usdt == pytest.approx(75, rel=0.01) and b.quantity < a.quantity
+    [rec] = log.read_day(now.date().isoformat())
+    assert "拉宽到" in rec.output["detail"]["stop_widened"]
+    assert "仓位按新止损重算" in rec.output["detail"]["stop_widened"]
 
 
 def test_funding_against_us_rejects_only_the_paying_side(now: datetime) -> None:

@@ -663,18 +663,27 @@ class RiskGuardImpl:
         size_ans = jev.answer(EntryQuestion.SIZE.value)
         assert size_ans is not None
         dist, stop_pct = stop.dist, stop.pct
+
+        stop_floor_bps = self._fast.min_stop_fee_multiple * 2.0 * risk.taker_fee_bps
+        if stop_pct * 100.0 < stop_floor_bps:
+            if not fast.stop_floor_widen:
+                reasons.append(
+                    f"止损 {stop_pct * 100:.1f}bp 离手续费太近（至少 {stop_floor_bps:.1f}bp）"
+                )
+                return None
+            # 拉宽到下限；下面的仓位、止盈、救生艇、移动止损都按新止损算（每笔风险金额不变）
+            detail["stop_widened"] = (
+                f"止损从 {stop_pct * 100:.1f}bp 拉宽到 {stop_floor_bps:.1f}bp，仓位按新止损重算"
+            )
+            stop_pct = stop_floor_bps / 100.0
+            dist = entry * stop_pct / 100.0
+            detail["stop_pct"] = round(stop_pct, 4)
+            detail["stop_atr"] = round(dist / stop.dist * float(detail.get("stop_atr", 0.0)), 3)
         tp_pct = stop_pct * cs.take_profit_r.min
 
         fee_floor_bps = risk.min_tp_fee_multiple * 2.0 * risk.taker_fee_bps
         if tp_pct * 100.0 < fee_floor_bps:
             reasons.append(f"止盈 {tp_pct * 100:.1f}bp 不够付手续费（至少 {fee_floor_bps:.1f}bp）")
-            return None
-
-        stop_floor_bps = self._fast.min_stop_fee_multiple * 2.0 * risk.taker_fee_bps
-        if stop_pct * 100.0 < stop_floor_bps:
-            reasons.append(
-                f"止损 {stop_pct * 100:.1f}bp 离手续费太近（至少 {stop_floor_bps:.1f}bp）"
-            )
             return None
 
         if self._fast.funding_against_max_bp > 0:

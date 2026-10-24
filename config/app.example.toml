@@ -43,6 +43,7 @@ jev_usd_per_mtok = 0.042          # Jev 每百万输入 token 的价格，记花
 jev_max_consecutive_errors = 5    # 连续出错 5 次暂停调用；成功一次就清零
 jev_error_cooldown_s = 60         # 暂停 60 秒后再试
 # min_p_genuine = 0.6               # 拍板：真信号概率 ≥ 0.6（paper 不写 = 0.35）
+# stop_floor_widen = true          # 止损离手续费太近：开 = 拉宽到下限、仓位按新止损重算；关 = 不开（不写 = 开）
 # min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6（paper 不写 = 0.20）
 # min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向（不写 = 0.45）
 # max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.60）
