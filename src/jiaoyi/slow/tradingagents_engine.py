@@ -60,6 +60,7 @@ from jiaoyi.slow.commander import (
     PickResult,
     StopScale,
 )
+from jiaoyi.slow.lessons import Lesson, LessonBook
 from jiaoyi.slow.levels import (
     SPAN_SIGMA,
     LevelContext,
@@ -844,6 +845,14 @@ class _CardSymbolDraft(BaseModel):
     reason: str = Field(min_length=1, description="中文，一两句话")
 
 
+class _LessonDraft(BaseModel):
+    class _L(BaseModel):
+        text: str
+        evidence: str = Field(description="哪一类卡、多少张、平均结果")
+
+    lessons: list[_L] = Field(default_factory=list, description="最多 5 条；没有站得住的就留空")
+
+
 class _PickDraft(BaseModel):
     class _P(BaseModel):
         symbol: str
@@ -1532,6 +1541,18 @@ class TradingAgentsEngine:
         set_analyst_klines(settings.analyst_klines, settings.meeting_min)
         set_indicator_interval(prompt_params(settings).indicator)
         self._ticks = TICKS
+        pp = prompt_params(settings)
+        self._book: LessonBook | None = (
+            LessonBook(
+                Path(settings.results_dir).parent,
+                tz=risk.day_reset_tz,
+                hold_minutes=pp.hold_minutes,
+                horizon_zh=pp.horizon_zh,
+                fee_pct=risk.taker_fee_bps * 2 / 100,
+            )
+            if risk is not None
+            else None
+        )
         self._write_active_prompts(settings)
         self._guard_reddit(settings)
         if news is not None:
@@ -1663,8 +1684,30 @@ class TradingAgentsEngine:
         return graph
 
     def _lessons(self) -> str:
-        """当前这一批教训（交给组合经理）。加密版记忆见 §4.7，没有就是空。"""
-        return ""
+        """当前这一批教训（交给组合经理）。没有就是空。"""
+        book = getattr(self, "_book", None)
+        return book.text() if book is not None else ""
+
+    def _refresh_lessons(self, handler: Any) -> None:
+        """每 5 天（曼谷日切后）把打完分的卡汇总成一批教训，下一场会起生效。失败不影响开会。"""
+        book = getattr(self, "_book", None)
+        now = self._today()
+        if book is None or not book.due(now):
+            return
+
+        def ask(prompt: str) -> list[Lesson]:
+            llm = (
+                self._llm(self._graph(("market",), handler), "quick")
+                .with_structured_output(_LessonDraft)
+                .bind(max_tokens=self._s.json_max_tokens)
+            )
+            d: _LessonDraft = llm.invoke(prompt, config={"callbacks": [handler]})
+            return [Lesson(x.text, x.evidence) for x in d.lessons]
+
+        try:
+            book.refresh(now, ask)
+        except Exception:
+            logger.exception("教训汇总失败（下一场会照旧用上一批）")
 
     def _snapshot_liquidations(self, symbols: Sequence[str]) -> None:
         """在事件循环里取强平快照，再让工作线程去读（统计对象不是线程安全的）。"""
@@ -1687,6 +1730,7 @@ class TradingAgentsEngine:
     ) -> PickResult:
         meter = self._meter("pick")
         handler = cost_handler(meter)
+        self._refresh_lessons(handler)
         try:
             return self._pick_run(candidates, max_n, previous, handler, meter)
         except Exception as exc:  # 失败时把已烧掉的花费带出去，日花费上限才不漏算

@@ -447,3 +447,12 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 `CardSymbol.entry_zone` 可选，旧卡没有也能读。30m–4h 档做多 / 做空必须有区间，转卡时结论没给出能用的区间
 （上下沿不在「现价 ± span」里、或下沿 > 上沿）就出观望，reason 加「会议没给进场区间」；8h 以上尽量给。
 快环暂不使用，面板只显示。
+
+### 加密版记忆（`slow/lessons.py`）
+
+原版 TradingAgents 记忆停掉（`memory_log_path=""`，旧 `memory.md` 保留）。换成：读复盘程序写的
+`card_review/cards.jsonl`（复盘程序不改），会后一个持仓期用币安 5 分钟 K 线打分（做多 / 做空扣往返手续费，
+山寨币看比同期 BTC 多走了多少，观望卡看错过多大波动），不花 AI 的钱。每 5 天（曼谷日切之后）、且打完分的卡
+≥ 30 张时，在下一场总盘会前让模型汇总成最多 5 条带依据的教训，写 `data/memory/lessons/<日期>.json`，
+自动替换上一批；`PerpGraph._memory_step` 把当前这批交给组合经理。只用第一次启动这套代码之后出的卡
+（`data/memory/state.json` 的 `since`），所以第一批在上线 5 天后。K 线走 `binance_gate`（每个币只拉一段，BTC 一次，按持仓期算根数；卡超过 300 张均匀抽样）；被限流就中止这次汇总，留到明天再试。止损 / 止盈先后没打：流水里没有止损价。
