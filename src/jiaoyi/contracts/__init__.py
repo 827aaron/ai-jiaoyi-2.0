@@ -19,6 +19,7 @@ from jiaoyi.contracts.common import (
 from jiaoyi.contracts.decision_log import DecisionRecord, Outcome
 from jiaoyi.contracts.jev import (
     ENTRY_CHOICES,
+    ENTRY_ONE,
     HOLD_CHOICES,
     EntryQuestion,
     HoldQuestion,
@@ -67,6 +68,7 @@ from jiaoyi.contracts.symbol_pool import HardFilters, SymbolPool, SymbolPoolEntr
 
 __all__ = [
     "ENTRY_CHOICES",
+    "ENTRY_ONE",
     "HOLD_CHOICES",
     "AccountState",
     "AgainstSignalEvent",

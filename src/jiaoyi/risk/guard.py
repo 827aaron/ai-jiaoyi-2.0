@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
     ENTRY_CHOICES,
+    ENTRY_ONE,
     AccountState,
     BattleCard,
     Bias,
@@ -411,9 +412,13 @@ class RiskGuardImpl:
         ``detail``。"""
         fast = self._fast
         out: list[str] = []
-        # 契约不保证 ok=True 的回复答全了：6 问必须都在，选项必须和问的一模一样
+        # 契约不保证 ok=True 的回复答全了：问了的题必须都在，选项必须和问的一模一样。
+        # 一道题问法（没有 genuine）只看「做」；旧的 6 道题问法真 / 毒 / 方向门槛也生效。
         got = {a.id: set(a.probs) for a in jev.answers}
-        for q, choices in ENTRY_CHOICES.items():
+        one = EntryQuestion.GENUINE.value not in got
+        asked = ENTRY_ONE if one else tuple(ENTRY_CHOICES)
+        for q in asked:
+            choices = ENTRY_CHOICES[q]
             if q.value not in got:
                 out.append(f"拍板人没回答“{q.value}”")
             elif got[q.value] != set(choices):
@@ -425,10 +430,11 @@ class RiskGuardImpl:
             a = jev.answer(q.value)
             return None if a is None else a.probs.get(choice)
 
-        checks = (
-            (EntryQuestion.GENUINE, "real", fast.min_p_genuine, "真信号"),
+        checks: tuple[tuple[EntryQuestion, str, float, str], ...] = (
             (EntryQuestion.TAKE, "take", fast.min_p_take, "做"),
         )
+        if not one:
+            checks = ((EntryQuestion.GENUINE, "real", fast.min_p_genuine, "真信号"), *checks)
         for q, choice, floor, cn in checks:
             v = p(q, choice)
             note = ""
@@ -444,17 +450,18 @@ class RiskGuardImpl:
                 out.append(f"拍板人没回答“{q.value}”")
             elif v < floor:
                 out.append(f"“{cn}”概率 {v:.2f}{note} 低于门槛 {floor}")
-        tox = p(EntryQuestion.TOXICITY, "high")
-        if tox is None:
-            out.append("拍板人没回答“toxicity”")
-        elif tox > fast.max_p_toxic:
-            out.append(f"订单流有毒概率 {tox:.2f} 高于上限 {fast.max_p_toxic}")
-        want, other = ("up", "down") if signal.side_hint == Side.LONG else ("down", "up")
-        pw, po = p(EntryQuestion.DIRECTION, want), p(EntryQuestion.DIRECTION, other)
-        if pw is None or po is None:
-            out.append("拍板人没回答“direction”")
-        elif pw < fast.min_p_direction or pw <= po:
-            out.append(f"方向 {want} 概率 {pw:.2f} 不够（反方向 {po:.2f}）")
+        if not one:
+            tox = p(EntryQuestion.TOXICITY, "high")
+            if tox is None:
+                out.append("拍板人没回答“toxicity”")
+            elif tox > fast.max_p_toxic:
+                out.append(f"订单流有毒概率 {tox:.2f} 高于上限 {fast.max_p_toxic}")
+            want, other = ("up", "down") if signal.side_hint == Side.LONG else ("down", "up")
+            pw, po = p(EntryQuestion.DIRECTION, want), p(EntryQuestion.DIRECTION, other)
+            if pw is None or po is None:
+                out.append("拍板人没回答“direction”")
+            elif pw < fast.min_p_direction or pw <= po:
+                out.append(f"方向 {want} 概率 {pw:.2f} 不够（反方向 {po:.2f}）")
         hard = []
         for q in (EntryQuestion.STOP_WIDTH, EntryQuestion.SIZE):
             if jev.answer(q.value) is None:
@@ -466,7 +473,8 @@ class RiskGuardImpl:
         self, signal: CandidateSignal, detail: dict[str, float | str] | None
     ) -> float:
         """预测员给“做”概率挪多少：只有看涨概率报 1.0（所有路径都收在现价之上）才算看涨，
-        其余（0 / 0.25 / 0.5 / 0.75）都算看跌；同向 + 权重 × 0.5，反向 − 权重 × 0.5。
+        其余（0 / 0.25 / 0.5 / 0.75）都算看跌；和信号方向（也就是卡的方向）一致 + 权重 × 0.5，
+        相反不扣（Aaron 10-24「预测员和卡片一致就加分。相反就不扣」）。
 
         Aaron 10-24：本地记录里 p_up 不到 1 的几档实际上涨只有 10–12%，和报 0 一样。
         预测员关掉、过期（``stale_after`` 不晚于信号时间）、或权重 0 时不挪。"""
@@ -480,9 +488,10 @@ class RiskGuardImpl:
             return 0.0
         sign = 1.0 if signal.side_hint == Side.LONG else -1.0
         up = 1.0 if fc.p_up >= 1.0 else -1.0
-        nudge = weight * 0.5 * up * sign
+        # Aaron 10-24：和卡（信号跟着卡的方向）一致就加分，相反不扣
+        nudge = weight * 0.5 if up * sign > 0 else 0.0
         if detail is not None:
-            agree = "同向" if nudge > 0 else "反向"
+            agree = "同向" if nudge > 0 else "反向，不扣分"
             view = "看涨" if up > 0 else "看跌"
             detail["predictor"] = f"{agree}（{view}，涨的路径占 {fc.p_up:.2f}）"
             detail["predictor_p_up"] = round(fc.p_up, 4)

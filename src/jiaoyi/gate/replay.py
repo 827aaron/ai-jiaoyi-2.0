@@ -278,11 +278,13 @@ def candidate(
     p_take = p(EntryQuestion.TAKE, "take")
     p_real = p(EntryQuestion.GENUINE, "real")
     p_toxic = p(EntryQuestion.TOXICITY, "high")
-    passes = (
-        (p_take or 0.0) >= fast.min_p_take
-        and (p_real or 0.0) >= fast.min_p_genuine
-        and (p_toxic if p_toxic is not None else 1.0) <= fast.max_p_toxic
-    )
+    passes = (p_take or 0.0) >= fast.min_p_take
+    if resp.answer(EntryQuestion.GENUINE.value) is not None:  # 旧 6 道题：真 / 毒门槛也看
+        passes = (
+            passes
+            and (p_real or 0.0) >= fast.min_p_genuine
+            and (p_toxic if p_toxic is not None else 1.0) <= fast.max_p_toxic
+        )
     return outcomes.Candidate(
         signal_id=sig.signal_id,
         symbol=sig.symbol,

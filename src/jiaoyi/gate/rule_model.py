@@ -72,7 +72,7 @@ class RuleDecisionModel:
         book = d.get("book") or {}
         return (
             4.0 * (float(d.get("buy", 0.5)) - 0.5)
-            + 1.5 * float(book.get("imb", 0.0))
+            + 1.5 * float(book.get("imb", book.get("imb_1m", 0.0)))  # 一道题问法用 1 分钟平均
             + (1.0 if float(d.get("cvd30_k", 0.0)) > 0 else -1.0)
         )
 

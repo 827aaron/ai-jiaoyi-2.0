@@ -42,12 +42,13 @@ rule_gate_without_jev = false     # 没有 Jev 时用不用规则版拍板人；
 jev_usd_per_mtok = 0.042          # Jev 每百万输入 token 的价格，记花费用
 jev_max_consecutive_errors = 5    # 连续出错 5 次暂停调用；成功一次就清零
 jev_error_cooldown_s = 60         # 暂停 60 秒后再试
-# min_p_genuine = 0.6               # 拍板：真信号概率 ≥ 0.6（paper 不写 = 0.35）
+# min_p_genuine = 0.6               # 拍板：真信号概率 ≥ 0.6（paper 不写 = 0.35；只在 six 生效）
 # stop_floor_widen = true          # 止损离手续费太近：开 = 拉宽到下限、仓位按新止损重算；关 = 不开（不写 = 开）
-# min_p_take = 0.6                  # 拍板：“做”概率 ≥ 0.6（paper 不写 = 0.20）
-# min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向（不写 = 0.45）
-# max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.60）
-# predictor_weight = 0.2            # 预测员意见占几成：只有报 100% 才算看涨，同向/反向把“做”挪 ±权重×0.5（0.2 → ±0.10）；0 = 不听
+# gate_questions = "one"            # 拍板人怎么问：one = 只问一道「做不做」（不写 = one）；six = 旧 6 道题（回放对照）
+# min_p_take = 0.55                 # 拍板：“做”概率 ≥ 0.55（不写 = 0.55；想多做可放 0.50）
+# min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向（不写 = 0.45；只在 six 生效）
+# max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.60；只在 six 生效）
+# predictor_weight = 0.2            # 预测员意见占几成：只有报 100% 才算看涨，与卡方向一致把“做”加 权重×0.5（0.2 → +0.10），相反不扣；0 = 不听
 # gate_record_only = false         # 拍板只记不拦（不写 = 关；只在 paper 生效，testnet / live 写了当关）：门槛没过也放行并记下，毒性 ≥ 0.8 仍拦
 signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成

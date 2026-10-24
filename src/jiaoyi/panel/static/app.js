@@ -795,11 +795,29 @@ const FIELD = {
   hi_1m: ["1 分钟最高", "px"], lo_1m: ["1 分钟最低", "px"], positions: ["持仓"], symbols: ["币"], checked_positions: ["核对了几个仓位"], issues: ["发现的问题"], fixed: ["已处理"],
   estimated: ["估算"], direct: ["直接"], values: ["行情特征"], features: ["行情特征"], forecast: ["预测员"], ts: ["时间", "ts"], stale_after: ["作废时间", "ts"],
   model: ["模型"], latency_ms: ["耗时", "ms"], cost_usd: ["花费", "usd"], ok: ["调用成功"], error: ["出错"], horizon_min: ["预测多久", "min"], price_low: ["预测下沿", "px"], price_high: ["预测上沿", "px"],
+  // 拍板人一道题问法的快照（技术面、成交流、衍生品、24 小时行情、完整作战卡）
+  tech: ["技术面"], range_hours: ["区间用了几小时"], pos_in_range_pct: ["在区间里的位置（0 最低 100 最高）"], vwap_dist_bps: ["离今天均价 VWAP", "bps"],
+  level_above_atr: ["离上方最近关键位（几个 ATR）"], level_below_atr: ["离下方最近关键位（几个 ATR）"],
+  flow: ["成交流"], taker_ratio_1h: ["1 小时主动买卖量比（币安统计）"], taker_ratio_4h: ["4 小时主动买卖量比（币安统计）"], big_15m: ["15 分钟大单（≥1 万 U）"], pct: ["占成交额", "pct"],
+  liq_15m_long_k: ["15 分钟多头强平", "k"], liq_15m_short_k: ["15 分钟空头强平", "k"], imb_1m: ["1 分钟平均挂单失衡", "ratio"], imb_5m: ["5 分钟平均挂单失衡", "ratio"],
+  deriv: ["衍生品"], premium_bps: ["标记价比指数价贵", "bps"], next_funding_min: ["离下次资金费结算", "min"], funding_prev: ["最近几次资金费率", "bpslist"], top_acct_ls: ["大户人数多空比"], adl: ["自动减仓风险"],
+  day: ["24 小时"], chg_pct: ["24 小时涨跌", "pct"], qv_m: ["24 小时成交额（百万 U）"],
+  reason: ["理由"], entry_zone_bps: ["进场区间离现价", "bpslist"], in_zone: ["现价在进场区间里"], levels: ["关键价位（离现价 bp，类型）", "lvlist"], signals: ["允许的信号"], left_min: ["离卡到期", "min"],
 };
-const VALUE = { ...SIGNAL, long: "多", short: "空", hold: "拿住", close: "平仓", market: "市价", limit: "限价", none: "没有作战卡", symbol_not_in_card: "作战卡里没这个币", both: "双向", no_trade: "观望", ...TIER };
+// 技术面、成交流的键带周期（chg_1h_bps、rsi14_5m……），按模式认
+const FIELD_DYN = [
+  [/^chg_(\w+)_bps$/, (p) => [`${p} 涨跌`, "bps"]], [/^trend_(\w+)$/, (p) => [`${p} 趋势`]], [/^rsi14_(\w+)$/, (p) => [`${p} RSI(14)`]],
+  [/^btc_(\w+)_bps$/, (p) => [`BTC ${p} 涨跌`, "bps"]], [/^cvd_(\w+)_k$/, (p) => [`${p} 净主动买`, "k"]], [/^buy_(\w+)$/, (p) => [`${p} 主动买占比`, "ratio"]],
+];
+function fieldOf(k) {
+  if (FIELD[k]) return FIELD[k];
+  for (const [re, f] of FIELD_DYN) { const m = re.exec(k); if (m) return f(m[1]); }
+  return [k];
+}
+const VALUE = { ...SIGNAL, up: "涨", down: "跌", flat: "横", support: "支撑", resistance: "阻力", pivot: "枢轴", low: "低", medium: "中", high: "高", long: "多", short: "空", hold: "拿住", close: "平仓", market: "市价", limit: "限价", none: "没有作战卡", symbol_not_in_card: "作战卡里没这个币", both: "双向", no_trade: "观望", ...TIER };
 const fmtNum = (v) => (Math.abs(v) >= 1000 ? money(v, 0) : Math.abs(v) >= 1 ? money(v, 2) : String(+v.toFixed(4)));
 function fieldVal(k, v) {
-  const unit = (FIELD[k] || [])[1];
+  const unit = fieldOf(k)[1];
   if (typeof v === "boolean") return k === "approved" ? (v ? "通过" : "拒绝") : v ? "是" : "否";
   if (typeof v === "string") return unit === "ts" ? hms(v) : esc(VALUE[v] || v);
   if (typeof v !== "number") return esc(String(v));
@@ -822,8 +840,12 @@ function fieldVal(k, v) {
 function kvRows(o, depth = 0) {
   if (!o || typeof o !== "object") return "";
   return Object.entries(o).filter(([, v]) => v != null && !(Array.isArray(v) && !v.length)).map(([k, v]) => {
-    const [name, unit] = FIELD[k] || [k];
+    const [name, unit] = fieldOf(k);
     const lab = `<span class="k" title="${esc(k)}">${esc(name)}</span>`;
+    if (Array.isArray(v) && unit === "lvlist") {
+      const items = v.map((x) => (Array.isArray(x) ? `${fmtNum(x[0])} bp ${esc(VALUE[x[1]] || x[1])}` : fieldVal(k, x))).join("、");
+      return `<div class="kv" style="--d:${depth}">${lab}<span>${items}</span></div>`;
+    }
     if (Array.isArray(v)) {
       if (v.every((x) => typeof x !== "object")) {
         const items = unit === "range" && v.length === 2 ? `${fmtNum(v[0])}–${fmtNum(v[1])}` : unit === "bpslist" ? v.map((x) => `${fmtNum(x)} bp`).join("、") : v.map((x) => fieldVal(k, x)).join("、");
@@ -1821,7 +1843,7 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
-const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -1927,9 +1949,10 @@ const PLAIN = {
   jev_max_consecutive_errors: "拍板人连错几次就先歇一会",
   jev_error_cooldown_s: "拍板人连错后歇几秒",
   min_p_genuine: "信号至少多大把握是真的（0–1）",
-  min_p_take: "至少多大把握值得做（0–1）",
+  min_p_take: "拍板人：做的把握至少（0–1）",
+  gate_questions: "拍板人怎么问",
   min_p_direction: "方向至少多大把握（0–1）",
-  predictor_weight: "预测员意见占几成（0–1）",
+  predictor_weight: "预测员意见占几成：与卡方向一致时加分，相反不扣",
   max_p_toxic: "被大户收割的可能最多多大（0–1）",
   signal_max_age_s: "信号超过几秒还没处理完就作废",
   size_fraction_s: "小仓位用正常仓位的几成",
@@ -2031,7 +2054,9 @@ const HINT = {
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
   burst_10s_ratio: "量能突增、放量突破提前触发用：最近 10 秒成交额折算成每分钟，至少是平时（20 根 1 分钟平均）的几倍才算；同时 1 分钟量还要过下一行。只看 1 分钟的那条仍按「量能突增 / 放量突破要几倍」。档位默认都是 5",
   stop_floor_widen: "开 = 止损离手续费太近（不到上面那个倍数）时，把止损拉宽到这条线再下单：每笔最多亏的钱不变，所以仓位会小一些，止盈也按新止损重算。关 = 这一单不做。默认开",
-  predictor_weight: "预测员（Kronos）对这个币涨跌的看法占几成：拿拍板人的「值得做」和门槛比之前先挪一点。只有预测员报 100% 看涨才算看涨，其余（0–75%）都算看跌；和信号同方向就往上挪，反方向就往下挪，挪多少 = 这个数 × 0.5。0.2 时挪 0.10（比如做多信号「值得做」0.15，预测员报 100% 看涨算成 0.25，报 75% 算成 0.05）。只动「值得做」这一道门，拍板人的提问不变。填 0 = 不听；预测员关掉或预测过期时不挪。档位默认都是 0.2",
+  predictor_weight: "预测员（Kronos）对这个币涨跌的看法占几成：拿拍板人的「做」和门槛比之前先加一点。只有预测员报 100% 看涨才算看涨，其余（0–75%）都算看跌；和卡的方向（也就是信号方向）一致就加，加多少 = 这个数 × 0.5，0.2 时加 0.10（比如做多信号「做」0.50，预测员报 100% 看涨算成 0.60）；相反不扣。只动「做」这一道门，预测员不进拍板人看到的数据。填 0 = 不听；预测员关掉或预测过期时不加。档位默认都是 0.2",
+  min_p_take: "拍板人只答一道题：现在按信号方向开这一单，接下来一段时间（2 小时档看 30 分钟）扣完手续费能不能赚。它给出「做」的把握（0–1），加上预测员的分以后至少要到这个数才放行。默认 0.55；想多做一些，可以放到 0.50",
+  gate_questions: "一道题 = 只问「做不做」（真假、方向、盘口有没有毒都并进这一道，再看技术面和完整作战卡），只看上面「做的把握至少」。6 道题 = 以前的问法，真信号 / 方向 / 盘口有毒三个门槛也生效，留着回放对照用。默认一道题",
   burst_min_1m_ratio: "量能突增、放量突破靠最近 10 秒提前触发时，还要这 1 分钟的量至少是平时（20 根平均）的几倍，挡掉只是一阵快单、整分钟其实不放量的假突增；只看 1 分钟够倍数的那条不受影响。填 0 = 不看。档位默认都是 2",
   trailing_on: "开 = 赚到下面的线以后，止损跟着这笔最好时的盈利往上挪，只收紧不放松，保住最高利润的一大半；关 = 只有原来的止损止盈。默认开，改了只对之后新开的仓生效，止损由执行器（hummingbot）实时盯着，不是只改面板上的数",
   trail_start_r: "单位是止损距离：1 = 一个止损距离。例如这笔止损离进场价 1%，填 0.7 就是赚到 0.7% 才开始跟（同时至少要够把止损挪到保本价）；刚开的仓不碰。档位默认都是 0.7",
@@ -2243,8 +2268,8 @@ const ROLES = [
     { g: "去重和过期", keys: ["app.signal_dedup_s", "fast_loop.signal_max_age_s"] },
     { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
   ] },
-  { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做、真不真、方向对不对", groups: [
-    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_genuine", "fast_loop.min_p_take", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.predictor_weight", "fast_loop.gate_record_only"] },
+  { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做", groups: [
+    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.gate_record_only", "fast_loop.gate_questions"] },
     { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
@@ -2282,7 +2307,8 @@ const ROLES = [
   { id: "show", t: "显示", what: "成交提示音、涨跌颜色、面板密码、时区等", find: "显示 币安风格成交提示音 成交提示音 声音 音量 下单声音 平单声音 提示音 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
 ];
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
-const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz"];
+// 真 / 毒 / 方向三个门槛只在旧的 6 道题问法下生效（回放对照用），设置页不显示
+const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic"];
 // 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
 const PREFIX_ROLE = [
   ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],
@@ -2697,10 +2723,8 @@ const TIER_GROUPS = [
     ["min_stop_fee_multiple", "fast_loop", "止损至少是手续费的几倍", "太窄的单子手续费吃掉利润，不做", "x"],
     ["funding_against_max_bp", "fast_loop", "资金费太贵不开", "只查长持仓", "bp"],
   ] },
-  { g: "拍板人门槛", hold: true, paper: "模拟盘先用临时门槛，等回测校准后再定", rows: [
-    ["min_p_take", "fast_loop", "「值得做」至少多少", "", "p"],
-    ["min_p_genuine", "fast_loop", "「是真信号」至少多少", "", "p"],
-    ["max_p_toxic", "fast_loop", "「盘口有毒」最多多少", "", "p"],
+  { g: "拍板人门槛", hold: true, rows: [
+    ["min_p_take", "fast_loop", "做不做 至少多少", "想多做一些可以放到 0.50", "p"],
   ] },
   { g: "盯着持仓", hold: true, rows: [
     ["keeper_interval_s", "app", "持仓管家多久看一次", "", "sec"],
@@ -2712,13 +2736,13 @@ const TIER_GROUPS = [
     ["pred_len", "predictor", "往后预测几根", "正好盖住最长持仓", "n"],
     ["lookback", "predictor", "回看几根 K 线", "回看 + 往后预测 ≤ 512", "n"],
     ["paths", "predictor", "模拟几条路径", "多 = 概率更细、更慢", "n"],
-    ["predictor_weight", "fast_loop", "预测员意见占几成", "0.2 时最多把「做」挪 0.10", "p"],
+    ["predictor_weight", "fast_loop", "预测员意见占几成", "与卡方向一致时加分（0.2 加 0.10），相反不扣", "p"],
   ] },
 ];
 // 档位给了、上面没列的键进哪一组的「其他」；不出行的：开会间隔本身、24 格时段系数、最长持仓秒数（= 第一行）
 const TIER_OTHER = { refresh_lead_min: "开会节奏", screener_interval_min: "开会节奏", signal_dedup_s: "拍板人门槛", stop_level_buffer_atr: "止损和止盈", predictor_enabled: "预测员" };
 const TIER_OTHER_SEC = { schedule: "开会节奏", app: "开会节奏", budget: "AI 花费", fast_loop: "止损和止盈", predictor: "预测员" };
-const TIER_HIDE = ["app.slow_loop_interval_min", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.time_limit_s"];
+const TIER_HIDE = ["app.slow_loop_interval_min", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.time_limit_s", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic"]; // 后三个只在旧 6 道题问法生效
 S.tierSel = null;
 S.tierOnlyCustom = false;
 

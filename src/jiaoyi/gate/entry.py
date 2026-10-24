@@ -1,4 +1,8 @@
-"""拍板人：候选信号 → 开仓 6 问 → 决策模型 → 原始概率。
+"""拍板人：候选信号 → 开仓问题 → 决策模型 → 原始概率。
+
+默认只问一道「做不做」（``questions="one"``，Aaron 10-24），问的时长跟着最长持仓档走；快照另加
+技术面、成交流、衍生品、24 小时行情（``gate.context``），这些数据在信号进来时就开始准备，和排队
+同时进行，REST 最多等 1 秒。``questions="six"`` 是旧的 6 道题（回放对照用）。
 
 拍板人不决定数量、不下单，“过不过门槛”由保镖按配置判断。这里只管：
 - 没有有效作战卡（缺失、过期、卡里没这个标的）→ 不问模型，直接 ``ok=False``。
@@ -14,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
 from datetime import datetime
 
@@ -27,13 +32,19 @@ from jiaoyi.contracts import (
     Side,
 )
 from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.gate.context import EntryContextSource, EntryExtras
 from jiaoyi.gate.questions import (
     DEFAULT_HOLD_MIN,
+    entry_atr_bps,
+    entry_levels_bps,
     entry_questions,
     entry_snapshot,
+    entry_snapshot_one,
     jev_log_fields,
 )
 from jiaoyi.interfaces import DecisionModel
+
+log = logging.getLogger(__name__)
 
 
 def _fail(request_id: str, msg: str) -> JevResponse:
@@ -47,7 +58,7 @@ def summarize(resp: JevResponse) -> str:
     if not resp.ok:
         return f"不可用：{resp.error}"
     parts = []
-    for q, cn in (
+    for q, cn in (  # 一道题问法只有「做」「止损」「仓位」，没回答的题跳过
         (EntryQuestion.GENUINE, "真"),
         (EntryQuestion.TAKE, "做"),
         (EntryQuestion.TOXICITY, "毒性"),
@@ -72,11 +83,18 @@ class JevEntryGate:
         hold_min: int = DEFAULT_HOLD_MIN,
         max_concurrent: int = 4,
         max_wait_s: float = 10.0,
+        questions: str = "one",
+        context: EntryContextSource | None = None,
     ) -> None:
         """``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。
 
         ``max_concurrent``：同时最多问几个（不同的币）；``max_wait_s``：同币排队最多等几秒
-        （信号有效期 − 拍板超时，从信号触发算起）。"""
+        （信号有效期 − 拍板超时，从信号触发算起）。
+
+        ``questions``：``"one"`` 一道题 / ``"six"`` 旧 6 道题；``context``：一道题问法的额外快照
+        数据（None = 只用信号自带的特征）。"""
+        self._questions = questions
+        self._context = context
         self._model = model
         self._rec = recorder
         self._hold_min = hold_min
@@ -94,18 +112,32 @@ class JevEntryGate:
             resp = _fail(rid, "没有有效作战卡，不开新仓")
             self._log(now, signal, card, resp, None)
             return resp
+        # 额外快照数据现在就开始准备（REST 并发补拉），和排队同时进行，不让拍板变慢
+        extras: asyncio.Future[EntryExtras] | None = None
+        if self._questions == "one" and self._context is not None:
+            extras = asyncio.ensure_future(
+                self._context(
+                    sym,
+                    self._hold_min,
+                    entry_atr_bps(signal),
+                    entry_levels_bps(signal, card),
+                    signal.features.values,
+                )
+            )
         lock = self._locks.setdefault(sym, asyncio.Lock())
         if lock.locked():
             wait_s = self._max_wait_s - (now - signal.ts).total_seconds()
             why = await self._queue(sym, lock, signal, card, now, wait_s)
             if why is not None:
+                if extras is not None:
+                    extras.cancel()
                 resp = _fail(rid, why)
                 self._log(now, signal, card, resp, None)
                 return resp
         else:
             await lock.acquire()
         try:
-            return await self._ask(rid, signal, card, now)
+            return await self._ask(rid, signal, card, now, extras)
         finally:
             lock.release()
 
@@ -154,21 +186,38 @@ class JevEntryGate:
         return f"排队太久已作废（等了 {self._max_wait_s:g} 秒，再问就判不完在信号有效期内）"
 
     async def _ask(
-        self, rid: str, signal: CandidateSignal, card: BattleCard, now: datetime
+        self,
+        rid: str,
+        signal: CandidateSignal,
+        card: BattleCard,
+        now: datetime,
+        extras: asyncio.Future[EntryExtras] | None = None,
     ) -> JevResponse:
         sym = signal.symbol
+        ex: EntryExtras | None = None
+        if self._questions == "one":
+            if extras is not None:
+                try:
+                    ex = await extras
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # 额外数据只是参考：出错就按没有，照常问
+                    log.exception("%s 拍板人额外快照数据出错，这次不带", sym)
+            snapshot = entry_snapshot_one(signal, card, self._hold_min, ex)
+        else:
+            snapshot = entry_snapshot(signal, card, self._hold_min)
         request = JevRequest(
             request_id=rid,
             kind="entry",
             symbol=sym,
             ts=now,
             signal_id=signal.signal_id,
-            snapshot=entry_snapshot(signal, card, self._hold_min),
-            questions=entry_questions(),
+            snapshot=snapshot,
+            questions=entry_questions(self._questions, self._hold_min),
         )
         async with self._slots:
             resp = await self._model.ask(request)
-        self._log(now, signal, card, resp, request)
+        self._log(now, signal, card, resp, request, ex)
         return resp
 
     def _log(
@@ -178,6 +227,7 @@ class JevEntryGate:
         card: BattleCard | None,
         resp: JevResponse,
         request: JevRequest | None,
+        extras: EntryExtras | None = None,
     ) -> None:
         if self._rec is None:
             return
@@ -189,7 +239,7 @@ class JevEntryGate:
         else:
             outcome = Outcome.INFO
             tail = "，门槛由保镖判定"
-        inp, out = jev_log_fields(request, resp)
+        inp, out = jev_log_fields(request, resp, extras.log() if extras is not None else None)
         self._rec.record(
             now,
             outcome,

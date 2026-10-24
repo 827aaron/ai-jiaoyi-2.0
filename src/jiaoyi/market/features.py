@@ -49,6 +49,12 @@ VOL_24H_MINUTES = 1441
 VOL_24H_MIN_POINTS = 60
 """1 分钟收益不够这么多个就不算 24 小时波动（刚上线的币 / 回填失败）。"""
 BTC = "BTCUSDT"
+FLOW_LONG_S = 3600.0
+"""拍板人快照的成交流（5 分钟到 1 小时的主动买卖、大单）按秒汇总，留这么多秒。"""
+BIG_TRADE_USDT = 10_000.0
+"""「大单」：单笔成交额至少这么多 USDT。"""
+IMB_WINDOW_S = 300.0
+"""盘口失衡每秒采样一次，留 5 分钟（拍板人快照看 1 / 5 分钟平均，不看一瞬间）。"""
 ExtraValues = Callable[[str, datetime], Mapping[str, float]]
 """快照的额外键（持仓量、多空比等，来自 REST 轮询）：(币, 现在) → 键值。"""
 
@@ -75,6 +81,14 @@ class _SymbolState:
     # (时间戳, OFI 名义价值)
     ofi: deque[tuple[float, float]] = field(default_factory=deque)
     klines: deque[Kline] = field(default_factory=lambda: deque(maxlen=60))
+    # (开盘分钟, 开, 高, 低, 收, 成交量)：拍板人快照的技术面块（涨跌、RSI、区间、VWAP）
+    bars: deque[tuple[int, float, float, float, float, float]] = field(
+        default_factory=lambda: deque(maxlen=CLOSES_KEEP)
+    )
+    # 按秒汇总的成交：[秒, 主动买 U, 主动卖 U, 大单买笔数, 大单卖笔数, 大单 U]，留 1 小时
+    flow: deque[list[float]] = field(default_factory=deque)
+    # (秒, 盘口失衡)，每秒一个点，留 5 分钟
+    imbs: deque[tuple[float, float]] = field(default_factory=deque)
     # (开盘分钟, 收盘价)：算 15 分钟到 4 小时涨跌、24 小时 1 分钟波动
     closes: deque[tuple[int, float]] = field(default_factory=lambda: deque(maxlen=CLOSES_KEEP))
     vol_24h: float | None = None  # 过去 24 小时 1 分钟对数收益的标准差
@@ -87,6 +101,24 @@ class _SymbolState:
     last_ts: float = 0.0
     book: BookTop | None = None
     mark: MarkPrice | None = None
+
+
+@dataclass(frozen=True)
+class EntryContext:
+    """``RollingFeatureEngine.entry_context`` 的结果：拍板人快照用的原始数据。"""
+
+    now: float
+    """该币最后一个事件的时间戳（秒）。"""
+    price: float
+    bars: list[tuple[int, float, float, float, float, float]]
+    """已收盘的 1 分钟线 (开盘分钟, 开, 高, 低, 收, 成交量)，最多约 25 小时，从早到晚。"""
+    btc_bars: list[tuple[int, float, float, float, float, float]]
+    flow: dict[str, float]
+    """``cvd_5m`` / ``cvd_15m`` / ``cvd_1h``（U）、``buy_*``（主动买占比）、15 分钟大单
+    ``big_buy_n`` / ``big_sell_n`` / ``big_pct``（占成交额 %）、
+    ``liq_15m_long`` / ``liq_15m_short``（U）。"""
+    imb: dict[str, float]
+    """盘口失衡 ``1m`` / ``5m`` 平均；没盘口就空。"""
 
 
 def _ts(dt: datetime) -> float:
@@ -231,7 +263,15 @@ class RollingFeatureEngine:
             st.prices[-1] = (sec, ev.price)
         else:
             st.prices.append((sec, ev.price))
-        st.trades.append((t, ev.price * ev.qty, ev.taker_side == Side.LONG))
+        usdt, is_buy = ev.price * ev.qty, ev.taker_side == Side.LONG
+        st.trades.append((t, usdt, is_buy))
+        if not st.flow or st.flow[-1][0] != sec:
+            st.flow.append([float(sec), 0.0, 0.0, 0.0, 0.0, 0.0])
+        b = st.flow[-1]
+        b[1 if is_buy else 2] += usdt
+        if usdt >= BIG_TRADE_USDT:
+            b[3 if is_buy else 4] += 1.0
+            b[5] += usdt
         st.last_price = ev.price
         st.last_ts = max(st.last_ts, t)
 
@@ -240,6 +280,9 @@ class RollingFeatureEngine:
         if st.book is not None:
             st.ofi.append((t, bk.ofi_event(st.book, ev) * bk.mid(ev)))
         st.book = ev
+        sec = math.floor(t)
+        if not st.imbs or st.imbs[-1][0] != sec:
+            st.imbs.append((float(sec), bk.imbalance(ev, self._levels)))
         st.last_ts = max(st.last_ts, t)
 
     def _on_kline(self, st: _SymbolState, k: Kline) -> None:
@@ -248,7 +291,9 @@ class RollingFeatureEngine:
         if st.klines and k.open_time <= st.klines[-1].open_time:
             return  # 重复或乱序（例如回填和推送重叠）
         st.klines.append(k)
-        st.closes.append((int(k.open_time.timestamp() // 60), k.close))
+        minute = int(k.open_time.timestamp() // 60)
+        st.closes.append((minute, k.close))
+        st.bars.append((minute, k.open, k.high, k.low, k.close, k.volume))
         st.vol_dirty = True
         end = self._aggregate(st.short, k, self._atr_min)
         if end is not None and st.short.atr is not None:
@@ -326,6 +371,8 @@ class RollingFeatureEngine:
             (st.trades, TRADE_WINDOW_S),
             (st.liqs, LIQ_WINDOW_S),
             (st.ofi, FLOW_WINDOW_S),
+            (st.flow, FLOW_LONG_S),
+            (st.imbs, IMB_WINDOW_S),
         ):
             while dq and dq[0][0] < now - window:
                 dq.popleft()
@@ -365,6 +412,54 @@ class RollingFeatureEngine:
             atr_median_7d=self.atr_median_7d(symbol),
             values=values,
             book=self._book_metrics(st, now),
+        )
+
+    def entry_context(self, symbol: str) -> EntryContext | None:
+        """拍板人快照要的原始数据（技术面、长一点的成交流、盘口失衡平均）。没见过这个币返回 None。
+
+        只读内存，不发请求；算法在 ``jiaoyi.gate.context``。"""
+        st = self._s.get(symbol)
+        if st is None or st.last_price is None:
+            return None
+        now = st.last_ts
+        flow: dict[str, float] = {}
+        for label, secs in (("5m", 300.0), ("15m", 900.0), ("1h", 3600.0)):
+            buy = sell = 0.0
+            for b in st.flow:
+                if b[0] >= now - secs:
+                    buy += b[1]
+                    sell += b[2]
+            flow[f"cvd_{label}"] = buy - sell
+            if buy + sell > 0:
+                flow[f"buy_{label}"] = buy / (buy + sell)
+        big_b = big_s = big_u = tot = 0.0
+        for b in st.flow:
+            if b[0] >= now - 900.0:
+                big_b, big_s, big_u, tot = (
+                    big_b + b[3],
+                    big_s + b[4],
+                    big_u + b[5],
+                    tot + b[1] + b[2],
+                )
+        flow["big_buy_n"], flow["big_sell_n"] = big_b, big_s
+        if tot > 0:
+            flow["big_pct"] = big_u / tot * 100.0
+        liq_l = sum(u for t, u, was_long in st.liqs if t >= now - 900.0 and was_long)
+        liq_s = sum(u for t, u, was_long in st.liqs if t >= now - 900.0 and not was_long)
+        flow["liq_15m_long"], flow["liq_15m_short"] = liq_l, liq_s
+        imb: dict[str, float] = {}
+        for label, secs in (("1m", 60.0), ("5m", 300.0)):
+            pts = [x for t, x in st.imbs if t >= now - secs]
+            if pts:
+                imb[label] = sum(pts) / len(pts)
+        btc = self._s.get(BTC)
+        return EntryContext(
+            now=now,
+            price=st.last_price,
+            bars=list(st.bars),
+            btc_bars=list(btc.bars) if btc is not None and symbol != BTC else list(st.bars),
+            flow=flow,
+            imb=imb,
         )
 
     def book_age_s(self, symbol: str, now: datetime) -> float | None:
