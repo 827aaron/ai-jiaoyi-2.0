@@ -135,11 +135,11 @@ def test_volume_surge_live_switch(now: datetime) -> None:
 def test_detail_lines_say_why_no_signal(now: datetime) -> None:
     t = trig()
     cd = card(now, bias="short", allowed_signals=["volume_surge"])
-    # 量 2.5 倍、主动买 60%：离量能突增还差 1.5 倍
+    # 量 2.5 倍、主动买 60%：离量能突增（5 倍）还差 2.5 倍
     assert t.check(features(now, vol_ratio_1m=2.5, taker_buy_ratio_1m=0.6), cd, now) == []
     lines = t.detail_lines(now)
     btc = next(x for x in lines if x.startswith("BTCUSDT"))
-    assert "量 2.5 倍" in btc and "主动买 60%" in btc and "还差 1.5 倍" in btc
+    assert "量 2.5 倍" in btc and "主动买 60%" in btc and "还差 2.5 倍" in btc
     # 够量能突增但方向是多、卡上只做空 → 记跳过原因
     later = now + timedelta(seconds=5)
     t.check(features(later, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8), cd, later)

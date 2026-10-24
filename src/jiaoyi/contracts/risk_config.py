@@ -450,7 +450,12 @@ class FastLoopConfig(Contract):
         description="CME 周日开盘在 testnet / live 也出（默认关：证据还不够，只在模拟盘攒样本）。",
     )
     breakout_vol_ratio: float = Field(default=3.0, ge=1.0, le=50.0)
-    surge_vol_ratio: float = Field(default=4.0, ge=1.0, le=50.0)
+    surge_vol_ratio: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=50.0,
+        description="量能突增：1 分钟成交额至少是平时几倍（Aaron 10-24 定 5 倍）。",
+    )
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
     entry_limit_pullback: bool = Field(
         default=False,
@@ -513,24 +518,16 @@ class FastLoopConfig(Contract):
         description="币安自动减仓风险是「高」的币不开新仓（每 30 分钟查一次，查不到不挡；"
         "已有持仓不管）。",
     )
+    # 下面三项已停用：Aaron 10-24「这个 10 秒取消。还换成之前一分钟。」哨兵只看 1 分钟量。
+    # 留着字段是让旧配置（Mac 的 app.toml 里写了 burst_10s_on = true）照样能读，写了也不生效。
     burst_10s_on: bool = Field(
-        default=True,
-        description="最近 10 秒成交额折算成每分钟也算放量：量能突增、放量突破在放量开头几秒就能出，"
-        "不用等满 1 分钟（1 分钟或 10 秒任一条够倍数就算；主动买卖占比用同一段时间）。",
+        default=False, description="已停用：10 秒提前触发取消了，写了也不生效。"
     )
     burst_10s_ratio: float = Field(
-        default=5.0,
-        ge=1.0,
-        le=100.0,
-        description="10 秒提前触发：最近 10 秒成交额折算每分钟要到几倍（量能突增、放量突破共用；"
-        "只看 1 分钟的那条仍按各自的倍数）。10-24 记录：亏的 6 笔 10 秒折算只有 3.5–5.2 倍。",
+        default=5.0, ge=1.0, le=100.0, description="已停用（10 秒提前触发取消了）。"
     )
     burst_min_1m_ratio: float = Field(
-        default=2.0,
-        ge=0.0,
-        le=50.0,
-        description="10 秒提前触发时，1 分钟量至少是平时几倍（0 = 不看）。10-24 记录：10 秒触发、"
-        "1 分钟只有 0.9–1.6 倍的 6 笔全亏，2 倍能挡下 5 笔、没挡掉赚钱的。",
+        default=2.0, ge=0.0, le=50.0, description="已停用（10 秒提前触发取消了）。"
     )
     liq_min_usdt_1m: float = Field(
         default=100_000.0, ge=0.0, le=1e9, description="1 分钟爆仓额下限。"

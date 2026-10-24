@@ -9,8 +9,7 @@
 - 时段与事件：资金费结算（UTC 0/8/16 点）、伦敦和纽约开盘前后几分钟，量能放大且 5 分钟走出
   一个标准差以上，顺势。CPI、议息这类事件日历以后接入。
 
-放量提前发现（``burst_10s_on``，默认开）：放量突破、量能突增除了看 1 分钟量，最近 10 秒成交额
-折算成每分钟够倍数也算（主动买卖占比用同一段 10 秒），放量开头几秒就能出。描述里写是哪一条触发的。
+放量只看 1 分钟量（Aaron 10-24 取消了 10 秒提前触发：亏的那批 1 分钟量只有 0.9–2 倍，根本没放大）。
 
 新信号（研究 2026-10-24，跟档位开；testnet / live 各一个开关默认关，模拟盘照出）：
 - 持仓量变化：W 分钟持仓量涨 ≥ th%，同一段价格走 ≥ z 倍平时波动，跟价格方向。
@@ -175,9 +174,6 @@ class RuleTrigger:
 
     def _extra_text(self, f: FeatureSnapshot) -> str:
         v, c, parts = f.values, self._cfg, []
-        vr10 = v.get("vol_ratio_10s")
-        if c.burst_10s_on and vr10 is not None:
-            parts.append(f"10 秒折算 {vr10:.1f} 倍")
         oi = v.get("oi_w_pct")
         if oi is not None:
             parts.append(f"持仓量 {c.oi_window_min} 分钟 {oi:+.1f}%")
@@ -420,24 +416,14 @@ class RuleTrigger:
         price = f.last_price
         vol_ratio = v.get("vol_ratio_1m", 0.0)
         buy_ratio = v.get("taker_buy_ratio_1m", 0.5)
-        # 最近 10 秒折算每分钟（关掉、或 1 分钟量还不到 burst_min_1m_ratio 倍时当没有）
-        vr10 = v.get("vol_ratio_10s", 0.0) if c.burst_10s_on else 0.0
-        if vol_ratio < c.burst_min_1m_ratio:
-            vr10 = 0.0
-        br10 = v.get("taker_buy_ratio_10s", 0.5)
         ret_1m = v.get("ret_1m", 0.0)
         ret_5m = v.get("ret_5m", 0.0)
         cvd_30s = v.get("cvd_30s_usdt", 0.0)
         hits: list[tuple[SignalKind, Side, str]] = []
 
-        # 放量突破：1 分钟量够，或最近 10 秒折算每分钟够
-        if vol_ratio >= c.breakout_vol_ratio:
-            vol_desc = f"1 分钟量 {vol_ratio:.1f} 倍"
-        elif vr10 >= c.burst_10s_ratio:
-            vol_desc = f"最近 10 秒折算每分钟量 {vr10:.1f} 倍（1 分钟 {vol_ratio:.1f} 倍）"
-        else:
-            vol_desc = ""
-        if prev is not None and vol_desc:
+        # 放量突破：1 分钟量够
+        vol_desc = f"1 分钟量 {vol_ratio:.1f} 倍"
+        if prev is not None and vol_ratio >= c.breakout_vol_ratio:
             for lv in levels:
                 if prev < lv <= price:
                     hits.append((SignalKind.VOLUME_BREAKOUT, Side.LONG, f"冲过 {lv:g}，{vol_desc}"))
@@ -446,33 +432,24 @@ class RuleTrigger:
                         (SignalKind.VOLUME_BREAKOUT, Side.SHORT, f"跌破 {lv:g}，{vol_desc}")
                     )
 
-        # 量能突增：先看 1 分钟；不够再看最近 10 秒（量和主动占比都用这 10 秒）
-        for ratio, need, buy, span in (
-            (vol_ratio, c.surge_vol_ratio, buy_ratio, "1 分钟"),
-            (vr10, c.burst_10s_ratio, br10, "最近 10 秒折算每分钟"),
-        ):
-            if ratio < need:
-                continue
-            if span.startswith("最近"):
-                span = f"1 分钟量 {vol_ratio:.1f} 倍，{span}"
-            if buy >= c.surge_taker_ratio:
+        # 量能突增：只看 1 分钟量和 1 分钟主动买卖占比
+        if vol_ratio >= c.surge_vol_ratio:
+            if buy_ratio >= c.surge_taker_ratio:
                 hits.append(
                     (
                         SignalKind.VOLUME_SURGE,
                         Side.LONG,
-                        f"{span}量 {ratio:.1f} 倍，主动买 {buy:.0%}",
+                        f"1 分钟量 {vol_ratio:.1f} 倍，主动买 {buy_ratio:.0%}",
                     )
                 )
-                break
-            if buy <= 1.0 - c.surge_taker_ratio:
+            elif buy_ratio <= 1.0 - c.surge_taker_ratio:
                 hits.append(
                     (
                         SignalKind.VOLUME_SURGE,
                         Side.SHORT,
-                        f"{span}量 {ratio:.1f} 倍，主动卖 {1 - buy:.0%}",
+                        f"1 分钟量 {vol_ratio:.1f} 倍，主动卖 {1 - buy_ratio:.0%}",
                     )
                 )
-                break
 
         # 强平瀑布反弹
         liq_ratio = v.get("liq_ratio_1m", 0.0)

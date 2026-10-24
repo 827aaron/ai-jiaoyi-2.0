@@ -1977,15 +1977,12 @@ const PLAIN = {
   volume_surge_live: "量能突增信号（测试网 / 实盘）",
   session_cme_open: "关键时段也看 CME 周日开盘",
   session_cme_open_live: "CME 周日开盘（测试网 / 实盘）",
-  burst_10s_on: "最近 10 秒折算每分钟也算放量",
   new_listing_block_h: "新上线的币多少小时内不做",
   entry_limit_pullback: "进场用挂单等回踩（默认关，关 = 市价进）",
   entry_limit_pullback_live: "实盘也用挂单等回踩",
   entry_limit_offset_stop: "挂单比触发价让多少（止损距离的几成）",
   entry_limit_wait_min: "挂单最多等几分钟",
   entry_limit_chase: "挂单没成交就市价追进",
-  burst_10s_ratio: "10 秒折算要到平时几倍",
-  burst_min_1m_ratio: "10 秒提前触发时，1 分钟量至少是平时几倍",
   trailing_on: "移动止损",
   trail_start_r: "赚到几个止损距离后开始跟",
   trail_distance_r: "止损跟在最高价后面几个止损距离",
@@ -2053,13 +2050,11 @@ const HINT = {
   entry_limit_offset_stop: "例如止损离进场价 1%，填 0.25 就挂在比触发价便宜 0.25% 的地方。档位默认 30 分钟 0.6、1 小时 0.4、2 / 4 小时 0.25、8 小时以上 0.1",
   entry_limit_wait_min: "从下单开始算；最长持仓按成交那一刻算，不会因为等挂单少拿",
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
-  burst_10s_ratio: "量能突增、放量突破提前触发用：最近 10 秒成交额折算成每分钟，至少是平时（20 根 1 分钟平均）的几倍才算；同时 1 分钟量还要过下一行。只看 1 分钟的那条仍按「量能突增 / 放量突破要几倍」。档位默认都是 5",
   stop_floor_widen: "开 = 止损离手续费太近（不到上面那个倍数）时，把止损拉宽到这条线再下单：每笔最多亏的钱不变，所以仓位会小一些，止盈也按新止损重算。关 = 这一单不做。默认开",
   predictor_weight: "预测员（Kronos）对这个币涨跌的看法占几成：拿拍板人的「做」和门槛比之前先加一点。只有预测员报 100% 看涨才算看涨，其余（0–75%）都算看跌；和卡的方向（也就是信号方向）一致就加，加多少 = 这个数 × 0.5，0.2 时加 0.10（比如做多信号「做」0.50，预测员报 100% 看涨算成 0.60）；相反不扣。只动「做」这一道门，预测员不进拍板人看到的数据。填 0 = 不听；预测员关掉或预测过期时不加。档位默认都是 0.2",
   predictor_nudge_mode: "预测员报的是「几条模拟路径里有几条收在现价之上」。第一种：只有全部在上面（100%）算看涨，其余都算看跌，所以做空信号几乎每次都加分。第二种：做多要全部在上面、做空要全部在下面（0%）才加分，其余不加。两种都是不一致时不扣",
   min_p_take: "拍板人只答一道题：现在按信号方向开这一单，接下来一段时间（2 小时档看 30 分钟）扣完手续费能不能赚。它给出「做」的把握（0–1），加上预测员的分以后至少要到这个数才放行。默认 0.55；想多做一些，可以放到 0.50",
   gate_questions: "一道题 = 只问「做不做」（真假、方向、盘口有没有毒都并进这一道，再看技术面和完整作战卡），只看上面「做的把握至少」。6 道题 = 以前的问法，真信号 / 方向 / 盘口有毒三个门槛也生效，留着回放对照用。默认一道题",
-  burst_min_1m_ratio: "量能突增、放量突破靠最近 10 秒提前触发时，还要这 1 分钟的量至少是平时（20 根平均）的几倍，挡掉只是一阵快单、整分钟其实不放量的假突增；只看 1 分钟够倍数的那条不受影响。填 0 = 不看。档位默认都是 2",
   trailing_on: "开 = 赚到下面的线以后，止损跟着这笔最好时的盈利往上挪，只收紧不放松，保住最高利润的一大半；关 = 只有原来的止损止盈。默认开，改了只对之后新开的仓生效，止损由执行器（hummingbot）实时盯着，不是只改面板上的数",
   trail_start_r: "单位是止损距离：1 = 一个止损距离。例如这笔止损离进场价 1%，填 0.7 就是赚到 0.7% 才开始跟（同时至少要够把止损挪到保本价）；刚开的仓不碰。档位默认都是 0.7",
   trail_distance_r: "单位是止损距离：1 = 一个止损距离。例如止损离进场价 1%，填 1.2 就是止损一直跟在这笔最高价往回 1.2% 的地方；填大一点平时不碍事，只在大回撤时锁住利润。档位默认 30 分钟–2 小时 0.7、4 小时以上 1.0",
@@ -2067,7 +2062,6 @@ const HINT = {
   breakeven_trigger_r: "单位是止损距离：1 = 一个止损距离。例如止损离进场价 1%，填 0.8 就是赚到 0.8% 后止损挪到保本价。默认 0.8",
   new_listing_block_h: "按币安上线时间算，刚上线的币价格还不稳。填 0 = 不挡",
   adl_high_block: "币安每 30 分钟给每个币标一次自动减仓风险（高 / 中 / 低）。是「高」时赚钱的仓可能被强制减掉，开 = 不开新仓；已有持仓不管；查不到就照常开",
-  burst_10s_on: "开 = 量能突增、放量突破不用等满 1 分钟：最近 10 秒的成交额乘 6 也够倍数就算（主动买卖占比也看这 10 秒），放量开头几秒就能发现。关 = 只看 1 分钟",
   oi_follow_on: "持仓量在涨、价格也在涨 = 新多头进场，跟着做多；价格在跌就是新空头，跟着做空。持仓量在跌不出信号。回测 2 小时到 24 小时这几档不比现有信号差，档位默认在这几档开",
   oi_window_min: "同一个币同一个方向这么久只出一次。档位默认 2 小时档 60、4 小时以上 240",
   oi_min_pct: "这段时间持仓量至少涨这么多才算新钱进场",
@@ -2263,7 +2257,7 @@ const ROLES = [
     { g: "", keys: ["app.predictor_enabled", "predictor.*", "schedule.predictor_against_runs"] },
   ] },
   { id: "sentinel", t: "哨兵", strip: ["哨兵"], what: "盯行情，发现信号就交给拍板人", groups: [
-    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
+    { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
     { g: "持仓量变化", keys: ["fast_loop.oi_follow_on", "fast_loop.oi_follow_live", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_*"] },
     { g: "大户散户分歧（反着大户）", keys: ["fast_loop.top_crowd_on", "fast_loop.top_crowd_live", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_*"] },
     { g: "BTC 先动，小币跟", keys: ["fast_loop.btc_lead_on", "fast_loop.btc_lead_live", "fast_loop.btc_lead_z", "fast_loop.btc_lead_*"] },
@@ -2309,8 +2303,8 @@ const ROLES = [
   { id: "show", t: "显示", what: "成交提示音、涨跌颜色、面板密码、时区等", find: "显示 币安风格成交提示音 成交提示音 声音 音量 下单声音 平单声音 提示音 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
 ];
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
-// 真 / 毒 / 方向三个门槛只在旧的 6 道题问法下生效（回放对照用），设置页不显示
-const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic"];
+// 真 / 毒 / 方向三个门槛只在旧的 6 道题问法下生效；burst_* 10 秒提前触发已取消（Aaron 10-24）：都不显示
+const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio"];
 // 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
 const PREFIX_ROLE = [
   ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],

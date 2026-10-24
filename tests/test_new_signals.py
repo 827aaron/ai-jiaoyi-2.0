@@ -160,48 +160,32 @@ def _quiet(now: datetime, **values: float) -> c.FeatureSnapshot:
     return features(now, **{**base, **values})
 
 
-def test_surge_fires_on_ten_second_rate(now: datetime) -> None:
+def test_ten_second_rate_no_longer_fires(now: datetime) -> None:
+    """Aaron 10-24：10 秒提前触发取消，只看 1 分钟量；旧配置里写了 burst_10s_on 也不生效。"""
     cd = card(now, allowed_signals=ALL)
-    f = _quiet(now, vol_ratio_1m=2.2, vol_ratio_10s=5.5, taker_buy_ratio_10s=0.9)
-    [s] = RuleTrigger(FAST).check(f, cd, now)
-    assert s.kind is c.SignalKind.VOLUME_SURGE and s.side_hint is c.Side.LONG
-    assert "最近 10 秒折算每分钟" in s.trigger_desc and "1 分钟量 2.2 倍" in s.trigger_desc
-    assert RuleTrigger(_cfg(burst_10s_on=False)).check(f, cd, now) == []
-    # 1 分钟够了照旧按 1 分钟写
-    f = _quiet(now, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8, vol_ratio_10s=9.0)
-    [s] = RuleTrigger(FAST).check(f, cd, now)
-    assert s.trigger_desc.startswith("1 分钟量")
-
-
-def test_breakout_fires_on_ten_second_rate(now: datetime) -> None:
-    t = RuleTrigger(FAST)
-    cd = card(now)
-    t.check(_quiet(now, price=67990.0), cd, now)
-    [s] = t.check(features(now, price=68010.0, vol_ratio_1m=2.1, vol_ratio_10s=5.5), cd, now)
-    assert s.kind is c.SignalKind.VOLUME_BREAKOUT and "10 秒" in s.trigger_desc
-    assert "1 分钟 2.1 倍" in s.trigger_desc
-
-
-def test_ten_second_path_needs_one_minute_floor(now: datetime) -> None:
-    """10 秒提前触发还要 1 分钟量 ≥ burst_min_1m_ratio（默认 2 倍）；只看 1 分钟那条不受影响。"""
-    assert FAST.burst_min_1m_ratio == 2.0
-    cd = card(now, allowed_signals=ALL)
-    weak = _quiet(now, vol_ratio_1m=1.6, vol_ratio_10s=6.0, taker_buy_ratio_10s=0.9)
-    assert RuleTrigger(FAST).check(weak, cd, now) == []
-    assert len(RuleTrigger(_cfg(burst_min_1m_ratio=0.0)).check(weak, cd, now)) == 1  # 0 = 不看
-    t = RuleTrigger(FAST)
+    f = _quiet(now, vol_ratio_1m=2.2, vol_ratio_10s=9.0, taker_buy_ratio_10s=0.95)
+    assert RuleTrigger(FAST).check(f, cd, now) == []
+    assert RuleTrigger(_cfg(burst_10s_on=True, burst_min_1m_ratio=0.0)).check(f, cd, now) == []
+    t = RuleTrigger(_cfg(burst_10s_on=True))
     t.check(_quiet(now, price=67990.0), card(now), now)
-    weak_bo = features(now, price=68010.0, vol_ratio_1m=1.6, vol_ratio_10s=6.0)
-    assert t.check(weak_bo, card(now), now) == []
+    assert (
+        t.check(features(now, price=68010.0, vol_ratio_1m=2.1, vol_ratio_10s=9.0), card(now), now)
+        == []
+    )
 
 
-def test_ten_second_path_has_its_own_ratio(now: datetime) -> None:
-    """10 秒那条用 burst_10s_ratio（默认 5），不再借量能突增的 1 分钟倍数。"""
-    assert FAST.burst_10s_ratio == 5.0
+def test_surge_needs_five_times_one_minute(now: datetime) -> None:
+    assert FAST.surge_vol_ratio == 5.0
     cd = card(now, allowed_signals=ALL)
-    mid = _quiet(now, vol_ratio_1m=2.5, vol_ratio_10s=4.8, taker_buy_ratio_10s=0.9)
-    assert RuleTrigger(FAST).check(mid, cd, now) == []  # 4.8 < 5
-    assert len(RuleTrigger(_cfg(burst_10s_ratio=4.5)).check(mid, cd, now)) == 1
+    assert (
+        RuleTrigger(FAST).check(_quiet(now, vol_ratio_1m=4.9, taker_buy_ratio_1m=0.8), cd, now)
+        == []
+    )
+    [s] = RuleTrigger(FAST).check(_quiet(now, vol_ratio_1m=5.0, taker_buy_ratio_1m=0.8), cd, now)
+    assert s.kind is c.SignalKind.VOLUME_SURGE and s.trigger_desc.startswith("1 分钟量 5.0 倍")
+    both = card(now, allowed_signals=ALL, bias="both")
+    [s] = RuleTrigger(FAST).check(_quiet(now, vol_ratio_1m=6.0, taker_buy_ratio_1m=0.2), both, now)
+    assert s.side_hint is c.Side.SHORT
 
 
 def test_oi_follow(now: datetime) -> None:
