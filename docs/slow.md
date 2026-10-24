@@ -406,3 +406,12 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 美股 / 加密股合约只在美股常规盘的开仓时段开新仓：**开盘后 15 分钟到收盘前 15 分钟**（美东时间，自动跟夏令时，周末和 NYSE 休市日不开）。
 时段判断在 `core/us_hours.py`（保镖和慢环共用）。可配置：`app.toml [fast_loop]` 的 `us_hours_gate`（默认开）、`us_open_delay_min`、`us_close_lead_min`。时段外：休市时照常进池参与选币，
 卡上该币标「休市不可做」（信号清空），保镖也拦开仓；已有持仓不强平，止损和持仓管家照常。金属不受限。
+
+## 主流币 = 市值前 N
+
+选币的「主流币」类别不再是写死的 7 个，而是**市值前 `major_top_n` 名（默认 20）**：`slow/majors.py` 每天从 CoinGecko 免费接口（无需 key）拉一次市值排名，
+去掉稳定币和包装 / 质押币（WBTC、stETH 等）后取前 N 个真币，对应到币安永续（`1000PEPE` 这类前缀按基础币名对）。结果缓存在 `data/majors.json`，
+拉取失败沿用缓存（不管多旧），没有缓存就回退写死的 7 个（BTC ETH BNB SOL XRP DOGE ADA）；`major_top_n = 0` 也是只用这 7 个。
+
+`slow.toml [screener]`：`major_top_n`、`major_include`（手动加入，如 `["LINK"]`）、`major_exclude`（手动排除，按山寨币算）。
+选币记录里每个主流币的理由写「主流币 · 市值第 N 名」（手动加入 / 回退名单也各有说明）。

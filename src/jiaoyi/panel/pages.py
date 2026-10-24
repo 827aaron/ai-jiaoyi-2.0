@@ -1194,7 +1194,9 @@ def _items(
         if name in skip:
             continue
         value = getattr(model, name)
-        if isinstance(value, BaseModel | dict):
+        if isinstance(
+            value, BaseModel | dict | list
+        ):  # 名单类先不在设置页列出（面板还没有名单编辑）
             continue
         lo = hi = None
         strict = False

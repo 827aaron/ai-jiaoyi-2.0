@@ -154,6 +154,21 @@ class ScreenerSection(_Strict):
         "选币页单独改过的类别以选币页为准。",
     )
     tiers: TiersSection = TiersSection()
+    major_top_n: int = Field(
+        default=20,
+        ge=0,
+        le=100,
+        description="「主流币」= 市值前几名（每天自动拉排名，去掉稳定币和包装币，对应到币安永续）。"
+        "0 = 不用市值排名，只认写死的 7 个（BTC ETH BNB SOL XRP DOGE ADA）。",
+    )
+    major_include: list[str] = Field(
+        default_factory=list,
+        description="手动加入主流币的币名（如 LINK），不管市值排名。",
+    )
+    major_exclude: list[str] = Field(
+        default_factory=list,
+        description="手动排除出主流币的币名；被排除的按山寨币算。",
+    )
     allow_tradfi: bool = Field(
         default=False,
         description="让币安 TRADIFI_PERPETUAL（美股 / 金属等传统资产永续）进池。"
@@ -563,6 +578,9 @@ class SlowConfig(_Strict):
             tiers=s.tiers.enabled,
             tier_head=s.tiers.head,
             tier_mid=s.tiers.mid,
+            major_top_n=s.major_top_n,
+            major_include=frozenset(x.strip().upper() for x in s.major_include),
+            major_exclude=frozenset(x.strip().upper() for x in s.major_exclude),
             allow_tradfi=s.allow_tradfi,
             us_events=s.us_events,
             us_open_bonus=s.us_open_bonus,
