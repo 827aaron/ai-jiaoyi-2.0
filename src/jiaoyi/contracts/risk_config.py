@@ -444,11 +444,12 @@ class FastLoopConfig(Contract):
         default=300, ge=10, le=3600, description="同一笔仓多久内最多因反向信号急查 1 次（秒）。"
     )
     against_strong_breakout_vol_ratio: float = Field(
-        default=3.0,
+        default=50.0,
         ge=1.0,
         le=50.0,
-        description="放量突破量 ≥ 这么多倍才算强反向信号（强平瀑布反弹一律算强）。"
-        "强的管家判 1 次翻向就平，别的要连续确认。",
+        description="放量突破 / 强平瀑布反弹的量 ≥ 这么多倍才算强反向信号，强的管家判 1 次翻向"
+        "就平。默认 50 = 基本不算强：一次就平只看这笔仓是否已亏到 against_loss_stop_frac 倍止损"
+        "（哨兵研究 10-24），其余要连续确认。",
     )
     against_loss_stop_frac: float = Field(
         default=0.5,

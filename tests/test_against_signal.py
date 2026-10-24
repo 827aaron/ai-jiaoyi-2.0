@@ -86,11 +86,15 @@ def test_strong_kinds(now: datetime) -> None:
         cvd_30s_usdt=20_000.0,
         vol_ratio_1m=1.0,
     )
+    # 强平瀑布反弹不再一律算强（默认 50 倍基本不会强）；量够阈值才算
     t = RuleTrigger(FAST)
     t.check(liq, cd, now)
     assert [(e.kind, e.strong) for e in t.pop_against()] == [
-        (c.SignalKind.LIQUIDATION_REBOUND, True)
+        (c.SignalKind.LIQUIDATION_REBOUND, False)
     ]
+    t = RuleTrigger(FAST.model_copy(update={"against_strong_breakout_vol_ratio": 1.0}))
+    t.check(liq, cd, now)
+    assert [e.strong for e in t.pop_against()] == [True]
     # 放量突破：量 ≥ against_strong_breakout_vol_ratio 才算强
     cfg = FAST.model_copy(
         update={"breakout_vol_ratio": 2.0, "against_strong_breakout_vol_ratio": 3.0}
@@ -456,7 +460,7 @@ def test_against_detected_before_allowed_kinds(now: datetime) -> None:
     t = RuleTrigger(FAST)
     assert t.check(liq, cd, now) == []
     [ev] = t.pop_against()
-    assert ev.kind is c.SignalKind.LIQUIDATION_REBOUND and ev.strong
+    assert ev.kind is c.SignalKind.LIQUIDATION_REBOUND and not ev.strong
 
 
 def test_against_detected_when_live_switch_hides_surge(now: datetime) -> None:
@@ -480,10 +484,12 @@ def test_cleared_signals_still_report_against(now: datetime) -> None:
     t = RuleTrigger(FAST)
     assert t.check(liq, cd, now) == []
     [ev] = t.pop_against()
-    assert ev.kind is c.SignalKind.LIQUIDATION_REBOUND and ev.strong
+    assert ev.kind is c.SignalKind.LIQUIDATION_REBOUND and not ev.strong
     held = pos(now, side="short", entry_price=68000.0, stop_loss_price=68120.0)
     ev2, rechecks = desk().route(ev, [held], set(), now)
-    assert [(p.position_id, one) for p, one in rechecks] == [("pos-1", True)]
+    assert [(p.position_id, one) for p, one in rechecks] == [
+        ("pos-1", False)
+    ]  # 没亏到半个止损：只急查，仍要连续确认
     assert ev2.actions == ["keeper_recheck"]
     # 顺卡方向的信号仍然不开仓，面板写只看不做
     t2 = RuleTrigger(FAST)

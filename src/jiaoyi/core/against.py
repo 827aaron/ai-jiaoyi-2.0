@@ -4,9 +4,9 @@
 （包括正在平仓的）决定怎么分流：
 
 - 这个币有持仓、且信号和持仓方向相反 → 叫管家马上复查一次，并把信号写进管家这次的提示。
-  默认仍要连续 ``keeper_confirmations`` 次判翻向才平；强反向信号（强平瀑布反弹，或放量突破
-  且量 ≥ ``against_strong_breakout_vol_ratio`` 倍）或这笔仓已亏到 ``against_loss_stop_frac``
-  倍止损距离 → 管家这次判 1 次翻向就平。
+  默认仍要连续 ``keeper_confirmations`` 次判翻向才平；这笔仓已亏到 ``against_loss_stop_frac``
+  倍止损距离（或强反向信号：放量突破 / 强平瀑布反弹且量 ≥ ``against_strong_breakout_vol_ratio``
+  倍，默认 50 倍基本不会）→ 管家这次判 1 次翻向就平。
   开仓 ``against_grace_s`` 内的不算；同一笔仓 ``against_recheck_cooldown_s`` 内最多急查 1 次；
   正在开 / 正在平的仓不叫管家。
 - 同一个币 ``against_meeting_window_s`` 内反向信号 ≥ ``against_meeting_count`` 次（有仓没仓都算，
