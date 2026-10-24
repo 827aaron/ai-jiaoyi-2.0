@@ -153,7 +153,9 @@ class PositionView(BaseModel):
     keeper: str | None
     """管家对这笔的最新判断（拿住 / 平仓）。"""
     mark_price: float | None = None
-    """现价：由 hummingbot 的浮盈倒推（开仓价 ± 浮盈 ÷ 数量），和浮盈同一口径。"""
+    """现价，和浮盈同一口径：``price_src`` 为 last 是币安最新成交价（和 K 线图同源），
+    为 mark 是由 hummingbot 的浮盈倒推（开仓价 ± 浮盈 ÷ 数量，币安按标记价算）。"""
+    price_src: Literal["last", "mark"] | None = None
     notional_usdt: float | None = None
     """名义 = 数量 × 现价（没有现价用开仓价）。"""
     margin_usdt: float | None = None
@@ -251,6 +253,7 @@ def build_overview(
     risk: RiskConfig,
     app: AppConfig,
     now: datetime,
+    prices: dict[str, float] | None = None,
 ) -> Overview:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -264,7 +267,7 @@ def build_overview(
     kpis = compute_kpis(files, ledger, hb, risk, now)
     halted, halt_pct = kpis.halted, kpis.halt_pct
     positions = position_views(
-        ledger.live(), records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions)
+        ledger.live(), records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
     )
 
     # ---- 今日统计
@@ -410,19 +413,29 @@ def position_views(
     hb: HbSnapshot,
     taker_fee_bps: float = 0.0,
     fills_fee_bps: float | None = None,
+    prices: dict[str, float] | None = None,
 ) -> list[PositionView]:
-    """未结束的持仓，最新开的在前；附上 hummingbot 的浮盈浮亏和管家最新判断。"""
+    """未结束的持仓，最新开的在前；附上浮盈浮亏和管家最新判断。
+
+    ``prices`` 是币安最新成交价（和持仓页 K 线图同一个来源）：有就按它算现价和浮盈，
+    图上最后一根和表里的现价对得上；拿不到退回 hummingbot 的浮盈（币安按标记价算）倒推。
+    """
     keeper_last: dict[str, str] = {}
     for r in records:
         if r.role is Role.KEEPER and r.position_id:
             keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
     out = []
     for p in sorted(live, key=lambda p: p.opened_at, reverse=True):
-        pnl = hb.unrealized_of(p.symbol) if hb.ok else None
-        mark = None
-        if pnl is not None and p.entry_price and p.quantity > 0:
-            sign = 1 if p.side.value == "long" else -1
-            mark = p.entry_price + sign * pnl / p.quantity
+        sign = 1 if p.side.value == "long" else -1
+        last = (prices or {}).get(p.symbol)
+        src: Literal["last", "mark"] | None = None
+        mark: float | None = None
+        if last and p.entry_price:
+            mark, pnl, src = last, sign * p.quantity * (last - p.entry_price), "last"
+        else:
+            pnl = hb.unrealized_of(p.symbol) if hb.ok else None
+            if pnl is not None and p.entry_price and p.quantity > 0:
+                mark, src = p.entry_price + sign * pnl / p.quantity, "mark"
         ref = mark or p.entry_price
         notional = p.quantity * ref if ref else None
         bps = fills_fee_bps if fills_fee_bps is not None else taker_fee_bps
@@ -452,6 +465,7 @@ def position_views(
                 unrealized_usdt=pnl,
                 keeper=keeper_last.get(p.position_id),
                 mark_price=mark,
+                price_src=src,
                 notional_usdt=notional,
                 margin_usdt=notional / p.leverage if notional and p.leverage else None,
                 pnl_pct=pnl / notional * 100 if pnl is not None and notional else None,

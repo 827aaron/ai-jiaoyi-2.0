@@ -221,6 +221,21 @@ def create_app(
     boot_code = code_fingerprint()
     market = klines or KlineSource()
 
+    async def last_prices() -> dict[str, float]:
+        """持仓币的币安最新成交价：取持仓页 K 线图同一份 1 分钟 K 线（5 秒缓存）的最后一根收盘价。
+        拿不到的币不放进来，持仓那边退回 hummingbot 的浮盈。"""
+
+        async def one(sym: str) -> tuple[str, float | None]:
+            try:
+                bars = await asyncio.wait_for(market.klines(sym, "1m"), 3.0)
+            except (KlineError, TimeoutError):
+                return sym, None
+            return sym, bars[-1]["close"] if bars else None
+
+        syms = sorted({p.symbol for p in files.ledger().live()})
+        got = await asyncio.gather(*(one(s) for s in syms))
+        return {s: px for s, px in got if px}
+
     async def sample_pnl() -> None:
         """今日盈亏曲线：每分钟记一个点（只记 hummingbot-api 拿得到总资产的时候）。"""
         while True:
@@ -264,14 +279,14 @@ def create_app(
     @api.get("/api/overview")
     async def overview() -> Overview:
         r, a = cfg()
-        ov = build_overview(files, await hb.snapshot(), r, a, clock())
+        ov = build_overview(files, await hb.snapshot(), r, a, clock(), await last_prices())
         ctl = actions.control_state(data_dir, config_paths)
         ctl.panel_stale = code_fingerprint() != boot_code
         return ov.model_copy(update={"control": ctl})
 
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
-        return build_positions(files, await hb.snapshot(), cfg()[0], clock())
+        return build_positions(files, await hb.snapshot(), cfg()[0], clock(), await last_prices())
 
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:

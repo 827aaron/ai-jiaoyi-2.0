@@ -35,7 +35,7 @@ class KlineSource:
         self,
         base_url: str = BASE,
         *,
-        cache_s: float = 5.0,
+        cache_s: float = 1.5,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._http = httpx.AsyncClient(base_url=base_url, timeout=4.0, transport=transport)

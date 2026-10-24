@@ -398,6 +398,14 @@ def test_positions_page_groups_and_trail(tmp_path: Path) -> None:
     assert major.notional_usdt == pytest.approx(68044.0 * 0.015)
     assert major.cap_usdt == pytest.approx(major.cap_x * 10_080)
     assert [t.text for t in page.trails[p.position_id]] == ["BTC 拿住"]
+    assert p.price_src == "mark"  # 没给最新价：按 hummingbot 浮盈倒推
+
+    # 给了币安最新价（和 K 线图同源）：现价、浮盈都按它算，不再用 hummingbot 的标记价浮盈
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    [q] = build_positions(files, HB, RISK, NOW, {"BTCUSDT": 68_100.0}).positions
+    sign = 1 if q.side == "long" else -1
+    assert (q.mark_price, q.price_src) == (68_100.0, "last")
+    assert q.unrealized_usdt == pytest.approx(sign * 0.015 * (68_100.0 - 68_044.0))
 
 
 def test_team_page_and_signal_chain(tmp_path: Path) -> None:

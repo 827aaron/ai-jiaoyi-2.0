@@ -1,4 +1,4 @@
-// 面板前端：每 5 秒拉一次 /api/overview（状态条 + 总览），当前页另有数据就再拉自己的接口。
+// 面板前端：每 5 秒（持仓页 2 秒）拉一次 /api/overview（状态条 + 总览），当前页另有数据就再拉自己的接口。
 // 数据里的文字一律经 esc() 再进 HTML。路由：#页面 或 #页面/参数（例如 #positions/pos-1、#team/gate）。
 "use strict";
 
@@ -236,6 +236,8 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
 const netPnl = (p) => (p.net_unrealized_usdt != null ? p.net_unrealized_usdt : p.unrealized_usdt);
 const netPct = (p) => (p.net_pnl_pct != null ? p.net_pnl_pct : p.pnl_pct);
 const feeSrc = (p) => (p.fee_from_fills ? `按最近成交实收费率 ${money(p.fee_bps / 100, 3)}%` : `估：按配置费率 ${money(p.fee_bps / 100, 3)}%，还没有平过的单可以对`);
+// 现价平时是最新成交价（和 K 线图同源）；K 线拿不到时退回 hummingbot 的浮盈倒推（标记价），标一下
+const pxSrc = (p) => (p.price_src === "mark" ? ' <span class="dim small" title="币安 K 线这会儿拿不到，按 hummingbot 的浮盈倒推，是标记价，和图上会差一点">标记</span>' : "");
 const feeTip = (p) => (p.fees_est_usdt == null || p.unrealized_usdt == null ? "" : `浮动 ${signed(p.unrealized_usdt, 2)} U − 手续费 ${money(p.fees_est_usdt, 2)} U（开仓 + 平仓各一次，${feeSrc(p)}）`);
 // 今日盈亏直接拆一行：已平（净，同历史页交易净盈亏）+ 浮动（没平的单现在的浮盈）+ 其它（资金费、0 点前已有持仓的浮盈等）
 function dayParts(k) {
@@ -1064,7 +1066,7 @@ P.positions = (arg) => {
       <td class="hi nowrap">${coin(p.symbol)}${catTag(p.category)}</td><td>${side}</td><td class="r num">${qtyFmt(p.quantity)}</td>
       <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td><td class="r num">${p.leverage}x</td>
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
-      <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}</td>
+      <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
       <td class="r num">${price(p.stop_loss_price, p.symbol)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
       <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}</td><td class="r">${closeBtn}</td></tr>`;
@@ -1079,7 +1081,7 @@ P.positions = (arg) => {
       <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
-        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
+        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
       <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
@@ -1092,7 +1094,7 @@ P.positions = (arg) => {
       <div class="bars">${groups}</div>
     </div>
     <section class="card mt"><div class="tw pos-wide"><table>
-      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
+      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="币安最新成交价，和下面 K 线图最后一根是同一个数；浮盈按它算。币安 App 持仓里的浮盈按标记价算，会差一点">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
     <section class="card mt">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
@@ -1348,7 +1350,7 @@ function tapeTables(snap) {
   const rows = syms.map(([sym, v]) => `<tr><td>${coin(sym)}</td><td class="r num">${v.price == null ? "—" : pxFmt(v.price, sym)}</td><td class="r num">${chg(v.chg_1m_pct, 2, "%")}</td><td class="r num">${chg(v.chg_5m_pct, 2, "%")}</td>
     <td class="r num">${v.taker_buy_ratio_1m == null ? "—" : Math.round(v.taker_buy_ratio_1m * 100) + "%"}</td><td class="r num">${v.spread_bps == null ? '<span class="warn">盘口没更新</span>' : v.spread_bps.toFixed(2) + " bp"}</td>
     <td class="r num">${kU(v.liq_long_usdt_1m)}</td><td class="r num">${kU(v.liq_short_usdt_1m)}</td><td class="r num ${v.book_age_s > 10 ? "warn" : ""}">${v.book_age_s == null ? "—" : v.book_age_s + " 秒"}</td></tr>`).join("");
-  const coins = syms.length ? `<div class="tw mt"><table><thead><tr><th>币</th><th class="r">现价</th><th class="r">1 分钟</th><th class="r">5 分钟</th><th class="r">主动买占比</th><th class="r">买卖价差</th><th class="r">1 分钟多头强平</th><th class="r">1 分钟空头强平</th><th class="r">盘口多久没更新</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim mt">现在没有在盯的币。</div>';
+  const coins = syms.length ? `<div class="tw mt"><table><thead><tr><th>币</th><th class="r" title="币安最新成交价，和下面 K 线图最后一根是同一个数；浮盈按它算。币安 App 持仓里的浮盈按标记价算，会差一点">现价</th><th class="r">1 分钟</th><th class="r">5 分钟</th><th class="r">主动买占比</th><th class="r">买卖价差</th><th class="r">1 分钟多头强平</th><th class="r">1 分钟空头强平</th><th class="r">盘口多久没更新</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim mt">现在没有在盯的币。</div>';
   const st = Object.entries(snap.streams || {});
   const streams = st.length ? `<div class="tw mt"><table><thead><tr><th>数据流</th><th class="r">今天收到</th><th class="r">最后一条</th></tr></thead><tbody>${st.map(([k, x]) => `<tr><td title="${esc(k)}">${esc(STREAM[k] || k)}</td><td class="r num">${esc(Number(x.count_today).toLocaleString())} 条</td><td class="r num">${x.last_at ? `${hms(x.last_at)}（${agoTxt(secAgo(x.last_at))}）` : "—"}</td></tr>`).join("")}</tbody></table></div>` : "";
   return `${stale}<div class="small dim mt">此刻的行情（${hms(snap.ts)}）</div>${coins}${streams ? `<div class="small dim mt">各路数据（今天 0 点起）</div>${streams}` : ""}`;
@@ -2402,7 +2404,8 @@ async function poll() {
 if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
   window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
   render();
-  poll();
   loadPrecision();
-  setInterval(poll, 5000);
+  // 持仓页 2 秒一轮（现价、浮盈、K 线要跟得上），其它页 5 秒
+  const loop = async () => { await poll(); setTimeout(loop, route().page === "positions" ? 2000 : 5000); };
+  loop();
 }

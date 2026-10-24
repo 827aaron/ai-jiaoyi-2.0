@@ -153,12 +153,18 @@ class TeamPage(BaseModel):
 
 
 def build_positions(
-    files: PanelFiles, hb: HbSnapshot, risk: RiskConfig, now: datetime
+    files: PanelFiles,
+    hb: HbSnapshot,
+    risk: RiskConfig,
+    now: datetime,
+    prices: dict[str, float] | None = None,
 ) -> PositionsPage:
     ledger = files.ledger()
     records = files.decisions_today(now)
     live = ledger.live()
-    views = position_views(live, records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions))
+    views = position_views(
+        live, records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
+    )
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt
     groups = []
