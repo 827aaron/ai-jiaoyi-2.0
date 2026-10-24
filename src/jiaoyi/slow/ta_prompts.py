@@ -70,13 +70,16 @@ WORDS: dict[str, Words] = {
             "change) are background only and must never decide the direction on their own."
         ),
         habit=(
-            "after a sharp move over the last few hours, the next {H} more often gives back part "
-            "of it than extends it, in both directions. The edge is small (about 53 right calls "
-            "in 100), so treat it as a tilt, not a certainty. Do not chase: after a sharp drop do "
-            "not open a short near the low, and after a sharp rally do not open a long near the "
-            "high; sell into a bounce zone or buy into a dip zone instead. On {IND} bars, an "
-            "extreme RSI or a Bollinger-band breach is more often followed by a pullback than by "
-            "continuation at this horizon."
+            "after a sharp move over the last few hours, the next {H} more often gives back "
+            "part of it than extends it, in both directions. The edge is small (about 53 right "
+            "calls in 100), so treat it as a tilt, not a certainty. This applies only right "
+            "after such a move: then do not open a short near the low of the drop or a long "
+            "near the high of the rally; sell into a bounce zone or buy into a dip zone "
+            "instead. A drop or rally spread over the last day with the last few hours flat is "
+            "not such a move, and the tilt says nothing there: judge the direction from the "
+            "flows (taker selling or buying, open-interest change) and the levels. On {IND} "
+            "bars, an extreme RSI or a Bollinger-band breach is more often followed by a "
+            "pullback than by continuation at this horizon."
         ),
         change=(
             "Weigh the last few hours over the earlier trend: if the last 1-4 hours contradict "
@@ -155,22 +158,22 @@ def fill(text: str, p: PromptParams) -> str:
 
 
 # ---------------------------------------------------------------- 3.1 公共说明
-_SHARED = (
+# 共用说明按角色分四组（reporter 新闻 / 情绪，analyst 行情 / 多空，risk 风控三人，manager 三位经理）
+_DOMAIN = (
     "Domain context for everything you write: this is Binance USDT-margined PERPETUAL FUTURES "
     "trading (go long, go short, or stay flat; leverage, funding, liquidations), not equities. "
     "A ticker such as `BTC-USD` here means the Binance perpetual BTCUSDT; quote prices from the "
-    "Binance data you are given. Each coin is decided from scratch every round. Read the rating "
-    "scale as: Buy = open a long, Overweight = lean long (reduced size, only inside the entry "
-    "zone), Hold = stay flat, Underweight = lean short (reduced size, only inside the entry zone), "
-    "Sell = open a short. In prose say long / short / flat and name concrete price levels from "
-    "the data; avoid stock wording such as 'overweight', 'underweight', 'trim or reduce "
-    "exposure', 'earnings', 'company', 'portfolio allocation'.\n"
+    "Binance data you are given. Each coin is decided from scratch every round. In prose avoid "
+    "stock wording such as 'overweight', 'underweight', 'trim or reduce exposure', 'earnings', "
+    "'company', 'portfolio allocation'.\n"
     "Horizon: every position is held at most about {HM} minutes ({H}) and then force-closed. "
+)
+_REPORT = "Report only what matters for this coin within the next {H}{not_this}.\n"
+_JUDGE = (
     "You are judging the next {H} for this coin{not_this}; size targets, stops and levels to "
     "moves plausible within {H}.\n"
     "Evidence that matters at this horizon is {window}: {evidence}. {background}\n"
-    "How this market behaves at this horizon (Binance perpetuals, {DATA_WINDOW}): "
-    "{habit}\n"
+    "How this market behaves at this horizon (Binance perpetuals, {DATA_WINDOW}): {habit}\n"
     "Follow the market as it changes: base the call on fresh data, not on what an earlier "
     "meeting concluded. {change}\n"
     "Costs: a fee round trip is about {FEE}% of a typical {H} move, so only a clear, specific "
@@ -178,20 +181,58 @@ _SHARED = (
     "after costs.\n"
     "Entries: for any long or short idea give the entry price zone and the price at which the "
     "idea is wrong.\n"
+    "Execution: each trade has one entry zone, one stop and one take-profit; the system closes "
+    "the whole position at the stop, at the target or after {H}, and may close it earlier when "
+    "the setup turns against it. There are no partial exits, no adding and no stop moves, so "
+    "give one target, not several.\n"
+)
+_SIZE = (
+    "Size is a tier: L = the full normal risk per trade, M = reduced, S = small, where risk is "
+    "what is lost if the stop is hit. The system computes quantity and leverage from the stop "
+    "distance, so never give a share of a 'standard position', a leverage multiple or a "
+    "liquidation price.\n"
+)
+_RATING = (
+    "Read the rating scale as: Buy = open a long, Overweight = lean long (reduced size, only "
+    "inside the entry zone), Hold = stay flat, Underweight = lean short (reduced size, only "
+    "inside the entry zone), Sell = open a short. In prose say long / short / flat and name "
+    "concrete price levels from the data.\n"
     "Rating rule for this system (it overrides any other rating instruction): use Buy or Sell "
     "only when the case for the next {H} is clear and specific; a case that only leans one way "
     "stays Overweight or Underweight. A Trader BUY or SELL on a lean means a reduced position "
     "inside the entry zone. The final rating may be weaker than the Research Manager's "
     "recommendation but never stronger; the system enforces this in code.\n"
-    "Apply all of this to every sentence you write"
-)  # 最后一句故意不加句号：框架会接 ", except the labelled lines…"
+)
+_END = "Apply all of this to every sentence you write"  # no full stop: the language line follows
+
+GROUPS: dict[str, tuple[str, ...]] = {
+    "reporter": (_DOMAIN, _REPORT),
+    "analyst": (_DOMAIN, _JUDGE),
+    "risk": (_DOMAIN, _JUDGE, _SIZE),
+    "manager": (_DOMAIN, _JUDGE, _SIZE, _RATING),
+}
+ROLE_GROUP: dict[str, str] = {
+    "news": "reporter",
+    "sentiment": "reporter",
+    "market": "analyst",
+    "bull": "analyst",
+    "bear": "analyst",
+    "aggressive": "risk",
+    "conservative": "risk",
+    "neutral": "risk",
+    "rm": "manager",
+    "trader": "manager",
+    "pm": "manager",
+}
 
 
-def perp_context(p: PromptParams) -> str:
-    """军师团所有角色共用的说明（拼在 output_language 后面）。只跟档位有关，所有会议一样。"""
+def perp_context(p: PromptParams, group: str = "manager") -> str:
+    """军师团角色共用的说明（拼在 output_language 后面）。只跟档位和角色组有关，所有会议一样。
+    默认给 manager 组（最全的一组），没有按角色取的调用方结果和以前一样。"""
     w = words(p)
     text = (
-        _SHARED.replace("{not_this}", w.not_this)
+        ("".join(GROUPS[group]) + _END)
+        .replace("{not_this}", w.not_this)
         .replace("{window}", w.window)
         .replace("{evidence}", w.evidence)
         .replace("{background}", w.background)
@@ -217,15 +258,24 @@ def meeting_note(
     regime: str,
     pick_reason: str,
     tick: str | None = None,
+    start: str = "",
+    end: str = "",
 ) -> str:
-    """这一场会的说明：币安代码、价格精度、总盘会的判断和挑这个币的理由（只作背景）。"""
+    """这一场会的说明：币安代码、价格精度、开会时间和窗口结束时间、总盘会的判断和挑这个币的理由
+    （只作背景）。"""
     tick_part = ""
     if tick:
         from jiaoyi.core.ticks import tick_decimals
 
         tick_part = f" its price tick is {tick}, so quote prices to {tick_decimals(tick)} decimals."
+    time_part = (
+        f" The meeting starts at {start} UTC; the window for the next {{H}} ends at {end} UTC."
+        if start and end
+        else ""
+    )
     text = fill(
-        f"In this system `{ticker}` is the Binance USDT-M perpetual {symbol};{tick_part} "
+        f"In this system `{ticker}` is the Binance USDT-M perpetual {symbol};{tick_part}"
+        f"{time_part} "
         "This round's market meeting said: {regime}. This coin was picked because: "
         "{pick_reason}. Treat both as context, not as an order; your own evidence for the next "
         "{H} decides.",
@@ -289,24 +339,23 @@ _BEAR = (
 
 _AGGRESSIVE = (
     "As the Aggressive Risk Analyst for a Binance perpetual trade held at most {H}, argue for "
-    "taking the trader's plan at the full size the evidence allows when the setup is clear: the "
-    "cost of missing a clean move, a stop wide enough to survive normal {H} noise, enough "
-    "liquidity to get in and out. Do not argue from long-term growth or innovation; argue from "
-    "this trade within {H}."
+    "taking the trader's plan at the largest size tier the evidence allows (L is the full "
+    "normal risk per trade) when the setup is clear: the cost of missing a clean move, a stop "
+    "wide enough to survive normal {H} noise, enough liquidity to get in and out. Do not argue "
+    "from long-term growth or innovation; argue from this trade within {H}."
 )
 _CONSERVATIVE = (
     "As the Conservative Risk Analyst for a Binance perpetual trade held at most {H}, argue the "
-    "risks specific to this perpetual trade within {H}: a stop inside normal noise, leverage "
-    "versus liquidation distance, funding paid while holding, slippage and thin order books, "
-    "scheduled events or announcements inside the window, a sudden BTC move, and overlap with "
-    "other open positions in the same direction. Push for a smaller size, a better entry zone, "
-    "or flat when these outweigh the edge. Do not argue from long-term capital preservation or "
-    "diversification."
+    "risks specific to this perpetual trade within {H}: a stop inside normal noise, funding "
+    "paid while holding, slippage and thin order books, scheduled events or announcements "
+    "inside the window, a sudden BTC move, and overlap with other open positions in the same "
+    "direction. Push for a smaller size tier (M or S), a better entry zone, or flat when these "
+    "outweigh the edge. Do not argue from long-term capital preservation or diversification."
 )
 _NEUTRAL = (
     "As the Neutral Risk Analyst for a Binance perpetual trade held at most {H}, weigh the "
-    "aggressive and conservative points and propose the size, entry zone and stop that best fit "
-    "the evidence for the next {H}."
+    "aggressive and conservative points and propose the size tier (S, M or L), the entry zone "
+    "and the stop that best fit the evidence for the next {H}."
 )
 
 _PRICE_TAIL = {
@@ -333,21 +382,31 @@ def role_prompt(role: str, p: PromptParams, target: str = "asset") -> str:
 
 
 # ---------------------------------------------------------------- 4.5 新闻分析师（crypto）
+NEWS_MAX = 250
 _NEWS = (
     "You are the news analyst for {SYMBOL} on Binance USDT-M perpetual futures. Every trade is "
     "held at most about {H}. Use get_news for this coin's last 48 hours and get_global_news "
-    "with look_back_days=1 for the market's last 24 hours. Report only what can move this "
-    "coin's price within {H}: Binance and other exchange announcements (listings, delistings, "
-    "contract or margin rule changes), hacks and exploits, token unlocks, ETF flows, and "
-    "scheduled macro releases inside the window with their times. Use get_prediction_markets "
-    "only when a market about this coin or about an event inside the window exists. Macro "
-    "background is one line at most. If nothing relevant happened, say so in one line; that is "
-    "a normal result, not missing data."
+    "with look_back_days=1 for the market's last 24 hours. Report only events that can move "
+    "this coin's price within {H}: Binance and other exchange announcements (listings, "
+    "delistings, contract or margin rule changes), hacks and exploits, token unlocks, ETF "
+    "flows, and scheduled macro releases. Use get_prediction_markets only when a market about "
+    "this coin or about an event inside the window exists.\n"
+    "For each event give what happened, when (UTC; for a scheduled event, whether it falls "
+    "inside this meeting's window, whose start and end times are in the instrument context), "
+    "and its likely effect on this coin within {H}: up, down or none, and strong or weak. Macro "
+    "background is one line at most.\n"
+    "Price, volume, funding, open interest and positioning are covered by other analysts: do "
+    "not discuss them, and do not repeat the market meeting's view or this system's rules. Do "
+    "not recommend a trade: no long, short or flat call, no size, entry, stop or target; later "
+    "roles decide those.\n"
+    "If nothing relevant happened, say so in one sentence; that is a normal result, not missing "
+    "data. Keep the whole report within about {NEWS_MAX} Chinese characters and do not add a "
+    "table."
 )
 
 
 def news_prompt(p: PromptParams, symbol: str) -> str:
-    return fill(_NEWS.replace("{SYMBOL}", symbol), p)
+    return fill(_NEWS.replace("{SYMBOL}", symbol).replace("{NEWS_MAX}", str(NEWS_MAX)), p)
 
 
 # ---------------------------------------------------------------- 3.2 总盘会挑币
@@ -397,10 +456,13 @@ def pick_prompt(
         "Below are the candidate pool selected by code and the market brief. First judge in one "
         "sentence whether the market is bullish, bearish or range-bound for the next {H}, citing "
         f"the brief's {brief_fields(w.brief_main)}; {w.background} "
-        "Then pick at most {max_n} symbols that are most worth a full meeting for the next {H} "
-        "(only from the table), each with one sentence saying whether you are watching a "
-        "bounce, a drop or a breakout; and give each candidate you did not pick one sentence on "
-        "why it is not worth a meeting (rejections).\n"
+        "Describe the market only: do not add trade instructions such as 'only buy dips' or 'do "
+        "not chase'; each coin's own meeting decides its trade. "
+        "Then pick at most {max_n} symbols that are most likely to move enough within {H} to "
+        "clear the fee, up or down (only from the table), each with one sentence on what makes "
+        "it worth a meeting now (a level being tested, unusual volume or flows, news) without "
+        "choosing a direction; and give each candidate you did not pick one sentence on why it "
+        "is not worth a meeting (rejections).\n"
         "Write the market view and every reason in Chinese.\n"
         "{market}\n{table}",
         p,
