@@ -1552,8 +1552,8 @@ function categoryCard(d) {
   const off = d.categories.filter((c) => !c.enabled).length;
   return `<section class="card mt"><div class="ch"><h2>按类别选币</h2><span class="r">${off ? `关了 ${off} 类` : "六类都开着"} · 每类默认最多 ${d.default_category_cap} 个</span></div>
     ${d.slow_error ? `<div class="note warn">类别配置读不出，下面的“默认”先按出厂值显示。${esc(d.slow_error)}</div>` : ""}
-    <div class="tw"><table><thead><tr><th>类别</th><th>开关</th><th class="r">最多进池</th><th class="r">上次进池 / 看了</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="foot">关掉的类别不再靠打分进池，你固定、手动加的币仍进池。开关和上限要面板密码，改完主程序马上重新选币（“上次进池”等这次选完才变）。“恢复默认”去掉你在这里改过的那一项，回到括号里的默认值。</div></section>`;
+    <div class="tw"><table><thead><tr><th>类别</th><th>开关</th><th class="r">最多进池</th><th class="r" title="上次选币：这一类进池几个 / 这一类一共看了几个">进池 / 候选</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="foot">关掉的类别不再靠打分进池，你固定、手动加的币仍进池。开关和上限要面板密码，改完主程序马上重新选币（“进池 / 候选”是上次选币的结果，等这次选完才变；候选 = 这一类上次一共看了几个币）。“恢复默认”去掉你在这里改过的那一项，回到括号里的默认值。</div></section>`;
 }
 
 P.pool = () => {
