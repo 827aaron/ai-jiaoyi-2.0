@@ -257,6 +257,10 @@ STOP_HINT = {
 }
 
 
+# 各最长持仓档 BTC 止损约多宽（%，研究 v3：2h ≈ 0.45、4h ≈ 0.64，其余按 √时间推）；只给设置页显示
+BTC_STOP_PCT = {"30m": 0.23, "1h": 0.32, "2h": 0.45, "4h": 0.64, "8h": 0.9, "12h": 1.1, "24h": 1.6}
+
+
 def stop_hint(hold: str) -> tuple[float, float]:
     return STOP_HINT.get(hold, STOP_HINT[DEFAULT_HOLD])
 
