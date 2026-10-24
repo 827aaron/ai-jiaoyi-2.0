@@ -582,6 +582,8 @@ def test_history_page(tmp_path: Path) -> None:
     assert (st.symbol, st.trades, st.top_kind) == (ex["symbol"], 1, "volume_breakout")
     assert st.longs + st.shorts == 1 and st.win_rate == 1.0
     assert st.pnl_usdt == pytest.approx(12.5) and st.avg_hold_s > 0
+    assert (st.wins, st.losses) == (1, 0) and st.avg_r is not None and st.avg_r > 0
+    assert {(g.by, g.key) for g in st.splits} == {("side", ex["side"]), ("kind", "volume_breakout")}
     assert build_history(files, RISK, NOW, "all").by_symbol == page.by_symbol
 
 
