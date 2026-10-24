@@ -48,6 +48,7 @@ from jiaoyi.contracts import (
     SizeTier,
     SymbolPoolEntry,
 )
+from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.slow import binance_gate, ta_nodes, ta_prompts
 from jiaoyi.slow.brief import MarketBriefService
@@ -71,7 +72,7 @@ from jiaoyi.slow.liquidations import LiquidationSource, describe_total
 from jiaoyi.slow.meeting_live import MeetingLive, tap_graph
 from jiaoyi.slow.news import NewsHub, format_items
 from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
-from jiaoyi.slow.ticks import TickSizes
+from jiaoyi.slow.ticks import TICKS
 
 _STOCK_LIKE = frozenset({Category.US_TECH, Category.CRYPTO_STOCK})
 
@@ -622,24 +623,132 @@ def _indicator(
     raise ValueError(f"币安数据源暂不支持指标 {name}")
 
 
+_INDICATOR_INTERVAL = "1h"
+"""行情分析师的指标 / 价格快照周期（按最长持仓档，见 ``core/profiles.py``）；引擎启动时设置。"""
+
+
+def set_indicator_interval(interval: str) -> None:
+    if interval not in _INTERVAL_MIN or interval == "1d":
+        raise ValueError(f"指标周期应为 1m–4h 之一：{interval!r}")
+    global _INDICATOR_INTERVAL
+    _INDICATOR_INTERVAL = interval
+
+
 def get_binance_indicators(
     symbol: str, indicator: str, as_of_date: str, look_back_days: int
 ) -> str:
-    """登记为 TradingAgents 的 ``get_indicators``：对小时线算 TradingAgents 常用的几个指标。"""
+    """登记为 TradingAgents 的 ``get_indicators``：对当前档位周期的已收盘 K 线算常用指标。"""
     end = as_of(as_of_date)
     end_ms = int(end.timestamp() * 1000)
-    rows = [k for k in _klines(symbol, "1h", 500, end) if k[6] <= end_ms]  # 只用已收盘的
+    interval = _INDICATOR_INTERVAL
+    rows = [k for k in _klines(symbol, interval, 500, end) if k[6] <= end_ms]  # 只用已收盘的
     o, h, lo, c, v = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4, 5))
     try:
         vals = _indicator(indicator, o, h, lo, c, v)
     except ValueError as e:  # 不认识的指标别让整场会议失败，告诉分析师换一个
         return f"## {indicator}\n{e}。可用：{', '.join(SUPPORTED_INDICATORS)}"
-    n = min(look_back_days * 24, len(vals))
+    n = min(look_back_days * (1440 // _INTERVAL_MIN[interval]), len(vals))
     out = [
         f"{datetime.fromtimestamp(k[0] / 1000, tz=UTC):%Y-%m-%d %H:%M}: {v:.6g}"
         for k, v in zip(rows[-n:], vals[-n:], strict=True)
     ]
-    return f"## {indicator}（{binance_symbol(symbol)}，1h）\n" + "\n".join(reversed(out))
+    return f"## {indicator}（{binance_symbol(symbol)}，{interval}）\n" + "\n".join(reversed(out))
+
+
+SNAPSHOT_INDICATORS = (
+    "close_10_ema",
+    "close_50_sma",
+    "close_200_sma",
+    "rsi",
+    "boll",
+    "boll_ub",
+    "boll_lb",
+    "macd",
+    "macds",
+    "macdh",
+    "atr",
+)
+SNAPSHOT_RECENT = 30
+
+
+def _no_data(symbol: str, sym: str, detail: str) -> Exception:
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    return NoMarketDataError(symbol, sym, detail)  # type: ignore[no-any-return]
+
+
+def _bar_time(k: Sequence[Any]) -> str:
+    return f"{datetime.fromtimestamp(k[0] / 1000, tz=UTC):%Y-%m-%d %H:%M}"
+
+
+def build_binance_snapshot(
+    symbol: str,
+    as_of_date: str,
+    look_back_days: int = SNAPSHOT_RECENT,
+    indicators: Sequence[str] | None = None,
+) -> str:
+    """登记为 TradingAgents 的 ``build_verified_market_snapshot``（雅虎日线的替身）：用币安永续
+    已收盘的当前档位周期 K 线，格式和原版一样：最新一根 OHLCV、指标表、最近 30 根收盘。"""
+    sym = binance_symbol(symbol)
+    interval = _INDICATOR_INTERVAL
+    end = as_of(as_of_date)
+    end_ms = int(end.timestamp() * 1000)
+    try:
+        rows = [k for k in _klines(symbol, interval, 500, end) if k[6] <= end_ms]
+        tick = TICKS.get(sym)
+    except binance_gate.RateLimited:
+        raise  # 被封了整轮暂停，不当成“没有数据”吞掉
+    except Exception as exc:
+        raise _no_data(symbol, sym, f"Binance request failed ({type(exc).__name__})") from exc
+    if not rows:
+        raise _no_data(symbol, sym, f"no closed {interval} bars")
+    o, h, lo, c, v = ([float(k[i]) for k in rows] for i in (1, 2, 3, 4, 5))
+    price = price_formatter(tick)
+    values: dict[str, str] = {}
+    for name in indicators or SNAPSHOT_INDICATORS:
+        try:
+            values[name] = f"{_indicator(name, o, h, lo, c, v)[-1]:.6g}"
+        except Exception as exc:  # 一个指标算不出来不拖垮整份快照
+            values[name] = f"N/A ({type(exc).__name__})"
+    recent = rows[-max(1, min(int(look_back_days), SNAPSHOT_RECENT)) :]
+    last = rows[-1]
+    lines = [
+        f"## Verified market data snapshot — Binance USDT-M perpetual {sym}, {interval} bars, "
+        "closed only",
+        "",
+        f"- Requested analysis time: {end:%Y-%m-%d %H:%M} UTC",
+        f"- Latest closed {interval} bar used: {_bar_time(last)} UTC",
+        "- Bars that had not closed by the analysis time are excluded.",
+        "",
+        "### Latest verified OHLCV row",
+        "",
+        "| Field | Value |",
+        "|---|---:|",
+        f"| Open | {price(o[-1])} |",
+        f"| High | {price(h[-1])} |",
+        f"| Low | {price(lo[-1])} |",
+        f"| Close | {price(c[-1])} |",
+        f"| Volume | {v[-1]:,.2f} |",
+        "",
+        "### Verified technical indicators (latest row)",
+        "",
+        "| Indicator | Value |",
+        "|---|---:|",
+        *(f"| {k} | {val} |" for k, val in values.items()),
+        "",
+        f"### Recent verified closes (last {len(recent)} bars)",
+        "",
+        "| Time (UTC) | Close |",
+        "|---|---:|",
+        *(f"| {_bar_time(k)} | {price(float(k[4]))} |" for k in recent),
+        "",
+        "Use this snapshot as the source of truth for exact OHLCV, price-level, and "
+        "indicator-value claims. If another tool output conflicts with it, flag the discrepancy "
+        "rather than inventing a reconciled number. Do not claim historical validation, "
+        "support/resistance bounces, or exact percentage moves unless directly supported by tool "
+        "output with concrete times and prices.",
+    ]
+    return "\n".join(lines)
 
 
 def register_binance_vendor() -> None:
@@ -648,6 +757,10 @@ def register_binance_vendor() -> None:
 
     router.VENDOR_METHODS["get_stock_data"]["binance"] = get_binance_stock_data
     router.VENDOR_METHODS["get_indicators"]["binance"] = get_binance_indicators
+    from tradingagents.agents import tools
+
+    # 行情分析师的「验证快照」原来读雅虎日线；换成币安当前档位周期的已收盘 K 线
+    tools.build_verified_market_snapshot = build_binance_snapshot
     ta_nodes.install()  # 同时换掉写死股票口径的多空研究员、风控三人、新闻分析师
 
 
@@ -844,7 +957,8 @@ _REPORTS = (
 )
 _ERROR_MARK = re.compile(
     r"traceback|exception|error (?:code|calling|fetching)|failed to|unable to (?:fetch|retrieve)|"
-    r"rate.?limit|tool (?:call )?(?:failed|error)|无法获取|获取失败|调用失败|接口(?:报错|错误)",
+    r"rate.?limit|unavailable this round|tool (?:call )?(?:failed|error)|"
+    r"无法获取|获取失败|调用失败|接口(?:报错|错误)",
     re.IGNORECASE,
 )
 
@@ -1357,11 +1471,13 @@ class TradingAgentsEngine:
         self._inflight_lock = threading.Lock()
         register_binance_vendor()
         set_analyst_klines(settings.analyst_klines, settings.meeting_min)
-        self._ticks = TickSizes()
+        set_indicator_interval(prompt_params(settings).indicator)
+        self._ticks = TICKS
         self._write_active_prompts(settings)
         self._guard_reddit(settings)
         if news is not None:
             register_crypto_news_vendor(news)
+        ta_nodes.set_news_hub(news)
 
     @staticmethod
     def _guard_reddit(settings: TradingAgentsSettings) -> None:

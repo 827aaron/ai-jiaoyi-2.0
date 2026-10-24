@@ -189,3 +189,47 @@ def test_original_memory_log_is_off(tmp_path: Path) -> None:
     assert g.config["memory_log_path"] == ""
     g.memory_log.store_decision("BTC-USD", "2026-10-24", "x", "Sell")  # 不写任何文件
     assert not list(Path(tmp_path).rglob("memory.md"))
+
+
+def test_sentiment_analyst_crypto_reads_positioning_and_stock_uses_the_original(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from jiaoyi.slow import crowd
+
+    ta_nodes.install()
+    monkeypatch.setitem(
+        ta_nodes._ORIGINALS, "create_sentiment_analyst", lambda llm: lambda st: {"x": "orig"}
+    )
+    seen: dict[str, Any] = {}
+
+    def fetch(symbol: str, period: str) -> tuple[list[str], int]:
+        seen["args"] = (symbol, period)
+        return ["### Global long/short account ratio\n- Latest 1.8"], 1
+
+    monkeypatch.setattr(crowd, "fetch_blocks", fetch)
+    llm = Llm()
+    node = ta_nodes.create_sentiment_analyst(llm)
+    with run_config(_cfg(tmp_path)):
+        out = node(_state())
+        assert seen["args"] == ("BTCUSDT", "15m")  # 周期跟档位
+        assert out["sentiment_report"] == "发言" and out["messages"][0].content == "发言"
+        prompt = llm.prompts[0]
+        assert "crowd-positioning analyst for BTCUSDT" in prompt and "Latest 1.8" in prompt
+        assert "StockTwits" not in prompt
+        assert node({**_state(), "asset_type": "stock"}) == {"x": "orig"}
+
+
+def test_sentiment_analyst_says_unavailable_instead_of_returning_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from jiaoyi.slow import crowd
+
+    ta_nodes.install()
+    monkeypatch.setitem(ta_nodes._ORIGINALS, "create_sentiment_analyst", lambda llm: lambda st: {})
+    monkeypatch.setattr(crowd, "fetch_blocks", lambda sym, period: (["(unavailable)"], 0))
+    monkeypatch.setattr(ta_nodes, "_NEWS_HUB", None)
+    llm = Llm()
+    with run_config(_cfg(tmp_path)):
+        out = ta_nodes.create_sentiment_analyst(llm)(_state())
+    assert "unavailable this round" in out["sentiment_report"] and not llm.prompts
+    assert out["messages"][0].content == out["sentiment_report"]

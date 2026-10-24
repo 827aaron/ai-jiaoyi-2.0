@@ -6,7 +6,7 @@
 只跟档位有关，所有会议一样）。每场会不同的东西（总盘会的判断、挑币理由、持仓说明）走
 ``PerpGraph`` 的 state，不进配置，所以同时开几场也不会串。
 
-替换的角色：多空研究员、风控三人、新闻分析师（加密币；美股永续照旧走原版）。
+替换的角色：多空研究员、风控三人、新闻分析师、情绪分析师（加密币；美股永续照旧走原版）。
 只在用到时才导入 tradingagents。
 """
 
@@ -227,6 +227,88 @@ def create_news_analyst(llm: Any) -> Node:
     return node
 
 
+_NEWS_HUB: Any = None
+
+
+def set_news_hub(hub: Any) -> None:
+    """情绪分析师读这个币最近 24 小时的新闻标题用（引擎启动时设置；没有就不加这一块）。"""
+    global _NEWS_HUB
+    _NEWS_HUB = hub
+
+
+_CROWD = (
+    "You are the crowd-positioning analyst for {SYMBOL} perpetual. Report who is positioned "
+    "which way over the last hours and whether that crowd is likely to be squeezed within the "
+    "next {H}. End with a one-line verdict: crowd leaning long / short / neutral, and whether "
+    "that positioning is fuel for a move against it."
+)
+CROWD_UNAVAILABLE = (
+    "Crowd-positioning data for {SYMBOL} is unavailable this round (the Binance positioning "
+    "endpoints returned nothing and there are no recent headlines). Do not infer the crowd's "
+    "positioning from other reports."
+)
+
+
+def create_sentiment_analyst(llm: Any) -> Node:
+    """情绪分析师：加密币看币安持仓人群（谁站哪边、会不会被挤），美股永续走原版。"""
+    original = _ORIGINALS["create_sentiment_analyst"](llm)
+
+    def node(state: Any) -> dict[str, Any]:
+        if state.get("asset_type", "stock") != "crypto":
+            out: dict[str, Any] = original(state)
+            return out
+        from langchain_core.messages import AIMessage
+        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        from tradingagents.agents.context import (
+            get_instrument_context_from_state,
+            get_language_instruction,
+        )
+
+        from jiaoyi.slow import crowd
+        from jiaoyi.slow.news import format_items
+
+        p = params_from_config()
+        sym = binance_symbol_of(str(state["company_of_interest"]))
+        blocks, ok = crowd.fetch_blocks(sym, p.indicator)
+        items = _NEWS_HUB.for_symbol(sym, hours=24, limit=8) if _NEWS_HUB is not None else []
+        if ok == 0 and not items:
+            text = ta_prompts.fill(CROWD_UNAVAILABLE.replace("{SYMBOL}", sym), p)
+            return {"messages": [AIMessage(content=text)], "sentiment_report": text}
+        headlines = format_items(items)
+        system_message = (
+            ta_prompts.fill(_CROWD.replace("{SYMBOL}", sym), p)
+            + "\n\nThe data below was collected for you from Binance public endpoints (each "
+            "block is a time series summarized for the last 24 hours) and from the exchange/news "
+            "feed; report on it and do not invent numbers. If a block says unavailable, say so.\n\n"
+            + "\n\n".join(blocks)
+            + f"\n\n### Headlines mentioning this coin, last 24 hours\n{headlines}"
+            + "\n\nMake sure to append a short Markdown table at the end of the report."
+            + get_language_instruction()
+        )
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a helpful AI assistant, collaborating with other assistants."
+                    " Report what your data supports; another agent decides the trade."
+                    " Today's date is {current_date}; treat it as 'now'. {instrument_context}\n"
+                    "{system_message}",
+                ),
+                MessagesPlaceholder(variable_name="messages"),
+            ]
+        )
+        prompt = prompt.partial(
+            system_message=system_message,
+            current_date=state["trade_date"],
+            instrument_context=get_instrument_context_from_state(state),
+        )
+        report = llm.invoke(prompt.format_messages(messages=state["messages"]))
+        text = str(report.content)
+        return {"messages": [AIMessage(content=text)], "sentiment_report": text}
+
+    return node
+
+
 _REPLACEMENTS: dict[str, Factory] = {
     "create_bull_researcher": create_bull_researcher,
     "create_bear_researcher": create_bear_researcher,
@@ -234,6 +316,7 @@ _REPLACEMENTS: dict[str, Factory] = {
     "create_conservative_debator": create_conservative_debator,
     "create_neutral_debator": create_neutral_debator,
     "create_news_analyst": create_news_analyst,
+    "create_sentiment_analyst": create_sentiment_analyst,
 }
 
 

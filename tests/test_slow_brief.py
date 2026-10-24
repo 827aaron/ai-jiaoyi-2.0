@@ -11,11 +11,58 @@ from tests.test_slow_commander import FakeEngine, entry, make, pool
 NOW = datetime(2026, 10, 23, 9, 0, tzinfo=UTC)
 
 
-def test_describe_trend() -> None:
-    daily = [100.0 + i for i in range(30)]
-    h4 = [100.0 + i for i in range(30)]
-    text = describe_trend("BTC", daily, h4)
-    assert "129.0" in text and "+0.8%" in text and "20 日均线上方" in text and "RSI 100" in text
+def bars(n: int, last: float = 129.0, step: float = 1.0, vol: float = 10.0) -> list[list[object]]:
+    """n 根线，收盘价每根 +step，最后一根收在 last；高 = 收 + 1，低 = 收 − 1。"""
+    out: list[list[object]] = []
+    for i in range(n):
+        c = last - (n - 1 - i) * step
+        out.append([i, str(c), str(c + 1), str(c - 1), str(c), str(vol)])
+    return out
+
+
+def test_describe_trend_short_uses_five_minute_windows_and_background() -> None:
+    from jiaoyi.slow.ta_prompts import WORDS
+
+    w = WORDS["short"]
+    text = describe_trend(
+        "BTC",
+        w.brief_main,
+        w.brief_bg,
+        bars(289, 200.0, 0.1),
+        [],
+        [],
+        bars(21),
+        lambda x: f"{x:.1f}",
+    )
+    assert text.startswith("- BTC 现价 200.0：")
+    assert "1 小时涨跌 +0.6%" in text  # 12 根 × 0.1 = 1.2
+    assert "4 小时涨跌 +2.5%" in text and "24 小时涨跌 +16.8%" in text
+    assert "在 24 小时区间里的位置 97%（低 170.3 – 高 201.0）" in text
+    assert "近 1 小时成交量（相对 24 小时均值） 1.0 倍" in text
+    assert "；背景：相对 20 日均线 上方（" in text and "7 天涨跌 +" in text and "RSI" not in text
+
+
+def test_describe_trend_mid_and_long_show_only_their_fields() -> None:
+    from jiaoyi.slow.ta_prompts import WORDS
+
+    mid, long_ = WORDS["mid"], WORDS["long"]
+    m = describe_trend(
+        "ETH",
+        mid.brief_main,
+        mid.brief_bg,
+        bars(289, 100.0),
+        bars(73, 100.0),
+        [],
+        bars(21),
+        lambda x: f"{x:.1f}",
+    )
+    assert "3 天涨跌" in m and "在 3 天区间里的位置" in m and "1 小时 RSI 100" in m
+    assert "1 小时涨跌" not in m and "背景：相对 20 日均线 上方" in m
+    lg = describe_trend(
+        "ETH", long_.brief_main, long_.brief_bg, bars(289), bars(73), bars(30), bars(21)
+    )
+    assert "4 小时 RSI 100" in lg and "日线 RSI 100" in lg and "背景" not in lg
+    assert "1 小时涨跌" not in lg and "7 天涨跌" in lg
 
 
 def transport(fail_fng: bool = False, fail_klines: bool = False) -> httpx.MockTransport:
@@ -26,7 +73,8 @@ def transport(fail_fng: bool = False, fail_klines: bool = False) -> httpx.MockTr
         if req.url.path == "/fapi/v1/klines":
             if fail_klines:
                 return httpx.Response(500)
-            return httpx.Response(200, json=[[0, "0", "0", "0", str(100 + i)] for i in range(30)])
+            n = int(req.url.params["limit"])
+            return httpx.Response(200, json=bars(n))
         if fail_fng:
             return httpx.Response(500)
         return httpx.Response(
@@ -41,7 +89,7 @@ def transport(fail_fng: bool = False, fail_klines: bool = False) -> httpx.MockTr
 
 async def test_brief_builds_once_per_round_and_is_cached() -> None:
     t = transport()
-    svc = MarketBriefService(client=httpx.AsyncClient(transport=t), clock=lambda: NOW)
+    svc = MarketBriefService(client=httpx.AsyncClient(transport=t), clock=lambda: NOW, style="mid")
     text = await svc.refresh()
     assert "BTC" in text and "ETH" in text and "恐慌贪婪指数：50（Neutral）（前一日 68）" in text
     n = len(t.calls)  # type: ignore[attr-defined]
