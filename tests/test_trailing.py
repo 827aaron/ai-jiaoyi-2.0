@@ -56,10 +56,11 @@ def test_both_on_trails_from_breakeven(now: datetime) -> None:
 
 
 def test_tier_defaults_wide() -> None:
-    assert HOLD["30m"]["fast_loop"]["trail_distance_r"] == 1.0
-    assert HOLD["2h"]["fast_loop"]["trail_distance_r"] == 1.0
-    assert HOLD["4h"]["fast_loop"]["trail_distance_r"] == 1.2
-    assert HOLD["24h"]["fast_loop"]["trail_distance_r"] == 1.2
+    assert HOLD["30m"]["fast_loop"]["trail_distance_r"] == 0.7
+    assert HOLD["2h"]["fast_loop"]["trail_distance_r"] == 0.7
+    assert HOLD["4h"]["fast_loop"]["trail_distance_r"] == 1.0
+    assert HOLD["24h"]["fast_loop"]["trail_distance_r"] == 1.0
+    assert all(HOLD[t]["fast_loop"]["trail_start_r"] == 0.7 for t in HOLD)
     assert FAST.trailing_on is False and FAST.breakeven_on is False
 
 
