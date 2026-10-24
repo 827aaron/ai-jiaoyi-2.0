@@ -1,4 +1,4 @@
-// 面板前端：每 5 秒拉一次 /api/overview（状态条 + 总览），当前页另有数据就再拉自己的接口。
+// 面板前端：每 5 秒（持仓页 2 秒）拉一次 /api/overview（状态条 + 总览），当前页另有数据就再拉自己的接口。
 // 数据里的文字一律经 esc() 再进 HTML。路由：#页面 或 #页面/参数（例如 #positions/pos-1、#team/gate）。
 "use strict";
 
@@ -236,12 +236,22 @@ async function watchCommand(id, kind, startedBefore, lead = "") {
 const netPnl = (p) => (p.net_unrealized_usdt != null ? p.net_unrealized_usdt : p.unrealized_usdt);
 const netPct = (p) => (p.net_pnl_pct != null ? p.net_pnl_pct : p.pnl_pct);
 const feeSrc = (p) => (p.fee_from_fills ? `按最近成交实收费率 ${money(p.fee_bps / 100, 3)}%` : `估：按配置费率 ${money(p.fee_bps / 100, 3)}%，还没有平过的单可以对`);
+// 现价平时是币安推送的最新成交价（和 K 线图最后一根同一个数）；推送断了退回全量行情，再不行按标记价倒推，标一下
+const PX_SRC = {
+  rest: ["轮询", "币安推送这会儿断了，先用一次全量行情（2 秒一次），自动重连后恢复推送"],
+  mark: ["标记", "币安行情这会儿拿不到，按 hummingbot 的浮盈倒推，是标记价，和图上会差一点"],
+};
+const PX_ENV = { live: "币安主网", demo: "币安 Demo（模拟盘实际撮合的盘子）" };
+const pxHeadTip = (d) => d.price_env
+  ? `${PX_ENV[d.price_env]}实时推送的最新成交价，和下面 K 线图最后一根是同一个数；浮盈按它算。总览「今日盈亏」里的浮动和币安 App 持仓浮盈按标记价算，会差一点`
+  : "这个模式没有实时行情源，按 hummingbot 的浮盈（标记价）倒推";
+const pxSrc = (p) => (PX_SRC[p.price_src] ? ` <span class="dim small" title="${PX_SRC[p.price_src][1]}">${PX_SRC[p.price_src][0]}</span>` : "");
 const feeTip = (p) => (p.fees_est_usdt == null || p.unrealized_usdt == null ? "" : `浮动 ${signed(p.unrealized_usdt, 2)} U − 手续费 ${money(p.fees_est_usdt, 2)} U（开仓 + 平仓各一次，${feeSrc(p)}）`);
 // 今日盈亏直接拆一行：已平（净，同历史页交易净盈亏）+ 浮动（没平的单现在的浮盈）+ 其它（资金费、0 点前已有持仓的浮盈等）
 function dayParts(k) {
   if (k.day_pnl_usdt == null || k.day_closed_usdt == null || k.day_floating_usdt == null) return "";
   const rest = k.day_pnl_usdt - k.day_closed_usdt - k.day_floating_usdt;
-  return `<small class="dim num">已平 ${signed(k.day_closed_usdt, 1)} · 浮动 ${signed(k.day_floating_usdt, 1)} · 其它 ${signed(rest, 1)}</small>`;
+  return `<small class="dim num" title="浮动按币安标记价算（和账户总资产同一口径），持仓页按最新成交价算，会差一点">已平 ${signed(k.day_closed_usdt, 1)} · 浮动 ${signed(k.day_floating_usdt, 1)} · 其它 ${signed(rest, 1)}</small>`;
 }
 // 今日盈亏曲线（面板每分钟记一个点，按现在的 0 点基准算）：标最高、最低和现在
 function pnlChart(c) {
@@ -1064,7 +1074,7 @@ P.positions = (arg) => {
       <td class="hi nowrap">${coin(p.symbol)}${catTag(p.category)}</td><td>${side}</td><td class="r num">${qtyFmt(p.quantity)}</td>
       <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td><td class="r num">${p.leverage}x</td>
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
-      <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}</td>
+      <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
       <td class="r num">${price(p.stop_loss_price, p.symbol)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
       <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}</td><td class="r">${closeBtn}</td></tr>`;
@@ -1079,7 +1089,7 @@ P.positions = (arg) => {
       <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
-        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
+        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
       <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
@@ -1092,7 +1102,7 @@ P.positions = (arg) => {
       <div class="bars">${groups}</div>
     </div>
     <section class="card mt"><div class="tw pos-wide"><table>
-      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
+      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
     <section class="card mt">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
@@ -1285,11 +1295,18 @@ function predictorText(r) {
   const m = /^已算 (\d+)\/(\d+) 个币(.*?)(（今天预测 \d+ 次）)?$/.exec(r.headline);
   return m ? `盯着 ${m[2]} 个币，已算 ${m[1]} 个${m[3]}` : r.headline;
 }
-function tfNode(r) {
+// 管家卡固定一行：最近 30 分钟的反向急查（不被例行复查的「刚刚」冲掉）
+function againstLine(c) {
+  if (!c) return "";
+  const v = c.failed ? "没问成，维持现状" : c.verdict ? (c.verdict === "close" ? "判平仓" : "判继续拿") : "急查中";
+  return `反向急查 ${coin(c.symbol)} ${hm(c.ts)} → ${v}`;
+}
+function tfNode(r, checks) {
   const line = r.state === "ok" ? runLine(r) : "";
+  const ag = r.role === "keeper" && checks && checks.length ? checks[0] : null;
   const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : line || (r.role === "predictor" ? predictorText(r) : r.status);
   return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}${hbBadge(r)}</span>
-    ${r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
+    ${ag ? `<small class="now against" title="${esc(ag.reason || ag.desc || "")}">${esc(againstLine(ag))}</small>` : r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
     <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
 }
 function teamFlow(d) {
@@ -1302,7 +1319,7 @@ function teamFlow(d) {
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
-    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r)}</a>`;
+    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
   };
   // 盯持仓是常态，放最后说；其余按流程顺序最多说两处
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
@@ -1382,13 +1399,21 @@ function sentinelCard(r) {
     ${rows ? `<div class="tw scroll"><table><thead><tr><th>币</th><th>现在（成交量是平时几倍 · 主动买卖哪边多）</th><th>离出信号还差</th><th>1 小时内最高</th><th>上次没出的原因</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="foot">只列现在作战卡上的币和持仓币${r.detail_hidden ? `（另有 ${r.detail_hidden} 个已掉出作战卡的币没列）` : ""}。阈值在「设置 › 执行 › 信号识别」：量能突增要量够倍数、而且主动买或卖占比够高；放量突破还要价格突破关键位。没出信号不一定是坏事，可能只是没行情。</div>` : `<div class="dim">${r.detail_hidden ? `现在作战卡上没有币、也没持仓（另有 ${r.detail_hidden} 个已掉出作战卡的币没列）。` : "哨兵还没报每个币的情况（主程序更新后才有）。"}</div>`}</section>`;
 }
+// 管家：最近 30 分钟每次反向急查（哪个信号、判了什么、理由）
+function againstCard(list) {
+  if (!list.length) return "";
+  const rows = list.map((c) => `<div><span class="n">${hm(c.ts)}</span><span><b>${coin(c.symbol)}</b> ${esc(c.desc || "反向信号")}${c.strong ? "（强）" : ""} → <b class="${c.verdict === "close" ? "down" : ""}">${esc(againstLine(c).split("→ ")[1])}</b>${c.p_close != null ? ` · 平仓概率 ${c.p_close.toFixed(2)}` : ""}${c.checked_at ? ` · ${hms(c.checked_at)} 查完` : ""}${c.reason ? `<br><span class="dim small">${esc(c.reason)}</span>` : ""}</span></div>`).join("");
+  return `<section class="card mt"><div class="ch"><h2>反向急查 · 最近 30 分钟</h2></div><div class="log trail">${rows}</div>
+    <div class="foot">哨兵看到和作战卡相反的信号、手里又有这个币的仓，就叫管家马上复查一次；下面「今天做了什么」里这几条标了「反向急查」。</div></section>`;
+}
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
   const sel = d.roles.find((r) => r.role === d.selected);
   window.__recs = d.records;
-  const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.symbol ? "" : ""}${esc(s.text)}</span></div>`).join("");
+  const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
+    ${sel.role === "keeper" ? againstCard(d.against_checks || []) : ""}
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
@@ -2402,7 +2427,8 @@ async function poll() {
 if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
   window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
   render();
-  poll();
   loadPrecision();
-  setInterval(poll, 5000);
+  // 持仓页 2 秒一轮（现价、浮盈、K 线要跟得上），其它页 5 秒
+  const loop = async () => { await poll(); setTimeout(loop, route().page === "positions" ? 2000 : 5000); };
+  loop();
 }
