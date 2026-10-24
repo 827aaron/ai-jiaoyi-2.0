@@ -93,7 +93,8 @@ def test_classify() -> None:
     assert classify("INTCUSDT", "tradifi_perpetual equity") is Category.US_TECH  # 名单外按类型识别
     assert classify("XPDUSDT", "") is Category.PRECIOUS_METAL
     assert classify("WTIUSDT", "tradifi_perpetual commodity") is Category.PRECIOUS_METAL
-    assert classify("NEWUSDT", "tradifi_perpetual") is Category.US_TECH  # 认不出的传统资产跟美股走
+    assert classify("NEWUSDT", "tradifi_perpetual") is Category.ALT  # 认不出类型：不当美股
+    assert classify("0700USDT", "tradifi_perpetual hk_equity") is Category.ALT  # 港股不套美股时段
 
 
 async def test_screener_reports_its_own_status(now: datetime, tmp_path: Path) -> None:
@@ -244,3 +245,24 @@ async def test_tradfi_perps_stay_out_until_allowed(now: datetime) -> None:
     )
     pool = await CodeSymbolScreener(src, ScreenerConfig(allow_tradfi=True)).screen(now)
     assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "INTCUSDT"}
+
+
+async def test_allowed_tradfi_still_rejects_non_us_types(now: datetime) -> None:
+    from jiaoyi.slow.screener import ScreenerConfig
+
+    kinds = {
+        "INTCUSDT": "tradifi_perpetual equity",
+        "WTIUSDT": "tradifi_perpetual commodity",
+        "0700USDT": "tradifi_perpetual hk_equity",
+        "SAMSUSDT": "tradifi_perpetual kr_equity",
+        "EURUSDT": "tradifi_perpetual fx",
+        "PREUSDT": "tradifi_perpetual premarket",
+        "MYSTUSDT": "tradifi_perpetual",
+    }
+    src = FakeSource([stat(sym, kind=k) for sym, k in kinds.items()])
+    pool = await CodeSymbolScreener(src, ScreenerConfig(allow_tradfi=True)).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"INTCUSDT", "WTIUSDT"}
+    hk = next(e for e in pool.entries if e.symbol == "0700USDT")
+    assert any(
+        "暂不支持的传统资产类型" in r and "hk_equity" in r for r in hk.filters.failed_reasons
+    )
