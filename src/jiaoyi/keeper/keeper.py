@@ -13,7 +13,7 @@
   要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
 - 和卡相反的信号（``note_against``，主循环按账本持仓判断后叫来的急查）：信号写进这次的快照
   （``against``）；强反向信号或已亏到一定倍数止损时，这次过线（``keeper_close_p``）就平，
-  不等连续确认。只用一次，下一轮常规复查不再带。
+  不等连续确认。查成了只用一次；没查成（没行情 / Jev 出错）留给下一次复查，不算查过。
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
+from functools import partial
 
 from jiaoyi.contracts import (
     AgainstSignalEvent,
@@ -83,15 +84,29 @@ class JevKeeper:
         """下一次复查带上这个反向信号；``one_shot`` = 这次过线就平，不等连续确认。"""
         self._against[position_id] = (sig, one_shot)
 
+    def pending_against(self, position_id: str) -> bool:
+        """还有没查成的反向信号（急查时没行情 / Jev 出错，留给下一次复查）。"""
+        return position_id in self._against
+
+    def _keep_against(
+        self, pid: str, against: tuple[AgainstSignalEvent, bool] | None, now: datetime
+    ) -> None:
+        """这次没查成：反向信号留给下一次复查（主循环马上再排急查，最晚下一轮例行复查），
+        不算查过。信号超过 ``against_recheck_cooldown_s`` 就不再留（太旧了）。"""
+        if against is None or pid in self._against:
+            return
+        if (now - against[0].ts).total_seconds() < self._cfg.against_recheck_cooldown_s:
+            self._against[pid] = against
+
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
         pid = position.position_id
         against = self._against.pop(pid, None)
+        verdict = partial(self._verdict, against=against)  # 四条路径都在记录里标反向急查
         f = self._features(position.symbol)
         if f is None:
             self._streak.pop(pid, None)
-            return self._verdict(
-                position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None
-            )
+            self._keep_against(pid, against, now)
+            return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
         card = self._card(now)
         request = JevRequest(
             request_id=f"hold-{pid}-{uuid.uuid4().hex[:6]}",
@@ -111,7 +126,8 @@ class JevKeeper:
             resp = await self._model.ask(request)
         if not resp.ok:
             self._streak.pop(pid, None)
-            return self._verdict(
+            self._keep_against(pid, against, now)
+            return verdict(
                 position,
                 now,
                 "hold",
@@ -124,7 +140,8 @@ class JevKeeper:
         ans = resp.answer(HoldQuestion.ACTION.value)
         if ans is None:
             self._streak.pop(pid, None)
-            return self._verdict(
+            self._keep_against(pid, against, now)
+            return verdict(
                 position, now, "hold", 0.0, 1, "决策模型没回答 action，维持现状", request, resp
             )
 
@@ -151,13 +168,11 @@ class JevKeeper:
                 or p_close >= self._cfg.keeper_close_p_strong
                 or n >= self._cfg.keeper_confirmations
             ):
-                return self._verdict(
-                    position, now, "close", p_close, n, "，".join(why), request, resp
-                )
+                return verdict(position, now, "close", p_close, n, "，".join(why), request, resp)
             why.append(f"第 {n} 次，等确认")
-            return self._verdict(position, now, "hold", p_close, n, "，".join(why), request, resp)
+            return verdict(position, now, "hold", p_close, n, "，".join(why), request, resp)
         self._streak.pop(pid, None)
-        return self._verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+        return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
 
     @staticmethod
     def _card_rule(position: PositionRecord, card: BattleCard | None, now: datetime) -> str | None:
@@ -181,7 +196,10 @@ class JevKeeper:
         reason: str,
         request: JevRequest | None,
         r: JevResponse | None,
+        *,
+        against: tuple[AgainstSignalEvent, bool] | None = None,
     ) -> KeeperVerdict:
+        """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）。"""
         v = KeeperVerdict(
             position_id=position.position_id,
             ts=now,
@@ -210,6 +228,20 @@ class JevKeeper:
                     "p_close": v.p_close,
                     "consecutive": v.consecutive,
                     **jev_out,
+                    **(
+                        {
+                            "against": {
+                                "ts": against[0].ts.isoformat(),
+                                "kind": against[0].kind.value,
+                                "side": against[0].side.value,
+                                "desc": against[0].desc,
+                                "strong": against[0].strong,
+                                "one_shot": against[1],
+                            }
+                        }
+                        if against is not None
+                        else {}
+                    ),
                 },
                 latency_ms=r.latency_ms if r is not None else 0.0,
                 cost_usd=r.cost_usd if r is not None else 0.0,

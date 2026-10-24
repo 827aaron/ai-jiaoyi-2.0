@@ -111,6 +111,8 @@ class _NotesAgainst(Protocol):
 
     def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None: ...
 
+    def pending_against(self, position_id: str) -> bool: ...
+
 
 @runtime_checkable
 class _LedgerPositions(Protocol):
@@ -245,6 +247,7 @@ class Runner:
         self._open_lock = asyncio.Lock()
         self._closing: set[str] = set()
         self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
+        self._reviewing: set[str] = set()  # 管家正在问 Jev 的持仓：同一笔不同时问两次
         self._tp_past: dict[str, datetime] = {}
         """限价止盈：价格第一次穿过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
         self._last_prune: datetime | None = None
@@ -658,11 +661,29 @@ class Runner:
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
 
-    async def _review(self, pos: PositionRecord) -> None:
-        verdict = await self.m.keeper.review(pos, self.app.clock())
-        if pos.position_id in self._against_pending:  # 这次复查带了反向信号：结论写回团队页
-            self._against_pending.discard(pos.position_id)
-            self.app.against_desk.settle(pos.position_id, verdict.action)
+    async def _review(self, pos: PositionRecord, *, urgent: bool = False) -> None:
+        """同一笔仓同一时间只问一次 Jev：例行复查还在问时来了急查，等它问完下一秒再查
+        （急查带的反向信号留在管家那里，例行那次没带上的话由这次补上）。
+
+        反向急查没查成（Jev 繁忙重试后仍失败 / 超时 / 没行情）：管家把信号留着，不算查过，
+        下一轮例行复查（``keeper_interval_s`` 内）带上再查；不每秒重试，免得 Jev 正忙时越催越忙。"""
+        pid = pos.position_id
+        if pid in self._reviewing:
+            if urgent and isinstance(self.m.patrol, _HasUrgent):
+                self.m.patrol.urgent.add(pid)
+            return
+        self._reviewing.add(pid)
+        try:
+            verdict = await self.m.keeper.review(pos, self.app.clock())
+        finally:
+            self._reviewing.discard(pid)
+        if pid in self._against_pending:  # 这次复查带了反向信号：结论写回团队页
+            keeper = self.m.keeper
+            if isinstance(keeper, _NotesAgainst) and keeper.pending_against(pid):
+                pass  # 没查成（Jev 繁忙 / 超时 / 没行情）：不算查过，信号留给下一轮例行复查
+            else:
+                self._against_pending.discard(pid)
+                self.app.against_desk.settle(pid, verdict.action)
         if verdict.action == "close":
             await self.close(pos, CloseReason.KEEPER)
 
@@ -700,9 +721,9 @@ class Runner:
         for pos in list(self.positions):
             if pos.position_id in urgent:
                 self.m.patrol.urgent.discard(pos.position_id)
-                await self._review(pos)
-        # 已经不在持仓里的也清掉
-        self.m.patrol.urgent -= urgent
+                await self._review(pos, urgent=True)
+        # 已经不在持仓里的也清掉（正在审、刚重新排上的留着）
+        self.m.patrol.urgent -= urgent - {p.position_id for p in self.positions}
 
     async def reconcile_tick(self) -> None:
         # 对账员自己发告警（带去重），连不上时抛异常，由 _every 记日志后下一轮再试
