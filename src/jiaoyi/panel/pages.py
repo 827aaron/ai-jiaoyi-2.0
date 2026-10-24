@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
@@ -678,7 +679,7 @@ def _item(r: DecisionRecord) -> TrailItem:
 
 # ---------------------------------------------------------------- 历史
 
-HistoryRange = Literal["today", "7d", "30d"]
+HistoryRange = Literal["today", "7d", "30d", "all"]
 REJECT_LIMIT = 300
 
 
@@ -719,6 +720,23 @@ class KindStats(BaseModel):
     pnl_usdt: float
 
 
+class SymbolStats(BaseModel):
+    """一个币在这段时间的成绩（只算成交了的单），给以后拉黑 / 加白参考。"""
+
+    symbol: str
+    trades: int
+    longs: int
+    shorts: int
+    win_rate: float
+    pnl_usdt: float
+    """净盈亏（已扣开平手续费）。"""
+    fees_usdt: float
+    avg_hold_s: float
+    """平均持有多久（秒）。"""
+    top_kind: str | None
+    """做这个币最多的信号类型（测试单算 ``test``）。"""
+
+
 class CurvePoint(BaseModel):
     ts: datetime
     cum_pnl_usdt: float
@@ -735,6 +753,8 @@ class HistoryPage(BaseModel):
     """按平仓顺序累计盈亏的最大回撤。"""
     curve: list[CurvePoint]
     by_kind: list[KindStats]
+    by_symbol: list[SymbolStats] = []
+    """按币种统计，净盈亏从高到低。"""
     rows: list[TradeRow]
     """最新在前。"""
     test_trades: int = 0
@@ -745,7 +765,7 @@ class HistoryPage(BaseModel):
 
 def _range_start(now: datetime, tz: str, rng: HistoryRange) -> datetime:
     day0 = datetime.combine(local_day(now, tz), time(), tzinfo=ZoneInfo(tz))
-    days = {"today": 0, "7d": 6, "30d": 29}[rng]
+    days = {"today": 0, "7d": 6, "30d": 29, "all": 0}[rng]
     return (day0 - timedelta(days=days)).astimezone(UTC)
 
 
@@ -757,6 +777,11 @@ def build_history(
     include_tests: bool = False,
 ) -> HistoryPage:
     start = _range_start(now, risk.day_reset_tz, rng)
+    if rng == "all":  # 全部 = 从账本里最早一笔平仓算起
+        start = min(
+            (p.closed_at for p in files.ledger().positions if p.closed_at is not None),
+            default=start,
+        )
     closed = sorted(
         (
             p
@@ -830,6 +855,26 @@ def build_history(
     by: dict[str, list[float]] = {}
     for t in real:
         by.setdefault("test" if t.test else (t.signal_kind or "unknown"), []).append(t.pnl_usdt)
+    per: dict[str, list[TradeRow]] = {}
+    for t in real:
+        per.setdefault(t.symbol, []).append(t)
+    by_symbol = [
+        SymbolStats(
+            symbol=sym,
+            trades=len(ts),
+            longs=sum(1 for t in ts if t.side == "long"),
+            shorts=sum(1 for t in ts if t.side == "short"),
+            win_rate=sum(1 for t in ts if t.pnl_usdt > 0) / len(ts),
+            pnl_usdt=sum(t.pnl_usdt for t in ts),
+            fees_usdt=sum(t.fees_usdt for t in ts),
+            avg_hold_s=sum((t.closed_at - t.opened_at).total_seconds() for t in ts) / len(ts),
+            top_kind=Counter(
+                "test" if t.test else t.signal_kind or "unknown" for t in ts
+            ).most_common(1)[0][0],
+        )
+        for sym, ts in per.items()
+    ]
+    by_symbol.sort(key=lambda x: -x.pnl_usdt)
     rejected = [
         _item(r)
         for r in reversed(recs)
@@ -858,6 +903,7 @@ def build_history(
             )
             for k, v in sorted(by.items(), key=lambda kv: -sum(kv[1]))
         ],
+        by_symbol=by_symbol,
         rows=list(reversed(rows)),
         test_trades=tests,
         rejected=rejected,

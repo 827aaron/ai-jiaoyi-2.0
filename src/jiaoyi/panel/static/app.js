@@ -419,6 +419,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "ai") { S.ai = arg; render(); poll(); }
   else if (act === "rej") { S.rej = !S.rej; render(); }
+  else if (act === "symsort") { S.symSort = arg; render(); }
   else if (act === "tests") { S.tests = !S.tests; render(); poll(); }
   else if (act === "csv") exportCsv();
   else if (act === "cmd") askCommand(arg);
@@ -1512,11 +1513,22 @@ P.team = () => {
 };
 
 /* ---------- 历史 */
-const RANGE = { today: "今天", "7d": "7 天", "30d": "30 天" };
+const RANGE = { today: "今天", "7d": "7 天", "30d": "30 天", all: "全部" };
 const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "移动止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
 S.hist = "today";
 S.rej = false;
 S.tests = false;
+S.symSort = "pnl";
+// 按币种统计：每个币做了几笔、多空、胜率、净盈亏、平均拿多久、主要信号（以后拉黑 / 加白的参考）
+function symbolCard(d) {
+  const list = [...(d.by_symbol || [])].sort((a, b) => (S.symSort === "n" ? b.trades - a.trades || b.pnl_usdt - a.pnl_usdt : b.pnl_usdt - a.pnl_usdt));
+  const kindName = (k) => (k === "test" ? "测试单" : k === "unknown" ? "未知" : SIGNAL[k] || k);
+  const rows = list.map((x) => `<tr><td class="hi nowrap">${coin(x.symbol)}</td><td class="r num">${x.trades}</td><td class="r num"><span class="up">${x.longs}</span> / <span class="down">${x.shorts}</span></td><td class="r num">${Math.round(x.win_rate * 100)}%</td><td class="r num ${cls(x.pnl_usdt)}"><b>${signed(x.pnl_usdt, 2)}</b></td><td class="r num dim">−${money(x.fees_usdt, 2)}</td><td class="r num nowrap">${dur(x.avg_hold_s * 1000)}</td><td>${esc(kindName(x.top_kind))}</td></tr>`).join("");
+  const sortBtn = (k, t) => `<button class="${S.symSort === k ? "on" : ""}" ${clickable("symsort", k)}>${t}</button>`;
+  return `<section class="card mt"><div class="ch"><h2>按币种统计</h2><span class="r">${list.length} 个币 · <span class="seg">${sortBtn("pnl", "按净盈亏")}${sortBtn("n", "按笔数")}</span></span></div>
+    ${rows ? `<div class="tw scroll tall"><table><thead><tr><th>币种</th><th class="r">笔数</th><th class="r">多 / 空</th><th class="r">胜率</th><th class="r">净盈亏</th><th class="r">手续费</th><th class="r">平均拿多久</th><th>主要信号</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="foot">只算成交了的单，时间范围跟上面一样${S.tests ? "，含测试单" : "，不含测试单"}。净盈亏已扣开平手续费，不含资金费和 AI 费。</div>` : '<div class="dim">没有。</div>'}</section>`;
+}
 
 P.history = () => {
   const d = pageData;
@@ -1559,6 +1571,7 @@ P.history = () => {
       ${d.curve.length ? '<div class="chart sm" id="hchart-host"></div>' : '<div class="empty"><b>这段时间没有平仓</b></div>'}</section>
     <section class="card mt"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链 · 窄屏左右滑</span></div>
       ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
+    ${symbolCard(d)}
     <section class="card mt"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
       ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>${rej}`;
 };
