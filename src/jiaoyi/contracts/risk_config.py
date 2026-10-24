@@ -382,7 +382,14 @@ class FastLoopConfig(Contract):
         ge=0.0,
         le=20.0,
         description="止损距离至少是来回手续费的几倍（0 = 不查）；持仓越短要求越高，"
-        "档位给推荐值，低于它这张卡的这个标的不开仓。",
+        "档位给推荐值，低于它时按 stop_floor_widen 拉宽止损或不开仓。",
+    )
+    stop_floor_widen: bool = Field(
+        default=True,
+        description="止损离手续费太近（不到 min_stop_fee_multiple 倍来回手续费）时："
+        "开 = 把止损拉宽到这条下限，仓位按新止损重算（每笔亏损金额不变，所以张数变少），"
+        "止盈也按新止损的 R 重算；"
+        "关 = 不开这一单。Aaron 10-24：默认开，所有模式。",
     )
     # ---- 持仓管家
     keeper_close_p: float = Field(default=0.6, ge=0.5, le=0.99, description="平仓概率过线。")
