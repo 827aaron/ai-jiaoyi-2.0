@@ -1925,6 +1925,17 @@ function auxOf(i) {
 }
 // 时间类的值已经换成“1 小时 40 分”，标题里的“几秒 / 几分钟”就改说“多久”
 const nameOf = (i) => (durOf(i.key, i.value) ? label(i).replace(/多少毫秒|几毫秒|几秒|几分钟|几小时/, "多久") : label(i));
+// 数字数组（时段系数 24 格、退避分钟等）：摘要行只写概况，数值在下面排成小格子，不挤坏标题
+const numArr = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "number");
+function arrSummary(v) {
+  if (v.length !== 24) return `${v.length} 个`;
+  const hi = v.indexOf(Math.max(...v)), lo = v.indexOf(Math.min(...v));
+  return `最高 ${v[hi]}（${hi} 点）· 最低 ${v[lo]}（${lo} 点）`;
+}
+function arrCells(v) {
+  if (v.length !== 24) return `<div class="arr-chips">${v.map((x) => `<span>${esc(x)}</span>`).join("")}</div>`;
+  return `<div class="hgrid">${v.map((x, h) => `<div class="${x > 1 ? "hot" : ""}"><small>${h} 点</small>${esc(x)}</div>`).join("")}</div><div class="dim small">曼谷时间每小时一个系数；高于 1 标浅色 = 这个钟点止损放宽。</div>`;
+}
 function itemRow(i, big) {
   const id = `${i.sec}.${i.key}`;
   const open = S.stOpen.has(id);
@@ -1937,8 +1948,8 @@ function itemRow(i, big) {
     `<span class="st-key">${esc(i.key)}</span>`,
   ].join("");
   return `<div class="st-item ${big ? "big" : ""} ${open ? "open" : ""} ${i.editable ? "" : "ro"}">
-    <button class="st-sum" data-act="st-item" data-arg="${esc(id)}" aria-expanded="${open}" title="${esc(i.key)}"><span class="nm">${esc(i.cat ? i.label : nameOf(i))}</span><span class="cur num ${hot(i) ? "warn" : ""}">${valOf(i)}</span><span class="aux">${auxOf(i)}</span><span class="chev">›</span></button>
-    <div class="st-body">${desc ? `<div>${desc}</div>` : ""}<div class="st-acts">${acts}</div></div></div>`;
+    <button class="st-sum${numArr(i.value) ? " arr" : ""}" data-act="st-item" data-arg="${esc(id)}" aria-expanded="${open}" title="${esc(i.key)}"><span class="nm">${esc(i.cat ? i.label : nameOf(i))}</span><span class="cur num ${hot(i) ? "warn" : ""}">${numArr(i.value) ? arrSummary(i.value) : valOf(i)}</span><span class="aux">${auxOf(i)}</span><span class="chev">›</span></button>
+    ${numArr(i.value) ? `<div class="st-arr">${arrCells(i.value)}</div>` : ""}<div class="st-body">${desc ? `<div>${desc}</div>` : ""}<div class="st-acts">${acts}</div></div></div>`;
 }
 function toggleItem(el, id) {
   const it = el.closest(".st-item");
