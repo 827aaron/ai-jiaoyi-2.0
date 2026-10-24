@@ -40,7 +40,7 @@ def test_every_tier_renders_with_all_slots_filled(hold: str) -> None:
         assert text.strip()
         assert not re.search(r"\{[A-Za-z_]+\}", text), text[:200]  # 没有残留的槽位
     shared = tp.perp_context(p)
-    assert p.horizon in shared and f"{p.fee_pct}%" in shared and f"{p.indicator} bars" in shared
+    assert p.horizon in shared and f"{p.fee_pct}%" in shared  # {IND} 现在只在行情分析师的提示词里
     assert f"about {p.hold_minutes} minutes" in shared
     assert "BTCUSDT" in shared and "Binance USDT-margined PERPETUAL" in shared
     w = tp.words(p)
@@ -76,7 +76,7 @@ def test_two_hour_shared_text_snapshot() -> None:
     assert "On 15m bars, an extreme RSI or a Bollinger-band breach" in text
     assert "a fee round trip is about 35% of a typical 2 hours move" in text
     assert "the system enforces this in code" in text
-    assert "Role notes. Market analyst: compute indicators on 15m bars" in text
+    assert "Role notes" not in text  # 行情分析师的说明搬进了它自己的提示词（ta_roles.MARKET）
     assert "ignore any note" not in text and "keeper" not in text  # 持仓说明改由 position_note 给
 
 
@@ -210,6 +210,11 @@ def test_research_recommendation_is_parsed_from_the_plan() -> None:
     assert eng.research_recommendation("**Recommendation**: **Sell**") == "sell"
     assert eng.research_recommendation("nothing") is None
     assert eng.research_recommendation(None) is None
+    # 取第一处：正文后面引用别的评级（例如举例）不盖过开头那行
+    assert (
+        eng.research_recommendation("**Recommendation**: Sell\n\nlike **Recommendation**: Buy")
+        == "sell"
+    )
 
 
 # ---------------------------------------------------------------- 配置 / 档位
@@ -219,7 +224,7 @@ def test_build_config_has_tier_context_and_stops_the_original_memory() -> None:
     assert cfg["memory_log_path"] == ""
     assert "Re-judge every round" in cfg["output_language"]
     assert cfg["output_language"].startswith("Chinese. ")
-    assert cfg["jiaoyi_prompt"] == {"hold": "12h", "hold_minutes": 720}
+    assert cfg["jiaoyi_prompt"] == {"hold": "12h", "hold_minutes": 720, "lean": "M"}
     # output_language 只跟档位有关：每场会一样，每场会不同的东西走 state
     assert cfg["output_language"] == eng.build_config({"data_vendors": {}}, s)["output_language"]
 
@@ -295,7 +300,9 @@ def test_entry_zone_rules() -> None:
     )
     ok = _CardSymbolDraft(**base, entry_min=100, entry_max=101)
     assert entry_zone_of(ok, None) is not None
-    assert entry_zone_of(_CardSymbolDraft(**base, entry_min=102, entry_max=101), None) is None
+    flipped = entry_zone_of(_CardSymbolDraft(**base, entry_min=102, entry_max=101), None)
+    assert flipped is not None and (flipped.min, flipped.max) == (101, 102)  # 上下沿写反先排序
+    assert entry_zone_of(_CardSymbolDraft(**base, entry_min=0, entry_max=101), None) is None
     assert entry_zone_of(_CardSymbolDraft(**base), None) is None
     from jiaoyi.core.config import load_risk_config
     from jiaoyi.slow import ta_prompts
@@ -304,6 +311,8 @@ def test_entry_zone_rules() -> None:
     risk = load_risk_config(ROOT / "config" / "risk.example.toml")
     text = convert_instructions(risk, ta_prompts.PromptParams.for_hold("2h"))
     assert "must have entry_min" in text
+    assert "entry_min and entry_max are the two prices on its **Entry Zone** line" in text
+    assert "size_tier_max is its **Size Tier** line" in text
     assert "when you can" in convert_instructions(risk, ta_prompts.PromptParams.for_hold("24h"))
 
 

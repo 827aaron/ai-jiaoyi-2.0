@@ -531,6 +531,11 @@ def test_direction_conflict_and_size_degrade() -> None:
 
     plan = "...\nFINAL TRANSACTION PROPOSAL: **SELL**"
     assert "做多" in (direction_conflict(Bias.LONG, "Buy", plan) or "")  # 交易员说卖
+    # 没有 FINAL TRANSACTION PROPOSAL 行（模型自由文本）时看 **Action** 行
+    assert "做多" in (
+        direction_conflict(Bias.LONG, "Buy", "**Action**: Sell\n\n**Reasoning**: x") or ""
+    )
+    assert direction_conflict(Bias.LONG, "Buy", "**Action**: Buy") is None
     assert direction_conflict(Bias.LONG, "Underweight", "") is not None
     assert direction_conflict(Bias.SHORT, "Overweight", "") is not None
     assert direction_conflict(Bias.SHORT, "Sell", plan) is None
