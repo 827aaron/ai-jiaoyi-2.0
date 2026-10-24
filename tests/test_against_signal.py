@@ -364,9 +364,13 @@ class NotingKeeper(FakeKeeper):
     def __init__(self, action: str = "hold") -> None:
         super().__init__(action)
         self.noted: list[tuple[str, bool]] = []
+        self.pending = False
 
     def note_against(self, position_id: str, sig: c.AgainstSignalEvent, one_shot: bool) -> None:
         self.noted.append((position_id, one_shot))
+
+    def pending_against(self, position_id: str) -> bool:
+        return self.pending
 
 
 def _runner(
@@ -492,3 +496,107 @@ def test_no_trade_card_skipped(now: datetime) -> None:
     t = RuleTrigger(FAST)
     assert t.check(h.features(now, **SURGE_LONG), h.card(now, bias="no_trade"), now) == []
     assert t.pop_against() == []
+
+
+# ------------------------------------------------------------------ 管家记录里标反向急查（面板用）
+
+
+async def test_keeper_log_marks_against_on_every_path(tmp_path: Path, now: datetime) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    rec = RoleRecorder(c.Role.KEEPER, log)
+    s = sig(now, strong=True)
+    # 成功路径
+    k = keeper(MockJevTransport(answer=close_p(0.3)), now, recorder=rec)
+    k.note_against("pos-1", s, True)
+    await k.review(pos(now), now)
+    # Jev 出错
+    k = keeper(MockJevTransport(fail=RuntimeError("boom")), now, recorder=rec)
+    k.note_against("pos-1", s, True)
+    await k.review(pos(now), now)
+    # 没行情
+    k = keeper(MockJevTransport(answer=close_p(0.3)), now, feats=False, recorder=rec)
+    k.note_against("pos-1", s, False)
+    await k.review(pos(now), now)
+    # 没回答 action
+    k = keeper(
+        MockJevTransport(answer=lambda st, qs: {"thesis_intact": {"yes": 1.0}}), now, recorder=rec
+    )
+    k.note_against("pos-1", s, False)
+    await k.review(pos(now), now)
+    # 常规复查：不写
+    k = keeper(MockJevTransport(answer=close_p(0.3)), now, recorder=rec)
+    await k.review(pos(now), now)
+    recs = log.read_day(now.date().isoformat())
+    marks = [r.output.get("against") for r in recs]
+    assert len(marks) == 5 and marks[-1] is None
+    for m in marks[:4]:
+        assert m is not None and m["strong"] is True and m["ts"] == now.isoformat()
+        assert m["kind"] == "volume_surge" and m["desc"]
+    assert [m["one_shot"] for m in marks[:4]] == [True, True, False, False]  # type: ignore[index]
+
+
+# ------------------------------------------------------------------ 急查没查成 / 同时复查
+
+
+async def test_failed_against_recheck_is_kept_for_next_review(now: datetime) -> None:
+    t = MockJevTransport(fail=RuntimeError("529 overloaded"))
+    k = keeper(t, now)
+    k.note_against("pos-1", sig(now, strong=True), True)
+    assert (await k.review(pos(now), now)).action == "hold"
+    assert k.pending_against("pos-1")  # 没查成：不算查过
+    t.fail, t.answer = None, close_p(0.7)
+    later = now + timedelta(seconds=20)
+    v = await k.review(pos(now), later)  # 下一轮例行复查带上，过线即平
+    assert v.action == "close" and '"against"' in t.calls[-1]
+    assert not k.pending_against("pos-1")
+
+
+async def test_failed_against_recheck_expires(now: datetime) -> None:
+    k = keeper(MockJevTransport(fail=RuntimeError("timeout")), now)
+    k.note_against("pos-1", sig(now), False)
+    late = now + timedelta(seconds=FAST.against_recheck_cooldown_s)
+    await k.review(pos(now), late)
+    assert not k.pending_against("pos-1")  # 太旧了不再留
+
+
+async def test_runner_does_not_settle_failed_recheck(tmp_path: Path, now: datetime) -> None:
+    r, _, k, patrol = _runner(tmp_path, now, [_position_now(now)])
+    r.positions = [_position_now(now)]
+    await r.on_event(_trade(now))
+    k.pending = True  # 管家这次没查成
+    await r.urgent_tick()
+    [ev] = r.app.against_desk.recent(now)
+    assert ev.keeper_verdict is None and "pos-1" in r._against_pending
+    assert patrol.urgent == set()  # 不每秒重试，等下一轮例行复查
+    k.pending = False
+    await r._review(_position_now(now))
+    [ev] = r.app.against_desk.recent(now)
+    assert ev.keeper_verdict == "hold" and not r._against_pending
+
+
+async def test_runner_never_asks_twice_at_once(tmp_path: Path, now: datetime) -> None:
+    import asyncio
+
+    r, _, k, patrol = _runner(tmp_path, now, [_position_now(now)])
+    p = _position_now(now)
+    r.positions = [p]
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def slow_review(position: c.PositionRecord, at: datetime) -> c.KeeperVerdict:
+        calls.append(position.position_id)
+        await gate.wait()
+        return c.KeeperVerdict(
+            position_id=position.position_id, ts=at, action="hold", p_close=0.1, consecutive=1
+        )
+
+    k.review = slow_review  # type: ignore[method-assign]
+    routine = asyncio.create_task(r._review(p))
+    await asyncio.sleep(0)
+    patrol.urgent.add("pos-1")
+    await r.urgent_tick()  # 例行复查还在问：急查不再问，排到下一秒
+    assert calls == ["pos-1"] and patrol.urgent == {"pos-1"}
+    gate.set()
+    await routine
+    await r.urgent_tick()
+    assert calls == ["pos-1", "pos-1"] and patrol.urgent == set()
