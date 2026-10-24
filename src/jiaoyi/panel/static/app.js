@@ -90,7 +90,7 @@ function chrome() {
     ? `<button class="btn b-pause" ${clickable("cmd", "resume")}>恢复开新仓</button>`
     : `<button class="btn b-pause" ${clickable("cmd", "pause")}>暂停开新仓</button>`;
   $("#pghead").innerHTML = `<h1>${pg[1]}</h1><span class="sub">${esc(mode)} · 曼谷 ${now} · ${pg[2]}</span>
-    <div class="acts">${data ? pauseBtn : ""}${data ? `<button class="btn b-kill" ${clickable("cmd", "close_all")}>全部平仓</button>` : ""}</div>`;
+    <div class="acts">${data && r === "team" ? `<button class="btn b-pause" ${clickable("cmd", "refresh_cards")} title="从选币开始重跑：选币 → 总盘会 → 军师团 → 写卡">重新开会</button>` : ""}${data ? pauseBtn : ""}${data ? `<button class="btn b-kill" ${clickable("cmd", "close_all")}>全部平仓</button>` : ""}</div>`;
 
   let b = "";
   if (data && data.mode !== "live") {
@@ -152,7 +152,7 @@ const CMD = {
   set_category_cap: { title: "这一类最多进池几个", text: "0 = 这一类一个都不要。主程序马上重新选币。", ok: "保存", pw: true, cap: true },
   reset_category: { title: "恢复默认开关", text: "去掉你在这里改过的开关，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
   reset_category_cap: { title: "恢复默认上限", text: "去掉你在这里改过的上限，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
-  refresh_cards: { title: "重新开会出卡", text: "让军师团马上开一次会、重出作战卡（会花一次大模型费用）。", ok: "开会" },
+  refresh_cards: { title: "重新开会出卡", text: "从选币开始把整条链重跑一遍：选币 → 总盘会 → 军师团 → 写新作战卡，不沿用上一轮结论（会花一次大模型费用，要几分钟）。", ok: "开会" },
 };
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
 let onOk = null;
@@ -983,7 +983,7 @@ P.overview = () => {
 function cardSection(c) {
   if (!c) {
     return `<section class="card"><div class="ch"><h2>作战卡</h2><span class="pill">军师团</span></div>
-      <div class="empty"><b>今天还没有作战卡</b>没有有效作战卡就不开新仓；已有持仓照常盯。</div></section>`;
+      <div class="empty"><b>今天还没有作战卡</b>没有有效作战卡就不开新仓；已有持仓照常盯。<div class="mt"><button class="btn b-sm" ${clickable("cmd", "refresh_cards")}>重新开会</button></div></div></section>`;
   }
   const [act, idle] = splitIdle(c.symbols);
   const shown = act.slice(0, 8);
