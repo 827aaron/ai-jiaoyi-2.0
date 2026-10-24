@@ -230,3 +230,17 @@ async def test_tiers_and_us_events(now: datetime) -> None:
     )
     assert all(e.tier is None for e in pool.entries)
     assert "us_open" not in next(e for e in pool.entries if e.symbol == "TSLAUSDT").score_breakdown
+
+
+async def test_tradfi_perps_stay_out_until_allowed(now: datetime) -> None:
+    from jiaoyi.slow.screener import ScreenerConfig
+
+    src = FakeSource([stat("AAAUSDT"), stat("INTCUSDT", kind="tradifi_perpetual equity")])
+    pool = await CodeSymbolScreener(src, ScreenerConfig()).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT"}
+    intc = next(e for e in pool.entries if e.symbol == "INTCUSDT")
+    assert (
+        intc.category is Category.US_TECH and "传统资产永续暂未开放" in intc.filters.failed_reasons
+    )
+    pool = await CodeSymbolScreener(src, ScreenerConfig(allow_tradfi=True)).screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "INTCUSDT"}

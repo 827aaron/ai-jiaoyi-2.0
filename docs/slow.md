@@ -401,6 +401,8 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 常量在 `contracts/common.py::PERPETUAL_CONTRACT_TYPES`。分类先看名单（含 PAXG / XAUT 归金属），名单外的按 exchangeInfo 的
 `contractType / underlyingType / underlyingSubType` 自动识别：商品 / 金属 → 金属，其余传统资产 → 美股科技。
 
+**进池开关**：`slow.toml [screener] allow_tradfi`，默认关（等在 Demo 上把开平仓、保命止损、行情流整条链验证完再开）；关着时 TRADIFI 合约在池里显示「传统资产永续暂未开放」。
+
 美股 / 加密股合约只在美股常规盘的开仓时段开新仓：**开盘后 15 分钟到收盘前 15 分钟**（美东时间，自动跟夏令时，周末和 NYSE 休市日不开）。
-可配置：`app.toml [fast_loop]` 的 `us_hours_gate`（默认开）、`us_open_delay_min`、`us_close_lead_min`。时段外：休市时照常进池参与选币，
+时段判断在 `core/us_hours.py`（保镖和慢环共用）。可配置：`app.toml [fast_loop]` 的 `us_hours_gate`（默认开）、`us_open_delay_min`、`us_close_lead_min`。时段外：休市时照常进池参与选币，
 卡上该币标「休市不可做」（信号清空），保镖也拦开仓；已有持仓不强平，止损和持仓管家照常。金属不受限。

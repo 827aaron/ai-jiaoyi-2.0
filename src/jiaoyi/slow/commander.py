@@ -46,12 +46,12 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
     TodayStats,
 )
+from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow import binance_gate
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
-from jiaoyi.slow.us_market import us_entry_window
 
 logger = logging.getLogger(__name__)
 

@@ -48,7 +48,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.contracts.common import Category
 from jiaoyi.core.recorder import RoleRecorder, local_day
-from jiaoyi.slow.us_market import us_entry_window
+from jiaoyi.core.us_hours import us_entry_window
 
 logger = logging.getLogger(__name__)
 

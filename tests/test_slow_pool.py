@@ -238,7 +238,7 @@ def test_gate_and_market_rest_share_one_ban(monkeypatch: pytest.MonkeyPatch) -> 
 def test_us_entry_window_follows_new_york_time_and_holidays() -> None:
     from datetime import UTC
 
-    from jiaoyi.slow.us_market import us_entry_window as w
+    from jiaoyi.core.us_hours import us_entry_window as w
 
     assert w(datetime(2026, 10, 23, 13, 44, tzinfo=UTC)) is False  # 夏令时 9:44
     assert w(datetime(2026, 10, 23, 13, 45, tzinfo=UTC)) is True

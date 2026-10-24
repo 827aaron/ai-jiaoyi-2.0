@@ -27,7 +27,8 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.pool_overrides import PoolOverrides
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.slow.us_market import EarningsCalendar, us_session
+from jiaoyi.core.us_hours import us_session
+from jiaoyi.slow.us_market import EarningsCalendar
 
 SCREEN_EVERY = timedelta(hours=1)
 """主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
@@ -123,6 +124,9 @@ class ScreenerConfig:
     """头部档几个：池里分数最高的前几个（固定 / 手动加入的币一律算头部）。"""
     tier_mid: int = 15
     """中间档几个：头部之后的几个；再往后是尾部。"""
+    allow_tradfi: bool = False
+    """是否让币安 TRADIFI_PERPETUAL（美股 / 金属等传统资产永续）进池。默认关：等 Demo 上把开平仓、
+    保命止损、行情流整条链验证完再开。"""
     us_events: bool = True
     """美股类别（crypto_stock / us_tech）是否用开盘时段和财报日历。"""
     us_open_bonus: float = 0.08
@@ -198,6 +202,8 @@ def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
         reasons.append("盘口深度不足")
     if s.listed_days < cfg.min_listed_days:
         reasons.append(f"上线不满 {cfg.min_listed_days} 天")
+    if not cfg.allow_tradfi and "tradifi" in s.kind:
+        reasons.append("传统资产永续暂未开放")
     if cfg.min_range_24h_pct > 0 and s.range_24h_pct < cfg.min_range_24h_pct:
         reasons.append("24 小时波动太小")
     if cfg.max_range_24h_pct > 0 and s.range_24h_pct > cfg.max_range_24h_pct:
