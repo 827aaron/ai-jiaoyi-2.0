@@ -450,9 +450,9 @@ class FastLoopConfig(Contract):
         default=0.8, ge=0.1, le=10.0, description="赚到几倍止损距离（R）启动保本。"
     )
     trailing_on: bool = Field(
-        default=False,
+        default=True,
         description="移动止损：赚到 trail_start_r 以后，止损跟着最高盈利往上挪，只收紧不放松，"
-        "保住最高利润的一大半。默认关；开了只对之后新开的仓生效。",
+        "保住最高利润的一大半。默认开（Aaron 10-24）；改了只对之后新开的仓生效。",
     )
     trail_start_r: float = Field(
         default=0.7,

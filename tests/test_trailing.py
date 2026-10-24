@@ -21,9 +21,11 @@ def _intent(now: datetime, **over: object):  # type: ignore[no-untyped-def]
     return v.intent
 
 
-def test_off_by_default(now: datetime) -> None:
+def test_trailing_on_by_default_breakeven_off(now: datetime) -> None:
     it = _intent(now)
-    assert it.trailing_activation_pct is None and it.trailing_stop_pct is None
+    assert it.trailing_activation_pct is not None and it.trailing_stop_pct is not None
+    off = _intent(now, trailing_on=False)
+    assert off.trailing_activation_pct is None and off.trailing_stop_pct is None
 
 
 def test_trailing_only_wide_and_starts_late(now: datetime) -> None:
@@ -38,7 +40,7 @@ def test_trailing_only_wide_and_starts_late(now: datetime) -> None:
 
 
 def test_breakeven_only_floor_at_fee(now: datetime) -> None:
-    it = _intent(now, breakeven_on=True, breakeven_trigger_r=0.8)
+    it = _intent(now, breakeven_on=True, breakeven_trigger_r=0.8, trailing_on=False)
     r = it.stop_loss_pct
     act, delta = it.trailing_activation_pct, it.trailing_stop_pct
     assert act is not None and delta is not None
@@ -61,7 +63,7 @@ def test_tier_defaults_wide() -> None:
     assert HOLD["4h"]["fast_loop"]["trail_distance_r"] == 1.0
     assert HOLD["24h"]["fast_loop"]["trail_distance_r"] == 1.0
     assert all(HOLD[t]["fast_loop"]["trail_start_r"] == 0.7 for t in HOLD)
-    assert FAST.trailing_on is False and FAST.breakeven_on is False
+    assert FAST.trailing_on is True and FAST.breakeven_on is False
 
 
 async def test_executor_passes_trailing_to_hummingbot(tmp_path: Path) -> None:
