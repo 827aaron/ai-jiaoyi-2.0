@@ -151,7 +151,9 @@ class _ChaseRecheck(Protocol):
 
 @runtime_checkable
 class _ChaseHook(Protocol):
-    def set_chase_check(self, check: Callable[[OrderIntent], Awaitable[list[str]]]) -> None: ...
+    def set_chase_request(self, request: Callable[[OrderIntent], None]) -> None: ...
+
+    async def open_chase(self, intent: OrderIntent) -> PositionRecord: ...
 
 
 @runtime_checkable
@@ -273,7 +275,7 @@ class Runner:
         # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
         if isinstance(self.m.executor, _ChaseHook):
-            self.m.executor.set_chase_check(self._may_chase)
+            self.m.executor.set_chase_request(self._request_chase)
         self._closing: set[str] = set()
         self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
         self._reviewing: set[str] = set()  # 管家正在问 Jev 的持仓：同一笔不同时问两次
@@ -630,6 +632,33 @@ class Runner:
                 f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
             )
         )
+
+    def _request_chase(self, intent: OrderIntent) -> None:
+        """执行层：挂单没成交要追。另起任务，别在执行层巡检里拿开仓锁（全平时持锁会调巡检）。"""
+        self._spawn(self._chase(intent))
+
+    async def _chase(self, intent: OrderIntent) -> None:
+        """和 handle_signal 一样在开仓锁里读账户 → 复核 → 下单，笔数 / 敞口不会多算。"""
+        executor = self.m.executor
+        if not isinstance(executor, _ChaseHook):
+            return
+        async with self._open_lock:
+            now = self.app.clock()
+            try:
+                why = await self._may_chase(intent)
+            except Exception as e:
+                why = [f"追单复核出错：{type(e).__name__}"]
+            if why:
+                self._guard_note(
+                    Outcome.REJECT, f"{intent.symbol} 挂单没成交，不追了：{'；'.join(why)}", now
+                )
+                return
+            try:
+                pos = await executor.open_chase(intent)
+            except Exception as e:
+                log.warning("%s 挂单没成交后市价追进失败：%r", intent.symbol, e)
+                return
+            self.positions = [*self.positions, pos]
 
     async def _may_chase(self, intent: OrderIntent) -> list[str]:
         """挂单没成交、要改市价追进：按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖。"""

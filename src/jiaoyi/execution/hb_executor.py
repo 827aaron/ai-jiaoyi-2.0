@@ -65,10 +65,10 @@ DAY_START_TOLERANCE_S = 300.0
 IncomeSince = Callable[[datetime], Awaitable[float]]
 
 
-class ChaseCheck(Protocol):
-    """挂单没成交、改市价追进前的复核：返回拦下的理由，空 = 可以追。"""
+class ChaseRequest(Protocol):
+    """挂单没成交要改市价追进：交回主循环（拿开仓锁、按此刻状态复核，过了再调 ``open_chase``）。"""
 
-    def __call__(self, intent: OrderIntent, /) -> Awaitable[list[str]]: ...
+    def __call__(self, intent: OrderIntent, /) -> None: ...
 
 
 _CLOSE_TYPE_MAP = {
@@ -233,13 +233,13 @@ class HbExecutorAdapter:
         trade_notices: bool = True,
         limit_take_profit: bool = False,
         tick_size: Callable[[str], float | None] | None = None,
-        chase_check: ChaseCheck | None = None,
+        chase_request: ChaseRequest | None = None,
     ) -> None:
         """``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
 
         ``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 保镖算的止损 / 止盈距离。"""
-        self._chase_check = chase_check
+        self._chase_request = chase_request
         self._api = api
         self._open_fee = open_fee_bps / 1e4
         self._lifeboat = lifeboat
@@ -692,30 +692,19 @@ class HbExecutorAdapter:
         )
         if chase is None:
             return
-        # 批准是挂单时给的（最多一小时前）：追之前按此刻的账户 / 作战卡 / 暂停 / 封币再审一遍
-        if self._chase_check is None:
-            why = ["没接上追单复核"]
-        else:
-            try:
-                why = await self._chase_check(chase)
-            except Exception as e:
-                why = [f"追单复核出错：{type(e).__name__}"]
-        if why:
-            self._record(
-                Outcome.REJECT,
-                f"{rec.symbol} 不追了：{'；'.join(why)}",
-                rec,
-                output={"chase_blocked": why},
-            )
+        # 批准是挂单时给的（最多一小时前）：交回主循环拿开仓锁、按此刻状态再审，过了才追
+        if self._chase_request is None:
+            log.warning("%s 挂单没成交，没接上追单复核，不追", rec.symbol)
             return
-        try:
-            await self._open(chase, chase=True)
-        except Exception as e:
-            log.warning("挂单没成交后市价追进失败 %s：%r", rec.position_id, e)
+        self._chase_request(chase)
 
-    def set_chase_check(self, check: ChaseCheck) -> None:
-        """主循环接上追单复核（保镖按此刻的状态再审）。没接 = 不追。"""
-        self._chase_check = check
+    def set_chase_request(self, request: ChaseRequest) -> None:
+        """主循环接上追单（它拿开仓锁复核后调 ``open_chase``）。没接 = 不追。"""
+        self._chase_request = request
+
+    async def open_chase(self, intent: OrderIntent) -> PositionRecord:
+        """按同一份保镖指令下市价单追进（主循环复核过才调）；账本里另记一笔，指令号带 -chase。"""
+        return await self._open(intent, chase=True)
 
     def live_positions(self) -> list[PositionRecord]:
         """账本里此刻还没结束的持仓（开仓中 / 持有中 / 平仓中），不查 hummingbot，马上返回。"""

@@ -211,5 +211,5 @@ testnet / live 的推荐等校准后再给。
 挂单价 = 现价 ∓ `entry_limit_offset_stop` × 止损距离（按档 30m 0.6 / 1h 0.4 / 2h·4h 0.25 / 8h 起 0.1，按最小跳动往有利方向取整），
 OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase`。执行层只挂单（LIMIT_MAKER），成交前不挂保命止损；
 等满没成交就撤单，记「挂单没成交已撤」（不报警）。`entry_limit_chase`（8h 起默认开）时改市价追进，
-追之前主循环按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖（`RiskGuardImpl.recheck_chase`），没过就记「不追了：…」。
+执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在保镖名下记「不追了：…」。
 持仓时长从成交时刻算。
