@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -29,6 +30,7 @@ from jiaoyi.contracts import (
     CandidateSignal,
     EntryQuestion,
     FeatureSnapshot,
+    Forecast,
     HoldQuestion,
     JevQuestion,
     JevRequest,
@@ -37,9 +39,9 @@ from jiaoyi.contracts import (
     Side,
 )
 
-TEMPLATE_VERSION = "q4"
+TEMPLATE_VERSION = "q5"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
-SNAPSHOT_SCHEMA = "s3"
+SNAPSHOT_SCHEMA = "s4"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
 MAX_SNAPSHOT_CHARS = 2400
 
@@ -51,6 +53,9 @@ KNOWN_TEMPLATES: dict[str, str] = {
     "q3": "cc0b4b385bae",
     # 新信号研究 10-24：快照加持仓量、多空比、BTC 5 分钟倍数、10 秒折算量比（拿不到不写）
     "q4": "8422594b5239",
+    # 管家方案 E（Aaron 10-24）：持仓快照加进场价 / 最高浮盈 / 回吐 / R / 扣费后 / 历次浮盈、
+    # 进场理由、移动止损状态、预测员；第 1、3 题措辞改；进场题目和快照不变
+    "q5": "359a65892452",
 }
 
 _ENTRY_GOAL = (
@@ -77,6 +82,15 @@ _HOLD_GOAL = (
     "to the stop. Inputs: `pnl_bps`, `age_min`, distance to stop and take-profit in bps, "
     "recent returns, taker flow (`buy`, `cvd30_k`), liquidations, funding, the book, and "
     "whether today's strategist card still supports the trade (`card`)."
+    " New inputs: `pos.entry_px`; `pos.peak_bps` = best unrealized PnL so far, "
+    "`pos.giveback_bps` = how much of that peak is gone; `pos.pnl_r`/`pos.peak_r` = the same "
+    "in units of the initial stop distance; `pos.be_bps` = PnL after round-trip fees; "
+    "`pos.path_bps` = unrealized PnL at earlier checks, oldest first; `entry` = why we entered "
+    "(signal type, trigger text, entry-time genuine/take probabilities); `trail` = trailing "
+    "stop: on, active, and bps from price to the trailing stop; `kronos.agree` = how many of 4 "
+    "simulated paths end in the position's direction; `against` (only on urgent checks) = a "
+    "rule trigger just fired in the OPPOSITE direction of our position: its type, side, volume "
+    "multiple, taker buy share, whether it is a strong type, seconds ago."
 )
 
 ENTRY_PROMPTS: dict[EntryQuestion, str] = {
@@ -101,11 +115,20 @@ ENTRY_PROMPTS: dict[EntryQuestion, str] = {
 }
 
 HOLD_PROMPTS: dict[HoldQuestion, str] = {
-    HoldQuestion.THESIS_INTACT: "Is the reason we entered this position still valid? " + _HOLD_GOAL,
+    HoldQuestion.THESIS_INTACT: (
+        "Is the reason we entered this position (`entry.sig`, `entry.why`) still valid? "
+        + _HOLD_GOAL
+    ),
     HoldQuestion.ADVERSE_RISK: (
         "How likely is a sharp move against the position in the next few minutes?"
     ),
-    HoldQuestion.ACTION: "Should we keep holding the whole position or close all of it now?",
+    HoldQuestion.ACTION: (
+        "Should we keep holding the whole position or close all of it now? If the position is "
+        "in profit after fees (`pos.be_bps` > 0), weigh how much of the peak profit "
+        "(`pos.peak_bps`, `pos.giveback_bps`) has already been given back and whether the "
+        "trailing stop (`trail`) already protects it. A position that is losing but still "
+        "inside its stop is not by itself a reason to close: the stop already limits that loss."
+    ),
 }
 
 # 每个选项的含义，决策模型 SDK 支持就一并发过去
@@ -277,6 +300,21 @@ def entry_snapshot(
     return _dump(d)
 
 
+def hold_pnl_bps(pos: PositionRecord, px: float) -> float:
+    """持仓浮盈（基点，未扣手续费），和快照里的 ``pos.pnl_bps`` 一致。"""
+    entry = pos.entry_price or px
+    sign = 1.0 if pos.side == Side.LONG else -1.0
+    return _r(sign * (px / entry - 1.0) * 1e4)
+
+
+def _path(history: Sequence[float], n: int = 5) -> list[int]:
+    """之前历次复查的浮盈，等间隔抽最多 ``n`` 个，从早到晚。"""
+    if len(history) <= n:
+        return [round(x) for x in history]
+    last = len(history) - 1
+    return [round(history[round(i * last / (n - 1))]) for i in range(n)]
+
+
 def hold_snapshot(
     pos: PositionRecord,
     f: FeatureSnapshot,
@@ -284,30 +322,65 @@ def hold_snapshot(
     now: datetime,
     *,
     against: AgainstSignalEvent | None = None,
+    history: Sequence[float] = (),
+    entry: Mapping[str, Any] | None = None,
+    forecast: Forecast | None = None,
+    fee_bps: float = 5.0,
 ) -> str:
     """``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
 
-    这是持仓快照里可选的键，进场快照和指纹不变（进场门槛校准按模板版本分组，不受影响）。"""
+    ``history``：这笔仓之前历次复查的浮盈（基点，从早到晚），算最高浮盈、回吐和走势；
+    ``entry``：进场理由（拍板记录里的信号种类、触发说明、「真」「做」概率），拿不到不写；
+    ``forecast``：这个币最新一条没过期的预测，拿不到不写；``fee_bps``：单边吃单手续费。
+    进场快照和进场题目不变（方案 E 只改管家）。"""
     px = f.last_price
-    entry = pos.entry_price or px
-    sign = 1.0 if pos.side == Side.LONG else -1.0
-    d: dict[str, Any] = {
-        "sym": pos.symbol,
-        "pos": {
-            "side": pos.side.value,
-            "pnl_bps": _r(sign * (px / entry - 1.0) * 1e4),
-            "age_min": _r((now - pos.opened_at).total_seconds() / 60.0),
-            "to_stop_bps": _r(abs(px / pos.stop_loss_price - 1.0) * 1e4)
-            if pos.stop_loss_price
-            else None,
-            "to_tp_bps": (
-                _r(abs(pos.take_profit_price / px - 1.0) * 1e4) if pos.take_profit_price else None
-            ),
-            "time_left_min": _r((pos.time_limit_s - (now - pos.opened_at).total_seconds()) / 60.0),
-        },
-        **market_block(f),
-        "card": _card_block(card, pos.symbol, px),
+    pnl = hold_pnl_bps(pos, px)
+    peak = max([*history, pnl])
+    p: dict[str, Any] = {
+        "side": pos.side.value,
+        "pnl_bps": pnl,
+        "age_min": _r((now - pos.opened_at).total_seconds() / 60.0),
+        "to_stop_bps": _r(abs(px / pos.stop_loss_price - 1.0) * 1e4)
+        if pos.stop_loss_price
+        else None,
+        "to_tp_bps": (
+            _r(abs(pos.take_profit_price / px - 1.0) * 1e4) if pos.take_profit_price else None
+        ),
+        "time_left_min": _r((pos.time_limit_s - (now - pos.opened_at).total_seconds()) / 60.0),
     }
+    if pos.entry_price:
+        p["entry_px"] = pos.entry_price
+    p["peak_bps"] = _r(peak)
+    p["giveback_bps"] = _r(peak - pnl)
+    if pos.entry_price and pos.stop_loss_price:
+        stop = abs(pos.entry_price / pos.stop_loss_price - 1.0) * 1e4
+        if stop > 0:
+            p["pnl_r"] = _r(pnl / stop, 2)
+            p["peak_r"] = _r(peak / stop, 2)
+    p["be_bps"] = _r(pnl - 2.0 * fee_bps)
+    if history:
+        p["path_bps"] = _path(history)
+    d: dict[str, Any] = {"sym": pos.symbol, "pos": p}
+    if entry:
+        d["entry"] = dict(entry)
+    on = pos.trailing_activation_pct is not None and pos.trailing_stop_pct is not None
+    trail: dict[str, Any] = {"on": on, "active": False}
+    if on and pos.trailing_activation_pct is not None and pos.trailing_stop_pct is not None:
+        active = peak >= pos.trailing_activation_pct * 100.0
+        trail["active"] = active
+        if active:
+            trail["stop_bps"] = _r(pnl - (peak - pos.trailing_stop_pct * 100.0))
+    d["trail"] = trail
+    mkt = market_block(f)
+    book = mkt.get("book")
+    if isinstance(book, dict):  # 测下来是噪音，让出字数（进场快照照旧带）
+        book.pop("imb", None)
+        book.pop("micro_bps", None)
+    d.update(mkt)
+    d["card"] = _card_block(card, pos.symbol, px)
+    if forecast is not None and forecast.stale_after > now:
+        up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
+        d["kronos"] = {"p_up": _r(forecast.p_up, 2), "agree": round(up * 4)}
     if against is not None:
         d["against"] = {
             "sig": against.kind.value,

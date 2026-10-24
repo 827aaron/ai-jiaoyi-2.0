@@ -616,6 +616,9 @@ def build_modules(
             cards.current,
             recorders[Role.KEEPER],
             blocked=(lambda: cards.blocked_symbols) if isinstance(cards, _Blocks) else None,
+            fee_bps=risk_cfg.taker_fee_bps,
+            forecast=predictor.latest,
+            scan_day=decision_log.scan_day,
         )
 
     modules = Modules(

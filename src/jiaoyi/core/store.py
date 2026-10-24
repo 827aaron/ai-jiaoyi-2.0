@@ -50,6 +50,25 @@ class JsonlDecisionLog:
         with path.open(encoding="utf-8") as f:
             return [DecisionRecord.model_validate_json(line) for line in f if line.strip()]
 
+    def scan_day(self, day: str, needle: str) -> list[dict[str, object]]:
+        """某一天里含 ``needle`` 的记录（原始字典，不过契约校验，快）。管家重启后找回持仓的
+        复查历史和进场拍板用；文件不存在或某行坏了就跳过。"""
+        path = self._log_dir / f"{day}.jsonl"
+        if not path.is_file():
+            return []
+        out: list[dict[str, object]] = []
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                if needle not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+        return out
+
     def read_status(self) -> dict[str, ModuleStatus]:
         with self._lock:
             raw = self._read_status_raw()

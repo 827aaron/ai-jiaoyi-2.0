@@ -3,6 +3,9 @@
 只读 ``data/decision_log/*.jsonl``，不连网络。拍板人（gate）和持仓管家（keeper）的记录
 都带 ``input.jev`` / ``output.jev``（见 ``gate.questions.jev_log_fields``）；没有这两个键的
 旧记录（模板版本化之前）跳过。
+
+q5（管家方案 E，2026-10-24）只改了持仓题目和持仓快照，进场题目和进场快照和 q4 一字不差：
+按版本分组校准拍板门槛时，q4 和 q5 的进场（gate）记录可以合在一起算。
 """
 
 from __future__ import annotations

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import statistics
 from datetime import datetime, timedelta
@@ -157,6 +158,14 @@ class PositionView(BaseModel):
     unrealized_usdt: float | None
     keeper: str | None
     """管家对这笔的最新判断（拿住 / 平仓）。"""
+    keeper_peak_usdt: float | None = None
+    """管家最近一次复查时记的开仓以来最高浮盈（U，按管家快照的 ``pos.peak_bps`` 换算，未扣费）。"""
+    keeper_peak_r: float | None = None
+    """同上，止损距离的倍数。"""
+    keeper_giveback_usdt: float | None = None
+    """从最高浮盈回吐了多少（U）。"""
+    keeper_trail_active: bool | None = None
+    """管家快照里移动止损是否已启动；None = 这笔没带移动止损或还没复查过。"""
     mark_price: float | None = None
     """现价，和浮盈同一口径：``price_src`` 为 push / rest 是币安最新成交价（和 K 线图同源），
     为 mark 是由 hummingbot 的浮盈倒推（开仓价 ± 浮盈 ÷ 数量，币安按标记价算）。"""
@@ -439,9 +448,13 @@ def position_views(
     算现价和浮盈；拿不到退回 hummingbot 的浮盈（币安按标记价算）倒推。
     """
     keeper_last: dict[str, str] = {}
+    keeper_pos: dict[str, dict[str, object]] = {}  # 最近一次管家快照的 pos + trail
     for r in records:
         if r.role is Role.KEEPER and r.position_id:
             keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
+            snap = _keeper_snap(r.input)
+            if snap is not None:
+                keeper_pos[r.position_id] = snap
     # 账本加移动止损字段之前开的仓：从保镖放行记录（output 顶层是 OrderIntent）补
     trail_of: dict[str, tuple[float, float]] = {}
     for r in records:
@@ -478,6 +491,10 @@ def position_views(
             if p.trailing_activation_pct is not None and p.trailing_stop_pct is not None
             else trail_of.get(p.intent_id)
         )
+        kp = keeper_pos.get(p.position_id, {})
+        base = p.entry_price * p.quantity if p.entry_price else None
+        peak_bps, give_bps, peak_r = kp.get("peak_bps"), kp.get("giveback_bps"), kp.get("peak_r")
+        trail_on = kp.get("trail_on")
         entry_fee_pct = None
         if p.entry_price:
             paid = p.fees_usdt / (p.quantity * p.entry_price) * 100 if p.fees_usdt else None
@@ -501,6 +518,14 @@ def position_views(
                 signal_id=p.signal_id,
                 unrealized_usdt=pnl,
                 keeper=keeper_last.get(p.position_id),
+                keeper_peak_usdt=(
+                    base * peak_bps / 1e4 if base and isinstance(peak_bps, int | float) else None
+                ),
+                keeper_peak_r=float(peak_r) if isinstance(peak_r, int | float) else None,
+                keeper_giveback_usdt=(
+                    base * give_bps / 1e4 if base and isinstance(give_bps, int | float) else None
+                ),
+                keeper_trail_active=bool(kp.get("trail_active")) if trail_on else None,
                 mark_price=mark,
                 price_src=src,
                 notional_usdt=notional,
@@ -519,6 +544,30 @@ def position_views(
             )
         )
     return out
+
+
+def _keeper_snap(inp: dict[str, object]) -> dict[str, object] | None:
+    """管家决策记录里的快照 → ``peak_bps`` / ``giveback_bps`` / ``peak_r`` / ``trail_on`` /
+    ``trail_active``；旧快照（方案 E 之前）没有这些键就返回 None。"""
+    jev = inp.get("jev")
+    raw = jev.get("snapshot") if isinstance(jev, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        snap = json.loads(raw)
+    except ValueError:
+        return None
+    pos = snap.get("pos") if isinstance(snap, dict) else None
+    if not isinstance(pos, dict) or "peak_bps" not in pos:
+        return None
+    trail = snap.get("trail") if isinstance(snap.get("trail"), dict) else {}
+    return {
+        "peak_bps": pos.get("peak_bps"),
+        "giveback_bps": pos.get("giveback_bps"),
+        "peak_r": pos.get("peak_r"),
+        "trail_on": bool(trail.get("on")),
+        "trail_active": bool(trail.get("active")),
+    }
 
 
 def _gate_label(st: ModuleStatus | None) -> str:
