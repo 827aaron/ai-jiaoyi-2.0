@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 from jiaoyi.contracts import (
+    AgainstSignalEvent,
     AppConfig,
     Category,
     DecisionRecord,
@@ -147,6 +148,8 @@ class TeamPage(BaseModel):
     """总盘会的模块状态（``Role.MARKET``：上次 / 下次 / 挑了几个）；主程序没报过就是 None。"""
     snapshot: dict[str, Any] | None = None
     """选中盘口员时：data/market_snapshot.json（逐币行情 + 各路推送今天的条数）。"""
+    against: list[AgainstSignalEvent] = []
+    """最近 30 分钟哨兵交出去的反向信号（新的在前）；流程图上对应的线平时不画，有才亮。"""
 
 
 def build_positions(
@@ -286,6 +289,18 @@ def _latest_chain(records: list[DecisionRecord], since: datetime | None = None) 
     return {r.role for r in mine}
 
 
+AGAINST_SHOW = timedelta(minutes=30)
+
+
+def _recent_against(status: dict[str, ModuleStatus], now: datetime) -> list[AgainstSignalEvent]:
+    """哨兵心跳里最近 30 分钟、真的交出去了（叫了管家或申请了临时会）的反向信号，新的在前。"""
+    st = status.get(Role.SENTINEL.value)
+    if st is None:
+        return []
+    hits = [e for e in st.against_signals if e.actions and now - e.ts <= AGAINST_SHOW]
+    return sorted(hits, key=lambda e: e.ts, reverse=True)
+
+
 def build_team(
     files: PanelFiles,
     now: datetime,
@@ -336,6 +351,7 @@ def build_team(
         ),
         market=market,
         market_progress=_market_progress(market, now, run.tz),
+        against=_recent_against(status, now),
     )
 
 

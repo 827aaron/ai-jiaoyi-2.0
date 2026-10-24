@@ -372,6 +372,9 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tf-edges .ah.done { fill: var(--ok-lamp); }
 .tf-edges .ah.doing { fill: var(--accent); }
 .tf-edges text { fill: var(--dim); font: 11px var(--font); }
+.tf-edges .e.against { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 5 4; animation: none; opacity: 0.85; }
+.tf-edges .ah.against { fill: var(--warn); }
+.tf-edges text.against { fill: var(--warn); }
 @keyframes tf-flow { to { stroke-dashoffset: -11; } }
 .tf-node { position: absolute; width: 168px; min-height: 92px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 9px 11px; display: flex; flex-direction: column; gap: 2px; color: inherit; cursor: pointer; }
 .tf-node:hover { border-color: var(--line2); }
