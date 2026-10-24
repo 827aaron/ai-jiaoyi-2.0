@@ -15,7 +15,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -35,7 +35,15 @@ from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatu
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import CloseFill, ExchangeClient, ExchangeError
-from jiaoyi.execution.fills import LOOKBACK, OPEN_SLACK, UserTrades, entry_fill, exit_fill
+from jiaoyi.execution.fills import (
+    LOOKBACK,
+    OPEN_SLACK,
+    TradeFill,
+    UserTrades,
+    entry_fill,
+    exit_fill,
+    no_open_fill,
+)
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
@@ -62,12 +70,20 @@ _CLOSE_TYPE_MAP = {
     "EXPIRED": CloseReason.TIME_LIMIT,
 }
 
+_NOT_FILLED_CN = {
+    "INSUFFICIENT_BALANCE": "保证金不够，hummingbot 没下单（INSUFFICIENT_BALANCE）",
+    "FAILED": "下单失败（FAILED）",
+    "EARLY_STOP": "开仓前被停掉（EARLY_STOP）",
+}
+
 
 class SymbolAlreadyHeld(RuntimeError):
     """同一个币已有在管持仓，执行层拒绝再开。"""
 
 
 _UNKNOWN_EXECUTOR_ROUNDS_BEFORE_SETTLE = 2
+PHANTOM_SETTLE = timedelta(minutes=5)
+"""「手动平」的仓平掉这么久后，币安上还查不到一笔开仓成交，才改记为没开成（成交明细有延迟）。"""
 """平仓中（CLOSING）的仓，连续这么多次同步都查不到执行器，就按币安持仓结账。"""
 
 _TRADE_BUY = 1
@@ -147,6 +163,27 @@ def _positive(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def filled_entry(detail: dict[str, Any]) -> float | None:
+    """执行器的开仓单真成交了才返回入场价，否则 None。
+
+    ``custom_info.current_position_average_price`` 不能单独当成交：开仓单没成交时它是计划价 /
+    当前价。保证金不够时 hummingbot 根本不下单（INSUFFICIENT_BALANCE「Not enough budget」，
+    ``order_ids`` 为空），我们却按它记了开仓、挂了保命止损、推了「开仓成交」（BTC / ENA 4 笔）。
+    要求：下过单（``order_ids`` 非空），且开仓有成交
+    （``is_trading`` 或 ``filled_amount_quote`` > 0）。
+    """
+    info = detail.get("custom_info") or {}
+    entry = _positive(info.get("current_position_average_price"))
+    if entry is None:
+        return None
+    ids = info.get("order_ids")
+    if isinstance(ids, list) and not ids:
+        return None
+    reported = "is_trading" in detail or "filled_amount_quote" in detail
+    traded = detail.get("is_trading") or _positive(detail.get("filled_amount_quote")) is not None
+    return entry if traded or not reported else None
 
 
 def tp_price(tracked: TrackedPosition, entry: float) -> float:
@@ -613,8 +650,7 @@ class HbExecutorAdapter:
                 tracked, {"close_type": "EXECUTOR_UNKNOWN"}, rec.entry_price
             )
         self._unknown_executor_rounds.pop(rec.position_id, None)
-        info = detail.get("custom_info") or {}
-        entry = _positive(info.get("current_position_average_price"))
+        entry = filled_entry(detail)
 
         if rec.status is PositionStatus.OPENING and entry is not None:
             tracked = self._mark_filled(tracked, entry)
@@ -752,8 +788,14 @@ class HbExecutorAdapter:
             realized_pnl_usdt=float(detail.get("net_pnl_quote") or 0.0),
             fees_usdt=abs(float(detail.get("cum_fees_quote") or 0.0)),
         )
+        why = _NOT_FILLED_CN.get(close_type, close_type or "未知")
         if never_filled:
-            self._record(Outcome.ERROR, f"{rec.symbol} 开仓没成交，执行器已结束", rec)
+            self._record(
+                Outcome.ERROR,
+                f"{rec.symbol} 开仓没成交，执行器已结束：{why}",
+                rec,
+                output={"not_filled": True, "close_type": close_type or None},
+            )
         else:
             closed = tracked.record
             net = closed.realized_pnl_usdt or 0.0
@@ -772,7 +814,7 @@ class HbExecutorAdapter:
             await self._alert(
                 AlertLevel.WARN,
                 "开仓没成交，执行器已结束",
-                f"{rec.symbol} {rec.position_id}（{close_type or '未知'}）",
+                f"{rec.symbol} {rec.position_id}：{why}",
                 rec.symbol,
                 f"never_filled:{rec.position_id}",
             )
@@ -805,6 +847,9 @@ class HbExecutorAdapter:
                 continue
             entry = entry_fill(rec, rows)
             if entry is None:
+                if self._phantom(rec, rows, now):
+                    self._mark_never_opened(tracked)
+                    changed += 1
                 continue  # 开仓成交还没查到（或数量对不上）：都不动
             changes: dict[str, Any] = {}
             if need_entry:
@@ -858,6 +903,36 @@ class HbExecutorAdapter:
                     "lifeboat_hit",
                 )
         return changed
+
+    @staticmethod
+    def _phantom(rec: PositionRecord, rows: list[TradeFill], now: datetime) -> bool:
+        """修旧账：以前把 hummingbot 的计划价当成交（保证金不够根本没下单），对账员几秒后见币安
+        没仓又记成「手动平」。这种记录币安上前后一笔开仓成交都没有，平仓价也从没回填过。"""
+        return (
+            rec.status is PositionStatus.CLOSED
+            and rec.close_reason is CloseReason.MANUAL
+            and rec.exit_price is None
+            and rec.intended_price is None
+            and rec.closed_at is not None
+            and rec.closed_at + PHANTOM_SETTLE <= now
+            and no_open_fill(rec, rows)
+        )
+
+    def _mark_never_opened(self, tracked: TrackedPosition) -> None:
+        rec = tracked.record
+        self._set(
+            tracked,
+            status=PositionStatus.FAILED,
+            close_reason=None,
+            realized_pnl_usdt=0.0,
+            fees_usdt=0.0,
+        )
+        self._record(
+            Outcome.INFO,
+            f"{rec.symbol} 这笔币安上没有任何开仓成交，改记为「未成交」（不是手动平）",
+            tracked.record,
+            output={"not_filled": True, "was": "closed_manual"},
+        )
 
     async def _relay_lifeboat(self, tracked: TrackedPosition) -> TrackedPosition:
         """入场价按真实成交改了：保命止损按新入场价（仍是 ×倍数的距离）重挂。
@@ -966,6 +1041,12 @@ class HbExecutorAdapter:
             raise HbApiError(f"账户权益读到 {equity}，拒绝继续")
 
         live = self._registry.live()
+        # 已经交给 hummingbot、还没成交的单会占保证金，币安的可用余额里可能还没扣
+        pending_margin = sum(
+            t.notional_usdt / t.record.leverage
+            for t in live
+            if t.record.status is PositionStatus.OPENING
+        )
         by_category: dict[Any, float] = {}
         for t in live:
             # 还没成交的（OPENING）没有入场价，按指令里的名义价值算，否则连发的信号会少算敞口
@@ -990,7 +1071,7 @@ class HbExecutorAdapter:
         return AccountState(
             ts=now,
             equity_usdt=equity,
-            available_usdt=max(available, 0.0),
+            available_usdt=max(available - pending_margin, 0.0),
             day_start_equity_usdt=await self._day_start(now, wallet, equity),
             open_notional_usdt=sum(by_category.values()),
             open_notional_by_category=by_category,

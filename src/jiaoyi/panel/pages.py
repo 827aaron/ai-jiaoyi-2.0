@@ -18,6 +18,7 @@ from jiaoyi.contracts import (
     Health,
     ModuleStatus,
     Outcome,
+    PositionStatus,
     RiskConfig,
     Role,
     SymbolPoolEntry,
@@ -683,6 +684,8 @@ class TradeRow(BaseModel):
     signal_kind: str | None
     test: bool = False
     """没有哨兵 / 拍板 / 保镖记录的单：冒烟测试或手动下的，不是机器人自己的交易。"""
+    unfilled: bool = False
+    """开仓没成交（账本 FAILED，如保证金不够 hummingbot 没下单）：只列出来，不算进任何统计。"""
 
 
 class KindStats(BaseModel):
@@ -762,12 +765,14 @@ def build_history(
         tests += test
         if test and not include_tests:
             continue
-        pnl = p.realized_pnl_usdt or 0.0
-        cum += pnl
-        peak = max(peak, cum)
-        dd = max(dd, peak - cum)
+        unfilled = p.status is PositionStatus.FAILED
+        pnl = 0.0 if unfilled else p.realized_pnl_usdt or 0.0
         assert p.closed_at is not None
-        curve.append(CurvePoint(ts=p.closed_at, cum_pnl_usdt=cum))
+        if not unfilled:
+            cum += pnl
+            peak = max(peak, cum)
+            dd = max(dd, peak - cum)
+            curve.append(CurvePoint(ts=p.closed_at, cum_pnl_usdt=cum))
         rows.append(
             TradeRow(
                 position_id=p.position_id,
@@ -786,15 +791,20 @@ def build_history(
                 close_reason=p.close_reason.value if p.close_reason else None,
                 pnl_usdt=pnl,
                 fees_usdt=p.fees_usdt,
-                pnl_missing=p.exit_price is None and pnl == 0.0 and p.fees_usdt == 0.0,
+                pnl_missing=not unfilled
+                and p.exit_price is None
+                and pnl == 0.0
+                and p.fees_usdt == 0.0,
                 signal_kind=kind_of.get(p.signal_id),
                 test=test,
+                unfilled=unfilled,
             )
         )
-    wins = [t.pnl_usdt for t in rows if t.pnl_usdt > 0]
-    losses = [-t.pnl_usdt for t in rows if t.pnl_usdt < 0]
+    real = [t for t in rows if not t.unfilled]
+    wins = [t.pnl_usdt for t in real if t.pnl_usdt > 0]
+    losses = [-t.pnl_usdt for t in real if t.pnl_usdt < 0]
     by: dict[str, list[float]] = {}
-    for t in rows:
+    for t in real:
         by.setdefault("test" if t.test else (t.signal_kind or "unknown"), []).append(t.pnl_usdt)
     rejected = [
         _item(r)
@@ -808,8 +818,8 @@ def build_history(
     return HistoryPage(
         range=rng,
         net_pnl_usdt=cum,
-        trades=len(rows),
-        win_rate=len(wins) / len(rows) if rows else None,
+        trades=len(real),
+        win_rate=len(wins) / len(real) if real else None,
         avg_win_loss=(
             (sum(wins) / len(wins)) / (sum(losses) / len(losses)) if wins and losses else None
         ),

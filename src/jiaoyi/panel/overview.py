@@ -25,6 +25,7 @@ from jiaoyi.contracts import (
     ModuleStatus,
     Outcome,
     PositionRecord,
+    PositionStatus,
     RiskConfig,
     Role,
 )
@@ -286,6 +287,7 @@ def build_overview(
         if p.closed_at is not None
         and local_day(p.closed_at, tz).isoformat() == today
         and p.realized_pnl_usdt is not None
+        and p.status is not PositionStatus.FAILED  # 没成交的不算平仓
     ]
     wins = sum(1 for p in closed_today if (p.realized_pnl_usdt or 0.0) > 0)
     gate_recs = [r for r in records if r.role is Role.GATE]

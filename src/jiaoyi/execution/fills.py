@@ -101,3 +101,12 @@ def exit_fill(rec: PositionRecord, trades: Iterable[TradeFill], entry: Fill | No
     end = rec.closed_at + CLOSE_SLACK
     window = [t for t in trades if t.time <= end]
     return _take(window, close_side(rec.side), rec.quantity, start)
+
+
+def no_open_fill(rec: PositionRecord, trades: Iterable[TradeFill]) -> bool:
+    """开仓前 10 秒到平仓后 60 秒之间，这个币一笔开仓方向的成交都没有：这笔仓根本没开成。"""
+    if rec.closed_at is None:
+        return False
+    start, end = rec.opened_at - OPEN_SLACK, rec.closed_at + CLOSE_SLACK
+    side = open_side(rec.side)
+    return not any(t.side == side and start <= t.time <= end and t.qty > 0 for t in trades)

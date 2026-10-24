@@ -65,14 +65,26 @@ class FakeHbApi:
             "cum_fees_quote": 0.0,
             "error_count": 0,
             "last_error": None,
-            "custom_info": {"current_position_average_price": 0},
+            # 和 hummingbot 一样：没成交时 current_position_average_price 也可能有数（计划价）
+            "is_trading": False,
+            "filled_amount_quote": 0.0,
+            "custom_info": {"current_position_average_price": 0, "order_ids": []},
         }
         if self.create_error is not None:
             raise self.create_error
         return {"executor_id": eid}
 
     def fill(self, eid: str, price: float) -> None:
-        self.executors[eid]["custom_info"]["current_position_average_price"] = price
+        ex = self.executors[eid]
+        ex["custom_info"]["current_position_average_price"] = price
+        ex["custom_info"]["order_ids"] = [f"o-{eid}"]
+        ex["is_trading"] = True
+        ex["filled_amount_quote"] = price
+
+    def insufficient_balance(self, eid: str, planned_price: float) -> None:
+        """hummingbot 核保证金不够：不下单直接结束，计划价照样写在 custom_info 里。"""
+        self.executors[eid]["custom_info"]["current_position_average_price"] = planned_price
+        self.terminate(eid, "INSUFFICIENT_BALANCE", leaves_position=True)
 
     def terminate(
         self,
@@ -84,7 +96,9 @@ class FakeHbApi:
     ) -> None:
         """执行器结束。默认像真的 hummingbot 一样把仓位一起平掉；``leaves_position=True`` 模拟
         重启被 SYSTEM_CLEANUP 终止、币安上仓位还在。"""
-        self.executors[eid].update(status="TERMINATED", is_active=False, close_type=close_type)
+        self.executors[eid].update(
+            status="TERMINATED", is_active=False, is_trading=False, close_type=close_type
+        )
         if self.on_terminate is not None and not leaves_position:
             self.on_terminate(eid)
         if pnl is not None:

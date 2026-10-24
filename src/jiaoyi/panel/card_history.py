@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ValidationError
 
-from jiaoyi.contracts import DecisionRecord, Outcome, Role
+from jiaoyi.contracts import DecisionRecord, Outcome, PositionStatus, Role
 from jiaoyi.contracts.battle_card import CardSymbol
 from jiaoyi.panel.files import PanelFiles
 from jiaoyi.slow.review import CardJournal, JournalRow
@@ -98,7 +98,11 @@ def build_card_history(
         mine = [
             p for p in positions if p.symbol == r.symbol and r.created_at <= p.opened_at < ended
         ]
-        closed = [p.realized_pnl_usdt for p in mine if p.realized_pnl_usdt is not None]
+        closed = [
+            p.realized_pnl_usdt
+            for p in mine
+            if p.realized_pnl_usdt is not None and p.status is not PositionStatus.FAILED
+        ]
         out.append(
             CardHistoryRow(
                 symbol=r.symbol,
