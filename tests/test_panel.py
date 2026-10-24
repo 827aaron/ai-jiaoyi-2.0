@@ -1207,9 +1207,11 @@ def test_settings_majors_list_and_names_edit(tmp_path: Path) -> None:
     assert m.fallback and "DOGE" not in [r.name for r in m.rows] and m.excluded == ["DOGE"]
     assert m.rows[-1].name == "LINK" and m.rows[-1].why == "你手动加入"
     (tmp_path / "majors.json").write_text(json.dumps(
-        {"fetched_at": "2026-10-24T00:00:00+00:00", "top_n": 20, "ranks": {"ETH": 2, "BTC": 1}}
+        {"fetched_at": "2026-10-24T00:00:00+00:00", "v": 2,
+         "ranks": {"BTC": 1, "ETH": 2, "XRP": 4, "SOL": 6},
+         "effective": {"ETH": 2, "BTC": 1}, "effective_top_n": 20}
     ))  # fmt: skip
-    m = _majors(files, scr)
+    m = _majors(files, scr)  # 面板只认选币器写的 effective，不把整张候选表当主流币
     assert not m.fallback and m.fetched_top_n == 20
     assert [(r.name, r.rank) for r in m.rows] == [("BTC", 1), ("ETH", 2), ("LINK", None)]
     assert _majors(files, ScreenerSection(major_top_n=0)).fallback  # 0 = 只用固定 7 个

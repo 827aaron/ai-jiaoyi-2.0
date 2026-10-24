@@ -1280,9 +1280,20 @@ def _majors(files: PanelFiles, scr: ScreenerSection) -> MajorsInfo:
     got_n: int | None = None
     if isinstance(raw, dict) and isinstance(raw.get("ranks"), dict):
         try:
-            ranks = {str(k): int(v) for k, v in raw["ranks"].items()}
+            # 选币器每轮写的「实际生效的前 N 个」（已按币安有没有永续过滤）；
+            # 还没写过就先拿候选表的前 N 个
+            eff = raw.get("effective")
+            if isinstance(eff, dict) and eff:
+                ranks = {str(k): int(v) for k, v in eff.items()}
+                got_n = int(raw.get("effective_top_n", 0))
+            else:
+                ranks = dict(
+                    list({str(k): int(v) for k, v in raw["ranks"].items()}.items())[
+                        : scr.major_top_n
+                    ]
+                )
+                got_n = None
             at = datetime.fromisoformat(str(raw["fetched_at"]))
-            got_n = int(raw.get("top_n", 0))
         except (KeyError, TypeError, ValueError):
             ranks, at, got_n = {}, None, None
     rows: list[MajorRow] = []
