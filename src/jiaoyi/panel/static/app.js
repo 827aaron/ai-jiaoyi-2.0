@@ -442,6 +442,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "tier-cancel") { S.tierSel = null; render(); }
   else if (act === "tier-go") switchProfile(arg);
   else if (act === "tier-filter") { S.tierOnlyCustom = arg === "1"; render(); }
+  else if (act === "tier-role") toggleTierRole(arg);
   else if (act === "st-more") openRole("risk_guard");
   else if (act === "daypnl") showDayPnl();
   else if (act === "prompts") showPrompts();
@@ -1765,17 +1766,18 @@ function addSymbol() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target && e.target.id === "pool-add") { e.preventDefault(); addSymbol(); }
 });
-// 设置页搜索：边打边筛（中文输入法拼字时先不筛，选定字再筛）
+// 设置页搜索（全部设置、档位参数各一个框）：边打边筛（中文输入法拼字时先不筛，选定字再筛）
+const SEARCH_BOX = { "st-q": "stQ", "tier-q": "tierQ" };
 document.addEventListener("input", (e) => {
-  if (!e.target || e.target.id !== "st-q" || e.isComposing) return;
-  S.stQ = e.target.value;
+  if (!e.target || !(e.target.id in SEARCH_BOX) || e.isComposing) return;
+  S[SEARCH_BOX[e.target.id]] = e.target.value;
   render();
 });
-document.addEventListener("compositionstart", (e) => { if (e.target && e.target.id === "st-q") S.stComposing = true; });
+document.addEventListener("compositionstart", (e) => { if (e.target && e.target.id in SEARCH_BOX) S.stComposing = true; });
 document.addEventListener("compositionend", (e) => {
-  if (!e.target || e.target.id !== "st-q") return;
+  if (!e.target || !(e.target.id in SEARCH_BOX)) return;
   S.stComposing = false;
-  S.stQ = e.target.value;
+  S[SEARCH_BOX[e.target.id]] = e.target.value;
   render();
 });
 
@@ -2513,7 +2515,7 @@ function showTab(d, ix) {
 }
 
 // 搜索：每个词都要在行名、原始说明、键名、组名或角色名里出现（不分大小写）
-const qTerms = () => S.stQ.trim().toLowerCase().split(/\s+/).filter(Boolean);
+const qTerms = (q = S.stQ) => q.trim().toLowerCase().split(/\s+/).filter(Boolean);
 const hitAll = (text, terms) => { const t = text.toLowerCase(); return terms.every((w) => t.includes(w)); };
 function roleBody(role, d, ix, groups, terms) {
   if (role.id === "keys") return keysTab(d);
@@ -2731,45 +2733,86 @@ function tierPreview(d) {
     ${kept.length ? `<div class="tchips">${kept.map(({ r, b }) => `<span class="tchip keep">${esc(r.label)}：保持你的 ${showVal(d, r, effVal(d, r, pf.current))}（新档是 ${showVal(d, r, b)}）</span>`).join("")}</div>` : ""}
     <div class="dim small">点「换到」要面板密码，重启主程序后按新档位运行。</div></div>`;
 }
+// 档位参数按角色分块（和下面「按角色的全部设置」同一张 ROLES / PREFIX_ROLE 表，两边不会分歧），默认收起
+const TIER_ROLE = { "app.hold": "market" };  // 别处显示、ROLES 里没点名的
+function tierRoleOf(d, ix) {
+  const where = {};
+  for (const [id, gs] of Object.entries(roleGroups(d, ix))) for (const g of gs) for (const i of g.items) where[`${i.sec}.${i.key}`] = { role: id, g: g.g };
+  return (id) => where[id] || { role: TIER_ROLE[id] || (PREFIX_ROLE.find(([pre]) => id.startsWith(pre)) || [])[1] || SECTION_ROLE[id.split(".")[0]] || "market", g: "" };
+}
+try { S.tierRoleOpen = new Set(JSON.parse(localStorage.getItem("tier-roles") || "[]")); } catch (err) { S.tierRoleOpen = new Set(); }
+S.tierQ = "";
+function toggleTierRole(id) {
+  if (S.tierRoleOpen.has(id)) S.tierRoleOpen.delete(id);
+  else S.tierRoleOpen.add(id);
+  try { localStorage.setItem("tier-roles", JSON.stringify([...S.tierRoleOpen])); } catch (err) { /* 记不住就每次都收起 */ }
+  render();
+}
+function tierRowHtml(d, r, ix, t, previewing) {
+  const pf = d.profile;
+  const mine = isCustom(pf, r);
+  const curV = effVal(d, r, pf.current), newV = effVal(d, r, t);
+  const changing = previewing && !mine && !sameV(curV, newV);
+  const val = changing ? `<s>${showVal(d, r, curV)}</s><span class="arrow">→</span> ${showVal(d, r, newV)}` : showVal(d, r, newV);
+  const id = `${r.sec}.${r.key}`;
+  const i = ix[id];
+  const w = d.writable && i && i.editable;
+  const restore = r.key === "hold" ? clickable("hold", "auto") : clickable("unpin", `${r.sec}:${r.key}`);
+  const act = !w ? '<span class="dim small">网页不改</span>'
+    : mine ? `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">改</button><button class="btn b-sm b-ghost" ${restore}>恢复跟档</button>`
+    : `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">自定义</button>`;
+  const follow = r.hold ? `跟最长持仓 ${profileSpan(tierHold(pf, t))}` : "跟开会档位";
+  return `<div class="tier-row ${mine ? "custom" : ""} ${changing ? "changing" : ""}">
+    <div class="tl"><b>${esc(r.label)}</b>${r.hint && r.hint !== "其他" ? `<small>${esc(r.hint)}</small>` : ""}<code>${esc(r.key)}</code></div>
+    <div class="tv num">${val}</div>
+    <div class="ts">${mine ? `<span class="ttag c">自定义</span><small>档位是 ${showVal(d, r, tierVal(pf, r, pf.current))}</small>` : `<span class="ttag f" title="${esc(follow)}走">跟档</span><small>${esc(follow)}</small>`}</div>
+    <div class="ta">${act}</div></div>`;
+}
 function tierTable(d) {
   const pf = d.profile;
   const t = S.tierSel || pf.current;
   const previewing = t !== pf.current;
   const ix = settingIndex(d);
   const groups = tierRows(d);
-  const n = groups.reduce((s, g) => s + g.rows.filter((r) => isCustom(pf, r)).length, 0);
+  const all = groups.flatMap((g) => g.rows.map((r) => ({ ...r, paper: g.paper })));
+  const n = all.filter((r) => isCustom(pf, r)).length;
+  const where = tierRoleOf(d, ix);
+  const terms = qTerms(S.tierQ);
   let html = "";
-  for (const g of groups) {
-    const rows = g.rows.filter((r) => !S.tierOnlyCustom || isCustom(pf, r));
+  for (const role of ROLES) {
+    const mine = all.filter((r) => where(`${r.sec}.${r.key}`).role === role.id);
+    if (!mine.length) continue;
+    const rows = mine.filter((r) => (!S.tierOnlyCustom || isCustom(pf, r)) && (!terms.length || hitAll(`${r.label} ${r.hint} ${r.key} ${r.sec}.${r.key} ${where(`${r.sec}.${r.key}`).g} ${role.t}`, terms)));
     if (!rows.length) continue;
-    const follow = g.hold ? `跟最长持仓 ${profileSpan(tierHold(pf, t))} 走${pf.hold_custom ? "（你定的）" : ""}` : "跟开会档位走";
-    html += `<div class="tier-gh"><span>${esc(g.g)}</span><span class="follow">${esc(follow)}${g.paper && d.mode === "paper" ? ` · ${esc(g.paper)}` : ""}</span></div>`;
+    const nCustom = mine.filter((r) => isCustom(pf, r)).length;
+    const nChange = previewing ? mine.filter((r) => !isCustom(pf, r) && !sameV(effVal(d, r, pf.current), effVal(d, r, t))).length : 0;
+    const auto = terms.length > 0 || S.tierOnlyCustom;
+    const open = auto || S.tierRoleOpen.has(role.id);
+    const meta = [terms.length ? `找到 ${rows.length} 项` : `${mine.length} 项`, nCustom ? `<span class="warn">${nCustom} 项自定义</span>` : "", nChange ? `<span class="accent">${nChange} 项会变</span>` : ""].filter(Boolean).join(" · ");
+    const subs = [...new Set(rows.map((r) => where(`${r.sec}.${r.key}`).g))];  // 同一小组的行排在一起
+    rows.sort((a, b) => subs.indexOf(where(`${a.sec}.${a.key}`).g) - subs.indexOf(where(`${b.sec}.${b.key}`).g));
+    let body = "", last = null;
+    const paper = rows.find((r) => r.paper);
+    if (paper && d.mode === "paper") body += `<div class="st-note">${esc(paper.paper)}</div>`;
     for (const r of rows) {
-      const mine = isCustom(pf, r);
-      const curV = effVal(d, r, pf.current), newV = effVal(d, r, t);
-      const changing = previewing && !mine && !sameV(curV, newV);
-      const val = changing ? `<s>${showVal(d, r, curV)}</s><span class="arrow">→</span> ${showVal(d, r, newV)}` : showVal(d, r, newV);
-      const id = `${r.sec}.${r.key}`;
-      const i = ix[id];
-      const w = d.writable && i && i.editable;
-      const restore = r.key === "hold" ? clickable("hold", "auto") : clickable("unpin", `${r.sec}:${r.key}`);
-      const act = !w ? '<span class="dim small">网页不改</span>'
-        : mine ? `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">改</button><button class="btn b-sm b-ghost" ${restore}>恢复跟档</button>`
-        : `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">自定义</button>`;
-      html += `<div class="tier-row ${mine ? "custom" : ""} ${changing ? "changing" : ""}">
-        <div class="tl"><b>${esc(r.label)}</b>${r.hint && r.hint !== "其他" ? `<small>${esc(r.hint)}</small>` : ""}<code>${esc(r.key)}</code></div>
-        <div class="tv num">${val}</div>
-        <div class="ts">${mine ? `<span class="ttag c">自定义</span><small>档位是 ${showVal(d, r, tierVal(pf, r, pf.current))}</small>` : '<span class="ttag f">跟档</span>'}</div>
-        <div class="ta">${act}</div></div>`;
+      const g = where(`${r.sec}.${r.key}`).g;
+      if (subs.length > 1 && g !== last) body += `<div class="tier-gh"><span>${esc(g || "其他")}</span></div>`;
+      last = g;
+      body += tierRowHtml(d, r, ix, t, previewing);
     }
+    html += `<div class="role tier-role ${open ? "open" : ""}" id="tier-r-${role.id}">
+      <button class="role-h" ${auto ? "disabled" : `data-act="tier-role" data-arg="${role.id}"`} aria-expanded="${open}"><span class="rn">${esc(role.t)}</span><span class="rw">${esc(role.what || "")}</span><span class="rm">${meta}</span><span class="chev">${auto ? "" : "›"}</span></button>
+      <div class="role-b">${body}</div></div>`;
   }
   const head = previewing ? `换到 ${profileSpan(t)}档后的全部参数（预览）` : `${profileSpan(t)}档的全部参数`;
-  const sub = previewing ? "蓝色 = 换档后会变的；橙色 = 你自定义的，换档也不动。" : "「跟档」= 档位给的值，换档跟着变；橙色「自定义」= 你改过的，换档不动。";
+  const sub = previewing ? "蓝色 = 换档后会变的；橙色 = 你自定义的，换档也不动。按角色分，点一个角色展开。" : "「跟档」= 档位给的值，换档跟着变；橙色「自定义」= 你改过的，换档不动。按角色分，点一个角色展开。";
   const filt = (v, txt) => `<button aria-pressed="${S.tierOnlyCustom === v}" data-act="tier-filter" data-arg="${v ? 1 : 0}">${txt}</button>`;
+  const empty = terms.length ? `没找到「${esc(S.tierQ.trim())}」。换个词试试，比如「止损」「预算」「门槛」。` : "没有自定义的项，全部跟着档位走。";
   return `<section class="card st tier-table"><div class="tier-th"><div><h2>${esc(head)}</h2><span class="dim small">${sub}</span></div>
       <div class="tcustom"><span class="n ${n ? "" : "zero"}">${n ? `有 ${n} 项自定义` : "全部跟档"}</span>${n && d.writable ? `<button class="btn b-sm b-ghost" ${clickable("clearpins")}>恢复全部跟档</button>` : ""}
-        <div class="tfilter" role="group" aria-label="显示">${filt(false, "全部")}${filt(true, "只看自定义")}</div></div></div>
-    ${html || '<div class="tempty">没有自定义的项，全部跟着档位走。</div>'}</section>`;
+        <div class="tfilter" role="group" aria-label="显示">${filt(false, "全部")}${filt(true, "只看自定义")}</div></div>
+      <div class="st-search tier-search"><input id="tier-q" class="inp" type="search" placeholder="搜这一档的参数：比如「止损」「预算」「门槛」" autocomplete="off" spellcheck="false" value="${esc(S.tierQ)}"></div></div>
+    ${html || `<div class="tempty">${empty}</div>`}</section>`;
 }
 function tierSection(d) {
   if (!d.profile || !d.profile.defaults || !Object.keys(d.profile.defaults).length) return `<section class="card st"><div class="ch"><h2>选档位</h2></div><div class="st-row"><div class="k">这次启动的面板没拿到配置文件路径，看不到档位</div></div></section>`;
@@ -2857,7 +2900,8 @@ function render() {
   const typing = document.activeElement && document.activeElement.id === "pool-add";
   const typed = $("#pool-add") ? $("#pool-add").value : "";
   // 设置页搜索框：每打一个字整页重画，焦点和光标要放回去
-  const q = document.activeElement && document.activeElement.id === "st-q" ? [$("#st-q").selectionStart, $("#st-q").selectionEnd] : null;
+  const qid = document.activeElement && document.activeElement.id in SEARCH_BOX ? document.activeElement.id : null;
+  const q = qid ? [$(`#${qid}`).selectionStart, $(`#${qid}`).selectionEnd] : null;
   // 定时刷新整页重画：先用旧高度撑住页面，免得重画中途变矮把滚动位置夹回顶部（团队页尤其明显）
   const pg = $("#page"), y = window.scrollY, same = pg.dataset.key === pageId(page, arg), samePage = pg.dataset.page === page;
   pg.style.minHeight = same ? pg.offsetHeight + "px" : "";
@@ -2868,7 +2912,7 @@ function render() {
   const box = $("#pool-add");
   if (box && typed) box.value = typed;
   if (box && typing) box.focus();
-  const qbox = $("#st-q");
+  const qbox = qid && $(`#${qid}`);
   if (qbox && q) { qbox.focus(); qbox.setSelectionRange(...q); }
   if (page === "settings" && S.stScroll) {
     const sec = $(`#st-r-${S.stScroll}`);
