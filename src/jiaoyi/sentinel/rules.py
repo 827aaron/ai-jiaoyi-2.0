@@ -433,7 +433,7 @@ class RuleTrigger:
         # 放量突破：1 分钟量够，或最近 10 秒折算每分钟够
         if vol_ratio >= c.breakout_vol_ratio:
             vol_desc = f"1 分钟量 {vol_ratio:.1f} 倍"
-        elif vr10 >= c.breakout_vol_ratio:
+        elif vr10 >= c.burst_10s_ratio:
             vol_desc = f"最近 10 秒折算每分钟量 {vr10:.1f} 倍（1 分钟 {vol_ratio:.1f} 倍）"
         else:
             vol_desc = ""
@@ -447,11 +447,11 @@ class RuleTrigger:
                     )
 
         # 量能突增：先看 1 分钟；不够再看最近 10 秒（量和主动占比都用这 10 秒）
-        for ratio, buy, span in (
-            (vol_ratio, buy_ratio, "1 分钟"),
-            (vr10, br10, "最近 10 秒折算每分钟"),
+        for ratio, need, buy, span in (
+            (vol_ratio, c.surge_vol_ratio, buy_ratio, "1 分钟"),
+            (vr10, c.burst_10s_ratio, br10, "最近 10 秒折算每分钟"),
         ):
-            if ratio < c.surge_vol_ratio:
+            if ratio < need:
                 continue
             if span.startswith("最近"):
                 span = f"1 分钟量 {vol_ratio:.1f} 倍，{span}"
