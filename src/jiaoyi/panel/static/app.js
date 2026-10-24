@@ -1301,7 +1301,7 @@ function sentinelCard(r) {
   return `<section class="card mt"><div class="ch"><h2>哨兵 · 每个币为什么还没出信号</h2><span class="r">${r.last_beat ? "心跳 " + hms(r.last_beat) : "没有心跳"}</span></div>
     ${r.headline ? `<div class="note">${esc(r.headline)}</div>` : ""}
     ${rows ? `<div class="tw scroll"><table><thead><tr><th>币</th><th>现在（成交量是平时几倍 · 主动买卖哪边多）</th><th>离出信号还差</th><th>1 小时内最高</th><th>上次没出的原因</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="foot">阈值在「设置 › 执行 › 信号识别」：量能突增要量够倍数、而且主动买或卖占比够高；放量突破还要价格突破关键位。没出信号不一定是坏事，可能只是没行情。</div>` : '<div class="dim">哨兵还没报每个币的情况（主程序更新后才有）。</div>'}</section>`;
+    <div class="foot">只列现在作战卡上的币和持仓币${r.detail_hidden ? `（另有 ${r.detail_hidden} 个已掉出作战卡的币没列）` : ""}。阈值在「设置 › 执行 › 信号识别」：量能突增要量够倍数、而且主动买或卖占比够高；放量突破还要价格突破关键位。没出信号不一定是坏事，可能只是没行情。</div>` : `<div class="dim">${r.detail_hidden ? `现在作战卡上没有币、也没持仓（另有 ${r.detail_hidden} 个已掉出作战卡的币没列）。` : "哨兵还没报每个币的情况（主程序更新后才有）。"}</div>`}</section>`;
 }
 P.team = () => {
   const d = pageData;
