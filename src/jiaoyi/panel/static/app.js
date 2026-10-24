@@ -1309,6 +1309,24 @@ function tfNode(r, checks) {
     ${ag ? `<small class="now against" title="${esc(ag.reason || ag.desc || "")}">${esc(againstLine(ag))}</small>` : r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
     <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
 }
+/* 「现在走到」轮播：每处一条，4 秒换一条；鼠标放上去停住，点一下看下一条。
+   页面每 5 秒重画不打断（第几条记在 tfNowI） */
+let tfNowItems = [], tfNowI = 0, tfNowHold = false;
+function tfNowHtml() {
+  const n = tfNowItems.length;
+  if (!n) return "";
+  const i = tfNowI % n;
+  return `<b>现在走到：</b><span class="t">${esc(tfNowItems[i])}</span>${n > 1 ? `<span class="k">${i + 1}/${n}</span>` : ""}`;
+}
+function tfNowStep() {
+  const el = $(".tf-now");
+  if (!el || tfNowItems.length < 2) return;
+  tfNowI = (tfNowI + 1) % tfNowItems.length;
+  el.innerHTML = tfNowHtml();
+}
+setInterval(() => { if (!tfNowHold) tfNowStep(); }, 4000);
+document.addEventListener("mouseover", (e) => { tfNowHold = !!(e.target.closest && e.target.closest(".tf-now")); });
+document.addEventListener("click", (e) => { if (e.target.closest && e.target.closest(".tf-now")) tfNowStep(); });
 function teamFlow(d) {
   const by = Object.fromEntries(d.roles.map((r) => [r.role, r]));
   const prog = Object.fromEntries(d.roles.map((r) => [r.role, r.progress]));
@@ -1321,14 +1339,14 @@ function teamFlow(d) {
     if (!r) return "";
     return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
   };
-  // 盯持仓是常态，放最后说；其余按流程顺序最多说两处
+  // 盯持仓是常态，放最后说；其余按流程顺序，每处一条，轮播着看全
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
   const main = busy.filter((r) => !r.doing.startsWith("盯着"));
   const watching = busy.find((r) => r.doing.endsWith("笔持仓"));
-  const now = main.length
-    ? `现在走到：${main.slice(0, 2).map((r) => `${esc(r.name)} ${esc(r.doing)}`).join("；")}${main.length > 2 ? ` 等 ${main.length} 处` : ""}`
-    : watching ? `现在走到：看着持仓（${esc(watching.doing)}）` : "现在走到：哨兵盯着信号，等下一个机会";
-  const legend = `<div class="tf-legend" aria-label="图例">${["done", "doing", "wait", "err"].map((p) => `<span class="lg"><i class="dot ${p}"></i>${{ done: "这一轮已完成", doing: "正在做", wait: "等待（还没轮到 / 没活）", err: "出错或没心跳" }[p]}</span>`).join("")}<span class="lg"><em class="hb ok">心跳正常</em>右上角 = 模块心跳</span><span class="tf-now">${now}</span></div>`;
+  tfNowItems = main.length
+    ? main.map((r) => `${r.name} ${r.doing}`)
+    : [watching ? `看着持仓（${watching.doing}）` : "哨兵盯着信号，等下一个机会"];
+  const legend = `<div class="tf-legend" aria-label="图例">${["done", "doing", "wait", "err"].map((p) => `<span class="lg"><i class="dot ${p}"></i>${{ done: "这一轮已完成", doing: "正在做", wait: "等待（还没轮到 / 没活）", err: "出错或没心跳" }[p]}</span>`).join("")}<span class="lg"><em class="hb ok">心跳正常</em>右上角 = 模块心跳</span><div class="tf-now" title="鼠标放上去停住，点一下看下一条" aria-live="polite">${tfNowHtml()}</div></div>`;
   const known = new Set([...Object.keys(TF_POS)]);
   const extra = d.roles.filter((r) => !known.has(r.role));
   const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");

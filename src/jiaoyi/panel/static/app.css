@@ -347,9 +347,13 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .lnk:hover { text-decoration: underline; }
 
 /* 团队页流程图（设计稿 design/team-flow）：画布 1180×570 绝对定位，宽度不够整体缩放；≤700px 改竖排 */
-.tf-legend { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; font-size: 12px; background: var(--card); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); margin-bottom: 12px; }
+.tf-legend { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; justify-content: center; font-size: 12px; background: var(--card); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); margin-bottom: 12px; }
 .tf-legend .lg { display: inline-flex; align-items: center; gap: 6px; }
-.tf-now { margin-left: auto; color: var(--accent); font-weight: 600; }
+/* 图例和「现在走到」都居中；「现在走到」单独一行轮播，长的那条自己换行，看得全 */
+.tf-now { flex-basis: 100%; display: flex; gap: 6px; align-items: baseline; justify-content: center; text-align: center; color: var(--accent); font-weight: 600; cursor: pointer; user-select: none; }
+.tf-now b { flex: none; }
+.tf-now .t { min-width: 0; overflow-wrap: anywhere; }
+.tf-now .k { flex: none; color: var(--dim); font-weight: 400; font-size: 11px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
 .dot.done { background: var(--ok-lamp); }
 .dot.doing { background: var(--accent); animation: tf-pulse 1.6s ease-out infinite; }
@@ -403,7 +407,6 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
   .tf-stack { display: flex; flex-direction: column; gap: 14px; }
   .tf-lane { display: flex; flex-direction: column; gap: 8px; }
   .tf-stack .tf-node { position: static; width: auto; min-height: 0; }
-  .tf-now { margin-left: 0; }
 }
 
 /* 作战卡：快到期的币变灰；历史卡的日期 / 币筛选 */
