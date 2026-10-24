@@ -1210,6 +1210,18 @@ const TF_EDGES = [
   [tfL("executor"), tfT("patrol"), "patrol", "", "tree"],
   [tfL("executor"), tfT("reconciler"), "reconciler", "", "tree"],
 ];
+// 和卡相反的信号（主程序按有没有仓分流）：平时不画，最近 30 分钟真交出去过才亮，标最近一次的币、时间、结果
+const VERDICT = { close: "管家判平", hold: "管家判继续拿" };
+function againstEdges(list) {
+  const out = [];
+  const pick = (act) => (list || []).filter((e) => e.actions.includes(act));
+  const tag = (hits, tail) => `${hits[0].symbol.replace(/USDT$/, "")} ${hm(hits[0].ts)} ${tail}${hits.length > 1 ? `（30 分钟内 ${hits.length} 次）` : ""}`;
+  const k = pick("keeper_recheck");
+  if (k.length) out.push([[TF_POS.sentinel[0] + 130, TF_POS.sentinel[1] + NODE_H], [TF_POS.keeper[0] + 40, TF_POS.keeper[1]], "keeper", tag(k, `反向 → ${VERDICT[k[0].keeper_verdict] || "管家急查中"}`), "drop", "against"]);
+  const m = pick("meeting");
+  if (m.length) out.push([[TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], [TF_POS.commander[0] + 40, TF_POS.commander[1] + NODE_H], "commander", tag(m, "反向 → 临时会"), "up", "against"]);
+  return out;
+}
 function tfEdge([a, b, to, label, how, extra], prog) {
   const [x1, y1] = a, [x2, y2] = b;
   const st = prog[to] === "doing" ? "doing" : prog[to] === "done" ? "done" : "";
@@ -1220,11 +1232,13 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
   // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
   else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
+  else if (how === "drop") { const yy = 402; d = `M${x1},${y1} V${yy} H${x2} V${y2 - 1}`; lx = x1 + 8; ly = yy - 5; dir = "d"; }
+  else if (how === "up") { d = `M${x1},${y1} V${y2 + 1}`; lx = x1 - 8; ly = (y1 + y2) / 2 + 22; dir = "u"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
-  const ah = dir === "r" ? `M${x2},${y2} l-7,-4 v8 z` : `M${x2},${y2} l-4,-7 h8 z`;
-  return `<path class="${cls}" d="${d}"/><path class="ah ${st}" d="${ah}"/>${label ? `<text x="${lx}" y="${ly}">${esc(label)}</text>` : ""}`;
+  const ah = dir === "r" ? `M${x2},${y2} l-7,-4 v8 z` : dir === "u" ? `M${x2},${y2} l-4,7 h8 z` : `M${x2},${y2} l-4,-7 h8 z`;
+  return `<path class="${cls}" d="${d}"/><path class="ah ${st} ${extra || ""}" d="${ah}"/>${label ? `<text class="${extra || ""}" x="${lx}" y="${ly}"${how === "up" ? ' text-anchor="end"' : ""}>${esc(label)}</text>` : ""}`;
 }
 const PROG_LABEL = { err: "出错", doing: "正在做", done: "这一轮做完", wait: "等待" };
 function tfCardNode() {
@@ -1292,7 +1306,7 @@ function teamFlow(d) {
   const known = new Set([...Object.keys(TF_POS)]);
   const extra = d.roles.filter((r) => !known.has(r.role));
   const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");
-  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${TF_EDGES.map((e) => tfEdge(e, prog)).join("")}</svg>`;
+  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${[...TF_EDGES, ...againstEdges(d.against)].map((e) => tfEdge(e, prog)).join("")}</svg>`;
   const canvas = `<div class="tf-fit"><div class="tf-canvas" style="width:${TF_W}px;height:${TF_H}px">${lanes}${edges}${Object.keys(TF_POS).map((k) => node(k, true)).join("")}
     <div class="tf-watch"><span>看门狗在外面守着：主程序卡住或退出就自动拉起</span></div></div></div>`;
   // 手机：按泳道竖排，不画线

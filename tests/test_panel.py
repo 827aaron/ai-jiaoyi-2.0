@@ -1247,3 +1247,26 @@ def test_pnl_curve_endpoint(tmp_path: Path) -> None:
     with _client(tmp_path, "127.0.0.1") as client:
         body = client.get("/api/pnl-curve").json()
         assert body["day"] == "2026-10-22" and isinstance(body["points"], list)
+
+
+def test_team_against_signals_only_recent_routed(tmp_path: Path) -> None:
+    """流程图反向信号线：只要最近 30 分钟、真交出去了的（叫管家 / 申请临时会），新的在前。"""
+    from jiaoyi.panel.pages import build_team
+
+    def ev(mins: int, actions: list[str]) -> c.AgainstSignalEvent:
+        return c.AgainstSignalEvent.model_validate({
+            "symbol": "BTCUSDT", "ts": (NOW - timedelta(minutes=mins)).isoformat(),
+            "kind": "volume_surge", "side": "long", "actions": actions,
+        })  # fmt: skip
+
+    st = c.ModuleStatus(
+        role=c.Role.SENTINEL, health=c.Health.OK, ts=NOW,
+        against_signals=[ev(40, ["keeper_recheck"]), ev(10, []), ev(5, ["meeting"]),
+                         ev(2, ["keeper_recheck"])],
+    )  # fmt: skip
+    (tmp_path / "module_status.json").write_text(
+        json.dumps({st.role.value: st.model_dump(mode="json")})
+    )
+    team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, None)
+    assert [(NOW - e.ts).seconds // 60 for e in team.against] == [2, 5]
+    assert build_team(PanelFiles(tmp_path / "x", RISK.day_reset_tz), NOW, None).against == []
