@@ -31,6 +31,8 @@ const LIFEBOAT = { active: "保命 ✓", pending: "⚠ 保命挂单中", missing
 const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "保镖", commander: "军师团", keeper: "管家", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
 const OUTCOME = { pass: ["放行", "p-long"], reject: ["拒绝", "p-short"], hold: ["拿住", ""], close: ["平仓", "p-accent"], action: ["动作", "p-accent"], error: ["出错", "p-warn"], info: ["信息", ""] };
 const CAT = { major: "主流币", alt: "山寨币", crypto_stock: "加密概念股", us_tech: "美股科技", precious_metal: "贵金属", other: "其他" };
+// 币名旁的类型小字（主流币 / 山寨币 …），和作战卡同写法
+const catTag = (c) => (c ? ` <span class="dim small">${esc(CAT[c] || c)}</span>` : "");
 const SIGNAL = { volume_breakout: "放量突破", volume_surge: "量能突增", liquidation_rebound: "爆仓反弹", crowded_reversal: "拥挤反向", session_event: "时段与事件" };
 
 let TZ = "Asia/Bangkok";
@@ -935,7 +937,7 @@ function posSection(list) {
         const [s, sc] = SIDE[p.side] || [p.side, ""];
         const lb = LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单";
         const lbBad = p.lifeboat_status !== "active";
-        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
+        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)}${catTag(p.category)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
           <span class="pnl ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${netPnl(p) == null ? "—" : signed(netPnl(p), 2) + "U"}</span></div>
           <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
           <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
@@ -996,7 +998,7 @@ P.positions = (arg) => {
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
-      <td class="hi">${coin(p.symbol)}</td><td>${side}</td><td class="r num">${qtyFmt(p.quantity)}</td>
+      <td class="hi nowrap">${coin(p.symbol)}${catTag(p.category)}</td><td>${side}</td><td class="r num">${qtyFmt(p.quantity)}</td>
       <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td><td class="r num">${p.leverage}x</td>
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}</td>
@@ -1011,7 +1013,7 @@ P.positions = (arg) => {
     const held = now - new Date(p.opened_at).getTime();
     const lbOk = p.lifeboat_status === "active";
     return `<div class="pm ${on ? "sel" : ""}"><a href="#positions/${encodeURIComponent(p.position_id)}">
-      <div class="l1"><b>${coin(p.symbol)}</b> <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
+      <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
         开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}</div></a>
@@ -1345,7 +1347,7 @@ P.history = () => {
     const miss = '<span class="warn" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到</span>';
     const exit = t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>';
     const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
-    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
+    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
       <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 保镖：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
       <td class="num nowrap">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}</tr>`;
   }).join("");
@@ -1370,10 +1372,10 @@ P.history = () => {
 function exportCsv() {
   const d = pageData;
   if (!d || !d.rows) return;
-  const head = ["平仓时间", "开仓时间", "币种", "方向", "数量", "名义金额U", "杠杆", "开仓价", "平仓价", "止损价", "止盈价", "信号", "平仓原因", "毛利U", "手续费U", "净盈亏U", "position_id"];
+  const head = ["平仓时间", "开仓时间", "币种", "类型", "方向", "数量", "名义金额U", "杠杆", "开仓价", "平仓价", "止损价", "止盈价", "信号", "平仓原因", "毛利U", "手续费U", "净盈亏U", "position_id"];
   // 文字字段以 = + - @ 开头时加 ' 前缀，免得表格软件当公式执行（数字照常）
   const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
-  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.close_reason, t.pnl_missing ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing ? "" : t.fees_usdt, t.pnl_missing ? "" : t.pnl_usdt, t.position_id].map(q).join(","));
+  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.close_reason, t.pnl_missing ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing ? "" : t.fees_usdt, t.pnl_missing ? "" : t.pnl_usdt, t.position_id].map(q).join(","));
   const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

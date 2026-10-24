@@ -497,6 +497,8 @@ class TradeRow(BaseModel):
     position_id: str
     signal_id: str
     symbol: str
+    category: str = ""
+    """主流币 / 山寨币 …（账本里开仓时的分组）。"""
     side: str
     quantity: float
     leverage: int
@@ -607,6 +609,7 @@ def build_history(
                 position_id=p.position_id,
                 signal_id=p.signal_id,
                 symbol=p.symbol,
+                category=p.category.value,
                 side=p.side.value,
                 quantity=p.quantity,
                 leverage=p.leverage,
