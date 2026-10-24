@@ -506,3 +506,4 @@ tr.fade td { opacity: 0.55; }
 .pc-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
 /* 说明列可以折行，数字列留在框里（今日盈亏明细） */
 table.wrap1 td:first-child { white-space: normal; }
+.pc-line.est { stroke-dasharray: 5 4; opacity: 0.7; }

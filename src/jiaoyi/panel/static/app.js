@@ -249,13 +249,20 @@ function pnlChart(c) {
   if (pts.length < 2) return `<div class="pnl-curve"><p class="dim small">曲线从面板更新后开始记，每分钟一个点，过几分钟再来看。</p></div>`;
   const W = 600, H = 220, L = 8, R = 8, T = 10, B = 10;
   const t0 = Date.parse(pts[0].ts), t1 = Date.parse(pts[pts.length - 1].ts);
+  // 纵轴按数据范围（上下各留 10%），不从 0 起，小波动也看得出；0 线在范围里才画
   const vs = pts.map((p) => p.pnl_usdt);
-  let lo = Math.min(0, ...vs), hi = Math.max(0, ...vs);
-  if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  const pad = Math.max((hi - lo) * 0.1, 1);
+  lo -= pad; hi += pad;
   const x = (p) => L + ((Date.parse(p.ts) - t0) / Math.max(t1 - t0, 1)) * (W - L - R);
   const y = (v) => T + ((hi - v) / (hi - lo)) * (H - T - B);
-  const line = pts.map((p, i) => `${i ? "L" : "M"}${x(p).toFixed(1)},${y(p.pnl_usdt).toFixed(1)}`).join("");
-  const z = y(0).toFixed(1);
+  const path = (ps) => ps.map((p, i) => `${i ? "L" : "M"}${x(p).toFixed(1)},${y(p.pnl_usdt).toFixed(1)}`).join("");
+  const line = path(pts);
+  const nEst = pts.filter((p) => p.est).length;
+  const estLine = nEst ? path(pts.slice(0, nEst + 1)) : "";
+  const realLine = nEst ? path(pts.slice(nEst)) : line;
+  const zero = lo <= 0 && 0 <= hi;
+  const z = Math.min(Math.max(y(0), T), H - B).toFixed(1);
   const dot = (p, k) => (p ? `<circle class="${k}" cx="${x(p).toFixed(1)}" cy="${y(p.pnl_usdt).toFixed(1)}" r="4"/>` : "");
   const stat = (name, p) => (p ? `<span>${name} <b class="num ${cls(p.pnl_usdt)}">${signed(p.pnl_usdt, 2)} U</b> <small class="dim">${hm(p.ts)}</small></span>` : "");
   return `<div class="pnl-curve">
@@ -264,11 +271,13 @@ function pnlChart(c) {
       <clipPath id="pc-up"><rect x="0" y="0" width="${W}" height="${z}"/></clipPath><clipPath id="pc-dn"><rect x="0" y="${z}" width="${W}" height="${H}"/></clipPath>
       <path class="pc-fill up" clip-path="url(#pc-up)" d="${line}L${x(pts[pts.length - 1]).toFixed(1)},${z}L${x(pts[0]).toFixed(1)},${z}Z"/>
       <path class="pc-fill dn" clip-path="url(#pc-dn)" d="${line}L${x(pts[pts.length - 1]).toFixed(1)},${z}L${x(pts[0]).toFixed(1)},${z}Z"/>
-      <line class="pc-zero" x1="0" x2="${W}" y1="${z}" y2="${z}"/>
-      <path class="pc-line" d="${line}"/>${dot(c.high, "hi")}${dot(c.low, "lo")}${dot(c.now, "now")}
+      ${zero ? `<line class="pc-zero" x1="0" x2="${W}" y1="${z}" y2="${z}"/>` : ""}
+      ${estLine ? `<path class="pc-line est" d="${estLine}"/>` : ""}<path class="pc-line" d="${realLine}"/>${dot(c.high, "hi")}${dot(c.low, "lo")}${dot(c.now, "now")}
       <line class="pc-cur" x1="-9" x2="-9" y1="0" y2="${H}"/>
     </svg>
     <div class="pc-axis dim small"><span>${hm(pts[0].ts)}</span><span class="pc-read"></span><span>${hm(pts[pts.length - 1].ts)}</span></div>
+    ${nEst ? `<div class="dim small">虚线（${hm(pts[0].ts)}–${hm(pts[nEst].ts)}）是面板开始记录之前的估算：按今天的成交和 5 分钟 K 线算，不含资金费，和实线接头处可能差一点。</div>` : ""}
+    ${zero ? "" : `<div class="dim small">今天一直在 ${lo > 0 ? "盈利" : "亏损"}，纵轴按今天的范围画，没画 0 线。</div>`}
   </div>`;
 }
 // 手指 / 鼠标划过曲线：读出那一分钟的盈亏
