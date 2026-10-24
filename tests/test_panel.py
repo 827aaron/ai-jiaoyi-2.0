@@ -1270,3 +1270,51 @@ def test_team_against_signals_only_recent_routed(tmp_path: Path) -> None:
     team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, None)
     assert [(NOW - e.ts).seconds // 60 for e in team.against] == [2, 5]
     assert build_team(PanelFiles(tmp_path / "x", RISK.day_reset_tz), NOW, None).against == []
+
+
+def test_pnl_curve_backfill_from_ledger_and_klines(tmp_path: Path) -> None:
+    """记录开始前那段：已平的按净盈亏（0 点前那段扣掉），开着的按 5 分钟收盘价算浮盈。"""
+    import asyncio
+
+    from jiaoyi.panel import pnl_curve
+
+    since = datetime(2026, 10, 23, 17, 0, tzinfo=UTC)  # 曼谷 0 点
+    until = since + timedelta(minutes=30)
+
+    def rec(**kw: Any) -> c.PositionRecord:
+        return c.PositionRecord.model_validate({**load_example("position_record"), **kw})
+
+    a = rec(
+        position_id="a",
+        symbol="AAAUSDT",
+        side="long",
+        quantity=2.0,
+        entry_price=100.0,
+        opened_at=(since + timedelta(minutes=5)).isoformat(),
+        status="closed",
+        closed_at=(since + timedelta(minutes=17)).isoformat(),
+        realized_pnl_usdt=15.0,
+    )
+    b = rec(position_id="b", symbol="BBBUSDT", side="short", quantity=1.0, entry_price=50.0,
+            opened_at=(since - timedelta(hours=1)).isoformat(), status="open",
+            closed_at=None, realized_pnl_usdt=None)  # fmt: skip
+    t0 = int(since.timestamp())
+    px = {"AAAUSDT": [100, 101, 104, 108, 108, 108, 108], "BBBUSDT": [48, 47, 46, 49, 50, 51, 52]}
+
+    async def kl(sym: str) -> list[dict[str, float]]:
+        return [{"time": t0 - 300 + i * 300, "close": float(v), "open": 0, "high": 0, "low": 0}
+                for i, v in enumerate(px[sym])]  # fmt: skip
+
+    pts = asyncio.run(pnl_curve.backfill([a, b], since, until, kl))
+    assert [p.ts for p in pts][:2] == [since, since + timedelta(minutes=5)] and all(
+        p.est for p in pts
+    )
+    # 0 点 B 的参考价 = 0 点前一根收盘 48；空单价格跌 → 赚
+    assert pts[0].pnl_usdt == 0.0
+    assert pts[1].pnl_usdt == 2 * (101 - 100) + (48 - 47)  # A 刚开（00:05 收 101）
+    assert pts[4].pnl_usdt == 15.0 + (48 - 50)  # 00:20：A 已平按净盈亏，B 浮亏
+    pnl_curve.save_est(tmp_path, "2026-10-24", pts)
+    assert pnl_curve.load_est(tmp_path, "2026-10-24") == pts
+    pnl_curve.record(tmp_path, "2026-10-24", until, 1010.0, 1000.0)
+    c2 = pnl_curve.read(tmp_path, "2026-10-24", 1000.0, None, pts)
+    assert len(c2.points) == len(pts) + 1 and c2.points[-1].est is False

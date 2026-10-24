@@ -17,9 +17,10 @@ import ipaddress
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -310,7 +311,28 @@ def create_app(
             else None
         )
         day = local_day(now, r.day_reset_tz).isoformat()
-        return pnl_curve.read(data_dir, day, k.day_start_equity_usdt, cur)
+        return pnl_curve.read(
+            data_dir, day, k.day_start_equity_usdt, cur, await pnl_est(day, r.day_reset_tz)
+        )
+
+    async def pnl_est(day: str, tz: str) -> list[pnl_curve.PnlPoint] | None:
+        """面板开始记之前那段（0 点 → 第一个记录点）的估算，算一次存下来；K 线拿不到就先不画。"""
+        est = pnl_curve.load_est(data_dir, day)
+        first = pnl_curve.first_recorded(data_dir, day)
+        if est is not None or first is None:
+            return est
+        since = datetime.combine(date.fromisoformat(day), time(), ZoneInfo(tz))
+        if first - since <= pnl_curve.EST_STEP * 2:
+            return None
+        try:
+            est = await pnl_curve.backfill(
+                files.ledger().positions, since, first, lambda s: market.klines(s, "5m", 300)
+            )
+        except KlineError as e:
+            log.info("今日盈亏曲线回填拿不到 K 线：%s", e)
+            return None
+        pnl_curve.save_est(data_dir, day, est)
+        return est
 
     @api.get("/api/funds")
     async def funds(ai: AiRange = "today") -> FundsPage:
