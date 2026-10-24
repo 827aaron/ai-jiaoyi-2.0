@@ -18,11 +18,15 @@ class HbApiError(Exception):
 
     ``definite_rejection`` 为真表示对方明确拒绝（HTTP 4xx），请求肯定没有生效；
     超时、断连、5xx 则结果不明——对方可能已经执行了。
+    ``transient`` 为真表示是网络层的一时失败（超时、连不上），只读查询可以稍后重试。
     """
 
-    def __init__(self, message: str, *, definite_rejection: bool = False) -> None:
+    def __init__(
+        self, message: str, *, definite_rejection: bool = False, transient: bool = False
+    ) -> None:
         super().__init__(message)
         self.definite_rejection = definite_rejection
+        self.transient = transient
 
 
 @runtime_checkable
@@ -75,7 +79,9 @@ class HttpHummingbotApi:
         try:
             resp = await self._http.request(method, path, **kwargs)
         except httpx.HTTPError as e:
-            raise HbApiError(f"hummingbot-api 不可达（{method} {path}）：{e!r}") from e
+            raise HbApiError(
+                f"hummingbot-api 不可达（{method} {path}）：{e!r}", transient=True
+            ) from e
         if resp.status_code == 404:
             return None
         if resp.status_code >= 400:

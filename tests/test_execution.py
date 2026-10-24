@@ -1186,3 +1186,56 @@ async def test_open_ledger_opposite_side_other_quantity_only_alerts(rig: Rig) ->
     (issue,) = (await rig.rec.reconcile(rig.t)).issues
     assert issue.kind is ReconcileIssueKind.SIDE_MISMATCH and not issue.fixed
     assert rig.ex.market_closed == []
+
+
+# 对账查持仓一时超时：本轮重试，连续 2 轮才告警
+
+
+def _timeouts(n: int) -> list[ExchangeError]:
+    return [ExchangeError("查持仓失败：RequestTimeout", transient=True) for _ in range(n)]
+
+
+async def test_reconcile_retries_transient_timeout_in_round(rig: Rig) -> None:
+    rig.rec._retry_delays = (0.0, 0.0)
+    rig.ex.positions_queue = [*_timeouts(2)]  # 第 3 次成功
+    await rig.rec.reconcile(rig.t)
+    assert rig.alerts.sent == []
+
+
+async def test_reconcile_alerts_only_after_two_failed_rounds(rig: Rig) -> None:
+    rig.rec._retry_delays = (0.0, 0.0)
+    rig.ex.positions_queue = [*_timeouts(3)]
+    with pytest.raises(ReconcileError):
+        await rig.rec.reconcile(rig.t)
+    assert rig.alerts.sent == []  # 单轮只记日志
+    await rig.rec.reconcile(rig.t)  # 下一轮好了：计数清零
+    rig.ex.positions_queue = [*_timeouts(3)]
+    with pytest.raises(ReconcileError):
+        await rig.rec.reconcile(rig.t)
+    assert rig.alerts.sent == []
+    rig.ex.positions_queue = [*_timeouts(3)]
+    with pytest.raises(ReconcileError):
+        await rig.rec.reconcile(rig.t)
+    assert [a.level for a in rig.alerts.sent] == [AlertLevel.CRITICAL]
+    assert "连续 2 轮" in rig.alerts.sent[0].title
+
+
+async def test_reconcile_definite_error_alerts_at_once(rig: Rig) -> None:
+    rig.rec._retry_delays = (0.0, 0.0)
+    rig.ex.positions_queue = [ExchangeError("查持仓失败：-2015 Invalid API-key")]
+    with pytest.raises(ReconcileError):
+        await rig.rec.reconcile(rig.t)
+    assert [a.level for a in rig.alerts.sent] == [AlertLevel.CRITICAL]
+
+
+def test_ccxt_transient_classification() -> None:
+    import ccxt
+
+    from jiaoyi.execution.exchange import is_transient
+
+    assert is_transient(ccxt.RequestTimeout("t")) and is_transient(ccxt.NetworkError("n"))
+    assert is_transient(ccxt.ExchangeNotAvailable("502"))
+    for e in (ccxt.DDoSProtection("418"), ccxt.RateLimitExceeded("429")):
+        assert not is_transient(e)
+    assert not is_transient(ccxt.InvalidNonce("-1021"))
+    assert not is_transient(ccxt.AuthenticationError("-2015"))

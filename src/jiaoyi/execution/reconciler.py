@@ -77,7 +77,19 @@ def _signed(side: Side, qty: float) -> float:
 
 
 class ReconcileError(Exception):
-    """核对本身做不下去（hummingbot-api 或币安连不上）。已发 critical 告警。"""
+    """核对本身做不下去（hummingbot-api 或币安连不上）。
+
+    明确的错误（鉴权、限流、时间戳…）立即发 critical；超时 / 断连这类一时失败先在本轮里短退避重试，
+    还不行只记日志，连续 ``UNREACHABLE_ALERT_ROUNDS`` 轮都这样才发。"""
+
+
+RETRY_DELAYS_S = (0.5, 1.5)
+"""一时失败（超时、断连）本轮内重试的退避。"""
+UNREACHABLE_ALERT_ROUNDS = 2
+
+
+def _transient(e: BaseException) -> bool:
+    return bool(getattr(e, "transient", False))
 
 
 class ThreeWayReconciler:
@@ -97,7 +109,11 @@ class ThreeWayReconciler:
         recorder: RoleRecorder | None = None,
         heartbeats: Sequence[Callable[[datetime, Health, str], None]] = (),
         close_unknown_positions: bool = False,
+        retry_delays_s: Sequence[float] = RETRY_DELAYS_S,
     ) -> None:
+        self._retry_delays = tuple(retry_delays_s)
+        self._unreachable_rounds = 0
+        """连续几轮因为一时失败（超时 / 断连）没对成。"""
         self._adapter = adapter
         self._api = api
         self._exchange = exchange
@@ -119,6 +135,41 @@ class ThreeWayReconciler:
         self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
 
+    async def _retry(self, fn: Callable[[], Awaitable[Any]]) -> Any:
+        """只读查询：超时 / 断连这类一时失败短退避重试；明确的错误直接抛。"""
+        for delay in (*self._retry_delays, None):
+            try:
+                return await fn()
+            except (HbApiError, ExchangeError) as e:
+                if delay is None or not _transient(e):
+                    raise
+                log.warning("对账查询一时失败，%.1f 秒后重试：%r", delay, e)
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _unreachable(self, now: datetime, e: Exception) -> None:
+        """明确的错误立即告警；一时失败（重试过还不行）连续 2 轮才告警，单轮只记日志。"""
+        transient = _transient(e)
+        self._unreachable_rounds = self._unreachable_rounds + 1 if transient else 0
+        if transient and self._unreachable_rounds < UNREACHABLE_ALERT_ROUNDS:
+            log.warning("对账这轮没对成（%r），重试过了，下轮再对", e)
+            if self._rec is not None:
+                self._rec.note(now, "这轮查持仓超时，重试过还不行，下轮再对（连续 2 轮才告警）")
+                self._rec.heartbeat(now, Health.DEGRADED, "上轮查持仓超时，下轮再对")
+            return
+        rounds = f"（连续 {self._unreachable_rounds} 轮）" if transient else ""
+        await self._send(
+            now,
+            AlertLevel.CRITICAL,
+            f"对账失败：连不上 hummingbot-api 或币安{rounds}",
+            repr(e),
+            None,
+            "reconcile_unreachable",
+        )
+        if self._rec is not None:
+            self._rec.record(now, Outcome.ERROR, f"对账失败{rounds}：{e!r}")
+            self._rec.heartbeat(now, Health.DOWN, "连不上 hummingbot-api 或币安")
+
     def set_next_run(self, at: datetime | None) -> None:
         """主循环按 ``reconcile_interval_s`` 排下一轮，团队页显示「下次对账」。"""
         if self._rec is not None:
@@ -127,24 +178,15 @@ class ThreeWayReconciler:
     async def reconcile(self, now: datetime) -> ReconcileReport:
         issues: list[ReconcileIssue] = []
         try:
-            running = await self._api.running_executors(self._account)
+            running = await self._retry(lambda: self._api.running_executors(self._account))
             issues += await self._claim_unclaimed(running, now)
-            await self._adapter.sync_all()
-            exchange_positions = await self._exchange.positions()
-            stops = await self._exchange.open_stops()
+            await self._retry(self._adapter.sync_all)
+            exchange_positions = await self._retry(self._exchange.positions)
+            stops = await self._retry(self._exchange.open_stops)
         except (HbApiError, ExchangeError) as e:
-            await self._send(
-                now,
-                AlertLevel.CRITICAL,
-                "对账失败：连不上 hummingbot-api 或币安",
-                repr(e),
-                None,
-                "reconcile_unreachable",
-            )
-            if self._rec is not None:
-                self._rec.record(now, Outcome.ERROR, f"对账失败：{e!r}")
-                self._rec.heartbeat(now, Health.DOWN, "连不上 hummingbot-api 或币安")
+            await self._unreachable(now, e)
             raise ReconcileError(str(e)) from e
+        self._unreachable_rounds = 0
 
         live = self._registry.live()
         # 正在平仓（平仓单已发、执行器还没结算）：币安已平、账本还没结是正常的几秒，
