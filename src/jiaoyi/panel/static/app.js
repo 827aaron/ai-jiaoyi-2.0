@@ -446,6 +446,7 @@ document.addEventListener("click", async (e) => {
     if (adv) adv.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   else if (act === "daypnl") showDayPnl();
+  else if (act === "prompts") showPrompts();
   else if (act === "mode") switchMode(arg);
   else if (act === "hold") switchHold(arg);
   else if (act === "clearpins") askClearPins();
@@ -1457,6 +1458,40 @@ function quietHead(sel) {
   const last = sel.summary ? `<div><span class="n">${sel.last_run_at ? hms(sel.last_run_at) : ""}</span><span><span class="pill">最近一轮</span> ${esc(sel.summary)}</span></div>` : "";
   return `<div class="note">${esc(why)}今日查了 ${sel.calls || 0} 次。</div>${last ? `<div class="log trail">${last}</div>` : ""}`;
 }
+// 军师团现在用的提示词（data/prompts_active.json，引擎启动时写；按最长持仓档分短线 / 中线 / 长线写法）
+const PROMPT_STYLE = { short: "短线写法", mid: "中线写法", long: "长线写法" };
+const PROMPT_PART = [
+  ["shared", "公共说明（每个角色都读）"],
+  ["pick", "总盘会挑币"],
+  ["meeting_note", "每场会的说明（花括号里的开会时填）"],
+  ["position_note", "手上有这个币的仓时加的说明"],
+  ["convert", "会议结论转成作战卡"],
+];
+function promptLine(pr, holdNow) {
+  if (!pr) return `<div class="prompt-line dim small">现在用的提示词：还没有记录（军师团引擎启动后才写）</div>`;
+  const later = holdNow && holdNow !== pr.hold ? `<span class="warn">（设置已改成 ${esc(profileSpan(holdNow))}，重启后换）</span>` : "";
+  return `<div class="prompt-line small">现在用的提示词：<b>${esc(profileSpan(pr.hold))}档</b>（${esc(PROMPT_STYLE[pr.style] || pr.style)}）<span class="dim"> · ${md(pr.written_at)} ${hm(pr.written_at)} 起用</span>${later} <button class="btn b-sm" data-act="prompts">看原文</button></div>`;
+}
+async function showPrompts() {
+  dlg(`<h3>军师团现在用的提示词</h3><div class="dim">读取中…</div>`);
+  let p;
+  try { p = await getJson("/api/prompts"); } catch (e) { return dlg(`<h3>军师团现在用的提示词</h3><div class="down">${esc(e.message)}</div>`); }
+  const block = (t, v) => `<div class="st-sub">${esc(t)}</div><pre class="json prompt">${esc(typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre>`;
+  const known = new Set(["hold", "style", "brief_fields", "indicator_interval", "analyst_klines", ...PROMPT_PART.map(([k]) => k)]);
+  const bf = p.brief_fields || {};
+  const facts = [
+    p.analyst_klines ? `分析师看的 K 线：${p.analyst_klines.join("、")}` : "",
+    p.indicator_interval ? `行情分析师算指标用 ${profileSpan(p.indicator_interval)} K 线` : "",
+    bf.main ? `大盘简报主要看：${bf.main.join("、")}` : "",
+    bf.background && bf.background.length ? `只当背景：${bf.background.join("、")}` : "",
+  ].filter(Boolean);
+  dlg(`<h3>军师团现在用的提示词 · ${esc(profileSpan(p.hold || ""))}档（${esc(PROMPT_STYLE[p.style] || p.style || "")}）</h3>
+    <p class="dim small">只读。按最长持仓档写，换档后重启主程序才换。</p>
+    ${facts.length ? `<ul class="small">${facts.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+    ${PROMPT_PART.filter(([k]) => p[k]).map(([k, t]) => block(t, p[k])).join("")}
+    ${Object.keys(p).filter((k) => !known.has(k)).map((k) => block(k, p[k])).join("")}`);
+  $("#layer .dlg").classList.add("wide");
+}
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
@@ -1465,6 +1500,7 @@ P.team = () => {
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
     ${sel.role === "keeper" ? againstCard(d.against_checks || []) : ""}
+    ${sel.role === "commander" || sel.role === "market" ? `<section class="card mt">${promptLine(d.prompts)}</section>` : ""}
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
@@ -2501,6 +2537,7 @@ function tierTable(d) {
 function tierSection(d) {
   if (!d.profile || !d.profile.defaults || !Object.keys(d.profile.defaults).length) return `<section class="card st"><div class="ch"><h2>选档位</h2></div><div class="st-row"><div class="k">这次启动的面板没拿到配置文件路径，看不到档位</div></div></section>`;
   return `<section class="tier-sec"><div class="tier-head"><h2>选档位</h2><span class="dim small">档位 = 军师团多久开一次会。持仓时间、止损宽度、AI 费用都跟着走；点卡片先看会变什么，确认了才换。</span></div>
+    ${promptLine(d.prompts, d.profile.hold)}
     <div class="tiers-scroll"><div class="tiers" role="radiogroup" aria-label="开会档位">${tierCards(d)}</div></div>${tierPreview(d)}</section>${tierTable(d)}`;
 }
 
