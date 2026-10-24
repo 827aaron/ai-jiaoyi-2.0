@@ -484,6 +484,13 @@ class FastLoopConfig(Contract):
         description="最近 10 秒成交额折算成每分钟也算放量：量能突增、放量突破在放量开头几秒就能出，"
         "不用等满 1 分钟（1 分钟或 10 秒任一条够倍数就算；主动买卖占比用同一段时间）。",
     )
+    burst_min_1m_ratio: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=50.0,
+        description="10 秒提前触发时，1 分钟量至少是平时几倍（0 = 不看）。10-24 记录：10 秒触发、"
+        "1 分钟只有 0.9–1.6 倍的 6 笔全亏，2 倍能挡下 5 笔、没挡掉赚钱的。",
+    )
     liq_min_usdt_1m: float = Field(
         default=100_000.0, ge=0.0, le=1e9, description="1 分钟爆仓额下限。"
     )
