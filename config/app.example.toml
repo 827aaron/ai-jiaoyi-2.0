@@ -74,8 +74,8 @@ entry_limit_pullback = false      # 进场用挂单等回踩（默认关 = 市�
 entry_limit_pullback_live = false # testnet / live 也用挂单等回踩
 entry_limit_wait_min = 60         # 挂单最多等 60 分钟，没成交就撤（8h 以上档改市价追）
 # trailing_on = false              # 移动止损（持仓管家）：赚到 trail_start_r 后止损跟着最高盈利收紧，只收紧不放松（不写 = 关）
-# trail_start_r = 1.0              # 赚到几个止损距离后开始跟（1 = 一个止损距离）
-# trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 1.0、4h 以上 1.2）
+# trail_start_r = 0.7              # 赚到几个止损距离后开始跟（1 = 一个止损距离；不写 = 跟档位 0.7）
+# trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 0.7、4h 以上 1.0）
 # breakeven_on = false             # 保本：赚到 breakeven_trigger_r 后最坏按保本价平（不写 = 关）
 # breakeven_trigger_r = 0.8        # 赚到几个止损距离后保本
 new_listing_block_h = 24          # 保镖：新上线不到 24 小时的币不开新仓（0 = 不挡）

@@ -455,17 +455,18 @@ class FastLoopConfig(Contract):
         "保住最高利润的一大半。默认关；开了只对之后新开的仓生效。",
     )
     trail_start_r: float = Field(
-        default=1.0,
+        default=0.7,
         ge=0.1,
         le=10.0,
-        description="赚到几倍止损距离（R）才开始移动止损，刚开的仓不碰。",
+        description="赚到几倍止损距离（R）才开始移动止损，刚开的仓不碰。档位推荐都是 0.7"
+        "（止盈多在 1.1–1.5R，要在止盈前就开始跟）。",
     )
     trail_distance_r: float = Field(
         default=1.0,
         ge=0.1,
         le=10.0,
         description="移动止损离最高盈利多远（止损距离的几倍），放宽一点平时不碍事。"
-        "档位推荐 30m–2h 1.0、4h 以上 1.2。",
+        "档位推荐 30m–2h 0.7、4h 以上 1.0（1.2R 止盈前最高时锁住约 0.5R）。",
     )
     new_listing_block_h: float = Field(
         default=24.0,

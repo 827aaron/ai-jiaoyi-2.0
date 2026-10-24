@@ -220,7 +220,7 @@ OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase
 hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时盈利 − 回撤距离」，之后只往上挪不往下放，由 hummingbot 实时盯着平仓
 （平仓原因「保本 / 移动止损」）。数字都按止损距离（R）给：
 
-- 只开移动：启动线 = max(`trail_start_r`, `trail_distance_r` + 平仓手续费)，回撤距离 = `trail_distance_r`（档位 30m–2h 1.0、4h 起 1.2）；
+- 只开移动：启动线 = max(`trail_start_r`, `trail_distance_r` + 平仓手续费)，回撤距离 = `trail_distance_r`（档位 30m–2h 0.7、4h 起 1.0；`trail_start_r` 档位都是 0.7）；
 - 只开保本：启动线 = `breakeven_trigger_r`，回撤距离 = 启动线 − 平仓手续费（启动时止损正好在保本价）；
 - 都开：启动线 = `breakeven_trigger_r`，回撤距离 = min(`trail_distance_r`, 启动线 − 平仓手续费)。
 
