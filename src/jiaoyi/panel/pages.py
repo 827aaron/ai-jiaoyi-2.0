@@ -75,6 +75,13 @@ class TrailItem(BaseModel):
     """拍板人的概率、保镖的拒绝理由等，原样给页面挑着显示。"""
     latency_ms: float = 0.0
     cost_usd: float = 0.0
+    tag: str | None = None
+    """额外标签，例如管家的「反向急查」（不是例行复查）。"""
+
+
+def is_against_check(r: DecisionRecord) -> bool:
+    """管家这条是不是反向信号急查：先认决策记录的 ``output.against``，旧记录认理由里的字样。"""
+    return r.role is Role.KEEPER and ("against" in r.output or "反向信号急查" in r.summary)
 
 
 class GroupExposure(BaseModel):
@@ -93,6 +100,8 @@ class PositionsPage(BaseModel):
     groups: list[GroupExposure]
     trails: dict[str, list[TrailItem]]
     """position_id → 这笔从信号到现在的每一步（今天的记录）。"""
+    price_env: Literal["live", "demo"] | None = None
+    """现价从哪个盘子来：live 主网；demo = paper / testnet 撮合的币安 Demo；None = 没接实时行情。"""
 
 
 Progress = Literal["err", "doing", "done", "wait"]
@@ -129,6 +138,24 @@ class RoleCard(BaseModel):
     """哨兵：掉出作战卡、也没持仓、所以没显示的币数。"""
 
 
+class AgainstCheck(BaseModel):
+    """一次反向信号急查：哨兵哪个时候看到什么，管家怎么判的（团队页管家卡固定显示 30 分钟）。"""
+
+    symbol: str
+    ts: datetime
+    """哨兵看到反向信号的时间。"""
+    desc: str = ""
+    strong: bool = False
+    verdict: Literal["close", "hold"] | None = None
+    """None = 管家还没查完。"""
+    p_close: float | None = None
+    reason: str | None = None
+    """管家这次的理由（决策日志原话，去掉「币 拿住：」前缀）。"""
+    checked_at: datetime | None = None
+    failed: bool = False
+    """管家这次没问成（行情没有 / 决策模型出错），按规矩维持现状。"""
+
+
 class TeamPage(BaseModel):
     roles: list[RoleCard]
     selected: Role
@@ -151,6 +178,8 @@ class TeamPage(BaseModel):
     """选中盘口员时：data/market_snapshot.json（逐币行情 + 各路推送今天的条数）。"""
     against: list[AgainstSignalEvent] = []
     """最近 30 分钟哨兵交出去的反向信号（新的在前）；流程图上对应的线平时不画，有才亮。"""
+    against_checks: list[AgainstCheck] = []
+    """最近 30 分钟叫管家急查的反向信号和管家的判断（新的在前），不被例行复查冲掉。"""
 
 
 def build_positions(
@@ -308,6 +337,43 @@ def _recent_against(status: dict[str, ModuleStatus], now: datetime) -> list[Agai
     return sorted(hits, key=lambda e: e.ts, reverse=True)
 
 
+def _against_checks(
+    events: list[AgainstSignalEvent], records: list[DecisionRecord]
+) -> list[AgainstCheck]:
+    """叫了管家急查的反向信号，各配上管家那次判断：同一笔仓、信号之后、理由里带「反向信号急查」的第一条。"""
+    keeper = sorted(
+        (r for r in records if is_against_check(r)),
+        key=lambda r: r.ts,
+    )
+    out = []
+    for e in events:
+        if "keeper_recheck" not in e.actions:
+            continue
+        hit = next((r for r in keeper if r.position_id == e.position_id and r.ts >= e.ts), None)
+        verdict = e.keeper_verdict
+        p_close = reason = None
+        if hit is not None:
+            act = hit.output.get("action")
+            verdict = act if act in ("close", "hold") else verdict
+            p = hit.output.get("p_close")
+            p_close = float(p) if isinstance(p, int | float) else None
+            reason = hit.summary.split("：", 1)[-1]
+        out.append(
+            AgainstCheck(
+                symbol=e.symbol,
+                ts=e.ts,
+                desc=e.desc,
+                strong=e.strong,
+                verdict=verdict,
+                p_close=p_close,
+                reason=reason,
+                checked_at=hit.ts if hit is not None else None,
+                failed=hit is not None and hit.outcome is Outcome.ERROR,
+            )
+        )
+    return out
+
+
 def build_team(
     files: PanelFiles,
     now: datetime,
@@ -343,6 +409,7 @@ def build_team(
     mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
     meets = meetings if chosen is Role.COMMANDER else []
     market = next((m for m in meetings if m.symbol == MARKET), None)
+    against = _recent_against(status, now)
     return TeamPage(
         roles=cards,
         selected=chosen,
@@ -358,7 +425,8 @@ def build_team(
         ),
         market=market,
         market_progress=_market_progress(market, now, run.tz),
-        against=_recent_against(status, now),
+        against=against,
+        against_checks=_against_checks(against, records),
     )
 
 
@@ -508,6 +576,7 @@ def _item(r: DecisionRecord) -> TrailItem:
         output=r.output,
         latency_ms=r.latency_ms,
         cost_usd=r.cost_usd,
+        tag="反向急查" if is_against_check(r) else None,
     )
 
 

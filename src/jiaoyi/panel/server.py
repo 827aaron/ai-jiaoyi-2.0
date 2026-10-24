@@ -37,8 +37,8 @@ from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
 from jiaoyi.panel.hb import HbReader
-from jiaoyi.panel.live_price import LivePrices, merge_live
-from jiaoyi.panel.market import Interval, KlineError, KlineSource
+from jiaoyi.panel.live_price import DEMO_WS_BASE, WS_BASE, LivePrices, merge_live
+from jiaoyi.panel.market import BASE, DEMO_BASE, Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
 from jiaoyi.panel.overview import Overview, PriceSrc, build_overview, compute_kpis
 from jiaoyi.panel.pages import (
@@ -223,12 +223,40 @@ def create_app(
     boot_code = code_fingerprint()
     market = klines or KlineSource()
 
-    ticks = live_prices or LivePrices()
+    QUOTE_BASES = {"live": (BASE, WS_BASE), "demo": (DEMO_BASE, DEMO_WS_BASE)}
+    quote_srcs: dict[str, tuple[KlineSource, LivePrices]] = {}
+
+    def quote_env() -> Literal["live", "demo"] | None:
+        """持仓在哪个盘子撮合：live 主网；paper / testnet 按 sim_environment（旧测试网不接）。"""
+        a = cfg()[1]
+        if a.mode.value == "live":
+            return "live"
+        return "demo" if a.sim_environment == "demo" else None
+
+    def quotes() -> tuple[KlineSource, LivePrices] | None:
+        """当前模式的行情源（持仓现价、持仓页 K 线）；测试注入的源不分模式。"""
+        env = quote_env()
+        if env is None:
+            return None
+        if klines is not None or live_prices is not None:
+            return market, live_prices or LivePrices("ws://127.0.0.1:9")
+        if env not in quote_srcs:
+            rest, ws = QUOTE_BASES[env]
+            quote_srcs[env] = (market if rest == BASE else KlineSource(rest), LivePrices(ws))
+        for other, (_, lp) in quote_srcs.items():
+            if other != env:
+                lp.watch(())  # 换了模式：另一边的推送不再订
+        return quote_srcs[env]
 
     async def last_prices() -> dict[str, tuple[float, PriceSrc]]:
-        """持仓币的现价：币安 WebSocket 推送（``ticks``）；推送断了的币退回一次全量 ticker
-        （2 秒缓存，限流时不发）；都拿不到的不放进来，持仓那边退回 hummingbot 的浮盈。"""
+        """持仓币的现价，取持仓实际撮合的盘子（live 主网 / paper、testnet 币安 Demo）：推送优先；
+        推送断了的币退回一次全量 ticker（2 秒缓存，限流时不发）；都拿不到的不放进来，
+        持仓那边退回 hummingbot 的浮盈（标记价），不拿别的盘子的价顶。"""
         held = {p.symbol for p in files.ledger().live()}
+        q = quotes()
+        if q is None:
+            return {}
+        rest_src, ticks = q
         ticks.watch(held)
         out: dict[str, tuple[float, PriceSrc]] = {}
         for s in held:
@@ -237,7 +265,7 @@ def create_app(
                 out[s] = (px, "push")
         if held - out.keys():
             try:
-                rest = await asyncio.wait_for(market.last_prices(), 3.0)
+                rest = await asyncio.wait_for(rest_src.last_prices(), 3.0)
             except (KlineError, TimeoutError):
                 rest = {}
             for s in held - out.keys():
@@ -267,7 +295,10 @@ def create_app(
             task.cancel()
         await hb.close()
         await market.close()
-        await ticks.close()
+        for rest_src, lp in quote_srcs.values():
+            await lp.close()
+            if rest_src is not market:
+                await rest_src.close()
 
     api = FastAPI(title="jiaoyi 面板", docs_url=None, redoc_url=None, lifespan=lifespan)
 
@@ -296,7 +327,8 @@ def create_app(
 
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
-        return build_positions(files, await hb.snapshot(), cfg()[0], clock(), await last_prices())
+        page = build_positions(files, await hb.snapshot(), cfg()[0], clock(), await last_prices())
+        return page.model_copy(update={"price_env": quote_env()})
 
     @api.get("/api/team")
     async def team(role: Role | None = None) -> TeamPage:
@@ -445,11 +477,12 @@ def create_app(
     @api.get("/api/klines")
     async def klines_(symbol: str, interval: Interval = "1m") -> list[dict[str, float]]:
         try:
-            bars = await market.klines(symbol, interval)
+            q = quotes()
+            bars = await (q[0] if q else market).klines(symbol, interval)
         except KlineError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
         # 最后一根接上推送，和持仓表现价同一个数
-        return merge_live(bars, ticks.bar(symbol), interval)
+        return merge_live(bars, q[1].bar(symbol), interval) if q else bars
 
     @api.get("/api/card-atr")
     async def card_atr(symbol: str) -> CardAtr:

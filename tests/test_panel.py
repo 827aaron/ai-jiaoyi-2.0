@@ -1369,6 +1369,64 @@ def test_team_against_signals_only_recent_routed(tmp_path: Path) -> None:
     assert build_team(PanelFiles(tmp_path / "x", RISK.day_reset_tz), NOW, None).against == []
 
 
+def test_team_against_checks_pinned_and_tagged(tmp_path: Path) -> None:
+    """管家卡的反向急查：配上信号之后同一笔仓的那次急查判断，例行复查冲不掉；日志里标「反向急查」。"""
+    from jiaoyi.panel.pages import build_team
+
+    def ev(mins: int, pid: str, **kw: Any) -> c.AgainstSignalEvent:
+        return c.AgainstSignalEvent.model_validate({
+            "symbol": "ZECUSDT", "ts": (NOW - timedelta(minutes=mins)).isoformat(),
+            "kind": "volume_surge", "side": "long", "actions": ["keeper_recheck"],
+            "position_id": pid, "desc": "放量拉升", **kw,
+        })  # fmt: skip
+
+    st = c.ModuleStatus(
+        role=c.Role.SENTINEL, health=c.Health.OK, ts=NOW,
+        against_signals=[ev(6, "p1", keeper_verdict="hold"), ev(1, "p2")],
+    )  # fmt: skip
+    (tmp_path / "module_status.json").write_text(
+        json.dumps({st.role.value: st.model_dump(mode="json")})
+    )
+    log = JsonlDecisionLog(tmp_path)
+    k = c.Role.KEEPER
+    log.write(
+        _rec(
+            k,
+            c.Outcome.HOLD,
+            "ZECUSDT 拿住：平仓概率 0.20",
+            NOW - timedelta(minutes=8),
+            position_id="p1",
+            output={"action": "hold", "p_close": 0.2},
+        )
+    )  # 信号前的例行
+    log.write(
+        _rec(
+            k,
+            c.Outcome.HOLD,
+            "ZECUSDT 拿住：平仓概率 0.41，反向信号急查（放量拉升）",
+            NOW - timedelta(minutes=5),
+            position_id="p1",
+            output={"action": "hold", "p_close": 0.41},
+        )
+    )
+    log.write(
+        _rec(
+            k,
+            c.Outcome.HOLD,
+            "NEARUSDT 拿住：平仓概率 0.50",
+            NOW - timedelta(minutes=1),
+            position_id="p9",
+            output={"action": "hold", "p_close": 0.5},
+        )
+    )  # 例行复查
+    team = build_team(PanelFiles(tmp_path, RISK.day_reset_tz), NOW, k)
+    new, old = team.against_checks
+    assert (new.symbol, new.verdict, new.reason) == ("ZECUSDT", None, None)  # 还没查完
+    assert (old.verdict, old.p_close) == ("hold", 0.41)
+    assert old.reason == "平仓概率 0.41，反向信号急查（放量拉升）"
+    assert [r.tag for r in team.records] == [None, "反向急查", None]
+
+
 def test_pnl_curve_backfill_from_ledger_and_klines(tmp_path: Path) -> None:
     """记录开始前那段：已平的按净盈亏（0 点前那段扣掉），开着的按 5 分钟收盘价算浮盈。"""
     import asyncio

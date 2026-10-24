@@ -16,6 +16,8 @@ ATR_INTERVAL: dict[int, Interval] = {5: "5m", 15: "15m", 30: "30m", 60: "1h", 24
 """保镖 ATR 用的分钟周期 → 币安原生 K 线周期（同样按 UTC 整点对齐）。"""
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 BASE = "https://fapi.binance.com"
+DEMO_BASE = "https://demo-fapi.binance.com"
+"""paper / testnet 的持仓在币安 Demo 撮合：现价、持仓页 K 线从这里拿，和账户对得上。"""
 
 
 DECIMALS_CACHE_S = 6 * 3600.0
