@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
@@ -678,7 +679,7 @@ def _item(r: DecisionRecord) -> TrailItem:
 
 # ---------------------------------------------------------------- 历史
 
-HistoryRange = Literal["today", "7d", "30d"]
+HistoryRange = Literal["today", "7d", "30d", "all"]
 REJECT_LIMIT = 300
 
 
@@ -719,6 +720,90 @@ class KindStats(BaseModel):
     pnl_usdt: float
 
 
+class GroupStats(BaseModel):
+    """一组成交了的单的成绩（按币、按多空、按信号都用它）。"""
+
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float
+    pnl_usdt: float
+    """净盈亏（已扣开平手续费）。"""
+    fees_usdt: float
+    avg_r: float | None
+    """平均每笔赚几个 R（R = 这笔开仓时的止损距离 × 数量）；没有止损价的单不算，全没有就是 None。"""
+    fee_share: float | None
+    """手续费占毛利（毛利 = 净盈亏 + 手续费）多少；毛利 ≤ 0 时是 None（毛利本身就亏了）。"""
+    avg_hold_s: float
+    """平均持有多久（秒）。"""
+
+
+class SymbolSplit(GroupStats):
+    """一个币里再按多空 / 信号拆开：``by`` = side / kind，``key`` = long / short / 信号类型。"""
+
+    by: Literal["side", "kind"]
+    key: str
+
+
+class SymbolStats(GroupStats):
+    """一个币在这段时间的成绩（只算成交了的单），给以后拉黑 / 加白参考。"""
+
+    symbol: str
+    longs: int
+    shorts: int
+    top_kind: str | None
+    """做这个币最多的信号类型（测试单算 ``test``）。"""
+    splits: list[SymbolSplit] = []
+    """按多空、按信号拆开的成绩（笔数多的在前）。"""
+
+
+def _group(ts: list[TradeRow]) -> dict[str, Any]:
+    rs = []
+    for t in ts:
+        if t.entry_price and t.stop_loss_price:
+            risk = abs(t.entry_price - t.stop_loss_price) * t.quantity
+            if risk > 0:
+                rs.append(t.pnl_usdt / risk)
+    pnl = sum(t.pnl_usdt for t in ts)
+    fees = sum(t.fees_usdt for t in ts)
+    wins = sum(1 for t in ts if t.pnl_usdt > 0)
+    return {
+        "trades": len(ts),
+        "wins": wins,
+        "losses": sum(1 for t in ts if t.pnl_usdt < 0),
+        "win_rate": wins / len(ts),
+        "pnl_usdt": pnl,
+        "fees_usdt": fees,
+        "avg_r": sum(rs) / len(rs) if rs else None,
+        "fee_share": fees / (pnl + fees) if pnl + fees > 0 else None,
+        "avg_hold_s": sum((t.closed_at - t.opened_at).total_seconds() for t in ts) / len(ts),
+    }
+
+
+def _kind(t: TradeRow) -> str:
+    return "test" if t.test else t.signal_kind or "unknown"
+
+
+def _symbol_stats(sym: str, ts: list[TradeRow]) -> SymbolStats:
+    splits: list[SymbolSplit] = []
+    for by, key_of in (("side", lambda t: t.side), ("kind", _kind)):
+        groups: dict[str, list[TradeRow]] = {}
+        for t in ts:
+            groups.setdefault(key_of(t), []).append(t)
+        splits += [
+            SymbolSplit(by=by, key=k, **_group(g))
+            for k, g in sorted(groups.items(), key=lambda kv: -len(kv[1]))
+        ]
+    return SymbolStats(
+        symbol=sym,
+        longs=sum(1 for t in ts if t.side == "long"),
+        shorts=sum(1 for t in ts if t.side == "short"),
+        top_kind=Counter(_kind(t) for t in ts).most_common(1)[0][0],
+        splits=splits,
+        **_group(ts),
+    )
+
+
 class CurvePoint(BaseModel):
     ts: datetime
     cum_pnl_usdt: float
@@ -735,6 +820,8 @@ class HistoryPage(BaseModel):
     """按平仓顺序累计盈亏的最大回撤。"""
     curve: list[CurvePoint]
     by_kind: list[KindStats]
+    by_symbol: list[SymbolStats] = []
+    """按币种统计，净盈亏从高到低。"""
     rows: list[TradeRow]
     """最新在前。"""
     test_trades: int = 0
@@ -745,7 +832,7 @@ class HistoryPage(BaseModel):
 
 def _range_start(now: datetime, tz: str, rng: HistoryRange) -> datetime:
     day0 = datetime.combine(local_day(now, tz), time(), tzinfo=ZoneInfo(tz))
-    days = {"today": 0, "7d": 6, "30d": 29}[rng]
+    days = {"today": 0, "7d": 6, "30d": 29, "all": 0}[rng]
     return (day0 - timedelta(days=days)).astimezone(UTC)
 
 
@@ -757,6 +844,11 @@ def build_history(
     include_tests: bool = False,
 ) -> HistoryPage:
     start = _range_start(now, risk.day_reset_tz, rng)
+    if rng == "all":  # 全部 = 从账本里最早一笔平仓算起
+        start = min(
+            (p.closed_at for p in files.ledger().positions if p.closed_at is not None),
+            default=start,
+        )
     closed = sorted(
         (
             p
@@ -830,6 +922,12 @@ def build_history(
     by: dict[str, list[float]] = {}
     for t in real:
         by.setdefault("test" if t.test else (t.signal_kind or "unknown"), []).append(t.pnl_usdt)
+    per: dict[str, list[TradeRow]] = {}
+    for t in real:
+        if not t.pnl_missing:  # 没取到盈亏数的单不算，免得当成 0 拉低胜率
+            per.setdefault(t.symbol, []).append(t)
+    by_symbol = [_symbol_stats(sym, ts) for sym, ts in per.items()]
+    by_symbol.sort(key=lambda x: -x.pnl_usdt)
     rejected = [
         _item(r)
         for r in reversed(recs)
@@ -858,6 +956,7 @@ def build_history(
             )
             for k, v in sorted(by.items(), key=lambda kv: -sum(kv[1]))
         ],
+        by_symbol=by_symbol,
         rows=list(reversed(rows)),
         test_trades=tests,
         rejected=rejected,

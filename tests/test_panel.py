@@ -578,6 +578,13 @@ def test_history_page(tmp_path: Path) -> None:
     assert row.category == ex["category"]
     assert row.take_profit_price == ex["take_profit_price"]
     assert row.exit_price is None and not row.pnl_missing  # 有盈亏数，只是平仓价没回填
+    [st] = page.by_symbol  # 按币种统计
+    assert (st.symbol, st.trades, st.top_kind) == (ex["symbol"], 1, "volume_breakout")
+    assert st.longs + st.shorts == 1 and st.win_rate == 1.0
+    assert st.pnl_usdt == pytest.approx(12.5) and st.avg_hold_s > 0
+    assert (st.wins, st.losses) == (1, 0) and st.avg_r is not None and st.avg_r > 0
+    assert {(g.by, g.key) for g in st.splits} == {("side", ex["side"]), ("kind", "volume_breakout")}
+    assert build_history(files, RISK, NOW, "all").by_symbol == page.by_symbol
 
 
 def test_history_reads_older_days_with_role_filter(tmp_path: Path) -> None:
