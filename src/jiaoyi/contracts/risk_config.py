@@ -222,6 +222,12 @@ class FastLoopConfig(Contract):
         description="拍板人：做的把握至少多少。一道题问法下这是唯一的放行门槛"
         "（Aaron 10-24 定 0.55），预测员的加减分加在这个概率上。",
     )
+    predictor_nudge_mode: Literal["card_agree", "symmetric"] = Field(
+        default="card_agree",
+        description="预测员什么时候算和信号一致（一致就给「做」加分，不一致不扣）："
+        "card_agree = 只有报 1.0（所有路径收在现价之上）算看涨，其余都算看跌，所以做空几乎总加分；"
+        "symmetric = 做多要报 1.0、做空要报 0（所有路径都在现价之下）才加，其余不加。",
+    )
     gate_questions: Literal["one", "six"] = Field(
         default="one",
         description="拍板人怎么问：one = 只问一道「做不做」（按之后 30 分钟、扣手续费后判断，"

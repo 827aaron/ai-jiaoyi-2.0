@@ -32,9 +32,19 @@ from jiaoyi.gate.questions import (
 from jiaoyi.gate.replay import Found, candidate
 from jiaoyi.keeper.keeper import _entry_block
 from jiaoyi.market.features import EntryContext, RollingFeatureEngine
-from tests.fastloop_helpers import FAST, GOOD_LONG, account, answer_with, card, jev, signal
+from tests.fastloop_helpers import (
+    FAST,
+    GOOD_LONG,
+    RISK,
+    Lots,
+    account,
+    answer_with,
+    card,
+    jev,
+    signal,
+)
 from tests.test_gate import model
-from tests.test_risk_guard import guard
+from tests.test_risk_guard import _Guard, guard
 
 ONE = {k: GOOD_LONG[k] for k in ("take", "stop_width", "size")}
 
@@ -361,7 +371,7 @@ def test_guard_one_question_only_checks_take(now: datetime) -> None:
 
 
 def test_guard_six_questions_still_check_all(now: datetime) -> None:
-    v = guard().review(
+    v = guard(gate_questions="six").review(
         signal(now), jev(genuine={"real": 0.1, "fake": 0.9}), card(now), account(now), now
     )
     assert any("真信号" in r for r in v.reasons)
@@ -444,3 +454,48 @@ async def test_realistic_snapshot_length(now: datetime) -> None:
     d = json.loads(s)
     assert {"tech", "flow", "deriv", "day"} <= set(d) and "regime" in d["card"]
     assert len(s) <= 2400, len(s)
+
+
+def test_guard_question_set_comes_from_config_not_the_answer(now: datetime) -> None:
+    """six 下模型漏答 genuine：拦（不能当成一道题把真 / 毒 / 方向门槛跳过去）。"""
+    v = guard(gate_questions="six").review(signal(now), jev(ONE), card(now), account(now), now)
+    assert not v.approved and any("没回答“genuine”" in r for r in v.reasons)
+    # one 下多答了别的题也只看「做」
+    v = guard().review(
+        signal(now), jev(genuine={"real": 0.0, "fake": 1.0}), card(now), account(now), now
+    )
+    assert v.approved, v.reasons
+
+
+@pytest.mark.parametrize(
+    ("mode", "side", "p_up", "nudge"),
+    [
+        ("card_agree", c.Side.SHORT, 0.75, 0.1),  # 不到 1.0 都算看跌：做空加分
+        ("symmetric", c.Side.SHORT, 0.75, 0.0),  # 对称：做空要报 0 才加
+        ("symmetric", c.Side.SHORT, 0.0, 0.1),
+        ("symmetric", c.Side.LONG, 1.0, 0.1),
+        ("symmetric", c.Side.LONG, 0.5, 0.0),
+    ],
+)
+def test_predictor_nudge_modes(
+    tmp_path: Path, now: datetime, mode: str, side: c.Side, p_up: float, nudge: float
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update={"predictor_nudge_mode": mode})
+    g = _Guard(RISK, cfg, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    sig = signal(now, side=side)
+    fc = c.Forecast(
+        symbol="BTCUSDT",
+        ts=now,
+        horizon_min=120,
+        price_low=60000.0,
+        price_high=70000.0,
+        p_up=p_up,
+        model="Kronos-small",
+        stale_after=now + timedelta(minutes=10),
+    )
+    g.review(
+        sig.model_copy(update={"forecast": fc}), jev(ONE), card(now, bias="both"), account(now), now
+    )
+    [rec] = log.read_day(now.date().isoformat())
+    assert rec.output["detail"]["predictor_nudge"] == pytest.approx(nudge)

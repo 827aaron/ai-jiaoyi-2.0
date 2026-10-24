@@ -617,6 +617,10 @@ def build_modules(
                 features.entry_context,
                 adl=derivs.adl_risk if derivs is not None else None,
                 fetch=derivs_rest if isinstance(feed, BinanceFuturesFeed) else None,
+                # 补拉最多等 1 秒，但不能把信号拖过有效期（有效期 − 拍板超时）
+                timeout_s=min(
+                    1.0, max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0)
+                ),
             ),
         )
         keeper = JevKeeper(

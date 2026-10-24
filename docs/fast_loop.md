@@ -201,7 +201,7 @@ paper 的推荐是 做 ≥ 0.55（一道题问法的门槛）、真信号 ≥ 0.
 先加 `权重 × 0.5`：只有 `p_up == 1.0` 算看涨，其余（0 / 0.25 / 0.5 / 0.75，本地记录实际上涨都只有 10–12%）算看跌；
 和卡的方向（信号跟着卡走）一致就加，相反不扣（Aaron 10-24），结果夹在 0–1；0.2 时 +0.10。信号没带预测、或预测的 `stale_after`
 不晚于信号时间就不加。只动「做」这一道门，预测员不进拍板人的快照。保镖日志 `detail` 里写
-`predictor`（同向 / 反向，不扣分 / 没有预测）、`predictor_p_up`、`predictor_nudge`、`take_raw`、`take_adj`；
+`predictor`（同向 / 不同向，不扣分 / 没有预测；`predictor_nudge_mode` 选 card_agree 或 symmetric）、`predictor_p_up`、`predictor_nudge`、`take_raw`、`take_adj`；
 拒绝原因写成「“做”概率 0.18（预测员 +0.10）低于门槛 0.2」。面板拍板人那一行仍按拍板人原话标门槛，挪后的结论看保镖那一行。
 
 `[fast_loop] gate_record_only`（拍板只记不拦）：不写 = 关；只在 paper 生效；testnet / live 写 true 当关、启动时日志警告「拍板只记不拦 只在模拟盘生效，已忽略」，面板总览顶部也提示；面板切到测试网 / 实盘时自动把它关掉并记进修改记录。

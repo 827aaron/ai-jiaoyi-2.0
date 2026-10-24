@@ -1843,7 +1843,7 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
-const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -1951,6 +1951,7 @@ const PLAIN = {
   min_p_genuine: "信号至少多大把握是真的（0–1）",
   min_p_take: "拍板人：做的把握至少（0–1）",
   gate_questions: "拍板人怎么问",
+  predictor_nudge_mode: "预测员怎样算和信号一致",
   min_p_direction: "方向至少多大把握（0–1）",
   predictor_weight: "预测员意见占几成：与卡方向一致时加分，相反不扣",
   max_p_toxic: "被大户收割的可能最多多大（0–1）",
@@ -2055,6 +2056,7 @@ const HINT = {
   burst_10s_ratio: "量能突增、放量突破提前触发用：最近 10 秒成交额折算成每分钟，至少是平时（20 根 1 分钟平均）的几倍才算；同时 1 分钟量还要过下一行。只看 1 分钟的那条仍按「量能突增 / 放量突破要几倍」。档位默认都是 5",
   stop_floor_widen: "开 = 止损离手续费太近（不到上面那个倍数）时，把止损拉宽到这条线再下单：每笔最多亏的钱不变，所以仓位会小一些，止盈也按新止损重算。关 = 这一单不做。默认开",
   predictor_weight: "预测员（Kronos）对这个币涨跌的看法占几成：拿拍板人的「做」和门槛比之前先加一点。只有预测员报 100% 看涨才算看涨，其余（0–75%）都算看跌；和卡的方向（也就是信号方向）一致就加，加多少 = 这个数 × 0.5，0.2 时加 0.10（比如做多信号「做」0.50，预测员报 100% 看涨算成 0.60）；相反不扣。只动「做」这一道门，预测员不进拍板人看到的数据。填 0 = 不听；预测员关掉或预测过期时不加。档位默认都是 0.2",
+  predictor_nudge_mode: "预测员报的是「几条模拟路径里有几条收在现价之上」。第一种：只有全部在上面（100%）算看涨，其余都算看跌，所以做空信号几乎每次都加分。第二种：做多要全部在上面、做空要全部在下面（0%）才加分，其余不加。两种都是不一致时不扣",
   min_p_take: "拍板人只答一道题：现在按信号方向开这一单，接下来一段时间（2 小时档看 30 分钟）扣完手续费能不能赚。它给出「做」的把握（0–1），加上预测员的分以后至少要到这个数才放行。默认 0.55；想多做一些，可以放到 0.50",
   gate_questions: "一道题 = 只问「做不做」（真假、方向、盘口有没有毒都并进这一道，再看技术面和完整作战卡），只看上面「做的把握至少」。6 道题 = 以前的问法，真信号 / 方向 / 盘口有毒三个门槛也生效，留着回放对照用。默认一道题",
   burst_min_1m_ratio: "量能突增、放量突破靠最近 10 秒提前触发时，还要这 1 分钟的量至少是平时（20 根平均）的几倍，挡掉只是一阵快单、整分钟其实不放量的假突增；只看 1 分钟够倍数的那条不受影响。填 0 = 不看。档位默认都是 2",
@@ -2269,7 +2271,7 @@ const ROLES = [
     { g: "看到和作战卡反向的信号", keys: ["fast_loop.against_*"] },
   ] },
   { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做", groups: [
-    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.gate_record_only", "fast_loop.gate_questions"] },
+    { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.predictor_nudge_mode", "fast_loop.gate_record_only", "fast_loop.gate_questions"] },
     { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },

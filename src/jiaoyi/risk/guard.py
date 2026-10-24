@@ -412,10 +412,10 @@ class RiskGuardImpl:
         ``detail``。"""
         fast = self._fast
         out: list[str] = []
-        # 契约不保证 ok=True 的回复答全了：问了的题必须都在，选项必须和问的一模一样。
-        # 一道题问法（没有 genuine）只看「做」；旧的 6 道题问法真 / 毒 / 方向门槛也生效。
+        # 契约不保证 ok=True 的回复答全了：按配置的问法，该答的题必须都在，选项必须一模一样。
+        # 问法按配置定，不按回答猜（six 下漏答 genuine 要拦，不能当成一道题放过去）。
         got = {a.id: set(a.probs) for a in jev.answers}
-        one = EntryQuestion.GENUINE.value not in got
+        one = fast.gate_questions == "one"
         asked = ENTRY_ONE if one else tuple(ENTRY_CHOICES)
         for q in asked:
             choices = ENTRY_CHOICES[q]
@@ -486,13 +486,19 @@ class RiskGuardImpl:
             if detail is not None:
                 detail["predictor"] = "没有预测"
             return 0.0
-        sign = 1.0 if signal.side_hint == Side.LONG else -1.0
-        up = 1.0 if fc.p_up >= 1.0 else -1.0
-        # Aaron 10-24：和卡（信号跟着卡的方向）一致就加分，相反不扣
-        nudge = weight * 0.5 if up * sign > 0 else 0.0
+        long = signal.side_hint == Side.LONG
+        if self._fast.predictor_nudge_mode == "symmetric":
+            # 对称：所有路径都收在现价之上才算看涨、都在之下才算看跌，其余不表态
+            view = "看涨" if fc.p_up >= 1.0 else "看跌" if fc.p_up <= 0.0 else "不表态"
+            agrees = (long and fc.p_up >= 1.0) or (not long and fc.p_up <= 0.0)
+        else:
+            # 和卡一致（Aaron 10-24）：只有报 1.0 算看涨，其余都算看跌
+            view = "看涨" if fc.p_up >= 1.0 else "看跌"
+            agrees = (fc.p_up >= 1.0) == long
+        # 和卡（信号跟着卡的方向）一致就加分，相反不扣
+        nudge = weight * 0.5 if agrees else 0.0
         if detail is not None:
-            agree = "同向" if nudge > 0 else "反向，不扣分"
-            view = "看涨" if up > 0 else "看跌"
+            agree = "同向" if nudge > 0 else "不同向，不扣分"
             detail["predictor"] = f"{agree}（{view}，涨的路径占 {fc.p_up:.2f}）"
             detail["predictor_p_up"] = round(fc.p_up, 4)
             detail["predictor_nudge"] = round(nudge, 4)

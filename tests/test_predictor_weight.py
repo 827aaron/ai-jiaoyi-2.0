@@ -113,4 +113,4 @@ def test_only_full_up_counts_as_up(
     [rec] = log.read_day(now.date().isoformat())
     d = rec.output["detail"]
     assert d["predictor_nudge"] == pytest.approx(nudge)
-    assert d["predictor"].startswith("同向（看涨" if nudge > 0 else "反向，不扣分（看跌")
+    assert d["predictor"].startswith("同向（看涨" if nudge > 0 else "不同向，不扣分（看跌")
