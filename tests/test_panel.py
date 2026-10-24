@@ -623,6 +623,12 @@ def test_pool_page_categories_layered(tmp_path: Path) -> None:
     assert (cats["us_tech"].cap, cats["us_tech"].cap_from) == (20, "default")
     assert (cats["alt"].cap, cats["alt"].cap_from, cats["alt"].enabled_from) == (10, "slow", "slow")
     assert (cats["major"].cap, cats["major"].cap_from) == (3, "pool")
+    # 「恢复默认」后的值：开关按 slow.toml（关），上限按每类默认（20）
+    assert (cats["us_tech"].enabled_base, cats["major"].cap_base, cats["alt"].cap_base) == (
+        False,
+        20,
+        10,
+    )
     write_pool_overrides(tmp_path, PoolOverrides())
     cats = {x.category: x for x in build_pool(files, scr).categories}
     assert (cats["us_tech"].enabled, cats["us_tech"].enabled_from) == (False, "slow")

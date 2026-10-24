@@ -148,8 +148,10 @@ const CMD = {
   unblacklist_symbol: { title: "取消拉黑", text: "取消后它重新参加选币，分数够就可能进池、被开仓。", ok: "取消拉黑", pw: true },
   add_symbol: { title: "手动加币", text: "把这个币加进候选池（仍要过成交量、价差这些硬条件，不够就进不去）。主程序马上重新选一次币。", ok: "加入", pw: true },
   remove_symbol: { title: "移除手动加的币", text: "撤掉手动加入，以后按打分决定它进不进候选池。", ok: "移除" },
-  set_category: { title: "类别开关", text: "关掉后这一类不再靠打分进候选池，你固定、手动加的币仍然进池；打开就恢复按打分进池。选币页的设置优先于 slow.toml，主程序马上重新选币。", ok: "确定", pw: true },
-  set_category_cap: { title: "这一类最多进池几个", text: "0 = 这一类一个都不要。选币页的设置优先于 slow.toml，主程序马上重新选币。", ok: "保存", pw: true, cap: true },
+  set_category: { title: "类别开关", text: "关掉后这一类不再靠打分进候选池，你固定、手动加的币仍然进池；打开就恢复按打分进池。主程序马上重新选币。", ok: "确定", pw: true },
+  set_category_cap: { title: "这一类最多进池几个", text: "0 = 这一类一个都不要。主程序马上重新选币。", ok: "保存", pw: true, cap: true },
+  reset_category: { title: "恢复默认开关", text: "去掉你在这里改过的开关，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
+  reset_category_cap: { title: "恢复默认上限", text: "去掉你在这里改过的上限，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
   refresh_cards: { title: "重新开会出卡", text: "让军师团马上开一次会、重出作战卡（会花一次大模型费用）。", ok: "开会" },
 };
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
@@ -185,14 +187,17 @@ function restartBtn() {
   return `<button class="btn b-sm ${pending ? "b-go" : ""}" ${clickable("cmd", "restart")} ${data.running ? "" : 'disabled title="主程序没在运行"'}>${pending ? "重启生效" : "重启主程序"}</button>`;
 }
 
-function askCommand(kind, params = {}, what = "") {
-  const k = CMD[kind];
+// ui：弹窗用哪套文案（「恢复默认」走 reset_*，发出去的指令还是 kind）
+function askCommand(kind, params = {}, what = "", ui = kind) {
+  const k = CMD[ui];
   const c = data.control;
   const startedBefore = c.started_at || null;
   const warn = data.running ? "" : `<div class="note warn">主程序没在运行，指令 60 秒内没人执行就作废。</div>`;
   const title = kind === "restart" && c.config_pending !== true ? "重启主程序" : k.title;
+  const extra = params.base != null ? `<p>恢复后：<b>${esc(params.base)}</b></p>` : "";
+  if (params.base != null) params = Object.fromEntries(Object.entries(params).filter(([key]) => key !== "base"));
   const capField = k.cap ? `<label class="pw">最多几个（0–100 的整数）<input type="number" id="dlg-cap" min="0" max="100" step="1" inputmode="numeric" value="${esc(String(params.cap))}"></label>` : "";
-  ask(`${title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${warn}${capField}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
+  ask(`${title}${what ? " · " + esc(what) : ""}`, `<p>${k.text}</p>${extra}${warn}${capField}${k.pw ? pwField(c) : ""}`, k.ok, k.danger, async () => {
     const pw = $("#dlg-pw");
     if (k.cap) {
       const v = $("#dlg-cap").value.trim();
@@ -365,7 +370,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "mode") switchMode(arg);
   else if (act === "hold") switchHold(arg);
   else if (act === "clearpins") askClearPins();
-  else if (act === "cat") { const [kind, cat, v] = arg.split(":"); askCommand(kind, kind === "set_category" ? { category: cat, enabled: v } : { category: cat, cap: v }, CAT[cat] || cat); }
+  else if (act === "cat") { const [kind, cat, v, base] = arg.split(":"); askCommand(kind, { category: cat, [kind === "set_category" ? "enabled" : "cap"]: v, ...(v === "default" ? { base } : {}) }, CAT[cat] || cat, v === "default" ? `reset_${kind.slice(4)}` : kind); }
   else if (act === "pool") { const [kind, sym] = arg.split(":"); askCommand(kind, { symbol: sym }, sym.replace(/USDT$/, "")); }
   else if (act === "pooladd") addSymbol();
   else if (act === "unpin") unpin(arg);
@@ -1458,25 +1463,25 @@ P.funds = () => {
 
 /* ---------- 选币 */
 // 每类币的开关和进池上限：选币页设的 > slow.toml [screener.categories] > 默认（开、每类默认上限）
-const CAT_FROM = { pool: "选币页设的", slow: "slow.toml", default: "默认" };
+// 界面上不出现文件名：slow.toml 写的也算「默认」，选币页改过的显示「你改过（默认 X）· 恢复默认」
 function categoryCard(d) {
   if (!d.categories || !d.categories.length) return "";
   const can = !d.overrides_error;
   const b = (arg, text, on) => `<button class="${on ? "on" : ""}" ${can && !on ? clickable("cat", arg) : "disabled"}>${text}</button>`;
   const rows = d.categories.map((c) => {
     const k = c.category;
-    const back = (arg) => (can ? ` <button class="lnk small" ${clickable("cat", arg)}>改回 slow.toml</button>` : "");
+    const from = (src, arg, base) => (src === "pool" ? `你改过（默认 ${base}）${can ? ` · <button class="lnk small" ${clickable("cat", `${arg}:default:${base}`)}>恢复默认</button>` : ""}` : "默认");
     return `<tr class="${c.enabled ? "" : "dimrow"}"><td class="hi">${esc(CAT[k] || k)}</td>
-      <td><span class="seg">${b(`set_category:${k}:true`, "开", c.enabled)}${b(`set_category:${k}:false`, "关", !c.enabled)}</span><div class="dim small">${CAT_FROM[c.enabled_from]}${c.enabled_from === "pool" ? back(`set_category:${k}:default`) : ""}</div></td>
-      <td class="r num">${c.cap} 个<div class="dim small">${CAT_FROM[c.cap_from]}${c.cap_from === "pool" ? back(`set_category_cap:${k}:default`) : ""}</div></td>
+      <td><span class="seg">${b(`set_category:${k}:true`, "开", c.enabled)}${b(`set_category:${k}:false`, "关", !c.enabled)}</span><div class="dim small">${from(c.enabled_from, `set_category:${k}`, c.enabled_base ? "开" : "关")}</div></td>
+      <td class="r num">${c.cap} 个<div class="dim small">${from(c.cap_from, `set_category_cap:${k}`, `${c.cap_base} 个`)}</div></td>
       <td class="r num">${c.in_pool} / ${c.total}</td>
       <td class="r nowrap">${can ? `<button class="btn b-sm" ${clickable("cat", `set_category_cap:${k}:${c.cap}`)}>改上限</button>` : ""}</td></tr>`;
   }).join("");
   const off = d.categories.filter((c) => !c.enabled).length;
   return `<section class="card mt"><div class="ch"><h2>按类别选币</h2><span class="r">${off ? `关了 ${off} 类` : "六类都开着"} · 每类默认最多 ${d.default_category_cap} 个</span></div>
-    ${d.slow_error ? `<div class="note warn">slow.toml 读不出：下面“slow.toml”一栏按默认显示。${esc(d.slow_error)}</div>` : ""}
+    ${d.slow_error ? `<div class="note warn">类别配置读不出，下面的“默认”先按出厂值显示。${esc(d.slow_error)}</div>` : ""}
     <div class="tw"><table><thead><tr><th>类别</th><th>开关</th><th class="r">最多进池</th><th class="r">上次进池 / 看了</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="foot">关掉的类别不再靠打分进池，你固定、手动加的币仍进池。开关和上限要面板密码，改完主程序马上重新选币（“上次进池”等这次选完才变）。“改回 slow.toml”清掉选币页的这一项，改用 slow.toml 里写的（没写就是默认）。</div></section>`;
+    <div class="foot">关掉的类别不再靠打分进池，你固定、手动加的币仍进池。开关和上限要面板密码，改完主程序马上重新选币（“上次进池”等这次选完才变）。“恢复默认”去掉你在这里改过的那一项，回到括号里的默认值。</div></section>`;
 }
 
 P.pool = () => {
@@ -1743,7 +1748,7 @@ function unpin(arg) {
   const [sec, key] = arg.split(":");
   const i = ((pageData && pageData[sec]) || []).find((x) => x.key === key);
   if (!i) return;
-  ask(`恢复档位默认 · ${esc(key)}`, `<p>删掉配置文件里的这一行：${fmtVal(i.value, i)} → 档位默认 ${fmtVal(i.profile_default, i)}，以后切档位也跟着变。</p>${pwField(data.control)}`, "恢复", false, async () => {
+  ask(`恢复档位默认 · ${esc(key)}`, `<p>去掉你改过的值：${fmtVal(i.value, i)} → 档位默认 ${fmtVal(i.profile_default, i)}，以后切档位也跟着变。</p>${pwField(data.control)}`, "恢复", false, async () => {
     const pw = $("#dlg-pw");
     await post("/api/settings", { section: sec, changes: { [key]: null }, password: pw ? pw.value : "" });
     onOk = null;
