@@ -233,8 +233,9 @@ class RuleTrigger:
         self._against_at[key] = now
         self._against_result.pop(key, None)
         vr = f.values.get("vol_ratio_1m")
-        strong = kind is SignalKind.LIQUIDATION_REBOUND or (
-            kind is SignalKind.VOLUME_BREAKOUT
+        # 强平瀑布反弹不再一律算强（哨兵研究 10-24：一次就平只在已亏半个止损时才划算）
+        strong = (
+            kind in (SignalKind.VOLUME_BREAKOUT, SignalKind.LIQUIDATION_REBOUND)
             and (vr or 0.0) >= self._cfg.against_strong_breakout_vol_ratio
         )
         self._against.append(

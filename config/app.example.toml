@@ -79,7 +79,7 @@ against_signal_on = true          # false = 只记录（和以前一样）
 against_dedup_s = 300             # 同一个币同一种反向信号 5 分钟内只算 1 次
 against_grace_s = 180             # 开仓 3 分钟内的反向信号不算
 against_recheck_cooldown_s = 300  # 同一笔仓 5 分钟内最多急查 1 次
-against_strong_breakout_vol_ratio = 3.0  # 放量突破量 ≥ 3 倍算强（瀑布反弹一律算强）：判 1 次就平
+against_strong_breakout_vol_ratio = 50.0  # 放量突破 / 瀑布反弹量 ≥ 50 倍才算强（基本不会）：一次就平只看是否已亏半个止损
 against_loss_stop_frac = 0.5      # 已亏到 0.5 倍止损时也判 1 次就平；0 = 不用
 against_meeting_count = 2         # 30 分钟内 2 次反向信号 → 申请单币临时会
 against_meeting_window_s = 1800
