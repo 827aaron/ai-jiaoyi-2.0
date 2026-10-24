@@ -410,7 +410,7 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 ## 主流币 = 市值前 N
 
 选币的「主流币」类别不再是写死的 7 个，而是**市值前 `major_top_n` 名（默认 20）**：`slow/majors.py` 每天从 CoinGecko 免费接口（无需 key）拉一次市值排名，
-去掉稳定币和包装 / 质押币（WBTC、stETH 等）后取前 N 个真币，对应到币安永续（`1000PEPE` 这类前缀按基础币名对）。结果缓存在 `data/majors.json`，
+去掉稳定币和包装 / 质押币（WBTC、stETH 等），选币时再去掉币安没有 USDT 永续的，往下补满 N 个，对应到币安永续（`1000PEPE` 这类前缀按基础币名对）。结果缓存在 `data/majors.json`，
 拉取失败沿用缓存（不管多旧），没有缓存就回退写死的 7 个（BTC ETH BNB SOL XRP DOGE ADA）；`major_top_n = 0` 也是只用这 7 个。
 
 `slow.toml [screener]`：`major_top_n`、`major_include`（手动加入，如 `["LINK"]`）、`major_exclude`（手动排除，按山寨币算）。

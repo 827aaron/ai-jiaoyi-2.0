@@ -26,15 +26,10 @@ def rows() -> list[dict[str, object]]:
     ]  # fmt: skip
 
 
-def test_parse_drops_stables_and_wrapped_and_takes_top_n_real_coins() -> None:
-    assert parse_markets(rows(), 6) == {
-        "BTC": 1,
-        "ETH": 2,
-        "XRP": 4,
-        "BNB": 5,
-        "SOL": 6,
-        "DOGE": 10,
-    }
+def test_parse_drops_stables_and_wrapped_keeps_rank_order() -> None:
+    got = parse_markets(rows())
+    assert list(got) == ["BTC", "ETH", "XRP", "BNB", "SOL", "DOGE", "PEPE", "LINK"]
+    assert got["DOGE"] == 10
 
 
 def test_binance_prefix_maps_to_base() -> None:
@@ -64,39 +59,36 @@ def _client(calls: list[int], fail: bool = False) -> httpx.AsyncClient:
 
 async def test_refresh_once_a_day_cache_survives_restart_and_failure(tmp_path: Path) -> None:
     path, calls = tmp_path / "majors.json", []
-    src = MajorsSource(path, _client(calls), top_n=3)
+    src = MajorsSource(path, _client(calls))
     await src.refresh(NOW)
     await src.refresh(NOW + timedelta(hours=5))
-    assert len(calls) == 1 and src.ranks() == {"BTC": 1, "ETH": 2, "XRP": 4}
-    again = MajorsSource(path, _client(calls), top_n=3)  # 重启读缓存
-    assert again.ranks() == src.ranks()
+    assert len(calls) == 1 and src.ranks(3) == {"BTC": 1, "ETH": 2, "XRP": 4}
+    again = MajorsSource(path, _client(calls))  # 重启读缓存
+    assert again.ranks(3) == src.ranks(3)
     bad_calls: list[int] = []
-    failing = MajorsSource(path, _client(bad_calls, fail=True), top_n=3)
+    failing = MajorsSource(path, _client(bad_calls, fail=True))
     await failing.refresh(NOW + timedelta(days=2))  # 到期了但接口挂了：沿用旧的
-    assert failing.ranks() == src.ranks() and failing.error is not None and bad_calls
-    empty = MajorsSource(tmp_path / "none.json", _client([], fail=True), top_n=3)
+    assert failing.ranks(3) == src.ranks(3) and failing.error is not None and bad_calls
+    empty = MajorsSource(tmp_path / "none.json", _client([], fail=True))
     await empty.refresh(NOW)
-    assert empty.ranks() == {}  # 什么都没有：调用方回退写死名单
-    await again.refresh(NOW)  # top_n 变了要重拉
-    again.top_n = 2
-    await again.refresh(NOW)
-    assert again.ranks() == {"BTC": 1, "ETH": 2}
+    assert empty.ranks(3) == {}  # 什么都没有：调用方回退写死名单
+    assert again.ranks(2) == {"BTC": 1, "ETH": 2}
 
 
 async def test_screener_marks_majors_with_rank_and_include_exclude(
     tmp_path: Path, now: datetime
 ) -> None:
-    src = MajorsSource(tmp_path / "m.json", _client([]), top_n=6)
+    src = MajorsSource(tmp_path / "m.json", _client([]))
     fake = FakeSource([stat("1000PEPEUSDT"), stat("SOLUSDT"), stat("LINKUSDT"), stat("DOGEUSDT")])
     cfg = ScreenerConfig(
-        major_top_n=6, major_include=frozenset({"LINK"}), major_exclude=frozenset({"DOGE"})
+        major_top_n=2, major_include=frozenset({"LINK"}), major_exclude=frozenset({"DOGE"})
     )
     pool = await CodeSymbolScreener(fake, cfg, majors=src).screen(now)
     by = {e.symbol: e for e in pool.entries}
     assert (
         by["SOLUSDT"].category is Category.MAJOR and "主流币 · 市值第 6 名" in by["SOLUSDT"].reasons
     )
-    assert by["1000PEPEUSDT"].category is Category.ALT  # 排名表里没有 PEPE（top 6）
+    assert by["1000PEPEUSDT"].category is Category.ALT  # 币安上的 SOL、DOGE 占满 2 个名额
     assert (
         by["LINKUSDT"].category is Category.MAJOR
         and "主流币（你手动加入）" in by["LINKUSDT"].reasons
@@ -106,9 +98,32 @@ async def test_screener_marks_majors_with_rank_and_include_exclude(
 
 async def test_failed_fetch_cools_down_for_an_hour() -> None:
     calls: list[int] = []
-    src = MajorsSource(None, _client(calls, fail=True), top_n=3)
+    src = MajorsSource(None, _client(calls, fail=True))
     await src.refresh(NOW)
     await src.refresh(NOW + timedelta(minutes=59))  # 冷却中：不再请求
     assert len(calls) == 1
     await src.refresh(NOW + timedelta(minutes=61))
     assert len(calls) == 2
+
+
+async def test_coins_without_binance_perps_do_not_take_a_slot(tmp_path: Path) -> None:
+    src = MajorsSource(tmp_path / "m.json", _client([]))
+    await src.refresh(NOW)
+    # 币安上没有 XRP、BNB 的永续：往下补 SOL、DOGE，前 4 个仍是 4 个真能交易的币
+    assert src.ranks(4, {"BTC", "ETH", "SOL", "DOGE", "PEPE", "LINK"}) == {
+        "BTC": 1, "ETH": 2, "SOL": 6, "DOGE": 10,
+    }  # fmt: skip
+    assert list(src.ranks(20)) == ["BTC", "ETH", "XRP", "BNB", "SOL", "DOGE", "PEPE", "LINK"]
+
+
+async def test_old_cache_without_version_is_refetched(tmp_path: Path) -> None:
+    import json
+
+    path, calls = tmp_path / "majors.json", []
+    path.write_text(
+        json.dumps({"fetched_at": NOW.isoformat(), "top_n": 20, "ranks": {"BTC": 1}}),
+        encoding="utf-8",
+    )
+    src = MajorsSource(path, _client(calls))
+    await src.refresh(NOW + timedelta(hours=1))  # 旧格式的缓存只有前 N 个：不到一天也要重拉
+    assert len(calls) == 1 and "LINK" in src.ranks(20)

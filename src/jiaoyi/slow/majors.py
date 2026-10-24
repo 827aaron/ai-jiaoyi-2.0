@@ -1,8 +1,9 @@
 """「主流币」= 市值前 N 名（默认 20）：每天拉一次市值排名，结果缓存到 data/majors.json。
 
-- 数据源：CoinGecko 免费接口（无需 key）按市值排序的前 100 个币。
-- 去掉稳定币和包装 / 质押币（WBTC、stETH 之类跟着别的币走，不算独立标的），再取前 N 个，
-  所以「前 20」是 20 个真币，名次是它们在 CoinGecko 上的原始市值名次。
+- 数据源：CoinGecko 免费接口（无需 key）按市值排序的前 250 个币。
+- 去掉稳定币和包装 / 质押币（WBTC、stETH 之类跟着别的币走，不算独立标的）。
+- 选币时再去掉币安没有 USDT 永续的（FIGR_HELOC、WBT、LEO 这类），往下补满 N 个，
+  所以「前 20」是 20 个币安能交易的真币，名次是它们在 CoinGecko 上的原始市值名次。
 - 映射到币安 USDT 永续：基础币名一致即可；币安给小币种加的 1000 / 1000000 / 1M 前缀（1000PEPE）
   在 :func:`base_of` 里去掉再比。
 - 拉取失败沿用缓存（不管多旧），1 小时内不再重试；没有缓存就回退
@@ -15,7 +16,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 
 URL = "https://api.coingecko.com/api/v3/coins/markets"
 REFRESH_EVERY = timedelta(hours=24)
+CACHE_VERSION = 2  # 缓存格式变了（存全部候选、不再只存前 N）：旧缓存当过期
 RETRY_AFTER_FAIL = timedelta(hours=1)
 """拉取失败后多久内不再试（直接用缓存），免得接口长期挂着时每轮选币都多等一次超时。"""
 
@@ -47,12 +49,11 @@ def base_of(symbol: str) -> str:
     return _PREFIX.sub("", symbol.removesuffix("USDT"))
 
 
-def parse_markets(rows: list[dict[str, Any]], top_n: int) -> dict[str, int]:
-    """CoinGecko 行 → {基础币名: 市值名次}：去掉稳定币和包装币后按市值取前 ``top_n`` 个。"""
+def parse_markets(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """CoinGecko 行 → {基础币名: 市值名次}（按市值从大到小）：去掉稳定币和包装币，取前几名留给
+    :meth:`MajorsSource.ranks` 按币安有没有永续再筛。"""
     out: dict[str, int] = {}
     for r in sorted(rows, key=lambda r: r.get("market_cap_rank") or 10**9):
-        if len(out) >= top_n:
-            break
         sym = str(r.get("symbol", "")).upper()
         rank = r.get("market_cap_rank")
         if not sym or not isinstance(rank, int) or sym in out:
@@ -69,7 +70,7 @@ class MajorRanks:
 
     ranks: dict[str, int] = field(default_factory=dict)
     fetched_at: datetime | None = None
-    top_n: int = 0
+    version: int = 0
 
 
 class MajorsSource:
@@ -77,12 +78,10 @@ class MajorsSource:
         self,
         path: Path | None = None,
         client: httpx.AsyncClient | None = None,
-        top_n: int = 20,
     ) -> None:
         self._path = path
         self._client = client or httpx.AsyncClient(timeout=15.0)
         self._owns = client is None
-        self.top_n = top_n
         self.state = self._load()
         self.error: str | None = None
         self._failed_at: datetime | None = None
@@ -95,7 +94,7 @@ class MajorsSource:
             return MajorRanks(
                 {str(k): int(v) for k, v in d["ranks"].items()},
                 datetime.fromisoformat(d["fetched_at"]),
-                int(d.get("top_n", 0)),
+                int(d.get("v", 0)),
             )
         except (ValueError, KeyError, TypeError, OSError):
             log.warning("市值排名缓存 %s 读不懂，忽略", self._path)
@@ -111,7 +110,7 @@ class MajorsSource:
                 json.dumps(
                     {
                         "fetched_at": self.state.fetched_at.isoformat(),
-                        "top_n": self.state.top_n,
+                        "v": self.state.version,
                         "ranks": self.state.ranks,
                     },
                     ensure_ascii=False,
@@ -122,18 +121,28 @@ class MajorsSource:
         except OSError:
             log.warning("市值排名缓存写不进 %s", self._path, exc_info=True)
 
-    def ranks(self) -> Mapping[str, int]:
-        """当前可用的排名；空表示还没有任何数据（调用方回退写死的名单）。"""
-        return self.state.ranks
+    def ranks(self, top_n: int, available: Collection[str] | None = None) -> Mapping[str, int]:
+        """市值前 ``top_n`` 个「币安有 USDT 永续」的真币：{基础币名: 市值名次}。
+
+        稳定币、包装币拉名单时已去；这里再去掉币安没有永续的（``available`` 是币安永续的基础币名，
+        不给就不筛），然后从大到小取满 ``top_n`` 个。
+        空表示还没有任何数据（调用方回退写死的名单）。"""
+        out: dict[str, int] = {}
+        for base, rank in self.state.ranks.items():
+            if len(out) >= top_n:
+                break
+            if available is None or base in available:
+                out[base] = rank
+        return out
 
     async def refresh(self, now: datetime) -> None:
-        """超过一天（或 top_n 变了）才重新拉；失败沿用旧缓存，只记 ``error``。"""
+        """超过一天（或缓存格式旧了）才重新拉；失败沿用旧缓存，只记 ``error``。"""
         st = self.state
         if self._failed_at is not None and now - self._failed_at < RETRY_AFTER_FAIL:
             return
         if (
             st.fetched_at is not None
-            and st.top_n == self.top_n
+            and st.version == CACHE_VERSION
             and now - st.fetched_at < REFRESH_EVERY
         ):
             return
@@ -143,12 +152,12 @@ class MajorsSource:
                 params={
                     "vs_currency": "usd",
                     "order": "market_cap_desc",
-                    "per_page": 100,
+                    "per_page": 250,
                     "page": 1,
                 },
             )
             r.raise_for_status()
-            ranks = parse_markets(r.json(), self.top_n)
+            ranks = parse_markets(r.json())
             if not ranks:
                 raise ValueError("市值排名是空的")
         except Exception as exc:
@@ -157,7 +166,7 @@ class MajorsSource:
             log.warning("拉市值排名失败，沿用上次（%s）", self.error)
             return
         self.error, self._failed_at = None, None
-        self.state = MajorRanks(ranks, now.astimezone(UTC), self.top_n)
+        self.state = MajorRanks(ranks, now.astimezone(UTC), CACHE_VERSION)
         self._save()
 
     async def aclose(self) -> None:
