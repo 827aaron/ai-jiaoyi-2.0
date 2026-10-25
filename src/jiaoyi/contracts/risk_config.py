@@ -847,6 +847,18 @@ class AppConfig(Contract):
     notify_model_credit: bool = Field(
         default=True, description="推 Telegram：模型额度快用完或被拒（402）时推。"
     )
+    credit_low_floor_usd: float = Field(
+        default=5.0,
+        gt=0,
+        le=10000,
+        description="OpenRouter 余额低于这么多美元就提醒（日均花费 × 2 天更高时按那个算）。",
+    )
+    credit_resend_hours: float = Field(
+        default=6.0,
+        ge=1,
+        le=168,
+        description="同一条额度提醒（快用完 / 被拒）多久重复推一次，单位小时。",
+    )
     notify_meeting_paused: bool = Field(
         default=True,
         description="推 Telegram：军师团因失败或当日花费超限暂停开会时推。",

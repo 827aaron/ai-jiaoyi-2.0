@@ -49,9 +49,12 @@ class Balance:
     balance_usd: float
     avg_daily_usd: float
 
+    def is_low(self, floor_usd: float = LOW_FLOOR_USD) -> bool:
+        return self.balance_usd < max(floor_usd, self.avg_daily_usd * LOW_DAYS)
+
     @property
     def low(self) -> bool:
-        return self.balance_usd < max(LOW_FLOOR_USD, self.avg_daily_usd * LOW_DAYS)
+        return self.is_low()
 
 
 def fetch_balance(key: str, transport: httpx.BaseTransport | None = None) -> Balance:
@@ -90,7 +93,12 @@ class CreditMonitor:
         data_dir: str | Path,
         get_key: Callable[[], str | None],
         fetch: Callable[[str], Balance] = fetch_balance,
+        *,
+        low_floor_usd: float = LOW_FLOOR_USD,
+        resend_after: timedelta = RESEND_AFTER,
     ) -> None:
+        self._floor = low_floor_usd
+        self._resend = resend_after
         self._path = Path(data_dir) / CREDITS_FILE
         self._get_key = get_key
         self._fetch = fetch
@@ -111,7 +119,7 @@ class CreditMonitor:
         if self._last_check is None or now - self._last_check >= CHECK_EVERY:
             self._check(now, alerts)
         if self._exhausted_at is not None and (
-            self._exhausted_sent is None or now - self._exhausted_sent >= RESEND_AFTER
+            self._exhausted_sent is None or now - self._exhausted_sent >= self._resend
         ):
             self._exhausted_sent = now
             alerts.append(
@@ -136,19 +144,19 @@ class CreditMonitor:
             logger.warning("查 OpenRouter 余额失败：%s", type(exc).__name__)
             return
         self._state = {"balance_usd": b.balance_usd, "avg_daily_usd": b.avg_daily_usd}
-        if not b.low:
+        if not b.is_low(self._floor):
             self._exhausted_at = None  # 余额够了，之前的 402 不再显示
             self._low_sent = None
             return
         self._state["low"] = True
-        if self._low_sent is None or now - self._low_sent >= RESEND_AFTER:
+        if self._low_sent is None or now - self._low_sent >= self._resend:
             self._low_sent = now
             alerts.append(
                 (
                     "warn",
                     "模型额度快用完了",
                     f"OpenRouter 余额 ${b.balance_usd:.2f}，近 7 天日均花 ${b.avg_daily_usd:.2f}"
-                    f"（低于 ${max(LOW_FLOOR_USD, b.avg_daily_usd * LOW_DAYS):.2f}）。请充值，"
+                    f"（低于 ${max(self._floor, b.avg_daily_usd * LOW_DAYS):.2f}）。请充值，"
                     "否则并发开会会成批被拒。",
                 )
             )
