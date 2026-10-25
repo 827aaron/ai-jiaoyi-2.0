@@ -1947,6 +1947,7 @@ const PLAIN = {
   pool_size: "每次选多少个币进候选池",
   card_pick_max: "军师团每次最多挑几个币",
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
+  trade_notices: "Telegram 推送开仓成交 / 平仓完成的消息",
   rule_gate_without_jev: "没有拍板人时用规则代替",
   gate_record_only: "拍板只记不拦（门槛没过也放行，只记下来）",
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",
@@ -2045,6 +2046,7 @@ const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && t
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
+  trade_notices: "关 = 开仓成交、平仓完成（止盈 / 止损 / 移动止损 / 到时 / 管家平…）这两类不再往 Telegram 推，面板「历史」里照样有。保命止损触发、保命止损缺失、对账不一致、开仓 / 平仓失败、日亏熔断、拍板人挂了、没钱了这些安全告警不受这个开关管，一直推。重启后生效",
   vol_full_multiple: "把这个币平时的波动按每小时折算，是来回手续费（0.10%）的几倍就算这一项满分。默认 30，也就是每小时 3% 算满分；改小会有更多币挤在满分上、分不出高低",
   always_candidates: "这些币只要过了硬门槛、没被拉黑，每轮都进候选池（算在池子名额里），由总盘会按数字决定挑不挑。不算头部，也不占中部每天挑几个的名额。想强制开会用选币页的「固定」。填币名，空格隔开，如 BTC ETH",
   gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
@@ -2311,6 +2313,9 @@ const ROLES = [
   ] },
   { id: "lifeboat", t: "保命止损", what: "在交易所挂的兜底止损，程序挂了也能止损", groups: [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
+  ] },
+  { id: "alerting", t: "告警推送", what: "往 Telegram 推哪些消息（安全告警一直推）", find: "告警 通知 提醒 推送 消息 Telegram 电报 开仓成交 平仓完成 静音 关闭提醒 trade_notices", groups: [
+    { g: "", hint: "Telegram 的密钥在「密钥」里配。这里只管开仓 / 平仓这类成功消息；出了问题的告警不能关。", keys: ["app.trade_notices"] },
   ] },
   { id: "keys", t: "密钥", what: "币安、OpenRouter、Telegram 等的 key，只显示配没配", find: "密钥 key api 币安 binance openrouter telegram jev typesafe 测试网" },
   { id: "show", t: "显示", what: "成交提示音、涨跌颜色、面板密码、时区等", find: "显示 币安风格成交提示音 成交提示音 声音 音量 下单声音 平单声音 提示音 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },

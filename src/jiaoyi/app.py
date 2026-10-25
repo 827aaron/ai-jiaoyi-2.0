@@ -432,6 +432,7 @@ def _build_execution(
             close_unknown_positions=app_cfg.reconciler_close_unknown_positions,
             demo_trading=app_cfg.sim_environment == "demo",
             limit_take_profit=app_cfg.limit_take_profit_on,
+            trade_notices=app_cfg.trade_notices,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:

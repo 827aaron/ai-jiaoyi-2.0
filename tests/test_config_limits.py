@@ -118,6 +118,7 @@ OPTIONAL_APP_FIELDS = {
     "fast_loop",
     "predictor",
     "reconciler_close_unknown_positions",
+    "trade_notices",
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",
