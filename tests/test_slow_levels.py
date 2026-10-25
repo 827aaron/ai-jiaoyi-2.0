@@ -282,3 +282,23 @@ def test_convert_schema_requires_key_levels_and_allowed_signals() -> None:
     """可选数组会被模型在工具调用里整个跳过（10-25 ENA 实测），所以两项必须在 required 里。"""
     required = _CardSymbolDraft.model_json_schema()["required"]
     assert "key_levels" in required and "allowed_signals" in required
+
+
+def test_omitted_arrays_are_detected_and_do_not_lose_the_card() -> None:
+    """模型漏填 key_levels / allowed_signals：解析不失败，引擎能发现并重问，最后仍出卡。"""
+    from jiaoyi.slow.tradingagents_engine import omitted_fields, reask_prompt
+
+    base = dict(
+        bias="long", size_tier_max="S", notional_min=100, notional_max=200, leverage_min=1,
+        leverage_max=2, stop_atr_min=1, stop_atr_max=2, take_profit_r_min=1.5,
+        take_profit_r_max=3, reason="测试",
+    )  # fmt: skip
+    d = _CardSymbolDraft(**base)  # 两个数组都没写，照样解析
+    assert omitted_fields(d, True) == ["key_levels", "allowed_signals"]
+    assert omitted_fields(d, False) == ["allowed_signals"]  # 没候选就不用写 key_levels
+    assert omitted_fields(_CardSymbolDraft(**base, key_levels=[], allowed_signals=[]), True) == []
+    assert "left out key_levels and allowed_signals" in reask_prompt(
+        "P", ["key_levels", "allowed_signals"]
+    )
+    cs = draft_to_card_symbol(d, _entry())  # 重问后仍漏：空列表照出卡（allowed_signals 走默认全部）
+    assert cs.key_levels == [] and cs.allowed_signals
