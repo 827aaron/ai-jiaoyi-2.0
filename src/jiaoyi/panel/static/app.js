@@ -1246,6 +1246,7 @@ async function loadKlines(force) {
     // 换了一笔 / 换了周期：先清掉上一个币的 K 线和价格线，价格轴重新自动缩放（不然会停在上一个币的价格区间）
     chartKey = key;
     series.setData([]);
+    series.setMarkers([]);
     priceLines.forEach((l) => series.removePriceLine(l));
     priceLines = [];
     linePrices = [];
@@ -1253,10 +1254,11 @@ async function loadKlines(force) {
     needFit = true;
   }
   const seq = ++klineSeq;
+  let bars = [];
   try {
     const r = await fetch(`/api/klines?symbol=${encodeURIComponent(p.symbol)}&interval=${S.tf}`, { cache: "no-store" });
     if (!r.ok) throw new Error(String(r.status));
-    const bars = await r.json();
+    bars = await r.json();
     if (seq !== klineSeq || key !== chartKey) return; // 等的时候又换了：这份是旧币的，不画
     series.setData(bars);
     const dg = pxDigits(p.entry_price || 1, p.symbol);
@@ -1279,8 +1281,24 @@ async function loadKlines(force) {
     [trailLine, "移动止损", c("--accent"), L.Solid, 2],
     [startLine, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
   ].filter(([v]) => v != null).map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+  series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) chart.timeScale().fitContent();
   needFit = false;
+}
+// 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
+// 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
+function entryMarkers(p, bars) {
+  if (!bars.length || p.entry_price == null || !p.opened_at) return [];
+  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
+  if (at < bars[0].time) return [];
+  let bar = bars[0];
+  for (const b of bars) { if (b.time <= at) bar = b; else break; }
+  const long = p.side === "long";
+  const css = getComputedStyle(document.documentElement);
+  return [{
+    time: bar.time, position: long ? "belowBar" : "aboveBar", shape: long ? "arrowUp" : "arrowDown",
+    color: css.getPropertyValue(long ? "--up" : "--down").trim(), text: `开仓 ${price(p.entry_price, p.symbol)}`,
+  }];
 }
 
 /* ---------- 团队 */
