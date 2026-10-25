@@ -43,15 +43,6 @@ REST_WAIT_S = 1.0
 """信号来时补拉的 REST 总共最多等几秒，没回来的不写。"""
 
 _LABEL_MIN = {"5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "3d": 4320}
-_WORDS = {
-    "5m": "5-minute",
-    "15m": "15-minute",
-    "1h": "1-hour",
-    "4h": "4-hour",
-    "1d": "1-day",
-    "3d": "3-day",
-}
-_LAST = {"15m": "15 minutes", "1h": "hour", "4h": "4 hours", "1d": "day"}
 
 
 @dataclass(frozen=True)
@@ -92,21 +83,6 @@ def horizon_for(hold_min: int) -> Horizon:
         if hold_min <= upto:
             return h
     return HORIZONS[-1][1]
-
-
-def horizon_words(h: Horizon) -> dict[str, str]:
-    """题目里随档位替换的词（``gate.questions.take_prompt`` 用）。"""
-    s, m, lg = h.periods
-    return {
-        "H": h.text,
-        "mid": m,
-        "mid_words": _WORDS[m],
-        "mid_last": _LAST.get(m, _WORDS[m]),
-        "rsi_short": h.rsi_short,
-        "rsi_short_words": _WORDS[h.rsi_short],
-        "rsi_long": h.rsi_long,
-        "periods": f"{s}/{m}/{lg}",
-    }
 
 
 # ---------------------------------------------------------------------- 技术面
