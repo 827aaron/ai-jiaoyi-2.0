@@ -694,7 +694,7 @@ def build_modules(
         executor=executor,
         lifeboat=lifeboat,
         keeper=keeper,
-        patrol=RulePatrol(fast, recorders[Role.PATROL]),
+        patrol=RulePatrol(fast, recorders[Role.PATROL], fee_bps=risk_cfg.taker_fee_bps),
         reconciler=reconciler,
         screener=screener,
         cards=cards,

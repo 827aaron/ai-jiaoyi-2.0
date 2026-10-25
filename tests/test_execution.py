@@ -288,6 +288,21 @@ async def test_close_stops_executor_then_cancels_lifeboat(rig: Rig) -> None:
     assert await rig.adapter.positions() == []
 
 
+async def test_close_reason_follows_what_actually_filled(rig: Rig) -> None:
+    """巡逻兵下令平仓，但止盈单先成交：记止盈，不记巡逻兵（Aaron 10-25）；下过令的人另外留着。"""
+    pid = await open_filled(rig)
+
+    async def tp_fills_first(executor_id: str, *, keep_position: bool) -> None:
+        rig.api.stopped.append((executor_id, keep_position))
+        rig.api.terminate(executor_id, "TAKE_PROFIT")
+
+    rig.api.stop_executor = tp_fills_first  # type: ignore[method-assign]
+    await rig.adapter.close(pid, CloseReason.PATROL)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None and tracked.record.close_reason is CloseReason.TAKE_PROFIT
+    assert tracked.requested_close is CloseReason.PATROL
+
+
 async def test_lifeboat_stays_until_executor_terminates(rig: Rig) -> None:
     pid = await open_filled(rig)
     rig.api.auto_terminate_on_stop = False

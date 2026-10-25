@@ -7,6 +7,9 @@
   让持仓管家马上（不等 15–30 秒）用决策模型复查一次。这就是巡逻兵“规则 + Jev”里 Jev 的部分：
   判断交给管家，巡逻兵本身永远只能平仓、不能开仓或放宽止损。
 同一个标的 30 秒内只要求一次，避免重复下平仓。
+冲击线不在盈利仓上触发（Aaron 10-25「盈利也要平吗？这个不对吧」）：现价比开仓价好、且超过来回
+手续费的仓，冲高回吐一个止损距离不全平，改成叫管家马上复查（和报警线一样）；亏损或持平的仓规则不变。
+跳过的事每个币每分钟最多写一条记录，方便数有多少次。
 
 两条线按这笔的止损距离定：冲击线 = ``patrol_shock_stop_mult`` × 止损%（默认 1.0），
 报警线 = ``patrol_alert_stop_mult`` × 止损%（默认 0.5）。档位百分比只在没有止损价（或倍数设成 0）时
@@ -48,9 +51,14 @@ def _stop_pct(pos: PositionRecord) -> float:
 class RulePatrol:
     """``Patrol`` 的实现。"""
 
-    def __init__(self, cfg: FastLoopConfig, recorder: RoleRecorder | None = None) -> None:
+    def __init__(
+        self, cfg: FastLoopConfig, recorder: RoleRecorder | None = None, *, fee_bps: float = 5.0
+    ) -> None:
+        """``fee_bps``：单边吃单手续费；浮盈超过来回手续费才算「盈利中」。"""
         self._cfg = cfg
         self._rec = recorder
+        self._fee_pct = 2.0 * fee_bps / 100.0
+        self._skip_logged: dict[str, datetime] = {}
         self._px: dict[str, deque[tuple[datetime, float]]] = {}
         self._last_action: dict[str, datetime] = {}
         self._round_at: datetime | None = None
@@ -82,6 +90,27 @@ class RulePatrol:
         )
         self._rec.set_next_run(now + ROUND)
         self._seen = {}
+
+    def _in_profit(self, pos: PositionRecord, price: float) -> bool:
+        """现价比开仓价好、且超过来回手续费。没有开仓价（还没成交）算不盈利。"""
+        if not pos.entry_price:
+            return False
+        sign = 1.0 if pos.side == Side.LONG else -1.0
+        return sign * (price / pos.entry_price - 1.0) * 100.0 > self._fee_pct
+
+    def _note_skip(self, sym: str, now: datetime, pos: PositionRecord, price: float) -> None:
+        last = self._skip_logged.get(sym)
+        if self._rec is None or (last is not None and now - last < WINDOW):
+            return
+        self._skip_logged[sym] = now
+        self._rec.record(
+            now,
+            Outcome.HOLD,
+            f"{sym} 巡逻兵：盈利中，冲击规则不触发",
+            symbol=sym,
+            position_id=pos.position_id,
+            input={"price": price, "entry": pos.entry_price},
+        )
 
     def check(self, event: MarketEvent, positions: Sequence[PositionRecord]) -> PatrolAction | None:
         if isinstance(event, Trade):
@@ -116,7 +145,10 @@ class RulePatrol:
             ratio = adverse / stop if stop > 0 else 0.0
             worst_ratio = self._seen.get(sym, (0, 0.0, 0.0, 0.0))[1]
             self._seen[sym] = (len(mine), max(worst_ratio, ratio), alert, shock)
-            if adverse >= shock:
+            if adverse >= shock and self._in_profit(pos, price):
+                self.urgent.add(pos.position_id)  # 赚着钱：不全平，让管家马上看
+                self._note_skip(sym, now, pos, price)
+            elif adverse >= shock:
                 hit.append((adverse, shock))
             elif adverse >= alert:
                 self.urgent.add(pos.position_id)
