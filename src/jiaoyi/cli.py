@@ -409,10 +409,28 @@ def _jev_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _migrate(args: argparse.Namespace) -> None:
+    """一次性配置迁移（``panel/migrations.py``）：删掉压过新默认的手写旧值，打印删了什么。"""
+    from jiaoyi.panel.actions import ConfigPaths
+    from jiaoyi.panel.migrations import apply_pending
+
+    try:
+        raw = tomllib.loads(Path(args.app).read_text(encoding="utf-8"))
+        data_dir = str(raw.get("data_dir") or "data")
+        paths = ConfigPaths(risk=Path(args.risk), app=Path(args.app), slow=Path(args.slow))
+        removed = apply_pending(paths, data_dir, datetime.now(UTC))
+    except (OSError, tomllib.TOMLDecodeError):
+        return  # 读不了配置，后面的启动校验会报原因
+    for r in removed:
+        name = f"{r['section']}.{r['key']}" if r["section"] else r["key"]
+        print(f"配置迁移：删掉 {name} = {r['old']!r}，回到默认（{r['note']}）")
+
+
 def _run(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
     from jiaoyi.loop import Runner
 
+    _migrate(args)
     if problem := _startup_problem(args):
         print(problem, file=sys.stderr)
         return 2
