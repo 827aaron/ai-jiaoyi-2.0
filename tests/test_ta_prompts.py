@@ -94,7 +94,7 @@ def test_pick_prompt_snapshot_and_previous_round_line() -> None:
     assert "held at most 2 hours; you judge the market for the next 2 hours, not today" in text
     assert "reference only; do not copy it" in text and "BTC 压在 20 日线下 {x}" in text
     assert "must never decide the direction on their own" in text
-    assert "pick at most 8 symbols" in text and "【简报】" in text
+    assert "pick at most 8" in text and "【简报】" in text
     assert "in Chinese" in text and text.rstrip().endswith("表")
     assert "previous round" not in tp.pick_prompt(p, "t", 8)  # 没有上一轮：整行去掉
 
@@ -261,7 +261,7 @@ def test_prompts_active_file_is_written(tmp_path) -> None:  # type: ignore[no-un
     assert doc["hold"] == "4h" and doc["style"] == "mid" and doc["indicator_interval"] == "1h"
     assert "How this market behaves" not in doc["shared"] and "{SYMBOL}" in doc["position_note"]
     assert doc["brief_fields"]["main"][0] == "chg_4h"
-    assert "pick at most {max_n} symbols" in doc["pick"]  # 预览留占位符，不写成「最多 0 个」
+    assert "pick at most {max_n}" in doc["pick"]  # 预览留占位符，不写成「最多 0 个」
 
 
 # ---------------------------------------------------------------- tickSize
@@ -394,7 +394,7 @@ def test_meeting_note_has_the_window_only_when_given() -> None:
 
 def test_pick_prompt_describes_the_market_without_directions() -> None:
     text = tp.pick_prompt(tp.PromptParams.for_hold("2h"), "now", 8)
-    assert "Describe the market only" in text and "without choosing a direction" in text
+    assert "Describe the market only" in text and "do not choose a direction" in text
     assert "bounce, a drop or a breakout" not in text
 
 

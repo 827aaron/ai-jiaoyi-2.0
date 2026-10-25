@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Mapping
@@ -29,7 +30,10 @@ from jiaoyi.core.pool_overrides import PoolOverrides
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.us_hours import us_session
 from jiaoyi.slow.majors import MajorsSource, base_of
+from jiaoyi.slow.market_log import MarketLog
 from jiaoyi.slow.us_market import EarningsCalendar
+
+logger = logging.getLogger(__name__)
 
 SCREEN_EVERY = timedelta(hours=1)
 """主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
@@ -95,6 +99,17 @@ class SymbolStats:
     liquidations_1h_usdt: float = 0.0
     kind: str = ""
     """交易所给的标的类型（小写，含 contractType / underlyingType 等），给 ``classify`` 用。"""
+    range_hold_pct: float | None = None
+    """最近 3 个完整的「持仓时长」窗口，每个窗口的（最高 − 最低）÷ 现价（%），取平均。
+    ``None`` = 数据源没算（按 24h 波动折成每小时）。"""
+    hold_hours: float = 1.0
+    """持仓时长（小时，不足 1 小时按 1 算），打分时按 √时长折成每小时。"""
+    volume_surge_old: float | None = None
+    """旧算法的量能比值（最后一根半截小时 ÷ 前 24 小时均值），只用来算 ``score_old`` 对照。"""
+    metrics: dict[str, float] = field(default_factory=dict)
+    """给总盘会表格用的本地行情数字（见 ``binance_stats``）；缺的不写。"""
+    bars: tuple[tuple[int, float, float, float, float], ...] = ()
+    """1 小时 K 线 (开盘毫秒, 开, 高, 低, 收)，最后一根是还没走完的小时；事后回填用。"""
 
 
 class MarketStatsSource(Protocol):
@@ -143,6 +158,9 @@ class ScreenerConfig:
     """手动加入主流币的币名（如 LINK），不管市值排名。"""
     major_exclude: frozenset[str] = frozenset()
     """手动排除出主流币的币名；被排除的按山寨币算。"""
+    always_candidates: frozenset[str] = frozenset()
+    """每轮都进总盘会候选的币（不带 USDT 的币名）：过了硬门槛、没被拉黑就进池（算在池子大小里），
+    不算头部、不占中间档每天的名额。"""
     allow_tradfi: bool = False
     """是否让币安 TRADIFI_PERPETUAL（美股 / 金属等传统资产永续）进池。默认关：等 Demo 上把开平仓、
     保命止损、行情流整条链验证完再开。"""
@@ -159,8 +177,8 @@ class ScreenerConfig:
     max_range_24h_pct: float = 0.0
     """24 小时波动上限（%）；0 = 不设。波动过大的币止损容易被一根针扫掉。"""
     # 打分时各项「到多少算满分」
-    vol_full_multiple: float = 20.0
-    """24h 波动是来回手续费的几倍算满分。"""
+    vol_full_multiple: float = 30.0
+    """按每小时折算的正常波动是来回手续费的几倍算满分（30 = 每小时 3%）。"""
     surge_full_multiple: float = 8.0
     """最近 1 小时成交额是平时的几倍算满分。"""
     funding_full: float = 0.001
@@ -189,17 +207,53 @@ _US_CATEGORIES = frozenset({Category.CRYPTO_STOCK, Category.US_TECH})
 
 def _assign_tiers(entries: list[SymbolPoolEntry], cfg: ScreenerConfig) -> list[SymbolPoolEntry]:
     """进池的币分档：固定 / 手动加入的币和分数最高的凑满 ``tier_head`` 个算头部，接着
-    ``tier_mid`` 个算中间，其余尾部。``entries`` 已按（进池优先、分数从高到低）排好。"""
+    ``tier_mid`` 个算中间，其余尾部。``entries`` 已按（进池优先、分数从高到低）排好。
+    「每轮进总盘会」的币不抢名额：别的币按没有它们时排名，它们自己按分数落在哪档就是哪档。"""
     pooled = [e for e in entries if e.in_pool]
     user = [e for e in pooled if e.pinned or e.manual]
-    rest = [e for e in pooled if not (e.pinned or e.manual)]
+    always = [e for e in pooled if e.always_candidate and not (e.pinned or e.manual)]
+    rest = [e for e in pooled if not (e.pinned or e.manual or e.always_candidate)]
     head_room = max(cfg.tier_head - len(user), 0)
+
+    def tier_at(i: int) -> str:
+        return "head" if i < head_room else "mid" if i < head_room + cfg.tier_mid else "tail"
+
     tiers: dict[str, str] = {e.symbol: "head" for e in user}
     for i, e in enumerate(rest):
-        tiers[e.symbol] = (
-            "head" if i < head_room else "mid" if i < head_room + cfg.tier_mid else "tail"
-        )
+        tiers[e.symbol] = tier_at(i)
+    for e in always:
+        tiers[e.symbol] = tier_at(sum(1 for r in rest if r.score > e.score))
     return [e.model_copy(update={"tier": tiers.get(e.symbol)}) for e in entries]
+
+
+def _is_always(symbol: str, cfg: ScreenerConfig) -> bool:
+    return bool(cfg.always_candidates) and (
+        symbol.removesuffix("USDT") in cfg.always_candidates
+        or base_of(symbol) in cfg.always_candidates
+    )
+
+
+def _with_ranks(entries: list[SymbolPoolEntry]) -> list[SymbolPoolEntry]:
+    """池里的币按「每小时波动」排名，写进 metrics（rank = 第几，pool_n = 池子几个币）。"""
+    pooled = [e for e in entries if e.in_pool and "move_hold" in e.metrics]
+    order = {
+        e.symbol: i + 1
+        for i, e in enumerate(sorted(pooled, key=lambda e: (-e.metrics["move_hold"], e.symbol)))
+    }
+    return [
+        e.model_copy(
+            update={
+                "metrics": {
+                    **e.metrics,
+                    "rank": float(order[e.symbol]),
+                    "pool_n": float(len(order)),
+                }
+            }
+        )
+        if e.symbol in order
+        else e
+        for e in entries
+    ]
 
 
 def _enabled(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> bool:
@@ -262,13 +316,27 @@ def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
     )
 
 
+OLD_VOL_FULL_MULTIPLE = 20.0
+"""旧打分（24h 波动 ÷ 手续费 ÷ 20）的满分点，只用来算 ``score_old`` 对照。"""
+
+
+def _vol_item(s: SymbolStats, cfg: ScreenerConfig) -> float:
+    """波动分：最近 3 段持仓时长的平均高低差，按 √时长折成每小时，是手续费的几倍（30 倍满分）。"""
+    fee_pct = cfg.round_trip_fee_bps / 100.0
+    if s.range_hold_pct is not None:
+        per_hour = s.range_hold_pct / math.sqrt(max(s.hold_hours, 1.0))
+    else:
+        per_hour = s.range_24h_pct / math.sqrt(24.0)  # 数据源没给分段高低差：24h 波动折成每小时
+    return _clip01(per_hour / fee_pct / cfg.vol_full_multiple)
+
+
 def score(s: SymbolStats, cfg: ScreenerConfig) -> tuple[float, dict[str, float], list[str]]:
     """总分 0–1、各分项、中文入池理由。分项都先压到 0–1。"""
-    fee_pct = cfg.round_trip_fee_bps / 100.0
     parts = {
-        # 默认：24h 波动是来回手续费的 20 倍及以上算满分；量能 8 倍封顶；资金费 0.1% 封顶；
-        # 持仓量变化 10% 封顶；强平 1000 万美元封顶（各项满分点可配，见 ScreenerConfig）
-        "vol_vs_fees": _clip01(s.range_24h_pct / fee_pct / cfg.vol_full_multiple),
+        # 默认：波动分 = 最近 3 段持仓时长的平均高低差（折成每小时）是手续费的 30 倍及以上算满分；
+        # 量能 8 倍封顶；资金费 0.1% 封顶；持仓量变化 10% 封顶；强平 1000 万美元封顶（各项满分点
+        # 可配，见 ScreenerConfig）
+        "vol_vs_fees": _vol_item(s, cfg),
         "volume_surge": _clip01(
             math.log2(max(s.volume_surge, 1e-9)) / math.log2(cfg.surge_full_multiple)
         ),
@@ -290,6 +358,22 @@ def score(s: SymbolStats, cfg: ScreenerConfig) -> tuple[float, dict[str, float],
     return round(total, 4), {k: round(v, 4) for k, v in parts.items()}, reasons
 
 
+def score_old(s: SymbolStats, cfg: ScreenerConfig) -> float:
+    """旧公式的总分（24h 波动 ÷ 手续费 ÷ 20、半截小时的量能），每轮和新分数一起记，验收时对照。"""
+    fee_pct = cfg.round_trip_fee_bps / 100.0
+    surge = s.volume_surge_old if s.volume_surge_old is not None else s.volume_surge
+    parts = {
+        "vol_vs_fees": _clip01(s.range_24h_pct / fee_pct / OLD_VOL_FULL_MULTIPLE),
+        "volume_surge": _clip01(math.log2(max(surge, 1e-9)) / math.log2(cfg.surge_full_multiple)),
+        "funding_extreme": _clip01(abs(s.funding_rate) / cfg.funding_full),
+        "oi_change": _clip01(abs(s.oi_change_pct) / cfg.oi_full_pct),
+        "liquidations": _clip01(
+            math.log10(max(s.liquidations_1h_usdt, 1.0)) / math.log10(cfg.liq_full_usdt)
+        ),
+    }
+    return round(sum(cfg.weights.get(k, 0.0) * v for k, v in parts.items()), 4)
+
+
 class CodeSymbolScreener:
     """满足 ``interfaces.SymbolScreener``。"""
 
@@ -303,6 +387,7 @@ class CodeSymbolScreener:
         majors: MajorsSource | None = None,
         every: timedelta = SCREEN_EVERY,
         tz: str = "Asia/Bangkok",
+        market_log: MarketLog | None = None,
     ) -> None:
         self._source = source
         self._cfg = cfg or ScreenerConfig()
@@ -310,6 +395,7 @@ class CodeSymbolScreener:
         self._rec = recorder
         self._earnings = earnings
         self._majors = majors
+        self._market_log = market_log
         self._us_tickers: frozenset[str] = frozenset()
         self._every = every
         self._tz = ZoneInfo(tz)
@@ -407,6 +493,11 @@ class CodeSymbolScreener:
         stats = await self._source.fetch(now)
         if not stats:
             raise RuntimeError("行情数据源返回空列表，沿用上一份候选池")
+        if self._market_log is not None:
+            try:  # 持仓时长走完的总盘会轮次：用这次拉到的 K 线补上池子里每个币的实际结果
+                self._market_log.backfill(now, {s.symbol: s.bars for s in stats})
+            except Exception:
+                logger.exception("总盘会结果回填失败，不影响选币")
         cfg, ov = self._cfg, self._ov
         us_on = cfg.us_events
         if us_on and self._earnings is not None:
@@ -435,6 +526,12 @@ class CodeSymbolScreener:
             black = s.symbol in ov.blacklist
             pinned = s.symbol in ov.pinned and not black
             manual = s.symbol in ov.manual and not black
+            always = not black and _is_always(s.symbol, cfg)
+            metrics = dict(s.metrics)
+            metrics["score_old"] = score_old(s, cfg)
+            if s.range_hold_pct is not None:
+                metrics["move_hold"] = round(s.range_hold_pct, 4)
+                metrics["fee_x"] = round(s.range_hold_pct / (cfg.round_trip_fee_bps / 100.0), 2)
             try:
                 entry = SymbolPoolEntry(
                     symbol=s.symbol,
@@ -442,12 +539,15 @@ class CodeSymbolScreener:
                     score=total,
                     score_breakdown=parts,
                     reasons=(["你固定的币"] if pinned else [])
+                    + (["每轮进总盘会"] if always else [])
                     + (["这一类已关闭"] if not _enabled(category, cfg, ov) else [])
                     + reasons,
                     filters=f,
                     pinned=pinned,
                     blacklisted=black,
                     manual=manual,
+                    always_candidate=always,
+                    metrics=metrics,
                     in_pool=False,
                 )
             except ValidationError:
@@ -456,7 +556,7 @@ class CodeSymbolScreener:
             if f.passed and not black:
                 ranked.append(entry)
 
-        chosen: set[str] = {e.symbol for e in ranked if e.pinned or e.manual}
+        chosen: set[str] = {e.symbol for e in ranked if e.pinned or e.manual or e.always_candidate}
         counts: dict[Category, int] = {}
         for sym in chosen:
             counts[entries[sym].category] = counts.get(entries[sym].category, 0) + 1
@@ -477,6 +577,7 @@ class CodeSymbolScreener:
         final.sort(key=lambda e: (not e.in_pool, -e.score, e.symbol))
         if cfg.tiers:
             final = _assign_tiers(final, cfg)
+        final = _with_ranks(final)
         self._us_tickers = frozenset(
             e.symbol.removesuffix("USDT")
             for e in final

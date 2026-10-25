@@ -129,7 +129,8 @@ def test_screener_section_defaults_equal_the_old_hardcoded_values() -> None:
     cfg = SlowConfig().screener_config(
         pool_size=40, risk_max_spread_bps=5.0, round_trip_fee_bps=10.0
     )
-    assert cfg == ScreenerConfig()  # [screener] 不写 = 原来写死的值，选币结果不变
+    # [screener] 不写 = 默认值；唯一的区别是设置里默认每轮进总盘会的 BTC / ETH
+    assert cfg == ScreenerConfig(always_candidates=frozenset({"BTC", "ETH"}))
 
 
 def test_screener_section_validation_and_cautions() -> None:

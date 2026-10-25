@@ -50,11 +50,12 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
-from jiaoyi.slow import binance_gate, ta_nodes, ta_prompts, ta_roles
+from jiaoyi.slow import binance_gate, market_table, ta_nodes, ta_prompts, ta_roles
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
     Analysis,
+    Decision,
     MeetingError,
     Pick,
     PickResult,
@@ -873,15 +874,77 @@ class _LessonDraft(BaseModel):
 
 
 class _PickDraft(BaseModel):
-    class _P(BaseModel):
+    class _D(BaseModel):
         symbol: str
-        reason: str
+        pick: bool = Field(description="true = worth a meeting now; false = skip")
+        reason: str = Field(
+            description="Chinese, one sentence quoting at least two numbers from this coin's row"
+        )
 
-    regime: str = Field(min_length=1, description="One-sentence market view, in Chinese")
-    picks: list[_P]
-    rejections: list[_P] = Field(
-        default_factory=list,
-        description="Candidates not picked: one Chinese sentence each on why not worth a meeting",
+    regime: str = Field(
+        min_length=1,
+        description="One-sentence market view, in Chinese, citing at least two numbers from the "
+        "brief or the pool breadth line",
+    )
+    decisions: list[_D] = Field(
+        description="Exactly one entry for every candidate in the table: pick or skip, each "
+        "with its reason"
+    )
+
+
+def pick_problems(draft: _PickDraft, valid: Sequence[str]) -> list[str]:
+    """总盘会回答的校验：每个候选正好一条；每条理由和大盘判断至少 2 个数字。返回问题清单。"""
+    seen: dict[str, int] = {}
+    for d in draft.decisions:
+        seen[d.symbol] = seen.get(d.symbol, 0) + 1
+    out: list[str] = []
+    if missing := [s for s in valid if s not in seen]:
+        out.append(f"no decision for: {', '.join(missing)}")
+    if dup := [s for s, n in seen.items() if n > 1 and s in valid]:
+        out.append(f"more than one decision for: {', '.join(dup)}")
+    first: set[str] = set()
+    for d in draft.decisions:
+        if d.symbol not in valid or d.symbol in first:
+            continue
+        first.add(d.symbol)
+        if market_table.count_numbers(d.reason) < 2:
+            out.append(f"{d.symbol}: the reason must quote at least two numbers from its row")
+    if market_table.count_numbers(draft.regime) < 2:
+        out.append("regime: quote at least two numbers from the brief or the pool breadth line")
+    return out
+
+
+def pick_result(
+    draft: _PickDraft,
+    valid: Sequence[str],
+    max_n: int,
+    problems: Sequence[str],
+    retried: bool,
+    cost: float,
+    breadth: str,
+    table: str,
+) -> PickResult:
+    """回答 → ``PickResult``。校验不去掉任何一个挑中的币（格式问题不能让会变少）：
+    理由缺数字照样算；挑中数超过 ``max_n`` 才截断（那是名额，不是校验）。"""
+    decisions: list[Decision] = []
+    seen: set[str] = set()
+    for d in draft.decisions:
+        if d.symbol in valid and d.symbol not in seen:
+            seen.add(d.symbol)
+            decisions.append(Decision(d.symbol, d.pick, d.reason))
+    picks = [Pick(d.symbol, d.reason) for d in decisions if d.pick][:max_n]
+    kept = {p.symbol for p in picks}
+    rejections = [Pick(d.symbol, d.reason) for d in decisions if d.symbol not in kept]
+    return PickResult(
+        draft.regime,
+        picks,
+        cost,
+        rejections,
+        decisions=decisions,
+        retried=retried,
+        errors=list(problems),
+        breadth=breadth,
+        table=table,
     )
 
 
@@ -1877,21 +1940,31 @@ class TradingAgentsEngine:
         set_liquidation_totals({**_LIQ_TOTALS, **fresh})
 
     async def pick(
-        self, candidates: Sequence[SymbolPoolEntry], max_n: int, previous: BattleCard | None
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
     ) -> PickResult:
         if max_n <= 0 or not candidates:
             return PickResult(regime=previous.regime if previous else "无新增标的", picks=[])
         self._snapshot_liquidations([e.symbol for e in candidates])
-        return await asyncio.to_thread(self._pick_sync, list(candidates), max_n, previous)
+        return await asyncio.to_thread(
+            self._pick_sync, list(candidates), max_n, previous, list(pool) or list(candidates)
+        )
 
     def _pick_sync(
-        self, candidates: list[SymbolPoolEntry], max_n: int, previous: BattleCard | None
+        self,
+        candidates: list[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: list[SymbolPoolEntry],
     ) -> PickResult:
         meter = self._meter("pick")
         handler = cost_handler(meter)
         self._refresh_lessons(handler)
         try:
-            return self._pick_run(candidates, max_n, previous, handler, meter)
+            return self._pick_run(candidates, max_n, previous, handler, meter, pool)
         except Exception as exc:  # 失败时把已烧掉的花费带出去，日花费上限才不漏算
             raise MeetingError(str(exc), meter.cost) from exc
         finally:
@@ -1904,6 +1977,7 @@ class TradingAgentsEngine:
         previous: BattleCard | None,
         handler: Any,
         meter: CostMeter,
+        pool: Sequence[SymbolPoolEntry] = (),
     ) -> PickResult:
         graph = self._graph(("market",), handler)
         llm = (
@@ -1911,31 +1985,37 @@ class TradingAgentsEngine:
             .with_structured_output(_PickDraft)
             .bind(max_tokens=self._s.json_max_tokens)
         )
-        table = "\n".join(
-            f"{e.symbol} category={e.category.value} score={e.score:.2f} "
-            f"reasons={'; '.join(e.reasons)}" + self._liq_note(e.symbol) + self._headlines(e.symbol)
-            for e in candidates
+        breadth = market_table.breadth_line(pool or candidates)
+        rows = "\n".join(
+            market_table.format_row(e, self._s.hold, self._headlines(e.symbol)) for e in candidates
         )
+        table = f"{breadth}\n{rows}"
         market = self._brief_text() + self._market_news()
-        draft: _PickDraft = llm.invoke(
-            ta_prompts.pick_prompt(
-                prompt_params(self._s),
-                f"{self._today():%Y-%m-%d %H:%M}",
-                max_n,
-                previous.regime if previous else "",
-                market,
-                table,
-            ),
-            config={"callbacks": [handler]},
+        prompt = ta_prompts.pick_prompt(
+            prompt_params(self._s),
+            f"{self._today():%Y-%m-%d %H:%M}",
+            max_n,
+            previous.regime if previous else "",
+            market,
+            table,
         )
-        valid = {e.symbol for e in candidates}
-        picks = [Pick(p.symbol, p.reason) for p in draft.picks if p.symbol in valid][:max_n]
-        rejections = [
-            Pick(p.symbol, p.reason)
-            for p in draft.rejections
-            if p.symbol in valid and p.symbol not in {x.symbol for x in picks}
-        ]
-        return PickResult(draft.regime, picks, meter.cost, rejections)
+        valid = [e.symbol for e in candidates]
+        draft: _PickDraft = llm.invoke(prompt, config={"callbacks": [handler]})
+        problems = pick_problems(draft, valid)
+        retried = bool(problems)
+        if problems:
+            # 重问一次，把缺了哪些币、哪条不合格写进追问；重问失败就用第一次的回答
+            try:
+                again: _PickDraft = llm.invoke(
+                    prompt
+                    + "\n\nYour previous answer had these problems, answer again in full:\n- "
+                    + "\n- ".join(problems),
+                    config={"callbacks": [handler]},
+                )
+                draft, problems = again, pick_problems(again, valid)
+            except Exception:
+                logger.exception("总盘会重问失败，用第一次的回答")
+        return pick_result(draft, valid, max_n, problems, retried, meter.cost, breadth, table)
 
     def _liq_note(self, symbol: str) -> str:
         total = _LIQ_TOTALS.get(symbol, 0.0)

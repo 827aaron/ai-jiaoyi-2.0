@@ -88,7 +88,11 @@ class FakeEngine:
         self.running = self.peak = 0
 
     async def pick(
-        self, candidates: Sequence[SymbolPoolEntry], max_n: int, previous: BattleCard | None
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
     ) -> PickResult:
         return PickResult("区间震荡", [Pick(s, "r") for s in self.picks][:max_n], 0.01)
 
@@ -832,7 +836,11 @@ async def test_market_meeting_records_rejection_reasons(tmp_path: Path, now: dat
 
     class Eng(FakeEngine):
         async def pick(
-            self, candidates: Sequence[SymbolPoolEntry], max_n: int, previous: BattleCard | None
+            self,
+            candidates: Sequence[SymbolPoolEntry],
+            max_n: int,
+            previous: BattleCard | None,
+            pool: Sequence[SymbolPoolEntry] = (),
         ) -> PickResult:
             return PickResult(
                 "区间震荡", [Pick("BBUSDT", "r")], 0.01, [Pick("CCUSDT", "量能萎缩，不值得开会")]
@@ -843,7 +851,7 @@ async def test_market_meeting_records_rejection_reasons(tmp_path: Path, now: dat
     doc = json.loads((live / "_MARKET.json").read_text(encoding="utf-8"))
     assert doc["rejections"] == [
         {"symbol": "CCUSDT", "reason": "量能萎缩，不值得开会"},
-        {"symbol": "DDUSDT", "reason": "军师没挑，也没给理由"},
+        {"symbol": "DDUSDT", "reason": "AI 没写理由"},
     ]
     filt = doc["steps"][2]["text"]
     assert (

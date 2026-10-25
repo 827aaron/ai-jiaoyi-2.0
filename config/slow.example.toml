@@ -17,6 +17,7 @@ span_sigma = 1.5      # 关键位范围 = 系数 × 该币 ATR × √(持仓时�
 # mid = 15                         # 中间档几个；再往后是尾部
 # mid_daily_pick = 5               # 中间档每天（曼谷日）最多挑几个交易
 # mid_size_max = "S"               # 中间档仓位档位最大封到哪一档
+# always_candidates = ["BTC", "ETH"]  # 每轮都进总盘会候选的币（过了硬门槛就进池，不算头部、不占中间档名额）
 # 美股类别（us_events / us_open_bonus 写在下面 [screener] 里）：开盘期间加分，财报日前后标注
 # 按类别开关和每类上限（选币页上的设置优先于这里）：
 # [screener.categories.us_tech]
@@ -37,7 +38,7 @@ major_top_n = 20                   # 主流币 = 市值前几名（每天自动�
 allow_tradfi = false               # 美股 / 金属永续（TRADIFI_PERPETUAL）是否进池：默认关，Demo 上验证完整条链再开
 us_events = true                   # 美股类别（币股 / 美股科技）：开盘期间加分、财报日前后标注，军师团新闻带上财报日
 us_open_bonus = 0.08               # 美股常规盘开盘期间加多少分（总分满分约 1；0 = 不加）
-vol_full_multiple = 20             # 打分：24h 波动是来回手续费的几倍算满分
+vol_full_multiple = 30             # 打分：按每小时折算的正常波动是来回手续费的几倍算满分（30 = 每小时 3%）
 surge_full_multiple = 8            # 打分：最近 1 小时成交额是平时的几倍算满分
 funding_full = 0.001               # 打分：资金费率绝对值到多少算满分（0.001 = 0.1%）
 oi_full_pct = 10                   # 打分：持仓量一小时变化多少 % 算满分

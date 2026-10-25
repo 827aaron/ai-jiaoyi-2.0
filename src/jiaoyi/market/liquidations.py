@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from jiaoyi.contracts import Liquidation, Side
 
@@ -42,6 +42,11 @@ class LiquidationTracker:
         self._q: dict[str, deque[tuple[datetime, float, bool]]] = {}
         self._lock = threading.Lock()
         self._last_sweep: datetime | None = None
+        self._born = datetime.now(UTC)
+
+    def feed_minutes(self, now: datetime) -> float:
+        """强平数据流已经开着多少分钟（从统计对象创建算）；刚开不久时 0 不代表没有强平。"""
+        return max((now - self._born).total_seconds() / 60.0, 0.0)
 
     def record(self, ev: Liquidation) -> None:
         with self._lock:
