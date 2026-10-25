@@ -120,6 +120,7 @@ from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.credits import CreditMonitor
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.majors import MajorsSource
+from jiaoyi.slow.market_log import MarketLog
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
@@ -325,6 +326,13 @@ def _build_cards(
         tier_path=Path(app_cfg.data_dir) / "mid_tier.json",
         # 总盘会（大盘基调 + 挑币）的实况，和各币会议一起放 meeting_live/_MARKET.json
         live_dir=Path(app_cfg.data_dir) / "meeting_live",
+        # 每轮总盘会的记录（池子里每个币的分数 / 数字 / 结论），事后回填实际结果
+        market_log=MarketLog(Path(app_cfg.data_dir) / "market_meeting"),
+        log_meta={
+            "meeting_interval": app_cfg.meeting_interval,
+            "hold": app_cfg.hold,
+            "hold_hours": max(fast.time_limit_s / 3600.0, 1.0),
+        },
         **cfg.commander_kwargs(),
     )
     return commander, news
@@ -491,7 +499,10 @@ def build_modules(
         feed = bfeed
         # 选币只读币安公开接口，不需要 key
         # 强平统计由行情层的全市场强平流产出，选币和军师团共用，不另开连接
-        source = BinanceStatsSource(liquidations=bfeed.liquidations)
+        source = BinanceStatsSource(
+            liquidations=bfeed.liquidations,
+            hold_minutes=max(app_cfg.fast_loop.time_limit_s // 60, 1),
+        )
         closers.append(source.aclose)
         scfg = slow_cfg or slow_defaults(app_cfg.profile)
         earnings = EarningsCalendar() if scfg.screener.us_events else None
@@ -510,6 +521,7 @@ def build_modules(
             majors=majors,
             every=timedelta(minutes=app_cfg.screener_interval_min),
             tz=tz,
+            market_log=MarketLog(Path(app_cfg.data_dir) / "market_meeting"),
         )
         cards, news = _build_cards(
             risk_cfg,

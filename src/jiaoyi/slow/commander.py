@@ -48,9 +48,10 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
-from jiaoyi.slow import binance_gate
+from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.credits import is_credit_error
+from jiaoyi.slow.market_log import MarketLog, pool_rows, round_id
 from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
 
@@ -76,11 +77,25 @@ class Pick:
 
 
 @dataclass(frozen=True)
+class Decision:
+    """总盘会对一个候选的结论：挑 / 不挑 + 一句带数字的理由。"""
+
+    symbol: str
+    pick: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class PickResult:
     regime: str
     picks: list[Pick]
     cost_usd: float = 0.0
     rejections: list[Pick] = field(default_factory=list)  # 没挑中的币：一句理由
+    decisions: list[Decision] = field(default_factory=list)  # 每个候选一条（含没挑的）
+    retried: bool = False  # 第一次回答不合格，重问过一次
+    errors: list[str] = field(default_factory=list)  # 校验没过的地方（只记录，不丢任何结论）
+    breadth: str = ""  # 池子概况那一行（代码算的）
+    table: str = ""  # 给模型看的候选表
 
 
 @dataclass(frozen=True)
@@ -92,9 +107,14 @@ class Analysis:
 
 class MeetingEngine(Protocol):
     async def pick(
-        self, candidates: Sequence[SymbolPoolEntry], max_n: int, previous: BattleCard | None
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
     ) -> PickResult:
-        """总盘会：看大盘和池子，挑最多 ``max_n`` 个值得开会的，并写一句大盘判断。"""
+        """总盘会：看大盘和池子，挑最多 ``max_n`` 个值得开会的，并写一句大盘判断。
+        ``pool`` 是整个候选池（含尾部），只用来算「池子概况」那一行。"""
         ...
 
     async def analyze(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
@@ -245,6 +265,8 @@ class BattleCardCommander:
         events: EventRules | None = None,
         schedule_at: str | None = None,
         slowdown: tuple[timedelta, timedelta] | None = None,
+        market_log: MarketLog | None = None,
+        log_meta: Mapping[str, Any] | None = None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("作战卡有效期必须大于 0")
@@ -297,6 +319,9 @@ class BattleCardCommander:
         bind = getattr(engine, "bind_late_cost", None)
         if callable(bind):
             bind(self._late_cost)
+        self._market_log = market_log
+        self._log_meta: dict[str, Any] = dict(log_meta or {})
+        self._always: set[str] = set()  # 设置里「每轮进总盘会」的币（本轮池子里的）
         self._tiers = tiers or TierRules()
         self._tier_path = tier_path
         self._tier_of: dict[str, str] = {}
@@ -773,6 +798,7 @@ class BattleCardCommander:
         self._rl_until, self._rl_reason = None, ""  # 重开时清掉上一次的限流暂停
         self._pick_cost = 0.0  # 本轮总盘会花费；出卡失败时记在错误记录上，面板净盈亏才不漏 AI 费
         self._tier_of = {e.symbol: e.tier for e in pool.in_pool if e.tier}
+        self._always = {e.symbol for e in pool.in_pool if e.always_candidate}
         self._expand_mid = self._tiers.enabled and self._mid_day != self._day(now)
         candidates = self._eligible(pool, now, expand=self._expand_mid)
         if not candidates:
@@ -818,6 +844,7 @@ class BattleCardCommander:
             mid_ok = e.symbol in self._mid_unlocked and self._mid_day == self._day(now)
             if (
                 e.tier in (None, "head")
+                or e.always_candidate  # 每轮进总盘会：不管落在哪档
                 or e.symbol in self._held
                 or (e.tier == "mid" and (expand or mid_ok))
             ):
@@ -829,7 +856,7 @@ class BattleCardCommander:
         keep: list[SymbolPoolEntry] = []
         mids: list[str] = []
         for e in chosen:
-            if e.tier == "mid" and e.symbol not in self._held:
+            if e.tier == "mid" and e.symbol not in self._held and e.symbol not in self._always:
                 if len(mids) >= self._tiers.mid_daily_pick:
                     continue
                 mids.append(e.symbol)
@@ -844,6 +871,7 @@ class BattleCardCommander:
         if (
             self._tiers.enabled
             and self._tier_of.get(cs.symbol) == "mid"
+            and cs.symbol not in self._always  # 每轮进总盘会的币仓位按头部算，不被中间档封顶
             and _SIZE_ORDER[cs.size_tier_max] > _SIZE_ORDER[cap]
         ):
             return cs.model_copy(update={"size_tier_max": cap})
@@ -871,6 +899,7 @@ class BattleCardCommander:
 
     def _market_live(
         self,
+        pool: Sequence[SymbolPoolEntry],
         candidates: list[SymbolPoolEntry],
         forced: list[SymbolPoolEntry],
         free: list[SymbolPoolEntry],
@@ -880,12 +909,11 @@ class BattleCardCommander:
         if self._live_dir is None:
             return None
         live = MeetingLive(self._live_dir, MARKET_LIVE)
-        table = "\n".join(
-            f"{e.symbol}（{e.category.value}，分数 {e.score:.2f}"
-            + (f"，档位 {e.tier}" if e.tier else "")
-            + (f"，{'、'.join(e.reasons)}" if e.reasons else "")
-            + "）"
-            for e in free
+        hold = str(self._log_meta.get("hold", "hold"))
+        table = (
+            market_table.breadth_line(pool or free)
+            + "\n"
+            + "\n".join(market_table.format_row(e, hold) for e in free)
         )
         prev = f"上一张卡的大盘判断：{self._card.regime}\n" if self._card is not None else ""
         live.step(
@@ -907,7 +935,13 @@ class BattleCardCommander:
         now: datetime,
     ) -> None:
         by_pick = {p.symbol: p.reason for p in picked.picks}
-        out = [f"大盘判断：{picked.regime}", "挑中："]
+        out = [f"大盘判断：{picked.regime}"]
+        if picked.decisions:
+            out.append("每个候选的结论：")
+            out += [
+                f"{d.symbol}：{'挑' if d.pick else '不挑'}：{d.reason}" for d in picked.decisions
+            ]
+        out.append("挑中：")
         out += [f"{e.symbol}：{by_pick.get(e.symbol, '')}" for e in chosen if e not in forced]
         live.step("pick", "market", "\n".join(out))
         keep = {e.symbol for e in chosen}
@@ -921,7 +955,7 @@ class BattleCardCommander:
             if e.symbol in by_pick:
                 why.append(f"{e.symbol}：总盘会挑了，但这轮上会名额已满（或中间档当天名额已满）")
             else:
-                reason = said.get(e.symbol) or "没写单币理由"
+                reason = said.get(e.symbol) or "AI 没写理由"
                 why.append(
                     f"{e.symbol}：总盘会这轮没挑中（候选池第 {rank[e.symbol]} 名，"
                     f"选币分 {e.score:.2f}）：{reason}"
@@ -935,6 +969,43 @@ class BattleCardCommander:
         live.set_rejections(rejections)
         live.set_summary(summary)
         live.finish("market", picked.regime, "", picked.cost_usd)
+
+    def _record_market(
+        self,
+        pool: SymbolPool,
+        picked: PickResult,
+        chosen: list[SymbolPoolEntry],
+        room: int,
+        card_version: int,
+        elapsed_s: float,
+        now: datetime,
+    ) -> None:
+        """每轮总盘会写一行记录（data/market_meeting/）：池子里每个币的分数和数字、候选的结论。"""
+        if self._market_log is None:
+            return
+        decided = {d.symbol: (d.pick, d.reason) for d in picked.decisions}
+        try:
+            self._market_log.write_round(
+                {
+                    "round_id": round_id(now),
+                    "ts": now.isoformat(),
+                    "pool_id": pool.pool_id,
+                    "card_version": card_version,
+                    **self._log_meta,
+                    "max_n": max(room, 0),
+                    "regime": picked.regime,
+                    "breadth": picked.breadth,
+                    "picked": [p.symbol for p in picked.picks],
+                    "chosen": [e.symbol for e in chosen],
+                    "cost_usd": picked.cost_usd,
+                    "elapsed_s": round(elapsed_s, 1),
+                    "retried": picked.retried,
+                    "errors": picked.errors,
+                    "pool": pool_rows(pool.in_pool, decided),
+                }
+            )
+        except Exception:
+            logger.exception("写总盘会记录失败，不影响开会")
 
     def _market_summary(
         self,
@@ -966,7 +1037,7 @@ class BattleCardCommander:
             if e.symbol in by_pick:
                 reason = "军师挑了，但超出名额或中间档当天名额已满"
             else:
-                reason = said.get(e.symbol) or "军师没挑，也没给理由"
+                reason = said.get(e.symbol) or "AI 没写理由"
             rows.append({"symbol": e.symbol, "reason": reason})
         return rows
 
@@ -1030,11 +1101,12 @@ class BattleCardCommander:
         pinned = [*pinned, *held_in]
         room = max(self._pick_max - len(pinned), 0)
         free = [e for e in candidates if e not in pinned]
+        pick_started = time.monotonic()
         est = self._estimate(self._pick_costs)
         self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
-        live = self._market_live(candidates, pinned, free, max(room, 0))
+        live = self._market_live(pool.in_pool, candidates, pinned, free, max(room, 0))
         try:
-            picked = await self._engine.pick(free, max(room, 0), self._card)
+            picked = await self._engine.pick(free, max(room, 0), self._card, pool=pool.in_pool)
         except Exception as exc:
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
             fail_cost = self._failure_cost(exc, "pick")
@@ -1050,6 +1122,11 @@ class BattleCardCommander:
             picked.cost_usd - est
         )  # 选币的花费一出结果就改成实际值，哪怕后面所有标的都失败
         self._pick_costs.append(picked.cost_usd)
+        if picked.errors:  # 格式问题只记录，挑中的币照样用
+            self._write(
+                outcome=Outcome.ERROR,
+                summary=f"总盘会回答有问题（挑中的币照用）：{'；'.join(picked.errors)}"[:200],
+            )
         chosen = list(pinned)
         for p in picked.picks:
             e = by_symbol.get(p.symbol)
@@ -1097,6 +1174,9 @@ class BattleCardCommander:
         prev = self._card
         same_day = prev is not None and prev.card_id == self._card_id(now)
         base_version = prev.version if prev is not None and same_day else 0
+        self._record_market(
+            pool, picked, chosen, room, base_version + 1, time.monotonic() - pick_started, now
+        )
         # 指令池：上一张卡里还没到期的币原样留着（这轮没开会的币不动），开完哪个换哪个；
         # 持仓币的指令到期也不消失，只清空信号。池外（已被筛掉）的币不留
         in_pool = {e.symbol for e in pool.in_pool}

@@ -151,7 +151,7 @@ def _binance_handler(req: httpx.Request) -> httpx.Response:
     if p == "/fapi/v1/ticker/24hr":
         return httpx.Response(200, json=[
             {"symbol": s, "lastPrice": "100", "highPrice": "105", "lowPrice": "100",
-             "quoteVolume": v} for s, v in VOLS
+             "priceChangePercent": "-1.5", "quoteVolume": v} for s, v in VOLS
         ])  # fmt: skip
     if p == "/fapi/v1/ticker/bookTicker":
         return httpx.Response(200, json=[
@@ -165,9 +165,17 @@ def _binance_handler(req: httpx.Request) -> httpx.Response:
     if p == "/fapi/v1/depth":
         return httpx.Response(200, json={"bids": [["99.9", "1000"]], "asks": [["100.1", "500"]]})
     if p == "/fapi/v1/klines":
-        ks = [[0, "0", "0", "0", "0", "0", 0, "100"] for _ in range(24)] + [
-            [0, "0", "0", "0", "0", "0", 0, "400"]
-        ]
+        # 整点后 30 分钟（conftest.now = 06:30 UTC）：最后一根 06:00 开的半截小时
+        limit = int(req.url.params["limit"])
+        hour = 3_600_000
+        start = int(datetime(2026, 10, 22, 6, tzinfo=UTC).timestamp() * 1000)
+        ks = [
+            [start - (limit - 1 - i) * hour, "100", "101", "99", "100", "1",
+             start - (limit - 1 - i) * hour + hour - 1,
+             "400" if i == limit - 1 else "100", 10, "0.5",
+             "240" if i == limit - 1 else "60", "0"]
+            for i in range(limit)
+        ]  # fmt: skip
         return httpx.Response(200, json=ks)
     if p == "/futures/data/openInterestHist":
         return httpx.Response(200, json=[{"sumOpenInterestValue": "100"},
@@ -186,7 +194,11 @@ async def test_binance_stats_source(now: datetime) -> None:
     b = by["BTCUSDT"]
     assert b.spread_bps == pytest.approx(2.0, rel=0.01)
     assert b.depth_usdt == pytest.approx(100.1 * 500)  # 取较小的一边
-    assert b.volume_surge == pytest.approx(4.0)
+    assert b.volume_surge == pytest.approx(8.0)  # 本小时走了 30 分钟：400 ÷ 0.5 小时 ÷ 100
+    assert b.volume_surge_old == pytest.approx(4.0)  # 旧算法：半截小时直接比
+    assert b.range_hold_pct == pytest.approx(2.0) and b.hold_hours == 2.0
+    assert b.metrics["taker_buy_1h"] == pytest.approx(60.0)
+    assert b.metrics["chg_24h"] == -1.5 and b.metrics["pos_24h"] == 0.0
     assert b.oi_change_pct == pytest.approx(10.0)
     assert b.range_24h_pct == pytest.approx(5.0)
     assert b.listed_days == 30

@@ -1909,6 +1909,7 @@ const PLAIN = {
   "predictor.rank_min_peers": "至少几个币一起预测才排名",
   "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
+  "tiers.always_candidates": "每轮都进总盘会候选的币（不占头部和中间档名额）",
   "tiers.head": "头部几个币（开放交易）",
   "tiers.mid": "中部几个币",
   "tiers.mid_daily_pick": "中部每天挑几个来做",
@@ -2249,7 +2250,7 @@ const ROLES = [
     { g: "打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
     { g: "权重", hint: "五项各占多少分量。不用加起来等于 1，只看相对大小；不能全是 0。", keys: ["screener.weight_volatility", "screener.weight_volume_surge", "screener.weight_funding", "screener.weight_oi", "screener.weight_liquidations"] },
     { g: "主流币名单", extra: "majors", hint: "「主流币」这一类按市值前几名算，每天自动更新一次（去掉稳定币和包装币）。填 0 = 只用固定 7 个（BTC ETH BNB SOL XRP DOGE ADA）。手动算主流 / 排除的填币名，空格隔开。", keys: ["screener.major_top_n", "screener.major_include", "screener.major_exclude"] },
-    { g: "分档交易", warn: "tiers_cautions", hint: "候选池按分数从高到低分三档：头部开放交易；中部每天挑几个来做、仓位封顶；其余尾部只看不做。你固定、手动加的币算头部。", keys: ["tiers.enabled", "tiers.head", "tiers.mid", "tiers.mid_daily_pick", "tiers.mid_size_max"] },
+    { g: "分档交易", warn: "tiers_cautions", hint: "候选池按分数从高到低分三档：头部开放交易；中部每天挑几个来做、仓位封顶；其余尾部只看不做。你固定、手动加的币算头部。", keys: ["tiers.enabled", "tiers.head", "tiers.mid", "tiers.mid_daily_pick", "tiers.mid_size_max", "tiers.always_candidates"] },
     { g: "美股类别", keys: ["screener.us_events", "screener.us_open_bonus"] },
   ] },
   { id: "market", t: "总盘会", what: "整轮开会的节奏：多久一轮、挑几个币、作战卡管多久", caution: "schedule_caution", groups: [

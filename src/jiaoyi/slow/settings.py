@@ -102,6 +102,24 @@ class TiersSection(_Strict):
     mid_size_max: Literal["S", "M", "L"] = Field(
         default="S", description="中间档的币仓位档位最大封到哪一档（S 最小）。"
     )
+    always_candidates: list[str] = Field(
+        default_factory=lambda: ["BTC", "ETH"],
+        description="每轮都进总盘会候选的币：过了硬门槛就进池，不算头部、不占中间档每天的名额。"
+        "总盘会照样按数字决定挑不挑；写币名，不带 USDT。",
+    )
+
+    @field_validator("always_candidates", mode="before")
+    @classmethod
+    def _base_names(cls, v: Any) -> Any:
+        """写 BTC 或 BTCUSDT 都行，统一成不带 USDT 的大写币名。"""
+        if not isinstance(v, list):
+            return v
+        out: list[str] = []
+        for x in v:
+            name = str(x).strip().upper().removesuffix("USDT")
+            if name and name not in out:
+                out.append(name)
+        return out
 
     def cautions(self) -> list[str]:
         out: list[str] = []
@@ -191,10 +209,11 @@ class ScreenerSection(_Strict):
         "other。不写的类别 = 开、用默认上限。选币页上的设置优先于这里。",
     )
     vol_full_multiple: float = Field(
-        default=20.0,
+        default=30.0,
         gt=0,
         le=1000,
-        description="24 小时波动是来回手续费的几倍算「波动分」满分。",
+        description="按每小时折算的正常波动是来回手续费的几倍算「波动分」满分"
+        "（默认 30，也就是每小时 3%）。",
     )
     surge_full_multiple: float = Field(
         default=8.0,
@@ -584,6 +603,7 @@ class SlowConfig(_Strict):
             major_top_n=s.major_top_n,
             major_include=frozenset(x.strip().upper() for x in s.major_include),
             major_exclude=frozenset(x.strip().upper() for x in s.major_exclude),
+            always_candidates=frozenset(s.tiers.always_candidates),
             allow_tradfi=s.allow_tradfi,
             us_events=s.us_events,
             us_open_bonus=s.us_open_bonus,
