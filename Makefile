@@ -43,13 +43,15 @@ update:
 	@# 预测员权重（最大 / 标准）先拉好，已有缓存就跳过；失败不挡更新，第一次推理时会再下载
 	-@if [ -d vendor/Kronos ]; then $(BIN)/python -m jiaoyi.predictor.fetch_weights; fi
 	$(MAKE) check-config
-	@if launchctl print gui/$$(id -u)/com.jiaoyi.panel >/dev/null 2>&1; then \
-		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.panel && echo "已重启 com.jiaoyi.panel"; \
-	fi
+	@# 面板放最后重启：面板里的「更新到最新版」按钮就是它拉起的 make，先重启面板会把自己杀掉
 	@if launchctl print gui/$$(id -u)/com.jiaoyi.run >/dev/null 2>&1; then \
 		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.run && echo "已重启 com.jiaoyi.run"; \
 	else \
 		echo "com.jiaoyi.run 还没装进 launchd：纸面跑通后执行 scripts/install_launchd.sh --load-run；在前台跑的请自己重启 jiaoyi run"; \
+	fi
+	@if launchctl print gui/$$(id -u)/com.jiaoyi.panel >/dev/null 2>&1; then \
+		echo "重启 com.jiaoyi.panel（最后一步）"; \
+		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.panel; \
 	fi
 
 init-config:

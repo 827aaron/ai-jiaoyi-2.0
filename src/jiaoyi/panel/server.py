@@ -66,6 +66,7 @@ from jiaoyi.panel.pages import (
     build_team,
     prompts_info,
 )
+from jiaoyi.panel.updater import UpdateInfo, Updater
 from jiaoyi.risk.guard import blend_atr, session_factor
 from jiaoyi.slow.credits import banner as credit_banner
 from jiaoyi.slow.settings import slow_defaults
@@ -149,6 +150,10 @@ class ModeBody(BaseModel):
     """切实盘：提示已逐条勾过。"""
 
 
+class UpdateBody(BaseModel):
+    password: str | None = Field(default=None, max_length=256)
+
+
 class CardAtr(BaseModel):
     symbol: str
     price: float
@@ -220,6 +225,7 @@ def create_app(
     secret_writer: setup.SecretWriter | None = None,
     secret_reader: setup.SecretReader | None = None,
     pnl_sample_s: float | None = None,
+    update_repo: Path | None = None,
 ) -> FastAPI:
     """``key_status``：密钥名 → 配没配，由命令行查好传进来（密钥的值不进面板的数据和接口）。
 
@@ -229,6 +235,8 @@ def create_app(
     不给就只能看不能写（例如不是 Mac）。
 
     ``pnl_sample_s``：今日盈亏曲线多久记一个点（None = 每分钟，0 = 不记）。
+
+    ``update_repo``：源码目录；给了设置页才有「更新到最新版」（在这个目录跑 ``make update``）。
     """
     data_dir = app_cfg.data_dir
     files = PanelFiles(data_dir, risk.day_reset_tz)
@@ -583,6 +591,24 @@ def create_app(
         if config_paths is None:
             raise HTTPException(status_code=400, detail="面板启动时没给配置文件路径，只能看不能改")
         return config_paths
+
+    updater = Updater(update_repo, data_dir)
+
+    @api.get("/api/update")
+    async def update_get() -> UpdateInfo:
+        return await asyncio.to_thread(updater.info)
+
+    @api.post("/api/update")
+    async def update_post(body: UpdateBody) -> UpdateInfo:
+        try:
+            actions.check_password(data_dir, body.password or "")
+        except ActionError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        try:
+            await asyncio.to_thread(updater.start, clock())
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return await asyncio.to_thread(updater.info, False)
 
     @api.get("/api/mode")
     async def mode_get(request: Request) -> ModeInfo:
