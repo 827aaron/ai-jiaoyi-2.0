@@ -56,6 +56,11 @@ CommandKind = Literal[
     # 类别开关和每类进池上限（core/pool_overrides.py ``CATEGORY_ACTIONS``）
     "set_category",
     "set_category_cap",
+    # 保镖拒绝详情里的两个按钮，都要 params.signal_id + params.symbol：
+    # recheck_signal = 按现价把整套开仓检查重跑一遍（只看结果，不下单）；
+    # release_signal = 按现价、卡上的仓位止损止盈，跳过拒绝它的过滤，人工放行立刻开
+    "recheck_signal",
+    "release_signal",
 ]
 
 
