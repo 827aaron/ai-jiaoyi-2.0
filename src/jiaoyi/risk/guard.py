@@ -340,7 +340,7 @@ class RiskGuardImpl:
         market: FeatureSnapshot | None,
         release: bool,
     ) -> RiskVerdict:
-        """面板「保镖拒绝」详情里的两个按钮（Aaron 10-25）。
+        """面板「风控员拒绝」详情里的两个按钮（Aaron 10-25）。
 
         ``release=False`` = 重新检查：完整再审一遍，不放行任何规则，决策记录标 ``by=recheck``，
         调用方不下单。``release=True`` = 人工放行：软规则（自动减仓风险高 / 刚上线 / 价差 / 滑点 /

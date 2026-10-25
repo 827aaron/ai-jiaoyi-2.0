@@ -157,7 +157,7 @@ class _ChaseRecheck(Protocol):
 
 @runtime_checkable
 class _ManualReview(Protocol):
-    """保镖：面板「重新检查 / 放行」（``RiskGuardImpl.review_manual``）。"""
+    """风控员：面板「重新检查 / 放行」（``RiskGuardImpl.review_manual``）。"""
 
     def review_manual(
         self,
@@ -298,7 +298,7 @@ class Runner:
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
-        # 处理过的信号（面板「保镖拒绝」详情的重新检查 / 放行要按 signal_id 找回）
+        # 处理过的信号（面板「风控员拒绝」详情的重新检查 / 放行要按 signal_id 找回）
         self._signals: OrderedDict[str, CandidateSignal] = OrderedDict()
         if isinstance(self.m.executor, _ChaseHook):
             self.m.executor.set_chase_request(self._request_chase)
@@ -802,21 +802,21 @@ class Runner:
     async def _manual_signal(
         self, cmd: PanelCommand, *, release: bool
     ) -> tuple[Literal["done", "rejected"], str]:
-        """面板「保镖拒绝」详情的两个按钮（Aaron 10-25）：按现价重建这条信号，重新拍板、重新过保镖。
+        """面板「风控员拒绝」详情的两个按钮（Aaron 10-25）：按现价重建信号，重新拍板、重新过风控员。
 
-        重新检查 = 干跑，不下单，结果写进保镖记录（``by=recheck``）；放行 = 软规则不拦（见
+        重新检查 = 干跑，不下单，结果写进风控员记录（``by=recheck``）；放行 = 软规则不拦（见
         ``RiskGuardImpl.review_manual``），过了就按现价开仓，记「人工放行」并推 Telegram。"""
         sid, sym = cmd.params.get("signal_id", ""), cmd.params.get("symbol", "")
         sig = self._signals.get(sid)
         if sig is None or sig.symbol != sym:
             return "rejected", "信号记录已过期（主程序重启过），等下一个信号"
         if not isinstance(self.m.risk, _ManualReview):
-            return "rejected", "这个保镖不支持重新检查 / 放行"
+            return "rejected", "这个风控员不支持重新检查 / 放行"
         if self._restarting:
             return "rejected", "主程序正在重启"
         if self.app.paused is not None:
             return "rejected", "人工暂停开新仓中，先恢复"
-        if sym in self.app.pool_overrides.blacklist:  # 拉黑 = 立即不开新仓（保镖不管这个）
+        if sym in self.app.pool_overrides.blacklist:  # 拉黑 = 立即不开新仓（风控员不管这个）
             return "rejected", f"{sym} 你拉黑了，不开新仓"
         now = self.app.clock()
         card = self.m.cards.current(now)
@@ -900,7 +900,7 @@ class Runner:
         self, signal: CandidateSignal, card: BattleCard, now: datetime, summary: str, by: str,
         why: str,
     ) -> None:  # fmt: skip
-        """重新检查在进场区间这步就拒绝：保镖自己没跑，按保镖记录的格式补一条（面板详情要看）。"""
+        """重新检查在进场区间这步就拒绝：风控员自己没跑，按风控员记录的格式补一条（面板详情要看）。"""
         rec = self.app.recorders.get(Role.RISK_GUARD)
         if rec is not None:
             side = "多" if signal.side_hint == Side.LONG else "空"
