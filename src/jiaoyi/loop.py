@@ -560,6 +560,7 @@ class Runner:
             AlertLevel.INFO,
             "限价止盈没成交，已改市价平",
             f"{pos.symbol} 止盈价 {pos.take_profit_price:g}，现价 {price:g}，越过 {wait:.0f} 秒",
+            "close_done",
         )
 
     def _sync_wanted(self) -> None:
@@ -640,6 +641,7 @@ class Runner:
                 AlertLevel.WARN,
                 f"{info.symbol} 禁止新开仓",
                 f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
+                "news_block",
             )
         )
 
@@ -761,7 +763,9 @@ class Runner:
                 pos = await self.m.executor.open(intent)
             except Exception as e:
                 log.exception("开仓失败")
-                await self.app._alert(AlertLevel.WARN, f"{intent.symbol} 开仓失败", str(e)[:200])
+                await self.app._alert(
+                    AlertLevel.WARN, f"{intent.symbol} 开仓失败", str(e)[:200], "order_failed"
+                )
                 return
             # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
             self.positions = [*self.positions, pos]
@@ -802,7 +806,7 @@ class Runner:
     async def _patrol_close(self, pos: PositionRecord, why: str) -> None:
         """巡逻兵冲击线全平，平完推一条 Telegram。"""
         await self.close(pos, CloseReason.PATROL)
-        await self.app._alert(AlertLevel.WARN, "巡逻兵已全平", f"巡逻兵：{why}")
+        await self.app._alert(AlertLevel.WARN, "巡逻兵已全平", f"巡逻兵：{why}", "system")
 
     async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
         """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""
@@ -821,7 +825,9 @@ class Runner:
             await self.m.executor.close(pos.position_id, reason)
         except Exception as e:
             log.exception("平仓失败")
-            await self.app._alert(AlertLevel.CRITICAL, f"{pos.symbol} 平仓失败", str(e)[:200])
+            await self.app._alert(
+                AlertLevel.CRITICAL, f"{pos.symbol} 平仓失败", str(e)[:200], "order_failed"
+            )
             return
         finally:
             self._closing.discard(pos.position_id)
@@ -1000,7 +1006,7 @@ class Runner:
             reason = "scheduled"
         if isinstance(cards, _RefreshGate):
             while (notice := cards.take_notice()) is not None:
-                await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice)
+                await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice, "meeting_paused")
             if not cards.may_refresh(now):
                 return  # 失败退避中或当日花费超限；定时兜底也不能绕过
         if is_stub(cards):
@@ -1045,6 +1051,7 @@ class Runner:
                     AlertLevel.WARN,
                     f"{sym} 禁止新开仓",
                     f"{reason}（已有持仓约 40 秒后由持仓管家平掉）",
+                    "news_block",
                 )
 
     async def _refresh(self, pool: SymbolPool, reason: str) -> None:
@@ -1220,19 +1227,21 @@ class Runner:
             self._restarting = False
             return "rejected", f"还有 {len(self._closing)} 笔平仓没做完，没有重启，稍后再试"
         self._leaving = True
-        await self.app._alert(AlertLevel.INFO, "主程序重启", "面板指令：重新加载配置")
+        await self.app._alert(AlertLevel.INFO, "主程序重启", "面板指令：重新加载配置", "control")
         return "done", "在途动作已做完，主程序已退出，launchd 会自动拉起"
 
     async def _run_command(self, cmd: PanelCommand) -> tuple[Literal["done", "rejected"], str]:
         if cmd.kind == "pause":
             self.app.set_paused(True, reason=cmd.params.get("reason", ""), command_id=cmd.id)
-            await self.app._alert(AlertLevel.WARN, "已暂停开新仓", "面板指令；已有持仓照常看管")
+            await self.app._alert(
+                AlertLevel.WARN, "已暂停开新仓", "面板指令；已有持仓照常看管", "control"
+            )
             return "done", "已暂停开新仓"
         if cmd.kind == "resume":
             if self.app.pool_overrides_corrupt:
                 return "rejected", "选币覆盖项文件读不出（拉黑清单没生效），修好或删掉后重启主程序"
             self.app.set_paused(False, command_id=cmd.id)
-            await self.app._alert(AlertLevel.INFO, "已恢复开新仓", "面板指令")
+            await self.app._alert(AlertLevel.INFO, "已恢复开新仓", "面板指令", "control")
             return "done", "已恢复开新仓"
         if cmd.kind == "restart":
             return await self._prepare_restart()
@@ -1245,7 +1254,7 @@ class Runner:
             for p in targets:
                 self._spawn(self.close(p, CloseReason.MANUAL))
             await self.app._alert(
-                AlertLevel.WARN, "面板全部平仓", "已同时暂停开新仓，恢复需另发指令"
+                AlertLevel.WARN, "面板全部平仓", "已同时暂停开新仓，恢复需另发指令", "control"
             )
             return "done", f"已暂停开新仓并提交平仓 {len(targets)} 笔"
         if cmd.kind == "close_position":

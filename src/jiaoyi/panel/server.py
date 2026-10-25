@@ -23,7 +23,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -85,6 +85,17 @@ def code_fingerprint(root: Path = PACKAGE) -> str:
             st = f.stat()
             h.update(f"{f.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}\n".encode())
     return h.hexdigest()[:16]
+
+
+def index_page() -> HTMLResponse:
+    """首页：app.js / app.css 带上文件指纹当版本号，改了文件浏览器就不会继续用缓存里的旧版。"""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "app.css"):
+        st = (STATIC / name).stat()
+        html = html.replace(
+            f'/static/{name}"', f'/static/{name}?v={st.st_mtime_ns:x}{st.st_size:x}"'
+        )
+    return HTMLResponse(html)
 
 
 Clock = Callable[[], datetime]
@@ -673,15 +684,15 @@ def create_app(
         return await setup.self_check(config_paths, hb, secret_reader or (lambda _: None), clock())
 
     @api.get("/", response_model=None)
-    async def index(request: Request) -> FileResponse | RedirectResponse:
+    async def index(request: Request) -> HTMLResponse | RedirectResponse:
         # 本机打开、还没配齐：直接进首次设置。局域网打开照常进总览（设置页会提示）
         if local(request) and not setup_state(request).done:
             return RedirectResponse("/setup", status_code=303)
-        return FileResponse(STATIC / "index.html")
+        return index_page()
 
     @api.get("/setup")
-    async def setup_page() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+    async def setup_page() -> HTMLResponse:
+        return index_page()
 
     api.mount("/static", StaticFiles(directory=STATIC), name="static")
     return api

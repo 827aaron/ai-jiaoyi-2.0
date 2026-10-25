@@ -337,17 +337,27 @@ def test_update_needs_password(tmp_path: Path) -> None:
     assert load_risk_config(paths.risk).max_leverage == 5
 
 
-def test_trade_notices_switch_defaults_on_and_is_editable(tmp_path: Path) -> None:
+def test_alert_switches_default_on_and_are_editable(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
-    assert load_app_config(paths.app).trade_notices is True
-    actions.update_config(paths, data, "app", {"trade_notices": False}, PW, NOW)
-    assert load_app_config(paths.app).trade_notices is False
-    assert tomllib.loads(paths.app.read_text())["trade_notices"] is False
+    assert load_app_config(paths.app).muted_alert_kinds == frozenset()
     actions.update_config(
-        paths, data, "app", {"trade_notices": None}, PW, NOW
-    )  # 恢复默认 = 删掉这一行
-    assert "trade_notices" not in tomllib.loads(paths.app.read_text())
-    assert load_app_config(paths.app).trade_notices is True
+        paths, data, "app", {"notify_open_filled": False, "notify_news_block": False}, PW, NOW
+    )
+    cfg = load_app_config(paths.app)
+    assert cfg.muted_alert_kinds == {"open_filled", "news_block"}
+    actions.update_config(paths, data, "app", {"notify_open_filled": None}, PW, NOW)  # 恢复默认
+    assert "notify_open_filled" not in tomllib.loads(paths.app.read_text())
+    assert load_app_config(paths.app).muted_alert_kinds == {"news_block"}
+
+
+def test_old_trade_notices_false_turns_open_close_rows_off(tmp_path: Path) -> None:
+    paths, _ = _setup(tmp_path)
+    text = paths.app.read_text(encoding="utf-8")
+    paths.app.write_text("trade_notices = false\n" + text, encoding="utf-8")
+    assert load_app_config(paths.app).muted_alert_kinds == {"open_filled", "close_done"}
+    # 单独写了新开关就听新的
+    paths.app.write_text("notify_close_done = true\n" + paths.app.read_text(), encoding="utf-8")
+    assert load_app_config(paths.app).muted_alert_kinds == {"open_filled"}
 
 
 def test_update_app_and_fast_loop_sections(tmp_path: Path) -> None:

@@ -1850,6 +1850,18 @@ const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "m
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
 // 设置项的大白话标题；原来的专业说明和英文键名降为灰色小字
 const PLAIN = {
+  notify_open_filled: "开仓成交",
+  notify_close_done: "平仓完成",
+  notify_lifeboat_hit: "保命止损被打到",
+  notify_lifeboat_missing: "保命止损缺失 / 挂不上",
+  notify_order_failed: "开仓 / 平仓失败",
+  notify_reconcile: "对账不一致",
+  notify_news_block: "新闻禁止开仓",
+  notify_model_credit: "模型额度不足",
+  notify_meeting_paused: "军师团暂停开会",
+  notify_control: "面板操作",
+  notify_live_started: "实盘已启动",
+  notify_system: "系统异常",
   "screener.min_quote_volume_usdt": "24 小时成交额至少多少 U 才进池",
   "screener.max_spread_bps": "买卖价差超过万分之几就不进池",
   "screener.min_depth_usdt": "盘口深度至少多少 U",
@@ -1947,7 +1959,6 @@ const PLAIN = {
   pool_size: "每次选多少个币进候选池",
   card_pick_max: "军师团每次最多挑几个币",
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
-  trade_notices: "Telegram 推送开仓成交 / 平仓完成的消息",
   rule_gate_without_jev: "没有拍板人时用规则代替",
   gate_record_only: "拍板只记不拦（门槛没过也放行，只记下来）",
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",
@@ -2046,7 +2057,18 @@ const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && t
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
-  trade_notices: "关 = 开仓成交、平仓完成（止盈 / 止损 / 移动止损 / 到时 / 管家平…）这两类不再往 Telegram 推，面板「历史」里照样有。保命止损触发、保命止损缺失、对账不一致、开仓 / 平仓失败、日亏熔断、拍板人挂了、没钱了这些安全告警不受这个开关管，一直推。重启后生效",
+  notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。重启后生效",
+  notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。重启后生效",
+  notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开。重启后生效",
+  notify_lifeboat_missing: "保命止损没挂上、重挂或撤销失败时推——这时仓位可能没有最后一道保护。　建议保持开。重启后生效",
+  notify_order_failed: "开仓或平仓失败、结果不明、没成交就结束时推。　建议保持开。重启后生效",
+  notify_reconcile: "对账发现无人管的仓位、数量或方向对不上、手动平仓、连不上币安时推。　建议保持开。重启后生效",
+  notify_news_block: "某个币因新闻 / 事件被禁止新开仓时推。重启后生效",
+  notify_model_credit: "OpenRouter 额度快用完或被拒（402）时推，没额度就没有新作战卡。　建议保持开。重启后生效",
+  notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。重启后生效",
+  notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。重启后生效",
+  notify_live_started: "实盘启动时推。　建议保持开。重启后生效",
+  notify_system: "拒绝启动、状态文件损坏、巡逻兵全平等系统级问题时推。　建议保持开。重启后生效",
   vol_full_multiple: "把这个币平时的波动按每小时折算，是来回手续费（0.10%）的几倍就算这一项满分。默认 30，也就是每小时 3% 算满分；改小会有更多币挤在满分上、分不出高低",
   always_candidates: "这些币只要过了硬门槛、没被拉黑，每轮都进候选池（算在池子名额里），由总盘会按数字决定挑不挑。不算头部，也不占中部每天挑几个的名额。想强制开会用选币页的「固定」。填币名，空格隔开，如 BTC ETH",
   gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
@@ -2314,15 +2336,15 @@ const ROLES = [
   { id: "lifeboat", t: "保命止损", what: "在交易所挂的兜底止损，程序挂了也能止损", groups: [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
   ] },
-  { id: "alerting", t: "告警推送", what: "往 Telegram 推哪些消息（安全告警一直推）", find: "告警 通知 提醒 推送 消息 Telegram 电报 开仓成交 平仓完成 静音 关闭提醒 trade_notices", groups: [
-    { g: "", hint: "Telegram 的密钥在「密钥」里配。这里只管开仓 / 平仓这类成功消息；出了问题的告警不能关。", keys: ["app.trade_notices"] },
+  { id: "alerting", t: "告警推送", what: "往 Telegram 推哪些消息（每一类单独开关，默认全开）", find: "告警 通知 提醒 推送 消息 Telegram 电报 开仓成交 平仓完成 静音 关闭提醒 保命止损 对账 额度 notify", groups: [
+    { g: "", hint: "Telegram 的密钥在「密钥」里配。关掉只是不往 Telegram 推，面板「历史」和告警列表照样有记录；写「建议保持开」的是出了问题的安全告警。面板切模式、测试消息、看门狗这几条不走这里，一直推。", keys: ["app.notify_open_filled", "app.notify_close_done", "app.notify_lifeboat_hit", "app.notify_lifeboat_missing", "app.notify_order_failed", "app.notify_reconcile", "app.notify_news_block", "app.notify_model_credit", "app.notify_meeting_paused", "app.notify_control", "app.notify_live_started", "app.notify_system"] },
   ] },
   { id: "keys", t: "密钥", what: "币安、OpenRouter、Telegram 等的 key，只显示配没配", find: "密钥 key api 币安 binance openrouter telegram jev typesafe 测试网" },
   { id: "show", t: "显示", what: "成交提示音、涨跌颜色、面板密码、时区等", find: "显示 币安风格成交提示音 成交提示音 声音 音量 下单声音 平单声音 提示音 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
 ];
 // 别处已经显示的键（运行卡、显示里的系统信息），不再进“其他”
 // 真 / 毒 / 方向三个门槛只在旧的 6 道题问法下生效；burst_* 10 秒提前触发已取消（Aaron 10-24）：都不显示
-const SHOWN_ELSEWHERE = ["app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio", "fast_loop.predictor_nudge_mode"];
+const SHOWN_ELSEWHERE = ["app.trade_notices", "app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio", "fast_loop.predictor_nudge_mode"];
 // 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
 const PREFIX_ROLE = [
   ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],

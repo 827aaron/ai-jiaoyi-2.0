@@ -110,3 +110,7 @@ class Alert(Contract):
     body: str = ""
     symbol: Symbol | None = None
     dedup_key: str | None = Field(default=None, description="同一键短时间内只发一次。")
+    kind: str = Field(
+        default="",
+        description="告警类别（alerting/kinds.py），Telegram 按设置里的开关静音；空 = 一律推。",
+    )

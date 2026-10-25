@@ -230,7 +230,6 @@ class HbExecutorAdapter:
         clock: Clock = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         open_fee_bps: float = 0.0,
-        trade_notices: bool = True,
         limit_take_profit: bool = False,
         tick_size: Callable[[str], float | None] | None = None,
         chase_request: ChaseRequest | None = None,
@@ -254,7 +253,6 @@ class HbExecutorAdapter:
         self._income_since = income_since
         self._unknown_executor_rounds: dict[str, int] = {}
         self._finalizing: set[str] = set()
-        self._notices = trade_notices
         self._limit_tp = limit_take_profit
         self._tick_size = tick_size or (lambda _s: None)
         self.fills_note: str | None = None
@@ -378,6 +376,7 @@ class HbExecutorAdapter:
                     f"{intent.symbol} 目标 {intent.leverage}x：{e}",
                     intent.symbol,
                     f"leverage_failed:{record.position_id}",
+                    kind="order_failed",
                 )
                 raise
         marker = f"{MARKER_PREFIX}{record.position_id}"
@@ -400,6 +399,7 @@ class HbExecutorAdapter:
                     f"{intent.symbol} {record.position_id}：{e}",
                     intent.symbol,
                     f"open_unknown:{record.position_id}",
+                    kind="order_failed",
                 )
                 return record
             if not found:
@@ -411,6 +411,7 @@ class HbExecutorAdapter:
                 f"{intent.symbol} {record.position_id} → {executor_id}",
                 intent.symbol,
                 f"claimed:{record.position_id}",
+                kind="order_failed",
             )
         tracked = self._set(tracked, executor_id=executor_id)
 
@@ -431,6 +432,7 @@ class HbExecutorAdapter:
                 f"{intent.symbol} {record.position_id}",
                 intent.symbol,
                 f"lifeboat_failed_on_open:{record.position_id}",
+                kind="lifeboat_missing",
             )
             await self.close(record.position_id, CloseReason.RECONCILER)
         return self._registry.data.positions[record.position_id].record
@@ -445,6 +447,7 @@ class HbExecutorAdapter:
             f"{symbol} {tracked.record.position_id}",
             symbol,
             f"open_failed:{tracked.record.position_id}",
+            kind="order_failed",
         )
         raise raise_error
 
@@ -486,6 +489,7 @@ class HbExecutorAdapter:
             f"{rec.symbol} {rec.position_id}：{last!r}",
             rec.symbol,
             f"lifeboat_cancel_failed:{rec.position_id}",
+            kind="lifeboat_missing",
         )
 
     def _mark_lifeboat_cancelled(self, position_id: str) -> None:
@@ -589,6 +593,7 @@ class HbExecutorAdapter:
                     f"{tracked.record.symbol} {position_id}，保命止损保留，等对账员复查",
                     tracked.record.symbol,
                     f"close_slow:{position_id}",
+                    kind="order_failed",
                 )
                 return
             await self._sleep(self._poll_s)
@@ -630,6 +635,7 @@ class HbExecutorAdapter:
             f"{rec.symbol} {rec.position_id}：{cause}",
             rec.symbol,
             f"closed_directly:{rec.position_id}",
+            kind="order_failed",
         )
         # 执行器可能还活着：尽力停一次，免得它之后对不存在的仓位再下单（失败不影响已平的结果）
         if rec.executor_id:
@@ -831,6 +837,7 @@ class HbExecutorAdapter:
             f"币安持仓 {held}。账本保持持仓，保命止损保留，对账员接管",
             rec.symbol,
             f"executor_ended_position_remains:{rec.position_id}",
+            kind="order_failed",
         )
         return tracked
 
@@ -910,6 +917,7 @@ class HbExecutorAdapter:
                 f"{rec.symbol} {rec.position_id}：{why}",
                 rec.symbol,
                 f"never_filled:{rec.position_id}",
+                kind="order_failed",
             )
         await self._cancel_lifeboat(tracked.record)
         return self._registry.get(rec.position_id) or tracked
@@ -1082,6 +1090,7 @@ class HbExecutorAdapter:
                 f"{rec.symbol} {rec.position_id}：{e!r}；旧的保命止损 {old.stop_price:g} 还在",
                 rec.symbol,
                 f"lifeboat_relay_failed:{rec.position_id}",
+                kind="lifeboat_missing",
             )
             return tracked
         else:
@@ -1096,6 +1105,7 @@ class HbExecutorAdapter:
                     f"{rec.symbol} {rec.position_id}：{e!r}；已按旧价 {old.stop_price:g} 挂回",
                     rec.symbol,
                     f"lifeboat_relay_failed:{rec.position_id}",
+                    kind="lifeboat_missing",
                 )
                 return self._set(tracked, lifeboat=order)
         await self._alert(
@@ -1104,15 +1114,17 @@ class HbExecutorAdapter:
             f"{rec.symbol} {rec.position_id}：重挂失败（{e!r}），可能没有保命止损，对账员会补挂",
             rec.symbol,
             f"lifeboat_missing:{rec.position_id}",
+            kind="lifeboat_missing",
         )
         return self._set(tracked, lifeboat=None)
 
     async def _notice(self, title: str, body: str, rec: PositionRecord, kind: str) -> None:
         """成功路径的 INFO 通知（开仓成交 / 平仓完成 / 保命止损触发），同一笔同一类只发一次。
-
-        ``trade_notices`` 关掉只静音开仓成交和平仓完成；保命止损触发是风控事件，一直推。"""
-        if self._notices or kind == "lifeboat_hit":
-            await self._alert(AlertLevel.INFO, title, body, rec.symbol, f"{kind}:{rec.position_id}")
+        Telegram 推不推由设置里对应的 ``notify_*`` 开关管。"""
+        shown = {"opened": "open_filled", "closed": "close_done"}.get(kind, kind)
+        await self._alert(
+            AlertLevel.INFO, title, body, rec.symbol, f"{kind}:{rec.position_id}", shown
+        )
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
         requested = changes.pop("requested_close", tracked.requested_close)
@@ -1229,6 +1241,7 @@ class HbExecutorAdapter:
             f"晚于 0 点才读到账户；基准取 {base:.2f} USDT（当前 {equity:.2f}，上次 {previous}）",
             None,
             f"day_start_fallback:{midnight.date().isoformat()}",
+            kind="system",
         )
         return base
 
@@ -1264,7 +1277,13 @@ class HbExecutorAdapter:
     # ------------------------------------------------------------------ 告警
 
     async def _alert(
-        self, level: AlertLevel, title: str, body: str, symbol: str | None, dedup_key: str
+        self,
+        level: AlertLevel,
+        title: str,
+        body: str,
+        symbol: str | None,
+        dedup_key: str,
+        kind: str = "",
     ) -> None:
         try:
             await self._alerter.send(
@@ -1276,6 +1295,7 @@ class HbExecutorAdapter:
                     body=body,
                     symbol=symbol,
                     dedup_key=dedup_key,
+                    kind=kind,
                 )
             )
         except Exception:  # 告警失败不能拖住交易回路

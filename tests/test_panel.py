@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -354,6 +355,9 @@ def test_server_serves_lan_and_blocks_public(tmp_path: Path) -> None:
         page = client.get("/")
         assert page.status_code == 200 and "AI 交易台" in page.text
         assert client.get("/static/theme.css").status_code == 200
+        # app.js / app.css 带版本号，改了文件浏览器不用缓存里的旧版
+        assert re.search(r'src="/static/app\.js\?v=[0-9a-f]+"', page.text)
+        assert re.search(r'href="/static/app\.css\?v=[0-9a-f]+"', page.text)
     with _client(tmp_path, "8.8.8.8") as client:
         assert client.get("/api/overview").status_code == 403
         assert client.get("/").status_code == 403
