@@ -5,5 +5,6 @@
   "title": "保命止损缺失，已补挂",
   "body": "BTCUSDT pos-0001",
   "symbol": "BTCUSDT",
-  "dedup_key": "lifeboat_missing:pos-0001"
+  "dedup_key": "lifeboat_missing:pos-0001",
+  "kind": "lifeboat_missing"
 }

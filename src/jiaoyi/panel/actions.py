@@ -26,6 +26,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
+from jiaoyi.alerting.kinds import KINDS, field_of
 from jiaoyi.contracts import AppConfig, Category, RiskConfig
 from jiaoyi.contracts.risk_config import FastLoopConfig, PredictorConfig
 from jiaoyi.core import profiles
@@ -93,6 +94,7 @@ _SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers")
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
+        *(field_of(k) for k in KINDS),  # Telegram 告警类别开关（alerting/kinds.py）
         "predictor_enabled",
         "signal_dedup_s",
         "jev_timeout_ms",
@@ -104,7 +106,6 @@ APP_EDITABLE = frozenset(
         "pool_size",
         "card_pick_max",
         "reconciler_close_unknown_positions",
-        "trade_notices",
         "meeting_interval",
         "hold",
     }

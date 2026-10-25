@@ -14,6 +14,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
+from jiaoyi.alerting.kinds import KINDS
 from jiaoyi.contracts import AppConfig, RiskConfig
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config
@@ -119,6 +120,7 @@ OPTIONAL_APP_FIELDS = {
     "predictor",
     "reconciler_close_unknown_positions",
     "trade_notices",
+    *(f"notify_{k}" for k in KINDS),
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",

@@ -165,6 +165,7 @@ class ThreeWayReconciler:
             repr(e),
             None,
             "reconcile_unreachable",
+            "reconcile",
         )
         if self._rec is not None:
             self._rec.record(now, Outcome.ERROR, f"对账失败{rounds}：{e!r}")
@@ -797,6 +798,9 @@ class ThreeWayReconciler:
             f"{issue.symbol} {issue.detail}",
             issue.symbol,
             self._dedup_key(now, issue),
+            "lifeboat_missing"
+            if issue.kind is ReconcileIssueKind.LIFEBOAT_MISSING
+            else "reconcile",
         )
 
     @staticmethod
@@ -815,6 +819,7 @@ class ThreeWayReconciler:
         body: str,
         symbol: str | None,
         dedup_key: str,
+        kind: str,
     ) -> None:
         try:
             await self._alerter.send(
@@ -826,6 +831,7 @@ class ThreeWayReconciler:
                     body=body,
                     symbol=symbol,
                     dedup_key=dedup_key,
+                    kind=kind,
                 )
             )
         except Exception:

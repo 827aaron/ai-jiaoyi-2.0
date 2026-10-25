@@ -393,13 +393,15 @@ def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
         log.exception("写预测员看反记录失败")
 
 
-def _build_alerter(secrets: SecretStore, closers: list[Closer]) -> Alerter:
+def _build_alerter(
+    secrets: SecretStore, closers: list[Closer], muted_kinds: frozenset[str] = frozenset()
+) -> Alerter:
     """有 Telegram 密钥就发 Telegram，否则打到日志里。"""
     token, chat = secrets.get("TELEGRAM_BOT_TOKEN"), secrets.get("TELEGRAM_CHAT_ID")
     if not (token and chat):
         log.warning("没配 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，告警只写日志")
         return LogAlerter()
-    telegram = TelegramAlerter(token, chat)
+    telegram = TelegramAlerter(token, chat, muted_kinds=muted_kinds)
     closers.append(telegram.close)
     return telegram
 
@@ -432,7 +434,6 @@ def _build_execution(
             close_unknown_positions=app_cfg.reconciler_close_unknown_positions,
             demo_trading=app_cfg.sim_environment == "demo",
             limit_take_profit=app_cfg.limit_take_profit_on,
-            trade_notices=app_cfg.trade_notices,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:
@@ -553,7 +554,7 @@ def build_modules(
             StubLotRules(),
         )
     else:
-        inner = _build_alerter(secrets, closers)
+        inner = _build_alerter(secrets, closers, app_cfg.muted_alert_kinds)
         alerter = RecordedAlerter(
             inner, recorders[Role.ALERTING], telegram=isinstance(inner, TelegramAlerter)
         )
@@ -793,11 +794,13 @@ class App:
             try:
                 await check()
             except AccountMismatch as e:
-                await self._alert(AlertLevel.CRITICAL, "拒绝启动：账户核对不一致", str(e))
+                await self._alert(AlertLevel.CRITICAL, "拒绝启动：账户核对不一致", str(e), "system")
                 raise
             except Exception as e:
                 if self.app_cfg.mode == RunMode.LIVE:
-                    await self._alert(AlertLevel.CRITICAL, "拒绝启动：读不到账户做核对", repr(e))
+                    await self._alert(
+                        AlertLevel.CRITICAL, "拒绝启动：读不到账户做核对", repr(e), "system"
+                    )
                     raise
                 log.warning("启动账户核对读不到数据，模拟盘继续：%r", e)
 
@@ -834,6 +837,7 @@ class App:
                 AlertLevel.CRITICAL,
                 "暂停状态文件损坏，按已暂停处理",
                 "不开新仓；确认后在面板发恢复指令",
+                "system",
             )
         if self.pool_overrides_corrupt:
             await self._alert(
@@ -841,14 +845,17 @@ class App:
                 "选币覆盖项文件读不出，暂停开新仓",
                 "data/pool_overrides.json 损坏（已备份成 .corrupt-时间戳）：拉黑清单这次没生效，"
                 "所以不开新仓（已有持仓照常看管），选币页的操作也会被拒；修好或删掉后重启主程序恢复",
+                "system",
             )
         elif auto_resumed:
             await self._alert(
-                AlertLevel.INFO, "选币覆盖项已修好，恢复开新仓", "上次因文件损坏自动暂停"
+                AlertLevel.INFO, "选币覆盖项已修好，恢复开新仓", "上次因文件损坏自动暂停", "system"
             )
         if self.app_cfg.mode == RunMode.LIVE:
             # 实盘启动一定要通知（设计文档 §十）；能走到这里说明上线确认已经通过
-            await self._alert(AlertLevel.CRITICAL, "实盘已启动", f"拍板：{self.gate_label()}")
+            await self._alert(
+                AlertLevel.CRITICAL, "实盘已启动", f"拍板：{self.gate_label()}", "live_started"
+            )
         log.info("已启动：模式 %s，%d 个角色仍是桩", self.app_cfg.mode, len(self.stub_fields()))
 
     async def stop(self) -> None:
@@ -886,7 +893,10 @@ class App:
             return
         for level, title, body in alerts:
             await self._alert(
-                AlertLevel.CRITICAL if level == "critical" else AlertLevel.WARN, title, body
+                AlertLevel.CRITICAL if level == "critical" else AlertLevel.WARN,
+                title,
+                body,
+                "model_credit",
             )
 
     async def refresh_income(self) -> None:
@@ -1021,10 +1031,17 @@ class App:
         except OSError:
             log.exception("写 %s 失败", name)
 
-    async def _alert(self, level: AlertLevel, title: str, body: str = "") -> None:
+    async def _alert(self, level: AlertLevel, title: str, body: str = "", kind: str = "") -> None:
         try:
             await self.m.alerter.send(
-                Alert(ts=self.clock(), level=level, role=Role.ALERTING, title=title, body=body)
+                Alert(
+                    ts=self.clock(),
+                    level=level,
+                    role=Role.ALERTING,
+                    title=title,
+                    body=body,
+                    kind=kind,
+                )
             )
         except Exception:
             log.exception("发告警失败：%s", title)

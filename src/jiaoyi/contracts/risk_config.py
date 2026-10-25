@@ -19,6 +19,7 @@ from typing import Literal, get_args
 
 from pydantic import Field, model_validator
 
+from jiaoyi.alerting.kinds import KINDS, field_of
 from jiaoyi.contracts.common import Category, Contract, RunMode
 
 # 两套各选各的档位，各档的跨模块默认值见 ``jiaoyi.core.profiles``
@@ -818,8 +819,46 @@ class AppConfig(Contract):
     )
     trade_notices: bool = Field(
         default=True,
-        description="Telegram 推送开仓成交 / 平仓完成的消息。关 = 这两类不再推；保命止损触发、"
-        "保命止损缺失、对账不一致、开平仓失败、日亏熔断等安全告警照推，不受这个开关管。",
+        description="旧开关，已拆成下面的 ``notify_*``。写成 false 时，开仓成交 / 平仓完成两项"
+        "默认跟着关（没单独写那两项的话）；新配置请直接用 ``notify_*``。",
+    )
+    notify_open_filled: bool = Field(default=True, description="推 Telegram：开仓成交时推一条。")
+    notify_close_done: bool = Field(
+        default=True, description="推 Telegram：平仓完成时推一条（含盈亏）。"
+    )
+    notify_lifeboat_hit: bool = Field(
+        default=True, description="推 Telegram：币安上的保命止损被打到时推。"
+    )
+    notify_lifeboat_missing: bool = Field(
+        default=True,
+        description="推 Telegram：保命止损缺失、挂不上、重挂 / 撤销失败时推。",
+    )
+    notify_order_failed: bool = Field(
+        default=True,
+        description="推 Telegram：开仓或平仓失败、结果不明、没成交时推。",
+    )
+    notify_reconcile: bool = Field(
+        default=True,
+        description="推 Telegram：对账发现不一致或连不上时推。",
+    )
+    notify_news_block: bool = Field(
+        default=True, description="推 Telegram：因新闻 / 事件禁止某个币新开仓时推。"
+    )
+    notify_model_credit: bool = Field(
+        default=True, description="推 Telegram：模型额度快用完或被拒（402）时推。"
+    )
+    notify_meeting_paused: bool = Field(
+        default=True,
+        description="推 Telegram：军师团因失败或当日花费超限暂停开会时推。",
+    )
+    notify_control: bool = Field(
+        default=True,
+        description="推 Telegram：面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。",
+    )
+    notify_live_started: bool = Field(default=True, description="推 Telegram：实盘启动时推。")
+    notify_system: bool = Field(
+        default=True,
+        description="推 Telegram：拒绝启动、状态文件损坏、巡逻兵全平等系统级异常时推。",
     )
     reconciler_close_unknown_positions: bool = Field(
         default=False,
@@ -832,6 +871,19 @@ class AppConfig(Contract):
     fast_loop: FastLoopConfig = Field(
         default_factory=FastLoopConfig, description="快环门槛；不写就用默认值（见示例）。"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_trade_notices(cls, data: object) -> object:
+        """老的 ``trade_notices = false`` 等于关掉开仓成交 / 平仓完成两类（没单独写的话）。"""
+        if isinstance(data, dict) and data.get("trade_notices") is False:
+            data = {"notify_open_filled": False, "notify_close_done": False, **data}
+        return data
+
+    @property
+    def muted_alert_kinds(self) -> frozenset[str]:
+        """设置里关掉的 Telegram 告警类别（``alerting/kinds.py``）。"""
+        return frozenset(k for k in KINDS if not getattr(self, field_of(k)))
 
     @property
     def profile(self) -> str:

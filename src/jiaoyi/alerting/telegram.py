@@ -27,12 +27,14 @@ class TelegramAlerter:
         chat_id: str,
         *,
         cooldown_s: float = 300.0,
+        muted_kinds: frozenset[str] = frozenset(),
         timeout_s: float = 5.0,
         monotonic: Callable[[], float] = time.monotonic,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._chat_id = chat_id
         self._cooldown_s = cooldown_s
+        self._muted = muted_kinds
         self._monotonic = monotonic
         self._last_sent: dict[str, float] = {}
         self.last_error: str | None = None
@@ -53,6 +55,8 @@ class TelegramAlerter:
 
     async def send(self, alert: Alert) -> None:
         self.last_skipped = False
+        if alert.kind in self._muted:
+            return  # 设置里关了这一类：不发 Telegram（面板告警列表照记，也不占冷却）
         if alert.dedup_key is not None:
             now = self._monotonic()
             last = self._last_sent.get(alert.dedup_key)

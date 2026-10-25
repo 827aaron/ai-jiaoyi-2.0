@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from jiaoyi.alerting.stub import StubAlerter
-from jiaoyi.contracts import AlertLevel, Health, OrderIntent, Side
+from jiaoyi.contracts import Alert, AlertLevel, Health, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
 from jiaoyi.execution.exchange import CloseFill, ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
@@ -20,6 +20,18 @@ from tests.conftest import load_example
 from tests.fakes import FakeExchange, FakeHbApi
 
 START = datetime(2026, 10, 22, 6, 17, tzinfo=UTC)
+
+
+class _Alerts(StubAlerter):
+    """notices=False 时丢掉开仓成交 / 平仓完成两类成功消息，老测试只看出问题的告警。"""
+
+    def __init__(self, notices: bool) -> None:
+        super().__init__()
+        self._notices = notices
+
+    async def send(self, alert: Alert) -> None:
+        if self._notices or alert.kind not in ("open_filled", "close_done"):
+            await super().send(alert)
 
 
 class Rig:
@@ -37,7 +49,7 @@ class Rig:
         self.notices = notices  # 开平仓成功的 INFO 推送；老测试只看告警，默认关
         self.api = FakeHbApi()
         self.ex = FakeExchange()
-        self.alerts = StubAlerter()
+        self.alerts = _Alerts(notices)
         self.api.on_terminate = self._flatten_exchange
         self.registry = PositionRegistry(tmp_path / "positions.json")
         self.lifeboat = BinanceLifeboat(self.ex, clock=self.clock)
@@ -76,7 +88,6 @@ class Rig:
             sleep=self.sleep,
             income_since=self.ex.income_since,
             exchange=self.ex,
-            trade_notices=self.notices,
             limit_take_profit=self.limit_tp,
             tick_size=lambda _s: self.tick,
         )
