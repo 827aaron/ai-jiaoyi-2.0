@@ -2131,20 +2131,20 @@ const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && t
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
-  notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。重启后生效",
-  notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。重启后生效",
-  notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
-  notify_lifeboat_missing: "保命止损没挂上、重挂或撤销失败时推——这时仓位可能没有最后一道保护。　建议保持开：关掉就收不到这类提醒。重启后生效",
-  notify_order_failed: "开仓或平仓失败、结果不明、没成交就结束时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
-  notify_reconcile: "对账发现无人管的仓位、数量或方向对不上、手动平仓、连不上币安时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
-  notify_news_block: "某个币因新闻 / 事件被禁止新开仓时推。重启后生效",
-  notify_model_credit: "OpenRouter 额度快用完或被拒（402）时推，没额度就没有新作战卡。　建议保持开：关掉就收不到这类提醒。重启后生效",
-  credit_low_floor_usd: "OpenRouter 余额低于这个数（美元）就推一条。余额低于「近 7 天日均花费 × 2」时按那个更高的数算，所以实际提醒线可能比这里高。默认 5。重启后生效",
-  credit_resend_hours: "同一条额度提醒（快用完 / 被拒）每隔多少小时重复推一次，充值后自动停。默认 6。重启后生效",
-  notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。重启后生效",
-  notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。重启后生效",
-  notify_live_started: "实盘启动时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
-  notify_system: "拒绝启动、状态文件损坏、巡逻兵全平等系统级问题时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
+  notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。保存后几秒内生效",
+  notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。保存后几秒内生效",
+  notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
+  notify_lifeboat_missing: "保命止损没挂上、重挂或撤销失败时推——这时仓位可能没有最后一道保护。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
+  notify_order_failed: "开仓或平仓失败、结果不明、没成交就结束时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
+  notify_reconcile: "对账发现无人管的仓位、数量或方向对不上、手动平仓、连不上币安时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
+  notify_news_block: "某个币因新闻 / 事件被禁止新开仓时推。保存后几秒内生效",
+  notify_model_credit: "OpenRouter 额度快用完或被拒（402）时推，没额度就没有新作战卡。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
+  credit_low_floor_usd: "OpenRouter 余额低于这个数（美元）就推一条。余额低于「近 7 天日均花费 × 2」时按那个更高的数算，所以实际提醒线可能比这里高。默认 5。保存后几秒内生效",
+  credit_resend_hours: "同一条额度提醒（快用完 / 被拒）每隔多少小时重复推一次，充值后自动停。默认 6。保存后几秒内生效",
+  notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。保存后几秒内生效",
+  notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。保存后几秒内生效",
+  notify_live_started: "实盘启动时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
+  notify_system: "拒绝启动、状态文件损坏、巡逻兵全平等系统级问题时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
   vol_full_multiple: "把这个币平时的波动按每小时折算，是来回手续费（0.10%）的几倍就算这一项满分。默认 30，也就是每小时 3% 算满分；改小会有更多币挤在满分上、分不出高低",
   always_candidates: "这些币只要过了硬门槛、没被拉黑，每轮都进候选池（算在池子名额里），由总盘会按数字决定挑不挑。不算头部，也不占中部每天挑几个的名额。想强制开会用选币页的「固定」。填币名，空格隔开，如 BTC ETH",
   gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
@@ -2593,7 +2593,7 @@ function editOne(id, useRec) {
   ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${eqX(i) ? "（填本金的几倍）" : ""}${input}</label>`}${pwField(data.control)}
     ${i.key === "atr_period_min" || i.key === "time_limit_s" ? '<div class="small warn" id="dlg-fit"></div>' : ""}
     ${eqX(i) && eqBasis() ? `<div class="small" id="dlg-amt"></div>` : ""}
-    <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。改完点「重启生效」才用上。</div>`, "保存", false, async () => {
+    <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。${isHot(i.sec, i.key) ? "保存后几秒内生效，不用重启。" : "改完点「重启生效」才用上。"}</div>`, "保存", false, async () => {
     const el = $("#dlg-v");
     let v;
     if (i.names) {
@@ -2629,7 +2629,7 @@ function editOne(id, useRec) {
     $("#layer [data-ok]").remove();
     $("#layer [data-close].btn").textContent = "关闭";
     const x = res.changed[0];
-    dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。点「重启生效」后用上。`);
+    dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。"}`);
     poll();
   });
   // 填的是本金几倍，旁边实时写折合多少 U
@@ -2659,15 +2659,18 @@ function editOne(id, useRec) {
 }
 
 // 主程序这次启动以后的改动 = 还没生效的
+// 这项设置改了不用重启（主程序几秒内自己换上）？名单来自后端 core/hotconfig.py
+function isHot(sec, key) {
+  const hot = new Set(data.control.hot_keys || []);
+  return hot.has(`${sec}.${key}`) || hot.has(`${sec}.*`);
+}
 // 热生效的项（control.hot_keys）主程序换上以后就不算待生效了；没换上（主程序没在跑 / 还没轮到）仍算
 function pendingChanges(d) {
   const c = data.control;
   const since = c.started_at ? Date.parse(c.started_at) : null;
   if (since == null) return [];
-  const hot = new Set(c.hot_keys || []);
   const applied = c.hot_applied_at ? Date.parse(c.hot_applied_at) : null;
-  const isHot = (x) => hot.has(`${x.section}.${x.key}`) || hot.has(`${x.section}.*`);
-  return d.changes.filter((x) => x.ts && Date.parse(x.ts) > since && !(isHot(x) && applied != null && Date.parse(x.ts) <= applied));
+  return d.changes.filter((x) => x.ts && Date.parse(x.ts) > since && !(isHot(x.section, x.key) && applied != null && Date.parse(x.ts) <= applied));
 }
 function changeText(x, ix) {
   const i = ix[`${x.section}.${x.key}`] || { key: x.key, label: x.key, nullable: true, choices: [] };
