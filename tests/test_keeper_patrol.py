@@ -258,6 +258,26 @@ def test_patrol_ignores_favourable_moves_and_other_symbols(now: datetime) -> Non
     assert p2.check(_trade(now + timedelta(seconds=5), 69500.0), short) is not None
 
 
+def test_patrol_shock_skips_positions_in_profit(now: datetime, tmp_path: Path) -> None:
+    """赚着钱冲高回吐一个止损距离，不全平，叫管家看；亏损或赚不过来回手续费照旧（Aaron 10-25）。"""
+    log = JsonlDecisionLog(tmp_path)
+    p = RulePatrol(FAST, RoleRecorder(c.Role.PATROL, log), fee_bps=5.0)
+    pos = [position(now)]  # 开仓 68000，止损 67880（0.176%），冲击线 0.176%
+    p.check(_trade(now, 68000.0), pos)
+    p.check(_trade(now + timedelta(seconds=5), 69000.0), pos)  # 冲高
+    # 回吐 0.29%（超过冲击线），现价 68800 仍比开仓价高 1.2%：不平，叫管家
+    assert p.check(_trade(now + timedelta(seconds=10), 68800.0), pos) is None
+    assert p.urgent == {"pos-1"}
+    p.check(_trade(now + timedelta(seconds=15), 68790.0), pos)  # 还在盈利中，同一分钟不再写记录
+    notes = [r for r in log.read_day(now.date().isoformat()) if "盈利中" in r.summary]
+    assert len(notes) == 1 and notes[0].role == c.Role.PATROL
+    # 赚的钱不到来回手续费（0.1%）：现价 68050 只高 0.07%，算没赚，照旧全平
+    q = RulePatrol(FAST, fee_bps=5.0)
+    q.check(_trade(now, 68400.0), pos)
+    a = q.check(_trade(now + timedelta(seconds=5), 68050.0), pos)
+    assert a is not None and a.action == "close"
+
+
 def test_patrol_window_forgets_old_highs(now: datetime) -> None:
     p = RulePatrol(FAST)
     pos = [position(now)]

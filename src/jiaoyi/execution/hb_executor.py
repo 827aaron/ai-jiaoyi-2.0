@@ -879,7 +879,11 @@ class HbExecutorAdapter:
             status, reason = PositionStatus.FAILED, None
         else:
             status = PositionStatus.CLOSED
-            reason = tracked.requested_close or _CLOSE_TYPE_MAP.get(close_type, CloseReason.MANUAL)
+            # 按实际怎么成交的记（止盈 / 止损 / 移动止损 / 到时）；执行器说不出来（我们自己要求
+            # 平仓，它报 EARLY_STOP 之类）才用要求平仓的原因。别因为有人下过令就把止盈单记成他平的
+            reason = (
+                _CLOSE_TYPE_MAP.get(close_type) or tracked.requested_close or CloseReason.MANUAL
+            )
         tracked = self._set(
             tracked,
             status=status,
@@ -907,6 +911,12 @@ class HbExecutorAdapter:
                     "net": net,
                     "reason": reason.value if reason else None,
                     "fees": closed.fees_usdt,
+                    # 曾下令平仓的人（面板可以显示「巡逻兵曾下令」）；和 reason 一样就不重复写
+                    **(
+                        {"requested_by": tracked.requested_close.value}
+                        if tracked.requested_close not in (None, reason)
+                        else {}
+                    ),
                 },
             )
             await self._notice("平仓完成", _close_text(closed), closed, "closed")
