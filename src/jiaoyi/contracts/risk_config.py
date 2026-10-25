@@ -456,8 +456,9 @@ class FastLoopConfig(Contract):
     )
     surge_taker_ratio: float = Field(default=0.7, ge=0.5, le=1.0)
     entry_zone_only: bool = Field(
-        default=True,
-        description="只在卡的进场区间内开仓（Aaron 10-24「让快环尊重卡的进场区间」）：卡上这个币"
+        default=False,
+        description="只在卡的进场区间内开仓（默认关：10-24 数据显示会挡掉好信号）："
+        "卡上这个币"
         "写了进场区间、触发价在区间外就不开，连拍板人都不问；往交易方向（做多往上、做空往下）"
         "最多放宽 0.1R（R ≈ 卡上止损倍数中值 × 止损 ATR）。卡上没写区间照旧不限。",
     )
