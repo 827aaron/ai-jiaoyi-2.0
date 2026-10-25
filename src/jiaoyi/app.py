@@ -19,11 +19,13 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from pydantic import ValidationError
 
 from jiaoyi.alerting.log import LogAlerter
 from jiaoyi.alerting.recorded import RecordedAlerter
@@ -46,8 +48,18 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core import profiles
 from jiaoyi.core.against import MEETING_TRIGGER, AgainstSignalDesk
-from jiaoyi.core.commands import config_fingerprint, read_paused, write_paused, write_runtime
-from jiaoyi.core.config import ConfigError
+from jiaoyi.core.commands import read_paused, update_runtime, write_paused, write_runtime
+from jiaoyi.core.config import ConfigError, load_risk_config, read_toml, with_profile
+from jiaoyi.core.hotconfig import (
+    HOT_APP,
+    HOT_FAST,
+    HOT_RISK,
+    PROFILE_KEYS,
+    ConfigFiles,
+    describe,
+    patch_inplace,
+    restart_fingerprint,
+)
 from jiaoyi.core.pool_overrides import (
     POOL_OVERRIDES_FILE,
     POOL_OVERRIDES_PAUSE,
@@ -718,6 +730,7 @@ class App:
         *,
         offline: bool = False,
         slow_cfg: SlowConfig | None = None,
+        config_files: ConfigFiles | None = None,
     ) -> None:
         self.risk_cfg = risk_cfg
         self.app_cfg = app_cfg
@@ -737,6 +750,10 @@ class App:
         self.halted: dict[str, str] = {}
         self.credits: CreditMonitor | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
+        # 配置热生效（core/hotconfig.py）：给了文件路径，主循环定时看文件变没变
+        self.config_files = config_files
+        self._config_stamp = config_files.stamp() if config_files else None
+        self.hot_applied_at: str | None = None
         # 人工暂停开新仓（面板 pause 指令），落盘在 data/paused.json，重启后仍生效
         self.paused: dict[str, Any] | None = read_paused(app_cfg.data_dir)
         if modules is None:
@@ -961,6 +978,68 @@ class App:
         except OSError:
             log.exception("写暂停状态失败")
 
+    def reload_config(self) -> dict[str, tuple[Any, Any]]:
+        """配置文件变了就读出来，把热生效的项换到正在用的配置对象上（不用重启）。
+
+        整份读出来、按启动时一样的规则校验，读不好就沿用旧的（面板设置页会显示错误）。
+        返回真换了的项 ``{段.键: (旧, 新)}``。必须重启才生效的项不在这里动。"""
+        files = self.config_files
+        if files is None or (stamp := files.stamp()) == self._config_stamp:
+            return {}
+        self._config_stamp = stamp
+        try:
+            raw = read_toml(files.app)
+            # 档位（hold / meeting_interval / mode）没重启前不换：重读时仍按正在跑的垫默认值
+            for key in PROFILE_KEYS:
+                val = getattr(self.app_cfg, key)
+                raw[key] = getattr(val, "value", val)
+            raw.pop("profile", None)
+            new_app = AppConfig.model_validate(with_profile(raw))
+            new_risk = load_risk_config(files.risk)
+        except (ConfigError, ValidationError) as e:
+            log.warning("配置文件改过但读不好，继续用旧配置：%s", e)
+            return {}
+        changed: dict[str, tuple[Any, Any]] = {}
+        for section, target, new, names in (
+            ("risk", self.risk_cfg, new_risk, HOT_RISK),
+            ("fast_loop", self.app_cfg.fast_loop, new_app.fast_loop, HOT_FAST),
+            ("app", self.app_cfg, new_app, HOT_APP),
+        ):
+            for name, pair in patch_inplace(target, new, names).items():
+                changed[f"{section}.{name}"] = pair
+        if not changed:
+            return {}
+        self._apply_hot(changed)
+        self.hot_applied_at = self.clock().isoformat()
+        try:
+            update_runtime(self.app_cfg.data_dir, hot_applied_at=self.hot_applied_at)
+        except OSError:
+            log.exception("写 runtime.json 的热生效时间失败（只影响面板显示）")
+        log.info("配置已热生效（不用重启）：%s", describe(changed))
+        return changed
+
+    def _apply_hot(self, changed: Mapping[str, tuple[Any, Any]]) -> None:
+        """通知启动时把值抄进了自己变量的部件重新算。"""
+        m, fast, cfg = self.m, self.app_cfg.fast_loop, self.app_cfg
+        if "risk.daily_loss_halt_pct" in changed and hasattr(m.risk, "breaker"):
+            m.risk.breaker.set_halt_pct(self.risk_cfg.daily_loss_halt_pct)
+        if hasattr(m.risk, "set_record_only"):
+            m.risk.set_record_only(cfg.gate_record_only)
+        if hasattr(m.trigger, "refresh"):
+            m.trigger.refresh(cfg.signal_dedup_s)
+        if hasattr(m.gate, "reconfigure"):
+            m.gate.reconfigure(
+                max_wait_s=max(fast.signal_max_age_s - cfg.jev_timeout_ms / 1000.0, 0.0),
+                questions=fast.gate_questions,
+            )
+        telegram = getattr(m.alerter, "inner", m.alerter)
+        if hasattr(telegram, "set_muted"):
+            telegram.set_muted(cfg.muted_alert_kinds)
+        if self.credits is not None:
+            self.credits.reconfigure(
+                cfg.credit_low_floor_usd, timedelta(hours=cfg.credit_resend_hours)
+            )
+
     def _write_runtime(self, now: datetime) -> None:
         """给面板对比：配置指纹不一致 → 总览提示「配置已改、未生效」。"""
         try:
@@ -969,7 +1048,8 @@ class App:
                 started_at=now.isoformat(),
                 mode=self.app_cfg.mode.value,
                 pid=os.getpid(),
-                config_fingerprint=config_fingerprint(self.risk_cfg, self.app_cfg, self.slow_cfg),
+                # 只算必须重启才生效的那部分；热生效的项改了不算「待重启」
+                config_fingerprint=restart_fingerprint(self.risk_cfg, self.app_cfg, self.slow_cfg),
                 stub_roles=self.stub_roles(),
             )
         except OSError:

@@ -47,6 +47,10 @@ class TelegramAlerter:
             transport=transport,
         )
 
+    def set_muted(self, muted_kinds: frozenset[str]) -> None:
+        """配置热生效：设置里关 / 开了哪几类。"""
+        self._muted = muted_kinds
+
     @staticmethod
     def format(alert: Alert) -> str:
         head = f"{_ICON[alert.level]} {alert.title}"

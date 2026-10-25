@@ -76,7 +76,7 @@ async def test_panel_and_run_talk_through_data_dir(tmp_path: Path) -> None:
         assert ex.opened == []  # 暂停中不开新仓
 
         # 面板改配置 → 主循环没重启前提示“未生效”
-        body = {"section": "app", "changes": {"signal_dedup_s": 120}, "password": PW}
+        body = {"section": "app", "changes": {"pool_size": 35}, "password": PW}
         assert client.post("/api/settings", json=body, headers=HEADERS).status_code == 200
         assert control()["config_pending"] is True
 
@@ -94,6 +94,6 @@ async def test_panel_and_run_talk_through_data_dir(tmp_path: Path) -> None:
         # 主循环按新配置重启 → runtime.json 指纹更新，提示消失
         app2, _ = _run_app(paths.app, paths.risk)
         await app2.start()
-        assert app2.app_cfg.signal_dedup_s == 120
+        assert app2.app_cfg.pool_size == 35
         assert control()["config_pending"] is False
         await app2.stop()

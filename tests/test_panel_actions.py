@@ -17,11 +17,11 @@ from jiaoyi.core import profiles
 from jiaoyi.core.commands import (
     CommandInbox,
     CommandResult,
-    config_fingerprint,
     write_paused,
     write_runtime,
 )
 from jiaoyi.core.config import load_app_config, load_risk_config
+from jiaoyi.core.hotconfig import restart_fingerprint
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate
 from jiaoyi.panel import actions, pages
 from jiaoyi.panel.actions import ActionError, ConfigPaths, set_toml_value
@@ -395,10 +395,13 @@ def test_config_pending_compares_runtime_fingerprint(tmp_path: Path) -> None:
     assert actions.config_pending(paths, data) is None  # 主循环没跑过
     risk, app = load_risk_config(paths.risk), load_app_config(paths.app)
     write_runtime(
-        data, config_fingerprint=config_fingerprint(risk, app, load_slow_config(paths.slow))
+        data, config_fingerprint=restart_fingerprint(risk, app, load_slow_config(paths.slow))
     )
     assert actions.config_pending(paths, data) is False
+    # 热生效的项（主程序不重启就换上）不算待重启
     actions.update_config(paths, data, "risk", {"max_open_positions": 3}, PW, NOW)
+    assert actions.config_pending(paths, data) is False
+    actions.update_config(paths, data, "risk", {"max_spread_bps": 7}, PW, NOW)
     assert actions.config_pending(paths, data) is True
 
 
@@ -564,7 +567,7 @@ def test_config_pending_uses_profile_for_slow(tmp_path: Path) -> None:
     paths.app.write_text(text, encoding="utf-8")
     risk, app = load_risk_config(paths.risk), load_app_config(paths.app)
     slow = load_slow_config(paths.slow, app.profile)  # 主循环就是这样读的
-    write_runtime(data, config_fingerprint=config_fingerprint(risk, app, slow))
+    write_runtime(data, config_fingerprint=restart_fingerprint(risk, app, slow))
     assert actions.config_pending(paths, data) is False
 
 

@@ -108,6 +108,11 @@ class CreditMonitor:
         self._low_sent: datetime | None = None
         self._state: dict[str, Any] = {}
 
+    def reconfigure(self, low_floor_usd: float, resend_after: timedelta) -> None:
+        """配置热生效：余额下限和重复提醒间隔。"""
+        self._floor = low_floor_usd
+        self._resend = resend_after
+
     def note_exhausted(self, now: datetime) -> None:
         """会议撞上 402（线程里调也行）。下一次 ``tick`` 发告警、写面板横幅。"""
         self._exhausted_at = now

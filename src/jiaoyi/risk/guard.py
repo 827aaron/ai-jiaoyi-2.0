@@ -180,6 +180,10 @@ class DayLossBreaker:
     所以“熔断后重启”也照样锁到第二天。状态文件读不懂 → 当天按已触发处理（故障即关闭）。
     """
 
+    def set_halt_pct(self, halt_pct: float) -> None:
+        """配置热生效：新的日亏线，下一次权益检查起按新的算。"""
+        self._halt = halt_pct
+
     def __init__(self, halt_pct: float, tz: str, state_path: Path | None = None) -> None:
         self._halt = halt_pct
         self._tz = tz
@@ -308,6 +312,10 @@ class RiskGuardImpl:
         # 接线时传 AppConfig.data_dir，熔断状态写在 data/risk_state.json
         path = Path(state_dir) / "risk_state.json" if state_dir is not None else None
         self.breaker = DayLossBreaker(risk.daily_loss_halt_pct, risk.day_reset_tz, path)
+
+    def set_record_only(self, record_only: bool) -> None:
+        """配置热生效：拍板只记不拦的开关。"""
+        self._record_only = record_only
 
     def review(
         self,

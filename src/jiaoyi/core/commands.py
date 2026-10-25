@@ -191,5 +191,16 @@ def config_fingerprint(*configs: BaseModel) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def update_runtime(data_dir: str | Path, **info: Any) -> None:
+    """在 runtime.json 上加 / 改几项，其余照旧（没有这个文件就什么也不做）。"""
+    path = Path(data_dir) / RUNTIME_FILE
+    try:
+        cur = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(cur, dict):
+        _write_atomic(path, json.dumps({**cur, **info}, ensure_ascii=False))
+
+
 def write_runtime(data_dir: str | Path, **info: Any) -> None:
     _write_atomic(Path(data_dir) / RUNTIME_FILE, json.dumps(info, ensure_ascii=False))

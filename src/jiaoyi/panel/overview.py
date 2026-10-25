@@ -236,6 +236,10 @@ class Control(BaseModel):
     """面板这次启动有没有拿到配置文件路径（没有就只读）。"""
     started_at: str | None = None
     """主程序这次启动的时间（runtime.json）；面板“重启生效”看它变了才算真的重启了。"""
+    hot_applied_at: str | None = None
+    """主程序最近一次把设置热换上（不用重启）的时间（runtime.json）。"""
+    hot_keys: list[str] = []
+    """不用重启就生效的设置键（``段.键``，``category.*`` = 整段）；其余改了要重启。"""
     paper_only_ignored: list[str] = []
     """配置里开着、但现在不是模拟盘所以被忽略的开关（中文名）。"""
     llm_credit: str | None = None

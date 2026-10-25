@@ -2659,9 +2659,15 @@ function editOne(id, useRec) {
 }
 
 // 主程序这次启动以后的改动 = 还没生效的
+// 热生效的项（control.hot_keys）主程序换上以后就不算待生效了；没换上（主程序没在跑 / 还没轮到）仍算
 function pendingChanges(d) {
-  const since = data.control.started_at ? Date.parse(data.control.started_at) : null;
-  return since == null ? [] : d.changes.filter((x) => x.ts && Date.parse(x.ts) > since);
+  const c = data.control;
+  const since = c.started_at ? Date.parse(c.started_at) : null;
+  if (since == null) return [];
+  const hot = new Set(c.hot_keys || []);
+  const applied = c.hot_applied_at ? Date.parse(c.hot_applied_at) : null;
+  const isHot = (x) => hot.has(`${x.section}.${x.key}`) || hot.has(`${x.section}.*`);
+  return d.changes.filter((x) => x.ts && Date.parse(x.ts) > since && !(isHot(x) && applied != null && Date.parse(x.ts) <= applied));
 }
 function changeText(x, ix) {
   const i = ix[`${x.section}.${x.key}`] || { key: x.key, label: x.key, nullable: true, choices: [] };
