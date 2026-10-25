@@ -232,6 +232,8 @@ class Control(BaseModel):
     """面板密码设了没有。"""
     panel_stale: bool = False
     """磁盘上的代码比面板进程启动时新（git pull 了没重启面板）：接口和页面可能对不上。"""
+    ui_version: str = ""
+    """磁盘上 app.js 当前的版本号（同首页 ``app.js?v=``）；开着的页面不是它就提示刷新。"""
     writable: bool = False
     """面板这次启动有没有拿到配置文件路径（没有就只读）。"""
     started_at: str | None = None

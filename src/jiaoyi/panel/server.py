@@ -87,14 +87,16 @@ def code_fingerprint(root: Path = PACKAGE) -> str:
     return h.hexdigest()[:16]
 
 
+def asset_version(name: str) -> str:
+    st = (STATIC / name).stat()
+    return f"{st.st_mtime_ns:x}{st.st_size:x}"
+
+
 def index_page() -> HTMLResponse:
     """首页：app.js / app.css 带上文件指纹当版本号，改了文件浏览器就不会继续用缓存里的旧版。"""
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     for name in ("app.js", "app.css"):
-        st = (STATIC / name).stat()
-        html = html.replace(
-            f'/static/{name}"', f'/static/{name}?v={st.st_mtime_ns:x}{st.st_size:x}"'
-        )
+        html = html.replace(f'/static/{name}"', f'/static/{name}?v={asset_version(name)}"')
     return HTMLResponse(html)
 
 
@@ -344,6 +346,7 @@ def create_app(
         ov = build_overview(files, await hb.snapshot(), r, a, clock(), await last_prices())
         ctl = actions.control_state(data_dir, config_paths)
         ctl.panel_stale = code_fingerprint() != boot_code
+        ctl.ui_version = asset_version("app.js")
         ctl.llm_credit = credit_banner(files.llm_credits(), clock())
         return ov.model_copy(update={"control": ctl})
 
