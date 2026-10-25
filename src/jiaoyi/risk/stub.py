@@ -25,4 +25,6 @@ class StubRiskGuard:
         *,
         market: FeatureSnapshot | None,
     ) -> RiskVerdict:
-        return RiskVerdict(signal_id=signal.signal_id, approved=False, reasons=["stub: 保镖未接入"])
+        return RiskVerdict(
+            signal_id=signal.signal_id, approved=False, reasons=["stub: 风控员未接入"]
+        )

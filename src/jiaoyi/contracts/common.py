@@ -70,7 +70,7 @@ class Category(StrEnum):
 
 
 class SizeTier(StrEnum):
-    """仓位档位：拍板人选档，保镖算具体数量。"""
+    """仓位档位：拍板人选档，风控员算具体数量。"""
 
     S = "S"
     M = "M"
@@ -124,7 +124,7 @@ class Role(StrEnum):
     GATE = "gate"
     """拍板人（Jev）。"""
     RISK_GUARD = "risk_guard"
-    """保镖。"""
+    """风控员。"""
     EXECUTOR = "executor"
     """执行（hummingbot-api 开仓执行器）。"""
     LIFEBOAT = "lifeboat"

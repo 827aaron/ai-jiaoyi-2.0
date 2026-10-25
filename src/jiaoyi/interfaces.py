@@ -1,9 +1,9 @@
 """模块边界：每个角色对外只暴露这里定义的接口。
 
 - 每个接口在对应角色包里有一个 ``stub.py`` 桩实现，行为一律“故障即关闭”：
-  拍板人桩说不做、保镖桩全拒、管家桩维持现状、执行器桩不碰交易所。
+  拍板人桩说不做、风控员桩全拒、管家桩维持现状、执行器桩不碰交易所。
 - 真实现写在同一个包的其它文件里，实现同一个接口，然后在 ``jiaoyi.app`` 里接线。
-- 只有 ``ExecutorAdapter`` 和 ``LifeboatStop`` 会动交易所，且 ``open`` 只接受保镖签发的
+- 只有 ``ExecutorAdapter`` 和 ``LifeboatStop`` 会动交易所，且 ``open`` 只接受风控员签发的
   ``OrderIntent``。AI 角色（拍板人、管家、巡逻兵的 Jev 部分、军师团、预测员）只输出判断，
   不得导入 ``jiaoyi.execution``（tests/test_boundaries.py 会检查）。
 """
@@ -127,7 +127,7 @@ class DecisionModel(Protocol):
 class EntryGate(Protocol):
     """拍板人：把候选信号打包成开仓 6 问，问决策模型，返回原始回复。
 
-    不决定数量，不下单；“过不过门槛”由保镖按配置判断。
+    不决定数量，不下单；“过不过门槛”由风控员按配置判断。
     """
 
     async def evaluate(
@@ -137,7 +137,7 @@ class EntryGate(Protocol):
 
 @runtime_checkable
 class RiskGuard(Protocol):
-    """保镖：唯一能签发 ``OrderIntent`` 的地方。
+    """风控员：唯一能签发 ``OrderIntent`` 的地方。
 
     查硬上限、作战卡方向和范围、相关组敞口、日亏熔断、价差和手续费门槛；
     按“风险金额 ÷ 止损距离”算数量。``jev`` 为 ``ok=False`` 时必须拒绝。
@@ -166,7 +166,7 @@ class ExecutorAdapter(Protocol):
     """hummingbot-api 开仓执行器的适配层。"""
 
     async def open(self, intent: OrderIntent) -> PositionRecord:
-        """建执行器。只接受保镖签发的 ``OrderIntent``。"""
+        """建执行器。只接受风控员签发的 ``OrderIntent``。"""
         ...
 
     async def close(self, position_id: str, reason: CloseReason) -> None:

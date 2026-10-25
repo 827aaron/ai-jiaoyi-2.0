@@ -1,4 +1,4 @@
-"""保镖：四层决定权、数量计算、故障即关闭、日亏熔断按曼谷 0 点清零。"""
+"""风控员：四层决定权、数量计算、故障即关闭、日亏熔断按曼谷 0 点清零。"""
 
 from __future__ import annotations
 
@@ -303,7 +303,7 @@ def test_daily_halt_uses_worse_of_two_day_starts() -> None:
     g = guard()
     t = datetime(2026, 10, 22, 3, 0, tzinfo=UTC)
     assert g.review(signal(t), jev(), card(t), account(t), t).approved
-    # 账户这边的日初权益被错误重置，但保镖自己记着当天开始是 10000
+    # 账户这边的日初权益被错误重置，但风控员自己记着当天开始是 10000
     t2 = t + timedelta(hours=1)
     bad = account(t2, equity=9_600.0, day_start_equity_usdt=9_600.0)
     v = g.review(signal(t2), jev(), card(t2), bad, t2)
@@ -332,7 +332,7 @@ def test_daily_halt_survives_restart(tmp_path: Path) -> None:
     down = account(t, equity=9_650.0, day_start_equity_usdt=10_000.0)
     assert not g1.review(signal(t), jev(), card(t), down, t).approved
 
-    # 进程重启：新保镖读回状态，同一天权益回到线内也照样锁住
+    # 进程重启：新风控员读回状态，同一天权益回到线内也照样锁住
     t2 = t + timedelta(hours=1)
     g2 = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
     back = account(t2, equity=10_000.0, day_start_equity_usdt=10_000.0)
@@ -571,11 +571,11 @@ def test_session_factor_table_validated() -> None:
         FAST.model_validate({**FAST.model_dump(), "atr_long_period_min": 15})  # 不比短周期长
 
 
-# ---------------------------------------------------------------- 拍板放弃 vs 保镖拒绝
+# ---------------------------------------------------------------- 拍板放弃 vs 风控员拒绝
 def test_gate_only_rejection_tagged_as_gate_skip(tmp_path: Path, now: datetime) -> None:
     """只因为拍板人概率没过门槛：记成「拍板放弃」（detail.by = gate）。
 
-    夹了保镖自己的规则就还是拒绝。
+    夹了风控员自己的规则就还是拒绝。
     """
     log = JsonlDecisionLog(tmp_path)
     six = FAST.model_copy(update={"gate_questions": "six"})

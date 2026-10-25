@@ -1,7 +1,7 @@
-"""保镖的结论和开仓指令。
+"""风控员的结论和开仓指令。
 
 **AI 永远不直接下单。** 唯一能进执行器的东西是 ``OrderIntent``，而 ``OrderIntent``
-只能由保镖（RiskGuard）在全部硬上限检查通过后生成，``approved_by`` 固定为
+只能由风控员（RiskGuard）在全部硬上限检查通过后生成，``approved_by`` 固定为
 ``risk_guard``。拍板人、军师团、持仓管家、预测员都只输出判断或概率。
 
 JSON 示例见 ``contracts/examples/order_intent.json``。
@@ -18,7 +18,7 @@ from jiaoyi.contracts.common import Category, Contract, NonNegFloat, PosFloat, S
 
 
 class AccountState(Contract):
-    """保镖做判断时看到的账户状态（来自币安账户推送或 hummingbot-api 模拟账户）。"""
+    """风控员做判断时看到的账户状态（来自币安账户推送或 hummingbot-api 模拟账户）。"""
 
     ts: AwareDatetime
     equity_usdt: NonNegFloat = Field(description="总资产（含浮盈浮亏），即币安的权益。")
@@ -35,7 +35,7 @@ class AccountState(Contract):
     open_risk_usdt: NonNegFloat = Field(
         default=0.0,
         description="所有在管持仓按保命止损距离算的风险之和：已成交 数量×入场价×止损%，"
-        "未成交按指令名义价值。保镖用它限制总风险。",
+        "未成交按指令名义价值。风控员用它限制总风险。",
     )
     day_realized_pnl_usdt: float = Field(
         default=0.0, description="当日（曼谷 0 点起）已平仓位的净盈亏，亏损为负。"
@@ -50,13 +50,13 @@ class AccountState(Contract):
 class _Sealed(Contract):
     """签发后不能改、也不能跳过校验造一个：``model_copy`` 和 ``model_construct`` 直接报错。
 
-    要换数量或止损，只能让保镖重新签发一张。
+    要换数量或止损，只能让风控员重新签发一张。
     """
 
     def model_copy(
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False
     ) -> NoReturn:
-        raise TypeError(f"{type(self).__name__} 签发后不能修改，请让保镖重新签发")
+        raise TypeError(f"{type(self).__name__} 签发后不能修改，请让风控员重新签发")
 
     # pydantic 的 mypy 插件会为每个模型生成自己的签名，这里故意整体覆盖
     @classmethod
@@ -67,7 +67,7 @@ class _Sealed(Contract):
 
 
 class OrderIntent(_Sealed):
-    """经保镖批准的开仓指令，交给执行器（hummingbot-api 开仓执行器）。
+    """经风控员批准的开仓指令，交给执行器（hummingbot-api 开仓执行器）。
 
     百分比相对开仓价。止损止盈由执行器每秒检查；保命止损另由 lifeboat 挂到币安。
     """
@@ -128,7 +128,7 @@ class OrderIntent(_Sealed):
 
 
 class RiskVerdict(_Sealed):
-    """保镖的结论：放行（带 ``intent``）或拒绝（带原因）。"""
+    """风控员的结论：放行（带 ``intent``）或拒绝（带原因）。"""
 
     signal_id: str = Field(min_length=1)
     approved: bool

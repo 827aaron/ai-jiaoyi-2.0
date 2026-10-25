@@ -148,7 +148,7 @@ async def test_lifeboat_relaid_at_real_entry_place_before_cancel(tmp_path: Path)
     assert new is not None and new.stop_price < old.stop_price
     assert seen == [2]  # 先挂新再撤旧：中间一直有保命止损
     assert len(rig.ex.stops) == 1 and new.client_order_id.endswith("-r")
-    # 保镖算的距离原样保留，不按回填价倒推
+    # 风控员算的距离原样保留，不按回填价倒推
     assert after.stop_loss_pct == rec.stop_loss_pct
     assert after.lifeboat_stop_pct == rec.lifeboat_stop_pct
     # 对账员认带后缀的那张：不补挂、不当残留撤

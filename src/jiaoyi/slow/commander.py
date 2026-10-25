@@ -140,7 +140,7 @@ def _clamp_range(r: Range, lo: float, hi: float) -> Range:
 
 @dataclass(frozen=True)
 class StopScale:
-    """止损 / 止盈倍数的尺度：ATR 周期（分钟）和保镖认的两个倍数区间，来自 ``fast_loop``。
+    """止损 / 止盈倍数的尺度：ATR 周期（分钟）和风控员认的两个倍数区间，来自 ``fast_loop``。
 
     默认值与 ``FastLoopConfig`` 的默认一致；``app.py`` 用真实配置覆盖。
     """
@@ -176,12 +176,12 @@ def clamp_to_risk(
         return cs.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
     return cs.model_copy(
         update={
-            # 慢环不知道实时权益：只按绝对硬顶夹（没写就不夹），权益倍数由保镖下单时封顶
+            # 慢环不知道实时权益：只按绝对硬顶夹（没写就不夹），权益倍数由风控员下单时封顶
             "notional_usdt": _clamp_range(cs.notional_usdt, 0.0, risk.notional_cap(None)),
             "leverage": _clamp_range(cs.leverage, 1.0, float(risk.max_leverage)),
-            # 止损倍数落在保镖认的区间内，免得整张卡这个标的被 min/max_stop_atr 拒掉
+            # 止损倍数落在风控员认的区间内，免得整张卡这个标的被 min/max_stop_atr 拒掉
             "stop_atr": _clamp_range(cs.stop_atr, stop.min_stop_atr, stop.max_stop_atr),
-            # 止盈倍数同理：低于 min_tp_r 整张卡这个标的会被保镖拒掉
+            # 止盈倍数同理：低于 min_tp_r 整张卡这个标的会被风控员拒掉
             "take_profit_r": _clamp_range(cs.take_profit_r, stop.min_tp_r, stop.max_tp_r),
         }
     )
@@ -452,7 +452,7 @@ class BattleCardCommander:
         return cs.model_copy(update={"allowed_signals": []})
 
     def block_symbol(self, symbol: str, reason: str) -> None:
-        """封掉一个币的新开仓（例如币安公告要下架它）。保镖只认作战卡，所以这里改卡。
+        """封掉一个币的新开仓（例如币安公告要下架它）。风控员只认作战卡，所以这里改卡。
 
         封币后卡里该币读成 NO_TRADE：不再开仓，已有持仓会被持仓管家按卡规则平掉
         （要下架的币留仓更危险）。
@@ -666,7 +666,7 @@ class BattleCardCommander:
 
     def _mask_us_closed(self, card: BattleCard, now: datetime) -> BattleCard:
         """美股 / 加密股合约不在开仓时段：卡上标「休市不可做」，清空信号（方向不动、持仓照常盯）。
-        金属不受限。保镖那边另有同样的闸。"""
+        金属不受限。风控员那边另有同样的闸。"""
         if self._us_hours is None or us_entry_window(now, *self._us_hours):
             return card
         us = (Category.US_TECH, Category.CRYPTO_STOCK)
@@ -1473,7 +1473,7 @@ class BattleCardCommander:
         if not card.is_valid(now):
             logger.info("存档的作战卡已过期，不恢复")
             return
-        # 重启前后可能改过硬上限或切了档位：按现在的配置再夹一遍，免得保镖整个拒掉
+        # 重启前后可能改过硬上限或切了档位：按现在的配置再夹一遍，免得风控员整个拒掉
         card = card.model_copy(
             update={"symbols": [clamp_to_risk(sym, self._risk, self._stop) for sym in card.symbols]}
         )

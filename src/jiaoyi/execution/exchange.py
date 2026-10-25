@@ -476,7 +476,7 @@ class CcxtBinanceFutures:
                     delist_at=_ms_time(info.get("deliveryDate")),
                 )
             except (KeyError, ValueError):
-                continue  # 缺字段的合约不给精度，保镖会对它拒单
+                continue  # 缺字段的合约不给精度，风控员会对它拒单
         return out
 
     async def income_since(self, since: datetime) -> float:

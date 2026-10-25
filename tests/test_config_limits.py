@@ -221,7 +221,7 @@ def test_notional_cap_follows_equity() -> None:
     cfg = b.risk_config(max_notional_per_trade_x=2.0)
     assert cfg.notional_cap(1_000.0) == 2_000.0
     assert cfg.notional_cap(5_000.0) == 10_000.0
-    assert cfg.notional_cap(None) == float("inf")  # 不知道权益：保镖按实时权益封顶
+    assert cfg.notional_cap(None) == float("inf")  # 不知道权益：风控员按实时权益封顶
     topped = b.risk_config(max_notional_per_trade_x=2.0, max_notional_per_trade_usdt=3_000.0)
     assert topped.notional_cap(5_000.0) == 3_000.0
     assert topped.notional_cap(None) == 3_000.0
@@ -251,7 +251,7 @@ def test_conservative_defaults_have_no_cautions() -> None:
 def test_daily_halt_below_one_lifeboat_loss_is_only_a_caution(tmp_path: Path) -> None:
     data = {**b.RISK_DEFAULTS, "risk_per_trade_pct": 1.0, "daily_loss_halt_pct": 1.2}
     hits = load_risk_config(_write(tmp_path, data)).cautions()
-    assert any("满仓位的单子会被保镖全部拒掉" in h for h in hits)
+    assert any("满仓位的单子会被风控员全部拒掉" in h for h in hits)
 
 
 @pytest.mark.parametrize(

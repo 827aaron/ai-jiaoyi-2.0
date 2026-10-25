@@ -1,6 +1,6 @@
 # 快环说明
 
-快环 = 行情 → 特征 → 哨兵 → 拍板人 → 保镖 → （执行层）开仓；盯仓 = 持仓管家 + 巡逻兵。
+快环 = 行情 → 特征 → 哨兵 → 拍板人 → 风控员 → （执行层）开仓；盯仓 = 持仓管家 + 巡逻兵。
 负责人：快环工程师。设计依据：设计文档 v1 §二、§三、§四、§五、§七。
 
 ## 模块和实现
@@ -28,8 +28,8 @@
 - 每个候选信号：`gate.evaluate` → `guard.review` → 放行才把 `verdict.intent` 交给执行器。
 - 管家每 `keeper_interval_s` 秒复查一次每个持仓；`patrol.urgent` 里的持仓立刻复查，复查后 `discard`。
 - 持仓平掉后调 `keeper.forget(position_id)`。
-- 保镖构造时传 `state_dir=AppConfig.data_dir`，日亏熔断状态落盘在 `data/risk_state.json`，重启后当天仍锁住。
-- 保镖需要 `LotRulesProvider`（币安 exchangeInfo 的 stepSize / minQty / minNotional），由执行层提供；拿不到就拒单。
+- 风控员构造时传 `state_dir=AppConfig.data_dir`，日亏熔断状态落盘在 `data/risk_state.json`，重启后当天仍锁住。
+- 风控员需要 `LotRulesProvider`（币安 exchangeInfo 的 stepSize / minQty / minNotional），由执行层提供；拿不到就拒单。
 - 拍板模型用 `gate.jev.decision_model_from_config(...)` 选：有所选通道的 key（`JEV_API_KEY` 或 `OPENROUTER_API_KEY`，见下文“Jev 通道”）且 `[fast_loop] jev_model` 锁了具体版本 → Jev；
   否则只有 paper 模式且 `rule_gate_without_jev = true` 才用规则版（testnet / live 构造规则版直接报错），默认返回 None（用桩，不开仓）。
   这是启动时的一次性选择，Jev 运行中出错只返回 `ok=False`，不会切到规则版。
@@ -64,7 +64,7 @@
 | `top_w_pct`、`crowd_w_pct` | 上面两个在 `top_crowd_window_min` 内的对数变化 | % |
 | `div4h` | 大户比 4 小时对数变化 − 散户比 4 小时对数变化（正 = 大户比散户更看多） | % |
 
-`FeatureSnapshot.atr`：`atr_period_min` 分钟 K 线 14 根 Wilder ATR（默认 15 分钟，由 1 分钟 K 线按 UTC 整点聚合，缺分钟的那根整根丢掉），周期写在 `FeatureSnapshot.atr_period_min`。`book`：盘口超过 10 秒没更新就为空（保镖看到空盘口会拒单）。
+`FeatureSnapshot.atr`：`atr_period_min` 分钟 K 线 14 根 Wilder ATR（默认 15 分钟，由 1 分钟 K 线按 UTC 整点聚合，缺分钟的那根整根丢掉），周期写在 `FeatureSnapshot.atr_period_min`。`book`：盘口超过 10 秒没更新就为空（风控员看到空盘口会拒单）。
 `BookMetrics.ofi` 和 `cvd` 都是 60 秒窗口、按 USDT 计。
 
 ## 已知限制
@@ -72,7 +72,7 @@
 - 币安 U 本位 WS 按类型分路由：盘口类（depth / bookTicker）走 `wss://fstream.binance.com/public/stream`，成交 / 标记价格 / K 线 / 强平走 `/market/stream`；旧的 `/stream` 只剩盘口在推（2026-10-23 Mac mini 实测）。行情层每 40 个币各开一条 market、一条 public 连接；按币订的连接 30 秒没消息就断开重连（看门狗），盘口员卡同时报 down。
 - 只订要盯的币：总盘会本轮挑中的（挑完马上回调 `Runner.set_meeting_picks`，不等作战卡）+ 有效作战卡上的 + 有持仓的，不订整个候选池。新加的币先回填 K 线；卡过期、平仓后下一轮持仓管家（`keeper_tick`）里退订。全市场强平连接一直开着（选币要用）。盘口员卡开头写「盯着 N 个币（总盘会 n 持仓 m）」。
 
-- 全市场连接同时订 `!contractInfo`：盯着 / 候选池 / 持仓的币排了 7 天内下架、或状态变成交割 / 已下线（`FINAL_STATUSES`：PRE_DELIVERING / DELIVERING / DELIVERED / CLOSE）→ `block_symbol`（和下架公告同一条路，原因写「币安合约信息：…」，已有持仓由管家平掉，要手动解封）。其余非 TRADING（结算中、待上线等）只当临时停：记进 `App.halted`，保镖只挡新开仓、已有持仓不动，状态回到 TRADING 自动放开，只记日志不报警。保镖另按 exchangeInfo 的 `deliveryDate` / `onboardDate` 拒「7 天内下架」「上线不到 `new_listing_block_h` 小时」，按 `symbolAdlRisk`（30 分钟一查）拒自动减仓风险「高」（`adl_high_block`），查不到都不挡。
+- 全市场连接同时订 `!contractInfo`：盯着 / 候选池 / 持仓的币排了 7 天内下架、或状态变成交割 / 已下线（`FINAL_STATUSES`：PRE_DELIVERING / DELIVERING / DELIVERED / CLOSE）→ `block_symbol`（和下架公告同一条路，原因写「币安合约信息：…」，已有持仓由管家平掉，要手动解封）。其余非 TRADING（结算中、待上线等）只当临时停：记进 `App.halted`，风控员只挡新开仓、已有持仓不动，状态回到 TRADING 自动放开，只记日志不报警。风控员另按 exchangeInfo 的 `deliveryDate` / `onboardDate` 拒「7 天内下架」「上线不到 `new_listing_block_h` 小时」，按 `symbolAdlRisk`（30 分钟一查）拒自动减仓风险「高」（`adl_high_block`），查不到都不挡。
 - 币安强平流每个标的每秒最多推一笔，爆仓额是下限估计。
 - 强平走全市场流 `!forceOrder@arr`（一个连接）。`feed.liquidations`（`LiquidationTracker`）记着所有币近 1 小时的强平，
   选币用 `feed.liquidations.liquidations_1h_usdt(symbol, now)` 填 `SymbolStats.liquidations_1h_usdt`。
@@ -110,7 +110,7 @@
 
 ## ATR 周期和止损倍数（设置页可调）
 
-止损距离 = 作战卡给的倍数 × ATR，所以 ATR 的周期必须和军师出卡时用的周期一致。原来保镖乘的是 1 分钟 ATR，军师按 1 小时 ATR 想“1–2 倍”，实际止损只有原意的几分之一，落在 1 分钟噪音里。现在全链路统一成一个可配的周期，默认 15 分钟。
+止损距离 = 作战卡给的倍数 × ATR，所以 ATR 的周期必须和军师出卡时用的周期一致。原来风控员乘的是 1 分钟 ATR，军师按 1 小时 ATR 想“1–2 倍”，实际止损只有原意的几分之一，落在 1 分钟噪音里。现在全链路统一成一个可配的周期，默认 15 分钟。
 
 | 键（`[fast_loop]`） | 默认 | 范围 | 作用 |
 |---|---|---|---|
@@ -124,8 +124,8 @@
 | `stop_level_snap` | false | true / false | 止损挪到作战卡关键位外侧。默认关：价格碰到关键位后 93% 会穿过 0.1 ATR，挪过去只是让止损更宽 |
 | `stop_level_buffer_atr` | 0.1 | 0–1 | 止损放在关键位外侧多少个 ATR（只在 `stop_level_snap` 开时用） |
 
-- 止损距离 = 作战卡倍数（窄 / 中 / 宽）× √(短 ATR × 长 ATR) × 时段系数；数量 = 风险金额 ÷ 止损距离；手续费检查在乘完系数之后。保镖日志 `detail` 记 `atr_short / atr_long / session_factor`。各最长持仓档的周期和系数表见 `core/profiles.py`（研究 v3，12 个月数据；系数表每月重算）。
-- 保镖会核对快照的 `atr_period_min` 和配置一致，对不上就拒单（接线错了止损会差好几倍）。
+- 止损距离 = 作战卡倍数（窄 / 中 / 宽）× √(短 ATR × 长 ATR) × 时段系数；数量 = 风险金额 ÷ 止损距离；手续费检查在乘完系数之后。风控员日志 `detail` 记 `atr_short / atr_long / session_factor`。各最长持仓档的周期和系数表见 `core/profiles.py`（研究 v3，12 个月数据；系数表每月重算）。
+- 风控员会核对快照的 `atr_period_min` 和配置一致，对不上就拒单（接线错了止损会差好几倍）。
 - 拍板人快照里的 `atr_bps` 跟着变成新口径，所以问题模板升到 `q2`（提示里写明 `atr_bps` 是 `stop_atr` 的单位）。
 - 巡逻兵的 1% / 2%（1 分钟逆向波动）是价格百分比，和 ATR 无关，不用改。15 分钟止损变宽后，2% 的冲击线仍然明显宽于正常止损（BTC 15 分钟 ATR 一般 0.1%–0.3%）。
 
@@ -174,8 +174,8 @@
 
 ## 拍板人：一道「做不做」（q6，Aaron 2026-10-24）
 
-`[fast_loop] gate_questions`：`"one"`（默认）只问一道 `take`，再加 `stop_width` / `size` 两题给保镖定止损档和仓位档
-（不参与放不放行）；`"six"` 是旧的 6 道题，留着回放对照。保镖按回答里有没有 `genuine` 判断用哪种口径。
+`[fast_loop] gate_questions`：`"one"`（默认）只问一道 `take`，再加 `stop_width` / `size` 两题给风控员定止损档和仓位档
+（不参与放不放行）；`"six"` 是旧的 6 道题，留着回放对照。风控员按回答里有没有 `genuine` 判断用哪种口径。
 
 - 题目（模板 q8，`gate.questions.ONE_TAKE_PROMPT`）用旧的「Considering everything, should we take this trade in
   direction `side` now, after fees?」加目标说明。10-25 线上没有新单：原来那句「Take it only if all of these hold together」
@@ -196,7 +196,7 @@
 ## 进场区间（Aaron 2026-10-24）
 
 `[fast_loop] entry_zone_only`（默认关；10-24 数据显示开着会挡掉好信号，Aaron 10-25 同意关）：卡上这个币写了 `entry_zone`、触发价在区间外，主循环在问拍板人之前就拦下，
-保镖名下记一条「没到区间」（`detail.by = "entry_zone"`）。往交易方向最多放宽 0.1R（做多高过上沿、做空低过下沿），
+风控员名下记一条「没到区间」（`detail.by = "entry_zone"`）。往交易方向最多放宽 0.1R（做多高过上沿、做空低过下沿），
 R ≈ 卡上 `stop_atr` 中值 × 止损 ATR；另一侧不放宽。卡上没写区间照旧不限。不加挂单等回踩。
 
 ## 拍板门槛与校准
@@ -209,10 +209,10 @@ paper 的推荐是 做 ≥ 0.55（一道题问法的门槛）、真信号 ≥ 0.
 （Aaron 10-24「直接改成官方的」）：每个币一次采样 `[predictor] paths` 条（默认 10，温度 `temperature` 0.6、top_p 0.9），
 模型自己平均成一条；分数 = 平均路径终点 ÷ 现价 − 1；同一时刻所有新鲜预测按分数排名（`rank_pct`，1 = 最看好）。
 排在前 `rank_band`（默认 1/6）= 看好，后 `rank_band` = 看坏（看坏给做空用是我们的镜像，官方只做多），中间不表态；
-一起预测的币少于 `rank_min_peers`（默认 6）就不排名。做多碰上看好、做空碰上看坏，保镖拿「做」和门槛比之前先加
+一起预测的币少于 `rank_min_peers`（默认 6）就不排名。做多碰上看好、做空碰上看坏，风控员拿「做」和门槛比之前先加
 `权重 × 0.5`（0.2 时 +0.10），其余不加也不扣，结果夹在 0–1。单个币的涨跌方向不看（论文里方向相关很弱，只看名次）。
 信号没带预测、预测过期、排不出名次都不加。只动「做」这一道门，预测员不进拍板人的快照。`predictor_nudge_mode` 已停用。
-保镖日志 `detail` 里写 `predictor`（「同向（看好，N 个币里排第 k）」/「不同向，不扣分（…）」/ 排不出名次 / 没有预测）、
+风控员日志 `detail` 里写 `predictor`（「同向（看好，N 个币里排第 k）」/「不同向，不扣分（…）」/ 排不出名次 / 没有预测）、
 `predictor_rank_pct`、`predictor_score_bps`、`predictor_nudge`、`take_raw`、`take_adj`；
 管家快照的 `kronos` = `{agree: 平均路径是否朝持仓方向 1/0, rank: top/mid/bottom}`（模板 q7）。
 
@@ -220,16 +220,16 @@ paper 的推荐是 做 ≥ 0.55（一道题问法的门槛）、真信号 ≥ 0.
 就用 64）：30m 持仓 5m 64/6、1h 5m 64/12、2h 5m 120/24、4h 15m 80/16、8h 15m 160/32、12h 15m 240/48、24h 1h 120/24，
 各档 10 条、温度 0.6。都能在面板改；配置文件写死的（例如 Mac 上 lookback 128 / paths 4）优先，点「恢复档位默认」跟档位走。
 耗时按 `paths × pred_len × (lookback + pred_len)` 增长（官方没有 KV 缓存），每次推理的耗时记在预测员决策日志 `latency_ms`。
-拒绝原因写成「“做”概率 0.18（预测员 +0.10）低于门槛 0.2」。面板拍板人那一行仍按拍板人原话标门槛，挪后的结论看保镖那一行。
+拒绝原因写成「“做”概率 0.18（预测员 +0.10）低于门槛 0.2」。面板拍板人那一行仍按拍板人原话标门槛，挪后的结论看风控员那一行。
 
 `[fast_loop] gate_record_only`（拍板只记不拦）：不写 = 关；只在 paper 生效；testnet / live 写 true 当关、启动时日志警告「拍板只记不拦 只在模拟盘生效，已忽略」，面板总览顶部也提示；面板切到测试网 / 实盘时自动把它关掉并记进修改记录。
-开着时门槛没过也放行，保镖日志 `detail.gate_would_block` 记下本会拦的原因，面板写「拍板本会拦，只记不拦放行」；
+开着时门槛没过也放行，风控员日志 `detail.gate_would_block` 记下本会拦的原因，面板写「拍板本会拦，只记不拦放行」；
 订单流有毒概率 ≥ 0.8 仍然拦，回答不全永远拦。
 
 **校准：`jiaoyi jev-backtest [--since 2026-10-23T12:47]`**（要能连币安，在 Mac 上跑）。不用等新样本：
 决策日志里每次拍板都记了完整快照和每个选项的概率，命令按快照里的价格、方向、最长持仓，拉之后的 1 分钟线算
-「做了会怎样」——止损 / 止盈用保镖当时算的（没算到那步的按 1.5 × 快照 `atr_bps` 估、止盈 1.5R），
-同一根线两边都碰到按先止损，都没碰到按到时收盘平，扣来回吃单费。放行的、拍板拦的、保镖拦的都算。
+「做了会怎样」——止损 / 止盈用风控员当时算的（没算到那步的按 1.5 × 快照 `atr_bps` 估、止盈 1.5R），
+同一根线两边都碰到按先止损，都没碰到按到时收盘平，扣来回吃单费。放行的、拍板拦的、风控员拦的都算。
 输出按模板版本分开（问法不同的概率不能混比）：做概率分桶、做 × 真信号 × 毒性 →
 笔数 / 胜率 / 平均 R，并扫门槛给推荐（门槛内总 R 最大、至少 10 笔）。
 明细缓存 `data/shadow/outcomes.jsonl`（算过的不重算），汇总 `data/debug/jev_backtest.json`。
@@ -238,28 +238,28 @@ paper 的推荐是 做 ≥ 0.55（一道题问法的门槛）、真信号 ≥ 0.
 从 data.binance.vision 下载过去几天的 1 分钟线和逐笔成交（缓存 `data/history`），灌进和实盘同一个特征引擎、
 同一个哨兵规则造信号（作战卡用回放卡：两边都可以、所有信号类型、关键位取前 24h / 4h 高低点、
 止损 ATR / 止盈 R 用当前最长持仓档推荐），均匀抽 `--n` 个按当前模板和最长持仓真问 Jev；
-止损 = Jev 选的止损档 × 和保镖同一个止损 ATR，止盈 = 止损 × 最小 R，结果算法同上。
+止损 = Jev 选的止损档 × 和风控员同一个止损 ATR，止盈 = 止损 × 最小 R，结果算法同上。
 默认选币 = 总盘会最常选的 8 个（`data/card_review/cards.jsonl`），可 `--symbols BTCUSDT,ETHUSDT`。
 历史数据没有盘口（快照 `book` 写 null）、爆仓（为 0，不出「强平瀑布反弹」）、资金费率（不出「拥挤交易反向」）和预测员。
 输出同样的分桶表 + 按现在门槛会放行多少 + 按信号类型，存 `data/replay/jev/<时间>/` 和 `data/debug/jev_replay.json`。
 
-- 只因为拍板人概率没过门槛被拦的，保镖记 `detail.by = "gate"`，面板显示黄色「拍板放弃」；红色「保镖拒绝」只留给保镖自己的规则。
+- 只因为拍板人概率没过门槛被拦的，风控员记 `detail.by = "gate"`，面板显示黄色「拍板放弃」；红色「风控员拒绝」只留给风控员自己的规则。
 - 滑点（`risk.toml max_slippage_bps`）只拦不利方向（做多价格比触发时高、做空比触发时低），`detail.slippage_bps` 正数 = 不利；
   `detail.since_trigger_ms` 记触发到审完用了多久。推荐值按最长持仓档（约止损的 1/4）：30m 6 / 1h 8 / 2h 11 / 4h 16 / 8h 22 / 12h 28 / 24h 40bp。
 - 拍板问题模板 q3：时间按最长持仓问（快照 `hold_min`），`atr_bps` 是止损用的 ATR（√短×长）。
 
 ## 进场挂单等回踩（默认关）
 
-`entry_limit_pullback`（testnet / live 还要 `entry_limit_pullback_live`）打开后，保镖不再出市价单：
+`entry_limit_pullback`（testnet / live 还要 `entry_limit_pullback_live`）打开后，风控员不再出市价单：
 挂单价 = 现价 ∓ `entry_limit_offset_stop` × 止损距离（按档 30m 0.6 / 1h 0.4 / 2h·4h 0.25 / 8h 起 0.1，按最小跳动往有利方向取整），
 OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase`。执行层只挂单（LIMIT_MAKER），成交前不挂保命止损；
 等满没成交就撤单，记「挂单没成交已撤」（不报警）。`entry_limit_chase`（8h 起默认开）时改市价追进，
-执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在保镖名下记「不追了：…」。
+执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍风控员（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在风控员名下记「不追了：…」。
 持仓时长从成交时刻算。
 
 ## 保本和移动止损（持仓管家的开关：移动止损默认开，保本默认关）
 
-`trailing_on` / `breakeven_on` 打开后，保镖在 OrderIntent 里带上 `trailing_activation_pct` / `trailing_stop_pct`，执行器交给
+`trailing_on` / `breakeven_on` 打开后，风控员在 OrderIntent 里带上 `trailing_activation_pct` / `trailing_stop_pct`，执行器交给
 hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时盈利 − 回撤距离」，之后只往上挪不往下放，由 hummingbot 实时盯着平仓
 （平仓原因「保本 / 移动止损」）。数字都按止损距离（R）给：
 

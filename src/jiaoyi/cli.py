@@ -588,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_status)
 
-    p = sub.add_parser("run", help="启动快环主循环（行情、哨兵、拍板、保镖、盯仓、定时开会）")
+    p = sub.add_parser("run", help="启动快环主循环（行情、哨兵、拍板、风控员、盯仓、定时开会）")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")

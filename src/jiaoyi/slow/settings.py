@@ -144,7 +144,7 @@ class ScreenerSection(_Strict):
         default=None,
         gt=0,
         description="最大买卖价差（万分之几）。不写 = 跟硬上限里的「最大价差」走，"
-        "免得进池的币保镖一律拒。写得比硬上限大会被提示。",
+        "免得进池的币风控员一律拒。写得比硬上限大会被提示。",
     )
     min_depth_usdt: float = Field(
         default=100_000.0, ge=0, description="盘口最小深度（美元）。太浅的币大单吃不下。"
@@ -282,12 +282,12 @@ class ScreenerSection(_Strict):
             if self.max_spread_bps > risk_max_spread_bps:
                 out.append(
                     f"选币的最大价差 {self.max_spread_bps:g} 比硬上限里的 "
-                    f"{risk_max_spread_bps:g} 宽，多出来的币进池后保镖会一律拒绝"
+                    f"{risk_max_spread_bps:g} 宽，多出来的币进池后风控员会一律拒绝"
                 )
         elif self.max_spread_bps is not None and self.max_spread_bps > SCREENER_SPREAD_BPS:
             out.append(
                 f"选币的最大价差 {self.max_spread_bps:g} 比推荐的 {SCREENER_SPREAD_BPS:g} 宽，"
-                "保镖按止损的 1/10 卡价差，价差大的币进池后多半开不了仓"
+                "风控员按止损的 1/10 卡价差，价差大的币进池后多半开不了仓"
             )
         out.extend(self.tiers.cautions())
         if self.categories and not any(
@@ -591,7 +591,7 @@ class SlowConfig(_Strict):
         return ScreenerConfig(
             pool_size=pool_size,
             min_quote_volume_usdt=s.min_quote_volume_usdt,
-            # 硬上限也没写（保镖只按止损比例）时用选币器自己的默认
+            # 硬上限也没写（风控员只按止损比例）时用选币器自己的默认
             max_spread_bps=s.max_spread_bps or risk_max_spread_bps or SCREENER_SPREAD_BPS,
             min_depth_usdt=s.min_depth_usdt,
             min_listed_days=s.min_listed_days,

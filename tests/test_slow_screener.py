@@ -150,7 +150,7 @@ def test_screener_section_validation_and_cautions() -> None:
         ScreenerSection(min_range_24h_pct=10, max_range_24h_pct=5)
     assert ScreenerSection().cautions(5.0) == []
     notes = ScreenerSection(min_quote_volume_usdt=1e6, max_spread_bps=9).cautions(5.0)
-    assert len(notes) == 2 and "保镖" in notes[1]
+    assert len(notes) == 2 and "风控员" in notes[1]
 
 
 def test_range_filters_and_full_score_points(now: datetime) -> None:

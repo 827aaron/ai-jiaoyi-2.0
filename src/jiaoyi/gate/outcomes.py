@@ -5,7 +5,7 @@
 
 - 入场价 = 快照里的 ``px``，方向 = 快照 ``side``；窗口 = 快照 ``hold_min``（q2 以前的快照没有，
   用当前配置的最长持仓）。
-- 止损 / 止盈：同一信号保镖算出来了（``detail.stop_pct``，放行的还有 ``take_profit_pct``）就按它；
+- 止损 / 止盈：同一信号风控员算出来了（``detail.stop_pct``，放行的还有 ``take_profit_pct``）就按它；
   没有就按 ``FALLBACK_STOP_ATR`` × 快照 ``atr_bps``、止盈 ``FALLBACK_TP_R`` R 估一个（标 ``est``）。
 - 一根 1 分钟线里止损、止盈都碰到按先止损算（保守）；都没碰到按窗口最后一根收盘平。
 - 净收益扣来回吃单费（``risk.taker_fee_bps`` × 2），R = 净收益 / 止损距离。
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 OUTCOMES_FILE = Path("shadow") / "outcomes.jsonl"
 REPORT_FILE = Path("debug") / "jev_backtest.json"
 FALLBACK_STOP_ATR = 1.5
-"""保镖没算出止损时（拍板拦了、没走到算仓位那步），按快照 atr_bps 的几倍估止损。"""
+"""风控员没算出止损时（拍板拦了、没走到算仓位那步），按快照 atr_bps 的几倍估止损。"""
 FALLBACK_TP_R = 1.5
 MIN_N = 10
 """推荐门槛时，门槛以上至少要有几笔才算数。"""
@@ -51,7 +51,7 @@ class Candidate:
     hold_min: int
     template: str
     verdict: str
-    """opened = 保镖放行；gate = 拍板拦下；guard = 保镖自己的规则拦下；none = 没有保镖记录。"""
+    """opened = 风控放行；gate = 拍板拦下；guard = 风控自己的规则拦下；none = 没有风控记录。"""
     gate_would_block: bool
     stop_bps: float | None
     tp_bps: float | None
@@ -119,7 +119,7 @@ def _p(answers: dict[str, Any], q: str, choice: str) -> float | None:
 
 
 def candidates(data_dir: str | Path, since: datetime, default_hold_min: int) -> list[Candidate]:
-    """``since`` 以来每一次成功的开仓拍板（带快照和概率），配上同一信号的保镖结论。"""
+    """``since`` 以来每一次成功的开仓拍板（带快照和概率），配上同一信号的风控员结论。"""
     gates: list[tuple[DecisionRecord, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     guards: dict[str, DecisionRecord] = {}
     for rec in _records(Path(data_dir), since):

@@ -56,7 +56,7 @@ class StubReconciler:
 
 
 class StubLotRules:
-    """桩：拿不到交易所精度，保镖据此一律拒单。真实现由执行层从 exchangeInfo 读。"""
+    """桩：拿不到交易所精度，风控员据此一律拒单。真实现由执行层从 exchangeInfo 读。"""
 
     def lot_rules(self, symbol: str) -> None:
         return None

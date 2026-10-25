@@ -112,7 +112,7 @@ class RiskConfig(Contract):
     def notional_cap(self, equity_usdt: float | None) -> float:
         """单笔名义价值上限：权益 × ``max_notional_per_trade_x``，写了绝对硬顶再取小。
 
-        不知道权益（慢环、日志验收）时只剩绝对硬顶；也没写就是 ``inf``，由保镖按实时权益封顶。
+        不知道权益（慢环、日志验收）时只剩绝对硬顶；也没写就是 ``inf``，由风控员按实时权益封顶。
         """
         caps = (
             []
@@ -136,7 +136,7 @@ class RiskConfig(Contract):
         if worst > self.daily_loss_halt_pct:
             out.append(
                 f"daily_loss_halt_pct {self.daily_loss_halt_pct:g}% 小于一笔打到保命止损的亏损"
-                f" {worst:g}%：满仓位的单子会被保镖全部拒掉"
+                f" {worst:g}%：满仓位的单子会被风控员全部拒掉"
             )
         return out
 
@@ -182,9 +182,9 @@ def recommended_caps(equity_usdt: float | None = None) -> dict[str, Recommendati
 
 
 class FastLoopConfig(Contract):
-    """快环的门槛和节奏（哨兵、拍板人、保镖的档位换算、持仓管家、巡逻兵）。
+    """快环的门槛和节奏（哨兵、拍板人、风控员的档位换算、持仓管家、巡逻兵）。
 
-    这些是策略参数，不是硬上限：只能在硬上限以内起作用，保镖仍按 ``RiskConfig`` 封顶。
+    这些是策略参数，不是硬上限：只能在硬上限以内起作用，风控员仍按 ``RiskConfig`` 封顶。
     每项都有默认值（契约规则：新加字段必须给默认值，旧的 app.toml 照样能读），
     但同样有合理范围，超范围拒绝启动。键名在 ``config/app.example.toml`` 的 ``[fast_loop]``。
     """
@@ -252,7 +252,7 @@ class FastLoopConfig(Contract):
         "（订单流有毒概率 ≥ 0.8 仍然拦），用来在 paper 攒样本校准门槛。"
         "不写 = 关（拍板一票否决）；只在 paper 生效，testnet / live 写 true 当关（启动时警告）。",
     )
-    # ---- 保镖的档位换算
+    # ---- 风控员的档位换算
     max_slippage_stop_frac: float = Field(
         default=0.25,
         gt=0.0,
@@ -312,7 +312,7 @@ class FastLoopConfig(Contract):
         "限价单还在排队，不算；穿过去还没成交才改市价。0 = 碰到就算（旧行为）。",
     )
     signal_max_age_s: float = Field(
-        default=5.0, ge=0.5, le=60.0, description="信号从触发到保镖审核超过这么久就作废。"
+        default=5.0, ge=0.5, le=60.0, description="信号从触发到风控员审核超过这么久就作废。"
     )
     size_fraction_s: float = Field(
         default=0.5, gt=0.0, le=1.0, description="S 档用每笔风险的几成。"
@@ -482,7 +482,7 @@ class FastLoopConfig(Contract):
     )
     entry_limit_pullback: bool = Field(
         default=False,
-        description="进场用挂单等回踩（默认关，关 = 市价进）：保镖按触发价往有利方向让一段"
+        description="进场用挂单等回踩（默认关，关 = 市价进）：风控员按触发价往有利方向让一段"
         "（止损距离的几成，跟档位走）挂只挂单的限价单，等够时间没成交就撤（8h 以上档改市价追）。"
         "成交后才挂保命止损。",
     )

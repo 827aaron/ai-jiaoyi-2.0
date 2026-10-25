@@ -4,7 +4,7 @@
 
 ## 三条铁律
 
-1. **AI 永远不直接下单。** 拍板人、持仓管家、巡逻兵的 Jev 部分、军师团、预测员只输出判断或概率。唯一能进执行器的是 `OrderIntent`，只有保镖（`jiaoyi.risk`）能构造它。`tests/test_boundaries.py` 会检查：AI 角色的包不得导入 `jiaoyi.execution`，`jiaoyi.risk` 以外不得构造 `OrderIntent`。平仓也一样：管家和巡逻兵只返回 `KeeperVerdict` / `PatrolAction`，由接线代码去调执行器。
+1. **AI 永远不直接下单。** 拍板人、持仓管家、巡逻兵的 Jev 部分、军师团、预测员只输出判断或概率。唯一能进执行器的是 `OrderIntent`，只有风控员（`jiaoyi.risk`）能构造它。`tests/test_boundaries.py` 会检查：AI 角色的包不得导入 `jiaoyi.execution`，`jiaoyi.risk` 以外不得构造 `OrderIntent`。平仓也一样：管家和巡逻兵只返回 `KeeperVerdict` / `PatrolAction`，由接线代码去调执行器。
 2. **故障即关闭。** Jev 超时或报错 → 开仓一律不做，盯仓维持现状；没有有效作战卡 → 不开新仓；配置缺项或超范围 → 拒绝启动。不许“出错时换个公式照常交易”。
 3. **硬上限 AI 改不了。** 硬上限只在 `config/risk.toml`，由人改。作战卡和拍板人只能在它的范围里选，代码里不许写死比它更松的数。
 
@@ -12,7 +12,7 @@
 
 - **上线门槛（执行层）**：只改配置不能进实盘。启动时 `mode = "live"` 但没有本次有效的上线确认（确认词 + 面板密码，连续输错 5 次锁 15 分钟，切换后 Telegram 通知），就拒绝启动或降级为 paper 并告警。
 - **按天清零（快环）**：日亏熔断、Jev 连续错误计数都按 `day_reset_tz` 的 0 点清零（buberlo 的已知 bug：从不清零），测试要覆盖跨日。
-- **答案要完整（保镖、管家）**：`JevResponse.ok=True` 也要核对答案覆盖了请求里的每一问、选项一致、概率和为 1；缺任何一项按故障处理，不得用公式补。
+- **答案要完整（风控员、管家）**：`JevResponse.ok=True` 也要核对答案覆盖了请求里的每一问、选项一致、概率和为 1；缺任何一项按故障处理，不得用公式补。
 - **交易所客户端**：AI 角色的包不得导入 ccxt、binance、hummingbot；币安密钥只有 `jiaoyi.execution` 能读（`tests/test_boundaries.py` 检查）。`gate` 调 Jev、`slow` 调 DeepSeek 可以用 httpx / aiohttp，审查时确认它们只连这两个服务。
 - `OrderIntent` / `RiskVerdict` 签发后不能 `model_copy`、不能 `model_construct`；`jiaoyi.risk` 以外只能当类型注解用。
 
@@ -27,7 +27,7 @@ src/jiaoyi/
   market/         行情接入、特征、盘口员公式                  快环工程师
   sentinel/       哨兵（触发、去重、冷却）                    快环工程师
   gate/           拍板人 + 决策模型客户端（Jev）              快环工程师
-  risk/           保镖（唯一签发 OrderIntent）                快环工程师；必须过代码审查员
+  risk/           风控员（唯一签发 OrderIntent）                快环工程师；必须过代码审查员
   keeper/         持仓管家                                    快环工程师
   patrol/         巡逻兵                                      快环工程师
   execution/      hummingbot-api 适配、保命止损、对账员       执行工程师

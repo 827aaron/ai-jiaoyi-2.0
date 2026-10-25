@@ -11,7 +11,7 @@
    高低点；止损 ATR 倍数 / 止盈 R 用当前最长持仓档的推荐范围。
 4. 所有信号里均匀抽 ``n`` 个，按当前模板（``TEMPLATE_VERSION``）和最长持仓问 Jev
    （并发 ``concurrency``）。
-5. 止损 = Jev 选的止损档（窄 / 中 / 宽）× 和保镖同一个止损 ATR；止盈 = 止损 × 卡上最小 R；
+5. 止损 = Jev 选的止损档（窄 / 中 / 宽）× 和风控员同一个止损 ATR；止盈 = 止损 × 卡上最小 R；
    之后的 1 分钟线算结果，和回测同一套算法（``outcomes.simulate``）。
 
 历史数据缺的：盘口（快照里 ``book`` 写 null）、爆仓（为 0，所以不会出「强平瀑布反弹」）、
@@ -257,7 +257,7 @@ async def ask_all(
 def candidate(
     f: Found, resp: JevResponse, fast: FastLoopConfig, hold_min: int
 ) -> outcomes.Candidate | None:
-    """Jev 的回答 → 和保镖同样算法的止损 / 止盈（不含关键位外推），再交给 ``simulate``。"""
+    """Jev 的回答 → 和风控员同样算法的止损 / 止盈（不含关键位外推），再交给 ``simulate``。"""
     if not resp.ok:
         return None
     sig = f.signal
@@ -293,7 +293,7 @@ def candidate(
         entry=sig.trigger_price,
         hold_min=hold_min,
         template=TEMPLATE_VERSION,
-        verdict=sig.kind.value,  # 回放里没有保镖结论，这里放信号类型
+        verdict=sig.kind.value,  # 回放里没有风控员结论，这里放信号类型
         gate_would_block=not passes,
         stop_bps=stop_bps,
         tp_bps=stop_bps * cs.take_profit_r.min,

@@ -202,7 +202,7 @@ class RollingFeatureEngine:
 
     ATR 用 1 分钟 K 线聚合成 ``atr_period_min`` 分钟（按 UTC 整点对齐，例如 15 分钟线从 :00、:15
     开始），每收完一根算一个 TR，Wilder 平滑 14 根。不完整的 N 分钟线（启动回填的第一段）丢掉。
-    ``atr_long_period_min`` 不为 0 时同样再算一个长周期 ATR（保镖止损用两者的几何平均）。
+    ``atr_long_period_min`` 不为 0 时同样再算一个长周期 ATR（风控员止损用两者的几何平均）。
     均量 ``vol_ratio_1m`` 仍按 1 分钟 K 线算。
     """
 
@@ -587,7 +587,7 @@ class RollingFeatureEngine:
     def _book_metrics(self, st: _SymbolState, now: float) -> BookMetrics | None:
         b = st.book
         if b is None or now - _ts(b.ts) > 10.0:
-            return None  # 盘口太旧就当没有，保镖看到没有盘口会拒单
+            return None  # 盘口太旧就当没有，风控员看到没有盘口会拒单
         bid, ask = bk.depth_usdt(b, self._levels)
         buy = sell = 0.0
         for t, usdt, is_buy in st.trades:

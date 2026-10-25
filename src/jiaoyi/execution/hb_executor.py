@@ -6,7 +6,7 @@
   close  停执行器并市价全平 → 确认执行器结束后才撤保命止损
   sync   （positions() 每次都会跑）执行器自己结束了（止损、止盈、时间到）就记账并撤保命止损
 
-这里是全项目唯一建 / 停执行器的地方，只接受保镖签发的 ``OrderIntent``；出场永远不经过 AI。
+这里是全项目唯一建 / 停执行器的地方，只接受风控员签发的 ``OrderIntent``；出场永远不经过 AI。
 """
 
 from __future__ import annotations
@@ -237,7 +237,7 @@ class HbExecutorAdapter:
         """``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
 
         ``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
-        触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 保镖算的止损 / 止盈距离。"""
+        触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 风控算的止损 / 止盈距离。"""
         self._chase_request = chase_request
         self._api = api
         self._open_fee = open_fee_bps / 1e4
@@ -267,7 +267,7 @@ class HbExecutorAdapter:
     def _executor_config(self, intent: OrderIntent, *, market: bool = False) -> dict[str, Any]:
         """``market``：挂单等回踩没成交、改市价追进时用同一份指令下市价单。"""
         limit = intent.order_type == "limit" and not market
-        # hummingbot 的止损止盈看 net_pnl_pct（已扣开仓手续费）：不补的话价格止损比保镖算的近一个
+        # hummingbot 的止损止盈看 net_pnl_pct（已扣开仓手续费）：不补的话价格止损比风控员算的近一个
         # 手续费（约 5bp），市价止盈远一个手续费。止损加上、止盈减去，触发价就和 OrderIntent 一致
         # 限价止盈（E4）：hummingbot 按「入场价 × (1 ± 止盈%)」直接挂只减仓限价单，不看净盈亏，不减
         stop = intent.stop_loss_pct / 100.0 + self._open_fee
@@ -317,13 +317,13 @@ class HbExecutorAdapter:
         return await self._open(intent)
 
     async def _open(self, intent: OrderIntent, *, chase: bool = False) -> PositionRecord:
-        """``chase``：挂单没成交后按同一份保镖指令改市价追进（账本里另记一笔，指令号带 -chase）。"""
+        """``chase``：挂单没成交后按同一份风控指令改市价追进（账本里另记一笔，指令号带 -chase）。"""
         intent_id = f"{intent.intent_id}-chase" if chase else intent.intent_id
         limit = intent.order_type == "limit" and not chase
         existing = self._registry.by_intent(intent_id)
         if existing is not None:  # 重试同一条指令不重复开仓
             return existing.record
-        # 执行侧兜底（保镖也会拦）：同一个币已有在管持仓就拒绝。单向持仓模式下，第二笔——尤其反向——
+        # 执行侧兜底（风控员也会拦）：同一个币已有在管持仓就拒绝。单向持仓模式下，第二笔——尤其反向——
         # 会把原仓对冲掉甚至反手，保命止损还会错位。放在改杠杆之前：ensure_leverage 改的是整个合约。
         held = next((t for t in self._registry.live() if t.record.symbol == intent.symbol), None)
         if held is not None:
@@ -711,7 +711,7 @@ class HbExecutorAdapter:
         self._chase_request = request
 
     async def open_chase(self, intent: OrderIntent) -> PositionRecord:
-        """按同一份保镖指令下市价单追进（主循环复核过才调）；账本里另记一笔，指令号带 -chase。"""
+        """按同一份风控员指令下市价单追进（主循环复核过才调）；账本里另记一笔，指令号带 -chase。"""
         return await self._open(intent, chase=True)
 
     def live_positions(self) -> list[PositionRecord]:

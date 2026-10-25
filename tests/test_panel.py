@@ -73,7 +73,7 @@ def _seed(tmp_path: Path) -> None:
             latency_ms=100,
             cost_usd=0.01,
         ),
-        _rec(c.Role.RISK_GUARD, c.Outcome.PASS, "BTC 保镖通过", t, symbol="BTCUSDT"),
+        _rec(c.Role.RISK_GUARD, c.Outcome.PASS, "BTC 风控员通过", t, symbol="BTCUSDT"),
         _rec(
             c.Role.KEEPER, c.Outcome.HOLD, "BTC 拿住", t, symbol="BTCUSDT", position_id="pos-0001"
         ),
@@ -148,7 +148,7 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert ov.running and ov.mode == "paper"
     k = ov.kpis
     assert k.equity_source == "hummingbot" and k.equity_usdt == pytest.approx(10_080.0)
-    # 日初权益取熔断器记的 10000（和保镖同一口径），不取账本的 9000
+    # 日初权益取熔断器记的 10000（和风控员同一口径），不取账本的 9000
     assert k.day_pnl_usdt == pytest.approx(80.0) and k.day_pnl_pct == pytest.approx(0.8)
     # 今日盈亏拆成 已平（今天平的净盈亏）+ 浮动（还没平的浮盈）+ 其它
     assert k.day_closed_usdt == pytest.approx(12.5) and k.day_floating_usdt == pytest.approx(-20.0)
@@ -176,7 +176,7 @@ def test_overview_numbers(tmp_path: Path) -> None:
     assert [s.symbol for s in ov.card.symbols] == ["BTCUSDT"]
     assert ov.card.symbols[0].key_levels[0].model_dump() == {"price": 68000.0, "kind": "resistance"}
     assert ov.card.leverage_max is not None
-    # 摘要行写保镖真会用的：作战卡不约束（默认）时杠杆 = 硬上限；L 档每笔风险 = 总资产 × 风险%
+    # 摘要行写风控员真会用的：作战卡不约束（默认）时杠杆 = 硬上限；L 档每笔风险 = 总资产 × 风险%
     assert ov.card.leverage_used == int(RISK.max_leverage)
     assert ov.card.risk_per_trade_usdt == pytest.approx(10_080 * RISK.risk_per_trade_pct / 100)
     assert ov.card.size_fractions["L"] == 1.0 and 0 < ov.card.size_fractions["S"] <= 1  # 仓位档折扣
@@ -771,7 +771,7 @@ def test_pool_and_settings_endpoints(tmp_path: Path) -> None:
 
 
 def test_history_hides_test_trades_by_default(tmp_path: Path) -> None:
-    """没有哨兵 / 拍板 / 保镖记录的平仓（冒烟测试、手动单）默认不算进记录和统计。"""
+    """没有哨兵 / 拍板 / 风控员记录的平仓（冒烟测试、手动单）默认不算进记录和统计。"""
     from jiaoyi.panel.pages import build_history
 
     _seed(tmp_path)  # 种子里的那笔平仓没有任何决策记录 → 测试单
@@ -900,7 +900,7 @@ def test_team_progress_follows_this_round_not_heartbeat() -> None:
 
 
 def test_team_dots_after_card_with_no_signal(tmp_path: Path) -> None:
-    """出卡后没信号：哨兵 / 盘口员在盯（蓝），拍板人 / 保镖 / 执行器等待，没持仓第三层等待。"""
+    """出卡后没信号：哨兵 / 盘口员在盯（蓝），拍板人 / 风控员 / 执行器等待，没持仓第三层等待。"""
     from jiaoyi.panel.pages import build_team
 
     status = {
@@ -1228,7 +1228,7 @@ async def test_hb_snapshot_asks_for_fresh_balance() -> None:
 
 
 async def test_card_atr_same_formula_as_guard() -> None:
-    """作战卡的 ATR：币安原生 N 分钟线丢掉没走完的最后一根，Wilder 14；短长周期按保镖公式合起来。"""
+    """作战卡的 ATR：币安原生 N 分钟线丢掉没走完的最后一根，Wilder 14；短长周期按风控公式合起来。"""
     from jiaoyi.market.features import wilder_atr
     from jiaoyi.panel.market import KlineSource
     from jiaoyi.risk.guard import blend_atr

@@ -48,7 +48,7 @@ from jiaoyi.slow.review import CardJournal, JournalRow
 from jiaoyi.slow.screener import FALLBACK_MAJORS
 from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
 
-# 团队页按数据流排：选币 → 军师团 → 盘口员 → 预测员 → 哨兵 → 拍板 → 保镖 → 下单 → 持仓看管 → 告警
+# 团队页按数据流排：选币 → 军师团 → 盘口员 → 预测员 → 哨兵 → 拍板 → 风控员 → 下单 → 持仓看管 → 告警
 ROLE_NAMES: dict[Role, str] = {
     Role.SCREENER: "选币",
     Role.COMMANDER: "军师团",
@@ -56,7 +56,7 @@ ROLE_NAMES: dict[Role, str] = {
     Role.PREDICTOR: "预测员 Kronos",
     Role.SENTINEL: "哨兵",
     Role.GATE: "拍板人",
-    Role.RISK_GUARD: "保镖",
+    Role.RISK_GUARD: "风控员",
     Role.EXECUTOR: "执行器",
     Role.LIFEBOAT: "保命止损",
     Role.KEEPER: "持仓管家",
@@ -75,7 +75,7 @@ class TrailItem(BaseModel):
     input: dict[str, object] = {}
     """它看到了什么（哨兵的快照等）。"""
     output: dict[str, object] = {}
-    """拍板人的概率、保镖的拒绝理由等，原样给页面挑着显示。"""
+    """拍板人的概率、风控员的拒绝理由等，原样给页面挑着显示。"""
     latency_ms: float = 0.0
     cost_usd: float = 0.0
     tag: str | None = None
@@ -324,7 +324,7 @@ def _progress(
 
     出错 > 正在做 > 这一轮做完 > 等待：
     ① 选币 / 军师团 / 预测员今天跑过 = 做完；盘口员、哨兵心跳正常 = 一直在盯；
-    ② 拍板人 / 保镖 / 执行器只跟本轮（最新作战卡之后）最新一个信号：链上有的 = 做完，其余 = 等待；
+    ② 拍板人 / 风控员 / 执行器只跟本轮（最新作战卡之后）最新一个信号：链上有的 = 做完，其余 = 等待；
     ③ 管家 / 巡逻兵 / 对账员 / 保命止损有持仓 = 正在做，没持仓 = 等待；报警员今天推过 = 做完。"""
     if card.state == "bad":
         return "err"
@@ -659,7 +659,7 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
 
 
 def build_signal(files: PanelFiles, now: datetime, signal_id: str) -> list[TrailItem]:
-    """一个信号今天的整条链：哨兵 → 拍板 → 保镖 → 执行 → 盯仓。"""
+    """一个信号今天的整条链：哨兵 → 拍板 → 风控员 → 执行 → 盯仓。"""
     return [_item(r) for r in files.decisions_today(now) if r.signal_id == signal_id]
 
 
@@ -708,7 +708,7 @@ class TradeRow(BaseModel):
     """没回填出场价、净盈亏和手续费又都是 0：多半是执行器没报数，不是真的 0。"""
     signal_kind: str | None
     test: bool = False
-    """没有哨兵 / 拍板 / 保镖记录的单：冒烟测试或手动下的，不是机器人自己的交易。"""
+    """没有哨兵 / 拍板 / 风控员记录的单：冒烟测试或手动下的，不是机器人自己的交易。"""
     unfilled: bool = False
     """开仓没成交（账本 FAILED，如保证金不够 hummingbot 没下单）：只列出来，不算进任何统计。"""
 
@@ -827,7 +827,7 @@ class HistoryPage(BaseModel):
     test_trades: int = 0
     """范围内的测试单笔数；``include_tests`` 为假时它们不在 rows 和各项统计里。"""
     rejected: list[TrailItem]
-    """范围内被拍板放弃 / 保镖拒绝的信号，最新在前，最多 ``REJECT_LIMIT`` 条。"""
+    """范围内被拍板放弃 / 风控员拒绝的信号，最新在前，最多 ``REJECT_LIMIT`` 条。"""
 
 
 def _range_start(now: datetime, tz: str, rng: HistoryRange) -> datetime:
@@ -859,7 +859,7 @@ def build_history(
         ),
         key=lambda p: p.closed_at or now,
     )
-    # 信号类型在哨兵 / 保镖的记录里；开仓可能早于范围起点，往前多读一天
+    # 信号类型在哨兵 / 风控员的记录里；开仓可能早于范围起点，往前多读一天
     first_open = min((p.opened_at for p in closed), default=start)
     recs = files.decisions_since(
         min(first_open, start) - timedelta(days=1),

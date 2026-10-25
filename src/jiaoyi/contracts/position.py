@@ -91,11 +91,11 @@ class PositionRecord(Contract):
     )
     stop_loss_pct: PosFloat | None = Field(
         default=None,
-        description="保镖算的止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
+        description="风控员算的止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
     )
     lifeboat_stop_pct: PosFloat | None = Field(
         default=None,
-        description="保镖算的保命止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
+        description="风控员算的保命止损距离（%），开仓时写入，按成交价回填时不变；旧记录为 None。",
     )
     trailing_activation_pct: PosFloat | None = Field(
         default=None,

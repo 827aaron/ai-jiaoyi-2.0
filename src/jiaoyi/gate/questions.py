@@ -186,7 +186,7 @@ CRITERIA: dict[str, dict[str, str]] = {
 
 
 GateQuestions = str
-"""``"one"``：一道「做不做」（+ 止损档、仓位档两题给保镖）；``"six"``：旧的 6 道题（回放对照）。"""
+"""``"one"``：一道「做不做」（+ 止损档、仓位档两题给风控）；``"six"``：旧的 6 道题（回放对照）。"""
 
 
 def entry_questions(mode: GateQuestions = "six", hold_min: int = 120) -> list[JevQuestion]:
@@ -225,7 +225,7 @@ def _bps(x: float, ref: float) -> float:
 
 
 def _stop_atr(f: FeatureSnapshot) -> float:
-    """作战卡 ``stop_atr`` 乘的那个 ATR：有长周期就 √(短 × 长)，和保镖一致（不含时段系数）。"""
+    """作战卡 ``stop_atr`` 乘的那个 ATR：有长周期就 √(短 × 长)，和风控员一致（不含时段系数）。"""
     if f.atr_long:
         return math.sqrt(f.atr * f.atr_long)
     return f.atr
@@ -363,7 +363,7 @@ def entry_snapshot_one(
 ) -> str:
     """一道题问法的进场快照：市场块 + 完整作战卡 + 技术面 / 成交流 / 衍生品 / 24 小时行情。
 
-    不带预测员（Aaron 10-24：预测员只在保镖那里按方向加分）。盘口失衡用 1 / 5 分钟平均，
+    不带预测员（Aaron 10-24：预测员只在风控员那里按方向加分）。盘口失衡用 1 / 5 分钟平均，
     不用一瞬间的 ``imb``。"""
     f = signal.features
     d: dict[str, Any] = {

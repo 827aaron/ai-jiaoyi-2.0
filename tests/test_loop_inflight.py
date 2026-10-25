@@ -53,7 +53,7 @@ async def test_new_card_version_during_jev_does_not_open(tmp_path: Path, now: da
     old = h.card(now)
     r, ex, risk = _wire(tmp_path, now, old.model_copy(update={"version": old.version + 1}))
     await r.handle_signal(h.signal(now))
-    assert ex.opened == [] and risk.cards == []  # 连保镖都不用问
+    assert ex.opened == [] and risk.cards == []  # 连风控员都不用问
 
 
 async def test_block_during_jev_reaches_guard(tmp_path: Path, now: datetime) -> None:
@@ -68,5 +68,5 @@ async def test_block_during_jev_reaches_guard(tmp_path: Path, now: datetime) -> 
     )
     r, _, risk = _wire(tmp_path, now, blocked)
     await r.handle_signal(h.signal(now))
-    # 封币不升版本：保镖拿到的是锁里重新取的卡（只看不做），由它拒绝
+    # 封币不升版本：风控员拿到的是锁里重新取的卡（只看不做），由它拒绝
     assert risk.cards == [blocked]

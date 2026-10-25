@@ -258,7 +258,7 @@ def test_convert_prompt_states_configured_atr_interval_and_value() -> None:
     p = convert_prompt(entry("AAUSDT", cat=Category.ALT), risk, "震荡", "", "结论正文", note)
     assert f"stop_atr = {atr_interval(m)} ATR" in p  # 周期跟风控配置，不写死
     assert "stop_atr = 1.5" in p and "1.50%" in p
-    assert f"between {lo:g} and {hi:g}" in p  # 告诉军师保镖认的倍数区间
+    assert f"between {lo:g} and {hi:g}" in p  # 告诉军师风控员认的倍数区间
     assert f"between {st.min_tp_r:g} and {st.max_tp_r:g}" in p  # 止盈倍数区间也写明
     assert "unavailable" in describe_atr(None, None, st)
     assert [atr_interval(x) for x in (5, 15, 30, 60)] == ["5m", "15m", "30m", "1h"]
