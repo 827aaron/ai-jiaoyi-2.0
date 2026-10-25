@@ -452,6 +452,24 @@ def test_team_page_and_signal_chain(tmp_path: Path) -> None:
     assert build_signal(files, NOW, "nope") == []
 
 
+def test_rejection_items_carry_signal_id_and_symbol(tmp_path: Path) -> None:
+    """风控员拒绝记录上的两个按钮靠 signal_id + symbol 发命令：团队页和信号链都要带上。"""
+    from jiaoyi.panel.pages import build_signal, build_team
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    JsonlDecisionLog(tmp_path).write(
+        _rec(
+            c.Role.RISK_GUARD, c.Outcome.REJECT, "BTC 风控员拒绝", NOW,
+            signal_id="sig-9", symbol="BTCUSDT",
+            output={"approved": False, "reasons": ["价差太大"]},
+        )
+    )  # fmt: skip
+    [from_team] = build_team(files, NOW, c.Role.RISK_GUARD).records
+    [from_chain] = build_signal(files, NOW, "sig-9")
+    for item in (from_team, from_chain):
+        assert (item.signal_id, item.symbol) == ("sig-9", "BTCUSDT")
+
+
 async def test_kline_source_validates_and_parses() -> None:
     from jiaoyi.panel.market import KlineError, KlineSource
 
