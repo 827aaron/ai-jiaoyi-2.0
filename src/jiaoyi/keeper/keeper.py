@@ -11,6 +11,11 @@
   新卡改成只看不做、或卡里没有这个币：不投票，持仓交给决策模型 / 止损 / 最长持仓时间处理
   （不开新仓由拍板人和保镖按卡管）。例外：被封的币（币安下架公告等，``blocked``）照样投票，
   要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
+- 回吐保护（Aaron 10-25，代码规则，不问模型）：这笔仓最高浮盈到过 ``giveback_arm_r`` 倍止损距离后，
+  浮盈从最高点吐掉 ``giveback_close_pct`` % 就全平（``giveback_on`` 开关）。
+  每次复查都先查这条，查过才问模型；
+  最高浮盈用每次复查的价格单独记（不受 ``MAX_HISTORY`` 截断），重启后从决策日志找回的历史接上。
+  浮盈和快照同口径（基点、未扣手续费，R = 开仓价到止损价的距离）。
 - 快照带这笔仓的来历（管家方案 E，Aaron 10-24）：之前历次复查的浮盈（算最高浮盈、回吐、走势）、
   进场拍板（信号种类、触发说明、「真」「做」概率）、移动止损状态、预测员。历次浮盈和进场拍板
   第一次复查这笔仓时从决策日志里找回（重启后也接得上），找不到就从这次开始记。
@@ -97,6 +102,7 @@ class JevKeeper:
         self._forecast = forecast
         self._scan_day = scan_day
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
+        self._peak: dict[str, float] = {}  # 每个持仓复查到过的最高浮盈（基点），不被历史截断
         self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
 
     def forget(self, position_id: str) -> None:
@@ -104,6 +110,7 @@ class JevKeeper:
         self._streak.pop(position_id, None)
         self._against.pop(position_id, None)
         self._history.pop(position_id, None)
+        self._peak.pop(position_id, None)
         self._entry.pop(position_id, None)
 
     def history(self, position_id: str) -> list[float]:
@@ -121,6 +128,8 @@ class JevKeeper:
             except Exception:  # 日志读不了就从这次开始记，不影响复查
                 log.warning("管家找回 %s 的复查历史失败", pid, exc_info=True)
         self._history[pid] = history[-MAX_HISTORY:]
+        if history:
+            self._peak[pid] = max(history)
         self._entry[pid] = entry
 
     def _read_log(
@@ -179,6 +188,17 @@ class JevKeeper:
         if pid not in self._history:
             await self._recall(position, now)
         history = self._history.setdefault(pid, [])
+        pnl = hold_pnl_bps(position, f.last_price)
+        peak = max(self._peak.get(pid, pnl), pnl)
+        self._peak[pid] = peak
+        guard = self._giveback_guard(position, pnl, peak)
+        if guard is not None:  # 代码规则先于模型：回吐保护不问 Jev，直接全平
+            history.append(pnl)
+            del history[:-MAX_HISTORY]
+            self._streak.pop(pid, None)
+            self._keep_against(pid, against, now)
+            text, detail = guard
+            return verdict(position, now, "close", 1.0, 1, text, None, None, extra=detail)
         fc = self._forecast(position.symbol, now) if self._forecast is not None else None
         request = JevRequest(
             request_id=f"hold-{pid}-{uuid.uuid4().hex[:6]}",
@@ -256,6 +276,38 @@ class JevKeeper:
         self._streak.pop(pid, None)
         return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
 
+    def _giveback_guard(
+        self, position: PositionRecord, pnl: float, peak: float
+    ) -> tuple[str, dict[str, Any]] | None:
+        """回吐保护：最高浮盈到过 ``giveback_arm_r`` R，且已从最高点吐掉 ``giveback_close_pct`` %。
+        返回（理由, 决策记录里的数字）；没触发、关了、算不出 R 返回 None。"""
+        pct = self._cfg.giveback_close_pct
+        if not self._cfg.giveback_on or not position.entry_price or not position.stop_loss_price:
+            return None
+        stop_bps = abs(position.entry_price / position.stop_loss_price - 1.0) * 1e4
+        if stop_bps <= 0 or peak <= 0:
+            return None
+        peak_r = peak / stop_bps
+        if peak_r < self._cfg.giveback_arm_r:
+            return None
+        gave = (peak - pnl) / peak * 100.0
+        if gave < pct:
+            return None
+        detail = {
+            "peak_bps": round(peak, 1),
+            "peak_r": round(peak_r, 2),
+            "pnl_bps": round(pnl, 1),
+            "pnl_r": round(pnl / stop_bps, 2),
+            "giveback_pct": round(gave, 1),
+            "close_pct": pct,
+            "arm_r": self._cfg.giveback_arm_r,
+        }
+        text = (
+            f"回吐保护：最高浮盈 {peak:+.0f} bps（{peak_r:.2f}R），现在 {pnl:+.0f} bps，"
+            f"已回吐 {gave:.0f}%（线 {pct:g}%，{self._cfg.giveback_arm_r:g}R 起算）"
+        )
+        return text, detail
+
     @staticmethod
     def _card_rule(position: PositionRecord, card: BattleCard | None, now: datetime) -> str | None:
         if card is None or not card.is_valid(now):
@@ -280,8 +332,10 @@ class JevKeeper:
         r: JevResponse | None,
         *,
         against: tuple[AgainstSignalEvent, bool] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> KeeperVerdict:
-        """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）。"""
+        """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）；
+        ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``。"""
         v = KeeperVerdict(
             position_id=position.position_id,
             ts=now,
@@ -310,6 +364,7 @@ class JevKeeper:
                     "p_close": v.p_close,
                     "consecutive": v.consecutive,
                     **jev_out,
+                    **({"giveback_guard": dict(extra)} if extra else {}),
                     **(
                         {
                             "against": {

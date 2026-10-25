@@ -122,11 +122,17 @@ def test_prompts_use_spec_wording() -> None:
     assert "`against` (only on urgent checks)" in thesis
 
 
-def _keeper(t: MockJevTransport, now: datetime, prices: list[float], **kw: Any) -> JevKeeper:
+NO_GIVEBACK = FAST.model_copy(update={"giveback_on": False})  # 这些测试看模型路径
+
+
+def _keeper(
+    t: MockJevTransport, now: datetime, prices: list[float], cfg: c.FastLoopConfig = NO_GIVEBACK,
+    **kw: Any,
+) -> JevKeeper:  # fmt: skip
     it = iter(prices)
     return JevKeeper(
-        JevDecisionModel(t, FAST, timeout_ms=200),
-        FAST,
+        JevDecisionModel(t, cfg, timeout_ms=200),
+        cfg,
         lambda s: features(now, price=next(it)),
         lambda n: card(now),
         **kw,
@@ -223,3 +229,60 @@ def test_positions_page_shows_keeper_peak_and_giveback(now: datetime) -> None:
     assert v.keeper_peak_r is not None and v.keeper_trail_active is True
     [v] = position_views([pos], recs[:1], HbSnapshot(ok=False))
     assert v.keeper_peak_usdt is None and v.keeper_trail_active is None
+
+
+# ---- 回吐保护（Aaron 10-25）：代码规则，不问模型。止损距离 ≈ 17.7bp，0.5R ≈ 8.8bp ----
+
+
+async def test_giveback_guard_closes_without_asking_model(tmp_path: Path, now: datetime) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    t = MockJevTransport(answer=close_p(0.0))  # 模型一直说拿住
+    # 浮盈 30bp（1.7R）→ 吐到 16bp（吐 47%）
+    k = _keeper(t, now, [68204.0, 68109.0], FAST, recorder=RoleRecorder(c.Role.KEEPER, log))
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
+    calls = len(t.calls)
+    v = await k.review(pos, now)
+    assert v.action == "close" and "回吐保护" in v.reason and v.jev_request_id is None
+    assert len(t.calls) == calls  # 没问模型
+    rec = [r for r in log.scan_day(now.date().isoformat(), "pos-1") if r.get("outcome") == "close"]
+    g = rec[-1]["output"]["giveback_guard"]
+    assert g["peak_bps"] == 30.0 and g["pnl_bps"] == 16.0 and g["close_pct"] == 45.0
+
+
+async def test_giveback_guard_needs_arm_and_threshold(now: datetime) -> None:
+    t = MockJevTransport(answer=close_p(0.0))
+    # 最高 6bp（0.34R）没到 0.5R：吐光也不平；最高 30bp 只吐 40% 也不平
+    k = _keeper(t, now, [68041.0, 68000.0, 68204.0, 68122.0], FAST)
+    pos = position(now)
+    for _ in range(4):
+        assert (await k.review(pos, now)).action == "hold"
+
+
+async def test_giveback_guard_switch_off_and_peak_survives_history_cap(now: datetime) -> None:
+    t = MockJevTransport(answer=close_p(0.0))
+    k = _keeper(t, now, [68204.0, 68000.0], NO_GIVEBACK)
+    for _ in range(2):
+        assert (await k.review(position(now), now)).action == "hold"
+    # 历史被截断也不丢最高浮盈
+    k2 = _keeper(t, now, [68204.0, *([68150.0] * 5), 68100.0], FAST)
+    pos = position(now)
+    await k2.review(pos, now)
+    for _ in range(5):
+        await k2.review(pos, now)
+    k2._history[pos.position_id].clear()
+    assert (await k2.review(pos, now)).action == "close"  # 峰 30bp，现在 10bp
+    k2.forget(pos.position_id)
+    assert pos.position_id not in k2._peak
+
+
+async def test_giveback_peak_recalled_after_restart(tmp_path: Path, now: datetime) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    pos = position(now)
+    t1 = MockJevTransport(answer=close_p(0.0))
+    k1 = _keeper(t1, now, [68204.0], NO_GIVEBACK, recorder=RoleRecorder(c.Role.KEEPER, log),
+                 scan_day=log.scan_day)  # fmt: skip
+    await k1.review(pos, now)
+    t2 = MockJevTransport(answer=close_p(0.0))
+    k2 = _keeper(t2, now, [68109.0], FAST, scan_day=log.scan_day)  # 重启后吐到 15bp
+    assert (await k2.review(pos, now)).action == "close"
