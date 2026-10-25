@@ -114,7 +114,7 @@ MEETING: dict[str, dict[Section, dict[str, Any]]] = {
         daily_usd=20.0,
         slow_to=360,
         # 反向信号反复出（30 分钟 2 次）的单币临时会，研究 2026-10-24
-        events=_events((*_E2, "signal_against_card"), gap=60, per_day=12, entry_age=360),
+        events=_events((*_E2, "signal_against_card"), gap=60, per_day=50, entry_age=360),
     ),
     "6h": _meeting(
         360,

@@ -260,6 +260,7 @@ def test_profile_defaults_for_events_slowdown_and_schedule() -> None:
     s2 = slow_defaults("2h").schedule
     assert s2.event_meeting_enabled and s2.slowdown_interval_min == 360
     assert s2.entry_max_card_age_min == 360
+    assert s2.event_max_per_day == 50
     assert set(s2.event_triggers) == {
         "key_level_break",
         "move_since_card",
