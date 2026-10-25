@@ -161,6 +161,36 @@ def test_convert_prompt_is_perp_flavoured_and_forbids_inventing_levels() -> None
     assert "财报" not in p
 
 
+def test_convert_prompt_tells_the_model_to_fill_key_levels_from_candidates() -> None:
+    from jiaoyi.core.config import load_risk_config
+    from tests.conftest import ROOT
+
+    risk = load_risk_config(ROOT / "config" / "risk.example.toml")
+    ctx = LevelContext(
+        100.0, 2.0, 10.0, (Candidate(99.0, "昨日低点"), Candidate(101.0, "整数关口"))
+    )
+    p = convert_prompt(_entry(), risk, "震荡", "", "结论", "ATR 说明", describe_candidates(ctx))
+    assert "key_levels: fill it from the candidate key levels" in p
+    assert "up to 3 supports and up to 3 resistances" in p
+    assert "empty list disables" in p and "only when the candidates are none" in p
+    # 候选在，会议按候选写 → 卡上有关键位（不空）
+    d = _CardSymbolDraft(
+        bias=Bias.LONG,
+        key_levels=[_LevelDraft(price=99.0, kind=LevelKind.SUPPORT)],
+        size_tier_max=SizeTier.S,
+        notional_min=100,
+        notional_max=200,
+        leverage_min=1,
+        leverage_max=2,
+        stop_atr_min=1,
+        stop_atr_max=2,
+        take_profit_r_min=1.5,
+        take_profit_r_max=3,
+        reason="测试",
+    )
+    assert draft_to_card_symbol(d, _entry(), ctx).key_levels
+
+
 def test_perp_context_replaces_stock_rating_words() -> None:
     assert "PERPETUAL" in PERP_CONTEXT and "Underweight = lean short" in PERP_CONTEXT
 
@@ -216,3 +246,32 @@ def test_level_context_end_to_end_stays_inside_holding_span(
     assert ctx.span / ctx.price < 0.03
     assert all(abs(c.price - ctx.price) <= ctx.span + 1e-9 for c in ctx.candidates)
     assert all(c.price not in (2492.0, 2156.0) for c in ctx.candidates)  # 远处的日线高低点被滤掉
+
+
+def test_atr_interval_uses_binance_names() -> None:
+    from jiaoyi.slow.tradingagents_engine import atr_interval
+
+    got = {m: atr_interval(m) for m in (1, 5, 15, 30, 60, 120, 240, 360, 720, 1440)}
+    assert got == {
+        1: "1m", 5: "5m", 15: "15m", 30: "30m", 60: "1h", 120: "2h", 240: "4h",
+        360: "6h", 720: "12h", 1440: "1d",
+    }  # fmt: skip
+
+
+def test_level_context_logs_failure_instead_of_swallowing(caplog: pytest.LogCaptureFixture) -> None:
+    from datetime import UTC, datetime
+
+    import jiaoyi.slow.tradingagents_engine as te
+    from jiaoyi.slow.commander import StopScale
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("400 bad interval")
+
+    orig = te._klines
+    te._klines = boom  # type: ignore[assignment]
+    try:
+        with caplog.at_level("WARNING"):
+            ctx = te.level_context("ETHUSDT", datetime(2026, 10, 25, tzinfo=UTC), StopScale(), 240)
+    finally:
+        te._klines = orig
+    assert not ctx.candidates and "ETHUSDT 算关键位候选失败" in caplog.text
