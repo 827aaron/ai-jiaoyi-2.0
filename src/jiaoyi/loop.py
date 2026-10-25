@@ -24,6 +24,7 @@ import contextlib
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,13 +37,16 @@ from jiaoyi.contracts import (
     AlertLevel,
     BattleCard,
     CandidateSignal,
+    FeatureSnapshot,
     Interval,
+    JevResponse,
     Kline,
     MarketEvent,
     OrderIntent,
     Outcome,
     PositionRecord,
     PositionStatus,
+    RiskVerdict,
     Role,
     Side,
     SymbolPool,
@@ -77,6 +81,7 @@ CREDIT_CHECK_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
 CONFIG_WATCH_EVERY_S = 3.0  # 看设置文件变没变（热生效，core/hotconfig.py）
 KEEPER_CONCURRENCY = 5
+SIGNAL_CACHE = 200  # 记住最近这么多条处理过的信号（面板重新检查 / 放行用）
 """持仓管家一轮里最多几笔一起问 Jev。"""
 RESTART_WAIT_CLOSE_S = 60.0
 # 决定重启后：收尾最多等这么久；军师团开会跑在工作线程里取消不掉，收尾超时就直接退出
@@ -148,6 +153,23 @@ class _ChaseRecheck(Protocol):
     def recheck_chase(
         self, intent: OrderIntent, card: BattleCard | None, account: AccountState, now: datetime
     ) -> list[str]: ...
+
+
+@runtime_checkable
+class _ManualReview(Protocol):
+    """风控员：面板「重新检查 / 放行」（``RiskGuardImpl.review_manual``）。"""
+
+    def review_manual(
+        self,
+        signal: CandidateSignal,
+        jev: JevResponse,
+        card: BattleCard | None,
+        account: AccountState,
+        now: datetime,
+        *,
+        market: FeatureSnapshot | None,
+        release: bool,
+    ) -> RiskVerdict: ...
 
 
 @runtime_checkable
@@ -276,6 +298,8 @@ class Runner:
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
+        # 处理过的信号（面板「风控员拒绝」详情的重新检查 / 放行要按 signal_id 找回）
+        self._signals: OrderedDict[str, CandidateSignal] = OrderedDict()
         if isinstance(self.m.executor, _ChaseHook):
             self.m.executor.set_chase_request(self._request_chase)
         self._closing: set[str] = set()
@@ -713,6 +737,9 @@ class Runner:
         card = self.m.cards.current(now)
         if card is None:
             return
+        self._signals[signal.signal_id] = signal
+        while len(self._signals) > SIGNAL_CACHE:
+            self._signals.popitem(last=False)
         if self._restarting:
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 主程序正在重启，不处理信号", now)
             return
@@ -771,6 +798,121 @@ class Runner:
                 return
             # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
             self.positions = [*self.positions, pos]
+
+    async def _manual_signal(
+        self, cmd: PanelCommand, *, release: bool
+    ) -> tuple[Literal["done", "rejected"], str]:
+        """面板「风控员拒绝」详情的两个按钮（Aaron 10-25）：按现价重建信号，重新拍板、重新过风控员。
+
+        重新检查 = 干跑，不下单，结果写进风控员记录（``by=recheck``）；放行 = 软规则不拦（见
+        ``RiskGuardImpl.review_manual``），过了就按现价开仓，记「人工放行」并推 Telegram。"""
+        sid, sym = cmd.params.get("signal_id", ""), cmd.params.get("symbol", "")
+        sig = self._signals.get(sid)
+        if sig is None or sig.symbol != sym:
+            return "rejected", "信号记录已过期（主程序重启过），等下一个信号"
+        if not isinstance(self.m.risk, _ManualReview):
+            return "rejected", "这个风控员不支持重新检查 / 放行"
+        if self._restarting:
+            return "rejected", "主程序正在重启"
+        if self.app.paused is not None:
+            return "rejected", "人工暂停开新仓中，先恢复"
+        if sym in self.app.pool_overrides.blacklist:  # 拉黑 = 立即不开新仓（风控员不管这个）
+            return "rejected", f"{sym} 你拉黑了，不开新仓"
+        now = self.app.clock()
+        card = self.m.cards.current(now)
+        if card is None or card.for_symbol(sym) is None:
+            return "rejected", f"{sym} 现行作战卡已过期或没有这个币，等新卡"
+        await self.refresh_positions()
+        if any(p.symbol == sym for p in self.positions):
+            return "rejected", f"{sym} 已经有持仓"
+        snap = self.m.features.snapshot(sym)
+        if snap is None:
+            return "rejected", f"拿不到 {sym} 的现价"
+        new = sig.model_copy(
+            update={
+                "ts": now,
+                "trigger_price": snap.last_price,
+                "features": snap,
+                "card_id": card.card_id,
+                "card_version": card.version,
+            }
+        )
+        label = "人工放行" if release else "重新检查"
+        if not release:
+            miss = entry_zone_miss(new, card, self.app.app_cfg.fast_loop, now)
+            if miss is not None:
+                self._manual_note(new, card, now, f"重新检查：现在仍拒绝：{miss}", "recheck", miss)
+                return "done", f"现在仍拒绝：{miss}"
+        jev = await self.m.gate.evaluate(new, card, now)
+        async with self._open_lock:
+            now = self.app.clock()
+            if (
+                self.app.paused is not None
+                or self._restarting
+                or sym in self.app.pool_overrides.blacklist
+            ):
+                return "rejected", "拍板期间已暂停、重启或拉黑，没有开仓"
+            fresh = self.m.cards.current(now)
+            if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
+                return "rejected", "拍板期间作战卡换了，请再点一次"
+            account = await self.m.executor.account()
+            market = self.m.features.snapshot(sym)
+            verdict = self.m.risk.review_manual(
+                new, jev, fresh, account, now, market=market, release=release
+            )
+            intent = verdict.intent
+            if not verdict.approved or intent is None:
+                why = verdict.reasons[0] if verdict.reasons else "未通过"
+                if release:
+                    return "rejected", f"{label}没成功：{why}"[:200]
+                return "done", f"现在仍拒绝：{why}"[:200]
+            if not release:
+                return (
+                    "done",
+                    f"重新检查：现在放行（{intent.quantity} 张≈{intent.notional_usdt:.0f}U）",
+                )
+            try:
+                pos = await self.m.executor.open(intent)
+            except Exception as e:
+                log.exception("人工放行开仓失败")
+                await self.app._alert(
+                    AlertLevel.WARN,
+                    f"{intent.symbol} 人工放行开仓失败",
+                    str(e)[:200],
+                    "order_failed",
+                )
+                return "rejected", f"开仓失败：{str(e)[:150]}"
+            self.positions = [*self.positions, pos]
+        side = "多" if intent.side == Side.LONG else "空"
+        await self.app._alert(
+            AlertLevel.WARN,
+            f"人工放行 {sym}",
+            f"面板放行：{sym} {side} {intent.quantity} 张≈{intent.notional_usdt:.0f}U，"
+            f"止损 {intent.stop_loss_pct:.2f}%",
+            "control",
+        )
+        return (
+            "done",
+            f"已人工放行开仓：{sym} {side} {intent.quantity} 张≈{intent.notional_usdt:.0f}U",
+        )
+
+    def _manual_note(
+        self, signal: CandidateSignal, card: BattleCard, now: datetime, summary: str, by: str,
+        why: str,
+    ) -> None:  # fmt: skip
+        """重新检查在进场区间这步就拒绝：风控员自己没跑，按风控员记录的格式补一条（面板详情要看）。"""
+        rec = self.app.recorders.get(Role.RISK_GUARD)
+        if rec is not None:
+            side = "多" if signal.side_hint == Side.LONG else "空"
+            rec.record(
+                now,
+                Outcome.REJECT,
+                f"{signal.symbol} {side} {summary}",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                card_id=card.card_id,
+                output={"approved": False, "reasons": [why], "detail": {"by": by}},
+            )
 
     # ------------------------------------------------------------ 盯仓
     async def refresh_positions(self) -> None:
@@ -1271,6 +1413,8 @@ class Runner:
                 return "rejected", f"没有持仓 {pid}"
             self._spawn(self.close(pos, CloseReason.MANUAL))
             return "done", f"已提交平仓 {pos.symbol} {pid}"
+        if cmd.kind in ("recheck_signal", "release_signal"):
+            return await self._manual_signal(cmd, release=cmd.kind == "release_signal")
         if cmd.kind in POOL_ACTIONS:
             sym = cmd.params.get("symbol", "")
             try:

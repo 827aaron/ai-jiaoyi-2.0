@@ -327,18 +327,58 @@ class RiskGuardImpl:
         *,
         market: FeatureSnapshot | None,
     ) -> RiskVerdict:
+        return self._run_review(signal, jev, card, account, now, market, None)
+
+    def review_manual(
+        self,
+        signal: CandidateSignal,
+        jev: JevResponse,
+        card: BattleCard | None,
+        account: AccountState,
+        now: datetime,
+        *,
+        market: FeatureSnapshot | None,
+        release: bool,
+    ) -> RiskVerdict:
+        """面板「风控员拒绝」详情里的两个按钮（Aaron 10-25）。
+
+        ``release=False`` = 重新检查：完整再审一遍，不放行任何规则，决策记录标 ``by=recheck``，
+        调用方不下单。``release=True`` = 人工放行：软规则（自动减仓风险高 / 刚上线 / 价差 / 滑点 /
+        盘口深度上限 / 拍板人概率门槛）不拦，被跳过的原因写进记录的 ``waived``；暂停 / 熔断 /
+        要下架 / 封币 / 作战卡 / 笔数和敞口上限 / 交易所最小下单量 / 保证金 / 总风险额度照旧。"""
+        return self._run_review(
+            signal, jev, card, account, now, market, "release" if release else "recheck"
+        )
+
+    def _run_review(
+        self,
+        signal: CandidateSignal,
+        jev: JevResponse,
+        card: BattleCard | None,
+        account: AccountState,
+        now: datetime,
+        market: FeatureSnapshot | None,
+        mode: str | None,
+    ) -> RiskVerdict:
         reasons: list[str] = []
         detail: dict[str, float | str] = {}
         intent: OrderIntent | None = None
         gate: list[str] = []  # 拍板人概率没过门槛的那几条（reasons 的子集）
+        waived: list[str] | None = [] if mode == "release" else None  # 人工放行跳过的软规则
         try:
-            intent = self._review(signal, jev, card, account, now, market, reasons, detail, gate)
+            intent = self._review(
+                signal, jev, card, account, now, market, reasons, detail, gate, waived
+            )
         except Exception as e:  # 算不出来就拒绝
             reasons.append(f"风控员计算出错：{type(e).__name__}: {e}")
             intent = None
         # 从信号触发到风控员审完用了多久（滑点主要看这段：拍板 + 排队 + 读账户）
         detail["since_trigger_ms"] = round((now - signal.ts).total_seconds() * 1000)
-        if reasons and all(r in gate for r in reasons):
+        if mode is not None:
+            detail["by"] = mode
+            if waived:
+                detail["waived"] = "；".join(waived)
+        elif reasons and all(r in gate for r in reasons):
             detail["by"] = "gate"  # 只因为拍板人说不做：面板显示黄色「拍板放弃」，不算风控员拒绝
         if reasons or intent is None:
             verdict = RiskVerdict(
@@ -362,8 +402,11 @@ class RiskGuardImpl:
         reasons: list[str],
         detail: dict[str, float | str],
         gate: list[str],
+        waived: list[str] | None = None,
     ) -> OrderIntent | None:
+        """``waived``：不是 None = 人工放行，软规则的理由记到这里、不拦（见 ``review_manual``）。"""
         risk, fast = self._risk, self._fast
+        soft_sink = reasons if waived is None else waived
 
         # ---- 账户级
         halted, day_pnl = self.breaker.check(account, now)
@@ -383,7 +426,7 @@ class RiskGuardImpl:
         if now - signal.ts > timedelta(seconds=fast.signal_max_age_s):
             age = (now - signal.ts).total_seconds()
             reasons.append(f"信号已过 {age:.1f} 秒，超过 {fast.signal_max_age_s} 秒作废")
-        self._symbol_filters(signal.symbol, now, reasons)
+        self._symbol_filters(signal.symbol, now, reasons, soft_sink)
 
         # ---- 拍板人：先看 ok，再读答案
         if not jev.ok:
@@ -402,8 +445,10 @@ class RiskGuardImpl:
                         f"订单流有毒概率 {p_tox:.2f} ≥ {TOXIC_ALWAYS_BLOCK}（只记不拦模式也拦）"
                     )
             else:
-                gate += soft
-                reasons += soft
+                if waived is None:
+                    gate += soft
+                reasons_or_waived = reasons if waived is None else waived
+                reasons_or_waived += soft
 
         # ---- 作战卡
         cs = self._card_symbol(signal, card, now, reasons)
@@ -436,21 +481,23 @@ class RiskGuardImpl:
             else:
                 lim = _limit(risk.max_spread_bps, fast.max_spread_stop_frac, stop_bps)
                 if lim is not None and book.spread_bps > lim[0]:
-                    reasons.append(f"价差 {book.spread_bps:.1f}bp 超过 {lim[0]:.1f}bp（{lim[1]}）")
+                    soft_sink.append(
+                        f"价差 {book.spread_bps:.1f}bp 超过 {lim[0]:.1f}bp（{lim[1]}）"
+                    )
             # 只拦不利方向：做多价格比触发时高、做空价格比触发时低；往有利方向走了不拦
             sign = 1.0 if signal.side_hint == Side.LONG else -1.0
             slip = sign * (f.last_price / signal.trigger_price - 1.0) * 1e4
             detail["slippage_bps"] = round(slip, 2)  # 正数 = 不利
             lim = _limit(risk.max_slippage_bps, fast.max_slippage_stop_frac, stop_bps)
             if lim is not None and slip > lim[0]:
-                reasons.append(
+                soft_sink.append(
                     f"触发后价格往不利方向跑了 {slip:.1f}bp，"
                     f"超过滑点上限 {lim[0]:.1f}bp（{lim[1]}）"
                 )
 
         if reasons or cs is None or not jev.ok or f is None or stop is None:
             return None
-        return self._size(signal, f, jev, card, cs, stop, account, now, reasons, detail)
+        return self._size(signal, f, jev, card, cs, stop, account, now, reasons, detail, waived)
 
     def _check_jev(
         self,
@@ -595,8 +642,12 @@ class RiskGuardImpl:
                 reasons.append("加上这笔会超过这一类币的合计仓位上限")
         return reasons
 
-    def _symbol_filters(self, sym: str, now: datetime, reasons: list[str]) -> None:
-        """「不做」过滤：要下架、刚上线、自动减仓风险高。数据拿不到就不挡。"""
+    def _symbol_filters(
+        self, sym: str, now: datetime, reasons: list[str], soft: list[str] | None = None
+    ) -> None:
+        """「不做」过滤：要下架、刚上线、自动减仓风险高。数据拿不到就不挡。
+        ``soft``：刚上线和自动减仓风险高两条记到这里（人工放行时不拦），不给就记进 reasons。"""
+        soft = reasons if soft is None else soft
         fast = self._fast
         why_halted = self._halted(sym) if self._halted is not None else None
         if why_halted:
@@ -610,11 +661,11 @@ class RiskGuardImpl:
         if hours > 0 and lot is not None and lot.onboard_at is not None:
             age_h = (now - lot.onboard_at).total_seconds() / 3600.0
             if age_h < hours:
-                reasons.append(
+                soft.append(
                     f"{sym} 上线不到 {hours:g} 小时（{age_h:.0f} 小时），价格还不稳，不开新仓"
                 )
         if fast.adl_high_block and self._adl is not None and self._adl(sym) == "high":
-            reasons.append(
+            soft.append(
                 "这个币被自动减仓的风险是高（币安每 30 分钟更新），赚钱的仓可能被强制减掉，不开新仓"
             )
 
@@ -724,6 +775,7 @@ class RiskGuardImpl:
         now: datetime,
         reasons: list[str],
         detail: dict[str, float | str],
+        waived: list[str] | None = None,
     ) -> OrderIntent | None:
         risk, fast = self._risk, self._fast
         entry = f.last_price
@@ -807,13 +859,15 @@ class RiskGuardImpl:
             / (1.0 / lev + risk.taker_fee_bps / 1e4),
         }
         book_cap = self._book_cap(f, side)
-        if book_cap is not None:
+        if book_cap is not None and waived is None:
             caps["盘口深度"] = book_cap
             detail["book_cap_usdt"] = round(book_cap, 2)
         binding = "风险金额"
         for name, cap in caps.items():
             if cap < notional:
                 notional, binding = cap, name
+        if book_cap is not None and waived is not None and book_cap < notional:
+            waived.append(f"盘口深度上限 {book_cap:.0f}U 小于本笔 {notional:.0f}U")
         detail.update(size_tier=tier.value, leverage=lev, binding=binding)
         if notional <= 0:
             reasons.append(f"{binding}已用完")
@@ -976,6 +1030,7 @@ class RiskGuardImpl:
         if self._rec is None:
             return
         side = "多" if signal.side_hint == Side.LONG else "空"
+        by = detail.get("by")
         if verdict.approved and verdict.intent is not None:
             it = verdict.intent
             summary = (
@@ -988,10 +1043,25 @@ class RiskGuardImpl:
             if would := detail.get("gate_would_block"):
                 summary += f"（拍板本会拦，只记不拦放行：{str(would).split('；')[0]}）"
             outcome = Outcome.PASS
+            if by == "release":
+                skipped = f"，跳过：{detail['waived']}" if detail.get("waived") else ""
+                summary = (
+                    f"{signal.symbol} {side} 人工放行{skipped}；" + summary.split("放行：", 1)[1]
+                )
+            elif by == "recheck":
+                # 干跑，不下单：不算「放行」，别和真开仓混（验收脚本只读 PASS）
+                summary = (
+                    f"{signal.symbol} {side} 重新检查：现在放行（不下单）；"
+                    + summary.split("放行：", 1)[1]
+                )
+                outcome = Outcome.ACTION
         else:
-            what = "拍板放弃" if detail.get("by") == "gate" else "拒绝"
+            what = "拍板放弃" if by == "gate" else "拒绝"
             more = f"（共 {len(verdict.reasons)} 条）" if len(verdict.reasons) > 1 else ""
             summary = f"{signal.symbol} {side} {what}：{verdict.reasons[0]}{more}"
+            if by in ("recheck", "release"):
+                head = "重新检查：现在仍拒绝" if by == "recheck" else "人工放行没成功"
+                summary = f"{signal.symbol} {side} {head}：{verdict.reasons[0]}{more}"
             outcome = Outcome.REJECT
         self._rec.record(
             now,
