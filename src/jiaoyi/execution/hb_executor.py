@@ -1108,8 +1108,10 @@ class HbExecutorAdapter:
         return self._set(tracked, lifeboat=None)
 
     async def _notice(self, title: str, body: str, rec: PositionRecord, kind: str) -> None:
-        """成功路径的 INFO 通知（开仓成交 / 平仓完成 / 保命止损触发），同一笔同一类只发一次。"""
-        if self._notices:
+        """成功路径的 INFO 通知（开仓成交 / 平仓完成 / 保命止损触发），同一笔同一类只发一次。
+
+        ``trade_notices`` 关掉只静音开仓成交和平仓完成；保命止损触发是风控事件，一直推。"""
+        if self._notices or kind == "lifeboat_hit":
             await self._alert(AlertLevel.INFO, title, body, rec.symbol, f"{kind}:{rec.position_id}")
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:

@@ -337,6 +337,19 @@ def test_update_needs_password(tmp_path: Path) -> None:
     assert load_risk_config(paths.risk).max_leverage == 5
 
 
+def test_trade_notices_switch_defaults_on_and_is_editable(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    assert load_app_config(paths.app).trade_notices is True
+    actions.update_config(paths, data, "app", {"trade_notices": False}, PW, NOW)
+    assert load_app_config(paths.app).trade_notices is False
+    assert tomllib.loads(paths.app.read_text())["trade_notices"] is False
+    actions.update_config(
+        paths, data, "app", {"trade_notices": None}, PW, NOW
+    )  # 恢复默认 = 删掉这一行
+    assert "trade_notices" not in tomllib.loads(paths.app.read_text())
+    assert load_app_config(paths.app).trade_notices is True
+
+
 def test_update_app_and_fast_loop_sections(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     actions.update_config(

@@ -104,6 +104,7 @@ APP_EDITABLE = frozenset(
         "pool_size",
         "card_pick_max",
         "reconciler_close_unknown_positions",
+        "trade_notices",
         "meeting_interval",
         "hold",
     }

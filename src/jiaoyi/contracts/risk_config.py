@@ -816,6 +816,11 @@ class AppConfig(Contract):
         description="paper / testnet 连哪个币安模拟环境：demo = Demo Trading，"
         "legacy_testnet = 旧测试网（已停用，仅回退）。hummingbot 侧补丁要与此一致。",
     )
+    trade_notices: bool = Field(
+        default=True,
+        description="Telegram 推送开仓成交 / 平仓完成的消息。关 = 这两类不再推；保命止损触发、"
+        "保命止损缺失、对账不一致、开平仓失败、日亏熔断等安全告警照推，不受这个开关管。",
+    )
     reconciler_close_unknown_positions: bool = Field(
         default=False,
         description="对账员遇到不在账本里的币安仓位 / hummingbot 执行器时直接平掉。"

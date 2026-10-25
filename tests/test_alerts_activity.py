@@ -75,6 +75,21 @@ async def test_open_and_close_push_plain_text(tmp_path: Path) -> None:
     assert "持仓 1 小时 15 分" in closed.body
 
 
+async def test_trade_notices_off_mutes_open_close_but_not_lifeboat_hit(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, notices=False)
+    pid = await open_filled(rig)
+    rig.api.executors["ex1"]["cum_fees_quote"] = 0.5
+    rig.api.terminate("ex1", "TAKE_PROFIT", pnl=2.0)
+    await rig.adapter.positions()
+    assert [a.title for a in rig.alerts.sent] == []  # 开仓成交、平仓完成都不推
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
+    await rig.adapter._notice("开仓成交", "x", rec, "opened")
+    await rig.adapter._notice("平仓完成", "x", rec, "closed")
+    assert rig.alerts.sent == []
+    await rig.adapter._notice("保命止损触发", "x", rec, "lifeboat_hit")  # 风控事件照推
+    assert [a.title for a in rig.alerts.sent] == ["保命止损触发"]
+
+
 def _fill_lower(rig: Rig, qty: float) -> None:
     rig.ex.trades = [TradeFill(START + timedelta(seconds=1), "o1", "buy", 0.7487, qty, 0.05, 0.0)]
 
