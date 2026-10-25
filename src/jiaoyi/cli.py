@@ -567,6 +567,7 @@ def _panel(args: argparse.Namespace) -> int:
         allow_hosts=frozenset(h.lower() for h in args.allow_host),
         secret_writer=writer.set if writer.available() else None,
         secret_reader=store.get,
+        update_repo=Path(__file__).resolve().parents[2],
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

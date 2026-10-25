@@ -451,6 +451,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "tests") { S.tests = !S.tests; render(); poll(); }
   else if (act === "csv") exportCsv();
   else if (act === "cmd") askCommand(arg);
+  else if (act === "update") askUpdate();
   else if (act === "close1") { const p = (pageData && pageData.positions || []).find((x) => x.position_id === arg); askCommand("close_position", { position_id: arg }, p ? `${p.symbol.replace(/USDT$/, "")} ${(SIDE[p.side] || [p.side])[0]} ${p.quantity}` : arg); }
   else if (act === "unblock") askCommand("unblock_symbol", { symbol: arg }, arg);
   else if (act === "edit1") editOne(arg, false);
@@ -2755,7 +2756,78 @@ function showChanges() {
 function restartBar() {
   const c = data.control;
   const up = c.started_at ? `${hm(c.started_at)} 启动，已跑 ${dur(Date.now() - Date.parse(c.started_at))}` : "还没有启动记录";
-  return `<div class="st-restart"><span class="lamp ${data.running ? "" : "bad"}"><i></i>${data.running ? "主程序运行中" : "主程序没在运行"}</span><span class="dim small">${up}</span>${restartBtn()}</div>`;
+  loadUpdate(false);
+  return `<div class="st-restart"><span class="lamp ${data.running ? "" : "bad"}"><i></i>${data.running ? "主程序运行中" : "主程序没在运行"}</span><span class="dim small">${up}</span>${updateNote()}${updateBtn()}${restartBtn()}</div>`;
+}
+
+// 「更新到最新版」：面板里跑 make update（拉代码 + 装依赖 + 检查配置 + 重启两个服务）。接口缓存 60 秒
+let upd = null;
+let updAt = 0;
+async function loadUpdate(force) {
+  if (!force && Date.now() - updAt < 60000) return;
+  updAt = Date.now();
+  try { upd = await getJson("/api/update"); } catch (e) { return; }
+  if (route().page === "settings" && !$("#dlg-msg")) render();
+}
+function updateNote() {
+  if (!upd || !upd.supported) return "";
+  if (upd.state === "running") return `<span class="dim small">更新中…</span>`;
+  if (upd.state === "failed") return `<span class="warn small">上次更新没成功</span>`;
+  const v = upd.head ? `版本 ${esc(upd.head)}` : "";
+  if (upd.behind > 0) return `<span class="small">${v}，落后最新版 ${upd.behind} 个提交</span>`;
+  if (upd.behind === 0) return `<span class="dim small">${v}，已是最新</span>`;
+  return `<span class="dim small">${v}</span>`;
+}
+function updateBtn() {
+  if (!upd || !upd.supported) return "";
+  const busy = upd.state === "running";
+  return `<button class="btn b-sm ${upd.behind > 0 ? "b-go" : ""}" ${clickable("update")} ${busy ? 'disabled title="正在更新"' : ""}>更新到最新版</button>`;
+}
+function askUpdate() {
+  const c = data.control;
+  const ver = upd && upd.head ? `现在是 <b>${esc(upd.head)}</b>${upd.behind > 0 ? `，最新版比它多 ${upd.behind} 个提交` : upd.behind === 0 ? "，已经是最新" : "，查不到最新版（网络？）"}。` : "";
+  const dirty = upd && upd.dirty ? `<div class="note warn">代码目录里有没提交的改动，拉代码可能失败；失败会把原因显示在这里，不会动现有服务。</div>` : "";
+  ask("更新到最新版", `<p>${ver}会拉最新代码、装依赖、检查配置，然后<b>重启主程序和面板</b>（和终端里 <code>make update</code> 一样）。持仓不动；信号缓存和哨兵去重会清空。</p>${dirty}${pwField(c)}`, "更新并重启", true, async () => {
+    const pw = $("#dlg-pw");
+    const startedBefore = c.started_at || null;
+    await post("/api/update", { password: pw ? pw.value : null });
+    onOk = null;
+    $("#layer [data-ok]").remove();
+    $("#layer [data-close].btn").textContent = "关闭";
+    return waitUpdate(startedBefore);
+  });
+}
+// 更新跑起来后：面板会在最后一步被重启，期间拉不到接口就继续等；等到回执出结果、主程序启动时间变了
+async function waitUpdate(startedBefore) {
+  const t0 = Date.now();
+  let lastLog = "";
+  while (Date.now() - t0 < 25 * 60000) {
+    if (!$("#dlg-msg")) return;
+    await new Promise((r) => setTimeout(r, 2000));
+    let u;
+    try { u = await getJson("/api/update"); } catch (e) { dlgMsg(`<b>正在更新…</b>　面板在重启，等它回来（已等 ${Math.round((Date.now() - t0) / 1000)} 秒）${lastLog ? `<pre class="json">${esc(lastLog)}</pre>` : ""}`); continue; }
+    upd = u;
+    lastLog = u.log_tail || lastLog;
+    if (u.state === "failed") {
+      dlgMsg(`<b class="down">更新没成功</b>　现有服务没有被动，可以再试或在终端跑 <code>make update</code>。<pre class="json">${esc(u.log_tail || "（没有输出）")}</pre>`, "down");
+      return;
+    }
+    if (u.state === "done") {
+      let ov = null;
+      try { ov = await getJson("/api/overview"); } catch (e) { /* 主程序还在起 */ }
+      const c = (ov && ov.control) || {};
+      if (ov && ov.running && c.started_at && c.started_at !== startedBefore) {
+        dlgMsg(`<b class="up">已更新到 ${esc(u.to_hash || u.head || "")}</b>　主程序 ${hm(c.started_at)} 重启。页面会提示刷新。`);
+        updAt = 0;
+        poll();
+        return;
+      }
+      dlgMsg(`<b>代码已更新到 ${esc(u.to_hash || u.head || "")}</b>　等主程序起来…`);
+      continue;
+    }
+    dlgMsg(`<b>正在更新…</b>　已等 ${Math.round((Date.now() - t0) / 1000)} 秒${u.log_tail ? `<pre class="json">${esc(u.log_tail)}</pre>` : ""}`);
+  }
+  dlgMsg("25 分钟还没更新完：在 Mac 上看 data/panel_update.log。", "down");
 }
 
 function pendingBanner(d) {
