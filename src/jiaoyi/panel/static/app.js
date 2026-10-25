@@ -1238,7 +1238,16 @@ P.positions = (arg) => {
 };
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
-let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false;
+let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
+// 默认视图：全部 K 线铺开，最新一根停在图宽 2/3 处，右边留 1/3 空白（像 TradingView 的右侧留白）
+function fitView(c) {
+  if (c === chart && barCount > 1) {
+    const last = barCount - 1;
+    c.timeScale().setVisibleLogicalRange({ from: 0, to: last + last / 2 });
+  } else {
+    c.timeScale().fitContent();
+  }
+}
 // 图和页面抢手势：照地图控件（Google Maps / Mapbox 的 cooperative gestures）的通行做法——
 // 电脑：普通滚轮留给页面滚动，按住 Ctrl / ⌘ 再滚轮才缩放，鼠标拖动平移，双击复位；
 // 手机：单指滑动留给页面滚动（不接管触摸拖动），双指捏合才缩放 / 平移图。
@@ -1251,14 +1260,14 @@ function setChartFull(on) {
   S.chartFull = on;
   document.body.classList.toggle("chart-fs", on);
   render();
-  setTimeout(() => { if (chart) chart.timeScale().fitContent(); }, 80); // 容器尺寸变了，等重排完再铺满
+  setTimeout(() => { if (chart) fitView(chart); }, 80); // 容器尺寸变了，等重排完再铺满
 }
 window.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.chartFull) setChartFull(false); });
 window.addEventListener("hashchange", () => { if (S.chartFull) setChartFull(false); });
 const chartsList = [];
 function lockChart(c, el) {
   chartsList.push(c);
-  el.addEventListener("dblclick", () => c.timeScale().fitContent()); // 双击图：回到默认范围
+  el.addEventListener("dblclick", () => fitView(c)); // 双击图：回到默认范围
   return c;
 }
 function chartWheel(on) {
@@ -1313,6 +1322,7 @@ async function loadKlines(force) {
     // 换了一笔 / 换了周期：先清掉上一个币的 K 线和价格线，价格轴重新自动缩放（不然会停在上一个币的价格区间）
     chartKey = key;
     series.setData([]);
+    barCount = 0;
     series.setMarkers([]);
     priceLines.forEach((l) => series.removePriceLine(l));
     priceLines = [];
@@ -1328,6 +1338,7 @@ async function loadKlines(force) {
     bars = await r.json();
     if (seq !== klineSeq || key !== chartKey) return; // 等的时候又换了：这份是旧币的，不画
     series.setData(bars);
+    barCount = bars.length;
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1349,7 +1360,7 @@ async function loadKlines(force) {
     [startLine, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
   ].filter(([v]) => v != null).map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
   series.setMarkers(entryMarkers(p, bars));
-  if (force || needFit) chart.timeScale().fitContent();
+  if (force || needFit) fitView(chart);
   needFit = false;
 }
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
