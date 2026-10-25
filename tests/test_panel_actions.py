@@ -975,3 +975,25 @@ def test_prompts_active_shown_read_only(tmp_path: Path) -> None:
         assert (info["hold"], info["style"]) == ("2h", "short") and info["written_at"]
         assert client.get("/api/team?role=commander").json()["prompts"]["hold"] == "2h"
         assert client.get("/api/prompts").json() == body
+
+
+def test_signal_commands_need_signal_and_release_needs_password(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    ok = {"signal_id": "BTCUSDT:volume_breakout:long:1", "symbol": "BTCUSDT"}
+    assert "release_signal" in actions.NEEDS_PASSWORD
+    assert "recheck_signal" not in actions.NEEDS_PASSWORD
+    with _client(paths) as client:
+        for bad in ({}, {"signal_id": "x"}, {"signal_id": "x", "symbol": "btc"}):
+            r = client.post(
+                "/api/command", json={"kind": "recheck_signal", "params": bad}, headers=HEADERS
+            )
+            assert r.status_code == 400
+        body = {"kind": "recheck_signal", "params": {**ok, "junk": "1"}}
+        assert client.post("/api/command", json=body, headers=HEADERS).status_code == 200
+        body = {"kind": "release_signal", "params": ok}
+        assert client.post("/api/command", json=body, headers=HEADERS).status_code == 400
+        body["password"] = PW
+        assert client.post("/api/command", json=body, headers=HEADERS).status_code == 200
+    cmds = _inbox_commands(data)
+    assert [c["kind"] for c in cmds] == ["recheck_signal", "release_signal"]
+    assert all(c["params"] == ok for c in cmds)

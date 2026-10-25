@@ -77,6 +77,8 @@ NEEDS_PASSWORD: frozenset[CommandKind] = frozenset(
         # 类别开关 / 每类上限：同一条指令既可能放宽也可能收紧，一律要密码
         "set_category",
         "set_category_cap",
+        # 人工放行 = 绕过保镖的一道过滤去开仓，要密码；重新检查只看结果、不下单
+        "release_signal",
     }
 )
 
@@ -114,6 +116,8 @@ APP_EDITABLE = frozenset(
         "hold",
     }
 )
+
+SIGNAL_ACTIONS = frozenset({"recheck_signal", "release_signal"})
 
 BUDGET_EDITABLE = "daily_cost_limit_usd"
 """花费段在设置页只能改日上限。"""
@@ -156,6 +160,12 @@ def send_command(
         raise ActionError("平单笔要给 position_id")
     if kind == "unblock_symbol" and not params.get("symbol"):
         raise ActionError("解封要给币种")
+    if kind in SIGNAL_ACTIONS:
+        if not 0 < len(params.get("signal_id", "")) <= 128 or not SYMBOL_RE.match(
+            params.get("symbol", "")
+        ):
+            raise ActionError("要给信号编号和币种代码，例如 BTCUSDT")
+        params = {k: params[k] for k in ("signal_id", "symbol")}
     if kind in POOL_ACTIONS and not SYMBOL_RE.match(params.get("symbol", "")):
         raise ActionError("选币页操作要给币种代码，例如 BTCUSDT")
     if kind in CATEGORY_ACTIONS:

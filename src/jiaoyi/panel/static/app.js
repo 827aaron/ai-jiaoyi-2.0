@@ -159,6 +159,8 @@ const CMD = {
   set_category_cap: { title: "这一类最多进池几个", text: "0 = 这一类一个都不要。主程序马上重新选币。", ok: "保存", pw: true, cap: true },
   reset_category: { title: "恢复默认开关", text: "去掉你在这里改过的开关，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
   reset_category_cap: { title: "恢复默认上限", text: "去掉你在这里改过的上限，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
+  recheck_signal: { title: "重新检查", text: "按现在的价格把这个信号的开仓检查重跑一遍（拍板人 + 保镖），只看结果、不下单；结果会写进这条信号的记录里。拍板人那一步会花一点点模型费用。", ok: "重新检查" },
+  release_signal: { title: "人工放行", text: "按现在的价格、作战卡上的仓位和止损止盈，跳过拒绝它的那条过滤，立刻开仓；币安的硬限制（最小下单量、杠杆上限等）照旧。开仓会写进记录并推 Telegram，记为「人工放行」。", ok: "放行开仓", danger: true, pw: true },
   refresh_cards: { title: "重新开会出卡", text: "从选币开始把整条链重跑一遍：选币 → 总盘会 → 军师团 → 写新作战卡，不沿用上一轮结论（会花一次大模型费用，要几分钟）。", ok: "开会" },
 };
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
@@ -420,6 +422,10 @@ document.addEventListener("click", async (e) => {
   if (act === "card") showCard();
   else if (act === "cardhist") showCardHistory(arg);
   else if (act === "signal") showSignal(arg);
+  else if (act === "sigcmd") {
+    const [kind, symbol, ...rest] = arg.split(":");
+    askCommand(kind, { signal_id: rest.join(":"), symbol }, symbol.replace(/USDT$/, ""));
+  }
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
@@ -925,11 +931,26 @@ function guardView(s) {
   const head = o.approved != null ? `<div class="note ${o.approved ? "" : "warn"}"><b>${o.approved ? "通过" : "拒绝"}</b>${(o.reasons || []).length ? `：${esc(o.reasons.join("；"))}` : ""}</div>` : "";
   return `<div class="small dim">看到的</div>${kvOrEmpty(s.input)}<div class="small dim mt">判断</div>${head}${kvRows(rest)}`;
 }
+// 保镖拒绝的信号：重新检查（按现价重跑，不下单）/ 人工放行（按现价立刻开）。
+// 这个币的卡过期了或已有持仓就灰掉，写明原因；主程序重启过、信号记录没了，主程序会回「记录已过期」
+function guardActions(s) {
+  const o = s.output || {};
+  if (o.approved !== false || !s.signal_id || !s.symbol || !data || !data.control) return "";
+  const row = ((data.card && data.card.symbols) || []).find((r) => r.symbol === s.symbol);
+  const exp = row && row.expires_at ? new Date(row.expires_at).getTime() : null;
+  const why = !data.running ? "主程序没在运行"
+    : !row || (exp != null && exp <= Date.now()) ? "这个币的作战卡已过期（或已不在卡上），要等下一轮会议出新卡"
+    : (data.positions || []).some((p) => p.symbol === s.symbol) ? "这个币已经有持仓，不开第二笔"
+    : "";
+  const btn = (kind, label, cls) => `<button class="btn b-sm ${cls}" ${why ? `disabled title="${esc(why)}"` : clickable("sigcmd", `${kind}:${s.symbol}:${s.signal_id}`)}>${label}</button>`;
+  return `<div class="row mt" style="gap:8px">${btn("recheck_signal", "重新检查", "")}${btn("release_signal", "放行", "b-kill")}</div>
+    <div class="dim small">${why ? esc(why) : "重新检查：按现价重跑一遍，只看结果、不下单。放行：按现价立刻开，跳过拒绝它的过滤（要面板密码）。"}</div>`;
+}
 function recordBody(s) {
   const th = (pageData && pageData.gate_thresholds) || null;
   const isJev = (s.input && s.input.jev) || (s.output && s.output.jev);
   const body = isJev ? jevView(s, th) : s.output && "approved" in s.output ? guardView(s) : `<div class="small dim">看到的</div>${kvOrEmpty(s.input)}<div class="small dim mt">判断</div>${kvOrEmpty(s.output)}`;
-  return body + rawData(s);
+  return body + guardActions(s) + rawData(s);
 }
 
 function showRecord(i) {
