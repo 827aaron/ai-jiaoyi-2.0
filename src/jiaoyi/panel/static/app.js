@@ -1194,7 +1194,7 @@ P.positions = (arg) => {
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span></span></div>
       <div class="chart" id="kchart-host"></div>
-      <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${sel.trailing_stop_pct != null ? `<span><i style="border-color:var(--accent);border-style:solid"></i>移动止损（启动后，估算）</span><span><i style="border-color:var(--accent);opacity:.45"></i>启动线（赚到这里开始跟）</span>` : ""}</div>
+      <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${sel.trailing_stop_pct != null ? `<span><i style="border-color:var(--accent);border-style:solid"></i>移动止损（启动后，估算）</span><span><i style="border-color:var(--accent);opacity:.45"></i>启动线（赚到这里开始跟）</span>` : ""}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
       ${sel.trailing_stop_pct != null ? `<div class="small dim trail-note">${trailNote(sel)}</div>` : ""}
       <div><div class="lbl">从信号到现在的每一步（今天）· 点一条看快照</div><div class="log trail">${trail || '<div class="dim">今天的日志里没有这笔的记录。</div>'}</div></div>
     </section>`;
@@ -1202,6 +1202,26 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false;
+// 图和页面抢手势：照地图控件（Google Maps / Mapbox 的 cooperative gestures）的通行做法——
+// 电脑：普通滚轮留给页面滚动，按住 Ctrl / ⌘ 再滚轮才缩放，鼠标拖动平移，双击复位；
+// 手机：单指滑动留给页面滚动（不接管触摸拖动），双指捏合才缩放 / 平移图。
+const CHART_COOP = {
+  handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: false, vertTouchDrag: false },
+  handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true },
+};
+const chartsList = [];
+function lockChart(c, el) {
+  chartsList.push(c);
+  el.addEventListener("dblclick", () => c.timeScale().fitContent()); // 双击图：回到默认范围
+  return c;
+}
+function chartWheel(on) {
+  const o = { handleScroll: { ...CHART_COOP.handleScroll, mouseWheel: on }, handleScale: { ...CHART_COOP.handleScale, mouseWheel: on } };
+  chartsList.forEach((c) => c.applyOptions(o));
+}
+window.addEventListener("keydown", (e) => { if (e.key === "Control" || e.key === "Meta") chartWheel(true); });
+window.addEventListener("keyup", (e) => { if (e.key === "Control" || e.key === "Meta") chartWheel(false); });
+window.addEventListener("blur", () => chartWheel(false));
 function mountChart() {
   const host = $("#kchart-host");
   if (!host || !window.LightweightCharts) return;
@@ -1209,14 +1229,15 @@ function mountChart() {
     chartEl = document.createElement("div");
     chartEl.style.height = "100%";
     host.appendChild(chartEl);
-    chart = LightweightCharts.createChart(chartEl, {
+    chart = lockChart(LightweightCharts.createChart(chartEl, {
+      ...CHART_COOP,
       autoSize: true,
       layout: { background: { color: "transparent" }, textColor: getComputedStyle(document.body).getPropertyValue("--dim"), fontFamily: getComputedStyle(document.body).fontFamily },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(0,0,0,0.05)" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderVisible: false, tickMarkFormatter: (t) => tick(t) },
       rightPriceScale: { borderVisible: false },
       localization: { timeFormatter: (t) => hm(t * 1000) },
-    });
+    }), chartEl);
     const css = getComputedStyle(document.documentElement);
     const up = css.getPropertyValue("--up").trim(), down = css.getPropertyValue("--down").trim();
     series = chart.addCandlestickSeries({
@@ -3021,14 +3042,15 @@ function mountHistoryChart() {
     hEl = document.createElement("div");
     hEl.style.height = "100%";
     host.appendChild(hEl); // 先挂到页面上再建图，否则初始尺寸是 0
-    hchart = LightweightCharts.createChart(hEl, {
+    hchart = lockChart(LightweightCharts.createChart(hEl, {
+      ...CHART_COOP,
       autoSize: true,
       layout: { background: { color: "transparent" }, textColor: getComputedStyle(document.documentElement).getPropertyValue("--dim").trim(), fontFamily: getComputedStyle(document.body).fontFamily },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(0,0,0,0.05)" } },
       timeScale: { timeVisible: true, borderVisible: false, tickMarkFormatter: (t) => tick(t) },
       rightPriceScale: { borderVisible: false },
       localization: { timeFormatter: (t) => hm(t * 1000) },
-    });
+    }), hEl);
     hseries = hchart.addBaselineSeries({ baseValue: { type: "price", price: 0 } });
   }
   host.appendChild(hEl);
