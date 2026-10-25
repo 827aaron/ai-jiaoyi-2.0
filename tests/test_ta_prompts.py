@@ -54,8 +54,8 @@ def test_styles_follow_the_hold_tier() -> None:
     short, mid, long_ = (tp.perp_context(tp.PromptParams.for_hold(h)) for h in ("2h", "4h", "12h"))
     for text in (short, mid):
         assert "tend to keep going" not in text
-    assert "gives back part of it" in short and "Re-judge every round" not in short
-    assert "both effects are weak" in mid
+    assert "gives back part of it" not in short and "Re-judge every round" not in short
+    assert "both effects are weak" not in mid and "How this market behaves" not in mid
     assert "Re-judge every round" in long_ and "are not reversal signals on their own" in long_
     assert "not today or this week" in short and "not this week" in mid
     assert "not today" not in long_ and "not this week" not in long_
@@ -73,7 +73,9 @@ def test_two_hour_shared_text_snapshot() -> None:
         "Evidence that matters at this horizon is the last 15 minutes to 5 hours: the % change "
         "over the last 15m, 1h and 4h" in text
     )
-    assert "On 15m bars, an extreme RSI or a Bollinger-band breach" in text
+    assert (
+        "How this market behaves" not in text
+    )  # 2h 档不写市场习性（10-24 复盘：回吐那句把方向带偏）
     assert "a fee round trip is about 35% of a typical 2 hours move" in text
     assert "the system enforces this in code" in text
     assert "Role notes" not in text  # 行情分析师的说明搬进了它自己的提示词（ta_roles.MARKET）
@@ -257,7 +259,7 @@ def test_prompts_active_file_is_written(tmp_path) -> None:  # type: ignore[no-un
     e._write_active_prompts(s)
     doc = json.loads((tmp_path / "prompts_active.json").read_text())
     assert doc["hold"] == "4h" and doc["style"] == "mid" and doc["indicator_interval"] == "1h"
-    assert "both effects are weak" in doc["shared"] and "{SYMBOL}" in doc["position_note"]
+    assert "How this market behaves" not in doc["shared"] and "{SYMBOL}" in doc["position_note"]
     assert doc["brief_fields"]["main"][0] == "chg_4h"
     assert "pick at most {max_n} symbols" in doc["pick"]  # 预览留占位符，不写成「最多 0 个」
 
@@ -348,7 +350,7 @@ def test_zone_required_turns_card_into_no_trade() -> None:
 def test_data_window_comes_from_one_constant() -> None:
     from jiaoyi.core import profiles
 
-    p = tp.PromptParams.for_hold("2h")
+    p = tp.PromptParams.for_hold("12h")  # 2h / 4h 档没有习性那一行
     assert profiles.DATA_WINDOW in tp.perp_context(p) and "{DATA_WINDOW}" not in tp.perp_context(p)
     assert profiles.DATA_WINDOW in tp.pick_prompt(p, "t", 3)
 
@@ -396,10 +398,22 @@ def test_pick_prompt_describes_the_market_without_directions() -> None:
     assert "bounce, a drop or a breakout" not in text
 
 
-def test_short_habit_only_applies_right_after_a_sharp_move() -> None:
-    short = tp.words(tp.PromptParams.for_hold("2h")).habit
-    assert "applies only right after such a move" in short and "spread over the last day" in short
-    assert "applies only right after" not in tp.words(tp.PromptParams.for_hold("4h")).habit
+def test_short_and_mid_tiers_have_no_habit_line_long_keeps_it() -> None:
+    for hold in ("30m", "1h", "2h", "4h"):
+        p = tp.PromptParams.for_hold(hold)
+        assert tp.words(p).habit == "", hold
+        for text in (tp.perp_context(p), tp.pick_prompt(p, "now", 8)):
+            assert "How this market behaves" not in text, hold
+            assert "{habit" not in text, hold
+        assert "How this market behaves" not in tp.words(p).habit_line(windowed=False)
+    for hold in ("8h", "12h", "24h"):
+        p = tp.PromptParams.for_hold(hold)
+        assert "How this market behaves at this horizon" in tp.perp_context(p), hold
+        assert "How this market behaves" in tp.pick_prompt(p, "now", 8), hold
+    assert (
+        "rebound off the low, or a break below" in tp.words(tp.PromptParams.for_hold("2h")).change
+    )
+    assert "rising volume" not in tp.words(tp.PromptParams.for_hold("2h")).change
 
 
 def test_risk_trio_speaks_in_size_tiers() -> None:
