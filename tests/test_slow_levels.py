@@ -177,6 +177,7 @@ def test_convert_prompt_tells_the_model_to_fill_key_levels_from_candidates() -> 
     d = _CardSymbolDraft(
         bias=Bias.LONG,
         key_levels=[_LevelDraft(price=99.0, kind=LevelKind.SUPPORT)],
+        allowed_signals=[],
         size_tier_max=SizeTier.S,
         notional_min=100,
         notional_max=200,
@@ -275,3 +276,9 @@ def test_level_context_logs_failure_instead_of_swallowing(caplog: pytest.LogCapt
     finally:
         te._klines = orig
     assert not ctx.candidates and "ETHUSDT 算关键位候选失败" in caplog.text
+
+
+def test_convert_schema_requires_key_levels_and_allowed_signals() -> None:
+    """可选数组会被模型在工具调用里整个跳过（10-25 ENA 实测），所以两项必须在 required 里。"""
+    required = _CardSymbolDraft.model_json_schema()["required"]
+    assert "key_levels" in required and "allowed_signals" in required

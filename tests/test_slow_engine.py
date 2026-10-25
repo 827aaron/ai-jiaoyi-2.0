@@ -95,6 +95,7 @@ def test_unknown_indicator_does_not_fail_the_meeting(monkeypatch: pytest.MonkeyP
 def test_draft_conversion_normalizes_and_blocks_no_trade_signals() -> None:
     d = _CardSymbolDraft(
         bias=Bias.NO_TRADE,
+        key_levels=[],
         allowed_signals=["volume_breakout"],  # type: ignore[list-item]
         size_tier_max=SizeTier.S,
         notional_min=500,
@@ -115,6 +116,7 @@ def test_draft_conversion_normalizes_and_blocks_no_trade_signals() -> None:
 def test_directional_card_with_empty_signals_gets_default_set() -> None:
     d = _CardSymbolDraft(
         bias=Bias.SHORT,
+        key_levels=[],
         allowed_signals=[],
         size_tier_max=SizeTier.S,
         notional_min=100,

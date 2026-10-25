@@ -847,8 +847,9 @@ class _LevelDraft(BaseModel):
 
 class _CardSymbolDraft(BaseModel):
     bias: Bias
-    key_levels: list[_LevelDraft] = Field(default_factory=list)
-    allowed_signals: list[SignalKind] = Field(default_factory=list)
+    # 两个数组必填（没有默认值）：可选字段在工具调用里会被模型整个跳过；空列表仍然合法
+    key_levels: list[_LevelDraft]
+    allowed_signals: list[SignalKind]
     size_tier_max: SizeTier
     notional_min: float = Field(ge=0)
     notional_max: float = Field(ge=0)
@@ -1083,7 +1084,7 @@ def convert_instructions(
         "key_levels: fill it from the candidate key levels listed below, the nearest up to 3 "
         "supports and up to 3 resistances, copying each candidate's price. Breakout signals only "
         "fire at card key levels, so an empty list disables them: leave it empty only when the "
-        "candidates are none.\n"
+        "candidates are none (then write []).\n"
         "Choose allowed_signals to match the entry method in the conclusion; do not pick only "
         "chase-style signals when the conclusion waits for a zone.\n"
         f"{signal_kinds_note(p.hold_minutes)}"
@@ -2193,7 +2194,10 @@ class TradingAgentsEngine:
                         "gate",
                         f"关键位：候选 {len(levels.candidates)} 个，"
                         f"会议写了 {len(draft.key_levels)} 个，"
-                        f"对上候选留下 {len(cs.key_levels)} 个",
+                        f"对上候选留下 {len(cs.key_levels)} 个；"
+                        "会议原样返回 key_levels="
+                        f"{[(x.price, x.kind.value) for x in draft.key_levels]}"
+                        f" allowed_signals={[x.value for x in draft.allowed_signals]}",
                     )
                 if why := direction_conflict(
                     cs.bias, rating, str(state.get("trader_investment_plan", ""))
