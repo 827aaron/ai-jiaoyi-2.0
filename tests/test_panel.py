@@ -470,6 +470,36 @@ def test_rejection_items_carry_signal_id_and_symbol(tmp_path: Path) -> None:
         assert (item.signal_id, item.symbol) == ("sig-9", "BTCUSDT")
 
 
+def test_lists_cross_the_bangkok_day_rollover(tmp_path: Path) -> None:
+    """曼谷 0 点翻日后，各列表（团队页日志、信号流、信号链）仍给最新的记录，不是一片空白。"""
+    from jiaoyi.panel.pages import build_signal, build_team
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    now = datetime(2026, 10, 25, 17, 5, tzinfo=UTC)  # 曼谷 10-26 00:05
+    log = JsonlDecisionLog(tmp_path)
+    for ago_min, text in ((600, "10 小时前"), (30, "半小时前"), (1, "刚刚")):
+        ts = now - timedelta(minutes=ago_min)
+        log.write(_rec(c.Role.GATE, c.Outcome.PASS, text, ts, signal_id=f"s{ago_min}"))
+    texts = [r.text for r in build_team(files, now, c.Role.GATE).records]
+    assert texts == ["刚刚", "半小时前", "10 小时前"]  # 最新在前，跨了曼谷 0 点
+    assert [r.text for r in build_signal(files, now, "s30")] == ["半小时前"]
+    feed = build_overview(files, HB, RISK, _cfg(tmp_path), now).feed
+    assert [e.text for e in feed][:2] == ["刚刚", "半小时前"]
+
+
+def test_team_log_looks_back_into_older_files_when_recent_days_are_thin(tmp_path: Path) -> None:
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    now = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
+    log = JsonlDecisionLog(tmp_path)
+    for days_ago in (5, 3):
+        ts = now - timedelta(days=days_ago)
+        log.write(_rec(c.Role.KEEPER, c.Outcome.HOLD, f"{days_ago} 天前", ts))
+    got, more = files.role_records(c.Role.KEEPER, 5, now)
+    assert [r.summary for r in got] == ["3 天前", "5 天前"] and more is False
+    got, more = files.role_records(c.Role.KEEPER, 1, now)
+    assert [r.summary for r in got] == ["3 天前"] and more is True
+
+
 async def test_kline_source_validates_and_parses() -> None:
     from jiaoyi.panel.market import KlineError, KlineSource
 

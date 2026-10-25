@@ -948,7 +948,9 @@ function guardView(s) {
 // 这个币的卡过期了或已有持仓就灰掉，写明原因；主程序重启过、信号记录没了，主程序会回「记录已过期」
 function guardActions(s) {
   const o = s.output || {};
-  if (o.approved !== false || !s.signal_id || !s.symbol || !data || !data.control) return "";
+  // 拒绝记录，或「重新检查」的结果记录（现在放行 / 现在仍拒绝）：都带这两个按钮，原来那条拒绝翻到别天了也能点
+  const by = o.detail && o.detail.by;
+  if ((o.approved !== false && by !== "recheck") || !s.signal_id || !s.symbol || !data || !data.control) return "";
   const row = ((data.card && data.card.symbols) || []).find((r) => r.symbol === s.symbol);
   const exp = row && row.expires_at ? new Date(row.expires_at).getTime() : null;
   const why = !data.running ? "主程序没在运行"
@@ -1113,7 +1115,7 @@ function feedSection(feed, signals) {
   const body = feed.length
     ? `<div class="feed scroll">${feed.map((e) => `<div class="ev ${e.kind} ${e.signal_id ? "click" : ""}" ${e.signal_id ? clickable("signal", e.signal_id) : ""}><div class="t"><span class="n">${hm(e.ts)}</span>${esc(ROLE[e.role] || e.role)}${e.symbol ? " · " + coin(e.symbol) : ""}</div><div class="d">${esc(e.text)}</div></div>`).join("")}</div>`
     : `<div class="empty"><b>今天还没有决策</b>哨兵已触发 ${signals} 个信号。送拍板后会在这里出现。</div>`;
-  return `<section class="card"><div class="ch"><h2>信号与决策流</h2><span class="r">今天 · 最新在上</span></div>${body}
+  return `<section class="card"><div class="ch"><h2>信号与决策流</h2><span class="r">最新在上 · 框里往下滚看更早的</span></div>${body}
     <div class="foot">绿 = 放行 / 开仓 · 黄 = 拍板放弃 · 红 = 风控员拒绝 · 蓝 = 平仓。点一条看整条链和快照。</div></section>`;
 }
 
@@ -1695,11 +1697,11 @@ P.team = () => {
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
-    <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 今天做了什么</h2>
+    <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
-      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "今天还没有记录。"}</div>`}</div>
-      <div class="foot">最多显示最新 200 条 · 点一条看它看到了什么、怎么判断的</div></section>`;
+      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
+      <div class="foot">最新 200 条（跨天），框里往下滚看更早的 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 
 /* ---------- 历史 */
