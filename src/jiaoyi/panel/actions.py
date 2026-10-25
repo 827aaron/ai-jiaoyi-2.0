@@ -94,6 +94,8 @@ _SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers")
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
+        "credit_low_floor_usd",
+        "credit_resend_hours",
         *(field_of(k) for k in KINDS),  # Telegram 告警类别开关（alerting/kinds.py）
         "predictor_enabled",
         "signal_dedup_s",

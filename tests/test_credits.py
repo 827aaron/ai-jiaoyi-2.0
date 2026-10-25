@@ -118,3 +118,19 @@ def test_default_max_tokens_is_capped() -> None:
     assert default_max_tokens("openrouter", ["a/x"], lambda: big) == DEFAULT_MAX_TOKENS == 16384
     assert default_max_tokens("openrouter", ["a/x"], lambda: small) == 8_000  # 模型自己更小就用小的
     assert default_max_tokens("deepseek", ["d"], lambda: big) == 8192
+
+
+def test_custom_floor_and_resend_interval(tmp_path: Path) -> None:
+    it = iter([Balance(12.0, 1.0)] * 10)
+    m = CreditMonitor(
+        tmp_path,
+        lambda: "k",
+        lambda key: next(it),
+        low_floor_usd=20.0,
+        resend_after=timedelta(hours=2),
+    )
+    first = m.tick(T0)
+    assert len(first) == 1 and "$20.00" in first[0][2]  # 提醒线 20，余额 12 就推
+    assert m.tick(T0 + timedelta(hours=1, minutes=1)) == []
+    assert len(m.tick(T0 + timedelta(hours=2, minutes=1))) == 1  # 2 小时后重复
+    assert Balance(12.0, 1.0).low is False  # 默认提醒线 5，不触发

@@ -762,7 +762,10 @@ class App:
             if self.slow_cfg.llm.provider == "openrouter" and self.news is not None:
                 store = secrets or ChainedSecretStore()  # 真军师团才有 news；桩没有额度可看
                 self.credits = CreditMonitor(
-                    app_cfg.data_dir, lambda: store.get("OPENROUTER_API_KEY")
+                    app_cfg.data_dir,
+                    lambda: store.get("OPENROUTER_API_KEY"),
+                    low_floor_usd=app_cfg.credit_low_floor_usd,
+                    resend_after=timedelta(hours=app_cfg.credit_resend_hours),
                 )
         self.m = modules
         # 和卡相反的信号：主循环按账本持仓分流（有仓叫管家急查、反复出申请单币临时会）

@@ -350,6 +350,19 @@ def test_alert_switches_default_on_and_are_editable(tmp_path: Path) -> None:
     assert load_app_config(paths.app).muted_alert_kinds == {"news_block"}
 
 
+def test_credit_alert_settings_editable_and_validated(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    cfg = load_app_config(paths.app)
+    assert (cfg.credit_low_floor_usd, cfg.credit_resend_hours) == (5.0, 6.0)
+    actions.update_config(
+        paths, data, "app", {"credit_low_floor_usd": 15, "credit_resend_hours": 12}, PW, NOW
+    )
+    cfg = load_app_config(paths.app)
+    assert (cfg.credit_low_floor_usd, cfg.credit_resend_hours) == (15.0, 12.0)
+    with pytest.raises(actions.ActionError):
+        actions.update_config(paths, data, "app", {"credit_resend_hours": 0}, PW, NOW)
+
+
 def test_old_trade_notices_false_turns_open_close_rows_off(tmp_path: Path) -> None:
     paths, _ = _setup(tmp_path)
     text = paths.app.read_text(encoding="utf-8")
