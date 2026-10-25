@@ -2721,6 +2721,13 @@ function showChanges() {
     <p class="dim small">每次修改前都留了备份；记录在 data/config_changes.jsonl。</p>`);
 }
 
+// 设置页最上面常显：主程序状态 + 重启按钮（不用往下翻到「运行」卡片）
+function restartBar() {
+  const c = data.control;
+  const up = c.started_at ? `${hm(c.started_at)} 启动，已跑 ${dur(Date.now() - Date.parse(c.started_at))}` : "还没有启动记录";
+  return `<div class="st-restart"><span class="lamp ${data.running ? "" : "bad"}"><i></i>${data.running ? "主程序运行中" : "主程序没在运行"}</span><span class="dim small">${up}</span>${restartBtn()}</div>`;
+}
+
 function pendingBanner(d) {
   if (data.control.config_pending !== true) return "";
   const list = pendingChanges(d);
@@ -2729,7 +2736,7 @@ function pendingBanner(d) {
     ? list.slice(0, 3).map((x) => `${changeText(x, ix)}（${hm(x.ts)} 改的）`).join("；") + (list.length > 3 ? ` 等 ${list.length} 项` : "")
     : "配置文件改过（可能是在终端改的）";
   return `<div class="st-pending"><div class="t"><b>${list.length ? `有 ${list.length} 项改动还没生效` : "配置改了还没生效"}</b><div>${what}。重启主程序后用上，约 1 分钟。</div></div>
-    <button class="btn b-sm" data-act="st-changes">看改了什么</button>${data.running ? `<button class="btn b-sm b-go" ${clickable("cmd", "restart")}>重启生效</button>` : ""}</div>`;
+    <button class="btn b-sm" data-act="st-changes">看改了什么</button></div>`;
 }
 
 function runCard(d) {
@@ -2737,7 +2744,7 @@ function runCard(d) {
   const up = c.started_at ? `${hm(c.started_at)} 启动，已跑 ${dur(Date.now() - Date.parse(c.started_at))}` : "";
   return `<section class="card st"><div class="ch"><h2>运行</h2></div>
     <div class="st-row"><div class="k">交易模式<small>切回模拟盘随时可以；测试网要面板密码；实盘只能在 Mac 本机切，要逐条确认提示、确认词和面板密码。切完自动重启</small></div><span class="seg">${["paper", "testnet", "live"].map((m) => `<button class="${m === d.mode ? "on" : ""}" ${m === d.mode && (m !== "live" || d.live_armed) || !d.writable ? "disabled" : clickable("mode", m)}>${MODE[m]}</button>`).join("")}</span><span class="pill ${d.live_armed ? "p-short" : ""}">${d.live_armed ? "实盘已解锁" : "实盘未解锁"}</span></div>
-    <div class="st-row"><div class="k">主程序<small>${up || "还没有启动记录"}</small></div><span class="lamp ${data.running ? "" : "bad"}"><i></i>${data.running ? "运行中" : "没在运行"}</span>${restartBtn()}</div>
+    <div class="st-row"><div class="k">主程序<small>${up || "还没有启动记录"}</small></div><span class="lamp ${data.running ? "" : "bad"}"><i></i>${data.running ? "运行中" : "没在运行"}</span></div>
     <div class="st-row"><div class="k">开新仓<small>暂停后只管已有持仓，不开新的</small></div><span class="pill ${c.paused ? "p-short" : ""}">${c.paused ? "已暂停" : "正常开仓"}</span>${c.paused ? `<button class="btn b-sm" ${clickable("cmd", "resume")}>恢复开仓</button>` : `<button class="btn b-sm" ${clickable("cmd", "pause")}>暂停开新仓</button>`}</div>
     </section>`;
 }
@@ -3088,7 +3095,7 @@ P.settings = (arg) => {
   S.stArg = arg;
   const ix = settingIndex(d);
   const note = d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；模式、数据目录、拍板人通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。";
-  return `<div class="st-col st-wide">${pendingBanner(d)}${tierSection(d)}${riskCard(d, ix)}${runCard(d)}${meaningCard(d)}${rolesCard(d, ix)}
+  return `<div class="st-col st-wide">${restartBar()}${pendingBanner(d)}${tierSection(d)}${riskCard(d, ix)}${runCard(d)}${meaningCard(d)}${rolesCard(d, ix)}
     <div class="st-links"><button data-act="st-changes">最近的修改记录</button><span class="dim small">${note}</span></div></div>`;
 };
 

@@ -272,6 +272,8 @@ td.nowrap { white-space: nowrap; }
 .card.st { padding: 0; gap: 0; }
 .card.st > .ch { padding: 14px 18px 4px; }
 .st-row { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line); min-height: 52px; flex-wrap: wrap; }
+.st-restart { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 4px; }
+.st-restart .btn { margin-left: auto; }
 .card.st > .ch + .st-row { border-top: 0; }
 .st-row .k { flex: 1; min-width: 160px; color: var(--hi); font-size: 14px; }
 .st-row .k small { display: block; color: var(--dim); font-size: 12px; }
