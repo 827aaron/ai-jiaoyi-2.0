@@ -197,6 +197,7 @@ tr.click:hover td, tr.sel td { background: var(--bg); }
 .legend { display: flex; gap: 16px; }
 .legend i { display: inline-block; width: 18px; border-top: 2px dashed; vertical-align: middle; margin-right: 4px; }
 .legend { flex-wrap: wrap; }
+.chart-hint .h-touch { display: none; } @media (hover: none) { .chart-hint .h-pc { display: none; } .chart-hint .h-touch { display: inline; } }
 .trail-note { margin: 6px 0 2px; }
 .seg { display: inline-flex; flex-wrap: wrap; background: var(--fill); border-radius: 9px; padding: 2px; gap: 2px; }
 .seg button { white-space: nowrap; border: 0; border-radius: 7px; background: transparent; padding: 3px 10px; font-size: 12px; cursor: pointer; }
