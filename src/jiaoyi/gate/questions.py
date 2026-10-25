@@ -39,9 +39,9 @@ from jiaoyi.contracts import (
     PositionRecord,
     Side,
 )
-from jiaoyi.gate.context import HORIZONS, EntryExtras, Horizon, horizon_for, horizon_words
+from jiaoyi.gate.context import EntryExtras
 
-TEMPLATE_VERSION = "q7"
+TEMPLATE_VERSION = "q8"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
 SNAPSHOT_SCHEMA = "s5"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
@@ -64,6 +64,8 @@ KNOWN_TEMPLATES: dict[str, str] = {
     "q6": "b514926fcf43",
     # 预测员改官方用法（Aaron 10-24）：管家快照的 kronos 改成「平均路径是否同向」+ 全池名次
     "q7": "2937b035dde4",
+    # 10-25「没有新单」：一道题改回旧措辞，卡去掉理由 / 区间 / 允许信号 / 卡龄（A/B 0.08 → 0.59）
+    "q8": "7309175f24c4",
 }
 
 _ENTRY_GOAL = (
@@ -124,48 +126,11 @@ ENTRY_PROMPTS: dict[EntryQuestion, str] = {
     EntryQuestion.SIZE: "How large should the position be within today's allowed sizes?",
 }
 
-_ONE_TAKE = (
-    "Should we open this trade in direction `side` right now? Judge it on the next {H} after "
-    "round-trip fees (about 10 bps); after that a trailing stop and a position manager handle "
-    "the exit. Take it only if all of these hold together: price is likely to be further in "
-    "direction `side` in {H} by more than fees; the trigger is a genuine move backed by flow, "
-    "not a fake-out; and the counterparty flow is not toxic (informed traders or a liquidity "
-    "trap that runs us over right after entry). Weigh the longer context in `tech`: whether the "
-    "{mid_words} trend (`tech.trend_{mid}`, `tech.chg_{mid}_bps`) points in direction `side`, "
-    "whether the {rsi_short_words} RSI (`tech.rsi14_{rsi_short}`) leans in direction `side`, "
-    "and whether BTC's last {mid_last} (`tech.btc_{mid}_bps`) moved the same way. Inputs: "
-    "`sig`/`why` say what fired; `ret*_bps`, `vol_x` (1m volume vs average), `buy` (taker buy "
-    "share, 1m), `cvd30_k` (taker buy minus sell, last 30s, kUSDT), `liq_*_k` (liquidations 1m, "
-    "kUSDT), `fund_bps`, `atr_bps`; when present: `vol10_x`, `oi15`/`oi60`/`oi4h` open interest "
-    "change %, `top_ls`/`crowd_ls` long/short ratios, `div4h`, `btc5z` BTC 5-minute move in "
-    "noise units; `book` has spread, imbalance, order-flow imbalance and depth; `card` is "
-    "today's strategist plan for this coin: bias, the strategist's own reason (`card.reason`), "
-    "the entry zone, key levels with type (support/resistance) as bps from price, "
-    "stop/take-profit ranges, size cap, which signal types it allows, how old the plan is, and "
-    "the meeting's market view (`card.regime`). `tech` (when present) = technical context from "
-    "5-minute candles: price change and trend (up/down/flat) over {periods}, RSI(14) on "
-    "{rsi_short} and {rsi_long} candles, where price sits in its recent range (`range_hours` "
-    "long, 0 = low, 100 = high), distance from today's VWAP in bps, distance to the nearest "
-    "card key level above and below in ATR units, and BTC's {mid} change in bps."
-    # 下面这句是快环加的：spec §3 的新块原文没说明，没测过，和 §3 一样要上线后验证
-    " `flow` (when present) = taker flow over 5m/15m/1h: buy minus sell (`cvd_*_k`, kUSDT), "
-    "taker buy share (`buy_*`), Binance's taker buy/sell volume ratio (`taker_ratio_1h`/"
-    "`taker_ratio_4h`), large trades of at least 10k USDT in the last 15 minutes (`big_15m`: "
-    "buys, sells, share of turnover %), and liquidations in the last 15 minutes "
-    "(`liq_15m_long_k`/`liq_15m_short_k`); `book.imb_1m`/`book.imb_5m` = average book "
-    "imbalance over 1 and 5 minutes; `deriv` = mark minus index premium in bps, minutes to the "
-    "next funding, the last funding rates in bps (oldest first), top-trader account long/short "
-    "ratio, and auto-deleveraging risk; `day` = 24h change %, 24h turnover in million USDT, and "
-    "bps from price to the 24h high and low."
-)
-"""拍板人一道题（Aaron 10-24「改成一题」）。原文见 spec；「30 minutes」、周期和键名按持仓档替换
-（``take_prompt``），不手写多份。预测员不进快照（Aaron「不要加预测员的」），所以去掉了原文
-里说明 ``kronos`` 的半句。"""
-
-
-def take_prompt(h: Horizon) -> str:
-    """按持仓档出「做不做」的题目说明。"""
-    return _ONE_TAKE.format(**horizon_words(h))
+ONE_TAKE_PROMPT = ENTRY_PROMPTS[EntryQuestion.TAKE] + " " + _ENTRY_GOAL
+"""拍板人一道题「做不做」的题目说明：用回旧的「Considering everything, should we take this
+trade」+ 目标说明。10-25 线上 45 条快照 A/B（/mnt/project-files/gate-*.jsonl）：原措辞
+「Take it only if all of these hold together」+ 完整作战卡中位只有 0.08（≥0.55 为 0/90）；
+这句 + 精简的卡、技术面等数据块照留，中位 0.59（54/90）。预测员不进快照。"""
 
 
 HOLD_PROMPTS: dict[HoldQuestion, str] = {
@@ -227,11 +192,10 @@ GateQuestions = str
 def entry_questions(mode: GateQuestions = "six", hold_min: int = 120) -> list[JevQuestion]:
     """``mode="one"`` 时 ``take`` 用按持仓档的一道题说明，只问 ``ENTRY_ONE``。"""
     if mode == "one":
-        take = take_prompt(horizon_for(hold_min))
         return [
             JevQuestion(
                 id=q.value,
-                prompt=take if q == EntryQuestion.TAKE else ENTRY_PROMPTS[q],
+                prompt=ONE_TAKE_PROMPT if q == EntryQuestion.TAKE else ENTRY_PROMPTS[q],
                 choices=ENTRY_CHOICES[q],
             )
             for q in ENTRY_ONE
@@ -359,27 +323,21 @@ def _dump(d: dict[str, Any]) -> str:
 def _card_full(
     card: BattleCard, symbol: str, px: float, hold_min: int, now: datetime
 ) -> dict[str, Any]:
-    """一道题问法的完整作战卡（Aaron「加上我们出的卡」，spec §3d）。"""
+    """一道题问法的作战卡：方向、关键位（带支撑 / 阻力）、止损止盈范围、仓位上限、市场判断。
+
+    理由、进场区间、是否在区间、允许的信号、卡龄不给：10-25 A/B 里这些让「做」普遍压到 0.1 以下
+    （去掉后中位 0.08 → 0.32，再换回旧措辞 0.59）。"""
     cs = card.for_symbol(symbol)
     if cs is None:
         return {"status": "symbol_not_in_card", "regime": card.regime[:200]}
-    d: dict[str, Any] = {"bias": cs.bias.value, "reason": cs.reason[:200]}
-    if cs.entry_zone is not None:
-        lo, hi = _bps(cs.entry_zone.min, px), _bps(cs.entry_zone.max, px)
-        d["entry_zone_bps"] = [lo, hi]
-        d["in_zone"] = cs.entry_zone.contains(px)
-    d["levels"] = [[_bps(lv.price, px), lv.kind.value] for lv in cs.key_levels][:6]
-    d["stop_atr"] = [cs.stop_atr.min, cs.stop_atr.max]
-    d["tp_r"] = [cs.take_profit_r.min, cs.take_profit_r.max]
-    d["size_max"] = cs.size_tier_max.value
-    d["signals"] = [k.value for k in cs.allowed_signals]
-    issued = cs.issued_at or card.created_at
-    d["age_min"] = round((now - issued).total_seconds() / 60.0)
-    expires = cs.expires_at or card.expires_at
-    d["left_min"] = round((expires - now).total_seconds() / 60.0)
-    d["hold"] = f"{hold_min // 60}h" if hold_min % 60 == 0 else f"{hold_min}m"
-    d["regime"] = card.regime[:200]
-    return d
+    return {
+        "bias": cs.bias.value,
+        "levels": [[_bps(lv.price, px), lv.kind.value] for lv in cs.key_levels][:6],
+        "stop_atr": [cs.stop_atr.min, cs.stop_atr.max],
+        "tp_r": [cs.take_profit_r.min, cs.take_profit_r.max],
+        "size_max": cs.size_tier_max.value,
+        "regime": card.regime[:200],
+    }
 
 
 DEFAULT_HOLD_MIN = 120
@@ -559,7 +517,7 @@ def template_fingerprint() -> str:
     """问题措辞、选项说明和快照格式的哈希（前 12 位）。"""
     payload = {
         "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
-        "entry_one": [take_prompt(h) for _, h in HORIZONS],
+        "entry_one": ONE_TAKE_PROMPT,
         "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
         "criteria": CRITERIA,
         "snapshot": SNAPSHOT_SCHEMA,
@@ -576,7 +534,7 @@ def template_dump() -> dict[str, Any]:
         "fingerprint": template_fingerprint(),
         "snapshot_schema": SNAPSHOT_SCHEMA,
         "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
-        "entry_one": {str(h.minutes): take_prompt(h) for _, h in HORIZONS},
+        "entry_one": ONE_TAKE_PROMPT,
         "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
         "criteria": CRITERIA,
     }

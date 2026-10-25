@@ -25,9 +25,9 @@ from jiaoyi.gate.entry import JevEntryGate, summarize
 from jiaoyi.gate.jev import MockJevTransport
 from jiaoyi.gate.questions import (
     MAX_SNAPSHOT_CHARS,
+    ONE_TAKE_PROMPT,
     entry_questions,
     entry_snapshot_one,
-    take_prompt,
 )
 from jiaoyi.gate.replay import Found, candidate
 from jiaoyi.keeper.keeper import _entry_block
@@ -46,56 +46,17 @@ from tests.test_risk_guard import guard
 
 ONE = {k: GOOD_LONG[k] for k in ("take", "stop_width", "size")}
 
-# spec 原文（2 小时档）：从开头到点名 tech 那句，一字不改
-SPEC_HEAD = (
-    "Should we open this trade in direction `side` right now? Judge it on the next 30 minutes "
-    "after round-trip fees (about 10 bps); after that a trailing stop and a position manager "
-    "handle the exit. Take it only if all of these hold together: price is likely to be further "
-    "in direction `side` in 30 minutes by more than fees; the trigger is a genuine move backed "
-    "by flow, not a fake-out; and the counterparty flow is not toxic (informed traders or a "
-    "liquidity trap that runs us over right after entry). Weigh the longer context in `tech`: "
-    "whether the 1-hour trend (`tech.trend_1h`, `tech.chg_1h_bps`) points in direction `side`, "
-    "whether the 5-minute RSI (`tech.rsi14_5m`) leans in direction `side`, and whether BTC's "
-    "last hour (`tech.btc_1h_bps`) moved the same way."
-)
-SPEC_CARD = (
-    "`card` is today's strategist plan for this coin: bias, the strategist's own reason "
-    "(`card.reason`), the entry zone, key levels with type (support/resistance) as bps from "
-    "price, stop/take-profit ranges, size cap, which signal types it allows, how old the plan "
-    "is, and the meeting's market view (`card.regime`)."
-)
-SPEC_TECH = (
-    "`tech` (when present) = technical context from 5-minute candles: price change and trend "
-    "(up/down/flat) over 15m/1h/4h, RSI(14) on 5m and 1h candles, where price sits in its recent "
-    "range (`range_hours` long, 0 = low, 100 = high), distance from today's VWAP in bps, distance "
-    "to the nearest card key level above and below in ATR units, and BTC's 1h change in bps."
-)
-
-
 # ---------------------------------------------------------------------- 题目
 
 
-def test_two_hour_prompt_is_the_spec_text_without_kronos() -> None:
-    p = take_prompt(horizon_for(120))
-    assert p.startswith(SPEC_HEAD)
-    assert SPEC_CARD in p and SPEC_TECH in p
-    assert "kronos" not in p  # Aaron：预测员不进拍板人看到的东西
-
-
-@pytest.mark.parametrize(
-    ("hold", "words", "keys"),
-    [
-        (30, "next 15 minutes", ("tech.trend_15m", "tech.rsi14_5m", "tech.btc_15m_bps")),
-        (60, "next 30 minutes", ("tech.trend_1h", "tech.rsi14_5m", "tech.btc_1h_bps")),
-        (240, "next 1 hour", ("tech.trend_4h", "tech.rsi14_15m", "tech.btc_4h_bps")),
-        (720, "next 2 hours", ("tech.trend_1d", "tech.rsi14_1h", "tech.btc_1d_bps")),
-    ],
-)
-def test_prompt_follows_hold_tier(hold: int, words: str, keys: tuple[str, ...]) -> None:
-    p = take_prompt(horizon_for(hold))
-    assert words in p and "{" not in p
-    for k in keys:
-        assert k in p
+def test_take_prompt_is_the_old_wording_without_kronos() -> None:
+    """10-25 A/B：「Take it only if all of these hold together」把「做」压到 0.08，改回旧措辞。"""
+    p = ONE_TAKE_PROMPT
+    assert p.startswith("Considering everything, should we take this trade in direction `side`")
+    assert "all of these hold together" not in p
+    # 和 A/B 测过的原文一字不差（目标说明里顺带提到 kronos，但快照里不放预测员）
+    take = next(q for q in entry_questions("one", 240) if q.id == "take")
+    assert take.prompt == p
 
 
 def test_one_question_request_validates(now: datetime) -> None:
@@ -111,7 +72,7 @@ def test_one_question_request_validates(now: datetime) -> None:
         snapshot="{}",
         questions=qs,
     )
-    assert req.questions[0].prompt.startswith("Should we open this trade")
+    assert req.questions[0].prompt.startswith("Considering everything")
     with pytest.raises(ValidationError):  # 别的组合（例如只有 take）不收
         c.JevRequest(
             request_id="r",
@@ -223,9 +184,9 @@ def test_one_snapshot_has_full_card_and_no_predictor(now: datetime) -> None:
     d = json.loads(entry_snapshot_one(sig, card(now), 120, ex))
     assert "kronos" not in d
     cd = d["card"]
-    assert cd["reason"] and cd["hold"] == "2h" and cd["age_min"] >= 0 and cd["left_min"] > 0
+    # 卡只给方向、关键位、止损止盈、仓位上限、大盘判断（10-25 A/B：理由 / 区间 / 卡龄压低「做」）
+    assert set(cd) == {"bias", "levels", "stop_atr", "tp_r", "size_max", "regime"}
     assert all(isinstance(lv, list) and len(lv) == 2 for lv in cd["levels"])
-    assert cd["signals"] and cd["regime"]
     assert d["book"]["imb_1m"] == 0.2 and "imb" not in d["book"]
     assert d["tech"] == {"chg_1h_bps": 12.0} and d["deriv"] == {"adl": "low"}
 
@@ -336,7 +297,7 @@ async def test_gate_asks_one_question_and_logs_extra(tmp_path: Path, now: dateti
     assert r.ok and {a.id for a in r.answers} == {"take", "stop_width", "size"}
     [rec] = log.read_day(now.date().isoformat())
     jv = rec.input["jev"]
-    assert jv["questions"] == ["take", "stop_width", "size"] and jv["template"] == "q7"
+    assert jv["questions"] == ["take", "stop_width", "size"] and jv["template"] == "q8"
     assert "tech" in jv["extra"] and "rest_ms" in jv["extra"]
     assert "tech" in json.loads(jv["snapshot"])
     assert summarize(r).startswith("做 take")

@@ -177,11 +177,13 @@
 `[fast_loop] gate_questions`：`"one"`（默认）只问一道 `take`，再加 `stop_width` / `size` 两题给保镖定止损档和仓位档
 （不参与放不放行）；`"six"` 是旧的 6 道题，留着回放对照。保镖按回答里有没有 `genuine` 判断用哪种口径。
 
-- 题目问「接下来多久」跟着最长持仓档走（`gate.context.horizon_for`）：30 分钟档 15 分钟、1–2 小时档 30 分钟（只有这档测过）、
-  4 小时档 1 小时、8 小时及以上 2 小时；技术面的三个周期同比例换（2 小时档 15m / 1h / 4h）。题目原文见
-  /mnt/project-files/research/jev-snapshot/spec.md，周期和键名按档替换（`gate.questions.take_prompt`）。
-- 快照（上限 3200 字）在旧快照基础上：完整作战卡（理由、进场区间、带类型的关键位、允许的信号、卡多旧 / 还剩多久、持仓档、
-  大盘判断 200 字）；`tech` 技术面（1 分钟线内存聚合，4 小时及以上档补拉 4h / 1d K 线）；`flow` 5 分钟到 1 小时的主动买卖、
+- 题目（模板 q8，`gate.questions.ONE_TAKE_PROMPT`）用旧的「Considering everything, should we take this trade in
+  direction `side` now, after fees?」加目标说明。10-25 线上没有新单：原来那句「Take it only if all of these hold together」
+  加完整作战卡，「做」中位只有 0.08（45 条 × 2 次，≥0.55 为 0）；换回这句、卡精简后中位 0.59（54/90），
+  数据在 /mnt/project-files/gate-ab*.jsonl、gate-blocks*.txt、gate-confirm.jsonl。技术面的三个周期仍跟最长持仓档走
+  （`gate.context.horizon_for`，2 小时档 15m / 1h / 4h）。
+- 快照（上限 3200 字）在旧快照基础上：作战卡（方向、带类型的关键位、止损止盈范围、仓位上限、大盘判断 200 字；理由、
+  进场区间、允许的信号、卡龄不给，A/B 里它们把「做」压低）；`tech` 技术面（1 分钟线内存聚合，4 小时及以上档补拉 4h / 1d K 线）；`flow` 5 分钟到 1 小时的主动买卖、
   大单、15 分钟爆仓；`book.imb_1m` / `imb_5m` 代替一瞬间的 `imb`；`deriv` 基差、离结算几分钟、近 3 次资金费率、大户人数多空比、
   自动减仓风险；`day` 24 小时行情。预测员**不进**快照。超长按 `card.regime` → `day` → `flow.big_15m` → `kronos` → `book` 删。
 - REST 补拉（大户人数多空比、主动买卖量比、资金费率、24 小时行情、长周期 K 线）在信号进来时就开始，和排队同时进行，
