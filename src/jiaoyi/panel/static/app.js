@@ -422,6 +422,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
+  else if (act === "chartfull") setChartFull(!S.chartFull);
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "ai") { S.ai = arg; render(); poll(); }
   else if (act === "rej") { S.rej = !S.rej; render(); }
@@ -1190,9 +1191,10 @@ P.positions = (arg) => {
     <section class="card mt"><div class="tw pos-wide"><table>
       <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
-    <section class="card mt">
+    <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
-        <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span></span></div>
+        <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
+          <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>止损</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${sel.trailing_stop_pct != null ? `<span><i style="border-color:var(--accent);border-style:solid"></i>移动止损（启动后，估算）</span><span><i style="border-color:var(--accent);opacity:.45"></i>启动线（赚到这里开始跟）</span>` : ""}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
       ${sel.trailing_stop_pct != null ? `<div class="small dim trail-note">${trailNote(sel)}</div>` : ""}
@@ -1209,6 +1211,15 @@ const CHART_COOP = {
   handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: false, vertTouchDrag: false },
   handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true },
 };
+// 全屏看图：同一块（走势图 + 周期按钮 + 图例）铺满屏幕，线和开仓点都在；Esc / ✕ / 切走页面退出
+function setChartFull(on) {
+  S.chartFull = on;
+  document.body.classList.toggle("chart-fs", on);
+  render();
+  setTimeout(() => { if (chart) chart.timeScale().fitContent(); }, 80); // 容器尺寸变了，等重排完再铺满
+}
+window.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.chartFull) setChartFull(false); });
+window.addEventListener("hashchange", () => { if (S.chartFull) setChartFull(false); });
 const chartsList = [];
 function lockChart(c, el) {
   chartsList.push(c);
