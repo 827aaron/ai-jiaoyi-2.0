@@ -388,9 +388,15 @@ def wilder_atr(rows: Sequence[Sequence[Any]], period: int = ATR_PERIOD) -> float
     return atr
 
 
+_BINANCE_INTERVALS = {
+    1: "1m", 3: "3m", 5: "5m", 15: "15m", 30: "30m", 60: "1h", 120: "2h", 240: "4h",
+    360: "6h", 480: "8h", 720: "12h", 1440: "1d",
+}  # fmt: skip
+
+
 def atr_interval(minutes: int) -> str:
-    """``risk.atr_period_min`` → 币安 K 线周期名。"""
-    return "1h" if minutes == 60 else f"{minutes}m"
+    """``risk.atr_period_min`` → 币安 K 线周期名（币安只认固定几个：240 是 ``4h``）。"""
+    return _BINANCE_INTERVALS.get(minutes, f"{minutes}m")
 
 
 TP_HINT = (1.2, 2.0)
@@ -451,6 +457,7 @@ def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
         long = _closed_atr(symbol, stop.long_period_min, end)[0] if stop.long_period_min else None
         return describe_atr(combine_atr(short, long, stop), price, stop)
     except Exception:
+        logger.warning("%s 算 ATR 失败，这场会拿不到 ATR 说明", symbol, exc_info=True)
         return describe_atr(None, None, stop)
 
 
@@ -500,6 +507,7 @@ def level_context(
         cands = build_candidates(price, atr, bars, daily, span)
         return LevelContext(price, atr, span, cands, basis)
     except Exception:
+        logger.warning("%s 算关键位候选失败，这场会没有候选关键位", symbol, exc_info=True)
         return LevelContext()
 
 
@@ -1072,6 +1080,10 @@ def convert_instructions(
         "The decision gives its trade on labelled lines: entry_min and entry_max are the two "
         "prices on its **Entry Zone** line, and size_tier_max is its **Size Tier** line, capped "
         "as above. An Entry Zone of none gives no zone.\n"
+        "key_levels: fill it from the candidate key levels listed below, the nearest up to 3 "
+        "supports and up to 3 resistances, copying each candidate's price. Breakout signals only "
+        "fire at card key levels, so an empty list disables them: leave it empty only when the "
+        "candidates are none.\n"
         "Choose allowed_signals to match the entry method in the conclusion; do not pick only "
         "chase-style signals when the conclusion waits for a zone.\n"
         f"{signal_kinds_note(p.hold_minutes)}"
@@ -2175,6 +2187,14 @@ class TradingAgentsEngine:
                     # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
                     raise ValueError("模型没有返回结构化结果")
                 cs = draft_to_card_symbol(draft, entry, levels, params.zone_required)
+                if live:
+                    live.step(
+                        "quality",
+                        "gate",
+                        f"关键位：候选 {len(levels.candidates)} 个，"
+                        f"会议写了 {len(draft.key_levels)} 个，"
+                        f"对上候选留下 {len(cs.key_levels)} 个",
+                    )
                 if why := direction_conflict(
                     cs.bias, rating, str(state.get("trader_investment_plan", ""))
                 ):
