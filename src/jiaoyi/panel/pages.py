@@ -80,6 +80,9 @@ class TrailItem(BaseModel):
     cost_usd: float = 0.0
     tag: str | None = None
     """额外标签，例如管家的「反向急查」（不是例行复查）。"""
+    signal_id: str | None = None
+    symbol: str | None = None
+    """这条记录属于哪个信号 / 币（风控员拒绝记录上的「重新检查」「放行」按钮靠它们发命令）。"""
 
 
 def is_against_check(r: DecisionRecord) -> bool:
@@ -674,6 +677,8 @@ def _item(r: DecisionRecord) -> TrailItem:
         latency_ms=r.latency_ms,
         cost_usd=r.cost_usd,
         tag="反向急查" if is_against_check(r) else None,
+        signal_id=r.signal_id,
+        symbol=r.symbol,
     )
 
 
