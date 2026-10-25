@@ -40,6 +40,7 @@ from jiaoyi.core.commands import (
     write_command,
 )
 from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config, with_profile
+from jiaoyi.core.hotconfig import hot_keys, restart_fingerprint
 from jiaoyi.core.pool_overrides import (
     CATEGORY_ACTIONS,
     POOL_ACTIONS,
@@ -196,6 +197,8 @@ def control_state(data_dir: str | Path, paths: ConfigPaths | None) -> Control:
         pw_set=password_set,
         writable=paths is not None,
         started_at=runtime_started_at(data_dir),
+        hot_applied_at=_runtime_field(data_dir, "hot_applied_at"),
+        hot_keys=hot_keys(),
         paper_only_ignored=paper_only_ignored(paths) if paths else [],
     )
 
@@ -210,13 +213,17 @@ def paper_only_ignored(paths: ConfigPaths) -> list[str]:
     return [name for key, name in PAPER_ONLY_SWITCHES.items() if fast.get(key) is True]
 
 
-def runtime_started_at(data_dir: str | Path) -> str | None:
+def _runtime_field(data_dir: str | Path, key: str) -> str | None:
     try:
         runtime = json.loads((Path(data_dir) / RUNTIME_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    at = runtime.get("started_at") if isinstance(runtime, dict) else None
+    at = runtime.get(key) if isinstance(runtime, dict) else None
     return at if isinstance(at, str) else None
+
+
+def runtime_started_at(data_dir: str | Path) -> str | None:
+    return _runtime_field(data_dir, "started_at")
 
 
 # ---------------------------------------------------------------- 配置
@@ -278,7 +285,7 @@ def config_pending(paths: ConfigPaths, data_dir: str | Path) -> bool | None:
     loaded = runtime.get("config_fingerprint") if isinstance(runtime, dict) else None
     if not isinstance(loaded, str):
         return None
-    return loaded != config_fingerprint(risk, app, slow)
+    return loaded != restart_fingerprint(risk, app, slow)
 
 
 # 档位给默认值的全部段（面板段 → 档位段）

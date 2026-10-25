@@ -103,6 +103,11 @@ class JevEntryGate:
         self._locks: dict[str, asyncio.Lock] = {}  # 每个币一把：同币一次只问一个
         self._queued: dict[str, asyncio.Event] = {}  # 同币排队的那一条；set() = 被更新的让掉
 
+    def reconfigure(self, *, max_wait_s: float, questions: str) -> None:
+        """配置热生效：排队最长等多久、问法。同时问几个（信号量）启动时定，换不了。"""
+        self._max_wait_s = max_wait_s
+        self._questions = questions
+
     async def evaluate(
         self, signal: CandidateSignal, card: BattleCard, now: datetime
     ) -> JevResponse:

@@ -132,6 +132,21 @@ class RuleTrigger:
         live: bool = False,
     ) -> None:
         self._cfg = cfg
+        self._live = live
+        self.refresh(dedup_s)
+        self._rec = recorder
+        self._predictor = predictor
+        self._prev_price: dict[str, float] = {}
+        self._last_fired: dict[str, datetime] = {}
+        self._watch: dict[str, _Watch] = {}
+        self._card: BattleCard | None = None
+        self._against: list[AgainstSignalEvent] = []  # 还没交给主循环的反向信号
+        self._against_at: dict[str, datetime] = {}  # 去重键 → 上次发反向信号的时间
+        self._against_result: dict[str, str] = {}  # 去重键 → 主循环给的处理结果
+
+    def refresh(self, dedup_s: int) -> None:
+        """按当前配置重算启动时抄进变量的开关（配置热生效时由 App 调用）。"""
+        cfg, live = self._cfg, self._live
         # volume_surge_live 关掉时 testnet / live 不出量能突增；paper 照出攒样本
         self._skip: frozenset[SignalKind] = (
             frozenset({SignalKind.VOLUME_SURGE})
@@ -150,15 +165,6 @@ class RuleTrigger:
             SignalKind.BTC_LEAD: BTC_LEAD_DEDUP,
         }
         self._dedup = timedelta(seconds=dedup_s)
-        self._rec = recorder
-        self._predictor = predictor
-        self._prev_price: dict[str, float] = {}
-        self._last_fired: dict[str, datetime] = {}
-        self._watch: dict[str, _Watch] = {}
-        self._card: BattleCard | None = None
-        self._against: list[AgainstSignalEvent] = []  # 还没交给主循环的反向信号
-        self._against_at: dict[str, datetime] = {}  # 去重键 → 上次发反向信号的时间
-        self._against_result: dict[str, str] = {}  # 去重键 → 主循环给的处理结果
 
     def _observe(self, f: FeatureSnapshot, now: datetime) -> _Watch:
         vr = f.values.get("vol_ratio_1m")

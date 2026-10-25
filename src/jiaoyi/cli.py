@@ -26,6 +26,7 @@ from jiaoyi.core.config import (
     load_app_config,
     load_risk_config,
 )
+from jiaoyi.core.hotconfig import ConfigFiles
 from jiaoyi.core.secrets import (
     KEYCHAIN_SERVICE,
     KNOWN_KEYS,
@@ -436,7 +437,12 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     try:
         risk, app_cfg, slow = _load(args)
-        app = App(risk, app_cfg, slow_cfg=slow)
+        app = App(
+            risk,
+            app_cfg,
+            slow_cfg=slow,
+            config_files=ConfigFiles(Path(args.risk), Path(args.app), Path(args.slow)),
+        )
     except (ConfigError, LiveGateError, MissingSecret) as e:
         print(e, file=sys.stderr)
         return 2

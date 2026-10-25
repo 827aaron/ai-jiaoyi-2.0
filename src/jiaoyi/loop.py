@@ -75,6 +75,7 @@ NEWS_POLL_EVERY_S = 120.0
 CREDIT_CHECK_EVERY_S = 120.0
 """模型额度看护多久看一眼（撞 402 要及时发；余额每小时才真去查一次）。"""
 COMMAND_POLL_EVERY_S = 1.0
+CONFIG_WATCH_EVERY_S = 3.0  # 看设置文件变没变（热生效，core/hotconfig.py）
 KEEPER_CONCURRENCY = 5
 """持仓管家一轮里最多几笔一起问 Jev。"""
 RESTART_WAIT_CLOSE_S = 60.0
@@ -338,6 +339,7 @@ class Runner:
             self._every(NEWS_POLL_EVERY_S, self.news_tick),
             self._every(CREDIT_CHECK_EVERY_S, self.app.credit_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
+            self._every(CONFIG_WATCH_EVERY_S, self.config_tick),
             # 有交易所连接时账本回填和收入流水由 LedgerSync 管（成交回报叫醒，60 秒兜底）
             (
                 asyncio.create_task(self.app.ledger.run())
@@ -976,6 +978,10 @@ class Runner:
             if snap is not None and snap.atr > 0:
                 out[e.symbol] = snap.atr
         return out
+
+    async def config_tick(self) -> None:
+        """设置文件改了就在这个空档换上热生效的项（core/hotconfig.py）；其余项仍要重启。"""
+        self.app.reload_config()
 
     async def slow_tick(self) -> None:
         now = self.app.clock()

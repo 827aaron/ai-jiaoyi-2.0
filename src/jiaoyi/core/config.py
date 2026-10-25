@@ -21,7 +21,7 @@ class ConfigError(Exception):
     """配置不合格。消息是给人看的中文，直接打印即可。"""
 
 
-def _read_toml(path: Path) -> dict[str, object]:
+def read_toml(path: Path) -> dict[str, object]:
     if not path.is_file():
         raise ConfigError(
             f"找不到配置文件 {path}。先运行 make init-config，从示例复制一份再按需修改。"
@@ -43,7 +43,7 @@ def _explain(path: Path, err: ValidationError) -> ConfigError:
 
 
 def load_risk_config(path: Path = DEFAULT_RISK_PATH) -> RiskConfig:
-    data = _read_toml(path)
+    data = read_toml(path)
     try:
         return RiskConfig.model_validate(data)
     except ValidationError as e:
@@ -76,7 +76,7 @@ def with_profile(raw: dict[str, object]) -> dict[str, object]:
 
 
 def load_app_config(path: Path = DEFAULT_APP_PATH) -> AppConfig:
-    data = with_profile(_read_toml(path))
+    data = with_profile(read_toml(path))
     try:
         return AppConfig.model_validate(data)
     except ValidationError as e:
