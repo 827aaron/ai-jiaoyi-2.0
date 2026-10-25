@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from datetime import datetime, timedelta
@@ -138,6 +139,7 @@ async def _run(
     p = {"signal_id": "sig-test-1", "symbol": "BTCUSDT", **p}
     write_command(tmp_path, _cmd(now, kind, n, **p))
     await r.command_tick()
+    await asyncio.gather(*r._tasks)
     return _result(tmp_path, f"cmd-{kind}-{n:04d}")
 
 
@@ -219,3 +221,46 @@ def test_release_keeps_strong_toxic_block_in_record_only_mode(now: datetime) -> 
         signal(now), toxic, card(now), account(now), now, market=signal(now).features, release=True
     )
     assert not v.approved and any("有毒" in r for r in v.reasons)
+
+
+class SlowGate(FakeGate):
+    """拍板一直卡着，直到测试放行。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+
+    async def evaluate(
+        self, signal: c.CandidateSignal, card: c.BattleCard, now: datetime
+    ) -> c.JevResponse:
+        self.started.set()
+        await self.release.wait()
+        return await super().evaluate(signal, card, now)
+
+
+async def test_pending_recheck_does_not_block_pause_and_is_one_per_symbol(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, _ex, _risk, _ = await _runner(tmp_path, now)
+    slow = SlowGate()
+    r.m = dataclasses.replace(r.m, gate=slow)
+    write_command(
+        tmp_path, _cmd(now, "recheck_signal", 1, signal_id="sig-test-1", symbol="BTCUSDT")
+    )
+    await r.command_tick()  # 立刻返回，回执还没有
+    await asyncio.wait_for(slow.started.wait(), 2)
+    assert not (tmp_path / "panel_commands" / "done" / "cmd-recheck_signal-0001.json").exists()
+    write_command(tmp_path, _cmd(now, "pause", 2, reason="x"))
+    write_command(
+        tmp_path, _cmd(now, "release_signal", 3, signal_id="sig-test-1", symbol="BTCUSDT")
+    )
+    await r.command_tick()  # 拍板还卡着，暂停照样办完；同币第二个被拒
+    assert _result(tmp_path, "cmd-pause-0002")["status"] == "done"
+    assert r.app.paused is not None
+    res = _result(tmp_path, "cmd-release_signal-0003")
+    assert res["status"] == "rejected" and "还没跑完" in res["detail"]
+    slow.release.set()
+    await asyncio.gather(*r._tasks)
+    assert _result(tmp_path, "cmd-recheck_signal-0001")["status"] == "rejected"  # 期间已暂停
+    assert r._manual_busy == set() and r._inflight == set()

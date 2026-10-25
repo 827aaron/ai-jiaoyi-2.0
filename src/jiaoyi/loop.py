@@ -319,7 +319,10 @@ class Runner:
         self._restart_exit = restart_exit
         # restart 的回执在进程真要退出前一刻才写（面板看到“完成”时进程确实在退）
         self._restart_receipt: tuple[CommandInbox, Path, CommandResult] | None = None
-        self._inflight: set[str] = set()  # 还在跑、回执要等跑完才写的面板指令（重新开会）
+        self._inflight: set[str] = (
+            set()
+        )  # 还在跑、回执要等跑完才写的面板指令（重新开会、重新检查 / 放行）
+        self._manual_busy: set[str] = set()  # 正在重新检查 / 放行的币：同一个币同时只跑一个
         self._cmd_path: Path | None = None
         self._exit_lock = threading.Lock()
         self._exited = False
@@ -798,6 +801,27 @@ class Runner:
                 return
             # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
             self.positions = [*self.positions, pos]
+
+    async def _manual_chain(self, cmd: PanelCommand, path: Path) -> None:
+        """后台跑重新检查 / 放行，跑完写回执（文字和同步时一样）。"""
+        status: Literal["done", "rejected", "failed"]
+        try:
+            status, detail = await self._manual_signal(cmd, release=cmd.kind == "release_signal")
+        except Exception as e:
+            log.exception("面板指令执行失败")
+            status, detail = "failed", repr(e)[:200]
+        finally:
+            self._manual_busy.discard(cmd.params.get("symbol", ""))
+            self._inflight.discard(cmd.id)
+        now = self.app.clock()
+        outcome = Outcome.ACTION if status == "done" else Outcome.REJECT
+        self._guard_note(outcome, f"面板指令 {cmd.kind}（{status}）：{detail}"[:200], now)
+        try:
+            CommandInbox(self.app.app_cfg.data_dir).finish(
+                path, CommandResult(id=cmd.id, kind=cmd.kind, status=status, detail=detail, ts=now)
+            )
+        except OSError:
+            log.exception("写面板指令结果失败")
 
     async def _manual_signal(
         self, cmd: PanelCommand, *, release: bool
@@ -1332,6 +1356,22 @@ class Runner:
                 result = CommandResult(
                     id=cmd.id, kind=cmd.kind, status="done", detail="已重启", ts=now
                 )
+            elif cmd.kind in ("recheck_signal", "release_signal"):
+                # 要等拍板人，放后台跑，别卡住后面的暂停 / 平仓指令；回执跑完才写
+                sym = cmd.params.get("symbol", "")
+                if sym in self._manual_busy:
+                    result = CommandResult(
+                        id=cmd.id,
+                        kind=cmd.kind,
+                        status="rejected",
+                        detail=f"{sym} 上一次重新检查 / 放行还没跑完，稍后再点",
+                        ts=now,
+                    )
+                else:
+                    self._manual_busy.add(sym)
+                    self._inflight.add(cmd.id)
+                    self._spawn(self._manual_chain(cmd, path))
+                    continue
             else:
                 status: Literal["done", "rejected", "failed"]
                 self._cmd_path = path
@@ -1413,8 +1453,6 @@ class Runner:
                 return "rejected", f"没有持仓 {pid}"
             self._spawn(self.close(pos, CloseReason.MANUAL))
             return "done", f"已提交平仓 {pos.symbol} {pid}"
-        if cmd.kind in ("recheck_signal", "release_signal"):
-            return await self._manual_signal(cmd, release=cmd.kind == "release_signal")
         if cmd.kind in POOL_ACTIONS:
             sym = cmd.params.get("symbol", "")
             try:
