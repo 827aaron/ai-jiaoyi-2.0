@@ -294,6 +294,8 @@ def test_entry_zone_rules() -> None:
 
     base = dict(
         bias="short",
+        key_levels=[],
+        allowed_signals=[],
         size_tier_max="M",
         notional_min=0,
         notional_max=1,
@@ -329,6 +331,7 @@ def test_zone_required_turns_card_into_no_trade() -> None:
 
     d = _CardSymbolDraft(
         bias="short",
+        key_levels=[],
         size_tier_max="M",
         notional_min=0,
         notional_max=1,
