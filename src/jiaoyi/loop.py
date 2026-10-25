@@ -816,6 +816,8 @@ class Runner:
             return "rejected", "主程序正在重启"
         if self.app.paused is not None:
             return "rejected", "人工暂停开新仓中，先恢复"
+        if sym in self.app.pool_overrides.blacklist:  # 拉黑 = 立即不开新仓（保镖不管这个）
+            return "rejected", f"{sym} 你拉黑了，不开新仓"
         now = self.app.clock()
         card = self.m.cards.current(now)
         if card is None or card.for_symbol(sym) is None:
@@ -844,8 +846,12 @@ class Runner:
         jev = await self.m.gate.evaluate(new, card, now)
         async with self._open_lock:
             now = self.app.clock()
-            if self.app.paused is not None or self._restarting:
-                return "rejected", "拍板期间已暂停或重启，没有开仓"
+            if (
+                self.app.paused is not None
+                or self._restarting
+                or sym in self.app.pool_overrides.blacklist
+            ):
+                return "rejected", "拍板期间已暂停、重启或拉黑，没有开仓"
             fresh = self.m.cards.current(now)
             if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
                 return "rejected", "拍板期间作战卡换了，请再点一次"

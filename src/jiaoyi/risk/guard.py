@@ -441,7 +441,7 @@ class RiskGuardImpl:
                 tox = jev.answer(EntryQuestion.TOXICITY.value)
                 p_tox = tox.probs.get("high") if tox is not None else None
                 if p_tox is not None and p_tox >= TOXIC_ALWAYS_BLOCK:
-                    soft_sink.append(
+                    reasons.append(
                         f"订单流有毒概率 {p_tox:.2f} ≥ {TOXIC_ALWAYS_BLOCK}（只记不拦模式也拦）"
                     )
             else:

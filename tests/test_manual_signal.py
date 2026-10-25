@@ -182,6 +182,13 @@ async def test_manual_preconditions(tmp_path: Path, now: datetime) -> None:
     res = await _run(r, tmp_path, now, "release_signal", 2)
     assert res["status"] == "rejected" and "已经有持仓" in res["detail"]
     ex.held = []
+    r.app.pool_overrides = r.app.pool_overrides.model_copy(
+        update={"blacklist": frozenset({"BTCUSDT"})}
+    )
+    for n, kind in ((6, "release_signal"), (7, "recheck_signal")):
+        res = await _run(r, tmp_path, now, kind, n)
+        assert res["status"] == "rejected" and "拉黑" in res["detail"]
+    r.app.pool_overrides = r.app.pool_overrides.model_copy(update={"blacklist": frozenset()})
     r.m.cards.card = None  # type: ignore[attr-defined]
     res = await _run(r, tmp_path, now, "recheck_signal", 3)
     assert res["status"] == "rejected" and "作战卡" in res["detail"]
@@ -203,3 +210,12 @@ def test_signal_cache_is_bounded(now: datetime) -> None:
     from jiaoyi.loop import SIGNAL_CACHE
 
     assert SIGNAL_CACHE >= 200
+
+
+def test_release_keeps_strong_toxic_block_in_record_only_mode(now: datetime) -> None:
+    toxic = jev(toxicity={"low": 0.1, "high": 0.9})
+    g = RiskGuardImpl(RISK, FAST, Lots(), gate_record_only=True)
+    v = g.review_manual(
+        signal(now), toxic, card(now), account(now), now, market=signal(now).features, release=True
+    )
+    assert not v.approved and any("有毒" in r for r in v.reasons)
