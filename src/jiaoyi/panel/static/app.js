@@ -501,6 +501,21 @@ function trailTag(p, brief) {
   if (t.active) return `<div class="small" title="${tip}"><span class="pill p-accent">跟踪中</span>${brief ? "" : ` ${price(t.stop_price, p.symbol)}`} <span class="dim">估算</span></div>`;
   return `<div class="small dim" title="${tip}"><span class="pill">未启动</span>${brief ? "" : ` 赚到 ${act} 开始跟`}</div>`;
 }
+// 到这个价成交的预估净盈亏（U）：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次吃单费；没有费率 / 价就不估
+function lvlPnl(p, lvl) {
+  if (lvl == null || p.entry_price == null || !p.quantity) return null;
+  const gross = p.quantity * (lvl - p.entry_price) * (p.side === "long" ? 1 : -1);
+  const fee = p.fee_bps == null ? 0 : p.quantity * (p.entry_price + lvl) * p.fee_bps / 10000;
+  return gross - fee;
+}
+const lvlEst = (p, lvl) => { const v = lvlPnl(p, lvl); return v == null ? "" : `<span class="num ${cls(v)}">${signed(v, 0)} U</span>`; };
+const LVL_TIP = "到这个价成交时预估的净盈亏：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次的吃单手续费。滑点、资金费没算。";
+// 止损格：移动止损已经跟上时按它现在的价估（比原止损更接近实际会落袋的数）
+function slCell(p) {
+  const t = p.trail, trailing = t && t.active && t.stop_price != null;
+  const lvl = trailing ? t.stop_price : p.stop_loss_price;
+  return `${price(lvl, p.symbol)}${trailing ? ' <span class="dim small">移动</span>' : ""}<div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
+}
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
 // 系统值：持仓用持仓自己的开仓 / 止损 / 止盈；没持仓按现价 + ATR 估（双向只给距离）
@@ -1138,7 +1153,7 @@ P.positions = (arg) => {
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
     const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}</div>` : "";
     const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
-    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>`;
+    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? `<div class="small" title="${LVL_TIP}">${lvlEst(p, p.lifeboat_price)}</div>` : ""}`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
@@ -1147,7 +1162,7 @@ P.positions = (arg) => {
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
-      <td class="r num">${price(p.stop_loss_price, p.symbol)}${trailTag(p)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}</td>
+      <td class="r num">${slCell(p)}${trailTag(p)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}<div class="small" title="${LVL_TIP}">${lvlEst(p, p.take_profit_price)}</div></td>
       <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
   // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
@@ -1160,8 +1175,8 @@ P.positions = (arg) => {
       <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
-        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
-      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
+        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${slCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 盈 ${price(p.take_profit_price, p.symbol)} ${lvlEst(p, p.take_profit_price)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
+      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) + " " + lvlEst(p, p.lifeboat_price) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
   const trail = window.__recs.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`).join("");
