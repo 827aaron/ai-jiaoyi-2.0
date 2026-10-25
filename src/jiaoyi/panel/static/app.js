@@ -2057,6 +2057,9 @@ const PLAIN = {
   keeper_close_p: "管家觉得该平的把握过多少就平（0–1）",
   keeper_close_p_strong: "把握过多少不用再确认直接平（0–1）",
   keeper_confirmations: "管家连续几次都说平才平",
+  giveback_on: "回吐保护开关（代码规则，不问模型）",
+  giveback_close_pct: "回吐保护：最高浮盈吐掉百分之几就全平",
+  giveback_arm_r: "回吐保护：最高浮盈到过几倍止损距离才开始看",
   patrol_shock_pct_1m: "1 分钟内往亏的方向走了百分之几就全平",
   patrol_alert_pct_1m: "1 分钟内往亏的方向走了百分之几就叫管家马上看",
   breakout_vol_ratio: "成交量是平时几倍算放量突破",
@@ -2398,6 +2401,7 @@ const ROLES = [
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
+    { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
   ] },
   { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
@@ -2432,7 +2436,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "r
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", giveback_close_pct: "%", giveback_arm_r: " 倍", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",

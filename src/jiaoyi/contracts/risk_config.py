@@ -414,6 +414,23 @@ class FastLoopConfig(Contract):
         default=0.85, ge=0.5, le=1.0, description="概率明显过线时不用等第二次确认。"
     )
     keeper_confirmations: int = Field(default=2, ge=1, le=5, description="连续几次一致才平仓。")
+    giveback_on: bool = Field(
+        default=True,
+        description="回吐保护开关（代码规则，不问管家模型）：最高浮盈到过 giveback_arm_r 倍止损距离"
+        "之后，浮盈从最高点吐掉 giveback_close_pct % 就全平。Aaron 10-25，默认开。",
+    )
+    giveback_close_pct: float = Field(
+        default=45.0,
+        ge=10.0,
+        le=95.0,
+        description="回吐保护：浮盈从最高点吐掉这个百分比就全平。Aaron 10-25，默认 45。",
+    )
+    giveback_arm_r: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=10.0,
+        description="回吐保护从最高浮盈到几倍止损距离（R）才开始看。Aaron 10-25，默认 0.5。",
+    )
     # ---- 巡逻兵
     patrol_shock_pct_1m: float = Field(
         default=2.0, ge=0.2, le=20.0, description="1 分钟内对持仓不利的波动达到这个百分比就全平。"
