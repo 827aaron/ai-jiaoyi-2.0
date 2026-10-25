@@ -65,6 +65,8 @@ ROLE_NAMES: dict[Role, str] = {
     Role.ALERTING: "告警",
 }
 TEAM_RECORD_LIMIT = 200
+TRAIL_LIMIT = 100
+"""持仓页每笔持仓的走势里，管家记录最多给这么多条（最新的）；其它角色的都给。"""
 
 
 class TrailItem(BaseModel):
@@ -253,11 +255,16 @@ def build_positions(
         )
     trails: dict[str, list[TrailItem]] = {}
     for p in live:
-        trails[p.position_id] = [
-            _item(r)
+        mine = [
+            r
             for r in records
             if r.position_id == p.position_id or (r.signal_id and r.signal_id == p.signal_id)
         ]
+        # 管家每 ~20 秒查一次、每条带整份快照：昨天开的仓两天下来上万条，接口体积撑爆页面。
+        # 只留最新 TRAIL_LIMIT 条管家记录；信号、拍板、风控员、执行这些链上的头几步都留着
+        keeper = [r for r in mine if r.role is Role.KEEPER]
+        drop = {id(r) for r in keeper[:-TRAIL_LIMIT]}
+        trails[p.position_id] = [_item(r) for r in mine if id(r) not in drop]
     pnl = [v.unrealized_usdt for v in views if v.unrealized_usdt is not None]
     return PositionsPage(
         positions=views,

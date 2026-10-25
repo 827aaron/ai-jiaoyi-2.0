@@ -500,6 +500,31 @@ def test_team_log_looks_back_into_older_files_when_recent_days_are_thin(tmp_path
     assert [r.summary for r in got] == ["3 天前"] and more is True
 
 
+def test_position_trail_caps_keeper_records_but_keeps_the_chain(tmp_path: Path) -> None:
+    """管家每 20 秒一条、各带整份快照：走势里只留最新一批；链上其它步骤都留。"""
+    from jiaoyi.panel.pages import TRAIL_LIMIT, build_positions
+
+    _seed(tmp_path)
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    pos = build_positions(files, HB, RISK, NOW, {}).positions[0]
+    log = JsonlDecisionLog(tmp_path)
+    log.write(
+        _rec(
+            c.Role.GATE,
+            c.Outcome.PASS,
+            "拍板",
+            NOW - timedelta(hours=30),
+            position_id=pos.position_id,
+        )
+    )
+    for i in range(TRAIL_LIMIT + 50):
+        ts = NOW - timedelta(seconds=20 * (TRAIL_LIMIT + 50 - i))
+        log.write(_rec(c.Role.KEEPER, c.Outcome.HOLD, f"拿住 {i}", ts, position_id=pos.position_id))
+    trail = build_positions(files, HB, RISK, NOW, {}).trails[pos.position_id]
+    assert sum(1 for t in trail if t.role is c.Role.KEEPER) == TRAIL_LIMIT
+    assert any(t.text == "拍板" for t in trail) and trail[-1].text == f"拿住 {TRAIL_LIMIT + 49}"
+
+
 async def test_kline_source_validates_and_parses() -> None:
     from jiaoyi.panel.market import KlineError, KlineSource
 
