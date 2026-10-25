@@ -29,6 +29,8 @@ from jiaoyi.core.recorder import local_day
 log = logging.getLogger(__name__)
 
 DONE = {PositionStatus.CLOSED, PositionStatus.FAILED}
+ROLE_LOOKBACK_DAYS = 14
+"""团队页某角色最近几条不够时，往前翻多少天的旧日志。"""
 
 
 @dataclass
@@ -97,6 +99,34 @@ class PanelFiles:
             out += [r for r in self._decisions.read_day(d) if local_day(r.ts, self.tz) == today]
         out.sort(key=lambda r: r.ts)
         return out
+
+    def decisions_days(self, now: datetime) -> list[DecisionRecord]:
+        """昨天和今天两个 UTC 日的全部记录（不按曼谷日截断），时间升序。
+
+        列表类页面（信号流、团队页、持仓走势、信号链）用它：曼谷 0 点翻日后不会一片空白。
+        各项“今天”统计仍用 ``decisions_today``。"""
+        utc_today = now.date()
+        out: list[DecisionRecord] = []
+        for d in (utc_today - timedelta(days=1), utc_today):
+            out += self._decisions.read_day(d)
+        out.sort(key=lambda r: r.ts)
+        return out
+
+    def role_records(
+        self, role: Role, limit: int, now: datetime
+    ) -> tuple[list[DecisionRecord], bool]:
+        """这个角色最新的 ``limit`` 条记录（最新在前，不分哪天），再多一条的话第二项为 True。
+
+        先用昨天 + 今天的；不够就一天天往前翻旧文件，最多翻 ``ROLE_LOOKBACK_DAYS`` 天。"""
+        out = [r for r in self.decisions_days(now) if r.role is role]
+        day = now.date() - timedelta(days=2)
+        back = 0
+        while len(out) <= limit and back < ROLE_LOOKBACK_DAYS:
+            out = self._old_day(day, frozenset({role})) + out
+            day -= timedelta(days=1)
+            back += 1
+        newest = out[::-1]
+        return newest[:limit], len(newest) > limit
 
     def decisions_since(
         self, start: datetime, now: datetime, roles: frozenset[Role]

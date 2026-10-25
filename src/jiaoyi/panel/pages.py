@@ -198,7 +198,7 @@ class TeamPage(BaseModel):
     roles: list[RoleCard]
     selected: Role
     records: list[TrailItem]
-    """所选角色今天的记录，最新在前。"""
+    """所选角色最新的记录（不分哪天），最新在前。"""
     meetings: list[MeetingSummary] = []
     """选中军师团时：每个币最近一场会（data/meeting_live/），正在开的在前。"""
     market: MeetingSummary | None = None
@@ -232,7 +232,7 @@ def build_positions(
     prices: dict[str, tuple[float, PriceSrc]] | None = None,
 ) -> PositionsPage:
     ledger = files.ledger()
-    records = files.decisions_today(now)
+    records = files.decisions_days(now)  # 昨天开的仓走势也要，不按曼谷日截断
     live = ledger.live()
     views = position_views(
         live, records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
@@ -505,7 +505,8 @@ def build_team(
             card.detail = shown
         cards.append(card)
     chosen = selected or Role.GATE
-    mine = [_item(r) for r in reversed(records) if r.role is chosen][:TEAM_RECORD_LIMIT]
+    got, _ = files.role_records(chosen, TEAM_RECORD_LIMIT, now)  # 最新 N 条，不分哪天
+    mine = [_item(r) for r in got]
     meets = meetings if chosen is Role.COMMANDER else []
     market = next((m for m in meetings if m.symbol == MARKET), None)
     against = _recent_against(status, now)
@@ -663,7 +664,7 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
 
 def build_signal(files: PanelFiles, now: datetime, signal_id: str) -> list[TrailItem]:
     """一个信号今天的整条链：哨兵 → 拍板 → 风控员 → 执行 → 盯仓。"""
-    return [_item(r) for r in files.decisions_today(now) if r.signal_id == signal_id]
+    return [_item(r) for r in files.decisions_days(now) if r.signal_id == signal_id]
 
 
 def _item(r: DecisionRecord) -> TrailItem:

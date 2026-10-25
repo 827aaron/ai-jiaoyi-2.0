@@ -40,7 +40,7 @@ from jiaoyi.panel.trailing import TrailEstimate
 
 STALE_S = 120.0
 """主循环每 30 秒心跳一次；4 个周期没更新就当掉线。"""
-FEED_LIMIT = 30
+FEED_LIMIT = 100
 ALERT_LIMIT = 12
 
 LampState = Literal["ok", "slow", "bad", "off"]
@@ -289,6 +289,7 @@ def build_overview(
 ) -> Overview:
     status = files.module_status()
     records = files.decisions_today(now)
+    recent = files.decisions_days(now)  # 列表类（信号流、持仓走势）不按曼谷日截断
     ledger = files.ledger()
     today = local_day(now, risk.day_reset_tz).isoformat()
 
@@ -299,7 +300,7 @@ def build_overview(
     kpis = compute_kpis(files, ledger, hb, risk, now)
     halted, halt_pct = kpis.halted, kpis.halt_pct
     positions = position_views(
-        ledger.live(), records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
+        ledger.live(), recent, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
     )
 
     # ---- 今日统计
@@ -355,7 +356,7 @@ def build_overview(
             risk,
             kpis.equity_usdt,
         ),
-        feed=_feed(records),
+        feed=_feed(recent),
         positions=positions,
         tiles=tiles,
         alerts=_alerts(records, halted, halt_pct),
@@ -823,7 +824,7 @@ def _parse_ts(raw: object) -> datetime | None:
 _FEED_ROLES = {Role.GATE, Role.RISK_GUARD, Role.EXECUTOR, Role.KEEPER, Role.PATROL}
 
 
-def _feed(records: list[DecisionRecord]) -> list[FeedItem]:
+def _feed(records: list[DecisionRecord], limit: int = FEED_LIMIT) -> list[FeedItem]:
     out: list[FeedItem] = []
     for r in reversed(records):
         if r.role not in _FEED_ROLES:
@@ -841,7 +842,7 @@ def _feed(records: list[DecisionRecord]) -> list[FeedItem]:
                 signal_id=r.signal_id,
             )
         )
-        if len(out) >= FEED_LIMIT:
+        if len(out) >= limit:
             break
     return out
 
