@@ -369,7 +369,7 @@ ATR_PERIOD = 14
 def wilder_atr(rows: Sequence[Sequence[Any]], period: int = ATR_PERIOD) -> float | None:
     """币安 K 线行 → Wilder ATR（前 ``period`` 根 TR 的均值起步，再逐根平滑）。
 
-    算法与快环特征层 / 保镖用的 ATR 一致，这样“止损 1–2 倍 ATR”两边说的是同一把尺子。
+    算法与快环特征层 / 风控员用的 ATR 一致，这样“止损 1–2 倍 ATR”两边说的是同一把尺子。
     根数不够返回 None。
     """
     trs = [
@@ -400,7 +400,7 @@ def atr_interval(minutes: int) -> str:
 
 
 TP_HINT = (1.2, 2.0)
-"""出卡提示词里建议的止盈倍数范围（研究 v3）；硬范围仍是保镖的 min_tp_r–max_tp_r。"""
+"""出卡提示词里建议的止盈倍数范围（研究 v3）；硬范围仍是风控员的 min_tp_r–max_tp_r。"""
 
 
 def stop_atr_name(stop: StopScale) -> str:
@@ -412,7 +412,7 @@ def stop_atr_name(stop: StopScale) -> str:
 
 
 def combine_atr(short: float | None, long: float | None, stop: StopScale) -> float | None:
-    """stop_atr = √(短 × 长)；没有长周期用短周期；长周期拿不到先只用短周期（同保镖）。"""
+    """stop_atr = √(短 × 长)；没有长周期用短周期；长周期拿不到先只用短周期（同风控员）。"""
     if short is None or not stop.long_period_min or long is None:
         return short
     return math.sqrt(short * long)
@@ -451,7 +451,7 @@ def describe_atr(atr: float | None, price: float | None, stop: StopScale) -> str
 
 
 def atr_context(symbol: str, end: datetime, stop: StopScale) -> str:
-    """取与保镖同周期的 K 线算 stop_atr（不乘时段系数）。失败只说明不可用，不影响开会。"""
+    """取与风控员同周期的 K 线算 stop_atr（不乘时段系数）。失败只说明不可用，不影响开会。"""
     try:
         short, price = _closed_atr(symbol, stop.period_min, end)
         long = _closed_atr(symbol, stop.long_period_min, end)[0] if stop.long_period_min else None

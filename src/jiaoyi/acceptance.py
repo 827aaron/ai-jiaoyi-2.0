@@ -9,7 +9,7 @@
 
 依赖的日志约定（各角色写 ``DecisionRecord`` 时遵守，回放框架写的也是这一套）：
 
-- 保镖放行：``role=risk_guard, outcome=pass``，``output`` 是 ``OrderIntent`` 的 JSON，
+- 风控员放行：``role=risk_guard, outcome=pass``，``output`` 是 ``OrderIntent`` 的 JSON，
   带 ``signal_id``。
 - 拍板人：``role=gate``，Jev 失败时 ``outcome=error``，带 ``signal_id``。
 - 开仓成交：``role=executor, outcome=action``，带 ``signal_id`` 和 ``position_id``。
@@ -147,7 +147,7 @@ def audit(
         no_pass = [r for r in opens if r.signal_id not in passes or passes[r.signal_id] > r.ts]
         add(
             Check(
-                "每笔开仓都有保镖放行在先",
+                "每笔开仓都有风控员放行在先",
                 not no_pass,
                 f"开仓 {len(opens)} 笔，缺放行记录 {len(no_pass)} 笔" + _ids(no_pass),
             )
@@ -275,10 +275,10 @@ def _intent_problems(r: DecisionRecord, risk: RiskConfig) -> list[str]:
         return [f"{r.record_id} 不是合法的放行指令"]
     probs = []
     if approved_by != "risk_guard":
-        probs.append(f"{iid} 不是保镖签发")
+        probs.append(f"{iid} 不是风控员签发")
     if lev > risk.max_leverage:
         probs.append(f"{iid} 杠杆 {lev} 超过 {risk.max_leverage}")
-    # 日志里没有下单那一刻的权益，只能核绝对硬顶；权益倍数由保镖下单时封顶（有单测）
+    # 日志里没有下单那一刻的权益，只能核绝对硬顶；权益倍数由风控员下单时封顶（有单测）
     if notional > risk.notional_cap(None) + 1e-6:
         probs.append(f"{iid} 名义 {notional:.0f} 超过 {risk.notional_cap(None):.0f}")
     if lifeboat < stop * risk.lifeboat_stop_multiplier * (1 - 1e-6):

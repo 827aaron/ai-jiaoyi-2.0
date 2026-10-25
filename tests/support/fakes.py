@@ -152,7 +152,7 @@ class RecordingAlerter:
 
 # ---------------------------------------------------------------- 执行
 class FakeExecutorAdapter:
-    """内存里的执行器：只接受保镖签发的 ``OrderIntent``，开仓后记录持仓。"""
+    """内存里的执行器：只接受风控员签发的 ``OrderIntent``，开仓后记录持仓。"""
 
     def __init__(self, equity: float = 10_000.0, now: datetime = b.T0) -> None:
         self.opened: list[OrderIntent] = []
@@ -163,7 +163,7 @@ class FakeExecutorAdapter:
 
     async def open(self, intent: OrderIntent) -> PositionRecord:
         if not isinstance(intent, OrderIntent) or intent.approved_by != "risk_guard":
-            raise TypeError("执行器只接受保镖签发的 OrderIntent")
+            raise TypeError("执行器只接受风控员签发的 OrderIntent")
         self.opened.append(intent)
         rec = PositionRecord(
             position_id=f"pos-{intent.intent_id}",

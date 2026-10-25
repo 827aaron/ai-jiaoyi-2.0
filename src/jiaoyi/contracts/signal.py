@@ -1,6 +1,6 @@
 """候选信号：哨兵发现、交给拍板人判断的东西。
 
-候选信号不是开仓指令。它只说“这里可能有机会”，后面还要过拍板人（Jev）和保镖。
+候选信号不是开仓指令。它只说“这里可能有机会”，后面还要过拍板人（Jev）和风控员。
 同一个 ``dedup_key`` 在冷却期（默认 30 秒）内只发一次。
 
 JSON 示例见 ``contracts/examples/candidate_signal.json``。
@@ -30,7 +30,7 @@ class CandidateSignal(Contract):
         default=None,
         ge=1,
         description="触发时作战卡的版本号。同一天的 card_id 不变、每次刷新版本加 1，"
-        "保镖比 (card_id, card_version) 判断拍板期间卡有没有换；没带版本的信号保镖一律拒绝。",
+        "风控员比 (card_id, card_version) 判断拍板期间卡有没有换；没带版本的信号风控员一律拒绝。",
     )
     features: FeatureSnapshot
     forecast: Forecast | None = Field(default=None, description="预测员关掉或过期时为空。")

@@ -28,7 +28,7 @@ const MODE = { paper: "模拟盘", testnet: "测试网", live: "实盘" };
 const BIAS = { long: ["偏多", "p-long"], short: ["偏空", "p-short"], both: ["双向", "p-accent"], no_trade: ["观望", ""], unknown: ["没结论", ""] };
 const SIDE = { long: ["多", "up"], short: ["空", "down"] };
 const LIFEBOAT = { active: "保命 ✓", pending: "⚠ 保命挂单中", missing: "⚠ 保命缺失", triggered: "保命已触发", cancelled: "保命已撤" };
-const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "保镖", commander: "军师团", keeper: "管家", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
+const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "风控员", commander: "军师团", keeper: "管家", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
 const OUTCOME = { pass: ["放行", "p-long"], reject: ["拒绝", "p-short"], hold: ["拿住", ""], close: ["平仓", "p-accent"], action: ["动作", "p-accent"], error: ["出错", "p-warn"], info: ["信息", ""] };
 const CAT = { major: "主流币", alt: "山寨币", crypto_stock: "加密概念股", us_tech: "美股科技", precious_metal: "贵金属", other: "其他" };
 // 币名旁的类型小字（主流币 / 山寨币 …），和作战卡同写法
@@ -159,7 +159,7 @@ const CMD = {
   set_category_cap: { title: "这一类最多进池几个", text: "0 = 这一类一个都不要。主程序马上重新选币。", ok: "保存", pw: true, cap: true },
   reset_category: { title: "恢复默认开关", text: "去掉你在这里改过的开关，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
   reset_category_cap: { title: "恢复默认上限", text: "去掉你在这里改过的上限，恢复默认。主程序马上重新选币。", ok: "恢复默认", pw: true },
-  recheck_signal: { title: "重新检查", text: "按现在的价格把这个信号的开仓检查重跑一遍（拍板人 + 保镖），只看结果、不下单；结果会写进这条信号的记录里。拍板人那一步会花一点点模型费用。", ok: "重新检查" },
+  recheck_signal: { title: "重新检查", text: "按现在的价格把这个信号的开仓检查重跑一遍（拍板人 + 风控员），只看结果、不下单；结果会写进这条信号的记录里。拍板人那一步会花一点点模型费用。", ok: "重新检查" },
   release_signal: { title: "人工放行", text: "按现在的价格、作战卡上的仓位和止损止盈，跳过拒绝它的那条过滤，立刻开仓；币安的硬限制（最小下单量、杠杆上限等）照旧。开仓会写进记录并推 Telegram，记为「人工放行」。", ok: "放行开仓", danger: true, pw: true },
   refresh_cards: { title: "重新开会出卡", text: "从选币开始把整条链重跑一遍：选币 → 总盘会 → 军师团 → 写新作战卡，不沿用上一轮结论（会花一次大模型费用，要几分钟）。", ok: "开会" },
 };
@@ -478,21 +478,21 @@ const splitIdle = (list) => [list.filter((s) => s.bias !== "no_trade"), list.fil
 const idleLine = (idle) => `观望：${idle.slice(0, 6).map((s) => coin(s.symbol)).join("、")}${idle.length > 6 ? " 等" : ""} 共 ${idle.length} 个`;
 
 // 作战卡：每个币默认折叠成一行（方向 / 止损 / 止盈 / 杠杆 / 仓位 / 到期），点开看计划、价格刻度、军师原话和开会过程。
-// 止损 / 止盈是保镖真会用的口径：距离 = 卡上倍数 × ATR（/api/card-atr，√(短×长) × 时段系数），止盈 = 止损距离 × 止盈倍数下限；
+// 止损 / 止盈是风控员真会用的口径：距离 = 卡上倍数 × ATR（/api/card-atr，√(短×长) × 时段系数），止盈 = 止损距离 × 止盈倍数下限；
 // 信号来了按那一刻的价进，卡上按现价估，所以价前面带「≈」。军师原话里的价位不解析，只在折叠里标「参考」。
 S.atr = {};
 const TIER = { S: "小", M: "中", L: "大", low: "低", high: "高" };
 const tierTip = (c) => {
   const f = c.size_fractions || {};
   const pct = (k) => (f[k] == null ? "" : `${TIER[k]} = 每笔风险的 ${Math.round(f[k] * 100)}%`);
-  return "军师团给的仓位上限档，拍板人选的档不超过它，保镖按档打折" + (f.S != null ? `：${["S", "M", "L"].map(pct).join("，")}` : "");
+  return "军师团给的仓位上限档，拍板人选的档不超过它，风控员按档打折" + (f.S != null ? `：${["S", "M", "L"].map(pct).join("，")}` : "");
 };
 const DIR = { long: ["做多", "p-long"], short: ["做空", "p-short"], both: ["双向", "p-accent"] };
 const signedPct = (a, b) => { const p = (a - b) / b * 100; return `${p >= 0 ? "+" : "−"}${Math.abs(p).toFixed(2)}%`; };
-// 保镖算的距离（不随成交价回填变）：止损 / 保命在亏钱一侧，止盈在赚钱一侧
+// 风控员算的距离（不随成交价回填变）：止损 / 保命在亏钱一侧，止盈在赚钱一侧
 const guardPct = (pct, side, loss) => `${(side === "long") === loss ? "−" : "+"}${pct.toFixed(2)}%`;
 const lbPct = p => p.lifeboat_stop_pct != null ? ` <span class="dim">${guardPct(p.lifeboat_stop_pct, p.side, true)}</span>` : "";
-// 移动止损：账本 / 保镖记录里的启动线和回撤距离 + 持仓页按 K 线估的状态（hummingbot 不吐当前移动止损价）
+// 移动止损：账本 / 风控员记录里的启动线和回撤距离 + 持仓页按 K 线估的状态（hummingbot 不吐当前移动止损价）
 const TRAIL_TIP = "按开仓以后的 1 分钟 K 线最高 / 最低估：执行器是逐笔看价，实际触发价可能差一点。盈利按扣过开仓手续费算。";
 function trailNote(p) {
   const t = p.trail, act = `${(+p.trailing_activation_pct).toFixed(2)}%`, back = `${(+p.trailing_stop_pct).toFixed(2)}%`;
@@ -535,7 +535,7 @@ function cardLevels(s) {
   }
   const a = S.atr[s.symbol];
   if (!a || !s.stop_atr || !s.take_profit_r) return null;
-  // 保镖开着「夹到推荐范围」时，越界的那截不要（没交集时保镖会拒单，这里照原样显示）
+  // 风控员开着「夹到推荐范围」时，越界的那截不要（没交集时风控员会拒单，这里照原样显示）
   const clamp = (r, c) => (c && Math.max(r[0], c[0]) <= Math.min(r[1], c[1]) ? [Math.max(r[0], c[0]), Math.min(r[1], c[1])] : r);
   const sa = clamp(s.stop_atr, a.stop_atr_clamp), tr = clamp(s.take_profit_r, a.tp_r_clamp);
   const R = tr[0], d = sa.map((m) => m * a.atr), dm = (d[0] + d[1]) / 2;
@@ -653,7 +653,7 @@ function cardBody(s, L) {
       <div><span class="tag-ref">参考</span><span class="dim small">原话里的价是军师说的，系统不会等这个价，只按信号和上面的止损 / 止盈下单。</span></div>
       <div class="txt">${esc(s.reason || "（这场会没写理由）")}</div>
       ${levelsLine(s)}
-      <dl class="bc-kv small"><dt>军师建议止损</dt><dd>${range(s.stop_atr, "", 1)} 倍 ATR（拍板人选窄 / 中 / 宽）</dd><dt>军师建议止盈</dt><dd>${range(s.take_profit_r, "", 1)} 倍止损距离（保镖用下限）</dd><dt>军师建议杠杆</dt><dd>${range(s.leverage, "", 0)} 倍（只是建议，实际用设置里的杠杆）</dd><dt>军师建议仓位</dt><dd>${range(s.notional_usdt, "", 0)} U（只是建议，实际由保镖按风险算）</dd></dl>
+      <dl class="bc-kv small"><dt>军师建议止损</dt><dd>${range(s.stop_atr, "", 1)} 倍 ATR（拍板人选窄 / 中 / 宽）</dd><dt>军师建议止盈</dt><dd>${range(s.take_profit_r, "", 1)} 倍止损距离（风控员用下限）</dd><dt>军师建议杠杆</dt><dd>${range(s.leverage, "", 0)} 倍（只是建议，实际用设置里的杠杆）</dd><dt>军师建议仓位</dt><dd>${range(s.notional_usdt, "", 0)} U（只是建议，实际由风控员按风险算）</dd></dl>
     </div></details>`;
   return `<div class="plan">${plan}</div>${from}${calc}${lad}<div class="bc-foot">${raw}<a class="small" ${clickable("meeting", sym)}>开会过程 ›</a></div>`;
 }
@@ -756,7 +756,7 @@ async function showSignal(id) {
   }
 }
 
-// 拍板人的概率、保镖的理由：挑出来直接显示，其余放“完整快照”
+// 拍板人的概率、风控员的理由：挑出来直接显示，其余放“完整快照”
 function keyFacts(s) {
   const o = s.output || {};
   const facts = [];
@@ -924,14 +924,14 @@ function jevView(s, th) {
     <div class="small dim mt">判断</div>${verdict}${rows || '<div class="dim small">（没有回答）</div>'}
     <p class="dim small">${[out.model ? `模型 ${esc(out.model)}` : "", out.latency_ms != null ? `${Math.round(out.latency_ms)} ms` : "", out.cost_usd != null ? `$${(+out.cost_usd).toFixed(4)}` : ""].filter(Boolean).join(" · ")}</p>`;
 }
-// 保镖：通过 / 拒绝 + 原因列表 + 细节
+// 风控员：通过 / 拒绝 + 原因列表 + 细节
 function guardView(s) {
   const o = s.output || {};
   const rest = Object.fromEntries(Object.entries(o).filter(([k]) => !["approved", "reasons"].includes(k)));
   const head = o.approved != null ? `<div class="note ${o.approved ? "" : "warn"}"><b>${o.approved ? "通过" : "拒绝"}</b>${(o.reasons || []).length ? `：${esc(o.reasons.join("；"))}` : ""}</div>` : "";
   return `<div class="small dim">看到的</div>${kvOrEmpty(s.input)}<div class="small dim mt">判断</div>${head}${kvRows(rest)}`;
 }
-// 保镖拒绝的信号：重新检查（按现价重跑，不下单）/ 人工放行（按现价立刻开）。
+// 风控员拒绝的信号：重新检查（按现价重跑，不下单）/ 人工放行（按现价立刻开）。
 // 这个币的卡过期了或已有持仓就灰掉，写明原因；主程序重启过、信号记录没了，主程序会回「记录已过期」
 function guardActions(s) {
   const o = s.output || {};
@@ -1087,7 +1087,7 @@ function cardSection(c) {
   </section>`;
 }
 
-// 作战卡摘要：只写保镖下单真会用的数（杠杆、每笔风险金额）；军师团给的范围只是建议，点开每个币才看得到
+// 作战卡摘要：只写风控员下单真会用的数（杠杆、每笔风险金额）；军师团给的范围只是建议，点开每个币才看得到
 function cardEffective(c) {
   const f = c.size_fractions || {};
   const r = c.risk_per_trade_usdt;
@@ -1101,7 +1101,7 @@ function feedSection(feed, signals) {
     ? `<div class="feed scroll">${feed.map((e) => `<div class="ev ${e.kind} ${e.signal_id ? "click" : ""}" ${e.signal_id ? clickable("signal", e.signal_id) : ""}><div class="t"><span class="n">${hm(e.ts)}</span>${esc(ROLE[e.role] || e.role)}${e.symbol ? " · " + coin(e.symbol) : ""}</div><div class="d">${esc(e.text)}</div></div>`).join("")}</div>`
     : `<div class="empty"><b>今天还没有决策</b>哨兵已触发 ${signals} 个信号。送拍板后会在这里出现。</div>`;
   return `<section class="card"><div class="ch"><h2>信号与决策流</h2><span class="r">今天 · 最新在上</span></div>${body}
-    <div class="foot">绿 = 放行 / 开仓 · 黄 = 拍板放弃 · 红 = 保镖拒绝 · 蓝 = 平仓。点一条看整条链和快照。</div></section>`;
+    <div class="foot">绿 = 放行 / 开仓 · 黄 = 拍板放弃 · 红 = 风控员拒绝 · 蓝 = 平仓。点一条看整条链和快照。</div></section>`;
 }
 
 // 管家快照里的最高浮盈 / 回吐 / 移动止损（方案 E 之后的记录才有）
@@ -1733,12 +1733,12 @@ P.history = () => {
     const exit = t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>';
     const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
     return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 保镖：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
+      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
       <td class="num nowrap">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}</tr>`;
   }).join("");
   window.__recs = d.rejected;
   const rej = S.rej
-    ? `<section class="card mt"><div class="ch"><h2>被拒的信号</h2><span class="r">${d.rejected.length} 条 · 拍板放弃和保镖拒绝 · 点一条看快照</span></div>
+    ? `<section class="card mt"><div class="ch"><h2>被拒的信号</h2><span class="r">${d.rejected.length} 条 · 拍板放弃和风控员拒绝 · 点一条看快照</span></div>
       <div class="log trail scroll tall">${d.rejected.map((r, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hm(r.ts)}</span><span>${esc(ROLE[r.role] || r.role)} ${pill(r.outcome)} ${esc(r.text)}</span></div>`).join("") || '<div class="dim">没有。</div>'}</div></section>`
     : "";
   return `<div class="toolbar"><span class="seg">${Object.entries(RANGE).map(([k, v]) => `<button class="${S.hist === k ? "on" : ""}" ${clickable("hist", k)}>${v}</button>`).join("")}</span>
@@ -2179,7 +2179,7 @@ const HINT = {
   entry_limit_offset_stop: "例如止损离进场价 1%，填 0.25 就挂在比触发价便宜 0.25% 的地方。档位默认 30 分钟 0.6、1 小时 0.4、2 / 4 小时 0.25、8 小时以上 0.1",
   entry_limit_wait_min: "从下单开始算；最长持仓按成交那一刻算，不会因为等挂单少拿",
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
-  entry_zone_only: "开 = 卡上这个币写了进场区间（例如反抽做空区、回调做多区），触发价在区间外就不开，连拍板人都不问，团队页保镖那一行写「没到区间」；往交易方向最多放宽 0.1R（做多可以比区间上沿高一点，做空可以比下沿低一点）。卡上没写区间照旧不限。关 = 不看区间。默认关（10-24 的数据显示开着会挡掉好信号）",
+  entry_zone_only: "开 = 卡上这个币写了进场区间（例如反抽做空区、回调做多区），触发价在区间外就不开，连拍板人都不问，团队页风控员那一行写「没到区间」；往交易方向最多放宽 0.1R（做多可以比区间上沿高一点，做空可以比下沿低一点）。卡上没写区间照旧不限。关 = 不看区间。默认关（10-24 的数据显示开着会挡掉好信号）",
   stop_floor_widen: "开 = 止损离手续费太近（不到上面那个倍数）时，把止损拉宽到这条线再下单：每笔最多亏的钱不变，所以仓位会小一些，止盈也按新止损重算。关 = 这一单不做。默认开",
   predictor_weight: "预测员（Kronos，照官方用法）：每个币算一个分数（平均走势终点比现价高多少），同一时刻所有币一起排名，排在前段算看好、后段算看坏（段多大看预测员那组的「排名前 / 后多少」）。做多信号碰上看好、做空信号碰上看坏，拍板人的「做」先加 这个数 × 0.5 再和门槛比，0.2 时加 0.10；其余情况不加也不扣。单个币的涨跌方向不看（官方也只看名次）。填 0 = 不听；预测员关掉、预测过期或一起预测的币太少时不加。档位默认都是 0.2",
   min_p_take: "拍板人只答一道题：现在按信号方向开这一单，接下来一段时间（2 小时档看 30 分钟）扣完手续费能不能赚。它给出「做」的把握（0–1），加上预测员的分以后至少要到这个数才放行。默认 0.55；想多做一些，可以放到 0.50",
@@ -2404,7 +2404,7 @@ const ROLES = [
     { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
-  { id: "risk_guard", t: "保镖（风控）", strip: ["保镖"], what: "下单前最后一道关：仓位多大、门槛、止损止盈放哪。上限都是你定的，AI 改不了", groups: [
+  { id: "risk_guard", t: "风控员", strip: ["风控员", "保镖"], what: "下单前最后一道关：仓位多大、门槛、止损止盈放哪。上限都是你定的，AI 改不了", groups: [
     { g: "最要紧的三项（和页面上面「风控硬上限」是同一份）", keys: CORE },
     { g: "仓位上限", keys: ["risk.max_total_exposure_x", "risk.max_notional_per_trade_x", "risk.max_notional_per_trade_usdt", "risk.max_open_positions"] },
     { g: "小仓、中仓用几成", hint: "拍板人给的仓位档：小仓、中仓按正常仓位打折，大仓用满。", keys: ["fast_loop.size_fraction_s", "fast_loop.size_fraction_m"] },
@@ -2735,7 +2735,7 @@ function riskCard(d, ix) {
   return `<section class="card st"><div class="ch"><h2>风控硬上限</h2><span class="r">不跟档位 · 你定的上限，AI 改不了 · ${basis}</span></div>
     ${CORE.filter((k) => ix[k]).map((k) => itemRow(ix[k], true)).join("")}
     <div class="st-foot">${cautions.length ? `<span class="warn">${cautions.length} 项比推荐冒险：</span>${cautions.join("；")}。只提示，不拦。` : "都在推荐范围内。"}
-      <button class="btn b-sm" data-act="st-more">保镖的全部设置 ›</button></div></section>`;
+      <button class="btn b-sm" data-act="st-more">风控员的全部设置 ›</button></div></section>`;
 }
 
 function keysTab(d) {

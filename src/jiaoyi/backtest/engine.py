@@ -1,6 +1,6 @@
 """回放引擎：把历史行情按时间顺序灌进 market / sentinel / gate / risk 接口。
 
-流程和实盘一致：行情 → 特征 → 哨兵出信号 → 拍板人问决策模型 → （等延迟）→ 保镖审 →
+流程和实盘一致：行情 → 特征 → 哨兵出信号 → 拍板人问决策模型 → （等延迟）→ 风控员审 →
 （等下单延迟）→ 纸面成交 → 每秒检查止损止盈。引擎本身不含任何业务判断，
 全部通过注入的接口对象完成，所以真实现一做好就能替换假实现。
 
@@ -181,7 +181,7 @@ class ReplayEngine:
             due = tr.ts + self._lat.jev_delay(resp.latency_ms)
             heapq.heappush(self._decisions, _Pending(due, next(self._seq), sig, jev=resp))
 
-    # ---------------------------------------------------------------- 保镖、成交、收尾
+    # ---------------------------------------------------------------- 风控员、成交、收尾
     def _review(self, item: _Pending) -> None:
         sig, jev, now = item.signal, item.jev, item.due
         assert jev is not None

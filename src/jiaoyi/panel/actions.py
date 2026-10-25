@@ -77,7 +77,7 @@ NEEDS_PASSWORD: frozenset[CommandKind] = frozenset(
         # 类别开关 / 每类上限：同一条指令既可能放宽也可能收紧，一律要密码
         "set_category",
         "set_category_cap",
-        # 人工放行 = 绕过保镖的一道过滤去开仓，要密码；重新检查只看结果、不下单
+        # 人工放行 = 绕过风控员的一道过滤去开仓，要密码；重新检查只看结果、不下单
         "release_signal",
     }
 )

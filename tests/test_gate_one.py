@@ -1,4 +1,4 @@
-"""拍板人一道「做不做」（Aaron 10-24）：题目按持仓档、技术面、额外快照、保镖只看「做」。"""
+"""拍板人一道「做不做」（Aaron 10-24）：题目按持仓档、技术面、额外快照、风控员只看「做」。"""
 
 from __future__ import annotations
 
@@ -310,7 +310,7 @@ async def test_six_mode_keeps_old_questions(now: datetime) -> None:
     assert r.ok and len(r.answers) == 6
 
 
-# ---------------------------------------------------------------------- 保镖、旧日志
+# ---------------------------------------------------------------------- 风控员、旧日志
 
 
 def test_guard_one_question_only_checks_take(now: datetime) -> None:

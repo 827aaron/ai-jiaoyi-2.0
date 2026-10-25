@@ -95,7 +95,7 @@ async def test_every_filled_trade_has_a_risk_pass_record_and_obeys_limits() -> N
     cfg = b.risk_config()
     card = b.card([b.card_symbol()], now=START, ttl=timedelta(days=2))
     for t in eng.account.closed:
-        assert t.signal_id in passes, "没有保镖放行记录就成交了"
+        assert t.signal_id in passes, "没有风控员放行记录就成交了"
         intent = OrderIntent.model_validate(passes[t.signal_id].output)
         assert_intent_within_limits(intent, cfg, b.account(equity=rep.initial_equity), card)
 

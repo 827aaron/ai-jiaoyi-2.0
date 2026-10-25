@@ -147,7 +147,7 @@ async def test_open_builds_executor_and_places_lifeboat(rig: Rig) -> None:
 
 
 async def test_stop_and_take_profit_compensate_open_fee(rig: Rig) -> None:
-    """hummingbot 按扣了开仓手续费的净盈亏触发：止损加 5bp、止盈减 5bp，价格距离才等于保镖算的。"""
+    """hummingbot 按扣了开仓手续费的净盈亏触发：止损加 5bp、止盈减 5bp，价格距离才等于风控算的。"""
     rig.adapter = HbExecutorAdapter(
         rig.api, rig.lifeboat, rig.registry, rig.alerts,
         account_name="acct", connector_name="binance_perpetual_testnet",

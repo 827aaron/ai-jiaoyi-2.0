@@ -1,8 +1,8 @@
-"""保镖要的下单精度：币安 exchangeInfo 的 stepSize / minQty / minNotional，带缓存。
+"""风控员要的下单精度：币安 exchangeInfo 的 stepSize / minQty / minNotional，带缓存。
 
-保镖的 ``LotRulesProvider.lot_rules`` 是同步的（快环里不许阻塞），所以这里分两半：
+风控员的 ``LotRulesProvider.lot_rules`` 是同步的（快环里不许阻塞），所以这里分两半：
 ``refresh`` 异步去币安拉，``lot_rules`` 只读缓存。故障即关闭：
-  - 从没拉成功过 → 返回 None，保镖拒单
+  - 从没拉成功过 → 返回 None，风控员拒单
   - 缓存超过 ``max_age_s`` 没刷新成功 → 返回 None（交易所改了精度我们不知道，宁可不下单）
   - 某个合约不在列表里（下架、暂停交易）→ 返回 None
 刷新失败保留旧缓存，只要没过期就继续用。

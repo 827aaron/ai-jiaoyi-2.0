@@ -1,4 +1,4 @@
-"""保镖：唯一能签发 ``OrderIntent`` 的地方。
+"""风控员：唯一能签发 ``OrderIntent`` 的地方。
 
 四层决定权（设计文档 §四），下一层只能在上一层的范围里选：
 1. 硬上限（``RiskConfig``，人定）：每笔风险、杠杆、总敞口、相关组敞口、日亏熔断、单笔名义、
@@ -334,12 +334,12 @@ class RiskGuardImpl:
         try:
             intent = self._review(signal, jev, card, account, now, market, reasons, detail, gate)
         except Exception as e:  # 算不出来就拒绝
-            reasons.append(f"保镖计算出错：{type(e).__name__}: {e}")
+            reasons.append(f"风控员计算出错：{type(e).__name__}: {e}")
             intent = None
-        # 从信号触发到保镖审完用了多久（滑点主要看这段：拍板 + 排队 + 读账户）
+        # 从信号触发到风控员审完用了多久（滑点主要看这段：拍板 + 排队 + 读账户）
         detail["since_trigger_ms"] = round((now - signal.ts).total_seconds() * 1000)
         if reasons and all(r in gate for r in reasons):
-            detail["by"] = "gate"  # 只因为拍板人说不做：面板显示黄色「拍板放弃」，不算保镖拒绝
+            detail["by"] = "gate"  # 只因为拍板人说不做：面板显示黄色「拍板放弃」，不算风控员拒绝
         if reasons or intent is None:
             verdict = RiskVerdict(
                 signal_id=signal.signal_id, approved=False, reasons=reasons or ["未通过"]

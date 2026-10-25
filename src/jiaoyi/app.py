@@ -374,7 +374,7 @@ class Built:
     derivs: DerivsFeed | None = None
     """持仓量 / 多空比轮询（新信号 + 拍板人快照）；没连币安时没有。主循环跑 ``run``。"""
     halted: dict[str, str] = field(default_factory=dict)
-    """合约临时不在交易（结算中等）的币 → 原因。主循环按币安推送增删，保镖只挡新开仓。"""
+    """合约临时不在交易（结算中等）的币 → 原因。主循环按币安推送增删，风控员只挡新开仓。"""
 
 
 def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
@@ -526,7 +526,7 @@ def build_modules(
         closers.append(majors.aclose)
         screener = CodeSymbolScreener(
             source,
-            # 门槛和权重来自 slow.toml [screener]；价差默认跟硬上限一致，免得进池的币保镖一律拒
+            # 门槛和权重来自 slow.toml [screener]；价差默认跟硬上限一致，免得进池的币风控员一律拒
             (slow_cfg or slow_defaults(app_cfg.profile)).screener_config(
                 app_cfg.pool_size, risk_cfg.max_spread_bps, risk_cfg.taker_fee_bps * 2
             ),
@@ -635,7 +635,7 @@ def build_modules(
             recorders[Role.GATE],
             hold_min=fast.time_limit_s // 60,
             max_concurrent=app_cfg.jev_max_concurrent,
-            # 排队再等就来不及在信号有效期内判完（保镖按年龄拒，白花一次 Jev）
+            # 排队再等就来不及在信号有效期内判完（风控员按年龄拒，白花一次 Jev）
             max_wait_s=max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0),
             questions=fast.gate_questions,
             # 一道题问法的额外快照：技术面 / 成交流 / 盘口平均（内存）
@@ -678,7 +678,7 @@ def build_modules(
         risk=RiskGuardImpl(
             risk_cfg,
             fast,
-            # 交易所精度由执行层从 exchangeInfo 读；拿不到（没刷新成功、过期、下架）保镖一律拒单
+            # 交易所精度由执行层从 exchangeInfo 读；拿不到（没刷新成功、过期、下架）风控员一律拒单
             lot_rules,
             recorders[Role.RISK_GUARD],
             # 日亏熔断状态落盘，重启后当天仍锁住
@@ -746,7 +746,7 @@ class App:
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
-        # 合约临时不在交易的币（主循环按 !contractInfo 推送增删），和保镖共用一个 dict
+        # 合约临时不在交易的币（主循环按 !contractInfo 推送增删），和风控员共用一个 dict
         self.halted: dict[str, str] = {}
         self.credits: CreditMonitor | None = None
         self.slow_cfg = slow_cfg or slow_defaults(app_cfg.profile)
@@ -898,7 +898,7 @@ class App:
         self.started = False
 
     async def refresh_lot_rules(self) -> None:
-        """拉一次交易所精度。失败沿用旧缓存，过期后保镖自动拒单。"""
+        """拉一次交易所精度。失败沿用旧缓存，过期后风控员自动拒单。"""
         if isinstance(self.lot_rules, _Refreshable) and not await self.lot_rules.refresh():
             log.warning("下单精度刷新失败")
 

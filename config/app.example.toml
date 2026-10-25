@@ -65,7 +65,7 @@ size_fraction_m = 0.75            # M 用 7.5 成，L 用满
 # stop_level_snap = false           # 止损挪到关键位外侧（默认关）
 # atr_floor_7d = 0                  # 短周期 ATR 至少取 7 天中位数 × 这个数（0 = 关，默认）
 # min_stop_atr = 0.5                # 作战卡止损低于 0.5 倍 ATR 就不认（太近会被噪音扫掉）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
-# max_stop_atr = 4.0                # 作战卡止损超过 4 倍 ATR 就不认（慢环的数保镖再核一遍）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
+# max_stop_atr = 4.0                # 作战卡止损超过 4 倍 ATR 就不认（慢环的数风控员再核一遍）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 # min_tp_r = 1.0                    # 作战卡止盈倍数要在 1–3 倍止损之间（档位默认；提示词建议 1.2–2.0）（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 # max_tp_r = 3.0（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 # time_limit_s = 14400              # 单笔最长拿 4 小时（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
@@ -90,8 +90,8 @@ entry_limit_wait_min = 60         # 挂单最多等 60 分钟，没成交就撤�
 # trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 0.7、4h 以上 1.0）
 # breakeven_on = false             # 保本：赚到 breakeven_trigger_r 后最坏按保本价平（不写 = 关）
 # breakeven_trigger_r = 0.8        # 赚到几个止损距离后保本
-new_listing_block_h = 24          # 保镖：新上线不到 24 小时的币不开新仓（0 = 不挡）
-adl_high_block = true             # 保镖：币安自动减仓风险「高」的币不开新仓（查不到不挡）
+new_listing_block_h = 24          # 风控员：新上线不到 24 小时的币不开新仓（0 = 不挡）
+adl_high_block = true             # 风控员：币安自动减仓风险「高」的币不开新仓（查不到不挡）
 # 新信号（2026-10-24 研究）：出不出跟档位走（oi_follow_on / top_crowd_on / btc_lead_on），testnet / live 默认不出
 oi_min_pct = 1.0                  # 持仓量变化：窗口内持仓量至少涨 1%（窗口 oi_window_min、价格倍数 oi_price_z 跟档位走）
 oi_follow_live = false

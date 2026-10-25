@@ -4,12 +4,12 @@
 技术面、成交流、衍生品、24 小时行情（``gate.context``），这些数据在信号进来时就开始准备，和排队
 同时进行，REST 最多等 1 秒。``questions="six"`` 是旧的 6 道题（回放对照用）。
 
-拍板人不决定数量、不下单，“过不过门槛”由保镖按配置判断。这里只管：
+拍板人不决定数量、不下单，“过不过门槛”由风控员按配置判断。这里只管：
 - 没有有效作战卡（缺失、过期、卡里没这个标的）→ 不问模型，直接 ``ok=False``。
 - 不同的币同时问，最多 ``max_concurrent`` 个（面板「拍板人同时最多判几个」）。
 - 同一个币一次只问一个：上一次还没判完，新信号排队（记一行「排队等拍板人」），排队的只留
   最新一条（更早排队的让位作废）；等过 ``max_wait_s``（信号有效期减拍板超时：再问也来不及，
-  保镖会按年龄拒，白花一次钱）也作废。
+  风控员会按年龄拒，白花一次钱）也作废。
   以前是直接作废（10-24 一天作废的信号里大半是这个）。
 - 每次判断写一条决策日志（团队页的拍板人卡片读它）。
 """
@@ -237,13 +237,13 @@ class JevEntryGate:
         if self._rec is None:
             return
         side = "多" if signal.side_hint == Side.LONG else "空"
-        # 拍板只记概率；放不放行由保镖按当前生效门槛判定（同一份口径），这里不自己标 pass/reject。
+        # 拍板只记概率；放不放行由风控员按当前生效门槛判定（同一份口径），这里不自己标 pass/reject。
         if not resp.ok:
             outcome = Outcome.ERROR if request is not None else Outcome.REJECT
             tail = ""
         else:
             outcome = Outcome.INFO
-            tail = "，门槛由保镖判定"
+            tail = "，门槛由风控员判定"
         inp, out = jev_log_fields(request, resp, extras.log() if extras is not None else None)
         self._rec.record(
             now,

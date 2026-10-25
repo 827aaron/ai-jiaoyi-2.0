@@ -82,7 +82,7 @@ def test_gate_record_only_default_off_and_never_live() -> None:
     assert not AppConfig.model_validate(raw).gate_record_only  # testnet / live 永远关
     raw["fast_loop"]["gate_record_only"] = True
     raw["fast_loop"]["rule_gate_without_jev"] = True
-    for mode in ("testnet", "live"):  # 不拒绝启动，只是当关；传给保镖的 record_only 也是关
+    for mode in ("testnet", "live"):  # 不拒绝启动，只是当关；传给风控员的 record_only 也是关
         raw["mode"] = mode
         cfg = AppConfig.model_validate(raw)
         assert not cfg.gate_record_only

@@ -108,7 +108,7 @@ async def test_open_without_risk_pass_fails() -> None:
             and r.signal_id == victim.signal_id
         )
     ]
-    assert "每笔开仓都有保镖放行在先" in failed(run(kept))
+    assert "每笔开仓都有风控员放行在先" in failed(run(kept))
 
 
 async def test_open_after_jev_failure_fails() -> None:

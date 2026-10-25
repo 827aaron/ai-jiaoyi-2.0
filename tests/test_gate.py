@@ -231,7 +231,7 @@ async def test_entry_gate_logs(tmp_path: Path, now: datetime) -> None:
     await gate.evaluate(signal(now), card(now), now)
     recs = log.read_day(now.date().isoformat())
     assert [r.outcome for r in recs] == [c.Outcome.INFO, c.Outcome.ERROR]
-    assert "门槛由保镖判定" in recs[0].summary
+    assert "门槛由风控员判定" in recs[0].summary
     assert recs[0].cost_usd > 0 and recs[0].input["jev"]["snapshot"]
     assert recs[1].output["jev"]["answers"] == {}
 
@@ -246,7 +246,7 @@ def test_snapshot_is_compact_json(now: datetime) -> None:
 
 
 def test_snapshot_hold_and_stop_atr(now: datetime) -> None:
-    """问题按最长持仓问时间；atr_bps 是止损用的 ATR（有长周期就 √短×长），和保镖一个口径。"""
+    """问题按最长持仓问时间；atr_bps 是止损用的 ATR（有长周期就 √短×长），和风控员一个口径。"""
     sig = signal(now)
     f = sig.features.model_copy(update={"atr": 34.0, "atr_long": 136.0, "atr_long_period_min": 60})
     d = json.loads(entry_snapshot(sig.model_copy(update={"features": f}), card(now), 240))

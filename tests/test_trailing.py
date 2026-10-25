@@ -1,4 +1,4 @@
-"""保本和移动止损（持仓管家的开关，默认关）：保镖算 hummingbot trailing_stop 的启动线和回撤距离。"""
+"""保本和移动止损（持仓管家的开关，默认关）：风控算 hummingbot trailing_stop 的启动线和回撤距离。"""
 
 from __future__ import annotations
 

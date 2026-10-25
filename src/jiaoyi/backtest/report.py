@@ -42,7 +42,7 @@ class ReplayReport(BaseModel):
             "回放汇总",
             f"  触发 {self.triggers}，问决策模型 {self.jev_calls} 次（失败 {self.jev_failed}，"
             f"回答“做”{self.jev_take}）",
-            f"  保镖放行 {self.risk_approved}，拒绝 {self.risk_rejected}",
+            f"  风控员放行 {self.risk_approved}，拒绝 {self.risk_rejected}",
             f"  成交 {self.filled}，已平 {self.closed}，未成交 {self.unfilled}",
             f"  胜率 {wr}（{self.wins} 胜 {self.losses} 负）",
             f"  毛盈亏 {self.gross_pnl:+.2f} U，手续费 {self.fees:.2f} U，"

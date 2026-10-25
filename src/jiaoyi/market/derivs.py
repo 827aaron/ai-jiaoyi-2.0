@@ -7,7 +7,7 @@
 - 大户持仓多空比 / 全市场人数多空比（至少 4 小时）：每 5 分钟查
   ``/futures/data/topLongShortPositionRatio``、``globalLongShortAccountRatio``
   （权重 0，各 5 分钟限 1000 次）。
-- 自动减仓风险：每 30 分钟查一次 ``/fapi/v1/symbolAdlRisk``（全市场，权重 1），保镖遇到「高」
+- 自动减仓风险：每 30 分钟查一次 ``/fapi/v1/symbolAdlRisk``（全市场，权重 1），风控员遇到「高」
   不开新仓（``adl_risk``）；查不到 / 超过 2 小时没更新当没有，不挡。
 - 查失败就跳过这一轮：不出信号、不报错刷屏（同一个币连着失败只记一行日志）。
 

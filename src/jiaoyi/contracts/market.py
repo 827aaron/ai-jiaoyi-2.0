@@ -124,12 +124,12 @@ class FeatureSnapshot(Contract):
     )
     atr_median_7d: NonNegFloat | None = Field(
         default=None,
-        description="同一周期 ATR 最近 7 天的中位数（保镖给止损 ATR 设下限，防周末窄止损）。"
+        description="同一周期 ATR 最近 7 天的中位数（风控员给止损 ATR 设下限，防周末窄止损）。"
         "历史不够 1 天时为 None。",
     )
     atr_long: NonNegFloat | None = Field(
         default=None,
-        description="长周期 ATR（``atr_long_period_min`` 分钟 K 线 14 根）；保镖止损用 "
+        description="长周期 ATR（``atr_long_period_min`` 分钟 K 线 14 根）；风控员止损用 "
         "√(atr × atr_long)。没配长周期或还没攒够时为 None。",
     )
     atr_long_period_min: int | None = Field(

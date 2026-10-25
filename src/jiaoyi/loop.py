@@ -3,7 +3,7 @@
 一笔交易的路径（设计文档 §三）::
 
     行情事件 → 特征 → 巡逻兵（有动作就平仓）→ 成交事件后哨兵出信号
-    → 拍板人 → 保镖 → 放行才交给执行器开仓（执行器成交后自己挂保命止损）
+    → 拍板人 → 风控员 → 放行才交给执行器开仓（执行器成交后自己挂保命止损）
 
 定时任务：
 - 持仓管家：每 ``keeper_interval_s`` 秒复查每个持仓；巡逻兵标记的急查每秒看一次。
@@ -143,7 +143,7 @@ class _NewsAware(Protocol):
 
 @runtime_checkable
 class _ChaseRecheck(Protocol):
-    """保镖：挂单没成交改市价追进前按此刻状态再审（``RiskGuardImpl.recheck_chase``）。"""
+    """风控员：挂单没成交改市价追进前按此刻状态再审（``RiskGuardImpl.recheck_chase``）。"""
 
     def recheck_chase(
         self, intent: OrderIntent, card: BattleCard | None, account: AccountState, now: datetime
@@ -274,7 +274,7 @@ class Runner:
         self._last_card_at: datetime | None = None
         self._refreshing = False
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
-        # 读账户 → 保镖 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
+        # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
         if isinstance(self.m.executor, _ChaseHook):
             self.m.executor.set_chase_request(self._request_chase)
@@ -615,7 +615,7 @@ class Runner:
         - 真下架（排了 7 天内的下架时间，或状态是交割 / 已关）：和新闻源（币安下架公告）走同一个
           ``block_symbol``，卡里读成只看不做，已有持仓由持仓管家平掉，要手动解封。推送是即时的，
           公告要轮询，所以这是更快的第二来源。
-        - 临时不在交易（结算中、待上线等）：只记进 ``app.halted``，保镖挡新开仓，已有持仓不动；
+        - 临时不在交易（结算中、待上线等）：只记进 ``app.halted``，风控员挡新开仓，已有持仓不动；
           状态回到 TRADING 自动放开。"""
         now = self.app.clock()
         sym = info.symbol
@@ -675,7 +675,7 @@ class Runner:
             self.positions = [*self.positions, pos]
 
     async def _may_chase(self, intent: OrderIntent) -> list[str]:
-        """挂单没成交、要改市价追进：按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍保镖。"""
+        """挂单没成交、要改市价追进：按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍风控员。"""
         now = self.app.clock()
         why: list[str] = []
         if self.app.paused is not None:
@@ -685,7 +685,7 @@ class Runner:
         if intent.symbol in self.app.pool_overrides.blacklist:
             why.append("你拉黑了这个币")
         if not isinstance(self.m.risk, _ChaseRecheck):
-            return [*why, "保镖不支持追单复核"]
+            return [*why, "风控员不支持追单复核"]
         account = await self.m.executor.account()
         card = self.m.cards.current(now)
         return (
@@ -721,12 +721,12 @@ class Runner:
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 你拉黑了，不开新仓", now)
             return
         if self.app.paused is not None:
-            # 人工暂停：连 Jev 都不问（省钱），记在保镖名下
+            # 人工暂停：连 Jev 都不问（省钱），记在风控员名下
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 人工暂停开新仓，不处理信号", now)
             return
         miss = entry_zone_miss(signal, card, self.app.app_cfg.fast_loop, now)
         if miss is not None:
-            # 卡的进场区间外：连 Jev 都不问（省钱），记在保镖名下
+            # 卡的进场区间外：连 Jev 都不问（省钱），记在风控员名下
             rec = self.app.recorders.get(Role.RISK_GUARD)
             if rec is not None:
                 side = "多" if signal.side_hint == Side.LONG else "空"

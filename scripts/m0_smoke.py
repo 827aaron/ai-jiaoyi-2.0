@@ -4,7 +4,7 @@
 
     .venv/bin/python scripts/m0_smoke.py --symbol BTCUSDT --quantity 0.002
 
-这是人跑的联调脚本，它自己造一条 OrderIntent 绕过保镖，所以：
+这是人跑的联调脚本，它自己造一条 OrderIntent 绕过风控员，所以：
   - 只允许 paper / testnet 模式，live 直接退出；
   - 不在 src/ 里，不属于运行时代码。
 """

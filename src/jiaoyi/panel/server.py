@@ -152,14 +152,14 @@ class CardAtr(BaseModel):
     price: float
     """现价（1 分钟线最后一根收盘）。"""
     atr: float
-    """保镖止损用的 ATR（价格单位）：止损距离 = 作战卡倍数 × 它。"""
+    """风控员止损用的 ATR（价格单位）：止损距离 = 作战卡倍数 × 它。"""
     atr_short: float
     atr_long: float | None
     period_min: int
     long_period_min: int
     session_factor: float
     stop_atr_clamp: tuple[float, float] | None = None
-    """保镖把作战卡止损倍数夹到这个范围（``card_range_clamp`` 开着时）；None = 不夹。"""
+    """风控员把作战卡止损倍数夹到这个范围（``card_range_clamp`` 开着时）；None = 不夹。"""
     tp_r_clamp: tuple[float, float] | None = None
 
 
@@ -539,7 +539,7 @@ def create_app(
 
     @api.get("/api/card-atr")
     async def card_atr(symbol: str) -> CardAtr:
-        """作战卡按保镖口径估止损：√(短 ATR × 长 ATR) × 曼谷时段系数（不含 7 天兜底）。"""
+        """作战卡按风控员口径估止损：√(短 ATR × 长 ATR) × 曼谷时段系数（不含 7 天兜底）。"""
         fl = cfg()[1].fast_loop
         try:
             short = await market.atr(symbol, fl.atr_period_min)

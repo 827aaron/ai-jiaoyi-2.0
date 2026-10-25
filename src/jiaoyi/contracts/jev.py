@@ -62,7 +62,7 @@ ENTRY_ONE: tuple[EntryQuestion, ...] = (
     EntryQuestion.SIZE,
 )
 """拍板人「一道题」问法（Aaron 2026-10-24）：放不放行只看 ``take``；``stop_width`` / ``size``
-只给保镖定止损档和仓位档，不参与放行。旧的 6 道题（``ENTRY_CHOICES`` 全部）仍可用。"""
+只给风控员定止损档和仓位档，不参与放行。旧的 6 道题（``ENTRY_CHOICES`` 全部）仍可用。"""
 
 HOLD_CHOICES: dict[HoldQuestion, tuple[str, ...]] = {
     HoldQuestion.THESIS_INTACT: ("yes", "no"),
@@ -163,7 +163,7 @@ class JevResponse(Contract):
     def answer(self, question: str) -> JevAnswer | None:
         """某个问题的回答。``ok=False`` 时永远返回 None。
 
-        这里不检查答案是否覆盖了请求的全部问题（契约拿不到请求）：保镖和管家用之前必须核对，
+        这里不检查答案是否覆盖了请求的全部问题（契约拿不到请求）：风控员和管家用之前必须核对，
         缺任何一问、选项对不上，一律按故障处理，不得用公式补。
         """
         if not self.ok:

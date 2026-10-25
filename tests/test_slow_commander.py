@@ -257,7 +257,7 @@ def test_clamp_to_risk() -> None:
     cs = card_symbol(
         "AAUSDT", notional_usdt=Range(min=1e6, max=2e6), leverage=Range(min=20, max=50)
     )
-    # 只按权益倍数时慢环不夹名义价值（不知道实时权益），保镖下单时封顶
+    # 只按权益倍数时慢环不夹名义价值（不知道实时权益），风控员下单时封顶
     assert clamp_to_risk(cs, RISK).notional_usdt == cs.notional_usdt
     topped = RISK.model_copy(update={"max_notional_per_trade_usdt": 2000.0})
     out = clamp_to_risk(cs, topped)
@@ -453,7 +453,7 @@ def test_clamp_raises_too_tight_stop_into_guard_band() -> None:
 
     band = StopScale(15, 0.5, 4.0)
     tight = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=0.2, max=0.4)), RISK, band)
-    assert tight.stop_atr.min >= 0.5  # 不会被保镖的 min_stop_atr 整张拒掉
+    assert tight.stop_atr.min >= 0.5  # 不会被风控员的 min_stop_atr 整张拒掉
     wide = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=3, max=9)), RISK, band)
     assert wide.stop_atr.max == 4.0
     ok = clamp_to_risk(card_symbol("AAUSDT", stop_atr=Range(min=1, max=2)), RISK, band)
@@ -466,7 +466,7 @@ def test_clamp_raises_too_low_take_profit_into_guard_band() -> None:
 
     band = StopScale(15, 0.5, 4.0, 1.0, 6.0)
     low = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=0.3, max=0.8)), RISK, band)
-    assert low.take_profit_r.min >= 1.0  # 不会被保镖的 min_tp_r 整张拒掉
+    assert low.take_profit_r.min >= 1.0  # 不会被风控员的 min_tp_r 整张拒掉
     high = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=3, max=12)), RISK, band)
     assert high.take_profit_r.max == 6.0
     ok = clamp_to_risk(card_symbol("AAUSDT", take_profit_r=Range(min=1.5, max=3)), RISK, band)

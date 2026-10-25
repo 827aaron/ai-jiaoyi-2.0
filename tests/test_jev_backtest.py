@@ -92,7 +92,7 @@ def test_candidates_join_gate_and_guard(tmp_path: Path) -> None:
             _guard("a", Outcome.PASS, {}, stop_loss_pct=0.5, take_profit_pct=1.0),
             _gate("b", "short", 0.3, hold=None, tpl="q2"),
             _guard("b", Outcome.REJECT, {"by": "gate", "stop_pct": 0.4}),
-            _gate("c", "long", 0.2),  # 没有保镖记录：按 atr 估止损
+            _gate("c", "long", 0.2),  # 没有风控员记录：按 atr 估止损
         ],
     )
     cs = {c.signal_id: c for c in outcomes.candidates(tmp_path, T0 - timedelta(hours=1), 240)}

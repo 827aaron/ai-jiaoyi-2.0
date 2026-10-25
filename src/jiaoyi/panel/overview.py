@@ -3,8 +3,8 @@
 页面只管画，口径都在这里定（设计文档 §十 总览）：
 - 状态灯：每个角色最新心跳；超过 ``STALE_S`` 没更新视为掉线（主循环没在跑时全红）。
 - 总资产 = hummingbot 钱包余额 + 未实现盈亏；拿不到就用账本里上一次记下的权益。
-- 今日盈亏和离熔断：日初权益优先取熔断器记下的（和保镖同一口径），其次执行层账本。
-- 信号与决策流：拍板、保镖、执行、管家 / 巡逻兵平仓；哨兵量大，只计数不进流。
+- 今日盈亏和离熔断：日初权益优先取熔断器记下的（和风控员同一口径），其次执行层账本。
+- 信号与决策流：拍板、风控员、执行、管家 / 巡逻兵平仓；哨兵量大，只计数不进流。
 """
 
 from __future__ import annotations
@@ -122,9 +122,9 @@ class CardView(BaseModel):
     leverage_max: float | None
     notional_usdt: tuple[float, float] | None
     size_fractions: dict[str, float] = {}
-    """仓位档 → 每笔风险打几折（保镖按这个算：S / M 来自 app.toml [fast_loop]，L 固定 1）。"""
+    """仓位档 → 每笔风险打几折（风控员按这个算：S / M 来自 app.toml [fast_loop]，L 固定 1）。"""
     leverage_used: int | None = None
-    """保镖下单实际用的杠杆：作战卡不约束（默认）时就是硬上限；约束时为 None（按各币卡上的）。"""
+    """风控员下单实际用的杠杆：作战卡不约束（默认）时就是硬上限；约束时为 None（按各币卡上的）。"""
     risk_per_trade_usdt: float | None = None
     """L 档每笔风险 = 总资产 × 每笔风险%；S / M 再乘 ``size_fractions``。拿不到总资产时 None。"""
 
@@ -175,9 +175,9 @@ class PositionView(BaseModel):
     margin_usdt: float | None = None
     """本金占用 = 名义 ÷ 杠杆。"""
     stop_loss_pct: float | None = None
-    """保镖算的止损距离（%），不用回填后的价格倒推；旧记录为 None。"""
+    """风控员算的止损距离（%），不用回填后的价格倒推；旧记录为 None。"""
     lifeboat_stop_pct: float | None = None
-    """保镖算的保命止损距离（%）。"""
+    """风控员算的保命止损距离（%）。"""
     trailing_activation_pct: float | None = None
     """移动止损启动线（%，扣过开仓手续费的盈亏）；None = 这笔没带移动止损。"""
     trailing_stop_pct: float | None = None
@@ -459,7 +459,7 @@ def position_views(
             snap = _keeper_snap(r.input)
             if snap is not None:
                 keeper_pos[r.position_id] = snap
-    # 账本加移动止损字段之前开的仓：从保镖放行记录（output 顶层是 OrderIntent）补
+    # 账本加移动止损字段之前开的仓：从风控员放行记录（output 顶层是 OrderIntent）补
     trail_of: dict[str, tuple[float, float]] = {}
     for r in records:
         o = r.output
@@ -618,7 +618,7 @@ def _lamps(
 def _with_fractions(
     card: CardView | None, app: AppConfig, risk: RiskConfig, equity: float | None
 ) -> CardView | None:
-    """附上保镖真正会用的口径：仓位档折扣、实际杠杆、每笔风险金额（总览摘要行显示这些，不显示军师建议范围）。"""
+    """附上风控员真正会用的口径：仓位档折扣、实际杠杆、每笔风险金额（总览摘要行显示这些，不显示军师建议范围）。"""
     if card is None:
         return None
     fl = app.fast_loop
@@ -845,7 +845,7 @@ def _feed(records: list[DecisionRecord]) -> list[FeedItem]:
 
 
 def _gate_skip(r: DecisionRecord) -> bool:
-    """保镖记的拒绝里，只因为拍板人概率没过门槛的：算「拍板放弃」（黄），不算保镖拒绝（红）。"""
+    """风控员记的拒绝里，只因为拍板人概率没过门槛的：算「拍板放弃」（黄），不算风控员拒绝（红）。"""
     if r.role is not Role.RISK_GUARD or r.outcome is not Outcome.REJECT:
         return False
     detail = (r.output or {}).get("detail")

@@ -50,7 +50,7 @@ async def test_start_stop_and_status(tmp_path: Path, now: datetime) -> None:
     assert status[c.Role.PREDICTOR].health == c.Health.DISABLED  # 预测员自己上报
     assert status[c.Role.EXECUTOR].health == c.Health.DISABLED  # 桩补的
     assert "未启用" in status[c.Role.EXECUTOR].headline
-    assert status[c.Role.RISK_GUARD].health == c.Health.OK  # 真保镖，app 代发心跳
+    assert status[c.Role.RISK_GUARD].health == c.Health.OK  # 真风控员，app 代发心跳
     assert "predictor" not in app.stub_fields()
     assert "risk" not in app.stub_fields()
     assert "executor" in app.stub_fields()
@@ -251,7 +251,7 @@ async def test_start_refreshes_lot_rules(tmp_path: Path, now: datetime) -> None:
     class Lots:
         async def refresh(self) -> bool:
             calls.append(1)
-            return False  # 失败也照常启动，保镖拿不到精度就拒单
+            return False  # 失败也照常启动，风控员拿不到精度就拒单
 
         def lot_rules(self, symbol: str) -> None:
             return None

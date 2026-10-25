@@ -37,7 +37,7 @@ INSTANCE_METHODS = {"model_copy", "model_construct", "copy", "construct"}
 
 
 def violations(source: str) -> list[str]:
-    """返回源码里所有可能绕过“只有保镖产出 OrderIntent”的写法（行号 + 说明）。"""
+    """返回源码里所有可能绕过“只有风控员产出 OrderIntent”的写法（行号 + 说明）。"""
     tree = ast.parse(source)
     aliases = {"OrderIntent"}
     out: list[str] = []

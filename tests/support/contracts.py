@@ -90,9 +90,9 @@ def assert_intent_within_limits(
     )
 
 
-# ---------------------------------------------------------------- 保镖
+# ---------------------------------------------------------------- 风控员
 class RiskGuardSafetyContract:
-    """保镖红线：该拒的必须拒。"""
+    """风控员红线：该拒的必须拒。"""
 
     def make_guard(self, cfg: RiskConfig) -> RiskGuard:
         raise NotImplementedError
@@ -178,7 +178,7 @@ class RiskGuardSafetyContract:
 
 
 class RiskGuardApprovalContract(RiskGuardSafetyContract):
-    """保镖正常路径：放行时的指令必须合规，日亏熔断次日恢复。"""
+    """风控员正常路径：放行时的指令必须合规，日亏熔断次日恢复。"""
 
     def approved(self, cfg: RiskConfig, **kw: Any) -> RiskVerdict:
         v = self.review(cfg, **kw)
@@ -411,7 +411,7 @@ class PatrolSafetyContract:
 
 # ---------------------------------------------------------------- 执行
 def an_intent() -> OrderIntent:
-    """用参考保镖签发一张合规指令，给执行器套件用。"""
+    """用参考风控员签发一张合规指令，给执行器套件用。"""
     v = ReferenceRiskGuard(b.risk_config()).review(
         b.signal(), b.jev_ok(), b.card(), b.account(), b.T0
     )

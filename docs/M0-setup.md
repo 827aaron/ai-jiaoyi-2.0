@@ -143,14 +143,14 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 - 改面板密码要先输对旧密码，改完自动重新上锁
 - 解锁时记下 `config/risk.toml` 的指纹：**之后改了硬上限，实盘启动会被拒**，要重新 `go-live`（`--risk` 指定要绑定的文件）
 - 启动时会核对 hummingbot 与我们自己的币安连接是不是**同一个账户**（USDT 钱包余额 + 持仓列表）；对不上拒绝启动并发 critical。注意这是间接核对，两个全新空仓且余额相同的账户分不出来
-- 同一个币已有在管持仓时，保镖和执行层都拒绝再开（含反向）
+- 同一个币已有在管持仓时，风控员和执行层都拒绝再开（含反向）
 - 状态文件在 `data/live_gate.json`（权限 600），**不进仓库**
 
 实盘前还需要：主网 key 用**子账户**、只开合约权限、**不开提现**、杠杆在交易所侧设上限（设计文档附录 B）。
 
 ## 9. 下单精度与决策日志（接线时用）
 
-- `ExchangeInfoLotRules`（`execution/lot_rules.py`）实现保镖的 `LotRulesProvider`：`await refresh()` 去币安 exchangeInfo 拉 `stepSize / minQty / minNotional`，`lot_rules(symbol)` 只读缓存（同步，快环里可直接调）。启动时先拉一次，之后用 `run_lot_rules_refresh` 每小时刷新。**故障即关闭**：没拉成功过、缓存超过 6 小时、或合约不在列表里，都返回 `None`，保镖就拒单。
+- `ExchangeInfoLotRules`（`execution/lot_rules.py`）实现风控员的 `LotRulesProvider`：`await refresh()` 去币安 exchangeInfo 拉 `stepSize / minQty / minNotional`，`lot_rules(symbol)` 只读缓存（同步，快环里可直接调）。启动时先拉一次，之后用 `run_lot_rules_refresh` 每小时刷新。**故障即关闭**：没拉成功过、缓存超过 6 小时、或合约不在列表里，都返回 `None`，风控员就拒单。
 - `build_execution(..., decision_log=JsonlDecisionLog(...))` 会让执行层按 `acceptance.py` 的约定写决策日志：`executor` 成交 = action、平仓 = close（`output.net` 是净盈亏）、`lifeboat` 挂上 = action、`reconciler` 没修好的问题 = error（修好的 = action），三者都发心跳。用 `python -m jiaoyi.acceptance --stage m0 --hours 24` 验收。
 
 ## 10. 开机自启与每日备份（launchd，Mac mini）

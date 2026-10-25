@@ -14,7 +14,7 @@ from jiaoyi.market.features import wilder_atr
 
 Interval = Literal["1m", "5m", "15m", "30m", "1h", "4h"]
 ATR_INTERVAL: dict[int, Interval] = {5: "5m", 15: "15m", 30: "30m", 60: "1h", 240: "4h"}
-"""保镖 ATR 用的分钟周期 → 币安原生 K 线周期（同样按 UTC 整点对齐）。"""
+"""风控员 ATR 用的分钟周期 → 币安原生 K 线周期（同样按 UTC 整点对齐）。"""
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 BASE = "https://fapi.binance.com"
 DEMO_BASE = "https://demo-fapi.binance.com"

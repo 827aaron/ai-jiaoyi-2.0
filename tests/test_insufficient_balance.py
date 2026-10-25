@@ -1,4 +1,4 @@
-"""保证金不够的假开仓（2026-10-24 BTC / ENA 4 笔）：保镖按可用保证金缩单，执行层只认真成交。
+"""保证金不够的假开仓（2026-10-24 BTC / ENA 4 笔）：风控员按可用保证金缩单，执行层只认真成交。
 
 hummingbot 核保证金不够时不下单就结束执行器（INSUFFICIENT_BALANCE，order_ids 为空），
 ``custom_info.current_position_average_price`` 却照样有计划价。以前我们把它当成交：账本记开仓、
@@ -124,7 +124,7 @@ async def test_real_manual_close_is_not_touched(tmp_path: Path) -> None:
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
 
 
-# ---------------------------------------------------------------- 保镖：按可用保证金缩单
+# ---------------------------------------------------------------- 风控员：按可用保证金缩单
 
 
 def test_guard_shrinks_to_available_margin(now: datetime) -> None:
