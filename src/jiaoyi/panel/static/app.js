@@ -1265,6 +1265,23 @@ function setChartFull(on) {
   setTimeout(() => { if (chart) fitView(chart); }, 80); // 容器尺寸变了，等重排完再铺满
 }
 window.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.chartFull) setChartFull(false); });
+// 列表框（.scroll）：滚轮放在框里面不滚框、照常滚整页；只有鼠标在它的滚动条上滚 / 拖，框才动。
+// 手机上没有滚轮：手指在框里滑照样滚框。弹窗里的框不管（弹窗里本来就是要滚框）
+window.addEventListener(
+  "wheel",
+  (e) => {
+    const box = e.target instanceof Element ? e.target.closest(".scroll") : null;
+    if (!box || box.closest("#layer") || e.ctrlKey) return;
+    const r = box.getBoundingClientRect();
+    const bar = box.offsetWidth - box.clientWidth;
+    if (bar > 0 && e.clientX >= r.right - bar - 1) return; // 在滚动条上：让框自己滚
+    e.preventDefault();
+    const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1;
+    window.scrollBy(e.deltaX * k, e.deltaY * k);
+  },
+  { passive: false, capture: true },
+);
+
 window.addEventListener("hashchange", () => { if (S.chartFull) setChartFull(false); });
 const chartsList = [];
 function lockChart(c, el) {
