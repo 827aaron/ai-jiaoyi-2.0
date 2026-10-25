@@ -1323,6 +1323,13 @@ def test_settings_majors_list_and_names_edit(tmp_path: Path) -> None:
     assert _coerce_names("k", []) == []
     with pytest.raises(ActionError):
         _coerce_names("k", ["BTC-1"])
+    # 币名列表是 default_factory：没改过不该出「恢复默认」，改过才出，默认值显示空列表
+    from jiaoyi.panel.pages import _items
+
+    rows = {i.key: i for i in _items(ScreenerSection(), "screener")}
+    assert not rows["major_include"].resettable
+    rows = {i.key: i for i in _items(scr, "screener")}
+    assert rows["major_include"].resettable and rows["major_include"].code_default == []
 
 
 def test_pnl_curve_record_and_read(tmp_path: Path) -> None:
