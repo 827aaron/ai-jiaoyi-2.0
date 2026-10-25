@@ -473,7 +473,7 @@ const idleLine = (idle) => `观望：${idle.slice(0, 6).map((s) => coin(s.symbol
 // 止损 / 止盈是保镖真会用的口径：距离 = 卡上倍数 × ATR（/api/card-atr，√(短×长) × 时段系数），止盈 = 止损距离 × 止盈倍数下限；
 // 信号来了按那一刻的价进，卡上按现价估，所以价前面带「≈」。军师原话里的价位不解析，只在折叠里标「参考」。
 S.atr = {};
-const TIER = { S: "小", M: "中", L: "大" };
+const TIER = { S: "小", M: "中", L: "大", low: "低", high: "高" };
 const tierTip = (c) => {
   const f = c.size_fractions || {};
   const pct = (k) => (f[k] == null ? "" : `${TIER[k]} = 每笔风险的 ${Math.round(f[k] * 100)}%`);
@@ -868,6 +868,10 @@ const JEV_Q = [
   ["take", "做这笔", (p) => p.take, "min_p_take", ">="],
   ["stop_width", "止损", null],
   ["size", "仓位", null],
+  // 管家（持仓复核）问的三题
+  ["thesis_intact", "论点是否成立", (p) => p.yes],
+  ["adverse_risk", "逆风风险", null],
+  ["action", "平仓概率", (p) => p.close],
 ];
 const JEV_CHOICE = { up: "向上", down: "向下", flat: "横盘", narrow: "偏窄", mid: "适中", wide: "偏宽", S: "小", M: "中", L: "大" };
 function jevView(s, th) {
@@ -2061,18 +2065,18 @@ const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[
 const HINT = {
   notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。重启后生效",
   notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。重启后生效",
-  notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开。重启后生效",
-  notify_lifeboat_missing: "保命止损没挂上、重挂或撤销失败时推——这时仓位可能没有最后一道保护。　建议保持开。重启后生效",
-  notify_order_failed: "开仓或平仓失败、结果不明、没成交就结束时推。　建议保持开。重启后生效",
-  notify_reconcile: "对账发现无人管的仓位、数量或方向对不上、手动平仓、连不上币安时推。　建议保持开。重启后生效",
+  notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
+  notify_lifeboat_missing: "保命止损没挂上、重挂或撤销失败时推——这时仓位可能没有最后一道保护。　建议保持开：关掉就收不到这类提醒。重启后生效",
+  notify_order_failed: "开仓或平仓失败、结果不明、没成交就结束时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
+  notify_reconcile: "对账发现无人管的仓位、数量或方向对不上、手动平仓、连不上币安时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
   notify_news_block: "某个币因新闻 / 事件被禁止新开仓时推。重启后生效",
-  notify_model_credit: "OpenRouter 额度快用完或被拒（402）时推，没额度就没有新作战卡。　建议保持开。重启后生效",
+  notify_model_credit: "OpenRouter 额度快用完或被拒（402）时推，没额度就没有新作战卡。　建议保持开：关掉就收不到这类提醒。重启后生效",
   credit_low_floor_usd: "OpenRouter 余额低于这个数（美元）就推一条。余额低于「近 7 天日均花费 × 2」时按那个更高的数算，所以实际提醒线可能比这里高。默认 5。重启后生效",
   credit_resend_hours: "同一条额度提醒（快用完 / 被拒）每隔多少小时重复推一次，充值后自动停。默认 6。重启后生效",
   notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。重启后生效",
   notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。重启后生效",
-  notify_live_started: "实盘启动时推。　建议保持开。重启后生效",
-  notify_system: "拒绝启动、状态文件损坏、巡逻兵全平等系统级问题时推。　建议保持开。重启后生效",
+  notify_live_started: "实盘启动时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
+  notify_system: "拒绝启动、状态文件损坏、巡逻兵全平等系统级问题时推。　建议保持开：关掉就收不到这类提醒。重启后生效",
   vol_full_multiple: "把这个币平时的波动按每小时折算，是来回手续费（0.10%）的几倍就算这一项满分。默认 30，也就是每小时 3% 算满分；改小会有更多币挤在满分上、分不出高低",
   always_candidates: "这些币只要过了硬门槛、没被拉黑，每轮都进候选池（算在池子名额里），由总盘会按数字决定挑不挑。不算头部，也不占中部每天挑几个的名额。想强制开会用选币页的「固定」。填币名，空格隔开，如 BTC ETH",
   gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
