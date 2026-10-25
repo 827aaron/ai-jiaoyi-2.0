@@ -40,6 +40,7 @@ try { if (localStorage.getItem("updown") === "red-up") document.documentElement.
 let data = null; // /api/overview
 let pageData = null; // 当前页自己的接口
 let pageKey = "";
+const pageCache = new Map(); // 页面 id → 上次拉到的数据：切回来先用它画，后台再刷新，不先出「正在读取」
 let pageErr = null; // [pageId, 出错说明]：读不出就显示错误，不能一直“正在读取…”
 const STALE_HINT = "多半是代码更新了、面板进程还是旧的：在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。";
 let lastOk = 0;
@@ -3115,6 +3116,10 @@ function render() {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>这一页读不出来</b><span>${esc(pageErr[1])}</span><span>${STALE_HINT}</span></div></div>`;
     return;
   }
+  if (needs && pageKey !== pageId(page, arg) && pageCache.has(pageId(page, arg))) {
+    pageData = pageCache.get(pageId(page, arg));
+    pageKey = pageId(page, arg);
+  }
   if (!data || (needs && (!pageData || pageKey !== pageId(page, arg)))) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
@@ -3240,18 +3245,21 @@ function tradeSounds(list) {
 async function poll() {
   const { page, arg } = route();
   try {
+    // 总览和这一页自己的接口一起拉（原来是先等总览、再拉这一页，慢一点就多等一轮）
+    const api = PAGE_API[page];
+    const id = api ? pageId(page, arg) : null;
+    const pageReq = api ? getJson(api(arg)).then((d) => [d, null], (e) => [null, e]) : null;
     data = await getJson("/api/overview");
     TZ = data.display_tz || TZ;
     tradeSounds(data.positions || []);
-    const api = PAGE_API[page];
-    if (api) {
-      const id = pageId(page, arg);
-      try {
-        pageData = await getJson(api(arg));
+    if (pageReq) {
+      const [d, e] = await pageReq;
+      if (e) pageErr = [id, e.message];
+      else {
+        pageData = d;
         pageKey = id;
+        pageCache.set(id, d);
         pageErr = null;
-      } catch (e) {
-        pageErr = [id, e.message];
       }
     }
     lastOk = Date.now();
