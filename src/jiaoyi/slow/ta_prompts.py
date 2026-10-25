@@ -55,6 +55,13 @@ class Words:
     brief_main: tuple[str, ...]  # 简报主字段
     brief_bg: tuple[str, ...]  # 简报背景字段
 
+    def habit_line(self, windowed: bool = True) -> str:
+        """「这个市场在这个周期怎么走」那一行；这一写法没有习性就整行不写。"""
+        if not self.habit:
+            return ""
+        scope = " (Binance perpetuals, {DATA_WINDOW})" if windowed else ""
+        return f"How this market behaves at this horizon{scope}: {self.habit}\n"
+
 
 WORDS: dict[str, Words] = {
     "short": Words(
@@ -69,21 +76,10 @@ WORDS: dict[str, Words] = {
             "Daily and multi-day readings (20-day MA, daily RSI, 50/200-period averages, 7-day "
             "change) are background only and must never decide the direction on their own."
         ),
-        habit=(
-            "after a sharp move over the last few hours, the next {H} more often gives back "
-            "part of it than extends it, in both directions. The edge is small (about 53 right "
-            "calls in 100), so treat it as a tilt, not a certainty. This applies only right "
-            "after such a move: then do not open a short near the low of the drop or a long "
-            "near the high of the rally; sell into a bounce zone or buy into a dip zone "
-            "instead. A drop or rally spread over the last day with the last few hours flat is "
-            "not such a move, and the tilt says nothing there: judge the direction from the "
-            "flows (taker selling or buying, open-interest change) and the levels. On {IND} "
-            "bars, an extreme RSI or a Bollinger-band breach is more often followed by a "
-            "pullback than by continuation at this horizon."
-        ),
+        habit="",
         change=(
             "Weigh the last few hours over the earlier trend: if the last 1-4 hours contradict "
-            "it (for example a rebound off the low on rising volume, or a break below a level "
+            "it (for example a rebound off the low, or a break below a level "
             "that had held), say so and change the view."
         ),
         price_action=(
@@ -100,12 +96,7 @@ WORDS: dict[str, Words] = {
             "range, volume, taker flow, funding, open-interest change and liquidations"
         ),
         background="Multi-week readings (20-day MA, daily RSI) are background only.",
-        habit=(
-            "both effects are weak. A sharp move of the last 1-5 hours tends to give back a "
-            "little, while the move of the last day tends to continue a little. Neither alone "
-            "decides the direction: look for the two to agree, otherwise stay flat. Do not chase "
-            "a move that is already stretched; prefer a stated entry zone."
-        ),
+        habit="",
         change="When the last few hours contradict the earlier view, say so and change it.",
         price_action=(
             "the % change over the last 1h / 4h / 24h, position in the 24h and 3-day range, "
@@ -173,7 +164,7 @@ _JUDGE = (
     "You are judging the next {H} for this coin{not_this}; size targets, stops and levels to "
     "moves plausible within {H}.\n"
     "Evidence that matters at this horizon is {window}: {evidence}. {background}\n"
-    "How this market behaves at this horizon (Binance perpetuals, {DATA_WINDOW}): {habit}\n"
+    "{habit_line}"
     "Follow the market as it changes: base the call on fresh data, not on what an earlier "
     "meeting concluded. {change}\n"
     "Costs: a fee round trip is about {FEE}% of a typical {H} move, so only a clear, specific "
@@ -236,7 +227,7 @@ def perp_context(p: PromptParams, group: str = "manager") -> str:
         .replace("{window}", w.window)
         .replace("{evidence}", w.evidence)
         .replace("{background}", w.background)
-        .replace("{habit}", w.habit)
+        .replace("{habit_line}", w.habit_line())
         .replace("{change}", w.change)
     )
     return fill(text, p)
@@ -450,8 +441,7 @@ def pick_prompt(
         "You are the chief strategist for crypto perpetual futures. The time now is {now} UTC. "
         f"Every position in this system is held at most {{H}}; you judge the market for the next "
         f"{{H}}{w.not_this}.\n"
-        "How this market behaves at this horizon (Binance perpetuals, {DATA_WINDOW}): "
-        f"{w.habit}\n"
+        f"{w.habit_line()}"
         f"{prev_line}"
         "Below are the candidate pool selected by code and the market brief. First judge in one "
         "sentence whether the market is bullish, bearish or range-bound for the next {H}, citing "
