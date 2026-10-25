@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from jiaoyi.contracts import (
     BattleCard,
@@ -845,11 +845,39 @@ class _LevelDraft(BaseModel):
     note: str = ""
 
 
+_MUST_WRITE = ("key_levels", "allowed_signals")
+
+
+def _require_in_schema(schema: dict[str, Any]) -> None:
+    required = schema.setdefault("required", [])
+    required.extend(f for f in _MUST_WRITE if f not in required)
+
+
+def omitted_fields(draft: BaseModel, has_candidates: bool) -> list[str]:
+    """模型在工具调用里整个没写的必填数组（没有候选关键位时 key_levels 不用写）。"""
+    return [
+        f
+        for f in _MUST_WRITE
+        if f not in draft.model_fields_set and (f != "key_levels" or has_candidates)
+    ]
+
+
+def reask_prompt(base: str, omitted: Sequence[str]) -> str:
+    return (
+        f"{base}\n\nYour previous answer left out {' and '.join(omitted)}. Both key_levels and "
+        "allowed_signals are required fields: write them explicitly in the answer, using [] only "
+        "when there is truly nothing to put in them."
+    )
+
+
 class _CardSymbolDraft(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_require_in_schema)
+
     bias: Bias
-    # 两个数组必填（没有默认值）：可选字段在工具调用里会被模型整个跳过；空列表仍然合法
-    key_levels: list[_LevelDraft]
-    allowed_signals: list[SignalKind]
+    # 两个数组在发给模型的 schema 里标成必填（可选字段在工具调用里会被模型整个跳过），但解析时
+    # 放宽成默认空列表：模型仍漏填时转卡不能整个失败，由引擎用 model_fields_set 发现并重问一次
+    key_levels: list[_LevelDraft] = Field(default_factory=list)
+    allowed_signals: list[SignalKind] = Field(default_factory=list)
     size_tier_max: SizeTier
     notional_min: float = Field(ge=0)
     notional_max: float = Field(ge=0)
@@ -2181,12 +2209,23 @@ class TradingAgentsEngine:
             .bind(max_tokens=self._s.json_max_tokens)
         )
         last: Exception | None = None
-        for _ in range(2):
+        base_prompt = prompt
+        for attempt in range(2):
             try:
                 draft = llm.invoke(prompt, config={"callbacks": [handler]})
                 if not isinstance(draft, _CardSymbolDraft):
                     # 思考模型偶尔把结构化输出退回成自由文本：当作没有结论，不去猜
                     raise ValueError("模型没有返回结构化结果")
+                omitted = omitted_fields(draft, bool(levels.candidates))
+                if omitted and attempt == 0:
+                    # 模型把必填数组整个漏了：带更严的提示重问一次
+                    prompt = reask_prompt(base_prompt, omitted)
+                    last = ValueError(f"模型漏填 {'、'.join(omitted)}")
+                    continue
+                if omitted:  # 重问后仍漏：退回空列表（卡不丢），记一笔
+                    logger.warning("%s 转卡模型漏填 %s，按空列表处理", entry.symbol, omitted)
+                    if live:
+                        live.step("quality", "gate", f"模型漏填 {'、'.join(omitted)}（重问后仍漏）")
                 cs = draft_to_card_symbol(draft, entry, levels, params.zone_required)
                 if live:
                     live.step(
