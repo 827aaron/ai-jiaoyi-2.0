@@ -1857,7 +1857,7 @@ const PLAIN = {
   "screener.min_range_24h_pct": "24 小时波动至少百分之几",
   "screener.max_range_24h_pct": "24 小时波动最多百分之几",
   "screener.default_category_cap": "每一类币默认最多进池几个",
-  "screener.vol_full_multiple": "波动是来回手续费的几倍算满分",
+  "screener.vol_full_multiple": "每小时折算的波动是来回手续费的几倍算满分",
   "screener.surge_full_multiple": "1 小时成交额是平时的几倍算满分",
   "screener.funding_full": "资金费率到多少算满分",
   "screener.oi_full_pct": "持仓量 1 小时变百分之几算满分",
@@ -1909,11 +1909,11 @@ const PLAIN = {
   "predictor.rank_min_peers": "至少几个币一起预测才排名",
   "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
-  "tiers.always_candidates": "每轮都进总盘会候选的币（不占头部和中间档名额）",
   "tiers.head": "头部几个币（开放交易）",
   "tiers.mid": "中部几个币",
   "tiers.mid_daily_pick": "中部每天挑几个来做",
   "tiers.mid_size_max": "中部的币仓位最大到哪一档",
+  "tiers.always_candidates": "固定进总盘会的币",
   "screener.weight_volatility": "波动的权重",
   "screener.weight_volume_surge": "量能突增的权重",
   "screener.weight_funding": "资金费率的权重",
@@ -2045,6 +2045,8 @@ const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && t
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
+  vol_full_multiple: "把这个币平时的波动按每小时折算，是来回手续费（0.10%）的几倍就算这一项满分。默认 30，也就是每小时 3% 算满分；改小会有更多币挤在满分上、分不出高低",
+  always_candidates: "这些币只要过了硬门槛、没被拉黑，每轮都进候选池（算在池子名额里），由总盘会按数字决定挑不挑。不算头部，也不占中部每天挑几个的名额。想强制开会用选币页的「固定」。填币名，空格隔开，如 BTC ETH",
   gate_record_only: "开 = 拍板人照常问、照常记，概率没过门槛也放行（盘口有毒 ≥ 0.8 仍然拦），用来在模拟盘攒样本校准门槛。关 = 拍板一票否决。只有模拟盘能开",
   volume_surge_live: "开 = 成交量突然放大、而且买卖一边倒时顺着那一边做。历史回测不稳定，觉得不对可以关；模拟盘不管开关都照出（攒样本）",
   session_cme_open: "开 = 芝加哥 CME 比特币期货周日开盘（曼谷周一早上 5 点或 6 点）前后几分钟，放量又大涨大跌时顺着做。回测只有 30 分钟到 2 小时这三档比随便进好，档位默认只在这三档开",
@@ -2250,7 +2252,7 @@ const ROLES = [
     { g: "打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
     { g: "权重", hint: "五项各占多少分量。不用加起来等于 1，只看相对大小；不能全是 0。", keys: ["screener.weight_volatility", "screener.weight_volume_surge", "screener.weight_funding", "screener.weight_oi", "screener.weight_liquidations"] },
     { g: "主流币名单", extra: "majors", hint: "「主流币」这一类按市值前几名算，每天自动更新一次（去掉稳定币和包装币）。填 0 = 只用固定 7 个（BTC ETH BNB SOL XRP DOGE ADA）。手动算主流 / 排除的填币名，空格隔开。", keys: ["screener.major_top_n", "screener.major_include", "screener.major_exclude"] },
-    { g: "分档交易", warn: "tiers_cautions", hint: "候选池按分数从高到低分三档：头部开放交易；中部每天挑几个来做、仓位封顶；其余尾部只看不做。你固定、手动加的币算头部。", keys: ["tiers.enabled", "tiers.head", "tiers.mid", "tiers.mid_daily_pick", "tiers.mid_size_max", "tiers.always_candidates"] },
+    { g: "分档交易", warn: "tiers_cautions", hint: "候选池按分数从高到低分三档：头部开放交易；中部每天挑几个来做、仓位封顶；其余尾部只看不做。你固定、手动加的币算头部；每轮进总盘会的币不算头部。", keys: ["tiers.enabled", "tiers.head", "tiers.mid", "tiers.mid_daily_pick", "tiers.mid_size_max", "tiers.always_candidates"] },
     { g: "美股类别", keys: ["screener.us_events", "screener.us_open_bonus"] },
   ] },
   { id: "market", t: "总盘会", what: "整轮开会的节奏：多久一轮、挑几个币、作战卡管多久", caution: "schedule_caution", groups: [

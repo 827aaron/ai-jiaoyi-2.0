@@ -1542,7 +1542,8 @@ def _items(
         spec = specs.get(name)
         if value is None and spec is not None and spec.kind is bool:
             value = False  # 开关不写 = 关
-        default = None if field.is_required() else field.default
+        # default_factory 的项（币名列表）也要拿到真默认值，不然永远显示「恢复默认」
+        default = None if field.is_required() else field.get_default(call_default_factory=True)
         resettable = (
             spec is not None
             and not spec.profiled
