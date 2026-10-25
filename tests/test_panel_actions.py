@@ -676,6 +676,15 @@ def test_overview_flags_panel_older_than_code(
         assert client.get("/api/overview").json()["control"]["panel_stale"] is True
 
 
+def test_overview_ui_version_matches_the_script_tag_in_index(tmp_path: Path) -> None:
+    """页面靠两者对比发现“开着的页面是旧的”：首页 app.js?v= 必须和总览的 ui_version 同一个值。"""
+    paths, _ = _setup(tmp_path)
+    with _client(paths) as client:
+        version = client.get("/api/overview").json()["control"]["ui_version"]
+        assert version
+        assert f"/static/app.js?v={version}" in client.get("/").text
+
+
 def test_code_fingerprint_changes_when_a_file_changes(tmp_path: Path) -> None:
     from jiaoyi.panel.server import code_fingerprint
 

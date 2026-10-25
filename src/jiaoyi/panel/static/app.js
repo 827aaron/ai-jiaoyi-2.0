@@ -28,6 +28,15 @@ const MODE = { paper: "模拟盘", testnet: "测试网", live: "实盘" };
 const BIAS = { long: ["偏多", "p-long"], short: ["偏空", "p-short"], both: ["双向", "p-accent"], no_trade: ["观望", ""], unknown: ["没结论", ""] };
 const SIDE = { long: ["多", "up"], short: ["空", "down"] };
 const LIFEBOAT = { active: "保命 ✓", pending: "⚠ 保命挂单中", missing: "⚠ 保命缺失", triggered: "保命已触发", cancelled: "保命已撤" };
+// 本页加载的 app.js 版本号（首页给 app.js 带的 ?v=）
+const UI_VER = (() => {
+  try {
+    const s = document.querySelector('script[src*="/static/app.js"]');
+    return new URL(s.src).searchParams.get("v") || "";
+  } catch (e) {
+    return "";
+  }
+})();
 const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "风控员", commander: "军师团", keeper: "管家", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
 const OUTCOME = { pass: ["放行", "p-long"], reject: ["拒绝", "p-short"], hold: ["拿住", ""], close: ["平仓", "p-accent"], action: ["动作", "p-accent"], error: ["出错", "p-warn"], info: ["信息", ""] };
 const CAT = { major: "主流币", alt: "山寨币", crypto_stock: "加密概念股", us_tech: "美股科技", precious_metal: "贵金属", other: "其他" };
@@ -111,6 +120,10 @@ function chrome() {
   }
   if (c && c.llm_credit) {
     b += `<div class="banner bn-bad"><b>💳 ${esc(c.llm_credit)}</b></div>`;
+  }
+  // 页面开着没刷新，服务器上的 app.js 已经换了：提示刷新（make update 后手机上常见）
+  if (c && c.ui_version && UI_VER && c.ui_version !== UI_VER) {
+    b += `<div class="banner bn-paper"><b>面板有新版本</b><span>你开着的页面还是旧的。</span><button class="btn b-sm b-go" onclick="location.reload()">刷新</button></div>`;
   }
   if (c && c.panel_stale) {
     b += `<div class="banner bn-bad"><b>面板版本与代码不一致</b><span>代码已更新、面板进程还是旧的，有的页面会读不出。在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。</span></div>`;
