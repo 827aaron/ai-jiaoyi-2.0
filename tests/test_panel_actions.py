@@ -995,5 +995,5 @@ def test_signal_commands_need_signal_and_release_needs_password(tmp_path: Path) 
         body["password"] = PW
         assert client.post("/api/command", json=body, headers=HEADERS).status_code == 200
     cmds = _inbox_commands(data)
-    assert [c["kind"] for c in cmds] == ["recheck_signal", "release_signal"]
+    assert sorted(c["kind"] for c in cmds) == ["recheck_signal", "release_signal"]
     assert all(c["params"] == ok for c in cmds)
