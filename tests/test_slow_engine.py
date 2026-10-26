@@ -208,6 +208,17 @@ async def test_binance_stats_source(now: datetime) -> None:
     await client.aclose()
 
 
+async def test_market_stats_refreshes_original_symbols_outside_current_top_k(now: datetime) -> None:
+    async with httpx.AsyncClient(
+        base_url="https://fapi.binance.com", transport=httpx.MockTransport(_binance_handler)
+    ) as client:
+        source = BinanceStatsSource(client, top_k=1)
+        assert {s.symbol for s in await source.fetch(now)} == {"BTCUSDT"}
+        snapshot = await source.fetch_symbols(["TSLAUSDT"], now)
+        assert {s.symbol for s in snapshot} == {"BTCUSDT", "TSLAUSDT"}
+        assert next(s for s in snapshot if s.symbol == "TSLAUSDT").metrics["chg_24h"] == -1.5
+
+
 def test_format_derivatives() -> None:
     funding = [{"fundingRate": "0.0001"}, {"fundingRate": "-0.0002"}, {"fundingRate": "0.0005"}]
     oi = [{"sumOpenInterestValue": "100"}, {"sumOpenInterestValue": "112"}]

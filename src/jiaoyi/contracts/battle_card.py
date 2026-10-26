@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -22,6 +23,22 @@ from jiaoyi.contracts.common import (
     SizeTier,
     Symbol,
 )
+
+
+class MarketView(Contract):
+    """独立市场观点；时间和版本与各币研究、作战卡有效期分开。"""
+
+    market_view_id: str = Field(min_length=1)
+    version: int = Field(ge=1)
+    observed_at: AwareDatetime
+    regime: str = Field(min_length=1)
+    regime_direction: Literal["看涨", "看跌", "中性"]
+    source: str = "market_only"
+    refresh_reason: str = "regime_flip"
+    pool_id: str = ""
+    source_ts: AwareDatetime | None = Field(
+        default=None, description="本次使用的池内行情统计时间。"
+    )
 
 
 class LevelKind(StrEnum):
@@ -88,6 +105,12 @@ class CardSymbol(Contract):
         "持仓币的指令不因到期消失，只是不再开新仓。",
     )
     meeting_id: str | None = Field(default=None, description="出这条指令的会议编号。")
+    source_market_view_id: str | None = Field(
+        default=None, description="研究启动时的市场观点编号。"
+    )
+    source_regime: str | None = Field(
+        default=None, description="研究启动时的市场判断；旧卡回退整卡判断。"
+    )
 
 
 class BattleCard(Contract):
@@ -99,7 +122,13 @@ class BattleCard(Contract):
     expires_at: AwareDatetime = Field(description="到期即失效，快环停止新开仓直到新卡到来。")
     source: str = Field(default="tradingagents", description="tradingagents / manual / replay")
     regime: str = Field(min_length=1, description="军师对大盘的一句话判断。")
+    regime_direction: Literal["看涨", "看跌", "中性"] | None = Field(
+        default=None, description="出卡时同一份市场判断的结构化方向；旧卡没有则不猜。"
+    )
     symbols: list[CardSymbol] = Field(min_length=1, max_length=50)
+    current_market: MarketView | None = Field(
+        default=None, description="只读视图附带的当前市场背景；不会改写各币研究来源。"
+    )
     refresh_reason: str = Field(
         default="scheduled",
         description="scheduled / key_level_break / news / new_entrant / manual",

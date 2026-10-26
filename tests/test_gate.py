@@ -276,12 +276,25 @@ def test_rule_model_stop_width_follows_atr_period() -> None:
     assert stop(60, 1.8, 22.0) == "wide"  # 同样的 ATR 数值放在 60 分钟口径下算偏窄的 ATR
 
 
-async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
+@pytest.mark.parametrize("base_url", [None, OPENROUTER_BASE_URL])
+async def test_typesafe_transport_against_mock_http(now: datetime, base_url: str | None) -> None:
     seen: dict[str, object] = {}
 
     def handler(req: httpx2.Request) -> httpx2.Response:
-        body = json.loads(req.content)
+        content = req.content
+        encoding = req.headers.get("content-encoding", "")
+        if encoding == "zstd":
+            # SDK 在 Python 3.14 或装有 backport 时默认压缩；mock 按真实报文解码。
+            try:
+                from compression.zstd import decompress
+            except ImportError:
+                from backports.zstd import decompress
+            content = decompress(content)
+        else:
+            assert not encoding, f"未支持的请求编码：{encoding}"
+        body = json.loads(content)
         seen["body"] = body
+        seen["encoding"] = encoding
         seen["auth"] = req.headers.get("authorization")
         answers = {
             q: {
@@ -303,7 +316,10 @@ async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
         )
 
     tr = TypeSafeTransport(
-        "test-key-not-real", "jev-2026-10-01", http_transport=httpx2.MockTransport(handler)
+        "test-key-not-real",
+        "jev-2026-10-01",
+        base_url=base_url,
+        http_transport=httpx2.MockTransport(handler),
     )
     m = JevDecisionModel(tr, FAST, timeout_ms=2000)
     r = await m.ask(entry_request(now))
@@ -312,6 +328,9 @@ async def test_typesafe_transport_against_mock_http(now: datetime) -> None:
     assert r.cost_usd == pytest.approx(380 * FAST.jev_usd_per_mtok / 1e6)
     assert r.usage == c.JevUsage(input_tokens=380, output_tokens=6)  # 没报推理 token 记 0
     assert seen["auth"] == "Bearer test-key-not-real"
+    assert set(seen["body"]["questions"]) == set(GOOD_LONG)
+    if base_url:
+        assert seen["encoding"] == ""  # 转发模式的未压缩路径也必须覆盖。
     await tr.aclose()
 
 

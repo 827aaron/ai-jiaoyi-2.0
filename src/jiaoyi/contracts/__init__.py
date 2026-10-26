@@ -3,7 +3,14 @@
 改动规则见 docs/CONTRIBUTING.md：字段只加不删；改含义要升 schema_version 并经架构评审。
 """
 
-from jiaoyi.contracts.battle_card import BattleCard, CardSymbol, KeyLevel, LevelKind, Range
+from jiaoyi.contracts.battle_card import (
+    BattleCard,
+    CardSymbol,
+    KeyLevel,
+    LevelKind,
+    MarketView,
+    Range,
+)
 from jiaoyi.contracts.common import (
     Bias,
     Category,
@@ -107,6 +114,7 @@ __all__ = [
     "Liquidation",
     "MarkPrice",
     "MarketEvent",
+    "MarketView",
     "ModuleStatus",
     "OrderIntent",
     "Outcome",

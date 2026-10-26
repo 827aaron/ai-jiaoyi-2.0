@@ -19,11 +19,11 @@ import os
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
@@ -35,6 +35,7 @@ from jiaoyi.contracts import (
     Health,
     KeyLevel,
     LevelKind,
+    MarketView,
     ModuleStatus,
     Outcome,
     Range,
@@ -228,6 +229,8 @@ class EventRules:
 
 PENDING_EXPIRY = timedelta(minutes=30)
 SLOWDOWN_AT = 0.8
+MARKET_SNAPSHOT_FRESH = timedelta(minutes=2)
+"""沿用整轮会前统计的新鲜度要求；不是方向判断阈值。"""
 """日花费到上限的这个比例就放慢开会（over_budget = slow）。"""
 
 
@@ -286,6 +289,19 @@ class BattleCardCommander:
         self.regime_reference: RegimeReference | None = None
         self.last_regime_flip_at: datetime | None = None
         self.last_regime_direction: Direction = "中性"
+        self.latest_market_view: MarketView | None = None
+        self._market_generation = 0
+        self._market_published_generation = 0
+        self._reference_generation = 0
+        self._pending_reference_view: MarketView | None = None
+        self._market_lock = asyncio.Lock()
+        self._market_snapshot: Callable[[SymbolPool, datetime], Awaitable[SymbolPool]] | None = None
+        self.market_refresh_cost_usd = 0.0
+        self.market_refresh_discarded = False
+        self._market_error: str | None = None
+        self._market_fails = 0
+        self._market_retry_at: datetime | None = None
+        self._market_path = card_path.with_name("market_view.json") if card_path else None
         self.round_cost_usd = 0.0
         self._round_reference: RegimeReference | None = None
         self._regime_price: Callable[[], float | None] | None = None
@@ -354,6 +370,7 @@ class BattleCardCommander:
         self._market_last: tuple[datetime, str, int | None] | None = None
         self._market_state: tuple[Health, str, str | None] | None = None
         self._restore_card()
+        self._restore_market()
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
@@ -365,6 +382,7 @@ class BattleCardCommander:
         if c is None:
             return None
         c = self._mask_us_closed(self._mask_stale(c, now), now)
+        c = c.model_copy(update={"current_market": self.latest_market_view})
         if not self._blocked:
             return c
         # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；
@@ -418,13 +436,17 @@ class BattleCardCommander:
         )
 
     @staticmethod
-    def _stamp(cs: CardSymbol, issued: datetime, expires: datetime) -> CardSymbol:
+    def _stamp(
+        cs: CardSymbol, issued: datetime, expires: datetime, market: MarketView | None = None
+    ) -> CardSymbol:
         """给一条指令盖上「哪一刻开的会、到几点到期」。"""
         return cs.model_copy(
             update={
                 "issued_at": issued,
                 "expires_at": expires,
                 "meeting_id": f"{cs.symbol}-{issued:%Y%m%dT%H%M%S}",
+                "source_market_view_id": market.market_view_id if market else None,
+                "source_regime": market.regime if market else None,
             }
         )
 
@@ -520,6 +542,8 @@ class BattleCardCommander:
     def regime_flip_blocked(self, now: datetime) -> str | None:
         if binance_gate.banned_until():
             return "限流"
+        if self._market_retry_at is not None and now < self._market_retry_at:
+            return "市场刷新失败退避"
         if self.may_refresh(now):
             return None
         if self._budget_exhausted(now):
@@ -530,7 +554,7 @@ class BattleCardCommander:
 
     def mark_regime_flip(self, now: datetime) -> None:
         self.last_regime_flip_at = now
-        self._save_card()  # 失败的开会也消耗过钱，重启不能绕过最少间隔
+        self._save_market()  # 失败也消耗钱，重启不能绕过最少间隔
 
     def take_notice(self) -> str | None:
         """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
@@ -777,7 +801,12 @@ class BattleCardCommander:
         beat = asyncio.create_task(self._beat_while_meeting())
         started = time.monotonic()
         try:
-            res = await self._analyze_one(entry, card.regime, "")
+            market = self.latest_market_view
+            regime = market.regime if market else card.regime
+            brief_text = self._brief.text if self._brief is not None else ""
+            res = await self._analyze_one(
+                entry, regime, "", brief_text=brief_text, market_view=market
+            )
         except Exception:
             return None  # 失败原因和花费已在各标的记录里
         finally:
@@ -788,6 +817,7 @@ class BattleCardCommander:
             self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
             now,
             card.expires_at,  # 临时会不改整轮的节奏：到期时间跟这一轮走
+            market,
         )
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
         if all(s.symbol != symbol for s in card.symbols):
@@ -809,7 +839,7 @@ class BattleCardCommander:
         if self._journal is not None:
             self._journal.record(card, [symbol])
         self._record_card(card, started)
-        return card
+        return card.model_copy(update={"current_market": self.latest_market_view})
 
     @staticmethod
     def _broken(lv: KeyLevel, px: float) -> bool:
@@ -823,6 +853,7 @@ class BattleCardCommander:
     async def refresh(self, pool: SymbolPool, reason: str) -> BattleCard:
         now = self._clock()
         self.round_cost_usd = 0.0
+        generation = self._new_market_generation()
         self._round_reference = None
         started = time.monotonic()
         self._loop = asyncio.get_running_loop()
@@ -836,15 +867,16 @@ class BattleCardCommander:
             raise CardRefreshError("候选池为空，不出卡")
         if self._budget_exhausted(now):
             raise CardRefreshError("军师团当日花费已达上限，今天不再开会")
+        brief_text = ""
         if self._brief is not None:
             try:
-                await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
+                brief_text = await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
             except Exception as exc:
                 self._write(outcome=Outcome.ERROR, summary=f"市场简报失败，会议继续：{exc}"[:200])
         self._progress = "选币中"
         beat = asyncio.create_task(self._beat_while_meeting())
         try:
-            card = await self._meet(pool, candidates, reason, now)
+            card = await self._meet(pool, candidates, reason, now, generation, brief_text)
         except Exception as exc:
             self._record_error(reason, exc, started)
             if self._rate_limited(reason):
@@ -862,13 +894,303 @@ class BattleCardCommander:
         if reason != "regime_flip":
             self._last_refresh = now
             self._scheduled_due = card.expires_at - self._lead
-        self.regime_reference = self._round_reference
+        if generation >= self._reference_generation:
+            self.regime_reference = self._round_reference
+            self._reference_generation = generation
+            self._pending_reference_view = (
+                self.latest_market_view if self.regime_reference is None else None
+            )
         self._save_card()
+        self._save_market()
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
         self._level_broken.clear()
         self._record_card(card, started)
-        return card
+        return card.model_copy(update={"current_market": self.latest_market_view})
+
+    def set_market_snapshot(
+        self, source: Callable[[SymbolPool, datetime], Awaitable[SymbolPool]]
+    ) -> None:
+        """只刷新原池成员统计，不重新选择或发布候选池。"""
+        self._market_snapshot = source
+
+    def _new_market_generation(self) -> int:
+        self._market_generation += 1
+        return self._market_generation
+
+    def _reference_for(self, view: MarketView) -> RegimeReference | None:
+        try:
+            px = self._regime_price() if self._regime_price is not None else None
+            if px is not None:
+                return RegimeReference(
+                    ts=self._clock(),
+                    direction=view.regime_direction,
+                    btc_px=px,
+                    regime_text=view.regime,
+                )
+        except Exception:
+            logger.exception("市场观点缺少可用 BTC 参照，暂停翻转检测")
+        return None
+
+    def ensure_regime_reference(self) -> None:
+        """方向变化时缺少新鲜 BTC，就等下一次有效行情后原子建立新参照。"""
+        if self._pending_reference_view is not None:
+            ref = self._reference_for(self._pending_reference_view)
+            if ref is not None:
+                self.regime_reference = ref
+                self._pending_reference_view = None
+                self._save_market()
+
+    def _publish_market(
+        self,
+        picked: PickResult,
+        pool: SymbolPool,
+        reason: str,
+        generation: int,
+        *,
+        transition: bool,
+    ) -> MarketView:
+        view = MarketView(
+            market_view_id=uuid.uuid4().hex,
+            version=(self.latest_market_view.version + 1) if self.latest_market_view else 1,
+            observed_at=self._clock(),
+            regime=picked.regime,
+            regime_direction=picked.regime_direction,
+            source="market_only" if transition else "scheduled_market",
+            refresh_reason=reason,
+            pool_id=pool.pool_id,
+            source_ts=pool.ts,
+        )
+        if generation < self._market_published_generation:
+            return view  # 仍是这一场币研究的历史来源，但不能覆盖更晚的当前观点
+        self.latest_market_view = view
+        self.last_regime_direction = view.regime_direction
+        self._market_published_generation = generation
+        if transition:
+            self._reference_generation = generation
+        if transition and (
+            self.regime_reference is None
+            or self.regime_reference.direction != view.regime_direction
+        ):
+            self.regime_reference = self._reference_for(view)
+            self._reference_generation = generation
+            self._pending_reference_view = view if self.regime_reference is None else None
+        self._save_market()
+        return view
+
+    async def refresh_market(
+        self,
+        pool: SymbolPool,
+        reason: str = "regime_flip",
+        *,
+        valid: Callable[[], bool] | None = None,
+    ) -> MarketView:
+        """独立更新市场背景；不选币、不分析币、不出卡，不重置整轮节奏。"""
+        waiting = self._market_lock.locked()
+        async with self._market_lock:
+            if waiting:
+                if self._market_error is None and self.latest_market_view is not None:
+                    return self.latest_market_view
+                raise CardRefreshError(self._market_error or "市场刷新未完成")
+            now = self._clock()
+            if why := self.regime_flip_blocked(now):
+                raise CardRefreshError(f"市场刷新暂停：{why}")
+            refresh = getattr(self._engine, "refresh_market", None)
+            if not callable(refresh):
+                raise CardRefreshError("会议引擎不支持独立市场刷新")
+            self._loop = asyncio.get_running_loop()
+            generation = self._new_market_generation()
+            self._market_error = None
+            started = time.monotonic()
+            self.market_refresh_cost_usd = 0.0
+            self.market_refresh_discarded = False
+            est = self._estimate(self._pick_costs)
+            reserve_day = self._day(now)
+            self._charge(est, round_cost=False)
+            cost = est
+            model_started = False
+            model_cost: float | None = None
+            try:
+                if self._market_snapshot is not None:
+                    snapshot = await asyncio.wait_for(
+                        self._market_snapshot(pool, now), self._symbol_timeout_s
+                    )
+                    if {e.symbol for e in snapshot.in_pool} != {e.symbol for e in pool.in_pool}:
+                        raise CardRefreshError("市场统计快照改变了原池成员，拒绝发布")
+                    pool = snapshot
+                age = self._clock() - pool.ts
+                if age < timedelta(0) or age > MARKET_SNAPSHOT_FRESH:
+                    raise CardRefreshError("市场统计超过 2 分钟或时间异常，保留上一份观点")
+                if valid is not None and not valid():
+                    raise CardRefreshError("市场刷新条件已变化，保留上一份观点")
+                brief_text = await self._brief.refresh() if self._brief is not None else ""
+                brief_text = f"Pool statistics source UTC: {pool.ts.isoformat()}\n" + brief_text
+                model_started = True
+                picked: PickResult = await asyncio.wait_for(
+                    refresh(pool.in_pool, self.latest_market_view, brief_text=brief_text),
+                    self._symbol_timeout_s,
+                )
+                model_cost = picked.cost_usd
+                if valid is not None and not valid():
+                    raise MeetingError("市场刷新期间设置或参照已变化，结果不发布", model_cost)
+                if picked.errors:
+                    raise MeetingError(
+                        "市场观点校验失败：" + "；".join(picked.errors), picked.cost_usd
+                    )
+                # 先验证，失败不得刷新时间、版本或方向。
+                MarketView(
+                    market_view_id="validate",
+                    version=1,
+                    observed_at=self._clock(),
+                    regime=picked.regime,
+                    regime_direction=picked.regime_direction,
+                )
+                cost = picked.cost_usd
+            except BaseException as exc:
+                cost = (
+                    model_cost
+                    if model_cost is not None
+                    else self._failure_cost(exc, "market_only")
+                    if model_started
+                    else 0.0
+                )
+                self._market_error = self._why(exc)
+                self._market_retry_at = (
+                    self._clock() + self._backoff[min(self._market_fails, len(self._backoff) - 1)]
+                )
+                self._market_fails += 1
+                self._write(
+                    outcome=Outcome.ERROR,
+                    summary=f"大盘独立更新失败，保留上一份观点：{self._market_error}"[:200],
+                    input={"refresh_reason": reason, "scope": "market_only"},
+                    output={"error": self._market_error},
+                    cost_usd=cost,
+                    latency_ms=(time.monotonic() - started) * 1000,
+                )
+                raise
+            finally:
+                # 预留跨日不能从新一天退款；新一天计完整实际费用。
+                charge = cost - est if self._day(self._clock()) == reserve_day else cost
+                self._charge(charge, round_cost=False)
+                self.market_refresh_cost_usd = cost
+                self._bump(
+                    ok=self._market_error is None,
+                    cost=0.0,
+                    ms=(time.monotonic() - started) * 1000,
+                    round_cost=False,
+                )
+                self._save_market()
+            self._market_fails, self._market_retry_at = 0, None
+            self._pick_costs.append(cost)
+            if generation < self._market_published_generation:
+                self.market_refresh_discarded = True
+                self._write(
+                    outcome=Outcome.INFO,
+                    summary="独立市场结果已被较新观点取代，不覆盖当前大盘",
+                    input={"refresh_reason": reason, "scope": "market_only"},
+                    output={"discarded_regime": picked.regime, "accepted": False},
+                    cost_usd=cost,
+                    latency_ms=(time.monotonic() - started) * 1000,
+                )
+                self._save_market()
+                assert self.latest_market_view is not None
+                return self.latest_market_view
+            view = self._publish_market(picked, pool, reason, generation, transition=True)
+            self._write(
+                outcome=Outcome.ACTION,
+                summary=f"独立大盘更新 v{view.version}：{view.regime}"[:200],
+                input={"refresh_reason": reason, "scope": "market_only"},
+                output={"market_view": view.model_dump(mode="json")},
+                cost_usd=cost,
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+            self._record_market(
+                pool,
+                picked,
+                [],
+                0,
+                self._card.version if self._card else 0,
+                time.monotonic() - started,
+                view.observed_at,
+                reason,
+            )
+            self._save_market()
+            return view
+
+    def _save_market(self) -> None:
+        if self._market_path is None:
+            return
+        data = {
+            "latest_market_view": self.latest_market_view.model_dump(mode="json")
+            if self.latest_market_view
+            else None,
+            "generation": self._market_generation,
+            "published_generation": self._market_published_generation,
+            "reference_generation": self._reference_generation,
+            "regime_reference": self.regime_reference.model_dump(mode="json")
+            if self.regime_reference
+            else None,
+            "pending_reference_view": self._pending_reference_view.model_dump(mode="json")
+            if self._pending_reference_view
+            else None,
+            "last_regime_flip_at": self.last_regime_flip_at.isoformat()
+            if self.last_regime_flip_at
+            else None,
+            "market_error": self._market_error,
+            "market_fails": self._market_fails,
+            "market_retry_at": self._market_retry_at.isoformat() if self._market_retry_at else None,
+        }
+        tmp = self._market_path.with_suffix(".tmp")
+        try:
+            self._market_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._market_path)
+        except Exception:
+            logger.exception("独立市场观点存盘失败")
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+    def _restore_market(self) -> None:
+        if self._market_path is None:
+            return
+        try:
+            data = json.loads(self._market_path.read_text(encoding="utf-8"))
+            view = (
+                MarketView.model_validate(data["latest_market_view"])
+                if data.get("latest_market_view")
+                else None
+            )
+            ref = (
+                RegimeReference.model_validate(data["regime_reference"])
+                if data.get("regime_reference")
+                else None
+            )
+            pending = (
+                MarketView.model_validate(data["pending_reference_view"])
+                if data.get("pending_reference_view")
+                else None
+            )
+            times: dict[str, datetime | None] = {}
+            for key in ("last_regime_flip_at", "market_retry_at"):
+                times[key] = datetime.fromisoformat(data[key]) if data.get(key) else None
+                at = times[key]
+                if at is not None and at.tzinfo is None:
+                    raise ValueError("市场状态时间必须带时区")
+            generation = int(data.get("generation", 0))
+            published = int(data.get("published_generation", 0))
+            reference_generation = int(data.get("reference_generation", 0))
+            fails = int(data.get("market_fails", 0))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return
+        self.latest_market_view, self.regime_reference = view, ref
+        self._pending_reference_view = pending
+        self._market_generation, self._market_published_generation = generation, published
+        self._reference_generation = reference_generation
+        self.last_regime_flip_at = times["last_regime_flip_at"]
+        self._market_retry_at, self._market_fails = times["market_retry_at"], fails
+        self._market_error = data.get("market_error")
+        if view is not None:
+            self.last_regime_direction = view.regime_direction
 
     def _eligible(self, pool: SymbolPool, now: datetime, *, expand: bool) -> list[SymbolPoolEntry]:
         """这一轮能开会的币：没开分档 = 整个池；开了 = 头部 + 有持仓的 + 中间档里今天挑中的
@@ -1131,7 +1453,13 @@ class BattleCardCommander:
             await asyncio.sleep(self._beat_s)
 
     async def _meet(
-        self, pool: SymbolPool, candidates: list[SymbolPoolEntry], reason: str, now: datetime
+        self,
+        pool: SymbolPool,
+        candidates: list[SymbolPoolEntry],
+        reason: str,
+        now: datetime,
+        generation: int,
+        brief_text: str,
     ) -> BattleCard:
         by_symbol = {e.symbol: e for e in candidates}
         pinned = [e for e in candidates if e.pinned][: self._pick_max]
@@ -1145,7 +1473,13 @@ class BattleCardCommander:
         self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
         live = self._market_live(pool.in_pool, candidates, pinned, free, max(room, 0))
         try:
-            picked = await self._engine.pick(free, max(room, 0), self._card, pool=pool.in_pool)
+            contextual_pick = getattr(self._engine, "pick_with_context", None)
+            if callable(contextual_pick):
+                picked = await contextual_pick(
+                    free, max(room, 0), self._card, pool.in_pool, brief_text=brief_text
+                )
+            else:
+                picked = await self._engine.pick(free, max(room, 0), self._card, pool=pool.in_pool)
         except Exception as exc:
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
             fail_cost = self._failure_cost(exc, "pick")
@@ -1157,7 +1491,7 @@ class BattleCardCommander:
                 Health.DEGRADED, f"总盘会失败：{self._why(exc)}", None, self._why(exc)
             )
             raise
-        self.last_regime_direction = picked.regime_direction
+        market_view = self._publish_market(picked, pool, reason, generation, transition=False)
         # 总盘会结束与单币会全部结束可能相差十几分钟：价和方向必须取同一时刻。
         if self._regime_price is not None:
             try:
@@ -1273,6 +1607,7 @@ class BattleCardCommander:
                 expires_at=round_expiry,
                 source="tradingagents",
                 regime=picked.regime,
+                regime_direction=picked.regime_direction,
                 symbols=self._fit(list(symbols.values())),
                 refresh_reason=reason,
                 llm_cost_usd=round(cost, 6),
@@ -1284,12 +1619,19 @@ class BattleCardCommander:
 
         async def meet(e: SymbolPoolEntry) -> Analysis:
             nonlocal cost, published
-            res = await self._analyze_one(e, picked.regime, reasons.get(e.symbol, ""))
+            res = await self._analyze_one(
+                e,
+                picked.regime,
+                reasons.get(e.symbol, ""),
+                brief_text=brief_text,
+                market_view=market_view,
+            )
             # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
             symbols[e.symbol] = self._stamp(
                 self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
                 now,
                 round_expiry,
+                market_view,
             )
             cost += res.cost_usd
             published += 1
@@ -1347,16 +1689,37 @@ class BattleCardCommander:
         return str(exc) or type(exc).__name__
 
     async def _analyze_one(
-        self, entry: SymbolPoolEntry, regime: str, pick_reason: str = ""
+        self,
+        entry: SymbolPoolEntry,
+        regime: str,
+        pick_reason: str = "",
+        *,
+        brief_text: str = "",
+        market_view: MarketView | None = None,
     ) -> Analysis:
         async with self._sem:
             started = time.monotonic()
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             try:
-                res = await asyncio.wait_for(
-                    self._engine.analyze(entry, regime, pick_reason), self._symbol_timeout_s
+                contextual_analyze = getattr(self._engine, "analyze_with_context", None)
+                meeting = (
+                    contextual_analyze(entry, regime, pick_reason, brief_text=brief_text)
+                    if callable(contextual_analyze)
+                    else self._engine.analyze(entry, regime, pick_reason)
                 )
+                res = cast(Analysis, await asyncio.wait_for(meeting, self._symbol_timeout_s))
+                if market_view is not None:
+                    res = Analysis(
+                        res.card_symbol.model_copy(
+                            update={
+                                "source_market_view_id": market_view.market_view_id,
+                                "source_regime": market_view.regime,
+                            }
+                        ),
+                        res.cost_usd,
+                        res.usage,
+                    )
             except Exception as exc:
                 self._charge(-est)
                 fail_cost = self._failure_cost(exc, entry.symbol)
@@ -1417,8 +1780,9 @@ class BattleCardCommander:
         if day != self._stats_day:
             self._stats, self._stats_day = TodayStats(), day
 
-    def _bump(self, *, ok: bool, cost: float, ms: float) -> None:
-        self.round_cost_usd += cost
+    def _bump(self, *, ok: bool, cost: float, ms: float, round_cost: bool = True) -> None:
+        if round_cost:
+            self.round_cost_usd += cost
         self._roll(self._clock())
         s = self._stats
         calls = s.calls + 1
@@ -1433,9 +1797,12 @@ class BattleCardCommander:
         )
         self._save_budget()
 
-    def _charge(self, cost: float) -> None:
+    def _charge(self, cost: float, *, round_cost: bool = True) -> None:
         """只记花费、不算一次调用（选币步骤，或不属于某个标的的花费）。"""
-        self.round_cost_usd += cost
+        if round_cost:
+            self.round_cost_usd += cost
+        else:
+            self.market_refresh_cost_usd += cost
         self._roll(self._clock())
         self._stats = self._stats.model_copy(
             update={"cost_usd": max(round(self._stats.cost_usd + cost, 6), 0.0)}
@@ -1454,7 +1821,7 @@ class BattleCardCommander:
         """超时取消的会议，在途请求的真实花费晚到：补正今天的花费（从工作线程回到事件循环里记）。"""
         loop = self._loop
         if loop is not None and delta:
-            loop.call_soon_threadsafe(self._charge, delta)
+            loop.call_soon_threadsafe(lambda: self._charge(delta, round_cost=key != "market_only"))
 
     def bind_credit_alarm(self, fn: Callable[[], None]) -> None:
         """模型额度不足（402）时调一下：让主程序发告警、面板显示横幅。"""
@@ -1666,7 +2033,10 @@ class BattleCardCommander:
             input={"refresh_reason": card.refresh_reason},
             output={
                 "regime": card.regime,
-                "regime_direction": self.last_regime_direction,
+                "regime_direction": card.regime_direction,
+                "market_view": self.latest_market_view.model_dump(mode="json")
+                if self.latest_market_view
+                else None,
                 "version": card.version,
                 "expires_at": card.expires_at.isoformat(),  # 面板据此显示“还有多久有效”
                 "symbols": [s.symbol for s in card.symbols],

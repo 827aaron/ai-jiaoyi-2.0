@@ -41,9 +41,9 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.gate.context import EntryExtras
 
-TEMPLATE_VERSION = "q8"
+TEMPLATE_VERSION = "q9"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
-SNAPSHOT_SCHEMA = "s5"
+SNAPSHOT_SCHEMA = "s6"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
 MAX_SNAPSHOT_CHARS = 3200
 """一道题问法加了技术面、成交流、衍生品、完整作战卡，中位约 1750 字，最长约 2600（spec §3e）。"""
@@ -66,6 +66,8 @@ KNOWN_TEMPLATES: dict[str, str] = {
     "q7": "2937b035dde4",
     # 10-25「没有新单」：一道题改回旧措辞，卡去掉理由 / 区间 / 允许信号 / 卡龄（A/B 0.08 → 0.59）
     "q8": "7309175f24c4",
+    # 独立大盘：当前市场背景与每币原研究来源分列，字段结构 s6。
+    "q9": "11822a6e9146",
 }
 
 _ENTRY_GOAL = (
@@ -287,7 +289,24 @@ def _card_block(card: BattleCard | None, symbol: str, px: float) -> dict[str, An
         "stop_atr": [cs.stop_atr.min, cs.stop_atr.max],
         "tp_r": [cs.take_profit_r.min, cs.take_profit_r.max],
         "size_max": cs.size_tier_max.value,
-        "regime": card.regime[:120],
+        "regime": (cs.source_regime or card.regime)[:120],
+        **({"source_market_view_id": cs.source_market_view_id} if cs.source_market_view_id else {}),
+    }
+
+
+def _current_market(card: BattleCard | None) -> dict[str, Any]:
+    if card is None or card.current_market is None:
+        return {}
+    view = card.current_market
+    return {
+        "current_market": {
+            "market_view_id": view.market_view_id,
+            "version": view.version,
+            "observed_at": view.observed_at.isoformat(),
+            "source_ts": view.source_ts.isoformat() if view.source_ts else None,
+            "regime": view.regime[:200],
+            "regime_direction": view.regime_direction,
+        }
     }
 
 
@@ -336,7 +355,8 @@ def _card_full(
         "stop_atr": [cs.stop_atr.min, cs.stop_atr.max],
         "tp_r": [cs.take_profit_r.min, cs.take_profit_r.max],
         "size_max": cs.size_tier_max.value,
-        "regime": card.regime[:200],
+        "regime": (cs.source_regime or card.regime)[:200],
+        **({"source_market_view_id": cs.source_market_view_id} if cs.source_market_view_id else {}),
     }
 
 
@@ -384,6 +404,7 @@ def entry_snapshot_one(
         if blocks.get(key):
             d[key] = json.loads(json.dumps(blocks[key]))  # 拷一份：超长删键不动日志里的原值
     d["card"] = _card_full(card, signal.symbol, f.last_price, hold_min, signal.ts)
+    d.update(_current_market(card))
     return _dump(d)
 
 
@@ -402,6 +423,7 @@ def entry_snapshot(
         "hold_min": hold_min,
         **market_block(f),
         "card": _card_block(card, signal.symbol, f.last_price),
+        **_current_market(card),
     }
     fc = signal.forecast
     if fc is not None and fc.stale_after > signal.ts:
@@ -492,6 +514,7 @@ def hold_snapshot(
         book.pop("micro_bps", None)
     d.update(mkt)
     d["card"] = _card_block(card, pos.symbol, px)
+    d.update(_current_market(card))
     if forecast is not None and forecast.stale_after > now:
         up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
         kr: dict[str, Any] = {"agree": 1 if up > 0.5 else 0}

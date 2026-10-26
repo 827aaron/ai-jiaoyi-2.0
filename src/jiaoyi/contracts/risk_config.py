@@ -637,37 +637,37 @@ class FastLoopConfig(Contract):
     btc_lead_live: bool = Field(
         default=False, description="testnet / live 也出 BTC 先动信号（默认关，只在模拟盘出）。"
     )
-    # ---- 大盘翻转：只申请提前开整轮会，不下单、不平仓
+    # ---- 大盘方向变化：只更新市场背景，不重跑各币会议
     regime_flip_on: bool = Field(
-        default=True, description="每 5 分钟看一次大盘是否翻向；满足条件就提前重开整轮会。"
+        default=True, description="每 5 分钟看一次大盘是否翻向；满足条件就独立更新大盘。"
     )
     regime_flip_live: bool = Field(
-        default=False, description="测试网 / 实盘也启用大盘翻转重开；默认关，仅模拟盘开启。"
+        default=False, description="测试网 / 实盘也启用独立大盘更新；默认关，仅模拟盘开启。"
     )
     regime_flip_breadth: int = Field(
         default=30,
         ge=0,
         le=40,
-        description="按 40 个有效币算，至少几个往旧判断的反方向走才算翻转；"
+        description="按 40 个有效币算，至少几个同向才算方向变化（中性对称检查上下）；"
         "默认 30，即四分之三。有效币数不同就按比例算；0 = 不要求广度条件。",
     )
     regime_flip_btc_pct: float = Field(
         default=1.0,
         ge=0,
         allow_inf_nan=False,
-        description="BTC 相比上次总盘会的参照价，至少反向走百分之几；"
+        description="BTC 相比市场参照价至少同向走百分之几（中性对称检查上下）；"
         "默认 1 表示 1%，0 = 不要求 BTC 幅度条件。",
     )
     regime_flip_confirm: int = Field(
         default=2,
         ge=0,
-        description="连续几次检查满足条件才重开；默认 2 次。0 = 不等连续确认，本次满足就重开。",
+        description="连续几次同方向检查满足条件才更新大盘；默认 2 次。0 = 不等连续确认。",
     )
     regime_flip_min_gap_min: float = Field(
         default=60,
         ge=0,
         allow_inf_nan=False,
-        description="两次因大盘翻转重开至少隔几分钟；默认 60，填 0 不限制间隔。",
+        description="两次独立大盘更新至少隔几分钟；默认 60，填 0 不限制间隔。",
     )
     regime_flip_min_symbols: int = Field(
         default=10,

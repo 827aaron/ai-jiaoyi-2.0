@@ -65,7 +65,7 @@ def test_missing_condition_resets_streak(
 
 def test_neutral_missing_reference_and_missing_prices(now: datetime) -> None:
     r = rule(now, "中性", regime_flip_confirm=1)
-    assert r.step(now, 40, 0, 40, 102).reason == "中性判断"
+    assert r.step(now, 40, 0, 40, 102).kind == "confirmed"
     r.arm(None)
     assert "参照" in r.step(now, 40, 0, 40, 102).reason
     r.arm(reference(now))

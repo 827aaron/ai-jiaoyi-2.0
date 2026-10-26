@@ -202,7 +202,9 @@ async def test_failed_refresh_keeps_old_card_until_expiry(tmp_path: Path, now: d
     c.notify_news("AAUSDT")  # 大消息才会在间隔内重开会
     with pytest.raises(CardRefreshError):
         await c.refresh(p, "news")
-    assert c.current(clock[0]) == old
+    assert c.current(clock[0]).model_dump(exclude={"current_market"}) == old.model_dump(
+        exclude={"current_market"}
+    )
 
 
 async def test_version_increments_within_day(tmp_path: Path, now: datetime) -> None:
@@ -886,3 +888,26 @@ async def test_saved_card_with_stop_hint_survives_restart(tmp_path: Path, now: d
     )
     restored = c2.current(now)
     assert restored is not None and restored.card_id == card.card_id
+
+
+async def test_card_record_keeps_historical_direction_when_latest_market_changed(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.contracts import MarketView
+
+    engine = FakeEngine(["AAUSDT"])
+    commander, log, _ = make(tmp_path, engine, now)
+    card = await commander.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    historical = card.model_copy(update={"regime": "旧看跌", "regime_direction": "看跌"})
+    commander.latest_market_view = MarketView(
+        market_view_id="latest",
+        version=2,
+        observed_at=now,
+        regime="新看涨",
+        regime_direction="看涨",
+    )
+    commander.last_regime_direction = "看涨"
+    commander._record_card(historical, 0.0)
+    record = log.read_day(now.date().isoformat())[-1]
+    assert record.output["regime"] == "旧看跌" and record.output["regime_direction"] == "看跌"
+    assert record.output["market_view"]["regime_direction"] == "看涨"

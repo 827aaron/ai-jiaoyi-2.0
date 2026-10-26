@@ -934,6 +934,9 @@ class RiskGuardImpl:
             intent_id=f"int-{uuid.uuid4().hex[:16]}",
             signal_id=signal.signal_id,
             card_id=card.card_id,
+            source_market_direction=(
+                card.current_market.regime_direction if card.current_market else None
+            ),
             symbol=signal.symbol,
             category=cs.category,
             side=side,

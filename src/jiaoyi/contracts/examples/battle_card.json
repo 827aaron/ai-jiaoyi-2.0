@@ -50,7 +50,9 @@
       "reason": "资金费率中性，持仓量回升，68000 突破后上方空间较大。",
       "issued_at": "2026-10-22T06:00:00Z",
       "expires_at": "2026-10-22T08:00:00Z",
-      "meeting_id": "BTCUSDT-20260101T000000"
+      "meeting_id": "BTCUSDT-20260101T000000",
+      "source_market_view_id": null,
+      "source_regime": null
     },
     {
       "symbol": "TSLAUSDT",
@@ -79,9 +81,13 @@
       "reason": "财报前一晚，只看不做。",
       "issued_at": null,
       "expires_at": null,
-      "meeting_id": null
+      "meeting_id": null,
+      "source_market_view_id": null,
+      "source_regime": null
     }
   ],
   "refresh_reason": "scheduled",
-  "llm_cost_usd": 0.042
+  "llm_cost_usd": 0.042,
+  "current_market": null,
+  "regime_direction": null
 }

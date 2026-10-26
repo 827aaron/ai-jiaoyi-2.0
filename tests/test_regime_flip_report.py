@@ -58,3 +58,26 @@ def test_cli_no_records_does_not_create_data(tmp_path: Path) -> None:
     assert "| 无记录 | 0 | 0 | 0 | 0 |" in result.stdout
     assert "无有效样本" in result.stdout
     assert not list(tmp_path.iterdir())
+
+
+def test_neutral_confirmation_uses_explicit_candidate_direction(now: datetime) -> None:
+    rows = [
+        {
+            "ts": now.isoformat(),
+            "event_id": "neutral",
+            "kind": "confirmed",
+            "regime_dir": "中性",
+            "candidate_direction": "看涨",
+        },
+        {
+            "ts": now.isoformat(),
+            "event_id": "neutral",
+            "kind": "outcome",
+            "horizon_h": 1,
+            "fwd_1h_pool_median_pct": 2,
+            "fwd_1h_btc_pct": 1,
+        },
+    ]
+    output = report(rows, now)
+    assert "| 1h 池面 | 1 | +2.000% | +2.000% | 100.0%（1/1）" in output
+    assert "| 1h BTC | 1 | +1.000% | +1.000% | 100.0%（1/1）" in output

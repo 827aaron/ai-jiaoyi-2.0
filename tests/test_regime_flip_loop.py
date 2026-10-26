@@ -31,6 +31,8 @@ class Engine(FakeEngine):
     def __init__(self) -> None:
         super().__init__(["AAUSDT", "ABUSDT"])
         self.pick_calls = 0
+        self.market_calls = 0
+        self.market_fail = False
 
     async def pick(self, *args: object, **kwargs: object) -> PickResult:
         self.pick_calls += 1
@@ -40,6 +42,12 @@ class Engine(FakeEngine):
             0.01,
             regime_direction=self.direction,
         )
+
+    async def refresh_market(self, *args: object, **kwargs: object) -> PickResult:
+        self.market_calls += 1
+        if self.market_fail:
+            raise RuntimeError("市场模型超时")
+        return PickResult("独立市场判断", [], 0.01, regime_direction=self.direction)
 
 
 async def setup(tmp: Path, now: datetime):
@@ -71,6 +79,11 @@ async def setup(tmp: Path, now: datetime):
         return [bar(sym, end - timedelta(hours=1), 100), bar(sym, end, px[0])]
 
     r = Runner(app, fetch_regime_klines=fetch)
+
+    async def fresh_snapshot(p, at):
+        return p.model_copy(update={"ts": at})
+
+    cards.set_market_snapshot(fresh_snapshot)
     r._screen_now = AsyncMock()
     r.sync_watch = AsyncMock()
     await cards.refresh(p, "scheduled")
@@ -97,17 +110,17 @@ async def test_round_reference_flip_and_unchanged_scheduled_deadline(
     assert eng.pick_calls == 1
     clock[0] += timedelta(minutes=5)
     await r.regime_flip_tick()
-    assert r._refreshing
+    assert r._market_refreshing and not r._refreshing
     await finish(r)
-    assert eng.pick_calls == 2
-    assert eng.analyzed == ["AAUSDT", "ABUSDT", "AAUSDT", "ABUSDT"]  # 不沿用旧单币会
-    assert c.current(clock[0]).refresh_reason == "regime_flip"
+    assert eng.pick_calls == 1 and eng.market_calls == 1
+    assert eng.analyzed == ["AAUSDT", "ABUSDT"]
+    assert c.current(clock[0]).refresh_reason == "scheduled"
     assert c.regime_reference.direction == "看涨" and c.regime_reference.btc_px == 102
     assert c._scheduled_due == deadline and r._last_card_at == now
     events = records(tmp_path / "regime_flip")
     assert [e["kind"] for e in events] == ["blocked", "confirmed", "rerun_result"]
     assert events[-1]["result"] == "flip_changed"
-    assert events[-1]["cost_usd"] == pytest.approx(0.05)
+    assert events[-1]["cost_usd"] == pytest.approx(0.01)
     assert events[-1]["event_id"] == events[-2]["event_id"]
     market = records(tmp_path / "market_meeting")[-1]
     assert market["regime_direction"] == "看涨" and market["refresh_reason"] == "regime_flip"
@@ -121,7 +134,7 @@ async def test_round_reference_flip_and_unchanged_scheduled_deadline(
     assert restored._scheduled_due == deadline and restored._last_refresh == now
 
 
-@pytest.mark.parametrize("block", ["busy", "budget", "backoff", "rate", "missing", "neutral"])
+@pytest.mark.parametrize("block", ["market_busy", "budget", "backoff", "rate", "missing"])
 async def test_gates_block_without_duplicate_round(
     tmp_path: Path, now: datetime, block: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -130,8 +143,8 @@ async def test_gates_block_without_duplicate_round(
     patch_inplace(
         r.app.app_cfg.fast_loop, FastLoopConfig(regime_flip_confirm=1), {"regime_flip_confirm"}
     )
-    if block == "busy":
-        r._refreshing = True
+    if block == "market_busy":
+        r._market_refreshing = True
     elif block == "budget":
         c._cost_limit = 0.001
     elif block == "backoff":
@@ -140,8 +153,6 @@ async def test_gates_block_without_duplicate_round(
         monkeypatch.setattr("jiaoyi.loop.binance_gate.banned_until", lambda: now.timestamp() + 3600)
     elif block == "missing":
         c.regime_reference = None
-    else:
-        c.regime_reference = c.regime_reference.model_copy(update={"direction": "中性"})
     clock[0] += timedelta(minutes=5)
     await r.regime_flip_tick()
     await finish(r)
@@ -149,12 +160,11 @@ async def test_gates_block_without_duplicate_round(
     latest = records(tmp_path / "regime_flip")[-1]
     assert latest["kind"] == "blocked"
     expected = {
-        "busy": "正在开会",
+        "market_busy": "大盘独立更新中",
         "budget": "日预算",
         "backoff": "失败退避",
         "rate": "限流",
         "missing": "没有可恢复的总盘会参照",
-        "neutral": "中性判断",
     }
     assert latest["blocked_reason"] == expected[block]
     assert c.last_regime_flip_at is None
@@ -169,7 +179,7 @@ async def test_rate_limit_during_fetch_is_logged_not_raised(tmp_path: Path, now:
     assert records(tmp_path / "regime_flip")[-1]["blocked_reason"] == "限流"
 
 
-async def test_busy_single_coin_event_and_flip_do_not_overlap(
+async def test_single_coin_event_and_market_update_can_overlap(
     tmp_path: Path, now: datetime
 ) -> None:
     r, c, eng, clock, px = await setup(tmp_path, now)
@@ -179,14 +189,11 @@ async def test_busy_single_coin_event_and_flip_do_not_overlap(
     c.request_event("AAUSDT", "signal_against_card")
     clock[0] += timedelta(minutes=5)
     await asyncio.gather(r.regime_flip_tick(), r.regime_flip_tick())
-    assert r._refreshing
-    await r.slow_tick()  # 单币事件仍在排队，不能和整轮并发
-    assert "AAUSDT" in c._pending
-    await finish(r)
-    assert eng.pick_calls == 2
     await r.slow_tick()
     await finish(r)
-    assert eng.pick_calls == 2 and "AAUSDT" not in c._pending
+    assert eng.pick_calls == 1 and eng.market_calls == 1
+    assert "AAUSDT" not in c._pending
+    assert eng.analyzed.count("AAUSDT") == 2
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -196,7 +203,7 @@ async def test_no_change_or_failure_is_logged_and_does_not_refund_cooldown(
     r, c, eng, clock, px = await setup(tmp_path, now)
     old = c.regime_reference
     if failed:
-        eng.fail = set(eng.picks)
+        eng.market_fail = True
     px[0] = 102
     cfg = r.app.app_cfg.fast_loop
     patch_inplace(cfg, cfg.model_copy(update={"regime_flip_confirm": 1}), {"regime_flip_confirm"})
@@ -289,7 +296,7 @@ async def test_panel_sentinel_logs_and_trigger_edge_payload(tmp_path: Path, now:
         await r.regime_flip_tick()
     await finish(r)
     page = build_team(PanelFiles(tmp_path, "UTC"), clock[0], Role.SENTINEL)
-    assert page.regime_flip is not None and "提前开整轮会" in page.regime_flip.text
+    assert page.regime_flip is not None and "独立更新大盘" in page.regime_flip.text
     assert {item.output["regime_flip"]["kind"] for item in page.records} >= {
         "suspect_breadth",
         "blocked",
@@ -306,6 +313,7 @@ async def test_bad_or_legacy_reference_never_guesses_direction(
 ) -> None:
     r, c, eng, _, _ = await setup(tmp_path, now)
     path = tmp_path / "battle_card.json"
+    (tmp_path / "market_view.json").rename(tmp_path / "market_view.backup")
     saved = json.loads(path.read_text())
     saved["regime_reference"] = {"ts": "bad", "direction": "看涨", "btc_px": 0}
     path.write_text(json.dumps(saved))
@@ -328,7 +336,7 @@ async def test_expired_card_still_restores_arbitrary_flip_gap(
         eng, RISK, r.app.log, clock=r.app.clock, card_path=tmp_path / "battle_card.json"
     )
     assert restored.last_regime_flip_at == now
-    assert restored.regime_reference is None  # 旧卡不能成为当前方向参照
+    assert restored.regime_reference == c.regime_reference  # 独立市场状态不随卡过期丢失
 
 
 async def test_reference_price_is_pick_time_not_last_symbol_finish(
@@ -353,25 +361,26 @@ async def test_reference_price_is_pick_time_not_last_symbol_finish(
     assert clock[0] > pick_at and px[0] == 120
 
 
-async def test_settings_change_while_rescreening_aborts_and_logs(
+async def test_settings_change_while_market_snapshot_aborts_and_logs(
     tmp_path: Path,
     now: datetime,
 ) -> None:
-    r, _, eng, clock, px = await setup(tmp_path, now)
+    r, c, eng, clock, px = await setup(tmp_path, now)
     px[0] = 102
     clock[0] += timedelta(minutes=5)
     await r.regime_flip_tick()
 
-    async def rescreen(_):
+    async def snapshot(p, at):
         cfg = r.app.app_cfg.fast_loop
         patch_inplace(cfg, cfg.model_copy(update={"regime_flip_confirm": 3}), HOT_FAST)
+        return p.model_copy(update={"ts": at})
 
-    r._screen_now = rescreen
+    c.set_market_snapshot(snapshot)
     clock[0] += timedelta(minutes=5)
     await r.regime_flip_tick()
     await finish(r)
-    assert eng.pick_calls == 1 and not r._refreshing
-    assert "阈值已更新" in records(tmp_path / "regime_flip")[-1]["blocked_reason"]
+    assert eng.pick_calls == 1 and eng.market_calls == 0 and not r._market_refreshing
+    assert "条件已变化" in records(tmp_path / "regime_flip")[-1]["error"]
 
 
 async def test_reference_price_freshness_can_be_disabled(tmp_path: Path, now: datetime) -> None:

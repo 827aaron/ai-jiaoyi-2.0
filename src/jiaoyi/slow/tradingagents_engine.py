@@ -42,6 +42,7 @@ from jiaoyi.contracts import (
     Category,
     KeyLevel,
     LevelKind,
+    MarketView,
     Range,
     RiskConfig,
     SignalKind,
@@ -911,6 +912,11 @@ class _LessonDraft(BaseModel):
     lessons: list[_L] = Field(default_factory=list, description="At most 5; empty if none stand up")
 
 
+class _MarketDraft(BaseModel):
+    regime: str = Field(min_length=1, description="Chinese market view citing at least two numbers")
+    regime_direction: Direction
+
+
 class _PickDraft(BaseModel):
     class _D(BaseModel):
         symbol: str
@@ -1708,7 +1714,9 @@ def cost_handler(meter: CostMeter) -> Any:
     """把 ``CostMeter`` 接到 LangChain 的回调上（LangChain 只在真跑时才导入）。"""
     from langchain_core.callbacks import BaseCallbackHandler
 
-    class _CostHandler(BaseCallbackHandler):  # type: ignore[misc]
+    # slow 是可选依赖：未安装时基类为 Any；装有类型信息时无需抑制。
+    class _CostHandler(BaseCallbackHandler):  # type: ignore[misc, unused-ignore]
+        meter: CostMeter
         raise_error = True  # 被取消的会议要让下一次请求真的失败，不能被回调管理器吞掉
 
         def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
@@ -1993,12 +2001,19 @@ class TradingAgentsEngine:
         max_n: int,
         previous: BattleCard | None,
         pool: Sequence[SymbolPoolEntry] = (),
+        *,
+        brief_text: str | None = None,
     ) -> PickResult:
         if max_n <= 0 or not candidates:
             return PickResult(regime=previous.regime if previous else "无新增标的", picks=[])
         self._snapshot_liquidations([e.symbol for e in candidates])
         return await asyncio.to_thread(
-            self._pick_sync, list(candidates), max_n, previous, list(pool) or list(candidates)
+            self._pick_sync,
+            list(candidates),
+            max_n,
+            previous,
+            list(pool) or list(candidates),
+            self._brief_text() if brief_text is None else brief_text,
         )
 
     def _pick_sync(
@@ -2007,12 +2022,13 @@ class TradingAgentsEngine:
         max_n: int,
         previous: BattleCard | None,
         pool: list[SymbolPoolEntry],
+        brief_text: str | None = None,
     ) -> PickResult:
         meter = self._meter("pick")
         handler = cost_handler(meter)
         self._refresh_lessons(handler)
         try:
-            return self._pick_run(candidates, max_n, previous, handler, meter, pool)
+            return self._pick_run(candidates, max_n, previous, handler, meter, pool, brief_text)
         except Exception as exc:  # 失败时把已烧掉的花费带出去，日花费上限才不漏算
             raise MeetingError(str(exc), meter.cost) from exc
         finally:
@@ -2026,6 +2042,7 @@ class TradingAgentsEngine:
         handler: Any,
         meter: CostMeter,
         pool: Sequence[SymbolPoolEntry] = (),
+        brief_text: str | None = None,
     ) -> PickResult:
         graph = self._graph(("market",), handler)
         llm = (
@@ -2038,7 +2055,7 @@ class TradingAgentsEngine:
             market_table.format_row(e, self._s.hold, self._headlines(e.symbol)) for e in candidates
         )
         table = f"{breadth}\n{rows}"
-        market = self._brief_text() + self._market_news()
+        market = (self._brief_text() if brief_text is None else brief_text) + self._market_news()
         prompt = ta_prompts.pick_prompt(
             prompt_params(self._s),
             f"{self._today():%Y-%m-%d %H:%M}",
@@ -2065,6 +2082,80 @@ class TradingAgentsEngine:
                 logger.exception("总盘会重问失败，用第一次的回答")
         return pick_result(draft, valid, max_n, problems, retried, meter.cost, breadth, table)
 
+    async def pick_with_context(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry],
+        *,
+        brief_text: str,
+    ) -> PickResult:
+        return await self.pick(candidates, max_n, previous, pool, brief_text=brief_text)
+
+    async def refresh_market(
+        self,
+        pool: Sequence[SymbolPoolEntry],
+        previous: MarketView | None,
+        *,
+        brief_text: str = "",
+    ) -> PickResult:
+        """只评估市场，独立模型调用和成本键；空池也不走 pick 的短路。"""
+        return await asyncio.to_thread(self._refresh_market_sync, list(pool), previous, brief_text)
+
+    def _refresh_market_sync(
+        self,
+        pool: list[SymbolPoolEntry],
+        previous: MarketView | None,
+        brief_text: str,
+    ) -> PickResult:
+        meter = self._meter("market_only")
+        handler = cost_handler(meter)
+        try:
+            graph = self._graph(("market",), handler)
+            llm = (
+                self._llm(graph, self._s.pick_tier)
+                .with_structured_output(_MarketDraft)
+                .bind(max_tokens=self._s.json_max_tokens)
+            )
+            breadth = market_table.breadth_line(pool)
+            table = "\n".join(market_table.format_row(e, self._s.hold) for e in pool)
+            prompt = (
+                "Judge the CURRENT overall market for perpetual trading. Do not select coins "
+                "or analyze individual trade instructions. Return a concise Chinese regime "
+                "citing at least two observed numbers, and an explicit regime_direction "
+                "(看涨/看跌/中性). Use the same trading horizon as the scheduled market meeting.\n"
+                f"Trading horizon: {prompt_params(self._s).horizon}\n"
+                f"UTC: {self._today():%Y-%m-%d %H:%M}\n"
+                f"Previous market view: {previous.regime if previous else 'none'}\n"
+                + brief_text
+                + self._market_news()
+                + "\n"
+                + breadth
+                + "\n"
+                + table
+            )
+            for attempt in range(2):
+                draft: _MarketDraft = llm.invoke(prompt, config={"callbacks": [handler]})
+                if not isinstance(draft, _MarketDraft):
+                    raise ValueError("市场刷新没有返回结构化观点")
+                if market_table.count_numbers(draft.regime) >= 2:
+                    return PickResult(
+                        regime=draft.regime,
+                        picks=[],
+                        cost_usd=meter.cost,
+                        regime_direction=draft.regime_direction,
+                        breadth=breadth,
+                        table=table,
+                        retried=bool(attempt),
+                    )
+                prompt += "\nQuote at least two actual numbers from the supplied data."
+            raise ValueError("市场观点缺少数据依据，保留上一份观点")
+        except Exception as exc:
+            raise MeetingError(str(exc), meter.cost) from exc
+        finally:
+            self._done("market_only", meter)
+
     def _liq_note(self, symbol: str) -> str:
         total = _LIQ_TOTALS.get(symbol, 0.0)
         return f" liquidated_1h={total:,.0f}USDT" if total > 0 else ""
@@ -2076,7 +2167,8 @@ class TradingAgentsEngine:
         return "".join(f"\n    · {i.title}" for i in items)
 
     def _brief_text(self) -> str:
-        return f"\n{self._brief.text}\n" if self._brief is not None and self._brief.text else ""
+        brief = getattr(self, "_brief", None)
+        return f"\n{brief.text}\n" if brief is not None and brief.text else ""
 
     def _market_news(self) -> str:
         if self._news is None:
@@ -2091,7 +2183,24 @@ class TradingAgentsEngine:
         self._snapshot_liquidations([entry.symbol])
         return await asyncio.to_thread(self._analyze_sync, entry, regime, pick_reason)
 
-    def _analyze_sync(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+    async def analyze_with_context(
+        self,
+        entry: SymbolPoolEntry,
+        regime: str,
+        pick_reason: str = "",
+        *,
+        brief_text: str,
+    ) -> Analysis:
+        self._snapshot_liquidations([entry.symbol])
+        return await asyncio.to_thread(self._analyze_sync, entry, regime, pick_reason, brief_text)
+
+    def _analyze_sync(
+        self,
+        entry: SymbolPoolEntry,
+        regime: str,
+        pick_reason: str = "",
+        brief_text: str | None = None,
+    ) -> Analysis:
         meter = self._meter(entry.symbol)
         handler = cost_handler(meter)
         live = MeetingLive(Path(self._s.live_dir), entry.symbol) if self._s.live_dir else None
@@ -2102,7 +2211,7 @@ class TradingAgentsEngine:
             meter.on_model = live.note_model
             meter.on_retry = live.note_retry
         try:
-            res = self._analyze_run(entry, regime, handler, meter, live, pick_reason)
+            res = self._analyze_run(entry, regime, handler, meter, live, pick_reason, brief_text)
         except Exception as exc:  # 同上：失败也带上真实花费
             if live:
                 live.fail(str(exc) or type(exc).__name__, meter.cost)
@@ -2124,6 +2233,7 @@ class TradingAgentsEngine:
         meter: CostMeter,
         live: MeetingLive | None = None,
         pick_reason: str = "",
+        brief_text: str | None = None,
     ) -> Analysis:
         ticker, asset_type = ta_ticker(entry)
         analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
@@ -2200,7 +2310,7 @@ class TradingAgentsEngine:
             entry,
             self._risk,
             regime,
-            self._brief_text(),
+            self._brief_text() if brief_text is None else brief_text,
             decision,
             atr_context(entry.symbol, self._today(), self._stop),
             describe_candidates(levels),

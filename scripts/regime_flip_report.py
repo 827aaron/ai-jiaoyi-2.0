@@ -106,12 +106,15 @@ def report(rows: list[dict[str, Any]], now: datetime, days: int = 3) -> str:
             for eid, row in confirmed.items():
                 outcome = outcomes.get((eid, hours), {})
                 raw = outcome.get(f"fwd_{hours}h_{field}_pct")
-                direction = row.get("regime_dir")
+                direction = row.get("candidate_direction")
+                if direction not in ("看涨", "看跌"):
+                    old = row.get("regime_dir")
+                    direction = "看涨" if old == "看跌" else "看跌" if old == "看涨" else None
                 if not isinstance(raw, (int, float)) or direction not in ("看涨", "看跌"):
                     continue
                 value = float(raw)
                 values.append(value)
-                signed = value if direction == "看跌" else -value
+                signed = value if direction == "看涨" else -value
                 continued += signed > 0
                 reversed_ += signed < 0
                 flat += signed == 0
@@ -128,7 +131,7 @@ def report(rows: list[dict[str, Any]], now: datetime, days: int = 3) -> str:
         "",
         f"重跑后方向改变：{percent(changed, len(judged))}；"
         f"失败 {failed} 次，尚无结果 {len(confirmed) - len(finished)} 次。",
-        f"整轮费用合计（含失败费用及账本估算）：${cost:.6f}。未回报的费用不计为零成本成功。",
+        f"市场更新费用合计（含历史整轮、失败费用及账本估算）：${cost:.6f}。未回报的费用不计为零成本成功。",
         "",
         "口径：延续率 = 朝预期翻转方向继续走的样本比例；误报率 = 向相反方向走的比例；"
         "持平单列。缺失、尚未到期的结果不进分母。方向不变率与价格误报率分别统计。",

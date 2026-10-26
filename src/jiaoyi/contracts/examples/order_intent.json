@@ -20,5 +20,6 @@
   "approved_by": "risk_guard",
   "approved_at": "2026-10-22T06:17:00.240000Z",
   "limit_wait_s": null,
-  "limit_chase": false
+  "limit_chase": false,
+  "source_market_direction": null
 }

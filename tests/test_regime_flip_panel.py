@@ -31,7 +31,7 @@ assert.equal(edge[1][1], TF_POS.market[1] + NODE_H);
 assert.equal(edge[2], "market");
 const svg = tfEdge(edge, {market: "doing"});
 assert.match(svg, /class="e doing against"/);
-assert.match(svg, /06:35 大盘翻转 → 整轮会/);
+assert.match(svg, /06:35 大盘变化 → 独立更新/);
 assert.match(svg, /class="ah doing against"/);
 assert.ok(!svg.includes("undefined") && !svg.includes("NaN"));
 """

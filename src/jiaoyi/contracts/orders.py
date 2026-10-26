@@ -75,6 +75,10 @@ class OrderIntent(_Sealed):
     intent_id: str = Field(min_length=1)
     signal_id: str = Field(min_length=1)
     card_id: str = Field(min_length=1)
+    source_market_direction: Literal["看涨", "看跌", "中性"] | None = Field(
+        default=None,
+        description="拍板时当前大盘方向；追单前方向改变时需重新拍板。旧指令没有则兼容。",
+    )
     symbol: Symbol
     category: Category
     side: Side

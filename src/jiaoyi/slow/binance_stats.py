@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -55,6 +56,13 @@ class BinanceStatsSource:
         return r.json()
 
     async def fetch(self, now: datetime) -> list[SymbolStats]:
+        return await self._fetch(now)
+
+    async def fetch_symbols(self, symbols: Sequence[str], now: datetime) -> list[SymbolStats]:
+        """原池成员的当前统计，不受新成交额排名 top_k 截断；BTC 只用于相关性背景。"""
+        return await self._fetch(now, set(symbols) | {"BTCUSDT"})
+
+    async def _fetch(self, now: datetime, symbols: set[str] | None = None) -> list[SymbolStats]:
         info, tick24, book, premium = await asyncio.gather(
             self._get("/fapi/v1/exchangeInfo"),
             self._get("/fapi/v1/ticker/24hr"),
@@ -72,10 +80,15 @@ class BinanceStatsSource:
         kinds = {s["symbol"]: _kind(s) for s in live}
         books = {b["symbol"]: b for b in book}
         funding = {p["symbol"]: float(p["lastFundingRate"] or 0.0) for p in premium}
-        top = sorted(
+        ranked = sorted(
             (t for t in tick24 if t["symbol"] in onboard),
             key=lambda t: -float(t["quoteVolume"]),
-        )[: self._top_k]
+        )
+        top = (
+            [t for t in ranked if t["symbol"] in symbols]
+            if symbols is not None
+            else ranked[: self._top_k]
+        )
         results = await asyncio.gather(
             *(self._one(t, onboard, books, funding, kinds, now) for t in top),
             return_exceptions=True,
