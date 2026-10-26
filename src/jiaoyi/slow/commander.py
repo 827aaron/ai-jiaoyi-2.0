@@ -48,6 +48,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
+from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.credits import is_credit_error
@@ -96,6 +97,7 @@ class PickResult:
     errors: list[str] = field(default_factory=list)  # 校验没过的地方（只记录，不丢任何结论）
     breadth: str = ""  # 池子概况那一行（代码算的）
     table: str = ""  # 给模型看的候选表
+    regime_direction: Direction = "中性"  # 旧结果没有方向时不从中文猜
 
 
 @dataclass(frozen=True)
@@ -281,6 +283,13 @@ class BattleCardCommander:
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
+        self.regime_reference: RegimeReference | None = None
+        self.last_regime_flip_at: datetime | None = None
+        self.last_regime_direction: Direction = "中性"
+        self.round_cost_usd = 0.0
+        self._round_reference: RegimeReference | None = None
+        self._regime_price: Callable[[], float | None] | None = None
+        self._scheduled_due: datetime | None = None
         self._us_hours = us_hours  # (开盘后几分钟, 收盘前几分钟)；None = 不按美股时段限制
         self._held: dict[str, Side] = {}
         self._on_picks: Callable[[list[str]], None] | None = None
@@ -504,6 +513,25 @@ class BattleCardCommander:
             return False
         return self._retry_at is None or now >= self._retry_at
 
+    def set_regime_price(self, source: Callable[[], float | None]) -> None:
+        """主循环提供此刻 BTC 价；pick 完成时取，整轮成功后才更新参照。"""
+        self._regime_price = source
+
+    def regime_flip_blocked(self, now: datetime) -> str | None:
+        if binance_gate.banned_until():
+            return "限流"
+        if self.may_refresh(now):
+            return None
+        if self._budget_exhausted(now):
+            return "日预算"
+        if self._rl_until is not None and now < self._rl_until:
+            return "限流"
+        return "失败退避"
+
+    def mark_regime_flip(self, now: datetime) -> None:
+        self.last_regime_flip_at = now
+        self._save_card()  # 失败的开会也消耗过钱，重启不能绕过最少间隔
+
     def take_notice(self) -> str | None:
         """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
         return self._notices.pop(0) if self._notices else None
@@ -574,7 +602,8 @@ class BattleCardCommander:
         """定时整轮：每天固定时间（``schedule_at``，曼谷）或卡快到期。"""
         if self._schedule_at is not None:
             return "scheduled" if self._schedule_due(now) else None
-        return "scheduled" if card.expires_at - now <= self._lead else None
+        due = self._scheduled_due or (card.expires_at - self._lead)
+        return "scheduled" if now >= due else None
 
     def _schedule_at_today(self, now: datetime) -> datetime:
         hh, mm = (self._schedule_at or "00:00").split(":")
@@ -793,6 +822,8 @@ class BattleCardCommander:
     # ------------------------------------------------------------ 开会
     async def refresh(self, pool: SymbolPool, reason: str) -> BattleCard:
         now = self._clock()
+        self.round_cost_usd = 0.0
+        self._round_reference = None
         started = time.monotonic()
         self._loop = asyncio.get_running_loop()
         self._rl_until, self._rl_reason = None, ""  # 重开时清掉上一次的限流暂停
@@ -827,7 +858,12 @@ class BattleCardCommander:
             self._progress = ""
         self._fails, self._retry_at, self._last_error = 0, None, None
         self._restored = False
-        self._card, self._last_refresh = card, now
+        self._card = card
+        if reason != "regime_flip":
+            self._last_refresh = now
+            self._scheduled_due = card.expires_at - self._lead
+        self.regime_reference = self._round_reference
+        self._save_card()
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
         self._level_broken.clear()
@@ -979,6 +1015,7 @@ class BattleCardCommander:
         card_version: int,
         elapsed_s: float,
         now: datetime,
+        reason: str = "scheduled",
     ) -> None:
         """每轮总盘会写一行记录（data/market_meeting/）：池子里每个币的分数和数字、候选的结论。"""
         if self._market_log is None:
@@ -994,6 +1031,8 @@ class BattleCardCommander:
                     **self._log_meta,
                     "max_n": max(room, 0),
                     "regime": picked.regime,
+                    "regime_direction": picked.regime_direction,
+                    "refresh_reason": reason,
                     "breadth": picked.breadth,
                     "picked": [p.symbol for p in picked.picks],
                     "chosen": [e.symbol for e in chosen],
@@ -1118,6 +1157,20 @@ class BattleCardCommander:
                 Health.DEGRADED, f"总盘会失败：{self._why(exc)}", None, self._why(exc)
             )
             raise
+        self.last_regime_direction = picked.regime_direction
+        # 总盘会结束与单币会全部结束可能相差十几分钟：价和方向必须取同一时刻。
+        if self._regime_price is not None:
+            try:
+                px = self._regime_price()
+                if px is not None:
+                    self._round_reference = RegimeReference(
+                        ts=self._clock(),
+                        direction=picked.regime_direction,
+                        btc_px=px,
+                        regime_text=picked.regime,
+                    )
+            except Exception:
+                logger.exception("取总盘会 BTC 参照失败；本轮不建立翻转参照")
         self._charge(
             picked.cost_usd - est
         )  # 选币的花费一出结果就改成实际值，哪怕后面所有标的都失败
@@ -1148,7 +1201,7 @@ class BattleCardCommander:
 
         # 同一个币两次会议至少隔 symbol_min_interval；没有大消息 / 关键位突破就沿用上一张卡的指令
         forced = self._news | self._level_broken
-        if reason == "manual":  # 面板「重新开会」：整条链真跑，不沿用上一张卡、不受同币最小间隔限制
+        if reason in ("manual", "regime_flip"):  # 整轮重判：不沿用同币最小间隔内的旧结论
             forced = forced | {e.symbol for e in chosen}
         reused: dict[str, CardSymbol] = {}
         prev_card = self._card
@@ -1175,7 +1228,14 @@ class BattleCardCommander:
         same_day = prev is not None and prev.card_id == self._card_id(now)
         base_version = prev.version if prev is not None and same_day else 0
         self._record_market(
-            pool, picked, chosen, room, base_version + 1, time.monotonic() - pick_started, now
+            pool,
+            picked,
+            chosen,
+            room,
+            base_version + 1,
+            time.monotonic() - pick_started,
+            now,
+            reason,
         )
         # 指令池：上一张卡里还没到期的币原样留着（这轮没开会的币不动），开完哪个换哪个；
         # 持仓币的指令到期也不消失，只清空信号。池外（已被筛掉）的币不留
@@ -1358,6 +1418,7 @@ class BattleCardCommander:
             self._stats, self._stats_day = TodayStats(), day
 
     def _bump(self, *, ok: bool, cost: float, ms: float) -> None:
+        self.round_cost_usd += cost
         self._roll(self._clock())
         s = self._stats
         calls = s.calls + 1
@@ -1374,6 +1435,7 @@ class BattleCardCommander:
 
     def _charge(self, cost: float) -> None:
         """只记花费、不算一次调用（选币步骤，或不属于某个标的的花费）。"""
+        self.round_cost_usd += cost
         self._roll(self._clock())
         self._stats = self._stats.model_copy(
             update={"cost_usd": max(round(self._stats.cost_usd + cost, 6), 0.0)}
@@ -1465,6 +1527,15 @@ class BattleCardCommander:
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             logger.info("没有可恢复的作战卡（%s）", exc.__class__.__name__)
             return
+        # 用户可把间隔设得比卡寿命长；旧卡过期也不能丢掉已花钱重开的时间。
+        try:
+            if data.get("last_regime_flip_at") is not None:
+                at = datetime.fromisoformat(data["last_regime_flip_at"])
+                if at.tzinfo is None:
+                    raise ValueError("翻转时间必须带时区")
+                self.last_regime_flip_at = at
+        except (ValueError, TypeError):
+            logger.warning("大盘翻转上次重开时间损坏，无法恢复最少间隔")
         # 存盘是 JSON：tuple（stop_hint）读回来是 list，两边都过一遍 JSON 再比
         if saved_stop != json.loads(json.dumps(asdict(self._stop))):
             logger.info("存档的作战卡档位 / ATR 周期与现在不一致，不恢复")
@@ -1478,6 +1549,23 @@ class BattleCardCommander:
             update={"symbols": [clamp_to_risk(sym, self._risk, self._stop) for sym in card.symbols]}
         )
         self._card, self._last_refresh = card, card.created_at
+        try:
+            raw_ref = data.get("regime_reference")
+            if raw_ref is not None:
+                self.regime_reference = RegimeReference.model_validate(raw_ref)
+                self.last_regime_direction = self.regime_reference.direction
+            for key, attr in (
+                ("scheduled_due", "_scheduled_due"),
+                ("last_refresh", "_last_refresh"),
+            ):
+                if data.get(key) is not None:
+                    at = datetime.fromisoformat(data[key])
+                    if at.tzinfo is None:
+                        raise ValueError("参照时间必须带时区")
+                    setattr(self, attr, at)
+        except (ValueError, TypeError):
+            self.regime_reference = None
+            logger.warning("大盘翻转参照损坏，不触发翻转；作战卡仍按原规则恢复")
         self._seen = {s.symbol for s in card.symbols}
         self._last_meeting = meets
         self._restored = True
@@ -1497,6 +1585,22 @@ class BattleCardCommander:
                         "card": self._card.model_dump(mode="json"),
                         "last_meeting": {k: v.isoformat() for k, v in self._last_meeting.items()},
                         "stop": asdict(self._stop),
+                        "regime_reference": (
+                            self.regime_reference.model_dump(mode="json")
+                            if self.regime_reference is not None
+                            else None
+                        ),
+                        "last_regime_flip_at": (
+                            self.last_regime_flip_at.isoformat()
+                            if self.last_regime_flip_at
+                            else None
+                        ),
+                        "scheduled_due": (
+                            self._scheduled_due.isoformat() if self._scheduled_due else None
+                        ),
+                        "last_refresh": self._last_refresh.isoformat()
+                        if self._last_refresh
+                        else None,
                     }
                 ),
                 encoding="utf-8",
@@ -1562,6 +1666,7 @@ class BattleCardCommander:
             input={"refresh_reason": card.refresh_reason},
             output={
                 "regime": card.regime,
+                "regime_direction": self.last_regime_direction,
                 "version": card.version,
                 "expires_at": card.expires_at.isoformat(),  # 面板据此显示“还有多久有效”
                 "symbols": [s.symbol for s in card.symbols],

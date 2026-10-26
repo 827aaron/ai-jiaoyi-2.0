@@ -1456,6 +1456,11 @@ function predictorMeetingEdges(list) {
   const label = `${p.symbol.replace(/USDT$/, "")} ${hm(p.ts)} 预测看反 → 临时会${BIAS_WORD[p.bias] ? "：" + BIAS_WORD[p.bias] : ""}${list.length > 1 ? `（30 分钟内 ${list.length} 次）` : ""}`;
   return [[[TF_POS.predictor[0] + 150, TF_POS.predictor[1]], [TF_POS.commander[0] + 14, TF_POS.commander[1] + NODE_H], "commander", label, "climb", "against"]];
 }
+// 只在真正启动整轮会后画虚线，疑似 / 被拦仍进哨兵日志，不冒充已触发。
+function regimeFlipEdges(event) {
+  if (!event) return [];
+  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS.market[0] + 140, TF_POS.market[1] + NODE_H], "market", `${hm(event.ts)} 大盘翻转 → 整轮会`, "flip", "against"]];
+}
 function tfEdge([a, b, to, label, how, extra], prog) {
   const [x1, y1] = a, [x2, y2] = b;
   const st = prog[to] === "doing" ? "doing" : prog[to] === "done" ? "done" : "";
@@ -1470,6 +1475,7 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   // 从下面的节点顶上往上，在第一、二泳道之间横过去，再往上进目标节点底
   else if (how === "climb") { const yy = 182; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x1 - 140; ly = yy - 5; dir = "u"; }
   else if (how === "up") { d = `M${x1},${y1} V${y2 + 1}`; lx = x1 - 8; ly = (y1 + y2) / 2 + 22; dir = "u"; }
+  else if (how === "flip") { const yy = 172; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 - 10},${yy} H${x2 + 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x2 - 10; ly = yy - 6; dir = "u"; }
   else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
@@ -1567,13 +1573,14 @@ function teamFlow(d) {
   const known = new Set([...Object.keys(TF_POS)]);
   const extra = d.roles.filter((r) => !known.has(r.role));
   const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");
-  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${[...TF_EDGES, ...againstEdges(d.against), ...predictorMeetingEdges(d.predictor_meetings)].map((e) => tfEdge(e, prog)).join("")}</svg>`;
+  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${[...TF_EDGES, ...againstEdges(d.against), ...predictorMeetingEdges(d.predictor_meetings), ...regimeFlipEdges(d.regime_flip)].map((e) => tfEdge(e, prog)).join("")}</svg>`;
   const canvas = `<div class="tf-fit"><div class="tf-canvas" style="width:${TF_W}px;height:${TF_H}px">${lanes}${edges}${Object.keys(TF_POS).map((k) => node(k, true)).join("")}
     <div class="tf-watch"><span>看门狗在外面守着：主程序卡住或退出就自动拉起</span></div></div></div>`;
   // 手机：按泳道竖排，不画线
   const stack = `<div class="tf-stack">${TF_LANES.map(([t, sub, , , ks]) => `<div class="tf-lane"><b>${t}<span>${sub}</span></b>${ks.map((k) => node(k, false)).join("")}</div>`).join("")}</div>`;
   const rest = extra.length ? `<div class="tf-stack tf-extra">${extra.map((r) => node(r.role, false)).join("")}</div>` : "";
-  return `${legend}<section class="card tf">${canvas}${stack}${rest}</section>`;
+  const flipLog = d.regime_flip ? `<div class="note mt">最近一次：${hms(d.regime_flip.ts)} ${esc(d.regime_flip.text)} · <a href="#team/sentinel">查看哨兵日志 ›</a></div>` : "";
+  return `${legend}<section class="card tf">${canvas}${stack}${rest}</section>${flipLog}`;
 }
 const FLOW_ORDER = ["screener", "commander", "book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor", "lifeboat", "keeper", "patrol", "reconciler", "alerting"];
 function fitTeamFlow() {
@@ -2159,6 +2166,16 @@ const PLAIN = {
   btc_lead_on: "BTC 先动：出这个信号",
   btc_lead_z: "BTC 先动：BTC 5 分钟至少走（倍平时波动）",
   btc_lead_live: "实盘也出 BTC 先动信号",
+  regime_flip_on: "大盘翻转：提前重开整轮会",
+  regime_flip_live: "测试网 / 实盘也启用大盘翻转",
+  regime_flip_breadth: "按 40 个币算，反向的至少几个",
+  regime_flip_btc_pct: "BTC 至少反向走多少（%）",
+  regime_flip_confirm: "连续满足几次才重开",
+  regime_flip_min_gap_min: "两次翻转重开至少隔多久（分钟）",
+  regime_flip_min_symbols: "至少有几个有效币才判断",
+  regime_flip_check_min: "每隔多久检查（分钟）",
+  regime_flip_suspect_log_min: "同类疑似隔多久记文件（分钟）",
+  regime_flip_price_max_age_min: "BTC 参照行情最多旧多久（分钟）",
   liq_min_usdt_1m: "1 分钟爆仓至少多少 USDT 才算",
   liq_ratio: "爆仓额是平时几倍才算",
   liq_drop_pct_5m: "爆仓砸出的 5 分钟跌幅至少百分之几",
@@ -2248,6 +2265,16 @@ const HINT = {
   btc_lead_on: "BTC 突然大动、这个币还没跟着动时，按 BTC 的方向做这个币，赌它补涨补跌。回测 30 分钟到 2 小时这三档最好，档位默认在这三档开",
   btc_lead_z: "BTC 最近 5 分钟走了几倍平时波动才算「突然大动」",
   btc_lead_live: "开 = 测试网 / 实盘也出 BTC 先动信号。默认关，先在模拟盘攒样本",
+  regime_flip_on: "默认每 5 分钟检查一次：池面和 BTC 都往上次总盘会判断的反方向走，连续站稳后提前开整轮会。不会直接平仓或反向下单；原判断为中性或没有结构化方向时不触发。疑似、确认、被拦的时间和原因在团队页哨兵的「最近做了什么」里",
+  regime_flip_live: "开 = 测试网 / 实盘也启用。默认关，仅模拟盘开启；总开关关闭时所有模式都停用",
+  regime_flip_breadth: "默认 30：40 个有效币里至少 30 个，也就是四分之三，过去一小时往旧判断的反方向走。不是 40 个时按比例算；持平和缺数据的币不计入。填 0 不要求池面条件",
+  regime_flip_btc_pct: "BTC 比上次总盘会参照价至少反向走百分之几。默认 1 表示 1%；填 0 不要求 BTC 幅度条件",
+  regime_flip_confirm: "默认连续 2 次检查都满足才重开。填 1 是满足一次即重开，填 0 不等连续确认；次数不设上限，改门槛后重新累计",
+  regime_flip_min_gap_min: "默认 60 分钟内不因翻转再次重开，减少来回震荡时的 AI 花费。填 0 不限制；仍遵守已有日预算、限流和失败退避",
+  regime_flip_min_symbols: "默认至少 10 个币有可用的一小时涨跌。持平和缺数据的币不算；填 0 不限制个数，但启用池面条件时仍需有数据才能计算比例",
+  regime_flip_check_min: "默认 5 分钟检查一次，可填任意正数或小数；填 0 停止定时检查。改后按新周期重新计时，无需重启",
+  regime_flip_suspect_log_min: "连续同类疑似在独立观测文件里默认每 30 分钟再记一次，填 0 每次都记。面板和决策日志始终记录每次检查发现的疑似",
+  regime_flip_price_max_age_min: "取上次总盘会 BTC 参照价时，行情最多允许旧几分钟。默认 5，填 0 不限制新鲜程度；没有价格仍不能建立参照",
   jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
   jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
   jev_usd_per_mtok: "按用量算钱，用来统计花费",
@@ -2437,6 +2464,7 @@ const ROLES = [
     { g: "", keys: ["app.predictor_enabled", "predictor.*", "schedule.predictor_against_runs"] },
   ] },
   { id: "sentinel", t: "哨兵", strip: ["哨兵"], what: "盯行情，发现信号就交给拍板人", groups: [
+    { g: "大盘翻转", hint: "默认值是观察起点，尚无数据支持。满足启用的条件时直接重跑整轮会，即使新判断没变也会花整轮费用。门槛和间隔填 0 可关闭对应限制。", keys: ["fast_loop.regime_flip_on", "fast_loop.regime_flip_live", "fast_loop.regime_flip_breadth", "fast_loop.regime_flip_btc_pct", "fast_loop.regime_flip_confirm", "fast_loop.regime_flip_min_gap_min", "fast_loop.regime_flip_min_symbols", "fast_loop.regime_flip_check_min", "fast_loop.regime_flip_suspect_log_min", "fast_loop.regime_flip_price_max_age_min"] },
     { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
     { g: "持仓量变化", keys: ["fast_loop.oi_follow_on", "fast_loop.oi_follow_live", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_*"] },
     { g: "大户散户分歧（反着大户）", keys: ["fast_loop.top_crowd_on", "fast_loop.top_crowd_live", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_*"] },
@@ -2491,6 +2519,7 @@ const ROLES = [
 const SHOWN_ELSEWHERE = ["app.trade_notices", "app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio", "fast_loop.predictor_nudge_mode"];
 // 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
 const PREFIX_ROLE = [
+  ["fast_loop.regime_flip_", "sentinel"],
   ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],
   ["fast_loop.liq_", "sentinel"], ["fast_loop.crowded_", "sentinel"], ["fast_loop.session_cme", "sentinel"], ["fast_loop.session_vol", "sentinel"], ["fast_loop.session_window", "sentinel"],
   ["fast_loop.oi_", "sentinel"], ["fast_loop.top_crowd_", "sentinel"], ["fast_loop.btc_lead_", "sentinel"], ["fast_loop.volume_", "sentinel"],
