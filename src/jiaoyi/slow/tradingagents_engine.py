@@ -1714,7 +1714,8 @@ def cost_handler(meter: CostMeter) -> Any:
     """把 ``CostMeter`` 接到 LangChain 的回调上（LangChain 只在真跑时才导入）。"""
     from langchain_core.callbacks import BaseCallbackHandler
 
-    class _CostHandler(BaseCallbackHandler):
+    # slow 是可选依赖：未安装时基类为 Any；装有类型信息时无需抑制。
+    class _CostHandler(BaseCallbackHandler):  # type: ignore[misc, unused-ignore]
         meter: CostMeter
         raise_error = True  # 被取消的会议要让下一次请求真的失败，不能被回调管理器吞掉
 

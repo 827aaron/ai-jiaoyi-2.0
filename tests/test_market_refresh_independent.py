@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import sys
 import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -594,6 +596,13 @@ async def test_real_market_entry_invokes_model_without_pick_or_coin_analysis(
             return self.schema(regime="BTC +2%，上涨占比 75%", regime_direction="看涨")
 
     model = Model()
+    # CI 只装 dev，不要求可选 slow；模型边界用到的外部回调基类也用离线替身。
+    callbacks = ModuleType("langchain_core.callbacks")
+    callbacks.BaseCallbackHandler = object
+    langchain = ModuleType("langchain_core")
+    langchain.callbacks = callbacks
+    monkeypatch.setitem(sys.modules, "langchain_core", langchain)
+    monkeypatch.setitem(sys.modules, "langchain_core.callbacks", callbacks)
     # 绕过读取密钥的构造器，只替换模型边界，真实异步入口和解析仍照常执行。
     engine = TradingAgentsEngine.__new__(TradingAgentsEngine)
     engine._s = TradingAgentsSettings(hold="4h", hold_minutes=240)
