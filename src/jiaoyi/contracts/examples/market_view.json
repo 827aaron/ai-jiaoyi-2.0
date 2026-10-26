@@ -1,0 +1,11 @@
+{
+  "market_view_id": "market-example-1",
+  "version": 1,
+  "observed_at": "2026-10-27T01:10:00Z",
+  "regime": "有效币上涨30/40，BTC较参照上涨1%，短线看涨",
+  "regime_direction": "看涨",
+  "source": "market_only",
+  "refresh_reason": "regime_flip",
+  "pool_id": "pool-example",
+  "source_ts": "2026-10-27T01:09:00Z"
+}

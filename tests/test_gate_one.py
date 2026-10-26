@@ -297,7 +297,7 @@ async def test_gate_asks_one_question_and_logs_extra(tmp_path: Path, now: dateti
     assert r.ok and {a.id for a in r.answers} == {"take", "stop_width", "size"}
     [rec] = log.read_day(now.date().isoformat())
     jv = rec.input["jev"]
-    assert jv["questions"] == ["take", "stop_width", "size"] and jv["template"] == "q8"
+    assert jv["questions"] == ["take", "stop_width", "size"] and jv["template"] == "q9"
     assert "tech" in jv["extra"] and "rest_ms" in jv["extra"]
     assert "tech" in json.loads(jv["snapshot"])
     assert summarize(r).startswith("做 take")

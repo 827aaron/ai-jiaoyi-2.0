@@ -30,7 +30,7 @@ from jiaoyi.contracts import (
     RiskConfig,
     Role,
 )
-from jiaoyi.contracts.battle_card import CardSymbol
+from jiaoyi.contracts.battle_card import CardSymbol, MarketView
 from jiaoyi.core.recorder import local_day
 from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
@@ -117,6 +117,7 @@ class CardView(BaseModel):
     expires_at: datetime | None
     valid: bool
     regime: str
+    current_market: MarketView | None = None
     symbols: list[CardRow]
     stop_atr: tuple[float, float] | None
     leverage_max: float | None
@@ -347,7 +348,12 @@ def build_overview(
         card=_with_fractions(
             _with_pool_notes(
                 _with_pending(
-                    _card(records, now, {p.symbol for p in positions}), files.root, now, files.tz
+                    _with_current_market(
+                        _card(records, now, {p.symbol for p in positions}), files.root
+                    ),
+                    files.root,
+                    now,
+                    files.tz,
                 ),
                 now,
                 files.tz,
@@ -785,6 +791,16 @@ def _card(
                 held=stamps[n][2] if n in stamps else False,
             )
         )
+    latest_market = None
+    for record in cmd:
+        raw = record.output.get("market_view") if record.output else None
+        if isinstance(raw, dict):
+            try:
+                view = MarketView.model_validate(raw)
+                if latest_market is None or view.version > latest_market.version:
+                    latest_market = view
+            except ValueError:
+                continue
     tradable = [s for s in syms if s.bias.value != "no_trade"]
     version = last.output.get("version")
     expires = _parse_ts(last.output.get("expires_at"))
@@ -795,6 +811,7 @@ def _card(
         expires_at=expires,
         valid=expires is None or now < expires,
         regime=str(last.output.get("regime", "")),
+        current_market=latest_market,
         symbols=rows,
         stop_atr=(
             (min(s.stop_atr.min for s in tradable), max(s.stop_atr.max for s in tradable))
@@ -808,6 +825,20 @@ def _card(
             else None
         ),
     )
+
+
+def _with_current_market(card: CardView | None, root: Path) -> CardView | None:
+    """独立观点可能来自前一天；磁盘状态比仅查本日出卡记录更完整。"""
+    if card is None:
+        return None
+    try:
+        data = json.loads((root / "market_view.json").read_text(encoding="utf-8"))
+        view = MarketView.model_validate(data["latest_market_view"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return card
+    if card.current_market is None or view.version >= card.current_market.version:
+        return card.model_copy(update={"current_market": view})
+    return card
 
 
 def _parse_ts(raw: object) -> datetime | None:

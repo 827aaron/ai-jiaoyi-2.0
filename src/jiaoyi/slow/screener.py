@@ -468,6 +468,43 @@ class CodeSymbolScreener:
         self.heartbeat(now)
         return pool
 
+    async def market_snapshot(self, pool: SymbolPool, now: datetime) -> SymbolPool:
+        """独立市场评估用：保留池成员、分档和分数，只取新的市场数字。"""
+        fetch_symbols = getattr(self._source, "fetch_symbols", None)
+        rows = (
+            await fetch_symbols([e.symbol for e in pool.in_pool], now)
+            if callable(fetch_symbols)
+            else await self._source.fetch(now)
+        )
+        stats = {s.symbol: s for s in rows}
+        entries = []
+        for old in pool.in_pool:
+            current = stats.get(old.symbol)
+            if current is None:
+                raise RuntimeError(f"{old.symbol} 缺少本轮市场统计，保留上一份观点")
+            filters = _hard_filters(current, self._cfg)
+            metrics = dict(current.metrics)
+            if current.range_hold_pct is not None:
+                metrics["move_hold"] = round(current.range_hold_pct, 4)
+                metrics["fee_x"] = round(
+                    current.range_hold_pct / (self._cfg.round_trip_fee_bps / 100.0), 2
+                )
+            entries.append(
+                old.model_copy(
+                    update={
+                        "metrics": metrics,
+                        "filters": old.filters.model_copy(
+                            update={
+                                "quote_volume_24h_usdt": filters.quote_volume_24h_usdt,
+                                "spread_bps": filters.spread_bps,
+                                "depth_usdt": filters.depth_usdt,
+                            }
+                        ),
+                    }
+                )
+            )
+        return pool.model_copy(update={"ts": now, "entries": entries})
+
     def _us_adjust(
         self,
         symbol: str,

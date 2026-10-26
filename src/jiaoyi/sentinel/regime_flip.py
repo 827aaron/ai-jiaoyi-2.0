@@ -46,6 +46,7 @@ class FlipCheck:
     reason: str = ""
     count: int = 0
     btc_ret: float | None = None
+    candidate_direction: Direction | None = None
 
 
 class RegimeFlip:
@@ -57,6 +58,7 @@ class RegimeFlip:
         self.last_rerun: datetime | None = None
         self.count = 0
         self._checked_at: datetime | None = None
+        self._candidate: Direction | None = None
         self._thresholds: dict[str, Any] = {}
 
     def arm(self, reference: RegimeReference | None) -> None:
@@ -67,6 +69,7 @@ class RegimeFlip:
     def reset(self) -> None:
         self.count = 0
         self._checked_at = None
+        self._candidate = None
 
     def thresholds(self) -> dict[str, Any]:
         return {k: v for k, v in self.cfg.model_dump().items() if k.startswith("regime_flip_")}
@@ -80,9 +83,6 @@ class RegimeFlip:
         if ref is None:
             self.reset()
             return FlipCheck("blocked", "没有可恢复的总盘会参照")
-        if ref.direction == "中性":
-            self.reset()
-            return FlipCheck("blocked", "中性判断")
         if (
             n < self.cfg.regime_flip_min_symbols
             or (n == 0 and self.cfg.regime_flip_breadth > 0)
@@ -96,22 +96,38 @@ class RegimeFlip:
             self.reset()
             return FlipCheck("blocked", "数据不足")
         ret = (btc_px / ref.btc_px - 1) * 100
-        opposite = up if ref.direction == "看跌" else down
-        breadth = (
-            self.cfg.regime_flip_breadth == 0 or opposite * 40 >= self.cfg.regime_flip_breadth * n
+        directions: tuple[Direction, ...] = (
+            ("看涨", "看跌")
+            if ref.direction == "中性"
+            else (("看涨",) if ref.direction == "看跌" else ("看跌",))
         )
-        btc = (
-            self.cfg.regime_flip_btc_pct == 0
-            or (ret if ref.direction == "看跌" else -ret) >= self.cfg.regime_flip_btc_pct
-        )
-        if not (breadth and btc):
+        checks = []
+        for direction in directions:
+            opposite = up if direction == "看涨" else down
+            breadth = (
+                self.cfg.regime_flip_breadth == 0
+                or opposite * 40 >= self.cfg.regime_flip_breadth * n
+            )
+            btc = (
+                self.cfg.regime_flip_btc_pct == 0
+                or (ret if direction == "看涨" else -ret) >= self.cfg.regime_flip_btc_pct
+            )
+            checks.append((direction, breadth, btc))
+        candidates = [d for d, breadth, btc in checks if breadth and btc]
+        if len(candidates) != 1:
             self.reset()
+            if len(candidates) > 1:
+                return FlipCheck("blocked", "上下候选同时满足，方向有歧义", btc_ret=ret)
             kind = "quiet"
-            if breadth and self.cfg.regime_flip_breadth > 0:
+            if any(b for _, b, _ in checks) and self.cfg.regime_flip_breadth > 0:
                 kind = "suspect_breadth"
-            elif btc and self.cfg.regime_flip_btc_pct > 0:
+            elif any(b for _, _, b in checks) and self.cfg.regime_flip_btc_pct > 0:
                 kind = "suspect_btc"
             return FlipCheck(kind, btc_ret=ret)
+        candidate = candidates[0]
+        if candidate != self._candidate:
+            self.reset()  # 中性向上、向下分别确认，不能把两边次数拼在一起
+            self._candidate = candidate
         if self._checked_at is None or now > self._checked_at:
             self.count += 1
             self._checked_at = now
@@ -121,6 +137,7 @@ class RegimeFlip:
                 f"连续确认 {self.count}/{self.cfg.regime_flip_confirm} 次",
                 self.count,
                 ret,
+                candidate,
             )
         if self.last_rerun is not None and self.cfg.regime_flip_min_gap_min > 0:
             age = (now - self.last_rerun).total_seconds() / 60
@@ -131,8 +148,9 @@ class RegimeFlip:
                     f"{self.cfg.regime_flip_min_gap_min:g} 分钟",
                     self.count,
                     ret,
+                    candidate,
                 )
-        return FlipCheck("confirmed", count=self.count, btc_ret=ret)
+        return FlipCheck("confirmed", count=self.count, btc_ret=ret, candidate_direction=candidate)
 
 
 def minute(now: datetime) -> datetime:

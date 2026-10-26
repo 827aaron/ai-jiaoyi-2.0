@@ -187,6 +187,7 @@ class MarketBriefService:
         self._text = ""
         self._at: datetime | None = None
         self.failed_parts = 0
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def text(self) -> str:
@@ -194,6 +195,10 @@ class MarketBriefService:
         return self._text
 
     async def refresh(self) -> str:
+        async with self._refresh_lock:
+            return await self._refresh_once()
+
+    async def _refresh_once(self) -> str:
         now = self._clock()
         if self._at is not None and now - self._at < self._min_age:
             return self._text

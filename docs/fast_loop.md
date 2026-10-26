@@ -177,7 +177,7 @@
 `[fast_loop] gate_questions`：`"one"`（默认）只问一道 `take`，再加 `stop_width` / `size` 两题给风控员定止损档和仓位档
 （不参与放不放行）；`"six"` 是旧的 6 道题，留着回放对照。风控员按回答里有没有 `genuine` 判断用哪种口径。
 
-- 题目（模板 q8，`gate.questions.ONE_TAKE_PROMPT`）用旧的「Considering everything, should we take this trade in
+- 题目（模板 q9，沿用 q8 问法，`gate.questions.ONE_TAKE_PROMPT`）用旧的「Considering everything, should we take this trade in
   direction `side` now, after fees?」加目标说明。10-25 线上没有新单：原来那句「Take it only if all of these hold together」
   加完整作战卡，「做」中位只有 0.08（45 条 × 2 次，≥0.55 为 0）；换回这句、卡精简后中位 0.59（54/90），
   数据在 /mnt/project-files/gate-ab*.jsonl、gate-blocks*.txt、gate-confirm.jsonl。技术面的三个周期仍跟最长持仓档走

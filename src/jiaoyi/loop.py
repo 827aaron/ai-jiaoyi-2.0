@@ -78,7 +78,7 @@ from jiaoyi.sentinel.regime_flip import (
     snapshot as regime_snapshot,
 )
 from jiaoyi.slow import binance_gate
-from jiaoyi.slow.commander import BattleCardCommander
+from jiaoyi.slow.commander import MARKET_SNAPSHOT_FRESH, BattleCardCommander
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ RESTART_DRAIN_S = 15.0
 RESTART_HARD_EXIT_S = 45.0
 TASK_CANCEL_WAIT_S = 10.0
 PRUNE_EVERY = timedelta(hours=1)
-SCREEN_FRESH = timedelta(minutes=2)
+SCREEN_FRESH = MARKET_SNAPSHOT_FRESH
 """整轮会议前选币：2 分钟内刚选过就不重复。"""
 _POOL_DONE = {
     "pin_symbol": "已固定",
@@ -309,6 +309,8 @@ class Runner:
         self._refreshing = False
         self._slow_lock = asyncio.Lock()
         self._regime_tick_lock = asyncio.Lock()
+        self._market_refreshing = False
+        self._market_task: asyncio.Task[None] | None = None
         self._regime_period: float | None = None
         self._regime_next: datetime | None = None
         self._regime = RegimeFlip(fl)
@@ -321,6 +323,9 @@ class Runner:
         )
         if isinstance(self.m.cards, BattleCardCommander):
             self.m.cards.set_regime_price(self._regime_btc_price)
+            snapshot = getattr(self.m.screener, "market_snapshot", None)
+            if callable(snapshot):
+                self.m.cards.set_market_snapshot(snapshot)
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
@@ -728,6 +733,14 @@ class Runner:
                 return
             self.positions = [*self.positions, pos]
 
+    @staticmethod
+    def _same_decision_context(card: BattleCard, fresh: BattleCard | None) -> bool:
+        if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
+            return False
+        before = card.current_market.regime_direction if card.current_market else None
+        after = fresh.current_market.regime_direction if fresh.current_market else None
+        return before == after
+
     async def _may_chase(self, intent: OrderIntent) -> list[str]:
         """挂单没成交、要改市价追进：按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍风控员。"""
         now = self.app.clock()
@@ -741,7 +754,14 @@ class Runner:
         if not isinstance(self.m.risk, _ChaseRecheck):
             return [*why, "风控员不支持追单复核"]
         account = await self.m.executor.account()
+        now = self.app.clock()
         card = self.m.cards.current(now)
+        direction = card.current_market.regime_direction if card and card.current_market else None
+        if (
+            intent.source_market_direction is not None
+            and direction != intent.source_market_direction
+        ):
+            why.append("大盘方向已变，原拍板背景已过时，等新信号重新拍板")
         return (
             why
             + self._chase_zone(intent, card, now)
@@ -806,12 +826,22 @@ class Runner:
             # 问 Jev 期间可能换了新卡或封了币：按锁里这一刻的卡审，和问 Jev 时的卡不是同一版就不开
             now = self.app.clock()
             fresh = self.m.cards.current(now)
-            if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
+            if not self._same_decision_context(card, fresh):
                 self._guard_note(
-                    Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡已变，按新卡重新等信号", now
+                    Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡或大盘方向已变，重新等信号", now
                 )
                 return
             account = await self.m.executor.account()
+            now = self.app.clock()
+            fresh = self.m.cards.current(now)
+            if not self._same_decision_context(card, fresh):
+                self._guard_note(
+                    Outcome.REJECT,
+                    f"{signal.symbol} 等账户期间大盘方向或作战卡已变，重新等信号",
+                    now,
+                )
+                return
+            assert fresh is not None
             # 拍板要几百毫秒，滑点和价差按现在的行情算，不按触发时那份
             market = self.m.features.snapshot(signal.symbol)
             verdict = self.m.risk.review(signal, jev, fresh, account, now, market=market)
@@ -904,9 +934,14 @@ class Runner:
             ):
                 return "rejected", "拍板期间已暂停、重启或拉黑，没有开仓"
             fresh = self.m.cards.current(now)
-            if fresh is None or (fresh.card_id, fresh.version) != (card.card_id, card.version):
-                return "rejected", "拍板期间作战卡换了，请再点一次"
+            if not self._same_decision_context(card, fresh):
+                return "rejected", "拍板期间作战卡或大盘方向换了，请再点一次"
             account = await self.m.executor.account()
+            now = self.app.clock()
+            fresh = self.m.cards.current(now)
+            if not self._same_decision_context(card, fresh):
+                return "rejected", "等账户期间作战卡或大盘方向换了，请再点一次"
+            assert fresh is not None
             market = self.m.features.snapshot(sym)
             verdict = self.m.risk.review_manual(
                 new, jev, fresh, account, now, market=market, release=release
@@ -1201,6 +1236,8 @@ class Runner:
         period = self.app.app_cfg.fast_loop.regime_flip_check_min
         if not self._regime_enabled():
             self._regime.reset()
+            if self._market_task is not None and not self._market_task.done():
+                self._market_task.cancel()
             self._regime_next = None
             self._regime_period = period
             return
@@ -1260,16 +1297,17 @@ class Runner:
             return
         async with self._regime_tick_lock:
             now = self.app.clock()
+            cards.ensure_regime_reference()
             self._regime.arm(cards.regime_reference)
             self._regime.last_rerun = cards.last_regime_flip_at
             row = self._flip_row(now)
             ref = self._regime.reference
             try:
                 pool = self.app.pool
-                if self._refreshing or self._restarting:
+                if self._restarting:
                     self._regime.reset()
-                    self._flip_blocked(row, "正在开会" if self._refreshing else "正在重启")
-                elif ref is None or ref.direction == "中性":
+                    self._flip_blocked(row, "正在重启")
+                elif ref is None:
                     check = self._regime.step(now, 0, 0, 0, None)
                     self._flip_blocked(row, check.reason)
                 elif pool is None:
@@ -1298,6 +1336,7 @@ class Runner:
                             blocked_reason=check.reason,
                             btc_ret_since_round_pct=check.btc_ret,
                             confirm_count=check.count,
+                            candidate_direction=check.candidate_direction,
                         )
                         if check.kind == "confirmed":
                             await self.slow_tick(flip=row)
@@ -1327,27 +1366,129 @@ class Runner:
                     log.warning("大盘翻转事后收益回填失败，留待下次", exc_info=True)
 
     async def slow_tick(self, *, flip: dict[str, Any] | None = None) -> None:
-        async with self._slow_lock:
-            await self._slow_tick(flip)
-
-    async def _slow_tick(self, flip: dict[str, Any] | None = None) -> None:
-        now = self.app.clock()
-        if flip is not None and (self._refreshing or self._restarting):
-            self._flip_blocked(flip, "正在开会" if self._refreshing else "正在重启")
+        if flip is not None:
+            self._start_market_refresh(flip)
             return
+        async with self._slow_lock:
+            await self._slow_tick()
+
+    def _start_market_refresh(self, flip: dict[str, Any]) -> None:
+        cards = self.m.cards
+        pool = self.app.pool
+        if not isinstance(cards, BattleCardCommander) or pool is None:
+            self._flip_blocked(flip, "数据不足：没有候选池")
+            return
+        why = cards.regime_flip_blocked(self.app.clock())
+        ref = cards.regime_reference
+        if not self._regime_enabled():
+            why = "设置已关闭"
+        elif self._restarting:
+            why = "正在重启"
+        elif self._market_refreshing:
+            why = "大盘独立更新中"
+        elif ref is None or ref.ts.isoformat() != flip["reference_at"]:
+            why = "市场参照已更新"
+        elif self._regime.thresholds() != flip["thresholds"]:
+            why = "阈值已更新，下一轮按新值重新确认"
+        if why:
+            self._flip_blocked(flip, why)
+            return
+        cards.mark_regime_flip(self.app.clock())
+        self._regime.last_rerun = cards.last_regime_flip_at
+        flip = self._regime_journal.emit(
+            {**flip, "ts": self.app.clock().isoformat(), "rerun": True, "scope": "market_only"},
+            f"大盘方向变化：{flip['up_1h']} 涨/{flip['down_1h']} 跌，"
+            f"BTC {flip['btc_ret_since_round_pct']:+.2f}%"
+            f"（连续 {flip['confirm_count']} 次）→ 独立更新大盘",
+        )
+        self._market_refreshing = True
+        task = asyncio.create_task(self._refresh_market(cards, pool, flip))
+        self._market_task = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._market_finished)
+
+    def _market_finished(self, task: asyncio.Task[None]) -> None:
+        if self._market_task is task:
+            self._market_task = None
+            self._market_refreshing = False
+
+    async def _refresh_market(
+        self, cards: BattleCardCommander, pool: SymbolPool, flip: dict[str, Any]
+    ) -> None:
+        view = None
+        error = ""
+        try:
+            view = await cards.refresh_market(
+                pool,
+                valid=lambda: (
+                    self._regime_enabled()
+                    and not self._restarting
+                    and self._regime.thresholds() == flip["thresholds"]
+                    and cards.regime_reference is not None
+                    and cards.regime_reference.ts.isoformat() == flip["reference_at"]
+                ),
+            )
+        except asyncio.CancelledError:
+            error = "市场更新已取消，保留上一份观点"
+            raise
+        except Exception as exc:
+            error = str(exc) or type(exc).__name__
+            log.exception("大盘独立更新失败，保留上一份观点")
+        finally:
+            self._market_refreshing = False
+            self._market_task = None
+            direction = view.regime_direction if view else None
+            superseded = cards.market_refresh_discarded
+            changed = direction != flip["regime_dir"] if view and not superseded else None
+            result = (
+                "flip_failed"
+                if view is None
+                else "flip_superseded"
+                if cards.market_refresh_discarded
+                else "flip_changed"
+                if changed
+                else "flip_no_change"
+            )
+            self._regime_journal.emit(
+                {
+                    **flip,
+                    "kind": "rerun_result",
+                    "ts": self.app.clock().isoformat(),
+                    "origin_ts": flip["ts"],
+                    "scope": "market_only",
+                    "market_view_id": view.market_view_id if view else None,
+                    "new_regime_text": view.regime if view else None,
+                    "new_regime_dir": direction,
+                    "regime_changed": changed,
+                    "result": result,
+                    "error": error,
+                    "cost_usd": max(cards.market_refresh_cost_usd, 0.0),
+                    "cost_estimated": True,
+                },
+                f"独立大盘更新：{result}，"
+                + (
+                    "较新任务已发布，此结果未采用"
+                    if superseded
+                    else f"{flip['regime_dir']} → {direction}"
+                    if view
+                    else error[:120]
+                ),
+            )
+
+    async def _slow_tick(self) -> None:
+        now = self.app.clock()
         if self._last_screen is None or now - self._last_screen >= timedelta(
             minutes=self.app.app_cfg.screener_interval_min
         ):
             await self._screen_now(now)
         pool = self.app.pool
         if pool is None or self._refreshing:
-            if flip is not None:
-                self._flip_blocked(flip, "正在开会" if self._refreshing else "数据不足：没有候选池")
             return
         cards = self.m.cards
         events = cards if isinstance(cards, _EventMeetings) else None
-        reason: str | None = "regime_flip" if flip is not None else None
-        if flip is None and isinstance(cards, _RefreshReason):
+        reason: str | None = None
+        if isinstance(cards, _RefreshReason):
             if events is None:
                 reason = cards.refresh_reason(now, pool, self._prices(pool))
             else:
@@ -1365,13 +1506,6 @@ class Runner:
         if isinstance(cards, _RefreshGate):
             while (notice := cards.take_notice()) is not None:
                 await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice, "meeting_paused")
-            if (
-                flip is not None
-                and isinstance(cards, BattleCardCommander)
-                and (why := cards.regime_flip_blocked(self.app.clock()))
-            ):
-                self._flip_blocked(flip, why)
-                return
             if not cards.may_refresh(now):
                 return  # 失败退避中或当日花费超限；定时兜底也不能绕过
         if is_stub(cards):
@@ -1388,36 +1522,8 @@ class Runner:
             if self._last_screen is None or now - self._last_screen >= SCREEN_FRESH:
                 await self._screen_now(now)
                 pool = self.app.pool or pool
-            if flip is not None and isinstance(cards, BattleCardCommander):
-                ref = cards.regime_reference
-                why = cards.regime_flip_blocked(self.app.clock())
-                if not self._regime_enabled():
-                    why = "设置已关闭"
-                elif self._restarting:
-                    why = "正在重启"
-                elif ref is None or ref.ts.isoformat() != flip["reference_at"]:
-                    why = "总盘会参照已更新"
-                elif self._regime.thresholds() != flip["thresholds"]:
-                    why = "阈值已更新，下一轮按新值重新确认"
-                if why:
-                    self._refreshing = False
-                    self._flip_blocked(flip, why)
-                    return
-                cards.mark_regime_flip(self.app.clock())
-                self._regime.last_rerun = cards.last_regime_flip_at
-                flip = self._regime_journal.emit(
-                    {**flip, "ts": self.app.clock().isoformat(), "rerun": True},
-                    f"大盘翻转：原判断{flip['regime_dir']} → "
-                    f"{flip['up_1h']} 涨/{flip['down_1h']} 跌，"
-                    f"BTC {flip['btc_ret_since_round_pct']:+.2f}%"
-                    f"（连续 {flip['confirm_count']} 次）→ 提前开整轮会",
-                )
-            else:
-                self._last_card_at = now
-            if flip is None:
-                self._spawn(self._refresh(pool, reason))
-            else:
-                self._spawn(self._refresh(pool, reason, flip))
+            self._last_card_at = now
+            self._spawn(self._refresh(pool, reason))
         except BaseException:
             self._refreshing = False
             raise
@@ -1451,34 +1557,8 @@ class Runner:
                     "news_block",
                 )
 
-    async def _refresh(
-        self, pool: SymbolPool, reason: str, flip: dict[str, Any] | None = None
-    ) -> None:
-        card, error = await self._refresh_run(pool, reason)
-        if flip is not None and isinstance(self.m.cards, BattleCardCommander):
-            direction = self.m.cards.last_regime_direction if card is not None else None
-            changed = direction != flip["regime_dir"] if direction is not None else None
-            result = (
-                "flip_failed" if card is None else "flip_changed" if changed else "flip_no_change"
-            )
-            self._regime_journal.emit(
-                {
-                    **flip,
-                    "kind": "rerun_result",
-                    "ts": self.app.clock().isoformat(),
-                    "origin_ts": flip["ts"],
-                    "rerun_card_id": card.card_id if card else None,
-                    "new_regime_text": card.regime if card else None,
-                    "new_regime_dir": direction,
-                    "regime_changed": changed,
-                    "result": result,
-                    "error": error,
-                    "cost_usd": max(self.m.cards.round_cost_usd, 0.0),
-                    "cost_estimated": True,
-                },
-                f"大盘翻转重开：{result}，"
-                + (f"{flip['regime_dir']} → {direction}" if card else f"失败：{error[:120]}"),
-            )
+    async def _refresh(self, pool: SymbolPool, reason: str) -> None:
+        await self._refresh_run(pool, reason)
 
     async def _refresh_run(self, pool: SymbolPool, reason: str) -> tuple[BattleCard | None, str]:
         """开一整轮会；返回 (新卡, 失败原因)，开会失败时新卡是 None。"""
