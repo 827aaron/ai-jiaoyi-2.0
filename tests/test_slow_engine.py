@@ -660,8 +660,16 @@ def test_convert_instructions_describe_new_signal_kinds() -> None:
     long_ = convert_instructions(risk, ta_prompts.PromptParams.for_hold("24h"))
     for kind in ("oi_follow", "top_vs_crowd", "btc_lead"):
         assert kind in short and kind in long_
-    assert "Best fit at this horizon: btc_lead" in short
-    assert "Best fit at this horizon: oi_follow" in long_ and "top_vs_crowd (" in long_
+    for text in (short, long_):
+        assert "Choose allowed_signals from the eight signals below" in text
+        assert "chase-style" not in text and "pure breakout chase" not in text
+        assert "older" not in text and "newer" not in text
+        for kind in (
+            "volume_breakout", "volume_surge", "liquidation_rebound", "crowded_reversal",
+            "session_event",
+        ):  # fmt: skip
+            assert f"- {kind}:" in text
+        assert "a conclusion that waits for a pullback zone does not exclude it" in text
 
 
 def _pm_logs() -> dict[str, dict[str, str]]:
