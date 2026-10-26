@@ -637,6 +637,64 @@ class FastLoopConfig(Contract):
     btc_lead_live: bool = Field(
         default=False, description="testnet / live 也出 BTC 先动信号（默认关，只在模拟盘出）。"
     )
+    # ---- 大盘翻转：只申请提前开整轮会，不下单、不平仓
+    regime_flip_on: bool = Field(
+        default=True, description="每 5 分钟看一次大盘是否翻向；满足条件就提前重开整轮会。"
+    )
+    regime_flip_live: bool = Field(
+        default=False, description="测试网 / 实盘也启用大盘翻转重开；默认关，仅模拟盘开启。"
+    )
+    regime_flip_breadth: int = Field(
+        default=30,
+        ge=0,
+        le=40,
+        description="按 40 个有效币算，至少几个往旧判断的反方向走才算翻转；"
+        "默认 30，即四分之三。有效币数不同就按比例算；0 = 不要求广度条件。",
+    )
+    regime_flip_btc_pct: float = Field(
+        default=1.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="BTC 相比上次总盘会的参照价，至少反向走百分之几；"
+        "默认 1 表示 1%，0 = 不要求 BTC 幅度条件。",
+    )
+    regime_flip_confirm: int = Field(
+        default=2,
+        ge=0,
+        description="连续几次检查满足条件才重开；默认 2 次。0 = 不等连续确认，本次满足就重开。",
+    )
+    regime_flip_min_gap_min: float = Field(
+        default=60,
+        ge=0,
+        allow_inf_nan=False,
+        description="两次因大盘翻转重开至少隔几分钟；默认 60，填 0 不限制间隔。",
+    )
+    regime_flip_min_symbols: int = Field(
+        default=10,
+        ge=0,
+        description="至少有几个币能算出一小时涨跌才判断；默认 10，0 = 不限制个数。"
+        "持平和缺数据的不计入。",
+    )
+    regime_flip_check_min: float = Field(
+        default=5,
+        ge=0,
+        allow_inf_nan=False,
+        description="隔几分钟检查一次大盘翻转；默认 5，可填小数，0 = 停止定时检查。",
+    )
+    regime_flip_suspect_log_min: float = Field(
+        default=30,
+        ge=0,
+        allow_inf_nan=False,
+        description="连续同类疑似在独立观测文件里隔几分钟再记一次；默认 30，0 = 每次都记。"
+        "决策日志和面板始终记录每次疑似，不受此项影响。",
+    )
+    regime_flip_price_max_age_min: float = Field(
+        default=5,
+        ge=0,
+        allow_inf_nan=False,
+        description="总盘会取 BTC 参照价时，行情最多可旧几分钟；默认 5，0 = 不限制新鲜程度。"
+        "完全没有价格时仍无法计算涨跌。",
+    )
     # ---- 和作战卡相反的信号（研究 2026-10-24：有仓交管家急查，反复出才开单币临时会）
     against_signal_on: bool = Field(
         default=True,

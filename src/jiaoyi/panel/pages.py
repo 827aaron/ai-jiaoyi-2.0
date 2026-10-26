@@ -220,6 +220,8 @@ class TeamPage(BaseModel):
     """最近 30 分钟哨兵交出去的反向信号（新的在前）；流程图上对应的线平时不画，有才亮。"""
     predictor_meetings: list[PredictorMeeting] = []
     """最近 30 分钟预测员申请、已经开完的临时会（新的在前）；流程图上预测员 → 军师团的线有才亮。"""
+    regime_flip: TrailItem | None = None
+    """当前日志中最近一次已启动的大盘翻转整轮会；疑似、被拦不会画触发连线。"""
     against_checks: list[AgainstCheck] = []
     """最近 30 分钟叫管家急查的反向信号和管家的判断（新的在前），不被例行复查冲掉。"""
     prompts: PromptsInfo | None = None
@@ -535,6 +537,17 @@ def build_team(
         against=against,
         against_checks=_against_checks(against, records),
         predictor_meetings=_predictor_meetings(files, now),
+        regime_flip=next(
+            (
+                _item(r)
+                for r in reversed(files.decisions_days(now))
+                if r.role is Role.SENTINEL
+                and isinstance(r.output.get("regime_flip"), dict)
+                and r.output["regime_flip"].get("kind") == "confirmed"
+                and r.output["regime_flip"].get("rerun") is True
+            ),
+            None,
+        ),
     )
 
 

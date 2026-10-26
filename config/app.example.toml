@@ -106,6 +106,18 @@ liq_drop_pct_5m = 1.0             # 且 5 分钟内被砸了 1% 以上
 crowded_funding_rate = 0.0005     # 哨兵：资金费率绝对值 ≥ 0.05% 算拥挤
 session_window_min = 5            # 哨兵：开盘 / 资金费结算前后 5 分钟
 session_vol_ratio = 2.0
+
+# 大盘翻转：每 5 分钟检查，提前重开整轮会（不直接下单或平仓）；以下均可热更新
+regime_flip_on = true             # 模拟盘默认开
+regime_flip_live = false          # 测试网 / 实盘也启用；默认关
+regime_flip_breadth = 30          # 按 40 个有效币算反向至少 30 个；按比例；0 = 不限制
+regime_flip_btc_pct = 1.0         # BTC 相比总盘会价至少反向走 1%；0 = 不限制
+regime_flip_confirm = 2           # 连续 2 次满足才重开；0 = 不等连续确认
+regime_flip_min_gap_min = 60      # 两次翻转重开至少隔 60 分钟；0 = 不限
+regime_flip_min_symbols = 10      # 最少有效涨跌币数；持平、缺数据不计；0 = 不限制
+regime_flip_check_min = 5         # 每隔几分钟检查；可填小数；0 = 停止定时检查
+regime_flip_suspect_log_min = 30  # 连续同类疑似的文件记录间隔；0 = 每次记；面板始终每次记
+regime_flip_price_max_age_min = 5 # BTC 参照行情最多旧几分钟；0 = 不限制（仍需有价格）
 # 和作战卡相反的信号：有仓叫管家急查，同一个币反复出就申请单币临时会；不会开反方向的仓
 against_signal_on = true          # false = 只记录（和以前一样）
 against_dedup_s = 300             # 同一个币同一种反向信号 5 分钟内只算 1 次

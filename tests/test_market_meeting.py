@@ -369,6 +369,7 @@ def test_count_numbers() -> None:
 def _draft(regime: str, *rows: tuple[str, bool, str]) -> _PickDraft:
     return _PickDraft(
         regime=regime,
+        regime_direction="中性",
         decisions=[_PickDraft._D(symbol=s, pick=p, reason=r) for s, p, r in rows],
     )
 

@@ -50,6 +50,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
+from jiaoyi.sentinel.regime_flip import Direction
 from jiaoyi.slow import binance_gate, market_table, ta_nodes, ta_prompts, ta_roles
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
@@ -923,6 +924,10 @@ class _PickDraft(BaseModel):
         description="One-sentence market view, in Chinese, citing at least two numbers from the "
         "brief or the pool breadth line",
     )
+    regime_direction: Direction = Field(
+        description="Market direction for the same horizon as regime: 看涨 = bullish, "
+        "看跌 = bearish, 中性 = neutral or range-bound. Choose one explicitly."
+    )
     decisions: list[_D] = Field(
         description="Exactly one entry for every candidate in the table: pick or skip, each "
         "with its reason"
@@ -982,6 +987,7 @@ def pick_result(
         errors=list(problems),
         breadth=breadth,
         table=table,
+        regime_direction=draft.regime_direction,
     )
 
 
