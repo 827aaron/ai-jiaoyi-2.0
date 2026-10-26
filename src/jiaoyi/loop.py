@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -40,8 +42,10 @@ from jiaoyi.contracts import (
     FeatureSnapshot,
     Interval,
     JevResponse,
+    KeeperMarketProgress,
     Kline,
     MarketEvent,
+    MarketView,
     OrderIntent,
     Outcome,
     PositionRecord,
@@ -311,6 +315,11 @@ class Runner:
         self._regime_tick_lock = asyncio.Lock()
         self._market_refreshing = False
         self._market_task: asyncio.Task[None] | None = None
+        self._keeper_market: dict[str, KeeperMarketProgress] = {}
+        self._keeper_market_path = Path(app.app_cfg.data_dir) / "keeper_market.json"
+        self._keeper_slots = asyncio.Semaphore(KEEPER_CONCURRENCY)
+        self._keeper_queued: set[str] = set()
+        self._restore_keeper_market()
         self._regime_period: float | None = None
         self._regime_next: datetime | None = None
         self._regime = RegimeFlip(fl)
@@ -323,6 +332,14 @@ class Runner:
         )
         if isinstance(self.m.cards, BattleCardCommander):
             self.m.cards.set_regime_price(self._regime_btc_price)
+            self.m.cards.set_on_market(self._market_published)
+            market_source = getattr(self.m.keeper, "set_market_source", None)
+            if callable(market_source):
+                cards = self.m.cards
+                market_source(lambda: cards.latest_market_view)
+            self.m.cards.set_market_review_enabled(
+                lambda: self.app.app_cfg.fast_loop.market_review_on
+            )
             snapshot = getattr(self.m.screener, "market_snapshot", None)
             if callable(snapshot):
                 self.m.cards.set_market_snapshot(snapshot)
@@ -1011,6 +1028,7 @@ class Runner:
         self.positions = [
             p for p in all_pos if p.status in (PositionStatus.OPEN, PositionStatus.OPENING)
         ]
+        self._sync_keeper_market()
         if before - {p.position_id for p in self.positions}:
             self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
 
@@ -1062,12 +1080,98 @@ class Runner:
         finally:
             self._closing.discard(pos.position_id)
         self.positions = [p for p in self.positions if p.position_id != pos.position_id]
+        self._keeper_market.pop(pos.position_id, None)
+        self._save_keeper_market()
         self._reconcile_soon()
         if isinstance(self.m.keeper, _Forgets):
             self.m.keeper.forget(pos.position_id)
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
+
+    def _restore_keeper_market(self) -> None:
+        try:
+            raw = json.loads(self._keeper_market_path.read_text(encoding="utf-8"))
+            self._keeper_market = {
+                pid: KeeperMarketProgress.model_validate(value) for pid, value in raw.items()
+            }
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._keeper_market = {}
+
+    def _save_keeper_market(self) -> None:
+        path = self._keeper_market_path
+        tmp = path.with_suffix(".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps(
+                    {
+                        pid: progress.model_dump(mode="json")
+                        for pid, progress in self._keeper_market.items()
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError:
+            log.exception("持仓市场复核进度保存失败，巡检继续")
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+    def _sync_keeper_market(self, view: MarketView | None = None) -> None:
+        if view is None and isinstance(self.m.cards, BattleCardCommander):
+            view = self.m.cards.latest_market_view
+        open_ids = {p.position_id for p in self.positions}
+        self._keeper_market = {
+            pid: progress for pid, progress in self._keeper_market.items() if pid in open_ids
+        }
+        if view is not None:
+            for pos in self.positions:
+                if pos.status is not PositionStatus.OPEN:
+                    continue
+                previous = self._keeper_market.get(
+                    pos.position_id, KeeperMarketProgress(position_id=pos.position_id)
+                )
+                if (
+                    max(
+                        previous.processed_market_version or 0, previous.pending_market_version or 0
+                    )
+                    < view.version
+                ):
+                    self._keeper_market[pos.position_id] = previous.model_copy(
+                        update={
+                            "pending_market_view_id": view.market_view_id,
+                            "pending_market_version": view.version,
+                        }
+                    )
+                    rec = self.app.recorders.get(Role.KEEPER)
+                    if rec is not None:
+                        rec.record(
+                            self.app.clock(),
+                            Outcome.INFO,
+                            f"{pos.symbol} 等待按大盘 v{view.version} 复核持仓",
+                            position_id=pos.position_id,
+                            symbol=pos.symbol,
+                            output={
+                                "market_review": "pending",
+                                "market_view_id": view.market_view_id,
+                                "market_version": view.version,
+                            },
+                        )
+        self._save_keeper_market()
+
+    def _market_published(self, view: MarketView) -> None:
+        """只唤醒原管家通道；同仓在途不并行重问，旧回复仅确认实际使用的版本。"""
+        self._sync_keeper_market(view)
+        held = [
+            p
+            for p in self.positions
+            if p.status is PositionStatus.OPEN
+            and p.position_id in self._keeper_market
+            and self._keeper_market[p.position_id].pending_market_view_id is not None
+        ]
+        if held and not self._leaving:
+            self._spawn(self._review_all(held))
 
     async def _review(self, pos: PositionRecord, *, urgent: bool = False) -> None:
         """同一笔仓同一时间只问一次 Jev：例行复查还在问时来了急查，等它问完下一秒再查
@@ -1085,6 +1189,43 @@ class Runner:
             verdict = await self.m.keeper.review(pos, self.app.clock())
         finally:
             self._reviewing.discard(pid)
+        if pid in self._keeper_market:
+            acknowledged = False
+            progress = self._keeper_market[pid]
+            if (
+                verdict.review_succeeded
+                and verdict.source_market_view_id is not None
+                and verdict.source_market_version is not None
+            ):
+                acknowledged = True
+                updates: dict[str, Any] = {}
+                if verdict.source_market_version >= (progress.processed_market_version or 0):
+                    updates.update(
+                        processed_market_view_id=verdict.source_market_view_id,
+                        processed_market_version=verdict.source_market_version,
+                    )
+                if (
+                    verdict.source_market_view_id == progress.pending_market_view_id
+                    or verdict.source_market_version > (progress.pending_market_version or 0)
+                ):
+                    updates.update(pending_market_view_id=None, pending_market_version=None)
+                self._keeper_market[pid] = progress.model_copy(update=updates)
+            self._save_keeper_market()
+            rec = self.app.recorders.get(Role.KEEPER)
+            if rec is not None:
+                rec.record(
+                    self.app.clock(),
+                    Outcome.INFO,
+                    f"{pos.symbol} 持仓市场复核" + ("完成" if acknowledged else "未完成，留待巡检"),
+                    position_id=pid,
+                    symbol=pos.symbol,
+                    output={
+                        "market_review": "processed" if acknowledged else "retry",
+                        "source_market_view_id": verdict.source_market_view_id,
+                        "source_market_version": verdict.source_market_version,
+                        "progress": self._keeper_market[pid].model_dump(mode="json"),
+                    },
+                )
         if pid in self._against_pending:  # 这次复查带了反向信号：结论写回团队页
             keeper = self.m.keeper
             if isinstance(keeper, _NotesAgainst) and keeper.pending_against(pid):
@@ -1098,11 +1239,21 @@ class Runner:
     async def _review_all(self, positions: list[PositionRecord]) -> None:
         """并发审（最多 ``KEEPER_CONCURRENCY`` 笔一起）：Jev 繁忙重试时每笔多等几秒，
         持仓多了按顺序问会拖过下一轮。每笔的「连续几次该平」各算各的。"""
-        sem = asyncio.Semaphore(KEEPER_CONCURRENCY)
 
         async def one(pos: PositionRecord) -> None:
-            async with sem:
-                await self._review(pos)
+            pid = pos.position_id
+            if pid in self._reviewing or pid in self._keeper_queued:
+                return
+            self._keeper_queued.add(pid)
+            try:
+                async with self._keeper_slots:
+                    if pid not in self._closing and any(
+                        current.position_id == pid and current.status is PositionStatus.OPEN
+                        for current in self.positions
+                    ):
+                        await self._review(pos)
+            finally:
+                self._keeper_queued.discard(pid)
 
         results = await asyncio.gather(*(one(p) for p in positions), return_exceptions=True)
         for pos, r in zip(positions, results, strict=True):

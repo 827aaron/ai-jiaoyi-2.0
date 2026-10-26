@@ -108,6 +108,7 @@ session_window_min = 5            # 哨兵：开盘 / 资金费结算前后 5 �
 session_vol_ratio = 2.0
 
 # 大盘方向变化：每 5 分钟检查，只独立更新大盘（不重跑各币会议）；以下均可热更新
+market_review_on = true           # 提名单币复核，还需 schedule.event_meeting_enabled
 regime_flip_on = true             # 模拟盘默认开
 regime_flip_live = false          # 测试网 / 实盘也启用；默认关
 regime_flip_breadth = 30          # 按 40 个有效币算反向至少 30 个；按比例；0 = 不限制

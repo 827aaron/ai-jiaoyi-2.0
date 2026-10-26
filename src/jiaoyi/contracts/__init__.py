@@ -8,7 +8,11 @@ from jiaoyi.contracts.battle_card import (
     CardSymbol,
     KeyLevel,
     LevelKind,
+    MarketReviewCandidate,
+    MarketReviewCard,
+    MarketReviewEvidence,
     MarketView,
+    QueuedMarketReview,
     Range,
 )
 from jiaoyi.contracts.common import (
@@ -59,6 +63,7 @@ from jiaoyi.contracts.module_status import (
 from jiaoyi.contracts.orders import AccountState, OrderIntent, RiskVerdict
 from jiaoyi.contracts.position import (
     CloseReason,
+    KeeperMarketProgress,
     KeeperVerdict,
     LifeboatOrder,
     LifeboatStatus,
@@ -105,6 +110,7 @@ __all__ = [
     "JevRequest",
     "JevResponse",
     "JevUsage",
+    "KeeperMarketProgress",
     "KeeperVerdict",
     "KeyLevel",
     "Kline",
@@ -114,6 +120,9 @@ __all__ = [
     "Liquidation",
     "MarkPrice",
     "MarketEvent",
+    "MarketReviewCandidate",
+    "MarketReviewCard",
+    "MarketReviewEvidence",
     "MarketView",
     "ModuleStatus",
     "OrderIntent",
@@ -122,6 +131,7 @@ __all__ = [
     "PositionRecord",
     "PositionStatus",
     "PredictorConfig",
+    "QueuedMarketReview",
     "Range",
     "ReconcileIssue",
     "ReconcileIssueKind",

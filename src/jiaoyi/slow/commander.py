@@ -35,9 +35,12 @@ from jiaoyi.contracts import (
     Health,
     KeyLevel,
     LevelKind,
+    MarketReviewCandidate,
+    MarketReviewCard,
     MarketView,
     ModuleStatus,
     Outcome,
+    QueuedMarketReview,
     Range,
     RiskConfig,
     Role,
@@ -99,6 +102,8 @@ class PickResult:
     breadth: str = ""  # 池子概况那一行（代码算的）
     table: str = ""  # 给模型看的候选表
     regime_direction: Direction = "中性"  # 旧结果没有方向时不从中文猜
+    review_candidates: list[MarketReviewCandidate] = field(default_factory=list)
+    reviews_valid: bool = False  # 只有显式、完整有效的候选集合才能撤销旧市场原因
 
 
 @dataclass(frozen=True)
@@ -358,6 +363,10 @@ class BattleCardCommander:
         self._slowdown = slowdown  # （放慢后的卡有效期，放慢后的开会间隔）
         self._slow_noticed_day = ""
         self._pending: dict[str, tuple[str, datetime]] = {}
+        self._market_reviews: dict[str, QueuedMarketReview] = {}
+        self._symbol_inflight: set[str] = set()
+        self._market_review_enabled: Callable[[], bool] = lambda: True
+        self._on_market: Callable[[MarketView], None] | None = None
         self._event_day = ""
         self._event_count = 0
         self._event_last: dict[str, datetime] = {}
@@ -674,17 +683,217 @@ class BattleCardCommander:
             self._event_day, self._event_count = day, 0
 
     def _queue(self, symbol: str, trigger: str, now: datetime) -> None:
-        if trigger in self._events.triggers and symbol not in self._pending:
+        if trigger not in self._events.triggers:
+            return
+        if symbol not in self._pending:
             self._pending[symbol] = (trigger, now)
+        queued = self._market_reviews.get(symbol)
+        if queued is not None and trigger not in queued.reasons:
+            self._market_reviews[symbol] = queued.model_copy(
+                update={
+                    "reasons": [*queued.reasons, trigger],
+                    "reason_queued_at": {**queued.reason_queued_at, trigger: now},
+                }
+            )
+            self._save_market()
 
     def accepts_event(self, trigger: str) -> bool:
         """开了临时会、且这类事件在名单里（不然 ``request_event`` 会被忽略）。"""
-        return self._events.enabled and trigger in self._events.triggers
+        return self._events.enabled and (
+            self._market_review_enabled()
+            if trigger == "market_review"
+            else trigger in self._events.triggers
+        )
 
     def request_event(self, symbol: str, trigger: str) -> None:
         """外部事件（预测员连续看反作战卡等）：排进临时会队列，没开临时会 / 不在名单里就忽略。"""
         if self._events.enabled:
             self._queue(symbol, trigger, self._clock())
+
+    def set_market_review_enabled(self, enabled: Callable[[], bool]) -> None:
+        self._market_review_enabled = enabled
+
+    def set_on_market(self, callback: Callable[[MarketView], None]) -> None:
+        self._on_market = callback
+
+    @property
+    def last_market_success_at(self) -> datetime | None:
+        return self.latest_market_view.observed_at if self.latest_market_view else None
+
+    def market_review_context(self, pool: SymbolPool) -> list[MarketReviewCard]:
+        card = self._card
+        if card is None or not card.is_valid(self._clock()):
+            return []
+        symbols = {e.symbol for e in pool.in_pool}
+        return [
+            MarketReviewCard(
+                symbol=cs.symbol,
+                research_token=cs.research_token(),
+                bias=cs.bias,
+                reason=cs.reason,
+                issued_at=cs.issued_at or card.created_at,
+                source_regime=cs.source_regime or card.regime,
+                source_market_view_id=cs.source_market_view_id,
+                key_levels=cs.key_levels,
+            )
+            for cs in card.symbols
+            if cs.symbol in symbols
+        ]
+
+    def _event_eligible(self, symbol: str, now: datetime) -> datetime:
+        current = self._card.for_symbol(symbol) if self._card else None
+        issued = (current.issued_at or self._card.created_at) if current and self._card else None
+        last = max(
+            (
+                at
+                for at in (self._event_last.get(symbol), self._last_meeting.get(symbol), issued)
+                if at
+            ),
+            default=None,
+        )
+        at = last + self._events.symbol_gap if last else datetime.min.replace(tzinfo=UTC)
+        self._roll_events(now)
+        if self._event_count >= self._events.max_per_day:
+            local = now.astimezone(ZoneInfo(self._risk.day_reset_tz))
+            tomorrow = (local + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            at = max(at, tomorrow.astimezone(UTC))
+        return at
+
+    def _drop_market_review(self, symbol: str, why: str) -> None:
+        queued = self._market_reviews.pop(symbol, None)
+        if queued is None:
+            return
+        others = [
+            r
+            for r in queued.reasons
+            if r != "market_review"
+            and self._clock() - queued.reason_queued_at.get(r, queued.first_seen) <= PENDING_EXPIRY
+        ]
+        if others:
+            first_reason = min(
+                others, key=lambda reason: queued.reason_queued_at.get(reason, queued.first_seen)
+            )
+            self._pending[symbol] = (
+                first_reason,
+                queued.reason_queued_at.get(first_reason, queued.first_seen),
+            )
+        else:
+            self._pending.pop(symbol, None)
+        self._write(
+            symbol=symbol,
+            outcome=Outcome.INFO,
+            summary=f"{symbol} 市场复核提名已忽略：{why}"[:200],
+            output={"market_review": "ignored", "reason": why},
+        )
+        self._save_market()
+
+    def enqueue_market_reviews(
+        self,
+        candidates: Sequence[MarketReviewCandidate],
+        pool: SymbolPool,
+        context: Sequence[MarketReviewCard],
+        view: MarketView,
+    ) -> None:
+        supplied = {s.symbol: s for s in context}
+        entries = {e.symbol: e for e in pool.in_pool}
+        retained: set[str] = set()
+        for candidate in candidates:
+            sym = candidate.symbol
+            old = supplied.get(sym)
+            current = self._card.for_symbol(sym) if self._card else None
+            entry = entries.get(sym)
+            why = ""
+            if not self.accepts_event("market_review"):
+                why = "市场复核或总临时会开关已关闭"
+            elif entry is None or old is None or current is None:
+                why = "不在本次原池与现卡交集"
+            elif (
+                candidate.research_token != old.research_token
+                or current.research_token() != old.research_token
+            ):
+                why = "该币研究已替换，提名过时"
+            elif sym in self._symbol_inflight:
+                why = "该币正在研究，合并到现有会议，不取消重开"
+            else:
+                values = {f"metrics.{key}": value for key, value in entry.metrics.items()}
+                values.update(
+                    {
+                        f"filters.{key}": value
+                        for key, value in entry.filters.model_dump().items()
+                        if isinstance(value, int | float) and not isinstance(value, bool)
+                    }
+                )
+                if not candidate.evidence or any(
+                    e.field not in values
+                    or not math.isclose(e.value, values[e.field], rel_tol=1e-9, abs_tol=1e-9)
+                    for e in candidate.evidence
+                ):
+                    why = "缺少与本次新鲜快照匹配的具体数字证据"
+            self._write(
+                symbol=sym,
+                outcome=Outcome.INFO,
+                summary=f"{sym} 大盘提名单币复核：{why or candidate.reason}"[:200],
+                output={
+                    "market_review": "ignored" if why else "nominated",
+                    "market_view_id": view.market_view_id,
+                    "candidate": candidate.model_dump(mode="json"),
+                    "reason": why,
+                },
+            )
+            if why:
+                continue
+            now = self._clock()
+            retained.add(sym)
+            previous = self._market_reviews.get(sym)
+            first = previous.first_seen if previous else self._pending.get(sym, ("", now))[1]
+            eligible = (
+                previous.eligible_at if previous else max(now, self._event_eligible(sym, now))
+            )
+            reasons = (
+                previous.reasons
+                if previous
+                else list(
+                    dict.fromkeys(
+                        [
+                            *([self._pending[sym][0]] if sym in self._pending else []),
+                            "market_review",
+                        ]
+                    )
+                )
+            )
+            queued = QueuedMarketReview(
+                candidate=candidate,
+                market_view_id=view.market_view_id,
+                first_seen=first,
+                eligible_at=eligible,
+                expires_at=eligible + PENDING_EXPIRY,
+                reasons=reasons,
+                reason_queued_at=(
+                    previous.reason_queued_at
+                    if previous
+                    else {
+                        **(
+                            {self._pending[sym][0]: self._pending[sym][1]}
+                            if sym in self._pending
+                            else {}
+                        ),
+                        "market_review": first,
+                    }
+                ),
+            )
+            self._market_reviews[sym] = queued
+            self._pending.setdefault(sym, ("market_review", first))
+            self._write(
+                symbol=sym,
+                outcome=Outcome.INFO,
+                summary=f"{sym} 市场复核已排队，最早 {eligible.isoformat()}"[:200],
+                output={"market_review": "queued", **queued.model_dump(mode="json")},
+            )
+        for symbol in set(self._market_reviews) - retained:
+            self._drop_market_review(symbol, "本次新市场未再提名，撤销旧市场原因")
+        self._save_market()
 
     def _detect(
         self,
@@ -766,12 +975,72 @@ class BattleCardCommander:
             return None
         self._roll_events(now)
         if self._event_count >= self._events.max_per_day:
+            for symbol, quota_item in self._market_reviews.items():
+                eligible = max(quota_item.eligible_at, self._event_eligible(symbol, now))
+                self._market_reviews[symbol] = quota_item.model_copy(
+                    update={
+                        "eligible_at": eligible,
+                        "expires_at": eligible + PENDING_EXPIRY,
+                    }
+                )
+            self._save_market()
             return None
         by_symbol = {e.symbol: e for e in pool.in_pool}
         for sym in sorted(self._pending, key=lambda x: x not in self._held):
+            queued = self._market_reviews.get(sym)
+            if queued is not None:
+                current = self._card.for_symbol(sym) if self._card else None
+                if (
+                    not self.accepts_event("market_review")
+                    or current is None
+                    or current.research_token() != queued.candidate.research_token
+                    or sym not in by_symbol
+                ):
+                    self._drop_market_review(sym, "开关关闭、移出原池或该币研究已替换")
+                    if sym not in self._pending:
+                        continue
+                    queued = None
+                else:
+                    eligible = max(queued.eligible_at, self._event_eligible(sym, now))
+                    if eligible > queued.eligible_at:
+                        queued = queued.model_copy(
+                            update={
+                                "eligible_at": eligible,
+                                "expires_at": eligible + PENDING_EXPIRY,
+                            }
+                        )
+                        self._market_reviews[sym] = queued
+                        self._save_market()
+                    if now < queued.eligible_at:
+                        continue
             trigger, at = self._pending[sym]
-            if now - at > PENDING_EXPIRY or sym not in by_symbol:
-                del self._pending[sym]
+            if queued is not None and (
+                self.latest_market_view is None
+                or queued.market_view_id != self.latest_market_view.market_view_id
+            ):
+                # 新市场未提供有效集合：保位置但不将旧证据当作新版确认。
+                others = [
+                    reason
+                    for reason in queued.reasons
+                    if reason != "market_review"
+                    and now - queued.reason_queued_at.get(reason, queued.first_seen)
+                    <= PENDING_EXPIRY
+                ]
+                if not others:
+                    if now > queued.expires_at:
+                        self._drop_market_review(sym, "未获新版确认且可执行窗口已过期")
+                    continue
+                trigger = min(
+                    others,
+                    key=lambda reason: queued.reason_queued_at.get(reason, queued.first_seen),
+                )
+                at = queued.reason_queued_at.get(trigger, queued.first_seen)
+            expires = queued.expires_at if queued else at + PENDING_EXPIRY
+            if now > expires or sym not in by_symbol:
+                if queued is not None:
+                    self._drop_market_review(sym, "可执行窗口已过期")
+                else:
+                    self._pending.pop(sym, None)
                 continue
             last = max(
                 (t for t in (self._event_last.get(sym), self._last_meeting.get(sym)) if t),
@@ -789,7 +1058,36 @@ class BattleCardCommander:
         旧卡照旧；同一个币的间隔照常计，免得失败后每分钟重试。"""
         now = self._clock()
         self._loop = asyncio.get_running_loop()
+        nomination = self._market_reviews.get(symbol)
+        if nomination is not None and (
+            self.latest_market_view is None
+            or nomination.market_view_id != self.latest_market_view.market_view_id
+        ):
+            if trigger == "market_review":
+                return None
+            nomination = None  # 其他真实事件可独立执行，不冒认旧市场提名已确认。
+        if nomination is not None:
+            current = self._card.for_symbol(symbol) if self._card else None
+            if (
+                not self.accepts_event("market_review")
+                or current is None
+                or current.research_token() != nomination.candidate.research_token
+            ):
+                self._drop_market_review(symbol, "开会前该币研究已替换或开关关闭")
+                if trigger == "market_review":
+                    return None
+                nomination = None
+            elif (
+                not self.may_refresh(now)
+                or now < nomination.eligible_at
+                or now < self._event_eligible(symbol, now)
+            ):
+                return None
+        elif trigger == "market_review":
+            return None
         self._pending.pop(symbol, None)
+        self._market_reviews.pop(symbol, None)
+        self._save_market()
         card = self._card
         entry = next((e for e in pool.in_pool if e.symbol == symbol), None)
         if card is None or not card.is_valid(now) or entry is None:
@@ -797,7 +1095,21 @@ class BattleCardCommander:
         self._roll_events(now)
         self._event_count += 1
         self._event_last[symbol] = now
+        source_symbol = card.for_symbol(symbol)
+        source_token = source_symbol.research_token() if source_symbol else None
+        self._symbol_inflight.add(symbol)
         self._progress = f"{symbol} 临时会"
+        if nomination is not None:
+            self._write(
+                symbol=symbol,
+                outcome=Outcome.INFO,
+                summary=f"{symbol} 市场提名复核开始：{nomination.candidate.reason}"[:200],
+                output={
+                    "market_review": "started",
+                    "nomination": nomination.model_dump(mode="json"),
+                },
+            )
+        self._save_market()
         beat = asyncio.create_task(self._beat_while_meeting())
         started = time.monotonic()
         try:
@@ -805,13 +1117,41 @@ class BattleCardCommander:
             regime = market.regime if market else card.regime
             brief_text = self._brief.text if self._brief is not None else ""
             res = await self._analyze_one(
-                entry, regime, "", brief_text=brief_text, market_view=market
+                entry,
+                regime,
+                nomination.candidate.reason if nomination else "",
+                brief_text=brief_text,
+                market_view=market,
             )
-        except Exception:
+        except BaseException as exc:
+            if nomination is not None:
+                self._write(
+                    symbol=symbol,
+                    outcome=Outcome.ERROR,
+                    summary=f"{symbol} 市场提名复核失败：{self._why(exc)}"[:200],
+                    output={"market_review": "failed", "market_view_id": nomination.market_view_id},
+                )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return None  # 失败原因和花费已在各标的记录里
         finally:
             beat.cancel()
+            self._symbol_inflight.discard(symbol)
             self._progress = ""
+        latest_card = self._card
+        latest_symbol = latest_card.for_symbol(symbol) if latest_card else None
+        if (
+            latest_card is None
+            or (latest_symbol.research_token() if latest_symbol else None) != source_token
+        ):
+            self._write(
+                symbol=symbol,
+                outcome=Outcome.INFO,
+                summary=f"{symbol} 研究期间该币指令已替换，本次结论不覆盖新研究",
+                output={"market_review": "superseded"},
+            )
+            return None
+        card = latest_card
         self._pick_cost = 0.0  # 没有总盘会这一份，别重复记上一轮的
         new = self._stamp(
             self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
@@ -839,6 +1179,18 @@ class BattleCardCommander:
         if self._journal is not None:
             self._journal.record(card, [symbol])
         self._record_card(card, started)
+        if nomination is not None:
+            self._write(
+                symbol=symbol,
+                outcome=Outcome.ACTION,
+                summary=f"{symbol} 市场提名复核完成，仅更新该币指令",
+                output={
+                    "market_review": "completed",
+                    "source_market_view_id": new.source_market_view_id,
+                    "nomination_market_view_id": nomination.market_view_id,
+                },
+            )
+        self._save_market()
         return card.model_copy(update={"current_market": self.latest_market_view})
 
     @staticmethod
@@ -976,6 +1328,11 @@ class BattleCardCommander:
             self._reference_generation = generation
             self._pending_reference_view = view if self.regime_reference is None else None
         self._save_market()
+        if self._on_market is not None:
+            try:
+                self._on_market(view)
+            except Exception:
+                logger.exception("通知最新市场观点失败，持仓巡检会继续补查")
         return view
 
     async def refresh_market(
@@ -995,6 +1352,7 @@ class BattleCardCommander:
             now = self._clock()
             if why := self.regime_flip_blocked(now):
                 raise CardRefreshError(f"市场刷新暂停：{why}")
+            contextual_refresh = getattr(self._engine, "refresh_market_with_reviews", None)
             refresh = getattr(self._engine, "refresh_market", None)
             if not callable(refresh):
                 raise CardRefreshError("会议引擎不支持独立市场刷新")
@@ -1025,9 +1383,22 @@ class BattleCardCommander:
                     raise CardRefreshError("市场刷新条件已变化，保留上一份观点")
                 brief_text = await self._brief.refresh() if self._brief is not None else ""
                 brief_text = f"Pool statistics source UTC: {pool.ts.isoformat()}\n" + brief_text
+                card_context = (
+                    self.market_review_context(pool) if self.accepts_event("market_review") else []
+                )
                 model_started = True
+                meeting = (
+                    contextual_refresh(
+                        pool.in_pool,
+                        self.latest_market_view,
+                        brief_text=brief_text,
+                        card_context=card_context,
+                    )
+                    if callable(contextual_refresh)
+                    else refresh(pool.in_pool, self.latest_market_view, brief_text=brief_text)
+                )
                 picked: PickResult = await asyncio.wait_for(
-                    refresh(pool.in_pool, self.latest_market_view, brief_text=brief_text),
+                    meeting,
                     self._symbol_timeout_s,
                 )
                 model_cost = picked.cost_usd
@@ -1096,11 +1467,25 @@ class BattleCardCommander:
                 assert self.latest_market_view is not None
                 return self.latest_market_view
             view = self._publish_market(picked, pool, reason, generation, transition=True)
+            if picked.reviews_valid:
+                self.enqueue_market_reviews(picked.review_candidates, pool, card_context, view)
+            else:
+                self._write(
+                    outcome=Outcome.INFO,
+                    summary="本次市场复核提名不可用：保留位置，市场原因暂停等待新版确认",
+                    output={"reviews_valid": False, "market_view_id": view.market_view_id},
+                )
             self._write(
                 outcome=Outcome.ACTION,
                 summary=f"独立大盘更新 v{view.version}：{view.regime}"[:200],
                 input={"refresh_reason": reason, "scope": "market_only"},
-                output={"market_view": view.model_dump(mode="json")},
+                output={
+                    "market_view": view.model_dump(mode="json"),
+                    "reviews_valid": picked.reviews_valid,
+                    "review_candidates": [
+                        c.model_dump(mode="json") for c in picked.review_candidates
+                    ],
+                },
                 cost_usd=cost,
                 latency_ms=(time.monotonic() - started) * 1000,
             )
@@ -1136,6 +1521,15 @@ class BattleCardCommander:
             "last_regime_flip_at": self.last_regime_flip_at.isoformat()
             if self.last_regime_flip_at
             else None,
+            "last_market_success_at": self.last_market_success_at.isoformat()
+            if self.last_market_success_at
+            else None,
+            "market_reviews": {
+                key: q.model_dump(mode="json") for key, q in self._market_reviews.items()
+            },
+            "event_day": self._event_day,
+            "event_count": self._event_count,
+            "event_last": {key: at.isoformat() for key, at in self._event_last.items()},
             "market_error": self._market_error,
             "market_fails": self._market_fails,
             "market_retry_at": self._market_retry_at.isoformat() if self._market_retry_at else None,
@@ -1191,6 +1585,20 @@ class BattleCardCommander:
         self._market_error = data.get("market_error")
         if view is not None:
             self.last_regime_direction = view.regime_direction
+        try:
+            self._event_day = str(data.get("event_day", ""))
+            self._event_count = int(data.get("event_count", 0))
+            self._event_last = {
+                key: datetime.fromisoformat(value)
+                for key, value in data.get("event_last", {}).items()
+            }
+            for key, raw in data.get("market_reviews", {}).items():
+                queued = QueuedMarketReview.model_validate(raw)
+                self._market_reviews[key] = queued
+                self._pending[key] = (queued.reasons[0], queued.first_seen)
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("市场复核排队状态损坏，保留卡与市场，等待新提名")
+            self._market_reviews.clear()
 
     def _eligible(self, pool: SymbolPool, now: datetime, *, expand: bool) -> list[SymbolPoolEntry]:
         """这一轮能开会的币：没开分档 = 整个池；开了 = 头部 + 有持仓的 + 中间档里今天挑中的
@@ -1354,6 +1762,10 @@ class BattleCardCommander:
                     "max_n": max(room, 0),
                     "regime": picked.regime,
                     "regime_direction": picked.regime_direction,
+                    "reviews_valid": picked.reviews_valid,
+                    "review_candidates": [
+                        c.model_dump(mode="json") for c in picked.review_candidates
+                    ],
                     "refresh_reason": reason,
                     "breadth": picked.breadth,
                     "picked": [p.symbol for p in picked.picks],
@@ -1472,9 +1884,22 @@ class BattleCardCommander:
         est = self._estimate(self._pick_costs)
         self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
         live = self._market_live(pool.in_pool, candidates, pinned, free, max(room, 0))
+        card_context = (
+            self.market_review_context(pool) if self.accepts_event("market_review") else []
+        )
         try:
+            review_pick = getattr(self._engine, "pick_with_reviews", None)
             contextual_pick = getattr(self._engine, "pick_with_context", None)
-            if callable(contextual_pick):
+            if callable(review_pick):
+                picked = await review_pick(
+                    free,
+                    max(room, 0),
+                    self._card,
+                    pool.in_pool,
+                    brief_text=brief_text,
+                    card_context=card_context,
+                )
+            elif callable(contextual_pick):
                 picked = await contextual_pick(
                     free, max(room, 0), self._card, pool.in_pool, brief_text=brief_text
                 )
@@ -1552,6 +1977,22 @@ class BattleCardCommander:
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
+        if (
+            picked.reviews_valid
+            and self.latest_market_view is not None
+            and self.latest_market_view.market_view_id == market_view.market_view_id
+        ):
+            planned = {entry.symbol for entry in to_meet}
+            self.enqueue_market_reviews(
+                [
+                    candidate
+                    for candidate in picked.review_candidates
+                    if candidate.symbol not in planned
+                ],
+                pool,
+                card_context,
+                market_view,
+            )
         if live is not None:
             self._market_done(live, picked, chosen, candidates, pinned, reused, now)
         else:

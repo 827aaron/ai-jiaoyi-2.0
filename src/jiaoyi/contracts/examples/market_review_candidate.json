@@ -1,0 +1,11 @@
+{
+  "symbol": "BTCUSDT",
+  "research_token": "research-example-1",
+  "reason": "原研究等待突破，但当前一小时下跌2.5%，需要单币核对旧假设",
+  "evidence": [
+    {
+      "field": "metrics.chg_1h",
+      "value": -2.5
+    }
+  ]
+}

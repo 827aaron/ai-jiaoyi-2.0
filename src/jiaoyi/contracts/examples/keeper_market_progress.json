@@ -1,0 +1,7 @@
+{
+  "position_id": "position-example-1",
+  "pending_market_view_id": "market-example-2",
+  "pending_market_version": 2,
+  "processed_market_view_id": "market-example-1",
+  "processed_market_version": 1
+}

@@ -125,6 +125,19 @@ class KeeperVerdict(Contract):
     consecutive: int = Field(ge=1)
     reason: str = ""
     jev_request_id: str | None = None
+    source_market_view_id: str | None = None
+    source_market_version: int | None = Field(default=None, ge=1)
+    review_succeeded: bool = False
+
+
+class KeeperMarketProgress(Contract):
+    """一笔持仓待复核及实际已复核的市场版本，防止旧在途回复冒认新版。"""
+
+    position_id: str
+    pending_market_view_id: str | None = None
+    pending_market_version: int | None = Field(default=None, ge=1)
+    processed_market_view_id: str | None = None
+    processed_market_version: int | None = Field(default=None, ge=1)
 
 
 class PatrolAction(Contract):

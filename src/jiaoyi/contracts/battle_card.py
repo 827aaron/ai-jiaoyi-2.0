@@ -8,6 +8,7 @@ JSON 示例见 ``contracts/examples/battle_card.json``。
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -111,6 +112,51 @@ class CardSymbol(Contract):
     source_regime: str | None = Field(
         default=None, description="研究启动时的市场判断；旧卡回退整卡判断。"
     )
+
+    def research_token(self) -> str:
+        """仅按本币研究内容签名，无关币换卡或市场版本刷新不使它失效。"""
+        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()[:24]
+
+
+class MarketReviewEvidence(Contract):
+    """市场提名引用的同池快照数字；字段名与本次输入一致。"""
+
+    field: str = Field(min_length=1)
+    value: float = Field(allow_inf_nan=False)
+
+
+class MarketReviewCandidate(Contract):
+    """市场只提名单币复核，不改已有指令或选择新币。"""
+
+    symbol: Symbol
+    research_token: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    evidence: list[MarketReviewEvidence] = Field(min_length=1)
+
+
+class MarketReviewCard(Contract):
+    """提供给独立市场模型的旧研究摘要，含本币内容令牌。"""
+
+    symbol: Symbol
+    research_token: str
+    bias: Bias
+    reason: str
+    issued_at: AwareDatetime | None = None
+    source_regime: str | None = None
+    source_market_view_id: str | None = None
+    key_levels: list[KeyLevel] = Field(default_factory=list)
+
+
+class QueuedMarketReview(Contract):
+    """市场提名的持久排队状态；到期从可执行时间起算。"""
+
+    candidate: MarketReviewCandidate
+    market_view_id: str
+    first_seen: AwareDatetime
+    eligible_at: AwareDatetime
+    expires_at: AwareDatetime
+    reasons: list[str] = Field(default_factory=lambda: ["market_review"])
+    reason_queued_at: dict[str, AwareDatetime] = Field(default_factory=dict)
 
 
 class BattleCard(Contract):
