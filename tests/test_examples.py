@@ -11,6 +11,11 @@ from tests.conftest import EXAMPLES, load_example
 EXAMPLE_MODELS: dict[str, type[BaseModel]] = {
     "battle_card": c.BattleCard,
     "market_view": c.MarketView,
+    "market_review_evidence": c.MarketReviewEvidence,
+    "market_review_candidate": c.MarketReviewCandidate,
+    "market_review_card": c.MarketReviewCard,
+    "queued_market_review": c.QueuedMarketReview,
+    "keeper_market_progress": c.KeeperMarketProgress,
     "candidate_signal": c.CandidateSignal,
     "jev_entry_request": c.JevRequest,
     "jev_entry_response": c.JevResponse,

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from jiaoyi.contracts import (
     BattleCard,
@@ -42,6 +42,8 @@ from jiaoyi.contracts import (
     Category,
     KeyLevel,
     LevelKind,
+    MarketReviewCandidate,
+    MarketReviewCard,
     MarketView,
     Range,
     RiskConfig,
@@ -912,12 +914,36 @@ class _LessonDraft(BaseModel):
     lessons: list[_L] = Field(default_factory=list, description="At most 5; empty if none stand up")
 
 
+def _review_candidates(value: Any) -> list[MarketReviewCandidate] | None:
+    """可选提名坏了只停用提名，不丢掉独立且有效的大盘判断。"""
+    if not isinstance(value, list):
+        return None
+    try:
+        return [MarketReviewCandidate.model_validate(item) for item in value]
+    except (ValueError, TypeError):
+        return None
+
+
 class _MarketDraft(BaseModel):
+    review_candidates: list[MarketReviewCandidate] | None = None
+
+    @field_validator("review_candidates", mode="before")
+    @classmethod
+    def _reviews(cls, value: Any) -> list[MarketReviewCandidate] | None:
+        return _review_candidates(value)
+
     regime: str = Field(min_length=1, description="Chinese market view citing at least two numbers")
     regime_direction: Direction
 
 
 class _PickDraft(BaseModel):
+    review_candidates: list[MarketReviewCandidate] | None = None
+
+    @field_validator("review_candidates", mode="before")
+    @classmethod
+    def _reviews(cls, value: Any) -> list[MarketReviewCandidate] | None:
+        return _review_candidates(value)
+
     class _D(BaseModel):
         symbol: str
         pick: bool = Field(description="true = worth a meeting now; false = skip")
@@ -994,6 +1020,8 @@ def pick_result(
         breadth=breadth,
         table=table,
         regime_direction=draft.regime_direction,
+        review_candidates=draft.review_candidates or [],
+        reviews_valid=draft.review_candidates is not None,
     )
 
 
@@ -2003,6 +2031,7 @@ class TradingAgentsEngine:
         pool: Sequence[SymbolPoolEntry] = (),
         *,
         brief_text: str | None = None,
+        card_context: Sequence[MarketReviewCard] = (),
     ) -> PickResult:
         if max_n <= 0 or not candidates:
             return PickResult(regime=previous.regime if previous else "无新增标的", picks=[])
@@ -2014,6 +2043,7 @@ class TradingAgentsEngine:
             previous,
             list(pool) or list(candidates),
             self._brief_text() if brief_text is None else brief_text,
+            card_context,
         )
 
     def _pick_sync(
@@ -2023,12 +2053,15 @@ class TradingAgentsEngine:
         previous: BattleCard | None,
         pool: list[SymbolPoolEntry],
         brief_text: str | None = None,
+        card_context: Sequence[MarketReviewCard] = (),
     ) -> PickResult:
         meter = self._meter("pick")
         handler = cost_handler(meter)
         self._refresh_lessons(handler)
         try:
-            return self._pick_run(candidates, max_n, previous, handler, meter, pool, brief_text)
+            return self._pick_run(
+                candidates, max_n, previous, handler, meter, pool, brief_text, card_context
+            )
         except Exception as exc:  # 失败时把已烧掉的花费带出去，日花费上限才不漏算
             raise MeetingError(str(exc), meter.cost) from exc
         finally:
@@ -2043,6 +2076,7 @@ class TradingAgentsEngine:
         meter: CostMeter,
         pool: Sequence[SymbolPoolEntry] = (),
         brief_text: str | None = None,
+        card_context: Sequence[MarketReviewCard] = (),
     ) -> PickResult:
         graph = self._graph(("market",), handler)
         llm = (
@@ -2064,6 +2098,7 @@ class TradingAgentsEngine:
             market,
             table,
         )
+        prompt += self._review_prompt(pool or candidates, card_context)
         valid = [e.symbol for e in candidates]
         draft: _PickDraft = llm.invoke(prompt, config={"callbacks": [handler]})
         problems = pick_problems(draft, valid)
@@ -2081,6 +2116,61 @@ class TradingAgentsEngine:
             except Exception:
                 logger.exception("总盘会重问失败，用第一次的回答")
         return pick_result(draft, valid, max_n, problems, retried, meter.cost, breadth, table)
+
+    @staticmethod
+    def _review_prompt(
+        pool: Sequence[SymbolPoolEntry],
+        card_context: Sequence[MarketReviewCard],
+    ) -> str:
+        # 只提供现卡与本次原池交集，数字使用精确值以便指挥官核对证据。
+        entries = {e.symbol: e for e in pool}
+        summaries = []
+        for old in card_context:
+            entry = entries.get(old.symbol)
+            if entry is None:
+                continue
+            evidence = {f"metrics.{key}": value for key, value in entry.metrics.items()}
+            evidence.update(
+                {
+                    f"filters.{key}": value
+                    for key, value in entry.filters.model_dump().items()
+                    if isinstance(value, int | float) and not isinstance(value, bool)
+                }
+            )
+            summaries.append({**old.model_dump(mode="json"), "current_evidence": evidence})
+        return (
+            "\nExisting research summaries and exact fresh evidence: "
+            + json.dumps(summaries, ensure_ascii=False)
+            + "\nReturn the COMPLETE currently needed review set, not incremental additions. "
+            "Return [] explicitly when none need review; omit only if unable to judge. "
+            "Optional review_candidates: nominate ONLY listed symbols whose OLD research "
+            "assumption is challenged by specific NEW observed facts. "
+            "Copy research_token exactly; "
+            "give a Chinese reason explaining the mismatch and evidence [{field,value}] copied "
+            "exactly from that symbol's current_evidence. A newer market version, elapsed age, "
+            "or unchanged neutral label alone is NOT a reason. "
+            "Do not nominate every card by age. "
+            "If no concrete mismatch exists return []. Never choose a new coin, bias or TTL."
+        )
+
+    async def pick_with_reviews(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry],
+        *,
+        brief_text: str,
+        card_context: Sequence[MarketReviewCard] = (),
+    ) -> PickResult:
+        return await self.pick(
+            candidates,
+            max_n,
+            previous,
+            pool,
+            brief_text=brief_text,
+            card_context=card_context,
+        )
 
     async def pick_with_context(
         self,
@@ -2101,13 +2191,26 @@ class TradingAgentsEngine:
         brief_text: str = "",
     ) -> PickResult:
         """只评估市场，独立模型调用和成本键；空池也不走 pick 的短路。"""
-        return await asyncio.to_thread(self._refresh_market_sync, list(pool), previous, brief_text)
+        return await self.refresh_market_with_reviews(pool, previous, brief_text=brief_text)
+
+    async def refresh_market_with_reviews(
+        self,
+        pool: Sequence[SymbolPoolEntry],
+        previous: MarketView | None,
+        *,
+        brief_text: str = "",
+        card_context: Sequence[MarketReviewCard] = (),
+    ) -> PickResult:
+        return await asyncio.to_thread(
+            self._refresh_market_sync, list(pool), previous, brief_text, list(card_context)
+        )
 
     def _refresh_market_sync(
         self,
         pool: list[SymbolPoolEntry],
         previous: MarketView | None,
         brief_text: str,
+        card_context: Sequence[MarketReviewCard] = (),
     ) -> PickResult:
         meter = self._meter("market_only")
         handler = cost_handler(meter)
@@ -2122,7 +2225,7 @@ class TradingAgentsEngine:
             table = "\n".join(market_table.format_row(e, self._s.hold) for e in pool)
             prompt = (
                 "Judge the CURRENT overall market for perpetual trading. Do not select coins "
-                "or analyze individual trade instructions. Return a concise Chinese regime "
+                "or rewrite individual trade instructions. Return a concise Chinese regime "
                 "citing at least two observed numbers, and an explicit regime_direction "
                 "(看涨/看跌/中性). Use the same trading horizon as the scheduled market meeting.\n"
                 f"Trading horizon: {prompt_params(self._s).horizon}\n"
@@ -2135,6 +2238,7 @@ class TradingAgentsEngine:
                 + "\n"
                 + table
             )
+            prompt += self._review_prompt(pool, card_context)
             for attempt in range(2):
                 draft: _MarketDraft = llm.invoke(prompt, config={"callbacks": [handler]})
                 if not isinstance(draft, _MarketDraft):
@@ -2148,6 +2252,8 @@ class TradingAgentsEngine:
                         breadth=breadth,
                         table=table,
                         retried=bool(attempt),
+                        review_candidates=draft.review_candidates or [],
+                        reviews_valid=draft.review_candidates is not None,
                     )
                 prompt += "\nQuote at least two actual numbers from the supplied data."
             raise ValueError("市场观点缺少数据依据，保留上一份观点")

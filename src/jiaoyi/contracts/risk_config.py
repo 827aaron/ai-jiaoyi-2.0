@@ -637,6 +637,11 @@ class FastLoopConfig(Contract):
     btc_lead_live: bool = Field(
         default=False, description="testnet / live 也出 BTC 先动信号（默认关，只在模拟盘出）。"
     )
+    market_review_on: bool = Field(
+        default=True,
+        description="市场模型可提名现卡与原池交集中的币复核；仍需打开总临时会开关，"
+        "不依赖旧 event_triggers 名单，不直接改卡或延长有效期。",
+    )
     # ---- 大盘方向变化：只更新市场背景，不重跑各币会议
     regime_flip_on: bool = Field(
         default=True, description="每 5 分钟看一次大盘是否翻向；满足条件就独立更新大盘。"

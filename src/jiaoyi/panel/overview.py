@@ -105,6 +105,8 @@ class CardRow(BaseModel):
     expires_at: datetime | None = None
     held: bool = False
     source_note: str | None = None
+    source_regime: str | None = None
+    source_market_view_id: str | None = None
     """「来自 hh:mm 的会 · hh:mm 到期」；持仓币到期后写「已到期，持仓中，不再开新仓」。"""
     fading: bool = False
     """离到期不到 10 分钟（或已到期的持仓币）：显示成灰色。"""
@@ -770,6 +772,8 @@ def _card(
                 bias=cs.bias.value,
                 category=cs.category.value,
                 reason=cs.reason,
+                source_regime=cs.source_regime,
+                source_market_view_id=cs.source_market_view_id,
                 size_tier_max=cs.size_tier_max.value,
                 stop_atr=(cs.stop_atr.min, cs.stop_atr.max),
                 take_profit_r=(cs.take_profit_r.min, cs.take_profit_r.max),

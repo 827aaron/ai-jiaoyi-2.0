@@ -36,6 +36,7 @@ from jiaoyi.contracts import (
     JevQuestion,
     JevRequest,
     JevResponse,
+    MarketView,
     PositionRecord,
     Side,
 )
@@ -294,10 +295,10 @@ def _card_block(card: BattleCard | None, symbol: str, px: float) -> dict[str, An
     }
 
 
-def _current_market(card: BattleCard | None) -> dict[str, Any]:
-    if card is None or card.current_market is None:
+def _current_market(card: BattleCard | None, view: MarketView | None = None) -> dict[str, Any]:
+    view = view or (card.current_market if card else None)
+    if view is None:
         return {}
-    view = card.current_market
     return {
         "current_market": {
             "market_view_id": view.market_view_id,
@@ -462,6 +463,7 @@ def hold_snapshot(
     entry: Mapping[str, Any] | None = None,
     forecast: Forecast | None = None,
     fee_bps: float = 5.0,
+    current_market: MarketView | None = None,
 ) -> str:
     """``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
 
@@ -514,7 +516,7 @@ def hold_snapshot(
         book.pop("micro_bps", None)
     d.update(mkt)
     d["card"] = _card_block(card, pos.symbol, px)
-    d.update(_current_market(card))
+    d.update(_current_market(card, current_market))
     if forecast is not None and forecast.stale_after > now:
         up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
         kr: dict[str, Any] = {"agree": 1 if up > 0.5 else 0}

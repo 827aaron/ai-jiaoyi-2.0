@@ -652,7 +652,7 @@ function cardBody(s, L) {
   const plan = p
     ? `已在 <span class="num">${price(p.entry_price, sym)}</span> ${(DIR[p.side] || [p.side])[0]}，拿着等止盈${p.stop_loss_price ? `；${p.side === "long" ? "跌破" : "涨过"} <span class="num">${price(p.stop_loss_price, sym)}</span> 止损` : ""}。`
     : `等哨兵发现${sigs}，按当时价格${dt}。`;
-  const from = s.source_note ? `<div class="dim small">${esc(s.source_note)}</div>` : "";
+  const from = (s.source_note ? `<div class="dim small">${esc(s.source_note)}</div>` : "") + (s.source_regime ? `<div class="dim small" title="${esc(s.source_market_view_id || "旧卡来源")}">研究时大盘：${esc(s.source_regime)}</div>` : "");
   let calc = "";
   if (!p && L && L.stop) {
     const lo = Math.min(...L.stop), hi = Math.max(...L.stop), tlo = Math.min(...L.tp), thi = Math.max(...L.tp);
@@ -2167,6 +2167,7 @@ const PLAIN = {
   btc_lead_on: "BTC 先动：出这个信号",
   btc_lead_z: "BTC 先动：BTC 5 分钟至少走（倍平时波动）",
   btc_lead_live: "实盘也出 BTC 先动信号",
+  market_review_on: "大盘更新后提名相关币复核",
   regime_flip_on: "大盘方向变化：独立更新大盘",
   regime_flip_live: "测试网 / 实盘也启用大盘翻转",
   regime_flip_breadth: "按 40 个币算，反向的至少几个",
@@ -2266,6 +2267,7 @@ const HINT = {
   btc_lead_on: "BTC 突然大动、这个币还没跟着动时，按 BTC 的方向做这个币，赌它补涨补跌。回测 30 分钟到 2 小时这三档最好，档位默认在这三档开",
   btc_lead_z: "BTC 最近 5 分钟走了几倍平时波动才算「突然大动」",
   btc_lead_live: "开 = 测试网 / 实盘也出 BTC 先动信号。默认关，先在模拟盘攒样本",
+  market_review_on: "大盘有新判断后，只提名有具体行情证据且仍在原池和现卡内的币，复用同币间隔、日次数、预算和持仓优先；还需打开军师团的总临时会开关。不依赖旧事件名单，不直接改方向或延长有效期。没有新增每十分钟总盘调用",
   regime_flip_on: "默认每 5 分钟检查：有效币中至少四分之三同向、BTC 相对参照至少同向 1%，连续 2 次后只更新大盘。中性同时对称检查向上和向下；不会重跑各币会议或延长卡有效期。疑似、确认、被拦原因在哨兵日志里",
   regime_flip_live: "开 = 测试网 / 实盘也启用。默认关，仅模拟盘开启；总开关关闭时所有模式都停用",
   regime_flip_breadth: "默认 30：40 个有效币里至少 30 个，也就是四分之三，过去一小时往旧判断的反方向走。不是 40 个时按比例算；持平和缺数据的币不计入。填 0 不要求池面条件",
@@ -2455,7 +2457,7 @@ const ROLES = [
   ] },
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
-    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
+    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
   { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [
     { g: "", hint: "曼谷 0 点清零；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min", "budget.*"] },
@@ -2520,6 +2522,7 @@ const ROLES = [
 const SHOWN_ELSEWHERE = ["app.trade_notices", "app.profile", "app.meeting_interval", "app.hold", "app.data_dir", "app.sim_environment", "risk.day_reset_tz", "fast_loop.min_p_genuine", "fast_loop.min_p_direction", "fast_loop.max_p_toxic", "fast_loop.burst_10s_on", "fast_loop.burst_10s_ratio", "fast_loop.burst_min_1m_ratio", "fast_loop.predictor_nudge_mode"];
 // 没点名的新键先按键名前缀归角色（新加的门槛、信号开关不用改这张表也能落对地方），再按所在段兜底
 const PREFIX_ROLE = [
+  ["fast_loop.market_review_", "commander"],
   ["fast_loop.regime_flip_", "sentinel"],
   ["fast_loop.against_", "sentinel"], ["fast_loop.signal_", "sentinel"], ["fast_loop.surge_", "sentinel"], ["fast_loop.breakout_", "sentinel"], ["fast_loop.burst_", "sentinel"],
   ["fast_loop.liq_", "sentinel"], ["fast_loop.crowded_", "sentinel"], ["fast_loop.session_cme", "sentinel"], ["fast_loop.session_vol", "sentinel"], ["fast_loop.session_window", "sentinel"],

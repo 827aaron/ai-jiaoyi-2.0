@@ -1,0 +1,10 @@
+{
+  "symbol": "BTCUSDT",
+  "research_token": "research-example-1",
+  "bias": "long",
+  "reason": "原研究等待放量突破",
+  "issued_at": "2026-10-27T00:00:00Z",
+  "source_regime": "震荡偏强",
+  "source_market_view_id": "market-example-1",
+  "key_levels": []
+}

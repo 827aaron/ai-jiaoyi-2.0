@@ -46,6 +46,7 @@ from jiaoyi.contracts import (
     JevRequest,
     JevResponse,
     KeeperVerdict,
+    MarketView,
     Outcome,
     PositionRecord,
     Role,
@@ -84,6 +85,7 @@ class JevKeeper:
         fee_bps: float = 5.0,
         forecast: Callable[[str, datetime], Forecast | None] | None = None,
         scan_day: Callable[[str, str], list[dict[str, Any]]] | None = None,
+        current_market: Callable[[], MarketView | None] | None = None,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -95,6 +97,7 @@ class JevKeeper:
         self._cfg = cfg
         self._features = features
         self._card = card
+        self._market_source = current_market
         self._rec = recorder
         self._streak: dict[str, int] = {}  # 每个持仓连续“该平”的次数
         self._against: dict[str, tuple[AgainstSignalEvent, bool]] = {}
@@ -104,6 +107,10 @@ class JevKeeper:
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
         self._peak: dict[str, float] = {}  # 每个持仓复查到过的最高浮盈（基点），不被历史截断
         self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
+
+    def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
+        """市场背景不依赖是否还有有效开仓卡；只读，不合成交易授权。"""
+        self._market_source = source
 
     def forget(self, position_id: str) -> None:
         """持仓平掉后调用，清掉它的计数。"""
@@ -185,6 +192,11 @@ class JevKeeper:
             self._keep_against(pid, against, now)
             return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
         card = self._card(now)
+        market = (
+            self._market_source()
+            if self._market_source is not None
+            else (card.current_market if card else None)
+        )
         if pid not in self._history:
             await self._recall(position, now)
         history = self._history.setdefault(pid, [])
@@ -216,6 +228,7 @@ class JevKeeper:
                 entry=self._entry.get(pid),
                 forecast=fc,
                 fee_bps=self._fee_bps,
+                current_market=market,
             ),
             questions=hold_questions(),
         )
@@ -336,6 +349,14 @@ class JevKeeper:
     ) -> KeeperVerdict:
         """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）；
         ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``。"""
+        actual_market: dict[str, Any] = {}
+        if request is not None:
+            try:
+                snapshot = json.loads(request.snapshot)
+                actual_market = snapshot.get("current_market") or {}
+            except (ValueError, TypeError, AttributeError):
+                pass
+        succeeded = bool(r is not None and r.ok and r.answer(HoldQuestion.ACTION.value) is not None)
         v = KeeperVerdict(
             position_id=position.position_id,
             ts=now,
@@ -344,6 +365,9 @@ class JevKeeper:
             consecutive=max(consecutive, 1),
             reason=reason,
             jev_request_id=request.request_id if request is not None else None,
+            source_market_view_id=actual_market.get("market_view_id"),
+            source_market_version=actual_market.get("version"),
+            review_succeeded=succeeded,
         )
         if self._rec is not None:
             outcome = Outcome.CLOSE if v.action == "close" else Outcome.HOLD
@@ -363,6 +387,9 @@ class JevKeeper:
                     "action": v.action,
                     "p_close": v.p_close,
                     "consecutive": v.consecutive,
+                    "source_market_view_id": v.source_market_view_id,
+                    "source_market_version": v.source_market_version,
+                    "review_succeeded": v.review_succeeded,
                     **jev_out,
                     **({"giveback_guard": dict(extra)} if extra else {}),
                     **(

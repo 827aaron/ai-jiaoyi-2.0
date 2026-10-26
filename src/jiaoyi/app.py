@@ -661,6 +661,9 @@ def build_modules(
             fee_bps=risk_cfg.taker_fee_bps,
             forecast=predictor.latest,
             scan_day=decision_log.scan_day,
+            current_market=(lambda: cards.latest_market_view)
+            if isinstance(cards, BattleCardCommander)
+            else None,
         )
 
     modules = Modules(
