@@ -1,6 +1,6 @@
 """币安 U 本位永续 WebSocket 行情 → ``MarketEvent``。
 
-每个标的订 4 路流：逐笔归集成交（aggTrade）、前 5 档盘口（depth5@100ms）、
+每个标的订 4 路流：逐笔归集成交（aggTrade）、前 20 档盘口（depth20@100ms，求和只取前 N 档）、
 标记价格和资金费率（markPrice@1s）、1 分钟 K 线（kline_1m，只发已收盘的）。
 强平另开一个连接订全市场流（``!forceOrder@arr``）：候选池里的币照样发给下游，
 所有币（包括池外的）都记进 ``liquidations``（``LiquidationTracker``），选币用它算“近 1 小时强平额”。
@@ -109,7 +109,7 @@ _KIND = {Trade: "成交", BookTop: "盘口", Kline: "K 线", MarkPrice: "标记�
 def streams_for(symbol: str, *, liquidations: bool = True) -> list[str]:
     """一个标的要订的流。全市场强平流打开时不再单独订它的 forceOrder，免得重复。"""
     s = symbol.lower()
-    out = [f"{s}@aggTrade", f"{s}@depth5@100ms"]
+    out = [f"{s}@aggTrade", f"{s}@depth20@100ms"]
     if liquidations:
         out.append(f"{s}@forceOrder")
     return [*out, f"{s}@markPrice@1s", f"{s}@kline_1m"]

@@ -227,6 +227,12 @@ class RollingFeatureEngine:
         self._s: dict[str, _SymbolState] = {}
         self._extra: ExtraValues | None = None
 
+    def set_depth_levels(self, levels: int) -> None:
+        """盘口深度档数热更新（设置 ``book_depth_levels``）：下一次算盘口就按新档数求和。"""
+        if not 1 <= levels <= 20:
+            raise ValueError("盘口深度档数要在 1–20 之间")
+        self._levels = levels
+
     def set_extra(self, extra: ExtraValues | None) -> None:
         """快照里并进的额外键（持仓量、多空比，见 ``market.derivs``）。拿不到的键不写。"""
         self._extra = extra

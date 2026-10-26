@@ -275,11 +275,19 @@ class FastLoopConfig(Contract):
         description="作战卡的止损 ATR / 止盈 R 范围超出档位范围时取交集，交集为空才不做；"
         "关掉 = 一端越界整个币不做。",
     )
+    book_depth_levels: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="看吃单那一侧前几档挂单（1–20）：用来限制单笔大小（max_notional_book_frac）、"
+        "给拍板人看深度、算盘口失衡。档数越多，算出的深度越大。Aaron 10-26，默认 5（和以前一样）。",
+    )
     max_notional_book_frac: float = Field(
         default=0.5,
         ge=0.0,
         le=5.0,
-        description="单笔名义 ≤ 吃单一侧前 5 档挂单额 × 这个比例，超了缩单不拒（0 = 不看盘口）。",
+        description="单笔名义 ≤ 吃单一侧前 N 档（档数见 book_depth_levels）挂单额 × 这个比例，"
+        "超了缩单不拒（0 = 不看盘口）。",
     )
     margin_safety_pct: float = Field(
         default=5.0,
