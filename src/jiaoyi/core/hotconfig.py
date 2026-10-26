@@ -59,6 +59,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "card_caps_binding",
         "card_range_clamp",
         "max_notional_book_frac",
+        "book_depth_levels",
         "margin_safety_pct",
         "session_factor",
         "session_factor_weekday",

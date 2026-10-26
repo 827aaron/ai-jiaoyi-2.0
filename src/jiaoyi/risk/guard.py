@@ -753,7 +753,8 @@ class RiskGuardImpl:
         return _Stop(dist=dist, pct=pct)
 
     def _book_cap(self, f: FeatureSnapshot, side: Side) -> float | None:
-        """吃单那一侧前 5 档挂单额 × ``max_notional_book_frac``；关了或没有盘口返回 None。"""
+        """吃单那一侧前 N 档（``book_depth_levels``）挂单额 × ``max_notional_book_frac``。
+        关了或没有盘口返回 None。"""
         frac = self._fast.max_notional_book_frac
         if frac <= 0 or f.book is None:
             return None

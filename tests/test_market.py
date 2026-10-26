@@ -27,7 +27,7 @@ def test_interfaces() -> None:
 def test_streams_per_symbol() -> None:
     assert streams_for("BTCUSDT") == [
         "btcusdt@aggTrade",
-        "btcusdt@depth5@100ms",
+        "btcusdt@depth20@100ms",
         "btcusdt@forceOrder",
         "btcusdt@markPrice@1s",
         "btcusdt@kline_1m",
@@ -464,7 +464,7 @@ def test_streams_split_by_route() -> None:
     """盘口类走 /public/stream，成交 / 标记价格 / K 线 / 强平走 /market/stream。"""
     from jiaoyi.market.binance_ws import route_of
 
-    assert route_of("btcusdt@depth5@100ms") == "public"
+    assert route_of("btcusdt@depth20@100ms") == "public"
     assert route_of("btcusdt@bookTicker") == "public"
     for s in ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@kline_1m", "!forceOrder@arr"):
         assert route_of(s) == "market"
@@ -488,7 +488,7 @@ async def test_subscribe_opens_market_and_public_connections(
     assert m0.startswith("wss://fstream.binance.com/market/stream?streams=")
     assert "@aggTrade" in m0 and "@kline_1m" in m0 and "@markPrice@1s" in m0 and "@depth" not in m0
     assert p0.startswith("wss://fstream.binance.com/public/stream?streams=")
-    assert "@depth5@100ms" in p0 and "@aggTrade" not in p0
+    assert "@depth20@100ms" in p0 and "@aggTrade" not in p0
     assert conns["liquidations"][0].endswith("/market/stream?streams=!forceOrder@arr/!contractInfo")
     assert conns["liquidations"][1] is None and conns["market-0"][1] == feed._stale_s
     await feed.close()
@@ -545,3 +545,67 @@ async def test_feed_heartbeat_reports_book_reader_status(tmp_path: Path) -> None
     assert st.health == c.Health.DOWN and "market-0 已 45 秒没消息" in st.headline
     await feed.close()
     assert status().health == c.Health.DOWN
+
+
+# ---- 盘口深度档数 book_depth_levels（Aaron 10-26）：订阅固定 20 档，求和只取前 N 档 ----
+
+
+def _deep_book(t: datetime) -> c.BookTop:
+    bids = [(100.0 - i, 10.0) for i in range(20)]  # 每档 (100-i)×10 U
+    asks = [(101.0 + i, 10.0) for i in range(20)]
+    return c.BookTop(symbol="BTCUSDT", ts=t, bids=bids, asks=asks)
+
+
+def test_depth_usdt_sums_only_the_first_n_levels() -> None:
+    b = _deep_book(T0)
+    for n in (1, 5, 20):
+        bid, ask = bk.depth_usdt(b, n)
+        assert bid == pytest.approx(sum((100.0 - i) * 10.0 for i in range(n)))
+        assert ask == pytest.approx(sum((101.0 + i) * 10.0 for i in range(n)))
+
+
+def test_parse_depth20_message_keeps_all_levels() -> None:
+    msg = {
+        "stream": "btcusdt@depth20@100ms",
+        "data": {
+            "e": "depthUpdate",
+            "E": 1_700_000_000_000,
+            "T": 1_700_000_000_000,
+            "s": "BTCUSDT",
+            "b": [[str(100 - i), "1"] for i in range(20)],
+            "a": [[str(101 + i), "1"] for i in range(20)],
+        },
+    }
+    ev = parse_message(msg)
+    assert isinstance(ev, c.BookTop) and len(ev.bids) == 20 and len(ev.asks) == 20
+
+
+def test_engine_depth_levels_hot_update() -> None:
+    eng = warm_engine()
+    eng.set_depth_levels(5)
+    now = T0 + timedelta(minutes=21)
+    eng.update(c.Trade(symbol="BTCUSDT", ts=now, price=100.5, qty=1.0, taker_side=c.Side.LONG))
+    eng.update(_deep_book(now))
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and snap.book is not None
+    d5 = snap.book.depth_usdt
+    eng.set_depth_levels(20)
+    snap20 = eng.snapshot("BTCUSDT")
+    assert snap20 is not None and snap20.book is not None and snap20.book.depth_usdt > d5
+    assert snap20.book.bid_depth_usdt == pytest.approx(sum((100.0 - i) * 10.0 for i in range(20)))
+    for bad in (0, 21):
+        with pytest.raises(ValueError):
+            eng.set_depth_levels(bad)
+
+
+def test_book_depth_levels_setting_is_validated_and_hot() -> None:
+    from pydantic import ValidationError
+
+    from jiaoyi.core.hotconfig import HOT_FAST
+
+    assert c.FastLoopConfig().book_depth_levels == 5
+    assert c.FastLoopConfig(book_depth_levels=1).book_depth_levels == 1
+    for bad in (0, 21, -1):
+        with pytest.raises(ValidationError):
+            c.FastLoopConfig(book_depth_levels=bad)
+    assert "book_depth_levels" in HOT_FAST

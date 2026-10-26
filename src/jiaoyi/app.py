@@ -600,6 +600,7 @@ def build_modules(
     else:  # 默认关：只记录，不申请会（预测员还在观察）
         against.subscribe(lambda a: _note_predictor_against(decision_log, a))
     features = RollingFeatureEngine(
+        fast.book_depth_levels,
         atr_period_min=fast.atr_period_min,
         atr_long_period_min=fast.atr_long_period_min,
         oi_window_min=fast.oi_window_min,
@@ -1025,6 +1026,8 @@ class App:
             m.risk.breaker.set_halt_pct(self.risk_cfg.daily_loss_halt_pct)
         if hasattr(m.risk, "set_record_only"):
             m.risk.set_record_only(cfg.gate_record_only)
+        if "fast_loop.book_depth_levels" in changed and hasattr(m.features, "set_depth_levels"):
+            m.features.set_depth_levels(fast.book_depth_levels)
         if hasattr(m.trigger, "refresh"):
             m.trigger.refresh(cfg.signal_dedup_s)
         if hasattr(m.gate, "reconfigure"):
