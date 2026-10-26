@@ -1044,27 +1044,30 @@ def draft_to_card_symbol(
 
 
 # ---------------------------------------------------------------- 引擎
-def signal_kinds_note(hold_minutes: int) -> str:
-    """allowed_signals 里三种新信号怎么选：默认放宽，有方向又没有排除理由就都允许。"""
-    kinds = [
-        "oi_follow (open interest building in the direction of the move; trend-following)"
-        if hold_minutes >= 120
-        else "",
-        "top_vs_crowd (fade the crowd when top traders lean the other way; contrarian)"
-        if hold_minutes >= 480
-        else "",
-        "btc_lead (BTC moved first and this alt follows; alt cards only)"
-        if hold_minutes <= 120 and hold_minutes >= 30
-        else "",
-    ]
-    fit = "; ".join(k for k in kinds if k)
+def signal_kinds_note() -> str:
+    """allowed_signals 怎么选：八种信号一个列表，每种一句触发条件，统一一条规则。"""
     return (
-        "Besides the older signals, three newer ones may be allowed: oi_follow, top_vs_crowd "
-        "and btc_lead. Be generous: when the card has a direction and you have no reason to "
-        "exclude them, allow them too. Best fit at this horizon: "
-        f"{fit or 'none specially'}. "
-        "Leave oi_follow out only if the conclusion fades the move, top_vs_crowd out only if "
-        "it is a pure breakout chase, and btc_lead out for BTC itself.\n"
+        "Choose allowed_signals from the eight signals below. Rule: when the card has a "
+        "direction, allow every signal whose event could plausibly happen inside the holding "
+        "time; exclude one only when the conclusion explicitly rules out its event. The card's "
+        "direction still decides which side may trade.\n"
+        "- volume_breakout: price closes through one of this card's key levels on heavy 1-minute "
+        "volume (up through a level to go long, down through it to go short); a conclusion that "
+        "waits for a pullback zone does not exclude it.\n"
+        "- volume_surge: 1-minute volume far above normal with most of it taker buying (long) or "
+        "taker selling (short).\n"
+        "- liquidation_rebound: a liquidation cascade (large forced closes plus a sharp 5-minute "
+        "drop or spike) after which aggressive flow turns back.\n"
+        "- crowded_reversal: extreme funding rate on one side while price starts moving against "
+        "that crowd.\n"
+        "- session_event: a session open or scheduled event with an unusually large 5-minute "
+        "move on volume.\n"
+        "- oi_follow: open interest building in the direction of the move (trend-following); "
+        "exclude it only if the conclusion fades the move.\n"
+        "- top_vs_crowd: top traders lean the other way from the crowd and the signal fades the "
+        "crowd; exclude it only if the conclusion follows the crowd.\n"
+        "- btc_lead: BTC moved first and this alt follows; alt cards only, so exclude it for BTC "
+        "itself.\n"
     )
 
 
@@ -1113,9 +1116,7 @@ def convert_instructions(
         "supports and up to 3 resistances, copying each candidate's price. Breakout signals only "
         "fire at card key levels, so an empty list disables them: leave it empty only when the "
         "candidates are none (then write []).\n"
-        "Choose allowed_signals to match the entry method in the conclusion; do not pick only "
-        "chase-style signals when the conclusion waits for a zone.\n"
-        f"{signal_kinds_note(p.hold_minutes)}"
+        f"{signal_kinds_note()}"
         "reason: in Chinese (at most 500 characters); state the direction, entry zone, "
         "invalidation price and why this is a view of the next {H}.",
         p,
