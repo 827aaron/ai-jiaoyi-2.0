@@ -110,7 +110,13 @@ def trailing_update(
         raise ExchangeError("持久化净收益峰值无效")
     peak = max(old_peak, net)
     activated = state.trailing_activated or net > Decimal(str(rec.trailing_activation_pct)) / 100
-    threshold = peak - Decimal(str(rec.trailing_stop_pct)) / 100 if activated else None
+    # 反向卡锚定（#314）可覆盖回撤距离；None = 开仓指令带的距离。
+    distance = (
+        state.trailing_distance_pct
+        if state.trailing_distance_pct is not None
+        else rec.trailing_stop_pct
+    )
+    threshold = peak - Decimal(str(distance)) / 100 if activated else None
     stop: Decimal | None = None
     if threshold is not None:
         stop = net_to_price(long, quote, quantity, fee, threshold)

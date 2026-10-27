@@ -16,15 +16,34 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from jiaoyi.contracts import OrderIntent, PositionRecord, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.exchange import WorkingType
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
-LegPurpose = Literal["fixed", "trailing", "lifeboat"]
-"""条件单腿的来源；新的收紧来源（例如反向卡收紧）在这里加自己的取值。"""
+LegPurpose = Literal["fixed", "trailing", "lifeboat", "tightened"]
+"""条件单腿的来源；新的收紧来源在这里加自己的取值（tightened = 反向作战卡保本收紧价，#314）。"""
+
+OPPOSITE_CARD_FIELDS = (
+    "tightened_stop_price",
+    "tightened_reason",
+    "tightened_at",
+    "opposite_anchor_price",
+    "opposite_card_key",
+    "trailing_distance_pct",
+    "opposite_anchor_retry_since",
+)
+"""反向作战卡（#314）加在 ``ServerProtection`` 上的字段：为空时不落盘，没用过这条规则的账本和
+加字段之前一字不差，回退到旧代码（``extra="forbid"``）也能读。用过之后回退先跑
+``scripts/opposite_card_rollback.py``。"""
 
 
 class ProtectiveLeg(BaseModel):
@@ -116,6 +135,32 @@ class ServerProtection(BaseModel):
     和 ``last_error``（普通保护同步）分开记，免得一个盖掉另一个。"""
     trailing_failing_since: datetime | None = None
     """移动止损观测从何时起连续没做成（落盘，重启不重新计时）；做成一轮或进入退出清空。"""
+    tightened_stop_price: float | None = None
+    """反向作战卡没经价格确认时收紧到的保本止损价（#314，``opposite_profit_mode = "breakeven"``）；
+    作为止损候选，只收紧不放松。不改账本止损价（R 仍按原始止损距离算）。"""
+    tightened_reason: str | None = None
+    """反向卡为什么改了保护（两种模式都写）。"""
+    tightened_at: datetime | None = None
+    opposite_anchor_price: float | None = None
+    """反向卡（#314，``opposite_profit_mode = "trail"``）强制启动移动止损时锚定的可成交价
+    （多买一 / 空卖一）；落了就不再锚（换卡版本、重启都不重锚）。"""
+    opposite_card_key: str | None = None
+    """触发这次改保护的反向指令（币|issued_at|方向）。"""
+    trailing_distance_pct: float | None = None
+    """移动止损回撤距离（净收益百分点）的覆盖值：反向卡锚定时 = 开仓带的距离 × 倍数；
+    None = 用开仓指令里的 ``trailing_stop_pct``。"""
+    opposite_anchor_retry_since: datetime | None = None
+    """锚定移动止损因盘口疑似插针没做成，从何时起连续重试（落盘，重启不重新计时）。"""
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_opposite_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        data: dict[str, object] = handler(self)
+        for name in OPPOSITE_CARD_FIELDS:
+            if data.get(name) is None:
+                data.pop(name, None)
+        return data
 
 
 class TrackedPosition(BaseModel):

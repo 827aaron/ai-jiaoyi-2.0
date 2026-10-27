@@ -159,6 +159,24 @@ class _CardRuleKeeper(Protocol):
 
 
 @runtime_checkable
+class _TightensStop(Protocol):
+    """执行器：反向卡没经价格确认时收紧交易所托管止损（HbExecutorAdapter，#314）。"""
+
+    async def tighten_stop(
+        self,
+        position_id: str,
+        *,
+        reason: str,
+        buffer_bps: float,
+        mark_gap_bps: float,
+        profit_mode: str,
+        distance_mult: float,
+        card_key: str | None,
+        anchor_retry_s: float,
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
 class _LedgerPositions(Protocol):
     """执行器：账本里此刻还没结束的持仓，不查 hummingbot（HbExecutorAdapter）。"""
 
@@ -349,6 +367,8 @@ class Runner:
         self._keeper_slots = asyncio.Semaphore(KEEPER_CONCURRENCY)
         self._keeper_queued: set[str] = set()
         self._card_rule_queued: set[str] = set()
+        self._tighten_logged: dict[str, tuple[str, str]] = {}  # 每仓上次记下的收紧结果
+        self._tighten_done: dict[str, str] = {}  # 每仓已收紧 / 已够紧的反向指令，不再进执行器锁
         self._restore_keeper_market()
         self._regime_period: float | None = None
         self._regime_next: datetime | None = None
@@ -1183,6 +1203,8 @@ class Runner:
                 return
         self.positions = [p for p in self.positions if p.position_id != pos.position_id]
         self._keeper_market.pop(pos.position_id, None)
+        self._tighten_logged.pop(pos.position_id, None)
+        self._tighten_done.pop(pos.position_id, None)
         self._save_keeper_market()
         self._reconcile_soon()
         if isinstance(self.m.keeper, _Forgets):
@@ -1286,23 +1308,99 @@ class Runner:
                 verdict = keeper.review_card_rule(pos, self.app.clock())
                 if verdict is not None and verdict.action == "close":
                     await self.close(pos, CloseReason.KEEPER)
+                elif verdict is not None:  # 反向卡价格未确认（#314）：收紧止损，不行就照旧平
+                    key_of = getattr(keeper, "card_rule_key", None)
+                    key = key_of(pos, self.app.clock()) if callable(key_of) else None
+                    await self._opposite_tighten(pos, verdict.reason, key)
             finally:
                 self._card_rule_queued.discard(pid)
+
+        def closes_now(pos: PositionRecord) -> bool:
+            # 走「价格确认或收紧」的仓模型照常复查；立刻全平的不再排模型复查。
+            watch = getattr(keeper, "card_rule_watch", None)
+            return not (callable(watch) and watch(pos, self.app.clock()))
 
         # 只作无副作用预检并登记后台任务，不等平仓返回，其他持仓立即进入正常管家复核。
         for pos in self._ledger_positions():
             pid = pos.position_id
             if pid in self._card_rule_queued:
-                if keeper.card_rule_applies(pos, self.app.clock()):
+                if keeper.card_rule_applies(pos, self.app.clock()) and closes_now(pos):
                     attempted.add(pid)
                 continue
             if pos.status is not PositionStatus.OPEN or pid in self._closing:
                 continue
             if keeper.card_rule_applies(pos, self.app.clock()):
-                attempted.add(pid)
+                if closes_now(pos):
+                    attempted.add(pid)
                 self._card_rule_queued.add(pid)
                 self._spawn(one(pid))
         return attempted
+
+    async def _opposite_tighten(
+        self, pos: PositionRecord, reason: str, key: str | None = None
+    ) -> None:
+        """反向卡价格未确认：让执行器收紧托管止损（trail：现价强制启动移动止损；breakeven：
+        挪到扣费保本）；执行器说收紧不了（旧通道、从没完整托管 / 开仓宽限期、证据读不到、
+        亏着或赚得不够）就照原规则全平。
+
+        同一条反向指令（``key``）已收紧 / 已够紧就记在内存里，之后每轮不再进执行器的锁；
+        结果换了才记一条管家决策记录。"""
+        if key is not None and self._tighten_done.get(pos.position_id) == key:
+            return
+        executor = self.m.executor
+        result: dict[str, Any]
+        if isinstance(executor, _TightensStop):
+            fl = self.app.app_cfg.fast_loop
+            try:
+                result = await executor.tighten_stop(
+                    pos.position_id,
+                    reason=reason,
+                    buffer_bps=fl.opposite_tighten_buffer_bps,
+                    mark_gap_bps=fl.opposite_tighten_mark_gap_bps,
+                    profit_mode=fl.opposite_profit_mode,
+                    distance_mult=fl.opposite_trail_distance_mult,
+                    card_key=key,
+                    anchor_retry_s=fl.opposite_anchor_retry_s,
+                )
+            except Exception as e:
+                log.exception("%s 收紧止损出错，按原规则平", pos.symbol)
+                result = {"action": "close", "why": "tighten_error", "error": str(e)[:200]}
+        else:
+            result = {"action": "close", "why": "executor_cannot_tighten"}
+        action, why = str(result.get("action")), str(result.get("why"))
+        if key is not None and action in ("tightened", "kept"):
+            self._tighten_done[pos.position_id] = key
+        if self._tighten_logged.get(pos.position_id) != (action, why):
+            self._tighten_logged[pos.position_id] = (action, why)
+            rec = self.app.recorders.get(Role.KEEPER)
+            if rec is not None:
+                text = {
+                    "tightened": "反向卡未确认，托管止损已收紧",
+                    "pending": "反向卡未确认，收紧价已记下，等交易所确认换单",
+                    "exiting": "收紧时交易所说已越过触发价，保护进入退出",
+                    "kept": "反向卡未确认，止损已经够紧，不再动",
+                    "skip": "反向卡未确认，仓已在平，不收紧",
+                    "close": "反向卡未确认但收紧不了，按原规则全平",
+                }.get(action, "反向卡未确认，收紧结果未知")
+                rec.record(
+                    self.app.clock(),
+                    Outcome.CLOSE if action == "close" else Outcome.ACTION,
+                    f"{pos.symbol} {text}（{why}）",
+                    symbol=pos.symbol,
+                    signal_id=pos.signal_id,
+                    position_id=pos.position_id,
+                    output={
+                        "opposite_tighten": result,
+                        "reason": reason,
+                        "instruction_key": key,
+                        "counterfactual": {
+                            "estimated_target": result.get("target"),
+                            "placeable": result.get("placeable"),
+                        },
+                    },
+                )
+        if action == "close":
+            await self.close(pos, CloseReason.KEEPER)
 
     def _market_published(self, view: MarketView) -> None:
         """只唤醒原管家通道；同仓在途不并行重问，旧回复仅确认实际使用的版本。"""

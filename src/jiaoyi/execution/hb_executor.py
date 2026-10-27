@@ -35,7 +35,12 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatus
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete, describe_error
+from jiaoyi.execution.brackets import (
+    AnchorBookSpike,
+    BracketManager,
+    ProtectionIncomplete,
+    describe_error,
+)
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
     CloseFill,
@@ -64,6 +69,7 @@ from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
 from jiaoyi.execution.symbols import to_hb_pair
+from jiaoyi.execution.tighten import breakeven_stop_price
 from jiaoyi.execution.trailing import TrailingBookUnavailable
 from jiaoyi.interfaces import Alerter, LifeboatStop
 
@@ -125,6 +131,7 @@ _REASON_CN = {
     CloseReason.STOP_LOSS: "止损",
     CloseReason.TAKE_PROFIT: "止盈",
     CloseReason.TRAILING_STOP: "保本 / 移动止损",
+    CloseReason.TIGHTENED_STOP: "反向卡收紧止损",
     CloseReason.TIME_LIMIT: "到时平仓",
     CloseReason.KEEPER: "管家平仓",
     CloseReason.PATROL: "巡逻兵平仓",
@@ -892,6 +899,288 @@ class HbExecutorAdapter:
         if tracked.record.status is PositionStatus.CLOSED:
             return True
         return await self._close_directly(tracked, reason, None)
+
+    async def tighten_stop(
+        self,
+        position_id: str,
+        *,
+        reason: str,
+        buffer_bps: float,
+        mark_gap_bps: float = 0.0,
+        profit_mode: str = "breakeven",
+        distance_mult: float = 1.0,
+        card_key: str | None = None,
+        anchor_retry_s: float = 0.0,
+    ) -> dict[str, Any]:
+        """反向作战卡没经价格确认（#314）：收紧交易所托管止损，不平仓。
+
+        先判「亏 / 赚得不够」：保本价 = 开仓价 ±（实际开仓手续费 + 按吃单费率估的平仓手续费 +
+        ``buffer_bps`` 开仓名义），离触发价源不够 gap 就按原规则平（用户决定，正常分支）。
+        够的话按 ``profit_mode``：
+
+        - ``trail``：``BracketManager.anchor_trailing`` 在当前可成交价强制启动移动止损（距离 =
+          开仓带的移动止损距离 × ``distance_mult``），之后移动止损照常只收紧；开仓没带移动止损的仓
+          退回 breakeven。只锚一次（落盘，换卡版本、重启都不重锚）。
+        - ``breakeven``：保本价落成 ``tightened_stop_price``。
+
+        两种都作为 ``_stop_target`` 的候选，和固定 / 移动 / 正在挂的止损取最紧，换代先确认新代
+        再撤旧代，不改账本止损价。返回 ``{"action", "why", ...}``：
+
+        - ``tightened`` 新止损已确认；``pending`` 目标已落盘、换代还没确认（保护轮询接着做，
+          旧止损保留；上一代移动止损还在提交 / 撤销中时先等它，不算失败）；
+        - ``exiting`` 换代时交易所说已越触发价等，保护状态机已进入退出，由保护轮询按止损原因平；
+        - ``kept`` 已收紧过，或现有止损已同样紧，或换代后在挂的止损没变；``skip`` 仓已不在 /
+          已在平 / 保护在退出，或赚得够但这一轮临时保护且没有确认在挂的止损（交给保护状态机）；
+        - trail 锚定时盘口疑似插针：``anchor_retry_s`` 秒内返回 ``pending`` 下一轮再试（不告警，
+          起始时刻落盘），过了就平 + CRITICAL；0 = 立刻平。
+        - ``close`` 不能收紧，调用方按原反向卡规则全平：旧通道（没有托管保护）、从没完整托管
+          （含 #325 开仓宽限期）、入场费用或触发价源读不到、目标价离触发价源（新止损腿的触发价格源，
+          现在配置是标记价）不到 ``mark_gap_bps``：多要 目标 < 价 ×（1 − gap），
+          空要 目标 > 价 ×（1 + gap）；挂不稳就不挂，不靠交易所 -2021 拒单。
+        曾完整托管、这一轮临时保护但旧止损仍确认在挂：目标落盘，返回 ``pending``。
+        读不到证据、换单没确认写 ``server_protection.last_error`` 并发 CRITICAL；挂不稳是正常分支，
+        只进决策记录。
+        """
+        manager = self._protection
+        initial = self._registry.get(position_id)
+        if initial is None:
+            return {"action": "skip", "why": "unknown_position"}
+        if initial.server_protection is None or manager is None:
+            return {"action": "close", "why": "not_server_managed"}
+        async with self._exit_lock(position_id):
+            tracked = self._registry.get(position_id)
+            if (
+                tracked is None
+                or tracked.record.status is not PositionStatus.OPEN
+                or tracked.requested_close is not None
+            ):
+                return {"action": "skip", "why": "not_open"}
+            state, rec = tracked.server_protection, tracked.record
+            if state is None:
+                return {"action": "close", "why": "not_server_managed"}
+            if state.tightened_stop_price is not None or state.opposite_anchor_price is not None:
+                # 已收紧 / 已锚定过：不再改（换卡版本、重启都不重来），之后由移动止损自己收紧。
+                return {
+                    "action": "kept",
+                    "why": "already_tightened",
+                    "target": state.tightened_stop_price,
+                    "anchor_price": state.opposite_anchor_price,
+                }
+            if state.stage in {"exiting", "cleanup", "done"}:
+                return {"action": "skip", "why": "protection_exiting", "stage": state.stage}
+            if (
+                not state.ever_armed
+                or not state.entry_terminal
+                or state.prearm_failing_since is not None
+                or tracked.entry_client_order_id is None
+                or rec.stop_loss_price is None
+            ):
+                # 从没完整托管过 / #325 开仓宽限期里：按原规则平。
+                return {"action": "close", "why": "not_armed", "stage": state.stage}
+            armed = state.stage == "armed"
+            working_type = manager.stop_working_type
+            long = rec.side is Side.LONG
+            try:
+                basis = await self._tighten_basis(tracked)
+                target = breakeven_stop_price(
+                    rec.side,
+                    basis.filled_quantity,
+                    basis.filled_quote,
+                    basis.fee_usdt,
+                    self._open_fee,
+                    buffer_bps,
+                )
+                reference = await self._trigger_reference(manager, rec.symbol, long, working_type)
+            except Exception as error:
+                detail = describe_error(error)
+                await self._tighten_failed(
+                    position_id, "收紧止损的证据读不到", detail, "按原规则全平"
+                )
+                return {"action": "close", "why": "evidence_unavailable", "error": detail}
+            # 和交易所上正在挂的止损比（最后回读明确 NEW 的最高一代）；没有就和账本固定止损比。
+            live = manager.live_stop_price(position_id)
+            existing = live if live is not None else rec.stop_loss_price
+            # 和保护状态机换代时的标记价缓冲取大的：这里过了，换代时也过（价格没动的话）。
+            gap_bps = max(mark_gap_bps, manager.trailing_stop_mark_buffer_bps)
+            gap = gap_bps / 1e4
+            limit = reference * (1 - gap) if long else reference * (1 + gap)
+            placeable = target < limit if long else target > limit
+            info: dict[str, Any] = {
+                "target": target,
+                "placeable": placeable,
+                "existing_stop": existing,
+                "reference_price": reference,
+                "placeable_limit": limit,
+                "working_type": working_type,
+                "entry_fee_usdt": basis.fee_usdt,
+                "entry_quote": basis.filled_quote,
+                "exit_fee_bps": self._open_fee * 1e4,
+                "buffer_bps": buffer_bps,
+                "mark_gap_bps": gap_bps,
+            }
+            if not placeable:
+                # 亏着或赚得不够（保本价离触发价源不到 gap）：按原规则直接平（用户决定）。
+                # 正常分支，不是故障：只进决策记录，不写 last_error、不发 CRITICAL。
+                return {"action": "close", "why": "target_crossed", **info}
+            if not armed and not manager.retains_confirmed_stop(position_id):
+                # 赚得够，但曾完整托管、这一轮退回临时保护且最后回读没有在挂的止损：
+                # 交给保护状态机，不平也不收紧，下一轮再看。
+                return {"action": "skip", "why": "protection_unconfirmed", **info}
+            trail = profit_mode == "trail"
+            if trail and (rec.trailing_activation_pct is None or rec.trailing_stop_pct is None):
+                trail = False  # 开仓没带移动止损：没有距离可用，退回保本收紧
+                info["fallback"] = "no_trailing_config_breakeven"
+            info["mode"] = "trail" if trail else "breakeven"
+            if trail:
+                read_book = getattr(self._exchange, "execution_book", None)
+                try:
+                    if read_book is None:
+                        raise ProtectionIncomplete("缺同交易所盘口")
+                    anchored = await manager.anchor_trailing(
+                        position_id,
+                        basis,
+                        read_book,
+                        distance_mult=distance_mult,
+                        reason=reason,
+                        card_key=card_key,
+                    )
+                except AnchorBookSpike as error:
+                    detail = describe_error(error)
+                    now = self._clock()
+                    since = manager._current(position_id)[1].opposite_anchor_retry_since or now
+                    waited = (now - since).total_seconds()
+                    if anchor_retry_s > 0 and waited < anchor_retry_s:
+                        if waited == 0:
+                            manager._save(position_id, opposite_anchor_retry_since=now)
+                        return {
+                            "action": "pending",
+                            "why": "anchor_book_spike_retry",
+                            "error": detail,
+                            "waited_s": waited,
+                            **info,
+                        }
+                    await self._tighten_failed(
+                        position_id, "反向卡锚定移动止损没做成", detail, "按原规则全平"
+                    )
+                    return {"action": "close", "why": "evidence_unavailable", "error": detail}
+                except Exception as error:
+                    detail = describe_error(error)
+                    await self._tighten_failed(
+                        position_id, "反向卡锚定移动止损没做成", detail, "按原规则全平"
+                    )
+                    return {"action": "close", "why": "evidence_unavailable", "error": detail}
+                after = manager._current(position_id)[1]
+                info.update(
+                    anchor_price=after.opposite_anchor_price,
+                    anchored_stop=anchored,
+                    trailing_distance_pct=after.trailing_distance_pct,
+                )
+            else:
+                if existing >= target if long else existing <= target:
+                    return {"action": "kept", "why": "existing_stop_tighter", **info}
+                manager.set_tightened_stop(position_id, target, reason, card_key)
+            if not armed:
+                # 曾完整托管、旧止损仍在挂，这一轮在临时保护：已落盘，由保护轮询换代。
+                return {"action": "pending", "why": "waiting_protection_sync", **info}
+            if any(leg.state in {"submit_pending", "cancel_pending"} for leg in state.legs):
+                # 上一代（移动止损换代）还在提交 / 撤销中：已落盘，
+                # 等它确认后由保护轮询再换，不算失败。
+                return {"action": "pending", "why": "waiting_previous_generation", **info}
+            try:
+                result = await manager.sync(position_id)
+            except Exception as error:
+                detail = describe_error(error)  # sync 已把它写进 last_error
+                await self._tighten_failed(
+                    position_id,
+                    "收紧止损换单未确认",
+                    detail,
+                    "已落盘，旧止损保留，保护轮询继续换",
+                )
+                return {"action": "pending", "why": "sync_unconfirmed", "error": detail, **info}
+            info["live_stop_after"] = after_stop = manager.live_stop_price(position_id)
+            if result == "exit":
+                return {"action": "exiting", "why": "protection_exit", **info}
+            if result == "armed" and after_stop == live:
+                # 候选不比正在挂的紧（或没够最小步长）：交易所上没换，如实记「没动」。
+                return {"action": "kept", "why": "live_stop_unchanged", **info}
+            return {
+                "action": "tightened" if result == "armed" else "pending",
+                "why": f"sync_{result}",
+                **info,
+            }
+
+    async def _tighten_failed(self, position_id: str, title: str, detail: str, then: str) -> None:
+        """收紧失败：写托管保护的 last_error（不碰移动止损自己的错误字段），发 CRITICAL。"""
+        tracked = self._registry.get(position_id)
+        if tracked is None or tracked.server_protection is None:
+            return
+        text = f"{title}：{detail}"[:300]
+        if tracked.server_protection.last_error != text:
+            state = tracked.server_protection.model_copy(update={"last_error": text})
+            self._registry.put(tracked.model_copy(update={"server_protection": state}))
+        await self._alert(
+            AlertLevel.CRITICAL,
+            title,
+            f"{tracked.record.symbol} {position_id}：{detail}；{then}",
+            tracked.record.symbol,
+            f"opposite_tighten:{position_id}",
+            kind="order_failed",
+        )
+
+    async def _tighten_basis(self, tracked: TrackedPosition) -> EntryBasis:
+        """实际开仓成交与手续费：移动止损已冻结的基准优先，没有再按开仓 CID 读。"""
+        state, rec = tracked.server_protection, tracked.record
+        cid = tracked.entry_client_order_id
+        assert state is not None and cid is not None
+        side: Literal["buy", "sell"] = "buy" if rec.side is Side.LONG else "sell"
+        if (
+            state.trailing_entry_quote is not None
+            and state.trailing_entry_quantity is not None
+            and state.trailing_fees_quote is not None
+            and state.entry_order_id is not None
+        ):
+            return EntryBasis(
+                symbol=rec.symbol,
+                client_order_id=cid,
+                order_id=state.entry_order_id,
+                side=side,
+                filled_quantity=state.trailing_entry_quantity,
+                filled_quote=state.trailing_entry_quote,
+                fee_usdt=state.trailing_fees_quote,
+                entry_price=state.trailing_entry_quote / state.trailing_entry_quantity,
+                order_status=state.entry_status or "UNKNOWN",
+            )
+        read_basis = getattr(self._exchange, "entry_basis", None)
+        if read_basis is None:
+            raise ProtectionIncomplete("缺实际入场成交与费用证据")
+        basis = await read_basis(rec.symbol, cid)
+        if (
+            not isinstance(basis, EntryBasis)
+            or basis.client_order_id != cid
+            or basis.order_id != state.entry_order_id
+            or basis.symbol != rec.symbol
+            or basis.side != side
+            or basis.order_status != "FILLED"
+        ):
+            raise ProtectionIncomplete("入场基准身份或完整性不一致")
+        return basis
+
+    async def _trigger_reference(
+        self, manager: BracketManager, symbol: str, long: bool, working_type: str
+    ) -> float:
+        """新止损腿按哪个价触发就拿哪个价比：带交易所时间、5 秒内的同环境标记价（和保护状态机
+        换代时同一个读法），或同环境盘口（多看买一、空看卖一）。"""
+        value: float | None = None
+        if working_type == "MARK_PRICE":
+            value = await manager._fresh_mark(symbol)
+        else:
+            read_book = getattr(self._exchange, "execution_book", None)
+            if read_book is not None:
+                book = await read_book(symbol)
+                value = book.bid if long else book.ask
+        if value is None or not math.isfinite(value) or value <= 0:
+            raise ExchangeError(f"收紧止损的触发价源（{working_type}）读不到")
+        return float(value)
 
     async def _close_directly(
         self,
