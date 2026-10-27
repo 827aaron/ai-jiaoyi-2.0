@@ -170,12 +170,20 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     (adapter, *_), _, _ = _build(tmp_path, RunMode.PAPER)
     assert adapter._protection.readback_grace_s == 0  # 不写 = 原行为
     assert adapter._protection.prearm_grace_s == 0
+    assert adapter._protection.stop_working_type == "CONTRACT_PRICE"
+    assert adapter._protection.take_profit_working_type == "CONTRACT_PRICE"
     app_cfg = _cfg(
-        tmp_path, RunMode.PAPER, protection_readback_grace_s=2.5, protection_prearm_grace_s=90
+        tmp_path,
+        RunMode.PAPER,
+        protection_readback_grace_s=2.5,
+        protection_prearm_grace_s=90,
+        protection_stop_working_type="MARK_PRICE",
     )
     (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
     assert adapter._protection.readback_grace_s == 2.5
     assert adapter._protection.prearm_grace_s == 90
+    assert adapter._protection.stop_working_type == "MARK_PRICE"
+    assert adapter._protection.take_profit_working_type == "CONTRACT_PRICE"
 
 
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:

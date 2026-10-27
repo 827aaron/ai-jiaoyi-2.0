@@ -992,6 +992,18 @@ class AppConfig(Contract):
         "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
         "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
     )
+    protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
+        default="CONTRACT_PRICE",
+        description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"
+        "（原行为）；MARK_PRICE = 标记价，不会被 Demo 盘口的瞬间插针扫掉，但触发后仍按当时盘口"
+        "市价成交。只影响之后新挂的止损（新仓、移动止损换价），已挂的单照旧按挂单时的核对。"
+        "保命单固定按标记价。改后重启生效。",
+    )
+    protection_take_profit_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
+        default="CONTRACT_PRICE",
+        description="Demo 托管保护：止盈按什么价触发。CONTRACT_PRICE = 最新成交价（原行为）；"
+        "MARK_PRICE = 标记价。只影响之后新挂的止盈，已挂的单照旧按挂单时的核对。改后重启生效。",
+    )
     predictor: PredictorConfig = Field(
         default_factory=PredictorConfig, description="预测员运行方式，见 ``[predictor]``。"
     )

@@ -121,6 +121,8 @@ OPTIONAL_APP_FIELDS = {
     "reconciler_close_unknown_positions",
     "protection_readback_grace_s",
     "protection_prearm_grace_s",
+    "protection_stop_working_type",
+    "protection_take_profit_working_type",
     "trade_notices",
     *(f"notify_{k}" for k in KINDS),
     "credit_low_floor_usd",

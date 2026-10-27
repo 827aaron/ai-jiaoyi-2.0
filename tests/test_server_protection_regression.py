@@ -93,17 +93,22 @@ class EvidenceExchange:
         client_order_id: str,
         *,
         kind: Literal["stop_loss", "take_profit"],
+        working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"],
     ) -> ExchangeBracket:
         assert client_order_id.startswith("br-")
-        return await self._place(symbol, close_side, quantity, trigger_price, client_order_id, kind)
+        return await self._place(
+            symbol, close_side, quantity, trigger_price, client_order_id, kind, working_type
+        )
 
     async def place_lifeboat(self, symbol, close_side, quantity, trigger_price, client_order_id):
         assert client_order_id.startswith("lb-")
         return await self._place(
-            symbol, close_side, quantity, trigger_price, client_order_id, "stop_loss"
+            symbol, close_side, quantity, trigger_price, client_order_id, "stop_loss", "MARK_PRICE"
         )
 
-    async def _place(self, symbol, close_side, quantity, trigger_price, client_order_id, kind):
+    async def _place(
+        self, symbol, close_side, quantity, trigger_price, client_order_id, kind, working_type
+    ):
         assert self.registry is not None
         stored = self.registry.get("pos-1").server_protection
         leg = next(x for x in stored.legs if x.client_order_id == client_order_id)
@@ -123,7 +128,7 @@ class EvidenceExchange:
             quantity=quantity,
             trigger_price=trigger_price,
             position_side="BOTH",
-            working_type="MARK_PRICE" if client_order_id.startswith("lb-") else "CONTRACT_PRICE",
+            working_type=working_type,
             reduce_only=True,
             price_protect=False,
             close_position=False,

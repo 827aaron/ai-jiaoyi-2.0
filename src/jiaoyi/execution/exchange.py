@@ -75,6 +75,9 @@ class ExchangeStop:
 
 
 BracketKind = Literal["stop_loss", "take_profit"]
+WorkingType = Literal["CONTRACT_PRICE", "MARK_PRICE"]
+"""条件单触发价格源：合约最新成交价 / 标记价。"""
+WORKING_TYPES: tuple[WorkingType, ...] = ("CONTRACT_PRICE", "MARK_PRICE")
 BRACKET_PREFIXES: dict[BracketKind, str] = {"stop_loss": "br-sl-", "take_profit": "br-tp-"}
 _CHILD_TERMINAL = frozenset({"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"})
 
@@ -937,15 +940,22 @@ class CcxtBinanceFutures:
         client_order_id: str,
         *,
         kind: BracketKind,
+        working_type: WorkingType = "CONTRACT_PRICE",
     ) -> ExchangeBracket:
-        """只单向、只减仓、合约成交价触发的普通 SL/TP，原保命止损接口不变。
+        """只单向、只减仓的普通 SL/TP；触发价格源按调用方持久化的值，默认合约最新成交价。
 
         调用方必须先持久化 CID/量化参数，并在进程重启后只查已提交或未知的 CID。
         本进程另加一次提交锁与记录，防并发调用或查无后重复 POST；不是持久化的替代品。
         不自动撤其他订单，不市价补偿，不更改持仓模式。
         """
         return await self._submit_protection(
-            symbol, close_side, quantity, trigger_price, client_order_id, kind=kind
+            symbol,
+            close_side,
+            quantity,
+            trigger_price,
+            client_order_id,
+            kind=kind,
+            working_type=working_type,
         )
 
     async def place_lifeboat(
@@ -968,6 +978,7 @@ class CcxtBinanceFutures:
             client_order_id,
             kind="stop_loss",
             lifeboat=True,
+            working_type="MARK_PRICE",
         )
 
     async def _submit_protection(
@@ -980,13 +991,16 @@ class CcxtBinanceFutures:
         *,
         kind: BracketKind,
         lifeboat: bool = False,
+        working_type: WorkingType = "CONTRACT_PRICE",
     ) -> ExchangeBracket:
         if kind not in BRACKET_PREFIXES or close_side not in {"buy", "sell"}:
             raise ValueError("普通保护单类型或方向不合法")
+        if working_type not in WORKING_TYPES:
+            raise ValueError("条件单触发价格源不合法")
         if lifeboat:
             _lifeboat_cid(client_order_id)
-            if kind != "stop_loss":
-                raise ValueError("保命单只能是止损")
+            if kind != "stop_loss" or working_type != "MARK_PRICE":
+                raise ValueError("保命单只能是按标记价触发的止损")
         else:
             _bracket_cid(client_order_id, kind)
         _bracket_symbol(symbol)
@@ -1006,6 +1020,7 @@ class CcxtBinanceFutures:
                 client_order_id,
                 kind=kind,
                 lifeboat=lifeboat,
+                working_type=working_type,
             )
 
     async def _place_bracket_once(
@@ -1017,14 +1032,14 @@ class CcxtBinanceFutures:
         client_order_id: str,
         *,
         kind: BracketKind,
-        lifeboat: bool = False,
+        lifeboat: bool,
+        working_type: WorkingType,
     ) -> ExchangeBracket:
         import ccxt.async_support as ccxt
 
         spec = await self.normalized_bracket_spec(symbol, quantity, trigger_price)
         if await self.position_mode() != "one_way":
             raise ExchangeError("普通保护条件单只支持已确认的单向持仓模式")
-        working_type = "MARK_PRICE" if lifeboat else "CONTRACT_PRICE"
 
         async def query() -> ExchangeBracket | None:
             return (
