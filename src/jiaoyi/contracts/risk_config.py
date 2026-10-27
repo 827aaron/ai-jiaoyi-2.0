@@ -432,6 +432,26 @@ class FastLoopConfig(Contract):
         le=604800,
         description="Seconds after the first verified exchange entry fill to freeze the target.",
     )
+    frozen_peak_evidence_mode: Literal["sync", "background"] = Field(
+        default="sync",
+        description="sync = every keeper review waits for the exchange evidence read (up to "
+        "12 s); background = a per-position refresher reads it every "
+        "frozen_peak_evidence_interval_s, reviews use the cached result only while it is "
+        "fresh, and the routine review round no longer waits for its slowest position.",
+    )
+    frozen_peak_evidence_interval_s: int = Field(
+        default=30,
+        ge=5,
+        le=600,
+        description="Background mode: seconds between evidence reads for one open position.",
+    )
+    frozen_peak_evidence_max_age_s: int = Field(
+        default=90,
+        ge=0,
+        le=3600,
+        description="Background mode: older cached evidence skips the frozen peak rule for "
+        "that review (0 = no age limit).",
+    )
     giveback_on: bool = Field(
         default=True,
         description="回吐保护开关（代码规则，不问管家模型）：最高浮盈到过 giveback_arm_r 倍止损距离"
@@ -763,6 +783,11 @@ class FastLoopConfig(Contract):
             raise ValueError("size_fraction_s 不能大于 size_fraction_m")
         if self.keeper_close_p_strong < self.keeper_close_p:
             raise ValueError("keeper_close_p_strong 不能小于 keeper_close_p")
+        if 0 < self.frozen_peak_evidence_max_age_s < self.frozen_peak_evidence_interval_s:
+            raise ValueError(
+                "frozen_peak_evidence_max_age_s 要么填 0（不限），要么不小于 "
+                "frozen_peak_evidence_interval_s，否则缓存永远算过期"
+            )
         if 0 < self.atr_long_period_min <= self.atr_period_min:
             raise ValueError("atr_long_period_min 必须比 atr_period_min 长")
         for name in ("session_factor_weekday", "session_factor_weekend"):

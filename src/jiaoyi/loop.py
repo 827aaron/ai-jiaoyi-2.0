@@ -98,6 +98,7 @@ CREDIT_CHECK_EVERY_S = 120.0
 COMMAND_POLL_EVERY_S = 1.0
 CONFIG_WATCH_EVERY_S = 3.0  # 看设置文件变没变（热生效，core/hotconfig.py）
 KEEPER_CONCURRENCY = 5
+FROZEN_PEAK_CHECK_EVERY_S = 1.0  # 后台模式下多久看一眼哪笔仓该重读冻结盈利价证据
 SIGNAL_CACHE = 200  # 记住最近这么多条处理过的信号（面板重新检查 / 放行用）
 """持仓管家一轮里最多几笔一起问 Jev。"""
 RESTART_WAIT_CLOSE_S = 60.0
@@ -147,6 +148,17 @@ class _NotesAgainst(Protocol):
     def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None: ...
 
     def pending_against(self, position_id: str) -> bool: ...
+
+
+@runtime_checkable
+class _FrozenPeakCache(Protocol):
+    """管家：冻结盈利价证据在后台按仓读、复查只用缓存（JevKeeper）。"""
+
+    def frozen_peak_background(self) -> bool: ...
+
+    def frozen_peak_due(self, position_id: str, now: datetime) -> bool: ...
+
+    async def refresh_frozen_peak(self, position_id: str, now: datetime) -> None: ...
 
 
 @runtime_checkable
@@ -436,6 +448,7 @@ class Runner:
             asyncio.create_task(self._market_loop()),
             self._every(cfg.keeper_interval_s, self.keeper_tick),
             self._every(URGENT_CHECK_EVERY_S, self.urgent_tick),
+            self._every(FROZEN_PEAK_CHECK_EVERY_S, self.frozen_peak_tick),
             self._every(cfg.reconcile_interval_s, self.reconcile_tick),
             self._every(SLOW_CHECK_EVERY_S, self.slow_tick),
             self._every(CONFIG_WATCH_EVERY_S, self._regime_periodic_tick),
@@ -1411,11 +1424,35 @@ class Runner:
             for p in self.positions
             if p.status is PositionStatus.OPEN and p.position_id not in attempted
         ]
-        await self._review_all(held)
+        if self._frozen_peak_background():
+            # 一笔仓慢（交易所证据、Jev 重试）不推迟别的仓下一轮：不等这一轮问完；
+            # 还在问的仓下一轮由 _review_all 跳过，不会重叠。
+            self._spawn(self._review_all(held))
+        else:
+            await self._review_all(held)
         if keeper is not None and not self.positions:
             keeper.note(self.app.clock(), "看了一眼：没有持仓，不用审")
         # 开平仓、卡过期都在这里跟上订阅；放在审查之后，回填新币的几秒不推迟审持仓
         await self.sync_watch()
+
+    def _frozen_peak_background(self) -> bool:
+        keeper = self.m.keeper
+        return isinstance(keeper, _FrozenPeakCache) and keeper.frozen_peak_background()
+
+    async def frozen_peak_tick(self) -> None:
+        """后台模式：每笔持仓按自己的间隔读一次冻结盈利价证据，各读各的，不进复查关键路径。"""
+        keeper = self.m.keeper
+        if not isinstance(keeper, _FrozenPeakCache) or not keeper.frozen_peak_background():
+            return
+        now = self.app.clock()
+        for pos in self.positions:
+            pid = pos.position_id
+            if (
+                pos.status is PositionStatus.OPEN
+                and pid not in self._closing
+                and keeper.frozen_peak_due(pid, now)
+            ):
+                self._spawn(keeper.refresh_frozen_peak(pid, now))
 
     async def urgent_tick(self) -> None:
         if not isinstance(self.m.patrol, _HasUrgent) or not self.m.patrol.urgent:

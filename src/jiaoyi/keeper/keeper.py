@@ -118,6 +118,11 @@ class JevKeeper:
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
         self._peak: dict[str, float] = {}  # 每个持仓复查到过的最高浮盈（基点），不被历史截断
         self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
+        # 后台模式的冻结盈利价证据：pid → (这次读开始的时刻, 结果)
+        self._fp_cache: dict[str, tuple[datetime, dict[str, Any] | None]] = {}
+        self._fp_started: dict[str, datetime] = {}
+        self._fp_inflight: set[str] = set()
+        self._fp_stale: set[str] = set()
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
         """市场背景不依赖是否还有有效开仓卡；只读，不合成交易授权。"""
@@ -130,6 +135,10 @@ class JevKeeper:
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
         self._entry.pop(position_id, None)
+        self._fp_cache.pop(position_id, None)
+        self._fp_started.pop(position_id, None)
+        self._fp_inflight.discard(position_id)
+        self._fp_stale.discard(position_id)
 
     def history(self, position_id: str) -> list[float]:
         """这笔仓之前历次复查的浮盈（基点，从早到晚）。"""
@@ -193,18 +202,69 @@ class JevKeeper:
         if (now - against[0].ts).total_seconds() < self._cfg.against_recheck_cooldown_s:
             self._against[pid] = against
 
+    def frozen_peak_background(self) -> bool:
+        return (
+            self._frozen_peak_review is not None
+            and self._cfg.frozen_peak_evidence_mode == "background"
+        )
+
+    def frozen_peak_due(self, position_id: str, now: datetime) -> bool:
+        """Background mode: no read in flight and the last one started an interval ago."""
+        if position_id in self._fp_inflight:
+            return False
+        last = self._fp_started.get(position_id)
+        interval = self._cfg.frozen_peak_evidence_interval_s
+        return last is None or (now - last).total_seconds() >= interval
+
+    async def refresh_frozen_peak(self, position_id: str, now: datetime) -> None:
+        """One background evidence read. ``now`` is stored as the result's as-of: the read
+        started then, so the cached age is an upper bound on the evidence age."""
+        if position_id in self._fp_inflight:
+            return
+        self._fp_inflight.add(position_id)
+        self._fp_started[position_id] = now
+        try:
+            result = await self._read_frozen_peak(position_id, now)
+        finally:
+            closed = position_id not in self._fp_started  # forget() ran while reading
+            self._fp_inflight.discard(position_id)
+        if not closed:
+            self._fp_cache[position_id] = (now, result)
+
+    async def _read_frozen_peak(self, pid: str, now: datetime) -> dict[str, Any] | None:
+        assert self._frozen_peak_review is not None
+        try:
+            return await self._frozen_peak_review(pid, now)
+        except Exception:
+            log.warning("Frozen peak evidence unavailable for %s", pid, exc_info=True)
+            return {"triggered": False, "detail": "evidence_reader_failed"}
+
+    def _cached_frozen_peak(self, pid: str, now: datetime) -> dict[str, Any] | None:
+        cached = self._fp_cache.get(pid)
+        max_age = self._cfg.frozen_peak_evidence_max_age_s
+        if cached is not None and (max_age == 0 or (now - cached[0]).total_seconds() <= max_age):
+            self._fp_stale.discard(pid)
+            return cached[1]
+        as_of = cached[0].isoformat() if cached is not None else None
+        if pid not in self._fp_stale:
+            self._fp_stale.add(pid)
+            log.warning(
+                "Frozen peak evidence for %s is stale (as of %s); rule skipped until a fresh read",
+                pid,
+                as_of,
+            )
+        return {"triggered": False, "detail": "evidence_stale", "evidence_as_of": as_of}
+
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
         direct = self.review_card_rule(position, now)
         if direct is not None:
             return direct
         pid = position.position_id
         frozen_peak = None
-        if self._frozen_peak_review is not None:
-            try:
-                frozen_peak = await self._frozen_peak_review(pid, now)
-            except Exception:
-                log.warning("Frozen peak evidence unavailable for %s", pid, exc_info=True)
-                frozen_peak = {"triggered": False, "detail": "evidence_reader_failed"}
+        if self.frozen_peak_background():
+            frozen_peak = self._cached_frozen_peak(pid, now)
+        elif self._frozen_peak_review is not None:
+            frozen_peak = await self._read_frozen_peak(pid, now)
         if frozen_peak and frozen_peak.get("triggered") is True:
             self._streak.pop(pid, None)
             return self._verdict(
