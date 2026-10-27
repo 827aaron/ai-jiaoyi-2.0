@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from jiaoyi.contracts import OrderIntent, PositionRecord
+from jiaoyi.contracts import OrderIntent, PositionRecord, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
@@ -130,6 +130,47 @@ class TrackedPosition(BaseModel):
     frozen_peak_exit: FrozenPeakExit | None = None
 
 
+class EmergencyExit(BaseModel):
+    """对账员对无主仓 / 反手仓的直连退出意图（不是有入场证据的 PositionRecord）。
+
+    先落盘本代 CID 再发；结果未知或未终态只查原 CID，不重发。只有原单明确终态、
+    同向余仓不超过剩余上限才建下一代；交易所复查净仓为零才算完成并删除。
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    exit_id: str
+    symbol: str
+    source: Literal["unknown", "reverse", "side_mismatch"]
+    position_id: str | None = None
+    """触发它的账本仓（反手 / 方向不对）；无主仓为 None。"""
+    side: Side
+    """交易所上实际方向，平仓方向由它推出。"""
+    initial_quantity: float
+    """首次提交时复查到的数量，也是本意图可关闭的上限。"""
+    closed_quantity: float = 0.0
+    """已终态各代的累计成交。"""
+    created_at: datetime
+    generation: int = 0
+    client_order_id: str | None = None
+    quantity: float | None = None
+    order_id: str | None = None
+    order_status: str | None = None
+    pending: bool = False
+    """本代已（可能）提交但还没确认终态。"""
+
+
+class ForeignExecutorStop(BaseModel):
+    """对不在账本里的执行器发过 keep_position=True 停止；结果未知不重发，查到终态才删。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    executor_id: str
+    symbol: str
+    requested_at: datetime
+    error: str | None = None
+
+
 class DayStart(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -144,6 +185,10 @@ class RegistryData(BaseModel):
     day_start: DayStart | None = None
     last_equity_usdt: float | None = None
     """上一次读到的权益，晚启动又拿不到收入流水时用它给日亏基准兜底。"""
+    emergency_exits: dict[str, EmergencyExit] = {}
+    """按币种，最多一个未完成的对账员退出意图；未完成时同币禁止新开。"""
+    foreign_executor_stops: dict[str, ForeignExecutorStop] = {}
+    """按执行器 id。"""
 
 
 class PositionRegistry:

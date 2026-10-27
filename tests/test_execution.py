@@ -467,14 +467,15 @@ async def test_close_unknown_switch_stops_unknown_executor(rig: Rig) -> None:
     await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "someone-else")
     report = await with_close_unknown(rig).reconcile(rig.t)
     assert report.issues[0].fixed
-    assert rig.api.stopped == [("ex1", False)]
+    # 只停不平：余仓由对账员走带 CID 的平仓，不让执行器和直连两条通道同时退出
+    assert rig.api.stopped == [("ex1", True)]
 
 
 async def test_close_unknown_switch_failure_stays_unfixed(rig: Rig) -> None:
     rig.ex.set_position("ETHUSDT", Side.LONG, 2.0)
     rig.ex.fail_market_close = True
     (issue,) = (await with_close_unknown(rig).reconcile(rig.t)).issues
-    assert not issue.fixed and "平仓失败" in issue.detail
+    assert not issue.fixed and "结果未知" in issue.detail
 
 
 async def test_close_unknown_switch_never_touches_our_own_position(rig: Rig) -> None:

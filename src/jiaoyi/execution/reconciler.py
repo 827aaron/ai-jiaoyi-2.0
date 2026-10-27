@@ -10,6 +10,9 @@
   数量对不上、执行器报错或消失 → 告警，人看
   方向对不上（币安和账本反向）/ 刚结束的仓被反向开了一笔等量的（平仓单在保命止损之后又成交，
   「抢跑反手仓」）→ 不管开关，当轮直连币安只减仓平掉，critical 告警；对不上方向时不补保命止损
+  无主仓 / 反手仓的直连平仓：同币串行，先落盘意图和 CID 再发；结果未知只查原 CID，不重发；
+  交易所复查净仓为零才算平掉。账本里还有别的归属、方向变了、数量涨了、同币有不认识的执行器在跑，
+  都不下单只告警。不认识的执行器按开关只停不平（keep_position=True），余仓由上面的通道平
   账本 OPEN 但币安连续 2 轮没有仓位 → 判定有人在币安手动平了：停执行器、按手动平仓结算、撤保命止损
 重启后第一件事就是调一次 ``reconcile``。
 """
@@ -19,8 +22,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Literal
 
@@ -41,11 +47,14 @@ from jiaoyi.execution.exchange import (
     ExchangeError,
     ExchangePosition,
     ExchangeStop,
+    IdentifiedCloseOrder,
+    IdentifiedCloseRejected,
+    IdentifiedCloseUnknown,
 )
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
 from jiaoyi.execution.lifeboat import lifeboat_cids, lifeboat_price
-from jiaoyi.execution.registry import PositionRegistry
+from jiaoyi.execution.registry import EmergencyExit, ForeignExecutorStop, PositionRegistry
 from jiaoyi.execution.symbols import from_hb_pair
 from jiaoyi.interfaces import Alerter, LifeboatStop
 
@@ -75,6 +84,21 @@ _TITLES = {
 
 def _signed(side: Side, qty: float) -> float:
     return qty if side is Side.LONG else -qty
+
+
+_EPS = 1e-9
+"""意图数量上限的相对容差（只吸收浮点误差，不是数量对不上的容忍度）。"""
+ExitSource = Literal["unknown", "reverse", "side_mismatch"]
+
+
+@dataclass(frozen=True)
+class _ExitTrigger:
+    """这一轮判定要平的那笔：来源、触发时看到的仓位、相关账本仓、告警前缀。"""
+
+    source: ExitSource
+    position: ExchangePosition
+    position_id: str | None
+    detail: str
 
 
 class ReconcileError(Exception):
@@ -135,6 +159,8 @@ class ThreeWayReconciler:
         self._rec = recorder
         self._close_unknown = close_unknown_positions
         self._heartbeats = heartbeats
+        self._foreign_running: dict[str, set[str]] = {}
+        """本轮运行列表里不归账本管的执行器（按币种）；有就不另发直连平仓。"""
 
     async def _retry(self, fn: Callable[[], Awaitable[Any]]) -> Any:
         """只读查询：超时 / 断连这类一时失败短退避重试；明确的错误直接抛。"""
@@ -326,10 +352,20 @@ class ThreeWayReconciler:
                 )
 
         # 2. 币安上有仓位但账本里没有：刚结束的仓被反向开了等量的一笔 → 我们的反手仓，当轮平；
-        #    其它不是我们开的，只告警（开关打开才平）
+        #    其它不是我们开的，只告警（开关打开才平）。已有未完成退出意图的币只核对原意图。
+        await self._settle_foreign_stops()
+        self._foreign_running = self._foreign_executors(running)
+        exits = self._registry.data.emergency_exits
+        handled = set(reversed_)
         live_symbols = {t.record.symbol for t in live}
         for symbol in exchange_qty:
             if symbol not in live_symbols:
+                handled.add(symbol)
+                if symbol in exits:
+                    found = await self._emergency_exit(symbol, None)
+                    if found is not None:
+                        issues.append(found)
+                        continue
                 pending_owner = next(
                     (
                         t
@@ -353,6 +389,11 @@ class ThreeWayReconciler:
                     continue
                 rev = await self._recent_reverse(symbol, exchange_positions, now)
                 issues.append(rev or await self._unknown_position(symbol, exchange_positions))
+        # 本轮没轮到的未完成意图（例如已经平到零）：只核对原 CID 和交易所净仓
+        for symbol in [s for s in exits if s not in handled]:
+            found = await self._emergency_exit(symbol, None)
+            if found is not None:
+                issues.append(found)
 
         # 3. 残留的保命止损
         live_ids = {t.record.position_id for t in live}
@@ -376,6 +417,7 @@ class ThreeWayReconciler:
                 not stop.client_order_id.startswith(STOP_PREFIX)
                 or stop.client_order_id in live_cids
                 or stop.symbol in reversed_
+                or stop.symbol in exits
             ):
                 continue
             issues.append(await self._clear_stale(stop, exchange_qty))
@@ -487,7 +529,7 @@ class ThreeWayReconciler:
             except ValueError:
                 continue
             if str(ex.get("executor_id")) not in known_ids:
-                issues.append(await self._unknown_executor(symbol, str(ex.get("executor_id"))))
+                issues.append(await self._unknown_executor(symbol, str(ex.get("executor_id")), now))
             elif int(ex.get("error_count") or 0) > 0:
                 # main loop 的静默重试在这里露出来
                 owner = next(
@@ -545,18 +587,6 @@ class ThreeWayReconciler:
     def _same_qty(self, a: float, b: float) -> bool:
         return abs(a - b) <= max(a, b) * self._tol
 
-    async def _close_on_exchange(
-        self, symbol: str, mine: list[ExchangePosition]
-    ) -> ExchangeError | None:
-        """直连币安只减仓市价平掉这个币在币安上的仓位（按币安上的方向），返回失败原因。"""
-        try:
-            for p in mine:
-                side: Literal["buy", "sell"] = "sell" if p.side is Side.LONG else "buy"
-                await self._exchange.close_position_market(symbol, side, p.quantity)
-        except ExchangeError as e:
-            return e
-        return None
-
     async def _side_mismatch(
         self, rec: PositionRecord, exchange_positions: list[ExchangePosition]
     ) -> ReconcileIssue:
@@ -578,6 +608,10 @@ class ThreeWayReconciler:
                 fixed=fixed,
             )
 
+        if rec.symbol in self._registry.data.emergency_exits:
+            found = await self._emergency_exit(rec.symbol, None)
+            if found is not None:
+                return found
         if not self._same_qty(qty, rec.quantity):
             return issue(f"{detail}，数量也对不上，未自动处理", False)
         tracked = self._registry.get(rec.position_id)
@@ -585,10 +619,10 @@ class ThreeWayReconciler:
             return issue(
                 f"{detail}，托管仓归属不一致，保留保护并等待核验，未自动平未知反向仓", False
             )
-        err = await self._close_on_exchange(rec.symbol, mine)
-        if err is not None:
-            return issue(f"{detail}（反手仓），直连币安平仓失败：{err!r}", False)
-        return issue(f"{detail}（反手仓），已直连币安只减仓平掉", True)
+        if len(mine) != 1:
+            return issue(f"{detail}，同币读到多笔持仓，未自动处理", False)
+        trigger = _ExitTrigger("side_mismatch", mine[0], rec.position_id, f"{detail}（反手仓）")
+        return await self._emergency_exit(rec.symbol, trigger) or issue(detail, False)
 
     async def _recent_reverse(
         self, symbol: str, exchange_positions: list[ExchangePosition], now: datetime
@@ -625,66 +659,327 @@ class ThreeWayReconciler:
                 detail=f"{detail}；托管使用只减仓，不能凭等量断言归属，未自动平未知仓",
                 fixed=False,
             )
-        err = await self._close_on_exchange(symbol, mine)
-        fixed = err is None
-        return ReconcileIssue(
-            kind=ReconcileIssueKind.SIDE_MISMATCH,
-            symbol=symbol,
-            position_id=rec.position_id,
-            detail=f"{detail}，{'已直连币安只减仓平掉' if fixed else f'直连平仓失败：{err!r}'}",
-            fixed=fixed,
+        return await self._emergency_exit(
+            symbol, _ExitTrigger("reverse", pos, rec.position_id, detail)
         )
 
     async def _unknown_position(
         self, symbol: str, exchange_positions: list[ExchangePosition]
     ) -> ReconcileIssue:
-        """币安有仓位但账本里没有。默认只告警；打开开关后直连币安只减仓市价平掉。"""
+        """币安有仓位但账本里没有。默认只告警；打开开关后直连币安只减仓平掉（走带 CID 的意图）。"""
         mine = [p for p in exchange_positions if p.symbol == symbol]
         qty = sum(p.quantity for p in mine)
         detail = f"币安有 {qty} 的仓位，但没有执行器在管"
-        if not self._close_unknown or not mine:
-            return ReconcileIssue(
-                kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=detail, fixed=False
-            )
-        try:
-            for p in mine:
-                side: Literal["buy", "sell"] = "sell" if p.side is Side.LONG else "buy"
-                await self._exchange.close_position_market(symbol, side, p.quantity)
-        except ExchangeError as e:
-            return ReconcileIssue(
-                kind=ReconcileIssueKind.ORPHAN_POSITION,
-                symbol=symbol,
-                detail=f"{detail}；开关已打开但平仓失败：{e!r}",
-                fixed=False,
-            )
+        trigger = None
+        if self._close_unknown and len(mine) == 1:
+            trigger = _ExitTrigger("unknown", mine[0], None, detail)
+        if trigger is not None or symbol in self._registry.data.emergency_exits:
+            found = await self._emergency_exit(symbol, trigger)
+            if found is not None:
+                return found
         return ReconcileIssue(
-            kind=ReconcileIssueKind.ORPHAN_POSITION,
-            symbol=symbol,
-            detail=f"{detail}；已按开关直连币安平仓",
-            fixed=True,
+            kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=detail, fixed=False
         )
 
-    async def _unknown_executor(self, symbol: str, executor_id: str) -> ReconcileIssue:
-        detail = f"hummingbot 里有运行中的执行器 {executor_id} 不在账本里"
-        if not self._close_unknown:
-            return ReconcileIssue(
-                kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=detail, fixed=False
+    def _foreign_executors(self, running: list[dict[str, Any]]) -> dict[str, set[str]]:
+        """运行列表里不归账本管的执行器（按币种）。"""
+        owned = {
+            t.record.executor_id
+            for t in self._registry.data.positions.values()
+            if t.record.executor_id
+            and (
+                t.record.status not in (PositionStatus.CLOSED, PositionStatus.FAILED)
+                or t.exit_cleanup_pending
+                or (t.server_protection is not None and t.server_protection.stage != "done")
             )
-        try:
-            await self._api.stop_executor(executor_id, keep_position=False)
-        except HbApiError as e:
-            return ReconcileIssue(
-                kind=ReconcileIssueKind.ORPHAN_POSITION,
-                symbol=symbol,
-                detail=f"{detail}；开关已打开但停止失败：{e!r}",
-                fixed=False,
-            )
-        return ReconcileIssue(
-            kind=ReconcileIssueKind.ORPHAN_POSITION,
-            symbol=symbol,
-            detail=f"{detail}；已按开关停止并平仓",
-            fixed=True,
+        }
+        out: dict[str, set[str]] = {}
+        for ex in running:
+            eid = str(ex.get("executor_id"))
+            try:
+                symbol = from_hb_pair(str(ex.get("trading_pair") or ""))
+            except ValueError:
+                continue
+            if eid not in owned:
+                out.setdefault(symbol, set()).add(eid)
+        return out
+
+    async def _settle_foreign_stops(self) -> None:
+        """停过的不认识执行器：逐项查到明确终态才删记录；查不到、查失败都保留（同币不另发直连）。"""
+        stops = self._registry.data.foreign_executor_stops
+        for eid in list(stops):
+            try:
+                detail = await self._retry(partial(self._api.get_executor, eid))
+            except HbApiError:
+                continue
+            if executor_query_state(detail, eid) == "terminal":
+                stops.pop(eid, None)
+                self._registry.save()
+
+    def _exit_blocker(
+        self, symbol: str, source: ExitSource, position_id: str | None, side: Side
+    ) -> str | None:
+        """提交前在同币锁内重新核实归属；返回不能下单的原因。"""
+        done = (PositionStatus.CLOSED, PositionStatus.FAILED)
+        for t in self._registry.data.positions.values():
+            rec = t.record
+            if rec.symbol != symbol:
+                continue
+            if source == "side_mismatch" and rec.position_id == position_id:
+                if (
+                    rec.status not in (PositionStatus.OPEN, PositionStatus.CLOSING)
+                    or t.server_protection is not None
+                    or rec.side is side
+                ):
+                    return f"账本 {position_id} 不再是开着的反向仓（{rec.status.value}），不平"
+                continue
+            if (
+                rec.status not in done
+                or t.exit_cleanup_pending
+                or (t.server_protection is not None and t.server_protection.stage != "done")
+            ):
+                return f"账本里 {rec.position_id}（{rec.status.value}）仍管这个币，归属未明，不下单"
+        if source == "side_mismatch" and self._registry.get(position_id or "") is None:
+            return f"账本里已没有 {position_id}，不按反手仓平"
+        foreign = set(self._foreign_running.get(symbol, set()))
+        foreign.update(
+            s.executor_id
+            for s in self._registry.data.foreign_executor_stops.values()
+            if s.symbol == symbol
         )
+        if foreign:
+            return (
+                f"同币有不在账本里的执行器 {', '.join(sorted(foreign))} 在跑或停止未确认，"
+                "先隔离，不另发直连平仓"
+            )
+        return None
+
+    async def _emergency_exit(
+        self, symbol: str, trigger: _ExitTrigger | None
+    ) -> ReconcileIssue | None:
+        """无主仓 / 反手仓唯一的直连退出入口：同币串行（和开仓共用锁），先落盘 CID 再发，
+        结果未知只查原 CID，交易所复查净仓为零才算平掉。``trigger`` 为 None 时只核对已有意图。"""
+        async with self._registry.symbol_lock(symbol):
+            return await self._emergency_exit_locked(symbol, trigger)
+
+    async def _emergency_exit_locked(
+        self, symbol: str, trigger: _ExitTrigger | None
+    ) -> ReconcileIssue | None:
+        exits = self._registry.data.emergency_exits
+        plan = exits.get(symbol)
+        source: ExitSource
+        if plan is not None:
+            source, pid = plan.source, plan.position_id
+            head = trigger.detail if trigger is not None else f"对账员平仓意图 {plan.exit_id}"
+        elif trigger is not None:
+            source, pid, head = trigger.source, trigger.position_id, trigger.detail
+        else:
+            return None
+        kind = (
+            ReconcileIssueKind.ORPHAN_POSITION
+            if source == "unknown"
+            else ReconcileIssueKind.SIDE_MISMATCH
+        )
+
+        def issue(text: str, fixed: bool) -> ReconcileIssue:
+            return ReconcileIssue(
+                kind=kind, symbol=symbol, position_id=pid, detail=f"{head}；{text}", fixed=fixed
+            )
+
+        if plan is not None and plan.pending:
+            order = await self._recover_exit(plan)
+            if order is None or order.is_terminal is not True:
+                status = order.status if order is not None else "查不到或结果未知"
+                return issue(
+                    f"平仓单 {plan.client_order_id} {status}，未确认终态；只查原 CID，不重发",
+                    False,
+                )
+            plan = exits[symbol]
+        read = getattr(self._exchange, "positions_evidence", None)
+        if read is None:
+            return issue("缺严格持仓查询能力，不下单", False)
+        try:
+            fresh = [p for p in await read() if p.symbol == symbol]
+        except ExchangeError as e:
+            return issue(f"下单前复查持仓失败，不下单：{e!r}", False)
+        if not fresh:
+            if plan is None:
+                return issue("复查时币安已无仓位，未下单", True)
+            exits.pop(symbol, None)
+            self._registry.save()
+            last = f"{plan.client_order_id} {plan.order_status}" if plan.generation else "无"
+            return issue(f"币安复查已无仓位，已平（最后一张平仓单：{last}）", True)
+        if len(fresh) != 1:
+            return issue("同币读到多笔持仓，不下单", False)
+        pos = fresh[0]
+        if plan is None:
+            assert trigger is not None
+            seen = trigger.position
+            if pos.side is not seen.side or pos.quantity > seen.quantity * (1 + _EPS):
+                return issue(
+                    f"复查是 {pos.side.value} {pos.quantity}，和触发时不一致，不下单", False
+                )
+            cap = pos.quantity
+        else:
+            cap = plan.initial_quantity - plan.closed_quantity
+            if pos.side is not plan.side:
+                return issue("复查方向和原意图相反（可能有人新开），未下单，人看", False)
+            if pos.quantity > cap * (1 + _EPS):
+                return issue(
+                    f"余仓 {pos.quantity} 超过本意图剩余上限 {cap:g}（可能有人加仓），未下单，人看",
+                    False,
+                )
+        blocker = self._exit_blocker(symbol, source, pid, pos.side)
+        if blocker is not None:
+            return issue(blocker, False)
+        if source == "unknown" and not self._close_unknown:
+            return issue("开关已关，不再下新的平仓单", False)
+        place = getattr(self._exchange, "place_close", None)
+        if place is None:
+            return issue("交易所客户端缺带 CID 的平仓能力，不降级成无身份市价单", False)
+        if plan is None:
+            plan = EmergencyExit(
+                exit_id=f"em-{uuid.uuid4().hex[:12]}",
+                symbol=symbol,
+                source=source,
+                position_id=pid,
+                side=pos.side,
+                initial_quantity=pos.quantity,
+                created_at=datetime.now(UTC),
+            )
+        generation = plan.generation + 1
+        cid = f"dc-{plan.exit_id}-{generation}"
+        quantity = min(pos.quantity, cap)
+        plan = plan.model_copy(
+            update={
+                "generation": generation,
+                "client_order_id": cid,
+                "quantity": quantity,
+                "order_id": None,
+                "order_status": "SUBMIT_PENDING",
+                "pending": True,
+            }
+        )
+        exits[symbol] = plan
+        self._registry.save()  # 先落盘再发：超时 / 重启后只能按这个 CID 查
+        close_side: Literal["buy", "sell"] = "sell" if plan.side is Side.LONG else "buy"
+        try:
+            order = await place(symbol, close_side, quantity, cid)
+        except IdentifiedCloseRejected as e:
+            exits[symbol] = plan.model_copy(update={"pending": False, "order_status": "REJECTED"})
+            self._registry.save()
+            return issue(f"平仓单 {cid} 被币安明确拒绝：{e!r}；下轮按真实余仓再判断", False)
+        except IdentifiedCloseUnknown as e:
+            if e.observed is None:
+                return issue(f"平仓单 {cid} 结果未知（{e!r}）；只查原 CID，不重发", False)
+            order = e.observed
+        except Exception as e:
+            return issue(f"平仓单 {cid} 结果未知（{e!r}）；只查原 CID，不重发", False)
+        if not isinstance(order, IdentifiedCloseOrder) or not self._accept_exit(plan, order):
+            return issue(f"平仓单 {cid} 的回报和请求对不上，按结果未知处理，不重发", False)
+        if order.is_terminal is not True:
+            return issue(f"平仓单 {cid} 已受理（{order.status}），还没终态；下轮只查原 CID", False)
+        try:
+            rest = [p for p in await read() if p.symbol == symbol]
+        except ExchangeError as e:
+            return issue(f"平仓单 {cid} 已终态，但复查持仓失败，下轮再核：{e!r}", False)
+        if rest:
+            left = sum(p.quantity for p in rest)
+            return issue(
+                f"平仓单 {cid} 已终态（{order.status}，成交 {order.filled_quantity}），"
+                f"币安仍有 {left}；下轮按真实余仓处理",
+                False,
+            )
+        exits.pop(symbol, None)
+        self._registry.save()
+        return issue(f"已直连币安只减仓平掉（{cid} {order.status}），复查已无仓位", True)
+
+    def _accept_exit(self, plan: EmergencyExit, order: IdentifiedCloseOrder) -> bool:
+        """回报必须就是本代请求；终态时把成交计入累计，之后不再查这代。"""
+        if (
+            plan.quantity is None
+            or order.client_order_id != plan.client_order_id
+            or order.symbol != plan.symbol
+            or order.close_side != ("sell" if plan.side is Side.LONG else "buy")
+            or order.position_side != "BOTH"
+            or not order.reduce_only
+            or (plan.order_id is not None and order.order_id != plan.order_id)
+            or not all(
+                math.isfinite(v)
+                for v in (order.quantity, order.filled_quantity, order.remaining_quantity)
+            )
+            or order.filled_quantity < 0
+            or order.remaining_quantity < 0
+            or not math.isclose(
+                order.quantity, order.filled_quantity + order.remaining_quantity, rel_tol=1e-10
+            )
+            or not math.isclose(order.quantity, plan.quantity, rel_tol=1e-10)
+        ):
+            return False
+        terminal = order.is_terminal is True
+        self._registry.data.emergency_exits[plan.symbol] = plan.model_copy(
+            update={
+                "order_id": order.order_id,
+                "order_status": order.status,
+                "pending": not terminal,
+                "closed_quantity": plan.closed_quantity
+                + (order.filled_quantity if terminal else 0.0),
+            }
+        )
+        self._registry.save()
+        return True
+
+    async def _recover_exit(self, plan: EmergencyExit) -> IdentifiedCloseOrder | None:
+        """只读查原 CID；查不到不等于没下过，不能据此重发。"""
+        read = getattr(self._exchange, "close_order", None)
+        if read is None or plan.client_order_id is None:
+            return None
+        try:
+            order = await read(plan.symbol, plan.client_order_id)
+        except Exception:
+            log.warning("对账员平仓单 %s 暂不可查", plan.client_order_id, exc_info=True)
+            return None
+        if isinstance(order, IdentifiedCloseOrder) and self._accept_exit(plan, order):
+            return order
+        return None
+
+    async def _unknown_executor(
+        self, symbol: str, executor_id: str, now: datetime
+    ) -> ReconcileIssue:
+        """不在账本里的执行器。开关打开时只停不平（keep_position=True），免得它和直连平仓
+        同时退出；余仓下一轮按无主仓走带 CID 的意图。停止请求先落盘，结果未知不重发。"""
+        detail = f"hummingbot 里有运行中的执行器 {executor_id} 不在账本里"
+
+        def issue(text: str, fixed: bool) -> ReconcileIssue:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=text, fixed=fixed
+            )
+
+        if not self._close_unknown:
+            return issue(detail, False)
+        stops = self._registry.data.foreign_executor_stops
+        pending = stops.get(executor_id)
+        if pending is not None:
+            why = f"，请求结果未知（{pending.error}）" if pending.error else ""
+            return issue(f"{detail}；已请求停止（保留仓位）{why}，等它明确终止，不重发", False)
+        stops[executor_id] = ForeignExecutorStop(
+            executor_id=executor_id, symbol=symbol, requested_at=now
+        )
+        self._registry.save()
+        try:
+            await self._api.stop_executor(executor_id, keep_position=True)
+        except HbApiError as e:
+            if e.definite_rejection:
+                stops.pop(executor_id, None)
+                self._registry.save()
+                return issue(f"{detail}；开关已打开但停止被明确拒绝：{e!r}", False)
+            stops[executor_id] = stops[executor_id].model_copy(update={"error": repr(e)})
+            self._registry.save()
+            return issue(f"{detail}；开关已打开但停止结果未知：{e!r}，只查不重发", False)
+        await self._settle_foreign_stops()
+        if executor_id in stops:
+            return issue(f"{detail}；已按开关请求停止（保留仓位），还没确认终止", False)
+        return issue(f"{detail}；已按开关停止（保留仓位），余仓按无主仓走带 CID 的平仓", True)
 
     async def _repair_lifeboat(self, position_id: str) -> tuple[ReconcileIssue, bool]:
         """补挂保命止损。补不上的账本内持仓不能一直裸着：-2021 当轮平，其它原因连续几轮失败后平。"""
