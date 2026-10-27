@@ -1603,7 +1603,7 @@ function teamFlow(d) {
   prog.card = data && data.card && data.card.valid ? "done" : "wait";
   prog.market = d.market_progress;
   const node = (k, inCanvas) => {
-    if (k === "market") return `<div class="tf-node ${d.market_progress}" ${clickable("meeting", MARKET)} style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress, d.market_role)}</div>`;
+    if (k === "market") return `<a class="tf-node ${d.market_progress} ${d.selected === "market" ? "on" : ""}" href="#team/market" style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress, d.market_role)}</a>`;
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
@@ -1760,7 +1760,7 @@ async function showPrompts() {
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
-  const sel = d.roles.find((r) => r.role === d.selected);
+  const sel = d.roles.find((r) => r.role === d.selected) || d.market_role;
   window.__recs = d.records;
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
@@ -1770,9 +1770,9 @@ P.team = () => {
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
-      <span class="r">${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
+      <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
-      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
+      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "market" ? "最近没有总盘会的记录（出作战卡、大盘更新、开会失败都记在这里）。" : sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
       <div class="foot">最新 200 条（跨天），框里往下滚看更早的 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 

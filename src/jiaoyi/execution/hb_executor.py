@@ -438,6 +438,8 @@ class HbExecutorAdapter:
             for t in self._registry.data.positions.values()
         ):
             raise SymbolAlreadyHeld(f"{intent.symbol} 上一笔退出清理未确认，拒绝新开")
+        if intent.symbol in self._registry.data.emergency_exits:
+            raise SymbolAlreadyHeld(f"{intent.symbol} 对账员的无主/反手仓平仓尚未确认，拒绝新开")
         if self._protection is not None:
             await self._protection.preflight(intent.symbol)
         now = self._clock()
