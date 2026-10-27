@@ -1113,13 +1113,13 @@ class HbExecutorAdapter:
             kind="order_failed",
         )
 
-    async def _alert_trigger_rejected(self, pid: str, symbol: str, text: str) -> None:
+    async def _alert_trigger_rejected(self, pid: str, symbol: str, tag: str, text: str) -> None:
         await self._alert(
             AlertLevel.CRITICAL,
             "条件单触发后子单被交易所拒绝",
             f"{symbol} {pid}：{text}",
             symbol,
-            f"server_trigger_rejected:{pid}",
+            f"server_trigger_rejected:{pid}:{tag}",
             kind="order_failed",
         )
 

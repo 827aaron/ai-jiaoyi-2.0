@@ -86,6 +86,7 @@ class IncidentExchange:
 
     async def _algo(self, request: dict[str, Any]) -> dict[str, Any]:
         cid = request.get("clientAlgoId")
+        self.events.append(("algo", str(cid or request.get("algoId"))))
         for raw in self.algo.values():
             if raw["clientAlgoId"] == cid or raw["algoId"] == request.get("algoId"):
                 return raw
@@ -402,8 +403,89 @@ async def test_rejected_tp_while_position_open_rearms_and_alerts(tmp_path: Path)
     )
     assert [a.title for a in alerter.sent] == ["条件单触发后子单被交易所拒绝"]
     assert TP_CID in alerter.sent[0].body
+    old_tp = final.server_protection.legs[2]
+    assert (old_tp.state, old_tp.algo_status, old_tp.child_state) == (
+        "cancelled",
+        "REJECTED",
+        "absent",
+    )
+    assert old_tp.triggered_at is not None
+    exchange.events.clear()
+    exchange.child_lookup = ccxt.RequestTimeout("synthetic timeout")
+    del exchange.algo[TP_CID]
     assert await manager.sync(PID) == "armed"
+    assert ("algo", TP_CID) not in exchange.events
+    assert not exchange.actions("child_lookup") and not exchange.creates()
     assert len(alerter.sent) == 1
+
+
+def open_case(failed: int, **leg_changes: Any) -> tuple[dict[str, Any], IncidentExchange]:
+    """仓位还在，第 ``failed`` 条腿（0 保命单 / 1 止损 / 2 止盈）触发后子单被拒，其余仍 NEW。"""
+    ledger = open_ledger()
+    legs = ledger["server_protection"]["legs"]
+    legs[2].update(algo_status="NEW", triggered_at=None, child_state="absent")
+    legs[failed].update(leg_changes)
+    algo = {leg["client_order_id"]: live_algo(leg) for leg in legs[:2]}
+    algo[TP_CID] = tp_algo(algoStatus="NEW", triggerTime=0)
+    algo[legs[failed]["client_order_id"]].update(algoStatus="REJECTED", triggerTime=1793141024459)
+    return ledger, IncidentExchange(held=1194.7, algo=algo)
+
+
+@pytest.mark.parametrize(
+    "failed,leg_changes,reason",
+    [
+        (1, {}, CloseReason.STOP_LOSS),
+        (1, {"purpose": "trailing"}, CloseReason.TRAILING_STOP),
+        (0, {}, CloseReason.LIFEBOAT),
+    ],
+)
+async def test_rejected_stop_while_position_open_exits_without_rearm(
+    tmp_path: Path, failed: int, leg_changes: dict[str, Any], reason: CloseReason
+) -> None:
+    ledger, exchange = open_case(failed, **leg_changes)
+    registry, manager, _, alerter = build(tmp_path, ledger, exchange)
+    assert await manager.sync(PID) == "exit"
+    state = registry.get(PID).server_protection
+    assert (state.stage, state.exit_reason) == ("exiting", reason)
+    assert state.legs[failed].state == "cancelled"
+    assert not exchange.creates() and not exchange.actions("cancel")
+    assert [a.title for a in alerter.sent] == ["条件单触发后子单被交易所拒绝"]
+    assert "不再补挂" in alerter.sent[0].body
+
+
+async def test_take_profit_rejected_twice_exits_instead_of_rearming_again(tmp_path: Path) -> None:
+    ledger, exchange = open_case(2, algo_status="NEW")
+    exchange.algo[TP_CID].update(algoStatus="REJECTED", triggerTime=1793141024459)
+    registry, manager, _, alerter = build(tmp_path, ledger, exchange)
+    assert await manager.sync(PID) == "armed"
+    second = "br-tp-pos-42600c953a4c-2"
+    assert exchange.creates() == [second]
+    exchange.algo[second].update(algoStatus="REJECTED", triggerTime=1793141100000)
+    assert await manager.sync(PID) == "exit"
+    state = registry.get(PID).server_protection
+    assert (state.stage, state.exit_reason) == ("exiting", CloseReason.TAKE_PROFIT)
+    assert exchange.creates() == [second]
+    assert [a.dedup_key for a in alerter.sent] == [
+        f"server_trigger_rejected:{PID}:take_profit-1",
+        f"server_trigger_rejected:{PID}:take_profit-2",
+    ]
+    assert "第二次" in alerter.sent[1].body
+
+
+async def test_triggering_then_rejected_reports_the_exit_as_rejected_after_trigger(
+    tmp_path: Path,
+) -> None:
+    ledger, exchange = open_case(2)
+    exchange.algo[TP_CID].update(algoStatus="TRIGGERING")
+    registry, manager, _, alerter = build(tmp_path, ledger, exchange)
+    assert await manager.sync(PID) == "exit"
+    assert registry.get(PID).server_protection.exit_reason is CloseReason.TAKE_PROFIT
+    assert not alerter.sent
+    exchange.algo[TP_CID].update(algoStatus="REJECTED")
+    assert await manager.prepare_exit(PID)
+    assert [a.title for a in alerter.sent] == ["条件单触发后子单被交易所拒绝"]
+    assert "触发后被拒" in alerter.sent[0].body
+    assert registry.get(PID).server_protection.legs[2].state == "cancelled"
 
 
 async def test_rejected_tp_while_position_open_is_not_a_close_via_adapter_tick(

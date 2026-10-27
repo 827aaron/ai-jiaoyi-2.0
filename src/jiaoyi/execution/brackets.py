@@ -127,6 +127,9 @@ class StopTarget:
 StopNotify = Callable[[str, str, str], Awaitable[None]]
 """(position_id, symbol, 正文) → 发紧急告警；在同币锁外调用。"""
 
+TriggerNotify = Callable[[str, str, str, str], Awaitable[None]]
+"""(position_id, symbol, 去重标签「角色-代」, 正文) → 发紧急告警；在同币锁外调用。"""
+
 
 @dataclass(frozen=True)
 class EntryEvidence:
@@ -252,10 +255,10 @@ class BracketManager:
         self.trailing_book_critical_after_s = trailing_book_critical_after_s
         self.notify_stop_clamped: StopNotify | None = None
         """移动止损目标已越过标记价（被夹到可挂的最紧价，或本轮没换）时调用；执行器接上告警。"""
-        self.notify_trigger_rejected: StopNotify | None = None
-        """仓位仍在时某条腿触发后子单被交易所拒绝（不算退出，下一轮补挂）时调用；执行器接上告警。"""
+        self.notify_trigger_rejected: TriggerNotify | None = None
+        """某条腿触发后子单被交易所拒绝时调用；执行器接上告警。"""
         self._pending_notes: dict[str, list[str]] = {}
-        self._pending_rejections: dict[str, list[str]] = {}
+        self._pending_rejections: dict[str, list[tuple[str, str]]] = {}
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -458,14 +461,11 @@ class BracketManager:
         )
         if leg.state == "cancel_pending" and _settled(updated):
             updated = updated.model_copy(update={"state": "cancelled"})
-        if _trigger_failed(updated) and not _trigger_failed(leg):
-            _, state = self._current(pid)
-            if state.stage not in {"exiting", "cleanup", "done"}:
-                self._pending_rejections.setdefault(pid, []).append(
-                    f"{_role(updated)} 条件单 {updated.client_order_id}（algo {updated.algo_id}）"
-                    f"触发后交易所 {updated.algo_status}，没有子单、没有成交；仓位不当作已平，"
-                    "按现有仓位补挂这一侧保护"
-                )
+        if _trigger_failed(updated):
+            # 终态且已复核无子单：记为已撤，_refresh 不再每轮重查这张 algo。
+            updated = updated.model_copy(update={"state": "cancelled"})
+            if not _trigger_failed(leg):
+                self._on_trigger_failed(pid, leg, updated)
         self._save_leg(pid, updated)
         if updated.purpose == "lifeboat" and _live(updated):
             current, _ = self._current(pid)
@@ -503,6 +503,39 @@ class BracketManager:
             reason = _reason(updated)
             self._save(pid, stage="exiting", exit_reason=state.exit_reason or reason)
         return updated
+
+    def _on_trigger_failed(self, pid: str, old: ProtectiveLeg, leg: ProtectiveLeg) -> None:
+        """仓位还在时只有止盈补挂；止损/保命单被拒说明价格已越过止损线，同角色第二次被拒也退出。"""
+        _, state = self._current(pid)
+        role = _role(leg)
+        head = (
+            f"{role} 条件单 {leg.client_order_id}（algo {leg.algo_id}）触发后交易所 "
+            f"{leg.algo_status}，没有子单、没有成交"
+        )
+        tag = f"{role}-{leg.generation}"
+        log.warning("%s %s", pid, head)
+        if state.stage in {"exiting", "cleanup", "done"}:
+            if old.algo_status in _TRIGGERED:
+                self._pending_rejections.setdefault(pid, []).append(
+                    (
+                        tag,
+                        f"{head}；此前读到 {old.algo_status} 已进入退出，"
+                        "这次退出实为「触发后被拒」，按现有仓位继续退出",
+                    )
+                )
+            return
+        repeated = any(
+            x.client_order_id != leg.client_order_id and _role(x) == role and _trigger_failed(x)
+            for x in state.legs
+        )
+        if role == "take_profit" and not repeated:
+            text = f"{head}；仓位不当作已平，按现有仓位补挂止盈"
+        else:
+            reason = _reason(leg)
+            self._save(pid, stage="exiting", exit_reason=reason)
+            why = "同一角色第二次触发后被拒" if repeated else "止损线已被越过"
+            text = f"{head}；{why}，不再补挂，按 {reason.value} 退出"
+        self._pending_rejections.setdefault(pid, []).append((tag, text))
 
     async def _refresh(self, pid: str) -> ServerProtection:
         tracked, state = self._current(pid)
@@ -607,17 +640,18 @@ class BracketManager:
             await self._flush_notes(pid, tracked.record.symbol)  # 告警在锁外发，不拖住同币锁
 
     async def _flush_notes(self, pid: str, symbol: str) -> None:
-        for notes, notify in (
-            (self._pending_notes.pop(pid, []), self.notify_stop_clamped),
-            (self._pending_rejections.pop(pid, []), self.notify_trigger_rejected),
-        ):
-            if notify is None:
-                continue
-            for text in notes:
-                try:
-                    await notify(pid, symbol, text)
-                except Exception:  # 告警失败不能影响保护同步
-                    log.exception("保护告警发送失败：%s", pid)
+        notes, clamped = self._pending_notes.pop(pid, []), self.notify_stop_clamped
+        rejections, rejected = self._pending_rejections.pop(pid, []), self.notify_trigger_rejected
+        sends: list[Awaitable[None]] = []
+        if clamped is not None:
+            sends += [clamped(pid, symbol, text) for text in notes]
+        if rejected is not None:
+            sends += [rejected(pid, symbol, tag, text) for tag, text in rejections]
+        for send in sends:
+            try:
+                await send
+            except Exception:  # 告警失败不能影响保护同步
+                log.exception("保护告警发送失败：%s", pid)
 
     def live_stop_price(self, pid: str) -> float | None:
         """交易所上正在挂的普通止损（最高一代、最后回读明确 NEW）的触发价；没有就是 None。"""
@@ -1026,6 +1060,20 @@ class BracketManager:
         return changed
 
     async def prepare_exit(self, pid: str) -> bool:
+        tracked, _ = self._current(pid)
+        try:
+            return await self._prepare_exit(pid)
+        finally:
+            await self._flush_notes(pid, tracked.record.symbol)
+
+    async def flat_cleanup(self, pid: str) -> bool:
+        tracked, _ = self._current(pid)
+        try:
+            return await self._flat_cleanup(pid)
+        finally:
+            await self._flush_notes(pid, tracked.record.symbol)
+
+    async def _prepare_exit(self, pid: str) -> bool:
         """停入场并查清未决子单；普通只减仓保护留到真实零仓，不先撤最后 SL。
 
         用户接受条件单与 HB / 程序退出并发；只能用单向只减仓、实际余量和禁止新代仓限制风险，
@@ -1053,7 +1101,7 @@ class BracketManager:
                 self._save(pid, last_error=describe_error(error))
                 return False
 
-    async def flat_cleanup(self, pid: str) -> bool:
+    async def _flat_cleanup(self, pid: str) -> bool:
         tracked, _ = self._current(pid)
         async with self.registry.symbol_lock(tracked.record.symbol):
             try:

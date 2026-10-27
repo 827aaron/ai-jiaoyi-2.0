@@ -80,16 +80,21 @@ def _time(v: object) -> datetime | None:
     return t if t.tzinfo else None
 
 
-def _triggered(leg: dict[str, object]) -> bool:
-    filled = _num(leg.get("filled_quantity"))
-    if (
+def _trigger_failed(leg: dict[str, object]) -> bool:
+    """触发了但交易所没下出子单（REJECTED/EXPIRED、无子单、无成交）。"""
+    return bool(
         leg.get("triggered_at")
         and leg.get("algo_status") in _CLOSED_ALGO
         and leg.get("child_state") == "absent"
         and not leg.get("actual_order_id")
-        and not filled
-    ):
-        return False  # 触发后交易所没下出子单：和执行层一致，不算触发
+        and not _num(leg.get("filled_quantity"))
+    )
+
+
+def _triggered(leg: dict[str, object]) -> bool:
+    filled = _num(leg.get("filled_quantity"))
+    if _trigger_failed(leg):
+        return False  # 和执行层一致，不算触发
     return bool(
         leg.get("algo_status") in _TRIGGERED_ALGO
         or leg.get("actual_order_id")
@@ -151,6 +156,8 @@ def _leg_view(
         detail = "撤销中，未确认" if leg.get("state") == "cancel_pending" else "提交中，未确认"
     elif st == "unknown":
         detail = "子单状态未确认" if leg.get("child_state") != "absent" else "状态不明"
+    elif _trigger_failed(leg):
+        detail = "触发后被拒（无子单）"
     return LegView(
         role=role,
         purpose=str(leg.get("purpose") or "fixed"),
