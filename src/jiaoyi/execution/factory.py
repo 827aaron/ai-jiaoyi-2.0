@@ -100,6 +100,7 @@ def build_execution(
     protection_trailing_stop_mark_buffer_bps: float = 5.0,
     protection_trailing_min_step_bps: float = 5.0,
     protection_trailing_book_critical_after_s: float = 300.0,
+    position_mode_cache_s: float = 0.0,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -128,6 +129,7 @@ def build_execution(
         api_secret,
         testnet=mode is not RunMode.LIVE,
         demo=demo_trading,
+        position_mode_cache_s=position_mode_cache_s,
     )
     tz = risk.day_reset_tz
 

@@ -13,6 +13,8 @@ import contextlib
 import logging
 import math
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,6 +29,9 @@ log = logging.getLogger(__name__)
 
 STOP_PREFIX = "lb-"
 """保命止损的 clientOrderId 前缀，对账员靠它认出“自己的”条件单。"""
+
+
+_MODE_MISMATCH = re.compile(r'"code"\s*:\s*-4061\b')
 
 
 class ExchangeError(Exception):
@@ -404,6 +409,26 @@ def _bracket_child(order: ExchangeBracket, raw: dict[str, Any]) -> ExchangeBrack
     return replace(order, actual_order_status=str(status), filled_quantity=filled)
 
 
+_TRIGGER_FAILED = frozenset({"REJECTED", "EXPIRED"})
+
+
+def _trigger_failed(raw: dict[str, Any], order: ExchangeBracket) -> bool:
+    """触发了但交易所没下出子单：终态 REJECTED/EXPIRED、明确的空 actualOrderId、非零 triggerTime。
+
+    缺字段、null、CANCELED（撤单可能与触发竞速）都不算；调用方还须按 CID 复核没有子单。
+    """
+    actual, trigger = raw.get("actualOrderId"), raw.get("triggerTime")
+    return (
+        order.child_state == "unknown"
+        and order.actual_order_id is None
+        and order.algo_status in _TRIGGER_FAILED
+        and order.triggered_at is not None
+        and actual in ("", "0", 0)
+        and not isinstance(actual, bool)
+        and not isinstance(trigger, bool)
+    )
+
+
 def _bracket_settled(order: ExchangeBracket) -> bool:
     """仅说明这张 algo 及其已知 child 不再工作，不证明账户已平仓。"""
     if order.child_state == "identified":
@@ -666,6 +691,7 @@ class CcxtBinanceFutures:
         testnet: bool,
         demo: bool = True,
         timeout_ms: int = 5000,
+        position_mode_cache_s: float = 0.0,
     ):
         import ccxt.async_support as ccxt
 
@@ -690,6 +716,19 @@ class CcxtBinanceFutures:
         self._markets_loaded = False
         self._bracket_submit_locks: dict[str, asyncio.Lock] = {}
         self._bracket_submitted: set[str] = set()
+        self.position_mode_cache_s = position_mode_cache_s
+        inner = self._ex.handle_errors
+
+        def handle_errors(code: Any, reason: Any, url: Any, method: Any, *rest: Any) -> Any:
+            # Every HTTP response passes here, so a -4061 from any call site drops the cache.
+            if rest and _MODE_MISMATCH.search(str(rest[1])):
+                self.forget_position_mode()
+            return inner(code, reason, url, method, *rest)
+
+        self._ex.handle_errors = handle_errors
+
+    def forget_position_mode(self) -> None:
+        self._position_mode_cached: tuple[float, Literal["one_way", "hedge"]] | None = None
 
     async def _ready(self) -> None:
         if not self._markets_loaded:
@@ -750,6 +789,7 @@ class CcxtBinanceFutures:
                 qty = _evidence_number(row["contracts"], zero=True)
                 info = row.get("info")
                 if not isinstance(info, dict) or info.get("positionSide") != "BOTH":
+                    self.forget_position_mode()
                     raise ValueError("持仓模式字段未知")
                 amount = Decimal(str(info.get("positionAmt")))
                 if not amount.is_finite() or abs(amount) != Decimal(str(qty)):
@@ -902,8 +942,40 @@ class CcxtBinanceFutures:
         order_type = str(info.get("orderType") or info.get("type") or raw.get("type") or "")
         return order_type.upper().startswith("STOP")
 
-    async def position_mode(self) -> Literal["one_way", "hedge"]:
-        """只读，不切换模式；未知响应不能当单向模式。"""
+    async def position_mode(self, *, fresh: bool = False) -> Literal["one_way", "hedge"]:
+        """只读，不切换模式；未知响应不能当单向模式。
+
+        ``position_mode_cache_s`` > 0 serves a successful read again for that many seconds
+        (0 = every call asks Binance). The request weighs 30 of the client's 20-per-second
+        rate budget, and Binance refuses to switch modes while a position or open order
+        exists, so within a holding period the answer cannot change. ``fresh`` (preflight
+        before opening) and any error, including a -4061 or a non-BOTH position, bypass or
+        drop the cache."""
+        ttl = getattr(self, "position_mode_cache_s", 0.0)
+        if fresh or ttl <= 0:
+            return await self._read_position_mode(ttl)
+        hit = self._cached_position_mode(ttl)
+        if hit is not None:
+            return hit
+        # Cold cache: callers arriving together share one request instead of each paying 30.
+        lock = self.__dict__.setdefault("_position_mode_lock", asyncio.Lock())
+        async with lock:
+            hit = self._cached_position_mode(ttl)
+            if hit is not None:
+                return hit
+            return await self._read_position_mode(ttl)
+
+    def _cached_position_mode(self, ttl: float) -> Literal["one_way", "hedge"] | None:
+        cached = getattr(self, "_position_mode_cached", None)
+        clock: Callable[[], float] = getattr(self, "_mode_clock", time.monotonic)
+        if cached is not None and clock() - cached[0] < ttl:
+            mode: Literal["one_way", "hedge"] = cached[1]
+            return mode
+        return None
+
+    async def _read_position_mode(self, ttl: float) -> Literal["one_way", "hedge"]:
+        clock: Callable[[], float] = getattr(self, "_mode_clock", time.monotonic)
+        self.forget_position_mode()
         try:
             raw = await self._ex.fapiPrivateGetPositionSideDual()
             hedged = _evidence_bool(raw, "dualSidePosition")
@@ -911,7 +983,10 @@ class CcxtBinanceFutures:
             raise ExchangeError(
                 "查询持仓模式失败或响应未知", transient=is_transient(error)
             ) from error
-        return "hedge" if hedged else "one_way"
+        mode: Literal["one_way", "hedge"] = "hedge" if hedged else "one_way"
+        if ttl > 0:
+            self._position_mode_cached = (clock(), mode)
+        return mode
 
     async def normalized_bracket_spec(
         self, symbol: str, quantity: float, trigger_price: float
@@ -1182,6 +1257,8 @@ class CcxtBinanceFutures:
                     {"symbol": symbol, "orderId": order.actual_order_id}
                 )
                 order = _bracket_child(order, actual)
+            elif _trigger_failed(raw, order):
+                order = await self._no_child_after_trigger(order)
             return order
         except Exception as error:
             raise ExchangeError(
@@ -1230,11 +1307,39 @@ class CcxtBinanceFutures:
                     {"symbol": symbol, "orderId": order.actual_order_id}
                 )
                 order = _bracket_child(order, actual)
+            elif _trigger_failed(raw, order):
+                order = await self._no_child_after_trigger(order)
             return order
         except Exception as error:
             raise ExchangeError(
                 "保命单或实际子订单证据不完整", transient=is_transient(error)
             ) from error
+
+    async def _no_child_after_trigger(self, order: ExchangeBracket) -> ExchangeBracket:
+        """触发后被拒的条件单：按 clientAlgoId 复核，查无或同名单已终态零成交才认作没有子单。
+
+        Binance 不保证子单 CID 等于 clientAlgoId，这一查只能排除同名子单；查到在场或有成交的单、
+        身份不符或查询失败都保留 unknown（由调用方抛错）。
+        """
+        import ccxt.async_support as ccxt
+
+        try:
+            raw = await self._ex.fapiPrivateGetOrder(
+                {"symbol": order.symbol, "origClientOrderId": order.client_order_id}
+            )
+        except ccxt.OrderNotFound:
+            return replace(order, child_state="absent")
+        if (
+            isinstance(raw, dict)
+            and raw.get("symbol") == order.symbol
+            and raw.get("clientOrderId") == order.client_order_id
+            and raw.get("side") == order.close_side.upper()
+            and _close_bool(raw.get("reduceOnly"))
+            and raw.get("status") in _CHILD_TERMINAL - {"FILLED"}
+            and _bracket_number(raw.get("executedQty"), zero=True) == 0
+        ):
+            return replace(order, child_state="absent")
+        raise ValueError("触发后被拒的条件单仍查到在场或有成交的同名订单，子单不能认作不存在")
 
     async def open_brackets(self, symbol: str | None = None) -> list[ExchangeBracket]:
         """仅返回 br-sl/br-tp 角色；不接管 lifeboat 或用户单，不推导子单成交量。"""

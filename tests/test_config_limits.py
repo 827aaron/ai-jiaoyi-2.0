@@ -128,6 +128,7 @@ OPTIONAL_APP_FIELDS = {
     "protection_trailing_stop_mark_buffer_bps",  # 默认 5
     "protection_trailing_min_step_bps",  # 默认 5
     "protection_trailing_book_critical_after_s",  # 默认 300
+    "position_mode_cache_s",  # 默认 0，老配置文件没有这一行
     "trade_notices",
     *(f"notify_{k}" for k in KINDS),
     "credit_low_floor_usd",

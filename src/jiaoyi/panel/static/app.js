@@ -179,10 +179,20 @@ const CMD = {
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
 let onOk = null;
 
+// 面板密码只记在这个变量里：刷新页面就没了，不进 localStorage / sessionStorage
+let panelPw = "";
+const isPwFailure = (status, detail) => status === 401 || status === 403 || /密码|锁定/.test(typeof detail === "string" ? detail : "");
+function rememberPw(body, ok, status, detail) {
+  if (!body || !body.password) return;
+  if (ok) panelPw = body.password;
+  else if (isPwFailure(status, detail)) panelPw = "";
+}
+
 async function post(url, body) {
   const r = await fetch(url, { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json", "X-Jiaoyi-Panel": "1" }, body: JSON.stringify(body) });
   let j = {};
   try { j = await r.json(); } catch (e) { /* 非 JSON 也当失败 */ }
+  rememberPw(body, r.ok, r.status, j.detail);
   if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : `出错了（${r.status}）`);
   return j;
 }
@@ -193,14 +203,14 @@ function ask(title, body, ok, danger, submit) {
     <div class="msg small" id="dlg-msg"></div>
     <div class="acts"><button class="btn" data-close="1">取消</button><button class="btn ${danger ? "b-kill" : "b-go"}" data-ok="1">${ok}</button></div></div></div>`;
   onOk = submit;
-  const first = $("#layer input") || $("#layer [data-ok]");
+  const first = $("#layer input:not(.vh)") || $("#layer [data-ok]");
   first.focus();
 }
 function dlgMsg(html, k = "") { const m = $("#dlg-msg"); if (m) { m.className = "msg small " + k; m.innerHTML = html; } }
 
-function pwField(c) {
+function pwField(c, { prefill = true } = {}) {
   if (!c.pw_set) return `<div class="note warn">还没有设置面板密码：先在 Mac mini 终端运行 <code>jiaoyi set-panel-password</code>。</div>`;
-  return `<label class="pw">面板密码<input type="password" id="dlg-pw" autocomplete="current-password"></label><div class="dim small">连错 5 次锁 15 分钟。</div>`;
+  return `<form id="dlg-pw-form" autocomplete="on"><input type="text" name="username" autocomplete="username" value="jiaoyi-panel" class="vh" tabindex="-1" aria-hidden="true" readonly><label class="pw">面板密码<input type="password" id="dlg-pw" name="password" autocomplete="current-password" value="${prefill ? esc(panelPw) : ""}"></label></form><div class="dim small">连错 5 次锁 15 分钟。</div>`;
 }
 
 // 设置页常显：有改动没生效时高亮「重启生效」，否则是普通的「重启主程序」（验收时随时要重启）
@@ -375,7 +385,7 @@ async function switchMode(target) {
   if (target === "paper") body = `<p>切回模拟盘：不再真下单${m.armed ? "，实盘同时上锁" : ""}。</p>${warn}`;
   else if (target === "testnet") body = `<p>切到测试网${m.armed ? "（实盘同时上锁）" : ""}。</p>${list}${warn}${pwField(c)}`;
   else body = `<p>切到实盘：用真钱在币安主网下单。每条提示都勾上，再原样输入确认词和面板密码。</p>${list}${warn}
-    <label class="pw">确认词（原样输入「${esc(m.confirm_word)}」）<input type="text" id="dlg-word" autocomplete="off"></label>${pwField(c)}`;
+    <label class="pw">确认词（原样输入「${esc(m.confirm_word)}」）<input type="text" id="dlg-word" autocomplete="off"></label>${pwField(c, { prefill: false })}`;
   ask(`切换交易模式 · ${name}`, body, ok, target === "live", async () => {
     const pw = $("#dlg-pw");
     const payload = { mode: target, password: pw ? pw.value : null };
@@ -420,6 +430,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDlg();
   if (e.key === "Enter" && e.target.closest && e.target.closest("#layer") && e.target.tagName === "INPUT") { e.preventDefault(); const b = $("#layer [data-ok]"); if (b) b.click(); }
 });
+document.addEventListener("submit", (e) => { if (e.target.id === "dlg-pw-form") { e.preventDefault(); const b = $("#layer [data-ok]"); if (b) b.click(); } });
 document.addEventListener("click", async (e) => {
   if (e.target.dataset && e.target.dataset.close) return closeDlg();
   if (e.target.dataset && e.target.dataset.ok && onOk) {
@@ -2119,7 +2130,7 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
-const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -2243,6 +2254,7 @@ const PLAIN = {
   card_pick_max: "军师团每次最多挑几个币",
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
   protection_readback_grace_s: "条件单回执后查不到，最多等几秒再算没挂上（0 = 不等）",
+  position_mode_cache_s: "持仓模式查一次后几秒内不再查（0 = 每次都查）",
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
@@ -2280,6 +2292,9 @@ const PLAIN = {
   keeper_price_max_age_s: "管家复查时行情最多旧几秒",
   frozen_peak_exit_on: "冻结盈利价回访（仅之后新开的 Demo 仓）",
   frozen_peak_exit_after_s: "从真实首笔成交起几分钟后冻结盈利价",
+  frozen_peak_evidence_mode: "冻结盈利价的交易所证据怎么读",
+  frozen_peak_evidence_interval_s: "后台读：每笔仓隔几秒读一次证据",
+  frozen_peak_evidence_max_age_s: "后台读：证据超过几秒就不算（0 = 不限）",
   giveback_on: "回吐保护开关（代码规则，不问模型）",
   giveback_close_pct: "回吐保护：最高浮盈吐掉百分之几就全平",
   giveback_arm_r: "回吐保护：最高浮盈到过几倍止损距离才开始看",
@@ -2692,11 +2707,11 @@ const ROLES = [
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
     { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
-    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。只在配置文件改，改后重启；秒数 0、触发价 CONTRACT_PRICE = 原行为。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*"] },
+    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。只在配置文件改，改后重启；秒数 0、触发价 CONTRACT_PRICE = 原行为。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s"] },
-    { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s"] },
+    { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },

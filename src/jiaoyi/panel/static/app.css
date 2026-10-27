@@ -664,3 +664,4 @@ section.card > .prompt-line { padding: 2px 0; }
 .card.chart-full .chart { flex: 1 1 auto; height: auto; min-height: 200px; }
 .card.chart-full .trail-note, .card.chart-full .lbl, .card.chart-full .log { display: none; }
 .chart-fs-btn { margin-left: 8px; font-size: 16px; line-height: 1; }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; opacity: 0; }
