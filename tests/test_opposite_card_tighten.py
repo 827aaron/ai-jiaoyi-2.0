@@ -190,6 +190,26 @@ def test_no_market_data_only_tightens_never_closes(now: datetime) -> None:
     assert rec.rows[-1]["output"]["card_rule"]["branch"] == "confirmed_close"
 
 
+def test_stale_price_never_confirms_an_opposite_card(now: datetime) -> None:
+    """行情过旧（keeper_price_max_age_s）：按没有行情处理，只收紧不平，也不拿旧价当起点。"""
+    cfg = TIGHT.model_copy(update={"keeper_price_max_age_s": 20.0})
+    k, rec, _, _ = make_keeper(now, cfg, price=[67000.0])  # 新鲜的话会确认（亏 8R）
+    later = now + timedelta(seconds=60)
+    v = k.review_card_rule(position(now), later)
+    assert v is not None and v.action == "hold" and "没有行情快照" in v.reason
+    rule = rec.rows[-1]["output"]["card_rule"]
+    assert rule["branch"] == "no_market_data_tighten" and rule["confirm"] is None
+    assert rule["price"] is None and rule["ref_price"] is None and rule["price_stale_s"] == 60
+    assert k._opposite_ref.get(position(now).position_id, {}) == {}
+    assert k._opposite_first[position(now).position_id][1] is None
+    v2 = k.review_card_rule(position(now), now)  # 行情新鲜了：照常确认
+    assert v2 is not None and v2.action == "close"
+    # 默认原规则（直接平）不看行情，过旧也照平
+    legacy, _, _, _ = make_keeper(now, FAST.model_copy(update={"keeper_price_max_age_s": 20.0}))
+    v3 = legacy.review_card_rule(position(now), later)
+    assert v3 is not None and v3.action == "close"
+
+
 def test_counterfactual_keeps_first_opposite_event_across_new_instructions(
     now: datetime,
 ) -> None:

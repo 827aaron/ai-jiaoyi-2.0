@@ -422,6 +422,14 @@ class FastLoopConfig(Contract):
         default=0.85, ge=0.5, le=1.0, description="概率明显过线时不用等第二次确认。"
     )
     keeper_confirmations: int = Field(default=2, ge=1, le=5, description="连续几次一致才平仓。")
+    keeper_price_max_age_s: float = Field(
+        default=0,
+        ge=0,
+        le=600,
+        allow_inf_nan=False,
+        description="管家复查时这个币的行情最多旧几秒（时钟同开仓检查）；超过就这一轮跳过、"
+        "维持现状，不平仓、不问模型，连续计数不变。0 = 不查（现状）。",
+    )
     frozen_peak_exit_on: bool = Field(
         default=True,
         description="Enable observed profit target freezing for new Demo positions only.",
@@ -610,6 +618,14 @@ class FastLoopConfig(Contract):
     entry_limit_chase: bool = Field(
         default=False,
         description="挂单等到时没成交改市价追进。档位推荐 8h 以上开，4h 以下关（撤单不开）。",
+    )
+    chase_price_max_age_s: float = Field(
+        default=0,
+        ge=0,
+        le=600,
+        allow_inf_nan=False,
+        description="改市价追进前按现价复查进场区间时，这个币的行情最多旧几秒（和开仓检查同一个"
+        "时钟：成交 / 盘口 / 标记价任一最后更新）；超过就这次不追。0 = 不查（现状）。",
     )
     breakeven_on: bool = Field(
         default=False,

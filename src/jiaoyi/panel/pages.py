@@ -1550,6 +1550,8 @@ OFF_SWITCHES: dict[str, OffSwitch] = {
         ("app", "reconciler_executor_stop_retry_rounds", "关闭", "已关闭（只查不重发）", 3),
         ("fast_loop", "regime_flip_min_gap_min", "不限", "不限", 60),
         ("fast_loop", "regime_flip_check_min", "关闭", "已关闭", 5),
+        ("fast_loop", "chase_price_max_age_s", "关闭", "已关闭", 5),
+        ("fast_loop", "keeper_price_max_age_s", "关闭", "已关闭", 30),
     )
 }
 """填 0 = 关闭 / 不限的设置（键 = 段.键），面板的开关和只读显示都从这张表来。

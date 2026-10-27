@@ -76,6 +76,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_close_p",
         "keeper_close_p_strong",
         "keeper_confirmations",
+        "keeper_price_max_age_s",
         "frozen_peak_exit_on",
         "frozen_peak_exit_after_s",
         "frozen_peak_evidence_mode",
@@ -110,6 +111,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "entry_limit_offset_stop",
         "entry_limit_wait_min",
         "entry_limit_chase",
+        "chase_price_max_age_s",
         # 哨兵阈值 / 开关
         "volume_surge_live",
         "session_cme_open",
