@@ -81,6 +81,7 @@ max_retries = 6
 # event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / signal_against_card / news_high_impact / stale_card_on_entry
 # event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久
 # event_max_per_day = 12          # 每个交易日最多几场临时会；0 = 不限
+# key_level_trigger = "outside"  # key_level_break 怎么算：outside = 价格在关键位外侧就算（还在外面就隔够间隔再开）；cross = 出卡后价格从里侧穿到外侧那一下才算，出卡时已在外侧的位要等回到里侧再穿
 # move_since_card_atr = 3.0       # 离上次开会的价格走了几倍 ATR 算 move_since_card
 # predictor_against_runs = 2      # 预测员连续几次看反作战卡才算
 # entry_max_card_age_min = 360    # 开仓前卡龄上限（分钟，12h 360 / 24h 480；0 = 不查）：超了这次信号不开，先补会
