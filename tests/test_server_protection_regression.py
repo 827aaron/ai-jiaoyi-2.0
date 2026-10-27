@@ -149,11 +149,13 @@ class EvidenceExchange:
         return self._get(algo_id, client_order_id)
 
     def _get(self, algo_id, client_order_id):
-        if client_order_id in self.hidden:
-            return None
         if client_order_id is not None:
-            return self.orders.get(client_order_id)
-        return next((o for o in self.orders.values() if o.algo_id == algo_id), None)
+            order = self.orders.get(client_order_id)
+        else:
+            order = next((o for o in self.orders.values() if o.algo_id == algo_id), None)
+        if order is None or order.client_order_id in self.hidden:
+            return None  # 按 algoId 查也同样查无，模拟交易所读延迟。
+        return order if algo_id is None or order.algo_id == algo_id else None
 
     async def open_brackets(self, symbol: str | None = None) -> list[ExchangeBracket]:
         return [

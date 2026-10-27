@@ -975,6 +975,14 @@ class AppConfig(Contract):
         description="对账员遇到不在账本里的币安仓位 / hummingbot 执行器时直接平掉。"
         "默认只告警（可能是你手动开的）；要打开请在 M4 小额实盘前自己决定。",
     )
+    protection_readback_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=30.0,
+        description="Demo 托管保护：本程序刚提交、交易所回执已接受的条件单，回执后这么多秒内"
+        "查不到就按 algoId 只读重试（不重发、不当已撤、不建新代）；过时仍查不到照旧报保护未确认。"
+        "0 = 不等（原行为）。改后重启生效。",
+    )
     predictor: PredictorConfig = Field(
         default_factory=PredictorConfig, description="预测员运行方式，见 ``[predictor]``。"
     )
