@@ -45,6 +45,18 @@ def test_hot_names_are_real_fields() -> None:
     assert not hotconfig.HOT_RISK & {"day_reset_tz", "taker_fee_bps", "max_spread_bps"}
 
 
+def test_panel_only_card_score_settings_do_not_ask_for_a_restart(tmp_path: Path) -> None:
+    """方向记分的两个设置只有面板用：改了不能让面板提示「重启交易程序」。"""
+    app, _, _ = _running(tmp_path)
+    risk, slow = app.risk_cfg, app.slow_cfg
+    before = restart_fingerprint(risk, app.app_cfg, slow)
+    changed = app.app_cfg.model_copy(
+        update={"card_score_every_min": 0, "card_score_window_days": 7}
+    )
+    assert restart_fingerprint(risk, changed, slow) == before
+    assert "app.card_score_every_min" in hotconfig.hot_keys()
+
+
 def test_hot_edit_is_applied_in_place(tmp_path: Path) -> None:
     app, paths, data = _running(tmp_path)
     risk, fast = app.risk_cfg, app.app_cfg.fast_loop  # 部件手里拿的就是这两个对象

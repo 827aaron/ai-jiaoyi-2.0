@@ -162,6 +162,9 @@ HOT_APP: frozenset[str] = frozenset(
         "trade_notices",
         "credit_low_floor_usd",
         "credit_resend_hours",
+        # 方向记分只有面板用（面板每轮现读），主循环不看：改了不该提示重启
+        "card_score_every_min",
+        "card_score_window_days",
         *(field_of(k) for k in KINDS),  # Telegram 告警类别开关
     }
 )

@@ -1029,9 +1029,29 @@ class AppConfig(Contract):
         le=168,
         description="同一条额度提醒（快用完 / 被拒）多久重复推一次，单位小时。",
     )
+    card_score_every_min: int = Field(
+        default=60,
+        ge=0,
+        le=1440,
+        description="面板每隔多少分钟给窗口走完的作战卡补算方向记分（发布时刻起算、扣掉同期币池，"
+        "写 data/card_score/）。只读主网公开 K 线，不影响任何交易判断；0 = 不算。"
+        "只有面板用，改了不用重启主循环，面板这一轮等完（最多一个间隔）后生效。",
+    )
+    card_score_window_days: int = Field(
+        default=30,
+        ge=0,
+        le=365,
+        description="方向记分汇总最近多少天出的卡（逐卡结果照样全留）；0 = 全部。"
+        "只有面板用，改了不用重启主循环。",
+    )
     notify_meeting_paused: bool = Field(
         default=True,
         description="推 Telegram：军师团因失败或当日花费超限暂停开会时推。",
+    )
+    notify_spend_alert: bool = Field(
+        default=True,
+        description="推 Telegram：军师团日上限设为不限时，当天花费超过本档默认日上限"
+        "提醒一次（只提醒，不停会）。",
     )
     notify_control: bool = Field(
         default=True,

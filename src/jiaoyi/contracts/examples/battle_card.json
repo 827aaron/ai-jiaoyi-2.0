@@ -52,7 +52,8 @@
       "expires_at": "2026-10-22T08:00:00Z",
       "meeting_id": "BTCUSDT-20260101T000000",
       "source_market_view_id": null,
-      "source_regime": null
+      "source_regime": null,
+      "outlook": null
     },
     {
       "symbol": "TSLAUSDT",
@@ -83,7 +84,8 @@
       "expires_at": null,
       "meeting_id": null,
       "source_market_view_id": null,
-      "source_regime": null
+      "source_regime": null,
+      "outlook": null
     }
   ],
   "refresh_reason": "scheduled",

@@ -227,6 +227,16 @@ class _ChaseHook(Protocol):
     async def open_chase(self, intent: OrderIntent) -> PositionRecord: ...
 
 
+SPEND_ALERT_TITLE = "AI 花费超过本档默认日上限（不限模式，只提醒）"
+
+
+@runtime_checkable
+class _SpendAlerts(Protocol):
+    """日上限设为不限时，花费过了本档默认上限的提醒（不停会）。"""
+
+    def take_spend_alert(self) -> str | None: ...
+
+
 @runtime_checkable
 class _RefreshGate(Protocol):
     """军师团开会的总闸：失败退避 / 日花费上限，以及要推送的提示。"""
@@ -1909,7 +1919,13 @@ class Runner:
         if isinstance(cards, _RefreshGate):
             while (notice := cards.take_notice()) is not None:
                 await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice, "meeting_paused")
-            if not cards.may_refresh(now):
+            allowed = cards.may_refresh(now)
+            if isinstance(
+                cards, _SpendAlerts
+            ):  # 日上限设为不限：花费过线只提醒，单独一类、单独标题
+                while (alert := cards.take_spend_alert()) is not None:
+                    await self.app._alert(AlertLevel.WARN, SPEND_ALERT_TITLE, alert, "spend_alert")
+            if not allowed:
                 return  # 失败退避中或当日花费超限；定时兜底也不能绕过
         if is_stub(cards):
             return

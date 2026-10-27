@@ -30,10 +30,17 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    WithJsonSchema,
+    field_validator,
+)
 
 from jiaoyi.contracts import (
     BattleCard,
@@ -54,7 +61,15 @@ from jiaoyi.contracts import (
 from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.sentinel.regime_flip import Direction
-from jiaoyi.slow import binance_gate, market_table, ta_nodes, ta_prompts, ta_roles
+from jiaoyi.slow import (
+    binance_gate,
+    card_outlook,
+    market_table,
+    ta_nodes,
+    ta_prompts,
+    ta_roles,
+)
+from jiaoyi.slow.bias_fix import LEGACY_SETUP, BiasFix, MeetingSetup, resolve
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
@@ -154,6 +169,8 @@ class TradingAgentsSettings:
     reasoning_effort: str = "low"
     # 开会过程实时落盘的目录（面板读）；空 = 不落盘。见 meeting_live.py
     live_dir: str = ""
+    # 偏空整改开关和对照比例（见 bias_fix.py）；默认 = 现状
+    bias_fix: BiasFix = field(default_factory=BiasFix)
 
 
 def prompt_params(s: TradingAgentsSettings) -> ta_prompts.PromptParams:
@@ -169,22 +186,39 @@ def perp_context(p: ta_prompts.PromptParams, group: str = "manager") -> str:
 PERP_CONTEXT = perp_context(ta_prompts.PromptParams())
 
 
+def setup_overrides(setup: MeetingSetup) -> dict[str, str]:
+    """这场会和现状不同的偏空整改设置（全是现状就是空的，配置和改动前一字不差）。"""
+    return {
+        k: getattr(setup, k)
+        for k in ta_nodes.SETUP_KEYS
+        if getattr(setup, k) != getattr(LEGACY_SETUP, k)
+    }
+
+
 def build_config(
-    base: Mapping[str, Any], s: TradingAgentsSettings, *, crypto_news: bool = False
+    base: Mapping[str, Any],
+    s: TradingAgentsSettings,
+    *,
+    crypto_news: bool = False,
+    setup: MeetingSetup = LEGACY_SETUP,
 ) -> dict[str, Any]:
-    """在 TradingAgents 的 ``DEFAULT_CONFIG`` 上叠加我们的设置，返回新字典。"""
+    """在 TradingAgents 的 ``DEFAULT_CONFIG`` 上叠加我们的设置，返回新字典。
+    ``setup`` 是这场会实际用的偏空整改设置（默认 = 现状），
+    节点和数据工具从 ``jiaoyi_prompt`` 读。"""
     cfg = dict(base)
     cfg.update(
         llm_provider=s.provider,
         quick_think_llm=s.quick_model,
         deep_think_llm=s.deep_model,
-        output_language=f"{s.output_language}. {perp_context(prompt_params(s))}",
+        output_language=f"{s.output_language}. "
+        + ta_prompts.perp_context(prompt_params(s), mirror=setup.bear_bull_symmetry == "mirror"),
         **{
             ta_nodes.PROMPT_KEY: {
                 "hold": prompt_params(s).hold,
                 "hold_minutes": s.hold_minutes,
                 "lean": s.lean_size_tier.value,
                 "lang": s.output_language,
+                **setup_overrides(setup),
             }
         },
         max_debate_rounds=s.debate_rounds,
@@ -315,8 +349,44 @@ def set_liquidation_totals(totals: Mapping[str, float]) -> None:
     _LIQ_TOTALS = totals
 
 
+FUNDING_LABEL_LEGACY = "(positive: longs pay, crowded long; negative: the opposite)"
+FUNDING_LABEL_NEUTRAL = (
+    "(positive: longs pay shorts; negative: shorts pay longs; Binance baseline is +0.01% per "
+    "8h{interval}. Funding near the baseline is the normal resting rate, not a sign of "
+    "crowding: call longs crowded only when funding is well above the baseline, and shorts "
+    "crowded only when it is well below the baseline)"
+)
+"""资金费率那一行的说明（``funding_label``，见 bias_fix.py）。legacy 把任何正费率都叫多头拥挤。
+neutral 的 {interval}：结算间隔不是 8 小时的币，按币安「利率 0.03%/天」把基准折算到每次结算。"""
+
+
+def funding_interval_h(funding: Sequence[Mapping[str, Any]]) -> float | None:
+    """从相邻两次结算的 ``fundingTime`` 间隔算这个币几小时结算一次（取中位数）；算不出返回 None。"""
+    times = sorted(int(f["fundingTime"]) for f in funding if f.get("fundingTime") is not None)
+    gaps = sorted(b - a for a, b in pairwise(times) if b > a)
+    if not gaps:
+        return None
+    hours = round(gaps[len(gaps) // 2] / 3_600_000)
+    return float(hours) if hours >= 1 else None
+
+
+def neutral_funding_label(interval_h: float | None) -> str:
+    if interval_h is None:
+        part = ""
+    elif interval_h == 8:
+        part = "; this coin settles every 8h"
+    else:
+        part = (
+            f"; this coin settles every {interval_h:g}h, so the baseline is "
+            f"{0.01 * interval_h / 8:+.4f}% per settlement"
+        )
+    return FUNDING_LABEL_NEUTRAL.replace("{interval}", part)
+
+
 def format_derivatives(
-    funding: Sequence[Mapping[str, Any]], oi: Sequence[Mapping[str, Any]]
+    funding: Sequence[Mapping[str, Any]],
+    oi: Sequence[Mapping[str, Any]],
+    funding_label: str = "legacy",
 ) -> str:
     """资金费率历史 + 持仓量 24 小时变化 → 给分析师看的一段文字。纯函数，便于测试。"""
     lines = ["## Derivatives data (Binance USDT-M perpetual)"]
@@ -326,10 +396,12 @@ def format_derivatives(
         lines.append(
             f"- Funding rate (%, last {min(len(rates), 6)} settlements, oldest to newest): {hist}"
         )
-        lines.append(
-            f"- Latest funding rate {rates[-1]:+.4f}% "
-            "(positive: longs pay, crowded long; negative: the opposite)"
+        label = (
+            neutral_funding_label(funding_interval_h(funding))
+            if funding_label == "neutral"
+            else FUNDING_LABEL_LEGACY
         )
+        lines.append(f"- Latest funding rate {rates[-1]:+.4f}% {label}")
     if len(oi) >= 2:
         first, last = float(oi[0]["sumOpenInterestValue"]), float(oi[-1]["sumOpenInterestValue"])
         if first > 0:
@@ -358,7 +430,9 @@ def derivatives_context(symbol: str, end: datetime) -> str:
             {"symbol": sym, "period": "1h", "limit": 25, "endTime": end_ms},
         )
         o.raise_for_status()
-        text = format_derivatives(f.json(), o.json())
+        text = format_derivatives(
+            f.json(), o.json(), ta_nodes.meeting_setting("funding_label", "legacy")
+        )
         if sym in _LIQ_TOTALS:
             text += "\n" + describe_total(_LIQ_TOTALS[sym])
         return text
@@ -851,11 +925,19 @@ class _LevelDraft(BaseModel):
 
 
 _MUST_WRITE = ("key_levels", "allowed_signals")
+_OUTLOOK_FIELDS = ("market_dir", "market_dir_evidence", "rel_dir", "rel_dir_evidence")
 
 
 def _require_in_schema(schema: dict[str, Any]) -> None:
     required = schema.setdefault("required", [])
-    required.extend(f for f in _MUST_WRITE if f not in required)
+    required.extend(f for f in (*_MUST_WRITE, *_OUTLOOK_FIELDS) if f not in required)
+
+
+def _enum(values: Sequence[str]) -> WithJsonSchema:
+    return WithJsonSchema({"type": "string", "enum": list(values)})
+
+
+_Text = Annotated[str | None, WithJsonSchema({"type": "string"})]
 
 
 def omitted_fields(draft: BaseModel, has_candidates: bool) -> list[str]:
@@ -903,6 +985,31 @@ class _CardSymbolDraft(BaseModel):
         description="Upper edge of the entry zone (price); leave empty if the conclusion gave none",
     )
     reason: str = Field(min_length=1, description="Chinese, one or two sentences")
+    # 只记录的两个判断（CardOutlook），排在最后：模型先定方向再写它们。发给模型的 schema 里是
+    # 必填的枚举，解析时什么都收（漏写、写错由 card_outlook 记 None 和原因），绝不让转卡失败
+    market_dir: Annotated[str | None, _enum(card_outlook.MARKET_DIRS)] = Field(
+        default=None,
+        description="Fixed next-4-hour window, independent of the holding time: where the "
+        "equal-weight pool average moves",
+    )
+    market_dir_evidence: _Text = Field(
+        default=None, description="Chinese, one brief sentence quoting numbers"
+    )
+    rel_dir: Annotated[str | None, _enum(card_outlook.REL_DIRS)] = Field(
+        default=None,
+        description="Fixed next-4-hour window, independent of the holding time: this coin "
+        "against the equal-weight pool average",
+    )
+    rel_dir_evidence: _Text = Field(
+        default=None, description="Chinese, one brief sentence quoting numbers"
+    )
+
+    @field_validator(*_OUTLOOK_FIELDS, mode="before")
+    @classmethod
+    def _loose(cls, value: Any) -> str | None:
+        if value is None or isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, default=str)
 
 
 class _LessonDraft(BaseModel):
@@ -1159,7 +1266,8 @@ def convert_instructions(
         "candidates are none (then write []).\n"
         f"{signal_kinds_note()}"
         "reason: in Chinese (at most 500 characters); state the direction, entry zone, "
-        "invalidation price and why this is a view of the next {H}.",
+        "invalidation price and why this is a view of the next {H}.\n"
+        f"{ta_prompts.OUTLOOK_NOTE}",
         p,
     )
 
@@ -1345,6 +1453,33 @@ def research_recommendation(plan: str | None) -> str | None:
     """研究经理方案里的 ``**Recommendation**: X``（小写）；解析不出返回 None。"""
     found = _RECOMMENDATION.findall(plan or "")
     return found[0].lower() if found else None  # 取第一处：正文里引用别的评级不算
+
+
+def trader_action(plan: str | None) -> str | None:
+    """交易员的建议（buy / hold / sell，取最后一处，和 ``direction_conflict`` 同一口径）。"""
+    found = _PROPOSAL.findall(plan or "") or _ACTION.findall(plan or "")
+    return found[-1].lower() if found else None
+
+
+def attach_outlook(
+    cs: CardSymbol, draft: _CardSymbolDraft, rm: str | None, pm: Any, trader_plan: str
+) -> CardSymbol:
+    """在定好的卡上挂只记录的 ``CardOutlook``；卡的其余内容一字不动。出任何错只记日志，卡照出。"""
+    try:
+        outlook = card_outlook.build_outlook(
+            bias=cs.bias,
+            market_dir=draft.market_dir,
+            market_dir_evidence=draft.market_dir_evidence,
+            rel_dir=draft.rel_dir,
+            rel_dir_evidence=draft.rel_dir_evidence,
+            rm=rm,
+            pm=pm,
+            trader=trader_action(trader_plan),
+        )
+    except Exception:
+        logger.exception("%s 整理只记录的大盘 / 相对判断失败，这张卡不带 outlook", cs.symbol)
+        return cs
+    return cs.model_copy(update={"outlook": outlook})
 
 
 def _no_trade(cs: CardSymbol, why: str) -> CardSymbol:
@@ -1820,6 +1955,8 @@ class TradingAgentsEngine:
         self._live: dict[str, MeetingLive] = {}
         self._inflight_lock = threading.Lock()
         register_binance_vendor()
+        if not settings.bias_fix.is_legacy:
+            ta_nodes.check_meeting_settings()  # 开关真能传到提示词里，否则拒绝启动
         set_analyst_klines(settings.analyst_klines, settings.meeting_min)
         set_indicator_interval(prompt_params(settings).indicator)
         self._ticks = TICKS
@@ -1959,10 +2096,13 @@ class TradingAgentsEngine:
         handler: Any,
         meeting_note: str = "",
         position_note: str = "",
+        setup: MeetingSetup = LEGACY_SETUP,
     ) -> Any:
         from tradingagents.default_config import build_default_config
 
-        cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
+        cfg = build_config(
+            build_default_config(), self._s, crypto_news=self._news is not None, setup=setup
+        )
         graph = ta_nodes.perp_graph_class()(
             selected_analysts=analysts,
             config=cfg,
@@ -2321,6 +2461,14 @@ class TradingAgentsEngine:
         self._snapshot_liquidations([entry.symbol])
         return await asyncio.to_thread(self._analyze_sync, entry, regime, pick_reason, brief_text)
 
+    def _setups(self) -> dict[str, dict[str, str]]:
+        setups: dict[str, dict[str, str]] = self.__dict__.setdefault("_meeting_setups", {})
+        return setups
+
+    def meeting_setup(self, key: str) -> dict[str, str] | None:
+        """这个币最近一场会定下的偏空整改设置（超时取消的会，指挥官据此记失败属于哪一组）。"""
+        return self._setups().get(key)
+
     def _analyze_sync(
         self,
         entry: SymbolPoolEntry,
@@ -2330,6 +2478,7 @@ class TradingAgentsEngine:
     ) -> Analysis:
         meter = self._meter(entry.symbol)
         handler = cost_handler(meter)
+        self._setups().pop(entry.symbol, None)  # 上一场的不算；这场定下设置时再写
         live = MeetingLive(Path(self._s.live_dir), entry.symbol) if self._s.live_dir else None
         if live:
             self._live[entry.symbol] = live
@@ -2342,7 +2491,7 @@ class TradingAgentsEngine:
         except Exception as exc:  # 同上：失败也带上真实花费
             if live:
                 live.fail(str(exc) or type(exc).__name__, meter.cost)
-            raise MeetingError(str(exc), meter.cost) from exc
+            raise MeetingError(str(exc), meter.cost, self.meeting_setup(entry.symbol)) from exc
         else:
             if live:
                 cs = res.card_symbol
@@ -2382,9 +2531,15 @@ class TradingAgentsEngine:
             f"{now:%Y-%m-%d %H:%M}",
             f"{now + timedelta(minutes=params.hold_minutes):%Y-%m-%d %H:%M}",
         )
-        graph = self._graph(analysts, handler, note, ta_prompts.position_note(params, entry.symbol))
+        # 偏空整改：这场会用哪组设置（按会议 id 定，可复现），记进实况和结论
+        setup = resolve(self._s.bias_fix, f"{entry.symbol}@{now:%Y-%m-%dT%H:%M:%SZ}")
+        self._setups()[entry.symbol] = setup.record()
+        graph = self._graph(
+            analysts, handler, note, ta_prompts.position_note(params, entry.symbol), setup
+        )
         if live:
             live.step("input", "meeting_note", note)
+            live.step("input", "meeting_setup", setup.describe())
         if live:
             tap_graph(graph, live)
         state, rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
@@ -2495,6 +2650,9 @@ class TradingAgentsEngine:
                 )
                 if missing:
                     cs = degrade_size(cs, missing)
+                cs = attach_outlook(
+                    cs, draft, rm, rating, str(state.get("trader_investment_plan", ""))
+                )
                 return Analysis(
                     cs,
                     meter.cost,
@@ -2504,6 +2662,7 @@ class TradingAgentsEngine:
                         "reasoning_tokens": meter.tokens_reasoning,
                         "cached_tokens": meter.tokens_cached,  # 命中缓存的输入 token
                     },
+                    setup.record(),
                 )
             except (ValidationError, ValueError) as exc:
                 last = exc

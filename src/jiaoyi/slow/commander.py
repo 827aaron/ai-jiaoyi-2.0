@@ -20,7 +20,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
@@ -55,6 +55,7 @@ from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.card_outlook import with_board
 from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.market_audit import CURRENT_AUDIT, MarketAudit
 from jiaoyi.slow.market_log import MarketLog, pool_rows, round_id
@@ -67,9 +68,12 @@ logger = logging.getLogger(__name__)
 class MeetingError(RuntimeError):
     """会议中途失败。``cost_usd`` 是已烧掉的真实花费；未知为 None，由指挥官按估算计。"""
 
-    def __init__(self, message: str, cost_usd: float | None = None) -> None:
+    def __init__(
+        self, message: str, cost_usd: float | None = None, setup: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.cost_usd = cost_usd
+        self.setup = setup  # 这场会用的偏空整改设置（bias_fix），失败也要记
 
 
 class CardRefreshError(RuntimeError):
@@ -112,6 +116,8 @@ class Analysis:
     card_symbol: CardSymbol
     cost_usd: float = 0.0
     usage: dict[str, int] | None = None  # input_tokens / output_tokens / reasoning_tokens
+    # 这场会实际用的偏空整改设置（bias_fix.MeetingSetup.record()）：分组、谁先发言等；旧引擎没有
+    setup: dict[str, str] | None = None
 
 
 class MeetingEngine(Protocol):
@@ -227,14 +233,24 @@ class EventRules:
     enabled: bool = False
     triggers: frozenset[str] = frozenset()
     symbol_gap: timedelta = timedelta(minutes=60)
+    """同一个币两场会至少隔多久；0 = 不隔（配置里的 0 由 ``commander_kwargs`` 换成下限）。"""
     max_per_day: int = 12
+    """每天最多几场临时会；0 = 不限（照常计数）。"""
     move_atr: float = 3.0
     entry_max_age: timedelta = timedelta(0)
     """开仓前卡龄上限（该币上次开会距今）；0 = 不查。"""
+    key_level_trigger: str = "outside"
+    """outside = 价格在关键位外面就算突破；cross = 出卡后价格从里侧穿到外侧那一下才算。"""
 
 
 PENDING_EXPIRY = timedelta(minutes=30)
+LEVEL_PX_FRESH = timedelta(minutes=5)
+"""开会开始时用多新的价定新关键位的两侧；更旧就等出卡后第一次看到的价。"""
 SLOWDOWN_AT = 0.8
+EVENT_GAP_FLOOR = timedelta(minutes=5)
+"""配置里同币临时会间隔写 0（不限）时，实际仍隔这么久：关键位一直被穿时不会连着开。"""
+EVENT_FAIL_BACKOFF = timedelta(minutes=15)
+"""一场临时会开失败后，这个币至少隔这么久才再排（失败也算一场，但配置的间隔可能是 0 / 很短）。"""
 MARKET_SNAPSHOT_FRESH = timedelta(minutes=2)
 """沿用整轮会前统计的新鲜度要求；不是方向判断阈值。"""
 """日花费到上限的这个比例就放慢开会（over_budget = slow）。"""
@@ -267,6 +283,7 @@ class BattleCardCommander:
             timedelta(minutes=30),
         ),
         daily_cost_limit_usd: float | None = None,
+        spend_alert_usd: float | None = None,
         failed_meeting_cost_usd: float = 0.05,
         budget_path: Path | None = None,
         card_path: Path | None = None,
@@ -288,7 +305,11 @@ class BattleCardCommander:
         if not fail_backoff:
             raise ValueError("fail_backoff 至少要有一档")
         self._backoff = tuple(fail_backoff)
-        self._cost_limit = daily_cost_limit_usd
+        self._cost_limit = daily_cost_limit_usd or None  # None / 0 = 不限
+        self._spend_alert = spend_alert_usd or None  # 日上限关了时的「只提醒不停」线
+        self._spend_noticed_day = ""
+        self._spend_alerts: list[str] = []
+        self._event_fail_until: dict[str, datetime] = {}
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
@@ -337,6 +358,11 @@ class BattleCardCommander:
         self._symbol_min_interval = symbol_min_interval
         self._last_meeting: dict[str, datetime] = {}
         self._level_broken: set[str] = set()
+        # cross 模式：币 → (这条结论的标识, {关键位 → 上次看到价格是否已在外侧})；结论换了才重记
+        self._level_side: dict[str, tuple[str, dict[str, bool]]] = {}
+        self._level_cross: dict[str, datetime] = {}  # 穿过了、还没开上会的币 → 穿过的时刻
+        self._last_px: dict[str, tuple[float, datetime]] = {}
+        self._meet_px: dict[str, float] = {}  # 开会开始时的价：新结论的关键位按它定在哪一侧
         self._blocked: dict[str, str] = {}
         self._symbol_timeout_s = symbol_timeout_s
         self._min_gap = min_refresh_gap
@@ -450,8 +476,8 @@ class BattleCardCommander:
     def _stamp(
         cs: CardSymbol, issued: datetime, expires: datetime, market: MarketView | None = None
     ) -> CardSymbol:
-        """给一条指令盖上「哪一刻开的会、到几点到期」。"""
-        return cs.model_copy(
+        """给一条指令盖上「哪一刻开的会、到几点到期」；只记录的 outlook 配上同一份总盘会方向。"""
+        stamped = cs.model_copy(
             update={
                 "issued_at": issued,
                 "expires_at": expires,
@@ -460,6 +486,7 @@ class BattleCardCommander:
                 "source_regime": market.regime if market else None,
             }
         )
+        return with_board(stamped, market)
 
     def _fit(self, syms: list[CardSymbol]) -> list[CardSymbol]:
         """池子装不下（卡最多 50 个币）时先丢最早到期的，持仓币不丢。"""
@@ -571,6 +598,10 @@ class BattleCardCommander:
         """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
         return self._notices.pop(0) if self._notices else None
 
+    def take_spend_alert(self) -> str | None:
+        """取走一条「日上限不限时花费过线」的提醒（只提醒，不是暂停开会），没有返回 None。"""
+        return self._spend_alerts.pop(0) if self._spend_alerts else None
+
     def _ttl_now(self) -> timedelta:
         """作战卡有效期；日花费到 80% 且设了放慢，新卡按放慢后的间隔出。"""
         return self._slowdown[0] if self._slowdown is not None and self._slowed() else self._ttl
@@ -580,7 +611,10 @@ class BattleCardCommander:
 
     def _budget_exhausted(self, now: datetime) -> bool:
         """今天（按 day_reset_tz，曼谷）开会花费 ≥ 上限。每天只提示一次。"""
-        if self._cost_limit is None or self._stats_day != self._day(now):
+        if self._stats_day != self._day(now):
+            return False
+        if self._cost_limit is None:
+            self._spend_alerted(now)
             return False
         if self._stats.cost_usd < self._cost_limit:
             return False
@@ -592,6 +626,18 @@ class BattleCardCommander:
                 "今天不再开会（沿用现有作战卡，到期后不开新仓）"
             )
         return True
+
+    def _spend_alerted(self, now: datetime) -> None:
+        """日上限关了（不限）：花费超过档位默认日上限时只推一条提醒（每天一次），不停会、不放慢。"""
+        if self._spend_alert is None or self._stats.cost_usd < self._spend_alert:
+            return
+        day = self._day(now)
+        if self._spend_noticed_day != day:
+            self._spend_noticed_day = day
+            self._spend_alerts.append(
+                f"军师团今天已花 ${self._stats.cost_usd:.2f}，超过本档默认日上限 "
+                f"${self._spend_alert:.2f}（日上限已设为不限，不会停会，只提醒）"
+            )
 
     def refresh_reason(
         self,
@@ -605,6 +651,14 @@ class BattleCardCommander:
         开了临时会的档位：关键位突破 / 大消息 / 新币 / 走了 N 倍 ATR 不重开整轮，只排进临时会队列
         （``pop_event``），整轮只在到点（卡快到期 / 每天固定时间）才开。
         """
+        if self._cross_mode:
+            self._last_px.update({sym: (px, now) for sym, px in prices.items()})
+        if self._cross_mode and self._card is not None:
+            # 每次检查都记两侧、认穿越，不受开会间隔 / 退避影响；间隔只管开不开会
+            for cs in self._card.symbols:
+                px = prices.get(cs.symbol)
+                if px is not None and self._level_hit(cs, px, now):
+                    self._level_broken.add(cs.symbol)
         if not self.may_refresh(now):
             return None
         if self._rl_until is not None:  # 解封了：不等下一个间隔，用原来的原因立刻重开这一轮
@@ -618,12 +672,10 @@ class BattleCardCommander:
             return self._due_reason(now, card)
         if self._last_refresh is not None and now - self._last_refresh < self._min_gap:
             return None
-        for cs in card.symbols:
-            px = prices.get(cs.symbol)
-            if px is None:
-                continue
-            for lv in cs.key_levels:
-                if self._broken(lv, px):
+        if not self._cross_mode:
+            for cs in card.symbols:
+                px = prices.get(cs.symbol)
+                if px is not None and any(self._broken(lv, px) for lv in cs.key_levels):
                     self._level_broken.add(cs.symbol)
         if self._level_broken & {c.symbol for c in card.symbols}:
             return "key_level_break"
@@ -765,8 +817,10 @@ class BattleCardCommander:
             default=None,
         )
         at = last + self._events.symbol_gap if last else datetime.min.replace(tzinfo=UTC)
+        if (failed := self._event_fail_until.get(symbol)) is not None:
+            at = max(at, failed)
         self._roll_events(now)
-        if self._event_count >= self._events.max_per_day:
+        if self._events.max_per_day and self._event_count >= self._events.max_per_day:
             local = now.astimezone(ZoneInfo(self._risk.day_reset_tz))
             tomorrow = (local + timedelta(days=1)).replace(
                 hour=0, minute=0, second=0, microsecond=0
@@ -916,15 +970,28 @@ class BattleCardCommander:
         prices: Mapping[str, float],
         atrs: Mapping[str, float],
     ) -> None:
+        in_pool = {e.symbol for e in pool.in_pool}
         for cs in card.symbols:
             sym, px = cs.symbol, prices.get(cs.symbol)
             if px is None:
                 continue
-            for lv in cs.key_levels:
-                if self._broken(lv, px):
+            if self._cross_mode:
+                if self._cross_pending(sym, now):
+                    old = self._pending.get(sym)
+                    if (
+                        old is not None
+                        and old[0] == "key_level_break"
+                        and sym in in_pool
+                        and sym not in self._market_reviews
+                        and now - old[1] > PENDING_EXPIRY
+                    ):
+                        self._pending.pop(sym)  # 穿过时同币间隔没到、排队过期了：重排，等间隔满
+                    self._queue(sym, "key_level_break", now)
+            else:
+                if any(self._broken(lv, px) for lv in cs.key_levels):
                     self._level_broken.add(sym)
-            if sym in self._level_broken:
-                self._queue(sym, "key_level_break", now)
+                if sym in self._level_broken:
+                    self._queue(sym, "key_level_break", now)
             if sym in self._news:
                 self._queue(sym, "news_high_impact", now)
             lm = self._last_meeting.get(sym)
@@ -987,7 +1054,7 @@ class BattleCardCommander:
         if not self._events.enabled or not self._pending or not self.may_refresh(now):
             return None
         self._roll_events(now)
-        if self._event_count >= self._events.max_per_day:
+        if self._events.max_per_day and self._event_count >= self._events.max_per_day:
             for symbol, quota_item in self._market_reviews.items():
                 eligible = max(quota_item.eligible_at, self._event_eligible(symbol, now))
                 self._market_reviews[symbol] = quota_item.model_copy(
@@ -1061,6 +1128,8 @@ class BattleCardCommander:
             )
             if last is not None and now - last < self._events.symbol_gap:
                 continue
+            if (failed := self._event_fail_until.get(sym)) is not None and now < failed:
+                continue
             return sym, trigger
         return None
 
@@ -1108,6 +1177,8 @@ class BattleCardCommander:
         self._roll_events(now)
         self._event_count += 1
         self._event_last[symbol] = now
+        self._level_cross.pop(symbol, None)  # 这次穿越换到了一场会：开不成也不再排
+        self._mark_meeting_px(symbol, now)
         source_symbol = card.for_symbol(symbol)
         source_token = source_symbol.research_token() if source_symbol else None
         self._symbol_inflight.add(symbol)
@@ -1146,6 +1217,7 @@ class BattleCardCommander:
                 )
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            self._event_fail_until[symbol] = self._clock() + EVENT_FAIL_BACKOFF
             return None  # 失败原因和花费已在各标的记录里
         finally:
             beat.cancel()
@@ -1186,12 +1258,13 @@ class BattleCardCommander:
         self._card = card
         self._notify_card()
         self._last_meeting[symbol] = now
+        self._event_fail_until.pop(symbol, None)
         self._seen.add(symbol)
         self._level_broken.discard(symbol)
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
-            self._journal.record(card, [symbol])
+            self._journal.record(card, [symbol], {symbol: res.setup})
         self._record_card(card, started)
         if nomination is not None:
             self._write(
@@ -1206,6 +1279,106 @@ class BattleCardCommander:
             )
         self._save_market()
         return card.model_copy(update={"current_market": self.latest_market_view})
+
+    @property
+    def _cross_mode(self) -> bool:
+        return self._events.key_level_trigger == "cross"
+
+    @staticmethod
+    def _level_token(cs: CardSymbol) -> str:
+        """这条结论的标识：哪场会出的 + 关键位。沿用、只清信号、按风控夹过都不变，新开一场才变。"""
+        levels = ",".join(f"{lv.kind.value}@{lv.price!r}" for lv in cs.key_levels)
+        return f"{cs.meeting_id or cs.research_token()}|{levels}"
+
+    def _mark_meeting_px(self, symbol: str, now: datetime) -> None:
+        """开会开始时记下该币的价（最近 5 分钟内看到的），新结论的关键位按它定两侧。"""
+        seen = self._last_px.get(symbol)
+        if seen is not None and now - seen[1] <= LEVEL_PX_FRESH:
+            self._meet_px[symbol] = seen[0]
+        else:
+            self._meet_px.pop(symbol, None)
+
+    def _cross_pending(self, symbol: str, now: datetime) -> bool:
+        """有没有还没开上会的穿越。等得比开会间隔（``min_refresh_gap``）和同币间隔都久就作废，
+        免得被每日上限 / 定点开会压到隔夜再补开。"""
+        at = self._level_cross.get(symbol)
+        if at is None:
+            return False
+        if now - at <= max(self._min_gap, self._events.symbol_gap):
+            return True
+        del self._level_cross[symbol]
+        queued = self._pending.get(symbol)
+        if (
+            queued is not None
+            and queued[0] == "key_level_break"
+            and symbol not in self._market_reviews
+        ):
+            self._pending.pop(symbol)
+        self._save_market()
+        self._write(
+            symbol=symbol,
+            outcome=Outcome.INFO,
+            summary=f"{symbol} 关键位穿越等了一个开会间隔还没开上会，作废"[:200],
+            output={"key_level": "expired", "crossed_at": at.isoformat()},
+        )
+        return False
+
+    def _level_hit(self, cs: CardSymbol, px: float, now: datetime) -> bool:
+        """cross 模式：这一刻有没有关键位从里侧穿到外侧。
+
+        这条结论第一次看到时，按开会开始时的价（没有就用现在的价）定每个关键位在哪一侧，
+        当时已在外侧的位不算，等价格回到里侧再穿过去。"""
+        sym = cs.symbol
+        self._last_px[sym] = (px, now)
+        token = self._level_token(cs)
+        rec = self._level_side.get(sym)
+        old: dict[str, bool] = {}
+        base_px = px
+        if rec is None or rec[0] != token:
+            fresh = True
+            self._level_cross.pop(sym, None)  # 新结论：旧卡上的穿越作废
+            base_px = self._meet_px.pop(sym, px)
+        else:
+            fresh, old = False, rec[1]
+        new: dict[str, bool] = {}
+        crossed: list[float] = []
+        beyond_at_card: list[float] = []
+        for lv in cs.key_levels:
+            if lv.kind not in (LevelKind.RESISTANCE, LevelKind.SUPPORT):
+                continue
+            key = f"{lv.kind.value}@{lv.price!r}"
+            out = self._broken(lv, px)
+            new[key] = out
+            was = self._broken(lv, base_px) if fresh else old.get(key, out)
+            if fresh and was:
+                beyond_at_card.append(lv.price)
+            elif out and not was:
+                crossed.append(lv.price)
+        if fresh or new != old:
+            self._level_side[sym] = (token, new)
+            self._save_market()
+        if beyond_at_card:
+            self._write(
+                symbol=sym,
+                outcome=Outcome.INFO,
+                summary=f"{sym} 出卡时价格已在关键位外侧，等回到里侧再穿过才算突破"[:200],
+                output={
+                    "key_level": "suppressed_already_beyond",
+                    "price": base_px,
+                    "levels": beyond_at_card,
+                },
+            )
+        if not crossed:
+            return False
+        self._level_cross[sym] = now
+        self._save_market()
+        self._write(
+            symbol=sym,
+            outcome=Outcome.INFO,
+            summary=f"{sym} 价格穿过关键位 {crossed}"[:200],
+            output={"key_level": "crossed", "price": px, "levels": crossed},
+        )
+        return True
 
     @staticmethod
     def _broken(lv: KeyLevel, px: float) -> bool:
@@ -1270,11 +1443,11 @@ class BattleCardCommander:
             self._pending_reference_view = (
                 self.latest_market_view if self.regime_reference is None else None
             )
-        self._save_card()
-        self._save_market()
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
         self._level_broken.clear()
+        self._save_card()
+        self._save_market()
         self._record_card(card, started)
         return card.model_copy(update={"current_market": self.latest_market_view})
 
@@ -1618,6 +1791,11 @@ class BattleCardCommander:
             "event_day": self._event_day,
             "event_count": self._event_count,
             "event_last": {key: at.isoformat() for key, at in self._event_last.items()},
+            "level_side": {
+                sym: {"token": token, "sides": sides}
+                for sym, (token, sides) in self._level_side.items()
+            },
+            "level_cross": {sym: at.isoformat() for sym, at in self._level_cross.items()},
             "market_error": self._market_error,
             "market_fails": self._market_fails,
             "market_retry_at": self._market_retry_at.isoformat() if self._market_retry_at else None,
@@ -1687,6 +1865,23 @@ class BattleCardCommander:
         except (ValueError, TypeError, AttributeError):
             logger.warning("市场复核排队状态损坏，保留卡与市场，等待新提名")
             self._market_reviews.clear()
+        try:  # 旧文件没有这两项：当作出卡后还没看过价格
+            self._level_side = {
+                str(sym): (
+                    str(rec["token"]),
+                    {str(k): bool(v) for k, v in rec["sides"].items()},
+                )
+                for sym, rec in data.get("level_side", {}).items()
+            }
+            self._level_cross = {
+                str(sym): datetime.fromisoformat(at)
+                for sym, at in data.get("level_cross", {}).items()
+            }
+            if any(at.tzinfo is None for at in self._level_cross.values()):
+                raise ValueError("穿越时间必须带时区")
+        except (ValueError, TypeError, AttributeError, KeyError):
+            logger.warning("关键位穿越状态损坏，按出卡后第一次看到的价格重记")
+            self._level_side, self._level_cross = {}, {}
 
     def _eligible(self, pool: SymbolPool, now: datetime, *, expand: bool) -> list[SymbolPoolEntry]:
         """这一轮能开会的币：没开分档 = 整个池；开了 = 头部 + 有持仓的 + 中间档里今天挑中的
@@ -2181,6 +2376,7 @@ class BattleCardCommander:
 
         async def meet(e: SymbolPoolEntry) -> Analysis:
             nonlocal cost, published
+            self._mark_meeting_px(e.symbol, self._clock())
             res = await self._analyze_one(
                 e,
                 picked.regime,
@@ -2203,7 +2399,7 @@ class BattleCardCommander:
             self._notify_card()
             self._save_card()
             if self._journal is not None:
-                self._journal.record(card, [e.symbol])
+                self._journal.record(card, [e.symbol], {e.symbol: res.setup})
             self._record_card(card, time.monotonic(), partial=True)  # 面板马上显示这个币
             return res
 
@@ -2273,17 +2469,17 @@ class BattleCardCommander:
                     else self._engine.analyze(entry, regime, pick_reason)
                 )
                 res = cast(Analysis, await asyncio.wait_for(meeting, self._symbol_timeout_s))
+                cs = res.card_symbol
                 if market_view is not None:
-                    res = Analysis(
-                        res.card_symbol.model_copy(
-                            update={
-                                "source_market_view_id": market_view.market_view_id,
-                                "source_regime": market_view.regime,
-                            }
-                        ),
-                        res.cost_usd,
-                        res.usage,
+                    cs = cs.model_copy(
+                        update={
+                            "source_market_view_id": market_view.market_view_id,
+                            "source_regime": market_view.regime,
+                        }
                     )
+                # 只记录的 outlook 配上这场会看到的总盘会方向，开会记录里就是完整的一份；
+                # replace 只换指令，其余（花费、用量、会议设置）原样带着
+                res = replace(res, card_symbol=with_board(cs, market_view))
             except Exception as exc:
                 self._charge(-est)
                 fail_cost = self._failure_cost(exc, entry.symbol)
@@ -2296,6 +2492,7 @@ class BattleCardCommander:
                     started,
                     fail_cost,
                     estimated=guess,
+                    setup=self._failed_setup(exc, entry.symbol),
                 )
                 raise
             self._charge(-est)
@@ -2311,6 +2508,7 @@ class BattleCardCommander:
                     started,
                     res.cost_usd,
                     usage=res.usage,
+                    setup=res.setup,
                 )
                 raise
             self._log_symbol(
@@ -2321,6 +2519,7 @@ class BattleCardCommander:
                 res.cost_usd,
                 cs,
                 usage=res.usage,
+                setup=res.setup,
             )
             return res
 
@@ -2390,6 +2589,14 @@ class BattleCardCommander:
     def bind_credit_alarm(self, fn: Callable[[], None]) -> None:
         """模型额度不足（402）时调一下：让主程序发告警、面板显示横幅。"""
         self._credit_alarm = fn
+
+    def _failed_setup(self, exc: BaseException, key: str) -> dict[str, str] | None:
+        """失败的会（报错 / 质量门槛 / 超时）用的偏空整改设置，好按组算失败率：引擎随错误带出来的
+        优先；超时没有错误对象，就问引擎这个币这场会定下的设置。拿不到（还没定就失败了）为 None。"""
+        if isinstance(exc, MeetingError) and exc.setup is not None:
+            return exc.setup
+        fn = getattr(self._engine, "meeting_setup", None)
+        return fn(key) if callable(fn) else None
 
     def _failure_cost(self, exc: BaseException, key: str = "") -> float:
         """失败会议的花费：引擎带出了真实花费就用它；超时取消的会议，引擎还在跑，就叫停它并取
@@ -2513,7 +2720,11 @@ class BattleCardCommander:
             tmp.write_text(
                 json.dumps(
                     {
-                        "card": self._card.model_dump(mode="json"),
+                        # outlook 只是记录（已在开会记录和复盘流水里），不进存档：回退旧版本时
+                        # 旧代码（契约禁止多余字段）还能读回这张卡
+                        "card": self._card.model_dump(
+                            mode="json", exclude={"symbols": {"__all__": {"outlook"}}}
+                        ),
                         "last_meeting": {k: v.isoformat() for k, v in self._last_meeting.items()},
                         "stop": asdict(self._stop),
                         "regime_reference": (
@@ -2558,6 +2769,7 @@ class BattleCardCommander:
         cs: CardSymbol | None = None,
         estimated: bool = False,
         usage: dict[str, int] | None = None,
+        setup: dict[str, str] | None = None,
     ) -> None:
         ms = (time.monotonic() - started) * 1000
         self._bump(ok=outcome is not Outcome.ERROR, cost=cost, ms=ms)
@@ -2566,20 +2778,25 @@ class BattleCardCommander:
             outcome=outcome,
             summary=summary[:200],
             input={"score": entry.score, "reasons": entry.reasons},
-            output=self._symbol_output(cs, estimated, usage),
+            output=self._symbol_output(cs, estimated, usage, setup),
             latency_ms=ms,
             cost_usd=cost,
         )
 
     @staticmethod
     def _symbol_output(
-        cs: CardSymbol | None, estimated: bool, usage: dict[str, int] | None
+        cs: CardSymbol | None,
+        estimated: bool,
+        usage: dict[str, int] | None,
+        setup: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         out: dict[str, Any] = (
             cs.model_dump(mode="json") if cs is not None else {"cost_estimated": estimated}
         )
         if usage is not None:  # 面板「AI 费用」按模型 token 展示
             out["usage"] = usage
+        if setup is not None:  # 偏空整改的分组和设置，复盘按组对照
+            out["meeting_setup"] = setup
         return out
 
     def _record_card(self, card: BattleCard, started: float, *, partial: bool = False) -> None:

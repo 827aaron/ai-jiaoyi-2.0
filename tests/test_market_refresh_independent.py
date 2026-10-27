@@ -168,7 +168,9 @@ async def test_market_only_runs_analysis_without_coin_meetings_or_authority_chan
     # 外部存储中的研究内容也不能被市场背景刷新悄悄重签。
     saved = json.loads((tmp_path / "battle_card.json").read_text())
     assert saved["card"]["version"] == before.version
-    assert saved["card"]["symbols"] == before.model_dump(mode="json")["symbols"]
+    # 只记录的 outlook 不进存档（回退旧版本还能读），其余字段一字不差
+    unsaved = {"symbols": {"__all__": {"outlook"}}}
+    assert saved["card"]["symbols"] == before.model_dump(mode="json", exclude=unsaved)["symbols"]
 
 
 async def test_future_symbol_meeting_uses_latest_context_and_preserves_other_source(
