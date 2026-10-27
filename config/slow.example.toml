@@ -106,3 +106,34 @@ flash_in = 0.30                    # OpenRouter deepseek/deepseek-v4.1-flash 标
 flash_out = 1.20
 pro_in = 0.50
 pro_out = 2.00
+
+# 大盘台：独立判断候选池等权组合未来 4 小时涨 / 平 / 跌（DeepSeek V4.1 Flash 经 OpenRouter，每轮问 5 次取平均）。
+# 详见 docs/slow.md「大盘台」。改这一段要重启。回滚到没有大盘台的旧版本前先删掉整段（旧代码不认识会拒绝启动）。
+[market_desk]
+mode = "off"                 # off = 不跑、零调用（默认）；replace = 接管大盘方向（要求 app.toml regime_flip_target 不是 flash_market_only）
+# cadence_min = 60           # 多久定时跑一轮（分钟，5–240，UTC 对齐）；Demo 推荐 15
+# offset_min = 2             # 对齐时刻之后几分钟跑
+# samples = 5                # 每轮独立问几次，概率取平均（花费 × 次数）
+# min_valid_samples = 3      # 合格回答少于这么多这一轮作废
+# move_trigger_pct = 0       # 急动加跑：窗口内 |BTC| 或 |池涨跌中位数| ≥ 这么多 % 就加跑；0 = 关
+# move_trigger_window_min = 15
+# min_run_gap_min = 5        # 加跑（急动 / 翻转）离上一轮开跑至少几分钟
+# mirror_test_rate = 0.1667  # 镜像测试轮次比例（数据涨跌取反再问，量方向偏置）；0 = 不做
+# mirror_alert_gap = 0.05    # 最近几次 |p_up(原) − p_down(镜像)| 平均超过它就告警
+# band_sigma = 0.5           # 「平」= |4h 等权收益| ≤ 0.5σ
+# sigma_lookback_h = 168
+# base_rate_days = 30        # 先验：过去 30 天涨 / 平 / 跌频率
+# call_p_min = 0.45          # 方向门槛 θ
+# call_edge_min = 0.15       # 方向门槛 δ
+# max_age_min = 75           # 最新结果多久内算可用
+# fallback = "flash"         # 不可用时：flash = 整轮总盘会的 Flash 判断恢复发布；hold = 沿用大盘台最后一版
+# publish_confirm = 2        # 滞回：新方向连续几轮一致才发布
+# publish_confirm_min = 30   # 且至少持续几分钟（其中有加跑轮时只看轮数）
+# publish_min_gap_min = 0    # 两次方向发布至少隔几分钟
+# daily_cost_limit_usd = 0   # 大盘台单独的日上限；0 = 不限
+# balance_floor_usd = 10     # OpenRouter 余额低于它大盘台自停，留给开会和 Jev；0 = 不看
+# reasoning_effort = "low"
+# max_tokens = 4096
+# timeout_s = 120
+# max_input_age_min = 5      # 不能有延后信息：实时字段 as_of 比运行时刻旧过这么多分钟就不给模型；0 = 不查
+# exclude_symbols = ["PAXGUSDT", "XAUTUSDT"]

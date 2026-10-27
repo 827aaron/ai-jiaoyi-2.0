@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from jiaoyi.contracts import PositionRecord, Side
+from jiaoyi.core.trailing_price import net_of, net_to_price
 from jiaoyi.execution.exchange import EntryBasis, ExchangeError, ExecutionBook
 from jiaoyi.execution.registry import ServerProtection
 
@@ -94,12 +95,12 @@ def trailing_update(
         or state.trailing_fees_quote != basis.fee_usdt
     ):
         raise ExchangeError("净收益基准已变化，不能沿用旧基准峰值")
-    price = Decimal(str(book.bid if rec.side is Side.LONG else book.ask))
-    sign = Decimal(1) if rec.side is Side.LONG else Decimal(-1)
+    long = rec.side is Side.LONG
+    price = Decimal(str(book.bid if long else book.ask))
     quantity, quote, fee = (
         Decimal(str(v)) for v in (basis.filled_quantity, basis.filled_quote, basis.fee_usdt)
     )
-    net = (sign * (price * quantity - quote) - fee) / quote
+    net = net_of(long, price, quantity, quote, fee)
     old_peak = (
         Decimal(state.trailing_peak_net_exact)
         if state.trailing_peak_net_exact is not None
@@ -112,7 +113,7 @@ def trailing_update(
     threshold = peak - Decimal(str(rec.trailing_stop_pct)) / 100 if activated else None
     stop: Decimal | None = None
     if threshold is not None:
-        stop = (quote + sign * (quote * threshold + fee)) / quantity
+        stop = net_to_price(long, quote, quantity, fee, threshold)
         if not stop.is_finite() or stop <= 0:
             raise ExchangeError("移动止损逆算价格无效")
         if state.trailing_stop_price is not None:
