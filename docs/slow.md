@@ -171,7 +171,7 @@ Aaron 决定深度档也用 4.1、不用 v4-pro，所以两档默认同一个模
 ## 失败退避与日花费上限
 
 - **失败退避**：开会整轮失败（例如 DeepSeek 结构化输出持续出错）后，依次等 5 → 10 → 30 分钟再试，之后保持 30 分钟，成功一次清零（`[budget] fail_backoff_minutes`）。闸门在 `BattleCardCommander.may_refresh`，主循环的所有触发原因（含定时兜底）都要过它，不会每分钟重开最多 20 个币的会。
-- **日花费上限**：`[budget] daily_cost_limit_usd`（默认 10 美元，0 = 不限：不停开会、也不放慢，花费照常统计；按 `day_reset_tz` 的交易日即曼谷 0 点清零）。超了当天不再开会，沿用现有作战卡（到期后不开新仓），并通过 Telegram 推一条提醒（每天一次）。
+- **日花费上限**：`[budget] daily_cost_limit_usd`（默认 10 美元，0 = 不限：不停开会、也不放慢，花费照常统计，花过本档默认日上限（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）时每天推一条只提醒不停的消息；按 `day_reset_tz` 的交易日即曼谷 0 点清零）。超了当天不再开会，沿用现有作战卡（到期后不开新仓），并通过 Telegram 推一条提醒（每天一次）。
 - 统计口径：只算成功记录下来的花费（总盘会 + 出了结论的标的）。整轮失败的会议没有可记的 token 用量，所以不进统计，靠上面的退避把这部分兜住。
 
 ## 每轮最多出几张作战卡
@@ -399,7 +399,7 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 ### 临时会 / 卡龄检查 / 固定时间 / 超额放慢（`[schedule]`）
 
-- **临时会**（`event_meeting_enabled`，2h 起默认开，15m–1h 关）：卡有效期里出了事件，只给那一个币补开一场，结论并进现有卡（版本 +1，有效期不延长，`refresh_reason = event:<触发>`），不重开整轮。关掉时关键位突破 / 大消息 / 新入池照旧重开整轮。触发名单 `event_triggers`（不在名单里的事件不开会）：`key_level_break`（收盘价穿卡上关键位）、`move_since_card`（离该币上次开会的价格 ≥ `move_since_card_atr`=3 倍最长持仓档 ATR）、`new_head_symbol`（新币进头部档）、`predictor_against_card`（预测员连续 `predictor_against_runs`=2 次看反，订阅 `App.against`）、`news_high_impact`（大消息）、`stale_card_on_entry`（见下）。同币间隔 `event_symbol_gap_min`（含正式会，0 = 不限）、每天（曼谷日）最多 `event_max_per_day` 场（0 = 不限，场数照常计数）；持仓币优先；排队超过 30 分钟没轮到就丢（事件还在会重排）；失败也算一场（间隔内不重试），花费照常计入日上限。2h：前三项、间隔 60、50 场/天；6h：五项、60、20；12h：六项、90、20；24h：六项、120、24。
+- **临时会**（`event_meeting_enabled`，2h 起默认开，15m–1h 关）：卡有效期里出了事件，只给那一个币补开一场，结论并进现有卡（版本 +1，有效期不延长，`refresh_reason = event:<触发>`），不重开整轮。关掉时关键位突破 / 大消息 / 新入池照旧重开整轮。触发名单 `event_triggers`（不在名单里的事件不开会）：`key_level_break`（收盘价穿卡上关键位）、`move_since_card`（离该币上次开会的价格 ≥ `move_since_card_atr`=3 倍最长持仓档 ATR）、`new_head_symbol`（新币进头部档）、`predictor_against_card`（预测员连续 `predictor_against_runs`=2 次看反，订阅 `App.against`）、`news_high_impact`（大消息）、`stale_card_on_entry`（见下）。同币间隔 `event_symbol_gap_min`（含正式会，0 = 不限，但内部仍隔 5 分钟，免得关键位一直被穿时连着开；开会失败的币另隔 15 分钟才再排）、每天（曼谷日）最多 `event_max_per_day` 场（0 = 不限，场数照常计数）；持仓币优先；排队超过 30 分钟没轮到就丢（事件还在会重排）；失败也算一场（间隔内不重试），花费照常计入日上限。2h：前三项、间隔 60、50 场/天；6h：五项、60、20；12h：六项、90、20；24h：六项、120、24。
 - **开仓前卡龄检查**（`entry_max_card_age_min`，12h 360 / 24h 480，0 = 不查）：该币上次开会距今超过这个值，卡上这个币的信号读成空（方向不动、持仓照常盯），这次信号不开仓；同时排一场补会，新结论出来后的信号再开。名单里没写 `stale_card_on_entry` 就只拦不补。
 - **每天固定时间**（`schedule_at`，24h 档 `"08:00"`，曼谷时间）：整轮会只在这个时间开（当天还没开过的话），不按启动时间漂；主循环的按间隔兜底也停用；重启后看存档卡的出卡时间，不会补开。
 - **日花费放慢**（`over_budget`）：花到 `daily_cost_limit_usd` 的 80% 时，`slow` = 新卡按 `slowdown_interval_min` 出（有效期 = 该间隔 + 提前量）、主循环兜底间隔也换成它，并推送一次提醒；15m→30m、30m→1h、1h→2h、2h→6h；6h 起没有下一档，`stop` = 不放慢。到 100% 一律当天停开会（沿用旧卡到期，持仓管家和 Jev 继续，Jev 费用不计入）。

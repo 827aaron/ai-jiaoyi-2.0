@@ -25,7 +25,7 @@ from jiaoyi.contracts import Category, SizeTier
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.interfaces import SecretStore
-from jiaoyi.slow.commander import EventRules, TierRules
+from jiaoyi.slow.commander import EVENT_GAP_FLOOR, EventRules, TierRules
 from jiaoyi.slow.screener import ScreenerConfig
 from jiaoyi.slow.tradingagents_engine import (
     PROVIDER_KEY_ENV,
@@ -441,7 +441,8 @@ class ScheduleConfig(_Strict):
         default=60.0,
         ge=0.0,
         le=1440.0,
-        description="同一个币两场临时会（含正式会）至少隔多久。0 = 不限。",
+        description="同一个币两场临时会（含正式会）至少隔多久。0 = 不限（内部仍隔 5 分钟，"
+        "免得关键位一直被穿时同一个币连着开）。",
     )
     event_max_per_day: int = Field(
         default=12,
@@ -496,7 +497,7 @@ class ScheduleConfig(_Strict):
             raise ValueError("min_refresh_gap_min 必须小于作战卡有效期，否则卡会过期断档")
         return self
 
-    def caution(self) -> str | None:
+    def caution(self, pick_max: int | None = None) -> str | None:
         """只提示不拒绝：①单币超时 + 5 分钟余量比提前量长，个别币拖到超时时旧卡过期后到新卡出来
         之间不开新仓；②最坏一轮（每波都拖到超时）跑不完开会间隔，下一轮会晚开 / 与上一轮重叠。"""
         notes: list[str] = []
@@ -507,7 +508,9 @@ class ScheduleConfig(_Strict):
                 f"比换卡提前量 {self.refresh_lead_min:g} 分钟长，个别币拖到超时时旧卡过期后"
                 "到新卡出来之间可能不开新仓"
             )
-        waves = math.ceil((self.max_cards_per_round or self.concurrency) / self.concurrency)
+        # 每轮实际开会的个数：max_cards_per_round（0 / 不写 = 不另设）与 card_pick_max 取小
+        cards = min(self.max_cards_per_round or pick_max or self.concurrency, pick_max or 10**6)
+        waves = math.ceil(cards / self.concurrency)
         worst = waves * self.symbol_timeout_s / 60
         if worst >= self.min_refresh_gap_min:
             notes.append(
@@ -648,9 +651,14 @@ class SlowConfig(_Strict):
         every = timedelta(minutes=s.slowdown_interval_min)
         return every + timedelta(minutes=s.refresh_lead_min), every
 
-    def commander_kwargs(self) -> dict[str, Any]:
-        """传给 ``BattleCardCommander(...)`` 的节奏参数。"""
+    def commander_kwargs(self, profile: str = profiles.DEFAULT_PROFILE) -> dict[str, Any]:
+        """传给 ``BattleCardCommander(...)`` 的节奏参数。``profile``：日上限关了（0）时，
+        用这一档的默认日上限当「只提醒不停」的线。"""
         s = self.schedule
+        spend_alert = None
+        if not self.budget.daily_cost_limit_usd:
+            default = profiles.defaults(profile, "slow.budget").get("daily_cost_limit_usd")
+            spend_alert = float(default) if default else None
         return {
             "concurrency": s.concurrency,
             "ttl": timedelta(minutes=s.card_ttl_min),
@@ -659,10 +667,11 @@ class SlowConfig(_Strict):
             "symbol_timeout_s": s.symbol_timeout_s,
             "min_refresh_gap": timedelta(minutes=s.min_refresh_gap_min),
             "daily_cost_limit_usd": self.budget.daily_cost_limit_usd or None,  # 0 = 不限
+            "spend_alert_usd": spend_alert,
             "events": EventRules(
                 enabled=s.event_meeting_enabled,
                 triggers=frozenset(s.event_triggers),
-                symbol_gap=timedelta(minutes=s.event_symbol_gap_min),
+                symbol_gap=timedelta(minutes=s.event_symbol_gap_min) or EVENT_GAP_FLOOR,  # 0 = 不限
                 max_per_day=s.event_max_per_day,
                 move_atr=s.move_since_card_atr,
                 entry_max_age=timedelta(minutes=s.entry_max_card_age_min),

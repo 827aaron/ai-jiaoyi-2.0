@@ -67,6 +67,10 @@ box.checked = false; num.value = ''; box.handlers.change();
 const pinned = { ...money_i, pinned: true, profile_default: 25 };
 offBind(pinned); box.checked = false; num.value = ''; box.handlers.change();
 assert.equal(num.value, 25);  // 档位有默认就回到档位默认
+// 档位默认本身是 0（|| 而不是 ?? ）：取消开关不能回到 0，要用表里的数
+const zero = { ...money_i, pinned: true, profile_default: 0 };
+offBind(zero); box.checked = false; num.value = ''; box.handlers.change();
+assert.equal(num.value, 10);
 // 现值是 12：勾上再取消，回到 12
 const box2 = mk({ checked: false }), num2 = mk({ value: '12' });
 els['#dlg-off'] = box2; els['#dlg-v'] = num2;
@@ -92,6 +96,13 @@ assert.equal(mootOf({ sec: 'schedule', key: 'over_budget' }, ix), '日上限已�
 assert.equal(mootOf({ sec: 'schedule', key: 'slowdown_interval_min' }, ix), '日上限已关闭，用不上');
 assert.equal(mootOf({ sec: 'schedule', key: 'over_budget' }, { 'budget.daily_cost_limit_usd': { ...money_i, value: 20 } }), '');
 assert.equal(mootOf({ sec: 'schedule', key: 'event_max_per_day' }, ix), '');
+// 大盘翻转的定时检查关了（regime_flip_check_min = 0），其余 regime_flip_* 行写「用不上」
+const flip = { 'fast_loop.regime_flip_check_min': { key: 'regime_flip_check_min', sec: 'fast_loop', value: 0, off: off('关闭', '已关闭', 5) } };
+for (const k of ['regime_flip_on', 'regime_flip_breadth', 'regime_flip_min_gap_min', 'regime_flip_min_symbols']) {
+  assert.equal(mootOf({ sec: 'fast_loop', key: k }, flip), '定时检查已关闭，用不上', k);
+}
+assert.equal(mootOf({ sec: 'fast_loop', key: 'regime_flip_check_min' }, flip), '');  // 开关本身照常
+assert.equal(mootOf({ sec: 'fast_loop', key: 'regime_flip_on' }, { 'fast_loop.regime_flip_check_min': { ...flip['fast_loop.regime_flip_check_min'], value: 5 } }), '');
 // 开着的「0 = 关」项比推荐更冒险，仍标黄；有推荐值才算
 assert.equal(hot({ ...cnt_i, value: 0, recommended: 12 }), true);
 assert.equal(hot({ ...cnt_i, value: 12, recommended: 12 }), false);

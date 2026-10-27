@@ -2367,7 +2367,7 @@ function offBind(i) {
   const sync = () => {
     num.disabled = box.checked;
     if (box.checked) num.value = "";
-    else if (!Number(num.value) && !i.nullable) num.value = i.value || (i.profile_default != null ? i.profile_default : i.off.back);
+    else if (!Number(num.value) && !i.nullable) num.value = i.value || i.profile_default || i.off.back;
   };
   box.addEventListener("change", sync);
   num.disabled = box.checked;
@@ -2376,6 +2376,7 @@ function offBind(i) {
 const MOOT = {
   "schedule.over_budget": ["budget.daily_cost_limit_usd", "日上限已关闭，用不上"],
   "schedule.slowdown_interval_min": ["budget.daily_cost_limit_usd", "日上限已关闭，用不上"],
+  ...Object.fromEntries(["on", "live", "breadth", "btc_pct", "confirm", "min_gap_min", "min_symbols", "suspect_log_min", "price_max_age_min"].map((k) => [`fast_loop.regime_flip_${k}`, ["fast_loop.regime_flip_check_min", "定时检查已关闭，用不上"]])),
 };
 const mootOf = (i, ix) => {
   const m = MOOT[`${i.sec}.${i.key}`];

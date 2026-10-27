@@ -79,7 +79,7 @@ max_retries = 6
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
 # event_meeting_enabled = true    # 临时会：出了事件只给那一个币补开一场（2h 起默认开，15m–1h 关）
 # event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / signal_against_card / news_high_impact / stale_card_on_entry
-# event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久；0 = 不限
+# event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久；0 = 不限（内部仍隔 5 分钟，失败的会这个币另隔 15 分钟）
 # event_max_per_day = 12          # 每个交易日最多几场临时会；0 = 不限
 # move_since_card_atr = 3.0       # 离上次开会的价格走了几倍 ATR 算 move_since_card
 # predictor_against_runs = 2      # 预测员连续几次看反作战卡才算
@@ -89,7 +89,7 @@ max_retries = 6
 # slowdown_interval_min = 360     # 放慢后的开会间隔（分钟）；默认 = 下一档
 
 [budget]
-# daily_cost_limit_usd = 20.0              # 档位：每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）；你写多少就是多少；0 = 不限（不停开会、也不放慢）
+# daily_cost_limit_usd = 20.0              # 档位：每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）；你写多少就是多少；0 = 不限（不停开会、也不放慢，花过本档默认上限只推一条提醒）
 failed_meeting_cost_usd = 0.05             # 失败的会议拿不到真实用量时，按这个估算价计入日花费
 # fail_backoff_minutes = [5, 10, 30]       # 档位：开会连续失败后依次等多久再试，成功清零（15m 2,5,10 / 30m 3,5,10 / 1h 5,10,15 / 2h 5,10,30 / 6h+ 10,30,60）
 

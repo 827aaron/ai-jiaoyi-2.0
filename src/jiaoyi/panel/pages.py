@@ -1532,7 +1532,7 @@ OFF_SWITCHES: dict[str, OffSwitch] = {
     for sec, key, label, shown, back in (
         ("budget", "daily_cost_limit_usd", "不限", "不限", 10),
         ("schedule", "max_cards_per_round", "不限", "不限", 10),
-        ("schedule", "event_symbol_gap_min", "不限", "不限", 60),
+        ("schedule", "event_symbol_gap_min", "不限（仍隔 5 分钟）", "不限（内部仍隔 5 分钟）", 60),
         ("schedule", "event_max_per_day", "不限", "不限", 12),
         ("schedule", "entry_max_card_age_min", "关闭", "已关闭", 360),
         ("screener", "default_category_cap", "不限", "不限", 30),
@@ -1542,9 +1542,8 @@ OFF_SWITCHES: dict[str, OffSwitch] = {
         ("app", "protection_stale_s", "关闭", "已关闭", 120),
         ("app", "protection_readback_grace_s", "关闭", "已关闭", 5),
         ("app", "protection_prearm_grace_s", "关闭", "已关闭", 30),
+        ("app", "reconciler_executor_stop_retry_rounds", "关闭", "已关闭（只查不重发）", 3),
         ("fast_loop", "regime_flip_min_gap_min", "不限", "不限", 60),
-        ("fast_loop", "regime_flip_min_symbols", "不限", "不限", 10),
-        ("fast_loop", "regime_flip_price_max_age_min", "不限", "不限", 5),
         ("fast_loop", "regime_flip_check_min", "关闭", "已关闭", 5),
     )
 }
@@ -1828,7 +1827,7 @@ def build_settings(
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),
         schedule=_items(slow.schedule, "schedule"),
-        schedule_caution=slow.schedule.caution(),
+        schedule_caution=slow.schedule.caution(app.card_pick_max),
         budget=_items(
             slow.budget, "budget", frozenset(BudgetConfig.model_fields) - {"daily_cost_limit_usd"}
         ),
