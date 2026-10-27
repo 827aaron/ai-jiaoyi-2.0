@@ -1,0 +1,761 @@
+"""偏空整改开关（slow/bias_fix.py）：默认一字不差、每个模式只改该改的、分组可复现并落盘。"""
+
+from __future__ import annotations
+
+import asyncio
+import collections
+import itertools
+import threading
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from jiaoyi.contracts import Category, HardFilters, Outcome, SymbolPoolEntry
+from jiaoyi.core.config import ConfigError
+from jiaoyi.core.profiles import HOLDS
+from jiaoyi.slow import binance_gate, crowd, ta_prompts, ta_roles
+from jiaoyi.slow import tradingagents_engine as eng
+from jiaoyi.slow.bias_fix import LEGACY_SETUP, SWITCHES, BiasFix, MeetingSetup, resolve
+from jiaoyi.slow.review import CardJournal, JournalRow
+from jiaoyi.slow.settings import MeetingConfig, load_slow_config
+from tests.test_slow_commander import FakeEngine, card_symbol, entry, make, pool
+
+IDS = [f"S{i}USDT@2026-10-28T{i % 24:02d}:{i % 60:02d}:00Z" for i in range(2000)]
+NEW_ARGS = ("alternate", "neutral", "mirror", "relative")
+NEW = BiasFix(*NEW_ARGS)
+
+
+# ---------------------------------------------------------------- 分组和先发言
+def test_default_is_legacy_and_off() -> None:
+    s = resolve(BiasFix(), "AAUSDT@x")
+    assert (s.arm, s.debate_first, s.funding_label, s.bear_bull_symmetry, s.crowd_ratio_mode) == (
+        "off",
+        "bull",
+        "legacy",
+        "legacy",
+        "raw",
+    )
+    assert BiasFix().is_legacy and not NEW.is_legacy
+
+
+def test_alternate_is_deterministic_and_balanced() -> None:
+    cfg = BiasFix(debate_first="alternate")
+    firsts = [resolve(cfg, i).debate_first for i in IDS]
+    assert firsts == [resolve(cfg, i).debate_first for i in IDS]  # 同一场会永远同一个结果
+    share = firsts.count("bear") / len(firsts)
+    assert 0.45 < share < 0.55
+    # 同一个币连着几轮也两边都有
+    one = [resolve(cfg, f"AAUSDT@2026-10-28T{h:02d}:00:00Z").debate_first for h in range(24)]
+    assert set(one) == {"bull", "bear"}
+    s = resolve(cfg, IDS[0])
+    assert s.debate_first_setting == "alternate" and s.arm == "off"
+
+
+def test_fixed_debate_first_is_used_as_is() -> None:
+    assert {resolve(BiasFix(debate_first="bear"), i).debate_first for i in IDS[:50]} == {"bear"}
+
+
+def test_ab_assignment_is_deterministic_and_factorial() -> None:
+    """ab > 0：每个改了的开关各自独立按 ab 的概率开（2⁴ 析因），能分别估计每个开关的效果。"""
+    cfg = BiasFix("alternate", "neutral", "mirror", "relative", ab=0.5)
+    setups = [resolve(cfg, i) for i in IDS]
+    assert setups == [resolve(cfg, i) for i in IDS]
+    on = {k: [k in s.switches_on for s in setups] for k in SWITCHES}
+    for k in SWITCHES:  # 每个开关大约一半
+        assert 0.45 < sum(on[k]) / len(IDS) < 0.55
+    for a, b in itertools.combinations(SWITCHES, 2):  # 两两独立：同时开约 1/4
+        both = sum(x and y for x, y in zip(on[a], on[b], strict=True)) / len(IDS)
+        assert 0.21 < both < 0.29, (a, b)
+    cells = collections.Counter(s.switches_on for s in setups)
+    assert len(cells) == 16 and all(85 < n < 170 for n in cells.values())  # 每组约 2000/16 = 125
+    for s in setups:
+        want = {
+            "debate_first": "alternate" if "debate_first" in s.switches_on else "bull",
+            "funding_label": "neutral" if "funding_label" in s.switches_on else "legacy",
+            "bear_bull_symmetry": "mirror" if "bear_bull_symmetry" in s.switches_on else "legacy",
+            "crowd_ratio_mode": "relative" if "crowd_ratio_mode" in s.switches_on else "raw",
+        }
+        got = {
+            "debate_first": s.debate_first_setting,
+            "funding_label": s.funding_label,
+            "bear_bull_symmetry": s.bear_bull_symmetry,
+            "crowd_ratio_mode": s.crowd_ratio_mode,
+        }
+        assert got == want
+        n = len(s.switches_on)
+        assert s.arm == ("new" if n == 4 else "legacy" if n == 0 else "mixed")
+        if s.debate_first_setting == "bull":
+            assert s.debate_first == "bull"
+    # 开了交替的会里，多空先发言两边都有
+    assert {s.debate_first for s in setups if "debate_first" in s.switches_on} == {"bull", "bear"}
+    # 只改一个开关：要么 new 要么 legacy，比例约等于 ab；ab = 1 全部 new
+    small = [resolve(BiasFix(funding_label="neutral", ab=0.2), i).arm for i in IDS]
+    assert set(small) == {"new", "legacy"} and 0.16 < small.count("new") / len(small) < 0.24
+    assert {resolve(BiasFix(funding_label="neutral", ab=1.0), i).arm for i in IDS} == {"new"}
+    # 没改的开关永远是现状
+    one = [resolve(BiasFix(crowd_ratio_mode="relative", ab=0.5), i) for i in IDS[:200]]
+    assert {s.switches_on for s in one} == {(), ("crowd_ratio_mode",)}
+    assert {(s.debate_first, s.funding_label, s.bear_bull_symmetry) for s in one} == {
+        ("bull", "legacy", "legacy")
+    }
+
+
+def test_record_has_every_setting_ab_and_config_version() -> None:
+    cfg = BiasFix("alternate", "neutral", "mirror", "relative", ab=0.5)
+    s = resolve(cfg, "AAUSDT@x")
+    rec = s.record()
+    assert list(rec) == [
+        "meeting_id",
+        "arm",
+        "debate_first",
+        "debate_first_setting",
+        "funding_label",
+        "bear_bull_symmetry",
+        "crowd_ratio_mode",
+        "ab",
+        "config_version",
+        "switches_on",
+    ]
+    assert rec["meeting_id"] == "AAUSDT@x" and rec["ab"] == "0.5"
+    assert rec["switches_on"] == ",".join(s.switches_on)
+    assert rec["config_version"] == cfg.version
+    assert cfg.version.startswith("bf-") and cfg.version == BiasFix(*NEW_ARGS, ab=0.5).version
+    # 改任何一项（含 ab）版本号都变；默认是固定的一个
+    others = {
+        BiasFix().version,
+        BiasFix(ab=0.0, debate_first="bear").version,
+        BiasFix("alternate", "neutral", "mirror", "relative", ab=0.4).version,
+        cfg.version,
+    }
+    assert len(others) == 4
+    assert resolve(BiasFix(), "x").record()["config_version"] == BiasFix().version
+    assert resolve(BiasFix(), "x").record()["ab"] == "0"
+    assert "先发言" in s.describe() and cfg.version in s.describe()
+
+
+# ---------------------------------------------------------------- 配置
+def test_config_defaults_and_validation(tmp_path: Path) -> None:
+    m = MeetingConfig()
+    assert m.bias_fix() == BiasFix()
+    assert load_slow_config(tmp_path / "nope.toml").engine_settings().bias_fix == BiasFix()
+    p = tmp_path / "slow.toml"
+    p.write_text(
+        '[meeting]\ndebate_first = "alternate"\nfunding_label = "neutral"\n'
+        'bear_bull_symmetry = "mirror"\ncrowd_ratio_mode = "relative"\nbias_fix_ab = 0.5\n',
+        encoding="utf-8",
+    )
+    assert load_slow_config(p).engine_settings().bias_fix == BiasFix(
+        "alternate", "neutral", "mirror", "relative", 0.5
+    )
+    for bad in (
+        'debate_first = "both"',
+        'funding_label = "soft"',
+        'bear_bull_symmetry = "drop"',
+        'crowd_ratio_mode = "zscore"',
+        "bias_fix_ab = 1.5",
+        "bias_fix_ab = -0.1",
+        "bias_fix_ab = 0.5",  # 四项都是现状，两组一样
+    ):
+        p.write_text(f"[meeting]\n{bad}\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_slow_config(p)
+
+
+# ---------------------------------------------------------------- 提示词：默认不变，模式只改一处
+P = ta_prompts.PromptParams.for_hold("2h")
+
+
+def test_role_prompts_default_unchanged() -> None:
+    for role in ("bull", "bear", "aggressive", "conservative", "neutral"):
+        base = ta_prompts.role_prompt(role, P, "BTC-USD")
+        assert base == ta_prompts.role_prompt(
+            role, P, "BTC-USD", mirror=False, neutral_funding=False
+        )
+    bull = ta_prompts.role_prompt("bull", P, "BTC-USD")
+    bear = ta_prompts.role_prompt("bear", P, "BTC-USD")
+    assert "crowded short" not in bull and "flushed out" not in bull
+    assert "a crowded long (high funding, open interest rising into resistance)" in bear
+
+
+def test_mirror_adds_exactly_the_symmetric_lines() -> None:
+    bull = ta_prompts.role_prompt("bull", P, "BTC-USD", mirror=True)
+    bear = ta_prompts.role_prompt("bear", P, "BTC-USD", mirror=True)
+    assert (
+        "recent liquidations (forced selling that has run its course often precedes a bounce), "
+        "a crowded short (deeply negative funding, open interest rising into support); longs "
+        "that were already flushed out are no longer fuel for a drop." in bull
+    )
+    assert (
+        "recent liquidations (forced buying that has run its course often precedes a pullback), "
+        "a crowded long (high funding, open interest rising into resistance); shorts that were "
+        "already squeezed out are no longer fuel for a rally." in bear
+    )
+    assert "a reclaimed level, a failed breakdown, a failed pullback, higher lows." in bull
+    assert "a lost level, a failed breakout, a failed bounce, lower highs." in bear
+    for text in (bull, bear):
+        assert ta_prompts.EQUITY_ARGS_MIRROR in text
+    # 和默认只差这几处
+    tail = {
+        "bull": (
+            "a failed breakdown, higher lows.",
+            "a failed breakdown, a failed pullback, higher lows.",
+        ),
+        "bear": (
+            "a lost level, a failed bounce,",
+            "a lost level, a failed breakout, a failed bounce,",
+        ),
+    }
+    edits = {
+        "bull": [(ta_prompts.BULL_MIRROR_OLD, ta_prompts.BULL_MIRROR_NEW)],
+        "bear": list(ta_prompts.BEAR_MIRROR_EDITS),
+    }
+    for role in ("bull", "bear"):
+        want = ta_prompts.role_prompt(role, P, "BTC-USD")
+        for old, new in [
+            *edits[role],
+            (ta_prompts.EQUITY_ARGS[role], ta_prompts.EQUITY_ARGS_MIRROR),
+            tail[role],
+        ]:
+            assert want.count(old) == 1
+            want = want.replace(old, new)
+        assert ta_prompts.role_prompt(role, P, "BTC-USD", mirror=True) == want
+    # 风控三人没有单边写法，不变
+    for role in ("aggressive", "conservative", "neutral"):
+        assert ta_prompts.role_prompt(role, P, mirror=True) == ta_prompts.role_prompt(role, P)
+
+
+@pytest.mark.parametrize("neutral_funding", [False, True])
+@pytest.mark.parametrize("hold", HOLDS)
+def test_mirror_makes_bull_and_bear_word_swaps_of_each_other(
+    hold: str, neutral_funding: bool
+) -> None:
+    """mirror 下：空头正文按方向词对照表（long↔short、bounce↔pullback、support↔resistance、
+    up↔down…）换一遍就一字不差地是多头正文，反过来也一样；默认（现状）做不到。"""
+    p = ta_prompts.PromptParams.for_hold(hold)
+    bull = ta_prompts.role_prompt(
+        "bull", p, "BTC-USD", mirror=True, neutral_funding=neutral_funding
+    )
+    bear = ta_prompts.role_prompt(
+        "bear", p, "BTC-USD", mirror=True, neutral_funding=neutral_funding
+    )
+    assert ta_prompts.mirror_swap(bear) == bull
+    assert ta_prompts.mirror_swap(bull) == bear
+    old_bull = ta_prompts.role_prompt("bull", p, "BTC-USD")
+    old_bear = ta_prompts.role_prompt("bear", p, "BTC-USD")
+    assert ta_prompts.mirror_swap(old_bear) != old_bull
+    assert ta_prompts.mirror_swap(old_bull) != old_bear
+
+
+def test_mirror_swap_table_is_a_clean_involution() -> None:
+    lhs = [a for a, _ in ta_prompts.MIRROR_SWAPS]
+    rhs = [b for a, b in ta_prompts.MIRROR_SWAPS if a != b]
+    assert len(set(lhs) | set(rhs)) == len(lhs) + len(rhs)  # 每个词只出现一次
+    s = "long/short ratios, long-term growth; buy longs at support, up a rally"
+    swapped = "long/short ratios, long-term growth; sell shorts at resistance, down a drop"
+    assert ta_prompts.mirror_swap(s) == swapped
+    assert ta_prompts.mirror_swap(swapped) == s
+
+
+# 方向词：一段文字里出现其中一个，镜像版里另一个也要出现
+CLOSURE = (
+    ("bounce", "pullback"),
+    ("support", "resistance"),
+    ("above", "below"),
+    ("higher", "lower"),
+    ("highs", "lows"),
+    ("rally", "drop"),
+    ("uptrend", "downtrend"),
+    ("up", "down"),
+    ("breakout", "breakdown"),
+    ("buying", "selling"),
+    ("longs", "shorts"),
+)
+
+
+def _one_sided(text: str) -> list[tuple[str, str]]:
+    import re
+
+    def has(w: str) -> bool:
+        return re.search(rf"(?<![\w-]){w}(?![\w-])", text.lower()) is not None
+
+    return [(a, b) for a, b in CLOSURE if has(a) != has(b)]
+
+
+def _shared_texts(mirror: bool) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for hold in HOLDS:
+        p = ta_prompts.PromptParams.for_hold(hold)
+        for group in ta_prompts.GROUPS:
+            out[f"context/{hold}/{group}"] = ta_prompts.perp_context(p, group, mirror=mirror)
+        for name in ("MARKET", "RM", "TRADER_SYSTEM", "TRADER_USER", "PM"):
+            out[f"{name}/{hold}"] = ta_roles.fill(getattr(ta_roles, name), p, mirror=mirror)
+        for role in ("aggressive", "conservative", "neutral"):
+            out[f"{role}/{hold}"] = ta_prompts.role_prompt(role, p, mirror=mirror)
+    fields = ta_roles.TRADE_FIELDS_MIRROR if mirror else ta_roles.TRADE_FIELDS
+    for d in (ta_roles.RM_FIELDS, fields):
+        out.update({f"field/{k}": v for k, v in d.items()})
+    for k in ("action", "reasoning"):
+        out[f"trader_field/{k}"] = ta_roles.TRADER_FIELDS[k]
+    for k in ("rating", "executive_summary", "investment_thesis"):
+        out[f"pm_field/{k}"] = ta_roles.PM_FIELDS[k]
+    return out
+
+
+def test_mirror_leaves_no_one_sided_direction_word_in_shared_and_manager_texts() -> None:
+    """分析师 / 研究经理 / 交易员 / 组合经理 / 共用说明 / 结构化字段：
+    mirror 下每个方向词都有对面那个。"""
+    mirror = {k: _one_sided(t) for k, t in _shared_texts(True).items()}
+    assert {k: v for k, v in mirror.items() if v} == {}
+    legacy = {k: _one_sided(t) for k, t in _shared_texts(False).items()}
+    assert legacy["context/2h/manager"] == [("above", "below")]
+    assert legacy["context/24h/manager"] == [("above", "below"), ("uptrend", "downtrend")]
+    assert legacy["PM/2h"] == [("bounce", "pullback")]
+    assert legacy["field/entry_zone"] == [("bounce", "pullback")]
+
+
+def test_mirror_spells_out_the_short_ratings_and_both_entry_waits() -> None:
+    rm = ta_roles.fill(ta_roles.RM, P, mirror=True)
+    want_rm = ta_roles.RM.replace(ta_roles.RM_MIRROR_OLD, ta_roles.RM_MIRROR_NEW)
+    assert rm == ta_roles.fill(want_rm, P)
+    assert "the mirror of" not in rm and "The short case wins on fresh evidence" in rm
+    pm = ta_roles.fill(ta_roles.PM, P, mirror=True)
+    want = ta_roles.PM.replace(ta_roles.PM_SELL_OLD, ta_roles.PM_SELL_NEW).replace(
+        ta_roles.PULLBACK_OLD, ta_roles.PULLBACK_NEW
+    )
+    assert pm == ta_roles.fill(want, P) and "waits for a pullback or a bounce" in pm
+    market = ta_roles.fill(ta_roles.MARKET, P, mirror=True)
+    assert market == ta_roles.fill(
+        ta_roles.MARKET.replace(ta_roles.MARKET_MIRROR_OLD, ta_roles.MARKET_MIRROR_NEW), P
+    )
+    for name in ("TRADER_SYSTEM", "TRADER_USER"):
+        text = getattr(ta_roles, name)
+        assert ta_roles.fill(text, P, mirror=True) == ta_roles.fill(text, P)
+    assert ta_roles.TRADE_FIELDS_MIRROR["entry_zone"].endswith("waits for a pullback or a bounce.")
+    for hold in HOLDS:  # 默认不变
+        p = ta_prompts.PromptParams.for_hold(hold)
+        for name in ("MARKET", "RM", "TRADER_SYSTEM", "TRADER_USER", "PM"):
+            text = getattr(ta_roles, name)
+            assert ta_roles.fill(text, p, mirror=False) == ta_roles.fill(text, p)
+        for group in ta_prompts.GROUPS:
+            assert ta_prompts.perp_context(p, group, mirror=False) == ta_prompts.perp_context(
+                p, group
+            )
+
+
+def test_neutral_funding_states_the_baseline_rule_in_the_bear_line() -> None:
+    base = ta_prompts.role_prompt("bear", P, "BTC-USD")
+    got = ta_prompts.role_prompt("bear", P, "BTC-USD", neutral_funding=True)
+    assert got == base.replace(ta_prompts.BEAR_FUNDING_OLD, ta_prompts.BEAR_FUNDING_NEW) != base
+    assert (
+        "a crowded long (funding well above the Binance baseline of +0.01% per 8h, open interest "
+        "rising into resistance)" in got
+    )
+    assert "high funding" not in got
+    for role in ("bull", "aggressive", "conservative", "neutral"):
+        assert ta_prompts.role_prompt(role, P, neutral_funding=True) == ta_prompts.role_prompt(
+            role, P
+        )
+    # mirror + neutral：多头那句用同样的门槛写法（well below）
+    bull = ta_prompts.role_prompt("bull", P, "BTC-USD", mirror=True, neutral_funding=True)
+    assert (
+        "a crowded short (funding well below the Binance baseline of +0.01% per 8h, open interest "
+        "rising into support)" in bull
+    )
+
+
+FUNDING = [{"fundingRate": "0.0001"}, {"fundingRate": "-0.0002"}, {"fundingRate": "0.0005"}]
+OI = [{"sumOpenInterestValue": "100"}, {"sumOpenInterestValue": "112"}]
+
+
+def test_funding_label_default_is_the_old_text_and_neutral_changes_only_that_line() -> None:
+    legacy = eng.format_derivatives(FUNDING, OI)
+    assert legacy == eng.format_derivatives(FUNDING, OI, "legacy")
+    assert (
+        "- Latest funding rate +0.0500% (positive: longs pay, crowded long; negative: the "
+        "opposite)" in legacy.splitlines()
+    )
+    neutral = eng.format_derivatives(FUNDING, OI, "neutral")
+    assert neutral == legacy.replace(eng.FUNDING_LABEL_LEGACY, eng.neutral_funding_label(None))
+    assert (
+        "positive: longs pay shorts; negative: shorts pay longs; Binance baseline is +0.01% per "
+        "8h" in neutral
+    )
+    assert "crowded long;" not in neutral
+    assert (
+        "well above the baseline, and shorts crowded only when it is well below the baseline"
+        in (neutral)
+    )
+
+
+def _funding(hours: float, n: int = 9) -> list[dict[str, Any]]:
+    t0 = 1_761_000_000_000
+    return [
+        {"fundingRate": "0.00005", "fundingTime": t0 + int(i * hours * 3_600_000) + i * 7}
+        for i in range(n)
+    ]
+
+
+def test_neutral_funding_states_the_baseline_per_settlement_interval() -> None:
+    assert eng.funding_interval_h(_funding(8)) == 8
+    assert eng.funding_interval_h(_funding(4)) == 4
+    assert eng.funding_interval_h(_funding(1)) == 1
+    assert eng.funding_interval_h(FUNDING) is None  # 没有 fundingTime
+    assert eng.funding_interval_h(_funding(4, n=1)) is None
+    # 中间漏了一次结算也不影响（取中位数）
+    gappy = _funding(4)
+    del gappy[3]
+    assert eng.funding_interval_h(gappy) == 4
+    eight = eng.format_derivatives(_funding(8), OI, "neutral")
+    four = eng.format_derivatives(_funding(4), OI, "neutral")
+    one = eng.format_derivatives(_funding(1), OI, "neutral")
+    assert "Binance baseline is +0.01% per 8h; this coin settles every 8h." in eight
+    assert (
+        "Binance baseline is +0.01% per 8h; this coin settles every 4h, so the baseline is "
+        "+0.0050% per settlement." in four
+    )
+    assert "settles every 1h, so the baseline is +0.0013% per settlement." in one
+    # 默认（legacy）不管结算间隔，一字不差
+    assert eng.format_derivatives(_funding(4), OI) == eng.format_derivatives(
+        _funding(4), OI, "legacy"
+    )
+    assert "settles" not in eng.format_derivatives(_funding(4), OI)
+
+
+# ---------------------------------------------------------------- 多空比相对值
+def _rows(field: str, vals: list[float]) -> list[dict[str, Any]]:
+    return [{"timestamp": 1_761_000_000_000 + i, field: v} for i, v in enumerate(vals)]
+
+
+class _Resp:
+    def __init__(self, rows: list[dict[str, Any]], bad: bool = False) -> None:
+        self._rows, self._bad = rows, bad
+
+    def raise_for_status(self) -> None:
+        if self._bad:
+            raise RuntimeError("boom")
+
+    def json(self) -> list[dict[str, Any]]:
+        return self._rows
+
+
+def _get(seen: list[dict[str, Any]], *, median_ok: bool = True) -> Any:
+    def get(url: str, params: dict[str, Any]) -> _Resp:
+        seen.append({"url": url, **params})
+        path = url.rsplit("/", 1)[1]
+        field = {
+            "globalLongShortAccountRatio": "longShortRatio",
+            "topLongShortPositionRatio": "longShortRatio",
+            "takerlongshortRatio": "buySellRatio",
+            "openInterestHist": "sumOpenInterestValue",
+        }[path]
+        if path == "globalLongShortAccountRatio" and params["period"] == "4h":
+            return _Resp(_rows(field, [1.5, 2.0, 2.5]), bad=not median_ok)
+        return _Resp(_rows(field, [1.0, 1.2, 1.8]))
+
+    return get
+
+
+@pytest.fixture(autouse=True)
+def _clear_median_cache() -> None:
+    crowd._MEDIANS.clear()
+
+
+def test_crowd_raw_default_is_unchanged_and_makes_no_extra_request() -> None:
+    seen: list[dict[str, Any]] = []
+    blocks, ok = crowd.fetch_blocks("BTCUSDT", "1h", _get(seen))
+    assert ok == 4 and len(seen) == 4
+    assert "Relative" not in "\n".join(blocks) and "median" not in "\n".join(blocks)
+    assert blocks[0] == crowd.summarize(
+        _rows("longShortRatio", [1.0, 1.2, 1.8]), crowd.SERIES[0], "1h"
+    )
+
+
+def test_crowd_relative_adds_the_deviation_from_the_30_day_median() -> None:
+    seen: list[dict[str, Any]] = []
+    raw, _ = crowd.fetch_blocks("BTCUSDT", "1h", _get([]))
+    crowd._MEDIANS.clear()
+    blocks, ok = crowd.fetch_blocks("BTCUSDT", "1h", _get(seen), ratio_mode="relative")
+    assert ok == 4 and blocks[1:] == raw[1:]  # 只改账户多空比那一块
+    extra = blocks[0].removeprefix(raw[0] + "\n")
+    assert extra == (
+        "- Relative to this coin's own 30-day median 2.000: latest 1.800 is -10.0% versus that "
+        "median; most coins' all-account ratio sits above 1 structurally, so a ratio above 1 "
+        "alone does not show an unusually long crowd, so judge crowding by the deviation from "
+        "this coin's own median, not by the ratio being above 1."
+    )
+    hist = [c for c in seen if c["period"] == "4h"]
+    assert hist == [
+        {
+            "url": f"{crowd._BASE}/globalLongShortAccountRatio",
+            "symbol": "BTCUSDT",
+            "period": "4h",
+            "limit": 180,
+        }
+    ]
+    # 6 小时内同一个币不再拉
+    again: list[dict[str, Any]] = []
+    crowd.fetch_blocks("BTCUSDT", "1h", _get(again), ratio_mode="relative")
+    assert len(again) == 4
+
+
+def test_crowd_relative_falls_back_to_raw_with_a_note() -> None:
+    blocks, _ = crowd.fetch_blocks(
+        "BTCUSDT", "1h", _get([], median_ok=False), ratio_mode="relative"
+    )
+    assert "30-day median is unavailable this round, so only the raw ratio is shown" in blocks[0]
+    assert "sits above 1 structurally" in blocks[0]
+    assert "BTCUSDT" not in crowd._MEDIANS  # 失败不缓存
+
+
+def test_crowd_relative_rate_limit_propagates() -> None:
+    def get(url: str, params: dict[str, Any]) -> _Resp:
+        if params["period"] == "4h":
+            raise binance_gate.RateLimited("ban", 60.0)
+        return _get([])(url, params)
+
+    with pytest.raises(binance_gate.RateLimited):
+        crowd.fetch_blocks("BTCUSDT", "1h", get, ratio_mode="relative")
+
+
+def test_median_cache_expires() -> None:
+    t = [0.0]
+    seen: list[dict[str, Any]] = []
+    assert crowd.account_ratio_median("XUSDT", _get(seen), clock=lambda: t[0]) == 2.0
+    t[0] = crowd.MEDIAN_TTL_S - 1
+    crowd.account_ratio_median("XUSDT", _get(seen), clock=lambda: t[0])
+    assert len(seen) == 1
+    t[0] = crowd.MEDIAN_TTL_S + 1
+    crowd.account_ratio_median("XUSDT", _get(seen), clock=lambda: t[0])
+    assert len(seen) == 2
+
+
+# ---------------------------------------------------------------- 引擎：按会议定设置并交给图
+def _pool_entry(sym: str) -> SymbolPoolEntry:
+    return SymbolPoolEntry(
+        symbol=sym,
+        category=Category.ALT,
+        score=0.5,
+        filters=HardFilters(
+            quote_volume_24h_usdt=1e8, spread_bps=1, depth_usdt=1e6, listed_days=100, passed=True
+        ),
+        in_pool=True,
+    )
+
+
+class _Stop(Exception):
+    pass
+
+
+def test_engine_resolves_the_setup_per_meeting_and_passes_it_to_the_graph() -> None:
+    e = eng.TradingAgentsEngine.__new__(eng.TradingAgentsEngine)
+    e._s = eng.TradingAgentsSettings(bias_fix=BiasFix(debate_first="alternate", ab=0.5))
+    now = datetime(2026, 10, 28, 3, 0, tzinfo=UTC)
+    e._today = lambda: now  # type: ignore[method-assign]
+    e._ticks = SimpleNamespace(get=lambda sym: None)  # type: ignore[assignment]
+    seen: list[MeetingSetup] = []
+
+    def graph(*a: Any, **k: Any) -> Any:
+        seen.append(a[4] if len(a) > 4 else k["setup"])
+        raise _Stop
+
+    e._graph = graph  # type: ignore[method-assign,assignment]
+    with pytest.raises(_Stop):
+        e._analyze_run(_pool_entry("AAUSDT"), "震荡", None, None)  # type: ignore[arg-type]
+    assert seen == [resolve(e._s.bias_fix, "AAUSDT@2026-10-28T03:00:00Z")]
+
+
+def test_build_config_carries_the_setup_and_defaults_to_legacy() -> None:
+    s = eng.TradingAgentsSettings()
+    legacy = eng.build_config({}, s)
+    assert legacy[eng.ta_nodes.PROMPT_KEY] == {
+        "hold": "2h",
+        "hold_minutes": 120,
+        "lean": "M",
+        "lang": "Chinese",
+    }
+    # 对照的现状组：配置也和改动前一样
+    ab = BiasFix(funding_label="neutral", ab=0.5)
+    old_arm = next(resolve(ab, i) for i in IDS if resolve(ab, i).arm == "legacy")
+    assert eng.build_config({}, s, setup=old_arm) == legacy
+    setup = resolve(BiasFix("bear", "neutral", "mirror", "relative"), "x")
+    got = eng.build_config({}, s, setup=setup)[eng.ta_nodes.PROMPT_KEY]
+    assert [got[k] for k in eng.ta_nodes.SETUP_KEYS] == ["bear", "neutral", "mirror", "relative"]
+    one = eng.build_config({}, s, setup=resolve(BiasFix(crowd_ratio_mode="relative"), "x"))
+    assert set(one[eng.ta_nodes.PROMPT_KEY]) - set(legacy[eng.ta_nodes.PROMPT_KEY]) == {
+        "crowd_ratio_mode"
+    }
+    assert LEGACY_SETUP.record()["arm"] == "off"
+
+
+# ---------------------------------------------------------------- 落盘：决策日志和复盘流水
+class _SetupEngine(FakeEngine):
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Any:
+        from jiaoyi.slow.commander import Analysis
+
+        await super().analyze(e, regime, pick_reason)
+        return Analysis(card_symbol(e.symbol), 0.02, None, resolve(NEW, f"{e.symbol}@t").record())
+
+
+async def test_setup_is_written_to_the_decision_log_and_the_card_journal(
+    tmp_path: Path, now: datetime
+) -> None:
+    j = CardJournal(tmp_path)
+    c, log, _ = make(tmp_path, _SetupEngine(["AAUSDT"]), now, journal=j)
+    await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    want = resolve(NEW, "AAUSDT@t").record()
+    rows = j.read()
+    assert [r.meeting_setup for r in rows] == [want]
+    recs = [r for r in log.read_day(now.date().isoformat()) if r.symbol == "AAUSDT"]
+    assert [r.output.get("meeting_setup") for r in recs if "bias" in r.output] == [want]
+
+
+def test_old_journal_rows_still_load(tmp_path: Path) -> None:
+    j = CardJournal(tmp_path)
+    j.path.parent.mkdir(parents=True)
+    old = (
+        '{"card_id":"c","version":1,"created_at":"2026-10-27T00:00:00Z",'
+        '"expires_at":"2026-10-27T02:00:00Z","regime":"r","refresh_reason":"s",'
+        '"symbol":"AAUSDT","category":"alt","bias":"short"}'
+    )
+    j.path.write_text(old + "\n", encoding="utf-8")
+    (row,) = j.read()
+    assert isinstance(row, JournalRow) and row.meeting_setup is None
+
+
+# ---------------------------------------------------------------- 失败的会也记设置
+class _FailEngine(FakeEngine):
+    """AAUSDT 报错（带设置），BBUSDT 超时（错误里没有设置，问引擎）。"""
+
+    def __init__(self) -> None:
+        super().__init__(["AAUSDT", "BBUSDT", "CCUSDT"])
+
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Any:
+        from jiaoyi.slow.commander import MeetingError
+
+        if e.symbol == "AAUSDT":
+            raise MeetingError("质量门槛没过", 0.01, resolve(NEW, "AAUSDT@t").record())
+        if e.symbol == "BBUSDT":
+            await asyncio.sleep(5)
+        return await super().analyze(e, regime, pick_reason)
+
+    def meeting_setup(self, key: str) -> dict[str, str] | None:
+        return resolve(NEW, f"{key}@engine").record() if key == "BBUSDT" else None
+
+
+async def test_failed_meetings_record_their_setup(tmp_path: Path, now: datetime) -> None:
+    c, log, _ = make(tmp_path, _FailEngine(), now, symbol_timeout_s=0.05)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT")), "scheduled")
+    errs = {
+        r.symbol: r.output.get("meeting_setup")
+        for r in log.read_day(now.date().isoformat())
+        if r.outcome is Outcome.ERROR and r.symbol
+    }
+    assert errs["AAUSDT"] == resolve(NEW, "AAUSDT@t").record()  # 引擎随错误带出来
+    assert errs["BBUSDT"] == resolve(NEW, "BBUSDT@engine").record()  # 超时：问引擎
+
+
+def test_engine_attaches_the_setup_to_a_failed_meeting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiaoyi.slow.commander import MeetingError
+
+    # 记花费的回调要导入 langchain_core（CI 不装）；这里只看设置有没有带出来
+    monkeypatch.setattr(eng, "cost_handler", lambda meter: None)
+    e = eng.TradingAgentsEngine.__new__(eng.TradingAgentsEngine)
+    e._s = eng.TradingAgentsSettings(bias_fix=BiasFix(funding_label="neutral", ab=0.5))
+    now = datetime(2026, 10, 28, 3, 0, tzinfo=UTC)
+    e._today = lambda: now  # type: ignore[method-assign]
+    e._ticks = SimpleNamespace(get=lambda sym: None)  # type: ignore[assignment]
+    e._inflight, e._live = {}, {}
+    e._inflight_lock = threading.Lock()
+
+    def graph(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("质量门槛没过")
+
+    e._graph = graph  # type: ignore[method-assign,assignment]
+    with pytest.raises(MeetingError) as err:
+        e._analyze_sync(_pool_entry("AAUSDT"), "震荡")
+    want = resolve(e._s.bias_fix, "AAUSDT@2026-10-28T03:00:00Z").record()
+    assert err.value.setup == want and e.meeting_setup("AAUSDT") == want
+
+    # 下一场一开始就清掉上一场的（还没定设置就失败的会不会冒用上一场）
+    def banned(sym: str) -> None:
+        raise binance_gate.RateLimited("ban", 1.0)
+
+    e._ticks = SimpleNamespace(get=banned)  # type: ignore[assignment]
+    with pytest.raises(MeetingError) as err2:
+        e._analyze_sync(_pool_entry("AAUSDT"), "震荡")
+    assert err2.value.setup is None and e.meeting_setup("AAUSDT") is None
+
+
+def test_journal_row_keeps_the_old_keys_as_a_prefix(tmp_path: Path) -> None:
+    j = CardJournal(tmp_path)
+    old_keys = [
+        "card_id",
+        "version",
+        "created_at",
+        "expires_at",
+        "regime",
+        "refresh_reason",
+        "symbol",
+        "category",
+        "bias",
+    ]
+    assert list(JournalRow.model_fields)[: len(old_keys)] == old_keys
+    assert list(JournalRow.model_fields)[len(old_keys) :] == ["outlook", "meeting_setup"]
+    assert j.path.name == "cards.jsonl"
+
+
+async def test_market_view_branch_keeps_the_setup(tmp_path: Path, now: datetime) -> None:
+    """有总盘会观点时指挥官给指令补上来源，会议设置不能跟着丢。"""
+    from jiaoyi.contracts import MarketView
+
+    j = CardJournal(tmp_path)
+    c, log, _ = make(tmp_path, _SetupEngine(["AAUSDT"]), now, journal=j)
+    view = MarketView(
+        market_view_id="mv-1", version=1, observed_at=now, regime="震荡", regime_direction="中性"
+    )
+    res = await c._analyze_one(entry("AAUSDT"), "震荡", market_view=view)
+    assert res.card_symbol.source_market_view_id == "mv-1"
+    assert res.setup == resolve(NEW, "AAUSDT@t").record()
+    recs = [r for r in log.read_day(now.date().isoformat()) if r.symbol == "AAUSDT"]
+    assert recs[-1].output["meeting_setup"] == resolve(NEW, "AAUSDT@t").record()
+
+
+def test_panel_overview_shows_a_conclusion_that_carries_meeting_setup(now: datetime) -> None:
+    """单币结论里多了 meeting_setup（和 usage 一样不属于指令）：总览仍要显示真实方向。"""
+    from datetime import timedelta
+
+    from jiaoyi.contracts import DecisionRecord, Role
+    from jiaoyi.panel.overview import _card
+    from jiaoyi.slow.commander import BattleCardCommander
+
+    out = BattleCardCommander._symbol_output(
+        card_symbol("AAUSDT"), False, {"input_tokens": 1}, resolve(NEW, "AAUSDT@t").record()
+    )
+    assert "meeting_setup" in out and "usage" in out
+    t = now - timedelta(minutes=10)
+
+    def rec(summary: str, ts: datetime, **kw: Any) -> DecisionRecord:
+        return DecisionRecord(
+            record_id=f"r-{summary}",
+            ts=ts,
+            role=Role.COMMANDER,
+            outcome=Outcome.ACTION,
+            summary=summary,
+            **kw,
+        )
+
+    recs = [
+        rec("结论", t, symbol="AAUSDT", output=out),
+        rec(
+            "出卡",
+            t + timedelta(minutes=1),
+            card_id="card-1",
+            output={"symbols": ["AAUSDT"], "expires_at": (now + timedelta(hours=1)).isoformat()},
+        ),
+    ]
+    view = _card(recs, now)
+    assert view is not None
+    assert view.symbols[0].bias == "long" and view.symbols[0].reason == "测试"

@@ -25,6 +25,7 @@ from jiaoyi.contracts import Category, SizeTier
 from jiaoyi.core import profiles
 from jiaoyi.core.config import ConfigError
 from jiaoyi.interfaces import SecretStore
+from jiaoyi.slow.bias_fix import BiasFix
 from jiaoyi.slow.commander import EVENT_GAP_FLOOR, EventRules, TierRules
 from jiaoyi.slow.screener import ScreenerConfig
 from jiaoyi.slow.tradingagents_engine import (
@@ -356,6 +357,54 @@ class MeetingConfig(_Strict):
         "通道生效。",
     )
     max_retries: int = Field(default=6, ge=0, le=10)
+    # 偏空整改（见 slow/bias_fix.py 和 short-bias-investigation-2026-10-28），默认 = 现状
+    debate_first: Literal["bull", "bear", "alternate"] = Field(
+        default="bull",
+        description="多空辩论谁先说：bull = 多头先、空头最后说（现状）；bear = 反过来；"
+        "alternate = 按会议交替（按会议 id 哈希，可复现），两边各一半时间有最后发言。",
+    )
+    funding_label: Literal["legacy", "neutral"] = Field(
+        default="legacy",
+        description="资金费率怎么写：legacy = 正费率写成「多头拥挤」（现状）；"
+        "neutral = 只写谁付谁 + 币安基准 +0.01%/8h（按结算间隔折算），写明明显高于基准才算"
+        "多头拥挤、明显低于基准才算空头拥挤。",
+    )
+    bear_bull_symmetry: Literal["legacy", "mirror"] = Field(
+        default="legacy",
+        description="legacy = 现状（空头独有「拥挤 / 已被挤出的不再是燃料」，多头独有「强平耗尽后"
+        "常反弹」等）；mirror = 多空两份提示词逐句对称，经理 / 交易员 / 共用说明里的单边写法补齐"
+        "另一边。",
+    )
+    crowd_ratio_mode: Literal["raw", "relative"] = Field(
+        default="raw",
+        description="账户多空比：raw = 只给原值（现状）；relative = 再给相对这个币自己 "
+        "30 天中位数的偏离并注明多数币长期在 1 以上（每个币多一次币安公开请求，缓存 6 小时）。",
+    )
+    bias_fix_ab: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="0 = 上面四项每场会都按配置；> 0 = 析因对照：每个改了的开关各自独立按这个"
+        "概率用配置值、否则用现状（按会议 id 加盐哈希，可复现），记进决策日志和复盘流水。",
+    )
+
+    @model_validator(mode="after")
+    def _bias_fix_ab_needs_a_change(self) -> MeetingConfig:
+        if self.bias_fix_ab > 0 and self.bias_fix().is_legacy:
+            raise ValueError(
+                "bias_fix_ab > 0 但 debate_first / funding_label / bear_bull_symmetry / "
+                "crowd_ratio_mode 都是现状，两组一模一样，对照没有意义：先改至少一项"
+            )
+        return self
+
+    def bias_fix(self) -> BiasFix:
+        return BiasFix(
+            debate_first=self.debate_first,
+            funding_label=self.funding_label,
+            bear_bull_symmetry=self.bear_bull_symmetry,
+            crowd_ratio_mode=self.crowd_ratio_mode,
+            ab=self.bias_fix_ab,
+        )
 
     @field_validator("analysts_crypto", "analysts_stock")
     @classmethod
@@ -600,6 +649,7 @@ class SlowConfig(_Strict):
             level_span_sigma=self.levels.span_sigma,
             pick_tier=m.pick_tier,
             convert_tier=m.convert_tier,
+            bias_fix=m.bias_fix(),
         )
 
     def screener_config(

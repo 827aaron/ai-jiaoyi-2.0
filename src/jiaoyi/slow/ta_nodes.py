@@ -3,8 +3,8 @@
 做法：``tradingagents.graph.setup`` 是按名字引用 ``create_*`` 的，所以替换模块属性就生效，
 不改开源代码。新节点的状态读写和原版（0.7.0，e8f5503）完全一样，只换提示词正文；
 持仓档的参数（{H} 等）从这场会的运行配置里读（``jiaoyi_prompt``，由引擎的 ``build_config`` 写入，
-只跟档位有关，所有会议一样）。每场会不同的东西（总盘会的判断、挑币理由、持仓说明）走
-``PerpGraph`` 的 state，不进配置，所以同时开几场也不会串。
+只跟档位有关，所有会议一样；偏空整改设置例外，见 ``SETUP_KEYS``）。每场会不同的东西
+（总盘会的判断、挑币理由、持仓说明）走 ``PerpGraph`` 的 state，不进配置，所以同时开几场也不会串。
 
 替换的角色：多空研究员、风控三人、新闻分析师、情绪分析师（加密币；美股永续照旧走原版）。
 只在用到时才导入 tradingagents。
@@ -47,6 +47,62 @@ def lean_from_config() -> str:
     return lean if lean in ("S", "M", "L") else "M"
 
 
+SETUP_KEYS = ("debate_first", "funding_label", "bear_bull_symmetry", "crowd_ratio_mode")
+"""这场会实际用的偏空整改设置（bias_fix.MeetingSetup），由 ``build_config`` 写进 ``jiaoyi_prompt``。
+
+和档位参数不同，这几项每场会可能不一样（对照分组 / 交替先发言）。照样放配置是因为资金费率那段
+是数据工具（``get_stock_data``）里拼的，工具只看得到配置、看不到 state；开会时 TradingAgents
+按场用 ContextVar 给每张图自己的配置（``run_config``），同时开几场不会串。
+
+只从这个按场的 ContextVar 读（``meeting_setting``）：建图时 ``set_config`` 会把配置合并进进程全局，
+而且字典是逐键合并的，上一场 mirror 写进去的键下一场现状组不会清掉，所以全局那份不能信。"""
+
+
+def _run_config_var() -> Any:
+    """TradingAgents 按场配置的 ContextVar。版本变了找不到就报错：宁可开不了会，也不能悄悄按
+    现状开、却在日志里记成 mirror / neutral。"""
+    from tradingagents.dataflows import config as ta_config
+
+    var = getattr(ta_config, "_run_config", None)
+    if var is None or not callable(getattr(var, "get", None)):
+        raise RuntimeError(
+            "TradingAgents 里没有按场配置 _run_config，版本对不上，先核对 pyproject 里钉的提交"
+        )
+    return var
+
+
+def meeting_setting(key: str, default: str) -> str:
+    """读这场会的一项偏空整改设置，只看这场会自己的运行配置；不在会议里（或没装
+    tradingagents）就是默认值 = 现状。TradingAgents 装了却找不到按场配置就报错。"""
+    try:
+        import tradingagents.dataflows.config  # noqa: F401
+    except ImportError:
+        return default
+    scoped = _run_config_var().get()
+    if not isinstance(scoped, Mapping):
+        return default
+    raw = scoped.get(PROMPT_KEY) or {}
+    return str(raw.get(key) or default)
+
+
+def check_meeting_settings() -> None:
+    """启动自检（开了任何偏空整改开关时由引擎调用）：在一场假的按场配置里读回设置，读不回就
+    拒绝启动，免得记录里写着 mirror / neutral 而提示词其实没用上。"""
+    from tradingagents.dataflows.config import run_config
+
+    _run_config_var()
+    probe = {k: f"probe-{k}" for k in SETUP_KEYS}
+    with run_config({PROMPT_KEY: probe}):
+        got = {k: meeting_setting(k, "") for k in SETUP_KEYS}
+    if got != probe or meeting_setting(SETUP_KEYS[0], "legacy") != "legacy":
+        raise RuntimeError(f"偏空整改设置读不回这场会的配置（读到 {got}），拒绝启动")
+
+
+def _mirror() -> bool:
+    """这场会是否 bear_bull_symmetry = mirror（多空写法逐句对称）。"""
+    return meeting_setting("bear_bull_symmetry", "legacy") == "mirror"
+
+
 def language(role: str | None = None) -> str:
     """替换 TradingAgents 的 ``get_language_instruction()``：按角色说清哪些标签行保持英文，
     共用说明也按角色组给（新闻 / 情绪不收评级和进场规则，见 ``ta_prompts.ROLE_GROUP``）。"""
@@ -58,7 +114,7 @@ def language(role: str | None = None) -> str:
         if str(base).strip().lower() == "english":
             return ""
         group = ta_prompts.ROLE_GROUP.get(role or "", "manager")
-        lang = f"{base}. {ta_prompts.perp_context(params_from_config(), group)}"
+        lang = f"{base}. {ta_prompts.perp_context(params_from_config(), group, mirror=_mirror())}"
     else:  # 老配置：整段 output_language
         lang = str(cfg.get("output_language", "English"))
         if lang.strip().lower() == "english":
@@ -105,7 +161,13 @@ def _researcher(role: str, label: str, other: str) -> Factory:
             )
             p = params_from_config()
             prompt = (
-                ta_prompts.role_prompt(role, p, str(state.get("company_of_interest", "asset")))
+                ta_prompts.role_prompt(
+                    role,
+                    p,
+                    str(state.get("company_of_interest", "asset")),
+                    mirror=_mirror(),
+                    neutral_funding=meeting_setting("funding_label", "legacy") == "neutral",
+                )
                 + "\n\nResources available:\n"
                 + _resources(state, p)
                 + f"Conversation history of the debate: {history}\n"
@@ -298,7 +360,10 @@ def create_sentiment_analyst(llm: Any) -> Node:
 
         p = params_from_config()
         sym = binance_symbol_of(str(state["company_of_interest"]))
-        blocks, ok = crowd.fetch_blocks(sym, p.indicator)
+        if meeting_setting("crowd_ratio_mode", "raw") == "relative":
+            blocks, ok = crowd.fetch_blocks(sym, p.indicator, ratio_mode="relative")
+        else:
+            blocks, ok = crowd.fetch_blocks(sym, p.indicator)
         items = _NEWS_HUB.for_symbol(sym, hours=24, limit=8) if _NEWS_HUB is not None else []
         if ok == 0 and not items:
             text = ta_prompts.fill(CROWD_UNAVAILABLE.replace("{SYMBOL}", sym), p)
@@ -366,8 +431,10 @@ def _as_text(v: Any) -> str | None:
 
 
 @functools.cache
-def _schemas() -> tuple[Any, Any, Any]:
-    """研究经理 / 交易员 / 组合经理的结构化输出模型（字段说明见 ``ta_roles``）。"""
+def _schemas(mirror: bool = False) -> tuple[Any, Any, Any]:
+    """研究经理 / 交易员 / 组合经理的结构化输出模型（字段说明见 ``ta_roles``）。
+    ``mirror``：交易字段说明用 mirror 版（「等回调」写成「等回调或反弹」）。"""
+    trade_fields = ta_roles.TRADE_FIELDS_MIRROR if mirror else ta_roles.TRADE_FIELDS
     from pydantic import BaseModel, Field, field_validator
     from tradingagents.agents.schemas import (
         PortfolioRating,
@@ -381,9 +448,7 @@ def _schemas() -> tuple[Any, Any, Any]:
         strategic_actions: str = Field(description=ta_roles.RM_FIELDS["strategic_actions"])
 
     class _Trade(BaseModel):
-        entry_zone: str | None = Field(
-            default=None, description=ta_roles.TRADE_FIELDS["entry_zone"]
-        )
+        entry_zone: str | None = Field(default=None, description=trade_fields["entry_zone"])
         invalidation: str | None = Field(
             default=None, description=ta_roles.TRADE_FIELDS["invalidation"]
         )
@@ -423,6 +488,19 @@ def _bind(llm: Any, schema: Any, name: str) -> Any | None:
         return None
 
 
+class _Structured:
+    """交易员 / 组合经理的结构化绑定：默认那份建节点时就绑好（和原来一样），mirror 那份用到再绑。"""
+
+    def __init__(self, llm: Any, index: int, name: str) -> None:
+        self._llm, self._index, self._name = llm, index, name
+        self._bound = {False: _bind(llm, _schemas()[index], name)}
+
+    def get(self, mirror: bool) -> Any | None:
+        if mirror not in self._bound:
+            self._bound[mirror] = _bind(self._llm, _schemas(mirror)[self._index], self._name)
+        return self._bound[mirror]
+
+
 def _ask(structured: Any | None, plain: Any, prompt: Any, name: str) -> tuple[Any | None, str]:
     """(解析好的对象, "") 或 (None, 文字)。结构化解析失败但模型答了文字，就直接用这段文字；
     只有一个字都没答（或请求本身出错）才再发一次普通请求。"""
@@ -455,7 +533,7 @@ def create_market_analyst(llm: Any) -> Node:
         from tradingagents.agents.context import get_instrument_context_from_state
 
         p = params_from_config()
-        text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config())
+        text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config(), mirror=_mirror())
         system_message = _subst(text, {"target": str(state["company_of_interest"])}) + language(
             "market"
         )
@@ -499,7 +577,7 @@ def create_research_manager(llm: Any) -> Node:
         debate = state["investment_debate_state"]
         p = params_from_config()
         prompt = _subst(
-            ta_roles.fill(ta_roles.RM, p, lean_from_config()),
+            ta_roles.fill(ta_roles.RM, p, lean_from_config(), mirror=_mirror()),
             {
                 "target": str(state["company_of_interest"]),
                 "instrument_context": get_instrument_context_from_state(state),
@@ -522,8 +600,7 @@ def create_research_manager(llm: Any) -> Node:
 
 def create_trader(llm: Any) -> Node:
     """交易员：写 messages（一条 AIMessage）和 trader_investment_plan，和原版一样。"""
-    schema = _schemas()[1]
-    structured = _bind(llm, schema, "Trader")
+    structured = _Structured(llm, 1, "Trader")
 
     def node(state: Any) -> dict[str, Any]:
         from langchain_core.messages import AIMessage
@@ -534,6 +611,7 @@ def create_trader(llm: Any) -> Node:
 
         p = params_from_config()
         lean = lean_from_config()
+        mirror = _mirror()
         report = (state["market_report"] or "").strip()
         system = ta_roles.TRADER_SYSTEM
         if not report:  # 没有行情报告就不让它「从报告里取价位」
@@ -549,14 +627,17 @@ def create_trader(llm: Any) -> Node:
         messages = [
             {
                 "role": "system",
-                "content": _subst(ta_roles.fill(system, p, lean), values) + language("trader"),
+                "content": _subst(ta_roles.fill(system, p, lean, mirror=mirror), values)
+                + language("trader"),
             },
             {
                 "role": "user",
-                "content": _subst(ta_roles.fill(ta_roles.TRADER_USER, p, lean), values),
+                "content": _subst(
+                    ta_roles.fill(ta_roles.TRADER_USER, p, lean, mirror=mirror), values
+                ),
             },
         ]
-        parsed, text = _ask(structured, llm, messages, "Trader")
+        parsed, text = _ask(structured.get(mirror), llm, messages, "Trader")
         if parsed is not None:
             text = ta_roles.render_trader(
                 parsed.action.value,
@@ -573,8 +654,7 @@ def create_trader(llm: Any) -> Node:
 
 def create_portfolio_manager(llm: Any) -> Node:
     """组合经理：写 risk_debate_state、final_trade_decision、final_rating，和原版一样。"""
-    schema = _schemas()[2]
-    structured = _bind(llm, schema, "Portfolio Manager")
+    structured = _Structured(llm, 2, "Portfolio Manager")
 
     def node(state: Any) -> dict[str, Any]:
         from tradingagents.agents.context import (
@@ -585,10 +665,11 @@ def create_portfolio_manager(llm: Any) -> Node:
 
         rs = state["risk_debate_state"]
         p = params_from_config()
+        mirror = _mirror()
         past = state.get("past_context", "")
         lessons = ta_roles.LESSONS_LINE.replace("{past_context}", str(past)) if past else ""
         prompt = _subst(
-            ta_roles.fill(ta_roles.PM, p, lean_from_config()),
+            ta_roles.fill(ta_roles.PM, p, lean_from_config(), mirror=mirror),
             {
                 "target": str(state["company_of_interest"]),
                 "instrument_context": get_instrument_context_from_state(state),
@@ -599,7 +680,7 @@ def create_portfolio_manager(llm: Any) -> Node:
                 "history": rs["history"],
             },
         ) + language("pm")
-        parsed, text = _ask(structured, llm, prompt, "Portfolio Manager")
+        parsed, text = _ask(structured.get(mirror), llm, prompt, "Portfolio Manager")
         if parsed is not None:
             decision = ta_roles.render_pm(
                 parsed.rating.value,
@@ -663,10 +744,38 @@ def install() -> None:
 
 # ---------------------------------------------------------------- 每场会不同的内容
 _BUILD_LOCK = threading.Lock()
-"""建图加一把锁：TradingAgentsGraph 建图会把配置就地合并进进程全局（``set_config``）。今天并发建图
-不会读错（角色读配置都在开会时，按场用 ContextVar），锁防的是以后有人把每场会不同的东西放回配置。"""
+"""建图加一把锁：TradingAgentsGraph 建图会把配置就地合并进进程全局（``set_config``）。角色读配置都在
+开会时、按场用 ContextVar（``run_config``），并发建图不会读错。每场会不同的偏空整改设置
+（``SETUP_KEYS``）也在配置里，但只经 ``meeting_setting`` 从按场的 ContextVar 读，不读全局那份
+（全局是逐键合并的，会留着上一场的值）；谁先开口由 ``PerpGraph`` 读它自己的 ``self.config``。"""
 
 _PERP_GRAPH: type | None = None
+
+BULL_NODE, BEAR_NODE = "Bull Researcher", "Bear Researcher"
+
+
+def open_debate_with_bear(workflow: Any) -> None:
+    """让空头先开口（多头最后发言）：把分析师之后进辩论的那条边从多头改接到空头。
+
+    TradingAgents 的建图把「分析师都交完报告 → Bull Researcher」写死了；之后谁接着说由
+    ``should_continue_debate`` 按上一位是谁来定（Bull 之后 Bear，否则 Bull），轮数到了交研究经理，
+    所以只改入口这一条边，轮流和收尾照原版。只改这张图自己的 workflow，不动全局。"""
+    moved = 0
+    for starts, end in list(workflow.waiting_edges):
+        if end == BULL_NODE:
+            workflow.waiting_edges.discard((starts, end))
+            workflow.waiting_edges.add((starts, BEAR_NODE))
+            moved += 1
+    for start, end in list(workflow.edges):
+        if end == BULL_NODE and start not in (BULL_NODE, BEAR_NODE):
+            workflow.edges.discard((start, end))
+            workflow.edges.add((start, BEAR_NODE))
+            moved += 1
+    if moved != 1:  # 版本变了对不上：报错，不悄悄按原顺序开
+        raise RuntimeError(
+            f"TradingAgents 进辩论的边有 {moved} 条（应为 1），版本对不上，"
+            "先核对 pyproject 里钉的提交"
+        )
 
 
 def perp_graph_class() -> type:
@@ -689,6 +798,13 @@ def perp_graph_class() -> type:
                 self.lessons = lessons
                 with _BUILD_LOCK:
                     super().__init__(*a, **kw)
+                # 谁先开口（bias_fix.debate_first，已解析成 bull / bear）；默认 bull = 原版
+                self.debate_first = str(
+                    (self.config.get(PROMPT_KEY) or {}).get("debate_first") or "bull"
+                )
+                if self.debate_first == "bear":
+                    open_debate_with_bear(self.workflow)
+                    self.graph = self.workflow.compile()
 
             def resolve_instrument_context(
                 self, ticker: str, asset_type: str = "stock", trade_date: str | None = None

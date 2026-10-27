@@ -20,7 +20,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
@@ -68,9 +68,12 @@ logger = logging.getLogger(__name__)
 class MeetingError(RuntimeError):
     """会议中途失败。``cost_usd`` 是已烧掉的真实花费；未知为 None，由指挥官按估算计。"""
 
-    def __init__(self, message: str, cost_usd: float | None = None) -> None:
+    def __init__(
+        self, message: str, cost_usd: float | None = None, setup: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.cost_usd = cost_usd
+        self.setup = setup  # 这场会用的偏空整改设置（bias_fix），失败也要记
 
 
 class CardRefreshError(RuntimeError):
@@ -113,6 +116,8 @@ class Analysis:
     card_symbol: CardSymbol
     cost_usd: float = 0.0
     usage: dict[str, int] | None = None  # input_tokens / output_tokens / reasoning_tokens
+    # 这场会实际用的偏空整改设置（bias_fix.MeetingSetup.record()）：分组、谁先发言等；旧引擎没有
+    setup: dict[str, str] | None = None
 
 
 class MeetingEngine(Protocol):
@@ -1259,7 +1264,7 @@ class BattleCardCommander:
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
-            self._journal.record(card, [symbol])
+            self._journal.record(card, [symbol], {symbol: res.setup})
         self._record_card(card, started)
         if nomination is not None:
             self._write(
@@ -2394,7 +2399,7 @@ class BattleCardCommander:
             self._notify_card()
             self._save_card()
             if self._journal is not None:
-                self._journal.record(card, [e.symbol])
+                self._journal.record(card, [e.symbol], {e.symbol: res.setup})
             self._record_card(card, time.monotonic(), partial=True)  # 面板马上显示这个币
             return res
 
@@ -2472,8 +2477,9 @@ class BattleCardCommander:
                             "source_regime": market_view.regime,
                         }
                     )
-                # 只记录的 outlook 配上这场会看到的总盘会方向，开会记录里就是完整的一份
-                res = Analysis(with_board(cs, market_view), res.cost_usd, res.usage)
+                # 只记录的 outlook 配上这场会看到的总盘会方向，开会记录里就是完整的一份；
+                # replace 只换指令，其余（花费、用量、会议设置）原样带着
+                res = replace(res, card_symbol=with_board(cs, market_view))
             except Exception as exc:
                 self._charge(-est)
                 fail_cost = self._failure_cost(exc, entry.symbol)
@@ -2486,6 +2492,7 @@ class BattleCardCommander:
                     started,
                     fail_cost,
                     estimated=guess,
+                    setup=self._failed_setup(exc, entry.symbol),
                 )
                 raise
             self._charge(-est)
@@ -2501,6 +2508,7 @@ class BattleCardCommander:
                     started,
                     res.cost_usd,
                     usage=res.usage,
+                    setup=res.setup,
                 )
                 raise
             self._log_symbol(
@@ -2511,6 +2519,7 @@ class BattleCardCommander:
                 res.cost_usd,
                 cs,
                 usage=res.usage,
+                setup=res.setup,
             )
             return res
 
@@ -2580,6 +2589,14 @@ class BattleCardCommander:
     def bind_credit_alarm(self, fn: Callable[[], None]) -> None:
         """模型额度不足（402）时调一下：让主程序发告警、面板显示横幅。"""
         self._credit_alarm = fn
+
+    def _failed_setup(self, exc: BaseException, key: str) -> dict[str, str] | None:
+        """失败的会（报错 / 质量门槛 / 超时）用的偏空整改设置，好按组算失败率：引擎随错误带出来的
+        优先；超时没有错误对象，就问引擎这个币这场会定下的设置。拿不到（还没定就失败了）为 None。"""
+        if isinstance(exc, MeetingError) and exc.setup is not None:
+            return exc.setup
+        fn = getattr(self._engine, "meeting_setup", None)
+        return fn(key) if callable(fn) else None
 
     def _failure_cost(self, exc: BaseException, key: str = "") -> float:
         """失败会议的花费：引擎带出了真实花费就用它；超时取消的会议，引擎还在跑，就叫停它并取
@@ -2752,6 +2769,7 @@ class BattleCardCommander:
         cs: CardSymbol | None = None,
         estimated: bool = False,
         usage: dict[str, int] | None = None,
+        setup: dict[str, str] | None = None,
     ) -> None:
         ms = (time.monotonic() - started) * 1000
         self._bump(ok=outcome is not Outcome.ERROR, cost=cost, ms=ms)
@@ -2760,20 +2778,25 @@ class BattleCardCommander:
             outcome=outcome,
             summary=summary[:200],
             input={"score": entry.score, "reasons": entry.reasons},
-            output=self._symbol_output(cs, estimated, usage),
+            output=self._symbol_output(cs, estimated, usage, setup),
             latency_ms=ms,
             cost_usd=cost,
         )
 
     @staticmethod
     def _symbol_output(
-        cs: CardSymbol | None, estimated: bool, usage: dict[str, int] | None
+        cs: CardSymbol | None,
+        estimated: bool,
+        usage: dict[str, int] | None,
+        setup: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         out: dict[str, Any] = (
             cs.model_dump(mode="json") if cs is not None else {"cost_estimated": estimated}
         )
         if usage is not None:  # 面板「AI 费用」按模型 token 展示
             out["usage"] = usage
+        if setup is not None:  # 偏空整改的分组和设置，复盘按组对照
+            out["meeting_setup"] = setup
         return out
 
     def _record_card(self, card: BattleCard, started: float, *, partial: bool = False) -> None:
