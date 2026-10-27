@@ -27,11 +27,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -51,6 +52,7 @@ from jiaoyi.contracts import (
     PositionRecord,
     Role,
 )
+from jiaoyi.core.observations import aware, freeze_values
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.jev import error_kind
 from jiaoyi.gate.questions import hold_pnl_bps, hold_questions, hold_snapshot, jev_log_fields
@@ -86,6 +88,9 @@ class JevKeeper:
         forecast: Callable[[str, datetime], Forecast | None] | None = None,
         scan_day: Callable[[str, str], list[dict[str, Any]]] | None = None,
         current_market: Callable[[], MarketView | None] | None = None,
+        observation_source: Callable[[str, datetime], Mapping[str, Any] | None] | None = None,
+        observation_sink: Callable[[dict[str, Any]], None] | None = None,
+        observation_wall: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -98,6 +103,9 @@ class JevKeeper:
         self._features = features
         self._card = card
         self._market_source = current_market
+        self._observation_source = observation_source
+        self._observation_sink = observation_sink
+        self._observation_wall = observation_wall
         self._rec = recorder
         self._streak: dict[str, int] = {}  # 每个持仓连续“该平”的次数
         self._against: dict[str, tuple[AgainstSignalEvent, bool]] = {}
@@ -185,8 +193,9 @@ class JevKeeper:
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
         pid = position.position_id
         against = self._against.pop(pid, None)
-        verdict = partial(self._verdict, against=against)  # 四条路径都在记录里标反向急查
         f = self._features(position.symbol)
+        observation = self._observation_start(position, now, f)
+        verdict = partial(self._verdict, against=against, observation=observation)
         if f is None:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
@@ -235,10 +244,13 @@ class JevKeeper:
         history.append(hold_pnl_bps(position, f.last_price))
         del history[:-MAX_HISTORY]
         resp = await self._model.ask(request)
+        attempts = 1
         if not resp.ok and error_kind(resp.error) in ("busy", "timeout"):
             await self._sleep(RETRY_AFTER_S)  # 服务方一时过载 / 超时：本轮再问一次
             request = request.model_copy(update={"request_id": f"{request.request_id}-r"})
             resp = await self._model.ask(request)
+            attempts = 2
+        self._observation_response(observation, position.symbol, request, resp, attempts)
         if not resp.ok:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
@@ -346,6 +358,7 @@ class JevKeeper:
         *,
         against: tuple[AgainstSignalEvent, bool] | None = None,
         extra: Mapping[str, Any] | None = None,
+        observation: dict[str, Any] | None = None,
     ) -> KeeperVerdict:
         """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）；
         ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``。"""
@@ -411,7 +424,91 @@ class JevKeeper:
                 cost_usd=r.cost_usd if r is not None else 0.0,
                 model_version=r.model_version if r is not None else None,
             )
+        if observation is not None and self._observation_sink is not None:
+            with contextlib.suppress(Exception):
+                self._observation_sink({**observation, "action": v.action})
         return v
+
+    def _observation_time(self) -> datetime | None:
+        try:
+            value = self._observation_wall()
+            return value if value.tzinfo is not None and value.utcoffset() is not None else None
+        except Exception:
+            return None
+
+    def _observation_view(self, symbol: str, at: datetime | None) -> dict[str, Any] | None:
+        if at is None or self._observation_source is None:
+            return None
+        try:
+            value = self._observation_source(symbol, at)
+            return freeze_values(value) if isinstance(value, Mapping) else None
+        except Exception as error:
+            return {"capture_status": "unavailable", "error_kind": type(error).__name__}
+
+    def _observation_start(
+        self, position: PositionRecord, now: datetime, feature: FeatureSnapshot | None
+    ) -> dict[str, Any] | None:
+        if self._observation_source is None and self._observation_sink is None:
+            return None
+        at = self._observation_time()
+        view = self._observation_view(position.symbol, at)
+        if view is not None and feature is not None and "feature_ts" in view:
+            price = view.get("price")
+            view["matches_request_feature"] = (
+                view["feature_ts"] == feature.ts.isoformat()
+                and isinstance(price, Mapping)
+                and price.get("value") == feature.last_price
+            )
+        return {
+            "schema_version": 1,
+            "kind": "keeper_observation",
+            "symbol": position.symbol,
+            "position_id": position.position_id,
+            "review_started_at": now.isoformat(),
+            "request_view": view,
+            "response_completed_at": None,
+            "post_response_view": None,
+            "observed_at": at.isoformat() if at else None,
+            "attempt_count": 0,
+            "model_ok": None,
+            "is_execution_fill": False,
+        }
+
+    def _observation_response(
+        self,
+        observation: dict[str, Any] | None,
+        symbol: str,
+        request: JevRequest,
+        response: JevResponse,
+        attempts: int,
+    ) -> None:
+        if observation is None:
+            return
+        completed = self._observation_time()
+        observed = self._observation_time()
+        view = self._observation_view(symbol, observed)
+        clock_consistent = (
+            observed >= completed if observed is not None and completed is not None else None
+        )
+        if view is not None:
+            for name in ("price", "book", "mark"):
+                source = view.get(name)
+                if isinstance(source, dict):
+                    event_at = aware(source.get("source_ts"))
+                    source["source_event_after_response"] = (
+                        event_at > completed
+                        if event_at is not None and completed is not None
+                        else None
+                    )
+        observation.update(
+            request_id=request.request_id,
+            attempt_count=attempts,
+            model_ok=response.ok,
+            response_completed_at=completed.isoformat() if completed else None,
+            observed_at=observed.isoformat() if observed else None,
+            clock_consistent=clock_consistent,
+            post_response_view=view,
+        )
 
 
 def _snapshot_pnl(rec: Mapping[str, Any]) -> float | None:
