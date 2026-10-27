@@ -25,6 +25,7 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # protection_prearm_grace_s = 0    # Demo 托管保护：新仓还没完整托管时，同步失败（只限读延迟 / 网络一时失败，且已有确认的保命单或止损）最多连续容忍几秒再平仓，宽限内照样告警、下一轮重试；0 = 不容忍（默认，原行为），最多 600，改后重启
 # card_score_every_min = 60       # 面板每隔几分钟补算作战卡方向记分（发布时刻起算、扣掉同期币池，写 data/card_score/，只读公开 K 线）；0 = 不算，最多 1440；只有面板用，不用重启主循环，面板这一轮等完后生效
 # card_score_window_days = 30     # 方向记分汇总最近几天出的卡；0 = 全部
+#   回滚到没有方向记分的旧版本前，先删掉 card_score_every_min / card_score_window_days 这两行：旧版配置不认识的键（extra=forbid）会拒绝启动
 # protection_stop_working_type = "CONTRACT_PRICE"         # Demo 托管保护：止损（含移动止损）按什么价触发：CONTRACT_PRICE = 最新成交价（默认，原行为）/ MARK_PRICE = 标记价（不被 Demo 瞬间插针扫掉，触发后仍按当时盘口市价成交）；只影响之后新挂的单，已挂的不动；保命单固定标记价；改后重启
 # protection_take_profit_working_type = "CONTRACT_PRICE"  # Demo 托管保护：止盈按什么价触发，取值同上；默认 CONTRACT_PRICE（原行为）；只影响之后新挂的单；改后重启
 

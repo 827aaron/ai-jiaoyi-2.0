@@ -345,14 +345,17 @@ class FakeFetch:
         fail: set[str] | None = None,
         gone: set[str] | None = None,
         badzip: int = 0,
+        reject: set[str] | None = None,
     ) -> None:
         self.slopes = slopes
         self.fail = fail or set()
-        self.gone = gone or set()  # 币安没有这个币：接口回 400
+        self.gone = gone or set()  # 币安没有这个币：400 + {"code": -1121}
+        self.reject = reject or set()  # 别的 400（参数错之类）：不能据此认定没有这个币
         self.badzip = badzip  # 前几次调用抛 BadZipFile（缓存里的日包坏了）
         self.calls: list[tuple[str, datetime, datetime]] = []
 
     async def __call__(self, sym: str, a: datetime, b: datetime) -> list[Bar]:
+        import io
         import urllib.error
         import zipfile
 
@@ -362,8 +365,10 @@ class FakeFetch:
             raise zipfile.BadZipFile("File is not a zip file")
         if sym in self.fail:
             raise OSError("down")
-        if sym in self.gone:
-            raise urllib.error.HTTPError("u", 400, "Invalid symbol", None, None)  # type: ignore[arg-type]
+        if sym in self.gone | self.reject:
+            code = -1121 if sym in self.gone else -1100
+            body = io.BytesIO(json.dumps({"code": code, "msg": "x"}).encode())
+            raise urllib.error.HTTPError("u", 400, "Bad Request", None, body)  # type: ignore[arg-type]
         out, t = [], a
         while t <= b:
             k = (t - T.replace(second=0, microsecond=0)).total_seconds() / 60
@@ -507,6 +512,29 @@ async def test_symbol_binance_does_not_have_is_cached_and_counted_unpriced(
     r = await C.update(tmp_path, now, fetch)
     assert r.new == 1 and "ENAUSDT" not in {c[0] for c in fetch.calls}
     assert r.unavailable == frozenset()
+
+
+async def test_plain_http_400_needs_two_runs_in_a_row(tmp_path: Path) -> None:
+    """没有 -1121 的 400：第一轮只当一时拉不到（卡等下次、记进 suspect）；中间拉到过就重新数；
+    连续两轮都这样才认定币安没有。"""
+    seed_data(tmp_path)
+    now = T + timedelta(hours=6)
+    store = C.ScoreStore(tmp_path)
+    r = await C.update(tmp_path, now, FakeFetch({}, reject={"ENAUSDT"}))
+    assert (r.new, r.failed, r.unavailable) == (1, 2, frozenset())  # 只有 SOL 那张
+    assert store.suspects() == {"ENAUSDT"} and not store.unavailable()
+    # 第二轮拉到了：不算没有，计数清零（两张 ENA 卡照常补上）
+    write_journal(tmp_path, [jrow("ENAUSDT", "short", T + timedelta(minutes=30), version=9)])
+    r = await C.update(tmp_path, now, FakeFetch({}))
+    assert (r.new, r.failed) == (3, 0) and store.suspects() == set()
+    # 之后连续两轮 400：第二轮才认定，卡按没价格记上
+    write_journal(tmp_path, [jrow("ENAUSDT", "short", T + timedelta(minutes=40), version=10)])
+    r = await C.update(tmp_path, now, FakeFetch({}, reject={"ENAUSDT"}))
+    assert (r.new, r.failed, r.unavailable) == (0, 1, frozenset())
+    r = await C.update(tmp_path, now, FakeFetch({}, reject={"ENAUSDT"}))
+    assert (r.new, r.failed, r.unavailable) == (1, 0, frozenset({"ENAUSDT"}))
+    assert store.unavailable() == {"ENAUSDT"} and store.suspects() == set()
+    assert next(s for s in store.read() if s.version == 10).coin.h4 is None
 
 
 async def test_bad_daily_pack_is_deleted_and_fetched_again(tmp_path: Path) -> None:

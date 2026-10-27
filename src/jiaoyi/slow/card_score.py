@@ -16,7 +16,8 @@
 逐卡结果追加到 ``data/card_score/scored.jsonl``（只加不改，按 卡 / 版本 / 币 去重，重跑幂等），
 汇总写 ``data/card_score/summary.json`` 给面板读。逐卡行里存的是当时算好的币池收益：**改币池口径
 （或 t0、价格口径）要删掉 scored.jsonl 重算**，否则新旧口径混在一起。币安确认没有的币（日包 404 且
-接口 400）记进 ``unavailable.json``，之后不再去拉、按没价格计；删掉这个文件就会重试。
+接口回 -1121 Invalid symbol，或连续两轮都回 400 / 404）记进 ``unavailable.json``，之后不再去拉、
+按没价格计；删掉这个文件就会重试。只回一次 400 / 404 的先记在 ``suspect.json``，下次再看。
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ import os
 import zipfile
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol
@@ -45,6 +46,7 @@ DIR_NAME = "card_score"
 SCORED_FILE = "scored.jsonl"
 SUMMARY_FILE = "summary.json"
 UNAVAILABLE_FILE = "unavailable.json"
+SUSPECT_FILE = "suspect.json"
 
 BTC = "BTCUSDT"
 MINUTE = timedelta(minutes=1)
@@ -226,15 +228,28 @@ class CloseBook:
         return pb / pa - 1
 
 
-PERMANENT_HTTP = (400, 404)
-"""币安回这些状态码 = 这个币（主网合约）根本没有，不是一时拉不到。"""
+REJECT_HTTP = (400, 404)
+"""币安回这些状态码：可能是这个币根本没有，也可能是别的参数错；单回一次不下结论。"""
+INVALID_SYMBOL = -1121
+"""币安错误码 Invalid symbol：这个币（主网合约）确实没有。"""
 
 
-def _permanent(e: BaseException) -> bool:
+def _http_status(e: BaseException) -> int | None:
     code = getattr(e, "code", None)
-    if code is None:
+    if not isinstance(code, int):
         code = getattr(getattr(e, "response", None), "status_code", None)
-    return code in PERMANENT_HTTP
+    return code if isinstance(code, int) else None
+
+
+def _binance_code(e: BaseException) -> int | None:
+    """错误响应体里币安的 ``code``（urllib 的 HTTPError 或 httpx 的响应）；读不出来是 None。"""
+    try:
+        resp = getattr(e, "response", None)
+        raw = resp.content if resp is not None else e.read()  # type: ignore[attr-defined]
+        code = json.loads(raw).get("code")
+    except Exception:  # 没有响应体、不是 JSON：当作不知道
+        return None
+    return code if isinstance(code, int) else None
 
 
 @dataclass
@@ -243,7 +258,11 @@ class Closes:
     failed: set[str]
     """一时拉不到的币：用到它的卡（本币或 BTC）下次再算。"""
     missing: set[str]
-    """币安确认没有的币：按没价格计，不再重试。"""
+    """币安确认没有的币（-1121）：按没价格计，不再重试。"""
+    rejected: set[str] = field(default_factory=set)
+    """回了 400 / 404 但没说 -1121 的币：这一轮按一时拉不到算，连续两轮这样才认定没有。"""
+    ok: set[str] = field(default_factory=set)
+    """这一轮拉到了的币。"""
 
 
 async def load_closes(
@@ -272,9 +291,12 @@ async def load_closes(
                     logger.warning("方向记分：%s %s 的日包坏了，删掉重下", sym, day)
                     bad.unlink(missing_ok=True)
                 except (OSError, ValueError, KeyError, IndexError) as e:
-                    if _permanent(e):
+                    if _http_status(e) in REJECT_HTTP and _binance_code(e) == INVALID_SYMBOL:
                         logger.warning("方向记分：币安没有 %s（%s），按没价格计、不再拉", sym, e)
                         out.missing.add(sym)
+                    elif _http_status(e) in REJECT_HTTP:
+                        logger.warning("方向记分：%s 被币安拒绝（%s），下一轮再看", sym, e)
+                        out.rejected.add(sym)
                     else:
                         logger.warning("方向记分：%s 的 K 线拉不到：%s", sym, e)
                     break
@@ -286,6 +308,8 @@ async def load_closes(
                 ot = b.open_time.astimezone(UTC)
                 if ot in want:
                     out.book.put(sym, ot, b.close)
+        else:
+            out.ok.add(sym)  # 每一天都拉到了
     return out
 
 
@@ -487,6 +511,27 @@ class ScoreStore:
     def unavailable(self) -> set[str]:
         """币安确认没有的币（第一次发现的时间记在文件里）；删掉文件就会重试。"""
         return set(self._unavailable_map())
+
+    @property
+    def suspect_path(self) -> Path:
+        return self.dir / SUSPECT_FILE
+
+    def suspects(self) -> set[str]:
+        """上一轮回过 400 / 404（没说 -1121）的币。"""
+        try:
+            got = json.loads(self.suspect_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        return {str(k) for k in got} if isinstance(got, dict) else set()
+
+    def save_suspects(self, symbols: Iterable[str], now: datetime) -> None:
+        syms = sorted(set(symbols))
+        if not syms and not self.suspect_path.exists():
+            return
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.dir / f"{SUSPECT_FILE}.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(dict.fromkeys(syms, now.isoformat()), indent=1), "utf-8")
+        tmp.replace(self.suspect_path)
 
     def add_unavailable(self, symbols: Iterable[str], now: datetime) -> None:
         got = self._unavailable_map()
@@ -814,13 +859,19 @@ async def update(
                 needs.setdefault(s, set()).update(times)
             plan.append((r, t0, src, rid, pool))
         got = await load_closes(fetch, needs, packs=packs)
-        gone = got.missing - skip
+        # -1121 直接认定；只回 400 / 404 的，上一轮也这样才认定（中间拉到过就重新数）
+        prev = await asyncio.to_thread(store.suspects)
+        gone = (got.missing | (got.rejected & prev)) - skip
+        await asyncio.to_thread(
+            store.save_suspects, (prev - got.ok - gone) | (got.rejected - gone), now
+        )
         if gone:
             await asyncio.to_thread(store.add_unavailable, gone, now)
+        failed = got.failed - gone
         rows = []
         for r, t0, src, rid, pool in plan:
             # 本币或 BTC 一时拉不到：下次再算；池里个别币拉不到：等权只算有价的（记在 pool_n_4h）
-            if {r.symbol, BTC} & got.failed:
+            if {r.symbol, BTC} & failed:
                 failed_n += 1
                 continue
             rows.append(score_card(r, t0, src, rid, got.book, pool, now))
