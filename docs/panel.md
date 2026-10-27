@@ -165,7 +165,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 | 信号与决策流 | 拍板、风控员、执行、管家 / 巡逻兵平仓；哨兵只计数 |
 | 告警 | 决策日志里的出错、对账补救、下架封禁（告警本身直接推 Telegram，不单独落盘） |
 - 高级 →「军师团」：「开会节奏」里加「每天固定几点开整轮会」（`schedule_at`，HH:MM 文字，留空回到档位默认）；
-  新分组「临时会」（`event_meeting_enabled` / `event_triggers` 多选勾选 / `event_symbol_gap_min` / `event_max_per_day` /
+  新分组「临时会」（`event_meeting_enabled` / `event_triggers` 多选勾选 / `event_symbol_gap_min` / `event_max_per_day` / `key_level_trigger`（在外面就算 / 穿过才算） /
   `move_since_card_atr` / `predictor_against_runs` / `entry_max_card_age_min`，0 显示「不查」）和「AI 花费上限」
   （`[budget] daily_cost_limit_usd` 每日上限，没写死跟档位走；`over_budget` 放慢一档 / 不放慢、`slowdown_interval_min`）。
   花费段在设置页只能改日上限，失败估价等仍只在首次设置 / 配置文件里改。多选项写成 TOML 数组（按选项顺序、去重）；

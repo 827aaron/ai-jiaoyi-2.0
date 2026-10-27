@@ -450,6 +450,12 @@ class ScheduleConfig(_Strict):
         le=200,
         description="每个交易日（曼谷）最多开几场临时会。0 = 不限（场数照常计数和记录）。",
     )
+    key_level_trigger: Literal["outside", "cross"] = Field(
+        default="outside",
+        description="key_level_break 怎么算：outside = 价格在关键位外侧就算（只要还在外面，"
+        "隔够间隔就再开）；cross = 出卡后价格从里侧穿到外侧那一下才算，出卡时已在外侧的位"
+        "要等价格回到里侧再穿过去。",
+    )
     move_since_card_atr: float = Field(
         default=3.0,
         gt=0,
@@ -675,6 +681,7 @@ class SlowConfig(_Strict):
                 max_per_day=s.event_max_per_day,
                 move_atr=s.move_since_card_atr,
                 entry_max_age=timedelta(minutes=s.entry_max_card_age_min),
+                key_level_trigger=s.key_level_trigger,
             ),
             "schedule_at": s.schedule_at,
             "slowdown": self._slowdown(),
