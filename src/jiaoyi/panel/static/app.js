@@ -586,15 +586,19 @@ function protBrief(p) {
   const q = p.protection;
   if (!q) return "";
   const legs = q.legs.filter((l) => l.role !== "lifeboat").map((l) => { const s = legShown(l); return `<span class="${legBad(s) ? "warn" : ""}">${legName(s)}${LEG_ST[s.state]}${s !== l ? `（新一代${LEG_ST[l.state]}）` : ""}</span>`; }).join(" · ");
-  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}${q.trailing_error ? ` · <span class="warn" title="${esc(q.trailing_error)}">移动止损本轮没更新</span>` : ""}</div>`;
+  const tight = q.tightened_stop_price != null ? ` · <span class="pill p-accent" title="${esc(q.tightened_reason || "")}">反向卡收紧止损 ${price(q.tightened_stop_price, p.symbol)}</span>` : q.opposite_anchor_price != null ? ` · <span class="pill p-accent" title="${esc(q.tightened_reason || "")}">反向卡锚定移动止损 ${price(q.opposite_anchor_price, p.symbol)}</span>` : "";
+  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${tight}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}${q.trailing_error ? ` · <span class="warn" title="${esc(q.trailing_error)}">移动止损本轮没更新</span>` : ""}</div>`;
 }
 function protBlock(p) {
   const q = p.protection;
   const row = (l, tag) => `<div><span class="n">${legName(l)}${tag}</span><span class="${legBad(l) ? "warn" : ""}"><b>${LEG_ST[l.state]}</b>${l.detail ? ` · ${l.detail}` : ""} · 触发价 ${legPrice(p, l)}${l.quantity != null ? ` · 数量 ${qtyFmt(l.quantity)}` : ""}${l.algo_status ? ` · 交易所状态 ${esc(l.algo_status)}` : ""}${l.child_state ? ` · 子单 ${{ absent: "确认没有", unknown: "未确认", identified: "已出现" }[l.child_state] || esc(l.child_state)}` : ""}</span></div>`;
   const rows = q.legs.map((l) => l.previous && l.state !== "live" ? row(l, "·新一代") + row(l.previous, "·旧一代仍挂") : row(l, "")).join("");
   const trail = q.trailing_stop_price != null ? ` · 移动止损价 ${price(q.trailing_stop_price, p.symbol)}${q.trailing_activated ? "（已激活）" : ""}` : "";
+  const oppWhen = q.tightened_at ? `（${new Date(q.tightened_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : "";
+  const oppWhy = q.tightened_reason ? ` · ${esc(q.tightened_reason)}` : "";
+  const tight = q.opposite_anchor_price != null && q.tightened_stop_price == null ? `<div>反向作战卡锚定移动止损：锚定价 ${price(q.opposite_anchor_price, p.symbol)}${q.trailing_distance_pct != null ? ` · 回撤距离 ${(+q.trailing_distance_pct).toFixed(2)}%` : ""}${oppWhen}${oppWhy}（程序记录，之后移动止损只收紧；以下方止损腿的交易所确认状态为准）</div>` : q.tightened_stop_price != null ? `<div>反向作战卡收紧止损：目标 ${price(q.tightened_stop_price, p.symbol)}${q.tightened_at ? `（${new Date(q.tightened_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : ""}${q.tightened_reason ? ` · ${esc(q.tightened_reason)}` : ""}（程序记录，以下方止损腿的交易所确认状态为准；卡转回不会自动放松）</div>` : "";
   const age = q.observed_at ? `${secText(q.age_s)}（${new Date(q.observed_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : "没有观测时间";
-  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div><div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}${q.trailing_error ? `<div class="warn">移动止损本轮没更新：${esc(q.trailing_error)}${q.trailing_error_book ? "（已挂的保护不受影响）" : ""}</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
+  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div>${tight}<div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}${q.trailing_error ? `<div class="warn">移动止损本轮没更新：${esc(q.trailing_error)}${q.trailing_error_book ? "（已挂的保护不受影响）" : ""}</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
 }
 // 到这个价成交的预估净盈亏（U）：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次吃单费；没有费率 / 价就不估
 function lvlPnl(p, lvl) {
@@ -1860,7 +1864,7 @@ P.team = () => {
 
 /* ---------- 历史 */
 const RANGE = { today: "今天", "7d": "7 天", "30d": "30 天", all: "全部" };
-const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "保本 / 移动止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
+const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "保本 / 移动止损", tightened_stop: "反向卡收紧止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
 S.hist = "today";
 S.rej = false;
 S.tests = false;
@@ -2278,6 +2282,16 @@ const PLAIN = {
   giveback_on: "回吐保护开关（代码规则，不问模型）",
   giveback_close_pct: "回吐保护：最高浮盈吐掉百分之几就全平",
   giveback_arm_r: "回吐保护：最高浮盈到过几倍止损距离才开始看",
+  opposite_card_action: "新作战卡方向和持仓相反时：close 立刻全平 / confirm_or_tighten 价格确认才平，否则收紧止损到保本附近",
+  opposite_card_ab: "反向卡 A/B：这个比例的事件走新规则，其余照旧全平（按持仓号 + 币 + 指令发布时间 + 方向抽签，整卡换版本不重抽；0 = 不分组）",
+  opposite_anchor_retry_s: "trail 锚定时盘口疑似插针：这么多秒内每轮再试，过了按原规则平（0 = 立刻平）",
+  opposite_confirm_loss_r: "反向卡价格确认①：已亏到几倍原始止损距离就平（0 = 不用）",
+  opposite_confirm_atr: "反向卡价格确认②：看到卡后逆向走了几倍 ATR 就平（0 = 不用）",
+  opposite_confirm_key_level: "反向卡价格确认③：越过反向卡在开仓价之外最近的关键位就平",
+  opposite_tighten_buffer_bps: "反向卡收紧止损：保本（扣来回手续费）之外再多留几个基点",
+  opposite_tighten_mark_gap_bps: "反向卡收紧止损：离标记价不到这么多基点就不挂、直接平（0 = 只要在安全一侧）",
+  opposite_profit_mode: "反向卡没确认、赚得够时：trail 在现价强制启动移动止损 / breakeven 止损挪到扣费保本",
+  opposite_trail_distance_mult: "trail 模式：锚定的移动止损距离 = 开仓带的移动止损距离 × 几倍",
   patrol_shock_pct_1m: "1 分钟内往亏的方向走了百分之几就全平",
   patrol_alert_pct_1m: "1 分钟内往亏的方向走了百分之几就叫管家马上看",
   breakout_vol_ratio: "成交量是平时几倍算放量突破",
@@ -2680,6 +2694,7 @@ const ROLES = [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
+    { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
   ] },
   { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
@@ -2716,7 +2731,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "r
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",

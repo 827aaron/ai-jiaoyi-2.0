@@ -90,6 +90,16 @@ keeper_confirmations = 2
 # giveback_on = true               # 回吐保护开关（代码规则）：最高浮盈到过 giveback_arm_r 后，从最高点吐掉 giveback_close_pct 就全平
 # giveback_close_pct = 45           # 回吐保护：吐掉最高浮盈的 45%
 # giveback_arm_r = 0.5              # 回吐保护从最高浮盈到几倍止损距离才开始看
+# opposite_card_action = "close"    # 新作战卡方向和持仓相反：close = 立刻全平（不写 = 这个）；confirm_or_tighten = 价格确认才平，否则收紧托管止损到保本附近（#314，见 docs/fast_loop.md）
+# opposite_card_ab = 0.0            # 反向卡 A/B：这个比例的事件（按持仓号 + 币 + 指令发布时间 + 方向固定抽签；整卡换版本不重抽）走新规则，其余照旧全平；0 = 不分组；只能配 confirm_or_tighten
+# opposite_confirm_loss_r = 0.5     # 价格确认①：已亏到 0.5 倍原始止损距离就平（0 = 不用这条）
+# opposite_confirm_atr = 1.0        # 价格确认②：看到这张卡后逆向走了 1 倍 ATR 就平（0 = 不用这条）
+# opposite_confirm_key_level = true # 价格确认③：越过反向卡在开仓价之外最近的关键位就平
+# opposite_tighten_buffer_bps = 5   # 收紧目标：扣实际开仓费 + 估算平仓费后再赚 5 bp 的平仓价
+# opposite_tighten_mark_gap_bps = 10 # 收紧的止损离标记价（止损的触发价源）不到 10 bp 就不挂，按原规则全平
+# opposite_profit_mode = "trail"    # 没确认、赚得够时：trail = 在现价强制启动移动止损（之后只收紧）；breakeven = 止损挪到扣费保本
+# opposite_trail_distance_mult = 1.0 # trail 模式锚定的移动止损距离 = 开仓带的移动止损距离 × 这个倍数
+# opposite_anchor_retry_s = 30      # trail 锚定时盘口疑似插针：30 秒内每轮再试（不告警），过了按原规则平；0 = 立刻平
 # patrol_shock_pct_1m = 2.0         # 巡逻兵：1 分钟逆向 2% 直接全平该币（最长持仓档：8h 2.5 / 12h 3.0 / 24h 4.0，其余 2.0）
 # patrol_alert_pct_1m = 1.0         # 巡逻兵：1 分钟逆向 1% 让管家立刻复查（8h 1.2 / 12h 1.5 / 24h 2.0，其余 1.0）
 breakout_vol_ratio = 3.0          # 哨兵：放量突破要 1 分钟量 ≥ 3 倍均值
