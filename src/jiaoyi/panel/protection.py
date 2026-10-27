@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from jiaoyi.core.trailing_price import activation_price
+
 LegState = Literal["live", "triggered", "cancelled", "rejected", "pending", "unknown", "none"]
 LegRole = Literal["lifeboat", "stop_loss", "take_profit"]
 
@@ -18,6 +20,7 @@ _CLOSED_ALGO = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 _PENDING = {"planned", "submit_pending", "cancel_pending"}
 _ROLE_ORDER: tuple[LegRole, ...] = ("lifeboat", "stop_loss", "take_profit")
 _WORKING_TYPES = {"MARK_PRICE", "CONTRACT_PRICE"}
+_TRAIL_BASIS = ("trailing_entry_quote", "trailing_entry_quantity", "trailing_fees_quote")
 
 
 class LegView(BaseModel):
@@ -47,6 +50,9 @@ class ProtectionView(BaseModel):
     legs: list[LegView]
     trailing_activated: bool = False
     trailing_stop_price: float | None = None
+    trailing_activation_price: float | None = None
+    """观察价（多仓买一 / 空仓卖一）越过它程序就激活移动止损；按首次观测落盘的成交额、数量、
+    实收手续费算，还没观测过（没有这些基准）为 None。"""
     observed_at: datetime | None = None
     age_s: float | None = None
     stale: bool = False
@@ -152,10 +158,21 @@ def _leg_view(
     )
 
 
-def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView | None:
+def parse_protection(
+    raw: object,
+    now: datetime,
+    stale_s: int,
+    long: bool | None = None,
+    activation_pct: float | None = None,
+) -> ProtectionView | None:
     """``TrackedPosition.server_protection`` 的落盘 JSON → 面板视图；旧仓位（None）返回 None。"""
     if not isinstance(raw, dict):
         return None
+    basis = [_num(raw.get(k)) for k in _TRAIL_BASIS]
+    act_price = None
+    if long is not None and activation_pct is not None and None not in basis:
+        quote, quantity, fee = (v or 0.0 for v in basis)
+        act_price = activation_price(long, quote, quantity, fee, activation_pct)
     legs_raw = [x for x in raw.get("legs") or [] if isinstance(x, dict)]
     legs: list[LegView] = []
     for role in _ROLE_ORDER:
@@ -181,6 +198,7 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
         legs=legs,
         trailing_activated=bool(raw.get("trailing_activated")),
         trailing_stop_price=_num(raw.get("trailing_stop_price")),
+        trailing_activation_price=act_price,
         observed_at=observed.astimezone(UTC) if observed else None,
         age_s=age,
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),

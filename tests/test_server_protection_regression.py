@@ -15,6 +15,7 @@ import pytest
 from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.core.trailing_price import activation_price
 from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import (
     BracketSubmissionRejected,
@@ -787,6 +788,35 @@ def test_trailing_inverse_preserves_net_fee_distance_and_correct_book_side(tmp_p
     assert result.net == pytest.approx(0.019)
     assert result.threshold_net == pytest.approx(0.014)
     assert result.stop_price == pytest.approx(101.5 if side is Side.LONG else 98.5)
+
+
+@pytest.mark.parametrize(
+    ("side", "fee", "expected", "before", "beyond"),
+    [
+        (Side.LONG, 0.2, 100.4, 100.39, 100.41),
+        (Side.SHORT, 0.2, 99.6, 99.61, 99.59),
+        (Side.LONG, 0.0, 100.3, 100.29, 100.31),
+        (Side.SHORT, 0.0, 99.7, 99.71, 99.69),
+    ],
+)
+def test_activation_price_is_where_trailing_update_starts_to_activate(
+    tmp_path, side, fee, expected, before, beyond
+):
+    long = side is Side.LONG
+    assert activation_price(long, 200.0, 2.0, fee, 0.3) == pytest.approx(expected, abs=1e-12)
+    for px, activated in ((before, False), (expected, False), (beyond, True)):
+        root = tmp_path / str(px)
+        root.mkdir()
+        rec, state, basis, book = trailing_inputs(root, side, px, px)
+        result = trailing_update(rec, state, replace(basis, fee_usdt=fee), book, START)
+        assert result.activated is activated, px
+
+
+def test_activation_price_rejects_invalid_basis():
+    assert activation_price(True, 0.0, 2.0, 0.2, 0.3) is None
+    assert activation_price(True, 200.0, 0.0, 0.2, 0.3) is None
+    assert activation_price(True, float("nan"), 2.0, 0.2, 0.3) is None
+    assert activation_price(False, 200.0, 2.0, 0.2, 100.0) is None
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])

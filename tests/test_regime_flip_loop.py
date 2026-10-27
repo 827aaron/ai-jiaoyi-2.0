@@ -257,6 +257,7 @@ def test_all_new_settings_hot_update_in_running_app(tmp_path: Path) -> None:
     assert keys <= HOT_FAST
     changes = {k: False if k in ("regime_flip_on", "regime_flip_live") else 0 for k in keys}
     changes["regime_flip_min_gap_min"] = 100000.125
+    changes["regime_flip_target"] = "off"
     _edit(paths, data, "fast_loop", changes)
     app.reload_config()
     for key, value in changes.items():
