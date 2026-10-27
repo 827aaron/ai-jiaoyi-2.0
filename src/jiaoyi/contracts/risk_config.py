@@ -982,6 +982,13 @@ class AppConfig(Contract):
         description="对账员遇到不在账本里的币安仓位 / hummingbot 执行器时直接平掉。"
         "默认只告警（可能是你手动开的）；要打开请在 M4 小额实盘前自己决定。",
     )
+    reconciler_executor_stop_retry_rounds: int = Field(
+        default=0,
+        ge=0,
+        le=10000,
+        description="对账员停执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
+        "没确认终止，就再发一次停止。0 = 永不重发（只查）。",
+    )
     protection_readback_grace_s: float = Field(
         default=0.0,
         ge=0.0,
