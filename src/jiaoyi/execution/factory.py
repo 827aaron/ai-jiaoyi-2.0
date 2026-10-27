@@ -87,6 +87,7 @@ def build_execution(
     live_gate: LiveGate | None = None,
     decision_log: DecisionLog | None = None,
     close_unknown_positions: bool = False,
+    executor_stop_retry_rounds: int = 0,
     demo_trading: bool = True,
     limit_take_profit: bool = False,
     frozen_peak_exit_on: bool = True,
@@ -180,6 +181,7 @@ def build_execution(
         account_name=account_name,
         recorder=recorder(Role.RECONCILER),
         close_unknown_positions=close_unknown_positions,
+        executor_stop_retry_rounds=executor_stop_retry_rounds,
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
     )
     return ExecutionStack(
