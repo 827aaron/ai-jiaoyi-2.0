@@ -120,6 +120,42 @@ async def open_filled(rig: Rig, price: float = 68044.0, **over: object) -> str:
     return rec.position_id
 
 
+def explain_reverse(rig: Rig, pid: str) -> None:
+    """反手仓的归属证据：入场单成交、保命止损平掉，执行器自己的平仓单又成交一次（多出来的
+    这一笔开出反手仓）。三笔都是认得出的我方订单。"""
+    from dataclasses import replace
+
+    from jiaoyi.execution.exchange import ExchangeEntryOrder
+
+    tracked = rig.registry.get(pid)
+    assert tracked is not None and tracked.record.executor_id is not None
+    rec, eid = tracked.record, tracked.record.executor_id
+    entry = rig.ex.entry_orders[f"o-{eid}"]
+    close_side = "sell" if rec.side is Side.LONG else "buy"
+    cid = f"o-{eid}-close"
+    rig.api.executors[eid]["custom_info"]["order_ids"] = [f"o-{eid}", cid]
+    rig.ex.entry_orders[cid] = replace(
+        ExchangeEntryOrder(
+            symbol=rec.symbol,
+            client_order_id=cid,
+            order_id=f"c-{eid}",
+            side=close_side,
+            quantity=rec.quantity,
+            filled_quantity=rec.quantity,
+            status="FILLED",
+            position_side="BOTH",
+        ),
+        reduce_only=True,
+    )
+    assert rec.lifeboat is not None and rec.lifeboat.exchange_order_id is not None
+    for oid, side in (
+        (entry.order_id, entry.side),
+        (rec.lifeboat.exchange_order_id, close_side),
+        (f"c-{eid}", close_side),
+    ):
+        rig.ex.trades.append(TradeFill(rig.t, oid, side, 68000.0, rec.quantity, None, 0.0))
+
+
 # ---------------------------------------------------------------- 开仓
 
 
@@ -467,14 +503,15 @@ async def test_close_unknown_switch_stops_unknown_executor(rig: Rig) -> None:
     await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "someone-else")
     report = await with_close_unknown(rig).reconcile(rig.t)
     assert report.issues[0].fixed
-    assert rig.api.stopped == [("ex1", False)]
+    # 只停不平：余仓由对账员走带 CID 的平仓，不让执行器和直连两条通道同时退出
+    assert rig.api.stopped == [("ex1", True)]
 
 
 async def test_close_unknown_switch_failure_stays_unfixed(rig: Rig) -> None:
     rig.ex.set_position("ETHUSDT", Side.LONG, 2.0)
     rig.ex.fail_market_close = True
     (issue,) = (await with_close_unknown(rig).reconcile(rig.t)).issues
-    assert not issue.fixed and "平仓失败" in issue.detail
+    assert not issue.fixed and "结果未知" in issue.detail
 
 
 async def test_close_unknown_switch_never_touches_our_own_position(rig: Rig) -> None:
@@ -1225,6 +1262,7 @@ async def test_fixed_issue_does_not_keep_reconcile_lamp_red(rig: Rig) -> None:
 async def _stopped_then_reversed(rig: Rig) -> tuple[str, float]:
     """保命止损先平了仓，执行器的止损单又成交一次：执行器 STOP_LOSS 结束，币安出现反向等量仓。"""
     pid = await open_filled(rig)
+    explain_reverse(rig, pid)
     rig.api.terminate("ex1", "STOP_LOSS", pnl=-5.0)
     await rig.adapter.positions()
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
@@ -1273,6 +1311,7 @@ async def test_open_ledger_with_opposite_exchange_side_is_flattened_not_relifebo
     """账本还开着多单，币安上却是等量空单：不按账本方向补保命止损（会失败），直接平反手仓。"""
     pid = await open_filled(rig)
     qty = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
+    explain_reverse(rig, pid)
     rig.ex.stops.clear()  # 保命止损已经触发
     rig.ex.set_position("BTCUSDT", Side.SHORT, qty)
     placed_before = len(rig.ex.placed)
