@@ -8,11 +8,12 @@ Protocol 在这里，ccxt 实现放在最后，测试用内存假件。
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -71,6 +72,84 @@ class ExchangeStop:
     client_order_id: str
     stop_price: float
     reduce_only: bool
+
+
+BracketKind = Literal["stop_loss", "take_profit"]
+BRACKET_PREFIXES: dict[BracketKind, str] = {"stop_loss": "br-sl-", "take_profit": "br-tp-"}
+_CHILD_TERMINAL = frozenset({"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"})
+
+
+@dataclass(frozen=True)
+class NormalizedBracketSpec:
+    """按交易所精度量化后的请求；调用方应在提交前持久化这两个值。"""
+
+    quantity: float
+    trigger_price: float
+
+
+@dataclass(frozen=True)
+class EntryBasis:
+    """已终态开仓订单及其完整实际成交账；费用只接受原始 USDT commission。"""
+
+    symbol: str
+    client_order_id: str
+    order_id: str
+    side: Literal["buy", "sell"]
+    filled_quantity: float
+    filled_quote: float
+    fee_usdt: float
+    entry_price: float
+    order_status: str
+
+
+@dataclass(frozen=True)
+class ExecutionBook:
+    """本交易客户端所属环境的盘口；source_at 为交易所时间，不以到达时间替代。"""
+
+    symbol: str
+    bid: float
+    ask: float
+    source_at: datetime
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class ExchangeBracket:
+    """独立普通保护单；algo 状态不是成交证据，未知 child 不能补成不存在。"""
+
+    symbol: str
+    algo_id: str
+    client_order_id: str
+    kind: BracketKind
+    close_side: Literal["buy", "sell"]
+    quantity: float
+    trigger_price: float
+    position_side: str
+    working_type: str
+    reduce_only: bool
+    price_protect: bool
+    close_position: bool
+    algo_status: str
+    actual_order_id: str | None = None
+    actual_order_status: str | None = None
+    filled_quantity: float | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    triggered_at: datetime | None = None
+    child_state: Literal["absent", "unknown", "identified"] = "unknown"
+
+
+class BracketSubmissionUnknown(ExchangeError):
+    """提交可能已接收；只查原 CID，不能因暂时查无而重新提交。"""
+
+    def __init__(self, client_order_id: str, observed: ExchangeBracket | None = None) -> None:
+        super().__init__("条件单提交结果未知；须核实原CID，不能自动二次创建")
+        self.client_order_id = client_order_id
+        self.observed = observed
+
+
+class BracketSubmissionRejected(ExchangeError):
+    """本次提交被明确拒绝；并不证明旧保护、HB 退出或仓位已经终止。"""
 
 
 @dataclass(frozen=True)
@@ -158,6 +237,242 @@ def _close_bool(value: object) -> bool:
     if value is False or value == "false":
         return False
     raise ValueError("订单布尔字段未知")
+
+
+def _bracket_symbol(symbol: str) -> str:
+    ccxt_symbol = to_ccxt_symbol(symbol)
+    if from_ccxt_symbol(ccxt_symbol) != symbol or any(c.isspace() for c in symbol):
+        raise ValueError("普通保护单标的不是规范 U 本位代码")
+    return ccxt_symbol
+
+
+def _bracket_cid(client_order_id: str, kind: BracketKind | None = None) -> None:
+    if not re.fullmatch(r"[.A-Za-z0-9_:/-]{1,36}", client_order_id):
+        raise ValueError("普通保护单CID不合法")
+    prefixes = (BRACKET_PREFIXES[kind],) if kind else tuple(BRACKET_PREFIXES.values())
+    if not any(client_order_id.startswith(p) and len(client_order_id) > len(p) for p in prefixes):
+        raise ValueError("普通保护单CID必须与角色前缀一致，不能复用保命止损CID")
+
+
+def _bracket_id(value: object) -> str:
+    if not re.fullmatch(r"[1-9]\d*", str(value)):
+        raise ValueError("普通保护单订单ID缺失或非法")
+    return str(value)
+
+
+def _lifeboat_cid(client_order_id: str) -> None:
+    if not re.fullmatch(r"lb-[.A-Za-z0-9_:/-]{1,33}", client_order_id):
+        raise ValueError("保命单CID必须使用lb-前缀且总长不超过36")
+
+
+def _bracket_number(value: object, *, zero: bool = False) -> float:
+    number = _close_decimal(value, zero=zero)
+    result = float(number)
+    # 持久模型用 float；不能让两个不同的交易所数值被舍成同一个预期值。
+    if Decimal(str(result)) != number:
+        raise ValueError("普通保护单数值不能无损保存")
+    return result
+
+
+def _bracket_time(value: object) -> datetime | None:
+    if value is None:
+        return None
+    millis = _close_decimal(value, zero=True)
+    if millis != millis.to_integral_value():
+        raise ValueError("普通保护单时间戳非法")
+    return datetime.fromtimestamp(float(millis) / 1000, UTC) if millis else None
+
+
+def _bracket_from(raw: dict[str, Any], *, lifeboat: bool = False) -> ExchangeBracket:
+    if not isinstance(raw, dict):
+        raise ValueError("普通保护单响应不是对象")
+    order_type = raw.get("orderType") or raw.get("type")
+    if order_type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}:
+        raise ValueError("不是支持的条件市价保护单")
+    kind: BracketKind = "stop_loss" if order_type == "STOP_MARKET" else "take_profit"
+    side = raw.get("side")
+    if side not in {"BUY", "SELL"}:
+        raise ValueError("普通保护单方向未知")
+    algo_id, cid = _bracket_id(raw.get("algoId")), str(raw.get("clientAlgoId") or "")
+    if lifeboat:
+        _lifeboat_cid(cid)
+        if kind != "stop_loss":
+            raise ValueError("保命单类型或CID不符")
+    else:
+        _bracket_cid(cid, kind)
+    symbol = str(raw.get("symbol") or "")
+    _bracket_symbol(symbol)
+    status, position_side, working_type = (
+        raw.get("algoStatus"),
+        raw.get("positionSide"),
+        raw.get("workingType"),
+    )
+    if (
+        not isinstance(status, str)
+        or not status
+        or position_side not in {"BOTH", "LONG", "SHORT"}
+        or working_type not in {"CONTRACT_PRICE", "MARK_PRICE"}
+    ):
+        raise ValueError("普通保护单状态、模式或触发价格源未知")
+    triggered_at = _bracket_time(raw.get("triggerTime"))
+    actual = raw.get("actualOrderId")
+    actual_id = None
+    child_state: Literal["absent", "unknown", "identified"] = "unknown"
+    if actual is not None and actual != "":
+        if actual in (0, "0") and not isinstance(actual, bool):
+            # 0 是明确 sentinel，缺字段/空字段不是；触发迹象优先于这个 sentinel。
+            if (
+                status in {"NEW", "CANCELED", "REJECTED", "EXPIRED"}
+                and raw.get("triggerTime") in (0, "0")
+                and not isinstance(raw.get("triggerTime"), bool)
+            ):
+                child_state = "absent"
+        else:
+            actual_id = _bracket_id(actual)
+            child_state = "identified"
+    return ExchangeBracket(
+        symbol=symbol,
+        algo_id=algo_id,
+        client_order_id=cid,
+        kind=kind,
+        close_side="buy" if side == "BUY" else "sell",
+        quantity=_bracket_number(raw.get("quantity")),
+        trigger_price=_bracket_number(raw.get("triggerPrice")),
+        position_side=str(position_side),
+        working_type=str(working_type),
+        reduce_only=_close_bool(raw.get("reduceOnly")),
+        price_protect=_close_bool(raw.get("priceProtect")),
+        close_position=_close_bool(raw.get("closePosition")),
+        algo_status=status,
+        actual_order_id=actual_id,
+        # Algo ACK 中的 executedQty 不用作实际 child 成交证据。
+        created_at=_bracket_time(raw.get("createTime")),
+        updated_at=_bracket_time(raw.get("updateTime")),
+        triggered_at=triggered_at,
+        child_state=child_state,
+    )
+
+
+def _bracket_child(order: ExchangeBracket, raw: dict[str, Any]) -> ExchangeBracket:
+    if not isinstance(raw, dict) or (
+        raw.get("symbol") != order.symbol
+        or _bracket_id(raw.get("orderId")) != order.actual_order_id
+        or raw.get("side") != order.close_side.upper()
+        or raw.get("positionSide") != "BOTH"
+        or not _close_bool(raw.get("reduceOnly"))
+    ):
+        raise ValueError("普通保护单实际子订单身份或只减仓语义不符")
+    parent_type = "STOP_MARKET" if order.kind == "stop_loss" else "TAKE_PROFIT_MARKET"
+    if raw.get("type") not in {"MARKET", parent_type}:
+        raise ValueError("普通保护单实际子订单类型不符")
+    if raw.get("origType") is not None and raw["origType"] not in {"MARKET", parent_type}:
+        raise ValueError("普通保护单实际子订单原类型不符")
+    # child CID 可由交易所生成，不假定等于 clientAlgoId；关联以已核实的 actualOrderId 为准。
+    if not isinstance(raw.get("clientOrderId"), str) or not re.fullmatch(
+        r"[.A-Za-z0-9_:/-]{1,36}", raw["clientOrderId"]
+    ):
+        raise ValueError("普通保护单实际子订单CID未知")
+    qty = _bracket_number(raw.get("origQty"))
+    filled = _bracket_number(raw.get("executedQty"), zero=True)
+    status = raw.get("status")
+    if status not in _CHILD_TERMINAL | {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}:
+        raise ValueError("普通保护单实际子订单状态未知")
+    if (
+        qty != order.quantity
+        or filled > qty
+        or (status == "FILLED" and filled != qty)
+        or (status == "NEW" and filled != 0)
+        or (status == "PARTIALLY_FILLED" and not 0 < filled < qty)
+    ):
+        raise ValueError("普通保护单实际子订单数量与状态不一致")
+    return replace(order, actual_order_status=str(status), filled_quantity=filled)
+
+
+def _bracket_settled(order: ExchangeBracket) -> bool:
+    """仅说明这张 algo 及其已知 child 不再工作，不证明账户已平仓。"""
+    if order.child_state == "identified":
+        return (
+            order.algo_status in {"CANCELED", "REJECTED", "EXPIRED", "TRIGGERED", "FINISHED"}
+            and order.actual_order_status in _CHILD_TERMINAL
+            and order.filled_quantity is not None
+        )
+    return order.child_state == "absent" and order.algo_status in {
+        "CANCELED",
+        "REJECTED",
+        "EXPIRED",
+    }
+
+
+def _entry_basis_order(
+    raw: dict[str, Any], symbol: str, cid: str
+) -> tuple[str, Literal["buy", "sell"], Decimal, Decimal, str]:
+    if not isinstance(raw, dict) or raw.get("symbol") != symbol or raw.get("clientOrderId") != cid:
+        raise ValueError("开仓成本订单身份不符")
+    if (
+        raw.get("side") not in {"BUY", "SELL"}
+        or raw.get("type") not in {"LIMIT", "MARKET"}
+        or raw.get("positionSide") != "BOTH"
+        or _close_bool(raw.get("reduceOnly"))
+    ):
+        raise ValueError("开仓成本订单类型或方向不符")
+    status = raw.get("status")
+    if status not in _CHILD_TERMINAL:
+        raise ValueError("开仓尚未终态，不能冻结成本基准")
+    qty, filled = _close_decimal(raw.get("origQty")), _close_decimal(raw.get("executedQty"))
+    quote = _close_decimal(raw.get("cumQuote"))
+    if filled > qty or (status == "FILLED" and filled != qty):
+        raise ValueError("开仓累计成交量与状态不一致")
+    return (
+        _bracket_id(raw.get("orderId")),
+        "buy" if raw["side"] == "BUY" else "sell",
+        filled,
+        quote,
+        str(status),
+    )
+
+
+def _entry_basis_fills(
+    rows: list[dict[str, Any]],
+    symbol: str,
+    order_id: str,
+    side: Literal["buy", "sell"],
+    filled: Decimal,
+    quote: Decimal,
+) -> Decimal:
+    if not isinstance(rows, list) or not rows or len(rows) >= 1000:
+        raise ValueError("开仓成交记录缺失或达到分页边界，完整性未知")
+    total_qty, total_quote, total_fees = Decimal("0"), Decimal("0"), Decimal("0")
+    ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or (
+            row.get("symbol") != symbol
+            or _bracket_id(row.get("orderId")) != order_id
+            or row.get("side") != side.upper()
+            or row.get("positionSide") != "BOTH"
+            or row.get("commissionAsset") != "USDT"
+            or _close_bool(row.get("buyer")) != (side == "buy")
+        ):
+            raise ValueError("开仓成交身份、方向或手续费币种不符")
+        trade_id = str(row.get("id"))
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)", trade_id):
+            raise ValueError("开仓成交ID非法")
+        if trade_id in ids:
+            raise ValueError("开仓成交ID重复，不能累计费用")
+        ids.add(trade_id)
+        qty, value = _close_decimal(row.get("qty")), _close_decimal(row.get("quoteQty"))
+        _close_decimal(row.get("price"))
+        if isinstance(row.get("commission"), bool):
+            raise ValueError("开仓手续费字段非法")
+        fee = Decimal(str(row.get("commission")))
+        realized = Decimal(str(row.get("realizedPnl")))
+        if not fee.is_finite() or not math.isfinite(float(fee)) or realized != 0:
+            raise ValueError("开仓手续费未知或成交包含平仓盈亏")
+        total_qty += qty
+        total_quote += value
+        total_fees += fee
+    if total_qty != filled or total_quote != quote:
+        raise ValueError("开仓实际成交量/金额未完整覆盖订单累计量，不能估计费用")
+    return total_fees
 
 
 def _identified_close(raw: dict[str, Any], symbol: str, cid: str) -> IdentifiedCloseOrder:
@@ -357,6 +672,8 @@ class CcxtBinanceFutures:
             else:
                 self._ex.set_sandbox_mode(True)
         self._markets_loaded = False
+        self._bracket_submit_locks: dict[str, asyncio.Lock] = {}
+        self._bracket_submitted: set[str] = set()
 
     async def _ready(self) -> None:
         if not self._markets_loaded:
@@ -579,6 +896,581 @@ class CcxtBinanceFutures:
                 "查询持仓模式失败或响应未知", transient=is_transient(error)
             ) from error
         return "hedge" if hedged else "one_way"
+
+    async def normalized_bracket_spec(
+        self, symbol: str, quantity: float, trigger_price: float
+    ) -> NormalizedBracketSpec:
+        """复用 CCXT 精度规则；零/非法/无法无损持久化的结果拒绝，不更改账户。
+
+        这是请求量化，不表示实际成交量、当前仓位量或交易所已接受保护。
+        """
+        ccxt_symbol = _bracket_symbol(symbol)
+        qty, price = _bracket_number(quantity), _bracket_number(trigger_price)
+        await self._ready()
+        amount = _bracket_number(self._ex.amount_to_precision(ccxt_symbol, qty))
+        trigger = _bracket_number(self._ex.price_to_precision(ccxt_symbol, price))
+        if amount > qty:
+            raise ValueError("普通保护单量化后数量不能超过请求数量")
+        return NormalizedBracketSpec(amount, trigger)
+
+    async def _bracket_uncertain(
+        self, symbol: str, cid: str, *, lifeboat: bool = False
+    ) -> BracketSubmissionUnknown:
+        observed = None
+        with contextlib.suppress(ExchangeError):
+            observed = (
+                await self.get_lifeboat(symbol, client_order_id=cid)
+                if lifeboat
+                else await self.get_bracket(symbol, client_order_id=cid)
+            )
+        return BracketSubmissionUnknown(cid, observed)
+
+    async def place_bracket(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        trigger_price: float,
+        client_order_id: str,
+        *,
+        kind: BracketKind,
+    ) -> ExchangeBracket:
+        """只单向、只减仓、合约成交价触发的普通 SL/TP，原保命止损接口不变。
+
+        调用方必须先持久化 CID/量化参数，并在进程重启后只查已提交或未知的 CID。
+        本进程另加一次提交锁与记录，防并发调用或查无后重复 POST；不是持久化的替代品。
+        不自动撤其他订单，不市价补偿，不更改持仓模式。
+        """
+        return await self._submit_protection(
+            symbol, close_side, quantity, trigger_price, client_order_id, kind=kind
+        )
+
+    async def place_lifeboat(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        trigger_price: float,
+        client_order_id: str,
+    ) -> ExchangeBracket:
+        """新托管流程专用：唯一代 lb-CID、MARK_PRICE、完整回读、未知不重发。
+
+        调用方先持久化量化参数和每代 CID；跨重启只查既有意图。旧 place_stop 路径不变。
+        """
+        return await self._submit_protection(
+            symbol,
+            close_side,
+            quantity,
+            trigger_price,
+            client_order_id,
+            kind="stop_loss",
+            lifeboat=True,
+        )
+
+    async def _submit_protection(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        trigger_price: float,
+        client_order_id: str,
+        *,
+        kind: BracketKind,
+        lifeboat: bool = False,
+    ) -> ExchangeBracket:
+        if kind not in BRACKET_PREFIXES or close_side not in {"buy", "sell"}:
+            raise ValueError("普通保护单类型或方向不合法")
+        if lifeboat:
+            _lifeboat_cid(client_order_id)
+            if kind != "stop_loss":
+                raise ValueError("保命单只能是止损")
+        else:
+            _bracket_cid(client_order_id, kind)
+        _bracket_symbol(symbol)
+        _bracket_number(quantity)
+        _bracket_number(trigger_price)
+        # __new__ 构造的离线假件也走同一提交锁；生产实例在 __init__ 建立。
+        if not hasattr(self, "_bracket_submit_locks"):
+            self._bracket_submit_locks = {}
+            self._bracket_submitted = set()
+        key = client_order_id  # CID 属于账户命名空间，不因换 symbol 而允许重复 POST。
+        async with self._bracket_submit_locks.setdefault(key, asyncio.Lock()):
+            return await self._place_bracket_once(
+                symbol,
+                close_side,
+                quantity,
+                trigger_price,
+                client_order_id,
+                kind=kind,
+                lifeboat=lifeboat,
+            )
+
+    async def _place_bracket_once(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        trigger_price: float,
+        client_order_id: str,
+        *,
+        kind: BracketKind,
+        lifeboat: bool = False,
+    ) -> ExchangeBracket:
+        import ccxt.async_support as ccxt
+
+        spec = await self.normalized_bracket_spec(symbol, quantity, trigger_price)
+        if await self.position_mode() != "one_way":
+            raise ExchangeError("普通保护条件单只支持已确认的单向持仓模式")
+        working_type = "MARK_PRICE" if lifeboat else "CONTRACT_PRICE"
+
+        async def query() -> ExchangeBracket | None:
+            return (
+                await self.get_lifeboat(symbol, client_order_id=client_order_id)
+                if lifeboat
+                else await self.get_bracket(symbol, client_order_id=client_order_id)
+            )
+
+        def matches(order: ExchangeBracket) -> bool:
+            return (
+                order.symbol == symbol
+                and order.client_order_id == client_order_id
+                and order.kind == kind
+                and order.close_side == close_side
+                and order.quantity == spec.quantity
+                and order.trigger_price == spec.trigger_price
+                and order.position_side == "BOTH"
+                and order.working_type == working_type
+                and order.reduce_only
+                and not order.price_protect
+                and not order.close_position
+            )
+
+        existing = await query()
+        key = client_order_id
+        if existing is not None:
+            self._bracket_submitted.add(key)
+            if not matches(existing):
+                raise ExchangeError("原CID条件单与本次请求不一致，禁止复用")
+            return existing  # 包含终态；同 CID 从不隐式建下一张。
+        if key in self._bracket_submitted:
+            raise BracketSubmissionUnknown(client_order_id)
+        ccxt_symbol = _bracket_symbol(symbol)
+        amount = self._ex.amount_to_precision(ccxt_symbol, spec.quantity)
+        price = self._ex.price_to_precision(ccxt_symbol, spec.trigger_price)
+        if _bracket_number(amount) != spec.quantity or _bracket_number(price) != spec.trigger_price:
+            raise ExchangeError("普通保护单精度在提交前变化，禁止提交不同于持久目标的请求")
+        self._bracket_submitted.add(key)  # 在第一个 POST await 前锁定，取消协程也不能重发。
+        try:
+            result = await self._ex.create_order(
+                ccxt_symbol,
+                "market",
+                close_side,
+                amount,
+                None,
+                {
+                    "stopLossPrice" if kind == "stop_loss" else "takeProfitPrice": float(price),
+                    "reduceOnly": True,
+                    "workingType": working_type,
+                    "priceProtect": False,
+                    "positionSide": "BOTH",
+                    "newClientOrderId": client_order_id,
+                },
+            )
+        except Exception as error:
+            rejected = isinstance(
+                error,
+                ccxt.InvalidOrder
+                | ccxt.AuthenticationError
+                | ccxt.PermissionDenied
+                | ccxt.InsufficientFunds
+                | ccxt.BadSymbol,
+            )
+            uncertain_code = re.search(
+                r"-(?:1000|1001|1006|1007|4111|4116)\b|\b(?:500|502|503|504)\b|5xx|duplicate",
+                str(error),
+                re.IGNORECASE,
+            )
+            if rejected and not uncertain_code:
+                raise BracketSubmissionRejected(
+                    "普通保护条件单被交易所明确拒绝",
+                    immediate_trigger=bool(re.search(r"-(?:2021|4142)\b", str(error))),
+                ) from error
+            raise await self._bracket_uncertain(
+                symbol, client_order_id, lifeboat=lifeboat
+            ) from error
+        try:
+            order = _bracket_from(result["info"], lifeboat=lifeboat)
+            if not matches(order):
+                raise ValueError("响应身份或保护语义不符")
+            # 即时触发的 ACK 必须再读 algo 及真实 child；不把响应的 executedQty 当成交。
+            if order.child_state != "absent" or order.algo_status != "NEW":
+                observed = await query()
+                if observed is None or observed.algo_id != order.algo_id or not matches(observed):
+                    raise ValueError("普通保护单提交回读身份或参数不一致")
+                return observed
+            return order
+        except Exception as error:
+            raise await self._bracket_uncertain(
+                symbol, client_order_id, lifeboat=lifeboat
+            ) from error
+
+    async def get_bracket(
+        self,
+        symbol: str,
+        *,
+        algo_id: str | None = None,
+        client_order_id: str | None = None,
+    ) -> ExchangeBracket | None:
+        """仅明确 algo OrderNotFound 返回 None；未知提交后的 None 不能授权重发。
+
+        child 缺 ID 保留 unknown；有 ID 就必须查其原始数量/方向/只减仓/状态，缺证据抛错。
+        """
+        import ccxt.async_support as ccxt
+
+        _bracket_symbol(symbol)
+        if (algo_id is None) == (client_order_id is None):
+            raise ValueError("必须且仅指定algo_id或client_order_id")
+        if client_order_id is not None:
+            _bracket_cid(client_order_id)
+        if algo_id is not None:
+            _bracket_id(algo_id)
+        request = {"algoId": algo_id} if algo_id is not None else {"clientAlgoId": client_order_id}
+        try:
+            raw = await self._ex.fapiPrivateGetAlgoOrder(request)
+        except ccxt.OrderNotFound:
+            return None
+        except Exception as error:
+            raise ExchangeError("查询普通保护条件单未知", transient=is_transient(error)) from error
+        try:
+            order = _bracket_from(raw)
+            if (
+                order.symbol != symbol
+                or (algo_id is not None and order.algo_id != algo_id)
+                or (client_order_id is not None and order.client_order_id != client_order_id)
+            ):
+                raise ValueError("普通保护条件单查询身份不符")
+            if order.actual_order_id is not None:
+                actual = await self._ex.fapiPrivateGetOrder(
+                    {"symbol": symbol, "orderId": order.actual_order_id}
+                )
+                order = _bracket_child(order, actual)
+            return order
+        except Exception as error:
+            raise ExchangeError(
+                "普通保护条件单或实际子订单证据不完整", transient=is_transient(error)
+            ) from error
+
+    async def get_lifeboat(
+        self,
+        symbol: str,
+        *,
+        client_order_id: str,
+        algo_id: str | None = None,
+    ) -> ExchangeBracket | None:
+        """按持久 lb-CID 及可选 algoID 精确查询；父单查无不证明 child 已结束。
+
+        强制 STOP_MARKET/MARK_PRICE/BOTH/只减仓；child 使用原始订单身份与数量核验。
+        """
+        import ccxt.async_support as ccxt
+
+        _bracket_symbol(symbol)
+        _lifeboat_cid(client_order_id)
+        if algo_id is not None:
+            _bracket_id(algo_id)
+        request = {"algoId": algo_id} if algo_id is not None else {"clientAlgoId": client_order_id}
+        try:
+            raw = await self._ex.fapiPrivateGetAlgoOrder(request)
+        except ccxt.OrderNotFound:
+            return None
+        except Exception as error:
+            raise ExchangeError("保命单查询未知", transient=is_transient(error)) from error
+        try:
+            order = _bracket_from(raw, lifeboat=True)
+            if (
+                order.symbol != symbol
+                or order.client_order_id != client_order_id
+                or (algo_id is not None and order.algo_id != algo_id)
+                or order.working_type != "MARK_PRICE"
+                or order.position_side != "BOTH"
+                or not order.reduce_only
+                or order.close_position
+                or order.price_protect
+            ):
+                raise ValueError("保命单身份或保护语义不符")
+            if order.actual_order_id is not None:
+                actual = await self._ex.fapiPrivateGetOrder(
+                    {"symbol": symbol, "orderId": order.actual_order_id}
+                )
+                order = _bracket_child(order, actual)
+            return order
+        except Exception as error:
+            raise ExchangeError(
+                "保命单或实际子订单证据不完整", transient=is_transient(error)
+            ) from error
+
+    async def open_brackets(self, symbol: str | None = None) -> list[ExchangeBracket]:
+        """仅返回 br-sl/br-tp 角色；不接管 lifeboat 或用户单，不推导子单成交量。"""
+        if symbol is not None:
+            _bracket_symbol(symbol)
+        try:
+            raw = await self._ex.fapiPrivateGetOpenAlgoOrders({"symbol": symbol} if symbol else {})
+            if not isinstance(raw, list):
+                raise ValueError("开放条件单响应不是完整列表")
+            orders: list[ExchangeBracket] = []
+            ids: set[str] = set()
+            cids: set[str] = set()
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError("开放条件单列表包含未知对象")
+                cid = str(item.get("clientAlgoId") or "")
+                if not cid.startswith(tuple(BRACKET_PREFIXES.values())):
+                    continue
+                order = _bracket_from(item)
+                if (
+                    (symbol is not None and order.symbol != symbol)
+                    or order.algo_id in ids
+                    or order.client_order_id in cids
+                ):
+                    raise ValueError("开放条件单标的或唯一身份不符")
+                ids.add(order.algo_id)
+                cids.add(order.client_order_id)
+                orders.append(order)
+            return orders
+        except Exception as error:
+            raise ExchangeError(
+                "查询普通开放保护单失败或响应不完整", transient=is_transient(error)
+            ) from error
+
+    async def assert_entry_clear(self, symbol: str) -> None:
+        """只读确认两类完整开放订单列表均为空；包含手工单及旧保命单，不撤任何单。
+
+        两个 all-open 端点不分页，不能用带 cursor/包装对象的未知响应代替完整列表。
+        这是检查时点的证据，并不阻止 HB 或其他客户端随后独立发单。
+        """
+        _bracket_symbol(symbol)
+        try:
+            normal, algo = await asyncio.gather(
+                self._ex.fapiPrivateGetOpenOrders({"symbol": symbol}),
+                self._ex.fapiPrivateGetOpenAlgoOrders({"symbol": symbol}),
+            )
+        except Exception as error:
+            raise ExchangeError(
+                "同币开放订单检查失败，禁止新开", transient=is_transient(error)
+            ) from error
+        if not isinstance(normal, list) or not isinstance(algo, list):
+            raise ExchangeError("同币开放订单响应不完整，禁止新开")
+        if normal or algo:
+            raise ExchangeError("同币仍有开放订单或未知订单记录，禁止新开")
+
+    async def lifeboat_ready(
+        self,
+        symbol: str,
+        client_order_ids: tuple[str, ...],
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        trigger_price: float,
+    ) -> bool:
+        """仅核指定保命单是否仍能覆盖实际余仓，不将旧 ExchangeStop 当完整保护证据。
+
+        一个有效 NEW 不能掩盖另一个 CID 的查询/触发未知。仅明确无匹配返回 False；
+        不撤旧保命单或陌生单，也不以这个检查推断后续 HB/市场不会同时退出。
+        """
+        import ccxt.async_support as ccxt
+
+        if (
+            not client_order_ids
+            or len(set(client_order_ids)) != len(client_order_ids)
+            or any(not re.fullmatch(r"lb-[.A-Za-z0-9_:/-]{1,33}", c) for c in client_order_ids)
+            or close_side not in {"buy", "sell"}
+        ):
+            raise ValueError("保命单核验CID或方向非法")
+        spec = await self.normalized_bracket_spec(symbol, quantity, trigger_price)
+        actual_quantity = _bracket_number(quantity)
+        ready = False
+        for cid in client_order_ids:
+            try:
+                raw = await self._ex.fapiPrivateGetAlgoOrder({"clientAlgoId": cid})
+            except ccxt.OrderNotFound:
+                continue
+            except Exception as error:
+                raise ExchangeError("保命单覆盖查询未知", transient=is_transient(error)) from error
+            try:
+                order = _bracket_from(raw, lifeboat=True)
+                if (
+                    order.symbol != symbol
+                    or order.client_order_id != cid
+                    or order.close_side != close_side
+                    or order.position_side != "BOTH"
+                    or order.working_type != "MARK_PRICE"
+                    or not order.reduce_only
+                    or order.price_protect
+                    or order.close_position
+                ):
+                    raise ValueError("保命单身份或保护语义不符")
+                if order.child_state != "absent":
+                    raise ValueError("保命单有触发或未知子订单，不能以另一张NEW掩盖")
+                if order.algo_status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                    continue
+                if order.algo_status != "NEW":
+                    raise ValueError("保命单状态未知")
+                if order.quantity >= actual_quantity and order.trigger_price == spec.trigger_price:
+                    ready = True
+            except Exception as error:
+                raise ExchangeError("保命单完整覆盖证据未知") from error
+        return ready
+
+    async def entry_basis(self, symbol: str, client_order_id: str) -> EntryBasis:
+        """按原始开仓 CID 读终态订单及完整成交账，不复用估算价格或默认零费用。
+
+        仅接受单向账户、终态且正成交的开仓；成交量及金额须精确覆盖两次一致的订单快照。
+        userTrades 达 1000 条边界直接 unknown，不把可能被截断的分页当作完整账本。
+        """
+        _bracket_symbol(symbol)
+        if not re.fullmatch(r"[.A-Za-z0-9_:/-]{1,36}", client_order_id):
+            raise ValueError("开仓成本CID非法")
+        try:
+            if await self.position_mode() != "one_way":
+                raise ValueError("开仓成本只支持已确认的单向模式")
+            request = {"symbol": symbol, "origClientOrderId": client_order_id}
+            before = _entry_basis_order(
+                await self._ex.fapiPrivateGetOrder(request), symbol, client_order_id
+            )
+            order_id, side, filled, quote, status = before
+            rows = await self._ex.fapiPrivateGetUserTrades(
+                {"symbol": symbol, "orderId": order_id, "limit": 1000}
+            )
+            fee = _entry_basis_fills(rows, symbol, order_id, side, filled, quote)
+            after = _entry_basis_order(
+                await self._ex.fapiPrivateGetOrder(request), symbol, client_order_id
+            )
+            if after != before:
+                raise ValueError("开仓成本查询期间订单证据变化，不能冻结基准")
+            quantity, notional = _bracket_number(filled), _bracket_number(quote)
+            fee_float = float(fee)
+            if not math.isfinite(fee_float) or Decimal(str(fee_float)) != fee:
+                raise ValueError("开仓实际费用无法无损保存")
+            entry_price = float(quote / filled)
+            if not math.isfinite(entry_price) or entry_price <= 0:
+                raise ValueError("开仓实际均价非法")
+            return EntryBasis(
+                symbol=symbol,
+                client_order_id=client_order_id,
+                order_id=order_id,
+                side=side,
+                filled_quantity=quantity,
+                filled_quote=notional,
+                fee_usdt=fee_float,
+                entry_price=entry_price,
+                order_status=status,
+            )
+        except Exception as error:
+            raise ExchangeError(
+                "开仓实际成交成本或费用证据未知", transient=is_transient(error)
+            ) from error
+
+    async def execution_book(self, symbol: str, *, max_age_s: float = 5.0) -> ExecutionBook:
+        """只从本交易客户端同环境读取盘口；缺少/未来/过期的交易所时间一律未知。
+
+        5 秒是证据健康上界，不是策略阈值；调用方还须处理乱序及消费时再检查新鲜度。
+        """
+        _bracket_symbol(symbol)
+        age_limit = _bracket_number(max_age_s)
+        started_at = datetime.now(UTC)
+        try:
+            raw = await self._ex.fapiPublicGetTickerBookTicker({"symbol": symbol})
+            observed_at = datetime.now(UTC)
+            if not isinstance(raw, dict) or raw.get("symbol") != symbol:
+                raise ValueError("同环境盘口身份不符")
+            bid, ask = _bracket_number(raw.get("bidPrice")), _bracket_number(raw.get("askPrice"))
+            _bracket_number(raw.get("bidQty"))
+            _bracket_number(raw.get("askQty"))
+            source_at = _bracket_time(raw.get("time"))
+            if source_at is None:
+                raise ValueError("同环境盘口没有交易所时间")
+            age = (observed_at - source_at).total_seconds()
+            if bid > ask or observed_at < started_at or age < 0 or age > age_limit:
+                raise ValueError("同环境盘口交叉或时钟/新鲜度不可信")
+            return ExecutionBook(symbol, bid, ask, source_at, observed_at)
+        except Exception as error:
+            raise ExchangeError("同环境执行盘口证据未知", transient=is_transient(error)) from error
+
+    async def cancel_bracket(
+        self, symbol: str, algo_id: str, *, expected_client_order_id: str
+    ) -> None:
+        """精确核对所有权再撤单，回读明确终态才成功；未知/触发中的 child 不代撤。"""
+        _bracket_cid(expected_client_order_id)
+        await self._cancel_protection(
+            symbol, algo_id, expected_client_order_id=expected_client_order_id
+        )
+
+    async def cancel_lifeboat(
+        self, symbol: str, algo_id: str, *, expected_client_order_id: str
+    ) -> None:
+        """新托管流程保命单清理：核 exact lb-CID/algoID，回读父/子终态才返回。
+
+        不调用旧 cancel_stop 的 OrderNotFound 即成功路径，不撤正在工作的实际子订单。
+        """
+        _lifeboat_cid(expected_client_order_id)
+        await self._cancel_protection(
+            symbol, algo_id, expected_client_order_id=expected_client_order_id, lifeboat=True
+        )
+
+    async def _cancel_protection(
+        self,
+        symbol: str,
+        algo_id: str,
+        *,
+        expected_client_order_id: str,
+        lifeboat: bool = False,
+    ) -> None:
+        _bracket_id(algo_id)
+
+        async def query() -> ExchangeBracket | None:
+            return (
+                await self.get_lifeboat(
+                    symbol, client_order_id=expected_client_order_id, algo_id=algo_id
+                )
+                if lifeboat
+                else await self.get_bracket(symbol, algo_id=algo_id)
+            )
+
+        order = await query()
+        if order is None:
+            raise ExchangeError("保护单查无结果不能证明已撤，保留待核验")
+        if order.client_order_id != expected_client_order_id:
+            raise ExchangeError("保护单CID与预期仓位不符，禁止撤单")
+        if _bracket_settled(order):
+            return
+        if order.algo_status != "NEW" or order.child_state != "absent":
+            raise ExchangeError("保护单存在触发或未知子订单，不能认定可安全撤除")
+        try:
+            response = await self._ex.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+        except Exception as error:
+            # 超时 / OrderNotFound 可能是 HB 独立退出或触发竞态，只读核验，不重发 DELETE。
+            observed = None
+            with contextlib.suppress(ExchangeError):
+                observed = await query()
+            if (
+                observed is not None
+                and observed.client_order_id == expected_client_order_id
+                and _bracket_settled(observed)
+            ):
+                return
+            raise ExchangeError("撤普通保护条件单结果未知，须重新查询") from error
+        if (
+            not isinstance(response, dict)
+            or str(response.get("algoId")) != algo_id
+            or response.get("clientAlgoId") != expected_client_order_id
+            or str(response.get("code")) != "200"
+        ):
+            raise ExchangeError("撤普通保护条件单回执身份或状态不符，保留待核验")
+        observed = await query()
+        if (
+            observed is None
+            or observed.client_order_id != expected_client_order_id
+            or not _bracket_settled(observed)
+        ):
+            raise ExchangeError("撤普通保护条件单后仍未证实终止，保留待核验")
 
     @staticmethod
     def _close_cid(client_order_id: str) -> None:

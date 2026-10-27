@@ -9,6 +9,7 @@ from jiaoyi.contracts import RiskConfig, Role, RunMode
 from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.account_check import verify_same_account
+from jiaoyi.execution.brackets import BracketManager
 from jiaoyi.execution.exchange import CcxtBinanceFutures
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
@@ -130,6 +131,14 @@ def build_execution(
         return rules.tick_size if rules is not None else None
 
     registry = PositionRegistry(Path(data_dir) / "positions.json")
+    # 当前只批准 Demo 新仓托管。实盘和旧测试网不因更新代码切换出场策略。
+    protection = (
+        BracketManager(
+            exchange, registry, account_name=account_name, connector_name=CONNECTOR_BY_MODE[mode]
+        )
+        if mode is not RunMode.LIVE and demo_trading
+        else None
+    )
     adapter = HbExecutorAdapter(
         api,
         lifeboat,
@@ -144,6 +153,7 @@ def build_execution(
         open_fee_bps=risk.taker_fee_bps,
         limit_take_profit=limit_take_profit,
         tick_size=tick_size,
+        protection=protection,
     )
     reconciler = ThreeWayReconciler(
         adapter,
