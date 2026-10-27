@@ -763,6 +763,41 @@ function showCard(fetch = true) {
   layoutLadders(d);
 }
 
+// 方向记分（data/card_score/summary.json）：起点 = 卡真正发出的时刻，主指标 = 4h 超额命中（扣掉同期币池等权），
+// 原始命中只和同一批样本的「一律做空 / 一律做多」放一起看；区间按 4 小时时段聚类
+const scPct = (v) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
+const scSg = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}`;
+const scBp = (v) => (v == null ? "-" : `${scSg(v)}bp`);
+const scCiP = (c) => (c ? ` <span class="dim">[${(c[0] * 100).toFixed(1)}–${(c[1] * 100).toFixed(1)}]</span>` : "");
+const scCiB = (c) => (c ? ` <span class="dim">[${scSg(c[0])}, ${scSg(c[1])}]</span>` : "");
+const SC_H = { "1h": "1 小时", "4h": "4 小时", exp: "到过期" };
+function cardScoreBlock(r) {
+  if (!r) return `<div class="note">方向记分：还没算过（面板启动几分钟后自动算，之后每小时补一次）。</div>`;
+  const h = (r.horizons || {})["4h"];
+  if (!h || !h.excess.n) return `<div class="note">方向记分：还没有 4 小时窗口走完的方向卡。</div>`;
+  const base = Object.fromEntries(((r.baselines || {})["4h"] || []).map((b) => [b.key, b]));
+  const x = h.excess, raw = h.raw;
+  const sh = base.always_short ? base.always_short.raw : {}, lg = base.always_long ? base.always_long.raw : {};
+  const few = x.blocks < r.min_blocks ? `<div class="warn small">只有 ${x.blocks} 个 4 小时时段；超额命中要分辨到 ±2.5 个百分点约需 ${r.min_blocks} 个，现在别当结论。</div>` : "";
+  const stat = (s) => `${scPct(s.hit)}${scCiP(s.hit_ci)}</td><td class="num">${scBp(s.mean_bp)}${scCiB(s.mean_bp_ci)}`;
+  const hz = Object.entries(r.horizons).map(([k, v]) => `<tr><td>${SC_H[k] || esc(k)}</td><td class="num">${stat(v.excess)}</td><td class="num">${stat(v.raw)}</td><td class="num">${scBp(v.market.mean_bp)}</td><td class="num">${v.excess.n} / ${v.excess.blocks}</td></tr>`).join("");
+  const bl = ((r.baselines || {})["4h"] || []).map((b) => `<tr><td>${esc(b.label)}</td><td class="num">${stat(b.raw)}</td><td class="num">${scPct(b.excess.hit)}</td><td class="num">${b.raw.n}</td></tr>`).join("");
+  const grp = (title, gs) => (gs || []).length ? `<div class="st-sub">${title}</div><div class="tw"><table><thead><tr><th></th><th>卡数（观望）</th><th>超额命中</th><th>平均超额</th><th>原始命中</th><th>一律做空 / 做多</th><th>时段</th></tr></thead><tbody>${gs.map((g) => `<tr><td>${esc(g.key)}</td><td class="num">${g.n_cards}（${g.n_neutral}）</td><td class="num">${scPct(g.excess.hit)}${scCiP(g.excess.hit_ci)}</td><td class="num">${scBp(g.excess.mean_bp)}</td><td class="num">${scPct(g.raw.hit)}</td><td class="num">${scPct(g.always_short.hit)} / ${scPct(g.always_long.hit)}</td><td class="num">${g.excess.blocks}</td></tr>`).join("")}</tbody></table></div>` : "";
+  return `<div class="note">
+    <div><b>方向记分</b>（4 小时，扣掉同期币池等权）：超额命中 <b>${scPct(x.hit)}</b>${scCiP(x.hit_ci)} · 平均超额 <b>${scBp(x.mean_bp)}</b>${scCiB(x.mean_bp_ci)} · ${x.n} 张方向卡 / ${x.blocks} 个时段</div>
+    <div>原始命中（没扣大盘）${scPct(raw.hit)}${scCiP(raw.hit_ci)}，同一批卡：一律做空 ${scPct(sh.hit)}、一律做多 ${scPct(lg.hit)}。观望 ${r.n_neutral} 张只计数。</div>
+    ${few}
+    <details><summary class="dim">各期限、基线、分期 / 方向 / 出卡原因</summary>
+      <div class="tw mt"><table><thead><tr><th>期限</th><th>超额命中</th><th>平均超额</th><th>原始命中</th><th>平均原始</th><th>大盘分量</th><th>张 / 时段</th></tr></thead><tbody>${hz}</tbody></table></div>
+      <div class="st-sub">同一批样本的基线（4 小时）</div>
+      <div class="tw"><table><thead><tr><th></th><th>原始命中</th><th>平均原始</th><th>超额命中</th><th>张</th></tr></thead><tbody>${bl}</tbody></table></div>
+      ${grp("分期（按合并时间）", r.periods)}${grp("方向", r.by_direction)}${grp("出卡原因", r.by_refresh_reason)}
+      <div class="dim small mt">口径：起点 = 这一版卡第一次发布的时刻；价格 = 主网最后一根已收盘 1 分钟线；超额 = 方向 ×（币 − 同期币池等权）；区间 = 按 4 小时 UTC 时段聚类 bootstrap 的 95%。
+      老口径（未扣大盘，整轮起点 → 到期的原始涨跌）：命中 ${scPct(r.legacy.hit)}（${r.legacy.n} 张），只作对照。${md(r.generated_at)} ${hm(r.generated_at)} 算的。</div>
+    </details>
+  </div>`;
+}
+
 // 历史卡：过去每条指令（一个币一场会的结论）后来怎么样了；按日期翻、按币筛
 const CARD_END = { active: ["还在用", "p-accent"], expired: ["到期", ""], replaced: ["被新结论替换", "p-warn"] };
 async function showCardHistory(arg = "") {
@@ -772,8 +807,10 @@ async function showCardHistory(arg = "") {
   if (sym) q.set("symbol", sym);
   dlg(`<h3>历史卡</h3><div class="dim">读取中…</div>`);
   $("#layer .dlg").classList.add("wide");
-  let h;
-  try { h = await getJson(`/api/card-history?${q}`); } catch (e) {
+  let h, sc;
+  try {
+    [h, sc] = await Promise.all([getJson(`/api/card-history?${q}`), getJson("/api/card-score").catch(() => null)]);
+  } catch (e) {
     dlg(`<h3>历史卡</h3><div class="down">读取失败：${esc(e.message)}</div>`);
     return;
   }
@@ -789,7 +826,8 @@ async function showCardHistory(arg = "") {
       <td><span class="pill ${ek}">${et}</span></td><td>${trade}</td><td class="txt dim small">${esc(r.reason || "（没找到这场会的结论记录）")}</td></tr>`;
   }).join("");
   dlg(`<h3>历史卡</h3><p class="dim">每行是一个币一场会的结论：出会时间 → 失效时间（到期或被同一个币的新结论替换）。<a ${clickable("card")}>‹ 回到现在的作战卡</a></p>
-    <div class="row-pick">${pick}</div>
+    ${cardScoreBlock(sc)}
+    <div class="row-pick mt">${pick}</div>
     ${rows ? `<div class="tw mt"><table><thead><tr><th>时间</th><th>币种</th><th>方向</th><th>止损 ATR</th><th>止盈 R</th><th>杠杆</th><th>单笔仓位 U</th><th>结局</th><th>开过仓</th><th>理由</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="dim mt">${esc(h.day)} 没有出过指令。</div>`}`);
   $("#layer .dlg").classList.add("wide");
   const go = () => showCardHistory(`${$("#ch-day").value}|${$("#ch-sym").value}`);
@@ -2041,6 +2079,7 @@ const PLAIN = {
   notify_model_credit: "模型额度不足",
   credit_low_floor_usd: "模型额度最低几美元就提醒",
   credit_resend_hours: "额度提醒多久重复一次（小时）",
+  card_score_every_min: "方向记分多久补算一次（分钟）",
   notify_meeting_paused: "军师团暂停开会",
   notify_control: "面板操作",
   notify_live_started: "实盘已启动",
@@ -2272,6 +2311,7 @@ const HINT = {
   notify_model_credit: "OpenRouter 额度快用完或被拒（402）时推，没额度就没有新作战卡。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
   credit_low_floor_usd: "OpenRouter 余额低于这个数（美元）就推一条。余额低于「近 7 天日均花费 × 2」时按那个更高的数算，所以实际提醒线可能比这里高。默认 5。保存后几秒内生效",
   credit_resend_hours: "同一条额度提醒（快用完 / 被拒）每隔多少小时重复推一次，充值后自动停。默认 6。保存后几秒内生效",
+  card_score_every_min: "面板每隔多少分钟给 4 小时窗口走完的作战卡补算一次方向记分（只读币安主网公开 K 线，过去的整天用历史日包）。0 = 不算。默认 60。改配置文件后面板下一轮生效",
   notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。保存后几秒内生效",
   notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。保存后几秒内生效",
   notify_live_started: "实盘启动时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
@@ -2502,6 +2542,7 @@ const ROLES = [
   ] },
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
+    { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min"] },
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
   { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [

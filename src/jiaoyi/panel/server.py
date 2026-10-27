@@ -18,7 +18,7 @@ import logging
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -33,6 +33,8 @@ from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.recorder import local_day
 from jiaoyi.execution.live_gate import CONFIRM_WORD
+from jiaoyi.gate.bars import OutcomeBars
+from jiaoyi.market.rest import RateLimited, WeightBudget
 from jiaoyi.panel import actions, pnl_curve, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
@@ -70,6 +72,7 @@ from jiaoyi.panel.pages import (
 from jiaoyi.panel.stop_diagnostics import parse_diagnostics
 from jiaoyi.panel.updater import UpdateInfo, Updater
 from jiaoyi.risk.guard import blend_atr, session_factor
+from jiaoyi.slow import card_score
 from jiaoyi.slow.credits import banner as credit_banner
 from jiaoyi.slow.settings import slow_defaults
 from jiaoyi.watchdog import send as send_telegram
@@ -78,6 +81,14 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 PACKAGE = Path(__file__).parent.parent
+CARD_SCORE_FIRST_S = 120.0
+"""面板启动后多久第一次算方向记分（别和启动时的其他读取挤在一起）。"""
+CARD_SCORE_IDLE_MIN = 10
+"""设置成 0（不算）时，隔多久再看一眼设置。"""
+CARD_SCORE_LOOKBACK = timedelta(days=7)
+"""面板只补算最近几天的卡；更早的用 ``jiaoyi card-score --days`` 补。"""
+CARD_SCORE_WEIGHT_PER_MIN = 120
+"""方向记分打币安 API 的权重预算（每分钟，币安按 IP 给 2400；大头留给交易程序）。"""
 
 
 def code_fingerprint(root: Path = PACKAGE) -> str:
@@ -323,10 +334,35 @@ def create_app(
             except Exception:
                 log.warning("记今日盈亏曲线失败", exc_info=True)
 
+    score_fetch = OutcomeBars(
+        cache=Path(data_dir) / "history", budget=WeightBudget(CARD_SCORE_WEIGHT_PER_MIN)
+    )
+
+    async def score_cards() -> None:
+        """作战卡方向记分：每 ``card_score_every_min`` 分钟补算窗口走完的卡（只读主网公开 K 线，
+        过去的整天走日包缓存），重写 data/card_score/summary.json。0 = 不算。"""
+        await asyncio.sleep(CARD_SCORE_FIRST_S)
+        while True:
+            every = cfg()[1].card_score_every_min
+            if every:
+                now = clock()
+                try:
+                    res = await card_score.update(
+                        data_dir, now, score_fetch, since=now - CARD_SCORE_LOOKBACK
+                    )
+                    log.info("%s（这次新记 %d 张）", card_score.headline(res.report), res.new)
+                except RateLimited as e:
+                    log.warning("作战卡方向记分：%s，这一轮作罢", e)
+                except Exception:
+                    log.warning("作战卡方向记分失败", exc_info=True)
+            await asyncio.sleep((every or CARD_SCORE_IDLE_MIN) * 60)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task = asyncio.create_task(sample_pnl()) if pnl_sample_s != 0 else None
+        scorer = asyncio.create_task(score_cards())
         yield
+        scorer.cancel()
         if task is not None:
             task.cancel()
         await hb.close()
@@ -423,6 +459,14 @@ def create_app(
     @api.get("/api/card-history")
     async def card_history(day: date | None = None, symbol: str | None = None) -> CardHistoryPage:
         return build_card_history(files, clock(), day, symbol)
+
+    @api.get("/api/card-score")
+    async def card_score_summary() -> card_score.Report:
+        """作战卡方向记分的汇总（data/card_score/summary.json），只读。"""
+        got = await asyncio.to_thread(card_score.ScoreStore(data_dir).read_summary)
+        if got is None:
+            raise HTTPException(404, "方向记分还没算过：面板启动几分钟后自动算（设置 0 = 不算）")
+        return got
 
     @api.get("/api/history")
     async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:

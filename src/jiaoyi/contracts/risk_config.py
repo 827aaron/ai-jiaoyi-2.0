@@ -964,6 +964,13 @@ class AppConfig(Contract):
         le=168,
         description="同一条额度提醒（快用完 / 被拒）多久重复推一次，单位小时。",
     )
+    card_score_every_min: int = Field(
+        default=60,
+        ge=0,
+        le=1440,
+        description="面板每隔多少分钟给窗口走完的作战卡补算方向记分（发布时刻起算、扣掉同期币池，"
+        "写 data/card_score/）。只读主网公开 K 线，不影响任何交易判断；0 = 不算。",
+    )
     notify_meeting_paused: bool = Field(
         default=True,
         description="推 Telegram：军师团因失败或当日花费超限暂停开会时推。",
