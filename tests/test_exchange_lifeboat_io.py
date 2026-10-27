@@ -166,7 +166,9 @@ async def test_lifeboat_child_partial_and_terminal_partial_are_not_parent_comple
     [
         ("0", "NEW", "absent"),
         (None, "NEW", "unknown"),
-        ("", "NEW", "unknown"),
+        ("", "NEW", "absent"),
+        ("", "TRIGGERED", "unknown"),
+        ("", "FINISHED", "unknown"),
         ("0", "FINISHED", "unknown"),
     ],
 )
