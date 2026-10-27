@@ -53,20 +53,7 @@
       "meeting_id": "BTCUSDT-20260101T000000",
       "source_market_view_id": null,
       "source_regime": null,
-      "outlook": {
-        "market_dir": "up",
-        "market_dir_evidence": "池内近 4 小时 36 涨 4 跌、中位 +0.7%，BTC 4h +0.3%",
-        "rel_dir": "inline",
-        "rel_dir_evidence": "BTC 4h +0.3%，与池中位 +0.7% 相差不到 0.5 个百分点",
-        "rm_rating": "buy",
-        "pm_rating": "overweight",
-        "trader_action": "buy",
-        "no_trade_lean": null,
-        "board_market_dir": "flat",
-        "board_regime_direction": "中性",
-        "board_market_view_id": "market-20261022-0600",
-        "missing": {}
-      }
+      "outlook": null
     },
     {
       "symbol": "TSLAUSDT",

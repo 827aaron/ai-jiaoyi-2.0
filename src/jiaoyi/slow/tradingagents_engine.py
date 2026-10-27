@@ -928,13 +928,17 @@ class _CardSymbolDraft(BaseModel):
     # 只记录的两个判断（CardOutlook），排在最后：模型先定方向再写它们。发给模型的 schema 里是
     # 必填的枚举，解析时什么都收（漏写、写错由 card_outlook 记 None 和原因），绝不让转卡失败
     market_dir: Annotated[str | None, _enum(card_outlook.MARKET_DIRS)] = Field(
-        default=None, description="Equal-weight pool average over the next 4 hours"
+        default=None,
+        description="Fixed next-4-hour window, independent of the holding time: where the "
+        "equal-weight pool average moves",
     )
     market_dir_evidence: _Text = Field(
         default=None, description="Chinese, one brief sentence quoting numbers"
     )
     rel_dir: Annotated[str | None, _enum(card_outlook.REL_DIRS)] = Field(
-        default=None, description="This coin against that average over the next 4 hours"
+        default=None,
+        description="Fixed next-4-hour window, independent of the holding time: this coin "
+        "against the equal-weight pool average",
     )
     rel_dir_evidence: _Text = Field(
         default=None, description="Chinese, one brief sentence quoting numbers"

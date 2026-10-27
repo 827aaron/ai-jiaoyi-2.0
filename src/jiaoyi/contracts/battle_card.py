@@ -83,14 +83,20 @@ class CardOutlook(Contract):
     卡的方向混着两个判断：整个市场往哪走、这个币比市场强还是弱。这里把两者分开记，再带上会议里
     已有的研究经理 / 组合经理评级、观望卡的倾向，和研究启动时总盘会的方向（同一套 up/down/flat）。
     哪一项拿不到就记 None，原因写进 ``missing``（字段名 → 原因）；旧卡没有这一块。
+    落在开会记录和 ``card_review/cards.jsonl``；``battle_card.json`` 存档不带它。
     """
 
+    horizon_min: int = Field(
+        default=240,
+        gt=0,
+        description="market_dir / rel_dir 的判断窗口（分钟）：固定未来 4 小时，与持仓时长无关。",
+    )
     market_dir: MarketDir | None = Field(
-        default=None, description="会议判断的未来 4 小时等权大盘方向。"
+        default=None, description="会议判断的未来 horizon_min 分钟等权大盘方向。"
     )
     market_dir_evidence: str | None = Field(default=None, description="依据，一句带数字。")
     rel_dir: RelDir | None = Field(
-        default=None, description="会议判断的未来 4 小时这个币相对等权大盘：跑赢 / 跑输 / 同步。"
+        default=None, description="同一窗口里这个币相对等权大盘：跑赢 / 跑输 / 同步。"
     )
     rel_dir_evidence: str | None = Field(default=None, description="依据，一句带数字。")
     rm_rating: Rating | None = Field(default=None, description="研究经理的建议。")

@@ -39,6 +39,7 @@ from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
 from jiaoyi.panel.protection import ProtectionView, lifeboat_summary, parse_protection
 from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
+from jiaoyi.slow.card_outlook import card_from_output
 
 STALE_S = 120.0
 """主循环每 30 秒心跳一次；4 个周期没更新就当掉线。"""
@@ -800,8 +801,9 @@ def _card(
     for r in cmd:
         if r.symbol and r.output and r.outcome is Outcome.ACTION and r.ts <= last.ts:
             try:
-                # 记录里还夹着 usage（token 用量），不属于作战指令：不去掉的话契约校验会整条丢掉
-                per[r.symbol] = CardSymbol.model_validate(
+                # 记录里还夹着 usage（token 用量），不属于作战指令：不去掉的话契约校验会整条丢掉；
+                # 只记录的 outlook 单独校验，坏了不连累卡
+                per[r.symbol] = card_from_output(
                     {k: v for k, v in r.output.items() if k != "usage"}
                 )
             except ValueError:

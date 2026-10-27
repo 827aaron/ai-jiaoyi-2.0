@@ -1,4 +1,5 @@
 {
+  "horizon_min": 240,
   "market_dir": "flat",
   "market_dir_evidence": null,
   "rel_dir": null,

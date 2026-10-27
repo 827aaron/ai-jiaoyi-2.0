@@ -8,14 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from jiaoyi import contracts as c
 from jiaoyi.contracts import BattleCard, Bias, CardOutlook, CardSymbol, MarketView
 from jiaoyi.core.config import load_risk_config
 from jiaoyi.core.store import JsonlDecisionLog
-from jiaoyi.slow import ta_prompts
+from jiaoyi.slow import card_outlook, ta_prompts
 from jiaoyi.slow import tradingagents_engine as te
-from jiaoyi.slow.card_outlook import OutlookJournal, build_outlook, with_board
+from jiaoyi.slow.card_outlook import build_outlook, card_from_output, with_board
 from jiaoyi.slow.commander import DEFAULT_STOP_SCALE, BattleCardCommander
 from jiaoyi.slow.levels import LevelContext
 from jiaoyi.slow.review import CardJournal, JournalRow
@@ -113,13 +114,33 @@ def test_no_trade_lean_comes_only_from_existing_ratings(
 
 
 def test_prompt_addition_is_appended_and_neutral() -> None:
-    text = te.convert_instructions(RISK, ta_prompts.PromptParams.for_hold("2h"))
-    assert text.endswith(ta_prompts.OUTLOOK_NOTE)
-    before = text.removesuffix(ta_prompts.OUTLOOK_NOTE)
+    p = ta_prompts.PromptParams.for_hold("2h")
+    text = te.convert_instructions(RISK, p)
+    note = ta_prompts.fill(ta_prompts.OUTLOOK_NOTE, p)
+    assert text.endswith(note)
+    before = text.removesuffix(note)
     assert "market_dir" not in before and "rel_dir" not in before  # 原有规则一字没动
     words = set(ta_prompts.OUTLOOK_NOTE.lower().replace(",", " ").replace(".", " ").split())
     assert not words & {"long", "short", "bull", "bullish", "bear", "bearish", "buy", "sell"}
     assert {"up", "down", "flat", "outperform", "underperform", "inline"} <= words
+
+
+@pytest.mark.parametrize("hold", ["30m", "2h", "4h", "24h"])
+def test_outlook_window_is_a_fixed_4h_separate_from_the_hold(hold: str) -> None:
+    p = ta_prompts.PromptParams.for_hold(hold)
+    note = ta_prompts.fill(ta_prompts.OUTLOOK_NOTE, p)
+    assert "fixed window of the next 4 hours" in note
+    assert f"independent of the {p.horizon} holding window used above" in note
+    assert "{" not in note
+    assert card_outlook.HORIZON_MIN == 240 == CardOutlook().horizon_min
+    o = build_outlook(
+        bias=Bias.LONG, market_dir="up", market_dir_evidence="e", rel_dir="inline",
+        rel_dir_evidence="e", rm=None, pm=None, trader=None,
+    )  # fmt: skip
+    assert o.horizon_min == 240
+    props = te._CardSymbolDraft.model_json_schema()["properties"]
+    for name in ("market_dir", "rel_dir"):
+        assert props[name]["description"].startswith("Fixed next-4-hour window, independent")
 
 
 # ---------------------------------------------------------------- 引擎：卡一字不变
@@ -259,6 +280,14 @@ def test_stamp_adds_board_direction_in_the_same_vocabulary(zh: str, en: str) -> 
     assert with_board(card_symbol("AAUSDT"), _market(zh)).outlook is None  # 没有 outlook 不造
 
 
+def test_with_board_errors_leave_the_card_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    cs = card_symbol("AAUSDT", outlook=CardOutlook(market_dir="down"))
+    monkeypatch.setattr(card_outlook, "BOARD_DIR", {})  # 映射表坏了
+    assert with_board(cs, _market("看涨")) == cs
+    stamped = BattleCardCommander._stamp(cs, NOW, NOW + timedelta(hours=1), _market("看涨"))
+    assert stamped.outlook == cs.outlook and stamped.issued_at == NOW
+
+
 def test_research_token_ignores_outlook() -> None:
     cs = card_symbol("AAUSDT")
     with_o = cs.model_copy(update={"outlook": CardOutlook(market_dir="up")})
@@ -285,7 +314,7 @@ class _OutlookEngine(FakeEngine):
 async def test_commander_persists_outlook_to_journal_and_meeting_record(
     tmp_path: Path, now: datetime
 ) -> None:
-    j = OutlookJournal(tmp_path)
+    j = CardJournal(tmp_path)
     saved_path = tmp_path / "battle_card.json"
     cmd, log, _ = make(tmp_path, _OutlookEngine(["AAUSDT"]), now, journal=j, card_path=saved_path)
     card = await cmd.refresh(pool(now, entry("AAUSDT")), "scheduled")
@@ -294,6 +323,7 @@ async def test_commander_persists_outlook_to_journal_and_meeting_record(
     assert (o["market_dir"], o["rel_dir"], o["board_market_dir"]) == ("up", "inline", "flat")
     assert (o["rm_rating"], o["pm_rating"], o["trader_action"]) == ("buy", "overweight", "buy")
     assert o["board_market_view_id"] == card.symbols[0].source_market_view_id
+    assert o["horizon_min"] == 240
     [rec] = [r for r in log.read_day(now.date().isoformat()) if r.symbol == "AAUSDT"]
     assert rec.output is not None and rec.output["outlook"] == o  # 开会记录里同一份
     # 存档不带 outlook（回退旧版本仍能读），重启后照常恢复
@@ -306,25 +336,50 @@ async def test_commander_persists_outlook_to_journal_and_meeting_record(
     assert restored.symbols[0].research_token() == card.symbols[0].research_token()
 
 
-def test_outlook_journal_rows_match_card_journal_plus_outlook(tmp_path: Path) -> None:
-    """前面的键和 CardJournal 写的一字不差；复盘程序改了行格式，这条会先红。"""
+_LEGACY_KEYS = (
+    "card_id", "version", "created_at", "expires_at", "regime", "refresh_reason", "symbol",
+    "category", "bias",
+)  # fmt: skip
+
+
+class _OldRow(BaseModel):
+    """改动前的 ``JournalRow``（旧代码读新行时用的就是它）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    card_id: str
+    version: int
+    created_at: datetime
+    expires_at: datetime
+    regime: str
+    refresh_reason: str
+    symbol: str
+    category: str
+    bias: str
+
+
+def test_journal_rows_keep_old_keys_byte_identical_and_append_outlook(tmp_path: Path) -> None:
     o = CardOutlook(market_dir="up", missing={"rel_dir": "omitted"})
     card = BattleCard(
         card_id="card-1", version=3, created_at=NOW, expires_at=NOW + timedelta(hours=2),
         regime="震荡", regime_direction="中性", refresh_reason="scheduled",
         symbols=[card_symbol("AAUSDT", outlook=o), card_symbol("BBUSDT")],
     )  # fmt: skip
-    old, new = tmp_path / "old", tmp_path / "new"
-    CardJournal(old).record(card, ["AAUSDT", "BBUSDT"])
-    OutlookJournal(new).record(card, ["AAUSDT", "BBUSDT"])
-    old_lines = CardJournal(old).path.read_text().splitlines()
-    new_lines = OutlookJournal(new).path.read_text().splitlines()
-    for a, b in zip(old_lines, new_lines, strict=True):
-        assert b.startswith(a[:-1] + ',"outlook":')  # 原样的行，末尾多一个键
-    rows = [json.loads(x) for x in new_lines]
+    j = CardJournal(tmp_path)
+    j.record(card, ["AAUSDT", "BBUSDT"])
+    lines = j.path.read_text(encoding="utf-8").splitlines()
+    for line, s in zip(lines, card.symbols, strict=True):
+        old = _OldRow(
+            card_id=card.card_id, version=card.version, created_at=card.created_at,
+            expires_at=card.expires_at, regime=card.regime, refresh_reason=card.refresh_reason,
+            symbol=s.symbol, category=s.category.value, bias=s.bias.value,
+        ).model_dump_json()  # fmt: skip
+        assert line.startswith(old[:-1] + ',"outlook":')  # 旧格式原样，末尾多一个键
+        assert list(json.loads(line)) == [*_LEGACY_KEYS, "outlook"]
+    rows = [json.loads(x) for x in lines]
     assert rows[0]["outlook"] == o.model_dump(mode="json") and rows[1]["outlook"] is None
-    OutlookJournal(new).record(card, [])  # 没有新开会的币：什么都不写
-    assert len(OutlookJournal(new).path.read_text().splitlines()) == 2
+    j.record(card, [])  # 没有新开会的币：什么都不写
+    assert len(j.path.read_text().splitlines()) == 2
 
 
 def test_every_journal_reader_accepts_old_and_new_rows(tmp_path: Path) -> None:
@@ -336,30 +391,35 @@ def test_every_journal_reader_accepts_old_and_new_rows(tmp_path: Path) -> None:
         card_id="card-1", version=1, created_at=NOW, expires_at=NOW + timedelta(hours=2),
         regime="震荡", symbols=[card_symbol("AAUSDT", outlook=CardOutlook(rel_dir="inline"))],
     )  # fmt: skip
-    CardJournal(tmp_path).record(card, ["AAUSDT"])  # 旧格式的行
-    OutlookJournal(tmp_path).record(card, ["AAUSDT"])  # 新格式的行
-    rows = CardJournal(tmp_path).read()
-    assert len(rows) == 2 and rows[0] == rows[1]  # 旧读者忽略多出的键
-    assert len(OutlookJournal(tmp_path).read()) == 2
+    j = CardJournal(tmp_path)
+    j.record(card, ["AAUSDT"])  # 新格式的行
+    new_line = j.path.read_text(encoding="utf-8")
+    legacy = {k: v for k, v in json.loads(new_line).items() if k != "outlook"}
+    with j.path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(legacy, ensure_ascii=False) + "\n")  # 改动前写的旧行
+    new, old = j.read()
+    assert new.outlook is not None and new.outlook["rel_dir"] == "inline"
+    assert old.outlook is None and old.model_copy(update={"outlook": None}) == old
+    assert new.model_copy(update={"outlook": None}) == old
+    assert _OldRow.model_validate_json(new_line).symbol == "AAUSDT"  # 旧代码读新行不崩
     assert all(isinstance(r, JournalRow) for r in _journal_tail(PanelFiles(tmp_path, "UTC")))
     assert len(_journal_tail(PanelFiles(tmp_path, "UTC"))) == 2
     assert default_symbols(tmp_path)[0][0] == "AAUSDT"
 
 
 # ---------------------------------------------------------------- 面板（只读显示）
-def test_panel_card_rows_show_outlook_and_tolerate_legacy_records(tmp_path: Path) -> None:
-    from jiaoyi.panel.files import PanelFiles
-    from jiaoyi.panel.overview import build_overview
-    from tests.test_panel import HB, _cfg
+BAD_OUTLOOK = {"market_dir": "sideways", "surprise": 1}  # 只记录的部分坏了
 
-    log = JsonlDecisionLog(tmp_path)
-    now = datetime.now(UTC)
+
+def _symbol_records(log: JsonlDecisionLog, now: datetime) -> None:
     with_o = card_symbol(
         "AAUSDT",
         outlook=CardOutlook(market_dir="down", rel_dir="outperform", board_market_dir="flat"),
     )
     legacy = card_symbol("BBUSDT").model_dump(mode="json", exclude={"outlook"})  # 旧记录没有这个键
-    for sym, out in (("AAUSDT", with_o.model_dump(mode="json")), ("BBUSDT", legacy)):
+    broken = {**card_symbol("CCUSDT").model_dump(mode="json"), "outlook": BAD_OUTLOOK}
+    for sym, out in (("AAUSDT", with_o.model_dump(mode="json")), ("BBUSDT", legacy),
+                     ("CCUSDT", broken)):  # fmt: skip
         log.write(
             c.DecisionRecord(
                 record_id=f"r-{sym}", ts=now - timedelta(minutes=5), role=c.Role.COMMANDER,
@@ -367,11 +427,23 @@ def test_panel_card_rows_show_outlook_and_tolerate_legacy_records(tmp_path: Path
                 output={**out, "usage": {"input_tokens": 1}},
             )
         )  # fmt: skip
+
+
+def test_panel_card_rows_show_outlook_and_tolerate_legacy_and_bad_records(
+    tmp_path: Path,
+) -> None:
+    from jiaoyi.panel.files import PanelFiles
+    from jiaoyi.panel.overview import build_overview
+    from tests.test_panel import HB, _cfg
+
+    log = JsonlDecisionLog(tmp_path)
+    now = datetime.now(UTC)
+    _symbol_records(log, now)
     log.write(
         c.DecisionRecord(
             record_id="card", ts=now - timedelta(minutes=4), role=c.Role.COMMANDER,
             outcome=c.Outcome.ACTION, summary="出作战卡 v1", card_id="card-1",
-            output={"regime": "震荡", "version": 1, "symbols": ["AAUSDT", "BBUSDT"],
+            output={"regime": "震荡", "version": 1, "symbols": ["AAUSDT", "BBUSDT", "CCUSDT"],
                     "expires_at": (now + timedelta(hours=1)).isoformat()},
         )
     )  # fmt: skip
@@ -381,3 +453,31 @@ def test_panel_card_rows_show_outlook_and_tolerate_legacy_records(tmp_path: Path
     assert (rows["AAUSDT"].market_dir, rows["AAUSDT"].rel_dir) == ("down", "outperform")
     assert rows["AAUSDT"].board_market_dir == "flat"
     assert rows["BBUSDT"].bias == "long" and rows["BBUSDT"].market_dir is None
+    assert rows["CCUSDT"].bias == "long" and rows["CCUSDT"].market_dir is None  # 卡照样显示
+
+
+def test_card_history_keeps_cards_whose_outlook_is_bad(tmp_path: Path) -> None:
+    from jiaoyi.panel.card_history import _conclusion
+
+    log = JsonlDecisionLog(tmp_path)
+    now = datetime.now(UTC)
+    _symbol_records(log, now)
+    recs = log.read_day(now.date().isoformat())
+    for sym, want in (("AAUSDT", "down"), ("BBUSDT", None), ("CCUSDT", None)):
+        row = JournalRow(
+            card_id="card-1", version=1, created_at=now, expires_at=now + timedelta(hours=1),
+            regime="震荡", refresh_reason="scheduled", symbol=sym, category="alt", bias="long",
+        )  # fmt: skip
+        cs = _conclusion(recs, row)
+        assert cs is not None and cs.symbol == sym
+        assert (cs.outlook.market_dir if cs.outlook else None) == want
+
+
+def test_card_from_output_validates_the_card_first() -> None:
+    raw = card_symbol("AAUSDT").model_dump(mode="json")
+    assert card_from_output({**raw, "outlook": BAD_OUTLOOK}).outlook is None
+    assert card_from_output({**raw, "outlook": "nonsense"}).outlook is None
+    good = card_from_output({**raw, "outlook": {"rel_dir": "inline"}})
+    assert good.outlook is not None and good.outlook.rel_dir == "inline"
+    with pytest.raises(ValueError):
+        card_from_output({**raw, "bias": "sideways", "outlook": {"rel_dir": "inline"}})

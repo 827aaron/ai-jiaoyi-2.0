@@ -1,4 +1,4 @@
-"""作战卡上「只记录」的结构化判断（``CardOutlook``）：整理、配上总盘会方向、写进复盘流水。
+"""作战卡上「只记录」的结构化判断（``CardOutlook``）：整理、配上总盘会方向、从记录里读回。
 
 卡的方向混着「大盘往哪走」和「这个币比大盘强还是弱」两个判断，复盘时分不清错在哪一个
 （card-direction-accuracy-2026-10-28：判错的卡 86% 同期等权池反向走）。这里把会议的两个判断、
@@ -9,14 +9,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from collections.abc import Iterable
-from typing import Literal, cast
+from collections.abc import Iterable, Mapping
+from typing import Any, Literal, cast
 
-from jiaoyi.contracts import BattleCard, Bias, CardOutlook, CardSymbol, MarketView
+from jiaoyi.contracts import Bias, CardOutlook, CardSymbol, MarketView
 from jiaoyi.contracts.battle_card import MarketDir, Rating, RelDir
-from jiaoyi.slow.review import CardJournal, JournalRow
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +24,7 @@ RATINGS: tuple[Rating, ...] = ("buy", "overweight", "hold", "underweight", "sell
 ACTIONS = ("buy", "hold", "sell")
 BOARD_DIR: dict[str, MarketDir] = {"看涨": "up", "看跌": "down", "中性": "flat"}
 EVIDENCE_MAX = 300
+HORIZON_MIN = 240  # 和 ta_prompts.OUTLOOK_NOTE 里的「4 hours」、复盘打分的 4 小时一致
 _SIGN = {"buy": 1, "overweight": 1, "hold": 0, "underweight": -1, "sell": -1}
 
 
@@ -88,6 +87,7 @@ def build_outlook(
     tr = keep("trader_action", _rating(trader, ACTIONS))
     lean = keep("no_trade_lean", no_trade_lean(bias, rm_r, pm_r, tr))
     return CardOutlook(
+        horizon_min=HORIZON_MIN,
         market_dir=cast("MarketDir | None", md),
         market_dir_evidence=md_ev,
         rel_dir=cast("RelDir | None", rd),
@@ -106,59 +106,41 @@ def _rating(raw: object, allowed: Iterable[str]) -> tuple[str | None, str | None
 
 
 def with_board(cs: CardSymbol, market: MarketView | None) -> CardSymbol:
-    """给已有的 outlook 配上研究启动时总盘会的方向（同一套 up/down/flat）；没有 outlook 不动。"""
+    """给已有的 outlook 配上研究启动时总盘会的方向（同一套 up/down/flat）；没有 outlook 不动。
+    出任何错原样返回，不能让开会 / 盖章失败。"""
     if cs.outlook is None:
         return cs
-    missing = {k: v for k, v in cs.outlook.missing.items() if k != "board_market_dir"}
-    if market is None:
-        missing["board_market_dir"] = "no_market_view"
-        update: dict[str, object] = {
-            "board_market_dir": None,
-            "board_regime_direction": None,
-            "board_market_view_id": None,
-        }
-    else:
-        update = {
-            "board_market_dir": BOARD_DIR[market.regime_direction],
-            "board_regime_direction": market.regime_direction,
-            "board_market_view_id": market.market_view_id,
-        }
-    outlook = cs.outlook.model_copy(update={**update, "missing": missing})
+    try:
+        missing = {k: v for k, v in cs.outlook.missing.items() if k != "board_market_dir"}
+        if market is None:
+            missing["board_market_dir"] = "no_market_view"
+            update: dict[str, object] = {
+                "board_market_dir": None,
+                "board_regime_direction": None,
+                "board_market_view_id": None,
+            }
+        else:
+            update = {
+                "board_market_dir": BOARD_DIR[market.regime_direction],
+                "board_regime_direction": market.regime_direction,
+                "board_market_view_id": market.market_view_id,
+            }
+        outlook = cs.outlook.model_copy(update={**update, "missing": missing})
+        return cs.model_copy(update={"outlook": outlook})
+    except Exception:
+        logger.exception("%s 配总盘会方向失败，outlook 照旧", cs.symbol)
+        return cs
+
+
+def card_from_output(data: Mapping[str, Any]) -> CardSymbol:
+    """记录里的指令 → ``CardSymbol``：先不带 outlook 校验卡（不合格照常抛 ValueError），
+    outlook 再单独校验，坏了当 None。只记录的数据永远不能让面板丢掉这张卡。"""
+    cs = CardSymbol.model_validate({k: v for k, v in data.items() if k != "outlook"})
+    raw = data.get("outlook")
+    if raw is None:
+        return cs
+    try:
+        outlook = CardOutlook.model_validate(raw)
+    except (ValueError, TypeError):
+        return cs
     return cs.model_copy(update={"outlook": outlook})
-
-
-class OutlookJournal(CardJournal):
-    """和 ``CardJournal`` 写同一个文件、同样的行，每行末尾多一个 ``outlook``（没有为 null）。
-
-    旧的读者按 ``JournalRow`` 读，多出的键被忽略；``tests/test_card_outlook.py`` 核对前面的键
-    和 ``CardJournal`` 写的一字不差，复盘程序那边改了行格式这里要跟着改。
-    """
-
-    def record(self, card: BattleCard, fresh: Iterable[str]) -> None:
-        fresh_set = set(fresh)
-        lines = []
-        for s in card.symbols:
-            if s.symbol not in fresh_set:
-                continue
-            row = JournalRow(
-                card_id=card.card_id,
-                version=card.version,
-                created_at=s.issued_at or card.created_at,
-                expires_at=s.expires_at or card.expires_at,
-                regime=card.regime,
-                refresh_reason=card.refresh_reason,
-                symbol=s.symbol,
-                category=s.category.value,
-                bias=s.bias.value,
-            ).model_dump(mode="json")
-            row["outlook"] = s.outlook.model_dump(mode="json") if s.outlook else None
-            lines.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
-        if not lines:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as f:
-                for line in lines:
-                    f.write(line + "\n")
-        except OSError as e:
-            logger.warning("作战卡复盘流水写不进去：%s", e)
