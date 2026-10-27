@@ -97,6 +97,34 @@ async def test_event_daily_cap_and_symbol_gap(tmp_path: Path, now: datetime) -> 
     assert c.pop_event(t, p) is None  # 每天最多 1 场
 
 
+async def test_event_daily_cap_zero_means_unlimited_but_still_counts(
+    tmp_path: Path, now: datetime
+) -> None:
+    syms = ["AAUSDT", "BBUSDT", "CCUSDT"]
+    c, _, clock = make(tmp_path, FakeEngine(syms), now, events=rules(max_per_day=0))
+    p = pool(now, *(entry(x) for x in syms))
+    await c.refresh(p, "scheduled")
+    clock[0] = t = now + timedelta(minutes=70)
+    for sym in syms:
+        c.request_event(sym, "predictor_against_card")
+    for _ in syms:
+        got = c.pop_event(t, p)
+        assert got is not None  # 不被当天次数挡住
+        await c.refresh_symbol(p, got[0], got[1])
+    assert c._event_count == 3  # 照常计数
+
+
+def test_event_max_per_day_config_accepts_zero() -> None:
+    from pydantic import ValidationError
+
+    from jiaoyi.slow.settings import ScheduleConfig
+
+    assert ScheduleConfig(event_max_per_day=0).event_max_per_day == 0
+    assert ScheduleConfig().event_max_per_day == 12
+    with pytest.raises(ValidationError):
+        ScheduleConfig(event_max_per_day=-1)
+
+
 async def test_held_symbol_goes_first_and_unlisted_request_ignored(
     tmp_path: Path, now: datetime
 ) -> None:
