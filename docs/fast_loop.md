@@ -268,3 +268,60 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 - 都开：启动线 = `breakeven_trigger_r`，回撤距离 = min(`trail_distance_r`, 启动线 − 平仓手续费)。
 
 只对之后新开的仓生效；保命止损（币安上的兜底单）不跟着挪，仍是程序挂了时的最后一道。拍板人管家的逻辑不变。
+
+## 新作战卡方向反了（#314，`opposite_card_action`）
+
+触发条件和原规则一模一样：最新作战卡有效、这个币的指令明确 long / short、`allowed_signals` 非空、
+在指令自己的 issued_at–expires_at 之内、方向和持仓相反。不问模型。
+
+- `opposite_card_action = "close"`（默认）：立刻全平，和以前一字不差（同一条决策记录、同一个平仓原因）。
+- `"confirm_or_tighten"`：先看价格确认，三条任一成立就全平（同一条路、同一个原因 KEEPER，理由后面加
+  「（价格确认：…）」）；都不成立就把**交易所托管止损**收紧到保本附近，持仓留着、模型照常复查。
+  之后每轮管家（`keeper_interval_s`）和每次出新卡都重新判，卡还有效时一旦确认就平（`close` 自己去重：
+  已在平 / 已有平仓申请不重复发）。
+
+价格确认（`keeper.opposite_confirmation`，每条都写进决策记录 `output.card_rule.confirm`）：
+
+| 设置 | 默认 | 含义（0 / false = 这条不用） |
+|---|---|---|
+| `opposite_confirm_loss_r` | 0.5 | 按行情价已亏到这么多 R；R = 账本开仓价到账本止损价（开仓时的原始距离，收紧价另存不改它） |
+| `opposite_confirm_atr` | 1.0 | 从**本进程第一次看到这张卡**（卡号 + 版本）时的价格起，朝不利方向走了这么多倍 ATR（行情快照里止损用的 ATR） |
+| `opposite_confirm_key_level` | true | 价格越过反向卡自己在开仓价之外最近的关键位：卡做空看开仓价下方最高的支撑 / 枢轴（跌破），卡做多看开仓价上方最低的阻力 / 枢轴（涨破）；卡里没有就不成立 |
+
+三条都关 = 永远不确认、只收紧。没有行情快照时核验不了，按原规则全平。
+
+收紧（`HbExecutorAdapter.tighten_stop` → `BracketManager`）：
+
+- 目标价 = 扣掉实际开仓手续费（开仓成交账）和按 `taker_fee_bps` 估的平仓手续费之后，还赚
+  `opposite_tighten_buffer_bps`（相对开仓名义）的平仓价。
+- 记成 `server_protection.tightened_stop_price`（落盘，重启后还在），**不改账本止损价**：
+  回吐保护、反向信号的 R 照旧按原始止损算，开仓价回填也不会把它冲掉。同步时和固定止损、移动止损取最紧
+  的一个，换代走原来的流程：新止损腿按 `protection_stop_working_type` 建、确认挂上之后才撤旧腿。
+  收紧价最紧时这条腿的用途记 `tightened`（面板叫「反向卡收紧止损」），触发后平仓原因是
+  `tightened_stop`（`CloseReason.TIGHTENED_STOP`）；之后移动止损更紧了，下一代回到 `trailing`。
+- 挂之前先和触发价源比：新止损腿按标记价触发（现在的配置）就拿标记价，按 CONTRACT_PRICE 就拿同环境
+  买一（多）/ 卖一（空）。多要 目标 < 价 ×（1 − `opposite_tighten_mark_gap_bps`），空要 目标 > 价 ×（1 + gap）；
+  不满足就不挂、按原规则全平，不等交易所 -2021 拒单。
+- 上一代（移动止损换代）还在提交 / 撤销中：收紧价先落盘，返回「等待」，等它确认后保护轮询按收紧价换代，不算失败。
+- 证据读不到、挂不稳、换单没确认：写 `server_protection.last_error` 并发 CRITICAL（去重键
+  `opposite_tighten:<持仓号>`），不写移动止损自己的错误字段。
+- 只收紧不放松：现有固定 / 移动止损已经同样紧就不动；收紧过一次就不再改；之后卡转回持仓方向也不会自动放松。
+- 收紧不了就按原规则全平，原因写进决策记录：旧通道的仓（没有 `server_protection`，hummingbot 管止损）、
+  还没完整托管（阶段不是 armed、从没完整托管过、开仓残单没终态、#325 开仓宽限期里）、开仓费用或
+  触发价源读不到、目标价离触发价源不到 `opposite_tighten_mark_gap_bps`。万一换单时交易所仍说已越过
+  触发价，托管状态机进入退出，由保护轮询按 `tightened_stop` 平。换单结果未知时目标价留着，保护轮询
+  继续换，旧止损保留。
+
+A/B（`opposite_card_ab`，0–1，只能配 `confirm_or_tighten`）：每个反向卡事件按
+`sha256(持仓号|卡号|卡版本)` 前 8 字节固定抽签，小于这个比例走新规则，其余照旧全平；0 = 不分组（全走新规则）。
+同一张卡同一笔仓重启、重算结果都一样；换一版卡重新抽。
+
+决策记录（管家，`output.card_rule`）：`arm`（走哪组）、`ab` / `ab_draw`、`branch`
+（`ab_legacy_close` / `confirmed_close` / `no_market_data_close` / `tighten`）、`price` / `atr` /
+`ref_price` / `ref_at`、`confirm`（每条的输入和是否成立）、`counterfactual`（新规则组记原规则会在何时何价平：
+第一次看到这张卡的时间和价格；原规则组记新规则会平还是收紧）。同一张卡的「收紧」只记第一次；
+收紧结果（`output.opposite_tighten`：tightened / pending / exiting / kept / skip / close 和原因、目标价、
+现有止损、触发价源）结果变了才再记一条。面板持仓的托管保护里显示收紧价和理由（只读）。
+
+已知限制：第②条的起点只在内存里，重启后从重启后第一次看到这张卡的价格重新量（偏保守：更难确认、
+更多是收紧而不是平）。收紧价按交易所价格精度取整，可能差一个最小变动价位，由缓冲盖住。

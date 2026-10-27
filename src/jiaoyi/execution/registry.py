@@ -30,7 +30,8 @@ class ProtectiveLeg(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     kind: Literal["stop_loss", "take_profit"]
-    purpose: Literal["fixed", "trailing", "lifeboat"] = "fixed"
+    purpose: Literal["fixed", "trailing", "lifeboat", "tightened"] = "fixed"
+    """tightened = 反向作战卡收紧价（#314）是三者里最紧的那一代止损。"""
     generation: int
     client_order_id: str
     quantity: float
@@ -108,6 +109,11 @@ class ServerProtection(BaseModel):
     trailing_source_at: datetime | None = None
     trailing_stop_price: float | None = None
     trailing_observation_gap: bool = False
+    tightened_stop_price: float | None = None
+    """反向作战卡没经价格确认时收紧到的止损价（#314，保本 + 费用 + 缓冲）；同步时和固定止损、
+    移动止损取最紧的一个，只收紧不放松。不改账本止损价（R 仍按原始止损距离算）。"""
+    tightened_reason: str | None = None
+    tightened_at: datetime | None = None
 
 
 class TrackedPosition(BaseModel):

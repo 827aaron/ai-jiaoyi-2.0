@@ -40,6 +40,10 @@ class ProtectionView(BaseModel):
     legs: list[LegView]
     trailing_activated: bool = False
     trailing_stop_price: float | None = None
+    tightened_stop_price: float | None = None
+    """反向作战卡没经价格确认时程序收紧到的止损目标价（#314）；交易所是否已换上看止损腿。"""
+    tightened_reason: str | None = None
+    tightened_at: datetime | None = None
     observed_at: datetime | None = None
     age_s: float | None = None
     stale: bool = False
@@ -151,6 +155,9 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
         legs=legs,
         trailing_activated=bool(raw.get("trailing_activated")),
         trailing_stop_price=_num(raw.get("trailing_stop_price")),
+        tightened_stop_price=_num(raw.get("tightened_stop_price")),
+        tightened_reason=str(raw["tightened_reason"]) if raw.get("tightened_reason") else None,
+        tightened_at=_time(raw.get("tightened_at")),
         observed_at=observed.astimezone(UTC) if observed else None,
         age_s=age,
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),

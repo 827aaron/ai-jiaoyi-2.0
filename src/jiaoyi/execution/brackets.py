@@ -163,6 +163,8 @@ def _reason(leg: ProtectiveLeg) -> CloseReason:
         return CloseReason.LIFEBOAT
     if leg.purpose == "trailing":
         return CloseReason.TRAILING_STOP
+    if leg.purpose == "tightened":
+        return CloseReason.TIGHTENED_STOP
     return CloseReason.STOP_LOSS if leg.kind == "stop_loss" else CloseReason.TAKE_PROFIT
 
 
@@ -206,6 +208,26 @@ class BracketManager:
     def retains_confirmed_stop(self, pid: str) -> bool:
         """最后回读仍明确 NEW 的普通止损；不表示网络断开后仍能证明当前实时状态。"""
         return any(_live(leg) and _role(leg) == "stop_loss" for leg in self._current(pid)[1].legs)
+
+    def set_tightened_stop(self, pid: str, price: float, reason: str) -> bool:
+        """记下反向卡收紧价（#314）；已有同样紧或更紧的收紧价就不动，返回是否改了。
+
+        只落盘目标价，交易所上的换代由随后的 ``sync`` 按原有顺序做（新代确认后才撤旧代）。
+        调用方须持同币锁。"""
+        tracked, state = self._current(pid)
+        if not math.isfinite(price) or price <= 0:
+            raise ProtectionIncomplete("收紧止损价无效")
+        old = state.tightened_stop_price
+        long = tracked.record.side is Side.LONG
+        if old is not None and (price <= old if long else price >= old):
+            return False
+        self._save(
+            pid,
+            tightened_stop_price=price,
+            tightened_reason=reason[:300],
+            tightened_at=self.clock(),
+        )
+        return True
 
     def prearm_grace(self, pid: str, error: BaseException) -> float | None:
         """从未完整托管时本轮同步失败能否先不平仓：返回连续失败已持续的秒数，None = 照旧退出。
@@ -557,6 +579,17 @@ class BracketManager:
                 if tracked.record.side is Side.LONG
                 else min(fixed_stop, state.trailing_stop_price)
             )
+        tightened_wins = False
+        if state.tightened_stop_price is not None and desired["stop_loss"] is not None:
+            # 反向卡收紧价（#314）：固定 / 移动 / 收紧取最紧，换价走下面同一套新代先确认、再撤旧代。
+            current_stop = desired["stop_loss"]
+            tightened_wins = (
+                state.tightened_stop_price > current_stop
+                if tracked.record.side is Side.LONG
+                else state.tightened_stop_price < current_stop
+            )
+            if tightened_wins:
+                desired["stop_loss"] = state.tightened_stop_price
         specs: dict[str, NormalizedBracketSpec] = {}
         for kind, price in desired.items():
             if price is None or not math.isfinite(price) or price <= 0:
@@ -645,7 +678,9 @@ class BracketManager:
                         purpose="lifeboat"
                         if kind == "lifeboat"
                         else (
-                            "trailing"
+                            "tightened"
+                            if kind == "stop_loss" and tightened_wins
+                            else "trailing"
                             if kind == "stop_loss" and state.trailing_activated
                             else "fixed"
                         ),
