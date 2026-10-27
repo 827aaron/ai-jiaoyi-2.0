@@ -166,10 +166,10 @@ class ScreenerSection(_Strict):
     )
     default_category_cap: int = Field(
         default=30,
-        ge=1,
+        ge=0,
         le=100,
         description="每一类币（主流 / 山寨 / 币股 / 美股科技 / 贵金属）默认最多进池几个。"
-        "选币页单独改过的类别以选币页为准。",
+        "选币页单独改过的类别以选币页为准。0 = 不限（只受候选池大小管）。",
     )
     tiers: TiersSection = TiersSection()
     major_top_n: int = Field(
@@ -392,10 +392,10 @@ EventTrigger = Literal[
 class ScheduleConfig(_Strict):
     max_cards_per_round: int | None = Field(
         default=None,
-        ge=1,
+        ge=0,
         le=50,
         description="每轮最多出几张作战卡（几个标的开会）。不写 = 用 app.toml 的 card_pick_max；"
-        "写了取两者较小值，不会超过 card_pick_max。",
+        "写了取两者较小值，不会超过 card_pick_max。0 = 不限（只受 card_pick_max 管）。",
     )
     concurrency: int = Field(default=8, ge=1, le=8, description="同时开几个标的的会议。")
     card_ttl_min: float = Field(
@@ -438,7 +438,10 @@ class ScheduleConfig(_Strict):
         "（次数和时间窗在 app.toml [fast_loop] against_meeting_*）。",
     )
     event_symbol_gap_min: float = Field(
-        default=60.0, ge=1.0, le=1440.0, description="同一个币两场临时会（含正式会）至少隔多久。"
+        default=60.0,
+        ge=0.0,
+        le=1440.0,
+        description="同一个币两场临时会（含正式会）至少隔多久。0 = 不限。",
     )
     event_max_per_day: int = Field(
         default=12,
@@ -518,7 +521,11 @@ class ScheduleConfig(_Strict):
 
 class BudgetConfig(_Strict):
     daily_cost_limit_usd: float = Field(
-        default=10.0, gt=0, le=1000, description="军师团每个交易日（曼谷 0 点清零）最多花多少美元。"
+        default=10.0,
+        ge=0,
+        le=1000,
+        description="军师团每个交易日（曼谷 0 点清零）最多花多少美元。"
+        "0 = 不限（不停开会，也不放慢）。",
     )
     failed_meeting_cost_usd: float = Field(
         default=0.05,
@@ -631,7 +638,7 @@ class SlowConfig(_Strict):
     def effective_pick_max(self, app_pick_max: int) -> int:
         """每轮最多出几张卡：``max_cards_per_round`` 与 ``card_pick_max`` 取小。"""
         n = self.schedule.max_cards_per_round
-        return app_pick_max if n is None else min(n, app_pick_max)
+        return min(n, app_pick_max) if n else app_pick_max  # 不写 / 0 = 不另设上限
 
     def _slowdown(self) -> tuple[timedelta, timedelta] | None:
         """日花费到 80% 后的（卡有效期，开会间隔）；不放慢返回 None。"""
@@ -651,7 +658,7 @@ class SlowConfig(_Strict):
             "expiry_lead": timedelta(minutes=s.refresh_lead_min),
             "symbol_timeout_s": s.symbol_timeout_s,
             "min_refresh_gap": timedelta(minutes=s.min_refresh_gap_min),
-            "daily_cost_limit_usd": self.budget.daily_cost_limit_usd,
+            "daily_cost_limit_usd": self.budget.daily_cost_limit_usd or None,  # 0 = 不限
             "events": EventRules(
                 enabled=s.event_meeting_enabled,
                 triggers=frozenset(s.event_triggers),

@@ -170,6 +170,12 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
   （`[budget] daily_cost_limit_usd` 每日上限，没写死跟档位走；`over_budget` 放慢一档 / 不放慢、`slowdown_interval_min`）。
   花费段在设置页只能改日上限，失败估价等仍只在首次设置 / 配置文件里改。多选项写成 TOML 数组（按选项顺序、去重）；
   契约里带 `pattern` 的可空文字字段才能在网页上改，写前按 pattern 校验。
+- 「关闭 / 不限」开关：软上限填 0 = 关。哪些项有开关由 `panel/pages.py` 的 `OFF_SWITCHES` 一张表定（键 = 段.键，写开关上的字、只读时 0 显示成什么、关回去先填多少），
+  每项带 `off` 给前端：编辑框旁边出「不限」/「关闭」勾选，勾上保存就写 0，只读（不在网页上改的）项直接显示「不限」/「已关闭」。
+  现在有：`daily_cost_limit_usd`（日 AI 费用）、`max_cards_per_round`、`event_symbol_gap_min`、`event_max_per_day`、`entry_max_card_age_min`、`default_category_cap`、
+  `min_range_24h_pct` / `max_range_24h_pct` / `major_top_n`、`protection_stale_s` / `protection_readback_grace_s` / `protection_prearm_grace_s`、`regime_flip_min_gap_min` /
+  `regime_flip_min_symbols` / `regime_flip_price_max_age_min` / `regime_flip_check_min`。日上限关了，「花到 80% 时」「放慢成多久开一次」两行写「日上限已关闭，用不上」，档位卡的费用条满格写「不限」。
+  硬上限（`config/risk.toml`、`RiskConfig`）一项都没有开关，测试守着；超时、调度间隔、打分满分线、并发数这类 0 没有意义的项也不在表里。
 - 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
   持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）
   从 `data/card_review/cards.jsonl` 按天列出过去的指令：出会 → 失效时间、方向、当时的止损 / 止盈 / 杠杆 / 仓位和理由

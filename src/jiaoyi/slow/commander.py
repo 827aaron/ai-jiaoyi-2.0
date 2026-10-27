@@ -227,6 +227,7 @@ class EventRules:
     enabled: bool = False
     triggers: frozenset[str] = frozenset()
     symbol_gap: timedelta = timedelta(minutes=60)
+    """同一个币两场会至少隔多久；0 = 不限。"""
     max_per_day: int = 12
     """每天最多几场临时会；0 = 不限（照常计数）。"""
     move_atr: float = 3.0
@@ -289,7 +290,7 @@ class BattleCardCommander:
         if not fail_backoff:
             raise ValueError("fail_backoff 至少要有一档")
         self._backoff = tuple(fail_backoff)
-        self._cost_limit = daily_cost_limit_usd
+        self._cost_limit = daily_cost_limit_usd or None  # None / 0 = 不限
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path

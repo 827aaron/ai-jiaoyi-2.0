@@ -143,7 +143,7 @@ def test_budget_defaults_and_validation(tmp_path: Path) -> None:
         timedelta(minutes=10),
         timedelta(minutes=30),
     )
-    for body in ("[budget]\ndaily_cost_limit_usd = 0\n", "[budget]\nfail_backoff_minutes = []\n"):
+    for body in ("[budget]\ndaily_cost_limit_usd = -1\n", "[budget]\nfail_backoff_minutes = []\n"):
         p = tmp_path / "slow.toml"
         p.write_text(body, encoding="utf-8")
         with pytest.raises(ConfigError):
@@ -157,7 +157,7 @@ def test_max_cards_per_round(tmp_path: Path) -> None:
     cfg = load_slow_config(p)
     assert cfg.effective_pick_max(20) == 8
     assert cfg.effective_pick_max(5) == 5  # 不会超过 card_pick_max
-    for bad in ("0", "51"):
+    for bad in ("-1", "51"):
         p.write_text(f"[schedule]\nmax_cards_per_round = {bad}\n", encoding="utf-8")
         with pytest.raises(ConfigError):
             load_slow_config(p)

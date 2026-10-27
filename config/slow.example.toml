@@ -31,7 +31,7 @@ min_depth_usdt = 100000            # 盘口最小深度（美元），推荐 10 
 min_listed_days = 7                # 至少上线几天，推荐 7
 min_range_24h_pct = 0              # 24 小时波动下限（%），0 = 不设；推荐 1.5
 max_range_24h_pct = 0              # 24 小时波动上限（%），0 = 不设；推荐 30
-default_category_cap = 30          # 每一类币默认最多进池几个（选币页单独改过的以选币页为准）
+default_category_cap = 30          # 每一类币默认最多进池几个（选币页单独改过的以选币页为准）；0 = 不限
 major_top_n = 20                   # 主流币 = 市值前几名（每天自动更新，去掉稳定币和包装币）；0 = 只用写死的 7 个
 # major_include = ["LINK"]        # 手动加入主流币的币名
 # major_exclude = ["DOGE"]        # 手动排除出主流币的币名（按山寨币算）
@@ -70,7 +70,7 @@ max_retries = 6
 
 [schedule]
 # 这一段不写的键取 app.toml 所选持仓档位的默认（core/profiles.py）；写了就覆盖档位。下面注释里是 2h 档的值
-# max_cards_per_round = 10         # 每轮最多出几张作战卡（几个标的开会）；不超过 app.toml 的 card_pick_max
+# max_cards_per_round = 10         # 每轮最多出几张作战卡（几个标的开会）；不超过 app.toml 的 card_pick_max；0 = 不限（只受 card_pick_max 管）
 # concurrency = 8                  # 同时开几个标的的会议 1–8
 # card_ttl_min = 140              # 作战卡有效期（分钟）= 开会间隔 + 提前量（2h 140 / 60m 80 / 30m 50 / 15m 35）
 # symbol_min_interval_min = 115   # 同一个币两次会议的最小间隔 5–720 分钟（≤ 开会间隔）
@@ -79,7 +79,7 @@ max_retries = 6
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
 # event_meeting_enabled = true    # 临时会：出了事件只给那一个币补开一场（2h 起默认开，15m–1h 关）
 # event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / signal_against_card / news_high_impact / stale_card_on_entry
-# event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久
+# event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久；0 = 不限
 # event_max_per_day = 12          # 每个交易日最多几场临时会；0 = 不限
 # move_since_card_atr = 3.0       # 离上次开会的价格走了几倍 ATR 算 move_since_card
 # predictor_against_runs = 2      # 预测员连续几次看反作战卡才算
@@ -89,7 +89,7 @@ max_retries = 6
 # slowdown_interval_min = 360     # 放慢后的开会间隔（分钟）；默认 = 下一档
 
 [budget]
-# daily_cost_limit_usd = 20.0              # 档位：每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）；你写多少就是多少
+# daily_cost_limit_usd = 20.0              # 档位：每个交易日（曼谷 0 点清零）最多花多少美元；超了当天不再开会并推送提醒（15m 75 / 30m 40 / 1h 30 / 2h 20 / 6h 10 / 12h、24h 5）；你写多少就是多少；0 = 不限（不停开会、也不放慢）
 failed_meeting_cost_usd = 0.05             # 失败的会议拿不到真实用量时，按这个估算价计入日花费
 # fail_backoff_minutes = [5, 10, 30]       # 档位：开会连续失败后依次等多久再试，成功清零（15m 2,5,10 / 30m 3,5,10 / 1h 5,10,15 / 2h 5,10,30 / 6h+ 10,30,60）
 

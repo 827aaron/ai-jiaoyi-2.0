@@ -1408,12 +1408,12 @@ class PoolCategory(BaseModel):
     enabled: bool
     """现在开着没有（选币页 > slow.toml > 默认开）。"""
     enabled_from: CategorySource
-    cap: int
-    """最多进池几个（选币页 > slow.toml 这一类 > 每类默认上限）。"""
+    cap: int | None
+    """最多进池几个（选币页 > slow.toml 这一类 > 每类默认上限）；None = 不限（默认上限写 0）。"""
     cap_from: CategorySource
     enabled_base: bool = True
     """不算选币页的话是开还是关（slow.toml > 默认开）：「恢复默认」后的值。"""
-    cap_base: int = 30
+    cap_base: int | None = 30
     """不算选币页的话最多进池几个（slow.toml > 每类默认上限）：「恢复默认」后的值。"""
     in_pool: int
     """上次选币这一类进池了几个（选币页改了要等下一次选币才变）。"""
@@ -1447,6 +1447,7 @@ def _pool_categories(
     entries: list[SymbolPoolEntry], ov: PoolOverrides | None, scr: ScreenerSection
 ) -> list[PoolCategory]:
     out = []
+    default_cap = scr.default_category_cap or None  # 0 = 不限；单类写 0 仍是一个都不要
     for c in Category:
         rule = scr.categories.get(c)
         mine_on = ov.category_enabled.get(c) if ov else None
@@ -1464,12 +1465,10 @@ def _pool_categories(
                 category=c.value,
                 enabled=mine_on if mine_on is not None else (rule.enabled if rule else True),
                 enabled_from=enabled_from,
-                cap=next(
-                    v for v in (mine_cap, slow_cap, scr.default_category_cap) if v is not None
-                ),
+                cap=next((v for v in (mine_cap, slow_cap, default_cap) if v is not None), None),
                 cap_from=cap_from,
                 enabled_base=rule.enabled if rule else True,
-                cap_base=slow_cap if slow_cap is not None else scr.default_category_cap,
+                cap_base=slow_cap if slow_cap is not None else default_cap,
                 in_pool=sum(1 for e in mine if e.in_pool),
                 total=len(mine),
             )
@@ -1506,6 +1505,43 @@ def build_pool(
 # ---------------------------------------------------------------- 设置
 
 
+class OffSwitch(BaseModel):
+    """一项设置填 0 = 关闭 / 不限：编辑框旁边给一个开关，只读时把 0 写成 ``shown``。"""
+
+    label: str
+    """开关上的字：「不限」（次数、金额、间隔的上限）/「关闭」（一道检查、一个定时）。"""
+    shown: str
+    """值是 0 时代替数字显示的字。"""
+    back: float
+    """开关关回去时输入框先填的数（现值不是 0 时用现值，档位有默认时用档位默认）。"""
+
+
+OFF_SWITCHES: dict[str, OffSwitch] = {
+    f"{sec}.{key}": OffSwitch(label=label, shown=shown, back=back)
+    for sec, key, label, shown, back in (
+        ("budget", "daily_cost_limit_usd", "不限", "不限", 10),
+        ("schedule", "max_cards_per_round", "不限", "不限", 10),
+        ("schedule", "event_symbol_gap_min", "不限", "不限", 60),
+        ("schedule", "event_max_per_day", "不限", "不限", 12),
+        ("schedule", "entry_max_card_age_min", "关闭", "已关闭", 360),
+        ("screener", "default_category_cap", "不限", "不限", 30),
+        ("screener", "min_range_24h_pct", "关闭", "已关闭", 1.5),
+        ("screener", "max_range_24h_pct", "关闭", "已关闭", 30),
+        ("screener", "major_top_n", "关闭", "已关闭（只用固定 7 个）", 20),
+        ("app", "protection_stale_s", "关闭", "已关闭", 120),
+        ("app", "protection_readback_grace_s", "关闭", "已关闭", 5),
+        ("app", "protection_prearm_grace_s", "关闭", "已关闭", 30),
+        ("fast_loop", "regime_flip_min_gap_min", "不限", "不限", 60),
+        ("fast_loop", "regime_flip_min_symbols", "不限", "不限", 10),
+        ("fast_loop", "regime_flip_price_max_age_min", "不限", "不限", 5),
+        ("fast_loop", "regime_flip_check_min", "关闭", "已关闭", 5),
+    )
+}
+"""填 0 = 关闭 / 不限的设置（键 = 段.键），面板的开关和只读显示都从这张表来。
+只放非硬上限：硬上限（config/risk.toml、``RiskConfig``）没有关闭开关，测试守着这条。
+超时、调度间隔、打分满分线、并发数这类 0 没有意义的项不在表里。"""
+
+
 class SettingItem(BaseModel):
     key: str
     label: str
@@ -1539,6 +1575,8 @@ class SettingItem(BaseModel):
     """自由填写的字样要符合的格式（例如开会定点 ``08:00``）。"""
     names: bool = False
     """币名名单：自由填，空格隔开，可以一个都没有。"""
+    off: OffSwitch | None = None
+    """填 0 = 关闭 / 不限：有就在编辑框旁边给开关（见 ``OFF_SWITCHES``）。"""
 
 
 class MajorRow(BaseModel):
@@ -1672,6 +1710,7 @@ def _items(
                 paper_only=section == "fast_loop" and name in PAPER_ONLY_SWITCHES,
                 code_default=_plain(default) if resettable else None,
                 resettable=resettable,
+                off=OFF_SWITCHES.get(f"{section}.{name}"),
             )
         )
     return out
