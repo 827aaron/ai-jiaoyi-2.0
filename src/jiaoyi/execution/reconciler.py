@@ -267,6 +267,23 @@ class ThreeWayReconciler:
                 continue
             if rec.position_id in settling:
                 continue
+            if t.server_protection is not None:
+                protection_state = t.server_protection
+                observed = protection_state.observed_quantity
+                tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + (
+                    observed if observed is not None else rec.quantity
+                )
+                if protection_state.stage != "armed":
+                    issues.append(
+                        ReconcileIssue(
+                            kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                            symbol=rec.symbol,
+                            position_id=rec.position_id,
+                            detail=f"交易所托管仍在{protection_state.stage}阶段；保留已确认保护，由持久订单状态核验，未宣称已平",
+                            fixed=False,
+                        )
+                    )
+                continue  # 所有代的 MARK/普通腿由同一协调器管理，不能走旧两CID补挂/删多单。
             tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + rec.quantity
             if rec.status is not PositionStatus.OPEN and rec.position_id not in pending_direct:
                 continue
@@ -313,6 +330,27 @@ class ThreeWayReconciler:
         live_symbols = {t.record.symbol for t in live}
         for symbol in exchange_qty:
             if symbol not in live_symbols:
+                pending_owner = next(
+                    (
+                        t
+                        for t in self._registry.data.positions.values()
+                        if t.record.symbol == symbol
+                        and t.server_protection is not None
+                        and t.server_protection.stage != "done"
+                    ),
+                    None,
+                )
+                if pending_owner is not None:
+                    issues.append(
+                        ReconcileIssue(
+                            kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                            symbol=symbol,
+                            position_id=pending_owner.record.position_id,
+                            detail="托管订单/子单尚未清理且出现余仓，归属需核验；不另起无身份平仓通道",
+                            fixed=False,
+                        )
+                    )
+                    continue
                 rev = await self._recent_reverse(symbol, exchange_positions, now)
                 issues.append(rev or await self._unknown_position(symbol, exchange_positions))
 
@@ -321,9 +359,18 @@ class ThreeWayReconciler:
         owned = [
             t
             for t in self._registry.data.positions.values()
-            if t.record.position_id in live_ids or t.exit_cleanup_pending
+            if t.record.position_id in live_ids
+            or t.exit_cleanup_pending
+            or (t.server_protection is not None and t.server_protection.stage != "done")
         ]
         live_cids = {c for t in owned for c in lifeboat_cids(t.record.position_id)}
+        live_cids.update(
+            leg.client_order_id
+            for t in owned
+            if t.server_protection is not None
+            for leg in t.server_protection.legs
+            if leg.purpose == "lifeboat"
+        )
         for stop in stops:
             if (
                 not stop.client_order_id.startswith(STOP_PREFIX)
@@ -533,6 +580,11 @@ class ThreeWayReconciler:
 
         if not self._same_qty(qty, rec.quantity):
             return issue(f"{detail}，数量也对不上，未自动处理", False)
+        tracked = self._registry.get(rec.position_id)
+        if tracked is not None and tracked.server_protection is not None:
+            return issue(
+                f"{detail}，托管仓归属不一致，保留保护并等待核验，未自动平未知反向仓", False
+            )
         err = await self._close_on_exchange(rec.symbol, mine)
         if err is not None:
             return issue(f"{detail}（反手仓），直连币安平仓失败：{err!r}", False)
@@ -564,6 +616,15 @@ class ThreeWayReconciler:
             f"{rec.position_id} 刚结束（{rec.close_reason.value if rec.close_reason else '?'}），"
             f"币安上却出现反向等量仓 {pos.quantity}（反手仓）"
         )
+        tracked = self._registry.get(rec.position_id)
+        if tracked is not None and tracked.server_protection is not None:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.SIDE_MISMATCH,
+                symbol=symbol,
+                position_id=rec.position_id,
+                detail=f"{detail}；托管使用只减仓，不能凭等量断言归属，未自动平未知仓",
+                fixed=False,
+            )
         err = await self._close_on_exchange(symbol, mine)
         fixed = err is None
         return ReconcileIssue(

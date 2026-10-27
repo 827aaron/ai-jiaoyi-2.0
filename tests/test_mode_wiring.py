@@ -21,7 +21,7 @@ from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.config import load_app_config, load_risk_config
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution import factory
-from jiaoyi.execution.exchange import CcxtBinanceFutures
+from jiaoyi.execution.exchange import CcxtBinanceFutures, ExchangeBracket, ExchangeError
 from jiaoyi.execution.factory import MissingSecret, SimEnvironmentMismatch
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate, LiveGateError
 from jiaoyi.execution.stub import StubExecutorAdapter
@@ -49,12 +49,24 @@ class _Secrets:
         return self._v.get(name)
 
 
+class _WiringExchange(FakeExchange):
+    """仅本文件的初始空账户证据；模式测试不把未知订单伪造成完整保护。"""
+
+    async def open_brackets(self, symbol: str | None = None) -> list[ExchangeBracket]:
+        # 这个装配假件从未提交普通条件单；不复用生产端点或全局fake的兼容放行。
+        return []
+
+    async def assert_entry_clear(self, symbol: str) -> None:
+        if self.stops or self.entry_orders or self.close_submissions:
+            raise ExchangeError("模式接线假件已非明确空账户，禁止继续新开")
+
+
 @dataclass
 class Spy:
     hb_calls: list[tuple[str, str, str]] = field(default_factory=list)
     ccxt_calls: list[dict[str, Any]] = field(default_factory=list)
     api: FakeHbApi = field(default_factory=FakeHbApi)
-    exchange: FakeExchange = field(default_factory=FakeExchange)
+    exchange: FakeExchange = field(default_factory=_WiringExchange)
 
 
 @pytest.fixture
@@ -140,6 +152,7 @@ async def test_paper_and_testnet_use_demo_connector_and_testnet_key(
 ) -> None:
     _mark_sim(tmp_path)
     (adapter, *_), closers, checks = _build(tmp_path, mode)
+    assert adapter._protection is not None  # 本轮仅Demo新仓启用交易所托管。
 
     assert spy.hb_calls == [("http://127.0.0.1:8000", "admin", "hb-pass")]
     (call,) = spy.ccxt_calls
@@ -153,6 +166,7 @@ async def test_paper_and_testnet_use_demo_connector_and_testnet_key(
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:
     _unlock(tmp_path)
     (adapter, *_), _, _ = _build(tmp_path, RunMode.LIVE)
+    assert adapter._protection is None  # LIVE保留原管理，不能随本轮自动切换。
 
     (call,) = spy.ccxt_calls
     assert (call["key"], call["secret"]) == ("MAINNET-KEY", "MAINNET-SECRET")
@@ -165,7 +179,8 @@ async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, s
 async def test_legacy_testnet_environment_is_honoured(tmp_path: Path, spy: Spy) -> None:
     _mark_sim(tmp_path, "legacy_testnet")
     app_cfg = _cfg(tmp_path, RunMode.TESTNET, sim_environment="legacy_testnet")
-    _build_cfg(app_cfg, None, RISK, tmp_path)
+    (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
+    assert adapter._protection is None  # legacy testnet同样保留原管理。
 
     (call,) = spy.ccxt_calls
     assert call["demo"] is False

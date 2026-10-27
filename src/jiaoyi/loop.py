@@ -164,6 +164,13 @@ class _LedgerPositions(Protocol):
 
 
 @runtime_checkable
+class _ServerProtection(Protocol):
+    def server_managed(self, position_id: str) -> bool: ...
+
+    async def protection_tick(self) -> None: ...
+
+
+@runtime_checkable
 class _NewsAware(Protocol):
     def notify_news(self, symbol: str) -> None: ...
 
@@ -435,6 +442,9 @@ class Runner:
                 else self._every(INCOME_REFRESH_S, self.app.refresh_income)
             ),
         ]
+        if isinstance(self.m.executor, _ServerProtection):
+            # 每轮结束后再等待，避免慢交易所请求使保护轮询重叠。
+            self._loops.append(self._every(1.0, self.m.executor.protection_tick))
         if self.app.derivs is not None:
             # 持仓量每 60 秒、多空比每 5 分钟（盯着的币；查失败自己跳过）
             self._loops.append(asyncio.create_task(self.app.derivs.run(self._derivs_symbols)))
@@ -629,6 +639,16 @@ class Runner:
             tp, pid = pos.take_profit_price, pos.position_id
             if pos.symbol != t.symbol or pos.status is not PositionStatus.OPEN or tp is None:
                 continue
+            if isinstance(self.m.executor, _ServerProtection):
+                try:
+                    if self.m.executor.server_managed(pid):
+                        self._tp_past.pop(pid, None)
+                        continue
+                except Exception:
+                    # 无法确认所有权时不能用另一价格源发出平仓。
+                    log.exception("止盈兜底无法确认交易所保护所有权: %s", pid)
+                    self._tp_past.pop(pid, None)
+                    continue
             past = (
                 t.price >= tp * (1.0 + through)
                 if pos.side is Side.LONG

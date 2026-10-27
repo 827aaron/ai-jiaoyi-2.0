@@ -6,16 +6,85 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from jiaoyi.contracts import OrderIntent, PositionRecord
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+
+
+class ProtectiveLeg(BaseModel):
+    """每次提交/撤销前持久化的条件单身份；旧代也保留以核对迟到触发。"""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    kind: Literal["stop_loss", "take_profit"]
+    purpose: Literal["fixed", "trailing", "lifeboat"] = "fixed"
+    generation: int
+    client_order_id: str
+    quantity: float
+    trigger_price: float
+    state: Literal[
+        "planned",
+        "submit_pending",
+        "confirmed",
+        "cancel_pending",
+        "cancelled",
+        "rejected",
+        "superseded",
+    ] = "planned"
+    algo_id: str | None = None
+    algo_status: str | None = None
+    actual_order_id: str | None = None
+    actual_order_status: str | None = None
+    filled_quantity: float | None = None
+    triggered_at: datetime | None = None
+    child_state: Literal["absent", "unknown", "identified"] = "unknown"
+
+
+class ServerProtection(BaseModel):
+    """只有新仓显式启用；旧账本默认 None，不能自动改为交易所托管。"""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    version: Literal[1] = 1
+    account_name: str
+    connector_name: str
+    intended_quantity: float
+    stage: Literal["entry", "provisional", "armed", "exiting", "cleanup", "done"] = "entry"
+    ever_armed: bool = False
+    generation: int = 0
+    legs: list[ProtectiveLeg] = []
+    entry_order_id: str | None = None
+    entry_status: str | None = None
+    entry_filled_quantity: float | None = None
+    entry_terminal: bool = False
+    observed_quantity: float | None = None
+    observed_at: datetime | None = None
+    exit_reason: CloseReason | None = None
+    last_error: str | None = None
+    deadline_at: datetime | None = None
+    trailing_peak_net: float | None = None
+    trailing_threshold_net: float | None = None
+    trailing_peak_net_exact: str | None = None
+    trailing_threshold_net_exact: str | None = None
+    trailing_activated: bool = False
+    trailing_observed_at: datetime | None = None
+    trailing_entry_quote: float | None = None
+    trailing_entry_quantity: float | None = None
+    trailing_fees_quote: float | None = None
+    trailing_source_at: datetime | None = None
+    trailing_stop_price: float | None = None
+    trailing_observation_gap: bool = False
 
 
 class TrackedPosition(BaseModel):
@@ -56,6 +125,7 @@ class TrackedPosition(BaseModel):
     direct_close_fee: float | None = None
     chase: OrderIntent | None = None
     """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
+    server_protection: ServerProtection | None = None
 
 
 class DayStart(BaseModel):
@@ -78,8 +148,24 @@ class PositionRegistry:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._lock = threading.Lock()
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
+        self._symbol_owners: dict[str, asyncio.Task[object] | None] = {}
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
+
+    @asynccontextmanager
+    async def symbol_lock(self, symbol: str) -> AsyncIterator[None]:
+        """开仓、旧仓退出和条件单共用同币锁；同任务重入避免清理路径死锁。"""
+        task = asyncio.current_task()
+        if task is not None and self._symbol_owners.get(symbol) is task:
+            yield
+            return
+        async with self._symbol_locks.setdefault(symbol, asyncio.Lock()):
+            self._symbol_owners[symbol] = task
+            try:
+                yield
+            finally:
+                self._symbol_owners.pop(symbol, None)
 
     def _load(self) -> RegistryData:
         if not self._path.is_file():
