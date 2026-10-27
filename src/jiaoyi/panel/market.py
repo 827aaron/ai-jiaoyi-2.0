@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
@@ -47,6 +49,7 @@ class KlineSource:
         self._prices_lock = asyncio.Lock()
         self._kline_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._blocked_until = 0.0
+        self._books: dict[str, tuple[float, dict[str, Any]]] = {}
         """被币安 429 / 418 之后，到这个时刻（monotonic）之前一个请求都不发。"""
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -100,6 +103,34 @@ class KlineSource:
                     out[name] = tick_decimals(str(f["tickSize"]))
         self._decimals = (time.monotonic(), out)
         return out
+
+    async def book_quote(self, symbol: str) -> dict[str, Any] | None:
+        """面板参考盘口；独立于执行器的止损检查输入，缓存两秒。"""
+        if not SYMBOL_RE.fullmatch(symbol):
+            raise KlineError("币种代码不对")
+        hit = self._books.get(symbol)
+        if hit and time.monotonic() - hit[0] < PRICES_CACHE_S:
+            return hit[1]
+        raw = await self._get("/fapi/v1/ticker/bookTicker", {"symbol": symbol})
+        try:
+            if not isinstance(raw, dict) or raw.get("symbol") != symbol:
+                return None
+            bid, ask = float(raw["bidPrice"]), float(raw["askPrice"])
+            if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask):
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+        quote = {
+            "bid": bid,
+            "ask": ask,
+            "observed_at": datetime.now(UTC).isoformat(),
+            "source": "binance_rest_book_ticker",
+            "environment": "demo" if str(self._http.base_url).startswith(DEMO_BASE) else "live",
+        }
+        if len(self._books) >= 100:
+            self._books.clear()
+        self._books[symbol] = (time.monotonic(), quote)
+        return quote
 
     async def klines(
         self, symbol: str, interval: Interval, limit: int = 300

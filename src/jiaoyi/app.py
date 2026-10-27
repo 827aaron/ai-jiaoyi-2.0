@@ -73,6 +73,7 @@ from jiaoyi.core.pool_overrides import (
 )
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.secrets import ChainedSecretStore
+from jiaoyi.core.stop_quotes import StopQuoteRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.account_check import AccountMismatch
 from jiaoyi.execution.factory import MissingSecret, build_execution
@@ -767,6 +768,9 @@ class App:
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
         self.observations: KeeperObservationCollector | None = None
+        self._quote_diagnostics_enabled = not offline
+        self.stop_quotes: StopQuoteRecorder | None = None
+        self._stop_quotes_task: asyncio.Task[None] | None = None
         # 合约临时不在交易的币（主循环按 !contractInfo 推送增删），和风控员共用一个 dict
         self.halted: dict[str, str] = {}
         self.credits: CreditMonitor | None = None
@@ -874,6 +878,17 @@ class App:
             await self.m.decision_model.warmup()
         self.heartbeat_all()
         self.started = True
+        # 独立诊断连接只读落盘账本，绝不把 Demo 行情传入策略，也不调用含副作用的 positions()。
+        if self._quote_diagnostics_enabled and isinstance(self.m.feed, BinanceFuturesFeed):
+            environment = (
+                "live" if self.app_cfg.mode == RunMode.LIVE else self.app_cfg.sim_environment
+            )
+            if environment in ("demo", "live"):
+                try:
+                    self.stop_quotes = StopQuoteRecorder(self.app_cfg.data_dir, environment)
+                    self._stop_quotes_task = asyncio.create_task(self.stop_quotes.run())
+                except Exception:
+                    log.warning("持仓盘口诊断未启动（不影响交易）", exc_info=True)
         if self.paused is not None and self.paused.get("corrupt"):
             await self._alert(
                 AlertLevel.CRITICAL,
@@ -911,6 +926,12 @@ class App:
                         module.close()
                     except Exception:
                         log.exception("关闭 %s 失败", name)
+        if self.stop_quotes is not None and self._stop_quotes_task is not None:
+            try:
+                await self.stop_quotes.aclose(self._stop_quotes_task)
+            except Exception:
+                log.warning("停止盘口诊断失败（不影响交易）", exc_info=True)
+            self.stop_quotes, self._stop_quotes_task = None, None
         for closer in self._closers:
             try:
                 await closer()

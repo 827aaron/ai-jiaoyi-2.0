@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -68,12 +70,14 @@ class HbReader:
         self._connector = connector_name
         self._cache_s = cache_s
         self._cached: tuple[float, HbSnapshot] | None = None
+        self._stop_cached: dict[str, tuple[float, object]] = {}
 
     def update_password(self, password: str) -> None:
         """首次设置向导刚写进钥匙串的 hummingbot-api 密码，不用重启面板就生效。"""
         self._password = password
         self._http.auth = httpx.BasicAuth(self._username, password)
         self._cached = None
+        self._stop_cached.clear()
 
     async def snapshot(self) -> HbSnapshot:
         if self._cached and time.monotonic() - self._cached[0] < self._cache_s:
@@ -118,6 +122,43 @@ class HbReader:
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    async def stop_diagnostics(self, executor_id: str | None) -> object:
+        """执行器详情的只读诊断投影；不回传其它账户 / 订单字段。"""
+        if (
+            not self._password
+            or not executor_id
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", executor_id)
+        ):
+            return None
+        hit = self._stop_cached.get(executor_id)
+        if hit and time.monotonic() - hit[0] < self._cache_s:
+            return hit[1]
+        result: object = None
+        try:
+            async with self._http.stream("GET", f"/executors/{executor_id}") as resp:
+                if resp.status_code == 200:
+                    body = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 256 * 1024:
+                            break
+                    else:
+                        raw = json.loads(body)
+                        if (
+                            isinstance(raw, dict)
+                            and raw.get("id", raw.get("executor_id")) == executor_id
+                            and raw.get("executor_id", executor_id) == executor_id
+                        ):
+                            custom = raw.get("custom_info")
+                            if isinstance(custom, dict):
+                                result = custom.get("stop_diagnostics")
+        except (httpx.HTTPError, ValueError):
+            pass
+        if len(self._stop_cached) >= 100:
+            self._stop_cached.clear()
+        self._stop_cached[executor_id] = (time.monotonic(), result)
+        return result
 
 
 class _HbError(Exception):

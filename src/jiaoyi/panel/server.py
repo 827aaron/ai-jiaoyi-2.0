@@ -16,7 +16,7 @@ import hashlib
 import ipaddress
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
@@ -32,7 +32,7 @@ from jiaoyi.core.commands import CommandKind
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.recorder import local_day
 from jiaoyi.execution.live_gate import CONFIRM_WORD
-from jiaoyi.panel import actions, pnl_curve, setup, trailing
+from jiaoyi.panel import actions, pnl_curve, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
@@ -66,6 +66,7 @@ from jiaoyi.panel.pages import (
     build_team,
     prompts_info,
 )
+from jiaoyi.panel.stop_diagnostics import parse_diagnostics
 from jiaoyi.panel.updater import UpdateInfo, Updater
 from jiaoyi.risk.guard import blend_atr, session_factor
 from jiaoyi.slow.credits import banner as credit_banner
@@ -361,25 +362,18 @@ def create_app(
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
         page = build_positions(files, await hb.snapshot(), cfg()[0], clock(), await last_prices())
-        q = quotes()
-        src = q[0] if q else market
+        quote_source = quotes()
 
         async def with_trail(v: PositionView) -> PositionView:
-            act, delta = v.trailing_activation_pct, v.trailing_stop_pct
-            if act is None or delta is None or not v.entry_price:
-                return v
-            try:
-                best = await trailing.fetch_best(
-                    v.side, v.opened_at, lambda tf: src.klines(v.symbol, tf)
-                )
-            except KlineError:
-                best = None
-            # K 线拿到了才把现价算进去：拿不到就说「不知道」，不拿一个现价充数
-            mark = v.mark_price if best is not None else None
-            est = trailing.estimate(
-                v.side, v.entry_price, act, delta, v.entry_fee_pct or 0.0, best, mark
+            raw = await hb.stop_diagnostics(v.executor_id)
+            diag = parse_diagnostics(raw, v.executor_id, clock(), v.opened_at)
+            book = None
+            if quote_source:
+                with suppress(KlineError, TimeoutError, ValueError):
+                    book = await quote_source[0].book_quote(v.symbol)
+            return v.model_copy(
+                update={"trail": None, "stop_diagnostics": diag, "book_quote": book}
             )
-            return v.model_copy(update={"trail": est})
 
         views = list(await asyncio.gather(*(with_trail(v) for v in page.positions)))
         return page.model_copy(update={"price_env": quote_env(), "positions": views})
