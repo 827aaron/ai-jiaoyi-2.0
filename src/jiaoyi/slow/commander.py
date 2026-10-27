@@ -20,7 +20,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
@@ -67,9 +67,12 @@ logger = logging.getLogger(__name__)
 class MeetingError(RuntimeError):
     """会议中途失败。``cost_usd`` 是已烧掉的真实花费；未知为 None，由指挥官按估算计。"""
 
-    def __init__(self, message: str, cost_usd: float | None = None) -> None:
+    def __init__(
+        self, message: str, cost_usd: float | None = None, setup: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.cost_usd = cost_usd
+        self.setup = setup  # 这场会用的偏空整改设置（bias_fix），失败也要记
 
 
 class CardRefreshError(RuntimeError):
@@ -2276,16 +2279,15 @@ class BattleCardCommander:
                 )
                 res = cast(Analysis, await asyncio.wait_for(meeting, self._symbol_timeout_s))
                 if market_view is not None:
-                    res = Analysis(
-                        res.card_symbol.model_copy(
+                    # replace 只换指令，其余（花费、用量、会议设置）原样带着
+                    res = replace(
+                        res,
+                        card_symbol=res.card_symbol.model_copy(
                             update={
                                 "source_market_view_id": market_view.market_view_id,
                                 "source_regime": market_view.regime,
                             }
                         ),
-                        res.cost_usd,
-                        res.usage,
-                        res.setup,
                     )
             except Exception as exc:
                 self._charge(-est)
@@ -2299,6 +2301,7 @@ class BattleCardCommander:
                     started,
                     fail_cost,
                     estimated=guess,
+                    setup=self._failed_setup(exc, entry.symbol),
                 )
                 raise
             self._charge(-est)
@@ -2395,6 +2398,14 @@ class BattleCardCommander:
     def bind_credit_alarm(self, fn: Callable[[], None]) -> None:
         """模型额度不足（402）时调一下：让主程序发告警、面板显示横幅。"""
         self._credit_alarm = fn
+
+    def _failed_setup(self, exc: BaseException, key: str) -> dict[str, str] | None:
+        """失败的会（报错 / 质量门槛 / 超时）用的偏空整改设置，好按组算失败率：引擎随错误带出来的
+        优先；超时没有错误对象，就问引擎这个币这场会定下的设置。拿不到（还没定就失败了）为 None。"""
+        if isinstance(exc, MeetingError) and exc.setup is not None:
+            return exc.setup
+        fn = getattr(self._engine, "meeting_setup", None)
+        return fn(key) if callable(fn) else None
 
     def _failure_cost(self, exc: BaseException, key: str = "") -> float:
         """失败会议的花费：引擎带出了真实花费就用它；超时取消的会议，引擎还在跑，就叫停它并取

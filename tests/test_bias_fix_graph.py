@@ -130,7 +130,7 @@ def test_derivatives_block_reads_the_funding_label_of_this_meeting(
     with run_config(_cfg(tmp_path, _setup(funding_label="neutral"))):
         neutral = eng.derivatives_context("BTCUSDT", end)
     assert outside == legacy and eng.FUNDING_LABEL_LEGACY in legacy
-    assert neutral == legacy.replace(eng.FUNDING_LABEL_LEGACY, eng.FUNDING_LABEL_NEUTRAL)
+    assert neutral == legacy.replace(eng.FUNDING_LABEL_LEGACY, eng.neutral_funding_label(None))
 
 
 # ---------------------------------------------------------------- 多空比
@@ -344,3 +344,23 @@ def test_mirror_output_language_and_default_config_unchanged(tmp_path: Path) -> 
     mirror = _cfg(tmp_path, _setup(bear_bull_symmetry="mirror"))
     want = legacy["output_language"].replace(*ta_prompts.CHANGE_MIRROR["short"])
     assert mirror["output_language"] == want != legacy["output_language"]
+
+
+def test_meeting_setting_reads_only_the_per_run_config(tmp_path: Path) -> None:
+    """建图时 set_config 把配置逐键合并进进程全局，上一场 mirror 的键会留着：只读按场那份。"""
+    from tradingagents.dataflows.config import set_config
+
+    set_config(_cfg(tmp_path, _setup(bear_bull_symmetry="mirror", funding_label="neutral")))
+    try:
+        assert ta_nodes.meeting_setting("bear_bull_symmetry", "legacy") == "legacy"
+        assert ta_nodes.meeting_setting("funding_label", "legacy") == "legacy"
+        with run_config(_cfg(tmp_path)):  # 这场是现状组：全局里那份 mirror 不能漏进来
+            assert ta_nodes.meeting_setting("bear_bull_symmetry", "legacy") == "legacy"
+        with run_config(_cfg(tmp_path, _setup(bear_bull_symmetry="mirror"))):
+            assert ta_nodes.meeting_setting("bear_bull_symmetry", "legacy") == "mirror"
+    finally:
+        set_config(_cfg(tmp_path))
+        from tradingagents.dataflows import config as ta_config
+
+        ta_config._config = None
+        ta_config.initialize_config()

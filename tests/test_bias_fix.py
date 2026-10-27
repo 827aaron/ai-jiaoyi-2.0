@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import collections
+import itertools
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,18 +13,19 @@ from typing import Any
 
 import pytest
 
-from jiaoyi.contracts import Category, HardFilters, SymbolPoolEntry
+from jiaoyi.contracts import Category, HardFilters, Outcome, SymbolPoolEntry
 from jiaoyi.core.config import ConfigError
 from jiaoyi.core.profiles import HOLDS
 from jiaoyi.slow import binance_gate, crowd, ta_prompts, ta_roles
 from jiaoyi.slow import tradingagents_engine as eng
-from jiaoyi.slow.bias_fix import LEGACY_SETUP, BiasFix, MeetingSetup, resolve
+from jiaoyi.slow.bias_fix import LEGACY_SETUP, SWITCHES, BiasFix, MeetingSetup, resolve
 from jiaoyi.slow.review import CardJournal, JournalRow
 from jiaoyi.slow.settings import MeetingConfig, load_slow_config
 from tests.test_slow_commander import FakeEngine, card_symbol, entry, make, pool
 
 IDS = [f"S{i}USDT@2026-10-28T{i % 24:02d}:{i % 60:02d}:00Z" for i in range(2000)]
-NEW = BiasFix("alternate", "neutral", "mirror", "relative")
+NEW_ARGS = ("alternate", "neutral", "mirror", "relative")
+NEW = BiasFix(*NEW_ARGS)
 
 
 # ---------------------------------------------------------------- 分组和先发言
@@ -53,37 +58,56 @@ def test_fixed_debate_first_is_used_as_is() -> None:
     assert {resolve(BiasFix(debate_first="bear"), i).debate_first for i in IDS[:50]} == {"bear"}
 
 
-def test_ab_assignment_is_deterministic_and_legacy_arm_is_all_legacy() -> None:
+def test_ab_assignment_is_deterministic_and_factorial() -> None:
+    """ab > 0：每个改了的开关各自独立按 ab 的概率开（2⁴ 析因），能分别估计每个开关的效果。"""
     cfg = BiasFix("alternate", "neutral", "mirror", "relative", ab=0.5)
     setups = [resolve(cfg, i) for i in IDS]
     assert setups == [resolve(cfg, i) for i in IDS]
-    arms = [s.arm for s in setups]
-    assert set(arms) == {"new", "legacy"} and 0.45 < arms.count("new") / len(arms) < 0.55
+    on = {k: [k in s.switches_on for s in setups] for k in SWITCHES}
+    for k in SWITCHES:  # 每个开关大约一半
+        assert 0.45 < sum(on[k]) / len(IDS) < 0.55
+    for a, b in itertools.combinations(SWITCHES, 2):  # 两两独立：同时开约 1/4
+        both = sum(x and y for x, y in zip(on[a], on[b], strict=True)) / len(IDS)
+        assert 0.21 < both < 0.29, (a, b)
+    cells = collections.Counter(s.switches_on for s in setups)
+    assert len(cells) == 16 and all(85 < n < 170 for n in cells.values())  # 每组约 2000/16 = 125
     for s in setups:
-        if s.arm == "legacy":
-            assert (s.debate_first, s.funding_label, s.bear_bull_symmetry) == (
-                "bull",
-                "legacy",
-                "legacy",
-            )
-            assert (s.crowd_ratio_mode, s.debate_first_setting) == ("raw", "bull")
-        else:
-            assert (s.funding_label, s.bear_bull_symmetry, s.crowd_ratio_mode) == (
-                "neutral",
-                "mirror",
-                "relative",
-            )
-    # 分组和先发言互不相关：new 组里多空先发言两边都有
-    assert {s.debate_first for s in setups if s.arm == "new"} == {"bull", "bear"}
-    # 概率大致等于 ab；ab = 1 全部 new
+        want = {
+            "debate_first": "alternate" if "debate_first" in s.switches_on else "bull",
+            "funding_label": "neutral" if "funding_label" in s.switches_on else "legacy",
+            "bear_bull_symmetry": "mirror" if "bear_bull_symmetry" in s.switches_on else "legacy",
+            "crowd_ratio_mode": "relative" if "crowd_ratio_mode" in s.switches_on else "raw",
+        }
+        got = {
+            "debate_first": s.debate_first_setting,
+            "funding_label": s.funding_label,
+            "bear_bull_symmetry": s.bear_bull_symmetry,
+            "crowd_ratio_mode": s.crowd_ratio_mode,
+        }
+        assert got == want
+        n = len(s.switches_on)
+        assert s.arm == ("new" if n == 4 else "legacy" if n == 0 else "mixed")
+        if s.debate_first_setting == "bull":
+            assert s.debate_first == "bull"
+    # 开了交替的会里，多空先发言两边都有
+    assert {s.debate_first for s in setups if "debate_first" in s.switches_on} == {"bull", "bear"}
+    # 只改一个开关：要么 new 要么 legacy，比例约等于 ab；ab = 1 全部 new
     small = [resolve(BiasFix(funding_label="neutral", ab=0.2), i).arm for i in IDS]
-    assert 0.16 < small.count("new") / len(small) < 0.24
+    assert set(small) == {"new", "legacy"} and 0.16 < small.count("new") / len(small) < 0.24
     assert {resolve(BiasFix(funding_label="neutral", ab=1.0), i).arm for i in IDS} == {"new"}
+    # 没改的开关永远是现状
+    one = [resolve(BiasFix(crowd_ratio_mode="relative", ab=0.5), i) for i in IDS[:200]]
+    assert {s.switches_on for s in one} == {(), ("crowd_ratio_mode",)}
+    assert {(s.debate_first, s.funding_label, s.bear_bull_symmetry) for s in one} == {
+        ("bull", "legacy", "legacy")
+    }
 
 
-def test_record_has_every_setting() -> None:
-    rec = resolve(NEW, "AAUSDT@x").record()
-    assert set(rec) == {
+def test_record_has_every_setting_ab_and_config_version() -> None:
+    cfg = BiasFix("alternate", "neutral", "mirror", "relative", ab=0.5)
+    s = resolve(cfg, "AAUSDT@x")
+    rec = s.record()
+    assert list(rec) == [
         "meeting_id",
         "arm",
         "debate_first",
@@ -91,9 +115,25 @@ def test_record_has_every_setting() -> None:
         "funding_label",
         "bear_bull_symmetry",
         "crowd_ratio_mode",
+        "ab",
+        "config_version",
+        "switches_on",
+    ]
+    assert rec["meeting_id"] == "AAUSDT@x" and rec["ab"] == "0.5"
+    assert rec["switches_on"] == ",".join(s.switches_on)
+    assert rec["config_version"] == cfg.version
+    assert cfg.version.startswith("bf-") and cfg.version == BiasFix(*NEW_ARGS, ab=0.5).version
+    # 改任何一项（含 ab）版本号都变；默认是固定的一个
+    others = {
+        BiasFix().version,
+        BiasFix(ab=0.0, debate_first="bear").version,
+        BiasFix("alternate", "neutral", "mirror", "relative", ab=0.4).version,
+        cfg.version,
     }
-    assert rec["meeting_id"] == "AAUSDT@x"
-    assert "先发言" in resolve(NEW, "AAUSDT@x").describe()
+    assert len(others) == 4
+    assert resolve(BiasFix(), "x").record()["config_version"] == BiasFix().version
+    assert resolve(BiasFix(), "x").record()["ab"] == "0"
+    assert "先发言" in s.describe() and cfg.version in s.describe()
 
 
 # ---------------------------------------------------------------- 配置
@@ -309,12 +349,21 @@ def test_neutral_funding_states_the_baseline_rule_in_the_bear_line() -> None:
     base = ta_prompts.role_prompt("bear", P, "BTC-USD")
     got = ta_prompts.role_prompt("bear", P, "BTC-USD", neutral_funding=True)
     assert got == base.replace(ta_prompts.BEAR_FUNDING_OLD, ta_prompts.BEAR_FUNDING_NEW) != base
-    assert "funding well above the Binance baseline of +0.01% per 8h, not merely positive" in got
+    assert (
+        "a crowded long (funding well above the Binance baseline of +0.01% per 8h, open interest "
+        "rising into resistance)" in got
+    )
     assert "high funding" not in got
     for role in ("bull", "aggressive", "conservative", "neutral"):
         assert ta_prompts.role_prompt(role, P, neutral_funding=True) == ta_prompts.role_prompt(
             role, P
         )
+    # mirror + neutral：多头那句用同样的门槛写法（well below）
+    bull = ta_prompts.role_prompt("bull", P, "BTC-USD", mirror=True, neutral_funding=True)
+    assert (
+        "a crowded short (funding well below the Binance baseline of +0.01% per 8h, open interest "
+        "rising into support)" in bull
+    )
 
 
 FUNDING = [{"fundingRate": "0.0001"}, {"fundingRate": "-0.0002"}, {"fundingRate": "0.0005"}]
@@ -329,12 +378,50 @@ def test_funding_label_default_is_the_old_text_and_neutral_changes_only_that_lin
         "opposite)" in legacy.splitlines()
     )
     neutral = eng.format_derivatives(FUNDING, OI, "neutral")
-    assert neutral == legacy.replace(eng.FUNDING_LABEL_LEGACY, eng.FUNDING_LABEL_NEUTRAL)
+    assert neutral == legacy.replace(eng.FUNDING_LABEL_LEGACY, eng.neutral_funding_label(None))
     assert (
         "positive: longs pay shorts; negative: shorts pay longs; Binance baseline is +0.01% per "
         "8h" in neutral
     )
-    assert "crowded long;" not in neutral and "well above the baseline" in neutral
+    assert "crowded long;" not in neutral
+    assert (
+        "well above the baseline, and shorts crowded only when it is well below the baseline"
+        in (neutral)
+    )
+
+
+def _funding(hours: float, n: int = 9) -> list[dict[str, Any]]:
+    t0 = 1_761_000_000_000
+    return [
+        {"fundingRate": "0.00005", "fundingTime": t0 + int(i * hours * 3_600_000) + i * 7}
+        for i in range(n)
+    ]
+
+
+def test_neutral_funding_states_the_baseline_per_settlement_interval() -> None:
+    assert eng.funding_interval_h(_funding(8)) == 8
+    assert eng.funding_interval_h(_funding(4)) == 4
+    assert eng.funding_interval_h(_funding(1)) == 1
+    assert eng.funding_interval_h(FUNDING) is None  # 没有 fundingTime
+    assert eng.funding_interval_h(_funding(4, n=1)) is None
+    # 中间漏了一次结算也不影响（取中位数）
+    gappy = _funding(4)
+    del gappy[3]
+    assert eng.funding_interval_h(gappy) == 4
+    eight = eng.format_derivatives(_funding(8), OI, "neutral")
+    four = eng.format_derivatives(_funding(4), OI, "neutral")
+    one = eng.format_derivatives(_funding(1), OI, "neutral")
+    assert "Binance baseline is +0.01% per 8h; this coin settles every 8h." in eight
+    assert (
+        "Binance baseline is +0.01% per 8h; this coin settles every 4h, so the baseline is "
+        "+0.0050% per settlement." in four
+    )
+    assert "settles every 1h, so the baseline is +0.0013% per settlement." in one
+    # 默认（legacy）不管结算间隔，一字不差
+    assert eng.format_derivatives(_funding(4), OI) == eng.format_derivatives(
+        _funding(4), OI, "legacy"
+    )
+    assert "settles" not in eng.format_derivatives(_funding(4), OI)
 
 
 # ---------------------------------------------------------------- 多空比相对值
@@ -536,3 +623,137 @@ def test_old_journal_rows_still_load(tmp_path: Path) -> None:
     j.path.write_text(old + "\n", encoding="utf-8")
     (row,) = j.read()
     assert isinstance(row, JournalRow) and row.meeting_setup is None
+
+
+# ---------------------------------------------------------------- 失败的会也记设置
+class _FailEngine(FakeEngine):
+    """AAUSDT 报错（带设置），BBUSDT 超时（错误里没有设置，问引擎）。"""
+
+    def __init__(self) -> None:
+        super().__init__(["AAUSDT", "BBUSDT", "CCUSDT"])
+
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Any:
+        from jiaoyi.slow.commander import MeetingError
+
+        if e.symbol == "AAUSDT":
+            raise MeetingError("质量门槛没过", 0.01, resolve(NEW, "AAUSDT@t").record())
+        if e.symbol == "BBUSDT":
+            await asyncio.sleep(5)
+        return await super().analyze(e, regime, pick_reason)
+
+    def meeting_setup(self, key: str) -> dict[str, str] | None:
+        return resolve(NEW, f"{key}@engine").record() if key == "BBUSDT" else None
+
+
+async def test_failed_meetings_record_their_setup(tmp_path: Path, now: datetime) -> None:
+    c, log, _ = make(tmp_path, _FailEngine(), now, symbol_timeout_s=0.05)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT")), "scheduled")
+    errs = {
+        r.symbol: r.output.get("meeting_setup")
+        for r in log.read_day(now.date().isoformat())
+        if r.outcome is Outcome.ERROR and r.symbol
+    }
+    assert errs["AAUSDT"] == resolve(NEW, "AAUSDT@t").record()  # 引擎随错误带出来
+    assert errs["BBUSDT"] == resolve(NEW, "BBUSDT@engine").record()  # 超时：问引擎
+
+
+def test_engine_attaches_the_setup_to_a_failed_meeting() -> None:
+    from jiaoyi.slow.commander import MeetingError
+
+    e = eng.TradingAgentsEngine.__new__(eng.TradingAgentsEngine)
+    e._s = eng.TradingAgentsSettings(bias_fix=BiasFix(funding_label="neutral", ab=0.5))
+    now = datetime(2026, 10, 28, 3, 0, tzinfo=UTC)
+    e._today = lambda: now  # type: ignore[method-assign]
+    e._ticks = SimpleNamespace(get=lambda sym: None)  # type: ignore[assignment]
+    e._inflight, e._live = {}, {}
+    e._inflight_lock = threading.Lock()
+
+    def graph(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("质量门槛没过")
+
+    e._graph = graph  # type: ignore[method-assign,assignment]
+    with pytest.raises(MeetingError) as err:
+        e._analyze_sync(_pool_entry("AAUSDT"), "震荡")
+    want = resolve(e._s.bias_fix, "AAUSDT@2026-10-28T03:00:00Z").record()
+    assert err.value.setup == want and e.meeting_setup("AAUSDT") == want
+
+    # 下一场一开始就清掉上一场的（还没定设置就失败的会不会冒用上一场）
+    def banned(sym: str) -> None:
+        raise binance_gate.RateLimited("ban", 1.0)
+
+    e._ticks = SimpleNamespace(get=banned)  # type: ignore[assignment]
+    with pytest.raises(MeetingError) as err2:
+        e._analyze_sync(_pool_entry("AAUSDT"), "震荡")
+    assert err2.value.setup is None and e.meeting_setup("AAUSDT") is None
+
+
+def test_journal_row_keeps_the_old_keys_as_a_prefix(tmp_path: Path) -> None:
+    j = CardJournal(tmp_path)
+    old_keys = [
+        "card_id",
+        "version",
+        "created_at",
+        "expires_at",
+        "regime",
+        "refresh_reason",
+        "symbol",
+        "category",
+        "bias",
+    ]
+    assert list(JournalRow.model_fields)[: len(old_keys)] == old_keys
+    assert list(JournalRow.model_fields)[-1] == "meeting_setup"
+    assert j.path.name == "cards.jsonl"
+
+
+async def test_market_view_branch_keeps_the_setup(tmp_path: Path, now: datetime) -> None:
+    """有总盘会观点时指挥官给指令补上来源，会议设置不能跟着丢。"""
+    from jiaoyi.contracts import MarketView
+
+    j = CardJournal(tmp_path)
+    c, log, _ = make(tmp_path, _SetupEngine(["AAUSDT"]), now, journal=j)
+    view = MarketView(
+        market_view_id="mv-1", version=1, observed_at=now, regime="震荡", regime_direction="中性"
+    )
+    res = await c._analyze_one(entry("AAUSDT"), "震荡", market_view=view)
+    assert res.card_symbol.source_market_view_id == "mv-1"
+    assert res.setup == resolve(NEW, "AAUSDT@t").record()
+    recs = [r for r in log.read_day(now.date().isoformat()) if r.symbol == "AAUSDT"]
+    assert recs[-1].output["meeting_setup"] == resolve(NEW, "AAUSDT@t").record()
+
+
+def test_panel_overview_shows_a_conclusion_that_carries_meeting_setup(now: datetime) -> None:
+    """单币结论里多了 meeting_setup（和 usage 一样不属于指令）：总览仍要显示真实方向。"""
+    from datetime import timedelta
+
+    from jiaoyi.contracts import DecisionRecord, Role
+    from jiaoyi.panel.overview import _card
+    from jiaoyi.slow.commander import BattleCardCommander
+
+    out = BattleCardCommander._symbol_output(
+        card_symbol("AAUSDT"), False, {"input_tokens": 1}, resolve(NEW, "AAUSDT@t").record()
+    )
+    assert "meeting_setup" in out and "usage" in out
+    t = now - timedelta(minutes=10)
+
+    def rec(summary: str, ts: datetime, **kw: Any) -> DecisionRecord:
+        return DecisionRecord(
+            record_id=f"r-{summary}",
+            ts=ts,
+            role=Role.COMMANDER,
+            outcome=Outcome.ACTION,
+            summary=summary,
+            **kw,
+        )
+
+    recs = [
+        rec("结论", t, symbol="AAUSDT", output=out),
+        rec(
+            "出卡",
+            t + timedelta(minutes=1),
+            card_id="card-1",
+            output={"symbols": ["AAUSDT"], "expires_at": (now + timedelta(hours=1)).isoformat()},
+        ),
+    ]
+    view = _card(recs, now)
+    assert view is not None
+    assert view.symbols[0].bias == "long" and view.symbols[0].reason == "测试"

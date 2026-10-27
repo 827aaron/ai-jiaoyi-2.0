@@ -52,16 +52,24 @@ SETUP_KEYS = ("debate_first", "funding_label", "bear_bull_symmetry", "crowd_rati
 
 和档位参数不同，这几项每场会可能不一样（对照分组 / 交替先发言）。照样放配置是因为资金费率那段
 是数据工具（``get_stock_data``）里拼的，工具只看得到配置、看不到 state；开会时 TradingAgents
-按场用 ContextVar 给每张图自己的配置（``run_config``），同时开几场不会串。"""
+按场用 ContextVar 给每张图自己的配置（``run_config``），同时开几场不会串。
+
+只从这个按场的 ContextVar 读（``meeting_setting``）：建图时 ``set_config`` 会把配置合并进进程全局，
+而且字典是逐键合并的，上一场 mirror 写进去的键下一场现状组不会清掉，所以全局那份不能信。"""
 
 
 def meeting_setting(key: str, default: str) -> str:
-    """读这场会的一项偏空整改设置；不在会议里（或没装 tradingagents）就是默认值 = 现状。"""
+    """读这场会的一项偏空整改设置，只看这场会自己的运行配置；不在会议里（或没装
+    tradingagents）就是默认值 = 现状。"""
     try:
-        from tradingagents.dataflows.config import get_config
+        from tradingagents.dataflows import config as ta_config
     except ImportError:
         return default
-    raw = get_config().get(PROMPT_KEY) or {}
+    var = getattr(ta_config, "_run_config", None)
+    scoped = var.get() if var is not None else None
+    if not isinstance(scoped, Mapping):
+        return default
+    raw = scoped.get(PROMPT_KEY) or {}
     return str(raw.get(key) or default)
 
 
@@ -711,8 +719,10 @@ def install() -> None:
 
 # ---------------------------------------------------------------- 每场会不同的内容
 _BUILD_LOCK = threading.Lock()
-"""建图加一把锁：TradingAgentsGraph 建图会把配置就地合并进进程全局（``set_config``）。今天并发建图
-不会读错（角色读配置都在开会时，按场用 ContextVar），锁防的是以后有人把每场会不同的东西放回配置。"""
+"""建图加一把锁：TradingAgentsGraph 建图会把配置就地合并进进程全局（``set_config``）。角色读配置都在
+开会时、按场用 ContextVar（``run_config``），并发建图不会读错。每场会不同的偏空整改设置
+（``SETUP_KEYS``）也在配置里，但只经 ``meeting_setting`` 从按场的 ContextVar 读，不读全局那份
+（全局是逐键合并的，会留着上一场的值）；谁先开口由 ``PerpGraph`` 读它自己的 ``self.config``。"""
 
 _PERP_GRAPH: type | None = None
 

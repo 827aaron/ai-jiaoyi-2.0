@@ -400,14 +400,10 @@ _PRICE_TAIL_MIRROR = {
 }
 # funding_label = neutral：「拥挤」里的资金费率写明基准，只有明显偏离基准才算
 BEAR_FUNDING_OLD = "a crowded long (high funding, open "
-BEAR_FUNDING_NEW = (
-    "a crowded long (funding well above the Binance baseline of +0.01% per 8h, not merely "
-    "positive; open "
-)
+BEAR_FUNDING_NEW = "a crowded long (funding well above the Binance baseline of +0.01% per 8h, open "
 BULL_FUNDING_OLD = "a crowded short (deeply negative funding, open "  # 只在 mirror 时有这句
 BULL_FUNDING_NEW = (
-    "a crowded short (funding well below the Binance baseline of +0.01% per 8h, clearly "
-    "negative; open "
+    "a crowded short (funding well below the Binance baseline of +0.01% per 8h, open "
 )
 # 4) 共用说明里「行情变了要改判断」的例子：短档两个例子方向不对称，长档只举了转多的例子
 CHANGE_MIRROR = {
@@ -427,7 +423,6 @@ MIRROR_SWAPS = (
     ("long/short", "long/short"),  # 不换
     ("long-term", "long-term"),  # 不换
     ("deeply negative funding", "high funding"),
-    ("clearly negative", "not merely positive"),
     ("Bull", "Bear"),
     ("bull", "bear"),
     ("LONG", "SHORT"),

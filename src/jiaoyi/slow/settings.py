@@ -366,13 +366,14 @@ class MeetingConfig(_Strict):
     funding_label: Literal["legacy", "neutral"] = Field(
         default="legacy",
         description="资金费率怎么写：legacy = 正费率写成「多头拥挤」（现状）；"
-        "neutral = 只写谁付谁 + 币安基准 +0.01%/8h，写明只有明显高于基准才算多头拥挤、"
-        "明显为负才算空头拥挤。",
+        "neutral = 只写谁付谁 + 币安基准 +0.01%/8h（按结算间隔折算），写明明显高于基准才算"
+        "多头拥挤、明显低于基准才算空头拥挤。",
     )
     bear_bull_symmetry: Literal["legacy", "mirror"] = Field(
         default="legacy",
-        description="legacy = 只有空头有「拥挤 / 已被挤出的不再是燃料」这条（现状）；"
-        "mirror = 多头加对称的一条（空头拥挤、已被清洗的多头不再是下跌燃料）。",
+        description="legacy = 现状（空头独有「拥挤 / 已被挤出的不再是燃料」，多头独有「强平耗尽后"
+        "常反弹」等）；mirror = 多空两份提示词逐句对称，经理 / 交易员 / 共用说明里的单边写法补齐"
+        "另一边。",
     )
     crowd_ratio_mode: Literal["raw", "relative"] = Field(
         default="raw",
@@ -383,8 +384,8 @@ class MeetingConfig(_Strict):
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="0 = 上面四项每场会都按配置；> 0 = 每场会按这个概率用上面四项（new 组），"
-        "否则全部用现状（legacy 组），按会议 id 哈希分组、记进决策日志和复盘流水，两组同时对照。",
+        description="0 = 上面四项每场会都按配置；> 0 = 析因对照：每个改了的开关各自独立按这个"
+        "概率用配置值、否则用现状（按会议 id 加盐哈希，可复现），记进决策日志和复盘流水。",
     )
 
     @model_validator(mode="after")
