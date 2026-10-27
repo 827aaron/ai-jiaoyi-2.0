@@ -60,8 +60,8 @@ def _armed(**kw: Any) -> dict[str, Any]:
     return sp
 
 
-def _seed(tmp_path: Path, sp: dict[str, Any] | None) -> None:
-    pos = _position()
+def _seed(tmp_path: Path, sp: dict[str, Any] | None, **record: Any) -> None:
+    pos = _position(**record)
     if sp is not None:
         pos["server_protection"] = sp
     (tmp_path / "positions.json").write_text(json.dumps({"positions": {"pos-0001": pos}}))
@@ -444,6 +444,128 @@ assert(block.includes('旧一代仍挂') && block.includes('66500') && block.inc
 assert(block.includes('移动止损本轮没更新') && block.includes('移动止损盘口读取失败'), block);
 assert(brief.includes('固定止损已挂') && brief.includes('新一代提交中'), brief);
 assert(brief.includes('移动止损本轮没更新'), brief);
+"""
+    )
+    subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+_BASIS = {"trailing_entry_quote": 200.0, "trailing_entry_quantity": 2.0, "trailing_fees_quote": 0.2}
+_TRAIL = {"trailing_activation_pct": 0.3, "trailing_stop_pct": 0.5}
+
+
+@pytest.mark.parametrize(("side", "expected"), [("long", 100.4), ("short", 99.6)])
+def test_payload_carries_trailing_activation_price(
+    tmp_path: Path, side: str, expected: float
+) -> None:
+    from tests.test_panel import _client
+
+    _seed(tmp_path, _armed(**_BASIS), side=side, **_TRAIL)
+    page = build_positions(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW, None, 120)
+    assert page.positions[0].protection.trailing_activation_price == pytest.approx(expected)
+    [v] = build_overview(
+        PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, _cfg(tmp_path), NOW
+    ).positions
+    assert v.protection is not None
+    assert v.protection.trailing_activation_price == pytest.approx(expected)
+    with _client(tmp_path, "127.0.0.1") as client:
+        body = client.get("/api/positions").json()
+    assert body["positions"][0]["protection"]["trailing_activation_price"] == pytest.approx(
+        expected
+    )
+
+
+def test_trailing_activation_price_needs_basis_and_trailing_config(tmp_path: Path) -> None:
+    _seed(tmp_path, _armed(), **_TRAIL)
+    page = build_positions(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW, None, 120)
+    assert page.positions[0].protection.trailing_activation_price is None
+    _seed(tmp_path, _armed(**_BASIS))
+    page = build_positions(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW, None, 120)
+    assert page.positions[0].protection.trailing_activation_price is None
+
+
+def test_js_draws_trailing_lines_only_from_hosted_protection() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("JavaScript 渲染回归需要 Node")
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    helpers = source[source.index("const TRAIL_TIP =") : source.index("const cardPos =")]
+    fixed = _leg("stop_loss", "fixed", 66_500.0)
+    pending = _leg(
+        "stop_loss", "trailing", 67_200.0, generation=2, state="submit_pending", algo_status=None
+    )
+
+    def pos(sp: dict[str, Any] | None) -> dict[str, Any]:
+        view = parse_protection(sp, NOW, 120, long=True, activation_pct=0.3) if sp else None
+        return {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "trailing_activation_pct": 0.3,
+            "trailing_stop_pct": 0.5,
+            "protection": json.loads(view.model_dump_json()) if view else None,
+        }
+
+    cases = {
+        "idle": pos(_armed(**_BASIS)),
+        "nobasis": pos(_armed()),
+        "live": pos(
+            _armed(
+                trailing_activated=True,
+                trailing_stop_price=67_300.0,
+                legs=[
+                    {**fixed, "state": "superseded"},
+                    _leg("stop_loss", "trailing", 67_200.0, generation=2),
+                ],
+            )
+        ),
+        "unconfirmed": pos(
+            _armed(trailing_activated=True, trailing_stop_price=67_200.0, legs=[fixed, pending])
+        ),
+        "legacy": pos(None),
+        "looser": pos(_armed(trailing_activated=True, trailing_stop_price=66_400.0)),
+        "small": pos(_armed(trailing_activated=True, trailing_stop_price=66_510.0)),
+        "tightened": pos(
+            _armed(
+                trailing_activated=True,
+                trailing_stop_price=66_600.0,
+                legs=[_leg("stop_loss", "tightened", 66_800.0)],
+            )
+        ),
+    }
+    script = (
+        """
+const assert = require('node:assert/strict');
+const esc = value => String(value);
+const price = value => value == null ? '—' : String(value);
+const signed = (value, digits) => (value >= 0 ? '+' : '') + value.toFixed(digits);
+const cls = () => '';
+const TZ = 'Asia/Bangkok';
+const qtyFmt = value => String(value);
+const dur = ms => Math.round(ms / 60000) + ' 分';
+"""
+        + helpers
+        + "\nconst C = "
+        + json.dumps(cases)
+        + """;
+assert.deepEqual(trailLines(C.idle), { start: 100.4 });
+const idle = trailTag(C.idle);
+assert(idle.includes('移动止损未激活') && idle.includes('到 100.4 开始跟，回撤距离 0.50%'), idle);
+assert(trailNote(C.idle).includes('100.4') && trailLegend(C.idle).includes('启动线'));
+assert.equal(trailLines(C.nobasis), null);
+assert(trailNote(C.nobasis).includes('第一次看盘口') && trailLegend(C.nobasis) === '');
+assert.deepEqual(trailLines(C.live), { stop: 67200, confirmed: true });
+assert(trailTag(C.live).includes('交易所已挂') && trailLegend(C.live).includes('交易所已挂'));
+assert.deepEqual(trailLines(C.unconfirmed), { stop: 67200, confirmed: false });
+assert(trailTag(C.unconfirmed).includes('程序记录（未确认）'));
+assert(trailLegend(C.unconfirmed).includes('未确认'));
+assert.equal(trailLines(C.legacy), null);
+assert.equal(trailLegend(C.legacy), '');
+const looser = trailNote(C.looser);
+assert(looser.includes('比在挂的固定止损 66500 松，未换挂'), looser);
+assert(!looser.includes('还没确认'), looser);
+assert(trailTag(C.looser).includes('未换挂') && trailLegend(C.looser).includes('未换挂'));
+assert.deepEqual(trailLines(C.looser).held, { name: '固定止损', price: 66500, looser: true });
+assert(trailNote(C.small).includes('紧但收紧不够一步'), trailNote(C.small));
+assert(trailNote(C.tightened).includes('比在挂的收紧止损 66800 松，未换挂'));
 """
     )
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
