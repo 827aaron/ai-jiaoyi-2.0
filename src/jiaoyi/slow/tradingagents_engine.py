@@ -196,7 +196,8 @@ def build_config(
         llm_provider=s.provider,
         quick_think_llm=s.quick_model,
         deep_think_llm=s.deep_model,
-        output_language=f"{s.output_language}. {perp_context(prompt_params(s))}",
+        output_language=f"{s.output_language}. "
+        + ta_prompts.perp_context(prompt_params(s), mirror=setup.bear_bull_symmetry == "mirror"),
         **{
             ta_nodes.PROMPT_KEY: {
                 "hold": prompt_params(s).hold,

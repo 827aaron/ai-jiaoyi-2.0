@@ -415,13 +415,60 @@ def render_pm(
     )
 
 
+# ---- bear_bull_symmetry = mirror（偏空整改，见 slow/bias_fix.py）：两个方向写得一样具体 ----
+# 默认不生效，上面的原文一字不差。
+RM_MIRROR_OLD = (
+    "- **Underweight**: a lean short; the mirror of Overweight.\n"
+    "- **Sell**: a clear short; the mirror of Buy."
+)
+RM_MIRROR_NEW = (
+    "- **Underweight**: a lean short. The short case is better but not clear-cut. The system "
+    "trades a lean only at size {LEAN} or smaller.\n"
+    "- **Sell**: a clear short. The short case wins on fresh evidence that matters within {H}, "
+    "it has a specific entry zone and invalidation price, and the move to the target is large "
+    "next to the round-trip fee (about {FEE}% of a typical move within {H})."
+)
+PM_SELL_OLD = "- **Sell**: a clear short.\n"
+PM_SELL_NEW = (
+    "- **Sell**: a clear short: the case is specific and the target is large next to the "
+    "round-trip fee (about {FEE}% of a typical move within {H}).\n"
+)
+PULLBACK_OLD = "waits for a pullback"
+PULLBACK_NEW = "waits for a pullback or a bounce"
+MARKET_MIRROR_OLD = "Do not say a level held or bounced unless the bars show it."
+MARKET_MIRROR_NEW = (
+    "Do not say a level held, or that price bounced off it or was rejected at it, unless the "
+    "bars show it."
+)
+
+
+def _swap(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:  # 正文被改过却忘了改这里：导入时就报错，不悄悄不生效
+        raise RuntimeError(f"提示词里找不到要替换的那句：{old!r}")
+    return text.replace(old, new)
+
+
 NO_EXTERNAL_TOOLS = (
     "Use only the evidence provided in this prompt. Do not call external tools or search the "
     "web; if something is missing, say so explicitly."
 )
 
 
-def fill(text: str, p: tp.PromptParams, lean: str = "M") -> str:
+MIRRORED: dict[str, str] = {
+    RM: _swap(RM, RM_MIRROR_OLD, RM_MIRROR_NEW),
+    PM: _swap(_swap(PM, PM_SELL_OLD, PM_SELL_NEW), PULLBACK_OLD, PULLBACK_NEW),
+    MARKET: _swap(MARKET, MARKET_MIRROR_OLD, MARKET_MIRROR_NEW),
+}
+"""mirror 时换用的正文（交易员两段没有单边的写法，不在这里）。"""
+TRADE_FIELDS_MIRROR = {
+    **TRADE_FIELDS,
+    "entry_zone": _swap(TRADE_FIELDS["entry_zone"], PULLBACK_OLD, PULLBACK_NEW),
+}
+
+
+def fill(text: str, p: tp.PromptParams, lean: str = "M", *, mirror: bool = False) -> str:
+    if mirror:
+        text = MIRRORED.get(text, text)
     w = tp.words(p)
     out = (
         text.replace("{ZONE_RULE}", ZONE_RULE[p.zone_required])

@@ -11,7 +11,8 @@ import pytest
 
 from jiaoyi.contracts import Category, HardFilters, SymbolPoolEntry
 from jiaoyi.core.config import ConfigError
-from jiaoyi.slow import binance_gate, crowd, ta_prompts
+from jiaoyi.core.profiles import HOLDS
+from jiaoyi.slow import binance_gate, crowd, ta_prompts, ta_roles
 from jiaoyi.slow import tradingagents_engine as eng
 from jiaoyi.slow.bias_fix import LEGACY_SETUP, BiasFix, MeetingSetup, resolve
 from jiaoyi.slow.review import CardJournal, JournalRow
@@ -139,17 +140,169 @@ def test_role_prompts_default_unchanged() -> None:
     assert "a crowded long (high funding, open interest rising into resistance)" in bear
 
 
-def test_mirror_adds_exactly_the_symmetric_line_to_the_bull() -> None:
-    base = ta_prompts.role_prompt("bull", P, "BTC-USD")
-    got = ta_prompts.role_prompt("bull", P, "BTC-USD", mirror=True)
-    assert got == base.replace(ta_prompts.BULL_MIRROR_OLD, ta_prompts.BULL_MIRROR_NEW) != base
+def test_mirror_adds_exactly_the_symmetric_lines() -> None:
+    bull = ta_prompts.role_prompt("bull", P, "BTC-USD", mirror=True)
+    bear = ta_prompts.role_prompt("bear", P, "BTC-USD", mirror=True)
     assert (
+        "recent liquidations (forced selling that has run its course often precedes a bounce), "
         "a crowded short (deeply negative funding, open interest rising into support); longs "
-        "that were already flushed out are no longer fuel for a drop." in got
+        "that were already flushed out are no longer fuel for a drop." in bull
     )
-    # 只动多头；其他角色一字不差
-    for role in ("bear", "aggressive", "conservative", "neutral"):
+    assert (
+        "recent liquidations (forced buying that has run its course often precedes a pullback), "
+        "a crowded long (high funding, open interest rising into resistance); shorts that were "
+        "already squeezed out are no longer fuel for a rally." in bear
+    )
+    assert "a reclaimed level, a failed breakdown, a failed pullback, higher lows." in bull
+    assert "a lost level, a failed breakout, a failed bounce, lower highs." in bear
+    for text in (bull, bear):
+        assert ta_prompts.EQUITY_ARGS_MIRROR in text
+    # 和默认只差这几处
+    tail = {
+        "bull": (
+            "a failed breakdown, higher lows.",
+            "a failed breakdown, a failed pullback, higher lows.",
+        ),
+        "bear": (
+            "a lost level, a failed bounce,",
+            "a lost level, a failed breakout, a failed bounce,",
+        ),
+    }
+    edits = {
+        "bull": [(ta_prompts.BULL_MIRROR_OLD, ta_prompts.BULL_MIRROR_NEW)],
+        "bear": list(ta_prompts.BEAR_MIRROR_EDITS),
+    }
+    for role in ("bull", "bear"):
+        want = ta_prompts.role_prompt(role, P, "BTC-USD")
+        for old, new in [
+            *edits[role],
+            (ta_prompts.EQUITY_ARGS[role], ta_prompts.EQUITY_ARGS_MIRROR),
+            tail[role],
+        ]:
+            assert want.count(old) == 1
+            want = want.replace(old, new)
+        assert ta_prompts.role_prompt(role, P, "BTC-USD", mirror=True) == want
+    # 风控三人没有单边写法，不变
+    for role in ("aggressive", "conservative", "neutral"):
         assert ta_prompts.role_prompt(role, P, mirror=True) == ta_prompts.role_prompt(role, P)
+
+
+@pytest.mark.parametrize("neutral_funding", [False, True])
+@pytest.mark.parametrize("hold", HOLDS)
+def test_mirror_makes_bull_and_bear_word_swaps_of_each_other(
+    hold: str, neutral_funding: bool
+) -> None:
+    """mirror 下：空头正文按方向词对照表（long↔short、bounce↔pullback、support↔resistance、
+    up↔down…）换一遍就一字不差地是多头正文，反过来也一样；默认（现状）做不到。"""
+    p = ta_prompts.PromptParams.for_hold(hold)
+    bull = ta_prompts.role_prompt(
+        "bull", p, "BTC-USD", mirror=True, neutral_funding=neutral_funding
+    )
+    bear = ta_prompts.role_prompt(
+        "bear", p, "BTC-USD", mirror=True, neutral_funding=neutral_funding
+    )
+    assert ta_prompts.mirror_swap(bear) == bull
+    assert ta_prompts.mirror_swap(bull) == bear
+    old_bull = ta_prompts.role_prompt("bull", p, "BTC-USD")
+    old_bear = ta_prompts.role_prompt("bear", p, "BTC-USD")
+    assert ta_prompts.mirror_swap(old_bear) != old_bull
+    assert ta_prompts.mirror_swap(old_bull) != old_bear
+
+
+def test_mirror_swap_table_is_a_clean_involution() -> None:
+    lhs = [a for a, _ in ta_prompts.MIRROR_SWAPS]
+    rhs = [b for a, b in ta_prompts.MIRROR_SWAPS if a != b]
+    assert len(set(lhs) | set(rhs)) == len(lhs) + len(rhs)  # 每个词只出现一次
+    s = "long/short ratios, long-term growth; buy longs at support, up a rally"
+    swapped = "long/short ratios, long-term growth; sell shorts at resistance, down a drop"
+    assert ta_prompts.mirror_swap(s) == swapped
+    assert ta_prompts.mirror_swap(swapped) == s
+
+
+# 方向词：一段文字里出现其中一个，镜像版里另一个也要出现
+CLOSURE = (
+    ("bounce", "pullback"),
+    ("support", "resistance"),
+    ("above", "below"),
+    ("higher", "lower"),
+    ("highs", "lows"),
+    ("rally", "drop"),
+    ("uptrend", "downtrend"),
+    ("up", "down"),
+    ("breakout", "breakdown"),
+    ("buying", "selling"),
+    ("longs", "shorts"),
+)
+
+
+def _one_sided(text: str) -> list[tuple[str, str]]:
+    import re
+
+    def has(w: str) -> bool:
+        return re.search(rf"(?<![\w-]){w}(?![\w-])", text.lower()) is not None
+
+    return [(a, b) for a, b in CLOSURE if has(a) != has(b)]
+
+
+def _shared_texts(mirror: bool) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for hold in HOLDS:
+        p = ta_prompts.PromptParams.for_hold(hold)
+        for group in ta_prompts.GROUPS:
+            out[f"context/{hold}/{group}"] = ta_prompts.perp_context(p, group, mirror=mirror)
+        for name in ("MARKET", "RM", "TRADER_SYSTEM", "TRADER_USER", "PM"):
+            out[f"{name}/{hold}"] = ta_roles.fill(getattr(ta_roles, name), p, mirror=mirror)
+        for role in ("aggressive", "conservative", "neutral"):
+            out[f"{role}/{hold}"] = ta_prompts.role_prompt(role, p, mirror=mirror)
+    fields = ta_roles.TRADE_FIELDS_MIRROR if mirror else ta_roles.TRADE_FIELDS
+    for d in (ta_roles.RM_FIELDS, fields):
+        out.update({f"field/{k}": v for k, v in d.items()})
+    for k in ("action", "reasoning"):
+        out[f"trader_field/{k}"] = ta_roles.TRADER_FIELDS[k]
+    for k in ("rating", "executive_summary", "investment_thesis"):
+        out[f"pm_field/{k}"] = ta_roles.PM_FIELDS[k]
+    return out
+
+
+def test_mirror_leaves_no_one_sided_direction_word_in_shared_and_manager_texts() -> None:
+    """分析师 / 研究经理 / 交易员 / 组合经理 / 共用说明 / 结构化字段：
+    mirror 下每个方向词都有对面那个。"""
+    mirror = {k: _one_sided(t) for k, t in _shared_texts(True).items()}
+    assert {k: v for k, v in mirror.items() if v} == {}
+    legacy = {k: _one_sided(t) for k, t in _shared_texts(False).items()}
+    assert legacy["context/2h/manager"] == [("above", "below")]
+    assert legacy["context/24h/manager"] == [("above", "below"), ("uptrend", "downtrend")]
+    assert legacy["PM/2h"] == [("bounce", "pullback")]
+    assert legacy["field/entry_zone"] == [("bounce", "pullback")]
+
+
+def test_mirror_spells_out_the_short_ratings_and_both_entry_waits() -> None:
+    rm = ta_roles.fill(ta_roles.RM, P, mirror=True)
+    want_rm = ta_roles.RM.replace(ta_roles.RM_MIRROR_OLD, ta_roles.RM_MIRROR_NEW)
+    assert rm == ta_roles.fill(want_rm, P)
+    assert "the mirror of" not in rm and "The short case wins on fresh evidence" in rm
+    pm = ta_roles.fill(ta_roles.PM, P, mirror=True)
+    want = ta_roles.PM.replace(ta_roles.PM_SELL_OLD, ta_roles.PM_SELL_NEW).replace(
+        ta_roles.PULLBACK_OLD, ta_roles.PULLBACK_NEW
+    )
+    assert pm == ta_roles.fill(want, P) and "waits for a pullback or a bounce" in pm
+    market = ta_roles.fill(ta_roles.MARKET, P, mirror=True)
+    assert market == ta_roles.fill(
+        ta_roles.MARKET.replace(ta_roles.MARKET_MIRROR_OLD, ta_roles.MARKET_MIRROR_NEW), P
+    )
+    for name in ("TRADER_SYSTEM", "TRADER_USER"):
+        text = getattr(ta_roles, name)
+        assert ta_roles.fill(text, P, mirror=True) == ta_roles.fill(text, P)
+    assert ta_roles.TRADE_FIELDS_MIRROR["entry_zone"].endswith("waits for a pullback or a bounce.")
+    for hold in HOLDS:  # 默认不变
+        p = ta_prompts.PromptParams.for_hold(hold)
+        for name in ("MARKET", "RM", "TRADER_SYSTEM", "TRADER_USER", "PM"):
+            text = getattr(ta_roles, name)
+            assert ta_roles.fill(text, p, mirror=False) == ta_roles.fill(text, p)
+        for group in ta_prompts.GROUPS:
+            assert ta_prompts.perp_context(p, group, mirror=False) == ta_prompts.perp_context(
+                p, group
+            )
 
 
 def test_neutral_funding_states_the_baseline_rule_in_the_bear_line() -> None:

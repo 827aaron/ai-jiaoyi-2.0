@@ -13,7 +13,7 @@ pytest.importorskip("langchain_core")
 
 from tradingagents.dataflows.config import run_config
 
-from jiaoyi.slow import ta_nodes, ta_prompts
+from jiaoyi.slow import ta_nodes, ta_prompts, ta_roles
 from jiaoyi.slow import tradingagents_engine as eng
 from jiaoyi.slow.bias_fix import LEGACY_SETUP, BiasFix, MeetingSetup, resolve
 
@@ -88,11 +88,18 @@ def test_researcher_prompts_are_unchanged_by_default(tmp_path: Path) -> None:
 def test_mirror_and_neutral_funding_change_only_their_line(tmp_path: Path) -> None:
     legacy = {r: _prompt(tmp_path, r, _cfg(tmp_path)) for r in ("bull", "bear")}
     mirror = _cfg(tmp_path, _setup(bear_bull_symmetry="mirror"))
-    assert _prompt(tmp_path, "bull", mirror) == legacy["bull"].replace(
-        ta_prompts.BULL_MIRROR_OLD, ta_prompts.BULL_MIRROR_NEW
-    )
-    assert _prompt(tmp_path, "bull", mirror) != legacy["bull"]
-    assert _prompt(tmp_path, "bear", mirror) == legacy["bear"]
+    p = ta_prompts.PromptParams.for_hold("2h")
+    change = ta_prompts.CHANGE_MIRROR["short"]
+    for role in ("bull", "bear"):
+        want = (
+            legacy[role]
+            .replace(
+                ta_prompts.role_prompt(role, p, "BTC-USD"),
+                ta_prompts.role_prompt(role, p, "BTC-USD", mirror=True),
+            )
+            .replace(*change)  # 共用说明里「行情变了要改判断」的例子
+        )
+        assert _prompt(tmp_path, role, mirror) == want != legacy[role]
     neutral = _cfg(tmp_path, _setup(funding_label="neutral"))
     assert _prompt(tmp_path, "bear", neutral) == legacy["bear"].replace(
         ta_prompts.BEAR_FUNDING_OLD, ta_prompts.BEAR_FUNDING_NEW
@@ -243,3 +250,97 @@ def test_open_with_bear_refuses_an_unexpected_graph() -> None:
     wf = StateGraph(AgentState)
     with pytest.raises(RuntimeError, match="版本对不上"):
         ta_nodes.open_debate_with_bear(wf)
+
+
+# ------------------------------------------------------------ mirror：经理 / 交易员 / 行情分析师
+class _Structured(Llm):
+    def __init__(self) -> None:
+        super().__init__()
+        self.schemas: list[Any] = []
+
+    def with_structured_output(self, schema: Any, **k: Any) -> Any:
+        self.schemas.append(schema)
+        outer = self
+
+        class Bound:
+            def invoke(self, prompt: Any) -> dict[str, Any]:  # 解析失败、用模型原文
+                outer.prompts.append(str(prompt))
+                return {"parsed": None, "raw": SimpleNamespace(content="Hold")}
+
+        return Bound()
+
+
+def _desc(schema: Any) -> str:
+    return str(schema.model_json_schema()["properties"]["entry_zone"]["description"])
+
+
+def test_mirror_reaches_the_market_analyst_and_the_managers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tradingagents.agents.analysts import turn
+
+    seen: list[str] = []
+
+    def take_turn(prompt: Any, llm: Any, tools: Any, messages: Any) -> tuple[str, str]:
+        seen.append(prompt.format_messages(messages=[])[0].content)
+        return "r", "行情报告"
+
+    monkeypatch.setattr(turn, "take_turn", take_turn)
+    state = {
+        **_state(),
+        "messages": [],
+        "instrument_context": "",
+        "portfolio_context": "",
+        "investment_plan": "plan",
+        "trader_investment_plan": "t",
+        "past_context": "",
+        "risk_debate_state": {
+            "history": "h",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "Neutral",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "count": 3,
+        },
+    }
+    out: dict[str, dict[str, str]] = {}
+    schemas: dict[str, list[Any]] = {}
+    for name, setup in (("legacy", LEGACY_SETUP), ("mirror", _setup(bear_bull_symmetry="mirror"))):
+        llms = {k: _Structured() for k in ("rm", "trader", "pm")}
+        rm = ta_nodes.create_research_manager(llms["rm"])
+        trader = ta_nodes.create_trader(llms["trader"])
+        pm = ta_nodes.create_portfolio_manager(llms["pm"])
+        with run_config(_cfg(tmp_path, setup)):
+            ta_nodes.create_market_analyst(Llm())(state)
+            rm(state)
+            trader(state)
+            pm(state)
+        out[name] = {
+            "market": seen.pop(),
+            "rm": llms["rm"].prompts[-1],
+            "trader": llms["trader"].prompts[-1],
+            "pm": llms["pm"].prompts[-1],
+        }
+        schemas[name] = llms["pm"].schemas + llms["trader"].schemas
+    legacy, mirror = out["legacy"], out["mirror"]
+    assert ta_roles.MARKET_MIRROR_NEW in mirror["market"]
+    assert ta_roles.MARKET_MIRROR_OLD in legacy["market"]
+    assert "The short case wins on fresh evidence" in mirror["rm"]
+    assert "the mirror of Buy" in legacy["rm"]
+    assert "waits for a pullback or a bounce" in mirror["pm"]
+    assert "waits for a pullback or a bounce" not in legacy["pm"]
+    assert "a bounce off the low or a pullback from the high" in mirror["trader"]
+    assert "a bounce off the low" not in legacy["trader"]
+    # 结构化字段：建节点时绑的还是原来那份，mirror 的会议另绑一份
+    assert all("pullback or a bounce" not in _desc(s) for s in schemas["legacy"])
+    assert sum("pullback or a bounce" in _desc(s) for s in schemas["mirror"]) == 2
+
+
+def test_mirror_output_language_and_default_config_unchanged(tmp_path: Path) -> None:
+    legacy = _cfg(tmp_path)
+    mirror = _cfg(tmp_path, _setup(bear_bull_symmetry="mirror"))
+    want = legacy["output_language"].replace(*ta_prompts.CHANGE_MIRROR["short"])
+    assert mirror["output_language"] == want != legacy["output_language"]

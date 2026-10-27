@@ -65,6 +65,11 @@ def meeting_setting(key: str, default: str) -> str:
     return str(raw.get(key) or default)
 
 
+def _mirror() -> bool:
+    """这场会是否 bear_bull_symmetry = mirror（多空写法逐句对称）。"""
+    return meeting_setting("bear_bull_symmetry", "legacy") == "mirror"
+
+
 def language(role: str | None = None) -> str:
     """替换 TradingAgents 的 ``get_language_instruction()``：按角色说清哪些标签行保持英文，
     共用说明也按角色组给（新闻 / 情绪不收评级和进场规则，见 ``ta_prompts.ROLE_GROUP``）。"""
@@ -76,7 +81,7 @@ def language(role: str | None = None) -> str:
         if str(base).strip().lower() == "english":
             return ""
         group = ta_prompts.ROLE_GROUP.get(role or "", "manager")
-        lang = f"{base}. {ta_prompts.perp_context(params_from_config(), group)}"
+        lang = f"{base}. {ta_prompts.perp_context(params_from_config(), group, mirror=_mirror())}"
     else:  # 老配置：整段 output_language
         lang = str(cfg.get("output_language", "English"))
         if lang.strip().lower() == "english":
@@ -127,7 +132,7 @@ def _researcher(role: str, label: str, other: str) -> Factory:
                     role,
                     p,
                     str(state.get("company_of_interest", "asset")),
-                    mirror=meeting_setting("bear_bull_symmetry", "legacy") == "mirror",
+                    mirror=_mirror(),
                     neutral_funding=meeting_setting("funding_label", "legacy") == "neutral",
                 )
                 + "\n\nResources available:\n"
@@ -393,8 +398,10 @@ def _as_text(v: Any) -> str | None:
 
 
 @functools.cache
-def _schemas() -> tuple[Any, Any, Any]:
-    """研究经理 / 交易员 / 组合经理的结构化输出模型（字段说明见 ``ta_roles``）。"""
+def _schemas(mirror: bool = False) -> tuple[Any, Any, Any]:
+    """研究经理 / 交易员 / 组合经理的结构化输出模型（字段说明见 ``ta_roles``）。
+    ``mirror``：交易字段说明用 mirror 版（「等回调」写成「等回调或反弹」）。"""
+    trade_fields = ta_roles.TRADE_FIELDS_MIRROR if mirror else ta_roles.TRADE_FIELDS
     from pydantic import BaseModel, Field, field_validator
     from tradingagents.agents.schemas import (
         PortfolioRating,
@@ -408,9 +415,7 @@ def _schemas() -> tuple[Any, Any, Any]:
         strategic_actions: str = Field(description=ta_roles.RM_FIELDS["strategic_actions"])
 
     class _Trade(BaseModel):
-        entry_zone: str | None = Field(
-            default=None, description=ta_roles.TRADE_FIELDS["entry_zone"]
-        )
+        entry_zone: str | None = Field(default=None, description=trade_fields["entry_zone"])
         invalidation: str | None = Field(
             default=None, description=ta_roles.TRADE_FIELDS["invalidation"]
         )
@@ -450,6 +455,19 @@ def _bind(llm: Any, schema: Any, name: str) -> Any | None:
         return None
 
 
+class _Structured:
+    """交易员 / 组合经理的结构化绑定：默认那份建节点时就绑好（和原来一样），mirror 那份用到再绑。"""
+
+    def __init__(self, llm: Any, index: int, name: str) -> None:
+        self._llm, self._index, self._name = llm, index, name
+        self._bound = {False: _bind(llm, _schemas()[index], name)}
+
+    def get(self, mirror: bool) -> Any | None:
+        if mirror not in self._bound:
+            self._bound[mirror] = _bind(self._llm, _schemas(mirror)[self._index], self._name)
+        return self._bound[mirror]
+
+
 def _ask(structured: Any | None, plain: Any, prompt: Any, name: str) -> tuple[Any | None, str]:
     """(解析好的对象, "") 或 (None, 文字)。结构化解析失败但模型答了文字，就直接用这段文字；
     只有一个字都没答（或请求本身出错）才再发一次普通请求。"""
@@ -482,7 +500,7 @@ def create_market_analyst(llm: Any) -> Node:
         from tradingagents.agents.context import get_instrument_context_from_state
 
         p = params_from_config()
-        text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config())
+        text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config(), mirror=_mirror())
         system_message = _subst(text, {"target": str(state["company_of_interest"])}) + language(
             "market"
         )
@@ -526,7 +544,7 @@ def create_research_manager(llm: Any) -> Node:
         debate = state["investment_debate_state"]
         p = params_from_config()
         prompt = _subst(
-            ta_roles.fill(ta_roles.RM, p, lean_from_config()),
+            ta_roles.fill(ta_roles.RM, p, lean_from_config(), mirror=_mirror()),
             {
                 "target": str(state["company_of_interest"]),
                 "instrument_context": get_instrument_context_from_state(state),
@@ -549,8 +567,7 @@ def create_research_manager(llm: Any) -> Node:
 
 def create_trader(llm: Any) -> Node:
     """交易员：写 messages（一条 AIMessage）和 trader_investment_plan，和原版一样。"""
-    schema = _schemas()[1]
-    structured = _bind(llm, schema, "Trader")
+    structured = _Structured(llm, 1, "Trader")
 
     def node(state: Any) -> dict[str, Any]:
         from langchain_core.messages import AIMessage
@@ -561,6 +578,7 @@ def create_trader(llm: Any) -> Node:
 
         p = params_from_config()
         lean = lean_from_config()
+        mirror = _mirror()
         report = (state["market_report"] or "").strip()
         system = ta_roles.TRADER_SYSTEM
         if not report:  # 没有行情报告就不让它「从报告里取价位」
@@ -576,14 +594,17 @@ def create_trader(llm: Any) -> Node:
         messages = [
             {
                 "role": "system",
-                "content": _subst(ta_roles.fill(system, p, lean), values) + language("trader"),
+                "content": _subst(ta_roles.fill(system, p, lean, mirror=mirror), values)
+                + language("trader"),
             },
             {
                 "role": "user",
-                "content": _subst(ta_roles.fill(ta_roles.TRADER_USER, p, lean), values),
+                "content": _subst(
+                    ta_roles.fill(ta_roles.TRADER_USER, p, lean, mirror=mirror), values
+                ),
             },
         ]
-        parsed, text = _ask(structured, llm, messages, "Trader")
+        parsed, text = _ask(structured.get(mirror), llm, messages, "Trader")
         if parsed is not None:
             text = ta_roles.render_trader(
                 parsed.action.value,
@@ -600,8 +621,7 @@ def create_trader(llm: Any) -> Node:
 
 def create_portfolio_manager(llm: Any) -> Node:
     """组合经理：写 risk_debate_state、final_trade_decision、final_rating，和原版一样。"""
-    schema = _schemas()[2]
-    structured = _bind(llm, schema, "Portfolio Manager")
+    structured = _Structured(llm, 2, "Portfolio Manager")
 
     def node(state: Any) -> dict[str, Any]:
         from tradingagents.agents.context import (
@@ -612,10 +632,11 @@ def create_portfolio_manager(llm: Any) -> Node:
 
         rs = state["risk_debate_state"]
         p = params_from_config()
+        mirror = _mirror()
         past = state.get("past_context", "")
         lessons = ta_roles.LESSONS_LINE.replace("{past_context}", str(past)) if past else ""
         prompt = _subst(
-            ta_roles.fill(ta_roles.PM, p, lean_from_config()),
+            ta_roles.fill(ta_roles.PM, p, lean_from_config(), mirror=mirror),
             {
                 "target": str(state["company_of_interest"]),
                 "instrument_context": get_instrument_context_from_state(state),
@@ -626,7 +647,7 @@ def create_portfolio_manager(llm: Any) -> Node:
                 "history": rs["history"],
             },
         ) + language("pm")
-        parsed, text = _ask(structured, llm, prompt, "Portfolio Manager")
+        parsed, text = _ask(structured.get(mirror), llm, prompt, "Portfolio Manager")
         if parsed is not None:
             decision = ta_roles.render_pm(
                 parsed.rating.value,

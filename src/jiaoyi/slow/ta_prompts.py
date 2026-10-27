@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from jiaoyi.core import profiles
 
@@ -217,10 +217,13 @@ ROLE_GROUP: dict[str, str] = {
 }
 
 
-def perp_context(p: PromptParams, group: str = "manager") -> str:
+def perp_context(p: PromptParams, group: str = "manager", *, mirror: bool = False) -> str:
     """军师团角色共用的说明（拼在 output_language 后面）。只跟档位和角色组有关，所有会议一样。
-    默认给 manager 组（最全的一组），没有按角色取的调用方结果和以前一样。"""
+    默认给 manager 组（最全的一组），没有按角色取的调用方结果和以前一样。
+    ``mirror``（bear_bull_symmetry = mirror）：「行情变了要改判断」的例子两个方向都举。"""
     w = words(p)
+    if mirror and p.style in CHANGE_MIRROR:
+        w = replace(w, change=_swap(w.change, *CHANGE_MIRROR[p.style]))
     text = (
         ("".join(GROUPS[group]) + _END)
         .replace("{not_this}", w.not_this)
@@ -363,18 +366,99 @@ _ROLE_TEXT = {
 
 
 # 偏空整改开关（bias_fix.py），默认都不生效，提示词与原来一字不差。
-# bear_bull_symmetry = mirror：多头加上和空头对称的一条结构性论据
+# bear_bull_symmetry = mirror：多空两份正文逐句对称（把空头那份的方向词按 MIRROR_SWAPS 换过来，
+# 就一字不差地得到多头那份，反过来也一样，见 tests/test_bias_fix.py）。
+# 1) 多头加上空头独有的「拥挤 / 已被挤出的不再是燃料」；空头加上多头独有的「强平耗尽后常反弹」
 BULL_MIRROR_OLD = "often precedes a bounce).\n"
 BULL_MIRROR_NEW = (
     "often precedes a bounce), a crowded short (deeply negative funding, open interest rising "
     "into support); longs that were already flushed out are no longer fuel for a drop.\n"
 )
-# funding_label = neutral：空头那条「拥挤」里的资金费率写明基准，只有明显高于基准才算
+BEAR_MIRROR_EDITS = (
+    (
+        "long/short ratios, a crowded long",
+        "long/short ratios, recent liquidations (forced buying that has run its course often "
+        "precedes a pullback), a crowded long",
+    ),
+    ("are no longer fuel.\n", "are no longer fuel for a rally.\n"),
+)
+# 2) 「不要用股票口径的论据」两边原来各列一半（多头列利好、空头列利空），改成同一份
+EQUITY_ARGS = {
+    "bull": "(growth, revenue, competitive advantage, branding, long-term adoption)",
+    "bear": (
+        "(market saturation, financial instability, competitive weakness, declining innovation)"
+    ),
+}
+EQUITY_ARGS_MIRROR = (
+    "(growth or decline, revenue, competitive advantage or weakness, branding, long-term "
+    "adoption or market saturation, financial stability or instability, innovation)"
+)
+# 3) 价格行为：多头有「跌破失败」没有「回调失败」，空头有「反弹失败」没有「突破失败」
+_PRICE_TAIL_MIRROR = {
+    "bull": "a reclaimed level, a failed breakdown, a failed pullback, higher lows.",
+    "bear": "a lost level, a failed breakout, a failed bounce, lower highs.",
+}
+# funding_label = neutral：「拥挤」里的资金费率写明基准，只有明显偏离基准才算
 BEAR_FUNDING_OLD = "a crowded long (high funding, open "
 BEAR_FUNDING_NEW = (
     "a crowded long (funding well above the Binance baseline of +0.01% per 8h, not merely "
     "positive; open "
 )
+BULL_FUNDING_OLD = "a crowded short (deeply negative funding, open "  # 只在 mirror 时有这句
+BULL_FUNDING_NEW = (
+    "a crowded short (funding well below the Binance baseline of +0.01% per 8h, clearly "
+    "negative; open "
+)
+# 4) 共用说明里「行情变了要改判断」的例子：短档两个例子方向不对称，长档只举了转多的例子
+CHANGE_MIRROR = {
+    "short": (
+        "a rebound off the low, or a break below a level that had held",
+        "a bounce off the low or a pullback from the high, or a break above or below a level "
+        "that had held",
+    ),
+    "long": (
+        "the previous day's high in a downtrend)",
+        "the previous day's high in a downtrend, or back below the previous day's low in an "
+        "uptrend)",
+    ),
+}
+
+MIRROR_SWAPS = (
+    ("long/short", "long/short"),  # 不换
+    ("long-term", "long-term"),  # 不换
+    ("deeply negative funding", "high funding"),
+    ("clearly negative", "not merely positive"),
+    ("Bull", "Bear"),
+    ("bull", "bear"),
+    ("LONG", "SHORT"),
+    ("longs", "shorts"),
+    ("long", "short"),
+    ("buying", "selling"),
+    ("buy", "sell"),
+    ("bounce", "pullback"),
+    ("support", "resistance"),
+    ("rally", "drop"),
+    ("higher", "lower"),
+    ("highs", "lows"),
+    ("reclaimed", "lost"),
+    ("breakdown", "breakout"),
+    ("listings", "delistings"),
+    ("above", "below"),
+    ("flushed", "squeezed"),
+    ("uptrend", "downtrend"),
+    ("up", "down"),
+)
+"""多空方向词对照表（测试用来核对 mirror 下两份正文逐句对称）。"""
+
+
+def mirror_swap(text: str) -> str:
+    """按 ``MIRROR_SWAPS`` 把方向词互换（整词匹配，长的先换）。"""
+    import re
+
+    table = {a: b for a, b in MIRROR_SWAPS} | {b: a for a, b in MIRROR_SWAPS}
+    keys = sorted(table, key=len, reverse=True)
+    pattern = re.compile(r"(?<!\w)(" + "|".join(re.escape(k) for k in keys) + r")(?!\w)")
+    return pattern.sub(lambda m: table[m.group(1)], text)
 
 
 def role_prompt(
@@ -386,14 +470,23 @@ def role_prompt(
     neutral_funding: bool = False,
 ) -> str:
     """多空研究员 / 风控三人的正文（数据块和辩论记录由节点按原版格式拼在后面）。
-    「价格行为」的周期跟这一档同一组词。``mirror`` / ``neutral_funding`` 见上面两组常量。"""
+    「价格行为」的周期跟这一档同一组词。``mirror`` / ``neutral_funding`` 见上面几组常量。"""
     text = _ROLE_TEXT[role]
-    if mirror and role == "bull":
-        text = _swap(text, BULL_MIRROR_OLD, BULL_MIRROR_NEW)
+    tails = _PRICE_TAIL
+    if mirror and role in _PRICE_TAIL:
+        tails = _PRICE_TAIL_MIRROR
+        text = _swap(text, EQUITY_ARGS[role], EQUITY_ARGS_MIRROR)
+        if role == "bull":
+            text = _swap(text, BULL_MIRROR_OLD, BULL_MIRROR_NEW)
+        else:
+            for old, new in BEAR_MIRROR_EDITS:
+                text = _swap(text, old, new)
     if neutral_funding and role == "bear":
         text = _swap(text, BEAR_FUNDING_OLD, BEAR_FUNDING_NEW)
-    if role in _PRICE_TAIL:
-        action = words(p).price_action.replace("{price_tail}", _PRICE_TAIL[role])
+    if neutral_funding and mirror and role == "bull":
+        text = _swap(text, BULL_FUNDING_OLD, BULL_FUNDING_NEW)
+    if role in tails:
+        action = words(p).price_action.replace("{price_tail}", tails[role])
         text = text.replace("{price_action}", action)
     return fill(text.replace("{target}", target), p)
 
