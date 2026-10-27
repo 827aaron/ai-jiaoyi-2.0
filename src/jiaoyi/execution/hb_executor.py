@@ -905,12 +905,15 @@ class HbExecutorAdapter:
         - ``tightened`` 新止损已确认；``pending`` 目标已落盘、换代还没确认（保护轮询接着做，
           旧止损保留；上一代移动止损还在提交 / 撤销中时先等它，不算失败）；
         - ``exiting`` 换代时交易所说已越触发价等，保护状态机已进入退出，由保护轮询按止损原因平；
-        - ``kept`` 已收紧过，或现有固定 / 移动止损已同样紧；``skip`` 仓已不在或已在平；
-        - ``close`` 不能收紧，调用方按原反向卡规则全平：旧通道（没有托管保护）、还没完整托管
-          （含开仓宽限期）、入场费用或触发价源读不到、目标价离触发价源（新止损腿的触发价格源，
+        - ``kept`` 已收紧过，或现有止损已同样紧；``skip`` 仓已不在 / 已在平 / 保护在退出，
+          或这一轮临时保护且没有确认在挂的止损（交给保护状态机）；
+        - ``close`` 不能收紧，调用方按原反向卡规则全平：旧通道（没有托管保护）、从没完整托管
+          （含 #325 开仓宽限期）、入场费用或触发价源读不到、目标价离触发价源（新止损腿的触发价格源，
           现在配置是标记价）不到 ``mark_gap_bps``：多要 目标 < 价 ×（1 − gap），
           空要 目标 > 价 ×（1 + gap）；挂不稳就不挂，不靠交易所 -2021 拒单。
-        读不到证据、挂不稳、换单没确认都写 ``server_protection.last_error`` 并发 CRITICAL。
+        曾完整托管、这一轮临时保护但旧止损仍确认在挂：目标落盘，返回 ``pending``。
+        读不到证据、换单没确认写 ``server_protection.last_error`` 并发 CRITICAL；挂不稳是正常分支，
+        只进决策记录。
         """
         manager = self._protection
         initial = self._registry.get(position_id)
@@ -935,15 +938,22 @@ class HbExecutorAdapter:
                     "why": "already_tightened",
                     "target": state.tightened_stop_price,
                 }
+            if state.stage in {"exiting", "cleanup", "done"}:
+                return {"action": "skip", "why": "protection_exiting", "stage": state.stage}
             if (
-                state.stage != "armed"
-                or not state.ever_armed
+                not state.ever_armed
                 or not state.entry_terminal
                 or state.prearm_failing_since is not None
                 or tracked.entry_client_order_id is None
                 or rec.stop_loss_price is None
             ):
+                # 从没完整托管过 / #325 开仓宽限期里：按原规则平。
                 return {"action": "close", "why": "not_armed", "stage": state.stage}
+            armed = state.stage == "armed"
+            if not armed and not manager.retains_confirmed_stop(position_id):
+                # 曾完整托管、这一轮退回临时保护且最后回读没有在挂的止损：交给保护状态机，
+                # 不平也不收紧，下一轮再看。
+                return {"action": "skip", "why": "protection_unconfirmed", "stage": state.stage}
             working_type = manager.stop_working_type
             long = rec.side is Side.LONG
             try:
@@ -972,8 +982,10 @@ class HbExecutorAdapter:
                 )
             gap = mark_gap_bps / 1e4
             limit = reference * (1 - gap) if long else reference * (1 + gap)
+            placeable = target < limit if long else target > limit
             info: dict[str, Any] = {
                 "target": target,
+                "placeable": placeable,
                 "existing_stop": existing,
                 "reference_price": reference,
                 "placeable_limit": limit,
@@ -986,17 +998,14 @@ class HbExecutorAdapter:
             }
             if existing >= target if long else existing <= target:
                 return {"action": "kept", "why": "existing_stop_tighter", **info}
-            if target >= limit if long else target <= limit:
+            if not placeable:
                 # 目标离触发价源太近或已越过：挂上去会（几乎）立刻触发，按原规则直接平。
-                await self._tighten_failed(
-                    position_id,
-                    "收紧止损挂不稳",
-                    f"目标 {target:g}，{working_type} {reference:g}，"
-                    f"要求至少隔 {mark_gap_bps:g} bp（界 {limit:g}）",
-                    "按原规则全平",
-                )
+                # 正常分支，不是故障：只进决策记录，不写 last_error、不发 CRITICAL。
                 return {"action": "close", "why": "target_crossed", **info}
             manager.set_tightened_stop(position_id, target, reason)
+            if not armed:
+                # 曾完整托管、旧止损仍在挂，这一轮在临时保护：目标落盘，由保护轮询换代。
+                return {"action": "pending", "why": "waiting_protection_sync", **info}
             if any(leg.state in {"submit_pending", "cancel_pending"} for leg in state.legs):
                 # 上一代（移动止损换代）还在提交 / 撤销中：目标已落盘，
                 # 等它确认后由保护轮询再换，不算失败。

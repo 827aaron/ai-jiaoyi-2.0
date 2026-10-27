@@ -8,6 +8,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,11 +23,11 @@ from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.core import hotconfig
 from jiaoyi.core.config import load_app_config
-from jiaoyi.execution.brackets import BracketManager
+from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import EntryBasis
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.tighten import breakeven_stop_price
-from jiaoyi.keeper.keeper import JevKeeper, opposite_ab_draw
+from jiaoyi.keeper.keeper import JevKeeper, opposite_ab_draw, opposite_instruction_key
 from jiaoyi.loop import Runner
 from jiaoyi.panel.protection import parse_protection
 from tests.conftest import ROOT
@@ -168,23 +169,69 @@ async def test_unconfirmed_holds_logs_counterfactual_and_model_review_continues(
     assert tighten["outcome"] == c.Outcome.HOLD and "收紧止损" in tighten["summary"]
 
 
-def test_no_market_data_falls_back_to_close(now: datetime) -> None:
-    k, rec, _, _ = make_keeper(now)
-    k._features = lambda _: None
-    v = k.review_card_rule(position(now), now)
+def test_no_market_data_only_tightens_never_closes(now: datetime) -> None:
+    k, rec, _, price = make_keeper(now, price=[67000.0])  # 有行情时会确认（亏 8R）
+    k._features = lambda _: None  # 刚重启，还没有行情快照
+    for _ in range(3):
+        v = k.review_card_rule(position(now), now)
+        assert v is not None and v.action == "hold" and "没有行情快照" in v.reason
+    assert len(rec.rows) == 1
+    rule = rec.rows[-1]["output"]["card_rule"]
+    assert rule["branch"] == "no_market_data_tighten" and rule["confirm"] is None
+    assert rule["counterfactual"]["would_close_at"] == now.isoformat()
+    assert rule["counterfactual"]["would_close_price"] is None
+    # 行情回来了：照常判确认
+    k._features = lambda _: features(now, price=price[0], atr=80.0)
+    later = now + timedelta(seconds=30)
+    v = k.review_card_rule(position(now), later)
     assert v is not None and v.action == "close"
-    assert rec.rows[-1]["output"]["card_rule"]["branch"] == "no_market_data_close"
+    assert rec.rows[-1]["output"]["card_rule"]["branch"] == "confirmed_close"
+
+
+def test_counterfactual_keeps_first_opposite_event_across_new_instructions(
+    now: datetime,
+) -> None:
+    k, rec, _, price = make_keeper(now, price=[68010.0])
+    assert k.review_card_rule(position(now), now).action == "hold"  # type: ignore[union-attr]
+    price[0] = 68020.0
+    later = now + timedelta(minutes=10)
+    reissued = card(now, bias="short", issued_at=(now + timedelta(minutes=5)).isoformat())
+    k._card = lambda _: reissued
+    assert k.review_card_rule(position(now), later).action == "hold"  # type: ignore[union-attr]
+    rule = rec.rows[-1]["output"]["card_rule"]
+    assert rule["counterfactual"]["would_close_at"] == now.isoformat()  # 第一次碰到反向卡
+    assert rule["counterfactual"]["would_close_price"] == 68010.0
+    assert rule["ref_price"] == 68020.0 and rule["ref_at"] == later.isoformat()  # 新指令新起点
+
+
+async def test_loop_no_market_data_asks_executor_to_tighten_without_closing(
+    tmp_path: Path, now: datetime
+) -> None:
+    k, _, _, _ = make_keeper(now)
+    k._features = lambda _: None
+    ex = TightenExecutor(position(now), {"action": "kept", "why": "already_tightened"})
+    runner = _runner(tmp_path, now, k, ex)
+    await runner._review_card_rules()
+    await drain(runner)
+    assert ex.closed == [] and len(ex.tighten_calls) == 1
 
 
 # ---------------------------------------------------------------- A/B
 
 
 def test_ab_draw_is_deterministic_and_arm_is_recorded(now: datetime) -> None:
-    expected = int.from_bytes(hashlib.sha256(b"pos-1|card-x|3").digest()[:8], "big") / 2**64
-    assert opposite_ab_draw("pos-1", "card-x", 3) == expected
-    assert opposite_ab_draw("pos-1", "card-x", 4) != expected
     cd = card(now, bias="short")
-    draws = {f"pos-{i}": opposite_ab_draw(f"pos-{i}", cd.card_id, cd.version) for i in range(40)}
+    key = opposite_instruction_key(cd.symbols[0], cd)
+    assert key == "BTCUSDT|2026-10-22T06:00:00+00:00|short"  # 币|这条指令的 issued_at|方向
+    raw = f"pos-1|{key}".encode()
+    expected = int.from_bytes(hashlib.sha256(raw).digest()[:8], "big") / 2**64
+    assert opposite_ab_draw("pos-1", key) == expected
+    # 整卡换版本（别的币变了）不改这条指令，抽签不变；重新开会出新指令才重抽
+    bumped = cd.model_copy(update={"version": cd.version + 1})
+    assert opposite_instruction_key(bumped.symbols[0], bumped) == key
+    again = card(now, bias="short", issued_at="2026-10-22T06:20:00Z")
+    assert opposite_instruction_key(again.symbols[0], again) != key
+    draws = {f"pos-{i}": opposite_ab_draw(f"pos-{i}", key) for i in range(40)}
     low = next(p for p, d in draws.items() if d < 0.5)
     high = next(p for p, d in draws.items() if d >= 0.5)
     cfg = TIGHT.model_copy(update={"opposite_card_ab": 0.5})
@@ -202,6 +249,9 @@ def test_ab_draw_is_deterministic_and_arm_is_recorded(now: datetime) -> None:
     k2, _, _, _ = make_keeper(now, cfg, [68010.0], cd)
     assert k2.card_rule_watch(position(now, position_id=low), now) is True
     assert k2.card_rule_watch(position(now, position_id=high), now) is False
+    assert k2.card_rule_key(position(now, position_id=low), now) == key
+    k2._card = lambda _: bumped
+    assert k2.card_rule_watch(position(now, position_id=low), now) is True
 
 
 # ---------------------------------------------------------------- 主循环接线
@@ -259,17 +309,40 @@ async def test_loop_tightens_instead_of_closing_then_closes_once_on_confirmation
         fl.opposite_tighten_buffer_bps,
         fl.opposite_tighten_mark_gap_bps,
     )
-    ex.result = {"action": "kept", "why": "already_tightened"}
-    await runner._review_card_rules()
-    await drain(runner)
-    assert ex.closed == [] and len(ex.tighten_calls) == 2
+    ex.result = None  # 同一条指令已收紧：之后每轮不再进执行器
+    for _ in range(2):
+        await runner._review_card_rules()
+        await drain(runner)
+    assert ex.closed == [] and len(ex.tighten_calls) == 1
     price[0] = 67900.0  # 亏 0.92R：确认
     await runner._review_card_rules()
     await drain(runner)
     await runner._review(position(now))  # 模型复查通道也会看到确认，但不重复发平仓
     await runner._review_card_rules()
     await drain(runner)
-    assert ex.closed == [("pos-1", CloseReason.KEEPER)] and len(ex.tighten_calls) == 2
+    assert ex.closed == [("pos-1", CloseReason.KEEPER)] and len(ex.tighten_calls) == 1
+
+
+async def test_loop_retries_pending_but_not_kept(tmp_path: Path, now: datetime) -> None:
+    k, _, _, _ = make_keeper(now, price=[68010.0])
+    ex = TightenExecutor(position(now), {"action": "pending", "why": "sync_unconfirmed"})
+    runner = _runner(tmp_path, now, k, ex)
+    rec = runner.app.recorders[c.Role.KEEPER]
+    rows: list[dict[str, Any]] = []
+    rec.record = lambda *a, **kw: rows.append({"args": a, **kw})  # type: ignore[method-assign]
+    for _ in range(2):
+        await runner._review_card_rules()
+        await drain(runner)
+    assert len(ex.tighten_calls) == 2  # 没确认的会再进执行器
+    ex.result = {"action": "kept", "why": "already_tightened", "target": 68_050.0}
+    for _ in range(2):
+        await runner._review_card_rules()
+        await drain(runner)
+    assert len(ex.tighten_calls) == 3 and ex.closed == []
+    logged = [r["output"] for r in rows if "opposite_tighten" in r.get("output", {})]
+    assert [o["opposite_tighten"]["action"] for o in logged] == ["pending", "kept"]
+    assert logged[-1]["instruction_key"] == "BTCUSDT|2026-10-22T06:00:00+00:00|short"
+    assert logged[-1]["counterfactual"] == {"estimated_target": 68_050.0, "placeable": None}
 
 
 @pytest.mark.parametrize(
@@ -483,8 +556,9 @@ async def test_target_already_crossed_by_mark_closes_instead(tmp_path: Path, sid
     assert result["action"] == "close" and result["why"] == "target_crossed"
     assert result["reference_price"] == h.mark
     assert h.state().tightened_stop_price is None and h.creates() == creates
-    assert "收紧止损挂不稳" in (h.state().last_error or "")
-    assert [a.level for a in h.critical()] == [c.AlertLevel.CRITICAL]
+    assert result["placeable"] is False
+    # 正常分支：不写 last_error、不发 CRITICAL（决策记录由主循环写）
+    assert h.state().last_error is None and h.critical() == []
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -511,8 +585,7 @@ async def test_old_path_and_unarmed_positions_close(tmp_path: Path) -> None:
     await h.protect()
     armed = h.state()
     # 曾完整托管、开仓已终态，但这一轮退回临时保护（如仓量变化）：不收紧
-    h.manager._save("pos-1", stage="provisional")
-    assert (await h.tighten())["why"] == "not_armed"
+    # （曾完整托管、退回临时保护的情形见下面单独的测试）
     # #325 开仓宽限期：从未完整托管、同步失败计时中（阶段字段被别处写成 armed 也不算）
     h.manager._save("pos-1", stage="armed", ever_armed=False, prearm_failing_since=START)
     assert (await h.tighten())["why"] == "not_armed"
@@ -520,12 +593,62 @@ async def test_old_path_and_unarmed_positions_close(tmp_path: Path) -> None:
     assert (await h.tighten())["why"] == "not_armed"
     h.manager._save("pos-1", ever_armed=False, prearm_failing_since=None)
     assert (await h.tighten())["why"] == "not_armed"  # 从没完整托管过
-    h.manager._save("pos-1", ever_armed=True)
+    h.manager._save("pos-1", ever_armed=True, stage="exiting")
+    exiting = {"action": "skip", "why": "protection_exiting", "stage": "exiting"}
+    assert await h.tighten() == exiting
     h.manager._save("pos-1", **{k: getattr(armed, k) for k in ("stage", "prearm_failing_since")})
     assert h.state().tightened_stop_price is None
     tracked = h.registry.get("pos-1")
     h.registry.put(tracked.model_copy(update={"server_protection": None}))
     assert await h.tighten() == {"action": "close", "why": "not_server_managed"}
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_provisional_after_failed_replacement_persists_target_and_waits(
+    tmp_path: Path, side: Side
+) -> None:
+    h = TightenHarness(tmp_path, side)
+    await h.protect()
+    old = h.stop_legs()[0].client_order_id
+    # 真实的换代失败：固定止损换价（开仓价回填后），新腿提交结果未知 → 退回临时保护
+    tracked = h.registry.get("pos-1")
+    moved = 99.5 if side is Side.LONG else 100.5
+    record = tracked.record.model_copy(update={"stop_loss_price": moved})
+    h.registry.put(tracked.model_copy(update={"record": record}))
+    h.exchange.unknown_submit = True
+    with pytest.raises(ProtectionIncomplete):
+        await h.manager.sync("pos-1")
+    state = h.state()
+    assert state.stage == "provisional" and state.ever_armed
+    assert h.manager.retains_confirmed_stop("pos-1")
+    creates = list(h.creates())
+    result = await h.tighten()
+    assert result["action"] == "pending"
+    assert result["why"] in ("waiting_protection_sync", "waiting_previous_generation")
+    assert h.state().tightened_stop_price == pytest.approx(_target(side), abs=0.001)
+    assert h.creates() == creates and h.exchange.orders[old].algo_status == "NEW"
+    # 交易所恢复后，保护轮询的下一次同步直接按收紧价换代
+    h.exchange.unknown_submit = False
+    h.exchange.hidden.clear()
+    assert await h.manager.sync("pos-1") == "armed"
+    live = [x for x in h.stop_legs() if x.state == "confirmed"]
+    assert [(x.purpose, x.trigger_price) for x in live] == [("tightened", _target(side))]
+
+
+async def test_provisional_without_confirmed_stop_is_left_to_protection(tmp_path: Path) -> None:
+    h = TightenHarness(tmp_path, Side.LONG)
+    await h.protect()
+    sl = h.stop_legs()[0]
+    h.exchange.orders[sl.client_order_id] = replace(
+        h.exchange.orders[sl.client_order_id], algo_status="CANCELED"
+    )
+    with suppress(ProtectionIncomplete):
+        await h.manager._refresh("pos-1")
+    h.manager._save("pos-1", stage="provisional")
+    assert not h.manager.retains_confirmed_stop("pos-1")
+    result = await h.tighten()
+    assert result["action"] == "skip" and result["why"] == "protection_unconfirmed"
+    assert h.state().tightened_stop_price is None
 
 
 async def test_closing_position_is_not_tightened(tmp_path: Path) -> None:

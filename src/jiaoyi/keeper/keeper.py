@@ -125,9 +125,11 @@ class JevKeeper:
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
         self._peak: dict[str, float] = {}  # 每个持仓复查到过的最高浮盈（基点），不被历史截断
         self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
-        # 反向卡（confirm_or_tighten）：每个持仓第一次看到这张卡（卡号:版本）时的价格和时间
+        # 反向卡（confirm_or_tighten）：每个持仓第一次看到这条反向指令（币|issued_at|方向）时的
+        # 价格和时间（ATR 走势起点），和这笔仓第一次碰到反向卡的时间和价格（反事实）
         self._opposite_ref: dict[str, tuple[str, float, datetime]] = {}
-        self._opposite_logged: dict[str, str] = {}  # 已记过「收紧」决策的卡（卡号:版本），不刷屏
+        self._opposite_first: dict[str, tuple[datetime, float | None]] = {}
+        self._opposite_logged: dict[str, tuple[str, str]] = {}  # 已记过的（指令, 分支），不刷屏
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
         """市场背景不依赖是否还有有效开仓卡；只读，不合成交易授权。"""
@@ -141,6 +143,7 @@ class JevKeeper:
         self._peak.pop(position_id, None)
         self._entry.pop(position_id, None)
         self._opposite_ref.pop(position_id, None)
+        self._opposite_first.pop(position_id, None)
         self._opposite_logged.pop(position_id, None)
 
     def history(self, position_id: str) -> list[float]:
@@ -343,17 +346,25 @@ class JevKeeper:
 
     def card_rule_watch(self, position: PositionRecord, now: datetime) -> bool:
         """只读：反向卡这次走「价格确认或收紧」新规则（不是立刻全平），模型复查照常进行。"""
+        return self.card_rule_key(position, now) is not None
+
+    def card_rule_key(self, position: PositionRecord, now: datetime) -> str | None:
+        """只读：走新规则时这条反向指令的身份（币|issued_at|方向），否则 None。接线代码按它缓存
+        「已收紧 / 已够紧」，同一条指令不再每轮进执行器的锁。"""
         card = self._card(now)
         if self._cfg.opposite_card_action != "confirm_or_tighten" or card is None:
-            return False
+            return None
         if self._card_rule(position, card, now) is None:
-            return False
-        return self._opposite_arm(position, card)[0] == "confirm_or_tighten"
+            return None
+        cs = card.for_symbol(position.symbol)
+        assert cs is not None
+        key = opposite_instruction_key(cs, card)
+        return key if self._opposite_arm(position, key)[0] == "confirm_or_tighten" else None
 
-    def _opposite_arm(self, position: PositionRecord, card: BattleCard) -> tuple[str, float]:
+    def _opposite_arm(self, position: PositionRecord, key: str) -> tuple[str, float]:
         """（这次走哪组, 抽签数）。``opposite_card_ab`` = 0 不分组，全走新规则。"""
         ab = self._cfg.opposite_card_ab
-        draw = opposite_ab_draw(position.position_id, card.card_id, card.version)
+        draw = opposite_ab_draw(position.position_id, key)
         return ("confirm_or_tighten" if ab <= 0 or draw < ab else "close"), draw
 
     def review_card_rule(self, position: PositionRecord, now: datetime) -> KeeperVerdict | None:
@@ -394,14 +405,21 @@ class JevKeeper:
         rule: dict[str, Any],
         now: datetime,
     ) -> KeeperVerdict:
-        """#314 新规则：记下抽签、价格确认的每一条输入和走了哪支，反事实一并记。"""
+        """#314 新规则：记下抽签、价格确认的每一条输入和走了哪支，反事实一并记。
+
+        没有行情快照（比如刚重启）：不平、只要求收紧（执行器自己按触发价源核对能不能挂；
+        已收紧过就是维持），有行情了再判确认。"""
         pid = position.position_id
-        key = f"{card.card_id}:v{card.version}"
-        arm, draw = self._opposite_arm(position, card)
+        key = opposite_instruction_key(cs, card)
+        arm, draw = self._opposite_arm(position, key)
         f = self._features(position.symbol)
+        first = self._opposite_first.get(pid)
+        if first is None or (first[1] is None and f is not None):
+            first = (first[0] if first else now, f.last_price if f is not None else None)
+            self._opposite_first[pid] = first  # 这笔仓第一次碰到反向卡：原规则会在这时这价平
         ref = self._opposite_ref.get(pid)
         if f is not None and (ref is None or ref[0] != key):
-            ref = (key, f.last_price, now)  # 第一次看到这张卡：之后的 ATR 走势从这里量
+            ref = (key, f.last_price, now)  # 第一次看到这条指令：之后的 ATR 走势从这里量
             self._opposite_ref[pid] = ref
         confirm = (
             opposite_confirmation(position, cs, f.last_price, f.atr, ref[1], self._cfg)
@@ -410,6 +428,7 @@ class JevKeeper:
         )
         rule.update(
             opposite_card_action="confirm_or_tighten",
+            instruction_key=key,
             ab=self._cfg.opposite_card_ab,
             ab_draw=round(draw, 6),
             arm=arm,
@@ -427,33 +446,30 @@ class JevKeeper:
                 else ("close" if confirm["confirmed"] else "tighten")
             }
         elif confirm is None:
-            branch, tag = "no_market_data_close", "（没有行情，核验不了价格，按原规则）"
+            branch, tag = "no_market_data_tighten", ""
         elif confirm["confirmed"]:
             branch, tag = "confirmed_close", f"（价格确认：{confirm['why']}）"
         else:
             branch, tag = "tighten", ""
         rule["branch"] = branch
-        if branch != "tighten":
+        if branch in ("ab_legacy_close", "confirmed_close"):
             rule["requires_confirmation"] = arm == "confirm_or_tighten"
             self._streak.pop(pid, None)
             self._opposite_logged.pop(pid, None)
             text = f"作战卡反向硬规则：{reason}，不等模型或确认{tag}"
             return self._verdict(position, now, "close", 1.0, 1, text, None, None, card_rule=rule)
-        assert ref is not None and confirm is not None
         rule["requires_confirmation"] = True
         rule["counterfactual"] = {
             "legacy_action": "close",
-            "would_close_at": ref[2].isoformat(),
-            "would_close_price": ref[1],
+            "would_close_at": first[0].isoformat(),
+            "would_close_price": first[1],
         }
-        text = (
-            f"作战卡反向（{key}，{reason}）价格未确认（{confirm['why']}）："
-            "收紧止损到保本附近，继续盯"
-        )
-        first = self._opposite_logged.get(pid) != key
-        self._opposite_logged[pid] = key
+        why = confirm["why"] if confirm is not None else "没有行情快照，先不判确认"
+        text = f"作战卡反向（{key}，{reason}）价格未确认（{why}）：收紧止损到保本附近，继续盯"
+        log_first = self._opposite_logged.get(pid) != (key, branch)
+        self._opposite_logged[pid] = (key, branch)
         return self._verdict(
-            position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=first
+            position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=log_first
         )
 
     def _giveback_guard(
@@ -682,9 +698,16 @@ class JevKeeper:
         )
 
 
-def opposite_ab_draw(position_id: str, card_id: str, version: int) -> float:
-    """反向卡 A/B 抽签：持仓号|卡号|卡版本 的 SHA-256 前 8 字节 → [0, 1)，重启、重算都一样。"""
-    digest = hashlib.sha256(f"{position_id}|{card_id}|{version}".encode()).digest()
+def opposite_instruction_key(cs: CardSymbol, card: BattleCard) -> str:
+    """这条币级反向指令的身份：币|issued_at|方向。整卡换版本（别的币变了）不改它，
+    这个币重新开会出了新指令才变。"""
+    return f"{cs.symbol}|{(cs.issued_at or card.created_at).isoformat()}|{cs.bias.value}"
+
+
+def opposite_ab_draw(position_id: str, instruction_key: str) -> float:
+    """反向卡 A/B 抽签：持仓号|指令身份 的 SHA-256 前 8 字节 → [0, 1)，重启、重算、
+    整卡换版本都一样。"""
+    digest = hashlib.sha256(f"{position_id}|{instruction_key}".encode()).digest()
     return int.from_bytes(digest[:8], "big") / 2**64
 
 

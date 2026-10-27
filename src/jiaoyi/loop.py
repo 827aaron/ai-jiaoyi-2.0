@@ -346,6 +346,7 @@ class Runner:
         self._keeper_queued: set[str] = set()
         self._card_rule_queued: set[str] = set()
         self._tighten_logged: dict[str, tuple[str, str]] = {}  # 每仓上次记下的收紧结果
+        self._tighten_done: dict[str, str] = {}  # 每仓已收紧 / 已够紧的反向指令，不再进执行器锁
         self._restore_keeper_market()
         self._regime_period: float | None = None
         self._regime_next: datetime | None = None
@@ -1175,6 +1176,7 @@ class Runner:
         self.positions = [p for p in self.positions if p.position_id != pos.position_id]
         self._keeper_market.pop(pos.position_id, None)
         self._tighten_logged.pop(pos.position_id, None)
+        self._tighten_done.pop(pos.position_id, None)
         self._save_keeper_market()
         self._reconcile_soon()
         if isinstance(self.m.keeper, _Forgets):
@@ -1279,7 +1281,9 @@ class Runner:
                 if verdict is not None and verdict.action == "close":
                     await self.close(pos, CloseReason.KEEPER)
                 elif verdict is not None:  # 反向卡价格未确认（#314）：收紧止损，不行就照旧平
-                    await self._opposite_tighten(pos, verdict.reason)
+                    key_of = getattr(keeper, "card_rule_key", None)
+                    key = key_of(pos, self.app.clock()) if callable(key_of) else None
+                    await self._opposite_tighten(pos, verdict.reason, key)
             finally:
                 self._card_rule_queued.discard(pid)
 
@@ -1304,11 +1308,16 @@ class Runner:
                 self._spawn(one(pid))
         return attempted
 
-    async def _opposite_tighten(self, pos: PositionRecord, reason: str) -> None:
+    async def _opposite_tighten(
+        self, pos: PositionRecord, reason: str, key: str | None = None
+    ) -> None:
         """反向卡价格未确认：让执行器把托管止损收紧到保本附近；执行器说收紧不了
-        （旧通道、还没完整托管、证据读不到、目标价已被越过）就照原规则全平。
+        （旧通道、从没完整托管 / 开仓宽限期、证据读不到、目标价挂不稳）就照原规则全平。
 
-        结果换了才记一条管家决策记录（每轮复查都会再调一次，已收紧的只返回 kept）。"""
+        同一条反向指令（``key``）已收紧 / 已够紧就记在内存里，之后每轮不再进执行器的锁；
+        结果换了才记一条管家决策记录。"""
+        if key is not None and self._tighten_done.get(pos.position_id) == key:
+            return
         executor = self.m.executor
         result: dict[str, Any]
         if isinstance(executor, _TightensStop):
@@ -1326,6 +1335,8 @@ class Runner:
         else:
             result = {"action": "close", "why": "executor_cannot_tighten"}
         action, why = str(result.get("action")), str(result.get("why"))
+        if key is not None and action in ("tightened", "kept"):
+            self._tighten_done[pos.position_id] = key
         if self._tighten_logged.get(pos.position_id) != (action, why):
             self._tighten_logged[pos.position_id] = (action, why)
             rec = self.app.recorders.get(Role.KEEPER)
@@ -1345,7 +1356,15 @@ class Runner:
                     symbol=pos.symbol,
                     signal_id=pos.signal_id,
                     position_id=pos.position_id,
-                    output={"opposite_tighten": result, "reason": reason},
+                    output={
+                        "opposite_tighten": result,
+                        "reason": reason,
+                        "instruction_key": key,
+                        "counterfactual": {
+                            "estimated_target": result.get("target"),
+                            "placeable": result.get("placeable"),
+                        },
+                    },
                 )
         if action == "close":
             await self.close(pos, CloseReason.KEEPER)
