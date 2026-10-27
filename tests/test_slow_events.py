@@ -531,3 +531,141 @@ def test_key_level_trigger_config_values() -> None:
         update={"schedule": s.schedule.model_copy(update={"key_level_trigger": "cross"})}
     )
     assert s.commander_kwargs()["events"].key_level_trigger == "cross"
+
+
+def _cross(tmp_path: Path, now: datetime, eng: FakeEngine, **kw: object):  # type: ignore[no-untyped-def]
+    base: dict[str, object] = {"events": rules(key_level_trigger="cross"), "ttl": CARD_TTL}
+    return make(tmp_path, eng, now, **{**base, **kw})
+
+
+@pytest.mark.parametrize("picks", [["AAUSDT", "BBUSDT"], ["BBUSDT"]])
+async def test_cross_mode_full_round_keeps_sides_of_coins_without_new_conclusion(
+    tmp_path: Path, now: datetime, picks: list[str]
+) -> None:
+    """整轮会里 AA 没有新结论（同币间隔内沿用 / 没挑中原样留着）：两侧和没开上的穿越都不清。"""
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, clock = _cross(tmp_path, now, eng)
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    c.refresh_reason(now, p, {"AAUSDT": 99.0, "CCUSDT": 99.0})  # AA 在里侧
+    eng.picks = picks
+    clock[0] = t = now + timedelta(minutes=10)
+    await c.refresh(p, "scheduled")
+    assert eng.analyzed.count("AAUSDT") == 1  # AA 这轮没重开
+    clock[0] = t = now + timedelta(minutes=70)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert c.pop_event(t, p) == ("AAUSDT", "key_level_break")
+
+
+async def test_cross_mode_full_round_keeps_pending_crossing_of_reused_coin(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = FakeEngine(["AAUSDT", "BBUSDT"])
+    c, _, clock = _cross(tmp_path, now, eng)
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    c.refresh_reason(now, p, {"AAUSDT": 99.0})
+    clock[0] = t = now + timedelta(minutes=5)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})  # 穿了，同币间隔没到
+    eng.picks = ["BBUSDT"]
+    clock[0] = t = now + timedelta(minutes=10)
+    await c.refresh(p, "scheduled")
+    clock[0] = t = now + timedelta(minutes=61)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert c.pop_event(t, p) == ("AAUSDT", "key_level_break")
+
+
+async def test_cross_mode_without_event_meetings_records_sides_inside_refresh_gap(
+    tmp_path: Path, now: datetime
+) -> None:
+    """不开临时会时：开会间隔内也照常记两侧、认穿越，间隔只管什么时候开整轮。"""
+    c, _, clock = make(
+        tmp_path,
+        FakeEngine(["AAUSDT"]),
+        now,
+        events=EventRules(key_level_trigger="cross"),
+        min_refresh_gap=timedelta(minutes=120),
+        ttl=CARD_TTL,
+    )
+    p = pool(now, entry("AAUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = t = now + timedelta(minutes=1)
+    assert c.refresh_reason(t, p, {"AAUSDT": 99.0}) is None
+    clock[0] = t = now + timedelta(minutes=30)
+    assert c.refresh_reason(t, p, {"AAUSDT": 101.0}) is None  # 间隔没到
+    clock[0] = t = now + timedelta(minutes=121)
+    assert c.refresh_reason(t, p, {"AAUSDT": 101.0}) == "key_level_break"
+
+
+async def test_cross_mode_new_card_sides_use_price_at_meeting_start(
+    tmp_path: Path, now: datetime
+) -> None:
+    """开会开始时价格在里侧、开完已到外侧：这是穿越，不当成“出卡时就在外侧”。"""
+    c, _, clock = _cross(tmp_path, now, FakeEngine(["AAUSDT"]))
+    p = pool(now, entry("AAUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = t = now + timedelta(minutes=70)
+    c.refresh_reason(t, p, {"AAUSDT": 99.0})
+    c.request_event("AAUSDT", "predictor_against_card")
+    assert c.pop_event(t, p) == ("AAUSDT", "predictor_against_card")
+    assert await c.refresh_symbol(p, "AAUSDT", "predictor_against_card") is not None
+    clock[0] = t = now + timedelta(minutes=131)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert c.pop_event(t, p) == ("AAUSDT", "key_level_break")
+
+
+async def test_cross_mode_crossing_kept_when_meeting_never_starts(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, clock = _cross(tmp_path, now, FakeEngine(["AAUSDT", "BBUSDT"]))
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    c.refresh_reason(now, p, {"AAUSDT": 99.0})
+    clock[0] = t = now + timedelta(minutes=70)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert c.pop_event(t, p) == ("AAUSDT", "key_level_break")
+    # 刚好这时 AA 不在池里：会没开成，穿越不算用掉
+    assert await c.refresh_symbol(pool(t, entry("BBUSDT")), "AAUSDT", "key_level_break") is None
+    clock[0] = t = now + timedelta(minutes=71)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert c.pop_event(t, p) == ("AAUSDT", "key_level_break")
+
+
+async def test_cross_mode_requeue_only_own_reason_and_in_pool(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, clock = _cross(tmp_path, now, FakeEngine(["AAUSDT", "BBUSDT"]))
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    c.refresh_reason(now, p, {"AAUSDT": 99.0, "BBUSDT": 99.0})
+    clock[0] = t0 = now + timedelta(minutes=5)
+    c.request_event("AAUSDT", "predictor_against_card")  # AA 先排了别的原因
+    c.refresh_reason(t0, p, {"AAUSDT": 101.0, "BBUSDT": 101.0})
+    assert c._pending["BBUSDT"] == ("key_level_break", t0)
+    clock[0] = t = now + timedelta(minutes=40)  # 两个排队都过期了
+    c.refresh_reason(t, pool(t, entry("AAUSDT")), {"AAUSDT": 101.0, "BBUSDT": 101.0})
+    assert c._pending["AAUSDT"] == ("predictor_against_card", t0)  # 别的原因不替它重排
+    assert c._pending["BBUSDT"] == ("key_level_break", t0)  # 不在池里不重排
+
+
+async def test_cross_mode_pending_crossing_expires(tmp_path: Path, now: datetime) -> None:
+    """穿越一直开不上会（每日上限）：等过开会间隔和同币间隔就作废，不隔夜补开。"""
+    c, _, clock = _cross(
+        tmp_path,
+        now,
+        FakeEngine(["AAUSDT", "BBUSDT"]),
+        events=rules(key_level_trigger="cross", max_per_day=1),
+    )
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = t = now + timedelta(minutes=70)
+    c.request_event("BBUSDT", "predictor_against_card")
+    await c.refresh_symbol(p, "BBUSDT", "predictor_against_card")  # 当天名额用完
+    c.refresh_reason(t, p, {"AAUSDT": 99.0})
+    clock[0] = t = now + timedelta(minutes=71)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert c.pop_event(t, p) is None
+    clock[0] = t = now + timedelta(minutes=135)
+    c.refresh_reason(t, p, {"AAUSDT": 101.0})
+    assert "AAUSDT" not in c._level_cross and "AAUSDT" not in c._pending
+    assert "expired" in _level_logs(tmp_path, now)
