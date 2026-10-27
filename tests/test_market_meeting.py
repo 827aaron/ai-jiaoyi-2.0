@@ -329,7 +329,8 @@ def test_row_has_every_field_and_marks_missing_numbers() -> None:
     row = market_table.format_row(e, "4h")
     for part in (
         "ENAUSDT tier=head cat=alt score=0.71",
-        "chg thisHour +0.2% 1h -0.4% 4h +1.2% 24h -3.1%",
+        "chg current_hour_open_to_ticker +0.2% completed_hour -0.4% "
+        "completed_4h_close_span +1.2% ticker_24h -3.1%",
         "pos24h 38%",
         "move4h 3.7% (37x fee, rank 1/40)",
         "vol1h 1.6x",
@@ -354,8 +355,11 @@ def test_breadth_covers_the_whole_pool() -> None:
         _entry_with(chg_1h=-0.4, chg_4h=-5.0),
     ]
     line = market_table.breadth_line(pool)
-    assert line.startswith("Pool breadth (3): last hour up 1 / down 2, median -0.4%")
-    assert "last 4h up 0 / down 3, median -3.0%" in line and "24h up 1 / down 1" in line
+    assert line.startswith(
+        "Pool breadth (3): completed_hour up 1 / down 2 / flat 0 / missing 0, median -0.4%"
+    )
+    assert "completed_4h_close_span up 0 / down 3 / flat 0 / missing 0, median -3.0%" in line
+    assert "ticker_24h up 1 / down 1 / flat 0 / missing 1, median -0.5%" in line
 
 
 def test_count_numbers() -> None:

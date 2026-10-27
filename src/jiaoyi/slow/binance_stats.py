@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from collections.abc import Sequence
 from dataclasses import replace
@@ -21,6 +22,100 @@ from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.screener import SymbolStats
 
 _BASE = "https://fapi.binance.com"
+
+
+def _source_metadata(*args: Any) -> dict[str, Any]:
+    try:
+        metadata = _source_metadata_impl(*args)
+        json.dumps(metadata, allow_nan=False)
+        return metadata
+    except Exception:
+        return {}  # 来源旁路坏了仍保留原有统计；未知不伪造。
+
+
+def _source_metadata_impl(
+    ticker: dict[str, Any],
+    complete: Sequence[Sequence[Any]],
+    partial: Sequence[Any] | None,
+    requested_at: datetime,
+    request_clocks: dict[str, Any] | None = None,
+    oi: Sequence[dict[str, Any]] = (),
+    hold_n: int = 1,
+) -> dict[str, Any]:
+    """只标记原算法实际使用的边界，不改数字，也不把请求时间冒充交易所事件时间。"""
+
+    def stamp(value: Any) -> str | None:
+        try:
+            return datetime.fromtimestamp(float(value) / 1000, UTC).isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    volumes = [float(k[7]) for k in complete]
+    base = complete[-24:]
+    avg = sum(volumes[-24:]) / len(volumes[-24:]) if volumes else 0.0
+    elapsed = (requested_at.timestamp() * 1000 - float(partial[0])) / 60000 if partial else 0.0
+    branch = "default1.0_insufficient_baseline"
+    numerator = None
+    if partial is not None and elapsed >= 15.0 and avg > 0:
+        branch, numerator = "current_hour_extrapolated", partial
+    elif len(volumes) >= 2:
+        base = complete[-25:-1]
+        pavg = sum(float(k[7]) for k in base) / len(base) if base else 0.0
+        if pavg > 0:
+            branch, numerator = "latest_completed_hour", complete[-1]
+    volume_meta = {
+        "branch": branch,
+        "current_hour_elapsed_minutes": elapsed if partial else None,
+        "baseline_bars": len(base),
+        "baseline_start": stamp(base[0][0]) if base else None,
+        "baseline_end": stamp(base[-1][6]) if base else None,
+        "numerator_start": stamp(numerator[0]) if numerator else None,
+        "numerator_end": stamp(numerator[6])
+        if numerator is not None and branch == "latest_completed_hour"
+        else None,
+        "partial_observed_at": ((request_clocks or {}).get("klines") or {}).get(
+            "response_observed_at"
+        )
+        if branch == "current_hour_extrapolated"
+        else None,
+        "extrapolation_elapsed_to": requested_at.isoformat()
+        if branch == "current_hour_extrapolated"
+        else None,
+        "default_is_observed_volume": False,
+    }
+    return {
+        "source": "binance_usdm_public_rest",
+        "request_clocks": request_clocks or {},
+        "price_event_at": None,
+        "oi_window_start": stamp(oi[0].get("timestamp")) if oi else None,
+        "oi_window_end": stamp(oi[-1].get("timestamp")) if oi else None,
+        "taker_window": "latest_completed_hour",
+        "volume_ratio": volume_meta,
+        "move_hold_windows": [
+            {
+                "start": stamp(complete[len(complete) - (i + 1) * hold_n][0]),
+                "end": stamp(complete[len(complete) - i * hold_n - 1][6]),
+            }
+            for i in range(3)
+            if len(complete) >= (i + 1) * hold_n
+        ],
+        "liquidation_source_window": (
+            "rolling60min_local_feed; coverage is liq_feed_min "
+            "when recorded else source-specific unknown"
+        ),
+        "requested_at": requested_at.isoformat(),
+        "assembled_at": datetime.now(UTC).isoformat(),
+        "ticker_window_end_at": stamp(ticker.get("closeTime")),
+        "ticker_window_start": stamp(ticker.get("openTime")),
+        "completed_hour_start": stamp(complete[-1][0]) if complete else None,
+        "completed_hour_end": stamp(complete[-1][6]) if complete else None,
+        "completed_4h_close_span_start": stamp(complete[-5][6]) if len(complete) >= 5 else None,
+        "completed_4h_close_span_end": stamp(complete[-1][6]) if len(complete) >= 5 else None,
+        "current_hour_open_at": stamp(partial[0]) if partial else None,
+        "current_hour_price_event_at": None,
+        "complete_hour_bars": len(complete),
+        "source_clock_status": "exchange_fields_where_present_otherwise_unknown",
+    }
 
 
 def _kind(sym: dict[str, Any]) -> str:
@@ -55,6 +150,21 @@ class BinanceStatsSource:
         r.raise_for_status()
         return r.json()
 
+    async def _get_timed(self, path: str, **params: Any) -> tuple[Any, dict[str, Any]]:
+        def stamp() -> str | None:
+            try:
+                return datetime.now(UTC).isoformat()
+            except Exception:
+                return None
+
+        started = stamp()
+        data = await self._get(path, **params)
+        return data, {
+            "source": path,
+            "request_started_at": started,
+            "response_observed_at": stamp(),
+        }
+
     async def fetch(self, now: datetime) -> list[SymbolStats]:
         return await self._fetch(now)
 
@@ -63,12 +173,17 @@ class BinanceStatsSource:
         return await self._fetch(now, set(symbols) | {"BTCUSDT"})
 
     async def _fetch(self, now: datetime, symbols: set[str] | None = None) -> list[SymbolStats]:
-        info, tick24, book, premium = await asyncio.gather(
-            self._get("/fapi/v1/exchangeInfo"),
-            self._get("/fapi/v1/ticker/24hr"),
-            self._get("/fapi/v1/ticker/bookTicker"),
-            self._get("/fapi/v1/premiumIndex"),
+        info_pair, tick_pair, book_pair, premium_pair = await asyncio.gather(
+            self._get_timed("/fapi/v1/exchangeInfo"),
+            self._get_timed("/fapi/v1/ticker/24hr"),
+            self._get_timed("/fapi/v1/ticker/bookTicker"),
+            self._get_timed("/fapi/v1/premiumIndex"),
         )
+        info, _ = info_pair
+        tick24, ticker_clock = tick_pair
+        book, book_clock = book_pair
+        premium, funding_clock = premium_pair
+        common_clocks = {"ticker": ticker_clock, "book": book_clock, "funding": funding_clock}
         live = [
             s
             for s in info["symbols"]
@@ -90,7 +205,7 @@ class BinanceStatsSource:
             else ranked[: self._top_k]
         )
         results = await asyncio.gather(
-            *(self._one(t, onboard, books, funding, kinds, now) for t in top),
+            *(self._one(t, onboard, books, funding, kinds, now, common_clocks) for t in top),
             return_exceptions=True,
         )
         got = [r for r in results if isinstance(r, tuple)]
@@ -115,17 +230,21 @@ class BinanceStatsSource:
         funding: dict[str, float],
         kinds: dict[str, str],
         now: datetime,
+        common_clocks: dict[str, Any] | None = None,
     ) -> tuple[SymbolStats, list[float]]:
         sym = t["symbol"]
         last = float(t["lastPrice"])
         b = books[sym]
         bid, ask = float(b["bidPrice"]), float(b["askPrice"])
         mid = (bid + ask) / 2 or last
-        depth, klines, oi = await asyncio.gather(
-            self._get("/fapi/v1/depth", symbol=sym, limit=100),
-            self._get("/fapi/v1/klines", symbol=sym, interval="1h", limit=self._limit),
-            self._get("/futures/data/openInterestHist", symbol=sym, period="1h", limit=2),
+        depth_pair, kline_pair, oi_pair = await asyncio.gather(
+            self._get_timed("/fapi/v1/depth", symbol=sym, limit=100),
+            self._get_timed("/fapi/v1/klines", symbol=sym, interval="1h", limit=self._limit),
+            self._get_timed("/futures/data/openInterestHist", symbol=sym, period="1h", limit=2),
         )
+        depth, depth_clock = depth_pair
+        klines, kline_clock = kline_pair
+        oi, oi_clock = oi_pair
         # 深度：中间价上下 0.5% 内双边挂单额里较小的一边
         lo, hi = mid * 0.995, mid * 1.005
         bid_usdt = sum(float(p) * float(q) for p, q in depth["bids"] if float(p) >= lo)
@@ -179,6 +298,20 @@ class BinanceStatsSource:
             ),
             bars=tuple(
                 (int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4])) for k in klines
+            ),
+            source_metadata=_source_metadata(
+                t,
+                complete,
+                partial,
+                now,
+                {
+                    **(common_clocks or {}),
+                    "depth": depth_clock,
+                    "klines": kline_clock,
+                    "oi": oi_clock,
+                },
+                oi,
+                self._n,
             ),
         )
         return stats, [float(k[4]) for k in complete[-25:]]

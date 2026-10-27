@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import statistics
 from collections.abc import Iterable, Sequence
@@ -22,24 +23,24 @@ def count_numbers(text: str) -> int:
 
 def _pct(m: dict[str, float], key: str, signed: bool = True, digits: int = 1) -> str:
     v = m.get(key)
-    if v is None:
+    if v is None or not math.isfinite(v):
         return NA
     return f"{v:+.{digits}f}%" if signed else f"{v:.{digits}f}%"
 
 
 def _num(m: dict[str, float], key: str, fmt: str, unit: str = "") -> str:
     v = m.get(key)
-    return NA if v is None else f"{format(v, fmt)}{unit}"
+    return NA if v is None or not math.isfinite(v) else f"{format(v, fmt)}{unit}"
 
 
 def format_row(e: SymbolPoolEntry, hold: str, headlines: str = "") -> str:
     """一个候选一行：英文字段名、数字带单位、缺的写 n/a。``headlines`` 是已经格式化好的新闻标题。"""
-    m = e.metrics
+    m = {key: value for key, value in e.metrics.items() if math.isfinite(value)}
     move = m.get("move_hold")
     move_txt = (
-        f"{move:.1f}% ({m.get('fee_x', 0):.0f}x fee, rank {m['rank']:.0f}/{m['pool_n']:.0f})"
+        f"{move:.1f}% ({_num(m, 'fee_x', '.0f')}x fee, rank {m['rank']:.0f}/{m['pool_n']:.0f})"
         if move is not None and "rank" in m and "pool_n" in m
-        else (f"{move:.1f}% ({m.get('fee_x', 0):.0f}x fee)" if move is not None else NA)
+        else (f"{move:.1f}% ({_num(m, 'fee_x', '.0f')}x fee)" if move is not None else NA)
     )
     if "liq_1h" in m:
         share = f" ({m['liq_share']:.1f}% of 1h vol)" if "liq_share" in m else ""
@@ -50,8 +51,9 @@ def format_row(e: SymbolPoolEntry, hold: str, headlines: str = "") -> str:
         liq = NA
     row = (
         f"{e.symbol} tier={e.tier or '-'} cat={e.category.value} score={e.score:.2f}"
-        f" | chg thisHour {_pct(m, 'chg_this_hour')} 1h {_pct(m, 'chg_1h')}"
-        f" 4h {_pct(m, 'chg_4h')} 24h {_pct(m, 'chg_24h')}"
+        f" | chg current_hour_open_to_ticker {_pct(m, 'chg_this_hour')}"
+        f" completed_hour {_pct(m, 'chg_1h')}"
+        f" completed_4h_close_span {_pct(m, 'chg_4h')} ticker_24h {_pct(m, 'chg_24h')}"
         f" | pos24h {_num(m, 'pos_24h', '.0f', '%')}"
         f" | move{hold} {move_txt}"
         f" | vol1h {_num(m, 'vol_ratio_1h', '.1f', 'x')}"
@@ -67,18 +69,20 @@ def format_row(e: SymbolPoolEntry, hold: str, headlines: str = "") -> str:
 
 
 def _breadth(values: Iterable[float | None]) -> str:
-    vs = [v for v in values if v is not None]
-    if not vs:
-        return f"{NA}"
+    raw = list(values)
+    vs = [v for v in raw if v is not None and math.isfinite(v)]
     up = sum(1 for v in vs if v > 0)
-    return f"up {up} / down {len(vs) - up}, median {statistics.median(vs):+.1f}%"
+    down = sum(1 for v in vs if v < 0)
+    flat = sum(1 for v in vs if v == 0)
+    median = f"{statistics.median(vs):+.1f}%" if vs else NA
+    return f"up {up} / down {down} / flat {flat} / missing {len(raw) - len(vs)}, median {median}"
 
 
 def breadth_line(pool: Sequence[SymbolPoolEntry]) -> str:
     """池子概况：覆盖池里全部币（含尾部），给大盘判断用，全由代码算。"""
     n = len(pool)
     return (
-        f"Pool breadth ({n}): last hour {_breadth(e.metrics.get('chg_1h') for e in pool)}; "
-        f"last 4h {_breadth(e.metrics.get('chg_4h') for e in pool)}; "
-        f"24h {_breadth(e.metrics.get('chg_24h') for e in pool)}"
+        f"Pool breadth ({n}): completed_hour {_breadth(e.metrics.get('chg_1h') for e in pool)}; "
+        f"completed_4h_close_span {_breadth(e.metrics.get('chg_4h') for e in pool)}; "
+        f"ticker_24h {_breadth(e.metrics.get('chg_24h') for e in pool)}"
     )

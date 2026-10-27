@@ -77,6 +77,7 @@ from jiaoyi.sentinel.regime_flip import (
     FlipJournal,
     KlineSource,
     RegimeFlip,
+    check_diagnostics,
 )
 from jiaoyi.sentinel.regime_flip import (
     snapshot as regime_snapshot,
@@ -1415,6 +1416,15 @@ class Runner:
             "reference_btc_px": ref.btc_px if ref else None,
             "regime_age_min": (now - ref.ts).total_seconds() / 60 if ref else None,
             "thresholds": self._regime.thresholds(),
+            "flat_1h": sample.flat if sample else None,
+            "missing_1h": sample.missing if sample else None,
+            "requested_symbols": sample.requested if sample else None,
+            "window_start": (sample.ts - timedelta(hours=1)).isoformat() if sample else None,
+            "window_end": sample.ts.isoformat() if sample else None,
+            "confirm_count_before": self._regime.count,
+            "last_rerun_at": self._regime.last_rerun.isoformat()
+            if self._regime.last_rerun
+            else None,
             "up_1h": sample.up if sample else 0,
             "down_1h": sample.down if sample else 0,
             "n": sample.n if sample else 0,
@@ -1430,6 +1440,7 @@ class Runner:
         }
 
     def _flip_blocked(self, row: dict[str, Any], reason: str) -> None:
+        row.update(kind="blocked", blocked_reason=reason)  # 旁路最终检查结果；不改变判定。
         self._regime_journal.emit(
             {
                 **row,
@@ -1512,6 +1523,18 @@ class Runner:
                 self._regime.reset()
                 log.exception("大盘翻转本轮检查失败")
                 self._flip_blocked(row, "数据不足：检查失败")
+            finally:
+                try:
+                    row["check_completed_at"] = self.app.clock().isoformat()
+                    row["confirm_count_after"] = self._regime.count
+                    row["market_view_id"] = (
+                        cards.latest_market_view.market_view_id
+                        if cards.latest_market_view
+                        else None
+                    )
+                    self._regime_journal.audit_check(check_diagnostics(row))
+                except Exception:
+                    log.warning("翻转完整检查轨迹不可用，原判断不变", exc_info=True)
             # 回填失败不改变本轮判断或连续确认次数。
             if self._regime_enabled() and not binance_gate.banned_until():
                 try:

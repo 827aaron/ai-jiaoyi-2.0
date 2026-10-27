@@ -75,6 +75,7 @@ from jiaoyi.slow.levels import (
     select_levels,
 )
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
+from jiaoyi.slow.market_audit import invoke_market, market_timing_note
 from jiaoyi.slow.meeting_live import MeetingLive, tap_graph
 from jiaoyi.slow.news import NewsHub, format_items
 from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
@@ -2098,19 +2099,31 @@ class TradingAgentsEngine:
             market,
             table,
         )
+        prompt = market_timing_note() + prompt
         prompt += self._review_prompt(pool or candidates, card_context)
         valid = [e.symbol for e in candidates]
-        draft: _PickDraft = llm.invoke(prompt, config={"callbacks": [handler]})
+        draft: _PickDraft = invoke_market(
+            llm,
+            prompt,
+            handler,
+            scope="scheduled_market",
+            table_symbols=valid,
+            breadth_symbols=[e.symbol for e in pool or candidates],
+        )
         problems = pick_problems(draft, valid)
         retried = bool(problems)
         if problems:
             # 重问一次，把缺了哪些币、哪条不合格写进追问；重问失败就用第一次的回答
             try:
-                again: _PickDraft = llm.invoke(
+                again: _PickDraft = invoke_market(
+                    llm,
                     prompt
                     + "\n\nYour previous answer had these problems, answer again in full:\n- "
                     + "\n- ".join(problems),
-                    config={"callbacks": [handler]},
+                    handler,
+                    scope="scheduled_market",
+                    table_symbols=valid,
+                    breadth_symbols=[e.symbol for e in pool or candidates],
                 )
                 draft, problems = again, pick_problems(again, valid)
             except Exception:
@@ -2238,9 +2251,17 @@ class TradingAgentsEngine:
                 + "\n"
                 + table
             )
+            prompt = market_timing_note() + prompt
             prompt += self._review_prompt(pool, card_context)
             for attempt in range(2):
-                draft: _MarketDraft = llm.invoke(prompt, config={"callbacks": [handler]})
+                draft: _MarketDraft = invoke_market(
+                    llm,
+                    prompt,
+                    handler,
+                    scope="market_only",
+                    table_symbols=[e.symbol for e in pool],
+                    breadth_symbols=[e.symbol for e in pool],
+                )
                 if not isinstance(draft, _MarketDraft):
                     raise ValueError("市场刷新没有返回结构化观点")
                 if market_table.count_numbers(draft.regime) >= 2:

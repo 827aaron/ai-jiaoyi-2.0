@@ -8,7 +8,7 @@ JSON 示例见 ``contracts/examples/symbol_pool.json``。
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -73,6 +73,10 @@ class SymbolPool(Contract):
     pool_id: str = Field(min_length=1)
     ts: AwareDatetime
     entries: list[SymbolPoolEntry]
+    source_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="本次池统计的来源/实际窗口旁路元数据；旧池缺失即未知，不改变原metrics。",
+    )
 
     @property
     def in_pool(self) -> list[SymbolPoolEntry]:
