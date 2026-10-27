@@ -404,6 +404,26 @@ def _bracket_child(order: ExchangeBracket, raw: dict[str, Any]) -> ExchangeBrack
     return replace(order, actual_order_status=str(status), filled_quantity=filled)
 
 
+_TRIGGER_FAILED = frozenset({"REJECTED", "EXPIRED"})
+
+
+def _trigger_failed(raw: dict[str, Any], order: ExchangeBracket) -> bool:
+    """触发了但交易所没下出子单：终态 REJECTED/EXPIRED、明确的空 actualOrderId、非零 triggerTime。
+
+    缺字段、null、CANCELED（撤单可能与触发竞速）都不算；调用方还须按 CID 复核没有子单。
+    """
+    actual, trigger = raw.get("actualOrderId"), raw.get("triggerTime")
+    return (
+        order.child_state == "unknown"
+        and order.actual_order_id is None
+        and order.algo_status in _TRIGGER_FAILED
+        and order.triggered_at is not None
+        and actual in ("", "0", 0)
+        and not isinstance(actual, bool)
+        and not isinstance(trigger, bool)
+    )
+
+
 def _bracket_settled(order: ExchangeBracket) -> bool:
     """仅说明这张 algo 及其已知 child 不再工作，不证明账户已平仓。"""
     if order.child_state == "identified":
@@ -1182,6 +1202,8 @@ class CcxtBinanceFutures:
                     {"symbol": symbol, "orderId": order.actual_order_id}
                 )
                 order = _bracket_child(order, actual)
+            elif _trigger_failed(raw, order):
+                order = await self._no_child_after_trigger(order)
             return order
         except Exception as error:
             raise ExchangeError(
@@ -1230,11 +1252,39 @@ class CcxtBinanceFutures:
                     {"symbol": symbol, "orderId": order.actual_order_id}
                 )
                 order = _bracket_child(order, actual)
+            elif _trigger_failed(raw, order):
+                order = await self._no_child_after_trigger(order)
             return order
         except Exception as error:
             raise ExchangeError(
                 "保命单或实际子订单证据不完整", transient=is_transient(error)
             ) from error
+
+    async def _no_child_after_trigger(self, order: ExchangeBracket) -> ExchangeBracket:
+        """触发后被拒的条件单：按 clientAlgoId 复核，查无或同名单已终态零成交才认作没有子单。
+
+        Binance 不保证子单 CID 等于 clientAlgoId，这一查只能排除同名子单；查到在场或有成交的单、
+        身份不符或查询失败都保留 unknown（由调用方抛错）。
+        """
+        import ccxt.async_support as ccxt
+
+        try:
+            raw = await self._ex.fapiPrivateGetOrder(
+                {"symbol": order.symbol, "origClientOrderId": order.client_order_id}
+            )
+        except ccxt.OrderNotFound:
+            return replace(order, child_state="absent")
+        if (
+            isinstance(raw, dict)
+            and raw.get("symbol") == order.symbol
+            and raw.get("clientOrderId") == order.client_order_id
+            and raw.get("side") == order.close_side.upper()
+            and _close_bool(raw.get("reduceOnly"))
+            and raw.get("status") in _CHILD_TERMINAL - {"FILLED"}
+            and _bracket_number(raw.get("executedQty"), zero=True) == 0
+        ):
+            return replace(order, child_state="absent")
+        raise ValueError("触发后被拒的条件单仍查到在场或有成交的同名订单，子单不能认作不存在")
 
     async def open_brackets(self, symbol: str | None = None) -> list[ExchangeBracket]:
         """仅返回 br-sl/br-tp 角色；不接管 lifeboat 或用户单，不推导子单成交量。"""

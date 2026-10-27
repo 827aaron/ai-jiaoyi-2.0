@@ -200,6 +200,9 @@ def test_leg_state_requires_all_three_facts_for_live() -> None:
     assert leg_state({**base, "algo_status": None}) == "unknown"
     assert leg_state({**base, "state": "rejected"}) == "rejected"
     assert leg_state({**base, "algo_status": "CANCELED"}) == "cancelled"
+    rejected = {**base, "algo_status": "REJECTED", "triggered_at": "2026-10-27T22:43:44.459000Z"}
+    assert leg_state(rejected) == "cancelled"
+    assert leg_state({**rejected, "child_state": "unknown"}) == "triggered"
     assert parse_protection("garbage", NOW, 120) is None
 
 

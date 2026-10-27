@@ -780,3 +780,42 @@ async def test_real_ccxt_maps_both_types_and_rounding_to_algo_without_network(
         assert ex.urls["api"]["fapiPublic"] == "https://demo-fapi.binance.com/fapi/v1"
     finally:
         await ex.close()
+
+
+@pytest.mark.parametrize("status", ["REJECTED", "EXPIRED"])
+async def test_trigger_failed_without_child_is_absent_only_after_cid_lookup(status: str) -> None:
+    obj, ex = client()
+    ex.fapiPrivateGetAlgoOrder.side_effect = None
+    ex.fapiPrivateGetAlgoOrder.return_value = raw(
+        algoStatus=status, triggerTime=1793100001000, actualOrderId=""
+    )
+    ex.fapiPrivateGetOrder.side_effect = ccxt.OrderNotFound("Order does not exist")
+    order = await obj.get_bracket("SYNTHUSDT", algo_id="17")
+    assert order is not None and order.child_state == "absent"
+    assert order.actual_order_id is None and order.filled_quantity is None
+    ex.fapiPrivateGetOrder.assert_awaited_once_with(
+        {"symbol": "SYNTHUSDT", "origClientOrderId": "br-sl-synthetic"}
+    )
+    ex.fapiPrivateGetOrder.side_effect = ccxt.RequestTimeout("synthetic")
+    with pytest.raises(ExchangeError, match="证据不完整"):
+        await obj.get_bracket("SYNTHUSDT", algo_id="17")
+
+
+async def test_lifeboat_trigger_failed_without_child_is_absent_only_after_cid_lookup() -> None:
+    obj, ex = client()
+    ex.fapiPrivateGetAlgoOrder.side_effect = None
+    ex.fapiPrivateGetAlgoOrder.return_value = raw(
+        clientAlgoId="lb-position",
+        workingType="MARK_PRICE",
+        algoStatus="REJECTED",
+        triggerTime=1793100001000,
+    )
+    ex.fapiPrivateGetOrder.side_effect = ccxt.OrderNotFound("Order does not exist")
+    order = await obj.get_lifeboat("SYNTHUSDT", client_order_id="lb-position")
+    assert order is not None and order.child_state == "absent"
+    ex.fapiPrivateGetOrder.side_effect = None
+    ex.fapiPrivateGetOrder.return_value = child(
+        clientOrderId="lb-position", status="NEW", executedQty="0"
+    )
+    with pytest.raises(ExchangeError, match="证据不完整"):
+        await obj.get_lifeboat("SYNTHUSDT", client_order_id="lb-position")

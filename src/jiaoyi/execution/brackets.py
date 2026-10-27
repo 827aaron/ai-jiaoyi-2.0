@@ -143,7 +143,20 @@ _TRIGGERED = {"TRIGGERING", "TRIGGERED", "FINISHED"}
 _READBACK_POLL_S = 0.5  # 回读宽限内的重读间隔；总等待由 readback_grace_s 封顶。
 
 
+def _trigger_failed(leg: ProtectiveLeg) -> bool:
+    """触发了但交易所没下出子单（REJECTED/EXPIRED 且已复核无子单）：什么都没成交，不算退出。"""
+    return bool(
+        leg.triggered_at is not None
+        and leg.algo_status in _ALGO_CLOSED
+        and leg.child_state == "absent"
+        and leg.actual_order_id is None
+        and not leg.filled_quantity
+    )
+
+
 def _triggered(leg: ProtectiveLeg) -> bool:
+    if _trigger_failed(leg):
+        return False
     return bool(
         leg.algo_status in _TRIGGERED
         or leg.actual_order_id is not None
@@ -239,7 +252,10 @@ class BracketManager:
         self.trailing_book_critical_after_s = trailing_book_critical_after_s
         self.notify_stop_clamped: StopNotify | None = None
         """移动止损目标已越过标记价（被夹到可挂的最紧价，或本轮没换）时调用；执行器接上告警。"""
+        self.notify_trigger_rejected: StopNotify | None = None
+        """仓位仍在时某条腿触发后子单被交易所拒绝（不算退出，下一轮补挂）时调用；执行器接上告警。"""
         self._pending_notes: dict[str, list[str]] = {}
+        self._pending_rejections: dict[str, list[str]] = {}
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -442,6 +458,14 @@ class BracketManager:
         )
         if leg.state == "cancel_pending" and _settled(updated):
             updated = updated.model_copy(update={"state": "cancelled"})
+        if _trigger_failed(updated) and not _trigger_failed(leg):
+            _, state = self._current(pid)
+            if state.stage not in {"exiting", "cleanup", "done"}:
+                self._pending_rejections.setdefault(pid, []).append(
+                    f"{_role(updated)} 条件单 {updated.client_order_id}（algo {updated.algo_id}）"
+                    f"触发后交易所 {updated.algo_status}，没有子单、没有成交；仓位不当作已平，"
+                    "按现有仓位补挂这一侧保护"
+                )
         self._save_leg(pid, updated)
         if updated.purpose == "lifeboat" and _live(updated):
             current, _ = self._current(pid)
@@ -583,14 +607,17 @@ class BracketManager:
             await self._flush_notes(pid, tracked.record.symbol)  # 告警在锁外发，不拖住同币锁
 
     async def _flush_notes(self, pid: str, symbol: str) -> None:
-        notes, notify = self._pending_notes.pop(pid, []), self.notify_stop_clamped
-        if notify is None:
-            return
-        for text in notes:
-            try:
-                await notify(pid, symbol, text)
-            except Exception:  # 告警失败不能影响保护同步
-                log.exception("移动止损越过标记价的告警发送失败：%s", pid)
+        for notes, notify in (
+            (self._pending_notes.pop(pid, []), self.notify_stop_clamped),
+            (self._pending_rejections.pop(pid, []), self.notify_trigger_rejected),
+        ):
+            if notify is None:
+                continue
+            for text in notes:
+                try:
+                    await notify(pid, symbol, text)
+                except Exception:  # 告警失败不能影响保护同步
+                    log.exception("保护告警发送失败：%s", pid)
 
     def live_stop_price(self, pid: str) -> float | None:
         """交易所上正在挂的普通止损（最高一代、最后回读明确 NEW）的触发价；没有就是 None。"""

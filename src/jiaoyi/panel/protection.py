@@ -76,6 +76,14 @@ def _time(v: object) -> datetime | None:
 
 def _triggered(leg: dict[str, object]) -> bool:
     filled = _num(leg.get("filled_quantity"))
+    if (
+        leg.get("triggered_at")
+        and leg.get("algo_status") in _CLOSED_ALGO
+        and leg.get("child_state") == "absent"
+        and not leg.get("actual_order_id")
+        and not filled
+    ):
+        return False  # 触发后交易所没下出子单：和执行层一致，不算触发
     return bool(
         leg.get("algo_status") in _TRIGGERED_ALGO
         or leg.get("actual_order_id")
