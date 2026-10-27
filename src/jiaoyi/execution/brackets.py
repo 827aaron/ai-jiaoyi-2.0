@@ -91,6 +91,10 @@ class BracketExchange(Protocol):
     async def execution_mark(self, symbol: str) -> MarkEvidence: ...
 
 
+class AnchorBookSpike(ExchangeError):
+    """反向卡锚定移动止损时盘口价偏离标记价太多（疑似插针）：这一轮不锚，可以下一轮再试。"""
+
+
 class ProtectionIncomplete(ExchangeError):
     """状态未知或保护不完整；调用方保留已确认保护并报告，不应擅自重复提交。"""
 
@@ -187,6 +191,8 @@ def _reason(leg: ProtectiveLeg) -> CloseReason:
         return CloseReason.LIFEBOAT
     if leg.purpose == "trailing":
         return CloseReason.TRAILING_STOP
+    if leg.purpose == "tightened":
+        return CloseReason.TIGHTENED_STOP
     return CloseReason.STOP_LOSS if leg.kind == "stop_loss" else CloseReason.TAKE_PROFIT
 
 
@@ -252,6 +258,106 @@ class BracketManager:
     def retains_confirmed_stop(self, pid: str) -> bool:
         """最后回读仍明确 NEW 的普通止损；不表示网络断开后仍能证明当前实时状态。"""
         return any(_live(leg) and _role(leg) == "stop_loss" for leg in self._current(pid)[1].legs)
+
+    def set_tightened_stop(
+        self, pid: str, price: float, reason: str, card_key: str | None = None
+    ) -> bool:
+        """记下反向卡收紧价（#314）；已有同样紧或更紧的收紧价就不动，返回是否改了。
+
+        只落盘目标价，交易所上的换代由随后的 ``sync`` 按原有顺序做（新代确认后才撤旧代）。
+        调用方须持同币锁。"""
+        tracked, state = self._current(pid)
+        if not math.isfinite(price) or price <= 0:
+            raise ProtectionIncomplete("收紧止损价无效")
+        old = state.tightened_stop_price
+        long = tracked.record.side is Side.LONG
+        if old is not None and (price <= old if long else price >= old):
+            return False
+        self._save(
+            pid,
+            tightened_stop_price=price,
+            tightened_reason=reason[:300],
+            tightened_at=self.clock(),
+            opposite_card_key=card_key,
+        )
+        return True
+
+    async def anchor_trailing(
+        self,
+        pid: str,
+        basis: EntryBasis,
+        read_book: Callable[[str], Awaitable[ExecutionBook]],
+        *,
+        distance_mult: float,
+        reason: str,
+        card_key: str | None = None,
+    ) -> float | None:
+        """反向卡（#314，trail 模式）：在当前可成交价强制启动移动止损，之后照常只收紧。
+
+        峰值 = 现价（多买一 / 空卖一）的净收益，回撤距离 = 开仓带的 ``trailing_stop_pct`` ×
+        ``distance_mult``（落成 ``trailing_distance_pct``，之后的移动止损都按它），止损价用
+        ``trailing_update`` 同一套扣费逆算。已经激活的移动止损峰值和止损价只取更紧的，不放松；
+        和正在挂的止损谁紧由 ``_stop_target`` 定。已锚定过就不再锚（返回现在的移动止损价）。
+        盘口先过和移动止损同样的标记价偏离核对（不记 ``trailing_last_error``）。调用方须持同币锁。
+        """
+        tracked, state = self._current(pid)
+        if state.opposite_anchor_price is not None:
+            return state.trailing_stop_price
+        rec = tracked.record
+        if rec.trailing_activation_pct is None or rec.trailing_stop_pct is None:
+            raise ProtectionIncomplete("这笔仓开仓时没带移动止损，不能锚定")
+        if basis.client_order_id != tracked.entry_client_order_id:
+            raise ProtectionIncomplete("锚定移动止损的入场身份不一致")
+        if not math.isfinite(distance_mult) or distance_mult <= 0:
+            raise ProtectionIncomplete("锚定移动止损的距离倍数无效")
+        long = rec.side is Side.LONG
+        mark = await self._fresh_mark(rec.symbol)
+        book = await read_book(rec.symbol)
+        price = book.bid if long else book.ask
+        dev = (price - mark if long else mark - price) / mark * 10_000
+        max_dev = self.trailing_book_mark_max_dev_bps
+        if max_dev > 0 and (not math.isfinite(dev) or dev > max_dev):
+            raise AnchorBookSpike(
+                f"锚定用的盘口价 {price:g} 比标记价 {mark:g} 偏 {dev:.1f} 基点"
+                f"（上限 {max_dev:g}），疑似插针，本轮不锚定"
+            )
+        distance = rec.trailing_stop_pct * distance_mult
+        seed = state.model_copy(
+            update={
+                "trailing_activated": True,
+                # 还没激活：峰值从现价起算；已激活：沿用更高的峰值（不放松）
+                "trailing_peak_net": state.trailing_peak_net if state.trailing_activated else None,
+                "trailing_peak_net_exact": state.trailing_peak_net_exact
+                if state.trailing_activated
+                else None,
+                "trailing_source_at": None,  # 这一轮一定按这张盘口算
+                "trailing_distance_pct": distance,
+            }
+        )
+        update = trailing_update(rec, seed, basis, book, self.clock())
+        if update is None or update.stop_price is None:
+            raise ProtectionIncomplete("锚定移动止损没算出止损价")
+        self._save(
+            pid,
+            trailing_peak_net=update.peak_net,
+            trailing_threshold_net=update.threshold_net,
+            trailing_peak_net_exact=update.peak_net_exact,
+            trailing_threshold_net_exact=update.threshold_net_exact,
+            trailing_activated=True,
+            trailing_stop_price=update.stop_price,
+            trailing_entry_quote=basis.filled_quote,
+            trailing_entry_quantity=basis.filled_quantity,
+            trailing_fees_quote=basis.fee_usdt,
+            trailing_source_at=book.source_at,
+            trailing_observed_at=book.observed_at,
+            trailing_distance_pct=distance,
+            opposite_anchor_price=price,
+            opposite_anchor_retry_since=None,
+            opposite_card_key=card_key,
+            tightened_reason=reason[:300],
+            tightened_at=self.clock(),
+        )
+        return update.stop_price
 
     def prearm_grace(self, pid: str, error: BaseException) -> float | None:
         """从未完整托管时本轮同步失败能否先不平仓：返回连续失败已持续的秒数，None = 照旧退出。
@@ -607,8 +713,13 @@ class BracketManager:
     def _extra_stop_candidates(
         self, tracked: TrackedPosition, state: ServerProtection
     ) -> list[tuple[LegPurpose, float]]:
-        """固定止损和移动止损以外的收紧候选（来源, 价格）；默认没有。新的收紧来源从这里接入。"""
-        return []
+        """固定止损和移动止损以外的收紧候选（来源, 价格）。新的收紧来源从这里接入。
+
+        反向卡收紧价（#314）：只从落盘的 ``tightened_stop_price`` 读，落了就每轮都给（卡变了也给），
+        这样它一直是下限——非固定来源不会把在挂的止损换松，只有账本固定止损比它还紧时才轮到固定止损。"""
+        if state.tightened_stop_price is None:
+            return []
+        return [("tightened", state.tightened_stop_price)]
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         evidence = await self._evidence(pid)
@@ -858,8 +969,8 @@ class BracketManager:
 
         if gain(target) <= 0:
             return keep  # 收紧来源不把正在挂的止损换松
-        if gain(target) < self.trailing_min_step_bps:
-            return keep  # 收紧太少，不值得撤旧挂新
+        if gain(target) < self.trailing_min_step_bps and purpose != "tightened":
+            return keep  # 收紧太少，不值得撤旧挂新（反向卡收紧价只换一次，不受最小步长限制）
         buffer = self.trailing_stop_mark_buffer_bps
         try:
             mark = await self._fresh_mark(tracked.record.symbol)
