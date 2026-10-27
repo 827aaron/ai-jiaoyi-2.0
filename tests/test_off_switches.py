@@ -158,16 +158,17 @@ async def test_spend_alert_when_budget_is_off(tmp_path: Path, now: datetime) -> 
     )
     p = pool(now, entry("AAUSDT"))
     await c.refresh(p, "scheduled")
-    assert c.may_refresh(clock[0]) and c.take_notice() is None  # 没到线：安静
+    assert c.may_refresh(clock[0]) and c.take_spend_alert() is None  # 没到线：安静
     c._charge(6.0)
     assert c.may_refresh(clock[0])  # 过线也不停会
-    notice = c.take_notice()
+    assert c.take_notice() is None  # 不是「暂停」提示，走自己的通道
+    notice = c.take_spend_alert()
     assert notice is not None and "只提醒" in notice and "5.00" in notice
-    assert c.may_refresh(clock[0]) and c.take_notice() is None  # 每天一次
+    assert c.may_refresh(clock[0]) and c.take_spend_alert() is None  # 每天一次
     clock[0] += timedelta(days=1)
     c._charge(6.0)
     assert c.may_refresh(clock[0])
-    assert c.take_notice() is not None  # 第二天再提醒
+    assert c.take_spend_alert() is not None  # 第二天再提醒
     # 设了上限就不走这条
     c2, _, clock2 = make(
         tmp_path / "x", FakeEngine(["AAUSDT"]), now, daily_cost_limit_usd=1.0, spend_alert_usd=5.0
@@ -175,6 +176,7 @@ async def test_spend_alert_when_budget_is_off(tmp_path: Path, now: datetime) -> 
     await c2.refresh(p, "scheduled")
     c2._charge(6.0)
     assert not c2.may_refresh(clock2[0])
+    assert c2.take_spend_alert() is None
 
 
 def test_spend_alert_line_comes_from_the_profile_default_only_when_off() -> None:

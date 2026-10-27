@@ -298,6 +298,7 @@ class BattleCardCommander:
         self._cost_limit = daily_cost_limit_usd or None  # None / 0 = 不限
         self._spend_alert = spend_alert_usd or None  # 日上限关了时的「只提醒不停」线
         self._spend_noticed_day = ""
+        self._spend_alerts: list[str] = []
         self._event_fail_until: dict[str, datetime] = {}
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
@@ -581,6 +582,10 @@ class BattleCardCommander:
         """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
         return self._notices.pop(0) if self._notices else None
 
+    def take_spend_alert(self) -> str | None:
+        """取走一条「日上限不限时花费过线」的提醒（只提醒，不是暂停开会），没有返回 None。"""
+        return self._spend_alerts.pop(0) if self._spend_alerts else None
+
     def _ttl_now(self) -> timedelta:
         """作战卡有效期；日花费到 80% 且设了放慢，新卡按放慢后的间隔出。"""
         return self._slowdown[0] if self._slowdown is not None and self._slowed() else self._ttl
@@ -613,7 +618,7 @@ class BattleCardCommander:
         day = self._day(now)
         if self._spend_noticed_day != day:
             self._spend_noticed_day = day
-            self._notices.append(
+            self._spend_alerts.append(
                 f"军师团今天已花 ${self._stats.cost_usd:.2f}，超过本档默认日上限 "
                 f"${self._spend_alert:.2f}（日上限已设为不限，不会停会，只提醒）"
             )
