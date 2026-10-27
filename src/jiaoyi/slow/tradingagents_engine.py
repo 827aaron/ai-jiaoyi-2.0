@@ -30,10 +30,17 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    WithJsonSchema,
+    field_validator,
+)
 
 from jiaoyi.contracts import (
     BattleCard,
@@ -54,7 +61,14 @@ from jiaoyi.contracts import (
 from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.sentinel.regime_flip import Direction
-from jiaoyi.slow import binance_gate, market_table, ta_nodes, ta_prompts, ta_roles
+from jiaoyi.slow import (
+    binance_gate,
+    card_outlook,
+    market_table,
+    ta_nodes,
+    ta_prompts,
+    ta_roles,
+)
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
@@ -851,11 +865,19 @@ class _LevelDraft(BaseModel):
 
 
 _MUST_WRITE = ("key_levels", "allowed_signals")
+_OUTLOOK_FIELDS = ("market_dir", "market_dir_evidence", "rel_dir", "rel_dir_evidence")
 
 
 def _require_in_schema(schema: dict[str, Any]) -> None:
     required = schema.setdefault("required", [])
-    required.extend(f for f in _MUST_WRITE if f not in required)
+    required.extend(f for f in (*_MUST_WRITE, *_OUTLOOK_FIELDS) if f not in required)
+
+
+def _enum(values: Sequence[str]) -> WithJsonSchema:
+    return WithJsonSchema({"type": "string", "enum": list(values)})
+
+
+_Text = Annotated[str | None, WithJsonSchema({"type": "string"})]
 
 
 def omitted_fields(draft: BaseModel, has_candidates: bool) -> list[str]:
@@ -903,6 +925,31 @@ class _CardSymbolDraft(BaseModel):
         description="Upper edge of the entry zone (price); leave empty if the conclusion gave none",
     )
     reason: str = Field(min_length=1, description="Chinese, one or two sentences")
+    # 只记录的两个判断（CardOutlook），排在最后：模型先定方向再写它们。发给模型的 schema 里是
+    # 必填的枚举，解析时什么都收（漏写、写错由 card_outlook 记 None 和原因），绝不让转卡失败
+    market_dir: Annotated[str | None, _enum(card_outlook.MARKET_DIRS)] = Field(
+        default=None,
+        description="Fixed next-4-hour window, independent of the holding time: where the "
+        "equal-weight pool average moves",
+    )
+    market_dir_evidence: _Text = Field(
+        default=None, description="Chinese, one brief sentence quoting numbers"
+    )
+    rel_dir: Annotated[str | None, _enum(card_outlook.REL_DIRS)] = Field(
+        default=None,
+        description="Fixed next-4-hour window, independent of the holding time: this coin "
+        "against the equal-weight pool average",
+    )
+    rel_dir_evidence: _Text = Field(
+        default=None, description="Chinese, one brief sentence quoting numbers"
+    )
+
+    @field_validator(*_OUTLOOK_FIELDS, mode="before")
+    @classmethod
+    def _loose(cls, value: Any) -> str | None:
+        if value is None or isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, default=str)
 
 
 class _LessonDraft(BaseModel):
@@ -1159,7 +1206,8 @@ def convert_instructions(
         "candidates are none (then write []).\n"
         f"{signal_kinds_note()}"
         "reason: in Chinese (at most 500 characters); state the direction, entry zone, "
-        "invalidation price and why this is a view of the next {H}.",
+        "invalidation price and why this is a view of the next {H}.\n"
+        f"{ta_prompts.OUTLOOK_NOTE}",
         p,
     )
 
@@ -1345,6 +1393,33 @@ def research_recommendation(plan: str | None) -> str | None:
     """研究经理方案里的 ``**Recommendation**: X``（小写）；解析不出返回 None。"""
     found = _RECOMMENDATION.findall(plan or "")
     return found[0].lower() if found else None  # 取第一处：正文里引用别的评级不算
+
+
+def trader_action(plan: str | None) -> str | None:
+    """交易员的建议（buy / hold / sell，取最后一处，和 ``direction_conflict`` 同一口径）。"""
+    found = _PROPOSAL.findall(plan or "") or _ACTION.findall(plan or "")
+    return found[-1].lower() if found else None
+
+
+def attach_outlook(
+    cs: CardSymbol, draft: _CardSymbolDraft, rm: str | None, pm: Any, trader_plan: str
+) -> CardSymbol:
+    """在定好的卡上挂只记录的 ``CardOutlook``；卡的其余内容一字不动。出任何错只记日志，卡照出。"""
+    try:
+        outlook = card_outlook.build_outlook(
+            bias=cs.bias,
+            market_dir=draft.market_dir,
+            market_dir_evidence=draft.market_dir_evidence,
+            rel_dir=draft.rel_dir,
+            rel_dir_evidence=draft.rel_dir_evidence,
+            rm=rm,
+            pm=pm,
+            trader=trader_action(trader_plan),
+        )
+    except Exception:
+        logger.exception("%s 整理只记录的大盘 / 相对判断失败，这张卡不带 outlook", cs.symbol)
+        return cs
+    return cs.model_copy(update={"outlook": outlook})
 
 
 def _no_trade(cs: CardSymbol, why: str) -> CardSymbol:
@@ -2495,6 +2570,9 @@ class TradingAgentsEngine:
                 )
                 if missing:
                     cs = degrade_size(cs, missing)
+                cs = attach_outlook(
+                    cs, draft, rm, rating, str(state.get("trader_investment_plan", ""))
+                )
                 return Analysis(
                     cs,
                     meter.cost,

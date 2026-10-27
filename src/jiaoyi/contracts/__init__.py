@@ -5,6 +5,7 @@
 
 from jiaoyi.contracts.battle_card import (
     BattleCard,
+    CardOutlook,
     CardSymbol,
     KeyLevel,
     LevelKind,
@@ -92,6 +93,7 @@ __all__ = [
     "BookMetrics",
     "BookTop",
     "CandidateSignal",
+    "CardOutlook",
     "CardSymbol",
     "Category",
     "CloseReason",

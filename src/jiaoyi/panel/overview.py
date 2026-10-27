@@ -39,6 +39,7 @@ from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
 from jiaoyi.panel.protection import ProtectionView, lifeboat_summary, parse_protection
 from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
+from jiaoyi.slow.card_outlook import card_from_output
 
 STALE_S = 120.0
 """主循环每 30 秒心跳一次；4 个周期没更新就当掉线。"""
@@ -110,6 +111,10 @@ class CardRow(BaseModel):
     source_regime: str | None = None
     source_market_view_id: str | None = None
     """「来自 hh:mm 的会 · hh:mm 到期」；持仓币到期后写「已到期，持仓中，不再开新仓」。"""
+    market_dir: str | None = None
+    rel_dir: str | None = None
+    board_market_dir: str | None = None
+    """只记录的判断（CardOutlook）：会议看未来 4 小时大盘 / 相对大盘，及总盘会方向；旧卡没有。"""
     fading: bool = False
     """离到期不到 10 分钟（或已到期的持仓币）：显示成灰色。"""
 
@@ -796,8 +801,9 @@ def _card(
     for r in cmd:
         if r.symbol and r.output and r.outcome is Outcome.ACTION and r.ts <= last.ts:
             try:
-                # 记录里还夹着 usage（token 用量），不属于作战指令：不去掉的话契约校验会整条丢掉
-                per[r.symbol] = CardSymbol.model_validate(
+                # 记录里还夹着 usage（token 用量），不属于作战指令：不去掉的话契约校验会整条丢掉；
+                # 只记录的 outlook 单独校验，坏了不连累卡
+                per[r.symbol] = card_from_output(
                     {k: v for k, v in r.output.items() if k != "usage"}
                 )
             except ValueError:
@@ -814,6 +820,9 @@ def _card(
                 reason=cs.reason,
                 source_regime=cs.source_regime,
                 source_market_view_id=cs.source_market_view_id,
+                market_dir=cs.outlook.market_dir if cs.outlook else None,
+                rel_dir=cs.outlook.rel_dir if cs.outlook else None,
+                board_market_dir=cs.outlook.board_market_dir if cs.outlook else None,
                 size_tier_max=cs.size_tier_max.value,
                 stop_atr=(cs.stop_atr.min, cs.stop_atr.max),
                 take_profit_r=(cs.take_profit_r.min, cs.take_profit_r.max),
