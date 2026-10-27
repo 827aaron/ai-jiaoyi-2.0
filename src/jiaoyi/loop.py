@@ -161,7 +161,15 @@ class _TightensStop(Protocol):
     """执行器：反向卡没经价格确认时收紧交易所托管止损（HbExecutorAdapter，#314）。"""
 
     async def tighten_stop(
-        self, position_id: str, *, reason: str, buffer_bps: float, mark_gap_bps: float
+        self,
+        position_id: str,
+        *,
+        reason: str,
+        buffer_bps: float,
+        mark_gap_bps: float,
+        profit_mode: str,
+        distance_mult: float,
+        card_key: str | None,
     ) -> dict[str, Any]: ...
 
 
@@ -1311,8 +1319,9 @@ class Runner:
     async def _opposite_tighten(
         self, pos: PositionRecord, reason: str, key: str | None = None
     ) -> None:
-        """反向卡价格未确认：让执行器把托管止损收紧到保本附近；执行器说收紧不了
-        （旧通道、从没完整托管 / 开仓宽限期、证据读不到、目标价挂不稳）就照原规则全平。
+        """反向卡价格未确认：让执行器收紧托管止损（trail：现价强制启动移动止损；breakeven：
+        挪到扣费保本）；执行器说收紧不了（旧通道、从没完整托管 / 开仓宽限期、证据读不到、
+        亏着或赚得不够）就照原规则全平。
 
         同一条反向指令（``key``）已收紧 / 已够紧就记在内存里，之后每轮不再进执行器的锁；
         结果换了才记一条管家决策记录。"""
@@ -1328,6 +1337,9 @@ class Runner:
                     reason=reason,
                     buffer_bps=fl.opposite_tighten_buffer_bps,
                     mark_gap_bps=fl.opposite_tighten_mark_gap_bps,
+                    profit_mode=fl.opposite_profit_mode,
+                    distance_mult=fl.opposite_trail_distance_mult,
+                    card_key=key,
                 )
             except Exception as e:
                 log.exception("%s 收紧止损出错，按原规则平", pos.symbol)

@@ -24,7 +24,7 @@ from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.core import hotconfig
 from jiaoyi.core.config import load_app_config
 from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
-from jiaoyi.execution.exchange import EntryBasis
+from jiaoyi.execution.exchange import EntryBasis, ExecutionBook
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.tighten import breakeven_stop_price
 from jiaoyi.keeper.keeper import JevKeeper, opposite_ab_draw, opposite_instruction_key
@@ -263,14 +263,24 @@ class TightenExecutor(FakeExecutor):
         self.held = [pos]
         self.result = result
         self.tighten_calls: list[tuple[str, str, float, float]] = []
+        self.extra: list[tuple[str, float, str | None]] = []
 
     def live_positions(self) -> list[c.PositionRecord]:
         return self.held
 
     async def tighten_stop(
-        self, position_id: str, *, reason: str, buffer_bps: float, mark_gap_bps: float
+        self,
+        position_id: str,
+        *,
+        reason: str,
+        buffer_bps: float,
+        mark_gap_bps: float,
+        profit_mode: str,
+        distance_mult: float,
+        card_key: str | None,
     ) -> dict[str, Any]:
         self.tighten_calls.append((position_id, reason, buffer_bps, mark_gap_bps))
+        self.extra.append((profit_mode, distance_mult, card_key))
         assert self.result is not None
         return self.result
 
@@ -303,7 +313,12 @@ async def test_loop_tightens_instead_of_closing_then_closes_once_on_confirmation
     await drain(runner)
     assert attempted == set()  # 收紧的仓模型复查照常
     assert ex.closed == [] and [c[0] for c in ex.tighten_calls] == ["pos-1"]
-    assert "收紧止损" in ex.tighten_calls[0][1]
+    assert "在现价启动移动止损" in ex.tighten_calls[0][1]  # 默认 trail 模式
+    assert ex.extra[0] == (
+        runner.app.app_cfg.fast_loop.opposite_profit_mode,
+        runner.app.app_cfg.fast_loop.opposite_trail_distance_mult,
+        "BTCUSDT|2026-10-22T06:00:00+00:00|short",
+    )
     fl = runner.app.app_cfg.fast_loop
     assert ex.tighten_calls[0][2:] == (
         fl.opposite_tighten_buffer_bps,
@@ -730,11 +745,15 @@ def test_config_validation() -> None:
         {"opposite_confirm_atr": -1.0},
         {"opposite_tighten_buffer_bps": -1.0},
         {"opposite_tighten_buffer_bps": 201.0},
+        {"opposite_profit_mode": "stop"},
+        {"opposite_trail_distance_mult": 0.0},
+        {"opposite_trail_distance_mult": 5.1},
     ):
         with pytest.raises(ValidationError):
             c.FastLoopConfig(**bad)
     shipped = load_app_config(ROOT / "config" / "app.example.toml").fast_loop
     assert shipped.opposite_card_action == "close" and shipped.opposite_card_ab == 0
+    assert shipped.opposite_profit_mode == "trail" and shipped.opposite_trail_distance_mult == 1.0
     names = {
         "opposite_card_action",
         "opposite_card_ab",
@@ -742,6 +761,9 @@ def test_config_validation() -> None:
         "opposite_confirm_atr",
         "opposite_confirm_key_level",
         "opposite_tighten_buffer_bps",
+        "opposite_tighten_mark_gap_bps",
+        "opposite_profit_mode",
+        "opposite_trail_distance_mult",
     }
     assert names <= hotconfig.HOT_FAST
 
@@ -869,3 +891,246 @@ async def test_persisted_tightened_beyond_mark_is_clamped_by_protection(tmp_path
     expected = round(h.mark * (0.9995 if side is Side.LONG else 1.0005), 2)
     assert [(x.purpose, x.trigger_price) for x in live] == [("tightened", expected)]
     assert h.state().tightened_stop_price == _target(side)
+
+
+# ---------------------------------------------------------------- trail 模式（默认）
+
+
+class TrailHarness(TightenHarness):
+    """开仓带移动止损（启动 0.3%、回撤 1.2%），盘口 / 标记价都在 START。"""
+
+    def __init__(self, root: Path, side: Side) -> None:
+        super().__init__(root, side)
+        tracked = self.registry.get("pos-1")
+        record = tracked.record.model_copy(
+            update={"trailing_activation_pct": 0.3, "trailing_stop_pct": 1.2}
+        )
+        self.registry.put(tracked.model_copy(update={"record": record}))
+        self.book_at = START
+        self.spread = 0.1
+
+        async def book(symbol: str) -> ExecutionBook:
+            px = self.exchange.mark
+            bid, ask = (px, px + self.spread) if side is Side.LONG else (px - self.spread, px)
+            return ExecutionBook(symbol, bid, ask, self.book_at, self.book_at)
+
+        self.exchange.execution_book = book  # type: ignore[attr-defined]
+
+    async def trail(self, mult: float = 1.0, key: str = "BTCUSDT|t1|short") -> dict[str, Any]:
+        return await self.adapter.tighten_stop(
+            "pos-1",
+            reason="反向卡 v1 未确认",
+            buffer_bps=5.0,
+            mark_gap_bps=10.0,
+            profit_mode="trail",
+            distance_mult=mult,
+            card_key=key,
+        )
+
+    def live(self) -> list[tuple[str, float]]:
+        return [(x.purpose, x.trigger_price) for x in self.stop_legs() if x.state == "confirmed"]
+
+
+def _trail_stop(side: Side, peak_px: float, distance_pct: float) -> float:
+    """2 张、名义 200、开仓费 0.2：峰值价 → 净收益 → 减距离 → 逆算止损价（2 位小数）。"""
+    sign = 1 if side is Side.LONG else -1
+    peak = (sign * (peak_px * 2 - 200) - 0.2) / 200
+    threshold = peak - distance_pct / 100
+    return round((200 + sign * (200 * threshold + 0.2)) / 2, 2)
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_trail_anchors_at_current_executable_price(tmp_path: Path, side: Side):
+    h = TrailHarness(tmp_path, side)
+    await h.protect()
+    result = await h.trail()
+    assert result["action"] == "tightened" and result["mode"] == "trail"
+    price = 100.5 if side is Side.LONG else 99.5  # 多看买一、空看卖一
+    state = h.state()
+    assert state.opposite_anchor_price == price and state.trailing_activated
+    assert state.trailing_distance_pct == pytest.approx(1.2)
+    assert state.opposite_card_key == "BTCUSDT|t1|short"
+    stop = _trail_stop(side, price, 1.2)
+    assert stop == (99.3 if side is Side.LONG else 100.7)  # 赚得少：止损落在开仓价另一侧
+    assert h.live() == [("trailing", stop)]
+    assert state.tightened_stop_price is None
+    assert h.registry.get("pos-1").record.stop_loss_price == (99.0 if side is Side.LONG else 101.0)
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_trail_anchor_then_ratchets_with_multiplied_distance(tmp_path: Path, side: Side):
+    h = TrailHarness(tmp_path, side)
+    await h.protect()
+    assert (await h.trail(mult=0.5))["action"] == "tightened"
+    assert h.live() == [("trailing", _trail_stop(side, h.mark, 0.6))]
+    # 价格往有利方向走：照常的移动止损按锚定时定下的 0.6% 距离继续收紧
+    later = START + timedelta(seconds=1)
+    h.manager.clock = lambda: later
+    h.book_at = h.exchange.mark_at = later
+    h.mark = 101.5 if side is Side.LONG else 98.5
+    basis = await h.exchange.entry_basis("BTCUSDT", "entry-1")  # type: ignore[attr-defined]
+    assert await h.manager.observe_trailing("pos-1", basis, h.exchange.execution_book)  # type: ignore[attr-defined]
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.live() == [("trailing", _trail_stop(side, h.mark, 0.6))]
+    # 回落：只收紧不放松
+    h.mark = 100.8 if side is Side.LONG else 99.2
+    later2 = START + timedelta(seconds=2)
+    h.manager.clock = lambda: later2
+    h.book_at = h.exchange.mark_at = later2
+    await h.manager.observe_trailing("pos-1", basis, h.exchange.execution_book)  # type: ignore[attr-defined]
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.live() == [("trailing", _trail_stop(side, 101.5 if side is Side.LONG else 98.5, 0.6))]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_trail_no_reanchor_on_new_card_or_restart(tmp_path: Path, side: Side):
+    h = TrailHarness(tmp_path, side)
+    await h.protect()
+    await h.trail()
+    anchored = h.state().opposite_anchor_price
+    h.mark = 101.0 if side is Side.LONG else 99.0  # 价格变了也不重锚
+    again = await h.trail(key="BTCUSDT|t2|short")
+    assert again["action"] == "kept" and again["anchor_price"] == anchored
+    h.restart_adapter()
+
+    async def book(symbol: str) -> ExecutionBook:
+        raise AssertionError("已锚定不再读盘口")
+
+    h.exchange.execution_book = book  # type: ignore[attr-defined]
+    assert (await h.trail(key="BTCUSDT|t3|short"))["action"] == "kept"
+    state = h.state()
+    assert state.opposite_anchor_price == anchored and state.opposite_card_key == "BTCUSDT|t1|short"
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_trail_anchor_never_looser_than_live_stop(tmp_path: Path, side: Side):
+    h = TrailHarness(tmp_path, side)
+    tracked = h.registry.get("pos-1")
+    tight = 99.6 if side is Side.LONG else 100.4  # 账本固定止损比锚定的 99.3 / 100.7 还紧
+    record = tracked.record.model_copy(update={"stop_loss_price": tight})
+    h.registry.put(tracked.model_copy(update={"record": record}))
+    await h.protect()
+    creates = list(h.creates())
+    result = await h.trail()
+    assert result["action"] == "tightened" and result["anchored_stop"] == pytest.approx(
+        99.3 if side is Side.LONG else 100.7
+    )
+    assert h.live() == [("fixed", tight)] and h.creates() == creates
+    assert h.state().opposite_anchor_price is not None  # 锚还是落了，之后移动止损从这里收紧
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_trail_losing_position_closes_and_does_not_anchor(tmp_path: Path, side: Side):
+    h = TrailHarness(tmp_path, side)
+    await h.protect()
+    h.mark = 100.1 if side is Side.LONG else 99.9  # 扣费保本价 100.2 / 99.8 挂不上
+    creates = list(h.creates())
+    result = await h.trail()
+    assert result["action"] == "close" and result["why"] == "target_crossed"
+    assert h.state().opposite_anchor_price is None and h.creates() == creates
+    assert h.critical() == [] and h.state().last_error is None
+
+
+async def test_trail_without_trailing_config_falls_back_to_breakeven(tmp_path: Path) -> None:
+    h = TightenHarness(tmp_path, Side.LONG)  # 开仓没带移动止损
+    await h.protect()
+    result = await h.adapter.tighten_stop(
+        "pos-1", reason="r", buffer_bps=5.0, mark_gap_bps=10.0, profit_mode="trail"
+    )
+    assert result["action"] == "tightened" and result["mode"] == "breakeven"
+    assert result["fallback"] == "no_trailing_config_breakeven"
+    live = [(x.purpose, x.trigger_price) for x in h.stop_legs() if x.state == "confirmed"]
+    assert live == [("tightened", _target(Side.LONG))]
+
+
+async def test_trail_anchor_book_spike_is_evidence_failure(tmp_path: Path) -> None:
+    h = TrailHarness(tmp_path, Side.LONG)
+    await h.protect()
+    h.spread = 0.0
+
+    async def spiky(symbol: str) -> ExecutionBook:
+        return ExecutionBook(symbol, h.mark * 1.01, h.mark * 1.011, START, START)
+
+    h.exchange.execution_book = spiky  # type: ignore[attr-defined]
+    result = await h.trail()
+    assert result["action"] == "close" and result["why"] == "evidence_unavailable"
+    assert h.state().opposite_anchor_price is None
+    assert h.state().trailing_last_error is None  # 不记成移动止损自己的错误
+    assert [a.level for a in h.critical()] == [c.AlertLevel.CRITICAL]
+
+
+def test_panel_shows_trail_anchor() -> None:
+    raw = {
+        **_protection_raw(),
+        "tightened_stop_price": None,
+        "opposite_anchor_price": 68_200.0,
+        "trailing_distance_pct": 1.2,
+    }
+    view = parse_protection(raw, START, 120)
+    assert view is not None and view.opposite_anchor_price == 68_200.0
+    assert view.trailing_distance_pct == 1.2
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("JavaScript 渲染回归需要 Node")
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    helpers = source[source.index("const TRAIL_TIP =") : source.index("const cardPos =")]
+    p = {"symbol": "BTCUSDT", "side": "long", "protection": json.loads(view.model_dump_json())}
+    script = (
+        "const assert = require('node:assert/strict');\n"
+        "const esc = v => String(v); const price = v => v == null ? '—' : String(v);\n"
+        "const signed = (v, d) => (v >= 0 ? '+' : '') + v.toFixed(d); const cls = () => '';\n"
+        "const TZ = 'Asia/Bangkok'; const qtyFmt = v => String(v);\n"
+        "const dur = ms => Math.round(ms / 60000) + ' 分';\n"
+        + helpers
+        + "\nconst p = "
+        + json.dumps(p)
+        + ";\nconst block = protBlock(p), brief = protBrief(p);\n"
+        "assert(block.includes('反向作战卡锚定移动止损：锚定价 68200'), block);\n"
+        "assert(block.includes('1.20%'), block);\n"
+        "assert(brief.includes('反向卡锚定移动止损 68200'), brief);\n"
+    )
+    subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_anchor_keeps_tighter_active_trailing_stop(tmp_path: Path, side: Side):
+    h = TrailHarness(tmp_path, side)
+    await h.protect()
+    prior = 99.9 if side is Side.LONG else 100.1  # 移动止损已激活且比锚定算出的 99.3 / 100.7 紧
+    h.manager._save(
+        "pos-1",
+        trailing_activated=True,
+        trailing_peak_net_exact="0.005",
+        trailing_peak_net=0.005,
+        trailing_stop_price=prior,
+    )
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.live() == [("trailing", prior)]
+    creates = list(h.creates())
+    result = await h.trail()
+    assert result["anchored_stop"] == prior and h.state().trailing_stop_price == prior
+    assert h.live() == [("trailing", prior)] and h.creates() == creates
+
+
+async def test_manager_anchor_is_one_shot(tmp_path: Path) -> None:
+    h = TrailHarness(tmp_path, Side.LONG)
+    await h.protect()
+    basis = await h.exchange.entry_basis("BTCUSDT", "entry-1")  # type: ignore[attr-defined]
+    async with h.registry.symbol_lock("BTCUSDT"):
+        first = await h.manager.anchor_trailing(
+            "pos-1",
+            basis,
+            h.exchange.execution_book,
+            distance_mult=1.0,
+            reason="a",  # type: ignore[attr-defined]
+        )
+
+        async def no_book(symbol: str) -> ExecutionBook:
+            raise AssertionError("已锚定不再读盘口")
+
+        h.mark = 101.0
+        again = await h.manager.anchor_trailing(
+            "pos-1", basis, no_book, distance_mult=0.5, reason="b", card_key="k2"
+        )
+    assert first == again == 99.3
+    assert h.state().opposite_anchor_price == 100.5 and h.state().tightened_reason == "a"

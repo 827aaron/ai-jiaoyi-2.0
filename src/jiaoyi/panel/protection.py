@@ -51,6 +51,10 @@ class ProtectionView(BaseModel):
     """反向作战卡没经价格确认时程序收紧到的止损目标价（#314）；交易所是否已换上看止损腿。"""
     tightened_reason: str | None = None
     tightened_at: datetime | None = None
+    opposite_anchor_price: float | None = None
+    """反向作战卡（trail 模式）强制启动移动止损时锚定的可成交价（#314）。"""
+    trailing_distance_pct: float | None = None
+    """锚定后这笔仓移动止损用的回撤距离（净收益百分点）。"""
     observed_at: datetime | None = None
     age_s: float | None = None
     stale: bool = False
@@ -188,6 +192,8 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
         tightened_stop_price=_num(raw.get("tightened_stop_price")),
         tightened_reason=str(raw["tightened_reason"]) if raw.get("tightened_reason") else None,
         tightened_at=_time(raw.get("tightened_at")),
+        opposite_anchor_price=_num(raw.get("opposite_anchor_price")),
+        trailing_distance_pct=_num(raw.get("trailing_distance_pct")),
         observed_at=observed.astimezone(UTC) if observed else None,
         age_s=age,
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),

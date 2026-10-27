@@ -465,7 +465,12 @@ class JevKeeper:
             "would_close_price": first[1],
         }
         why = confirm["why"] if confirm is not None else "没有行情快照，先不判确认"
-        text = f"作战卡反向（{key}，{reason}）价格未确认（{why}）：收紧止损到保本附近，继续盯"
+        how = (
+            "在现价启动移动止损"
+            if self._cfg.opposite_profit_mode == "trail"
+            else "收紧止损到保本附近"
+        )
+        text = f"作战卡反向（{key}，{reason}）价格未确认（{why}）：{how}，继续盯"
         log_first = self._opposite_logged.get(pid) != (key, branch)
         self._opposite_logged[pid] = (key, branch)
         return self._verdict(

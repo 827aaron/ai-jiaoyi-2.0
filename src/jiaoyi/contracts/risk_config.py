@@ -495,7 +495,20 @@ class FastLoopConfig(Contract):
         le=500.0,
         description="收紧的止损离触发价源（止损按标记价触发时就是标记价）至少隔这么多基点才挂："
         "多要 目标 < 价 ×（1 − gap），空要 目标 > 价 ×（1 + gap）；不够就按原规则全平，"
-        "不靠交易所拒单。0 = 只要求在安全一侧。",
+        "不靠交易所拒单。0 = 只要求在安全一侧（仍至少按保护状态机的标记价缓冲）。",
+    )
+    opposite_profit_mode: Literal["trail", "breakeven"] = Field(
+        default="trail",
+        description="价格没确认、仓位赚得够（保本价可挂）时怎么收紧：trail = 在第一次看到反向卡时的"
+        "可成交价强制启动移动止损（之后照常只收紧）；breakeven = 止损挪到扣费保本 + 缓冲。"
+        "亏着或赚得不够的照旧全平。只在 confirm_or_tighten 时起作用。",
+    )
+    opposite_trail_distance_mult: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=5.0,
+        description="trail 模式：锚定的移动止损回撤距离 = 开仓时带的移动止损距离 × 这个倍数"
+        "（之后这笔仓的移动止损都按它）。1 = 和平常一样。",
     )
     # ---- 巡逻兵
     patrol_shock_pct_1m: float = Field(

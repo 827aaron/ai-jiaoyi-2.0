@@ -88,6 +88,8 @@ HOT_FAST: frozenset[str] = frozenset(
         "opposite_confirm_key_level",
         "opposite_tighten_buffer_bps",
         "opposite_tighten_mark_gap_bps",
+        "opposite_profit_mode",
+        "opposite_trail_distance_mult",
         "patrol_shock_pct_1m",
         "patrol_alert_pct_1m",
         "patrol_shock_stop_mult",

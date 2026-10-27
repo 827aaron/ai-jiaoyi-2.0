@@ -118,10 +118,19 @@ class ServerProtection(BaseModel):
     trailing_failing_since: datetime | None = None
     """移动止损观测从何时起连续没做成（落盘，重启不重新计时）；做成一轮或进入退出清空。"""
     tightened_stop_price: float | None = None
-    """反向作战卡没经价格确认时收紧到的止损价（#314，保本 + 费用 + 缓冲）；同步时和固定止损、
-    移动止损取最紧的一个，只收紧不放松。不改账本止损价（R 仍按原始止损距离算）。"""
+    """反向作战卡没经价格确认时收紧到的保本止损价（#314，``opposite_profit_mode = "breakeven"``）；
+    作为止损候选，只收紧不放松。不改账本止损价（R 仍按原始止损距离算）。"""
     tightened_reason: str | None = None
+    """反向卡为什么改了保护（两种模式都写）。"""
     tightened_at: datetime | None = None
+    opposite_anchor_price: float | None = None
+    """反向卡（#314，``opposite_profit_mode = "trail"``）强制启动移动止损时锚定的可成交价
+    （多买一 / 空卖一）；落了就不再锚（换卡版本、重启都不重锚）。"""
+    opposite_card_key: str | None = None
+    """触发这次改保护的反向指令（币|issued_at|方向）。"""
+    trailing_distance_pct: float | None = None
+    """移动止损回撤距离（净收益百分点）的覆盖值：反向卡锚定时 = 开仓带的距离 × 倍数；
+    None = 用开仓指令里的 ``trailing_stop_pct``。"""
 
 
 class TrackedPosition(BaseModel):

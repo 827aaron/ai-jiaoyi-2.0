@@ -896,13 +896,29 @@ class HbExecutorAdapter:
         return await self._close_directly(tracked, reason, None)
 
     async def tighten_stop(
-        self, position_id: str, *, reason: str, buffer_bps: float, mark_gap_bps: float = 0.0
+        self,
+        position_id: str,
+        *,
+        reason: str,
+        buffer_bps: float,
+        mark_gap_bps: float = 0.0,
+        profit_mode: str = "breakeven",
+        distance_mult: float = 1.0,
+        card_key: str | None = None,
     ) -> dict[str, Any]:
-        """反向作战卡没经价格确认（#314）：把交易所托管止损收紧到保本附近，不平仓。
+        """反向作战卡没经价格确认（#314）：收紧交易所托管止损，不平仓。
 
-        目标 = 开仓价 ±（实际开仓手续费 + 按吃单费率估的平仓手续费 + ``buffer_bps`` 开仓名义），
-        落成 ``ServerProtection.tightened_stop_price``，由 ``BracketManager.sync`` 和固定 / 移动止损
-        取最紧的一个换代（新代确认后才撤旧代），不改账本止损价。返回 ``{"action", "why", ...}``：
+        先判「亏 / 赚得不够」：保本价 = 开仓价 ±（实际开仓手续费 + 按吃单费率估的平仓手续费 +
+        ``buffer_bps`` 开仓名义），离触发价源不够 gap 就按原规则平（用户决定，正常分支）。
+        够的话按 ``profit_mode``：
+
+        - ``trail``：``BracketManager.anchor_trailing`` 在当前可成交价强制启动移动止损（距离 =
+          开仓带的移动止损距离 × ``distance_mult``），之后移动止损照常只收紧；开仓没带移动止损的仓
+          退回 breakeven。只锚一次（落盘，换卡版本、重启都不重锚）。
+        - ``breakeven``：保本价落成 ``tightened_stop_price``。
+
+        两种都作为 ``_stop_target`` 的候选，和固定 / 移动 / 正在挂的止损取最紧，换代先确认新代
+        再撤旧代，不改账本止损价。返回 ``{"action", "why", ...}``：
 
         - ``tightened`` 新止损已确认；``pending`` 目标已落盘、换代还没确认（保护轮询接着做，
           旧止损保留；上一代移动止损还在提交 / 撤销中时先等它，不算失败）；
@@ -934,11 +950,13 @@ class HbExecutorAdapter:
             state, rec = tracked.server_protection, tracked.record
             if state is None:
                 return {"action": "close", "why": "not_server_managed"}
-            if state.tightened_stop_price is not None:
+            if state.tightened_stop_price is not None or state.opposite_anchor_price is not None:
+                # 已收紧 / 已锚定过：不再改（换卡版本、重启都不重来），之后由移动止损自己收紧。
                 return {
                     "action": "kept",
                     "why": "already_tightened",
                     "target": state.tightened_stop_price,
+                    "anchor_price": state.opposite_anchor_price,
                 }
             if state.stage in {"exiting", "cleanup", "done"}:
                 return {"action": "skip", "why": "protection_exiting", "stage": state.stage}
@@ -996,18 +1014,49 @@ class HbExecutorAdapter:
                 "buffer_bps": buffer_bps,
                 "mark_gap_bps": gap_bps,
             }
-            if existing >= target if long else existing <= target:
-                return {"action": "kept", "why": "existing_stop_tighter", **info}
             if not placeable:
-                # 目标离触发价源太近或已越过：挂上去会（几乎）立刻触发，按原规则直接平。
+                # 亏着或赚得不够（保本价离触发价源不到 gap）：按原规则直接平（用户决定）。
                 # 正常分支，不是故障：只进决策记录，不写 last_error、不发 CRITICAL。
                 return {"action": "close", "why": "target_crossed", **info}
-            manager.set_tightened_stop(position_id, target, reason)
+            trail = profit_mode == "trail"
+            if trail and (rec.trailing_activation_pct is None or rec.trailing_stop_pct is None):
+                trail = False  # 开仓没带移动止损：没有距离可用，退回保本收紧
+                info["fallback"] = "no_trailing_config_breakeven"
+            info["mode"] = "trail" if trail else "breakeven"
+            if trail:
+                read_book = getattr(self._exchange, "execution_book", None)
+                try:
+                    if read_book is None:
+                        raise ProtectionIncomplete("缺同交易所盘口")
+                    anchored = await manager.anchor_trailing(
+                        position_id,
+                        basis,
+                        read_book,
+                        distance_mult=distance_mult,
+                        reason=reason,
+                        card_key=card_key,
+                    )
+                except Exception as error:
+                    detail = describe_error(error)
+                    await self._tighten_failed(
+                        position_id, "反向卡锚定移动止损没做成", detail, "按原规则全平"
+                    )
+                    return {"action": "close", "why": "evidence_unavailable", "error": detail}
+                after = manager._current(position_id)[1]
+                info.update(
+                    anchor_price=after.opposite_anchor_price,
+                    anchored_stop=anchored,
+                    trailing_distance_pct=after.trailing_distance_pct,
+                )
+            else:
+                if existing >= target if long else existing <= target:
+                    return {"action": "kept", "why": "existing_stop_tighter", **info}
+                manager.set_tightened_stop(position_id, target, reason, card_key)
             if not armed:
-                # 曾完整托管、旧止损仍在挂，这一轮在临时保护：目标落盘，由保护轮询换代。
+                # 曾完整托管、旧止损仍在挂，这一轮在临时保护：已落盘，由保护轮询换代。
                 return {"action": "pending", "why": "waiting_protection_sync", **info}
             if any(leg.state in {"submit_pending", "cancel_pending"} for leg in state.legs):
-                # 上一代（移动止损换代）还在提交 / 撤销中：目标已落盘，
+                # 上一代（移动止损换代）还在提交 / 撤销中：已落盘，
                 # 等它确认后由保护轮询再换，不算失败。
                 return {"action": "pending", "why": "waiting_previous_generation", **info}
             try:
@@ -1018,9 +1067,10 @@ class HbExecutorAdapter:
                     position_id,
                     "收紧止损换单未确认",
                     detail,
-                    "目标已落盘，旧止损保留，保护轮询继续换",
+                    "已落盘，旧止损保留，保护轮询继续换",
                 )
                 return {"action": "pending", "why": "sync_unconfirmed", "error": detail, **info}
+            info["live_stop_after"] = manager.live_stop_price(position_id)
             if result == "exit":
                 return {"action": "exiting", "why": "protection_exit", **info}
             return {

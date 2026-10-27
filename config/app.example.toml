@@ -94,6 +94,8 @@ keeper_confirmations = 2
 # opposite_confirm_key_level = true # 价格确认③：越过反向卡在开仓价之外最近的关键位就平
 # opposite_tighten_buffer_bps = 5   # 收紧目标：扣实际开仓费 + 估算平仓费后再赚 5 bp 的平仓价
 # opposite_tighten_mark_gap_bps = 10 # 收紧的止损离标记价（止损的触发价源）不到 10 bp 就不挂，按原规则全平
+# opposite_profit_mode = "trail"    # 没确认、赚得够时：trail = 在现价强制启动移动止损（之后只收紧）；breakeven = 止损挪到扣费保本
+# opposite_trail_distance_mult = 1.0 # trail 模式锚定的移动止损距离 = 开仓带的移动止损距离 × 这个倍数
 # patrol_shock_pct_1m = 2.0         # 巡逻兵：1 分钟逆向 2% 直接全平该币（最长持仓档：8h 2.5 / 12h 3.0 / 24h 4.0，其余 2.0）
 # patrol_alert_pct_1m = 1.0         # 巡逻兵：1 分钟逆向 1% 让管家立刻复查（8h 1.2 / 12h 1.5 / 24h 2.0，其余 1.0）
 breakout_vol_ratio = 3.0          # 哨兵：放量突破要 1 分钟量 ≥ 3 倍均值
