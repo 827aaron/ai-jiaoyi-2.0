@@ -340,6 +340,7 @@ class HbExecutorAdapter:
         self._protection = protection
         if protection is not None:
             protection.notify_stop_clamped = self._alert_stop_clamped
+            protection.notify_trigger_rejected = self._alert_trigger_rejected
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -1398,6 +1399,16 @@ class HbExecutorAdapter:
             f"{symbol} {pid}：{text}",
             symbol,
             f"server_stop_clamped:{pid}",
+            kind="order_failed",
+        )
+
+    async def _alert_trigger_rejected(self, pid: str, symbol: str, tag: str, text: str) -> None:
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "条件单触发后子单被交易所拒绝",
+            f"{symbol} {pid}：{text}",
+            symbol,
+            f"server_trigger_rejected:{pid}:{tag}",
             kind="order_failed",
         )
 
