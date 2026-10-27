@@ -10,7 +10,7 @@ from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.brackets import BracketManager
-from jiaoyi.execution.exchange import CcxtBinanceFutures
+from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -93,6 +93,8 @@ def build_execution(
     frozen_peak_exit_after_s: int = 3600,
     protection_readback_grace_s: float = 0.0,
     protection_prearm_grace_s: float = 0.0,
+    protection_stop_working_type: WorkingType = "CONTRACT_PRICE",
+    protection_take_profit_working_type: WorkingType = "CONTRACT_PRICE",
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -144,6 +146,8 @@ def build_execution(
             connector_name=CONNECTOR_BY_MODE[mode],
             readback_grace_s=protection_readback_grace_s,
             prearm_grace_s=protection_prearm_grace_s,
+            stop_working_type=protection_stop_working_type,
+            take_profit_working_type=protection_take_profit_working_type,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None

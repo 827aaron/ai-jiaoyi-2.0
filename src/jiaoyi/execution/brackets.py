@@ -26,6 +26,7 @@ from jiaoyi.execution.exchange import (
     ExchangePosition,
     ExecutionBook,
     NormalizedBracketSpec,
+    WorkingType,
 )
 from jiaoyi.execution.registry import (
     PositionRegistry,
@@ -53,6 +54,7 @@ class BracketExchange(Protocol):
         client_order_id: str,
         *,
         kind: Literal["stop_loss", "take_profit"],
+        working_type: WorkingType,
     ) -> ExchangeBracket: ...
     async def get_bracket(
         self, symbol: str, *, algo_id: str | None = None, client_order_id: str | None = None
@@ -176,15 +178,22 @@ class BracketManager:
         readback_grace_s: float = 0.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         prearm_grace_s: float = 0.0,
+        stop_working_type: WorkingType = "CONTRACT_PRICE",
+        take_profit_working_type: WorkingType = "CONTRACT_PRICE",
     ) -> None:
         """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
 
         ``prearm_grace_s``：从未完整托管时，可重试的同步失败最多连续容忍几秒；0 = 不容忍。
+
+        ``stop_working_type`` / ``take_profit_working_type``：之后新建的止损（含移动止损新一代）/
+        止盈腿用哪个触发价格源，建腿时写进账本；已有的腿一直按自己记下的核对，保命单固定标记价。
         """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
         self.readback_grace_s, self._sleep = readback_grace_s, sleep
         self.prearm_grace_s = prearm_grace_s
+        self.stop_working_type = stop_working_type
+        self.take_profit_working_type = take_profit_working_type
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -356,8 +365,7 @@ class BracketManager:
             or order.kind != leg.kind
             or order.close_side != ("sell" if tracked.record.side is Side.LONG else "buy")
             or order.position_side != "BOTH"
-            or order.working_type
-            != ("MARK_PRICE" if leg.purpose == "lifeboat" else "CONTRACT_PRICE")
+            or order.working_type != leg.working_type
             or not order.reduce_only
             or order.price_protect
             or order.close_position
@@ -617,6 +625,16 @@ class BracketManager:
                 if len(cid) > 36:
                     raise ProtectionIncomplete("条件单身份超过交易所长度限制")
                 spec = specs[kind]
+                # 新一代（含移动止损换价）按现在的设置；旧腿照自己记下的核对，新腿确认后才撤旧腿。
+                working_type: WorkingType = (
+                    "MARK_PRICE"
+                    if kind == "lifeboat"
+                    else (
+                        self.stop_working_type
+                        if kind == "stop_loss"
+                        else self.take_profit_working_type
+                    )
+                )
                 legs.append(
                     ProtectiveLeg(
                         kind="take_profit" if kind == "take_profit" else "stop_loss",
@@ -631,6 +649,7 @@ class BracketManager:
                             if kind == "stop_loss" and state.trailing_activated
                             else "fixed"
                         ),
+                        working_type=working_type,
                     )
                 )
             self._save(pid, legs=legs, generation=generation, stage="provisional")
@@ -663,6 +682,7 @@ class BracketManager:
                             leg.trigger_price,
                             leg.client_order_id,
                             kind=leg.kind,
+                            working_type=leg.working_type,
                         )
                 except BracketSubmissionRejected as rejected:
                     self._save_leg(

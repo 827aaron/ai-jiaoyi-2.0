@@ -2112,6 +2112,8 @@ const PLAIN = {
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
   protection_readback_grace_s: "条件单回执后查不到，最多等几秒再算没挂上（0 = 不等）",
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
+  protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
+  protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   rule_gate_without_jev: "没有拍板人时用规则代替",
   gate_record_only: "拍板只记不拦（门槛没过也放行，只记下来）",
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",
@@ -2505,7 +2507,7 @@ const ROLES = [
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
     { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
-    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。只在配置文件改，改后重启；0 = 原行为。", keys: ["app.protection_*"] },
+    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。只在配置文件改，改后重启；秒数 0、触发价 CONTRACT_PRICE = 原行为。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
