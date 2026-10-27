@@ -60,6 +60,7 @@ from jiaoyi.slow.settings import (
     SlowConfig,
     TiersSection,
     load_slow_config,
+    market_desk_conflict,
 )
 from jiaoyi.slow.settings import with_profile as slow_with_profile
 
@@ -924,8 +925,8 @@ def _validate(section: Section, text: str, paths: ConfigPaths) -> None:
             raw_app = tomllib.loads(paths.app.read_text(encoding="utf-8"))
             SlowConfig.model_validate(slow_with_profile(data, profiles.profile_of(raw_app)))
         else:
-            AppConfig.model_validate(with_profile(data))
-            _validate_slow_for(profiles.profile_of(data), paths)
+            app = AppConfig.model_validate(with_profile(data))
+            _validate_slow_for(profiles.profile_of(data), paths, app.fast_loop.regime_flip_target)
     except tomllib.TOMLDecodeError as e:  # set_toml_value 出错才会到这
         raise ActionError(f"改完不是合法 TOML，没有保存：{e}") from e
     except ValidationError as e:
@@ -937,8 +938,11 @@ def _validate(section: Section, text: str, paths: ConfigPaths) -> None:
         raise ActionError("不合格，没有保存：" + "；".join(msgs)) from e
 
 
-def _validate_slow_for(profile: str, paths: ConfigPaths) -> None:
-    """切档位时 slow.toml 要按新档位再校验一遍，不然这里存成功、下次启动反被拒。"""
+def _validate_slow_for(
+    profile: str, paths: ConfigPaths, regime_flip_target: str = "flash_market_only"
+) -> None:
+    """切档位时 slow.toml 要按新档位再校验一遍，不然这里存成功、下次启动反被拒。
+    大盘台接管时翻转目标也要对得上（``market_desk_conflict``）。"""
     if not paths.slow.is_file():
         return
     try:
@@ -946,7 +950,7 @@ def _validate_slow_for(profile: str, paths: ConfigPaths) -> None:
     except tomllib.TOMLDecodeError as e:
         raise ActionError(f"{paths.slow.name} 不是合法 TOML，先在终端修好：{e}") from e
     try:
-        SlowConfig.model_validate(slow_with_profile(raw, profile))
+        slow = SlowConfig.model_validate(slow_with_profile(raw, profile))
     except ValidationError as e:
         msgs = [
             f"{'.'.join(str(p) for p in err['loc']) or '(整体)'}："
@@ -956,6 +960,8 @@ def _validate_slow_for(profile: str, paths: ConfigPaths) -> None:
         raise ActionError(
             f"换到档位 {profile} 后 {paths.slow.name} 不合格，没有保存：" + "；".join(msgs)
         ) from e
+    if problem := market_desk_conflict(slow, regime_flip_target):
+        raise ActionError(f"不合格，没有保存：{problem}")
 
 
 _SECTION = re.compile(r"^\s*\[([A-Za-z0-9_.]+)\]\s*(#.*)?$")

@@ -134,11 +134,17 @@ from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.credits import CreditMonitor
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.majors import MajorsSource
+from jiaoyi.slow.market_desk import MarketDesk, OpenRouterDeskModel
 from jiaoyi.slow.market_log import MarketLog
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
-from jiaoyi.slow.settings import SlowConfig, missing_slow_stack, slow_defaults
+from jiaoyi.slow.settings import (
+    SlowConfig,
+    market_desk_conflict,
+    missing_slow_stack,
+    slow_defaults,
+)
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
 from jiaoyi.slow.tradingagents_engine import PROVIDER_KEY_ENV, TradingAgentsEngine
 from jiaoyi.slow.us_market import EarningsCalendar, EarningsNews
@@ -818,7 +824,8 @@ class App:
             self.derivs = built.derivs
             self.observations = built.observations
             self.halted = built.halted
-            if self.slow_cfg.llm.provider == "openrouter" and self.news is not None:
+            desk_on = self.slow_cfg.market_desk.mode != "off"
+            if (self.slow_cfg.llm.provider == "openrouter" or desk_on) and self.news is not None:
                 store = secrets or ChainedSecretStore()  # 真军师团才有 news；桩没有额度可看
                 self.credits = CreditMonitor(
                     app_cfg.data_dir,
@@ -827,6 +834,12 @@ class App:
                     resend_after=timedelta(hours=app_cfg.credit_resend_hours),
                 )
         self.m = modules
+        # 大盘台（slow.toml [market_desk]）：mode = off 时不建，一次模型调用都没有
+        self.desk: MarketDesk | None = None
+        if self.slow_cfg.market_desk.mode != "off" and isinstance(
+            modules.cards, BattleCardCommander
+        ):
+            self.desk = self._build_desk(modules.cards, secrets or ChainedSecretStore())
         # 和卡相反的信号：主循环按账本持仓分流（有仓叫管家急查、反复出申请单币临时会）
         cards = modules.cards
         bind_credit = getattr(cards, "bind_credit_alarm", None)
@@ -1037,6 +1050,28 @@ class App:
         except OSError:
             log.exception("写暂停状态失败")
 
+    def _build_desk(self, cards: BattleCardCommander, secrets: SecretStore) -> MarketDesk:
+        cfg = self.slow_cfg.market_desk
+        if not secrets.get("OPENROUTER_API_KEY"):
+            raise ConfigError(
+                "slow.toml [market_desk] 开了，但没有 OPENROUTER_API_KEY（大盘台经 OpenRouter 调 "
+                "DeepSeek V4.1 Flash）；先 setup-keys，或把 mode 改回 off"
+            )
+        credits = self.credits
+        return MarketDesk(
+            cfg,
+            cards,
+            OpenRouterDeskModel(lambda: secrets.get("OPENROUTER_API_KEY"), cfg),
+            self.log,
+            self.app_cfg.data_dir,
+            clock=self.clock,
+            day_tz=self.risk_cfg.day_reset_tz,
+            balance=(lambda: credits.balance_usd()) if credits is not None else None,
+            credit_alarm=(lambda: credits.note_exhausted(self.clock()))
+            if credits is not None
+            else None,
+        )
+
     def reload_config(self) -> dict[str, tuple[Any, Any]]:
         """配置文件变了就读出来，把热生效的项换到正在用的配置对象上（不用重启）。
 
@@ -1055,6 +1090,8 @@ class App:
             raw.pop("profile", None)
             new_app = AppConfig.model_validate(with_profile(raw))
             new_risk = load_risk_config(files.risk)
+            if problem := market_desk_conflict(self.slow_cfg, new_app.fast_loop.regime_flip_target):
+                raise ConfigError(problem)
         except (ConfigError, ValidationError) as e:
             log.warning("配置文件改过但读不好，继续用旧配置：%s", e)
             return {}

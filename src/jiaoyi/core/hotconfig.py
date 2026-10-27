@@ -129,6 +129,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "market_review_on",
         "regime_flip_on",
         "regime_flip_live",
+        "regime_flip_target",
         "regime_flip_breadth",
         "regime_flip_btc_pct",
         "regime_flip_confirm",

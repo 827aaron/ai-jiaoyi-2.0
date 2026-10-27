@@ -29,6 +29,7 @@ from jiaoyi.contracts import (
     PositionStatus,
     RiskConfig,
     Role,
+    Side,
 )
 from jiaoyi.contracts.battle_card import CardSymbol, MarketView
 from jiaoyi.core.recorder import local_day
@@ -540,7 +541,11 @@ def position_views(
         trail_on = kp.get("trail_on")
         prot = (
             parse_protection(
-                protections.get(p.position_id), now or datetime.now(UTC), protection_stale_s
+                protections.get(p.position_id),
+                now or datetime.now(UTC),
+                protection_stale_s,
+                long=p.side is Side.LONG,
+                activation_pct=p.trailing_activation_pct,
             )
             if protections
             else None
