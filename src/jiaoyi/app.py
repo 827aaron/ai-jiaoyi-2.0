@@ -60,6 +60,7 @@ from jiaoyi.core.hotconfig import (
     patch_inplace,
     restart_fingerprint,
 )
+from jiaoyi.core.observations import KeeperObservationCollector
 from jiaoyi.core.pool_overrides import (
     POOL_OVERRIDES_FILE,
     POOL_OVERRIDES_PAUSE,
@@ -375,6 +376,7 @@ class Built:
     """持仓量 / 多空比轮询（新信号 + 拍板人快照）；没连币安时没有。主循环跑 ``run``。"""
     halted: dict[str, str] = field(default_factory=dict)
     """合约临时不在交易（结算中等）的币 → 原因。主循环按币安推送增删，风控员只挡新开仓。"""
+    observations: KeeperObservationCollector | None = None
 
 
 def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
@@ -624,11 +626,22 @@ def build_modules(
     keeper: Keeper
     for name in app_cfg.ignored_paper_switches:
         log.warning("%s 只在模拟盘生效，已忽略", name)
+    observations: KeeperObservationCollector | None = None
     if model is None:
         gate_mode = "none"
         log.warning("没有可用的拍板模型（缺 JEV_API_KEY 或没锁 jev_model），不开新仓")
         decision_model, gate, keeper = StubDecisionModel(), StubEntryGate(), StubKeeper()
     else:
+        try:
+            observations = KeeperObservationCollector(app_cfg.data_dir)
+
+            async def close_observations() -> None:
+                if observations is not None:
+                    observations.close()
+
+            closers.append(close_observations)
+        except Exception:
+            observations = None
         gate_mode = "rule" if isinstance(model, RuleDecisionModel) else "jev"
         decision_model = model
         gate = JevEntryGate(
@@ -664,6 +677,8 @@ def build_modules(
             current_market=(lambda: cards.latest_market_view)
             if isinstance(cards, BattleCardCommander)
             else None,
+            observation_source=features.diagnostic_observation if observations else None,
+            observation_sink=observations.offer if observations else None,
         )
 
     modules = Modules(
@@ -717,6 +732,7 @@ def build_modules(
         against,
         derivs,
         halted,
+        observations,
     )
 
 
@@ -750,6 +766,7 @@ class App:
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
+        self.observations: KeeperObservationCollector | None = None
         # 合约临时不在交易的币（主循环按 !contractInfo 推送增删），和风控员共用一个 dict
         self.halted: dict[str, str] = {}
         self.credits: CreditMonitor | None = None
@@ -779,6 +796,7 @@ class App:
             self.news = built.news
             self.against = built.against
             self.derivs = built.derivs
+            self.observations = built.observations
             self.halted = built.halted
             if self.slow_cfg.llm.provider == "openrouter" and self.news is not None:
                 store = secrets or ChainedSecretStore()  # 真军师团才有 news；桩没有额度可看

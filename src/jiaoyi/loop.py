@@ -543,6 +543,9 @@ class Runner:
 
     async def on_event(self, event: MarketEvent) -> None:
         self.m.features.update(event)
+        if self.app.observations is not None:
+            with contextlib.suppress(Exception):
+                self.app.observations.on_event(event)
         self._market_file.count(event, self.app.clock())
         if isinstance(event, Kline):
             self._sync_wanted()

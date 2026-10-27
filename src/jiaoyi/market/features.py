@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from jiaoyi.contracts import (
     BookMetrics,
@@ -99,6 +100,11 @@ class _SymbolState:
     atr_hist: deque[tuple[float, float]] = field(default_factory=deque)
     last_price: float | None = None
     last_ts: float = 0.0
+    last_price_source: str | None = None
+    last_price_source_ts: float | None = None
+    last_price_observed_ts: float | None = None
+    book_observed_ts: float | None = None
+    mark_observed_ts: float | None = None
     book: BookTop | None = None
     mark: MarkPrice | None = None
 
@@ -123,6 +129,91 @@ class EntryContext:
 
 def _ts(dt: datetime) -> float:
     return dt.timestamp()
+
+
+def _finite_observation(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _observation_iso(value: float | None) -> str | None:
+    if _finite_observation(value) is None:
+        return None
+    try:
+        assert value is not None
+        return datetime.fromtimestamp(value, UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _observation_times(
+    source: float | None, received: float | None, observed: float | None
+) -> dict[str, Any]:
+    source, received = _finite_observation(source), _finite_observation(received)
+    return {
+        "source_ts": _observation_iso(source),
+        "observed_at": _observation_iso(received),
+        "age_s": observed - source if observed is not None and source is not None else None,
+        "source_after_update_observation": (
+            source > received if source is not None and received is not None else None
+        ),
+        "source_after_capture": (
+            source > observed if source is not None and observed is not None else None
+        ),
+    }
+
+
+def _return_observation(st: _SymbolState, seconds: float) -> dict[str, Any]:
+    target = st.last_ts - seconds
+    result: dict[str, Any] = {
+        "nominal_window_s": seconds,
+        "reference_ts": _observation_iso(st.last_ts),
+        "reference_clock": "latest_mixed_market_event",
+        "target_ts": _observation_iso(target),
+        "anchor_bucket_ts": None,
+        "anchor_price": None,
+        "actual_lookback_s": None,
+        "anchor_gap_s": None,
+        "history_span_s": None,
+        "last_bucket_age_s": None,
+        "max_bucket_gap_s": None,
+        "warmup_complete": False,
+        "used_first_available": None,
+        "source_bucket_precision_s": 1,
+        "sample_count": 0,
+        "chronological": None,
+        "coverage_status": "no_trade_price_history",
+    }
+    if not st.prices or not math.isfinite(st.last_ts):
+        return result
+    prices = list(st.prices)
+    if not all(math.isfinite(t) and math.isfinite(px) for t, px in prices):
+        result["coverage_status"] = "nonfinite_history"
+        return result
+    chronological = all(a[0] <= b[0] for a, b in itertools.pairwise(prices))
+    index = bisect.bisect_right(prices, (target, math.inf)) - 1
+    anchor_ts, anchor_price = prices[max(index, 0)]
+    window = prices[max(index, 0) :]
+    result.update(
+        anchor_bucket_ts=_observation_iso(anchor_ts),
+        anchor_price=anchor_price,
+        actual_lookback_s=st.last_ts - anchor_ts,
+        anchor_gap_s=target - anchor_ts,
+        history_span_s=st.last_ts - min(t for t, _ in prices),
+        last_bucket_age_s=st.last_ts - prices[-1][0],
+        max_bucket_gap_s=max((b[0] - a[0] for a, b in itertools.pairwise(window)), default=None),
+        warmup_complete=chronological and index >= 0,
+        used_first_available=index < 0,
+        sample_count=len(window),
+        chronological=chronological,
+        coverage_status=(
+            "unordered_history"
+            if not chronological
+            else "target_reached_not_continuity_proof"
+            if index >= 0
+            else "insufficient_history"
+        ),
+    )
+    return result
 
 
 def backfill_minutes(atr_period_min: int, atr_long_period_min: int = 0) -> int:
@@ -213,6 +304,7 @@ class RollingFeatureEngine:
         atr_period_min: int = DEFAULT_ATR_MINUTES,
         atr_long_period_min: int = 0,
         oi_window_min: int = 240,
+        observation_wall: Callable[[], datetime] | None = None,
     ) -> None:
         """``oi_window_min``：持仓量变化信号的窗口，按它多算一个 ``ret_oiw``（同窗口价格涨跌）。"""
         if atr_period_min < 1:
@@ -226,6 +318,7 @@ class RollingFeatureEngine:
         self._oi_min = oi_window_min
         self._s: dict[str, _SymbolState] = {}
         self._extra: ExtraValues | None = None
+        self._observation_wall = observation_wall or (lambda: datetime.now(UTC))
 
     def set_depth_levels(self, levels: int) -> None:
         """盘口深度档数热更新（设置 ``book_depth_levels``）：下一次算盘口就按新档数求和。"""
@@ -247,8 +340,12 @@ class RollingFeatureEngine:
         st = self._state(event.symbol)
         if isinstance(event, Trade):
             self._on_trade(st, event)
+            st.last_price_source = "trade"
+            st.last_price_source_ts = _ts(event.ts)
+            st.last_price_observed_ts = self._observation_update_ts()
         elif isinstance(event, BookTop):
             self._on_book(st, event)
+            st.book_observed_ts = self._observation_update_ts()
         elif isinstance(event, Liquidation):
             t = _ts(event.ts)
             st.liqs.append((t, event.price * event.qty, event.side == Side.LONG))
@@ -256,9 +353,24 @@ class RollingFeatureEngine:
         elif isinstance(event, MarkPrice):
             st.mark = event
             st.last_ts = max(st.last_ts, _ts(event.ts))
+            st.mark_observed_ts = self._observation_update_ts()
         elif isinstance(event, Kline):
+            had_price = st.last_price is not None
             self._on_kline(st, event)
+            if not had_price and st.last_price is not None:
+                st.last_price_source = "kline_close_bootstrap"
+                st.last_price_source_ts = _ts(event.close_time)
+                st.last_price_observed_ts = self._observation_update_ts()
         self._prune(st)
+
+    def _observation_update_ts(self) -> float | None:
+        try:
+            observed = self._observation_wall()
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                return None
+            return _finite_observation(_ts(observed))
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------ 输入
 
@@ -419,6 +531,56 @@ class RollingFeatureEngine:
             values=values,
             book=self._book_metrics(st, now),
         )
+
+    def diagnostic_observation(self, symbol: str, observed_at: datetime) -> dict[str, Any]:
+        """只读诊断；update 的观察时间不是 WebSocket 接收时间，不进入模型快照。"""
+        observed = (
+            _finite_observation(_ts(observed_at))
+            if observed_at.tzinfo is not None and observed_at.utcoffset() is not None
+            else None
+        )
+        st = self._s.get(symbol)
+        result: dict[str, Any] = {
+            "symbol": symbol,
+            "observed_at": _observation_iso(observed),
+            "feature_ts": _observation_iso(st.last_ts) if st is not None else None,
+            "feature_clock": "latest_mixed_market_event",
+            "source_observed_clock": "python_feature_update_not_websocket_receive",
+            "price": None,
+            "mark": None,
+            "book": None,
+            "returns": {},
+        }
+        if st is None:
+            result["status"] = "unknown_symbol"
+            return result
+        result["status"] = "observed"
+        if st.last_price is not None:
+            result["price"] = {
+                "value": _finite_observation(st.last_price),
+                "source": st.last_price_source or "unknown",
+                **_observation_times(st.last_price_source_ts, st.last_price_observed_ts, observed),
+            }
+        if st.mark is not None:
+            result["mark"] = {
+                "value": _finite_observation(st.mark.mark_price),
+                "source": "mark",
+                **_observation_times(_ts(st.mark.ts), st.mark_observed_ts, observed),
+            }
+        if st.book is not None:
+            result["book"] = {
+                "bid": _finite_observation(st.book.bids[0][0]),
+                "bid_qty": _finite_observation(st.book.bids[0][1]),
+                "ask": _finite_observation(st.book.asks[0][0]),
+                "ask_qty": _finite_observation(st.book.asks[0][1]),
+                "source": "book_top_reference_not_fill",
+                **_observation_times(_ts(st.book.ts), st.book_observed_ts, observed),
+            }
+        result["returns"] = {
+            name: _return_observation(st, seconds)
+            for name, seconds in (("ret1m", 60.0), ("ret5m", 300.0))
+        }
+        return result
 
     def entry_context(self, symbol: str) -> EntryContext | None:
         """拍板人快照要的原始数据（技术面、长一点的成交流、盘口失衡平均）。没见过这个币返回 None。

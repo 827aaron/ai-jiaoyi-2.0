@@ -1,0 +1,596 @@
+{
+  "baseline_commit": "44ca954",
+  "request": {
+    "request_id": "hold-pos-1-a1b2c3",
+    "kind": "hold",
+    "symbol": "BTCUSDT",
+    "ts": "2026-10-22T06:30:00Z",
+    "signal_id": null,
+    "position_id": "pos-1",
+    "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}",
+    "questions": [
+      {
+        "id": "thesis_intact",
+        "prompt": "Is the reason we entered this position (`entry.sig`, `entry.why`) still valid? Goal: we hold an open position (`pos`). Decide whether to keep holding or close it now. You can only hold or close the whole position; the stop is never widened and size is never added. A wrong close costs fees and the remaining move; a wrong hold can cost up to the stop. Inputs: `pnl_bps`, `age_min`, distance to stop and take-profit in bps, recent returns, taker flow (`buy`, `cvd30_k`), liquidations, funding, the book, and whether today's strategist card still supports the trade (`card`). New inputs: `pos.entry_px`; `pos.peak_bps` = best unrealized PnL so far, `pos.giveback_bps` = how much of that peak is gone; `pos.pnl_r`/`pos.peak_r` = the same in units of the initial stop distance; `pos.be_bps` = PnL after round-trip fees; `pos.path_bps` = unrealized PnL at earlier checks, oldest first; `entry` = why we entered (signal type, trigger text, entry-time genuine/take probabilities); `trail` = trailing stop: on, active, and bps from price to the trailing stop; `kronos.agree` = 1 if the forecast model's averaged path ends in the position's direction, else 0; `kronos.rank` = where this coin's forecast return ranks among all coins forecast now (top/mid/bottom); `against` (only on urgent checks) = a rule trigger just fired in the OPPOSITE direction of our position: its type, side, volume multiple, taker buy share, whether it is a strong type, seconds ago.",
+        "choices": [
+          "yes",
+          "no"
+        ]
+      },
+      {
+        "id": "adverse_risk",
+        "prompt": "How likely is a sharp move against the position in the next few minutes?",
+        "choices": [
+          "low",
+          "high"
+        ]
+      },
+      {
+        "id": "action",
+        "prompt": "Should we keep holding the whole position or close all of it now? If the position is in profit after fees (`pos.be_bps` > 0), weigh how much of the peak profit (`pos.peak_bps`, `pos.giveback_bps`) has already been given back and whether the trailing stop (`trail`) already protects it. A position that is losing but still inside its stop is not by itself a reason to close: the stop already limits that loss.",
+        "choices": [
+          "hold",
+          "close"
+        ]
+      }
+    ]
+  },
+  "verdict": {
+    "position_id": "pos-1",
+    "ts": "2026-10-22T06:30:00Z",
+    "action": "close",
+    "p_close": 0.9,
+    "consecutive": 1,
+    "reason": "平仓概率 0.90",
+    "jev_request_id": "hold-pos-1-a1b2c3",
+    "source_market_view_id": null,
+    "source_market_version": null,
+    "review_succeeded": true
+  },
+  "template": {
+    "version": "q9",
+    "fingerprint": "11822a6e9146"
+  },
+  "cases": {
+    "hold": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": true,
+          "error": null,
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": [
+            {
+              "id": "thesis_intact",
+              "probs": {
+                "yes": 0.8,
+                "no": 0.2
+              }
+            },
+            {
+              "id": "adverse_risk",
+              "probs": {
+                "low": 0.8,
+                "high": 0.2
+              }
+            },
+            {
+              "id": "action",
+              "probs": {
+                "hold": 0.8,
+                "close": 0.2
+              }
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "hold",
+          "p_close": 0.2,
+          "consecutive": 1,
+          "reason": "平仓概率 0.20",
+          "jev_request_id": "hold-pos-1-a1b2c3",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": true
+        }
+      ],
+      "waits": [],
+      "history": [
+        10.0
+      ]
+    },
+    "close": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": true,
+          "error": null,
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": [
+            {
+              "id": "thesis_intact",
+              "probs": {
+                "yes": 0.09999999999999998,
+                "no": 0.9
+              }
+            },
+            {
+              "id": "adverse_risk",
+              "probs": {
+                "low": 0.09999999999999998,
+                "high": 0.9
+              }
+            },
+            {
+              "id": "action",
+              "probs": {
+                "hold": 0.09999999999999998,
+                "close": 0.9
+              }
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "close",
+          "p_close": 0.9,
+          "consecutive": 1,
+          "reason": "平仓概率 0.90",
+          "jev_request_id": "hold-pos-1-a1b2c3",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": true
+        }
+      ],
+      "waits": [],
+      "history": [
+        10.0
+      ]
+    },
+    "confirm": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        },
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0,\"path_bps\":[10]},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": true,
+          "error": null,
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": [
+            {
+              "id": "thesis_intact",
+              "probs": {
+                "yes": 0.30000000000000004,
+                "no": 0.7
+              }
+            },
+            {
+              "id": "adverse_risk",
+              "probs": {
+                "low": 0.30000000000000004,
+                "high": 0.7
+              }
+            },
+            {
+              "id": "action",
+              "probs": {
+                "hold": 0.30000000000000004,
+                "close": 0.7
+              }
+            }
+          ]
+        },
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": true,
+          "error": null,
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": [
+            {
+              "id": "thesis_intact",
+              "probs": {
+                "yes": 0.30000000000000004,
+                "no": 0.7
+              }
+            },
+            {
+              "id": "adverse_risk",
+              "probs": {
+                "low": 0.30000000000000004,
+                "high": 0.7
+              }
+            },
+            {
+              "id": "action",
+              "probs": {
+                "hold": 0.30000000000000004,
+                "close": 0.7
+              }
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "hold",
+          "p_close": 0.7,
+          "consecutive": 1,
+          "reason": "平仓概率 0.70，第 1 次，等确认",
+          "jev_request_id": "hold-pos-1-a1b2c3",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": true
+        },
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "close",
+          "p_close": 0.7,
+          "consecutive": 2,
+          "reason": "平仓概率 0.70",
+          "jev_request_id": "hold-pos-1-a1b2c3",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": true
+        }
+      ],
+      "waits": [],
+      "history": [
+        10.0,
+        10.0
+      ]
+    },
+    "retry": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        },
+        {
+          "request_id": "hold-pos-1-a1b2c3-r",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": false,
+          "error": "HTTP 529 system_overloaded",
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": []
+        },
+        {
+          "request_id": "hold-pos-1-a1b2c3-r",
+          "ok": true,
+          "error": null,
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": [
+            {
+              "id": "thesis_intact",
+              "probs": {
+                "yes": 0.09999999999999998,
+                "no": 0.9
+              }
+            },
+            {
+              "id": "adverse_risk",
+              "probs": {
+                "low": 0.09999999999999998,
+                "high": 0.9
+              }
+            },
+            {
+              "id": "action",
+              "probs": {
+                "hold": 0.09999999999999998,
+                "close": 0.9
+              }
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "close",
+          "p_close": 0.9,
+          "consecutive": 1,
+          "reason": "平仓概率 0.90",
+          "jev_request_id": "hold-pos-1-a1b2c3-r",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": true
+        }
+      ],
+      "waits": [
+        1.0
+      ],
+      "history": [
+        10.0
+      ]
+    },
+    "failure": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": false,
+          "error": "invalid response",
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": []
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "hold",
+          "p_close": 0.0,
+          "consecutive": 1,
+          "reason": "Jev 调用出错，本轮维持现状",
+          "jev_request_id": "hold-pos-1-a1b2c3",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": false
+        }
+      ],
+      "waits": [],
+      "history": [
+        10.0
+      ]
+    },
+    "retry_failure": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        },
+        {
+          "request_id": "hold-pos-1-a1b2c3-r",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":10.0,\"age_min\":5.0,\"to_stop_bps\":27.7,\"to_tp_bps\":16.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":10.0,\"giveback_bps\":0.0,\"pnl_r\":0.57,\"peak_r\":0.57,\"be_bps\":0.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68068.0,\"atr_bps\":11.8,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-10.0,-230.4],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": false,
+          "error": "HTTP 529 system_overloaded",
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": []
+        },
+        {
+          "request_id": "hold-pos-1-a1b2c3-r",
+          "ok": false,
+          "error": "HTTP 529 system_overloaded",
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": []
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "hold",
+          "p_close": 0.0,
+          "consecutive": 1,
+          "reason": "Jev 服务方繁忙（已重试 1 次），本轮维持现状",
+          "jev_request_id": "hold-pos-1-a1b2c3-r",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": false
+        }
+      ],
+      "waits": [
+        1.0
+      ],
+      "history": [
+        10.0
+      ]
+    },
+    "guard": {
+      "requests": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "kind": "hold",
+          "symbol": "BTCUSDT",
+          "ts": "2026-10-22T06:30:00Z",
+          "signal_id": null,
+          "position_id": "pos-1",
+          "snapshot": "{\"sym\":\"BTCUSDT\",\"pos\":{\"side\":\"long\",\"pnl_bps\":30.0,\"age_min\":5.0,\"to_stop_bps\":47.7,\"to_tp_bps\":3.5,\"time_left_min\":55.0,\"entry_px\":68000.0,\"peak_bps\":30.0,\"giveback_bps\":0.0,\"pnl_r\":1.7,\"peak_r\":1.7,\"be_bps\":20.0},\"trail\":{\"on\":false,\"active\":false},\"px\":68204.0,\"atr_bps\":11.7,\"ret1m_bps\":20.0,\"ret5m_bps\":40.0,\"vol_x\":4.0,\"buy\":0.65,\"cvd30_k\":30.0,\"rv5m_bps\":4.0,\"liq_long_k\":0.0,\"liq_short_k\":0.0,\"book\":{\"spread_bps\":0.07,\"ofi_k\":10.0,\"depth_k\":2000.0},\"card\":{\"bias\":\"long\",\"levels_bps\":[-29.9,-249.8],\"stop_atr\":[1.0,2.0],\"tp_r\":[1.5,3.0],\"size_max\":\"L\",\"regime\":\"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，不追高。\"}}"
+        }
+      ],
+      "responses": [
+        {
+          "request_id": "hold-pos-1-a1b2c3",
+          "ok": true,
+          "error": null,
+          "model_version": "observation-test",
+          "latency_ms": 0.0,
+          "cost_usd": 0.0,
+          "usage": null,
+          "answers": [
+            {
+              "id": "thesis_intact",
+              "probs": {
+                "yes": 0.8,
+                "no": 0.2
+              }
+            },
+            {
+              "id": "adverse_risk",
+              "probs": {
+                "low": 0.8,
+                "high": 0.2
+              }
+            },
+            {
+              "id": "action",
+              "probs": {
+                "hold": 0.8,
+                "close": 0.2
+              }
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "hold",
+          "p_close": 0.2,
+          "consecutive": 1,
+          "reason": "平仓概率 0.20",
+          "jev_request_id": "hold-pos-1-a1b2c3",
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": true
+        },
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "close",
+          "p_close": 1.0,
+          "consecutive": 1,
+          "reason": "回吐保护：最高浮盈 +30 bps（1.70R），现在 +16 bps，已回吐 47%（线 45%，0.5R 起算）",
+          "jev_request_id": null,
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": false
+        }
+      ],
+      "waits": [],
+      "history": [
+        30.0,
+        16.0
+      ]
+    },
+    "missing": {
+      "requests": [],
+      "responses": [],
+      "verdicts": [
+        {
+          "position_id": "pos-1",
+          "ts": "2026-10-22T06:30:00Z",
+          "action": "hold",
+          "p_close": 0.0,
+          "consecutive": 1,
+          "reason": "没有行情数据，维持现状",
+          "jev_request_id": null,
+          "source_market_view_id": null,
+          "source_market_version": null,
+          "review_succeeded": false
+        }
+      ],
+      "waits": [],
+      "history": []
+    }
+  }
+}
