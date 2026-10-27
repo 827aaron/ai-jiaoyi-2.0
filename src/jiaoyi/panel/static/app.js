@@ -179,10 +179,20 @@ const CMD = {
 const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
 let onOk = null;
 
+// 面板密码只记在这个变量里：刷新页面就没了，不进 localStorage / sessionStorage
+let panelPw = "";
+const isPwFailure = (status, detail) => status === 401 || status === 403 || /密码|锁定/.test(typeof detail === "string" ? detail : "");
+function rememberPw(body, ok, status, detail) {
+  if (!body || !body.password) return;
+  if (ok) panelPw = body.password;
+  else if (isPwFailure(status, detail)) panelPw = "";
+}
+
 async function post(url, body) {
   const r = await fetch(url, { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json", "X-Jiaoyi-Panel": "1" }, body: JSON.stringify(body) });
   let j = {};
   try { j = await r.json(); } catch (e) { /* 非 JSON 也当失败 */ }
+  rememberPw(body, r.ok, r.status, j.detail);
   if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : `出错了（${r.status}）`);
   return j;
 }
@@ -193,14 +203,14 @@ function ask(title, body, ok, danger, submit) {
     <div class="msg small" id="dlg-msg"></div>
     <div class="acts"><button class="btn" data-close="1">取消</button><button class="btn ${danger ? "b-kill" : "b-go"}" data-ok="1">${ok}</button></div></div></div>`;
   onOk = submit;
-  const first = $("#layer input") || $("#layer [data-ok]");
+  const first = $("#layer input:not([hidden])") || $("#layer [data-ok]");
   first.focus();
 }
 function dlgMsg(html, k = "") { const m = $("#dlg-msg"); if (m) { m.className = "msg small " + k; m.innerHTML = html; } }
 
 function pwField(c) {
   if (!c.pw_set) return `<div class="note warn">还没有设置面板密码：先在 Mac mini 终端运行 <code>jiaoyi set-panel-password</code>。</div>`;
-  return `<label class="pw">面板密码<input type="password" id="dlg-pw" autocomplete="current-password"></label><div class="dim small">连错 5 次锁 15 分钟。</div>`;
+  return `<form id="dlg-pw-form" autocomplete="on"><input type="text" name="username" autocomplete="username" value="jiaoyi-panel" hidden readonly><label class="pw">面板密码<input type="password" id="dlg-pw" name="password" autocomplete="current-password" value="${esc(panelPw)}"></label></form><div class="dim small">连错 5 次锁 15 分钟。</div>`;
 }
 
 // 设置页常显：有改动没生效时高亮「重启生效」，否则是普通的「重启主程序」（验收时随时要重启）
@@ -420,6 +430,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDlg();
   if (e.key === "Enter" && e.target.closest && e.target.closest("#layer") && e.target.tagName === "INPUT") { e.preventDefault(); const b = $("#layer [data-ok]"); if (b) b.click(); }
 });
+document.addEventListener("submit", (e) => { if (e.target.id === "dlg-pw-form") { e.preventDefault(); const b = $("#layer [data-ok]"); if (b) b.click(); } });
 document.addEventListener("click", async (e) => {
   if (e.target.dataset && e.target.dataset.close) return closeDlg();
   if (e.target.dataset && e.target.dataset.ok && onOk) {
