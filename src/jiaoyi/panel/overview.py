@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -36,6 +36,7 @@ from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meetings import STAGES, read_meeting
 from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
+from jiaoyi.panel.protection import ProtectionView, lifeboat_summary, parse_protection
 from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
 
@@ -192,6 +193,8 @@ class PositionView(BaseModel):
     trail: TrailEstimate | None = None
     """兼容旧客户端；不再用 K 线估算执行器状态。"""
     stop_diagnostics: StopDiagnostics | None = None
+    protection: ProtectionView | None = None
+    """交易所托管保护单的落盘状态（新仓才有）；有它时 ``lifeboat_*`` 按它算。"""
     book_quote: dict[str, object] | None = None
     """独立的公开 REST 盘口参考（含获取时间和环境），不是执行器检查输入。"""
     pnl_pct: float | None = None
@@ -308,7 +311,15 @@ def build_overview(
     kpis = compute_kpis(files, ledger, hb, risk, now)
     halted, halt_pct = kpis.halted, kpis.halt_pct
     positions = position_views(
-        ledger.live(), recent, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
+        ledger.live(),
+        recent,
+        hb,
+        risk.taker_fee_bps,
+        fee_rate_bps(ledger.positions),
+        prices,
+        ledger.protection,
+        now,
+        app.protection_stale_s,
     )
 
     # ---- 今日统计
@@ -461,6 +472,9 @@ def position_views(
     taker_fee_bps: float = 0.0,
     fills_fee_bps: float | None = None,
     prices: dict[str, tuple[float, PriceSrc]] | None = None,
+    protections: dict[str, object] | None = None,
+    now: datetime | None = None,
+    protection_stale_s: int = 120,
 ) -> list[PositionView]:
     """未结束的持仓，最新开的在前；附上浮盈浮亏和管家最新判断。
 
@@ -519,6 +533,21 @@ def position_views(
         base = p.entry_price * p.quantity if p.entry_price else None
         peak_bps, give_bps, peak_r = kp.get("peak_bps"), kp.get("giveback_bps"), kp.get("peak_r")
         trail_on = kp.get("trail_on")
+        prot = (
+            parse_protection(
+                protections.get(p.position_id), now or datetime.now(UTC), protection_stale_s
+            )
+            if protections
+            else None
+        )
+        lb_status, lb_price = (
+            lifeboat_summary(prot)
+            if prot
+            else (
+                p.lifeboat.status.value if p.lifeboat else None,
+                p.lifeboat.stop_price if p.lifeboat else None,
+            )
+        )
         entry_fee_pct = None
         if p.entry_price:
             paid = p.fees_usdt / (p.quantity * p.entry_price) * 100 if p.fees_usdt else None
@@ -536,8 +565,9 @@ def position_views(
                 entry_price=p.entry_price,
                 stop_loss_price=p.stop_loss_price,
                 take_profit_price=p.take_profit_price,
-                lifeboat_status=p.lifeboat.status.value if p.lifeboat else None,
-                lifeboat_price=p.lifeboat.stop_price if p.lifeboat else None,
+                lifeboat_status=lb_status,
+                lifeboat_price=lb_price,
+                protection=prot,
                 opened_at=p.opened_at,
                 time_limit_s=p.time_limit_s,
                 signal_id=p.signal_id,

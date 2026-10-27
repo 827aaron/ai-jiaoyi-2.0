@@ -365,12 +365,22 @@ def create_app(
 
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
-        page = build_positions(files, await hb.snapshot(), cfg()[0], clock(), await last_prices())
+        page = build_positions(
+            files,
+            await hb.snapshot(),
+            cfg()[0],
+            clock(),
+            await last_prices(),
+            cfg()[1].protection_stale_s,
+        )
         quote_source = quotes()
 
         async def with_trail(v: PositionView) -> PositionView:
-            raw = await hb.stop_diagnostics(v.executor_id)
-            diag = parse_diagnostics(raw, v.executor_id, clock(), v.opened_at)
+            # 交易所托管保护的新仓不依赖 hummingbot 的止损诊断（可能根本没部署）
+            diag = None
+            if v.protection is None:
+                raw = await hb.stop_diagnostics(v.executor_id)
+                diag = parse_diagnostics(raw, v.executor_id, clock(), v.opened_at)
             book = None
             if quote_source:
                 with suppress(KlineError, TimeoutError, ValueError):

@@ -27,7 +27,7 @@ const ICON = {
 const MODE = { paper: "模拟盘", testnet: "测试网", live: "实盘" };
 const BIAS = { long: ["偏多", "p-long"], short: ["偏空", "p-short"], both: ["双向", "p-accent"], no_trade: ["观望", ""], unknown: ["没结论", ""] };
 const SIDE = { long: ["多", "up"], short: ["空", "down"] };
-const LIFEBOAT = { active: "保命 ✓", pending: "⚠ 保命挂单中", missing: "⚠ 保命缺失", triggered: "保命已触发", cancelled: "保命已撤" };
+const LIFEBOAT = { active: "保命 ✓", pending: "⚠ 保命挂单中", missing: "⚠ 保命缺失", triggered: "保命已触发", cancelled: "保命已撤", stale: "⚠ 保命已挂·数据过期", unknown: "⚠ 保命状态未知" };
 // 本页加载的 app.js 版本号（首页给 app.js 带的 ?v=）
 const UI_VER = (() => {
   try {
@@ -511,11 +511,13 @@ const TRAIL_TIP = "状态来自执行器实际止损检查，超过 15 秒显示
 function trailNote(p) {
   const t = p.stop_diagnostics;
   const head = `移动止损配置：净收益赚到 ${(+p.trailing_activation_pct).toFixed(2)}% 开始跟，回撤距离 ${(+p.trailing_stop_pct).toFixed(2)}%。`;
+  if (p.protection) return head + (p.protection.trailing_activated ? `程序记录已激活${p.protection.trailing_stop_price == null ? "" : `，目标止损价 ${price(p.protection.trailing_stop_price, p.symbol)}（以下方交易所保护单的确认状态为准）`}。` : "程序记录未激活。");
   if (!t || t.status !== "current" || t.trailing_active == null) return head + `实际状态未知：${esc(t?.reason || "执行器尚未提供观测")}。`;
   return head + (t.trailing_active ? `执行器确认已启动；当前净收益触发阈值 ${t.actual_trailing_trigger_net_pnl_pct == null ? "未知" : signed(t.actual_trailing_trigger_net_pnl_pct, 4) + "%"}。` : (t.coverage_complete ? "执行器本轮检查未激活。" : "执行器本轮检查未激活，此前记录不完整。")) + " 未提供精确动态触发价，不绘制动态价格线。";
 }
 function trailTag(p, brief) {
   if (p.trailing_stop_pct == null) return `<div class="small dim" title="开仓那会儿移动止损没开（设置 → 持仓管家），这笔不会跟着收紧">没带移动止损</div>`;
+  if (p.protection) return `<div class="small ${p.protection.trailing_activated ? "" : "dim"}"><span class="pill ${p.protection.trailing_activated ? "p-accent" : ""}">${p.protection.trailing_activated ? "移动止损跟踪中 · 程序记录" : "移动止损未激活 · 程序记录"}</span></div>`;
   const t = p.stop_diagnostics, tip = esc(TRAIL_TIP);
   if (!t || t.status !== "current" || t.trailing_active == null) return `<div class="small warn" title="${tip}">移动止损 · 状态未知${t?.status === "stale" ? "（观测过期）" : ""}</div>`;
   if (t.trailing_active) return `<div class="small" title="${tip}"><span class="pill p-accent">跟踪中 · 执行器确认</span>${brief || t.actual_trailing_trigger_net_pnl_pct == null ? "" : ` 净收益阈值 ${signed(t.actual_trailing_trigger_net_pnl_pct, 4)}%`}</div>`;
@@ -533,6 +535,30 @@ function stopDiagnostics(p) {
   const events = (t?.events || []).slice().reverse().map(e => `<div><span class="n">${stamp(e.ts)}</span><span>${e.stage === "check" ? (e.check_action === "activation" ? "移动止损启动条件检查" : e.check_action === "close" ? "止损平仓条件检查" : "止损条件检查（动作未知）") : stage[e.stage] || "未知阶段"}${e.stage === "check" ? (e.condition_met === true ? " · 条件满足" : e.condition_met === false ? " · 条件未满足" : " · 条件结果未知") + (e.close_requested === true ? " · 已请求平仓流程" : e.close_requested === false ? " · 本次未请求平仓流程" : " · 平仓请求状态未知") : ""} · ${kind[e.kind] || "执行器事件"} · 价 ${price(e.price, p.symbol)}${e.fill_amount == null ? "" : ` · 成交数量 ${qtyFmt(e.fill_amount)}`}${e.threshold == null ? "" : ` · 净收益 ${esc(e.comparison || "阈值")} ${signed(e.threshold, 4)}%`}${e.check_seq ? ` · 检查序号 ${e.check_seq}` : ""}</span></div>`).join("");
   return `<div class="note small"><div>${book}</div><div>${state}</div><div>源 ${esc(t?.source || "未知")} · 采样 ${stamp(t?.observed_at)} · 实际检查 ${stamp(t?.check_at)} · 序号 ${t?.check_seq || "未知"}</div><div>${coverage}。仅凭这些记录不能断言没有漏触发。</div><div>固定止损线来自账本计划价；执行器按实际费用后的净收益检查，成交还取决于订单回报。</div></div><div class="lbl">执行器止损事件（最近 ${t?.events?.length || 0} 条）</div><div class="log trail scroll tall">${events || '<div class="dim">没有可用止损事件，无法据此判断是否漏触发。</div>'}</div><div class="small dim">触发判定、下单申请和成交是不同阶段；真实成交见交易流水。</div>`;
 }
+// 交易所托管保护单（positions.json 的 server_protection，只读）：每条腿的真实状态，价格只用交易所确认过的
+const LEG_ST = { live: "已挂", triggered: "已触发", cancelled: "已撤", rejected: "被拒", pending: "提交中·未确认", unknown: "状态未知", none: "无记录" };
+const PROT_STAGE = { entry: "入场中", provisional: "临时保护", armed: "已武装", exiting: "平仓中", cleanup: "清理中", done: "已结束" };
+const protLeg = (p, role) => p.protection && p.protection.legs.find((l) => l.role === role);
+const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? "止盈" : l.purpose === "trailing" ? "移动止损" : "固定止损";
+const legBad = (l) => l.state !== "live";
+const secText = (s) => s == null ? "未知" : s < 60 ? `${Math.round(s)} 秒前` : `${dur(s * 1000)}前`;
+function legPrice(p, l) {
+  if (l.trigger_price != null) return price(l.trigger_price, p.symbol);
+  return l.planned_price != null ? `<span class="dim">计划 ${price(l.planned_price, p.symbol)}（未确认）</span>` : "—";
+}
+function protBrief(p) {
+  const q = p.protection;
+  if (!q) return "";
+  const legs = q.legs.filter((l) => l.role !== "lifeboat").map((l) => `<span class="${legBad(l) ? "warn" : ""}">${legName(l)}${LEG_ST[l.state]}</span>`).join(" · ");
+  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}</div>`;
+}
+function protBlock(p) {
+  const q = p.protection;
+  const rows = q.legs.map((l) => `<div><span class="n">${legName(l)}</span><span class="${legBad(l) ? "warn" : ""}"><b>${LEG_ST[l.state]}</b>${l.detail ? ` · ${l.detail}` : ""} · 触发价 ${legPrice(p, l)}${l.quantity != null ? ` · 数量 ${qtyFmt(l.quantity)}` : ""}${l.algo_status ? ` · 交易所状态 ${esc(l.algo_status)}` : ""}${l.child_state ? ` · 子单 ${{ absent: "确认没有", unknown: "未确认", identified: "已出现" }[l.child_state] || esc(l.child_state)}` : ""}</span></div>`).join("");
+  const trail = q.trailing_stop_price != null ? ` · 移动止损价 ${price(q.trailing_stop_price, p.symbol)}${q.trailing_activated ? "（已激活）" : ""}` : "";
+  const age = q.observed_at ? `${secText(q.age_s)}（${new Date(q.observed_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : "没有观测时间";
+  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div><div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
+}
 // 到这个价成交的预估净盈亏（U）：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次吃单费；没有费率 / 价就不估
 function lvlPnl(p, lvl) {
   if (lvl == null || p.entry_price == null || !p.quantity) return null;
@@ -544,8 +570,15 @@ const lvlEst = (p, lvl) => { const v = lvlPnl(p, lvl); return v == null ? "" : `
 const LVL_TIP = "到这个价成交时预估的净盈亏：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次的吃单手续费。滑点、资金费没算。";
 // 止损格只显示账本固定计划价；没有可信动态触发价就不计算其预估收益。
 function slCell(p) {
+  const l = protLeg(p, "stop_loss");
+  if (l) return `${legPrice(p, l)} <span class="${legBad(l) ? "warn" : "dim"} small">${legName(l)}·${LEG_ST[l.state]}</span><div class="small" title="${LVL_TIP}">${lvlEst(p, l.trigger_price)}</div>`;
   const lvl = p.stop_loss_price;
   return `${price(lvl, p.symbol)} <span class="dim small">固定计划</span><div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
+}
+function tpCell(p) {
+  const l = protLeg(p, "take_profit");
+  if (!l) return `${price(p.take_profit_price, p.symbol)}<div class="small" title="${LVL_TIP}">${lvlEst(p, p.take_profit_price)}</div>`;
+  return `${legPrice(p, l)} <span class="${legBad(l) ? "warn" : "dim"} small">${LEG_ST[l.state]}</span><div class="small" title="${LVL_TIP}">${lvlEst(p, l.trigger_price)}</div>`;
 }
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
@@ -1201,7 +1234,7 @@ P.positions = (arg) => {
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
     const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}</div>` : "";
     const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
-    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? `<div class="small" title="${LVL_TIP}">${lvlEst(p, p.lifeboat_price)}</div>` : ""}`;
+    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? `<div class="small" title="${LVL_TIP}">${lvlEst(p, p.lifeboat_price)}</div>` : ""}${protBrief(p)}`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
@@ -1210,8 +1243,8 @@ P.positions = (arg) => {
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
-      <td class="r num">${slCell(p)}${trailTag(p)}</td><td class="r num">${price(p.take_profit_price, p.symbol)}<div class="small" title="${LVL_TIP}">${lvlEst(p, p.take_profit_price)}</div></td>
-      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "—")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
+      <td class="r num">${slCell(p)}${trailTag(p)}</td><td class="r num">${tpCell(p)}</td>
+      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "还没看")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
   // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
   const cards = d.positions.map((p) => {
@@ -1223,8 +1256,8 @@ P.positions = (arg) => {
       <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
-        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${slCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 盈 ${price(p.take_profit_price, p.symbol)} ${lvlEst(p, p.take_profit_price)} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
-      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) + " " + lvlEst(p, p.lifeboat_price) : ""}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
+        开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${slCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 盈 ${tpCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
+      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) + " " + lvlEst(p, p.lifeboat_price) : ""}${protBrief(p)}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
   const trail = window.__recs.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`).join("");
@@ -1245,7 +1278,7 @@ P.positions = (arg) => {
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span><span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
       ${sel.trailing_stop_pct != null ? `<div class="small dim trail-note">${trailNote(sel)}</div>` : ""}
-      ${stopDiagnostics(sel)}
+      ${sel.protection ? protBlock(sel) : stopDiagnostics(sel)}
       <div><div class="lbl">从信号到现在的每一步（今天）· 点一条看快照</div><div class="log trail">${trail || '<div class="dim">今天的日志里没有这笔的记录。</div>'}</div></div>
     </section>`;
 };
@@ -2105,6 +2138,7 @@ const PLAIN = {
   jev_max_concurrent: "拍板人同时最多判几个",
   keeper_interval_s: "管家每隔几秒看一次持仓",
   reconcile_interval_s: "每隔几秒和交易所对一次账",
+  protection_stale_s: "交易所保护单的观测超过几秒就标“数据过期”（0 = 不标）",
   slow_loop_interval_min: "军师团每隔几分钟开一次会（档位 = 开会间隔）",
   screener_interval_min: "选币每隔几分钟跑一次（默认跟开会间隔档位走，最少 15 分钟）",
   pool_size: "每次选多少个币进候选池",
@@ -2514,7 +2548,7 @@ const ROLES = [
     { g: "", keys: ["fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "fast_loop.patrol_alert_stop_mult", "fast_loop.patrol_shock_stop_mult"] },
   ] },
   { id: "reconciler", t: "对账员", strip: ["对账员"], what: "定时和交易所对账，账本和币安对不上时处理", groups: [
-    { g: "", keys: ["app.reconcile_interval_s", "app.reconciler_close_unknown_positions"] },
+    { g: "", keys: ["app.reconcile_interval_s", "app.protection_stale_s", "app.reconciler_close_unknown_positions"] },
   ] },
   { id: "lifeboat", t: "保命止损", what: "在交易所挂的兜底止损，程序挂了也能止损", groups: [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },

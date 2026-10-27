@@ -12,6 +12,7 @@ jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 Op
 jev_max_concurrent = 4       # 拍板人同时最多判几个信号（不同币并行；同币排队只留最新一条）
 # keeper_interval_s = 20     # 最长持仓档：持仓管家多久看一次（30m 10 秒 / 1h 15 / 2h 20 / 4h 30）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
+# protection_stale_s = 120   # 面板：交易所保护单的观测超过 120 秒标“数据过期”；0 = 不标
 # slow_loop_interval_min = 60  # 开会间隔档 = 军师团开会间隔（15m 15 分钟 … 1h 60 … 24h 1440）
 # pool_size = 40             # 每次选多少个币进候选池；不写 = 跟档位（现在各档都是 40）
 # card_pick_max = 20         # 军师每次最多挑几个；不写 = 跟档位（现在各档都是 20）
