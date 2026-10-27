@@ -17,6 +17,7 @@ import logging
 import re
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from jiaoyi.slow import ta_prompts, ta_roles
@@ -33,9 +34,11 @@ def params_from_config() -> ta_prompts.PromptParams:
     from tradingagents.dataflows.config import get_config
 
     raw = get_config().get(PROMPT_KEY) or {}
-    return ta_prompts.PromptParams.for_hold(
+    p = ta_prompts.PromptParams.for_hold(
         str(raw.get("hold") or "2h"), int(raw["hold_minutes"]) if raw.get("hold_minutes") else None
     )
+    # slow.toml [meeting] snapshot_interval：快照 / 指标周期整进程一样，所以读全局配置也可靠
+    return replace(p, indicator=str(raw["indicator"])) if raw.get("indicator") else p
 
 
 def lean_from_config() -> str:
@@ -534,6 +537,10 @@ def create_market_analyst(llm: Any) -> Node:
 
         p = params_from_config()
         text = ta_roles.fill(ta_roles.MARKET, p, lean_from_config(), mirror=_mirror())
+        if meeting_setting("snapshot_label", "legacy") == "neutral":
+            text = text.replace(
+                ta_roles.SNAPSHOT_TRUTH, ta_prompts.fill(ta_roles.SNAPSHOT_NEUTRAL, p)
+            )
         system_message = _subst(text, {"target": str(state["company_of_interest"])}) + language(
             "market"
         )

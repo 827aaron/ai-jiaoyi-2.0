@@ -118,6 +118,8 @@ class Analysis:
     usage: dict[str, int] | None = None  # input_tokens / output_tokens / reasoning_tokens
     # 这场会实际用的偏空整改设置（bias_fix.MeetingSetup.record()）：分组、谁先发言等；旧引擎没有
     setup: dict[str, str] | None = None
+    # 这场会实际用的大盘判断（latest_market_regime 开着时可能比本轮开始时新）；None = 没有
+    market_view: MarketView | None = None
 
 
 class MeetingEngine(Protocol):
@@ -306,11 +308,15 @@ class BattleCardCommander:
         slowdown: tuple[timedelta, timedelta] | None = None,
         market_log: MarketLog | None = None,
         log_meta: Mapping[str, Any] | None = None,
+        latest_market_regime: bool = False,
+        event_brief_refresh: bool = False,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("作战卡有效期必须大于 0")
         self._clock = clock
         self._brief = brief
+        self._latest_regime = latest_market_regime
+        self._event_brief_refresh = event_brief_refresh
         self._journal = journal
         self._stop = stop_scale
         if not fail_backoff:
@@ -1224,6 +1230,15 @@ class BattleCardCommander:
             market = self.latest_market_view
             regime = market.regime if market else card.regime
             brief_text = self._brief.text if self._brief is not None else ""
+            if self._event_brief_refresh and self._brief is not None:
+                try:
+                    brief_text, _ = await self._market_brief()  # 简报自己 10 分钟内不重复拉
+                except Exception as exc:
+                    self._write(
+                        symbol=symbol,
+                        outcome=Outcome.ERROR,
+                        summary=f"{symbol} 临时会刷新简报失败，用上一份：{exc}"[:200],
+                    )
             res = await self._analyze_one(
                 entry,
                 regime,
@@ -1266,7 +1281,7 @@ class BattleCardCommander:
             self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
             now,
             card.expires_at,  # 临时会不改整轮的节奏：到期时间跟这一轮走
-            market,
+            res.market_view or market,
         )
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
         if all(s.symbol != symbol for s in card.symbols):
@@ -2141,6 +2156,9 @@ class BattleCardCommander:
         out.append("挑中：")
         out += [f"{e.symbol}：{by_pick.get(e.symbol, '')}" for e in chosen if e not in forced]
         live.step("pick", "market", "\n".join(out))
+        if "rolling_60m" in picked.table or "_closedHour[" in picked.table:
+            # 会前那一步是按现状格式先显示的；开了新标签 / 滚动涨跌家数时，补上模型实际收到的
+            live.step("input", "input", f"模型实际收到的池子概况和候选表：\n{picked.table}")
         keep = {e.symbol for e in chosen}
         said = {r.symbol: r.reason for r in picked.rejections}
         why: list[str] = []
@@ -2585,7 +2603,7 @@ class BattleCardCommander:
                 self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
                 now,
                 round_expiry,
-                market_view,
+                res.market_view or market_view,
             )
             cost += res.cost_usd
             published += 1
@@ -2655,6 +2673,7 @@ class BattleCardCommander:
     ) -> Analysis:
         async with self._sem:
             started = time.monotonic()
+            regime, market_view, regime_note = self._regime_at_start(regime, market_view)
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             try:
@@ -2675,7 +2694,9 @@ class BattleCardCommander:
                     )
                 # 只记录的 outlook 配上这场会看到的总盘会方向，开会记录里就是完整的一份；
                 # replace 只换指令，其余（花费、用量、会议设置）原样带着
-                res = replace(res, card_symbol=with_board(cs, market_view))
+                res = replace(res, card_symbol=with_board(cs, market_view), market_view=market_view)
+                if regime_note:
+                    res = replace(res, setup={**(res.setup or {}), **regime_note})
             except Exception as exc:
                 self._charge(-est)
                 fail_cost = self._failure_cost(exc, entry.symbol)
@@ -2718,6 +2739,26 @@ class BattleCardCommander:
                 setup=res.setup,
             )
             return res
+
+    def _regime_at_start(
+        self, regime: str, market_view: MarketView | None
+    ) -> tuple[str, MarketView | None, dict[str, str]]:
+        """单币会真正开始（拿到并发名额）时用哪一版大盘判断。``latest_market_regime`` 关着 =
+        原样（本轮开始时的）；开着 = 此刻最新发布的那份，并返回记进 meeting_setup 的几项。"""
+        if not self._latest_regime:
+            return regime, market_view, {}
+        latest = self.latest_market_view
+        if latest is None or market_view is None:
+            used, source = market_view, "round"
+        else:
+            used = latest
+            source = "round" if latest.market_view_id == market_view.market_view_id else "latest"
+        note = {
+            "regime_source": source,
+            "regime_market_view_id": used.market_view_id if used is not None else "",
+            "regime_observed_at": used.observed_at.isoformat() if used is not None else "",
+        }
+        return (used.regime if used is not None else regime), used, note
 
     def _validate(self, entry: SymbolPoolEntry, res: Analysis) -> CardSymbol:
         cs = res.card_symbol

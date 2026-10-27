@@ -26,6 +26,7 @@ import os
 import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
@@ -90,7 +91,7 @@ from jiaoyi.slow.levels import (
     select_levels,
 )
 from jiaoyi.slow.liquidations import LiquidationSource, describe_total
-from jiaoyi.slow.market_audit import invoke_market, market_timing_note
+from jiaoyi.slow.market_audit import CURRENT_AUDIT, invoke_market, market_timing_note
 from jiaoyi.slow.meeting_live import MeetingLive, tap_graph
 from jiaoyi.slow.news import NewsHub, format_items
 from jiaoyi.slow.social_guard import RedditGuard, register_reddit_guard
@@ -171,11 +172,33 @@ class TradingAgentsSettings:
     live_dir: str = ""
     # 偏空整改开关和对照比例（见 bias_fix.py）；默认 = 现状
     bias_fix: BiasFix = field(default_factory=BiasFix)
+    # 输入新鲜度（slow.toml [meeting]，见 docs/slow.md「延后信息」）；默认 = 现状
+    snapshot_interval: str | None = None  # None = 档位的指标周期
+    snapshot_label: str = "legacy"  # legacy / neutral
+    live_price_line: bool = False
+    stale_on_arrival: bool = False
+    stale_on_arrival_action: str = "watch"  # watch / no_trade
+    input_time_labels: str = "legacy"  # legacy / explicit
+    market_table_rolling: bool = False
+
+
+def fresh_overrides(s: TradingAgentsSettings) -> dict[str, str]:
+    """和现状不同的输入新鲜度设置，写进 ``jiaoyi_prompt``（数据工具在工作线程里按场读）；
+    全是现状就是空的，配置和改动前一字不差。"""
+    out: dict[str, str] = {}
+    if s.snapshot_interval:
+        out["indicator"] = s.snapshot_interval
+    if s.snapshot_label != "legacy":
+        out["snapshot_label"] = s.snapshot_label
+    if s.input_time_labels != "legacy":
+        out["input_time_labels"] = s.input_time_labels
+    return out
 
 
 def prompt_params(s: TradingAgentsSettings) -> ta_prompts.PromptParams:
     """这套设置对应的提示词参数（持仓时长、写法、指标周期、手续费占比）。"""
-    return ta_prompts.PromptParams.for_hold(s.hold, s.hold_minutes)
+    p = ta_prompts.PromptParams.for_hold(s.hold, s.hold_minutes)
+    return replace(p, indicator=s.snapshot_interval) if s.snapshot_interval else p
 
 
 def perp_context(p: ta_prompts.PromptParams, group: str = "manager") -> str:
@@ -219,6 +242,7 @@ def build_config(
                 "lean": s.lean_size_tier.value,
                 "lang": s.output_language,
                 **setup_overrides(setup),
+                **fresh_overrides(s),
             }
         },
         max_debate_rounds=s.debate_rounds,
@@ -383,12 +407,25 @@ def neutral_funding_label(interval_h: float | None) -> str:
     return FUNDING_LABEL_NEUTRAL.replace("{interval}", part)
 
 
+def _hm(ms: Any) -> str | None:
+    """毫秒时间戳 → ``HH:MM``（UTC）；读不出返回 None。"""
+    try:
+        return f"{datetime.fromtimestamp(int(ms) / 1000, tz=UTC):%H:%M}"
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def format_derivatives(
     funding: Sequence[Mapping[str, Any]],
     oi: Sequence[Mapping[str, Any]],
     funding_label: str = "legacy",
+    time_labels: str = "legacy",
+    premium: Mapping[str, Any] | None = None,
 ) -> str:
-    """资金费率历史 + 持仓量 24 小时变化 → 给分析师看的一段文字。纯函数，便于测试。"""
+    """资金费率历史 + 持仓量 24 小时变化 → 给分析师看的一段文字。纯函数，便于测试。
+    ``time_labels`` = explicit：资金费率写明是哪次结算的，持仓量写明首尾两个整点，
+    ``premium``（premiumIndex 的一条）有就加一行实时估算。"""
+    explicit = time_labels == "explicit"
     lines = ["## Derivatives data (Binance USDT-M perpetual)"]
     if funding:
         rates = [float(f["fundingRate"]) * 100 for f in funding]
@@ -401,18 +438,52 @@ def format_derivatives(
             if funding_label == "neutral"
             else FUNDING_LABEL_LEGACY
         )
-        lines.append(f"- Latest funding rate {rates[-1]:+.4f}% {label}")
+        settled = _hm(funding[-1].get("fundingTime")) if explicit else None
+        head = (
+            f"Last settled funding rate (settled at {settled} UTC)"
+            if settled
+            else "Latest funding rate"
+        )
+        lines.append(f"- {head} {rates[-1]:+.4f}% {label}")
+    if explicit and premium:
+        try:
+            est = float(premium["lastFundingRate"]) * 100
+            nxt, read = _hm(premium.get("nextFundingTime")), _hm(premium.get("time"))
+            lines.append(
+                f"- Live funding estimate {est:+.4f}% (Binance premiumIndex"
+                + (f" read at {read} UTC" if read else "")
+                + (f", for the settlement at {nxt} UTC" if nxt else "")
+                + "; it can still change before that settlement)"
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
     if len(oi) >= 2:
         first, last = float(oi[0]["sumOpenInterestValue"]), float(oi[-1]["sumOpenInterestValue"])
         if first > 0:
             chg = (last - first) / first * 100
+            t0, t1 = _hm(oi[0].get("timestamp")), _hm(oi[-1].get("timestamp"))
+            span = f" (hourly snapshots {t0} -> {t1} UTC)" if explicit and t0 and t1 else ""
             lines.append(
                 f"- Open interest (USDT) {first:,.0f} -> {last:,.0f}, "
-                f"change over {len(oi) - 1}h {chg:+.2f}%"
+                f"change over {len(oi) - 1}h{span} {chg:+.2f}%"
             )
     if len(lines) == 1:
         lines.append("- (no data)")
     return "\n".join(lines)
+
+
+def _premium_index(sym: str) -> Mapping[str, Any] | None:
+    """这个币此刻的 premiumIndex（含下次结算的实时资金费率估算）；拿不到返回 None。"""
+    try:
+        r = binance_gate.get(f"{_FAPI}/fapi/v1/premiumIndex", {"symbol": sym})
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, Mapping) else None
+    except binance_gate.RateLimited:
+        raise
+    except Exception:
+        logger.warning("%s 读 premiumIndex 失败，资金费率不带实时估算", sym, exc_info=True)
+        return None
 
 
 def derivatives_context(symbol: str, end: datetime) -> str:
@@ -430,8 +501,14 @@ def derivatives_context(symbol: str, end: datetime) -> str:
             {"symbol": sym, "period": "1h", "limit": 25, "endTime": end_ms},
         )
         o.raise_for_status()
+        labels = ta_nodes.meeting_setting("input_time_labels", "legacy")
+        premium = _premium_index(sym) if labels == "explicit" else None
         text = format_derivatives(
-            f.json(), o.json(), ta_nodes.meeting_setting("funding_label", "legacy")
+            f.json(),
+            o.json(),
+            ta_nodes.meeting_setting("funding_label", "legacy"),
+            labels,
+            premium,
         )
         if sym in _LIQ_TOTALS:
             text += "\n" + describe_total(_LIQ_TOTALS[sym])
@@ -814,12 +891,23 @@ def build_binance_snapshot(
             values[name] = f"N/A ({type(exc).__name__})"
     recent = rows[-max(1, min(int(look_back_days), SNAPSHOT_RECENT)) :]
     last = rows[-1]
+    neutral = ta_nodes.meeting_setting("snapshot_label", "legacy") == "neutral"
+    closed_at = datetime.fromtimestamp((int(last[6]) + 1) / 1000, tz=UTC)
+    age_min = max((end - closed_at).total_seconds() / 60, 0.0)
     lines = [
         f"## Verified market data snapshot — Binance USDT-M perpetual {sym}, {interval} bars, "
         "closed only",
         "",
         f"- Requested analysis time: {end:%Y-%m-%d %H:%M} UTC",
         f"- Latest closed {interval} bar used: {_bar_time(last)} UTC",
+        *(
+            [
+                f"- That bar closed at {closed_at:%H:%M} UTC, {age_min:.0f} min before the "
+                "requested analysis time; price moves after it are not in this snapshot."
+            ]
+            if neutral
+            else []
+        ),
         "- Bars that had not closed by the analysis time are excluded.",
         "",
         "### Latest verified OHLCV row",
@@ -844,8 +932,15 @@ def build_binance_snapshot(
         "|---|---:|",
         *(f"| {_bar_time(k)} | {price(float(k[4]))} |" for k in recent),
         "",
-        "Use this snapshot as the source of truth for exact OHLCV, price-level, and "
-        "indicator-value claims. If another tool output conflicts with it, flag the discrepancy "
+        (
+            f"This snapshot ends at the last closed {interval} bar, which closed at "
+            f"{closed_at:%H:%M} UTC, {age_min:.0f} min before now. Quote exact closed-bar OHLCV "
+            "and indicator values from it."
+            if neutral
+            else "Use this snapshot as the source of truth for exact OHLCV, price-level, and "
+            "indicator-value claims."
+        )
+        + " If another tool output conflicts with it, flag the discrepancy "
         "rather than inventing a reconciled number. Do not claim historical validation, "
         "support/resistance bounces, or exact percentage moves unless directly supported by tool "
         "output with concrete times and prices.",
@@ -1272,6 +1367,181 @@ def convert_instructions(
     )
 
 
+@dataclass(frozen=True)
+class LiveQuote:
+    """开会 / 转卡那一刻的现价，加上档位周期最后一根已收盘 K 线和还没走完的那根。"""
+
+    price: float
+    at: datetime
+    interval: str
+    closed_close: float | None = None
+    closed_at: datetime | None = None  # 最后一根已收盘 K 线的收盘时刻
+    partial_open_at: datetime | None = None
+    partial_ohl: tuple[float, float, float] | None = None  # 未收盘那根的开、高、低
+
+
+def _utc_ms(ms: Any) -> datetime:
+    return datetime.fromtimestamp(int(ms) / 1000, tz=UTC)
+
+
+def rolling_change(symbol: str, start: datetime) -> float | None:
+    """``start`` 那一分钟的开盘价到此刻最新价的涨跌（%），用 1 分钟 K 线；拿不到返回 None。"""
+    params = {
+        "symbol": binance_symbol(symbol),
+        "interval": "1m",
+        "startTime": int(start.timestamp() * 1000),
+        "limit": 61,
+    }
+    try:
+        r = binance_gate.get(_KL, params)
+        r.raise_for_status()
+        rows = r.json()
+    except binance_gate.RateLimited:
+        raise
+    except Exception:
+        logger.warning("%s 取滚动 60 分钟 K 线失败", symbol, exc_info=True)
+        return None
+    if not rows or int(rows[0][0]) != params["startTime"] or float(rows[0][1]) <= 0:
+        return None  # 起点那一分钟不在（新币 / 断档）：不拿别的分钟冒充
+    return (float(rows[-1][4]) / float(rows[0][1]) - 1) * 100
+
+
+def _pool_source_metadata() -> Mapping[str, Mapping[str, Any]]:
+    """本轮总盘会的选币来源元数据（指挥官放进 ``CURRENT_AUDIT``，``to_thread`` 带到工作线程）。"""
+    audit = CURRENT_AUDIT.get()
+    meta = audit.context.get("pool_source_metadata") if audit is not None else None
+    return {k: v for k, v in meta.items() if isinstance(v, Mapping)} if meta else {}
+
+
+def fetch_live_quote(symbol: str, interval: str, now: datetime) -> LiveQuote | None:
+    """币安最新成交价 + ``interval`` 最近两根 K 线（2 个公开请求）。
+    拿不到返回 None，不让会议失败。"""
+    sym = binance_symbol(symbol)
+    try:
+        r = binance_gate.get(f"{_FAPI}/fapi/v1/ticker/price", {"symbol": sym})
+        r.raise_for_status()
+        t = r.json()
+        price = float(t["price"])
+        at = _utc_ms(t["time"]) if t.get("time") else now
+        rows = _klines(symbol, interval, 2)
+    except binance_gate.RateLimited:
+        raise
+    except Exception:
+        logger.warning("%s 取实时价失败，这场会没有实时价那一行", sym, exc_info=True)
+        return None
+    now_ms = int(now.timestamp() * 1000)
+    closed = [k for k in rows if int(k[6]) < now_ms]
+    partial = [k for k in rows if int(k[6]) >= now_ms]
+    last = closed[-1] if closed else None
+    cur = partial[-1] if partial else None
+    return LiveQuote(
+        price=price,
+        at=at,
+        interval=interval,
+        closed_close=float(last[4]) if last is not None else None,
+        closed_at=_utc_ms(int(last[6]) + 1) if last is not None else None,
+        partial_open_at=_utc_ms(cur[0]) if cur is not None else None,
+        partial_ohl=(float(cur[1]), float(cur[2]), float(cur[3])) if cur is not None else None,
+    )
+
+
+def live_price_line(q: LiveQuote, now: datetime, fmt: Callable[[float], str]) -> str:
+    """会议说明里的实时价一行：现价、离最后一根已收盘 K 线变了多少、未收盘那根标成 partial。"""
+    text = f"Live price at {q.at:%H:%M:%S} UTC (Binance last trade): {fmt(q.price)}."
+    if q.closed_close and q.closed_at is not None:
+        age = max((now - q.closed_at).total_seconds() / 60, 0.0)
+        chg = (q.price / q.closed_close - 1) * 100
+        text += (
+            f" The last closed {q.interval} bar closed at {q.closed_at:%H:%M} UTC, {age:.0f} min "
+            f"before now, at {fmt(q.closed_close)}; the live price is {chg:+.2f}% from that close."
+        )
+    if q.partial_open_at is not None and q.partial_ohl is not None:
+        o, h, lo = q.partial_ohl
+        text += (
+            f" The {q.interval} bar that opened at {q.partial_open_at:%H:%M} UTC has not closed "
+            f"(partial bar, not a closed bar): open {fmt(o)}, high {fmt(h)}, low {fmt(lo)} so far."
+        )
+    return text + (
+        " Bars from the data tools end at the last closed bar; use this live price as the current "
+        "price when placing the entry zone, invalidation and targets."
+    )
+
+
+def converter_live_note(q: LiveQuote, start: LiveQuote | None, fmt: Callable[[float], str]) -> str:
+    """转卡前再取一次现价：告诉转卡这一步结论是按更早的价格写的。多空写法成对。"""
+    since = (
+        f" ({(q.price / start.price - 1) * 100:+.2f}% from {fmt(start.price)} at the meeting "
+        f"start, {start.at:%H:%M:%S} UTC)"
+        if start is not None and start.price > 0
+        else ""
+    )
+    return (
+        f"Live price at {q.at:%H:%M:%S} UTC, just before this card is written: "
+        f"{fmt(q.price)}{since}. The conclusion was written from earlier prices. If the live "
+        "price has already crossed the conclusion's invalidation level (at or below it for a "
+        "long, at or above it for a short), or the whole entry zone is already behind the price "
+        "(entirely above it for a long, entirely below it for a short), choose no_trade."
+    )
+
+
+def invalidation_price(decision: str) -> float | None:
+    """组合经理结论里 ``**Invalidation**:`` 那一行的第一个价格；没有或写的 none 返回 None。"""
+    m = re.search(r"\*\*Invalidation\*\*\s*:[ \t]*([^\n]*)", decision, re.I)
+    if m is None or _is_empty(m.group(1)):
+        return None
+    num = re.search(_NUM, m.group(1))
+    try:
+        return float(num.group(0).replace(",", "")) if num else None
+    except ValueError:
+        return None
+
+
+def stale_on_arrival_reason(
+    bias: Bias,
+    zone: Range | None,
+    invalidation: float | None,
+    price: float,
+    start_price: float | None = None,
+) -> str | None:
+    """卡到手时现价已让它作废的理由；没作废返回 None。做多 / 做空互为镜像。
+
+    失效价：现价已越过就作废。进场区间：只有开会开始时价格还没越过区间（``start_price``
+    在区间或正确一侧）、现在整段被甩在后面才作废；开会时就已在区间另一侧（等价格回来的挂法）
+    或不知道开会时的价，不按区间作废。"""
+    if bias is Bias.LONG:
+        if invalidation is not None and price <= invalidation:
+            return f"现价 {price:g} 已到失效价 {invalidation:g} 或以下（做多作废）"
+        if zone is not None and start_price is not None and start_price >= zone.min > price:
+            return (
+                f"开会后价格从 {start_price:g} 跌穿进场区间 {zone.min:g}–{zone.max:g}，"
+                f"现价 {price:g} 在区间下方（做多）"
+            )
+    elif bias is Bias.SHORT:
+        if invalidation is not None and price >= invalidation:
+            return f"现价 {price:g} 已到失效价 {invalidation:g} 或以上（做空作废）"
+        if zone is not None and start_price is not None and start_price <= zone.max < price:
+            return (
+                f"开会后价格从 {start_price:g} 涨穿进场区间 {zone.min:g}–{zone.max:g}，"
+                f"现价 {price:g} 在区间上方（做空）"
+            )
+    return None
+
+
+def stale_card(cs: CardSymbol, why: str, action: str = "watch") -> CardSymbol:
+    """卡到手就作废时怎么处理。watch（默认）= 方向不动、只清信号和进场区间（和指挥官
+    ``_watch_only`` 同一种「只盯不开」：持仓的反向信号、方向记分照旧，管家也不把它当反向卡平仓）；
+    no_trade = 改成观望。"""
+    if action == "no_trade":
+        return _no_trade(cs, f"stale_on_arrival：{why}").model_copy(update={"entry_zone": None})
+    return cs.model_copy(
+        update={
+            "allowed_signals": [],
+            "entry_zone": None,
+            "reason": f"{cs.reason}（stale_on_arrival：{why}）"[:500],
+        }
+    )
+
+
 def convert_prompt(
     entry: SymbolPoolEntry,
     r: RiskConfig,
@@ -1285,12 +1555,14 @@ def convert_prompt(
     lean_tier: SizeTier = SizeTier.M,
     rm: str = "",
     pm: str = "",
+    live_note: str = "",
 ) -> str:
     """把会议结论整理成作战指令的提示词（单独成函数，便于快照测试）。"""
     return (
         f"{convert_instructions(r, params, lean_tier, rm, pm)}\n"
         f"{atr_note}\n{hold_note}\n{level_note}\n"
-        f"Symbol: {entry.symbol} ({entry.category.value})\nMarket view: {regime}{brief}\n"
+        + (f"{live_note}\n" if live_note else "")
+        + f"Symbol: {entry.symbol} ({entry.category.value})\nMarket view: {regime}{brief}\n"
         f"Conclusion:\n{decision}"
     )
 
@@ -2226,8 +2498,18 @@ class TradingAgentsEngine:
             .bind(max_tokens=self._s.json_max_tokens)
         )
         breadth = market_table.breadth_line(pool or candidates)
+        if self._s.market_table_rolling:
+            breadth += "\n" + self._rolling_breadth([e.symbol for e in pool or candidates])
+        meta = _pool_source_metadata() if self._s.input_time_labels == "explicit" else {}
         rows = "\n".join(
-            market_table.format_row(e, self._s.hold, self._headlines(e.symbol)) for e in candidates
+            market_table.format_row(
+                e,
+                self._s.hold,
+                self._headlines(e.symbol),
+                self._s.input_time_labels,
+                meta.get(e.symbol),
+            )
+            for e in candidates
         )
         table = f"{breadth}\n{rows}"
         market = (self._brief_text() if brief_text is None else brief_text) + self._market_news()
@@ -2269,6 +2551,18 @@ class TradingAgentsEngine:
             except Exception:
                 logger.exception("总盘会重问失败，用第一次的回答")
         return pick_result(draft, valid, max_n, problems, retried, meter.cost, breadth, table)
+
+    def _rolling_breadth(self, symbols: Sequence[str]) -> str:
+        """池子滚动 60 分钟涨跌家数（截到此刻）；每个币一个 1 分钟 K 线请求，拿不到的记缺失。"""
+        end = self._today()
+        start = end.replace(second=0, microsecond=0) - timedelta(minutes=60)
+        try:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                got = list(pool.map(lambda s: rolling_change(s, start), symbols))
+        except Exception as exc:  # 含限流：这一行只是补充，不能让整轮总盘会失败
+            logger.warning("滚动 60 分钟涨跌家数取不到", exc_info=True)
+            return f"Pool breadth rolling_60m unavailable ({type(exc).__name__})"
+        return market_table.rolling_breadth_line(dict(zip(symbols, got, strict=True)), start, end)
 
     @staticmethod
     def _review_prompt(
@@ -2531,6 +2825,14 @@ class TradingAgentsEngine:
             f"{now:%Y-%m-%d %H:%M}",
             f"{now + timedelta(minutes=params.hold_minutes):%Y-%m-%d %H:%M}",
         )
+        fmt = price_formatter(tick)
+        start_quote = (
+            fetch_live_quote(entry.symbol, params.indicator, now)
+            if self._s.live_price_line or self._s.stale_on_arrival
+            else None
+        )
+        if start_quote is not None and self._s.live_price_line:
+            note = f"{note}\n{live_price_line(start_quote, now, fmt)}"
         # 偏空整改：这场会用哪组设置（按会议 id 定，可复现），记进实况和结论
         setup = resolve(self._s.bias_fix, f"{entry.symbol}@{now:%Y-%m-%dT%H:%M:%SZ}")
         self._setups()[entry.symbol] = setup.record()
@@ -2588,6 +2890,13 @@ class TradingAgentsEngine:
             self._s.level_span_stops,
         )
         rm = research_recommendation(str(state.get("investment_plan", "")))
+        quote = (
+            fetch_live_quote(entry.symbol, params.indicator, self._today())
+            if self._s.live_price_line or self._s.stale_on_arrival
+            else None
+        )
+        if live and quote is not None:
+            live.step("input", "live_price", live_price_line(quote, self._today(), fmt))
         prompt = convert_prompt(
             entry,
             self._risk,
@@ -2601,6 +2910,9 @@ class TradingAgentsEngine:
             self._s.lean_size_tier,
             rm or "",
             str(rating or ""),
+            converter_live_note(quote, start_quote, fmt)
+            if quote is not None and self._s.live_price_line
+            else "",
         )
         llm = (
             self._llm(graph, self._s.convert_tier)
@@ -2650,6 +2962,45 @@ class TradingAgentsEngine:
                 )
                 if missing:
                     cs = degrade_size(cs, missing)
+                stale = None
+                guard: dict[str, str] = {}
+                if self._s.stale_on_arrival:
+                    px = quote.price if quote is not None else levels.price
+                    source = (
+                        "live_ticker"
+                        if quote is not None
+                        else ("levels_fallback" if px else "unavailable")
+                    )
+                    guard["stale_guard_price_source"] = source
+                    stale = (
+                        stale_on_arrival_reason(
+                            cs.bias,
+                            cs.entry_zone,
+                            invalidation_price(decision),
+                            px,
+                            start_quote.price if start_quote is not None else None,
+                        )
+                        if px
+                        else None
+                    )
+                    if stale is not None:
+                        how = self._s.stale_on_arrival_action
+                        logger.info(
+                            "%s stale_on_arrival（%s，价格来源 %s）：%s",
+                            entry.symbol,
+                            how,
+                            source,
+                            stale,
+                        )
+                        if live:
+                            live.step(
+                                "quality",
+                                "gate",
+                                f"stale_on_arrival：{stale}（价格来源 {source}），"
+                                + ("只盯不开" if how == "watch" else "改成观望"),
+                            )
+                        cs = stale_card(cs, stale, how)
+                        guard["stale_on_arrival"] = stale
                 cs = attach_outlook(
                     cs, draft, rm, rating, str(state.get("trader_investment_plan", ""))
                 )
@@ -2662,7 +3013,7 @@ class TradingAgentsEngine:
                         "reasoning_tokens": meter.tokens_reasoning,
                         "cached_tokens": meter.tokens_cached,  # 命中缓存的输入 token
                     },
-                    setup.record(),
+                    {**setup.record(), **guard},
                 )
             except (ValidationError, ValueError) as exc:
                 last = exc

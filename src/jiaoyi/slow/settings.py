@@ -308,8 +308,57 @@ class MeetingConfig(_Strict):
     analyst_klines: tuple[str, ...] | None = Field(
         default=None,
         description='分析师看的 K 线，每段 "周期 x 根数"，如 ["15m x 96", "1h x 72", "4h x 60"]。'
-        "不写 = 按最长持仓档：30m–2h 15m×96 + 1h×72 + 4h×60；4h 起 1h×72 + 4h×90 + 1d×60。"
+        "不写 = 按最长持仓档：30m 5m×48 + 15m×48 + 1h×48；1h / 2h 5m×48 + 15m×96 + 1h×72；"
+        "4h 15m×96 + 1h×72 + 4h×60；8h 起 1h×72 + 4h×90 + 1d×60。"
         "开会间隔比最细一段还短，最前面自动补 15m×48。",
+    )
+    snapshot_interval: Literal["5m", "15m", "30m", "1h", "4h"] | None = Field(
+        default=None,
+        description="行情分析师的「已收盘快照」和指标用几分钟 K 线；不写 = 按最长持仓档"
+        "（4h 档是 1h，最旧约 1 小时）。写 15m 快照最旧约 15 分钟。提示词里的指标周期、"
+        "多空比的统计周期跟着一起换。",
+    )
+    snapshot_label: Literal["legacy", "neutral"] = Field(
+        default="legacy",
+        description="快照怎么写：legacy = 叫「source of truth」（现状）；neutral = 写明「最后一根"
+        "已收盘 K 线 HH:MM 收盘，距现在 N 分钟」，行情分析师的说明同样不再叫它权威。",
+    )
+    live_price_line: bool = Field(
+        default=False,
+        description="开 = 会议说明加一行实时价（开会时的最新成交价、离最后一根已收盘 K 线涨跌多少，"
+        "没走完的那根标成未收盘），转作战指令前再取一次现价写进去。每场会多 4 个币安公开请求。",
+    )
+    stale_on_arrival: bool = Field(
+        default=False,
+        description="开 = 转作战指令后用现价核对：做多现价已跌到失效价或以下，做空现价已涨到"
+        "失效价或以上；或开会后价格穿过了整个进场区间（开会时还没越过）→ 按 "
+        "stale_on_arrival_action 处理，理由写 stale_on_arrival，记日志。",
+    )
+    stale_on_arrival_action: Literal["watch", "no_trade"] = Field(
+        default="watch",
+        description="stale_on_arrival 命中后：watch = 只盯不开（方向不动，清掉信号和进场区间，"
+        "持仓的反向信号和方向记分照旧）；no_trade = 改成观望。",
+    )
+    input_time_labels: Literal["legacy", "explicit"] = Field(
+        default="legacy",
+        description="legacy = 现状；explicit = 总盘会表格的 takerBuy1h / OI1h 写成「已收盘小时 "
+        "HH:00–HH:00」，单币会议的资金费率写「上次结算 HH:MM」并加币安 premiumIndex 的实时估算"
+        "（每场会多 1 个公开请求）。",
+    )
+    market_table_rolling: bool = Field(
+        default=False,
+        description="开 = 总盘会的池子概况另给一行滚动 60 分钟涨跌家数（1 分钟 K 线，截到开会"
+        "这一刻，例如 10:54 开会就是 09:54–10:54）；池里每个币多 1 个公开请求。",
+    )
+    latest_market_regime: bool = Field(
+        default=False,
+        description="开 = 整轮里每个单币会开始时取当时最新发布的大盘判断（本轮中途 Flash 更新过"
+        "就用新的），并在 meeting_setup 里记用了哪一版；关 = 用本轮开始时的大盘判断（现状）。",
+    )
+    event_brief_refresh: bool = Field(
+        default=False,
+        description="开 = 临时会开会前刷新大盘简报（简报自己 10 分钟内不重复拉）；关 = 用上一轮"
+        "留下的简报（现状，最旧可到一个开会间隔）。",
     )
     debate_rounds: int = Field(default=1, ge=0, le=3, description="多空辩论轮数；越多越贵。")
     risk_rounds: int = Field(default=1, ge=0, le=3, description="风控讨论轮数。")
@@ -842,6 +891,13 @@ class SlowConfig(_Strict):
             pick_tier=m.pick_tier,
             convert_tier=m.convert_tier,
             bias_fix=m.bias_fix(),
+            snapshot_interval=m.snapshot_interval,
+            snapshot_label=m.snapshot_label,
+            live_price_line=m.live_price_line,
+            stale_on_arrival=m.stale_on_arrival,
+            stale_on_arrival_action=m.stale_on_arrival_action,
+            input_time_labels=m.input_time_labels,
+            market_table_rolling=m.market_table_rolling,
         )
 
     def screener_config(
@@ -934,6 +990,8 @@ class SlowConfig(_Strict):
                 mid_size_max=SizeTier(self.screener.tiers.mid_size_max),
             ),
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
+            "latest_market_regime": self.meeting.latest_market_regime,
+            "event_brief_refresh": self.meeting.event_brief_refresh,
         }
 
 
