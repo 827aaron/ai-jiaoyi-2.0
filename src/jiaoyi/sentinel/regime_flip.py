@@ -199,6 +199,9 @@ class Breadth:
     down: int
     median_pct: float | None
     btc_px: float | None
+    flat: int = 0
+    missing: int = 0
+    requested: int = 0
 
     @property
     def n(self) -> int:
@@ -223,7 +226,87 @@ async def snapshot(symbols: Sequence[str], now: datetime, source: KlineSource) -
         sum(x < 0 for x in changes),
         statistics.median(changes) if changes else None,
         close_at(bars.get(BTC, []), at),
+        sum(x == 0 for x in changes),
+        len(set(symbols)) - len(changes),
+        len(set(symbols)),
     )
+
+
+def check_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
+    """只解释已使用的值；不调用step、不重置确认，也不拿当前配置覆盖历史输入。"""
+    cfg = row.get("thresholds") or {}
+    ret = row.get("btc_ret_since_round_pct")
+    direction = row.get("regime_dir")
+    checks = []
+    directions = (
+        ("看涨", "看跌")
+        if direction == "中性"
+        else (("看涨",) if direction == "看跌" else ("看跌",))
+    )
+    for candidate in directions:
+        n = row.get("n", 0)
+        opposite = row.get("up_1h" if candidate == "看涨" else "down_1h", 0)
+        breadth = cfg.get("regime_flip_breadth")
+        threshold = cfg.get("regime_flip_btc_pct")
+        signed = (ret if candidate == "看涨" else -ret) if ret is not None else None
+        checks.append(
+            {
+                "direction": candidate,
+                "breadth_pass": (breadth == 0 or opposite * 40 >= breadth * n)
+                if breadth is not None and (n > 0 or breadth == 0)
+                else None,
+                "btc_directional_return_pct": signed,
+                "btc_pass": (threshold == 0 or signed >= threshold)
+                if threshold is not None and signed is not None
+                else None,
+            }
+        )
+    ref_px, btc_px = row.get("reference_btc_px"), row.get("btc_px")
+    up, down, n = row.get("up_1h", 0), row.get("down_1h", 0), row.get("n", 0)
+    minimum = cfg.get("regime_flip_min_symbols")
+    valid_ref = (
+        direction in ("看涨", "看跌", "中性")
+        and isinstance(ref_px, (int, float))
+        and math.isfinite(ref_px)
+        and ref_px > 0
+    )
+    valid_btc = isinstance(btc_px, (int, float)) and math.isfinite(btc_px) and btc_px > 0
+    data_pass = (
+        valid_ref
+        and valid_btc
+        and minimum is not None
+        and n >= minimum
+        and n == up + down
+        and min(up, down) >= 0
+        and not (n == 0 and cfg.get("regime_flip_breadth", 0) > 0)
+    )
+    count, required = row.get("confirm_count"), cfg.get("regime_flip_confirm")
+    gap_pass = None
+    gap = cfg.get("regime_flip_min_gap_min")
+    checked_at, last = row.get("checked_at"), row.get("last_rerun_at")
+    if gap is not None:
+        if gap == 0 or last is None:
+            gap_pass = True
+        elif isinstance(checked_at, str) and isinstance(last, str):
+            gap_pass = (
+                datetime.fromisoformat(checked_at) - datetime.fromisoformat(last)
+            ).total_seconds() / 60 >= gap
+    return {
+        **row,
+        "reference_valid": valid_ref,
+        "btc_price_valid": valid_btc,
+        "data_condition_pass": data_pass,
+        "conditions_evaluated": data_pass and "confirm_count" in row,
+        "confirmation_pass": count >= required
+        if count is not None and required is not None
+        else None,
+        "min_gap_pass": gap_pass,
+        "diagnostic_type": "flip_check",
+        "conditions": checks if direction is not None else [],
+        "result_kind": row.get("kind"),
+        "rolling_window": "exact_closed_1m_60min",
+        "source_event_clock": row.get("sample_at"),
+    }
 
 
 class FlipJournal:
@@ -237,6 +320,12 @@ class FlipJournal:
 
     def quiet(self) -> None:
         self._suspect = None
+
+    def audit_check(self, row: dict[str, Any]) -> None:
+        """独立完整检查轨迹；不碰原事件去重、UI记录和确认状态。"""
+        from jiaoyi.slow.market_audit import enqueue_diagnostic
+
+        enqueue_diagnostic(self.root.parent / "regime_checks", {"kind": "flip_check", **row})
 
     def emit(self, row: dict[str, Any], summary: str) -> dict[str, Any]:
         row = {"event_id": uuid.uuid4().hex, **row}

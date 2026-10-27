@@ -12,7 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import Any
@@ -27,6 +30,99 @@ _FAPI = "https://fapi.binance.com"
 _FNG = "https://api.alternative.me/fng/"
 
 BriefPart = Callable[[httpx.AsyncClient], Awaitable[str]]
+_PART_TRACE: ContextVar[dict[str, Any] | None] = ContextVar("brief_part_trace", default=None)
+
+
+def _trace_time() -> str | None:
+    trace = _PART_TRACE.get()
+    if trace is None:
+        return None
+    try:
+        value = trace["clock"]()
+        if (
+            isinstance(value, datetime)
+            and value.tzinfo is not None
+            and value.utcoffset() is not None
+        ):
+            return value.astimezone(UTC).isoformat()
+    except Exception:
+        pass
+    return None
+
+
+def _millis_iso(value: Any) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(value) / 1000.0, UTC).isoformat()
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _bar_window(rows: Sequence[Sequence[Any]], observed: str | None) -> dict[str, Any]:
+    if not rows:
+        return {"available_bars": 0, "coverage": "unavailable"}
+    first, last = rows[0], rows[-1]
+    close = _millis_iso(last[6]) if len(last) > 6 else None
+    complete = (
+        datetime.fromisoformat(close) <= datetime.fromisoformat(observed)
+        if close is not None and observed is not None
+        else None
+    )
+    return {
+        "available_bars": len(rows),
+        "first_bar_open_at": _millis_iso(first[0]),
+        "last_bar_open_at": _millis_iso(last[0]),
+        "last_bar_scheduled_close_at": close,
+        "last_bar_closed_at_observation": complete,
+        "source_price_event_at": None,
+        "observed_at": observed,
+        "coverage": "bar_boundaries_only_not_price_event_time",
+    }
+
+
+def _trace_fields(
+    symbol: str,
+    fields: Sequence[str],
+    series: dict[str, Sequence[Sequence[Any]]],
+) -> None:
+    trace = _PART_TRACE.get()
+    if trace is None:
+        return
+    with contextlib.suppress(Exception):
+        sources = {row["interval"]: row for row in trace["sources"] if "interval" in row}
+        specs = {
+            "chg_1h": ("5m", 13, "close_endpoints"),
+            "chg_4h": ("5m", 49, "close_endpoints"),
+            "chg_24h": ("5m", 289, "close_endpoints"),
+            "chg_3d": ("1h", 73, "close_endpoints"),
+            "chg_7d": ("1d", 8, "close_endpoints"),
+            "range_24h": ("5m", 288, "high_low_range"),
+            "range_3d": ("1h", 72, "high_low_range"),
+            "vol_1h": ("5m", 288, "last_12_bar_volume_over_288_bar_volume_divided_by_24"),
+            "sma20": ("1d", 20, "mean_close"),
+            "rsi_1h": ("1h", 15, "last_14_close_changes"),
+            "rsi_4h": ("4h", 15, "last_14_close_changes"),
+            "rsi_1d": ("1d", 15, "last_14_close_changes"),
+        }
+        details = {}
+        for name in fields:
+            interval, count, kind = specs[name]
+            rows = series[interval][-count:]
+            observed = sources.get(interval, {}).get("observed_at")
+            detail = {
+                "interval": interval,
+                "calculation": kind,
+                "required_bars": count,
+                "required_bar_count_present": len(rows) == count,
+                **_bar_window(rows, observed),
+            }
+            if kind == "close_endpoints" and rows:
+                detail["anchor_bar_scheduled_close_at"] = (
+                    _millis_iso(rows[0][6]) if len(rows[0]) > 6 else None
+                )
+            if name == "vol_1h":
+                detail["numerator_window"] = _bar_window(rows[-12:], observed)
+            details[name] = detail
+        trace["symbol"], trace["fields"] = symbol, details
 
 
 def _sma(xs: Sequence[float], n: int) -> float:
@@ -119,11 +215,26 @@ def describe_trend(
 
 
 async def _rows(c: httpx.AsyncClient, symbol: str, interval: str, limit: int) -> list[list[Any]]:
+    started = _trace_time()
     r = await c.get(
         f"{_FAPI}/fapi/v1/klines", params={"symbol": symbol, "interval": interval, "limit": limit}
     )
     r.raise_for_status()
     rows: list[list[Any]] = r.json()
+    trace = _PART_TRACE.get()
+    if trace is not None:
+        with contextlib.suppress(Exception):
+            observed = _trace_time()
+            trace["sources"].append(
+                {
+                    "source": "binance_futures_klines",
+                    "symbol": symbol,
+                    "interval": interval,
+                    "requested_bars": limit,
+                    "request_started_at": started,
+                    **_bar_window(rows, observed),
+                }
+            )
     return rows
 
 
@@ -135,6 +246,10 @@ def trend_part(symbol: str, name: str, style: str = "short") -> BriefPart:
     used = set(fields) | set(background)
 
     async def part(c: httpx.AsyncClient) -> str:
+        trace = _PART_TRACE.get()
+        if trace is not None:
+            trace.update(symbol=symbol, requested_fields=[*fields, *background])
+
         async def get(want: set[str], interval: str, n: int) -> list[list[Any]]:
             return await _rows(c, symbol, interval, n) if used & want else []
 
@@ -144,6 +259,7 @@ def trend_part(symbol: str, name: str, style: str = "short") -> BriefPart:
             get(H4_FIELDS, "4h", _BARS_4H),
             get(DAILY_FIELDS, "1d", _BARS_1D),
         )
+        _trace_fields(symbol, (*fields, *background), {"5m": m5, "1h": h1, "4h": h4, "1d": d1})
         tick = await asyncio.to_thread(TICKS.get, symbol)
         return describe_trend(
             name, fields, background, m5, h1, h4, d1, price_formatter(tick, thousands=True)
@@ -153,9 +269,26 @@ def trend_part(symbol: str, name: str, style: str = "short") -> BriefPart:
 
 
 async def fear_greed_part(c: httpx.AsyncClient) -> str:
+    started = _trace_time()
     r = await c.get(_FNG, params={"limit": 2})
     r.raise_for_status()
     rows: list[dict[str, Any]] = r.json()["data"]
+    trace = _PART_TRACE.get()
+    if trace is not None:
+        with contextlib.suppress(Exception):
+            trace["sources"].append(
+                {
+                    "source": "alternative_me_fear_greed",
+                    "request_started_at": started,
+                    "observed_at": _trace_time(),
+                    "source_published_at": [
+                        _millis_iso(float(row["timestamp"]) * 1000)
+                        if row.get("timestamp") is not None
+                        else None
+                        for row in rows[:2]
+                    ],
+                }
+            )
     now, prev = rows[0], rows[1] if len(rows) > 1 else None
     tail = f" (previous day {prev['value']})" if prev else ""
     return f"- Fear & Greed index: {now['value']} ({now['value_classification']}){tail}"
@@ -179,6 +312,7 @@ class MarketBriefService:
         min_age: timedelta = timedelta(minutes=10),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         style: str = "short",
+        observation_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._parts = list(parts) if parts is not None else default_parts(style)
         self._c = client or httpx.AsyncClient(timeout=10.0)
@@ -188,6 +322,9 @@ class MarketBriefService:
         self._at: datetime | None = None
         self.failed_parts = 0
         self._refresh_lock = asyncio.Lock()
+        self._observation_clock = observation_clock
+        self._content_provenance: dict[str, Any] | None = None
+        self._returned_provenance: dict[str, Any] = {}
 
     @property
     def text(self) -> str:
@@ -198,21 +335,80 @@ class MarketBriefService:
         async with self._refresh_lock:
             return await self._refresh_once()
 
+    async def refresh_with_provenance(self) -> tuple[str, dict[str, Any]]:
+        """元数据和本次返回文本在同一锁内配对，缓存内容不借用新的行情时间。"""
+        async with self._refresh_lock:
+            text = await self._refresh_once()
+            return text, copy.deepcopy(self._returned_provenance)
+
+    def _observed_time(self) -> str | None:
+        try:
+            value = self._observation_clock()
+            if value.tzinfo is not None and value.utcoffset() is not None:
+                return value.astimezone(UTC).isoformat()
+        except Exception:
+            pass
+        return None
+
+    def _note_return(self, status: str, attempt: dict[str, Any] | None = None) -> None:
+        self._returned_provenance = {
+            "schema_version": 1,
+            "status": status,
+            "cache_hit": status == "cache_hit",
+            "returned_at": self._observed_time(),
+            "cache_clock_at": self._at.isoformat() if self._at is not None else None,
+            "cache_ttl_s": self._min_age.total_seconds(),
+            "content": self._content_provenance,
+            "attempt": attempt,
+        }
+
+    async def _part_observed(self, part: BriefPart, trace: dict[str, Any]) -> str:
+        token = _PART_TRACE.set({**trace, "clock": self._observation_clock})
+        captured = _PART_TRACE.get()
+        try:
+            value = await part(self._c)
+            trace["status"] = "ok" if isinstance(value, str) else "unavailable"
+            return value
+        except Exception as error:
+            trace.update(status="unavailable", error_kind=type(error).__name__)
+            raise
+        finally:
+            if captured is not None:
+                trace.update({k: v for k, v in captured.items() if k != "clock"})
+            trace["completed_at"] = self._observed_time()
+            _PART_TRACE.reset(token)
+
     async def _refresh_once(self) -> str:
         now = self._clock()
         if self._at is not None and now - self._at < self._min_age:
+            self._note_return("cache_hit")
             return self._text
-        results = await asyncio.gather(*(p(self._c) for p in self._parts), return_exceptions=True)
+        attempt: dict[str, Any] = {"started_at": self._observed_time()}
+        parts: list[dict[str, Any]] = [{"index": i, "sources": []} for i in range(len(self._parts))]
+        results = await asyncio.gather(
+            *(self._part_observed(p, part) for p, part in zip(self._parts, parts, strict=True)),
+            return_exceptions=True,
+        )
+        parts = copy.deepcopy(parts)
+        attempt.update(completed_at=self._observed_time(), parts=parts)
         lines = [r if isinstance(r, str) else "- (one data item is unavailable)" for r in results]
         self.failed_parts = sum(1 for r in results if not isinstance(r, str))
         if self.failed_parts == len(self._parts):
             # 全部失败：保留上一份（可能为空），不更新时间，下一轮再试
+            self._note_return("refresh_failed_retained_cache", attempt)
             return self._text
         self._text = (
             f"## Market brief ({now:%Y-%m-%d %H:%M} UTC, shared by every meeting this round)\n"
             + "\n".join(lines)
         )
         self._at = now
+        self._content_provenance = {
+            "generated_at": self._observed_time(),
+            "header_clock_at": now.isoformat(),
+            "status": "partial" if self.failed_parts else "complete",
+            "parts": parts,
+        }
+        self._note_return("refreshed", attempt)
         return self._text
 
     async def aclose(self) -> None:

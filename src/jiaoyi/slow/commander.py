@@ -56,6 +56,7 @@ from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.credits import is_credit_error
+from jiaoyi.slow.market_audit import CURRENT_AUDIT, MarketAudit
 from jiaoyi.slow.market_log import MarketLog, pool_rows, round_id
 from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
@@ -1220,15 +1221,18 @@ class BattleCardCommander:
         if self._budget_exhausted(now):
             raise CardRefreshError("军师团当日花费已达上限，今天不再开会")
         brief_text = ""
+        brief_provenance: dict[str, Any] = {"status": "not_configured"}
         if self._brief is not None:
             try:
-                brief_text = await self._brief.refresh()  # 每轮算一次，所有会议共用；失败不影响开会
+                brief_text, brief_provenance = await self._market_brief()  # 同份文本/来源快照
             except Exception as exc:
                 self._write(outcome=Outcome.ERROR, summary=f"市场简报失败，会议继续：{exc}"[:200])
         self._progress = "选币中"
         beat = asyncio.create_task(self._beat_while_meeting())
         try:
-            card = await self._meet(pool, candidates, reason, now, generation, brief_text)
+            card = await self._meet(
+                pool, candidates, reason, now, generation, brief_text, brief_provenance
+            )
         except Exception as exc:
             self._record_error(reason, exc, started)
             if self._rate_limited(reason):
@@ -1292,6 +1296,52 @@ class BattleCardCommander:
                 self.regime_reference = ref
                 self._pending_reference_view = None
                 self._save_market()
+
+    async def _market_brief(self) -> tuple[str, dict[str, Any]]:
+        if self._brief is None:
+            return "", {"status": "not_configured"}
+        richer = getattr(self._brief, "refresh_with_provenance", None)
+        if callable(richer):
+            text, metadata = await richer()
+            return str(text), dict(metadata)
+        return await self._brief.refresh(), {"status": "unknown_legacy_brief"}
+
+    def _market_audit(
+        self,
+        pool: SymbolPool,
+        scope: str,
+        reason: str,
+        now: datetime,
+        brief_provenance: dict[str, Any] | None,
+    ) -> MarketAudit:
+        try:
+            audit = MarketAudit(
+                self._market_log,
+                {
+                    "role": "market",
+                    "scope": scope,
+                    "refresh_reason": reason,
+                    "round_id": round_id(now),
+                    "workflow_started_at": now.isoformat(),
+                    "pool_id": pool.pool_id,
+                    "pool_requested_at": pool.ts.isoformat(),
+                    "pool_n": len(pool.in_pool),
+                    "pool_source_metadata": {
+                        e.symbol: pool.source_metadata.get(e.symbol) for e in pool.in_pool
+                    },
+                    "brief_provenance": brief_provenance or {"status": "unknown"},
+                    "previous_market_view_id": self.latest_market_view.market_view_id
+                    if self.latest_market_view
+                    else None,
+                    "reference_at": self.regime_reference.ts.isoformat()
+                    if self.regime_reference
+                    else None,
+                },
+            )
+            audit.emit("request_accepted")
+            return audit
+        except Exception:
+            return MarketAudit(None, {})  # 诊断准备失败仍走原路径。
 
     def _publish_market(
         self,
@@ -1368,6 +1418,8 @@ class BattleCardCommander:
             cost = est
             model_started = False
             model_cost: float | None = None
+            audit = self._market_audit(pool, "market_only", reason, now, None)
+            token = CURRENT_AUDIT.set(audit)
             try:
                 if self._market_snapshot is not None:
                     snapshot = await asyncio.wait_for(
@@ -1381,8 +1433,14 @@ class BattleCardCommander:
                     raise CardRefreshError("市场统计超过 2 分钟或时间异常，保留上一份观点")
                 if valid is not None and not valid():
                     raise CardRefreshError("市场刷新条件已变化，保留上一份观点")
-                brief_text = await self._brief.refresh() if self._brief is not None else ""
-                brief_text = f"Pool statistics source UTC: {pool.ts.isoformat()}\n" + brief_text
+                brief_text, brief_provenance = await self._market_brief()
+                audit.context.update(
+                    pool_requested_at=pool.ts.isoformat(),
+                    pool_source_metadata={
+                        e.symbol: pool.source_metadata.get(e.symbol) for e in pool.in_pool
+                    },
+                    brief_provenance=brief_provenance,
+                )
                 card_context = (
                     self.market_review_context(pool) if self.accepts_event("market_review") else []
                 )
@@ -1418,6 +1476,11 @@ class BattleCardCommander:
                 )
                 cost = picked.cost_usd
             except BaseException as exc:
+                audit.emit(
+                    "workflow_failed",
+                    error_type=type(exc).__name__,
+                    model_call_observed=audit.attempt > 0,
+                )
                 cost = (
                     model_cost
                     if model_cost is not None
@@ -1440,6 +1503,7 @@ class BattleCardCommander:
                 )
                 raise
             finally:
+                CURRENT_AUDIT.reset(token)
                 # 预留跨日不能从新一天退款；新一天计完整实际费用。
                 charge = cost - est if self._day(self._clock()) == reserve_day else cost
                 self._charge(charge, round_cost=False)
@@ -1455,6 +1519,7 @@ class BattleCardCommander:
             self._pick_costs.append(cost)
             if generation < self._market_published_generation:
                 self.market_refresh_discarded = True
+                audit.emit("superseded", published_at=None, model_call_observed=audit.attempt > 0)
                 self._write(
                     outcome=Outcome.INFO,
                     summary="独立市场结果已被较新观点取代，不覆盖当前大盘",
@@ -1467,6 +1532,12 @@ class BattleCardCommander:
                 assert self.latest_market_view is not None
                 return self.latest_market_view
             view = self._publish_market(picked, pool, reason, generation, transition=True)
+            audit.emit(
+                "published",
+                published_at=view.observed_at.isoformat(),
+                market_view=view.model_dump(mode="json"),
+                model_call_observed=audit.attempt > 0,
+            )
             if picked.reviews_valid:
                 self.enqueue_market_reviews(picked.review_candidates, pool, card_context, view)
             else:
@@ -1498,6 +1569,9 @@ class BattleCardCommander:
                 time.monotonic() - started,
                 view.observed_at,
                 reason,
+                view,
+                audit.trace_id,
+                True,
             )
             self._save_market()
             return view
@@ -1746,6 +1820,9 @@ class BattleCardCommander:
         elapsed_s: float,
         now: datetime,
         reason: str = "scheduled",
+        market_view: MarketView | None = None,
+        trace_id: str | None = None,
+        publish_accepted: bool | None = None,
     ) -> None:
         """每轮总盘会写一行记录（data/market_meeting/）：池子里每个币的分数和数字、候选的结论。"""
         if self._market_log is None:
@@ -1756,6 +1833,16 @@ class BattleCardCommander:
                 {
                     "round_id": round_id(now),
                     "ts": now.isoformat(),
+                    "trace_id": trace_id,
+                    "publish_accepted": publish_accepted,
+                    "publish_status": "published"
+                    if publish_accepted is True
+                    else "superseded"
+                    if publish_accepted is False
+                    else "unknown",
+                    "published_at": market_view.observed_at.isoformat() if market_view else None,
+                    "market_view": market_view.model_dump(mode="json") if market_view else None,
+                    "pool_requested_at": pool.ts.isoformat(),
                     "pool_id": pool.pool_id,
                     "card_version": card_version,
                     **self._log_meta,
@@ -1872,6 +1959,7 @@ class BattleCardCommander:
         now: datetime,
         generation: int,
         brief_text: str,
+        brief_provenance: dict[str, Any] | None = None,
     ) -> BattleCard:
         by_symbol = {e.symbol: e for e in candidates}
         pinned = [e for e in candidates if e.pinned][: self._pick_max]
@@ -1887,6 +1975,8 @@ class BattleCardCommander:
         card_context = (
             self.market_review_context(pool) if self.accepts_event("market_review") else []
         )
+        audit = self._market_audit(pool, "scheduled_market", reason, now, brief_provenance)
+        token = CURRENT_AUDIT.set(audit)
         try:
             review_pick = getattr(self._engine, "pick_with_reviews", None)
             contextual_pick = getattr(self._engine, "pick_with_context", None)
@@ -1906,6 +1996,11 @@ class BattleCardCommander:
             else:
                 picked = await self._engine.pick(free, max(room, 0), self._card, pool=pool.in_pool)
         except Exception as exc:
+            audit.emit(
+                "workflow_failed",
+                error_type=type(exc).__name__,
+                model_call_observed=audit.attempt > 0,
+            )
             # 总盘会失败也烧了 token：按真实 usage，拿不到就按估算上限计
             fail_cost = self._failure_cost(exc, "pick")
             self._charge(fail_cost - est)
@@ -1916,7 +2011,16 @@ class BattleCardCommander:
                 Health.DEGRADED, f"总盘会失败：{self._why(exc)}", None, self._why(exc)
             )
             raise
+        finally:
+            CURRENT_AUDIT.reset(token)
+        accepted = generation >= self._market_published_generation
         market_view = self._publish_market(picked, pool, reason, generation, transition=False)
+        audit.emit(
+            "published" if accepted else "superseded",
+            published_at=market_view.observed_at.isoformat() if accepted else None,
+            market_view=market_view.model_dump(mode="json"),
+            model_call_observed=audit.attempt > 0,
+        )
         # 总盘会结束与单币会全部结束可能相差十几分钟：价和方向必须取同一时刻。
         if self._regime_price is not None:
             try:
@@ -2011,6 +2115,9 @@ class BattleCardCommander:
             time.monotonic() - pick_started,
             now,
             reason,
+            market_view if accepted else None,
+            audit.trace_id,
+            accepted,
         )
         # 指令池：上一张卡里还没到期的币原样留着（这轮没开会的币不动），开完哪个换哪个；
         # 持仓币的指令到期也不消失，只清空信号。池外（已被筛掉）的币不留

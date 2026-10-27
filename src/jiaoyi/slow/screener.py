@@ -7,13 +7,14 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -81,6 +82,13 @@ def classify(
     return Category.ALT
 
 
+def _source_copy(metadata: Any) -> dict[str, Any]:
+    try:
+        return copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
+    except Exception:
+        return {}  # 旁路未知不得改变原筛选成功路径。
+
+
 @dataclass(frozen=True)
 class SymbolStats:
     """一个合约此刻的原始行情统计，由数据源填。"""
@@ -109,6 +117,7 @@ class SymbolStats:
     metrics: dict[str, float] = field(default_factory=dict)
     """给总盘会表格用的本地行情数字（见 ``binance_stats``）；缺的不写。"""
     bars: tuple[tuple[int, float, float, float, float], ...] = ()
+    source_metadata: dict[str, Any] = field(default_factory=dict)
     """1 小时 K 线 (开盘毫秒, 开, 高, 低, 收)，最后一根是还没走完的小时；事后回填用。"""
 
 
@@ -503,7 +512,13 @@ class CodeSymbolScreener:
                     }
                 )
             )
-        return pool.model_copy(update={"ts": now, "entries": entries})
+        return pool.model_copy(
+            update={
+                "ts": now,
+                "entries": entries,
+                "source_metadata": {s.symbol: _source_copy(s.source_metadata) for s in rows},
+            }
+        )
 
     def _us_adjust(
         self,
@@ -620,4 +635,9 @@ class CodeSymbolScreener:
             for e in final
             if e.in_pool and e.category in _US_CATEGORIES
         )
-        return SymbolPool(pool_id=f"pool-{now:%Y%m%dT%H%M}", ts=now, entries=final)
+        return SymbolPool(
+            pool_id=f"pool-{now:%Y%m%dT%H%M}",
+            ts=now,
+            entries=final,
+            source_metadata={s.symbol: _source_copy(s.source_metadata) for s in stats},
+        )

@@ -64,6 +64,11 @@ class MarketLog:
     def outcomes_path(self) -> Path:
         return self._root / "outcomes.jsonl"
 
+    def write_diagnostic(self, row: dict[str, Any]) -> None:
+        from jiaoyi.slow.market_audit import enqueue_diagnostic
+
+        enqueue_diagnostic(self._root.parent / "market_diagnostics", row)
+
     def write_round(self, row: dict[str, Any]) -> None:
         ts = datetime.fromisoformat(str(row["ts"]))
         path = self._root / f"{ts.astimezone(UTC):%Y-%m-%d}.jsonl"
