@@ -228,6 +228,7 @@ class EventRules:
     triggers: frozenset[str] = frozenset()
     symbol_gap: timedelta = timedelta(minutes=60)
     max_per_day: int = 12
+    """每天最多几场临时会；0 = 不限（照常计数）。"""
     move_atr: float = 3.0
     entry_max_age: timedelta = timedelta(0)
     """开仓前卡龄上限（该币上次开会距今）；0 = 不查。"""
@@ -766,7 +767,7 @@ class BattleCardCommander:
         )
         at = last + self._events.symbol_gap if last else datetime.min.replace(tzinfo=UTC)
         self._roll_events(now)
-        if self._event_count >= self._events.max_per_day:
+        if self._events.max_per_day and self._event_count >= self._events.max_per_day:
             local = now.astimezone(ZoneInfo(self._risk.day_reset_tz))
             tomorrow = (local + timedelta(days=1)).replace(
                 hour=0, minute=0, second=0, microsecond=0
@@ -987,7 +988,7 @@ class BattleCardCommander:
         if not self._events.enabled or not self._pending or not self.may_refresh(now):
             return None
         self._roll_events(now)
-        if self._event_count >= self._events.max_per_day:
+        if self._events.max_per_day and self._event_count >= self._events.max_per_day:
             for symbol, quota_item in self._market_reviews.items():
                 eligible = max(quota_item.eligible_at, self._event_eligible(symbol, now))
                 self._market_reviews[symbol] = quota_item.model_copy(

@@ -2246,7 +2246,7 @@ const PLAIN = {
   event_meeting_enabled: "出事时给那一个币开临时会",
   event_triggers: "哪些事算“出事”",
   event_symbol_gap_min: "同一个币两场会至少隔几分钟",
-  event_max_per_day: "一天最多开几场临时会",
+  event_max_per_day: "一天最多开几场临时会（0 = 不限）",
   move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
   predictor_against_runs: "预测员连续几次看反才算",
   entry_max_card_age_min: "开仓前卡最多旧几分钟（超了先补会再开）",
@@ -2353,7 +2353,7 @@ const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.val
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
 const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4" };
 // 这几项填 0 = 不设限
-const ZERO_AS = { major_top_n: "只用固定 7 个", min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查" };
+const ZERO_AS = { major_top_n: "只用固定 7 个", min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查", event_max_per_day: "不限" };
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
 const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
 function humanDur(sec) {
@@ -2736,6 +2736,8 @@ function editOne(id, useRec) {
     const shown = useRec ? i.recommended : i.value == null || (i.profiled && !i.pinned) ? "" : i.value;
     const ph = i.profiled ? `留空 = 跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}（${fmtVal(i.pinned ? i.profile_default : i.value, i)}）` : i.nullable ? "留空 = 用默认" : "";
     input = `<input id="dlg-v" type="number" step="any" inputmode="decimal" value="${esc(shown)}" placeholder="${esc(ph)}">`
+    // 次数上限：旁边给「不限」开关，开 = 写 0；关 = 回到一个数（现值，或档位默认）
+    if (i.key === "event_max_per_day") input += ` <label class="small"><input type="checkbox" id="dlg-unl" ${i.value === 0 ? "checked" : ""}> 不限</label>`;
   }
   const now = [`现在 ${valOf(i)}`, i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : "", i.pinned ? `${i.sec === "fast_loop" ? "最长持仓" : "档位"}默认 ${valOf(i, i.profile_default)}` : i.profiled ? `现在跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}走` : "", i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? `范围 ${esc(i.bounds)}` : ""].filter(Boolean).join("，");
   ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${eqX(i) ? "（填本金的几倍）" : ""}${input}</label>`}${pwField(data.control)}
@@ -2744,7 +2746,8 @@ function editOne(id, useRec) {
     <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。${isHot(i.sec, i.key) ? "保存后几秒内生效，不用重启。" : "改完点「重启生效」才用上。"}</div>`, "保存", false, async () => {
     const el = $("#dlg-v");
     let v;
-    if (i.names) {
+    if (i.key === "event_max_per_day" && $("#dlg-unl") && $("#dlg-unl").checked) v = 0;
+    else if (i.names) {
       v = [...new Set(el.value.toUpperCase().split(/[\s,，、]+/).filter(Boolean))];
       if (JSON.stringify(v) === JSON.stringify(i.value || [])) throw new Error("没有改动");
     } else if (i.multi) {
@@ -2784,6 +2787,17 @@ function editOne(id, useRec) {
     dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。"}`);
     poll();
   });
+  const unl = $("#dlg-unl");
+  if (unl) {
+    const num = $("#dlg-v");
+    const sync = () => {
+      num.disabled = unl.checked;
+      if (!unl.checked && !Number(num.value)) num.value = i.value || (i.profile_default != null ? i.profile_default : 12);
+      if (unl.checked) num.value = "";
+    };
+    unl.addEventListener("change", sync);
+    num.disabled = unl.checked;
+  }
   // 填的是本金几倍，旁边实时写折合多少 U
   const amtEl = $("#dlg-amt");
   if (amtEl) {
@@ -3061,7 +3075,7 @@ const TIER_GROUPS = [
     ["event_meeting_enabled", "schedule", "出事时临时开会", "2 小时及更慢的档位才开", "bool"],
     ["event_triggers", "schedule", "哪些事算出事", "", "ev"],
     ["event_symbol_gap_min", "schedule", "同一个币临时会最短间隔", "", "min"],
-    ["event_max_per_day", "schedule", "一天最多几次临时会", "", "n"],
+    ["event_max_per_day", "schedule", "一天最多几次临时会", "0 = 不限", "n"],
     ["entry_max_card_age_min", "schedule", "卡太旧就不入场", "", "age"],
     ["schedule_at", "schedule", "每天定点开会", "只有 24 小时档用", "at"],
   ] },

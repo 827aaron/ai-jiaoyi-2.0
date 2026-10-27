@@ -441,7 +441,10 @@ class ScheduleConfig(_Strict):
         default=60.0, ge=1.0, le=1440.0, description="同一个币两场临时会（含正式会）至少隔多久。"
     )
     event_max_per_day: int = Field(
-        default=12, ge=1, le=200, description="每个交易日（曼谷）最多开几场临时会。"
+        default=12,
+        ge=0,
+        le=200,
+        description="每个交易日（曼谷）最多开几场临时会。0 = 不限（场数照常计数和记录）。",
     )
     move_since_card_atr: float = Field(
         default=3.0,
