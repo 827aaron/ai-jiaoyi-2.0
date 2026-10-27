@@ -129,6 +129,7 @@ OPTIONAL_APP_FIELDS = {
     "credit_low_floor_usd",
     "credit_resend_hours",
     "card_score_every_min",  # 默认 60，老配置文件没有这一行
+    "card_score_window_days",  # 默认 30
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",

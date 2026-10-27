@@ -334,21 +334,28 @@ def create_app(
             except Exception:
                 log.warning("记今日盈亏曲线失败", exc_info=True)
 
-    score_fetch = OutcomeBars(
-        cache=Path(data_dir) / "history", budget=WeightBudget(CARD_SCORE_WEIGHT_PER_MIN)
-    )
+    packs = Path(data_dir) / "history"
+    # 之后的总盘记分也在面板里跑时共用这一个（同一份日包缓存、同一个权重预算）
+    score_fetch = OutcomeBars(cache=packs, budget=WeightBudget(CARD_SCORE_WEIGHT_PER_MIN))
 
     async def score_cards() -> None:
         """作战卡方向记分：每 ``card_score_every_min`` 分钟补算窗口走完的卡（只读主网公开 K 线，
         过去的整天走日包缓存），重写 data/card_score/summary.json。0 = 不算。"""
         await asyncio.sleep(CARD_SCORE_FIRST_S)
         while True:
-            every = cfg()[1].card_score_every_min
+            a = cfg()[1]
+            every = a.card_score_every_min
             if every:
                 now = clock()
+                window = a.card_score_window_days
                 try:
                     res = await card_score.update(
-                        data_dir, now, score_fetch, since=now - CARD_SCORE_LOOKBACK
+                        data_dir,
+                        now,
+                        score_fetch,
+                        since=now - CARD_SCORE_LOOKBACK,
+                        summary_since=now - timedelta(days=window) if window else None,
+                        packs=packs,
                     )
                     log.info("%s（这次新记 %d 张）", card_score.headline(res.report), res.new)
                 except RateLimited as e:

@@ -316,13 +316,17 @@ def _card_score(args: argparse.Namespace) -> int:
         return 2
     now = datetime.now(UTC)
     data_dir = app_cfg.data_dir
+    packs = Path(data_dir) / "history"
+    window = app_cfg.card_score_window_days
     try:
         res = asyncio.run(
             card_score.update(
                 data_dir,
                 now,
-                OutcomeBars(cache=Path(data_dir) / "history"),
+                OutcomeBars(cache=packs),
                 since=now - timedelta(days=args.days),
+                summary_since=now - timedelta(days=window) if window else None,
+                packs=packs,
             )
         )
     except RateLimited:

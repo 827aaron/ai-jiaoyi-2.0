@@ -8,12 +8,15 @@
   整轮起点 ``created_at``（它比实际发布早，中位 4.5 分钟、最多 22 分钟）。
 - 价格：t 时刻最后一根已收盘 1 分钟 K 线的收盘价（主网，和哨兵一个口径）。
 - 期限：1h、4h（会议提示词把结论定义为未来 4 小时）、到卡片过期。
-- 币池：t0 时生效的那一份（``market_meeting`` 每轮记的池）；等权、只算两端都有价的币。
+- 币池：t0 时生效的那一份（``market_meeting`` 每轮记的池）；等权、只算两端都有价的币。最早一轮之前的
+  卡没有币池，只算原始指标、不进超额。
 - 基线（同一批样本）：一律做空、一律做多、BTC 过去 4h 方向、自身过去 4h 动量、币池过去 4h 方向。
 - 置信区间：按 4 小时 UTC 时段聚类 bootstrap（同一时段的卡高度相关，独立样本数 ≈ 时段数）。
 
 逐卡结果追加到 ``data/card_score/scored.jsonl``（只加不改，按 卡 / 版本 / 币 去重，重跑幂等），
-汇总写 ``data/card_score/summary.json`` 给面板读。
+汇总写 ``data/card_score/summary.json`` 给面板读。逐卡行里存的是当时算好的币池收益：**改币池口径
+（或 t0、价格口径）要删掉 scored.jsonl 重算**，否则新旧口径混在一起。币安确认没有的币（日包 404 且
+接口 400）记进 ``unavailable.json``，之后不再去拉、按没价格计；删掉这个文件就会重试。
 """
 
 from __future__ import annotations
@@ -21,25 +24,27 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
-from bisect import bisect_right
+import os
+import zipfile
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from jiaoyi.slow.review import CardJournal, JournalRow
+from jiaoyi.slow.scoring_common import BOOT_B, Pool, PoolTimeline, cluster_ci
+from jiaoyi.slow.scoring_common import parse_ts as _ts
 
 logger = logging.getLogger(__name__)
 
 DIR_NAME = "card_score"
 SCORED_FILE = "scored.jsonl"
 SUMMARY_FILE = "summary.json"
+UNAVAILABLE_FILE = "unavailable.json"
 
 BTC = "BTCUSDT"
 MINUTE = timedelta(minutes=1)
@@ -59,8 +64,6 @@ CONCLUSION_WINDOW_S = (-120.0, 1800.0)
 BLOCK_HOURS = 4
 MIN_BLOCKS = 44
 """复盘的功效估计：超额命中要分辨到 ±2.5 个百分点约需 44 个 4 小时时段（7–8 天）。"""
-BOOT_B = 2000
-BOOT_SEED = 7
 
 PERIOD_MARKS: tuple[tuple[str, datetime], ...] = (
     ("#213", datetime(2026, 10, 24, 12, 29, 43, tzinfo=UTC)),
@@ -105,12 +108,6 @@ class LogIndex:
 
     conclusions: dict[str, list[Conclusion]]
     publishes: dict[tuple[str | None, int], list[datetime]]
-
-
-def _ts(v: object) -> datetime | None:
-    if not isinstance(v, str) or not v:
-        return None
-    return datetime.fromisoformat(v).astimezone(UTC)
 
 
 def read_log_index(log_dir: Path, days: Iterable[date] | None = None) -> LogIndex:
@@ -192,54 +189,12 @@ def resolve_t0(
 
 
 def dedup(rows: Iterable[JournalRow]) -> list[JournalRow]:
-    """同一 卡 / 版本 / 币 写了几行的留最后一行（位置按第一次出现）。"""
+    """同一 卡 / 版本 / 币 写了几行的留最后一行（位置按第一次出现）。
+    只拿 (卡, 版本, 币) 当键：流水行可能带不能哈希的字段，行本身不进集合、字典键或缓存。"""
     seen: dict[tuple[str, int, str], JournalRow] = {}
     for r in rows:
         seen[(r.card_id, r.version, r.symbol)] = r
     return list(seen.values())
-
-
-# ---------------------------------------------------------------- 币池
-
-
-@dataclass(frozen=True)
-class Pool:
-    pool_id: str | None
-    symbols: tuple[str, ...]
-
-
-class PoolTimeline:
-    """t 时刻生效的币池：``market_meeting`` 每轮记下的池，取 t 之前最近一轮。
-    最早一轮之前的卡用最早那轮。"""
-
-    def __init__(self, entries: Sequence[tuple[datetime, Pool]]) -> None:
-        self._entries = sorted(entries, key=lambda e: e[0])
-        self._keys = [t for t, _ in self._entries]
-
-    @classmethod
-    def load(cls, data_dir: str | Path) -> PoolTimeline:
-        out: list[tuple[datetime, Pool]] = []
-        for path in sorted((Path(data_dir) / "market_meeting").glob("????-??-??.jsonl")):
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                try:
-                    r = json.loads(line)
-                    t = _ts(r.get("ts"))
-                    syms = tuple(p["symbol"] for p in r.get("pool") or [])
-                except (ValueError, KeyError, TypeError):
-                    continue
-                if t is not None and syms:
-                    out.append((t, Pool(r.get("pool_id"), syms)))
-        return cls(out)
-
-    def at(self, t: datetime) -> Pool | None:
-        if not self._entries:
-            return None
-        i = bisect_right(self._keys, t) - 1
-        return self._entries[max(i, 0)][1]
 
 
 # ---------------------------------------------------------------- 价格
@@ -271,30 +226,67 @@ class CloseBook:
         return pb / pa - 1
 
 
+PERMANENT_HTTP = (400, 404)
+"""币安回这些状态码 = 这个币（主网合约）根本没有，不是一时拉不到。"""
+
+
+def _permanent(e: BaseException) -> bool:
+    code = getattr(e, "code", None)
+    if code is None:
+        code = getattr(getattr(e, "response", None), "status_code", None)
+    return code in PERMANENT_HTTP
+
+
+@dataclass
+class Closes:
+    book: CloseBook
+    failed: set[str]
+    """一时拉不到的币：用到它的卡（本币或 BTC）下次再算。"""
+    missing: set[str]
+    """币安确认没有的币：按没价格计，不再重试。"""
+
+
 async def load_closes(
-    fetch: KlineFetch, needs: dict[str, set[datetime]]
-) -> tuple[CloseBook, set[str]]:
+    fetch: KlineFetch, needs: dict[str, set[datetime]], *, packs: Path | None = None
+) -> Closes:
     """按 (币, UTC 日) 合并成一段拉一次（过去的整天走日包缓存，今天才打 API），只留要的分钟。
-    返回 (价格, 拉失败的币)；被限流（``market.rest.RateLimited``）不接，直接抛出，这一轮作罢。"""
-    book = CloseBook()
-    failed: set[str] = set()
+    日包坏了（``BadZipFile``）删掉 ``packs`` 里那一天的包再拉一次。
+    被限流（``market.rest.RateLimited``）不接，直接抛出，这一轮作罢。"""
+    out = Closes(CloseBook(), set(), set())
     for sym in sorted(needs):
         by_day: dict[date, list[datetime]] = {}
         for m in needs[sym]:
             by_day.setdefault(m.date(), []).append(m)
-        for ms in by_day.values():
+        for day, ms in by_day.items():
             want = set(ms)
-            try:
-                bars = await fetch(sym, min(ms), max(ms))
-            except (OSError, ValueError, KeyError, IndexError) as e:  # 跳过用到它的卡，下次再试
-                logger.warning("方向记分：%s 的 K 线拉不到：%s", sym, e)
-                failed.add(sym)
+            bars: Sequence[_Bar] | None = None
+            for attempt in (1, 2):
+                try:
+                    bars = await fetch(sym, min(ms), max(ms))
+                    break
+                except zipfile.BadZipFile as e:
+                    bad = packs / sym / f"{sym}-1m-{day.isoformat()}.zip" if packs else None
+                    if attempt == 2 or bad is None or not bad.is_file():
+                        logger.warning("方向记分：%s %s 的日包坏了：%s", sym, day, e)
+                        break
+                    logger.warning("方向记分：%s %s 的日包坏了，删掉重下", sym, day)
+                    bad.unlink(missing_ok=True)
+                except (OSError, ValueError, KeyError, IndexError) as e:
+                    if _permanent(e):
+                        logger.warning("方向记分：币安没有 %s（%s），按没价格计、不再拉", sym, e)
+                        out.missing.add(sym)
+                    else:
+                        logger.warning("方向记分：%s 的 K 线拉不到：%s", sym, e)
+                    break
+            if bars is None:
+                if sym not in out.missing:
+                    out.failed.add(sym)
                 break
             for b in bars:
                 ot = b.open_time.astimezone(UTC)
                 if ot in want:
-                    book.put(sym, ot, b.close)
-    return book, failed
+                    out.book.put(sym, ot, b.close)
+    return out
 
 
 # ---------------------------------------------------------------- 逐卡结果
@@ -475,10 +467,37 @@ class ScoreStore:
         return len(new)
 
     def write_summary(self, report: Report) -> None:
+        """先写本进程专用的临时文件再改名（面板和命令行同时跑也不会互相覆盖半截）。"""
         self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.summary_path.with_suffix(".tmp")
+        tmp = self.dir / f"{SUMMARY_FILE}.{os.getpid()}.tmp"
         tmp.write_text(report.model_dump_json(indent=1), encoding="utf-8")
         tmp.replace(self.summary_path)
+
+    @property
+    def unavailable_path(self) -> Path:
+        return self.dir / UNAVAILABLE_FILE
+
+    def _unavailable_map(self) -> dict[str, str]:
+        try:
+            got = json.loads(self.unavailable_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {str(k): str(v) for k, v in got.items()} if isinstance(got, dict) else {}
+
+    def unavailable(self) -> set[str]:
+        """币安确认没有的币（第一次发现的时间记在文件里）；删掉文件就会重试。"""
+        return set(self._unavailable_map())
+
+    def add_unavailable(self, symbols: Iterable[str], now: datetime) -> None:
+        got = self._unavailable_map()
+        new = set(symbols) - set(got)
+        if not new:
+            return
+        got.update(dict.fromkeys(sorted(new), now.isoformat()))
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.dir / f"{UNAVAILABLE_FILE}.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(got, indent=1), encoding="utf-8")
+        tmp.replace(self.unavailable_path)
 
     def read_summary(self) -> Report | None:
         try:
@@ -488,35 +507,6 @@ class ScoreStore:
 
 
 # ---------------------------------------------------------------- 汇总
-
-
-@lru_cache(maxsize=8)
-def _boot_draws(k: int, b: int, seed: int) -> tuple[tuple[int, ...], ...]:
-    """同样的时段数、次数、种子，抽到的时段下标完全一样（命中和均值共用一套抽样）。"""
-    rng = random.Random(seed)
-    return tuple(tuple(rng.randrange(k) for _ in range(k)) for _ in range(b))
-
-
-def cluster_ci(
-    values: Sequence[float], blocks: Sequence[str], *, b: int = BOOT_B, seed: int = BOOT_SEED
-) -> tuple[float | None, float | None, int]:
-    """按时段整块有放回重抽 ``b`` 次，取均值的 2.5% / 97.5% 分位。时段少于 3 个不给区间。
-    返回 (下限, 上限, 时段数)。"""
-    sums: dict[str, float] = {}
-    cnts: dict[str, int] = {}
-    for v, k in zip(values, blocks, strict=True):
-        sums[k] = sums.get(k, 0.0) + v
-        cnts[k] = cnts.get(k, 0) + 1
-    keys = list(sums)
-    if len(keys) < 3:
-        return None, None, len(keys)
-    s = [sums[k] for k in keys]
-    c = [cnts[k] for k in keys]
-    sims = sorted(
-        sum(s[i] for i in draw) / sum(c[i] for i in draw)
-        for draw in _boot_draws(len(keys), b, seed)
-    )
-    return sims[int(0.025 * b)], sims[int(0.975 * b)], len(keys)
 
 
 class Stat(BaseModel):
@@ -646,6 +636,10 @@ class Report(BaseModel):
     """观望 / 双向：不计命中率，只计数。"""
     n_unpriced: int = 0
     """方向卡里 4h 拿不到价格的（下架、没有主网合约）。"""
+    n_no_pool: int = 0
+    """方向卡里没有币池记录的（最早一轮总盘会之前）：只算原始，不进超额。"""
+    since: datetime | None = None
+    """只汇总 t0 在这之后的卡（None = 全部）。"""
     t0_src: dict[str, int] = {}
     min_blocks: int = MIN_BLOCKS
     primary: str = PRIMARY
@@ -700,8 +694,13 @@ def summarize(
     rows: Iterable[CardScore],
     now: datetime,
     marks: Sequence[tuple[str, datetime]] = PERIOD_MARKS,
+    *,
+    since: datetime | None = None,
 ) -> Report:
-    rows = sorted(rows, key=lambda s: s.t0)  # 稳定排序：同一时刻保持写入顺序
+    """``since``：只汇总 t0 在这之后的卡，汇总的花费不随流水无限长大。"""
+    rows = sorted(  # 稳定排序：同一时刻保持写入顺序
+        (s for s in rows if since is None or s.t0 >= since), key=lambda s: s.t0
+    )
     d = [s for s in rows if s.direction]
     card = BASELINES[0][2]
     horizons = {
@@ -726,6 +725,8 @@ def summarize(
         n_short=sum(1 for s in d if s.direction < 0),
         n_neutral=len(rows) - len(d),
         n_unpriced=sum(1 for s in d if s.coin.h4 is None),
+        n_no_pool=sum(1 for s in d if not s.pool_size),
+        since=since,
         t0_src=dict(Counter(s.t0_src for s in rows)),
         horizons=horizons,
         baselines=baselines,
@@ -750,6 +751,8 @@ class RunResult:
     waiting: int
     failed: int
     report: Report
+    unavailable: frozenset[str] = frozenset()
+    """这一轮新确认币安没有的币。"""
 
 
 async def update(
@@ -758,11 +761,14 @@ async def update(
     fetch: KlineFetch,
     *,
     since: datetime | None = None,
+    summary_since: datetime | None = None,
     pools: PoolTimeline | None = None,
     marks: Sequence[tuple[str, datetime]] = PERIOD_MARKS,
+    packs: Path | None = None,
 ) -> RunResult:
     """把窗口已走完、还没记过分的卡补上，再重写汇总。重跑只补新的（幂等）。
-    同步的读文件 / 统计放线程里，不卡事件循环。"""
+    ``since`` 管补算哪些卡，``summary_since`` 管汇总哪些卡；
+    ``packs`` 是日包缓存目录（坏包删掉重下）。同步的读文件 / 统计放线程里，不卡事件循环。"""
     store = ScoreStore(data_dir)
 
     def prepare() -> tuple[list[tuple[JournalRow, datetime, T0Source, str | None]], int]:
@@ -792,7 +798,9 @@ async def update(
 
     ready, waiting = await asyncio.to_thread(prepare)
     new = failed_n = 0
+    gone: set[str] = set()
     if ready:
+        skip = await asyncio.to_thread(store.unavailable)
         timeline = (
             pools if pools is not None else await asyncio.to_thread(PoolTimeline.load, data_dir)
         )
@@ -802,20 +810,26 @@ async def update(
             pool = timeline.at(t0)
             syms = {r.symbol, BTC, *(pool.symbols if pool else ())}
             times = [bar_open(t) for t in needed_times(r, t0)]
-            for s in syms:
+            for s in syms - skip:
                 needs.setdefault(s, set()).update(times)
-            plan.append((r, t0, src, rid, pool, syms))
-        book, failed = await load_closes(fetch, needs)
+            plan.append((r, t0, src, rid, pool))
+        got = await load_closes(fetch, needs, packs=packs)
+        gone = got.missing - skip
+        if gone:
+            await asyncio.to_thread(store.add_unavailable, gone, now)
         rows = []
-        for r, t0, src, rid, pool, syms in plan:
-            if syms & failed:
+        for r, t0, src, rid, pool in plan:
+            # 本币或 BTC 一时拉不到：下次再算；池里个别币拉不到：等权只算有价的（记在 pool_n_4h）
+            if {r.symbol, BTC} & got.failed:
                 failed_n += 1
                 continue
-            rows.append(score_card(r, t0, src, rid, book, pool, now))
+            rows.append(score_card(r, t0, src, rid, got.book, pool, now))
         new = await asyncio.to_thread(store.append, rows)
-    report = await asyncio.to_thread(lambda: summarize(store.read(), now, marks))
+    report = await asyncio.to_thread(
+        lambda: summarize(store.read(), now, marks, since=summary_since)
+    )
     await asyncio.to_thread(store.write_summary, report)
-    return RunResult(new, waiting, failed_n, report)
+    return RunResult(new, waiting, failed_n, report, frozenset(gone))
 
 
 # ---------------------------------------------------------------- 文字版（命令行 / 日志）
@@ -870,6 +884,8 @@ def render(r: Report) -> list[str]:
     lines.append(
         f"样本：{r.n_cards} 张卡（做多 {r.n_long} / 做空 {r.n_short} / 观望 {r.n_neutral}，"
         f"观望不计命中）；t0 来源 {r.t0_src}"
+        + (f"；{r.n_no_pool} 张方向卡没有币池记录，只算原始" if r.n_no_pool else "")
+        + (f"；只汇总 {r.since:%Y-%m-%d %H:%M} UTC 之后的卡" if r.since else "")
     )
     for h, label in (("1h", "1h"), ("4h", "4h"), ("exp", "到过期")):
         hs = r.horizons.get(h)

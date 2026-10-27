@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from jiaoyi.slow import card_score as C
+from jiaoyi.slow import scoring_common as SC
 from jiaoyi.slow.review import JournalRow
 
 T = datetime(2026, 10, 25, 9, 41, 41, 500000, tzinfo=UTC)
@@ -149,12 +150,13 @@ def test_pool_is_the_one_in_force_at_t0(tmp_path: Path) -> None:
     ]
     (mm / "2026-10-25.jsonl").write_text("\n".join(json.dumps(r) for r in rounds) + "\n")
     (mm / "outcomes.jsonl").write_text('{"not": "a round"}\n')
-    tl = C.PoolTimeline.load(tmp_path)
+    tl = SC.PoolTimeline.load(tmp_path)
     at = tl.at
-    assert at(T - timedelta(hours=1)) == C.Pool("p1", ("SOLUSDT",))  # 最早一轮之前：用最早那轮
-    assert at(T) == at(T + timedelta(hours=1, minutes=59)) == C.Pool("p1", ("SOLUSDT",))
-    assert at(T + timedelta(hours=2)) == C.Pool("p2", ("X",))
-    assert C.PoolTimeline([]).at(T) is None
+    assert tl.first == T
+    assert at(T - timedelta(hours=1)) is None  # 最早一轮之前没有记录：不拿后来的池顶替
+    assert at(T) == at(T + timedelta(hours=1, minutes=59)) == SC.Pool("p1", ("SOLUSDT",))
+    assert at(T + timedelta(hours=2)) == SC.Pool("p2", ("X",))
+    assert SC.PoolTimeline([]).at(T) is None
 
 
 def test_bar_open_is_last_closed_minute() -> None:
@@ -303,8 +305,8 @@ def test_cluster_bootstrap_is_seeded_and_matches_naive_block_resampling() -> Non
     rng = random.Random(1)
     blocks = [f"b{rng.randrange(9)}" for _ in range(120)]
     vals = [rng.gauss(0.0, 1.0) + (0.5 if k in ("b1", "b2") else 0.0) for k in blocks]
-    got = C.cluster_ci(vals, blocks)
-    assert got == C.cluster_ci(vals, blocks)  # 同种子同结果
+    got = SC.cluster_ci(vals, blocks)
+    assert got == SC.cluster_ci(vals, blocks)  # 同种子同结果
     lo, hi, n = naive_cluster_boot(vals, blocks)
     assert n == got[2] == 9
     assert got[0] == pytest.approx(lo, abs=1e-12) and got[1] == pytest.approx(hi, abs=1e-12)
@@ -337,15 +339,31 @@ class Bar:
 class FakeFetch:
     """每分钟一根，价格 = 100 + 分钟序号 × 每币的斜率（BTC 平）。"""
 
-    def __init__(self, slopes: dict[str, float], fail: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        slopes: dict[str, float],
+        fail: set[str] | None = None,
+        gone: set[str] | None = None,
+        badzip: int = 0,
+    ) -> None:
         self.slopes = slopes
         self.fail = fail or set()
+        self.gone = gone or set()  # 币安没有这个币：接口回 400
+        self.badzip = badzip  # 前几次调用抛 BadZipFile（缓存里的日包坏了）
         self.calls: list[tuple[str, datetime, datetime]] = []
 
     async def __call__(self, sym: str, a: datetime, b: datetime) -> list[Bar]:
+        import urllib.error
+        import zipfile
+
         self.calls.append((sym, a, b))
+        if self.badzip:
+            self.badzip -= 1
+            raise zipfile.BadZipFile("File is not a zip file")
         if sym in self.fail:
             raise OSError("down")
+        if sym in self.gone:
+            raise urllib.error.HTTPError("u", 400, "Invalid symbol", None, None)  # type: ignore[arg-type]
         out, t = [], a
         while t <= b:
             k = (t - T.replace(second=0, microsecond=0)).total_seconds() / 60
@@ -447,14 +465,114 @@ def test_append_is_idempotent_and_first_line_wins(tmp_path: Path) -> None:
     assert store.read() == [a, b]
 
 
-async def test_failed_fetch_is_retried_next_run_not_written(tmp_path: Path) -> None:
+async def test_pool_member_down_does_not_block_cards(tmp_path: Path) -> None:
+    """池里个别币一时拉不到：卡照样记，等权只算拉到的币。"""
     seed_data(tmp_path)
     now = T + timedelta(hours=6)
-    r = await C.update(tmp_path, now, FakeFetch({}, fail={"AAVEUSDT"}))
-    assert (r.new, r.failed) == (0, 3)  # 池里有它：三张都等下次
-    assert not C.ScoreStore(tmp_path).read()
+    r = await C.update(tmp_path, now, FakeFetch({"SOLUSDT": -0.01}, fail={"AAVEUSDT"}))
+    assert (r.new, r.failed) == (3, 0)
+    sol = next(s for s in C.ScoreStore(tmp_path).read() if s.symbol == "SOLUSDT")
+    assert (sol.pool_size, sol.pool_n_4h) == (3, 2)  # SOL、ENA 进了等权，AAVE 没有
+    assert sol.coin.h4 is not None and sol.pool.h4 == pytest.approx(sol.coin.h4 / 2)
+
+
+async def test_own_coin_or_btc_down_is_retried_next_run_not_written(tmp_path: Path) -> None:
+    seed_data(tmp_path)
+    now = T + timedelta(hours=6)
+    r = await C.update(tmp_path, now, FakeFetch({}, fail={"ENAUSDT"}))
+    assert (r.new, r.failed) == (1, 2)  # 只有 SOL 那张记上
+    assert [s.symbol for s in C.ScoreStore(tmp_path).read()] == ["SOLUSDT"]
+    assert not C.ScoreStore(tmp_path).unavailable()  # 一时拉不到不算「没有」
+    r = await C.update(tmp_path, now, FakeFetch({}, fail={"BTCUSDT"}))
+    assert (r.new, r.failed) == (0, 2)
     r = await C.update(tmp_path, now, FakeFetch({}))
-    assert r.new == 3
+    assert r.new == 2
+
+
+async def test_symbol_binance_does_not_have_is_cached_and_counted_unpriced(
+    tmp_path: Path,
+) -> None:
+    seed_data(tmp_path)
+    now = T + timedelta(hours=6)
+    fetch = FakeFetch({}, gone={"ENAUSDT"})
+    r = await C.update(tmp_path, now, fetch)
+    assert (r.new, r.failed, r.unavailable) == (3, 0, frozenset({"ENAUSDT"}))
+    store = C.ScoreStore(tmp_path)
+    assert store.unavailable() == {"ENAUSDT"}
+    ena = next(s for s in store.read() if s.version == 2)
+    assert ena.coin.h4 is None and r.report.n_unpriced == 1
+    # 之后不再去拉它
+    write_journal(tmp_path, [jrow("ENAUSDT", "short", T + timedelta(minutes=30), version=9)])
+    fetch.calls.clear()
+    r = await C.update(tmp_path, now, fetch)
+    assert r.new == 1 and "ENAUSDT" not in {c[0] for c in fetch.calls}
+    assert r.unavailable == frozenset()
+
+
+async def test_bad_daily_pack_is_deleted_and_fetched_again(tmp_path: Path) -> None:
+    seed_data(tmp_path)
+    packs = tmp_path / "history"
+    day = (T + timedelta(minutes=2) - timedelta(hours=4)).date()  # 第一个要拉的：AAVE 那天
+    bad = packs / "AAVEUSDT" / f"AAVEUSDT-1m-{day.isoformat()}.zip"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"<html>not a zip</html>")
+    fetch = FakeFetch({}, badzip=1)
+    r = await C.update(tmp_path, T + timedelta(hours=6), fetch, packs=packs)
+    assert (r.new, r.failed) == (3, 0) and not bad.exists()
+    assert [c[0] for c in fetch.calls[:2]] == ["AAVEUSDT", "AAVEUSDT"]
+
+
+async def test_cards_before_first_pool_round_get_no_pool(tmp_path: Path) -> None:
+    """最早一轮总盘会之前的卡：只算原始，不进超额（不拿后来的池顶替）。"""
+    seed_data(tmp_path)
+    mm = tmp_path / "market_meeting" / "2026-10-25.jsonl"
+    mm.write_text(
+        json.dumps(
+            {
+                "ts": (T + timedelta(minutes=30)).isoformat(),
+                "pool_id": "later",
+                "pool": [{"symbol": "SOLUSDT"}, {"symbol": "AAVEUSDT"}],
+            }
+        )
+        + "\n"
+    )
+    r = await C.update(tmp_path, T + timedelta(hours=6), FakeFetch({"SOLUSDT": -0.01}))
+    rows = {s.version: s for s in C.ScoreStore(tmp_path).read()}
+    assert rows[1].pool_id is None and rows[1].pool.h4 is None and rows[1].pool_size == 0
+    assert rows[3].pool_id == "later"
+    assert r.report.n_no_pool == 2  # 两张方向卡都在 T+30 分钟之前
+    h = r.report.horizons["4h"]
+    assert (h.raw.n, h.excess.n, h.market.n) == (2, 0, 0)
+
+
+def test_dedup_never_hashes_journal_rows() -> None:
+    """流水行以后可能带 dict 字段（不能哈希）：去重只按 (卡, 版本, 币)。"""
+
+    class Unhashable(JournalRow):
+        def __hash__(self) -> int:
+            raise TypeError("unhashable")
+
+    a = Unhashable.model_validate(jrow(version=1).model_dump())
+    b = Unhashable.model_validate(jrow(version=2).model_dump())
+    a2 = Unhashable.model_validate(jrow(version=1, bias="long").model_dump())
+    assert C.dedup([a, b, a2]) == [a2, b]
+
+
+def test_summary_window_only_counts_recent_cards() -> None:
+    rows = [card(1, "short", -0.01, 0.0, hours=-48), card(2, "long", 0.01, 0.0)]
+    r = C.summarize(rows, T, since=T - timedelta(hours=24))
+    assert (r.n_cards, r.n_long, r.n_short, r.since) == (1, 1, 0, T - timedelta(hours=24))
+    assert C.summarize(rows, T).n_cards == 2
+
+
+def test_summary_tmp_file_is_per_process(tmp_path: Path) -> None:
+    """别的进程正在写（这里用占住老的固定临时名模拟）也不影响这次写汇总。"""
+    store = C.ScoreStore(tmp_path)
+    (store.dir / "summary.tmp").mkdir(parents=True)
+    rep = C.Report(generated_at=T, n_cards=1)
+    store.write_summary(rep)
+    assert store.read_summary() == rep
+    assert [p.name for p in store.dir.iterdir() if p.suffix == ".tmp"] == ["summary.tmp"]
 
 
 async def test_rate_limit_aborts_the_run(tmp_path: Path) -> None:

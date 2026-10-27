@@ -1332,21 +1332,26 @@ def test_panel_card_score_job_follows_setting(
     from jiaoyi.panel import server
     from jiaoyi.slow import card_score
 
-    calls: list[datetime] = []
+    calls: list[dict[str, Any]] = []
 
     async def fake_update(data_dir: Any, now: datetime, fetch: Any, **kw: Any) -> Any:
-        calls.append(kw["since"])
+        calls.append(kw)
         return card_score.RunResult(0, 0, 0, card_score.Report(generated_at=now))
 
     monkeypatch.setattr(server, "CARD_SCORE_FIRST_S", 0.0)
     monkeypatch.setattr(server, "CARD_SCORE_IDLE_MIN", 0.001)
     monkeypatch.setattr(card_score, "update", fake_update)
-    cfg = _cfg(tmp_path).model_copy(update={"card_score_every_min": every})
+    cfg = _cfg(tmp_path).model_copy(
+        update={"card_score_every_min": every, "card_score_window_days": 30}
+    )
     _seed(tmp_path)
     with _client(tmp_path, "127.0.0.1", cfg=cfg):
         time.sleep(0.3)
     assert len(calls) == runs
-    assert all(s == NOW - server.CARD_SCORE_LOOKBACK for s in calls)
+    for kw in calls:
+        assert kw["since"] == NOW - server.CARD_SCORE_LOOKBACK
+        assert kw["summary_since"] == NOW - timedelta(days=30)  # 汇总只看最近 30 天
+        assert kw["packs"] == tmp_path / "history"  # 坏日包删了重下
 
 
 def test_position_view_mark_notional_margin(tmp_path: Path) -> None:
