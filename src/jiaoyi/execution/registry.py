@@ -16,10 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from jiaoyi.contracts import OrderIntent, PositionRecord, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.execution.exchange import WorkingType
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
 
@@ -50,6 +51,25 @@ class ProtectiveLeg(BaseModel):
     filled_quantity: float | None = None
     triggered_at: datetime | None = None
     child_state: Literal["absent", "unknown", "identified"] = "unknown"
+    acked_at: datetime | None = None
+    """本程序提交后交易所回执已接受的时刻；首次回读到后清空。只用于回读宽限，不代表仍在。"""
+    working_type: WorkingType = "CONTRACT_PRICE"
+    """创建这条腿时定下的触发价格源，提交和每次回读都按它核对；改配置只影响之后新建的腿。
+    旧账本没有这一项：保命单按 MARK_PRICE、普通止盈止损按 CONTRACT_PRICE（当时的固定行为）。"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_working_type(cls, data: object) -> object:
+        if isinstance(data, dict) and "working_type" not in data:
+            lifeboat = data.get("purpose") == "lifeboat"
+            data = {**data, "working_type": "MARK_PRICE" if lifeboat else "CONTRACT_PRICE"}
+        return data
+
+    @model_validator(mode="after")
+    def _lifeboat_mark_price(self) -> ProtectiveLeg:
+        if self.purpose == "lifeboat" and self.working_type != "MARK_PRICE":
+            raise ValueError("保命单只按标记价触发")
+        return self
 
 
 class ServerProtection(BaseModel):
@@ -73,6 +93,8 @@ class ServerProtection(BaseModel):
     observed_at: datetime | None = None
     exit_reason: CloseReason | None = None
     last_error: str | None = None
+    prearm_failing_since: datetime | None = None
+    """未曾完整托管时，可宽限的同步失败从何时开始连续出现；成功一轮清空。"""
     deadline_at: datetime | None = None
     trailing_peak_net: float | None = None
     trailing_threshold_net: float | None = None

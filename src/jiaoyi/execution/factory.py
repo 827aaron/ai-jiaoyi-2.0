@@ -10,7 +10,7 @@ from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.brackets import BracketManager
-from jiaoyi.execution.exchange import CcxtBinanceFutures
+from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -92,6 +92,10 @@ def build_execution(
     limit_take_profit: bool = False,
     frozen_peak_exit_on: bool = True,
     frozen_peak_exit_after_s: int = 3600,
+    protection_readback_grace_s: float = 0.0,
+    protection_prearm_grace_s: float = 0.0,
+    protection_stop_working_type: WorkingType = "CONTRACT_PRICE",
+    protection_take_profit_working_type: WorkingType = "CONTRACT_PRICE",
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -137,7 +141,14 @@ def build_execution(
     # 当前只批准 Demo 新仓托管。实盘和旧测试网不因更新代码切换出场策略。
     protection = (
         BracketManager(
-            exchange, registry, account_name=account_name, connector_name=CONNECTOR_BY_MODE[mode]
+            exchange,
+            registry,
+            account_name=account_name,
+            connector_name=CONNECTOR_BY_MODE[mode],
+            readback_grace_s=protection_readback_grace_s,
+            prearm_grace_s=protection_prearm_grace_s,
+            stop_working_type=protection_stop_working_type,
+            take_profit_working_type=protection_take_profit_working_type,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None

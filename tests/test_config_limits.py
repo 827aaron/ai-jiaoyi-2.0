@@ -120,11 +120,16 @@ OPTIONAL_APP_FIELDS = {
     "predictor",
     "reconciler_close_unknown_positions",
     "reconciler_executor_stop_retry_rounds",  # 默认 0（永不重发），老配置文件没有这一行
+    "protection_readback_grace_s",
+    "protection_prearm_grace_s",
+    "protection_stop_working_type",
+    "protection_take_profit_working_type",
     "trade_notices",
     *(f"notify_{k}" for k in KINDS),
     "credit_low_floor_usd",
     "credit_resend_hours",
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
+    "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",
     "hold",

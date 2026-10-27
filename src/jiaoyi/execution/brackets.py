@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Protocol
 
 from jiaoyi.contracts import LifeboatOrder, Side
@@ -24,6 +26,7 @@ from jiaoyi.execution.exchange import (
     ExchangePosition,
     ExecutionBook,
     NormalizedBracketSpec,
+    WorkingType,
 )
 from jiaoyi.execution.registry import (
     PositionRegistry,
@@ -51,6 +54,7 @@ class BracketExchange(Protocol):
         client_order_id: str,
         *,
         kind: Literal["stop_loss", "take_profit"],
+        working_type: WorkingType,
     ) -> ExchangeBracket: ...
     async def get_bracket(
         self, symbol: str, *, algo_id: str | None = None, client_order_id: str | None = None
@@ -79,9 +83,25 @@ class BracketExchange(Protocol):
 class ProtectionIncomplete(ExchangeError):
     """状态未知或保护不完整；调用方保留已确认保护并报告，不应擅自重复提交。"""
 
+    def __init__(self, message: str, *, read_lag: bool = False) -> None:
+        super().__init__(message)
+        self.read_lag = read_lag
+        """已提交且回执已接受的条件单暂时查不到（可能是交易所读延迟），不是参数或状态不符。"""
+
 
 class _PositionChanged(ProtectionIncomplete):
     """网络等待期间正常入场量变化；先保留已有保护，下一次用新证据继续。"""
+
+
+def describe_error(error: BaseException) -> str:
+    """类名 + 原文（含直接 cause），供 last_error 与告警定位具体哪一项核对没过；限长。"""
+
+    def one(e: BaseException) -> str:
+        text = str(e)
+        return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+    cause = error.__cause__
+    return (one(error) + (f" <- {one(cause)}" if cause is not None else ""))[:300]
 
 
 @dataclass(frozen=True)
@@ -96,6 +116,7 @@ class EntryEvidence:
 _CHILD_TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
 _ALGO_CLOSED = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 _TRIGGERED = {"TRIGGERING", "TRIGGERED", "FINISHED"}
+_READBACK_POLL_S = 0.5  # 回读宽限内的重读间隔；总等待由 readback_grace_s 封顶。
 
 
 def _triggered(leg: ProtectiveLeg) -> bool:
@@ -154,9 +175,25 @@ class BracketManager:
         account_name: str,
         connector_name: str,
         clock: Clock = utc_now,
+        readback_grace_s: float = 0.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        prearm_grace_s: float = 0.0,
+        stop_working_type: WorkingType = "CONTRACT_PRICE",
+        take_profit_working_type: WorkingType = "CONTRACT_PRICE",
     ) -> None:
+        """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
+
+        ``prearm_grace_s``：从未完整托管时，可重试的同步失败最多连续容忍几秒；0 = 不容忍。
+
+        ``stop_working_type`` / ``take_profit_working_type``：之后新建的止损（含移动止损新一代）/
+        止盈腿用哪个触发价格源，建腿时写进账本；已有的腿一直按自己记下的核对，保命单固定标记价。
+        """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
+        self.readback_grace_s, self._sleep = readback_grace_s, sleep
+        self.prearm_grace_s = prearm_grace_s
+        self.stop_working_type = stop_working_type
+        self.take_profit_working_type = take_profit_working_type
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -169,6 +206,44 @@ class BracketManager:
     def retains_confirmed_stop(self, pid: str) -> bool:
         """最后回读仍明确 NEW 的普通止损；不表示网络断开后仍能证明当前实时状态。"""
         return any(_live(leg) and _role(leg) == "stop_loss" for leg in self._current(pid)[1].legs)
+
+    def prearm_grace(self, pid: str, error: BaseException) -> float | None:
+        """从未完整托管时本轮同步失败能否先不平仓：返回连续失败已持续的秒数，None = 照旧退出。
+
+        只宽限交易所读延迟（回执已接受的单暂时查无）和网络层一时失败；还必须：未进入退出、
+        最后回读（或回执）仍有明确 NEW 的保命单或止损、没有任何腿处于提交/撤销未知、
+        已触发、子单未知或被明确拒绝。计时从第一次可宽限失败算并落盘，重启不重新计时。
+        """
+        if self.prearm_grace_s <= 0:
+            return None
+        if isinstance(error, ProtectionIncomplete):
+            if not error.read_lag:
+                return None
+        elif not (isinstance(error, ExchangeError) and error.transient):
+            return None
+        try:
+            _, state = self._current(pid)
+        except ProtectionIncomplete:
+            return None
+        if state.ever_armed or state.stage in {"exiting", "cleanup", "done"}:
+            return None
+        if not any(_live(leg) and _role(leg) in {"lifeboat", "stop_loss"} for leg in state.legs):
+            return None
+        if not all(
+            leg.state in {"planned", "superseded"}
+            or _live(leg)
+            or (leg.state == "cancelled" and _settled(leg) and not _triggered(leg))
+            for leg in state.legs
+        ):
+            return None
+        now = self.clock()
+        since = state.prearm_failing_since or now
+        elapsed = (now - since).total_seconds()
+        if elapsed >= self.prearm_grace_s:
+            return None
+        if state.prearm_failing_since is None:
+            self._save(pid, prearm_failing_since=now)
+        return elapsed
 
     def _current(self, pid: str) -> tuple[TrackedPosition, ServerProtection]:
         tracked = self.registry.get(pid)
@@ -290,8 +365,7 @@ class BracketManager:
             or order.kind != leg.kind
             or order.close_side != ("sell" if tracked.record.side is Side.LONG else "buy")
             or order.position_side != "BOTH"
-            or order.working_type
-            != ("MARK_PRICE" if leg.purpose == "lifeboat" else "CONTRACT_PRICE")
+            or order.working_type != leg.working_type
             or not order.reduce_only
             or order.price_protect
             or order.close_position
@@ -372,14 +446,46 @@ class BracketManager:
             )
             order = await read(tracked.record.symbol, client_order_id=old.client_order_id)
             if order is None:
-                raise ProtectionIncomplete("已提交条件单暂时不可查，不能再次创建或当作已撤")
-            self._accept(pid, self._leg(pid, old.client_order_id), order)
+                order = await self._await_readback(pid, old.client_order_id)
+            if order is None:
+                raise ProtectionIncomplete(
+                    "已提交条件单暂时不可查，不能再次创建或当作已撤",
+                    read_lag=old.state == "confirmed" and old.acked_at is not None,
+                )
+            leg = self._leg(pid, old.client_order_id)
+            self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
         _, state = self._current(pid)
         hit = next((leg for leg in state.legs if _triggered(leg)), None)
         if hit is not None:
             reason = _reason(hit)
             state = self._save(pid, stage="exiting", exit_reason=state.exit_reason or reason)
         return state
+
+    async def _await_readback(self, pid: str, cid: str) -> ExchangeBracket | None:
+        """回执已接受的 NEW 腿在宽限内查无：按 algoId 只读重试，不重发、不当已撤、不建新代。
+
+        宽限从持久化的回执时刻算，重启不会重新计时；过时仍查无返回 None，由调用方照旧报错。
+        """
+        tracked, _ = self._current(pid)
+        leg = self._leg(pid, cid)
+        grace = self.readback_grace_s
+        if grace <= 0 or leg.acked_at is None or leg.algo_id is None or not _live(leg):
+            return None
+        deadline = leg.acked_at + timedelta(seconds=grace)
+        for _ in range(math.ceil(grace / _READBACK_POLL_S)):  # 时钟异常也不会无限等。
+            remaining = (deadline - self.clock()).total_seconds()
+            if remaining <= 0:
+                return None
+            await self._sleep(min(_READBACK_POLL_S, remaining))
+            if leg.purpose == "lifeboat":
+                order = await self.exchange.get_lifeboat(
+                    tracked.record.symbol, client_order_id=cid, algo_id=leg.algo_id
+                )
+            else:
+                order = await self.exchange.get_bracket(tracked.record.symbol, algo_id=leg.algo_id)
+            if order is not None:
+                return order
+        return None
 
     async def _cancel(self, pid: str, cid: str) -> None:
         tracked, _ = self._current(pid)
@@ -414,15 +520,18 @@ class BracketManager:
         tracked, _ = self._current(pid)
         async with self.registry.symbol_lock(tracked.record.symbol):
             try:
-                return await self._sync(pid)
+                result = await self._sync(pid)
             except _PositionChanged as error:
                 if self._current(pid)[1].stage in {"exiting", "cleanup", "done"}:
                     return "exit"  # 撤旧单期间已确认触发，数量变化不能把退出退回保护阶段。
                 self._save(pid, stage="provisional", last_error=str(error))
                 return "provisional"
             except Exception as error:
-                self._save(pid, last_error=type(error).__name__)
+                self._save(pid, last_error=describe_error(error))
                 raise
+            if self._current(pid)[1].prearm_failing_since is not None:
+                self._save(pid, prearm_failing_since=None)
+            return result
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         evidence = await self._evidence(pid)
@@ -516,6 +625,16 @@ class BracketManager:
                 if len(cid) > 36:
                     raise ProtectionIncomplete("条件单身份超过交易所长度限制")
                 spec = specs[kind]
+                # 新一代（含移动止损换价）按现在的设置；旧腿照自己记下的核对，新腿确认后才撤旧腿。
+                working_type: WorkingType = (
+                    "MARK_PRICE"
+                    if kind == "lifeboat"
+                    else (
+                        self.stop_working_type
+                        if kind == "stop_loss"
+                        else self.take_profit_working_type
+                    )
+                )
                 legs.append(
                     ProtectiveLeg(
                         kind="take_profit" if kind == "take_profit" else "stop_loss",
@@ -530,6 +649,7 @@ class BracketManager:
                             if kind == "stop_loss" and state.trailing_activated
                             else "fixed"
                         ),
+                        working_type=working_type,
                     )
                 )
             self._save(pid, legs=legs, generation=generation, stage="provisional")
@@ -562,6 +682,7 @@ class BracketManager:
                             leg.trigger_price,
                             leg.client_order_id,
                             kind=leg.kind,
+                            working_type=leg.working_type,
                         )
                 except BracketSubmissionRejected as rejected:
                     self._save_leg(
@@ -583,7 +704,8 @@ class BracketManager:
                     ) from None
                 except BracketSubmissionUnknown:
                     raise ProtectionIncomplete("普通保护提交结果未知，只查原CID") from None
-                self._accept(pid, self._leg(pid, leg.client_order_id), order)
+                acked = self._leg(pid, leg.client_order_id)
+                self._accept(pid, acked.model_copy(update={"acked_at": self.clock()}), order)
                 await self._checkpoint(pid, evidence)
                 state = await self._refresh(pid)
                 if state.stage == "exiting":
@@ -679,7 +801,7 @@ class BracketManager:
                 await self._checkpoint(pid, evidence)
                 return True
             except Exception as error:
-                self._save(pid, last_error=type(error).__name__)
+                self._save(pid, last_error=describe_error(error))
                 return False
 
     async def flat_cleanup(self, pid: str) -> bool:
@@ -701,5 +823,5 @@ class BracketManager:
                 self._save(pid, stage="done", last_error=None)
                 return True
             except Exception as error:
-                self._save(pid, last_error=type(error).__name__)
+                self._save(pid, last_error=describe_error(error))
                 return False

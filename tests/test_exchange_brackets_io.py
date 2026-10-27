@@ -716,7 +716,10 @@ async def test_unknown_cid_cannot_be_reused_on_another_symbol() -> None:
     ex.create_order.assert_awaited_once()
 
 
-async def test_real_ccxt_maps_both_types_and_rounding_to_algo_without_network() -> None:
+@pytest.mark.parametrize("working_type", ["CONTRACT_PRICE", "MARK_PRICE"])
+async def test_real_ccxt_maps_both_types_and_rounding_to_algo_without_network(
+    working_type: str,
+) -> None:
     ex = ccxt.binanceusdm()
     ex.enable_demo_trading(True)
     market: dict[str, Any] = {
@@ -759,7 +762,7 @@ async def test_real_ccxt_maps_both_types_and_rounding_to_algo_without_network() 
                 {
                     field: 0.91256,
                     "reduceOnly": True,
-                    "workingType": "CONTRACT_PRICE",
+                    "workingType": working_type,
                     "priceProtect": False,
                     "positionSide": "BOTH",
                     "newClientOrderId": cid,
@@ -769,9 +772,7 @@ async def test_real_ccxt_maps_both_types_and_rounding_to_algo_without_network() 
         assert [r["clientAlgoId"] for r in captured] == ["br-sl-synthetic", "br-tp-synthetic"]
         assert all(r["algoType"] == "CONDITIONAL" for r in captured)
         assert all(r["triggerPrice"] == "0.9126" and r["quantity"] == "10.12" for r in captured)
-        assert all(
-            r["workingType"] == "CONTRACT_PRICE" and r["reduceOnly"] is True for r in captured
-        )
+        assert all(r["workingType"] == working_type and r["reduceOnly"] is True for r in captured)
         assert all(r["priceProtect"] is False and r["positionSide"] == "BOTH" for r in captured)
         assert all("callbackRate" not in r and "closePosition" not in r for r in captured)
         ex.fetch.assert_not_awaited()

@@ -907,6 +907,13 @@ class AppConfig(Contract):
         le=1440,
         description="选币多久跑一次，默认跟开会间隔档位走（15 分钟下限保护币安接口权重）。",
     )
+    protection_stale_s: int = Field(
+        default=120,
+        ge=0,
+        le=3600,
+        description="面板：交易所托管保护单的观测时间超过这么多秒就标“数据过期”（对账员约每 "
+        "reconcile_interval_s 刷新一次）；0 = 不标。",
+    )
     pool_size: int = Field(ge=5, le=100, description="候选池大小，设计值 30–50。")
     card_pick_max: int = Field(ge=1, le=50, description="军师每次最多挑几个，设计值 10–20。")
     data_dir: str = Field(min_length=1, description="决策日志、模块状态等写在这里。")
@@ -981,6 +988,35 @@ class AppConfig(Contract):
         le=10000,
         description="对账员停执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
         "没确认终止，就再发一次停止。0 = 永不重发（只查）。",
+    )
+    protection_readback_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=30.0,
+        description="Demo 托管保护：本程序刚提交、交易所回执已接受的条件单，回执后这么多秒内"
+        "查不到就按 algoId 只读重试（不重发、不当已撤、不建新代）；过时仍查不到照旧报保护未确认。"
+        "0 = 不等（原行为）。改后重启生效。",
+    )
+    protection_prearm_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=600.0,
+        description="Demo 托管保护：新仓还没完整托管（保命 + 止损 + 止盈从没同时确认过）时，"
+        "同步失败最多连续容忍这么多秒（从第一次失败算）再按对账原因平仓。只宽限交易所读延迟和"
+        "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
+        "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
+    )
+    protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
+        default="CONTRACT_PRICE",
+        description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"
+        "（原行为）；MARK_PRICE = 标记价，不会被 Demo 盘口的瞬间插针扫掉，但触发后仍按当时盘口"
+        "市价成交。只影响之后新挂的止损（新仓、移动止损换价），已挂的单照旧按挂单时的核对。"
+        "保命单固定按标记价。改后重启生效。",
+    )
+    protection_take_profit_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
+        default="CONTRACT_PRICE",
+        description="Demo 托管保护：止盈按什么价触发。CONTRACT_PRICE = 最新成交价（原行为）；"
+        "MARK_PRICE = 标记价。只影响之后新挂的止盈，已挂的单照旧按挂单时的核对。改后重启生效。",
     )
     predictor: PredictorConfig = Field(
         default_factory=PredictorConfig, description="预测员运行方式，见 ``[predictor]``。"

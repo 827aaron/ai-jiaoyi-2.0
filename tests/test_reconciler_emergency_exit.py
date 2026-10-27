@@ -24,7 +24,7 @@ from jiaoyi.execution.fills import TradeFill
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import SymbolAlreadyHeld
 from jiaoyi.execution.reconciler import ThreeWayReconciler
-from jiaoyi.execution.registry import PositionRegistry
+from jiaoyi.execution.registry import ForeignExecutorStop, PositionRegistry
 from tests.test_execution import Rig, explain_reverse, intent, open_filled, with_close_unknown
 
 
@@ -816,3 +816,58 @@ async def test_reverse_close_waits_until_own_closed_executor_is_isolated(
     second = await rig.rec.reconcile(rig.t)
     assert len(rig.ex.close_submissions) == 1
     assert any(i.kind is ReconcileIssueKind.SIDE_MISMATCH and i.fixed for i in second.issues)
+
+
+# ---------------------------------------------------------------- 旧账本
+
+
+async def test_old_positions_json_without_any_new_field_still_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """托管仓（腿的 working_type / acked_at、prearm_failing_since）加上对账员意图与执行器停止记录
+    全写进账本；去掉这些后来才加的字段，旧文件照样能读，默认值正确；全字段来回一致。"""
+    import json
+
+    from tests.test_server_protection_regression import Harness
+
+    h = Harness(tmp_path, Side.LONG)
+    assert await h.build().sync("pos-1") == "armed"
+    rig = Rig(tmp_path / "rig")
+    await _stuck_intent(rig, monkeypatch)
+    await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "someone-else")
+    calls = _flaky_stop(rig, monkeypatch)
+    await _rec_with(rig, close_unknown_positions=True).reconcile(rig.t)
+    assert calls and rig.registry.data.foreign_executor_stops
+    data = json.loads(h.path.read_text(encoding="utf-8"))
+    extra = json.loads(rig.registry.path.read_text(encoding="utf-8"))
+    data["emergency_exits"] = extra["emergency_exits"]
+    data["foreign_executor_stops"] = extra["foreign_executor_stops"]
+    full = tmp_path / "full" / "positions.json"
+    full.parent.mkdir()
+    full.write_text(json.dumps(data), encoding="utf-8")
+    loaded = PositionRegistry(full)
+    loaded.save()
+    assert json.loads(full.read_text(encoding="utf-8")) == json.loads(loaded.data.model_dump_json())
+    assert loaded.data.emergency_exits.keys() == {"BTCUSDT"}
+
+    del data["emergency_exits"], data["foreign_executor_stops"]
+    sp = data["positions"]["pos-1"]["server_protection"]
+    sp.pop("prearm_failing_since", None)
+    for leg in sp["legs"]:
+        leg.pop("working_type", None)
+        leg.pop("acked_at", None)
+    old = tmp_path / "old" / "positions.json"
+    old.parent.mkdir()
+    old.write_text(json.dumps(data), encoding="utf-8")
+    legacy = PositionRegistry(old)
+    assert legacy.data.emergency_exits == {} and legacy.data.foreign_executor_stops == {}
+    state = legacy.get("pos-1").server_protection  # type: ignore[union-attr]
+    assert state is not None and state.prearm_failing_since is None
+    assert {leg.purpose: leg.working_type for leg in state.legs} == {
+        "lifeboat": "MARK_PRICE",
+        "fixed": "CONTRACT_PRICE",
+    }
+    stop = extra["foreign_executor_stops"]["ex1"]
+    del stop["position_id"], stop["unresolved_rounds"]
+    legacy_stop = ForeignExecutorStop.model_validate(stop)
+    assert legacy_stop.position_id is None and legacy_stop.unresolved_rounds == 0

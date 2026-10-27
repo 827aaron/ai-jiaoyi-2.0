@@ -12,6 +12,7 @@ jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 Op
 jev_max_concurrent = 4       # 拍板人同时最多判几个信号（不同币并行；同币排队只留最新一条）
 # keeper_interval_s = 20     # 最长持仓档：持仓管家多久看一次（30m 10 秒 / 1h 15 / 2h 20 / 4h 30）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
+# protection_stale_s = 120   # 面板：交易所保护单的观测超过 120 秒标“数据过期”；0 = 不标
 # slow_loop_interval_min = 60  # 开会间隔档 = 军师团开会间隔（15m 15 分钟 … 1h 60 … 24h 1440）
 # pool_size = 40             # 每次选多少个币进候选池；不写 = 跟档位（现在各档都是 40）
 # card_pick_max = 20         # 军师每次最多挑几个；不写 = 跟档位（现在各档都是 20）
@@ -20,6 +21,10 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # notify_open_filled = true    # Telegram 各类告警的开关（默认都开）：notify_close_done / notify_lifeboat_hit / notify_order_failed 等，见网页「设置 → 告警推送」
 # reconciler_close_unknown_positions = false  # 对账员遇到“不认识的仓位”：false = 只告警（默认）；true = 直接平掉。M4 前由你决定
 # reconciler_executor_stop_retry_rounds = 0  # 对账员停执行器（只停不平）结果不明后，再过几轮仍没终止就再发一次停止；0 = 永不重发（默认）
+# protection_readback_grace_s = 0  # Demo 托管保护：刚提交、交易所已回执接受的条件单，回执后几秒内查不到只重读不报错（不重发）；0 = 不等（默认，原行为），最多 30，改后重启
+# protection_prearm_grace_s = 0    # Demo 托管保护：新仓还没完整托管时，同步失败（只限读延迟 / 网络一时失败，且已有确认的保命单或止损）最多连续容忍几秒再平仓，宽限内照样告警、下一轮重试；0 = 不容忍（默认，原行为），最多 600，改后重启
+# protection_stop_working_type = "CONTRACT_PRICE"         # Demo 托管保护：止损（含移动止损）按什么价触发：CONTRACT_PRICE = 最新成交价（默认，原行为）/ MARK_PRICE = 标记价（不被 Demo 瞬间插针扫掉，触发后仍按当时盘口市价成交）；只影响之后新挂的单，已挂的不动；保命单固定标记价；改后重启
+# protection_take_profit_working_type = "CONTRACT_PRICE"  # Demo 托管保护：止盈按什么价触发，取值同上；默认 CONTRACT_PRICE（原行为）；只影响之后新挂的单；改后重启
 
 # 预测员 Kronos 怎么跑（整段可省略，省略就用下面的默认值）；开关是上面的 predictor_enabled
 [predictor]

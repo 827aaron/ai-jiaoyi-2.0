@@ -236,12 +236,21 @@ def build_positions(
     risk: RiskConfig,
     now: datetime,
     prices: dict[str, tuple[float, PriceSrc]] | None = None,
+    protection_stale_s: int = 120,
 ) -> PositionsPage:
     ledger = files.ledger()
     records = files.decisions_days(now)  # 昨天开的仓走势也要，不按曼谷日截断
     live = ledger.live()
     views = position_views(
-        live, records, hb, risk.taker_fee_bps, fee_rate_bps(ledger.positions), prices
+        live,
+        records,
+        hb,
+        risk.taker_fee_bps,
+        fee_rate_bps(ledger.positions),
+        prices,
+        ledger.protection,
+        now,
+        protection_stale_s,
     )
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt
