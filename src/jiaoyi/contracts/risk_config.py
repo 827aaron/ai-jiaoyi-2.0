@@ -1058,6 +1058,15 @@ class AppConfig(Contract):
         "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
         "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
     )
+    position_mode_cache_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=3600.0,
+        description="币安持仓模式（单向 / 双向）查一次后这么多秒内不再查（0 = 每次都查，原行为）。"
+        "这个查询占 30 权重，本地限流每秒只有 20，托管保护和冻结盈利价证据每轮都要查好几次。"
+        "有持仓或挂单时币安不允许切换模式；开新仓前的检查、任何 -4061 或非单向持仓都会重新查。"
+        "改后重启生效。",
+    )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
         description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"
