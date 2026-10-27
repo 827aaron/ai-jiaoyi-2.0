@@ -1067,6 +1067,9 @@ class App:
             clock=self.clock,
             day_tz=self.risk_cfg.day_reset_tz,
             balance=(lambda: credits.balance_usd()) if credits is not None else None,
+            credit_alarm=(lambda: credits.note_exhausted(self.clock()))
+            if credits is not None
+            else None,
         )
 
     def reload_config(self) -> dict[str, tuple[Any, Any]]:

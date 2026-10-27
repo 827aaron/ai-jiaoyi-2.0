@@ -1,29 +1,35 @@
-"""大盘台的数据包（设计 2026-10-28 §2）：只放池级 / 大盘级的数字，每项带来源和源时间。
+"""大盘台的数据包（设计 2026-10-28 §2）：只放池级 / 大盘级的数字，每项带来源和 as_of。
 
-原则（§6.5 中立性硬要求）：
-- 只给数字和单位，不给「拥挤」「恐慌」这类定性标签；资金费给相对基准（币安默认每 8 小时 0.01%，
-  按各币结算间隔折算）的偏离，多空比给相对自身 7 天历史的 z 值；恐慌贪婪只给数值。
-- 先验用基础率：过去 30 天等权池 4h / 1h 涨 / 平 / 跌频率（「平」= |收益| ≤ band × σ，
-  σ 用每个时点之前的滚动窗口算，只用已收盘数据）。
-- 每个有方向的字段都能「镜像」：涨跌全部取反（收益取负、上涨家数和下跌家数对调、主动买卖占比对调、
-  多空账户占比对调……），镜像测试用它检查模型有没有方向偏置。
+原则（§6.5 中立性硬要求 + 「不能有延后信息」）：
+- 所有「近 N 分钟 / 近 N 小时」的窗口都是**截止到运行时刻的滚动窗口**：终点价 = 15 分钟线里还在走的
+  那一根的现价（拉取时刻），起点价在包含起点的那根 K 线里按时间线性插值；绝不把上一根已收盘的
+  1h / 4h K 线当成「近 1 小时 / 近 4 小时」。
+- 每项带 as_of；「实时」类字段 as_of 比运行时刻旧过 ``max_input_age_min`` 就不给（写进缺失原因）。
+  σ、基础率这类统计量按已收盘 1h 线算（as_of = 最后一根收盘），恐慌贪婪是日值，这两类不按新鲜度拦。
+- 只给数字和单位，不给定性标签；资金费给相对基准（每 8 小时 0.01%，按各币结算间隔折算）的偏离，
+  多空比给相对自身 7 天历史的 z 值；先验用过去 30 天涨 / 平 / 跌基础率。
+- 每个有方向的字段都能「镜像」（收益取负、上涨下跌家数对调……），镜像测试用它量方向偏置。
 - 可选来源拿不到就跳过并记下原因，不挡这一轮。
 
-请求都走 ``binance_gate``（和单币会议共用封禁与权重闸）。1 小时 K 线按币缓存，每轮只补新收盘的几根。
-池成员用当前池（幸存者口径，日志里写明）。
+请求都走 ``binance_gate``（和单币会议共用封禁与权重闸）。1h K 线按币缓存并落盘（重启不用重新回填），
+只在有新收盘时补；首次每币只拉 200 根，30 天长历史每轮最多补 8 个币。15 分钟线每轮重拉 18 根
+（含正在走的一根，权重 1）。池成员用当前池（幸存者口径，记分器另按时点池算）。
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import math
+import os
 import statistics
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -37,24 +43,26 @@ FAPI = "https://fapi.binance.com"
 FNG_URL = "https://api.alternative.me/fng/"
 BTC, ETH = "BTCUSDT", "ETHUSDT"
 HOUR_MS = 3_600_000
+Q_MS = 900_000
 FUNDING_BASE_PER_8H = 0.0001
 """币安默认资金费基准：利率部分每 8 小时 0.01%，其他结算间隔按小时数折算。"""
-POOL_METRICS_MAX_AGE = timedelta(minutes=90)
 FUNDING_INFO_TTL = timedelta(hours=24)
 FNG_TTL = timedelta(hours=1)
 MAX_BARS = 1000
-Q_MS = 900_000
-BARS_15M = 16
-"""15 分钟线留最近 16 根（4 小时）；首次 limit 16、之后只补新收盘的，权重都是 1。"""
+BARS_15M = 18
+"""15 分钟线每轮拉 18 根（含正在走的一根）：够 4 小时滚动窗口的起点，权重 1。"""
 SHALLOW_BARS = 200
-"""1h 线首次只拉 200 根（权重 2），够算 σ（168 个窗口）和各段收益。"""
+"""1h 线首次只拉 200 根（权重 2），够算 σ（168 个窗口）和 12h–72h 窗口的起点。"""
 DEEP_PER_RUN = 8
 """每轮最多给几个币补全 30 天以上的 1h 历史（limit≈900，权重 5）：启动时分几轮补完，
-不一口气打几十个大请求（防 418）。"""
+不一口气打几十个大请求（防 418）。补过的落盘，重启不用重来。"""
 DEEP_MIN_SHARE = 0.8
 """等权池里补全历史的币占到这个比例才给基础率（先验），之前写「回填中」。"""
+PERIOD_5M = timedelta(minutes=5)
+"""futures/data 的 5 分钟统计：时间戳是这一段的开始，as_of = 开始 + 5 分钟。"""
 
 Mirror = Literal["neg", "comp100", "inv", "same", "pair"]
+Kind = Literal["live", "stat", "daily"]
 Getter = Callable[..., Any]
 """``get(url, params) -> httpx.Response``；默认 ``binance_gate.get``（共用限流），测试换替身。"""
 
@@ -62,7 +70,9 @@ Getter = Callable[..., Any]
 @dataclass(frozen=True)
 class DossierField:
     """数据包里的一个数。``mirror`` 是镜像时怎么变：neg 取负、comp100 变成 100 − x、
-    inv 取倒数、same 不变、pair 和 ``partner`` 互换值（上涨家数 ↔ 下跌家数这种）。"""
+    inv 取倒数、same 不变、pair 和 ``partner`` 互换值（上涨家数 ↔ 下跌家数这种）。
+    ``source_ts`` 是这个数的 as_of；``kind``：live = 按新鲜度拦，stat = 已收盘线上的统计量，
+    daily = 日值。``note_alt`` 是两半（正 / 负）顺序对调的说明，按轮次交替用。"""
 
     name: str
     value: float
@@ -73,9 +83,14 @@ class DossierField:
     mirror: Mirror = "same"
     partner: str | None = None
     digits: int = 2
+    kind: Kind = "live"
+    note_alt: str | None = None
 
     def shown(self) -> str:
         return f"{self.value:.{self.digits}f}"
+
+    def note_for(self, order: str) -> str:
+        return self.note_alt if order == "down_first" and self.note_alt else self.note
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -84,7 +99,8 @@ class DossierField:
             "shown": self.shown(),
             "unit": self.unit,
             "source": self.source,
-            "source_ts": self.source_ts.isoformat(),
+            "as_of": self.source_ts.isoformat(),
+            "kind": self.kind,
             "mirror": self.mirror,
             "partner": self.partner,
         }
@@ -108,6 +124,10 @@ class Dossier:
     def value(self, name: str) -> float | None:
         f = self.get(name)
         return f.value if f is not None else None
+
+    @property
+    def has_prior(self) -> bool:
+        return self.value("base_rate_up_4h") is not None
 
     def mirror(self) -> Dossier:
         """涨跌全部取反的同一份数据（镜像测试用）。非方向性的数（波动、持仓量变化、强平总额）不变。"""
@@ -150,30 +170,92 @@ class Dossier:
 @dataclass(frozen=True)
 class Bar:
     open_ms: int
+    open: float
     high: float
     low: float
     close: float
     quote_vol: float
     taker_quote_vol: float
 
+    def row(self) -> list[float]:
+        return [
+            self.open_ms,
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            self.quote_vol,
+            self.taker_quote_vol,
+        ]
+
+
+def _bar(r: Sequence[Any]) -> Bar:
+    return Bar(
+        int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[7]), float(r[10])
+    )
+
 
 def parse_bars(rows: Sequence[Sequence[Any]], now_ms: int) -> list[Bar]:
-    """``/fapi/v1/klines`` 原始行 → 已收盘的 1 小时线（收盘时间晚于现在的丢掉）。"""
+    """``/fapi/v1/klines`` 原始行 → 已收盘的线（收盘时间晚于现在的丢掉）。"""
     out: list[Bar] = []
     for r in rows:
         try:
             if int(r[6]) >= now_ms:
                 continue
-            out.append(
-                Bar(int(r[0]), float(r[2]), float(r[3]), float(r[4]), float(r[7]), float(r[10]))
-            )
+            out.append(_bar(r))
         except (IndexError, TypeError, ValueError):
             continue
     return out
 
 
+@dataclass(frozen=True)
+class Live:
+    """一个币截止到拉取时刻的 15 分钟线：已收盘的几根 + 正在走的一根（close = 现价）。"""
+
+    bars: tuple[Bar, ...]
+    now_ms: int
+    price: float
+
+    @property
+    def as_of(self) -> datetime:
+        return datetime.fromtimestamp(self.now_ms / 1000, UTC)
+
+
+def parse_live(rows: Sequence[Sequence[Any]], now_ms: int) -> Live | None:
+    """15 分钟线（含正在走的一根）→ ``Live``；最后一根必须是还没收盘的那根，不然现价不是现在的。"""
+    bars: list[Bar] = []
+    for r in rows:
+        with contextlib.suppress(IndexError, TypeError, ValueError):
+            bars.append(_bar(r))
+    if not bars:
+        return None
+    last = bars[-1]
+    if not last.open_ms <= now_ms < last.open_ms + Q_MS or last.close <= 0:
+        return None
+    return Live(tuple(bars), now_ms, last.close)
+
+
+def interp_price(
+    bars: Sequence[Bar], t_ms: int, step: int, now_ms: int, now_px: float
+) -> float | None:
+    """时刻 t 的价：在包含 t 的那根线里，开盘价到收盘价按时间线性插值（正在走的那根，收盘价是
+    现价、终点是拉取时刻）。t 不在任何一根里返回 None，不拿邻近的补。"""
+    if t_ms >= now_ms:
+        return now_px
+    for b in bars:
+        if b.open_ms <= t_ms < b.open_ms + step:
+            end_ms, end_px = b.open_ms + step, b.close
+            if end_ms > now_ms:
+                end_ms, end_px = now_ms, now_px
+            if end_ms <= b.open_ms or b.open <= 0:
+                return None
+            frac = (t_ms - b.open_ms) / (end_ms - b.open_ms)
+            return b.open + (end_px - b.open) * frac
+    return None
+
+
 def price_at(bars: Mapping[int, Bar], t_ms: int, step: int = HOUR_MS) -> float | None:
-    """时刻 t 的价 = 开盘在 t − step 的那根已收盘线的收盘价；没有就是 None，不拿邻近的补。"""
+    """整点时刻 t 的价 = 开盘在 t − step 的那根已收盘线的收盘价（只给 σ / 基础率这类统计量用）。"""
     b = bars.get(t_ms - step)
     return b.close if b is not None and b.close > 0 else None
 
@@ -181,7 +263,7 @@ def price_at(bars: Mapping[int, Bar], t_ms: int, step: int = HOUR_MS) -> float |
 def pool_return(
     series: Mapping[str, Mapping[int, Bar]], start_ms: int, end_ms: int, step: int = HOUR_MS
 ) -> tuple[float | None, list[float]]:
-    """等权池在 [start, end] 的简单收益（%）= 两端都有价的币收益的平均；同时返回各币收益。"""
+    """等权池在两个整点之间的简单收益（%）= 两端都有价的币收益的平均；同时返回各币收益。"""
     rets: list[float] = []
     for bars in series.values():
         a, b = price_at(bars, start_ms, step), price_at(bars, end_ms, step)
@@ -226,7 +308,6 @@ def base_rates(
     """过去 ``days`` 天里（结局在 t0 前已知的起点），等权池 h 小时收益落在涨 / 平 / 跌的频率，
     拉普拉斯平滑（各加 1）。σ 用每个起点自己之前的窗口算（按时点，无前视）。"""
     counts = {"up": 0, "flat": 0, "down": 0}
-    # σ 序列先按小时算一遍，起点 t 的 σ 取 sigma(t)；避免对每个起点重复算 168 个窗口
     starts = range(t0_ms - days * 24 * HOUR_MS, t0_ms - horizon_h * HOUR_MS + 1, HOUR_MS)
     rets: dict[int, float] = {}
     lo = starts.start - (lookback - 1) * HOUR_MS
@@ -259,6 +340,11 @@ def zscore(values: Sequence[float]) -> float | None:
     return (last - statistics.fmean(hist)) / sd
 
 
+def _halves(intro: str, up: str, down: str) -> tuple[str, str]:
+    """「正 = 一边，负 = 另一边」两种顺序的说明（按轮次交替，中立）。"""
+    return f"{intro}; {up}; {down}.", f"{intro}; {down}; {up}."
+
+
 # ------------------------------------------------------------------ 采集
 
 
@@ -272,6 +358,8 @@ class DossierBuilder:
         sigma_lookback_h: int = 168,
         base_rate_days: int = 30,
         exclude_symbols: Sequence[str] = (),
+        max_input_age_min: float = 5.0,
+        cache_path: Path | None = None,
         get: Getter | None = None,
         fng_get: Getter | None = None,
     ) -> None:
@@ -279,14 +367,17 @@ class DossierBuilder:
         self._lookback = sigma_lookback_h
         self._days = base_rate_days
         self._exclude = frozenset(exclude_symbols)
+        self._max_age = max_input_age_min
+        self._cache_path = cache_path
         self._get: Getter = get or binance_gate.get
         self._fng_get: Getter = fng_get or _plain_get
         self._bars: dict[str, dict[int, Bar]] = {}
-        self._bars15: dict[str, dict[int, Bar]] = {}
+        self._live: dict[str, Live] = {}
         self._deep: set[str] = set()
         self._funding_hours: dict[str, float] = {}
         self._funding_info_at: datetime | None = None
         self._fng: tuple[datetime, float, datetime] | None = None  # (取到时间, 值, 源时间)
+        self._load_cache()
 
     @property
     def need_bars(self) -> int:
@@ -300,20 +391,23 @@ class DossierBuilder:
         missing: dict[str, str] = {}
         fields: list[DossierField] = []
         syms = self.symbols(pool)
-        t0_ms = int(now.timestamp() * 1000) // HOUR_MS * HOUR_MS  # 最后一根已收盘 1h 线的收盘整点
-        t0_bar = datetime.fromtimestamp(t0_ms / 1000, UTC)
+        now_ms = int(now.timestamp() * 1000)
+        t0_ms = now_ms // HOUR_MS * HOUR_MS  # 最后一根已收盘 1h 线的收盘整点（统计量用）
         self._refresh_bars([*syms, BTC, ETH], now, missing)
+        self._refresh_live([*syms, BTC, ETH], now, missing)
         basket = {s: self._bars[s] for s in syms if self._bars.get(s)}
+        live = {s: self._live[s] for s in syms if s in self._live}
         sigma4: float | None = None
         if len(basket) < 5:
-            missing["klines_1h"] = f"等权池能用的币只有 {len(basket)} 个（要 ≥5）"
+            missing["klines_1h"] = f"等权池有 1h 历史的币只有 {len(basket)} 个（要 ≥5）"
         else:
-            sigma4 = self._kline_fields(basket, t0_ms, t0_bar, fields, missing)
-        self._refresh_15m([*syms, BTC], now, missing)
-        self._quarter_fields(syms, now, fields, missing)
-        self._major_fields(t0_ms, t0_bar, fields, missing)
-        self._pool_metric_fields(pool, syms, now, fields, missing)
-        self._funding_fields(syms, now, t0_ms, fields, missing)
+            sigma4 = self._stat_fields(basket, t0_ms, fields, missing)
+        if len(live) < 5:
+            missing["klines_15m"] = f"等权池有现价的币只有 {len(live)} 个（要 ≥5）"
+        else:
+            self._window_fields(live, sigma4, fields, missing)
+        self._major_fields(syms, fields, missing)
+        self._funding_fields(syms, now, fields, missing)
         for sym, tag in ((BTC, "btc"), (ETH, "eth")):
             self._crowd_fields(sym, tag, fields, missing)
             self._oi_fields(sym, tag, fields, missing)
@@ -330,257 +424,275 @@ class DossierBuilder:
                 digits=0,
             )
         )
+        missing.setdefault(
+            "pool_metrics",
+            "选币时的池统计（持仓量 1h、量比、强平）是选币时刻 / 已收盘小时的值，不用",
+        )
         missing.setdefault("news", "第一阶段不接新闻（不可复现、有注入风险）")
+        fields = self._drop_stale(fields, now, missing)
         return Dossier(
             t0=now,
             fields=tuple(fields),
             missing=missing,
-            symbols=tuple(sorted(basket)),
+            symbols=tuple(sorted(live or basket)),
             pool_id=pool.pool_id,
             pool_ts=pool.ts,
             sigma_4h_pct=sigma4,
             method={
                 "basket": "equal-weight simple return of current pool members (survivor basis)",
-                "price_at_t": "close of the 1h bar opening at t-1h",
-                "sigma": f"RMS of {self._lookback} rolling windows ending at or before t",
+                "windows": "rolling, ending at the run time: end price = current price of the "
+                "forming 15m bar; start price interpolated inside the bar containing the start",
+                "sigma": f"RMS of {self._lookback} rolling 1h-aligned windows of closed 1h bars",
                 "band_sigma": self._band,
                 "base_rate_days": self._days,
                 "base_rate_smoothing": "laplace +1",
                 "funding_baseline": "0.01% per 8h scaled to each symbol's interval",
+                "max_input_age_min": self._max_age,
                 "excluded": sorted(self._exclude),
             },
         )
 
+    def _drop_stale(
+        self, fields: list[DossierField], now: datetime, missing: dict[str, str]
+    ) -> list[DossierField]:
+        """实时类字段 as_of 比运行时刻旧过 ``max_input_age_min`` 就不给（5 分钟统计多给一段）。"""
+        if self._max_age <= 0:
+            return fields
+        out: list[DossierField] = []
+        for f in fields:
+            limit = timedelta(minutes=self._max_age)
+            if f.source.startswith("futures_data"):
+                limit += PERIOD_5M
+            age = now - f.source_ts
+            if f.kind == "live" and age > limit:
+                missing[f.name] = (
+                    f"as_of {f.source_ts:%H:%M:%S}Z 比运行时刻旧 "
+                    f"{age.total_seconds() / 60:.1f} 分钟（上限 {limit.total_seconds() / 60:g}）"
+                )
+                continue
+            out.append(f)
+        return out
+
     # ---------------------------------------------------------- K 线
-    def _fetch_into(
-        self,
-        store: dict[str, dict[int, Bar]],
-        sym: str,
-        interval: str,
-        limit: int,
-        now_ms: int,
-        keep: int,
-    ) -> int:
-        """拉一个币的 K 线并合进缓存，返回缓存里的根数。限流原样往外抛。"""
+    def _fetch(self, sym: str, interval: str, limit: int) -> Any:
         r = self._get(
             f"{FAPI}/fapi/v1/klines", {"symbol": sym, "interval": interval, "limit": limit}
         )
         r.raise_for_status()
-        merged = dict(store.get(sym, {}))
-        for b in parse_bars(r.json(), now_ms):
+        return r.json()
+
+    def _merge(self, sym: str, rows: Any, now_ms: int) -> int:
+        merged = dict(self._bars.get(sym, {}))
+        for b in parse_bars(rows, now_ms):
             merged[b.open_ms] = b
-        kept = sorted(merged)[-keep:]
-        store[sym] = {k: merged[k] for k in kept}
+        kept = sorted(merged)[-MAX_BARS:]
+        self._bars[sym] = {k: merged[k] for k in kept}
         return len(kept)
 
     def _refresh_bars(self, symbols: Sequence[str], now: datetime, missing: dict[str, str]) -> None:
-        """1h 线：没缓存的先拉 ``SHALLOW_BARS`` 根（够 σ 和各段收益），有缓存的只补新收盘的；
-        再给最多 ``DEEP_PER_RUN`` 个还没补全的币拉满 30 天以上历史（基础率要），分几轮补完，
-        启动时不一口气打几十个大请求。"""
+        """1h 线：有新收盘才补（只补新的几根）；没缓存的先拉 ``SHALLOW_BARS`` 根；再给最多
+        ``DEEP_PER_RUN`` 个还没补全的币拉满 30 天以上历史（基础率要），分几轮补完。有变化就落盘。"""
         now_ms = int(now.timestamp() * 1000)
         failed: list[str] = []
+        changed = False
         for sym in dict.fromkeys(symbols):
             have = self._bars.get(sym, {})
             if have:
-                want = (now_ms - max(have)) // HOUR_MS + 2
-                limit = int(min(max(want, 2), self.need_bars))
+                last = max(have)
+                if now_ms < last + 2 * HOUR_MS:  # 下一根还没收盘：不请求
+                    continue
+                limit = int(min((now_ms - last) // HOUR_MS + 2, self.need_bars))
             else:
                 limit = min(SHALLOW_BARS, self.need_bars)
             try:
-                n = self._fetch_into(self._bars, sym, "1h", limit, now_ms, MAX_BARS)
+                n = self._merge(sym, self._fetch(sym, "1h", limit), now_ms)
             except binance_gate.RateLimited:
                 raise
             except Exception as exc:
                 failed.append(f"{sym}:{type(exc).__name__}")
                 continue
+            changed = True
             if n >= self.need_bars - 2:
                 self._deep.add(sym)
         todo = [s for s in dict.fromkeys(symbols) if s in self._bars and s not in self._deep]
         for sym in todo[:DEEP_PER_RUN]:
             try:
-                self._fetch_into(self._bars, sym, "1h", self.need_bars, now_ms, MAX_BARS)
+                self._merge(sym, self._fetch(sym, "1h", self.need_bars), now_ms)
             except binance_gate.RateLimited:
                 raise
             except Exception as exc:
                 failed.append(f"{sym}:deep:{type(exc).__name__}")
                 continue
             self._deep.add(sym)  # 新上线不满 30 天的币：拉过一次全量就算补全
+            changed = True
         if failed:
-            missing["klines_1h_partial"] = "部分币 K 线没取到：" + ", ".join(failed[:10])
+            missing["klines_1h_partial"] = "部分币 1h 线没取到：" + ", ".join(failed[:10])
+        if changed:
+            self._save_cache()
 
-    def deep_basket(
-        self, basket: Mapping[str, Mapping[int, Bar]]
-    ) -> dict[str, Mapping[int, Bar]] | None:
-        """补全了长历史的那部分等权池；占比不到 ``DEEP_MIN_SHARE`` 返回 None（先验还在回填）。"""
-        deep = {s: b for s, b in basket.items() if s in self._deep}
-        return deep if basket and len(deep) >= DEEP_MIN_SHARE * len(basket) else None
-
-    def _refresh_15m(self, symbols: Sequence[str], now: datetime, missing: dict[str, str]) -> None:
-        now_ms = int(now.timestamp() * 1000)
+    def _refresh_live(self, symbols: Sequence[str], now: datetime, missing: dict[str, str]) -> None:
+        """15 分钟线每轮重拉（含正在走的一根）：现价和滚动窗口的起点都从这里来。"""
+        self._live = {}
         failed: list[str] = []
+        now_ms = int(now.timestamp() * 1000)  # 现价按运行时刻算 as_of（请求就在开跑后几秒内）
         for sym in dict.fromkeys(symbols):
-            have = self._bars15.get(sym, {})
-            want = (now_ms - max(have)) // Q_MS + 2 if have else BARS_15M
-            limit = int(min(max(want, 2), BARS_15M))
             try:
-                self._fetch_into(self._bars15, sym, "15m", limit, now_ms, BARS_15M)
+                rows = self._fetch(sym, "15m", BARS_15M)
             except binance_gate.RateLimited:
                 raise
             except Exception as exc:
                 failed.append(f"{sym}:{type(exc).__name__}")
+                continue
+            live = parse_live(rows, now_ms)
+            if live is None:
+                failed.append(f"{sym}:no_forming_bar")
+                continue
+            self._live[sym] = live
         if failed:
             missing["klines_15m_partial"] = "部分币 15 分钟线没取到：" + ", ".join(failed[:10])
 
-    def _quarter_fields(
-        self, syms: Sequence[str], now: datetime, out: list[DossierField], missing: dict[str, str]
-    ) -> None:
-        """15 分钟线：最近 15 / 30 / 60 分钟的等权收益、上涨下跌家数、主动买卖占比、BTC。"""
-        t_ms = int(now.timestamp() * 1000) // Q_MS * Q_MS  # 最后一根已收盘 15m 线的收盘时刻
-        ts = datetime.fromtimestamp(t_ms / 1000, UTC)
-        basket = {s: self._bars15[s] for s in syms if self._bars15.get(s)}
-        if len(basket) < 5:
-            missing["klines_15m"] = f"15 分钟线能用的币只有 {len(basket)} 个（要 ≥5）"
-            return
+    def _ret(self, sym: str, minutes: int) -> float | None:
+        """截止到拉取时刻的滚动 ``minutes`` 分钟收益（%）。
+        4 小时内用 15 分钟线找起点，更长用 1h 线。"""
+        live = self._live.get(sym)
+        if live is None:
+            return None
+        start = live.now_ms - minutes * 60_000
+        if minutes <= 240:
+            px = interp_price(live.bars, start, Q_MS, live.now_ms, live.price)
+        else:
+            bars = sorted(self._bars.get(sym, {}).values(), key=lambda b: b.open_ms)
+            px = interp_price(bars, start, HOUR_MS, live.now_ms, live.price)
+        return (live.price / px - 1.0) * 100.0 if px else None
 
-        def add(name: str, value: float | None, unit: str, note: str, **kw: Any) -> None:
-            if value is None or not math.isfinite(value):
-                missing[name] = "数据不足"
-                return
-            out.append(DossierField(name, value, unit, note, "klines_15m", ts, **kw))
-
-        for m in (15, 30, 60):
-            r, rets = pool_return(basket, t_ms - m * 60_000, t_ms, Q_MS)
-            add(
-                f"pool_ret_{m}m_pct",
-                r,
-                "%",
-                f"Equal-weight basket return over the last {m} minutes (15m bars).",
-                mirror="neg",
-                digits=3,
-            )
-            if m == 15 and rets:
-                add(
-                    "pool_up_count_15m",
-                    float(sum(x > 0 for x in rets)),
-                    "count",
-                    "Basket symbols with a 15m return above 0.",
-                    mirror="pair",
-                    partner="pool_down_count_15m",
-                    digits=0,
-                )
-                add(
-                    "pool_down_count_15m",
-                    float(sum(x < 0 for x in rets)),
-                    "count",
-                    "Basket symbols with a 15m return below 0.",
-                    mirror="pair",
-                    partner="pool_up_count_15m",
-                    digits=0,
-                )
-        btc = self._bars15.get(BTC, {})
-        a, b = price_at(btc, t_ms - Q_MS, Q_MS), price_at(btc, t_ms, Q_MS)
-        add(
-            "btc_ret_15m_pct",
-            (b / a - 1.0) * 100.0 if a and b else None,
-            "%",
-            "BTC return over the last 15 minutes.",
-            mirror="neg",
-            digits=3,
-        )
-        qv = tb = 0.0
-        for bars in basket.values():
-            last = bars.get(t_ms - Q_MS)
-            if last is not None and last.quote_vol > 0:
-                qv, tb = qv + last.quote_vol, tb + last.taker_quote_vol
-        if qv <= 0:
-            missing["taker_15m"] = "数据不足"
-            return
-        add(
-            "pool_taker_buy_share_15m",
-            tb / qv * 100.0,
-            "%",
-            "Taker buy share of basket quote volume over the last 15 minutes.",
-            mirror="pair",
-            partner="pool_taker_sell_share_15m",
-        )
-        add(
-            "pool_taker_sell_share_15m",
-            100.0 - tb / qv * 100.0,
-            "%",
-            "Taker sell share of basket quote volume over the last 15 minutes.",
-            mirror="pair",
-            partner="pool_taker_buy_share_15m",
-        )
-
-    def _kline_fields(
+    def _window_fields(
         self,
-        basket: Mapping[str, Mapping[int, Bar]],
-        t0_ms: int,
-        t0: datetime,
+        live: Mapping[str, Live],
+        sigma4: float | None,
         out: list[DossierField],
         missing: dict[str, str],
-    ) -> float | None:
+    ) -> None:
+        as_of = min(v.as_of for v in live.values())
+
         def add(name: str, value: float | None, unit: str, note: str, **kw: Any) -> None:
             if value is None or not math.isfinite(value):
                 missing[name] = "数据不足"
                 return
-            out.append(DossierField(name, value, unit, note, "klines_1h", t0, **kw))
+            out.append(DossierField(name, value, unit, note, "klines_15m_live", as_of, **kw))
 
-        for h in (1, 4, 12, 24, 72):
-            r, _ = pool_return(basket, t0_ms - h * HOUR_MS, t0_ms)
+        windows = ((15, "15m"), (30, "30m"), (60, "1h"), (240, "4h"), (720, "12h"))
+        for minutes, tag in (*windows, (1440, "24h"), (4320, "72h")):
+            rets = [r for s in live if (r := self._ret(s, minutes)) is not None]
             add(
-                f"pool_ret_{h}h_pct",
-                r,
+                f"pool_ret_{tag}_pct",
+                statistics.fmean(rets) if len(rets) >= 5 else None,
                 "%",
-                f"Equal-weight basket return over the last {h}h.",
+                f"Equal-weight basket return over the {tag} ending at as_of (rolling).",
                 mirror="neg",
                 digits=3,
             )
-        for h in (1, 4, 24):
-            _, rets = pool_return(basket, t0_ms - h * HOUR_MS, t0_ms)
-            if not rets:
-                missing[f"pool_count_{h}h"] = "数据不足"
-                continue
-            up, down = sum(x > 0 for x in rets), sum(x < 0 for x in rets)
-            add(
-                f"pool_up_count_{h}h",
-                float(up),
-                "count",
-                f"Basket symbols with a {h}h return above 0.",
-                mirror="pair",
-                partner=f"pool_down_count_{h}h",
-                digits=0,
-            )
-            add(
-                f"pool_down_count_{h}h",
-                float(down),
-                "count",
-                f"Basket symbols with a {h}h return below 0.",
-                mirror="pair",
-                partner=f"pool_up_count_{h}h",
-                digits=0,
-            )
-            if h == 4 and len(rets) >= 2:
+            if tag in ("15m", "1h", "4h", "24h") and len(rets) >= 5:
+                add(
+                    f"pool_up_count_{tag}",
+                    float(sum(x > 0 for x in rets)),
+                    "count",
+                    f"Basket symbols with a rolling {tag} return above 0.",
+                    mirror="pair",
+                    partner=f"pool_down_count_{tag}",
+                    digits=0,
+                )
+                add(
+                    f"pool_down_count_{tag}",
+                    float(sum(x < 0 for x in rets)),
+                    "count",
+                    f"Basket symbols with a rolling {tag} return below 0.",
+                    mirror="pair",
+                    partner=f"pool_up_count_{tag}",
+                    digits=0,
+                )
+            if tag == "4h" and len(rets) >= 5:
                 add(
                     "pool_dispersion_4h_pct",
                     statistics.pstdev(rets),
                     "%",
-                    "Cross-sectional standard deviation of 4h returns across the basket.",
+                    "Cross-sectional standard deviation of rolling 4h returns across the basket.",
                     digits=3,
                 )
+                if sigma4:
+                    add(
+                        "pool_ret_4h_in_sigma",
+                        statistics.fmean(rets) / sigma4,
+                        "sigma",
+                        "Rolling 4h basket return divided by sigma_4h_pct.",
+                        mirror="neg",
+                    )
+        for minutes, tag in ((60, "1h"), (240, "4h")):
+            qv = tb = 0.0
+            for v in live.values():
+                for b in v.bars:
+                    if b.open_ms + Q_MS > v.now_ms - minutes * 60_000:
+                        qv, tb = qv + b.quote_vol, tb + b.taker_quote_vol
+            if qv <= 0:
+                missing[f"taker_{tag}"] = "数据不足"
+                continue
+            note = "of basket quote volume in the 15m bars overlapping the {} ending at as_of."
+            add(
+                f"pool_taker_buy_share_{tag}",
+                tb / qv * 100.0,
+                "%",
+                "Taker buy share " + note.format(tag),
+                mirror="pair",
+                partner=f"pool_taker_sell_share_{tag}",
+            )
+            add(
+                f"pool_taker_sell_share_{tag}",
+                100.0 - tb / qv * 100.0,
+                "%",
+                "Taker sell share " + note.format(tag),
+                mirror="pair",
+                partner=f"pool_taker_buy_share_{tag}",
+            )
+        pos: list[float] = []
+        for sym, v in live.items():
+            start = v.now_ms - 24 * HOUR_MS
+            hist = [b for b in self._bars.get(sym, {}).values() if b.open_ms >= start]
+            if len(hist) < 20:
+                continue
+            covered = max(b.open_ms for b in hist) + HOUR_MS  # 已收盘 1h 线覆盖到哪
+            got = [*hist, *(b for b in v.bars if b.open_ms + Q_MS > covered)]
+            hi, lo = max(b.high for b in got), min(b.low for b in got)
+            if hi > lo:
+                pos.append((v.price - lo) / (hi - lo) * 100.0)
+        add(
+            "pool_range_position_24h_median_pct",
+            statistics.median(pos) if pos else None,
+            "%",
+            "Median position of the current price inside each symbol's last-24h low-high range "
+            "(0 = at the low, 100 = at the high).",
+            mirror="comp100",
+            digits=1,
+        )
+
+    def _stat_fields(
+        self,
+        basket: Mapping[str, Mapping[int, Bar]],
+        t0_ms: int,
+        out: list[DossierField],
+        missing: dict[str, str],
+    ) -> float | None:
+        """σ 和基础率：已收盘 1h 线上的统计量（as_of = 最后一根收盘），不按新鲜度拦。"""
+        t0 = datetime.fromtimestamp(t0_ms / 1000, UTC)
+
+        def add(name: str, value: float | None, unit: str, note: str, **kw: Any) -> None:
+            if value is None or not math.isfinite(value):
+                missing[name] = "数据不足"
+                return
+            out.append(DossierField(name, value, unit, note, "klines_1h", t0, kind="stat", **kw))
+
         sigma4 = sigma_at(basket, t0_ms, 4, self._lookback)
         sigma1 = sigma_at(basket, t0_ms, 1, self._lookback)
         add("sigma_4h_pct", sigma4, "%", "Sigma of the 4h basket return (RMS).", digits=3)
         add("sigma_1h_pct", sigma1, "%", "Sigma of the 1h basket return (RMS).", digits=3)
-        r4, _ = pool_return(basket, t0_ms - 4 * HOUR_MS, t0_ms)
-        if r4 is not None and sigma4:
-            add(
-                "pool_ret_4h_in_sigma",
-                r4 / sigma4,
-                "sigma",
-                "Last 4h basket return divided by sigma_4h_pct.",
-                mirror="neg",
-            )
         deep = self.deep_basket(basket)
         for h, sigma in ((4, sigma4), (1, sigma1)):
             if deep is None:
@@ -627,134 +739,50 @@ class DossierBuilder:
                 f"Number of past {h}h windows behind the base rate.",
                 digits=0,
             )
-        # 主动买卖（K 线第 10 列：主动买入成交额），按成交额加权
-        for h in (1, 4):
-            qv = tb = 0.0
-            for bars in basket.values():
-                for k in range(h):
-                    b = bars.get(t0_ms - (k + 1) * HOUR_MS)
-                    if b is not None and b.quote_vol > 0:
-                        qv += b.quote_vol
-                        tb += b.taker_quote_vol
-            if qv <= 0:
-                missing[f"taker_{h}h"] = "数据不足"
-                continue
-            buy = tb / qv * 100.0
-            add(
-                f"pool_taker_buy_share_{h}h",
-                buy,
-                "%",
-                f"Taker buy share of basket quote volume over the last {h}h.",
-                mirror="pair",
-                partner=f"pool_taker_sell_share_{h}h",
-            )
-            add(
-                f"pool_taker_sell_share_{h}h",
-                100.0 - buy,
-                "%",
-                f"Taker sell share of basket quote volume over the last {h}h.",
-                mirror="pair",
-                partner=f"pool_taker_buy_share_{h}h",
-            )
-        pos: list[float] = []
-        for bars in basket.values():
-            win = [bars.get(t0_ms - (k + 1) * HOUR_MS) for k in range(24)]
-            got = [b for b in win if b is not None]
-            if len(got) < 20:
-                continue
-            hi, lo = max(b.high for b in got), min(b.low for b in got)
-            last = bars.get(t0_ms - HOUR_MS)
-            if last is not None and hi > lo:
-                pos.append((last.close - lo) / (hi - lo) * 100.0)
-        add(
-            "pool_range_position_24h_median_pct",
-            statistics.median(pos) if pos else None,
-            "%",
-            "Median position of the last close inside each symbol's 24h low-high range "
-            "(0 = at the low, 100 = at the high).",
-            mirror="comp100",
-            digits=1,
-        )
         return sigma4
 
+    def deep_basket(
+        self, basket: Mapping[str, Mapping[int, Bar]]
+    ) -> dict[str, Mapping[int, Bar]] | None:
+        """补全了长历史的那部分等权池；占比不到 ``DEEP_MIN_SHARE`` 返回 None（先验还在回填）。"""
+        deep = {s: b for s, b in basket.items() if s in self._deep}
+        return deep if basket and len(deep) >= DEEP_MIN_SHARE * len(basket) else None
+
     def _major_fields(
-        self, t0_ms: int, t0: datetime, out: list[DossierField], missing: dict[str, str]
+        self, syms: Sequence[str], out: list[DossierField], missing: dict[str, str]
     ) -> None:
-        btc, eth = self._bars.get(BTC, {}), self._bars.get(ETH, {})
-
-        def ret(bars: Mapping[int, Bar], h: int) -> float | None:
-            a, b = price_at(bars, t0_ms - h * HOUR_MS), price_at(bars, t0_ms)
-            return (b / a - 1.0) * 100.0 if a and b else None
-
+        btc, eth = self._live.get(BTC), self._live.get(ETH)
+        r = self._ret
         rows: list[tuple[str, float | None, str]] = [
-            ("btc_ret_1h_pct", ret(btc, 1), "BTC return over the last 1h."),
-            ("btc_ret_4h_pct", ret(btc, 4), "BTC return over the last 4h."),
-            ("btc_ret_24h_pct", ret(btc, 24), "BTC return over the last 24h."),
-            ("eth_ret_4h_pct", ret(eth, 4), "ETH return over the last 4h."),
-            ("eth_ret_24h_pct", ret(eth, 24), "ETH return over the last 24h."),
+            ("btc_ret_15m_pct", r(BTC, 15), "BTC return over the 15m ending at as_of."),
+            ("btc_ret_1h_pct", r(BTC, 60), "BTC return over the 1h ending at as_of."),
+            ("btc_ret_4h_pct", r(BTC, 240), "BTC return over the 4h ending at as_of."),
+            ("btc_ret_24h_pct", r(BTC, 1440), "BTC return over the 24h ending at as_of."),
+            ("eth_ret_4h_pct", r(ETH, 240), "ETH return over the 4h ending at as_of."),
+            ("eth_ret_24h_pct", r(ETH, 1440), "ETH return over the 24h ending at as_of."),
         ]
-        e24, b24 = ret(eth, 24), ret(btc, 24)
+        e24, b24 = r(ETH, 1440), r(BTC, 1440)
         if e24 is not None and b24 is not None:
             ratio = ((1 + e24 / 100) / (1 + b24 / 100) - 1) * 100
-            rows.append(("eth_btc_ratio_chg_24h_pct", ratio, "Change of the ETH/BTC price ratio."))
-        basket = {s: b for s, b in self._bars.items() if s not in (BTC, ETH)}
-        p24, _ = pool_return(basket, t0_ms - 24 * HOUR_MS, t0_ms) if basket else (None, [])
-        if b24 is not None and p24 is not None:
-            rows.append(("btc_minus_pool_ret_24h_pct", b24 - p24, "BTC 24h return minus basket."))
+            rows.append(("eth_btc_ratio_chg_24h_pct", ratio, "ETH/BTC ratio change over 24h."))
+        pool24 = [x for s in syms if (x := r(s, 1440)) is not None]  # 只用当前池成员
+        if b24 is not None and len(pool24) >= 5:
+            rows.append(
+                (
+                    "btc_minus_pool_ret_24h_pct",
+                    b24 - statistics.fmean(pool24),
+                    "BTC 24h return minus the basket 24h return (current pool members).",
+                )
+            )
+        stamps = [v.as_of for v in (btc, eth) if v is not None]
+        as_of = min(stamps) if stamps else None
         for name, value, note in rows:
-            if value is None:
-                missing[name] = "BTC / ETH K 线不足"
+            if value is None or as_of is None:
+                missing[name] = "BTC / ETH 现价或历史不足"
                 continue
-            out.append(DossierField(name, value, "%", note, "klines_1h", t0, "neg", digits=3))
-
-    # ---------------------------------------------------------- 池统计（选币时已算好）
-    def _pool_metric_fields(
-        self,
-        pool: SymbolPool,
-        syms: Sequence[str],
-        now: datetime,
-        out: list[DossierField],
-        missing: dict[str, str],
-    ) -> None:
-        age = now - pool.ts
-        if age > POOL_METRICS_MAX_AGE or age < timedelta(0):
-            missing["pool_metrics"] = f"候选池统计 {age.total_seconds() / 60:.0f} 分钟前，太旧不用"
-            return
-        keep = set(syms)
-        entries = [e for e in pool.in_pool if e.symbol in keep]
-
-        def med(key: str) -> float | None:
-            vs = [e.metrics[key] for e in entries if math.isfinite(e.metrics.get(key, math.nan))]
-            return statistics.median(vs) if vs else None
-
-        liq = [
-            e.metrics["liq_1h"] for e in entries if math.isfinite(e.metrics.get("liq_1h", math.nan))
-        ]
-        rows: list[tuple[str, float | None, str, str]] = [
-            (
-                "pool_oi_chg_1h_median_pct",
-                med("oi_chg_1h"),
-                "%",
-                "Median 1h open-interest change across the basket.",
-            ),
-            (
-                "pool_vol_ratio_1h_median",
-                med("vol_ratio_1h"),
-                "x",
-                "Median of last-hour volume divided by the usual hourly volume.",
-            ),
-            (
-                "pool_liquidations_1h_musd",
-                sum(liq) / 1e6 if liq else None,
-                "M USDT",
-                "Total liquidations (both sides) across the basket over the last hour.",
-            ),
-        ]
-        for name, value, unit, note in rows:
-            if value is None or not math.isfinite(value):
-                missing[name] = "候选池统计里没有"
-                continue
-            out.append(DossierField(name, value, unit, note, "pool_metrics", pool.ts))
+            out.append(
+                DossierField(name, value, "%", note, "klines_15m_live", as_of, "neg", digits=3)
+            )
 
     # ---------------------------------------------------------- 资金费
     def _funding_intervals(self, now: datetime, missing: dict[str, str]) -> None:
@@ -774,75 +802,8 @@ class DossierBuilder:
         except Exception as exc:
             missing["funding_interval"] = f"结算间隔没取到（按 8 小时算）：{type(exc).__name__}"
 
-    def _intrahour_fields(
-        self,
-        rows: Mapping[str, Mapping[str, Any]],
-        syms: Sequence[str],
-        t0_ms: int,
-        ts: datetime,
-        out: list[DossierField],
-        missing: dict[str, str],
-    ) -> None:
-        """整点之后到现在（标记价）的涨跌：15 分钟一轮时，整点 K 线之外最新的一段。"""
-
-        def since_close(sym: str) -> float | None:
-            last = price_at(self._bars.get(sym, {}), t0_ms)
-            try:
-                mark = float(rows[sym]["markPrice"])
-            except (KeyError, TypeError, ValueError):
-                return None
-            return (mark / last - 1.0) * 100.0 if last and mark > 0 else None
-
-        pool = [r for r in (since_close(s) for s in syms) if r is not None]
-        btc = since_close(BTC)
-        minutes = (ts - datetime.fromtimestamp(t0_ms / 1000, UTC)).total_seconds() / 60
-        if len(pool) < 5 or btc is None:
-            missing["intrahour"] = "整点后涨跌算不出（K 线或标记价缺）"
-            return
-        note = "since the last hourly close, using the current mark price."
-        out.append(
-            DossierField(
-                "pool_ret_since_hour_close_pct",
-                statistics.fmean(pool),
-                "%",
-                f"Equal-weight basket return {note}",
-                "premiumIndex",
-                ts,
-                "neg",
-                digits=3,
-            )
-        )
-        out.append(
-            DossierField(
-                "btc_ret_since_hour_close_pct",
-                btc,
-                "%",
-                f"BTC return {note}",
-                "premiumIndex",
-                ts,
-                "neg",
-                digits=3,
-            )
-        )
-        out.append(
-            DossierField(
-                "minutes_since_hour_close",
-                minutes,
-                "min",
-                "Minutes between the last hourly close and the mark-price snapshot.",
-                "premiumIndex",
-                ts,
-                digits=0,
-            )
-        )
-
     def _funding_fields(
-        self,
-        syms: Sequence[str],
-        now: datetime,
-        t0_ms: int,
-        out: list[DossierField],
-        missing: dict[str, str],
+        self, syms: Sequence[str], now: datetime, out: list[DossierField], missing: dict[str, str]
     ) -> None:
         self._funding_intervals(now, missing)
         try:
@@ -873,30 +834,33 @@ class DossierBuilder:
             except (KeyError, TypeError, ValueError, ZeroDivisionError):
                 continue
         ts = datetime.fromtimestamp(ts_ms / 1000, UTC) if ts_ms else now
-        self._intrahour_fields(rows, syms, t0_ms, ts, out, missing)
         pool_ex = [excess[s] for s in syms if s in excess]
         if not pool_ex:
             missing["funding"] = "池内没有资金费数据"
             return
         n = len(pool_ex)
-        above = sum(x > 0.005 for x in pool_ex) / n * 100.0
-        below = sum(x < -0.005 for x in pool_ex) / n * 100.0
-        rows_out: list[DossierField] = [
+        note, alt = _halves(
+            "Median funding minus the 0.01%/8h baseline, in basis points per 8h",
+            "positive = longs pay shorts more than baseline",
+            "negative = shorts pay longs more than baseline",
+        )
+        out.append(
             DossierField(
                 "funding_excess_median_bp8h",
                 statistics.median(pool_ex),
                 "bp/8h",
-                "Median funding minus the 0.01%/8h baseline, in basis points per 8h; "
-                "positive = longs pay shorts more than baseline, negative = shorts pay longs "
-                "more than baseline.",
+                note,
                 "premiumIndex",
                 ts,
                 "neg",
                 digits=3,
-            ),
+                note_alt=alt,
+            )
+        )
+        out.append(
             DossierField(
                 "funding_share_above_base_pct",
-                above,
+                sum(x > 0.005 for x in pool_ex) / n * 100.0,
                 "%",
                 "Share of basket symbols with funding above the baseline.",
                 "premiumIndex",
@@ -904,10 +868,12 @@ class DossierBuilder:
                 "pair",
                 "funding_share_below_base_pct",
                 digits=1,
-            ),
+            )
+        )
+        out.append(
             DossierField(
                 "funding_share_below_base_pct",
-                below,
+                sum(x < -0.005 for x in pool_ex) / n * 100.0,
                 "%",
                 "Share of basket symbols with funding below the baseline.",
                 "premiumIndex",
@@ -915,10 +881,10 @@ class DossierBuilder:
                 "pair",
                 "funding_share_above_base_pct",
                 digits=1,
-            ),
-        ]
+            )
+        )
         if basis:
-            rows_out.append(
+            out.append(
                 DossierField(
                     "mark_index_premium_median_bp",
                     statistics.median(basis),
@@ -932,7 +898,7 @@ class DossierBuilder:
             )
         for sym, tag in ((BTC, "btc"), (ETH, "eth")):
             if sym in excess:
-                rows_out.append(
+                out.append(
                     DossierField(
                         f"{tag}_funding_excess_bp8h",
                         excess[sym],
@@ -944,37 +910,45 @@ class DossierBuilder:
                         digits=3,
                     )
                 )
-        out.extend(rows_out)
 
     # ---------------------------------------------------------- 多空账户 / 持仓量（BTC、ETH）
+    def _series(self, path: str, sym: str, period: str, limit: int) -> Any:
+        r = self._get(
+            f"{FAPI}/futures/data/{path}", {"symbol": sym, "period": period, "limit": limit}
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            raise ValueError("empty")
+        return rows
+
     def _crowd_fields(
         self, sym: str, tag: str, out: list[DossierField], missing: dict[str, str]
     ) -> None:
+        """最新值取 5 分钟统计（as_of = 这一段结束）；z 值相对自身 7 天（1h 统计）的历史。"""
         name = f"{tag}_long_short_account"
         try:
-            r = self._get(
-                f"{FAPI}/futures/data/globalLongShortAccountRatio",
-                {"symbol": sym, "period": "1h", "limit": 168},
-            )
-            r.raise_for_status()
-            rows = r.json()
-            longs = [float(x["longAccount"]) * 100 for x in rows]
-            shorts = [float(x["shortAccount"]) * 100 for x in rows]
-            ratios = [math.log(float(x["longShortRatio"])) for x in rows]
-            ts = datetime.fromtimestamp(int(rows[-1]["timestamp"]) / 1000, UTC)
+            hist = self._series("globalLongShortAccountRatio", sym, "1h", 168)
+            last = self._series("globalLongShortAccountRatio", sym, "5m", 1)[-1]
+            longs = float(last["longAccount"]) * 100
+            shorts = float(last["shortAccount"]) * 100
+            ratios = [math.log(float(x["longShortRatio"])) for x in hist]
+            ratios.append(math.log(float(last["longShortRatio"])))
+            ts = datetime.fromtimestamp(int(last["timestamp"]) / 1000, UTC) + PERIOD_5M
         except binance_gate.RateLimited:
             raise
         except Exception as exc:
             missing[name] = f"多空账户比没取到：{type(exc).__name__}"
             return
         up = tag.upper()
+        src = "futures_data:globalLongShortAccountRatio"
         out.append(
             DossierField(
                 f"{tag}_long_account_pct",
-                longs[-1],
+                longs,
                 "%",
                 f"{up} share of accounts net long.",
-                "globalLongShortAccountRatio",
+                src,
                 ts,
                 "pair",
                 f"{tag}_short_account_pct",
@@ -984,10 +958,10 @@ class DossierBuilder:
         out.append(
             DossierField(
                 f"{tag}_short_account_pct",
-                shorts[-1],
+                shorts,
                 "%",
                 f"{up} share of accounts net short.",
-                "globalLongShortAccountRatio",
+                src,
                 ts,
                 "pair",
                 f"{tag}_long_account_pct",
@@ -997,47 +971,42 @@ class DossierBuilder:
         z = zscore(ratios)
         if z is None:
             missing[f"{tag}_long_short_z_7d"] = "历史不足"
-        else:
-            out.append(
-                DossierField(
-                    f"{tag}_long_short_log_ratio_z_7d",
-                    z,
-                    "z",
-                    f"{up} log(long/short account ratio) versus its own last 7 days, in standard "
-                    "deviations; positive = more long than usual, "
-                    "negative = more short than usual.",
-                    "globalLongShortAccountRatio",
-                    ts,
-                    "neg",
-                )
+            return
+        note, alt = _halves(
+            f"{up} log(long/short account ratio) now versus its own last 7 days, in standard "
+            "deviations",
+            "positive = more long than usual",
+            "negative = more short than usual",
+        )
+        out.append(
+            DossierField(
+                f"{tag}_long_short_log_ratio_z_7d", z, "z", note, src, ts, "neg", note_alt=alt
             )
+        )
 
     def _oi_fields(
         self, sym: str, tag: str, out: list[DossierField], missing: dict[str, str]
     ) -> None:
+        """持仓量：5 分钟统计，截止到最新一段的 4 小时 / 24 小时变化。"""
         try:
-            r = self._get(
-                f"{FAPI}/futures/data/openInterestHist",
-                {"symbol": sym, "period": "1h", "limit": 25},
-            )
-            r.raise_for_status()
-            rows = r.json()
+            rows = self._series("openInterestHist", sym, "5m", 289)
             vals = [float(x["sumOpenInterestValue"]) for x in rows]
-            ts = datetime.fromtimestamp(int(rows[-1]["timestamp"]) / 1000, UTC)
+            ts = datetime.fromtimestamp(int(rows[-1]["timestamp"]) / 1000, UTC) + PERIOD_5M
         except binance_gate.RateLimited:
             raise
         except Exception as exc:
             missing[f"{tag}_oi"] = f"持仓量历史没取到：{type(exc).__name__}"
             return
         for h in (4, 24):
-            if len(vals) > h and vals[-1 - h] > 0:
+            k = h * 12
+            if len(vals) > k and vals[-1 - k] > 0:
                 out.append(
                     DossierField(
                         f"{tag}_oi_chg_{h}h_pct",
-                        (vals[-1] / vals[-1 - h] - 1) * 100,
+                        (vals[-1] / vals[-1 - k] - 1) * 100,
                         "%",
-                        f"{tag.upper()} open-interest value change over {h}h.",
-                        "openInterestHist",
+                        f"{tag.upper()} open-interest value change over the {h}h ending at as_of.",
+                        "futures_data:openInterestHist",
                         ts,
                     )
                 )
@@ -1062,13 +1031,51 @@ class DossierBuilder:
                 "fear_greed_index",
                 value,
                 "0-100",
-                "alternative.me index value only (0 to 100); the text label is withheld.",
+                "alternative.me daily index value only (0 to 100); the text label is withheld.",
                 "alternative.me",
                 ts,
                 "comp100",
                 digits=0,
+                kind="daily",
             )
         )
+
+    # ---------------------------------------------------------- 1h 缓存落盘
+    def _load_cache(self) -> None:
+        path = self._cache_path
+        if path is None or not path.is_file():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            bars = {
+                str(sym): {int(r[0]): Bar(int(r[0]), *map(float, r[1:7])) for r in rows}
+                for sym, rows in raw["bars"].items()
+            }
+            deep = {str(s) for s in raw.get("deep", [])}
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+            logger.warning("大盘台 1h K 线缓存读不了，重新回填：%s", exc)
+            return
+        self._bars, self._deep = bars, deep & set(bars)
+
+    def _save_cache(self) -> None:
+        path = self._cache_path
+        if path is None:
+            return
+        tmp = path.with_suffix(".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "bars": {
+                    s: [b.row() for _, b in sorted(bars.items())] for s, bars in self._bars.items()
+                },
+                "deep": sorted(self._deep),
+            }
+            tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:
+            logger.exception("大盘台 1h K 线缓存存盘失败（重启后要重新回填）")
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
 
 def _plain_get(url: str, params: Mapping[str, Any] | None = None) -> httpx.Response:

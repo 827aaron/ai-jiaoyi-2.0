@@ -762,6 +762,15 @@ class MarketDeskSection(_Strict):
         le=10000.0,
         description="OpenRouter 余额低于这条线大盘台自停，把余额留给开会和 Jev；0 = 不看余额。",
     )
+    max_input_age_min: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=120.0,
+        description="不能有延后信息：实时类字段（滚动窗口、现价、资金费、多空比、持仓量）的 "
+        "as_of 比"
+        "运行时刻旧过这么多分钟就不给模型（写进缺失原因）；5 分钟统计的数再多给 5 分钟。0 = 不查。"
+        "σ、基础率（已收盘 1h 线上的统计量）和恐慌贪婪（日值）不按这个拦。",
+    )
     exclude_symbols: tuple[str, ...] = Field(
         default=("PAXGUSDT", "XAUTUSDT"),
         description="不进等权池的币（贵金属等，和大盘无关）。",
@@ -995,12 +1004,18 @@ def upgrade_legacy_schedule(data: dict[str, Any]) -> dict[str, Any]:
 
 def market_desk_conflict(slow: SlowConfig, regime_flip_target: str) -> str | None:
     """跨文件校验：大盘台接管（replace）时只能有一个发布者，翻转后不能再让 Flash 独立刷新大盘
-    （CONFLICTS #2）。有冲突返回原因，否则 None。启动、面板重启前、热生效都按这一条拦。"""
+    （CONFLICTS #2）；翻转目标是大盘台时大盘台必须开着。有冲突返回原因，否则 None。
+    启动、面板保存 / 重启前、热生效都按这一条拦。"""
     if slow.market_desk.mode == "replace" and regime_flip_target == "flash_market_only":
         return (
             'slow.toml [market_desk] mode = "replace" 时，app.toml [fast_loop] '
             "regime_flip_target 不能是 flash_market_only（会有两个大盘发布者来回改方向）；"
             '改成 "desk"（翻转时让大盘台重跑）或 "off"（只记录）'
+        )
+    if slow.market_desk.mode == "off" and regime_flip_target == "desk":
+        return (
+            'app.toml [fast_loop] regime_flip_target = "desk" 要求 slow.toml [market_desk] '
+            'mode 不是 off（大盘台没开，翻转时没人更新大盘）；改回 "flash_market_only" 或 "off"'
         )
     return None
 

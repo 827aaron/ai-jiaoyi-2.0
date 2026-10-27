@@ -40,6 +40,7 @@ import httpx
 from jiaoyi.contracts import DecisionRecord, MarketView, Outcome, Role, SymbolPool
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow import binance_gate, market_table
+from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.market_dossier import Dossier, DossierBuilder
 from jiaoyi.slow.settings import MarketDeskSection
 from jiaoyi.slow.tradingagents_engine import openrouter_body
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 DESK_SOURCE = "market_desk"
 STATE_FILE = "market_desk_state.json"
 LOG_DIR = "market_desk"
+KLINE_CACHE = "klines_1h.json"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 PROMPT_VERSION = "desk-v1"
 MIRROR_WINDOW = 12
@@ -171,7 +173,15 @@ def instruction_lines(order: Order, band: float) -> list[str]:
 
 def render_prompt(dossier: Dossier, order: Order, band: float, cycle_id: str) -> str:
     """数据包 → 提示词。不接任何锚：没有上一轮观点、教训、持仓、卡片倾斜、总盘会文字。"""
-    lines = [*instruction_lines(order, band), "", f"Cycle: {cycle_id}", "Data:"]
+    lines = [
+        *instruction_lines(order, band),
+        "",
+        f"Cycle: {cycle_id}",
+        f"Run time (as_of): {dossier.t0.astimezone(UTC):%Y-%m-%d %H:%M:%S}Z. Every window ends "
+        "at the run time unless its own as_of says otherwise; sigma and base rates come from "
+        "closed 1h bars.",
+        "Data:",
+    ]
     names = {f.name for f in dossier.fields}
     done: set[str] = set()
     up_words = ("_up_", "_buy_", "_long_", "_above_")
@@ -188,8 +198,8 @@ def render_prompt(dossier: Dossier, order: Order, band: float, cycle_id: str) ->
         for g in group:
             done.add(g.name)
             lines.append(
-                f"- {g.name} = {g.shown()} [{g.unit}; source {g.source} at "
-                f"{g.source_ts.astimezone(UTC):%Y-%m-%d %H:%M}Z] {g.note}"
+                f"- {g.name} = {g.shown()} [{g.unit}; source {g.source}; as_of "
+                f"{g.source_ts.astimezone(UTC):%Y-%m-%d %H:%M:%S}Z] {g.note_for(order)}"
             )
     if dossier.missing:
         lines.append("Unavailable this cycle: " + ", ".join(sorted(dossier.missing)))
@@ -458,7 +468,7 @@ class OpenRouterDeskModel:
             )
         ms = (time.monotonic() - started) * 1000
         if r.status_code >= 400:
-            raise RuntimeError(f"OpenRouter HTTP {r.status_code}: {r.text[:200]}")
+            raise DeskHTTPError(r.status_code, f"OpenRouter HTTP {r.status_code}: {r.text[:200]}")
         data = r.json()
         usage = data.get("usage") or {}
         text = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
@@ -626,6 +636,7 @@ class MarketDesk:
         day_tz: str = "Asia/Bangkok",
         balance: Callable[[], float | None] | None = None,
         banned: Callable[[], float] = binance_gate.banned_until,
+        credit_alarm: Callable[[], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self._pub = publisher
@@ -633,15 +644,23 @@ class MarketDesk:
         self._log = log
         self._clock = clock
         self._tz = ZoneInfo(day_tz)
+        if balance is None and cfg.mode != "off" and cfg.balance_floor_usd > 0:
+            logger.warning(
+                "大盘台拿不到 OpenRouter 余额（没有额度看护），余额低线 $%.2f 自停不生效",
+                cfg.balance_floor_usd,
+            )
         self._balance = balance or (lambda: None)
         self._banned = banned
+        self._credit_alarm = credit_alarm
+        root = Path(data_dir)
         self._builder = builder or DossierBuilder(
             band_sigma=cfg.band_sigma,
             sigma_lookback_h=cfg.sigma_lookback_h,
             base_rate_days=cfg.base_rate_days,
             exclude_symbols=cfg.exclude_symbols,
+            max_input_age_min=cfg.max_input_age_min,
+            cache_path=root / LOG_DIR / KLINE_CACHE,
         )
-        root = Path(data_dir)
         self._state_path = root / STATE_FILE
         self._log_dir = root / LOG_DIR
         self.state = DeskState()
@@ -903,6 +922,19 @@ class MarketDesk:
                 default=None,
             )
             regime = compose_regime(pick, avg, dossier, order)
+            if not dossier.has_prior:
+                # 没有先验（重启后长历史还在回填）：只记录，不发布、不接管、不当成「可用」结果
+                self.state.fails, self.state.last_error = 0, None
+                row.update(
+                    status="ok",
+                    prior_missing=True,
+                    probs_4h=avg.as_dict(),
+                    probs_1h=avg_1h.as_dict(),
+                    direction=direction,
+                    regime=regime,
+                    published_view=None,
+                )
+                return DeskRun(cycle_id, "ok", direction, avg, None, cost, "prior_missing")
             desk_id = uuid.uuid4().hex
             completed = self._clock()
             self.state.latest = {
@@ -966,6 +998,11 @@ class MarketDesk:
         try:
             reply = await asyncio.wait_for(self._model.complete(prompt), self.cfg.timeout_s + 5)
         except Exception as exc:
+            if is_credit_error(exc) and self._credit_alarm is not None:
+                try:
+                    self._credit_alarm()  # 和开会撞 402 一样：额度看护立即告警、面板横幅
+                except Exception:
+                    logger.exception("大盘台通知额度不足失败")
             est = len(prompt) / 3 * FLASH_PRICE_PER_MTOK[0] / 1e6  # 失败也可能计费：按输入估
             return Sample(
                 index, mirrored, error=f"调用失败：{str(exc) or type(exc).__name__}", cost_usd=est
@@ -1035,8 +1072,15 @@ class MarketDesk:
                 st.candidate_since, st.candidate_event = now, event
             if st.candidate_count < self.cfg.publish_confirm:
                 return None
+            # 确认的几轮要在时间上分开：加跑紧挨着定时轮（:16 加跑、:17 定时）不算两次独立确认
             lasted = now - st.candidate_since
-            if not st.candidate_event and lasted < timedelta(minutes=self.cfg.publish_confirm_min):
+            spread = timedelta(minutes=max(self.cfg.publish_confirm_min / 2, self.cfg.cadence_min))
+            need = (
+                spread
+                if st.candidate_event
+                else max(spread, timedelta(minutes=self.cfg.publish_confirm_min))
+            )
+            if lasted < need:
                 return None
             gap = timedelta(minutes=self.cfg.publish_min_gap_min)
             if st.last_publish_at is not None and completed - st.last_publish_at < gap:
@@ -1091,7 +1135,13 @@ class MarketDesk:
             summary = (
                 f"大盘台：{row.get('direction')}（涨 {p.get('up', 0):.0%} / 平 "
                 f"{p.get('flat', 0):.0%} / 跌 {p.get('down', 0):.0%}）"
-                + (f"，发布大盘 v{pub['version']}" if pub else "，方向未发布")
+                + (
+                    f"，发布大盘 v{pub['version']}"
+                    if pub
+                    else "，没有先验（长历史回填中），只记录"
+                    if row.get("prior_missing")
+                    else "，方向未发布"
+                )
             )
             outcome = Outcome.ACTION if pub else Outcome.INFO
         else:
@@ -1113,6 +1163,7 @@ class MarketDesk:
                 "mirror_test",
                 "prompt_version",
                 "dossier_sha256",
+                "prior_missing",
                 "error",
             )
         }
@@ -1172,6 +1223,14 @@ class MarketDesk:
 
 class DeskError(RuntimeError):
     pass
+
+
+class DeskHTTPError(RuntimeError):
+    """OpenRouter 返回错误状态；带 ``status_code``，402（额度不足）由 ``is_credit_error`` 认出。"""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def score_targets(t0: datetime, dossier: Dossier, band: float) -> dict[str, Any]:

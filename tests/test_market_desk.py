@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import math
 import re
 import time
 from collections import Counter
@@ -724,15 +725,17 @@ async def test_hysteresis_needs_consecutive_runs_and_minutes(tmp_path: Path) -> 
     assert commander.latest_market_view.version == 3  # type: ignore[union-attr]
 
 
-async def test_event_run_plus_next_scheduled_run_publish(tmp_path: Path) -> None:
+async def test_extra_run_needs_time_separated_confirmation(tmp_path: Path) -> None:
     commander, _, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
     script = Switch(answer(0.6, 0.25, 0.15))
     desk = make_desk(tmp_path, commander, FakeModel(script), clock)
-    await desk.run(candidates, "scheduled")
+    await desk.run(candidates, "scheduled")  # 10:02 接管，看涨
     script.text = answer(0.15, 0.25, 0.6)
-    clock[0] += timedelta(minutes=8)
+    clock[0] = T0 + timedelta(minutes=14)  # 10:16 急动加跑
     assert (await desk.run(candidates, "move")).published is None
-    clock[0] += timedelta(minutes=7)
+    clock[0] = T0 + timedelta(minutes=15)  # 10:17 定时轮：和加跑只隔 1 分钟，不算独立确认
+    assert (await desk.run(candidates, "scheduled")).published is None
+    clock[0] = T0 + timedelta(minutes=30)  # 10:32：离加跑 16 分钟 ≥ max(30/2, 15)
     published = (await desk.run(candidates, "scheduled")).published
     assert published is not None and published.regime_direction == "看跌"
     assert published.refresh_reason == DESK_SOURCE
@@ -1029,11 +1032,24 @@ async def test_flip_target_off_and_desk_never_call_flash(tmp_path: Path, target:
 SYMS = [f"C{i}USDT" for i in range(8)]
 
 
-class FakeBinance:
-    """币安 / alternative.me 替身：确定的合成行情。"""
+def wave(sym: str, t_ms: int) -> float:
+    """默认合成价：每个币一条不同周期的正弦，只跟时间有关（不同 limit 拉到的同一根线一致）。"""
+    k = sum(map(ord, sym)) % 7
+    return 100 * (1 + 0.004 * math.sin(t_ms / (3_600_000 * (k + 3))))
 
-    def __init__(self, fail: set[str] | None = None) -> None:
+
+class FakeBinance:
+    """币安 / alternative.me 替身：按时间连续的合成行情，K 线带正在走的那一根。"""
+
+    def __init__(
+        self,
+        fail: set[str] | None = None,
+        price: Callable[[str, int], float] = wave,
+        premium_lag_min: float = 0.0,
+    ) -> None:
         self.fail = fail or set()
+        self.price = price
+        self.premium_lag_ms = int(premium_lag_min * 60_000)
         self.calls: list[tuple[str, Any]] = []
         self.limits: list[tuple[str, int]] = []
         self.now_ms = int(T0.timestamp() * 1000)
@@ -1043,21 +1059,20 @@ class FakeBinance:
         path = url.rsplit("/", 1)[-1]
         if path in self.fail:
             raise RuntimeError("boom")
-        now_ms = int(T0.timestamp() * 1000)
+        now_ms = self.now_ms
         if path == "klines":
             sym, limit = params["symbol"], params["limit"]
             self.limits.append((params["interval"], limit))
             step = {"1h": 3_600_000, "15m": 900_000}[params["interval"]]
             k = sum(map(ord, sym)) % 7
-            last = self.now_ms // step * step - step
+            forming = now_ms // step * step
             rows = []
             for i in range(limit):
-                o = last - (limit - 1 - i) * step
-                j = o // step  # 价只跟开盘时间有关：不同 limit 拉到的同一根线一致
-                px = 100 * (1 + 0.004 * ((j * (k + 3)) % 11 - 5) / 5)
-                rows.append(
-                    [o, px, px * 1.01, px * 0.99, px, 1, o + step - 1, 1e6, 1, 4.8e5 + k * 1e3, 0]
-                )
+                o = forming - (limit - 1 - i) * step
+                end = min(o + step, now_ms)
+                po, pc = self.price(sym, o), self.price(sym, end)
+                hi, lo = max(po, pc) * 1.001, min(po, pc) * 0.999
+                rows.append([o, po, hi, lo, pc, 1, o + step - 1, 1e6, 1, 4.8e5 + k * 1e3, 0])
             return Resp(rows)
         if path == "premiumIndex":
             return Resp(
@@ -1067,32 +1082,31 @@ class FakeBinance:
                         "markPrice": "100.1",
                         "indexPrice": "100.0",
                         "lastFundingRate": "0.00012" if i % 2 else "0.00005",
-                        "time": now_ms,
+                        "time": now_ms - self.premium_lag_ms,
                     }
                     for i, s in enumerate([*SYMS, "BTCUSDT", "ETHUSDT"])
                 ]
             )
         if path == "fundingInfo":
             return Resp([{"symbol": SYMS[0], "fundingIntervalHours": 4}])
-        if path == "globalLongShortAccountRatio":
-            return Resp(
-                [
+        period = {"1h": 3_600_000, "5m": 300_000}.get((params or {}).get("period", ""), 0)
+        if path in ("globalLongShortAccountRatio", "openInterestHist"):
+            n = params["limit"]
+            last = now_ms // period * period - period  # 最新一段（已结束）的开始时间
+            rows = []
+            for i in range(n):
+                ts = last - (n - 1 - i) * period
+                a = 0.6 + 0.001 * ((ts // period) % 5)
+                rows.append(
                     {
-                        "longAccount": str(0.6 + 0.001 * (i % 5)),
-                        "shortAccount": str(0.4 - 0.001 * (i % 5)),
-                        "longShortRatio": str((0.6 + 0.001 * (i % 5)) / (0.4 - 0.001 * (i % 5))),
-                        "timestamp": now_ms - (167 - i) * 3_600_000,
+                        "longAccount": str(a),
+                        "shortAccount": str(1 - a),
+                        "longShortRatio": str(a / (1 - a)),
+                        "sumOpenInterestValue": str(1e9 * (1 + 1e-6 * (ts // period % 1000))),
+                        "timestamp": ts,
                     }
-                    for i in range(168)
-                ]
-            )
-        if path == "openInterestHist":
-            return Resp(
-                [
-                    {"sumOpenInterestValue": str(1e9 * (1 + 0.001 * i)), "timestamp": now_ms}
-                    for i in range(25)
-                ]
-            )
+                )
+            return Resp(rows)
         raise AssertionError(url)
 
     def fng(self, url: str, params: Any = None) -> Any:
@@ -1132,7 +1146,7 @@ def test_dossier_builder_fields_sources_and_base_rates() -> None:
         "btc_long_short_log_ratio_z_7d",
         "btc_oi_chg_4h_pct",
         "fear_greed_index",
-        "pool_ret_since_hour_close_pct",
+        "pool_ret_1h_pct",
         "pool_taker_buy_share_4h",
     ):
         assert n in names, n
@@ -1143,14 +1157,20 @@ def test_dossier_builder_fields_sources_and_base_rates() -> None:
     # 同一份数据，哈希稳定；第二轮只补新 K 线（limit 很小）
     assert d.sha256() == d.sha256()
     assert {"pool_ret_15m_pct", "pool_up_count_15m", "btc_ret_15m_pct"} <= names
-    assert {"pool_taker_buy_share_15m", "pool_ret_60m_pct"} <= names
-    # 第二轮只补新收盘的线（1h 和 15m 都是小 limit），剩下没补全的长历史每轮最多 8 个
+    assert {"pool_ret_30m_pct", "pool_ret_24h_pct", "btc_minus_pool_ret_24h_pct"} <= names
+    # 同一小时里第二轮：没有新的 1h 收盘就不请求 1h 线（只有剩下没补全的长历史，最多 8 个）
     fake.limits.clear()
     fake.now_ms += 15 * 60_000
     b.build(p, T0 + timedelta(minutes=15))
-    small = [n for _, n in fake.limits if n <= 4]
-    big = [n for _, n in fake.limits if n > BARS_15M]
-    assert small and len(big) <= DEEP_PER_RUN
+    hourly = [n for iv, n in fake.limits if iv == "1h"]
+    assert all(n == b.need_bars for n in hourly) and len(hourly) <= DEEP_PER_RUN
+    assert [n for iv, n in fake.limits if iv == "15m"] == [BARS_15M] * 9
+    fake.limits.clear()
+    fake.now_ms += 60 * 60_000  # 新的一根 1h 收盘了：只补几根
+    b.build(p, T0 + timedelta(minutes=75))
+    assert [n for iv, n in fake.limits if iv == "1h"] and max(
+        n for iv, n in fake.limits if iv == "1h"
+    ) <= 4
 
 
 def test_first_run_backfill_is_spread_over_cycles() -> None:
@@ -1203,3 +1223,213 @@ async def test_rate_limited_run_is_skipped_and_slot_not_consumed(tmp_path: Path)
     run = await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
     assert run.status == "skipped" and model.prompts == []
     assert desk.due(T0) == "scheduled"
+
+
+# ------------------------------------------------------------------ 不能有延后信息
+
+
+def test_windows_roll_to_run_time_not_last_closed_hour() -> None:
+    """10:54 跑、10:00 起一路上涨：「近 1 小时」是 09:54–10:54，不是 09:00–10:00 那根收盘线。"""
+    at = datetime(2026, 10, 28, 10, 54, tzinfo=UTC)
+    rise_from = int(datetime(2026, 10, 28, 10, 0, tzinfo=UTC).timestamp() * 1000)
+
+    def price(sym: str, t_ms: int) -> float:
+        return 100.0 if t_ms <= rise_from else 100.0 + 2.0 * (t_ms - rise_from) / 3_240_000
+
+    fake = FakeBinance(price=price)
+    fake.now_ms = int(at.timestamp() * 1000)
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng).build(
+        pool(at, *(entry(s) for s in SYMS)), at
+    )
+    assert d.value("pool_ret_1h_pct") == pytest.approx(2.0, abs=1e-6)  # 09:54 → 10:54
+    assert d.value("btc_ret_1h_pct") == pytest.approx(2.0, abs=1e-6)
+    assert d.value("pool_up_count_1h") == len(SYMS)
+    assert d.value("pool_ret_15m_pct") == pytest.approx((102 / (100 + 2 * 39 / 54) - 1) * 100)
+    f = d.get("pool_ret_1h_pct")
+    assert f is not None and f.source_ts == at  # as_of = 运行时刻
+    prompt = render_prompt(d, "up_first", 0.5, "c")
+    assert "Run time (as_of): 2026-10-28 10:54:00Z" in prompt
+    assert (
+        "pool_ret_1h_pct = 2.000 [%; source klines_15m_live; as_of 2026-10-28 10:54:00Z]" in prompt
+    )
+
+
+def test_stale_live_inputs_are_dropped_not_shown() -> None:
+    fake = FakeBinance(premium_lag_min=10)
+    p = pool(T0, *(entry(s) for s in SYMS))
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, max_input_age_min=5).build(p, T0)
+    assert d.get("funding_excess_median_bp8h") is None
+    assert "旧 10.0 分钟" in d.missing["funding_excess_median_bp8h"]
+    assert d.get("pool_ret_1h_pct") is not None  # 现价是运行时刻的
+    assert d.get("btc_long_account_pct") is not None  # 5 分钟统计在容差内
+    assert d.get("sigma_4h_pct") is not None and d.get("fear_greed_index") is not None
+    off = DossierBuilder(get=fake.get, fng_get=fake.fng, max_input_age_min=0).build(p, T0)
+    assert off.get("funding_excess_median_bp8h") is not None  # 0 = 不查
+
+
+def test_btc_minus_pool_uses_current_pool_only() -> None:
+    fake = FakeBinance()
+    b = DossierBuilder(get=fake.get, fng_get=fake.fng)
+    b.build(pool(T0, *(entry(s) for s in [*SYMS, "Z1USDT", "Z2USDT", "Z3USDT"])), T0)
+    d = b.build(pool(T0, *(entry(s) for s in SYMS[:6])), T0)
+    btc, basket = d.value("btc_ret_24h_pct"), d.value("pool_ret_24h_pct")
+    assert btc is not None and basket is not None
+    assert d.value("btc_minus_pool_ret_24h_pct") == pytest.approx(btc - basket)
+
+
+def test_kline_cache_survives_restart(tmp_path: Path) -> None:
+    cache = tmp_path / "klines_1h.json"
+    fake = FakeBinance()
+    p = pool(T0, *(entry(s) for s in SYMS))
+    first = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
+    assert first.build(p, T0).has_prior and cache.is_file()
+    fake.limits.clear()
+    fake.now_ms += 15 * 60_000
+    again = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
+    d = again.build(p, T0 + timedelta(minutes=15))
+    assert d.has_prior  # 重启后不用重新回填就有先验
+    hourly = [n for iv, n in fake.limits if iv == "1h"]
+    assert SHALLOW_BARS not in hourly  # 缓存里有的不重拉
+    assert len(hourly) <= 2 and set(hourly) <= {again.need_bars}  # 只剩上次没轮到的两个补长历史
+    cache.write_text("{broken", encoding="utf-8")
+    assert not DossierBuilder(get=fake.get, cache_path=cache)._bars
+
+
+async def test_run_without_prior_is_record_only(tmp_path: Path) -> None:
+    commander, _engine, clock, candidates, _log = await commander_with_flash(tmp_path / "r", T0)
+    flash = commander.latest_market_view
+    no_prior = dataclasses.replace(
+        make_dossier(),
+        fields=tuple(f for f in make_dossier().fields if not f.name.startswith("base_rate")),
+    )
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(answer(0.6, 0.25, 0.15)),
+        clock,
+        builder=FakeBuilder(no_prior),
+    )
+    run = await desk.run(candidates, "scheduled")
+    assert run.status == "ok" and run.reason == "prior_missing" and run.published is None
+    assert commander.latest_market_view is flash  # 不接管
+    assert desk.state.owner == "flash" and desk.state.latest is None
+    assert not desk.owns_market(clock[0])
+    row = log_rows(tmp_path)[-1]
+    assert row["prior_missing"] is True and row["probs_4h"]["up"] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("order", ["up_first", "down_first"])
+def test_two_sided_notes_alternate_with_round_order(order: Any) -> None:
+    d = DossierBuilder(get=FakeBinance().get, fng_get=FakeBinance().fng).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    text = render_prompt(d, order, 0.5, "c")
+    for pos, neg in (
+        ("positive = longs pay shorts", "negative = shorts pay longs"),
+        ("positive = more long than usual", "negative = more short than usual"),
+    ):
+        assert pos in text and neg in text
+        assert (text.index(pos) < text.index(neg)) == (order == "up_first")
+
+
+def test_desk_flip_target_requires_desk_on(tmp_path: Path) -> None:
+    import argparse
+
+    from jiaoyi.cli import _load
+
+    off = load_slow_config(tmp_path / "missing.toml")
+    assert off.market_desk.mode == "off"
+    assert "mode 不是 off" in (market_desk_conflict(off, "desk") or "")
+    assert market_desk_conflict(off, "flash_market_only") is None
+    root = Path(__file__).resolve().parents[1] / "config"
+    app = tmp_path / "app.toml"
+    text = (root / "app.example.toml").read_text(encoding="utf-8")
+    app.write_text(
+        text.replace('regime_flip_target = "flash_market_only"', 'regime_flip_target = "desk"'),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        risk=str(root / "risk.example.toml"), app=str(app), slow=str(tmp_path / "missing.toml")
+    )
+    with pytest.raises(ConfigError, match="mode 不是 off"):
+        _load(args)
+
+
+async def test_review_context_hides_desk_text_from_flash(tmp_path: Path) -> None:
+    commander, _engine, clock, candidates, _log = await commander_with_flash(tmp_path / "r", T0)
+    desk = make_desk(tmp_path, commander, FakeModel(answer(0.6, 0.25, 0.15)), clock)
+    await desk.run(candidates, "scheduled")
+    clock[0] += timedelta(minutes=30)
+    await commander.refresh(candidates, "manual")  # 各币研究盖上了大盘台的观点
+    view = commander.latest_market_view
+    assert view is not None and view.source == DESK_SOURCE
+    context = commander.market_review_context(candidates)
+    assert context
+    assert all(c.source_regime and c.source_regime.startswith("旧研究背景") for c in context)
+    assert all(view.regime not in (c.source_regime or "") for c in context)
+
+
+def test_panel_market_node_excludes_desk_records(tmp_path: Path) -> None:
+    from jiaoyi.contracts import DecisionRecord, Outcome
+    from jiaoyi.panel.files import PanelFiles
+    from jiaoyi.panel.pages import _market_records
+
+    log = JsonlDecisionLog(tmp_path)
+    for i in range(3):
+        log.write(
+            DecisionRecord(
+                record_id=f"d{i}",
+                ts=T0,
+                role=Role.COMMANDER,
+                outcome=Outcome.INFO,
+                summary="大盘台",
+                output={"market_desk": {}},
+            )
+        )
+    log.write(
+        DecisionRecord(
+            record_id="m",
+            ts=T0,
+            role=Role.COMMANDER,
+            outcome=Outcome.ACTION,
+            summary="独立大盘更新 v2",
+            output={"market_view": {}},
+        )
+    )
+    items = _market_records(PanelFiles(tmp_path, "UTC"), T0 + timedelta(minutes=1))
+    assert [i.text for i in items] == ["独立大盘更新 v2"]
+
+
+async def test_credit_error_raises_alarm(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from jiaoyi.slow.market_desk import DeskHTTPError
+
+    class Broke:
+        async def complete(self, prompt: str) -> ModelReply:
+            raise DeskHTTPError(402, "OpenRouter HTTP 402: insufficient credits")
+
+    alarms: list[int] = []
+    clock = [T0]
+    desk = MarketDesk(
+        cfg(),
+        FakePublisher(),
+        Broke(),
+        JsonlDecisionLog(tmp_path / "log"),
+        tmp_path,
+        builder=FakeBuilder(),  # type: ignore[arg-type]
+        clock=lambda: clock[0],
+        balance=lambda: 100.0,
+        banned=lambda: 0.0,
+        credit_alarm=lambda: alarms.append(1),
+    )
+    run = await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    assert run.status == "failed" and alarms
+    with caplog.at_level("WARNING"):
+        MarketDesk(
+            cfg(),
+            FakePublisher(),
+            Broke(),
+            JsonlDecisionLog(tmp_path / "log"),
+            tmp_path / "x",
+            builder=FakeBuilder(),  # type: ignore[arg-type]
+        )
+    assert "自停不生效" in caplog.text

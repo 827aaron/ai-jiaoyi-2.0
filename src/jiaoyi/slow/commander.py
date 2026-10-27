@@ -805,9 +805,13 @@ class BattleCardCommander:
 
     def market_review_context(self, pool: SymbolPool) -> list[MarketReviewCard]:
         card = self._card
-        if card is None or not card.is_valid(self._clock()):
+        now = self._clock()
+        if card is None or not card.is_valid(now):
             return []
         symbols = {e.symbol for e in pool.in_pool}
+        # 大盘台接管时卡上各币的来源大盘是大盘台的文字：给 Flash 看的复核摘要换成 Flash 自己上一轮
+        # 的判断（没有就不给），不让大盘台的观点锚定 Flash 对照
+        desk = self._desk_owns(now)
         return [
             MarketReviewCard(
                 symbol=cs.symbol,
@@ -815,7 +819,9 @@ class BattleCardCommander:
                 bias=cs.bias,
                 reason=cs.reason,
                 issued_at=cs.issued_at or card.created_at,
-                source_regime=cs.source_regime or card.regime,
+                source_regime=(self._flash_regime or None)
+                if desk
+                else cs.source_regime or card.regime,
                 source_market_view_id=cs.source_market_view_id,
                 key_levels=cs.key_levels,
             )

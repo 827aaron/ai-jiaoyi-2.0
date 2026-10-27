@@ -570,7 +570,9 @@ def _market_records(files: PanelFiles, now: datetime) -> list[TrailItem]:
 
     总盘会没有单独的决策角色，这些记录落在 ``commander`` 下，靠没有 ``symbol`` 和单个币的会分开。"""
     got, _ = files.role_records(Role.COMMANDER, _MARKET_SCAN, now)
-    return [_item(r) for r in got if r.symbol is None][:TEAM_RECORD_LIMIT]
+    # 大盘台的记录（output 带 market_desk）也是 commander、没有 symbol：单独算，不挤掉总盘会的
+    mine = [r for r in got if r.symbol is None and "market_desk" not in r.output]
+    return [_item(r) for r in mine][:TEAM_RECORD_LIMIT]
 
 
 def _market_progress(m: MeetingSummary | None, now: datetime, tz: str) -> Progress:
