@@ -119,6 +119,7 @@ OPTIONAL_APP_FIELDS = {
     "fast_loop",
     "predictor",
     "reconciler_close_unknown_positions",
+    "reconciler_executor_stop_retry_rounds",  # 默认 0（永不重发），老配置文件没有这一行
     "trade_notices",
     *(f"notify_{k}" for k in KINDS),
     "credit_low_floor_usd",

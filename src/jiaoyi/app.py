@@ -447,6 +447,7 @@ def _build_execution(
             live_gate=LiveGate(Path(app_cfg.data_dir) / "live_gate.json"),
             decision_log=decision_log,
             close_unknown_positions=app_cfg.reconciler_close_unknown_positions,
+            executor_stop_retry_rounds=app_cfg.reconciler_executor_stop_retry_rounds,
             demo_trading=app_cfg.sim_environment == "demo",
             limit_take_profit=app_cfg.limit_take_profit_on,
             frozen_peak_exit_on=app_cfg.fast_loop.frozen_peak_exit_on,

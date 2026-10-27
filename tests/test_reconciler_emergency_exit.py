@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +12,20 @@ import pytest
 
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import PositionStatus, ReconcileIssueKind
+from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.exchange import CloseFill, ExchangeError
+from jiaoyi.execution.exit_resolution import (
+    prepare_resolution,
+    read_result,
+    resolutions_dir,
+    write_resolution,
+)
+from jiaoyi.execution.fills import TradeFill
+from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import SymbolAlreadyHeld
 from jiaoyi.execution.reconciler import ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry
-from tests.test_execution import Rig, intent, open_filled, with_close_unknown
+from tests.test_execution import Rig, explain_reverse, intent, open_filled, with_close_unknown
 
 
 def _restart(rig: Rig, tmp_path: Path, *, close_unknown: bool) -> None:
@@ -49,9 +58,11 @@ def _ack_only(rig: Rig, monkeypatch: pytest.MonkeyPatch, *, timeout: bool) -> li
     return calls
 
 
-async def _reversed_after_close(rig: Rig, side: Side) -> float:
+async def _reversed_after_close(rig: Rig, side: Side, *, evidence: bool = True) -> float:
     """我们的仓刚结束，币安上出现反向等量仓（反手仓触发条件）。"""
     pid = await open_filled(rig, side=side.value)
+    if evidence:
+        explain_reverse(rig, pid)
     rig.api.terminate("ex1", "STOP_LOSS", pnl=-5.0)
     await rig.adapter.positions()
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
@@ -427,6 +438,7 @@ async def test_opposite_side_open_ledger_lost_response_never_resubmits(
 ) -> None:
     rig = Rig(tmp_path)
     pid = await open_filled(rig, side=side.value)
+    explain_reverse(rig, pid)
     qty = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
     rig.ex.stops.clear()
     rig.ex.set_position("BTCUSDT", Side.SHORT if side is Side.LONG else Side.LONG, qty)
@@ -458,6 +470,7 @@ async def test_opposite_side_close_waits_while_ledger_owner_changed(tmp_path: Pa
     """触发后账本那笔已经结束（不再是开着的反向仓）：不凭旧判断下单。"""
     rig = Rig(tmp_path)
     pid = await open_filled(rig)
+    explain_reverse(rig, pid)
     qty = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
     rig.ex.set_position("BTCUSDT", Side.SHORT, qty)
     tracked = rig.registry.get(pid)
@@ -470,3 +483,336 @@ async def test_opposite_side_close_waits_while_ledger_owner_changed(tmp_path: Pa
     )
     issue = await rig.rec._side_mismatch(stale, await rig.ex.positions_evidence())
     assert not issue.fixed and rig.ex.close_submissions == {}
+
+
+# ---------------------------------------------------------------- 反手仓要有归属证据
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_reverse_without_our_fills_is_left_alone(tmp_path: Path, side: Side) -> None:
+    """窗口内出现反向等量仓，但成交明细里没有能解释它的我方订单：可能是手动开的，不动。"""
+    rig = Rig(tmp_path)
+    await _reversed_after_close(rig, side, evidence=False)
+    rig.t += timedelta(minutes=3)
+    for _ in range(2):
+        (issue,) = (await rig.rec.reconcile(rig.t)).issues
+        assert issue.kind is ReconcileIssueKind.SIDE_MISMATCH and not issue.fixed
+        assert "不能证明" in issue.detail
+    assert rig.ex.close_submissions == {} and rig.ex.market_closed == []
+    assert rig.registry.data.emergency_exits == {}
+
+
+async def test_manual_fill_mixed_in_is_not_ownership_evidence(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await _reversed_after_close(rig, Side.LONG)
+    # 有人手动买了又卖（净量为零），但这两笔不是我方订单：整段成交就不能当证据
+    for side in ("buy", "sell"):
+        rig.ex.trades.append(TradeFill(rig.t, "999", side, 68000.0, 0.001, None, 0.0))
+    rig.t += timedelta(minutes=3)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert not issue.fixed and "不是认得出的我方订单" in issue.detail
+    assert rig.ex.close_submissions == {}
+
+
+async def test_our_fills_that_do_not_add_up_are_not_evidence(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await _reversed_after_close(rig, Side.LONG)
+    rig.ex.trades.pop()  # 执行器多成交的那一笔不在：我方成交解释不了反手仓
+    rig.t += timedelta(minutes=3)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert not issue.fixed and "解释不了" in issue.detail
+    assert rig.ex.close_submissions == {}
+
+
+async def test_evidence_lookup_failure_is_not_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    await _reversed_after_close(rig, Side.LONG)
+
+    async def down(symbol: str, since: Any) -> Any:
+        raise ExchangeError("合成：成交明细不可用")
+
+    monkeypatch.setattr(rig.ex, "user_trades", down)
+    rig.t += timedelta(minutes=3)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert not issue.fixed and rig.ex.close_submissions == {}
+
+
+async def test_executor_order_list_missing_is_not_evidence(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await _reversed_after_close(rig, Side.LONG)
+    rig.api.executors["ex1"]["custom_info"].pop("order_ids")
+    rig.t += timedelta(minutes=3)
+    (issue,) = (await rig.rec.reconcile(rig.t)).issues
+    assert not issue.fixed and rig.ex.close_submissions == {}
+    assert "身份查不到" in issue.detail
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_opposite_side_open_ledger_without_evidence_is_left_alone(
+    tmp_path: Path, side: Side
+) -> None:
+    """账本开着多单，币安却是等量空单，但我方成交解释不了（例如人手动平了又反开）：不动。"""
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, side=side.value)
+    qty = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
+    rig.ex.set_position("BTCUSDT", Side.SHORT if side is Side.LONG else Side.LONG, qty)
+    report = await rig.rec.reconcile(rig.t)
+    (issue,) = [i for i in report.issues if i.kind is ReconcileIssueKind.SIDE_MISMATCH]
+    assert not issue.fixed and "不能证明" in issue.detail
+    assert rig.ex.close_submissions == {} and rig.ex.market_closed == []
+
+
+# ---------------------------------------------------------------- 人工结束意图（resolve-exit）
+
+
+async def _stuck_intent(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> str:
+    """无主仓平仓单超时、原 CID 一直查不到：意图卡住。返回它的 CID。"""
+    rig.rec = with_close_unknown(rig)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
+    _ack_only(rig, monkeypatch, timeout=True)
+    await rig.rec.reconcile(rig.t)
+    cid = rig.registry.data.emergency_exits["BTCUSDT"].client_order_id
+    assert cid is not None
+    return cid
+
+
+async def _request(rig: Rig, cid: str, *, force: bool = False) -> tuple[Any, str]:
+    return await prepare_resolution(
+        rig.registry.path,
+        rig.ex.positions_evidence,
+        "BTCUSDT",
+        cid,
+        force=force,
+        reason="已在币安核实",
+        now=rig.t,
+    )
+
+
+async def test_resolve_exit_command_side_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    cid = await _stuck_intent(rig, monkeypatch)
+    req, text = await _request(rig, cid + "x")
+    assert req is None and "CID 对不上" in text
+    req, text = await _request(rig, cid)  # 币安仍有仓
+    assert req is None and "--force" in text
+    rig.ex.down = True
+    req, text = await _request(rig, cid)  # 读不到严格持仓
+    assert req is None and "--force" in text
+    req, _ = await _request(rig, cid, force=True)
+    assert req is not None and req.force and req.observed_quantity is None
+    rig.ex.down = False
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0)
+    req, _ = await _request(rig, cid)
+    assert req is not None and not req.force and req.observed_quantity == 0
+
+
+async def test_reconciler_applies_resolution_once_and_rechecks_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    cid = await _stuck_intent(rig, monkeypatch)
+    root = resolutions_dir(rig.registry.path)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0)
+    req, _ = await _request(rig, cid)
+    assert req is not None
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)  # 命令之后仓位又出现：主循环复核时拒绝
+    write_resolution(root, req)
+    await rig.rec.reconcile(rig.t)
+    result = read_result(root, req.id)
+    assert result is not None and not result.applied and "仍有净仓" in result.detail
+    assert "BTCUSDT" in rig.registry.data.emergency_exits
+
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0)
+    req, _ = await _request(rig, cid)
+    assert req is not None
+    write_resolution(root, req)
+    await rig.rec.reconcile(rig.t)
+    result = read_result(root, req.id)
+    assert result is not None and result.applied and result.removed is not None
+    assert result.removed["client_order_id"] == cid
+    assert rig.registry.data.emergency_exits == {}
+    assert len(rig.ex.close_submissions) == 1
+    assert any("人工结束" in a.title for a in rig.alerts.sent)
+    # 同一个 id 再来一次不执行（防重放）
+    write_resolution(root, req)
+    await rig.rec.reconcile(rig.t)
+    assert not list(root.glob("*.json"))
+    kept = read_result(root, req.id)
+    assert kept is not None and kept.applied  # 原结果不被覆盖
+
+
+async def test_resolution_with_stale_cid_is_refused_by_reconciler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    cid = await _stuck_intent(rig, monkeypatch)
+    req, _ = await _request(rig, cid, force=True)
+    assert req is not None
+    plan = rig.registry.data.emergency_exits["BTCUSDT"]
+    rig.registry.data.emergency_exits["BTCUSDT"] = plan.model_copy(
+        update={"client_order_id": cid[:-1] + "2", "generation": 2}
+    )  # 命令写下之后意图已换了一代
+    root = resolutions_dir(rig.registry.path)
+    write_resolution(root, req)
+    await rig.rec.reconcile(rig.t)
+    result = read_result(root, req.id)
+    assert result is not None and not result.applied and "CID 对不上" in result.detail
+    assert "BTCUSDT" in rig.registry.data.emergency_exits
+
+
+async def test_resolve_exit_cli_writes_request_and_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import jiaoyi.cli as cli
+    from tests.test_app import APP
+
+    rig = Rig(tmp_path)
+    cid = await _stuck_intent(rig, monkeypatch)
+    app_toml = tmp_path / "app.toml"
+    app_toml.write_text(
+        APP.read_text(encoding="utf-8").replace('data_dir = "data"', f'data_dir = "{tmp_path}"'),
+        encoding="utf-8",
+    )
+
+    class _NoClose:
+        positions_evidence = rig.ex.positions_evidence
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "_strict_exchange", lambda _cfg: _NoClose())
+    args = ["resolve-exit", "--app", str(app_toml), "--symbol", "BTCUSDT", "--wait", "0"]
+    # 仍有仓、没 --force：拒绝，不写请求
+    assert await asyncio.to_thread(cli.main, [*args, "--cid", cid]) == 2
+    assert "--force" in capsys.readouterr().err
+    root = resolutions_dir(rig.registry.path)
+    assert not list(root.glob("*.json"))
+    assert await asyncio.to_thread(cli.main, [*args, "--cid", cid, "--force"]) == 0
+    out = capsys.readouterr().out
+    assert "已提交" in out and cid in out
+    (path,) = list(root.glob("*.json"))
+    days = {rig.t.date().isoformat(), datetime.now(UTC).date().isoformat()}
+    records = [r for d in days for r in JsonlDecisionLog(tmp_path).read_day(d)]
+    assert any("人工请求结束平仓意图" in r.summary and r.symbol == "BTCUSDT" for r in records)
+    # 主循环下一轮执行（--force：不再看净仓）。开关关掉，免得余仓又被当无主仓平
+    rig.rec = _rec_with(rig)
+    await rig.rec.reconcile(rig.t)
+    assert rig.registry.data.emergency_exits == {} and not path.exists()
+    result = read_result(root, path.stem)
+    assert result is not None and result.applied and "--force" in result.detail
+
+
+# -------------------------------------------- 停执行器：结果不明后的重试 / 已结束仓的执行器
+
+
+def _rec_with(rig: Rig, **kw: Any) -> ThreeWayReconciler:
+    return ThreeWayReconciler(
+        rig.adapter,
+        rig.api,
+        rig.ex,
+        rig.lifeboat,
+        rig.registry,
+        rig.alerts,
+        account_name="acct",
+        **kw,
+    )
+
+
+def _flaky_stop(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
+    """第一次停止请求超时（结果不明），之后受理，但执行器一直不结束。"""
+    calls: list[tuple[str, bool]] = []
+
+    async def stop(executor_id: str, *, keep_position: bool) -> None:
+        calls.append((executor_id, keep_position))
+        if len(calls) == 1:
+            raise HbApiError("合成：停止超时", transient=True)
+
+    monkeypatch.setattr(rig.api, "stop_executor", stop)
+    return calls
+
+
+@pytest.mark.parametrize(("rounds", "expected"), [(0, 1), (2, 2)])
+async def test_unclear_executor_stop_retry_follows_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rounds: int, expected: int
+) -> None:
+    rig = Rig(tmp_path)
+    await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "someone-else")
+    calls = _flaky_stop(rig, monkeypatch)
+    rec = _rec_with(rig, close_unknown_positions=True, executor_stop_retry_rounds=rounds)
+    for _ in range(6):
+        await rec.reconcile(rig.t)
+    assert len(calls) == expected  # 0 = 永不重发；2 = 不明后满 2 轮再发一次，受理后不再发
+    assert all(keep for _, keep in calls)
+
+
+async def test_retry_counter_survives_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    await rig.api.create_executor({"trading_pair": "SOL-USDT"}, "acct", "someone-else")
+    calls = _flaky_stop(rig, monkeypatch)
+    for _ in range(2):
+        await _rec_with(rig, close_unknown_positions=True, executor_stop_retry_rounds=3).reconcile(
+            rig.t
+        )
+    _restart(rig, tmp_path, close_unknown=True)
+    rec = _rec_with(rig, close_unknown_positions=True, executor_stop_retry_rounds=3)
+    await rec.reconcile(rig.t)
+    assert len(calls) == 1
+    await rec.reconcile(rig.t)
+    assert len(calls) == 2 and calls[-1][1] is True
+
+
+async def _closed_with_running_executor(rig: Rig) -> str:
+    """账本已结束，但它的执行器还在运行列表里（比如 SHUTTING_DOWN 慢）。"""
+    pid = await open_filled(rig)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    rig.registry.put(
+        tracked.model_copy(
+            update={
+                "record": tracked.record.model_copy(
+                    update={"status": PositionStatus.CLOSED, "closed_at": rig.t}
+                )
+            }
+        )
+    )
+    rig.api.auto_terminate_on_stop = False
+    return pid
+
+
+async def test_own_closed_executor_is_isolated_even_with_switch_off(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)  # 开关默认关
+    pid = await _closed_with_running_executor(rig)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0)
+    first = await rig.rec.reconcile(rig.t)
+    await rig.rec.reconcile(rig.t)
+    assert rig.api.stopped == [("ex1", True)]  # 只停一次，不平
+    assert rig.registry.data.foreign_executor_stops["ex1"].position_id == pid
+    assert any(i.position_id == pid and "还在运行列表里" in i.detail for i in first.issues)
+    rig.api.terminate("ex1", "EARLY_STOP", leaves_position=True)
+    await rig.rec.reconcile(rig.t)
+    assert rig.registry.data.foreign_executor_stops == {}
+    assert rig.ex.market_closed == []
+
+
+async def test_reverse_close_waits_until_own_closed_executor_is_isolated(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    pid = await _closed_with_running_executor(rig)
+    explain_reverse(rig, pid)
+    rig.ex.set_position("BTCUSDT", Side.SHORT, 0.015)
+    rig.t += timedelta(minutes=1)
+    first = await rig.rec.reconcile(rig.t)
+    assert rig.ex.close_submissions == {}  # 还有执行器在跑：先隔离，不并行直连
+    assert any("先隔离" in i.detail for i in first.issues)
+    assert rig.api.stopped == [("ex1", True)]
+    rig.api.terminate("ex1", "EARLY_STOP", leaves_position=True)
+    second = await rig.rec.reconcile(rig.t)
+    assert len(rig.ex.close_submissions) == 1
+    assert any(i.kind is ReconcileIssueKind.SIDE_MISMATCH and i.fixed for i in second.issues)

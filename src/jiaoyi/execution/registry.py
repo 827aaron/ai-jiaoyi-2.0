@@ -161,7 +161,8 @@ class EmergencyExit(BaseModel):
 
 
 class ForeignExecutorStop(BaseModel):
-    """对不在账本里的执行器发过 keep_position=True 停止；结果未知不重发，查到终态才删。"""
+    """对不归在管持仓的执行器（不在账本里，或属于已结束的仓）发过 keep_position=True 停止；
+    结果未知默认不重发（可按配置隔几轮再发一次），查到终态才删。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -169,6 +170,10 @@ class ForeignExecutorStop(BaseModel):
     symbol: str
     requested_at: datetime
     error: str | None = None
+    position_id: str | None = None
+    """属于我们已结束的哪笔仓；不在账本里为 None。"""
+    unresolved_rounds: int = 0
+    """停止结果未知后又过了几轮对账仍没确认终止。"""
 
 
 class DayStart(BaseModel):
@@ -199,6 +204,10 @@ class PositionRegistry:
         self._symbol_owners: dict[str, asyncio.Task[object] | None] = {}
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     @asynccontextmanager
     async def symbol_lock(self, symbol: str) -> AsyncIterator[None]:

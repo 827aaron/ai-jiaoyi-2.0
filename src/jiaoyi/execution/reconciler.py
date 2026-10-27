@@ -51,6 +51,12 @@ from jiaoyi.execution.exchange import (
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
 )
+from jiaoyi.execution.exit_resolution import (
+    ResolutionRequest,
+    finish_resolution,
+    pending_resolutions,
+    resolutions_dir,
+)
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
 from jiaoyi.execution.lifeboat import lifeboat_cids, lifeboat_price
@@ -86,6 +92,10 @@ def _signed(side: Side, qty: float) -> float:
     return qty if side is Side.LONG else -qty
 
 
+_TRADES_PAGE = 1000
+"""成交明细一页的条数；拿满一页可能不全，不能当归属证据。"""
+_EVIDENCE_SLACK = timedelta(seconds=10)
+"""归属证据从开仓时间往前多看这么久（和账本回填入场成交同口径）。"""
 _EPS = 1e-9
 """意图数量上限的相对容差（只吸收浮点误差，不是数量对不上的容忍度）。"""
 ExitSource = Literal["unknown", "reverse", "side_mismatch"]
@@ -135,7 +145,10 @@ class ThreeWayReconciler:
         heartbeats: Sequence[Callable[[datetime, Health, str], None]] = (),
         close_unknown_positions: bool = False,
         retry_delays_s: Sequence[float] = RETRY_DELAYS_S,
+        executor_stop_retry_rounds: int = 0,
     ) -> None:
+        self._stop_retry_rounds = executor_stop_retry_rounds
+        """停执行器结果未知后再过几轮仍没终止，就再发一次 keep_position=True 停止；0 = 永不。"""
         self._retry_delays = tuple(retry_delays_s)
         self._unreachable_rounds = 0
         """连续几轮因为一时失败（超时 / 断连）没对成。"""
@@ -220,6 +233,7 @@ class ThreeWayReconciler:
             await self._unreachable(now, e)
             raise ReconcileError(str(e)) from e
         self._unreachable_rounds = 0
+        await self._apply_resolutions(now)
 
         live = self._registry.live()
         # 正在平仓（平仓单已发、执行器还没结算）：币安已平、账本还没结是正常的几秒，
@@ -353,7 +367,7 @@ class ThreeWayReconciler:
 
         # 2. 币安上有仓位但账本里没有：刚结束的仓被反向开了等量的一笔 → 我们的反手仓，当轮平；
         #    其它不是我们开的，只告警（开关打开才平）。已有未完成退出意图的币只核对原意图。
-        await self._settle_foreign_stops()
+        await self._settle_foreign_stops(count_round=True)
         self._foreign_running = self._foreign_executors(running)
         exits = self._registry.data.emergency_exits
         handled = set(reversed_)
@@ -528,8 +542,18 @@ class ThreeWayReconciler:
                 symbol = from_hb_pair(pair)
             except ValueError:
                 continue
-            if str(ex.get("executor_id")) not in known_ids:
-                issues.append(await self._unknown_executor(symbol, str(ex.get("executor_id")), now))
+            eid = str(ex.get("executor_id"))
+            if eid not in known_ids:
+                # 我们已结束的仓的执行器还在跑：它不归任何在管持仓，不管开关都只停不平
+                own = next(
+                    (
+                        t.record.position_id
+                        for t in self._registry.data.positions.values()
+                        if t.record.executor_id == eid and t.record.status is PositionStatus.CLOSED
+                    ),
+                    None,
+                )
+                issues.append(await self._unknown_executor(symbol, eid, now, own))
             elif int(ex.get("error_count") or 0) > 0:
                 # main loop 的静默重试在这里露出来
                 owner = next(
@@ -621,6 +645,9 @@ class ThreeWayReconciler:
             )
         if len(mine) != 1:
             return issue(f"{detail}，同币读到多笔持仓，未自动处理", False)
+        unproven = await self._ownership_unproven(rec, mine[0])
+        if unproven is not None:
+            return issue(f"{detail}，不能证明是我们的反手仓（{unproven}），不下单，人看", False)
         trigger = _ExitTrigger("side_mismatch", mine[0], rec.position_id, f"{detail}（反手仓）")
         return await self._emergency_exit(rec.symbol, trigger) or issue(detail, False)
 
@@ -657,6 +684,15 @@ class ThreeWayReconciler:
                 symbol=symbol,
                 position_id=rec.position_id,
                 detail=f"{detail}；托管使用只减仓，不能凭等量断言归属，未自动平未知仓",
+                fixed=False,
+            )
+        unproven = await self._ownership_unproven(rec, pos)
+        if unproven is not None:
+            return ReconcileIssue(
+                kind=ReconcileIssueKind.SIDE_MISMATCH,
+                symbol=symbol,
+                position_id=rec.position_id,
+                detail=f"{detail}；不能证明是我们的（{unproven}），不下单，人看",
                 fixed=False,
             )
         return await self._emergency_exit(
@@ -704,8 +740,11 @@ class ThreeWayReconciler:
                 out.setdefault(symbol, set()).add(eid)
         return out
 
-    async def _settle_foreign_stops(self) -> None:
-        """停过的不认识执行器：逐项查到明确终态才删记录；查不到、查失败都保留（同币不另发直连）。"""
+    async def _settle_foreign_stops(self, *, count_round: bool = False) -> None:
+        """停过的执行器：逐项查到明确终态才删记录；查不到、查失败都保留（同币不另发直连）。
+
+        ``count_round``（每轮对账一次）：停止结果未知的，没终止就记一轮；配置了
+        ``executor_stop_retry_rounds`` 且到数，再发一次 keep_position=True 停止。"""
         stops = self._registry.data.foreign_executor_stops
         for eid in list(stops):
             try:
@@ -715,6 +754,153 @@ class ThreeWayReconciler:
             if executor_query_state(detail, eid) == "terminal":
                 stops.pop(eid, None)
                 self._registry.save()
+                continue
+            stop = stops[eid]
+            if not count_round or stop.error is None:
+                continue
+            rounds = stop.unresolved_rounds + 1
+            if self._stop_retry_rounds <= 0 or rounds < self._stop_retry_rounds:
+                stops[eid] = stop.model_copy(update={"unresolved_rounds": rounds})
+                self._registry.save()
+                continue
+            stops[eid] = stop.model_copy(update={"unresolved_rounds": 0})
+            self._registry.save()
+            try:
+                await self._api.stop_executor(eid, keep_position=True)
+            except HbApiError as e:
+                if e.definite_rejection:
+                    stops.pop(eid, None)
+                else:
+                    stops[eid] = stops[eid].model_copy(update={"error": repr(e)})
+            else:
+                stops[eid] = stops[eid].model_copy(update={"error": None})
+            self._registry.save()
+
+    async def _ownership_unproven(self, rec: PositionRecord, pos: ExchangePosition) -> str | None:
+        """反手仓归属证据：从 ``rec`` 开仓前起，这个币的每一笔成交都来自认得出的我方订单，
+        且我方成交的净量正好等于币安现在的净仓。证实返回 None；否则返回原因（不下单）。"""
+        trades_read = getattr(self._exchange, "user_trades", None)
+        if trades_read is None or getattr(self._exchange, "entry_order", None) is None:
+            return "缺成交明细 / 订单查询能力"
+        since = rec.opened_at - _EVIDENCE_SLACK
+        try:
+            trades = [t for t in await trades_read(rec.symbol, since) if t.time >= since]
+            ours = await self._our_order_ids(rec.symbol, since)
+        except (ExchangeError, HbApiError) as e:
+            return f"查成交或订单失败：{e!r}"
+        if ours is None:
+            return "有我方订单的身份查不到"
+        if len(trades) >= _TRADES_PAGE:
+            return "成交明细可能不全"
+        foreign = [t for t in trades if t.order_id not in ours]
+        if foreign:
+            return f"{len(foreign)} 笔成交不是认得出的我方订单（可能是手动单）"
+        net = sum(t.qty if t.side == "buy" else -t.qty for t in trades)
+        want = _signed(pos.side, pos.quantity)
+        if not math.isclose(net, want, rel_tol=1e-6, abs_tol=1e-12):
+            return f"我方成交净量 {net:g} 解释不了币安净仓 {want:g}"
+        return None
+
+    async def _our_order_ids(self, symbol: str, since: datetime) -> set[str] | None:
+        """这段时间里这个币上我方订单的交易所订单号：执行器订单、保命止损、直连平仓、托管腿、
+        对账员平仓单。执行器的订单清单拿不到就返回 None（认不全就不能当证据）。"""
+        read = self._exchange.entry_order  # type: ignore[attr-defined]
+        out: set[str] = set()
+
+        async def by_cid(cid: str) -> None:
+            order = await read(symbol, cid)
+            if order is not None:
+                out.add(str(order.order_id))
+
+        for t in self._registry.data.positions.values():
+            rec = t.record
+            if rec.symbol != symbol or (rec.closed_at is not None and rec.closed_at < since):
+                continue
+            if rec.executor_id:
+                detail = await self._retry(partial(self._api.get_executor, rec.executor_id))
+                info = detail.get("custom_info") if isinstance(detail, dict) else None
+                ids = info.get("order_ids") if isinstance(info, dict) else None
+                if not isinstance(ids, list) or not all(isinstance(c, str) and c for c in ids):
+                    return None
+                for cid in ids:
+                    await by_cid(cid)
+            if rec.lifeboat is not None and rec.lifeboat.exchange_order_id:
+                out.add(rec.lifeboat.exchange_order_id)
+            for cid in lifeboat_cids(rec.position_id):
+                await by_cid(cid)
+            for g in range(1, t.direct_close_generation + 1):
+                await by_cid(f"dc-{rec.position_id}-{g}")
+            if t.direct_close_order_id:
+                out.add(t.direct_close_order_id)
+            if t.server_protection is not None:
+                out.update(
+                    leg.actual_order_id for leg in t.server_protection.legs if leg.actual_order_id
+                )
+        plan = self._registry.data.emergency_exits.get(symbol)
+        if plan is not None:
+            for g in range(1, plan.generation + 1):
+                await by_cid(f"dc-{plan.exit_id}-{g}")
+            if plan.order_id:
+                out.add(plan.order_id)
+        return out
+
+    async def _apply_resolutions(self, now: datetime) -> None:
+        """执行 ``jiaoyi resolve-exit`` 写下的人工结束请求：同币锁里核对 CID 和净仓再删意图。"""
+        root = resolutions_dir(self._registry.path)
+        for path, req in pending_resolutions(root):
+            if req is None:
+                finish_resolution(root, path, None, False, "请求文件格式不对，未执行")
+                continue
+            async with self._registry.symbol_lock(req.symbol):
+                applied, text, removed = await self._resolve_one(req)
+            finish_resolution(root, path, req, applied, text, removed)
+            if self._rec is not None:
+                self._rec.record(
+                    now,
+                    Outcome.ACTION if applied else Outcome.ERROR,
+                    f"人工结束平仓意图{'已执行' if applied else '未执行'}：{text}",
+                    symbol=req.symbol,
+                    input=req.model_dump(mode="json"),
+                    output={"applied": applied, "removed": removed},
+                )
+            await self._send(
+                now,
+                AlertLevel.WARN,
+                "人工结束对账员平仓意图" + ("" if applied else "（未执行）"),
+                f"{req.symbol} {text}",
+                req.symbol,
+                f"exit_resolution:{req.id}",
+                "reconcile",
+            )
+
+    async def _resolve_one(self, req: ResolutionRequest) -> tuple[bool, str, dict[str, Any] | None]:
+        exits = self._registry.data.emergency_exits
+        plan = exits.get(req.symbol)
+        if plan is None:
+            return False, f"{req.symbol} 已没有未完成的平仓意图", None
+        if plan.client_order_id != req.client_order_id:
+            return (
+                False,
+                f"CID 对不上：账本里是 {plan.client_order_id}，请求的是 {req.client_order_id}",
+                None,
+            )
+        if not req.force:
+            read = getattr(self._exchange, "positions_evidence", None)
+            try:
+                if read is None:
+                    raise ExchangeError("缺严格持仓查询能力")
+                left = [p for p in await read() if p.symbol == req.symbol]
+            except ExchangeError as e:
+                return False, f"读不到严格持仓（{e!r}），没加 --force 不结束", None
+            if left:
+                qty = sum(_signed(p.side, p.quantity) for p in left)
+                return False, f"币安仍有净仓 {qty:g}，没加 --force 不结束", None
+        exits.pop(req.symbol, None)
+        self._registry.save()
+        removed = plan.model_dump(mode="json")
+        why = f"（{req.reason}）" if req.reason else ""
+        force = "，--force" if req.force else ""
+        return True, f"已结束意图 {plan.exit_id}（{plan.client_order_id}{force}）{why}", removed
 
     def _exit_blocker(
         self, symbol: str, source: ExitSource, position_id: str | None, side: Side
@@ -944,18 +1130,26 @@ class ThreeWayReconciler:
         return None
 
     async def _unknown_executor(
-        self, symbol: str, executor_id: str, now: datetime
+        self, symbol: str, executor_id: str, now: datetime, own_position_id: str | None = None
     ) -> ReconcileIssue:
-        """不在账本里的执行器。开关打开时只停不平（keep_position=True），免得它和直连平仓
-        同时退出；余仓下一轮按无主仓走带 CID 的意图。停止请求先落盘，结果未知不重发。"""
-        detail = f"hummingbot 里有运行中的执行器 {executor_id} 不在账本里"
+        """不归在管持仓的执行器：只停不平（keep_position=True），免得它和直连平仓同时退出；
+        余仓下一轮按无主仓走带 CID 的意图。不在账本里的看开关；已结束仓的（``own_position_id``）
+        不看开关，它不下单。停止请求先落盘，结果未知不重发（除非配置了重试轮数）。"""
+        if own_position_id is not None:
+            detail = f"已结束的 {own_position_id} 的执行器 {executor_id} 还在运行列表里"
+            kind = ReconcileIssueKind.EXECUTOR_FAILED
+            how = ""
+        else:
+            detail = f"hummingbot 里有运行中的执行器 {executor_id} 不在账本里"
+            kind = ReconcileIssueKind.ORPHAN_POSITION
+            how = "开关已打开但"
 
         def issue(text: str, fixed: bool) -> ReconcileIssue:
             return ReconcileIssue(
-                kind=ReconcileIssueKind.ORPHAN_POSITION, symbol=symbol, detail=text, fixed=fixed
+                kind=kind, symbol=symbol, position_id=own_position_id, detail=text, fixed=fixed
             )
 
-        if not self._close_unknown:
+        if not self._close_unknown and own_position_id is None:
             return issue(detail, False)
         stops = self._registry.data.foreign_executor_stops
         pending = stops.get(executor_id)
@@ -963,7 +1157,10 @@ class ThreeWayReconciler:
             why = f"，请求结果未知（{pending.error}）" if pending.error else ""
             return issue(f"{detail}；已请求停止（保留仓位）{why}，等它明确终止，不重发", False)
         stops[executor_id] = ForeignExecutorStop(
-            executor_id=executor_id, symbol=symbol, requested_at=now
+            executor_id=executor_id,
+            symbol=symbol,
+            requested_at=now,
+            position_id=own_position_id,
         )
         self._registry.save()
         try:
@@ -972,14 +1169,14 @@ class ThreeWayReconciler:
             if e.definite_rejection:
                 stops.pop(executor_id, None)
                 self._registry.save()
-                return issue(f"{detail}；开关已打开但停止被明确拒绝：{e!r}", False)
+                return issue(f"{detail}；{how}停止被明确拒绝：{e!r}", False)
             stops[executor_id] = stops[executor_id].model_copy(update={"error": repr(e)})
             self._registry.save()
-            return issue(f"{detail}；开关已打开但停止结果未知：{e!r}，只查不重发", False)
+            return issue(f"{detail}；{how}停止结果未知：{e!r}，只查不重发", False)
         await self._settle_foreign_stops()
         if executor_id in stops:
-            return issue(f"{detail}；已按开关请求停止（保留仓位），还没确认终止", False)
-        return issue(f"{detail}；已按开关停止（保留仓位），余仓按无主仓走带 CID 的平仓", True)
+            return issue(f"{detail}；已请求停止（保留仓位），还没确认终止", False)
+        return issue(f"{detail}；已停止（保留仓位），余仓按无主仓走带 CID 的平仓", True)
 
     async def _repair_lifeboat(self, position_id: str) -> tuple[ReconcileIssue, bool]:
         """补挂保命止损。补不上的账本内持仓不能一直裸着：-2021 当轮平，其它原因连续几轮失败后平。"""
