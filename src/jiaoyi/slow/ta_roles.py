@@ -435,6 +435,18 @@ PM_SELL_NEW = (
 )
 PULLBACK_OLD = "waits for a pullback"
 PULLBACK_NEW = "waits for a pullback or a bounce"
+# slow.toml [meeting] snapshot_label = neutral：快照不叫「权威」，写明它截到最后一根已收盘 K 线
+SNAPSHOT_TRUTH = (
+    "Treat it as the source of truth for exact prices and indicator values; if another tool "
+    "disagrees with it, say so instead of inventing a reconciled number."
+)
+SNAPSHOT_NEUTRAL = (
+    "It ends at the last closed {IND} bar, so it can be as much as one {IND} bar old; it states "
+    "that bar's close time and how many minutes before now it was, and any live price in the "
+    "meeting context is newer. Quote exact closed-bar prices and indicator values from it; if "
+    "another tool disagrees with it, say so instead of inventing a reconciled number."
+)
+
 MARKET_MIRROR_OLD = "Do not say a level held or bounced unless the bars show it."
 MARKET_MIRROR_NEW = (
     "Do not say a level held, or that price bounced off it or was rejected at it, unless the "

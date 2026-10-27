@@ -408,7 +408,7 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 ### K 线表（研究 v3，2026-10-23）
 
-- **分析师 K 线**：不再只给 1h×200，改成按最长持仓档分三段（从细到粗，只用已收盘的）：30m / 1h / 2h 持仓 = 15m×96 + 1h×72 + 4h×60；4h 起 = 1h×72 + 4h×90 + 1d×60。开会间隔比最细一段还短（15m / 30m 开会配 4h 起持仓）时最前面补 15m×48。`slow.toml [meeting] analyst_klines = ["15m x 96", ...]` 可覆盖。指标仍是 1h×500，不用 1m / 5m（5 分钟线多数根比来回手续费还小）。
+- **分析师 K 线**：不再只给 1h×200，改成按最长持仓档分三段（从细到粗，只用已收盘的，表在 `core/profiles.py` 的 `ANALYST_KLINES`）：30m 持仓 = 5m×48 + 15m×48 + 1h×48；1h / 2h = 5m×48 + 15m×96 + 1h×72；4h = 15m×96 + 1h×72 + 4h×60；8h 起 = 1h×72 + 4h×90 + 1d×60。开会间隔比最细一段还短时最前面补 15m×48。`slow.toml [meeting] analyst_klines = ["15m x 96", ...]` 可覆盖。指标 / 已收盘快照的周期按档位（`INDICATOR_INTERVAL`：30m、1h 5m；2h 15m；4h 1h；8h 起 4h），`[meeting] snapshot_interval` 可覆盖。
 - **关键位候选周期**：摆动高低点 / 成交密集区从 15m（30m–2h 持仓）/ 1h（4h、8h）/ 4h（12h、24h）的 300 根 K 线找；昨日 / 7 日高低点照旧用日线，提示词里标成「突破位」（收盘越过它是延续，不是反转点）。
 - **止损不再贴关键位**：`fast_loop.stop_level_snap` 默认 `false`，风控员不再把止损挪到关键位外侧（价格碰到关键位后 93% 会穿过 0.1 ATR）；`stop_level_buffer_atr` 只在 `true` 时用。
 - **止盈**：风控员范围全档 `min_tp_r` 1.0 / `max_tp_r` 3.0，提示词建议 1.2–2.0（`TP_HINT`）。
@@ -552,3 +552,22 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 开了任何一个开关时，启动会自检：在一场假的按场配置里读回设置，读不回（TradingAgents 改版、找不到 `_run_config`）就拒绝启动；会议中途找不到也直接报错。不会出现记录写着 mirror / neutral、提示词却没用上的情况。
 
 回退到这个功能之前的版本：先把这五个键从 `config/slow.toml` 删掉（旧代码的配置禁止多余字段，留着会拒绝启动）。
+
+## 会议输入的新鲜度（`[meeting]`，不能有延后信息）
+
+依据 `stale-input-audit-2026-10-28`：「上一根已收盘小时线」被当成「近 1 小时」，单币会议没有实时价，临时会用旧简报。下面八个键都不写 = 现状，提示词和配置一字不差；`[meeting]` 和偏空整改那几个键一样只在 `slow.toml` 里改，面板设置页不放。
+
+| 键 | 取值（默认在前） | 作用 |
+|---|---|---|
+| `snapshot_interval` | 不写 / `"5m"` `"15m"` `"30m"` `"1h"` `"4h"` | 行情分析师的已收盘快照（`get_verified_market_snapshot`）和 `get_indicators` 用的 K 线周期；不写 = 档位的（4h 档 1h，最旧约 1 小时加开会时长）。提示词里的 `{IND}` 和多空比的统计周期跟着换 |
+| `snapshot_label` | `"legacy"` / `"neutral"` | neutral：快照不再叫 source of truth，写「最后一根已收盘 K 线 HH:MM 收盘，距现在 N 分钟，之后的价格变动不在快照里」；行情分析师的说明同样改写 |
+| `live_price_line` | `false` / `true` | 会议说明加一行：开会时币安最新成交价、最后一根已收盘 K 线（快照周期）几点收、距现在几分钟、现价离它涨跌多少，没走完的那根标成 partial 并给开 / 高 / 低；转作战指令前再取一次现价写进转卡提示词（距开会开始变了多少，已越过失效价或区间整段在价格后面就选 no_trade）。每场会 4 个公开请求 |
+| `stale_on_arrival` | `false` / `true` | 转卡之后代码再核对一次（不靠模型）：做多现价 ≤ 组合经理 `Invalidation` 行的价、或进场区间整段在现价上方；做空现价 ≥ 失效价、或区间整段在现价下方 → 改成观望，理由写 `stale_on_arrival：…`，记日志、开会实况和 `meeting_setup.stale_on_arrival`。现价取不到时用关键位那一步的最新 K 线价 |
+| `input_time_labels` | `"legacy"` / `"explicit"` | 总盘会表格 `takerBuy1h` / `OI1h` 改成 `takerBuy_closedHour[09:00-10:00Z]` / `OI_closedHour[…]`（窗口来自选币来源元数据，不知道写 `time unknown`）；单币会议资金费率写「Last settled funding rate (settled at HH:MM UTC)」，再加 `premiumIndex` 的实时估算和下次结算时间，持仓量写明首尾两个整点 |
+| `market_table_rolling` | `false` / `true` | 整轮总盘会的池子概况多一行 `rolling_60m`：每个币 1 分钟 K 线，从「开会时刻取整到分钟 − 60 分钟」那一分钟的开盘价到此刻最新价（最后一分钟没走完），10:54 开会就是 09:54–10:54。起点那一分钟没有的币记缺失。原来的 `completed_hour` 一行不变。只改整轮总盘会，不改 Flash 只更新大盘（那一处归大盘台） |
+| `latest_market_regime` | `false` / `true` | 整轮里每个单币会拿到并发名额、真正开始时取当时最新发布的大盘判断（本轮中途 Flash 更新过就用新的），卡上该币的 `source_market_view_id` 跟着用那一版；`meeting_setup` 记 `regime_source`（round / latest）、`regime_market_view_id`、`regime_observed_at` |
+| `event_brief_refresh` | `false` / `true` | 临时会开会前刷新大盘简报（简报服务自己 10 分钟内不重复拉）；刷新失败记一条错误、用上一份 |
+
+推荐的 Demo 配置：八项全开，`snapshot_interval = "15m"`、`snapshot_label = "neutral"`、`input_time_labels = "explicit"`。新增请求都走 `binance_gate` 限流闸：每场单币会约 5 个、每轮总盘会约池子大小个。
+
+回退到这个功能之前的版本：先把这八个键从 `config/slow.toml` 删掉（旧代码的配置禁止多余字段，留着会拒绝启动）。

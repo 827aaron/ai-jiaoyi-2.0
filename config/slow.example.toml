@@ -54,7 +54,7 @@ analysts_crypto = ["market", "social", "news"]                 # 分析师越少
 analysts_stock  = ["market", "social", "news", "fundamentals"]
 debate_rounds = 1        # 多空辩论轮数 0–3
 risk_rounds   = 1        # 风控讨论轮数 0–3
-# analyst_klines = ["15m x 96", "1h x 72", "4h x 60"]  # 分析师看的 K 线（周期 x 根数，从细到粗）；不写 = 按最长持仓档（30m–2h 这一组；4h 起 1h x 72 / 4h x 90 / 1d x 60）
+# analyst_klines = ["15m x 96", "1h x 72", "4h x 60"]  # 分析师看的 K 线（周期 x 根数，从细到粗）；不写 = 按最长持仓档：30m 5m x 48 / 15m x 48 / 1h x 48；1h、2h 5m x 48 / 15m x 96 / 1h x 72；4h 就是这一组；8h 起 1h x 72 / 4h x 90 / 1d x 60
 # quick_model / deep_model 不写 = 用所选 provider 的默认模型
 # （两档默认都是 DeepSeek 4.1：deepseek 直连 deepseek-flash；openrouter deepseek/deepseek-v4.1-flash）
 pick_tier    = "quick"   # 总盘会（挑币）用 quick（flash，便宜）还是 deep（pro）
@@ -74,6 +74,16 @@ max_retries = 6
 # crowd_ratio_mode = "raw"       # 账户多空比：raw（原值）/ relative（加相对 30 天中位数的偏离）
 # bias_fix_ab = 0.0              # 0 = 上面四项每场会都按配置；0.5 = 每个改了的开关各自独立一半会议开、一半现状（析因对照）
 #                                  推荐 Demo：debate_first = "bear"、funding_label = "neutral"、bear_bull_symmetry = "mirror"、crowd_ratio_mode = "relative"、bias_fix_ab = 0.5
+# 输入新鲜度（默认全是现状；见 docs/slow.md「会议输入的新鲜度」）
+# snapshot_interval = "15m"      # 行情分析师的已收盘快照和指标用几分钟 K 线（5m / 15m / 30m / 1h / 4h）；不写 = 按最长持仓档（4h 档是 1h）
+# snapshot_label = "legacy"      # legacy（快照叫 source of truth，现状）/ neutral（写明最后一根已收盘 K 线几点收、距现在几分钟）
+# live_price_line = false        # 会议说明加实时价一行（现价、离最后收盘涨跌、未收盘那根标 partial），转卡前再取一次
+# stale_on_arrival = false       # 转卡后现价已越过失效价、或进场区间整段在价格错误一侧 → 观望（stale_on_arrival）
+# input_time_labels = "legacy"   # legacy / explicit（表格 takerBuy / OI 写明哪个已收盘小时，单币资金费率写「上次结算 HH:MM」+ 实时估算）
+# market_table_rolling = false   # 总盘会另给滚动 60 分钟涨跌家数（截到开会这一刻）
+# latest_market_regime = false   # 整轮里每个单币会开始时用最新发布的大盘判断（关 = 本轮开始时的）
+# event_brief_refresh = false    # 临时会开会前刷新大盘简报（10 分钟缓存）
+#                                  推荐 Demo：全部打开，snapshot_interval = "15m"
 
 [schedule]
 # 这一段不写的键取 app.toml 所选持仓档位的默认（core/profiles.py）；写了就覆盖档位。下面注释里是 2h 档的值
