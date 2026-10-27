@@ -206,6 +206,75 @@ def filled_entry(detail: dict[str, Any]) -> float | None:
     return entry if traded or not reported else None
 
 
+def _never_submitted(tracked: TrackedPosition, detail: dict[str, Any]) -> bool:
+    """HB 启动预算校验在控制循环下单前退出；空订单列表本身不能证明没下过单。
+
+    只认目标 HB 的这一条明确路径，不把 SYSTEM_CLEANUP、404、未知字段或历史成交抹成失败。
+    调用方仍须持退出锁并核对两次交易所零仓；这里不授权撤保护或发任何订单。
+    """
+    rec = tracked.record
+    if (
+        rec.executor_id is None
+        or executor_query_state(detail, rec.executor_id) != "terminal"
+        or detail.get("controller_id") != f"{MARKER_PREFIX}{rec.position_id}"
+        or detail.get("trading_pair") != to_hb_pair(rec.symbol)
+        or str(detail.get("close_type") or "").upper().removeprefix("CLOSETYPE.")
+        != "INSUFFICIENT_BALANCE"
+        or detail.get("is_trading") is not False
+        or rec.status is not PositionStatus.OPENING
+        or rec.entry_price is not None
+        or rec.intended_price is not None
+        or rec.exit_price is not None
+        or rec.closed_at is not None
+        or rec.close_reason is not None
+        or rec.lifeboat is not None
+        or rec.realized_pnl_usdt is not None
+        or rec.fees_usdt != 0
+        or tracked.filled_at is not None
+        or tracked.entry_client_order_id is not None
+        or tracked.entry_original_quantity is not None
+        or tracked.requested_close is not None
+        or tracked.exit_cleanup_pending
+        or tracked.hb_close_pending
+        or tracked.hb_close_unknown
+        or tracked.direct_close_pending
+        or tracked.direct_close_generation != 0
+        or any(
+            value is not None
+            for value in (
+                tracked.direct_close_client_order_id,
+                tracked.direct_close_order_id,
+                tracked.direct_close_order_status,
+                tracked.direct_close_quantity,
+                tracked.direct_close_price,
+                tracked.direct_close_fee,
+            )
+        )
+    ):
+        return False
+    info = detail.get("custom_info")
+    if (
+        not isinstance(info, dict)
+        or info.get("order_ids") != []
+        or "open_order_last_update" not in info
+        or info["open_order_last_update"] is not None
+        or info.get("held_position_orders") != []
+    ):
+        return False
+    # HB 的 JSON 数值可能序列化为字符串；不接受布尔、缺项、NaN 或带费用的矛盾记录。
+    for field in ("filled_amount_quote", "cum_fees_quote", "net_pnl_quote"):
+        value = detail.get(field)
+        if not isinstance(value, (str, int, float, Decimal)) or isinstance(value, bool):
+            return False
+        try:
+            number = Decimal(str(value))
+        except ArithmeticError:
+            return False
+        if not number.is_finite() or number != 0:
+            return False
+    return True
+
+
 def tp_price(tracked: TrackedPosition, entry: float) -> float:
     """账本里的止盈价。限价止盈 = 币安上那张限价单的价格（按 tickSize 往有利方向取整：多单卖出
     向下、空单买入向上，和 ``_executor_config`` 的挂法一致），快环判「穿过止盈价没成交」也按它。"""
@@ -1297,6 +1366,13 @@ class HbExecutorAdapter:
             tracked = self._registry.get(rec.position_id) or tracked
         close_type = str(detail.get("close_type") or "").upper().removeprefix("CLOSETYPE.")
         never_filled = rec.entry_price is None and entry is None
+        never_submitted = never_filled and _never_submitted(tracked, detail)
+        if (
+            never_filled
+            and tracked.entry_client_order_id is None
+            and (not never_submitted or self._exchange is None)
+        ):
+            return tracked  # 没有真实订单身份时，只能用明确未提交证据 + 交易所零仓收尾。
         if self._exchange is not None:
             # 执行器说它结束了，不等于币安上的仓平了（hummingbot 重启时执行器被 SYSTEM_CLEANUP
             # 终止，仓位还在）。以币安为准：仓还在就不能记成已平、更不能撤保命止损。
@@ -1308,7 +1384,7 @@ class HbExecutorAdapter:
                     return tracked  # 入场证据不完整，不能把有仓位的开仓记录标 FAILED
                 return await self._executor_ended_position_remains(tracked, close_type, held)
         if self._exchange is not None and (
-            not await self.entry_finished(rec.position_id)
+            (not never_submitted and not await self.entry_finished(rec.position_id))
             or await self._held_quantity(rec.symbol) != 0
         ):
             return tracked
@@ -1318,6 +1394,8 @@ class HbExecutorAdapter:
             PositionStatus.FAILED,
         ):
             return current  # 等币安回话的时候别的路径（直连平仓 / 对账员）已经结过账
+        if never_submitted and (current is None or not _never_submitted(current, detail)):
+            return current or tracked  # 等查仓期间的认领 / 成交证据不能被旧快照覆盖。
         if never_filled:
             status, reason = PositionStatus.FAILED, None
         else:
@@ -1332,7 +1410,9 @@ class HbExecutorAdapter:
             status=status,
             closed_at=self._clock(),
             close_reason=reason,
-            realized_pnl_usdt=float(detail.get("net_pnl_quote") or 0.0),
+            realized_pnl_usdt=None
+            if never_submitted
+            else float(detail.get("net_pnl_quote") or 0.0),
             fees_usdt=abs(float(detail.get("cum_fees_quote") or 0.0)),
         )
         why = _NOT_FILLED_CN.get(close_type, close_type or "未知")
@@ -1341,7 +1421,11 @@ class HbExecutorAdapter:
                 Outcome.ERROR,
                 f"{rec.symbol} 开仓没成交，执行器已结束：{why}",
                 rec,
-                output={"not_filled": True, "close_type": close_type or None},
+                output={
+                    "not_filled": True,
+                    "close_type": close_type or None,
+                    **({"never_submitted": True} if never_submitted else {}),
+                },
             )
         else:
             closed = tracked.record
@@ -1372,7 +1456,8 @@ class HbExecutorAdapter:
                 f"never_filled:{rec.position_id}",
                 kind="order_failed",
             )
-        await self._cancel_lifeboat(tracked.record)
+        if not never_submitted:
+            await self._cancel_lifeboat(tracked.record)
         return self._registry.get(rec.position_id) or tracked
 
     # ------------------------------------------------------------------ 按币安成交回填
