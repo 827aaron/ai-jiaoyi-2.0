@@ -67,6 +67,12 @@ speech_min_chars = 50                     # 质量门槛：每个辩手每轮发
 report_min_chars = 50                     # 分析师报告至少多少字，低于算缺失（行情技术缺了整场失败；新闻/社交/基本面缺了仓位档位下调一级）
 retry_min_chars = 20                      # 回答少于多少字算过短
 max_retries = 6
+# 偏空整改（默认全是现状；见 src/jiaoyi/slow/bias_fix.py）
+# debate_first = "bull"          # 多空辩论谁先说：bull（现状，空头最后说）/ bear / alternate（按会议交替）
+# funding_label = "legacy"       # 资金费率说明：legacy（正费率=多头拥挤，现状）/ neutral（谁付谁 + 基准 +0.01%/8h）
+# bear_bull_symmetry = "legacy"  # legacy（只有空头有「拥挤 / 不再是燃料」）/ mirror（多头加对称的一条）
+# crowd_ratio_mode = "raw"       # 账户多空比：raw（原值）/ relative（加相对 30 天中位数的偏离）
+# bias_fix_ab = 0.0              # 0 = 上面四项每场会都按配置；0.5 = 一半会议用上面四项、一半用现状，同时对照
 
 [schedule]
 # 这一段不写的键取 app.toml 所选持仓档位的默认（core/profiles.py）；写了就覆盖档位。下面注释里是 2h 档的值

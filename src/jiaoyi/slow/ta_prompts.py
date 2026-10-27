@@ -362,14 +362,46 @@ _ROLE_TEXT = {
 }
 
 
-def role_prompt(role: str, p: PromptParams, target: str = "asset") -> str:
+# 偏空整改开关（bias_fix.py），默认都不生效，提示词与原来一字不差。
+# bear_bull_symmetry = mirror：多头加上和空头对称的一条结构性论据
+BULL_MIRROR_OLD = "often precedes a bounce).\n"
+BULL_MIRROR_NEW = (
+    "often precedes a bounce), a crowded short (deeply negative funding, open interest rising "
+    "into support); longs that were already flushed out are no longer fuel for a drop.\n"
+)
+# funding_label = neutral：空头那条「拥挤」里的资金费率写明基准，只有明显高于基准才算
+BEAR_FUNDING_OLD = "a crowded long (high funding, open "
+BEAR_FUNDING_NEW = (
+    "a crowded long (funding well above the Binance baseline of +0.01% per 8h, not merely "
+    "positive; open "
+)
+
+
+def role_prompt(
+    role: str,
+    p: PromptParams,
+    target: str = "asset",
+    *,
+    mirror: bool = False,
+    neutral_funding: bool = False,
+) -> str:
     """多空研究员 / 风控三人的正文（数据块和辩论记录由节点按原版格式拼在后面）。
-    「价格行为」的周期跟这一档同一组词。"""
+    「价格行为」的周期跟这一档同一组词。``mirror`` / ``neutral_funding`` 见上面两组常量。"""
     text = _ROLE_TEXT[role]
+    if mirror and role == "bull":
+        text = _swap(text, BULL_MIRROR_OLD, BULL_MIRROR_NEW)
+    if neutral_funding and role == "bear":
+        text = _swap(text, BEAR_FUNDING_OLD, BEAR_FUNDING_NEW)
     if role in _PRICE_TAIL:
         action = words(p).price_action.replace("{price_tail}", _PRICE_TAIL[role])
         text = text.replace("{price_action}", action)
     return fill(text.replace("{target}", target), p)
+
+
+def _swap(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:  # 正文被改过却忘了改这里：宁可报错也不悄悄不生效
+        raise RuntimeError(f"提示词里找不到要替换的那句：{old!r}")
+    return text.replace(old, new)
 
 
 # ---------------------------------------------------------------- 4.5 新闻分析师（crypto）

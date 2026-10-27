@@ -112,6 +112,8 @@ class Analysis:
     card_symbol: CardSymbol
     cost_usd: float = 0.0
     usage: dict[str, int] | None = None  # input_tokens / output_tokens / reasoning_tokens
+    # 这场会实际用的偏空整改设置（bias_fix.MeetingSetup.record()）：分组、谁先发言等；旧引擎没有
+    setup: dict[str, str] | None = None
 
 
 class MeetingEngine(Protocol):
@@ -1191,7 +1193,7 @@ class BattleCardCommander:
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
-            self._journal.record(card, [symbol])
+            self._journal.record(card, [symbol], {symbol: res.setup})
         self._record_card(card, started)
         if nomination is not None:
             self._write(
@@ -2203,7 +2205,7 @@ class BattleCardCommander:
             self._notify_card()
             self._save_card()
             if self._journal is not None:
-                self._journal.record(card, [e.symbol])
+                self._journal.record(card, [e.symbol], {e.symbol: res.setup})
             self._record_card(card, time.monotonic(), partial=True)  # 面板马上显示这个币
             return res
 
@@ -2283,6 +2285,7 @@ class BattleCardCommander:
                         ),
                         res.cost_usd,
                         res.usage,
+                        res.setup,
                     )
             except Exception as exc:
                 self._charge(-est)
@@ -2311,6 +2314,7 @@ class BattleCardCommander:
                     started,
                     res.cost_usd,
                     usage=res.usage,
+                    setup=res.setup,
                 )
                 raise
             self._log_symbol(
@@ -2321,6 +2325,7 @@ class BattleCardCommander:
                 res.cost_usd,
                 cs,
                 usage=res.usage,
+                setup=res.setup,
             )
             return res
 
@@ -2558,6 +2563,7 @@ class BattleCardCommander:
         cs: CardSymbol | None = None,
         estimated: bool = False,
         usage: dict[str, int] | None = None,
+        setup: dict[str, str] | None = None,
     ) -> None:
         ms = (time.monotonic() - started) * 1000
         self._bump(ok=outcome is not Outcome.ERROR, cost=cost, ms=ms)
@@ -2566,20 +2572,25 @@ class BattleCardCommander:
             outcome=outcome,
             summary=summary[:200],
             input={"score": entry.score, "reasons": entry.reasons},
-            output=self._symbol_output(cs, estimated, usage),
+            output=self._symbol_output(cs, estimated, usage, setup),
             latency_ms=ms,
             cost_usd=cost,
         )
 
     @staticmethod
     def _symbol_output(
-        cs: CardSymbol | None, estimated: bool, usage: dict[str, int] | None
+        cs: CardSymbol | None,
+        estimated: bool,
+        usage: dict[str, int] | None,
+        setup: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         out: dict[str, Any] = (
             cs.model_dump(mode="json") if cs is not None else {"cost_estimated": estimated}
         )
         if usage is not None:  # 面板「AI 费用」按模型 token 展示
             out["usage"] = usage
+        if setup is not None:  # 偏空整改的分组和设置，复盘按组对照
+            out["meeting_setup"] = setup
         return out
 
     def _record_card(self, card: BattleCard, started: float, *, partial: bool = False) -> None:

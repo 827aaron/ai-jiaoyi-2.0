@@ -3,8 +3,8 @@
 做法：``tradingagents.graph.setup`` 是按名字引用 ``create_*`` 的，所以替换模块属性就生效，
 不改开源代码。新节点的状态读写和原版（0.7.0，e8f5503）完全一样，只换提示词正文；
 持仓档的参数（{H} 等）从这场会的运行配置里读（``jiaoyi_prompt``，由引擎的 ``build_config`` 写入，
-只跟档位有关，所有会议一样）。每场会不同的东西（总盘会的判断、挑币理由、持仓说明）走
-``PerpGraph`` 的 state，不进配置，所以同时开几场也不会串。
+只跟档位有关，所有会议一样；偏空整改设置例外，见 ``SETUP_KEYS``）。每场会不同的东西
+（总盘会的判断、挑币理由、持仓说明）走 ``PerpGraph`` 的 state，不进配置，所以同时开几场也不会串。
 
 替换的角色：多空研究员、风控三人、新闻分析师、情绪分析师（加密币；美股永续照旧走原版）。
 只在用到时才导入 tradingagents。
@@ -45,6 +45,24 @@ def lean_from_config() -> str:
     raw = get_config().get(PROMPT_KEY) or {}
     lean = str(raw.get("lean") or "M").upper()
     return lean if lean in ("S", "M", "L") else "M"
+
+
+SETUP_KEYS = ("debate_first", "funding_label", "bear_bull_symmetry", "crowd_ratio_mode")
+"""这场会实际用的偏空整改设置（bias_fix.MeetingSetup），由 ``build_config`` 写进 ``jiaoyi_prompt``。
+
+和档位参数不同，这几项每场会可能不一样（对照分组 / 交替先发言）。照样放配置是因为资金费率那段
+是数据工具（``get_stock_data``）里拼的，工具只看得到配置、看不到 state；开会时 TradingAgents
+按场用 ContextVar 给每张图自己的配置（``run_config``），同时开几场不会串。"""
+
+
+def meeting_setting(key: str, default: str) -> str:
+    """读这场会的一项偏空整改设置；不在会议里（或没装 tradingagents）就是默认值 = 现状。"""
+    try:
+        from tradingagents.dataflows.config import get_config
+    except ImportError:
+        return default
+    raw = get_config().get(PROMPT_KEY) or {}
+    return str(raw.get(key) or default)
 
 
 def language(role: str | None = None) -> str:
@@ -105,7 +123,13 @@ def _researcher(role: str, label: str, other: str) -> Factory:
             )
             p = params_from_config()
             prompt = (
-                ta_prompts.role_prompt(role, p, str(state.get("company_of_interest", "asset")))
+                ta_prompts.role_prompt(
+                    role,
+                    p,
+                    str(state.get("company_of_interest", "asset")),
+                    mirror=meeting_setting("bear_bull_symmetry", "legacy") == "mirror",
+                    neutral_funding=meeting_setting("funding_label", "legacy") == "neutral",
+                )
                 + "\n\nResources available:\n"
                 + _resources(state, p)
                 + f"Conversation history of the debate: {history}\n"
@@ -298,7 +322,10 @@ def create_sentiment_analyst(llm: Any) -> Node:
 
         p = params_from_config()
         sym = binance_symbol_of(str(state["company_of_interest"]))
-        blocks, ok = crowd.fetch_blocks(sym, p.indicator)
+        if meeting_setting("crowd_ratio_mode", "raw") == "relative":
+            blocks, ok = crowd.fetch_blocks(sym, p.indicator, ratio_mode="relative")
+        else:
+            blocks, ok = crowd.fetch_blocks(sym, p.indicator)
         items = _NEWS_HUB.for_symbol(sym, hours=24, limit=8) if _NEWS_HUB is not None else []
         if ok == 0 and not items:
             text = ta_prompts.fill(CROWD_UNAVAILABLE.replace("{SYMBOL}", sym), p)
@@ -668,6 +695,32 @@ _BUILD_LOCK = threading.Lock()
 
 _PERP_GRAPH: type | None = None
 
+BULL_NODE, BEAR_NODE = "Bull Researcher", "Bear Researcher"
+
+
+def open_debate_with_bear(workflow: Any) -> None:
+    """让空头先开口（多头最后发言）：把分析师之后进辩论的那条边从多头改接到空头。
+
+    TradingAgents 的建图把「分析师都交完报告 → Bull Researcher」写死了；之后谁接着说由
+    ``should_continue_debate`` 按上一位是谁来定（Bull 之后 Bear，否则 Bull），轮数到了交研究经理，
+    所以只改入口这一条边，轮流和收尾照原版。只改这张图自己的 workflow，不动全局。"""
+    moved = 0
+    for starts, end in list(workflow.waiting_edges):
+        if end == BULL_NODE:
+            workflow.waiting_edges.discard((starts, end))
+            workflow.waiting_edges.add((starts, BEAR_NODE))
+            moved += 1
+    for start, end in list(workflow.edges):
+        if end == BULL_NODE and start not in (BULL_NODE, BEAR_NODE):
+            workflow.edges.discard((start, end))
+            workflow.edges.add((start, BEAR_NODE))
+            moved += 1
+    if moved != 1:  # 版本变了对不上：报错，不悄悄按原顺序开
+        raise RuntimeError(
+            f"TradingAgents 进辩论的边有 {moved} 条（应为 1），版本对不上，"
+            "先核对 pyproject 里钉的提交"
+        )
+
 
 def perp_graph_class() -> type:
     """``TradingAgentsGraph`` 的子类：把这场会的说明、持仓说明、教训放进它自己的 state。"""
@@ -689,6 +742,13 @@ def perp_graph_class() -> type:
                 self.lessons = lessons
                 with _BUILD_LOCK:
                     super().__init__(*a, **kw)
+                # 谁先开口（bias_fix.debate_first，已解析成 bull / bear）；默认 bull = 原版
+                self.debate_first = str(
+                    (self.config.get(PROMPT_KEY) or {}).get("debate_first") or "bull"
+                )
+                if self.debate_first == "bear":
+                    open_debate_with_bear(self.workflow)
+                    self.graph = self.workflow.compile()
 
             def resolve_instrument_context(
                 self, ticker: str, asset_type: str = "stock", trade_date: str | None = None

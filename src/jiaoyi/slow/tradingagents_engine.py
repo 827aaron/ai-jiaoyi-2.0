@@ -55,6 +55,7 @@ from jiaoyi.core.ticks import price_formatter
 from jiaoyi.interfaces import SecretStore
 from jiaoyi.sentinel.regime_flip import Direction
 from jiaoyi.slow import binance_gate, market_table, ta_nodes, ta_prompts, ta_roles
+from jiaoyi.slow.bias_fix import LEGACY_SETUP, BiasFix, MeetingSetup, resolve
 from jiaoyi.slow.brief import MarketBriefService
 from jiaoyi.slow.commander import (
     DEFAULT_STOP_SCALE,
@@ -154,6 +155,8 @@ class TradingAgentsSettings:
     reasoning_effort: str = "low"
     # 开会过程实时落盘的目录（面板读）；空 = 不落盘。见 meeting_live.py
     live_dir: str = ""
+    # 偏空整改开关和对照比例（见 bias_fix.py）；默认 = 现状
+    bias_fix: BiasFix = field(default_factory=BiasFix)
 
 
 def prompt_params(s: TradingAgentsSettings) -> ta_prompts.PromptParams:
@@ -169,10 +172,25 @@ def perp_context(p: ta_prompts.PromptParams, group: str = "manager") -> str:
 PERP_CONTEXT = perp_context(ta_prompts.PromptParams())
 
 
+def setup_overrides(setup: MeetingSetup) -> dict[str, str]:
+    """这场会和现状不同的偏空整改设置（全是现状就是空的，配置和改动前一字不差）。"""
+    return {
+        k: getattr(setup, k)
+        for k in ta_nodes.SETUP_KEYS
+        if getattr(setup, k) != getattr(LEGACY_SETUP, k)
+    }
+
+
 def build_config(
-    base: Mapping[str, Any], s: TradingAgentsSettings, *, crypto_news: bool = False
+    base: Mapping[str, Any],
+    s: TradingAgentsSettings,
+    *,
+    crypto_news: bool = False,
+    setup: MeetingSetup = LEGACY_SETUP,
 ) -> dict[str, Any]:
-    """在 TradingAgents 的 ``DEFAULT_CONFIG`` 上叠加我们的设置，返回新字典。"""
+    """在 TradingAgents 的 ``DEFAULT_CONFIG`` 上叠加我们的设置，返回新字典。
+    ``setup`` 是这场会实际用的偏空整改设置（默认 = 现状），
+    节点和数据工具从 ``jiaoyi_prompt`` 读。"""
     cfg = dict(base)
     cfg.update(
         llm_provider=s.provider,
@@ -185,6 +203,7 @@ def build_config(
                 "hold_minutes": s.hold_minutes,
                 "lean": s.lean_size_tier.value,
                 "lang": s.output_language,
+                **setup_overrides(setup),
             }
         },
         max_debate_rounds=s.debate_rounds,
@@ -315,8 +334,20 @@ def set_liquidation_totals(totals: Mapping[str, float]) -> None:
     _LIQ_TOTALS = totals
 
 
+FUNDING_LABEL_LEGACY = "(positive: longs pay, crowded long; negative: the opposite)"
+FUNDING_LABEL_NEUTRAL = (
+    "(positive: longs pay shorts; negative: shorts pay longs; Binance baseline is +0.01% per "
+    "8h. Funding at or near the baseline is the normal resting rate, not a sign of crowding: "
+    "call longs crowded only when funding is well above the baseline, and shorts crowded only "
+    "when it is clearly negative)"
+)
+"""资金费率那一行的说明（``funding_label``，见 bias_fix.py）。legacy 把任何正费率都叫多头拥挤。"""
+
+
 def format_derivatives(
-    funding: Sequence[Mapping[str, Any]], oi: Sequence[Mapping[str, Any]]
+    funding: Sequence[Mapping[str, Any]],
+    oi: Sequence[Mapping[str, Any]],
+    funding_label: str = "legacy",
 ) -> str:
     """资金费率历史 + 持仓量 24 小时变化 → 给分析师看的一段文字。纯函数，便于测试。"""
     lines = ["## Derivatives data (Binance USDT-M perpetual)"]
@@ -326,10 +357,8 @@ def format_derivatives(
         lines.append(
             f"- Funding rate (%, last {min(len(rates), 6)} settlements, oldest to newest): {hist}"
         )
-        lines.append(
-            f"- Latest funding rate {rates[-1]:+.4f}% "
-            "(positive: longs pay, crowded long; negative: the opposite)"
-        )
+        label = FUNDING_LABEL_NEUTRAL if funding_label == "neutral" else FUNDING_LABEL_LEGACY
+        lines.append(f"- Latest funding rate {rates[-1]:+.4f}% {label}")
     if len(oi) >= 2:
         first, last = float(oi[0]["sumOpenInterestValue"]), float(oi[-1]["sumOpenInterestValue"])
         if first > 0:
@@ -358,7 +387,9 @@ def derivatives_context(symbol: str, end: datetime) -> str:
             {"symbol": sym, "period": "1h", "limit": 25, "endTime": end_ms},
         )
         o.raise_for_status()
-        text = format_derivatives(f.json(), o.json())
+        text = format_derivatives(
+            f.json(), o.json(), ta_nodes.meeting_setting("funding_label", "legacy")
+        )
         if sym in _LIQ_TOTALS:
             text += "\n" + describe_total(_LIQ_TOTALS[sym])
         return text
@@ -1959,10 +1990,13 @@ class TradingAgentsEngine:
         handler: Any,
         meeting_note: str = "",
         position_note: str = "",
+        setup: MeetingSetup = LEGACY_SETUP,
     ) -> Any:
         from tradingagents.default_config import build_default_config
 
-        cfg = build_config(build_default_config(), self._s, crypto_news=self._news is not None)
+        cfg = build_config(
+            build_default_config(), self._s, crypto_news=self._news is not None, setup=setup
+        )
         graph = ta_nodes.perp_graph_class()(
             selected_analysts=analysts,
             config=cfg,
@@ -2382,9 +2416,14 @@ class TradingAgentsEngine:
             f"{now:%Y-%m-%d %H:%M}",
             f"{now + timedelta(minutes=params.hold_minutes):%Y-%m-%d %H:%M}",
         )
-        graph = self._graph(analysts, handler, note, ta_prompts.position_note(params, entry.symbol))
+        # 偏空整改：这场会用哪组设置（按会议 id 定，可复现），记进实况和结论
+        setup = resolve(self._s.bias_fix, f"{entry.symbol}@{now:%Y-%m-%dT%H:%M:%SZ}")
+        graph = self._graph(
+            analysts, handler, note, ta_prompts.position_note(params, entry.symbol), setup
+        )
         if live:
             live.step("input", "meeting_note", note)
+            live.step("input", "meeting_setup", setup.describe())
         if live:
             tap_graph(graph, live)
         state, rating = graph.propagate(ticker, f"{self._today():%Y-%m-%d}", asset_type=asset_type)
@@ -2504,6 +2543,7 @@ class TradingAgentsEngine:
                         "reasoning_tokens": meter.tokens_reasoning,
                         "cached_tokens": meter.tokens_cached,  # 命中缓存的输入 token
                     },
+                    setup.record(),
                 )
             except (ValidationError, ValueError) as exc:
                 last = exc
