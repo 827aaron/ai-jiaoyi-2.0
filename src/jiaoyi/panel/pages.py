@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -730,6 +732,8 @@ class TradeRow(BaseModel):
     pnl_usdt: float
     """净盈亏（已扣开平手续费）：按币安成交回填后是币安实扣，否则是 hummingbot 报的。"""
     fees_usdt: float
+    keeper_peak_usdt: float | None = None
+    """管家采样的最高毛浮盈估算（未扣费），缺记录为 None。"""
     pnl_missing: bool = False
     """没回填出场价、净盈亏和手续费又都是 0：多半是执行器没报数，不是真的 0。"""
     signal_kind: str | None
@@ -890,13 +894,78 @@ def build_history(
     recs = files.decisions_since(
         min(first_open, start) - timedelta(days=1),
         now,
-        frozenset({Role.SENTINEL, Role.GATE, Role.RISK_GUARD}),
+        frozenset({Role.SENTINEL, Role.GATE, Role.RISK_GUARD, Role.KEEPER}),
     )
     kind_of: dict[str, str] = {}
+    closed_by_id = {p.position_id: p for p in closed}
+    peak_of: dict[str, float] = {}
+    changed_entry: set[str] = set()
+    snapshot_positions: dict[int, dict[str, Any]] = {}
+    for r in recs:
+        if r.role is not Role.KEEPER or not r.position_id:
+            continue
+        p = closed_by_id.get(r.position_id)
+        if (
+            p is None
+            or p.closed_at is None
+            or r.symbol != p.symbol
+            or not (p.opened_at <= r.ts <= p.closed_at)
+        ):
+            continue
+        jev = r.input.get("jev")
+        raw = jev.get("snapshot") if isinstance(jev, dict) else None
+        try:
+            first_snap = json.loads(raw) if isinstance(raw, str) else None
+        except (ValueError, RecursionError):
+            continue
+        pos = first_snap.get("pos") if isinstance(first_snap, dict) else None
+        if isinstance(pos, dict):
+            snapshot_positions[id(r)] = pos
+        entry = pos.get("entry_px") if isinstance(pos, dict) else None
+        if p.entry_price and isinstance(entry, int | float) and not isinstance(entry, bool):
+            try:
+                if not math.isclose(float(entry), p.entry_price, rel_tol=1e-9):
+                    changed_entry.add(r.position_id)
+            except OverflowError:
+                changed_entry.add(r.position_id)
     for r in recs:
         k = r.output.get("kind") if r.role is Role.SENTINEL else r.input.get("kind")
-        if r.signal_id and isinstance(k, str):
+        if r.role is not Role.KEEPER and r.signal_id and isinstance(k, str):
             kind_of.setdefault(r.signal_id, k)
+        if r.role is not Role.KEEPER or not r.position_id:
+            continue
+        p = closed_by_id.get(r.position_id)
+        if p is None or p.closed_at is None or not (p.opened_at <= r.ts <= p.closed_at):
+            continue
+        if r.symbol != p.symbol or not p.entry_price or not p.quantity:
+            continue
+        pos = snapshot_positions.get(id(r))
+        recorded_entry = pos.get("entry_px") if isinstance(pos, dict) else None
+        if r.position_id in changed_entry and (
+            not isinstance(recorded_entry, int | float) or isinstance(recorded_entry, bool)
+        ):
+            continue
+        if isinstance(recorded_entry, int | float) and not isinstance(recorded_entry, bool):
+            try:
+                if not math.isclose(float(recorded_entry), p.entry_price, rel_tol=1e-9):
+                    continue
+            except OverflowError:
+                continue
+        guard = r.output.get("giveback_guard")
+        values = [pos.get("pnl_bps")] if isinstance(pos, dict) else []
+        if r.position_id not in changed_entry and isinstance(pos, dict):
+            values.append(pos.get("peak_bps"))
+        if r.position_id not in changed_entry and isinstance(guard, dict):
+            values.append(guard.get("peak_bps"))
+        for val in values:
+            if not isinstance(val, int | float) or isinstance(val, bool):
+                continue
+            try:
+                estimate = p.entry_price * p.quantity * float(val) / 10_000
+            except OverflowError:
+                continue
+            if math.isfinite(estimate):
+                peak_of[p.position_id] = max(peak_of.get(p.position_id, estimate), estimate)
 
     rows: list[TradeRow] = []
     cum = peak = dd = 0.0
@@ -933,6 +1002,7 @@ def build_history(
                 close_reason=p.close_reason.value if p.close_reason else None,
                 pnl_usdt=pnl,
                 fees_usdt=p.fees_usdt,
+                keeper_peak_usdt=None if unfilled else peak_of.get(p.position_id),
                 pnl_missing=not unfilled
                 and p.exit_price is None
                 and pnl == 0.0

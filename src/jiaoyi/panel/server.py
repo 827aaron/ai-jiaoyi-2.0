@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import ipaddress
 import logging
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, time
@@ -241,6 +242,9 @@ def create_app(
     """
     data_dir = app_cfg.data_dir
     files = PanelFiles(data_dir, risk.day_reset_tz)
+    # 历史页要读取管家采样；独立缓存及线程锁避免大量 JSON 解析阻塞主事件循环。
+    history_files = PanelFiles(data_dir, risk.day_reset_tz)
+    history_lock = threading.Lock()
     live = actions.LiveConfigs(risk, app_cfg, config_paths)
 
     def cfg() -> tuple[RiskConfig, AppConfig]:
@@ -412,7 +416,13 @@ def create_app(
 
     @api.get("/api/history")
     async def history(range: HistoryRange = "today", tests: bool = False) -> HistoryPage:
-        return build_history(files, cfg()[0], clock(), range, include_tests=tests)
+        current_risk, now = cfg()[0], clock()
+
+        def read_history() -> HistoryPage:
+            with history_lock:
+                return build_history(history_files, current_risk, now, range, include_tests=tests)
+
+        return await asyncio.to_thread(read_history)
 
     @api.get("/api/pnl-curve")
     async def pnl_curve_today() -> pnl_curve.PnlCurve:
