@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from jiaoyi import contracts as c
+from jiaoyi.alerting.kinds import KINDS
 from jiaoyi.app import App, read_blocked
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.config import load_app_config, load_risk_config
@@ -723,3 +724,46 @@ async def test_keeper_tick_reviews_positions_concurrently(tmp_path: Path, now: d
     await Runner(app).keeper_tick()
     assert sorted(keeper.reviewed) == sorted(p.position_id for p in ex.held)
     assert peak == loop.KEEPER_CONCURRENCY  # 并发问，但不超过上限
+
+
+class SpendCards(FakeCards):
+    """日上限不限：花费过线只有 take_spend_alert，没有「暂停」提示。"""
+
+    def __init__(self, card: c.BattleCard | None) -> None:
+        super().__init__(card)
+        self.alerts = [
+            "军师团今天已花 $21.00，超过本档默认日上限 $20.00（日上限已设为不限，不会停会，只提醒）"
+        ]
+        self.notices = ["军师团今天开会连续失败，暂停开会"]
+
+    def may_refresh(self, now: datetime) -> bool:
+        return True
+
+    def take_notice(self) -> str | None:
+        return self.notices.pop(0) if self.notices else None
+
+    def take_spend_alert(self) -> str | None:
+        return self.alerts.pop(0) if self.alerts else None
+
+
+async def test_spend_alert_has_its_own_title_and_kind(tmp_path: Path, now: datetime) -> None:
+    app = _app(tmp_path, now)
+    app.pool = c.SymbolPool.model_validate(load_example("symbol_pool"))
+    sent: list[c.Alert] = []
+
+    class Alerter:
+        async def send(self, alert: c.Alert) -> None:
+            sent.append(alert)
+
+    app.m = dataclasses.replace(app.m, cards=SpendCards(h.card(now)), alerter=Alerter())
+    r = Runner(app)
+    r._last_screen = now
+    await r.slow_tick()
+    by_kind = {a.kind: a for a in sent}
+    assert set(by_kind) == {"meeting_paused", "spend_alert"}
+    assert by_kind["meeting_paused"].title == "军师团暂停开会"  # 真暂停的推送不变
+    spend = by_kind["spend_alert"]
+    assert spend.title == "AI 花费超过本档默认日上限（不限模式，只提醒）"
+    assert "只提醒" in spend.body and "暂停" not in spend.title
+    # 单独一类：静音「暂停开会」不影响它，反过来也一样
+    assert "spend_alert" in KINDS and "notify_spend_alert" in type(app.app_cfg).model_fields

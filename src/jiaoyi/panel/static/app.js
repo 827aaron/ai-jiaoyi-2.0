@@ -1935,6 +1935,7 @@ P.funds = () => {
 /* ---------- 选币 */
 // 每类币的开关和进池上限：选币页设的 > slow.toml [screener.categories] > 默认（开、每类默认上限）
 // 界面上不出现文件名：slow.toml 写的也算「默认」，选币页改过的显示「你改过（默认 X）· 恢复默认」
+const capText = (n) => (n == null ? "不限" : `${n} 个`);  // null = 每类默认上限关了（写 0）
 function categoryCard(d) {
   if (!d.categories || !d.categories.length) return "";
   const can = !d.overrides_error;
@@ -1944,12 +1945,12 @@ function categoryCard(d) {
     const from = (src, arg, base) => (src === "pool" ? `你改过（默认 ${base}）${can ? ` · <button class="lnk small" ${clickable("cat", `${arg}:default:${base}`)}>恢复默认</button>` : ""}` : "默认");
     return `<tr class="${c.enabled ? "" : "dimrow"}"><td class="hi">${esc(CAT[k] || k)}</td>
       <td><span class="seg">${b(`set_category:${k}:true`, "开", c.enabled)}${b(`set_category:${k}:false`, "关", !c.enabled)}</span><div class="dim small">${from(c.enabled_from, `set_category:${k}`, c.enabled_base ? "开" : "关")}</div></td>
-      <td class="r num">${c.cap} 个<div class="dim small">${from(c.cap_from, `set_category_cap:${k}`, `${c.cap_base} 个`)}</div></td>
+      <td class="r num">${capText(c.cap)}<div class="dim small">${from(c.cap_from, `set_category_cap:${k}`, capText(c.cap_base))}</div></td>
       <td class="r num">${c.in_pool} / ${c.total}</td>
-      <td class="r nowrap">${can ? `<button class="btn b-sm" ${clickable("cat", `set_category_cap:${k}:${c.cap}`)}>改上限</button>` : ""}</td></tr>`;
+      <td class="r nowrap">${can ? `<button class="btn b-sm" ${clickable("cat", `set_category_cap:${k}:${c.cap ?? 30}`)}>改上限</button>` : ""}</td></tr>`;
   }).join("");
   const off = d.categories.filter((c) => !c.enabled).length;
-  return `<section class="card mt"><div class="ch"><h2>按类别选币</h2><span class="r">${off ? `关了 ${off} 类` : "六类都开着"} · 每类默认最多 ${d.default_category_cap} 个</span></div>
+  return `<section class="card mt"><div class="ch"><h2>按类别选币</h2><span class="r">${off ? `关了 ${off} 类` : "六类都开着"} · 每类默认最多 ${capText(d.default_category_cap || null)}</span></div>
     ${d.slow_error ? `<div class="note warn">类别配置读不出，下面的“默认”先按出厂值显示。${esc(d.slow_error)}</div>` : ""}
     <div class="tw"><table><thead><tr><th>类别</th><th>开关</th><th class="r">最多进池</th><th class="r" title="上次选币：这一类进池几个 / 这一类一共看了几个">进池 / 候选</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="foot">关掉的类别不再靠打分进池，你固定、手动加的币仍进池。开关和上限要面板密码，改完主程序马上重新选币（“进池 / 候选”是上次选币的结果，等这次选完才变；候选 = 这一类上次一共看了几个币）。“恢复默认”去掉你在这里改过的那一项，回到括号里的默认值。</div></section>`;
@@ -2042,6 +2043,7 @@ const PLAIN = {
   credit_low_floor_usd: "模型额度最低几美元就提醒",
   credit_resend_hours: "额度提醒多久重复一次（小时）",
   notify_meeting_paused: "军师团暂停开会",
+  notify_spend_alert: "AI 花费过线提醒（日上限不限时）",
   notify_control: "面板操作",
   notify_live_started: "实盘已启动",
   notify_system: "系统异常",
@@ -2051,7 +2053,7 @@ const PLAIN = {
   "screener.min_listed_days": "上线至少几天",
   "screener.min_range_24h_pct": "24 小时波动至少百分之几",
   "screener.max_range_24h_pct": "24 小时波动最多百分之几",
-  "screener.default_category_cap": "每一类币默认最多进池几个",
+  "screener.default_category_cap": "每一类币默认最多进池几个（0 = 不限）",
   "screener.vol_full_multiple": "每小时折算的波动是来回手续费的几倍算满分",
   "screener.surge_full_multiple": "1 小时成交额是平时的几倍算满分",
   "screener.funding_full": "资金费率到多少算满分",
@@ -2235,7 +2237,7 @@ const PLAIN = {
   adaptive_base_max_queue: "排队不超过几个时用最准的模型",
   adaptive_mini_min_queue: "排队到几个时换最快的模型",
   backfill_bars: "启动时先拉多少根 5 分钟 K 线",
-  max_cards_per_round: "每轮最多开几个币的会（每天 AI 费用上限照样管着）",
+  max_cards_per_round: "每轮最多开几个币的会（每天 AI 费用上限照样管着；0 = 不限）",
   concurrency: "同时开几个会",
   card_ttl_min: "作战卡管用几分钟（开会间隔 + 提前量）",
   symbol_min_interval_min: "同一个币至少隔几分钟才再开会",
@@ -2245,13 +2247,13 @@ const PLAIN = {
   schedule_at: "每天固定几点开整轮会（曼谷时间）",
   event_meeting_enabled: "出事时给那一个币开临时会",
   event_triggers: "哪些事算“出事”",
-  event_symbol_gap_min: "同一个币两场会至少隔几分钟",
+  event_symbol_gap_min: "同一个币两场会至少隔几分钟（0 = 不限）",
   event_max_per_day: "一天最多开几场临时会（0 = 不限）",
   key_level_trigger: "怎样算“突破关键价位”",
   move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
   predictor_against_runs: "预测员连续几次看反才算",
   entry_max_card_age_min: "开仓前卡最多旧几分钟（超了先补会再开）",
-  daily_cost_limit_usd: "每日 AI 费用上限",
+  daily_cost_limit_usd: "每日 AI 费用上限（0 = 不限）",
   over_budget: "花到日上限 80% 时",
   slowdown_interval_min: "放慢后几分钟开一次会",
   sim_environment: "模拟盘连币安哪个环境",
@@ -2274,6 +2276,7 @@ const HINT = {
   credit_low_floor_usd: "OpenRouter 余额低于这个数（美元）就推一条。余额低于「近 7 天日均花费 × 2」时按那个更高的数算，所以实际提醒线可能比这里高。默认 5。保存后几秒内生效",
   credit_resend_hours: "同一条额度提醒（快用完 / 被拒）每隔多少小时重复推一次，充值后自动停。默认 6。保存后几秒内生效",
   notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。保存后几秒内生效",
+  notify_spend_alert: "每日 AI 费用上限设为不限时，当天花费超过本档默认上限推一条（只提醒，不停会）。保存后几秒内生效",
   notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。保存后几秒内生效",
   notify_live_started: "实盘启动时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
   notify_system: "拒绝启动、状态文件损坏、巡逻兵全平等系统级问题时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
@@ -2354,8 +2357,37 @@ const HINT = {
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
 const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4" };
-// 这几项填 0 = 不设限
-const ZERO_AS = { major_top_n: "只用固定 7 个", min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查", event_max_per_day: "不限" };
+// ---- 填 0 = 关闭 / 不限 的设置：哪些项有、开关上写什么，都来自后端每项的 off（panel/pages.py 的 OFF_SWITCHES）
+const offShown = (i, v = i.value) => (v === 0 && i.off ? i.off.shown : null);
+// 编辑框旁边的开关；现值是 0 就是勾着的（点「用推荐值」时填的是推荐值，不勾）
+const offSwitchHtml = (i, useRec) => (i.off ? ` <label class="small"><input type="checkbox" id="dlg-off" ${i.value === 0 && !useRec ? "checked" : ""}> ${esc(i.off.label)}</label>` : "");
+// 保存时：勾着就写 0，不看输入框
+const offPicked = (i) => !!i.off && !!$("#dlg-off") && $("#dlg-off").checked;
+// 勾上：输入框清空并禁用；取消：回到现值，现值是 0 就用档位默认，再没有就用表里的 back
+function offBind(i) {
+  const box = $("#dlg-off");
+  if (!box) return;
+  const num = $("#dlg-v");
+  const sync = () => {
+    num.disabled = box.checked;
+    if (box.checked) num.value = "";
+    else if (!Number(num.value) && !i.nullable) num.value = i.value || i.profile_default || i.off.back;
+  };
+  box.addEventListener("change", sync);
+  num.disabled = box.checked;
+}
+// 上面那项关了，这一项就用不上：键 → [控制项, 说明]
+const MOOT = {
+  "schedule.over_budget": ["budget.daily_cost_limit_usd", "日上限已关闭，用不上"],
+  "schedule.slowdown_interval_min": ["budget.daily_cost_limit_usd", "日上限已关闭，用不上"],
+  ...Object.fromEntries(["on", "live", "breadth", "btc_pct", "confirm", "min_gap_min", "min_symbols", "suspect_log_min", "price_max_age_min"].map((k) => [`fast_loop.regime_flip_${k}`, ["fast_loop.regime_flip_check_min", "定时检查已关闭，用不上"]])),
+};
+const mootOf = (i, ix) => {
+  const m = MOOT[`${i.sec}.${i.key}`];
+  const c = m && ix[m[0]];
+  return c && c.off && c.value === 0 ? m[1] : "";
+};
+// ---- 填 0 = 关闭 / 不限 结束
 // 时间类设置按单位后缀换成人话：1.67 小时 → 1 小时 40 分
 const UNIT_S = [["_hours", 3600], ["_min", 60], ["_ms", 0.001], ["_s", 1]];
 function humanDur(sec) {
@@ -2561,7 +2593,7 @@ const ROLES = [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
   ] },
   { id: "alerting", t: "告警推送", what: "往 Telegram 推哪些消息（每一类单独开关，默认全开）", find: "告警 通知 提醒 推送 消息 Telegram 电报 开仓成交 平仓完成 静音 关闭提醒 保命止损 对账 额度 notify", groups: [
-    { g: "", hint: "Telegram 的密钥在「密钥」里配。关掉只是不往 Telegram 推，面板「历史」和告警列表照样有记录；写「建议保持开」的是出了问题的安全告警。面板切模式、测试消息、看门狗这几条不走这里，一直推。", keys: ["app.notify_open_filled", "app.notify_close_done", "app.notify_lifeboat_hit", "app.notify_lifeboat_missing", "app.notify_order_failed", "app.notify_reconcile", "app.notify_news_block", "app.notify_model_credit", "app.credit_low_floor_usd", "app.credit_resend_hours", "app.notify_meeting_paused", "app.notify_control", "app.notify_live_started", "app.notify_system"] },
+    { g: "", hint: "Telegram 的密钥在「密钥」里配。关掉只是不往 Telegram 推，面板「历史」和告警列表照样有记录；写「建议保持开」的是出了问题的安全告警。面板切模式、测试消息、看门狗这几条不走这里，一直推。", keys: ["app.notify_open_filled", "app.notify_close_done", "app.notify_lifeboat_hit", "app.notify_lifeboat_missing", "app.notify_order_failed", "app.notify_reconcile", "app.notify_news_block", "app.notify_model_credit", "app.credit_low_floor_usd", "app.credit_resend_hours", "app.notify_meeting_paused", "app.notify_spend_alert", "app.notify_control", "app.notify_live_started", "app.notify_system"] },
   ] },
   { id: "keys", t: "密钥", what: "币安、OpenRouter、Telegram 等的 key，只显示配没配", find: "密钥 key api 币安 binance openrouter telegram jev typesafe 测试网" },
   { id: "show", t: "显示", what: "成交提示音、涨跌颜色、面板密码、时区等", find: "显示 币安风格成交提示音 成交提示音 声音 音量 下单声音 平单声音 提示音 涨跌颜色 绿涨红跌 红涨绿跌 面板密码 时区 今天 模拟盘环境 数据文件夹 day_reset_tz sim_environment data_dir" },
@@ -2601,8 +2633,8 @@ const eqBasis = () => (pageData && pageData.recommend_basis_usdt) || null;
 const eqX = (i) => i.cat || (i.sec === "risk" && EQ_X.includes(i.key));
 const eqAmt = (x) => (eqBasis() ? `≈${money(x * eqBasis(), 0)} U` : "");
 const valOf = (i, v = i.value) => (eqX(i) && typeof v === "number" && eqBasis() ? `${eqAmt(v)}（本金 ${+v.toFixed(2)} 倍）` : valRaw(i, v));
-const valRaw = (i, v = i.value) => (v === 0 && ZERO_AS[i.key] && (i.sec === "screener" || i.sec === "schedule") ? ZERO_AS[i.key] : null) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
-const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWER_RISKIER.includes(i.key) ? i.value < i.recommended : i.value > i.recommended || (i.value === 0 && i.key in ZERO_AS));
+const valRaw = (i, v = i.value) => offShown(i, v) || fmtVal(v >= 1e5 && v % 1e4 === 0 && i.key.endsWith("_usdt") ? `${v / 1e4} 万` : v, i) + (typeof v === "number" && !durOf(i.key, v) && !(i.choices && i.choices.length) ? UNIT[i.cat ? "max_total_exposure_x" : i.key] || "" : "");
+const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWER_RISKIER.includes(i.key) ? i.value < i.recommended : i.value > i.recommended || (i.value === 0 && !!i.off));
 
 // 段.键 → 设置项（每类币上限拼成 category 段）
 function settingIndex(d) {
@@ -2658,6 +2690,8 @@ function openRole(id) {
 
 const lockedPaper = (i) => i.paper_only && pageData.mode !== "paper";
 function auxOf(i) {
+  const moot = mootOf(i, settingIndex(pageData));
+  if (moot) return `<span class="dim">${moot}</span>`;
   if (lockedPaper(i)) return i.value === true ? '<span class="warn">只在模拟盘生效，已忽略</span>' : "只有模拟盘能开";
   if (!i.editable) return "网页不改";
   if (i.recommended != null) return `推荐 <b>${valOf(i, i.recommended)}</b>`;
@@ -2738,8 +2772,7 @@ function editOne(id, useRec) {
     const shown = useRec ? i.recommended : i.value == null || (i.profiled && !i.pinned) ? "" : i.value;
     const ph = i.profiled ? `留空 = 跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}（${fmtVal(i.pinned ? i.profile_default : i.value, i)}）` : i.nullable ? "留空 = 用默认" : "";
     input = `<input id="dlg-v" type="number" step="any" inputmode="decimal" value="${esc(shown)}" placeholder="${esc(ph)}">`
-    // 次数上限：旁边给「不限」开关，开 = 写 0；关 = 回到一个数（现值，或档位默认）
-    if (i.key === "event_max_per_day") input += ` <label class="small"><input type="checkbox" id="dlg-unl" ${i.value === 0 ? "checked" : ""}> 不限</label>`;
+    input += offSwitchHtml(i, useRec);  // 能填 0 = 关闭 / 不限的项，旁边给开关
   }
   const now = [`现在 ${valOf(i)}`, i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : "", i.pinned ? `${i.sec === "fast_loop" ? "最长持仓" : "档位"}默认 ${valOf(i, i.profile_default)}` : i.profiled ? `现在跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}走` : "", i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? `范围 ${esc(i.bounds)}` : ""].filter(Boolean).join("，");
   ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${eqX(i) ? "（填本金的几倍）" : ""}${input}</label>`}${pwField(data.control)}
@@ -2748,7 +2781,7 @@ function editOne(id, useRec) {
     <div class="dim small">保存前整份检查，不合理会说原因；写前留备份。${isHot(i.sec, i.key) ? "保存后几秒内生效，不用重启。" : "改完点「重启生效」才用上。"}</div>`, "保存", false, async () => {
     const el = $("#dlg-v");
     let v;
-    if (i.key === "event_max_per_day" && $("#dlg-unl") && $("#dlg-unl").checked) v = 0;
+    if (offPicked(i)) v = 0;
     else if (i.names) {
       v = [...new Set(el.value.toUpperCase().split(/[\s,，、]+/).filter(Boolean))];
       if (JSON.stringify(v) === JSON.stringify(i.value || [])) throw new Error("没有改动");
@@ -2789,17 +2822,7 @@ function editOne(id, useRec) {
     dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。"}`);
     poll();
   });
-  const unl = $("#dlg-unl");
-  if (unl) {
-    const num = $("#dlg-v");
-    const sync = () => {
-      num.disabled = unl.checked;
-      if (!unl.checked && !Number(num.value)) num.value = i.value || (i.profile_default != null ? i.profile_default : 12);
-      if (unl.checked) num.value = "";
-    };
-    unl.addEventListener("change", sync);
-    num.disabled = unl.checked;
-  }
+  offBind(i);
   // 填的是本金几倍，旁边实时写折合多少 U
   const amtEl = $("#dlg-amt");
   if (amtEl) {
@@ -3144,8 +3167,10 @@ function effVal(d, r, t) {
   return i ? i.value : tierVal(pf, r, t);
 }
 function showVal(d, r, v) {
-  if (r.fmt) return TF[r.fmt](v);
   const i = settingIndex(d)[`${r.sec}.${r.key}`] || { key: r.key, choices: [] };
+  const off = offShown(i, v);
+  if (off) return esc(off);
+  if (r.fmt) return TF[r.fmt](v);
   return valOf({ ...i, sec: r.sec, nullable: true }, v);
 }
 const sameV = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -3181,12 +3206,12 @@ function tierCards(d) {
       ${cur ? '<span class="tbadge">当前</span>' : on ? '<span class="tbadge next">换到这档？</span>' : ""}
       <div><div class="tname">${esc(profileSpan(t))}</div><div class="tnick">${esc(TIER_NICK[t] || "")}${t === TIER_REC ? ' · <span class="trec">推荐</span>' : ""}</div></div>
       <div class="tm"><span>节奏</span>${bars(7 - n)}</div>
-      <div class="tm"><span>费用</span>${bars(usd > 0 ? costBars(usd) : 0, "cost")}</div>
+      <div class="tm"><span>费用</span>${bars(usd === 0 ? 7 : usd > 0 ? costBars(usd) : 0, "cost")}</div>
       <div class="tkv num">
         <div><span>多久开会</span><b>${esc(profileSpan(t))}</b></div>
         <div><span>拿多久</span><b class="${pf.hold_custom ? "mine" : ""}">${esc(profileSpan(hold))}</b></div>
         <div><span>止损约</span><b>${stop != null ? `${stop}%` : "—"}</b></div>
-        <div><span>AI 每天</span><b class="${cur && mineU ? "mine" : ""}">≤ $${esc(usd)}</b></div>
+        <div><span>AI 每天</span><b class="${cur && mineU ? "mine" : ""}">${usd === 0 ? "不限" : `≤ $${esc(usd)}`}</b></div>
       </div>
       <div class="twho">${esc(TIER_WHO[t] || "")}</div></button>`;
   }).join("");
@@ -3234,7 +3259,7 @@ function tierRowHtml(d, r, ix, t, previewing) {
     : `<button class="btn b-sm" data-act="edit1" data-arg="${esc(id)}">自定义</button>`;
   const follow = r.hold ? `跟最长持仓 ${profileSpan(tierHold(pf, t))}` : "跟开会档位";
   return `<div class="tier-row ${mine ? "custom" : ""} ${changing ? "changing" : ""}">
-    <div class="tl"><b>${esc(r.label)}</b>${r.hint && r.hint !== "其他" ? `<small>${esc(r.hint)}</small>` : ""}<code>${esc(r.key)}</code></div>
+    <div class="tl"><b>${esc(r.label)}</b>${r.hint && r.hint !== "其他" ? `<small>${esc(r.hint)}</small>` : ""}${mootOf(r, ix) ? `<small class="warn">${mootOf(r, ix)}</small>` : ""}<code>${esc(r.key)}</code></div>
     <div class="tv num">${val}</div>
     <div class="ts">${mine ? `<span class="ttag c">自定义</span><small>档位是 ${showVal(d, r, tierVal(pf, r, pf.current))}</small>` : `<span class="ttag f" title="${esc(follow)}走">跟档</span><small>${esc(follow)}</small>`}</div>
     <div class="ta">${act}</div></div>`;

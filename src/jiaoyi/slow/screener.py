@@ -155,6 +155,7 @@ class ScreenerConfig:
     min_listed_days: int = 7
     round_trip_fee_bps: float = 10.0
     default_category_cap: int = 30
+    """0 = 不限。"""
     tiers: bool = True
     """是否分档（头部 / 中间 / 尾部）。"""
     tier_head: int = 10
@@ -269,9 +270,10 @@ def _enabled(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> bool
     return ov.category_enabled.get(category, cfg.category_enabled.get(category, True))
 
 
-def _cap(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> int:
-    default = cfg.category_caps.get(category, cfg.default_category_cap)
-    return ov.category_caps.get(category, default)
+def _cap(category: Category, cfg: ScreenerConfig, ov: UserOverrides) -> int | None:
+    """这一类最多进池几个；None = 不限。只有「每类默认上限」写 0 才不限，单类写 0 是一个都不要。"""
+    specific = ov.category_caps.get(category, cfg.category_caps.get(category))
+    return specific if specific is not None else cfg.default_category_cap or None
 
 
 def _major_note(symbol: str, ranks: Mapping[str, int], cfg: ScreenerConfig) -> str:
@@ -620,7 +622,7 @@ class CodeSymbolScreener:
             if not _enabled(e.category, cfg, ov):
                 continue
             cap = _cap(e.category, cfg, ov)
-            if counts.get(e.category, 0) >= cap:
+            if cap is not None and counts.get(e.category, 0) >= cap:
                 continue
             chosen.add(e.symbol)
             counts[e.category] = counts.get(e.category, 0) + 1

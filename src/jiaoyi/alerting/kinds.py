@@ -17,6 +17,7 @@ KINDS: tuple[str, ...] = (
     "news_block",
     "model_credit",
     "meeting_paused",
+    "spend_alert",
     "control",
     "live_started",
     "system",

@@ -139,7 +139,12 @@ def build_meaning(
     )
     rec = recommended_meeting(equity_usdt)
     cap = max(MIN_DAILY_CAP_USD, equity_usdt * AI_SHARE_PCT / 100)
-    now_cap = f"（现在 ${daily_cost_limit_usd:g}）" if daily_cost_limit_usd is not None else ""
+    if daily_cost_limit_usd is None:
+        now_cap = ""
+    elif daily_cost_limit_usd == 0:
+        now_cap = "（现在不限，没有日上限）"
+    else:
+        now_cap = f"（现在 ${daily_cost_limit_usd:g}）"
     meet = f"开会 {rec} 档" if rec else "最慢的 24h 档也超过本金 0.05% / 天，建议只跑模拟盘或加本金"
     lines.append(
         MeaningLine(

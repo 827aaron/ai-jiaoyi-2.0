@@ -968,6 +968,11 @@ class AppConfig(Contract):
         default=True,
         description="推 Telegram：军师团因失败或当日花费超限暂停开会时推。",
     )
+    notify_spend_alert: bool = Field(
+        default=True,
+        description="推 Telegram：军师团日上限设为不限时，当天花费超过本档默认日上限"
+        "提醒一次（只提醒，不停会）。",
+    )
     notify_control: bool = Field(
         default=True,
         description="推 Telegram：面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。",

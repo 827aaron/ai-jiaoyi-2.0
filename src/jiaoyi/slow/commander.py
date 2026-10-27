@@ -227,6 +227,7 @@ class EventRules:
     enabled: bool = False
     triggers: frozenset[str] = frozenset()
     symbol_gap: timedelta = timedelta(minutes=60)
+    """同一个币两场会至少隔多久；0 = 不隔（配置里的 0 由 ``commander_kwargs`` 换成下限）。"""
     max_per_day: int = 12
     """每天最多几场临时会；0 = 不限（照常计数）。"""
     move_atr: float = 3.0
@@ -240,6 +241,10 @@ PENDING_EXPIRY = timedelta(minutes=30)
 LEVEL_PX_FRESH = timedelta(minutes=5)
 """开会开始时用多新的价定新关键位的两侧；更旧就等出卡后第一次看到的价。"""
 SLOWDOWN_AT = 0.8
+EVENT_GAP_FLOOR = timedelta(minutes=5)
+"""配置里同币临时会间隔写 0（不限）时，实际仍隔这么久：关键位一直被穿时不会连着开。"""
+EVENT_FAIL_BACKOFF = timedelta(minutes=15)
+"""一场临时会开失败后，这个币至少隔这么久才再排（失败也算一场，但配置的间隔可能是 0 / 很短）。"""
 MARKET_SNAPSHOT_FRESH = timedelta(minutes=2)
 """沿用整轮会前统计的新鲜度要求；不是方向判断阈值。"""
 """日花费到上限的这个比例就放慢开会（over_budget = slow）。"""
@@ -272,6 +277,7 @@ class BattleCardCommander:
             timedelta(minutes=30),
         ),
         daily_cost_limit_usd: float | None = None,
+        spend_alert_usd: float | None = None,
         failed_meeting_cost_usd: float = 0.05,
         budget_path: Path | None = None,
         card_path: Path | None = None,
@@ -293,7 +299,11 @@ class BattleCardCommander:
         if not fail_backoff:
             raise ValueError("fail_backoff 至少要有一档")
         self._backoff = tuple(fail_backoff)
-        self._cost_limit = daily_cost_limit_usd
+        self._cost_limit = daily_cost_limit_usd or None  # None / 0 = 不限
+        self._spend_alert = spend_alert_usd or None  # 日上限关了时的「只提醒不停」线
+        self._spend_noticed_day = ""
+        self._spend_alerts: list[str] = []
+        self._event_fail_until: dict[str, datetime] = {}
         self._failed_cost = failed_meeting_cost_usd
         self._budget_path = budget_path
         self._card_path = card_path
@@ -581,6 +591,10 @@ class BattleCardCommander:
         """取走一条待推送的提示（例如“当日花费超限，停止开会”），没有返回 None。"""
         return self._notices.pop(0) if self._notices else None
 
+    def take_spend_alert(self) -> str | None:
+        """取走一条「日上限不限时花费过线」的提醒（只提醒，不是暂停开会），没有返回 None。"""
+        return self._spend_alerts.pop(0) if self._spend_alerts else None
+
     def _ttl_now(self) -> timedelta:
         """作战卡有效期；日花费到 80% 且设了放慢，新卡按放慢后的间隔出。"""
         return self._slowdown[0] if self._slowdown is not None and self._slowed() else self._ttl
@@ -590,7 +604,10 @@ class BattleCardCommander:
 
     def _budget_exhausted(self, now: datetime) -> bool:
         """今天（按 day_reset_tz，曼谷）开会花费 ≥ 上限。每天只提示一次。"""
-        if self._cost_limit is None or self._stats_day != self._day(now):
+        if self._stats_day != self._day(now):
+            return False
+        if self._cost_limit is None:
+            self._spend_alerted(now)
             return False
         if self._stats.cost_usd < self._cost_limit:
             return False
@@ -602,6 +619,18 @@ class BattleCardCommander:
                 "今天不再开会（沿用现有作战卡，到期后不开新仓）"
             )
         return True
+
+    def _spend_alerted(self, now: datetime) -> None:
+        """日上限关了（不限）：花费超过档位默认日上限时只推一条提醒（每天一次），不停会、不放慢。"""
+        if self._spend_alert is None or self._stats.cost_usd < self._spend_alert:
+            return
+        day = self._day(now)
+        if self._spend_noticed_day != day:
+            self._spend_noticed_day = day
+            self._spend_alerts.append(
+                f"军师团今天已花 ${self._stats.cost_usd:.2f}，超过本档默认日上限 "
+                f"${self._spend_alert:.2f}（日上限已设为不限，不会停会，只提醒）"
+            )
 
     def refresh_reason(
         self,
@@ -781,6 +810,8 @@ class BattleCardCommander:
             default=None,
         )
         at = last + self._events.symbol_gap if last else datetime.min.replace(tzinfo=UTC)
+        if (failed := self._event_fail_until.get(symbol)) is not None:
+            at = max(at, failed)
         self._roll_events(now)
         if self._events.max_per_day and self._event_count >= self._events.max_per_day:
             local = now.astimezone(ZoneInfo(self._risk.day_reset_tz))
@@ -1090,6 +1121,8 @@ class BattleCardCommander:
             )
             if last is not None and now - last < self._events.symbol_gap:
                 continue
+            if (failed := self._event_fail_until.get(sym)) is not None and now < failed:
+                continue
             return sym, trigger
         return None
 
@@ -1177,6 +1210,7 @@ class BattleCardCommander:
                 )
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            self._event_fail_until[symbol] = self._clock() + EVENT_FAIL_BACKOFF
             return None  # 失败原因和花费已在各标的记录里
         finally:
             beat.cancel()
@@ -1217,6 +1251,7 @@ class BattleCardCommander:
         self._card = card
         self._notify_card()
         self._last_meeting[symbol] = now
+        self._event_fail_until.pop(symbol, None)
         self._seen.add(symbol)
         self._level_broken.discard(symbol)
         self._news.discard(symbol)
