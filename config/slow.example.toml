@@ -73,6 +73,7 @@ max_retries = 6
 # bear_bull_symmetry = "legacy"  # legacy（现状）/ mirror（多空提示词逐句对称，经理 / 共用说明里的单边写法补齐另一边）
 # crowd_ratio_mode = "raw"       # 账户多空比：raw（原值）/ relative（加相对 30 天中位数的偏离）
 # bias_fix_ab = 0.0              # 0 = 上面四项每场会都按配置；0.5 = 每个改了的开关各自独立一半会议开、一半现状（析因对照）
+#                                  推荐 Demo：debate_first = "bear"、funding_label = "neutral"、bear_bull_symmetry = "mirror"、crowd_ratio_mode = "relative"、bias_fix_ab = 0.5
 
 [schedule]
 # 这一段不写的键取 app.toml 所选持仓档位的默认（core/profiles.py）；写了就覆盖档位。下面注释里是 2h 档的值

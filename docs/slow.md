@@ -545,6 +545,10 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 每场会（含报错、质量门槛没过、超时的会）把 `meeting_setup` 记进决策日志单币记录的 `output`：`meeting_id`（`币@开会时刻 UTC`）、`arm`（off / new / legacy / mixed）、四个开关实际取值、`debate_first_setting`、`ab`、`config_version`（四项 + ab 的哈希）、`switches_on`。开成的会同样写进 `card_review/cards.jsonl` 每行的 `meeting_setup`（可选字段，旧行照读）和开会实况。
 
-对照怎么看：用 J1 的超额记分，按 `meeting_setup.meeting_id` 对上每场会，在 4 小时时段内比较各组（或各开关开 / 不开的主效应），不要看交易盈亏；按开会时这个币有没有持仓分层。
+对照怎么看：用 J1 的超额记分，按 `meeting_setup.meeting_id` 对上每场会，在 4 小时时段内按 `switches_on` / 各开关的实际取值（比如 `debate_first` 实际是 bull 还是 bear）分组，估计每个开关开 / 不开的主效应；不要按 `arm` 分组（析因设计下 new / legacy 只是 16 组里的两个角），也不要看交易盈亏；按开会时这个币有没有持仓分层。
+
+推荐的 Demo 配置：`debate_first = "bear"`、`funding_label = "neutral"`、`bear_bull_symmetry = "mirror"`、`crowd_ratio_mode = "relative"`、`bias_fix_ab = 0.5`。`bear` 而不是 `alternate`：析因分组本身就让一半会议空头先说、一半多头先说，比较干净；`neutral` 和 `mirror` 一起开，避免现状资金费率写法下「high funding」↔「deeply negative funding」这对不完全对等的措辞。
+
+开了任何一个开关时，启动会自检：在一场假的按场配置里读回设置，读不回（TradingAgents 改版、找不到 `_run_config`）就拒绝启动；会议中途找不到也直接报错。不会出现记录写着 mirror / neutral、提示词却没用上的情况。
 
 回退到这个功能之前的版本：先把这五个键从 `config/slow.toml` 删掉（旧代码的配置禁止多余字段，留着会拒绝启动）。
