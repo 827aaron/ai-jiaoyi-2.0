@@ -84,6 +84,17 @@ class _PositionChanged(ProtectionIncomplete):
     """网络等待期间正常入场量变化；先保留已有保护，下一次用新证据继续。"""
 
 
+def describe_error(error: BaseException) -> str:
+    """类名 + 原文（含直接 cause），供 last_error 与告警定位具体哪一项核对没过；限长。"""
+
+    def one(e: BaseException) -> str:
+        text = str(e)
+        return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+    cause = error.__cause__
+    return (one(error) + (f" <- {one(cause)}" if cause is not None else ""))[:300]
+
+
 @dataclass(frozen=True)
 class EntryEvidence:
     order_id: str
@@ -421,7 +432,7 @@ class BracketManager:
                 self._save(pid, stage="provisional", last_error=str(error))
                 return "provisional"
             except Exception as error:
-                self._save(pid, last_error=type(error).__name__)
+                self._save(pid, last_error=describe_error(error))
                 raise
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
@@ -679,7 +690,7 @@ class BracketManager:
                 await self._checkpoint(pid, evidence)
                 return True
             except Exception as error:
-                self._save(pid, last_error=type(error).__name__)
+                self._save(pid, last_error=describe_error(error))
                 return False
 
     async def flat_cleanup(self, pid: str) -> bool:
@@ -701,5 +712,5 @@ class BracketManager:
                 self._save(pid, stage="done", last_error=None)
                 return True
             except Exception as error:
-                self._save(pid, last_error=type(error).__name__)
+                self._save(pid, last_error=describe_error(error))
                 return False
