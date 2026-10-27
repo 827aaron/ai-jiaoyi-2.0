@@ -57,6 +57,8 @@ class ProtectionView(BaseModel):
     """观测时间距今超过 ``protection_stale_s``，或根本没有观测时间；阈值 0 = 不标记。"""
     last_error: str | None = None
     trailing_error: str | None = None
+    trailing_error_book: bool = False
+    """``trailing_error`` 是不是“这一轮没有可用盘口 / 标记价”（这种情况已挂的保护不受影响）。"""
     """最近一轮移动止损观测没做成的原因（和普通保护同步的 ``last_error`` 分开）；做成一轮清空。"""
 
 
@@ -175,7 +177,8 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
     observed = _time(raw.get("observed_at"))
     age = max(0.0, (now - observed).total_seconds()) if observed else None
     err = raw.get("last_error")
-    trailing_err = raw.get("trailing_last_error")
+    # 只在已武装时显示：进入退出 / 清理后移动止损不再观测，旧原因没有意义。
+    trailing_err = raw.get("trailing_last_error") if raw.get("stage") == "armed" else None
     return ProtectionView(
         stage=str(raw.get("stage") or "entry"),
         ever_armed=bool(raw.get("ever_armed")),
@@ -190,6 +193,9 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),
         last_error=str(err) if err else None,
         trailing_error=str(trailing_err) if trailing_err else None,
+        trailing_error_book=bool(
+            trailing_err and str(trailing_err).startswith("TrailingBookUnavailable")
+        ),
     )
 
 

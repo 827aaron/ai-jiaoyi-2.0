@@ -566,7 +566,7 @@ function protBlock(p) {
   const trail = q.trailing_stop_price != null ? ` · 移动止损价 ${price(q.trailing_stop_price, p.symbol)}${q.trailing_activated ? "（已激活）" : ""}` : "";
   const tight = q.tightened_stop_price != null ? `<div>反向作战卡收紧止损：目标 ${price(q.tightened_stop_price, p.symbol)}${q.tightened_at ? `（${new Date(q.tightened_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : ""}${q.tightened_reason ? ` · ${esc(q.tightened_reason)}` : ""}（程序记录，以下方止损腿的交易所确认状态为准；卡转回不会自动放松）</div>` : "";
   const age = q.observed_at ? `${secText(q.age_s)}（${new Date(q.observed_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : "没有观测时间";
-  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div>${tight}<div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}${q.trailing_error ? `<div class="warn">移动止损本轮没更新：${esc(q.trailing_error)}（已挂的保护不受影响）</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
+  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div>${tight}<div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}${q.trailing_error ? `<div class="warn">移动止损本轮没更新：${esc(q.trailing_error)}${q.trailing_error_book ? "（已挂的保护不受影响）" : ""}</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
 }
 // 到这个价成交的预估净盈亏（U）：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次吃单费；没有费率 / 价就不估
 function lvlPnl(p, lvl) {
@@ -2158,6 +2158,10 @@ const PLAIN = {
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
+  protection_trailing_book_mark_max_dev_bps: "移动止损：买一高过（空仓：卖一低过）标记价几基点当插针，不更新峰值（0 = 不比对，不建议）",
+  protection_trailing_stop_mark_buffer_bps: "移动止损：新止损至少离标记价几基点（在正确一侧）才挂，否则这轮不换",
+  protection_trailing_min_step_bps: "移动止损：至少收紧几基点才撤旧挂新（0 = 一变就换）",
+  protection_trailing_book_critical_after_s: "移动止损：已激活却连续几秒没有有效盘口，告警升为紧急（0 = 不升级）",
   rule_gate_without_jev: "没有拍板人时用规则代替",
   gate_record_only: "拍板只记不拦（门槛没过也放行，只记下来）",
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",

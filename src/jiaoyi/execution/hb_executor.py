@@ -333,6 +333,8 @@ class HbExecutorAdapter:
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 风控算的止损 / 止盈距离。"""
         self._chase_request = chase_request
         self._protection = protection
+        if protection is not None:
+            protection.notify_stop_clamped = self._alert_stop_clamped
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -966,21 +968,19 @@ class HbExecutorAdapter:
                     self._open_fee,
                     buffer_bps,
                 )
-                reference = await self._trigger_reference(rec.symbol, long, working_type)
+                reference = await self._trigger_reference(manager, rec.symbol, long, working_type)
             except Exception as error:
                 detail = describe_error(error)
                 await self._tighten_failed(
                     position_id, "收紧止损的证据读不到", detail, "按原规则全平"
                 )
                 return {"action": "close", "why": "evidence_unavailable", "error": detail}
-            existing = rec.stop_loss_price
-            if state.trailing_stop_price is not None:
-                existing = (
-                    max(existing, state.trailing_stop_price)
-                    if long
-                    else min(existing, state.trailing_stop_price)
-                )
-            gap = mark_gap_bps / 1e4
+            # 和交易所上正在挂的止损比（最后回读明确 NEW 的最高一代）；没有就和账本固定止损比。
+            live = manager.live_stop_price(position_id)
+            existing = live if live is not None else rec.stop_loss_price
+            # 和保护状态机换代时的标记价缓冲取大的：这里过了，换代时也过（价格没动的话）。
+            gap_bps = max(mark_gap_bps, manager.trailing_stop_mark_buffer_bps)
+            gap = gap_bps / 1e4
             limit = reference * (1 - gap) if long else reference * (1 + gap)
             placeable = target < limit if long else target > limit
             info: dict[str, Any] = {
@@ -994,7 +994,7 @@ class HbExecutorAdapter:
                 "entry_quote": basis.filled_quote,
                 "exit_fee_bps": self._open_fee * 1e4,
                 "buffer_bps": buffer_bps,
-                "mark_gap_bps": mark_gap_bps,
+                "mark_gap_bps": gap_bps,
             }
             if existing >= target if long else existing <= target:
                 return {"action": "kept", "why": "existing_stop_tighter", **info}
@@ -1085,12 +1085,14 @@ class HbExecutorAdapter:
             raise ProtectionIncomplete("入场基准身份或完整性不一致")
         return basis
 
-    async def _trigger_reference(self, symbol: str, long: bool, working_type: str) -> float:
-        """新止损腿按哪个价触发就拿哪个价比：标记价，或同环境盘口（多看买一、空看卖一）。"""
+    async def _trigger_reference(
+        self, manager: BracketManager, symbol: str, long: bool, working_type: str
+    ) -> float:
+        """新止损腿按哪个价触发就拿哪个价比：带交易所时间、5 秒内的同环境标记价（和保护状态机
+        换代时同一个读法），或同环境盘口（多看买一、空看卖一）。"""
         value: float | None = None
         if working_type == "MARK_PRICE":
-            read_mark = getattr(self._exchange, "mark_price", None)
-            value = await read_mark(symbol) if read_mark is not None else None
+            value = await manager._fresh_mark(symbol)
         else:
             read_book = getattr(self._exchange, "execution_book", None)
             if read_book is not None:
@@ -1296,17 +1298,7 @@ class HbExecutorAdapter:
                 if current.record.status is PositionStatus.OPEN:
                     await self._update_server_trailing(pid)
             except TrailingBookUnavailable as error:
-                # 只是这一轮没拿到能用的盘口：不更新移动止损，已确认保护不变。单独的去重键，
-                # 不占真正保护失败（server_tick）的冷却名额。
-                await self._alert(
-                    AlertLevel.WARN,
-                    "移动止损本轮缺有效盘口",
-                    f"{initial.record.symbol} {pid}：{describe_error(error)}；"
-                    "本轮不更新移动止损，已确认的止损 / 止盈 / 保命单不变",
-                    initial.record.symbol,
-                    f"server_trailing_book:{pid}",
-                    kind="order_failed",
-                )
+                await self._alert_trailing_book(pid, initial.record.symbol, error)
             except Exception as error:
                 await self._alert(
                     AlertLevel.CRITICAL,
@@ -1317,6 +1309,51 @@ class HbExecutorAdapter:
                     f"server_tick:{pid}",
                     kind="order_failed",
                 )
+
+    async def _alert_stop_clamped(self, pid: str, symbol: str, text: str) -> None:
+        """止损目标已越过标记价：被夹到可挂的最紧价，或本轮没换。价格已经穿过想要的止损位。"""
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "止损目标已越过标记价",
+            f"{symbol} {pid}：{text}",
+            symbol,
+            f"server_stop_clamped:{pid}",
+            kind="order_failed",
+        )
+
+    async def _alert_trailing_book(
+        self, pid: str, symbol: str, error: TrailingBookUnavailable
+    ) -> None:
+        """这一轮没拿到能用的盘口：不更新移动止损，已确认保护不变。单独的去重键，不占真正保护
+        失败（server_tick）的冷却名额；已激活的移动止损连续太久拿不到，升级成紧急。"""
+        tracked = self._registry.get(pid)
+        state = tracked.server_protection if tracked is not None else None
+        after = self._protection.trailing_book_critical_after_s if self._protection else 0.0
+        since = state.trailing_failing_since if state is not None else None
+        held_s = (self._clock() - since).total_seconds() if since is not None else 0.0
+        if state is not None and state.trailing_activated and after > 0 and held_s >= after:
+            last = state.trailing_observed_at
+            last_text = last.strftime("%m-%d %H:%M:%S UTC") if last is not None else "从没有"
+            await self._alert(
+                AlertLevel.CRITICAL,
+                "移动止损长时间没有有效盘口",
+                f"{symbol} {pid}：已激活的移动止损连续 {held_s / 60:.0f} 分钟没有有效盘口，"
+                f"最后一次成功观测 {last_text}；最近原因：{describe_error(error)}。"
+                "峰值和止损价停在最后一次成功观测，已挂的止损 / 止盈 / 保命单不变",
+                symbol,
+                f"server_trailing_book_stuck:{pid}",
+                kind="order_failed",
+            )
+            return
+        await self._alert(
+            AlertLevel.WARN,
+            "移动止损本轮缺有效盘口",
+            f"{symbol} {pid}：{describe_error(error)}；"
+            "本轮不更新移动止损，已确认的止损 / 止盈 / 保命单不变",
+            symbol,
+            f"server_trailing_book:{pid}",
+            kind="order_failed",
+        )
 
     def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:
         self._frozen_peak_on = enabled
@@ -1370,10 +1407,15 @@ class HbExecutorAdapter:
             if not error_detail:
                 try:
                     assert read_book is not None
-                    async with asyncio.timeout(FROZEN_PEAK_EVIDENCE_TIMEOUT_S):
+                    # 盘口超过 5 秒本来就不能用：读盘口单独按 5 秒超时，不占满 12 秒总预算。
+                    async with asyncio.timeout(FROZEN_BOOK_MAX_AGE_S):
                         book = await read_book(symbol)
+                except TimeoutError:
+                    error_detail = "evidence_unavailable:book_timeout:"
                 except Exception as error:
-                    error_detail = f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
+                    error_detail = (
+                        f"evidence_unavailable:book:{type(error).__name__}:{str(error)[:200]}"
+                    )
             async with self._registry.symbol_lock(symbol):
                 tracked = self._registry.get(position_id)
                 if (

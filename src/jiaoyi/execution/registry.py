@@ -23,6 +23,10 @@ from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.exchange import WorkingType
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
+LegPurpose = Literal["fixed", "trailing", "lifeboat", "tightened"]
+"""tightened = 反向作战卡收紧价（#314）是这一代止损的来源。"""
+"""条件单腿的来源；新的收紧来源（例如反向卡收紧）在这里加自己的取值。"""
+
 
 class ProtectiveLeg(BaseModel):
     """每次提交/撤销前持久化的条件单身份；旧代也保留以核对迟到触发。"""
@@ -30,8 +34,7 @@ class ProtectiveLeg(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     kind: Literal["stop_loss", "take_profit"]
-    purpose: Literal["fixed", "trailing", "lifeboat", "tightened"] = "fixed"
-    """tightened = 反向作战卡收紧价（#314）是三者里最紧的那一代止损。"""
+    purpose: LegPurpose = "fixed"
     generation: int
     client_order_id: str
     quantity: float
@@ -112,6 +115,8 @@ class ServerProtection(BaseModel):
     trailing_last_error: str | None = None
     """最近一轮移动止损观测为什么没完成（缺盘口、盘口过期、证据不一致等）；完成一轮清空。
     和 ``last_error``（普通保护同步）分开记，免得一个盖掉另一个。"""
+    trailing_failing_since: datetime | None = None
+    """移动止损观测从何时起连续没做成（落盘，重启不重新计时）；做成一轮或进入退出清空。"""
     tightened_stop_price: float | None = None
     """反向作战卡没经价格确认时收紧到的止损价（#314，保本 + 费用 + 缓冲）；同步时和固定止损、
     移动止损取最紧的一个，只收紧不放松。不改账本止损价（R 仍按原始止损距离算）。"""

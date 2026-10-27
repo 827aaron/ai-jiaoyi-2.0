@@ -393,7 +393,7 @@ class TightenHarness(AdapterHarness):
     def __init__(self, root: Path, side: Side) -> None:
         super().__init__(root, side)
         self.side = side
-        self.mark = 100.5 if side is Side.LONG else 99.5
+        self.exchange.mark = 100.5 if side is Side.LONG else 99.5
 
         async def basis(symbol: str, client_order_id: str) -> EntryBasis:
             return EntryBasis(
@@ -408,11 +408,15 @@ class TightenHarness(AdapterHarness):
                 "FILLED",
             )
 
-        async def mark(symbol: str) -> float:
-            return self.mark
-
         self.exchange.entry_basis = basis  # type: ignore[attr-defined]
-        self.exchange.mark_price = mark  # type: ignore[attr-defined]
+
+    @property
+    def mark(self) -> float:
+        return self.exchange.mark  # 带交易所时间的同环境标记价（execution_mark）
+
+    @mark.setter
+    def mark(self, value: float) -> None:
+        self.exchange.mark = value
 
     def build(self) -> BracketManager:
         manager = super().build()
@@ -566,7 +570,7 @@ async def test_target_too_close_to_mark_closes_before_exchange_rejects(tmp_path:
     h = TightenHarness(tmp_path, side)
     await h.protect()
     # 目标 100.2 / 99.8 还在安全一侧，但离标记价不到 10 bp
-    h.mark = 100.25 if side is Side.LONG else 99.75
+    h.mark = 100.28 if side is Side.LONG else 99.72
     creates = list(h.creates())
     result = await h.tighten()
     assert result["action"] == "close" and result["why"] == "target_crossed"
@@ -574,8 +578,14 @@ async def test_target_too_close_to_mark_closes_before_exchange_rejects(tmp_path:
         h.mark * (0.999 if side is Side.LONG else 1.001)
     )
     assert h.creates() == creates and h.state().tightened_stop_price is None
-    # 0 = 只要求在安全一侧：同样的标记价可以挂
-    assert (await h.tighten(gap=0.0))["action"] == "tightened"
+    # 设置 0 时仍按保护状态机换代用的标记价缓冲（默认 5 bp）核对：这个标记价够 5 bp，可以挂
+    assert h.manager.trailing_stop_mark_buffer_bps == 5.0
+    result = await h.tighten(gap=0.0)
+    assert result["action"] == "tightened" and result["mark_gap_bps"] == 5.0
+    h2 = TightenHarness(tmp_path / "b", side)
+    await h2.protect()
+    h2.mark = 100.24 if side is Side.LONG else 99.76  # 不够 5 bp
+    assert (await h2.tighten(gap=0.0))["why"] == "target_crossed"
 
 
 async def test_old_path_and_unarmed_positions_close(tmp_path: Path) -> None:
@@ -623,8 +633,7 @@ async def test_provisional_after_failed_replacement_persists_target_and_waits(
     assert h.manager.retains_confirmed_stop("pos-1")
     creates = list(h.creates())
     result = await h.tighten()
-    assert result["action"] == "pending"
-    assert result["why"] in ("waiting_protection_sync", "waiting_previous_generation")
+    assert result["action"] == "pending" and result["why"] == "waiting_protection_sync"
     assert h.state().tightened_stop_price == pytest.approx(_target(side), abs=0.001)
     assert h.creates() == creates and h.exchange.orders[old].algo_status == "NEW"
     # 交易所恢复后，保护轮询的下一次同步直接按收紧价换代
@@ -664,10 +673,7 @@ async def test_unreadable_mark_closes_instead(tmp_path: Path) -> None:
     h = TightenHarness(tmp_path, Side.LONG)
     await h.protect()
 
-    async def no_mark(symbol: str) -> None:
-        return None
-
-    h.exchange.mark_price = no_mark  # type: ignore[attr-defined]
+    h.exchange.mark_at = START - timedelta(seconds=6)  # 标记价过期：不当作可用
     result = await h.tighten()
     assert result["action"] == "close" and result["why"] == "evidence_unavailable"
     assert "收紧止损的证据读不到" in (h.state().last_error or "")
@@ -810,3 +816,56 @@ assert(!protBlock(p).includes('反向作战卡'));
 """
     )
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+# ---------------------------------------------------------------- 接 #333 的止损目标
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_live_tightened_leg_restart_never_replaced_by_looser(tmp_path: Path, side: Side):
+    h = TightenHarness(tmp_path, side)
+    tracked = h.registry.get("pos-1")
+    no_trail = tracked.record.model_copy(
+        update={"trailing_activation_pct": None, "trailing_stop_pct": None}
+    )
+    h.registry.put(tracked.model_copy(update={"record": no_trail}))
+    await h.protect()
+    assert (await h.tighten())["action"] == "tightened"
+    assert h.state().trailing_stop_price is None
+    creates = list(h.creates())
+    h.restart_adapter()  # 新的 BracketManager 从账本读
+    assert h.manager.live_stop_price("pos-1") == _target(side)
+    assert await h.manager.sync("pos-1") == "armed"
+    # 账本固定止损被开仓价回填改得更松：收紧价仍是下限，不换松
+    tracked = h.registry.get("pos-1")
+    looser = 98.5 if side is Side.LONG else 101.5
+    record = tracked.record.model_copy(update={"stop_loss_price": looser})
+    h.registry.put(tracked.model_copy(update={"record": record}))
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.creates() == creates and h.manager.live_stop_price("pos-1") == _target(side)
+    assert [x.purpose for x in h.stop_legs() if x.state == "confirmed"] == ["tightened"]
+    assert h.state().tightened_stop_price is not None  # 持仓期间不清、不放松
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_tightened_candidate_ignores_trailing_min_step(tmp_path: Path, side: Side):
+    h = TightenHarness(tmp_path, side)
+    await h.protect()
+    h.manager.trailing_min_step_bps = 500.0  # 移动止损要收紧 5% 才换代
+    assert (await h.tighten())["action"] == "tightened"
+    assert h.manager.live_stop_price("pos-1") == _target(side)
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_persisted_tightened_beyond_mark_is_clamped_by_protection(tmp_path: Path, side: Side):
+    # 落盘后才越过标记价（还没换上就跌了）：由 #333 夹到标记价旁可挂的最紧价，不走原规则平
+    h = TightenHarness(tmp_path, side)
+    await h.protect()
+    async with h.registry.symbol_lock("BTCUSDT"):
+        h.manager.set_tightened_stop("pos-1", _target(side), "反向卡")
+    h.mark = 100.1 if side is Side.LONG else 99.9
+    assert await h.manager.sync("pos-1") == "armed"
+    live = [x for x in h.stop_legs() if x.state == "confirmed"]
+    expected = round(h.mark * (0.9995 if side is Side.LONG else 1.0005), 2)
+    assert [(x.purpose, x.trigger_price) for x in live] == [("tightened", expected)]
+    assert h.state().tightened_stop_price == _target(side)

@@ -119,6 +119,16 @@ class ExecutionBook:
 
 
 @dataclass(frozen=True)
+class MarkEvidence:
+    """本交易客户端所属环境的标记价；source_at 为交易所时间（premiumIndex 的 time）。"""
+
+    symbol: str
+    mark: float
+    source_at: datetime
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
 class ExchangeBracket:
     """独立普通保护单；algo 状态不是成交证据，未知 child 不能补成不存在。"""
 
@@ -1419,6 +1429,31 @@ class CcxtBinanceFutures:
             return ExecutionBook(symbol, bid, ask, source_at, observed_at)
         except Exception as error:
             raise ExchangeError("同环境执行盘口证据未知", transient=is_transient(error)) from error
+
+    async def execution_mark(self, symbol: str, *, max_age_s: float = 5.0) -> MarkEvidence:
+        """同环境标记价（带交易所时间）；缺少 / 未来 / 过期 / 非正数一律未知，不回退到别的价。
+
+        和 ``execution_book`` 一样，5 秒是证据健康上界；调用方消费时还要再查新鲜度。
+        """
+        _bracket_symbol(symbol)
+        age_limit = _bracket_number(max_age_s)
+        started_at = datetime.now(UTC)
+        try:
+            raw = await self._ex.fapiPublicGetPremiumIndex({"symbol": symbol})
+            observed_at = datetime.now(UTC)
+            row = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+            if not isinstance(row, dict) or row.get("symbol") != symbol:
+                raise ValueError("同环境标记价身份不符")
+            mark = _bracket_number(row.get("markPrice"))
+            source_at = _bracket_time(row.get("time"))
+            if source_at is None:
+                raise ValueError("同环境标记价没有交易所时间")
+            age = (observed_at - source_at).total_seconds()
+            if observed_at < started_at or age < 0 or age > age_limit:
+                raise ValueError("同环境标记价时钟/新鲜度不可信")
+            return MarkEvidence(symbol, mark, source_at, observed_at)
+        except Exception as error:
+            raise ExchangeError("同环境标记价证据未知", transient=is_transient(error)) from error
 
     async def cancel_bracket(
         self, symbol: str, algo_id: str, *, expected_client_order_id: str
