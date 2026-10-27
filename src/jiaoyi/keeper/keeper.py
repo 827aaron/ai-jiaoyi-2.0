@@ -228,6 +228,19 @@ class JevKeeper:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
+        age = (now - f.ts).total_seconds()
+        if self._cfg.keeper_price_max_age_s > 0 and age > self._cfg.keeper_price_max_age_s:
+            self._keep_against(pid, against, now)  # 连续计数不动：这一轮当没复查
+            return verdict(
+                position,
+                now,
+                "hold",
+                0.0,
+                1,
+                f"行情已旧 {age:.0f} 秒，这轮跳过、维持现状",
+                None,
+                None,
+            )
         card = self._card(now)
         market = (
             self._market_source()

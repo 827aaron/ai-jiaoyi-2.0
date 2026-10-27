@@ -257,6 +257,8 @@ def test_switch_table_lists_exactly_the_agreed_soft_limits() -> None:
         "app.reconciler_executor_stop_retry_rounds",
         "fast_loop.regime_flip_min_gap_min",
         "fast_loop.regime_flip_check_min",
+        "fast_loop.chase_price_max_age_s",
+        "fast_loop.keeper_price_max_age_s",
     }
 
 

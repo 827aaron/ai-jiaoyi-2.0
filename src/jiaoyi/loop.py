@@ -846,6 +846,9 @@ class Runner:
         snap = self.m.features.snapshot(intent.symbol)
         if snap is None:
             return ["没到区间：拿不到现价，没法确认还在卡的进场区间里"]
+        age = (now - snap.ts).total_seconds()
+        if fast.chase_price_max_age_s > 0 and age > fast.chase_price_max_age_s:
+            return [f"行情已旧 {age:.1f} 秒（上限 {fast.chase_price_max_age_s:g} 秒），这次不追"]
         miss = entry_zone_miss_at(
             intent.symbol, intent.side, snap.last_price, snap, card, fast, now
         )

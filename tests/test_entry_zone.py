@@ -103,3 +103,27 @@ def test_chase_rechecks_zone_at_current_price(tmp_path: Path, now: datetime) -> 
     r.m = dataclasses.replace(r.m, features=_Feats(None))
     assert r._chase_zone(_intent(c.Side.LONG), cd, now)[0].startswith("没到区间")  # type: ignore[arg-type]
     assert r._chase_zone(_intent(c.Side.LONG), h.card(now), now) == []  # type: ignore[arg-type]
+
+
+def test_chase_skips_on_stale_price_only_when_age_limit_set(tmp_path: Path, now: datetime) -> None:
+    """追进前行情断流：价格超过 chase_price_max_age_s 就这次不追；0（默认）= 现状不查。"""
+    from datetime import timedelta
+
+    app = _on(tmp_path, now)
+    r = Runner(app)
+    cd = h.card(now, entry_zone=ZONE, bias="both")
+    old = h.features(now - timedelta(seconds=30), price=67900.0)  # 区间里，但 30 秒前的价
+    r.m = dataclasses.replace(r.m, features=_Feats(old))
+    assert c.FastLoopConfig().chase_price_max_age_s == 0
+    from jiaoyi.core.hotconfig import HOT_FAST
+
+    assert {"chase_price_max_age_s", "keeper_price_max_age_s"} <= HOT_FAST  # 面板改了不用重启
+    assert r._chase_zone(_intent(c.Side.LONG), cd, now) == []  # type: ignore[arg-type]
+    app.app_cfg = app.app_cfg.model_copy(
+        update={"fast_loop": ON.model_copy(update={"chase_price_max_age_s": 5.0})}
+    )
+    why = r._chase_zone(_intent(c.Side.LONG), cd, now)  # type: ignore[arg-type]
+    assert why == ["行情已旧 30.0 秒（上限 5 秒），这次不追"]
+    fresh = h.features(now - timedelta(seconds=2), price=67900.0)
+    r.m = dataclasses.replace(r.m, features=_Feats(fresh))
+    assert r._chase_zone(_intent(c.Side.LONG), cd, now) == []  # type: ignore[arg-type]

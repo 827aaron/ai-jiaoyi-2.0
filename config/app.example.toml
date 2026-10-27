@@ -67,7 +67,7 @@ jev_error_cooldown_s = 60         # 暂停 60 秒后再试
 # max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.60；只在 six 生效）
 # predictor_weight = 0.2            # 预测员意见占几成：只有报 100% 才算看涨，与卡方向一致把“做”加 权重×0.5（0.2 → +0.10），相反不扣；0 = 不听
 # gate_record_only = false         # 拍板只记不拦（不写 = 关；只在 paper 生效，testnet / live 写了当关）：门槛没过也放行并记下，毒性 ≥ 0.8 仍拦
-signal_max_age_s = 5.0            # 信号超过 5 秒没审完就作废
+signal_max_age_s = 5.0            # 信号从触发到风控员审完超过这么多秒就作废（开仓前行情最旧也按它）
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
 size_fraction_m = 0.75            # M 用 7.5 成，L 用满
 # atr_period_min = 15               # 止损用几分钟 K 线的 ATR（5 / 15 / 30 / 60）；作战卡的止损倍数按这个尺度给（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
@@ -85,6 +85,7 @@ size_fraction_m = 0.75            # M 用 7.5 成，L 用满
 keeper_close_p = 0.6              # 管家：平仓概率 ≥ 0.6 且连续 2 次才平
 keeper_close_p_strong = 0.85      # 管家：≥ 0.85 一次就平
 keeper_confirmations = 2
+# keeper_price_max_age_s = 0       # 管家复查时这个币的行情最多旧几秒，超过这一轮跳过、维持现状（不平仓）；0 = 不查。推荐 Demo 30
 # frozen_peak_exit_on = true       # New Demo positions only; existing positions are never migrated
 # frozen_peak_exit_after_s = 3600  # Freeze the observed executable profit target after one hour
 # giveback_on = true               # 回吐保护开关（代码规则）：最高浮盈到过 giveback_arm_r 后，从最高点吐掉 giveback_close_pct 就全平
@@ -100,6 +101,7 @@ session_cme_open_live = false     # CME 周日开盘在 testnet / live 也出；
 entry_limit_pullback = false      # 进场用挂单等回踩（默认关 = 市价进）；让多少 / 追不追跟档位走
 entry_limit_pullback_live = false # testnet / live 也用挂单等回踩
 entry_limit_wait_min = 60         # 挂单最多等 60 分钟，没成交就撤（8h 以上档改市价追）
+# chase_price_max_age_s = 0        # 改市价追进前复查进场区间时行情最多旧几秒，超过就这次不追；0 = 不查。推荐 Demo 5
 # trailing_on = true               # 移动止损（持仓管家）：赚到 trail_start_r 后止损跟着最高盈利收紧，只收紧不放松（不写 = 开）
 # trail_start_r = 0.7              # 赚到几个止损距离后开始跟（1 = 一个止损距离；不写 = 跟档位 0.7）
 # trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 0.7、4h 以上 1.0）

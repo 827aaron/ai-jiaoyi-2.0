@@ -300,3 +300,27 @@ def test_patrol_lines_follow_the_stop(now: datetime) -> None:
     assert "pos-1" in p.urgent
     a = p.check(_trade(now + timedelta(seconds=30), 65900.0), wide)  # -3.09%
     assert a is not None and "≥3.00%" in a.reason
+
+
+async def test_stale_price_skips_the_round_without_closing(now: datetime) -> None:
+    """管家价格过旧（keeper_price_max_age_s）：这一轮跳过、不问模型、不平仓，连续计数不变。"""
+    t = MockJevTransport(answer=close_p(0.7))
+    snap = {"f": features(now)}
+    fast = FAST.model_copy(update={"keeper_price_max_age_s": 20.0})
+    model = JevDecisionModel(t, FAST, timeout_ms=200)
+    k = JevKeeper(model, fast, lambda s: snap["f"], lambda n: card(now))
+    v1 = await k.review(position(now), now)
+    assert v1.action == "hold" and v1.consecutive == 1 and len(t.calls) == 1
+    later = now + timedelta(seconds=40)  # 行情停在 now：已旧 40 秒
+    v2 = await k.review(position(now), later)
+    assert v2.action == "hold" and "行情已旧 40 秒" in v2.reason and len(t.calls) == 1
+    snap["f"] = features(later)
+    v3 = await k.review(position(now), later)
+    assert v3.action == "close" and v3.consecutive == 2  # 跳过的那轮没打断连续计数
+
+
+async def test_stale_price_check_is_off_by_default(now: datetime) -> None:
+    assert c.FastLoopConfig().keeper_price_max_age_s == 0
+    t = MockJevTransport(answer=close_p(0.9))
+    v = await keeper(t, now).review(position(now), now + timedelta(minutes=10))
+    assert v.action == "close"  # 现状：不看行情多旧
