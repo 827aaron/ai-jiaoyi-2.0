@@ -387,7 +387,8 @@ def _latest_chain(records: list[DecisionRecord], since: datetime | None = None) 
     return {r.role for r in mine}
 
 
-AGAINST_SHOW = timedelta(minutes=30)
+EVENT_EDGE_SHOW = timedelta(minutes=30)
+"""流程图事件虚线（反向信号、预测看反临时会、大盘变化）只显示这么久。"""
 
 
 def _recent_against(status: dict[str, ModuleStatus], now: datetime) -> list[AgainstSignalEvent]:
@@ -395,7 +396,7 @@ def _recent_against(status: dict[str, ModuleStatus], now: datetime) -> list[Agai
     st = status.get(Role.SENTINEL.value)
     if st is None:
         return []
-    hits = [e for e in st.against_signals if e.actions and now - e.ts <= AGAINST_SHOW]
+    hits = [e for e in st.against_signals if e.actions and now - e.ts <= EVENT_EDGE_SHOW]
     return sorted(hits, key=lambda e: e.ts, reverse=True)
 
 
@@ -445,7 +446,7 @@ def _predictor_meetings(files: PanelFiles, now: datetime) -> list[PredictorMeeti
         r
         for r in _journal_tail(files)
         if r.refresh_reason == PREDICTOR_EVENT
-        and timedelta(0) <= now - r.created_at <= AGAINST_SHOW
+        and timedelta(0) <= now - r.created_at <= EVENT_EDGE_SHOW
     ]
     rows.sort(key=lambda r: r.created_at, reverse=True)
     return [PredictorMeeting(symbol=r.symbol, ts=r.created_at, bias=r.bias) for r in rows]
@@ -553,6 +554,7 @@ def build_team(
                 _item(r)
                 for r in reversed(files.decisions_days(now))
                 if r.role is Role.SENTINEL
+                and now - r.ts <= EVENT_EDGE_SHOW
                 and isinstance(r.output.get("regime_flip"), dict)
                 and r.output["regime_flip"].get("kind") == "confirmed"
                 and r.output["regime_flip"].get("rerun") is True

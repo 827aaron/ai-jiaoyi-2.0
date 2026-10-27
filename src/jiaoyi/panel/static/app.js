@@ -1581,15 +1581,24 @@ const TF_EDGES = [
   [tfL("executor"), tfT("reconciler"), "reconciler", "", "tree"],
 ];
 // 和卡相反的信号（主程序按有没有仓分流）：平时不画，最近 30 分钟真交出去过才亮，标最近一次的币、时间、结果
+// 事件虚线随时间变淡：10 分钟内不透明，到 30 分钟线性降到 0.35；标签尾巴带相对时间
+const EDGE_FADE_FROM = 10, EDGE_SHOW_MIN = 30, EDGE_FADE_TO = 0.35;
+const edgeAgeMin = (ts) => Math.max(0, (Date.now() - new Date(ts).getTime()) / 60000);
+const edgeOpacity = (ts) => {
+  const m = edgeAgeMin(ts);
+  if (m <= EDGE_FADE_FROM) return 1;
+  return Math.max(EDGE_FADE_TO, 1 - ((1 - EDGE_FADE_TO) * (m - EDGE_FADE_FROM)) / (EDGE_SHOW_MIN - EDGE_FADE_FROM));
+};
+const edgeAgeTxt = (ts) => { const m = Math.floor(edgeAgeMin(ts)); return m < 1 ? "· 刚刚" : `· ${m} 分钟前`; };
 const VERDICT = { close: "管家判平", hold: "管家判继续拿" };
 function againstEdges(list) {
   const out = [];
   const pick = (act) => (list || []).filter((e) => e.actions.includes(act));
-  const tag = (hits, tail) => `${hits[0].symbol.replace(/USDT$/, "")} ${hm(hits[0].ts)} ${tail}${hits.length > 1 ? `（30 分钟内 ${hits.length} 次）` : ""}`;
+  const tag = (hits, tail) => `${hits[0].symbol.replace(/USDT$/, "")} ${hm(hits[0].ts)} ${tail}${hits.length > 1 ? `（30 分钟内 ${hits.length} 次）` : ""} ${edgeAgeTxt(hits[0].ts)}`;
   const k = pick("keeper_recheck");
-  if (k.length) out.push([[TF_POS.sentinel[0] + 130, TF_POS.sentinel[1] + NODE_H], [TF_POS.keeper[0] + 40, TF_POS.keeper[1]], "keeper", tag(k, `反向 → ${VERDICT[k[0].keeper_verdict] || "管家急查中"}`), "drop", "against"]);
+  if (k.length) out.push([[TF_POS.sentinel[0] + 130, TF_POS.sentinel[1] + NODE_H], [TF_POS.keeper[0] + 40, TF_POS.keeper[1]], "keeper", tag(k, `反向 → ${VERDICT[k[0].keeper_verdict] || "管家急查中"}`), "drop", "against", k[0].ts]);
   const m = pick("meeting");
-  if (m.length) out.push([[TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], [TF_POS.commander[0] + 40, TF_POS.commander[1] + NODE_H], "commander", tag(m, "反向 → 临时会"), "up", "against"]);
+  if (m.length) out.push([[TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], [TF_POS.commander[0] + 40, TF_POS.commander[1] + NODE_H], "commander", tag(m, "反向 → 临时会"), "up", "against", m[0].ts]);
   return out;
 }
 // 预测员连续看反作战卡 → 单币临时会：同样平时不画，最近 30 分钟开过才亮
@@ -1597,15 +1606,17 @@ const BIAS_WORD = { long: "改做多", short: "改做空", both: "两边都可",
 function predictorMeetingEdges(list) {
   if (!list || !list.length) return [];
   const p = list[0];
-  const label = `${p.symbol.replace(/USDT$/, "")} ${hm(p.ts)} 预测看反 → 临时会${BIAS_WORD[p.bias] ? "：" + BIAS_WORD[p.bias] : ""}${list.length > 1 ? `（30 分钟内 ${list.length} 次）` : ""}`;
-  return [[[TF_POS.predictor[0] + 150, TF_POS.predictor[1]], [TF_POS.commander[0] + 14, TF_POS.commander[1] + NODE_H], "commander", label, "climb", "against"]];
+  const label = `${p.symbol.replace(/USDT$/, "")} ${hm(p.ts)} 预测看反 → 临时会${BIAS_WORD[p.bias] ? "：" + BIAS_WORD[p.bias] : ""}${list.length > 1 ? `（30 分钟内 ${list.length} 次）` : ""} ${edgeAgeTxt(p.ts)}`;
+  return [[[TF_POS.predictor[0] + 150, TF_POS.predictor[1]], [TF_POS.commander[0] + 14, TF_POS.commander[1] + NODE_H], "commander", label, "climb", "against", p.ts]];
 }
 // 只在真正启动大盘独立更新后画虚线，疑似 / 被拦仍进哨兵日志，不冒充已触发。
 function regimeFlipEdges(event) {
   if (!event) return [];
-  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS.market[0] + 140, TF_POS.market[1] + NODE_H], "market", `${hm(event.ts)} 大盘变化 → 独立更新`, "flip", "against"]];
+  const flip = (event.output && event.output.regime_flip) || {};
+  const target = flip.scope === "market_desk" ? "大盘台" : "独立更新";
+  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS.market[0] + 140, TF_POS.market[1] + NODE_H], "market", `${hm(event.ts)} 大盘变化 → ${target} ${edgeAgeTxt(event.ts)}`, "flip", "against", event.ts]];
 }
-function tfEdge([a, b, to, label, how, extra], prog) {
+function tfEdge([a, b, to, label, how, extra, ts], prog) {
   const [x1, y1] = a, [x2, y2] = b;
   const st = prog[to] === "doing" ? "doing" : prog[to] === "done" ? "done" : "";
   const cls = `e ${st} ${extra || ""}`;
@@ -1624,7 +1635,8 @@ function tfEdge([a, b, to, label, how, extra], prog) {
   else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
   else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
   const ah = dir === "r" ? `M${x2},${y2} l-7,-4 v8 z` : dir === "u" ? `M${x2},${y2} l-4,7 h8 z` : `M${x2},${y2} l-4,-7 h8 z`;
-  return `<path class="${cls}" d="${d}"/><path class="ah ${st} ${extra || ""}" d="${ah}"/>${label ? `<text class="${extra || ""}" x="${lx}" y="${ly}"${how === "up" ? ' text-anchor="end"' : ""}>${esc(label)}</text>` : ""}`;
+  const body = `<path class="${cls}" d="${d}"/><path class="ah ${st} ${extra || ""}" d="${ah}"/>${label ? `<text class="${extra || ""}" x="${lx}" y="${ly}"${how === "up" ? ' text-anchor="end"' : ""}>${esc(label)}</text>` : ""}`;
+  return ts ? `<g class="aged" style="opacity:${edgeOpacity(ts).toFixed(2)}">${body}</g>` : body;
 }
 const PROG_LABEL = { err: "出错", doing: "正在做", done: "这一轮做完", wait: "等待" };
 function tfCardNode() {
