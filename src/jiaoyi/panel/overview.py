@@ -466,7 +466,11 @@ def position_views(
     keeper_pos: dict[str, dict[str, object]] = {}  # 最近一次管家快照的 pos + trail
     for r in records:
         if r.role is Role.KEEPER and r.position_id:
-            keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(r.outcome, "出错")
+            # 市场复核的 INFO 是进度回执，不能覆盖真实判断或伪装成调用错误。
+            if r.outcome in (Outcome.HOLD, Outcome.CLOSE, Outcome.ERROR):
+                keeper_last[r.position_id] = {"close": "平仓", "hold": "拿住"}.get(
+                    r.outcome, "出错"
+                )
             snap = _keeper_snap(r.input)
             if snap is not None:
                 keeper_pos[r.position_id] = snap
