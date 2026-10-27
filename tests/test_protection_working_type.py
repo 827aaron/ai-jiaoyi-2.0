@@ -20,7 +20,7 @@ from jiaoyi.panel.pages import _items
 from tests.support import builders as b
 from tests.test_config_limits import _write
 from tests.test_exchange_brackets_io import client, raw
-from tests.test_server_protection_regression import Harness, trailing_inputs
+from tests.test_server_protection_regression import Harness, reads, trailing_inputs
 
 MARK, LAST = "MARK_PRICE", "CONTRACT_PRICE"
 
@@ -215,7 +215,7 @@ async def test_trailing_generation_uses_current_setting_and_cancels_old_after(
     tp = next(cid for cid in h.exchange.orders if cid.startswith("br-tp-"))
     h.restart()
     _set(h, after, after)
-    assert await h.manager.observe_trailing("pos-1", basis, book)
+    assert await h.manager.observe_trailing("pos-1", basis, reads(book))
     assert await h.manager.sync("pos-1") == "armed"
     new_sl = h.creates()[-1]
     assert new_sl.startswith("br-sl-") and new_sl != old_sl

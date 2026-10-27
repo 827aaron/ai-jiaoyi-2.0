@@ -109,6 +109,9 @@ class ServerProtection(BaseModel):
     trailing_source_at: datetime | None = None
     trailing_stop_price: float | None = None
     trailing_observation_gap: bool = False
+    trailing_last_error: str | None = None
+    """最近一轮移动止损观测为什么没完成（缺盘口、盘口过期、证据不一致等）；完成一轮清空。
+    和 ``last_error``（普通保护同步）分开记，免得一个盖掉另一个。"""
     tightened_stop_price: float | None = None
     """反向作战卡没经价格确认时收紧到的止损价（#314，保本 + 费用 + 缓冲）；同步时和固定止损、
     移动止损取最紧的一个，只收紧不放松。不改账本止损价（R 仍按原始止损距离算）。"""

@@ -12,6 +12,9 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from jiaoyi.contracts import PositionRecord, Side
 from jiaoyi.execution.exchange import EntryBasis, ExchangeError, ExecutionBook
 
+BOOK_MAX_AGE_S = 5.0
+"""判断时盘口源时刻最多多旧；也是两次观测之间算“断流”的间隔。"""
+
 
 class FrozenPeakExit(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -76,7 +79,7 @@ def frozen_peak_update(
             basis.entry_price * basis.filled_quantity, basis.filled_quote, rel_tol=1e-10
         )
         or not rec.opened_at <= first <= last <= book.source_at <= book.observed_at <= now
-        or (now - book.source_at).total_seconds() > 5
+        or (now - book.source_at).total_seconds() > BOOK_MAX_AGE_S
     ):
         raise ExchangeError("Frozen peak entry, quantity or executable book evidence is invalid")
     identity = (
@@ -110,10 +113,13 @@ def frozen_peak_update(
         entry_fee=basis.fee_usdt,
         last_source_at=book.source_at,
         observation_gap=state.observation_gap
-        or (state.last_source_at is None and (book.source_at - first).total_seconds() > 5)
+        or (
+            state.last_source_at is None
+            and (book.source_at - first).total_seconds() > BOOK_MAX_AGE_S
+        )
         or bool(
             state.last_source_at is not None
-            and (book.source_at - state.last_source_at).total_seconds() > 5
+            and (book.source_at - state.last_source_at).total_seconds() > BOOK_MAX_AGE_S
         ),
         detail="",
     )

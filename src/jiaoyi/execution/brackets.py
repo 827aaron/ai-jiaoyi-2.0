@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from jiaoyi.execution.registry import (
     ServerProtection,
     TrackedPosition,
 )
-from jiaoyi.execution.trailing import trailing_update
+from jiaoyi.execution.trailing import TrailingBookUnavailable, trailing_update
 
 
 class BracketExchange(Protocol):
@@ -782,37 +783,73 @@ class BracketManager:
         self._save(pid, stage="armed", ever_armed=True, last_error=None)
         return "armed"
 
-    async def observe_trailing(self, pid: str, basis: EntryBasis, book: ExecutionBook) -> bool:
+    async def observe_trailing(
+        self,
+        pid: str,
+        basis: EntryBasis,
+        read_book: Callable[[str], Awaitable[ExecutionBook]],
+    ) -> bool:
+        """锁内先核入场 / 实际仓 / 三腿回读，最后才读盘口并立刻判断。
+
+        盘口不能在这些查询之前读：入场 2 次 + 三腿 3 次 + 检查点 2 次（回读宽限时再多等几秒），
+        Demo 上常超过 5 秒，判断时必然“过期”。5 秒新鲜度、未来时刻和源时钟回退的检查一条不放松。
+        失败原因记 ``trailing_last_error``，完成一轮清空；异常照常抛给调用方告警。
+        """
         tracked, _ = self._current(pid)
         async with self.registry.symbol_lock(tracked.record.symbol):
-            evidence = await self._evidence(pid)
-            state = await self._refresh(pid)
-            if state.stage != "armed" or not evidence.terminal:
-                return False
-            await self._checkpoint(pid, evidence)
-            tracked, state = self._current(pid)
-            if basis.client_order_id != tracked.entry_client_order_id:
-                raise ProtectionIncomplete("移动止损入场身份不一致")
-            update = trailing_update(tracked.record, state, basis, book, self.clock())
-            if update is None:
-                return False
-            changed = update.stop_price != state.trailing_stop_price
-            self._save(
-                pid,
-                trailing_peak_net=update.peak_net,
-                trailing_threshold_net=update.threshold_net,
-                trailing_peak_net_exact=update.peak_net_exact,
-                trailing_threshold_net_exact=update.threshold_net_exact,
-                trailing_activated=update.activated,
-                trailing_stop_price=update.stop_price,
-                trailing_entry_quote=basis.filled_quote,
-                trailing_entry_quantity=basis.filled_quantity,
-                trailing_fees_quote=basis.fee_usdt,
-                trailing_source_at=book.source_at,
-                trailing_observed_at=book.observed_at,
-                trailing_observation_gap=update.observation_gap,
-            )
+            try:
+                changed = await self._observe_trailing(pid, basis, read_book)
+            except Exception as error:
+                self.record_trailing_error(pid, error)
+                raise
+            if self._current(pid)[1].trailing_last_error is not None:
+                self._save(pid, trailing_last_error=None)
             return changed
+
+    def record_trailing_error(self, pid: str, error: BaseException) -> None:
+        """移动止损这一轮没做成：只记原因给面板看，不改任何保护状态。"""
+        # 已不是本状态机的持仓：没有地方可记，原异常照常由调用方处理。
+        with contextlib.suppress(ProtectionIncomplete):
+            self._save(pid, trailing_last_error=describe_error(error))
+
+    async def _observe_trailing(
+        self,
+        pid: str,
+        basis: EntryBasis,
+        read_book: Callable[[str], Awaitable[ExecutionBook]],
+    ) -> bool:
+        evidence = await self._evidence(pid)
+        state = await self._refresh(pid)
+        if state.stage != "armed" or not evidence.terminal:
+            return False
+        await self._checkpoint(pid, evidence)
+        tracked, state = self._current(pid)
+        if basis.client_order_id != tracked.entry_client_order_id:
+            raise ProtectionIncomplete("移动止损入场身份不一致")
+        try:
+            book = await read_book(tracked.record.symbol)
+        except ExchangeError as error:
+            raise TrailingBookUnavailable("移动止损盘口读取失败") from error
+        update = trailing_update(tracked.record, state, basis, book, self.clock())
+        if update is None:
+            return False
+        changed = update.stop_price != state.trailing_stop_price
+        self._save(
+            pid,
+            trailing_peak_net=update.peak_net,
+            trailing_threshold_net=update.threshold_net,
+            trailing_peak_net_exact=update.peak_net_exact,
+            trailing_threshold_net_exact=update.threshold_net_exact,
+            trailing_activated=update.activated,
+            trailing_stop_price=update.stop_price,
+            trailing_entry_quote=basis.filled_quote,
+            trailing_entry_quantity=basis.filled_quantity,
+            trailing_fees_quote=basis.fee_usdt,
+            trailing_source_at=book.source_at,
+            trailing_observed_at=book.observed_at,
+            trailing_observation_gap=update.observation_gap,
+        )
+        return changed
 
     async def prepare_exit(self, pid: str) -> bool:
         """停入场并查清未决子单；普通只减仓保护留到真实零仓，不先撤最后 SL。
