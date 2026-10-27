@@ -88,6 +88,8 @@ class JevKeeper:
         forecast: Callable[[str, datetime], Forecast | None] | None = None,
         scan_day: Callable[[str, str], list[dict[str, Any]]] | None = None,
         current_market: Callable[[], MarketView | None] | None = None,
+        frozen_peak_review: Callable[[str, datetime], Awaitable[dict[str, Any] | None]]
+        | None = None,
         observation_source: Callable[[str, datetime], Mapping[str, Any] | None] | None = None,
         observation_sink: Callable[[dict[str, Any]], None] | None = None,
         observation_wall: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -96,6 +98,7 @@ class JevKeeper:
 
         ``fee_bps``：单边吃单手续费（快照的扣费后浮盈）；``forecast``：预测员最新预测；
         ``scan_day(UTC 日期, 关键字)``：读决策日志里含关键字的记录，找回复查历史和进场拍板。"""
+        self._frozen_peak_review = frozen_peak_review
         self._model = model
         self._sleep = sleep
         self._blocked = blocked or dict
@@ -195,10 +198,32 @@ class JevKeeper:
         if direct is not None:
             return direct
         pid = position.position_id
+        frozen_peak = None
+        if self._frozen_peak_review is not None:
+            try:
+                frozen_peak = await self._frozen_peak_review(pid, now)
+            except Exception:
+                log.warning("Frozen peak evidence unavailable for %s", pid, exc_info=True)
+                frozen_peak = {"triggered": False, "detail": "evidence_reader_failed"}
+        if frozen_peak and frozen_peak.get("triggered") is True:
+            self._streak.pop(pid, None)
+            return self._verdict(
+                position,
+                now,
+                "close",
+                1.0,
+                1,
+                f"冻结盈利价回访：同环境可成交价再次到达 {frozen_peak['target_price']:g}",
+                None,
+                None,
+                frozen_peak_rule=frozen_peak,
+            )
         against = self._against.pop(pid, None)
         f = self._features(position.symbol)
         observation = self._observation_start(position, now, f)
-        verdict = partial(self._verdict, against=against, observation=observation)
+        verdict = partial(
+            self._verdict, against=against, observation=observation, frozen_peak_rule=frozen_peak
+        )
         if f is None:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
@@ -397,6 +422,7 @@ class JevKeeper:
         extra: Mapping[str, Any] | None = None,
         observation: dict[str, Any] | None = None,
         card_rule: Mapping[str, Any] | None = None,
+        frozen_peak_rule: Mapping[str, Any] | None = None,
     ) -> KeeperVerdict:
         """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）；
         ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``。"""
@@ -449,6 +475,7 @@ class JevKeeper:
                     **jev_out,
                     **({"giveback_guard": dict(extra)} if extra else {}),
                     **({"card_rule": dict(card_rule)} if card_rule else {}),
+                    **({"frozen_peak_exit": dict(frozen_peak_rule)} if frozen_peak_rule else {}),
                     **(
                         {
                             "against": {

@@ -449,6 +449,8 @@ def _build_execution(
             close_unknown_positions=app_cfg.reconciler_close_unknown_positions,
             demo_trading=app_cfg.sim_environment == "demo",
             limit_take_profit=app_cfg.limit_take_profit_on,
+            frozen_peak_exit_on=app_cfg.fast_loop.frozen_peak_exit_on,
+            frozen_peak_exit_after_s=app_cfg.fast_loop.frozen_peak_exit_after_s,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:
@@ -675,6 +677,7 @@ def build_modules(
             fee_bps=risk_cfg.taker_fee_bps,
             forecast=predictor.latest,
             scan_day=decision_log.scan_day,
+            frozen_peak_review=getattr(executor, "frozen_peak_review", None),
             current_market=(lambda: cards.latest_market_view)
             if isinstance(cards, BattleCardCommander)
             else None,
@@ -1076,6 +1079,10 @@ class App:
             m.gate.reconfigure(
                 max_wait_s=max(fast.signal_max_age_s - cfg.jev_timeout_ms / 1000.0, 0.0),
                 questions=fast.gate_questions,
+            )
+        if hasattr(m.executor, "configure_frozen_peak_exit"):
+            m.executor.configure_frozen_peak_exit(
+                fast.frozen_peak_exit_on, fast.frozen_peak_exit_after_s
             )
         telegram = getattr(m.alerter, "inner", m.alerter)
         if hasattr(telegram, "set_muted"):

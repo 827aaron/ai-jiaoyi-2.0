@@ -2137,6 +2137,8 @@ const PLAIN = {
   keeper_close_p: "管家觉得该平的把握过多少就平（0–1）",
   keeper_close_p_strong: "把握过多少不用再确认直接平（0–1）",
   keeper_confirmations: "管家连续几次都说平才平",
+  frozen_peak_exit_on: "冻结盈利价回访（仅之后新开的 Demo 仓）",
+  frozen_peak_exit_after_s: "从真实首笔成交起几分钟后冻结盈利价",
   giveback_on: "回吐保护开关（代码规则，不问模型）",
   giveback_close_pct: "回吐保护：最高浮盈吐掉百分之几就全平",
   giveback_arm_r: "回吐保护：最高浮盈到过几倍止损距离才开始看",
@@ -2310,7 +2312,7 @@ const HINT = {
 };
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
-const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
+const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
 const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4" };
 // 这几项填 0 = 不设限
 const ZERO_AS = { major_top_n: "只用固定 7 个", min_range_24h_pct: "不设", max_range_24h_pct: "不设", entry_max_card_age_min: "不查" };
@@ -2504,6 +2506,7 @@ const ROLES = [
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong"] },
+    { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
   ] },
@@ -2687,6 +2690,7 @@ function editOne(id, useRec) {
     const fit = (c) => (i.key === "atr_period_min" && ATR_FIT[c] ? ` · 适合最长持仓 ${ATR_FIT[c][0]}` : "");
     input = `<select id="dlg-v">${i.choices.map((c) => `<option value="${esc(JSON.stringify(c))}" ${c === i.value ? "selected" : ""}>${esc(choiceLabel(i.key, c) + fit(c))}</option>`).join("")}</select>`;
   } else if (i.pattern) input = `<input id="dlg-v" type="text" value="${esc(i.pinned || !i.profiled ? i.value || "" : "")}" placeholder="${esc(i.key === "schedule_at" ? "如 08:00；留空 = " + (i.profiled ? `跟档位（${fmtVal(i.pinned ? i.profile_default : i.value, i)}）` : "不定点") : "")}">`;
+  else if (i.key === "frozen_peak_exit_after_s") input = `<input id="dlg-v" type="number" step="1" min="1" max="10080" inputmode="numeric" value="${esc(i.value / 60)}"> 分钟`;
   else if (i.key === "time_limit_s") input = `<input id="dlg-v" type="number" step="0.25" min="0.25" inputmode="decimal" value="${esc(useRec ? 2 : i.value / 3600)}"> 小时`;
   else {
     // 档位给默认的键：没写死时留空（= 跟档位走），写死了才填文件里的值
@@ -2694,7 +2698,7 @@ function editOne(id, useRec) {
     const ph = i.profiled ? `留空 = 跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}（${fmtVal(i.pinned ? i.profile_default : i.value, i)}）` : i.nullable ? "留空 = 用默认" : "";
     input = `<input id="dlg-v" type="number" step="any" inputmode="decimal" value="${esc(shown)}" placeholder="${esc(ph)}">`
   }
-  const now = [`现在 ${valOf(i)}`, i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : "", i.pinned ? `${i.sec === "fast_loop" ? "最长持仓" : "档位"}默认 ${valOf(i, i.profile_default)}` : i.profiled ? `现在跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}走` : "", i.bounds ? `范围 ${esc(i.bounds)}` : ""].filter(Boolean).join("，");
+  const now = [`现在 ${valOf(i)}`, i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : "", i.pinned ? `${i.sec === "fast_loop" ? "最长持仓" : "档位"}默认 ${valOf(i, i.profile_default)}` : i.profiled ? `现在跟${i.sec === "fast_loop" ? "最长持仓" : "档位"}走` : "", i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? `范围 ${esc(i.bounds)}` : ""].filter(Boolean).join("，");
   ask(esc(i.cat ? i.label : nameOf(i)), `<p class="dim">${now}。</p>${i.multi ? `<div class="pw">勾选${input}</div>` : `<label class="pw">改成${eqX(i) ? "（填本金的几倍）" : ""}${input}</label>`}${pwField(data.control)}
     ${i.key === "atr_period_min" || i.key === "time_limit_s" ? '<div class="small warn" id="dlg-fit"></div>' : ""}
     ${eqX(i) && eqBasis() ? `<div class="small" id="dlg-amt"></div>` : ""}
@@ -2721,6 +2725,10 @@ function editOne(id, useRec) {
     } else {
       v = Number(el.value);
       if (!Number.isFinite(v)) throw new Error("要填数字");
+      if (i.key === "frozen_peak_exit_after_s") {
+        if (!Number.isInteger(v) || v < 1 || v > 10080) throw new Error("请输入 1–10080 之间的整分钟数");
+        v *= 60;
+      }
       if (i.key === "time_limit_s") v = Math.round(v * 3600);
     }
     // 跟档的项填了和档位一样的值：不用自定义（写进文件反而以后换档不跟）

@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 from jiaoyi.contracts import OrderIntent, PositionRecord
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
 
 class ProtectiveLeg(BaseModel):
@@ -126,6 +127,7 @@ class TrackedPosition(BaseModel):
     chase: OrderIntent | None = None
     """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
     server_protection: ServerProtection | None = None
+    frozen_peak_exit: FrozenPeakExit | None = None
 
 
 class DayStart(BaseModel):

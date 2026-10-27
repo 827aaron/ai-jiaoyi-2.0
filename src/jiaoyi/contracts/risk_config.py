@@ -422,6 +422,16 @@ class FastLoopConfig(Contract):
         default=0.85, ge=0.5, le=1.0, description="概率明显过线时不用等第二次确认。"
     )
     keeper_confirmations: int = Field(default=2, ge=1, le=5, description="连续几次一致才平仓。")
+    frozen_peak_exit_on: bool = Field(
+        default=True,
+        description="Enable observed profit target freezing for new Demo positions only.",
+    )
+    frozen_peak_exit_after_s: int = Field(
+        default=3600,
+        ge=60,
+        le=604800,
+        description="Seconds after the first verified exchange entry fill to freeze the target.",
+    )
     giveback_on: bool = Field(
         default=True,
         description="回吐保护开关（代码规则，不问管家模型）：最高浮盈到过 giveback_arm_r 倍止损距离"
