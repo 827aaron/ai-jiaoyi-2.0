@@ -432,6 +432,26 @@ class FastLoopConfig(Contract):
         le=604800,
         description="Seconds after the first verified exchange entry fill to freeze the target.",
     )
+    frozen_peak_evidence_mode: Literal["sync", "background"] = Field(
+        default="sync",
+        description="sync = every keeper review waits for the exchange evidence read (up to "
+        "12 s); background = a per-position refresher reads it every "
+        "frozen_peak_evidence_interval_s, reviews use the cached result only while it is "
+        "fresh, and the routine review round no longer waits for its slowest position.",
+    )
+    frozen_peak_evidence_interval_s: int = Field(
+        default=30,
+        ge=5,
+        le=600,
+        description="Background mode: seconds between evidence reads for one open position.",
+    )
+    frozen_peak_evidence_max_age_s: int = Field(
+        default=90,
+        ge=0,
+        le=3600,
+        description="Background mode: older cached evidence skips the frozen peak rule for "
+        "that review (0 = no age limit; otherwise at least the interval plus 30 s).",
+    )
     giveback_on: bool = Field(
         default=True,
         description="回吐保护开关（代码规则，不问管家模型）：最高浮盈到过 giveback_arm_r 倍止损距离"
@@ -840,6 +860,12 @@ class FastLoopConfig(Contract):
             raise ValueError("size_fraction_s 不能大于 size_fraction_m")
         if self.keeper_close_p_strong < self.keeper_close_p:
             raise ValueError("keeper_close_p_strong 不能小于 keeper_close_p")
+        if 0 < self.frozen_peak_evidence_max_age_s < self.frozen_peak_evidence_interval_s + 30:
+            raise ValueError(
+                "frozen_peak_evidence_max_age_s 要么填 0（不限），要么至少 "
+                "frozen_peak_evidence_interval_s + 30 秒（一次证据读最多十几秒），"
+                "否则正常节奏下缓存也会算过期"
+            )
         if 0 < self.atr_long_period_min <= self.atr_period_min:
             raise ValueError("atr_long_period_min 必须比 atr_period_min 长")
         for name in ("session_factor_weekday", "session_factor_weekend"):
@@ -1106,6 +1132,15 @@ class AppConfig(Contract):
         "同步失败最多连续容忍这么多秒（从第一次失败算）再按对账原因平仓。只宽限交易所读延迟和"
         "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
         "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
+    )
+    position_mode_cache_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=3600.0,
+        description="币安持仓模式（单向 / 双向）查一次后这么多秒内不再查（0 = 每次都查，原行为）。"
+        "这个查询占 30 权重，本地限流每秒只有 20，托管保护和冻结盈利价证据每轮都要查好几次。"
+        "有持仓或挂单时币安不允许切换模式；开新仓前的检查、任何 -4061 或非单向持仓都会重新查。"
+        "改后重启生效。",
     )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",

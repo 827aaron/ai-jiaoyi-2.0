@@ -242,7 +242,7 @@ class FakeExchange:
             raise ExchangeError("合成持仓证据缺失或非法")
         return rows
 
-    async def position_mode(self) -> Literal["one_way", "hedge"]:
+    async def position_mode(self, *, fresh: bool = False) -> Literal["one_way", "hedge"]:
         if self.down:
             raise ExchangeError("合成持仓模式查询不可用")
         return self.mode

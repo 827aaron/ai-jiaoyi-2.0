@@ -76,7 +76,7 @@ class EvidenceExchange:
         self.mark_reads += 1
         return MarkEvidence(symbol, self.mark, self.mark_at, self.mark_at)
 
-    async def position_mode(self) -> Literal["one_way", "hedge"]:
+    async def position_mode(self, *, fresh: bool = False) -> Literal["one_way", "hedge"]:
         return self.mode
 
     async def positions_evidence(self) -> list[ExchangePosition]:

@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 
 class BracketExchange(Protocol):
-    async def position_mode(self) -> Literal["one_way", "hedge"]: ...
+    async def position_mode(self, *, fresh: bool = False) -> Literal["one_way", "hedge"]: ...
     async def positions_evidence(self) -> list[ExchangePosition]: ...
     async def assert_entry_clear(self, symbol: str) -> None: ...
     async def entry_order(self, symbol: str, client_order_id: str) -> ExchangeEntryOrder | None: ...
@@ -456,7 +456,7 @@ class BracketManager:
 
     async def preflight(self, symbol: str) -> None:
         async with self.registry.symbol_lock(symbol):
-            if await self.exchange.position_mode() != "one_way":
+            if await self.exchange.position_mode(fresh=True) != "one_way":
                 raise ProtectionIncomplete("只支持已确认的单向持仓，不修改账户模式")
             if any(
                 p.symbol == symbol
