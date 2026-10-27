@@ -13,6 +13,7 @@ import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from jiaoyi.alerting.telegram import TelegramAlerter
 from jiaoyi.contracts import Alert, AppConfig, RiskConfig, Role
@@ -608,6 +609,84 @@ def _panel(args: argparse.Namespace) -> int:
     return 0
 
 
+def _strict_exchange(app_cfg: AppConfig) -> object:
+    """只读查持仓用的币安客户端（测试里替换）。"""
+    from jiaoyi.execution.exit_resolution import strict_exchange
+
+    return strict_exchange(app_cfg.mode, app_cfg.sim_environment, ChainedSecretStore())
+
+
+def _resolve_exit(args: argparse.Namespace) -> int:
+    """人工结束一条对账员平仓意图：核对币种 + 原 CID + 币安严格净仓，写请求给主循环执行。"""
+    import time
+
+    from jiaoyi.contracts import DecisionRecord, Outcome
+    from jiaoyi.core.store import JsonlDecisionLog
+    from jiaoyi.execution.exit_resolution import (
+        prepare_resolution,
+        read_result,
+        resolutions_dir,
+        write_resolution,
+    )
+
+    try:
+        app_cfg = load_app_config(Path(args.app))
+        exchange: Any = _strict_exchange(app_cfg)
+    except (ConfigError, MissingSecret) as e:
+        print(e, file=sys.stderr)
+        return 2
+    registry_path = Path(app_cfg.data_dir) / "positions.json"
+    now = datetime.now(UTC)
+
+    async def check() -> tuple[Any, str]:
+        try:
+            return await prepare_resolution(
+                registry_path,
+                exchange.positions_evidence,
+                args.symbol,
+                args.cid,
+                force=args.force,
+                reason=args.reason,
+                now=now,
+            )
+        finally:
+            await exchange.close()
+
+    req, text = asyncio.run(check())
+    if req is None:
+        print(f"没有提交：{text}", file=sys.stderr)
+        return 2
+    root = resolutions_dir(registry_path)
+    write_resolution(root, req)
+    JsonlDecisionLog(app_cfg.data_dir).write(
+        DecisionRecord(
+            record_id=f"reconciler-{req.id}",
+            ts=now,
+            role=Role.RECONCILER,
+            symbol=req.symbol,
+            outcome=Outcome.ACTION,
+            summary=f"人工请求结束平仓意图 {req.client_order_id}"
+            + ("（--force）" if req.force else ""),
+            input=req.model_dump(mode="json"),
+            output={"check": text},
+        )
+    )
+    print(f"已提交 {req.id}：{req.symbol} {req.client_order_id}")
+    print(f"  {text}")
+    deadline = time.monotonic() + max(0.0, args.wait)
+    while True:
+        result = read_result(root, req.id)
+        if result is not None:
+            print(f"{'已执行' if result.applied else '未执行'}：{result.detail}")
+            if result.removed is not None:
+                print(f"  删掉的意图：{result.removed}")
+            return 0 if result.applied else 1
+        if time.monotonic() >= deadline:
+            print(f"主循环还没处理；下一轮对账时执行，结果见 {root}/done/{req.id}.json")
+            return 0
+        time.sleep(1.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jiaoyi")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -696,6 +775,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--hb-url", default="http://127.0.0.1:8000")
     p.set_defaults(func=_panel)
+
+    p = sub.add_parser(
+        "resolve-exit",
+        help="在币安上核实过后，人工结束一条对账员平仓意图（原 CID 一直查不到时用）",
+    )
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--symbol", required=True, help="币种，如 BTCUSDT")
+    p.add_argument("--cid", required=True, help="意图里那张平仓单的完整 CID（dc-em-…）")
+    p.add_argument(
+        "--force", action="store_true", help="币安严格持仓仍非零或读不到时也结束（自己负责）"
+    )
+    p.add_argument("--reason", default="", help="写进决策日志的说明")
+    p.add_argument("--wait", type=float, default=90.0, help="最多等主循环执行几秒，0 = 不等")
+    p.set_defaults(func=_resolve_exit)
 
     p = sub.add_parser("key-status", help="显示每个密钥配没配（只显示末四位）")
     p.set_defaults(func=_key_status)
