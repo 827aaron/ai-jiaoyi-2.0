@@ -525,10 +525,14 @@ def build_team(
             card.detail = shown
         cards.append(card)
     chosen = selected or Role.GATE
-    got, _ = files.role_records(chosen, TEAM_RECORD_LIMIT, now)  # 最新 N 条，不分哪天
-    mine = [_item(r) for r in got]
+    if chosen is Role.MARKET:
+        mine = _market_records(files, now)
+    else:
+        got, _ = files.role_records(chosen, TEAM_RECORD_LIMIT, now)  # 最新 N 条，不分哪天
+        mine = [_item(r) for r in got]
     meets = meetings if chosen is Role.COMMANDER else []
     market = next((m for m in meetings if m.symbol == MARKET), None)
+    market_role = _role_card(Role.MARKET, status.get(Role.MARKET.value), now, run)
     against = _recent_against(status, now)
     return TeamPage(
         roles=cards,
@@ -538,11 +542,7 @@ def build_team(
         predictor_mode=predictor_mode,
         gate_thresholds=gate_thresholds or {},
         snapshot=files.market_snapshot() if chosen is Role.BOOK_READER else None,
-        market_role=(
-            _role_card(Role.MARKET, status[Role.MARKET.value], now, run)
-            if Role.MARKET.value in status
-            else None
-        ),
+        market_role=market_role if Role.MARKET.value in status or chosen is Role.MARKET else None,
         market=market,
         market_progress=_market_progress(market, now, run.tz),
         against=against,
@@ -560,6 +560,17 @@ def build_team(
             None,
         ),
     )
+
+
+_MARKET_SCAN = 2000
+
+
+def _market_records(files: PanelFiles, now: datetime) -> list[TrailItem]:
+    """总盘会自己的记录：军师团写的、不属于某个币的那几条（出作战卡、大盘独立更新、总盘会回答有问题、开会失败）。
+
+    总盘会没有单独的决策角色，这些记录落在 ``commander`` 下，靠没有 ``symbol`` 和单个币的会分开。"""
+    got, _ = files.role_records(Role.COMMANDER, _MARKET_SCAN, now)
+    return [_item(r) for r in got if r.symbol is None][:TEAM_RECORD_LIMIT]
 
 
 def _market_progress(m: MeetingSummary | None, now: datetime, tz: str) -> Progress:
