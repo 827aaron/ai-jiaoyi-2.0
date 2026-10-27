@@ -43,6 +43,7 @@ from jiaoyi.contracts import (
     Interval,
     JevResponse,
     KeeperMarketProgress,
+    KeeperVerdict,
     Kline,
     MarketEvent,
     MarketView,
@@ -146,6 +147,13 @@ class _NotesAgainst(Protocol):
     def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None: ...
 
     def pending_against(self, position_id: str) -> bool: ...
+
+
+@runtime_checkable
+class _CardRuleKeeper(Protocol):
+    def card_rule_applies(self, position: PositionRecord, now: datetime) -> bool: ...
+
+    def review_card_rule(self, position: PositionRecord, now: datetime) -> KeeperVerdict | None: ...
 
 
 @runtime_checkable
@@ -320,6 +328,7 @@ class Runner:
         self._keeper_market_path = Path(app.app_cfg.data_dir) / "keeper_market.json"
         self._keeper_slots = asyncio.Semaphore(KEEPER_CONCURRENCY)
         self._keeper_queued: set[str] = set()
+        self._card_rule_queued: set[str] = set()
         self._restore_keeper_market()
         self._regime_period: float | None = None
         self._regime_next: datetime | None = None
@@ -334,6 +343,7 @@ class Runner:
         if isinstance(self.m.cards, BattleCardCommander):
             self.m.cards.set_regime_price(self._regime_btc_price)
             self.m.cards.set_on_market(self._market_published)
+            self.m.cards.set_on_card(self._card_published)
             market_source = getattr(self.m.keeper, "set_market_source", None)
             if callable(market_source):
                 cards = self.m.cards
@@ -393,6 +403,7 @@ class Runner:
         await self.app.start()
         self._last_screen = self.app.clock()
         await self.refresh_positions()
+        self._card_published()  # 启动已恢复的有效反向卡不等第一轮30秒巡检。
         await self.sync_watch()
         # 重启后先拉一轮公告，下架封禁在第一个信号之前就生效
         try:
@@ -753,6 +764,7 @@ class Runner:
                 log.warning("%s 挂单没成交后市价追进失败：%r", intent.symbol, e)
                 return
             self.positions = [*self.positions, pos]
+            self._card_published()  # 开仓在途期间卡可能更新，立即按当前卡复核。
 
     @staticmethod
     def _same_decision_context(card: BattleCard, fresh: BattleCard | None) -> bool:
@@ -879,6 +891,7 @@ class Runner:
                 return
             # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
             self.positions = [*self.positions, pos]
+            self._card_published()  # 开仓在途期间卡可能更新，立即按当前卡复核。
 
     async def _manual_chain(self, cmd: PanelCommand, path: Path) -> None:
         """后台跑重新检查 / 放行，跑完写回执（文字和同步时一样）。"""
@@ -990,6 +1003,7 @@ class Runner:
                 )
                 return "rejected", f"开仓失败：{str(e)[:150]}"
             self.positions = [*self.positions, pos]
+            self._card_published()  # 开仓在途期间卡可能更新，立即按当前卡复核。
         side = "多" if intent.side == Side.LONG else "空"
         await self.app._alert(
             AlertLevel.WARN,
@@ -1028,11 +1042,20 @@ class Runner:
         except Exception:
             log.exception("读持仓失败，沿用上一次的列表")
             return
-        before = {p.position_id for p in self.positions}
+        before_status = {p.position_id: p.status for p in self.positions}
+        before = set(before_status)
         self.positions = [
-            p for p in all_pos if p.status in (PositionStatus.OPEN, PositionStatus.OPENING)
+            p
+            for p in all_pos
+            if p.status in (PositionStatus.OPEN, PositionStatus.OPENING, PositionStatus.CLOSING)
         ]
         self._sync_keeper_market()
+        if any(
+            p.status is PositionStatus.OPEN
+            and before_status.get(p.position_id) is PositionStatus.OPENING
+            for p in self.positions
+        ):
+            self._card_published()  # 异步入场由OPENING真正变OPEN时补查。
         if before - {p.position_id for p in self.positions}:
             self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
 
@@ -1072,6 +1095,17 @@ class Runner:
                 self.app.clock(),
             )
             return
+        executor = self.m.executor
+        if isinstance(executor, _LedgerPositions):
+            try:
+                current = next(
+                    (p for p in executor.live_positions() if p.position_id == pos.position_id), None
+                )
+            except Exception:
+                log.exception("平仓前无法确认账本状态，保持跟踪等待核实")
+                return
+            if current is None or current.status is PositionStatus.CLOSING:
+                return  # 已结束或已有平仓申请，不能重复发单。
         self._closing.add(pos.position_id)
         try:
             await self.m.executor.close(pos.position_id, reason)
@@ -1083,6 +1117,31 @@ class Runner:
             return
         finally:
             self._closing.discard(pos.position_id)
+        if isinstance(executor, _LedgerPositions):
+            try:
+                pending = next(
+                    (p for p in executor.live_positions() if p.position_id == pos.position_id), None
+                )
+            except Exception:
+                log.exception("平仓返回后无法确认账本状态，继续跟踪")
+                pending = pos
+            if pending is not None:
+                self.positions = [
+                    pending if p.position_id == pos.position_id else p for p in self.positions
+                ]
+                if not any(p.position_id == pos.position_id for p in self.positions):
+                    self.positions.append(pending)
+                rec = self.app.recorders.get(Role.KEEPER)
+                if rec is not None:
+                    rec.record(
+                        self.app.clock(),
+                        Outcome.INFO,
+                        f"{pos.symbol} 平仓未确认，等核实",
+                        position_id=pos.position_id,
+                        symbol=pos.symbol,
+                        output={"close_pending": True, "status": pending.status.value},
+                    )
+                return
         self.positions = [p for p in self.positions if p.position_id != pos.position_id]
         self._keeper_market.pop(pos.position_id, None)
         self._save_keeper_market()
@@ -1164,6 +1223,48 @@ class Runner:
                         )
         self._save_keeper_market()
 
+    def _card_published(self) -> None:
+        """不带旧卡快照，不排Jev队列；实际运行时读取最新卡与账本。"""
+
+        async def check() -> None:
+            await self._review_card_rules()
+
+        if not self._leaving:
+            self._spawn(check())
+
+    async def _review_card_rules(self) -> set[str]:
+        keeper = self.m.keeper
+        if not isinstance(keeper, _CardRuleKeeper):
+            return set()
+        attempted: set[str] = set()
+
+        async def one(pid: str) -> None:
+            try:
+                # 真正开始时再读账本/最新卡，排队期间换卡不能用旧结论。
+                pos = next((p for p in self._ledger_positions() if p.position_id == pid), None)
+                if pos is None or pos.status is not PositionStatus.OPEN or pid in self._closing:
+                    return
+                verdict = keeper.review_card_rule(pos, self.app.clock())
+                if verdict is not None and verdict.action == "close":
+                    await self.close(pos, CloseReason.KEEPER)
+            finally:
+                self._card_rule_queued.discard(pid)
+
+        # 只作无副作用预检并登记后台任务，不等平仓返回，其他持仓立即进入正常管家复核。
+        for pos in self._ledger_positions():
+            pid = pos.position_id
+            if pid in self._card_rule_queued:
+                if keeper.card_rule_applies(pos, self.app.clock()):
+                    attempted.add(pid)
+                continue
+            if pos.status is not PositionStatus.OPEN or pid in self._closing:
+                continue
+            if keeper.card_rule_applies(pos, self.app.clock()):
+                attempted.add(pid)
+                self._card_rule_queued.add(pid)
+                self._spawn(one(pid))
+        return attempted
+
     def _market_published(self, view: MarketView) -> None:
         """只唤醒原管家通道；同仓在途不并行重问，旧回复仅确认实际使用的版本。"""
         self._sync_keeper_market(view)
@@ -1193,6 +1294,10 @@ class Runner:
             verdict = await self.m.keeper.review(pos, self.app.clock())
         finally:
             self._reviewing.discard(pid)
+        if not any(
+            p.position_id == pid and p.status is PositionStatus.OPEN for p in self.positions
+        ):
+            return  # 模型在途时硬规则可能已平/正在平，旧回复不能再次下单。
         if pid in self._keeper_market:
             acknowledged = False
             progress = self._keeper_market[pid]
@@ -1270,9 +1375,14 @@ class Runner:
             now = self.app.clock()
             keeper.set_next_run(now + timedelta(seconds=self.app.app_cfg.keeper_interval_s))
         await self.refresh_positions()
-        held = [p for p in self.positions if p.status is PositionStatus.OPEN]
+        attempted = await self._review_card_rules()  # 新卡事件漏唤醒 / 上次失败的例行兜底。
+        held = [
+            p
+            for p in self.positions
+            if p.status is PositionStatus.OPEN and p.position_id not in attempted
+        ]
         await self._review_all(held)
-        if keeper is not None and not held:
+        if keeper is not None and not self.positions:
             keeper.note(self.app.clock(), "看了一眼：没有持仓，不用审")
         # 开平仓、卡过期都在这里跟上订阅；放在审查之后，回填新币的几秒不推迟审持仓
         await self.sync_watch()

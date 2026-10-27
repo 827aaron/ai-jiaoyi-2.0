@@ -172,13 +172,12 @@ async def test_low_probability_resets(now: datetime) -> None:
     assert (await k.review(position(now), now)).consecutive == 1
 
 
-async def test_card_flip_pushes_toward_close_only(now: datetime) -> None:
+async def test_card_flip_directly_closes_without_model_gate(now: datetime) -> None:
     flipped = card(now, bias="short")
     k = keeper(MockJevTransport(answer=close_p(0.1)), now, cd=flipped)
     v1 = await k.review(position(now), now)
-    assert v1.action == "hold" and "方向" in v1.reason
-    v2 = await k.review(position(now), now)
-    assert v2.action == "close"
+    assert v1.action == "close" and "方向" in v1.reason
+    assert v1.jev_request_id is None and v1.consecutive == 1
 
 
 async def test_no_trade_or_missing_from_card_does_not_vote(now: datetime) -> None:
