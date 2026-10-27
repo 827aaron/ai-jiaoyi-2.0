@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 
@@ -67,3 +68,55 @@ def test_post_reports_every_response_to_the_password_memory() -> None:
     assert "rememberPw(body, r.ok, r.status, j.detail)" in post
     assert "localStorage" not in source.split("let panelPw")[1].split("// 带确认按钮的弹窗")[0]
     assert 'document.addEventListener("submit"' in source
+
+
+def _run_node(script: str) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("JavaScript 渲染回归需要 Node")
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[-2000:]
+
+
+def test_live_switch_dialog_never_prefills_the_password() -> None:
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    memo = source[source.index("let panelPw") : source.index("async function post(")]
+    field = source[source.index("function pwField(") : source.index("// 设置页常显")]
+    _run_node(
+        SCRIPT
+        + memo
+        + field
+        + "panelPw = 'Abc123!x';"
+        + "assert(pwField({ pw_set: true }).includes('value=\"Abc123!x\"'));"
+        + "assert(!pwField({ pw_set: true }, { prefill: false }).includes('Abc123!x'));"
+    )
+    live = source[source.index("else body = `<p>切到实盘") : source.index("ask(`切换交易模式")]
+    assert "pwField(c, { prefill: false })" in live and "pwField(c)" not in live
+    testnet = source[
+        source.index('else if (target === "testnet")') : source.index("else body = `<p>切到实盘")
+    ]
+    assert "pwField(c)" in testnet
+
+
+def test_is_pw_failure_matches_the_real_live_gate_texts() -> None:
+    gate = (ROOT / "src/jiaoyi/execution/live_gate.py").read_text()
+    texts = []
+    for marker, fill in (
+        ("密码错误次数过多", {"{minutes}": "9"}),
+        ("连错 {MAX_FAILURES} 次", {"{MAX_FAILURES}": "5"}),
+        ("密码不对", {"{MAX_FAILURES - failures}": "4"}),
+    ):
+        line = next(x for x in gate.splitlines() if "LiveGateError(" in x and marker in x)
+        text = line.split('f"', 1)[1].rsplit('"', 1)[0]
+        for k, v in fill.items():
+            text = text.replace(k, v)
+        assert "{" not in text, text
+        texts.append(text)
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    fn = source[source.index("const isPwFailure") : source.index("function rememberPw")]
+    _run_node(
+        SCRIPT
+        + fn
+        + f"for (const t of {json.dumps(texts, ensure_ascii=False)}) assert(isPwFailure(400, t), t);"
+        + "assert(!isPwFailure(400, '要填 0–100 的整数'));"
+    )

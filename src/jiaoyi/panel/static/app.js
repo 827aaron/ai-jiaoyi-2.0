@@ -208,9 +208,9 @@ function ask(title, body, ok, danger, submit) {
 }
 function dlgMsg(html, k = "") { const m = $("#dlg-msg"); if (m) { m.className = "msg small " + k; m.innerHTML = html; } }
 
-function pwField(c) {
+function pwField(c, { prefill = true } = {}) {
   if (!c.pw_set) return `<div class="note warn">还没有设置面板密码：先在 Mac mini 终端运行 <code>jiaoyi set-panel-password</code>。</div>`;
-  return `<form id="dlg-pw-form" autocomplete="on"><input type="text" name="username" autocomplete="username" value="jiaoyi-panel" class="vh" tabindex="-1" aria-hidden="true" readonly><label class="pw">面板密码<input type="password" id="dlg-pw" name="password" autocomplete="current-password" value="${esc(panelPw)}"></label></form><div class="dim small">连错 5 次锁 15 分钟。</div>`;
+  return `<form id="dlg-pw-form" autocomplete="on"><input type="text" name="username" autocomplete="username" value="jiaoyi-panel" class="vh" tabindex="-1" aria-hidden="true" readonly><label class="pw">面板密码<input type="password" id="dlg-pw" name="password" autocomplete="current-password" value="${prefill ? esc(panelPw) : ""}"></label></form><div class="dim small">连错 5 次锁 15 分钟。</div>`;
 }
 
 // 设置页常显：有改动没生效时高亮「重启生效」，否则是普通的「重启主程序」（验收时随时要重启）
@@ -385,7 +385,7 @@ async function switchMode(target) {
   if (target === "paper") body = `<p>切回模拟盘：不再真下单${m.armed ? "，实盘同时上锁" : ""}。</p>${warn}`;
   else if (target === "testnet") body = `<p>切到测试网${m.armed ? "（实盘同时上锁）" : ""}。</p>${list}${warn}${pwField(c)}`;
   else body = `<p>切到实盘：用真钱在币安主网下单。每条提示都勾上，再原样输入确认词和面板密码。</p>${list}${warn}
-    <label class="pw">确认词（原样输入「${esc(m.confirm_word)}」）<input type="text" id="dlg-word" autocomplete="off"></label>${pwField(c)}`;
+    <label class="pw">确认词（原样输入「${esc(m.confirm_word)}」）<input type="text" id="dlg-word" autocomplete="off"></label>${pwField(c, { prefill: false })}`;
   ask(`切换交易模式 · ${name}`, body, ok, target === "live", async () => {
     const pw = $("#dlg-pw");
     const payload = { mode: target, password: pw ? pw.value : null };
