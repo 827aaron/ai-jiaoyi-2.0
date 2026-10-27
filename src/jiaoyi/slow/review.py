@@ -8,6 +8,10 @@
    （只记这次真的开了会的标的；沿用旧卡的不重复记，免得一个结论被算多次）。
 2. 卡过期后跑 ``python -m jiaoyi.slow.review``：按卡的有效期取 5 分钟 K 线，算
    收盘涨跌、最大有利 / 不利波动，再按方向汇总。long/short 才算命中；both / no_trade 只报波动幅度。
+
+这里的命中率是**原始口径**：起点用整轮开始（比卡真正发出早几分钟到二十几分钟）、只看原始涨跌、
+没扣大盘，会跟着「大盘恰好顺着卡的多空倾斜走」大起大落，只作对照。看卡的方向到底准不准用
+``slow/card_score.py``（``jiaoyi card-score``，面板「历史卡」顶上的方向记分）。
 """
 
 from __future__ import annotations
@@ -46,6 +50,8 @@ class JournalRow(BaseModel):
     symbol: str
     category: str
     bias: str
+    # 只记录的 CardOutlook（大盘 / 相对判断、评级、观望倾向、总盘会方向）；旧行没有
+    outlook: dict[str, Any] | None = None
     # 这场会实际用的偏空整改设置（分组 arm、谁先发言 debate_first 等，见 bias_fix.py）；旧行没有
     meeting_setup: dict[str, str] | None = None
 
@@ -79,6 +85,7 @@ class CardJournal:
                 symbol=s.symbol,
                 category=s.category.value,
                 bias=s.bias.value,
+                outlook=s.outlook.model_dump(mode="json") if s.outlook else None,
                 meeting_setup=dict(m) if (m := setups.get(s.symbol)) is not None else None,
             )
             for s in card.symbols
@@ -239,7 +246,10 @@ def _pct(v: float | None) -> str:
 def render(outcomes: Sequence[Outcome]) -> str:
     if not outcomes:
         return "还没有已过期且拉得到走势的作战卡可复盘。"
-    lines: list[str] = []
+    lines: list[str] = [
+        "# 原始口径（起点 = 整轮开始，未扣大盘）：只作对照，主指标看 jiaoyi card-score",
+        "",
+    ]
     for title, by in (
         ("按方向", lambda o: o.row.bias),
         ("按类别", lambda o: o.row.category),
@@ -255,7 +265,8 @@ def render(outcomes: Sequence[Outcome]) -> str:
             )
         lines.append("")
     lines.append(
-        "说明：命中 = 按卡的方向算收益 > 0；both / no_trade 不计命中率。样本少时别当结论。"
+        "说明：命中 = 按卡的方向算收益 > 0（原始涨跌，含大盘）；both / no_trade 不计命中率。"
+        "大盘一边倒时这个数跟着卡的多空倾斜摆，扣掉大盘的超额命中看 jiaoyi card-score。"
     )
     return "\n".join(lines)
 

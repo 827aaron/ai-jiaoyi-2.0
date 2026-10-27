@@ -15,7 +15,7 @@ from jiaoyi.contracts.position import PositionStatus, ReconcileIssueKind
 from jiaoyi.execution.exchange import ExchangeError
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.reconciler import ReconcileError
-from tests.test_execution import Rig, open_filled
+from tests.test_execution import Rig, explain_reverse, open_filled
 from tests.test_execution_io import hb
 
 
@@ -268,6 +268,7 @@ async def test_list_omission_does_not_disable_confirmed_reverse_position_protect
 ) -> None:
     rig = Rig(tmp_path)
     pid = await open_filled(rig, side=side)
+    explain_reverse(rig, pid)
     position = rig.registry.get(pid).record
     rig.ex.set_position(
         position.symbol, Side.SHORT if side == "long" else Side.LONG, position.quantity

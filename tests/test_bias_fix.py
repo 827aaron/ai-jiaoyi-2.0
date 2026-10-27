@@ -701,7 +701,7 @@ def test_journal_row_keeps_the_old_keys_as_a_prefix(tmp_path: Path) -> None:
         "bias",
     ]
     assert list(JournalRow.model_fields)[: len(old_keys)] == old_keys
-    assert list(JournalRow.model_fields)[-1] == "meeting_setup"
+    assert list(JournalRow.model_fields)[len(old_keys) :] == ["outlook", "meeting_setup"]
     assert j.path.name == "cards.jsonl"
 
 

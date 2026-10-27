@@ -119,6 +119,7 @@ OPTIONAL_APP_FIELDS = {
     "fast_loop",
     "predictor",
     "reconciler_close_unknown_positions",
+    "reconciler_executor_stop_retry_rounds",  # 默认 0（永不重发），老配置文件没有这一行
     "protection_readback_grace_s",
     "protection_prearm_grace_s",
     "protection_stop_working_type",
@@ -127,6 +128,8 @@ OPTIONAL_APP_FIELDS = {
     *(f"notify_{k}" for k in KINDS),
     "credit_low_floor_usd",
     "credit_resend_hours",
+    "card_score_every_min",  # 默认 60，老配置文件没有这一行
+    "card_score_window_days",  # 默认 30
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",
