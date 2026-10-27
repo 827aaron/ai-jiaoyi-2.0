@@ -27,6 +27,7 @@ from jiaoyi.execution.exchange import (
     ExecutionBook,
     IdentifiedCloseOrder,
     IdentifiedCloseUnknown,
+    MarkEvidence,
     NormalizedBracketSpec,
 )
 from jiaoyi.execution.hb_client import HbApiError
@@ -65,6 +66,14 @@ class EvidenceExchange:
         self.on_place: Callable[[ExchangeBracket], Awaitable[None]] | None = None
         self.foreign_orders = False
         self.registry: PositionRegistry | None = None
+        # 标记价：默认落在 trailing_inputs 盘口的中间价，交易所时间 = 合成时钟 START。
+        self.mark = 102.5 if side is Side.LONG else 97.5
+        self.mark_at = START
+        self.mark_reads = 0
+
+    async def execution_mark(self, symbol: str) -> MarkEvidence:
+        self.mark_reads += 1
+        return MarkEvidence(symbol, self.mark, self.mark_at, self.mark_at)
 
     async def position_mode(self) -> Literal["one_way", "hedge"]:
         return self.mode
@@ -759,6 +768,16 @@ def trailing_inputs(tmp_path, side, bid, ask):
     return rec, state, basis, ExecutionBook("BTCUSDT", bid, ask, START, START)
 
 
+def reads(book: ExecutionBook) -> Callable[[str], Awaitable[ExecutionBook]]:
+    """``observe_trailing`` 在锁内自己读盘口；测试给一个固定返回这本盘口的读取函数。"""
+
+    async def read(symbol: str) -> ExecutionBook:
+        assert symbol == book.symbol
+        return book
+
+    return read
+
+
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
 def test_trailing_inverse_preserves_net_fee_distance_and_correct_book_side(tmp_path, side):
     bid, ask = (102.0, 103.0) if side is Side.LONG else (97.0, 98.0)
@@ -809,7 +828,7 @@ async def test_trailing_replacement_unknown_preserves_old_sl_and_recovers_same_c
     h.registry.put(tracked.model_copy(update={"record": rec}))
     await h.manager.sync("pos-1")
     old_sl = next(cid for cid, order in h.exchange.orders.items() if cid.startswith("br-sl-"))
-    assert await h.manager.observe_trailing("pos-1", basis, book)
+    assert await h.manager.observe_trailing("pos-1", basis, reads(book))
     h.exchange.unknown_submit = True
     with pytest.raises(ProtectionIncomplete):
         await h.manager.sync("pos-1")
@@ -839,12 +858,13 @@ async def test_restart_lower_quote_preserves_peak_stop_and_marks_observation_gap
     tracked = h.registry.get("pos-1")
     h.registry.put(tracked.model_copy(update={"record": rec}))
     await h.manager.sync("pos-1")
-    await h.manager.observe_trailing("pos-1", basis, book)
+    await h.manager.observe_trailing("pos-1", basis, reads(book))
     await h.manager.sync("pos-1")
     peak, stop = h.state().trailing_peak_net_exact, h.state().trailing_stop_price
     h.restart()
     now = START + timedelta(seconds=10)
     h.manager.clock = lambda: now
+    h.exchange.mark_at = now  # 标记价同样是这一刻读到的
     later = ExecutionBook(
         "BTCUSDT",
         101.0 if side is Side.LONG else 98.0,
@@ -852,7 +872,7 @@ async def test_restart_lower_quote_preserves_peak_stop_and_marks_observation_gap
         now,
         now,
     )
-    assert await h.manager.observe_trailing("pos-1", basis, later) is False
+    assert await h.manager.observe_trailing("pos-1", basis, reads(later)) is False
     assert h.state().trailing_peak_net_exact == peak
     assert h.state().trailing_stop_price == stop and h.state().trailing_observation_gap
     assert await h.manager.sync("pos-1") == "armed"
@@ -968,7 +988,7 @@ async def test_trailing_price_crossed_rejection_enters_exit_without_dropping_old
     h.registry.put(tracked.model_copy(update={"record": rec}))
     await h.manager.sync("pos-1")
     old_sl = next(cid for cid in h.exchange.orders if cid.startswith("br-sl-"))
-    await h.manager.observe_trailing("pos-1", basis, book)
+    await h.manager.observe_trailing("pos-1", basis, reads(book))
     h.exchange.reject_kind = "stop_loss"
     h.exchange.reject_immediate = True
     assert await h.manager.sync("pos-1") == "exit"

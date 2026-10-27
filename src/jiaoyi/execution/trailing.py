@@ -19,6 +19,11 @@ from jiaoyi.execution.registry import ServerProtection
 BOOK_MAX_AGE_S = 5.0
 
 
+class TrailingBookUnavailable(ExchangeError):
+    """本轮没有可用的盘口证据（读不到、过期、来自未来或源时钟回退）：只是不更新移动止损，
+    已确认的止损 / 止盈 / 保命单不受影响；和真正的保护失败分开告警。"""
+
+
 @dataclass(frozen=True)
 class TrailingUpdate:
     net: float
@@ -72,15 +77,15 @@ def trailing_update(
     if any(
         t.tzinfo is None or t.utcoffset() is None for t in (book.source_at, book.observed_at, now)
     ):
-        raise ExchangeError("移动止损盘口缺带时区的源时刻")
+        raise TrailingBookUnavailable("移动止损盘口缺带时区的源时刻")
     if (
         not book.source_at <= book.observed_at <= now
         or (now - book.source_at).total_seconds() > BOOK_MAX_AGE_S
     ):
-        raise ExchangeError("移动止损盘口过期、来自未来或本地时钟回退")
+        raise TrailingBookUnavailable("移动止损盘口过期、来自未来或本地时钟回退")
     if state.trailing_source_at is not None:
         if book.source_at < state.trailing_source_at:
-            raise ExchangeError("移动止损盘口源时钟回退")
+            raise TrailingBookUnavailable("移动止损盘口源时钟回退")
         if book.source_at == state.trailing_source_at:
             return None
     if state.trailing_entry_quote is not None and (

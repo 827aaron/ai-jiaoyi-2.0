@@ -281,3 +281,169 @@ assert(brief.includes('数据过期'), brief);
 """
     )
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_leg_trigger_source_old_and_new_legs_can_be_mixed(tmp_path: Path) -> None:
+    # 改成 MARK_PRICE 后新挂的止损按标记价；旧账本没记的腿按当时的固定行为补。
+    lifeboat = _leg("stop_loss", "lifeboat", 60_000.0)
+    take_profit = _leg("take_profit", "fixed", 70_000.0)
+    sp = _armed(
+        legs=[
+            lifeboat,
+            _leg("stop_loss", "fixed", 66_500.0, working_type="MARK_PRICE"),
+            take_profit,
+        ]
+    )
+    legs = _legs(_view(tmp_path, sp)[1])
+    assert legs["lifeboat"].working_type == "MARK_PRICE"
+    assert legs["stop_loss"].working_type == "MARK_PRICE"
+    assert legs["take_profit"].working_type == "CONTRACT_PRICE"
+    sp["legs"][2] = {**take_profit, "working_type": "LAST_TRADE"}  # 读不懂的不猜
+    assert _legs(_view(tmp_path, sp)[1])["take_profit"].working_type is None
+
+
+@pytest.mark.parametrize(
+    "newest",
+    [
+        {"state": "submit_pending", "algo_id": None, "algo_status": None},
+        {"state": "rejected", "algo_id": None, "algo_status": None},
+        {"state": "planned", "algo_id": None, "algo_status": None},
+    ],
+)
+def test_replacement_in_flight_also_shows_the_still_live_previous_generation(
+    tmp_path: Path, newest: dict[str, Any]
+) -> None:
+    sp = _armed(
+        generation=2,
+        legs=[
+            _leg("stop_loss", "lifeboat", 60_000.0),
+            _leg("stop_loss", "fixed", 66_500.0, generation=1),
+            _leg("take_profit", "fixed", 70_000.0),
+            _leg(
+                "stop_loss",
+                "trailing",
+                67_200.0,
+                generation=2,
+                client_order_id="trailing-stop_loss-2",
+                working_type="MARK_PRICE",
+                **newest,
+            ),
+        ],
+    )
+    sl = _legs(_view(tmp_path, sp)[1])["stop_loss"]
+    assert sl.state != "live" and sl.planned_price == 67_200.0 and sl.working_type == "MARK_PRICE"
+    assert sl.previous is not None and sl.previous.state == "live"
+    assert sl.previous.trigger_price == 66_500.0 and sl.previous.purpose == "fixed"
+    assert sl.previous.working_type == "CONTRACT_PRICE"
+
+
+def test_previous_generation_only_when_newest_is_not_live_and_old_one_is(tmp_path: Path) -> None:
+    sp = _armed(
+        legs=[
+            _leg("stop_loss", "lifeboat", 60_000.0),
+            _leg("stop_loss", "fixed", 66_500.0, generation=1),
+            _leg("stop_loss", "trailing", 67_200.0, generation=2, client_order_id="t-2"),
+            _leg("take_profit", "fixed", 70_000.0),
+        ]
+    )
+    assert _legs(_view(tmp_path, sp)[1])["stop_loss"].previous is None  # 新一代已挂
+    sp["legs"][1] = {**sp["legs"][1], "state": "cancelled", "algo_status": "CANCELED"}
+    sp["legs"][2] = {**sp["legs"][2], "state": "submit_pending", "algo_status": None}
+    assert _legs(_view(tmp_path, sp)[1])["stop_loss"].previous is None  # 旧一代也不在挂
+
+
+def test_lifeboat_summary_counts_live_previous_generation(tmp_path: Path) -> None:
+    sp = _armed(
+        legs=[
+            _leg("stop_loss", "lifeboat", 60_000.0, generation=1),
+            _leg(
+                "stop_loss",
+                "lifeboat",
+                60_100.0,
+                generation=2,
+                client_order_id="lifeboat-2",
+                state="submit_pending",
+            ),
+            _leg("stop_loss", "fixed", 66_500.0),
+            _leg("take_profit", "fixed", 70_000.0),
+        ]
+    )
+    _, v = _view(tmp_path, sp)
+    assert v.lifeboat_status == "active" and v.lifeboat_price == 60_000.0
+
+
+def test_trailing_error_is_shown_separately_from_protection_error(tmp_path: Path) -> None:
+    text = "TrailingBookUnavailable: 移动止损盘口过期、来自未来或本地时钟回退"
+    _, v = _view(tmp_path, _armed(trailing_last_error=text))
+    assert v.protection.trailing_error == text and v.protection.last_error is None
+    _, v = _view(tmp_path, _armed())
+    assert v.protection.trailing_error is None
+
+
+def test_js_shows_trigger_source_and_live_previous_during_replacement() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("JavaScript 渲染回归需要 Node")
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    helpers = source[source.index("const TRAIL_TIP =") : source.index("const cardPos =")]
+    sp = _armed(
+        generation=2,
+        trailing_last_error="TrailingBookUnavailable: 移动止损盘口读取失败",
+        legs=[
+            _leg("stop_loss", "lifeboat", 60_000.0),
+            _leg("stop_loss", "fixed", 66_500.0, generation=1),
+            _leg("take_profit", "fixed", 70_000.0, working_type="MARK_PRICE"),
+            _leg(
+                "stop_loss",
+                "trailing",
+                67_200.0,
+                generation=2,
+                client_order_id="t-2",
+                state="submit_pending",
+                algo_status=None,
+                working_type="MARK_PRICE",
+            ),
+        ],
+    )
+    view = parse_protection(sp, NOW, 120)
+    assert view is not None
+    position = {
+        "symbol": "BTCUSDT",
+        "side": "long",
+        "entry_price": 65_000.0,
+        "stop_loss_price": 66_999.0,
+        "take_profit_price": 71_111.0,
+        "quantity": 0.5,
+        "fee_bps": 0,
+        "trailing_stop_pct": None,
+        "protection": json.loads(view.model_dump_json()),
+    }
+    script = (
+        """
+const assert = require('node:assert/strict');
+const esc = value => String(value);
+const price = value => value == null ? '—' : String(value);
+const signed = (value, digits) => (value >= 0 ? '+' : '') + value.toFixed(digits);
+const cls = () => '';
+const TZ = 'Asia/Bangkok';
+const qtyFmt = value => String(value);
+const dur = ms => Math.round(ms / 60000) + ' 分';
+"""
+        + helpers
+        + "\nconst p = "
+        + json.dumps(position)
+        + """;
+const sl = slCell(p), tp = tpCell(p), block = protBlock(p), brief = protBrief(p);
+// 止损格主显示仍在挂的旧一代（成交价触发），新一代只作附注
+assert(sl.startsWith('66500') && sl.includes('成交价') && sl.includes('固定止损·已挂'), sl);
+assert(sl.includes('新一代') && sl.includes('67200') && sl.includes('标记价'), sl);
+assert(sl.includes('提交中·未确认') && sl.includes('旧一代仍挂着'), sl);
+assert(!sl.split('<div')[0].includes('warn'), sl);  // 旧单在挂，主显示不报警
+assert(tp.includes('70000') && tp.includes('标记价'), tp);
+assert(block.includes('旧一代仍挂') && block.includes('66500') && block.includes('67200'), block);
+assert(block.includes('移动止损本轮没更新') && block.includes('移动止损盘口读取失败'), block);
+assert(brief.includes('固定止损已挂') && brief.includes('新一代提交中'), brief);
+assert(brief.includes('移动止损本轮没更新'), brief);
+"""
+    )
+    subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
