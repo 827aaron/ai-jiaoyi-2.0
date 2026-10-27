@@ -1613,6 +1613,27 @@ def test_team_against_signals_only_recent_routed(tmp_path: Path) -> None:
     assert build_team(PanelFiles(tmp_path / "x", RISK.day_reset_tz), NOW, None).against == []
 
 
+def test_team_regime_flip_edge_only_within_event_window(tmp_path: Path) -> None:
+    """大盘变化虚线：超过 30 分钟的已确认翻转不再返回；窗口内的（含大盘台接手的）照常返回。"""
+    from jiaoyi.panel.pages import build_team
+
+    def flip(mins: int, scope: str) -> c.DecisionRecord:
+        return _rec(
+            c.Role.SENTINEL, c.Outcome.ACTION, "大盘方向变化",
+            ts=NOW - timedelta(minutes=mins),
+            output={"regime_flip": {"kind": "confirmed", "rerun": True, "scope": scope}},
+        )  # fmt: skip
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    log = JsonlDecisionLog(tmp_path)
+    log.write(flip(40, "market_only"))
+    assert build_team(files, NOW, None).regime_flip is None
+    log.write(flip(12, "market_desk"))
+    got = build_team(files, NOW, None).regime_flip
+    assert got is not None and NOW - got.ts == timedelta(minutes=12)
+    assert got.output["regime_flip"]["scope"] == "market_desk"
+
+
 def test_team_against_checks_pinned_and_tagged(tmp_path: Path) -> None:
     """管家卡的反向急查：配上信号之后同一笔仓的那次急查判断，例行复查冲不掉；日志里标「反向急查」。"""
     from jiaoyi.panel.pages import build_team
