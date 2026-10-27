@@ -7,7 +7,7 @@
   （两次加起来几秒，赶得上下一轮）。面板上写大白话，原始报错留在决策记录的 output 里。
 - 平仓要概率明显过线（``keeper_close_p_strong``），或者过线（``keeper_close_p``）且连续
   ``keeper_confirmations`` 次一致，防止反复横跳。
-- 代码规则加一票：只有新作战卡的方向和持仓相反时，平仓概率至少按过线算（仍需连续确认）。
+- 有效最新作战卡明确单向反着持仓：不问模型、不等行情和连续确认，直接返回全平规则。
   新卡改成只看不做、或卡里没有这个币：不投票，持仓交给决策模型 / 止损 / 最长持仓时间处理
   （不开新仓由拍板人和风控员按卡管）。例外：被封的币（币安下架公告等，``blocked``）照样投票，
   要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
@@ -191,6 +191,9 @@ class JevKeeper:
             self._against[pid] = against
 
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
+        direct = self.review_card_rule(position, now)
+        if direct is not None:
+            return direct
         pid = position.position_id
         against = self._against.pop(pid, None)
         f = self._features(position.symbol)
@@ -275,11 +278,7 @@ class JevKeeper:
         p_close = ans.probs.get("close", 0.0)
         why = [f"平仓概率 {p_close:.2f}"]
         why_blocked = self._blocked().get(position.symbol)
-        rule = (
-            f"已禁止新开仓（{why_blocked}）"
-            if why_blocked is not None
-            else self._card_rule(position, card, now)
-        )
+        rule = f"已禁止新开仓（{why_blocked}）" if why_blocked is not None else None
         if rule is not None:
             p_close = max(p_close, self._cfg.keeper_close_p)
             why.append(rule)
@@ -300,6 +299,42 @@ class JevKeeper:
             return verdict(position, now, "hold", p_close, n, "，".join(why), request, resp)
         self._streak.pop(pid, None)
         return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+
+    def card_rule_applies(self, position: PositionRecord, now: datetime) -> bool:
+        """只读预检供调度去重；真正执行时仍需再次读取最新卡，不在预检记判定日志。"""
+        return self._card_rule(position, self._card(now), now) is not None
+
+    def review_card_rule(self, position: PositionRecord, now: datetime) -> KeeperVerdict | None:
+        """最新有效卡明确反向时直接交执行器全平；无行情/模型故障不构成关卡。"""
+        card = self._card(now)
+        reason = self._card_rule(position, card, now)
+        if reason is None or card is None:
+            return None
+        cs = card.for_symbol(position.symbol)
+        assert cs is not None
+        self._streak.pop(position.position_id, None)
+        return self._verdict(
+            position,
+            now,
+            "close",
+            1.0,
+            1,
+            f"作战卡反向硬规则：{reason}，不等模型或确认",
+            None,
+            None,
+            card_rule={
+                "kind": "opposite_card",
+                "card_id": card.card_id,
+                "entry_card_id": position.card_id,
+                "card_version": card.version,
+                "position_side": position.side.value,
+                "card_bias": cs.bias.value,
+                "issued_at": (cs.issued_at or card.created_at).isoformat(),
+                "expires_at": (cs.expires_at or card.expires_at).isoformat(),
+                "model_called": False,
+                "requires_confirmation": False,
+            },
+        )
 
     def _giveback_guard(
         self, position: PositionRecord, pnl: float, peak: float
@@ -339,7 +374,9 @@ class JevKeeper:
             return None  # 卡过期只停开新仓，已有持仓照常盯
         cs = card.for_symbol(position.symbol)
         # 卡里没有 / 只看不做：不投平仓票（研究 v2：只有方向反了才投）
-        if cs is None or cs.bias in (Bias.NO_TRADE, Bias.BOTH):
+        if cs is None or cs.bias not in (Bias.LONG, Bias.SHORT) or not cs.allowed_signals:
+            return None
+        if not (cs.issued_at or card.created_at) <= now < (cs.expires_at or card.expires_at):
             return None
         if cs.bias.value != position.side.value:
             return f"新作战卡方向改成 {cs.bias.value}"
@@ -359,6 +396,7 @@ class JevKeeper:
         against: tuple[AgainstSignalEvent, bool] | None = None,
         extra: Mapping[str, Any] | None = None,
         observation: dict[str, Any] | None = None,
+        card_rule: Mapping[str, Any] | None = None,
     ) -> KeeperVerdict:
         """``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）；
         ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``。"""
@@ -390,21 +428,27 @@ class JevKeeper:
             self._rec.record(
                 now,
                 outcome,
-                f"{position.symbol} {'全平' if v.action == 'close' else '拿住'}：{reason}",
+                (
+                    f"{position.symbol} 规则判平，等待执行：{reason}"
+                    if card_rule
+                    else f"{position.symbol} {'全平' if v.action == 'close' else '拿住'}：{reason}"
+                ),
                 symbol=position.symbol,
                 signal_id=position.signal_id,
                 position_id=position.position_id,
-                card_id=position.card_id,
+                card_id=str(card_rule["card_id"]) if card_rule else position.card_id,
                 input=jev_in,
                 output={
                     "action": v.action,
-                    "p_close": v.p_close,
+                    "p_close": None if card_rule else v.p_close,
+                    **({"model_called": False} if card_rule else {}),
                     "consecutive": v.consecutive,
                     "source_market_view_id": v.source_market_view_id,
                     "source_market_version": v.source_market_version,
                     "review_succeeded": v.review_succeeded,
                     **jev_out,
                     **({"giveback_guard": dict(extra)} if extra else {}),
+                    **({"card_rule": dict(card_rule)} if card_rule else {}),
                     **(
                         {
                             "against": {

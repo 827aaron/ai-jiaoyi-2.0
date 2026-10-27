@@ -368,6 +368,7 @@ class BattleCardCommander:
         self._symbol_inflight: set[str] = set()
         self._market_review_enabled: Callable[[], bool] = lambda: True
         self._on_market: Callable[[MarketView], None] | None = None
+        self._on_card: Callable[[], None] | None = None
         self._event_day = ""
         self._event_count = 0
         self._event_last: dict[str, datetime] = {}
@@ -716,6 +717,17 @@ class BattleCardCommander:
 
     def set_on_market(self, callback: Callable[[MarketView], None]) -> None:
         self._on_market = callback
+
+    def set_on_card(self, callback: Callable[[], None]) -> None:
+        """单币结论已生效时唤醒管家；接收方必须重新读取最新卡，不能用排队旧卡。"""
+        self._on_card = callback
+
+    def _notify_card(self) -> None:
+        if self._on_card is not None:
+            try:
+                self._on_card()
+            except Exception:
+                logger.exception("新卡已生效，但唤醒管家失败，留待例行巡检")
 
     @property
     def last_market_success_at(self) -> datetime | None:
@@ -1172,6 +1184,7 @@ class BattleCardCommander:
             }
         )
         self._card = card
+        self._notify_card()
         self._last_meeting[symbol] = now
         self._seen.add(symbol)
         self._level_broken.discard(symbol)
@@ -1247,6 +1260,7 @@ class BattleCardCommander:
         self._fails, self._retry_at, self._last_error = 0, None, None
         self._restored = False
         self._card = card
+        self._notify_card()
         if reason != "regime_flip":
             self._last_refresh = now
             self._scheduled_due = card.expires_at - self._lead
@@ -2186,6 +2200,7 @@ class BattleCardCommander:
             self._last_meeting[e.symbol] = now
             card = make_card()
             self._card = card
+            self._notify_card()
             self._save_card()
             if self._journal is not None:
                 self._journal.record(card, [e.symbol])
@@ -2222,6 +2237,7 @@ class BattleCardCommander:
             raise CardRefreshError("所有标的开会都失败：" + "；".join(failed))
         card = make_card()
         self._card = card
+        self._notify_card()
         self._save_card()
         if published == 0 and self._journal is not None:
             self._journal.record(card, [])
