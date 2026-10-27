@@ -664,6 +664,110 @@ def test_history_page(tmp_path: Path) -> None:
     assert build_history(files, RISK, NOW, "all").by_symbol == page.by_symbol
 
 
+def test_history_sampled_peak_only_uses_own_position_while_open(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    log = JsonlDecisionLog(tmp_path)
+    ex = load_example("position_record")
+    for position_id, symbol, minutes, bps in [
+        ("pos-0000", ex["symbol"], 90, 125.0),
+        ("pos-0000", ex["symbol"], 70, 200.0),
+        ("pos-0000", ex["symbol"], 30, 9999.0),  # after close
+        ("pos-other", ex["symbol"], 80, 9999.0),
+        ("pos-0000", "ETHUSDT", 80, 9999.0),
+    ]:
+        snapshot = json.dumps({"pos": {"peak_bps": bps}})
+        log.write(
+            _rec(
+                c.Role.KEEPER,
+                c.Outcome.HOLD,
+                "持仓复核",
+                NOW - timedelta(minutes=minutes),
+                symbol=symbol,
+                position_id=position_id,
+                input={"jev": {"snapshot": snapshot}},
+            )
+        )
+    row = build_history(PanelFiles(tmp_path, RISK.day_reset_tz), RISK, NOW, "today", True).rows[0]
+    assert row.keeper_peak_usdt == pytest.approx(ex["entry_price"] * ex["quantity"] * 0.02)
+
+
+def test_history_peak_uses_guard_and_preserves_missing(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    [row] = build_history(files, RISK, NOW, "today", True).rows
+    assert row.keeper_peak_usdt is None
+    ex = load_example("position_record")
+    JsonlDecisionLog(tmp_path).write(
+        _rec(
+            c.Role.KEEPER,
+            c.Outcome.CLOSE,
+            "回吐",
+            NOW - timedelta(minutes=70),
+            symbol=ex["symbol"],
+            position_id="pos-0000",
+            output={"giveback_guard": {"peak_bps": 55.0}},
+        )
+    )
+    [row] = build_history(files, RISK, NOW, "today", True).rows
+    assert row.keeper_peak_usdt == pytest.approx(ex["entry_price"] * ex["quantity"] * 0.0055)
+
+
+def test_history_peak_uses_legacy_pnl_and_skips_changed_entry_basis(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    ex = load_example("position_record")
+    log = JsonlDecisionLog(tmp_path)
+    for minute, pos in [
+        (80, {"entry_px": ex["entry_price"], "pnl_bps": 42.0, "peak_bps": 4000.0}),
+        (70, {"entry_px": ex["entry_price"] * 2, "peak_bps": 5000.0}),
+    ]:
+        log.write(
+            _rec(
+                c.Role.KEEPER,
+                c.Outcome.HOLD,
+                "旧快照",
+                NOW - timedelta(minutes=minute),
+                symbol=ex["symbol"],
+                position_id="pos-0000",
+                input={"jev": {"snapshot": json.dumps({"pos": pos})}},
+            )
+        )
+    [row] = build_history(PanelFiles(tmp_path, RISK.day_reset_tz), RISK, NOW, "today", True).rows
+    assert row.keeper_peak_usdt == pytest.approx(ex["entry_price"] * ex["quantity"] * 0.0042)
+
+
+def test_history_peak_wrong_symbol_cannot_change_basis(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    ex = load_example("position_record")
+    log = JsonlDecisionLog(tmp_path)
+    for symbol, entry, peak in [
+        (ex["symbol"], ex["entry_price"], 100.0),
+        ("ETHUSDT", ex["entry_price"] * 2, 9999.0),
+    ]:
+        log.write(
+            _rec(
+                c.Role.KEEPER,
+                c.Outcome.HOLD,
+                "复核",
+                NOW - timedelta(minutes=80),
+                symbol=symbol,
+                position_id="pos-0000",
+                input={
+                    "jev": {"snapshot": json.dumps({"pos": {"entry_px": entry, "peak_bps": peak}})}
+                },
+            )
+        )
+    [row] = build_history(PanelFiles(tmp_path, RISK.day_reset_tz), RISK, NOW, "today", True).rows
+    assert row.keeper_peak_usdt == pytest.approx(ex["entry_price"] * ex["quantity"] * 0.01)
+
+
 def test_history_reads_older_days_with_role_filter(tmp_path: Path) -> None:
     from jiaoyi.panel.pages import build_history
 
