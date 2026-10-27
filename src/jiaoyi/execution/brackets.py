@@ -91,6 +91,10 @@ class BracketExchange(Protocol):
     async def execution_mark(self, symbol: str) -> MarkEvidence: ...
 
 
+class AnchorBookSpike(ExchangeError):
+    """反向卡锚定移动止损时盘口价偏离标记价太多（疑似插针）：这一轮不锚，可以下一轮再试。"""
+
+
 class ProtectionIncomplete(ExchangeError):
     """状态未知或保护不完整；调用方保留已确认保护并报告，不应擅自重复提交。"""
 
@@ -313,7 +317,7 @@ class BracketManager:
         dev = (price - mark if long else mark - price) / mark * 10_000
         max_dev = self.trailing_book_mark_max_dev_bps
         if max_dev > 0 and (not math.isfinite(dev) or dev > max_dev):
-            raise ExchangeError(
+            raise AnchorBookSpike(
                 f"锚定用的盘口价 {price:g} 比标记价 {mark:g} 偏 {dev:.1f} 基点"
                 f"（上限 {max_dev:g}），疑似插针，本轮不锚定"
             )
@@ -348,6 +352,7 @@ class BracketManager:
             trailing_observed_at=book.observed_at,
             trailing_distance_pct=distance,
             opposite_anchor_price=price,
+            opposite_anchor_retry_since=None,
             opposite_card_key=card_key,
             tightened_reason=reason[:300],
             tightened_at=self.clock(),

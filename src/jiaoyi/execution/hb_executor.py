@@ -35,7 +35,12 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatus
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete, describe_error
+from jiaoyi.execution.brackets import (
+    AnchorBookSpike,
+    BracketManager,
+    ProtectionIncomplete,
+    describe_error,
+)
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
     CloseFill,
@@ -905,6 +910,7 @@ class HbExecutorAdapter:
         profit_mode: str = "breakeven",
         distance_mult: float = 1.0,
         card_key: str | None = None,
+        anchor_retry_s: float = 0.0,
     ) -> dict[str, Any]:
         """反向作战卡没经价格确认（#314）：收紧交易所托管止损，不平仓。
 
@@ -923,8 +929,10 @@ class HbExecutorAdapter:
         - ``tightened`` 新止损已确认；``pending`` 目标已落盘、换代还没确认（保护轮询接着做，
           旧止损保留；上一代移动止损还在提交 / 撤销中时先等它，不算失败）；
         - ``exiting`` 换代时交易所说已越触发价等，保护状态机已进入退出，由保护轮询按止损原因平；
-        - ``kept`` 已收紧过，或现有止损已同样紧；``skip`` 仓已不在 / 已在平 / 保护在退出，
-          或这一轮临时保护且没有确认在挂的止损（交给保护状态机）；
+        - ``kept`` 已收紧过，或现有止损已同样紧，或换代后在挂的止损没变；``skip`` 仓已不在 /
+          已在平 / 保护在退出，或赚得够但这一轮临时保护且没有确认在挂的止损（交给保护状态机）；
+        - trail 锚定时盘口疑似插针：``anchor_retry_s`` 秒内返回 ``pending`` 下一轮再试（不告警，
+          起始时刻落盘），过了就平 + CRITICAL；0 = 立刻平。
         - ``close`` 不能收紧，调用方按原反向卡规则全平：旧通道（没有托管保护）、从没完整托管
           （含 #325 开仓宽限期）、入场费用或触发价源读不到、目标价离触发价源（新止损腿的触发价格源，
           现在配置是标记价）不到 ``mark_gap_bps``：多要 目标 < 价 ×（1 − gap），
@@ -970,10 +978,6 @@ class HbExecutorAdapter:
                 # 从没完整托管过 / #325 开仓宽限期里：按原规则平。
                 return {"action": "close", "why": "not_armed", "stage": state.stage}
             armed = state.stage == "armed"
-            if not armed and not manager.retains_confirmed_stop(position_id):
-                # 曾完整托管、这一轮退回临时保护且最后回读没有在挂的止损：交给保护状态机，
-                # 不平也不收紧，下一轮再看。
-                return {"action": "skip", "why": "protection_unconfirmed", "stage": state.stage}
             working_type = manager.stop_working_type
             long = rec.side is Side.LONG
             try:
@@ -1018,6 +1022,10 @@ class HbExecutorAdapter:
                 # 亏着或赚得不够（保本价离触发价源不到 gap）：按原规则直接平（用户决定）。
                 # 正常分支，不是故障：只进决策记录，不写 last_error、不发 CRITICAL。
                 return {"action": "close", "why": "target_crossed", **info}
+            if not armed and not manager.retains_confirmed_stop(position_id):
+                # 赚得够，但曾完整托管、这一轮退回临时保护且最后回读没有在挂的止损：
+                # 交给保护状态机，不平也不收紧，下一轮再看。
+                return {"action": "skip", "why": "protection_unconfirmed", **info}
             trail = profit_mode == "trail"
             if trail and (rec.trailing_activation_pct is None or rec.trailing_stop_pct is None):
                 trail = False  # 开仓没带移动止损：没有距离可用，退回保本收紧
@@ -1036,6 +1044,25 @@ class HbExecutorAdapter:
                         reason=reason,
                         card_key=card_key,
                     )
+                except AnchorBookSpike as error:
+                    detail = describe_error(error)
+                    now = self._clock()
+                    since = manager._current(position_id)[1].opposite_anchor_retry_since or now
+                    waited = (now - since).total_seconds()
+                    if anchor_retry_s > 0 and waited < anchor_retry_s:
+                        if waited == 0:
+                            manager._save(position_id, opposite_anchor_retry_since=now)
+                        return {
+                            "action": "pending",
+                            "why": "anchor_book_spike_retry",
+                            "error": detail,
+                            "waited_s": waited,
+                            **info,
+                        }
+                    await self._tighten_failed(
+                        position_id, "反向卡锚定移动止损没做成", detail, "按原规则全平"
+                    )
+                    return {"action": "close", "why": "evidence_unavailable", "error": detail}
                 except Exception as error:
                     detail = describe_error(error)
                     await self._tighten_failed(
@@ -1070,9 +1097,12 @@ class HbExecutorAdapter:
                     "已落盘，旧止损保留，保护轮询继续换",
                 )
                 return {"action": "pending", "why": "sync_unconfirmed", "error": detail, **info}
-            info["live_stop_after"] = manager.live_stop_price(position_id)
+            info["live_stop_after"] = after_stop = manager.live_stop_price(position_id)
             if result == "exit":
                 return {"action": "exiting", "why": "protection_exit", **info}
+            if result == "armed" and after_stop == live:
+                # 候选不比正在挂的紧（或没够最小步长）：交易所上没换，如实记「没动」。
+                return {"action": "kept", "why": "live_stop_unchanged", **info}
             return {
                 "action": "tightened" if result == "armed" else "pending",
                 "why": f"sync_{result}",

@@ -55,6 +55,7 @@ def make_keeper(
     cfg: c.FastLoopConfig = TIGHT,
     price: list[float] | None = None,
     cd: c.BattleCard | None = None,
+    state: Path | None = None,
 ) -> tuple[JevKeeper, Rec, AsyncMock, list[float]]:
     holder = price if price is not None else [68000.0]
     model = AsyncMock()
@@ -66,6 +67,7 @@ def make_keeper(
         lambda _: features(now, price=holder[0], atr=80.0),
         lambda _: cd if cd is not None else card(now, bias="short"),
         recorder=rec,  # type: ignore[arg-type]
+        opposite_state_path=state,
     )
     return k, rec, model, holder
 
@@ -278,6 +280,7 @@ class TightenExecutor(FakeExecutor):
         profit_mode: str,
         distance_mult: float,
         card_key: str | None,
+        anchor_retry_s: float,
     ) -> dict[str, Any]:
         self.tighten_calls.append((position_id, reason, buffer_bps, mark_gap_bps))
         self.extra.append((profit_mode, distance_mult, card_key))
@@ -491,8 +494,10 @@ async def test_tighten_replaces_stop_leg_new_first_with_mark_price(tmp_path: Pat
     assert h.state().tightened_stop_price == pytest.approx(result["target"])
     assert h.state().tightened_reason == "反向卡 v1 未确认"
     # 再来一次：已收紧，不读交易所、不换单
-    before = list(h.exchange.events)
-    assert (await h.tighten())["action"] == "kept" and h.exchange.events == before
+    before, reads = list(h.exchange.events), h.exchange.mark_reads
+    again = await h.tighten()
+    assert again["action"] == "kept" and again["why"] == "already_tightened"
+    assert h.exchange.events == before and h.exchange.mark_reads == reads
     assert h.critical() == [] and h.state().last_error is None
 
 
@@ -673,6 +678,11 @@ async def test_provisional_without_confirmed_stop_is_left_to_protection(tmp_path
     result = await h.tighten()
     assert result["action"] == "skip" and result["why"] == "protection_unconfirmed"
     assert h.state().tightened_stop_price is None
+    # 同样的临时保护、没有确认在挂的止损，但亏着 / 赚得不够：照用户规则直接平
+    h.mark = 100.1
+    result = await h.tighten()
+    assert result["action"] == "close" and result["why"] == "target_crossed"
+    assert h.critical() == []
 
 
 async def test_closing_position_is_not_tightened(tmp_path: Path) -> None:
@@ -748,6 +758,8 @@ def test_config_validation() -> None:
         {"opposite_profit_mode": "stop"},
         {"opposite_trail_distance_mult": 0.0},
         {"opposite_trail_distance_mult": 5.1},
+        {"opposite_anchor_retry_s": -1.0},
+        {"opposite_anchor_retry_s": 601.0},
     ):
         with pytest.raises(ValidationError):
             c.FastLoopConfig(**bad)
@@ -764,6 +776,7 @@ def test_config_validation() -> None:
         "opposite_tighten_mark_gap_bps",
         "opposite_profit_mode",
         "opposite_trail_distance_mult",
+        "opposite_anchor_retry_s",
     }
     assert names <= hotconfig.HOT_FAST
 
@@ -916,7 +929,9 @@ class TrailHarness(TightenHarness):
 
         self.exchange.execution_book = book  # type: ignore[attr-defined]
 
-    async def trail(self, mult: float = 1.0, key: str = "BTCUSDT|t1|short") -> dict[str, Any]:
+    async def trail(
+        self, mult: float = 1.0, key: str = "BTCUSDT|t1|short", retry_s: float = 0.0
+    ) -> dict[str, Any]:
         return await self.adapter.tighten_stop(
             "pos-1",
             reason="反向卡 v1 未确认",
@@ -925,7 +940,14 @@ class TrailHarness(TightenHarness):
             profit_mode="trail",
             distance_mult=mult,
             card_key=key,
+            anchor_retry_s=retry_s,
         )
+
+    def at(self, when: datetime) -> None:
+        """把执行器、保护状态机、标记价和盘口都挪到同一时刻。"""
+        self.adapter._clock = lambda: when
+        self.manager.clock = lambda: when
+        self.exchange.mark_at = self.book_at = when
 
     def live(self) -> list[tuple[str, float]]:
         return [(x.purpose, x.trigger_price) for x in self.stop_legs() if x.state == "confirmed"]
@@ -989,8 +1011,10 @@ async def test_trail_no_reanchor_on_new_card_or_restart(tmp_path: Path, side: Si
     await h.trail()
     anchored = h.state().opposite_anchor_price
     h.mark = 101.0 if side is Side.LONG else 99.0  # 价格变了也不重锚
+    reads = h.exchange.mark_reads
     again = await h.trail(key="BTCUSDT|t2|short")
-    assert again["action"] == "kept" and again["anchor_price"] == anchored
+    assert again["action"] == "kept" and again["why"] == "already_tightened"
+    assert again["anchor_price"] == anchored and h.exchange.mark_reads == reads
     h.restart_adapter()
 
     async def book(symbol: str) -> ExecutionBook:
@@ -1012,9 +1036,8 @@ async def test_trail_anchor_never_looser_than_live_stop(tmp_path: Path, side: Si
     await h.protect()
     creates = list(h.creates())
     result = await h.trail()
-    assert result["action"] == "tightened" and result["anchored_stop"] == pytest.approx(
-        99.3 if side is Side.LONG else 100.7
-    )
+    assert result["action"] == "kept" and result["why"] == "live_stop_unchanged"
+    assert result["anchored_stop"] == pytest.approx(99.3 if side is Side.LONG else 100.7)
     assert h.live() == [("fixed", tight)] and h.creates() == creates
     assert h.state().opposite_anchor_price is not None  # 锚还是落了，之后移动止损从这里收紧
 
@@ -1134,3 +1157,148 @@ async def test_manager_anchor_is_one_shot(tmp_path: Path) -> None:
         )
     assert first == again == 99.3
     assert h.state().opposite_anchor_price == 100.5 and h.state().tightened_reason == "a"
+
+
+# ---------------------------------------------------------------- 逻辑评审第二轮
+
+
+async def test_trail_anchor_spike_retries_then_closes(tmp_path: Path) -> None:
+    h = TrailHarness(tmp_path, Side.LONG)
+    await h.protect()
+
+    async def spiky(symbol: str) -> ExecutionBook:
+        return ExecutionBook(symbol, h.mark * 1.01, h.mark * 1.011, h.book_at, h.book_at)
+
+    h.exchange.execution_book = spiky  # type: ignore[attr-defined]
+    first = await h.trail(retry_s=30.0)
+    assert first["action"] == "pending" and first["why"] == "anchor_book_spike_retry"
+    assert h.state().opposite_anchor_retry_since == START and h.critical() == []
+    assert h.state().opposite_anchor_price is None
+    h.restart_adapter()  # 起始时刻落盘：重启不重新计时
+    h.exchange.execution_book = spiky  # type: ignore[attr-defined]
+    h.at(START + timedelta(seconds=20))
+    again = await h.trail(retry_s=30.0)
+    assert again["action"] == "pending" and again["waited_s"] == 20.0 and h.critical() == []
+    h.at(START + timedelta(seconds=31))
+    last = await h.trail(retry_s=30.0)
+    assert last["action"] == "close" and last["why"] == "evidence_unavailable"
+    assert [a.level for a in h.critical()] == [c.AlertLevel.CRITICAL]
+
+
+async def test_trail_anchor_spike_recovers_and_clears_retry(tmp_path: Path) -> None:
+    h = TrailHarness(tmp_path, Side.LONG)
+    await h.protect()
+    good = h.exchange.execution_book  # type: ignore[attr-defined]
+
+    async def spiky(symbol: str) -> ExecutionBook:
+        return ExecutionBook(symbol, h.mark * 1.01, h.mark * 1.011, h.book_at, h.book_at)
+
+    h.exchange.execution_book = spiky  # type: ignore[attr-defined]
+    assert (await h.trail(retry_s=30.0))["action"] == "pending"
+    h.exchange.execution_book = good  # type: ignore[attr-defined]
+    h.at(START + timedelta(seconds=10))
+    result = await h.trail(retry_s=30.0)
+    assert result["action"] == "tightened" and h.state().opposite_anchor_price == 100.5
+    assert h.state().opposite_anchor_retry_since is None
+
+
+def test_keeper_confirmation_baseline_survives_restart(tmp_path: Path, now: datetime) -> None:
+    cfg = TIGHT.model_copy(
+        update={"opposite_confirm_loss_r": 0.0, "opposite_confirm_key_level": False}
+    )
+    path = tmp_path / "keeper_opposite.json"
+    k, _, _, price = make_keeper(now, cfg, [68000.0], state=path)
+    assert k.review_card_rule(position(now), now).action == "hold"  # type: ignore[union-attr]
+    later = now + timedelta(minutes=5)
+    price[0] = 67919.0  # 离 68000 走了 1.01 ATR；重启后若从这里重量就不够
+    k2, rec2, _, _ = make_keeper(now, cfg, price, state=path)
+    v = k2.review_card_rule(position(now), later)
+    assert v is not None and v.action == "close"
+    rule = rec2.rows[-1]["output"]["card_rule"]
+    assert rule["ref_price"] == 68000.0 and rule["ref_at"] == now.isoformat()
+    # 新规则组的反事实也用重启前第一次碰到反向卡的时间和价
+    k3, rec3, _, _ = make_keeper(now, TIGHT, [68010.0], state=path)
+    k3.review_card_rule(position(now), later)
+    cf = rec3.rows[-1]["output"]["card_rule"]["counterfactual"]
+    assert cf == {
+        "legacy_action": "close",
+        "would_close_at": now.isoformat(),
+        "would_close_price": 68000.0,
+    }
+    k3.forget("pos-1")
+    k4, rec4, _, _ = make_keeper(now, cfg, price, state=path)
+    k4.review_card_rule(position(now), later)
+    assert rec4.rows[-1]["output"]["card_rule"]["ref_price"] == 67919.0  # 平掉后清掉
+
+
+def test_unused_rule_ledger_loads_in_pre_314_model(tmp_path: Path) -> None:
+    from pydantic import ConfigDict, create_model
+
+    from jiaoyi.execution.registry import OPPOSITE_CARD_FIELDS, ServerProtection
+
+    old_fields = {
+        name: (field.annotation, field)
+        for name, field in ServerProtection.model_fields.items()
+        if name not in OPPOSITE_CARD_FIELDS
+    }
+    Old = create_model(
+        "PreOppositeServerProtection", __config__=ConfigDict(extra="forbid"), **old_fields
+    )
+    h = TightenHarness(tmp_path, Side.LONG)
+    h.registry.put(
+        h.registry.get("pos-1").model_copy(
+            update={
+                "server_protection": h.state().model_copy(
+                    update={"trailing_stop_price": 99.5, "trailing_activated": True}
+                )
+            }
+        )
+    )
+    raw = json.loads(h.path.read_text())["positions"]["pos-1"]["server_protection"]
+    assert not set(OPPOSITE_CARD_FIELDS) & set(raw)
+    old = Old.model_validate(raw)
+    assert old.model_dump_json() == h.state().model_dump_json()  # 其余输出一字不差
+
+
+async def test_rollback_script_makes_used_ledger_loadable_by_pre_314_model(tmp_path: Path) -> None:
+    import importlib.util
+
+    from pydantic import ConfigDict, create_model
+
+    from jiaoyi.execution.registry import OPPOSITE_CARD_FIELDS, ServerProtection
+
+    spec = importlib.util.spec_from_file_location(
+        "opposite_card_rollback", ROOT / "scripts" / "opposite_card_rollback.py"
+    )
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    assert tuple(script.FIELDS) == OPPOSITE_CARD_FIELDS
+    h = TightenHarness(tmp_path, Side.LONG)
+    await h.protect()
+    await h.tighten()  # 收紧腿 purpose = tightened，6 个新字段有值
+    tracked = h.registry.get("pos-1")
+    closed = tracked.record.model_copy(update={"close_reason": CloseReason.TIGHTENED_STOP})
+    h.registry.put(tracked.model_copy(update={"record": closed}))
+    raw = json.loads(h.path.read_text())
+    assert script.main([str(h.path)]) == 0  # 默认只列出，不改
+    assert json.loads(h.path.read_text()) == raw
+    assert script.main([str(h.path), "--write"]) == 0
+    assert (tmp_path / "positions.json.bak-314").is_file()
+    cleaned = json.loads(h.path.read_text())["positions"]["pos-1"]
+    old_fields = {
+        name: (field.annotation, field)
+        for name, field in ServerProtection.model_fields.items()
+        if name not in OPPOSITE_CARD_FIELDS
+    }
+    Old = create_model(
+        "PreOppositeServerProtection", __config__=ConfigDict(extra="forbid"), **old_fields
+    )
+    Old.model_validate(cleaned["server_protection"])
+    assert {leg["purpose"] for leg in cleaned["server_protection"]["legs"]} <= {
+        "fixed",
+        "trailing",
+        "lifeboat",
+    }
+    assert cleaned["record"]["close_reason"] == "stop_loss"
+    assert script.clean(json.loads(h.path.read_text())) == []

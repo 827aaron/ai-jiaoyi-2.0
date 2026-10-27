@@ -34,10 +34,12 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from jiaoyi.contracts import (
@@ -100,11 +102,14 @@ class JevKeeper:
         observation_source: Callable[[str, datetime], Mapping[str, Any] | None] | None = None,
         observation_sink: Callable[[dict[str, Any]], None] | None = None,
         observation_wall: Callable[[], datetime] = lambda: datetime.now(UTC),
+        opposite_state_path: Path | None = None,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
         ``fee_bps``：单边吃单手续费（快照的扣费后浮盈）；``forecast``：预测员最新预测；
-        ``scan_day(UTC 日期, 关键字)``：读决策日志里含关键字的记录，找回复查历史和进场拍板。"""
+        ``scan_day(UTC 日期, 关键字)``：读决策日志里含关键字的记录，找回复查历史和进场拍板。
+        ``opposite_state_path``：反向卡确认的起点（每条指令第一次看到时的价和时间、这笔仓第一次
+        碰到反向卡的时间和价）落盘的位置，重启后接着用；None = 只在内存。"""
         self._frozen_peak_review = frozen_peak_review
         self._model = model
         self._sleep = sleep
@@ -125,11 +130,13 @@ class JevKeeper:
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
         self._peak: dict[str, float] = {}  # 每个持仓复查到过的最高浮盈（基点），不被历史截断
         self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
-        # 反向卡（confirm_or_tighten）：每个持仓第一次看到这条反向指令（币|issued_at|方向）时的
+        # 反向卡（confirm_or_tighten）：每个持仓每条反向指令（币|issued_at|方向）第一次看到时的
         # 价格和时间（ATR 走势起点），和这笔仓第一次碰到反向卡的时间和价格（反事实）
-        self._opposite_ref: dict[str, tuple[str, float, datetime]] = {}
+        self._opposite_ref: dict[str, dict[str, tuple[float, datetime]]] = {}
         self._opposite_first: dict[str, tuple[datetime, float | None]] = {}
         self._opposite_logged: dict[str, tuple[str, str]] = {}  # 已记过的（指令, 分支），不刷屏
+        self._opposite_path = opposite_state_path
+        self._load_opposite_state()
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
         """市场背景不依赖是否还有有效开仓卡；只读，不合成交易授权。"""
@@ -142,9 +149,54 @@ class JevKeeper:
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
         self._entry.pop(position_id, None)
+        known = position_id in self._opposite_ref or position_id in self._opposite_first
         self._opposite_ref.pop(position_id, None)
         self._opposite_first.pop(position_id, None)
         self._opposite_logged.pop(position_id, None)
+        if known:
+            self._save_opposite_state()
+
+    def _load_opposite_state(self) -> None:
+        if self._opposite_path is None or not self._opposite_path.is_file():
+            return
+        try:
+            raw = json.loads(self._opposite_path.read_text(encoding="utf-8"))
+            for pid, row in raw.items():
+                at, price = row["first"]
+                self._opposite_first[pid] = (
+                    datetime.fromisoformat(at),
+                    None if price is None else float(price),
+                )
+                self._opposite_ref[pid] = {
+                    key: (float(ref_price), datetime.fromisoformat(ref_at))
+                    for key, (ref_price, ref_at) in row.get("refs", {}).items()
+                }
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            # 读坏了就从这次起重新量（偏保守：更难确认），不拦管家。
+            log.warning("反向卡确认起点 %s 读不了，从这次起重新记", self._opposite_path)
+            self._opposite_first.clear()
+            self._opposite_ref.clear()
+
+    def _save_opposite_state(self) -> None:
+        if self._opposite_path is None:
+            return
+        data = {
+            pid: {
+                "first": [first[0].isoformat(), first[1]],
+                "refs": {
+                    key: [price, at.isoformat()]
+                    for key, (price, at) in self._opposite_ref.get(pid, {}).items()
+                },
+            }
+            for pid, first in self._opposite_first.items()
+        }
+        try:
+            self._opposite_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._opposite_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._opposite_path)
+        except OSError:
+            log.warning("反向卡确认起点写不进 %s", self._opposite_path, exc_info=True)
 
     def history(self, position_id: str) -> list[float]:
         """这笔仓之前历次复查的浮盈（基点，从早到晚）。"""
@@ -413,16 +465,22 @@ class JevKeeper:
         key = opposite_instruction_key(cs, card)
         arm, draw = self._opposite_arm(position, key)
         f = self._features(position.symbol)
+        changed = False
         first = self._opposite_first.get(pid)
         if first is None or (first[1] is None and f is not None):
             first = (first[0] if first else now, f.last_price if f is not None else None)
             self._opposite_first[pid] = first  # 这笔仓第一次碰到反向卡：原规则会在这时这价平
-        ref = self._opposite_ref.get(pid)
-        if f is not None and (ref is None or ref[0] != key):
-            ref = (key, f.last_price, now)  # 第一次看到这条指令：之后的 ATR 走势从这里量
-            self._opposite_ref[pid] = ref
+            changed = True
+        refs = self._opposite_ref.setdefault(pid, {})
+        ref = refs.get(key)
+        if f is not None and ref is None:
+            ref = (f.last_price, now)  # 第一次看到这条指令：之后的 ATR 走势从这里量
+            refs[key] = ref
+            changed = True
+        if changed:
+            self._save_opposite_state()
         confirm = (
-            opposite_confirmation(position, cs, f.last_price, f.atr, ref[1], self._cfg)
+            opposite_confirmation(position, cs, f.last_price, f.atr, ref[0], self._cfg)
             if f is not None and ref is not None
             else None
         )
@@ -434,8 +492,8 @@ class JevKeeper:
             arm=arm,
             price=f.last_price if f is not None else None,
             atr=f.atr if f is not None else None,
-            ref_price=ref[1] if ref is not None else None,
-            ref_at=ref[2].isoformat() if ref is not None else None,
+            ref_price=ref[0] if ref is not None else None,
+            ref_at=ref[1].isoformat() if ref is not None else None,
             confirm=confirm,
         )
         if arm == "close":

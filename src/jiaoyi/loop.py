@@ -170,6 +170,7 @@ class _TightensStop(Protocol):
         profit_mode: str,
         distance_mult: float,
         card_key: str | None,
+        anchor_retry_s: float,
     ) -> dict[str, Any]: ...
 
 
@@ -1350,6 +1351,7 @@ class Runner:
                     profit_mode=fl.opposite_profit_mode,
                     distance_mult=fl.opposite_trail_distance_mult,
                     card_key=key,
+                    anchor_retry_s=fl.opposite_anchor_retry_s,
                 )
             except Exception as e:
                 log.exception("%s 收紧止损出错，按原规则平", pos.symbol)

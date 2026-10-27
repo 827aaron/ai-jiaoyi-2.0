@@ -460,8 +460,10 @@ class FastLoopConfig(Contract):
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="反向卡事件按 持仓号 + 卡号 + 卡版本 固定抽签：这个比例走新规则，其余照旧全平，"
-        "两组都记反事实。0 = 不分组（全按 opposite_card_action）；只在 confirm_or_tighten 时可设。",
+        description="反向卡事件按 持仓号 + 币 + 这条指令的发布时间（issued_at）+ 方向 固定抽签："
+        "这个比例走新规则，其余照旧全平，两组都记反事实；整卡换版本（别的币变了）不重抽，"
+        "这个币重新开会出新指令才重抽。0 = 不分组（全按 opposite_card_action）；"
+        "只在 confirm_or_tighten 时可设。",
     )
     opposite_confirm_loss_r: float = Field(
         default=0.5,
@@ -509,6 +511,13 @@ class FastLoopConfig(Contract):
         le=5.0,
         description="trail 模式：锚定的移动止损回撤距离 = 开仓时带的移动止损距离 × 这个倍数"
         "（之后这笔仓的移动止损都按它）。1 = 和平常一样。",
+    )
+    opposite_anchor_retry_s: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        description="trail 模式锚定时盘口疑似插针（盘口价偏离标记价太多）：这么多秒内每轮再试、"
+        "不告警，过了按原规则全平并告警。0 = 立刻平。",
     )
     # ---- 巡逻兵
     patrol_shock_pct_1m: float = Field(

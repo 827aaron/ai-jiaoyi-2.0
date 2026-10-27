@@ -16,7 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from jiaoyi.contracts import OrderIntent, PositionRecord, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
@@ -24,8 +30,20 @@ from jiaoyi.execution.exchange import WorkingType
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
 LegPurpose = Literal["fixed", "trailing", "lifeboat", "tightened"]
-"""tightened = 反向作战卡收紧价（#314）是这一代止损的来源。"""
-"""条件单腿的来源；新的收紧来源（例如反向卡收紧）在这里加自己的取值。"""
+"""条件单腿的来源；新的收紧来源在这里加自己的取值（tightened = 反向作战卡保本收紧价，#314）。"""
+
+OPPOSITE_CARD_FIELDS = (
+    "tightened_stop_price",
+    "tightened_reason",
+    "tightened_at",
+    "opposite_anchor_price",
+    "opposite_card_key",
+    "trailing_distance_pct",
+    "opposite_anchor_retry_since",
+)
+"""反向作战卡（#314）加在 ``ServerProtection`` 上的字段：为空时不落盘，没用过这条规则的账本和
+加字段之前一字不差，回退到旧代码（``extra="forbid"``）也能读。用过之后回退先跑
+``scripts/opposite_card_rollback.py``。"""
 
 
 class ProtectiveLeg(BaseModel):
@@ -131,6 +149,18 @@ class ServerProtection(BaseModel):
     trailing_distance_pct: float | None = None
     """移动止损回撤距离（净收益百分点）的覆盖值：反向卡锚定时 = 开仓带的距离 × 倍数；
     None = 用开仓指令里的 ``trailing_stop_pct``。"""
+    opposite_anchor_retry_since: datetime | None = None
+    """锚定移动止损因盘口疑似插针没做成，从何时起连续重试（落盘，重启不重新计时）。"""
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_opposite_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        data: dict[str, object] = handler(self)
+        for name in OPPOSITE_CARD_FIELDS:
+            if data.get(name) is None:
+                data.pop(name, None)
+        return data
 
 
 class TrackedPosition(BaseModel):
