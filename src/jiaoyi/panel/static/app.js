@@ -2111,6 +2111,7 @@ const PLAIN = {
   card_pick_max: "军师团每次最多挑几个币",
   reconciler_close_unknown_positions: "交易所上有不认识的仓位时直接平掉",
   protection_readback_grace_s: "条件单回执后查不到，最多等几秒再算没挂上（0 = 不等）",
+  protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
   rule_gate_without_jev: "没有拍板人时用规则代替",
   gate_record_only: "拍板只记不拦（门槛没过也放行，只记下来）",
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",

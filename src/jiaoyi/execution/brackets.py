@@ -81,6 +81,11 @@ class BracketExchange(Protocol):
 class ProtectionIncomplete(ExchangeError):
     """状态未知或保护不完整；调用方保留已确认保护并报告，不应擅自重复提交。"""
 
+    def __init__(self, message: str, *, read_lag: bool = False) -> None:
+        super().__init__(message)
+        self.read_lag = read_lag
+        """已提交且回执已接受的条件单暂时查不到（可能是交易所读延迟），不是参数或状态不符。"""
+
 
 class _PositionChanged(ProtectionIncomplete):
     """网络等待期间正常入场量变化；先保留已有保护，下一次用新证据继续。"""
@@ -170,11 +175,16 @@ class BracketManager:
         clock: Clock = utc_now,
         readback_grace_s: float = 0.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        prearm_grace_s: float = 0.0,
     ) -> None:
-        """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。"""
+        """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
+
+        ``prearm_grace_s``：从未完整托管时，可重试的同步失败最多连续容忍几秒；0 = 不容忍。
+        """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
         self.readback_grace_s, self._sleep = readback_grace_s, sleep
+        self.prearm_grace_s = prearm_grace_s
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -187,6 +197,44 @@ class BracketManager:
     def retains_confirmed_stop(self, pid: str) -> bool:
         """最后回读仍明确 NEW 的普通止损；不表示网络断开后仍能证明当前实时状态。"""
         return any(_live(leg) and _role(leg) == "stop_loss" for leg in self._current(pid)[1].legs)
+
+    def prearm_grace(self, pid: str, error: BaseException) -> float | None:
+        """从未完整托管时本轮同步失败能否先不平仓：返回连续失败已持续的秒数，None = 照旧退出。
+
+        只宽限交易所读延迟（回执已接受的单暂时查无）和网络层一时失败；还必须：未进入退出、
+        最后回读（或回执）仍有明确 NEW 的保命单或止损、没有任何腿处于提交/撤销未知、
+        已触发、子单未知或被明确拒绝。计时从第一次可宽限失败算并落盘，重启不重新计时。
+        """
+        if self.prearm_grace_s <= 0:
+            return None
+        if isinstance(error, ProtectionIncomplete):
+            if not error.read_lag:
+                return None
+        elif not (isinstance(error, ExchangeError) and error.transient):
+            return None
+        try:
+            _, state = self._current(pid)
+        except ProtectionIncomplete:
+            return None
+        if state.ever_armed or state.stage in {"exiting", "cleanup", "done"}:
+            return None
+        if not any(_live(leg) and _role(leg) in {"lifeboat", "stop_loss"} for leg in state.legs):
+            return None
+        if not all(
+            leg.state in {"planned", "superseded"}
+            or _live(leg)
+            or (leg.state == "cancelled" and _settled(leg) and not _triggered(leg))
+            for leg in state.legs
+        ):
+            return None
+        now = self.clock()
+        since = state.prearm_failing_since or now
+        elapsed = (now - since).total_seconds()
+        if elapsed >= self.prearm_grace_s:
+            return None
+        if state.prearm_failing_since is None:
+            self._save(pid, prearm_failing_since=now)
+        return elapsed
 
     def _current(self, pid: str) -> tuple[TrackedPosition, ServerProtection]:
         tracked = self.registry.get(pid)
@@ -392,7 +440,10 @@ class BracketManager:
             if order is None:
                 order = await self._await_readback(pid, old.client_order_id)
             if order is None:
-                raise ProtectionIncomplete("已提交条件单暂时不可查，不能再次创建或当作已撤")
+                raise ProtectionIncomplete(
+                    "已提交条件单暂时不可查，不能再次创建或当作已撤",
+                    read_lag=old.state == "confirmed" and old.acked_at is not None,
+                )
             leg = self._leg(pid, old.client_order_id)
             self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
         _, state = self._current(pid)
@@ -461,7 +512,7 @@ class BracketManager:
         tracked, _ = self._current(pid)
         async with self.registry.symbol_lock(tracked.record.symbol):
             try:
-                return await self._sync(pid)
+                result = await self._sync(pid)
             except _PositionChanged as error:
                 if self._current(pid)[1].stage in {"exiting", "cleanup", "done"}:
                     return "exit"  # 撤旧单期间已确认触发，数量变化不能把退出退回保护阶段。
@@ -470,6 +521,9 @@ class BracketManager:
             except Exception as error:
                 self._save(pid, last_error=describe_error(error))
                 raise
+            if self._current(pid)[1].prearm_failing_since is not None:
+                self._save(pid, prearm_failing_since=None)
+            return result
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         evidence = await self._evidence(pid)

@@ -92,6 +92,7 @@ def build_execution(
     frozen_peak_exit_on: bool = True,
     frozen_peak_exit_after_s: int = 3600,
     protection_readback_grace_s: float = 0.0,
+    protection_prearm_grace_s: float = 0.0,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -142,6 +143,7 @@ def build_execution(
             account_name=account_name,
             connector_name=CONNECTOR_BY_MODE[mode],
             readback_grace_s=protection_readback_grace_s,
+            prearm_grace_s=protection_prearm_grace_s,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None

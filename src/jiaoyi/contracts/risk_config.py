@@ -983,6 +983,15 @@ class AppConfig(Contract):
         "查不到就按 algoId 只读重试（不重发、不当已撤、不建新代）；过时仍查不到照旧报保护未确认。"
         "0 = 不等（原行为）。改后重启生效。",
     )
+    protection_prearm_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=600.0,
+        description="Demo 托管保护：新仓还没完整托管（保命 + 止损 + 止盈从没同时确认过）时，"
+        "同步失败最多连续容忍这么多秒（从第一次失败算）再按对账原因平仓。只宽限交易所读延迟和"
+        "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
+        "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
+    )
     predictor: PredictorConfig = Field(
         default_factory=PredictorConfig, description="预测员运行方式，见 ``[predictor]``。"
     )

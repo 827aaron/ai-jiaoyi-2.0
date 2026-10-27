@@ -1344,6 +1344,20 @@ class HbExecutorAdapter:
                 and state.stage != "exiting"
                 and manager.retains_confirmed_stop(rec.position_id)
             )
+            held = None if keep_previous else manager.prearm_grace(rec.position_id, error)
+            if held is not None:
+                await self._alert(
+                    AlertLevel.CRITICAL,
+                    "普通托管保护未完整确认",
+                    f"{rec.symbol} {rec.position_id}：{describe_error(error)}；"
+                    f"尚未完整托管，在未托管宽限内（已 {held:.0f} / "
+                    f"{manager.prearm_grace_s:.0f} 秒），"
+                    "保留已确认保命单/止损，暂不平仓，下一轮重试；超时仍未确认就平仓",
+                    rec.symbol,
+                    f"server_prearm_grace:{rec.position_id}",
+                    kind="order_failed",
+                )
+                return current
             await self._alert(
                 AlertLevel.CRITICAL,
                 "普通托管保护未完整确认",
