@@ -1045,6 +1045,41 @@ class AppConfig(Contract):
         description="Demo 托管保护：止盈按什么价触发。CONTRACT_PRICE = 最新成交价（原行为）；"
         "MARK_PRICE = 标记价。只影响之后新挂的止盈，已挂的单照旧按挂单时的核对。改后重启生效。",
     )
+    protection_trailing_book_mark_max_dev_bps: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=1000.0,
+        description="Demo 托管保护·移动止损：用来算峰值的盘口价往“抬高峰值”的方向偏离同时读到的"
+        "标记价超过这么多基点（多仓买一高于标记价、空仓卖一低于标记价），就当这一轮盘口不可信"
+        "（Demo 插针），不更新峰值、不激活，记原因并告警；反方向（价差宽）只会让峰值更保守，不拦。"
+        "默认 30 基点（正常时买一不会高过标记价这么多；插针一般远大于）。"
+        "0 = 不比对（旧行为，不建议：插针会把峰值永久抬到针尖）。改后重启生效。",
+    )
+    protection_trailing_stop_mark_buffer_bps: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=500.0,
+        description="Demo 托管保护·移动止损：挂新一代止损前先读标记价，多仓要求新止损价 < 标记价 ×"
+        "（1 − 这么多基点），空仓要求 > 标记价 ×（1 + 这么多基点）；不满足（或标记价读不到）这一轮"
+        "就不换代，旧止损留着，不靠交易所拒单（-2021）去触发平仓。0 = 只要求在标记价正确一侧。"
+        "改后重启生效。",
+    )
+    protection_trailing_min_step_bps: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=500.0,
+        description="Demo 托管保护·移动止损：新止损价比交易所上正在挂的止损至少收紧这么多基点"
+        "才换一代（撤旧挂新），免得每跳一个最小价位就换一次单。"
+        "默认 5 基点（多数币约 2 个最小价位）。"
+        "0 = 一有变化就换（旧行为）。改后重启生效。",
+    )
+    protection_trailing_book_critical_after_s: float = Field(
+        default=300.0,
+        ge=0.0,
+        le=86400.0,
+        description="Demo 托管保护·移动止损：已激活的移动止损连续这么多秒都没拿到有效盘口，告警从"
+        "“提醒”升级成“紧急”（正文带最后一次成功观测时间）。0 = 一直只发提醒。改后重启生效。",
+    )
     predictor: PredictorConfig = Field(
         default_factory=PredictorConfig, description="预测员运行方式，见 ``[predictor]``。"
     )

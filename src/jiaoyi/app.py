@@ -462,6 +462,14 @@ def _build_execution(
             protection_prearm_grace_s=app_cfg.protection_prearm_grace_s,
             protection_stop_working_type=app_cfg.protection_stop_working_type,
             protection_take_profit_working_type=app_cfg.protection_take_profit_working_type,
+            protection_trailing_book_mark_max_dev_bps=(
+                app_cfg.protection_trailing_book_mark_max_dev_bps
+            ),
+            protection_trailing_stop_mark_buffer_bps=app_cfg.protection_trailing_stop_mark_buffer_bps,
+            protection_trailing_min_step_bps=app_cfg.protection_trailing_min_step_bps,
+            protection_trailing_book_critical_after_s=(
+                app_cfg.protection_trailing_book_critical_after_s
+            ),
         )
     except MissingSecret:
         if mode is RunMode.LIVE:
