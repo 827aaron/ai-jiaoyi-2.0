@@ -11,6 +11,7 @@ from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import Alert, AlertLevel, Health, OrderIntent, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus, ReconcileIssueKind
 from jiaoyi.execution.exchange import CloseFill, ExchangeError
+from jiaoyi.execution.fills import TradeFill
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, SymbolAlreadyHeld
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -49,6 +50,7 @@ class Rig:
         self.notices = notices  # 开平仓成功的 INFO 推送；老测试只看告警，默认关
         self.api = FakeHbApi()
         self.ex = FakeExchange()
+        self.api.exchange = self.ex  # 只为已创建的合成 CID 注册入场订单与成交证据。
         self.alerts = _Alerts(notices)
         self.api.on_terminate = self._flatten_exchange
         self.registry = PositionRegistry(tmp_path / "positions.json")
@@ -115,7 +117,6 @@ async def open_filled(rig: Rig, price: float = 68044.0, **over: object) -> str:
 
     rig.api.create_executor = create_and_fill  # type: ignore[method-assign]
     rec = await rig.adapter.open(intent(**over))
-    rig.ex.set_position(rec.symbol, rec.side, rec.quantity)
     return rec.position_id
 
 
@@ -549,6 +550,8 @@ async def test_close_verifies_exchange_flat_and_falls_back_to_direct(rig: Rig) -
     rig.api.auto_terminate_on_stop = False
     rig.ex.exit_price = 68144.0
     rig.ex.exit_fee = 0.02
+    rig.ex.trades = [TradeFill(rig.t, "entry", "buy", 68044.0, 0.015, 0.0, 0.0)]
+    await rig.adapter.backfill_fills(rig.ex.user_trades)
 
     async def stop_and_leave(executor_id: str, *, keep_position: bool) -> None:
         rig.api.terminate(executor_id, "EARLY_STOP", leaves_position=True)
@@ -558,6 +561,10 @@ async def test_close_verifies_exchange_flat_and_falls_back_to_direct(rig: Rig) -
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     assert rec.status is PositionStatus.CLOSED
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    assert rec.realized_pnl_usdt is None  # identified 回报不含fee，不能把毛额当净额。
+    rig.ex.trades.append(TradeFill(rig.t, "exit", "sell", 68144.0, 0.015, 0.02, 1.5))
+    assert await rig.adapter.backfill_fills(rig.ex.user_trades) == 1
+    rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68144.0 - 68044.0) - 0.02)
     assert rec.fees_usdt == pytest.approx(0.02)
     assert rec.lifeboat is not None and rec.lifeboat.status.value == "cancelled"
@@ -649,19 +656,28 @@ async def test_flatten_falls_back_to_direct_reduce_only_order(rig: Rig) -> None:
     rig.ex.stops.clear()
     rig.ex.fail_place = ExchangeError("-2021", immediate_trigger=True)
     rig.api.executors["ex1"]["is_active"] = True
-    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    rig.api.stop_executor = _definite_stop_rejection  # type: ignore[method-assign]
     report = await rig.rec.reconcile(rig.t)
     # 执行层自己的 close() 在 hummingbot 停不掉时就会直连兜底，对账员看到的是已平仓
     assert report.issues[0].fixed
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
     assert rig.ex.stops == {}
-    # 账本标记已平：不再为这笔重复补挂 / 平仓；只剩 hummingbot 里没停掉的执行器这一条告警
+    # 净仓已平，但旧执行器清理未确认：仍归本仓认领，不误当无主或重复平仓。
     kinds = [i.kind for i in (await rig.rec.reconcile(rig.t)).issues]
-    assert kinds == [ReconcileIssueKind.ORPHAN_POSITION]
+    assert kinds == []
+    tracked = next(iter(rig.registry.data.positions.values()))
+    assert tracked.exit_cleanup_pending
+    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
+    with pytest.raises(SymbolAlreadyHeld):
+        await rig.adapter.open(intent(intent_id="int-cleanup-still-owned"))
 
 
 async def _always_down(executor_id: str, *, keep_position: bool) -> None:
     raise HbApiError("hummingbot-api 不可达")
+
+
+async def _definite_stop_rejection(executor_id: str, *, keep_position: bool) -> None:
+    raise HbApiError("合成明确拒绝，停止请求未接收", definite_rejection=True)
 
 
 async def test_unflattenable_position_alerts_critical_every_round(rig: Rig) -> None:
@@ -783,14 +799,15 @@ async def test_unclaimable_open_is_marked_failed_after_grace(rig: Rig) -> None:
     assert any("查不到执行器" in i.detail for i in report.issues)
 
 
-async def test_failed_stop_leaves_position_open_for_next_round(rig: Rig) -> None:
+async def test_failed_stop_keeps_closing_and_protection_for_evidence_recovery(rig: Rig) -> None:
     pid = await open_filled(rig)
     rig.api.stop_executor = _always_down  # type: ignore[method-assign]
     rig.ex.fail_market_close = True  # 直连兜底也不通
     with pytest.raises(HbApiError):
         await rig.adapter.close(pid, CloseReason.KEEPER)
-    assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
-    assert rig.registry.get(pid).requested_close is None  # type: ignore[union-attr]
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSING  # type: ignore[union-attr]
+    assert rig.registry.get(pid).requested_close is CloseReason.KEEPER  # type: ignore[union-attr]
+    assert len(rig.ex.stops) == 1 and rig.ex.market_closed == []
 
 
 # 逻辑审查 B1 / I4 / 总风险字段
@@ -819,7 +836,8 @@ async def test_symbol_can_be_reopened_after_close(rig: Rig) -> None:
 
 async def test_close_falls_back_to_direct_reduce_only_when_stop_executor_fails(rig: Rig) -> None:
     pid = await open_filled(rig)
-    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    rig.api.stop_executor = _definite_stop_rejection  # type: ignore[method-assign]
     await rig.adapter.close(pid, CloseReason.KEEPER)
     assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
@@ -829,7 +847,8 @@ async def test_close_falls_back_to_direct_reduce_only_when_stop_executor_fails(r
 
 async def test_direct_close_retries_lifeboat_cancel_then_alerts(rig: Rig) -> None:
     pid = await open_filled(rig)
-    rig.api.stop_executor = _always_down  # type: ignore[method-assign]
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    rig.api.stop_executor = _definite_stop_rejection  # type: ignore[method-assign]
     rig.ex.fail_cancel = True
     await rig.adapter.close(pid, CloseReason.KEEPER)
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
@@ -980,7 +999,7 @@ async def _closing_with_slow_executor(rig: Rig) -> str:
     return pid
 
 
-async def test_closing_with_unknown_executor_and_flat_exchange_is_settled(rig: Rig) -> None:
+async def test_closing_with_unknown_executor_and_flat_exchange_keeps_protection(rig: Rig) -> None:
     pid = await _closing_with_slow_executor(rig)
     rig.api.executors.clear()  # hummingbot 查不到（返回空，不是 TERMINATED）
     rig.ex.set_position("BTCUSDT", Side.LONG, 0)  # 币安上已经平了
@@ -988,20 +1007,21 @@ async def test_closing_with_unknown_executor_and_flat_exchange_is_settled(rig: R
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSING  # type: ignore[union-attr]
     await rig.adapter.positions()  # 连续第 2 次
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
-    assert rec.status is PositionStatus.CLOSED and rec.close_reason is CloseReason.MANUAL
-    assert rig.ex.market_closed == [] and rig.ex.stops == {}
+    assert rec.status is PositionStatus.CLOSING and rec.closed_at is None
+    assert rig.ex.market_closed == [] and len(rig.ex.stops) == 1
+    assert rig.ex.cancelled == []  # HB平仓请求可能尚有迟到副作用，不能只认瞬时零仓。
 
 
-async def test_closing_with_unknown_executor_and_position_remaining_is_closed_directly(
+async def test_closing_with_unknown_executor_and_position_remaining_keeps_protection(
     rig: Rig,
 ) -> None:
     pid = await _closing_with_slow_executor(rig)
     rig.api.executors.clear()
     await rig.adapter.positions()
     await rig.adapter.positions()
-    assert rig.ex.market_closed == [("BTCUSDT", "sell", 0.015)]
-    assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
-    assert rig.ex.stops == {}
+    assert rig.ex.market_closed == []
+    assert rig.registry.get(pid).record.status is PositionStatus.CLOSING  # type: ignore[union-attr]
+    assert len(rig.ex.stops) == 1 and rig.ex.cancelled == []
 
 
 async def test_unknown_executor_counter_resets_when_it_comes_back(rig: Rig) -> None:
@@ -1101,7 +1121,8 @@ async def test_manual_close_without_fill_waits_then_uses_mark_price(rig: Rig) ->
     report = await rig.rec.reconcile(rig.t)  # 第 6 轮才结算
     rec = rig.registry.get(pid).record  # type: ignore[union-attr]
     assert rec.status is PositionStatus.CLOSED
-    assert rec.realized_pnl_usdt == pytest.approx(0.015 * (68100.0 - 68044.0))
+    # 标记价只作估算说明，缺真实成交/手续费不能声称净盈亏。
+    assert rec.realized_pnl_usdt is None
     assert "标记价（估算）" in report.issues[0].detail
     assert rig.ex.stops == {}
 
@@ -1145,7 +1166,7 @@ async def test_failed_recheck_abandons_settlement(rig: Rig) -> None:
     assert len(rig.ex.stops) == 1 and rig.api.stopped == []
 
 
-async def test_manual_close_retries_when_stopping_the_executor_fails(rig: Rig) -> None:
+async def test_manual_close_recovers_evidence_without_repeating_unknown_stop(rig: Rig) -> None:
     pid = await open_filled(rig)
     rig.ex.manual_fill = CloseFill(68544.0, 0.2)
     _manual_close(rig)
@@ -1155,9 +1176,13 @@ async def test_manual_close_retries_when_stopping_the_executor_fails(rig: Rig) -
     assert not failed.issues[0].fixed
     assert rig.registry.get(pid).record.status is PositionStatus.OPEN  # type: ignore[union-attr]
     rig.api.stop_error = None
-    done = await rig.rec.reconcile(rig.t)
-    assert done.issues[0].fixed
+    pending = await rig.rec.reconcile(rig.t)
+    assert not pending.issues[0].fixed and rig.ex.stops
+    assert rig.api.stopped == []  # 503可能已接受，恢复连通不等于能重发停止。
+    rig.api.terminate("ex1", "EARLY_STOP")  # 原请求后来完成的可核实终态。
+    await rig.rec.reconcile(rig.t)
     assert rig.registry.get(pid).record.status is PositionStatus.CLOSED  # type: ignore[union-attr]
+    assert rig.ex.stops == {}
 
 
 async def test_manual_partial_reduce_only_warns(rig: Rig) -> None:

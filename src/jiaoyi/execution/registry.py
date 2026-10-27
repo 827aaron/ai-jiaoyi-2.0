@@ -40,6 +40,20 @@ class TrackedPosition(BaseModel):
     """挂单进场时按成交时刻算的最长持仓（执行器的 time_limit 加了等待时间，这里自己卡）。"""
     filled_at: datetime | None = None
     """挂单成交的时间（按它算最长持仓）。"""
+    exit_cleanup_pending: bool = False
+    entry_client_order_id: str | None = None
+    entry_original_quantity: float | None = None
+    hb_close_pending: bool = False
+    hb_close_unknown: bool = False
+    direct_close_client_order_id: str | None = None
+    direct_close_generation: int = 0
+    direct_close_quantity: float | None = None
+    direct_close_order_status: str | None = None
+    direct_close_order_id: str | None = None
+    direct_close_pending: bool = False
+    """直连市价平仓提交意图已落盘；未知/部分成交只核对，不盲目发送第二张。"""
+    direct_close_price: float | None = None
+    direct_close_fee: float | None = None
     chase: OrderIntent | None = None
     """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
 

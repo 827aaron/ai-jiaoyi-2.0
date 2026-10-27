@@ -183,7 +183,10 @@ class ThreeWayReconciler:
             running = await self._retry(lambda: self._api.running_executors(self._account))
             issues += await self._claim_unclaimed(running, now)
             await self._retry(self._adapter.sync_all)
-            exchange_positions = await self._retry(self._exchange.positions)
+            positions_read = getattr(self._exchange, "positions_evidence", None)
+            if positions_read is None:
+                raise ExchangeError("缺严格持仓查询能力，不能把未知当零仓")
+            exchange_positions = await self._retry(positions_read)
             stops = await self._retry(self._exchange.open_stops)
         except (HbApiError, ExchangeError) as e:
             # 本轮没有完整核验，不可把上次终态与下次终态拼成「连续两轮」。
@@ -200,7 +203,27 @@ class ThreeWayReconciler:
             for t in live
             if t.record.status is PositionStatus.CLOSING
         }
-        settling = {pid for pid, n in self._closing_rounds.items() if n < 2}
+        pending_direct = {
+            t.record.position_id
+            for t in live
+            if t.direct_close_pending
+            or t.hb_close_unknown
+            or t.direct_close_client_order_id is not None
+        }
+        settling = {
+            pid for pid, n in self._closing_rounds.items() if n < 2 and pid not in pending_direct
+        }
+        for t in live:
+            if t.record.position_id in pending_direct:
+                issues.append(
+                    ReconcileIssue(
+                        kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                        symbol=t.record.symbol,
+                        position_id=t.record.position_id,
+                        detail="平仓结果尚未确认，余仓与保护保留；禁止未知结果重复下单",
+                        fixed=False,
+                    )
+                )
         stops_by_cid = {s.client_order_id: s for s in stops}
         # 带方向的数量（多 +、空 −）；单向持仓每个币只有一个仓位。exchange_qty 是绝对值
         signed: dict[str, float] = {}
@@ -245,7 +268,7 @@ class ThreeWayReconciler:
             if rec.position_id in settling:
                 continue
             tracked_qty[rec.symbol] = tracked_qty.get(rec.symbol, 0.0) + rec.quantity
-            if rec.status is not PositionStatus.OPEN:
+            if rec.status is not PositionStatus.OPEN and rec.position_id not in pending_direct:
                 continue
             # 重挂时短暂会有两张（新 cid 带后缀）：账本记着的那张优先
             known = rec.lifeboat.client_order_id if rec.lifeboat is not None else None
@@ -294,7 +317,13 @@ class ThreeWayReconciler:
                 issues.append(rev or await self._unknown_position(symbol, exchange_positions))
 
         # 3. 残留的保命止损
-        live_cids = {c for t in live for c in lifeboat_cids(t.record.position_id)}
+        live_ids = {t.record.position_id for t in live}
+        owned = [
+            t
+            for t in self._registry.data.positions.values()
+            if t.record.position_id in live_ids or t.exit_cleanup_pending
+        ]
+        live_cids = {c for t in owned for c in lifeboat_cids(t.record.position_id)}
         for stop in stops:
             if (
                 not stop.client_order_id.startswith(STOP_PREFIX)
@@ -305,7 +334,7 @@ class ThreeWayReconciler:
             issues.append(await self._clear_stale(stop, exchange_qty))
 
         # 4. 执行器：报错、消失、没人认领
-        known_ids = {t.record.executor_id for t in live if t.record.executor_id}
+        known_ids = {t.record.executor_id for t in owned if t.record.executor_id}
         # 执行器回来了 / 仓位没了的，清掉“消失”计数
         live_executor = {t.record.position_id: t.record.executor_id for t in live}
         running_now = {str(e.get("executor_id")) for e in running}
@@ -670,22 +699,12 @@ class ThreeWayReconciler:
             return issue(
                 "币安上已无仓位，但找不到平仓方向的成交，暂不按手动平仓结算（保命止损保留）", False
             )
-        if rec.executor_id and rec.executor_id in running_ids:
-            try:
-                await self._api.stop_executor(rec.executor_id, keep_position=True)
-            except HbApiError as e:
-                return issue(
-                    f"币安上已无仓位（疑似手动平仓），但停执行器失败，下一轮重试：{e!r}", False
-                )
         source = "最近一笔只减仓成交"
         if fill is None or fill.price is None:
             fill = CloseFill(await self._exchange.mark_price(rec.symbol), None, estimated=True)
             source = "标记价（估算）" if fill.price is not None else "未取到价格，盈亏未记"
-        self._adapter.mark_closed_directly(pid, CloseReason.MANUAL, fill)
-        try:
-            await self._adapter.release_lifeboat(pid)
-        except Exception:
-            log.exception("手动平仓后撤保命止损失败 %s", pid)
+        if not await self._adapter.settle_external_close(pid, fill):
+            return issue("真实余仓/开仓残单/在途平仓尚未同时核实，保留保护继续核对", False)
         self._flat_rounds.pop(pid, None)
         self._gone_rounds.pop(pid, None)
         self._lb_failures.pop(pid, None)
@@ -715,24 +734,20 @@ class ThreeWayReconciler:
         try:
             await self._adapter.close(position_id, CloseReason.RECONCILER)
         except Exception as via_hb:
-            close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
+            # 两个兜底入口共享适配器持久 pending，不能在其已超时后再发第二张。
             try:
-                fill = await self._exchange.close_position_market(
-                    rec.symbol, close_side, rec.quantity
+                closed = await self._adapter.request_direct_close(
+                    position_id, CloseReason.RECONCILER
                 )
             except Exception as direct:
-                return (
-                    issue(
-                        f"{why}，需平仓但失败：hummingbot {via_hb!r}；直连币安 {direct!r}", False
-                    ),
-                    False,
-                )
-            self._lb_failures.pop(position_id, None)
-            self._adapter.mark_closed_directly(position_id, CloseReason.RECONCILER, fill)
-            await self._adapter.release_lifeboat(position_id)
-            return issue(f"{why}，hummingbot 平仓失败（{via_hb!r}），已直连币安平仓", True), True
+                return issue(f"{why}，平仓尚未确认：{via_hb!r}；{direct!r}", False), False
+            if not closed:
+                return issue(f"{why}，平仓尚未确认，原保护保留", False), False
+        current = self._registry.get(position_id)
+        if current is None or current.record.status is not PositionStatus.CLOSED:
+            return issue(f"{why}，平仓尚未确认，原保护保留", False), False
         self._lb_failures.pop(position_id, None)
-        return issue(f"{why}，已平仓", True), True
+        return issue(f"{why}，已平仓：币安已确认无剩余仓位", True), True
 
     async def _claim_unclaimed(
         self, running: list[dict[str, Any]], now: datetime
