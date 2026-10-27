@@ -17,6 +17,7 @@ _TRIGGERED_ALGO = {"TRIGGERING", "TRIGGERED", "FINISHED"}
 _CLOSED_ALGO = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 _PENDING = {"planned", "submit_pending", "cancel_pending"}
 _ROLE_ORDER: tuple[LegRole, ...] = ("lifeboat", "stop_loss", "take_profit")
+_WORKING_TYPES = {"MARK_PRICE", "CONTRACT_PRICE"}
 
 
 class LegView(BaseModel):
@@ -32,6 +33,12 @@ class LegView(BaseModel):
     algo_status: str | None = None
     child_state: str | None = None
     detail: str = ""
+    working_type: str | None = None
+    """这条腿在交易所按哪个价格触发：``MARK_PRICE`` 标记价 / ``CONTRACT_PRICE`` 合约成交价。
+    旧账本没记的按当时固定行为补（保命单标记价、其余成交价）；记了但读不懂的为 None。"""
+    previous: LegView | None = None
+    """最新一代还没在挂（计划 / 提交中 / 被拒 / 状态不明）时，同一角色仍在挂的上一代。
+    换移动止损价时旧单要等新单确认才撤，这段时间真正在保护的是它；没有就是 None。"""
 
 
 class ProtectionView(BaseModel):
@@ -45,6 +52,8 @@ class ProtectionView(BaseModel):
     stale: bool = False
     """观测时间距今超过 ``protection_stale_s``，或根本没有观测时间；阈值 0 = 不标记。"""
     last_error: str | None = None
+    trailing_error: str | None = None
+    """最近一轮移动止损观测没做成的原因（和普通保护同步的 ``last_error`` 分开）；做成一轮清空。"""
 
 
 def _num(v: object) -> float | None:
@@ -105,7 +114,16 @@ def _gen(leg: dict[str, object]) -> float:
     return _num(leg.get("generation")) or 0.0
 
 
-def _leg_view(role: LegRole, leg: dict[str, object] | None) -> LegView:
+def _working_type(leg: dict[str, object]) -> str | None:
+    if "working_type" not in leg:  # 旧账本：和执行层读旧账本时的补法一致
+        return "MARK_PRICE" if leg.get("purpose") == "lifeboat" else "CONTRACT_PRICE"
+    wt = leg.get("working_type")
+    return wt if isinstance(wt, str) and wt in _WORKING_TYPES else None
+
+
+def _leg_view(
+    role: LegRole, leg: dict[str, object] | None, previous: LegView | None = None
+) -> LegView:
     if leg is None:
         return LegView(role=role, state="none")
     st = leg_state(leg)
@@ -127,6 +145,8 @@ def _leg_view(role: LegRole, leg: dict[str, object] | None) -> LegView:
         algo_status=str(leg["algo_status"]) if leg.get("algo_status") else None,
         child_state=str(leg["child_state"]) if leg.get("child_state") else None,
         detail=detail,
+        working_type=_working_type(leg),
+        previous=previous,
     )
 
 
@@ -141,10 +161,17 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
         # 任何一代被触发都要亮出来（迟到触发）；否则看最新一代
         hit = [x for x in mine if _triggered(x)]
         pick = hit[-1] if hit else max(mine, key=_gen, default=None)
-        legs.append(_leg_view(role, pick))
+        previous = None
+        if pick is not None and leg_state(pick) not in {"live", "triggered"}:
+            # 新一代还没挂上时旧一代仍在挂（交易所先确认新单才撤旧单），一并亮出来
+            older = [x for x in mine if _gen(x) < _gen(pick) and leg_state(x) == "live"]
+            if older:
+                previous = _leg_view(role, max(older, key=_gen))
+        legs.append(_leg_view(role, pick, previous))
     observed = _time(raw.get("observed_at"))
     age = max(0.0, (now - observed).total_seconds()) if observed else None
     err = raw.get("last_error")
+    trailing_err = raw.get("trailing_last_error")
     return ProtectionView(
         stage=str(raw.get("stage") or "entry"),
         ever_armed=bool(raw.get("ever_armed")),
@@ -155,12 +182,15 @@ def parse_protection(raw: object, now: datetime, stale_s: int) -> ProtectionView
         age_s=age,
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),
         last_error=str(err) if err else None,
+        trailing_error=str(trailing_err) if trailing_err else None,
     )
 
 
 def lifeboat_summary(p: ProtectionView) -> tuple[str, float | None]:
     """并进旧的 ``lifeboat_status`` / ``lifeboat_price``：已挂但数据过期单独标出，不当作在位。"""
     leg = next(x for x in p.legs if x.role == "lifeboat")
+    if leg.state != "live" and leg.previous is not None:
+        leg = leg.previous  # 新一代保命单还没挂上，旧一代仍在挂
     if leg.state == "live":
         return ("stale" if p.stale else "active"), leg.trigger_price
     status = {

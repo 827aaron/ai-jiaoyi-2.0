@@ -541,23 +541,30 @@ const PROT_STAGE = { entry: "入场中", provisional: "临时保护", armed: "�
 const protLeg = (p, role) => p.protection && p.protection.legs.find((l) => l.role === role);
 const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? "止盈" : l.purpose === "trailing" ? "移动止损" : "固定止损";
 const legBad = (l) => l.state !== "live";
+// 触发价格源：每条腿建单时记下，旧腿和新腿可能不同（改设置只影响之后新挂的）
+const WT_CN = { MARK_PRICE: "标记价", CONTRACT_PRICE: "成交价" };
+const wtTag = (l) => WT_CN[l.working_type] ? ` <span class="dim small" title="交易所按${WT_CN[l.working_type]}触发这张单">${WT_CN[l.working_type]}</span>` : "";
+// 最新一代还没挂上（提交中 / 被拒 / 不明）而上一代仍在挂：真正在保护的是上一代，主显示它
+const legShown = (l) => (l.previous && l.state !== "live" ? l.previous : l);
+const legNewer = (p, l) => l.previous && l.state !== "live" ? `<div class="small ${l.state === "pending" ? "dim" : "warn"}">新一代 ${legPrice(p, l)} ${LEG_ST[l.state]}${l.detail ? ` · ${l.detail}` : ""}，旧一代仍挂着</div>` : "";
 const secText = (s) => s == null ? "未知" : s < 60 ? `${Math.round(s)} 秒前` : `${dur(s * 1000)}前`;
 function legPrice(p, l) {
-  if (l.trigger_price != null) return price(l.trigger_price, p.symbol);
-  return l.planned_price != null ? `<span class="dim">计划 ${price(l.planned_price, p.symbol)}（未确认）</span>` : "—";
+  if (l.trigger_price != null) return price(l.trigger_price, p.symbol) + wtTag(l);
+  return l.planned_price != null ? `<span class="dim">计划 ${price(l.planned_price, p.symbol)}（未确认）</span>${wtTag(l)}` : "—";
 }
 function protBrief(p) {
   const q = p.protection;
   if (!q) return "";
-  const legs = q.legs.filter((l) => l.role !== "lifeboat").map((l) => `<span class="${legBad(l) ? "warn" : ""}">${legName(l)}${LEG_ST[l.state]}</span>`).join(" · ");
-  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}</div>`;
+  const legs = q.legs.filter((l) => l.role !== "lifeboat").map((l) => { const s = legShown(l); return `<span class="${legBad(s) ? "warn" : ""}">${legName(s)}${LEG_ST[s.state]}${s !== l ? `（新一代${LEG_ST[l.state]}）` : ""}</span>`; }).join(" · ");
+  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}${q.trailing_error ? ` · <span class="warn" title="${esc(q.trailing_error)}">移动止损本轮没更新</span>` : ""}</div>`;
 }
 function protBlock(p) {
   const q = p.protection;
-  const rows = q.legs.map((l) => `<div><span class="n">${legName(l)}</span><span class="${legBad(l) ? "warn" : ""}"><b>${LEG_ST[l.state]}</b>${l.detail ? ` · ${l.detail}` : ""} · 触发价 ${legPrice(p, l)}${l.quantity != null ? ` · 数量 ${qtyFmt(l.quantity)}` : ""}${l.algo_status ? ` · 交易所状态 ${esc(l.algo_status)}` : ""}${l.child_state ? ` · 子单 ${{ absent: "确认没有", unknown: "未确认", identified: "已出现" }[l.child_state] || esc(l.child_state)}` : ""}</span></div>`).join("");
+  const row = (l, tag) => `<div><span class="n">${legName(l)}${tag}</span><span class="${legBad(l) ? "warn" : ""}"><b>${LEG_ST[l.state]}</b>${l.detail ? ` · ${l.detail}` : ""} · 触发价 ${legPrice(p, l)}${l.quantity != null ? ` · 数量 ${qtyFmt(l.quantity)}` : ""}${l.algo_status ? ` · 交易所状态 ${esc(l.algo_status)}` : ""}${l.child_state ? ` · 子单 ${{ absent: "确认没有", unknown: "未确认", identified: "已出现" }[l.child_state] || esc(l.child_state)}` : ""}</span></div>`;
+  const rows = q.legs.map((l) => l.previous && l.state !== "live" ? row(l, "·新一代") + row(l.previous, "·旧一代仍挂") : row(l, "")).join("");
   const trail = q.trailing_stop_price != null ? ` · 移动止损价 ${price(q.trailing_stop_price, p.symbol)}${q.trailing_activated ? "（已激活）" : ""}` : "";
   const age = q.observed_at ? `${secText(q.age_s)}（${new Date(q.observed_at).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })}）` : "没有观测时间";
-  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div><div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
+  return `<div class="note small"><div>交易所托管保护 · 阶段 ${PROT_STAGE[q.stage] || esc(q.stage)}${q.ever_armed ? " · 曾完整武装" : " · 还没完整武装"}${trail}</div><div class="${q.stale ? "warn" : ""}">数据 ${age}${q.stale ? " · 已过期，下面状态可能不是最新" : ""}</div>${q.last_error ? `<div class="warn">最近错误：${esc(q.last_error)}</div>` : ""}${q.trailing_error ? `<div class="warn">移动止损本轮没更新：${esc(q.trailing_error)}（已挂的保护不受影响）</div>` : ""}<div class="dim">状态来自执行层落盘的账本，面板不连交易所；只有“交易所已确认 + 子单确认没有”才算已挂。</div></div><div class="log trail">${rows}</div>`;
 }
 // 到这个价成交的预估净盈亏（U）：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次吃单费；没有费率 / 价就不估
 function lvlPnl(p, lvl) {
@@ -571,14 +578,15 @@ const LVL_TIP = "到这个价成交时预估的净盈亏：数量 ×（价 − �
 // 止损格只显示账本固定计划价；没有可信动态触发价就不计算其预估收益。
 function slCell(p) {
   const l = protLeg(p, "stop_loss");
-  if (l) return `${legPrice(p, l)} <span class="${legBad(l) ? "warn" : "dim"} small">${legName(l)}·${LEG_ST[l.state]}</span><div class="small" title="${LVL_TIP}">${lvlEst(p, l.trigger_price)}</div>`;
+  if (l) { const s = legShown(l); return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${legName(s)}·${LEG_ST[s.state]}</span>${legNewer(p, l)}<div class="small" title="${LVL_TIP}">${lvlEst(p, s.trigger_price)}</div>`; }
   const lvl = p.stop_loss_price;
   return `${price(lvl, p.symbol)} <span class="dim small">固定计划</span><div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
 }
 function tpCell(p) {
   const l = protLeg(p, "take_profit");
   if (!l) return `${price(p.take_profit_price, p.symbol)}<div class="small" title="${LVL_TIP}">${lvlEst(p, p.take_profit_price)}</div>`;
-  return `${legPrice(p, l)} <span class="${legBad(l) ? "warn" : "dim"} small">${LEG_ST[l.state]}</span><div class="small" title="${LVL_TIP}">${lvlEst(p, l.trigger_price)}</div>`;
+  const s = legShown(l);
+  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}<div class="small" title="${LVL_TIP}">${lvlEst(p, s.trigger_price)}</div>`;
 }
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 

@@ -108,6 +108,9 @@ class ServerProtection(BaseModel):
     trailing_source_at: datetime | None = None
     trailing_stop_price: float | None = None
     trailing_observation_gap: bool = False
+    trailing_last_error: str | None = None
+    """最近一轮移动止损观测为什么没完成（缺盘口、盘口过期、证据不一致等）；完成一轮清空。
+    和 ``last_error``（普通保护同步）分开记，免得一个盖掉另一个。"""
 
 
 class TrackedPosition(BaseModel):
