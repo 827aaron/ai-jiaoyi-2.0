@@ -2024,7 +2024,7 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
-const CHOICE = { ...TRIGGER, slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -2247,6 +2247,7 @@ const PLAIN = {
   event_triggers: "哪些事算“出事”",
   event_symbol_gap_min: "同一个币两场会至少隔几分钟",
   event_max_per_day: "一天最多开几场临时会（0 = 不限）",
+  key_level_trigger: "怎样算“突破关键价位”",
   move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
   predictor_against_runs: "预测员连续几次看反才算",
   entry_max_card_age_min: "开仓前卡最多旧几分钟（超了先补会再开）",
@@ -2344,6 +2345,7 @@ const HINT = {
   schedule_at: "填了就每天这个时间开，不按启动时间漂；留空 = 按开会间隔",
   event_meeting_enabled: "只给出事的那个币补开一场，不重开整轮；关掉时突破、大消息、新进池照旧重开整轮",
   event_triggers: "不在名单里的事不开会，等下一轮定时会",
+  key_level_trigger: "在外面就算 = 价格一直在关键位外面，隔够间隔就又开会；穿过才算 = 出卡后从里面穿出去那一下才开，出卡时已在外面的位要等回来再穿",
   entry_max_card_age_min: "要在“哪些事算出事”里勾上“开仓时卡太旧”才会补会，否则只拦不补",
   daily_cost_limit_usd: "只算军师团开会（含总盘会）的 AI 费；没手动固定就跟开会档位走，切档自动换",
   over_budget: "放慢一档 = 开会间隔换成下面那个；不放慢 = 照常开。花到 100% 都停开会，持仓照常管",
@@ -2502,7 +2504,7 @@ const ROLES = [
   ] },
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
-    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
+    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
   { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [
     { g: "", hint: "曼谷 0 点清零；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min", "budget.*"] },
