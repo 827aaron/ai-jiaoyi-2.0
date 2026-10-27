@@ -8,9 +8,13 @@ Protocol 在这里，ccxt 实现放在最后，测试用内存假件。
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
@@ -67,6 +71,136 @@ class ExchangeStop:
     client_order_id: str
     stop_price: float
     reduce_only: bool
+
+
+@dataclass(frozen=True)
+class ExchangeEntryOrder:
+    """原始开仓订单的只读身份与累计成交；不能从执行器 is_trading 推断终态。"""
+
+    symbol: str
+    client_order_id: str
+    order_id: str
+    side: Literal["buy", "sell"]
+    quantity: float
+    filled_quantity: float
+    status: str
+    position_side: str
+    reduce_only: bool = False
+
+    @property
+    def terminal(self) -> bool:
+        return self.status in {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+
+
+def _evidence_number(value: object, *, zero: bool = False) -> float:
+    if isinstance(value, bool):
+        raise ValueError("条件单数值不能是布尔值")
+    number = float(str(value))
+    if not math.isfinite(number) or number < 0 or (not zero and number == 0):
+        raise ValueError("条件单数值必须有限且为正")
+    return number
+
+
+def _evidence_bool(raw: dict[str, Any], key: str) -> bool:
+    value = raw.get(key)
+    if value is True or value == "true":
+        return True
+    if value is False or value == "false":
+        return False
+    raise ValueError(f"条件单缺少明确布尔字段：{key}")
+
+
+@dataclass(frozen=True)
+class IdentifiedCloseOrder:
+    """按调用方已持久化CID核实的只减仓市价单；ACK不等于成交或仓位归零。"""
+
+    symbol: str
+    client_order_id: str
+    order_id: str
+    close_side: Literal["buy", "sell"]
+    quantity: float
+    filled_quantity: float
+    remaining_quantity: float
+    average_price: float | None
+    status: str
+    position_side: str
+    reduce_only: bool
+    is_terminal: bool | None
+
+
+class IdentifiedCloseUnknown(ExchangeError):
+    """可能已创建；查原CID，不得因后续暂时查不到就再次提交。"""
+
+    def __init__(self, client_order_id: str, observed: IdentifiedCloseOrder | None = None) -> None:
+        super().__init__("直连平仓结果未知；保留原CID等待查证，禁止盲目重发")
+        self.client_order_id = client_order_id
+        self.observed = observed
+
+
+class IdentifiedCloseRejected(ExchangeError):
+    """明确业务拒绝；本请求无有效订单，仍不能据此认定仓位已平。"""
+
+
+def _close_decimal(value: object, *, zero: bool = False) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError("订单数值不能为布尔值")
+    number = Decimal(str(value))
+    if not number.is_finite() or number < 0 or (not zero and number == 0):
+        raise ValueError("订单数值缺失或非法")
+    if not math.isfinite(float(number)):
+        raise ValueError("订单数值超范围")
+    return number
+
+
+def _close_bool(value: object) -> bool:
+    if value is True or value == "true":
+        return True
+    if value is False or value == "false":
+        return False
+    raise ValueError("订单布尔字段未知")
+
+
+def _identified_close(raw: dict[str, Any], symbol: str, cid: str) -> IdentifiedCloseOrder:
+    if raw.get("symbol") != symbol or raw.get("clientOrderId") != cid:
+        raise ValueError("直连平仓订单身份不符")
+    if raw.get("type") != "MARKET" or raw.get("positionSide") != "BOTH":
+        raise ValueError("直连平仓订单类型或持仓模式不符")
+    if not _close_bool(raw.get("reduceOnly")):
+        raise ValueError("直连平仓订单不是只减仓")
+    side, status = str(raw.get("side") or "").lower(), str(raw.get("status") or "")
+    if (
+        side not in {"buy", "sell"}
+        or not status
+        or not re.fullmatch(r"[1-9]\d*", str(raw.get("orderId")))
+    ):
+        raise ValueError("直连平仓订单方向/状态/ID未知")
+    qty = _close_decimal(raw.get("origQty"))
+    filled = _close_decimal(raw.get("executedQty"), zero=True)
+    if filled > qty:
+        raise ValueError("直连平仓累计成交量超过原数量")
+    if status == "FILLED" and filled != qty:
+        raise ValueError("直连平仓完成状态与实际累计成交量不一致")
+    average = raw.get("avgPrice")
+    price = _close_decimal(average, zero=True) if average is not None else None
+    terminal = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+    return IdentifiedCloseOrder(
+        symbol=symbol,
+        client_order_id=cid,
+        order_id=str(raw["orderId"]),
+        close_side="buy" if side == "buy" else "sell",
+        quantity=float(qty),
+        filled_quantity=float(filled),
+        remaining_quantity=float(qty - filled),
+        average_price=float(price) if price else None,
+        status=status,
+        position_side="BOTH",
+        reduce_only=True,
+        is_terminal=True
+        if status in terminal
+        else False
+        if status in {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}
+        else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -267,6 +401,106 @@ class CcxtBinanceFutures:
             )
         return out
 
+    async def positions_evidence(self) -> list[ExchangePosition]:
+        """平仓结算用严格证据。缺量/未知方向/模式不能伪装成零仓。"""
+        try:
+            if await self.position_mode() != "one_way":
+                raise ValueError("只支持已确认的单向持仓")
+            await self._ready()
+            raw = await self._ex.fetch_positions()
+            if not isinstance(raw, list):
+                raise ValueError("持仓响应不是列表")
+            out: list[ExchangePosition] = []
+            for row in raw:
+                if not isinstance(row, dict) or row.get("contracts") is None:
+                    raise ValueError("持仓数量缺失")
+                qty = _evidence_number(row["contracts"], zero=True)
+                info = row.get("info")
+                if not isinstance(info, dict) or info.get("positionSide") != "BOTH":
+                    raise ValueError("持仓模式字段未知")
+                amount = Decimal(str(info.get("positionAmt")))
+                if not amount.is_finite() or abs(amount) != Decimal(str(qty)):
+                    raise ValueError("原始持仓量与解析数量不一致")
+                symbol = from_ccxt_symbol(str(row["symbol"]))
+                if qty == 0:
+                    continue
+                if row.get("side") not in {"long", "short"}:
+                    raise ValueError("非零仓位方向未知")
+                if (amount > 0) != (row["side"] == "long"):
+                    raise ValueError("原始持仓符号与解析方向不一致")
+                entry = row.get("entryPrice")
+                out.append(
+                    ExchangePosition(
+                        symbol=symbol,
+                        side=Side(row["side"]),
+                        quantity=qty,
+                        entry_price=_evidence_number(entry) if entry is not None else None,
+                        unrealized_pnl_usdt=0.0,
+                    )
+                )
+            return out
+        except ExchangeError:
+            raise
+        except Exception as error:
+            raise ExchangeError(
+                "真实持仓证据未知，不能确认空仓", transient=is_transient(error)
+            ) from error
+
+    async def entry_order(self, symbol: str, client_order_id: str) -> ExchangeEntryOrder | None:
+        """按 HB 开仓客户端订单号查询，不将空响应/查单失败当已撤。"""
+        import ccxt.async_support as ccxt
+
+        try:
+            raw = await self._ex.fapiPrivateGetOrder(
+                {
+                    "symbol": symbol,
+                    "origClientOrderId": client_order_id,
+                }
+            )
+        except ccxt.OrderNotFound:
+            return None
+        except Exception as error:
+            raise ExchangeError("开仓订单查询结果未知", transient=is_transient(error)) from error
+        try:
+            if not isinstance(raw, dict):
+                raise ValueError("响应不是订单")
+            if raw.get("symbol") != symbol or raw.get("clientOrderId") != client_order_id:
+                raise ValueError("开仓订单身份不匹配")
+            status = raw.get("status")
+            if status not in {
+                "NEW",
+                "PARTIALLY_FILLED",
+                "FILLED",
+                "CANCELED",
+                "EXPIRED",
+                "EXPIRED_IN_MATCH",
+                "REJECTED",
+            }:
+                raise ValueError("订单状态未知")
+            if raw.get("positionSide") != "BOTH" or raw.get("side") not in {"BUY", "SELL"}:
+                raise ValueError("订单模式/方向未知")
+            qty = _evidence_number(raw.get("origQty"))
+            filled = _evidence_number(raw.get("executedQty"), zero=True)
+            if (
+                filled > qty
+                or (status == "FILLED" and filled != qty)
+                or not re.fullmatch(r"[1-9]\d*", str(raw.get("orderId")))
+            ):
+                raise ValueError("订单成交数量或订单身份不一致")
+            return ExchangeEntryOrder(
+                symbol=symbol,
+                client_order_id=client_order_id,
+                order_id=str(raw["orderId"]),
+                side="buy" if raw["side"] == "BUY" else "sell",
+                quantity=qty,
+                filled_quantity=filled,
+                status=status,
+                position_side="BOTH",
+                reduce_only=_evidence_bool(raw, "reduceOnly"),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ExchangeError("开仓订单证据不完整") from error
+
     async def place_stop(
         self,
         symbol: str,
@@ -334,6 +568,128 @@ class CcxtBinanceFutures:
         info = raw.get("info") or {}
         order_type = str(info.get("orderType") or info.get("type") or raw.get("type") or "")
         return order_type.upper().startswith("STOP")
+
+    async def position_mode(self) -> Literal["one_way", "hedge"]:
+        """只读，不切换模式；未知响应不能当单向模式。"""
+        try:
+            raw = await self._ex.fapiPrivateGetPositionSideDual()
+            hedged = _evidence_bool(raw, "dualSidePosition")
+        except Exception as error:
+            raise ExchangeError(
+                "查询持仓模式失败或响应未知", transient=is_transient(error)
+            ) from error
+        return "hedge" if hedged else "one_way"
+
+    @staticmethod
+    def _close_cid(client_order_id: str) -> None:
+        if not re.fullmatch(r"dc-[.A-Za-z0-9_:/-]{1,33}", client_order_id):
+            raise ValueError("直连平仓CID必须使用dc-前缀且总长不超过36")
+
+    async def close_order(self, symbol: str, client_order_id: str) -> IdentifiedCloseOrder | None:
+        """GET原CID；明确未找到不证明之前未知提交未创建，不能因此重发。
+
+        身份/类型/只减仓/数量缺失一律未知，不用状态或CCXT推导的filled补全。
+        """
+        import ccxt.async_support as ccxt
+
+        self._close_cid(client_order_id)
+        to_ccxt_symbol(symbol)  # 请求前验证U本位标的格式。
+        try:
+            raw = await self._ex.fapiPrivateGetOrder(
+                {"symbol": symbol, "origClientOrderId": client_order_id}
+            )
+        except ccxt.OrderNotFound:
+            return None
+        except Exception as error:
+            raise IdentifiedCloseUnknown(client_order_id) from error
+        try:
+            return _identified_close(raw, symbol, client_order_id)
+        except Exception as error:
+            raise IdentifiedCloseUnknown(client_order_id) from error
+
+    async def _close_unknown(self, symbol: str, cid: str) -> IdentifiedCloseUnknown:
+        observed = None
+        with contextlib.suppress(ExchangeError):
+            observed = await self.close_order(symbol, cid)
+        return IdentifiedCloseUnknown(cid, observed)
+
+    async def place_close(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        client_order_id: str,
+    ) -> IdentifiedCloseOrder:
+        """只提交一次的直连平仓，调用方必须先持久化CID和请求参数。
+
+        仅支持只读确认的单向模式，不更改账户；5xx/网络/解析异常保持结果未知。
+        终态部分成交也返回原CID证据，新CID/余仓由上层另作决定，不自动再下单。
+        """
+        import ccxt.async_support as ccxt
+
+        self._close_cid(client_order_id)
+        if close_side not in {"buy", "sell"}:
+            raise ValueError("直连平仓方向非法")
+        qty = _close_decimal(quantity)
+        await self._ready()
+        try:
+            mode = await self._ex.fapiPrivateGetPositionSideDual()
+            if _close_bool(mode.get("dualSidePosition")):
+                raise ValueError("不支持双向持仓模式")
+        except Exception as error:
+            raise ExchangeError("未能确认单向持仓模式，禁止提交直连平仓") from error
+        ccxt_symbol = to_ccxt_symbol(symbol)
+        amount = self._ex.amount_to_precision(ccxt_symbol, float(qty))
+        requested = _close_decimal(amount)
+        existing = await self.close_order(symbol, client_order_id)
+
+        def matches(order: IdentifiedCloseOrder) -> bool:
+            return order.close_side == close_side and order.quantity == float(requested)
+
+        if existing is not None:
+            if not matches(existing):
+                raise ExchangeError("原直连平仓CID对应不同方向或数量，禁止复用")
+            return existing  # 包括终态部分成交；绝不自动创建下一代。
+        try:
+            response = await self._ex.create_order(
+                ccxt_symbol,
+                "market",
+                close_side,
+                amount,
+                None,
+                {
+                    "newClientOrderId": client_order_id,
+                    "reduceOnly": True,
+                    "positionSide": "BOTH",
+                    "newOrderRespType": "RESULT",
+                },
+            )
+        except Exception as error:
+            # 只承认CCXT明确的业务/参数/权限拒绝。通用ExchangeError/5xx均可能已创建。
+            rejected = isinstance(
+                error,
+                ccxt.InvalidOrder
+                | ccxt.AuthenticationError
+                | ccxt.PermissionDenied
+                | ccxt.InsufficientFunds
+                | ccxt.BadSymbol,
+            )
+            uncertain_code = re.search(
+                r"-(?:1000|1001|1006|1007|4116)\b|\b(?:500|502|503|504)\b|5xx|duplicate",
+                str(error),
+                re.IGNORECASE,
+            )
+            if rejected and not uncertain_code:
+                raise IdentifiedCloseRejected("直连平仓被交易所明确拒绝") from error
+            raise await self._close_unknown(symbol, client_order_id) from error
+        try:
+            order = _identified_close(response["info"], symbol, client_order_id)
+            if not matches(order):
+                raise ValueError("直连平仓响应参数不一致")
+            return order
+        except Exception as error:
+            # ACK或不完整返回不等于未创建；只读查证一次，不重发。
+            raise await self._close_unknown(symbol, client_order_id) from error
 
     async def wallet_usdt(self) -> float:
         try:

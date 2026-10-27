@@ -159,6 +159,7 @@ async def test_ccxt_lot_filters_failure_is_exchange_error() -> None:
 
 async def test_acceptance_m0_passes_on_a_full_trade(tmp_path: Path) -> None:
     clk, api, ex = Clk(), FakeHbApi(), FakeExchange()
+    api.exchange = ex  # 明确注册本fixture的入场订单，未知CID不能伪造成交。
     log = JsonlDecisionLog(tmp_path / "data")
 
     def rec(role: Role) -> RoleRecorder:
@@ -179,6 +180,7 @@ async def test_acceptance_m0_passes_on_a_full_trade(tmp_path: Path) -> None:
         clock=clk,
         sleep=clk.sleep,
         recorder=rec(Role.EXECUTOR),
+        exchange=ex,
     )
     reconciler = ThreeWayReconciler(
         adapter,
@@ -201,6 +203,7 @@ async def test_acceptance_m0_passes_on_a_full_trade(tmp_path: Path) -> None:
 
     api.create_executor = create_and_fill  # type: ignore[method-assign]
     position = await adapter.open(OrderIntent.model_validate(load_example("order_intent")))
+    api.on_terminate = lambda _: ex.set_position(position.symbol, position.side, 0)
     ex.set_position(position.symbol, position.side, position.quantity)
     clk.t += timedelta(seconds=10)
     assert (await reconciler.reconcile(clk.t)).clean

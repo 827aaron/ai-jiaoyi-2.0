@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Literal
 
 from jiaoyi.contracts import Side
 from jiaoyi.execution.exchange import (
     CloseFill,
+    ExchangeEntryOrder,
     ExchangeError,
     ExchangePosition,
     ExchangeStop,
+    IdentifiedCloseOrder,
+    IdentifiedCloseUnknown,
     IncomeRow,
     LotFilter,
 )
@@ -38,6 +43,7 @@ class FakeHbApi:
         """设了就在建之前抛出，模拟明确拒绝。"""
         self.find_down = False
         self.stop_error: HbApiError | None = None
+        self.exchange: FakeExchange | None = None
         self._n = 0
 
     def _check(self) -> None:
@@ -70,16 +76,48 @@ class FakeHbApi:
             "filled_amount_quote": 0.0,
             "custom_info": {"current_position_average_price": 0, "order_ids": []},
         }
+        if (
+            self.exchange is not None
+            and executor_config.get("side") in (1, 2)
+            and executor_config.get("amount") is not None
+        ):
+            cid = f"o-{eid}"
+            self.executors[eid]["custom_info"]["order_ids"] = [cid]
+            self.exchange.entry_orders[cid] = ExchangeEntryOrder(
+                symbol=str(executor_config["trading_pair"]).replace("-", ""),
+                client_order_id=cid,
+                order_id=str(self._n),
+                side="buy" if executor_config["side"] == 1 else "sell",
+                quantity=float(executor_config["amount"]),
+                filled_quantity=0.0,
+                status="NEW",
+                position_side="BOTH",
+            )
         if self.create_error is not None:
             raise self.create_error
         return {"executor_id": eid}
 
-    def fill(self, eid: str, price: float) -> None:
+    def fill(self, eid: str, price: float, *, filled_quantity: float | None = None) -> None:
         ex = self.executors[eid]
         ex["custom_info"]["current_position_average_price"] = price
         ex["custom_info"]["order_ids"] = [f"o-{eid}"]
         ex["is_trading"] = True
         ex["filled_amount_quote"] = price
+        if self.exchange is not None and f"o-{eid}" in self.exchange.entry_orders:
+            cid = f"o-{eid}"
+            order = self.exchange.entry_orders[cid]
+            quantity = order.quantity if filled_quantity is None else filled_quantity
+            if not 0 < quantity <= order.quantity:
+                raise ValueError("合成成交量必须在已注册原单数量内")
+            self.exchange.entry_orders[cid] = replace(
+                order,
+                filled_quantity=quantity,
+                status="FILLED" if quantity == order.quantity else "PARTIALLY_FILLED",
+            )
+            self.exchange.set_position(
+                order.symbol, Side.LONG if order.side == "buy" else Side.SHORT, quantity
+            )
+            ex["filled_amount_quote"] = price * quantity
 
     def insufficient_balance(self, eid: str, planned_price: float) -> None:
         """hummingbot 核保证金不够：不下单直接结束，计划价照样写在 custom_info 里。"""
@@ -99,6 +137,11 @@ class FakeHbApi:
         self.executors[eid].update(
             status="TERMINATED", is_active=False, is_trading=False, close_type=close_type
         )
+        if self.exchange is not None:
+            cid = f"o-{eid}"
+            order = self.exchange.entry_orders.get(cid)
+            if order is not None and not order.terminal:
+                self.exchange.entry_orders[cid] = replace(order, status="CANCELED")
         if self.on_terminate is not None and not leaves_position:
             self.on_terminate(eid)
         if pnl is not None:
@@ -114,7 +157,7 @@ class FakeHbApi:
             raise self.stop_error
         self.stopped.append((executor_id, keep_position))
         if self.auto_terminate_on_stop:
-            self.terminate(executor_id, "EARLY_STOP")
+            self.terminate(executor_id, "EARLY_STOP", leaves_position=keep_position)
 
     async def find_executors(self, account_name: str, controller_id: str) -> list[dict[str, Any]]:
         self._check()
@@ -164,6 +207,10 @@ class FakeExchange:
         self.filters_down = False
         self.income_down = False
         self.down = False
+        self.mode: Literal["one_way", "hedge"] = "one_way"
+        self.entry_orders: dict[str, ExchangeEntryOrder] = {}
+        self.close_orders: dict[str, IdentifiedCloseOrder] = {}
+        self.close_submissions: dict[str, tuple[str, str, float]] = {}
         self._n = 0
 
     def set_position(self, symbol: str, side: Side, qty: float) -> None:
@@ -180,6 +227,84 @@ class FakeExchange:
                 raise nxt
             return nxt
         return list(self.pos)
+
+    async def positions_evidence(self) -> list[ExchangePosition]:
+        """沿用显式假件队列/错误；只有合法合成持仓才构成净仓证据。"""
+        rows = await self.positions()
+        if not isinstance(rows, list) or any(
+            not isinstance(p, ExchangePosition)
+            or p.side not in (Side.LONG, Side.SHORT)
+            or isinstance(p.quantity, bool)
+            or not math.isfinite(p.quantity)
+            or p.quantity <= 0
+            for p in rows
+        ):
+            raise ExchangeError("合成持仓证据缺失或非法")
+        return rows
+
+    async def position_mode(self) -> Literal["one_way", "hedge"]:
+        if self.down:
+            raise ExchangeError("合成持仓模式查询不可用")
+        return self.mode
+
+    async def entry_order(self, symbol: str, client_order_id: str) -> ExchangeEntryOrder | None:
+        if self.down:
+            raise ExchangeError("合成开仓订单查询不可用")
+        order = self.entry_orders.get(client_order_id)
+        if order is not None and order.symbol != symbol:
+            raise ExchangeError("合成开仓订单标的不符")
+        return order  # 未注册 CID 就是未知，不合成 FILLED。
+
+    async def close_order(self, symbol: str, client_order_id: str) -> IdentifiedCloseOrder | None:
+        if self.down:
+            raise ExchangeError("合成平仓订单查询不可用")
+        order = self.close_orders.get(client_order_id)
+        if order is not None and order.symbol != symbol:
+            raise ExchangeError("合成平仓订单标的不符")
+        return order
+
+    async def place_close(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        client_order_id: str,
+    ) -> IdentifiedCloseOrder:
+        args = (symbol, close_side, quantity)
+        if client_order_id in self.close_submissions:
+            if self.close_submissions[client_order_id] != args:
+                raise ExchangeError("合成平仓 CID 参数冲突")
+            existing = await self.close_order(symbol, client_order_id)
+            if existing is None:
+                raise IdentifiedCloseUnknown(client_order_id)
+            return existing
+        self.close_submissions[client_order_id] = args
+        expected_side = Side.LONG if close_side == "sell" else Side.SHORT
+        before = sum(p.quantity for p in self.pos if p.symbol == symbol and p.side is expected_side)
+        try:
+            # 保留既有故障注入点；其明确改变的合成持仓差额作为测试成交证据。
+            fill = await self.close_position_market(symbol, close_side, quantity)
+        except ExchangeError as error:
+            raise IdentifiedCloseUnknown(client_order_id) from error
+        after = sum(p.quantity for p in self.pos if p.symbol == symbol and p.side is expected_side)
+        filled = min(quantity, max(0.0, before - after))
+        status = "FILLED" if filled == quantity else "PARTIALLY_FILLED" if filled > 0 else "NEW"
+        order = IdentifiedCloseOrder(
+            symbol=symbol,
+            client_order_id=client_order_id,
+            order_id=str(len(self.close_submissions)),
+            close_side=close_side,
+            quantity=quantity,
+            filled_quantity=filled,
+            remaining_quantity=quantity - filled,
+            average_price=fill.price,
+            status=status,
+            position_side="BOTH",
+            reduce_only=True,
+            is_terminal=status == "FILLED",
+        )
+        self.close_orders[client_order_id] = order
+        return order
 
     async def place_stop(
         self,
