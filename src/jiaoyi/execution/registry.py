@@ -50,6 +50,8 @@ class ProtectiveLeg(BaseModel):
     filled_quantity: float | None = None
     triggered_at: datetime | None = None
     child_state: Literal["absent", "unknown", "identified"] = "unknown"
+    acked_at: datetime | None = None
+    """本程序提交后交易所回执已接受的时刻；首次回读到后清空。只用于回读宽限，不代表仍在。"""
 
 
 class ServerProtection(BaseModel):

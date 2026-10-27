@@ -451,6 +451,7 @@ def _build_execution(
             limit_take_profit=app_cfg.limit_take_profit_on,
             frozen_peak_exit_on=app_cfg.fast_loop.frozen_peak_exit_on,
             frozen_peak_exit_after_s=app_cfg.fast_loop.frozen_peak_exit_after_s,
+            protection_readback_grace_s=app_cfg.protection_readback_grace_s,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:

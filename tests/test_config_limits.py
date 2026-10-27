@@ -119,6 +119,7 @@ OPTIONAL_APP_FIELDS = {
     "fast_loop",
     "predictor",
     "reconciler_close_unknown_positions",
+    "protection_readback_grace_s",
     "trade_notices",
     *(f"notify_{k}" for k in KINDS),
     "credit_low_floor_usd",

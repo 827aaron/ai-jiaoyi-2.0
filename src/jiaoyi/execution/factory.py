@@ -91,6 +91,7 @@ def build_execution(
     limit_take_profit: bool = False,
     frozen_peak_exit_on: bool = True,
     frozen_peak_exit_after_s: int = 3600,
+    protection_readback_grace_s: float = 0.0,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -136,7 +137,11 @@ def build_execution(
     # 当前只批准 Demo 新仓托管。实盘和旧测试网不因更新代码切换出场策略。
     protection = (
         BracketManager(
-            exchange, registry, account_name=account_name, connector_name=CONNECTOR_BY_MODE[mode]
+            exchange,
+            registry,
+            account_name=account_name,
+            connector_name=CONNECTOR_BY_MODE[mode],
+            readback_grace_s=protection_readback_grace_s,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None
