@@ -232,6 +232,8 @@ class EventRules:
     move_atr: float = 3.0
     entry_max_age: timedelta = timedelta(0)
     """开仓前卡龄上限（该币上次开会距今）；0 = 不查。"""
+    key_level_trigger: str = "outside"
+    """outside = 价格在关键位外面就算突破；cross = 出卡后价格从里侧穿到外侧那一下才算。"""
 
 
 PENDING_EXPIRY = timedelta(minutes=30)
@@ -338,6 +340,9 @@ class BattleCardCommander:
         self._symbol_min_interval = symbol_min_interval
         self._last_meeting: dict[str, datetime] = {}
         self._level_broken: set[str] = set()
+        # cross 模式：币 → {关键位 → 上次看到价格是否已在外侧}；出卡后第一次看到时只记、不触发
+        self._level_side: dict[str, dict[str, bool]] = {}
+        self._level_cross: set[str] = set()  # 穿过了、还没轮到开会的币（开一次就清）
         self._blocked: dict[str, str] = {}
         self._symbol_timeout_s = symbol_timeout_s
         self._min_gap = min_refresh_gap
@@ -621,11 +626,8 @@ class BattleCardCommander:
             return None
         for cs in card.symbols:
             px = prices.get(cs.symbol)
-            if px is None:
-                continue
-            for lv in cs.key_levels:
-                if self._broken(lv, px):
-                    self._level_broken.add(cs.symbol)
+            if px is not None and self._level_hit(cs, px):
+                self._level_broken.add(cs.symbol)
         if self._level_broken & {c.symbol for c in card.symbols}:
             return "key_level_break"
         if self._news & {c.symbol for c in card.symbols}:
@@ -921,10 +923,18 @@ class BattleCardCommander:
             sym, px = cs.symbol, prices.get(cs.symbol)
             if px is None:
                 continue
-            for lv in cs.key_levels:
-                if self._broken(lv, px):
-                    self._level_broken.add(sym)
-            if sym in self._level_broken:
+            if self._level_hit(cs, px):
+                self._level_broken.add(sym)
+            if self._cross_mode and sym in self._level_cross:
+                old = self._pending.get(sym)
+                if (
+                    old is not None
+                    and sym not in self._market_reviews
+                    and now - old[1] > PENDING_EXPIRY
+                ):
+                    self._pending.pop(sym)  # 穿过时同币间隔没到、排队过期了：重新排，等到间隔满
+                self._queue(sym, "key_level_break", now)
+            elif not self._cross_mode and sym in self._level_broken:
                 self._queue(sym, "key_level_break", now)
             if sym in self._news:
                 self._queue(sym, "news_high_impact", now)
@@ -1062,6 +1072,9 @@ class BattleCardCommander:
             )
             if last is not None and now - last < self._events.symbol_gap:
                 continue
+            if sym in self._level_cross:  # 这次穿越只换一场会：开不成也不再排
+                self._level_cross.discard(sym)
+                self._save_market()
             return sym, trigger
         return None
 
@@ -1189,6 +1202,8 @@ class BattleCardCommander:
         self._last_meeting[symbol] = now
         self._seen.add(symbol)
         self._level_broken.discard(symbol)
+        self._level_cross.discard(symbol)
+        self._level_side.pop(symbol, None)  # 新结论：关键位在哪一侧按出卡后第一次看到的价格重记
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
@@ -1207,6 +1222,55 @@ class BattleCardCommander:
             )
         self._save_market()
         return card.model_copy(update={"current_market": self.latest_market_view})
+
+    @property
+    def _cross_mode(self) -> bool:
+        return self._events.key_level_trigger == "cross"
+
+    def _level_hit(self, cs: CardSymbol, px: float) -> bool:
+        """这一刻算不算关键位突破。outside：价格在任一关键位外侧；cross：从里侧穿到外侧那一下。"""
+        if not self._cross_mode:
+            return any(self._broken(lv, px) for lv in cs.key_levels)
+        sym = cs.symbol
+        old = self._level_side.get(sym, {})
+        new: dict[str, bool] = {}
+        crossed: list[float] = []
+        beyond_at_card: list[float] = []
+        for lv in cs.key_levels:
+            if lv.kind not in (LevelKind.RESISTANCE, LevelKind.SUPPORT):
+                continue
+            key = f"{lv.kind.value}@{lv.price!r}"
+            out = self._broken(lv, px)
+            new[key] = out
+            if key not in old:
+                if out:
+                    beyond_at_card.append(lv.price)
+            elif out and not old[key]:
+                crossed.append(lv.price)
+        if new != old:
+            self._level_side[sym] = new
+            self._save_market()
+        if beyond_at_card:
+            self._write(
+                symbol=sym,
+                outcome=Outcome.INFO,
+                summary=f"{sym} 出卡时价格已在关键位外侧，等回到里侧再穿过才算突破"[:200],
+                output={
+                    "key_level": "suppressed_already_beyond",
+                    "price": px,
+                    "levels": beyond_at_card,
+                },
+            )
+        if not crossed:
+            return False
+        self._level_cross.add(sym)
+        self._write(
+            symbol=sym,
+            outcome=Outcome.INFO,
+            summary=f"{sym} 价格穿过关键位 {crossed}"[:200],
+            output={"key_level": "crossed", "price": px, "levels": crossed},
+        )
+        return True
 
     @staticmethod
     def _broken(lv: KeyLevel, px: float) -> bool:
@@ -1271,11 +1335,13 @@ class BattleCardCommander:
             self._pending_reference_view = (
                 self.latest_market_view if self.regime_reference is None else None
             )
-        self._save_card()
-        self._save_market()
         self._seen = {e.symbol for e in candidates}
         self._news.clear()
         self._level_broken.clear()
+        self._level_cross.clear()
+        self._level_side.clear()
+        self._save_card()
+        self._save_market()
         self._record_card(card, started)
         return card.model_copy(update={"current_market": self.latest_market_view})
 
@@ -1619,6 +1685,8 @@ class BattleCardCommander:
             "event_day": self._event_day,
             "event_count": self._event_count,
             "event_last": {key: at.isoformat() for key, at in self._event_last.items()},
+            "level_side": self._level_side,
+            "level_cross": sorted(self._level_cross),
             "market_error": self._market_error,
             "market_fails": self._market_fails,
             "market_retry_at": self._market_retry_at.isoformat() if self._market_retry_at else None,
@@ -1688,6 +1756,15 @@ class BattleCardCommander:
         except (ValueError, TypeError, AttributeError):
             logger.warning("市场复核排队状态损坏，保留卡与市场，等待新提名")
             self._market_reviews.clear()
+        try:  # 旧文件没有这两项：当作出卡后还没看过价格
+            self._level_side = {
+                str(sym): {str(k): bool(v) for k, v in sides.items()}
+                for sym, sides in data.get("level_side", {}).items()
+            }
+            self._level_cross = {str(sym) for sym in data.get("level_cross", [])}
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("关键位穿越状态损坏，按出卡后第一次看到的价格重记")
+            self._level_side, self._level_cross = {}, set()
 
     def _eligible(self, pool: SymbolPool, now: datetime, *, expand: bool) -> list[SymbolPoolEntry]:
         """这一轮能开会的币：没开分档 = 整个池；开了 = 头部 + 有持仓的 + 中间档里今天挑中的
