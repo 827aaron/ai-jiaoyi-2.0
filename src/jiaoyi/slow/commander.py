@@ -2156,6 +2156,9 @@ class BattleCardCommander:
         out.append("挑中：")
         out += [f"{e.symbol}：{by_pick.get(e.symbol, '')}" for e in chosen if e not in forced]
         live.step("pick", "market", "\n".join(out))
+        if "rolling_60m" in picked.table or "_closedHour[" in picked.table:
+            # 会前那一步是按现状格式先显示的；开了新标签 / 滚动涨跌家数时，补上模型实际收到的
+            live.step("input", "input", f"模型实际收到的池子概况和候选表：\n{picked.table}")
         keep = {e.symbol for e in chosen}
         said = {r.symbol: r.reason for r in picked.rejections}
         why: list[str] = []

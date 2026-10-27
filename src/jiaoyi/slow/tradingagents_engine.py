@@ -177,6 +177,7 @@ class TradingAgentsSettings:
     snapshot_label: str = "legacy"  # legacy / neutral
     live_price_line: bool = False
     stale_on_arrival: bool = False
+    stale_on_arrival_action: str = "watch"  # watch / no_trade
     input_time_labels: str = "legacy"  # legacy / explicit
     market_table_rolling: bool = False
 
@@ -1496,20 +1497,49 @@ def invalidation_price(decision: str) -> float | None:
 
 
 def stale_on_arrival_reason(
-    bias: Bias, zone: Range | None, invalidation: float | None, price: float
+    bias: Bias,
+    zone: Range | None,
+    invalidation: float | None,
+    price: float,
+    start_price: float | None = None,
 ) -> str | None:
-    """卡到手时现价已让它作废的理由；没作废返回 None。做多 / 做空互为镜像。"""
+    """卡到手时现价已让它作废的理由；没作废返回 None。做多 / 做空互为镜像。
+
+    失效价：现价已越过就作废。进场区间：只有开会开始时价格还没越过区间（``start_price``
+    在区间或正确一侧）、现在整段被甩在后面才作废；开会时就已在区间另一侧（等价格回来的挂法）
+    或不知道开会时的价，不按区间作废。"""
     if bias is Bias.LONG:
         if invalidation is not None and price <= invalidation:
             return f"现价 {price:g} 已到失效价 {invalidation:g} 或以下（做多作废）"
-        if zone is not None and zone.min > price:
-            return f"进场区间 {zone.min:g}–{zone.max:g} 整段在现价 {price:g} 上方（做多）"
+        if zone is not None and start_price is not None and start_price >= zone.min > price:
+            return (
+                f"开会后价格从 {start_price:g} 跌穿进场区间 {zone.min:g}–{zone.max:g}，"
+                f"现价 {price:g} 在区间下方（做多）"
+            )
     elif bias is Bias.SHORT:
         if invalidation is not None and price >= invalidation:
             return f"现价 {price:g} 已到失效价 {invalidation:g} 或以上（做空作废）"
-        if zone is not None and zone.max < price:
-            return f"进场区间 {zone.min:g}–{zone.max:g} 整段在现价 {price:g} 下方（做空）"
+        if zone is not None and start_price is not None and start_price <= zone.max < price:
+            return (
+                f"开会后价格从 {start_price:g} 涨穿进场区间 {zone.min:g}–{zone.max:g}，"
+                f"现价 {price:g} 在区间上方（做空）"
+            )
     return None
+
+
+def stale_card(cs: CardSymbol, why: str, action: str = "watch") -> CardSymbol:
+    """卡到手就作废时怎么处理。watch（默认）= 方向不动、只清信号和进场区间（和指挥官
+    ``_watch_only`` 同一种「只盯不开」：持仓的反向信号、方向记分照旧，管家也不把它当反向卡平仓）；
+    no_trade = 改成观望。"""
+    if action == "no_trade":
+        return _no_trade(cs, f"stale_on_arrival：{why}").model_copy(update={"entry_zone": None})
+    return cs.model_copy(
+        update={
+            "allowed_signals": [],
+            "entry_zone": None,
+            "reason": f"{cs.reason}（stale_on_arrival：{why}）"[:500],
+        }
+    )
 
 
 def convert_prompt(
@@ -2526,8 +2556,12 @@ class TradingAgentsEngine:
         """池子滚动 60 分钟涨跌家数（截到此刻）；每个币一个 1 分钟 K 线请求，拿不到的记缺失。"""
         end = self._today()
         start = end.replace(second=0, microsecond=0) - timedelta(minutes=60)
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            got = list(pool.map(lambda s: rolling_change(s, start), symbols))
+        try:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                got = list(pool.map(lambda s: rolling_change(s, start), symbols))
+        except Exception as exc:  # 含限流：这一行只是补充，不能让整轮总盘会失败
+            logger.warning("滚动 60 分钟涨跌家数取不到", exc_info=True)
+            return f"Pool breadth rolling_60m unavailable ({type(exc).__name__})"
         return market_table.rolling_breadth_line(dict(zip(symbols, got, strict=True)), start, end)
 
     @staticmethod
@@ -2794,10 +2828,10 @@ class TradingAgentsEngine:
         fmt = price_formatter(tick)
         start_quote = (
             fetch_live_quote(entry.symbol, params.indicator, now)
-            if self._s.live_price_line
+            if self._s.live_price_line or self._s.stale_on_arrival
             else None
         )
-        if start_quote is not None:
+        if start_quote is not None and self._s.live_price_line:
             note = f"{note}\n{live_price_line(start_quote, now, fmt)}"
         # 偏空整改：这场会用哪组设置（按会议 id 定，可复现），记进实况和结论
         setup = resolve(self._s.bias_fix, f"{entry.symbol}@{now:%Y-%m-%dT%H:%M:%SZ}")
@@ -2929,22 +2963,44 @@ class TradingAgentsEngine:
                 if missing:
                     cs = degrade_size(cs, missing)
                 stale = None
+                guard: dict[str, str] = {}
                 if self._s.stale_on_arrival:
                     px = quote.price if quote is not None else levels.price
+                    source = (
+                        "live_ticker"
+                        if quote is not None
+                        else ("levels_fallback" if px else "unavailable")
+                    )
+                    guard["stale_guard_price_source"] = source
                     stale = (
                         stale_on_arrival_reason(
-                            cs.bias, cs.entry_zone, invalidation_price(decision), px
+                            cs.bias,
+                            cs.entry_zone,
+                            invalidation_price(decision),
+                            px,
+                            start_quote.price if start_quote is not None else None,
                         )
                         if px
                         else None
                     )
                     if stale is not None:
-                        logger.info("%s stale_on_arrival：%s，改成观望", entry.symbol, stale)
-                        if live:
-                            live.step("quality", "gate", f"stale_on_arrival：{stale}，改成观望")
-                        cs = _no_trade(cs, f"stale_on_arrival：{stale}").model_copy(
-                            update={"entry_zone": None}
+                        how = self._s.stale_on_arrival_action
+                        logger.info(
+                            "%s stale_on_arrival（%s，价格来源 %s）：%s",
+                            entry.symbol,
+                            how,
+                            source,
+                            stale,
                         )
+                        if live:
+                            live.step(
+                                "quality",
+                                "gate",
+                                f"stale_on_arrival：{stale}（价格来源 {source}），"
+                                + ("只盯不开" if how == "watch" else "改成观望"),
+                            )
+                        cs = stale_card(cs, stale, how)
+                        guard["stale_on_arrival"] = stale
                 cs = attach_outlook(
                     cs, draft, rm, rating, str(state.get("trader_investment_plan", ""))
                 )
@@ -2957,7 +3013,7 @@ class TradingAgentsEngine:
                         "reasoning_tokens": meter.tokens_reasoning,
                         "cached_tokens": meter.tokens_cached,  # 命中缓存的输入 token
                     },
-                    {**setup.record(), **({"stale_on_arrival": stale} if stale else {})},
+                    {**setup.record(), **guard},
                 )
             except (ValidationError, ValueError) as exc:
                 last = exc

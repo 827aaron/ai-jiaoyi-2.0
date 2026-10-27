@@ -35,6 +35,7 @@ FRESH_KEYS = (
     "snapshot_label",
     "live_price_line",
     "stale_on_arrival",
+    "stale_on_arrival_action",
     "input_time_labels",
     "market_table_rolling",
     "latest_market_regime",
@@ -45,6 +46,7 @@ ALL_ON = {
     "snapshot_label": "neutral",
     "live_price_line": True,
     "stale_on_arrival": True,
+    "stale_on_arrival_action": "no_trade",
     "input_time_labels": "explicit",
     "market_table_rolling": True,
     "latest_market_regime": True,
@@ -105,6 +107,7 @@ def test_all_switches_load_and_reach_engine_and_commander(tmp_path: Path) -> Non
         "explicit",
     )
     assert s.live_price_line and s.stale_on_arrival and s.market_table_rolling
+    assert s.stale_on_arrival_action == "no_trade"
     kw = cfg.commander_kwargs()
     assert kw["latest_market_regime"] and kw["event_brief_refresh"]
     BattleCardCommander(object(), RISK, JsonlDecisionLog(tmp_path), **kw)  # type: ignore[arg-type]
@@ -404,6 +407,7 @@ def _meet(
     *,
     ratings: tuple[str, str, str] = ("Sell", "Sell", "SELL"),
     levels: LevelContext | None = None,
+    start_price: float | None = None,
     **settings: Any,
 ) -> tuple[te.Analysis, list[str], list[str]]:
     llm = _Llm(te._CardSymbolDraft.model_validate(draft))
@@ -417,27 +421,43 @@ def _meet(
     eng._graph = lambda *a, **k: notes.append(a[2]) or graph  # type: ignore[method-assign]
     now = datetime(2026, 10, 27, 21, 41, 40, tzinfo=UTC)
     quote = None if price is None else te.LiveQuote(price, now, "15m")
-    monkeypatch.setattr(te, "fetch_live_quote", lambda *a, **k: quote)
+    start = quote if start_price is None else te.LiveQuote(start_price, now, "15m")
+    quotes = iter([start, quote])  # 开会开始一次、转卡前一次
+    monkeypatch.setattr(te, "fetch_live_quote", lambda *a, **k: next(quotes))
     meter = te.CostMeter({"flash": (0.3, 1.2), "pro": (0.5, 2.0)})
     res = eng._analyze_run(entry("PUMPUSDT"), "震荡", object(), meter)
     return res, notes, llm.prompts
 
 
-def test_pump_regression_invalidation_crossed_before_meeting_is_no_trade(
+def test_pump_regression_invalidation_crossed_before_meeting_is_voided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PUMPUSDT 10-27 21:41：卡写「站上 0.004341 则偏空作废」，开会前价格已到 0.004375。"""
+    """PUMPUSDT 10-27 21:41：卡写「站上 0.004341 则偏空作废」，开会前价格已到 0.004375。
+    默认 watch：方向不动、只盯不开（清信号和区间）。"""
     res, _, _ = _meet(monkeypatch, PUMP_DRAFT, PUMP_DECISION, 0.004375, stale_on_arrival=True)
     cs = res.card_symbol
-    assert cs.bias is Bias.NO_TRADE and cs.allowed_signals == [] and cs.entry_zone is None
+    assert cs.bias is Bias.SHORT and cs.allowed_signals == [] and cs.entry_zone is None
     assert "stale_on_arrival" in cs.reason and "0.004341" in cs.reason
     assert res.setup is not None and "0.004341" in res.setup["stale_on_arrival"]
-    # 开关关着：照旧出空卡
+    assert res.setup["stale_guard_price_source"] == "live_ticker"
+    no_trade, _, _ = _meet(
+        monkeypatch,
+        PUMP_DRAFT,
+        PUMP_DECISION,
+        0.004375,
+        stale_on_arrival=True,
+        stale_on_arrival_action="no_trade",
+    )
+    assert no_trade.card_symbol.bias is Bias.NO_TRADE and no_trade.card_symbol.entry_zone is None
+    # 开关关着：照旧出空卡，不记价格来源
     off, _, _ = _meet(monkeypatch, PUMP_DRAFT, PUMP_DECISION, 0.004375)
-    assert off.card_symbol.bias is Bias.SHORT and "stale_on_arrival" not in (off.setup or {})
+    assert off.card_symbol.bias is Bias.SHORT and off.card_symbol.allowed_signals
+    assert "stale_on_arrival" not in (off.setup or {})
+    assert "stale_guard_price_source" not in (off.setup or {})
     # 价格还在失效价以下、区间在价格上方（做空的正确一侧）：照常出卡
     ok, _, _ = _meet(monkeypatch, PUMP_DRAFT, PUMP_DECISION, 0.004290, stale_on_arrival=True)
-    assert ok.card_symbol.bias is Bias.SHORT
+    assert ok.card_symbol.allowed_signals and ok.card_symbol.entry_zone is not None
+    assert ok.setup is not None and "stale_on_arrival" not in ok.setup
 
 
 def test_pump_mirror_long_is_treated_the_same(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -457,12 +477,31 @@ def test_pump_mirror_long_is_treated_the_same(monkeypatch: pytest.MonkeyPatch) -
     res, _, _ = _meet(
         monkeypatch, long_draft, decision, 0.004375, ratings=buy, stale_on_arrival=True
     )
-    assert res.card_symbol.bias is Bias.NO_TRADE and "stale_on_arrival" in res.card_symbol.reason
-    assert "0.004409" in res.card_symbol.reason
+    cs = res.card_symbol
+    assert cs.bias is Bias.LONG and cs.allowed_signals == [] and "stale_on_arrival" in cs.reason
+    assert "0.004409" in cs.reason
     ok, _, _ = _meet(
         monkeypatch, long_draft, decision, 0.004460, ratings=buy, stale_on_arrival=True
     )
-    assert ok.card_symbol.bias is Bias.LONG
+    assert ok.card_symbol.allowed_signals
+
+
+def test_zone_voids_only_when_crossed_after_the_meeting_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """区间 0.004300–0.004335、失效价调高到 0.0050（不碰失效价规则）。"""
+    decision = PUMP_DECISION.replace("0.004341", "0.0050")
+    # 开会时 0.004320 在区间里，转卡时 0.004360 已涨穿整个区间 → 作废
+    crossed, _, _ = _meet(
+        monkeypatch, PUMP_DRAFT, decision, 0.004360, start_price=0.004320, stale_on_arrival=True
+    )
+    assert crossed.card_symbol.allowed_signals == []
+    assert "涨穿进场区间" in crossed.card_symbol.reason
+    # 开会时就已经在区间上方（等价格回来做空的挂法）→ 不作废
+    above, _, _ = _meet(
+        monkeypatch, PUMP_DRAFT, decision, 0.004360, start_price=0.004350, stale_on_arrival=True
+    )
+    assert above.card_symbol.allowed_signals and above.card_symbol.entry_zone is not None
 
 
 def test_live_price_reaches_meeting_note_and_converter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,30 +516,41 @@ def test_live_price_reaches_meeting_note_and_converter(monkeypatch: pytest.Monke
 
 
 @pytest.mark.parametrize(
-    ("price", "inv", "zone", "stale"),
+    ("start", "price", "inv", "zone", "stale"),
     [
-        (100.0, 99.0, (99.5, 99.8), False),  # 做多：价在失效价上、区间在下方 → 正常
-        (98.9, 99.0, (99.5, 99.8), True),  # 跌破失效价
-        (99.0, 99.0, None, True),  # 正好到失效价
-        (99.4, 98.0, (99.5, 99.8), True),  # 区间整段在价上方：价已跌穿回踩区
-        (99.6, 98.0, (99.5, 99.8), False),  # 价在区间里
-        (100.0, None, None, False),  # 没有失效价也没有区间
+        (100.0, 100.0, 99.0, (99.5, 99.8), False),  # 做多：价在失效价上、区间在下方 → 正常
+        (100.0, 98.9, 99.0, (99.5, 99.8), True),  # 跌破失效价
+        (None, 99.0, 99.0, None, True),  # 正好到失效价（不需要开会时的价）
+        (100.0, 99.4, 98.0, (99.5, 99.8), True),  # 开会后跌穿整个回踩区
+        (99.6, 99.4, 98.0, (99.5, 99.8), True),  # 开会时在区间里，之后跌穿
+        (99.4, 99.3, 98.0, (99.5, 99.8), False),  # 开会时就在区间下方：不按区间作废
+        (None, 99.4, 98.0, (99.5, 99.8), False),  # 不知道开会时的价：不按区间作废
+        (100.0, 99.6, 98.0, (99.5, 99.8), False),  # 价在区间里
+        (100.0, 100.0, None, None, False),  # 没有失效价也没有区间
     ],
 )
 def test_stale_on_arrival_is_a_mirror_for_long_and_short(
-    price: float, inv: float | None, zone: tuple[float, float] | None, stale: bool
+    start: float | None,
+    price: float,
+    inv: float | None,
+    zone: tuple[float, float] | None,
+    stale: bool,
 ) -> None:
     def flip(x: float) -> float:
         return 200.0 - x
 
     long_zone = Range(min=zone[0], max=zone[1]) if zone else None
     short_zone = Range(min=flip(zone[1]), max=flip(zone[0])) if zone else None
-    long_why = te.stale_on_arrival_reason(Bias.LONG, long_zone, inv, price)
+    long_why = te.stale_on_arrival_reason(Bias.LONG, long_zone, inv, price, start)
     short_why = te.stale_on_arrival_reason(
-        Bias.SHORT, short_zone, flip(inv) if inv is not None else None, flip(price)
+        Bias.SHORT,
+        short_zone,
+        flip(inv) if inv is not None else None,
+        flip(price),
+        flip(start) if start is not None else None,
     )
     assert (long_why is not None, short_why is not None) == (stale, stale)
-    assert te.stale_on_arrival_reason(Bias.NO_TRADE, long_zone, inv, price) is None
+    assert te.stale_on_arrival_reason(Bias.NO_TRADE, long_zone, inv, price, start) is None
 
 
 def test_invalidation_price_parsing() -> None:
@@ -519,7 +569,18 @@ def test_stale_guard_falls_back_to_level_price(monkeypatch: pytest.MonkeyPatch) 
         levels=LevelContext(price=0.0044),
         stale_on_arrival=True,
     )
-    assert res.card_symbol.bias is Bias.NO_TRADE
+    assert res.setup is not None and res.setup["stale_guard_price_source"] == "levels_fallback"
+    assert res.card_symbol.allowed_signals == []
+
+
+def test_rolling_breadth_failure_never_fails_the_round(monkeypatch: pytest.MonkeyPatch) -> None:
+    def limited(*a: Any, **k: Any) -> Any:
+        raise te.binance_gate.RateLimited(418, 0.0)
+
+    monkeypatch.setattr(te.binance_gate, "get", limited)
+    eng = te.TradingAgentsEngine.__new__(te.TradingAgentsEngine)
+    eng._today = lambda: datetime(2026, 10, 27, 10, 54, tzinfo=UTC)
+    assert eng._rolling_breadth(["AAUSDT"]) == "Pool breadth rolling_60m unavailable (RateLimited)"
 
 
 # ---------------------------------------------------------------- c / e：指挥官
@@ -633,6 +694,31 @@ async def test_event_meeting_refreshes_the_brief(tmp_path: Path, now: datetime, 
         assert engine.seen[-1][2] == f"新简报 {calls + 1}"
     else:
         assert brief.calls == calls and engine.seen[-1][2] == "上一轮留下的简报"
+
+
+@pytest.mark.parametrize("table", ["legacy table", "Pool breadth rolling_60m (09:54-10:54 UTC"])
+async def test_live_view_shows_the_table_the_model_actually_got(
+    tmp_path: Path, now: datetime, table: str
+) -> None:
+    from jiaoyi.slow.commander import EventRules
+
+    class _TableEngine(_Engine):
+        async def pick(self, candidates: Any, max_n: int, previous: Any, pool: Any = ()) -> Any:
+            got = await super().pick(candidates, max_n, previous, pool)
+            return replace(got, table=table)
+
+    engine = _TableEngine()
+    c = BattleCardCommander(
+        engine,  # type: ignore[arg-type]
+        RISK,
+        JsonlDecisionLog(tmp_path / "log"),
+        clock=lambda: now,
+        live_dir=tmp_path / "live",
+        events=EventRules(enabled=False),
+    )
+    await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    text = (tmp_path / "live" / "_MARKET.json").read_text(encoding="utf-8")
+    assert ("模型实际收到的池子概况和候选表" in text) is (table != "legacy table")
 
 
 def test_example_toml_meeting_section_parses_with_every_key_uncommented() -> None:

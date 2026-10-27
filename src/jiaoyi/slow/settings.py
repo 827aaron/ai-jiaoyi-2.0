@@ -330,9 +330,14 @@ class MeetingConfig(_Strict):
     )
     stale_on_arrival: bool = Field(
         default=False,
-        description="开 = 转作战指令后用现价核对：做多现价已跌到失效价或以下、或进场区间整段在"
-        "现价上方；做空现价已涨到失效价或以上、或进场区间整段在现价下方 → 改成观望"
-        "（stale_on_arrival），记日志。",
+        description="开 = 转作战指令后用现价核对：做多现价已跌到失效价或以下，做空现价已涨到"
+        "失效价或以上；或开会后价格穿过了整个进场区间（开会时还没越过）→ 按 "
+        "stale_on_arrival_action 处理，理由写 stale_on_arrival，记日志。",
+    )
+    stale_on_arrival_action: Literal["watch", "no_trade"] = Field(
+        default="watch",
+        description="stale_on_arrival 命中后：watch = 只盯不开（方向不动，清掉信号和进场区间，"
+        "持仓的反向信号和方向记分照旧）；no_trade = 改成观望。",
     )
     input_time_labels: Literal["legacy", "explicit"] = Field(
         default="legacy",
@@ -890,6 +895,7 @@ class SlowConfig(_Strict):
             snapshot_label=m.snapshot_label,
             live_price_line=m.live_price_line,
             stale_on_arrival=m.stale_on_arrival,
+            stale_on_arrival_action=m.stale_on_arrival_action,
             input_time_labels=m.input_time_labels,
             market_table_rolling=m.market_table_rolling,
         )
