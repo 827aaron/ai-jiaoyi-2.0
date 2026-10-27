@@ -110,6 +110,10 @@ class CardRow(BaseModel):
     source_regime: str | None = None
     source_market_view_id: str | None = None
     """「来自 hh:mm 的会 · hh:mm 到期」；持仓币到期后写「已到期，持仓中，不再开新仓」。"""
+    market_dir: str | None = None
+    rel_dir: str | None = None
+    board_market_dir: str | None = None
+    """只记录的判断（CardOutlook）：会议看未来 4 小时大盘 / 相对大盘，及总盘会方向；旧卡没有。"""
     fading: bool = False
     """离到期不到 10 分钟（或已到期的持仓币）：显示成灰色。"""
 
@@ -814,6 +818,9 @@ def _card(
                 reason=cs.reason,
                 source_regime=cs.source_regime,
                 source_market_view_id=cs.source_market_view_id,
+                market_dir=cs.outlook.market_dir if cs.outlook else None,
+                rel_dir=cs.outlook.rel_dir if cs.outlook else None,
+                board_market_dir=cs.outlook.board_market_dir if cs.outlook else None,
                 size_tier_max=cs.size_tier_max.value,
                 stop_atr=(cs.stop_atr.min, cs.stop_atr.max),
                 take_profit_r=(cs.take_profit_r.min, cs.take_profit_r.max),

@@ -472,3 +472,14 @@ def pick_prompt(
     ):
         text = text.replace(key, value, 1) if key != "{now}" else text.replace(key, value)
     return text
+
+
+# ---------------------------------------------------------------- 转卡：只记录的两个判断
+# 写在转卡规则最后、字段排在 reason 之后：先定方向和其余字段，再写这两项；措辞对称，不带多空倾向
+OUTLOOK_NOTE = (
+    "Four more fields are for the record only and change nothing above, so settle bias and "
+    "every other field from the conclusion first. Both look at the next 4 hours. market_dir: "
+    "where the equal-weight average of the coins in the pool moves: up, down or flat. rel_dir: "
+    "this coin against that average: outperform, underperform or inline. market_dir_evidence "
+    "and rel_dir_evidence: one brief sentence each in Chinese, quoting the numbers behind it."
+)

@@ -72,6 +72,47 @@ class Range(Contract):
         return self.min <= value <= self.max
 
 
+MarketDir = Literal["up", "down", "flat"]
+RelDir = Literal["outperform", "underperform", "inline"]
+Rating = Literal["buy", "overweight", "hold", "underweight", "sell"]
+
+
+class CardOutlook(Contract):
+    """单币会议在方向之外的结构化判断。**只记录**，给复盘分开打分用，不参与任何交易决定。
+
+    卡的方向混着两个判断：整个市场往哪走、这个币比市场强还是弱。这里把两者分开记，再带上会议里
+    已有的研究经理 / 组合经理评级、观望卡的倾向，和研究启动时总盘会的方向（同一套 up/down/flat）。
+    哪一项拿不到就记 None，原因写进 ``missing``（字段名 → 原因）；旧卡没有这一块。
+    """
+
+    market_dir: MarketDir | None = Field(
+        default=None, description="会议判断的未来 4 小时等权大盘方向。"
+    )
+    market_dir_evidence: str | None = Field(default=None, description="依据，一句带数字。")
+    rel_dir: RelDir | None = Field(
+        default=None, description="会议判断的未来 4 小时这个币相对等权大盘：跑赢 / 跑输 / 同步。"
+    )
+    rel_dir_evidence: str | None = Field(default=None, description="依据，一句带数字。")
+    rm_rating: Rating | None = Field(default=None, description="研究经理的建议。")
+    pm_rating: Rating | None = Field(default=None, description="组合经理的评级。")
+    trader_action: Literal["buy", "hold", "sell"] | None = Field(
+        default=None, description="交易员的建议。"
+    )
+    no_trade_lean: Literal["long", "short"] | None = Field(
+        default=None,
+        description="观望卡里会议已经表达的倾向（三人里非观望的评级，方向一致才记）；"
+        "方向卡、没有倾向或互相矛盾为 None。",
+    )
+    board_market_dir: MarketDir | None = Field(
+        default=None, description="研究启动时总盘会的方向：看涨 = up，看跌 = down，中性 = flat。"
+    )
+    board_regime_direction: Literal["看涨", "看跌", "中性"] | None = None
+    board_market_view_id: str | None = None
+    missing: dict[str, str] = Field(
+        default_factory=dict, description="为 None 的字段 → 原因（omitted / invalid: … 等）。"
+    )
+
+
 class CardSymbol(Contract):
     """作战卡里单个标的的作战指令。只能来自候选池（symbol pool）。"""
 
@@ -112,10 +153,14 @@ class CardSymbol(Contract):
     source_regime: str | None = Field(
         default=None, description="研究启动时的市场判断；旧卡回退整卡判断。"
     )
+    outlook: CardOutlook | None = Field(
+        default=None, description="只记录的结构化判断（见 CardOutlook）；旧卡没有。"
+    )
 
     def research_token(self) -> str:
-        """仅按本币研究内容签名，无关币换卡或市场版本刷新不使它失效。"""
-        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()[:24]
+        """仅按本币研究内容签名，无关币换卡或市场版本刷新不使它失效。
+        ``outlook`` 只是记录，不进签名（加这个字段前后同一条指令的签名不变）。"""
+        return hashlib.sha256(self.model_dump_json(exclude={"outlook"}).encode()).hexdigest()[:24]
 
 
 class MarketReviewEvidence(Contract):

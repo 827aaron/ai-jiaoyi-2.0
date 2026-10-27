@@ -130,13 +130,13 @@ from jiaoyi.risk.guard import LotRulesProvider, RiskGuardImpl
 from jiaoyi.sentinel.rules import RuleTrigger
 from jiaoyi.slow.binance_stats import BinanceStatsSource
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.card_outlook import OutlookJournal
 from jiaoyi.slow.commander import BattleCardCommander, StopScale
 from jiaoyi.slow.credits import CreditMonitor
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.majors import MajorsSource
 from jiaoyi.slow.market_log import MarketLog
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
-from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
 from jiaoyi.slow.settings import SlowConfig, missing_slow_stack, slow_defaults
 from jiaoyi.slow.stub import StubBattleCardProvider, StubSymbolScreener
@@ -329,7 +329,7 @@ def _build_cards(
         clock=clock,
         brief=brief,
         # 每次真开会的标的追加到 data/card_review/cards.jsonl，供复盘脚本打分（只读，不调参）
-        journal=CardJournal(app_cfg.data_dir),
+        journal=OutlookJournal(app_cfg.data_dir),
         stop_scale=stop,
         us_hours=(fast.us_open_delay_min, fast.us_close_lead_min) if fast.us_hours_gate else None,
         # 当天已花的钱落盘（按曼谷日），重启不会把日上限清零

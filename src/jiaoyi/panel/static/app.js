@@ -686,6 +686,15 @@ function cardRow(s, now) {
   return `<details class="bc ${s.fading && !p ? "fade" : ""}" data-sym="${esc(sym)}">${sum}<div class="bc-body">${cardBody(s, L)}</div></details>`;
 }
 
+// 只记录的判断（CardOutlook）：大盘 / 相对大盘分开记，给复盘打分，不影响卡；旧卡没有就不显示
+const OUT_M = { up: "涨", down: "跌", flat: "平" }, OUT_R = { outperform: "跑赢", underperform: "跑输", inline: "同步" };
+function outlookLine(s) {
+  if (!s.market_dir && !s.rel_dir) return "";
+  const m = s.market_dir ? OUT_M[s.market_dir] : "没写", r = s.rel_dir ? OUT_R[s.rel_dir] : "没写";
+  const b = s.board_market_dir ? `（总盘会：${OUT_M[s.board_market_dir]}）` : "";
+  return `<div class="dim small" title="只记录，不影响卡">会议看未来 4 小时：大盘${m}${b}，这个币相对大盘${r}</div>`;
+}
+
 function cardBody(s, L) {
   const sym = s.symbol, p = L && L.held;
   if (s.pending_label) return `<div class="txt">${esc(s.pending || s.pending_label)}</div><div class="small"><a ${clickable("meeting", sym)}>开会过程 ›</a></div>`;
@@ -711,7 +720,7 @@ function cardBody(s, L) {
       ${levelsLine(s)}
       <dl class="bc-kv small"><dt>军师建议止损</dt><dd>${range(s.stop_atr, "", 1)} 倍 ATR（拍板人选窄 / 中 / 宽）</dd><dt>军师建议止盈</dt><dd>${range(s.take_profit_r, "", 1)} 倍止损距离（风控员用下限）</dd><dt>军师建议杠杆</dt><dd>${range(s.leverage, "", 0)} 倍（只是建议，实际用设置里的杠杆）</dd><dt>军师建议仓位</dt><dd>${range(s.notional_usdt, "", 0)} U（只是建议，实际由风控员按风险算）</dd></dl>
     </div></details>`;
-  return `<div class="plan">${plan}</div>${from}${calc}${lad}<div class="bc-foot">${raw}<a class="small" ${clickable("meeting", sym)}>开会过程 ›</a></div>`;
+  return `<div class="plan">${plan}</div>${from}${outlookLine(s)}${calc}${lad}<div class="bc-foot">${raw}<a class="small" ${clickable("meeting", sym)}>开会过程 ›</a></div>`;
 }
 
 // 军师给的关键位：按在现价下方 / 上方分支撑 / 压力，各自由近到远
