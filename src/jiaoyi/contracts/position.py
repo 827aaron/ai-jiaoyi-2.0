@@ -49,6 +49,8 @@ class CloseReason(StrEnum):
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
     TRAILING_STOP = "trailing_stop"
+    TIGHTENED_STOP = "tightened_stop"
+    """反向作战卡没经价格确认时收紧的托管止损触发（#314）。"""
     TIME_LIMIT = "time_limit"
     KEEPER = "keeper"
     PATROL = "patrol"
