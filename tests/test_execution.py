@@ -839,7 +839,8 @@ async def test_direct_close_retries_lifeboat_cancel_then_alerts(rig: Rig) -> Non
 
 async def test_vanished_executor_with_exchange_position_is_flattened_directly(rig: Rig) -> None:
     pid = await open_filled(rig)
-    rig.api.executors.clear()  # hummingbot 重启丢了执行器
+    rig.api.auto_terminate_on_stop = False
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)  # 启动清理已确认终止
     rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
     first = await rig.rec.reconcile(rig.t)
     assert rig.ex.market_closed == []  # 第 1 轮只告警

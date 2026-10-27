@@ -8,9 +8,29 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import httpx
+
+_NOT_FOUND = object()
+
+
+def executor_query_state(
+    detail: dict[str, Any] | None, executor_id: str
+) -> Literal["active", "terminal", "unknown"]:
+    """逐项查询的证据，不把列表缺席、404 或矛盾字段当作已终止。
+
+    active 只是接口报告的状态（上游可能读数据库），不保证执行器实时健康。
+    """
+    if not isinstance(detail, dict) or detail.get("executor_id") != executor_id:
+        return "unknown"
+    status = detail.get("status")
+    active = detail.get("is_active")
+    if status == "TERMINATED" and active is False:
+        return "terminal"
+    if status in ("NOT_STARTED", "RUNNING", "SHUTTING_DOWN") and active is True:
+        return "active"
+    return "unknown"
 
 
 class HbApiError(Exception):
@@ -42,7 +62,7 @@ class HummingbotApi(Protocol):
         ...
 
     async def get_executor(self, executor_id: str) -> dict[str, Any] | None:
-        """找不到返回 None。"""
+        """404 返回 None；仅代表查询未找到，不能证明运行中的执行器确实消失。"""
         ...
 
     async def stop_executor(self, executor_id: str, *, keep_position: bool) -> None: ...
@@ -75,7 +95,9 @@ class HttpHummingbotApi:
             transport=transport,
         )
 
-    async def _call(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _call(
+        self, method: str, path: str, *, not_found_value: Any = None, **kwargs: Any
+    ) -> Any:
         try:
             resp = await self._http.request(method, path, **kwargs)
         except httpx.HTTPError as e:
@@ -83,7 +105,7 @@ class HttpHummingbotApi:
                 f"hummingbot-api 不可达（{method} {path}）：{e!r}", transient=True
             ) from e
         if resp.status_code == 404:
-            return None
+            return not_found_value
         if resp.status_code >= 400:
             raise HbApiError(
                 f"hummingbot-api {method} {path} 返回 {resp.status_code}：{resp.text[:300]}"
@@ -110,8 +132,13 @@ class HttpHummingbotApi:
         return out
 
     async def get_executor(self, executor_id: str) -> dict[str, Any] | None:
-        out = await self._call("GET", f"/executors/{executor_id}")
-        return out if isinstance(out, dict) else None
+        out = await self._call("GET", f"/executors/{executor_id}", not_found_value=_NOT_FOUND)
+        if out is _NOT_FOUND:
+            return None
+        if not isinstance(out, dict) or executor_query_state(out, executor_id) == "unknown":
+            # 不输出响应正文：状态校验不需要账户、订单或其它私有字段。
+            raise HbApiError("hummingbot-api 执行器详情缺失、标识不匹配或状态不一致")
+        return out
 
     async def stop_executor(self, executor_id: str, *, keep_position: bool) -> None:
         out = await self._call(
@@ -126,7 +153,7 @@ class HttpHummingbotApi:
             "/executors/search",
             json={"account_names": [account_name], "controller_ids": [controller_id], "limit": 50},
         )
-        return [d for d in (out or {}).get("data", []) if isinstance(d, dict)]
+        return self._executor_page(out)
 
     async def running_executors(self, account_name: str) -> list[dict[str, Any]]:
         out = await self._call(
@@ -134,8 +161,34 @@ class HttpHummingbotApi:
             "/executors/search",
             json={"account_names": [account_name], "status": "RUNNING", "limit": 200},
         )
-        data = (out or {}).get("data", [])
-        return [d for d in data if isinstance(d, dict)]
+        return self._executor_page(out)
+
+    @staticmethod
+    def _executor_page(out: Any) -> list[dict[str, Any]]:
+        """查询失败、错误结构和未读完的分页都不是「没有执行器」。
+
+        兼容未提供分页字段的旧成功响应；列表缺席仍需逐项终态证据，不能据此平仓。
+        """
+        if not isinstance(out, dict) or not isinstance(out.get("data"), list):
+            raise HbApiError("hummingbot-api 执行器列表缺失或格式错误")
+        data = out["data"]
+        for item in data:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("executor_id"), str)
+                or not item["executor_id"].strip()
+            ):
+                raise HbApiError("hummingbot-api 执行器列表含无效条目")
+        if "pagination" in out:
+            page = out["pagination"]
+            if not isinstance(page, dict) or not isinstance(page.get("has_more"), bool):
+                raise HbApiError("hummingbot-api 执行器列表分页信息不明确")
+            if page["has_more"] or page.get("next_cursor") is not None:
+                raise HbApiError("hummingbot-api 执行器列表分页未读完，不能判定执行器缺席")
+            total = page.get("total_count")
+            if total is not None and (type(total) is not int or total != len(data)):
+                raise HbApiError("hummingbot-api 执行器列表总数与返回条目不一致")
+        return list(data)
 
     async def portfolio_state(self, account_name: str, connector_name: str) -> list[dict[str, Any]]:
         out = await self._call(

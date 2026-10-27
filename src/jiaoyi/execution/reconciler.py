@@ -21,6 +21,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, Literal
 
 from jiaoyi.contracts import Alert, Outcome, ReconcileReport, Role, Side
@@ -41,7 +42,7 @@ from jiaoyi.execution.exchange import (
     ExchangePosition,
     ExchangeStop,
 )
-from jiaoyi.execution.hb_client import HbApiError, HummingbotApi
+from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
 from jiaoyi.execution.lifeboat import lifeboat_cids, lifeboat_price
 from jiaoyi.execution.registry import PositionRegistry
@@ -185,6 +186,8 @@ class ThreeWayReconciler:
             exchange_positions = await self._retry(self._exchange.positions)
             stops = await self._retry(self._exchange.open_stops)
         except (HbApiError, ExchangeError) as e:
+            # 本轮没有完整核验，不可把上次终态与下次终态拼成「连续两轮」。
+            self._gone_rounds.clear()
             await self._unreachable(now, e)
             raise ReconcileError(str(e)) from e
         self._unreachable_rounds = 0
@@ -315,6 +318,7 @@ class ThreeWayReconciler:
                 or t.record.position_id in settling
                 or t.record.symbol in reversed_
             ):
+                self._gone_rounds.pop(t.record.position_id, None)
                 continue
             if t.record.executor_id and t.record.executor_id not in running_ids:
                 rec = t.record
@@ -323,9 +327,46 @@ class ThreeWayReconciler:
                     and rec.symbol not in flattened
                     and exchange_qty.get(rec.symbol, 0.0) > 0
                 ):
-                    # 执行器没了（hummingbot 重启 / 丢状态），止盈止损和时间限制都没人管，
-                    # 币安上却还有仓。第 1 轮：本轮第 1 步已补挂保命止损兜底，只告警；
-                    # 连续 2 轮仍没有执行器：直连只减仓平掉（避免一次读取抖动就平仓）。
+                    # RUNNING 搜索有状态过滤和分页；列表缺席不是终止证据。
+                    # 只对缺席且仍持仓的执行器补一次逐项查询，不缓存跨轮状态。
+                    executor_id = t.record.executor_id
+                    unknown = "逐项查询未找到（上游 404/未命中不能证明执行器消失）"
+                    try:
+                        detail = await self._retry(partial(self._api.get_executor, executor_id))
+                    except HbApiError:
+                        detail = None
+                        unknown = "逐项查询失败或响应无效，状态无法确认"
+                    state = executor_query_state(detail, executor_id)
+                    if state != "terminal":
+                        self._gone_rounds.pop(rec.position_id, None)
+                        if detail is not None and state == "unknown":
+                            unknown = "逐项查询的标识或状态字段不一致，状态无法确认"
+                        evidence = (
+                            "逐项查询仍报告 active（不代表实时管理健康）"
+                            if state == "active"
+                            else f"{unknown}（unknown）"
+                        )
+                        issues.append(
+                            ReconcileIssue(
+                                kind=ReconcileIssueKind.EXECUTOR_FAILED,
+                                symbol=rec.symbol,
+                                position_id=rec.position_id,
+                                detail=f"运行列表未返回执行器，但{evidence}；"
+                                "已清零终止计数，不按执行器消失平仓，继续原保命止损处理",
+                                fixed=False,
+                            )
+                        )
+                        continue
+                    # 查询期间其它路径可能已经平仓或更换执行器，不能继续沿用旧持仓。
+                    current = self._registry.get(rec.position_id)
+                    if (
+                        current is None
+                        or current.record.status is not PositionStatus.OPEN
+                        or current.record.executor_id != executor_id
+                    ):
+                        self._gone_rounds.pop(rec.position_id, None)
+                        continue
+                    # 明确 TERMINATED/is_active=false 且币安仍有仓，保留原两轮失管保护。
                     rounds = self._gone_rounds.get(rec.position_id, 0) + 1
                     self._gone_rounds[rec.position_id] = rounds
                     if rounds < _GONE_ROUNDS_BEFORE_FLATTEN:
@@ -334,15 +375,17 @@ class ThreeWayReconciler:
                                 kind=ReconcileIssueKind.EXECUTOR_FAILED,
                                 symbol=rec.symbol,
                                 position_id=rec.position_id,
-                                detail="hummingbot 里执行器已消失但币安仍有仓；保命止损在位，"
-                                "下一轮仍然没有就直连平仓",
+                                detail="hummingbot 里执行器已消失但币安仍有仓；"
+                                "逐项确认 TERMINATED/is_active=false（第 1/2 轮），"
+                                "保命止损在位，下一轮仍明确终止就按原保护平仓",
                                 fixed=False,
                             )
                         )
                         continue
                     issue, was_flattened = await self._flatten(
                         rec.position_id,
-                        "hummingbot 里执行器已消失但币安仍有仓",
+                        "hummingbot 里执行器已消失但币安仍有仓；"
+                        "连续 2 轮逐项确认 TERMINATED/is_active=false",
                         kind=ReconcileIssueKind.EXECUTOR_FAILED,
                     )
                     issues.append(issue)
@@ -350,12 +393,14 @@ class ThreeWayReconciler:
                         self._gone_rounds.pop(rec.position_id, None)
                         flattened.add(rec.symbol)
                         continue
+                else:
+                    self._gone_rounds.pop(rec.position_id, None)
                 issues.append(
                     ReconcileIssue(
                         kind=ReconcileIssueKind.EXECUTOR_FAILED,
                         symbol=t.record.symbol,
                         position_id=t.record.position_id,
-                        detail="账本里还在持仓，但 hummingbot 里执行器已不在运行",
+                        detail="账本里还在持仓，但运行列表未返回执行器；列表缺席不等于已终止",
                         fixed=False,
                     )
                 )
