@@ -1776,6 +1776,9 @@ class Runner:
         desk = getattr(self.app, "desk", None)
         if desk is None:
             return
+        check_owner = getattr(desk, "check_owner", None)
+        if callable(check_owner):
+            check_owner(self.app.clock())  # 不可用就按边沿切回 Flash（记录、提醒一次）
         while (notice := desk.take_notice()) is not None:
             await self.app._alert(AlertLevel.WARN, "大盘台", notice, "system")
         pool = self.app.pool

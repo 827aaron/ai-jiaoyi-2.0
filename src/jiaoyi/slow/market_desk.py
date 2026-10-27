@@ -532,6 +532,8 @@ class DeskState:
     mirror_flag: bool = False
     stopped: str | None = None
     stopped_day: str = ""
+    owner: Literal["desk", "flash"] = "flash"
+    owner_since: datetime | None = None
     last_error: str | None = None
     fails: int = 0
 
@@ -556,6 +558,8 @@ class DeskState:
             "stopped_day": self.stopped_day,
             "last_error": self.last_error,
             "fails": self.fails,
+            "owner": self.owner,
+            "owner_since": _iso(self.owner_since),
         }
 
     @classmethod
@@ -587,6 +591,8 @@ class DeskState:
             stopped_day=str(raw.get("stopped_day", "")),
             last_error=raw.get("last_error"),
             fails=int(raw.get("fails", 0)),
+            owner="desk" if raw.get("owner") == "desk" else "flash",
+            owner_since=_parse_at(raw.get("owner_since")),
         )
 
 
@@ -657,13 +663,63 @@ class MarketDesk:
         return timedelta(0) <= now - done <= timedelta(minutes=self.cfg.max_age_min)
 
     def owns_market(self, now: datetime) -> bool:
-        """此刻大盘方向归大盘台管（总盘会的大盘判断只记录、不发布、不设翻转参照）。"""
+        """此刻大盘方向归大盘台管（总盘会的大盘判断只记录、不发布、不设翻转参照）。
+
+        归属是有状态的、按边沿切换（``check_owner``）：大盘台出一轮合格结果就切到大盘台；
+        ``fallback = "flash"`` 时结果超过 ``max_age_min`` 才切回 Flash。切换各记一次。大盘台
+        恢复后哪怕接管发布被更晚的发布取代，Flash 也不会在下一轮接着发（不来回抢）。"""
         if self.cfg.mode != "replace":
             return False
-        view = self._pub.latest_market_view
-        if view is None or view.source != DESK_SOURCE:
-            return False
-        return self.cfg.fallback == "hold" or self.available(now)
+        self.check_owner(now)
+        return self.state.owner == "desk"
+
+    def check_owner(self, now: datetime) -> None:
+        """大盘台不可用了就切回 Flash（只在 fallback = flash 时；边沿触发，记录并提醒一次）。"""
+        st = self.state
+        if (
+            self.cfg.mode != "replace"
+            or st.owner != "desk"
+            or self.cfg.fallback != "flash"
+            or self.available(now)
+        ):
+            return
+        latest = st.latest
+        why = (
+            f"大盘台最新结果 {latest['completed_at']} 已超过 {self.cfg.max_age_min:g} 分钟"
+            if latest is not None
+            else "大盘台没有结果"
+        ) + (f"（{st.stopped}）" if st.stopped else "")
+        self._set_owner(now, "flash", why)
+
+    def _set_owner(self, now: datetime, owner: Literal["desk", "flash"], why: str) -> None:
+        st = self.state
+        if st.owner == owner:
+            return
+        before, st.owner, st.owner_since = st.owner, owner, now
+        text = (
+            f"大盘方向改由 Flash（总盘会）发布：{why}"
+            if owner == "flash"
+            else f"大盘台接管大盘方向：{why}"
+        )
+        self._notices.append(text)
+        self._record(
+            Outcome.INFO,
+            text,
+            {"owner_change": {"from": before, "to": owner, "reason": why}},
+            0.0,
+            0.0,
+        )
+        self._append_log(
+            now,
+            {
+                "event": "owner_change",
+                "at": now.isoformat(),
+                "from": before,
+                "to": owner,
+                "reason": why,
+            },
+        )
+        self._save()
 
     def request_run(self, reason: str = "regime_flip") -> None:
         """翻转确认 / 急动后要求立即加跑一轮（不占定时的格子；离上一轮开跑不到
@@ -865,6 +921,8 @@ class MarketDesk:
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
+            if self.cfg.mode == "replace":
+                self._set_owner(completed, "desk", f"第 {cycle_id} 轮结果合格")
             published = self._maybe_publish(
                 now, completed, direction, regime, reason, pool, generation, desk_id, avg
             )
@@ -960,6 +1018,7 @@ class MarketDesk:
         if self.cfg.mode != "replace":
             return None
         view = self._pub.latest_market_view
+        # 当前观点不是大盘台发的（第一次接管、Flash 回退期间发过、或上次接管被取代）：立即发布
         takeover = view is None or view.source != DESK_SOURCE
         st = self.state
         if not takeover and view is not None and direction == view.regime_direction:
@@ -1102,6 +1161,7 @@ class MarketDesk:
             "mode": self.cfg.mode,
             "available": self.available(now),
             "owns_market": self.owns_market(now),
+            "owner": self.state.owner,
             "latest": self.state.latest,
             "stopped": self.state.stopped,
             "last_error": self.state.last_error,

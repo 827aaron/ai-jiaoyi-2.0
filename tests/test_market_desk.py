@@ -50,7 +50,14 @@ from jiaoyi.slow.market_desk import (
     render_prompt,
     swap_words,
 )
-from jiaoyi.slow.market_dossier import Dossier, DossierBuilder, DossierField
+from jiaoyi.slow.market_dossier import (
+    BARS_15M,
+    DEEP_PER_RUN,
+    SHALLOW_BARS,
+    Dossier,
+    DossierBuilder,
+    DossierField,
+)
 from jiaoyi.slow.settings import MarketDeskSection, load_slow_config, market_desk_conflict
 from tests.test_loop import _app
 from tests.test_market_refresh_independent import OfflineResearch, research
@@ -182,6 +189,13 @@ def make_desk(
         balance=lambda: bal[0],
         banned=lambda: 0.0,
     )
+
+
+def notices(desk: MarketDesk) -> list[str]:
+    out = []
+    while (n := desk.take_notice()) is not None:
+        out.append(n)
+    return out
 
 
 def desk_records(log_dir: Path) -> list[dict[str, Any]]:
@@ -355,7 +369,7 @@ async def test_mirror_test_detects_biased_model(tmp_path: Path) -> None:
         clock[0] = T0 + timedelta(minutes=15 * k)
         await fair.run(pool(clock[0], entry("AAUSDT")), "scheduled")
     assert fair.state.mirror_gaps and all(g["gap"] < 1e-9 for g in fair.state.mirror_gaps)
-    assert not fair.state.mirror_flag and fair.take_notice() is None
+    assert not fair.state.mirror_flag and not any("偏置" in n for n in notices(fair))
 
     biased = make_desk(
         tmp_path / "biased", FakePublisher(), FakeModel(answer(0.2, 0.3, 0.5)), clock,
@@ -365,8 +379,7 @@ async def test_mirror_test_detects_biased_model(tmp_path: Path) -> None:
         clock[0] = T0 + timedelta(minutes=15 * k)
         await biased.run(pool(clock[0], entry("AAUSDT")), "scheduled")
     assert biased.state.mirror_flag
-    note = biased.take_notice()
-    assert note is not None and "偏置" in note
+    assert any("偏置" in n for n in notices(biased))
     rows = log_rows(tmp_path / "biased")
     assert rows[-1]["mirror"]["gap_up_vs_mirror_down"] == pytest.approx(0.3)
 
@@ -520,7 +533,7 @@ async def test_cost_records_daily_limit_and_balance_floor(tmp_path: Path) -> Non
     skipped = await desk.run(pool(clock[0], entry("AAUSDT")), "scheduled")
     assert skipped.status == "skipped" and "日上限" in skipped.reason
     assert len(model.prompts) == 10
-    assert "日上限" in (desk.take_notice() or "")
+    assert any("日上限" in n for n in notices(desk))
     clock[0] += timedelta(days=1)  # 曼谷换日清零
     assert (await desk.run(pool(clock[0], entry("AAUSDT")), "scheduled")).status == "ok"
     desk.state.cost_today_usd = 0.0  # 只看余额低线
@@ -855,6 +868,46 @@ async def test_hold_fallback_keeps_desk_view(tmp_path: Path) -> None:
     assert commander.latest_market_view is view
 
 
+async def test_owner_switch_is_edge_triggered_logged_and_no_ping_pong(tmp_path: Path) -> None:
+    commander, _engine, clock, candidates, _log = await commander_with_flash(tmp_path / "r", T0)
+    log = JsonlDecisionLog(tmp_path / "desk_log")
+    desk = make_desk(tmp_path, commander, FakeModel(answer(0.6, 0.25, 0.15)), clock, log=log)
+    await desk.run(candidates, "scheduled")
+    assert desk.state.owner == "desk" and any("接管" in n for n in notices(desk))
+    clock[0] += timedelta(minutes=80)
+    for _ in range(5):  # 反复查只切一次、只记一次
+        assert not desk.owns_market(clock[0])
+        desk.check_owner(clock[0])
+    changes = [
+        r["output"]["market_desk"]["owner_change"]
+        for r in desk_records(tmp_path / "desk_log")
+        if "owner_change" in r["output"]["market_desk"]
+    ]
+    assert [c["to"] for c in changes] == ["desk", "flash"]
+    assert [n for n in notices(desk) if "Flash" in n] and notices(desk) == []
+    assert [r["to"] for r in log_rows(tmp_path) if r.get("event") == "owner_change"] == [
+        "desk",
+        "flash",
+    ]
+    await commander.refresh(candidates, "manual")  # 回退期间 Flash 发布
+    flash = commander.latest_market_view
+    assert flash is not None and flash.source == "scheduled_market"
+    # 大盘台恢复，但接管发布恰好被更晚的发布取代：归属仍切回大盘台，Flash 不能紧接着再发
+    original = commander.publish_desk_view
+    commander.publish_desk_view = lambda **kw: None  # type: ignore[method-assign]
+    clock[0] += timedelta(minutes=15)
+    resumed = await desk.run(candidates, "scheduled")
+    assert resumed.status == "ok" and resumed.published is None
+    assert desk.owns_market(clock[0])
+    clock[0] += timedelta(minutes=5)
+    await commander.refresh(candidates, "manual")
+    assert commander.latest_market_view is flash  # 没有再发一版 Flash（不来回抢）
+    commander.publish_desk_view = original  # type: ignore[method-assign]
+    clock[0] += timedelta(minutes=10)
+    took = await desk.run(candidates, "scheduled")
+    assert took.published is not None and took.published.source == DESK_SOURCE
+
+
 async def test_state_persists_across_restart(tmp_path: Path) -> None:
     commander, engine, clock, candidates, log = await commander_with_flash(tmp_path / "r", T0)
     desk = make_desk(tmp_path, commander, FakeModel(answer(0.6, 0.25, 0.15)), clock)
@@ -982,6 +1035,8 @@ class FakeBinance:
     def __init__(self, fail: set[str] | None = None) -> None:
         self.fail = fail or set()
         self.calls: list[tuple[str, Any]] = []
+        self.limits: list[tuple[str, int]] = []
+        self.now_ms = int(T0.timestamp() * 1000)
 
     def get(self, url: str, params: Any = None) -> Any:
         self.calls.append((url, params))
@@ -991,14 +1046,17 @@ class FakeBinance:
         now_ms = int(T0.timestamp() * 1000)
         if path == "klines":
             sym, limit = params["symbol"], params["limit"]
+            self.limits.append((params["interval"], limit))
+            step = {"1h": 3_600_000, "15m": 900_000}[params["interval"]]
             k = sum(map(ord, sym)) % 7
-            last = now_ms // 3_600_000 * 3_600_000 - 3_600_000
+            last = self.now_ms // step * step - step
             rows = []
             for i in range(limit):
-                o = last - (limit - 1 - i) * 3_600_000
-                px = 100 * (1 + 0.004 * ((i * (k + 3)) % 11 - 5) / 5)
+                o = last - (limit - 1 - i) * step
+                j = o // step  # 价只跟开盘时间有关：不同 limit 拉到的同一根线一致
+                px = 100 * (1 + 0.004 * ((j * (k + 3)) % 11 - 5) / 5)
                 rows.append(
-                    [o, px, px * 1.01, px * 0.99, px, 1, o + 3_599_999, 1e6, 1, 4.8e5 + k * 1e3, 0]
+                    [o, px, px * 1.01, px * 0.99, px, 1, o + step - 1, 1e6, 1, 4.8e5 + k * 1e3, 0]
                 )
             return Resp(rows)
         if path == "premiumIndex":
@@ -1084,10 +1142,32 @@ def test_dossier_builder_fields_sources_and_base_rates() -> None:
     assert "fear" not in json.dumps(d.to_json()).lower().replace("fear_greed_index", "")
     # 同一份数据，哈希稳定；第二轮只补新 K 线（limit 很小）
     assert d.sha256() == d.sha256()
-    fake.calls.clear()
+    assert {"pool_ret_15m_pct", "pool_up_count_15m", "btc_ret_15m_pct"} <= names
+    assert {"pool_taker_buy_share_15m", "pool_ret_60m_pct"} <= names
+    # 第二轮只补新收盘的线（1h 和 15m 都是小 limit），剩下没补全的长历史每轮最多 8 个
+    fake.limits.clear()
+    fake.now_ms += 15 * 60_000
     b.build(p, T0 + timedelta(minutes=15))
-    limits = [c[1]["limit"] for c in fake.calls if c[0].endswith("klines")]
-    assert limits and max(limits) <= 3
+    small = [n for _, n in fake.limits if n <= 4]
+    big = [n for _, n in fake.limits if n > BARS_15M]
+    assert small and len(big) <= DEEP_PER_RUN
+
+
+def test_first_run_backfill_is_spread_over_cycles() -> None:
+    syms = [f"D{i}USDT" for i in range(30)]
+    fake = FakeBinance()
+    b = DossierBuilder(get=fake.get, fng_get=fake.fng)
+    p = pool(T0, *(entry(s) for s in syms))
+    d = b.build(p, T0)
+    deep = [n for iv, n in fake.limits if iv == "1h" and n > SHALLOW_BARS]
+    assert len(deep) <= DEEP_PER_RUN  # 启动时大请求最多 8 个
+    assert all(n <= SHALLOW_BARS for iv, n in fake.limits if iv == "1h") or deep
+    assert all(n <= BARS_15M for iv, n in fake.limits if iv == "15m")
+    assert "回填中" in d.missing["base_rate_4h"] and d.value("sigma_4h_pct") is not None
+    for k in range(1, 6):
+        fake.now_ms += 15 * 60_000
+        d = b.build(p, T0 + timedelta(minutes=15 * k))
+    assert d.value("base_rate_up_4h") is not None and "base_rate_4h" not in d.missing
 
 
 def test_dossier_skips_optional_sources_with_reason() -> None:

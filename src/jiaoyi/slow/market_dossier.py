@@ -43,6 +43,16 @@ POOL_METRICS_MAX_AGE = timedelta(minutes=90)
 FUNDING_INFO_TTL = timedelta(hours=24)
 FNG_TTL = timedelta(hours=1)
 MAX_BARS = 1000
+Q_MS = 900_000
+BARS_15M = 16
+"""15 分钟线留最近 16 根（4 小时）；首次 limit 16、之后只补新收盘的，权重都是 1。"""
+SHALLOW_BARS = 200
+"""1h 线首次只拉 200 根（权重 2），够算 σ（168 个窗口）和各段收益。"""
+DEEP_PER_RUN = 8
+"""每轮最多给几个币补全 30 天以上的 1h 历史（limit≈900，权重 5）：启动时分几轮补完，
+不一口气打几十个大请求（防 418）。"""
+DEEP_MIN_SHARE = 0.8
+"""等权池里补全历史的币占到这个比例才给基础率（先验），之前写「回填中」。"""
 
 Mirror = Literal["neg", "comp100", "inv", "same", "pair"]
 Getter = Callable[..., Any]
@@ -162,19 +172,19 @@ def parse_bars(rows: Sequence[Sequence[Any]], now_ms: int) -> list[Bar]:
     return out
 
 
-def price_at(bars: Mapping[int, Bar], t_ms: int) -> float | None:
-    """时刻 t（整点）的价 = 开盘在 t − 1h 的那根已收盘线的收盘价；没有就是 None，不拿邻近的补。"""
-    b = bars.get(t_ms - HOUR_MS)
+def price_at(bars: Mapping[int, Bar], t_ms: int, step: int = HOUR_MS) -> float | None:
+    """时刻 t 的价 = 开盘在 t − step 的那根已收盘线的收盘价；没有就是 None，不拿邻近的补。"""
+    b = bars.get(t_ms - step)
     return b.close if b is not None and b.close > 0 else None
 
 
 def pool_return(
-    series: Mapping[str, Mapping[int, Bar]], start_ms: int, end_ms: int
+    series: Mapping[str, Mapping[int, Bar]], start_ms: int, end_ms: int, step: int = HOUR_MS
 ) -> tuple[float | None, list[float]]:
     """等权池在 [start, end] 的简单收益（%）= 两端都有价的币收益的平均；同时返回各币收益。"""
     rets: list[float] = []
     for bars in series.values():
-        a, b = price_at(bars, start_ms), price_at(bars, end_ms)
+        a, b = price_at(bars, start_ms, step), price_at(bars, end_ms, step)
         if a is not None and b is not None:
             rets.append((b / a - 1.0) * 100.0)
     return (statistics.fmean(rets) if rets else None), rets
@@ -272,6 +282,8 @@ class DossierBuilder:
         self._get: Getter = get or binance_gate.get
         self._fng_get: Getter = fng_get or _plain_get
         self._bars: dict[str, dict[int, Bar]] = {}
+        self._bars15: dict[str, dict[int, Bar]] = {}
+        self._deep: set[str] = set()
         self._funding_hours: dict[str, float] = {}
         self._funding_info_at: datetime | None = None
         self._fng: tuple[datetime, float, datetime] | None = None  # (取到时间, 值, 源时间)
@@ -297,6 +309,8 @@ class DossierBuilder:
             missing["klines_1h"] = f"等权池能用的币只有 {len(basket)} 个（要 ≥5）"
         else:
             sigma4 = self._kline_fields(basket, t0_ms, t0_bar, fields, missing)
+        self._refresh_15m([*syms, BTC], now, missing)
+        self._quarter_fields(syms, now, fields, missing)
         self._major_fields(t0_ms, t0_bar, fields, missing)
         self._pool_metric_fields(pool, syms, now, fields, missing)
         self._funding_fields(syms, now, t0_ms, fields, missing)
@@ -338,35 +352,165 @@ class DossierBuilder:
         )
 
     # ---------------------------------------------------------- K 线
+    def _fetch_into(
+        self,
+        store: dict[str, dict[int, Bar]],
+        sym: str,
+        interval: str,
+        limit: int,
+        now_ms: int,
+        keep: int,
+    ) -> int:
+        """拉一个币的 K 线并合进缓存，返回缓存里的根数。限流原样往外抛。"""
+        r = self._get(
+            f"{FAPI}/fapi/v1/klines", {"symbol": sym, "interval": interval, "limit": limit}
+        )
+        r.raise_for_status()
+        merged = dict(store.get(sym, {}))
+        for b in parse_bars(r.json(), now_ms):
+            merged[b.open_ms] = b
+        kept = sorted(merged)[-keep:]
+        store[sym] = {k: merged[k] for k in kept}
+        return len(kept)
+
     def _refresh_bars(self, symbols: Sequence[str], now: datetime, missing: dict[str, str]) -> None:
+        """1h 线：没缓存的先拉 ``SHALLOW_BARS`` 根（够 σ 和各段收益），有缓存的只补新收盘的；
+        再给最多 ``DEEP_PER_RUN`` 个还没补全的币拉满 30 天以上历史（基础率要），分几轮补完，
+        启动时不一口气打几十个大请求。"""
         now_ms = int(now.timestamp() * 1000)
         failed: list[str] = []
         for sym in dict.fromkeys(symbols):
             have = self._bars.get(sym, {})
-            last = max(have) if have else None
-            if last is not None:
-                want = (now_ms - last) // HOUR_MS + 2
+            if have:
+                want = (now_ms - max(have)) // HOUR_MS + 2
                 limit = int(min(max(want, 2), self.need_bars))
             else:
-                limit = self.need_bars
+                limit = min(SHALLOW_BARS, self.need_bars)
             try:
-                r = self._get(
-                    f"{FAPI}/fapi/v1/klines", {"symbol": sym, "interval": "1h", "limit": limit}
-                )
-                r.raise_for_status()
-                rows = r.json()
+                n = self._fetch_into(self._bars, sym, "1h", limit, now_ms, MAX_BARS)
             except binance_gate.RateLimited:
                 raise
             except Exception as exc:
                 failed.append(f"{sym}:{type(exc).__name__}")
                 continue
-            merged = dict(have)
-            for b in parse_bars(rows, now_ms):
-                merged[b.open_ms] = b
-            keep = sorted(merged)[-MAX_BARS:]
-            self._bars[sym] = {k: merged[k] for k in keep}
+            if n >= self.need_bars - 2:
+                self._deep.add(sym)
+        todo = [s for s in dict.fromkeys(symbols) if s in self._bars and s not in self._deep]
+        for sym in todo[:DEEP_PER_RUN]:
+            try:
+                self._fetch_into(self._bars, sym, "1h", self.need_bars, now_ms, MAX_BARS)
+            except binance_gate.RateLimited:
+                raise
+            except Exception as exc:
+                failed.append(f"{sym}:deep:{type(exc).__name__}")
+                continue
+            self._deep.add(sym)  # 新上线不满 30 天的币：拉过一次全量就算补全
         if failed:
             missing["klines_1h_partial"] = "部分币 K 线没取到：" + ", ".join(failed[:10])
+
+    def deep_basket(
+        self, basket: Mapping[str, Mapping[int, Bar]]
+    ) -> dict[str, Mapping[int, Bar]] | None:
+        """补全了长历史的那部分等权池；占比不到 ``DEEP_MIN_SHARE`` 返回 None（先验还在回填）。"""
+        deep = {s: b for s, b in basket.items() if s in self._deep}
+        return deep if basket and len(deep) >= DEEP_MIN_SHARE * len(basket) else None
+
+    def _refresh_15m(self, symbols: Sequence[str], now: datetime, missing: dict[str, str]) -> None:
+        now_ms = int(now.timestamp() * 1000)
+        failed: list[str] = []
+        for sym in dict.fromkeys(symbols):
+            have = self._bars15.get(sym, {})
+            want = (now_ms - max(have)) // Q_MS + 2 if have else BARS_15M
+            limit = int(min(max(want, 2), BARS_15M))
+            try:
+                self._fetch_into(self._bars15, sym, "15m", limit, now_ms, BARS_15M)
+            except binance_gate.RateLimited:
+                raise
+            except Exception as exc:
+                failed.append(f"{sym}:{type(exc).__name__}")
+        if failed:
+            missing["klines_15m_partial"] = "部分币 15 分钟线没取到：" + ", ".join(failed[:10])
+
+    def _quarter_fields(
+        self, syms: Sequence[str], now: datetime, out: list[DossierField], missing: dict[str, str]
+    ) -> None:
+        """15 分钟线：最近 15 / 30 / 60 分钟的等权收益、上涨下跌家数、主动买卖占比、BTC。"""
+        t_ms = int(now.timestamp() * 1000) // Q_MS * Q_MS  # 最后一根已收盘 15m 线的收盘时刻
+        ts = datetime.fromtimestamp(t_ms / 1000, UTC)
+        basket = {s: self._bars15[s] for s in syms if self._bars15.get(s)}
+        if len(basket) < 5:
+            missing["klines_15m"] = f"15 分钟线能用的币只有 {len(basket)} 个（要 ≥5）"
+            return
+
+        def add(name: str, value: float | None, unit: str, note: str, **kw: Any) -> None:
+            if value is None or not math.isfinite(value):
+                missing[name] = "数据不足"
+                return
+            out.append(DossierField(name, value, unit, note, "klines_15m", ts, **kw))
+
+        for m in (15, 30, 60):
+            r, rets = pool_return(basket, t_ms - m * 60_000, t_ms, Q_MS)
+            add(
+                f"pool_ret_{m}m_pct",
+                r,
+                "%",
+                f"Equal-weight basket return over the last {m} minutes (15m bars).",
+                mirror="neg",
+                digits=3,
+            )
+            if m == 15 and rets:
+                add(
+                    "pool_up_count_15m",
+                    float(sum(x > 0 for x in rets)),
+                    "count",
+                    "Basket symbols with a 15m return above 0.",
+                    mirror="pair",
+                    partner="pool_down_count_15m",
+                    digits=0,
+                )
+                add(
+                    "pool_down_count_15m",
+                    float(sum(x < 0 for x in rets)),
+                    "count",
+                    "Basket symbols with a 15m return below 0.",
+                    mirror="pair",
+                    partner="pool_up_count_15m",
+                    digits=0,
+                )
+        btc = self._bars15.get(BTC, {})
+        a, b = price_at(btc, t_ms - Q_MS, Q_MS), price_at(btc, t_ms, Q_MS)
+        add(
+            "btc_ret_15m_pct",
+            (b / a - 1.0) * 100.0 if a and b else None,
+            "%",
+            "BTC return over the last 15 minutes.",
+            mirror="neg",
+            digits=3,
+        )
+        qv = tb = 0.0
+        for bars in basket.values():
+            last = bars.get(t_ms - Q_MS)
+            if last is not None and last.quote_vol > 0:
+                qv, tb = qv + last.quote_vol, tb + last.taker_quote_vol
+        if qv <= 0:
+            missing["taker_15m"] = "数据不足"
+            return
+        add(
+            "pool_taker_buy_share_15m",
+            tb / qv * 100.0,
+            "%",
+            "Taker buy share of basket quote volume over the last 15 minutes.",
+            mirror="pair",
+            partner="pool_taker_sell_share_15m",
+        )
+        add(
+            "pool_taker_sell_share_15m",
+            100.0 - tb / qv * 100.0,
+            "%",
+            "Taker sell share of basket quote volume over the last 15 minutes.",
+            mirror="pair",
+            partner="pool_taker_buy_share_15m",
+        )
 
     def _kline_fields(
         self,
@@ -437,9 +581,16 @@ class DossierBuilder:
                 "Last 4h basket return divided by sigma_4h_pct.",
                 mirror="neg",
             )
+        deep = self.deep_basket(basket)
         for h, sigma in ((4, sigma4), (1, sigma1)):
+            if deep is None:
+                done = sum(1 for s in basket if s in self._deep)
+                missing[f"base_rate_{h}h"] = (
+                    f"长历史回填中 {done}/{len(basket)}（每轮补 {DEEP_PER_RUN} 个），暂无先验"
+                )
+                continue
             rates = base_rates(
-                basket, t0_ms, h, days=self._days, band=self._band, lookback=self._lookback
+                deep, t0_ms, h, days=self._days, band=self._band, lookback=self._lookback
             )
             if rates is None or sigma is None:
                 missing[f"base_rate_{h}h"] = "历史不足，没有先验"
