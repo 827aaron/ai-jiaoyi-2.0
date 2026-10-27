@@ -302,21 +302,64 @@ def test_patrol_lines_follow_the_stop(now: datetime) -> None:
     assert a is not None and "≥3.00%" in a.reason
 
 
-async def test_stale_price_skips_the_round_without_closing(now: datetime) -> None:
-    """管家价格过旧（keeper_price_max_age_s）：这一轮跳过、不问模型、不平仓，连续计数不变。"""
-    t = MockJevTransport(answer=close_p(0.7))
-    snap = {"f": features(now)}
+class _Rows:
+    def __init__(self) -> None:
+        self.summaries: list[str] = []
+
+    def record(self, now: datetime, outcome: c.Outcome, summary: str, **kw: Any) -> None:
+        self.summaries.append(summary)
+
+
+def _stale_keeper(
+    now: datetime, t: MockJevTransport, snap: dict[str, Any]
+) -> tuple[JevKeeper, _Rows]:
+    rows = _Rows()
     fast = FAST.model_copy(update={"keeper_price_max_age_s": 20.0})
     model = JevDecisionModel(t, FAST, timeout_ms=200)
-    k = JevKeeper(model, fast, lambda s: snap["f"], lambda n: card(now))
+    k = JevKeeper(
+        model,
+        fast,
+        lambda s: snap["f"],
+        lambda n: card(now),
+        rows,  # type: ignore[arg-type]
+        review_interval_s=40.0,
+    )
+    return k, rows
+
+
+async def test_stale_price_skips_the_round_without_closing(now: datetime) -> None:
+    """管家价格过旧（keeper_price_max_age_s）：这一轮跳过、不问模型、不平仓；短暂断流
+    （不超过 2 个复查间隔）连续计数不变，同一段断流只记一条。"""
+    t = MockJevTransport(answer=close_p(0.7))
+    snap = {"f": features(now)}
+    k, rows = _stale_keeper(now, t, snap)
     v1 = await k.review(position(now), now)
     assert v1.action == "hold" and v1.consecutive == 1 and len(t.calls) == 1
-    later = now + timedelta(seconds=40)  # 行情停在 now：已旧 40 秒
-    v2 = await k.review(position(now), later)
-    assert v2.action == "hold" and "行情已旧 40 秒" in v2.reason and len(t.calls) == 1
+    for sec in (40, 60):  # 行情停在 now
+        v = await k.review(position(now), now + timedelta(seconds=sec))
+        assert v.action == "hold" and f"行情已旧 {sec} 秒" in v.reason and len(t.calls) == 1
+    assert sum("行情已旧" in x for x in rows.summaries) == 1
+    later = now + timedelta(seconds=60)
     snap["f"] = features(later)
     v3 = await k.review(position(now), later)
-    assert v3.action == "close" and v3.consecutive == 2  # 跳过的那轮没打断连续计数
+    assert v3.action == "close" and v3.consecutive == 2  # 跳过的那几轮没打断连续计数
+
+
+async def test_long_outage_drops_the_pre_outage_close_vote(now: datetime) -> None:
+    """断流超过 2 个复查间隔：断流前那一票「该平」不能和恢复后的一票凑成连续两次。"""
+    t = MockJevTransport(answer=close_p(0.7))
+    snap = {"f": features(now)}
+    k, rows = _stale_keeper(now, t, snap)
+    assert (await k.review(position(now), now)).consecutive == 1
+    later = now + timedelta(seconds=81)
+    v = await k.review(position(now), later)
+    assert v.action == "hold" and "行情已旧 81 秒" in v.reason
+    snap["f"] = features(later)
+    v2 = await k.review(position(now), later)
+    assert v2.action == "hold" and v2.consecutive == 1
+    # 恢复后再断：新的一段断流再记一条
+    await k.review(position(now), later + timedelta(seconds=30))
+    assert sum("行情已旧" in x for x in rows.summaries) == 2
 
 
 async def test_stale_price_check_is_off_by_default(now: datetime) -> None:

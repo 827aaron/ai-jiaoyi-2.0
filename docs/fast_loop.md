@@ -26,7 +26,7 @@
 - 每个行情事件：`features.update(ev)` → `patrol.check(ev, positions)`（有动作就调执行器平仓）→
   成交事件后 `trigger.check(features.snapshot(sym), card, now)`。
 - 每个候选信号：`gate.evaluate` → `guard.review` → 放行才把 `verdict.intent` 交给执行器。
-- 管家每 `keeper_interval_s` 秒复查一次每个持仓；`patrol.urgent` 里的持仓立刻复查，复查后 `discard`。`keeper_price_max_age_s`（默认 0 = 不查）> 0 时，这个币的特征快照时间（成交 / 盘口 / 标记价任一最后更新，和开仓检查 `signal_max_age_s` 同一个时钟）比现在旧超过它，这一轮记「行情已旧 N 秒，这轮跳过、维持现状」：不平仓、不问模型、回吐保护也不按旧价触发，连续计数不变，反向信号留到下一轮。冻结盈利价回访在它前面，不受它管。
+- 管家每 `keeper_interval_s` 秒复查一次每个持仓；`patrol.urgent` 里的持仓立刻复查，复查后 `discard`。`keeper_price_max_age_s`（默认 0 = 不查）> 0 时，这个币的特征快照时间（成交 / 盘口 / 标记价任一最后更新，和开仓检查 `signal_max_age_s` 同一个时钟）比现在旧超过它，这一轮记「行情已旧 N 秒，这轮跳过、维持现状」：不平仓、不问模型、回吐保护也不按旧价触发，反向信号留到下一轮；同一段断流只记第一条。断流不超过 2 个 `keeper_interval_s` 时连续「该平」计数不变，更久就清零（断流前的一票不和恢复后的一票凑成连续两次）。反向作战卡在 `confirm_or_tighten` 下遇到过旧行情按「没有行情」处理：不平、只要求收紧，也不拿旧价当确认起点（记 `price_stale_s`）；原规则（直接平）不看价格，照旧。冻结盈利价回访在它前面，不受它管。
 - 持仓平掉后调 `keeper.forget(position_id)`。
 - 风控员构造时传 `state_dir=AppConfig.data_dir`，日亏熔断状态落盘在 `data/risk_state.json`，重启后当天仍锁住。
 - 风控员需要 `LotRulesProvider`（币安 exchangeInfo 的 stepSize / minQty / minNotional），由执行层提供；拿不到就拒单。
@@ -254,7 +254,7 @@ paper 的推荐是 做 ≥ 0.55（一道题问法的门槛）、真信号 ≥ 0.
 挂单价 = 现价 ∓ `entry_limit_offset_stop` × 止损距离（按档 30m 0.6 / 1h 0.4 / 2h·4h 0.25 / 8h 起 0.1，按最小跳动往有利方向取整），
 OrderIntent 带 `limit_wait_s`（`entry_limit_wait_min` × 60）和 `limit_chase`。执行层只挂单（LIMIT_MAKER），成交前不挂保命止损；
 等满没成交就撤单，记「挂单没成交已撤」（不报警）。`entry_limit_chase`（8h 起默认开）时改市价追进，
-执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍风控员（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在风控员名下记「不追了：…」。按现价复查进场区间时，`chase_price_max_age_s`（默认 0 = 不查）> 0 且这个币的特征快照比现在旧超过它，就记「行情已旧 N 秒，这次不追」。
+执行层不自己追，交回主循环：主循环另起任务，拿开仓锁（和开新仓同一把），按此刻的暂停 / 重启 / 拉黑 / 作战卡 / 账户再过一遍风控员（`RiskGuardImpl.recheck_chase`），过了才在锁里调 `open_chase`，没过就在风控员名下记「不追了：…」。按现价复查进场区间时，`chase_price_max_age_s`（默认 0 = 不查）> 0 且这个币的特征快照比现在旧超过它，就记「行情已旧 N 秒，这次不追」。这个检查只在打开 `entry_zone_only`、并且卡上这个币有进场区间时才做（也就是只在要按现价查区间的时候）；没有区间时追进不看价格，也就不查它有多旧。
 持仓时长从成交时刻算。
 
 ## 保本和移动止损（持仓管家的开关：移动止损默认开，保本默认关）

@@ -703,6 +703,7 @@ def build_modules(
             observation_source=features.diagnostic_observation if observations else None,
             observation_sink=observations.offer if observations else None,
             opposite_state_path=Path(app_cfg.data_dir) / "keeper_opposite.json",
+            review_interval_s=float(app_cfg.keeper_interval_s),
         )
 
     modules = Modules(

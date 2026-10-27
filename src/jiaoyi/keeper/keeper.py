@@ -103,13 +103,16 @@ class JevKeeper:
         observation_sink: Callable[[dict[str, Any]], None] | None = None,
         observation_wall: Callable[[], datetime] = lambda: datetime.now(UTC),
         opposite_state_path: Path | None = None,
+        review_interval_s: float | None = None,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
         ``fee_bps``：单边吃单手续费（快照的扣费后浮盈）；``forecast``：预测员最新预测；
         ``scan_day(UTC 日期, 关键字)``：读决策日志里含关键字的记录，找回复查历史和进场拍板。
         ``opposite_state_path``：反向卡确认的起点（每条指令第一次看到时的价和时间、这笔仓第一次
-        碰到反向卡的时间和价）落盘的位置，重启后接着用；None = 只在内存。"""
+        碰到反向卡的时间和价）落盘的位置，重启后接着用；None = 只在内存。
+        ``review_interval_s``：例行复查间隔（app.toml ``keeper_interval_s``）。行情过旧超过它的
+        2 倍就丢掉断流前的连续「该平」计数；None = 一遇到过旧就丢。"""
         self._frozen_peak_review = frozen_peak_review
         self._model = model
         self._sleep = sleep
@@ -136,6 +139,8 @@ class JevKeeper:
         self._opposite_first: dict[str, tuple[datetime, float | None]] = {}
         self._opposite_logged: dict[str, tuple[str, str]] = {}  # 已记过的（指令, 分支），不刷屏
         self._opposite_path = opposite_state_path
+        self._review_interval_s = review_interval_s
+        self._stale_logged: set[str] = set()  # 这段断流已记过「行情已旧」的持仓，不刷屏
         self._load_opposite_state()
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
@@ -145,6 +150,7 @@ class JevKeeper:
     def forget(self, position_id: str) -> None:
         """持仓平掉后调用，清掉它的计数。"""
         self._streak.pop(position_id, None)
+        self._stale_logged.discard(position_id)
         self._against.pop(position_id, None)
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
@@ -295,9 +301,16 @@ class JevKeeper:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
-        age = (now - f.ts).total_seconds()
-        if self._cfg.keeper_price_max_age_s > 0 and age > self._cfg.keeper_price_max_age_s:
-            self._keep_against(pid, against, now)  # 连续计数不动：这一轮当没复查
+        age = self._stale_age(f, now)
+        if age is not None:
+            # 短暂断流：这一轮当没复查，连续计数不动；断得久了，断流前那一票不能和恢复后的
+            # 一票凑成「连续两次」
+            limit = self._review_interval_s
+            if limit is None or age > 2 * limit:
+                self._streak.pop(pid, None)
+            self._keep_against(pid, against, now)
+            first = pid not in self._stale_logged
+            self._stale_logged.add(pid)
             return verdict(
                 position,
                 now,
@@ -307,7 +320,9 @@ class JevKeeper:
                 f"行情已旧 {age:.0f} 秒，这轮跳过、维持现状",
                 None,
                 None,
+                record=first,
             )
+        self._stale_logged.discard(pid)
         card = self._card(now)
         market = (
             self._market_source()
@@ -478,6 +493,9 @@ class JevKeeper:
         key = opposite_instruction_key(cs, card)
         arm, draw = self._opposite_arm(position, key)
         f = self._features(position.symbol)
+        stale = self._stale_age(f, now) if f is not None else None
+        if stale is not None:
+            f = None  # 旧价不能确认反向卡，也不能当起点记下来：按没有行情处理（只收紧）
         changed = False
         first = self._opposite_first.get(pid)
         if first is None or (first[1] is None and f is not None):
@@ -508,6 +526,7 @@ class JevKeeper:
             ref_price=ref[0] if ref is not None else None,
             ref_at=ref[1].isoformat() if ref is not None else None,
             confirm=confirm,
+            price_stale_s=round(stale, 1) if stale is not None else None,
         )
         if arm == "close":
             branch, tag = "ab_legacy_close", "（A/B 原规则组）"
@@ -547,6 +566,12 @@ class JevKeeper:
         return self._verdict(
             position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=log_first
         )
+
+    def _stale_age(self, f: FeatureSnapshot, now: datetime) -> float | None:
+        """快照比 ``keeper_price_max_age_s`` 旧就返回它旧了几秒；没超（或这项关着）返回 None。"""
+        limit = self._cfg.keeper_price_max_age_s
+        age = (now - f.ts).total_seconds()
+        return age if limit > 0 and age > limit else None
 
     def _giveback_guard(
         self, position: PositionRecord, pnl: float, peak: float
