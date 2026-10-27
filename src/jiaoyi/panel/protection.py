@@ -53,6 +53,14 @@ class ProtectionView(BaseModel):
     trailing_activation_price: float | None = None
     """观察价（多仓买一 / 空仓卖一）越过它程序就激活移动止损；按首次观测落盘的成交额、数量、
     实收手续费算，还没观测过（没有这些基准）为 None。"""
+    tightened_stop_price: float | None = None
+    """反向作战卡没经价格确认时程序收紧到的止损目标价（#314）；交易所是否已换上看止损腿。"""
+    tightened_reason: str | None = None
+    tightened_at: datetime | None = None
+    opposite_anchor_price: float | None = None
+    """反向作战卡（trail 模式）强制启动移动止损时锚定的可成交价（#314）。"""
+    trailing_distance_pct: float | None = None
+    """锚定后这笔仓移动止损用的回撤距离（净收益百分点）。"""
     observed_at: datetime | None = None
     age_s: float | None = None
     stale: bool = False
@@ -80,8 +88,21 @@ def _time(v: object) -> datetime | None:
     return t if t.tzinfo else None
 
 
+def _trigger_failed(leg: dict[str, object]) -> bool:
+    """触发了但交易所没下出子单（REJECTED/EXPIRED、无子单、无成交）。"""
+    return bool(
+        leg.get("triggered_at")
+        and leg.get("algo_status") in _CLOSED_ALGO
+        and leg.get("child_state") == "absent"
+        and not leg.get("actual_order_id")
+        and not _num(leg.get("filled_quantity"))
+    )
+
+
 def _triggered(leg: dict[str, object]) -> bool:
     filled = _num(leg.get("filled_quantity"))
+    if _trigger_failed(leg):
+        return False  # 和执行层一致，不算触发
     return bool(
         leg.get("algo_status") in _TRIGGERED_ALGO
         or leg.get("actual_order_id")
@@ -143,6 +164,8 @@ def _leg_view(
         detail = "撤销中，未确认" if leg.get("state") == "cancel_pending" else "提交中，未确认"
     elif st == "unknown":
         detail = "子单状态未确认" if leg.get("child_state") != "absent" else "状态不明"
+    elif _trigger_failed(leg):
+        detail = "触发后被拒（无子单）"
     return LegView(
         role=role,
         purpose=str(leg.get("purpose") or "fixed"),
@@ -199,6 +222,11 @@ def parse_protection(
         trailing_activated=bool(raw.get("trailing_activated")),
         trailing_stop_price=_num(raw.get("trailing_stop_price")),
         trailing_activation_price=act_price,
+        tightened_stop_price=_num(raw.get("tightened_stop_price")),
+        tightened_reason=str(raw["tightened_reason"]) if raw.get("tightened_reason") else None,
+        tightened_at=_time(raw.get("tightened_at")),
+        opposite_anchor_price=_num(raw.get("opposite_anchor_price")),
+        trailing_distance_pct=_num(raw.get("trailing_distance_pct")),
         observed_at=observed.astimezone(UTC) if observed else None,
         age_s=age,
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),

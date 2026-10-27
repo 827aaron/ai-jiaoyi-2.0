@@ -449,6 +449,76 @@ class FastLoopConfig(Contract):
         le=10.0,
         description="回吐保护从最高浮盈到几倍止损距离（R）才开始看。Aaron 10-25，默认 0.5。",
     )
+    # ---- 反向作战卡（#314）
+    opposite_card_action: Literal["close", "confirm_or_tighten"] = Field(
+        default="close",
+        description="有效新卡方向和持仓相反时怎么办。close = 立刻全平（原规则）；"
+        "confirm_or_tighten = 价格确认（下面三条任一）才全平，否则把交易所托管止损收紧到保本附近、"
+        "继续盯，之后确认了再平。旧通道（没有交易所托管保护）的仓照旧全平。",
+    )
+    opposite_card_ab: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="反向卡事件按 持仓号 + 币 + 这条指令的发布时间（issued_at）+ 方向 固定抽签："
+        "这个比例走新规则，其余照旧全平，两组都记反事实；整卡换版本（别的币变了）不重抽，"
+        "这个币重新开会出新指令才重抽。0 = 不分组（全按 opposite_card_action）；"
+        "只在 confirm_or_tighten 时可设。",
+    )
+    opposite_confirm_loss_r: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=10.0,
+        description="价格确认①：按行情价已亏到这么多倍原始止损距离"
+        "（R = 账本开仓价到止损价）。0 = 不用这条。",
+    )
+    opposite_confirm_atr: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=20.0,
+        description="价格确认②：从第一次看到这张反向卡起，价格朝不利方向走了这么多倍 ATR"
+        "（止损用的那个 ATR）。0 = 不用这条。",
+    )
+    opposite_confirm_key_level: bool = Field(
+        default=True,
+        description="价格确认③：价格越过反向卡自己在开仓价之外最近的关键位（卡做空看支撑 / 枢轴，"
+        "卡做多看阻力 / 枢轴）。false = 不用这条。",
+    )
+    opposite_tighten_buffer_bps: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=200.0,
+        description="收紧止损的目标 = 开仓价 ±（实际开仓手续费 + 估算平仓手续费"
+        " + 这么多基点的开仓名义），即扣费后至少保本这么多。",
+    )
+    opposite_tighten_mark_gap_bps: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=500.0,
+        description="收紧的止损离触发价源（止损按标记价触发时就是标记价）至少隔这么多基点才挂："
+        "多要 目标 < 价 ×（1 − gap），空要 目标 > 价 ×（1 + gap）；不够就按原规则全平，"
+        "不靠交易所拒单。0 = 只要求在安全一侧（仍至少按保护状态机的标记价缓冲）。",
+    )
+    opposite_profit_mode: Literal["trail", "breakeven"] = Field(
+        default="trail",
+        description="价格没确认、仓位赚得够（保本价可挂）时怎么收紧：trail = 在第一次看到反向卡时的"
+        "可成交价强制启动移动止损（之后照常只收紧）；breakeven = 止损挪到扣费保本 + 缓冲。"
+        "亏着或赚得不够的照旧全平。只在 confirm_or_tighten 时起作用。",
+    )
+    opposite_trail_distance_mult: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=5.0,
+        description="trail 模式：锚定的移动止损回撤距离 = 开仓时带的移动止损距离 × 这个倍数"
+        "（之后这笔仓的移动止损都按它）。1 = 和平常一样。",
+    )
+    opposite_anchor_retry_s: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        description="trail 模式锚定时盘口疑似插针（盘口价偏离标记价太多）：这么多秒内每轮再试、"
+        "不告警，过了按原规则全平并告警。0 = 立刻平。",
+    )
     # ---- 巡逻兵
     patrol_shock_pct_1m: float = Field(
         default=2.0, ge=0.2, le=20.0, description="1 分钟内对持仓不利的波动达到这个百分比就全平。"
@@ -782,6 +852,10 @@ class FastLoopConfig(Contract):
             raise ValueError("min_tp_r 不能大于 max_tp_r")
         if self.patrol_alert_pct_1m > self.patrol_shock_pct_1m:
             raise ValueError("patrol_alert_pct_1m 不能大于 patrol_shock_pct_1m")
+        if self.opposite_card_ab > 0 and self.opposite_card_action != "confirm_or_tighten":
+            raise ValueError(
+                "opposite_card_ab 只在 opposite_card_action = confirm_or_tighten 时能大于 0"
+            )
         return self
 
 

@@ -200,6 +200,15 @@ def test_leg_state_requires_all_three_facts_for_live() -> None:
     assert leg_state({**base, "algo_status": None}) == "unknown"
     assert leg_state({**base, "state": "rejected"}) == "rejected"
     assert leg_state({**base, "algo_status": "CANCELED"}) == "cancelled"
+    rejected = {**base, "algo_status": "REJECTED", "triggered_at": "2026-10-27T22:43:44.459000Z"}
+    assert leg_state(rejected) == "cancelled"
+    assert leg_state({**rejected, "child_state": "unknown"}) == "triggered"
+    sp = _armed()
+    sp["legs"][2] = {**rejected, "kind": "take_profit", "state": "cancelled"}
+    view = parse_protection(sp, NOW, 120)
+    assert view is not None
+    tp = next(x for x in view.legs if x.role == "take_profit")
+    assert (tp.state, tp.detail) == ("cancelled", "触发后被拒（无子单）")
     assert parse_protection("garbage", NOW, 120) is None
 
 
