@@ -8,8 +8,9 @@
 ARG BASE=hummingbot/hummingbot-api:latest
 FROM ${BASE}
 ARG DEMO=1
-COPY patch_demo.py patch_reduce_only.py patch_tradifi.py /tmp/
+COPY patch_demo.py patch_reduce_only.py patch_tradifi.py patch_stop_diagnostics.py stop_diagnostics.py /tmp/
 RUN if [ "$DEMO" = "1" ]; then python /tmp/patch_demo.py; fi \
     && python /tmp/patch_reduce_only.py \
     && python /tmp/patch_tradifi.py \
-    && rm /tmp/patch_demo.py /tmp/patch_reduce_only.py /tmp/patch_tradifi.py
+    && python /tmp/patch_stop_diagnostics.py \
+    && rm /tmp/patch_demo.py /tmp/patch_reduce_only.py /tmp/patch_tradifi.py /tmp/patch_stop_diagnostics.py /tmp/stop_diagnostics.py

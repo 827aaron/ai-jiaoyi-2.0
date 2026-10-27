@@ -36,6 +36,7 @@ from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meetings import STAGES, read_meeting
 from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
+from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
 
 STALE_S = 120.0
@@ -144,6 +145,7 @@ class FeedItem(BaseModel):
 
 class PositionView(BaseModel):
     position_id: str
+    executor_id: str | None = None
     symbol: str
     category: str
     side: str
@@ -188,7 +190,10 @@ class PositionView(BaseModel):
     entry_fee_pct: float | None = None
     """开仓手续费占名义的百分比（账本实收，没有按吃单费率估），算启动价用。"""
     trail: TrailEstimate | None = None
-    """持仓页按 K 线估的启动价 / 移动止损价（``jiaoyi.panel.trailing``）；总览不算。"""
+    """兼容旧客户端；不再用 K 线估算执行器状态。"""
+    stop_diagnostics: StopDiagnostics | None = None
+    book_quote: dict[str, object] | None = None
+    """独立的公开 REST 盘口参考（含获取时间和环境），不是执行器检查输入。"""
     pnl_pct: float | None = None
     """浮盈占名义的百分比（不乘杠杆）。"""
     fees_est_usdt: float | None = None
@@ -521,6 +526,7 @@ def position_views(
         out.append(
             PositionView(
                 position_id=p.position_id,
+                executor_id=p.executor_id,
                 symbol=p.symbol,
                 category=p.category.value,
                 side=p.side.value,
