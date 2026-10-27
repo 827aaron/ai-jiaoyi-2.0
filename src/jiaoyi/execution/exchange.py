@@ -932,11 +932,29 @@ class CcxtBinanceFutures:
         before opening) and any error, including a -4061 or a non-BOTH position, bypass or
         drop the cache."""
         ttl = getattr(self, "position_mode_cache_s", 0.0)
+        if fresh or ttl <= 0:
+            return await self._read_position_mode(ttl)
+        hit = self._cached_position_mode(ttl)
+        if hit is not None:
+            return hit
+        # Cold cache: callers arriving together share one request instead of each paying 30.
+        lock = self.__dict__.setdefault("_position_mode_lock", asyncio.Lock())
+        async with lock:
+            hit = self._cached_position_mode(ttl)
+            if hit is not None:
+                return hit
+            return await self._read_position_mode(ttl)
+
+    def _cached_position_mode(self, ttl: float) -> Literal["one_way", "hedge"] | None:
         cached = getattr(self, "_position_mode_cached", None)
         clock: Callable[[], float] = getattr(self, "_mode_clock", time.monotonic)
-        if not fresh and ttl > 0 and cached is not None and clock() - cached[0] < ttl:
+        if cached is not None and clock() - cached[0] < ttl:
             mode: Literal["one_way", "hedge"] = cached[1]
             return mode
+        return None
+
+    async def _read_position_mode(self, ttl: float) -> Literal["one_way", "hedge"]:
+        clock: Callable[[], float] = getattr(self, "_mode_clock", time.monotonic)
         self.forget_position_mode()
         try:
             raw = await self._ex.fapiPrivateGetPositionSideDual()
@@ -945,7 +963,7 @@ class CcxtBinanceFutures:
             raise ExchangeError(
                 "查询持仓模式失败或响应未知", transient=is_transient(error)
             ) from error
-        mode = "hedge" if hedged else "one_way"
+        mode: Literal["one_way", "hedge"] = "hedge" if hedged else "one_way"
         if ttl > 0:
             self._position_mode_cached = (clock(), mode)
         return mode

@@ -88,9 +88,9 @@ keeper_close_p_strong = 0.85      # 管家：≥ 0.85 一次就平
 keeper_confirmations = 2
 # frozen_peak_exit_on = true       # New Demo positions only; existing positions are never migrated
 # frozen_peak_exit_after_s = 3600  # Freeze the observed executable profit target after one hour
-# frozen_peak_evidence_mode = "sync"     # sync = 每次复查等交易所证据（最多 12 秒）；background = 后台按仓读、复查只用新鲜缓存，例行一轮不等最慢那笔
-# frozen_peak_evidence_interval_s = 30   # background：每笔仓隔几秒读一次证据（5–600）
-# frozen_peak_evidence_max_age_s = 90    # background：缓存超过这么久本次复查不看冻结盈利价（0 = 不限；非 0 时不小于上一项）
+# frozen_peak_evidence_mode = "sync"     # sync = 每次复查等交易所证据（最多 12 秒）；background = 后台按仓读、复查只用新鲜缓存，读到触发马上复查，例行一轮不等最慢那笔。Demo 建议 background
+# frozen_peak_evidence_interval_s = 30   # background：每笔仓隔几秒读一次证据（5–600）。Demo 建议 20
+# frozen_peak_evidence_max_age_s = 90    # background：缓存超过这么久本次复查不看冻结盈利价（0 = 不限；非 0 时至少上一项 + 30）。Demo 建议 60
 # giveback_on = true               # 回吐保护开关（代码规则）：最高浮盈到过 giveback_arm_r 后，从最高点吐掉 giveback_close_pct 就全平
 # giveback_close_pct = 45           # 回吐保护：吐掉最高浮盈的 45%
 # giveback_arm_r = 0.5              # 回吐保护从最高浮盈到几倍止损距离才开始看

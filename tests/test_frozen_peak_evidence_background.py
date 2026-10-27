@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from jiaoyi import contracts as c
 from jiaoyi.contracts import Role
+from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.hotconfig import HOT_FAST
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
@@ -22,7 +23,7 @@ from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.loop import Runner
 from tests.fastloop_helpers import FAST
 from tests.test_keeper_patrol import close_p, position
-from tests.test_loop import FakeExecutor, FakeKeeper, _app
+from tests.test_loop import FakeExecutor, FakeKeeper, FakePatrol, _app
 
 BACKGROUND = FAST.model_copy(
     update={
@@ -71,7 +72,9 @@ def test_defaults_keep_sync_and_settings_are_validated_and_hot() -> None:
     assert FAST.frozen_peak_evidence_max_age_s == 90
     assert c.FastLoopConfig(frozen_peak_evidence_max_age_s=0).frozen_peak_evidence_max_age_s == 0
     with pytest.raises(ValidationError):
-        c.FastLoopConfig(frozen_peak_evidence_interval_s=60, frozen_peak_evidence_max_age_s=30)
+        c.FastLoopConfig(frozen_peak_evidence_interval_s=30, frozen_peak_evidence_max_age_s=59)
+    ok = c.FastLoopConfig(frozen_peak_evidence_interval_s=20, frozen_peak_evidence_max_age_s=50)
+    assert ok.frozen_peak_evidence_max_age_s == 50
     with pytest.raises(ValidationError):
         c.FastLoopConfig(frozen_peak_evidence_mode="async")
     with pytest.raises(ValidationError):
@@ -126,26 +129,41 @@ async def test_stale_or_missing_cache_skips_rule_and_warns_once_per_streak(
     def stale_warnings() -> int:
         return sum("is stale" in r.getMessage() for r in caplog.records)
 
-    missing = await keeper.review(position(now), now)
-    assert missing.action == "hold" and evidence.calls == []
+    never_read = await keeper.review(position(now), now)
+    assert never_read.action == "hold" and evidence.calls == []
+    row = log.scan_day(now.date().isoformat(), "")[-1]
+    assert "frozen_peak_exit" not in row["output"]  # 还没读过：不算过期
+    assert stale_warnings() == 0
+
+    assert await keeper.refresh_frozen_peak("pos-1", now) is True
+    late = now + timedelta(seconds=61)
+    assert (await keeper.review(position(now), late)).action == "hold"
     row = log.scan_day(now.date().isoformat(), "")[-1]
     assert row["output"]["frozen_peak_exit"] == {
         "triggered": False,
         "detail": "evidence_stale",
-        "evidence_as_of": None,
+        "evidence_as_of": now.isoformat(),
     }
-
-    await keeper.refresh_frozen_peak("pos-1", now)
-    late = now + timedelta(seconds=61)
-    assert (await keeper.review(position(now), late)).action == "hold"
     assert (await keeper.review(position(now), late + timedelta(seconds=5))).action == "hold"
-    assert stale_warnings() == 1  # 缺失和过期是同一段连续，只记一次
+    assert stale_warnings() == 1  # 同一段过期只记一次
     assert all(r.levelno < logging.CRITICAL for r in caplog.records)
 
     await keeper.refresh_frozen_peak("pos-1", late)
     assert (await keeper.review(position(now), late)).action == "close"
     assert (await keeper.review(position(now), late + timedelta(seconds=61))).action == "hold"
     assert stale_warnings() == 2  # 新鲜过一次，再过期是新的一段
+
+
+async def test_position_without_frozen_peak_never_reports_stale(
+    tmp_path: Path, now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    log = JsonlDecisionLog(tmp_path / "d")
+    keeper = _keeper(BACKGROUND, Evidence(None), log)
+    caplog.set_level(logging.WARNING, logger="jiaoyi.keeper.keeper")
+    assert await keeper.refresh_frozen_peak("pos-1", now) is False
+    await keeper.review(position(now), now + timedelta(hours=1))
+    assert "frozen_peak_exit" not in log.scan_day(now.date().isoformat(), "")[-1]["output"]
+    assert not any("is stale" in r.getMessage() for r in caplog.records)
 
 
 async def test_max_age_zero_means_no_limit(now: datetime) -> None:
@@ -256,3 +274,53 @@ async def test_one_slow_review_does_not_delay_the_next_round_of_others(
     keeper.release.set()
     await asyncio.wait_for(asyncio.gather(*r._tasks), 1)
     assert keeper.reviewed.count("pos-slow") == 1
+
+
+async def _drain(r: Runner) -> None:
+    for _ in range(3):
+        await asyncio.wait_for(asyncio.gather(*list(r._tasks)), 1)
+
+
+async def test_triggered_background_read_closes_without_waiting_for_keeper_round(
+    tmp_path: Path, now: datetime
+) -> None:
+    keeper = _keeper(BACKGROUND, Evidence(TRIGGERED))
+    r, ex = _runner(tmp_path, now, keeper, ["pos-1"])
+    await r.refresh_positions()
+    await r.frozen_peak_tick()  # 没有 keeper_tick：同一秒里读到触发就复查、请求全平
+    await _drain(r)
+    assert ex.closed == [("pos-1", CloseReason.KEEPER)]
+
+
+async def test_triggered_read_during_running_review_queues_an_urgent_recheck(
+    tmp_path: Path, now: datetime
+) -> None:
+    keeper = _keeper(BACKGROUND, Evidence(TRIGGERED))
+    r, ex = _runner(tmp_path, now, keeper, ["pos-1"])
+    r.app.m = dataclasses.replace(r.app.m, patrol=FakePatrol())
+    r.m = r.app.m
+    await r.refresh_positions()
+    r._reviewing.add("pos-1")
+    await r.frozen_peak_tick()
+    await _drain(r)
+    assert ex.closed == [] and r.m.patrol.urgent == {"pos-1"}
+    r._reviewing.discard("pos-1")
+    await r.urgent_tick()  # 下一秒的急查
+    assert ex.closed == [("pos-1", CloseReason.KEEPER)]
+
+
+async def test_untriggered_read_does_not_review(tmp_path: Path, now: datetime) -> None:
+    keeper = _keeper(BACKGROUND, Evidence({"triggered": False}))
+    reviewed: list[str] = []
+    real_review = keeper.review
+
+    async def review(pos: c.PositionRecord, at: datetime) -> c.KeeperVerdict:
+        reviewed.append(pos.position_id)
+        return await real_review(pos, at)
+
+    keeper.review = review  # type: ignore[method-assign]
+    r, _ = _runner(tmp_path, now, keeper, ["pos-1"])
+    await r.refresh_positions()
+    await r.frozen_peak_tick()
+    await _drain(r)
+    assert reviewed == []

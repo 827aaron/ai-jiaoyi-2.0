@@ -160,7 +160,7 @@ class _FrozenPeakCache(Protocol):
 
     def frozen_peak_due(self, position_id: str, now: datetime) -> bool: ...
 
-    async def refresh_frozen_peak(self, position_id: str, now: datetime) -> None: ...
+    async def refresh_frozen_peak(self, position_id: str, now: datetime) -> bool: ...
 
 
 @runtime_checkable
@@ -1556,7 +1556,23 @@ class Runner:
                 and pid not in self._closing
                 and keeper.frozen_peak_due(pid, now)
             ):
-                self._spawn(keeper.refresh_frozen_peak(pid, now))
+                self._spawn(self._refresh_frozen_peak(keeper, pid, now))
+
+    async def _refresh_frozen_peak(self, keeper: _FrozenPeakCache, pid: str, now: datetime) -> None:
+        """后台读到冻结盈利价已触发：马上复查这笔仓，不等下一轮例行复查。正在问的仓交给急查，
+        下一秒再审（_review 本身也是这样处理在途的）。"""
+        if not await keeper.refresh_frozen_peak(pid, now):
+            return
+        pos = next(
+            (p for p in self.positions if p.position_id == pid and p.status is PositionStatus.OPEN),
+            None,
+        )
+        if pos is None or pid in self._closing:
+            return
+        if pid in self._keeper_queued and isinstance(self.m.patrol, _HasUrgent):
+            self.m.patrol.urgent.add(pid)
+            return
+        await self._review(pos, urgent=True)
 
     async def urgent_tick(self) -> None:
         if not isinstance(self.m.patrol, _HasUrgent) or not self.m.patrol.urgent:

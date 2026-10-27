@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -107,3 +108,17 @@ async def test_binance_position_side_mismatch_response_drops_the_cache(
         assert (obj._position_mode_cached is None) is dropped
     finally:
         await obj.close()
+
+
+@pytest.mark.parametrize(("ttl", "requests"), [(300, 1), (0, 5)])
+async def test_concurrent_cold_callers_share_one_request(ttl: float, requests: int) -> None:
+    obj, ex, _ = cached_client(ttl)
+
+    async def slow_dual() -> dict[str, bool]:
+        await asyncio.sleep(0.01)
+        return {"dualSidePosition": False}
+
+    ex.fapiPrivateGetPositionSideDual.side_effect = slow_dual
+    modes = await asyncio.gather(*(obj.position_mode() for _ in range(5)))
+    assert modes == ["one_way"] * 5
+    assert ex.fapiPrivateGetPositionSideDual.await_count == requests

@@ -283,11 +283,13 @@ class JevKeeper:
         interval = self._cfg.frozen_peak_evidence_interval_s
         return last is None or (now - last).total_seconds() >= interval
 
-    async def refresh_frozen_peak(self, position_id: str, now: datetime) -> None:
-        """One background evidence read. ``now`` is stored as the result's as-of: the read
-        started then, so the cached age is an upper bound on the evidence age."""
+    async def refresh_frozen_peak(self, position_id: str, now: datetime) -> bool:
+        """One background evidence read; True when it latched a trigger, so the caller can
+        review the position now instead of a keeper interval later. ``now`` is stored as the
+        result's as-of: the read started then, so the cached age is an upper bound on the
+        evidence age."""
         if position_id in self._fp_inflight:
-            return
+            return False
         self._fp_inflight.add(position_id)
         self._fp_started[position_id] = now
         try:
@@ -295,8 +297,10 @@ class JevKeeper:
         finally:
             closed = position_id not in self._fp_started  # forget() ran while reading
             self._fp_inflight.discard(position_id)
-        if not closed:
-            self._fp_cache[position_id] = (now, result)
+        if closed:
+            return False
+        self._fp_cache[position_id] = (now, result)
+        return bool(result and result.get("triggered") is True)
 
     async def _read_frozen_peak(self, pid: str, now: datetime) -> dict[str, Any] | None:
         assert self._frozen_peak_review is not None
@@ -308,6 +312,8 @@ class JevKeeper:
 
     def _cached_frozen_peak(self, pid: str, now: datetime) -> dict[str, Any] | None:
         cached = self._fp_cache.get(pid)
+        if pid not in self._fp_started or (cached is not None and cached[1] is None):
+            return None  # 还没读过，或这笔仓没开冻结盈利价（不会再开）：不算过期，不记日志
         max_age = self._cfg.frozen_peak_evidence_max_age_s
         if cached is not None and (max_age == 0 or (now - cached[0]).total_seconds() <= max_age):
             self._fp_stale.discard(pid)

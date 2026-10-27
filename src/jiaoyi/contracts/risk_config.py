@@ -450,7 +450,7 @@ class FastLoopConfig(Contract):
         ge=0,
         le=3600,
         description="Background mode: older cached evidence skips the frozen peak rule for "
-        "that review (0 = no age limit).",
+        "that review (0 = no age limit; otherwise at least the interval plus 30 s).",
     )
     giveback_on: bool = Field(
         default=True,
@@ -860,10 +860,11 @@ class FastLoopConfig(Contract):
             raise ValueError("size_fraction_s 不能大于 size_fraction_m")
         if self.keeper_close_p_strong < self.keeper_close_p:
             raise ValueError("keeper_close_p_strong 不能小于 keeper_close_p")
-        if 0 < self.frozen_peak_evidence_max_age_s < self.frozen_peak_evidence_interval_s:
+        if 0 < self.frozen_peak_evidence_max_age_s < self.frozen_peak_evidence_interval_s + 30:
             raise ValueError(
-                "frozen_peak_evidence_max_age_s 要么填 0（不限），要么不小于 "
-                "frozen_peak_evidence_interval_s，否则缓存永远算过期"
+                "frozen_peak_evidence_max_age_s 要么填 0（不限），要么至少 "
+                "frozen_peak_evidence_interval_s + 30 秒（一次证据读最多十几秒），"
+                "否则正常节奏下缓存也会算过期"
             )
         if 0 < self.atr_long_period_min <= self.atr_period_min:
             raise ValueError("atr_long_period_min 必须比 atr_period_min 长")
