@@ -75,6 +75,8 @@ class ServerProtection(BaseModel):
     observed_at: datetime | None = None
     exit_reason: CloseReason | None = None
     last_error: str | None = None
+    prearm_failing_since: datetime | None = None
+    """未曾完整托管时，可宽限的同步失败从何时开始连续出现；成功一轮清空。"""
     deadline_at: datetime | None = None
     trailing_peak_net: float | None = None
     trailing_threshold_net: float | None = None
