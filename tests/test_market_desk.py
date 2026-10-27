@@ -761,20 +761,23 @@ async def test_flash_nominations_do_not_enter_queue_while_desk_owns(tmp_path: Pa
     await desk.run(candidates, "scheduled")
     card = commander.current(clock[0])
     assert card is not None
-    token = card.symbols[0].research_token()
+    nominated = card.symbols[0]
+    token = nominated.research_token()
 
     async def pick(c: Any, n: int, prev: Any, pool: Any = ()) -> PickResult:
         return PickResult(
             "Flash：偏弱 BTC -1%",
-            [Pick(e.symbol, "量 +10%") for e in c[:n]],
+            [Pick(e.symbol, "量 +10%") for e in c if e.symbol != nominated.symbol],
             cost_usd=0.01,
             regime_direction="看跌",
             review_candidates=[
                 MarketReviewCandidate(
-                    symbol=card.symbols[0].symbol,
+                    symbol=nominated.symbol,
                     research_token=token,
                     reason="新数字",
-                    evidence=[MarketReviewEvidence(field="metrics.x", value=1)],
+                    evidence=[
+                        MarketReviewEvidence(field="filters.quote_volume_24h_usdt", value=1e8)
+                    ],
                 )
             ],
             reviews_valid=True,
@@ -784,6 +787,10 @@ async def test_flash_nominations_do_not_enter_queue_while_desk_owns(tmp_path: Pa
     clock[0] += timedelta(minutes=30)
     await commander.refresh(candidates, "manual")
     assert commander._market_reviews == {}
+    recs = [
+        json.loads(x) for p in (tmp_path / "r").rglob("*.jsonl") for x in p.read_text().splitlines()
+    ]
+    assert any(r.get("output", {}).get("market_review") == "record_only" for r in recs)
 
 
 async def test_desk_publish_migrates_valid_nominations(tmp_path: Path) -> None:
