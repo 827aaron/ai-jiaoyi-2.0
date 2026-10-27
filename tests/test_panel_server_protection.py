@@ -521,6 +521,15 @@ def test_js_draws_trailing_lines_only_from_hosted_protection() -> None:
             _armed(trailing_activated=True, trailing_stop_price=67_200.0, legs=[fixed, pending])
         ),
         "legacy": pos(None),
+        "looser": pos(_armed(trailing_activated=True, trailing_stop_price=66_400.0)),
+        "small": pos(_armed(trailing_activated=True, trailing_stop_price=66_510.0)),
+        "tightened": pos(
+            _armed(
+                trailing_activated=True,
+                trailing_stop_price=66_600.0,
+                legs=[_leg("stop_loss", "tightened", 66_800.0)],
+            )
+        ),
     }
     script = (
         """
@@ -550,6 +559,13 @@ assert(trailTag(C.unconfirmed).includes('程序记录（未确认）'));
 assert(trailLegend(C.unconfirmed).includes('未确认'));
 assert.equal(trailLines(C.legacy), null);
 assert.equal(trailLegend(C.legacy), '');
+const looser = trailNote(C.looser);
+assert(looser.includes('比在挂的固定止损 66500 松，未换挂'), looser);
+assert(!looser.includes('还没确认'), looser);
+assert(trailTag(C.looser).includes('未换挂') && trailLegend(C.looser).includes('未换挂'));
+assert.deepEqual(trailLines(C.looser).held, { name: '固定止损', price: 66500, looser: true });
+assert(trailNote(C.small).includes('紧但收紧不够一步'), trailNote(C.small));
+assert(trailNote(C.tightened).includes('比在挂的收紧止损 66800 松，未换挂'));
 """
     )
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
