@@ -119,6 +119,8 @@ session_vol_ratio = 2.0
 market_review_on = true           # 提名单币复核，还需 schedule.event_meeting_enabled
 regime_flip_on = true             # 模拟盘默认开
 regime_flip_live = false          # 测试网 / 实盘也启用；默认关
+regime_flip_target = "flash_market_only"  # 确认翻转后：flash_market_only = Flash 独立刷新大盘（以前的做法）；
+                                  # desk = 让大盘台立即重跑；off = 只检查和记录。slow.toml [market_desk] mode = "replace" 时不能是 flash_market_only
 regime_flip_breadth = 30          # 按 40 个有效币算反向至少 30 个；按比例；0 = 不限制
 regime_flip_btc_pct = 1.0         # BTC 相比市场参照价至少同向走 1%；0 = 不限制
 regime_flip_confirm = 2           # 连续 2 次同方向满足才更新大盘；0 = 不等连续确认

@@ -113,6 +113,11 @@ class CreditMonitor:
         self._floor = low_floor_usd
         self._resend = resend_after
 
+    def balance_usd(self) -> float | None:
+        """最近一次查到的余额（美元）；还没查过 / 查失败返回 None。大盘台按它判断要不要自停。"""
+        bal = self._state.get("balance_usd")
+        return float(bal) if isinstance(bal, int | float) else None
+
     def note_exhausted(self, now: datetime) -> None:
         """会议撞上 402（线程里调也行）。下一次 ``tick`` 发告警、写面板横幅。"""
         self._exhausted_at = now

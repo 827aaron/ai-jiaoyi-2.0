@@ -201,6 +201,17 @@ MARKET_LIVE = "_MARKET"
 _SIZE_ORDER = {SizeTier.S: 0, SizeTier.M: 1, SizeTier.L: 2}
 
 
+@runtime_checkable
+class MarketDeskOwner(Protocol):
+    """大盘台（``slow/market_desk.py``）：此刻大盘方向是否归它管。"""
+
+    def owns_market(self, now: datetime) -> bool: ...
+
+
+DESK_SOURCE = "market_desk"
+"""大盘台发布的 ``MarketView.source``（不往契约加字段，概率等放 market_desk_state.json）。"""
+
+
 @dataclass(frozen=True)
 class TierRules:
     """分档交易（设计文档 §六「头部档先开放，中间档由军师每天挑，尾部只看不做」）怎么落到开会。
@@ -300,6 +311,11 @@ class BattleCardCommander:
         self._market_published_generation = 0
         self._reference_generation = 0
         self._pending_reference_view: MarketView | None = None
+        # 大盘台接管（[market_desk] mode = replace）：它是唯一的大盘发布者，整轮总盘会的大盘判断
+        # 只记录；Flash 下一轮只带它自己上一轮的判断（不被大盘台的观点锚定）
+        self._desk: MarketDeskOwner | None = None
+        self._flash_regime = ""
+        self._round_desk_owned = False
         self._market_lock = asyncio.Lock()
         self._market_snapshot: Callable[[SymbolPool, datetime], Awaitable[SymbolPool]] | None = None
         self.market_refresh_cost_usd = 0.0
@@ -553,6 +569,8 @@ class BattleCardCommander:
     def regime_flip_blocked(self, now: datetime) -> str | None:
         if binance_gate.banned_until():
             return "限流"
+        if self._desk_owns(now):
+            return "大盘台接管中，Flash 不独立更新大盘"
         if self._market_retry_at is not None and now < self._market_retry_at:
             return "市场刷新失败退避"
         if self.may_refresh(now):
@@ -1221,6 +1239,7 @@ class BattleCardCommander:
         self.round_cost_usd = 0.0
         generation = self._new_market_generation()
         self._round_reference = None
+        self._round_desk_owned = False
         started = time.monotonic()
         self._loop = asyncio.get_running_loop()
         self._rl_until, self._rl_reason = None, ""  # 重开时清掉上一次的限流暂停
@@ -1264,7 +1283,8 @@ class BattleCardCommander:
         if reason != "regime_flip":
             self._last_refresh = now
             self._scheduled_due = card.expires_at - self._lead
-        if generation >= self._reference_generation:
+        # 大盘台接管：翻转参照只由大盘台的发布来设（CONFLICTS #2）
+        if not self._round_desk_owned and generation >= self._reference_generation:
             self.regime_reference = self._round_reference
             self._reference_generation = generation
             self._pending_reference_view = (
@@ -1287,6 +1307,101 @@ class BattleCardCommander:
     def _new_market_generation(self) -> int:
         self._market_generation += 1
         return self._market_generation
+
+    def new_market_generation(self) -> int:
+        """大盘台一轮开始时取代数（和总盘会 / 独立刷新共用一套），发布时据此判断是否已被取代。"""
+        return self._new_market_generation()
+
+    def set_market_desk(self, desk: MarketDeskOwner | None) -> None:
+        self._desk = desk
+
+    def _flash_previous(self) -> BattleCard | None:
+        """总盘会（Flash）看到的「上一轮」：大盘台接管时卡上的大盘是大盘台的，换回 Flash 自己上一轮
+        的判断，免得 Flash 被大盘台锚定（CONFLICTS #14）。"""
+        card = self._card
+        if card is None or not self._desk_owns(self._clock()):
+            return card
+        return card.model_copy(update={"regime": self._flash_regime or "none"})
+
+    def _desk_owns(self, now: datetime) -> bool:
+        if self._desk is None:
+            return False
+        try:
+            return bool(self._desk.owns_market(now))
+        except Exception:
+            logger.exception("查大盘台是否接管失败，按未接管处理")
+            return False
+
+    def publish_desk_view(
+        self,
+        *,
+        regime: str,
+        direction: Direction,
+        reason: str,
+        pool: SymbolPool,
+        generation: int,
+        desk_id: str,
+        probs: Mapping[str, float],
+    ) -> MarketView | None:
+        """大盘台发布：走和总盘会 / 独立刷新同一条路（共用版本号、翻转参照、通知管家复核）。
+        比它晚开始的发布已经生效时不覆盖，返回 None。同步执行（不让出事件循环），就是「只在
+        发布时持锁」。仍有效的市场复核提名迁到新版本，过时的撤掉。"""
+        if generation < self._market_published_generation:
+            self._write(
+                outcome=Outcome.INFO,
+                summary="大盘台结果已被较新的大盘观点取代，不发布",
+                output={DESK_SOURCE: {"desk_id": desk_id, "accepted": False}},
+            )
+            return None
+        view = self._publish_view(
+            regime,
+            direction,
+            DESK_SOURCE,
+            reason,
+            pool.pool_id,
+            pool.ts,
+            generation,
+            transition=True,
+        )
+        self._migrate_market_reviews(view)
+        self._write(
+            outcome=Outcome.ACTION,
+            summary=f"大盘台发布大盘 v{view.version}：{view.regime}"[:200],
+            input={"refresh_reason": reason, "scope": DESK_SOURCE},
+            output={
+                DESK_SOURCE: {"desk_id": desk_id, "accepted": True, "probs_4h": dict(probs)},
+                "market_view": view.model_dump(mode="json"),
+            },
+        )
+        return view
+
+    def _migrate_market_reviews(self, view: MarketView) -> None:
+        """大盘台发了新版本：已排队、该币研究没换、没过期的复核提名改挂到新版本，其余撤掉
+        （CONFLICTS #6）。接管期间总盘会不再产生新提名。"""
+        now = self._clock()
+        for sym, queued in list(self._market_reviews.items()):
+            current = self._card.for_symbol(sym) if self._card else None
+            if (
+                current is None
+                or current.research_token() != queued.candidate.research_token
+                or now > queued.expires_at
+            ):
+                self._drop_market_review(sym, "大盘台发布新版本时，该提名已过时")
+                continue
+            self._market_reviews[sym] = queued.model_copy(
+                update={"market_view_id": view.market_view_id}
+            )
+            self._write(
+                symbol=sym,
+                outcome=Outcome.INFO,
+                summary=f"{sym} 市场复核提名迁到大盘台 v{view.version}",
+                output={
+                    "market_review": "migrated",
+                    "from_market_view_id": queued.market_view_id,
+                    "market_view_id": view.market_view_id,
+                },
+            )
+        self._save_market()
 
     def _reference_for(self, view: MarketView) -> RegimeReference | None:
         try:
@@ -1366,16 +1481,39 @@ class BattleCardCommander:
         *,
         transition: bool,
     ) -> MarketView:
+        return self._publish_view(
+            picked.regime,
+            picked.regime_direction,
+            "market_only" if transition else "scheduled_market",
+            reason,
+            pool.pool_id,
+            pool.ts,
+            generation,
+            transition=transition,
+        )
+
+    def _publish_view(
+        self,
+        regime: str,
+        direction: Direction,
+        source: str,
+        reason: str,
+        pool_id: str,
+        source_ts: datetime,
+        generation: int,
+        *,
+        transition: bool,
+    ) -> MarketView:
         view = MarketView(
             market_view_id=uuid.uuid4().hex,
             version=(self.latest_market_view.version + 1) if self.latest_market_view else 1,
             observed_at=self._clock(),
-            regime=picked.regime,
-            regime_direction=picked.regime_direction,
-            source="market_only" if transition else "scheduled_market",
+            regime=regime,
+            regime_direction=direction,
+            source=source,
             refresh_reason=reason,
-            pool_id=pool.pool_id,
-            source_ts=pool.ts,
+            pool_id=pool_id,
+            source_ts=source_ts,
         )
         if generation < self._market_published_generation:
             return view  # 仍是这一场币研究的历史来源，但不能覆盖更晚的当前观点
@@ -1621,6 +1759,8 @@ class BattleCardCommander:
             "market_error": self._market_error,
             "market_fails": self._market_fails,
             "market_retry_at": self._market_retry_at.isoformat() if self._market_retry_at else None,
+            # 旧代码按键读、不认识的键忽略：回滚安全
+            "flash_regime": self._flash_regime,
         }
         tmp = self._market_path.with_suffix(".tmp")
         try:
@@ -1671,6 +1811,8 @@ class BattleCardCommander:
         self.last_regime_flip_at = times["last_regime_flip_at"]
         self._market_retry_at, self._market_fails = times["market_retry_at"], fails
         self._market_error = data.get("market_error")
+        flash = data.get("flash_regime")
+        self._flash_regime = flash if isinstance(flash, str) else ""
         if view is not None:
             self.last_regime_direction = view.regime_direction
         try:
@@ -1837,8 +1979,11 @@ class BattleCardCommander:
         market_view: MarketView | None = None,
         trace_id: str | None = None,
         publish_accepted: bool | None = None,
+        *,
+        record_only: MarketView | None = None,
     ) -> None:
-        """每轮总盘会写一行记录（data/market_meeting/）：池子里每个币的分数和数字、候选的结论。"""
+        """每轮总盘会写一行记录（data/market_meeting/）：池子里每个币的分数和数字、候选的结论。
+        ``record_only``：大盘台接管时 Flash 自己的大盘判断（只记录、没发布）。"""
         if self._market_log is None:
             return
         decided = {d.symbol: (d.pick, d.reason) for d in picked.decisions}
@@ -1849,11 +1994,16 @@ class BattleCardCommander:
                     "ts": now.isoformat(),
                     "trace_id": trace_id,
                     "publish_accepted": publish_accepted,
-                    "publish_status": "published"
+                    "publish_status": "record_only"
+                    if record_only is not None
+                    else "published"
                     if publish_accepted is True
                     else "superseded"
                     if publish_accepted is False
                     else "unknown",
+                    "record_only_view": record_only.model_dump(mode="json")
+                    if record_only is not None
+                    else None,
                     "published_at": market_view.observed_at.isoformat() if market_view else None,
                     "market_view": market_view.model_dump(mode="json") if market_view else None,
                     "pool_requested_at": pool.ts.isoformat(),
@@ -1991,6 +2141,7 @@ class BattleCardCommander:
         )
         audit = self._market_audit(pool, "scheduled_market", reason, now, brief_provenance)
         token = CURRENT_AUDIT.set(audit)
+        previous = self._flash_previous()
         try:
             review_pick = getattr(self._engine, "pick_with_reviews", None)
             contextual_pick = getattr(self._engine, "pick_with_context", None)
@@ -1998,17 +2149,17 @@ class BattleCardCommander:
                 picked = await review_pick(
                     free,
                     max(room, 0),
-                    self._card,
+                    previous,
                     pool.in_pool,
                     brief_text=brief_text,
                     card_context=card_context,
                 )
             elif callable(contextual_pick):
                 picked = await contextual_pick(
-                    free, max(room, 0), self._card, pool.in_pool, brief_text=brief_text
+                    free, max(room, 0), previous, pool.in_pool, brief_text=brief_text
                 )
             else:
-                picked = await self._engine.pick(free, max(room, 0), self._card, pool=pool.in_pool)
+                picked = await self._engine.pick(free, max(room, 0), previous, pool=pool.in_pool)
         except Exception as exc:
             audit.emit(
                 "workflow_failed",
@@ -2027,16 +2178,38 @@ class BattleCardCommander:
             raise
         finally:
             CURRENT_AUDIT.reset(token)
-        accepted = generation >= self._market_published_generation
-        market_view = self._publish_market(picked, pool, reason, generation, transition=False)
+        self._flash_regime = picked.regime
+        desk_owned = self._round_desk_owned = self._desk_owns(self._clock())
+        flash_view: MarketView | None = None
+        if desk_owned and self.latest_market_view is not None:
+            # 大盘台接管：Flash 的大盘判断只记录（不发布、不改翻转参照、提名不进队列），
+            # 本轮各币会议看大盘台当前生效的观点
+            accepted = False
+            flash_view = MarketView(
+                market_view_id=uuid.uuid4().hex,
+                version=self.latest_market_view.version,
+                observed_at=self._clock(),
+                regime=picked.regime,
+                regime_direction=picked.regime_direction,
+                source="scheduled_market",
+                refresh_reason=reason,
+                pool_id=pool.pool_id,
+                source_ts=pool.ts,
+            )
+            market_view = self.latest_market_view
+            self._save_market()
+        else:
+            desk_owned = self._round_desk_owned = False
+            accepted = generation >= self._market_published_generation
+            market_view = self._publish_market(picked, pool, reason, generation, transition=False)
         audit.emit(
-            "published" if accepted else "superseded",
+            "record_only" if desk_owned else "published" if accepted else "superseded",
             published_at=market_view.observed_at.isoformat() if accepted else None,
-            market_view=market_view.model_dump(mode="json"),
+            market_view=(flash_view or market_view).model_dump(mode="json"),
             model_call_observed=audit.attempt > 0,
         )
         # 总盘会结束与单币会全部结束可能相差十几分钟：价和方向必须取同一时刻。
-        if self._regime_price is not None:
+        if self._regime_price is not None and not desk_owned:
             try:
                 px = self._regime_price()
                 if px is not None:
@@ -2095,8 +2268,20 @@ class BattleCardCommander:
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
+        if desk_owned and picked.review_candidates:
+            self._write(
+                outcome=Outcome.INFO,
+                summary="大盘台接管中：总盘会的市场复核提名只记录，不进队列",
+                output={
+                    "market_review": "record_only",
+                    "review_candidates": [
+                        c.model_dump(mode="json") for c in picked.review_candidates
+                    ],
+                },
+            )
         if (
-            picked.reviews_valid
+            not desk_owned
+            and picked.reviews_valid
             and self.latest_market_view is not None
             and self.latest_market_view.market_view_id == market_view.market_view_id
         ):
@@ -2131,8 +2316,13 @@ class BattleCardCommander:
             reason,
             market_view if accepted else None,
             audit.trace_id,
-            accepted,
+            None if desk_owned else accepted,
+            record_only=flash_view,
         )
+        # 本轮各币会议看的大盘：平时是总盘会刚发布的，大盘台接管时是大盘台当前生效的
+        round_regime, round_direction = market_view.regime, market_view.regime_direction
+        if not desk_owned:
+            round_regime, round_direction = picked.regime, picked.regime_direction
         # 指令池：上一张卡里还没到期的币原样留着（这轮没开会的币不动），开完哪个换哪个；
         # 持仓币的指令到期也不消失，只清空信号。池外（已被筛掉）的币不留
         in_pool = {e.symbol for e in pool.in_pool}
@@ -2168,8 +2358,8 @@ class BattleCardCommander:
                 created_at=now,
                 expires_at=round_expiry,
                 source="tradingagents",
-                regime=picked.regime,
-                regime_direction=picked.regime_direction,
+                regime=round_regime,
+                regime_direction=round_direction,
                 symbols=self._fit(list(symbols.values())),
                 refresh_reason=reason,
                 llm_cost_usd=round(cost, 6),
@@ -2183,7 +2373,7 @@ class BattleCardCommander:
             nonlocal cost, published
             res = await self._analyze_one(
                 e,
-                picked.regime,
+                round_regime,
                 reasons.get(e.symbol, ""),
                 brief_text=brief_text,
                 market_view=market_view,

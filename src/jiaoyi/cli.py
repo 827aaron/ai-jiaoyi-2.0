@@ -42,6 +42,7 @@ from jiaoyi.slow.settings import (
     DEFAULT_SLOW_PATH,
     SlowConfig,
     load_slow_config,
+    market_desk_conflict,
     missing_slow_stack,
 )
 
@@ -49,7 +50,10 @@ from jiaoyi.slow.settings import (
 def _load(args: argparse.Namespace) -> tuple[RiskConfig, AppConfig, SlowConfig]:
     """读三份配置；slow.toml 里没写的节奏参数取 app.toml 所选档位的默认。"""
     app = load_app_config(Path(args.app))
-    return load_risk_config(Path(args.risk)), app, load_slow_config(Path(args.slow), app.profile)
+    slow = load_slow_config(Path(args.slow), app.profile)
+    if problem := market_desk_conflict(slow, app.fast_loop.regime_flip_target):
+        raise ConfigError(f"配置互相冲突，拒绝启动：{problem}")
+    return load_risk_config(Path(args.risk)), app, slow
 
 
 def _profile_line(args: argparse.Namespace, app: AppConfig) -> str:

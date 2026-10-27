@@ -546,6 +546,188 @@ class PricesConfig(_Strict):
     pro_out: float = Field(default=2.00, ge=0)
 
 
+class MarketDeskSection(_Strict):
+    """大盘台（``[market_desk]``，设计 2026-10-28）：独立判断「候选池等权组合未来 4 小时」
+    涨 / 平 / 跌三项概率，方向由代码按门槛派生。模型 = DeepSeek V4.1 Flash（经 OpenRouter，
+    和开会同一个模型），每轮独立问 ``samples`` 次取平均。
+
+    回滚注意：旧版本代码不认识这一段，会拒绝启动；回滚到没有大盘台的版本前先删掉整段。
+    改这一段要重启才生效。"""
+
+    mode: Literal["off", "replace"] = Field(
+        default="off",
+        description="off = 不运行，一次模型调用都没有（和以前一样）；replace = 大盘台接管大盘方向："
+        "只有它发布市场观点、设翻转参照，总盘会的大盘判断只记录不发布。"
+        "replace 要求 app.toml [fast_loop] regime_flip_target 不是 flash_market_only。",
+    )
+    model: str = Field(
+        default="deepseek/deepseek-v4.1-flash-1017",
+        min_length=1,
+        description="OpenRouter 模型 id。默认 DeepSeek V4.1 Flash，和开会同一个。",
+    )
+    reasoning_effort: Literal["none", "low", "medium", "high"] = Field(
+        default="low", description="推理长度（OpenRouter reasoning.effort），思考也算在回答长度里。"
+    )
+    max_tokens: int = Field(
+        default=4096, ge=1024, le=65536, description="每次回答的长度上限（含思考）。"
+    )
+    timeout_s: float = Field(
+        default=120.0, ge=10.0, le=900.0, description="单次模型调用超时（秒）。"
+    )
+    cadence_min: int = Field(
+        default=60,
+        ge=5,
+        le=240,
+        description="多久定时跑一轮（分钟），按 UTC 对齐。Demo 推荐 15；每轮花费 × samples。",
+    )
+    offset_min: int = Field(
+        default=2,
+        ge=0,
+        le=59,
+        description="每轮在对齐时刻之后几分钟跑（默认 HH:02，等整点 K 线收好）。"
+        "要小于 cadence_min。",
+    )
+    move_trigger_pct: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=20.0,
+        description="急动加跑：move_trigger_window_min 分钟内 |BTC| 或 |候选池涨跌中位数| 走了"
+        "≥ 这么多 %（只算上一轮开跑之后的价）就立即加跑一轮；0 = 不按急动加跑。"
+        '翻转确认（app.toml regime_flip_target = "desk"）也会立即加跑。',
+    )
+    move_trigger_window_min: float = Field(
+        default=15.0, ge=1.0, le=120.0, description="急动加跑看多长时间窗（分钟）。"
+    )
+    min_run_gap_min: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=240.0,
+        description="加跑（急动 / 翻转）离上一轮开跑至少隔几分钟；没到就等到点再跑。定时轮不受限。",
+    )
+    samples: int = Field(
+        default=5, ge=1, le=10, description="每轮独立问几次（自洽投票），概率取平均；花费 × 次数。"
+    )
+    min_valid_samples: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="一轮至少几次回答合格才采用；不够这一轮作废（不发布、照常记账）。",
+    )
+    mirror_test_rate: float = Field(
+        default=1 / 6,
+        ge=0.0,
+        le=1.0,
+        description="镜像测试的轮次比例（按轮次哈希挑，可复现）：把数据包涨跌全部取反再问一遍，"
+        "看 p_up(原) 与 p_down(镜像) 差多少。0 = 不做。镜像那一遍不影响方向，只算偏置。",
+    )
+    mirror_alert_gap: float = Field(
+        default=0.05,
+        gt=0.0,
+        le=0.5,
+        description="最近几次镜像测试的 |p_up(原) − p_down(镜像)| 平均值超过它就告警（方向偏置）。",
+    )
+    band_sigma: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=3.0,
+        description="「平」的宽度：|4 小时等权收益| ≤ 这个系数 × σ 算平。σ 由过去 sigma_lookback_h "
+        "个滚动 4 小时窗口算。实测期内不调。",
+    )
+    sigma_lookback_h: int = Field(
+        default=168, ge=24, le=336, description="算 σ 用过去多少个滚动窗口（小时）。"
+    )
+    base_rate_days: int = Field(
+        default=30, ge=7, le=30, description="先验（涨 / 平 / 跌基础率）统计过去几天。"
+    )
+    call_p_min: float = Field(
+        default=0.45,
+        gt=0.0,
+        lt=1.0,
+        description="方向门槛 θ：p_up ≥ θ 且 p_up − p_down ≥ δ 才算看涨，看跌对称，其余中性。",
+    )
+    call_edge_min: float = Field(
+        default=0.15, ge=0.0, lt=1.0, description="方向门槛 δ（见 call_p_min）。"
+    )
+    max_age_min: float = Field(
+        default=75.0,
+        ge=10.0,
+        le=1440.0,
+        description="最新一轮结果多久内算「可用」；超过（或重启后没有）按 fallback 处理。",
+    )
+    fallback: Literal["flash", "hold"] = Field(
+        default="flash",
+        description="大盘台不可用（超过 max_age_min 没有新结果、日上限 / 余额低线自停）时："
+        "flash = 整轮总盘会的 Flash 大盘判断恢复发布（和以前一样），大盘台恢复后第一轮立即接管；"
+        "hold = 一直沿用大盘台最后一次发布的观点。",
+    )
+    publish_confirm: int = Field(
+        default=2,
+        ge=1,
+        le=6,
+        description="滞回：新方向要连续几轮一致才发布（每发布一版，所有持仓排队复核）。"
+        "大盘台第一次接管（当前观点不是大盘台发的）不等，立即发布。",
+    )
+    publish_confirm_min: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=1440.0,
+        description="滞回（按时间）：新方向从第一次出现到这一轮至少持续这么多分钟才发布，"
+        "和 publish_confirm 同时满足。例外：连续一致的几轮里有一轮是急动 / 翻转加跑的，"
+        "只看轮数（加跑那轮和下一轮定时轮一致就发）。15 分钟一轮时默认约要 3 轮（30 分钟）。",
+    )
+    publish_min_gap_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        description="两次方向发布至少隔几分钟；0 = 只靠连续确认。",
+    )
+    daily_cost_limit_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1000.0,
+        description="大盘台每个交易日（曼谷 0 点清零）最多花多少美元，单独记账，不占军师团日上限；"
+        "0 = 不限。到了当天停跑。",
+    )
+    balance_floor_usd: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=10000.0,
+        description="OpenRouter 余额低于这条线大盘台自停，把余额留给开会和 Jev；0 = 不看余额。",
+    )
+    exclude_symbols: tuple[str, ...] = Field(
+        default=("PAXGUSDT", "XAUTUSDT"),
+        description="不进等权池的币（贵金属等，和大盘无关）。",
+    )
+
+    @field_validator("exclude_symbols", mode="before")
+    @classmethod
+    def _symbols(cls, v: Any) -> Any:
+        if not isinstance(v, list | tuple):
+            return v
+        out: list[str] = []
+        for x in v:
+            name = str(x).strip().upper()
+            name = name if name.endswith("USDT") else f"{name}USDT"
+            if name not in out:
+                out.append(name)
+        return tuple(out)
+
+    @model_validator(mode="after")
+    def _sane(self) -> MarketDeskSection:
+        if self.min_valid_samples > self.samples:
+            raise ValueError("min_valid_samples 不能大于 samples")
+        if self.offset_min >= self.cadence_min:
+            raise ValueError("offset_min 必须小于 cadence_min")
+        if self.max_age_min <= self.cadence_min:
+            raise ValueError("max_age_min 必须大于 cadence_min，否则两轮之间就算不可用")
+        return self
+
+    def daily_calls(self) -> float:
+        """按定时轮估的每天模型调用次数（含镜像测试，不含加跑）。"""
+        runs = 24 * 60 / self.cadence_min
+        return runs * self.samples * (1 + self.mirror_test_rate)
+
+
 class SlowConfig(_Strict):
     llm: LlmConfig = LlmConfig()
     meeting: MeetingConfig = MeetingConfig()
@@ -555,6 +737,7 @@ class SlowConfig(_Strict):
     screener: ScreenerSection = ScreenerSection()
     budget: BudgetConfig = BudgetConfig()
     prices: PricesConfig = PricesConfig()
+    market_desk: MarketDeskSection = MarketDeskSection()
 
     def engine_settings(self) -> TradingAgentsSettings:
         m, p = self.meeting, self.prices
@@ -732,6 +915,18 @@ def upgrade_legacy_schedule(data: dict[str, Any]) -> dict[str, Any]:
                 "slow.toml [schedule] 的 %s 已改名 %s（分钟），已自动 ×60 换算", old, key
             )
     return {**data, "schedule": new}
+
+
+def market_desk_conflict(slow: SlowConfig, regime_flip_target: str) -> str | None:
+    """跨文件校验：大盘台接管（replace）时只能有一个发布者，翻转后不能再让 Flash 独立刷新大盘
+    （CONFLICTS #2）。有冲突返回原因，否则 None。启动、面板重启前、热生效都按这一条拦。"""
+    if slow.market_desk.mode == "replace" and regime_flip_target == "flash_market_only":
+        return (
+            'slow.toml [market_desk] mode = "replace" 时，app.toml [fast_loop] '
+            "regime_flip_target 不能是 flash_market_only（会有两个大盘发布者来回改方向）；"
+            '改成 "desk"（翻转时让大盘台重跑）或 "off"（只记录）'
+        )
+    return None
 
 
 def missing_slow_stack(cfg: SlowConfig, secrets: SecretStore) -> str | None:
