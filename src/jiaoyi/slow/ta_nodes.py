@@ -58,19 +58,44 @@ SETUP_KEYS = ("debate_first", "funding_label", "bear_bull_symmetry", "crowd_rati
 而且字典是逐键合并的，上一场 mirror 写进去的键下一场现状组不会清掉，所以全局那份不能信。"""
 
 
+def _run_config_var() -> Any:
+    """TradingAgents 按场配置的 ContextVar。版本变了找不到就报错：宁可开不了会，也不能悄悄按
+    现状开、却在日志里记成 mirror / neutral。"""
+    from tradingagents.dataflows import config as ta_config
+
+    var = getattr(ta_config, "_run_config", None)
+    if var is None or not callable(getattr(var, "get", None)):
+        raise RuntimeError(
+            "TradingAgents 里没有按场配置 _run_config，版本对不上，先核对 pyproject 里钉的提交"
+        )
+    return var
+
+
 def meeting_setting(key: str, default: str) -> str:
     """读这场会的一项偏空整改设置，只看这场会自己的运行配置；不在会议里（或没装
-    tradingagents）就是默认值 = 现状。"""
+    tradingagents）就是默认值 = 现状。TradingAgents 装了却找不到按场配置就报错。"""
     try:
-        from tradingagents.dataflows import config as ta_config
+        import tradingagents.dataflows.config  # noqa: F401
     except ImportError:
         return default
-    var = getattr(ta_config, "_run_config", None)
-    scoped = var.get() if var is not None else None
+    scoped = _run_config_var().get()
     if not isinstance(scoped, Mapping):
         return default
     raw = scoped.get(PROMPT_KEY) or {}
     return str(raw.get(key) or default)
+
+
+def check_meeting_settings() -> None:
+    """启动自检（开了任何偏空整改开关时由引擎调用）：在一场假的按场配置里读回设置，读不回就
+    拒绝启动，免得记录里写着 mirror / neutral 而提示词其实没用上。"""
+    from tradingagents.dataflows.config import run_config
+
+    _run_config_var()
+    probe = {k: f"probe-{k}" for k in SETUP_KEYS}
+    with run_config({PROMPT_KEY: probe}):
+        got = {k: meeting_setting(k, "") for k in SETUP_KEYS}
+    if got != probe or meeting_setting(SETUP_KEYS[0], "legacy") != "legacy":
+        raise RuntimeError(f"偏空整改设置读不回这场会的配置（读到 {got}），拒绝启动")
 
 
 def _mirror() -> bool:

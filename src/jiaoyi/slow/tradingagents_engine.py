@@ -1880,6 +1880,8 @@ class TradingAgentsEngine:
         self._live: dict[str, MeetingLive] = {}
         self._inflight_lock = threading.Lock()
         register_binance_vendor()
+        if not settings.bias_fix.is_legacy:
+            ta_nodes.check_meeting_settings()  # 开关真能传到提示词里，否则拒绝启动
         set_analyst_klines(settings.analyst_klines, settings.meeting_min)
         set_indicator_interval(prompt_params(settings).indicator)
         self._ticks = TICKS

@@ -364,3 +364,41 @@ def test_meeting_setting_reads_only_the_per_run_config(tmp_path: Path) -> None:
 
         ta_config._config = None
         ta_config.initialize_config()
+
+
+def test_missing_run_config_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TradingAgents 改版找不到按场配置：报错，不能悄悄按现状开会却记成 mirror / neutral。"""
+    from tradingagents.dataflows import config as ta_config
+
+    ta_nodes.check_meeting_settings()  # 当前钉的版本：自检通过
+    monkeypatch.delattr(ta_config, "_run_config")
+    with pytest.raises(RuntimeError, match="_run_config"):
+        ta_nodes.meeting_setting("bear_bull_symmetry", "legacy")
+    with pytest.raises(RuntimeError, match="_run_config"):
+        ta_nodes.check_meeting_settings()
+
+
+def test_engine_self_checks_only_when_a_switch_is_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x" * 16)  # 引擎会 setdefault 这个变量：测完还原
+    calls: list[int] = []
+    monkeypatch.setattr(ta_nodes, "check_meeting_settings", lambda: calls.append(1))
+    secrets = SimpleNamespace(get=lambda name: "x" * 16)
+    for fix, want in ((BiasFix(), 0), (BiasFix(funding_label="neutral"), 1)):
+        s = eng.TradingAgentsSettings(results_dir=str(tmp_path / "ta"), bias_fix=fix)
+        eng.TradingAgentsEngine(None, secrets, s)  # type: ignore[arg-type]
+        assert len(calls) == want
+
+    def broken() -> None:
+        raise RuntimeError("偏空整改设置读不回")
+
+    monkeypatch.setattr(ta_nodes, "check_meeting_settings", broken)
+    with pytest.raises(RuntimeError, match="读不回"):
+        eng.TradingAgentsEngine(  # type: ignore[arg-type]
+            None,
+            secrets,
+            eng.TradingAgentsSettings(
+                results_dir=str(tmp_path / "ta"), bias_fix=BiasFix(debate_first="bear")
+            ),
+        )
