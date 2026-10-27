@@ -37,7 +37,8 @@ def raw(kind: str = "stop_loss", **changes: Any) -> dict[str, Any]:
         "algoStatus": "NEW",
         "createTime": 1793100000000,
         "triggerTime": 0,
-        "actualOrderId": "0",
+        # Binance Query Algo Order / openAlgoOrders use an empty string before triggering.
+        "actualOrderId": "",
     }
     if kind == "take_profit":
         item.update(clientAlgoId="br-tp-synthetic", triggerPrice="1.1")
@@ -296,10 +297,10 @@ async def test_preflight_query_error_is_not_missing_and_cannot_create() -> None:
 
 
 @pytest.mark.parametrize("status", ["NEW", "CANCELED", "REJECTED", "EXPIRED"])
-async def test_explicit_zero_child_is_distinct_from_missing_or_empty(status: str) -> None:
+async def test_explicit_untriggered_child_is_distinct_from_missing_or_null(status: str) -> None:
     obj, ex = client()
     ex.fapiPrivateGetAlgoOrder.side_effect = None
-    for actual, expected in [("0", "absent"), (0, "absent"), (None, "unknown"), ("", "unknown")]:
+    for actual, expected in [("0", "absent"), (0, "absent"), (None, "unknown"), ("", "absent")]:
         ex.fapiPrivateGetAlgoOrder.return_value = raw(algoStatus=status, actualOrderId=actual)
         order = await obj.get_bracket("SYNTHUSDT", algo_id="17")
         assert order is not None and order.child_state == expected
@@ -312,6 +313,7 @@ async def test_explicit_zero_child_is_distinct_from_missing_or_empty(status: str
     ex.fapiPrivateGetOrder.assert_not_awaited()
 
 
+@pytest.mark.parametrize("actual", ["", "0", 0])
 @pytest.mark.parametrize(
     "change",
     [
@@ -324,10 +326,12 @@ async def test_explicit_zero_child_is_distinct_from_missing_or_empty(status: str
         {"algoStatus": "FUTURE_UNKNOWN_STATUS"},
     ],
 )
-async def test_trigger_or_missing_clock_overrides_zero_child(change: dict[str, Any]) -> None:
+async def test_trigger_or_missing_clock_overrides_no_child_sentinel(
+    actual: str | int, change: dict[str, Any]
+) -> None:
     obj, ex = client()
     ex.fapiPrivateGetAlgoOrder.side_effect = None
-    ex.fapiPrivateGetAlgoOrder.return_value = raw(**change)
+    ex.fapiPrivateGetAlgoOrder.return_value = raw(actualOrderId=actual, **change)
     order = await obj.get_bracket("SYNTHUSDT", algo_id="17")
     assert order is not None and order.child_state == "unknown" and order.filled_quantity is None
 
@@ -403,7 +407,7 @@ async def test_get_exact_symbol_cid_and_algo_identity() -> None:
             await obj.get_bracket("SYNTHUSDT", **query)
 
 
-@pytest.mark.parametrize("actual", [False, True, "-1", "abc", "17.5"])
+@pytest.mark.parametrize("actual", [False, True, " ", " 0 ", "-1", "abc", "17.5"])
 async def test_malformed_child_identity_is_not_absent(actual: Any) -> None:
     obj, ex = client()
     ex.fapiPrivateGetAlgoOrder.side_effect = None

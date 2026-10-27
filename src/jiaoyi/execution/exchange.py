@@ -320,9 +320,10 @@ def _bracket_from(raw: dict[str, Any], *, lifeboat: bool = False) -> ExchangeBra
     actual = raw.get("actualOrderId")
     actual_id = None
     child_state: Literal["absent", "unknown", "identified"] = "unknown"
-    if actual is not None and actual != "":
-        if actual in (0, "0") and not isinstance(actual, bool):
-            # 0 是明确 sentinel，缺字段/空字段不是；触发迹象优先于这个 sentinel。
+    if actual is not None:
+        if actual in (0, "0", "") and not isinstance(actual, bool):
+            # Binance documents an empty actualOrderId before triggering; also accept legacy 0.
+            # Require an untriggered status and explicit zero clock, never missing/null evidence.
             if (
                 status in {"NEW", "CANCELED", "REJECTED", "EXPIRED"}
                 and raw.get("triggerTime") in (0, "0")
