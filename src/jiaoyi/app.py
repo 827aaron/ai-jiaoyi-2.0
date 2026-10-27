@@ -353,7 +353,7 @@ def _build_cards(
             "hold": app_cfg.hold,
             "hold_hours": max(fast.time_limit_s / 3600.0, 1.0),
         },
-        **cfg.commander_kwargs(),
+        **cfg.commander_kwargs(app_cfg.profile),
     )
     return commander, news
 
