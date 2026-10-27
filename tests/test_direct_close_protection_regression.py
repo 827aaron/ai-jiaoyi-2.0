@@ -29,6 +29,61 @@ async def request_close(rig: Rig, pid: str) -> None:
         await rig.adapter.close(pid, CloseReason.KEEPER)
 
 
+@pytest.mark.parametrize("side", ["long", "short"])
+async def test_late_legacy_entry_lookup_cannot_erase_pending_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+) -> None:
+    """升级前账本补 CID 的迟到查询，不得覆盖查询期间保存的退出意图。"""
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig, side=side)
+    stale = rig.registry.get(pid).model_copy(
+        update={"entry_client_order_id": None, "entry_original_quantity": None}
+    )
+    rig.registry.put(stale)
+    stops = dict(rig.ex.stops)
+    detail = await rig.api.get_executor(stale.record.executor_id)
+    lookup_started, lookup_release = asyncio.Event(), asyncio.Event()
+    submissions = 0
+
+    async def slow_lookup(executor_id: str) -> Any:
+        lookup_started.set()
+        await lookup_release.wait()
+        return detail
+
+    async def accepted_then_timeout(*args: Any, **kwargs: Any) -> CloseFill:
+        nonlocal submissions
+        submissions += 1
+        raise ExchangeError("synthetic accepted then timeout", transient=True)
+
+    monkeypatch.setattr(rig.api, "get_executor", slow_lookup)
+    monkeypatch.setattr(rig.api, "stop_executor", unavailable_hb)
+    monkeypatch.setattr(rig.ex, "close_position_market", accepted_then_timeout)
+    syncing = asyncio.create_task(rig.adapter._sync_one(stale))
+    await lookup_started.wait()
+    closing = asyncio.create_task(request_close(rig, pid))
+    try:
+        # 兼容两种安全实现：锁串行化，或异步查询后只合并最新账本的入场证据。
+        with suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(closing), timeout=0.05)
+    finally:
+        lookup_release.set()
+        await asyncio.gather(syncing, closing)
+
+    state = rig.registry.get(pid)
+    assert state.record.status is PositionStatus.CLOSING
+    assert state.requested_close is CloseReason.KEEPER
+    assert state.direct_close_pending is True
+    assert state.direct_close_client_order_id is not None
+    assert state.direct_close_generation == 1
+    assert submissions == 1
+    assert_still_protected(rig, pid, stops)
+    restored = PositionRegistry(tmp_path / "positions.json").get(pid)
+    assert restored.direct_close_client_order_id == state.direct_close_client_order_id
+    assert restored.direct_close_pending is True
+
+
 def assert_still_protected(rig: Rig, pid: str, stops: dict[str, Any]) -> None:
     tracked = rig.registry.get(pid)
     assert tracked is not None
