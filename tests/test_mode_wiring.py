@@ -160,6 +160,8 @@ async def test_paper_and_testnet_use_demo_connector_and_testnet_key(
     assert call["testnet"] is True and call["demo"] is True
     assert "demo-fapi.binance.com" in _fapi(call)
     assert await _open_connector(spy, adapter) == "binance_perpetual_testnet"
+    enrolled = next(iter(adapter._registry.data.positions.values())).frozen_peak_exit
+    assert enrolled is not None and enrolled.after_s == 3600
     assert len(closers) == 1 and len(checks) == 1  # 关闭与启动时同账户校验都登记了
 
 
@@ -174,6 +176,7 @@ async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, s
     url = _fapi(call)
     assert "fapi.binance.com" in url and "demo" not in url and "testnet" not in url
     assert await _open_connector(spy, adapter) == "binance_perpetual"
+    assert next(iter(adapter._registry.data.positions.values())).frozen_peak_exit is None
 
 
 async def test_legacy_testnet_environment_is_honoured(tmp_path: Path, spy: Spy) -> None:
@@ -185,6 +188,8 @@ async def test_legacy_testnet_environment_is_honoured(tmp_path: Path, spy: Spy) 
     (call,) = spy.ccxt_calls
     assert call["demo"] is False
     assert "testnet.binancefuture.com" in _fapi(call)
+    assert await _open_connector(spy, adapter) == "binance_perpetual_testnet"
+    assert next(iter(adapter._registry.data.positions.values())).frozen_peak_exit is None
 
 
 def test_live_not_unlocked_is_refused_and_connects_to_nothing(tmp_path: Path, spy: Spy) -> None:

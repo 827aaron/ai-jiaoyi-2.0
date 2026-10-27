@@ -100,6 +100,8 @@ class EntryBasis:
     fee_usdt: float
     entry_price: float
     order_status: str
+    first_fill_at: datetime | None = None
+    last_fill_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -1352,6 +1354,12 @@ class CcxtBinanceFutures:
             entry_price = float(quote / filled)
             if not math.isfinite(entry_price) or entry_price <= 0:
                 raise ValueError("开仓实际均价非法")
+            try:
+                fill_times = [_bracket_time(row.get("time")) for row in rows]
+            except (ValueError, ArithmeticError, OverflowError, OSError):
+                fill_times = [None]
+            known_times = [t for t in fill_times if t is not None]
+            times_complete = len(known_times) == len(rows)
             return EntryBasis(
                 symbol=symbol,
                 client_order_id=client_order_id,
@@ -1362,6 +1370,8 @@ class CcxtBinanceFutures:
                 fee_usdt=fee_float,
                 entry_price=entry_price,
                 order_status=status,
+                first_fill_at=min(known_times) if times_complete else None,
+                last_fill_at=max(known_times) if times_complete else None,
             )
         except Exception as error:
             raise ExchangeError(

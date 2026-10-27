@@ -89,6 +89,8 @@ def build_execution(
     close_unknown_positions: bool = False,
     demo_trading: bool = True,
     limit_take_profit: bool = False,
+    frozen_peak_exit_on: bool = True,
+    frozen_peak_exit_after_s: int = 3600,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -154,6 +156,8 @@ def build_execution(
         limit_take_profit=limit_take_profit,
         tick_size=tick_size,
         protection=protection,
+        frozen_peak_exit_on=frozen_peak_exit_on and mode is not RunMode.LIVE and demo_trading,
+        frozen_peak_exit_after_s=frozen_peak_exit_after_s,
     )
     reconciler = ThreeWayReconciler(
         adapter,

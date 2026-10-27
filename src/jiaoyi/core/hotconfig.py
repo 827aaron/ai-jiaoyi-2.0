@@ -76,6 +76,8 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_close_p",
         "keeper_close_p_strong",
         "keeper_confirmations",
+        "frozen_peak_exit_on",
+        "frozen_peak_exit_after_s",
         "giveback_on",
         "giveback_close_pct",
         "giveback_arm_r",

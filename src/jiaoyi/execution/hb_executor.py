@@ -57,6 +57,7 @@ from jiaoyi.execution.fills import (
     exit_fill,
     no_open_fill,
 )
+from jiaoyi.execution.frozen_peak import FrozenPeakExit, frozen_peak_update
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
@@ -111,6 +112,8 @@ PHANTOM_SETTLE = timedelta(minutes=5)
 _TRADE_BUY = 1
 _TRADE_SELL = 2
 
+
+FROZEN_PEAK_EVIDENCE_TIMEOUT_S = 12.0
 
 RELAY_LIFEBOAT_BP = 2.0
 """真实入场价改了以后，保命止损价差超过这么多（万分之几）才撤旧挂新。"""
@@ -316,6 +319,8 @@ class HbExecutorAdapter:
         tick_size: Callable[[str], float | None] | None = None,
         chase_request: ChaseRequest | None = None,
         protection: BracketManager | None = None,
+        frozen_peak_exit_on: bool = False,
+        frozen_peak_exit_after_s: int = 3600,
     ) -> None:
         """``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
 
@@ -323,6 +328,8 @@ class HbExecutorAdapter:
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 风控算的止损 / 止盈距离。"""
         self._chase_request = chase_request
         self._protection = protection
+        self._frozen_peak_on = frozen_peak_exit_on
+        self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
         self._open_fee = open_fee_bps / 1e4
         self._lifeboat = lifeboat
@@ -461,6 +468,11 @@ class HbExecutorAdapter:
             limit_wait_s=intent.limit_wait_s if limit else None,
             hold_s=intent.time_limit_s if limit and intent.limit_wait_s else None,
             chase=intent if limit and intent.limit_wait_s and intent.limit_chase else None,
+            frozen_peak_exit=FrozenPeakExit(
+                after_s=self._frozen_peak_after_s, exit_fee_bps=self._open_fee * 1e4
+            )
+            if self._frozen_peak_on and self._protection is not None
+            else None,
             server_protection=self._protection.initial(intent.quantity)
             if self._protection is not None
             else None,
@@ -1079,6 +1091,97 @@ class HbExecutorAdapter:
                     f"server_tick:{pid}",
                     kind="order_failed",
                 )
+
+    def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:
+        self._frozen_peak_on = enabled
+        self._frozen_peak_after_s = after_s
+
+    async def frozen_peak_review(self, position_id: str, now: datetime) -> dict[str, Any] | None:
+        initial = self._registry.get(position_id)
+        if self._protection is None or initial is None or initial.frozen_peak_exit is None:
+            return None
+        if initial.record.status is not PositionStatus.OPEN:
+            return None
+        if initial.frozen_peak_exit.status == "triggered":
+            async with self._registry.symbol_lock(initial.record.symbol):
+                current = self._registry.get(position_id)
+                if (
+                    current is None
+                    or current.record.status is not PositionStatus.OPEN
+                    or current.frozen_peak_exit != initial.frozen_peak_exit
+                    or current.entry_client_order_id != initial.entry_client_order_id
+                ):
+                    return None
+                return {
+                    **initial.frozen_peak_exit.model_dump(mode="json"),
+                    "triggered": True,
+                    "detail": "pending_exit",
+                }
+        basis = book = None
+        held: list[ExchangePosition] = []
+        error_detail = ""
+        try:
+            read_basis = getattr(self._exchange, "entry_basis", None)
+            read_book = getattr(self._exchange, "execution_book", None)
+            read_positions = getattr(self._exchange, "positions_evidence", None)
+            if (
+                read_basis is None
+                or read_book is None
+                or read_positions is None
+                or initial.entry_client_order_id is None
+            ):
+                raise ExchangeError("Execution evidence reader or entry CID is unavailable")
+            async with asyncio.timeout(FROZEN_PEAK_EVIDENCE_TIMEOUT_S):
+                basis = await read_basis(initial.record.symbol, initial.entry_client_order_id)
+                held = [p for p in await read_positions() if p.symbol == initial.record.symbol]
+                book = await read_book(initial.record.symbol)
+        except Exception as error:
+            error_detail = f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
+        async with self._registry.symbol_lock(initial.record.symbol):
+            tracked = self._registry.get(position_id)
+            if (
+                tracked is None
+                or tracked.record.status is not PositionStatus.OPEN
+                or tracked.frozen_peak_exit != initial.frozen_peak_exit
+                or tracked.entry_client_order_id != initial.entry_client_order_id
+            ):
+                return None
+            state, protection = tracked.frozen_peak_exit, tracked.server_protection
+            assert state is not None
+            try:
+                if error_detail:
+                    raise ExchangeError(error_detail)
+                if (
+                    protection is None
+                    or protection.stage != "armed"
+                    or not protection.entry_terminal
+                    or protection.entry_status != "FILLED"
+                    or not isinstance(basis, EntryBasis)
+                    or book is None
+                    or basis.client_order_id != tracked.entry_client_order_id
+                    or basis.order_id != protection.entry_order_id
+                    or protection.observed_quantity is None
+                    or not math.isclose(
+                        protection.observed_quantity, basis.filled_quantity, rel_tol=1e-10
+                    )
+                    or len(held) != 1
+                    or held[0].side is not tracked.record.side
+                    or not math.isfinite(held[0].quantity)
+                    or not math.isclose(held[0].quantity, basis.filled_quantity, rel_tol=1e-10)
+                ):
+                    raise ExchangeError(
+                        "Entry order or remaining position evidence is inconsistent"
+                    )
+                state = frozen_peak_update(tracked.record, state, basis, book, self._clock())
+            except Exception as error:
+                detail = error_detail or (
+                    f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
+                )
+                state = state.model_copy(update={"detail": detail})
+                self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
+                return {**state.model_dump(mode="json"), "triggered": False}
+            self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
+            return {**state.model_dump(mode="json"), "triggered": state.status == "triggered"}
 
     async def _update_server_trailing(self, position_id: str) -> None:
         async with self._exit_lock(position_id):
