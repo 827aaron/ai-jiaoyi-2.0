@@ -23,6 +23,9 @@ from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.exchange import WorkingType
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
+LegPurpose = Literal["fixed", "trailing", "lifeboat"]
+"""条件单腿的来源；新的收紧来源（例如反向卡收紧）在这里加自己的取值。"""
+
 
 class ProtectiveLeg(BaseModel):
     """每次提交/撤销前持久化的条件单身份；旧代也保留以核对迟到触发。"""
@@ -30,7 +33,7 @@ class ProtectiveLeg(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     kind: Literal["stop_loss", "take_profit"]
-    purpose: Literal["fixed", "trailing", "lifeboat"] = "fixed"
+    purpose: LegPurpose = "fixed"
     generation: int
     client_order_id: str
     quantity: float

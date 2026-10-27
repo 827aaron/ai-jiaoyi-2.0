@@ -28,7 +28,7 @@ from tests.test_exchange_execution_evidence import client, freeze
 from tests.test_execution import START
 from tests.test_panel import NOW as PANEL_NOW
 from tests.test_panel_server_protection import _armed
-from tests.test_server_protection_regression import Harness
+from tests.test_server_protection_regression import AdapterHarness, Harness
 from tests.test_trailing_book_fresh import SlowHarness
 
 LONG_SHORT = pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -109,24 +109,77 @@ async def test_unknown_mark_skips_the_round_without_touching_the_peak(
 
 
 @LONG_SHORT
-async def test_new_trailing_stop_beyond_mark_is_not_submitted(tmp_path: Path, side: Side) -> None:
+async def test_target_beyond_mark_is_clamped_to_tightest_placeable_price_with_critical_alert(
+    tmp_path: Path, side: Side
+) -> None:
+    h = AdapterHarness(tmp_path, side)  # 用执行器接上的告警
+    long = side is Side.LONG
+    assert await h.manager.sync("pos-1") == "armed"
+    fixed_sl = _stop_cid(h)
+    _trail(h, 101.5 if long else 98.5)
+
+    def clamp_alerts() -> list[Any]:
+        return [a for a in h.alerter.sent if a.dedup_key == "server_stop_clamped:pos-1"]
+
+    # 标记价已越过目标：不退回入场一侧的固定止损，夹到标记价 ×（1 ∓ 5 基点），取整后挂上。
+    h.exchange.mark = 101.4 if long else 98.6
+    assert await h.manager.sync("pos-1") == "armed"
+    clamped = h.creates()[-1]
+    assert clamped.startswith("br-sl-") and h.cancels() == [fixed_sl]  # 先挂新的，再撤旧的
+    assert h.exchange.orders[clamped].trigger_price == (101.35 if long else 98.65)
+    assert h.state().legs[-1].purpose == "trailing"
+    assert "改挂可挂的最紧价" in (h.state().last_error or "")
+    assert len(clamp_alerts()) == 1 and clamp_alerts()[0].level is AlertLevel.CRITICAL
+    # 标记价再越过一点：夹出来的价不比正在挂的紧，保留正在挂的，照样紧急告警。
+    h.exchange.mark = 101.38 if long else 98.62
+    assert await h.manager.sync("pos-1") == "armed"
+    assert (
+        len(h.creates()) == 4
+        and h.manager.live_stop_price("pos-1") == h.exchange.orders[clamped].trigger_price
+    )
+    assert "保留正在挂的止损" in (h.state().last_error or "") and len(clamp_alerts()) == 2
+    # 标记价回到安全一侧：按原目标换代，不再告警。
+    h.exchange.mark = 102.5 if long else 97.5
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.exchange.orders[h.creates()[-1]].trigger_price == (101.5 if long else 98.5)
+    assert h.state().last_error is None and len(clamp_alerts()) == 2
+
+
+@LONG_SHORT
+async def test_tightened_candidate_is_never_replaced_by_a_looser_leg(
+    tmp_path: Path, side: Side
+) -> None:
+    # 给其它收紧来源（反向卡收紧等）留的接口：候选里最紧的赢；任何非固定来源都不会把在挂的换松。
+    h = Harness(tmp_path, side)
+    long = side is Side.LONG
+    candidates: list[tuple[Any, float]] = [("fixed", 101.8 if long else 98.2)]
+    h.manager._extra_stop_candidates = lambda tracked, state: candidates
+    assert await h.manager.sync("pos-1") == "armed"
+    _trail(h, 101.5 if long else 98.5)
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.manager.live_stop_price("pos-1") == (101.8 if long else 98.2)
+    placed = len(h.creates())
+    _trail(h, 101.6 if long else 98.4)  # 移动止损涨了，但仍比候选松
+    assert await h.manager.sync("pos-1") == "armed"
+    candidates.clear()  # 候选没了：移动止损 101.6 / 98.4 比在挂的 101.8 / 98.2 松，也不换
+    assert await h.manager.sync("pos-1") == "armed"
+    candidates.append(("fixed", 101.8 if long else 98.2))
+    h.exchange.mark = 101.7 if long else 98.3  # 标记价越过候选：夹出来的价更松，保留在挂的
+    assert await h.manager.sync("pos-1") == "armed"
+    assert len(h.creates()) == placed
+    assert h.manager.live_stop_price("pos-1") == (101.8 if long else 98.2)
+
+
+@LONG_SHORT
+async def test_candidate_counts_even_without_a_trailing_stop(tmp_path: Path, side: Side) -> None:
     h = Harness(tmp_path, side)
     long = side is Side.LONG
     assert await h.manager.sync("pos-1") == "armed"
-    old_sl = _stop_cid(h)
-    _trail(h, 101.5 if long else 98.5)
-    for mark in (101.4, 101.53) if long else (98.6, 98.47):  # 已越过；没越过但在 5 基点缓冲内
-        h.exchange.mark = mark
-        assert await h.manager.sync("pos-1") == "armed"
-        assert len(h.creates()) == 3 and not h.cancels()  # 没靠交易所拒单（-2021）去平仓
-        assert h.exchange.orders[old_sl].algo_status == "NEW"
-        assert h.state().stage == "armed" and "安全一侧" in (h.state().last_error or "")
-    h.exchange.mark = 102.5 if long else 97.5
+    assert h.manager.live_stop_price("pos-1") == (99.0 if long else 101.0)
+    assert h.state().trailing_stop_price is None
+    h.manager._extra_stop_candidates = lambda tracked, state: [("fixed", 99.5 if long else 100.5)]
     assert await h.manager.sync("pos-1") == "armed"
-    new_sl = h.creates()[-1]
-    assert new_sl.startswith("br-sl-") and h.cancels() == [old_sl]
-    assert h.exchange.orders[new_sl].trigger_price == (101.5 if long else 98.5)
-    assert h.state().last_error is None
+    assert h.manager.live_stop_price("pos-1") == (99.5 if long else 100.5)
 
 
 async def test_unreadable_mark_keeps_the_live_stop(tmp_path: Path) -> None:

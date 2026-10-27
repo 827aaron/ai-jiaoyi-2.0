@@ -331,6 +331,8 @@ class HbExecutorAdapter:
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 风控算的止损 / 止盈距离。"""
         self._chase_request = chase_request
         self._protection = protection
+        if protection is not None:
+            protection.notify_stop_clamped = self._alert_stop_clamped
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -1098,6 +1100,17 @@ class HbExecutorAdapter:
                     f"server_tick:{pid}",
                     kind="order_failed",
                 )
+
+    async def _alert_stop_clamped(self, pid: str, symbol: str, text: str) -> None:
+        """止损目标已越过标记价：被夹到可挂的最紧价，或本轮没换。价格已经穿过想要的止损位。"""
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "止损目标已越过标记价",
+            f"{symbol} {pid}：{text}",
+            symbol,
+            f"server_stop_clamped:{pid}",
+            kind="order_failed",
+        )
 
     async def _alert_trailing_book(
         self, pid: str, symbol: str, error: TrailingBookUnavailable
