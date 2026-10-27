@@ -301,6 +301,45 @@ def _jev_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _card_score(args: argparse.Namespace) -> int:
+    """作战卡方向记分：补算窗口走完的卡（只追加），重写汇总，打印主指标、基线和分组。"""
+    from datetime import timedelta
+
+    from jiaoyi.gate.bars import OutcomeBars
+    from jiaoyi.market.rest import RateLimited
+    from jiaoyi.slow import card_score
+
+    try:
+        app_cfg = load_app_config(Path(args.app))
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    now = datetime.now(UTC)
+    data_dir = app_cfg.data_dir
+    packs = Path(data_dir) / "history"
+    window = app_cfg.card_score_window_days
+    try:
+        res = asyncio.run(
+            card_score.update(
+                data_dir,
+                now,
+                OutcomeBars(cache=packs),
+                since=now - timedelta(days=args.days),
+                summary_since=now - timedelta(days=window) if window else None,
+                packs=packs,
+            )
+        )
+    except RateLimited:
+        _say_rate_limited()
+        return 1
+    print(f"新记 {res.new} 张，窗口没走完 {res.waiting} 张，拉行情失败 {res.failed} 张（下次再算）")
+    for line in card_score.render(res.report):
+        print(line)
+    store = card_score.ScoreStore(data_dir)
+    print(f"明细：{store.scored_path}  汇总：{store.summary_path}")
+    return 0
+
+
 def _gate_calibrate(args: argparse.Namespace) -> int:
     """影子结果（实盘拍板 + 回放）扫拍板门槛 → data/gate_calibration/<hold>.json，不自动套用。"""
     from datetime import timedelta
@@ -701,6 +740,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--cache", default="data/history", help="历史数据下载缓存")
     p.set_defaults(func=_jev_replay)
+
+    p = sub.add_parser(
+        "card-score", help="作战卡方向记分：发布时刻起算、扣掉同期币池，补算并打印（只读行情）"
+    )
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--days", type=float, default=30.0, help="补算最近几天出的卡")
+    p.set_defaults(func=_card_score)
 
     p = sub.add_parser(
         "gate-calibrate", help="拿影子结果扫拍板门槛，给推荐值（写 data/gate_calibration/）"

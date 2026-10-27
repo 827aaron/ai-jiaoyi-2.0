@@ -316,7 +316,9 @@ def test_is_lan(host: str | None, ok: bool) -> None:
     assert is_lan(host) is ok
 
 
-def _client(tmp_path: Path, host: str, live: Any = None) -> TestClient:
+def _client(
+    tmp_path: Path, host: str, live: Any = None, cfg: c.AppConfig | None = None
+) -> TestClient:
     from jiaoyi.panel.live_price import LivePrices
     from jiaoyi.panel.market import KlineSource
 
@@ -335,7 +337,7 @@ def _client(tmp_path: Path, host: str, live: Any = None) -> TestClient:
     )
     app = create_app(
         RISK,
-        _cfg(tmp_path),
+        cfg or _cfg(tmp_path),
         hb,
         clock=lambda: NOW,
         klines=KlineSource(transport=httpx.MockTransport(handler)),
@@ -1303,6 +1305,53 @@ def test_card_history_lists_past_orders(tmp_path: Path) -> None:
     prev = build_card_history(files, NOW, day=date.fromisoformat(page.days[1]))
     assert len(prev.rows) == 1 and prev.rows[0].reason == ""  # 那天没有会议记录
     assert build_card_history(files, NOW, symbol="X").rows == []
+
+
+def test_card_score_endpoint_reads_summary_only(tmp_path: Path) -> None:
+    """方向记分：面板只读 data/card_score/summary.json；没算过是 404，不在请求里现算。"""
+    from jiaoyi.slow import card_score
+
+    _seed(tmp_path)
+    with _client(tmp_path, "127.0.0.1") as client:
+        assert client.get("/api/card-score").status_code == 404
+        rep = card_score.Report(generated_at=NOW, n_cards=3, n_neutral=1)
+        card_score.ScoreStore(tmp_path).write_summary(rep)
+        r = client.get("/api/card-score")
+    assert r.status_code == 200
+    assert card_score.Report.model_validate(r.json()) == rep
+    assert not (tmp_path / "card_score" / "scored.jsonl").exists()
+
+
+@pytest.mark.parametrize(("every", "runs"), [(0, 0), (60, 1)])
+def test_panel_card_score_job_follows_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, every: int, runs: int
+) -> None:
+    """面板后台的方向记分：card_score_every_min = 0 一次都不算；> 0 启动后算一次再等。"""
+    import time
+
+    from jiaoyi.panel import server
+    from jiaoyi.slow import card_score
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_update(data_dir: Any, now: datetime, fetch: Any, **kw: Any) -> Any:
+        calls.append(kw)
+        return card_score.RunResult(0, 0, 0, card_score.Report(generated_at=now))
+
+    monkeypatch.setattr(server, "CARD_SCORE_FIRST_S", 0.0)
+    monkeypatch.setattr(server, "CARD_SCORE_IDLE_MIN", 0.001)
+    monkeypatch.setattr(card_score, "update", fake_update)
+    cfg = _cfg(tmp_path).model_copy(
+        update={"card_score_every_min": every, "card_score_window_days": 30}
+    )
+    _seed(tmp_path)
+    with _client(tmp_path, "127.0.0.1", cfg=cfg):
+        time.sleep(0.3)
+    assert len(calls) == runs
+    for kw in calls:
+        assert kw["since"] == NOW - server.CARD_SCORE_LOOKBACK
+        assert kw["summary_since"] == NOW - timedelta(days=30)  # 汇总只看最近 30 天
+        assert kw["packs"] == tmp_path / "history"  # 坏日包删了重下
 
 
 def test_position_view_mark_notional_margin(tmp_path: Path) -> None:
