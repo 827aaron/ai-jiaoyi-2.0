@@ -35,7 +35,7 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatus
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
+from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete, describe_error
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
     CloseFill,
@@ -1085,7 +1085,7 @@ class HbExecutorAdapter:
                 await self._alert(
                     AlertLevel.CRITICAL,
                     "托管保护本轮未确认",
-                    f"{initial.record.symbol} {pid}：{type(error).__name__}；"
+                    f"{initial.record.symbol} {pid}：{describe_error(error)}；"
                     "保留最后确认保护并等待核验",
                     initial.record.symbol,
                     f"server_tick:{pid}",
@@ -1347,7 +1347,7 @@ class HbExecutorAdapter:
             await self._alert(
                 AlertLevel.CRITICAL,
                 "普通托管保护未完整确认",
-                f"{rec.symbol} {rec.position_id}：{type(error).__name__}；"
+                f"{rec.symbol} {rec.position_id}：{describe_error(error)}；"
                 + (
                     "保留最后确认止损与 HB 时限，等待回读"
                     if keep_previous

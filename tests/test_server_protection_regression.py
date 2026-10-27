@@ -292,6 +292,9 @@ async def test_restart_rejects_wrong_trigger_price_without_rebuilding(tmp_path: 
     with pytest.raises(ProtectionIncomplete):
         await h.manager.sync("pos-1")
     assert len(h.creates()) == 3 and not h.cancels()
+    assert (
+        h.state().last_error == "ProtectionIncomplete: 条件单身份、触发价、数量或只减仓参数不匹配"
+    )
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -517,11 +520,12 @@ class AdapterHarness(Harness):
         self.adapter = self.make_adapter()
 
     def make_adapter(self):
+        self.alerter = StubAlerter()
         return HbExecutorAdapter(
             self.api,
             self.lifeboat,
             self.registry,
-            StubAlerter(),
+            self.alerter,
             account_name="synthetic-account",
             connector_name="synthetic-demo",
             exchange=self.exchange,
@@ -551,6 +555,24 @@ class AdapterHarness(Harness):
     def restart_adapter(self):
         self.restart()
         self.adapter = self.make_adapter()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_lifeboat_unreadable_after_ack_reports_which_check_failed(tmp_path: Path, side: Side):
+    h = AdapterHarness(tmp_path, side)
+
+    async def unreadable(order: ExchangeBracket) -> None:
+        if order.client_order_id.startswith("lb-"):
+            h.exchange.hidden.add(order.client_order_id)
+
+    h.exchange.on_place = unreadable
+    await h.adapter.protection_tick()
+    detail = "ProtectionIncomplete: 已提交条件单暂时不可查，不能再次创建或当作已撤"
+    assert [c[:3] for c in h.creates()] == ["lb-"]
+    assert h.state().last_error == detail
+    assert [a.body for a in h.alerter.sent if a.title == "普通托管保护未完整确认"] == [
+        f"BTCUSDT pos-1：{detail}；保留已确认保护，停止入场并核验退出"
+    ]
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
