@@ -203,14 +203,14 @@ function ask(title, body, ok, danger, submit) {
     <div class="msg small" id="dlg-msg"></div>
     <div class="acts"><button class="btn" data-close="1">取消</button><button class="btn ${danger ? "b-kill" : "b-go"}" data-ok="1">${ok}</button></div></div></div>`;
   onOk = submit;
-  const first = $("#layer input:not([hidden])") || $("#layer [data-ok]");
+  const first = $("#layer input:not(.vh)") || $("#layer [data-ok]");
   first.focus();
 }
 function dlgMsg(html, k = "") { const m = $("#dlg-msg"); if (m) { m.className = "msg small " + k; m.innerHTML = html; } }
 
 function pwField(c) {
   if (!c.pw_set) return `<div class="note warn">还没有设置面板密码：先在 Mac mini 终端运行 <code>jiaoyi set-panel-password</code>。</div>`;
-  return `<form id="dlg-pw-form" autocomplete="on"><input type="text" name="username" autocomplete="username" value="jiaoyi-panel" hidden readonly><label class="pw">面板密码<input type="password" id="dlg-pw" name="password" autocomplete="current-password" value="${esc(panelPw)}"></label></form><div class="dim small">连错 5 次锁 15 分钟。</div>`;
+  return `<form id="dlg-pw-form" autocomplete="on"><input type="text" name="username" autocomplete="username" value="jiaoyi-panel" class="vh" tabindex="-1" aria-hidden="true" readonly><label class="pw">面板密码<input type="password" id="dlg-pw" name="password" autocomplete="current-password" value="${esc(panelPw)}"></label></form><div class="dim small">连错 5 次锁 15 分钟。</div>`;
 }
 
 // 设置页常显：有改动没生效时高亮「重启生效」，否则是普通的「重启主程序」（验收时随时要重启）

@@ -19,7 +19,7 @@ CASES = r"""
 // 表单：隐藏的固定用户名 + 带 name 的密码框
 let h = pwField({ pw_set: true });
 assert(h.startsWith('<form id="dlg-pw-form"'), h);
-assert(h.includes('<input type="text" name="username" autocomplete="username" value="jiaoyi-panel" hidden readonly>'), h);
+assert(h.includes('<input type="text" name="username" autocomplete="username" value="jiaoyi-panel" class="vh" tabindex="-1" aria-hidden="true" readonly>'), h);
 assert(h.includes('type="password" id="dlg-pw" name="password" autocomplete="current-password"'), h);
 assert(h.includes('value=""'));
 assert(h.includes('连错 5 次锁 15 分钟'));
