@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 from jiaoyi.contracts import DecisionRecord, Outcome, PositionStatus, Role
 from jiaoyi.contracts.battle_card import CardSymbol
 from jiaoyi.panel.files import PanelFiles
+from jiaoyi.slow.card_outlook import card_from_output
 from jiaoyi.slow.review import CardJournal, JournalRow
 
 HistoryEnd = Literal["active", "expired", "replaced"]
@@ -137,8 +138,9 @@ def _conclusion(recs: list[DecisionRecord], row: JournalRow) -> CardSymbol | Non
         if gap > MATCH_WINDOW or (best and gap >= best[0]):
             continue
         try:
-            # 记录里还夹着 usage（token 用量）等不属于指令的键，契约禁止多余字段，先去掉
-            cs = CardSymbol.model_validate(
+            # 记录里还夹着 usage（token 用量）等不属于指令的键，契约禁止多余字段，先去掉；
+            # 只记录的 outlook 单独校验，坏了不连累卡
+            cs = card_from_output(
                 {k: v for k, v in rec.output.items() if k in CardSymbol.model_fields}
             )
         except ValidationError:

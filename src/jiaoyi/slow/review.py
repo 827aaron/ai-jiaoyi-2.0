@@ -46,6 +46,8 @@ class JournalRow(BaseModel):
     symbol: str
     category: str
     bias: str
+    # 只记录的 CardOutlook（大盘 / 相对判断、评级、观望倾向、总盘会方向）；旧行没有
+    outlook: dict[str, Any] | None = None
 
 
 class CardJournal:
@@ -71,6 +73,7 @@ class CardJournal:
                 symbol=s.symbol,
                 category=s.category.value,
                 bias=s.bias.value,
+                outlook=s.outlook.model_dump(mode="json") if s.outlook else None,
             )
             for s in card.symbols
             if s.symbol in fresh_set

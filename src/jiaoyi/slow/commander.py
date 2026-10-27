@@ -55,6 +55,7 @@ from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.card_outlook import with_board
 from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.market_audit import CURRENT_AUDIT, MarketAudit
 from jiaoyi.slow.market_log import MarketLog, pool_rows, round_id
@@ -470,8 +471,8 @@ class BattleCardCommander:
     def _stamp(
         cs: CardSymbol, issued: datetime, expires: datetime, market: MarketView | None = None
     ) -> CardSymbol:
-        """给一条指令盖上「哪一刻开的会、到几点到期」。"""
-        return cs.model_copy(
+        """给一条指令盖上「哪一刻开的会、到几点到期」；只记录的 outlook 配上同一份总盘会方向。"""
+        stamped = cs.model_copy(
             update={
                 "issued_at": issued,
                 "expires_at": expires,
@@ -480,6 +481,7 @@ class BattleCardCommander:
                 "source_regime": market.regime if market else None,
             }
         )
+        return with_board(stamped, market)
 
     def _fit(self, syms: list[CardSymbol]) -> list[CardSymbol]:
         """池子装不下（卡最多 50 个币）时先丢最早到期的，持仓币不丢。"""
@@ -2462,17 +2464,16 @@ class BattleCardCommander:
                     else self._engine.analyze(entry, regime, pick_reason)
                 )
                 res = cast(Analysis, await asyncio.wait_for(meeting, self._symbol_timeout_s))
+                cs = res.card_symbol
                 if market_view is not None:
-                    res = Analysis(
-                        res.card_symbol.model_copy(
-                            update={
-                                "source_market_view_id": market_view.market_view_id,
-                                "source_regime": market_view.regime,
-                            }
-                        ),
-                        res.cost_usd,
-                        res.usage,
+                    cs = cs.model_copy(
+                        update={
+                            "source_market_view_id": market_view.market_view_id,
+                            "source_regime": market_view.regime,
+                        }
                     )
+                # 只记录的 outlook 配上这场会看到的总盘会方向，开会记录里就是完整的一份
+                res = Analysis(with_board(cs, market_view), res.cost_usd, res.usage)
             except Exception as exc:
                 self._charge(-est)
                 fail_cost = self._failure_cost(exc, entry.symbol)
@@ -2702,7 +2703,11 @@ class BattleCardCommander:
             tmp.write_text(
                 json.dumps(
                     {
-                        "card": self._card.model_dump(mode="json"),
+                        # outlook 只是记录（已在开会记录和复盘流水里），不进存档：回退旧版本时
+                        # 旧代码（契约禁止多余字段）还能读回这张卡
+                        "card": self._card.model_dump(
+                            mode="json", exclude={"symbols": {"__all__": {"outlook"}}}
+                        ),
                         "last_meeting": {k: v.isoformat() for k, v in self._last_meeting.items()},
                         "stop": asdict(self._stop),
                         "regime_reference": (
