@@ -1087,17 +1087,7 @@ class HbExecutorAdapter:
                 if current.record.status is PositionStatus.OPEN:
                     await self._update_server_trailing(pid)
             except TrailingBookUnavailable as error:
-                # 只是这一轮没拿到能用的盘口：不更新移动止损，已确认保护不变。单独的去重键，
-                # 不占真正保护失败（server_tick）的冷却名额。
-                await self._alert(
-                    AlertLevel.WARN,
-                    "移动止损本轮缺有效盘口",
-                    f"{initial.record.symbol} {pid}：{describe_error(error)}；"
-                    "本轮不更新移动止损，已确认的止损 / 止盈 / 保命单不变",
-                    initial.record.symbol,
-                    f"server_trailing_book:{pid}",
-                    kind="order_failed",
-                )
+                await self._alert_trailing_book(pid, initial.record.symbol, error)
             except Exception as error:
                 await self._alert(
                     AlertLevel.CRITICAL,
@@ -1108,6 +1098,40 @@ class HbExecutorAdapter:
                     f"server_tick:{pid}",
                     kind="order_failed",
                 )
+
+    async def _alert_trailing_book(
+        self, pid: str, symbol: str, error: TrailingBookUnavailable
+    ) -> None:
+        """这一轮没拿到能用的盘口：不更新移动止损，已确认保护不变。单独的去重键，不占真正保护
+        失败（server_tick）的冷却名额；已激活的移动止损连续太久拿不到，升级成紧急。"""
+        tracked = self._registry.get(pid)
+        state = tracked.server_protection if tracked is not None else None
+        after = self._protection.trailing_book_critical_after_s if self._protection else 0.0
+        since = state.trailing_failing_since if state is not None else None
+        held_s = (self._clock() - since).total_seconds() if since is not None else 0.0
+        if state is not None and state.trailing_activated and after > 0 and held_s >= after:
+            last = state.trailing_observed_at
+            last_text = last.strftime("%m-%d %H:%M:%S UTC") if last is not None else "从没有"
+            await self._alert(
+                AlertLevel.CRITICAL,
+                "移动止损长时间没有有效盘口",
+                f"{symbol} {pid}：已激活的移动止损连续 {held_s / 60:.0f} 分钟没有有效盘口，"
+                f"最后一次成功观测 {last_text}；最近原因：{describe_error(error)}。"
+                "峰值和止损价停在最后一次成功观测，已挂的止损 / 止盈 / 保命单不变",
+                symbol,
+                f"server_trailing_book_stuck:{pid}",
+                kind="order_failed",
+            )
+            return
+        await self._alert(
+            AlertLevel.WARN,
+            "移动止损本轮缺有效盘口",
+            f"{symbol} {pid}：{describe_error(error)}；"
+            "本轮不更新移动止损，已确认的止损 / 止盈 / 保命单不变",
+            symbol,
+            f"server_trailing_book:{pid}",
+            kind="order_failed",
+        )
 
     def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:
         self._frozen_peak_on = enabled
@@ -1161,10 +1185,15 @@ class HbExecutorAdapter:
             if not error_detail:
                 try:
                     assert read_book is not None
-                    async with asyncio.timeout(FROZEN_PEAK_EVIDENCE_TIMEOUT_S):
+                    # 盘口超过 5 秒本来就不能用：读盘口单独按 5 秒超时，不占满 12 秒总预算。
+                    async with asyncio.timeout(FROZEN_BOOK_MAX_AGE_S):
                         book = await read_book(symbol)
+                except TimeoutError:
+                    error_detail = "evidence_unavailable:book_timeout:"
                 except Exception as error:
-                    error_detail = f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
+                    error_detail = (
+                        f"evidence_unavailable:book:{type(error).__name__}:{str(error)[:200]}"
+                    )
             async with self._registry.symbol_lock(symbol):
                 tracked = self._registry.get(position_id)
                 if (

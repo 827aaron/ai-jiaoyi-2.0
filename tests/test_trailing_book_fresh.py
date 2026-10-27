@@ -14,7 +14,7 @@ import pytest
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.module_status import AlertLevel
 from jiaoyi.execution.brackets import BracketManager
-from jiaoyi.execution.exchange import EntryBasis, ExchangeError, ExecutionBook
+from jiaoyi.execution.exchange import EntryBasis, ExchangeError, ExecutionBook, MarkEvidence
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.trailing import TrailingBookUnavailable
 from tests.test_execution import START
@@ -27,9 +27,20 @@ LATENCY_S = 0.8
 class SlowHarness(AdapterHarness):
     """时钟随假 REST 调用和假 sleep 前进；盘口按“读到那一刻”的时钟打源时刻。"""
 
-    def __init__(self, root: Path, side: Side, *, latency: float = LATENCY_S, grace: float = 0):
+    def __init__(
+        self,
+        root: Path,
+        side: Side,
+        *,
+        latency: float = LATENCY_S,
+        grace: float = 0,
+        **manager_options: float,
+    ):
         self.now, self.latency, self.grace = START, 0.0, grace
         self.sleeps, self.visible_after = 0, 2
+        self.manager_options = manager_options
+        self.bid, self.ask, self.mark_value = 100.4, 100.5, 100.45
+        self.mark_error: Exception | None = None
         super().__init__(root, side)
         tracked = self.registry.get("pos-1")
         self.registry.put(
@@ -56,6 +67,7 @@ class SlowHarness(AdapterHarness):
         ex._get = slow_get
         ex.entry_basis = self.entry_basis
         ex.execution_book = self.execution_book
+        ex.execution_mark = self.execution_mark
         self.latency = latency
 
     def _slow(self, call):
@@ -75,6 +87,7 @@ class SlowHarness(AdapterHarness):
             clock=lambda: self.now,
             readback_grace_s=self.grace,
             sleep=self.sleep,
+            **self.manager_options,
         )
 
     def make_adapter(self) -> HbExecutorAdapter:
@@ -99,9 +112,15 @@ class SlowHarness(AdapterHarness):
         if self.book_error is not None:
             raise self.book_error
         source = self.now - timedelta(seconds=self.book_lag)
-        book = ExecutionBook(symbol, 100.4, 100.5, source, self.now)
+        book = ExecutionBook(symbol, self.bid, self.ask, source, self.now)
         self.book_reads.append(book)
         return book
+
+    async def execution_mark(self, symbol: str) -> MarkEvidence:
+        self.now += timedelta(seconds=self.latency)
+        if self.mark_error is not None:
+            raise self.mark_error
+        return MarkEvidence(symbol, self.mark_value, self.now, self.now)
 
     async def armed(self) -> None:
         latency, self.latency = self.latency, 0.0

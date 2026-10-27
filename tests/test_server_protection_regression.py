@@ -27,6 +27,7 @@ from jiaoyi.execution.exchange import (
     ExecutionBook,
     IdentifiedCloseOrder,
     IdentifiedCloseUnknown,
+    MarkEvidence,
     NormalizedBracketSpec,
 )
 from jiaoyi.execution.hb_client import HbApiError
@@ -65,6 +66,14 @@ class EvidenceExchange:
         self.on_place: Callable[[ExchangeBracket], Awaitable[None]] | None = None
         self.foreign_orders = False
         self.registry: PositionRegistry | None = None
+        # 标记价：默认落在 trailing_inputs 盘口的中间价，交易所时间 = 合成时钟 START。
+        self.mark = 102.5 if side is Side.LONG else 97.5
+        self.mark_at = START
+        self.mark_reads = 0
+
+    async def execution_mark(self, symbol: str) -> MarkEvidence:
+        self.mark_reads += 1
+        return MarkEvidence(symbol, self.mark, self.mark_at, self.mark_at)
 
     async def position_mode(self) -> Literal["one_way", "hedge"]:
         return self.mode
@@ -855,6 +864,7 @@ async def test_restart_lower_quote_preserves_peak_stop_and_marks_observation_gap
     h.restart()
     now = START + timedelta(seconds=10)
     h.manager.clock = lambda: now
+    h.exchange.mark_at = now  # 标记价同样是这一刻读到的
     later = ExecutionBook(
         "BTCUSDT",
         101.0 if side is Side.LONG else 98.0,

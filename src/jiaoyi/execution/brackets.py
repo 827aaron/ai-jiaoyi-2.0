@@ -26,6 +26,7 @@ from jiaoyi.execution.exchange import (
     ExchangeError,
     ExchangePosition,
     ExecutionBook,
+    MarkEvidence,
     NormalizedBracketSpec,
     WorkingType,
 )
@@ -35,7 +36,11 @@ from jiaoyi.execution.registry import (
     ServerProtection,
     TrackedPosition,
 )
-from jiaoyi.execution.trailing import TrailingBookUnavailable, trailing_update
+from jiaoyi.execution.trailing import (
+    BOOK_MAX_AGE_S,
+    TrailingBookUnavailable,
+    trailing_update,
+)
 
 
 class BracketExchange(Protocol):
@@ -79,6 +84,7 @@ class BracketExchange(Protocol):
     async def cancel_lifeboat(
         self, symbol: str, algo_id: str, *, expected_client_order_id: str
     ) -> None: ...
+    async def execution_mark(self, symbol: str) -> MarkEvidence: ...
 
 
 class ProtectionIncomplete(ExchangeError):
@@ -181,6 +187,10 @@ class BracketManager:
         prearm_grace_s: float = 0.0,
         stop_working_type: WorkingType = "CONTRACT_PRICE",
         take_profit_working_type: WorkingType = "CONTRACT_PRICE",
+        trailing_book_mark_max_dev_bps: float = 30.0,
+        trailing_stop_mark_buffer_bps: float = 5.0,
+        trailing_min_step_bps: float = 5.0,
+        trailing_book_critical_after_s: float = 300.0,
     ) -> None:
         """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
 
@@ -188,6 +198,17 @@ class BracketManager:
 
         ``stop_working_type`` / ``take_profit_working_type``：之后新建的止损（含移动止损新一代）/
         止盈腿用哪个触发价格源，建腿时写进账本；已有的腿一直按自己记下的核对，保命单固定标记价。
+
+        ``trailing_book_mark_max_dev_bps``：算峰值的盘口价往抬高峰值的方向偏离标记价超过
+        这么多基点当插针，本轮不更新；0 = 不比对。
+
+        ``trailing_stop_mark_buffer_bps``：新一代移动止损须在标记价正确一侧且至少隔这么多基点
+        才挂，否则本轮不换代。
+
+        ``trailing_min_step_bps``：比正在挂的止损至少收紧这么多基点才换代；0 = 一变就换。
+
+        ``trailing_book_critical_after_s``：已激活的移动止损连续这么多秒没有有效盘口，告警升级；
+        0 = 不升级。
         """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
@@ -195,6 +216,10 @@ class BracketManager:
         self.prearm_grace_s = prearm_grace_s
         self.stop_working_type = stop_working_type
         self.take_profit_working_type = take_profit_working_type
+        self.trailing_book_mark_max_dev_bps = trailing_book_mark_max_dev_bps
+        self.trailing_stop_mark_buffer_bps = trailing_stop_mark_buffer_bps
+        self.trailing_min_step_bps = trailing_min_step_bps
+        self.trailing_book_critical_after_s = trailing_book_critical_after_s
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -545,19 +570,12 @@ class BracketManager:
         if tracked.record.entry_price is None:
             raise ProtectionIncomplete("实际入场价尚不可证")
         sign = 1 if tracked.record.side is Side.LONG else -1
+        stop_target, hold = await self._stop_target(tracked, state)
         desired = {
             "lifeboat": tracked.record.entry_price * (1 - sign * tracked.lifeboat_stop_pct / 100),
-            "stop_loss": tracked.record.stop_loss_price,
+            "stop_loss": stop_target,
             "take_profit": tracked.record.take_profit_price,
         }
-        if state.trailing_stop_price is not None and desired["stop_loss"] is not None:
-            fixed_stop = desired["stop_loss"]
-            assert fixed_stop is not None
-            desired["stop_loss"] = (
-                max(fixed_stop, state.trailing_stop_price)
-                if tracked.record.side is Side.LONG
-                else min(fixed_stop, state.trailing_stop_price)
-            )
         specs: dict[str, NormalizedBracketSpec] = {}
         for kind, price in desired.items():
             if price is None or not math.isfinite(price) or price <= 0:
@@ -591,7 +609,7 @@ class BracketManager:
                     pid,
                     stage="armed" if evidence.terminal else "provisional",
                     ever_armed=state.ever_armed or evidence.terminal,
-                    last_error=None,
+                    last_error=hold,
                 )
                 return "armed" if evidence.terminal else "provisional"
         for leg in state.legs:
@@ -745,8 +763,72 @@ class BracketManager:
             return "exit"
         if not all(_live(self._leg(pid, cid)) for cid in keep):
             raise ProtectionIncomplete("最后回读保护已改变")
-        self._save(pid, stage="armed", ever_armed=True, last_error=None)
+        self._save(pid, stage="armed", ever_armed=True, last_error=hold)
         return "armed"
+
+    async def _stop_target(
+        self, tracked: TrackedPosition, state: ServerProtection
+    ) -> tuple[float | None, str | None]:
+        """普通止损这一轮的目标价，以及（若有）为什么没换到更紧的价。
+
+        候选：固定止损；移动止损比它紧时用移动止损。以后别的收紧来源（各用自己的 ``purpose``）
+        在这里再加候选即可。移动止损换代先过最小步长，再过标记价侧向检查；不过就保留正在挂的
+        止损（没有在挂的就用固定止损），不靠交易所拒单（-2021 / -4142）去触发平仓。
+        """
+        fixed, trail = tracked.record.stop_loss_price, state.trailing_stop_price
+        if fixed is None or trail is None:
+            return fixed, None
+        long = tracked.record.side is Side.LONG
+        tighter = max if long else min
+        target = tighter(fixed, trail)
+        if target == fixed:
+            return fixed, None
+        sign = 1 if long else -1
+        live = [leg for leg in state.legs if _live(leg) and _role(leg) == "stop_loss"]
+        current = max(live, key=lambda leg: leg.generation).trigger_price if live else None
+        keep = fixed if current is None else tighter(current, fixed)
+        if current is not None:
+            gain_bps = sign * (target - current) / current * 10_000
+            if gain_bps <= 0:
+                return target, None  # 不比正在挂的更紧（例如入场价改了）：照旧换
+            if gain_bps < self.trailing_min_step_bps:
+                return keep, None  # 收紧太少，不值得撤旧挂新
+        buffer = self.trailing_stop_mark_buffer_bps
+        try:
+            mark = await self._fresh_mark(tracked.record.symbol)
+        except Exception as error:
+            return keep, (
+                f"移动止损新价 {target:g} 本轮不挂：标记价不可用（{describe_error(error)}），"
+                "保留正在挂的止损"
+            )
+        limit = mark * (1 - sign * buffer / 10_000)
+        if (target >= limit) if long else (target <= limit):
+            return keep, (
+                f"移动止损新价 {target:g} 不在标记价 {mark:g} 的安全一侧（缓冲 {buffer:g} 基点），"
+                "本轮不换代，保留正在挂的止损"
+            )
+        return target, None
+
+    async def _fresh_mark(self, symbol: str) -> float:
+        """同环境、带交易所时间、此刻不超过 5 秒的标记价；任何一项不满足都抛错，不回退。"""
+        read = getattr(self.exchange, "execution_mark", None)
+        if read is None:
+            raise ProtectionIncomplete("缺同交易所标记价读取")
+        ev = await read(symbol)
+        now = self.clock()
+        if (
+            not isinstance(ev, MarkEvidence)
+            or ev.symbol != symbol
+            or not math.isfinite(ev.mark)
+            or ev.mark <= 0
+            or any(
+                t.tzinfo is None or t.utcoffset() is None for t in (ev.source_at, ev.observed_at)
+            )
+            or not ev.source_at <= ev.observed_at <= now
+            or (now - ev.source_at).total_seconds() > BOOK_MAX_AGE_S
+        ):
+            raise ExchangeError("标记价过期、来自未来或格式不对")
+        return ev.mark
 
     async def observe_trailing(
         self,
@@ -767,15 +849,17 @@ class BracketManager:
             except Exception as error:
                 self.record_trailing_error(pid, error)
                 raise
-            if self._current(pid)[1].trailing_last_error is not None:
-                self._save(pid, trailing_last_error=None)
+            state = self._current(pid)[1]
+            if state.trailing_last_error is not None or state.trailing_failing_since is not None:
+                self._save(pid, trailing_last_error=None, trailing_failing_since=None)
             return changed
 
     def record_trailing_error(self, pid: str, error: BaseException) -> None:
         """移动止损这一轮没做成：只记原因给面板看，不改任何保护状态。"""
         # 已不是本状态机的持仓：没有地方可记，原异常照常由调用方处理。
         with contextlib.suppress(ProtectionIncomplete):
-            self._save(pid, trailing_last_error=describe_error(error))
+            since = self._current(pid)[1].trailing_failing_since or self.clock()
+            self._save(pid, trailing_last_error=describe_error(error), trailing_failing_since=since)
 
     async def _observe_trailing(
         self,
@@ -791,10 +875,29 @@ class BracketManager:
         tracked, state = self._current(pid)
         if basis.client_order_id != tracked.entry_client_order_id:
             raise ProtectionIncomplete("移动止损入场身份不一致")
+        max_dev = self.trailing_book_mark_max_dev_bps
+        mark: float | None = None
+        if max_dev > 0:  # 先读标记价再读盘口，让盘口离判断最近
+            try:
+                mark = await self._fresh_mark(tracked.record.symbol)
+            except Exception as error:
+                raise TrailingBookUnavailable("移动止损标记价不可用，不能核对盘口") from error
         try:
             book = await read_book(tracked.record.symbol)
         except ExchangeError as error:
             raise TrailingBookUnavailable("移动止损盘口读取失败") from error
+        if mark is not None:
+            # 只拦会把峰值抬高的方向：多仓买一高出标记价、空仓卖一低于标记价。反方向（含盘口
+            # 价差宽、买一低于标记价）只会让峰值更保守，不拦，免得 Demo 宽价差把移动止损整个停掉。
+            long = tracked.record.side is Side.LONG
+            price = book.bid if long else book.ask
+            dev = (price - mark if long else mark - price) / mark * 10_000
+            if not math.isfinite(dev) or dev > max_dev:
+                raise TrailingBookUnavailable(
+                    f"移动止损盘口价 {price:g} 比标记价 {mark:g} "
+                    f"{'高' if long else '低'} {dev:.1f} 基点（上限 {max_dev:g}），疑似插针，"
+                    "本轮不更新峰值"
+                )
         update = trailing_update(tracked.record, state, basis, book, self.clock())
         if update is None:
             return False
@@ -825,7 +928,10 @@ class BracketManager:
         tracked, _ = self._current(pid)
         async with self.registry.symbol_lock(tracked.record.symbol):
             try:
-                self._save(pid, stage="exiting")
+                # 进入退出后移动止损不再观测：清掉它的错误，面板不留过时提示。
+                self._save(
+                    pid, stage="exiting", trailing_last_error=None, trailing_failing_since=None
+                )
                 evidence = await self._evidence(pid)
                 if not evidence.terminal:
                     return False

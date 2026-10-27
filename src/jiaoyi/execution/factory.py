@@ -96,6 +96,10 @@ def build_execution(
     protection_prearm_grace_s: float = 0.0,
     protection_stop_working_type: WorkingType = "CONTRACT_PRICE",
     protection_take_profit_working_type: WorkingType = "CONTRACT_PRICE",
+    protection_trailing_book_mark_max_dev_bps: float = 30.0,
+    protection_trailing_stop_mark_buffer_bps: float = 5.0,
+    protection_trailing_min_step_bps: float = 5.0,
+    protection_trailing_book_critical_after_s: float = 300.0,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -149,6 +153,10 @@ def build_execution(
             prearm_grace_s=protection_prearm_grace_s,
             stop_working_type=protection_stop_working_type,
             take_profit_working_type=protection_take_profit_working_type,
+            trailing_book_mark_max_dev_bps=protection_trailing_book_mark_max_dev_bps,
+            trailing_stop_mark_buffer_bps=protection_trailing_stop_mark_buffer_bps,
+            trailing_min_step_bps=protection_trailing_min_step_bps,
+            trailing_book_critical_after_s=protection_trailing_book_critical_after_s,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None
