@@ -511,13 +511,23 @@ const TRAIL_TIP = "状态来自执行器实际止损检查，超过 15 秒显示
 function trailNote(p) {
   const t = p.stop_diagnostics;
   const head = `移动止损配置：净收益赚到 ${(+p.trailing_activation_pct).toFixed(2)}% 开始跟，回撤距离 ${(+p.trailing_stop_pct).toFixed(2)}%。`;
-  if (p.protection) return head + (p.protection.trailing_activated ? `程序记录已激活${p.protection.trailing_stop_price == null ? "" : `，目标止损价 ${price(p.protection.trailing_stop_price, p.symbol)}（以下方交易所保护单的确认状态为准）`}。` : "程序记录未激活。");
+  if (p.protection) {
+    const tl = trailLines(p), bk = p.side === "long" ? "买一" : "卖一";
+    if (!p.protection.trailing_activated) return head + (tl ? `程序记录未激活：${bk}越过 ${price(tl.start, p.symbol)} 开始跟（按实际成交额和手续费算，和程序判断同一公式）。` : "程序记录未激活；启动价要等程序第一次看盘口后才算得出。");
+    const h = tl && tl.held;
+    const tail = tl && tl.confirmed ? `；交易所已挂移动止损单 ${price(tl.stop, p.symbol)}` : h ? `；比在挂的${h.name} ${price(h.price, p.symbol)} ${h.looser ? "松" : "紧但收紧不够一步或标记价不可用"}，未换挂` : "；交易所还没确认挂上这一价（以下方保护单状态为准）";
+    return head + `程序记录已激活${p.protection.trailing_stop_price == null ? "" : `，移动止损价 ${price(p.protection.trailing_stop_price, p.symbol)}`}${tail}。`;
+  }
   if (!t || t.status !== "current" || t.trailing_active == null) return head + `实际状态未知：${esc(t?.reason || "执行器尚未提供观测")}。`;
   return head + (t.trailing_active ? `执行器确认已启动；当前净收益触发阈值 ${t.actual_trailing_trigger_net_pnl_pct == null ? "未知" : signed(t.actual_trailing_trigger_net_pnl_pct, 4) + "%"}。` : (t.coverage_complete ? "执行器本轮检查未激活。" : "执行器本轮检查未激活，此前记录不完整。")) + " 未提供精确动态触发价，不绘制动态价格线。";
 }
 function trailTag(p, brief) {
   if (p.trailing_stop_pct == null) return `<div class="small dim" title="开仓那会儿移动止损没开（设置 → 持仓管家），这笔不会跟着收紧">没带移动止损</div>`;
-  if (p.protection) return `<div class="small ${p.protection.trailing_activated ? "" : "dim"}"><span class="pill ${p.protection.trailing_activated ? "p-accent" : ""}">${p.protection.trailing_activated ? "移动止损跟踪中 · 程序记录" : "移动止损未激活 · 程序记录"}</span></div>`;
+  if (p.protection) {
+    const on = p.protection.trailing_activated, tl = trailLines(p), back = `${(+p.trailing_stop_pct).toFixed(2)}%`;
+    const more = brief ? "" : on ? (tl ? ` ${price(tl.stop, p.symbol)}${tl.confirmed ? "" : tl.held ? ` <span class="dim">未换挂（在挂${tl.held.name} ${price(tl.held.price, p.symbol)}）</span>` : ' <span class="dim">程序记录（未确认）</span>'}` : "") : ` ${tl ? `到 ${price(tl.start, p.symbol)} 开始跟，` : ""}回撤距离 ${back}`;
+    return `<div class="small ${on ? "" : "dim"}"><span class="pill ${on ? "p-accent" : ""}">${on ? (tl && tl.confirmed ? "移动止损跟踪中 · 交易所已挂" : "移动止损跟踪中 · 程序记录") : "移动止损未激活"}</span>${more}</div>`;
+  }
   const t = p.stop_diagnostics, tip = esc(TRAIL_TIP);
   if (!t || t.status !== "current" || t.trailing_active == null) return `<div class="small warn" title="${tip}">移动止损 · 状态未知${t?.status === "stale" ? "（观测过期）" : ""}</div>`;
   if (t.trailing_active) return `<div class="small" title="${tip}"><span class="pill p-accent">跟踪中 · 执行器确认</span>${brief || t.actual_trailing_trigger_net_pnl_pct == null ? "" : ` 净收益阈值 ${signed(t.actual_trailing_trigger_net_pnl_pct, 4)}%`}</div>`;
@@ -535,11 +545,31 @@ function stopDiagnostics(p) {
   const events = (t?.events || []).slice().reverse().map(e => `<div><span class="n">${stamp(e.ts)}</span><span>${e.stage === "check" ? (e.check_action === "activation" ? "移动止损启动条件检查" : e.check_action === "close" ? "止损平仓条件检查" : "止损条件检查（动作未知）") : stage[e.stage] || "未知阶段"}${e.stage === "check" ? (e.condition_met === true ? " · 条件满足" : e.condition_met === false ? " · 条件未满足" : " · 条件结果未知") + (e.close_requested === true ? " · 已请求平仓流程" : e.close_requested === false ? " · 本次未请求平仓流程" : " · 平仓请求状态未知") : ""} · ${kind[e.kind] || "执行器事件"} · 价 ${price(e.price, p.symbol)}${e.fill_amount == null ? "" : ` · 成交数量 ${qtyFmt(e.fill_amount)}`}${e.threshold == null ? "" : ` · 净收益 ${esc(e.comparison || "阈值")} ${signed(e.threshold, 4)}%`}${e.check_seq ? ` · 检查序号 ${e.check_seq}` : ""}</span></div>`).join("");
   return `<div class="note small"><div>${book}</div><div>${state}</div><div>源 ${esc(t?.source || "未知")} · 采样 ${stamp(t?.observed_at)} · 实际检查 ${stamp(t?.check_at)} · 序号 ${t?.check_seq || "未知"}</div><div>${coverage}。仅凭这些记录不能断言没有漏触发。</div><div>固定止损线来自账本计划价；执行器按实际费用后的净收益检查，成交还取决于订单回报。</div></div><div class="lbl">执行器止损事件（最近 ${t?.events?.length || 0} 条）</div><div class="log trail scroll tall">${events || '<div class="dim">没有可用止损事件，无法据此判断是否漏触发。</div>'}</div><div class="small dim">触发判定、下单申请和成交是不同阶段；真实成交见交易流水。</div>`;
 }
+const trailLegend = (p) => {
+  const tl = trailLines(p);
+  if (!tl) return "";
+  if (tl.start != null) return `<span><i style="border-color:var(--accent);border-style:dashed;opacity:.45"></i>移动止损启动线（越过开始跟）</span>`;
+  return tl.confirmed ? `<span><i style="border-color:var(--accent);border-style:solid"></i>移动止损（交易所已挂）</span>` : `<span><i style="border-color:var(--accent);border-style:dashed;opacity:.45"></i>移动止损（程序记录，${tl.held ? "未换挂" : "未确认"}）</span>`;
+};
+// 托管保护仓位的移动止损价线：启动价由服务端按执行层同一公式算；激活后优先用交易所确认在挂的移动止损腿
+function trailLines(p) {
+  const q = p.protection;
+  if (!q || p.trailing_stop_pct == null) return null;
+  if (!q.trailing_activated) return q.trailing_activation_price == null ? null : { start: q.trailing_activation_price };
+  const l = protLeg(p, "stop_loss"), s = l && legShown(l);
+  if (s && s.purpose === "trailing" && s.state === "live" && s.trigger_price != null) return { stop: s.trigger_price, confirmed: true };
+  if (q.trailing_stop_price == null) return null;
+  const tsp = q.trailing_stop_price;
+  // 执行层只在移动止损比在挂的止损紧够一步、且标记价可用时才换挂；在挂的是别的止损就是没换
+  if (s && s === l && s.state === "live" && s.trigger_price != null) return { stop: tsp, confirmed: false, held: { name: legName(s), price: s.trigger_price, looser: p.side === "long" ? tsp <= s.trigger_price : tsp >= s.trigger_price } };
+  return { stop: tsp, confirmed: false };
+}
 // 交易所托管保护单（positions.json 的 server_protection，只读）：每条腿的真实状态，价格只用交易所确认过的
 const LEG_ST = { live: "已挂", triggered: "已触发", cancelled: "已撤", rejected: "被拒", pending: "提交中·未确认", unknown: "状态未知", none: "无记录" };
 const PROT_STAGE = { entry: "入场中", provisional: "临时保护", armed: "已武装", exiting: "平仓中", cleanup: "清理中", done: "已结束" };
 const protLeg = (p, role) => p.protection && p.protection.legs.find((l) => l.role === role);
-const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? "止盈" : l.purpose === "trailing" ? "移动止损" : l.purpose === "tightened" ? "反向卡收紧止损" : "固定止损";
+const STOP_PURPOSE = { fixed: "固定止损", trailing: "移动止损", tightened: "收紧止损" };
+const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? "止盈" : STOP_PURPOSE[l.purpose] || "其他止损";
 const legBad = (l) => l.state !== "live";
 // 触发价格源：每条腿建单时记下，旧腿和新腿可能不同（改设置只影响之后新挂的）
 const WT_CN = { MARK_PRICE: "标记价", CONTRACT_PRICE: "成交价" };
@@ -1337,7 +1367,7 @@ P.positions = (arg) => {
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
           <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
-      <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span><span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
+      <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${trailLegend(sel)}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
       ${sel.trailing_stop_pct != null ? `<div class="small dim trail-note">${trailNote(sel)}</div>` : ""}
       ${sel.protection ? protBlock(sel) : stopDiagnostics(sel)}
       <div><div class="lbl">从信号到现在的每一步（今天）· 点一条看快照</div><div class="log trail">${trail || '<div class="dim">今天的日志里没有这笔的记录。</div>'}</div></div>
@@ -1469,7 +1499,8 @@ async function loadKlines(force) {
     return;
   }
   priceLines.forEach((l) => series.removePriceLine(l));
-  linePrices = [p.take_profit_price, p.entry_price, p.stop_loss_price, p.lifeboat_price];
+  const tl = trailLines(p) || {};
+  linePrices = [p.take_profit_price, p.entry_price, p.stop_loss_price, p.lifeboat_price, tl.start, tl.stop];
   const css = getComputedStyle(document.documentElement);
   const c = (v) => css.getPropertyValue(v).trim();
   const L = LightweightCharts.LineStyle;
@@ -1478,6 +1509,8 @@ async function loadKlines(force) {
     [p.entry_price, "开仓", c("--faint"), L.Solid],
     [p.stop_loss_price, "固定止损计划", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
+    [tl.start, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
+    tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
   ].filter(([v]) => v != null).map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
   series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) fitView(chart);

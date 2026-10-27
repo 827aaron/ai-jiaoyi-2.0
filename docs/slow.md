@@ -531,6 +531,83 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 
 旁路的 `write_started_at` 只表示后台写入开始，不代表落盘完成或精确可见时间；没有 fsync/receipt 就不补造完成证据。旁路使用有界后台队列，不等待磁盘；每目录每日最多两段、每段 32MiB，文本上限 262144 字符，单条上限 512KiB，队列满或写入失败可丢诊断并告警，不能据日志缺口断言没有检查。URL 查询与常见凭证模式脱敏，文本记录明确原文/存储哈希、脱敏、截断和是否可逐字复演；超限标记不冒称完整。故障、慢磁盘、脱敏或时钟不可用不得改变模型调用、重问、判断或费用路径。诊断只落本地，不上传真实 prompt、行情或回放数据。
 
+## 大盘台（`slow/market_desk.py`、`slow/market_dossier.py`，`[market_desk]`）
+
+设计：`market-direction-design-2026-10-28/DESIGN.md`（含 §6.5 中立性硬要求）和逻辑复核 `CONFLICTS.md`。
+默认 `mode = "off"`：不建对象，一次模型调用都没有，和以前完全一样。
+
+- **判断什么**：候选池等权组合（去掉 `exclude_symbols`，默认 PAXG / XAUT）未来 4 小时、1 小时的
+  涨 / 平 / 跌三项概率；「平」= |收益| ≤ `band_sigma` × σ，σ 是过去 `sigma_lookback_h` 个滚动窗口的 RMS。
+  方向由代码派生：p_up ≥ θ（`call_p_min`）且 p_up − p_down ≥ δ（`call_edge_min`）为看涨，看跌对称，其余中性。
+- **模型**：DeepSeek V4.1 Flash，经 OpenRouter（和开会同一个模型、同一套 usage / reasoning 参数），
+  每轮独立问 `samples` 次（默认 5）取平均；合格回答少于 `min_valid_samples` 这一轮作废（照样记账）。
+- **数据包**（`market_dossier.py`）：只放池级 / 大盘级数字，每项带来源和 as_of。**不能有延后信息**：
+  所有「近 15 / 30 分钟、近 1 / 4 / 12 / 24 / 72 小时」的收益、上涨下跌家数、离散度、主动买卖占比、
+  24h 区间位置、BTC / ETH 涨跌，都是截止到运行时刻的滚动窗口——终点价是 15 分钟线里正在走的那一根的现价，
+  起点价在包含起点的那根线里按时间线性插值；绝不把上一根已收盘的 1h / 4h 线当成「近 1 / 4 小时」。
+  15 分钟线每轮每币重拉 18 根（含正在走的一根，权重 1）。多空账户占比的最新值、持仓量变化取 5 分钟统计；
+  资金费 / 标记价溢价取 `premiumIndex`。实时类字段 as_of 比运行时刻旧过 `max_input_age_min`（默认 5 分钟，
+  5 分钟统计多给 5 分钟；0 = 不查）就不给模型、写进缺失原因；提示词开头写运行时刻，每个字段写自己的 as_of。
+  σ 和基础率（先验，过去 30 天等权池 4h / 1h 涨平跌频率）是已收盘 1h 线上的统计量；1h 线按币缓存并落盘
+  `data/market_desk/klines_1h.json`（重启不用重新回填），只在有新的 1h 收盘时补；首次每币只拉 200 根，
+  30 天长历史每轮最多补 8 个币，补到池的 80% 之前基础率写「回填中」。恐慌贪婪是日值，只给数。
+  选币时的池统计（持仓量 1h、量比、强平）是选币时刻 / 已收盘小时的值，不用。拿不到的来源跳过并写原因。
+  池成员用当前池（幸存者口径，日志写明；记分器 D3 要按时点池算）。请求都走 `binance_gate`，限流期间这一轮
+  跳过、格子不消耗。
+- **中立**：提示词每句偏向一边的话都成对（测试用多↔空、涨↔跌、支撑↔阻力、反弹↔回落……对调表逐句查）；
+  涨 / 跌的先后（选项、成对字段、回答键、两边理由）按轮次哈希交替并落盘；不给上一轮观点、教训、持仓、
+  卡片倾斜、总盘会文字、新闻。`mirror_test_rate`（默认 1/6）的轮次把数据包涨跌全部取反再问一遍，
+  最近几次 |p_up(原) − p_down(镜像)| 平均超过 `mirror_alert_gap`（0.05）就告警并在状态文件标 `mirror_flag`。
+- **节奏**：按 UTC 每 `cadence_min` 分钟对齐跑一轮（偏移 `offset_min`）；`regime_flip_target = "desk"`
+  时翻转确认会立即加跑一轮；`move_trigger_pct` > 0 时，`move_trigger_window_min` 内（只算上一轮开跑之后）
+  |BTC| 或 |池内涨跌中位数| 走到这么多就加跑。加跑离上一轮开跑至少隔 `min_run_gap_min`。
+  自己的定时器，不占 `_slow_lock` / `_refreshing`，开始时取代数，发布那一下同步完成。
+- **接管（`mode = "replace"`）= 唯一发布者**：经指挥官 `_publish_view`（和总盘会 / 独立刷新共用版本号、
+  翻转参照、管家复核通知），`MarketView.source = "market_desk"`，契约不加字段；概率、desk_id 等在
+  `data/market_desk_state.json`。第一次接管立即发布；之后新方向要连续 `publish_confirm` 轮一致，并且从第一次
+  出现到这一轮至少隔 max(`publish_confirm_min`, `cadence_min`) 分钟；这几轮里有急动 / 翻转加跑时放宽到
+  max(`publish_confirm_min` / 2, `cadence_min`)，但不会更短（:16 加跑、:17 定时不算两次独立确认）。
+  方向没变不发新版本。数据包没有先验（长历史还在回填）的轮只记录（`prior_missing`），不发布、不接管、
+  不算「可用」结果。接管期间整轮总盘会的
+  Flash 大盘判断只记录（`market_meeting` 里 `publish_status = "record_only"`），不发布、不设翻转参照，
+  提名不进队列；Flash 下一轮只带它自己上一轮的判断。各币会议读当前生效的（大盘台）观点。
+  大盘台发新版本时，仍有效（研究没换、没过期）的市场复核提名迁到新版本，其余撤掉。
+- **不可用 / 回退**：归属（`market_desk_state.json` 的 `owner`）按边沿切换并各记一次（决策记录 +
+  `market_desk` 日志 `event = owner_change` + Telegram）。大盘台出一轮合格结果就归大盘台；
+  `fallback = "flash"`（默认）时最新结果超过 `max_age_min`（重启后读回来的也按这个算；日上限 / 余额低线
+  自停后不再出结果，也走这条）才切回 Flash，整轮总盘会的 Flash 判断恢复发布。大盘台恢复后第一轮
+  就切回大盘台并立即接管发布；哪怕这次接管发布被更晚的发布取代，归属也已经是大盘台，Flash 不会紧接着
+  再发一版（不来回抢），下一轮大盘台再发。`fallback = "hold"` 一直归大盘台，沿用它最后一次发布的观点。
+- **花费**：单独记账（`daily_cost_limit_usd`，0 = 不限），不占军师团日上限；每轮一条 COMMANDER 决策记录
+  （symbol 空，output 带 `market_desk` 键）带 `cost_usd`，面板总 AI 费照算（资金页记为「大盘台」）。
+  OpenRouter 余额低于 `balance_floor_usd` 自停，余额留给开会和 Jev（没有额度看护时启动日志警告这条不生效）；
+  撞 402 和开会一样通知额度看护（告警、面板横幅）。团队页「总盘会」节点不显示大盘台的记录。
+- **落盘**：`data/market_desk/YYYY-MM-DD.jsonl` 每轮一行：完整数据包和哈希、提示词版本和顺序、每次回答
+  （原文、概率、drivers 核对、延迟、token、花费、错误）、镜像结果、平均概率、方向、滞回状态、发布的版本、
+  记分目标（t0 = 开跑时刻，1h / 4h 两个结算点和当时的 σ、平的宽度、基础率、池成员）。记分器另做。
+- **配置校验**（启动、面板保存 / 重启前、热生效三处都拦）：`mode = "replace"` 时 app.toml
+  `[fast_loop] regime_flip_target` 不能是 `flash_market_only`；`regime_flip_target = "desk"` 时大盘台不能是
+  `mode = "off"`。`regime_flip_target = "off"` 照常检查和记录翻转，只是不更新大盘。
+- **回滚**：旧代码不认识 `[market_desk]`，会拒绝启动。回滚前先删掉 slow.toml 里整段 `[market_desk]`，
+  并把 `regime_flip_target` 删掉或改回 `flash_market_only`（旧代码同样不认识这个键）。
+  `market_desk_state.json` 和 `market_view.json` 里新加的 `flash_regime` 旧代码会忽略。
+
+Demo 接管的推荐配置：
+
+```toml
+# config/slow.toml
+[market_desk]
+mode = "replace"
+cadence_min = 15
+offset_min = 2
+samples = 5
+move_trigger_pct = 1.0
+min_run_gap_min = 5
+
+# config/app.toml 的 [fast_loop]
+regime_flip_target = "desk"
+```
+
 ## 单币会议偏空整改开关（`[meeting]`，`slow/bias_fix.py`）
 
 依据 `short-bias-investigation-2026-10-28`：偏空出现在「多空辩论 → 研究经理」这一步。五个键都不写 = 现状，提示词和配置一字不差。

@@ -97,6 +97,8 @@ CREDIT_CHECK_EVERY_S = 120.0
 """模型额度看护多久看一眼（撞 402 要及时发；余额每小时才真去查一次）。"""
 COMMAND_POLL_EVERY_S = 1.0
 CONFIG_WATCH_EVERY_S = 3.0  # 看设置文件变没变（热生效，core/hotconfig.py）
+DESK_CHECK_EVERY_S = 30.0
+"""大盘台：多久看一次该不该跑（定时格子 / 翻转 / 急动），顺便喂一次价给急动检测。"""
 KEEPER_CONCURRENCY = 5
 SIGNAL_CACHE = 200  # 记住最近这么多条处理过的信号（面板重新检查 / 放行用）
 """持仓管家一轮里最多几笔一起问 Jev。"""
@@ -359,6 +361,7 @@ class Runner:
         self._regime_tick_lock = asyncio.Lock()
         self._market_refreshing = False
         self._market_task: asyncio.Task[None] | None = None
+        self._desk_task: asyncio.Task[None] | None = None
         self._keeper_market: dict[str, KeeperMarketProgress] = {}
         self._keeper_market_path = Path(app.app_cfg.data_dir) / "keeper_market.json"
         self._keeper_slots = asyncio.Semaphore(KEEPER_CONCURRENCY)
@@ -478,6 +481,9 @@ class Runner:
         if self.app.derivs is not None:
             # 持仓量每 60 秒、多空比每 5 分钟（盯着的币；查失败自己跳过）
             self._loops.append(asyncio.create_task(self.app.derivs.run(self._derivs_symbols)))
+        if getattr(self.app, "desk", None) is not None:
+            # 大盘台自己的定时器：不占 _slow_lock / _refreshing，和开会互不等待
+            self._loops.append(self._every(DESK_CHECK_EVERY_S, self.desk_tick))
         loops: asyncio.Future[Any] = asyncio.gather(*self._loops)
         stop: asyncio.Future[Any] = asyncio.ensure_future(self._restart.wait())
         try:
@@ -1793,6 +1799,10 @@ class Runner:
         if not isinstance(cards, BattleCardCommander) or pool is None:
             self._flip_blocked(flip, "数据不足：没有候选池")
             return
+        target = self.app.app_cfg.fast_loop.regime_flip_target
+        if target != "flash_market_only":
+            self._flip_to_target(cards, flip, target)
+            return
         why = cards.regime_flip_blocked(self.app.clock())
         ref = cards.regime_reference
         if not self._regime_enabled():
@@ -1822,6 +1832,82 @@ class Runner:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(self._market_finished)
+
+    def _flip_to_target(
+        self, cards: BattleCardCommander, flip: dict[str, Any], target: str
+    ) -> None:
+        """``regime_flip_target`` 不是 Flash 时：off = 照常检查和落盘，只是不更新大盘；
+        desk = 叫大盘台立即加跑一轮（大盘台自己按 min_run_gap_min 限间隔，结果走它的滞回）。"""
+        desk = getattr(self.app, "desk", None)
+        ref = cards.regime_reference
+        why = ""
+        if target == "off":
+            why = "regime_flip_target = off：只记录，不更新大盘"
+        elif desk is None:
+            why = "regime_flip_target = desk，但大盘台没开（slow.toml [market_desk] mode = off）"
+        elif not self._regime_enabled():
+            why = "设置已关闭"
+        elif self._restarting:
+            why = "正在重启"
+        elif binance_gate.banned_until():
+            why = "限流"
+        elif ref is None or ref.ts.isoformat() != flip["reference_at"]:
+            why = "市场参照已更新"
+        elif self._regime.thresholds() != flip["thresholds"]:
+            why = "阈值已更新，下一轮按新值重新确认"
+        if why or desk is None:
+            self._flip_blocked(flip, why)
+            return
+        cards.mark_regime_flip(self.app.clock())
+        self._regime.last_rerun = cards.last_regime_flip_at
+        self._regime_journal.emit(
+            {**flip, "ts": self.app.clock().isoformat(), "rerun": True, "scope": "market_desk"},
+            f"大盘方向变化：{flip['up_1h']} 涨/{flip['down_1h']} 跌，"
+            f"BTC {flip['btc_ret_since_round_pct']:+.2f}%"
+            f"（连续 {flip['confirm_count']} 次）→ 大盘台加跑",
+        )
+        desk.request_run("regime_flip")
+        self._start_desk_if_due()
+
+    async def desk_tick(self) -> None:
+        """大盘台：转发提示、喂价给急动检测、到点（定时格子 / 加跑请求）就开跑。"""
+        desk = getattr(self.app, "desk", None)
+        if desk is None:
+            return
+        check_owner = getattr(desk, "check_owner", None)
+        if callable(check_owner):
+            check_owner(self.app.clock())  # 不可用就按边沿切回 Flash（记录、提醒一次）
+        while (notice := desk.take_notice()) is not None:
+            await self.app._alert(AlertLevel.WARN, "大盘台", notice, "system")
+        pool = self.app.pool
+        if pool is not None:
+            btc = self.m.features.snapshot(BTC)
+            desk.observe_prices(
+                self.app.clock(), btc.last_price if btc is not None else None, self._prices(pool)
+            )
+        self._start_desk_if_due()
+
+    def _start_desk_if_due(self) -> None:
+        desk = getattr(self.app, "desk", None)
+        if desk is None or self._restarting:
+            return
+        if self._desk_task is not None and not self._desk_task.done():
+            return
+        reason = desk.due(self.app.clock())
+        if reason is None:
+            return
+        task = asyncio.create_task(self._desk_run(desk, reason))
+        self._desk_task = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _desk_run(self, desk: Any, reason: str) -> None:
+        try:
+            await desk.run(self.app.pool, reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("大盘台这一轮出错")
 
     def _market_finished(self, task: asyncio.Task[None]) -> None:
         if self._market_task is task:

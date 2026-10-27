@@ -570,7 +570,9 @@ def _market_records(files: PanelFiles, now: datetime) -> list[TrailItem]:
 
     总盘会没有单独的决策角色，这些记录落在 ``commander`` 下，靠没有 ``symbol`` 和单个币的会分开。"""
     got, _ = files.role_records(Role.COMMANDER, _MARKET_SCAN, now)
-    return [_item(r) for r in got if r.symbol is None][:TEAM_RECORD_LIMIT]
+    # 大盘台的记录（output 带 market_desk）也是 commander、没有 symbol：单独算，不挤掉总盘会的
+    mine = [r for r in got if r.symbol is None and "market_desk" not in r.output]
+    return [_item(r) for r in mine][:TEAM_RECORD_LIMIT]
 
 
 def _market_progress(m: MeetingSummary | None, now: datetime, tz: str) -> Progress:
@@ -1258,7 +1260,9 @@ def _ai_call(r: DecisionRecord) -> AiCall | None:
     coin = r.symbol.removesuffix("USDT") if r.symbol else None
     kind: AiKind
     if r.role is Role.COMMANDER:
-        if r.card_id and r.outcome is Outcome.ACTION:
+        if "market_desk" in r.output:
+            kind, who = "commander", "大盘台"
+        elif r.card_id and r.outcome is Outcome.ACTION:
             kind, who = "market", "总盘会（挑币上会）"
         else:
             kind, who = "commander", f"军师团 · {coin} 会议" if coin else "军师团"
@@ -1373,7 +1377,8 @@ def _pnl_periods(
     for r in files.decisions_since(start, now, _PAID):
         d = local_day(r.ts, tz)
         ai_by_day[d] = ai_by_day.get(d, 0.0) + r.cost_usd
-        if d == today and r.role is Role.COMMANDER:
+        # 大盘台单独记账（不在慢环预算文件里），下面用预算文件顶替军师团当天花费时不能把它顶掉
+        if d == today and r.role is Role.COMMANDER and "market_desk" not in r.output:
             commander_today += r.cost_usd
     # 军师团今天的花费以慢环预算文件为准：开会前预记、失败和还在开的会都算，日志要等会开完才有
     budget = files.slow_budget_cost(today)

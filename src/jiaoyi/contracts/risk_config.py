@@ -729,6 +729,13 @@ class FastLoopConfig(Contract):
     regime_flip_live: bool = Field(
         default=False, description="测试网 / 实盘也启用独立大盘更新；默认关，仅模拟盘开启。"
     )
+    regime_flip_target: Literal["flash_market_only", "desk", "off"] = Field(
+        default="flash_market_only",
+        description="确认翻转后叫谁更新大盘：flash_market_only = 总盘会的 Flash 独立刷新"
+        "（以前的做法）；"
+        "desk = 让大盘台立即重跑一轮（slow.toml [market_desk] 要开）；off = 照常检查和记录，"
+        "不更新大盘。大盘台接管（mode = replace）时不能是 flash_market_only。",
+    )
     regime_flip_breadth: int = Field(
         default=30,
         ge=0,

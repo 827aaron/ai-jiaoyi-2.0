@@ -845,7 +845,7 @@ const block = protBlock(p), brief = protBrief(p);
 assert(block.includes('反向作战卡收紧止损') && block.includes('68050'), block);
 assert(block.includes('card-1:v2'), block);
 assert(brief.includes('反向卡收紧止损 68050'), brief);
-assert(block.includes('<span class="n">反向卡收紧止损</span>'), block);
+assert(block.includes('<span class="n">收紧止损</span>'), block);
 p.protection.tightened_stop_price = null;
 assert(!protBlock(p).includes('反向作战卡'));
 """
