@@ -44,6 +44,7 @@ from jiaoyi.execution.exchange import (
     ExchangeEntryOrder,
     ExchangeError,
     ExchangePosition,
+    ExecutionBook,
     IdentifiedCloseOrder,
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
@@ -57,11 +58,13 @@ from jiaoyi.execution.fills import (
     exit_fill,
     no_open_fill,
 )
+from jiaoyi.execution.frozen_peak import BOOK_MAX_AGE_S as FROZEN_BOOK_MAX_AGE_S
 from jiaoyi.execution.frozen_peak import FrozenPeakExit, frozen_peak_update
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
 from jiaoyi.execution.symbols import to_hb_pair
+from jiaoyi.execution.trailing import TrailingBookUnavailable
 from jiaoyi.interfaces import Alerter, LifeboatStop
 
 log = logging.getLogger(__name__)
@@ -328,6 +331,8 @@ class HbExecutorAdapter:
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 风控算的止损 / 止盈距离。"""
         self._chase_request = chase_request
         self._protection = protection
+        if protection is not None:
+            protection.notify_stop_clamped = self._alert_stop_clamped
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -1083,6 +1088,8 @@ class HbExecutorAdapter:
                 current = await self._sync_one(initial)
                 if current.record.status is PositionStatus.OPEN:
                     await self._update_server_trailing(pid)
+            except TrailingBookUnavailable as error:
+                await self._alert_trailing_book(pid, initial.record.symbol, error)
             except Exception as error:
                 await self._alert(
                     AlertLevel.CRITICAL,
@@ -1093,6 +1100,51 @@ class HbExecutorAdapter:
                     f"server_tick:{pid}",
                     kind="order_failed",
                 )
+
+    async def _alert_stop_clamped(self, pid: str, symbol: str, text: str) -> None:
+        """止损目标已越过标记价：被夹到可挂的最紧价，或本轮没换。价格已经穿过想要的止损位。"""
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "止损目标已越过标记价",
+            f"{symbol} {pid}：{text}",
+            symbol,
+            f"server_stop_clamped:{pid}",
+            kind="order_failed",
+        )
+
+    async def _alert_trailing_book(
+        self, pid: str, symbol: str, error: TrailingBookUnavailable
+    ) -> None:
+        """这一轮没拿到能用的盘口：不更新移动止损，已确认保护不变。单独的去重键，不占真正保护
+        失败（server_tick）的冷却名额；已激活的移动止损连续太久拿不到，升级成紧急。"""
+        tracked = self._registry.get(pid)
+        state = tracked.server_protection if tracked is not None else None
+        after = self._protection.trailing_book_critical_after_s if self._protection else 0.0
+        since = state.trailing_failing_since if state is not None else None
+        held_s = (self._clock() - since).total_seconds() if since is not None else 0.0
+        if state is not None and state.trailing_activated and after > 0 and held_s >= after:
+            last = state.trailing_observed_at
+            last_text = last.strftime("%m-%d %H:%M:%S UTC") if last is not None else "从没有"
+            await self._alert(
+                AlertLevel.CRITICAL,
+                "移动止损长时间没有有效盘口",
+                f"{symbol} {pid}：已激活的移动止损连续 {held_s / 60:.0f} 分钟没有有效盘口，"
+                f"最后一次成功观测 {last_text}；最近原因：{describe_error(error)}。"
+                "峰值和止损价停在最后一次成功观测，已挂的止损 / 止盈 / 保命单不变",
+                symbol,
+                f"server_trailing_book_stuck:{pid}",
+                kind="order_failed",
+            )
+            return
+        await self._alert(
+            AlertLevel.WARN,
+            "移动止损本轮缺有效盘口",
+            f"{symbol} {pid}：{describe_error(error)}；"
+            "本轮不更新移动止损，已确认的止损 / 止盈 / 保命单不变",
+            symbol,
+            f"server_trailing_book:{pid}",
+            kind="order_failed",
+        )
 
     def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:
         self._frozen_peak_on = enabled
@@ -1122,9 +1174,10 @@ class HbExecutorAdapter:
         basis = book = None
         held: list[ExchangePosition] = []
         error_detail = ""
+        symbol = initial.record.symbol
+        read_book = getattr(self._exchange, "execution_book", None)
         try:
             read_basis = getattr(self._exchange, "entry_basis", None)
-            read_book = getattr(self._exchange, "execution_book", None)
             read_positions = getattr(self._exchange, "positions_evidence", None)
             if (
                 read_basis is None
@@ -1134,56 +1187,79 @@ class HbExecutorAdapter:
             ):
                 raise ExchangeError("Execution evidence reader or entry CID is unavailable")
             async with asyncio.timeout(FROZEN_PEAK_EVIDENCE_TIMEOUT_S):
-                basis = await read_basis(initial.record.symbol, initial.entry_client_order_id)
-                held = [p for p in await read_positions() if p.symbol == initial.record.symbol]
-                book = await read_book(initial.record.symbol)
+                basis = await read_basis(symbol, initial.entry_client_order_id)
+                held = [p for p in await read_positions() if p.symbol == symbol]
         except Exception as error:
             error_detail = f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
-        async with self._registry.symbol_lock(initial.record.symbol):
-            tracked = self._registry.get(position_id)
-            if (
-                tracked is None
-                or tracked.record.status is not PositionStatus.OPEN
-                or tracked.frozen_peak_exit != initial.frozen_peak_exit
-                or tracked.entry_client_order_id != initial.entry_client_order_id
-            ):
-                return None
-            state, protection = tracked.frozen_peak_exit, tracked.server_protection
-            assert state is not None
-            try:
-                if error_detail:
-                    raise ExchangeError(error_detail)
+        # 盘口在锁外读（慢采样不能拖住平仓），但等同币锁时托管保护那一轮可能正占着锁好几秒
+        # （回读宽限时更久），拿到锁时盘口常已超过 5 秒。这种情况放锁重读一次；5 秒新鲜度、
+        # 未来时刻、乱序的检查照旧由 frozen_peak_update 在判断时做，一条不放宽。
+        for last_try in (False, True):
+            if not error_detail:
+                try:
+                    assert read_book is not None
+                    # 盘口超过 5 秒本来就不能用：读盘口单独按 5 秒超时，不占满 12 秒总预算。
+                    async with asyncio.timeout(FROZEN_BOOK_MAX_AGE_S):
+                        book = await read_book(symbol)
+                except TimeoutError:
+                    error_detail = "evidence_unavailable:book_timeout:"
+                except Exception as error:
+                    error_detail = (
+                        f"evidence_unavailable:book:{type(error).__name__}:{str(error)[:200]}"
+                    )
+            async with self._registry.symbol_lock(symbol):
+                tracked = self._registry.get(position_id)
                 if (
-                    protection is None
-                    or protection.stage != "armed"
-                    or not protection.entry_terminal
-                    or protection.entry_status != "FILLED"
-                    or not isinstance(basis, EntryBasis)
-                    or book is None
-                    or basis.client_order_id != tracked.entry_client_order_id
-                    or basis.order_id != protection.entry_order_id
-                    or protection.observed_quantity is None
-                    or not math.isclose(
-                        protection.observed_quantity, basis.filled_quantity, rel_tol=1e-10
-                    )
-                    or len(held) != 1
-                    or held[0].side is not tracked.record.side
-                    or not math.isfinite(held[0].quantity)
-                    or not math.isclose(held[0].quantity, basis.filled_quantity, rel_tol=1e-10)
+                    tracked is None
+                    or tracked.record.status is not PositionStatus.OPEN
+                    or tracked.frozen_peak_exit != initial.frozen_peak_exit
+                    or tracked.entry_client_order_id != initial.entry_client_order_id
                 ):
-                    raise ExchangeError(
-                        "Entry order or remaining position evidence is inconsistent"
+                    return None
+                if (
+                    not last_try
+                    and isinstance(book, ExecutionBook)
+                    and book.source_at.utcoffset() is not None
+                    and (self._clock() - book.source_at).total_seconds() > FROZEN_BOOK_MAX_AGE_S
+                ):
+                    continue
+                state, protection = tracked.frozen_peak_exit, tracked.server_protection
+                assert state is not None
+                try:
+                    if error_detail:
+                        raise ExchangeError(error_detail)
+                    if (
+                        protection is None
+                        or protection.stage != "armed"
+                        or not protection.entry_terminal
+                        or protection.entry_status != "FILLED"
+                        or not isinstance(basis, EntryBasis)
+                        or book is None
+                        or basis.client_order_id != tracked.entry_client_order_id
+                        or basis.order_id != protection.entry_order_id
+                        or protection.observed_quantity is None
+                        or not math.isclose(
+                            protection.observed_quantity, basis.filled_quantity, rel_tol=1e-10
+                        )
+                        or len(held) != 1
+                        or held[0].side is not tracked.record.side
+                        or not math.isfinite(held[0].quantity)
+                        or not math.isclose(held[0].quantity, basis.filled_quantity, rel_tol=1e-10)
+                    ):
+                        raise ExchangeError(
+                            "Entry order or remaining position evidence is inconsistent"
+                        )
+                    state = frozen_peak_update(tracked.record, state, basis, book, self._clock())
+                except Exception as error:
+                    detail = error_detail or (
+                        f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
                     )
-                state = frozen_peak_update(tracked.record, state, basis, book, self._clock())
-            except Exception as error:
-                detail = error_detail or (
-                    f"evidence_unavailable:{type(error).__name__}:{str(error)[:200]}"
-                )
-                state = state.model_copy(update={"detail": detail})
+                    state = state.model_copy(update={"detail": detail})
+                    self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
+                    return {**state.model_dump(mode="json"), "triggered": False}
                 self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
-                return {**state.model_dump(mode="json"), "triggered": False}
-            self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
-            return {**state.model_dump(mode="json"), "triggered": state.status == "triggered"}
+                return {**state.model_dump(mode="json"), "triggered": state.status == "triggered"}
+        return None  # 不会到这里：第二次一定在锁内返回。
 
     async def _update_server_trailing(self, position_id: str) -> None:
         async with self._exit_lock(position_id):
@@ -1200,7 +1276,9 @@ class HbExecutorAdapter:
             read_basis = getattr(self._exchange, "entry_basis", None)
             read_book = getattr(self._exchange, "execution_book", None)
             if read_basis is None:
-                raise ProtectionIncomplete("缺实际入场成交与费用证据，保持最后确认保护")
+                missing = ProtectionIncomplete("缺实际入场成交与费用证据，保持最后确认保护")
+                self._protection.record_trailing_error(position_id, missing)
+                raise missing
             if (
                 state.trailing_entry_quote is not None
                 and state.trailing_entry_quantity is not None
@@ -1219,16 +1297,20 @@ class HbExecutorAdapter:
                     order_status=state.entry_status or "UNKNOWN",
                 )
             else:
-                basis = await read_basis(rec.symbol, tracked.entry_client_order_id)
-                if (
-                    not isinstance(basis, EntryBasis)
-                    or basis.client_order_id != tracked.entry_client_order_id
-                    or basis.order_id != state.entry_order_id
-                    or basis.symbol != rec.symbol
-                    or basis.side != ("buy" if rec.side is Side.LONG else "sell")
-                    or basis.order_status != "FILLED"
-                ):
-                    raise ProtectionIncomplete("入场基准身份或完整性不一致")
+                try:
+                    basis = await read_basis(rec.symbol, tracked.entry_client_order_id)
+                    if (
+                        not isinstance(basis, EntryBasis)
+                        or basis.client_order_id != tracked.entry_client_order_id
+                        or basis.order_id != state.entry_order_id
+                        or basis.symbol != rec.symbol
+                        or basis.side != ("buy" if rec.side is Side.LONG else "sell")
+                        or basis.order_status != "FILLED"
+                    ):
+                        raise ProtectionIncomplete("入场基准身份或完整性不一致")
+                except Exception as error:
+                    self._protection.record_trailing_error(position_id, error)
+                    raise
                 current = self._registry.get(position_id) or tracked
                 current_state = current.server_protection
                 assert current_state is not None
@@ -1258,9 +1340,11 @@ class HbExecutorAdapter:
             if rec.trailing_activation_pct is None or rec.trailing_stop_pct is None:
                 return
             if read_book is None:
-                raise ProtectionIncomplete("缺同交易所盘口源时钟，保持最后确认保护")
-            book = await read_book(rec.symbol)
-            if await self._protection.observe_trailing(position_id, basis, book):
+                missing = ProtectionIncomplete("缺同交易所盘口源时钟，保持最后确认保护")
+                self._protection.record_trailing_error(position_id, missing)
+                raise missing
+            # 盘口交给 observe_trailing 在三腿回读之后再读：在这里先读，回读完常已超过 5 秒。
+            if await self._protection.observe_trailing(position_id, basis, read_book):
                 await self._protection.sync(position_id)
 
     async def _prepare_server_exit(self, tracked: TrackedPosition) -> bool:
