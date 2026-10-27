@@ -657,9 +657,11 @@ async def test_failed_meetings_record_their_setup(tmp_path: Path, now: datetime)
     assert errs["BBUSDT"] == resolve(NEW, "BBUSDT@engine").record()  # 超时：问引擎
 
 
-def test_engine_attaches_the_setup_to_a_failed_meeting() -> None:
+def test_engine_attaches_the_setup_to_a_failed_meeting(monkeypatch: pytest.MonkeyPatch) -> None:
     from jiaoyi.slow.commander import MeetingError
 
+    # 记花费的回调要导入 langchain_core（CI 不装）；这里只看设置有没有带出来
+    monkeypatch.setattr(eng, "cost_handler", lambda meter: None)
     e = eng.TradingAgentsEngine.__new__(eng.TradingAgentsEngine)
     e._s = eng.TradingAgentsSettings(bias_fix=BiasFix(funding_label="neutral", ab=0.5))
     now = datetime(2026, 10, 28, 3, 0, tzinfo=UTC)
