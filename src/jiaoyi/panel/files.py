@@ -256,6 +256,7 @@ class PanelFiles:
             return Ledger()
         positions: list[PositionRecord] = []
         notional: dict[str, float] = {}
+        protection: dict[str, object] = {}
         for t in (raw.get("positions") or {}).values():
             try:
                 rec = PositionRecord.model_validate(t["record"])
@@ -263,6 +264,8 @@ class PanelFiles:
                 continue
             positions.append(rec)
             notional[rec.position_id] = float(t.get("notional_usdt") or 0.0)
+            if t.get("server_protection"):
+                protection[rec.position_id] = t["server_protection"]
         ds = raw.get("day_start") or {}
         return Ledger(
             positions=positions,
@@ -270,6 +273,7 @@ class PanelFiles:
             day_start_day=str(ds.get("day")) if ds.get("day") else None,
             day_start_equity=_float(ds.get("equity_usdt")),
             last_equity=_float(raw.get("last_equity_usdt")),
+            protection=protection,
         )
 
     def breaker(self) -> BreakerState | None:
@@ -296,6 +300,8 @@ class Ledger:
     day_start_day: str | None = None
     day_start_equity: float | None = None
     last_equity: float | None = None
+    protection: dict[str, object] = field(default_factory=dict)
+    """持仓号 → positions.json 里 server_protection 的原始 JSON（旧仓位没有）。"""
 
     def live(self) -> list[PositionRecord]:
         return [p for p in self.positions if p.status not in DONE]

@@ -128,6 +128,7 @@ OPTIONAL_APP_FIELDS = {
     "credit_low_floor_usd",
     "credit_resend_hours",
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
+    "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",
     "hold",

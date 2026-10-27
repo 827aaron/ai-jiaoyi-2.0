@@ -907,6 +907,13 @@ class AppConfig(Contract):
         le=1440,
         description="选币多久跑一次，默认跟开会间隔档位走（15 分钟下限保护币安接口权重）。",
     )
+    protection_stale_s: int = Field(
+        default=120,
+        ge=0,
+        le=3600,
+        description="面板：交易所托管保护单的观测时间超过这么多秒就标“数据过期”（对账员约每 "
+        "reconcile_interval_s 刷新一次）；0 = 不标。",
+    )
     pool_size: int = Field(ge=5, le=100, description="候选池大小，设计值 30–50。")
     card_pick_max: int = Field(ge=1, le=50, description="军师每次最多挑几个，设计值 10–20。")
     data_dir: str = Field(min_length=1, description="决策日志、模块状态等写在这里。")
