@@ -375,7 +375,7 @@ def test_journal_rows_keep_old_keys_byte_identical_and_append_outlook(tmp_path: 
             symbol=s.symbol, category=s.category.value, bias=s.bias.value,
         ).model_dump_json()  # fmt: skip
         assert line.startswith(old[:-1] + ',"outlook":')  # 旧格式原样，末尾多一个键
-        assert list(json.loads(line)) == [*_LEGACY_KEYS, "outlook"]
+        assert list(json.loads(line)) == [*_LEGACY_KEYS, "outlook", "meeting_setup"]
     rows = [json.loads(x) for x in lines]
     assert rows[0]["outlook"] == o.model_dump(mode="json") and rows[1]["outlook"] is None
     j.record(card, [])  # 没有新开会的币：什么都不写

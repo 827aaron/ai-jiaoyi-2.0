@@ -801,10 +801,11 @@ def _card(
     for r in cmd:
         if r.symbol and r.output and r.outcome is Outcome.ACTION and r.ts <= last.ts:
             try:
-                # 记录里还夹着 usage（token 用量），不属于作战指令：不去掉的话契约校验会整条丢掉；
-                # 只记录的 outlook 单独校验，坏了不连累卡
+                # 记录里还夹着 usage（token 用量）、meeting_setup（偏空整改的分组）等不属于作战指令
+                # 的键：契约禁止多余字段，不去掉的话校验会整条丢掉；只记录的 outlook 单独校验，
+                # 坏了不连累卡
                 per[r.symbol] = card_from_output(
-                    {k: v for k, v in r.output.items() if k != "usage"}
+                    {k: v for k, v in r.output.items() if k in CardSymbol.model_fields}
                 )
             except ValueError:
                 continue

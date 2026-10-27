@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,6 +52,8 @@ class JournalRow(BaseModel):
     bias: str
     # 只记录的 CardOutlook（大盘 / 相对判断、评级、观望倾向、总盘会方向）；旧行没有
     outlook: dict[str, Any] | None = None
+    # 这场会实际用的偏空整改设置（分组 arm、谁先发言 debate_first 等，见 bias_fix.py）；旧行没有
+    meeting_setup: dict[str, str] | None = None
 
 
 class CardJournal:
@@ -64,8 +66,14 @@ class CardJournal:
     def path(self) -> Path:
         return self._path
 
-    def record(self, card: BattleCard, fresh: Iterable[str]) -> None:
+    def record(
+        self,
+        card: BattleCard,
+        fresh: Iterable[str],
+        setups: Mapping[str, Mapping[str, str] | None] | None = None,
+    ) -> None:
         fresh_set = set(fresh)
+        setups = setups or {}
         rows = [
             JournalRow(
                 card_id=card.card_id,
@@ -78,6 +86,7 @@ class CardJournal:
                 category=s.category.value,
                 bias=s.bias.value,
                 outlook=s.outlook.model_dump(mode="json") if s.outlook else None,
+                meeting_setup=dict(m) if (m := setups.get(s.symbol)) is not None else None,
             )
             for s in card.symbols
             if s.symbol in fresh_set

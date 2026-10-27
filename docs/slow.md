@@ -597,3 +597,25 @@ min_run_gap_min = 5
 # config/app.toml 的 [fast_loop]
 regime_flip_target = "desk"
 ```
+
+## 单币会议偏空整改开关（`[meeting]`，`slow/bias_fix.py`）
+
+依据 `short-bias-investigation-2026-10-28`：偏空出现在「多空辩论 → 研究经理」这一步。五个键都不写 = 现状，提示词和配置一字不差。
+
+| 键 | 取值（默认在前） | 作用 |
+|---|---|---|
+| `debate_first` | `"bull"` / `"bear"` / `"alternate"` | 辩论谁先说。bull = 空头总是最后说（现状）；bear = 多头最后说；alternate = 按会议 id 哈希交替。实现：`PerpGraph` 只改自己那张图「分析师 → 辩论」的入口边，轮流和收尾照原版 |
+| `funding_label` | `"legacy"` / `"neutral"` | neutral：资金费率只写谁付谁 + 币安基准 +0.01%/8h（结算间隔从 `fundingTime` 算，不是 8 小时的按「利率 0.03%/天」折算到每次结算），明显高于 / 低于基准才算多头 / 空头拥挤；空头（mirror 时也包括多头）那句「拥挤」写同样的门槛 |
+| `bear_bull_symmetry` | `"legacy"` / `"mirror"` | mirror：多空两份正文逐句对称（空头正文按 `ta_prompts.MIRROR_SWAPS` 换方向词就是多头正文）；研究经理 / 组合经理把做空评级写得和做多一样具体，组合经理和交易字段「等回调」写成「等回调或反弹」，行情分析师「守住 / 反弹」补上「被压回」，共用说明里「行情变了要改判断」的例子两个方向都举 |
+| `crowd_ratio_mode` | `"raw"` / `"relative"` | relative：账户多空比再给相对这个币自己 30 天中位数（4h × 180 一次公开请求，按币缓存 6 小时）的偏离，并注明多数币长期在 1 以上；拿不到中位数就只给原值并写明。拍板快照的 `crowd_ls` 不变 |
+| `bias_fix_ab` | `0.0`（0–1） | 0 = 上面四项每场会都按配置。> 0 = 析因对照：每个改了的开关各自独立（各自加盐哈希）按这个概率用配置值，否则用现状；四个都改时是 2⁴ 组。四项全是现状却写 > 0 会拒绝启动 |
+
+每场会（含报错、质量门槛没过、超时的会）把 `meeting_setup` 记进决策日志单币记录的 `output`：`meeting_id`（`币@开会时刻 UTC`）、`arm`（off / new / legacy / mixed）、四个开关实际取值、`debate_first_setting`、`ab`、`config_version`（四项 + ab 的哈希）、`switches_on`。开成的会同样写进 `card_review/cards.jsonl` 每行的 `meeting_setup`（可选字段，旧行照读）和开会实况。
+
+对照怎么看：用 J1 的超额记分，按 `meeting_setup.meeting_id` 对上每场会，在 4 小时时段内按 `switches_on` / 各开关的实际取值（比如 `debate_first` 实际是 bull 还是 bear）分组，估计每个开关开 / 不开的主效应；不要按 `arm` 分组（析因设计下 new / legacy 只是 16 组里的两个角），也不要看交易盈亏；按开会时这个币有没有持仓分层。
+
+推荐的 Demo 配置：`debate_first = "bear"`、`funding_label = "neutral"`、`bear_bull_symmetry = "mirror"`、`crowd_ratio_mode = "relative"`、`bias_fix_ab = 0.5`。`bear` 而不是 `alternate`：析因分组本身就让一半会议空头先说、一半多头先说，比较干净；`neutral` 和 `mirror` 一起开，避免现状资金费率写法下「high funding」↔「deeply negative funding」这对不完全对等的措辞。
+
+开了任何一个开关时，启动会自检：在一场假的按场配置里读回设置，读不回（TradingAgents 改版、找不到 `_run_config`）就拒绝启动；会议中途找不到也直接报错。不会出现记录写着 mirror / neutral、提示词却没用上的情况。
+
+回退到这个功能之前的版本：先把这五个键从 `config/slow.toml` 删掉（旧代码的配置禁止多余字段，留着会拒绝启动）。
