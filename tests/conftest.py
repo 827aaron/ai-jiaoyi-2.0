@@ -3,6 +3,9 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import sys
+import threading
+import traceback
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +28,11 @@ _real_connect_ex = socket.socket.connect_ex
 _real_getaddrinfo = socket.getaddrinfo
 _network_allowed = False
 blocked_attempts: list[str] = []
+"""本测试里被拦的去向；``_attempt_details`` 同序记着线程名和调用栈。"""
+_attempt_details: list[str] = []
+_outside_attempts: list[str] = []
+"""不在任何测试里发生的拦截（导入、收集、会话级夹具、测试之间的后台线程），收尾时报出来。"""
+_LOCAL_NAMES = {"localhost", "ip6-localhost", "ip6-loopback"}
 
 
 class NetworkBlocked(OSError):
@@ -32,18 +40,24 @@ class NetworkBlocked(OSError):
 
 
 def _is_loopback(host: Any) -> bool:
-    if host is None or host == "localhost":
+    if host is None:
         return True
     if isinstance(host, bytes):
         host = host.decode(errors="replace")
+    name = str(host).lower().rstrip(".")
+    if name in _LOCAL_NAMES or name == "":
+        return True
     try:
-        return ipaddress.ip_address(str(host).split("%")[0]).is_loopback
+        ip = ipaddress.ip_address(name.split("%")[0])
     except ValueError:
         return False
+    return ip.is_loopback or ip.is_unspecified  # 0.0.0.0 / :: 连的是本机
 
 
 def _refuse(what: str) -> NetworkBlocked:
+    stack = "".join(traceback.format_stack(limit=15)[:-2])
     blocked_attempts.append(what)
+    _attempt_details.append(f"{what}（线程 {threading.current_thread().name}）\n{stack}")
     return NetworkBlocked(f"测试里禁止连外网：{what}（要联网就标 @pytest.mark.network）")
 
 
@@ -62,16 +76,24 @@ def _guarded_connect_ex(self: socket.socket, address: Any) -> int:
 def _guarded_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
     # 系统解析器不走 socket.connect，域名在这里拦，报错里也能看到是哪个主机
     if not _network_allowed and not _is_loopback(host):
+        name = host.decode(errors="replace") if isinstance(host, bytes) else str(host)
         try:
-            ipaddress.ip_address(str(host).split("%")[0])
+            ipaddress.ip_address(name.split("%")[0])
         except ValueError:
-            raise _refuse(f"resolve {host}") from None
+            raise _refuse(f"resolve {name}") from None
     return _real_getaddrinfo(host, *args, **kwargs)
 
 
 socket.socket.connect = _guarded_connect  # type: ignore[method-assign,assignment]
 socket.socket.connect_ex = _guarded_connect_ex  # type: ignore[method-assign,assignment]
 socket.getaddrinfo = _guarded_getaddrinfo
+
+
+def _take_attempts() -> list[str]:
+    details = list(_attempt_details)
+    blocked_attempts.clear()
+    _attempt_details.clear()
+    return details
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -91,19 +113,46 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip)
 
 
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    _outside_attempts.extend(_take_attempts())
+    if not _outside_attempts:
+        return
+    print("\n测试之外有代码试图连外网（被拦下）：", file=sys.stderr)
+    for d in _outside_attempts:
+        print(d, file=sys.stderr)
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 @pytest.fixture(autouse=True)
 def _no_network(request: pytest.FixtureRequest) -> Iterator[None]:
     global _network_allowed
+    _outside_attempts.extend(_take_attempts())
     _network_allowed = request.node.get_closest_marker("network") is not None
-    blocked_attempts.clear()
     try:
         yield
     finally:
         _network_allowed = False
-    if blocked_attempts:
-        hits = sorted(set(blocked_attempts))
-        blocked_attempts.clear()
-        pytest.fail(f"测试试图连外网（被拦下）：{hits}；把 HTTP 层换成假的", pytrace=False)
+    hits = _take_attempts()
+    if hits:
+        pytest.fail(
+            "测试试图连外网（被拦下），把 HTTP 层换成假的：\n" + "\n".join(hits), pytrace=False
+        )
+
+
+@pytest.fixture(autouse=True)
+def _offline_binance_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """TICKS 是进程级缓存，谁先调谁去币安 exchangeInfo 取；封禁状态也是进程级的，
+    一个测试登记的 418 会让后面的测试全挂。每个测试都从空缓存、未封禁开始，
+    要精度值的测试照旧自己 monkeypatch ``TICKS.get``。"""
+    from jiaoyi.slow import binance_gate
+    from jiaoyi.slow.ticks import TICKS
+
+    monkeypatch.setattr(TICKS, "_fetch", lambda: {})
+    monkeypatch.setattr(TICKS, "_ticks", {})
+    monkeypatch.setattr(TICKS, "_at", float("-inf"))
+    binance_gate.reset()
+    yield
+    binance_gate.reset()
 
 
 def load_example(name: str) -> dict[str, Any]:
