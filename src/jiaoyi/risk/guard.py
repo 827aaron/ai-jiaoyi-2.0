@@ -905,10 +905,20 @@ class RiskGuardImpl:
                 )
                 return None
 
-        caps = {
+        # Caps an empty account would also hit; the size floor measures squeezes beyond these.
+        static_caps = {
             **({"作战卡名义上限": cs.notional_usdt.max} if binding_card else {}),
             **({"币安杠杆分层名义上限": tier_cap} if tier_cap is not None else {}),
             "单笔名义上限": risk.notional_cap(equity),
+        }
+        planned_notional = min(
+            notional,
+            *static_caps.values(),
+            risk.max_total_exposure_x * equity,
+            risk.category_exposure_x[cs.category] * equity,
+        )
+        caps = {
+            **static_caps,
             "总敞口余量": risk.max_total_exposure_x * equity - account.open_notional_usdt,
             "相关组敞口余量": risk.category_exposure_x[cs.category] * equity
             - account.open_notional_by_category.get(cs.category, 0.0),
@@ -943,7 +953,10 @@ class RiskGuardImpl:
         qty = _floor_step(notional / entry, lot.step_size)
         if lot.max_qty is not None and qty > lot.max_qty:
             qty = _floor_step(lot.max_qty, lot.step_size)
-            detail["capped_by_max_qty"] = qty
+            binding = "交易所单笔最大数量"
+            detail.update(capped_by_max_qty=qty, binding=binding)
+        if lot.max_qty is not None:
+            planned_notional = min(planned_notional, lot.max_qty * entry)
         if qty < lot.min_qty or qty <= 0:
             reasons.append(f"数量 {qty} 低于交易所最小下单量 {lot.min_qty}")
             return None
@@ -961,10 +974,11 @@ class RiskGuardImpl:
                 f"按{binding}只能开 {notional:.0f}U，低于作战卡名义下限 {cs.notional_usdt.min:.0f}U"
             )
             return None
-        if fast.min_size_ratio > 0 and risk_budget > 0:
+        planned_risk = planned_notional / entry * dist
+        if fast.min_size_ratio > 0 and planned_risk > 0:
             # A cap that shrinks the trade to dust still costs fees and a position slot.
-            ratio = risk_usdt / risk_budget
-            detail.update(planned_risk_usdt=round(risk_budget, 4), size_ratio=round(ratio, 4))
+            ratio = risk_usdt / planned_risk
+            detail.update(planned_risk_usdt=round(planned_risk, 4), size_ratio=round(ratio, 4))
             if ratio < fast.min_size_ratio:
                 why = (
                     f"仓位被{binding}压到计划的 {ratio * 100:.1f}%（风险 {risk_usdt:.2f}U），"
