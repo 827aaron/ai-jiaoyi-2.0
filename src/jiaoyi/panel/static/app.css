@@ -402,70 +402,92 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .lnk { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 .lnk:hover { text-decoration: underline; }
 
-/* 团队页流程图（设计稿 design/team-flow）：画布 1180×570 绝对定位，宽度不够整体缩放；≤700px 改竖排 */
-.tf-legend { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; justify-content: center; font-size: 12px; background: var(--card); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); margin-bottom: 12px; }
-.tf-legend .lg { display: inline-flex; align-items: center; gap: 6px; }
-/* 图例和「现在走到」都居中；「现在走到」单独一行轮播，长的那条自己换行，看得全 */
-.tf-now { flex-basis: 100%; display: flex; gap: 6px; align-items: baseline; justify-content: center; text-align: center; color: var(--accent); font-weight: 600; cursor: pointer; user-select: none; }
-.tf-now b { flex: none; }
-.tf-now .t { min-width: 0; overflow-wrap: anywhere; }
-.tf-now .k { flex: none; color: var(--dim); font-weight: 400; font-size: 11px; }
-.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
-.dot.done { background: var(--ok-lamp); }
-.dot.doing { background: var(--accent); animation: tf-pulse 1.6s ease-out infinite; }
-.dot.wait { border: 2px solid var(--faint); }
-.dot.err { background: var(--down); }
-@keyframes tf-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
-.card.tf { padding: 12px; overflow: hidden; }
-.tf-fit { position: relative; width: 100%; }
-.tf-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
-.tf-band { position: absolute; left: 0; width: 1180px; border-radius: 10px; background: color-mix(in srgb, var(--hi) 3%, transparent); }
-.tf-band b, .tf-lane > b { font-size: 12px; font-weight: 600; color: var(--dim); }
-.tf-band b { position: absolute; left: 12px; top: 8px; }
-.tf-band b span, .tf-lane > b span { font-weight: 400; margin-left: 6px; }
-.tf-edges { position: absolute; inset: 0; overflow: visible; }
-.tf-edges .e { fill: none; stroke: var(--line2); stroke-width: 1.5; }
-.tf-edges .e.done { stroke: var(--ok-lamp); }
-.tf-edges .e.doing { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 5; animation: tf-flow 0.8s linear infinite; }
-.tf-edges .e.side { stroke-dasharray: 3 4; }
-.tf-edges .ah { fill: var(--line2); }
-.tf-edges .ah.done { fill: var(--ok-lamp); }
-.tf-edges .ah.doing { fill: var(--accent); }
-.tf-edges text { fill: var(--dim); font: 11px var(--font); }
-.tf-edges .e.against { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 5 4; animation: none; opacity: 0.85; }
-.tf-edges .ah.against { fill: var(--warn); }
-.tf-edges text.against { fill: var(--warn); }
-@keyframes tf-flow { to { stroke-dashoffset: -11; } }
-.tf-node { position: absolute; width: 168px; min-height: 92px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 9px 11px; display: flex; flex-direction: column; gap: 2px; color: inherit; cursor: pointer; }
-.tf-node:hover { border-color: var(--line2); }
-.tf-node .nm { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 14px; color: var(--hi); }
-.tf-node small { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tf-node .cnt { font-variant-numeric: tabular-nums; color: var(--tx, var(--hi)); }
-.tf-node.doing { border: 2px solid var(--accent); background: linear-gradient(color-mix(in srgb, var(--accent) 10%, transparent), color-mix(in srgb, var(--accent) 10%, transparent)), var(--card); padding: 8px 10px; }
-.tf-node .now { color: var(--accent); font-weight: 600; }
-.tf-node.wait .nm { color: var(--dim); }
-.tf-node.err { border-color: var(--down); }
-.tf-node.desk { padding: 6px 9px; gap: 1px; }
-.tf-node.desk small { font-size: 11px; line-height: 14px; }
-.tf-node.desk.doing { padding: 5px 8px; }
-.tf-node.doc { border-style: dashed; background: var(--fill); }
-.hb { margin-left: auto; font-style: normal; font-weight: 500; font-size: 10.5px; line-height: 16px; padding: 0 6px; border-radius: 8px; white-space: nowrap; color: var(--dim); background: var(--fill); }
-.hb.ok { color: color-mix(in srgb, var(--ok-lamp) 75%, var(--hi)); background: color-mix(in srgb, var(--ok-lamp) 14%, transparent); }
-.hb.slow { color: var(--warn); background: var(--warn-soft); }
-.hb.bad { color: var(--down); background: color-mix(in srgb, var(--down) 14%, transparent); }
-.tf-legend .hb { margin: 0 4px 0 0; }
-.tf-node.on { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
-.tf-watch { position: absolute; inset: -6px; border: 1.5px dashed var(--line2); border-radius: 16px; pointer-events: none; }
-.tf-watch span { position: absolute; right: 14px; bottom: -9px; background: var(--card); padding: 0 8px; font-size: 11.5px; color: var(--dim); }
-.tf-stack { display: none; }
-.tf-stack.tf-extra { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.tf-extra .tf-node { position: static; }
-@media (prefers-reduced-motion: reduce) { .dot.doing, .tf-edges .e.doing { animation: none; } }
-@media (max-width: 700px) {
-  .tf-fit { display: none; }
-  .tf-stack { display: flex; flex-direction: column; gap: 14px; }
-  .tf-lane { display: flex; flex-direction: column; gap: 8px; }
-  .tf-stack .tf-node { position: static; width: auto; min-height: 0; }
+/* 团队页：三条泳道（慢环 / 开仓 / 快环）+ 底栏；每条泳道一种强调色，只用在卡顶细条和泳道标题。
+   绿 / 琥珀 / 红只表示健康。1440×900 一屏放下；≤1180px 预测员换到下一行，≤760px 泳道竖排 */
+.tf { display: flex; flex-direction: column; gap: 18px; }
+.tf-top { display: flex; align-items: center; gap: 16px; min-width: 0; background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px 16px; }
+.tf-now { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: baseline; white-space: nowrap; cursor: pointer; user-select: none; }
+.tf-now b { flex: none; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--accent); }
+.tf-now .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--hi); font-size: 13px; }
+.tf-now .k { flex: none; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tf-key { flex: none; display: flex; gap: 14px; font-size: 11.5px; color: var(--dim); }
+.tf-key span { display: inline-flex; align-items: center; gap: 6px; }
+.tf-ring { width: 12px; height: 9px; border-radius: 3px; border: 1.5px solid var(--accent); }
+
+.tl { --lc: var(--line2); }
+.tl-slow { --lc: var(--lane-slow); }
+.tl-entry { --lc: var(--lane-entry); }
+.tl-fast { --lc: var(--lane-fast); }
+.tl-h { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 8px; }
+.tl-h b { font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--lc); }
+.tl-h span { font-size: 12px; color: var(--dim); }
+.tl-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr) 22px) minmax(0, 1fr) 176px; align-items: stretch; }
+.tl-cell, .tl-side { display: flex; min-width: 0; }
+.tl-side { padding-left: 16px; margin-left: 14px; border-left: 1px solid var(--line); }
+.tl-side:empty { border-left-color: transparent; }
+.tc-ar { align-self: center; justify-self: center; width: 7px; height: 7px; border-top: 1.5px solid var(--faint); border-right: 1.5px solid var(--faint); transform: rotate(45deg); margin-left: -3px; }
+.tc-gap { display: block; }
+
+.tc {
+  position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+  background: var(--card); border-radius: 13px; padding: 13px 14px 11px; overflow: hidden;
+  color: inherit; cursor: pointer; border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.05);
+  transition: box-shadow 150ms ease, transform 150ms ease, border-color 150ms ease;
+}
+.tc::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--lc); opacity: 0.85; }
+.tc:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05), 0 10px 24px rgba(0, 0, 0, 0.08); }
+.tc:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tc.doing { border-color: color-mix(in srgb, var(--accent) 70%, transparent); }
+.tc.on { box-shadow: 0 0 0 3px color-mix(in srgb, var(--lc) 22%, transparent), 0 4px 12px rgba(0, 0, 0, 0.05); }
+.tc-h { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tc-h b { font: 600 15px/1.35 var(--font-disp); color: var(--hi); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-k { font-size: 13px; line-height: 1.55; color: var(--tx); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-k.k-now { color: var(--accent); }
+.tc-k.k-bad { color: var(--err); }
+.tc-k.k-ev { color: var(--warn); }
+.tc-s { font-size: 12px; line-height: 1.5; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-s .s-err { color: var(--err); font-weight: 500; }
+.tc-x { display: flex; flex-direction: column; gap: 4px; margin-top: auto; padding-top: 5px; }
+.tc-u, .tc-ev { align-self: flex-start; max-width: 100%; font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-u { color: var(--dim); background: var(--fill); }
+.tc-ev { color: var(--warn); background: var(--warn-soft); }
+
+.hd { flex: none; width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--ok-lamp); }
+.hd.slow { background: var(--amber); }
+.hd.bad { background: var(--err); }
+.hd.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
+.hd.live { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok-lamp) 22%, transparent); }
+.hd.slow.live { box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 22%, transparent); }
+.hd.bad.live { box-shadow: 0 0 0 4px color-mix(in srgb, var(--err) 18%, transparent); }
+
+/* 作战卡是慢环交出来的东西，不是角色：淡色底，版本号放大 */
+.tc.tc-art { background: color-mix(in srgb, var(--lane-slow) 6%, var(--card)); }
+.tc-v { font: 600 26px/1.15 var(--font-disp); letter-spacing: -0.02em; color: var(--lane-slow); font-variant-numeric: tabular-nums; }
+.tc.tc-side .tc-h b { font-size: 14px; }
+
+.tl-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 2px; }
+.tc.tc-mini { flex: none; flex-direction: row; align-items: center; gap: 12px; padding: 8px 14px; border-radius: 10px; max-width: 100%; }
+.tc.tc-mini::before { display: none; }
+.tc.tc-mini .tc-k, .tc.tc-mini .tc-s { min-width: 0; }
+.tc.tc-mini .tc-x { flex-direction: row; margin: 0; padding: 0; }
+.tf-watch { margin-left: auto; font-size: 12px; color: var(--dim); }
+
+@media (prefers-reduced-motion: reduce) { .tc { transition: none; } .tc:hover { transform: none; } }
+@media (max-width: 1180px) {
+  .tl-row { grid-template-columns: repeat(4, minmax(0, 1fr) 20px) minmax(0, 1fr); }
+  .tl-side { grid-column: 1 / -1; margin: 10px 0 0; padding: 0; border: 0; max-width: 300px; }
+  .tl-side:empty { display: none; }
+}
+@media (max-width: 760px) {
+  .tl-row { display: flex; flex-direction: column; gap: 0; }
+  .tc-ar { margin: 6px 0; transform: rotate(135deg); }
+  .tc-gap { height: 8px; }
+  .tl-side { max-width: none; }
+  .tf-top { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .tf-now { width: 100%; }
+  .tf-key { flex-wrap: wrap; }
+  .tf-watch { margin-left: 0; }
 }
 
 /* 作战卡：快到期的币变灰；历史卡的日期 / 币筛选 */
@@ -571,7 +593,6 @@ table.wrap1 td:first-child { white-space: normal; }
 .pc-line.est { stroke-dasharray: 5 4; opacity: 0.7; }
 
 /* 反向急查：管家卡固定行和日志标签 */
-.tf-node small.now.against { color: var(--warn); }
 .pill.against { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
 
 /* 档位设置页（设计稿 design/tier-settings）：7 张档位卡 → 换档预览条 → 这一档的全部参数 */

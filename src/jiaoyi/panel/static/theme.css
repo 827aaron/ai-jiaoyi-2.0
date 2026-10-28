@@ -26,6 +26,12 @@
   --amber: #FF9F0A;
   --sl: #D48A00; /* K 线止损线 */
   --ok-lamp: #34C759;
+  --err: #D70015; /* 出错固定红，不跟涨跌色设置换 */
+
+  /* 团队页三条泳道：慢环 / 开仓 / 快环 */
+  --lane-slow: #5856D6;
+  --lane-entry: #0A8A9F;
+  --lane-fast: #C77700;
 
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC",
     system-ui, sans-serif;
