@@ -1198,6 +1198,14 @@ class AppConfig(Contract):
         "（被拒的换新单号重挂，未知的只查原单号），宽限用完仍没挂上照旧平仓；"
         "止损、止盈挂失败照旧立即平仓。只影响之后新挂的一代，旧接口的仓不变。改后重启生效。",
     )
+    hosted_close_mode: Literal["hb_first", "direct"] = Field(
+        default="hb_first",
+        description="Demo 托管仓平仓顺序。hb_first = 先停 HB 执行器、等它结束并核完条件单"
+        "再直连平仓（原行为，决定到成交常要 15–110 秒）；direct = 管家 / 巡逻兵等决定平仓时，"
+        "HB 执行器仍在跑、没有自己的平仓单、入场已结束、保护腿状态都明确，就先按持久化单号"
+        "下只减仓市价单，再只停不平 HB；交易所止损一直挂到确认零仓后才撤。"
+        "不满足条件的照旧走 hb_first；提交结果未知照旧只查不重发。改后重启生效。",
+    )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
         description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"

@@ -1,0 +1,419 @@
+"""托管仓平仓顺序（hosted_close_mode）：合成交易所 + 合成时钟复现决定到成交的时间线。
+
+不连接任何服务。
+
+时延模型：每次币安 REST 0.3 秒（直连下单要查模式、查原 CID、下单三次，记 0.9 秒），本机 HB 一次
+0.015 秒。HB 收到停止后不会当场终态（真实 HB 要等下一轮控制循环），由测试显式 terminate。
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from jiaoyi.contracts import Side
+from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
+from jiaoyi.execution.exchange import (
+    ExchangeEntryOrder,
+    IdentifiedCloseOrder,
+    IdentifiedCloseRejected,
+    IdentifiedCloseUnknown,
+)
+from jiaoyi.execution.hb_client import HbApiError
+from jiaoyi.execution.hb_executor import HbExecutorAdapter
+from tests.test_execution import START
+from tests.test_server_protection_regression import AdapterExchange, AdapterHarness
+
+REST_S = 0.3
+PLACE_S = 0.9
+HB_S = 0.015
+FILL_BUDGET_S = 3.0
+_REST = (
+    "positions_evidence",
+    "entry_order",
+    "get_bracket",
+    "get_lifeboat",
+    "cancel_bracket",
+    "cancel_lifeboat",
+    "close_order",
+    "place_bracket",
+    "place_lifeboat",
+    "execution_mark",
+    "assert_entry_clear",
+)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = START
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+class RaceExchange(AdapterExchange):
+    """只减仓语义：可成交量不超过实际余仓；余仓已为零时按币安 -2022 明确拒绝。"""
+
+    def __init__(self, side: Side) -> None:
+        super().__init__(side)
+        self.before_place: Callable[[], Awaitable[None]] | None = None
+        self.fill_cap: float | None = None
+        self.unknown_fills = True
+        self.hidden_direct: set[str] = set()
+        self.legs_at_place: list[dict[str, str | None]] = []
+
+    async def place_close(self, symbol, close_side, quantity, client_order_id):
+        self.legs_at_place.append({c: o.algo_status for c, o in self.orders.items()})
+        if self.before_place is not None:
+            await self.before_place()
+        self.direct.append((client_order_id, quantity))
+        if self.direct_unknown and not self.unknown_fills:
+            raise IdentifiedCloseUnknown(client_order_id)  # 请求没到交易所，查也查不到
+        filled = min(quantity, self.held, math.inf if self.fill_cap is None else self.fill_cap)
+        if filled <= 0:
+            raise IdentifiedCloseRejected("synthetic -2022 ReduceOnly Order is rejected")
+        self.held -= filled
+        order = IdentifiedCloseOrder(
+            symbol=symbol,
+            client_order_id=client_order_id,
+            order_id=f"direct-{len(self.direct)}",
+            close_side=close_side,
+            quantity=quantity,
+            filled_quantity=filled,
+            remaining_quantity=quantity - filled,
+            average_price=100,
+            status="FILLED" if filled == quantity else "EXPIRED",
+            position_side="BOTH",
+            reduce_only=True,
+            is_terminal=True,
+        )
+        self.direct_orders[client_order_id] = order
+        if self.direct_unknown:
+            self.hidden_direct.add(client_order_id)
+            raise IdentifiedCloseUnknown(client_order_id)
+        return order
+
+    async def close_order(self, symbol, client_order_id):
+        if client_order_id in self.hidden_direct:
+            return None
+        return self.direct_orders.get(client_order_id)
+
+
+class LatencyHarness(AdapterHarness):
+    def __init__(self, root: Path, side: Side, mode: str = "direct") -> None:
+        self.clock = FakeClock()
+        self.mode = mode
+        super().__init__(root, side)
+        self.exchange = RaceExchange(side)
+        self.manager = self.build()
+        self.adapter = self.make_adapter()
+        self.api.auto_terminate_on_stop = False
+        self.calls: list[tuple[float, str]] = []
+        self._wrap()
+
+    def build(self) -> BracketManager:
+        self.exchange.registry = self.registry
+        return BracketManager(
+            self.exchange,
+            self.registry,
+            account_name="synthetic-account",
+            connector_name="synthetic-demo",
+            clock=self.clock,
+        )
+
+    def make_adapter(self) -> HbExecutorAdapter:
+        adapter = super().make_adapter()
+        adapter._clock = self.clock
+        adapter._hosted_close_mode = self.mode  # type: ignore[assignment]
+        return adapter
+
+    def _wrap(self) -> None:
+        def timed(target, name: str, cost: float):
+            original = getattr(target, name)
+
+            async def call(*args, **kwargs):
+                self.clock.advance(cost)
+                self.calls.append(((self.clock.now - START).total_seconds(), name))
+                return await original(*args, **kwargs)
+
+            setattr(target, name, call)
+
+        for name in _REST:
+            timed(self.exchange, name, REST_S)
+        timed(self.exchange, "place_close", PLACE_S)
+        timed(self.api, "get_executor", HB_S)
+        timed(self.api, "stop_executor", HB_S)
+
+    def at(self, name: str) -> list[float]:
+        return [t for t, n in self.calls if n == name]
+
+    def hb_terminates(self) -> None:
+        self.api.terminate("owned-executor", "POSITION_HOLD", leaves_position=True)
+
+    def live_stop(self) -> bool:
+        return any(
+            o.kind == "stop_loss" and o.algo_status == "NEW" and cid.startswith("br-sl-")
+            for cid, o in self.exchange.orders.items()
+        )
+
+    def tracked(self):
+        return self.registry.get("pos-1")
+
+
+async def armed(tmp_path: Path, side: Side, mode: str = "direct") -> LatencyHarness:
+    h = LatencyHarness(tmp_path, side, mode)
+    await h.protect()
+    assert h.state().entry_terminal
+    h.calls.clear()
+    return h
+
+
+def elapsed(h: LatencyHarness, start: datetime) -> float:
+    return (h.clock.now - start).total_seconds()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_direct_mode_fills_inside_budget_with_stop_still_live(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+    decided = h.clock.now
+    await h.adapter.close("pos-1", CloseReason.KEEPER)  # 不抛：已确认零仓，只差收尾
+    placed = h.at("place_close")
+    assert len(placed) == 1
+    to_fill = placed[0] - (decided - START).total_seconds()
+    assert to_fill < FILL_BUDGET_S
+    assert [n for _, n in h.calls if n != "get_executor"][:2] == [
+        "positions_evidence",
+        "place_close",
+    ]
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert all(status == "NEW" for status in h.exchange.legs_at_place[0].values())
+    assert h.at("stop_executor")[0] > placed[0]  # HB 在单子上了交易所之后才只停不平
+    assert h.api.stopped == [("owned-executor", True)]
+    # HB 还没终态：保护腿一条不撤，账本保持平仓中。
+    assert h.tracked().record.status is PositionStatus.CLOSING
+    assert h.live_stop() and not h.cancels()
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    done = h.tracked()
+    assert done.record.status is PositionStatus.CLOSED
+    assert done.record.close_reason is CloseReason.KEEPER
+    assert done.direct_close_price == 100
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert not h.backups() and not h.live_stop() and len(h.cancels()) == 3
+    assert any(a.title == "托管仓已直连币安平仓" for a in h.alerter.sent)
+    assert not any("没能平掉" in a.title for a in h.alerter.sent)
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_hb_first_mode_waits_for_hb_terminal_and_next_tick(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side, "hb_first")
+    decided = h.clock.now
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert not h.exchange.direct and h.api.stopped == [("owned-executor", True)]
+    tick_wait = 12.4  # NEAR 2026-10-28 00:55:32.9 停止 → 00:55:45.3 串行保护轮回到这一仓
+    h.clock.advance(tick_wait)
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    placed = h.at("place_close")
+    assert len(placed) == 1
+    to_fill = placed[0] - (decided - START).total_seconds()
+    assert to_fill > tick_wait > FILL_BUDGET_S
+    before = [n for t, n in h.calls if t < placed[0] and n not in ("get_executor", "stop_executor")]
+    assert len(before) >= 6  # 先核 HB 子单、入场、三条腿，才轮到下单
+    assert h.tracked().record.status is PositionStatus.CLOSED
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("actually_filled", [True, False])
+async def test_direct_unknown_result_is_never_resent_across_ticks_and_restart(
+    tmp_path: Path, side: Side, actually_filled: bool
+):
+    h = await armed(tmp_path, side)
+    h.exchange.direct_unknown = True
+    h.exchange.unknown_fills = actually_filled
+    if actually_filled:
+        await h.adapter.close("pos-1", CloseReason.KEEPER)  # 已零仓：不报平仓失败
+    else:
+        with pytest.raises(ProtectionIncomplete):
+            await h.adapter.close("pos-1", CloseReason.KEEPER)
+    h.hb_terminates()
+    for _ in range(2):
+        await h.adapter.protection_tick()
+    h.restart_adapter()
+    await h.adapter.protection_tick()
+    if not actually_filled:
+        with pytest.raises(ProtectionIncomplete):
+            await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert h.tracked().direct_close_pending
+    assert h.tracked().record.status is PositionStatus.CLOSING
+    assert h.backups() and not h.cancels()  # 结果未明时一条保护都不撤
+    if not actually_filled:
+        return  # 原 CID 一直查不到就一直不重发，交给人工核实
+    h.exchange.hidden_direct.clear()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("status", ["SHUTTING_DOWN", "RUNNING"])
+async def test_hb_already_closing_on_its_own_falls_back_to_hb_first(
+    tmp_path: Path, side: Side, status: str
+):
+    h = await armed(tmp_path, side)
+    hb = h.api.executors["owned-executor"]
+    hb.update(status=status, close_type="TIME_LIMIT")
+    hb["custom_info"]["order_ids"] = ["entry-1", "hb-timer-close"]
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert not h.exchange.direct and not h.cancels()
+    assert h.live_stop()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_hb_selling_concurrently_leaves_one_reduce_only_rejection_and_no_retry(
+    tmp_path: Path, side: Side
+):
+    h = await armed(tmp_path, side)
+    hb = h.api.executors["owned-executor"]
+    closer = "sell" if side is Side.LONG else "buy"
+
+    async def hb_timer_fires_first() -> None:
+        hb["custom_info"]["order_ids"] = ["entry-1", "hb-timer-close"]
+        h.exchange.held = 0
+
+    h.exchange.before_place = hb_timer_fires_first
+    original_read = h.exchange.entry_order
+
+    async def read_order(symbol, client_order_id):
+        if client_order_id == "hb-timer-close":
+            return ExchangeEntryOrder(
+                symbol, client_order_id, "timer-1", closer, 2, 2, "FILLED", "BOTH", True
+            )
+        return await original_read(symbol, client_order_id)
+
+    h.exchange.entry_order = read_order
+    await h.adapter.close("pos-1", CloseReason.KEEPER)  # 被拒但已零仓：不报平仓失败
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert h.tracked().direct_close_order_status == "REJECTED"
+    assert h.tracked().record.status is PositionStatus.CLOSING and h.live_stop()
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert not h.live_stop() and not h.backups()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_partial_fill_keeps_stop_and_next_generation_closes_only_the_rest(
+    tmp_path: Path, side: Side
+):
+    h = await armed(tmp_path, side)
+    h.exchange.fill_cap = 1.5
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.exchange.held == 0.5 and h.live_stop() and not h.cancels()
+    h.exchange.fill_cap = None
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0), ("dc-pos-1-2", 0.5)]
+    done = h.tracked()
+    assert done.record.status is PositionStatus.CLOSED
+    assert done.record.realized_pnl_usdt is None  # 两代均价交成交明细回填
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_unknown_hb_stop_after_direct_fill_keeps_protection_until_hb_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: Side
+):
+    h = await armed(tmp_path, side)
+
+    async def lost(executor_id, *, keep_position):
+        raise HbApiError("synthetic response lost after accepted")
+
+    monkeypatch.setattr(h.api, "stop_executor", lost)
+    await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)] and h.exchange.held == 0
+    assert h.tracked().hb_close_unknown
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSING
+    assert h.live_stop() and not h.cancels()
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("stop_fills", [2.0, 0.8])
+async def test_exchange_stop_triggering_during_direct_close_settles_once(
+    tmp_path: Path, side: Side, stop_fills: float
+):
+    h = await armed(tmp_path, side)
+    sl = next(cid for cid in h.exchange.orders if cid.startswith("br-sl-"))
+
+    async def stop_triggers() -> None:
+        h.exchange.orders[sl] = replace(
+            h.exchange.orders[sl],
+            algo_status="FINISHED",
+            child_state="identified",
+            actual_order_id="child-sl",
+            actual_order_status="FILLED",
+            filled_quantity=stop_fills,
+            triggered_at=h.clock.now,
+        )
+        h.exchange.held -= stop_fills
+
+    h.exchange.before_place = stop_triggers
+    await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.exchange.held == 0
+    assert len(h.exchange.direct) == 1
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    done = h.tracked()
+    assert done.record.status is PositionStatus.CLOSED
+    assert done.record.close_reason is CloseReason.KEEPER
+    assert done.direct_close_price is None  # 止损子单分走了一部分，这单均价不代表整仓
+    assert len(h.exchange.direct) == 1
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_unclear_leg_falls_back_to_hb_first(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+    state = h.state()
+    legs = [
+        leg.model_copy(update={"state": "submit_pending"}) if leg.kind == "take_profit" else leg
+        for leg in state.legs
+    ]
+    tracked = h.tracked()
+    h.registry.put(
+        tracked.model_copy(update={"server_protection": state.model_copy(update={"legs": legs})})
+    )
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert not h.exchange.direct and h.live_stop()
+
+
+def test_unknown_hosted_close_mode_is_refused(tmp_path: Path):
+    h = LatencyHarness(tmp_path, Side.LONG)
+    with pytest.raises(ValueError):
+        HbExecutorAdapter(
+            h.api,
+            h.lifeboat,
+            h.registry,
+            h.alerter,
+            account_name="synthetic-account",
+            connector_name="synthetic-demo",
+            hosted_close_mode="fast",  # type: ignore[arg-type]
+        )

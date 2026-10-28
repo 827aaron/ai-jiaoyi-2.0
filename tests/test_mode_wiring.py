@@ -179,6 +179,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._protection.trailing_min_step_bps == 5
     assert adapter._protection.trailing_book_critical_after_s == 300
     assert adapter._protection.leg_order == "lifeboat_first"
+    assert adapter._hosted_close_mode == "hb_first"
     app_cfg = _cfg(
         tmp_path,
         RunMode.PAPER,
@@ -191,6 +192,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
         protection_trailing_min_step_bps=0,
         protection_trailing_book_critical_after_s=0,
         protection_leg_order="stop_first",
+        hosted_close_mode="direct",
     )
     (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
     assert adapter._protection.readback_grace_s == 2.5
@@ -203,6 +205,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._protection.trailing_min_step_bps == 0
     assert adapter._protection.trailing_book_critical_after_s == 0
     assert adapter._protection.leg_order == "stop_first"
+    assert adapter._hosted_close_mode == "direct"
 
 
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:
