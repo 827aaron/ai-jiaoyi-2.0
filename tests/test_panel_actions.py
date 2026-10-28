@@ -405,6 +405,10 @@ def test_update_take_by_kind_section_writes_subtable_and_clears(tmp_path: Path) 
     log = actions.update_config(paths, data, "take_by_kind", {"btc_lead": None}, PW, NOW)
     assert log == [{"key": "btc_lead", "old": 0.0, "new": None}]
     assert load_app_config(paths.app).fast_loop.min_p_take_by_kind == {}
+    actions.update_config(paths, data, "open_by_kind", {"btc_lead": 3}, PW, NOW)
+    assert load_app_config(paths.app).fast_loop.max_open_by_kind == {SignalKind.BTC_LEAD: 3}
+    with pytest.raises(actions.ActionError, match="整数"):
+        actions.update_config(paths, data, "open_by_kind", {"btc_lead": 1.5}, PW, NOW)
 
 
 def test_config_pending_compares_runtime_fingerprint(tmp_path: Path) -> None:

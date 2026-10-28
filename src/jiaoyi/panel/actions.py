@@ -91,6 +91,7 @@ Section = Literal[
     "app",
     "fast_loop",
     "take_by_kind",
+    "open_by_kind",
     "predictor",
     "schedule",
     "llm",
@@ -810,6 +811,7 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "app": ("app", None),
     "fast_loop": ("app", "fast_loop"),
     "take_by_kind": ("app", "fast_loop.min_p_take_by_kind"),
+    "open_by_kind": ("app", "fast_loop.max_open_by_kind"),
     "predictor": ("app", "predictor"),
     "schedule": ("slow", "schedule"),
     "llm": ("slow", "llm"),
@@ -838,6 +840,8 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return {c.value: FieldSpec(float) for c in Category}
     if section == "take_by_kind":  # empty = drop the line, the kind falls back to min_p_take
         return {k.value: FieldSpec(float, nullable=True) for k in SignalKind}
+    if section == "open_by_kind":  # empty = drop the line, no per-kind cap
+        return {k.value: FieldSpec(int, nullable=True) for k in SignalKind}
     if section == "risk":
         return scalar_fields(RiskConfig, {"day_reset_tz"})
     if section == "app":

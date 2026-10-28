@@ -125,6 +125,17 @@ def test_candidate_uses_jev_stop_tier_and_guard_atr() -> None:
     assert replay.candidate(f, b.jev_failed(), FAST, 120) is None
 
 
+def test_candidate_uses_per_kind_take_floor() -> None:
+    f = _found(1)
+    lead = f.signal.model_copy(update={"kind": SignalKind.BTC_LEAD})
+    low = b.jev_ok({"take": "skip"}, confidence=0.8)
+    fast = FAST.model_validate({**FAST.model_dump(), "min_p_take_by_kind": {"btc_lead": 0.0}})
+    c = replay.candidate(replay.Found(lead, f.card), low, fast, 120)
+    assert c is not None and not c.gate_would_block and c.take_floor_kind == "btc_lead"
+    other = replay.candidate(f, low, fast, 120)
+    assert other is not None and other.gate_would_block and other.take_floor_kind is None
+
+
 def test_pick_is_reproducible_and_sorted() -> None:
     found = [_found(i) for i in range(50)]
     a, b2 = replay.pick(found, 10, seed=1), replay.pick(found, 10, seed=1)

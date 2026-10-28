@@ -176,3 +176,44 @@ def test_report_buckets_and_recommends() -> None:
     assert q3["recommend"]["toxicity_below"] is not None
     text = "\n".join(outcomes.render(rep))
     assert "模板 q3" in text and "做概率 ≥ 0.50" in text
+
+
+def test_report_recommendation_skips_rows_judged_by_own_floor() -> None:
+    rows = []
+    for i in range(40):
+        p = 0.2 + 0.015 * i
+        good = p >= 0.5
+        rows.append(
+            {"signal_id": str(i), "template": "q3", "p_take": p, "p_real": 0.6, "p_toxic": 0.3,
+             "exit": "tp" if good else "stop", "net_bps": 90.0 if good else -60.0,
+             "r": 1.8 if good else -1.2, "sig": "volume_breakout"}
+        )  # fmt: skip
+    lead = [
+        {**rows[0], "signal_id": f"l{i}", "p_take": 0.2, "r": 3.0, "net_bps": 150.0,
+         "exit": "tp", "sig": "btc_lead"}
+        for i in range(30)
+    ]  # fmt: skip
+    assert outcomes.report(rows + lead)["q3"]["recommend"]["min_p_take"]["threshold"] == 0.2
+    rep = outcomes.report(rows + lead, ["btc_lead"])["q3"]
+    assert rep["recommend"]["min_p_take"]["threshold"] == 0.5
+    assert rep["recommend"]["own_floor_excluded"] == 30 and rep["all"]["n"] == 70
+    tagged = [{**r, "sig": "oi_follow", "take_floor_kind": "oi_follow"} for r in lead]
+    assert outcomes.report(rows + tagged)["q3"]["recommend"]["own_floor_excluded"] == 30
+
+
+def test_candidates_carry_take_floor_kind_from_gate_or_guard(tmp_path: Path) -> None:
+    g = _gate("a", "long", 0.2)
+    g = g.model_copy(
+        update={"input": {**g.input, "take_floor_kind": "btc_lead", "take_floor": 0.0}}
+    )
+    _write(
+        tmp_path,
+        [
+            g,
+            _gate("b", "long", 0.2),
+            _guard("b", Outcome.PASS, {"take_floor_kind": "btc_lead"}, stop_loss_pct=0.5),
+            _gate("c", "long", 0.7),
+        ],
+    )
+    cs = {c.signal_id: c for c in outcomes.candidates(tmp_path, T0 - timedelta(hours=1), 240)}
+    assert [cs[k].take_floor_kind for k in "abc"] == ["btc_lead", "btc_lead", None]

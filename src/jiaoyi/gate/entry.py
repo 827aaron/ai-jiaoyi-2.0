@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 from jiaoyi.contracts import (
@@ -30,6 +31,7 @@ from jiaoyi.contracts import (
     JevResponse,
     Outcome,
     Side,
+    SignalKind,
 )
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.context import EntryContextSource, EntryExtras
@@ -85,8 +87,12 @@ class JevEntryGate:
         max_wait_s: float = 10.0,
         questions: str = "one",
         context: EntryContextSource | None = None,
+        take_floor: Callable[[SignalKind], float | None] | None = None,
     ) -> None:
-        """``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。
+        """``take_floor``: the per-signal-kind take floor in force, None = the global one; a
+        per-kind floor is written into the record so the panel judges it as it was.
+
+        ``hold_min``：单笔最长持仓（分钟），写进快照，问题按这个时长问。
 
         ``max_concurrent``：同时最多问几个（不同的币）；``max_wait_s``：同币排队最多等几秒
         （信号有效期 − 拍板超时，从信号触发算起）。
@@ -95,6 +101,7 @@ class JevEntryGate:
         数据（None = 只用信号自带的特征）。"""
         self._questions = questions
         self._context = context
+        self._take_floor = take_floor
         self._model = model
         self._rec = recorder
         self._hold_min = hold_min
@@ -246,6 +253,10 @@ class JevEntryGate:
             tail = "，门槛由风控员判定"
         inp, out = jev_log_fields(request, resp, extras.log() if extras is not None else None)
         inp["signal_kind"] = signal.kind.value
+        floor = self._take_floor(signal.kind) if self._take_floor is not None else None
+        if floor is not None:
+            inp["take_floor_kind"] = signal.kind.value
+            inp["take_floor"] = floor
         self._rec.record(
             now,
             outcome,

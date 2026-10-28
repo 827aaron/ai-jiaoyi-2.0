@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -168,6 +169,13 @@ class PaperAccount:
             ),
             day_realized_pnl_usdt=self.realized - self._day_start_realized,
             paused=self.paused,
+            open_by_kind=dict(
+                Counter(
+                    p.intent.signal_kind
+                    for p in self.positions.values()
+                    if p.intent.signal_kind is not None
+                )
+            ),
         )
 
     # ---- 成交

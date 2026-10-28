@@ -412,6 +412,18 @@ async def test_account_includes_unrealized_and_day_start(rig: Rig) -> None:
     assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(900.0)
 
 
+async def test_account_counts_open_positions_by_signal_kind(rig: Rig) -> None:
+    await open_filled(rig, signal_kind="btc_lead")
+    await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT", signal_kind="btc_lead")
+    await open_filled(rig, intent_id="int-0003", symbol="SOLUSDT")
+    rig.api.pos = []
+    acc = await rig.adapter.account()
+    assert acc.open_positions == 3
+    assert acc.open_by_kind == {"btc_lead": 2}
+    rec = rig.registry.by_intent("int-0002")
+    assert rec is not None and rec.record.signal_kind == "btc_lead"
+
+
 async def test_account_fails_closed_without_balance(rig: Rig) -> None:
     rig.api.balances = []
     with pytest.raises(HbApiError):

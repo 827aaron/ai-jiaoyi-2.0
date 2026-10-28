@@ -46,6 +46,7 @@ from jiaoyi.contracts import (
     RiskConfig,
     RiskVerdict,
     Side,
+    SignalKind,
     SizeTier,
 )
 from jiaoyi.contracts.common import Category
@@ -62,6 +63,14 @@ ENTRY_ZONE_SLACK_R = 0.1
 
 
 BANGKOK = ZoneInfo("Asia/Bangkok")
+
+
+def _kind_cap_reason(fast: FastLoopConfig, account: AccountState, kind: SignalKind) -> str | None:
+    cap = fast.max_open_by_kind.get(kind)
+    held = account.open_by_kind.get(kind, 0)
+    if cap is None or held < cap:
+        return None
+    return f"{kind.value} 信号开的仓已有 {held} 笔，达到这类上限 {cap} 笔"
 
 
 def session_factor(fast: FastLoopConfig, now: datetime) -> float:
@@ -437,6 +446,8 @@ class RiskGuardImpl:
             reasons.append("面板已暂停开新仓")
         if account.open_positions >= risk.max_open_positions:
             reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
+        if why := _kind_cap_reason(fast, account, signal.kind):
+            reasons.append(why)
         if signal.symbol in account.open_symbols:
             reasons.append(f"{signal.symbol} 已有在管持仓，不开第二笔（含反向）")
         if account.equity_usdt <= 0:
@@ -653,6 +664,10 @@ class RiskGuardImpl:
             reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
         if sym in account.open_symbols:
             reasons.append(f"{sym} 已有在管持仓")
+        if intent.signal_kind is not None and (
+            why := _kind_cap_reason(self._fast, account, intent.signal_kind)
+        ):
+            reasons.append(why)
         self._symbol_filters(sym, now, reasons)
         cs = card.for_symbol(sym) if card is not None and card.is_valid(now) else None
         why_blocked = self._blocked().get(sym) if self._blocked is not None else None
@@ -974,6 +989,7 @@ class RiskGuardImpl:
             limit_chase=limit is not None and fast.entry_limit_chase,
             intent_id=f"int-{uuid.uuid4().hex[:16]}",
             signal_id=signal.signal_id,
+            signal_kind=signal.kind,
             card_id=card.card_id,
             source_market_direction=(
                 card.current_market.regime_direction if card.current_market else None

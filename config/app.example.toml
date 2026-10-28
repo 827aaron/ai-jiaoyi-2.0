@@ -196,3 +196,8 @@ against_meeting_gap_s = 3600      # 同一个币 60 分钟内最多申请 1 次
 # 每笔风险、止损、信号过期、作战卡、日亏熔断）照旧。类型名只能是哨兵的信号类型，写错拒绝启动。网页能改，热生效。
 # [fast_loop.min_p_take_by_kind]
 # btc_lead = 0.0
+
+# 按信号类型限制同时持仓笔数（不写 = 不单独限，只受 max_open_positions 和敞口上限约束）。
+# 这类信号开的在管持仓到了这个数，同类新信号就拒绝；0 = 这类信号不开仓。网页能改，热生效。
+# [fast_loop.max_open_by_kind]
+# btc_lead = 3

@@ -938,6 +938,7 @@ def test_settings_page_never_has_key_values(tmp_path: Path) -> None:
     assert page.category_caps["major"] == RISK.category_exposure_x[c.Category.MAJOR]
     assert any(i.key == "min_p_take" for i in page.fast_loop)
     assert page.take_by_kind == dict.fromkeys(c.SignalKind, None)
+    assert page.open_by_kind == dict.fromkeys(c.SignalKind, None)
     assert all(i.key != "min_p_take_by_kind" for i in page.fast_loop)
     assert page.keys == {"JEV_API_KEY": True}
     assert "deadbeefcafe" not in page.model_dump_json()  # 哈希不出面板

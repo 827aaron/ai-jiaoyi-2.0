@@ -1879,6 +1879,8 @@ class SettingsPage(BaseModel):
     category_caps: dict[str, float]
     take_by_kind: dict[str, float | None] = {}
     """Every signal kind -> its ``[fast_loop.min_p_take_by_kind]`` floor; None = min_p_take."""
+    open_by_kind: dict[str, int | None] = {}
+    """Every signal kind -> its ``[fast_loop.max_open_by_kind]`` cap; None = no per-kind cap."""
     app: list[SettingItem]
     fast_loop: list[SettingItem]
     predictor: list[SettingItem] = []
@@ -2090,6 +2092,7 @@ def build_settings(
         recommend_basis_usdt=equity_usdt,
         category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
         take_by_kind={k.value: app.fast_loop.min_p_take_by_kind.get(k) for k in SignalKind},
+        open_by_kind={k.value: app.fast_loop.max_open_by_kind.get(k) for k in SignalKind},
         app=_items(app, "app", frozenset({"mode"})),
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),

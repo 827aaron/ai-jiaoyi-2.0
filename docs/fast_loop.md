@@ -203,9 +203,12 @@
 - 按信号类型单独定门槛：`[fast_loop.min_p_take_by_kind]`（`dict[信号类型, 0–1]`，默认空 = 所有类型用 `min_p_take`，即原行为）。面板「拍板人 Jev → 按信号类型单独定门槛」每类一格，留空 = 跟总门槛；也能写进 `config/app.pending.toml` 随更新生效；热生效。类型名按 `SignalKind` 校验，写错或超出 0–1 拒绝。
   - 为什么有：3.2 天的漏斗里 `btc_lead` 33 个信号 Jev「做」都在 0.15–0.38，一笔没开；按主网 1 分钟线、真实止损 / 止盈 / 4 小时到时、12bp 成本模拟平均 +0.42R（不带移动止损）/ +0.17R（带），胜率 82–85%，12 个小时簇里 9 个为正；同期 Jev「做」和结果的秩相关是 −0.13。Demo 建议 `btc_lead = 0.0`。
   - 只换「做」这一道门的门槛（预测员加分照旧加在概率上），Jev 照常调用、照常记录（拍板人记录 `input.signal_kind`），风控员其余检查一条不少：熔断、暂停、持仓笔数、同币持仓、信号过期、要下架 / 刚上线 / 自动减仓、作战卡（有效、版本、允许的信号、方向）、止损档、价差和滑点、每笔风险、总敞口和每类币合计上限、交易所精度。Jev 不可用或没答止损档 / 仓位档照样拒绝。
-  - 用了单独门槛的风控员记录在 `output.detail` 写 `take_floor_kind`（类型）和 `take_floor`（门槛）；没过时原因写「“做”概率 0.60 低于门槛 0.7（btc_lead 单独门槛）」。面板拍板人记录详情按这类的门槛标「做」过没过。
-  - 同一次 BTC 大动会在多个小币上同时出 `btc_lead`，这些仓是相关的：不另加上限，由 `max_open_positions` 和 `category_exposure_x`（每类币合计上限）封顶。
-  - 回滚：面板把这一格清空，或删掉 `[fast_loop.min_p_take_by_kind]` 这一段，几秒内回到全部用 `min_p_take`；不用重启。
+  - 用了单独门槛时，拍板人记录的 `input` 和风控员记录的 `output.detail` 都写 `take_floor_kind`（类型）和 `take_floor`（当时的门槛）；没过时原因写「“做”概率 0.60 低于门槛 0.7（btc_lead 单独门槛）」。面板拍板人记录详情优先按记录里的 `take_floor` 标「做」过没过，旧记录才按现在的配置。
+  - 同一次 BTC 大动会在多个小币上同时出 `btc_lead`，这些仓是相关的。每类币合计上限 `category_exposure_x` 管不住它（现在 risk.toml 里 alt = major = 15 = `max_total_exposure_x`，不起作用）；真正封顶的是 `max_open_positions`、总敞口 `max_total_exposure_x`，和下面的 `max_open_by_kind`。
+  - 校准不被拖偏：`jev-backtest` / `gate-calibrate` / `jev-replay` 给总门槛 `min_p_take` 的推荐时，不算记录里有 `take_floor_kind` 的信号，也不算现在配了单独门槛的类型（`outcomes.global_floor_rows`，报告里写 `own_floor_excluded`）；分桶表照旧全算。`jev-replay` 判「会不会被拍板拦」时按这类的单独门槛。
+- 按信号类型限制同时持仓：`[fast_loop.max_open_by_kind]`（`dict[信号类型, 0–100]`，默认空 = 不另外限，即原行为）。某类信号开的在管持仓（含开仓中、平仓中）到了这个数，同类新信号风控员就拒绝「btc_lead 信号开的仓已有 3 笔，达到这类上限 3 笔」；挂单没成交改市价追进前也查一遍。0 = 这类信号不开仓。面板「拍板人 Jev → 按信号类型限制同时持仓」每类一格，留空 = 不单独限；能写进 `config/app.pending.toml`；热生效。Demo 建议 `btc_lead = 3`。
+  - 开仓指令 `OrderIntent` 和持仓记录 `PositionRecord` 新增 `signal_kind`，账户状态 `AccountState.open_by_kind` 按它数；升级前开的仓没有这一项，不计入（升级后第一批新仓开始算）。
+  - 回滚：面板把这一格清空，或删掉 `[fast_loop.min_p_take_by_kind]` / `[fast_loop.max_open_by_kind]` 这一段，几秒内回到原行为；不用重启。
   `min_p_genuine` / `min_p_direction` / `max_p_toxic` 只在 `"six"` 下生效，设置页不显示，配置里写了也不报错。
 - 题目里点名 `tech` 那句、`flow` / `deriv` / `day` 的说明还没在本地记录上测过，上线后用 `ab/run_ab.py` 重跑验证。
 

@@ -14,7 +14,15 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field
 
-from jiaoyi.contracts.common import Category, Contract, NonNegFloat, PosFloat, Side, Symbol
+from jiaoyi.contracts.common import (
+    Category,
+    Contract,
+    NonNegFloat,
+    PosFloat,
+    Side,
+    SignalKind,
+    Symbol,
+)
 
 
 class LifeboatStatus(StrEnum):
@@ -65,6 +73,9 @@ class PositionRecord(Contract):
     executor_id: str | None = Field(default=None, description="hummingbot-api 执行器 id。")
     intent_id: str = Field(min_length=1)
     signal_id: str = Field(min_length=1)
+    signal_kind: SignalKind | None = Field(
+        default=None, description="开这笔的信号类型；旧记录没有。"
+    )
     card_id: str = Field(min_length=1)
     symbol: Symbol
     category: Category

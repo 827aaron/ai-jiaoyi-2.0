@@ -167,9 +167,13 @@ def calibrate(
     now: datetime,
     min_above: int = MIN_ABOVE,
     min_samples: int = MIN_SAMPLES,
+    own_floor_kinds: Iterable[str] = (),
 ) -> dict[str, Any]:
+    """``own_floor_kinds``: signal kinds with their own take floor; their rows (and rows judged
+    by a per-kind floor) stay out of the scan, see ``outcomes.global_floor_rows``."""
+    kept = outcomes.global_floor_rows(rows, own_floor_kinds)
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-    for r in rows:
+    for r in kept:
         groups.setdefault(_group_key(r), []).append(r)
     base: dict[str, Any] = {
         "hold": hold,
@@ -179,6 +183,7 @@ def calibrate(
         "min_samples": min_samples,
         "slippage_bps": SLIPPAGE_BPS,
         "recommended": None,
+        "own_floor_excluded": len(rows) - len(kept),
     }
     if not groups:
         return {
@@ -244,6 +249,10 @@ def render(result: dict[str, Any]) -> list[str]:
         f"   实盘 {src['live']} / 回放 {src['replay']}，{result['days']} 天；"
         f"模板 {g['template']}，模型 {g['model'] or '未记'}"
     )
+    if result.get("own_floor_excluded"):
+        lines.append(
+            f"   有单独「做」门槛的信号类型 {result['own_floor_excluded']} 个，没算进总门槛"
+        )
     for o in result["other_groups"]:
         lines.append(
             f"   另有模板 {o['template']} / 模型 {o['model'] or '未记'} {o['n']} 个（没混进来）"

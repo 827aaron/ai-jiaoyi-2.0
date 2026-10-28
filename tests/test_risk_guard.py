@@ -852,3 +852,57 @@ def test_fast_loop_take_by_kind_rejects_unknown_kind_and_bad_p(
         c.FastLoopConfig.model_validate(
             {**FAST.model_dump(mode="json"), "min_p_take_by_kind": by_kind}
         )
+
+
+def _cap_guard(caps: dict[str, int]) -> _Guard:
+    cfg = c.FastLoopConfig.model_validate(
+        {**FAST.model_dump(mode="json"), "max_open_by_kind": caps}
+    )
+    return _Guard(RISK, cfg, Lots())
+
+
+@_SIDES
+def test_review_open_by_kind_caps_concurrent_positions_of_that_kind(
+    now: datetime, side: c.Side
+) -> None:
+    g = _cap_guard({"btc_lead": 2})
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    one = account(now, open_positions=1, open_by_kind={"btc_lead": 1})
+    two = account(now, open_positions=2, open_by_kind={"btc_lead": 2, "oi_follow": 3})
+    v = g.review(sig, j, cd, one, now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.signal_kind is c.SignalKind.BTC_LEAD
+    assert g.review(sig, j, cd, two, now).reasons == [
+        "btc_lead 信号开的仓已有 2 笔，达到这类上限 2 笔"
+    ]
+    other, j2, _ = _kind_case(now, side, c.SignalKind.VOLUME_BREAKOUT, 0.8)
+    assert g.review(other, j2, cd, two, now).approved
+    assert guard().review(sig, j, cd, two, now).approved  # default: no per-kind cap
+
+
+@_SIDES
+def test_review_open_by_kind_zero_blocks_kind(now: datetime, side: c.Side) -> None:
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    v = _cap_guard({"btc_lead": 0}).review(sig, j, cd, account(now), now)
+    assert v.reasons == ["btc_lead 信号开的仓已有 0 笔，达到这类上限 0 笔"]
+
+
+@_SIDES
+def test_recheck_chase_applies_open_by_kind(now: datetime, side: c.Side) -> None:
+    g = _cap_guard({"btc_lead": 1})
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    v = g.review(sig, j, cd, account(now), now)
+    assert v.intent is not None
+    held = account(now, open_positions=1, open_by_kind={"btc_lead": 1})
+    assert g.recheck_chase(v.intent, cd, held, now) == [
+        "btc_lead 信号开的仓已有 1 笔，达到这类上限 1 笔"
+    ]
+    assert g.recheck_chase(v.intent, cd, account(now), now) == []
+
+
+def test_fast_loop_open_by_kind_rejects_unknown_kind_and_negative() -> None:
+    for caps in ({"nope": 1}, {"btc_lead": -1}):
+        with pytest.raises(ValueError):
+            c.FastLoopConfig.model_validate(
+                {**FAST.model_dump(mode="json"), "max_open_by_kind": caps}
+            )

@@ -116,14 +116,20 @@ def test_accepts_leverage_account_and_jev_switches(tmp_path: Path) -> None:
 
 def test_accepts_take_by_kind_subtable(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
-    _pending(paths, "app", "[fast_loop.min_p_take_by_kind]\nbtc_lead = 0.0\n")
+    _pending(
+        paths,
+        "app",
+        "[fast_loop.min_p_take_by_kind]\nbtc_lead = 0.0\n\n"
+        "[fast_loop.max_open_by_kind]\nbtc_lead = 3\n",
+    )
     res = pc.apply_pending(paths, data, NOW)
     assert res.status == "applied", res.error
-    assert {
-        k.value: v for k, v in load_app_config(paths.app).fast_loop.min_p_take_by_kind.items()
-    } == {"btc_lead": 0.0}
+    fl = load_app_config(paths.app).fast_loop
+    assert {k.value: v for k, v in fl.min_p_take_by_kind.items()} == {"btc_lead": 0.0}
+    assert {k.value: v for k, v in fl.max_open_by_kind.items()} == {"btc_lead": 3}
     assert [(r["section"], r["key"], r["new"]) for r in _rows(data)] == [
-        ("take_by_kind", "btc_lead", 0.0)
+        ("take_by_kind", "btc_lead", 0.0),
+        ("open_by_kind", "btc_lead", 3),
     ]
 
 

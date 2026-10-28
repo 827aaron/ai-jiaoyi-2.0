@@ -482,6 +482,7 @@ class HbExecutorAdapter:
             group_id=f"grp-{uuid.uuid4().hex[:12]}",
             intent_id=intent_id,
             signal_id=intent.signal_id,
+            signal_kind=intent.signal_kind,
             card_id=intent.card_id,
             symbol=intent.symbol,
             category=intent.category,
@@ -2963,6 +2964,10 @@ class HbExecutorAdapter:
             # 还没成交的（OPENING）没有入场价，按指令里的名义价值算，否则连发的信号会少算敞口
             notional = t.record.notional_usdt if t.record.entry_price else t.notional_usdt
             by_category[t.record.category] = by_category.get(t.record.category, 0.0) + notional
+        by_kind: dict[Any, int] = {}
+        for t in live:
+            if t.record.signal_kind is not None:
+                by_kind[t.record.signal_kind] = by_kind.get(t.record.signal_kind, 0) + 1
         open_risk = 0.0
         for t in live:
             base = (
@@ -2990,6 +2995,7 @@ class HbExecutorAdapter:
             open_symbols=sorted({t.record.symbol for t in live}),
             open_risk_usdt=open_risk,
             day_realized_pnl_usdt=day_realized,
+            open_by_kind=by_kind,
         )
 
     async def _day_start(self, now: datetime, wallet: float, equity: float) -> float:

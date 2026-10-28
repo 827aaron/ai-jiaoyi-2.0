@@ -14,7 +14,15 @@ from typing import Any, Literal, NoReturn
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from jiaoyi.contracts.common import Category, Contract, NonNegFloat, PosFloat, Side, Symbol
+from jiaoyi.contracts.common import (
+    Category,
+    Contract,
+    NonNegFloat,
+    PosFloat,
+    Side,
+    SignalKind,
+    Symbol,
+)
 
 
 class AccountState(Contract):
@@ -41,6 +49,10 @@ class AccountState(Contract):
         default=0.0, description="当日（曼谷 0 点起）已平仓位的净盈亏，亏损为负。"
     )
     paused: bool = Field(default=False, description="面板“暂停开新仓”按钮。")
+    open_by_kind: dict[SignalKind, int] = Field(
+        default_factory=dict,
+        description="在管持仓按开仓信号类型计数（含开仓中、平仓中）；记不得类型的旧仓不计。",
+    )
 
     @property
     def day_pnl_pct(self) -> float:
@@ -78,6 +90,9 @@ class OrderIntent(_Sealed):
     source_market_direction: Literal["看涨", "看跌", "中性"] | None = Field(
         default=None,
         description="拍板时当前大盘方向；追单前方向改变时需重新拍板。旧指令没有则兼容。",
+    )
+    signal_kind: SignalKind | None = Field(
+        default=None, description="开这笔的信号类型；按类型限制同时持仓笔数用。"
     )
     symbol: Symbol
     category: Category

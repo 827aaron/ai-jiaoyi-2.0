@@ -4,6 +4,7 @@
   "executor_id": "hb-exec-7f3a",
   "intent_id": "int-0001",
   "signal_id": "sig-BTCUSDT-20261022T061700-001",
+  "signal_kind": null,
   "card_id": "card-20261022-0600",
   "symbol": "BTCUSDT",
   "category": "major",

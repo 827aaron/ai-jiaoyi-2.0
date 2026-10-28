@@ -1072,7 +1072,10 @@ const JEV_CHOICE = { up: "向上", down: "向下", flat: "横盘", narrow: "偏�
 function jevView(s, th) {
   const byKind = (pageData && pageData.gate_take_by_kind) || {};
   const kind = (s.input || {}).signal_kind;
-  if (th && kind in byKind) th = { ...th, min_p_take: byKind[kind] };
+  // a floor written into the record wins over today's config
+  const own = (s.input || {}).take_floor ?? ((s.output || {}).detail || {}).take_floor;
+  if (th && own != null) th = { ...th, min_p_take: own };
+  else if (th && kind in byKind) th = { ...th, min_p_take: byKind[kind] };
   const inp = (s.input || {}).jev || {};
   const out = (s.output || {}).jev || {};
   let snap = inp.snapshot;
@@ -2766,7 +2769,7 @@ const HINT = {
 // 灰色小字只放中文说明；英文键名只在鼠标悬停时显示（排查问题用）
 const hintKey = (i) => (i.key === "mode" && typeof i.value === "string" && i.value in CHOICE ? "mode_predictor" : i.key);
 const techHint = (i) => [HINT[hintKey(i)] ? esc(HINT[hintKey(i)]) : plainOf(i) && i.label && i.label !== i.key && !/^[\x00-\x7f]+$/.test(i.label) ? esc(i.label) : "", i.recommended != null ? `推荐 ${valOf(i, i.recommended)}（${esc(i.recommended_why)}）` : i.key === "frozen_peak_exit_after_s" ? "范围 1–10080 分钟" : i.bounds ? "范围 " + esc(i.bounds) : ""].filter(Boolean).join(" · ");
-const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4", "take_by_kind.*": "跟总门槛" };
+const NULL_AS = { schedule_at: "不定点，按开会间隔", slowdown_interval_min: "下一档", max_cards_per_round: "跟“军师团每次最多挑几个币”一样", "screener.max_spread_bps": "跟硬上限里的“最大价差”走", "risk.max_spread_bps": "不写：按这笔止损的 1/10", "risk.max_slippage_bps": "不写：按这笔止损的 1/4", "take_by_kind.*": "跟总门槛", "open_by_kind.*": "不单独限" };
 // ---- 填 0 = 关闭 / 不限 的设置：哪些项有、开关上写什么，都来自后端每项的 off（panel/pages.py 的 OFF_SWITCHES）
 const offShown = (i, v = i.value) => (v === 0 && i.off ? i.off.shown : null);
 // 编辑框旁边的开关；现值是 0 就是勾着的（点「用推荐值」时填的是推荐值，不勾）
@@ -2968,7 +2971,8 @@ const ROLES = [
   ] },
   { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做", groups: [
     { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.gate_record_only", "fast_loop.gate_questions", "fast_loop.entry_zone_only"] },
-    { g: "按信号类型单独定门槛", byKind: true, hint: "某类信号单独用一个「做」的门槛，没写的类型跟上面的总门槛。填 0 = 这类信号拍板人照常问、照常记，「做」的概率不再拦；持仓笔数、同币持仓、敞口和每类币合计上限、每笔风险、止损、信号过期、作战卡、日亏熔断照旧。同一次 BTC 大动会让多个小币同时出「BTC 先动」，这些仓由每类币合计上限和持仓笔数上限封顶。" },
+    { g: "按信号类型单独定门槛", prefix: "take_by_kind.", hint: "某类信号单独用一个「做」的门槛，没写的类型跟上面的总门槛。填 0 = 这类信号拍板人照常问、照常记，「做」的概率不再拦；持仓笔数、同币持仓、敞口上限、每笔风险、止损、信号过期、作战卡、日亏熔断照旧。同一次 BTC 大动会让多个小币同时出「BTC 先动」，这些仓由持仓笔数上限、总敞口和下面「按信号类型限制同时持仓」封顶。" },
+    { g: "按信号类型限制同时持仓", prefix: "open_by_kind.", hint: "某类信号开的在管持仓（含开仓中、平仓中）到了这个数，同类新信号就拒绝；0 = 这类信号不开仓；留空 = 不单独限（仍受持仓笔数和敞口上限约束）。升级前开的仓记不得类型，不计入。" },
     { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "app.jev_shared_cooldown", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
@@ -3030,7 +3034,7 @@ const PREFIX_ROLE = [
   ["fast_loop.limit_take_", "executor"], ["fast_loop.tp_limit_", "executor"], ["fast_loop.entry_limit_", "executor"],
   ["app.predictor_", "predictor"], ["app.screener_", "screener"],
 ];
-const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", take_by_kind: "gate", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener", meeting: "commander" };
+const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", take_by_kind: "gate", open_by_kind: "gate", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener", meeting: "commander" };
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
@@ -3061,6 +3065,7 @@ function settingIndex(d) {
   for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: `${CAT[k] || k}合计最多`, value: v, bounds: tot == null ? "" : `本金的 0–${tot} 倍（不超过所有仓位合计上限）`, editable: true, choices: [] };
   const take = (d.fast_loop.find((i) => i.key === "min_p_take") || {}).value;
   for (const [k, v] of Object.entries(d.take_by_kind || {})) ix[`take_by_kind.${k}`] = { key: k, sec: "take_by_kind", label: `${SIGNAL[k] || k}：做的把握至少`, value: v, bounds: `0–1；留空 = 跟总门槛${take == null ? "" : `（现在 ${take}）`}`, editable: true, nullable: true, choices: [] };
+  for (const [k, v] of Object.entries(d.open_by_kind || {})) ix[`open_by_kind.${k}`] = { key: k, sec: "open_by_kind", label: `${SIGNAL[k] || k}：最多同时几笔`, value: v, bounds: "0–100；0 = 这类信号不开仓；留空 = 不单独限", editable: true, nullable: true, choices: [] };
   return ix;
 }
 // 把每个角色展开成 {角色 id: [{组名, 提示, 项…}]}；没列到的键收进对应角色的“其他”
@@ -3073,7 +3078,7 @@ function roleGroups(d, ix) {
   for (const role of ROLES) {
     if (!role.groups) continue;
     out[role.id] = role.groups.map((g) => {
-      const keys = g.cat ? Object.keys(ix).filter((x) => x.startsWith("category.")) : g.byKind ? Object.keys(ix).filter((x) => x.startsWith("take_by_kind.")) : g.keys.flatMap(expand);
+      const keys = g.cat ? Object.keys(ix).filter((x) => x.startsWith("category.")) : g.prefix ? Object.keys(ix).filter((x) => x.startsWith(g.prefix)) : g.keys.flatMap(expand);
       keys.forEach((k) => used.add(k));
       return { g: g.g, hint: g.hint, extra: g.extra, warn: g.warn ? d[g.warn] || [] : [], items: keys.map((k) => ix[k]) };
     });

@@ -698,6 +698,7 @@ def build_modules(
             # 排队再等就来不及在信号有效期内判完（风控员按年龄拒，白花一次 Jev）
             max_wait_s=max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0),
             questions=fast.gate_questions,
+            take_floor=lambda kind: fast.min_p_take_by_kind.get(kind),
             # 一道题问法的额外快照：技术面 / 成交流 / 盘口平均（内存）
             # + 信号来时补拉的 REST（实盘行情才拉）
             context=EntryContextSource(
