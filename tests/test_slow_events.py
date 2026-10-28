@@ -194,6 +194,34 @@ async def test_stale_card_blocks_entry_signal_then_supplement_meeting_restores(
     assert back is not None and back.symbols[0].allowed_signals  # 新结论出来后的信号能开
 
 
+async def test_untradeable_sync_on_a_stale_card_queues_no_meeting(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, clock = make(
+        tmp_path / "c",
+        FakeEngine(["AAUSDT", "BBUSDT"]),
+        now,
+        ttl=timedelta(hours=24, minutes=20),
+        events=rules(entry_max_age=timedelta(hours=6)),
+    )
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    clock[0] = t = now + timedelta(hours=7)
+    asked: list[set[str]] = []
+
+    class Rules:
+        def unavailable(self, symbols: set[str]) -> dict[str, str]:
+            asked.append(set(symbols))
+            return {"AAUSDT": "SETTLING"}
+
+    app = _app(tmp_path / "app", t)
+    app.m = dataclasses.replace(app.m, cards=c)
+    app.lot_rules = Rules()  # type: ignore[assignment]
+    app.sync_untradeable(t)
+    assert asked == [{"AAUSDT", "BBUSDT"}]
+    assert c._pending == {}
+    assert c.pop_event(t, pool(t, entry("AAUSDT"), entry("BBUSDT"))) is None
+
+
 async def test_stale_check_off_by_default(tmp_path: Path, now: datetime) -> None:
     c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, ttl=timedelta(hours=30), events=rules())
     await c.refresh(pool(now, entry("AAUSDT")), "scheduled")

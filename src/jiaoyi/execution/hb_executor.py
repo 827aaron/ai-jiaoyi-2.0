@@ -158,6 +158,8 @@ def _open_text(tracked: TrackedPosition) -> str:
     ]
     if r.lifeboat is not None:
         lines.append(f"保命止损 {r.lifeboat.stop_price:.6g}（已挂在币安）")
+    elif tracked.server_protection is not None:
+        lines.append("保命单稍后由托管保护补挂")
     else:
         lines.append("保命止损还没挂上，对账员会补挂")
     return "\n".join(lines)
@@ -1776,6 +1778,22 @@ class HbExecutorAdapter:
         except Exception as error:
             current = self._registry.get(rec.position_id) or tracked
             state = current.server_protection
+            if state is not None and state.stage == "exiting" and state.exit_reason is not None:
+                # 另一条腿已触发：没查清的腿只影响退出核验（prepare_exit 仍会等它），
+                # 不是对账平仓的理由。
+                reason = state.exit_reason
+                await self._alert(
+                    AlertLevel.WARN,
+                    "托管保护已触发，按原因退出",
+                    f"{rec.symbol} {rec.position_id}：已触发 {reason.value}，按此原因退出；"
+                    f"其余腿尚未查清（{describe_error(error)}），退出前继续核验",
+                    rec.symbol,
+                    f"server_triggered_exit:{rec.position_id}",
+                    kind="reconcile",
+                )
+                current = self._set(current, status=PositionStatus.CLOSING, requested_close=reason)
+                await self._close_directly(current, reason, None)
+                return self._registry.get(rec.position_id) or current
             keep_previous = (
                 state is not None
                 and state.ever_armed
