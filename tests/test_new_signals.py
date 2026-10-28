@@ -253,6 +253,86 @@ def test_btc_lead(now: datetime) -> None:
     assert RuleTrigger(cfg).check(moved, cd, now) == []  # 已经跟了
     btc = _quiet(now, btc5z=3.5, ret_5m=-0.001)
     assert RuleTrigger(cfg).check(btc, card(now, allowed_signals=ALL), now) == []  # BTC 自己不出
+    for cold in ({"live_s": 299.0}, {"live_s": None}):
+        f = _quiet(now, btc5z=3.5, ret_5m=-0.001).model_copy(update={"symbol": "ETHUSDT"})
+        values = {k: v for k, v in {**f.values, **cold}.items() if v is not None}
+        assert RuleTrigger(cfg).check(f.model_copy(update={"values": values}), cd, now) == []
+
+
+def _backfilled(btc_bars: int = 1441) -> RollingFeatureEngine:
+    """重启回填完的样子：BTC 一天前 66000、最近一小时 68000（最后 5 分钟平），FIL 一直 100。"""
+    eng = RollingFeatureEngine(atr_period_min=1)
+    for i in range(1441 - btc_bars, 1441):
+        base = 66000.0 if i < 1381 else 68000.0
+        eng.update(_kline("BTCUSDT", i, base * (1 + 0.001 * (1 if i % 2 else -1))))
+    for i in range(1441):
+        eng.update(_kline("FILUSDT", i, 100.0 * (1 + 0.001 * (1 if i % 2 else -1))))
+    return eng
+
+
+def _stream(eng: RollingFeatureEngine, start: datetime, seconds: int, btc: float) -> None:
+    """重新订上之后每 10 秒 BTC、FIL 各一笔；BTC 最后一笔落在 ``btc``，FIL 一直 100。"""
+    for s in range(0, seconds + 1, 10):
+        at = start + timedelta(seconds=s)
+        px = btc if s == seconds else 68000.0
+        eng.update(_trade("BTCUSDT", at, 1000.0, True, px))
+        eng.update(_trade("FILUSDT", at, 1000.0, False, 100.0))
+
+
+def test_btc_lead_waits_for_warmup_after_restart(caplog: Any) -> None:
+    caplog.set_level("INFO", logger="jiaoyi.sentinel.rules")
+    cfg = _cfg(btc_lead_on=True, btc_lead_z=3.0)
+    end = T0 + timedelta(minutes=1441)
+    eng = _backfilled()
+    t = RuleTrigger(cfg)
+    short = card(end, symbol="FILUSDT", bias="short", allowed_signals=ALL)
+    # 刚订上：FIL 来了 1 笔，BTC 一笔成交还没到
+    eng.update(_trade("FILUSDT", end + timedelta(seconds=1), 1000.0, False, 100.0))
+    snap = eng.snapshot("FILUSDT")
+    assert snap is not None
+    assert abs(snap.values["btc5z"]) < 1  # BTC 现价是最新收盘价，不是一天前的 66000
+    assert snap.values["live_s"] == 0.0
+    assert t.check(snap, short, end) == []
+    for s in (2, 3, 4):
+        eng.update(_trade("FILUSDT", end + timedelta(seconds=s), 1000.0, False, 100.0))
+        snap = eng.snapshot("FILUSDT")
+        assert snap is not None and t.check(snap, short, end) == []
+    warm_lines = [r for r in caplog.records if "行情预热中" in r.getMessage()]
+    assert len(warm_lines) == 1 and "FILUSDT" in warm_lines[0].getMessage()
+
+
+def test_btc_lead_after_warmup_both_sides() -> None:
+    cfg = _cfg(btc_lead_on=True, btc_lead_z=3.0)
+    end = T0 + timedelta(minutes=1441)
+    for btc, bias, side in (
+        (68000.0 * 0.98, "short", c.Side.SHORT),
+        (68000.0 * 1.02, "long", c.Side.LONG),
+    ):
+        eng = _backfilled()
+        _stream(eng, end, 360, btc)
+        now = end + timedelta(seconds=360)
+        snap = eng.snapshot("FILUSDT")
+        assert snap is not None and snap.values["live_s"] == 360.0
+        assert snap.values["ret_5m"] == 0.0 and abs(snap.values["btc5z"]) > 3
+        [s] = RuleTrigger(cfg).check(
+            snap, card(now, symbol="FILUSDT", bias=bias, allowed_signals=ALL), now
+        )
+        assert s.kind is c.SignalKind.BTC_LEAD and s.side_hint is side
+
+
+def test_btc_lead_needs_btc_volatility_baseline(caplog: Any) -> None:
+    """BTC 回填失败只有半小时 K 线：算不出 24 小时波动就没有 btc5z，FIL 预热完也不出。"""
+    caplog.set_level("INFO", logger="jiaoyi.sentinel.rules")
+    cfg = _cfg(btc_lead_on=True, btc_lead_z=3.0)
+    end = T0 + timedelta(minutes=1441)
+    eng = _backfilled(btc_bars=30)
+    _stream(eng, end, 360, 68000.0 * 0.98)
+    now = end + timedelta(seconds=360)
+    snap = eng.snapshot("FILUSDT")
+    assert snap is not None and "btc5z" not in snap.values
+    short = card(now, symbol="FILUSDT", bias="short", allowed_signals=ALL)
+    assert RuleTrigger(cfg).check(snap, short, now) == []
+    assert any("BTC 5 分钟波动还算不出来" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------- 拍板人快照

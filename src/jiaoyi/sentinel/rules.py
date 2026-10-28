@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import uuid
 from dataclasses import dataclass
@@ -55,7 +56,9 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.interfaces import Predictor
-from jiaoyi.market.features import BTC
+from jiaoyi.market.features import BTC, LIQ_WINDOW_S, TRADE_WINDOW_S
+
+log = logging.getLogger(__name__)
 
 # (时区, 当地时间, 名称)；夏令时由 zoneinfo 处理
 _SESSION_OPENS = (
@@ -102,6 +105,11 @@ BTC_LEAD_DEDUP = timedelta(minutes=15)
 PEAK_WINDOW = timedelta(hours=1)
 QUIET_AFTER = timedelta(minutes=2)
 """卡上的币这么久没来一笔成交，就算「没收到行情」。"""
+WARM_1M_S = 60.0
+"""``live_s`` 不满这些秒，对应窗口的特征只是重启 / 重新订阅后那几笔：只有 1 笔时涨跌读 0，
+「BTC 先动」会当成「还没跟」。缺 ``live_s`` 按没预热算。"""
+WARM_5M_S = TRADE_WINDOW_S
+WARM_LIQ_S = LIQ_WINDOW_S
 
 
 @dataclass
@@ -143,6 +151,7 @@ class RuleTrigger:
         self._against: list[AgainstSignalEvent] = []  # 还没交给主循环的反向信号
         self._against_at: dict[str, datetime] = {}  # 去重键 → 上次发反向信号的时间
         self._against_result: dict[str, str] = {}  # 去重键 → 主循环给的处理结果
+        self._cold: set[str] = set()  # 已记过「行情预热中」的币，预热完再移出
 
     def refresh(self, dedup_s: int) -> None:
         """按当前配置重算启动时抄进变量的开关（配置热生效时由 App 调用）。"""
@@ -215,6 +224,7 @@ class RuleTrigger:
             return []
         if not cs.allowed_signals:
             self._note_skip(w, "卡上是只看不做", now)  # 方向还在：下面照样判反向
+        self._note_warmup(features, w, now, note=bool(cs.allowed_signals))
 
         out: list[CandidateSignal] = []
         for kind, side, desc in self._rules(
@@ -277,6 +287,30 @@ class RuleTrigger:
                     output={"kind": kind.value, "side": side.value, "dedup_key": key},
                 )
         return out
+
+    def _note_warmup(self, f: FeatureSnapshot, w: _Watch, now: datetime, *, note: bool) -> None:
+        """没预热完的币每段只记一行 INFO（不是每笔成交一行）。``note``：写进「上次跳过」，
+        卡上只看不做时不写，免得盖掉那个原因。"""
+        live = f.values.get("live_s")
+        parts = []
+        if live is None or live < WARM_5M_S:
+            parts.append(f"实时行情才 {live or 0.0:.0f} 秒，不满 5 分钟")
+        if self._btc and f.symbol != BTC and f.values.get("btc5z") is None:
+            parts.append("BTC 5 分钟波动还算不出来")
+        if not parts:
+            self._cold.discard(f.symbol)
+            return
+        reason = "，".join(parts)
+        if note:
+            self._note_skip(w, f"行情预热中：{reason}", now)
+        if f.symbol not in self._cold:
+            self._cold.add(f.symbol)
+            log.info(
+                "%s 行情预热中（%s）：BTC 先动、时段与事件、拥挤交易反向先不出，"
+                "强平瀑布反弹要连续行情满 30 分钟",
+                f.symbol,
+                reason,
+            )
 
     def _against_hit(
         self,
@@ -425,6 +459,7 @@ class RuleTrigger:
         ret_1m = v.get("ret_1m", 0.0)
         ret_5m = v.get("ret_5m", 0.0)
         cvd_30s = v.get("cvd_30s_usdt", 0.0)
+        live = v.get("live_s", 0.0)
         hits: list[tuple[SignalKind, Side, str]] = []
 
         # 放量突破：1 分钟量够
@@ -460,7 +495,7 @@ class RuleTrigger:
         # 强平瀑布反弹
         liq_ratio = v.get("liq_ratio_1m", 0.0)
         drop = c.liq_drop_pct_5m / 100.0
-        if liq_ratio >= c.liq_ratio:
+        if liq_ratio >= c.liq_ratio and live >= WARM_LIQ_S:
             long_liq = v.get("liq_long_usdt_1m", 0.0)
             short_liq = v.get("liq_short_usdt_1m", 0.0)
             if long_liq >= c.liq_min_usdt_1m and ret_5m <= -drop and cvd_30s > 0:
@@ -484,7 +519,7 @@ class RuleTrigger:
 
         # 拥挤交易反向
         funding = v.get("funding_rate")
-        if funding is not None:
+        if funding is not None and live >= WARM_1M_S:
             if funding >= c.crowded_funding_rate and ret_1m < 0 and buy_ratio < 0.5:
                 hits.append(
                     (
@@ -504,7 +539,7 @@ class RuleTrigger:
 
         # 时段与事件
         rv = v.get("realized_vol_5m")
-        if rv and vol_ratio >= c.session_vol_ratio:
+        if rv and vol_ratio >= c.session_vol_ratio and live >= WARM_5M_S:
             name = session_event(now, c.session_window_min, cme=self._cme)
             sigma_5m = rv * math.sqrt(30)  # realized_vol_5m 是 10 秒收益的标准差
             if name is not None and abs(ret_5m) >= sigma_5m > 0:
@@ -521,7 +556,7 @@ class RuleTrigger:
             hits.extend(self._oi_rule(v))
         if self._crowd:
             hits.extend(self._crowd_rule(v))
-        if self._btc and f.symbol != BTC:
+        if self._btc and f.symbol != BTC and live >= WARM_5M_S:
             hits.extend(self._btc_rule(v))
         return hits
 

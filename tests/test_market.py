@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -336,6 +337,57 @@ def test_duplicate_klines_ignored() -> None:
     eng.update(_kline(5, 99999.0, rng=5000.0))  # 回填和推送重叠的旧 K 线
     after = eng.snapshot("BTCUSDT")
     assert before is not None and after is not None and before.atr == after.atr
+
+
+def test_kline_bootstrap_price_is_latest_close_until_first_trade() -> None:
+    eng = RollingFeatureEngine(atr_period_min=1)
+    for k in range(20):
+        eng.update(_kline(k, 66000.0 + 100.0 * k))  # 回填从最老的往后喂
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and snap.last_price == 67900.0
+    t = T0 + timedelta(minutes=20, seconds=5)
+    eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=67950.0, qty=1.0, taker_side=c.Side.LONG))
+    eng.update(_kline(20, 68500.0))  # 来过成交，收盘价不再顶替现价
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and snap.last_price == 67950.0
+
+
+def test_live_s_counts_continuous_stream_and_restarts_after_gap() -> None:
+    eng = warm_engine()
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and "live_s" not in snap.values  # 只有回填 K 线
+    t = T0 + timedelta(minutes=21)
+    eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=68000.0, qty=1.0, taker_side=c.Side.LONG))
+    for s in range(60, 361, 60):  # 冷门币没成交，盘口照推
+        eng.update(_book(t + timedelta(seconds=s), 67999.5, 1.0, 68000.5, 1.0))
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and snap.values["live_s"] == 360.0
+    eng.update(_kline(27, 68000.0))  # K 线不算实时行情
+    gap = t + timedelta(seconds=360 + 301)
+    eng.update(c.Trade(symbol="BTCUSDT", ts=gap, price=68100.0, qty=1.0, taker_side=c.Side.LONG))
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and snap.values["live_s"] == 0.0
+
+
+def test_live_s_kept_by_book_or_mark_between_sparse_trades() -> None:
+    t = T0 + timedelta(minutes=21)
+    quiet: list[Callable[[datetime], c.MarketEvent]] = [
+        lambda at: _book(at, 67999.5, 1.0, 68000.5, 1.0),
+        lambda at: c.MarkPrice(
+            symbol="BTCUSDT", ts=at, mark_price=68000.0, index_price=68000.0, funding_rate=0.0
+        ),
+    ]
+    for event in quiet:
+        eng = warm_engine()
+        eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=68000.0, qty=1.0, taker_side=c.Side.LONG))
+        for s in range(60, 361, 60):
+            eng.update(event(t + timedelta(seconds=s)))
+        last = t + timedelta(seconds=400)  # 两笔成交隔 400 秒，中间行情一直在推
+        eng.update(
+            c.Trade(symbol="BTCUSDT", ts=last, price=68010.0, qty=1.0, taker_side=c.Side.LONG)
+        )
+        snap = eng.snapshot("BTCUSDT")
+        assert snap is not None and snap.values["live_s"] == 400.0
 
 
 def test_streams_without_per_symbol_liquidations() -> None:

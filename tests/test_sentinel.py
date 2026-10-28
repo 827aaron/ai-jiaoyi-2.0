@@ -84,6 +84,9 @@ def test_liquidation_rebound(now: datetime) -> None:
     # 主动成交还没掉头 → 不出
     f2 = f.model_copy(update={"values": {**f.values, "cvd_30s_usdt": -1.0}})
     assert trig().check(f2, card(now), now) == []
+    # 连续行情不满 30 分钟：30 分钟均值只有这几分钟，比值虚高
+    f3 = f.model_copy(update={"values": {**f.values, "live_s": 1799.0}})
+    assert trig().check(f3, card(now), now) == []
 
 
 def test_crowded_reversal(now: datetime) -> None:
@@ -91,6 +94,8 @@ def test_crowded_reversal(now: datetime) -> None:
     f = features(now, funding_rate=0.001, ret_1m=-0.001, taker_buy_ratio_1m=0.4, vol_ratio_1m=1.0)
     out = trig().check(f, cd, now)
     assert [(s.kind, s.side_hint) for s in out] == [(c.SignalKind.CROWDED_REVERSAL, c.Side.SHORT)]
+    cold = f.model_copy(update={"values": {**f.values, "live_s": 59.0}})
+    assert trig().check(cold, cd, now) == []
 
 
 def test_session_windows() -> None:
@@ -110,6 +115,8 @@ def test_session_event_signal() -> None:
     f = features(now, vol_ratio_1m=2.5, ret_5m=0.004, realized_vol_5m=0.0004)
     out = trig().check(f, cd, now)
     assert [(s.kind, s.side_hint) for s in out] == [(c.SignalKind.SESSION_EVENT, c.Side.LONG)]
+    cold = f.model_copy(update={"values": {**f.values, "live_s": 299.0}})
+    assert trig().check(cold, cd, now) == []
 
 
 def test_logs_each_signal(tmp_path: Path, now: datetime) -> None:
@@ -158,6 +165,16 @@ def test_detail_lines_flag_card_symbols_without_trades(now: datetime) -> None:
         assert any(x.startswith(f"{sym} 没收到行情") for x in lines)
     stale = now + timedelta(minutes=3)  # BTC 也 3 分钟没来成交
     assert any(x.startswith("BTCUSDT 没收到行情（最后一笔") for x in t.detail_lines(stale))
+
+
+def test_detail_lines_warmup_keeps_watch_only_reason(now: datetime) -> None:
+    t = trig()
+    t.check(features(now, live_s=10.0), card(now, allowed_signals=[]), now)
+    btc = next(x for x in t.detail_lines(now) if x.startswith("BTCUSDT"))
+    assert "卡上是只看不做" in btc and "行情预热中" not in btc
+    t.check(features(now, live_s=10.0), card(now), now)
+    btc = next(x for x in t.detail_lines(now) if x.startswith("BTCUSDT"))
+    assert "行情预热中：实时行情才 10 秒" in btc
 
 
 def test_detail_lines_cooldown_reason(now: datetime) -> None:
