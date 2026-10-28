@@ -1382,7 +1382,7 @@ P.positions = (arg) => {
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
-          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只贴合 K 线，超出的价位线贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "贴合K线" : "显示全部价位"}</button>
+          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只装 K 线和开仓 / 止损 / 止盈线，保命、启动线超出时贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "只看止损止盈" : "显示全部价位"}</button>
           <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${trailLegend(sel)}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
@@ -1394,21 +1394,32 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
-let lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
+let entryIdx = null, lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
 try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
 // KLINE-SCALE-BEGIN
-const DEFAULT_BARS = 120, RIGHT_BARS = 5;
-// 默认视图：最近 120 根，最新一根后面留 5 根的空位（像 TradingView / 币安）
-function defaultRange(n) {
-  return { from: Math.max(0, n - DEFAULT_BARS), to: Math.max(n - 1, 0) + RIGHT_BARS };
+const DEFAULT_BARS = 120, RIGHT_BARS = 5, ENTRY_LEAD_BARS = 10, ENTRY_LEAD_PX = 110, MAX_SPAN_BARS = 600;
+// 默认视图：从开仓那根前 10 根看到最新一根后 5 根的空位，这段超过 600 根或没有开仓点就退回最近 120 根
+// 开仓前留白：至少 10 根，窄屏再多留，让「开仓 价格」整句放得下（留白像素 = lead × 宽 / (lead + 开仓后的根数)）
+function leadBars(width, barsAfter) {
+  if (!(width > 2 * ENTRY_LEAD_PX)) return ENTRY_LEAD_BARS;
+  return Math.max(ENTRY_LEAD_BARS, Math.ceil((ENTRY_LEAD_PX * barsAfter) / (width - ENTRY_LEAD_PX)));
 }
-// 价格轴只认看得见的 K 线（+ 开仓价）；开了「显示全部价位」才把所有线算进去。返回 {min, max} 或 null
-function scaleRange(bars, range, lines, entry, all) {
+function defaultRange(n, entryIdx, width) {
+  const to = Math.max(n - 1, 0) + RIGHT_BARS;
+  if (entryIdx != null && entryIdx >= 0) {
+    const from = Math.max(0, entryIdx - leadBars(width, to - entryIdx));
+    if (to - from <= MAX_SPAN_BARS) return { from, to };
+  }
+  return { from: Math.max(0, n - DEFAULT_BARS), to };
+}
+// 价格轴认看得见的 K 线 + 开仓 / 止盈 / 止损（含移动止损）线；保命、启动线超出就贴边；开了「显示全部价位」才把所有线算进去。
+// core 是那几条线的价格数组。返回 {min, max} 或 null
+function scaleRange(bars, range, lines, core, all) {
   const lo = Math.max(0, Math.floor(range.from)), hi = Math.min(bars.length - 1, Math.ceil(range.to));
   let min = Infinity, max = -Infinity;
   for (let i = lo; i <= hi; i++) { min = Math.min(min, bars[i].low); max = Math.max(max, bars[i].high); }
   if (!(min <= max)) return null;
-  for (const v of all ? lines : [entry]) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
+  for (const v of all ? lines : core) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
   return { min, max };
 }
 // scaleMargins 是占图高的比例，换成占价格范围的比例：数据只占 1 - 2·pad 的高度
@@ -1426,11 +1437,20 @@ function limitNote(openedMs, limitS, bars, fmt) {
   const end = openedMs + limitS * 1000;
   return end > bars[bars.length - 1].time * 1000 ? `到时 ${fmt(end)} →` : "";
 }
+// 开仓那根 K 线的下标；开仓早于第一根 / 没有开仓时间 → null
+function entryBarIndex(p, bars) {
+  if (!bars.length || !p.opened_at) return null;
+  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
+  if (at < bars[0].time) return null;
+  let k = 0;
+  for (let i = 0; i < bars.length && bars[i].time <= at; i++) k = i;
+  return k;
+}
 // KLINE-SCALE-END
 const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
-    c.timeScale().setVisibleLogicalRange(defaultRange(barCount));
+    c.timeScale().setVisibleLogicalRange(defaultRange(barCount, entryIdx, c.timeScale().width()));
     c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
@@ -1445,8 +1465,7 @@ function updateEdges() {
     chartEl.appendChild(edgeEl);
   }
   const vr = chart.timeScale().getVisibleLogicalRange();
-  const entry = lineDefs.find((d) => d.entry);
-  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), entry && entry.price, S.scaleAll) : null;
+  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), lineDefs.filter((d) => d.core).map((d) => d.price), S.scaleAll) : null;
   const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, padFrac(SCALE_PAD)) : [];
   let nTop = 0, nBot = 0;
   const html = out.map((d) => {
@@ -1527,7 +1546,7 @@ function mountChart() {
       autoscaleInfoProvider: (orig) => {
         const r = orig();
         if (!r) return r;
-        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.entry).map((d) => d.price);
+        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.core).map((d) => d.price);
         const vals = extra.filter((v) => v != null);
         if (!vals.length) return r;
         return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...vals), maxValue: Math.max(r.priceRange.maxValue, ...vals) } };
@@ -1557,6 +1576,7 @@ async function loadKlines(force) {
     linePrices = [];
     lineDefs = [];
     lastBars = [];
+    entryIdx = null;
     limitAt = "";
     updateEdges();
     chart.priceScale("right").applyOptions({ autoScale: true });
@@ -1572,6 +1592,7 @@ async function loadKlines(force) {
     series.setData(bars);
     barCount = bars.length;
     lastBars = bars;
+    entryIdx = entryBarIndex(p, bars);
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1592,7 +1613,7 @@ async function loadKlines(force) {
     tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
   ].filter(([v]) => v != null);
   priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
-  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, entry: title === "开仓" }));
+  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, core: title !== "保命" && !title.startsWith("赚") }));
   limitAt = limitNote(p.opened_at ? new Date(p.opened_at).getTime() : null, p.time_limit_s, bars, hm);
   series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) fitView(chart);
@@ -1602,11 +1623,10 @@ async function loadKlines(force) {
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
 // 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
 function entryMarkers(p, bars) {
-  if (!bars.length || p.entry_price == null || !p.opened_at) return [];
-  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
-  if (at < bars[0].time) return [];
-  let bar = bars[0];
-  for (const b of bars) { if (b.time <= at) bar = b; else break; }
+  if (p.entry_price == null) return [];
+  const k = entryBarIndex(p, bars);
+  if (k == null) return [];
+  const bar = bars[k];
   const long = p.side === "long";
   const css = getComputedStyle(document.documentElement);
   return [{
