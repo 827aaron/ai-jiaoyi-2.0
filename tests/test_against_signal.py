@@ -746,3 +746,60 @@ async def test_runner_assistant_jev_errors_never_touch_the_gate_jev(
         await _settle(r)
     assert gate.consecutive_errors == 0 and gate.health is c.Health.OK
     assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+class FailingExecutor(LedgerExecutor):
+    async def close(self, position_id: str, reason: CloseReason) -> None:
+        raise RuntimeError("hummingbot-api 503")
+
+
+async def test_runner_close_records_source_only_when_the_executor_takes_it(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.m.executor = FailingExecutor([p])  # type: ignore[misc]
+    r.positions = [p]
+    assert r._assistant_close(p, "管家助手：反向信号，两个模型一致") is None
+    await _settle(r)
+    assert close_sources.read(tmp_path) == {}
+    closing = _position_now(now, status="closing")
+    r2, _, _, _ = _runner(tmp_path / "2", now, [closing])
+    r2.positions = [p]
+    assert r2._assistant_close(p, "x") is None  # handed off; the ledger says it is already closing
+    await _settle(r2)
+    assert close_sources.read(tmp_path / "2") == {} and r2.app.m.executor.closed == []  # type: ignore[attr-defined]
+    r3, _, _, _ = _runner(tmp_path / "3", now, [p])
+    r3.positions = [p]
+    r3._leaving = True
+    assert r3._assistant_close(p, "x") == "主程序正在重启或退出"
+    await _settle(r3)
+    assert r3.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+async def test_runner_shutdown_stops_the_assistant_before_cancelling_its_own_tasks(
+    tmp_path: Path, now: datetime
+) -> None:
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    seen: list[tuple[bool, str | None]] = []
+    hold = asyncio.Event()
+
+    async def background() -> None:
+        await hold.wait()
+
+    r._spawn(background())
+    task = next(iter(r._tasks))
+    original = r.assistant.aclose
+
+    async def aclose() -> None:
+        seen.append((task.cancelled() or task.done(), r._assistant_close(p, "x")))
+        await original()
+
+    r.assistant.aclose = aclose  # type: ignore[method-assign]
+    await r.shutdown()
+    assert seen == [(False, "主程序正在重启或退出")]
+    assert r.app.m.executor.closed == []  # type: ignore[attr-defined]

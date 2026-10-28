@@ -70,6 +70,8 @@ REASONS = {
     "key_level": "管家助手：价格穿过关键位，两个模型一致",
 }
 TRIGGER_TEXT = {"reverse_signal": "反向信号", "key_level": "价格穿过关键位"}
+SKIP_B = "跳过：B 不可用"
+SKIP_LOG_EVERY = timedelta(hours=1)
 REOPEN_DAYS = 7
 SUMMARY_EVERY = 10
 """每平满这么多笔发一次汇总。"""
@@ -161,6 +163,14 @@ class TransportScorer:
         self.consecutive_errors = 0
         self._cooldown_until: float | None = None
 
+    def cooling(self) -> bool:
+        return self._cooldown_until is not None and self._clock() < self._cooldown_until
+
+    async def aclose(self) -> None:
+        close = getattr(self._t, "aclose", None)
+        if callable(close):
+            await close()
+
     async def ask(
         self,
         judge: str,
@@ -188,7 +198,6 @@ class TransportScorer:
             self.consecutive_errors += 1
             if self.consecutive_errors >= self._max_errors:
                 self._cooldown_until = self._clock() + self._cooldown_s
-                self.consecutive_errors = 0
             why = "超时" if isinstance(exc, TimeoutError) else f"{type(exc).__name__}: {exc}"
             ms = (time.perf_counter() - started) * 1000
             return Verdict(judge, None, None, opts, why[:200], ms)
@@ -275,10 +284,12 @@ class KeeperAssistant:
         cards: FlipCards | None = None,
         alert: Callable[[str, str], None] | None = None,
         day_reset_tz: str = "Asia/Bangkok",
+        close_source: Callable[[str], str | None] | None = None,
     ) -> None:
         """``close(仓, 原因)``：过平仓前检查、登记平仓任务（主循环正常路径）；返回 None = 已交出去，
         否则是没平的原因（已在平、平仓前检查拦下）。``jev``：A；``b_scorer(模型 id)``：给 B；
-        ``alert(标题, 正文)``：汇总的 Telegram。"""
+        ``alert(标题, 正文)``：汇总的 Telegram；``close_source(持仓 id)``：这笔是谁平的（平仓真的
+        交给执行器之后才记），用来认出哪些仓真是管家助手平的。"""
         self._cfg = cfg
         self._rec = recorder
         self._features = features
@@ -301,6 +312,9 @@ class KeeperAssistant:
         self._checked: set[str] = set()
         self._shadows: dict[str, _Shadow] = {}
         self._closes = 0
+        self._close_source = close_source
+        self._handed_off: set[str] = set()
+        self._skip_logged: dict[str, datetime] = {}
         self._summary_day = local_day(self._clock(), self._tz)
         self._restore()
 
@@ -334,27 +348,46 @@ class KeeperAssistant:
             logger.exception("管家助手看关键位失败，管家照常")
 
     def on_closed(self, pos: PositionRecord, last_px: float | None) -> None:
-        """仓位结束：问过它的话记一行实际出场（账本还没回填出场价就先用 ``last_px``）。"""
+        """仓位结束：问过它的话记一行实际出场（账本还没回填出场价就先用 ``last_px``）。交过平仓、
+        平仓也真交给了执行器（``close_source`` 是管家助手）的，才算管家助手平的：计数、
+        开始跟影子。"""
         self._last_px.pop(pos.position_id, None)
-        if pos.position_id not in self._checked:
+        pid = pos.position_id
+        if pid not in self._checked:
             return
-        self._checked.discard(pos.position_id)
+        self._checked.discard(pid)
+        handed = pid in self._handed_off
+        self._handed_off.discard(pid)
         try:
+            source = self._close_source(pid) if handed and self._close_source else None
+            mine = source == CLOSE_SOURCE
             exit_px = pos.exit_price or last_px
             self._write_row(
                 {
                     "ts": self._clock().isoformat(),
                     "kind": "closed",
                     "symbol": pos.symbol,
-                    "position_id": pos.position_id,
+                    "position_id": pid,
                     "side": pos.side.value,
                     "exit_price": exit_px,
                     "exit_price_source": "ledger" if pos.exit_price else "last_price",
                     "r_exit": position_r(pos, exit_px),
                     "close_reason": pos.close_reason.value if pos.close_reason else None,
+                    "closed_by_assistant": mine,
                     "realized_pnl_usdt": pos.realized_pnl_usdt,
+                    "entry_price": pos.entry_price,
+                    "stop_loss_price": pos.stop_loss_price,
+                    "take_profit_price": pos.take_profit_price,
+                    "opened_at": pos.opened_at.isoformat(),
+                    "time_limit_s": pos.time_limit_s,
+                    "quantity": pos.quantity,
                 }
             )
+            if mine:
+                self._closes += 1
+                self._start_shadow(pos, self._clock())
+                if self._closes % SUMMARY_EVERY == 0:
+                    self._summary(f"管家助手已平 {self._closes} 笔", None)
         except Exception:
             logger.exception("管家助手记出场失败")
 
@@ -436,13 +469,17 @@ class KeeperAssistant:
         self._tasks.clear()
         self._busy.clear()  # 还没开始跑就被取消的任务进不了自己的 finally
         self._deferred.clear()
+        if self._b is not None and self._b[1] is not None:
+            await _close_scorer(self._b[1])
+        self._b = None
 
     def _resume(self, symbol: str) -> None:
         """这个币的事都问完了：推后的翻转确认现在问（候选变没变由军师团确认时再查）。"""
         if any(sym == symbol for sym, _ in self._busy):
             return
         cand = self._deferred.pop(symbol, None)
-        if cand is not None:
+        cfg = self._cfg()
+        if cand is not None and cfg.keeper_assistant_on and cfg.keeper_assistant_flip_confirm:
             self._start_flip(symbol, cand)
 
     @property
@@ -450,9 +487,9 @@ class KeeperAssistant:
         return frozenset(sym for sym, _ in self._busy)
 
     def heartbeat(self, now: datetime) -> None:
+        """只在开着时报：关着不写 module_status，回滚前不用删它。"""
         cfg = self._cfg()
         if not cfg.keeper_assistant_on:
-            self._rec.heartbeat(now, Health.OK, "已关闭（keeper_assistant_on = false）")
             return
         b = cfg.keeper_assistant_b_model or "没配置"
         acting = (
@@ -461,12 +498,22 @@ class KeeperAssistant:
             else "只记录"
         )
         head = (
-            f"{acting}；A Jev / B {b}；正在问 {len(self._busy)} 个币，占 {self._slots.used}/"
+            f"{acting}；A Jev / B {b}；正在问 {len(self.busy)} 个币，占 {self._slots.used}/"
             f"{cfg.keeper_assistant_concurrency} 个名额"
         )
+        notes: list[str] = []
         if self._jev is None:
-            head = f"Jev 没接上；{head}"
-        health = Health.DEGRADED if self._error or self._jev is None else Health.OK
+            notes.append("Jev 没接上")
+        scorer = self._b_scorer(cfg.keeper_assistant_b_model)
+        if scorer is None:
+            notes.append("模型 B 不可用，一律不平")
+        elif isinstance(scorer, TransportScorer) and scorer.cooling():
+            notes.append("模型 B 连续出错，冷却中，一律不平")
+        elif isinstance(scorer, TransportScorer) and scorer.consecutive_errors:
+            notes.append(f"模型 B 连续出错 {scorer.consecutive_errors} 次")
+        if notes:
+            head = f"{'；'.join(notes)}；{head}"
+        health = Health.DEGRADED if self._error or notes else Health.OK
         self._rec.heartbeat(now, health, head)
         self._error = None
 
@@ -475,6 +522,11 @@ class KeeperAssistant:
         if not model or self._b_factory is None:
             return None
         if self._b is None or self._b[0] != model:
+            old = self._b[1] if self._b is not None else None
+            if old is not None:
+                task = asyncio.ensure_future(_close_scorer(old))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
             try:
                 self._b = (model, self._b_factory(model))
             except Exception:
@@ -503,12 +555,22 @@ class KeeperAssistant:
     ) -> tuple[Verdict, Verdict] | str:
         """A、B 同时问「会不会往 ``want`` 走」，两个合起来最多等 ``keeper_assistant_timeout_s``；
         超时两个都算没答上。返回字符串 = 问不了的原因。"""
+        cfg = self._cfg()
+        b_model = cfg.keeper_assistant_b_model
+        b_scorer = self._b_scorer(b_model)
+        if b_scorer is None or (isinstance(b_scorer, TransportScorer) and b_scorer.cooling()):
+            why = (
+                "keeper_assistant_b_model 没配置"
+                if not b_model
+                else f"{b_model} 建不起来"
+                if b_scorer is None
+                else f"{b_model} 连续出错，冷却中"
+            )
+            return f"{SKIP_B}（{why}）"
         f = self._features(symbol)
         if f is None:
             return "没有这个币的行情快照"
         state = direction_snapshot(symbol, f)
-        cfg = self._cfg()
-        b_model = cfg.keeper_assistant_b_model
         mirrored = tuple(reversed(OPTIONS))
         started = time.perf_counter()
         try:
@@ -516,7 +578,7 @@ class KeeperAssistant:
                 asyncio.gather(
                     self._one(self._jev, "A", symbol, state, want, OPTIONS, "Jev 没接上", first),
                     self._one(
-                        self._b_scorer(b_model),
+                        b_scorer,
                         "B",
                         symbol,
                         state,
@@ -546,26 +608,33 @@ class KeeperAssistant:
         px = snap.last_price if snap is not None else None
         got = await self._judges(sym, want)
         if isinstance(got, str):
-            self._rec.record(
-                now,
-                Outcome.INFO,
-                f"{sym} {TRIGGER_TEXT[trigger]}，但{got}，不动",
-                symbol=sym,
-                position_id=pos.position_id,
-                output={"keeper_assistant": {"trigger": trigger, "skipped": got}},
-            )
+            if self._skip_due(got, now):
+                self._rec.record(
+                    now,
+                    Outcome.INFO,
+                    f"{sym} {TRIGGER_TEXT[trigger]}，{got}，不动"[:200],
+                    symbol=sym,
+                    position_id=pos.position_id,
+                    output={"keeper_assistant": {"trigger": trigger, "skipped": got}},
+                )
             return
         a, b = got
         cfg = self._cfg()
         would = a.yes(cfg.keeper_assistant_min_p) and b.yes(cfg.keeper_assistant_min_p)
-        act = would and cfg.keeper_assistant_close and not cfg.keeper_assistant_b_record_only
+        act = (
+            would
+            and cfg.keeper_assistant_on
+            and cfg.keeper_assistant_close
+            and not cfg.keeper_assistant_b_record_only
+        )
         reason = REASONS[trigger]
-        # 名额在问完那一刻已放开；平仓由主循环另起任务去发，这里不等它
+        # 名额在问完那一刻已放开；平仓由主循环另起任务去发，这里不等它。真平没平，等仓位结束时按
+        # close_source 认（on_closed）
         refused = self._close(pos, reason) if act else None
-        closed = act and refused is None
+        handed = act and refused is None
         why = (
-            reason
-            if closed
+            f"{reason}（已交给主循环去平）"
+            if handed
             else f"两个模型都答是，但没平：{refused}"
             if act
             else "两个模型都答是，但 B 只记录（keeper_assistant_b_record_only）"
@@ -575,14 +644,13 @@ class KeeperAssistant:
             else "两个模型没有都答是（或 p(是) 不够 / 有一个没答上），不动"
         )
         self._checked.add(pos.position_id)
-        if closed:
-            self._closes += 1
-            self._start_shadow(pos, now)
+        if handed:
+            self._handed_off.add(pos.position_id)
         self._log(
             now,
             started,
             sym,
-            Outcome.ACTION if closed else Outcome.INFO,
+            Outcome.ACTION if handed else Outcome.INFO,
             f"{sym} {TRIGGER_TEXT[trigger]}，问会不会{MOVE[want]}：A {a.text} / B {b.text}，{why}",
             {
                 "kind": "check",
@@ -600,32 +668,43 @@ class KeeperAssistant:
                 "r_at_signal": position_r(pos, px),
                 "asked": MOVE[want],
                 "would_close": would,
-                "closed": closed,
-                "close_source": CLOSE_SOURCE if closed else None,
+                "handed_off": handed,
                 "why": why,
             },
             (a, b),
             position_id=pos.position_id,
         )
-        if closed and self._closes % SUMMARY_EVERY == 0:
-            self._summary(f"管家助手已平 {self._closes} 笔", None)
+
+    def _skip_due(self, reason: str, now: datetime) -> bool:
+        """同一个跳过原因每小时只记一条（B 不可用时每个信号都会撞上）。"""
+        last = self._skip_logged.get(reason)
+        if last is not None and now - last < SKIP_LOG_EVERY:
+            return False
+        self._skip_logged[reason] = now
+        return True
 
     async def _flip_confirm(self, symbol: str, cand: FlipCandidate, now: datetime) -> None:
         started = time.monotonic()
         want = cand.candidate
         got = await self._judges(symbol, want, first=False)
         if isinstance(got, str):
-            self._rec.record(
-                now,
-                Outcome.INFO,
-                f"{symbol} 待确认翻转（{MOVE[want]}）没问成：{got}，照旧等下一场会",
-                symbol=symbol,
-                output={"keeper_assistant": {"kind": "flip_confirm", "skipped": got}},
-            )
+            if self._skip_due(got, now):
+                self._rec.record(
+                    now,
+                    Outcome.INFO,
+                    f"{symbol} 待确认翻转（{MOVE[want]}）没问成：{got}，照旧等下一场会"[:200],
+                    symbol=symbol,
+                    output={"keeper_assistant": {"kind": "flip_confirm", "skipped": got}},
+                )
             return
         a, b = got
         cfg = self._cfg()
-        both = a.yes(cfg.keeper_assistant_min_p) and b.yes(cfg.keeper_assistant_min_p)
+        both = (
+            cfg.keeper_assistant_on
+            and cfg.keeper_assistant_flip_confirm
+            and a.yes(cfg.keeper_assistant_min_p)
+            and b.yes(cfg.keeper_assistant_min_p)
+        )
         result = "not_agreed"
         if both and cfg.keeper_assistant_b_record_only:
             result = "b_record_only"
@@ -717,7 +796,13 @@ class KeeperAssistant:
     def _summary(self, title: str, day: str | None) -> None:
         if self._dir is None:
             return
-        pairs, pending = live_pairs(read_rows(self._dir), day)
+        rows = read_rows(self._dir)
+        pairs, pending = live_pairs(rows, day, self._tz)
+        checks = sum(
+            1
+            for r in rows
+            if r.get("kind") == "check" and (day is None or _local(r.get("ts"), self._tz) == day)
+        )
         n = len(pairs)
         text = (
             f"平仓 {n + pending} 笔（{day or '累计'}），已知不平会在哪出场的 {n} 笔："
@@ -736,7 +821,7 @@ class KeeperAssistant:
             output={"keeper_assistant": {"kind": "summary", "day": day, "n": n,
                                           "pending": pending, "text": text}},
         )  # fmt: skip
-        if self._alert is not None:
+        if self._alert is not None and self._cfg().keeper_assistant_on and checks:
             try:
                 self._alert(title, text)
             except Exception:
@@ -791,7 +876,8 @@ class KeeperAssistant:
             logger.exception("管家助手流水写入失败")
 
     def _restore(self) -> None:
-        """重启后接着等：最近几天问过、还没记出场的仓；平掉了、影子还没出场的仓；累计平了几笔。"""
+        """重启后接着等：最近几天问过、还没记出场的仓（交过平仓的那几笔也接着认）；管家助手平掉、
+        影子还没出场的仓；累计平了几笔。"""
         if self._dir is None:
             return
         rows = read_rows(self._dir, self._clock() - timedelta(days=REOPEN_DAYS))
@@ -799,12 +885,15 @@ class KeeperAssistant:
         done = {str(r["position_id"]) for r in rows if r.get("kind") == "closed"}
         shadowed = {str(r["position_id"]) for r in rows if r.get("kind") == "shadow_exit"}
         self._checked = {str(r["position_id"]) for r in checks} - done
+        self._handed_off = {str(r["position_id"]) for r in checks if r.get("handed_off")} - done
         self._closes = sum(
-            1 for r in read_rows(self._dir) if r.get("kind") == "check" and r.get("closed")
+            1
+            for r in read_rows(self._dir)
+            if r.get("kind") == "closed" and r.get("closed_by_assistant")
         )
-        for r in checks:
+        for r in rows:
             pid = str(r["position_id"])
-            if not r.get("closed") or pid in shadowed:
+            if r.get("kind") != "closed" or not r.get("closed_by_assistant") or pid in shadowed:
                 continue
             try:
                 self._shadows[pid] = _Shadow(
@@ -821,6 +910,22 @@ class KeeperAssistant:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
+
+
+async def _close_scorer(scorer: Scorer) -> None:
+    close = getattr(scorer, "aclose", None)
+    if callable(close):
+        try:
+            await close()
+        except Exception:
+            logger.exception("关模型 B 的连接失败")
+
+
+def _local(ts: Any, tz: str) -> str | None:
+    try:
+        return local_day(datetime.fromisoformat(str(ts)), tz).isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
 def read_rows(directory: Path, since: datetime | None = None) -> list[dict[str, Any]]:
@@ -854,7 +959,7 @@ class Pair:
 
 
 def counterfactual(
-    rows: Iterable[Mapping[str, Any]], ledger: Mapping[str, PositionRecord]
+    rows: Iterable[Mapping[str, Any]], ledger: Mapping[str, PositionRecord], tz: str = "UTC"
 ) -> tuple[list[Pair], int]:
     """每笔仓第一次「本来会平」（两个都答是、p(是) 都 ≥ 当时的 min_p）和它的实际出场配对。
     ΔR = 信号时平的 R − 实际出场的 R（正 = 早平更好）；ΔU 按数量算，不含手续费差。出场价先用账本
@@ -889,7 +994,7 @@ def counterfactual(
         pairs.append(
             Pair(
                 pid,
-                str(r["ts"])[:10],
+                _local(r.get("ts"), tz) or str(r["ts"])[:10],
                 str(r.get("symbol")),
                 float(r_sig),
                 round(r_exit, 4),
@@ -915,29 +1020,28 @@ def shadow_exit(sh: _Shadow, px: float | None, now: datetime) -> tuple[float | N
     return None, None
 
 
-def live_pairs(rows: Iterable[Mapping[str, Any]], day: str | None = None) -> tuple[list[Pair], int]:
-    """管家助手真平掉的仓：实际平仓（出场那一行的价格）对比影子出场。ΔR = 实际 R − 影子 R
-    （正 = 平掉更好）。``day`` 只看那天（按平仓判断那一行的 UTC 日期）平的。返回（配上的，
-    还没影子出场或还没记出场的个数）。"""
-    checks: dict[str, Mapping[str, Any]] = {}
+def live_pairs(
+    rows: Iterable[Mapping[str, Any]], day: str | None = None, tz: str = "UTC"
+) -> tuple[list[Pair], int]:
+    """管家助手真平掉的仓（出场那一行 ``closed_by_assistant``）：实际平仓对比影子出场。
+    ΔR = 实际 R − 影子 R（正 = 平掉更好）。``day`` 只看那天（``tz`` 的日期，按出场那一行）
+    平的。返回（配上的，还没影子出场的个数）。"""
     exits: dict[str, Mapping[str, Any]] = {}
     shadows: dict[str, Mapping[str, Any]] = {}
     for r in rows:
         pid = str(r.get("position_id"))
         kind = r.get("kind")
-        if kind == "check" and r.get("closed") and (day is None or str(r["ts"])[:10] == day):
-            checks.setdefault(pid, r)
-        elif kind == "closed":
-            exits[pid] = r
+        if kind == "closed" and r.get("closed_by_assistant"):
+            if day is None or _local(r.get("ts"), tz) == day:
+                exits[pid] = r
         elif kind == "shadow_exit":
             shadows[pid] = r
     pairs: list[Pair] = []
     pending = 0
-    for pid, r in checks.items():
-        ex, sh = exits.get(pid), shadows.get(pid)
+    for pid, ex in exits.items():
+        sh = shadows.get(pid)
         if (
-            ex is None
-            or sh is None
+            sh is None
             or ex.get("r_exit") is None
             or sh.get("r_shadow") is None
             or ex.get("exit_price") is None
@@ -945,13 +1049,13 @@ def live_pairs(rows: Iterable[Mapping[str, Any]], day: str | None = None) -> tup
         ):
             pending += 1
             continue
-        sign = 1.0 if r.get("side") == Side.LONG.value else -1.0
-        qty = float(r.get("quantity") or 0.0)
+        sign = 1.0 if ex.get("side") == Side.LONG.value else -1.0
+        qty = float(ex.get("quantity") or 0.0)
         pairs.append(
             Pair(
                 pid,
-                str(r["ts"])[:10],
-                str(r.get("symbol")),
+                _local(ex.get("ts"), tz) or str(ex["ts"])[:10],
+                str(ex.get("symbol")),
                 float(ex["r_exit"]),
                 float(sh["r_shadow"]),
                 round(float(ex["r_exit"]) - float(sh["r_shadow"]), 4),

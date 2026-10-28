@@ -97,6 +97,8 @@ class Harness:
         self.price = [price]
         self.alerts: list[tuple[str, str]] = []
         self.used_at_close: list[int] = []
+        self.accepted: set[str] = set()
+        """持仓 id：执行器真收下了平仓（主循环这时才记 close_sources）。"""
         self.log = JsonlDecisionLog(tmp_path)
         self.now = now
         self.a = KeeperAssistant(
@@ -111,6 +113,7 @@ class Harness:
             cards=cards,
             alert=lambda title, text: self.alerts.append((title, text)),
             day_reset_tz="UTC",
+            close_source=lambda pid: "keeper_assistant" if pid in self.accepted else None,
         )
 
     def _close(self, pos: c.PositionRecord, reason: str) -> str | None:
@@ -118,6 +121,7 @@ class Harness:
         if self.closing:
             return "这笔正在平"
         self.closed.append((pos.position_id, reason))
+        self.accepted.add(pos.position_id)
         return None
 
     async def settle(self) -> None:
@@ -147,7 +151,7 @@ async def test_KeeperAssistant_on_reverse_signal_closes_profit_or_loss_once_when
     await h.settle()
     assert h.closed == [("pos-1", "管家助手：反向信号，两个模型一致")]
     [rec] = h.records()
-    assert rec["closed"] is True and rec["asked"] == "上涨"
+    assert rec["handed_off"] is True and rec["asked"] == "上涨"
     assert [j["p_yes"] for j in rec["judges"]] == [0.8, 0.7]
     rows = (tmp_path / "keeper_assistant" / f"{now:%Y-%m-%d}.jsonl").read_text().splitlines()
     assert json.loads(rows[0])["trigger"] == "reverse_signal"
@@ -159,7 +163,6 @@ async def test_KeeperAssistant_on_reverse_signal_closes_profit_or_loss_once_when
         (0.8, 0.4, {}),
         (0.4, 0.8, {}),
         (0.8, 0.59, {}),
-        (0.8, None, {}),
         (None, 0.8, {}),
         (0.8, 0.8, {"keeper_assistant_b_record_only": True}),
         (0.8, 0.8, {"keeper_assistant_close": False}),
@@ -172,18 +175,38 @@ async def test_KeeperAssistant_on_reverse_signal_holds_unless_both_say_yes(
     h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
     await h.settle()
     assert h.closed == []
-    assert h.records()[0]["closed"] is False
+    assert h.records()[0]["handed_off"] is False
 
 
-async def test_KeeperAssistant_on_reverse_signal_holds_without_model_b(
-    tmp_path: Path, now: datetime
+@pytest.mark.parametrize("why", ["unset", "unbuilt", "cooling"])
+async def test_KeeperAssistant_skips_without_asking_jev_when_b_is_unavailable(
+    tmp_path: Path, now: datetime, why: str
 ) -> None:
-    h = Harness(tmp_path, now, Scorer(0.9), None)
-    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
-    await h.settle()
-    assert h.closed == []
-    [rec] = h.records()
-    assert rec["judges"][1]["error"] and rec["judges"][1]["p_yes"] is None
+    a = Scorer(0.9)
+    b: Any = None
+    kw: dict[str, Any] = {"keeper_assistant_gap_s": 0}
+    if why == "unset":
+        kw["keeper_assistant_b_model"] = None
+    if why == "cooling":
+        clock = [0.0]
+        b = TransportScorer(
+            MockJevTransport(fail=RuntimeError("503")),
+            usd_per_mtok=0,
+            max_errors=1,
+            cooldown_s=60,
+            clock=lambda: clock[0],
+        )
+        await b.ask("B", "X", "{}", "q", ("否", "是"), 1.0)
+    h = Harness(tmp_path, now, a, b, **kw)
+    pos = short_pos(now)
+    for minutes in (0, 30, 61):
+        h.clock[0] = now + timedelta(minutes=minutes)
+        h.a.on_reverse_signal(pos, Side.LONG, "x")
+        await h.settle()
+    assert a.calls == [] and h.closed == [] and h.a._slots.used == 0
+    recs = h.records()
+    assert len(recs) == 2  # once per hour per reason
+    assert all(r["skipped"].startswith("跳过：B 不可用") for r in recs)
 
 
 async def test_KeeperAssistant_on_reverse_signal_ignores_signals_with_the_position_or_when_off(
@@ -259,7 +282,7 @@ async def test_KeeperAssistant_no_double_close_when_already_closing(
     h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
     await h.settle()
     [rec] = h.records()
-    assert rec["closed"] is False and "正在平" in rec["why"]
+    assert rec["handed_off"] is False and "正在平" in rec["why"]
 
 
 async def test_KeeperAssistant_on_price_triggers_on_adverse_key_level_cross_only_when_on(
@@ -407,7 +430,7 @@ async def test_KeeperAssistant_records_counterfactual_inputs_and_exit(
     h.a.on_closed(pos, 107.0)  # second end of the same position writes nothing
     rows = ka.read_rows(tmp_path / "keeper_assistant")
     check, closed = rows
-    assert check["would_close"] is True and check["closed"] is False
+    assert check["would_close"] is True and check["handed_off"] is False
     assert (check["price_at_signal"], check["r_at_signal"]) == (103.7, -0.37)
     assert (closed["kind"], closed["exit_price"], closed["r_exit"]) == ("closed", 108.0, -0.8)
     pairs, open_n = ka.counterfactual(rows, {})
@@ -438,7 +461,10 @@ async def test_KeeperAssistant_live_close_follows_the_shadow_and_summarises(
     pos = short_pos(now, take_profit_price=95.0)
     h.a.on_reverse_signal(pos, Side.LONG, "x")
     await h.settle()
+    rows = ka.read_rows(tmp_path / "keeper_assistant")
+    assert rows[0]["handed_off"] is True
     h.a.on_closed(pos.model_copy(update={"exit_price": 104.0, "status": "closed"}), None)
+    assert ka.read_rows(tmp_path / "keeper_assistant")[-1]["closed_by_assistant"] is True
     h.price[0] = 106.0
     h.a.tick(now + timedelta(minutes=1))
     assert ka.live_pairs(ka.read_rows(tmp_path / "keeper_assistant"))[0] == []
@@ -457,13 +483,78 @@ async def test_KeeperAssistant_summarises_after_every_ten_closes(
     tmp_path: Path, now: datetime
 ) -> None:
     h = Harness(tmp_path, now, Scorer(0.9), Scorer(0.9), keeper_assistant_gap_s=0)
-    for i in range(10):
-        h.a.on_reverse_signal(
-            short_pos(now, position_id=f"p{i}", symbol=f"A{i}USDT"), Side.LONG, "x"
-        )
+    for i in range(11):
+        pos = short_pos(now, position_id=f"p{i}", symbol=f"A{i}USDT")
+        h.a.on_reverse_signal(pos, Side.LONG, "x")
         await h.settle()
-        assert len(h.alerts) == (1 if i == 9 else 0)
+        if i == 10:
+            h.accepted.discard(pos.position_id)  # the executor never took this one
+        h.a.on_closed(pos, 104.0)
+        assert len(h.alerts) == (1 if i >= 9 else 0)
     assert "已平 10 笔" in h.alerts[0][0]
+    assert h.a._closes == 10
+
+
+async def test_KeeperAssistant_handed_off_close_that_never_happens_is_not_counted(
+    tmp_path: Path, now: datetime
+) -> None:
+    h = Harness(tmp_path, now, Scorer(0.9), Scorer(0.9))
+    pos = short_pos(now)
+    h.a.on_reverse_signal(pos, Side.LONG, "x")
+    await h.settle()
+    h.accepted.clear()  # closing was refused downstream (leaving, already closing, error)
+    h.a.on_closed(pos, 104.0)
+    closed = ka.read_rows(tmp_path / "keeper_assistant")[-1]
+    assert closed["kind"] == "closed" and closed["closed_by_assistant"] is False
+    assert h.a._closes == 0 and h.a._shadows == {}
+
+
+async def test_KeeperAssistant_hot_off_stops_closing_and_confirming_at_once(
+    tmp_path: Path, now: datetime
+) -> None:
+    gate = asyncio.Event()
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.9, gate), Scorer(0.9), cards=cards)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    h.a.on_flip_pending("ETHUSDT", cand(now))
+    await asyncio.sleep(0)
+    h.a.on_flip_pending("BTCUSDT", cand(now))  # deferred behind the position check
+    h.cfg = h.cfg.model_copy(update={"keeper_assistant_on": False})
+    gate.set()
+    await h.settle()
+    assert h.closed == [] and cards.confirmed == []
+    assert h.a._deferred == {}
+    assert sum("BTCUSDT" in q for _, q, _ in h.a._jev.calls) == 1  # type: ignore[union-attr]
+
+
+async def test_KeeperAssistant_no_summary_alert_when_off_or_no_checks(
+    tmp_path: Path, now: datetime
+) -> None:
+    h = Harness(tmp_path, now, Scorer(0.9), Scorer(0.9))
+    h.a.tick(now + timedelta(days=1))  # no checks that day
+    assert h.alerts == []
+    h.a.on_reverse_signal(short_pos(now + timedelta(days=1)), Side.LONG, "x")
+    h.clock[0] = now + timedelta(days=1)
+    await h.settle()
+    h.cfg = h.cfg.model_copy(update={"keeper_assistant_on": False})
+    h.a.tick(now + timedelta(days=2))
+    assert h.alerts == []
+    assert any(r.get("kind") == "summary" for r in h.records())
+
+
+async def test_KeeperAssistant_summary_day_follows_the_configured_zone(
+    tmp_path: Path, now: datetime
+) -> None:
+    late = datetime(2026, 10, 22, 20, 0, tzinfo=now.tzinfo)  # 03:00 next day in Bangkok
+    rows = [
+        {"ts": late.isoformat(), "kind": "closed", "position_id": "p", "closed_by_assistant": True,
+         "side": "short", "exit_price": 104.0, "r_exit": -0.4, "quantity": 1.0},
+        {"ts": late.isoformat(), "kind": "shadow_exit", "position_id": "p",
+         "shadow_exit_price": 110.0, "r_shadow": -1.0},
+    ]  # fmt: skip
+    assert len(ka.live_pairs(rows, "2026-10-23", "Asia/Bangkok")[0]) == 1
+    assert ka.live_pairs(rows, "2026-10-22", "Asia/Bangkok")[0] == []
+    assert len(ka.live_pairs(rows, "2026-10-22", "UTC")[0]) == 1
 
 
 def test_shadow_exit_rules(now: datetime) -> None:
@@ -520,13 +611,64 @@ def test_keeper_assistant_report_cli_prints_both_comparisons(
     rows = [
         {"ts": now.isoformat(), "kind": "check", "position_id": "p", "symbol": "BTCUSDT",
          "side": "short", "entry_price": 100.0, "stop_loss_price": 110.0, "quantity": 2.0,
-         "price_at_signal": 103.0, "r_at_signal": -0.3, "would_close": True, "closed": False},
+         "price_at_signal": 103.0, "r_at_signal": -0.3, "would_close": True, "handed_off": False},
         {"ts": now.isoformat(), "kind": "closed", "position_id": "p", "exit_price": 110.0},
     ]  # fmt: skip
     (folder / f"{now:%Y-%m-%d}.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
     )
-    assert main(["keeper-assistant-report", "--app", str(app)]) == 0
+    risk = str(ROOT / "config" / "risk.example.toml")
+    assert main(["keeper-assistant-report", "--risk", risk, "--app", str(app)]) == 0
     out = capsys.readouterr().out
     assert "n = 1，平均 ΔR = +0.700，合计 ΔU = +14.00 U" in out
     assert "真平了的仓" in out
+
+
+async def test_KeeperAssistant_heartbeat_marks_model_b_failures_degraded(
+    tmp_path: Path, now: datetime
+) -> None:
+    clock = [0.0]
+    b = TransportScorer(
+        MockJevTransport(fail=RuntimeError("503")),
+        usd_per_mtok=0,
+        max_errors=3,
+        cooldown_s=60,
+        clock=lambda: clock[0],
+    )
+    h = Harness(tmp_path, now, Scorer(0.9), b)
+    h.a.heartbeat(now)
+    assert h.log.read_status()["keeper_assistant"].health is c.Health.OK
+    await b.ask("B", "X", "{}", "q", ("否", "是"), 1.0)
+    h.a.heartbeat(now)
+    st = h.log.read_status()["keeper_assistant"]
+    assert st.health is c.Health.DEGRADED and "模型 B 连续出错 1 次" in st.headline
+    for _ in range(2):
+        await b.ask("B", "X", "{}", "q", ("否", "是"), 1.0)
+    h.a.heartbeat(now)
+    assert "冷却中" in h.log.read_status()["keeper_assistant"].headline
+
+
+async def test_KeeperAssistant_closes_model_b_when_it_changes_and_on_shutdown(
+    tmp_path: Path, now: datetime
+) -> None:
+    closed: list[str] = []
+
+    class Closable(Scorer):
+        def __init__(self, name: str) -> None:
+            super().__init__(0.1)
+            self.name = name
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+
+    h = Harness(tmp_path, now, Scorer(0.1), None)
+    h.a._b_factory = lambda model: Closable(model)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    h.cfg = h.cfg.model_copy(update={"keeper_assistant_b_model": "other/model"})
+    h.clock[0] = now + timedelta(minutes=5)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    assert closed == ["microsoft/decision-1"]
+    await h.a.aclose()
+    assert closed == ["microsoft/decision-1", "other/model"]

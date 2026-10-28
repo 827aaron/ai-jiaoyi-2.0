@@ -455,6 +455,7 @@ class Runner:
             snapshot = getattr(self.m.screener, "market_snapshot", None)
             if callable(snapshot):
                 self.m.cards.set_market_snapshot(snapshot)
+        self._shutting_down = False
         self.assistant = self._build_assistant()
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
@@ -627,6 +628,9 @@ class Runner:
                 self._restart_exit()
 
     async def shutdown(self) -> None:
+        # 先停管家助手：它在途的判断不能在下面取消后台任务的空档里再交出平仓
+        self._shutting_down = True
+        await self.assistant.aclose()
         # 会议跑在线程池里取消不掉：先把它们的实况标成中断，线程之后写的会被忽略
         interrupt_open()
         tasks = [*self._loops, *self._tasks]
@@ -641,7 +645,6 @@ class Runner:
             if stuck:
                 log.warning("%d 个后台任务取消后 %s 秒还没停", len(stuck), TASK_CANCEL_WAIT_S)
         self._loops, self._tasks = [], set()
-        await self.assistant.aclose()
         await self.app.stop()
 
     def _every(self, seconds: float, tick: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
@@ -774,6 +777,9 @@ class Runner:
             cards=cards,
             alert=self._assistant_alert,
             day_reset_tz=app.risk_cfg.day_reset_tz,
+            close_source=lambda pid: (
+                close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
+            ).get("source"),
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
@@ -783,6 +789,8 @@ class Runner:
         """管家助手要平：过管家同一道平仓前检查，经正常平仓路径另起任务去平（同一笔在平 / 已平
         就跳过）。返回 None = 已交出去，否则是没平的原因。平仓原因枚举照旧记「持仓管家」，
         是管家助手平的另记在 ``close_sources.json``。"""
+        if self._leaving or self._shutting_down:
+            return "主程序正在重启或退出"
         current = next((p for p in self.positions if p.position_id == pos.position_id), None)
         if current is None or current.status is not PositionStatus.OPEN:
             return "这笔已不在持仓里"
@@ -794,9 +802,11 @@ class Runner:
             blocked = guard(pos.position_id, now)
             if blocked:
                 return f"平仓前检查拦下：{blocked}"
-        close_sources.record(self.app.app_cfg.data_dir, pos.position_id, CLOSE_SOURCE, reason, now)
         self._guard_note(Outcome.ACTION, f"{pos.symbol} 平仓：{reason}", now)
-        self._spawn(self.close(current, CloseReason.KEEPER), Role.EXECUTOR)
+        self._spawn(
+            self.close(current, CloseReason.KEEPER, source=CLOSE_SOURCE, detail=reason),
+            Role.EXECUTOR,
+        )
         return None
 
     def _assistant_alert(self, title: str, text: str) -> None:
@@ -1656,8 +1666,17 @@ class Runner:
         await self.close(pos, CloseReason.PATROL)
         await self.app._alert(AlertLevel.WARN, "巡逻兵已全平", f"巡逻兵：{why}", "system")
 
-    async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
-        """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""
+    async def close(
+        self,
+        pos: PositionRecord,
+        reason: CloseReason,
+        *,
+        source: str | None = None,
+        detail: str = "",
+    ) -> None:
+        """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。
+        ``source``：谁发起的（记进 ``close_sources.json``），只在平仓真交给执行器、执行器收下了
+        才记。"""
         if pos.position_id in self._closing:
             return
         if self._leaving:
@@ -1682,6 +1701,10 @@ class Runner:
         self._closing.add(pos.position_id)
         try:
             await self.m.executor.close(pos.position_id, reason)
+            if source is not None:
+                close_sources.record(
+                    self.app.app_cfg.data_dir, pos.position_id, source, detail, self.app.clock()
+                )
         except CloseInProgress as e:
             # The exit is already working and the executor's background tick settles it; the
             # reconciler's closing grace still escalates one that never completes.

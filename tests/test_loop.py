@@ -1040,8 +1040,7 @@ async def test_runner_keeper_assistant_reports_status_and_stops_with_the_runner(
     app = _app(tmp_path, now)
     r = Runner(app)
     await r._heartbeat_tick()
-    st = app.log.read_status()[c.Role.KEEPER_ASSISTANT.value]
-    assert "已关闭" in st.headline
+    assert c.Role.KEEPER_ASSISTANT.value not in app.log.read_status()  # off: nothing to roll back
     hung = asyncio.Event()
 
     async def wait() -> None:

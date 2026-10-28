@@ -328,16 +328,17 @@ def _keeper_assistant_report(args: argparse.Namespace) -> int:
 
     try:
         app_cfg = load_app_config(Path(args.app))
+        tz = load_risk_config(Path(args.risk)).day_reset_tz
     except ConfigError as e:
         print(e, file=sys.stderr)
         return 2
     rows = assistant.read_rows(Path(app_cfg.data_dir) / assistant.JOURNAL_DIR)
-    ledger = {p.position_id: p for p in PanelFiles(app_cfg.data_dir, "UTC").ledger().positions}
+    ledger = {p.position_id: p for p in PanelFiles(app_cfg.data_dir, tz).ledger().positions}
     pairs, open_n = assistant.counterfactual(
-        [r for r in rows if not (r.get("kind") == "check" and r.get("closed"))], ledger
+        [r for r in rows if not (r.get("kind") == "check" and r.get("handed_off"))], ledger, tz
     )
     print(assistant.report_text(pairs, open_n))
-    live, pending = assistant.live_pairs(rows)
+    live, pending = assistant.live_pairs(rows, tz=tz)
     print()
     print(assistant.report_text(live, pending, live=True))
     return 0
@@ -1011,6 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
         "keeper-assistant-report",
         help="管家助手：「本来会平」/ 真平了的仓对比实际出场或影子出场（只读本地流水和账本）",
     )
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.set_defaults(func=_keeper_assistant_report)
 
