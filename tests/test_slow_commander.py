@@ -916,3 +916,22 @@ async def test_card_record_keeps_historical_direction_when_latest_market_changed
     record = log.read_day(now.date().isoformat())[-1]
     assert record.output["regime"] == "旧看跌" and record.output["regime_direction"] == "看跌"
     assert record.output["market_view"]["regime_direction"] == "看涨"
+
+
+async def test_untradeable_symbol_goes_watch_only_except_when_held(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, _ = make(tmp_path, FakeEngine(["AAUSDT", "BBUSDT", "CCUSDT"]), now)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT")), "scheduled")
+    c.set_held({"CCUSDT": Side.LONG})
+    c.set_untradeable({"AAUSDT": "SETTLING", "CCUSDT": "SETTLING"})
+    card = c.current(now)
+    assert card is not None
+    aa, bb, cc = (card.for_symbol(x) for x in ("AAUSDT", "BBUSDT", "CCUSDT"))
+    assert aa is not None and aa.allowed_signals == [] and aa.bias is Bias.LONG
+    assert bb is not None and bb.allowed_signals == [SignalKind.VOLUME_BREAKOUT]
+    assert cc is not None and cc.allowed_signals == [SignalKind.VOLUME_BREAKOUT]
+    c.set_untradeable({})
+    again = c.current(now)
+    assert again is not None
+    assert again.for_symbol("AAUSDT").allowed_signals == [SignalKind.VOLUME_BREAKOUT]  # type: ignore[union-attr]
