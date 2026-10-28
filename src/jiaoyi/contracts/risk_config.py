@@ -649,8 +649,26 @@ class FastLoopConfig(Contract):
     card_neutral_flip: Literal["flip", "ignore"] = Field(
         default="flip",
         description="会把做多 / 做空的币判成不做（中性）时：flip = 和反向一样算待确认翻转"
-        "（现状）；ignore = 不算翻转，卡上留确认过的方向、照常能开仓，不记候选。切到 ignore 时"
+        "（现状）；ignore = 会议自己判的不做不算翻转（闸门改的、到手即作废照旧），"
+        "卡上留确认过的方向、照常能开仓，不记候选。切到 ignore 时"
         "（含启动）已有的转中性候选作废，那个币恢复候选前的方向和信号。做多 ↔ 做空不受影响。",
+    )
+    card_ignore_max_age_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        allow_inf_nan=False,
+        description="card_neutral_flip = ignore 时，卡上那条指令自己开会的时刻超过这么多分钟就不再"
+        "留着照常开仓，这场判不做按 flip 处理。0 = 不限。",
+    )
+    card_flip_assistant_fallback_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        allow_inf_nan=False,
+        description="card_flip_confirm_by = assistant 时，候选从第一次出现起超过这么多分钟、"
+        "管家助手一直没问成（关着、B 不可用、快照过旧 / 未预热、超时），"
+        "下一场同样结论的会就按场数确认。两个模型真答过（不同意）不算。0 = 从不。",
     )
     keeper_assistant_concurrency: int = Field(
         default=2,

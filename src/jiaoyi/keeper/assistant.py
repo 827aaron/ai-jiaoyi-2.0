@@ -113,6 +113,7 @@ def ws_snapshot_provider(
 
 
 STALE_LOG_EVERY = timedelta(minutes=1)
+STUCK_AFTER = timedelta(hours=2)
 SKIP_LOG_EVERY = timedelta(hours=1)
 REOPEN_DAYS = 7
 SUMMARY_EVERY = 10
@@ -151,7 +152,7 @@ class Verdict:
         return self.p_yes is not None and self.p_yes > 0.5 and self.p_yes >= min_p
 
     def no(self, min_p: float) -> bool:
-        # rounded so that min_p 0.6 accepts p(是) of exactly 0.4 (1 - 0.6 is not 0.4 in floats)
+        # rounded: 1 - 0.9 is 0.0999… in floats, which would refuse p(是) of exactly 0.1
         return self.p_yes is not None and self.p_yes < 0.5 and self.p_yes <= round(1 - min_p, 9)
 
     @property
@@ -303,6 +304,12 @@ class FlipCards(Protocol):
 
     def clear_neutral_flips(self) -> None: ...
 
+    def flip_answered(self, symbol: str, cand: FlipCandidate) -> None: ...
+
+    def stuck_held_flips(
+        self, now: datetime, older: timedelta
+    ) -> list[tuple[str, FlipCandidate]]: ...
+
 
 @dataclass
 class _Shadow:
@@ -333,6 +340,7 @@ class KeeperAssistant:
         b_scorer: Callable[[str], Scorer | None] | None = None,
         cards: FlipCards | None = None,
         alert: Callable[[str, str], None] | None = None,
+        warn: Callable[[str, str], None] | None = None,
         day_reset_tz: str = "Asia/Bangkok",
         close_source: Callable[[str], str | None] | None = None,
         snapshot_provider: SnapshotProvider | None = None,
@@ -353,6 +361,8 @@ class KeeperAssistant:
         self._b: tuple[str, Scorer | None] | None = None
         self._cards = cards
         self._alert = alert
+        self._warn = warn
+        self._stuck_warned: set[tuple[str, str]] = set()
         self._tz = day_reset_tz
         self._slots = Slots(lambda: self._cfg().keeper_assistant_concurrency)
         self._busy: set[tuple[str, str]] = set()
@@ -804,6 +814,8 @@ class KeeperAssistant:
             )
             return
         a, b, source = got
+        if a.p_yes is not None and b.p_yes is not None and self._cards is not None:
+            self._cards.flip_answered(symbol, cand)
         min_p = cfg.keeper_assistant_min_p
         agreed = a.no(min_p) and b.no(min_p) if neutral else a.yes(min_p) and b.yes(min_p)
         both = agreed and _flip_purpose(cand, cfg) is not None
@@ -847,6 +859,29 @@ class KeeperAssistant:
         )
 
     # ------------------------------------------------------------ 平掉之后：影子出场、汇总
+    def _warn_stuck(self, now: datetime) -> None:
+        """有持仓的币，待确认翻转卡了超过 2 小时：每个候选只告警一次（决策日志 + Telegram）。"""
+        assert self._cards is not None
+        for symbol, cand in self._cards.stuck_held_flips(now, STUCK_AFTER):
+            key = (symbol, cand.first_seen.isoformat())
+            if key in self._stuck_warned:
+                continue
+            self._stuck_warned.add(key)
+            hours = (now - cand.first_seen).total_seconds() / 3600
+            text = (
+                f"{symbol} 持仓中，待确认翻转（{DIR_TEXT[cand.confirmed]} → "
+                f"{DIR_TEXT[cand.candidate]}）已卡 {hours:.1f} 小时，卡上一直只看不做"
+            )
+            self._rec.record(
+                now,
+                Outcome.ERROR,
+                text,
+                symbol=symbol,
+                output={"keeper_assistant": {"kind": "flip_stuck", **cand.to_json()}},
+            )
+            if self._warn is not None:
+                self._warn("待确认翻转卡住", text)
+
     def _start_shadow(self, pos: PositionRecord, now: datetime) -> None:
         if not pos.entry_price or not pos.stop_loss_price:
             return
@@ -875,6 +910,8 @@ class KeeperAssistant:
             if only_us and not self._swept and self._cards is not None:
                 self._cards.sweep_flips()
             self._swept = only_us
+            if self._cards is not None:
+                self._warn_stuck(now)
         except Exception:
             logger.exception("管家助手要现有的待确认翻转失败")
         try:

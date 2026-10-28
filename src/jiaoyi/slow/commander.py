@@ -666,6 +666,12 @@ class BattleCardCommander:
         if not self._flips.on:
             self._flips.clear()  # switched back to 1: leftover candidates must not resurface
         out = self._flips.gate(symbol, fresh, in_force, now)
+        kept = self._flips.get(symbol)
+        if out.event == "ignored" and kept is not None and kept.candidate == "neutral":
+            # a neutral candidate an earlier sweep could not restore: this meeting retries it
+            restored = self._restore_neutral(symbol, out.card_symbol, kept)
+            if restored is not None:
+                out = replace(out, card_symbol=restored)
         if out.event == "pending":
             self._flip_fresh[symbol] = fresh
         elif out.event != "ignored":  # an ignored neutral meeting leaves a pending flip alone
@@ -703,6 +709,13 @@ class BattleCardCommander:
     def set_neutral_flip_ignored(self, ignored: Callable[[], bool]) -> None:
         """返回 True 时会判不做不算翻转，卡上留原方向（每次调用时读，热生效）。"""
         self._flips.neutral_ignored = ignored
+
+    def set_flip_limits(
+        self, ignore_max_age: Callable[[], timedelta], fallback_after: Callable[[], timedelta]
+    ) -> None:
+        """``card_ignore_max_age_min`` 和 ``card_flip_assistant_fallback_min``（每次调用时读）。"""
+        self._flips.ignore_max_age = ignore_max_age
+        self._flips.fallback_after = fallback_after
 
     def set_flip_by_assistant(self, by_assistant: Callable[[], bool]) -> None:
         """返回 True 时会只提候选，不按场数确认（每次调用时读，热生效）。"""
@@ -770,31 +783,49 @@ class BattleCardCommander:
             held = card.for_symbol(symbol)
             if held is None or held_key(held) != cand.held:
                 continue  # the next meeting drops it as today
-            signals = cand.signals if cand.signals is not None else self._signals_of(held)
-            if signals is None:
-                self._write(
-                    symbol=symbol,
-                    outcome=Outcome.INFO,
-                    summary=f"{symbol} 转中性的待确认翻转没清：找不到候选前的信号，等下一场会"[
-                        :200
-                    ],
-                    output={"card_flip": "kept", "why": "找不到候选前的信号", **cand.to_json()},
-                )
-                continue
-            base = held.reason.split(REASON_MARK, 1)[-1]
-            restored = held.model_copy(
-                update={"allowed_signals": [SignalKind(s) for s in signals], "reason": base}
-            )
-            self._flips.discard(symbol)
-            self._flip_fresh.pop(symbol, None)
-            self._merge_symbol(card, restored, "event:card_neutral_flip_ignore")
+            restored = self._restore_neutral(symbol, held, cand)
+            if restored is not None:
+                self._merge_symbol(card, restored, "event:card_neutral_flip_ignore")
+
+    def _restore_neutral(
+        self, symbol: str, held: CardSymbol, cand: FlipCandidate
+    ) -> CardSymbol | None:
+        """转中性的候选作废、``held``（候选期留在卡上那条）恢复候选前的信号；返回恢复后的指令，
+        候选已丢掉、记好了。找不到原来的信号就什么都不动，记一条 ``kept``，返回 None。"""
+        signals = cand.signals if cand.signals is not None else self._signals_of(held)
+        if signals is None:
             self._write(
                 symbol=symbol,
                 outcome=Outcome.INFO,
-                summary=f"{symbol} 会议判不做，按设置不翻转，保留原方向"
-                f"（{DIR_TEXT[cand.confirmed]}），恢复开仓"[:200],
-                output={"card_flip": "ignored", **cand.to_json()},
+                summary=f"{symbol} 转中性的待确认翻转没清：找不到候选前的信号，等下一场会",
+                output={"card_flip": "kept", "why": "找不到候选前的信号", **cand.to_json()},
             )
+            return None
+        base = held.reason.split(REASON_MARK, 1)[-1]
+        self._flips.discard(symbol)
+        self._flip_fresh.pop(symbol, None)
+        self._write(
+            symbol=symbol,
+            outcome=Outcome.INFO,
+            summary=f"{symbol} 会议判不做，按设置不翻转，保留原方向"
+            f"（{DIR_TEXT[cand.confirmed]}），恢复开仓"[:200],
+            output={"card_flip": "ignored", **cand.to_json()},
+        )
+        return held.model_copy(
+            update={"allowed_signals": [SignalKind(s) for s in signals], "reason": base}
+        )
+
+    def flip_answered(self, symbol: str, cand: FlipCandidate) -> None:
+        """管家助手的两个模型对这个候选真答过了（同不同意都算）：之后不再按「问不了」兜底。"""
+        self._flips.mark_answered(symbol, cand)
+
+    def stuck_held_flips(self, now: datetime, older: timedelta) -> list[tuple[str, FlipCandidate]]:
+        """有持仓的币里，候选从第一次出现起已超过 ``older`` 的。"""
+        return [
+            (s, f)
+            for s, f in self._flips.items().items()
+            if s in self._held and now - f.first_seen > older
+        ]
 
     def _signals_of(self, held: CardSymbol) -> tuple[str, ...] | None:
         """候选是旧代码记的、没存信号：从出这条指令的那场会的决策记录里找。会议记录里的结论还没

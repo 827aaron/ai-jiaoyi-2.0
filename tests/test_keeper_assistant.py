@@ -72,6 +72,8 @@ class Cards:
         self.ok = ok
         self.confirmed: list[tuple[str, FlipCandidate]] = []
         self.calls: list[str] = []
+        self.answered: list[str] = []
+        self.stuck: list[tuple[str, FlipCandidate]] = []
 
     def confirm_flip(
         self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
@@ -84,6 +86,12 @@ class Cards:
 
     def clear_neutral_flips(self) -> None:
         self.calls.append("clear_neutral")
+
+    def flip_answered(self, symbol: str, cand: FlipCandidate) -> None:
+        self.answered.append(symbol)
+
+    def stuck_held_flips(self, now: datetime, older: timedelta) -> list[tuple[str, FlipCandidate]]:
+        return [(s, f) for s, f in self.stuck if now - f.first_seen > older]
 
 
 class Harness:
@@ -107,6 +115,7 @@ class Harness:
         self.snap_age = 0.0
         self.live_s = 3600.0
         self.alerts: list[tuple[str, str]] = []
+        self.warns: list[tuple[str, str]] = []
         self.used_at_close: list[int] = []
         self.accepted: set[str] = set()
         """持仓 id：执行器真收下了平仓（主循环这时才记 close_sources）。"""
@@ -127,6 +136,7 @@ class Harness:
             b_scorer=(lambda model: b) if b is not None else None,
             cards=cards,
             alert=lambda title, text: self.alerts.append((title, text)),
+            warn=lambda title, text: self.warns.append((title, text)),
             day_reset_tz="UTC",
             close_source=lambda pid: "keeper_assistant" if pid in self.accepted else None,
         )
@@ -451,6 +461,40 @@ async def test_KeeperAssistant_on_flip_pending_neutral_confirms_only_when_both_s
     assert rec["result"] == ("confirmed" if agreed else "not_agreed")
     [row] = ka.read_rows(tmp_path / "keeper_assistant")
     assert row["kind"] == "flip_neutral"
+
+
+@pytest.mark.parametrize(
+    ("min_p", "p", "no"),
+    [(0.7, 0.3, True), (0.9, 0.1, True), (0.6, 0.4, True), (0.7, 0.31, False), (0.6, 0.5, False)],
+)
+def test_Verdict_no_accepts_exactly_one_minus_min_p(min_p: float, p: float, no: bool) -> None:
+    assert Verdict("A", "m", p, ("是", "否"), None, 1.0).no(min_p) is no
+
+
+@pytest.mark.parametrize(("b", "answered"), [(0.9, True), (None, False)])
+async def test_KeeperAssistant_tells_the_commander_only_when_both_judges_answered(
+    tmp_path: Path, now: datetime, b: float | None, answered: bool
+) -> None:
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.2), Scorer(b), cards=cards)
+    h.a.on_flip_pending("BTCUSDT", cand(now))
+    await h.settle()
+    assert cards.answered == (["BTCUSDT"] if answered else [])
+
+
+async def test_KeeperAssistant_warns_once_when_a_held_coin_flip_is_stuck(
+    tmp_path: Path, now: datetime
+) -> None:
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.2), Scorer(0.2), cards=cards)
+    cards.stuck = [("BTCUSDT", cand(now))]
+    h.a.tick(now + timedelta(hours=2))
+    assert h.warns == []
+    h.a.tick(now + timedelta(hours=2, minutes=1))
+    h.a.tick(now + timedelta(hours=3))
+    assert len(h.warns) == 1 and "BTCUSDT 持仓中" in h.warns[0][1]
+    [rec] = h.log.read_day(now.date().isoformat())
+    assert rec.outcome is Outcome.ERROR and rec.output["keeper_assistant"]["kind"] == "flip_stuck"
 
 
 async def test_KeeperAssistant_on_flip_pending_neutral_off_does_not_ask(

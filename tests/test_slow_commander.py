@@ -1648,6 +1648,135 @@ async def test_commander_clear_neutral_flips_restores_the_tradable_direction(
     assert json.loads((tmp_path / "card_flip.json").read_text())["flips"] == {}
 
 
+def _ignoring_book(cap_min: float = 0.0) -> Any:
+    from jiaoyi.slow.card_flip import FlipBook
+
+    book = FlipBook(2)
+    book.neutral_ignored = lambda: True
+    book.ignore_max_age = lambda: timedelta(minutes=cap_min)
+    return book
+
+
+@pytest.mark.parametrize(
+    "fresh",
+    [
+        {"bias": Bias.NO_TRADE, "allowed_signals": [], "reason": "stale_on_arrival：现价已走远"},
+        {"bias": Bias.LONG, "allowed_signals": [], "reason": "stale_on_arrival：现价已走远"},
+        {"bias": Bias.NO_TRADE, "allowed_signals": [], "no_trade_from": Bias.SHORT},
+    ],
+    ids=["stale-no-trade", "stale-watch", "gated-opposite"],
+)
+def test_FlipBook_gate_ignore_mode_keeps_only_genuine_no_trade(
+    now: datetime, fresh: dict[str, Any]
+) -> None:
+    book = _ignoring_book()
+    held = card_symbol("AAUSDT", issued_at=now - timedelta(hours=1), meeting_id="m1")
+    out = book.gate("AAUSDT", card_symbol("AAUSDT", **fresh), held, now)
+    assert out.event == "pending" and out.card_symbol.allowed_signals == []
+    genuine = card_symbol("BBUSDT", bias=Bias.NO_TRADE, allowed_signals=[], reason="会议观望")
+    kept = book.gate("BBUSDT", genuine, held.model_copy(update={"symbol": "BBUSDT"}), now)
+    assert kept.event == "ignored" and kept.card_symbol.allowed_signals == held.allowed_signals
+
+
+@pytest.mark.parametrize(("cap_min", "event"), [(0.0, "ignored"), (120.0, "pending")])
+def test_FlipBook_gate_ignore_mode_stops_keeping_an_instruction_older_than_the_cap(
+    now: datetime, cap_min: float, event: str
+) -> None:
+    book = _ignoring_book(cap_min)
+    held = card_symbol("AAUSDT", issued_at=now - timedelta(minutes=121), meeting_id="m1")
+    neutral = card_symbol("AAUSDT", bias=Bias.NO_TRADE, allowed_signals=[], reason="会议观望")
+    assert book.gate("AAUSDT", neutral, held, now).event == event
+
+
+async def test_commander_clear_neutral_flips_leaves_a_replaced_instruction_alone(
+    tmp_path: Path, now: datetime
+) -> None:
+    b = _ByAssistant(tmp_path, now, [Bias.LONG, Bias.NO_TRADE])
+    b.mode[0] = "meeting"
+    b.c.set_neutral_flip_ignored(lambda: True)
+    b.c._flips.neutral_ignored = lambda: False  # create the candidate under "flip"
+    await b.meet()
+    await b.meet()
+    b.c._flips.neutral_ignored = lambda: True
+    live = b.c._card
+    assert live is not None
+    swapped = [
+        x.model_copy(update={"meeting_id": "other"}) if x.symbol == "AAUSDT" else x
+        for x in live.symbols
+    ]
+    b.c._card = live.model_copy(update={"symbols": swapped})
+    b.c.clear_neutral_flips()
+    cs = b.c._card.for_symbol("AAUSDT")
+    assert cs is not None and cs.allowed_signals == []
+    assert b.c._flips.get("AAUSDT") is not None
+
+
+def _shift_meeting_records(log: JsonlDecisionLog, day: str, by: timedelta) -> None:
+    path = log._log_dir / f"{day}.jsonl"
+    rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    for r in rows:
+        if r.get("symbol") == "AAUSDT" and "allowed_signals" in (r.get("output") or {}):
+            r["ts"] = (datetime.fromisoformat(r["ts"]) + by).isoformat()
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+
+
+async def test_commander_neutral_candidate_without_signals_is_kept_then_retried_on_next_no_trade(
+    tmp_path: Path, now: datetime
+) -> None:
+    b = _ByAssistant(tmp_path, now, [Bias.LONG, Bias.NO_TRADE, Bias.NO_TRADE])
+    b.mode[0] = "meeting"
+    ignore = [False]
+    b.c.set_neutral_flip_ignored(lambda: ignore[0])
+    first = await b.meet()
+    await b.meet()
+    cand = b.c._flips.get("AAUSDT")
+    assert cand is not None
+    b.c._flips._flips["AAUSDT"] = replace(cand, signals=None)
+    _shift_meeting_records(b.log, now.date().isoformat(), timedelta(hours=3))
+    ignore[0] = True
+    b.c.clear_neutral_flips()  # a meeting three hours away is not this instruction's
+    assert b.c._flips.get("AAUSDT") is not None
+    assert b.c._card.for_symbol("AAUSDT").allowed_signals == []  # type: ignore[union-attr]
+    _shift_meeting_records(b.log, now.date().isoformat(), timedelta(hours=-3))
+    again = await b.meet()
+    assert again.bias is Bias.LONG and again.allowed_signals == first.allowed_signals
+    assert b.c._flips.get("AAUSDT") is None
+
+
+@pytest.mark.parametrize("answered", [False, True])
+async def test_commander_flip_by_assistant_falls_back_to_meetings_when_never_answered(
+    tmp_path: Path, now: datetime, answered: bool
+) -> None:
+    b = _ByAssistant(tmp_path, now, [Bias.LONG, Bias.SHORT, Bias.SHORT, Bias.SHORT])
+    b.c.set_flip_limits(lambda: timedelta(0), lambda: timedelta(minutes=120))
+    await b.meet()
+    await b.meet()
+    cand = b.c._flips.get("AAUSDT")
+    assert cand is not None
+    if answered:  # the judges answered and disagreed: no fallback
+        b.c.flip_answered("AAUSDT", cand)
+    held = await b.meet()  # 60 minutes in: too early either way
+    assert held.bias is Bias.LONG
+    assert b.c.stuck_held_flips(b.clock[0], timedelta(minutes=59)) == []  # not held
+    b.c.set_held({"AAUSDT": Side.LONG})
+    assert b.c.stuck_held_flips(b.clock[0], timedelta(minutes=59)) == [
+        ("AAUSDT", b.c._flips.get("AAUSDT"))
+    ]
+    assert b.c.stuck_held_flips(b.clock[0], timedelta(minutes=61)) == []
+    b.c.set_held({})
+    final = await b.meet()  # 120 minutes in
+    if answered:
+        assert final.bias is Bias.LONG and final.allowed_signals == []
+        return
+    assert final.bias is Bias.SHORT and final.allowed_signals
+    [rec] = [
+        r
+        for r in b.log.read_day(now.date().isoformat())
+        if r.output and r.output.get("card_flip") == "confirmed"
+    ]
+    assert "管家助手问不了超过 120 分钟，按会议确认" in rec.summary
+
+
 @pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
 async def test_commander_flip_alternating_opposite_and_neutral_still_confirms(
     tmp_path: Path, now: datetime, start: Bias
