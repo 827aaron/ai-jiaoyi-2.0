@@ -1149,6 +1149,15 @@ class AppConfig(Contract):
         "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
         "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
     )
+    protection_unknown_submit_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=30.0,
+        description="Demo 托管保护：条件单提交结果未知（超时、5xx、回执解析不了）时，当场按原 CID "
+        "只读重查最多这么多秒，查到就当已挂上、接着挂下一条腿；绝不重发、不换新 CID。仍查不到时，"
+        "若有已确认的保命单或止损，这笔提交未知也按未托管宽限（protection_prearm_grace_s）保留仓位、"
+        "每轮只查原 CID，宽限用完照旧平仓。0 = 提交未知立即平仓（原行为）。改后重启生效。",
+    )
     position_mode_cache_s: float = Field(
         default=0.0,
         ge=0.0,

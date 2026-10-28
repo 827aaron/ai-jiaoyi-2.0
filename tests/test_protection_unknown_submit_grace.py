@@ -1,0 +1,165 @@
+"""条件单提交结果未知时按原 CID 只读重查的宽限（INJUSDT 2026-10-28 复现）；只有合成订单。
+
+时间线：保命单回执确认 → 固定止损 POST 结果未知（交易所其实已收下）→ 止盈还没提交。
+原行为立即按对账原因平仓；打开 protection_unknown_submit_grace_s 后先按原 CID 只读重查。
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+
+from jiaoyi.contracts import Side
+from jiaoyi.contracts.position import PositionStatus
+from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
+from jiaoyi.execution.exchange import BracketSubmissionUnknown
+from tests.test_execution import START
+from tests.test_protection_readback_grace import GraceHarness
+
+TITLE = "普通托管保护未完整确认"
+UNKNOWN = "ProtectionIncomplete: 普通保护提交结果未知，只查原CID"
+
+
+class UnknownSubmitHarness(GraceHarness):
+    """``unknown_prefix`` 的腿 POST 后交易所已收下但回执未知，visible_after 次 sleep 后才查得到。"""
+
+    def __init__(
+        self,
+        root: Path,
+        side: Side,
+        *,
+        unknown: float,
+        prearm: float = 60.0,
+        unknown_prefix: str = "br-sl-",
+        visible_after: int = 2,
+        observed: bool = False,
+    ) -> None:
+        self.unknown, self.prearm = unknown, prearm
+        super().__init__(root, side, grace=3.0, prefix="none-", visible_after=visible_after)
+        self.unknown_prefix, self.observed = unknown_prefix, observed
+        original = self.exchange._place
+
+        async def place(symbol, close_side, quantity, trigger_price, cid, kind, working_type):
+            if not cid.startswith(self.unknown_prefix):
+                return await original(
+                    symbol, close_side, quantity, trigger_price, cid, kind, working_type
+                )
+            self.exchange.unknown_submit = True
+            try:
+                return await original(
+                    symbol, close_side, quantity, trigger_price, cid, kind, working_type
+                )
+            except BracketSubmissionUnknown:
+                if self.observed:  # 交易所层失败后当场按 CID 查到了。
+                    self.exchange.hidden.discard(cid)
+                    raise BracketSubmissionUnknown(cid, self.exchange.orders[cid]) from None
+                raise
+            finally:
+                self.exchange.unknown_submit = False
+
+        self.exchange._place = place
+
+    def build(self) -> BracketManager:
+        manager = super().build()
+        manager.prearm_grace_s = self.prearm
+        manager.unknown_submit_grace_s = self.unknown
+        return manager
+
+    def alerts(self) -> list[str]:
+        return [a.body for a in self.alerter.sent if a.title == TITLE]
+
+    def leg(self, prefix: str):
+        return next(leg for leg in self.state().legs if leg.client_order_id.startswith(prefix))
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_zero_setting_closes_with_tp_never_submitted_as_in_the_incident(
+    tmp_path: Path, side: Side
+):
+    h = UnknownSubmitHarness(tmp_path, side, unknown=0.0)
+    await h.adapter.protection_tick()
+    assert h.closing()
+    assert [c[:6] for c in h.creates()] == ["lb-pos", "br-sl-"]  # 止盈从没提交。
+    (body,) = h.alerts()
+    assert body.startswith(f"BTCUSDT pos-1：{UNKNOWN} <- BracketSubmissionUnknown")
+    assert body.endswith("保留已确认保护，停止入场并核验退出")
+    assert h.leg("lb-").state == "confirmed" and h.leg("lb-").algo_status == "NEW"
+    assert h.leg("br-sl-").state == "submit_pending"
+    assert h.leg("br-tp-").algo_id is None and h.leg("br-tp-").state in {"planned", "superseded"}
+    assert not h.slept
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_stop_found_by_original_cid_arms_all_three_legs_in_the_same_tick(
+    tmp_path: Path, side: Side
+):
+    h = UnknownSubmitHarness(tmp_path, side, unknown=3.0)
+    await h.adapter.protection_tick()
+    assert not h.closing() and not h.exchange.direct and not h.alerts()
+    assert sorted(c[:6] for c in h.creates()) == ["br-sl-", "br-tp-", "lb-pos"]  # 每腿一次。
+    state = h.state()
+    assert state.stage == "armed" and state.ever_armed and state.generation == 1
+    assert all(leg.state == "confirmed" and leg.algo_status == "NEW" for leg in state.legs)
+    assert h.slept == [0.5, 0.5]
+    assert [cid[:6] for algo, cid in h.reads if algo is None and cid].count("br-sl-") >= 2
+    assert h.registry.get("pos-1").record.status is PositionStatus.OPEN
+
+
+async def test_order_seen_by_the_exchange_layer_is_accepted_without_waiting(tmp_path: Path):
+    h = UnknownSubmitHarness(tmp_path, Side.SHORT, unknown=3.0, observed=True)
+    await h.adapter.protection_tick()
+    assert h.state().stage == "armed" and not h.closing()
+    assert not h.slept and len(h.creates()) == 3
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_still_unknown_keeps_position_in_prearm_grace_and_only_rereads_the_cid(
+    tmp_path: Path, side: Side
+):
+    h = UnknownSubmitHarness(tmp_path, side, unknown=2.0, visible_after=10**6)
+    await h.adapter.protection_tick()
+    assert sum(h.slept) == pytest.approx(2.0)
+    assert not h.closing() and h.state().prearm_failing_since == START + timedelta(seconds=2)
+    (body,) = h.alerts()
+    assert body.startswith(f"BTCUSDT pos-1：{UNKNOWN}") and "宽限内" in body
+    h.restart_adapter()
+    h.now += timedelta(seconds=20)
+    await h.adapter.protection_tick()  # 每轮只按原 CID 查，不重发、不建新代。
+    assert not h.closing() and "已 20 / 60 秒" in h.alerts()[-1]
+    assert [c[:6] for c in h.creates()] == ["lb-pos", "br-sl-"] and h.state().generation == 1
+    h.exchange.hidden.clear()
+    await h.adapter.protection_tick()
+    assert sorted(c[:6] for c in h.creates()) == ["br-sl-", "br-tp-", "lb-pos"]
+    state = h.state()
+    assert state.stage == "armed" and state.prearm_failing_since is None
+    assert not h.closing()
+
+
+async def test_still_unknown_past_prearm_grace_closes(tmp_path: Path):
+    h = UnknownSubmitHarness(tmp_path, Side.SHORT, unknown=2.0, visible_after=10**6)
+    await h.adapter.protection_tick()
+    assert not h.closing()
+    h.now += timedelta(seconds=60)
+    await h.adapter.protection_tick()
+    assert h.closing() and "宽限内" not in h.alerts()[-1]
+    assert [c[:6] for c in h.creates()] == ["lb-pos", "br-sl-"]
+
+
+async def test_unknown_lifeboat_without_any_confirmed_stop_still_closes(tmp_path: Path):
+    h = UnknownSubmitHarness(
+        tmp_path, Side.SHORT, unknown=2.0, unknown_prefix="lb-", visible_after=10**6
+    )
+    await h.adapter.protection_tick()
+    assert h.closing() and [c[:3] for c in h.creates()] == ["lb-"]
+    assert "宽限内" not in h.alerts()[-1]
+
+
+async def test_inline_reread_without_prearm_grace_closes_after_the_wait(tmp_path: Path):
+    h = UnknownSubmitHarness(tmp_path, Side.LONG, unknown=1.0, prearm=0.0, visible_after=10**6)
+    with pytest.raises(ProtectionIncomplete, match="提交结果未知") as raised:
+        await h.manager.sync("pos-1")
+    assert raised.value.read_lag and sum(h.slept) == pytest.approx(1.0)
+    await h.adapter.protection_tick()
+    assert h.closing()

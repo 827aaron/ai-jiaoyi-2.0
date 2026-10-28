@@ -254,6 +254,7 @@ def test_switch_table_lists_exactly_the_agreed_soft_limits() -> None:
         "app.protection_stale_s",
         "app.protection_readback_grace_s",
         "app.protection_prearm_grace_s",
+        "app.protection_unknown_submit_grace_s",
         "app.reconciler_executor_stop_retry_rounds",
         "fast_loop.regime_flip_min_gap_min",
         "fast_loop.regime_flip_check_min",
