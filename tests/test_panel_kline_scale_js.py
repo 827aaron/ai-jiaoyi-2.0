@@ -43,6 +43,10 @@ assert.deepEqual(edgeLabels([{ price: 203.2, title: '近' }, { price: 199.5, tit
 const all = scaleRange(bars, { from: 180, to: 304 }, lines, 199.5, true);
 assert.deepEqual(edgeLabels(defs.slice(0, 3), all, 0.09), []);
 
+// 边距占图高 9% = 占价格范围 9/82；刚好画在图里的线不上边
+assert(Math.abs(padFrac(0.09) - 0.09 / 0.82) < 1e-12);
+assert.deepEqual(edgeLabels([{ price: 203.38, title: '图内' }, { price: 203.42, title: '图外' }], r, padFrac(0.09)).map((d) => d.title), ['图外']);
+
 // 到时点：在最后一根之后才写，格式由调用方给
 const fmt = (ms) => 'T' + (ms / 1000);
 const lastMs = bars[bars.length - 1].time * 1000;

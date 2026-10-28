@@ -1411,6 +1411,8 @@ function scaleRange(bars, range, lines, entry, all) {
   for (const v of all ? lines : [entry]) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
   return { min, max };
 }
+// scaleMargins 是占图高的比例，换成占价格范围的比例：数据只占 1 - 2·pad 的高度
+const padFrac = (pad) => pad / (1 - 2 * pad);
 // 超出价格轴（含上下 pad 边距）的线：贴在上沿 / 下沿，留名字和价格
 function edgeLabels(defs, r, pad) {
   const h = r.max - r.min;
@@ -1429,6 +1431,7 @@ const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
     c.timeScale().setVisibleLogicalRange(defaultRange(barCount));
+    c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
   }
@@ -1444,11 +1447,11 @@ function updateEdges() {
   const vr = chart.timeScale().getVisibleLogicalRange();
   const entry = lineDefs.find((d) => d.entry);
   const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), entry && entry.price, S.scaleAll) : null;
-  const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, SCALE_PAD) : [];
+  const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, padFrac(SCALE_PAD)) : [];
   let nTop = 0, nBot = 0;
   const html = out.map((d) => {
     const n = d.edge === "top" ? nTop++ : nBot++;
-    return `<span class="ke" style="${d.edge}:${n * 18 + 4}px;color:${d.color}">${d.edge === "top" ? "▲" : "▼"} ${esc(d.title)} ${esc(price(d.price, d.symbol))}</span>`;
+    return `<span class="ke" style="${d.edge}:${n * 18 + (d.edge === "bottom" ? 28 : 4)}px;color:${d.color}">${d.edge === "top" ? "▲" : "▼"} ${esc(d.title)} ${esc(price(d.price, d.symbol))}</span>`;
   }).join("");
   edgeEl.innerHTML = html + (limitAt ? `<span class="ke kl">${esc(limitAt)}</span>` : "");
 }
@@ -1555,6 +1558,7 @@ async function loadKlines(force) {
     lineDefs = [];
     lastBars = [];
     limitAt = "";
+    updateEdges();
     chart.priceScale("right").applyOptions({ autoScale: true });
     needFit = true;
   }

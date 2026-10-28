@@ -671,5 +671,5 @@ section.card > .prompt-line { padding: 2px 0; }
 
 .kedge { position: absolute; inset: 0; pointer-events: none; z-index: 5; font-size: 11px; }
 .kedge .ke { position: absolute; right: 64px; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--bg, #fff) 80%, transparent); white-space: nowrap; }
-.kedge .kl { right: auto; left: 6px; top: 4px; color: var(--dim); }
-@media (max-width: 640px) { .kedge { font-size: 10px; } .kedge .ke { right: 52px; } }
+.kedge .ke.kl { right: auto; left: 6px; top: 4px; color: var(--dim); }
+@media (max-width: 640px) { .kedge { font-size: 10px; } .kedge .ke { right: 52px; } .kedge .ke.kl { right: auto; } }
