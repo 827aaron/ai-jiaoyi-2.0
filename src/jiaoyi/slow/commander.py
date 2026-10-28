@@ -55,7 +55,7 @@ from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
-from jiaoyi.slow.card_flip import FlipBook
+from jiaoyi.slow.card_flip import FlipBook, FlipCandidate
 from jiaoyi.slow.card_outlook import with_board
 from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.market_audit import CURRENT_AUDIT, MarketAudit
@@ -478,9 +478,10 @@ class BattleCardCommander:
         )
         self._restore_card()
         self._restore_market()
-        self._flips.restore(
+        for sym, lost in self._flips.restore(
             {s.symbol: s for s in self._card.symbols} if self._card is not None else {}
-        )
+        ).items():
+            self._flip_dropped(sym, lost, "重启后卡上留着的那条指令对不上")
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
@@ -649,6 +650,9 @@ class BattleCardCommander:
             self._flips.clear()  # switched back to 1: leftover candidates must not resurface
             return fresh
         out = self._flips.gate(symbol, fresh, in_force, now)
+        if out.dropped is not None:
+            why = "卡上留着的那条指令已到期被拿掉" if in_force is None else "卡上那条指令已被换掉"
+            self._flip_dropped(symbol, out.dropped, why)
         if out.event is not None:
             self._write(
                 symbol=symbol,
@@ -657,6 +661,14 @@ class BattleCardCommander:
                 output={"card_flip": out.event, **(out.detail or {})},
             )
         return out.card_symbol
+
+    def _flip_dropped(self, symbol: str, lost: FlipCandidate, why: str) -> None:
+        self._write(
+            symbol=symbol,
+            outcome=Outcome.INFO,
+            summary=f"{symbol} 待确认翻转作废：{why}"[:200],
+            output={"card_flip": "dropped", "why": why, **lost.to_json()},
+        )
 
     @staticmethod
     def _raw_view(card: BattleCard, fresh: CardSymbol) -> BattleCard:
@@ -1475,7 +1487,14 @@ class BattleCardCommander:
             expires,
             res.market_view or market,
         )
-        new = self._flip_gate(symbol, fresh, card.for_symbol(symbol), now)
+        in_force = card.for_symbol(symbol)
+        if (
+            in_force is not None
+            and symbol not in self._held
+            and now >= (in_force.expires_at or card.expires_at)
+        ):
+            in_force = None  # expired and unheld: _pool_view already hides it, as a round drops it
+        new = self._flip_gate(symbol, fresh, in_force, now)
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
         if all(s.symbol != symbol for s in card.symbols):
             symbols.append(new)
@@ -3427,6 +3446,7 @@ class BattleCardCommander:
                 "count": f.count,
                 "need": self._flips.need,
                 "since": f.first_seen.isoformat(),
+                "progress": self._flips.progress(f.count, f.first_seen, self._clock()),
             }
         }
 

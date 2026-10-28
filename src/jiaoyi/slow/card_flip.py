@@ -1,17 +1,17 @@
 """作战卡单币方向的滞回（``[schedule] card_flip_confirm``）。
 
 一个币的新会议结论和卡上生效的方向（long / short）不同时，先不换：卡上留着原指令、只清空
-信号（不开新仓），记成「待确认翻转」；同一个币接下来的会（整轮、临时会都算）连续
-``card_flip_confirm`` 场给出同一个新方向（并且从第一次出现起至少过了 ``card_flip_confirm_min``
-分钟）才换成最新那场的结论。会议回到原方向就取消候选，照常换上新结论。
+信号（不开新仓），记成「待确认翻转」；同一个币连续 ``card_flip_confirm`` 场会（整轮、临时会
+都算，第一场算 1）都和生效方向不同（反向、中性交替也算），并且从第一次出现起至少过了
+``card_flip_confirm_min`` 分钟，才换成最新那场的结论。会议回到原方向就取消候选，照常换上新结论。
 
 转中性（no_trade / both / 到手即作废）同样要确认：不开新仓本来就立刻生效（候选期卡上没有
 信号），只是持仓管家的卡规则（反向卡 / 中性卡）看的是确认过的方向，确认前不因它平仓。
 从中性转出一个方向不算翻转，立即生效。
 
 状态存在 ``data/card_flip.json``（不进作战卡存档：契约禁止多余字段，回滚的旧代码要能读卡）。
-每条候选记着它留在卡上的那条指令的身份；卡上那条被换掉（旧代码回滚后开过会、手工改卡）
-就作废。
+每条候选记着它留在卡上的那条指令的身份；卡上那条没了（没有持仓的币过了有效期被拿掉）或
+被换掉（旧代码回滚后开过会、手工改卡）就作废，记一条 ``dropped``。
 """
 
 from __future__ import annotations
@@ -52,10 +52,10 @@ def card_direction(cs: CardSymbol) -> FlipDir:
 
 
 def held_key(cs: CardSymbol) -> str:
-    # issued_at / meeting_id / bias survive clamp_to_risk and pool-expiry extension, unlike
-    # research_token, so a restart with changed risk limits keeps the candidate
+    # bias and research_token are left out: clamp_to_risk on restart may turn the held
+    # instruction into NO_TRADE (category cap now 0) or change its ranges
     issued = cs.issued_at.isoformat() if cs.issued_at else ""
-    return f"{cs.meeting_id or ''}|{issued}|{cs.bias.value}"
+    return f"{cs.meeting_id or ''}|{issued}"
 
 
 @dataclass(frozen=True)
@@ -98,9 +98,11 @@ class FlipOutcome:
 
     card_symbol: CardSymbol
     event: str | None = None
-    """pending / confirmed / cancelled / dropped"""
+    """pending / confirmed / cancelled"""
     detail: dict[str, Any] | None = None
     summary: str = ""
+    dropped: FlipCandidate | None = None
+    """A stored candidate whose held instruction was gone before this meeting."""
 
 
 class FlipBook:
@@ -131,10 +133,11 @@ class FlipBook:
         if not self.on:
             return FlipOutcome(fresh)
         prior = self._flips.get(symbol)
+        dropped: FlipCandidate | None = None
         if prior is not None and (
             in_force is None or in_force.allowed_signals or held_key(in_force) != prior.held
         ):
-            prior = None  # the held instruction is gone: nothing left to confirm against
+            dropped, prior = prior, None
             self._flips.pop(symbol, None)
             self.save()
         confirmed = (
@@ -145,7 +148,7 @@ class FlipBook:
         new = card_direction(fresh)
         if confirmed == "neutral" or new == confirmed:
             if prior is None:
-                return FlipOutcome(fresh)
+                return FlipOutcome(fresh, dropped=dropped)
             self._flips.pop(symbol, None)
             self.save()
             return FlipOutcome(
@@ -153,12 +156,11 @@ class FlipBook:
                 "cancelled",
                 {"confirmed": confirmed, "candidate": prior.candidate, "count": prior.count},
                 f"{symbol} 会议回到原方向{DIR_TEXT[confirmed]}，取消待确认的翻转"
-                f"（候选{DIR_TEXT[prior.candidate]} {prior.count}/{self.need}）",
+                f"（{self.progress(prior.count, prior.first_seen, now)}）",
             )
         assert in_force is not None
-        same = prior is not None and prior.candidate == new
-        count = prior.count + 1 if same and prior is not None else 1
-        first = prior.first_seen if same and prior is not None else now
+        count = prior.count + 1 if prior is not None else 1
+        first = prior.first_seen if prior is not None else now
         age = now - first
         detail: dict[str, Any] = {
             "confirmed": confirmed,
@@ -176,19 +178,28 @@ class FlipBook:
                 fresh,
                 "confirmed",
                 detail,
-                f"{symbol} 翻转确认：连续 {count} 场会都是{DIR_TEXT[new]}，"
-                f"卡上从{DIR_TEXT[confirmed]}换成新结论",
+                f"{symbol} 翻转确认：连续 {count} 场会都不是{DIR_TEXT[confirmed]}，"
+                f"卡上换成最新这场的结论（{DIR_TEXT[new]}）",
+                dropped,
             )
-        interim = self._interim(in_force, fresh, confirmed, new, count, now)
+        interim = self._interim(in_force, fresh, confirmed, new, count, first, now)
         self._flips[symbol] = FlipCandidate(confirmed, new, count, first, now, held_key(interim))
         self.save()
         return FlipOutcome(
             interim,
             "pending",
             detail,
-            f"{symbol} 待确认翻转 {count}/{self.need}：会议改判{DIR_TEXT[new]}，"
+            f"{symbol} 待确认翻转 {self.progress(count, first, now)}：会议改判{DIR_TEXT[new]}，"
             f"卡上仍按{DIR_TEXT[confirmed]}只看不做，持仓不按卡规则平",
+            dropped,
         )
+
+    def progress(self, count: int, first: datetime, now: datetime) -> str:
+        """「k/N」，候选时长还没到 ``min_age`` 时加「，等满 X 分钟」。"""
+        text = f"{min(count, self.need)}/{self.need}"
+        if self.min_age > timedelta(0) and now - first < self.min_age:
+            text += f"，等满 {self.min_age.total_seconds() / 60:g} 分钟"
+        return text
 
     def _interim(
         self,
@@ -197,13 +208,15 @@ class FlipBook:
         confirmed: FlipDir,
         new: FlipDir,
         count: int,
+        first: datetime,
         now: datetime,
     ) -> CardSymbol:
         """候选期留在卡上的指令：原指令（方向、出会时间、关键位都不动，持仓管家认的就是它）
         只清空信号，有效期跟新结论走。"""
         base = in_force.reason.split(REASON_MARK, 1)[-1]
         head = (
-            f"待确认翻转（{count}/{self.need}）：{now:%H:%M} UTC 的会改判{DIR_TEXT[new]}，"
+            f"待确认翻转（{self.progress(count, first, now)}）：{now:%H:%M} UTC 的会改判"
+            f"{DIR_TEXT[new]}，"
             f"卡上仍按{DIR_TEXT[confirmed]}只看不做；确认前不开新仓，持仓不按卡规则平"
         )
         expires = fresh.expires_at
@@ -222,16 +235,17 @@ class FlipBook:
             self._flips.clear()
             self.save()
 
-    def restore(self, card_symbols: dict[str, CardSymbol]) -> None:
-        """重启后读回候选；卡上留着的那条指令对不上的丢掉。``need`` <= 1 时清空文件里的候选。"""
+    def restore(self, card_symbols: dict[str, CardSymbol]) -> dict[str, FlipCandidate]:
+        """重启后读回候选；卡上留着的那条指令对不上的丢掉并返回（币 → 候选）。
+        ``need`` <= 1 时清空文件里的候选。"""
         if self._path is None or not self._path.is_file():
-            return
+            return {}
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             flips = {str(k): FlipCandidate.from_json(v) for k, v in raw["flips"].items()}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             logger.warning("翻转候选文件读不了（%s），从空开始", exc.__class__.__name__)
-            return
+            return {}
         kept = {
             s: f
             for s, f in flips.items()
@@ -245,6 +259,7 @@ class FlipBook:
             self.save()
         if kept:
             logger.info("已恢复待确认翻转：%s", sorted(kept))
+        return {sym: f for sym, f in flips.items() if sym not in kept}
 
     def save(self) -> None:
         if self._path is None:

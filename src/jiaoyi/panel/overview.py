@@ -804,9 +804,13 @@ def _flip_text(raw: object) -> str | None:
     was, to = _FLIP_DIR.get(str(raw.get("confirmed"))), _FLIP_DIR.get(str(raw.get("candidate")))
     if was is None or to is None:
         return None
+    progress = raw.get("progress")
+    if not isinstance(progress, str):
+        need = raw.get("need")
+        progress = f"{min(int(raw.get('count') or 0), int(need or 0))}/{need}"
     return (
-        f"待确认翻转 {raw.get('count')}/{raw.get('need')}：会议改判{to}，卡上仍按{was}只看不做"
-        "（不开新仓，持仓不按卡规则平），同一个币再有会议给出同一方向才换"
+        f"待确认翻转 {progress}：会议改判{to}，卡上仍按{was}只看不做"
+        "（不开新仓，持仓不按卡规则平）；连续够场数的会都不是原方向才换成最新结论"
     )
 
 

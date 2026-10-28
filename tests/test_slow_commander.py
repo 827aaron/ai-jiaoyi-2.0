@@ -1333,17 +1333,88 @@ async def test_commander_flip_to_neutral_needs_confirmation_too(
     tmp_path: Path, now: datetime, start: Bias
 ) -> None:
     _c, log, _clock, cards = await _flip_rounds(
+        tmp_path, now, [start, Bias.NO_TRADE, Bias.NO_TRADE], flip_confirm=2
+    )
+    held = cards[1].for_symbol("AAUSDT")
+    assert held is not None and held.bias is start and held.allowed_signals == []
+    final = cards[2].for_symbol("AAUSDT")
+    assert final is not None and final.bias is Bias.NO_TRADE
+    assert _flip_records(log, now) == ["pending", "confirmed"]
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_alternating_opposite_and_neutral_still_confirms(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    opp = _OPP[start]
+    _c, log, _clock, cards = await _flip_rounds(
+        tmp_path, now, [start, opp, Bias.NO_TRADE, opp], flip_confirm=3
+    )
+    held = [cards[i].for_symbol("AAUSDT") for i in (1, 2)]
+    assert all(h is not None and h.bias is start and h.allowed_signals == [] for h in held)
+    assert [h.reason[:10] for h in held if h is not None] == [
+        "待确认翻转（1/3）",
+        "待确认翻转（2/3）",
+    ]
+    final = cards[3].for_symbol("AAUSDT")
+    assert final is not None and final.bias is opp and final.allowed_signals
+    assert _flip_records(log, now) == ["pending", "pending", "confirmed"]
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_event_flip_ignores_expired_unheld_instruction(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    opp = _OPP[start]
+    eng = _Directed2({"AAUSDT": [start, opp], "BBUSDT": [Bias.LONG, Bias.LONG]})
+    c, log, clock = make(
         tmp_path,
+        eng,
         now,
-        [start, Bias.NO_TRADE, _OPP[start], Bias.NO_TRADE, Bias.NO_TRADE],
+        ttl=timedelta(minutes=140),
+        symbol_min_interval=timedelta(minutes=5),
         flip_confirm=2,
     )
-    held = [cards[i].for_symbol("AAUSDT") for i in (1, 2, 3)]
-    assert all(h is not None and h.bias is start and h.allowed_signals == [] for h in held)
-    assert [h.reason[:10] for h in held if h is not None] == ["待确认翻转（1/2）"] * 3
-    final = cards[4].for_symbol("AAUSDT")
-    assert final is not None and final.bias is Bias.NO_TRADE
-    assert _flip_records(log, now) == ["pending", "pending", "pending", "confirmed"]
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    clock[0] = now + timedelta(minutes=120)
+    eng.picks = ["BBUSDT"]
+    await c.refresh(pool(clock[0], entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    clock[0] = now + timedelta(minutes=150)  # AA's instruction expired, no position
+    seen = c.current(clock[0])
+    assert seen is not None and seen.for_symbol("AAUSDT") is None
+    assert c._card is not None and c._card.for_symbol("AAUSDT") is not None
+    card = await c.refresh_symbol(pool(clock[0], entry("AAUSDT")), "AAUSDT", "x")
+    assert card is not None
+    cs = card.for_symbol("AAUSDT")
+    assert cs is not None and cs.bias is opp and cs.allowed_signals
+    assert _flip_records(log, now) == []
+
+
+async def test_commander_flip_lapses_with_expired_stand_in_and_logs_dropped(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = _Directed2({"AAUSDT": [Bias.LONG, Bias.SHORT, Bias.SHORT], "BBUSDT": [Bias.LONG] * 3})
+    c, log, clock = make(
+        tmp_path,
+        eng,
+        now,
+        ttl=timedelta(minutes=140),
+        symbol_min_interval=timedelta(minutes=5),
+        flip_confirm=2,
+    )
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    clock[0] = now + timedelta(minutes=60)
+    await c.refresh(pool(clock[0], entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    assert c._flips.get("AAUSDT") is not None
+    clock[0] = now + timedelta(minutes=190)
+    eng.picks = ["BBUSDT"]
+    await c.refresh(pool(clock[0], entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+    clock[0] = now + timedelta(minutes=210)  # the stand-in (to 60 + 140 min) expired, AA unheld
+    card = await c.refresh_symbol(pool(clock[0], entry("AAUSDT")), "AAUSDT", "x")
+    assert card is not None
+    cs = card.for_symbol("AAUSDT")
+    assert cs is not None and cs.bias is Bias.SHORT and cs.allowed_signals
+    assert _flip_records(log, now) == ["pending", "dropped"]
 
 
 @pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
@@ -1379,6 +1450,8 @@ async def test_commander_flip_respects_minimum_candidate_age(tmp_path: Path, now
     )
     biases = [c.for_symbol("AAUSDT").bias for c in cards]  # type: ignore[union-attr]
     assert biases == [Bias.LONG, Bias.LONG, Bias.LONG, Bias.SHORT]
+    held = cards[2].for_symbol("AAUSDT")
+    assert held is not None and held.reason.startswith("待确认翻转（2/2，等满 90 分钟）")
     assert _flip_records(log, now) == ["pending", "pending", "confirmed"]
 
 
@@ -1412,9 +1485,9 @@ async def test_commander_flip_restore_drops_candidate_whose_held_instruction_cha
     )
     path = tmp_path / "card_flip.json"
     raw = json.loads(path.read_text())
-    raw["flips"]["AAUSDT"]["held"] = "other-meeting|2026-01-01T00:00:00+00:00|long"
+    raw["flips"]["AAUSDT"]["held"] = "other-meeting|2026-01-01T00:00:00+00:00"
     path.write_text(json.dumps(raw))
-    c2, _, _ = make(
+    c2, log2, _ = make(
         tmp_path / "after",
         FakeEngine([]),
         clock[0],
@@ -1423,3 +1496,4 @@ async def test_commander_flip_restore_drops_candidate_whose_held_instruction_cha
     )
     assert c2._flips.items() == {}
     assert json.loads(path.read_text())["flips"] == {}
+    assert _flip_records(log2, now) == ["dropped"]
