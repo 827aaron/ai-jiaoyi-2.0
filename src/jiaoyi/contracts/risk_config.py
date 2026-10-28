@@ -1265,7 +1265,8 @@ class AppConfig(Contract):
     mainnet_shadow_on: bool = Field(
         default=False,
         description="按主网价格算：每笔平仓后按同一时刻的币安主网成交价重算开平价和净盈亏"
-        "（同数量、两边都按吃单费率，不算资金费），写 data/mainnet_shadow.jsonl，面板「历史」页"
+        "（同数量、手续费按这笔在 Demo 的实际费率，限价成交的腿按限价，不算资金费），"
+        "写 data/mainnet_shadow.jsonl，面板「历史」页"
         "和 Demo 净盈亏并排显示。只用主程序已有的主网行情推送，不额外请求币安；不影响任何交易。"
         "更早的平仓用 jiaoyi mainnet-shadow 补算。热生效。",
     )

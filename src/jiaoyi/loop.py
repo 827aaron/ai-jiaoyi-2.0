@@ -71,7 +71,13 @@ from jiaoyi.market.features import (
     VOL_24H_MINUTES,
     backfill_minutes,
 )
-from jiaoyi.market.rest import RateLimited, WeightBudget, fetch_klines_between, fetch_recent_klines
+from jiaoyi.market.rest import (
+    RateLimited,
+    WeightBudget,
+    fetch_klines_between,
+    fetch_recent_klines,
+    save_ban,
+)
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
 from jiaoyi.risk.guard import DELIST_WINDOW, entry_zone_miss, entry_zone_miss_at
@@ -624,6 +630,7 @@ class Runner:
 
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
+        save_ban(self.app.app_cfg.data_dir)
 
     async def market_snapshot_tick(self) -> None:
         """面板「盘口员」读的 data/market_snapshot.json：正在盯的币此刻的行情和各路推送计数。"""

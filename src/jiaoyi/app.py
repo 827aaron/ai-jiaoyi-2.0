@@ -80,7 +80,7 @@ from jiaoyi.execution.factory import MissingSecret, build_execution
 from jiaoyi.execution.income_daily import IncomeDaily
 from jiaoyi.execution.ledger_sync import LedgerSync
 from jiaoyi.execution.live_gate import LiveGate
-from jiaoyi.execution.mainnet_shadow import LiveShadow, RecentTrades, read_ledger
+from jiaoyi.execution.mainnet_shadow import LiveShadow, RecentTrades, load_ledger
 from jiaoyi.execution.stub import (
     StubExecutorAdapter,
     StubLifeboatStop,
@@ -1078,24 +1078,28 @@ class App:
         if not self.app_cfg.mainnet_shadow_on:
             return
         feed = getattr(self.m.features, "price_at", None)
-        if feed is None:
+        span = getattr(self.m.features, "prices_between", None)
+        if feed is None or span is None:
             return
         if self.mainnet_shadow is None:
             trades = self.ledger.trades if self.ledger is not None else None
             self.mainnet_shadow = LiveShadow(
                 self.app_cfg.data_dir,
                 feed,
+                span,
                 lambda: self.risk_cfg.taker_fee_bps,
                 trades.cached if isinstance(trades, RecentTrades) else None,
             )
         try:
-            records = await asyncio.to_thread(read_ledger, self.app_cfg.data_dir)
-            res = await self.mainnet_shadow.tick(records, self.clock())
+            records, hints = await asyncio.to_thread(load_ledger, self.app_cfg.data_dir)
+            res = await self.mainnet_shadow.tick(records, hints, self.clock())
         except Exception as e:
             log.warning("按主网价格复算这轮跳过：%r", e)
             return
-        if res.added:
-            log.info("按主网价格复算了 %d 笔平仓（%s）", res.added, res.sources)
+        if res.added or res.upgraded:
+            log.info(
+                "按主网价格复算：新算 %d 笔、改进 %d 笔（%s）", res.added, res.upgraded, res.sources
+            )
 
     def blocked_symbols(self) -> dict[str, str]:
         """当前禁止新开仓的币 → 原因（来自币安下架公告）。"""

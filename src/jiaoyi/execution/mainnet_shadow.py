@@ -2,13 +2,14 @@
 
 Orders fill on Binance Demo, whose fills run a few bp better than the mainnet price at the
 same moment, so Demo P&L overstates the edge. For every closed position this re-prices
-both legs at the Binance mainnet price at the Demo fill times (same quantity, taker fee on
-both legs, funding ignored like the ledger's net P&L) and appends one JSON line.
+both legs at the Binance mainnet price at the Demo fill times (same quantity, Demo's actual
+fee rate per leg, funding ignored like the ledger's net P&L) and appends one JSON line. A
+leg that filled as a resting limit order keeps its own limit price and is flagged.
 
 It is a separate append-only file, never ``positions.json``: an older build that does not
-know it simply ignores it. Rows are keyed by ``position_id``; a row once written is never
-rewritten, and readers keep the first row per id, so the CLI backfill and the running loop
-may both append without coordination.
+know it simply ignores it. A line is never rewritten; a better-sourced line for the same
+position is appended instead and readers keep the best one (``core.shadow_ledger.quality``),
+so the CLI backfill and the running loop may both append without coordination.
 
 The running loop makes no Binance request of its own. Prices come from what the process
 already holds: the mainnet trade stream (per-second last price, five minutes deep), price
@@ -22,15 +23,29 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from jiaoyi.contracts import Interval, PositionRecord, PositionStatus, Side
-from jiaoyi.core.shadow_ledger import SHADOW_FILE, read_shadow
-from jiaoyi.execution.fills import OPEN_SLACK, TradeFill, UserTrades, entry_fill, exit_fill
+from jiaoyi.contracts import CloseReason, Interval, PositionRecord, PositionStatus, Side
+from jiaoyi.core.shadow_ledger import (
+    SHADOW_FILE,
+    SHADOW_VERSION,
+    Quality,
+    quality,
+    read_shadow,
+)
+from jiaoyi.execution.fills import (
+    OPEN_SLACK,
+    TradeFill,
+    UserTrades,
+    close_side,
+    entry_fill,
+    exit_fill,
+    open_side,
+)
 from jiaoyi.market.rest import (
     DEFAULT_REST_URL,
     RateLimited,
@@ -44,13 +59,19 @@ MARKS_FILE = "mainnet_shadow_marks.json"
 SHADOW_EVERY_S = 30.0
 LOOP_BATCH = 5
 MARK_WINDOW = timedelta(minutes=4)
-"""A mark is taken while the trade stream still covers the moment (it keeps five minutes)."""
+"""Marks are taken while the trade stream still covers the moment (it keeps five minutes)."""
+MARK_AFTER_OPEN = timedelta(seconds=120)
+"""A limit or slow entry may fill well after ``opened_at``; keep this much of the stream."""
+MARK_BEFORE_CLOSE = timedelta(seconds=120)
+"""``closed_at`` is when the close was seen, after the exit fill."""
+MARK_EDGE = timedelta(seconds=10)
 MARK_MATCH = timedelta(seconds=5)
-MARK_KEEP = timedelta(days=2)
+MARK_KEEP = timedelta(hours=30)
 MAX_FAILURES = 10
 LIVE_LOOKBACK = timedelta(hours=24)
 """The stream keeps 1500 one-minute bars; older closes are left to the CLI backfill."""
 AGG_TRADES_WEIGHT = 20
+USER_TRADES_WEIGHT = 5
 LOOKAHEAD_MS = 60_000
 MINUTE_S = 60.0
 
@@ -88,51 +109,53 @@ class FeedPrices:
         return PricePoint(*got) if got is not None else None
 
 
+Span = Callable[[str, datetime, datetime], "list[tuple[datetime, float]]"]
+"""(symbol, start, end) -> per-second stream prices in that span
+(``RollingFeatureEngine.prices_between``)."""
+
+
 class PriceMarks:
-    """Per-symbol mainnet price samples taken from the stream at entry / exit moments,
-    persisted so a restart between open and close does not lose the entry price."""
+    """Per-second mainnet stream prices kept around each entry and exit (the stream itself
+    keeps five minutes), persisted so a restart between open and close loses nothing."""
 
     def __init__(self, data_dir: str | Path) -> None:
         self._path = Path(data_dir) / MARKS_FILE
-        self._marks: dict[str, list[tuple[datetime, float, datetime]]] = {}
+        self._marks: dict[str, dict[int, float]] = {}
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             for sym, rows in raw.items():
-                self._marks[sym] = sorted(
-                    (datetime.fromisoformat(a), float(p), datetime.fromisoformat(b))
-                    for a, p, b in rows
-                )
+                self._marks[sym] = {int(sec): float(p) for sec, p in rows}
         except FileNotFoundError:
             pass
         except (OSError, ValueError, TypeError, AttributeError):
             log.warning("%s 读不出，从空的开始", self._path, exc_info=True)
             self._marks = {}
 
-    def has(self, symbol: str, t: datetime) -> bool:
-        return self.get(symbol, t) is not None
+    def add(self, symbol: str, samples: Iterable[tuple[datetime, float]]) -> bool:
+        got = self._marks.setdefault(symbol, {})
+        before = len(got)
+        for t, p in samples:
+            got.setdefault(int(t.timestamp()), p)
+        return len(got) != before
 
     def get(self, symbol: str, t: datetime) -> PricePoint | None:
-        best: tuple[datetime, float, datetime] | None = None
-        for row in self._marks.get(symbol, []):
-            if abs(row[0] - t) <= MARK_MATCH and (
-                best is None or abs(row[0] - t) < abs(best[0] - t)
-            ):
-                best = row
-        return PricePoint(best[1], best[2], "mark") if best is not None else None
-
-    def add(self, symbol: str, t: datetime, point: PricePoint) -> None:
-        self._marks.setdefault(symbol, []).append((t, point.price, point.ts))
-        self._marks[symbol].sort()
+        """Last sampled second at or before ``t``, at most ``MARK_MATCH`` earlier."""
+        ts = t.timestamp()
+        reach = MARK_MATCH.total_seconds()
+        marks = self._marks.get(symbol, {})
+        best = max((sec for sec in marks if 0 <= ts - sec <= reach), default=None)
+        if best is None:
+            return None
+        return PricePoint(self._marks[symbol][best], datetime.fromtimestamp(best, UTC), "mark")
 
     def prune_and_save(self, now: datetime) -> None:
-        cut = now - MARK_KEEP
+        cut = (now - MARK_KEEP).timestamp()
         self._marks = {
-            s: kept for s, rows in self._marks.items() if (kept := [r for r in rows if r[0] >= cut])
-        }
-        doc = {
-            s: [[a.isoformat(), p, b.isoformat()] for a, p, b in rows]
+            s: kept
             for s, rows in self._marks.items()
+            if (kept := {sec: p for sec, p in rows.items() if sec >= cut})
         }
+        doc = {s: sorted(rows.items()) for s, rows in self._marks.items()}
         tmp = self._path.with_name(f".{self._path.name}.tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +294,34 @@ class RecentTrades:
         return self._seen.get((symbol, since), [])
 
 
+STOP_REASONS = frozenset(
+    {
+        CloseReason.STOP_LOSS,
+        CloseReason.TRAILING_STOP,
+        CloseReason.TIGHTENED_STOP,
+        CloseReason.LIFEBOAT,
+    }
+)
+
+
+@dataclass(frozen=True)
+class LegHints:
+    """What the ledger wrapper says about the orders: the entry waited as a limit order
+    (``limit_wait_s``), the take-profit was a resting limit (``tp_tick``)."""
+
+    limit_entry: bool = False
+    limit_take_profit: bool = False
+
+
+@dataclass(frozen=True)
+class Leg:
+    time: datetime
+    kind: str
+    """``market`` / ``limit`` / ``stop``."""
+    fee_usdt: float | None
+    """Demo fee actually charged on this leg; None = not known per leg."""
+
+
 def eligible(rec: PositionRecord) -> bool:
     return (
         rec.status is PositionStatus.CLOSED
@@ -281,28 +332,86 @@ def eligible(rec: PositionRecord) -> bool:
     )
 
 
+def _maker(trades: Iterable[TradeFill], side: str, start: datetime, last: datetime) -> bool | None:
+    flags = [t.maker for t in trades if t.side == side and start <= t.time <= last and t.qty > 0]
+    if not flags or any(f is None for f in flags):
+        return None
+    return all(flags)
+
+
+def _entry_kind(maker: bool | None, hints: LegHints) -> str:
+    if maker is not None:
+        return "limit" if maker else "market"
+    return "limit" if hints.limit_entry else "market"
+
+
+def _exit_kind(maker: bool | None, rec: PositionRecord, hints: LegHints) -> str:
+    if maker:
+        return "limit"
+    if rec.close_reason in STOP_REASONS:
+        return "stop"
+    if maker is None and rec.close_reason is CloseReason.TAKE_PROFIT and hints.limit_take_profit:
+        return "limit"
+    return "market"
+
+
+def legs(
+    rec: PositionRecord, trades: list[TradeFill] | None, hints: LegHints
+) -> tuple[Leg, Leg, str]:
+    """Entry and exit legs from Demo fills when they match the position, else from the
+    ledger's ``opened_at`` / ``closed_at``; the third value is the time source."""
+    assert rec.closed_at is not None
+    if trades:
+        e = entry_fill(rec, trades)
+        x = exit_fill(rec, trades, e)
+        if e is not None and x is not None:
+            e_maker = _maker(trades, open_side(rec.side), rec.opened_at - OPEN_SLACK, e.last)
+            x_maker = _maker(trades, close_side(rec.side), e.last, x.last)
+            return (
+                Leg(e.last, _entry_kind(e_maker, hints), e.commission_usdt),
+                Leg(x.last, _exit_kind(x_maker, rec, hints), x.commission_usdt),
+                "fills",
+            )
+    return (
+        Leg(rec.opened_at, _entry_kind(None, hints), None),
+        Leg(rec.closed_at, _exit_kind(None, rec, hints), None),
+        "ledger",
+    )
+
+
 def shadow_row(
     rec: PositionRecord,
     entry: PricePoint,
     exit_: PricePoint,
+    entry_leg: Leg,
+    exit_leg: Leg,
     *,
-    entry_time: datetime,
-    exit_time: datetime,
     time_source: str,
     taker_fee_bps: float,
     now: datetime,
 ) -> dict[str, Any]:
     """One ledger line. ``demo_net_usdt`` is the ledger's net (Binance-charged fees, no
-    funding); the mainnet net charges ``taker_fee_bps`` on both mainnet notionals. R is the
-    ledger's stop distance times quantity, the same unit for both."""
+    funding). The mainnet net charges Demo's actual fee rate of each leg on that leg's
+    mainnet notional (per-leg rate from the fills, else the ledger's total fees spread over
+    both Demo notionals), so the gap is the price difference; ``fee_gap_usdt`` is what an
+    all-taker fee at ``taker_fee_bps`` would add on top. R is the ledger's stop distance
+    times quantity, the same unit for both."""
     assert rec.entry_price is not None and rec.exit_price is not None
     assert rec.realized_pnl_usdt is not None and rec.closed_at is not None
     sign = 1.0 if rec.side is Side.LONG else -1.0
     qty = rec.quantity
-    notional = rec.entry_price * qty
+    demo_in, demo_out = rec.entry_price * qty, rec.exit_price * qty
+    main_in, main_out = entry.price * qty, exit_.price * qty
     demo_gross = sign * (rec.exit_price - rec.entry_price) * qty
     gross = sign * (exit_.price - entry.price) * qty
-    fees = taker_fee_bps / 10_000 * qty * (entry.price + exit_.price)
+    if entry_leg.fee_usdt is not None and exit_leg.fee_usdt is not None:
+        rate_in, rate_out = entry_leg.fee_usdt / demo_in, exit_leg.fee_usdt / demo_out
+        fee_source = "fills"
+    else:
+        rate_in = rate_out = rec.fees_usdt / (demo_in + demo_out)
+        fee_source = "ledger"
+    fees = rate_in * main_in + rate_out * main_out
+    taker_fees = taker_fee_bps / 10_000 * (main_in + main_out)
     net = gross - fees
     demo_net = rec.realized_pnl_usdt
     risk = abs(rec.entry_price - rec.stop_loss_price) * qty if rec.stop_loss_price else 0.0
@@ -312,37 +421,45 @@ def shadow_row(
         return round(v / risk, 6) if risk > 0 else None
 
     def bp(v: float) -> float | None:
-        return round(v / notional * 10_000, 4) if notional > 0 else None
+        return round(v / demo_in * 10_000, 4) if demo_in > 0 else None
 
     return {
+        "v": SHADOW_VERSION,
         "position_id": rec.position_id,
         "symbol": rec.symbol,
         "side": rec.side.value,
         "quantity": qty,
         "opened_at": rec.opened_at.isoformat(),
         "closed_at": rec.closed_at.isoformat(),
-        "entry_time": entry_time.isoformat(),
-        "exit_time": exit_time.isoformat(),
+        "entry_time": entry_leg.time.isoformat(),
+        "exit_time": exit_leg.time.isoformat(),
         "time_source": time_source,
+        "entry_type": entry_leg.kind,
+        "exit_type": exit_leg.kind,
         "demo_entry": rec.entry_price,
         "demo_exit": rec.exit_price,
         "demo_gross_usdt": round(demo_gross, 8),
         "demo_fees_usdt": rec.fees_usdt,
         "demo_net_usdt": demo_net,
+        "fee_source": fee_source,
+        "demo_fee_rate_bps": [round(rate_in * 10_000, 4), round(rate_out * 10_000, 4)],
         "mainnet_entry": entry.price,
         "mainnet_exit": exit_.price,
         "mainnet_entry_ts": entry.ts.isoformat(),
         "mainnet_exit_ts": exit_.ts.isoformat(),
         "entry_source": entry.source,
         "exit_source": exit_.source,
-        "taker_fee_bps": taker_fee_bps,
         "mainnet_gross_usdt": round(gross, 8),
         "mainnet_fees_usdt": round(fees, 8),
         "mainnet_net_usdt": round(net, 8),
-        "notional_usdt": round(notional, 8),
+        "taker_fee_bps": taker_fee_bps,
+        "mainnet_taker_fees_usdt": round(taker_fees, 8),
+        "fee_gap_usdt": round(taker_fees - fees, 8),
+        "notional_usdt": round(demo_in, 8),
+        "price_gap_usdt": round(demo_gross - gross, 8),
+        "price_gap_bp": bp(demo_gross - gross),
         "gap_usdt": round(gap, 8),
         "gap_bp": bp(gap),
-        "price_gap_bp": bp(demo_gross - gross),
         "risk_usdt": round(risk, 8) if risk > 0 else None,
         "demo_r": r(demo_net),
         "mainnet_r": r(net),
@@ -351,31 +468,40 @@ def shadow_row(
     }
 
 
-def read_ledger(data_dir: str | Path) -> list[PositionRecord]:
-    """Records from ``positions.json``; a malformed record is skipped, not fatal."""
+def load_ledger(data_dir: str | Path) -> tuple[list[PositionRecord], dict[str, LegHints]]:
+    """Records from ``positions.json`` plus the order hints from their wrappers; a
+    malformed record is skipped, not fatal."""
     try:
         raw = json.loads((Path(data_dir) / "positions.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    out: list[PositionRecord] = []
+        return [], {}
+    recs: list[PositionRecord] = []
+    hints: dict[str, LegHints] = {}
     for t in ((raw or {}).get("positions") or {}).values():
         try:
-            out.append(PositionRecord.model_validate(t["record"]))
+            rec = PositionRecord.model_validate(t["record"])
         except (ValueError, KeyError, TypeError):
             continue
-    return out
+        recs.append(rec)
+        hints[rec.position_id] = LegHints(
+            limit_entry=t.get("limit_wait_s") is not None,
+            limit_take_profit=t.get("tp_tick") is not None,
+        )
+    return recs, hints
 
 
 @dataclass
 class UpdateResult:
     added: int = 0
+    upgraded: int = 0
+    """Replaced an existing row with a better-sourced one."""
     skipped: int = 0
-    """Already in the file."""
+    """Already in the file at the best quality this run can reach (or no better found)."""
     failed: int = 0
     """No price for a leg (or an error); retried on later runs."""
     pending: int = 0
     """Eligible but left for a later run (batch limit, rate limit, too many failures)."""
-    sources: dict[str, int] | None = None
+    sources: dict[str, int] = field(default_factory=dict)
 
 
 class MainnetShadow:
@@ -385,59 +511,67 @@ class MainnetShadow:
         prices: MainnetPrices,
         taker_fee_bps: Callable[[], float],
         trades: UserTrades | None = None,
+        *,
+        precise: bool = True,
     ) -> None:
-        """``trades`` (Demo userTrades) gives the exact fill times; without it, or when the
-        fills cannot be matched, the ledger's ``opened_at`` / ``closed_at`` stand in."""
+        """``trades`` (Demo userTrades) gives exact fill times, fees and maker flags; without
+        it, or when the fills cannot be matched, the ledger's ``opened_at`` / ``closed_at``
+        stand in. ``precise`` = ``prices`` can price to the second; with it off (bars only)
+        an existing second-level row is never attempted again."""
         self._dir = data_dir
         self._path = Path(data_dir) / SHADOW_FILE
         self._prices = prices
         self._fee = taker_fee_bps
         self._trades = trades
+        self._best: Quality = (SHADOW_VERSION, 2 if precise else 1, 1 if trades else 0)
         self._failures: dict[str, int] = {}
-
-    async def _times(self, rec: PositionRecord) -> tuple[datetime, datetime, str]:
-        assert rec.closed_at is not None
-        if self._trades is not None:
-            trades = await self._trades(rec.symbol, rec.opened_at - OPEN_SLACK)
-            entry = entry_fill(rec, trades)
-            exit_ = exit_fill(rec, trades, entry)
-            if entry is not None and exit_ is not None:
-                return entry.last, exit_.last, "fills"
-        return rec.opened_at, rec.closed_at, "ledger"
+        self._no_better: set[str] = set()
 
     async def update(
         self,
         records: Iterable[PositionRecord],
         now: datetime,
         *,
+        hints: Mapping[str, LegHints] | None = None,
         since: datetime | None = None,
         limit: int | None = None,
+        recompute: bool = False,
     ) -> UpdateResult:
-        """Prices closes not yet in the file, newest first, at most ``limit`` attempts.
+        """Prices closes that have no row, or whose row this run could improve on (see
+        ``quality``), newest first, at most ``limit`` attempts. ``recompute`` rewrites every
+        row in range; the newer line wins at equal quality.
 
         ``RateLimited`` stops the run and propagates; any other error only skips that
         position, which is retried on later calls up to ``MAX_FAILURES`` per process."""
         done = read_shadow(self._dir)
-        res = UpdateResult(sources={})
+        res = UpdateResult()
         todo: list[PositionRecord] = []
         for rec in records:
             if not eligible(rec) or rec.closed_at is None:
                 continue
             if since is not None and rec.closed_at < since:
                 continue
-            if rec.position_id in done:
+            old = done.get(rec.position_id)
+            if (
+                old is not None
+                and not recompute
+                and (quality(old) >= self._best or rec.position_id in self._no_better)
+            ):
                 res.skipped += 1
             elif self._failures.get(rec.position_id, 0) >= MAX_FAILURES:
                 res.pending += 1
             else:
                 todo.append(rec)
         todo.sort(key=lambda p: p.closed_at or now, reverse=True)
+        tried = 0
         for i, rec in enumerate(todo):
-            if limit is not None and res.added + res.failed >= limit:
+            if limit is not None and tried >= limit:
                 res.pending += len(todo) - i
                 break
+            tried += 1
+            hint = (hints or {}).get(rec.position_id, LegHints())
             try:
-                row = await self._one(rec, now)
+                row = await self._one(rec, hint, now)
             except RateLimited:
                 res.pending += len(todo) - i
                 raise
@@ -448,25 +582,47 @@ class MainnetShadow:
                 self._failures[rec.position_id] = self._failures.get(rec.position_id, 0) + 1
                 res.failed += 1
                 continue
+            old = done.get(rec.position_id)
+            if old is not None and not recompute and quality(row) <= quality(old):
+                self._no_better.add(rec.position_id)
+                res.skipped += 1
+                continue
             self._append(row)
-            res.added += 1
-            assert res.sources is not None
+            if old is None:
+                res.added += 1
+            else:
+                res.upgraded += 1
             for key in (row["entry_source"], row["exit_source"]):
                 res.sources[key] = res.sources.get(key, 0) + 1
         return res
 
-    async def _one(self, rec: PositionRecord, now: datetime) -> dict[str, Any] | None:
-        entry_t, exit_t, source = await self._times(rec)
-        entry = await self._prices.price_at(rec.symbol, entry_t)
-        exit_ = await self._prices.price_at(rec.symbol, exit_t) if entry is not None else None
+    async def _leg_price(self, rec: PositionRecord, leg: Leg, demo: float) -> PricePoint | None:
+        if leg.kind == "limit":
+            # A resting limit order fills at its own price on mainnet too; whether mainnet
+            # would have traded through it is not checked, the row flags the leg instead.
+            return PricePoint(demo, leg.time, "limit_price")
+        return await self._prices.price_at(rec.symbol, leg.time)
+
+    async def _one(
+        self, rec: PositionRecord, hints: LegHints, now: datetime
+    ) -> dict[str, Any] | None:
+        assert rec.entry_price is not None and rec.exit_price is not None
+        trades = (
+            await self._trades(rec.symbol, rec.opened_at - OPEN_SLACK)
+            if self._trades is not None
+            else None
+        )
+        e_leg, x_leg, source = legs(rec, trades, hints)
+        entry = await self._leg_price(rec, e_leg, rec.entry_price)
+        exit_ = await self._leg_price(rec, x_leg, rec.exit_price) if entry is not None else None
         if entry is None or exit_ is None:
             return None
         return shadow_row(
             rec,
             entry,
             exit_,
-            entry_time=entry_t,
-            exit_time=exit_t,
+            e_leg,
+            x_leg,
             time_source=source,
             taker_fee_bps=self._fee(),
             now=now,
@@ -479,35 +635,52 @@ class MainnetShadow:
 
 
 class LiveShadow:
-    """The running loop's side: marks the stream price at each open / close while the stream
-    still covers it, then prices settled closes from marks, the stream and streamed bars.
-    No network calls."""
+    """The running loop's side: keeps the stream's per-second prices around every entry
+    (from ``opened_at`` and, once the ledger backfill has fetched it, the actual entry fill
+    time) and every exit while the stream still covers them, then prices settled closes
+    from those marks, the stream and the streamed bars. No network calls."""
 
     def __init__(
         self,
         data_dir: str | Path,
         feed: FeedLookup,
+        span: Span,
         taker_fee_bps: Callable[[], float],
         fill_trades: UserTrades | None = None,
     ) -> None:
-        self._feed = FeedPrices(feed)
+        self._span = span
+        self._trades = fill_trades
         self.marks = PriceMarks(data_dir)
         self.shadow = MainnetShadow(
-            data_dir, ChainPrices([self.marks, self._feed]), taker_fee_bps, fill_trades
+            data_dir, ChainPrices([self.marks, FeedPrices(feed)]), taker_fee_bps, fill_trades
         )
 
-    async def tick(self, records: list[PositionRecord], now: datetime) -> UpdateResult:
+    async def _windows(self, rec: PositionRecord) -> list[tuple[datetime, datetime]]:
+        out = [(rec.opened_at - MARK_EDGE, rec.opened_at + MARK_AFTER_OPEN)]
+        if rec.closed_at is not None:
+            out.append((rec.closed_at - MARK_BEFORE_CLOSE, rec.closed_at + MARK_EDGE))
+        if self._trades is not None:
+            trades = await self._trades(rec.symbol, rec.opened_at - OPEN_SLACK)
+            e = entry_fill(rec, trades) if trades else None
+            if e is not None:
+                out.append((e.last - MARK_EDGE, e.last + MARK_EDGE))
+        return out
+
+    async def tick(
+        self, records: list[PositionRecord], hints: Mapping[str, LegHints], now: datetime
+    ) -> UpdateResult:
         changed = False
         for rec in records:
-            for t in (rec.opened_at, rec.closed_at):
-                if t is None or not (now - MARK_WINDOW <= t <= now):
+            if rec.status is PositionStatus.FAILED:
+                continue
+            if rec.closed_at is not None and rec.closed_at + MARK_EDGE < now - MARK_WINDOW:
+                continue
+            for a, b in await self._windows(rec):
+                if b < now - MARK_WINDOW or a > now:
                     continue
-                if self.marks.has(rec.symbol, t):
-                    continue
-                got = await self._feed.price_at(rec.symbol, t)
-                if got is not None and got.source == "ws_trade":
-                    self.marks.add(rec.symbol, t, got)
-                    changed = True
+                changed |= self.marks.add(rec.symbol, self._span(rec.symbol, a, min(b, now)))
         if changed:
             self.marks.prune_and_save(now)
-        return await self.shadow.update(records, now, since=now - LIVE_LOOKBACK, limit=LOOP_BATCH)
+        return await self.shadow.update(
+            records, now, hints=hints, since=now - LIVE_LOOKBACK, limit=LOOP_BATCH
+        )

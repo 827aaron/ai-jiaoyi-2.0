@@ -359,10 +359,14 @@ def _card_score(args: argparse.Namespace) -> int:
 
 
 def _mainnet_shadow(args: argparse.Namespace) -> int:
-    """按主网价格算：补算历史平仓（只追加，算过的跳过），按天打印 Demo 净盈亏和主网等价净盈亏。"""
+    """按主网价格算：补算历史平仓（只追加；已有的行只在这次能用更好的来源时才补一行更好的），
+    按天打印 Demo 净盈亏、按主网价格算的净盈亏、价差和费率差。"""
+    from zoneinfo import ZoneInfo
+
     from jiaoyi.core import shadow_ledger as sl
     from jiaoyi.execution import mainnet_shadow as ms
-    from jiaoyi.market.rest import RateLimited, WeightBudget
+    from jiaoyi.execution.fills import TradeFill
+    from jiaoyi.market.rest import RateLimited, WeightBudget, load_ban
 
     try:
         app_cfg = load_app_config(Path(args.app))
@@ -374,29 +378,45 @@ def _mainnet_shadow(args: argparse.Namespace) -> int:
     fee = risk_cfg.taker_fee_bps if args.taker_bps is None else args.taker_bps
     since = datetime.fromisoformat(args.since)
     if since.tzinfo is None:
-        from zoneinfo import ZoneInfo
-
         since = since.replace(tzinfo=ZoneInfo(risk_cfg.day_reset_tz))
     sources: list[ms.MainnetPrices] = [ms.CachedKlinePrices(ms.disk_day_bars(data_dir))]
     if args.source == "rest":
+        ban = load_ban(data_dir)
+        if ban is not None:
+            print(
+                f"主程序记录本机 IP 正被币安限流（HTTP {ban.status}），"
+                f"还有约 {ban.wait_min()} 分钟；限流期间再请求只会延长封禁。"
+                "等解封后再用 --source rest，或先用默认的 --source cache",
+                file=sys.stderr,
+            )
+            return 1
         sources = [ms.RestMainnetPrices(WeightBudget(args.weight_per_min)), *sources]
     exchange: Any = None
+    trades = None
     if args.fill_times:
         try:
             exchange = _strict_exchange(app_cfg)
         except MissingSecret as e:
             print(e, file=sys.stderr)
             return 2
+        demo_budget = WeightBudget(args.demo_weight_per_min)
+
+        async def throttled(symbol: str, start: datetime) -> list[TradeFill]:
+            await demo_budget.take(ms.USER_TRADES_WEIGHT)
+            fills: list[TradeFill] = await exchange.user_trades(symbol, start)
+            return fills
+
+        trades = throttled
     shadow = ms.MainnetShadow(
-        data_dir,
-        ms.ChainPrices(sources),
-        lambda: fee,
-        exchange.user_trades if exchange is not None else None,
+        data_dir, ms.ChainPrices(sources), lambda: fee, trades, precise=args.source == "rest"
     )
+    records, hints = ms.load_ledger(data_dir)
 
     async def run() -> ms.UpdateResult:
         try:
-            return await shadow.update(ms.read_ledger(data_dir), datetime.now(UTC), since=since)
+            return await shadow.update(
+                records, datetime.now(UTC), hints=hints, since=since, recompute=args.recompute
+            )
         finally:
             if exchange is not None:
                 await exchange.close()
@@ -407,28 +427,25 @@ def _mainnet_shadow(args: argparse.Namespace) -> int:
         _say_rate_limited()
         return 1
     print(
-        f"新算 {res.added} 笔，已有 {res.skipped} 笔，找不到主网价 {res.failed} 笔"
-        f"（价格来源 {res.sources or {}}）"
+        f"新算 {res.added} 笔，改进 {res.upgraded} 笔，已有 {res.skipped} 笔，"
+        f"找不到主网价 {res.failed} 笔（价格来源 {res.sources}）"
     )
-    rows = [
-        r
-        for r in sl.read_shadow(data_dir).values()
-        if r.get("closed_at", "") >= since.astimezone(UTC).isoformat()
-    ]
-    cum_demo = cum_main = 0.0
-    print("日期        笔数   Demo净U   按主网价格算U   差U      差bp   差R/笔")
-    for d in sl.by_day(rows, risk_cfg.day_reset_tz):
-        cum_demo += d.demo_net_usdt
-        cum_main += d.mainnet_net_usdt
+    cut = since.astimezone(UTC).isoformat()
+    rows = [r for r in sl.read_shadow(data_dir).values() if r.get("closed_at", "") >= cut]
+    total = sl.DayTotals("累计")
+    nan = float("nan")
+    print("日期        笔数   Demo净U   主网净U    差U     价差U   费率差U   差bp  差R/笔  限价腿")
+    for d in [*sl.by_day(rows, risk_cfg.day_reset_tz), total]:
+        if d is not total:
+            total.add(d)
         gap_r = d.avg(d.gap_r_sum)
         print(
-            f"{d.day}  {d.trades:4d}  {d.demo_net_usdt:9.2f}  {d.mainnet_net_usdt:12.2f}  "
-            f"{d.gap_usdt:8.2f}  {d.gap_bp if d.gap_bp is not None else float('nan'):6.1f}  "
-            f"{gap_r if gap_r is not None else float('nan'):6.3f}"
+            f"{d.day:10s}  {d.trades:4d}  {d.demo_net_usdt:9.2f}  {d.mainnet_net_usdt:8.2f}  "
+            f"{d.gap_usdt:7.2f}  {d.price_gap_usdt:7.2f}  {d.fee_gap_usdt:7.2f}  "
+            f"{d.gap_bp if d.gap_bp is not None else nan:5.1f}  "
+            f"{gap_r if gap_r is not None else nan:6.3f}  {d.limit_legs:4d}"
         )
-    print(
-        f"累计：Demo {cum_demo:.2f}U，按主网价格算 {cum_main:.2f}U，差 {cum_demo - cum_main:.2f}U"
-    )
+    print("费率差 = 两边全按吃单费率比按 Demo 实际费率多付多少（不在「差」里）")
     print(f"明细：{Path(data_dir) / sl.SHADOW_FILE}")
     return 0
 
@@ -1031,9 +1048,29 @@ def main(argv: list[str] | None = None) -> int:
         help="cache = 只读本机已有的 1 分钟 K 线（data/history 日包、大盘台记分缓存），插值到秒；"
         "rest = 先查币安主网公开逐笔成交（每笔 2 次，限速），查不到再用本机 K 线",
     )
-    p.add_argument("--weight-per-min", type=int, default=240, help="rest 每分钟最多用多少权重")
     p.add_argument(
-        "--fill-times", action="store_true", help="用 Demo 成交明细的准确成交时间（要密钥，只读）"
+        "--weight-per-min",
+        type=int,
+        default=240,
+        help="rest 每分钟最多用多少主网权重（本机 IP 每分钟共 2400，主程序也在用）；"
+        "主程序记着被限流（data/rest_ban.json）时直接拒绝，限流期间别跑 rest",
+    )
+    p.add_argument(
+        "--fill-times",
+        action="store_true",
+        help="用 Demo 成交明细的准确成交时间、每腿手续费和挂单 / 吃单（要密钥，只读）。"
+        "Demo 接口按 IP 计权重，和主程序的 Demo 请求（账本回填、对账、托管保护）共用",
+    )
+    p.add_argument(
+        "--demo-weight-per-min",
+        type=int,
+        default=60,
+        help="--fill-times 每分钟最多用多少 Demo 权重（成交明细每次 5）",
+    )
+    p.add_argument(
+        "--recompute",
+        action="store_true",
+        help="范围内每笔都重算一遍（同等来源时新的那行生效）；默认只算没有的和能改进的",
     )
     p.add_argument(
         "--taker-bps", type=float, default=None, help="默认用 risk.toml 的 taker_fee_bps"

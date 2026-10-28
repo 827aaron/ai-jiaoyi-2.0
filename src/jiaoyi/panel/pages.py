@@ -1015,6 +1015,13 @@ class TradeRow(BaseModel):
     mainnet_gap_bp: float | None = None
     """Demo net minus mainnet net, in bp of entry notional (positive = Demo flatters)."""
     mainnet_gap_r: float | None = None
+    mainnet_price_gap_usdt: float | None = None
+    """Demo gross minus mainnet gross: the fill-price advantage alone."""
+    mainnet_fee_gap_usdt: float | None = None
+    """All-taker fees minus Demo's actual-rate fees on mainnet notional (not in the gap)."""
+    mainnet_legs: list[str] = []
+    """Order type of the entry and exit leg (``market`` / ``limit`` / ``stop``); a limit leg
+    is priced at its own limit price."""
 
 
 class KindStats(BaseModel):
@@ -1117,6 +1124,9 @@ class MainnetDay(BaseModel):
     gap_bp: float | None
     gap_r: float | None
     """Average per trade, over trades with a stop distance."""
+    price_gap_usdt: float
+    fee_gap_usdt: float
+    limit_legs: int
     cum_demo_usdt: float
     cum_mainnet_usdt: float
 
@@ -1130,6 +1140,11 @@ class MainnetCompare(BaseModel):
     mainnet_net_usdt: float
     gap_usdt: float
     gap_bp: float | None
+    price_gap_usdt: float
+    price_gap_bp: float | None
+    fee_gap_usdt: float
+    fee_gap_bp: float | None
+    limit_legs: int
     demo_r: float | None
     mainnet_r: float | None
     gap_r: float | None
@@ -1151,17 +1166,7 @@ def _mainnet_compare(
     for d in days:
         cum_d += d.demo_net_usdt
         cum_m += d.mainnet_net_usdt
-        for k in (
-            "trades",
-            "demo_net_usdt",
-            "mainnet_net_usdt",
-            "notional_usdt",
-            "gap_r_sum",
-            "r_trades",
-            "demo_r_sum",
-            "mainnet_r_sum",
-        ):
-            setattr(total, k, getattr(total, k) + getattr(d, k))
+        total.add(d)
         out.append(
             MainnetDay(
                 day=d.day,
@@ -1171,6 +1176,9 @@ def _mainnet_compare(
                 gap_usdt=d.gap_usdt,
                 gap_bp=d.gap_bp,
                 gap_r=d.avg(d.gap_r_sum),
+                price_gap_usdt=d.price_gap_usdt,
+                fee_gap_usdt=d.fee_gap_usdt,
+                limit_legs=d.limit_legs,
                 cum_demo_usdt=cum_d,
                 cum_mainnet_usdt=cum_m,
             )
@@ -1182,6 +1190,11 @@ def _mainnet_compare(
         mainnet_net_usdt=total.mainnet_net_usdt,
         gap_usdt=total.gap_usdt,
         gap_bp=total.gap_bp,
+        price_gap_usdt=total.price_gap_usdt,
+        price_gap_bp=total.bp(total.price_gap_usdt),
+        fee_gap_usdt=total.fee_gap_usdt,
+        fee_gap_bp=total.bp(total.fee_gap_usdt),
+        limit_legs=total.limit_legs,
         demo_r=total.avg(total.demo_r_sum),
         mainnet_r=total.avg(total.mainnet_r_sum),
         gap_r=total.avg(total.gap_r_sum),
@@ -1222,17 +1235,20 @@ def _range_start(now: datetime, tz: str, rng: HistoryRange) -> datetime:
     return (day0 - timedelta(days=days)).astimezone(UTC)
 
 
-def _shadow_fields(row: dict[str, Any] | None) -> dict[str, float | None]:
+def _shadow_fields(row: dict[str, Any] | None) -> dict[str, Any]:
     if row is None:
         return {}
-    out: dict[str, float | None] = {}
+    out: dict[str, Any] = {}
     for key, src in (
         ("mainnet_net_usdt", "mainnet_net_usdt"),
         ("mainnet_gap_bp", "gap_bp"),
         ("mainnet_gap_r", "gap_r"),
+        ("mainnet_price_gap_usdt", "price_gap_usdt"),
+        ("mainnet_fee_gap_usdt", "fee_gap_usdt"),
     ):
         v = row.get(src)
         out[key] = float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+    out["mainnet_legs"] = [str(row.get("entry_type") or "?"), str(row.get("exit_type") or "?")]
     return out
 
 

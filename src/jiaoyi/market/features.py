@@ -660,6 +660,18 @@ class RollingFeatureEngine:
                 return o + (c - o) * frac, datetime.fromtimestamp(minute * 60, UTC), "ws_kline_1m"
         return None
 
+    def prices_between(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, float]]:
+        """Per-second last mainnet trade prices in [start, end] still in the trade window."""
+        st = self._s.get(symbol)
+        if st is None:
+            return []
+        a, b = _ts(start), _ts(end)
+        return [
+            (datetime.fromtimestamp(sec, UTC), px) for sec, px in st.prices if a - 1.0 < sec <= b
+        ]
+
     def _price_at(self, st: _SymbolState, t: float) -> float | None:
         if not st.prices:
             return None
