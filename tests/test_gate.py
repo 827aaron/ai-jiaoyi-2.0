@@ -152,6 +152,24 @@ async def test_with_own_errors_shares_transport_but_not_cooldown(now: datetime) 
     assert not r.ok and "冷却" in (r.error or "") and len(t.calls) == calls + 1
 
 
+@pytest.mark.parametrize("shared", [True, False])
+async def test_keeper_timeout_is_its_own_and_only_shares_errors_when_asked(
+    now: datetime, shared: bool
+) -> None:
+    t = MockJevTransport(answer=answer_with(GOOD_LONG), delay_s=0.3)
+    gate_model = model(t, clock=Clock(), wall=lambda: now)  # 200 ms
+    keeper_model = (
+        gate_model.with_timeout(400) if shared else gate_model.with_own_errors(timeout_ms=400)
+    )
+    assert (await keeper_model.ask(entry_request(now))).ok
+    r = await gate_model.ask(entry_request(now))
+    assert not r.ok and "超时（>200ms）" in (r.error or "")
+    t.delay_s = 0.45
+    r = await keeper_model.ask(entry_request(now))
+    assert not r.ok and "超时（>400ms）" in (r.error or "")
+    assert gate_model.consecutive_errors == (2 if shared else 1)
+
+
 async def test_entry_gate_without_valid_card_does_not_call_model(now: datetime) -> None:
     t = MockJevTransport(answer=answer_with(GOOD_LONG))
     gate = JevEntryGate(model(t))

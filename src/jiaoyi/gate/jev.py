@@ -180,14 +180,14 @@ class JevDecisionModel:
         self._cooldown_until: float | None = None
         self._served_model: str | None = None
 
-    def with_own_errors(self) -> JevDecisionModel:
+    def with_own_errors(self, *, timeout_ms: int | None = None) -> JevDecisionModel:
         """Same transport, config and clocks, but its own error counter and cooldown, so one
         caller's failures cannot put the other into cooldown. Closing the transport stays with
-        the original instance."""
+        the original instance. ``timeout_ms`` None keeps this instance's timeout."""
         return JevDecisionModel(
             self._t,
             self._cfg,
-            timeout_ms=round(self._timeout_s * 1000),
+            timeout_ms=round(self._timeout_s * 1000) if timeout_ms is None else timeout_ms,
             day_reset_tz=self._tz,
             clock=self._clock,
             wall=self._wall,
@@ -205,7 +205,14 @@ class JevDecisionModel:
             return Health.DOWN
         return Health.DEGRADED if self.consecutive_errors else Health.OK
 
+    def with_timeout(self, timeout_ms: int) -> DecisionModel:
+        """A caller with its own timeout that shares this instance's error counter and cooldown."""
+        return _TimeoutView(self, timeout_ms / 1000.0)
+
     async def ask(self, request: JevRequest) -> JevResponse:
+        return await self._ask(request, self._timeout_s)
+
+    async def _ask(self, request: JevRequest, timeout_s: float) -> JevResponse:
         day = local_day(self._wall(), self._tz)
         if day != self._day:  # 跨天：错误计数和冷却一起清零
             self._day = day
@@ -223,11 +230,11 @@ class JevDecisionModel:
         started = time.perf_counter()
         try:
             raw = await asyncio.wait_for(
-                self._t.evaluate(request.snapshot, request.questions, self._timeout_s),
-                timeout=self._timeout_s,
+                self._t.evaluate(request.snapshot, request.questions, timeout_s),
+                timeout=timeout_s,
             )
         except TimeoutError:
-            return self._error(request, f"Jev 超时（>{self._timeout_s * 1000:.0f}ms）", started)
+            return self._error(request, f"Jev 超时（>{timeout_s * 1000:.0f}ms）", started)
         except Exception as e:  # 网络、鉴权、限流……一律故障即关闭
             return self._error(request, f"Jev 调用失败：{type(e).__name__}: {e}", started)
         latency = (time.perf_counter() - started) * 1000.0
@@ -307,6 +314,15 @@ _BUSY = re.compile(
     r"\b5\d\d\b|overload|InternalServerError|ServiceUnavailable|BadGateway|Bad Gateway",
     re.IGNORECASE,
 )
+
+
+class _TimeoutView:
+    def __init__(self, base: JevDecisionModel, timeout_s: float) -> None:
+        self._base = base
+        self._timeout_s = timeout_s
+
+    async def ask(self, request: JevRequest) -> JevResponse:
+        return await self._base._ask(request, self._timeout_s)
 
 
 def error_kind(error: str | None) -> Literal["busy", "timeout", "cooldown", "other"]:

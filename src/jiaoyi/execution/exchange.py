@@ -225,6 +225,9 @@ class IdentifiedCloseOrder:
     position_side: str
     reduce_only: bool
     is_terminal: bool | None
+    update_time: datetime | None = None
+    """Binance ``updateTime``: for a FILLED market order, the time of its last fill. Display
+    only; None when absent or unreadable, never a reason to distrust the order."""
 
 
 class IdentifiedCloseUnknown(ExchangeError):
@@ -564,7 +567,15 @@ def _identified_close(raw: dict[str, Any], symbol: str, cid: str) -> IdentifiedC
         else False
         if status in {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}
         else None,
+        update_time=_close_update_time(raw.get("updateTime")),
     )
+
+
+def _close_update_time(value: object) -> datetime | None:
+    try:
+        return _bracket_time(value)
+    except (ValueError, ArithmeticError, OverflowError, OSError):
+        return None
 
 
 @dataclass(frozen=True)

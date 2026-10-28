@@ -14,6 +14,7 @@ from jiaoyi.alerting.kinds import KINDS
 from jiaoyi.app import App, read_blocked
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.config import load_app_config, load_risk_config
+from jiaoyi.execution.brackets import CloseInProgress, ProtectionIncomplete
 from jiaoyi.loop import Runner
 from tests import fastloop_helpers as h
 from tests.conftest import ROOT, load_example
@@ -928,3 +929,49 @@ async def test_spawned_task_exception_is_recorded(tmp_path: Path, now: datetime)
     [rec] = _guard_records(r, now)
     assert rec.outcome == c.Outcome.ERROR and "ValueError: lost" in rec.summary
     assert rec.output["task"].endswith("boom")
+
+
+class _CloseRaisesExecutor(FakeExecutor):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+        self.held = [_position()]
+
+    def live_positions(self) -> list[c.PositionRecord]:
+        return list(self.held)
+
+    async def close(self, position_id: str, reason: CloseReason) -> None:
+        self.closed.append((position_id, reason))
+        self.held = [p.model_copy(update={"status": c.PositionStatus.CLOSING}) for p in self.held]
+        raise self.error
+
+
+@pytest.mark.parametrize("in_progress", [True, False])
+async def test_runner_close_in_progress_is_quiet_but_a_real_failure_alerts(
+    tmp_path: Path, now: datetime, in_progress: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = _app(tmp_path, now)
+    error = (
+        CloseInProgress("托管退出进行中")
+        if in_progress
+        else ProtectionIncomplete("托管退出尚未确认")
+    )
+    ex = _CloseRaisesExecutor(error)
+    alerts: list[tuple[Any, ...]] = []
+
+    async def alert(*args: Any, **kwargs: Any) -> None:
+        alerts.append(args)
+
+    app._alert = alert  # type: ignore[method-assign]
+    app.m = dataclasses.replace(app.m, executor=ex, keeper=FakeKeeper())
+    r = Runner(app)
+    r.positions = [_position()]
+    await r.close(r.positions[0], CloseReason.KEEPER)
+    assert ex.closed == [("pos-0001", CloseReason.KEEPER)]
+    if in_progress:
+        assert alerts == []
+        assert not any(rec.exc_info for rec in caplog.records)
+        assert [p.status for p in r.positions] == [c.PositionStatus.CLOSING]
+    else:
+        assert [a[:2] for a in alerts] == [(c.AlertLevel.CRITICAL, "BTCUSDT 平仓失败")]
+        assert any(rec.exc_info for rec in caplog.records)

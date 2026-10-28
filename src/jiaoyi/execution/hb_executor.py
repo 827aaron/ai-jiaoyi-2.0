@@ -38,6 +38,7 @@ from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import (
     AnchorBookSpike,
     BracketManager,
+    CloseInProgress,
     ProtectionIncomplete,
     describe_error,
 )
@@ -57,6 +58,7 @@ from jiaoyi.execution.exchange import (
     IdentifiedCloseUnknown,
     MarkEvidence,
 )
+from jiaoyi.execution.exit_fills import ExitFills
 from jiaoyi.execution.fills import (
     LOOKBACK,
     OPEN_SLACK,
@@ -82,6 +84,9 @@ log = logging.getLogger(__name__)
 _ORDER_MARKET = 1
 HostedCloseMode = Literal["hb_first", "direct"]
 _HB_FAILED_TITLE = "hummingbot 没能平掉仓位，已直连币安平仓"
+_DIRECT_CLOSE_FAILED = frozenset(
+    {"REJECTED", "NOT_SENT", "EXPIRED", "EXPIRED_IN_MATCH", "CANCELED"}
+)
 _HB_STOP_RETRY_BASE_S = 5.0  # 结果未知的只停不平：第 n 次补发至少隔 5×2^n 秒
 _ORDER_LIMIT = 2
 _ORDER_LIMIT_MAKER = 3
@@ -356,11 +361,19 @@ class HbExecutorAdapter:
         hosted_close_mode: HostedCloseMode = "hb_first",
         protection_tick_alert_after: int = 1,
         hb_stop_unknown_retries: int = 0,
+        hosted_close_direct_when_exiting: bool = False,
+        exit_fills: ExitFills | None = None,
     ) -> None:
         """``hosted_close_mode``：交易所托管仓的平仓顺序。``hb_first`` = 先停 HB 执行器、等它终态并
         核完条件单再下直连平仓（原行为）；``direct`` = 我方决定平仓、HB 执行器仍在跑且没有自己的
         平仓单、保护腿状态都明确时，先按持久化的直连 CID 下只减仓市价单，再只停不平 HB，交易所止损
         一直挂到确认零仓后才撤。其余情况照旧走 ``hb_first``。
+        ``hosted_close_direct_when_exiting``: under ``direct``, still go direct-first once the
+        protection is already ``exiting`` (an earlier attempt could not read the position, or an
+        hb_first exit preparation ran) as long as every other direct-first condition holds; False
+        sends an exiting position to hb_first.
+
+        ``exit_fills``: side file for the exchange exit fill time (panel display); None = not kept.
 
         ``protection_tick_alert_after``：同一仓的后台保护轮连续失败几轮才发紧急告警，之前只记
         日志；1 = 每轮失败都发（原行为）。
@@ -379,6 +392,8 @@ class HbExecutorAdapter:
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
+        self._direct_when_exiting = hosted_close_direct_when_exiting
+        self._exit_fills = exit_fills
         self._flat_awaiting_cleanup: set[str] = set()
         self._hb_stop_sent: set[str] = set()
         if protection_tick_alert_after < 1:
@@ -902,6 +917,8 @@ class HbExecutorAdapter:
             if not await self._close_directly(tracked, tracked.requested_close or reason, None):
                 if position_id in self._flat_awaiting_cleanup:
                     return  # 直连平仓已确认零仓，只差收尾核验；后台每秒一轮接着做，不算平仓失败。
+                if self._hosted_exit_working(position_id):
+                    raise CloseInProgress("托管退出进行中，已有保护保留，后台每秒接着核验")
                 raise ProtectionIncomplete("托管退出尚未确认，已有保护保留")
             return
         # 已有直连意图时先恢复同一订单，不能再让 HB 另外下平仓单。
@@ -1410,6 +1427,29 @@ class HbExecutorAdapter:
             )
         )
 
+    def _hosted_exit_working(self, position_id: str) -> bool:
+        """An exit is already working and the background tick will finish it: a reduce-only order
+        still open or filled awaiting the flat read, a keep-position HB stop whose request was
+        accepted, or a triggered leg whose child order is not terminal yet. A definitely failed
+        direct order (rejected, never sent, expired or cancelled) or an HB stop with an unknown
+        result is not, so those stay loud failures."""
+        tracked = self._registry.get(position_id)
+        if (
+            tracked is None
+            or tracked.server_protection is None
+            or tracked.record.status is not PositionStatus.CLOSING
+            or tracked.direct_close_order_status in _DIRECT_CLOSE_FAILED
+        ):
+            return False
+        if tracked.direct_close_pending or tracked.direct_close_order_status == "FILLED":
+            return True
+        if tracked.hb_close_pending and not tracked.hb_close_unknown:
+            return True
+        try:
+            return self._protection is not None and self._protection.exit_leg_working(position_id)
+        except ProtectionIncomplete:
+            return False
+
     async def _direct_first_ready(self, tracked: TrackedPosition) -> bool:
         """``direct`` 模式下这次能否先下直连：只在一切都明确时，否则走 ``hb_first``。
 
@@ -1422,7 +1462,8 @@ class HbExecutorAdapter:
             or state is None
             or manager is None
             or self._exchange is None
-            or state.stage in {"exiting", "cleanup", "done"}
+            or state.stage in {"cleanup", "done"}
+            or (state.stage == "exiting" and not self._direct_when_exiting)
             or not state.entry_terminal
             or tracked.direct_close_pending
             or tracked.hb_close_pending
@@ -1651,6 +1692,14 @@ class HbExecutorAdapter:
         if ours == 0 and legs:
             reason = legs[0][0]  # 我方一笔没成交，是交易所的腿平掉的
         self.mark_closed_directly(rec.position_id, reason, self._close_fill(tracked, order))
+        if (
+            self._exit_fills is not None
+            and order is not None
+            and order.is_terminal is True
+            and order.filled_quantity > 0
+            and order.update_time is not None
+        ):
+            self._exit_fills.record(rec.position_id, order.update_time, "order")
         closed = self._registry.get(rec.position_id)
         hosted_normal = (
             tracked.server_protection is not None and via_hb is None and title == _HB_FAILED_TITLE
@@ -2893,6 +2942,8 @@ class HbExecutorAdapter:
                     )
                 exit_ = exit_fill(rec, rows, entry) if need_exit else None
                 lifeboat_hit = exit_ is not None and _lifeboat_hit(rec, exit_.price)
+                if exit_ is not None and self._exit_fills is not None:
+                    self._exit_fills.record(rec.position_id, exit_.last, "trades")
                 if exit_ is not None:
                     changes["exit_price"] = exit_.price
                     if lifeboat_hit:

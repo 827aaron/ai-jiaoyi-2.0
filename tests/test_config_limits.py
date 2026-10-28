@@ -144,6 +144,8 @@ OPTIONAL_APP_FIELDS = {
     "card_score_window_days",  # 默认 30
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "jev_shared_cooldown",  # 默认 true（原行为）
+    "keeper_jev_timeout_ms",  # 默认 0 = 跟 jev_timeout_ms 一样
+    "hosted_close_direct_when_exiting",  # 默认 false
     "account_read_retries",  # 默认 0（原行为）
     "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",

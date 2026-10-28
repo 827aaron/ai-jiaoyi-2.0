@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -175,6 +176,30 @@ async def test_query_incomplete_or_wrong_order_is_unknown(change: dict[str, Any]
     with pytest.raises(IdentifiedCloseUnknown):
         await obj.close_order("SYNTHUSDT", "dc-synthetic")
     ex.create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("update_time", "expected"),
+    [
+        (1793167827512, datetime(2026, 10, 28, 6, 10, 27, 512000, tzinfo=UTC)),
+        ("1793167827512", datetime(2026, 10, 28, 6, 10, 27, 512000, tzinfo=UTC)),
+        (None, None),
+        ("garbage", None),
+        ("1.5", None),
+    ],
+)
+async def test_close_order_update_time_is_read_but_never_blocks_identity(
+    update_time: Any, expected: datetime | None
+) -> None:
+    obj, ex = client()
+    ex.fapiPrivateGetOrder.side_effect = None
+    ex.fapiPrivateGetOrder.return_value = raw(
+        status="FILLED", executedQty="10", avgPrice="1.2", updateTime=update_time
+    )
+    order = await obj.close_order("SYNTHUSDT", "dc-synthetic")
+    assert order is not None and order.is_terminal is True
+    assert order.update_time == expected
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from jiaoyi.contracts.position import PositionStatus
+from jiaoyi.execution.exit_fills import ExitFills, read_exit_fills
 from jiaoyi.execution.fills import TradeFill, entry_fill, exit_fill
 from jiaoyi.execution.ledger_sync import LedgerSync
 from jiaoyi.execution.user_stream import StreamStatus, UserStream, is_fill, ws_urls
@@ -66,6 +67,40 @@ async def test_backfill_fixes_entry_then_exit_and_logs(tmp_path: Path) -> None:
     assert rec.status is PositionStatus.CLOSED and rec.exit_price == 0.76
     assert abs(rec.fees_usdt - 0.10) < 1e-9
     assert abs(rec.realized_pnl_usdt - ((0.76 - 0.7487) * q - 0.10)) < 1e-9  # type: ignore[operator]
+
+
+async def test_backfill_records_the_exit_fill_time_beside_the_ledger(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    fills = ExitFills(tmp_path / "exit_fills.json")
+    rig.adapter._exit_fills = fills
+    pid = await open_filled(rig, price=0.7497, symbol="APTUSDT")
+    q = rig.registry.get(pid).record.quantity  # type: ignore[union-attr]
+    fills.record(pid, START + timedelta(seconds=599), "order")
+    rig.ex.trades = [_t(1, "buy", 0.7487, q, 0.05)]
+    rig.t = START + timedelta(minutes=10)
+    rig.api.terminate("ex1", "EARLY_STOP", pnl=9.0)
+    await rig.adapter.positions()
+    rig.ex.trades += [
+        _t(570, "sell", 0.7600, q / 2, 0.02, pnl=0.1),
+        _t(575, "sell", 0.7601, q / 2, 0.02, pnl=0.1),
+    ]
+    assert await rig.adapter.backfill_fills(rig.ex.user_trades) == 1
+    assert read_exit_fills(tmp_path / "exit_fills.json") == {pid: START + timedelta(seconds=575)}
+    fills.record(pid, START + timedelta(seconds=599), "order")  # trades already won
+    assert read_exit_fills(tmp_path / "exit_fills.json") == {pid: START + timedelta(seconds=575)}
+    assert "exit_fill" not in (tmp_path / "positions.json").read_text()
+
+
+def test_exit_fills_file_unreadable_or_partial_reads_as_empty(tmp_path: Path) -> None:
+    path = tmp_path / "exit_fills.json"
+    assert read_exit_fills(path) == {}
+    path.write_text("{not json", encoding="utf-8")
+    assert read_exit_fills(path) == {}
+    path.write_text(
+        json.dumps({"a": {"at": "2026-10-28T06:10:27+00:00"}, "b": {"at": "bad"}, "c": 1}),
+        encoding="utf-8",
+    )
+    assert list(read_exit_fills(path)) == ["a"]
 
 
 async def test_finalize_runs_once_when_two_paths_race(tmp_path: Path) -> None:

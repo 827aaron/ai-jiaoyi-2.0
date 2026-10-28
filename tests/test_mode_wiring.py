@@ -182,6 +182,8 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._hosted_close_mode == "hb_first"
     assert adapter._tick_alert_after == 1
     assert adapter._hb_stop_unknown_retries == 0
+    assert adapter._direct_when_exiting is False
+    assert adapter._exit_fills is not None and adapter._exit_fills.path.name == "exit_fills.json"
     app_cfg = _cfg(
         tmp_path,
         RunMode.PAPER,
@@ -197,6 +199,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
         hosted_close_mode="direct",
         protection_tick_alert_after=5,
         hb_stop_unknown_retries=3,
+        hosted_close_direct_when_exiting=True,
     )
     (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
     assert adapter._protection.readback_grace_s == 2.5
@@ -212,6 +215,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._hosted_close_mode == "direct"
     assert adapter._tick_alert_after == 5
     assert adapter._hb_stop_unknown_retries == 3
+    assert adapter._direct_when_exiting is True
 
 
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:

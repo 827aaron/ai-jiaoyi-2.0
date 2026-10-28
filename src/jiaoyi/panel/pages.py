@@ -995,6 +995,9 @@ class TradeRow(BaseModel):
     """下单时的止损 / 止盈（按开仓成交价回填后的）。"""
     opened_at: datetime
     closed_at: datetime
+    """Ledger settlement time; daily P&L, range filter and ordering use it."""
+    exit_filled_at: datetime | None = None
+    """Last exchange exit fill; shown as the close time and used for hold time. None = unknown."""
     close_reason: str | None
     pnl_usdt: float
     """净盈亏（已扣开平手续费）：按币安成交回填后是币安实扣，否则是 hummingbot 报的。"""
@@ -1234,6 +1237,7 @@ def build_history(
             if math.isfinite(estimate):
                 peak_of[p.position_id] = max(peak_of.get(p.position_id, estimate), estimate)
 
+    exit_fills = files.exit_fills()
     rows: list[TradeRow] = []
     cum = peak = dd = 0.0
     curve: list[CurvePoint] = []
@@ -1266,6 +1270,7 @@ def build_history(
                 take_profit_price=p.take_profit_price,
                 opened_at=p.opened_at,
                 closed_at=p.closed_at,
+                exit_filled_at=exit_fills.get(p.position_id),
                 close_reason=p.close_reason.value if p.close_reason else None,
                 pnl_usdt=pnl,
                 fees_usdt=p.fees_usdt,

@@ -13,6 +13,8 @@ from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.brackets import BracketManager, LegOrder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
+from jiaoyi.execution.exit_fills import FILE_NAME as EXIT_FILLS_FILE
+from jiaoyi.execution.exit_fills import ExitFills
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, HostedCloseMode
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -110,6 +112,7 @@ def build_execution(
     hosted_close_mode: HostedCloseMode = "hb_first",
     protection_tick_alert_after: int = 1,
     hb_stop_unknown_retries: int = 0,
+    hosted_close_direct_when_exiting: bool = False,
     position_mode_cache_s: float = 0.0,
     leverage_brackets_wanted: Callable[[], bool] | None = None,
     hb_url: str = "http://127.0.0.1:8000",
@@ -198,6 +201,8 @@ def build_execution(
         hosted_close_mode=hosted_close_mode,
         protection_tick_alert_after=protection_tick_alert_after,
         hb_stop_unknown_retries=hb_stop_unknown_retries,
+        hosted_close_direct_when_exiting=hosted_close_direct_when_exiting,
+        exit_fills=ExitFills(Path(data_dir) / EXIT_FILLS_FILE),
     )
     reconciler = ThreeWayReconciler(
         adapter,

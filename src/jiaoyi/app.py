@@ -494,6 +494,7 @@ def _build_execution(
             hosted_close_mode=app_cfg.hosted_close_mode,
             protection_tick_alert_after=app_cfg.protection_tick_alert_after,
             hb_stop_unknown_retries=app_cfg.hb_stop_unknown_retries,
+            hosted_close_direct_when_exiting=app_cfg.hosted_close_direct_when_exiting,
             position_mode_cache_s=app_cfg.position_mode_cache_s,
             leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
         )
@@ -717,7 +718,11 @@ def build_modules(
         )
         keeper_model: DecisionModel = model
         if not app_cfg.jev_shared_cooldown and isinstance(model, JevDecisionModel):
-            keeper_model = keeper_jev = model.with_own_errors()
+            keeper_model = keeper_jev = model.with_own_errors(
+                timeout_ms=app_cfg.keeper_jev_timeout_ms or None
+            )
+        elif app_cfg.keeper_jev_timeout_ms and isinstance(model, JevDecisionModel):
+            keeper_model = model.with_timeout(app_cfg.keeper_jev_timeout_ms)
         keeper = JevKeeper(
             keeper_model,
             fast,

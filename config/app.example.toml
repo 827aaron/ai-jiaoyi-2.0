@@ -10,6 +10,8 @@ hold = "4h"                  # 最长持仓档：30m / 1h / 2h / 4h（默认）/
 # signal_dedup_s = 300        # 同一币同信号同方向的冷却秒数；不写跟最长持仓档（30m 60 / 1h 120 / 2h 300 / 4h 及以上 600）
 jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 OpenRouter 首次 963ms，之后约 500ms）
 jev_max_concurrent = 4       # 拍板人同时最多判几个信号（不同币并行；同币排队只留最新一条）
+# keeper_jev_timeout_ms = 0   # 持仓管家问 Jev 的超时（毫秒）：0 = 和 jev_timeout_ms 一样（默认，原行为）；管家超时只是本轮维持现状、还会重试 1 次，建议 6000；开仓拍板的 jev_timeout_ms 不放宽；改后重启
+#   回滚到没有 keeper_jev_timeout_ms 的旧版本前，先删掉这一行：旧版配置不认识的键（extra=forbid）会拒绝启动
 # jev_shared_cooldown = true  # 开仓拍板和持仓管家共用一份 Jev 连错计数和冷却（默认，原行为）；false = 各算各的，管家连错不会让开仓拍板进冷却（通道 / 模型 / 超时照旧共用），管家的 Jev 状态显示在管家的灯上；改后重启
 # account_read_retries = 0    # 拍板通过后开仓前读账户失败，隔 1 秒再读几次（0–3）；都失败记风控员拒绝「读账户失败，本信号放弃」；只对很快失败的（连不上 / 5xx）有用，信号剩不到 1 秒不再重读；重读成功后再查暂停 / 重启 / 信号过期；0 = 不重读（默认）；热生效
 #   回滚到没有这两项的旧版本前，先删掉这两行：旧版配置不认识的键（extra=forbid）会拒绝启动
@@ -37,6 +39,8 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # protection_leg_order = "lifeboat_first"  # Demo 托管保护：新仓三条腿的挂单顺序：lifeboat_first = 保命单 → 止损 → 止盈（默认，原行为）/ stop_first = 止损 → 止盈 → 保命单（交易所止损已能保护仓位，保命单只是更宽的后备）；stop_first 下止损确认后保命单挂失败不立即平仓，在 protection_prearm_grace_s 内告警并重试（被拒换新单号重挂，结果未知只查原单号），宽限用完照旧平；止损挂失败照旧立即平；网页「设置 → 执行 → 托管保护」也能改；改后重启
 # hosted_close_mode = "hb_first"  # Demo 托管仓平仓顺序：hb_first = 先停 HB 执行器、等它结束再直连平仓（默认，原行为）/ direct = 决定平仓时先按持久化单号下只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤；HB 已在自己平仓、保护腿或入场状态不明时照旧 hb_first；网页「设置 → 执行 → 托管保护」也能改；改后重启
 #   回滚到没有 hosted_close_mode 的旧版本前，先删掉这一行，并等正在平仓的托管仓结束（平仓中的仓账本里有 direct_first）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
+# hosted_close_direct_when_exiting = false  # Demo 托管仓、hosted_close_mode = "direct" 时：保护已进入退出（exiting）但没有腿触发、没有在途直连单或 HB 停止、HB 仍在跑且只有入场单，也照样先下只减仓市价单；全是单向只减仓，不会反向开仓；false = 进入退出就走 hb_first（默认，原行为）；网页「设置 → 执行 → 托管保护」也能改；改后重启
+#   回滚到没有这一项的旧版本前，先删掉这一行：旧版配置不认识的键（extra=forbid）会拒绝启动
 # protection_tick_alert_after = 1  # Demo 托管保护：后台保护轮同一笔仓连续失败几轮才发紧急告警「托管保护本轮未确认」，之前只记日志；1 = 每轮都发（默认，原行为）；改后重启
 #   回滚到没有 protection_tick_alert_after 的旧版本前，先删掉这一行，并等账本里没有带 close_detail 的仓（因保护没确认而正在平仓的仓）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
 # hb_stop_unknown_retries = 0   # Demo 托管仓：只停不平的 HB 停止结果未知、HB 仍报 RUNNING 时最多再补发几次（间隔 5、10、20… 秒翻倍；这种停止从不卖出）；0 = 不补发（原行为）；改后重启
