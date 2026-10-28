@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from jiaoyi import contracts as c
+from jiaoyi import loop as loop_mod
 from jiaoyi.alerting.kinds import KINDS
 from jiaoyi.app import App, read_blocked
 from jiaoyi.contracts.position import CloseReason
@@ -425,6 +426,156 @@ async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: 
     cards.card, r.positions = None, []  # 卡过期、平仓
     await r.sync_watch()
     assert feed.subs[-1] == ["BTCUSDT"]
+
+
+class FakeMarket:
+    """``MarketData`` 的替身：记下 warm 的顺序，K 线一律空。"""
+
+    def __init__(self, on: bool, order: list[str]) -> None:
+        self.on = on
+        self.order = order
+        self.warmed: list[list[str]] = []
+
+    async def warm(self, symbols: list[str]) -> None:
+        self.order.append("warm")
+        self.warmed.append(list(symbols))
+
+    async def klines(self, symbol: str, **kw: Any) -> list[c.Kline]:
+        return []
+
+    async def klines_between(self, *a: Any, **kw: Any) -> list[c.Kline]:
+        return []
+
+    async def refresh(self, symbol: str, max_age_s: float | None = None) -> None: ...
+
+
+def _warm_runner(app: Any, on: bool, fetch: Any) -> tuple[Runner, WatchFeed, FakeMarket, list[str]]:
+    feed, order = WatchFeed(), []
+
+    async def subscribe(symbols: Sequence[str]) -> None:
+        order.append("subscribe")
+        feed.subs.append(list(symbols))
+
+    feed.subscribe = subscribe  # type: ignore[method-assign]
+    market = FakeMarket(on, order)
+    app.market_data = market
+    app.m = dataclasses.replace(app.m, predictor=FakePredictor(), feed=feed)
+    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch, fetch_atr_history=fetch)
+    return r, feed, market, order
+
+
+@pytest.mark.parametrize("on", [False, True])
+async def test_new_symbols_are_rest_seeded_after_subscribe_only_when_on(
+    tmp_path: Path, now: datetime, on: bool
+) -> None:
+    """rest_warm_start：新订上的币订阅之后从 REST 补成交，BTC 排第一；关着照旧只回填 K 线。"""
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        return []
+
+    r, _, market, order = _warm_runner(_app(tmp_path, now), on, fetch)
+    r.set_meeting_picks(["SOLUSDT"])
+    await asyncio.sleep(0)
+    await r.sync_watch()
+    await asyncio.sleep(0)
+    if on:
+        assert order[-1] == "warm" and "subscribe" in order
+        assert market.warmed[0][0] == "BTCUSDT" and "SOLUSDT" in market.warmed[0]
+    else:
+        assert market.warmed == [] and order == ["subscribe"]
+
+
+async def test_assistant_snapshot_goes_through_market_data_when_on(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi.market.provider import MarketRead
+
+    snap = h.features(now)
+    calls: list[tuple[str, float | None, tuple[str, ...]]] = []
+    reply: dict[str, Any] = {}
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        return []
+
+    r, _, market, _ = _warm_runner(_app(tmp_path, now), False, fetch)
+
+    async def snapshot(
+        symbol: str, *, max_age_s: float | None = None, need: Sequence[str] = ()
+    ) -> MarketRead:
+        calls.append((symbol, max_age_s, tuple(need)))
+        if reply.get("hang"):
+            await asyncio.Event().wait()
+        return MarketRead(reply.get("snap"), reply["source"], reply.get("age"))
+
+    market.snapshot = snapshot  # type: ignore[attr-defined]
+    provide = r._assistant_snapshot()
+    assert (await provide("BTCUSDT", 30.0))[1] == "没有这个币的行情快照"  # 关着：照旧只读实时流
+    assert calls == []
+    market.on = True
+    for given, want in (
+        ({"snap": snap, "source": "rest", "age": 1.0}, (snap, "rest", 1.0)),
+        ({"snap": snap, "source": "stale", "age": 45.0}, (None, "stale", 45.0)),
+        ({"snap": snap, "source": "stale", "age": 3.0}, (None, "cold", 3.0)),
+        ({"source": "stale"}, (None, "没有这个币的行情快照", None)),
+    ):
+        reply.clear()
+        reply.update(given)
+        assert await provide("BTCUSDT", 30.0) == want
+    assert calls[0][:2] == ("BTCUSDT", 30.0) and "ret_5m" in calls[0][2]
+    assert not any(n.startswith("liq_") for n in calls[0][2])
+    monkeypatch.setattr(loop_mod, "ASSISTANT_SNAPSHOT_WAIT_S", 0.01)
+    reply.update(hang=True)
+    assert (await provide("BTCUSDT", 30.0))[1] == "stale"
+
+
+async def test_rest_warm_subscribes_btc_and_held_before_the_rest_backfill(
+    tmp_path: Path, now: datetime
+) -> None:
+    """开着时回填排在共用预算里：BTC 和持仓币先回填先订上，其余的币回填完再一起订。"""
+    gate = asyncio.Event()
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        if sym not in ("BTCUSDT", "XRPUSDT"):
+            await gate.wait()
+        return []
+
+    r, feed, _, _ = _warm_runner(_app(tmp_path, now), True, fetch)
+    r.positions = [_position(symbol="XRPUSDT")]
+    r.set_meeting_picks(["SOLUSDT"])
+    task = asyncio.create_task(r.sync_watch())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if feed.subs:
+            break
+    assert feed.subs == [["BTCUSDT", "XRPUSDT"]]
+    gate.set()
+    await asyncio.wait_for(task, 1.0)
+    assert feed.subs[-1] == ["BTCUSDT", "SOLUSDT", "XRPUSDT"]
+
+
+async def test_rest_warm_loops_start_before_the_backfill_finishes(
+    tmp_path: Path, now: datetime
+) -> None:
+    gate = asyncio.Event()
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        await gate.wait()  # 回填排在预算后面
+        return []
+
+    app = _app(tmp_path, now)
+    r, feed, _, _ = _warm_runner(app, True, fetch)
+    task = asyncio.create_task(r.run())
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if r._loops:
+                break
+        assert r._loops and feed.subs == []  # 循环已经起来，回填还没完、还没订阅
+    finally:
+        gate.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 async def test_backfill_feeds_recent_minutes_to_predictor(tmp_path: Path, now: datetime) -> None:

@@ -59,6 +59,11 @@ BIG_TRADE_USDT = 10_000.0
 """「大单」：单笔成交额至少这么多 USDT。"""
 IMB_WINDOW_S = 300.0
 """盘口失衡每秒采样一次，留 5 分钟（拍板人快照看 1 / 5 分钟平均，不看一瞬间）。"""
+_TRADE_SOURCES = ("trade", "rest_trade")
+SEED_JOIN_S = 10.0
+"""A REST trade seed and the websocket segment count as one coverage when they are at most this
+far apart: trades in that gap are in neither, so a wider join would let ``trade_s`` vouch for
+a window with holes in it."""
 ExtraValues = Callable[[str, datetime], Mapping[str, float]]
 """快照的额外键（持仓量、多空比等，来自 REST 轮询）：(币, 现在) → 键值。"""
 
@@ -112,6 +117,11 @@ class _SymbolState:
     mark: MarkPrice | None = None
     live_since: float | None = None  # 这一段连续实时行情从哪一秒开始
     live_last: float | None = None
+    # REST 补的成交覆盖 [cov_since, cov_last]（只在 rest_warm_start 开时有）
+    cov_since: float | None = None
+    cov_last: float | None = None
+    rest_until: float | None = None  # REST 补到的最后一笔成交时间：实时流再推来的同一笔不重复记
+    rest_last: float | None = None  # REST 补进来的最新一个点（成交或标记价）的时间
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,10 @@ class EntryContext:
     ``liq_15m_long`` / ``liq_15m_short``（U）。"""
     imb: dict[str, float]
     """盘口失衡 ``1m`` / ``5m`` 平均；没盘口就空。"""
+
+
+def _first(row: tuple[float, Any]) -> float:
+    return row[0]
 
 
 def _ts(dt: datetime) -> float:
@@ -299,6 +313,17 @@ def wilder_atr(bars: Iterable[tuple[float, float, float]]) -> float | None:
     return tr.atr
 
 
+def trade_warm_s(v: Mapping[str, float]) -> float | None:
+    """成交窗口的特征（涨跌、波动、主动买卖）连续了几秒：实时流和 REST 补的覆盖取长的。
+
+    ``trade_s`` 只在 ``rest_warm_start`` 补过 REST 时有；爆仓没有 REST 历史，强平瀑布反弹仍只看
+    ``live_s``。"""
+    live, rest = v.get("live_s"), v.get("trade_s")
+    if live is None:
+        return rest
+    return live if rest is None else max(live, rest)
+
+
 class RollingFeatureEngine:
     """``FeatureEngine`` 的实现。只认 1 分钟 K 线，其它周期忽略。
 
@@ -352,10 +377,10 @@ class RollingFeatureEngine:
         if isinstance(event, Trade | BookTop | MarkPrice):
             _mark_live(st, _ts(event.ts))
         if isinstance(event, Trade):
-            self._on_trade(st, event)
-            st.last_price_source = "trade"
-            st.last_price_source_ts = _ts(event.ts)
-            st.last_price_observed_ts = self._observation_update_ts()
+            if self._on_trade(st, event):
+                st.last_price_source = "trade"
+                st.last_price_source_ts = _ts(event.ts)
+                st.last_price_observed_ts = self._observation_update_ts()
         elif isinstance(event, BookTop):
             self._on_book(st, event)
             st.book_observed_ts = self._observation_update_ts()
@@ -367,11 +392,14 @@ class RollingFeatureEngine:
             st.mark = event
             st.last_ts = max(st.last_ts, _ts(event.ts))
             st.mark_observed_ts = self._observation_update_ts()
-        elif isinstance(event, Kline):
-            if self._on_kline(st, event) and st.last_price_source != "trade":
-                st.last_price_source = "kline_close_bootstrap"
-                st.last_price_source_ts = _ts(event.close_time)
-                st.last_price_observed_ts = self._observation_update_ts()
+        elif (
+            isinstance(event, Kline)
+            and self._on_kline(st, event)
+            and st.last_price_source not in _TRADE_SOURCES
+        ):
+            st.last_price_source = "kline_close_bootstrap"
+            st.last_price_source_ts = _ts(event.close_time)
+            st.last_price_observed_ts = self._observation_update_ts()
         self._prune(st)
 
     def _observation_update_ts(self) -> float | None:
@@ -385,8 +413,12 @@ class RollingFeatureEngine:
 
     # ------------------------------------------------------------------ 输入
 
-    def _on_trade(self, st: _SymbolState, ev: Trade) -> None:
+    def _on_trade(self, st: _SymbolState, ev: Trade) -> bool:
+        """收下返回 True；REST 已经补过的同一笔返回 False。"""
         t = _ts(ev.ts)
+        since, until = st.cov_since, st.rest_until
+        if since is not None and until is not None and since <= t <= until:
+            return False
         sec = math.floor(t)
         if st.prices and st.prices[-1][0] == sec:
             st.prices[-1] = (sec, ev.price)
@@ -403,6 +435,7 @@ class RollingFeatureEngine:
             b[5] += usdt
         st.last_price = ev.price
         st.last_ts = max(st.last_ts, t)
+        return True
 
     def _on_book(self, st: _SymbolState, ev: BookTop) -> None:
         t = _ts(ev.ts)
@@ -431,7 +464,7 @@ class RollingFeatureEngine:
         if self._long_min:
             self._aggregate(st.long, k, self._long_min)
         # 还没来过成交就跟最新收盘价：回填从 24 小时前往后喂，只取第一根会把一天前的价当现价
-        if st.last_price_source != "trade":
+        if st.last_price_source not in _TRADE_SOURCES:
             st.last_price = k.close
         st.last_ts = max(st.last_ts, _ts(k.close_time))
         return True
@@ -488,6 +521,170 @@ class RollingFeatureEngine:
         st.atr_hist.clear()
         st.atr_hist.extend(series + live)  # maxlen 自动丢掉最老的
         return len(series)
+
+    def seed_rest(
+        self,
+        symbol: str,
+        trades: list[Trade],
+        mark: MarkPrice | None,
+        *,
+        covered_from: float,
+        fetched_at: float,
+    ) -> None:
+        """REST 拉的逐笔归集成交（``/fapi/v1/aggTrades``）和标记价并进这个币的状态。
+
+        ``trades`` 是 ``covered_from`` 到 ``fetched_at`` 之间的全部成交（按时间排）。只补实时流
+        没有的时间段：比已有最早一笔早的、比已有最晚一笔晚的；中间那段以实时流为准。补进来的不算
+        实时行情（``live_s`` 不动），只给 ``trade_s``：成交窗口从哪一秒起是全的。标记价比已有的新
+        才换。爆仓没有 REST 历史，这里不碰。"""
+        st = self._state(symbol)
+        rows = sorted(((_ts(tr.ts), tr) for tr in trades if tr.symbol == symbol), key=_first)
+        self._drop_before_segment(st)
+        # 成交 5 分钟、逐秒价 301 秒、成交流 1 小时各留各的：边界按三者里最早 / 最晚的算，免得补进
+        # 成交流已有的秒（重复记）或插到比它新的秒前面（乱序）。逐秒的桶只知道是哪一秒，同一秒的不补
+        heads = [d[0][0] for d in (st.trades, st.prices, st.flow) if d]
+        tails = [st.trades[-1][0]] if st.trades else []
+        tails += [d[-1][0] + 1.0 for d in (st.prices, st.flow) if d]
+        had = bool(heads)
+        first = min(heads, default=math.inf)
+        last = max(tails, default=-math.inf)
+        before = [tr for t, tr in rows if t < first]
+        after = [tr for t, tr in rows if t > last] if had else []
+        self._prepend(st, before)
+        for tr in after:
+            self._on_trade(st, tr)
+        if rows and (after or (before and not had)):
+            newest_t, newest = rows[-1]
+            st.last_price = newest.price
+            st.last_price_source = "rest_trade"
+            st.last_price_source_ts = newest_t
+            st.last_price_observed_ts = self._observation_update_ts()
+            st.last_ts = max(st.last_ts, newest_t)
+        if rows:
+            st.rest_until = max(st.rest_until or -math.inf, rows[-1][0])
+            st.rest_last = max(st.rest_last or -math.inf, rows[-1][0])
+        if mark is not None and mark.symbol == symbol:
+            if st.mark is None or mark.ts > st.mark.ts:
+                st.mark = mark
+            st.last_ts = max(st.last_ts, _ts(mark.ts))
+            st.rest_last = max(st.rest_last or -math.inf, _ts(mark.ts))
+        self._cover(st, covered_from, fetched_at)
+        self._prune(st)
+
+    def _drop_before_segment(self, st: _SymbolState) -> None:
+        """丢掉当前这段连续行情（实时流 + 接得上的 REST 覆盖）之前的成交、逐秒价和成交流。
+
+        币退订后一小时内又订上（或断流 5 分钟以上重连）：成交流还留着上一段的秒，拿它当已有
+        数据的起点，最近 5 分钟的 REST 成交会被当成「中间那段」整段丢掉，覆盖却照样接上，
+        ``ret_5m`` 读 0（#390 同一类假信号）。"""
+        span = self._span(st)
+        start = span[0] if span is not None else st.live_since
+        if start is None:
+            return
+        sec = math.floor(start)
+        while st.trades and st.trades[0][0] < start:
+            st.trades.popleft()
+        for dq in (st.prices, st.flow):
+            while dq and dq[0][0] < sec:
+                dq.popleft()
+
+    @staticmethod
+    def _prepend(st: _SymbolState, trades: list[Trade]) -> None:
+        """比已有最早一笔还早的成交按时间插到前面（同一秒以已有的为准 / 成交额并进去）。"""
+        if not trades:
+            return
+        prices: list[tuple[float, float]] = []
+        flow: list[list[float]] = []
+        rows: list[tuple[float, float, bool]] = []
+        for tr in trades:
+            t = _ts(tr.ts)
+            sec = float(math.floor(t))
+            if prices and prices[-1][0] == sec:
+                prices[-1] = (sec, tr.price)
+            else:
+                prices.append((sec, tr.price))
+            usdt, is_buy = tr.price * tr.qty, tr.taker_side == Side.LONG
+            rows.append((t, usdt, is_buy))
+            if not flow or flow[-1][0] != sec:
+                flow.append([sec, 0.0, 0.0, 0.0, 0.0, 0.0])
+            b = flow[-1]
+            b[1 if is_buy else 2] += usdt
+            if usdt >= BIG_TRADE_USDT:
+                b[3 if is_buy else 4] += 1.0
+                b[5] += usdt
+        if st.prices and prices[-1][0] == st.prices[0][0]:
+            prices.pop()
+        if st.flow and flow[-1][0] == st.flow[0][0]:
+            for i in range(1, 6):
+                st.flow[0][i] += flow[-1][i]
+            flow.pop()
+        st.prices.extendleft(reversed(prices))
+        st.flow.extendleft(reversed(flow))
+        st.trades.extendleft(reversed(rows))
+
+    @staticmethod
+    def _cover(st: _SymbolState, since: float, last: float) -> None:
+        """[since, last] 并进成交覆盖：和已有覆盖或这段实时流挨着（``SEED_JOIN_S`` 内）就连起来。"""
+        segs = [(since, last)]
+        if st.cov_since is not None and st.cov_last is not None:
+            segs.append((st.cov_since, st.cov_last))
+        if st.live_since is not None and st.live_last is not None:
+            segs.append((st.live_since, st.live_last))
+        segs.sort()
+        merged: list[tuple[float, float]] = []
+        for a, b in segs:
+            if merged and a <= merged[-1][1] + SEED_JOIN_S:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        st.cov_since, st.cov_last = merged[-1]
+
+    def forget_rest(self) -> None:
+        """``rest_warm_start`` 热关掉时调：已补的覆盖不再算预热（``trade_s`` 消失），回到只看
+        ``live_s``；已经并进来的成交本身是真的，留着。"""
+        for st in self._s.values():
+            st.cov_since = st.cov_last = st.rest_until = st.rest_last = None
+
+    def trade_cover(self, symbol: str) -> tuple[float, float] | None:
+        """(起, 止)：这个币的成交窗口从哪一秒到哪一秒是全的；什么都没有返回 None。"""
+        st = self._s.get(symbol)
+        if st is None:
+            return None
+        span = self._span(st)
+        if span is None and st.live_since is not None and st.live_last is not None:
+            return st.live_since, st.live_last
+        return span
+
+    def data_source(self, symbol: str) -> str | None:
+        """最新一个点是实时流（``ws``）还是 REST 补的（``rest``）；都没有返回 None。"""
+        st = self._s.get(symbol)
+        if st is None:
+            return None
+        if st.rest_last is not None and (st.live_last is None or st.rest_last > st.live_last):
+            return "rest"
+        return "ws" if st.live_last is not None else None
+
+    @staticmethod
+    def _span(st: _SymbolState) -> tuple[float, float] | None:
+        if st.cov_since is None or st.cov_last is None:
+            return None
+        start, end = st.cov_since, st.cov_last
+        if st.live_since is not None and st.live_last is not None:
+            if st.live_since <= end + SEED_JOIN_S:
+                end = max(end, st.live_last)
+            else:
+                start, end = st.live_since, st.live_last
+        return start, end
+
+    def _trade_s(self, st: _SymbolState, now: float) -> float | None:
+        """成交窗口（``ret_1m`` / ``ret_5m`` / 波动 / 主动买卖）从现在往回有几秒是全的。
+
+        没补过 REST 返回 None（只有 ``live_s``）。实时流在覆盖之后断过又重来，只算新这段。"""
+        span = self._span(st)
+        if span is None or now - span[1] > STREAM_GAP_S:
+            return None
+        start = span[0]
+        return max(now - start, 0.0)
 
     def atr_median_7d(self, symbol: str) -> float | None:
         """最近 7 天 ATR 的中位数；不够 1 天的点数返回 None（不拿半天的数据当下限）。"""
@@ -723,6 +920,9 @@ class RollingFeatureEngine:
         v["trades_1m"] = float(n)
         if st.live_since is not None:
             v["live_s"] = max(now - st.live_since, 0.0)
+        trade_s = self._trade_s(st, now)
+        if trade_s is not None:
+            v["trade_s"] = trade_s
         v["taker_buy_ratio_1m"] = buy / (buy + sell) if buy + sell > 0 else 0.5
         v["cvd_1m_usdt"] = buy - sell
         v["cvd_30s_usdt"] = cvd_30

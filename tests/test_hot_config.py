@@ -179,3 +179,19 @@ def test_keeper_assistant_settings_edit_on_panel_and_apply_without_restart(
     app.reload_config()
     for key, value in changes.items():
         assert getattr(app.app_cfg.fast_loop, key) == value
+
+
+def test_rest_warm_start_hot_off_drops_rest_coverage(tmp_path: Path) -> None:
+    """热关 rest_warm_start：已补的覆盖立刻作废，哨兵回到只看 live_s；热开不动。"""
+    app, paths, data = _running(tmp_path)
+    forgot: list[bool] = []
+
+    class Features:
+        def forget_rest(self) -> None:
+            forgot.append(True)
+
+    app.m.features = Features()  # type: ignore[assignment]
+    _edit(paths, data, "fast_loop", {"rest_warm_start": True})
+    assert "fast_loop.rest_warm_start" in app.reload_config() and forgot == []
+    _edit(paths, data, "fast_loop", {"rest_warm_start": False})
+    assert "fast_loop.rest_warm_start" in app.reload_config() and forgot == [True]

@@ -160,6 +160,8 @@ entry_limit_pullback = false      # 进场用挂单等回踩（默认关 = 市�
 entry_limit_pullback_live = false # testnet / live 也用挂单等回踩
 entry_limit_wait_min = 60         # 挂单最多等 60 分钟，没成交就撤（8h 以上档改市价追）
 # chase_price_max_age_s = 0        # 改市价追进前复查进场区间时行情最多旧几秒，超过就这次不追；0 = 不查。推荐 Demo 5
+# rest_warm_start = false          # 行情不等预热：刚订上 / 断流的币马上从 REST 补成交和资金费率（共用权重预算，被封照旧等）
+# market_rest_concurrency = 4      # 从 REST 补行情时最多同时补几个币（改了要重启）
 # trailing_on = true               # 移动止损（持仓管家）：赚到 trail_start_r 后止损跟着最高盈利收紧，只收紧不放松（不写 = 开）
 # trail_start_r = 0.7              # 赚到几个止损距离后开始跟（1 = 一个止损距离；不写 = 跟档位 0.7）
 # trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 0.7、4h 以上 1.0）

@@ -9,10 +9,12 @@ from typing import Any
 
 from jiaoyi import contracts as c
 from jiaoyi.gate.questions import MAX_SNAPSHOT_CHARS, entry_snapshot, market_block
+from jiaoyi.market import rest
 from jiaoyi.market.derivs import DerivsFeed
 from jiaoyi.market.features import RollingFeatureEngine
+from jiaoyi.market.provider import MarketData
 from jiaoyi.sentinel.rules import RuleTrigger
-from tests.fastloop_helpers import FAST, card, features, signal
+from tests.fastloop_helpers import FAST, FakeMarketRest, card, features, signal
 
 T0 = datetime(2026, 10, 24, 0, 0, tzinfo=UTC)
 ALL = [k.value for k in c.SignalKind]
@@ -318,6 +320,56 @@ def test_btc_lead_after_warmup_both_sides() -> None:
             snap, card(now, symbol="FILUSDT", bias=bias, allowed_signals=ALL), now
         )
         assert s.kind is c.SignalKind.BTC_LEAD and s.side_hint is side
+
+
+def _rest_market(
+    eng: RollingFeatureEngine, now: datetime, btc_last: float, *, ban_btc: bool = False
+) -> tuple[MarketData, FakeMarketRest]:
+    """REST 上最近 10 分钟：BTC 每秒一笔 68000（最后 60 秒 ``btc_last``），FIL 每 2 秒一笔 100。"""
+    trades: dict[str, list[tuple[datetime, float, float, bool]]] = {"BTCUSDT": [], "FILUSDT": []}
+    for s in range(600, 0, -1):
+        at = now - timedelta(seconds=s)
+        trades["BTCUSDT"].append((at, btc_last if s <= 60 else 68000.0, 1000.0, s % 2 == 0))
+        if s % 2 == 0:
+            trades["FILUSDT"].append((at, 100.0, 1000.0, s % 4 == 0))
+    fail = {"BTCUSDT": rest.RateLimited(418, now.timestamp() + 600)} if ban_btc else {}
+    fake = FakeMarketRest(trades, now=now, fail=fail)
+    market = MarketData(eng, enabled=lambda: True, clock=lambda: now, fetch=fake)
+    return market, fake
+
+
+async def test_rest_seeded_restart_flat_btc_quiet_alt_no_btc_lead() -> None:
+    """重启后直接从 REST 补、不等预热：BTC 平、FIL 安静，不能出 BTC 先动（#390 的假信号）。
+    BTC 的 REST 被封时退回最新收盘价，也不能拿一天前的价算 btc5z。"""
+    cfg = _cfg(btc_lead_on=True, btc_lead_z=3.0)
+    now = T0 + timedelta(minutes=1441, seconds=1)
+    for ban_btc in (False, True):
+        eng = _backfilled()
+        market, _ = _rest_market(eng, now, 68000.0, ban_btc=ban_btc)
+        await market.warm(["BTCUSDT", "FILUSDT"])
+        btc = eng.snapshot("BTCUSDT")
+        # 最新的价（REST 最后一笔，封了就是最新收盘价），不是一天前的 66000
+        assert btc is not None and abs(btc.last_price / 68000.0 - 1) < 0.002
+        snap = eng.snapshot("FILUSDT")
+        assert snap is not None and "live_s" not in snap.values
+        assert snap.ts == now and snap.values["trade_s"] >= 300  # 窗口按现在算，不按最老那笔
+        assert snap.values["ret_5m"] == 0.0 and abs(snap.values["btc5z"]) < 1
+        short = card(now, symbol="FILUSDT", bias="short", allowed_signals=ALL)
+        assert RuleTrigger(cfg).check(snap, short, now) == []
+
+
+async def test_rest_seeded_restart_real_btc_move_fires_btc_lead_at_once() -> None:
+    cfg = _cfg(btc_lead_on=True, btc_lead_z=3.0)
+    now = T0 + timedelta(minutes=1441, seconds=1)
+    eng = _backfilled()
+    market, _ = _rest_market(eng, now, 68000.0 * 0.98)
+    await market.warm(["BTCUSDT", "FILUSDT"])
+    snap = eng.snapshot("FILUSDT")
+    assert snap is not None and snap.values["btc5z"] < -3 and "live_s" not in snap.values
+    [s] = RuleTrigger(cfg).check(
+        snap, card(now, symbol="FILUSDT", bias="short", allowed_signals=ALL), now
+    )
+    assert s.kind is c.SignalKind.BTC_LEAD and s.side_hint is c.Side.SHORT
 
 
 def test_btc_lead_needs_btc_volatility_baseline(caplog: Any) -> None:

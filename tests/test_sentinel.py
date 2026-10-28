@@ -98,6 +98,28 @@ def test_crowded_reversal(now: datetime) -> None:
     assert trig().check(cold, cd, now) == []
 
 
+def test_rest_seeded_trade_window_warms_per_field_not_liquidations(now: datetime) -> None:
+    """REST 补过成交（trade_s）：拥挤交易反向马上能出；爆仓历史 REST 补不了，强平瀑布反弹照旧
+    要连续实时行情满 30 分钟。"""
+    seeded = {"live_s": 5.0, "trade_s": 600.0}
+    cd = card(now, bias="both", allowed_signals=["crowded_reversal", "liquidation_rebound"])
+    crowded = features(
+        now, funding_rate=0.001, ret_1m=-0.001, taker_buy_ratio_1m=0.4, vol_ratio_1m=1.0, **seeded
+    )
+    out = trig().check(crowded, cd, now)
+    assert [(s.kind, s.side_hint) for s in out] == [(c.SignalKind.CROWDED_REVERSAL, c.Side.SHORT)]
+    liq = features(
+        now,
+        liq_long_usdt_1m=500_000.0,
+        liq_ratio_1m=8.0,
+        ret_5m=-0.015,
+        cvd_30s_usdt=20_000.0,
+        vol_ratio_1m=1.0,
+        **{**seeded, "trade_s": 3600.0},
+    )
+    assert trig().check(liq, cd, now) == []
+
+
 def test_session_windows() -> None:
     assert session_event(datetime(2026, 10, 22, 8, 3, tzinfo=UTC), 5) == "资金费结算 08:00 UTC"
     assert session_event(datetime(2026, 10, 22, 23, 57, tzinfo=UTC), 5) == "资金费结算 00:00 UTC"

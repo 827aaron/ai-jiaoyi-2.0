@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from jiaoyi.market import rest
-from jiaoyi.market.rest import IP_WEIGHT_PER_MIN, RateLimited
+from jiaoyi.market.rest import RateLimited
 
 __all__ = ["MIN_GAP_S", "RateLimited", "banned_until", "get", "reset"]
 
@@ -21,6 +21,7 @@ MIN_GAP_S = 0.05  # 全局最小请求间隔
 
 _lock = threading.Lock()
 _next_at = 0.0
+_waited: int | None = None  # 已为哪一分钟的「本 IP 过半」等过
 
 
 def banned_until() -> float:
@@ -30,18 +31,21 @@ def banned_until() -> float:
 
 
 def reset() -> None:
-    global _next_at
+    global _next_at, _waited
     with _lock:
-        _next_at = 0.0
+        _next_at, _waited = 0.0, None
     rest.reset_ban_state()
 
 
 def get(url: str, params: dict[str, Any] | None = None, timeout: float = 10.0) -> httpx.Response:
     """共用限速的 GET；418 / 429 登记封禁并抛 ``RateLimited``，其他状态码交给调用方。"""
-    global _next_at
+    global _next_at, _waited
     rest.check_blocked()
-    used = rest.take_used_weight()
-    if used is not None and used > IP_WEIGHT_PER_MIN // 2:
+    with _lock:
+        busy = rest.ip_busy(_waited)
+        if busy is not None:
+            _waited = busy
+    if busy is not None:
         time.sleep(60.0 - time.time() % 60.0 + 1.0)  # 等到币安下一分钟窗口
     with _lock:
         now = time.time()

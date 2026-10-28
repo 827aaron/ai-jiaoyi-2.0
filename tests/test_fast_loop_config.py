@@ -122,3 +122,13 @@ def test_keeper_assistant_defaults_off_and_rejects_bad_values() -> None:
     ):
         with pytest.raises(ValueError):
             FastLoopConfig(**bad)  # type: ignore[arg-type]
+
+
+def test_rest_warm_start_defaults_off_and_is_hot() -> None:
+    from jiaoyi.core.hotconfig import HOT_FAST
+
+    cfg = FastLoopConfig()
+    assert cfg.rest_warm_start is False and cfg.market_rest_concurrency == 4
+    assert "rest_warm_start" in HOT_FAST and "market_rest_concurrency" not in HOT_FAST
+    with pytest.raises(ValueError):
+        FastLoopConfig(market_rest_concurrency=0)
