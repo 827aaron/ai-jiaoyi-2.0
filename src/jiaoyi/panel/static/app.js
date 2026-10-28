@@ -727,7 +727,7 @@ function cardRow(s, now) {
   const sym = s.symbol, L = cardLevels(s), p = L && L.held;
   const [dt, dk] = s.pending_label ? [s.pending_label, s.pending_label === "开会中" ? "p-accent" : ""] : DIR[s.bias] || BIAS[s.bias] || [s.bias, ""];
   const pnl = p && p.unrealized_usdt != null ? `<span class="pill p-accent">持仓中 <span class="num ${p.unrealized_usdt >= 0 ? "up" : "down"}">${p.unrealized_usdt >= 0 ? "+" : ""}${money(p.unrealized_usdt, 2)} U</span></span>` : p ? '<span class="pill p-accent">持仓中</span>' : "";
-  const fade = s.fading && !p ? '<span class="pill p-warn">快到期</span>' : "";
+  const fade = (s.fading && !p ? '<span class="pill p-warn">快到期</span>' : "") + (s.flip_pending ? `<span class="pill p-warn" title="${esc(s.flip_pending)}">待确认翻转</span>` : "");
   let stop = "—", tp = "—";
   if (p) {
     const sp = p.stop_loss_pct != null ? guardPct(p.stop_loss_pct, p.side, true) : signedPct(p.stop_loss_price, p.entry_price);
@@ -772,7 +772,7 @@ function cardBody(s, L) {
   const plan = p
     ? `已在 <span class="num">${price(p.entry_price, sym)}</span> ${(DIR[p.side] || [p.side])[0]}，拿着等止盈${p.stop_loss_price ? `；${p.side === "long" ? "跌破" : "涨过"} <span class="num">${price(p.stop_loss_price, sym)}</span> 止损` : ""}。`
     : `等哨兵发现${sigs}，按当时价格${dt}。`;
-  const from = (s.source_note ? `<div class="dim small">${esc(s.source_note)}</div>` : "") + (s.source_regime ? `<div class="dim small" title="${esc(s.source_market_view_id || "旧卡来源")}">研究时大盘：${esc(s.source_regime)}</div>` : "");
+  const from = (s.flip_pending ? `<div class="warn small">${esc(s.flip_pending)}</div>` : "") + (s.source_note ? `<div class="dim small">${esc(s.source_note)}</div>` : "") + (s.source_regime ? `<div class="dim small" title="${esc(s.source_market_view_id || "旧卡来源")}">研究时大盘：${esc(s.source_regime)}</div>` : "");
   let calc = "";
   if (!p && L && L.stop) {
     const lo = Math.min(...L.stop), hi = Math.max(...L.stop), tlo = Math.min(...L.tp), thi = Math.max(...L.tp);
@@ -2652,6 +2652,8 @@ const PLAIN = {
   card_ttl_min: "作战卡管用几分钟（开会间隔 + 提前量）",
   symbol_min_interval_min: "同一个币至少隔几分钟才再开会",
   reuse_extend_expiry: "没重开会、沿用旧指令的币顺延到新卡的到期时间",
+  card_flip_confirm: "一个币的方向翻转要连续几场会确认（1 = 立即换）",
+  card_flip_confirm_min: "翻转候选至少持续几分钟才确认（0 = 只看场数）",
   refresh_lead_min: "作战卡到期前几分钟开会换新卡",
   symbol_timeout_s: "一个币的会最多开几秒",
   min_refresh_gap_min: "两轮会至少隔几分钟",
@@ -2957,7 +2959,7 @@ const ROLES = [
     { g: "", hint: "开会间隔和单笔最长持仓在页面上面「选档位」里换。", keys: ["app.slow_loop_interval_min", "app.card_pick_max", "schedule.max_cards_per_round", "schedule.schedule_at", "schedule.card_ttl_min", "schedule.refresh_lead_min", "schedule.min_refresh_gap_min"] },
   ] },
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
-    { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.reuse_extend_expiry", "schedule.symbol_timeout_s"] },
+    { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.reuse_extend_expiry", "schedule.card_flip_confirm", "schedule.card_flip_confirm_min", "schedule.symbol_timeout_s"] },
     { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
     { g: "会议输入和偏空整改（改了要重启主程序）", hint: "默认都是现状，提示词和原来一字不差。偏空整改四项可以用“对照比例”让一部分会议用新写法，另一部分照旧，对比效果（先把下面四项改掉至少一项，再开对照，否则会被拒绝）；输入新鲜度几项让会议材料写明时间、加实时价。教训口径只影响之后的汇总。", keys: ["meeting.lessons_scoring", "meeting.debate_first", "meeting.funding_label", "meeting.bear_bull_symmetry", "meeting.crowd_ratio_mode", "meeting.bias_fix_ab", "meeting.snapshot_interval", "meeting.snapshot_label", "meeting.live_price_line", "meeting.stale_on_arrival", "meeting.stale_on_arrival_action", "meeting.input_time_labels", "meeting.market_table_rolling", "meeting.latest_market_regime", "meeting.event_brief_refresh", "meeting.regime_time_label", "meeting.regime_max_age_min", "meeting.pool_scope_label"] },
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.event_concurrency", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },

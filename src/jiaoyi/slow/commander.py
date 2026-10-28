@@ -55,6 +55,7 @@ from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
+from jiaoyi.slow.card_flip import FlipBook, FlipCandidate
 from jiaoyi.slow.card_outlook import with_board
 from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.market_audit import CURRENT_AUDIT, MarketAudit
@@ -331,6 +332,8 @@ class BattleCardCommander:
         regime_time_label: bool = False,
         regime_max_age: timedelta = timedelta(0),
         pool_scope_label: bool = False,
+        flip_confirm: int = 1,
+        flip_confirm_min: timedelta = timedelta(0),
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("作战卡有效期必须大于 0")
@@ -468,8 +471,17 @@ class BattleCardCommander:
         self._restore_budget()
         self._market_last: tuple[datetime, str, int | None] | None = None
         self._market_state: tuple[Health, str, str | None] | None = None
+        self._flips = FlipBook(
+            flip_confirm,
+            flip_confirm_min,
+            card_path.with_name("card_flip.json") if card_path else None,
+        )
         self._restore_card()
         self._restore_market()
+        for sym, lost in self._flips.restore(
+            {s.symbol: s for s in self._card.symbols} if self._card is not None else {}
+        ).items():
+            self._flip_dropped(sym, lost, "重启后卡上留着的那条指令对不上")
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
@@ -630,6 +642,43 @@ class BattleCardCommander:
     def _watch_only(cs: CardSymbol) -> CardSymbol:
         """留在卡上继续盯、不开新仓：方向不动（NO_TRADE 会被持仓管家当平仓理由），只清空信号。"""
         return cs.model_copy(update={"allowed_signals": []})
+
+    def _flip_gate(
+        self, symbol: str, fresh: CardSymbol, in_force: CardSymbol | None, now: datetime
+    ) -> CardSymbol:
+        if not self._flips.on:
+            self._flips.clear()  # switched back to 1: leftover candidates must not resurface
+            return fresh
+        out = self._flips.gate(symbol, fresh, in_force, now)
+        if out.dropped is not None:
+            why = "卡上留着的那条指令已到期被拿掉" if in_force is None else "卡上那条指令已被换掉"
+            self._flip_dropped(symbol, out.dropped, why)
+        if out.event is not None:
+            self._write(
+                symbol=symbol,
+                outcome=Outcome.INFO,
+                summary=out.summary[:200],
+                output={"card_flip": out.event, **(out.detail or {})},
+            )
+        return out.card_symbol
+
+    def _flip_dropped(self, symbol: str, lost: FlipCandidate, why: str) -> None:
+        self._write(
+            symbol=symbol,
+            outcome=Outcome.INFO,
+            summary=f"{symbol} 待确认翻转作废：{why}"[:200],
+            output={"card_flip": "dropped", "why": why, **lost.to_json()},
+        )
+
+    @staticmethod
+    def _raw_view(card: BattleCard, fresh: CardSymbol) -> BattleCard:
+        """The review journal scores what the meeting concluded, not the pending-flip stand-in."""
+        cs = card.for_symbol(fresh.symbol)
+        if cs is None or cs is fresh:
+            return card
+        return card.model_copy(
+            update={"symbols": [fresh if s.symbol == fresh.symbol else s for s in card.symbols]}
+        )
 
     def block_symbol(self, symbol: str, reason: str) -> None:
         """封掉一个币的新开仓（例如币安公告要下架它）。风控员只认作战卡，所以这里改卡。
@@ -1432,12 +1481,20 @@ class BattleCardCommander:
         if self._round_symbols is not None and self._round_expiry is not None:
             # 整轮的币已定、新卡还没出：这条结论要活到整轮新卡的到期时间，不按旧卡提前消失
             expires = max(expires, self._round_expiry)
-        new = self._stamp(
+        fresh = self._stamp(
             self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
             now,
             expires,
             res.market_view or market,
         )
+        in_force = card.for_symbol(symbol)
+        if (
+            in_force is not None
+            and symbol not in self._held
+            and now >= (in_force.expires_at or card.expires_at)
+        ):
+            in_force = None  # expired and unheld: _pool_view already hides it, as a round drops it
+        new = self._flip_gate(symbol, fresh, in_force, now)
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
         if all(s.symbol != symbol for s in card.symbols):
             symbols.append(new)
@@ -1463,7 +1520,7 @@ class BattleCardCommander:
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
-            self._journal.record(card, [symbol], {symbol: res.setup})
+            self._journal.record(self._raw_view(card, fresh), [symbol], {symbol: res.setup})
         self._record_card(card, started, cost=0.0)  # 临时会没有总盘会这一份
         if nomination is not None:
             self._write(
@@ -2835,12 +2892,13 @@ class BattleCardCommander:
                 market_view=market_view,
             )
             # 开完一场就出卡并落盘：中途重启 / 失败不会丢掉已经开完的会
-            symbols[e.symbol] = self._stamp(
+            fresh = self._stamp(
                 self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
                 now,
                 round_expiry,
                 res.market_view or market_view,
             )
+            symbols[e.symbol] = self._flip_gate(e.symbol, fresh, symbols.get(e.symbol), now)
             cost += res.cost_usd
             published += 1
             self._last_meeting[e.symbol] = now
@@ -2849,7 +2907,7 @@ class BattleCardCommander:
             self._notify_card()
             self._save_card()
             if self._journal is not None:
-                self._journal.record(card, [e.symbol], {e.symbol: res.setup})
+                self._journal.record(self._raw_view(card, fresh), [e.symbol], {e.symbol: res.setup})
             self._record_card(card, time.monotonic(), partial=True)  # 面板马上显示这个币
             return res
 
@@ -3356,6 +3414,7 @@ class BattleCardCommander:
                         "issued_at": (s.issued_at or card.created_at).isoformat(),
                         "expires_at": (s.expires_at or card.expires_at).isoformat(),
                         "held": s.symbol in self._held,
+                        **self._flip_note(s.symbol),
                     }
                     for s in card.symbols
                 },
@@ -3375,6 +3434,21 @@ class BattleCardCommander:
             f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张{also}）",
             None,
         )
+
+    def _flip_note(self, symbol: str) -> dict[str, Any]:
+        f = self._flips.get(symbol)
+        if f is None:
+            return {}
+        return {
+            "flip_pending": {
+                "confirmed": f.confirmed,
+                "candidate": f.candidate,
+                "count": f.count,
+                "need": self._flips.need,
+                "since": f.first_seen.isoformat(),
+                "progress": self._flips.progress(f.count, f.first_seen, self._clock()),
+            }
+        }
 
     def _record_error(self, reason: str, exc: Exception, started: float) -> None:
         self._write(

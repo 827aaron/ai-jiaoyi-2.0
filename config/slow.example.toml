@@ -101,6 +101,8 @@ max_retries = 6
 # card_ttl_min = 140              # 作战卡有效期（分钟）= 开会间隔 + 提前量（2h 140 / 60m 80 / 30m 50 / 15m 35）
 # symbol_min_interval_min = 115   # 同一个币两次会议的最小间隔 5–720 分钟（≤ 开会间隔）
 # reuse_extend_expiry = false     # true = 因最小间隔沿用旧指令的币顺延到新卡的到期时间（从它开会算最多一个 card_ttl_min；没挑中的旧指令也顺延，大盘方向变了的不顺延）；推荐 Demo：true
+# card_flip_confirm = 1           # 单币方向翻转要确认：连续几场会都和生效方向不同（反向、中性交替也算；整轮和临时会都算）才换成最新结论；1 = 立即换（现状）；推荐 Demo：2。改了要重启 jiaoyi run
+# card_flip_confirm_min = 0        # 翻转候选从第一次出现起至少几分钟才确认（和上面同时满足）；0 = 只看场数
 # refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 20）
 # symbol_timeout_s = 900           # 单个标的的会议超时
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
