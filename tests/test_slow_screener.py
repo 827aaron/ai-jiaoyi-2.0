@@ -267,3 +267,44 @@ async def test_allowed_tradfi_still_rejects_non_us_types(now: datetime) -> None:
     assert any(
         "暂不支持的传统资产类型" in r and "hk_equity" in r for r in hk.filters.failed_reasons
     )
+
+
+class FakeVenue:
+    def __init__(self, gone: dict[str, str] | None) -> None:
+        self.gone = gone
+
+    def unavailable(self, symbols: object) -> dict[str, str] | None:
+        return (
+            None if self.gone is None else {s: v for s, v in self.gone.items() if s in set(symbols)}
+        )  # type: ignore[call-overload]
+
+
+async def test_untradeable_venue_symbols_are_excluded_and_reported(
+    now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    src = FakeSource(
+        [stat("AAAUSDT"), stat("PUMPUSDT"), stat("THINUSDT", quote_volume_24h_usdt=1e6)]
+    )
+    venue = FakeVenue({"PUMPUSDT": "SETTLING", "THINUSDT": "SETTLING"})
+    scr = CodeSymbolScreener(src, ScreenerConfig(), UserOverrides(pinned=frozenset({"PUMPUSDT"})))
+    scr.set_venue(venue, "Demo")
+    with caplog.at_level("INFO"):
+        pool = await scr.screen(now)
+    assert [e.symbol for e in pool.in_pool] == ["AAAUSDT"]
+    pump = next(e for e in pool.entries if e.symbol == "PUMPUSDT")
+    assert pump.filters.failed_reasons == ["Demo不可交易（SETTLING）"]
+    assert pool.venue_excluded == {"PUMPUSDT": "SETTLING"}  # 本来就过不了门槛的不报
+    assert "Demo 不可交易，已剔除：PUMPUSDT(SETTLING)" in caplog.text
+
+
+async def test_untradeable_exclusion_off_switch_and_stale_list(now: datetime) -> None:
+    src = FakeSource([stat("AAAUSDT"), stat("PUMPUSDT")])
+    off = CodeSymbolScreener(src, ScreenerConfig(exclude_untradeable=False))
+    off.set_venue(FakeVenue({"PUMPUSDT": "SETTLING"}))
+    pool = await off.screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "PUMPUSDT"}
+    stale = CodeSymbolScreener(src, ScreenerConfig())
+    stale.set_venue(FakeVenue(None))
+    pool = await stale.screen(now)
+    assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "PUMPUSDT"}
+    assert pool.venue_excluded == {}

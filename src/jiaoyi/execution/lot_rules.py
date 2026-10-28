@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 
 from jiaoyi.core.recorder import RoleRecorder
@@ -38,6 +39,7 @@ class ExchangeInfoLotRules:
         self._rec = recorder
         self._rules: dict[str, LotRules] = {}
         self._loaded_at: datetime | None = None
+        self._status: dict[str, str] = {}
 
     async def refresh(self) -> bool:
         """拉一次。成功返回 True；失败保留旧缓存并返回 False。"""
@@ -66,8 +68,18 @@ class ExchangeInfoLotRules:
             )
             for sym, f in filters.items()
         }
+        status = getattr(self._exchange, "untradeable_status", None)
+        self._status = dict(status) if isinstance(status, dict) else {}
         self._loaded_at = now
         return True
+
+    def unavailable(self, symbols: Iterable[str]) -> dict[str, str] | None:
+        """这些币里交易所现在不能交易的（币 → 交易所状态，没有精度的写「无下单精度」）。
+
+        缓存没拉到或已过期返回 None：此时 ``lot_rules`` 对所有币都是 None，不能据此剔币。"""
+        if self._loaded_at is None or self._clock() - self._loaded_at > self._max_age:
+            return None
+        return {s: self._status.get(s, "无下单精度") for s in symbols if self._rules.get(s) is None}
 
     def lot_rules(self, symbol: str) -> LotRules | None:
         if self._loaded_at is None or self._clock() - self._loaded_at > self._max_age:

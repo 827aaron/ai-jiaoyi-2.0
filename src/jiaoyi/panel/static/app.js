@@ -2268,6 +2268,7 @@ P.pool = () => {
   return `<div class="tiles t4"><div class="tile"><small>候选池</small><b>${d.in_pool}</b></div><div class="tile"><small>军师选中</small><b>${d.picked}</b></div>
       <div class="tile"><small>没进池</small><b>${d.rejected}</b></div><div class="tile"><small>上次选币</small><b>${d.ts ? hm(d.ts) : "—"}</b></div></div>
     ${categoryCard(d)}
+    ${venueExcluded(d.venue_excluded)}
     <section class="card mt"><div class="ch"><h2>候选池</h2><span class="r">代码每小时筛一次，军师只能从池里挑；固定、拉黑、手动加入优先</span></div>
       ${addBox}
       <div class="tw"><table><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -2275,6 +2276,12 @@ P.pool = () => {
       <div class="foot">固定：每次都进池（仍要过硬条件）；拉黑：永不进池、立刻不开新仓；手动加的：加进候选（仍要过硬条件），“移除”就撤掉。</div></section>
     <div class="mt">${blockedSection(d.blocked)}</div>`;
 };
+
+function venueExcluded(m) {
+  const items = Object.entries(m || {});
+  if (!items.length) return "";
+  return `<div class="note warn mt">交易所上不能交易，已从候选池剔除：${items.map(([s, st]) => `${esc(s.replace(/USDT$/, ""))}（${esc(st)}）`).join("、")}</div>`;
+}
 
 function addSymbol() {
   const el = $("#pool-add");
@@ -2348,6 +2355,7 @@ const PLAIN = {
   "screener.major_include": "手动算主流的币",
   "screener.major_exclude": "手动排除出主流的币",
   "screener.allow_tradfi": "美股、金属这类传统资产永续也进池",
+  "screener.exclude_untradeable": "剔掉交易所上不在交易的币（如结算中）",
   "predictor.interval": "喂给模型几分钟的 K 线",
   against_signal_on: "看到和作战卡反向的信号时叫管家急查、反复出就开临时会",
   against_dedup_s: "同一个币同一种反向信号几秒内只算 1 次",
@@ -2837,7 +2845,7 @@ const CORE = ["risk.risk_per_trade_pct", "risk.daily_loss_halt_pct", "risk.max_l
 const ROLES = [
   { id: "screener", t: "选币员", what: "用代码把全部币安永续筛一遍，挑出候选池", groups: [
     { g: "多久选一次、池子多大", keys: ["app.screener_interval_min", "app.pool_size"] },
-    { g: "门槛", warn: "screener_cautions", hint: "过不了门槛的币不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap", "screener.allow_tradfi"] },
+    { g: "门槛", warn: "screener_cautions", hint: "过不了门槛的币不进候选池。", keys: ["screener.min_quote_volume_usdt", "screener.max_spread_bps", "screener.min_depth_usdt", "screener.min_listed_days", "screener.min_range_24h_pct", "screener.max_range_24h_pct", "screener.default_category_cap", "screener.allow_tradfi", "screener.exclude_untradeable"] },
     { g: "打分", hint: "过了门槛的币按五项打分，取前面的进池。下面是每项到多少算满分。", keys: ["screener.vol_full_multiple", "screener.surge_full_multiple", "screener.funding_full", "screener.oi_full_pct", "screener.liq_full_usdt"] },
     { g: "权重", hint: "五项各占多少分量。不用加起来等于 1，只看相对大小；不能全是 0。", keys: ["screener.weight_volatility", "screener.weight_volume_surge", "screener.weight_funding", "screener.weight_oi", "screener.weight_liquidations"] },
     { g: "主流币名单", extra: "majors", hint: "「主流币」这一类按市值前几名算，每天自动更新一次（去掉稳定币和包装币）。填 0 = 只用固定 7 个（BTC ETH BNB SOL XRP DOGE ADA）。手动算主流 / 排除的填币名，空格隔开。", keys: ["screener.major_top_n", "screener.major_include", "screener.major_exclude"] },
