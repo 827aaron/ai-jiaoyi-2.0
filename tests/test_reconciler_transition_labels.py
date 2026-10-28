@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from jiaoyi.acceptance import read_records
+from jiaoyi.alerting.telegram import TelegramAlerter
 from jiaoyi.contracts import AlertLevel, Outcome, Role
 from jiaoyi.contracts.position import CloseReason, ReconcileIssue, ReconcileIssueKind
 from jiaoyi.core.recorder import RoleRecorder
@@ -17,6 +20,7 @@ from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.reconciler import ThreeWayReconciler
 from jiaoyi.execution.registry import ServerProtection
+from jiaoyi.interfaces import Alerter
 from tests.test_execution import Rig, open_filled
 
 ARMED_PENDING = "交易所托管仍在"
@@ -25,14 +29,21 @@ LIST_ABSENT = "账本里还在持仓，但运行列表未返回执行器"
 CLOSE_UNCONFIRMED = "平仓结果尚未确认"
 
 
-def _wire(rig: Rig, tmp_path: Path, *, opening: float = 0.0, closing: float = 0.0) -> None:
+def _wire(
+    rig: Rig,
+    tmp_path: Path,
+    *,
+    opening: float = 0.0,
+    closing: float = 0.0,
+    alerter: Alerter | None = None,
+) -> None:
     rig.rec = ThreeWayReconciler(
         rig.adapter,
         rig.api,
         rig.ex,
         rig.lifeboat,
         rig.registry,
-        rig.alerts,
+        alerter or rig.alerts,
         account_name="acct",
         recorder=RoleRecorder(Role.RECONCILER, JsonlDecisionLog(tmp_path / "data")),
         opening_grace_s=opening,
@@ -107,8 +118,8 @@ async def test_opening_list_absence_with_active_detail_label(
     assert issue.informational is informational
     expected = Outcome.INFO if informational else Outcome.ERROR
     assert _outcome(tmp_path, LIST_ABSENT_ACTIVE) is expected
-    level = next(a.level for a in rig.alerts.sent if LIST_ABSENT_ACTIVE in a.body)
-    assert level is (AlertLevel.INFO if informational else AlertLevel.WARN)
+    levels = [a.level for a in rig.alerts.sent if LIST_ABSENT_ACTIVE in a.body]
+    assert levels == ([] if informational else [AlertLevel.WARN])
 
 
 async def test_opening_round_started_before_the_record_is_inside_grace(
@@ -305,3 +316,68 @@ async def test_hot_reload_switches_the_grace(
     after = await rig.rec.reconcile(rig.t)
     assert not _issue(before.issues, LIST_ABSENT_ACTIVE).informational
     assert _issue(after.issues, LIST_ABSENT_ACTIVE).informational
+
+
+def _telegram(sent: list[str]) -> TelegramAlerter:
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["text"])
+        return httpx.Response(200, json={"ok": True})
+
+    return TelegramAlerter(
+        "t", "1", cooldown_s=300.0, monotonic=lambda: 1000.0, transport=httpx.MockTransport(handler)
+    )
+
+
+async def test_hint_does_not_swallow_the_warning_at_grace_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[str] = []
+    tg = _telegram(sent)
+    _wire(rig := Rig(tmp_path), tmp_path, opening=60.0, alerter=tg)
+    await open_filled(rig)
+    _hide_from_running_list(rig, monkeypatch)
+    await rig.rec.reconcile(rig.t + timedelta(seconds=10))
+    assert not any(LIST_ABSENT_ACTIVE in m for m in sent)
+    await rig.rec.reconcile(rig.t + timedelta(seconds=61))
+    assert sum(LIST_ABSENT_ACTIVE in m for m in sent) == 1
+    await tg.close()
+
+
+async def test_hint_does_not_swallow_a_real_executor_failure_next_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[str] = []
+    tg = _telegram(sent)
+    _wire(rig := Rig(tmp_path), tmp_path, opening=600.0, alerter=tg)
+    await open_filled(rig)
+    _hide_from_running_list(rig, monkeypatch)
+    await rig.rec.reconcile(rig.t)
+    rig.api.auto_terminate_on_stop = False
+    rig.api.terminate("ex1", "SYSTEM_CLEANUP", leaves_position=True)
+    await rig.rec.reconcile(rig.t + timedelta(seconds=30))
+    assert sum("TERMINATED" in m and "第 1/2 轮" in m for m in sent) == 1
+    await tg.close()
+
+
+async def test_closing_window_survives_a_close_that_flips_back(tmp_path: Path) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, closing=60.0)
+    pid = await open_filled(rig)
+    _set(rig, pid, direct_close_pending=True, server_protection=_protection("exiting"))
+    first = await rig.rec.reconcile(rig.t)
+    assert _issue(first.issues, CLOSE_UNCONFIRMED).informational
+    _set(rig, pid, direct_close_pending=False, server_protection=_protection("provisional"))
+    between = await rig.rec.reconcile(rig.t + timedelta(seconds=30))
+    assert not _issue(between.issues, ARMED_PENDING).informational
+    _set(rig, pid, direct_close_pending=True, server_protection=_protection("exiting"))
+    again = await rig.rec.reconcile(rig.t + timedelta(seconds=61))
+    assert not _issue(again.issues, CLOSE_UNCONFIRMED).informational
+
+
+async def test_opening_clock_jump_beyond_grace_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, opening=60.0)
+    await open_filled(rig)
+    _hide_from_running_list(rig, monkeypatch)
+    report = await rig.rec.reconcile(rig.t - timedelta(seconds=61))
+    assert not _issue(report.issues, LIST_ABSENT_ACTIVE).informational

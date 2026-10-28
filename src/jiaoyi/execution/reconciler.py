@@ -151,9 +151,11 @@ class ThreeWayReconciler:
     ) -> None:
         self._opening_grace_s = opening_grace_s
         self._closing_grace_s = closing_grace_s
+        self._closing_now: set[str] = set()
         self._closing_since: dict[str, datetime] = {}
-        """First round that saw each position's close in flight. In memory only: it drives a
-        label, so a restart restarting the window is harmless."""
+        """First round that saw each position's close in flight, kept until the position leaves
+        the live set so a close that fails and is retried does not restart its window. In memory
+        only: it drives a label, so a restart restarting the window is harmless."""
         self._stop_retry_rounds = executor_stop_retry_rounds
         """停执行器结果未知后再过几轮仍没终止，就再发一次 keep_position=True 停止；0 = 永不。"""
         self._retry_delays = tuple(retry_delays_s)
@@ -227,16 +229,17 @@ class ThreeWayReconciler:
         grace = self._opening_grace_s
         if grace <= 0:
             return None
-        # A round is stamped with its start time, so a position created mid-round is "negative".
-        elapsed = max((now - rec.opened_at).total_seconds(), 0.0)
-        if elapsed > grace:
+        # A round is stamped with its start time, so a position created mid-round is "negative";
+        # beyond the grace in either direction is a clock jump, not an opening.
+        elapsed = (now - rec.opened_at).total_seconds()
+        if abs(elapsed) > grace:
             return None
-        return f"开仓后 {elapsed:.0f} 秒，在开仓宽限 {grace:g} 秒内，记为信息"
+        return f"开仓后 {max(elapsed, 0.0):.0f} 秒，在开仓宽限 {grace:g} 秒内，记为信息"
 
     def _closing_hint(self, position_id: str, now: datetime) -> str | None:
         grace = self._closing_grace_s
         since = self._closing_since.get(position_id)
-        if grace <= 0 or since is None:
+        if grace <= 0 or since is None or position_id not in self._closing_now:
             return None
         elapsed = (now - since).total_seconds()
         if elapsed > grace:
@@ -309,7 +312,13 @@ class ThreeWayReconciler:
                 and t.server_protection.stage in ("exiting", "cleanup")
             )
         }
-        self._closing_since = {pid: self._closing_since.get(pid, now) for pid in closing_now}
+        live_pids = {t.record.position_id for t in live}
+        self._closing_since = {
+            pid: since for pid, since in self._closing_since.items() if pid in live_pids
+        }
+        for pid in closing_now:
+            self._closing_since.setdefault(pid, now)
+        self._closing_now = closing_now
         for t in live:
             if t.record.position_id in pending_direct:
                 issues.append(
@@ -632,7 +641,10 @@ class ThreeWayReconciler:
 
         report = ReconcileReport(ts=now, checked_positions=len(live), issues=issues)
         for issue in issues:
-            await self._send_issue(now, issue)
+            # Telegram dedups by kind and position, whatever the level: a hint sent here would
+            # swallow the real warning for the same position for the whole cooldown.
+            if not issue.informational:
+                await self._send_issue(now, issue)
             self._record_issue(now, issue)
         hints = sum(i.informational for i in issues)
         open_ = sum(not i.fixed and not i.informational for i in issues)
@@ -1475,8 +1487,6 @@ class ThreeWayReconciler:
         if issue.kind in (ReconcileIssueKind.LIFEBOAT_MISSING, ReconcileIssueKind.SIDE_MISMATCH):
             level = AlertLevel.CRITICAL  # 处理好了也要让人知道为什么会发生
         if issue.kind is ReconcileIssueKind.EXTERNAL_CLOSE and issue.fixed:
-            level = AlertLevel.INFO
-        if issue.informational:
             level = AlertLevel.INFO
         title = _TITLES[issue.kind] + ("，已处理" if issue.fixed else "")
         await self._send(

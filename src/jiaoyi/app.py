@@ -913,8 +913,9 @@ class App:
         await self._run_startup_checks()
         try:
             report = await self.m.reconciler.reconcile(now)
-            if not report.clean:
-                log.warning("启动对账发现 %d 个问题", len(report.issues))
+            problems = [i for i in report.issues if not i.informational]
+            if problems:
+                log.warning("启动对账发现 %d 个问题", len(problems))
         except Exception:
             # 对账员已发告警；照常启动，主循环里每轮再对
             log.exception("启动对账失败")
