@@ -47,6 +47,7 @@ from jiaoyi.execution.exchange import (
     ExchangeError,
     ExchangePosition,
     ExchangeStop,
+    IdentifiedCloseCancelledBeforeSend,
     IdentifiedCloseNotSent,
     IdentifiedCloseOrder,
     IdentifiedCloseRejected,
@@ -1145,6 +1146,10 @@ class ThreeWayReconciler:
             exits[symbol] = plan.model_copy(update={"pending": False, "order_status": "NOT_SENT"})
             self._registry.save()
             return issue(f"平仓单 {cid} 没有发出（{e!r}）；下轮按真实余仓换新单号再下", False)
+        except IdentifiedCloseCancelledBeforeSend:
+            exits[symbol] = plan.model_copy(update={"pending": False, "order_status": "NOT_SENT"})
+            self._registry.save()
+            raise
         except IdentifiedCloseUnknown as e:
             if e.observed is None:
                 return issue(f"平仓单 {cid} 结果未知（{e!r}）；只查原 CID，不重发", False)

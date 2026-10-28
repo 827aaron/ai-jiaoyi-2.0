@@ -50,6 +50,7 @@ from jiaoyi.execution.exchange import (
     ExchangeError,
     ExchangePosition,
     ExecutionBook,
+    IdentifiedCloseCancelledBeforeSend,
     IdentifiedCloseNotSent,
     IdentifiedCloseOrder,
     IdentifiedCloseRejected,
@@ -81,6 +82,7 @@ log = logging.getLogger(__name__)
 _ORDER_MARKET = 1
 HostedCloseMode = Literal["hb_first", "direct"]
 _HB_FAILED_TITLE = "hummingbot 没能平掉仓位，已直连币安平仓"
+_HB_STOP_RETRY_BASE_S = 5.0  # 结果未知的只停不平：第 n 次补发至少隔 5×2^n 秒
 _ORDER_LIMIT = 2
 _ORDER_LIMIT_MAKER = 3
 """hummingbot OrderType.LIMIT_MAKER：只挂单（post-only），挂单等回踩进场用。"""
@@ -343,11 +345,15 @@ class HbExecutorAdapter:
         frozen_peak_exit_on: bool = False,
         frozen_peak_exit_after_s: int = 3600,
         hosted_close_mode: HostedCloseMode = "hb_first",
+        hb_stop_unknown_retries: int = 0,
     ) -> None:
         """``hosted_close_mode``：交易所托管仓的平仓顺序。``hb_first`` = 先停 HB 执行器、等它终态并
         核完条件单再下直连平仓（原行为）；``direct`` = 我方决定平仓、HB 执行器仍在跑且没有自己的
         平仓单、保护腿状态都明确时，先按持久化的直连 CID 下只减仓市价单，再只停不平 HB，交易所止损
         一直挂到确认零仓后才撤。其余情况照旧走 ``hb_first``。
+
+        ``hb_stop_unknown_retries``：只停不平的停止请求结果未知、HB 仍报 RUNNING 时，本进程最多
+        再补发几次（退避 5、10、20… 秒）；0 = 不补发（原行为）。
 
         ``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
 
@@ -363,6 +369,9 @@ class HbExecutorAdapter:
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
         self._flat_awaiting_cleanup: set[str] = set()
         self._hb_stop_sent: set[str] = set()
+        self._hb_stop_unknown_retries = hb_stop_unknown_retries
+        self._hb_stop_retries: dict[str, tuple[int, datetime]] = {}
+        """结果未知的停止：本进程已补发几次、上次（或第一次未知）的时刻。"""
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -1340,14 +1349,12 @@ class HbExecutorAdapter:
         try:
             order = await place(rec.symbol, close_side, quantity, cid)
         except (IdentifiedCloseRejected, IdentifiedCloseNotSent) as error:
-            current = self._registry.get(rec.position_id) or tracked
             status = "REJECTED" if isinstance(error, IdentifiedCloseRejected) else "NOT_SENT"
-            self._registry.put(
-                current.model_copy(
-                    update={"direct_close_pending": False, "direct_close_order_status": status}
-                )
-            )
+            self._direct_close_void(rec.position_id, tracked, status)
             return None  # 明确本请求未生效；下轮仅依据新鲜余仓生成下一代
+        except IdentifiedCloseCancelledBeforeSend:
+            self._direct_close_void(rec.position_id, tracked, "NOT_SENT")
+            raise
         except IdentifiedCloseUnknown as error:
             order = error.observed
             if order is None:
@@ -1357,6 +1364,14 @@ class HbExecutorAdapter:
         if order is None or not self._accept_direct_order(tracked, order):
             return None
         return order
+
+    def _direct_close_void(self, pid: str, tracked: TrackedPosition, status: str) -> None:
+        current = self._registry.get(pid) or tracked
+        self._registry.put(
+            current.model_copy(
+                update={"direct_close_pending": False, "direct_close_order_status": status}
+            )
+        )
 
     async def _direct_first_ready(self, tracked: TrackedPosition) -> bool:
         """``direct`` 模式下这次能否先下直连：只在一切都明确时，否则走 ``hb_first``。
@@ -1430,17 +1445,21 @@ class HbExecutorAdapter:
         )
 
     async def _stop_hb_keep_position(self, position_id: str) -> bool:
-        """只停不平：HB 不再动这笔仓。请求前落盘；返回 False = 结果未知或已发过、还在等终态。
+        """只停不平：HB 不再动这笔仓。请求前落盘；返回 False = 没发、结果未知或已发过还在等终态。
 
-        已落盘待停、但不是本进程发的（落盘后、请求前崩溃，或请求丢了），且 HB 仍报 RUNNING：
-        再发一次。keep_position=True 的停止从不卖出，重发无害；结果未知（hb_close_unknown）的
-        照旧不重发，交对账员按轮数重试。"""
+        HB 仍报 RUNNING 时才补发：已落盘待停、但不是本进程发的（落盘后、请求前崩溃），或上次
+        结果未知（hb_close_unknown）且 ``hb_stop_unknown_retries`` 还有次数、退避已到。
+        keep_position=True 的停止从不卖出，重发无害；对账员不替本程序的执行器重发停止。
+        次数按进程计，重启后重新计。"""
         current = self._registry.get(position_id)
         if current is None or current.record.executor_id is None:
             return False
         eid = current.record.executor_id
+        retry = current.hb_close_pending and current.hb_close_unknown
         if current.hb_close_pending:
-            if current.hb_close_unknown or position_id in self._hb_stop_sent:
+            if retry and not self._hb_stop_retry_due(position_id):
+                return False
+            if not retry and position_id in self._hb_stop_sent:
                 return False
             try:
                 detail = await self._api.get_executor(eid)
@@ -1454,29 +1473,76 @@ class HbExecutorAdapter:
         else:
             self._registry.put(current.model_copy(update={"hb_close_pending": True}))
         self._hb_stop_sent.add(position_id)
+        if retry:
+            attempts, _ = self._hb_stop_retries.get(position_id, (0, self._clock()))
+            self._hb_stop_retries[position_id] = (attempts + 1, self._clock())
         try:
             await self._api.stop_executor(eid, keep_position=True)
         except Exception:
             latest = self._registry.get(position_id) or current
             self._registry.put(latest.model_copy(update={"hb_close_unknown": True}))
+            self._hb_stop_retries.setdefault(position_id, (0, self._clock()))
             return False
+        if retry:
+            latest = self._registry.get(position_id) or current
+            self._registry.put(latest.model_copy(update={"hb_close_unknown": False}))
+        self._hb_stop_retries.pop(position_id, None)
         return True
+
+    def _hb_stop_retry_due(self, position_id: str) -> bool:
+        attempts, since = self._hb_stop_retries.get(position_id, (0, self._clock()))
+        self._hb_stop_retries.setdefault(position_id, (attempts, since))
+        if attempts >= self._hb_stop_unknown_retries:
+            return False
+        wait: float = _HB_STOP_RETRY_BASE_S * 2.0**attempts
+        return bool((self._clock() - since).total_seconds() >= wait)
 
     async def _close_evidence(
         self, tracked: TrackedPosition
     ) -> tuple[float | None, IdentifiedCloseOrder | None]:
-        """我方直连单一共成交多少（None = 说不清）和唯一一代的订单回读。"""
+        """我方直连单各代一共成交多少（None = 说不清）和最后一代的订单回读。"""
         generation = tracked.direct_close_generation
         if generation == 0:
             return 0.0, None
         order = await self._recover_direct_order(tracked)
-        if generation > 1:
-            return None, order  # 前几代的成交量没落盘
         if order is not None and order.is_terminal is True:
-            return order.filled_quantity, order
-        if tracked.direct_close_order_status in {"REJECTED", "NOT_SENT"}:
-            return 0.0, None
-        return None, order
+            latest = order.filled_quantity
+        elif order is None and tracked.direct_close_order_status in {"REJECTED", "NOT_SENT"}:
+            latest = 0.0
+        else:
+            return None, order
+        earlier = await self._earlier_direct_fills(tracked)
+        return (None if earlier is None else earlier + latest), order
+
+    async def _earlier_direct_fills(self, tracked: TrackedPosition) -> float | None:
+        """前几代按确定的 CID 逐个回读。只有上一代结果明确（被拒、没发出、终态）才会有下一代，
+        所以查无 = 那一代没进交易所、成交 0；查询出错或回读对不上 = 说不清。"""
+        read = getattr(self._exchange, "close_order", None)
+        if read is None:
+            return None
+        rec = tracked.record
+        close_side = "sell" if rec.side is Side.LONG else "buy"
+        total = 0.0
+        for generation in range(1, tracked.direct_close_generation):
+            cid = f"dc-{rec.position_id}-{generation}"
+            try:
+                order = await read(rec.symbol, cid)
+            except Exception:
+                return None
+            if order is None:
+                continue
+            if not (
+                isinstance(order, IdentifiedCloseOrder)
+                and order.client_order_id == cid
+                and order.symbol == rec.symbol
+                and order.close_side == close_side
+                and order.reduce_only
+                and order.is_terminal is True
+                and math.isfinite(order.filled_quantity)
+            ):
+                return None
+            total += order.filled_quantity
+        return total
 
     def _close_fill(
         self, tracked: TrackedPosition, order: IdentifiedCloseOrder | None

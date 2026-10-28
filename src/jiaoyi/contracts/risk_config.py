@@ -1305,6 +1305,15 @@ class AppConfig(Contract):
         "下只减仓市价单，再只停不平 HB；交易所止损一直挂到确认零仓后才撤。"
         "不满足条件的照旧走 hb_first；提交结果未知照旧只查不重发。改后重启生效。",
     )
+    hb_stop_unknown_retries: int = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="Demo 托管仓：程序发给 HB 的只停不平（keep_position=True）停止结果未知、"
+        "HB 仍报 RUNNING 时，最多再补发几次，间隔 5、10、20… 秒翻倍；这种停止从不卖出，"
+        "补发无害。不补发时零仓也得等 HB 自己结束才撤交易所保护腿。次数按进程计，重启重新计。"
+        "0 = 不补发（原行为）。改后重启生效。",
+    )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
         description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"

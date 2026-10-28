@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,7 @@ from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import (
     CloseFill,
     ExchangeEntryOrder,
+    IdentifiedCloseCancelledBeforeSend,
     IdentifiedCloseNotSent,
     IdentifiedCloseOrder,
     IdentifiedCloseRejected,
@@ -561,3 +564,120 @@ def test_unknown_hosted_close_mode_is_refused(tmp_path: Path):
             connector_name="synthetic-demo",
             hosted_close_mode="fast",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("retries", [0, 3])
+async def test_unknown_hb_stop_is_resent_with_backoff_up_to_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: Side, retries: int
+):
+    h = await armed(tmp_path, side)
+    h.adapter._hb_stop_unknown_retries = retries
+    attempts: list[float] = []
+
+    async def always_lost(executor_id, *, keep_position):
+        assert keep_position is True
+        attempts.append(elapsed(h, START))
+        raise HbApiError("synthetic response lost after accepted")
+
+    monkeypatch.setattr(h.api, "stop_executor", always_lost)
+    await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.exchange.held == 0 and len(attempts) == 1
+    await h.adapter.protection_tick()
+    assert len(attempts) == 1  # 退避未到不重发
+    for _ in range(120):
+        h.clock.advance(1)
+        await h.adapter.protection_tick()
+    assert len(attempts) == 1 + retries
+    gaps = [b - a for a, b in pairwise(attempts)]
+    assert all(gap >= floor for gap, floor in zip(gaps, [5, 10, 20], strict=False))
+    assert h.tracked().record.status is PositionStatus.CLOSING and h.live_stop()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_unknown_hb_stop_resend_success_finishes_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: Side
+):
+    h = await armed(tmp_path, side)
+    h.adapter._hb_stop_unknown_retries = 3
+    original = h.api.stop_executor
+    lost = [True]
+
+    async def lost_once(executor_id, *, keep_position):
+        if lost:
+            lost.pop()
+            raise HbApiError("synthetic response lost after accepted")
+        await original(executor_id, keep_position=keep_position)
+        h.hb_terminates()
+
+    monkeypatch.setattr(h.api, "stop_executor", lost_once)
+    await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.tracked().hb_close_unknown
+    h.clock.advance(60)
+    await h.adapter.protection_tick()
+    await h.adapter.protection_tick()
+    assert h.api.stopped == [("owned-executor", True)]
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert not h.live_stop() and not h.backups()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_cancel_before_request_is_recorded_not_sent_and_reraised(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+
+    async def cancelled() -> None:
+        raise IdentifiedCloseCancelledBeforeSend()
+
+    h.exchange.before_place = cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    current = h.tracked()
+    assert not current.direct_close_pending
+    assert current.direct_close_order_status == "NOT_SENT"
+    h.exchange.before_place = None
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.exchange.direct == [("dc-pos-1-2", 2.0)]
+    assert h.tracked().record.status is PositionStatus.CLOSED
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_leg_reason_survives_an_earlier_not_sent_generation(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+    h.exchange.not_sent_once = True
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+
+    async def stop_takes_everything() -> None:
+        trigger_stop(h, 2.0)
+
+    h.exchange.before_place = stop_takes_everything
+    h.hb_terminates()
+    await h.adapter.protection_tick()  # 第 2 代被只减仓拒绝：止损先平光了
+    h.exchange.before_place = None
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.settled == [(CloseReason.STOP_LOSS, CloseFill())]
+    assert h.exit_alerts()[0].body.endswith("我方成交 0；交易所 stop_loss 腿成交 2")
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_earlier_generation_fill_counts_as_ours(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+    h.exchange.fill_cap = 1.5
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    h.exchange.fill_cap = None
+
+    async def stop_takes_rest() -> None:
+        trigger_stop(h, 0.5)
+
+    h.exchange.before_place = stop_takes_rest
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    h.exchange.before_place = None
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    # 第 1 代成交了 1.5：不是腿平掉的整仓，仍按请求的原因。
+    assert h.settled == [(CloseReason.KEEPER, CloseFill())]
+    assert "直连只减仓单 2 代，我方成交 1.5" in h.exit_alerts()[0].body
