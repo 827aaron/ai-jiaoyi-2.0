@@ -267,41 +267,6 @@ def mark_blocked(status: int, headers: Any, body: str | bytes | None = None) -> 
     return _blocked
 
 
-BAN_FILE = "rest_ban.json"
-
-
-def save_ban(data_dir: str | Path, now: float | None = None) -> None:
-    """Persist this process's live ban to ``data/rest_ban.json`` (and remove an expired one),
-    so a separate command on the same IP can refuse to send requests that would extend it."""
-    path = Path(data_dir) / BAN_FILE
-    now = time.time() if now is None else now
-    try:
-        if _blocked is not None and _blocked.until > now:
-            path.write_text(
-                json.dumps({"status": _blocked.status, "until": _blocked.until}), encoding="utf-8"
-            )
-        else:
-            path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def load_ban(data_dir: str | Path, now: float | None = None) -> RateLimited | None:
-    """A ban another process persisted that has not expired; adopted into this process, so
-    every request here stops until it ends."""
-    global _blocked
-    try:
-        raw = json.loads((Path(data_dir) / BAN_FILE).read_text(encoding="utf-8"))
-        ban = RateLimited(int(raw["status"]), float(raw["until"]))
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if ban.until <= (time.time() if now is None else now):
-        return None
-    if _blocked is None or ban.until > _blocked.until:
-        _blocked = ban
-    return ban
-
-
 def note_used_weight(header: str | None) -> None:
     """记下响应头 ``X-MBX-USED-WEIGHT-1M``（本 IP 这一分钟已用权重，含同机其他程序）。"""
     global _used_weight

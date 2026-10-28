@@ -117,20 +117,6 @@ def test_without_shared_dir_nothing_is_written(
     assert not list(tmp_path.rglob(rest.BAN_FILE))
 
 
-def test_save_ban_writes_live_ban_and_removes_expired(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(rest, "_blocked", rest.RateLimited(418, 2_000.0))
-    rest.save_ban(tmp_path, now=1_000.0)
-    monkeypatch.setattr(rest, "_blocked", None)
-    ban = rest.load_ban(tmp_path, now=1_500.0)
-    assert ban is not None and (ban.status, ban.until) == (418, 2_000.0)
-    assert rest.blocked() is ban
-    assert rest.load_ban(tmp_path, now=2_500.0) is None
-    rest.save_ban(tmp_path, now=2_500.0)
-    assert not (tmp_path / rest.BAN_FILE).exists()
-
-
 def test_save_ban_keeps_a_longer_ban_another_process_wrote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
