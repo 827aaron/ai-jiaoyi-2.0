@@ -27,7 +27,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -60,7 +60,7 @@ from jiaoyi.contracts import (
     Trade,
 )
 from jiaoyi.contracts.position import CloseReason
-from jiaoyi.core import paper_stop
+from jiaoyi.core import close_sources, paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.core.recorder import RoleRecorder
@@ -68,7 +68,7 @@ from jiaoyi.execution.brackets import CloseInProgress
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.gate.jev import JevDecisionModel
-from jiaoyi.keeper.assistant import KeeperAssistant, TransportScorer
+from jiaoyi.keeper.assistant import CLOSE_SOURCE, KeeperAssistant, TransportScorer
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -683,6 +683,7 @@ class Runner:
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
         try:
+            self.assistant.tick(self.app.clock())
             self.assistant.heartbeat(self.app.clock())
         except Exception:
             log.exception("管家助手心跳失败")
@@ -771,24 +772,36 @@ class Runner:
             jev=jev,
             b_scorer=getattr(app, "assistant_b", None),
             cards=cards,
+            alert=self._assistant_alert,
+            day_reset_tz=app.risk_cfg.day_reset_tz,
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
         return assistant
 
-    def _assistant_close(self, pos: PositionRecord, reason: str) -> bool:
-        """管家助手要平：只登记一次，经正常平仓路径（同一笔在平 / 已平就跳过）。同步登记任务，
-        平仓任务排在随后唤醒的管家复查前面。"""
+    def _assistant_close(self, pos: PositionRecord, reason: str) -> str | None:
+        """管家助手要平：过管家同一道平仓前检查，经正常平仓路径另起任务去平（同一笔在平 / 已平
+        就跳过）。返回 None = 已交出去，否则是没平的原因。平仓原因枚举照旧记「持仓管家」，
+        是管家助手平的另记在 ``close_sources.json``。"""
         current = next((p for p in self.positions if p.position_id == pos.position_id), None)
-        if (
-            current is None
-            or current.status is not PositionStatus.OPEN
-            or pos.position_id in self._closing
-        ):
-            return False
-        self._guard_note(Outcome.ACTION, f"{pos.symbol} 平仓：{reason}", self.app.clock())
+        if current is None or current.status is not PositionStatus.OPEN:
+            return "这笔已不在持仓里"
+        if pos.position_id in self._closing:
+            return "这笔正在平"
+        now = self.app.clock()
+        guard = getattr(self.m.keeper, "pre_close_guard", None)
+        if callable(guard):
+            blocked = guard(pos.position_id, now)
+            if blocked:
+                return f"平仓前检查拦下：{blocked}"
+        close_sources.record(self.app.app_cfg.data_dir, pos.position_id, CLOSE_SOURCE, reason, now)
+        self._guard_note(Outcome.ACTION, f"{pos.symbol} 平仓：{reason}", now)
         self._spawn(self.close(current, CloseReason.KEEPER), Role.EXECUTOR)
-        return True
+        return None
+
+    def _assistant_alert(self, title: str, text: str) -> None:
+        if not self._leaving:
+            self._spawn(self.app._alert(AlertLevel.INFO, title, text, "system"))
 
     def _ledger_positions(self) -> list[PositionRecord]:
         """账本里此刻的持仓（含正在开 / 正在平），读不到才用上一轮刷新的列表。"""
@@ -1578,6 +1591,7 @@ class Runner:
             log.exception("读持仓失败，沿用上一次的列表")
             return
         before_status = {p.position_id: p.status for p in self.positions}
+        previous = {p.position_id: p for p in self.positions}
         before = set(before_status)
         self.positions = [
             p
@@ -1591,8 +1605,10 @@ class Runner:
             for p in self.positions
         ):
             self._card_published()  # 异步入场由OPENING真正变OPEN时补查。
-        if before - {p.position_id for p in self.positions}:
+        ended = before - {p.position_id for p in self.positions}
+        if ended:
             self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
+            self._assistant_ended(ended, all_pos, previous)
         live = {p.position_id for p in self.positions}
         for pid in set(self._paper_close_at) - live:
             self._paper_close_at.pop(pid, None)
@@ -1600,6 +1616,21 @@ class Runner:
             self._paper_safe.pop(pid, None)
         self._paper_unseen_logged = {k for k in self._paper_unseen_logged if k[0] in live}
         self._paper_stop_retry()
+
+    def _assistant_ended(
+        self,
+        ended: set[str],
+        latest: Sequence[PositionRecord],
+        previous: Mapping[str, PositionRecord],
+    ) -> None:
+        """仓位结束：交给管家助手记实际出场（账本里结束后的那条优先，没有就用结束前的）。"""
+        by_id = {p.position_id: p for p in latest}
+        for pid in ended:
+            rec = by_id.get(pid) or previous.get(pid)
+            if rec is None:
+                continue
+            snap = self.m.features.snapshot(rec.symbol)
+            self.assistant.on_closed(rec, snap.last_price if snap is not None else None)
 
     def _contract_halt(self, info: ContractInfo) -> None:
         """临时不在交易 → 记进 ``app.halted``（只挡新开仓）；回到 TRADING → 放开。都只记日志。"""
@@ -1701,7 +1732,7 @@ class Runner:
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
-        self.assistant.forget(pos.position_id)
+        self._assistant_ended({pos.position_id}, [], {pos.position_id: pos})
 
     def _restore_keeper_market(self) -> None:
         try:

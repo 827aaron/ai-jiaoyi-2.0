@@ -2007,3 +2007,21 @@ def test_pnl_curve_backfill_from_ledger_and_klines(tmp_path: Path) -> None:
     pnl_curve.record(tmp_path, "2026-10-24", until, 1010.0, 1000.0)
     c2 = pnl_curve.read(tmp_path, "2026-10-24", 1000.0, None, pts)
     assert len(c2.points) == len(pts) + 1 and c2.points[-1].est is False
+
+
+def test_history_shows_who_closed_from_close_sources(tmp_path: Path) -> None:
+    from jiaoyi.core import close_sources
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    raw = json.loads((tmp_path / "positions.json").read_text())
+    pid, t = next((k, v) for k, v in raw["positions"].items() if v["record"].get("closed_at"))
+    t["record"]["close_reason"] = "keeper"
+    (tmp_path / "positions.json").write_text(json.dumps(raw))
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    before = build_history(files, RISK, NOW, "today", include_tests=True)
+    assert before.rows[0].close_source is None
+    close_sources.record(tmp_path, pid, "keeper_assistant", "两个模型一致", NOW)
+    after = build_history(files, RISK, NOW, "today", include_tests=True)
+    assert after.rows[0].close_reason == "keeper"
+    assert after.rows[0].close_source == "keeper_assistant"

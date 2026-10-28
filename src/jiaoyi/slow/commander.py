@@ -447,8 +447,8 @@ class BattleCardCommander:
         self._market_review_enabled: Callable[[], bool] = lambda: True
         self._on_market: Callable[[MarketView], None] | None = None
         self._on_card: Callable[[], None] | None = None
-        self._on_flip_pending: Callable[[str, str], None] | None = None
-        # 待确认翻转的那场会的结论（上卡前已夹好、盖好章）：管家助手确认时直接换上它
+        self._on_flip_pending: Callable[[str, FlipCandidate], None] | None = None
+        # 待确认翻转的那场会的结论（上卡前已夹好、盖好章）：管家助手确认时换上的就是它
         self._flip_fresh: dict[str, CardSymbol] = {}
         self._event_day = ""
         self._event_count = 0
@@ -672,26 +672,25 @@ class BattleCardCommander:
                 summary=out.summary[:200],
                 output={"card_flip": out.event, **(out.detail or {})},
             )
-        if out.event == "pending" and self._on_flip_pending is not None:
-            try:
-                self._on_flip_pending(symbol, str((out.detail or {}).get("candidate", "")))
+        cand = self._flips.get(symbol) if out.event == "pending" else None
+        if cand is not None and self._on_flip_pending is not None:
+            try:  # 只交出去（对方另起任务），这里不等：出卡路径保持没有 await
+                self._on_flip_pending(symbol, cand)
             except Exception:
                 logger.exception("%s 待确认翻转交给管家助手失败，照旧等下一场会", symbol)
         return out.card_symbol
 
     # ------------------------------------------------------------ 管家助手
-    def set_on_flip_pending(self, callback: Callable[[str, str], None] | None) -> None:
-        """翻转候选出现（还没确认）时同步回调 (币, 候选方向 long / short / neutral)。"""
+    def set_on_flip_pending(self, callback: Callable[[str, FlipCandidate], None] | None) -> None:
+        """翻转候选刚记下（还没确认）时同步回调（币, 那一刻的候选）；回调方不能在这里等。"""
         self._on_flip_pending = callback
 
-    def flip_candidate(self, symbol: str) -> str | None:
-        """这个币待确认翻转的候选方向；没有、或确认要换上的结论已不在手上（重启过）为 None。"""
-        cand = self._flips.get(symbol)
-        return cand.candidate if cand is not None and symbol in self._flip_fresh else None
-
-    def confirm_flip(self, symbol: str, direction: str, why: str, detail: dict[str, Any]) -> bool:
-        """管家助手的确认会和待确认翻转同向：换上那场整会的结论，和第 N 场会确认时一样上卡、
-        唤醒管家（反向卡 / 中性卡规则照常）。候选已变、卡上那条已换掉就不动，返回 False。"""
+    def confirm_flip(
+        self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
+    ) -> bool:
+        """管家助手确认待确认翻转：一步同步做完（中间没有 await）。翻转簿里还是交出去时那个候选
+        （方向、场数、首次出现、留在卡上的那条指令都没变），卡上生效的指令也还是它，才换上那场会
+        的结论，和第 N 场会确认时一样上卡、唤醒管家；否则什么都不动，返回 False。"""
         cand, fresh, card = self._flips.get(symbol), self._flip_fresh.get(symbol), self._card
         in_force = card.for_symbol(symbol) if card is not None else None
         if (
@@ -699,13 +698,28 @@ class BattleCardCommander:
             or fresh is None
             or card is None
             or in_force is None
-            or cand.candidate != direction
+            or (cand.candidate, cand.count, cand.first_seen, cand.held)
+            != (expected.candidate, expected.count, expected.first_seen, expected.held)
             or held_key(in_force) != cand.held
         ):
             return False
         self._flips.discard(symbol)
         self._flip_fresh.pop(symbol, None)
-        self._put_symbol(fresh, "event:keeper_assistant_flip", 0.0)
+        symbols = [fresh if s.symbol == symbol else s for s in card.symbols]
+        card = card.model_copy(
+            update={
+                "version": card.version + 1,
+                "symbols": symbols,
+                "refresh_reason": "event:keeper_assistant_flip",
+            }
+        )
+        if self._round_symbols is not None:
+            self._round_symbols[symbol] = fresh
+            self._round_event_merges += 1
+        self._card = card
+        self._notify_card()
+        self._save_card()
+        self._record_card(card, time.monotonic())
         self._write(
             symbol=symbol,
             outcome=Outcome.INFO,
@@ -713,29 +727,6 @@ class BattleCardCommander:
             output={"card_flip": "confirmed", "by": "keeper_assistant", **detail},
         )
         return True
-
-    def _put_symbol(self, new: CardSymbol, reason: str, cost: float) -> None:
-        card = self._card
-        assert card is not None
-        symbol = new.symbol
-        symbols = [new if s.symbol == symbol else s for s in card.symbols]
-        if all(s.symbol != symbol for s in card.symbols):
-            symbols.append(new)
-        card = card.model_copy(
-            update={
-                "version": card.version + 1,
-                "symbols": symbols,
-                "refresh_reason": reason,
-                "llm_cost_usd": round(card.llm_cost_usd + cost, 6),
-            }
-        )
-        if self._round_symbols is not None:
-            self._round_symbols[symbol] = new
-            self._round_event_merges += 1
-        self._card = card
-        self._notify_card()
-        self._save_card()
-        self._record_card(card, time.monotonic(), cost=0.0)
 
     def _flip_dropped(self, symbol: str, lost: FlipCandidate, why: str) -> None:
         self._write(

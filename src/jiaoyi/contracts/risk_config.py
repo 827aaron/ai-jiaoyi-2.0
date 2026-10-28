@@ -577,7 +577,7 @@ class FastLoopConfig(Contract):
         "A 固定是 Jev。不写或调不通 = 没有 B，算两个不一致，只记录，从不只凭 A 平仓或确认。",
     )
     keeper_assistant_min_p: float = Field(
-        default=0.5,
+        default=0.6,
         ge=0.5,
         le=0.99,
         description="p(是) 至少这么多才算答「是」（两个模型各自都要过）。",
@@ -589,11 +589,11 @@ class FastLoopConfig(Contract):
         description="是非题里的时间范围：「<币> 接下来 <这里> 会上涨吗？」。",
     )
     keeper_assistant_timeout_s: float = Field(
-        default=10.0,
-        ge=1.0,
-        le=120.0,
-        description="每个模型每次最多等几秒（A、B 各自算；连续出错的冷却也是管家助手自己的，"
-        "不连累管家和拍板人）。",
+        default=8.0,
+        ge=0.2,
+        le=60.0,
+        description="两个模型合起来最多等几秒（同时问，一起算）；超时两个都算没答上，不动。"
+        "连续出错的冷却是管家助手自己的，不连累管家和拍板人。",
     )
     keeper_assistant_gap_s: int = Field(
         default=120,
@@ -616,15 +616,17 @@ class FastLoopConfig(Contract):
     )
     keeper_assistant_flip_confirm: bool = Field(
         default=False,
-        description="开 = 军师团的会给出待确认翻转（card_flip_confirm ≥ 2 时的 1/N）后马上问两个"
-        "模型「会上涨 / 下跌吗」（持有、没持有的币都算）；都答「是」就确认，卡上换成那场会的"
-        "结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。转中性的候选不问。",
+        description="开 = 军师团的会给出待确认翻转（card_flip_confirm ≥ 2 时的 1/N）后另起一件事"
+        "问两个模型「会上涨 / 下跌吗」（持有、没持有的币都算）；都答「是」、候选和卡上那条指令"
+        "都没变，就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等"
+        "下一场会。转中性的候选不问。",
     )
     keeper_assistant_concurrency: int = Field(
-        default=4,
-        ge=2,
-        le=16,
-        description="管家助手同时最多问几次模型（一次判断问两个，算两个），和军师团开会的名额分开。",
+        default=2,
+        ge=1,
+        le=2,
+        description="管家助手同时最多问几次模型（一次判断问两个，算两个；1 = 两个排队问）。"
+        "和军师团开会的名额分开；持仓的事排在翻转确认前面。",
     )
     keeper_thesis_take_max_age_s: float = Field(
         default=180.0,

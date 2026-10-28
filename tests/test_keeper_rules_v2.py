@@ -698,3 +698,17 @@ def test_protection_exit_in_flight_identity_ignores_leg_steps() -> None:
         assert got is not None
         keys.add(got[:2])
     assert keys == {("exiting", "exiting")}
+
+
+async def test_pre_close_guard_blocks_while_exit_in_flight_and_marks_the_round(
+    now: datetime,
+) -> None:
+    state: dict[str, tuple[str, str, str] | None] = {"v": ("exiting", "exiting", "x")}
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, GUARD, review_interval_s=20.0, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    assert "交易所保护腿已触发或正在退出" in (k.pre_close_guard(pos.position_id, now) or "")
+    state["v"] = None
+    assert k.pre_close_guard(pos.position_id, now) is None
+    again = await k.review(pos, now + timedelta(seconds=5))  # 管家同一轮不再发第二次
+    assert again.action == "hold" and "这一轮已发过平仓请求" in again.reason

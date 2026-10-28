@@ -2185,7 +2185,7 @@ P.history = () => {
     const shutTip = t.exit_filled_at ? ` title="币安成交 ${hms(t.exit_filled_at)}；程序结账 ${hms(t.closed_at)}${lag > 0 ? `（晚 ${lag} 秒）` : ""}"` : "";
     const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
     return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap"${shutTip}>${when(shut)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
+      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(t.close_source === "keeper_assistant" ? "管家助手" : REASON[t.close_reason] || t.close_reason || "—")}</td>
       <td class="num nowrap">${dur(new Date(shut) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}${mainnetCells(t)}</tr>`;
   }).join("");
   window.__recs = d.rejected;
@@ -2217,7 +2217,7 @@ function exportCsv() {
   const head = ["平仓时间", "开仓时间", "币种", "类型", "方向", "数量", "名义金额U", "杠杆", "开仓价", "平仓价", "止损价", "止盈价", "信号", "平仓原因", "最高浮盈采样估算U（未扣费）", "毛利U", "手续费U", "净盈亏U", "按主网价格算净盈亏U", "主网差bp", "主网差R", "价差U", "费率差U", "开平单类型", "position_id", "程序结账时间"];
   // 文字字段以 = + - @ 开头时加 ' 前缀，免得表格软件当公式执行（数字照常）
   const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
-  const lines = d.rows.map((t) => [closeTime(t), t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.unfilled ? "未成交" : t.close_reason, t.keeper_peak_usdt ?? "", t.pnl_missing || t.unfilled ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing || t.unfilled ? "" : t.fees_usdt, t.pnl_missing || t.unfilled ? "" : t.pnl_usdt, t.mainnet_net_usdt ?? "", t.mainnet_gap_bp ?? "", t.mainnet_gap_r ?? "", t.mainnet_price_gap_usdt ?? "", t.mainnet_fee_gap_usdt ?? "", (t.mainnet_legs || []).join("/"), t.position_id, t.closed_at].map(q).join(","));
+  const lines = d.rows.map((t) => [closeTime(t), t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.unfilled ? "未成交" : t.close_source === "keeper_assistant" ? "keeper_assistant" : t.close_reason, t.keeper_peak_usdt ?? "", t.pnl_missing || t.unfilled ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing || t.unfilled ? "" : t.fees_usdt, t.pnl_missing || t.unfilled ? "" : t.pnl_usdt, t.mainnet_net_usdt ?? "", t.mainnet_gap_bp ?? "", t.mainnet_gap_r ?? "", t.mainnet_price_gap_usdt ?? "", t.mainnet_fee_gap_usdt ?? "", (t.mainnet_legs || []).join("/"), t.position_id, t.closed_at].map(q).join(","));
   const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -2627,7 +2627,7 @@ const PLAIN = {
   keeper_assistant_b_model: "模型 B 的 id",
   keeper_assistant_min_p: "p(是) 至少多少才算答「是」",
   keeper_assistant_horizon: "是非题问多长时间",
-  keeper_assistant_timeout_s: "每个模型最多等几秒",
+  keeper_assistant_timeout_s: "两个模型合起来最多等几秒",
   keeper_assistant_gap_s: "同一个币两次问至少隔几秒",
   keeper_assistant_key_level: "价格穿过关键位也问",
   keeper_assistant_close: "两个都答「是」就平仓",
@@ -2747,13 +2747,13 @@ const HINT = {
   keeper_assistant_b_model: "经 OpenRouter 的 SystemOne 接口调（和 Jev 走 OpenRouter 时一样）。留空或调不通 = 没有 B，一律算不一致，只记录，从不只凭 Jev 平仓或确认",
   keeper_assistant_min_p: "两个模型各自都要过这条线",
   keeper_assistant_horizon: "「<币> 接下来 <这里> 会上涨吗？」",
-  keeper_assistant_timeout_s: "A、B 各自算；连续出错后的冷却是管家助手自己的，不连累管家和拍板人",
+  keeper_assistant_timeout_s: "两个同时问、一起算，超时两个都算没答上、不平；连续出错后的冷却是管家助手自己的，不连累管家和拍板人",
   keeper_assistant_gap_s: "0 = 不隔，只是同一个币正在问时不重复问",
   keeper_assistant_key_level: "持空时价格往上穿过卡上的关键位、持多时往下穿过，也问两个模型",
-  keeper_assistant_close: "走正常平仓路径，同一笔已在平就不重复。关 = 只记录",
+  keeper_assistant_close: "先过管家同一道平仓前检查，再走正常平仓路径，同一笔已在平就不重复；平仓原因记「持仓管家」，历史页显示「管家助手」。关 = 只记录（照样记「本来会平」，jiaoyi keeper-assistant-report 看对比）",
   keeper_assistant_b_record_only: "开着时两个回答都记下，但不平仓、不确认翻转。关掉后两个都答「是」才动手",
-  keeper_assistant_flip_confirm: "军师团的会改判方向、要等第二场会确认时，马上问两个模型会不会往新方向走；都答「是」就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。转中性的候选不问",
-  keeper_assistant_concurrency: "一次判断问两个模型，算两个；和军师团开会的名额分开",
+  keeper_assistant_flip_confirm: "军师团的会改判方向、要等第二场会确认时，出卡照旧记下候选，另起一件事问两个模型会不会往新方向走；都答「是」、候选和卡上那条指令都没变，就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。这个币的持仓判断在问时推后再问。转中性的候选不问",
+  keeper_assistant_concurrency: "最多 2：一次判断问两个模型，算两个；1 = 两个排队问。和军师团开会的名额分开，持仓的事排在翻转确认前面",
   notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。保存后几秒内生效",
   notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。保存后几秒内生效",
   notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",

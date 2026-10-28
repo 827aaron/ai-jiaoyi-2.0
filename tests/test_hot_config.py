@@ -168,7 +168,7 @@ def test_keeper_assistant_settings_edit_on_panel_and_apply_without_restart(
         "keeper_assistant_b_model": "microsoft/decision-1",
         "keeper_assistant_gap_s": 60,
         "keeper_assistant_horizon": "1 小时",
-        "keeper_assistant_concurrency": 6,
+        "keeper_assistant_concurrency": 1,
     }
     _edit(paths, data, "fast_loop", changes)
     app.reload_config()

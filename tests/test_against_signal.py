@@ -675,3 +675,74 @@ async def test_runner_reverse_signal_on_unheld_coin_does_not_ask(
     await r.on_event(_trade(now))
     await _settle(r)
     assert sa.calls == [] and r.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+class GuardedKeeper(NotingKeeper):
+    def __init__(self, blocked: str | None) -> None:
+        super().__init__()
+        self.blocked = blocked
+        self.asked: list[str] = []
+
+    def pre_close_guard(self, position_id: str, now: datetime) -> str | None:
+        self.asked.append(position_id)
+        return self.blocked
+
+
+async def test_runner_assistant_close_passes_the_keeper_close_guard_and_records_its_source(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    k = GuardedKeeper("交易所保护腿已触发或正在退出")
+    r.m.keeper = k  # type: ignore[misc]
+    assert r._assistant_close(p, "管家助手：反向信号，两个模型一致") is not None
+    await _settle(r)
+    assert r.app.m.executor.closed == [] and close_sources.read(tmp_path) == {}  # type: ignore[attr-defined]
+    k.blocked = None
+    assert r._assistant_close(p, "管家助手：反向信号，两个模型一致") is None
+    await _settle(r)
+    assert k.asked == ["pos-1", "pos-1"]
+    assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
+    assert close_sources.read(tmp_path)["pos-1"]["source"] == "keeper_assistant"
+
+
+async def test_runner_assistant_jev_errors_never_touch_the_gate_jev(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.contracts import FastLoopConfig
+    from jiaoyi.core.hotconfig import patch_inplace
+    from jiaoyi.gate.jev import JevDecisionModel
+    from tests.test_keeper_assistant import ON, Scorer
+
+    p = _position_now(now)
+    app = _app(tmp_path, now)
+    gate = JevDecisionModel(
+        MockJevTransport(fail=RuntimeError("503")), FastLoopConfig(), timeout_ms=1000
+    )
+    app.m = dataclasses.replace(
+        app.m,
+        executor=LedgerExecutor([p]),
+        trigger=AgainstTrigger([]),
+        features=Feats(now),
+        keeper=NotingKeeper(),
+        patrol=FakePatrol(),
+        cards=_Cards(),
+        decision_model=gate,
+    )
+    r = Runner(app)
+    r.positions = [p]
+    fl = app.app_cfg.fast_loop
+    patch_inplace(
+        fl,
+        fl.model_copy(update={**ON, "keeper_assistant_gap_s": 0}),
+        {**ON, "keeper_assistant_gap_s": 0},
+    )
+    r.assistant._b_factory = lambda model: Scorer(0.9)
+    for _ in range(5):
+        r.assistant.on_reverse_signal(p, c.Side.SHORT, "x")
+        await _settle(r)
+    assert gate.consecutive_errors == 0 and gate.health is c.Health.OK
+    assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
