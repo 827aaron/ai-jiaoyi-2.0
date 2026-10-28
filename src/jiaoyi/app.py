@@ -139,7 +139,7 @@ from jiaoyi.slow.market_log import MarketLog
 from jiaoyi.slow.meeting_live import sweep_interrupted
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
 from jiaoyi.slow.review import CardJournal
-from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
+from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides, trusted_venue_off
 from jiaoyi.slow.settings import (
     SlowConfig,
     market_desk_conflict,
@@ -1038,7 +1038,13 @@ class App:
         unavailable = getattr(self.lot_rules, "unavailable", None)
         if self.slow_cfg.screener.exclude_untradeable and callable(unavailable):
             syms = cards.card_symbols()
-            gone = unavailable(syms) or {} if syms else {}
+            if syms:
+                # judged against the pool too, so a partial fetch reads the same as in the screener
+                pool = [e.symbol for e in self.pool.in_pool] if self.pool is not None else []
+                judged = [*syms, *pool]
+                label = "实盘" if self.app_cfg.mode == RunMode.LIVE else "Demo"
+                gone = trusted_venue_off(unavailable(judged), judged, label, "作战卡")
+                gone = {k: v for k, v in gone.items() if k in set(syms)}
         cards.set_untradeable(gone)
 
     async def credit_tick(self) -> None:

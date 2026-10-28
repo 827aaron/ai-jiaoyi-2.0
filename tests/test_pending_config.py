@@ -114,6 +114,15 @@ def test_accepts_leverage_account_and_jev_switches(tmp_path: Path) -> None:
     assert cfg.fast_loop.leverage_clamp_to_bracket is True
 
 
+def test_accepts_screener_exclude_untradeable(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(paths, "slow", "[screener]\nexclude_untradeable = false\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert load_slow_config(paths.slow, cfg.profile).screener.exclude_untradeable is False
+
+
 def test_no_pending_is_noop(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     text = paths.app.read_text(encoding="utf-8")
