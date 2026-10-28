@@ -962,10 +962,8 @@ class Runner:
                     Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡或大盘方向已变，重新等信号", now
                 )
                 return
-            try:
-                account = await self._read_account()
-            except Exception as e:
-                self._account_read_failed(signal, card, e)
+            account = await self._read_account(signal, card)
+            if account is None:
                 return
             now = self.app.clock()
             fresh = self.m.cards.current(now)
@@ -995,30 +993,58 @@ class Runner:
             self.positions = [*self.positions, pos]
             self._card_published()  # 开仓在途期间卡可能更新，立即按当前卡复核。
 
-    async def _read_account(self) -> AccountState:
+    async def _read_account(self, signal: CandidateSignal, card: BattleCard) -> AccountState | None:
+        """Account state for the open, or None after recording why this signal is given up.
+
+        A re-read only waits while the signal can still pass the guard's age check, and a
+        re-read that succeeds is checked again for pause / restart and staleness, because the
+        caller's checks ran before the wait."""
         retries = self.app.app_cfg.account_read_retries
+        max_age = self.app.app_cfg.fast_loop.signal_max_age_s
         for attempt in range(retries + 1):
             try:
-                return await self.m.executor.account()
+                account = await self.m.executor.account()
             except Exception as e:
+                err = f"{type(e).__name__}: {e}"
                 if attempt == retries:
-                    raise
+                    self._account_reject(signal, card, f"读账户失败，本信号放弃：{err}", e)
+                    return None
+                left = max_age - (self.app.clock() - signal.ts).total_seconds()
+                if left <= ACCOUNT_RETRY_S:
+                    why = (
+                        f"读账户失败，信号只剩 {max(left, 0.0):.1f} 秒有效，不再重读，"
+                        f"本信号放弃：{err}"
+                    )
+                    self._account_reject(signal, card, why, e)
+                    return None
                 log.warning(
                     "读账户失败（第 %d 次），%g 秒后重读：%r", attempt + 1, ACCOUNT_RETRY_S, e
                 )
                 await asyncio.sleep(ACCOUNT_RETRY_S)
+                continue
+            if attempt == 0:
+                return account
+            if self.app.paused is not None or self._restarting:
+                self._account_reject(signal, card, "重读账户期间已暂停或正在重启，不开仓", None)
+                return None
+            age = (self.app.clock() - signal.ts).total_seconds()
+            if age > max_age:
+                why = f"重读账户后信号已过 {age:.1f} 秒（上限 {max_age:g} 秒），本信号放弃"
+                self._account_reject(signal, card, why, None)
+                return None
+            return account
         raise AssertionError("unreachable")
 
-    def _account_read_failed(
-        self, signal: CandidateSignal, card: BattleCard, error: BaseException
+    def _account_reject(
+        self, signal: CandidateSignal, card: BattleCard, why: str, error: BaseException | None
     ) -> None:
         """The gate has already been paid for this signal, so the loss is recorded where the
         panel shows rejects instead of vanishing with the task."""
-        log.warning("%s 读账户失败，本信号放弃：%r", signal.symbol, error)
+        log.warning("%s %s", signal.symbol, why)
         rec = self.app.recorders.get(Role.RISK_GUARD)
         if rec is None:
             return
-        why = f"读账户失败，本信号放弃：{type(error).__name__}: {error}"[:300]
+        why = why[:300]
         side = "多" if signal.side_hint == Side.LONG else "空"
         rec.record(
             self.app.clock(),
@@ -1032,7 +1058,7 @@ class Runner:
                 "reasons": [why],
                 "detail": {
                     "by": "account_read",
-                    "error": repr(error)[:500],
+                    "error": repr(error)[:500] if error is not None else None,
                     "retries": self.app.app_cfg.account_read_retries,
                 },
             },

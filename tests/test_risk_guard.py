@@ -715,7 +715,9 @@ def test_leverage_clamped_to_bracket_resizes_by_margin(tmp_path: Path, now: date
     it = v.intent
     assert it.leverage == 2
     assert detail["bracket_max_leverage"] == 2
-    assert detail["leverage_clamped"] == "杠杆 5x 超过币安 BTCUSDT 上限 2x，按 2x 算"
+    assert detail["leverage_clamped"] == (
+        "杠杆 5x 超过币安 BTCUSDT 能开这么大仓位的上限，按 2x 算（最高档 2x）"
+    )
     # 500 * 0.95 / (1/2 + 5bp) = 949.05 U, floored to the 0.001 lot; risk shrinks, never grows.
     assert detail["binding"] == "可用保证金"
     assert it.quantity == pytest.approx(0.013)
@@ -723,12 +725,31 @@ def test_leverage_clamped_to_bracket_resizes_by_margin(tmp_path: Path, now: date
 
 
 def test_leverage_bracket_notional_cap_binds(tmp_path: Path, now: datetime) -> None:
-    tiers = (LeverageBracket(500.0, 20), LeverageBracket(800.0, 5), LeverageBracket(9e9, 1))
+    tiers = (LeverageBracket(500.0, 20), LeverageBracket(1_020.0, 5), LeverageBracket(9e9, 1))
     v, detail = _bracket_review(tmp_path, now, tiers, leverage_clamp_to_bracket=True)
     assert v.intent is not None and v.intent.leverage == 5
     assert "leverage_clamped" not in detail
     assert detail["binding"] == "币安杠杆分层名义上限"
-    assert v.intent.quantity == pytest.approx(0.011)  # 800 U / 68000, floored
+    # 0.98 * 1020 = 999.6 U -> 0.014 (the full 1020 U would have allowed 0.015).
+    assert v.intent.quantity == pytest.approx(0.014)
+
+
+def test_bracket_choice_prefers_lower_leverage_with_larger_tier(now: datetime) -> None:
+    """At 10x the 5k tier would cap the trade; 5x allows 25k, so the guard picks 5x."""
+    tiers = (LeverageBracket(5_000.0, 10), LeverageBracket(25_000.0, 5))
+    cfg = FAST.model_copy(update={"leverage_clamp_to_bracket": True})
+    g = _Guard(RISK.model_copy(update={"max_leverage": 15}), cfg, _BracketLots(tiers))
+    v = g.review(signal(now), jev(), card(now), account(now), now)
+    assert v.intent is not None, v.reasons
+    # Risk notional 75 U / 120 * 68000 = 42.5k, single-trade cap 20k binds at 5x.
+    assert v.intent.leverage == 5
+    assert v.intent.quantity == pytest.approx(0.294)
+    assert v.intent.risk_usdt <= 75.0
+    small = (LeverageBracket(50_000.0, 10), LeverageBracket(250_000.0, 5))
+    v = _Guard(RISK.model_copy(update={"max_leverage": 15}), cfg, _BracketLots(small)).review(
+        signal(now), jev(), card(now), account(now), now
+    )
+    assert v.intent is not None and v.intent.leverage == 10  # tie on size keeps more leverage
 
 
 def test_unknown_bracket_keeps_leverage(tmp_path: Path, now: datetime) -> None:

@@ -165,6 +165,9 @@ class LotRules:
     """排了下架的时间（deliveryDate）；None = 没排。"""
 
 
+TIER_CAP_SLACK = 0.98
+"""Fraction of a Binance leverage tier's notional cap the guard sizes up to."""
+
 DELIST_WINDOW = timedelta(days=7)
 """排了下架、离下架不到这么久就不开新仓（新信号研究 10-24「不做」过滤）。"""
 
@@ -863,7 +866,10 @@ class RiskGuardImpl:
             )
         tier_cap: float | None = None
         if fast.leverage_clamp_to_bracket:
-            lev, tier_cap = self._bracket_clamp(signal.symbol, lev, detail)
+            floor = cs.leverage.min if binding_card else 1.0
+            lev, tier_cap = self._bracket_choice(
+                signal.symbol, lev, notional, account, detail, floor
+            )
             if binding_card and lev < cs.leverage.min:
                 reasons.append(
                     f"币安 {signal.symbol} 杠杆上限 {lev}x 低于作战卡杠杆下限 {cs.leverage.min}"
@@ -879,9 +885,7 @@ class RiskGuardImpl:
             - account.open_notional_by_category.get(cs.category, 0.0),
             # hummingbot 下单前按「名义 ÷ 杠杆 + 开仓手续费」核保证金，不够就整笔不下
             # （BTC 那几笔：要 2,871U，可用 2,852U）。按同样的口径算，再留一点余量
-            "可用保证金": account.available_usdt
-            * (1.0 - fast.margin_safety_pct / 100.0)
-            / (1.0 / lev + risk.taker_fee_bps / 1e4),
+            "可用保证金": self._margin_cap(account, lev),
         }
         book_cap = self._book_cap(f, side)
         if book_cap is not None and waived is None:
@@ -977,11 +981,31 @@ class RiskGuardImpl:
             approved_at=now,
         )
 
-    def _bracket_clamp(
-        self, symbol: str, lev: int, detail: dict[str, float | str]
+    def _margin_cap(self, account: AccountState, lev: int) -> float:
+        return (
+            account.available_usdt
+            * (1.0 - self._fast.margin_safety_pct / 100.0)
+            / (1.0 / lev + self._risk.taker_fee_bps / 1e4)
+        )
+
+    def _bracket_choice(
+        self,
+        symbol: str,
+        lev: int,
+        risk_notional: float,
+        account: AccountState,
+        detail: dict[str, float | str],
+        floor: float = 1.0,
     ) -> tuple[int, float | None]:
-        """(leverage clamped to the symbol's Binance maximum, the notional cap of the highest tier
-        that still allows it). Unknown tiers keep ``lev`` and add no cap, as with the switch off."""
+        """(leverage, notional cap) within the symbol's Binance tiers that allows the largest
+        position: each tier's leverage (never above ``lev``) is scored by
+        min(risk notional, margin cap at that leverage, that leverage's tier cap); ties keep the
+        higher leverage, and leverages below ``floor`` (a binding card's minimum) are skipped
+        unless nothing else is left. Unknown tiers keep ``lev`` and add no cap, as with the
+        switch off.
+
+        The tier cap is shaved by ``TIER_CAP_SLACK``: Binance checks it against its own price
+        (mark, or a pullback limit above last for shorts), not the last trade sized here."""
         get = getattr(self._lots, "leverage_brackets", None)
         tiers = get(symbol) if callable(get) else None
         if not tiers:
@@ -989,11 +1013,21 @@ class RiskGuardImpl:
             return lev, None
         top = max(t.initial_leverage for t in tiers)
         detail["bracket_max_leverage"] = top
-        if lev > top:
-            detail["leverage_clamped"] = f"杠杆 {lev}x 超过币安 {symbol} 上限 {top}x，按 {top}x 算"
-            lev = top
-        cap = max(t.notional_cap for t in tiers if t.initial_leverage >= lev)
-        return lev, cap
+        best: tuple[float, int, float] | None = None
+        cands = sorted({min(lev, t.initial_leverage) for t in tiers}, reverse=True)
+        for cand in [x for x in cands if x >= floor] or cands[:1]:
+            cap = TIER_CAP_SLACK * max(t.notional_cap for t in tiers if t.initial_leverage >= cand)
+            size = min(risk_notional, self._margin_cap(account, cand), cap)
+            if best is None or size > best[0]:
+                best = (size, cand, cap)
+        assert best is not None
+        _, chosen, cap = best
+        if chosen < lev:
+            detail["leverage_clamped"] = (
+                f"杠杆 {lev}x 超过币安 {symbol} 能开这么大仓位的上限，按 {chosen}x 算"
+                f"（最高档 {top}x）"
+            )
+        return chosen, cap
 
     def _trailing(self, stop_pct: float) -> tuple[float | None, float | None, str]:
         """保本 / 移动止损（持仓管家的开关，默认关）→ hummingbot trailing_stop（启动线, 回撤距离）。

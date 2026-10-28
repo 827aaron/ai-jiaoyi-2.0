@@ -823,6 +823,95 @@ async def test_account_read_retries_then_opens(
     assert [x.output["detail"]["retries"] for x in _guard_records(r, now)] == [2]
 
 
+class MovingClock:
+    def __init__(self, t: datetime) -> None:
+        self.t = t
+
+    def __call__(self) -> datetime:
+        return self.t
+
+
+class SlowSecondRead(FlakyAccount):
+    """The first read fails; during the second read ``during`` runs, then it succeeds."""
+
+    def __init__(self, during: Callable[[], None]) -> None:
+        super().__init__(failures=1)
+        self.during = during
+
+    async def account(self) -> c.AccountState:
+        if self.reads == 1:
+            self.during()
+        return await super().account()
+
+
+async def test_no_reread_when_signal_is_about_to_expire(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.ACCOUNT_RETRY_S", 1.0)
+    ex = FlakyAccount(failures=1)
+    r = _account_wire(tmp_path, now, ex, retries=2)
+    age = r.app.app_cfg.fast_loop.signal_max_age_s - 0.5
+    sig = h.signal(now).model_copy(update={"ts": now - timedelta(seconds=age)})
+    await r.handle_signal(sig)
+    assert ex.reads == 1 and ex.opened == []
+    [rec] = _guard_records(r, now)
+    assert "信号只剩 0.5 秒有效，不再重读" in rec.summary
+
+
+async def test_reread_success_but_signal_stale_is_rejected(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.ACCOUNT_RETRY_S", 0.0)
+    clock = MovingClock(now)
+
+    def later() -> None:
+        clock.t = now + timedelta(seconds=6)
+
+    ex = SlowSecondRead(later)
+    r = _account_wire(tmp_path, now, ex, retries=1)
+    r.app.clock = clock
+    await r.handle_signal(h.signal(now))
+    assert ex.reads == 2 and ex.opened == []
+    [rec] = _guard_records(r, clock.t)
+    assert "重读账户后信号已过 6.0 秒（上限 5 秒）" in rec.summary
+
+
+async def test_reread_success_after_pause_is_rejected(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.ACCOUNT_RETRY_S", 0.0)
+    holder: list[Runner] = []
+
+    def pause() -> None:
+        holder[0].app.paused = {"since": now.isoformat(), "reason": "test"}
+
+    ex = SlowSecondRead(pause)
+    r = _account_wire(tmp_path, now, ex, retries=1)
+    holder.append(r)
+    await r.handle_signal(h.signal(now))
+    assert ex.reads == 2 and ex.opened == []
+    [rec] = _guard_records(r, now)
+    assert "重读账户期间已暂停或正在重启" in rec.summary
+
+
+async def test_spawned_task_cancel_is_not_an_error(
+    tmp_path: Path, now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    r = Runner(_app(tmp_path, now))
+
+    async def forever() -> None:
+        await asyncio.sleep(3600)
+
+    r._spawn(forever(), c.Role.RISK_GUARD)
+    [task] = r._tasks
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert _guard_records(r, now) == []
+    assert [x for x in caplog.records if x.levelname == "ERROR"] == []
+
+
 async def test_spawned_task_exception_is_recorded(tmp_path: Path, now: datetime) -> None:
     r = Runner(_app(tmp_path, now))
 

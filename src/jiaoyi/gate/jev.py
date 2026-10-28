@@ -193,6 +193,12 @@ class JevDecisionModel:
             wall=self._wall,
         )
 
+    def cooldown_left_s(self) -> float:
+        """Seconds of cooldown left; 0 when not cooling down."""
+        if self._cooldown_until is None:
+            return 0.0
+        return max(self._cooldown_until - self._clock(), 0.0)
+
     @property
     def health(self) -> Health:
         if self._cooldown_until is not None and self._clock() < self._cooldown_until:

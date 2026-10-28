@@ -1134,7 +1134,11 @@ class AppConfig(Contract):
         ge=0,
         le=3,
         description="拍板通过后开仓前读账户（hummingbot 的账户状态）失败时，隔 1 秒再读几次；"
-        "都失败就记一条风控员拒绝「读账户失败，本信号放弃」。0 = 不重读（原行为）。热生效。",
+        "都失败就记一条风控员拒绝「读账户失败，本信号放弃」。只对很快就失败的情况有用（连不上、"
+        "5xx）：hummingbot 请求超时是 5 秒，一次超时就把信号有效期（signal_max_age_s）"
+        "用得差不多了；"
+        "信号剩下的有效期不够再等一次就不重读，直接放弃。重读成功后再查一遍暂停 / 重启和信号是否"
+        "过期。0 = 不重读（原行为）。热生效。",
     )
     keeper_interval_s: int = Field(ge=5, le=120)
     reconcile_interval_s: int = Field(ge=10, le=300)
