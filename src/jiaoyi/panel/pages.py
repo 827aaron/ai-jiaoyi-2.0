@@ -31,7 +31,13 @@ from jiaoyi.core import profiles
 from jiaoyi.core.pool_overrides import PoolOverrides, read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
-from jiaoyi.panel.actions import PAPER_ONLY_SWITCHES, ProfileInfo, Section, editable_fields
+from jiaoyi.panel.actions import (
+    MEETING_EDITABLE,
+    PAPER_ONLY_SWITCHES,
+    ProfileInfo,
+    Section,
+    editable_fields,
+)
 from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meaning import SettingsMeaning, build_meaning
@@ -1775,6 +1781,8 @@ class SettingsPage(BaseModel):
     """选币规则（config/slow.toml 的 [screener]）：门槛、打分满分线、权重。"""
     tiers: list[SettingItem] = []
     """分档交易（config/slow.toml 的 [screener.tiers]）。"""
+    meeting: list[SettingItem] = []
+    """军师团会议开关（config/slow.toml 的 [meeting]，只放网页能改的那几项，改了要重启）。"""
     screener_cautions: list[str] = []
     """选币规则比推荐冒险的项（只提示，不拒绝）。"""
     majors: MajorsInfo | None = None
@@ -1976,6 +1984,11 @@ def build_settings(
         ),
         screener=_items(slow.screener, "screener"),
         tiers=_items(slow.screener.tiers, "tiers"),
+        meeting=_items(
+            slow.meeting,
+            "meeting",
+            frozenset(type(slow.meeting).model_fields) - set(MEETING_EDITABLE),
+        ),
         screener_cautions=[
             x for x in slow.screener.cautions(risk.max_spread_bps) if x not in tier_cautions
         ],
