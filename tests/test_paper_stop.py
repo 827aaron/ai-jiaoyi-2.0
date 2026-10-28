@@ -523,6 +523,71 @@ async def test_paper_stop_unreadable_file_alerts_and_is_kept(tmp_path: Path, now
     assert pos.position_id in json.loads((tmp_path / "paper_stops.json").read_text())
 
 
+@pytest.mark.parametrize("side", [LONG, SHORT])
+@pytest.mark.parametrize("source", ["trailing", "hosted"])
+async def test_paper_stop_unseen_tighter_stop_does_not_mask_ledger_stop(
+    tmp_path: Path, now: datetime, side: c.Side, source: str
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos)
+    await _arm(runner, now)  # the ledger stop is seen safe
+    # A tighter stop appears already past mainnet's price (after a spike, or the basis).
+    price = ENTRY - SIGN[side] * 10.0
+    tight = price + SIGN[side] * 5.0
+    ex.levels[pos.position_id] = [("ledger", STOP[side]), (source, tight)]
+    await runner.on_event(_trade(now, price))
+    await _settle(runner)
+    assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
+    assert runner.paper_unseen_crosses == 1
+    wick = _beyond(side, 100)
+    await runner.on_event(_trade(now, wick))
+    await _settle(runner)
+    assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
+    booked = runner._paper_stops.get(pos.position_id)
+    assert booked is not None
+    assert (booked.stop_source, booked.stop_price) == ("ledger", STOP[side])
+    assert booked.paper_exit_price == wick  # worse-of: 100 bp past the stop
+    assert runner.paper_unseen_crosses == 1  # an armed level was crossed: not counted
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_books_tightest_of_the_crossed_seen_levels(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos, paper_stop_slippage_bps=0.0)
+    trailing = ENTRY - SIGN[side] * 50.0
+    ex.levels[pos.position_id] = [("ledger", STOP[side]), ("trailing", trailing)]
+    await _arm(runner, now)  # both seen safe
+    await runner.on_event(_trade(now, _beyond(side, 100)))  # past both
+    await _settle(runner)
+    booked = runner._paper_stops.get(pos.position_id)
+    assert booked is not None and (booked.stop_source, booked.stop_price) == (
+        "trailing",
+        trailing,
+    )
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_counts_and_records_unseen_crosses(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos)
+    for _ in range(3):
+        await runner.on_event(_trade(now, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [] and runner.paper_unseen_crosses == 3
+    rows = [
+        json.loads(line)
+        for f in (tmp_path / "decision_log").glob("*.jsonl")
+        for line in f.read_text(encoding="utf-8").splitlines()
+    ]
+    unseen = [r for r in rows if "paper_stop_unseen" in r["output"]]
+    assert len(unseen) == 1  # one record per (position, level), the counter keeps counting
+    assert unseen[0]["output"]["paper_stop_unseen"] == [{"source": "ledger", "stop": STOP[side]}]
+
+
 # ---------------------------------------------------------------- executor
 
 

@@ -456,8 +456,11 @@ class Runner:
             Path(app.app_cfg.data_dir) / paper_stop.PAPER_STOP_FILE
         )
         self._paper_close_at: dict[str, datetime] = {}  # last Demo close asked for a paper stop
-        self._paper_safe: dict[str, float] = {}
-        """Position -> the stop level the mainnet price was last seen on the safe side of."""
+        self._paper_safe: dict[str, set[float]] = {}
+        """Position -> every current stop level the mainnet price has been seen safely beyond."""
+        self.paper_unseen_crosses = 0
+        """Crosses ignored because that stop level was never seen on its safe side."""
+        self._paper_unseen_logged: set[tuple[str, float]] = set()
         self._paper_load_alerted = False
         self._tp_past: dict[str, datetime] = {}
         """限价止盈：价格第一次穿过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
@@ -824,17 +827,30 @@ class Runner:
         since = self._paper_stop_since(pos)
         if ts < since:
             return  # a price from before the position existed (buffered or replayed)
-        stop = self._paper_stop_level(pos)
-        if stop is None:
-            return
-        if not paper_stop.crossed(pos.side, price, stop[1]):
-            self._paper_safe[pid] = stop[1]
+        levels = self._paper_stop_levels(pos)
+        if not levels:
             return
         # A cross counts only against a stop level the price was first seen safely beyond:
         # a leg placed off Demo's mark can sit past mainnet's price from the moment it is set
         # (the Demo-mainnet basis), and after a restart, a hot enable or a fresh fill we have
-        # not yet seen where the price stood.
-        if self._paper_safe.get(pid) != stop[1]:
+        # not yet seen where the price stood. Tracked per level, so a tighter stop that never
+        # had a safe sighting does not mask a looser one that did.
+        current = {p for _, p in levels}
+        safe = self._paper_safe.setdefault(pid, set())
+        safe &= current  # levels that moved away start over
+        armed: list[tuple[str, float]] = []
+        unseen: list[tuple[str, float]] = []
+        for src, level in levels:
+            if not paper_stop.crossed(pos.side, price, level):
+                safe.add(level)
+            elif level in safe:
+                armed.append((src, level))
+            else:
+                unseen.append((src, level))
+        stop = paper_stop.tightest_stop(pos.side, armed)
+        if stop is None:
+            if unseen:
+                self._paper_unseen(pos, unseen, price)
             return
         self._paper_stop_hit(pos, stop, price, ts, mode)
 
@@ -850,7 +866,7 @@ class Runner:
                     return since
         return pos.opened_at
 
-    def _paper_stop_level(self, pos: PositionRecord) -> tuple[str, float] | None:
+    def _paper_stop_levels(self, pos: PositionRecord) -> list[tuple[str, float]]:
         ex = self.m.executor
         candidates: list[tuple[str, float | None]] = [("ledger", pos.stop_loss_price)]
         if isinstance(ex, _PaperStopLevels):
@@ -858,7 +874,33 @@ class Runner:
                 candidates = ex.paper_stop_levels(pos.position_id) or candidates
             except Exception:
                 log.exception("读不到 %s 的止损，主网止损这次只按账本止损判", pos.position_id)
-        return paper_stop.tightest_stop(pos.side, candidates)
+        return [(src, p) for src, p in candidates if p is not None and p > 0]
+
+    def _paper_unseen(
+        self, pos: PositionRecord, unseen: list[tuple[str, float]], price: float
+    ) -> None:
+        """Count a cross of stops never seen safe; one decision record per (position, level)."""
+        self.paper_unseen_crosses += 1
+        fresh = [(s, p) for s, p in unseen if (pos.position_id, p) not in self._paper_unseen_logged]
+        if not fresh:
+            return
+        self._paper_unseen_logged.update((pos.position_id, p) for _, p in fresh)
+        rec = self.app.recorders.get(Role.PATROL)
+        if rec is None:
+            return
+        text = "、".join(f"{s} {p:g}" for s, p in fresh)
+        rec.record(
+            self.app.clock(),
+            Outcome.INFO,
+            f"{pos.symbol} 主网价 {price:g} 已在止损 {text} 外，但没见过它在安全一侧，不算越过",
+            symbol=pos.symbol,
+            position_id=pos.position_id,
+            output={
+                "paper_stop_unseen": [{"source": s, "stop": p} for s, p in fresh],
+                "price": price,
+                "unseen_crosses_total": self.paper_unseen_crosses,
+            },
+        )
 
     def _exit_in_flight(self, position_id: str) -> Literal["stop", "take_profit"] | None:
         """Demo's own hosted protection is already exiting, and through which side."""
@@ -1471,6 +1513,7 @@ class Runner:
             self._paper_close_at.pop(pid, None)
         for pid in set(self._paper_safe) - live:
             self._paper_safe.pop(pid, None)
+        self._paper_unseen_logged = {k for k in self._paper_unseen_logged if k[0] in live}
         self._paper_stop_retry()
 
     def _contract_halt(self, info: ContractInfo) -> None:
