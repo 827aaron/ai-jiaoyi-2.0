@@ -1227,6 +1227,29 @@ class AppConfig(Contract):
         description="对账员停执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
         "没确认终止，就再发一次停止。0 = 永不重发（只查）。",
     )
+    reconcile_opening_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=600.0,
+        description="对账员：新仓建账后这么多秒内，「交易所托管还没到 armed 阶段」「运行列表暂时"
+        "没返回执行器（逐项查询仍 active / 查不清）」这两类开仓过渡状态记「信息」而不是「出错」，"
+        "不推 Telegram、不点红对账灯。只改标注，平仓、补挂、终止计数都不变；"
+        "过了这个时间照旧记「出错」。"
+        "0 = 一律记出错（原行为）。热生效。",
+    )
+    reconcile_closing_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=600.0,
+        description="对账员：从第一次看到这笔在平仓"
+        "（状态平仓中、平仓结果待确认、托管在退出 / 清理）算起这么多秒内，"
+        "「平仓结果尚未确认」「交易所托管仍在退出阶段」"
+        "「运行列表未返回执行器」这几类平仓过渡状态记「信息」而不是「出错」，"
+        "不推 Telegram、不点红对账灯。"
+        "只改标注，平仓和保护处理都不变；过了这个时间照旧记「出错」。"
+        "平仓失败又重试不重新计时；重启后从重启后第一次看到重新算。"
+        "0 = 一律记出错（原行为）。热生效。",
+    )
     protection_readback_grace_s: float = Field(
         default=0.0,
         ge=0.0,

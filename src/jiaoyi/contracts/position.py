@@ -171,6 +171,11 @@ class ReconcileIssue(Contract):
     position_id: str | None = None
     detail: str = Field(min_length=1)
     fixed: bool = Field(description="是否已自动修正（补挂 / 撤单）。")
+    informational: bool = Field(
+        default=False,
+        description="开仓 / 平仓进行中的正常过渡状态（在对账宽限内）：决策日志记「信息」而不是"
+        "「出错」，不推 Telegram，不点红对账灯。只改标注，不改任何处理。",
+    )
 
 
 class ReconcileReport(Contract):
