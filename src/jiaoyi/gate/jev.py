@@ -193,6 +193,11 @@ class JevDecisionModel:
             wall=self._wall,
         )
 
+    @property
+    def transport(self) -> JevTransport:
+        """底层通道：管家助手拿它另问一道方向题，用自己的超时和错误计数。"""
+        return self._t
+
     def cooldown_left_s(self) -> float:
         """Seconds of cooldown left; 0 when not cooling down."""
         if self._cooldown_until is None:

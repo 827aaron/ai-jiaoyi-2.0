@@ -137,6 +137,8 @@ class Role(StrEnum):
     """对账员。"""
     ALERTING = "alerting"
     """告警。"""
+    KEEPER_ASSISTANT = "keeper_assistant"
+    """管家助手：持仓方向和大盘方向反了时，同时开两场独立的快会重判这个币。"""
 
 
 class RunMode(StrEnum):

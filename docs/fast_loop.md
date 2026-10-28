@@ -416,3 +416,24 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 和「按主网价格算」（`[app] mainnet_shadow_on`，`data/mainnet_shadow.jsonl`）互不影响：那边按 Demo 实际平仓那一刻的主网价重算，历史页的「按主网价格算」列和对比表照旧按它；记过账的仓，按止损价的模拟成交才是主网上会发生的出场。只改正「主网越过、Demo 没触发」这一种情况；Demo 自己插针止损而主网没越过的照旧按 Demo 成交，所以模拟结果偏保守。
 
 **回滚**：`positions.json` 没有新字段（`close_detail` 只在平仓进行中落盘，平完就不写，原本就是这样），旧代码直接能读。回退到没有这三个键的旧代码前，先从 `config/app.toml` 的 `[fast_loop]` 删掉 `paper_stop_on_mainnet` / `paper_stop_slippage_bps` / `paper_stop_book_pnl`（旧代码按未知字段拒绝启动）。`data/paper_stops.json` 旧代码不读，可留可删；删了面板就回到 Demo 实际成交。
+
+
+## 管家助手（`keeper_assistant_*`，`src/jiaoyi/keeper/assistant.py`）
+
+持仓后的事归快环。有持仓的币出了对持仓不利的快环事件，赚钱亏钱都算，管家助手就同时问两个互相独立的打分模型同一道是非题，两个都答「是」才动手。它有自己的名额（`keeper_assistant_concurrency`，最多 2）、自己的超时和连续错误冷却，不占军师团开会的名额，也不连累管家和拍板人的 Jev 计数；出任何错只记录，不影响管家复查和主循环。决策日志角色 `keeper_assistant`（面板「管家助手」），`module_status.json` 里有它的一行。
+
+- **触发**：哨兵的反向信号（信号方向和持仓相反），和管家急查同时交出去，各走各的；管家急查不变（照旧按 `keeper_model_mode`）。`keeper_assistant_key_level` 开着时，价格朝持仓不利的方向穿过卡上的关键位（持空往上、持多往下，每笔仓记上一次看到的成交价，第一次只记不判）也问。同一个币 `keeper_assistant_gap_s`（默认 120 秒）内只问一次，正在问时不重复问。没有持仓的币不问；大盘台的方向不参与。
+- **题目**：持空问「<币> 接下来 <horizon> 会上涨吗？（是 / 否）」，持多问「……会下跌吗？」；`horizon` 默认「1–4 小时」。A 是 Jev（同一条通道），B 是 `keeper_assistant_b_model`，B 的选项倒过来列（否 / 是），题目一字不差。快照是管家快照里的行情部分（`gate/questions.direction_snapshot`），不带仓位、开仓价、盈亏、作战卡、大盘判断、预测员和反向信号本身。管家急查问的是持仓题，不是这道题，所以没有可以省掉的重复调用，A 一律单独问。
+- **Jev 隔离**：A 用管家助手自己的一份打分器（`TransportScorer`）：只借 Jev 的底层通道，自己的超时、连续错误计数和冷却。拍板人 / 管家的 `JevDecisionModel` 只收合同里的 entry / hold 题，它的错误计数也只在它自己的 `ask` 里动，所以管家助手出错永远不会让它们进冷却。
+- **超时**：两个模型同时问，合起来最多等 `keeper_assistant_timeout_s`（默认 8 秒），超时两个都算没答上、不平。
+- **B 不可用就不问**：B 没配置、建不起来或连续出错在冷却中时，A 也不问（不占名额、不调 Jev），记一条「跳过：B 不可用」，同一个原因每小时最多一条。心跳里 B 连续出错 / 冷却算「降级」并写明。
+- **结论**：两个都答「是」且各自 p(是) ≥ `keeper_assistant_min_p`（默认 0.6）就是「本来会平」。`keeper_assistant_close` 开、`keeper_assistant_b_record_only` 关时，再过管家同一道平仓前检查（`keeper_close_guard`：交易所保护腿在退出 / 换代、这一轮已发过平仓请求，`JevKeeper.pre_close_guard`），然后问完、名额放开后另起任务经 `Runner.close` 平掉（同一笔已在平就不重复）。其余一律不动、只记录。B 没配置、调不通或超时都算不一致，从不只凭 A 平仓。`keeper_close_guard` 关着时这道检查一律放行，只剩 `_closing` / 账本 CLOSING 的去重。
+- **交出去不等于平了**：判断那一行记 `handed_off`（交给主循环去平了）；只有执行器真收下了平仓（`Runner.close` 里 `_closing` 登记后、执行器 `close` 正常返回），才写 `close_sources.json`；主程序正在重启 / 退出、账本里这笔已在平、执行器报错都不写。仓位结束时按 `close_sources.json` 认是不是管家助手平的（出场那一行 `closed_by_assistant`），只有这些才计入「已平几笔」、影子出场和汇总。
+- **热关**：`keeper_assistant_on` 关掉后马上不再平仓、不再确认翻转（问到一半的判断回来也不动手），推后的翻转确认直接丢掉。
+- **平仓来源**：平仓原因枚举照旧记「持仓管家」（`keeper`）：往 `CloseReason` 加新值或往 `PositionRecord` 加字段，回滚后的旧代码读 `positions.json` 会直接报错（枚举不认、合同不收多余字段）。所以「是管家助手平的」另记在 `data/close_sources.json`（持仓 id → source / detail / 时间，旧代码不读），面板历史页的平仓原因按它显示「管家助手」，导出的 CSV 写 `keeper_assistant`，复盘按持仓 id 查。
+- **翻转确认**（`keeper_assistant_flip_confirm`）：军师团的会给出待确认翻转（`card_flip_confirm` ≥ 2 时的 1/N，持有、没持有的币都算）时，出卡路径照旧同步记下候选（1/2），不等任何东西，只把那一刻的候选交过来；管家助手另起一件事问两个模型会不会往新方向走。都答「是」就请军师团一步同步确认（`confirm_flip`，中间没有 await）：翻转簿里还是同一个候选（方向、场数、首次出现、留在卡上的那条指令）且卡上生效的指令也没变，才换上那场会的结论，和第 N 场会确认时一样上卡、唤醒管家，反向卡 / 中性卡规则照常；变了就作罢。否则候选照旧等下一场会。转中性的候选不问；重启后手上没有那场会的结论，就不确认。同一个币按「币 + 哪件事」去重：持仓判断在问时，翻转确认推后（问完再问，不丢）；名额上持仓判断排在翻转确认前面。
+- **对比记录**：`data/keeper_assistant/YYYY-MM-DD.jsonl` 每次判断一行（触发类型、问的方向、两个模型的 p(是)、选项顺序、模型名、延迟、token、花费、信号时的价格和这笔仓的 R、是否本来会平 / 真平了），仓位结束时一行实际出场（账本回填了成交价就用它，否则用当时的最新价）。真平了的仓接着按它原来的止损 / 止盈 / 到时规则在心跳时的最新价上往后跟（影子出场，不算保本 / 移动止损，没价格就等，到时了还没价格就不再跟），记一行影子出场。重启后从最近 7 天的流水接着等。
+- **汇总**：每天（`day_reset_tz` 的 0 点后第一次心跳，说前一天，按 `day_reset_tz` 的日期算）和每平满 10 笔，决策日志一条：平了几笔、已知影子出场的几笔的平均 ΔR 和合计 ΔU（ΔR = 实际平仓的 R − 影子出场的 R，正 = 平掉更好；不含手续费差）。管家助手开着、那天（或累计）问过才发 Telegram（类别「系统」）。只报告，不会自动关。
+- **`jiaoyi keeper-assistant-report`**：只读本地流水和账本，打印两段：只记录时每笔仓第一次「本来会平」对比实际出场（n、平均 ΔR、合计 ΔU、按天），以及真平了的仓对比影子出场。
+- **模型 B 的通道**：`keeper_assistant.openrouter_scorer` 用 TypeSafe SDK 换 OpenRouter 的 base URL（和 Jev 走 OpenRouter 一样的 SystemOne 请求）。Microsoft-Decision-1 在 OpenRouter 上的调用方式还没核实，如果它不走这个接口，只换这个工厂；调不通时每次都算「B 没答上」，不平仓。没有 `OPENROUTER_API_KEY` 时没有 B。这个 key 只在启动时读一次，之后补上要重启；换 `keeper_assistant_b_model` 时旧的连接关掉，退出时也关。
+- **回滚**：回滚到没有管家助手的版本前，先删掉 `app.toml` 里所有 `keeper_assistant_*` 行（旧代码不认识这些键，会拒绝启动），再删掉 `data/module_status.json` 里的 `keeper_assistant` 一项（只在开着时才写）。`data/close_sources.json`、`data/keeper_assistant/` 旧代码不读，留着无妨。

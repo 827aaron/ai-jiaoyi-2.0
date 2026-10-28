@@ -207,6 +207,19 @@ against_loss_stop_frac = 0.5      # 已亏到 0.5 倍止损时也判 1 次就平
 against_meeting_count = 2         # 30 分钟内 2 次反向信号 → 申请单币临时会
 against_meeting_window_s = 1800
 against_meeting_gap_s = 3600      # 同一个币 60 分钟内最多申请 1 次
+# 管家助手：有持仓的币出了反向信号（可选：价格朝不利方向穿过关键位），赚钱亏钱都算，同时问 Jev（A）和模型 B
+# 同一道是非题（持空「会上涨吗」、持多「会下跌吗」，不提仓位和原因），两个都答「是」且 p(是) ≥ min_p 才平仓。以下均可热更新
+keeper_assistant_on = false
+# keeper_assistant_b_model = "…"  # 模型 B 的 id（经 OpenRouter）；不写 = 没有 B，一律不平
+keeper_assistant_min_p = 0.6
+keeper_assistant_horizon = "1–4 小时"
+keeper_assistant_timeout_s = 8.0  # 两个模型合起来最多等几秒，超时不平
+keeper_assistant_gap_s = 120      # 同一个币两次问至少隔 120 秒；0 = 只是同一个币在问时不重复
+keeper_assistant_key_level = false  # true = 价格朝不利方向穿过卡上关键位也问
+keeper_assistant_close = false    # true = 两个都答「是」就平仓（先过管家的平仓前检查）
+keeper_assistant_b_record_only = true  # true = B 只记录，不平仓、不确认翻转
+keeper_assistant_flip_confirm = false  # true = 军师团出待确认翻转时另起一件事问两个模型，都答「是」就确认
+keeper_assistant_concurrency = 2  # 最多 2；持仓的事排在翻转确认前面
 
 # 按信号类型单独定“做”的门槛（不写 = 所有类型都用上面的 min_p_take）。这一段要放在 fast_loop 那段的键后面。
 # 填 0 = 这类信号拍板人照常问、照常记，“做”概率不再拦；其余风控（持仓笔数、同币持仓、敞口和每类币合计上限、

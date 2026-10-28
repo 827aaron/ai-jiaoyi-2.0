@@ -230,6 +230,10 @@ class FlipBook:
             }
         )
 
+    def discard(self, symbol: str) -> None:
+        if self._flips.pop(symbol, None) is not None:
+            self.save()
+
     def clear(self) -> None:
         if self._flips:
             self._flips.clear()

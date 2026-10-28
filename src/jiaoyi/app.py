@@ -97,7 +97,7 @@ from jiaoyi.execution.user_stream import (
 )
 from jiaoyi.gate.context import EntryContextSource
 from jiaoyi.gate.entry import JevEntryGate
-from jiaoyi.gate.jev import JevDecisionModel, decision_model_from_config
+from jiaoyi.gate.jev import OPENROUTER_KEY_NAME, JevDecisionModel, decision_model_from_config
 from jiaoyi.gate.rule_model import RuleDecisionModel
 from jiaoyi.gate.stub import StubDecisionModel, StubEntryGate
 from jiaoyi.interfaces import (
@@ -118,6 +118,7 @@ from jiaoyi.interfaces import (
     SymbolScreener,
     Trigger,
 )
+from jiaoyi.keeper.assistant import Scorer, openrouter_scorer
 from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.keeper.stub import StubKeeper
 from jiaoyi.market.binance_ws import BinanceFuturesFeed
@@ -555,6 +556,7 @@ def build_modules(
             Role.PATROL,
             Role.SCREENER,
             Role.ALERTING,
+            Role.KEEPER_ASSISTANT,
         )
     }
 
@@ -892,6 +894,12 @@ class App:
                     resend_after=timedelta(hours=app_cfg.credit_resend_hours),
                 )
         self.m = modules
+        # 管家助手的模型 B：有 OpenRouter key 才建得起来（按设置里的模型 id 现建）
+        self.assistant_b: Callable[[str], Scorer | None] | None = None
+        if not offline:
+            or_key = (secrets or ChainedSecretStore()).get(OPENROUTER_KEY_NAME)
+            if or_key:
+                self.assistant_b = openrouter_scorer(or_key, lambda: self.app_cfg.fast_loop)
         # 大盘台（slow.toml [market_desk]）：mode = off 时不建，一次模型调用都没有
         self.desk: MarketDesk | None = None
         if self.slow_cfg.market_desk.mode != "off" and isinstance(

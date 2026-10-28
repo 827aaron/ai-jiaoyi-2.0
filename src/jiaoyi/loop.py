@@ -27,7 +27,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -60,12 +60,15 @@ from jiaoyi.contracts import (
     Trade,
 )
 from jiaoyi.contracts.position import CloseReason
-from jiaoyi.core import paper_stop
+from jiaoyi.core import close_sources, paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import CloseInProgress
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
+from jiaoyi.gate.jev import JevDecisionModel
+from jiaoyi.keeper.assistant import CLOSE_SOURCE, KeeperAssistant, TransportScorer
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -452,6 +455,8 @@ class Runner:
             snapshot = getattr(self.m.screener, "market_snapshot", None)
             if callable(snapshot):
                 self.m.cards.set_market_snapshot(snapshot)
+        self._shutting_down = False
+        self.assistant = self._build_assistant()
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
@@ -623,6 +628,9 @@ class Runner:
                 self._restart_exit()
 
     async def shutdown(self) -> None:
+        # 先停管家助手：它在途的判断不能在下面取消后台任务的空档里再交出平仓
+        self._shutting_down = True
+        await self.assistant.aclose()
         # 会议跑在线程池里取消不掉：先把它们的实况标成中断，线程之后写的会被忽略
         interrupt_open()
         tasks = [*self._loops, *self._tasks]
@@ -677,6 +685,11 @@ class Runner:
 
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
+        try:
+            self.assistant.tick(self.app.clock())
+            self.assistant.heartbeat(self.app.clock())
+        except Exception:
+            log.exception("管家助手心跳失败")
         save_ban(self.app.app_cfg.data_dir)
 
     async def market_snapshot_tick(self) -> None:
@@ -731,6 +744,80 @@ class Runner:
             if isinstance(self.m.trigger, _AgainstAware):
                 for sig in self.m.trigger.pop_against():
                     self._route_against(self.m.trigger, sig, now)
+            fl = self.app.app_cfg.fast_loop
+            if fl.keeper_assistant_on and fl.keeper_assistant_key_level:
+                self._assistant_levels(event.symbol, event.price, now)
+
+    def _build_assistant(self) -> KeeperAssistant:
+        app, fl = self.app, self.app.app_cfg.fast_loop
+        model = app.keeper_jev or self.m.decision_model
+        jev = (
+            TransportScorer(
+                model.transport,
+                usd_per_mtok=fl.jev_usd_per_mtok,
+                max_errors=fl.jev_max_consecutive_errors,
+                cooldown_s=fl.jev_error_cooldown_s,
+            )
+            if isinstance(model, JevDecisionModel)
+            else None
+        )
+        cards = self.m.cards if isinstance(self.m.cards, BattleCardCommander) else None
+        rec = app.recorders.get(Role.KEEPER_ASSISTANT) or RoleRecorder(
+            Role.KEEPER_ASSISTANT, app.log, day_reset_tz=app.risk_cfg.day_reset_tz
+        )
+        assistant = KeeperAssistant(
+            lambda: self.app.app_cfg.fast_loop,
+            rec,
+            features=self.m.features.snapshot,
+            close=self._assistant_close,
+            clock=app.clock,
+            data_dir=Path(app.app_cfg.data_dir),
+            jev=jev,
+            b_scorer=getattr(app, "assistant_b", None),
+            cards=cards,
+            alert=self._assistant_alert,
+            day_reset_tz=app.risk_cfg.day_reset_tz,
+            close_source=lambda pid: (
+                close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
+            ).get("source"),
+        )
+        if cards is not None:
+            cards.set_on_flip_pending(assistant.on_flip_pending)
+        return assistant
+
+    def _assistant_close(self, pos: PositionRecord, reason: str) -> str | None:
+        """管家助手要平：过管家同一道平仓前检查，经正常平仓路径另起任务去平（同一笔在平 / 已平
+        就跳过）。返回 None = 已交出去，否则是没平的原因。平仓原因枚举照旧记「持仓管家」，
+        是管家助手平的另记在 ``close_sources.json``。"""
+        if self._leaving or self._shutting_down:
+            return "主程序正在重启或退出"
+        current = next((p for p in self.positions if p.position_id == pos.position_id), None)
+        if current is None or current.status is not PositionStatus.OPEN:
+            return "这笔已不在持仓里"
+        if pos.position_id in self._closing:
+            return "这笔正在平"
+        now = self.app.clock()
+        guard = getattr(self.m.keeper, "pre_close_guard", None)
+        if callable(guard):
+            blocked = guard(pos.position_id, now)
+            if blocked:
+                return f"平仓前检查拦下：{blocked}"
+        self._guard_note(Outcome.ACTION, f"{pos.symbol} 平仓：{reason}", now)
+        self._spawn(
+            self.close(current, CloseReason.KEEPER, source=CLOSE_SOURCE, detail=reason),
+            Role.EXECUTOR,
+        )
+        return None
+
+    def _record_source(self, pos: PositionRecord, source: str | None, detail: str) -> None:
+        if source is not None:
+            close_sources.record(
+                self.app.app_cfg.data_dir, pos.position_id, source, detail, self.app.clock()
+            )
+
+    def _assistant_alert(self, title: str, text: str) -> None:
+        if not self._leaving:
+            self._spawn(self.app._alert(AlertLevel.INFO, title, text, "system"))
 
     def _ledger_positions(self) -> list[PositionRecord]:
         """账本里此刻的持仓（含正在开 / 正在平），读不到才用上一轮刷新的列表。"""
@@ -750,6 +837,10 @@ class Runner:
             sig, self._ledger_positions(), self._closing, now
         )
         trigger.note_against_result(sig, ev.result)
+        # 管家助手和管家急查各走各的，谁先平谁算（平仓去重在 close 里）
+        for pos in self._ledger_positions():
+            if pos.symbol == sig.symbol:
+                self.assistant.on_reverse_signal(pos, sig.side, f"{sig.kind.value}：{sig.desc}")
         for pos, one_shot in rechecks:
             if isinstance(self.m.keeper, _NotesAgainst):
                 self.m.keeper.note_against(pos.position_id, sig, one_shot)
@@ -758,6 +849,15 @@ class Runner:
                 self.m.patrol.urgent.add(pos.position_id)  # 和巡逻兵报警线同一条急查通道
             else:
                 self._spawn(self._review(pos), Role.KEEPER)
+
+    def _assistant_levels(self, symbol: str, px: float, now: datetime) -> None:
+        held = [p for p in self.positions if p.symbol == symbol]
+        if not held:
+            return
+        card = self.m.cards.current(now)
+        cs = card.for_symbol(symbol) if card is not None else None
+        for pos in held:
+            self.assistant.on_price(pos, cs.key_levels if cs is not None else [], px)
 
     def _tp_fallback(self, t: Trade) -> None:
         """限价止盈挂着却没成交：价格穿过止盈价 ``tp_limit_fallback_through_bps`` 以上、
@@ -1507,6 +1607,7 @@ class Runner:
             log.exception("读持仓失败，沿用上一次的列表")
             return
         before_status = {p.position_id: p.status for p in self.positions}
+        previous = {p.position_id: p for p in self.positions}
         before = set(before_status)
         self.positions = [
             p
@@ -1520,8 +1621,10 @@ class Runner:
             for p in self.positions
         ):
             self._card_published()  # 异步入场由OPENING真正变OPEN时补查。
-        if before - {p.position_id for p in self.positions}:
+        ended = before - {p.position_id for p in self.positions}
+        if ended:
             self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
+            self._assistant_ended(ended, all_pos, previous)
         live = {p.position_id for p in self.positions}
         for pid in set(self._paper_close_at) - live:
             self._paper_close_at.pop(pid, None)
@@ -1529,6 +1632,21 @@ class Runner:
             self._paper_safe.pop(pid, None)
         self._paper_unseen_logged = {k for k in self._paper_unseen_logged if k[0] in live}
         self._paper_stop_retry()
+
+    def _assistant_ended(
+        self,
+        ended: set[str],
+        latest: Sequence[PositionRecord],
+        previous: Mapping[str, PositionRecord],
+    ) -> None:
+        """仓位结束：交给管家助手记实际出场（账本里结束后的那条优先，没有就用结束前的）。"""
+        by_id = {p.position_id: p for p in latest}
+        for pid in ended:
+            rec = by_id.get(pid) or previous.get(pid)
+            if rec is None:
+                continue
+            snap = self.m.features.snapshot(rec.symbol)
+            self.assistant.on_closed(rec, snap.last_price if snap is not None else None)
 
     def _contract_halt(self, info: ContractInfo) -> None:
         """临时不在交易 → 记进 ``app.halted``（只挡新开仓）；回到 TRADING → 放开。都只记日志。"""
@@ -1554,8 +1672,17 @@ class Runner:
         await self.close(pos, CloseReason.PATROL)
         await self.app._alert(AlertLevel.WARN, "巡逻兵已全平", f"巡逻兵：{why}", "system")
 
-    async def close(self, pos: PositionRecord, reason: CloseReason) -> None:
-        """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。"""
+    async def close(
+        self,
+        pos: PositionRecord,
+        reason: CloseReason,
+        *,
+        source: str | None = None,
+        detail: str = "",
+    ) -> None:
+        """同一笔正在平就不重复提交。重启已定就不再发起（会被退出打断），交给重启后的进程。
+        ``source``：谁发起的（记进 ``close_sources.json``），只在平仓真交给执行器、执行器收下了
+        才记。"""
         if pos.position_id in self._closing:
             return
         if self._leaving:
@@ -1567,6 +1694,8 @@ class Runner:
             )
             return
         executor = self.m.executor
+        # 账本确认这一刻没有别的平仓申请在途：执行器说「退出进行中」时，那是这次申请的退出
+        first_request = False
         if isinstance(executor, _LedgerPositions):
             try:
                 current = next(
@@ -1577,13 +1706,17 @@ class Runner:
                 return
             if current is None or current.status is PositionStatus.CLOSING:
                 return  # 已结束或已有平仓申请，不能重复发单。
+            first_request = True
         self._closing.add(pos.position_id)
         try:
             await self.m.executor.close(pos.position_id, reason)
+            self._record_source(pos, source, detail)
         except CloseInProgress as e:
             # The exit is already working and the executor's background tick settles it; the
             # reconciler's closing grace still escalates one that never completes.
             log.warning("%s 平仓进行中（%s）：%s", pos.symbol, reason.value, e)
+            if first_request:
+                self._record_source(pos, source, detail)
             if not isinstance(executor, _LedgerPositions):
                 return
         except Exception as e:
@@ -1630,6 +1763,7 @@ class Runner:
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
+        self._assistant_ended({pos.position_id}, [], {pos.position_id: pos})
 
     def _restore_keeper_market(self) -> None:
         try:

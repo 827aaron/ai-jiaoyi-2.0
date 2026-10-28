@@ -29,8 +29,9 @@ from jiaoyi.contracts import (
     SignalKind,
     SymbolPoolEntry,
 )
+from jiaoyi.contracts.position import CloseReason
 from jiaoyi.contracts.risk_config import recommended_caps
-from jiaoyi.core import profiles
+from jiaoyi.core import close_sources, profiles
 from jiaoyi.core.pool_overrides import PoolOverrides, read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
@@ -74,6 +75,7 @@ ROLE_NAMES: dict[Role, str] = {
     Role.EXECUTOR: "执行器",
     Role.LIFEBOAT: "保命止损",
     Role.KEEPER: "持仓管家",
+    Role.KEEPER_ASSISTANT: "管家助手",
     Role.PATROL: "巡逻兵",
     Role.RECONCILER: "对账员",
     Role.ALERTING: "告警",
@@ -1003,6 +1005,8 @@ class TradeRow(BaseModel):
     exit_filled_at: datetime | None = None
     """Last exchange exit fill; shown as the close time and used for hold time. None = unknown."""
     close_reason: str | None
+    close_source: str | None = None
+    """谁发起的平仓（``data/close_sources.json``），例如 keeper_assistant；没记为 None。"""
     pnl_usdt: float
     """净盈亏（已扣开平手续费）：按币安成交回填后是币安实扣，否则是 hummingbot 报的。"""
     fees_usdt: float
@@ -1381,6 +1385,7 @@ def build_history(
 
     shadow = files.mainnet_shadow()
     exit_fills = files.exit_fills()
+    sources = close_sources.read(files.root)
     rows: list[TradeRow] = []
     cum = peak = dd = 0.0
     curve: list[CurvePoint] = []
@@ -1415,6 +1420,9 @@ def build_history(
                 closed_at=p.closed_at,
                 exit_filled_at=exit_fills.get(p.position_id),
                 close_reason=p.close_reason.value if p.close_reason else None,
+                close_source=(sources.get(p.position_id) or {}).get("source")
+                if p.close_reason is CloseReason.KEEPER
+                else None,
                 pnl_usdt=pnl,
                 fees_usdt=p.fees_usdt,
                 keeper_peak_usdt=None if unfilled else peak_of.get(p.position_id),

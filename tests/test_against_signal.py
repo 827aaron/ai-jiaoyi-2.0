@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from jiaoyi import contracts as c
+from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.against import KEEP, MEETING_TRIGGER, AgainstSignalDesk
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
@@ -606,3 +608,251 @@ async def test_runner_never_asks_twice_at_once(tmp_path: Path, now: datetime) ->
     await routine
     await r.urgent_tick()
     assert calls == ["pos-1", "pos-1"] and patrol.urgent == set()
+
+
+# ------------------------------------------------------------------ 管家助手（反向信号同时交给它）
+
+
+def _assistant_on(r: Runner, a: float | None, b: float | None) -> tuple[Any, Any]:
+    from jiaoyi.core.hotconfig import patch_inplace
+    from tests.test_keeper_assistant import ON, Scorer
+
+    fl = r.app.app_cfg.fast_loop
+    patch_inplace(fl, fl.model_copy(update=ON), ON)
+    sa, sb = Scorer(a), Scorer(b)
+    r.assistant._jev = sa
+    r.assistant._b_factory = lambda model: sb
+    return sa, sb
+
+
+async def _settle(r: Runner) -> None:
+    for _ in range(3):
+        await asyncio.gather(*list(r.assistant._tasks), *list(r._tasks))
+
+
+async def test_runner_reverse_signal_goes_to_keeper_and_assistant_and_closes_once(
+    tmp_path: Path, now: datetime
+) -> None:
+    p = _position_now(now)
+    r, _, k, patrol = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    sa, sb = _assistant_on(r, 0.8, 0.9)
+    await r.on_event(_trade(now))
+    assert patrol.urgent == {"pos-1"} and k.noted == [("pos-1", False)]
+    assert r.assistant.busy == {"BTCUSDT"}
+    r.app.m.trigger.events.append(sig(now))  # type: ignore[attr-defined]
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert sa.calls[0][1] == "BTCUSDT 接下来 1–4 小时会下跌吗？（是 / 否）"
+    assert len(sa.calls) == len(sb.calls) == 1
+    assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
+
+
+async def test_runner_reverse_signal_holds_when_one_model_says_no_or_already_closing(
+    tmp_path: Path, now: datetime
+) -> None:
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    _assistant_on(r, 0.8, 0.2)
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
+    r2, _, _, _ = _runner(tmp_path / "2", now, [p])
+    r2.positions = [p]
+    _assistant_on(r2, 0.9, 0.9)
+    r2._closing.add("pos-1")
+    await r2.on_event(_trade(now))
+    await _settle(r2)
+    assert r2.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+async def test_runner_reverse_signal_on_unheld_coin_does_not_ask(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, _, _, _ = _runner(tmp_path, now, [])
+    sa, _ = _assistant_on(r, 0.9, 0.9)
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert sa.calls == [] and r.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+class GuardedKeeper(NotingKeeper):
+    def __init__(self, blocked: str | None) -> None:
+        super().__init__()
+        self.blocked = blocked
+        self.asked: list[str] = []
+
+    def pre_close_guard(self, position_id: str, now: datetime) -> str | None:
+        self.asked.append(position_id)
+        return self.blocked
+
+
+async def test_runner_assistant_close_passes_the_keeper_close_guard_and_records_its_source(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    k = GuardedKeeper("交易所保护腿已触发或正在退出")
+    r.m.keeper = k  # type: ignore[misc]
+    assert r._assistant_close(p, "管家助手：反向信号，两个模型一致") is not None
+    await _settle(r)
+    assert r.app.m.executor.closed == [] and close_sources.read(tmp_path) == {}  # type: ignore[attr-defined]
+    k.blocked = None
+    assert r._assistant_close(p, "管家助手：反向信号，两个模型一致") is None
+    await _settle(r)
+    assert k.asked == ["pos-1", "pos-1"]
+    assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
+    assert close_sources.read(tmp_path)["pos-1"]["source"] == "keeper_assistant"
+
+
+async def test_runner_assistant_jev_errors_never_touch_the_gate_jev(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.contracts import FastLoopConfig
+    from jiaoyi.core.hotconfig import patch_inplace
+    from jiaoyi.gate.jev import JevDecisionModel
+    from tests.test_keeper_assistant import ON, Scorer
+
+    p = _position_now(now)
+    app = _app(tmp_path, now)
+    gate = JevDecisionModel(
+        MockJevTransport(fail=RuntimeError("503")), FastLoopConfig(), timeout_ms=1000
+    )
+    app.m = dataclasses.replace(
+        app.m,
+        executor=LedgerExecutor([p]),
+        trigger=AgainstTrigger([]),
+        features=Feats(now),
+        keeper=NotingKeeper(),
+        patrol=FakePatrol(),
+        cards=_Cards(),
+        decision_model=gate,
+    )
+    r = Runner(app)
+    r.positions = [p]
+    fl = app.app_cfg.fast_loop
+    patch_inplace(
+        fl,
+        fl.model_copy(update={**ON, "keeper_assistant_gap_s": 0}),
+        {**ON, "keeper_assistant_gap_s": 0},
+    )
+    r.assistant._b_factory = lambda model: Scorer(0.9)
+    for _ in range(5):
+        r.assistant.on_reverse_signal(p, c.Side.SHORT, "x")
+        await _settle(r)
+    assert gate.consecutive_errors == 0 and gate.health is c.Health.OK
+    assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+class FailingExecutor(LedgerExecutor):
+    async def close(self, position_id: str, reason: CloseReason) -> None:
+        raise RuntimeError("hummingbot-api 503")
+
+
+async def test_runner_close_records_source_only_when_the_executor_takes_it(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.m.executor = FailingExecutor([p])  # type: ignore[misc]
+    r.positions = [p]
+    assert r._assistant_close(p, "管家助手：反向信号，两个模型一致") is None
+    await _settle(r)
+    assert close_sources.read(tmp_path) == {}
+    closing = _position_now(now, status="closing")
+    r2, _, _, _ = _runner(tmp_path / "2", now, [closing])
+    r2.positions = [p]
+    assert r2._assistant_close(p, "x") is None  # handed off; the ledger says it is already closing
+    await _settle(r2)
+    assert close_sources.read(tmp_path / "2") == {} and r2.app.m.executor.closed == []  # type: ignore[attr-defined]
+    r3, _, _, _ = _runner(tmp_path / "3", now, [p])
+    r3.positions = [p]
+    r3._leaving = True
+    assert r3._assistant_close(p, "x") == "主程序正在重启或退出"
+    await _settle(r3)
+    assert r3.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+async def test_runner_shutdown_stops_the_assistant_before_cancelling_its_own_tasks(
+    tmp_path: Path, now: datetime
+) -> None:
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    seen: list[tuple[bool, str | None]] = []
+    hold = asyncio.Event()
+
+    async def background() -> None:
+        await hold.wait()
+
+    r._spawn(background())
+    task = next(iter(r._tasks))
+    original = r.assistant.aclose
+
+    async def aclose() -> None:
+        seen.append((task.cancelled() or task.done(), r._assistant_close(p, "x")))
+        await original()
+
+    r.assistant.aclose = aclose  # type: ignore[method-assign]
+    await r.shutdown()
+    assert seen == [(False, "主程序正在重启或退出")]
+    assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+class InProgressExecutor(LedgerExecutor):
+    """Hosted exit sent, not flat yet: the ledger shows CLOSING after the call."""
+
+    async def close(self, position_id: str, reason: CloseReason) -> None:
+        from jiaoyi.execution.brackets import CloseInProgress
+
+        self.closed.append((position_id, reason))
+        self.live = [p.model_copy(update={"status": "closing"}) for p in self.live]
+        raise CloseInProgress("托管退出进行中")
+
+
+async def test_runner_close_in_progress_still_records_the_assistant_and_counts_it_later(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+    from jiaoyi.keeper import assistant as ka
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    ex = InProgressExecutor([p])
+    r.m.executor = ex  # type: ignore[misc]
+    r.positions = [p]
+    _assistant_on(r, 0.9, 0.9)
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert ex.closed == [("pos-1", CloseReason.KEEPER)]
+    assert close_sources.read(tmp_path)["pos-1"]["source"] == "keeper_assistant"
+    done = p.model_copy(update={"status": "closed", "exit_price": 67900.0})
+    r._assistant_ended({"pos-1"}, [done], {})
+    assert r.assistant._closes == 1
+    ended = ka.read_rows(tmp_path / "keeper_assistant")[-1]
+    assert ended["kind"] == "closed" and ended["closed_by_assistant"] is True
+
+
+async def test_runner_close_in_progress_without_a_ledger_check_is_not_labelled(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+    from jiaoyi.execution.brackets import CloseInProgress
+
+    class Blind(FakeExecutor):
+        """No ledger to confirm nobody else had asked to close first."""
+
+        async def close(self, position_id: str, reason: CloseReason) -> None:
+            raise CloseInProgress("托管退出进行中")
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.m.executor = Blind()  # type: ignore[misc]
+    await r.close(p, CloseReason.KEEPER, source="keeper_assistant", detail="x")
+    assert close_sources.read(tmp_path) == {}

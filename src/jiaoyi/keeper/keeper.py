@@ -796,6 +796,14 @@ class JevKeeper:
             return f"这一轮已发过平仓请求（{last:%H:%M:%S}），不重复发", note
         return None, note
 
+    def pre_close_guard(self, position_id: str, now: datetime) -> str | None:
+        """别人（管家助手）要平这笔仓前过管家同一道平仓前检查：拦下返回原因；放行就当管家这一刻
+        发过平仓请求，免得管家半个复查间隔内再发一次。"""
+        blocker, _ = self._close_blocker(position_id, now)
+        if blocker is None:
+            self._close_sent[position_id] = now
+        return blocker
+
     def card_rule_applies(self, position: PositionRecord, now: datetime) -> bool:
         """只读预检供调度去重；真正执行时仍需再次读取最新卡，不在预检记判定日志。"""
         card = self._card(now)

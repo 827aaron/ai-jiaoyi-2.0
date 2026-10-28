@@ -882,7 +882,10 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         )
         return {k: found[k] for k in MEETING_EDITABLE}
     # jev_provider / jev_model 换通道和模型版本要重新校准，不在网页上改
-    return scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
+    found = scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
+    found["keeper_assistant_b_model"] = FieldSpec(str, nullable=True)  # 留空 = 没有模型 B
+    found["keeper_assistant_horizon"] = FieldSpec(str)
+    return found
 
 
 def _target(paths: ConfigPaths, section: Section) -> tuple[Path, str | None, dict[str, FieldSpec]]:

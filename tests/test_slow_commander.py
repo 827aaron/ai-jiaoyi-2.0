@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1312,6 +1313,75 @@ async def test_commander_flip_waits_for_second_agreeing_meeting(
     assert JevKeeper._card_rule(pos, card, clock[0]) == f"新作战卡方向改成 {opp.value}"
     assert _flip_records(log, now) == ["pending", "confirmed"]
     assert json.loads((tmp_path / "card_flip.json").read_text())["flips"] == {}
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_pending_hands_over_the_candidate_and_confirm_flip_applies_it(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    opp = _OPP[start]
+    eng = _Directed2({"AAUSDT": [start, opp]})
+    c, log, clock = make(
+        tmp_path,
+        eng,
+        now,
+        symbol_min_interval=timedelta(minutes=5),
+        card_path=tmp_path / "battle_card.json",
+        flip_confirm=2,
+    )
+    pending: list[tuple[str, Any]] = []
+    c.set_on_flip_pending(lambda sym, cand: pending.append((sym, cand)))
+    await c.refresh(pool(now, entry("AAUSDT")), "scheduled")
+    assert pending == []
+    clock[0] = now + timedelta(minutes=60)
+    held = (await c.refresh(pool(clock[0], entry("AAUSDT")), "scheduled")).for_symbol("AAUSDT")
+    assert held is not None and held.bias is start and held.allowed_signals == []
+    [(sym, cand)] = pending
+    assert (sym, cand.candidate, cand.count) == ("AAUSDT", opp.value, 1)
+    assert not c.confirm_flip("AAUSDT", replace(cand, count=2), "x", {})
+    assert not c.confirm_flip("AAUSDT", replace(cand, held="other"), "x", {})
+    live = c._card
+    assert live is not None
+    swapped = [
+        x.model_copy(update={"meeting_id": "other"}) if x.symbol == "AAUSDT" else x
+        for x in live.symbols
+    ]
+    c._card = live.model_copy(update={"symbols": swapped})  # the directive changed under us
+    assert not c.confirm_flip("AAUSDT", cand, "x", {})
+    c._card = live
+    assert c.confirm_flip("AAUSDT", cand, "两个模型都答是", {})
+    card = c.current(clock[0])
+    assert card is not None
+    flipped = card.for_symbol("AAUSDT")
+    assert flipped is not None and flipped.bias is opp and flipped.allowed_signals
+    pos = PositionRecord.model_construct(symbol="AAUSDT", side=_SIDE[start])
+    assert JevKeeper._card_rule(pos, card, clock[0]) == f"新作战卡方向改成 {opp.value}"
+    assert _flip_records(log, now) == ["pending", "confirmed"]
+    assert not c.confirm_flip("AAUSDT", cand, "x", {})
+
+
+async def test_commander_confirm_flip_refuses_a_candidate_that_moved_on(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng = _Directed2({"AAUSDT": [Bias.LONG, Bias.SHORT, Bias.SHORT]})
+    c, _log, clock = make(
+        tmp_path,
+        eng,
+        now,
+        symbol_min_interval=timedelta(minutes=5),
+        card_path=tmp_path / "battle_card.json",
+        flip_confirm=3,
+    )
+    pending: list[Any] = []
+    c.set_on_flip_pending(lambda sym, cand: pending.append(cand))
+    for i in range(3):
+        clock[0] = now + timedelta(minutes=60 * i)
+        await c.refresh(pool(clock[0], entry("AAUSDT")), "scheduled")
+    first, second = pending
+    assert (first.count, second.count) == (1, 2)
+    assert not c.confirm_flip("AAUSDT", first, "旧的那次", {})
+    card = c.current(clock[0])
+    assert card is not None and card.for_symbol("AAUSDT").bias is Bias.LONG  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])

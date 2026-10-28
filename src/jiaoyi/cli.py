@@ -320,6 +320,30 @@ def _jev_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _keeper_assistant_report(args: argparse.Namespace) -> int:
+    """读 data/keeper_assistant/*.jsonl 和账本 positions.json，打印两段对比：只记录时「本来会平」
+    对比实际出场；真平了的对比按原规则拿着的影子出场。"""
+    from jiaoyi.keeper import assistant
+    from jiaoyi.panel.files import PanelFiles
+
+    try:
+        app_cfg = load_app_config(Path(args.app))
+        tz = load_risk_config(Path(args.risk)).day_reset_tz
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    rows = assistant.read_rows(Path(app_cfg.data_dir) / assistant.JOURNAL_DIR)
+    ledger = {p.position_id: p for p in PanelFiles(app_cfg.data_dir, tz).ledger().positions}
+    pairs, open_n = assistant.counterfactual(
+        [r for r in rows if not (r.get("kind") == "check" and r.get("handed_off"))], ledger, tz
+    )
+    print(assistant.report_text(pairs, open_n))
+    live, pending = assistant.live_pairs(rows, tz=tz)
+    print()
+    print(assistant.report_text(live, pending, live=True))
+    return 0
+
+
 def _card_score(args: argparse.Namespace) -> int:
     """作战卡方向记分：补算窗口走完的卡（只追加），重写汇总，打印主指标、基线和分组。"""
     from datetime import timedelta
@@ -983,6 +1007,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--cache", default="data/history", help="历史数据下载缓存")
     p.set_defaults(func=_jev_replay)
+
+    p = sub.add_parser(
+        "keeper-assistant-report",
+        help="管家助手：「本来会平」/ 真平了的仓对比实际出场或影子出场（只读本地流水和账本）",
+    )
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.set_defaults(func=_keeper_assistant_report)
 
     p = sub.add_parser(
         "card-score", help="作战卡方向记分：发布时刻起算、扣掉同期币池，补算并打印（只读行情）"
