@@ -470,6 +470,7 @@ def _build_execution(
             protection_trailing_book_critical_after_s=(
                 app_cfg.protection_trailing_book_critical_after_s
             ),
+            protection_leg_order=app_cfg.protection_leg_order,
             position_mode_cache_s=app_cfg.position_mode_cache_s,
         )
     except MissingSecret:

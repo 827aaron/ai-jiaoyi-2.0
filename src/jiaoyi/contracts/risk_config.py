@@ -1158,6 +1158,16 @@ class AppConfig(Contract):
         "有持仓或挂单时币安不允许切换模式；开新仓前的检查、任何 -4061 或非单向持仓都会重新查。"
         "改后重启生效。",
     )
+    protection_leg_order: Literal["lifeboat_first", "stop_first"] = Field(
+        default="lifeboat_first",
+        description="Demo 托管保护：新仓的三条腿按什么顺序挂。"
+        "lifeboat_first = 保命单 → 止损 → 止盈（原行为）；stop_first = 止损 → 止盈 → 保命单："
+        "交易所托管的止损已经能保护仓位，保命单只是更宽的后备。"
+        "stop_first 下止损确认后保命单挂失败（被拒、提交结果未知）不立即平仓："
+        "在未托管宽限（protection_prearm_grace_s）内告警、下一轮重试"
+        "（被拒的换新单号重挂，未知的只查原单号），宽限用完仍没挂上照旧平仓；"
+        "止损、止盈挂失败照旧立即平仓。只影响之后新挂的一代，旧接口的仓不变。改后重启生效。",
+    )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
         description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"
