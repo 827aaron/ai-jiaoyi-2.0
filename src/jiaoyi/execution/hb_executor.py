@@ -34,6 +34,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatus
+from jiaoyi.core.paper_stop import PAPER_STOP_DETAIL
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import (
     AnchorBookSpike,
@@ -41,6 +42,7 @@ from jiaoyi.execution.brackets import (
     CloseInProgress,
     ProtectionIncomplete,
     describe_error,
+    live_leg,
 )
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
@@ -235,6 +237,23 @@ def _lifeboat_hit(rec: PositionRecord, exit_price: float) -> bool:
         return False
     beyond = (lb.stop_price - exit_price) if rec.side is Side.LONG else (exit_price - lb.stop_price)
     return beyond >= -0.1 * dist
+
+
+def _shown_detail(tracked: TrackedPosition, reason: CloseReason | None) -> str | None:
+    """The noted close detail when it belongs to ``reason``.
+
+    A detail noted by one rule must not label a close that something else caused: a paper
+    stop note only shows on a stop-loss close, a reconciler note only on a reconciler close.
+    """
+    detail = tracked.close_detail
+    if detail is None:
+        return None
+    paper = detail.startswith(PAPER_STOP_DETAIL)
+    if reason is CloseReason.RECONCILER and not paper:
+        return detail
+    if reason is CloseReason.STOP_LOSS and paper:
+        return detail
+    return None
 
 
 def _positive(value: Any) -> float | None:
@@ -861,7 +880,7 @@ class HbExecutorAdapter:
             fees_usdt=fee,
         )
         self._hb_stop_retries.pop(position_id, None)
-        detail = tracked.close_detail if reason is CloseReason.RECONCILER else None
+        detail = _shown_detail(tracked, reason)
         self._record(
             Outcome.CLOSE,
             f"{rec.symbol} 直连平仓（{reason.value}"
@@ -883,11 +902,68 @@ class HbExecutorAdapter:
     def _note_close_detail(self, tracked: TrackedPosition, detail: str) -> TrackedPosition:
         """只记第一次的原因：之后几轮重试平仓不覆盖当初为什么要平。"""
         current = self._registry.get(tracked.record.position_id) or tracked
-        if current.close_detail is not None:
+        # A paper stop note only asks for a stop-loss close; the reconciler's own reason for
+        # closing replaces it, or its close would be labelled with the wrong cause.
+        if current.close_detail is not None and not (
+            current.close_detail.startswith(PAPER_STOP_DETAIL)
+            and not detail.startswith(PAPER_STOP_DETAIL)
+        ):
             return current
         current = current.model_copy(update={"close_detail": detail[:300]})
         self._registry.put(current)
         return current
+
+    def note_close_detail(self, position_id: str, detail: str) -> None:
+        tracked = self._registry.get(position_id)
+        if tracked is not None:
+            self._note_close_detail(tracked, detail)
+
+    def paper_stop_levels(self, position_id: str) -> list[tuple[str, float | None]]:
+        """Every stop this position holds, as (source, trigger price), for the paper stop rule.
+
+        ``ledger`` is the ledger stop, ``hosted`` every stop-side hosted leg live on the exchange
+        (fixed, trailing, tightened or the lifeboat leg), ``trailing`` the program's activated
+        trailing stop even before its leg is replaced, ``lifeboat`` the legacy lifeboat order
+        while active. Empty for an unknown position.
+
+        The opposite-card target (``tightened_stop_price``) counts only once its leg is live:
+        it is placed away from Demo's mark, not mainnet's, and as a bare target it could close a
+        position the moment it is set.
+        """
+        tracked = self._registry.get(position_id)
+        if tracked is None:
+            return []
+        rec = tracked.record
+        out: list[tuple[str, float | None]] = [("ledger", rec.stop_loss_price)]
+        if rec.lifeboat is not None and rec.lifeboat.status is LifeboatStatus.ACTIVE:
+            out.append(("lifeboat", rec.lifeboat.stop_price))
+        state = tracked.server_protection
+        if state is None:
+            return out
+        out += [
+            ("hosted", leg.trigger_price)
+            for leg in state.legs
+            if leg.kind == "stop_loss" and live_leg(leg)
+        ]
+        if state.trailing_activated:
+            out.append(("trailing", state.trailing_stop_price))
+        return out
+
+    def paper_stop_since(self, position_id: str) -> datetime | None:
+        """When the position started to exist on the exchange: the fill of a limit entry, else
+        the open; None for an unknown position."""
+        tracked = self._registry.get(position_id)
+        if tracked is None:
+            return None
+        return tracked.filled_at or tracked.record.opened_at
+
+    def take_profit_exiting(self, position_id: str) -> bool:
+        """A hosted take-profit leg has triggered: Demo is exiting at its target, not a stop."""
+        tracked = self._registry.get(position_id)
+        state = tracked.server_protection if tracked is not None else None
+        if state is None:
+            return False
+        return any(leg.kind == "take_profit" and leg.triggered_at is not None for leg in state.legs)
 
     def mark_failed(self, position_id: str) -> None:
         tracked = self._registry.get(position_id)
@@ -1735,8 +1811,8 @@ class HbExecutorAdapter:
         self._close_slow_alerted.discard(rec.position_id)
         if closed is not None:
             body = _close_text(closed.record)
-            if closed.record.close_reason is CloseReason.RECONCILER and closed.close_detail:
-                body += f"\n原因：{closed.close_detail}"
+            if (shown := _shown_detail(closed, closed.record.close_reason)) is not None:
+                body += f"\n原因：{shown}"
             if hosted_normal:
                 body += "\n" + self._hosted_close_cause(tracked, ours, legs)
             await self._notice("平仓完成", body, closed.record, "closed")
@@ -2931,14 +3007,18 @@ class HbExecutorAdapter:
         else:
             closed = tracked.record
             net = closed.realized_pnl_usdt or 0.0
+            shown = _shown_detail(tracked, reason)
             self._record(
                 Outcome.CLOSE,
-                f"{rec.symbol} 平仓（{reason.value if reason else '未知'}），净盈亏 {net:+.2f}U",
+                f"{rec.symbol} 平仓（{reason.value if reason else '未知'}"
+                + (f"：{shown}" if shown else "")
+                + f"），净盈亏 {net:+.2f}U",
                 closed,
                 output={
                     "net": net,
                     "reason": reason.value if reason else None,
                     "fees": closed.fees_usdt,
+                    **({"detail": shown} if shown else {}),
                     # 曾下令平仓的人（面板可以显示「巡逻兵曾下令」）；和 reason 一样就不重复写
                     **(
                         {"requested_by": tracked.requested_close.value}
@@ -2947,7 +3027,8 @@ class HbExecutorAdapter:
                     ),
                 },
             )
-            await self._notice("平仓完成", _close_text(closed), closed, "closed")
+            body = _close_text(closed) + (f"\n原因：{shown}" if shown else "")
+            await self._notice("平仓完成", body, closed, "closed")
         if never_filled:
             await self._alert(
                 AlertLevel.WARN,

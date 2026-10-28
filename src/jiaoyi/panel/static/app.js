@@ -2172,7 +2172,8 @@ P.history = () => {
       <td>${t.test ? '<span class="pill p-warn">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="num">—</td><td class="num">—</td><td><span class="pill p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>
       <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>${mainnetCells(t)}</tr>`;
     }
-    const exit = t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>';
+    const paperNote = t.paper_stop_price != null ? `<div class="dim small" title="主网${t.paper_price_source === "mark" ? "标记价" : "成交价"}越过止损 ${t.paper_stop_price}，按止损价记模拟成交；Demo 实际净盈亏 ${t.demo_pnl_usdt == null ? "—" : signed(t.demo_pnl_usdt, 2) + "U"}">Demo ${t.demo_exit_price != null ? price(t.demo_exit_price, t.symbol) : "—"}</div>` : "";
+    const exit = (t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>') + paperNote;
     const shut = closeTime(t);
     const lag = t.exit_filled_at ? Math.round((new Date(t.closed_at) - new Date(t.exit_filled_at)) / 1000) : 0;
     const shutTip = t.exit_filled_at ? ` title="币安成交 ${hms(t.exit_filled_at)}；程序结账 ${hms(t.closed_at)}${lag > 0 ? `（晚 ${lag} 秒）` : ""}"` : "";
@@ -2405,6 +2406,7 @@ const MEETING_CHOICE = {
   stale_on_arrival_action: { watch: "只盯不开", no_trade: "改成观望" },
   input_time_labels: { legacy: "不标（现状）", explicit: "写明已收盘小时 / 上次结算时间" },
   keeper_snapshot: { direction: "方向 + 名次（原行为）", rank: "只带名次（多空对称）", off: "不带预测员" },
+  paper_stop_on_mainnet: { off: "关（现状）", mark: "主网标记价越过止损", last: "主网成交价越过止损" },
 };
 const choiceLabel = (k, v) => (MEETING_CHOICE[k] && MEETING_CHOICE[k][v]) || (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -2483,6 +2485,9 @@ const PLAIN = {
   limit_take_profit_live: "测试网 / 实盘也用限价单止盈",
   tp_limit_fallback_s: "价格穿过止盈价几秒还没平就改市价平",
   tp_limit_fallback_through_bps: "价格越过止盈价万分之几才算「没成交」",
+  paper_stop_on_mainnet: "模拟盘按主网价判止损：off 现状 / mark 主网标记价越过 / last 主网成交价越过（实盘不用）",
+  paper_stop_slippage_bps: "按止损价记模拟成交时的滑点（万分之几，按不利方向）",
+  paper_stop_book_pnl: "面板已实现盈亏对按主网止损记过账的仓用模拟成交价",
   patrol_alert_stop_mult: "报警线是止损距离的几倍",
   patrol_shock_stop_mult: "全平线是止损距离的几倍",
   "predictor.pred_len": "往后预测几根 K 线",
@@ -2754,6 +2759,8 @@ const HINT = {
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
   chase_price_max_age_s: "改市价追进前按现价复查进场区间，这个币的行情超过这么多秒没更新就这次不追（和开仓检查同一个时钟）。0 = 不查（现状）",
   keeper_model_mode: "act = 现状：Jev 的平仓概率过线（连续确认 / 明显过线 / 反向急查过线即平）就平。record = 每次照常问 Jev、照常记下，但不按平仓概率平；回吐保护、作战卡、冻结盈利价、盈利门控照常，被封的币直接平。决策记录里每条规则的票都写着",
+  paper_stop_on_mainnet: "Demo 的止损按 Demo 标记价触发，主网插针越过止损时 Demo 常常不触发、仓还拿着。打开后主程序盯主网行情（不另外查交易所）：mark = 主网标记价（每秒一次）、last = 主网逐笔成交价（插针更容易碰到），第一次越过这笔仓最紧的止损（账本止损、交易所上在挂的止损 / 保命单 / 已挂上的反向卡收紧止损、移动止损，取最先碰到的那个）就马上要求平 Demo 仓（平仓原因「止损」，写「主网价格越过止损」），同时按止损价记这笔的模拟成交（越过价更差时按越过价），不等 Demo 什么时候平完；止损价刚变（移动止损、托管腿换代）或刚打开 / 重启时，要先看到主网价在止损安全一侧才算越过；Demo 实际成交另记，历史页能看到。Demo 自己的止损已在退出时只记账、不再下平仓单；Demo 止盈已触发的不记。只对 Demo（paper / testnet 且模拟环境 demo；旧测试网不做）；实盘的交易所止损就是真的，不管开关都不做。热生效",
+  paper_stop_book_pnl: "开 = 今日胜率、历史页、按卡成绩里，按主网止损记过账的仓用模拟成交价（Demo 实际成交和净盈亏在历史页小字里）；关 = 一律 Demo 实际成交。状态栏 / 资金页的已平、盈亏曲线和日亏熔断始终按 Demo 账户的钱",
   keeper_price_source: "mainnet = 现状：行情快照的主网最新成交价。venue = 执行所的标记价（Demo 上是 Demo 标记价，实盘就是主网）：浮盈、最高浮盈、回吐保护、盈利门控和给 Jev 的快照都用它；「行情最多旧几秒」按这个价查（填 0 时按 5 秒）；读不到或过旧这轮不按价判、维持现状，不拿主网价凑。最高浮盈两种价分开记，中途切换不会混着比。两种价都写进决策记录",
   keeper_close_guard: "开 = 管家每次要平之前先看：交易所的保护腿已经触发或正在退出（交给保护轮询收尾）、正在换代，或这笔仓半个复查间隔内已经发过一次平仓，就这次不发（作战卡硬规则也一样，也不收紧）；等过下面的秒数照常平并记下。关 = 现状（不看）",
   keeper_thesis_take_on: "三条同时成立就全平：浮盈（未扣手续费，和回吐保护同口径）至少下面那么多倍止损距离；Jev 最近一次答「进场理由还成立吗」是 no 的把握至少下面那个数；那次回答不超过下面那么多秒。排在回吐保护之后、平仓概率之前，只平不放宽。默认关",
@@ -3046,6 +3053,7 @@ const ROLES = [
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
     { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
+    { g: "模拟盘按主网止损", hint: "默认关 = 现状。只对 paper / testnet：主网价格越过止损就平 Demo 仓，并按止损价记模拟成交（Demo 实际成交另记）。热生效。", keys: ["fast_loop.paper_stop_on_mainnet", "fast_loop.paper_stop_slippage_bps", "fast_loop.paper_stop_book_pnl"] },
     { g: "开仓前读账户", hint: "拍板通过后读 hummingbot 账户失败：再读几次都不行就放弃这个信号，风控员记一条拒绝。热生效。", keys: ["app.account_read_retries"] },
     { g: "按主网价格算", hint: "只算账不下单：每笔平仓按主网价格重算一遍盈亏，看去掉 Demo 成交优势后还赚不赚。", keys: ["app.mainnet_shadow_on"] },
     { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序、平仓顺序、退出中仍先直连、停止补发次数、告警轮数和持仓模式缓存外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。退出中仍先直连（默认关）：保护已进入退出但没有腿触发、没有在途平仓单时也照样先直连。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hosted_close_direct_when_exiting", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
@@ -3093,7 +3101,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", take_by_kind:
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", tp_r_cap: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", tp_r_cap: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", paper_stop_slippage_bps: " bp", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", account_read_retries: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",

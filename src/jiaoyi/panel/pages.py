@@ -22,6 +22,7 @@ from jiaoyi.contracts import (
     Health,
     ModuleStatus,
     Outcome,
+    PositionRecord,
     PositionStatus,
     RiskConfig,
     Role,
@@ -990,7 +991,7 @@ class TradeRow(BaseModel):
     leverage: int
     entry_price: float | None
     exit_price: float | None = None
-    """币安平仓成交均价；None = 还没按成交回填。"""
+    """币安平仓成交均价；None = 还没按成交回填。按主网止损记过账的仓是模拟成交价。"""
     stop_loss_price: float | None = None
     take_profit_price: float | None = None
     """下单时的止损 / 止盈（按开仓成交价回填后的）。"""
@@ -1025,6 +1026,12 @@ class TradeRow(BaseModel):
     mainnet_legs: list[str] = []
     """Order type of the entry and exit leg (``market`` / ``limit`` / ``stop``); a limit leg
     is priced at its own limit price."""
+    paper_stop_price: float | None = None
+    """Set when the paper stop rule booked this trade: the stop the mainnet price crossed.
+    ``exit_price`` / ``pnl_usdt`` are then the paper fill, ``demo_*`` what Demo filled."""
+    paper_price_source: str | None = None
+    demo_exit_price: float | None = None
+    demo_pnl_usdt: float | None = None
 
 
 class KindStats(BaseModel):
@@ -1255,6 +1262,19 @@ def _shadow_fields(row: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _paper_fields(ledger: Ledger, p: PositionRecord) -> dict[str, Any]:
+    demo = ledger.actual.get(p.position_id)
+    stop = ledger.paper.get(p.position_id)
+    if demo is None or stop is None:
+        return {}
+    return {
+        "paper_stop_price": stop.stop_price,
+        "paper_price_source": stop.price_source,
+        "demo_exit_price": demo.exit_price,
+        "demo_pnl_usdt": demo.realized_pnl_usdt,
+    }
+
+
 def build_history(
     files: PanelFiles,
     risk: RiskConfig,
@@ -1263,15 +1283,16 @@ def build_history(
     include_tests: bool = False,
 ) -> HistoryPage:
     start = _range_start(now, risk.day_reset_tz, rng)
+    ledger = files.ledger()
     if rng == "all":  # 全部 = 从账本里最早一笔平仓算起
         start = min(
-            (p.closed_at for p in files.ledger().positions if p.closed_at is not None),
+            (p.closed_at for p in ledger.positions if p.closed_at is not None),
             default=start,
         )
     closed = sorted(
         (
             p
-            for p in files.ledger().positions
+            for p in ledger.positions
             if p.closed_at is not None
             and p.realized_pnl_usdt is not None
             and start <= p.closed_at <= now
@@ -1403,6 +1424,7 @@ def build_history(
                 test=test,
                 unfilled=unfilled,
                 **_shadow_fields(None if unfilled else shadow.get(p.position_id)),
+                **_paper_fields(ledger, p),
             )
         )
     real = [t for t in rows if not t.unfilled]
@@ -1575,7 +1597,7 @@ def build_funds(
     today = local_day(now, tz)
     closed_today = [
         p
-        for p in ledger.positions
+        for p in map(ledger.demo, ledger.positions)  # reconciled against Demo's equity below
         if p.closed_at is not None
         and p.realized_pnl_usdt is not None
         and local_day(p.closed_at, tz) == today
@@ -1731,9 +1753,10 @@ def _pnl_periods(
     """
     today = local_day(now, tz)
     income = _income_days(files.income_daily())
+    # Money that moved on the account: Demo's fills, not the paper stop bookings.
     closed = [
         p
-        for p in ledger.positions
+        for p in map(ledger.demo, ledger.positions)
         if p.closed_at is not None
         and p.realized_pnl_usdt is not None  # 测试单也是真金白银，和币安流水口径一致
     ]

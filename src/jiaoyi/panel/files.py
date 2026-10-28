@@ -8,6 +8,7 @@
     risk_state.json                 日亏熔断状态（日期、日初权益、是否已触发）
     blocked_symbols.json            被下架公告封掉新开仓的币
     exit_fills.json                 exit fill time per position (jiaoyi.execution.exit_fills)
+    paper_stops.json                模拟盘按主网止损记的模拟成交（jiaoyi.core.paper_stop）
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -25,6 +27,7 @@ from pydantic import ValidationError
 
 from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role, SymbolPool
 from jiaoyi.contracts.position import PositionStatus
+from jiaoyi.core.paper_stop import PAPER_STOP_FILE, PaperStop, PaperStopCache, booked_record
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.shadow_ledger import read_shadow
 
@@ -85,6 +88,9 @@ class PanelFiles:
         self.tz = tz
         self._decisions = DecisionTail(self.root / "decision_log")
         self._old: dict[tuple[date, frozenset[Role]], tuple[int, list[DecisionRecord]]] = {}
+        self._paper = PaperStopCache(self.root / PAPER_STOP_FILE)
+        self.paper_book_pnl: Callable[[], bool] = lambda: True
+        """``[fast_loop] paper_stop_book_pnl``, read on every ``ledger()``."""
 
     def _json(self, name: str) -> Any:
         try:
@@ -272,9 +278,22 @@ class PanelFiles:
             notional[rec.position_id] = float(t.get("notional_usdt") or 0.0)
             if t.get("server_protection"):
                 protection[rec.position_id] = t["server_protection"]
+        paper = self._paper.get()
+        actual: dict[str, PositionRecord] = {}
+        if paper and self.paper_book_pnl():
+            booked = []
+            for rec in positions:
+                stop = paper.get(rec.position_id)
+                moved = booked_record(rec, stop) if stop is not None else rec
+                if moved is not rec:
+                    actual[rec.position_id] = rec
+                booked.append(moved)
+            positions = booked
         ds = raw.get("day_start") or {}
         return Ledger(
             positions=positions,
+            paper=paper,
+            actual=actual,
             planned_notional=notional,
             day_start_day=str(ds.get("day")) if ds.get("day") else None,
             day_start_equity=_float(ds.get("equity_usdt")),
@@ -324,6 +343,15 @@ class Ledger:
     last_equity: float | None = None
     protection: dict[str, object] = field(default_factory=dict)
     """持仓号 → positions.json 里 server_protection 的原始 JSON（旧仓位没有）。"""
+    paper: dict[str, PaperStop] = field(default_factory=dict)
+    """Position id -> its paper stop booking, whether or not ``positions`` uses it."""
+    actual: dict[str, PositionRecord] = field(default_factory=dict)
+    """Demo's own record of every position whose entry in ``positions`` was moved to its
+    paper exit; positions not moved are absent."""
+
+    def demo(self, p: PositionRecord) -> PositionRecord:
+        """The record as Demo filled it (money that really moved on the account)."""
+        return self.actual.get(p.position_id, p)
 
     def live(self) -> list[PositionRecord]:
         return [p for p in self.positions if p.status not in DONE]
