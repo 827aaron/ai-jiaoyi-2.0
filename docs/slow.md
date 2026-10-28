@@ -560,7 +560,19 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
   涨 / 平 / 跌三项概率；「平」= |收益| ≤ `band_sigma` × σ，σ 是过去 `sigma_lookback_h` 个滚动窗口的 RMS。
   方向由代码派生：p_up ≥ θ（`call_p_min`）且 p_up − p_down ≥ δ（`call_edge_min`）为看涨，看跌对称，其余中性。
 - **模型**：DeepSeek V4.1 Flash，经 OpenRouter（和开会同一个模型、同一套 usage / reasoning 参数），
-  每轮独立问 `samples` 次（默认 5）取平均；合格回答少于 `min_valid_samples` 这一轮作废（照样记账）。
+  每轮独立问 `samples` 次（默认 5），按 `aggregation` 合并（默认 `mean` 平均；`median`、`trimmed`
+  去掉最高最低各一个、`logodds` 对数平均）；合格回答少于 `min_valid_samples` 这一轮作废（照样记账）。
+- **先验和更新**：`prior_mode = "anchor"`（默认）让模型从基础率出发、证据弱就贴着它；0.5σ 时「平」的
+  基础率约 0.49，回答跟着一直中性。`context` 把基础率当成输入之一并明说不要默认它，`off` 提示词里不给
+  基础率（数据包、记分照样有）。`momentum_guidance = true` 加几句成对的说明：按近 15 分钟 / 1 / 4 小时
+  等权收益、涨跌家数和 BTC 是否同向来更新，走出「平」的宽度且同向越多、移动越大。改了这两项
+  `prompt_version` 带后缀（如 `desk-v1+prior-context+momentum`），默认设置下提示词逐字节不变。
+  `band_sigma` 同时决定数据包里的基础率、日志 `score_targets` 的 `flat_band_pct` 和提示词里的分类，改了
+  下一轮全部按新宽度重算；发布的话里写「未来 4 小时概率（平 = ±x%）」，状态文件 `latest.flat_band_pct`
+  记 4h / 1h 两档宽度。这四项和 `call_p_min`、`call_edge_min`、`publish_min_gap_min` 可以经面板的待生效配置
+  （`config/slow.pending.toml` 的 `[market_desk]`）改。**回滚**到没有 `prior_mode` / `momentum_guidance` /
+  `aggregation` 的旧版本前先删掉这三行（旧代码不认识会拒绝启动）；面板改过的另外几项旧代码认识，但会照改过的
+  值跑，要回到原值也一起删掉。
 - **数据包**（`market_dossier.py`）：只放池级 / 大盘级数字，每项带来源和 as_of。**不能有延后信息**：
   所有「近 15 / 30 分钟、近 1 / 4 / 12 / 24 / 72 小时」的收益、上涨下跌家数、离散度、主动买卖占比、
   24h 区间位置、BTC / ETH 涨跌，都是截止到运行时刻的滚动窗口——终点价是 15 分钟线里正在走的那一根的现价，

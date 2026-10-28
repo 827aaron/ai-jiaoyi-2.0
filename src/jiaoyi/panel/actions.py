@@ -55,6 +55,7 @@ from jiaoyi.panel.overview import Control
 from jiaoyi.slow.settings import (
     BudgetConfig,
     LlmConfig,
+    MarketDeskSection,
     MeetingConfig,
     ScheduleConfig,
     ScreenerSection,
@@ -95,9 +96,22 @@ Section = Literal[
     "budget",
     "screener",
     "tiers",
+    "market_desk",
     "meeting",
 ]
-_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "meeting")
+_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk", "meeting")
+# [market_desk] 其余项（模式、模型、节奏、采样）改了要重启、影响大盘方向，只在终端改
+DESK_EDITABLE = frozenset(
+    {
+        "band_sigma",
+        "prior_mode",
+        "momentum_guidance",
+        "aggregation",
+        "call_p_min",
+        "call_edge_min",
+        "publish_min_gap_min",
+    }
+)
 # [meeting] 里网页上能改的开关（偏空整改、输入新鲜度、教训口径）；模型 / 通道 / 分析师名单 /
 # 辩论轮数 / 回答长度不在网页改。
 # analyst_klines 是 "周期 x 根数" 的字符串列表，网页没有对应的输入，也不放。
@@ -790,6 +804,7 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "budget": ("slow", "budget"),
     "screener": ("slow", "screener"),
     "tiers": ("slow", "screener.tiers"),
+    "market_desk": ("slow", "market_desk"),
     "meeting": ("slow", "meeting"),
 }
 
@@ -825,6 +840,8 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return scalar_fields(ScreenerSection, set())
     if section == "tiers":
         return scalar_fields(TiersSection, set())
+    if section == "market_desk":
+        return scalar_fields(MarketDeskSection, set(MarketDeskSection.model_fields) - DESK_EDITABLE)
     if section == "meeting":
         found = scalar_fields(
             MeetingConfig, set(MeetingConfig.model_fields) - set(MEETING_EDITABLE)

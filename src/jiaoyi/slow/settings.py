@@ -696,9 +696,12 @@ class PricesConfig(_Strict):
 class MarketDeskSection(_Strict):
     """大盘台（``[market_desk]``，设计 2026-10-28）：独立判断「候选池等权组合未来 4 小时」
     涨 / 平 / 跌三项概率，方向由代码按门槛派生。模型 = DeepSeek V4.1 Flash（经 OpenRouter，
-    和开会同一个模型），每轮独立问 ``samples`` 次取平均。
+    和开会同一个模型），每轮独立问 ``samples`` 次，按 ``aggregation`` 合并。
 
     回滚注意：旧版本代码不认识这一段，会拒绝启动；回滚到没有大盘台的版本前先删掉整段。
+    回滚到没有 ``prior_mode`` / ``momentum_guidance`` / ``aggregation`` 的版本前，先删掉这三行；
+    面板改过的 ``band_sigma`` / ``call_p_min`` / ``call_edge_min`` / ``publish_min_gap_min`` 旧代码
+    认识，但留着会按改过的值跑，要回到原值就一起删掉。
     改这一段要重启才生效。"""
 
     mode: Literal["off", "replace"] = Field(
@@ -777,8 +780,27 @@ class MarketDeskSection(_Strict):
         default=0.5,
         gt=0.0,
         le=3.0,
-        description="「平」的宽度：|4 小时等权收益| ≤ 这个系数 × σ 算平。σ 由过去 sigma_lookback_h "
-        "个滚动 4 小时窗口算。实测期内不调。",
+        description="「平」的宽度：|等权收益| ≤ 这个系数 × σ 算平（4h、1h 各用自己的 σ，"
+        "σ 由过去 sigma_lookback_h 个滚动窗口算）。数据包里的基础率、日志里记分用的 "
+        "flat_band_pct、提示词里的分类都按它，改了下一轮全部按新宽度重算。"
+        "0.5σ 时 30 天基础率「平」约占一半；Demo 推荐 0.3（三类约各占三分之一）。",
+    )
+    prior_mode: Literal["anchor", "context", "off"] = Field(
+        default="anchor",
+        description="提示词怎么用先验（基础率）：anchor = 从基础率出发、证据弱就贴着它"
+        "（「平」常是众数，回答容易一直中性）；context = 基础率只是输入之一，"
+        "明说不要默认它；off = 提示词里不给基础率（数据包和记分照样有）。Demo 推荐 context。",
+    )
+    momentum_guidance: bool = Field(
+        default=False,
+        description="提示词里加几句（涨跌成对、中立）：怎样按近 15 分钟 / 1 / 4 小时等权收益、"
+        "涨跌家数和 BTC 的同向程度更新概率。Demo 推荐开。",
+    )
+    aggregation: Literal["mean", "median", "trimmed", "logodds"] = Field(
+        default="mean",
+        description="几次回答怎么合成一组概率（每项分别合再归一）：mean = 平均；median = 中位数；"
+        "trimmed = 去掉最高、最低各一个再平均；logodds = 对数平均（几次都同意的一项被放大）。"
+        "平均本身不往「平」收：每项的平均就是各次的平均，涨跌差也是各次的平均。",
     )
     sigma_lookback_h: int = Field(
         default=168, ge=24, le=336, description="算 σ 用过去多少个滚动窗口（小时）。"
