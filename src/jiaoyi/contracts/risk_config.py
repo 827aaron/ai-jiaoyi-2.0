@@ -547,6 +547,25 @@ class FastLoopConfig(Contract):
         description="trail 模式锚定时盘口疑似插针（盘口价偏离标记价太多）：这么多秒内每轮再试、"
         "不告警，过了按原规则全平并告警。0 = 立刻平。",
     )
+    # ---- 新作战卡把持仓的币改成中性
+    card_neutral_action: Literal["hold", "tighten", "close"] = Field(
+        default="hold",
+        description="持仓开仓之后发布的有效新卡把这个币改成中性（no_trade，或 stale_on_arrival "
+        "作废成只看不做）时怎么办。hold = 不管（现状）；tighten = 和反向卡没确认时同一套："
+        "亏着或赚得不够就全平，赚得够就在第一次看到时的可成交价锚定移动止损（只锚一次）；"
+        "close = 直接全平。方向反了的卡归 opposite_card_action 管。",
+    )
+    card_neutral_on_absent: bool = Field(
+        default=False,
+        description="新卡里干脆没有这个币也算中性（按 card_neutral_action 处理）。false = 不算。",
+    )
+    card_neutral_trail_distance_mult: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=5.0,
+        description="card_neutral_action = tighten 锚定的移动止损回撤距离 = 开仓时带的移动止损距离"
+        " × 这个倍数。1 = 和平常一样。",
+    )
     # ---- 巡逻兵
     patrol_shock_pct_1m: float = Field(
         default=2.0, ge=0.2, le=20.0, description="1 分钟内对持仓不利的波动达到这个百分比就全平。"

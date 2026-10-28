@@ -185,6 +185,7 @@ class _TightensStop(Protocol):
         distance_mult: float,
         card_key: str | None,
         anchor_retry_s: float,
+        allow_close: bool,
     ) -> dict[str, Any]: ...
 
 
@@ -1321,10 +1322,22 @@ class Runner:
                 verdict = keeper.review_card_rule(pos, self.app.clock())
                 if verdict is not None and verdict.action == "close":
                     await self.close(pos, CloseReason.KEEPER)
-                elif verdict is not None:  # 反向卡价格未确认（#314）：收紧止损，不行就照旧平
-                    key_of = getattr(keeper, "card_rule_key", None)
-                    key = key_of(pos, self.app.clock()) if callable(key_of) else None
-                    await self._opposite_tighten(pos, verdict.reason, key)
+                elif verdict is not None:  # 反向卡价格未确认（#314）/ 卡转中性：收紧，不行就平
+                    spec_of = getattr(keeper, "card_rule_tighten", None)
+                    if callable(spec_of):
+                        spec = spec_of(pos, self.app.clock())
+                        if spec is not None:  # None：中性卡 close 遇到旧行情，这轮先拿住
+                            await self._opposite_tighten(
+                                pos,
+                                verdict.reason,
+                                spec["key"],
+                                neutral=spec["kind"] == "neutral_card",
+                                allow_close=spec["allow_close"],
+                            )
+                    else:
+                        key_of = getattr(keeper, "card_rule_key", None)
+                        key = key_of(pos, self.app.clock()) if callable(key_of) else None
+                        await self._opposite_tighten(pos, verdict.reason, key)
             finally:
                 self._card_rule_queued.discard(pid)
 
@@ -1350,11 +1363,20 @@ class Runner:
         return attempted
 
     async def _opposite_tighten(
-        self, pos: PositionRecord, reason: str, key: str | None = None
+        self,
+        pos: PositionRecord,
+        reason: str,
+        key: str | None = None,
+        *,
+        neutral: bool = False,
+        allow_close: bool = True,
     ) -> None:
         """反向卡价格未确认：让执行器收紧托管止损（trail：现价强制启动移动止损；breakeven：
         挪到扣费保本）；执行器说收紧不了（旧通道、从没完整托管 / 开仓宽限期、证据读不到、
         亏着或赚得不够）就照原规则全平。
+
+        ``neutral``：作战卡转中性，同一条路，固定 trail，距离倍数用
+        ``card_neutral_trail_distance_mult``。``allow_close = False``：只收紧，这次不平。
 
         同一条反向指令（``key``）已收紧 / 已够紧就记在内存里，之后每轮不再进执行器的锁；
         结果换了才记一条管家决策记录。"""
@@ -1370,16 +1392,21 @@ class Runner:
                     reason=reason,
                     buffer_bps=fl.opposite_tighten_buffer_bps,
                     mark_gap_bps=fl.opposite_tighten_mark_gap_bps,
-                    profit_mode=fl.opposite_profit_mode,
-                    distance_mult=fl.opposite_trail_distance_mult,
+                    profit_mode="trail" if neutral else fl.opposite_profit_mode,
+                    distance_mult=fl.card_neutral_trail_distance_mult
+                    if neutral
+                    else fl.opposite_trail_distance_mult,
                     card_key=key,
                     anchor_retry_s=fl.opposite_anchor_retry_s,
+                    allow_close=allow_close,
                 )
             except Exception as e:
                 log.exception("%s 收紧止损出错，按原规则平", pos.symbol)
                 result = {"action": "close", "why": "tighten_error", "error": str(e)[:200]}
         else:
             result = {"action": "close", "why": "executor_cannot_tighten"}
+        if result.get("action") == "close" and not allow_close:
+            result = {**result, "action": "hold", "why": f"no_close_{result.get('why')}"}
         action, why = str(result.get("action")), str(result.get("why"))
         if key is not None and action in ("tightened", "kept"):
             self._tighten_done[pos.position_id] = key
@@ -1387,14 +1414,18 @@ class Runner:
             self._tighten_logged[pos.position_id] = (action, why)
             rec = self.app.recorders.get(Role.KEEPER)
             if rec is not None:
+                what = "作战卡转中性" if neutral else "反向卡未确认"
                 text = {
-                    "tightened": "反向卡未确认，托管止损已收紧",
-                    "pending": "反向卡未确认，收紧价已记下，等交易所确认换单",
+                    "tightened": f"{what}，托管止损已收紧",
+                    "pending": f"{what}，收紧价已记下，等交易所确认换单",
                     "exiting": "收紧时交易所说已越过触发价，保护进入退出",
-                    "kept": "反向卡未确认，止损已经够紧，不再动",
-                    "skip": "反向卡未确认，仓已在平，不收紧",
-                    "close": "反向卡未确认但收紧不了，按原规则全平",
-                }.get(action, "反向卡未确认，收紧结果未知")
+                    "kept": f"{what}，止损已经够紧，不再动",
+                    "skip": f"{what}，仓已在平，不收紧",
+                    "close": f"{what}，亏着或收紧不了，全平"
+                    if neutral
+                    else "反向卡未确认但收紧不了，按原规则全平",
+                    "hold": f"{what}，行情没有或过旧：收紧不了这次也不平",
+                }.get(action, f"{what}，收紧结果未知")
                 rec.record(
                     self.app.clock(),
                     Outcome.CLOSE if action == "close" else Outcome.ACTION,
@@ -1406,6 +1437,7 @@ class Runner:
                         "opposite_tighten": result,
                         "reason": reason,
                         "instruction_key": key,
+                        **({"card_rule_kind": "neutral_card"} if neutral else {}),
                         "counterfactual": {
                             "estimated_target": result.get("target"),
                             "placeable": result.get("placeable"),

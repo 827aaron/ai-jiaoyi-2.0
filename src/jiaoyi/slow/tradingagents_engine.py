@@ -1533,11 +1533,13 @@ def stale_card(cs: CardSymbol, why: str, action: str = "watch") -> CardSymbol:
     no_trade = 改成观望。"""
     if action == "no_trade":
         return _no_trade(cs, f"stale_on_arrival：{why}").model_copy(update={"entry_zone": None})
+    # 管家按理由里的 stale_on_arrival 认「作废」（card_neutral_action）：截断只截原理由，标记留着
+    tag = f"（stale_on_arrival：{why}）"[:500]
     return cs.model_copy(
         update={
             "allowed_signals": [],
             "entry_zone": None,
-            "reason": f"{cs.reason}（stale_on_arrival：{why}）"[:500],
+            "reason": cs.reason[: 500 - len(tag)] + tag,
         }
     )
 

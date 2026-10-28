@@ -286,6 +286,7 @@ class TightenExecutor(FakeExecutor):
         self.result = result
         self.tighten_calls: list[tuple[str, str, float, float]] = []
         self.extra: list[tuple[str, float, str | None]] = []
+        self.allow_close: list[bool] = []
 
     def live_positions(self) -> list[c.PositionRecord]:
         return self.held
@@ -301,7 +302,9 @@ class TightenExecutor(FakeExecutor):
         distance_mult: float,
         card_key: str | None,
         anchor_retry_s: float,
+        allow_close: bool,
     ) -> dict[str, Any]:
+        self.allow_close.append(allow_close)
         self.tighten_calls.append((position_id, reason, buffer_bps, mark_gap_bps))
         self.extra.append((profit_mode, distance_mult, card_key))
         assert self.result is not None

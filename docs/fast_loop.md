@@ -318,3 +318,33 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 没用过这条规则的账本和加字段之前一字不差，旧代码直接能读。**只要账本里有** `purpose = "tightened"` 的腿、`tightened_stop` 的平仓 / 退出原因，或上面 7 个字段任何一个有值，代码回退之前先停主程序，跑 `python scripts/opposite_card_rollback.py data/positions.json` 看要改什么，再加 `--write` 改（先备份成 `positions.json.bak-314`）：删掉这些字段、`tightened` 腿改 `fixed`（交易所上的单不动）、`tightened_stop` 改 `stop_loss`。锚定过的仓回退后移动止损按开仓指令带的距离继续走。
 
 已知限制：收紧价按交易所价格精度取整，可能差一个最小变动价位，由缓冲盖住。
+
+## 新作战卡把持仓的币改成中性（`card_neutral_action`）
+
+照旧卡开的仓（例如 NEAR / QNT 照延后数据出的做空卡开的空单），新卡把这个币改成不做了，原来的管家不投票，仓一直拿着。这条规则复用上面反向卡没确认时的同一套收紧，不另写算法。
+
+**什么算中性**（`JevKeeper._neutral_rule`，都要求最新卡有效、在这条指令自己的 issued_at–expires_at 之内、**指令发布时间晚于开仓时间**——开仓前就是这样的指令（例如照旧卡手动开的仓）不算「被换掉」）：
+
+- 这个币的指令 `bias = no_trade`（不管是会议观望、没给进场区间、类别敞口为 0 还是 `stale_on_arrival_action = "no_trade"` 改的）；
+- 或者 `allowed_signals` 为空且理由里有 `stale_on_arrival`（#341 到手即作废的只看不做）。方向和持仓相同、相反都算：作废的指令不算数。#341 截理由时只截原理由，`stale_on_arrival` 标记一定留着；
+- 别的原因的只看不做（开会失败留着盯、指令过期留着盯、美股休市遮掉、`allowed_signals` 为空的普通卡）**不算**：这些方向没变，只是先不开新仓；
+- 卡里没有这个币：只在 `card_neutral_on_absent = true` 时算（发布时间用整卡的 `created_at`）。持仓的币本来会强制留在卡上，所以默认不算；
+- 方向明确反着持仓的（有信号的 long / short）归上面的反向卡规则，中性规则不管。之后卡从中性转成反向，反向卡规则接手；已锚定过的锚不重做也不放松（执行器看到 `opposite_anchor_price` 已有就返回 `kept`）。
+
+**怎么处理**（热生效，面板「持仓管家 → 新作战卡把这个币改成中性」可改）：
+
+| 设置 | 默认 | 含义 |
+|---|---|---|
+| `card_neutral_action` | `"hold"` | `hold` = 不管（现状，和加这条之前一字不差）；`tighten` = 亏着或赚得不够照旧全平，赚得够在**第一次看到中性卡时**的可成交价锚定移动止损；`close` = 直接全平（平仓原因 KEEPER） |
+| `card_neutral_on_absent` | `false` | 卡里没有这个币也算中性 |
+| `card_neutral_trail_distance_mult` | `1.0` | `tighten` 锚定的移动止损回撤距离 = 开仓带的移动止损距离 × 这个倍数 |
+
+`tighten` 走 `HbExecutorAdapter.tighten_stop`，和反向卡没确认时完全同一条路，固定 `trail` 模式（开仓没带移动止损的仓退回 breakeven）：保本 / 可挂判定（`opposite_tighten_buffer_bps`、`opposite_tighten_mark_gap_bps`）、锚定（只锚一次，落盘在 `server_protection` 的 `opposite_anchor_price` / `opposite_card_key`，换卡、重启都不重锚，永远不比正在挂的止损松）、插针重试窗口（`opposite_anchor_retry_s`）、旧通道 / 从没完整托管照旧全平、证据读不到 CRITICAL、换代先确认新代，都和上面一样。指令身份 = 反向卡的 `币|issued_at|方向` 后面加 `|neutral`（卡里没有这个币：`币|created_at|absent`），主循环按它缓存「已收紧 / 已够紧」。模型复查照常进行；`close` 立刻平的不再排模型复查。
+
+**不做价格确认**：中性不是反向，没有「新方向」可确认；亏的本来就按可挂判定直接平，赚的只是锚住利润，不需要再等价格。
+
+**行情没有或过旧**（没有行情快照，或比 `keeper_price_max_age_s` 旧）：一律不平。`tighten` 只让执行器收紧（`allow_close = False`：执行器本来要平的分支都改成 `{"action": "hold", "why": "no_close_<原因>"}`，下一轮再试；证据读不到照样 CRITICAL，正文写「行情过旧，这次不平」）；`close` 这一轮先拿住，等新行情。和反向卡不同：反向卡在旧行情下执行器仍可能按交易所标记价判「赚得不够」平仓。
+
+**决策记录**：管家 `output.card_rule`：`kind = "neutral_card"`、`card_neutral_action`、`instruction_key`、`card_bias`（卡里没有 = null）、`issued_at` / `expires_at`、`price` / `price_stale_s`、`branch`（`neutral_close` / `neutral_tighten` / `no_market_data_tighten` / `no_market_data_hold`）、`counterfactual`（`{"legacy_action": "hold"}`）。同一条指令同一支只记第一次。主循环记执行器结果（`output.opposite_tighten`，多一个 `card_rule_kind = "neutral_card"`），结果变了才再记；亏着平是正常分支（INFO / 平仓记录），只有证据读不到才 CRITICAL。
+
+**回滚**：改回 `card_neutral_action = "hold"` 即恢复（热生效）。没有新的账本字段：锚定 / 收紧用的就是上面反向卡那 7 个字段，回退按上面反向卡的回滚步骤做。管家的 `data/keeper_opposite.json` 不记中性卡的东西。

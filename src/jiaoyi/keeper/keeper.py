@@ -14,6 +14,9 @@
   新卡改成只看不做、或卡里没有这个币：不投票，持仓交给决策模型 / 止损 / 最长持仓时间处理
   （不开新仓由拍板人和风控员按卡管）。例外：被封的币（币安下架公告等，``blocked``）照样投票，
   要下架的币留仓更危险。规则只会推向更安全，不会把模型的“平”改成“拿”。
+  ``card_neutral_action``（默认 hold = 上面这样不投票）：开仓之后的新卡把这个币改成 no_trade、
+  或 stale_on_arrival 作废成只看不做时，tighten 走反向卡同一套收紧（亏的平、赚的锚定移动止损），
+  close 直接平；见 ``_neutral_rule``。
 - 回吐保护（Aaron 10-25，代码规则，不问模型）：这笔仓最高浮盈到过 ``giveback_arm_r`` 倍止损距离后，
   浮盈从最高点吐掉 ``giveback_close_pct`` % 就全平（``giveback_on`` 开关）。
   每次复查都先查这条，查过才问模型；
@@ -488,24 +491,46 @@ class JevKeeper:
 
     def card_rule_applies(self, position: PositionRecord, now: datetime) -> bool:
         """只读预检供调度去重；真正执行时仍需再次读取最新卡，不在预检记判定日志。"""
-        return self._card_rule(position, self._card(now), now) is not None
+        card = self._card(now)
+        return (
+            self._card_rule(position, card, now) is not None
+            or self._neutral_rule(position, card, now) is not None
+        )
 
     def card_rule_watch(self, position: PositionRecord, now: datetime) -> bool:
-        """只读：反向卡这次走「价格确认或收紧」新规则（不是立刻全平），模型复查照常进行。"""
+        """只读：反向卡这次走「价格确认或收紧」新规则、或中性卡走 tighten（不是立刻全平），
+        模型复查照常进行。"""
         return self.card_rule_key(position, now) is not None
 
     def card_rule_key(self, position: PositionRecord, now: datetime) -> str | None:
-        """只读：走新规则时这条反向指令的身份（币|issued_at|方向），否则 None。接线代码按它缓存
-        「已收紧 / 已够紧」，同一条指令不再每轮进执行器的锁。"""
+        """只读：走收紧时这条指令的身份（反向：币|issued_at|方向；中性：后面再加 ``|neutral``），
+        否则 None。接线代码按它缓存「已收紧 / 已够紧」，同一条指令不再每轮进执行器的锁。"""
+        spec = self.card_rule_tighten(position, now)
+        return None if spec is None else spec["key"]
+
+    def card_rule_tighten(self, position: PositionRecord, now: datetime) -> dict[str, Any] | None:
+        """只读：这次该让执行器收紧时返回 ``{"kind", "key", "allow_close"}``，否则 None。
+
+        ``kind``：``opposite_card`` / ``neutral_card``；``allow_close`` = False：中性卡遇到
+        没有 / 过旧的行情，执行器只收紧，收紧不了也不平。"""
         card = self._card(now)
-        if self._cfg.opposite_card_action != "confirm_or_tighten" or card is None:
+        if card is None:
             return None
-        if self._card_rule(position, card, now) is None:
+        if self._card_rule(position, card, now) is not None:
+            if self._cfg.opposite_card_action != "confirm_or_tighten":
+                return None
+            cs = card.for_symbol(position.symbol)
+            assert cs is not None
+            key = opposite_instruction_key(cs, card)
+            if self._opposite_arm(position, key)[0] != "confirm_or_tighten":
+                return None
+            return {"kind": "opposite_card", "key": key, "allow_close": True}
+        neutral = self._neutral_rule(position, card, now)
+        if neutral is None or self._cfg.card_neutral_action != "tighten":
             return None
-        cs = card.for_symbol(position.symbol)
-        assert cs is not None
-        key = opposite_instruction_key(cs, card)
-        return key if self._opposite_arm(position, key)[0] == "confirm_or_tighten" else None
+        f = self._features(position.symbol)
+        fresh = f is not None and self._stale_age(f, now) is None
+        return {"kind": "neutral_card", "key": neutral[1], "allow_close": fresh}
 
     def _opposite_arm(self, position: PositionRecord, key: str) -> tuple[str, float]:
         """（这次走哪组, 抽签数）。``opposite_card_ab`` = 0 不分组，全走新规则。"""
@@ -521,7 +546,10 @@ class JevKeeper:
         card = self._card(now)
         reason = self._card_rule(position, card, now)
         if reason is None or card is None:
-            return None
+            neutral = self._neutral_rule(position, card, now)
+            if neutral is None or card is None:
+                return None
+            return self._neutral_review(position, card, *neutral, now)
         cs = card.for_symbol(position.symbol)
         assert cs is not None
         rule: dict[str, Any] = {
@@ -633,6 +661,97 @@ class JevKeeper:
             position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=log_first
         )
 
+    def _neutral_rule(
+        self, position: PositionRecord, card: BattleCard | None, now: datetime
+    ) -> tuple[str, str] | None:
+        """（理由, 指令身份）：持仓开仓之后发布的有效新卡把这个币改成中性。
+
+        中性 = 这个币的指令是 no_trade，或被 stale_on_arrival 作废成只看不做（不论方向：
+        作废的指令不算数）；卡里没有这个币只在 ``card_neutral_on_absent`` 时算。别的原因的
+        只看不做不算（研究 v2：只看不做本来就是常见的「方向对、先别追」）。方向反了归反向卡规则。
+        指令发布在开仓之前（例如照旧卡手动开的仓）不算「被换掉」。"""
+        if self._cfg.card_neutral_action == "hold" or card is None or not card.is_valid(now):
+            return None
+        if self._card_rule(position, card, now) is not None:
+            return None
+        cs = card.for_symbol(position.symbol)
+        if cs is None:
+            if not self._cfg.card_neutral_on_absent or card.created_at <= position.opened_at:
+                return None
+            return "新作战卡里没有这个币", f"{position.symbol}|{card.created_at.isoformat()}|absent"
+        issued = cs.issued_at or card.created_at
+        if not issued <= now < (cs.expires_at or card.expires_at) or issued <= position.opened_at:
+            return None
+        if cs.bias is Bias.NO_TRADE:
+            reason = "新作战卡把这个币改成 no_trade"
+        elif not cs.allowed_signals and "stale_on_arrival" in cs.reason:
+            reason = f"新作战卡这个币的指令（{cs.bias.value}）到手即作废（stale_on_arrival）"
+        else:
+            return None
+        return reason, f"{opposite_instruction_key(cs, card)}|neutral"
+
+    def _neutral_review(
+        self,
+        position: PositionRecord,
+        card: BattleCard,
+        reason: str,
+        key: str,
+        now: datetime,
+    ) -> KeeperVerdict:
+        """中性卡：``close`` 直接平；``tighten`` 返回「拿住」，由接线代码让执行器走反向卡
+        同一套收紧（亏 / 赚得不够平，赚得够锚定移动止损）。没有 / 过旧的行情一律不平：
+        ``close`` 这轮先拿住，``tighten`` 只收紧。不做价格确认：中性不是反向，没有要确认的方向。"""
+        pid = position.position_id
+        action = self._cfg.card_neutral_action
+        cs = card.for_symbol(position.symbol)
+        f = self._features(position.symbol)
+        stale = self._stale_age(f, now) if f is not None else None
+        fresh = f is not None and stale is None
+        rule: dict[str, Any] = {
+            "kind": "neutral_card",
+            "card_id": card.card_id,
+            "entry_card_id": position.card_id,
+            "card_version": card.version,
+            "position_side": position.side.value,
+            "card_bias": cs.bias.value if cs is not None else None,
+            "issued_at": (cs.issued_at or card.created_at).isoformat()
+            if cs is not None
+            else card.created_at.isoformat(),
+            "expires_at": (cs.expires_at or card.expires_at).isoformat()
+            if cs is not None
+            else card.expires_at.isoformat(),
+            "model_called": False,
+            "requires_confirmation": False,
+            "card_neutral_action": action,
+            "instruction_key": key,
+            "price": f.last_price if fresh and f is not None else None,
+            "price_stale_s": round(stale, 1) if stale is not None else None,
+        }
+        if action == "close" and fresh:
+            rule["branch"] = "neutral_close"
+            self._streak.pop(pid, None)
+            self._opposite_logged.pop(pid, None)
+            text = f"作战卡转中性：{reason}，直接全平"
+            return self._verdict(position, now, "close", 1.0, 1, text, None, None, card_rule=rule)
+        if action == "close":
+            branch = "no_market_data_hold"
+            text = f"作战卡转中性（{reason}）但行情没有或过旧：这轮先不平，等新行情"
+        else:
+            branch = "neutral_tighten" if fresh else "no_market_data_tighten"
+            rule["counterfactual"] = {"legacy_action": "hold"}
+            how = (
+                "亏着或赚得不够就平，赚得够在现价锚定移动止损"
+                if fresh
+                else "行情没有或过旧，只收紧不平"
+            )
+            text = f"作战卡转中性（{key}，{reason}）：{how}"
+        rule["branch"] = branch
+        log_first = self._opposite_logged.get(pid) != (key, branch)
+        self._opposite_logged[pid] = (key, branch)
+        return self._verdict(
+            position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=log_first
+        )
+
     def _stale_age(self, f: FeatureSnapshot, now: datetime) -> float | None:
         """快照比 ``keeper_price_max_age_s`` 旧就返回它旧了几秒；没超（或这项关着）返回 None。"""
         limit = self._cfg.keeper_price_max_age_s
@@ -738,6 +857,8 @@ class JevKeeper:
                 (
                     f"{position.symbol} 规则判平，等待执行：{reason}"
                     if card_rule and v.action == "close"
+                    else f"{position.symbol} 作战卡转中性，拿住：{reason}"
+                    if card_rule and card_rule.get("kind") == "neutral_card"
                     else f"{position.symbol} 反向卡未确认，收紧止损：{reason}"
                     if card_rule
                     else f"{position.symbol} {'全平' if v.action == 'close' else '拿住'}：{reason}"
