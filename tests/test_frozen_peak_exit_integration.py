@@ -34,8 +34,8 @@ async def test_exchange_basis_keeps_raw_first_and_last_order_fill_times():
     assert (await obj.entry_basis("SYNTHUSDT", CID)).first_fill_at is None
 
 
-def install(rig):
-    rec = position(START, opened_at=START, quantity=1, entry_price=100)
+def install(rig, side="long"):
+    rec = position(START, opened_at=START, quantity=1, entry_price=100, side=side)
     rig.registry.put(
         TrackedPosition(
             record=rec,
@@ -60,7 +60,7 @@ def install(rig):
         rec.symbol,
         "entry-1",
         "17",
-        "buy",
+        "buy" if side == "long" else "sell",
         1,
         100,
         0.05,
@@ -106,6 +106,110 @@ async def test_executor_samples_persists_freezes_and_requests_only_fresh_retouch
     )
     result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
     assert result["triggered"]
+
+
+PEAK_KEYS = {"peak_gain_r", "peak_net_bps", "peak_after_min"}
+TRIGGER_KEYS = {"trigger_price", "trigger_gain_r"}
+
+
+@pytest.mark.parametrize(
+    "side,peak,frozen_at,touch,net_bps",
+    [("long", 102, 101, 102.5, 189.9), ("short", 98, 99, 97.5, 190.1)],
+)
+async def test_executor_records_frozen_peak_size_at_freeze_and_trigger(
+    tmp_path, side, peak, frozen_at, touch, net_bps
+):
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+
+    def book_at(seconds, price):
+        rig.t = START + timedelta(seconds=seconds)
+        rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+            rec.symbol, price, price, rig.t, rig.t
+        )
+
+    book_at(30, peak)
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["status"] == "collecting" and not (PEAK_KEYS | TRIGGER_KEYS) & result.keys()
+
+    book_at(60, frozen_at)
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["status"] == "frozen" and not TRIGGER_KEYS & result.keys()
+    assert result["peak_gain_r"] == 2.0
+    assert result["peak_net_bps"] == net_bps
+    assert result["peak_after_min"] == 0.5
+
+    book_at(61, touch)
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["triggered"] and result["target_price"] == peak
+    assert result["peak_gain_r"] == 2.0 and result["peak_net_bps"] == net_bps
+    assert result["trigger_price"] == touch and result["trigger_gain_r"] == 2.5
+
+    book_at(70, frozen_at)
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["detail"] == "pending_exit" and result["peak_gain_r"] == 2.0
+    assert not TRIGGER_KEYS & result.keys()
+
+    stored = rig.registry.get(rec.position_id).frozen_peak_exit.model_dump()
+    assert not (PEAK_KEYS | TRIGGER_KEYS) & stored.keys()
+
+
+async def review_at(rig, rec, seconds, price):
+    rig.t = START + timedelta(seconds=seconds)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, price, price, rig.t, rig.t
+    )
+    return await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+
+
+@pytest.mark.parametrize("side,peak,touch", [("long", 102, 102.5), ("short", 98, 97.5)])
+async def test_executor_keeps_latched_trigger_when_recorded_size_is_corrupt(
+    tmp_path, side, peak, touch
+):
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+    await review_at(rig, rec, 30, peak)
+    await review_at(rig, rec, 60, peak)
+    assert (await review_at(rig, rec, 61, touch))["triggered"]
+    tracked = rig.registry.get(rec.position_id)
+    corrupt = tracked.frozen_peak_exit.model_copy(update={"peak_net_usdt": "corrupt"})
+    rig.registry.put(tracked.model_copy(update={"frozen_peak_exit": corrupt}))
+    result = await review_at(rig, rec, 70, peak)
+    assert result["triggered"] is True and result["detail"] == "pending_exit"
+    assert not (PEAK_KEYS | TRIGGER_KEYS) & result.keys()
+
+
+@pytest.mark.parametrize("side,peak,touch", [("long", 102, 102.5), ("short", 98, 97.5)])
+async def test_executor_triggers_when_recording_the_size_fails(
+    tmp_path, monkeypatch, caplog, side, peak, touch
+):
+    def broken(*_args):
+        raise ValueError("bad size")
+
+    monkeypatch.setattr("jiaoyi.execution.hb_executor.frozen_peak_evidence", broken)
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+    await review_at(rig, rec, 30, peak)
+    await review_at(rig, rec, 60, peak)
+    result = await review_at(rig, rec, 61, touch)
+    assert result["triggered"] is True and not TRIGGER_KEYS & result.keys()
+    assert rig.registry.get(rec.position_id).frozen_peak_exit.status == "triggered"
+    assert "Frozen peak size not recorded: ValueError: bad size" in caplog.text
+
+
+@pytest.mark.parametrize("side,peak,touch", [("long", 102, 102.5), ("short", 98, 97.5)])
+async def test_executor_keeps_trigger_price_without_a_usable_stop_distance(
+    tmp_path, side, peak, touch
+):
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+    tracked = rig.registry.get(rec.position_id)
+    rig.registry.put(tracked.model_copy(update={"stop_loss_pct": 0.0}))
+    await review_at(rig, rec, 30, peak)
+    await review_at(rig, rec, 60, peak)
+    result = await review_at(rig, rec, 61, touch)
+    assert result["triggered"] and result["trigger_price"] == touch
+    assert not {"peak_gain_r", "trigger_gain_r"} & result.keys()
 
 
 @pytest.mark.parametrize("quantity,side", [(0.5, "long"), (1, "short")])

@@ -997,6 +997,7 @@ const FIELD = {
   liq_15m_long_k: ["15 分钟多头强平", "k"], liq_15m_short_k: ["15 分钟空头强平", "k"], imb_1m: ["1 分钟平均挂单失衡", "ratio"], imb_5m: ["5 分钟平均挂单失衡", "ratio"],
   deriv: ["衍生品"], premium_bps: ["标记价比指数价贵", "bps"], next_funding_min: ["离下次资金费结算", "min"], funding_prev: ["最近几次资金费率", "bpslist"], top_acct_ls: ["大户人数多空比"], adl: ["自动减仓风险"],
   day: ["24 小时"], chg_pct: ["24 小时涨跌", "pct"], qv_m: ["24 小时成交额（百万 U）"],
+  peak_gain_r: ["冻结的最高盈利价（止损的倍数）"], peak_net_bps: ["冻结的最高盈利（扣开平手续费）", "bps"], peak_after_min: ["成交后几分钟到最高（分钟）"], trigger_gain_r: ["回访触发价（止损的倍数）"],
   reason: ["理由"], entry_zone_bps: ["进场区间离现价", "bpslist"], in_zone: ["现价在进场区间里"], levels: ["关键价位（离现价 bp，类型）", "lvlist"], signals: ["允许的信号"], left_min: ["离卡到期", "min"],
 };
 // 技术面、成交流的键带周期（chg_1h_bps、rsi14_5m……），按模式认
