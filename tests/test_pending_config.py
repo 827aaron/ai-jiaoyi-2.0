@@ -683,3 +683,12 @@ def test_pending_refuses_meeting_model_keys(tmp_path: Path) -> None:
     res = pc.apply_pending(paths, data, NOW)
     assert res.status != "applied" and p.exists()
     assert paths.slow.read_text(encoding="utf-8") == before
+
+
+def test_hosted_close_settings_merge_from_pending(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", 'hosted_close_mode = "direct"\nhb_stop_unknown_retries = 3\n')
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert (cfg.hosted_close_mode, cfg.hb_stop_unknown_retries) == ("direct", 3)

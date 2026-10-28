@@ -802,6 +802,7 @@ class HbExecutorAdapter:
             realized_pnl_usdt=pnl,
             fees_usdt=fee,
         )
+        self._hb_stop_retries.pop(position_id, None)
         self._record(
             Outcome.CLOSE,
             f"{rec.symbol} 直连平仓（{reason.value}），净盈亏 "
@@ -1367,9 +1368,14 @@ class HbExecutorAdapter:
 
     def _direct_close_void(self, pid: str, tracked: TrackedPosition, status: str) -> None:
         current = self._registry.get(pid) or tracked
+        outcomes = {**current.direct_close_outcomes, str(current.direct_close_generation): status}
         self._registry.put(
             current.model_copy(
-                update={"direct_close_pending": False, "direct_close_order_status": status}
+                update={
+                    "direct_close_pending": False,
+                    "direct_close_order_status": status,
+                    "direct_close_outcomes": outcomes,
+                }
             )
         )
 
@@ -1515,8 +1521,11 @@ class HbExecutorAdapter:
         return (None if earlier is None else earlier + latest), order
 
     async def _earlier_direct_fills(self, tracked: TrackedPosition) -> float | None:
-        """前几代按确定的 CID 逐个回读。只有上一代结果明确（被拒、没发出、终态）才会有下一代，
-        所以查无 = 那一代没进交易所、成交 0；查询出错或回读对不上 = 说不清。"""
+        """前几代各成交多少；任何一代说不清就返回 None。
+
+        记为 NOT_SENT / REJECTED 的那代没进交易所，成交 0、不必查；记为交易所终态的按确定的
+        CID 回读，查无、出错或对不上都算说不清（它确实到过交易所）；没有记录的（加记录之前
+        的仓）同样说不清。"""
         read = getattr(self._exchange, "close_order", None)
         if read is None:
             return None
@@ -1524,13 +1533,16 @@ class HbExecutorAdapter:
         close_side = "sell" if rec.side is Side.LONG else "buy"
         total = 0.0
         for generation in range(1, tracked.direct_close_generation):
+            outcome = tracked.direct_close_outcomes.get(str(generation))
+            if outcome in {"NOT_SENT", "REJECTED"}:
+                continue
+            if outcome is None:
+                return None
             cid = f"dc-{rec.position_id}-{generation}"
             try:
                 order = await read(rec.symbol, cid)
             except Exception:
                 return None
-            if order is None:
-                continue
             if not (
                 isinstance(order, IdentifiedCloseOrder)
                 and order.client_order_id == cid
@@ -1671,9 +1683,11 @@ class HbExecutorAdapter:
     async def protection_tick(self) -> None:
         """后台单轮，仅维护已持久托管仓；逐仓故障隔离，不开仓、不补造丢失峰值。"""
         for initial in list(self._registry.data.positions.values()):
+            pid = initial.record.position_id
+            if initial.record.status in {PositionStatus.CLOSED, PositionStatus.FAILED}:
+                self._hb_stop_retries.pop(pid, None)
             if initial.server_protection is None or initial.server_protection.stage == "done":
                 continue
-            pid = initial.record.position_id
             try:
                 if initial.exit_cleanup_pending:
                     await self._finish_exit_cleanup(pid)
@@ -2183,6 +2197,9 @@ class HbExecutorAdapter:
         ):
             return False
         current = self._registry.get(rec.position_id) or tracked
+        outcomes = current.direct_close_outcomes
+        if order.is_terminal is True:
+            outcomes = {**outcomes, str(current.direct_close_generation): order.status}
         self._registry.put(
             current.model_copy(
                 update={
@@ -2190,6 +2207,7 @@ class HbExecutorAdapter:
                     "direct_close_order_status": order.status,
                     "direct_close_order_id": order.order_id,
                     "direct_close_price": order.average_price,
+                    "direct_close_outcomes": outcomes,
                 }
             )
         )

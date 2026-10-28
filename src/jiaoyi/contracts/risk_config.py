@@ -1224,8 +1224,9 @@ class AppConfig(Contract):
         default=0,
         ge=0,
         le=10000,
-        description="对账员停执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
-        "没确认终止，就再发一次停止。0 = 永不重发（只查）。",
+        description="对账员停外来执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
+        "没确认终止，就再发一次停止。0 = 永不重发（只查）。本程序托管仓平仓时停自己的执行器"
+        "另由 hb_stop_unknown_retries 管。",
     )
     reconcile_opening_grace_s: float = Field(
         default=0.0,
@@ -1309,9 +1310,11 @@ class AppConfig(Contract):
         default=0,
         ge=0,
         le=10,
-        description="Demo 托管仓：程序发给 HB 的只停不平（keep_position=True）停止结果未知、"
+        description="Demo 托管仓：平仓时程序停自己的 HB 执行器（只停不平，keep_position=True），"
+        "停止结果未知、"
         "HB 仍报 RUNNING 时，最多再补发几次，间隔 5、10、20… 秒翻倍；这种停止从不卖出，"
         "补发无害。不补发时零仓也得等 HB 自己结束才撤交易所保护腿。次数按进程计，重启重新计。"
+        "外来执行器的重发是 reconciler_executor_stop_retry_rounds。"
         "0 = 不补发（原行为）。改后重启生效。",
     )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
