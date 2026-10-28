@@ -50,7 +50,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from jiaoyi.contracts import (
     AgainstSignalEvent,
@@ -137,6 +137,7 @@ class JevKeeper:
         venue_price: Callable[[str], Awaitable[tuple[float, datetime] | None]] | None = None,
         exit_in_flight: Callable[[str], tuple[str, str, str] | None] | None = None,
         alerter: Alerter | None = None,
+        kronos_snapshot: Literal["direction", "rank", "off"] = "direction",
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -169,6 +170,7 @@ class JevKeeper:
         self._against: dict[str, tuple[AgainstSignalEvent, bool]] = {}
         self._fee_bps = fee_bps
         self._forecast = forecast
+        self._kronos_snapshot = kronos_snapshot
         self._scan_day = scan_day
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
         # 每个持仓复查到过的最高浮盈（基点），按价格来源（mainnet / venue）分开记，不被历史截断
@@ -531,6 +533,7 @@ class JevKeeper:
                 fee_bps=self._fee_bps,
                 current_market=market,
                 market_intra=self._intra(now, market),
+                kronos=self._kronos_snapshot,
             ),
             questions=hold_questions(),
         )

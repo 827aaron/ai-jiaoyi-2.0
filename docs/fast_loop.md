@@ -108,10 +108,12 @@
 | `adaptive_base_max_queue` | 0 | 0–20，且 < 下一项 | 自适应：排队 ≤ 它用 base |
 | `adaptive_mini_min_queue` | 3 | 1–50 | 自适应：排队 ≥ 它用 mini，中间用 small |
 | `backfill_bars` | 400 | 64–1500 | 启动回填多少根 5 分钟线 |
+| `keeper_snapshot` | `direction` | `direction` / `rank` / `off` | 管家复查快照里怎么带预测员（改后重启）。`direction`（原行为）：`kronos.agree` = 平均路径终点在持仓方向一侧给 1、否则 0，排得出名次再带 `kronos.rank`；`rank`：只带 `kronos.rank`（top / mid / bottom，和拍板加分同一个全池排名），排不出名次就不写 `kronos`；`off`：不带 |
 
 - 三个模型都钉了 Hugging Face 提交（见 `predictor/kronos.py` 的 `MODEL_SPECS`）：mini 配 Tokenizer-2k（上下文 2048），small / base 配 Tokenizer-base（上下文 512）。用到哪个才加载哪个，加载后常驻。
 - 实测 small：约 3.0 秒 / 币，5 个币排队约 14.9 秒；按需模式下一般只有卡里的几个币，排得开。`Forecast.model` 记着这次用的是哪个。
 - 开关仍是 `predictor_enabled`；运行中关掉会丢掉已有预测。
+- `p_up` 是二值的：平均路径终点高于现价 = 1、低于 = 0、持平 = 0.5，不是「几成路径向上」。10-27 / 28 的 1927 条预测里 77% 是 0；主网 15 分钟线回测 4 小时方向准确率 49%，喊「跌」的只对 43%。所以拍板加分只看全池名次；管家快照默认的 `kronos.agree` 由它算，做多的仓多半拿到 0、做空的多半拿到 1，多空不对称，`keeper_snapshot = "rank"` 改成只给名次。面板预测员卡片写「平均路径终点在现价下方 / 上方」。
 
 ## ATR 周期和止损倍数（设置页可调）
 

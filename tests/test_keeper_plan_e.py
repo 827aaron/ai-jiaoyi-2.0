@@ -201,6 +201,86 @@ def test_keeper_sees_forecast_rank(now: datetime) -> None:
     assert d["kronos"] == {"agree": 1, "rank": "bottom"}
 
 
+def _ranked(now: datetime, p_up: float, view: str) -> c.Forecast:
+    score = {"top": 0.01, "mid": 0.0, "bottom": -0.01}[view]
+    pct = {"top": 1.0, "mid": 0.5, "bottom": 0.0}[view]
+    return _fc(now, p_up).model_copy(
+        update={"score": score, "rank_pct": pct, "rank_n": 12, "rank_view": view}
+    )
+
+
+def test_keeper_snapshot_rank_mode_carries_only_the_rank(now: datetime) -> None:
+    pos = position(now)
+    for p_up in (0.0, 1.0):  # p_up is ignored: only the pool rank goes in
+        d = _snap(
+            hold_snapshot(pos, features(now), card(now), now,
+                          forecast=_ranked(now, p_up, "top"), kronos="rank")
+        )  # fmt: skip
+        assert d["kronos"] == {"rank": "top"}
+    no_rank = _snap(
+        hold_snapshot(pos, features(now), card(now), now, forecast=_fc(now, 1.0), kronos="rank")
+    )
+    assert "kronos" not in no_rank
+
+
+def test_keeper_snapshot_off_mode_omits_kronos(now: datetime) -> None:
+    d = _snap(
+        hold_snapshot(position(now), features(now), card(now), now,
+                      forecast=_ranked(now, 1.0, "top"), kronos="off")
+    )  # fmt: skip
+    assert "kronos" not in d
+
+
+def test_keeper_snapshot_direction_mode_is_skewed_by_binary_p_up(now: datetime) -> None:
+    """Default: with the observed p_up = 0 skew, a long reads "against" and a short "with"."""
+    fc = _ranked(now, 0.0, "mid")
+    long_d = _snap(hold_snapshot(position(now), features(now), card(now), now, forecast=fc))
+    short_d = _snap(
+        hold_snapshot(position(now, side="short"), features(now), card(now), now, forecast=fc)
+    )
+    assert long_d["kronos"] == {"agree": 0, "rank": "mid"}
+    assert short_d["kronos"] == {"agree": 1, "rank": "mid"}
+
+
+@pytest.mark.parametrize("mode", ["direction", "rank", "off"])
+@pytest.mark.parametrize("p_up", [0.0, 1.0])
+def test_keeper_snapshot_kronos_is_long_short_mirrored(
+    now: datetime, mode: Any, p_up: float
+) -> None:
+    """Long vs short with a mirrored forecast (p_up flipped, rank top <-> bottom)."""
+    flip = {"top": "bottom", "bottom": "top", "mid": "mid"}
+    for view in ("top", "mid", "bottom"):
+        long_k = _snap(
+            hold_snapshot(position(now), features(now), card(now), now,
+                          forecast=_ranked(now, p_up, view), kronos=mode)
+        ).get("kronos")  # fmt: skip
+        short_k = _snap(
+            hold_snapshot(position(now, side="short"), features(now), card(now), now,
+                          forecast=_ranked(now, 1.0 - p_up, flip[view]), kronos=mode)
+        ).get("kronos")  # fmt: skip
+        if mode == "off":
+            assert long_k is None and short_k is None
+            continue
+        assert long_k is not None and short_k is not None
+        assert (
+            set(long_k) == set(short_k) == ({"agree", "rank"} if mode == "direction" else {"rank"})
+        )
+        assert long_k.get("agree") == short_k.get("agree")
+        assert long_k["rank"] == view and short_k["rank"] == flip[view]
+
+
+async def test_keeper_passes_kronos_snapshot_mode(now: datetime) -> None:
+    fc = _ranked(now, 0.0, "top")
+    t = MockJevTransport(answer=close_p(0.1))
+    k = _keeper(t, now, [68068.0], forecast=lambda s, n: fc, kronos_snapshot="rank")
+    await k.review(position(now), now)
+    assert _snap(t.calls[0])["kronos"] == {"rank": "top"}
+    t2 = MockJevTransport(answer=close_p(0.1))
+    k2 = _keeper(t2, now, [68068.0], forecast=lambda s, n: fc)
+    await k2.review(position(now), now)
+    assert _snap(t2.calls[0])["kronos"] == {"agree": 0, "rank": "top"}
+
+
 def test_positions_page_shows_keeper_peak_and_giveback(now: datetime) -> None:
     from jiaoyi.panel.hb import HbSnapshot
     from jiaoyi.panel.overview import position_views

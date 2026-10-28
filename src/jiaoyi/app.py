@@ -731,6 +731,7 @@ def build_modules(
             else None,
             exit_in_flight=getattr(executor, "protection_exit_in_flight", None),
             alerter=alerter,
+            kronos_snapshot=app_cfg.predictor.keeper_snapshot,
         )
 
     modules = Modules(

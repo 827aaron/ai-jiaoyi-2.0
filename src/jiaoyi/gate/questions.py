@@ -20,7 +20,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from jiaoyi.contracts import (
     ENTRY_CHOICES,
@@ -470,8 +470,12 @@ def hold_snapshot(
     fee_bps: float = 5.0,
     current_market: MarketView | None = None,
     market_intra: str | None = None,
+    kronos: Literal["direction", "rank", "off"] = "direction",
 ) -> str:
-    """``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
+    """``kronos`` is ``[predictor] keeper_snapshot``: "direction" = agree from p_up + rank,
+    "rank" = pool rank only (p_up is 0/1 and skews to 0, so agree favours shorts), "off" = none.
+
+    ``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
 
     ``history``：这笔仓之前历次复查的浮盈（基点，从早到晚），算最高浮盈、回吐和走势；
     ``entry``：进场理由（拍板记录里的信号种类、触发说明、「真」「做」概率），拿不到不写；
@@ -523,12 +527,15 @@ def hold_snapshot(
     d.update(mkt)
     d["card"] = _card_block(card, pos.symbol, px)
     d.update(_current_market(card, current_market, market_intra))
-    if forecast is not None and forecast.stale_after > now:
-        up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
-        kr: dict[str, Any] = {"agree": 1 if up > 0.5 else 0}
+    if kronos != "off" and forecast is not None and forecast.stale_after > now:
+        kr: dict[str, Any] = {}
+        if kronos == "direction":
+            up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
+            kr["agree"] = 1 if up > 0.5 else 0
         if forecast.rank_view is not None:
             kr["rank"] = forecast.rank_view
-        d["kronos"] = kr
+        if kr:
+            d["kronos"] = kr
     if against is not None:
         d["against"] = {
             "sig": against.kind.value,
