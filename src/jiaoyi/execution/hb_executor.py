@@ -87,6 +87,9 @@ MARKER_PREFIX = "jy-"
 DAY_START_TOLERANCE_S = 300.0
 VENUE_MARK_REUSE_S = 2.0
 """管家读执行所标记价：同一个币这么多秒内复用上一次读到的（标记价本身每秒才更新一次）。"""
+VENUE_MARK_READ_MAX_AGE_S = 600.0
+"""管家读标记价时交给 ``execution_mark`` 的新鲜度上限（``keeper_price_max_age_s`` 的上限）：
+旧到多少算过旧由管家按自己的设置判，这里只挡更离谱的，免得过旧被当成读不到。"""
 
 IncomeSince = Callable[[datetime], Awaitable[float]]
 
@@ -1495,7 +1498,7 @@ class HbExecutorAdapter:
         """持仓管家用的执行所标记价（和保护状态机同一个读法 ``execution_mark``）和它的交易所时间。
 
         同一个币 ``VENUE_MARK_REUSE_S`` 秒内只读一次、并发的复查共用一次读，免得每笔复查各打一次
-        REST；读不到返回 None（管家退回主网价）。"""
+        REST；读不到返回 None（管家这轮不按价判）。"""
         read = getattr(self._exchange, "execution_mark", None)
         if read is None:
             return None
@@ -1505,7 +1508,7 @@ class HbExecutorAdapter:
             return cached[1].mark, cached[1].source_at
         task = self._venue_reads.get(symbol)
         if task is None:
-            task = asyncio.ensure_future(read(symbol))
+            task = asyncio.ensure_future(read(symbol, max_age_s=VENUE_MARK_READ_MAX_AGE_S))
             self._venue_reads[symbol] = task
             task.add_done_callback(lambda _t: self._venue_reads.pop(symbol, None))
         try:
@@ -1531,7 +1534,7 @@ class HbExecutorAdapter:
             return "exiting", "leg_triggered"
         moving = [leg for leg in state.legs if leg.state in ("submit_pending", "cancel_pending")]
         if state.ever_armed and moving:
-            return "replacing", f"{moving[0].kind} {moving[0].state}"
+            return "replacing", f"第 {state.generation} 代 {moving[0].kind} {moving[0].state}"
         return None
 
     def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:

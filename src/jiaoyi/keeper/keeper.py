@@ -33,7 +33,8 @@
   「过线即平」），被封的币改成硬规则直接平。
   ``keeper_price_source = "venue"``：浮盈、最高浮盈、回吐、盈利门控和快照都用执行所标记价。
   Jev 盈利门控（``keeper_thesis_take_on``）排在回吐保护之后、平仓概率之前。
-  交易所保护腿已触发 / 在换代时、或这一轮已发过平仓请求时，管家不再发（``_close_blocker``）。
+  ``keeper_close_guard``：交易所保护腿已触发 / 在换代时（各有最长等待）、或这一轮已发过平仓
+  请求时，管家不再发（``_close_blocker``）。
 """
 
 from __future__ import annotations
@@ -91,8 +92,10 @@ RULE_ORDER = (
 """每轮复查的规则顺序：作战卡（硬平 / 收紧）→ 被封的币 → 冻结盈利价 → 价格新鲜度和来源 →
 回吐保护 → Jev 盈利门控 → 平仓概率。前三条不读管家的价；第一条投「close」的生效，
 每轮每仓最多一个平仓请求。"""
+VENUE_DEFAULT_MAX_AGE_S = 5.0
+"""``keeper_price_source = "venue"`` 且 ``keeper_price_max_age_s = 0`` 时执行所标记价最多旧几秒
+（和保护状态机用标记价时同一条线）。"""
 THESIS_TAKE_LABEL = "盈利且进场理由不成立，止盈"
-REPLACING_MAX_WAIT_S = 30.0
 _BLOCKED_PREFIX = "不发平仓："
 MAX_HISTORY = 400  # 每笔仓最多记这么多次复查的浮盈（20 秒一次 ≈ 2 小时多）
 _LOOKBACK_DAYS = 3  # 找回历史最多往前翻几天的决策日志
@@ -162,7 +165,8 @@ class JevKeeper:
         self._forecast = forecast
         self._scan_day = scan_day
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
-        self._peak: dict[str, float] = {}  # 每个持仓复查到过的最高浮盈（基点），不被历史截断
+        # 每个持仓复查到过的最高浮盈（基点），按价格来源（mainnet / venue）分开记，不被历史截断
+        self._peak: dict[str, dict[str, float]] = {}
         self._entry: dict[str, dict[str, Any] | None] = {}  # 每个持仓的进场拍板
         # 后台模式的冻结盈利价证据：pid → (这次读开始的时刻, 结果)
         self._fp_cache: dict[str, tuple[datetime, dict[str, Any] | None]] = {}
@@ -181,7 +185,7 @@ class JevKeeper:
         self._exit_in_flight = exit_in_flight
         self._thesis: dict[str, tuple[datetime, float]] = {}  # 最近一次 Jev thesis_intact 的 no
         self._close_sent: dict[str, datetime] = {}  # 上一次发出平仓请求的时刻
-        self._replacing_since: dict[str, datetime] = {}
+        self._inflight: dict[str, tuple[str, str, datetime]] = {}  # 保护腿在途（种类, 说明, 起）
         self._load_opposite_state()
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
@@ -194,7 +198,7 @@ class JevKeeper:
         self._stale_logged.discard(position_id)
         self._thesis.pop(position_id, None)
         self._close_sent.pop(position_id, None)
-        self._replacing_since.pop(position_id, None)
+        self._inflight.pop(position_id, None)
         self._against.pop(position_id, None)
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
@@ -259,27 +263,31 @@ class JevKeeper:
     async def _recall(self, pos: PositionRecord, now: datetime) -> None:
         """第一次复查这笔仓：从决策日志找回历次浮盈和进场拍板（放线程里读，不卡事件循环）。"""
         pid = pos.position_id
-        history: list[float] = []
+        checks: list[tuple[float, str]] = []
         entry: dict[str, Any] | None = None
         if self._scan_day is not None:
             try:
-                history, entry = await asyncio.to_thread(self._read_log, pos, now)
+                checks, entry = await asyncio.to_thread(self._read_log, pos, now)
             except Exception:  # 日志读不了就从这次开始记，不影响复查
                 log.warning("管家找回 %s 的复查历史失败", pid, exc_info=True)
-        self._history[pid] = history[-MAX_HISTORY:]
-        if history:
-            self._peak[pid] = max(history)
+        self._history[pid] = [pnl for pnl, _ in checks][-MAX_HISTORY:]
+        peaks: dict[str, float] = {}
+        for pnl, used in checks:
+            peaks[used] = max(peaks.get(used, pnl), pnl)
+        if peaks:
+            self._peak[pid] = peaks
         self._entry[pid] = entry
 
     def _read_log(
         self, pos: PositionRecord, now: datetime
-    ) -> tuple[list[float], dict[str, Any] | None]:
+    ) -> tuple[list[tuple[float, str]], dict[str, Any] | None]:
+        """（[(浮盈, 那次用的价格来源)], 进场拍板），从早到晚；没写来源的旧记录算主网价。"""
         assert self._scan_day is not None
         first = (pos.opened_at - timedelta(minutes=5)).date()
         last = now.date()
         days = [first + timedelta(days=i) for i in range((last - first).days + 1)]
         days = days[-_LOOKBACK_DAYS:]
-        checks: list[tuple[str, float]] = []
+        checks: list[tuple[str, float, str]] = []
         entry: dict[str, Any] | None = None
         for day in days:
             iso = day.isoformat()
@@ -289,12 +297,12 @@ class JevKeeper:
                     continue
                 pnl = _snapshot_pnl(rec)
                 if pnl is not None:
-                    checks.append((str(rec.get("ts", "")), pnl))
+                    checks.append((str(rec.get("ts", "")), pnl, _price_used(rec)))
             for rec in self._scan_day(iso, pos.signal_id):
                 if rec.get("role") == Role.GATE.value and rec.get("signal_id") == pos.signal_id:
                     entry = _entry_block(rec) or entry
         checks.sort(key=lambda c: c[0])
-        return [pnl for _, pnl in checks], entry
+        return [(pnl, used) for _, pnl, used in checks], entry
 
     def note_against(self, position_id: str, sig: AgainstSignalEvent, one_shot: bool) -> None:
         """下一次复查带上这个反向信号；``one_shot`` = 这次过线就平，不等连续确认。"""
@@ -381,9 +389,10 @@ class JevKeeper:
         确认、旧价只收紧，冻结盈利价读执行所自己的证据），价格过旧也照常判；之后读价的规则都要
         先过价格检查。"""
         pid = position.position_id
+        self._observe_inflight(pid, now)
         votes: list[dict[str, Any]] = []
         direct = self.review_card_rule(position, now, votes=votes)
-        if direct is not None and (direct.action == "close" or _is_blocked(direct)):
+        if direct is not None and (direct.action == "close" or close_blocked(direct)):
             return direct  # 「拿住 + 收紧」只交给作战卡规则通道，这里照常问模型
         votes.append(
             {"rule": "card", "vote": "none"}
@@ -441,28 +450,25 @@ class JevKeeper:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
-        if price["vote"] == "stale":
-            # 短暂断流：这一轮当没复查，连续计数不动；断得久了，断流前那一票不能和恢复后的
-            # 一票凑成「连续两次」
-            age = float(price["stale_s"])
+        if price["vote"] in ("stale", "venue_unavailable"):
+            # 短暂断流：这一轮当没复查，连续计数不动；断得久了（或执行所价读不到、不知道多久），
+            # 断流前那一票不能和恢复后的一票凑成「连续两次」
+            age = float(price.get("stale_s") or 0.0)
             limit = self._review_interval_s
-            if limit is None or age > 2 * limit:
+            if price["vote"] == "venue_unavailable" or limit is None or age > 2 * limit:
                 self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             first = pid not in self._stale_logged
             self._stale_logged.add(pid)
-            src = "执行所标记价" if price["used"] == "venue" else "行情"
-            return verdict(
-                position,
-                now,
-                "hold",
-                0.0,
-                1,
-                f"{src}已旧 {age:.0f} 秒，这轮跳过、维持现状",
-                None,
-                None,
-                record=first,
+            for name in ("giveback", "thesis_take"):
+                votes.append({"rule": name, "vote": "hold", "why": price["vote"]})
+            text = (
+                "执行所标记价读不到，这轮不按价判、维持现状"
+                if price["vote"] == "venue_unavailable"
+                else ("执行所标记价" if price["used"] == "venue" else "行情")
+                + f"已旧 {age:.0f} 秒，这轮跳过、维持现状"
             )
+            return verdict(position, now, "hold", 0.0, 1, text, None, None, record=first)
         self._stale_logged.discard(pid)
         px = float(price["price"])
         fv = f if px == f.last_price else f.model_copy(update={"last_price": px})
@@ -476,8 +482,13 @@ class JevKeeper:
             await self._recall(position, now)
         history = self._history.setdefault(pid, [])
         pnl = hold_pnl_bps(position, px)
-        peak = max(self._peak.get(pid, pnl), pnl)
-        self._peak[pid] = peak
+        peaks = self._peak.setdefault(pid, {})
+        if price["used"] == "venue" and not price["mainnet_stale"]:
+            # 主网价也新鲜就一起记它的最高浮盈：热切换价格来源时接得上，两种价不混在一起比
+            main = hold_pnl_bps(position, f.last_price)
+            peaks["mainnet"] = max(peaks.get("mainnet", main), main)
+        peak = max(peaks.get(price["used"], pnl), pnl)
+        peaks[price["used"]] = peak
         guard = self._giveback_guard(position, pnl, peak)
         if guard is not None:  # 代码规则先于模型：回吐保护不问 Jev，直接全平
             history.append(pnl)
@@ -588,42 +599,44 @@ class JevKeeper:
     ) -> dict[str, Any]:
         """这次复查用哪个价（``keeper_price_source``），以及两种价各是多少、多旧。
 
-        ``vote``：ok / stale（按选中的价查 ``keeper_price_max_age_s``）/ missing（没有行情快照）。
-        选 venue 但读不到执行所标记价：退回主网价，``note`` 写明。"""
+        ``vote``：ok / stale / missing（没有行情快照）/ venue_unavailable。选 venue 时只认执行所
+        标记价：读不到或过旧（``keeper_price_max_age_s``，0 时按 ``VENUE_DEFAULT_MAX_AGE_S``）这轮
+        不按价判，不退回主网价——最高浮盈记在执行所价上，拿主网价比会凭空多出回吐。"""
         source = self._cfg.keeper_price_source
+        read = self._venue_price if source == "venue" else None
         out: dict[str, Any] = {
             "source": source,
-            "used": "mainnet",
+            "used": "venue" if read is not None else "mainnet",
             "price": None,
             "mainnet": f.last_price if f is not None else None,
             "mainnet_age_s": round((now - f.ts).total_seconds(), 1) if f is not None else None,
             "venue": None,
             "venue_age_s": None,
         }
-        if f is None:
-            return {**out, "vote": "missing"}
-        read = self._venue_price
         if source == "venue" and read is None:
             out["note"] = "venue_is_mainnet"
-        elif source == "venue" and read is not None:
-            got: tuple[float, datetime] | None = None
-            try:
-                got = await read(position.symbol)
-            except Exception:
-                log.warning("执行所标记价读不到 %s，这次用主网价", position.symbol, exc_info=True)
-            if got is not None:
-                venue, at = got
-                age = (now - at).total_seconds()
-                out.update(used="venue", venue=venue, venue_age_s=round(age, 1))
-                limit = self._cfg.keeper_price_max_age_s
-                if limit > 0 and age > limit:
-                    return {**out, "vote": "stale", "stale_s": age}
-                return {**out, "vote": "ok", "price": venue}
-            out["note"] = "venue_unavailable_fallback_mainnet"
+        if f is None:
+            return {**out, "vote": "missing"}
         stale = self._stale_age(f, now)
-        if stale is not None:
-            return {**out, "vote": "stale", "stale_s": stale}
-        return {**out, "vote": "ok", "price": f.last_price}
+        out["mainnet_stale"] = stale is not None
+        if read is None:
+            if stale is not None:
+                return {**out, "vote": "stale", "stale_s": stale}
+            return {**out, "vote": "ok", "price": f.last_price}
+        got: tuple[float, datetime] | None = None
+        try:
+            got = await read(position.symbol)
+        except Exception:
+            log.warning("执行所标记价读不到 %s，这轮不按价判", position.symbol, exc_info=True)
+        if got is None:
+            return {**out, "vote": "venue_unavailable"}
+        venue, at = got
+        age = (now - at).total_seconds()
+        out.update(venue=venue, venue_age_s=round(age, 1))
+        limit = self._cfg.keeper_price_max_age_s or VENUE_DEFAULT_MAX_AGE_S
+        if age > limit:
+            return {**out, "vote": "stale", "stale_s": age}
+        return {**out, "vote": "ok", "price": venue}
 
     def _thesis_gate(
         self, position: PositionRecord, pnl: float, now: datetime
@@ -663,28 +676,54 @@ class JevKeeper:
         )
         return {**vote, "vote": "close"}, text
 
-    def _close_blocker(self, pid: str, now: datetime) -> str | None:
-        """平仓请求发不发：交易所保护腿已触发 / 正在退出（交给保护轮询收尾）、正在换代（最多等
-        ``REPLACING_MAX_WAIT_S``，换代卡住不能让管家永远平不了），或这一轮已经发过一次。"""
+    def _observe_inflight(self, pid: str, now: datetime) -> tuple[str, str, datetime] | None:
+        """交易所保护腿在途状态（种类, 说明, 从何时起）。每次复查都刷新：不在途就清掉，换了一次
+        换代（说明里带保护代数）或种类变了就重新起算，后来的换代各有自己的等待时间。"""
         inflight: tuple[str, str] | None = None
-        if self._exit_in_flight is not None:
+        if self._exit_in_flight is not None and self._cfg.keeper_close_guard:
             try:
                 inflight = self._exit_in_flight(pid)
             except Exception:
                 log.warning("保护腿状态读不到 %s，按没有在途处理", pid, exc_info=True)
-        if inflight is not None and inflight[0] == "exiting":
-            return f"交易所保护腿已触发或正在退出（{inflight[1]}），管家不再发平仓"
-        if inflight is not None:
-            since = self._replacing_since.setdefault(pid, now)
-            if (now - since).total_seconds() <= REPLACING_MAX_WAIT_S:
-                return f"交易所保护腿正在换代（{inflight[1]}），这轮不发平仓"
-        else:
-            self._replacing_since.pop(pid, None)
+        if inflight is None:
+            self._inflight.pop(pid, None)
+            return None
+        seen = self._inflight.get(pid)
+        if seen is None or seen[:2] != inflight:
+            seen = (inflight[0], inflight[1], now)
+            self._inflight[pid] = seen
+        return seen
+
+    def _close_blocker(self, pid: str, now: datetime) -> tuple[str | None, str | None]:
+        """（不发平仓的原因, 等过头照常平时的说明）。``keeper_close_guard`` 关着一律照常发。
+
+        交易所保护腿已触发 / 正在退出：交给保护轮询收尾，最多等
+        ``keeper_close_guard_exiting_max_s``；
+        正在换代：最多等 ``keeper_close_guard_replacing_max_s``；卡住不能让管家永远平不了。
+        同一笔仓半个复查间隔内已发过一次平仓请求：不重复发。"""
+        cfg = self._cfg
+        if not cfg.keeper_close_guard:
+            return None, None
+        note: str | None = None
+        seen = self._observe_inflight(pid, now)
+        if seen is not None:
+            kind, detail, since = seen
+            waited = (now - since).total_seconds()
+            exiting = kind == "exiting"
+            limit = (
+                cfg.keeper_close_guard_exiting_max_s
+                if exiting
+                else cfg.keeper_close_guard_replacing_max_s
+            )
+            what = "已触发或正在退出" if exiting else "正在换代"
+            if waited <= limit:
+                return f"交易所保护腿{what}（{detail}），这轮不发平仓", None
+            note = f"交易所保护腿{what}（{detail}）已 {waited:.0f} 秒，超过 {limit:g} 秒，照常平"
         last = self._close_sent.get(pid)
         window = 0.5 * self._review_interval_s if self._review_interval_s else 0.0
         if last is not None and 0 <= (now - last).total_seconds() < window:
-            return f"这一轮已发过平仓请求（{last:%H:%M:%S}），不重复发"
-        return None
+            return f"这一轮已发过平仓请求（{last:%H:%M:%S}），不重复发", note
+        return None, note
 
     def card_rule_applies(self, position: PositionRecord, now: datetime) -> bool:
         """只读预检供调度去重；真正执行时仍需再次读取最新卡，不在预检记判定日志。"""
@@ -1085,7 +1124,9 @@ class JevKeeper:
         没走到的规则补 ``not_reached``；``price``：``_price_inputs`` 的结果。
 
         所有平仓都从这里出去，``_close_blocker`` 拦下的改成「拿住」，原理由留在 reason 里。"""
-        blocker = self._close_blocker(position.position_id, now) if action == "close" else None
+        blocker, guard_note = (
+            self._close_blocker(position.position_id, now) if action == "close" else (None, None)
+        )
         if blocker is not None:
             action, reason = "hold", f"{_BLOCKED_PREFIX}{blocker}；本来要平：{reason}"
         elif action == "close":
@@ -1172,6 +1213,7 @@ class JevKeeper:
                     ),
                     **({"price": dict(price)} if price is not None else {}),
                     **({"close_blocked": blocker} if blocker is not None else {}),
+                    **({"close_guard_note": guard_note} if guard_note is not None else {}),
                     **(
                         {
                             "against": {
@@ -1385,8 +1427,17 @@ def _stop_bps(position: PositionRecord) -> float | None:
     return stop if stop > 0 else None
 
 
-def _is_blocked(v: KeeperVerdict) -> bool:
+def close_blocked(v: KeeperVerdict) -> bool:
+    """这次本来要平，被平仓前检查（``keeper_close_guard``）拦成了拿住：调用方也不该收紧。"""
     return v.reason.startswith(_BLOCKED_PREFIX)
+
+
+def _price_used(rec: Mapping[str, Any]) -> str:
+    try:
+        used = rec["output"]["price"]["used"]
+    except (KeyError, TypeError):
+        return "mainnet"
+    return "venue" if used == "venue" else "mainnet"
 
 
 def _snapshot_pnl(rec: Mapping[str, Any]) -> float | None:

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,9 @@ NEW_KEYS = {
     "keeper_thesis_take_min_r",
     "keeper_thesis_take_p",
     "keeper_thesis_take_max_age_s",
+    "keeper_close_guard",
+    "keeper_close_guard_replacing_max_s",
+    "keeper_close_guard_exiting_max_s",
 }
 RECORD = FAST.model_copy(update={"keeper_model_mode": "record"})
 GATE = FAST.model_copy(update={"keeper_thesis_take_on": True, "giveback_on": False})
@@ -55,6 +59,7 @@ def make(
     cfg: c.FastLoopConfig,
     prices: Iterator[float] | None = None,
     log: JsonlDecisionLog | None = None,
+    cd: c.BattleCard | None = None,
     **kw: Any,
 ) -> JevKeeper:
     it = prices
@@ -66,7 +71,7 @@ def make(
         JevDecisionModel(t, cfg, timeout_ms=200),
         cfg,
         feats,
-        lambda n: card(now),
+        lambda n: cd if cd is not None else card(now),
         RoleRecorder(c.Role.KEEPER, log) if log is not None else None,
         **kw,
     )
@@ -185,17 +190,138 @@ async def test_venue_price_respects_age_guard(now: datetime) -> None:
     assert v.action == "hold" and "执行所标记价已旧 45 秒" in v.reason and t.calls == []
 
 
-async def test_venue_unavailable_falls_back_to_mainnet(now: datetime, tmp_path: Path) -> None:
+async def test_venue_unavailable_holds_without_falling_back_to_mainnet(
+    now: datetime, tmp_path: Path
+) -> None:
+    """峰记在 Demo 价 30bp 上；之后 Demo 价读不到、主网 16bp：拿主网价比会凭空回吐 47%。"""
     log = JsonlDecisionLog(tmp_path)
     cfg = FAST.model_copy(update={"keeper_price_source": "venue"})
+    marks = iter([68204.0, None])
 
-    async def broken(symbol: str) -> tuple[float, datetime] | None:
-        raise RuntimeError("premiumIndex 500")
+    async def read(symbol: str) -> tuple[float, datetime] | None:
+        px = next(marks)
+        if px is None:
+            raise RuntimeError("premiumIndex 500")
+        return px, now
 
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, cfg, iter([68204.0, 68109.0]), log=log, venue_price=read)
+    pos = position(now)
+    await k.review(pos, now)
+    v = await k.review(pos, now + timedelta(seconds=30))
+    assert v.action == "hold" and "执行所标记价读不到" in v.reason and len(t.calls) == 1
+    out = keeper_records(log, now)[-1].output
+    votes = {r["rule"]: r for r in out["rules"]}
+    assert votes["price"]["vote"] == "venue_unavailable"
+    assert votes["giveback"]["vote"] == "hold" and votes["thesis_take"]["vote"] == "hold"
+    assert out["price"]["used"] == "venue" and out["price"]["venue"] is None
+
+
+async def test_hot_switch_of_price_source_keeps_peaks_apart(now: datetime) -> None:
+    """主网 10bp；切到 Demo 价：Demo 16bp（Demo 峰从这里起）不平，同时记下主网涨到的 30bp；
+    切回主网 16bp：对主网峰 30bp 回吐 47%，平。"""
+    mainnet = iter([68068.0, 68204.0, 68109.0])
     t = MockJevTransport(answer=answer(0.0))
-    await make(t, now, cfg, log=log, venue_price=broken).review(position(now), now)
-    price = keeper_records(log, now)[-1].output["price"]
-    assert price["used"] == "mainnet" and price["note"] == "venue_unavailable_fallback_mainnet"
+    k = make(t, now, FAST, mainnet, venue_price=venue_from([68109.0], lambda: now))
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
+    k._cfg = FAST.model_copy(update={"keeper_price_source": "venue"})
+    assert (await k.review(pos, now)).action == "hold"
+    k._cfg = FAST
+    v = await k.review(pos, now)
+    assert v.action == "close" and "回吐保护" in v.reason
+
+
+async def test_recalled_peak_keeps_its_price_source(now: datetime, tmp_path: Path) -> None:
+    """重启前用 Demo 价，峰 30bp；重启后改回主网价 16bp：Demo 的峰不拿来和主网价比。"""
+    log = JsonlDecisionLog(tmp_path)
+    venue_cfg = FAST.model_copy(update={"keeper_price_source": "venue"})
+    t = MockJevTransport(answer=answer(0.0))
+    k1 = make(
+        t, now, venue_cfg, iter([68000.0]), log=log, scan_day=log.scan_day,
+        venue_price=venue_from([68204.0], lambda: now),
+    )  # fmt: skip
+    await k1.review(position(now), now)
+    k2 = make(t, now, FAST, iter([68109.0]), log=log, scan_day=log.scan_day)
+    assert (await k2.review(position(now), now)).action == "hold"
+    k3 = make(
+        t, now, venue_cfg, iter([68000.0]), scan_day=log.scan_day,
+        venue_price=venue_from([68109.0], lambda: now),
+    )  # fmt: skip
+    assert (await k3.review(position(now), now)).action == "close"  # Demo 峰 30 → 16bp
+
+
+def _premium_client(mark: str, source_at: datetime) -> Any:
+    from unittest.mock import AsyncMock
+
+    from jiaoyi.execution.exchange import CcxtBinanceFutures
+
+    obj = CcxtBinanceFutures.__new__(CcxtBinanceFutures)
+    obj._markets_loaded = True
+    ex = AsyncMock()
+    ex.fapiPublicGetPremiumIndex.return_value = {
+        "symbol": "BTCUSDT",
+        "markPrice": mark,
+        "time": int(source_at.timestamp() * 1000),
+    }
+    obj._ex = ex
+    return obj
+
+
+@pytest.mark.parametrize(
+    ("max_age", "age_s", "fresh"),
+    [(30.0, 45, False), (30.0, 20, True), (0.0, 6, False), (0.0, 3, True)],
+)
+async def test_venue_age_guard_through_execution_mark(
+    now: datetime, monkeypatch: pytest.MonkeyPatch, max_age: float, age_s: int, fresh: bool
+) -> None:
+    """真的 ``execution_mark``（只把交易所回包换成合成的）：过旧的 Demo 标记价由管家按
+    ``keeper_price_max_age_s`` 判过旧（0 时 5 秒），不是读不到。"""
+    from jiaoyi.execution import exchange as module
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return now
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    adapter = _adapter(_premium_client("68100", now - timedelta(seconds=age_s)), lambda: now)
+    cfg = FAST.model_copy(
+        update={"keeper_price_source": "venue", "keeper_price_max_age_s": max_age}
+    )
+    t = MockJevTransport(answer=answer(0.0))
+    v = await make(t, now, cfg, venue_price=adapter.venue_mark).review(position(now), now)
+    if fresh:
+        assert len(t.calls) == 1 and "68100" in t.calls[0]
+    else:
+        assert t.calls == [] and f"执行所标记价已旧 {age_s} 秒" in v.reason
+
+
+async def test_venue_pnl_on_a_short(now: datetime, tmp_path: Path) -> None:
+    """空单：主网 68000（0），Demo 标记价 67900 → 浮盈 +14.7bp。"""
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update={"keeper_price_source": "venue"})
+    t = MockJevTransport(answer=answer(0.0))
+    k = make(
+        t, now, cfg, log=log, cd=card(now, bias="short"),
+        venue_price=venue_from([67900.0], lambda: now),
+    )  # fmt: skip
+    await k.review(_short(now), now)
+    snap = json.loads(t.calls[0])
+    assert snap["pos"]["pnl_bps"] == pytest.approx(14.7, abs=0.1)
+
+
+def _short(now: datetime) -> c.PositionRecord:
+    return position(now, side="short", stop_loss_price=68120.0, take_profit_price=67820.0)
+
+
+@pytest.mark.parametrize(("px", "closes"), [(67900.0, True), (68100.0, False), (67960.0, False)])
+async def test_thesis_gate_on_a_short(now: datetime, px: float, closes: bool) -> None:
+    """空单 1R ≈ 17.6bp：67900 赚 0.83R 平；68100 亏着、67960 只赚 0.33R 不平。"""
+    t = MockJevTransport(answer=answer(0.0, thesis_no=0.9))
+    k = make(t, now, GATE, iter([px]), cd=card(now, bias="short"))
+    v = await k.review(_short(now), now)
+    assert (v.action == "close") is closes
 
 
 # ---- 3. Jev 盈利门控
@@ -271,13 +397,24 @@ async def test_giveback_fires_before_thesis_gate(now: datetime, tmp_path: Path) 
     assert votes["price"] == "ok" and votes["card"] == "none"
 
 
-# ---- 4. 不变量
+# ---- 4. 平仓前检查（keeper_close_guard）
+
+GUARD = FAST.model_copy(update={"keeper_close_guard": True})
+
+
+async def test_close_guard_off_by_default_closes_like_today(now: datetime) -> None:
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, FAST, review_interval_s=20.0, exit_in_flight=lambda pid: ("exiting", "x"))
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "close"
+    assert (await k.review(pos, now + timedelta(seconds=1))).action == "close"
 
 
 async def test_one_close_request_per_position_per_round(now: datetime, tmp_path: Path) -> None:
     log = JsonlDecisionLog(tmp_path)
+    cfg = GATE.model_copy(update={"keeper_close_guard": True})
     t = MockJevTransport(answer=answer(0.99, thesis_no=0.99))
-    k = make(t, now, GATE, log=log, review_interval_s=20.0)
+    k = make(t, now, cfg, log=log, review_interval_s=20.0)
     pos = position(now)
     assert (await k.review(pos, now)).action == "close"
     again = await k.review(pos, now + timedelta(seconds=5))  # 同一轮（巡逻兵急查）
@@ -286,37 +423,99 @@ async def test_one_close_request_per_position_per_round(now: datetime, tmp_path:
     assert (await k.review(pos, now + timedelta(seconds=20))).action == "close"  # 下一轮再发
 
 
-async def test_no_keeper_close_while_exchange_leg_is_exiting(now: datetime) -> None:
-    state: dict[str, tuple[str, str] | None] = {"v": ("exiting", "exiting")}
+async def test_exiting_leg_defers_close_then_closes_with_note(
+    now: datetime, tmp_path: Path
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
     t = MockJevTransport(answer=answer(0.99))
-    k = make(t, now, FAST, exit_in_flight=lambda pid: state["v"])
+    k = make(t, now, GUARD, log=log, exit_in_flight=lambda pid: ("exiting", "exiting"))
     pos = position(now)
     v = await k.review(pos, now)
     assert v.action == "hold" and "交易所保护腿已触发或正在退出" in v.reason
+    assert (await k.review(pos, now + timedelta(seconds=120))).action == "hold"
+    assert (await k.review(pos, now + timedelta(seconds=121))).action == "close"
+    assert "超过 120 秒" in keeper_records(log, now)[-1].output["close_guard_note"]
+
+
+async def test_exiting_cleared_lets_the_next_close_through(now: datetime) -> None:
+    state: dict[str, tuple[str, str] | None] = {"v": ("exiting", "exiting")}
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
     state["v"] = None
     assert (await k.review(pos, now + timedelta(seconds=1))).action == "close"
 
 
 async def test_replacing_leg_defers_close_at_most_30s(now: datetime) -> None:
     t = MockJevTransport(answer=answer(0.99))
-    k = make(t, now, FAST, exit_in_flight=lambda pid: ("replacing", "stop_loss submit_pending"))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: ("replacing", "第 2 代 stop_loss"))
     pos = position(now)
     assert (await k.review(pos, now)).action == "hold"
     assert (await k.review(pos, now + timedelta(seconds=30))).action == "hold"
     assert (await k.review(pos, now + timedelta(seconds=31))).action == "close"
 
 
+async def test_each_replacement_gets_its_own_wait(now: datetime) -> None:
+    """换代时拦过一次；之后几轮不在途、模型说拿住；很久以后又在换代，照样要等。"""
+    state: dict[str, Any] = {"v": ("replacing", "第 2 代 stop_loss"), "p": 0.99}
+    t = MockJevTransport(answer=lambda s, q: answer(state["p"])(s, q))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
+    state.update(v=None, p=0.1)
+    for i in range(1, 4):
+        assert (await k.review(pos, now + timedelta(seconds=30 * i))).action == "hold"
+    state.update(v=("replacing", "第 2 代 stop_loss"), p=0.99)  # 同样的说明，也要重新等
+    v = await k.review(pos, now + timedelta(seconds=200))
+    assert v.action == "hold" and "正在换代" in v.reason
+
+
+async def test_new_generation_restarts_the_replacing_wait(now: datetime) -> None:
+    state: dict[str, Any] = {"v": ("replacing", "第 2 代 stop_loss")}
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
+    state["v"] = ("replacing", "第 3 代 stop_loss")
+    assert (await k.review(pos, now + timedelta(seconds=25))).action == "hold"
+    assert (await k.review(pos, now + timedelta(seconds=50))).action == "hold"
+    assert (await k.review(pos, now + timedelta(seconds=56))).action == "close"
+
+
 async def test_card_hard_close_is_also_blocked_while_exiting(now: datetime) -> None:
     t = MockJevTransport(answer=answer(0.0))
     k = JevKeeper(
-        JevDecisionModel(t, FAST, timeout_ms=200),
-        FAST,
+        JevDecisionModel(t, GUARD, timeout_ms=200),
+        GUARD,
         lambda s: features(now),
         lambda n: card(now, bias="short"),
         exit_in_flight=lambda pid: ("exiting", "cleanup"),
     )
     v = await k.review(position(now), now)
     assert v.action == "hold" and "反向硬规则" in v.reason and t.calls == []
+
+
+async def test_loop_card_channel_does_not_tighten_a_blocked_close(
+    tmp_path: Path, now: datetime
+) -> None:
+    """换代中 + 反向卡价格已确认：规则通道既不平也不收紧（收紧本身会换代或平仓）。"""
+    from tests.test_opposite_card_tighten import TIGHT, TightenExecutor, _runner, drain
+
+    cfg = TIGHT.model_copy(update={"keeper_close_guard": True})
+    model = JevDecisionModel(MockJevTransport(answer=answer(0.0)), cfg, timeout_ms=200)
+    k = JevKeeper(
+        model,
+        cfg,
+        lambda s: features(now, price=67900.0),  # 亏 0.92R：确认
+        lambda n: card(now, bias="short"),
+        exit_in_flight=lambda pid: ("replacing", "第 2 代 stop_loss submit_pending"),
+    )
+    ex = TightenExecutor(position(now), {"action": "close", "why": "not_armed"})
+    runner = _runner(tmp_path, now, k, ex)
+    await runner._review_card_rules()
+    await drain(runner)
+    assert ex.tighten_calls == [] and ex.closed == []
 
 
 # ---- 执行器：执行所标记价、保护腿在途
@@ -326,7 +525,8 @@ class _MarkExchange:
     def __init__(self) -> None:
         self.reads = 0
 
-    async def execution_mark(self, symbol: str) -> MarkEvidence:
+    async def execution_mark(self, symbol: str, *, max_age_s: float) -> MarkEvidence:
+        assert max_age_s == 600.0
         self.reads += 1
         return MarkEvidence(symbol, 68010.0 + self.reads, START, START)
 

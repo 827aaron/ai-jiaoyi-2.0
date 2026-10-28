@@ -462,6 +462,28 @@ class FastLoopConfig(Contract):
         allow_inf_nan=False,
         description="盈利门控：Jev「开仓理由还成立吗」答 no 的概率至少这么多。",
     )
+    keeper_close_guard: bool = Field(
+        default=False,
+        description="管家发平仓前先看：交易所保护腿已触发 / 正在退出（最多等 "
+        "keeper_close_guard_exiting_max_s 秒）、正在换代（最多等 "
+        "keeper_close_guard_replacing_max_s 秒）、或同一笔仓半个复查间隔内已发过一次平仓，"
+        "就这次不发。关 = 现状（不看）。",
+    )
+    keeper_close_guard_replacing_max_s: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="平仓前检查：同一次保护腿换代最多让管家等几秒，过了照常平（0 = 不等）。",
+    )
+    keeper_close_guard_exiting_max_s: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=3600.0,
+        allow_inf_nan=False,
+        description="平仓前检查：交易所保护腿已触发 / 正在退出时最多让管家等几秒，过了照常平"
+        "并记下（0 = 不等）。",
+    )
     keeper_thesis_take_max_age_s: float = Field(
         default=180.0,
         ge=1.0,

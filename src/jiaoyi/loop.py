@@ -61,6 +61,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
+from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
     ATR_PERIOD,
@@ -1327,6 +1328,9 @@ class Runner:
                 verdict = keeper.review_card_rule(pos, self.app.clock())
                 if verdict is not None and verdict.action == "close":
                     await self.close(pos, CloseReason.KEEPER)
+                elif verdict is not None and close_blocked(verdict):
+                    # 平仓前检查拦下的平仓：收紧本身可能换代或平仓，也不做
+                    return
                 elif verdict is not None:  # 反向卡价格未确认（#314）/ 卡转中性：收紧，不行就平
                     spec_of = getattr(keeper, "card_rule_tighten", None)
                     if callable(spec_of):
