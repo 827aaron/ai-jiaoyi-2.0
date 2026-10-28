@@ -352,6 +352,38 @@ def test_corrupt_breaker_state_fails_closed(tmp_path: Path, now: datetime) -> No
     assert not v.approved and any("熔断" in r for r in v.reasons)
 
 
+def test_breaker_override_start_moves_the_halt_line_and_survives_restart(tmp_path: Path) -> None:
+    t = datetime(2026, 10, 22, 13, 0, tzinfo=UTC)  # 曼谷 20:00
+    g1 = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
+    assert g1.review(signal(t), jev(), card(t), account(t), t).approved
+    day = datetime(2026, 10, 22, tzinfo=UTC).date()
+    assert g1.breaker.override_start(day, 9_700.0) == pytest.approx(10_000.0)
+    g2 = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
+    down = account(t, equity=9_500.0, day_start_equity_usdt=9_700.0)
+    v = g2.review(signal(t), jev(), card(t), down, t)
+    assert v.approved, v.reasons
+
+
+def test_breaker_override_start_keeps_a_trip(tmp_path: Path) -> None:
+    t = datetime(2026, 10, 22, 13, 0, tzinfo=UTC)
+    g = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
+    down = account(t, equity=9_650.0, day_start_equity_usdt=10_000.0)
+    assert not g.review(signal(t), jev(), card(t), down, t).approved
+    g.breaker.override_start(datetime(2026, 10, 22, tzinfo=UTC).date(), 9_000.0)
+    v = g.review(signal(t), jev(), card(t), down, t)
+    assert not v.approved and any("熔断" in r for r in v.reasons)
+
+
+def test_breaker_override_start_on_corrupt_state_stays_halted(
+    tmp_path: Path, now: datetime
+) -> None:
+    (tmp_path / "risk_state.json").write_text("{not json", encoding="utf-8")
+    g = _Guard(RISK, FAST, Lots(), state_dir=tmp_path)
+    assert g.breaker.override_start(now.date(), 10_000.0) is None
+    v = g.review(signal(now), jev(), card(now), account(now), now)
+    assert not v.approved and any("熔断" in r for r in v.reasons)
+
+
 # ---------------------------------------------------------------- 逻辑审查 I1 / I2
 def test_slippage_and_spread_use_fresh_market(now: datetime) -> None:
     sig = signal(now)

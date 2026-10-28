@@ -76,6 +76,7 @@ from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.core.stop_quotes import StopQuoteRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.account_check import AccountMismatch
+from jiaoyi.execution.day_override import apply_day_override
 from jiaoyi.execution.factory import MissingSecret, build_execution
 from jiaoyi.execution.hb_executor import HOSTED_CLOSE_SLOW_ALERT_S
 from jiaoyi.execution.income_daily import IncomeDaily
@@ -945,6 +946,17 @@ class App:
         if swept:
             log.info("上个进程留下 %d 场没开完的会，已标成中断：%s", len(swept), "、".join(swept))
         auto_resumed = self._pause_for_pool_overrides()
+        if callable(getattr(self.m.executor, "override_day_start", None)):
+            try:
+                apply_day_override(
+                    self.app_cfg.data_dir,
+                    now,
+                    self.risk_cfg.day_reset_tz,
+                    self.m.executor,  # type: ignore[arg-type]
+                    getattr(self.m.risk, "breaker", None),
+                )
+            except Exception:
+                log.exception("日亏基准修正文件处理出错，基准照旧")
         await self._run_startup_checks()
         try:
             report = await self.m.reconciler.reconcile(now)

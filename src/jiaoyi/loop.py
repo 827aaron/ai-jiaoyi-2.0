@@ -103,6 +103,8 @@ log = logging.getLogger(__name__)
 
 SLOW_CHECK_EVERY_S = 60.0
 URGENT_CHECK_EVERY_S = 1.0
+DAY_START_CHECK_EVERY_S = 60.0
+"""Must stay well under ``DAY_START_TOLERANCE_S`` so a running process captures midnight on time."""
 HEARTBEAT_EVERY_S = 30.0
 SNAPSHOT_EVERY_S = SNAPSHOT_WRITE_EVERY_S
 NEWS_POLL_EVERY_S = 120.0
@@ -236,6 +238,13 @@ class _ServerProtection(Protocol):
     def server_managed(self, position_id: str) -> bool: ...
 
     async def protection_tick(self) -> None: ...
+
+
+@runtime_checkable
+class _DayStartAware(Protocol):
+    def day_start_due(self, now: datetime) -> bool: ...
+
+    def set_price_source(self, price_at: Callable[[str, datetime], float | None]) -> None: ...
 
 
 @runtime_checkable
@@ -536,6 +545,9 @@ class Runner:
                 else self._every(INCOME_REFRESH_S, self.app.refresh_income)
             ),
         ]
+        if isinstance(self.m.executor, _DayStartAware):
+            self.m.executor.set_price_source(self._local_price_at)
+            self._loops.append(self._every(DAY_START_CHECK_EVERY_S, self.day_start_tick))
         if isinstance(self.m.executor, _ServerProtection):
             # 每轮结束后再等待，避免慢交易所请求使保护轮询重叠。
             self._loops.append(self._every(1.0, self.m.executor.protection_tick))
@@ -2015,6 +2027,16 @@ class Runner:
                 await self._review(pos, urgent=True)
         # 已经不在持仓里的也清掉（正在审、刚重新排上的留着）
         self.m.patrol.urgent -= urgent - {p.position_id for p in self.positions}
+
+    def _local_price_at(self, symbol: str, t: datetime) -> float | None:
+        read = getattr(self.m.features, "price_at", None)
+        hit = read(symbol, t) if callable(read) else None
+        return float(hit[0]) if hit is not None else None
+
+    async def day_start_tick(self) -> None:
+        executor = self.m.executor
+        if isinstance(executor, _DayStartAware) and executor.day_start_due(self.app.clock()):
+            await executor.account()
 
     async def reconcile_tick(self) -> None:
         # 对账员自己发告警（带去重），连不上时抛异常，由 _every 记日志后下一轮再试

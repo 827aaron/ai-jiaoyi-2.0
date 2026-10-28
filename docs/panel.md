@@ -254,8 +254,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 - 今日盈亏：顶部状态条「今日盈亏 · 账户」可点开明细：平仓毛利 + 手续费 + 资金费 + 持仓浮盈变化及其他 = 账户今日盈亏（= 总资产 − 0 点总资产），
   再减 AI 费 = 扣 AI 费后。旁边写「数据截至 hh:mm:ss」（`Kpis.as_of` = 面板向 hummingbot-api 拉到的时间）；
   面板拉余额时带 `refresh: true`，让 hummingbot-api 先从币安重拉（不然是它后台几分钟一次的旧数）。
-  数字下面直接一行「已平 x · 浮动 y · 其它 z」：已平 = 今天平掉的单的净盈亏（`Kpis.day_closed_usdt`，含测试单），
-  浮动 = 没平的单现在的浮盈（`Kpis.day_floating_usdt`，hummingbot），其它 = 差额（资金费、0 点前已有持仓的浮盈变化等）。
+  数字下面直接一行「今日平仓 x · 持仓今日变动 y · 手续费·资金费 z」（同券商 App 的口径）：0 点前开的仓从当日参考价（`positions.json` 的 `day_start.refs`，0 点定基准时按本地行情记下的各币 0 点价格）算起，今天开的从开仓价。今日平仓 = 今天平掉的单，扣今天收的手续费（`Kpis.day_closes_usdt`）；持仓今日变动 = 没平的单，按 hummingbot 标记价（`Kpis.day_holding_usdt`）；手续费·资金费 = 币安收入流水里今天的手续费去掉已算进平仓的部分，加资金费（`Kpis.day_costs_usdt`；没有流水时只按今天开仓的手续费估）。三项和今日盈亏的差额是「对账差」（`Kpis.day_residual_usdt`），只在悬停提示里。0 点时大脑没在跑、缺参考价的币（`Kpis.day_refs_missing`）按开仓价算，旁边标「⚠ 缺参考价」。持仓表「今日」列（`PositionView.today_usdt` / `today_from`）同一口径，未扣费。
 - 持仓页 K 线：换一笔或换周期时先清空旧 K 线和价格线、价格轴恢复自动缩放；等 K 线时又换了就丢掉旧的那份。
   图表标题的名义和表格一样按现价 × 数量。
 - 持仓浮盈一律显示扣费后：`PositionView.net_unrealized_usdt` = 浮动 − 手续费（`fees_est_usdt` = 开仓实收（账本有就用）+ 现在名义 × 费率），

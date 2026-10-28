@@ -53,6 +53,7 @@ from jiaoyi.panel.overview import (
     PriceSrc,
     _card,
     compute_kpis,
+    day_refs_at,
     fee_rate_bps,
     position_views,
 )
@@ -475,6 +476,7 @@ def build_positions(
         ledger.protection,
         now,
         protection_stale_s,
+        *day_refs_at(ledger, risk.day_reset_tz, now),
     )
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt

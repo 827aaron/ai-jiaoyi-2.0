@@ -297,6 +297,13 @@ class PanelFiles:
             planned_notional=notional,
             day_start_day=str(ds.get("day")) if ds.get("day") else None,
             day_start_equity=_float(ds.get("equity_usdt")),
+            day_refs={
+                str(k): px
+                for k, v in (ds.get("refs") or {}).items()
+                if (px := _float(v)) is not None and px > 0
+            }
+            if isinstance(ds.get("refs"), dict)
+            else {},
             last_equity=_float(raw.get("last_equity_usdt")),
             protection=protection,
         )
@@ -340,6 +347,8 @@ class Ledger:
     """开仓指令里的名义价值；还没成交（没有入场价）时敞口按它算。"""
     day_start_day: str | None = None
     day_start_equity: float | None = None
+    day_refs: dict[str, float] = field(default_factory=dict)
+    """币 → ``day_start_day`` 当地 0 点的价格（当日参考价）；0 点时大脑没在跑就没有。"""
     last_equity: float | None = None
     protection: dict[str, object] = field(default_factory=dict)
     """持仓号 → positions.json 里 server_protection 的原始 JSON（旧仓位没有）。"""

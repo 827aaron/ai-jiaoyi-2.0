@@ -125,7 +125,8 @@ make condor-run         # tmux 会话 condor；make -C vendor/condor logs 查看
 - 币安 2025-12 起把条件单挪到 algo 订单接口。`ccxt>=4.5` 会自动走新接口；升级 ccxt 前先在测试网跑第 5 步。
 - 账户权益 = hummingbot 报的 USDT 钱包余额 + 持仓浮动盈亏。请对比币安网页上的“保证金余额”是否一致。
 - 认领标记：建执行器时把 `jy-<position_id>` 写进请求的 `controller_id`（hummingbot-api 会原样存下并在执行器列表里返回、可按它过滤）。超时 / 5xx 这类结果不明的失败，先按标记查，查到就认领；对账员也会按标记认领。请在测试网确认 `POST /executors/search` 带 `controller_ids` 能查到刚建的执行器。
-- 日亏基准：0 点后第一次读账户若晚于 5 分钟，用币安 income 流水（`fapiPrivateGetIncome`：REALIZED_PNL、COMMISSION、FUNDING_FEE）倒推 0 点的钱包余额；查不到则取当前与上次落盘权益中更大的并告警。
+- 日亏基准 = 当地 0 点的权益（钱包 + 浮动盈亏）。主循环每分钟问执行器要不要读账户（`day_start_due`）：0 点前 5 分钟和当天基准还没定时读一次，所以大脑在跑时 0 点后 1 分钟内就按含浮盈亏的权益定下，同时按本地行情记下 0 点还持有的币的 0 点价格（当日参考价，`day_start.refs`）。0 点后超过 5 分钟才读到（0 点前后没在跑）：有 0 点前 5 分钟内落盘的权益就用它；否则用币安 income 流水（`fapiPrivateGetIncome`：REALIZED_PNL、COMMISSION、FUNDING_FEE）倒推 0 点的钱包余额，再加上按本地行情 0 点价格算的当时浮盈亏；有币取不到 0 点价格就只用钱包余额（不含当时浮盈亏，告警里写明）；流水也查不到则取当前与上次落盘权益中更大的并告警。
+- 日亏基准人工修正：停着的时候放 `data/day_start_override.json`（`{"day": "YYYY-MM-DD", "equity_usdt": 5751.86, "refs": {"BTCUSDT": 68000.0}, "reason": "..."}`），启动时在执行器和风控员第一次用基准之前读：日期是当地今天、数都是正数才用，同时改 `positions.json` 的 `day_start` 和 `risk_state.json` 的日初权益，记一行 `data/config_changes.jsonl`，日志 WARN 写新旧值和熔断变松还是变严，文件改名 `.applied-<时间>`；不合格什么都不改，改名 `.rejected-<时间>`。当天已触发的熔断不会因此解锁。
 - 保命止损用 `reduceOnly` + 数量，而不是 `closePosition=true`：后者会平掉该标的**全部**仓位，以后“先平一半”（两个执行器）时会误伤。
 
 ## 8. 切实盘：上线门槛

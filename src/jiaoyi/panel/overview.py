@@ -82,7 +82,19 @@ class Kpis(BaseModel):
     day_closed_usdt: float | None = None
     """今天平掉的单的净盈亏（已扣手续费，同历史页「交易净盈亏」）。"""
     day_floating_usdt: float | None = None
-    """还没平的单现在的浮盈浮亏（hummingbot）；拿不到 None。今日盈亏减掉这两项就是「其它」。"""
+    """还没平的单现在的浮盈浮亏（hummingbot）；拿不到 None。"""
+    day_closes_usdt: float | None = None
+    """今日平仓：今天平掉的单，0 点前开的从当日参考价算起、今天开的从开仓价，扣今天收的手续费。"""
+    day_holding_usdt: float | None = None
+    """持仓今日变动：没平的单，0 点前开的从当日参考价算起、今天开的从开仓价（按标记价）。"""
+    day_costs_usdt: float | None = None
+    """手续费·资金费：今天收的手续费里没算进「今日平仓」的那部分 + 资金费。"""
+    day_funding_known: bool = False
+    """``day_costs_usdt`` 里有没有资金费（币安收入流水拿到了才有）。"""
+    day_residual_usdt: float | None = None
+    """对账差：今日盈亏 −（上面三项）。标记价和参考价的来源不同、流水还没拉到等，只在提示里显示。"""
+    day_refs_missing: list[str] = []
+    """0 点前开的、没有当日参考价的币（0 点时大脑没在跑）：这些按开仓价算，今日数不准。"""
 
 
 class LevelView(BaseModel):
@@ -227,6 +239,10 @@ class PositionView(BaseModel):
     """开平两次手续费：开仓按开仓名义、平仓按现在的名义，都按吃单费率估（币安只在平仓后给实收）。"""
     net_unrealized_usdt: float | None = None
     """扣掉 ``fees_est_usdt`` 后的浮盈：现在平掉大概能落袋多少。"""
+    today_usdt: float | None = None
+    """今日变动（未扣费）：0 点前开的从当日参考价算起，今天开的同浮盈。"""
+    today_from: Literal["ref", "entry", "missing"] | None = None
+    """``today_usdt`` 从哪算起：当日参考价 / 开仓价（今天开的）/ 隔夜仓缺参考价（按开仓价）。"""
     net_pnl_pct: float | None = None
     fee_bps: float | None = None
     """估手续费用的单边费率（bp）。"""
@@ -344,6 +360,7 @@ def build_overview(
         ledger.protection,
         now,
         app.protection_stale_s,
+        *day_refs_at(ledger, risk.day_reset_tz, now),
     )
 
     # ---- 今日统计
@@ -463,7 +480,89 @@ def compute_kpis(
             and local_day(p.closed_at, risk.day_reset_tz).isoformat() == today
         ),
         day_floating_usdt=hb.unrealized_usdt if hb.ok else None,
+    ).model_copy(update=_day_breakdown(files, ledger, hb, risk.day_reset_tz, now, day_pnl))
+
+
+def day_refs_at(ledger: Ledger, tz: str, now: datetime) -> tuple[dict[str, float], datetime]:
+    """(当日参考价, 当地 0 点)：给 ``position_views`` 算每笔的「今日」。"""
+    local = now.astimezone(ZoneInfo(tz))
+    refs = ledger.day_refs if ledger.day_start_day == local.date().isoformat() else {}
+    return refs, local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _sign(p: PositionRecord) -> float:
+    return 1.0 if p.side is Side.LONG else -1.0
+
+
+def _income_today(raw: object, today: str) -> tuple[float, float] | None:
+    days = raw.get("days") if isinstance(raw, dict) else None
+    row = days.get(today) if isinstance(days, dict) else None
+    try:
+        return float(row["commission"]), float(row["funding_fee"])  # type: ignore[index]
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _day_breakdown(
+    files: PanelFiles,
+    ledger: Ledger,
+    hb: HbSnapshot,
+    tz: str,
+    now: datetime,
+    day_pnl: float | None,
+) -> dict[str, object]:
+    """今日盈亏拆成 今日平仓 + 持仓今日变动 + 手续费·资金费（同券商 App 的口径）。"""
+    local = now.astimezone(ZoneInfo(tz))
+    today = local.date().isoformat()
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    refs = ledger.day_refs if ledger.day_start_day == today else {}
+    missing: set[str] = set()
+    closes = 0.0
+    charged = 0.0  # 今天收的、已经扣在「今日平仓」里的手续费
+    for p in map(ledger.demo, ledger.positions):
+        if p.closed_at is None or p.closed_at < midnight or p.realized_pnl_usdt is None:
+            continue
+        closes += p.realized_pnl_usdt
+        if p.opened_at >= midnight or not p.entry_price:
+            charged += p.fees_usdt
+            continue
+        # Fees only come as one open+close total; split by price, both legs pay the same rate.
+        exit_px = p.exit_price or p.entry_price
+        open_fee = p.fees_usdt * p.entry_price / (p.entry_price + exit_px)
+        charged += p.fees_usdt - open_fee
+        ref = refs.get(p.symbol)
+        if ref is None:
+            missing.add(p.symbol)
+            continue
+        closes += open_fee - _sign(p) * p.quantity * (ref - p.entry_price)
+    holding: float | None = None
+    live = ledger.live()
+    if hb.ok:
+        holding = hb.unrealized_usdt
+        for p in live:
+            if p.opened_at >= midnight or not p.entry_price:
+                continue
+            ref = refs.get(p.symbol)
+            if ref is None:
+                missing.add(p.symbol)
+            else:
+                holding -= _sign(p) * p.quantity * (ref - p.entry_price)
+    income = _income_today(files.income_daily(), today)
+    if income is not None:
+        costs = income[0] + income[1] + charged
+    else:
+        costs = -sum(p.fees_usdt for p in live if p.opened_at >= midnight)
+    residual = (
+        day_pnl - closes - holding - costs if day_pnl is not None and holding is not None else None
     )
+    return {
+        "day_closes_usdt": closes,
+        "day_holding_usdt": holding,
+        "day_costs_usdt": costs,
+        "day_funding_known": income is not None,
+        "day_residual_usdt": residual,
+        "day_refs_missing": sorted(missing),
+    }
 
 
 FEE_SAMPLE = 20
@@ -500,6 +599,8 @@ def position_views(
     protections: dict[str, object] | None = None,
     now: datetime | None = None,
     protection_stale_s: int = 120,
+    day_refs: dict[str, float] | None = None,
+    midnight: datetime | None = None,
 ) -> list[PositionView]:
     """未结束的持仓，最新开的在前；附上浮盈浮亏和管家最新判断。
 
@@ -549,6 +650,15 @@ def position_views(
             opened = p.fees_usdt or p.quantity * p.entry_price * bps / 10_000
             fees = opened + notional * bps / 10_000
         net = pnl - fees if pnl is not None and fees is not None else None
+        today_pnl, today_from = pnl, None
+        if midnight is not None and pnl is not None:
+            ref_px = (day_refs or {}).get(p.symbol)
+            if p.opened_at >= midnight or not p.entry_price:
+                today_from = "entry"
+            elif ref_px is None:
+                today_from = "missing"
+            else:
+                today_pnl, today_from = pnl - sign * p.quantity * (ref_px - p.entry_price), "ref"
         trail = (
             (p.trailing_activation_pct, p.trailing_stop_pct)
             if p.trailing_activation_pct is not None and p.trailing_stop_pct is not None
@@ -622,6 +732,8 @@ def position_views(
                 entry_fee_pct=entry_fee_pct,
                 fees_est_usdt=fees,
                 net_unrealized_usdt=net,
+                today_usdt=today_pnl if today_from is not None else None,
+                today_from=today_from,
                 net_pnl_pct=net / notional * 100 if net is not None and notional else None,
                 fee_bps=bps,
                 fee_from_fills=fills_fee_bps is not None,
