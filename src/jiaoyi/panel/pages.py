@@ -1792,6 +1792,10 @@ class SettingsPage(BaseModel):
     """配置文件现在读不出或不合格（有人在终端改坏了）。"""
     changes: list[dict[str, object]] = []
     """最近的配置改动（data/config_changes.jsonl），新的在前。"""
+    pending_config: dict[str, object] | None = None
+    """待更新配置（config/*.pending.toml，点「更新到最新版」时生效）：``items`` 每项
+    ``file / table / key / value / label``；``error`` 待更新文件读不出；
+    ``failed`` 上次合并没成功。"""
 
 
 SCREENER_RECOMMENDED: dict[str, tuple[float, str]] = {

@@ -178,7 +178,7 @@ scripts/install_launchd.sh --load-run   # 另外装 jiaoyi run（纸面跑通、
 make update
 ```
 
-依次做：`git pull --ff-only` → `make install`（补装依赖）→ `make check-config`（配置不合格就停下，不会重启）→ 重启已装的 `com.jiaoyi.panel` 和 `com.jiaoyi.run`（`launchctl kickstart -k`，已在 launchd 里才重启）；没装就提示用 `scripts/install_launchd.sh --load-run`。
+依次做：`git pull --ff-only` → `make install`（补装依赖）→ `jiaoyi apply-pending-config`（合并待更新配置 `config/*.pending.toml`，见 [panel.md「待更新配置」](panel.md#待更新配置和代码一起上线只重启一次)；不合格就不动正式配置、不挡更新）→ `make check-config`（配置不合格就停下，不会重启）→ 重启已装的 `com.jiaoyi.panel` 和 `com.jiaoyi.run`（`launchctl kickstart -k`，已在 launchd 里才重启）；没装就提示用 `scripts/install_launchd.sh --load-run`。
 
 - 首次安装、`hb-setup`、密钥、`install_launchd.sh` 都只做一次，之后不用再配。
 - 重启只要几秒，看门狗的阈值是 2 分钟，不会误报；但会收到一次「主进程停了」/「心跳已恢复」也属正常。

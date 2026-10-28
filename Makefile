@@ -11,13 +11,13 @@ KRONOS_REPO := https://github.com/shiyu-coder/Kronos
 KRONOS_REF  := 67b630e67f6a18c9e9be918d9b4337c960db1e9a
 CONDOR_REF  := 8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c
 
-.PHONY: help install update init-config check-config lint format typecheck test check \
+.PHONY: help install update update-after-pull init-config check-config lint format typecheck test check \
         kronos-fetch hb-fetch hb-patch hb-setup hb-up hb-down hb-logs condor-install condor-run
 
 help:
 	@echo "开发："
 	@echo "  make install        建 .venv 并安装（含开发依赖和军师团 slow 依赖）"
-	@echo "  make update         日常更新：git pull --ff-only → install → 拉预测模型权重 → check-config → 重启 jiaoyi run"
+	@echo "  make update         日常更新：git pull --ff-only → install → 拉预测模型权重 → 合并待更新配置 → check-config → 重启 jiaoyi run"
 	@echo "  make init-config    从示例复制 config/risk.toml、config/app.toml（不覆盖已有）"
 	@echo "  make check-config   检查配置，不合格返回非 0"
 	@echo "  make check          lint + 类型检查 + 测试（同 CI）"
@@ -37,11 +37,17 @@ install:
 	uv pip install --python $(BIN)/python -e ".[dev,slow]"
 
 # 日常更新（Mac mini）。依赖装完、配置检查通过之后才重启，重启本身几秒，不会触发看门狗（2 分钟阈值）。
+# 拉完代码交给子 make：make 已经读进内存的是旧 Makefile，后面的步骤要用刚拉下来的。
 update:
 	git pull --ff-only
+	$(MAKE) update-after-pull
+
+update-after-pull:
 	$(MAKE) install
 	@# 预测员权重（最大 / 标准）先拉好，已有缓存就跳过；失败不挡更新，第一次推理时会再下载
 	-@if [ -d vendor/Kronos ]; then $(BIN)/python -m jiaoyi.predictor.fetch_weights; fi
+	@# 待更新配置（config/*.pending.toml）用新代码合并、校验；不合格就不动正式配置，不挡更新
+	-$(BIN)/jiaoyi apply-pending-config
 	$(MAKE) check-config
 	@# 面板放最后重启：面板里的「更新到最新版」按钮就是它拉起的 make，先重启面板会把自己杀掉
 	@if launchctl print gui/$$(id -u)/com.jiaoyi.run >/dev/null 2>&1; then \

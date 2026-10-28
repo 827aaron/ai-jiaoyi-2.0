@@ -3232,6 +3232,17 @@ async function waitUpdate(startedBefore) {
   dlgMsg("25 分钟还没更新完：在 Mac 上看 data/panel_update.log。", "down");
 }
 
+// 待更新配置（config/*.pending.toml）：只读列出，点「更新到最新版」时和代码一起生效
+function pendingConfigBanner(d) {
+  const p = d.pending_config;
+  if (!p || (!p.items.length && !p.error)) return "";
+  const val = (v) => esc(typeof v === "string" ? v : JSON.stringify(v));
+  const list = p.items.map((x) => `<div><code>${esc(x.label)}</code> = <b>${val(x.value)}</b></div>`).join("");
+  const bad = p.failed ? `<div class="down">上次更新时没生效：${esc((p.failed.offending || []).join("、"))}。原配置没动，代码照常更新了；改好待更新文件后再点一次更新。<pre class="json">${esc(String(p.failed.error || "").slice(0, 600))}</pre></div>` : "";
+  const err = p.error ? `<div class="down">待更新文件读不出：${esc(p.error)}</div>` : "";
+  return `<div class="st-pending"><div class="t"><b>${p.items.length ? `有 ${p.items.length} 项待更新时生效` : "待更新配置有问题"}</b><div>点「更新到最新版」时和新代码一起写进配置、只重启一次（config/*.pending.toml）。</div>${list}${err}${bad}</div></div>`;
+}
+
 function pendingBanner(d) {
   if (data.control.config_pending !== true) return "";
   const list = pendingChanges(d);
@@ -3601,7 +3612,7 @@ P.settings = (arg) => {
   S.stArg = arg;
   const ix = settingIndex(d);
   const note = d.file_error ? `<span class="down">配置文件现在读不出：${esc(d.file_error)}。先在终端修好再改。</span>` : d.writable ? "改任何一项都要面板密码；模式、数据目录、拍板人通道和模型版本不在网页上改。" : "这次启动的面板只能看：没拿到配置文件路径。";
-  return `<div class="st-col st-wide">${restartBar()}${pendingBanner(d)}${tierSection(d)}${riskCard(d, ix)}${runCard(d)}${meaningCard(d)}${rolesCard(d, ix)}
+  return `<div class="st-col st-wide">${restartBar()}${pendingBanner(d)}${pendingConfigBanner(d)}${tierSection(d)}${riskCard(d, ix)}${runCard(d)}${meaningCard(d)}${rolesCard(d, ix)}
     <div class="st-links"><button data-act="st-changes">最近的修改记录</button><span class="dim small">${note}</span></div></div>`;
 };
 

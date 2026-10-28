@@ -471,6 +471,60 @@ def _migrate(args: argparse.Namespace) -> None:
         print(f"配置迁移：删掉 {name} = {r['old']!r}，回到默认（{r['note']}）")
 
 
+def _notify_telegram(title: str, body: str) -> None:
+    """命令行直接发一条 Telegram（没配密钥就只打印）；发不出去不影响调用方。"""
+    store = ChainedSecretStore()
+    token, chat = store.get("TELEGRAM_BOT_TOKEN"), store.get("TELEGRAM_CHAT_ID")
+    if not (token and chat):
+        print("（没配 Telegram，告警只写在这里）")
+        return
+
+    async def send() -> None:
+        alerter = TelegramAlerter(token, chat)
+        await alerter.send(
+            Alert(
+                ts=datetime.now(UTC),
+                level=AlertLevel.WARN,
+                role=Role.EXECUTOR,
+                title=title,
+                body=body,
+            )
+        )
+        await alerter.close()
+
+    with contextlib.suppress(Exception):
+        asyncio.run(send())
+
+
+def _apply_pending_config(args: argparse.Namespace) -> int:
+    """``make update`` 装完新代码后跑：合并 ``config/*.pending.toml``（见 ``pending_config.py``）。
+
+    总是返回 0：合并失败时正式文件不动，代码照常更新、按原配置重启。"""
+    from jiaoyi.panel.actions import ConfigPaths
+    from jiaoyi.panel.pending_config import apply_pending
+
+    paths = ConfigPaths(risk=Path(args.risk), app=Path(args.app), slow=Path(args.slow))
+    try:
+        raw = tomllib.loads(paths.app.read_text(encoding="utf-8"))
+        data_dir = str(raw.get("data_dir") or "data")
+    except (OSError, tomllib.TOMLDecodeError):
+        data_dir = "data"
+    res = apply_pending(paths, data_dir, datetime.now(UTC), notify=_notify_telegram)
+    if res.status == "none":
+        print("没有待更新配置（config/*.pending.toml）")
+    elif res.status == "applied":
+        print(f"待更新配置已合并 {len(res.items)} 项：")
+        for it in res.items:
+            name = f"{it.table}.{it.key}" if it.table else it.key
+            print(f"  {it.file} {name} = {it.value!r}")
+    else:
+        print("待更新配置没生效（正式配置没动，代码照常更新）：")
+        print(f"  有问题的项：{'、'.join(res.offending) or '（读不出待更新文件）'}")
+        for line in res.error.splitlines():
+            print(f"  {line}")
+    return 0
+
+
 def _run(args: argparse.Namespace) -> int:
     from jiaoyi.app import App
     from jiaoyi.loop import Runner
@@ -704,6 +758,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH), help="可选；没有就用默认值")
     p.set_defaults(func=_check_config)
+
+    p = sub.add_parser(
+        "apply-pending-config",
+        help="把 config/*.pending.toml 合进正式配置（make update 装完新代码后自动跑）",
+    )
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH))
+    p.set_defaults(func=_apply_pending_config)
 
     p = sub.add_parser("status", help="团队页的文字版：每个角色的状态")
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))

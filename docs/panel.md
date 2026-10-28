@@ -153,6 +153,27 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
   （Apache-2.0）放在 `static/lib/`，不依赖外网 CDN。
 - 换皮只改 `src/jiaoyi/panel/static/theme.css`（颜色、字体、圆角、阴影令牌）。涨跌色默认绿涨红跌。
 
+## 待更新配置（和代码一起上线，只重启一次）
+
+新功能要的设置不能在合并后、更新前直接写进 `config/app.toml` / `config/slow.toml`：正在跑的旧代码不认识新键（契约 `extra="forbid"`），热生效会失败，面板设置页变只读（`/api/settings` 的 `writable` 为 false、`file_error` 有值）。所以新设置先写进待更新文件，点一次「更新到最新版」时和代码一起生效。
+
+运维流程（合并后把新设置写进 `*.pending.toml`，用户点一次更新即可）：
+
+1. PR 合并后，在 Mac 的源码目录里新建 `config/app.pending.toml` 和 / 或 `config/slow.pending.toml`（硬上限是 `config/risk.pending.toml`），段落写法和正式文件一样，只写要设的键，可以带注释。例：`[fast_loop]` 下一行 `new_key = 3`。
+2. 面板设置页顶部出现「有 N 项待更新时生效」，只读列出每一项（`/api/settings` 的 `pending_config.items`）。正在跑的主程序、面板和热生效都不读待更新文件。
+3. 用户点「更新到最新版」（或终端 `make update`）：拉代码 → 装依赖 → 拉权重 → `jiaoyi apply-pending-config` → `check-config` → 重启主程序和面板，只重启一次。
+
+`apply-pending-config` 做的事：
+
+- 没有待更新文件：什么都不做。重复跑结果一样。
+- 把每一项合进正式文件（只换 / 加那一行，其余行和注释原样留着；段没有就在文件末尾新开），先在临时目录里用新代码和 `check-config` 同一套读法校验，过了才写正式文件；写前留 `<文件>.bak-<时间>-pending` 备份，写完对正式文件再校验一次，不过就从备份恢复。
+- 成功：待更新文件挪到 `data/config_pending_applied/<时间>-<文件名>`，每项记一行 `data/config_changes.jsonl`（`source` 为 `"pending"`，面板「修改记录」能看到），状态写 `data/config_pending_status.json`。
+- 失败（待更新文件不是合法 TOML、新代码也不认这个键、值超范围、实盘时改硬上限）：正式文件不动，待更新文件留着，**代码照常更新、按原配置重启**；原因和有问题的项写进 `data/panel_update.log`、`data/config_pending_status.json`（面板设置页横幅「上次更新时没生效」），并发一条 Telegram。改好待更新文件后再点一次更新。
+- 实盘（`mode = "live"`）时不合并 `risk.pending.toml`：实盘解锁绑定 risk.toml 的指纹，改了主程序会拒绝按实盘启动。
+- 待更新文件在 `.gitignore` 里（`config/*.pending.toml`），不会让工作区变脏、挡住 `git pull`。
+
+`make update` 拉完代码后由子 make 跑剩下的步骤（`update-after-pull`），所以 Makefile 里更新步骤的改动在拉下来的那一次就生效。这一套本身合并后的第一次更新还按旧 Makefile 跑（没有合并这一步），从第二次起生效。
+
 ## 总览口径
 
 | 项 | 来源 |
