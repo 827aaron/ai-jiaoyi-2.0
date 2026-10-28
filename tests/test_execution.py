@@ -280,6 +280,39 @@ async def test_limit_tp_without_tick_keeps_raw_price(tmp_path: Path) -> None:
     assert rec.take_profit_price == pytest.approx(68044.0 * 0.995)
 
 
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("limit_tp", [False, True])
+async def test_open_tp_price_follows_guard_capped_r(
+    tmp_path: Path, side: Side, limit_tp: bool
+) -> None:
+    from jiaoyi.contracts import FastLoopConfig
+    from jiaoyi.risk.guard import RiskGuardImpl
+    from tests.fastloop_helpers import RISK, Lots, account, card, features, jev, signal
+
+    now = START
+    sig = signal(now, side=side, f=features(now, atr=4000.0))
+    cd = card(
+        now,
+        bias="both",
+        take_profit_r={"min": 1.5, "max": 3},
+        notional_usdt={"min": 10, "max": 100_000},
+    )
+    g = RiskGuardImpl(RISK, FastLoopConfig(tp_r_cap=1.0), Lots())
+    v = g.review(sig, jev(), cd, account(now, equity=10_000.0), now, market=sig.features)
+    assert v.approved and v.intent is not None, v.reasons
+    stop = v.intent.stop_loss_pct
+    assert v.intent.take_profit_pct == pytest.approx(stop)
+
+    r = Rig(tmp_path, limit_tp=limit_tp)
+    pid = await open_filled(r, price=68044.0, **v.intent.model_dump(mode="json"))
+    assert float(r.api.created[0]["triple_barrier_config"]["take_profit"]) == pytest.approx(
+        stop / 100
+    )
+    rec = r.registry.get(pid).record  # type: ignore[union-attr]
+    sign = 1 if side is Side.LONG else -1
+    assert rec.take_profit_price == pytest.approx(68044.0 * (1 + sign * stop / 100))
+
+
 async def test_limit_order_not_filled_yet_has_no_lifeboat_until_fill(rig: Rig) -> None:
     rec = await rig.adapter.open(intent(order_type="limit", limit_price=68000.0))
     assert rec.status is PositionStatus.OPENING

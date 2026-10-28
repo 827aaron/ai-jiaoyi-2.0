@@ -114,6 +114,17 @@ def test_accepts_leverage_account_and_jev_switches(tmp_path: Path) -> None:
     assert cfg.fast_loop.leverage_clamp_to_bracket is True
 
 
+def test_accepts_tp_r_cap(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(paths, "app", "[fast_loop]\ntp_r_cap = 1.0\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).fast_loop.tp_r_cap == 1.0
+    assert [(r["section"], r["key"], r["new"]) for r in _rows(data)] == [
+        ("fast_loop", "tp_r_cap", 1.0)
+    ]
+
+
 def test_accepts_take_by_kind_subtable(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
     _pending(

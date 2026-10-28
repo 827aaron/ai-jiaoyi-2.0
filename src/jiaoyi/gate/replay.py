@@ -73,7 +73,7 @@ from jiaoyi.gate.questions import (
 from jiaoyi.interfaces import DecisionModel
 from jiaoyi.market.features import RollingFeatureEngine, backfill_minutes
 from jiaoyi.market.rest import RateLimited
-from jiaoyi.risk.guard import stop_atr
+from jiaoyi.risk.guard import capped_tp_r, stop_atr
 from jiaoyi.sentinel.rules import RuleTrigger
 
 log = logging.getLogger(__name__)
@@ -298,7 +298,7 @@ def candidate(
         verdict=sig.kind.value,  # 回放里没有风控员结论，这里放信号类型
         gate_would_block=not passes,
         stop_bps=stop_bps,
-        tp_bps=stop_bps * cs.take_profit_r.min,
+        tp_bps=stop_bps * capped_tp_r(cs.take_profit_r.min, fast.tp_r_cap),
         stop_src=f"jev:{tier}",
         p_take=p_take,
         p_real=p_real,

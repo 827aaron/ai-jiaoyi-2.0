@@ -213,6 +213,8 @@ class CardAtr(BaseModel):
     stop_atr_clamp: tuple[float, float] | None = None
     """风控员把作战卡止损倍数夹到这个范围（``card_range_clamp`` 开着时）；None = 不夹。"""
     tp_r_clamp: tuple[float, float] | None = None
+    tp_r_cap: float | None = None
+    """``fast_loop.tp_r_cap`` when set: the guard orders at most this R (fee floor not modelled)."""
 
 
 class ModeInfo(BaseModel):
@@ -714,6 +716,7 @@ def create_app(
             session_factor=k,
             stop_atr_clamp=(fl.min_stop_atr, fl.max_stop_atr) if fl.card_range_clamp else None,
             tp_r_clamp=(fl.min_tp_r, fl.max_tp_r) if fl.card_range_clamp else None,
+            tp_r_cap=fl.tp_r_cap or None,
         )
 
     def local(request: Request) -> bool:
