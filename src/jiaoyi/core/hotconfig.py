@@ -45,6 +45,7 @@ HOT_FAST: frozenset[str] = frozenset(
         # 拍板门槛 / 仓位
         "min_p_genuine",
         "min_p_take",
+        "min_p_take_by_kind",
         "min_p_direction",
         "max_p_toxic",
         "predictor_weight",
@@ -200,12 +201,13 @@ PROFILE_KEYS = ("mode", "hold", "meeting_interval")
 
 
 def hot_keys() -> list[str]:
-    """面板用：热生效的设置键，``段.键`` 形式；``category.*`` 是类别敞口那一段整段。"""
+    """面板用：热生效的设置键，``段.键`` 形式；``category.*`` 是类别敞口那一段整段。
+    ``take_by_kind.*`` is the whole per-signal-kind take floor table."""
     return sorted(
         [f"risk.{k}" for k in HOT_RISK]
         + [f"fast_loop.{k}" for k in HOT_FAST]
         + [f"app.{k}" for k in HOT_APP]
-        + ["category.*"]
+        + ["category.*", "take_by_kind.*"]
     )
 
 

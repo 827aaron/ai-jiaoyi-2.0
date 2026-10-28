@@ -28,7 +28,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 from pydantic import BaseModel, ValidationError
 
 from jiaoyi.alerting.kinds import KINDS, field_of
-from jiaoyi.contracts import AppConfig, Category, RiskConfig
+from jiaoyi.contracts import AppConfig, Category, RiskConfig, SignalKind
 from jiaoyi.contracts.risk_config import FastLoopConfig, PredictorConfig
 from jiaoyi.core import profiles
 from jiaoyi.core.commands import (
@@ -90,6 +90,7 @@ Section = Literal[
     "category",
     "app",
     "fast_loop",
+    "take_by_kind",
     "predictor",
     "schedule",
     "llm",
@@ -634,7 +635,9 @@ def _write_config(
         current = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ActionError(f"{path.name} 现在就不是合法 TOML，先在终端修好：{e}") from e
-    olds = current.get(table, {}) if table else current
+    olds: Any = current
+    for part in table.split(".") if table else ():
+        olds = olds.get(part, {}) if isinstance(olds, dict) else {}
     log: list[dict[str, Any]] = []
     for key, raw in changes.items():
         if key not in fields:
@@ -806,6 +809,7 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "category": ("risk", "category_exposure_x"),
     "app": ("app", None),
     "fast_loop": ("app", "fast_loop"),
+    "take_by_kind": ("app", "fast_loop.min_p_take_by_kind"),
     "predictor": ("app", "predictor"),
     "schedule": ("slow", "schedule"),
     "llm": ("slow", "llm"),
@@ -832,6 +836,8 @@ def editable_fields(section: Section) -> dict[str, FieldSpec]:
 def _base_fields(section: Section) -> dict[str, FieldSpec]:
     if section == "category":
         return {c.value: FieldSpec(float) for c in Category}
+    if section == "take_by_kind":  # empty = drop the line, the kind falls back to min_p_take
+        return {k.value: FieldSpec(float, nullable=True) for k in SignalKind}
     if section == "risk":
         return scalar_fields(RiskConfig, {"day_reset_tz"})
     if section == "app":

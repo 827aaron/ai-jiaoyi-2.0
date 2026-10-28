@@ -25,6 +25,7 @@ from jiaoyi.contracts import (
     PositionStatus,
     RiskConfig,
     Role,
+    SignalKind,
     SymbolPoolEntry,
 )
 from jiaoyi.contracts.risk_config import recommended_caps
@@ -428,6 +429,9 @@ class TeamPage(BaseModel):
     gate_thresholds: dict[str, float] = {}
     """拍板门槛（fast_loop 的 min_p_genuine / min_p_take / min_p_direction / max_p_toxic），
     拍板记录详情里标出哪一问没过。"""
+    gate_take_by_kind: dict[str, float] = {}
+    """``fast_loop.min_p_take_by_kind``: a gate record whose ``input.signal_kind`` is here is
+    judged against this floor instead of ``min_p_take``."""
     market_role: RoleCard | None = None
     """总盘会的模块状态（``Role.MARKET``：上次 / 下次 / 挑了几个）；主程序没报过就是 None。"""
     snapshot: dict[str, Any] | None = None
@@ -720,6 +724,7 @@ def build_team(
     gate_thresholds: dict[str, float] | None = None,
     desk_schedule: tuple[str, int, int] | None = None,
     desk_selected: bool = False,
+    gate_take_by_kind: dict[str, float] | None = None,
 ) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -767,6 +772,7 @@ def build_team(
         meetings=meets,
         predictor_mode=predictor_mode,
         gate_thresholds=gate_thresholds or {},
+        gate_take_by_kind=gate_take_by_kind or {},
         snapshot=files.market_snapshot() if chosen is Role.BOOK_READER else None,
         market_role=market_role if Role.MARKET.value in status or chosen is Role.MARKET else None,
         market=market,
@@ -1871,6 +1877,8 @@ class SettingsPage(BaseModel):
     recommend_basis_usdt: float | None = None
     """推荐值按多少资金算的（账户权益；拿不到时 None，按 1000U 算）。"""
     category_caps: dict[str, float]
+    take_by_kind: dict[str, float | None] = {}
+    """Every signal kind -> its ``[fast_loop.min_p_take_by_kind]`` floor; None = min_p_take."""
     app: list[SettingItem]
     fast_loop: list[SettingItem]
     predictor: list[SettingItem] = []
@@ -2081,6 +2089,7 @@ def build_settings(
         risk_cautions=risk.cautions(equity_usdt),
         recommend_basis_usdt=equity_usdt,
         category_caps={k.value: v for k, v in risk.category_exposure_x.items()},
+        take_by_kind={k.value: app.fast_loop.min_p_take_by_kind.get(k) for k in SignalKind},
         app=_items(app, "app", frozenset({"mode"})),
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),

@@ -245,6 +245,7 @@ class JevEntryGate:
             outcome = Outcome.INFO
             tail = "，门槛由风控员判定"
         inp, out = jev_log_fields(request, resp, extras.log() if extras is not None else None)
+        inp["signal_kind"] = signal.kind.value
         self._rec.record(
             now,
             outcome,

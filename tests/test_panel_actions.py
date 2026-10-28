@@ -12,7 +12,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from jiaoyi.contracts import Category
+from jiaoyi.contracts import Category, SignalKind
 from jiaoyi.core import profiles
 from jiaoyi.core.commands import (
     CommandInbox,
@@ -388,6 +388,23 @@ def test_update_app_and_fast_loop_sections(tmp_path: Path) -> None:
     assert tomllib.loads(paths.app.read_text())["reconciler_close_unknown_positions"] is True
     # 没变的值不算改动
     assert actions.update_config(paths, data, "app", {"pool_size": 30}, PW, NOW) == []
+
+
+def test_update_take_by_kind_section_writes_subtable_and_clears(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    assert load_app_config(paths.app).fast_loop.min_p_take_by_kind == {}
+    actions.update_config(paths, data, "take_by_kind", {"btc_lead": 0.0}, PW, NOW)
+    raw = tomllib.loads(paths.app.read_text())
+    assert raw["fast_loop"]["min_p_take_by_kind"] == {"btc_lead": 0.0}
+    fl = load_app_config(paths.app).fast_loop
+    assert fl.min_p_take_by_kind == {SignalKind.BTC_LEAD: 0.0} and fl.min_p_take == 0.55
+    with pytest.raises(actions.ActionError, match="不能在网页上改"):
+        actions.update_config(paths, data, "take_by_kind", {"nope": 0.1}, PW, NOW)
+    with pytest.raises(actions.ActionError, match="不合格"):
+        actions.update_config(paths, data, "take_by_kind", {"btc_lead": 1.5}, PW, NOW)
+    log = actions.update_config(paths, data, "take_by_kind", {"btc_lead": None}, PW, NOW)
+    assert log == [{"key": "btc_lead", "old": 0.0, "new": None}]
+    assert load_app_config(paths.app).fast_loop.min_p_take_by_kind == {}
 
 
 def test_config_pending_compares_runtime_fingerprint(tmp_path: Path) -> None:
