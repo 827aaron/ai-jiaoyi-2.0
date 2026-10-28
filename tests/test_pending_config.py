@@ -738,3 +738,24 @@ def test_pending_accepts_reuse_expiry_and_regime_age_keys(tmp_path: Path) -> Non
     assert (defaults["reuse_extend_expiry"], defaults["regime_time_label"]) == (False, False)
     assert (defaults["regime_max_age"], defaults["pool_scope_label"]) == (timedelta(0), False)
     assert SlowConfig().market_desk.republish_after_min == 0.0
+
+
+def test_regime_max_age_requires_a_shorter_desk_republish(tmp_path: Path) -> None:
+    from jiaoyi.core.config import ConfigError
+
+    for again in (0, 120, 180):
+        p = tmp_path / f"slow{again}.toml"
+        p.write_text(
+            "[meeting]\nregime_max_age_min = 120\n"
+            f'[market_desk]\nmode = "replace"\nrepublish_after_min = {again}\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="republish_after_min"):
+            load_slow_config(p)
+    ok = tmp_path / "ok.toml"
+    ok.write_text(
+        '[meeting]\nregime_max_age_min = 120\n[market_desk]\nmode = "replace"\n'
+        "republish_after_min = 60\n",
+        encoding="utf-8",
+    )
+    assert load_slow_config(ok).market_desk.republish_after_min == 60.0

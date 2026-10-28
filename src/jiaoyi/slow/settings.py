@@ -388,7 +388,8 @@ class MeetingConfig(_Strict):
         ge=0.0,
         le=1440.0,
         description="大盘判断发布超过这么多分钟：各币会议里标「已过期，仅作参考」，管家和拍板人"
-        "快照的 current_market 加 age_min 和 stale。0 = 不标（现状）。",
+        "快照的 current_market 加 age_min 和 stale。0 = 不标（现状）。大盘台接管时要求 "
+        "[market_desk] republish_after_min 大于 0 且小于它。",
     )
     pool_scope_label: bool = Field(
         default=False,
@@ -550,8 +551,8 @@ class ScheduleConfig(_Strict):
         default=False,
         description="开 = 整轮里因为同币最小间隔没重开会、沿用上一张卡的币，到期时间顺延到"
         "这一轮新卡的到期时间，但从它自己开会那一刻算最多活一个卡有效期（card_ttl_min）；"
-        "整轮选币期间开完的临时会同样顺延。关 = 沿用的指令保留原到期时间（现状，可能在下一轮"
-        "之前就消失）。",
+        "没被挑中、还没到期的旧指令（含整轮选币期间开完的临时会）同样顺延；研究时的大盘方向和"
+        "此刻不同的不顺延。关 = 沿用的指令保留原到期时间（现状，可能在下一轮之前就消失）。",
     )
     refresh_lead_min: float = Field(
         default=20.0,
@@ -893,7 +894,8 @@ class MarketDeskSection(_Strict):
         ge=0.0,
         le=1440.0,
         description="方向没变时，当前生效的大盘台观点发布超过这么多分钟，就把这一轮的话和数字"
-        "按同一方向重发一版（版本号 +1；每发一版持仓都会排队复核，翻转参照不变）。"
+        "按同一方向重发一版（版本号 +1；不唤醒持仓复核、不重置 publish_min_gap_min 计时，"
+        "翻转参照不变）。"
         "0 = 方向没变不发（现状）。",
     )
     daily_cost_limit_usd: float = Field(
@@ -984,6 +986,19 @@ class SlowConfig(_Strict):
     budget: BudgetConfig = BudgetConfig()
     prices: PricesConfig = PricesConfig()
     market_desk: MarketDeskSection = MarketDeskSection()
+
+    @model_validator(mode="after")
+    def _regime_age_needs_republish(self) -> SlowConfig:
+        # with the desk in charge an unchanged direction is never republished, so every view
+        # would cross the age limit and meetings would always read 已过期
+        age, again = self.meeting.regime_max_age_min, self.market_desk.republish_after_min
+        if age > 0 and self.market_desk.mode == "replace" and not 0 < again < age:
+            raise ValueError(
+                f"[meeting] regime_max_age_min = {age:g} 时，[market_desk] republish_after_min "
+                f"要大于 0 且小于 {age:g}（现在是 {again:g}），否则方向不变时大盘判断总会被标成"
+                "已过期"
+            )
+        return self
 
     def engine_settings(self) -> TradingAgentsSettings:
         m, p = self.meeting, self.prices

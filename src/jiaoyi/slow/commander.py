@@ -454,7 +454,7 @@ class BattleCardCommander:
         self._round_meeting: set[str] | None = None
         self._round_symbols: dict[str, CardSymbol] | None = None
         self._round_expiry: datetime | None = None
-        self._round_start_meetings: frozenset[str | None] = frozenset()
+        self._view_dirs: dict[str, Direction] = {}  # market_view_id -> direction, this process
         self._round_event_merges = 0
         self._round_event_cost = 0.0
         self._ref: dict[str, tuple[datetime, float]] = {}
@@ -569,13 +569,32 @@ class BattleCardCommander:
     def _extend_reused(self, cs: CardSymbol, round_expiry: datetime) -> CardSymbol:
         """``reuse_extend_expiry``: a carried-over conclusion lives until the new round's expiry,
         but never longer than one card TTL from its own meeting, so a stale conclusion is not
-        stretched. Never shortens; without ``issued_at`` its age is unknown and it is left alone."""
+        stretched. Never shortens; without ``issued_at`` its age is unknown and it is left alone.
+        Nor is a conclusion researched under a market direction other than the one in force now
+        (or an unknown one): it must not outlive the regime it was argued against."""
         if not self._reuse_extend or cs.issued_at is None or cs.expires_at is None:
+            return cs
+        now_view = self.latest_market_view
+        if now_view is None or self._source_direction(cs) != now_view.regime_direction:
             return cs
         target = min(round_expiry, cs.issued_at + self._ttl_now())
         if target <= cs.expires_at:
             return cs
         return cs.model_copy(update={"expires_at": target})
+
+    def _source_direction(self, cs: CardSymbol) -> Direction | None:
+        vid = cs.source_market_view_id
+        if vid is None:
+            return None
+        if vid in self._view_dirs:
+            return self._view_dirs[vid]
+        latest = self.latest_market_view
+        if latest is not None and latest.market_view_id == vid:
+            return latest.regime_direction
+        o = cs.outlook
+        if o is not None and o.board_market_view_id == vid:
+            return o.board_regime_direction
+        return None
 
     def _fit(self, syms: list[CardSymbol]) -> list[CardSymbol]:
         """池子装不下（卡最多 50 个币）时先丢最早到期的，持仓币不丢。"""
@@ -1595,9 +1614,6 @@ class BattleCardCommander:
         beat = asyncio.create_task(self._beat_while_meeting())
         self._round_on, self._round_meeting, self._round_symbols = True, None, None
         self._round_event_merges, self._round_event_cost = 0, 0.0
-        self._round_start_meetings = frozenset(
-            s.meeting_id for s in (self._card.symbols if self._card is not None else [])
-        )
         try:
             card = await self._meet(
                 pool, candidates, reason, now, generation, brief_text, brief_provenance
@@ -1703,8 +1719,10 @@ class BattleCardCommander:
         generation: int,
         desk_id: str,
         probs: Mapping[str, float],
+        republish: bool = False,
     ) -> MarketView | None:
         """大盘台发布：走和总盘会 / 独立刷新同一条路（共用版本号、翻转参照、通知管家复核）。
+        ``republish``：同方向按 ``republish_after_min`` 重发，只换话和数字，不唤醒管家复核。
         比它晚开始的发布已经生效时不覆盖，返回 None。同步执行（不让出事件循环），就是「只在
         发布时持锁」。仍有效的市场复核提名迁到新版本，过时的撤掉。"""
         if generation < self._market_published_generation:
@@ -1723,6 +1741,7 @@ class BattleCardCommander:
             pool.ts,
             generation,
             transition=True,
+            notify=not republish,
         )
         self._migrate_market_reviews(view)
         self._write(
@@ -1864,6 +1883,7 @@ class BattleCardCommander:
         generation: int,
         *,
         transition: bool,
+        notify: bool = True,
     ) -> MarketView:
         view = MarketView(
             market_view_id=uuid.uuid4().hex,
@@ -1876,6 +1896,9 @@ class BattleCardCommander:
             pool_id=pool_id,
             source_ts=source_ts,
         )
+        self._view_dirs[view.market_view_id] = direction
+        while len(self._view_dirs) > 512:
+            del self._view_dirs[next(iter(self._view_dirs))]
         if generation < self._market_published_generation:
             return view  # 仍是这一场币研究的历史来源，但不能覆盖更晚的当前观点
         self.latest_market_view = view
@@ -1891,7 +1914,7 @@ class BattleCardCommander:
             self._reference_generation = generation
             self._pending_reference_view = view if self.regime_reference is None else None
         self._save_market()
-        if self._on_market is not None:
+        if notify and self._on_market is not None:
             try:
                 self._on_market(view)
             except Exception:
@@ -2752,12 +2775,9 @@ class BattleCardCommander:
             if old.symbol not in in_pool and old.symbol not in self._held:
                 continue
             if now < exp:
+                # event conclusions carry the expiry of the card in force when they merged
                 kept = clamp_to_risk(old, self._risk, self._stop)
-                if old.meeting_id not in self._round_start_meetings:
-                    # an event meeting merged while this round was picking was stamped with the
-                    # old card's expiry
-                    kept = self._extend_reused(kept, round_expiry)
-                symbols[old.symbol] = kept
+                symbols[old.symbol] = self._extend_reused(kept, round_expiry)
             elif old.symbol in self._held:
                 symbols[old.symbol] = self._watch_only(old)
         symbols.update({k: self._extend_reused(v, round_expiry) for k, v in reused.items()})

@@ -100,7 +100,7 @@ max_retries = 6
 # concurrency = 8                  # 同时开几个标的的会议 1–32（整轮各币会 + 临时会合计）；16 起注意 OpenRouter 同时请求数和币安权重（docs/slow.md）
 # card_ttl_min = 140              # 作战卡有效期（分钟）= 开会间隔 + 提前量（2h 140 / 60m 80 / 30m 50 / 15m 35）
 # symbol_min_interval_min = 115   # 同一个币两次会议的最小间隔 5–720 分钟（≤ 开会间隔）
-# reuse_extend_expiry = false     # true = 因最小间隔沿用旧指令的币顺延到新卡的到期时间（从它开会算最多一个 card_ttl_min）；推荐 Demo：true
+# reuse_extend_expiry = false     # true = 因最小间隔沿用旧指令的币顺延到新卡的到期时间（从它开会算最多一个 card_ttl_min；没挑中的旧指令也顺延，大盘方向变了的不顺延）；推荐 Demo：true
 # refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 20）
 # symbol_timeout_s = 900           # 单个标的的会议超时
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
@@ -155,7 +155,7 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # publish_confirm = 2        # 滞回：新方向连续几轮一致才发布
 # publish_confirm_min = 30   # 且至少持续几分钟（其中有加跑轮时只看轮数）
 # publish_min_gap_min = 0    # 两次方向发布至少隔几分钟
-# republish_after_min = 0    # 方向没变、当前观点发布超过这么多分钟就同方向重发一版新的话和数字（会触发持仓复核）；0 = 不重发。推荐 Demo：60
+# republish_after_min = 0    # 方向没变、当前观点发布超过这么多分钟就同方向重发一版新的话和数字（不触发持仓复核、不重置 publish_min_gap_min）；0 = 不重发；regime_max_age_min > 0 时必须小于它。推荐 Demo：60
 # daily_cost_limit_usd = 0   # 大盘台单独的日上限；0 = 不限
 # balance_floor_usd = 10     # OpenRouter 余额低于它大盘台自停，留给开会和 Jev；0 = 不看
 # reasoning_effort = "low"

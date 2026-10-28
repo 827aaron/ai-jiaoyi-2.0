@@ -821,6 +821,8 @@ def _aged_view(now: datetime) -> MarketView:
 async def test_keeper_and_entry_snapshots_carry_market_age(
     tmp_path: Path, now: datetime, kw: dict[str, Any], expected: dict[str, Any]
 ) -> None:
+    from jiaoyi.contracts import Role
+    from jiaoyi.core.recorder import RoleRecorder
     from jiaoyi.gate.entry import JevEntryGate
     from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
     from jiaoyi.keeper.keeper import JevKeeper
@@ -851,7 +853,18 @@ async def test_keeper_and_entry_snapshots_carry_market_age(
     assert held["market_view_id"] == "mv-2332"
 
     t2 = MockJevTransport(answer=answer_with(GOOD_LONG))
-    gate = JevEntryGate(JevDecisionModel(t2, FAST, timeout_ms=200), market_age=c.market_age)
+    gate_log = JsonlDecisionLog(tmp_path / "gate")
+    gate = JevEntryGate(
+        JevDecisionModel(t2, FAST, timeout_ms=200),
+        RoleRecorder(Role.GATE, gate_log),
+        market_age=c.market_age,
+    )
     await gate.evaluate(signal(now), card(now).model_copy(update={"current_market": view}), now)
     got = json.loads(t2.calls[-1])["current_market"]
     assert {k: got[k] for k in ("age_min", "stale") if k in got} == expected
+    [rec] = gate_log.read_day(now.date().isoformat())
+    logged = rec.input["jev"].get("market_age")
+    if expected:
+        assert logged == {"age_min": 157.0, "stale": "stale" in expected}
+    else:
+        assert logged is None

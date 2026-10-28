@@ -384,3 +384,27 @@ async def test_start_marks_previous_process_meetings_interrupted(
     m = read_meeting(tmp_path, "ZECUSDT", now)
     assert m and m.status == "interrupted" and m.error == "主程序重启，会议中断"
     assert m.finished_at is not None
+
+
+async def test_build_modules_wires_market_age_into_gate_and_keeper(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi.gate.entry import JevEntryGate
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from jiaoyi.keeper.keeper import JevKeeper
+
+    class FakeEngine:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    built = JevDecisionModel(MockJevTransport(), c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
+    app = _online(tmp_path, now, _Secrets(DEEPSEEK_API_KEY="x" * 16))
+    cards, gate, keeper = app.m.cards, app.m.gate, app.m.keeper
+    assert isinstance(cards, BattleCardCommander)
+    assert isinstance(gate, JevEntryGate) and isinstance(keeper, JevKeeper)
+    assert gate._market_age == cards.market_age
+    assert keeper._market_age == cards.market_age
+    await app.stop()

@@ -2190,6 +2190,8 @@ async def test_1h_probs_line_says_how_wide_flat_is(tmp_path: Path) -> None:
 async def test_desk_run_republishes_unchanged_direction_after_republish_after_min(
     tmp_path: Path, after: float
 ) -> None:
+    from jiaoyi.slow import market_score as ms
+
     commander, _, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
     script = Switch(answer(0.6, 0.25, 0.15))
     desk = make_desk(tmp_path, commander, FakeModel(script), clock, republish_after_min=after)
@@ -2209,9 +2211,71 @@ async def test_desk_run_republishes_unchanged_direction_after_republish_after_mi
     assert again is not None and commander.latest_market_view is again
     assert again.version == 3 and again.regime_direction == first.regime_direction == "看涨"
     assert again.observed_at == T0 + timedelta(minutes=30)
-    assert notified == [again]
+    assert notified == []  # a refresh does not wake keeper reviews
     assert commander.regime_reference == ref  # same direction: flip reference untouched
     assert desk.state.latest is not None and desk.state.latest["republished_same_direction"]
-    script.text = answer(0.15, 0.25, 0.6)  # a new direction still needs the hysteresis
+    assert desk.state.last_publish_at == T0
+    assert desk.state.last_republish_at == T0 + timedelta(minutes=30)
+    assert log_rows(tmp_path)[-1]["republished_same_direction"] is True
+    runs = ms.read_desk_log(tmp_path, T0 - timedelta(hours=1), clock[0]).runs
+    assert [r.published for r in runs] == ["看涨", None, None]  # left out of the publish count
+
+
+async def test_desk_run_republish_does_not_delay_the_next_flip(tmp_path: Path) -> None:
+    commander, _, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    script = Switch(answer(0.6, 0.25, 0.15))
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(script),
+        clock,
+        republish_after_min=30,
+        publish_min_gap_min=60,
+        publish_confirm=2,
+        publish_confirm_min=15,
+    )
+    await desk.run(candidates, "scheduled")  # T0: takeover
+    notified: list[Any] = []
+    commander.set_on_market(notified.append)
     clock[0] += timedelta(minutes=15)
-    assert (await desk.run(candidates, "scheduled")).published is None
+    await desk.run(candidates, "scheduled")
+    clock[0] += timedelta(minutes=15)
+    assert (await desk.run(candidates, "scheduled")).published is not None  # T+30 refresh
+    script.text = answer(0.15, 0.25, 0.6)
+    clock[0] += timedelta(minutes=15)
+    assert (await desk.run(candidates, "scheduled")).published is None  # T+45 candidate
+    clock[0] += timedelta(minutes=15)
+    flip = (await desk.run(candidates, "scheduled")).published  # T+60: 60 min after T0
+    assert flip is not None and flip.regime_direction == "看跌"
+    assert flip.observed_at == T0 + timedelta(minutes=60)
+    assert notified == [flip]  # only the real direction change wakes the keeper
+    assert commander.regime_reference is not None
+    assert commander.regime_reference.direction == "看跌"
+
+
+@pytest.mark.parametrize("scope", [False, True])
+async def test_meeting_regime_labels_with_desk_intra(tmp_path: Path, scope: bool) -> None:
+    commander, _engine, clock, candidates, _ = await research(
+        tmp_path / "r", T0, regime_time_label=True, pool_scope_label=scope
+    )
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=IntraBuilder(),  # type: ignore[arg-type]
+        publish_intra=True,
+    )
+    await desk.run(candidates, "scheduled")
+    view = commander.latest_market_view
+    assert view is not None and view.source == DESK_SOURCE
+    fake = ContextEngine()
+    commander._engine = fake  # type: ignore[assignment]
+    clock[0] += timedelta(minutes=40)
+    await commander._analyze_one(entry("AAUSDT"), view.regime, market_view=view)
+    regime, kw = fake.calls[-1]
+    head = "（大盘台 10:02 UTC 发布的 4 小时判断，距此刻 40 分钟"
+    pool_tag = "；其中的涨跌、主动买卖占比等数字是全池口径，不是这个币自己的"
+    assert regime.startswith(head + (pool_tag if scope else "") + "）")
+    assert kw["market_intra"].startswith("全池口径：10:02 UTC 起") is scope
+    assert kw["market_intra"].startswith("10:02 UTC 起") is not scope

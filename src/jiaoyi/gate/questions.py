@@ -626,6 +626,18 @@ def template_dump(kronos: KronosSnapshot = "direction") -> dict[str, Any]:
     }
 
 
+def _snapshot_market_age(snapshot: str) -> dict[str, Any] | None:
+    """``{age_min, stale}`` when the snapshot's ``current_market`` carries an age (only with
+    ``regime_time_label`` / ``regime_max_age_min`` on), else None."""
+    try:
+        market = json.loads(snapshot).get("current_market")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(market, dict) or "age_min" not in market:
+        return None
+    return {"age_min": market["age_min"], "stale": "stale" in market}
+
+
 def jev_log_fields(
     request: JevRequest | None,
     resp: JevResponse,
@@ -658,6 +670,8 @@ def jev_log_fields(
             questions=[q.id for q in request.questions],
             snapshot=request.snapshot,
         )
+        if age := _snapshot_market_age(request.snapshot):
+            inp["market_age"] = age  # grouping key for keeper observation analysis
     if extra is not None:
         inp["extra"] = dict(extra)  # 一道题问法的额外原始值（含快照超长删掉的），上线后逐项验证
     out: dict[str, Any] = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -944,10 +945,29 @@ XRP_EVENT = datetime.fromisoformat("2026-10-28T03:43:24+00:00")
 R2 = datetime.fromisoformat("2026-10-28T03:48:00+00:00")
 
 
-async def _xrp_case(tmp_path: Path, on: bool) -> tuple[BattleCardCommander, BattleCard]:
+class _Directed(FakeEngine):
+    def __init__(self, picks: list[str]) -> None:
+        super().__init__(picks)
+        self.direction = "中性"
+
+    async def pick(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
+    ) -> PickResult:
+        got = await super().pick(candidates, max_n, previous, pool)
+        return dataclasses.replace(got, regime_direction=self.direction)
+
+
+async def _xrp_case(
+    tmp_path: Path, on: bool, *, picked: bool = True, flip: bool = False
+) -> tuple[BattleCardCommander, BattleCard]:
     from jiaoyi.slow.commander import EventRules
 
-    eng = FakeEngine(["XRPUSDT", "LINKUSDT"])
+    eng = _Directed(["XRPUSDT", "LINKUSDT"])
+    eng.direction = "看涨"
     c, _, clock = make(
         tmp_path,
         eng,
@@ -963,16 +983,21 @@ async def _xrp_case(tmp_path: Path, on: bool) -> tuple[BattleCardCommander, Batt
     clock[0] = XRP_EVENT
     assert await c.refresh_symbol(p, "XRPUSDT", "key_level_break") is not None
     clock[0] = R2
+    if not picked:
+        eng.picks = ["LINKUSDT"]
+    if flip:
+        eng.direction = "看跌"
     card = await c.refresh(pool(R2, entry("XRPUSDT"), entry("LINKUSDT")), "scheduled")
     assert eng.analyzed == ["XRPUSDT", "LINKUSDT", "XRPUSDT", "LINKUSDT"]
     return c, card
 
 
+@pytest.mark.parametrize("picked", [True, False])
 @pytest.mark.parametrize("on", [False, True])
 async def test_commander_refresh_reused_entry_keeps_or_extends_expiry(
-    tmp_path: Path, on: bool
+    tmp_path: Path, on: bool, picked: bool
 ) -> None:
-    c, card = await _xrp_case(tmp_path, on)
+    c, card = await _xrp_case(tmp_path, on, picked=picked)
     assert card.expires_at == datetime.fromisoformat("2026-10-28T06:08:00+00:00")
     xrp = card.for_symbol("XRPUSDT")
     assert xrp is not None and xrp.issued_at == XRP_EVENT
@@ -985,6 +1010,17 @@ async def test_commander_refresh_reused_entry_keeps_or_extends_expiry(
     else:
         assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
         assert syms == {"LINKUSDT"}
+
+
+@pytest.mark.parametrize("picked", [True, False])
+async def test_commander_refresh_does_not_extend_entry_from_a_flipped_regime(
+    tmp_path: Path, picked: bool
+) -> None:
+    _c, card = await _xrp_case(tmp_path, True, picked=picked, flip=True)
+    assert card.regime_direction == "看跌"
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None
+    assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
 
 
 async def test_commander_refresh_reuse_extension_is_capped_by_conclusion_age(
