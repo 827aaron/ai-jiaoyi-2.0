@@ -368,7 +368,8 @@ class Runner:
         self._loops: list[asyncio.Task[None]] = []
         self._last_screen: datetime | None = None
         self._last_card_at: datetime | None = None
-        self._refreshing = False
+        self._refreshing = False  # 整轮（定时 / 面板重新开会）在开
+        self._event_running: set[str] = set()  # 在开临时会的币
         self._slow_lock = asyncio.Lock()
         self._regime_tick_lock = asyncio.Lock()
         self._market_refreshing = False
@@ -2040,10 +2041,24 @@ class Runner:
         ):
             await self._screen_now(now)
         pool = self.app.pool
-        if pool is None or self._refreshing:
+        if pool is None:
             return
         cards = self.m.cards
         events = cards if isinstance(cards, _EventMeetings) else None
+        limit = max(1, int(getattr(cards, "event_concurrency", 1))) if events else 1
+        if limit == 1 and (self._refreshing or self._event_running):
+            return  # 一场一场开：整轮或临时会在开，什么都不派
+        if self._refreshing:
+            # 整轮在开：本轮开哪些币定了以后，只给本轮不开的币派临时会（commander 挡掉本轮的币），
+            # 和整轮共用并发名额；还在选币 / 挑币时不派
+            if (
+                events is not None
+                and getattr(cards, "round_symbols_known", False) is True
+                and await self._may_meet(cards, now)
+                and not is_stub(cards)
+            ):
+                self._dispatch_events(events, pool, now, limit)
+            return
         reason: str | None = None
         if isinstance(cards, _RefreshReason):
             if events is None:
@@ -2060,25 +2075,16 @@ class Runner:
             and not (events is not None and events.fixed_time)  # 每天固定时间开的档不按间隔兜底
         ):
             reason = "scheduled"
-        if isinstance(cards, _RefreshGate):
-            while (notice := cards.take_notice()) is not None:
-                await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice, "meeting_paused")
-            allowed = cards.may_refresh(now)
-            if isinstance(
-                cards, _SpendAlerts
-            ):  # 日上限设为不限：花费过线只提醒，单独一类、单独标题
-                while (alert := cards.take_spend_alert()) is not None:
-                    await self.app._alert(AlertLevel.WARN, SPEND_ALERT_TITLE, alert, "spend_alert")
-            if not allowed:
-                return  # 失败退避中或当日花费超限；定时兜底也不能绕过
+        if not await self._may_meet(cards, now):
+            return  # 失败退避中或当日花费超限；定时兜底也不能绕过
         if is_stub(cards):
             return
         if reason is None:
-            event = events.pop_event(now, pool) if events is not None else None
-            if events is not None and event is not None:
-                self._refreshing = True
-                self._spawn(self._refresh_event(events, pool, *event))
+            if events is not None:
+                self._dispatch_events(events, pool, now, limit)
             return
+        if self._event_running:
+            return  # 整轮要开：不再派临时会，等在开的开完（和一场一场开时一样等）
         # 顺序 选币 → 总盘会：每一整轮会议前先把候选池刷新（刚选过就不重复）
         self._refreshing = True
         try:
@@ -2090,6 +2096,32 @@ class Runner:
         except BaseException:
             self._refreshing = False
             raise
+
+    async def _may_meet(self, cards: object, now: datetime) -> bool:
+        if not isinstance(cards, _RefreshGate):
+            return True
+        while (notice := cards.take_notice()) is not None:
+            await self.app._alert(AlertLevel.WARN, "军师团暂停开会", notice, "meeting_paused")
+        allowed = cards.may_refresh(now)
+        if isinstance(cards, _SpendAlerts):  # 日上限设为不限：花费过线只提醒，单独一类、单独标题
+            while (alert := cards.take_spend_alert()) is not None:
+                await self.app._alert(AlertLevel.WARN, SPEND_ALERT_TITLE, alert, "spend_alert")
+        return allowed
+
+    def _dispatch_events(
+        self, events: _EventMeetings, pool: SymbolPool, now: datetime, limit: int
+    ) -> None:
+        """派临时会，直到同时在开的到 ``limit`` 场。取下一场和登记在开之间没有 await：
+        commander 的 ``claim_event`` 同步预留币、当天场数和预估花费，同一刻派的几场不会撞。"""
+        claim = getattr(events, "claim_event", None)
+        while len(self._event_running) < limit:
+            event = claim(now, pool) if callable(claim) else events.pop_event(now, pool)
+            if event is None or event[0] in self._event_running:
+                return
+            self._event_running.add(event[0])
+            self._spawn(self._refresh_event(events, pool, *event))
+            if not callable(claim):
+                return  # 不会预留的实现：一次只派一场
 
     async def _screen_now(self, now: datetime) -> None:
         self._last_screen = now
@@ -2206,7 +2238,7 @@ class Runner:
         except Exception:
             log.exception("%s 临时会失败，沿用现有作战卡", symbol)
         finally:
-            self._refreshing = False
+            self._event_running.discard(symbol)
 
     async def _rescreen(self, now: datetime) -> None:
         self.app.reload_pool_overrides()  # 手改 data/pool_overrides.json 也在下一次选币生效
@@ -2377,7 +2409,7 @@ class Runner:
         # refresh_cards：整条链重跑 选币 → 总盘会 → 军师团
         if is_stub(self.m.cards):
             return "rejected", "军师团未接入"
-        if self._refreshing:
+        if self._refreshing or self._event_running:
             return "rejected", "军师团正在开会"
         self._refreshing = True
         now = self.app.clock()

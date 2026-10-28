@@ -485,7 +485,7 @@ def test_slow_schedule_created_and_cleared(tmp_path: Path) -> None:
     assert load_slow_config(paths.slow).schedule.max_cards_per_round == 15  # 清掉 = 回到 2h 档默认
     assert "max_cards_per_round" not in paths.slow.read_text(encoding="utf-8")
     with pytest.raises(ActionError, match="concurrency"):
-        actions.update_config(paths, data, "schedule", {"concurrency": 20}, PW, NOW)
+        actions.update_config(paths, data, "schedule", {"concurrency": 33}, PW, NOW)
     rows = actions.recent_changes(data)
     assert rows[0]["key"] == "max_cards_per_round" and rows[0]["new"] is None
 

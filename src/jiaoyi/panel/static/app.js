@@ -2489,6 +2489,7 @@ const PLAIN = {
   event_triggers: "哪些事算“出事”",
   event_symbol_gap_min: "同一个币两场会至少隔几分钟（0 = 不限）",
   event_max_per_day: "一天最多开几场临时会（0 = 不限）",
+  event_concurrency: "同时最多开几场临时会（不同币；1 = 排队一场一场开，0 = 跟「同时开几个会」一样）",
   key_level_trigger: "怎样算“突破关键价位”",
   move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
   predictor_against_runs: "预测员连续几次看反才算",
@@ -2781,7 +2782,7 @@ const ROLES = [
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
     { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
-    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
+    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.event_concurrency", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
   { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [
     { g: "", hint: "曼谷 0 点清零；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min", "budget.*"] },
@@ -2865,7 +2866,7 @@ const UNIT = {
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
   min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
-  liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个",
+  liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
   min_quote_volume_usdt: " U", min_depth_usdt: " U", min_listed_days: " 天", min_range_24h_pct: "%", max_range_24h_pct: "%",
   head: " 个", mid: " 个", mid_daily_pick: " 个", daily_cost_limit_usd: " 美元",

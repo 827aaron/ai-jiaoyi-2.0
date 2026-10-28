@@ -254,6 +254,8 @@ class EventRules:
     """开仓前卡龄上限（该币上次开会距今）；0 = 不查。"""
     key_level_trigger: str = "outside"
     """outside = 价格在关键位外面就算突破；cross = 出卡后价格从里侧穿到外侧那一下才算。"""
+    concurrency: int = 1
+    """同时最多开几场临时会（≥ 1，1 = 一场一场排队）；和整轮共用会议并发的名额。"""
 
 
 PENDING_EXPIRY = timedelta(minutes=30)
@@ -420,6 +422,17 @@ class BattleCardCommander:
         self._event_day = ""
         self._event_count = 0
         self._event_last: dict[str, datetime] = {}
+        # 并发临时会的预留：派出去、还没开始计数的币（占当天场数），和还没预记花费的币（占日上限）
+        self._event_claimed: set[str] = set()
+        self._event_uncharged: set[str] = set()
+        self._event_live: list[str] = []  # 正在开的临时会（心跳文字用，按开始先后）
+        # 整轮进行中：None = 还没定本轮开哪些币（这段时间不开临时会）；定了以后这些币不开临时会
+        self._round_on = False
+        self._round_meeting: set[str] | None = None
+        self._round_symbols: dict[str, CardSymbol] | None = None
+        self._round_expiry: datetime | None = None
+        self._round_event_merges = 0
+        self._round_event_cost = 0.0
         self._ref: dict[str, tuple[datetime, float]] = {}
         self._restore_tiers()
         self._stats = TodayStats()
@@ -1083,8 +1096,13 @@ class BattleCardCommander:
         失败退避 / 日花费）返回 None。过期的排队项（超过 30 分钟没轮到）丢掉，事件还在会再排。"""
         if not self._events.enabled or not self._pending or not self.may_refresh(now):
             return None
+        if self._event_budget_held(now) or (self._round_on and self._round_meeting is None):
+            return None
         self._roll_events(now)
-        if self._events.max_per_day and self._event_count >= self._events.max_per_day:
+        if (
+            self._events.max_per_day
+            and self._event_count + len(self._event_claimed) >= self._events.max_per_day
+        ):
             for symbol, quota_item in self._market_reviews.items():
                 eligible = max(quota_item.eligible_at, self._event_eligible(symbol, now))
                 self._market_reviews[symbol] = quota_item.model_copy(
@@ -1096,7 +1114,10 @@ class BattleCardCommander:
             self._save_market()
             return None
         by_symbol = {e.symbol: e for e in pool.in_pool}
+        busy = self._symbol_inflight | self._event_claimed | (self._round_meeting or set())
         for sym in sorted(self._pending, key=lambda x: x not in self._held):
+            if sym in busy:
+                continue
             queued = self._market_reviews.get(sym)
             if queued is not None:
                 current = self._card.for_symbol(sym) if self._card else None
@@ -1163,11 +1184,58 @@ class BattleCardCommander:
             return sym, trigger
         return None
 
+    @property
+    def event_concurrency(self) -> int:
+        return max(1, self._events.concurrency)
+
+    @property
+    def round_symbols_known(self) -> bool:
+        """整轮在开、且本轮开哪些币已经定了：这时才能给别的币派临时会。主循环自己的「整轮在开」
+        标记比这早（开会前还要选币、拉简报），那段时间不派，免得和本轮挑中的币撞。"""
+        return self._round_on and self._round_meeting is not None
+
+    def claim_event(self, now: datetime, pool: SymbolPool) -> tuple[str, str] | None:
+        """``pop_event`` 并预留：同一刻再派下一场时，这个币、它占的当天场数和预估花费都已算上，
+        并发派出的几场不会同币重叠、也不会一起越过每日上限 / 日花费上限。预留由
+        ``refresh_symbol`` 释放（开成了转成正式计数）。"""
+        event = self.pop_event(now, pool)
+        if event is not None:
+            self._event_claimed.add(event[0])
+            if self._cost_limit is not None:
+                self._event_uncharged.add(event[0])
+        return event
+
+    def _event_budget_held(self, now: datetime) -> bool:
+        """已派出、还没预记花费的临时会按估算算进今天花费后，是否已到日上限。"""
+        if self._cost_limit is None or not self._event_uncharged:
+            return False
+        if self._stats_day != self._day(now):
+            return False
+        held = self._estimate(self._meeting_costs) * len(self._event_uncharged)
+        return self._stats.cost_usd + held >= self._cost_limit
+
+    def _progress_text(self) -> str:
+        parts = [self._progress] if self._progress else []
+        if self._event_live:
+            parts.append(f"{'、'.join(self._event_live)} 临时会")
+        return "；".join(parts)
+
     async def refresh_symbol(
         self, pool: SymbolPool, symbol: str, trigger: str
     ) -> BattleCard | None:
         """临时会：只给一个币补开一场，结论并进现有作战卡（有效期不延长）。开不成返回 None，
         旧卡照旧；同一个币的间隔照常计，免得失败后每分钟重试。"""
+        try:
+            return await self._refresh_symbol(pool, symbol, trigger)
+        finally:
+            self._event_claimed.discard(symbol)
+            self._event_uncharged.discard(symbol)
+
+    async def _refresh_symbol(
+        self, pool: SymbolPool, symbol: str, trigger: str
+    ) -> BattleCard | None:
+        if symbol in self._symbol_inflight or symbol in (self._round_meeting or set()):
+            return None  # 这个币正在开会（另一场临时会 / 本轮整轮），不叠开
         now = self._clock()
         self._loop = asyncio.get_running_loop()
         nomination = self._market_reviews.get(symbol)
@@ -1206,13 +1274,12 @@ class BattleCardCommander:
             return None
         self._roll_events(now)
         self._event_count += 1
+        self._event_claimed.discard(symbol)  # 预留转成正式计数
         self._event_last[symbol] = now
         self._level_cross.pop(symbol, None)  # 这次穿越换到了一场会：开不成也不再排
         self._mark_meeting_px(symbol, now)
         source_symbol = card.for_symbol(symbol)
         source_token = source_symbol.research_token() if source_symbol else None
-        self._symbol_inflight.add(symbol)
-        self._progress = f"{symbol} 临时会"
         if nomination is not None:
             self._write(
                 symbol=symbol,
@@ -1224,6 +1291,9 @@ class BattleCardCommander:
                 },
             )
         self._save_market()
+        # 紧挨着 try 登记：上面写记录 / 落盘出错时不能把这个币永远留在「正在开会」里
+        self._symbol_inflight.add(symbol)
+        self._event_live.append(symbol)
         beat = asyncio.create_task(self._beat_while_meeting())
         started = time.monotonic()
         try:
@@ -1261,7 +1331,7 @@ class BattleCardCommander:
         finally:
             beat.cancel()
             self._symbol_inflight.discard(symbol)
-            self._progress = ""
+            self._event_live.remove(symbol)
         latest_card = self._card
         latest_symbol = latest_card.for_symbol(symbol) if latest_card else None
         if (
@@ -1275,12 +1345,17 @@ class BattleCardCommander:
                 output={"market_review": "superseded"},
             )
             return None
+        # 从这里到落盘没有 await：并发的几场临时会、整轮的单币会在事件循环上一场一场并进
+        # 最新卡，版本号连续、谁的结论都不丢
         card = latest_card
-        self._pick_cost = 0.0  # 没有总盘会这一份，别重复记上一轮的
+        expires = card.expires_at  # 临时会不改整轮的节奏：到期时间跟这一轮走
+        if self._round_symbols is not None and self._round_expiry is not None:
+            # 整轮的币已定、新卡还没出：这条结论要活到整轮新卡的到期时间，不按旧卡提前消失
+            expires = max(expires, self._round_expiry)
         new = self._stamp(
             self._limit_size(clamp_to_risk(res.card_symbol, self._risk, self._stop)),
             now,
-            card.expires_at,  # 临时会不改整轮的节奏：到期时间跟这一轮走
+            expires,
             res.market_view or market,
         )
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
@@ -1294,6 +1369,11 @@ class BattleCardCommander:
                 "llm_cost_usd": round(card.llm_cost_usd + res.cost_usd, 6),
             }
         )
+        if self._round_symbols is not None:
+            # 整轮还在开：它下一次出卡从自己的币表重建，这场结论和版本号要记进去
+            self._round_symbols[symbol] = new
+            self._round_event_merges += 1
+            self._round_event_cost += res.cost_usd
         self._card = card
         self._notify_card()
         self._last_meeting[symbol] = now
@@ -1304,7 +1384,7 @@ class BattleCardCommander:
         self._save_card()
         if self._journal is not None:
             self._journal.record(card, [symbol], {symbol: res.setup})
-        self._record_card(card, started)
+        self._record_card(card, started, cost=0.0)  # 临时会没有总盘会这一份
         if nomination is not None:
             self._write(
                 symbol=symbol,
@@ -1455,6 +1535,8 @@ class BattleCardCommander:
                 self._write(outcome=Outcome.ERROR, summary=f"市场简报失败，会议继续：{exc}"[:200])
         self._progress = "选币中"
         beat = asyncio.create_task(self._beat_while_meeting())
+        self._round_on, self._round_meeting, self._round_symbols = True, None, None
+        self._round_event_merges, self._round_event_cost = 0, 0.0
         try:
             card = await self._meet(
                 pool, candidates, reason, now, generation, brief_text, brief_provenance
@@ -1470,6 +1552,8 @@ class BattleCardCommander:
         finally:
             beat.cancel()
             self._progress = ""
+            self._round_on, self._round_meeting, self._round_symbols = False, None, None
+            self._round_expiry = None
         self._fails, self._retry_at, self._last_error = 0, None, None
         self._restored = False
         self._card = card
@@ -1489,7 +1573,7 @@ class BattleCardCommander:
         self._level_broken.clear()
         self._save_card()
         self._save_market()
-        self._record_card(card, started)
+        self._record_card(card, started, cost=self._pick_cost)
         return card.model_copy(update={"current_market": self.latest_market_view})
 
     def set_market_snapshot(
@@ -2304,8 +2388,8 @@ class BattleCardCommander:
 
     def heartbeat(self, now: datetime) -> None:
         """应用每 30 秒调一次：空闲期间也持续上报，面板才不会在两轮会议之间把慢环标红。"""
-        if self._progress:
-            self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+        if progress := self._progress_text():
+            self._heartbeat(Health.OK, f"开会中：{progress}", None)
             return
         tz = ZoneInfo(self._risk.day_reset_tz)
         nxt = self._next_meeting(now)
@@ -2331,7 +2415,7 @@ class BattleCardCommander:
     async def _beat_while_meeting(self) -> None:
         """一轮会议要十几分钟：期间每 30 秒报一次心跳，面板才不会把慢环标红。"""
         while True:
-            self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+            self._heartbeat(Health.OK, f"开会中：{self._progress_text()}", None)
             await asyncio.sleep(self._beat_s)
 
     async def _meet(
@@ -2487,6 +2571,16 @@ class BattleCardCommander:
             ):
                 reused[e.symbol] = old
         to_meet = [e for e in chosen if e.symbol not in reused]
+        # 已派出或正在开临时会的币本轮不再开：让那场开完，结论照样并进本轮的卡（见 _refresh_symbol）
+        busy = self._symbol_inflight | self._event_claimed
+        if busy & {e.symbol for e in to_meet}:
+            self._write(
+                outcome=Outcome.INFO,
+                summary=f"本轮不重开正在开临时会的币：{sorted(busy & {e.symbol for e in to_meet})}"[
+                    :200
+                ],
+            )
+            to_meet = [e for e in to_meet if e.symbol not in busy]
         if desk_owned and picked.review_candidates:
             self._write(
                 outcome=Outcome.INFO,
@@ -2570,10 +2664,14 @@ class BattleCardCommander:
 
         round_expiry = now + self._ttl_now()
 
+        # 从这里起本轮在开的币定了：别的币可以并发开临时会，结论记进 symbols（见 _refresh_symbol）
+        self._round_symbols, self._round_expiry = symbols, round_expiry
+        self._round_meeting = {e.symbol for e in to_meet}
+
         def make_card() -> BattleCard:
             return BattleCard(
                 card_id=self._card_id(now),
-                version=base_version + max(published, 1),
+                version=base_version + max(published, 1) + self._round_event_merges,
                 created_at=now,
                 expires_at=round_expiry,
                 source="tradingagents",
@@ -2581,7 +2679,7 @@ class BattleCardCommander:
                 regime_direction=round_direction,
                 symbols=self._fit(list(symbols.values())),
                 refresh_reason=reason,
-                llm_cost_usd=round(cost, 6),
+                llm_cost_usd=round(cost + self._round_event_cost, 6),
             )
 
         # 总盘会挑的币带上挑它的理由；固定 / 持仓强制开会的币不是挑的，理由留空（引擎写成
@@ -2627,7 +2725,7 @@ class BattleCardCommander:
             finally:
                 finished += 1  # 成功失败都算开完一场
                 self._progress = f"{finished}/{len(to_meet)}"
-                self._heartbeat(Health.OK, f"开会中：{self._progress}", None)
+                self._heartbeat(Health.OK, f"开会中：{self._progress_text()}", None)
 
         results = await asyncio.gather(*(counted(e) for e in to_meet), return_exceptions=True)
         failed = [
@@ -2676,6 +2774,7 @@ class BattleCardCommander:
             regime, market_view, regime_note = self._regime_at_start(regime, market_view)
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
+            self._event_uncharged.discard(entry.symbol)
             try:
                 contextual_analyze = getattr(self._engine, "analyze_with_context", None)
                 meeting = (
@@ -3036,9 +3135,12 @@ class BattleCardCommander:
             out["meeting_setup"] = setup
         return out
 
-    def _record_card(self, card: BattleCard, started: float, *, partial: bool = False) -> None:
+    def _record_card(
+        self, card: BattleCard, started: float, *, partial: bool = False, cost: float = 0.0
+    ) -> None:
         """写一条出卡记录（面板读最新一条显示作战卡）。``partial`` = 一轮会议中途、某个币刚开完：
-        只为了面板马上显示这个币，不记花费、不算调用次数（整轮结束那条照旧记总盘会花费）。"""
+        只为了面板马上显示这个币，不记花费、不算调用次数（整轮结束那条照旧记总盘会花费）。
+        ``cost``：这条记录记的总盘会花费（整轮传本轮的，临时会传 0）；各标的花费在各自记录里。"""
         tradable = sum(1 for s in card.symbols if s.bias is not Bias.NO_TRADE)
         self._write(
             card_id=card.card_id,
@@ -3070,9 +3172,7 @@ class BattleCardCommander:
                 "total_cost_usd": card.llm_cost_usd,
             },
             latency_ms=(time.monotonic() - started) * 1000,
-            cost_usd=0.0
-            if partial
-            else self._pick_cost,  # 只记总盘会这一份；各标的的花费在各自的记录里
+            cost_usd=0.0 if partial else cost,
         )
         if partial:
             return

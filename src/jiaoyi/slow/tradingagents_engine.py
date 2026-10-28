@@ -19,6 +19,8 @@ TradingAgents：Apache-2.0，v0.7.0，提交 e8f5503，钉在 pyproject 的 slow
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import json
 import logging
 import math
@@ -276,6 +278,14 @@ def binance_symbol(ticker: str) -> str:
     t = ticker.upper().removesuffix("-USD").removesuffix("USDT")
     return f"{t}USDT"
 
+
+MEETING_THREADS = 64
+"""单币会议专用线程池的上限（线程用到才建）。会议同时开几场由指挥官的信号量管（最多 32）；
+超时取消的会议线程要等它在途的那个请求结束才退出，期间仍占一个线程，所以留到 2 倍，不让
+它们挤掉新开的会。不用 ``asyncio.to_thread`` 的默认线程池：它只有 min(32, CPU 数 + 4) 个线程
+（10 核 Mac 上 14 个），并发调到 16 时多出来的会议排在池里干等、照样计超时，还占满别处的
+``to_thread``。"""
+_MEETING_POOL = ThreadPoolExecutor(max_workers=MEETING_THREADS, thread_name_prefix="meeting")
 
 # ---------------------------------------------------------------- 币安数据源
 _KL = "https://fapi.binance.com/fapi/v1/klines"
@@ -2742,7 +2752,7 @@ class TradingAgentsEngine:
 
     async def analyze(self, entry: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
         self._snapshot_liquidations([entry.symbol])
-        return await asyncio.to_thread(self._analyze_sync, entry, regime, pick_reason)
+        return await self._in_meeting_thread(self._analyze_sync, entry, regime, pick_reason)
 
     async def analyze_with_context(
         self,
@@ -2753,7 +2763,15 @@ class TradingAgentsEngine:
         brief_text: str,
     ) -> Analysis:
         self._snapshot_liquidations([entry.symbol])
-        return await asyncio.to_thread(self._analyze_sync, entry, regime, pick_reason, brief_text)
+        return await self._in_meeting_thread(
+            self._analyze_sync, entry, regime, pick_reason, brief_text
+        )
+
+    async def _in_meeting_thread(self, fn: Callable[..., Analysis], *args: Any) -> Analysis:
+        # 和 asyncio.to_thread 一样把 contextvars 带进工作线程（总盘会审计等靠它）
+        ctx = contextvars.copy_context()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_MEETING_POOL, functools.partial(ctx.run, fn, *args))
 
     def _setups(self) -> dict[str, dict[str, str]]:
         setups: dict[str, dict[str, str]] = self.__dict__.setdefault("_meeting_setups", {})
