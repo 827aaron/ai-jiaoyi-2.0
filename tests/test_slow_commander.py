@@ -1105,3 +1105,79 @@ async def test_commander_refresh_extends_event_merged_while_picking(
     assert bb is not None and bb.issued_at == XRP_EVENT
     expected = "2026-10-28T06:03:24+00:00" if on else "2026-10-28T04:07:17+00:00"
     assert bb.expires_at == datetime.fromisoformat(expected)
+
+
+class _WithOutlook(FakeEngine):
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+        from jiaoyi.contracts import CardOutlook
+
+        res = await super().analyze(e, regime, pick_reason)
+        cs = res.card_symbol.model_copy(update={"outlook": CardOutlook(market_dir="flat")})
+        return dataclasses.replace(res, card_symbol=cs)
+
+
+async def _xrp_event_card(
+    tmp_path: Path, eng: FakeEngine
+) -> tuple[BattleCardCommander, list[datetime], dict[str, object]]:
+    from jiaoyi.slow.commander import EventRules
+
+    kw: dict[str, object] = {
+        "ttl": timedelta(minutes=140),
+        "symbol_min_interval": timedelta(minutes=115),
+        "events": EventRules(enabled=True, triggers=frozenset({"key_level_break"})),
+        "reuse_extend_expiry": True,
+        "card_path": tmp_path / "battle_card.json",
+    }
+    c, _, clock = make(tmp_path, eng, R1, **kw)
+    p = pool(R1, entry("XRPUSDT"), entry("LINKUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = XRP_EVENT
+    assert await c.refresh_symbol(p, "XRPUSDT", "key_level_break") is not None
+    eng.picks = ["LINKUSDT"]  # XRP is carried over unpicked
+    return c, clock, kw
+
+
+async def _second_round(c: BattleCardCommander) -> CardSymbol:
+    card = await c.refresh(pool(R2, entry("XRPUSDT"), entry("LINKUSDT")), "scheduled")
+    assert card.regime_direction == "中性"
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None and xrp.issued_at == XRP_EVENT
+    return xrp
+
+
+@pytest.mark.parametrize("drop_view_id", [False, True])
+async def test_commander_refresh_after_restart_keeps_expiry_of_unknown_direction(
+    tmp_path: Path, drop_view_id: bool
+) -> None:
+    """After a restart the view history is empty: an entry whose market view is unknown, or that
+    names none (a card saved before entries carried one), keeps its expiry."""
+    eng = FakeEngine(["XRPUSDT", "LINKUSDT"])
+    _c, _clock, kw = await _xrp_event_card(tmp_path, eng)
+    if drop_view_id:
+        path = tmp_path / "battle_card.json"
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        for s in saved["card"]["symbols"]:
+            s["source_market_view_id"] = None
+        path.write_text(json.dumps(saved), encoding="utf-8")
+    c2, _, _ = make(tmp_path, eng, R2, **kw)
+    restored = c2.current(R2)
+    xrp_before = restored.for_symbol("XRPUSDT") if restored is not None else None
+    assert xrp_before is not None
+    assert (xrp_before.source_market_view_id is None) is drop_view_id
+    xrp = await _second_round(c2)
+    assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
+
+
+@pytest.mark.parametrize("outlook", [False, True])
+async def test_commander_refresh_reads_direction_from_outlook_when_history_is_empty(
+    tmp_path: Path, outlook: bool
+) -> None:
+    """The battle card file drops outlook, so this fallback only serves a process whose view
+    history no longer holds the entry's view; simulated by emptying it."""
+    eng = _WithOutlook(["XRPUSDT", "LINKUSDT"]) if outlook else FakeEngine(["XRPUSDT", "LINKUSDT"])
+    c, clock, _kw = await _xrp_event_card(tmp_path, eng)
+    c._view_dirs.clear()
+    clock[0] = R2
+    xrp = await _second_round(c)
+    expected = "2026-10-28T06:03:24+00:00" if outlook else "2026-10-28T04:07:17+00:00"
+    assert xrp.expires_at == datetime.fromisoformat(expected)
