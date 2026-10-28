@@ -1168,6 +1168,17 @@ class AppConfig(Contract):
         "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
         "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
     )
+    protection_unknown_submit_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=10.0,
+        description="Demo 托管保护：条件单提交结果未知（超时、5xx、回执解析不了）时，当场按原 CID "
+        "只读重查最多这么多秒，查到就当已挂上、接着挂下一条腿；绝不重发、不换新 CID。"
+        "等待期间这个币的平仓和整个托管保护轮询都暂停。仍查不到时，若有已确认的保命单或止损，"
+        "这笔提交未知也按未托管宽限保留仓位、每轮只查原 CID，宽限用完照旧平仓；"
+        "需要 protection_prearm_grace_s > 0 才会在之后每轮重查原单。"
+        "0 = 提交未知立即平仓（原行为）。改后重启生效。",
+    )
     position_mode_cache_s: float = Field(
         default=0.0,
         ge=0.0,
@@ -1176,6 +1187,16 @@ class AppConfig(Contract):
         "这个查询占 30 权重，本地限流每秒只有 20，托管保护和冻结盈利价证据每轮都要查好几次。"
         "有持仓或挂单时币安不允许切换模式；开新仓前的检查、任何 -4061 或非单向持仓都会重新查。"
         "改后重启生效。",
+    )
+    protection_leg_order: Literal["lifeboat_first", "stop_first"] = Field(
+        default="lifeboat_first",
+        description="Demo 托管保护：新仓的三条腿按什么顺序挂。"
+        "lifeboat_first = 保命单 → 止损 → 止盈（原行为）；stop_first = 止损 → 止盈 → 保命单："
+        "交易所托管的止损已经能保护仓位，保命单只是更宽的后备。"
+        "stop_first 下止损确认后保命单挂失败（被拒、提交结果未知）不立即平仓："
+        "在未托管宽限（protection_prearm_grace_s）内告警、下一轮重试"
+        "（被拒的换新单号重挂，未知的只查原单号），宽限用完仍没挂上照旧平仓；"
+        "止损、止盈挂失败照旧立即平仓。只影响之后新挂的一代，旧接口的仓不变。改后重启生效。",
     )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",

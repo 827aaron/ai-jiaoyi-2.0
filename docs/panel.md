@@ -196,6 +196,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
   现在有：`daily_cost_limit_usd`（日 AI 费用）、`max_cards_per_round`、`event_symbol_gap_min`、`event_max_per_day`、`entry_max_card_age_min`、`default_category_cap`、
   `min_range_24h_pct` / `max_range_24h_pct` / `major_top_n`、`protection_stale_s` / `protection_readback_grace_s` / `protection_prearm_grace_s`、`regime_flip_min_gap_min` /
   `regime_flip_check_min`，以及只读的 `reconciler_executor_stop_retry_rounds`（0 显示「已关闭（只查不重发）」）。同币临时会间隔的开关写明「不限（仍隔 5 分钟）」；`regime_flip_check_min` 关了，其余 `regime_flip_*` 行写「定时检查已关闭，用不上」；日上限关了，「花到 80% 时」「放慢成多久开一次」两行写「日上限已关闭，用不上」，档位卡的费用条满格写「不限」。
+  「执行 → 托管保护」里只有 `protection_leg_order`（挂单顺序，下拉选 `lifeboat_first` 保命单 → 止损 → 止盈 = 原行为 / `stop_first` 止损 → 止盈 → 保命单）能在网页上改，改后重启；其余 `protection_*` 只读。`stop_first` 下交易所止损确认后就算有最低保护：之后只差保命单（被拒、提交结果未知）的同步失败交给 `protection_prearm_grace_s`，宽限内告警（`lifeboat_missing` 类）、下一轮重试——被拒的换新一代、新单号重挂，未知的只按原单号查——宽限用完仍没挂上照旧平仓；止损或止盈本身挂失败照旧立即平仓。开仓等成交那一步看到「已确认止损、还没保命单」也不平。旧接口（非托管）的仓不受影响。
   硬上限（`config/risk.toml`、`RiskConfig`）一项都没有开关，测试守着；超时、调度间隔、打分满分线、并发数这类 0 没有意义的项也不在表里。
 - 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
   持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）

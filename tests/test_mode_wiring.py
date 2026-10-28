@@ -170,6 +170,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     (adapter, *_), _, _ = _build(tmp_path, RunMode.PAPER)
     assert adapter._protection.readback_grace_s == 0  # 不写 = 原行为
     assert adapter._protection.prearm_grace_s == 0
+    assert adapter._protection.unknown_submit_grace_s == 0
     assert adapter._protection.stop_working_type == "CONTRACT_PRICE"
     assert adapter._protection.take_profit_working_type == "CONTRACT_PRICE"
     # 移动止损防插针默认开着（不是 0）
@@ -177,26 +178,31 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._protection.trailing_stop_mark_buffer_bps == 5
     assert adapter._protection.trailing_min_step_bps == 5
     assert adapter._protection.trailing_book_critical_after_s == 300
+    assert adapter._protection.leg_order == "lifeboat_first"
     app_cfg = _cfg(
         tmp_path,
         RunMode.PAPER,
         protection_readback_grace_s=2.5,
         protection_prearm_grace_s=90,
+        protection_unknown_submit_grace_s=4,
         protection_stop_working_type="MARK_PRICE",
         protection_trailing_book_mark_max_dev_bps=50,
         protection_trailing_stop_mark_buffer_bps=8,
         protection_trailing_min_step_bps=0,
         protection_trailing_book_critical_after_s=0,
+        protection_leg_order="stop_first",
     )
     (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
     assert adapter._protection.readback_grace_s == 2.5
     assert adapter._protection.prearm_grace_s == 90
+    assert adapter._protection.unknown_submit_grace_s == 4
     assert adapter._protection.stop_working_type == "MARK_PRICE"
     assert adapter._protection.take_profit_working_type == "CONTRACT_PRICE"
     assert adapter._protection.trailing_book_mark_max_dev_bps == 50
     assert adapter._protection.trailing_stop_mark_buffer_bps == 8
     assert adapter._protection.trailing_min_step_bps == 0
     assert adapter._protection.trailing_book_critical_after_s == 0
+    assert adapter._protection.leg_order == "stop_first"
 
 
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:

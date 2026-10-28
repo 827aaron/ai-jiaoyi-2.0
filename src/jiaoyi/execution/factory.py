@@ -9,7 +9,7 @@ from jiaoyi.contracts import RiskConfig, Role, RunMode
 from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.account_check import verify_same_account
-from jiaoyi.execution.brackets import BracketManager
+from jiaoyi.execution.brackets import BracketManager, LegOrder
 from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
@@ -94,12 +94,14 @@ def build_execution(
     frozen_peak_exit_after_s: int = 3600,
     protection_readback_grace_s: float = 0.0,
     protection_prearm_grace_s: float = 0.0,
+    protection_unknown_submit_grace_s: float = 0.0,
     protection_stop_working_type: WorkingType = "CONTRACT_PRICE",
     protection_take_profit_working_type: WorkingType = "CONTRACT_PRICE",
     protection_trailing_book_mark_max_dev_bps: float = 30.0,
     protection_trailing_stop_mark_buffer_bps: float = 5.0,
     protection_trailing_min_step_bps: float = 5.0,
     protection_trailing_book_critical_after_s: float = 300.0,
+    protection_leg_order: LegOrder = "lifeboat_first",
     position_mode_cache_s: float = 0.0,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
@@ -153,12 +155,14 @@ def build_execution(
             connector_name=CONNECTOR_BY_MODE[mode],
             readback_grace_s=protection_readback_grace_s,
             prearm_grace_s=protection_prearm_grace_s,
+            unknown_submit_grace_s=protection_unknown_submit_grace_s,
             stop_working_type=protection_stop_working_type,
             take_profit_working_type=protection_take_profit_working_type,
             trailing_book_mark_max_dev_bps=protection_trailing_book_mark_max_dev_bps,
             trailing_stop_mark_buffer_bps=protection_trailing_stop_mark_buffer_bps,
             trailing_min_step_bps=protection_trailing_min_step_bps,
             trailing_book_critical_after_s=protection_trailing_book_critical_after_s,
+            leg_order=protection_leg_order,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None

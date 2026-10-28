@@ -1675,6 +1675,7 @@ OFF_SWITCHES: dict[str, OffSwitch] = {
         ("app", "protection_stale_s", "关闭", "已关闭", 120),
         ("app", "protection_readback_grace_s", "关闭", "已关闭", 5),
         ("app", "protection_prearm_grace_s", "关闭", "已关闭", 30),
+        ("app", "protection_unknown_submit_grace_s", "关闭", "已关闭", 5),
         ("app", "reconciler_executor_stop_retry_rounds", "关闭", "已关闭（只查不重发）", 3),
         ("fast_loop", "regime_flip_min_gap_min", "不限", "不限", 60),
         ("fast_loop", "regime_flip_check_min", "关闭", "已关闭", 5),

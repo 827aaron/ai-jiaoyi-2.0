@@ -23,10 +23,12 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # reconciler_executor_stop_retry_rounds = 0  # 对账员停执行器（只停不平）结果不明后，再过几轮仍没终止就再发一次停止；0 = 永不重发（默认）
 # protection_readback_grace_s = 0  # Demo 托管保护：刚提交、交易所已回执接受的条件单，回执后几秒内查不到只重读不报错（不重发）；0 = 不等（默认，原行为），最多 30，改后重启
 # protection_prearm_grace_s = 0    # Demo 托管保护：新仓还没完整托管时，同步失败（只限读延迟 / 网络一时失败，且已有确认的保命单或止损）最多连续容忍几秒再平仓，宽限内照样告警、下一轮重试；0 = 不容忍（默认，原行为），最多 600，改后重启
+# protection_unknown_submit_grace_s = 0  # Demo 托管保护：条件单提交结果未知（超时 / 5xx）时，当场按原单号只查不重发最多几秒，查到就接着挂；等待期间这个币的平仓和整个托管保护轮询都暂停；仍查不到且已有确认的保命单或止损时，交给上一行的未托管宽限每轮再查（需要 protection_prearm_grace_s > 0 才会在之后每轮重查原单）；0 = 立即平仓（默认，原行为），最多 10，改后重启
 # position_mode_cache_s = 0        # 持仓模式（单向 / 双向）查一次后几秒内不再查；0 = 每次都查（原行为）。这个查询占 30 权重，本地限流每秒 20；开新仓前、-4061、非单向持仓都会重查。Demo 建议 300。改后重启生效
 # card_score_every_min = 60       # 面板每隔几分钟补算作战卡方向记分（发布时刻起算、扣掉同期币池，写 data/card_score/，只读公开 K 线）；0 = 不算，最多 1440；只有面板用，不用重启主循环，面板这一轮等完后生效
 # card_score_window_days = 30     # 方向记分汇总最近几天出的卡；0 = 全部
 #   回滚到没有方向记分的旧版本前，先删掉 card_score_every_min / card_score_window_days 这两行：旧版配置不认识的键（extra=forbid）会拒绝启动
+# protection_leg_order = "lifeboat_first"  # Demo 托管保护：新仓三条腿的挂单顺序：lifeboat_first = 保命单 → 止损 → 止盈（默认，原行为）/ stop_first = 止损 → 止盈 → 保命单（交易所止损已能保护仓位，保命单只是更宽的后备）；stop_first 下止损确认后保命单挂失败不立即平仓，在 protection_prearm_grace_s 内告警并重试（被拒换新单号重挂，结果未知只查原单号），宽限用完照旧平；止损挂失败照旧立即平；网页「设置 → 执行 → 托管保护」也能改；改后重启
 # protection_stop_working_type = "CONTRACT_PRICE"         # Demo 托管保护：止损（含移动止损）按什么价触发：CONTRACT_PRICE = 最新成交价（默认，原行为）/ MARK_PRICE = 标记价（不被 Demo 瞬间插针扫掉，触发后仍按当时盘口市价成交）；只影响之后新挂的单，已挂的不动；保命单固定标记价；改后重启
 # protection_take_profit_working_type = "CONTRACT_PRICE"  # Demo 托管保护：止盈按什么价触发，取值同上；默认 CONTRACT_PRICE（原行为）；只影响之后新挂的单；改后重启
 # protection_trailing_book_mark_max_dev_bps = 30   # Demo 移动止损：算峰值用的盘口价往抬高峰值的方向偏离标记价（多仓买一高于 / 空仓卖一低于）超过几基点就当插针，这一轮不更新峰值 / 不激活；默认 30；0 = 不比对（不建议）；改后重启

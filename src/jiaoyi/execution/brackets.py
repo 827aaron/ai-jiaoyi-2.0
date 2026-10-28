@@ -98,10 +98,12 @@ class AnchorBookSpike(ExchangeError):
 class ProtectionIncomplete(ExchangeError):
     """状态未知或保护不完整；调用方保留已确认保护并报告，不应擅自重复提交。"""
 
-    def __init__(self, message: str, *, read_lag: bool = False) -> None:
+    def __init__(self, message: str, *, read_lag: bool = False, backup_only: bool = False) -> None:
         super().__init__(message)
         self.read_lag = read_lag
         """已提交且回执已接受的条件单暂时查不到（可能是交易所读延迟），不是参数或状态不符。"""
+        self.backup_only = backup_only
+        """``stop_first`` 下只差保命单（被拒或提交未知），已确认止损在挂；可交给未托管宽限。"""
 
 
 class _PositionChanged(ProtectionIncomplete):
@@ -148,6 +150,11 @@ _CHILD_TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTE
 _ALGO_CLOSED = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 _TRIGGERED = {"TRIGGERING", "TRIGGERED", "FINISHED"}
 _READBACK_POLL_S = 0.5  # 回读宽限内的重读间隔；总等待由 readback_grace_s 封顶。
+LegOrder = Literal["lifeboat_first", "stop_first"]
+_LEG_ORDER: dict[LegOrder, tuple[str, ...]] = {
+    "lifeboat_first": ("lifeboat", "stop_loss", "take_profit"),
+    "stop_first": ("stop_loss", "take_profit", "lifeboat"),
+}
 
 
 def _trigger_failed(leg: ProtectiveLeg) -> bool:
@@ -224,16 +231,21 @@ class BracketManager:
         readback_grace_s: float = 0.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         prearm_grace_s: float = 0.0,
+        unknown_submit_grace_s: float = 0.0,
         stop_working_type: WorkingType = "CONTRACT_PRICE",
         take_profit_working_type: WorkingType = "CONTRACT_PRICE",
         trailing_book_mark_max_dev_bps: float = 30.0,
         trailing_stop_mark_buffer_bps: float = 5.0,
         trailing_min_step_bps: float = 5.0,
         trailing_book_critical_after_s: float = 300.0,
+        leg_order: LegOrder = "lifeboat_first",
     ) -> None:
         """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
 
         ``prearm_grace_s``：从未完整托管时，可重试的同步失败最多连续容忍几秒；0 = 不容忍。
+
+        ``unknown_submit_grace_s``：条件单提交结果未知时，锁内按原 CID 只读重查最多几秒（不重发），
+        查到就当回执接着挂下一条腿；仍查不到的提交未知也交给 ``prearm_grace_s`` 宽限。0 = 原行为。
 
         ``stop_working_type`` / ``take_profit_working_type``：之后新建的止损（含移动止损新一代）/
         止盈腿用哪个触发价格源，建腿时写进账本；已有的腿一直按自己记下的核对，保命单固定标记价。
@@ -248,17 +260,24 @@ class BracketManager:
 
         ``trailing_book_critical_after_s``：已激活的移动止损连续这么多秒没有有效盘口，告警升级；
         0 = 不升级。
+
+        ``leg_order``：一代里几条腿的提交顺序。``stop_first`` 时已确认的止损就是最低保护，之后只差
+        保命单的失败交给 ``prearm_grace``（被拒的下一轮换新代重挂）；止损、止盈失败照旧。
         """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
         self.readback_grace_s, self._sleep = readback_grace_s, sleep
         self.prearm_grace_s = prearm_grace_s
+        self.unknown_submit_grace_s = unknown_submit_grace_s
         self.stop_working_type = stop_working_type
         self.take_profit_working_type = take_profit_working_type
         self.trailing_book_mark_max_dev_bps = trailing_book_mark_max_dev_bps
         self.trailing_stop_mark_buffer_bps = trailing_stop_mark_buffer_bps
         self.trailing_min_step_bps = trailing_min_step_bps
         self.trailing_book_critical_after_s = trailing_book_critical_after_s
+        if leg_order not in _LEG_ORDER:
+            raise ValueError(f"未知的保护腿顺序：{leg_order}")
+        self.leg_order: LegOrder = leg_order
         self.notify_stop_clamped: StopNotify | None = None
         """移动止损目标已越过标记价（被夹到可挂的最紧价，或本轮没换）时调用；执行器接上告警。"""
         self.notify_trigger_rejected: TriggerNotify | None = None
@@ -277,6 +296,12 @@ class BracketManager:
     def retains_confirmed_stop(self, pid: str) -> bool:
         """最后回读仍明确 NEW 的普通止损；不表示网络断开后仍能证明当前实时状态。"""
         return any(_live(leg) and _role(leg) == "stop_loss" for leg in self._current(pid)[1].legs)
+
+    def _backup_gap(self, state: ServerProtection) -> bool:
+        """``stop_first`` 且最后回读有明确 NEW 的止损：缺的保命单只是后备，不单独构成平仓理由。"""
+        return self.leg_order == "stop_first" and any(
+            _live(leg) and _role(leg) == "stop_loss" for leg in state.legs
+        )
 
     def set_tightened_stop(
         self, pid: str, price: float, reason: str, card_key: str | None = None
@@ -388,7 +413,7 @@ class BracketManager:
         if self.prearm_grace_s <= 0:
             return None
         if isinstance(error, ProtectionIncomplete):
-            if not error.read_lag:
+            if not (error.read_lag or error.backup_only):
                 return None
         elif not (isinstance(error, ExchangeError) and error.transient):
             return None
@@ -398,12 +423,16 @@ class BracketManager:
             return None
         if state.ever_armed or state.stage in {"exiting", "cleanup", "done"}:
             return None
+        backup = self._backup_gap(state)
         if not any(_live(leg) and _role(leg) in {"lifeboat", "stop_loss"} for leg in state.legs):
             return None
+        unknown_ok = self.unknown_submit_grace_s > 0
         if not all(
             leg.state in {"planned", "superseded"}
+            or (unknown_ok and leg.state == "submit_pending")
             or _live(leg)
             or (leg.state == "cancelled" and _settled(leg) and not _triggered(leg))
+            or (backup and _role(leg) == "lifeboat" and leg.state in {"submit_pending", "rejected"})
             for leg in state.legs
         ):
             return None
@@ -656,10 +685,20 @@ class BracketManager:
             order = await read(tracked.record.symbol, client_order_id=old.client_order_id)
             if order is None:
                 order = await self._await_readback(pid, old.client_order_id)
+            if (
+                order is None
+                and old.purpose == "lifeboat"
+                and old.state == "submit_pending"
+                and self._backup_gap(self._current(pid)[1])
+            ):
+                raise ProtectionIncomplete(
+                    "保命单提交结果仍未知，只查原CID；已确认止损在挂", backup_only=True
+                )
             if order is None:
                 raise ProtectionIncomplete(
                     "已提交条件单暂时不可查，不能再次创建或当作已撤",
-                    read_lag=old.state == "confirmed" and old.acked_at is not None,
+                    read_lag=(old.state == "confirmed" and old.acked_at is not None)
+                    or (old.state == "submit_pending" and self.unknown_submit_grace_s > 0),
                 )
             leg = self._leg(pid, old.client_order_id)
             self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
@@ -694,6 +733,32 @@ class BracketManager:
                 order = await self.exchange.get_bracket(tracked.record.symbol, algo_id=leg.algo_id)
             if order is not None:
                 return order
+        return None
+
+    async def _await_unknown_submit(
+        self, pid: str, cid: str, unknown: BracketSubmissionUnknown
+    ) -> ExchangeBracket | None:
+        """提交结果未知：先用交易所层当场查到的，再按原 CID 只读重查到宽限用完；从不重发。"""
+        grace = self.unknown_submit_grace_s
+        if grace <= 0:
+            return None
+        if unknown.observed is not None:
+            return unknown.observed
+        tracked, _ = self._current(pid)
+        leg = self._leg(pid, cid)
+        read = (
+            self.exchange.get_lifeboat if leg.purpose == "lifeboat" else self.exchange.get_bracket
+        )
+        deadline = self.clock() + timedelta(seconds=grace)
+        for _ in range(math.ceil(grace / _READBACK_POLL_S)):  # 时钟异常也不会无限等。
+            remaining = (deadline - self.clock()).total_seconds()
+            if remaining <= 0:
+                return None
+            await self._sleep(min(_READBACK_POLL_S, remaining))
+            with contextlib.suppress(ExchangeError):
+                order = await read(tracked.record.symbol, client_order_id=cid)
+                if order is not None:
+                    return order
         return None
 
     async def _cancel(self, pid: str, cid: str) -> None:
@@ -812,6 +877,7 @@ class BracketManager:
             if not math.isclose(spec.quantity, evidence.quantity, rel_tol=1e-10):
                 raise ProtectionIncomplete("实际仓量无法完整量化，不能宣称无残量")
             specs[kind] = spec
+        specs = {kind: specs[kind] for kind in _LEG_ORDER[self.leg_order]}
         await self._checkpoint(pid, evidence)
         _, state = self._current(pid)
         matching = {
@@ -839,6 +905,15 @@ class BracketManager:
         for leg in state.legs:
             if leg.state == "planned":
                 self._save_leg(pid, leg.model_copy(update={"state": "superseded"}))
+            elif (
+                leg.state == "rejected"
+                and _role(leg) == "lifeboat"
+                and not state.ever_armed
+                and self._backup_gap(state)
+            ):
+                # 明确被拒、交易所上没有这张单：换新代、新 CID 重挂。只在从没完整托管时
+                # （未托管宽限内）重试；曾完整托管后旧代保护还在，照旧停在这里，不每轮重发。
+                continue
             elif leg.state in {"submit_pending", "cancel_pending", "rejected"}:
                 raise ProtectionIncomplete("已有提交或撤销未确认，不能创建新代")
             elif not _settled(leg) and not _live(leg):
@@ -938,11 +1013,24 @@ class BracketManager:
                             last_error="immediate_trigger_rejected",
                         )
                         return "exit"  # 交易所明确已越触发价，复用退出核验；旧保护仍保留。
+                    if leg.purpose == "lifeboat" and self._backup_gap(self._current(pid)[1]):
+                        raise ProtectionIncomplete(
+                            "保命单被交易所明确拒绝；已确认止损在挂，下一轮换新CID重挂",
+                            backup_only=True,
+                        ) from rejected
                     raise ProtectionIncomplete(
                         "交易所明确拒绝普通保护，保留已有保护并退出"
                     ) from None
-                except BracketSubmissionUnknown:
-                    raise ProtectionIncomplete("普通保护提交结果未知，只查原CID") from None
+                except BracketSubmissionUnknown as unknown:
+                    found = await self._await_unknown_submit(pid, leg.client_order_id, unknown)
+                    if found is None:
+                        raise ProtectionIncomplete(
+                            "普通保护提交结果未知，只查原CID",
+                            read_lag=self.unknown_submit_grace_s > 0,
+                            backup_only=leg.purpose == "lifeboat"
+                            and self._backup_gap(self._current(pid)[1]),
+                        ) from (unknown.__cause__ or unknown)
+                    order = found
                 acked = self._leg(pid, leg.client_order_id)
                 self._accept(pid, acked.model_copy(update={"acked_at": self.clock()}), order)
                 await self._checkpoint(pid, evidence)
