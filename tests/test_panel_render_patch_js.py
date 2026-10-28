@@ -95,6 +95,22 @@ CASES = r"""
   assert.notEqual(from.childNodes[0], d);
   assert.equal(from.childNodes[0].hasAttribute('open'), false);
 }
+// 历史页「没有平仓」↔ 资金曲线格子：整个换，格子 id 不补到别的块上，画布格子换回空块也不残留
+{
+  const empty = E('div', { class: 'empty' }, E('b', {}, '这段时间没有平仓'));
+  const from = E('section', {}, empty);
+  morph(from, E('section', {}, E('div', { class: 'chart sm', id: 'hchart-host' })));
+  const host = from.childNodes[0];
+  assert.notEqual(host, empty);
+  assert.equal(host.id, 'hchart-host');
+  assert.equal(host.textContent, '');
+  host.appendChild(E('div', { class: 'curve' }));
+  morph(from, E('section', {}, E('div', { class: 'empty' }, E('b', {}, '这段时间没有平仓'))));
+  assert.notEqual(from.childNodes[0], host);
+  assert.equal(from.childNodes[0].id, '');
+  assert.equal(from.textContent, '这段时间没有平仓');
+  assert.equal(from.childNodes[0].childNodes.length, 1);
+}
 // setHtml：同一串标记、页面没被别处整块换掉 → 不动；第一次 / 被别处写过 → 照写
 {
   let parses = 0;
@@ -160,5 +176,82 @@ def test_render_patches_in_place_and_formatters_are_cached() -> None:
     bars = source[source.index("function barsExtend(") : source.index("function entryMarkers(")]
     done = subprocess.run(
         [node, "-e", FAKE_DOM + fmt + patch + bars + CASES], capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+
+
+# loadKlines 从入口跑：图表、接口、样式都是记账的桩
+KLINE_STUBS = r"""
+const assert = require('node:assert/strict');
+let pageData = null, pageKey = '', hash = 'positions';
+const S = { tf: '1m' };
+const route = () => { const [page, arg] = hash.split('/'); return { page, arg }; };
+const dataId = (page) => page + ' /api/' + page;
+let log = [];
+const series = {
+  setData: (b) => log.push('setData ' + b.length), update: (b) => log.push('update ' + b.time),
+  setMarkers: () => {}, applyOptions: () => {},
+  removePriceLine: (l) => log.push('remove ' + l.title), createPriceLine: (o) => { log.push('create ' + o.title + ' ' + o.price); return o; },
+};
+const chart = { priceScale: () => ({ applyOptions() {} }) };
+const mountChart = () => {}, updateEdges = () => {}, fitView = () => {};
+let chartKey = '', priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0, entryIdx = null, lineDefs = [], lastBars = [], limitAt = '', lineSig = '', markSig = '', pxSig = '';
+const document = { documentElement: {} };
+const getComputedStyle = () => ({ getPropertyValue: (v) => v });
+const LightweightCharts = { LineStyle: { Solid: 0, Dashed: 1, Dotted: 2, LargeDashed: 3 } };
+const trailLines = () => null, entryBarIndex = () => null, pxDigits = () => 2, limitNote = () => '', entryMarkers = () => [], hm = String;
+let BARS = [];
+const fetch = async () => ({ ok: true, json: async () => BARS.map((b) => ({ ...b })) });
+const bar = (t, c = 1) => ({ time: t, open: 1, high: 2, low: 0.5, close: c });
+const pos = (id, sl) => ({ position_id: id, symbol: 'BTCUSDT', entry_price: 100, stop_loss_price: sl, take_profit_price: 110 });
+const take = () => { const l = log; log = []; return l; };
+"""
+
+KLINE_CASES = r"""
+(async () => {
+  // 选币页的拉数换页后才回来：pageData 是选币页的，没有 positions，不能抛错
+  pageData = { rows: [] }; pageKey = 'pool /api/pool';
+  await loadKlines(false);
+  pageData = { positions: [pos('p1', 90)] };
+  await loadKlines(false);
+  assert.deepEqual(take(), []);
+  pageKey = 'positions /api/positions';
+
+  BARS = [bar(60), bar(120), bar(180)];
+  await loadKlines(false);
+  assert.deepEqual(take(), ['setData 0', 'setData 3', 'create 止盈 110', 'create 开仓 100', 'create 固定止损计划 90']);
+  // 多出一根：补上一轮最后那根和新的一根；价位没变不重建线
+  BARS = [bar(60), bar(120), bar(180, 1.5), bar(240)];
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 180', 'update 240']);
+  BARS = [bar(60), bar(120), bar(180, 1.5), bar(240, 1.2)];
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 240']);
+  // 止损价变了：线全部重建
+  pageData = { positions: [pos('p1', 95)] };
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 240', 'remove 止盈', 'remove 开仓', 'remove 固定止损计划', 'create 止盈 110', 'create 开仓 100', 'create 固定止损计划 95']);
+  // 换周期：清空后整批重灌、线重建（价位一样也要重建）
+  S.tf = '5m';
+  await loadKlines(false);
+  assert.deepEqual(take(), ['setData 0', 'remove 止盈', 'remove 开仓', 'remove 固定止损计划', 'setData 4', 'create 止盈 110', 'create 开仓 100', 'create 固定止损计划 95']);
+  // 换一笔（价位一样）：同样清空重建
+  pageData = { positions: [pos('p1', 95), pos('p2', 95)] }; hash = 'positions/p2';
+  await loadKlines(false);
+  assert.deepEqual(take(), ['setData 0', 'remove 止盈', 'remove 开仓', 'remove 固定止损计划', 'setData 4', 'create 止盈 110', 'create 开仓 100', 'create 固定止损计划 95']);
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_load_klines_patches_tail_and_rebuilds_lines_only_on_change() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("JavaScript 回归需要 Node")
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    code = source[
+        source.index("async function loadKlines(") : source.index("function entryMarkers(")
+    ]
+    done = subprocess.run(
+        [node, "-e", KLINE_STUBS + code + KLINE_CASES], capture_output=True, text=True
     )
     assert done.returncode == 0, done.stderr[-2000:]

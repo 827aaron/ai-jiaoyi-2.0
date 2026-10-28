@@ -1581,7 +1581,8 @@ function mountChart() {
 
 async function loadKlines(force) {
   const { page, arg } = route();
-  if (page !== "positions" || !pageData || !pageData.positions.length) return;
+  // 别的页的拉数刚好在换到持仓页之后才回来：pageData 还是那一页的，没有 positions
+  if (page !== "positions" || !pageData || pageKey !== dataId("positions", arg) || !(pageData.positions || []).length) return;
   mountChart();
   if (!series) return;
   const p = pageData.positions.find((x) => x.position_id === arg) || pageData.positions[0];
@@ -3778,6 +3779,8 @@ function morph(from, to) {
     const o = a[i], n = b[i];
     if (!o) from.appendChild(n);
     else if (o.nodeType !== n.nodeType || o.nodeName !== n.nodeName) from.replaceChild(n, o);
+    // 图表格子和别的块互换（历史页「没有平仓」↔ 资金曲线）：整个换，不能把格子 id 补到别的块上
+    else if ((MORPH_KEEP.has(o.id) || MORPH_KEEP.has(n.id)) && o.id !== n.id) from.replaceChild(n, o);
     else if (o.nodeType !== 1) { if (o.nodeValue !== n.nodeValue) o.nodeValue = n.nodeValue; }
     // 输入框标记没变就整个留着（打到一半的字、焦点、光标都在）；变了照旧换新的
     else if (MORPH_FORM.has(o.nodeName)) { if (o.outerHTML !== n.outerHTML) from.replaceChild(n, o); }
