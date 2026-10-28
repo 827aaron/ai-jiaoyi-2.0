@@ -2395,6 +2395,7 @@ const PLAIN = {
   protection_readback_grace_s: "条件单回执后查不到，最多等几秒再算没挂上（0 = 不等）",
   position_mode_cache_s: "持仓模式查一次后几秒内不再查（0 = 每次都查）",
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
+  protection_unknown_submit_grace_s: "条件单提交结果未知时，按原单号只查不重发最多几秒（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_trailing_book_mark_max_dev_bps: "移动止损：买一高过（空仓：卖一低过）标记价几基点当插针，不更新峰值（0 = 不比对，不建议）",

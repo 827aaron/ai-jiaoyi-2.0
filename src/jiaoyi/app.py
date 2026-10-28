@@ -460,6 +460,7 @@ def _build_execution(
             frozen_peak_exit_after_s=app_cfg.fast_loop.frozen_peak_exit_after_s,
             protection_readback_grace_s=app_cfg.protection_readback_grace_s,
             protection_prearm_grace_s=app_cfg.protection_prearm_grace_s,
+            protection_unknown_submit_grace_s=app_cfg.protection_unknown_submit_grace_s,
             protection_stop_working_type=app_cfg.protection_stop_working_type,
             protection_take_profit_working_type=app_cfg.protection_take_profit_working_type,
             protection_trailing_book_mark_max_dev_bps=(
