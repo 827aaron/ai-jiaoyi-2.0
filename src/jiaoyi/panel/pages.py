@@ -708,7 +708,7 @@ def _market_progress(m: MeetingSummary | None, now: datetime, tz: str) -> Progre
         return "wait"
     if m.status == "running":
         return "doing"
-    if m.status in ("failed", "stale"):
+    if m.status in ("failed", "interrupted", "stale"):
         return "err"
     end = m.finished_at or m.updated_at
     return "done" if end and local_day(end, tz) == local_day(now, tz) else "wait"

@@ -991,6 +991,11 @@ def test_meeting_process_read_tolerantly_and_served(tmp_path: Path) -> None:
     (folder / "ETHUSDT.json").write_text(json.dumps(done))
     (folder / "SOLUSDT.json").write_text(json.dumps(live | {"updated_at": t(30)}))
     (folder / "BAD.json").write_text("{broken")
+    cut = live | {"status": "interrupted", "error": "主程序重启，会议中断"}
+    (folder / "XRPUSDT.json").write_text(json.dumps(cut))
+    x = read_meeting(tmp_path, "XRPUSDT", NOW)
+    assert x and x.status == "interrupted" and x.error == "主程序重启，会议中断"
+    (folder / "XRPUSDT.json").unlink()
 
     m = read_meeting(tmp_path, "BTCUSDT", NOW)
     assert m and m.status == "running" and m.step_count == 2

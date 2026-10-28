@@ -11,12 +11,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+PROCESS_ID = uuid.uuid4().hex
+"""本进程的标识，写进每份实况；启动时用它认出「上一个进程留下的、还标着正在开」的会议。"""
+INTERRUPTED_REASON = "主程序重启，会议中断"
+
+_OPEN: set[MeetingLive] = set()
+_OPEN_LOCK = threading.Lock()
 
 # 图状态里每种发言的位置，按会议进行的先后排：分析师报告 → 多空辩论 → 研究经理 → 交易员 →
 # 风控辩论 → 组合经理。同一份状态里一次出现好几步时也按这个顺序记。
@@ -58,6 +67,7 @@ class MeetingLive:
             "symbol": symbol,
             "meeting_id": f"{symbol}-{started:%Y%m%dT%H%M%S}",
             "status": "running",
+            "process": PROCESS_ID,
             "started_at": started.isoformat(),
             "updated_at": started.isoformat(),
             "finished_at": None,
@@ -72,6 +82,8 @@ class MeetingLive:
             "retries": 0,
             "retry_reasons": [],
         }
+        with _OPEN_LOCK:
+            _OPEN.add(self)
         self._flush()
 
     @property
@@ -207,8 +219,17 @@ class MeetingLive:
         self._doc.update(status="failed", error=error, cost_usd=cost_usd, cost_estimated=estimated)
         self._close()
 
+    def interrupt(self, reason: str = INTERRUPTED_REASON) -> None:
+        """进程要退出了：标成中断。工作线程之后再写的任何东西都被忽略，不会把它改回「正在开」。"""
+        if self._closed:
+            return
+        self._doc.update(status="interrupted", error=reason)
+        self._close()
+
     def _close(self) -> None:
         self._closed = True
+        with _OPEN_LOCK:
+            _OPEN.discard(self)
         now = self._now().isoformat()
         self._doc["finished_at"] = self._doc["updated_at"] = now
         self._flush()
@@ -226,6 +247,48 @@ class MeetingLive:
         if not self._warned:
             self._warned = True
             logger.exception("会议实况写盘失败（%s），不影响开会", self._path)
+
+
+def interrupt_open(reason: str = INTERRUPTED_REASON) -> int:
+    """把本进程里所有还在开的会议标成中断（退出收尾时调；会议线程取消不掉，等不到它们自己收尾）。"""
+    with _OPEN_LOCK:
+        open_ = list(_OPEN)
+    for live in open_:
+        live.interrupt(reason)
+    return len(open_)
+
+
+def sweep_interrupted(
+    directory: Path,
+    *,
+    reason: str = INTERRUPTED_REASON,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> list[str]:
+    """启动时：目录里还标着正在开、却不是本进程写的实况，说明上一个进程死在会议中途，标成中断。
+
+    返回被改的文件名（不含扩展名）。读不出或格式不对的文件原样不动。
+    """
+    swept: list[str] = []
+    if not directory.is_dir():
+        return swept
+    for path in sorted(directory.glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(doc, dict)
+                or doc.get("status") != "running"
+                or doc.get("process") == PROCESS_ID
+            ):
+                continue
+            stamp = now().isoformat()
+            doc.update(status="interrupted", error=reason, finished_at=stamp, updated_at=stamp)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+            swept.append(path.stem)
+        except (OSError, ValueError):
+            logger.warning("清理中断的会议实况失败（%s）", path, exc_info=True)
+    return swept
 
 
 class _Tap:

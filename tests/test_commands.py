@@ -557,3 +557,76 @@ async def test_refresh_cards_reruns_whole_chain_and_receipt_has_result(
     assert res["status"] == "done" and res["detail"].startswith("已重新开会：选了")
     assert "上会" in res["detail"] and "花费" in res["detail"]
     assert (tmp_path / "symbol_pool.json").exists()
+
+
+async def test_shutdown_marks_running_meetings_interrupted(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.panel.meetings import read_meeting
+    from jiaoyi.slow.meeting_live import MeetingLive
+
+    r, _ = _restart_runner(tmp_path, now, lambda: None)
+    _idle_runner(r)
+    live = MeetingLive(tmp_path / "meeting_live", "HYPEUSDT", now=lambda: now)
+    await r.shutdown()
+    m = read_meeting(tmp_path, "HYPEUSDT", now)
+    assert m and m.status == "interrupted" and m.error == "主程序重启，会议中断"
+    live.step("analysts", "market", "之后线程还在写")
+    m = read_meeting(tmp_path, "HYPEUSDT", now)
+    assert m and m.status == "interrupted" and m.step_count == 0
+
+
+def _refresh_runner(tmp_path: Path, now: datetime) -> tuple[Runner, FakeCards]:
+    from jiaoyi.contracts import SymbolPool
+    from tests.conftest import load_example
+
+    pool = SymbolPool.model_validate(load_example("symbol_pool"))
+
+    class Screener:
+        async def screen(self, at: datetime) -> SymbolPool:
+            return pool
+
+    app = _app(tmp_path, now)
+    cards = FakeCards(h.card(now))
+    app.m = dataclasses.replace(app.m, cards=cards, screener=Screener())
+    return Runner(app), cards
+
+
+async def test_refresh_cards_queues_behind_running_event_meetings(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, cards = _refresh_runner(tmp_path, now)
+    r._event_running = {"ETHUSDT", "SOLUSDT"}
+    write_command(tmp_path, _cmd(now, "refresh_cards"))
+    await r.command_tick()
+    res = _result(tmp_path, "cmd-refresh_cards-0001")
+    assert res["status"] == "queued" and "2 场临时会" in res["detail"]
+    assert r._refreshing  # 已占住整轮：不再派新的临时会
+    await asyncio.sleep(0.7)
+    assert cards.refreshed == []  # 临时会还没开完，整轮不开始
+    r._event_running.clear()
+    await asyncio.wait_for(asyncio.gather(*r._tasks), timeout=5)
+    assert cards.refreshed == ["manual"] and not r._refreshing
+
+
+async def test_refresh_cards_queued_starts_after_event_timeout(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, cards = _refresh_runner(tmp_path, now)
+    cards.symbol_timeout_s = 0.6  # type: ignore[attr-defined]
+    r._event_running = {"ETHUSDT"}  # 一直不结束
+    write_command(tmp_path, _cmd(now, "refresh_cards"))
+    await r.command_tick()
+    await asyncio.wait_for(asyncio.gather(*r._tasks), timeout=5)
+    assert cards.refreshed == ["manual"]
+
+
+async def test_refresh_cards_rejected_while_a_round_is_running(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, cards = _refresh_runner(tmp_path, now)
+    r._refreshing = True
+    r._event_running = {"ETHUSDT"}
+    write_command(tmp_path, _cmd(now, "refresh_cards"))
+    await r.command_tick()
+    res = _result(tmp_path, "cmd-refresh_cards-0001")
+    assert res["status"] == "rejected" and res["detail"] == "军师团正在开会"
+    assert cards.refreshed == []

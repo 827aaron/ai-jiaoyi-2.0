@@ -136,6 +136,7 @@ from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.majors import MajorsSource
 from jiaoyi.slow.market_desk import MarketDesk, OpenRouterDeskModel
 from jiaoyi.slow.market_log import MarketLog
+from jiaoyi.slow.meeting_live import sweep_interrupted
 from jiaoyi.slow.news import NewsHub, NewsSource, default_sources
 from jiaoyi.slow.review import CardJournal
 from jiaoyi.slow.screener import CodeSymbolScreener, UserOverrides
@@ -889,6 +890,9 @@ class App:
         if self.started:
             return
         now = self.clock()
+        swept = sweep_interrupted(Path(self.app_cfg.data_dir) / "meeting_live")
+        if swept:
+            log.info("上个进程留下 %d 场没开完的会，已标成中断：%s", len(swept), "、".join(swept))
         auto_resumed = self._pause_for_pool_overrides()
         await self._run_startup_checks()
         try:

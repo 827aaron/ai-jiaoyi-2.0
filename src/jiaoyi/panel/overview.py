@@ -719,6 +719,8 @@ def _pending(sym: str, card: CardView, root: Path, now: datetime, tz: str) -> tu
         return "开会中", f"还在开会（{no}{name}），开完后结论进下一张卡"
     if m.status == "failed":
         return "开会失败", f"开会失败：{m.error or '没写原因'}；这张卡里它没有结论，不会开仓"
+    if m.status == "interrupted":
+        return "会中断", f"开会中断：{m.error or '没写原因'}；这张卡里它没有结论，不会开仓"
     if m.status == "stale":
         mins = MEETING_STALE_S // 60
         return "会中断", f"开会中断（超过 {mins} 分钟没更新）；这张卡里它没有结论，不会开仓"
