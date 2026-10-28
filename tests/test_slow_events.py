@@ -222,6 +222,61 @@ async def test_untradeable_sync_on_a_stale_card_queues_no_meeting(
     assert c.pop_event(t, pool(t, entry("AAUSDT"), entry("BBUSDT"))) is None
 
 
+async def test_untradeable_sync_uses_screener_judgement_on_partial_lot_rules(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, _ = make(tmp_path / "c", FakeEngine(["AAUSDT", "BBUSDT", "CCUSDT"]), now)
+    p = pool(now, entry("AAUSDT"), entry("BBUSDT"), entry("CCUSDT"))
+    await c.refresh(p, "scheduled")
+    gone = {"AAUSDT": "SETTLING", "BBUSDT": "无下单精度", "CCUSDT": "无下单精度"}
+
+    class Rules:
+        def unavailable(self, symbols: list[str]) -> dict[str, str]:
+            return {s: gone[s] for s in symbols if s in gone}
+
+    app = _app(tmp_path / "app", now)
+    app.m = dataclasses.replace(app.m, cards=c)
+    app.lot_rules = Rules()  # type: ignore[assignment]
+    app.sync_untradeable(now)
+    card = c.current(now)
+    assert card is not None
+    watch = {s.symbol for s in card.symbols if not s.allowed_signals}
+    assert watch == {"AAUSDT"}  # 2 / 3 lack lot rules: only the status-based one counts
+    gone["CCUSDT"] = "SETTLING"
+    app.sync_untradeable(now)
+    card = c.current(now)
+    assert card is not None
+    assert {s.symbol for s in card.symbols if not s.allowed_signals} == {
+        "AAUSDT",
+        "BBUSDT",
+        "CCUSDT",
+    }
+
+
+async def test_untradeable_sync_judges_partial_fetch_against_card_and_pool(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, _, _ = make(tmp_path / "c", FakeEngine(["AAUSDT", "BBUSDT"]), now)
+    await c.refresh(pool(now, entry("AAUSDT"), entry("BBUSDT")), "scheduled")
+
+    class Rules:
+        def unavailable(self, symbols: list[str]) -> dict[str, str]:
+            return {s: "无下单精度" for s in symbols if s in ("AAUSDT", "BBUSDT")}
+
+    app = _app(tmp_path / "app", now)
+    app.m = dataclasses.replace(app.m, cards=c)
+    app.lot_rules = Rules()  # type: ignore[assignment]
+    app.sync_untradeable(now)  # no pool yet: 2 / 2 card coins lack lot rules = partial fetch
+    card = c.current(now)
+    assert card is not None and all(s.allowed_signals for s in card.symbols)
+    others = [entry(f"{x}USDT") for x in ("CC", "DD", "EE", "FF")]
+    app.pool = pool(now, entry("AAUSDT"), entry("BBUSDT"), *others)
+    app.sync_untradeable(now)  # 2 / 6 with the pool: a real gap, both go watch-only
+    card = c.current(now)
+    assert card is not None
+    assert {s.symbol for s in card.symbols if not s.allowed_signals} == {"AAUSDT", "BBUSDT"}
+
+
 async def test_stale_check_off_by_default(tmp_path: Path, now: datetime) -> None:
     c, _, _ = make(tmp_path, FakeEngine(["AAUSDT"]), now, ttl=timedelta(hours=30), events=rules())
     await c.refresh(pool(now, entry("AAUSDT")), "scheduled")

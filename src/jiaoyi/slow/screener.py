@@ -27,6 +27,7 @@ from jiaoyi.contracts import (
     SymbolPool,
     SymbolPoolEntry,
 )
+from jiaoyi.contracts.symbol_pool import NO_VENUE_LOT
 from jiaoyi.core.pool_overrides import PoolOverrides
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.us_hours import us_session
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 SCREEN_EVERY = timedelta(hours=1)
 """主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
+VENUE_MAX_EXCLUDED_FRAC = 0.5
+"""More than this share of passing coins missing from the venue = a broken lot-rules fetch."""
 
 FALLBACK_MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
 """拿不到市值排名（没缓存、接口失败、major_top_n = 0）时的主流币名单。"""
@@ -119,6 +122,33 @@ class SymbolStats:
     bars: tuple[tuple[int, float, float, float, float], ...] = ()
     source_metadata: dict[str, Any] = field(default_factory=dict)
     """1 小时 K 线 (开盘毫秒, 开, 高, 低, 收)，最后一根是还没走完的小时；事后回填用。"""
+
+
+def trusted_venue_off(
+    off: Mapping[str, str] | None, judged: Iterable[str], label: str, where: str
+) -> dict[str, str]:
+    """The part of a venue's ``unavailable`` answer that is safe to act on; the screener and
+    the card's watch-only marking both go through here so they never disagree.
+
+    Fails open: ``off`` None (lot rules never loaded or stale) drops nothing. When more than
+    ``VENUE_MAX_EXCLUDED_FRAC`` of ``judged`` lack lot rules, the lot-rules part is taken for a
+    partial exchangeInfo and dropped, while status-based entries (SETTLING etc., read from the
+    same successful fetch) are kept. Both cases log a warning."""
+    if off is None:
+        logger.warning("%s下单精度没拉到或已过期，%s不按交易所可交易名单剔币", label, where)
+        return {}
+    seen = list(dict.fromkeys(judged))
+    no_lot = [x for x in seen if off.get(x) == NO_VENUE_LOT]
+    if seen and len(no_lot) > VENUE_MAX_EXCLUDED_FRAC * len(seen):
+        logger.warning(
+            "%s下单精度里没有 %d / %d 个币，像是没拉全，%s只按交易所状态剔币",
+            label,
+            len(no_lot),
+            len(seen),
+            where,
+        )
+        return {k: v for k, v in off.items() if v != NO_VENUE_LOT}
+    return dict(off)
 
 
 class VenueTradability(Protocol):
@@ -431,6 +461,13 @@ class CodeSymbolScreener:
         """接上执行交易所的可交易名单；每次选币前主循环已刷新过它。"""
         self._venue, self._venue_label = venue, label
 
+    def _venue_off(self, stats: list[SymbolStats], cfg: ScreenerConfig) -> dict[str, str]:
+        if not cfg.exclude_untradeable or self._venue is None:
+            return {}
+        off = self._venue.unavailable([s.symbol for s in stats])
+        passing = [s.symbol for s in stats if _hard_filters(s, cfg).passed]
+        return trusted_venue_off(off, passing, self._venue_label, "这轮选币")
+
     def heartbeat(self, now: datetime) -> None:
         """上报选币状态：从没跑过 / 正常（上次时间、币数、下次时间）/ 失败（原因）。"""
         if self._rec is None:
@@ -580,9 +617,7 @@ class CodeSymbolScreener:
             # 币安没有永续的（只在市值榜上）不占名额：往下补满 major_top_n 个
             ranks = self._majors.ranks(cfg.major_top_n, {base_of(s.symbol) for s in stats})
             self._majors.set_effective(ranks, cfg.major_top_n, now)
-        off: dict[str, str] = {}
-        if cfg.exclude_untradeable and self._venue is not None:
-            off = self._venue.unavailable([s.symbol for s in stats]) or {}
+        off = self._venue_off(stats, cfg)
         gone: dict[str, str] = {}
         entries: dict[str, SymbolPoolEntry] = {}
         ranked: list[SymbolPoolEntry] = []

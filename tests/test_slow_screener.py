@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from jiaoyi.contracts import Category
+from jiaoyi.execution.exchange import LotFilter
+from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
 from jiaoyi.slow.screener import (
     CodeSymbolScreener,
     ScreenerConfig,
@@ -13,6 +15,7 @@ from jiaoyi.slow.screener import (
     UserOverrides,
     classify,
 )
+from tests.fakes import FakeExchange
 
 
 def stat(sym: str, **kw: float) -> SymbolStats:
@@ -307,4 +310,88 @@ async def test_untradeable_exclusion_off_switch_and_stale_list(now: datetime) ->
     stale.set_venue(FakeVenue(None))
     pool = await stale.screen(now)
     assert {e.symbol for e in pool.in_pool} == {"AAAUSDT", "PUMPUSDT"}
+    assert pool.venue_excluded == {}
+
+
+def _venue_lots(now: datetime, tradable: list[str]) -> tuple[FakeExchange, ExchangeInfoLotRules]:
+    ex = FakeExchange()
+    ex.filters = {sym: LotFilter(0.001, 0.001, 5.0) for sym in tradable}
+    return ex, ExchangeInfoLotRules(ex, max_age_s=3600, clock=lambda: now)
+
+
+async def test_screen_drops_symbol_without_venue_lot_rules_and_fills_its_slot(
+    now: datetime,
+) -> None:
+    src = FakeSource([stat("PUMPUSDT", range_24h_pct=9), stat("AAAUSDT"), stat("BBBUSDT")])
+    _, lots = _venue_lots(now, ["AAAUSDT", "BBBUSDT"])
+    assert await lots.refresh()
+    scr = CodeSymbolScreener(src, ScreenerConfig(pool_size=2))
+    scr.set_venue(lots, "Demo")
+    pool = await scr.screen(now)
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT"]
+    pump = next(e for e in pool.entries if e.symbol == "PUMPUSDT")
+    assert pump.filters.failed_reasons == ["Demo不可交易（无下单精度）"]
+    assert pool.venue_excluded == {"PUMPUSDT": "无下单精度"}
+
+
+async def test_screen_keeps_pool_and_warns_when_venue_lot_rules_unavailable(
+    now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    src = FakeSource([stat("PUMPUSDT"), stat("AAAUSDT")])
+    ex, lots = _venue_lots(now, ["AAAUSDT"])
+    ex.filters_down = True
+    assert not await lots.refresh()
+    scr = CodeSymbolScreener(src, ScreenerConfig())
+    scr.set_venue(lots, "Demo")
+    with caplog.at_level("WARNING"):
+        pool = await scr.screen(now)
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "PUMPUSDT"]
+    assert pool.venue_excluded == {}
+    assert "Demo下单精度没拉到或已过期，这轮选币不按交易所可交易名单剔币" in caplog.text
+
+
+async def test_screen_ignores_venue_list_missing_most_passing_symbols(
+    now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    syms = ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]
+    src = FakeSource([stat(x) for x in [*syms, "PUMPUSDT"]])
+    ex, partial = _venue_lots(now, ["AAAUSDT"])
+    ex.untradeable_status = {"PUMPUSDT": "SETTLING"}  # type: ignore[attr-defined]
+    assert await partial.refresh()
+    scr = CodeSymbolScreener(src, ScreenerConfig())
+    scr.set_venue(partial, "Demo")
+    with caplog.at_level("WARNING"):
+        pool = await scr.screen(now)
+    assert sorted(e.symbol for e in pool.in_pool) == syms
+    assert pool.venue_excluded == {"PUMPUSDT": "SETTLING"}
+    assert "Demo下单精度里没有 3 / 5 个币，像是没拉全，这轮选币只按交易所状态剔币" in caplog.text
+    _, most = _venue_lots(now, ["AAAUSDT", "BBBUSDT", "PUMPUSDT"])
+    assert await most.refresh()
+    scr.set_venue(most, "Demo")
+    pool = await scr.screen(now)
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT", "PUMPUSDT"]
+    assert pool.venue_excluded == {"CCCUSDT": "无下单精度", "DDDUSDT": "无下单精度"}
+
+
+async def test_screen_still_excludes_at_exactly_half_without_lot_rules(now: datetime) -> None:
+    syms = ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]
+    _, lots = _venue_lots(now, ["AAAUSDT", "BBBUSDT"])
+    assert await lots.refresh()
+    scr = CodeSymbolScreener(FakeSource([stat(x) for x in syms]), ScreenerConfig())
+    scr.set_venue(lots, "Demo")
+    pool = await scr.screen(now)
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT"]
+    assert pool.venue_excluded == {"CCCUSDT": "无下单精度", "DDDUSDT": "无下单精度"}
+
+
+async def test_screen_venue_ratio_counts_only_hard_filter_passing_symbols(now: datetime) -> None:
+    thin = [stat(f"THIN{i}USDT", quote_volume_24h_usdt=1e6) for i in range(3)]
+    src = FakeSource([stat("AAAUSDT"), stat("CCCUSDT"), stat("DDDUSDT"), *thin])
+    _, lots = _venue_lots(now, ["AAAUSDT", *(s.symbol for s in thin)])
+    assert await lots.refresh()
+    scr = CodeSymbolScreener(src, ScreenerConfig())
+    scr.set_venue(lots, "Demo")
+    pool = await scr.screen(now)
+    # 2 / 3 passing coins lack lot rules (2 / 6 if the thin ones counted): treated as partial
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "CCCUSDT", "DDDUSDT"]
     assert pool.venue_excluded == {}

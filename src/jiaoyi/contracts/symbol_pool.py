@@ -14,6 +14,10 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from jiaoyi.contracts.common import Category, Contract, NonNegFloat, Symbol
 
+NO_VENUE_LOT = "无下单精度"
+"""``venue_excluded`` value for a symbol the execution venue has no lot rules for (as opposed
+to an exchange status such as SETTLING)."""
+
 
 class HardFilters(Contract):
     """硬条件的原始数值和是否通过。手动加入的币也要过。"""
