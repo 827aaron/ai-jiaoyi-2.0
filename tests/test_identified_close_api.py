@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ import pytest
 from jiaoyi.execution.exchange import (
     CcxtBinanceFutures,
     ExchangeError,
+    IdentifiedCloseCancelledBeforeSend,
     IdentifiedCloseNotSent,
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
@@ -270,3 +272,26 @@ async def test_create_timeout_stays_unknown_not_not_sent() -> None:
     ex.create_order.side_effect = ccxt.RequestTimeout("synthetic")
     with pytest.raises(IdentifiedCloseUnknown):
         await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["mode", "precheck"])
+async def test_cancel_before_create_is_not_sent_and_still_a_cancellation(step: str) -> None:
+    obj, ex = client()
+    if step == "mode":
+        ex.fapiPrivateGetPositionSideDual.side_effect = asyncio.CancelledError()
+    else:
+        ex.fapiPrivateGetOrder.side_effect = asyncio.CancelledError()
+    with pytest.raises(IdentifiedCloseCancelledBeforeSend) as caught:
+        await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+    assert isinstance(caught.value, asyncio.CancelledError)
+    ex.create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_create_stays_unknown() -> None:
+    obj, ex = client()
+    ex.create_order.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+    assert not isinstance(caught.value, IdentifiedCloseCancelledBeforeSend)

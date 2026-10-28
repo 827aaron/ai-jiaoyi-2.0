@@ -491,6 +491,7 @@ def _build_execution(
             ),
             protection_leg_order=app_cfg.protection_leg_order,
             hosted_close_mode=app_cfg.hosted_close_mode,
+            hb_stop_unknown_retries=app_cfg.hb_stop_unknown_retries,
             position_mode_cache_s=app_cfg.position_mode_cache_s,
             leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
         )

@@ -759,3 +759,12 @@ def test_regime_max_age_requires_a_shorter_desk_republish(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     assert load_slow_config(ok).market_desk.republish_after_min == 60.0
+
+
+def test_hosted_close_settings_merge_from_pending(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", 'hosted_close_mode = "direct"\nhb_stop_unknown_retries = 3\n')
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert (cfg.hosted_close_mode, cfg.hb_stop_unknown_retries) == ("direct", 3)

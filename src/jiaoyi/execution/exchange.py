@@ -244,6 +244,10 @@ class IdentifiedCloseNotSent(ExchangeError):
     """下单请求还没发出就失败（模式 / 市场 / 原 CID 预查出错）；这个 CID 从没到过交易所。"""
 
 
+class IdentifiedCloseCancelledBeforeSend(asyncio.CancelledError):
+    """下单请求发出之前任务被取消（多半是停机）：这个 CID 从没到过交易所，取消照常往上传。"""
+
+
 def _close_decimal(value: object, *, zero: bool = False) -> Decimal:
     if isinstance(value, bool):
         raise ValueError("订单数值不能为布尔值")
@@ -1703,6 +1707,8 @@ class CcxtBinanceFutures:
             amount = self._ex.amount_to_precision(ccxt_symbol, float(qty))
             requested = _close_decimal(amount)
             existing = await self.close_order(symbol, client_order_id)
+        except asyncio.CancelledError as error:
+            raise IdentifiedCloseCancelledBeforeSend() from error
         except Exception as error:
             # 这几步都在下单请求之前；调用方保证这个 CID 是新一代、此前从没发过。
             raise IdentifiedCloseNotSent("直连平仓下单前检查失败，请求没有发出") from error

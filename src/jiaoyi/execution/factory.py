@@ -106,6 +106,7 @@ def build_execution(
     protection_trailing_book_critical_after_s: float = 300.0,
     protection_leg_order: LegOrder = "lifeboat_first",
     hosted_close_mode: HostedCloseMode = "hb_first",
+    hb_stop_unknown_retries: int = 0,
     position_mode_cache_s: float = 0.0,
     leverage_brackets_wanted: Callable[[], bool] | None = None,
     hb_url: str = "http://127.0.0.1:8000",
@@ -192,6 +193,7 @@ def build_execution(
         frozen_peak_exit_on=frozen_peak_exit_on and mode is not RunMode.LIVE and demo_trading,
         frozen_peak_exit_after_s=frozen_peak_exit_after_s,
         hosted_close_mode=hosted_close_mode,
+        hb_stop_unknown_retries=hb_stop_unknown_retries,
     )
     reconciler = ThreeWayReconciler(
         adapter,

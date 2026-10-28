@@ -37,6 +37,8 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # protection_leg_order = "lifeboat_first"  # Demo 托管保护：新仓三条腿的挂单顺序：lifeboat_first = 保命单 → 止损 → 止盈（默认，原行为）/ stop_first = 止损 → 止盈 → 保命单（交易所止损已能保护仓位，保命单只是更宽的后备）；stop_first 下止损确认后保命单挂失败不立即平仓，在 protection_prearm_grace_s 内告警并重试（被拒换新单号重挂，结果未知只查原单号），宽限用完照旧平；止损挂失败照旧立即平；网页「设置 → 执行 → 托管保护」也能改；改后重启
 # hosted_close_mode = "hb_first"  # Demo 托管仓平仓顺序：hb_first = 先停 HB 执行器、等它结束再直连平仓（默认，原行为）/ direct = 决定平仓时先按持久化单号下只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤；HB 已在自己平仓、保护腿或入场状态不明时照旧 hb_first；网页「设置 → 执行 → 托管保护」也能改；改后重启
 #   回滚到没有 hosted_close_mode 的旧版本前，先删掉这一行，并等正在平仓的托管仓结束（平仓中的仓账本里有 direct_first）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
+# hb_stop_unknown_retries = 0   # Demo 托管仓：只停不平的 HB 停止结果未知、HB 仍报 RUNNING 时最多再补发几次（间隔 5、10、20… 秒翻倍；这种停止从不卖出）；0 = 不补发（原行为）；改后重启
+#   回滚到没有 hb_stop_unknown_retries 的旧版本前，先删掉这一行，并等账本里没有带 direct_close_outcomes 的仓（直连平仓进行中的仓）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
 # protection_stop_working_type = "CONTRACT_PRICE"         # Demo 托管保护：止损（含移动止损）按什么价触发：CONTRACT_PRICE = 最新成交价（默认，原行为）/ MARK_PRICE = 标记价（不被 Demo 瞬间插针扫掉，触发后仍按当时盘口市价成交）；只影响之后新挂的单，已挂的不动；保命单固定标记价；改后重启
 # protection_take_profit_working_type = "CONTRACT_PRICE"  # Demo 托管保护：止盈按什么价触发，取值同上；默认 CONTRACT_PRICE（原行为）；只影响之后新挂的单；改后重启
 # protection_trailing_book_mark_max_dev_bps = 30   # Demo 移动止损：算峰值用的盘口价往抬高峰值的方向偏离标记价（多仓买一高于 / 空仓卖一低于）超过几基点就当插针，这一轮不更新峰值 / 不激活；默认 30；0 = 不比对（不建议）；改后重启

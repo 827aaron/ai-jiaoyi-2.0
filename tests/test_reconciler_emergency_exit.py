@@ -13,7 +13,11 @@ import pytest
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import PositionStatus, ReconcileIssueKind
 from jiaoyi.core.store import JsonlDecisionLog
-from jiaoyi.execution.exchange import CloseFill, ExchangeError
+from jiaoyi.execution.exchange import (
+    CloseFill,
+    ExchangeError,
+    IdentifiedCloseCancelledBeforeSend,
+)
 from jiaoyi.execution.exit_resolution import (
     prepare_resolution,
     read_result,
@@ -871,3 +875,31 @@ async def test_old_positions_json_without_any_new_field_still_loads(
     del stop["position_id"], stop["unresolved_rounds"]
     legacy_stop = ForeignExecutorStop.model_validate(stop)
     assert legacy_stop.position_id is None and legacy_stop.unresolved_rounds == 0
+
+
+async def test_cancel_before_request_marks_not_sent_and_next_round_uses_next_cid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """停机取消发生在下单请求之前：记没发出、取消照常往上传；下一轮换下一代单号。"""
+    rig = Rig(tmp_path)
+    rig.rec = with_close_unknown(rig)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.015)
+    place = rig.ex.place_close
+
+    async def cancelled_before_send(*args: Any) -> Any:
+        raise IdentifiedCloseCancelledBeforeSend()
+
+    monkeypatch.setattr(rig.ex, "place_close", cancelled_before_send)
+    with pytest.raises(asyncio.CancelledError):
+        await rig.rec.reconcile(rig.t)
+    plan = rig.registry.data.emergency_exits["BTCUSDT"]
+    assert (plan.pending, plan.order_status, plan.generation) == (False, "NOT_SENT", 1)
+    sent: list[str] = []
+
+    async def record_and_place(symbol: str, side: Any, qty: float, cid: str) -> Any:
+        sent.append(cid)
+        return await place(symbol, side, qty, cid)
+
+    monkeypatch.setattr(rig.ex, "place_close", record_and_place)
+    await rig.rec.reconcile(rig.t)
+    assert sent == [f"dc-{plan.exit_id}-2"]
