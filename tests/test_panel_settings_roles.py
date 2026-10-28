@@ -14,7 +14,17 @@ from tests.conftest import ROOT
 from tests.test_panel_actions import _client, _setup
 
 APP_JS = ROOT / "src" / "jiaoyi" / "panel" / "static" / "app.js"
-SECTIONS = ["risk", "app", "fast_loop", "predictor", "schedule", "budget", "screener", "tiers"]
+SECTIONS = [
+    "risk",
+    "app",
+    "fast_loop",
+    "predictor",
+    "schedule",
+    "budget",
+    "screener",
+    "tiers",
+    "meeting",
+]
 
 
 def _roles_block() -> str:

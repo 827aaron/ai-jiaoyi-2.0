@@ -83,6 +83,7 @@ max_retries = 6
 # stale_on_arrival_action = "watch"  # watch（只盯不开：方向不动，清信号和区间）/ no_trade（改成观望）
 # input_time_labels = "legacy"   # legacy / explicit（表格 takerBuy / OI 写明哪个已收盘小时，单币资金费率写「上次结算 HH:MM」+ 实时估算）
 # market_table_rolling = false   # 总盘会另给滚动 60 分钟涨跌家数（截到开会这一刻）
+# lessons_scoring = "raw"        # 教训给卡打分的口径：raw（会后一个持仓期的原始涨跌，山寨币另比 BTC）/ excess（和方向记分同口径：发布时刻起 4 小时，扣掉同期币池等权收益）
 # latest_market_regime = false   # 整轮里每个单币会开始时用最新发布的大盘判断（关 = 本轮开始时的）
 # event_brief_refresh = false    # 临时会开会前刷新大盘简报（10 分钟缓存）
 #                                  推荐 Demo：全部打开，snapshot_interval = "15m"
@@ -134,7 +135,10 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # min_run_gap_min = 5        # 加跑（急动 / 翻转）离上一轮开跑至少几分钟
 # mirror_test_rate = 0.1667  # 镜像测试轮次比例（数据涨跌取反再问，量方向偏置）；0 = 不做
 # mirror_alert_gap = 0.05    # 最近几次 |p_up(原) − p_down(镜像)| 平均超过它就告警
-# band_sigma = 0.5           # 「平」= |4h 等权收益| ≤ 0.5σ
+# band_sigma = 0.5           # 「平」= |等权收益| ≤ 0.5σ（基础率、记分、提示词都按它）；Demo 推荐 0.3
+# prior_mode = "anchor"      # anchor = 从基础率出发；context = 基础率只是输入之一、不默认它（Demo 推荐）；off = 不给模型看
+# momentum_guidance = false  # 提示词里加成对的「按近 15m/1h/4h 收益、家数、BTC 更新」说明；Demo 推荐 true
+# aggregation = "mean"       # 几次回答怎么合并：mean / median / trimmed / logodds
 # sigma_lookback_h = 168
 # base_rate_days = 30        # 先验：过去 30 天涨 / 平 / 跌频率
 # call_p_min = 0.45          # 方向门槛 θ

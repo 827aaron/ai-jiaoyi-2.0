@@ -19,6 +19,7 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -72,7 +73,7 @@ from jiaoyi.panel.pages import (
 from jiaoyi.panel.stop_diagnostics import parse_diagnostics
 from jiaoyi.panel.updater import UpdateInfo, Updater
 from jiaoyi.risk.guard import blend_atr, session_factor
-from jiaoyi.slow import card_score
+from jiaoyi.slow import binance_gate, card_score, market_score
 from jiaoyi.slow.credits import banner as credit_banner
 from jiaoyi.slow.settings import slow_defaults
 from jiaoyi.watchdog import send as send_telegram
@@ -89,6 +90,37 @@ CARD_SCORE_LOOKBACK = timedelta(days=7)
 """面板只补算最近几天的卡；更早的用 ``jiaoyi card-score --days`` 补。"""
 CARD_SCORE_WEIGHT_PER_MIN = 120
 """方向记分打币安 API 的权重预算（每分钟，币安按 IP 给 2400；大头留给交易程序）。"""
+MARKET_SCORE_FIRST_S = CARD_SCORE_FIRST_S
+MARKET_SCORE_EVERY_MIN = 30
+"""大盘台记分（``data/market_desk/score.json``）多久算一次；只在大盘台有日志时算。"""
+MARKET_SCORE_GAP_S = 2.5
+"""大盘台记分两次币安请求之间至少隔几秒（每次最多 5 权重，约 120 权重 / 分钟）。"""
+
+
+def in_daemon_thread(fn: Callable[[], Any]) -> asyncio.Future[Any]:
+    """在守护线程里跑同步的 ``fn``，结果交回事件循环。不用默认线程池：面板关闭时
+    ``asyncio.run`` 会等池里的线程跑完，一轮记分卡在请求上就会拖住重启。"""
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[Any] = loop.create_future()
+
+    def settle(value: Any, exc: BaseException | None) -> None:
+        if fut.done():
+            return
+        if exc is not None:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(value)
+
+    def work() -> None:
+        try:
+            value, exc = fn(), None
+        except BaseException as e:  # 交回事件循环那边处理
+            value, exc = None, e
+        with suppress(RuntimeError):  # 事件循环已经关了：没人等结果
+            loop.call_soon_threadsafe(settle, value, exc)
+
+    threading.Thread(target=work, name="market-score", daemon=True).start()
+    return fut
 
 
 def code_fingerprint(root: Path = PACKAGE) -> str:
@@ -364,12 +396,38 @@ def create_app(
                     log.warning("作战卡方向记分失败", exc_info=True)
             await asyncio.sleep((every or CARD_SCORE_IDLE_MIN) * 60)
 
+    desk_stop = threading.Event()
+    desk_get = market_score.paced(
+        market_score.stoppable(binance_gate.get, desk_stop), MARKET_SCORE_GAP_S, desk_stop.wait
+    )
+
+    async def score_desk() -> None:
+        """大盘台记分：每 ``MARKET_SCORE_EVERY_MIN`` 分钟重算最近 7 天（K 线有缓存，只补新的）。
+        面板关闭时设 ``desk_stop``：正在跑的一轮在下一次请求前停下，线程是守护线程，不拖住退出。"""
+        await asyncio.sleep(MARKET_SCORE_FIRST_S)
+        while not desk_stop.is_set():
+            if (Path(data_dir) / "market_desk").is_dir():
+                job = partial(market_score.update, data_dir, clock(), get=desk_get, stop=desk_stop)
+                try:
+                    rep = await in_daemon_thread(job)
+                    log.info("大盘台记分：%s", rep["panel"]["text"])
+                except market_score.Stopped:
+                    return
+                except RateLimited as e:
+                    log.warning("大盘台记分：%s，这一轮作罢", e)
+                except Exception:
+                    log.warning("大盘台记分失败", exc_info=True)
+            await asyncio.sleep(MARKET_SCORE_EVERY_MIN * 60)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task = asyncio.create_task(sample_pnl()) if pnl_sample_s != 0 else None
         scorer = asyncio.create_task(score_cards())
+        desk_scorer = asyncio.create_task(score_desk())
         yield
         scorer.cancel()
+        desk_stop.set()
+        desk_scorer.cancel()
         if task is not None:
             task.cancel()
         await hb.close()

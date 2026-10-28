@@ -196,3 +196,85 @@ def test_gate_bars_pages_and_sizes_limit() -> None:
     calls_.clear()
     L.gate_bars("SOLUSDT", T0, T0 + timedelta(days=5), get)
     assert calls_[0] == 1000 and len(calls_) == 2
+
+
+# ---- excess scoring (reads card_score output)
+
+
+def _cs(sym="SOLUSDT", bias="short", coin=-0.02, pool=-0.01, at=T0):
+    from jiaoyi.slow.card_score import CardScore, Leg
+
+    return CardScore(
+        card_id="c",
+        version=1,
+        symbol=sym,
+        category="alt",
+        bias=bias,
+        refresh_reason="x",
+        created_at=at,
+        expires_at=at + HOLD,
+        t0=at,
+        t0_src="card_publish",
+        coin=Leg(h4=coin),
+        pool=Leg(h4=pool),
+        btc=Leg(),
+        scored_at=at,
+    )
+
+
+def test_score_excess_is_direction_times_coin_minus_pool() -> None:
+    s = L.score_excess(_cs(bias="short", coin=-0.02, pool=-0.01))
+    assert s is not None and round(s.dir_net_pct or 0, 6) == 1.0
+    s = L.score_excess(_cs(bias="long", coin=-0.02, pool=-0.01))
+    assert s is not None and round(s.dir_net_pct or 0, 6) == -1.0
+    s = L.score_excess(_cs(bias="no_trade", coin=0.03, pool=0.01))
+    assert s is not None and s.dir_net_pct is None and round(s.missed_pct, 6) == 2.0
+    assert L.score_excess(_cs(pool=None)) is None
+
+
+def _stats(bias: str, coin: float) -> str:
+    s = L.score_excess(_cs(bias=bias, coin=coin, pool=0.0))
+    assert s is not None
+    return L.render_stats(L.group_stats([s]), "excess")
+
+
+def test_excess_prompt_and_stats_are_neutral_and_mirror() -> None:
+    long, short = _stats("long", 0.02), _stats("short", -0.02)
+    assert long.replace("long", "short") == short
+    assert "+2.00%" in long and "BTC" not in long
+    p = L.lessons_prompt(long, 1, 5, "2 hours", "excess")
+    assert "equal-weighted" in p and "4h" in p and "5-minute" not in p
+    assert "5-minute" in L.lessons_prompt(long, 1, 5, "2 hours")
+
+
+def test_excess_book_reads_card_score_without_fetching(tmp_path: Path) -> None:
+    from jiaoyi.slow.card_score import ScoreStore
+
+    def no_fetch(*_a: object) -> list[Bar]:
+        raise AssertionError("must not fetch")
+
+    book = L.LessonBook(
+        tmp_path,
+        tz="Asia/Bangkok",
+        hold_minutes=120,
+        horizon="2 hours",
+        fee_pct=0.08,
+        fetch=no_fetch,
+        scoring="excess",
+    )
+    book._save_state({"since": (T0 - timedelta(days=1)).isoformat()})
+    ScoreStore(tmp_path).append(
+        [
+            _cs(at=T0 + timedelta(minutes=i)).model_copy(update={"card_id": f"c{i}"})
+            for i in range(35)
+        ]
+    )
+    prompts: list[str] = []
+
+    def ask(p: str) -> list[L.Lesson]:
+        prompts.append(p)
+        return [L.Lesson("别追空", "35 张")]
+
+    b = book.refresh(T0 + timedelta(days=6), ask)
+    assert b is not None and b.hold == "4h" and b.n_cards == 35
+    assert "coin pool" in prompts[0] and "+1.00%" in b.stats
