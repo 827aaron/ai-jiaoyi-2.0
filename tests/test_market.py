@@ -14,7 +14,9 @@ from jiaoyi import interfaces as i
 from jiaoyi.market import book as bk
 from jiaoyi.market.binance_ws import BinanceFuturesFeed, parse_message, streams_for
 from jiaoyi.market.features import RollingFeatureEngine
-from jiaoyi.market.rest import parse_klines
+from jiaoyi.market.provider import MarketData
+from jiaoyi.market.rest import WeightBudget, parse_klines
+from tests.fastloop_helpers import FakeMarketRest
 
 T0 = datetime(2026, 10, 22, 6, 0, tzinfo=UTC)
 MS = int(T0.timestamp() * 1000)
@@ -388,6 +390,131 @@ def test_live_s_kept_by_book_or_mark_between_sparse_trades() -> None:
         )
         snap = eng.snapshot("BTCUSDT")
         assert snap is not None and snap.values["live_s"] == 400.0
+
+
+def _rest_trades(
+    sym: str, start: datetime, end: datetime, step_s: int = 10, price: float = 68000.0
+) -> list[tuple[datetime, float, float, bool]]:
+    out = []
+    at, i = start, 0
+    while at <= end:
+        out.append((at, price, 1000.0, i % 2 == 0))
+        at, i = at + timedelta(seconds=step_s), i + 1
+    return out
+
+
+def _engine(symbols: list[str]) -> RollingFeatureEngine:
+    eng = RollingFeatureEngine(atr_period_min=1)
+    for sym in symbols:
+        for k in range(20):
+            eng.update(_kline(k, 68000.0).model_copy(update={"symbol": sym}))
+    return eng
+
+
+def test_rest_seed_fills_before_the_stream_without_double_counting() -> None:
+    eng = warm_engine()
+    t = T0 + timedelta(minutes=21)
+    eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=68000.0, qty=0.1, taker_side=c.Side.LONG))
+    eng.update(_book(t, 67999.5, 1.0, 68000.5, 1.0))
+    rows = _rest_trades("BTCUSDT", t - timedelta(seconds=300), t + timedelta(seconds=10))
+    trades = [
+        c.Trade(symbol="BTCUSDT", ts=at, price=px, qty=u / px, taker_side=c.Side.LONG)
+        for at, px, u, _ in rows
+    ]
+    eng.seed_rest(
+        "BTCUSDT",
+        trades,
+        None,
+        covered_from=(t - timedelta(seconds=300)).timestamp(),
+        fetched_at=(t + timedelta(seconds=11)).timestamp(),
+    )
+    late = c.Trade(  # 实时流晚到的一笔，REST 已经补过
+        symbol="BTCUSDT", ts=t + timedelta(seconds=10), price=68000.0, qty=1000.0 / 68000.0,
+        taker_side=c.Side.LONG,
+    )  # fmt: skip
+    eng.update(late)
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None
+    # 最近 60 秒：REST 的 t-50…t-10 五笔 + 实时流 t 那笔 + REST 的 t+10（晚到的不重复记）
+    assert snap.values["trades_1m"] == 7.0
+    assert snap.values["live_s"] == 10.0 and snap.values["trade_s"] == 310.0
+    assert snap.values["ret_5m"] == 0.0 and snap.ts == t + timedelta(seconds=10)
+
+
+async def test_market_data_parallel_callers_share_one_fetch_per_symbol() -> None:
+    syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    now = T0 + timedelta(minutes=21)
+    eng = _engine(syms)
+    fake = FakeMarketRest(
+        {s: _rest_trades(s, now - timedelta(seconds=400), now) for s in syms},
+        now=now,
+        delay=0.05,
+    )
+    md = MarketData(eng, enabled=lambda: True, clock=lambda: now, fetch=fake)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    reads = await asyncio.gather(*(md.snapshot(syms[i % 3], need=("ret_5m",)) for i in range(10)))
+    elapsed = loop.time() - started
+    assert [fake.agg_calls(s) for s in syms] == [1, 1, 1]
+    assert fake.max_inflight >= 2 and elapsed < 0.25  # 三个币一起拉，不是一个接一个（0.3 秒）
+    assert all(r.source == "rest" and r.snapshot is not None for r in reads)
+
+
+async def test_market_data_caches_a_fetch_for_twenty_seconds() -> None:
+    now = T0 + timedelta(minutes=21)
+    eng = _engine(["BTCUSDT"])
+    fake = FakeMarketRest(
+        {"BTCUSDT": _rest_trades("BTCUSDT", now - timedelta(seconds=400), now)}, now=now
+    )
+    mono = [0.0]
+    md = MarketData(eng, enabled=lambda: True, clock=lambda: now, fetch=fake, mono=lambda: mono[0])
+    for _ in range(3):  # 爆仓历史 REST 补不了：每次都是 stale，但 20 秒内只拉一次
+        r = await md.snapshot("BTCUSDT", need=("liq_ratio_1m",))
+        assert r.source == "stale" and "liq_ratio_1m" in r.reason
+    assert fake.agg_calls() == 1
+    mono[0] = 21.0
+    await md.snapshot("BTCUSDT", need=("liq_ratio_1m",))
+    assert fake.agg_calls() == 2
+
+
+async def test_market_data_flags_source_and_age() -> None:
+    now = T0 + timedelta(minutes=21)
+    clock = [now]
+    eng = _engine(["BTCUSDT"])
+    eng.update(c.Trade(symbol="BTCUSDT", ts=now, price=68000.0, qty=1.0, taker_side=c.Side.LONG))
+    later = now + timedelta(seconds=60)
+    fake = FakeMarketRest(
+        {"BTCUSDT": _rest_trades("BTCUSDT", now, later - timedelta(seconds=1), price=68100.0)},
+        now=later,
+    )
+    md = MarketData(eng, enabled=lambda: True, clock=lambda: clock[0], fetch=fake)
+    r = await md.snapshot("BTCUSDT", max_age_s=5)
+    assert (r.source, r.age_s, fake.calls) == ("ws", 0.0, [])
+    clock[0] = later + timedelta(seconds=2)  # 实时流停了一分钟
+    r = await md.snapshot("BTCUSDT", max_age_s=5)
+    assert r.source == "rest" and r.age_s == 2.0
+    assert r.snapshot is not None and r.snapshot.last_price == 68100.0
+
+
+async def test_market_data_off_reads_memory_only_and_fetches_without_the_queue() -> None:
+    now = T0 + timedelta(minutes=21)
+    eng = _engine(["BTCUSDT"])
+    fake = FakeMarketRest({"BTCUSDT": _rest_trades("BTCUSDT", now, now)}, now=now)
+
+    class NoBudget(WeightBudget):
+        async def take(self, weight: int) -> None:
+            raise AssertionError("关着时不排预算")
+
+    md = MarketData(eng, enabled=lambda: False, clock=lambda: now, fetch=fake, budget=NoBudget())
+    r = await md.snapshot("BTCUSDT", max_age_s=5, need=("ret_5m",))
+    assert r.source == "stale" and "行情已旧" in r.reason
+    await md.warm(["BTCUSDT"])
+    await md.refresh("BTCUSDT", 5)
+    assert fake.calls == []
+    snap = eng.snapshot("BTCUSDT")
+    assert snap is not None and "trade_s" not in snap.values
+    await md.fetch("/fapi/v1/premiumIndex", {"symbol": "BTCUSDT"}, 1)  # 持仓量 / 快照补拉照旧
+    assert [p for p, _, _ in fake.calls] == ["/fapi/v1/premiumIndex"]
 
 
 def test_streams_without_per_symbol_liquidations() -> None:

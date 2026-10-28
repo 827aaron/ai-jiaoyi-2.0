@@ -146,6 +146,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "entry_limit_wait_min",
         "entry_limit_chase",
         "chase_price_max_age_s",
+        "rest_warm_start",
         # 哨兵阈值 / 开关
         "volume_surge_live",
         "session_cme_open",

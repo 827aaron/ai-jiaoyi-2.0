@@ -427,6 +427,51 @@ async def test_watch_set_is_meeting_card_and_held_not_pool(tmp_path: Path, now: 
     assert feed.subs[-1] == ["BTCUSDT"]
 
 
+@pytest.mark.parametrize("on", [False, True])
+async def test_new_symbols_are_rest_seeded_after_subscribe_only_when_on(
+    tmp_path: Path, now: datetime, on: bool
+) -> None:
+    """rest_warm_start：新订上的币订阅之后从 REST 补成交，BTC 排第一；关着照旧只回填 K 线。"""
+    app = _app(tmp_path, now)
+    feed, order = WatchFeed(), []
+
+    class Market:
+        def __init__(self) -> None:
+            self.on = on
+            self.warmed: list[list[str]] = []
+
+        async def warm(self, symbols: list[str]) -> None:
+            order.append("warm")
+            self.warmed.append(list(symbols))
+
+        async def klines(self, symbol: str, **kw: Any) -> list[c.Kline]:
+            return []
+
+        async def klines_between(self, *a: Any, **kw: Any) -> list[c.Kline]:
+            return []
+
+    async def fetch(sym: str) -> list[c.Kline]:
+        return []
+
+    async def subscribe(symbols: Sequence[str]) -> None:
+        order.append("subscribe")
+
+    feed.subscribe = subscribe  # type: ignore[method-assign]
+    market = Market()
+    app.market_data = market  # type: ignore[assignment]
+    app.m = dataclasses.replace(app.m, predictor=FakePredictor(), feed=feed)
+    r = Runner(app, fetch_klines=fetch, fetch_predictor_klines=fetch, fetch_atr_history=fetch)
+    r.set_meeting_picks(["SOLUSDT"])
+    await asyncio.sleep(0)
+    await r.sync_watch()
+    await asyncio.sleep(0)
+    if on:
+        assert order[:2] == ["subscribe", "warm"]
+        assert market.warmed[0][0] == "BTCUSDT" and "SOLUSDT" in market.warmed[0]
+    else:
+        assert market.warmed == [] and "warm" not in order
+
+
 async def test_backfill_feeds_recent_minutes_to_predictor(tmp_path: Path, now: datetime) -> None:
     app = _app(tmp_path, now)
     pred = FakePredictor()

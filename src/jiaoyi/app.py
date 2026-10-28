@@ -123,8 +123,8 @@ from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.keeper.stub import StubKeeper
 from jiaoyi.market.binance_ws import BinanceFuturesFeed
 from jiaoyi.market.derivs import DerivsFeed
-from jiaoyi.market.derivs import rest_fetch as derivs_rest
 from jiaoyi.market.features import RollingFeatureEngine
+from jiaoyi.market.provider import MarketData
 from jiaoyi.market.stub import StubMarketDataFeed
 from jiaoyi.patrol.rules import RulePatrol
 from jiaoyi.predictor import KronosForecaster
@@ -404,6 +404,8 @@ class Built:
     observations: KeeperObservationCollector | None = None
     keeper_jev: JevDecisionModel | None = None
     """The keeper's own Jev instance when ``jev_shared_cooldown`` is off; None when shared."""
+    market: MarketData | None = None
+    """主网公开行情的唯一出口（实时流快照 + REST 补）；没连币安时没有。"""
 
 
 def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
@@ -665,11 +667,21 @@ def build_modules(
         oi_window_min=fast.oi_window_min,
     )
     derivs: DerivsFeed | None = None
+    market: MarketData | None = None
     halted: dict[str, str] = {}
     if isinstance(feed, BinanceFuturesFeed):
         feed.set_coverage(features.coverage)
+        # 主网公开行情的 REST 都从这一个出口走（共用权重预算和封禁）；开关关着时等于直接请求
+        market = MarketData(
+            features,
+            enabled=lambda: fast.rest_warm_start,
+            clock=clock,
+            concurrency=fast.market_rest_concurrency,
+        )
         derivs = DerivsFeed(
-            oi_window_min=fast.oi_window_min, ratio_window_min=fast.top_crowd_window_min
+            oi_window_min=fast.oi_window_min,
+            ratio_window_min=fast.top_crowd_window_min,
+            fetch=market.fetch,
         )
         features.set_extra(derivs.values)
 
@@ -717,7 +729,7 @@ def build_modules(
             context=EntryContextSource(
                 features.entry_context,
                 adl=derivs.adl_risk if derivs is not None else None,
-                fetch=derivs_rest if isinstance(feed, BinanceFuturesFeed) else None,
+                fetch=market.fetch if market is not None else None,
                 # 补拉最多等 1 秒，但不能把信号拖过有效期（有效期 − 拍板超时）
                 timeout_s=min(
                     1.0, max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0)
@@ -758,6 +770,11 @@ def build_modules(
             exit_in_flight=getattr(executor, "protection_exit_in_flight", None),
             alerter=alerter,
             kronos_snapshot=app_cfg.predictor.keeper_snapshot,
+            refresh=(
+                (lambda sym: market.refresh(sym, fast.keeper_price_max_age_s or None))
+                if market is not None
+                else None
+            ),
         )
 
     modules = Modules(
@@ -813,6 +830,7 @@ def build_modules(
         halted,
         observations,
         keeper_jev,
+        market,
     )
 
 
@@ -847,6 +865,7 @@ class App:
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
+        self.market_data: MarketData | None = None
         self.observations: KeeperObservationCollector | None = None
         self.keeper_jev: JevDecisionModel | None = None
         self._quote_diagnostics_enabled = not offline
@@ -881,6 +900,7 @@ class App:
             self.news = built.news
             self.against = built.against
             self.derivs = built.derivs
+            self.market_data = built.market
             self.observations = built.observations
             self.keeper_jev = built.keeper_jev
             self.halted = built.halted

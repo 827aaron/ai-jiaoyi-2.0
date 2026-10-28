@@ -56,7 +56,7 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.interfaces import Predictor
-from jiaoyi.market.features import BTC, LIQ_WINDOW_S, TRADE_WINDOW_S
+from jiaoyi.market.features import BTC, LIQ_WINDOW_S, TRADE_WINDOW_S, trade_warm_s
 
 log = logging.getLogger(__name__)
 
@@ -106,8 +106,8 @@ PEAK_WINDOW = timedelta(hours=1)
 QUIET_AFTER = timedelta(minutes=2)
 """卡上的币这么久没来一笔成交，就算「没收到行情」。"""
 WARM_1M_S = 60.0
-"""``live_s`` 不满这些秒，对应窗口的特征只是重启 / 重新订阅后那几笔：只有 1 笔时涨跌读 0，
-「BTC 先动」会当成「还没跟」。缺 ``live_s`` 按没预热算。"""
+"""成交窗口连续不满这些秒（``live_s``，REST 补过时和 ``trade_s`` 取大的），对应窗口的特征只是
+重启 / 重新订阅后那几笔：只有 1 笔时涨跌读 0，「BTC 先动」会当成「还没跟」。都没有算没预热。"""
 WARM_5M_S = TRADE_WINDOW_S
 WARM_LIQ_S = LIQ_WINDOW_S
 
@@ -291,7 +291,7 @@ class RuleTrigger:
     def _note_warmup(self, f: FeatureSnapshot, w: _Watch, now: datetime, *, note: bool) -> None:
         """没预热完的币每段只记一行 INFO（不是每笔成交一行）。``note``：写进「上次跳过」，
         卡上只看不做时不写，免得盖掉那个原因。"""
-        live = f.values.get("live_s")
+        live = trade_warm_s(f.values)
         parts = []
         if live is None or live < WARM_5M_S:
             parts.append(f"实时行情才 {live or 0.0:.0f} 秒，不满 5 分钟")
@@ -459,7 +459,8 @@ class RuleTrigger:
         ret_1m = v.get("ret_1m", 0.0)
         ret_5m = v.get("ret_5m", 0.0)
         cvd_30s = v.get("cvd_30s_usdt", 0.0)
-        live = v.get("live_s", 0.0)
+        live = trade_warm_s(v) or 0.0
+        liq_live = v.get("live_s", 0.0)
         hits: list[tuple[SignalKind, Side, str]] = []
 
         # 放量突破：1 分钟量够
@@ -495,7 +496,7 @@ class RuleTrigger:
         # 强平瀑布反弹
         liq_ratio = v.get("liq_ratio_1m", 0.0)
         drop = c.liq_drop_pct_5m / 100.0
-        if liq_ratio >= c.liq_ratio and live >= WARM_LIQ_S:
+        if liq_ratio >= c.liq_ratio and liq_live >= WARM_LIQ_S:
             long_liq = v.get("liq_long_usdt_1m", 0.0)
             short_liq = v.get("liq_short_usdt_1m", 0.0)
             if long_liq >= c.liq_min_usdt_1m and ret_5m <= -drop and cvd_30s > 0:

@@ -852,6 +852,19 @@ class FastLoopConfig(Contract):
         description="改市价追进前按现价复查进场区间时，这个币的行情最多旧几秒（和开仓检查同一个"
         "时钟：成交 / 盘口 / 标记价任一最后更新）；超过就这次不追。0 = 不查（现状）。",
     )
+    rest_warm_start: bool = Field(
+        default=False,
+        description="行情不等预热：刚订上或断流的币马上从币安 REST 补最近的逐笔成交和资金费率"
+        "（统一由哨兵的行情层拉，共用每分钟权重预算，被封就照旧等），BTC 先动、时段与事件、"
+        "拥挤交易反向不用等 5 分钟 / 1 分钟实时行情；管家、追单前行情旧了也先补再判。"
+        "强平瀑布反弹要的爆仓历史 REST 拿不到，照旧等 30 分钟。默认关（现状：等实时行情攒够）。",
+    )
+    market_rest_concurrency: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        description="行情层从 REST 补行情时最多同时补几个币（同一个币只拉一次）；改了要重启。",
+    )
     breakeven_on: bool = Field(
         default=False,
         description="保本：赚到 breakeven_trigger_r 倍止损距离后，最坏按保本价（扣完手续费）平。"

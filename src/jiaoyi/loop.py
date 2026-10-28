@@ -78,6 +78,7 @@ from jiaoyi.market.features import (
     VOL_24H_MINUTES,
     backfill_minutes,
 )
+from jiaoyi.market.provider import MarketData
 from jiaoyi.market.rest import (
     RateLimited,
     WeightBudget,
@@ -373,6 +374,12 @@ ATR_INTERVAL = {
 MAX_REST_KLINES = 1500
 
 
+def _direct_klines(
+    symbol: str, *, limit: int, interval: Interval = Interval.M1
+) -> Awaitable[list[Kline]]:
+    return fetch_recent_klines(symbol, limit=limit, interval=interval)
+
+
 class Runner:
     def __init__(
         self,
@@ -397,19 +404,22 @@ class Runner:
         fl = app.app_cfg.fast_loop
         # 至少 24 小时：新信号要 24 小时 1 分钟波动、4 小时涨跌（一次请求最多 1500 根）
         limit = max(backfill_minutes(fl.atr_period_min, fl.atr_long_period_min), VOL_24H_MINUTES)
-        self._fetch_klines = fetch_klines or (lambda sym: fetch_recent_klines(sym, limit=limit))
+        # 行情 REST 统一走行情层（rest_warm_start 开着时排进同一份权重预算）
+        self.market: MarketData | None = getattr(app, "market_data", None)
+        klines = self.market.klines if self.market is not None else _direct_klines
+        self._fetch_klines = fetch_klines or (lambda sym: klines(sym, limit=limit))
         # 预测员周期的 K 线（5m / 15m / 1h，至少 64 根），启动时一次拉够，不用等几个小时
         bars = app.app_cfg.predictor.backfill_bars
         pred_interval = Interval(app.app_cfg.predictor.interval)
         self._fetch_predictor_klines = fetch_predictor_klines or (
-            lambda sym: fetch_recent_klines(sym, limit=bars, interval=pred_interval)
+            lambda sym: klines(sym, limit=bars, interval=pred_interval)
         )
         # 止损 ATR 下限要 7 天 ATR 历史：按 ATR 周期拉 7 天 K 线
         # （一次最多 1500 根，5 分钟线约 5 天）
         period = app.app_cfg.fast_loop.atr_period_min
         hist = min(HISTORY_DAYS * 1440 // period + ATR_PERIOD + 1, MAX_REST_KLINES)
         self._fetch_atr_history = fetch_atr_history or (
-            lambda sym: fetch_recent_klines(sym, limit=hist, interval=ATR_INTERVAL[period])
+            lambda sym: klines(sym, limit=hist, interval=ATR_INTERVAL[period])
         )
         self.positions: list[PositionRecord] = []
         self._tasks: set[asyncio.Task[None]] = set()
@@ -438,8 +448,13 @@ class Runner:
             Path(app.app_cfg.data_dir) / "regime_flip", app.recorders.get(Role.SENTINEL)
         )
         regime_budget = WeightBudget()
+        market = self.market
         self._fetch_regime = fetch_regime_klines or (
-            lambda sym, start, end: fetch_klines_between(sym, start, end, budget=regime_budget)
+            (lambda sym, start, end: market.klines_between(sym, start, end, fallback=regime_budget))
+            if market is not None
+            else (
+                lambda sym, start, end: fetch_klines_between(sym, start, end, budget=regime_budget)
+            )
         )
         if isinstance(self.m.cards, BattleCardCommander):
             self.m.cards.set_regime_price(self._regime_btc_price)
@@ -1193,10 +1208,15 @@ class Runner:
             self._sync_wanted()
             if watch == self._watched:
                 return
-            await self.backfill(sorted(watch - (self._watched or set())))
+            added = sorted(watch - (self._watched or set()))
+            await self.backfill(added)
             # 空集也订一次：全市场强平那条连接要开着（选币用）
             await feed.subscribe(sorted(watch))
             self._watched = watch
+            if added and self.market is not None and self.market.on and not is_stub(feed):
+                # 订上之后再补成交：实时流先开始收，REST 补的那段才接得上，不留空档
+                first = [s for s in (BTC, *sorted(held)) if s in added]
+                self._spawn(self.market.warm([*first, *added]))
 
     def on_contract_info(self, info: ContractInfo) -> None:
         """币安合约信息推送：盯着的币 / 候选池的币 / 持仓的币。
@@ -1285,6 +1305,10 @@ class Runner:
         if not isinstance(self.m.risk, _ChaseRecheck):
             return [*why, "风控员不支持追单复核"]
         account = await self.m.executor.account()
+        if self.market is not None:
+            await self.market.refresh(
+                intent.symbol, self.app.app_cfg.fast_loop.chase_price_max_age_s or None
+            )
         now = self.app.clock()
         card = self.m.cards.current(now)
         direction = card.current_market.regime_direction if card and card.current_market else None

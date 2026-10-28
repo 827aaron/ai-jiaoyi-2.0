@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import asyncio
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -140,3 +141,72 @@ def answer_with(probs: Mapping[str, Mapping[str, float]]) -> Any:
         return {q.id: probs[q.id] for q in questions}
 
     return f
+
+
+class FakeMarketRest:
+    """假的币安公开行情 REST（``MarketData`` 的 ``fetch``）：``/fapi/v1/aggTrades`` 和
+    ``/fapi/v1/premiumIndex``。``trades[币]`` 是 [(时间, 价格, 名义 U, 主动买)]，按时间排。
+
+    ``fail``：这些币一请求就抛这个异常；``delay``：每次请求等几秒（测并发）；``on_call``：
+    每次请求先调一下（测预算节奏时记时间）。"""
+
+    def __init__(
+        self,
+        trades: Mapping[str, Sequence[tuple[datetime, float, float, bool]]],
+        *,
+        now: datetime,
+        funding: float = 0.0001,
+        delay: float = 0.0,
+        fail: Mapping[str, Exception] | None = None,
+        on_call: Callable[[str, dict[str, Any], int], None] | None = None,
+    ) -> None:
+        self.trades = trades
+        self.now = now
+        self.funding = funding
+        self.delay = delay
+        self.fail = dict(fail or {})
+        self.on_call = on_call
+        self.calls: list[tuple[str, dict[str, Any], int]] = []
+        self.inflight = 0
+        self.max_inflight = 0
+
+    def agg_calls(self, symbol: str | None = None) -> int:
+        return sum(
+            1
+            for p, q, _ in self.calls
+            if p == "/fapi/v1/aggTrades" and (symbol is None or q["symbol"] == symbol)
+        )
+
+    async def __call__(self, path: str, params: dict[str, Any], weight: int) -> Any:
+        self.calls.append((path, dict(params), weight))
+        if self.on_call is not None:
+            self.on_call(path, params, weight)
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            sym = params["symbol"]
+            if sym in self.fail:
+                raise self.fail[sym]
+            rows = self.trades.get(sym, [])
+            if path == "/fapi/v1/premiumIndex":
+                px = str(rows[-1][1]) if rows else "1.0"
+                return {
+                    "symbol": sym,
+                    "markPrice": px,
+                    "indexPrice": px,
+                    "lastFundingRate": str(self.funding),
+                    "nextFundingTime": int((self.now + timedelta(hours=1)).timestamp() * 1000),
+                    "time": int(self.now.timestamp() * 1000),
+                }
+            out = [
+                {"a": i, "p": str(p), "q": str(u / p), "T": int(at.timestamp() * 1000), "m": not b}
+                for i, (at, p, u, b) in enumerate(rows)
+            ]
+            limit = int(params["limit"])
+            if "fromId" in params:
+                return [r for r in out if r["a"] >= int(params["fromId"])][:limit]
+            return out[-limit:]
+        finally:
+            self.inflight -= 1

@@ -18,6 +18,9 @@ from jiaoyi.contracts import Interval, Kline
 from jiaoyi.gate import outcomes
 from jiaoyi.gate.bars import OutcomeBars
 from jiaoyi.market import rest
+from jiaoyi.market.features import RollingFeatureEngine
+from jiaoyi.market.provider import REST_WEIGHT_PER_MIN, MarketData
+from tests.fastloop_helpers import FakeMarketRest
 
 
 @pytest.fixture(autouse=True)
@@ -386,3 +389,54 @@ def test_backfill_stops_quietly_when_rate_limited(
         )
     )
     assert (n, failed) == (0, 3) and "拉行情失败" not in caplog.text
+
+
+def _market(
+    symbols: list[str], now: datetime, **kw: Any
+) -> tuple[MarketData, FakeMarketRest, RollingFeatureEngine]:
+    eng = RollingFeatureEngine(atr_period_min=1)
+    trades = {
+        s: [(now - timedelta(seconds=10 * i), 100.0, 1000.0, i % 2 == 0) for i in range(30, 0, -1)]
+        for s in symbols
+    }
+    fake = FakeMarketRest(trades, now=now, on_call=kw.pop("on_call", None))
+    md = MarketData(eng, enabled=lambda: True, clock=lambda: now, fetch=fake, **kw)
+    return md, fake, eng
+
+
+async def test_market_data_banned_falls_back_to_waiting(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = datetime(2026, 10, 29, 6, 0, tzinfo=UTC)
+    monkeypatch.setattr(rest, "_own", rest.RateLimited(418, time.time() + 600))
+    md, fake, eng = _market(["FILUSDT"], now)
+    r = await md.snapshot("FILUSDT", need=("ret_5m",))
+    await md.warm(["FILUSDT"])
+    assert r.source == "stale" and "限流" in r.reason and "等实时行情" in r.reason
+    assert fake.calls == []  # 封着不发请求，发了只会延长封禁
+    assert "FILUSDT" not in eng.symbols()  # 什么都没补：哨兵照旧等实时行情预热
+    assert sum("限流" in rec.getMessage() for rec in caplog.records) == 1
+
+
+async def test_market_data_startup_stagger_respects_the_weight_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 10, 29, 6, 0, tzinfo=UTC)
+    t = [0.0]
+    sent: list[tuple[float, int]] = []
+
+    async def sleep(s: float) -> None:
+        t[0] += s
+
+    budget = rest.WeightBudget(REST_WEIGHT_PER_MIN, clock=lambda: t[0], sleep=sleep)
+    symbols = [f"C{i:03d}USDT" for i in range(60)]
+    md, fake, _ = _market(
+        symbols, now, budget=budget, on_call=lambda p, q, w: sent.append((t[0], w))
+    )
+    monkeypatch.setattr(rest, "_used_weight", 1500)  # 同 IP 别的程序这一分钟已用过半：先等
+    await md.warm(symbols)
+    assert fake.agg_calls() == 60 and sum(w for _, w in sent) == 60 * 21
+    assert sent[0][0] > 0
+    for start, _ in sent:
+        assert sum(w for at, w in sent if start <= at < start + 60) <= REST_WEIGHT_PER_MIN
+    assert REST_WEIGHT_PER_MIN == 720  # 本 IP 每分钟 2400 的三成
