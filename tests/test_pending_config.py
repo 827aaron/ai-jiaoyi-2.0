@@ -780,6 +780,7 @@ def test_pending_accepts_reuse_expiry_and_regime_age_keys(tmp_path: Path) -> Non
         paths,
         "slow",
         "[schedule]\nreuse_extend_expiry = true\n"
+        "card_flip_confirm = 2\ncard_flip_confirm_min = 30\n"
         "[meeting]\nregime_time_label = true\nregime_max_age_min = 120\npool_scope_label = true\n"
         "[market_desk]\nrepublish_after_min = 60\n",
     )
@@ -788,6 +789,7 @@ def test_pending_accepts_reuse_expiry_and_regime_age_keys(tmp_path: Path) -> Non
     slow = load_slow_config(paths.slow, "standard")
     kw = slow.commander_kwargs()
     assert kw["reuse_extend_expiry"] is True
+    assert (kw["flip_confirm"], kw["flip_confirm_min"]) == (2, timedelta(minutes=30))
     assert (kw["regime_time_label"], kw["regime_max_age"], kw["pool_scope_label"]) == (
         True,
         timedelta(minutes=120),
@@ -796,6 +798,7 @@ def test_pending_accepts_reuse_expiry_and_regime_age_keys(tmp_path: Path) -> Non
     assert slow.market_desk.republish_after_min == 60.0
     defaults = SlowConfig().commander_kwargs()
     assert (defaults["reuse_extend_expiry"], defaults["regime_time_label"]) == (False, False)
+    assert (defaults["flip_confirm"], defaults["flip_confirm_min"]) == (1, timedelta(0))
     assert (defaults["regime_max_age"], defaults["pool_scope_label"]) == (timedelta(0), False)
     assert SlowConfig().market_desk.republish_after_min == 0.0
 

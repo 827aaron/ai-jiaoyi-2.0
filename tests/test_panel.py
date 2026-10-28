@@ -1242,7 +1242,18 @@ def test_card_pool_rows_show_source_and_hide_expired(tmp_path: Path) -> None:
     t0 = NOW - timedelta(minutes=30)
     iso = lambda m: (NOW + timedelta(minutes=m)).isoformat()  # noqa: E731
     pool = {
-        "AAUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(60), "held": False},
+        "AAUSDT": {
+            "issued_at": t0.isoformat(),
+            "expires_at": iso(60),
+            "held": False,
+            "flip_pending": {
+                "confirmed": "long",
+                "candidate": "short",
+                "count": 1,
+                "need": 2,
+                "since": t0.isoformat(),
+            },
+        },
         "BBUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(5), "held": False},
         "CCUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(-1), "held": False},
         "DDUSDT": {"issued_at": t0.isoformat(), "expires_at": iso(-1), "held": True},
@@ -1263,6 +1274,11 @@ def test_card_pool_rows_show_source_and_hide_expired(tmp_path: Path) -> None:
         == f"来自 {t0:%H:%M} 的会 · {NOW + timedelta(minutes=60):%H:%M} 到期"
     )
     assert not by["AAUSDT"].fading and by["BBUSDT"].fading
+    assert by["AAUSDT"].flip_pending is not None
+    assert by["AAUSDT"].flip_pending.startswith(
+        "待确认翻转 1/2：会议改判做空，卡上仍按做多只看不做"
+    )
+    assert by["BBUSDT"].flip_pending is None
     assert (
         by["DDUSDT"].source_note is not None
         and "已过期·持仓中，不再开新仓" in by["DDUSDT"].source_note

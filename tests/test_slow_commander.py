@@ -1219,3 +1219,207 @@ def test_commander_restore_keeps_last_512_valid_view_directions(tmp_path: Path) 
     )
     c, _, _ = make(tmp_path, FakeEngine([]), R1, card_path=tmp_path / "battle_card.json")
     assert list(c._view_dirs) == [f"v{i}" for i in range(88, 600)]
+
+
+class _Directed2(FakeEngine):
+    """Each meeting of a symbol returns the next bias of its script."""
+
+    def __init__(self, script: dict[str, list[Bias]]) -> None:
+        super().__init__(list(script))
+        self.script = {k: list(v) for k, v in script.items()}
+
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+        await super().analyze(e, regime, pick_reason)
+        bias = self.script[e.symbol].pop(0)
+        signals = [] if bias is Bias.NO_TRADE else [SignalKind.VOLUME_BREAKOUT]
+        return Analysis(
+            card_symbol(e.symbol, bias=bias, allowed_signals=signals, reason=f"会议{bias.value}"),
+            0.02,
+        )
+
+
+_OPP = {Bias.LONG: Bias.SHORT, Bias.SHORT: Bias.LONG}
+_SIDE = {Bias.LONG: Side.LONG, Bias.SHORT: Side.SHORT}
+
+
+async def _flip_rounds(
+    tmp_path: Path, now: datetime, script: list[Bias], **kw: object
+) -> tuple[BattleCardCommander, JsonlDecisionLog, list[datetime], list[BattleCard]]:
+    from jiaoyi.slow.review import CardJournal
+
+    eng = _Directed2({"AAUSDT": script})
+    c, log, clock = make(
+        tmp_path,
+        eng,
+        now,
+        symbol_min_interval=timedelta(minutes=5),
+        card_path=tmp_path / "battle_card.json",
+        journal=CardJournal(tmp_path),
+        **kw,
+    )
+    cards = []
+    for i in range(len(script)):
+        clock[0] = now + timedelta(minutes=60 * i)
+        cards.append(await c.refresh(pool(clock[0], entry("AAUSDT")), "scheduled"))
+    return c, log, clock, cards
+
+
+def _flip_records(log: JsonlDecisionLog, now: datetime) -> list[str]:
+    return [
+        str(r.output["card_flip"])
+        for r in log.read_day(now.date().isoformat())
+        if r.output and "card_flip" in r.output
+    ]
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_waits_for_second_agreeing_meeting(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    from jiaoyi.slow.review import CardJournal
+
+    opp = _OPP[start]
+    c, log, clock, cards = await _flip_rounds(tmp_path, now, [start, opp], flip_confirm=2)
+    pos = PositionRecord.model_construct(symbol="AAUSDT", side=_SIDE[start])
+    first = cards[0].for_symbol("AAUSDT")
+    held = cards[1].for_symbol("AAUSDT")
+    assert first is not None and held is not None
+    assert held.bias is start and held.allowed_signals == []
+    assert (held.issued_at, held.meeting_id) == (first.issued_at, first.meeting_id)
+    assert held.reason.startswith("待确认翻转（1/2）")
+    assert held.reason.endswith(f"会议{start.value}")
+    assert JevKeeper._card_rule(pos, cards[1], clock[0]) is None
+    assert [r.bias for r in CardJournal(tmp_path).read()] == [start.value, opp.value]
+    issued = [
+        r
+        for r in log.read_day(now.date().isoformat())
+        if r.card_id and r.outcome is Outcome.ACTION and not r.symbol
+    ]
+    note = issued[-1].output["pool"]["AAUSDT"]["flip_pending"]
+    assert (note["confirmed"], note["candidate"], note["count"], note["need"]) == (
+        start.value,
+        opp.value,
+        1,
+        2,
+    )
+    # the confirming meeting is an event meeting: both kinds count
+    c._engine.script["AAUSDT"].append(opp)  # type: ignore[attr-defined]
+    clock[0] += timedelta(minutes=30)
+    card = await c.refresh_symbol(pool(clock[0], entry("AAUSDT")), "AAUSDT", "key_level_break")
+    assert card is not None
+    flipped = card.for_symbol("AAUSDT")
+    assert flipped is not None and flipped.bias is opp and flipped.allowed_signals
+    assert JevKeeper._card_rule(pos, card, clock[0]) == f"新作战卡方向改成 {opp.value}"
+    assert _flip_records(log, now) == ["pending", "confirmed"]
+    assert json.loads((tmp_path / "card_flip.json").read_text())["flips"] == {}
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_back_cancels_candidate(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    c, log, _clock, cards = await _flip_rounds(
+        tmp_path, now, [start, _OPP[start], start], flip_confirm=2
+    )
+    last = cards[2].for_symbol("AAUSDT")
+    assert last is not None and last.bias is start and last.allowed_signals
+    assert last.reason == f"会议{start.value}"
+    assert _flip_records(log, now) == ["pending", "cancelled"]
+    assert c._flips.items() == {}
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_to_neutral_needs_confirmation_too(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    _c, log, _clock, cards = await _flip_rounds(
+        tmp_path,
+        now,
+        [start, Bias.NO_TRADE, _OPP[start], Bias.NO_TRADE, Bias.NO_TRADE],
+        flip_confirm=2,
+    )
+    held = [cards[i].for_symbol("AAUSDT") for i in (1, 2, 3)]
+    assert all(h is not None and h.bias is start and h.allowed_signals == [] for h in held)
+    assert [h.reason[:10] for h in held if h is not None] == ["待确认翻转（1/2）"] * 3
+    final = cards[4].for_symbol("AAUSDT")
+    assert final is not None and final.bias is Bias.NO_TRADE
+    assert _flip_records(log, now) == ["pending", "pending", "pending", "confirmed"]
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_out_of_neutral_applies_at_once(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    _c, log, _clock, cards = await _flip_rounds(
+        tmp_path, now, [Bias.NO_TRADE, start], flip_confirm=3
+    )
+    cs = cards[1].for_symbol("AAUSDT")
+    assert cs is not None and cs.bias is start and cs.allowed_signals
+    assert _flip_records(log, now) == []
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_default_applies_new_direction_immediately(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    _c, log, _clock, cards = await _flip_rounds(tmp_path, now, [start, _OPP[start]])
+    cs = cards[1].for_symbol("AAUSDT")
+    assert cs is not None and cs.bias is _OPP[start] and cs.allowed_signals
+    assert _flip_records(log, now) == []
+    assert not (tmp_path / "card_flip.json").exists()
+
+
+async def test_commander_flip_respects_minimum_candidate_age(tmp_path: Path, now: datetime) -> None:
+    _c, log, _clock, cards = await _flip_rounds(
+        tmp_path,
+        now,
+        [Bias.LONG, Bias.SHORT, Bias.SHORT, Bias.SHORT],
+        flip_confirm=2,
+        flip_confirm_min=timedelta(minutes=90),
+    )
+    biases = [c.for_symbol("AAUSDT").bias for c in cards]  # type: ignore[union-attr]
+    assert biases == [Bias.LONG, Bias.LONG, Bias.LONG, Bias.SHORT]
+    assert _flip_records(log, now) == ["pending", "pending", "confirmed"]
+
+
+@pytest.mark.parametrize("start", [Bias.LONG, Bias.SHORT])
+async def test_commander_flip_candidate_survives_restart(
+    tmp_path: Path, now: datetime, start: Bias
+) -> None:
+    opp = _OPP[start]
+    _c, _log, clock, _cards = await _flip_rounds(tmp_path, now, [start, opp], flip_confirm=2)
+    c2, _, clock2 = make(
+        tmp_path / "after",
+        _Directed2({"AAUSDT": [opp]}),
+        clock[0] + timedelta(minutes=30),
+        symbol_min_interval=timedelta(minutes=5),
+        card_path=tmp_path / "battle_card.json",
+        flip_confirm=2,
+    )
+    got = c2._flips.get("AAUSDT")
+    assert got is not None
+    assert (got.confirmed, got.candidate, got.count) == (start.value, opp.value, 1)
+    card = await c2.refresh(pool(clock2[0], entry("AAUSDT")), "scheduled")
+    cs = card.for_symbol("AAUSDT")
+    assert cs is not None and cs.bias is opp and cs.allowed_signals
+
+
+async def test_commander_flip_restore_drops_candidate_whose_held_instruction_changed(
+    tmp_path: Path, now: datetime
+) -> None:
+    _c, _log, clock, _cards = await _flip_rounds(
+        tmp_path, now, [Bias.LONG, Bias.SHORT], flip_confirm=2
+    )
+    path = tmp_path / "card_flip.json"
+    raw = json.loads(path.read_text())
+    raw["flips"]["AAUSDT"]["held"] = "other-meeting|2026-01-01T00:00:00+00:00|long"
+    path.write_text(json.dumps(raw))
+    c2, _, _ = make(
+        tmp_path / "after",
+        FakeEngine([]),
+        clock[0],
+        card_path=tmp_path / "battle_card.json",
+        flip_confirm=2,
+    )
+    assert c2._flips.items() == {}
+    assert json.loads(path.read_text())["flips"] == {}

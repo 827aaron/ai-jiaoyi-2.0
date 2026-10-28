@@ -112,6 +112,8 @@ class CardRow(BaseModel):
     issued_at: datetime | None = None
     expires_at: datetime | None = None
     held: bool = False
+    flip_pending: str | None = None
+    """待确认翻转（``[schedule] card_flip_confirm``）：会议改判了，卡上仍按原方向只看不做。"""
     source_note: str | None = None
     source_regime: str | None = None
     source_market_view_id: str | None = None
@@ -793,6 +795,21 @@ def _with_pending(card: CardView | None, root: Path, now: datetime, tz: str) -> 
     return card.model_copy(update={"symbols": rows})
 
 
+_FLIP_DIR = {"long": "做多", "short": "做空", "neutral": "中性"}
+
+
+def _flip_text(raw: object) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    was, to = _FLIP_DIR.get(str(raw.get("confirmed"))), _FLIP_DIR.get(str(raw.get("candidate")))
+    if was is None or to is None:
+        return None
+    return (
+        f"待确认翻转 {raw.get('count')}/{raw.get('need')}：会议改判{to}，卡上仍按{was}只看不做"
+        "（不开新仓，持仓不按卡规则平），同一个币再有会议给出同一方向才换"
+    )
+
+
 def _card(
     records: list[DecisionRecord], now: datetime, held: set[str] | None = None
 ) -> CardView | None:
@@ -805,8 +822,11 @@ def _card(
     names = [str(s) for s in last.output.get("symbols", [])]
     pool = last.output.get("pool")
     stamps: dict[str, tuple[datetime | None, datetime | None, bool]] = {}
+    flips: dict[str, str] = {}
     if isinstance(pool, dict):
         for n, v in pool.items():
+            if isinstance(v, dict) and (note := _flip_text(v.get("flip_pending"))):
+                flips[str(n)] = note
             if isinstance(v, dict):
                 stamps[str(n)] = (
                     _parse_ts(v.get("issued_at")),
@@ -857,6 +877,7 @@ def _card(
                 issued_at=stamps[n][0] if n in stamps else None,
                 expires_at=stamps[n][1] if n in stamps else None,
                 held=stamps[n][2] if n in stamps else False,
+                flip_pending=flips.get(n),
             )
             if cs
             else CardRow(
