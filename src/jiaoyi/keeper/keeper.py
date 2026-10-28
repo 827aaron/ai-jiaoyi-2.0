@@ -127,6 +127,7 @@ class JevKeeper:
         scan_day: Callable[[str, str], list[dict[str, Any]]] | None = None,
         current_market: Callable[[], MarketView | None] | None = None,
         market_intra: Callable[[datetime, MarketView | None], str | None] | None = None,
+        market_age: Callable[[datetime, MarketView | None], Mapping[str, Any]] | None = None,
         frozen_peak_review: Callable[[str, datetime], Awaitable[dict[str, Any] | None]]
         | None = None,
         observation_source: Callable[[str, datetime], Mapping[str, Any] | None] | None = None,
@@ -161,6 +162,7 @@ class JevKeeper:
         self._card = card
         self._market_source = current_market
         self._market_intra = market_intra
+        self._market_age = market_age
         self._observation_source = observation_source
         self._observation_sink = observation_sink
         self._observation_wall = observation_wall
@@ -531,6 +533,7 @@ class JevKeeper:
                 fee_bps=self._fee_bps,
                 current_market=market,
                 market_intra=self._intra(now, market),
+                market_age=self._market_age(now, market) if self._market_age else None,
             ),
             questions=hold_questions(),
         )

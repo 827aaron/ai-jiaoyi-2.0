@@ -377,6 +377,24 @@ class MeetingConfig(_Strict):
         description="开 = 临时会开会前刷新大盘简报（简报自己 10 分钟内不重复拉）；关 = 用上一轮"
         "留下的简报（现状，最旧可到一个开会间隔）。",
     )
+    regime_time_label: bool = Field(
+        default=False,
+        description="开 = 各币会议的大盘判断前写明这份判断几点发布、距开会多少分钟（不管 "
+        "publish_intra 开没开）；持仓管家和拍板人快照的 current_market 加 age_min。关 = 现状"
+        "（只有 publish_intra 开着、观点是大盘台发的时候才写发布时刻）。",
+    )
+    regime_max_age_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        description="大盘判断发布超过这么多分钟：各币会议里标「已过期，仅作参考」，管家和拍板人"
+        "快照的 current_market 加 age_min 和 stale。0 = 不标（现状）。",
+    )
+    pool_scope_label: bool = Field(
+        default=False,
+        description="开 = 各币会议里大盘判断和「4 小时之内」前标明其中的涨跌、主动买卖占比等数字是"
+        "全池口径，不是这个币自己的。关 = 现状。",
+    )
     debate_rounds: int = Field(default=1, ge=0, le=3, description="多空辩论轮数；越多越贵。")
     risk_rounds: int = Field(default=1, ge=0, le=3, description="风控讨论轮数。")
     quick_model: str | None = Field(default=None, description="不写 = 用所选 provider 的默认模型。")
@@ -527,6 +545,13 @@ class ScheduleConfig(_Strict):
     )
     symbol_min_interval_min: float = Field(
         default=115.0, ge=5.0, le=1440.0, description="同一个币两次会议的最小间隔（分钟）。"
+    )
+    reuse_extend_expiry: bool = Field(
+        default=False,
+        description="开 = 整轮里因为同币最小间隔没重开会、沿用上一张卡的币，到期时间顺延到"
+        "这一轮新卡的到期时间，但从它自己开会那一刻算最多活一个卡有效期（card_ttl_min）；"
+        "整轮选币期间开完的临时会同样顺延。关 = 沿用的指令保留原到期时间（现状，可能在下一轮"
+        "之前就消失）。",
     )
     refresh_lead_min: float = Field(
         default=20.0,
@@ -863,6 +888,14 @@ class MarketDeskSection(_Strict):
         le=1440.0,
         description="两次方向发布至少隔几分钟；0 = 只靠连续确认。",
     )
+    republish_after_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        description="方向没变时，当前生效的大盘台观点发布超过这么多分钟，就把这一轮的话和数字"
+        "按同一方向重发一版（版本号 +1；每发一版持仓都会排队复核，翻转参照不变）。"
+        "0 = 方向没变不发（现状）。",
+    )
     daily_cost_limit_usd: float = Field(
         default=0.0,
         ge=0.0,
@@ -1089,6 +1122,10 @@ class SlowConfig(_Strict):
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
             "latest_market_regime": self.meeting.latest_market_regime,
             "event_brief_refresh": self.meeting.event_brief_refresh,
+            "reuse_extend_expiry": s.reuse_extend_expiry,
+            "regime_time_label": self.meeting.regime_time_label,
+            "regime_max_age": timedelta(minutes=self.meeting.regime_max_age_min),
+            "pool_scope_label": self.meeting.pool_scope_label,
         }
 
 

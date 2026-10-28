@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import tomllib
 from collections.abc import Sequence
@@ -40,6 +41,9 @@ FRESH_KEYS = (
     "market_table_rolling",
     "latest_market_regime",
     "event_brief_refresh",
+    "regime_time_label",
+    "regime_max_age_min",
+    "pool_scope_label",
 )
 ALL_ON = {
     "snapshot_interval": "15m",
@@ -727,3 +731,127 @@ def test_example_toml_meeting_section_parses_with_every_key_uncommented() -> Non
     data = tomllib.loads(on)
     assert set(FRESH_KEYS) <= set(data["meeting"])
     SlowConfig.model_validate(data)
+
+
+# ---------------------------------------------------------------- 大盘判断的时间和口径
+# 2026-10-28：方向没变就不重发，01:47–04:09 的单币会拿到 23:32 那段话，没有时间
+LABELS = [
+    ({}, "本轮开始：看跌 1 2"),
+    (
+        {"regime_time_label": True},
+        "（大盘判断 06:30 UTC 发布，距此刻 157 分钟）本轮开始：看跌 1 2",
+    ),
+    (
+        {"regime_max_age": timedelta(minutes=120)},
+        "（大盘判断 06:30 UTC 发布，距此刻 157 分钟，已过期，仅作参考）本轮开始：看跌 1 2",
+    ),
+    (
+        {"regime_max_age": timedelta(minutes=180)},
+        "本轮开始：看跌 1 2",
+    ),
+    (
+        {"pool_scope_label": True},
+        "（其中的涨跌、主动买卖占比等数字是全池口径，不是这个币自己的）本轮开始：看跌 1 2",
+    ),
+]
+
+
+@pytest.mark.parametrize(("kw", "expected"), LABELS)
+async def test_commander_refresh_symbol_labels_regime_age_and_scope(
+    tmp_path: Path, now: datetime, kw: dict[str, Any], expected: str
+) -> None:
+    from jiaoyi.slow.commander import EventRules
+
+    clock = [now]
+    engine = _Engine()
+    c = BattleCardCommander(
+        engine,  # type: ignore[arg-type]
+        RISK,
+        JsonlDecisionLog(tmp_path / "log"),
+        clock=lambda: clock[0],
+        ttl=timedelta(hours=4),
+        events=EventRules(enabled=True, triggers=frozenset({"signal_against_card"})),
+        **kw,
+    )
+    engine.commander = c
+    p = pool(now, entry("AAUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = now + timedelta(minutes=157)
+    assert await c.refresh_symbol(p, "AAUSDT", "signal_against_card") is not None
+    assert engine.seen[-1][1] == expected
+    rows = [
+        r.output["meeting_setup"]
+        for r in JsonlDecisionLog(tmp_path / "log").read_day(now.date().isoformat())
+        if r.symbol == "AAUSDT" and r.output and "meeting_setup" in r.output
+    ]
+    labelled = "距此刻" in expected
+    assert ("regime_age_min" in rows[-1]) is labelled
+    assert ("regime_stale" in rows[-1]) is ("已过期" in expected)
+
+
+def test_regime_labels_are_neutral() -> None:
+    from jiaoyi.slow.commander import POOL_SCOPE, REGIME_STALE
+    from tests.test_market_desk import assert_paired
+
+    labels = [POOL_SCOPE, REGIME_STALE, "全池口径：", "大盘判断 06:30 UTC 发布，距此刻 157 分钟"]
+    assert_paired(labels)
+
+
+def _aged_view(now: datetime) -> MarketView:
+    return MarketView(
+        market_view_id="mv-2332",
+        version=4,
+        observed_at=now - timedelta(minutes=157),
+        regime="23:32 的判断",
+        regime_direction="中性",
+    )
+
+
+@pytest.mark.parametrize(
+    ("kw", "expected"),
+    [
+        ({}, {}),
+        ({"regime_time_label": True}, {"age_min": 157.0}),
+        (
+            {"regime_max_age": timedelta(minutes=120)},
+            {"age_min": 157.0, "stale": "已过期，仅作参考"},
+        ),
+    ],
+)
+async def test_keeper_and_entry_snapshots_carry_market_age(
+    tmp_path: Path, now: datetime, kw: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    from jiaoyi.gate.entry import JevEntryGate
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from jiaoyi.keeper.keeper import JevKeeper
+    from tests.fastloop_helpers import FAST, GOOD_LONG, answer_with, card, features, signal
+    from tests.test_keeper_patrol import close_p, position
+
+    c = BattleCardCommander(
+        _Engine(),  # type: ignore[arg-type]
+        RISK,
+        JsonlDecisionLog(tmp_path / "log"),
+        clock=lambda: now,
+        **kw,
+    )
+    view = _aged_view(now)
+    cfg = FAST.model_copy(update={"giveback_on": False})
+    t = MockJevTransport(answer=close_p(0.1))
+    keeper = JevKeeper(
+        JevDecisionModel(t, cfg, timeout_ms=200),
+        cfg,
+        lambda s: features(now),
+        lambda n: card(now),
+        current_market=lambda: view,
+        market_age=c.market_age,
+    )
+    await keeper.review(position(now), now)
+    held = json.loads(t.calls[-1])["current_market"]
+    assert {k: held[k] for k in ("age_min", "stale") if k in held} == expected
+    assert held["market_view_id"] == "mv-2332"
+
+    t2 = MockJevTransport(answer=answer_with(GOOD_LONG))
+    gate = JevEntryGate(JevDecisionModel(t2, FAST, timeout_ms=200), market_age=c.market_age)
+    await gate.evaluate(signal(now), card(now).model_copy(update={"current_market": view}), now)
+    got = json.loads(t2.calls[-1])["current_market"]
+    assert {k: got[k] for k in ("age_min", "stale") if k in got} == expected

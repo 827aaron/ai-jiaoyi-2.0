@@ -2184,3 +2184,34 @@ async def test_1h_probs_line_says_how_wide_flat_is(tmp_path: Path) -> None:
     # 旧状态里没有这个数：照旧不写宽度
     old = {k: v for k, v in latest["intra"].items() if k != "flat_band_1h_pct"}
     assert compose_intra(old, T0, 5.0).startswith("10:02 UTC 起 1 小时概率：跌 23%")
+
+
+@pytest.mark.parametrize("after", [0.0, 30.0])
+async def test_desk_run_republishes_unchanged_direction_after_republish_after_min(
+    tmp_path: Path, after: float
+) -> None:
+    commander, _, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    script = Switch(answer(0.6, 0.25, 0.15))
+    desk = make_desk(tmp_path, commander, FakeModel(script), clock, republish_after_min=after)
+    await desk.run(candidates, "scheduled")
+    first = commander.latest_market_view
+    assert first is not None and first.version == 2
+    ref = commander.regime_reference
+    notified: list[Any] = []
+    commander.set_on_market(notified.append)
+    clock[0] += timedelta(minutes=15)
+    assert (await desk.run(candidates, "scheduled")).published is None  # younger than 30 min
+    clock[0] += timedelta(minutes=15)
+    again = (await desk.run(candidates, "scheduled")).published
+    if after == 0:
+        assert again is None and commander.latest_market_view is first and notified == []
+        return
+    assert again is not None and commander.latest_market_view is again
+    assert again.version == 3 and again.regime_direction == first.regime_direction == "看涨"
+    assert again.observed_at == T0 + timedelta(minutes=30)
+    assert notified == [again]
+    assert commander.regime_reference == ref  # same direction: flip reference untouched
+    assert desk.state.latest is not None and desk.state.latest["republished_same_direction"]
+    script.text = answer(0.15, 0.25, 0.6)  # a new direction still needs the hysteresis
+    clock[0] += timedelta(minutes=15)
+    assert (await desk.run(candidates, "scheduled")).published is None

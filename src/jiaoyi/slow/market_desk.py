@@ -1285,18 +1285,23 @@ class MarketDesk:
     ) -> MarketView | None:
         """滞回：大盘台第一次接管立即发布；之后新方向要连续 ``publish_confirm`` 轮一致，并且从第一次
         出现起持续 ``publish_confirm_min`` 分钟（这几轮里有急动 / 翻转加跑的轮时只看轮数），还要离
-        上次发布够 ``publish_min_gap_min``。方向没变不发（每发一版所有持仓都要排队复核）。"""
+        上次发布够 ``publish_min_gap_min``。方向没变不发（每发一版所有持仓都要排队复核），除非
+        ``republish_after_min`` 开着、当前观点已经旧过它：同方向重发这一轮的话和数字。"""
         if self.cfg.mode != "replace":
             return None
         view = self._pub.latest_market_view
         # 当前观点不是大盘台发的（第一次接管、Flash 回退期间发过、或上次接管被取代）：立即发布
         takeover = view is None or view.source != DESK_SOURCE
         st = self.state
+        refresh = False
         if not takeover and view is not None and direction == view.regime_direction:
             st.candidate, st.candidate_count = None, 0
             st.candidate_since, st.candidate_event = None, False
-            return None
-        if not takeover:
+            after = self.cfg.republish_after_min
+            if after <= 0 or completed - view.observed_at < timedelta(minutes=after):
+                return None
+            refresh = True
+        if not takeover and not refresh:
             event = reason != "scheduled"
             if direction == st.candidate and st.candidate_since is not None:
                 st.candidate_count += 1
@@ -1337,6 +1342,8 @@ class MarketDesk:
         if st.latest is not None:
             st.latest["published_view_id"] = published.market_view_id
             st.latest["published_version"] = published.version
+            if refresh:
+                st.latest["republished_same_direction"] = True
         return published
 
     # ---------------------------------------------------------- 记录
