@@ -1270,7 +1270,9 @@ def draft_to_card_symbol(
     signals = d.allowed_signals if bias is not Bias.NO_TRADE else []
     reason = d.reason
     zone = entry_zone_of(d, levels)
+    gated_from: Bias | None = None
     if bias in (Bias.LONG, Bias.SHORT) and zone_required and zone is None:
+        gated_from = bias
         bias, signals, reason = Bias.NO_TRADE, [], f"{reason}（会议没给进场区间）"[:500]
     elif bias is not Bias.NO_TRADE and not signals:
         # 方向卡信号列表为空 = 这个币一个信号都出不来：按默认信号集（全部）填上，并在理由里记一笔
@@ -1293,6 +1295,7 @@ def draft_to_card_symbol(
         take_profit_r=rng(d.take_profit_r_min, d.take_profit_r_max),
         entry_zone=zone if bias is not Bias.NO_TRADE else None,
         reason=reason,
+        no_trade_from=gated_from,
     )
 
 
@@ -1813,7 +1816,10 @@ def rating_guard(
     if weakest >= 2:
         return cs
     if zone_ok is False:
-        return _no_trade(cs, "只是偏向，要等进场区间，会议没给")
+        gated = _no_trade(cs, "只是偏向，要等进场区间，会议没给")
+        if cs.bias in (Bias.LONG, Bias.SHORT):
+            gated = gated.model_copy(update={"no_trade_from": cs.bias})
+        return gated
     lean = "偏多" if agreed > 0 else "偏空"
     who = "研究经理" if rm in _DIRECTION and _STRENGTH[rm] == 1 else "组合经理"
     note = f"（{who}只是{lean}，仓位最多 {lean_tier.value}、等区间）"

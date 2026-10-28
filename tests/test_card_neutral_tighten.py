@@ -15,7 +15,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core import hotconfig
 from jiaoyi.execution.exchange import ExecutionBook
 from jiaoyi.slow.tradingagents_engine import stale_card
-from tests.fastloop_helpers import FAST, card
+from tests.fastloop_helpers import FAST, card, features
 from tests.test_execution import START
 from tests.test_keeper_patrol import position
 from tests.test_opposite_card_tighten import (
@@ -166,6 +166,55 @@ def test_opposite_card_takes_over_from_neutral(now: datetime) -> None:
 
 
 # ---------------------------------------------------------------- close / 行情过旧
+
+
+@pytest.mark.parametrize(
+    ("gated_from", "neutral"), [("short", False), ("long", True)], ids=["same_dir", "opposite_dir"]
+)
+def test_gate_rewritten_no_trade_is_neutral_only_against_the_position(
+    now: datetime, gated_from: str, neutral: bool
+) -> None:
+    """「会议没给进场区间」改成的 no_trade：会议方向同持仓 = 只是先别开，不动；反着持仓 = 中性。"""
+    cd = neutral_card(now, no_trade_from=gated_from, reason="反抽做空（会议没给进场区间）")
+    k, rec, _, _ = make_keeper(now, NEUTRAL, cd=cd)
+    v = k.review_card_rule(short_pos(now), now)
+    assert (v is not None) is neutral and k.card_rule_applies(short_pos(now), now) is neutral
+    assert bool(rec.rows) is neutral
+
+
+async def test_loop_close_mode_on_stale_price_falls_through_to_normal_review(
+    tmp_path: Path, now: datetime
+) -> None:
+    cfg = FAST.model_copy(update={"card_neutral_action": "close"})
+    k, _, _, _ = make_keeper(now, cfg, cd=neutral_card(now))
+    k._features = lambda _: None
+    ex = TightenExecutor(short_pos(now), None)
+    runner = _runner(tmp_path, now, k, ex)
+    runner.positions = [short_pos(now)]
+    assert k.card_rule_watch(short_pos(now), now) is True
+    assert await runner._review_card_rules() == set()  # 不平的这一轮照常复查（冻结盈利价 / 模型）
+    await drain(runner)
+    assert ex.closed == [] and ex.tighten_calls == []
+    k._features = lambda _: features(now)
+    assert k.card_rule_watch(short_pos(now), now) is False
+    assert await runner._review_card_rules() == {"pos-1"}
+    await drain(runner)
+    assert ex.closed == [("pos-1", CloseReason.KEEPER)]
+
+
+async def test_loop_tighten_log_dedupe_is_per_rule_kind(tmp_path: Path, now: datetime) -> None:
+    """同一笔仓先后被反向卡、中性卡收紧，结果一样也各记一条。"""
+    k, _, _, _ = make_keeper(now, NEUTRAL, cd=neutral_card(now))
+    ex = TightenExecutor(short_pos(now), {"action": "pending", "why": "sync_unconfirmed"})
+    runner = _runner(tmp_path, now, k, ex)
+    rows: list[dict[str, Any]] = []
+    runner.app.recorders[c.Role.KEEPER].record = lambda *a, **kw: rows.append(kw)  # type: ignore[method-assign]
+    await runner._opposite_tighten(short_pos(now), "r", "BTCUSDT|t|long")
+    await runner._opposite_tighten(short_pos(now), "r", KEY, neutral=True)
+    await runner._opposite_tighten(short_pos(now), "r", KEY, neutral=True)
+    logged = [r["output"] for r in rows if "opposite_tighten" in r.get("output", {})]
+    assert [o.get("card_rule_kind") for o in logged] == [None, "neutral_card"]
+    assert ex.labels == ["反向卡", "作战卡转中性", "作战卡转中性"]
 
 
 def test_close_mode_closes_directly_but_not_on_stale_price(now: datetime) -> None:
@@ -323,6 +372,7 @@ async def neutral_trail(h: TrailHarness, key: str, allow_close: bool = True) -> 
         card_key=key,
         anchor_retry_s=0.0,
         allow_close=allow_close,
+        label="作战卡转中性",
     )
 
 
@@ -374,3 +424,4 @@ async def test_unreadable_evidence_without_close_alerts_but_holds(tmp_path: Path
     alerts = h.critical()
     assert [a.level for a in alerts] == [c.AlertLevel.CRITICAL]
     assert "这次不平" in alerts[0].body
+    assert alerts[0].title == "作战卡转中性锚定移动止损没做成"  # 不写成「反向卡」

@@ -186,6 +186,7 @@ class _TightensStop(Protocol):
         card_key: str | None,
         anchor_retry_s: float,
         allow_close: bool,
+        label: str,
     ) -> dict[str, Any]: ...
 
 
@@ -381,7 +382,7 @@ class Runner:
         self._keeper_slots = asyncio.Semaphore(KEEPER_CONCURRENCY)
         self._keeper_queued: set[str] = set()
         self._card_rule_queued: set[str] = set()
-        self._tighten_logged: dict[str, tuple[str, str]] = {}  # 每仓上次记下的收紧结果
+        self._tighten_logged: dict[str, tuple[str, str, str]] = {}  # 每仓上次记下的收紧结果
         self._tighten_done: dict[str, str] = {}  # 每仓已收紧 / 已够紧的反向指令，不再进执行器锁
         self._restore_keeper_market()
         self._regime_period: float | None = None
@@ -1400,6 +1401,7 @@ class Runner:
                     card_key=key,
                     anchor_retry_s=fl.opposite_anchor_retry_s,
                     allow_close=allow_close,
+                    label="作战卡转中性" if neutral else "反向卡",
                 )
             except Exception as e:
                 log.exception("%s 收紧止损出错，按原规则平", pos.symbol)
@@ -1411,8 +1413,9 @@ class Runner:
         action, why = str(result.get("action")), str(result.get("why"))
         if key is not None and action in ("tightened", "kept"):
             self._tighten_done[pos.position_id] = key
-        if self._tighten_logged.get(pos.position_id) != (action, why):
-            self._tighten_logged[pos.position_id] = (action, why)
+        kind = "neutral_card" if neutral else "opposite_card"
+        if self._tighten_logged.get(pos.position_id) != (kind, action, why):
+            self._tighten_logged[pos.position_id] = (kind, action, why)
             rec = self.app.recorders.get(Role.KEEPER)
             if rec is not None:
                 what = "作战卡转中性" if neutral else "反向卡未确认"

@@ -913,6 +913,7 @@ class HbExecutorAdapter:
         card_key: str | None = None,
         anchor_retry_s: float = 0.0,
         allow_close: bool = True,
+        label: str = "反向卡",
     ) -> dict[str, Any]:
         """反向作战卡没经价格确认（#314）/ 作战卡转中性：收紧交易所托管止损，不平仓。
 
@@ -945,6 +946,7 @@ class HbExecutorAdapter:
 
         ``allow_close = False``（中性卡、管家行情没有或过旧）：上面每个 ``close`` 改成
         ``{"action": "hold", "why": "no_close_<原 why>"}``，只收紧，收紧不了这次也不平。
+        ``label``：告警标题里的规则名（「反向卡」/「作战卡转中性」）。
         """
         result = await self._tighten_stop(
             position_id,
@@ -956,6 +958,7 @@ class HbExecutorAdapter:
             card_key=card_key,
             anchor_retry_s=anchor_retry_s,
             then_close="按原规则全平" if allow_close else "行情过旧，这次不平",
+            label=label,
         )
         if result.get("action") == "close" and not allow_close:
             return {**result, "action": "hold", "why": f"no_close_{result.get('why')}"}
@@ -973,6 +976,7 @@ class HbExecutorAdapter:
         card_key: str | None,
         anchor_retry_s: float,
         then_close: str,
+        label: str,
     ) -> dict[str, Any]:
         manager = self._protection
         initial = self._registry.get(position_id)
@@ -1026,7 +1030,9 @@ class HbExecutorAdapter:
                 reference = await self._trigger_reference(manager, rec.symbol, long, working_type)
             except Exception as error:
                 detail = describe_error(error)
-                await self._tighten_failed(position_id, "收紧止损的证据读不到", detail, then_close)
+                await self._tighten_failed(
+                    position_id, f"{label}收紧止损的证据读不到", detail, then_close
+                )
                 return {"action": "close", "why": "evidence_unavailable", "error": detail}
             # 和交易所上正在挂的止损比（最后回读明确 NEW 的最高一代）；没有就和账本固定止损比。
             live = manager.live_stop_price(position_id)
@@ -1091,13 +1097,13 @@ class HbExecutorAdapter:
                             **info,
                         }
                     await self._tighten_failed(
-                        position_id, "反向卡锚定移动止损没做成", detail, then_close
+                        position_id, f"{label}锚定移动止损没做成", detail, then_close
                     )
                     return {"action": "close", "why": "evidence_unavailable", "error": detail}
                 except Exception as error:
                     detail = describe_error(error)
                     await self._tighten_failed(
-                        position_id, "反向卡锚定移动止损没做成", detail, then_close
+                        position_id, f"{label}锚定移动止损没做成", detail, then_close
                     )
                     return {"action": "close", "why": "evidence_unavailable", "error": detail}
                 after = manager._current(position_id)[1]
@@ -1123,7 +1129,7 @@ class HbExecutorAdapter:
                 detail = describe_error(error)  # sync 已把它写进 last_error
                 await self._tighten_failed(
                     position_id,
-                    "收紧止损换单未确认",
+                    f"{label}收紧止损换单未确认",
                     detail,
                     "已落盘，旧止损保留，保护轮询继续换",
                 )

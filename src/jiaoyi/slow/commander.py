@@ -190,7 +190,10 @@ def clamp_to_risk(
 ) -> CardSymbol:
     """卡里的范围只能比硬上限更紧：超出的夹回去；分组敞口上限为 0 的类别改成只看不做。"""
     if risk.category_exposure_x.get(cs.category, 0.0) <= 0.0 or cs.bias is Bias.NO_TRADE:
-        return cs.model_copy(update={"bias": Bias.NO_TRADE, "allowed_signals": []})
+        gated = cs.bias if cs.bias in (Bias.LONG, Bias.SHORT) else cs.no_trade_from
+        return cs.model_copy(
+            update={"bias": Bias.NO_TRADE, "allowed_signals": [], "no_trade_from": gated}
+        )
     return cs.model_copy(
         update={
             # 慢环不知道实时权益：只按绝对硬顶夹（没写就不夹），权益倍数由风控员下单时封顶

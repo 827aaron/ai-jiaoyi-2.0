@@ -236,6 +236,20 @@ def test_card_is_identical_with_or_without_the_new_fields(
     assert new.outlook is not None and new.research_token() == old.research_token()
 
 
+def test_missing_entry_zone_gate_records_the_meeting_direction() -> None:
+    d = te._CardSymbolDraft.model_validate({**DRAFT, "entry_min": None, "entry_max": None})
+    gated = te.draft_to_card_symbol(d, entry("AAUSDT"), LevelContext(), True)
+    assert gated.bias is Bias.NO_TRADE and gated.no_trade_from is Bias.SHORT
+    assert "会议没给进场区间" in gated.reason
+    assert te.draft_to_card_symbol(d, entry("AAUSDT"), LevelContext(), False).no_trade_from is None
+    dumped = json.loads(gated.model_dump_json())
+    assert dumped["no_trade_from"] == "short"
+    assert CardSymbol.model_validate(dumped) == gated  # 落盘到 battle_card.json 再读回来
+    plain = te.draft_to_card_symbol(te._CardSymbolDraft.model_validate(DRAFT), entry("AAUSDT"))
+    assert "no_trade_from" not in json.loads(plain.model_dump_json())  # 为空不落盘，旧代码能读
+    assert "no_trade_from" not in plain.model_dump()
+
+
 def test_engine_records_outlook_ratings_and_lean(monkeypatch: pytest.MonkeyPatch) -> None:
     cs = _run(monkeypatch, {**DRAFT, **OUTLOOK})
     assert cs.bias is Bias.SHORT and cs.outlook is not None

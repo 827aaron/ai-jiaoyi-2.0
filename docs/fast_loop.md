@@ -325,7 +325,8 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 
 **什么算中性**（`JevKeeper._neutral_rule`，都要求最新卡有效、在这条指令自己的 issued_at–expires_at 之内、**指令发布时间晚于开仓时间**——开仓前就是这样的指令（例如照旧卡手动开的仓）不算「被换掉」）：
 
-- 这个币的指令 `bias = no_trade`（不管是会议观望、没给进场区间、类别敞口为 0 还是 `stale_on_arrival_action = "no_trade"` 改的）；
+- 这个币的指令 `bias = no_trade`：会议本身观望（研究经理 / 组合经理 Hold、两人方向相反、转卡和评级相反）、封币、`stale_on_arrival_action = "no_trade"` 都算；
+- 例外：闸门把会议方向改成的 no_trade（会议没给进场区间、评级只是偏向要等区间、类别敞口上限为 0）在卡上记 `CardSymbol.no_trade_from` = 会议本来的方向。它**和持仓同方向时不算中性**（研究和持仓一致，只是先别开新仓），反着持仓才算；没记（`None`）的按普通 no_trade 算；
 - 或者 `allowed_signals` 为空且理由里有 `stale_on_arrival`（#341 到手即作废的只看不做）。方向和持仓相同、相反都算：作废的指令不算数。#341 截理由时只截原理由，`stale_on_arrival` 标记一定留着；
 - 别的原因的只看不做（开会失败留着盯、指令过期留着盯、美股休市遮掉、`allowed_signals` 为空的普通卡）**不算**：这些方向没变，只是先不开新仓；
 - 卡里没有这个币：只在 `card_neutral_on_absent = true` 时算（发布时间用整卡的 `created_at`）。持仓的币本来会强制留在卡上，所以默认不算；
@@ -339,12 +340,17 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 | `card_neutral_on_absent` | `false` | 卡里没有这个币也算中性 |
 | `card_neutral_trail_distance_mult` | `1.0` | `tighten` 锚定的移动止损回撤距离 = 开仓带的移动止损距离 × 这个倍数 |
 
-`tighten` 走 `HbExecutorAdapter.tighten_stop`，和反向卡没确认时完全同一条路，固定 `trail` 模式（开仓没带移动止损的仓退回 breakeven）：保本 / 可挂判定（`opposite_tighten_buffer_bps`、`opposite_tighten_mark_gap_bps`）、锚定（只锚一次，落盘在 `server_protection` 的 `opposite_anchor_price` / `opposite_card_key`，换卡、重启都不重锚，永远不比正在挂的止损松）、插针重试窗口（`opposite_anchor_retry_s`）、旧通道 / 从没完整托管照旧全平、证据读不到 CRITICAL、换代先确认新代，都和上面一样。指令身份 = 反向卡的 `币|issued_at|方向` 后面加 `|neutral`（卡里没有这个币：`币|absent|neutral`），按这个币的研究、不按整卡版本：别的币开会、并发会议合并卡只换版本，同一条中性指令不会再动一次；主循环按它缓存「已收紧 / 已够紧」，同一笔仓同一时间只排一次（`_card_rule_queued`），决策记录同一条指令同一支只记一次。模型复查照常进行；`close` 立刻平的不再排模型复查。
+`tighten` 走 `HbExecutorAdapter.tighten_stop`，和反向卡没确认时完全同一条路，固定 `trail` 模式（开仓没带移动止损的仓退回 breakeven）：保本 / 可挂判定（`opposite_tighten_buffer_bps`、`opposite_tighten_mark_gap_bps`）、锚定（只锚一次，落盘在 `server_protection` 的 `opposite_anchor_price` / `opposite_card_key`，换卡、重启都不重锚，永远不比正在挂的止损松）、插针重试窗口（`opposite_anchor_retry_s`）、旧通道 / 从没完整托管照旧全平、证据读不到 CRITICAL、换代先确认新代，都和上面一样。指令身份 = 反向卡的 `币|issued_at|方向` 后面加 `|neutral`（卡里没有这个币：`币|absent|neutral`），按这个币的研究、不按整卡版本：别的币开会、并发会议合并卡只换版本，同一条中性指令不会再动一次；主循环按它缓存「已收紧 / 已够紧」，同一笔仓同一时间只排一次（`_card_rule_queued`），决策记录同一条指令同一支只记一次，执行器结果按（规则种类, action, why）去重。告警标题写「作战卡转中性…」（反向卡写「反向卡…」）。模型复查照常进行；`close` 立刻平的不再排模型复查。
 
 **不做价格确认**：中性不是反向，没有「新方向」可确认；亏的本来就按可挂判定直接平，赚的只是锚住利润，不需要再等价格。
 
-**行情没有或过旧**（没有行情快照，或比 `keeper_price_max_age_s` 旧）：一律不平。`tighten` 只让执行器收紧（`allow_close = False`：执行器本来要平的分支都改成 `{"action": "hold", "why": "no_close_<原因>"}`，下一轮再试；证据读不到照样 CRITICAL，正文写「行情过旧，这次不平」）；`close` 这一轮先拿住，等新行情。和反向卡不同：反向卡在旧行情下执行器仍可能按交易所标记价判「赚得不够」平仓。
+**行情没有或过旧**（没有行情快照，或比 `keeper_price_max_age_s` 旧）：一律不平。`tighten` 只让执行器收紧（`allow_close = False`：执行器本来要平的分支都改成 `{"action": "hold", "why": "no_close_<原因>"}`，下一轮再试；证据读不到照样 CRITICAL，正文写「行情过旧，这次不平」）；`close` 这一轮先拿住，等新行情；这一轮不算规则通道已处理，照常进管家复查：冻结盈利价照常判，模型复查按旧行情规则跳过。**和反向卡（#335）不同**：反向卡在旧行情下只是不做价格确认，执行器仍按交易所标记价判可挂，「亏着 / 赚得不够」照样平（`allow_close` 保持 true）；中性卡在旧行情下一律 `allow_close = False`。
 
 **决策记录**：管家 `output.card_rule`：`kind = "neutral_card"`、`card_neutral_action`、`instruction_key`、`card_bias`（卡里没有 = null）、`issued_at` / `expires_at`、`price` / `price_stale_s`、`branch`（`neutral_close` / `neutral_tighten` / `no_market_data_tighten` / `no_market_data_hold`）、`counterfactual`（`{"legacy_action": "hold"}`）。同一条指令同一支只记第一次。主循环记执行器结果（`output.opposite_tighten`，多一个 `card_rule_kind = "neutral_card"`），结果变了才再记；亏着平是正常分支（INFO / 平仓记录），只有证据读不到才 CRITICAL。
 
-**回滚**：改回 `card_neutral_action = "hold"` 即恢复（热生效）。没有新的账本字段：锚定 / 收紧用的就是上面反向卡那 7 个字段，回退按上面反向卡的回滚步骤做。管家的 `data/keeper_opposite.json` 不记中性卡的东西。
+**回滚**：改回 `card_neutral_action = "hold"` 即恢复（热生效）。回退代码时：
+
+1. 先从 `config/app.toml` 的 `[fast_loop]` 删掉 `card_neutral_action` / `card_neutral_on_absent` / `card_neutral_trail_distance_mult` 三个键，不然旧代码按未知字段拒绝启动；
+2. 账本没有新字段：锚定 / 收紧用的就是上面反向卡那 7 个字段，按上面反向卡的回滚步骤做；
+3. 作战卡契约多了 `CardSymbol.no_trade_from`，为空时不落盘（和以前一字不差，`research_token` 也不变）；只要 `data/battle_card.json` 或 `data/card_review/cards.jsonl` 里有这个键（闸门改过观望的卡），回退前停主程序把这些 `no_trade_from` 键删掉，或等下一轮开会出新卡再回退；
+4. 管家的 `data/keeper_opposite.json` 不记中性卡的东西。

@@ -498,9 +498,18 @@ class JevKeeper:
         )
 
     def card_rule_watch(self, position: PositionRecord, now: datetime) -> bool:
-        """只读：反向卡这次走「价格确认或收紧」新规则、或中性卡走 tighten（不是立刻全平），
-        模型复查照常进行。"""
-        return self.card_rule_key(position, now) is not None
+        """只读：这次规则通道不会立刻全平（反向卡走「价格确认或收紧」、中性卡走 tighten，或中性卡
+        close 遇到没有 / 过旧行情先拿住），模型复查 / 冻结盈利价照常进行。"""
+        if self.card_rule_key(position, now) is not None:
+            return True
+        card = self._card(now)
+        if (
+            self._cfg.card_neutral_action != "close"
+            or self._neutral_rule(position, card, now) is None
+        ):
+            return False
+        f = self._features(position.symbol)
+        return f is None or self._stale_age(f, now) is not None
 
     def card_rule_key(self, position: PositionRecord, now: datetime) -> str | None:
         """只读：走收紧时这条指令的身份（反向：币|issued_at|方向；中性：后面再加 ``|neutral``），
@@ -686,6 +695,12 @@ class JevKeeper:
         issued = cs.issued_at or card.created_at
         if not issued <= now < (cs.expires_at or card.expires_at) or issued <= position.opened_at:
             return None
+        if (
+            cs.bias is Bias.NO_TRADE
+            and cs.no_trade_from is not None
+            and (cs.no_trade_from.value == position.side.value)
+        ):
+            return None  # 会议方向和持仓相同，只是闸门（没区间 / 敞口 0）不让开新仓
         if cs.bias is Bias.NO_TRADE:
             reason = "新作战卡把这个币改成 no_trade"
         elif not cs.allowed_signals and "stale_on_arrival" in cs.reason:
