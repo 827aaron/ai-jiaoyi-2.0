@@ -7,7 +7,8 @@
       "symbol": "BTCUSDT",
       "position_id": "pos-0001",
       "detail": "成交 5 秒后仍未见保命止损，已补挂",
-      "fixed": true
+      "fixed": true,
+      "informational": false
     }
   ]
 }

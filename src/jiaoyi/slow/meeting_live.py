@@ -4,13 +4,21 @@
 （返回的最终状态与 ``invoke`` 相同，不多一次模型调用），每走一步把新增的发言追加到
 ``<目录>/<SYMBOL>.json``（临时文件 + rename，整文件重写）。会后保留为上一场记录，
 下一场开会时覆盖。写盘失败只记日志，绝不影响会议。字段说明见 docs/slow.md。
+
+并发：一场会由多个线程写——TradingAgents 的分析师并行跑在 LangGraph 的线程池里，模型调用的
+回调（``note_call`` 等）在各自线程里触发，``observe`` 在跑图的线程里，超时叫停（``fail``）在
+事件循环线程里。所以每份实况一把锁（改内容 + 序列化在锁里），每个文件一把锁（换文件在锁里），
+临时文件名各不相同。同一个币同时可能有两场会（超时取消的那场后台线程还在跑，下一场已经开了）：
+文件只归最近开始的那场写，较早的那场之后的写入一律跳过，不会把新会的实况改回旧会。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -26,6 +34,28 @@ INTERRUPTED_REASON = "主程序重启，会议中断"
 
 _OPEN: set[MeetingLive] = set()
 _OPEN_LOCK = threading.Lock()
+_OWNERS: dict[Path, MeetingLive] = {}  # 每个文件现在归哪场会写；受 _OPEN_LOCK 保护
+_PATH_LOCKS: dict[Path, threading.Lock] = {}
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    with _OPEN_LOCK:
+        return _PATH_LOCKS.setdefault(path, threading.Lock())
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """同目录唯一临时文件 + ``os.replace``：别的写者的临时文件不会被这次换走。调用方持文件锁。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
 
 # 图状态里每种发言的位置，按会议进行的先后排：分析师报告 → 多空辩论 → 研究经理 → 交易员 →
 # 风控辩论 → 组合经理。同一份状态里一次出现好几步时也按这个顺序记。
@@ -56,8 +86,9 @@ class MeetingLive:
         *,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        self._path = directory / f"{symbol}.json"
+        self._path = (directory / f"{symbol}.json").absolute()
         self._now = now
+        self._lock = threading.RLock()
         self._doc: dict[str, Any] = {}
         self._seen: dict[tuple[str, str], int] = {}
         self._warned = False
@@ -84,6 +115,7 @@ class MeetingLive:
         }
         with _OPEN_LOCK:
             _OPEN.add(self)
+            _OWNERS[self._path] = self
         self._flush()
 
     @property
@@ -100,30 +132,32 @@ class MeetingLive:
 
     def step(self, stage: str, who: str, text: str) -> None:
         """直接记一条发言（不从图状态里取）：总盘会这类不走 TradingAgents 图的会议用。"""
-        if self._closed:
-            return
-        self._add(stage, who, text)
-        self._doc["updated_at"] = self._now().isoformat()
-        self._flush()
+        with self._lock:
+            if self._closed:
+                return
+            self._add(stage, who, text)
+            self._doc["updated_at"] = self._now().isoformat()
+            self._flush()
 
     def observe(self, state: Mapping[str, Any]) -> None:
         """看一份（部分）图状态，把新出现的发言记下来。可重复喂同一份。"""
-        if self._closed:
-            return
-        try:
-            before = len(self._doc["steps"])
-            for kind, outer, key, stage, who in _STEPS:
-                if kind == "history":
-                    inner = state.get(outer)
-                    if isinstance(inner, Mapping):
-                        self._grow((stage, who), inner.get(key), stage, who)
-                else:
-                    self._once((stage, who), state.get(key), stage, who)
-            if len(self._doc["steps"]) != before:
-                self._doc["updated_at"] = self._now().isoformat()
-                self._flush()
-        except Exception:
-            self._warn()
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                before = len(self._doc["steps"])
+                for kind, outer, key, stage, who in _STEPS:
+                    if kind == "history":
+                        inner = state.get(outer)
+                        if isinstance(inner, Mapping):
+                            self._grow((stage, who), inner.get(key), stage, who)
+                    else:
+                        self._once((stage, who), state.get(key), stage, who)
+                if len(self._doc["steps"]) != before:
+                    self._doc["updated_at"] = self._now().isoformat()
+                    self._flush()
+            except Exception:
+                self._warn()
 
     def _once(self, key: tuple[str, str], value: Any, stage: str, who: str) -> None:
         if isinstance(value, str) and value.strip() and key not in self._seen:
@@ -140,14 +174,15 @@ class MeetingLive:
 
     def note_retry(self, why: str) -> None:
         """某一步回答有问题（length 被截断 / empty 空 / short 过短），已自动重试一次。"""
-        if self._closed:
-            return
-        self._doc["retries"] += 1
-        reasons = self._doc["retry_reasons"]
-        reasons.append({"ts": self._now().isoformat(), "why": why})
-        del reasons[:-40]
-        self._doc["updated_at"] = self._now().isoformat()
-        self._flush()
+        with self._lock:
+            if self._closed:
+                return
+            self._doc["retries"] += 1
+            reasons = self._doc["retry_reasons"]
+            reasons.append({"ts": self._now().isoformat(), "why": why})
+            del reasons[:-40]
+            self._doc["updated_at"] = self._now().isoformat()
+            self._flush()
 
     def note_call(
         self,
@@ -157,74 +192,87 @@ class MeetingLive:
         retries: int = 0,
     ) -> None:
         """记一次模型调用怎么结束的：``length`` = 被 max_tokens 截断，实况里一眼能看出。"""
-        if self._closed:
-            return
-        calls = self._doc["llm_calls"]
-        calls.append(
-            {
-                "finish_reason": finish_reason,
-                "output_tokens": output_tokens,
-                "reasoning_tokens": reasoning_tokens,
-                "retries": retries,  # 1 = 这次调用本身是上一次出问题后的自动重试
-            }
-        )
-        del calls[:-80]  # 一场会不会超过几十次调用；防万一只留最近的
-        if finish_reason == "length":
-            self._doc["truncated"] += 1
-        self._doc["updated_at"] = self._now().isoformat()
-        self._flush()
+        with self._lock:
+            if self._closed:
+                return
+            calls = self._doc["llm_calls"]
+            calls.append(
+                {
+                    "finish_reason": finish_reason,
+                    "output_tokens": output_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "retries": retries,  # 1 = 这次调用本身是上一次出问题后的自动重试
+                }
+            )
+            del calls[:-80]  # 一场会不会超过几十次调用；防万一只留最近的
+            if finish_reason == "length":
+                self._doc["truncated"] += 1
+            self._doc["updated_at"] = self._now().isoformat()
+            self._flush()
 
     def note_model(self, model: str) -> None:
         """补记最近一次调用实际用的模型 id（紧跟在 ``note_call`` 之后），方便和设置核对。"""
-        if self._closed or not self._doc["llm_calls"]:
-            return
-        self._doc["llm_calls"][-1]["model"] = model
-        self._flush()
+        with self._lock:
+            if self._closed or not self._doc["llm_calls"]:
+                return
+            self._doc["llm_calls"][-1]["model"] = model
+            self._flush()
 
     def note_usage(self, input_tokens: int, cached_tokens: int) -> None:
         """补记最近一次调用的输入 tokens 和命中缓存的输入 tokens（紧跟在 ``note_call`` 之后）。"""
-        if self._closed or not self._doc["llm_calls"]:
-            return
-        last = self._doc["llm_calls"][-1]
-        last["input_tokens"] = input_tokens
-        last["cached_tokens"] = cached_tokens
-        self._flush()
+        with self._lock:
+            if self._closed or not self._doc["llm_calls"]:
+                return
+            last = self._doc["llm_calls"][-1]
+            last["input_tokens"] = input_tokens
+            last["cached_tokens"] = cached_tokens
+            self._flush()
 
     def set_rejections(self, rows: list[dict[str, str]]) -> None:
         """总盘会没挑中的币和各自的理由（结构化：``symbol`` / ``reason``），面板按币显示。"""
-        self._doc["rejections"] = rows
+        with self._lock:
+            self._doc["rejections"] = rows
 
     def set_summary(self, text: str) -> None:
         """一句话摘要（总盘会：「挑了 N 个 / 落选 M 个」），团队页节点显示。"""
-        self._doc["summary"] = text
+        with self._lock:
+            self._doc["summary"] = text
 
     def converting(self) -> None:
         """军师团讨论完毕，开始整理成作战指令。"""
-        if self._closed:
-            return
-        self._doc["stage"] = "decision"
-        self._doc["updated_at"] = self._now().isoformat()
-        self._flush()
+        with self._lock:
+            if self._closed:
+                return
+            self._doc["stage"] = "decision"
+            self._doc["updated_at"] = self._now().isoformat()
+            self._flush()
 
     def finish(self, bias: str, reason: str, text: str, cost_usd: float) -> None:
-        if self._closed:
-            return
-        self._add("decision", "convert", text)
-        self._doc.update(result={"bias": bias, "reason": reason}, status="done", cost_usd=cost_usd)
-        self._close()
+        with self._lock:
+            if self._closed:
+                return
+            self._add("decision", "convert", text)
+            self._doc.update(
+                result={"bias": bias, "reason": reason}, status="done", cost_usd=cost_usd
+            )
+            self._close()
 
     def fail(self, error: str, cost_usd: float, estimated: bool = False) -> None:
-        if self._closed:  # 超时取消时已经标成失败；后台线程之后才结束，不能改回去
-            return
-        self._doc.update(status="failed", error=error, cost_usd=cost_usd, cost_estimated=estimated)
-        self._close()
+        with self._lock:
+            if self._closed:  # 超时取消时已经标成失败；后台线程之后才结束，不能改回去
+                return
+            self._doc.update(
+                status="failed", error=error, cost_usd=cost_usd, cost_estimated=estimated
+            )
+            self._close()
 
     def interrupt(self, reason: str = INTERRUPTED_REASON) -> None:
         """进程要退出了：标成中断。工作线程之后再写的任何东西都被忽略，不会把它改回「正在开」。"""
-        if self._closed:
-            return
-        self._doc.update(status="interrupted", error=reason)
-        self._close()
+        with self._lock:
+            if self._closed:
+                return
+            self._doc.update(status="interrupted", error=reason)
+            self._close()
 
     def _close(self) -> None:
         self._closed = True
@@ -236,10 +284,13 @@ class MeetingLive:
 
     def _flush(self) -> None:
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(self._doc, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._path)
+            with self._lock:
+                text = json.dumps(self._doc, ensure_ascii=False)
+                with _path_lock(self._path):
+                    with _OPEN_LOCK:
+                        owner = _OWNERS.get(self._path) is self
+                    if owner:
+                        _write_atomic(self._path, text)
         except Exception:
             self._warn()
 
@@ -282,9 +333,8 @@ def sweep_interrupted(
                 continue
             stamp = now().isoformat()
             doc.update(status="interrupted", error=reason, finished_at=stamp, updated_at=stamp)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
+            with _path_lock(path.absolute()):
+                _write_atomic(path, json.dumps(doc, ensure_ascii=False))
             swept.append(path.stem)
         except (OSError, ValueError):
             logger.warning("清理中断的会议实况失败（%s）", path, exc_info=True)

@@ -77,6 +77,17 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_close_p_strong",
         "keeper_confirmations",
         "keeper_price_max_age_s",
+        "keeper_model_mode",
+        "keeper_price_source",
+        "keeper_thesis_take_on",
+        "keeper_thesis_take_min_r",
+        "keeper_thesis_take_p",
+        "keeper_thesis_take_max_age_s",
+        "keeper_close_guard",
+        "keeper_close_guard_replacing_max_s",
+        "keeper_close_guard_exiting_max_s",
+        "keeper_close_guard_total_max_s",
+        "keeper_venue_alert_reviews",
         "frozen_peak_exit_on",
         "frozen_peak_exit_after_s",
         "frozen_peak_evidence_mode",
@@ -175,6 +186,8 @@ HOT_APP: frozenset[str] = frozenset(
         # 方向记分只有面板用（面板每轮现读），主循环不看：改了不该提示重启
         "card_score_every_min",
         "card_score_window_days",
+        "reconcile_opening_grace_s",
+        "reconcile_closing_grace_s",
         *(field_of(k) for k in KINDS),  # Telegram 告警类别开关
     }
 )

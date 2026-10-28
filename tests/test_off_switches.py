@@ -252,6 +252,8 @@ def test_switch_table_lists_exactly_the_agreed_soft_limits() -> None:
         "screener.max_range_24h_pct",
         "screener.major_top_n",
         "app.protection_stale_s",
+        "app.reconcile_opening_grace_s",
+        "app.reconcile_closing_grace_s",
         "app.protection_readback_grace_s",
         "app.protection_prearm_grace_s",
         "app.protection_unknown_submit_grace_s",

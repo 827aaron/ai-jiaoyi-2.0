@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -201,3 +202,84 @@ def test_interrupt_open_stops_later_writes_from_reviving_the_meeting(tmp_path: P
     live.finish("long", "r", "t", 0.1)
     assert read(tmp_path)["status"] == "interrupted" and read(tmp_path)["steps"] == []
     assert interrupt_open() == 0  # 已收尾的不再算
+
+
+def _slow_replace(monkeypatch: Any, writers: int) -> Any:
+    """让 ``os.replace`` 等到 ``writers`` 个线程都走到这一步（最多等 0.5 秒）才换文件：
+    共用一个临时文件名时必有一个线程的临时文件被别人换走；换文件串行时等不齐就照常往下走。"""
+    import os
+    import threading
+
+    import jiaoyi.slow.meeting_live as ml
+
+    real = os.replace
+    gate = threading.Barrier(writers)
+    entered = threading.Event()
+
+    def replace(src: Any, dst: Any) -> None:
+        entered.set()
+        with contextlib.suppress(threading.BrokenBarrierError):
+            gate.wait(timeout=0.5)
+        real(src, dst)
+
+    monkeypatch.setattr(ml.os, "replace", replace)
+    return entered
+
+
+def test_concurrent_writers_of_one_meeting_never_lose_a_flush(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    import threading
+
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    _slow_replace(monkeypatch, 4)
+    start = threading.Barrier(4)
+
+    def analyst(i: int) -> None:  # 并行的分析师：各自线程里回调 note_call
+        start.wait(timeout=5)
+        live.note_call("stop", 100 + i)
+
+    threads = [threading.Thread(target=analyst, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads)
+    assert "会议实况写盘失败" not in caplog.text
+    doc = read(tmp_path)
+    assert sorted(c["output_tokens"] for c in doc["llm_calls"]) == [100, 101, 102, 103]
+    assert list(tmp_path.iterdir()) == [tmp_path / "SOLUSDT.json"]  # 没有留下临时文件
+
+
+def test_abort_from_another_thread_while_the_meeting_writes(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    import threading
+
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    entered = _slow_replace(monkeypatch, 2)
+    worker = threading.Thread(target=live.step, args=("analysts", "market", "行情报告"))
+    worker.start()
+    assert entered.wait(timeout=5)  # 会议线程正在换文件时，事件循环线程叫停
+    live.fail("超时取消，会议没有结论", 0.2)
+    worker.join(timeout=10)
+    assert "会议实况写盘失败" not in caplog.text
+    doc = read(tmp_path)
+    assert doc["status"] == "failed" and doc["finished_at"] is not None
+
+
+def test_a_leftover_meeting_thread_cannot_overwrite_the_newer_meeting(tmp_path: Path) -> None:
+    old = MeetingLive(tmp_path, "SOLUSDT", now=Clock())  # 超时取消后后台线程还在跑
+    later = Clock()
+    later.t = T0 + timedelta(hours=1)
+    new = MeetingLive(tmp_path, "SOLUSDT", now=later)
+    new.step("analysts", "market", "新一场")
+    old.step("analysts", "market", "旧一场晚到的发言")
+    old.finish("long", "旧结论", "旧结论", 0.5)
+    doc = read(tmp_path)
+    assert doc["meeting_id"] == "SOLUSDT-20261023T090010"
+    assert doc["status"] == "running"
+    assert [s["text"] for s in doc["steps"]] == ["新一场"]
+    new.finish("short", "新结论", "新结论", 0.3)
+    doc = read(tmp_path)
+    assert doc["status"] == "done" and doc["result"] == {"bias": "short", "reason": "新结论"}
