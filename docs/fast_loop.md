@@ -416,3 +416,15 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 和「按主网价格算」（`[app] mainnet_shadow_on`，`data/mainnet_shadow.jsonl`）互不影响：那边按 Demo 实际平仓那一刻的主网价重算，历史页的「按主网价格算」列和对比表照旧按它；记过账的仓，按止损价的模拟成交才是主网上会发生的出场。只改正「主网越过、Demo 没触发」这一种情况；Demo 自己插针止损而主网没越过的照旧按 Demo 成交，所以模拟结果偏保守。
 
 **回滚**：`positions.json` 没有新字段（`close_detail` 只在平仓进行中落盘，平完就不写，原本就是这样），旧代码直接能读。回退到没有这三个键的旧代码前，先从 `config/app.toml` 的 `[fast_loop]` 删掉 `paper_stop_on_mainnet` / `paper_stop_slippage_bps` / `paper_stop_book_pnl`（旧代码按未知字段拒绝启动）。`data/paper_stops.json` 旧代码不读，可留可删；删了面板就回到 Demo 实际成交。
+
+
+## 管家助手（`keeper_assistant_*`，`src/jiaoyi/keeper/assistant.py`）
+
+持仓后的事归快环。有持仓的币出了对持仓不利的快环事件，赚钱亏钱都算，管家助手就同时问两个互相独立的打分模型同一道是非题，两个都答「是」才动手。它有自己的名额（`keeper_assistant_concurrency`）、自己的超时和连续错误冷却，不占军师团开会的名额，也不连累管家和拍板人的 Jev 计数；出任何错只记录，不影响管家复查和主循环。决策日志角色 `keeper_assistant`（面板「管家助手」），`module_status.json` 里有它的一行。
+
+- **触发**：哨兵的反向信号（信号方向和持仓相反），和管家急查同时交出去，各走各的；`keeper_assistant_key_level` 开着时，价格朝持仓不利的方向穿过卡上的关键位（持空往上、持多往下，每笔仓记上一次看到的成交价，第一次只记不判）也问。同一个币 `keeper_assistant_gap_s`（默认 120 秒）内只问一次，正在问时不重复问。没有持仓的币不问；大盘台的方向不参与。
+- **题目**：持空问「<币> 接下来 <horizon> 会上涨吗？（是 / 否）」，持多问「……会下跌吗？」；`horizon` 默认「1–4 小时」。A 是 Jev（同一条通道），B 是 `keeper_assistant_b_model`，B 的选项倒过来列（否 / 是），题目一字不差。快照是管家快照里的行情部分（`gate/questions.direction_snapshot`），不带仓位、开仓价、盈亏、作战卡、大盘判断、预测员和反向信号本身。管家自己的急查问的是持仓题，不是这道题，所以 A 一律单独问。
+- **结论**：两个都答「是」且各自 p(是) ≥ `keeper_assistant_min_p`、`keeper_assistant_close` 开着、`keeper_assistant_b_record_only` 关着，就经主循环正常平仓路径平掉（平仓原因记「持仓管家」，决策日志写「管家助手：反向信号，两个模型一致」；同一笔已在平或已平就不重复）。其余一律不动、只记录。B 没配置、调不通或超时都算不一致，从不只凭 A 平仓。
+- **翻转确认**（`keeper_assistant_flip_confirm`）：军师团的会给出待确认翻转（`card_flip_confirm` ≥ 2 时的 1/N，持有、没持有的币都算），那场会是提议，马上问两个模型会不会往新方向走；都答「是」就确认，卡上换成那场会的结论（和第 N 场会确认时一样上卡、唤醒管家，反向卡 / 中性卡规则照常）。否则候选照旧等下一场会。转中性的候选不问；这个币正在问时不另问。重启后手上没有那场会的结论，就不确认，照旧等下一场会。
+- **记录**：每次判断一条决策记录，`data/keeper_assistant/YYYY-MM-DD.jsonl` 一行：触发类型、问的方向、两个模型的 p(是)、选项顺序、模型名、延迟、token、花费、是否平仓 / 确认，之后用来量两个模型的校准和一致率、调 `min_p`。
+- **模型 B 的通道**：`keeper_assistant.openrouter_scorer` 用 TypeSafe SDK 换 OpenRouter 的 base URL（和 Jev 走 OpenRouter 一样的 SystemOne 请求）。Microsoft-Decision-1 在 OpenRouter 上的调用方式还没核实，如果它不走这个接口，只换这个工厂；调不通时每次都算「B 没答上」，不平仓。没有 `OPENROUTER_API_KEY` 时没有 B。

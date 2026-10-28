@@ -588,6 +588,20 @@ def hold_snapshot(
     return _dump(d)
 
 
+def direction_snapshot(symbol: str, f: FeatureSnapshot) -> str:
+    """管家助手问「接下来往哪走」用的快照：管家快照里的行情部分（同一套 ``market_block``，盘口
+    同样去掉噪音两项），不带仓位、作战卡、大盘判断、预测员和反向信号，模型不知道我们拿着什么、
+    为什么问。"""
+    d: dict[str, Any] = {"sym": symbol}
+    mkt = market_block(f)
+    book = mkt.get("book")
+    if isinstance(book, dict):
+        book.pop("imb", None)
+        book.pop("micro_bps", None)
+    d.update(mkt)
+    return _dump(d)
+
+
 # ---------------------------------------------------------------------- 版本和日志
 
 

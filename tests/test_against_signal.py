@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from jiaoyi import contracts as c
+from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.against import KEEP, MEETING_TRIGGER, AgainstSignalDesk
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
@@ -606,3 +608,70 @@ async def test_runner_never_asks_twice_at_once(tmp_path: Path, now: datetime) ->
     await routine
     await r.urgent_tick()
     assert calls == ["pos-1", "pos-1"] and patrol.urgent == set()
+
+
+# ------------------------------------------------------------------ 管家助手（反向信号同时交给它）
+
+
+def _assistant_on(r: Runner, a: float | None, b: float | None) -> tuple[Any, Any]:
+    from jiaoyi.core.hotconfig import patch_inplace
+    from tests.test_keeper_assistant import ON, Scorer
+
+    fl = r.app.app_cfg.fast_loop
+    patch_inplace(fl, fl.model_copy(update=ON), ON)
+    sa, sb = Scorer(a), Scorer(b)
+    r.assistant._jev = sa
+    r.assistant._b_factory = lambda model: sb
+    return sa, sb
+
+
+async def _settle(r: Runner) -> None:
+    for _ in range(3):
+        await asyncio.gather(*list(r.assistant._tasks), *list(r._tasks))
+
+
+async def test_runner_reverse_signal_goes_to_keeper_and_assistant_and_closes_once(
+    tmp_path: Path, now: datetime
+) -> None:
+    p = _position_now(now)
+    r, _, k, patrol = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    sa, sb = _assistant_on(r, 0.8, 0.9)
+    await r.on_event(_trade(now))
+    assert patrol.urgent == {"pos-1"} and k.noted == [("pos-1", False)]
+    assert r.assistant.busy == {"BTCUSDT"}
+    r.app.m.trigger.events.append(sig(now))  # type: ignore[attr-defined]
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert sa.calls[0][1] == "BTCUSDT 接下来 1–4 小时会下跌吗？（是 / 否）"
+    assert len(sa.calls) == len(sb.calls) == 1
+    assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
+
+
+async def test_runner_reverse_signal_holds_when_one_model_says_no_or_already_closing(
+    tmp_path: Path, now: datetime
+) -> None:
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    _assistant_on(r, 0.8, 0.2)
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
+    r2, _, _, _ = _runner(tmp_path / "2", now, [p])
+    r2.positions = [p]
+    _assistant_on(r2, 0.9, 0.9)
+    r2._closing.add("pos-1")
+    await r2.on_event(_trade(now))
+    await _settle(r2)
+    assert r2.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+async def test_runner_reverse_signal_on_unheld_coin_does_not_ask(
+    tmp_path: Path, now: datetime
+) -> None:
+    r, _, _, _ = _runner(tmp_path, now, [])
+    sa, _ = _assistant_on(r, 0.9, 0.9)
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert sa.calls == [] and r.app.m.executor.closed == []  # type: ignore[attr-defined]

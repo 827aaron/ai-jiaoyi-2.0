@@ -154,3 +154,23 @@ def test_panel_marks_applied_hot_changes(tmp_path: Path) -> None:
     _edit(paths, data, "risk", {"max_leverage": 6})
     app.reload_config()
     assert actions.control_state(data, paths).hot_applied_at == NOW.isoformat()
+
+
+def test_keeper_assistant_settings_edit_on_panel_and_apply_without_restart(
+    tmp_path: Path,
+) -> None:
+    app, paths, data = _running(tmp_path)
+    changes = {
+        "keeper_assistant_on": True,
+        "keeper_assistant_close": True,
+        "keeper_assistant_b_record_only": False,
+        "keeper_assistant_flip_confirm": True,
+        "keeper_assistant_b_model": "microsoft/decision-1",
+        "keeper_assistant_gap_s": 60,
+        "keeper_assistant_horizon": "1 小时",
+        "keeper_assistant_concurrency": 6,
+    }
+    _edit(paths, data, "fast_loop", changes)
+    app.reload_config()
+    for key, value in changes.items():
+        assert getattr(app.app_cfg.fast_loop, key) == value

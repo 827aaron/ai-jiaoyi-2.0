@@ -74,6 +74,7 @@ ROLE_NAMES: dict[Role, str] = {
     Role.EXECUTOR: "执行器",
     Role.LIFEBOAT: "保命止损",
     Role.KEEPER: "持仓管家",
+    Role.KEEPER_ASSISTANT: "管家助手",
     Role.PATROL: "巡逻兵",
     Role.RECONCILER: "对账员",
     Role.ALERTING: "告警",

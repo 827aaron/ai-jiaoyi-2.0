@@ -1032,3 +1032,26 @@ async def test_day_start_tick_logs_one_stack_trace_per_outage(
         await r.day_start_tick()
     traced = [x.exc_info is not None for x in caplog.records if "日亏基准读账户" in x.getMessage()]
     assert ex.reads == 5 and traced == [True, False, False, True]
+
+
+async def test_runner_keeper_assistant_reports_status_and_stops_with_the_runner(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    r = Runner(app)
+    await r._heartbeat_tick()
+    st = app.log.read_status()[c.Role.KEEPER_ASSISTANT.value]
+    assert "已关闭" in st.headline
+    hung = asyncio.Event()
+
+    async def wait() -> None:
+        await hung.wait()
+
+    r.assistant._busy.update({"BTCUSDT", "ETHUSDT"})
+    r.assistant._spawn("BTCUSDT", wait())
+    await asyncio.sleep(0)
+    unstarted = wait()  # cancelled before it ever runs: its own finally never frees the coin
+    r.assistant._spawn("ETHUSDT", unstarted)
+    await r.shutdown()
+    unstarted.close()
+    assert r.assistant.busy == frozenset() and not r.assistant._tasks

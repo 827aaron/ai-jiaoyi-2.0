@@ -37,7 +37,7 @@ const UI_VER = (() => {
     return "";
   }
 })();
-const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "风控员", commander: "军师团", keeper: "管家", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
+const ROLE = { executor: "执行器", reconciler: "对账员", lifeboat: "保命", gate: "拍板", risk_guard: "风控员", commander: "军师团", keeper: "管家", keeper_assistant: "管家助手", patrol: "巡逻兵", sentinel: "哨兵", screener: "选币", predictor: "预测员", alerting: "告警", book_reader: "盘口员" };
 const OUTCOME = { pass: ["放行", "p-long"], reject: ["拒绝", "p-short"], hold: ["拿住", ""], close: ["平仓", "p-accent"], action: ["动作", "p-accent"], error: ["出错", "p-warn"], info: ["信息", ""] };
 const CAT = { major: "主流币", alt: "山寨币", crypto_stock: "加密概念股", us_tech: "美股科技", precious_metal: "贵金属", other: "其他" };
 // 币名旁的类型小字（主流币 / 山寨币 …），和作战卡同写法
@@ -2623,6 +2623,17 @@ const PLAIN = {
   keeper_close_guard_exiting_max_s: "平仓前检查：保护腿已触发 / 退出中最多等几秒",
   keeper_close_guard_total_max_s: "平仓前检查：保护腿连续在途合计最多等几秒",
   keeper_venue_alert_reviews: "执行所标记价连续几次读不到就告警（0 = 不告警）",
+  keeper_assistant_on: "管家助手：持仓遇到不利事件时问两个模型",
+  keeper_assistant_b_model: "模型 B 的 id",
+  keeper_assistant_min_p: "p(是) 至少多少才算答「是」",
+  keeper_assistant_horizon: "是非题问多长时间",
+  keeper_assistant_timeout_s: "每个模型最多等几秒",
+  keeper_assistant_gap_s: "同一个币两次问至少隔几秒",
+  keeper_assistant_key_level: "价格穿过关键位也问",
+  keeper_assistant_close: "两个都答「是」就平仓",
+  keeper_assistant_b_record_only: "模型 B 只记录",
+  keeper_assistant_flip_confirm: "马上确认待确认翻转",
+  keeper_assistant_concurrency: "同时最多问几次模型",
   frozen_peak_exit_on: "冻结盈利价回访（仅之后新开的 Demo 仓）",
   frozen_peak_exit_after_s: "从真实首笔成交起几分钟后冻结盈利价",
   frozen_peak_evidence_mode: "冻结盈利价的交易所证据怎么读",
@@ -2732,6 +2743,17 @@ const plainOf = (i) => PLAIN[`${i.sec}.${i.key}`] || PLAIN[i.key === "mode" && t
 const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[i.key] : i.label);
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
+  keeper_assistant_on: "有持仓的币出了反向信号（或价格朝不利方向穿过关键位，见下面的开关），赚钱亏钱都算，就同时问 Jev（A）和模型 B 同一道是非题：持空问「会上涨吗」、持多问「会下跌吗」。题目和行情快照里没有仓位、开仓价、盈亏，也不说为什么问；B 的选项倒过来列。两个都答「是」才算一致。关 = 不问、不记录",
+  keeper_assistant_b_model: "经 OpenRouter 的 SystemOne 接口调（和 Jev 走 OpenRouter 时一样）。留空或调不通 = 没有 B，一律算不一致，只记录，从不只凭 Jev 平仓或确认",
+  keeper_assistant_min_p: "两个模型各自都要过这条线",
+  keeper_assistant_horizon: "「<币> 接下来 <这里> 会上涨吗？」",
+  keeper_assistant_timeout_s: "A、B 各自算；连续出错后的冷却是管家助手自己的，不连累管家和拍板人",
+  keeper_assistant_gap_s: "0 = 不隔，只是同一个币正在问时不重复问",
+  keeper_assistant_key_level: "持空时价格往上穿过卡上的关键位、持多时往下穿过，也问两个模型",
+  keeper_assistant_close: "走正常平仓路径，同一笔已在平就不重复。关 = 只记录",
+  keeper_assistant_b_record_only: "开着时两个回答都记下，但不平仓、不确认翻转。关掉后两个都答「是」才动手",
+  keeper_assistant_flip_confirm: "军师团的会改判方向、要等第二场会确认时，马上问两个模型会不会往新方向走；都答「是」就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。转中性的候选不问",
+  keeper_assistant_concurrency: "一次判断问两个模型，算两个；和军师团开会的名额分开",
   notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。保存后几秒内生效",
   notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。保存后几秒内生效",
   notify_lifeboat_hit: "币安上的保命止损被触发时推。　建议保持开：关掉就收不到这类提醒。保存后几秒内生效",
@@ -3068,6 +3090,7 @@ const ROLES = [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },
     { g: "Jev 盈利门控", hint: "代码规则 + Jev 的一道题：赚到一定倍数止损距离、Jev 又说进场理由不成立（回答够新），就全平。只平不放宽。", keys: ["fast_loop.keeper_thesis_take_on", "fast_loop.keeper_thesis_take_min_r", "fast_loop.keeper_thesis_take_p", "fast_loop.keeper_thesis_take_max_age_s"] },
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
+    { g: "管家助手", hint: "持仓后的事归快环：反向信号（可选：价格穿过关键位）时同时问 Jev 和模型 B 同一道是非题，两个都答「是」才平仓；也能马上确认军师团的待确认翻转。改了热生效。", keys: ["fast_loop.keeper_assistant_on", "fast_loop.keeper_assistant_b_model", "fast_loop.keeper_assistant_min_p", "fast_loop.keeper_assistant_horizon", "fast_loop.keeper_assistant_timeout_s", "fast_loop.keeper_assistant_gap_s", "fast_loop.keeper_assistant_key_level", "fast_loop.keeper_assistant_close", "fast_loop.keeper_assistant_b_record_only", "fast_loop.keeper_assistant_flip_confirm", "fast_loop.keeper_assistant_concurrency"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
     { g: "新作战卡把这个币改成中性", hint: "代码规则，不问模型，不做价格确认（中性不是反向）。只看开仓之后发布的新卡：这个币改成 no_trade，或到手即作废（stale_on_arrival）成只看不做，都算中性；别的原因的只看不做不算；卡里没有这个币只在打开「没有也算」时算。hold = 不管（现状）。tighten = 和「新作战卡方向反了」没确认时同一套：亏着或赚得不够照旧全平，赚得够的在第一次看到时的现价强制启动移动止损（只锚一次，重启、换卡都不重锚，不会比正在挂的止损松），保本缓冲、离标记价多远、插针重试秒数都用上面那组。close = 直接全平。管家行情没有或过旧（「管家复查时行情最多旧几秒」）时一律不平：tighten 只收紧，close 等新行情。之后卡转成反向，交给上面那条规则。", keys: ["fast_loop.card_neutral_action", "fast_loop.card_neutral_on_absent", "fast_loop.card_neutral_trail_distance_mult"] },

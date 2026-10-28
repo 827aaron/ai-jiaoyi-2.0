@@ -565,6 +565,67 @@ class FastLoopConfig(Contract):
         description="keeper_price_source = venue 时执行所标记价连续这么多次复查读不到或过旧就告警"
         "（同一段只告一次；不退回主网价）。0 = 不告警。",
     )
+    keeper_assistant_on: bool = Field(
+        default=False,
+        description="管家助手：有持仓的币出了对持仓不利的快环事件（反向信号；关键位见下面的开关），"
+        "赚钱亏钱都算，就同时问两个打分模型同一道是非题——持空问「会上涨吗」、持多问「会下跌吗」"
+        "（不告诉它们有仓、为什么问）。关 = 不问、不记录（和以前一样）。",
+    )
+    keeper_assistant_b_model: str | None = Field(
+        default=None,
+        description="模型 B 的 id（经 OpenRouter 的 SystemOne 接口，和 Jev 走 OpenRouter 时一样）；"
+        "A 固定是 Jev。不写或调不通 = 没有 B，算两个不一致，只记录，从不只凭 A 平仓或确认。",
+    )
+    keeper_assistant_min_p: float = Field(
+        default=0.5,
+        ge=0.5,
+        le=0.99,
+        description="p(是) 至少这么多才算答「是」（两个模型各自都要过）。",
+    )
+    keeper_assistant_horizon: str = Field(
+        default="1–4 小时",
+        min_length=1,
+        max_length=20,
+        description="是非题里的时间范围：「<币> 接下来 <这里> 会上涨吗？」。",
+    )
+    keeper_assistant_timeout_s: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=120.0,
+        description="每个模型每次最多等几秒（A、B 各自算；连续出错的冷却也是管家助手自己的，"
+        "不连累管家和拍板人）。",
+    )
+    keeper_assistant_gap_s: int = Field(
+        default=120,
+        ge=0,
+        le=86400,
+        description="同一个币两次问至少隔几秒；0 = 不隔，只是同一个币在问时不重复问。",
+    )
+    keeper_assistant_key_level: bool = Field(
+        default=False,
+        description="价格朝持仓不利的方向穿过卡上的关键位（持空往上穿、持多往下穿）也问。",
+    )
+    keeper_assistant_close: bool = Field(
+        default=False,
+        description="开 = 两个模型都答「是」就平仓（走正常平仓路径，同一笔在平就不重复）。"
+        "关 = 只记录。",
+    )
+    keeper_assistant_b_record_only: bool = Field(
+        default=True,
+        description="B 只记录：两个回答都记下，但不平仓、不确认翻转。关掉后两个都答「是」才动手。",
+    )
+    keeper_assistant_flip_confirm: bool = Field(
+        default=False,
+        description="开 = 军师团的会给出待确认翻转（card_flip_confirm ≥ 2 时的 1/N）后马上问两个"
+        "模型「会上涨 / 下跌吗」（持有、没持有的币都算）；都答「是」就确认，卡上换成那场会的"
+        "结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。转中性的候选不问。",
+    )
+    keeper_assistant_concurrency: int = Field(
+        default=4,
+        ge=2,
+        le=16,
+        description="管家助手同时最多问几次模型（一次判断问两个，算两个），和军师团开会的名额分开。",
+    )
     keeper_thesis_take_max_age_s: float = Field(
         default=180.0,
         ge=1.0,

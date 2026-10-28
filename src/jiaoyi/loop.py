@@ -63,9 +63,12 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core import paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
+from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import CloseInProgress
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
+from jiaoyi.gate.jev import JevDecisionModel
+from jiaoyi.keeper.assistant import KeeperAssistant, TransportScorer
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -452,6 +455,7 @@ class Runner:
             snapshot = getattr(self.m.screener, "market_snapshot", None)
             if callable(snapshot):
                 self.m.cards.set_market_snapshot(snapshot)
+        self.assistant = self._build_assistant()
         self._predictor_refilling: set[str] = set()  # 正在用 REST 补预测员历史的币
         # 读账户 → 风控员 → 开仓 必须串行，否则并发信号都按“开仓前”的账户算，绕过笔数和敞口上限
         self._open_lock = asyncio.Lock()
@@ -637,6 +641,7 @@ class Runner:
             if stuck:
                 log.warning("%d 个后台任务取消后 %s 秒还没停", len(stuck), TASK_CANCEL_WAIT_S)
         self._loops, self._tasks = [], set()
+        await self.assistant.aclose()
         await self.app.stop()
 
     def _every(self, seconds: float, tick: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
@@ -677,6 +682,10 @@ class Runner:
 
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
+        try:
+            self.assistant.heartbeat(self.app.clock())
+        except Exception:
+            log.exception("管家助手心跳失败")
         save_ban(self.app.app_cfg.data_dir)
 
     async def market_snapshot_tick(self) -> None:
@@ -731,6 +740,55 @@ class Runner:
             if isinstance(self.m.trigger, _AgainstAware):
                 for sig in self.m.trigger.pop_against():
                     self._route_against(self.m.trigger, sig, now)
+            fl = self.app.app_cfg.fast_loop
+            if fl.keeper_assistant_on and fl.keeper_assistant_key_level:
+                self._assistant_levels(event.symbol, event.price, now)
+
+    def _build_assistant(self) -> KeeperAssistant:
+        app, fl = self.app, self.app.app_cfg.fast_loop
+        model = app.keeper_jev or self.m.decision_model
+        jev = (
+            TransportScorer(
+                model.transport,
+                usd_per_mtok=fl.jev_usd_per_mtok,
+                max_errors=fl.jev_max_consecutive_errors,
+                cooldown_s=fl.jev_error_cooldown_s,
+            )
+            if isinstance(model, JevDecisionModel)
+            else None
+        )
+        cards = self.m.cards if isinstance(self.m.cards, BattleCardCommander) else None
+        rec = app.recorders.get(Role.KEEPER_ASSISTANT) or RoleRecorder(
+            Role.KEEPER_ASSISTANT, app.log, day_reset_tz=app.risk_cfg.day_reset_tz
+        )
+        assistant = KeeperAssistant(
+            lambda: self.app.app_cfg.fast_loop,
+            rec,
+            features=self.m.features.snapshot,
+            close=self._assistant_close,
+            clock=app.clock,
+            data_dir=Path(app.app_cfg.data_dir),
+            jev=jev,
+            b_scorer=getattr(app, "assistant_b", None),
+            cards=cards,
+        )
+        if cards is not None:
+            cards.set_on_flip_pending(assistant.on_flip_pending)
+        return assistant
+
+    def _assistant_close(self, pos: PositionRecord, reason: str) -> bool:
+        """管家助手要平：只登记一次，经正常平仓路径（同一笔在平 / 已平就跳过）。同步登记任务，
+        平仓任务排在随后唤醒的管家复查前面。"""
+        current = next((p for p in self.positions if p.position_id == pos.position_id), None)
+        if (
+            current is None
+            or current.status is not PositionStatus.OPEN
+            or pos.position_id in self._closing
+        ):
+            return False
+        self._guard_note(Outcome.ACTION, f"{pos.symbol} 平仓：{reason}", self.app.clock())
+        self._spawn(self.close(current, CloseReason.KEEPER), Role.EXECUTOR)
+        return True
 
     def _ledger_positions(self) -> list[PositionRecord]:
         """账本里此刻的持仓（含正在开 / 正在平），读不到才用上一轮刷新的列表。"""
@@ -750,6 +808,10 @@ class Runner:
             sig, self._ledger_positions(), self._closing, now
         )
         trigger.note_against_result(sig, ev.result)
+        # 管家助手和管家急查各走各的，谁先平谁算（平仓去重在 close 里）
+        for pos in self._ledger_positions():
+            if pos.symbol == sig.symbol:
+                self.assistant.on_reverse_signal(pos, sig.side, f"{sig.kind.value}：{sig.desc}")
         for pos, one_shot in rechecks:
             if isinstance(self.m.keeper, _NotesAgainst):
                 self.m.keeper.note_against(pos.position_id, sig, one_shot)
@@ -758,6 +820,15 @@ class Runner:
                 self.m.patrol.urgent.add(pos.position_id)  # 和巡逻兵报警线同一条急查通道
             else:
                 self._spawn(self._review(pos), Role.KEEPER)
+
+    def _assistant_levels(self, symbol: str, px: float, now: datetime) -> None:
+        held = [p for p in self.positions if p.symbol == symbol]
+        if not held:
+            return
+        card = self.m.cards.current(now)
+        cs = card.for_symbol(symbol) if card is not None else None
+        for pos in held:
+            self.assistant.on_price(pos, cs.key_levels if cs is not None else [], px)
 
     def _tp_fallback(self, t: Trade) -> None:
         """限价止盈挂着却没成交：价格穿过止盈价 ``tp_limit_fallback_through_bps`` 以上、
@@ -1630,6 +1701,7 @@ class Runner:
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
+        self.assistant.forget(pos.position_id)
 
     def _restore_keeper_market(self) -> None:
         try:
