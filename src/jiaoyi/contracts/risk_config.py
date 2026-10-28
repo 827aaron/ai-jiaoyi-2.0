@@ -270,6 +270,13 @@ class FastLoopConfig(Contract):
         description="作战卡上的名义价值 / 杠杆范围当硬约束。默认关：只当军师建议记下来，"
         "仓位按风险金额和你的硬上限算，杠杆用 max_leverage。",
     )
+    leverage_clamp_to_bracket: bool = Field(
+        default=False,
+        description="杠杆按币安这个币的上限封顶（执行所的 /fapi/v1/leverageBracket，启动时和之后"
+        "每天拉一次）：超过上限的按上限开，保证金按封顶后的杠杆重算，名义价值再不超过该杠杆那档"
+        "的名义上限；每笔风险金额和各项敞口上限不变。默认关 = 原行为（杠杆超过上限时币安拒绝"
+        "设杠杆，这笔不开）。分层没拉到时按原杠杆。",
+    )
     card_range_clamp: bool = Field(
         default=True,
         description="作战卡的止损 ATR / 止盈 R 范围超出档位范围时取交集，交集为空才不做；"
@@ -1074,6 +1081,13 @@ class PredictorConfig(Contract):
         le=200,
         description="一起排名的新鲜预测至少几个币才算名次；不够就当预测员不表态。",
     )
+    keeper_snapshot: Literal["direction", "rank", "off"] = Field(
+        default="direction",
+        description="管家（持仓复查）快照里怎么带预测员。direction = 照旧：kronos.agree 按平均路径"
+        "终点在现价哪一侧给 1 / 0，再带全池名次（p_up 只有 0 / 1，实测多数是 0，做多多半是 0、"
+        "做空多半是 1，多空不对称）；rank = 只带全池名次 top / mid / bottom（和拍板加分同一个"
+        "排名，多空镜像对称），排不出名次就不写；off = 快照不带预测员。改后重启。",
+    )
     against_card_meeting: bool = Field(
         default=False,
         description="预测员连续几次看反作战卡时申请单币临时会。默认关（Aaron 2026-10-24：预测员还要"
@@ -1115,6 +1129,23 @@ class AppConfig(Contract):
         le=8,
         description="拍板人同时最多判几个信号（不同的币并行；同一个币一次只判一个，"
         "后来的排队、只留最新一条）。OpenRouter 和开会共用并发，别开太大。",
+    )
+    jev_shared_cooldown: bool = Field(
+        default=True,
+        description="开仓拍板和持仓管家共用一份 Jev 连续出错计数和冷却（原行为）：管家连错几次"
+        "也会让开仓拍板进冷却。关掉 = 两边各数各的、各冷却各的（通道、模型、超时照旧共用）。"
+        "改后重启生效。",
+    )
+    account_read_retries: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="拍板通过后开仓前读账户（hummingbot 的账户状态）失败时，隔 1 秒再读几次；"
+        "都失败就记一条风控员拒绝「读账户失败，本信号放弃」。只对很快就失败的情况有用（连不上、"
+        "5xx）：hummingbot 请求超时是 5 秒，一次超时就把信号有效期（signal_max_age_s）"
+        "用得差不多了；"
+        "信号剩下的有效期不够再等一次就不重读，直接放弃。重读成功后再查一遍暂停 / 重启和信号是否"
+        "过期。0 = 不重读（原行为）。热生效。",
     )
     keeper_interval_s: int = Field(ge=5, le=120)
     reconcile_interval_s: int = Field(ge=10, le=300)
@@ -1224,8 +1255,9 @@ class AppConfig(Contract):
         default=0,
         ge=0,
         le=10000,
-        description="对账员停执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
-        "没确认终止，就再发一次停止。0 = 永不重发（只查）。",
+        description="对账员停外来执行器（只停不平，keep_position=True）结果不明、之后又连续这么多轮"
+        "没确认终止，就再发一次停止。0 = 永不重发（只查）。本程序托管仓平仓时停自己的执行器"
+        "另由 hb_stop_unknown_retries 管。",
     )
     reconcile_opening_grace_s: float = Field(
         default=0.0,
@@ -1312,6 +1344,17 @@ class AppConfig(Contract):
         description="Demo 托管保护：后台每秒一轮的保护核验，同一笔仓连续失败这么多轮才发紧急告警"
         "「托管保护本轮未确认」，之前只记日志；成功一轮就重新计数。1 = 每轮失败都发（原行为）。"
         "改后重启生效。",
+    )
+    hb_stop_unknown_retries: int = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="Demo 托管仓：平仓时程序停自己的 HB 执行器（只停不平，keep_position=True），"
+        "停止结果未知、"
+        "HB 仍报 RUNNING 时，最多再补发几次，间隔 5、10、20… 秒翻倍；这种停止从不卖出，"
+        "补发无害。不补发时零仓也得等 HB 自己结束才撤交易所保护腿。次数按进程计，重启重新计。"
+        "外来执行器的重发是 reconciler_executor_stop_retry_rounds。"
+        "0 = 不补发（原行为）。改后重启生效。",
     )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",

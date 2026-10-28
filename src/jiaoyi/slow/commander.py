@@ -280,6 +280,10 @@ MARKET_SNAPSHOT_FRESH = timedelta(minutes=2)
 """日花费到上限的这个比例就放慢开会（over_budget = slow）。"""
 
 
+REGIME_STALE = "已过期，仅作参考"
+POOL_SCOPE = "其中的涨跌、主动买卖占比等数字是全池口径，不是这个币自己的"
+
+
 class BattleCardCommander:
     """满足 ``interfaces.BattleCardProvider``。``current`` 同步、不等开会。"""
 
@@ -321,6 +325,10 @@ class BattleCardCommander:
         log_meta: Mapping[str, Any] | None = None,
         latest_market_regime: bool = False,
         event_brief_refresh: bool = False,
+        reuse_extend_expiry: bool = False,
+        regime_time_label: bool = False,
+        regime_max_age: timedelta = timedelta(0),
+        pool_scope_label: bool = False,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("作战卡有效期必须大于 0")
@@ -328,6 +336,10 @@ class BattleCardCommander:
         self._brief = brief
         self._latest_regime = latest_market_regime
         self._event_brief_refresh = event_brief_refresh
+        self._reuse_extend = reuse_extend_expiry
+        self._regime_time_label = regime_time_label
+        self._regime_max_age = regime_max_age
+        self._pool_scope_label = pool_scope_label
         self._journal = journal
         self._stop = stop_scale
         if not fail_backoff:
@@ -442,6 +454,7 @@ class BattleCardCommander:
         self._round_meeting: set[str] | None = None
         self._round_symbols: dict[str, CardSymbol] | None = None
         self._round_expiry: datetime | None = None
+        self._view_dirs: dict[str, Direction] = {}  # market_view_id -> direction, this process
         self._round_event_merges = 0
         self._round_event_cost = 0.0
         self._ref: dict[str, tuple[datetime, float]] = {}
@@ -552,6 +565,36 @@ class BattleCardCommander:
             }
         )
         return with_board(stamped, market)
+
+    def _extend_reused(self, cs: CardSymbol, round_expiry: datetime) -> CardSymbol:
+        """``reuse_extend_expiry``: a carried-over conclusion lives until the new round's expiry,
+        but never longer than one card TTL from its own meeting, so a stale conclusion is not
+        stretched. Never shortens; without ``issued_at`` its age is unknown and it is left alone.
+        Nor is a conclusion researched under a market direction other than the one in force now
+        (or an unknown one): it must not outlive the regime it was argued against."""
+        if not self._reuse_extend or cs.issued_at is None or cs.expires_at is None:
+            return cs
+        now_view = self.latest_market_view
+        if now_view is None or self._source_direction(cs) != now_view.regime_direction:
+            return cs
+        target = min(round_expiry, cs.issued_at + self._ttl_now())
+        if target <= cs.expires_at:
+            return cs
+        return cs.model_copy(update={"expires_at": target})
+
+    def _source_direction(self, cs: CardSymbol) -> Direction | None:
+        vid = cs.source_market_view_id
+        if vid is None:
+            return None
+        if vid in self._view_dirs:
+            return self._view_dirs[vid]
+        latest = self.latest_market_view
+        if latest is not None and latest.market_view_id == vid:
+            return latest.regime_direction
+        o = cs.outlook
+        if o is not None and o.board_market_view_id == vid:
+            return o.board_regime_direction
+        return None
 
     def _fit(self, syms: list[CardSymbol]) -> list[CardSymbol]:
         """池子装不下（卡最多 50 个币）时先丢最早到期的，持仓币不丢。"""
@@ -1676,8 +1719,10 @@ class BattleCardCommander:
         generation: int,
         desk_id: str,
         probs: Mapping[str, float],
+        republish: bool = False,
     ) -> MarketView | None:
         """大盘台发布：走和总盘会 / 独立刷新同一条路（共用版本号、翻转参照、通知管家复核）。
+        ``republish``：同方向按 ``republish_after_min`` 重发，只换话和数字，不唤醒管家复核。
         比它晚开始的发布已经生效时不覆盖，返回 None。同步执行（不让出事件循环），就是「只在
         发布时持锁」。仍有效的市场复核提名迁到新版本，过时的撤掉。"""
         if generation < self._market_published_generation:
@@ -1696,6 +1741,7 @@ class BattleCardCommander:
             pool.ts,
             generation,
             transition=True,
+            notify=not republish,
         )
         self._migrate_market_reviews(view)
         self._write(
@@ -1837,6 +1883,7 @@ class BattleCardCommander:
         generation: int,
         *,
         transition: bool,
+        notify: bool = True,
     ) -> MarketView:
         view = MarketView(
             market_view_id=uuid.uuid4().hex,
@@ -1849,6 +1896,9 @@ class BattleCardCommander:
             pool_id=pool_id,
             source_ts=source_ts,
         )
+        self._view_dirs[view.market_view_id] = direction
+        while len(self._view_dirs) > 512:
+            del self._view_dirs[next(iter(self._view_dirs))]
         if generation < self._market_published_generation:
             return view  # 仍是这一场币研究的历史来源，但不能覆盖更晚的当前观点
         self.latest_market_view = view
@@ -1864,7 +1914,7 @@ class BattleCardCommander:
             self._reference_generation = generation
             self._pending_reference_view = view if self.regime_reference is None else None
         self._save_market()
-        if self._on_market is not None:
+        if notify and self._on_market is not None:
             try:
                 self._on_market(view)
             except Exception:
@@ -2718,16 +2768,19 @@ class BattleCardCommander:
         # 指令池：上一张卡里还没到期的币原样留着（这轮没开会的币不动），开完哪个换哪个；
         # 持仓币的指令到期也不消失，只清空信号。池外（已被筛掉）的币不留
         in_pool = {e.symbol for e in pool.in_pool}
+        round_expiry = now + self._ttl_now()
         symbols: dict[str, CardSymbol] = {}
         for old in prev.symbols if prev is not None else []:
             exp = old.expires_at or (prev.expires_at if prev is not None else now)
             if old.symbol not in in_pool and old.symbol not in self._held:
                 continue
             if now < exp:
-                symbols[old.symbol] = clamp_to_risk(old, self._risk, self._stop)
+                # event conclusions carry the expiry of the card in force when they merged
+                kept = clamp_to_risk(old, self._risk, self._stop)
+                symbols[old.symbol] = self._extend_reused(kept, round_expiry)
             elif old.symbol in self._held:
                 symbols[old.symbol] = self._watch_only(old)
-        symbols.update(reused)
+        symbols.update({k: self._extend_reused(v, round_expiry) for k, v in reused.items()})
         # 有持仓的币卡上必须有：没有新结论就沿用旧指令（只清空信号），旧卡里也没有就按持仓方向合成
         for sym, side in self._held.items():
             if sym in symbols:
@@ -2740,8 +2793,6 @@ class BattleCardCommander:
                 symbols[sym] = self._hold_only(sym, side, cat)
         cost = picked.cost_usd
         published = 0
-
-        round_expiry = now + self._ttl_now()
 
         # 从这里起本轮在开的币定了：别的币可以并发开临时会，结论记进 symbols（见 _refresh_symbol）
         self._round_symbols, self._round_expiry = symbols, round_expiry
@@ -2854,8 +2905,8 @@ class BattleCardCommander:
             intra = self.market_intra(self._clock(), market_view)
             if intra and market_view is not None:
                 regime_note = {**regime_note, "market_intra": intra}
-                # 4 小时判断只在方向变了才发新版：标上发布时刻，免得当成此刻的
-                regime = f"（大盘台 {market_view.observed_at:%H:%M} UTC 发布的 4 小时判断）{regime}"
+            regime, intra, labels = self._regime_labels(regime, market_view, intra)
+            regime_note = {**regime_note, **labels}
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             self._event_uncharged.discard(entry.symbol)
@@ -2925,6 +2976,50 @@ class BattleCardCommander:
                 setup=res.setup,
             )
             return res
+
+    def _regime_labels(
+        self, regime: str, view: MarketView | None, intra: str | None
+    ) -> tuple[str, str | None, dict[str, str]]:
+        """Prefixes the regime text for one meeting. A view is only republished when its direction
+        changes (unless ``republish_after_min``), so without its publish time a meeting reads an
+        hours-old text as current."""
+        tag, note = "", {}
+        if view is not None:
+            when = f"{view.observed_at.astimezone(UTC):%H:%M} UTC"
+            age = self.market_age(self._clock(), view)
+            if age:
+                head = f"大盘台 {when} 发布的 4 小时判断" if intra else f"大盘判断 {when} 发布"
+                tag = f"{head}，距此刻 {age['age_min']:.0f} 分钟"
+                if "stale" in age:
+                    tag += f"，{age['stale']}"
+                note = {"regime_age_min": f"{age['age_min']:.0f}"}
+                if "stale" in age:
+                    note["regime_stale"] = "true"
+            elif intra:
+                tag = f"大盘台 {when} 发布的 4 小时判断"
+        if self._pool_scope_label:
+            tag = f"{tag}；{POOL_SCOPE}" if tag else POOL_SCOPE
+            if intra:
+                intra = f"全池口径：{intra}"
+        return (f"（{tag}）{regime}" if tag else regime), intra, note
+
+    def market_age(self, now: datetime, view: MarketView | None) -> dict[str, Any]:
+        """How old the market view is, for meetings and the keeper / Jev snapshots
+        (``current_market``): ``age_min`` (minutes since publish), plus ``stale`` past
+        ``regime_max_age_min``. Empty when both settings are off or there is no view."""
+        if view is None:
+            return {}
+        expired = self._regime_max_age > timedelta(0) and now - view.observed_at > (
+            self._regime_max_age
+        )
+        if not (self._regime_time_label or expired):
+            return {}
+        out: dict[str, Any] = {
+            "age_min": round(max((now - view.observed_at).total_seconds(), 0.0) / 60.0, 1)
+        }
+        if expired:
+            out["stale"] = REGIME_STALE
+        return out
 
     def _regime_at_start(
         self, regime: str, market_view: MarketView | None

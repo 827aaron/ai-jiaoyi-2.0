@@ -166,7 +166,7 @@ scripts/install_launchd.sh --load-run   # 另外装 jiaoyi run（纸面跑通、
 - `com.jiaoyi.backup`：每天 04:10 把 `data/decision_log`、`module_status.json`、`positions.json` 打包到 `data/backups/<日期>/`，保留 30 天。
 - `com.jiaoyi.run`：默认只生成到 `data/launchd/`，**不装**；加 `--load-run` 才进 LaunchAgents（登录后自启，崩溃自动重启），模式取 `config/app.toml`。切 live 仍要走第 8 节的门槛。
 - `com.jiaoyi.panel`：面板常驻（`jiaoyi panel --host 0.0.0.0 --port 8090`，局域网可开，崩了 30 秒后自动重启），不用再留一个终端窗口；默认安装，不需要密钥。地址 `http://<Mac mini 的局域网 IP>:8090`，本机 `http://127.0.0.1:8090`。如果之前在终端里手动跑过面板，先 Ctrl+C 停掉，否则它占着 8090 端口。日志 `data/logs/com.jiaoyi.panel.log`。
-- `com.jiaoyi.watchdog`：每分钟跑一次 `jiaoyi watchdog`。主循环的心跳（`data/module_status.json`，30 秒写一次）超过 2 分钟没更新就发一条 Telegram「主进程停了」，恢复后再发一条；每次掉线只发一次。主循环从没启动过（没有 `data/runtime.json`）时不发。它和主进程分开跑，所以 `jiaoyi run` 崩了、卡死了也能报。验收：`launchctl bootout gui/$(id -u)/com.jiaoyi.run` 或杀掉 `jiaoyi run`，2–3 分钟内收到 Telegram。
+- `com.jiaoyi.watchdog`：每分钟跑一次 `jiaoyi watchdog`。主循环的心跳（`data/module_status.json`，30 秒写一次）超过 2 分钟没更新就发一条 Telegram「主进程停了」，恢复后再发一条；每次掉线只发一次。主循环从没启动过（没有 `data/runtime.json`）时不发。`config/app.toml` 校验不过（例如合并的待更新配置比程序新）时它不停：按文件里写的 `data_dir`（读不出就用 `data`）照查心跳，另发一条「配置不合格」（每次不合格只发一次，改好后发「配置已恢复合格」；这段记在 `config/.watchdog_config_state.json`，不随数据目录变），退出码 2。它和主进程分开跑，所以 `jiaoyi run` 崩了、卡死了也能报。验收：`launchctl bootout gui/$(id -u)/com.jiaoyi.run` 或杀掉 `jiaoyi run`，2–3 分钟内收到 Telegram。
 - 你自己停掉 `jiaoyi run`（Ctrl+C、`launchctl bootout`、改配置重启）时也会收到一次「主进程停了」，这是正常的；重新启动后会收到「心跳已恢复」。
 - 看门狗和主进程在同一台机器上：整台 Mac mini 断电、断网时它也发不出去。这种情况要靠机器外面的检查（例如外部定时 ping），还没做。
 - 日志都在 `data/logs/`。脚本只写用户级 LaunchAgents，不需要 sudo；重复运行会先卸载再重装。

@@ -94,7 +94,7 @@ from jiaoyi.execution.user_stream import (
 )
 from jiaoyi.gate.context import EntryContextSource
 from jiaoyi.gate.entry import JevEntryGate
-from jiaoyi.gate.jev import decision_model_from_config
+from jiaoyi.gate.jev import JevDecisionModel, decision_model_from_config
 from jiaoyi.gate.rule_model import RuleDecisionModel
 from jiaoyi.gate.stub import StubDecisionModel, StubEntryGate
 from jiaoyi.interfaces import (
@@ -398,6 +398,8 @@ class Built:
     halted: dict[str, str] = field(default_factory=dict)
     """合约临时不在交易（结算中等）的币 → 原因。主循环按币安推送增删，风控员只挡新开仓。"""
     observations: KeeperObservationCollector | None = None
+    keeper_jev: JevDecisionModel | None = None
+    """The keeper's own Jev instance when ``jev_shared_cooldown`` is off; None when shared."""
 
 
 def _note_predictor_against(sink: JsonlDecisionLog, a: AgainstCard) -> None:
@@ -491,7 +493,9 @@ def _build_execution(
             protection_leg_order=app_cfg.protection_leg_order,
             hosted_close_mode=app_cfg.hosted_close_mode,
             protection_tick_alert_after=app_cfg.protection_tick_alert_after,
+            hb_stop_unknown_retries=app_cfg.hb_stop_unknown_retries,
             position_mode_cache_s=app_cfg.position_mode_cache_s,
+            leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:
@@ -671,6 +675,7 @@ def build_modules(
     for name in app_cfg.ignored_paper_switches:
         log.warning("%s 只在模拟盘生效，已忽略", name)
     observations: KeeperObservationCollector | None = None
+    keeper_jev: JevDecisionModel | None = None
     if model is None:
         gate_mode = "none"
         log.warning("没有可用的拍板模型（缺 JEV_API_KEY 或没锁 jev_model），不开新仓")
@@ -696,6 +701,7 @@ def build_modules(
             # 排队再等就来不及在信号有效期内判完（风控员按年龄拒，白花一次 Jev）
             max_wait_s=max(fast.signal_max_age_s - app_cfg.jev_timeout_ms / 1000.0, 0.0),
             questions=fast.gate_questions,
+            market_age=cards.market_age if isinstance(cards, BattleCardCommander) else None,
             # 一道题问法的额外快照：技术面 / 成交流 / 盘口平均（内存）
             # + 信号来时补拉的 REST（实盘行情才拉）
             context=EntryContextSource(
@@ -708,8 +714,11 @@ def build_modules(
                 ),
             ),
         )
+        keeper_model: DecisionModel = model
+        if not app_cfg.jev_shared_cooldown and isinstance(model, JevDecisionModel):
+            keeper_model = keeper_jev = model.with_own_errors()
         keeper = JevKeeper(
-            model,
+            keeper_model,
             fast,
             features.snapshot,
             cards.current,
@@ -723,6 +732,7 @@ def build_modules(
             if isinstance(cards, BattleCardCommander)
             else None,
             market_intra=cards.keeper_intra if isinstance(cards, BattleCardCommander) else None,
+            market_age=cards.market_age if isinstance(cards, BattleCardCommander) else None,
             observation_source=features.diagnostic_observation if observations else None,
             observation_sink=observations.offer if observations else None,
             opposite_state_path=Path(app_cfg.data_dir) / "keeper_opposite.json",
@@ -733,6 +743,7 @@ def build_modules(
             else None,
             exit_in_flight=getattr(executor, "protection_exit_in_flight", None),
             alerter=alerter,
+            kronos_snapshot=app_cfg.predictor.keeper_snapshot,
         )
 
     modules = Modules(
@@ -787,6 +798,7 @@ def build_modules(
         derivs,
         halted,
         observations,
+        keeper_jev,
     )
 
 
@@ -821,6 +833,7 @@ class App:
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
         self.observations: KeeperObservationCollector | None = None
+        self.keeper_jev: JevDecisionModel | None = None
         self._quote_diagnostics_enabled = not offline
         self.stop_quotes: StopQuoteRecorder | None = None
         self._stop_quotes_task: asyncio.Task[None] | None = None
@@ -854,6 +867,7 @@ class App:
             self.against = built.against
             self.derivs = built.derivs
             self.observations = built.observations
+            self.keeper_jev = built.keeper_jev
             self.halted = built.halted
             desk_on = self.slow_cfg.market_desk.mode != "off"
             if (self.slow_cfg.llm.provider == "openrouter" or desk_on) and self.news is not None:
@@ -1326,6 +1340,8 @@ class App:
                 continue
             health = getattr(module, "health", Health.OK)
             headline = self.gate_label() if role is Role.GATE else ""
+            if role is Role.KEEPER and self.keeper_jev is not None:
+                health, headline = self._keeper_jev_lamp(health, headline)
             extra: dict[str, Any] | None = None
             if isinstance(module, _SentinelDetail):  # 为什么没信号：每币一行
                 headline = module.brief(now)
@@ -1334,6 +1350,23 @@ class App:
                     "against_signals": self.against_desk.recent(now),
                 }
             rec.heartbeat(now, health if isinstance(health, Health) else Health.OK, headline, extra)
+
+    def _keeper_jev_lamp(self, health: object, headline: str) -> tuple[object, str]:
+        """With separate cooldowns the gate lamp no longer shows the keeper's Jev errors, so the
+        keeper lamp carries them; it only ever gets worse, never better, than the keeper's own."""
+        jev = self.keeper_jev
+        assert jev is not None
+        own = jev.health
+        if own is Health.OK:
+            return health, headline
+        if own is Health.DOWN:
+            note = f"管家的 Jev 连续出错，冷却中（还剩 {jev.cooldown_left_s():.0f} 秒）"
+        else:
+            note = f"管家的 Jev 连续出错 {jev.consecutive_errors} 次"
+        rank = {Health.OK: 0, Health.DEGRADED: 1, Health.DOWN: 2}
+        if health in rank and rank[own] > rank[health]:  # type: ignore[index]
+            health = own
+        return health, f"{headline}；{note}" if headline else note
 
     def status(self) -> dict[Role, ModuleStatus]:
         """每个角色一条最新状态。没心跳的角色：桩显示“未接入”，真实现显示“启动中”。"""

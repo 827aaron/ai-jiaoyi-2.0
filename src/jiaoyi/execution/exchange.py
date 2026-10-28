@@ -244,6 +244,10 @@ class IdentifiedCloseNotSent(ExchangeError):
     """下单请求还没发出就失败（模式 / 市场 / 原 CID 预查出错）；这个 CID 从没到过交易所。"""
 
 
+class IdentifiedCloseCancelledBeforeSend(asyncio.CancelledError):
+    """下单请求发出之前任务被取消（多半是停机）：这个 CID 从没到过交易所，取消照常往上传。"""
+
+
 def _close_decimal(value: object, *, zero: bool = False) -> Decimal:
     if isinstance(value, bool):
         raise ValueError("订单数值不能为布尔值")
@@ -1703,6 +1707,8 @@ class CcxtBinanceFutures:
             amount = self._ex.amount_to_precision(ccxt_symbol, float(qty))
             requested = _close_decimal(amount)
             existing = await self.close_order(symbol, client_order_id)
+        except asyncio.CancelledError as error:
+            raise IdentifiedCloseCancelledBeforeSend() from error
         except Exception as error:
             # 这几步都在下单请求之前；调用方保证这个 CID 是新一代、此前从没发过。
             raise IdentifiedCloseNotSent("直连平仓下单前检查失败，请求没有发出") from error
@@ -1901,6 +1907,29 @@ class CcxtBinanceFutures:
             except (KeyError, ValueError):
                 continue  # 缺字段的合约不给精度，风控员会对它拒单
         self.untradeable_status = off
+        return out
+
+    async def leverage_brackets(self) -> dict[str, tuple[tuple[float, int], ...]]:
+        """Per-symbol ``(notionalCap, initialLeverage)`` tiers of this account on the execution
+        venue (signed read-only GET /fapi/v1/leverageBracket), ascending by notional cap, so the
+        first tier carries the symbol's maximum leverage. Symbols with unreadable tiers are left
+        out."""
+        try:
+            rows = await self._ex.fapiPrivateGetLeverageBracket()
+        except Exception as e:
+            raise ExchangeError(f"读杠杆分层失败：{e}") from e
+        out: dict[str, tuple[tuple[float, int], ...]] = {}
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                tiers = sorted(
+                    (float(b["notionalCap"]), int(float(b["initialLeverage"])))
+                    for b in row["brackets"]
+                )
+                symbol = str(row["symbol"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tiers and all(cap > 0 and lev >= 1 for cap, lev in tiers):
+                out[symbol] = tuple(tiers)
         return out
 
     async def income_since(self, since: datetime) -> float:

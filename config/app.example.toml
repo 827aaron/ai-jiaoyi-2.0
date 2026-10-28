@@ -10,6 +10,9 @@ hold = "4h"                  # 最长持仓档：30m / 1h / 2h / 4h（默认）/
 # signal_dedup_s = 300        # 同一币同信号同方向的冷却秒数；不写跟最长持仓档（30m 60 / 1h 120 / 2h 300 / 4h 及以上 600）
 jev_timeout_ms = 1500        # Jev 超时就放弃本次开仓（M1 实测经 OpenRouter 首次 963ms，之后约 500ms）
 jev_max_concurrent = 4       # 拍板人同时最多判几个信号（不同币并行；同币排队只留最新一条）
+# jev_shared_cooldown = true  # 开仓拍板和持仓管家共用一份 Jev 连错计数和冷却（默认，原行为）；false = 各算各的，管家连错不会让开仓拍板进冷却（通道 / 模型 / 超时照旧共用），管家的 Jev 状态显示在管家的灯上；改后重启
+# account_read_retries = 0    # 拍板通过后开仓前读账户失败，隔 1 秒再读几次（0–3）；都失败记风控员拒绝「读账户失败，本信号放弃」；只对很快失败的（连不上 / 5xx）有用，信号剩不到 1 秒不再重读；重读成功后再查暂停 / 重启 / 信号过期；0 = 不重读（默认）；热生效
+#   回滚到没有这两项的旧版本前，先删掉这两行：旧版配置不认识的键（extra=forbid）会拒绝启动
 # keeper_interval_s = 20     # 最长持仓档：持仓管家多久看一次（30m 10 秒 / 1h 15 / 2h 20 / 4h 30）
 reconcile_interval_s = 30    # 对账员每 30 秒核对一次
 # protection_stale_s = 120   # 面板：交易所保护单的观测超过 120 秒标“数据过期”；0 = 不标
@@ -36,6 +39,8 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 #   回滚到没有 hosted_close_mode 的旧版本前，先删掉这一行，并等正在平仓的托管仓结束（平仓中的仓账本里有 direct_first）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
 # protection_tick_alert_after = 1  # Demo 托管保护：后台保护轮同一笔仓连续失败几轮才发紧急告警「托管保护本轮未确认」，之前只记日志；1 = 每轮都发（默认，原行为）；改后重启
 #   回滚到没有 protection_tick_alert_after 的旧版本前，先删掉这一行，并等账本里没有带 close_detail 的仓（因保护没确认而正在平仓的仓）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
+# hb_stop_unknown_retries = 0   # Demo 托管仓：只停不平的 HB 停止结果未知、HB 仍报 RUNNING 时最多再补发几次（间隔 5、10、20… 秒翻倍；这种停止从不卖出）；0 = 不补发（原行为）；改后重启
+#   回滚到没有 hb_stop_unknown_retries 的旧版本前，先删掉这一行，并等账本里没有带 direct_close_outcomes 的仓（直连平仓进行中的仓）：旧版配置和账本不认识的键（extra=forbid）会拒绝启动
 # protection_stop_working_type = "CONTRACT_PRICE"         # Demo 托管保护：止损（含移动止损）按什么价触发：CONTRACT_PRICE = 最新成交价（默认，原行为）/ MARK_PRICE = 标记价（不被 Demo 瞬间插针扫掉，触发后仍按当时盘口市价成交）；只影响之后新挂的单，已挂的不动；保命单固定标记价；改后重启
 # protection_take_profit_working_type = "CONTRACT_PRICE"  # Demo 托管保护：止盈按什么价触发，取值同上；默认 CONTRACT_PRICE（原行为）；只影响之后新挂的单；改后重启
 # protection_trailing_book_mark_max_dev_bps = 30   # Demo 移动止损：算峰值用的盘口价往抬高峰值的方向偏离标记价（多仓买一高于 / 空仓卖一低于）超过几基点就当插针，这一轮不更新峰值 / 不激活；默认 30；0 = 不比对（不建议）；改后重启
@@ -58,6 +63,8 @@ backfill_bars = 400               # 启动时回填多少根预测员周期的 K
 # temperature = 0.6                 # 采样温度（官方 0.6）
 # rank_band = 0.1667                # 全池排名前 / 后多少算看好 / 看坏（和卡一致才加分）
 # rank_min_peers = 6                # 至少几个币一起预测才排名
+# keeper_snapshot = "direction"     # 管家快照怎么带预测员：direction = 平均路径终点同向给 kronos.agree 1 / 0 + 全池名次（默认，原行为；p_up 只有 0 / 1 且多数是 0，做多多半 0、做空多半 1）/ rank = 只带名次 top / mid / bottom（和拍板加分同一个排名，多空对称）/ off = 不带；网页「设置」也能改；改后重启
+#   回滚到没有 keeper_snapshot 的旧版本前，先删掉这一行：旧版配置不认识的键（extra=forbid）会拒绝启动
 against_card_meeting = false      # 预测员连续看反作战卡时申请单币临时会；false = 只记录（预测员还在观察）
 
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用默认值；注释掉的是档位给的 2h 档旧默认，见 core/profiles.py）
@@ -80,6 +87,7 @@ jev_error_cooldown_s = 60         # 暂停 60 秒后再试
 signal_max_age_s = 5.0            # 信号从触发到风控员审完超过这么多秒就作废（开仓前行情最旧也按它）
 size_fraction_s = 0.5             # 仓位档：S 用每笔风险的 5 成
 size_fraction_m = 0.75            # M 用 7.5 成，L 用满
+# leverage_clamp_to_bracket = false  # 杠杆按币安这个币的上限封顶（执行所 /fapi/v1/leverageBracket，启动时和之后每天拉）：在不超过原杠杆的档里挑能开最大仓位的杠杆、保证金按它重算、名义不超过该档上限 × 0.98；每笔风险和敞口上限不变；false = 原行为（超上限这笔开不了，如 XPLUSDT -4028）；热生效；回滚前先删掉这一行
 # atr_period_min = 15               # 止损用几分钟 K 线的 ATR（5 / 15 / 30 / 60）；作战卡的止损倍数按这个尺度给（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）
 # stop_level_snap = false          # 止损贴关键位（外侧半个 ATR 内有关键位就挪到它外侧）：默认关，价格碰到关键位后 93% 会穿过 0.1 ATR
 # stop_level_buffer_atr = 0.1       # 止损放在关键位外侧 0.1 ATR（独立设置，不随档位；止损 / 止盈 / ATR 周期的默认按它分段）

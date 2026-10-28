@@ -286,6 +286,54 @@ async def test_start_warms_up_decision_model(tmp_path: Path, now: datetime) -> N
     await app.stop()
 
 
+@pytest.mark.parametrize("shared", [True, False])
+async def test_keeper_jev_cooldown_follows_switch(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch, shared: bool
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+
+    t = MockJevTransport()
+    built = JevDecisionModel(t, c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    app = _app(tmp_path, now, jev_shared_cooldown=shared)
+    keeper_model = app.m.keeper._model  # type: ignore[attr-defined]
+    assert app.m.decision_model is built and app.m.gate._model is built  # type: ignore[attr-defined]
+    assert (keeper_model is built) is shared
+    assert isinstance(keeper_model, JevDecisionModel) and keeper_model._t is t
+    assert (app.keeper_jev is None) is shared
+    await app.stop()
+
+
+async def test_keeper_lamp_shows_its_own_jev_cooldown(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from tests.test_gate import entry_request
+
+    t = MockJevTransport(fail=RuntimeError("x"))
+    built = JevDecisionModel(t, c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    app = _app(tmp_path, now, jev_shared_cooldown=False)
+    assert app.keeper_jev is not None
+
+    def lamps() -> tuple[c.ModuleStatus, c.ModuleStatus]:
+        app.heartbeat_all()
+        st = app.log.read_status()
+        return st[c.Role.KEEPER.value], st[c.Role.GATE.value]
+
+    keeper, gate = lamps()
+    assert keeper.health == c.Health.OK and "Jev" not in keeper.headline
+    await app.keeper_jev.ask(entry_request(now))
+    keeper, gate = lamps()
+    assert keeper.health == c.Health.DEGRADED and "管家的 Jev 连续出错 1 次" in keeper.headline
+    for _ in range(c.FastLoopConfig().jev_max_consecutive_errors):
+        await app.keeper_jev.ask(entry_request(now))
+    keeper, gate = lamps()
+    assert keeper.health == c.Health.DOWN and "冷却中" in keeper.headline
+    assert gate.health == c.Health.OK  # the gate lamp stays on the gate's own counter
+    await app.stop()
+
+
 async def test_start_refuses_on_account_mismatch_and_alerts(tmp_path: Path, now: datetime) -> None:
     from jiaoyi.execution.account_check import AccountMismatch
 
@@ -336,3 +384,27 @@ async def test_start_marks_previous_process_meetings_interrupted(
     m = read_meeting(tmp_path, "ZECUSDT", now)
     assert m and m.status == "interrupted" and m.error == "主程序重启，会议中断"
     assert m.finished_at is not None
+
+
+async def test_build_modules_wires_market_age_into_gate_and_keeper(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi.gate.entry import JevEntryGate
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from jiaoyi.keeper.keeper import JevKeeper
+
+    class FakeEngine:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    built = JevDecisionModel(MockJevTransport(), c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr(app_mod, "TradingAgentsEngine", FakeEngine)
+    app = _online(tmp_path, now, _Secrets(DEEPSEEK_API_KEY="x" * 16))
+    cards, gate, keeper = app.m.cards, app.m.gate, app.m.keeper
+    assert isinstance(cards, BattleCardCommander)
+    assert isinstance(gate, JevEntryGate) and isinstance(keeper, JevKeeper)
+    assert gate._market_age == cards.market_age
+    assert keeper._market_age == cards.market_age
+    await app.stop()

@@ -136,6 +136,22 @@ async def test_error_counter_resets_at_bangkok_midnight() -> None:
     assert m.health == c.Health.DEGRADED
 
 
+async def test_with_own_errors_shares_transport_but_not_cooldown(now: datetime) -> None:
+    t = MockJevTransport(fail=RuntimeError("x"))
+    gate_model = model(t, clock=Clock(), wall=lambda: now)
+    keeper_model = gate_model.with_own_errors()
+    for _ in range(FAST.jev_max_consecutive_errors):
+        assert not (await keeper_model.ask(entry_request(now))).ok
+    assert keeper_model.health == c.Health.DOWN
+    assert gate_model.health == c.Health.OK and gate_model.consecutive_errors == 0
+    t.fail, t.answer = None, answer_with(GOOD_LONG)
+    calls = len(t.calls)
+    assert (await gate_model.ask(entry_request(now))).ok
+    assert len(t.calls) == calls + 1  # same transport
+    r = await keeper_model.ask(entry_request(now))
+    assert not r.ok and "冷却" in (r.error or "") and len(t.calls) == calls + 1
+
+
 async def test_entry_gate_without_valid_card_does_not_call_model(now: datetime) -> None:
     t = MockJevTransport(answer=answer_with(GOOD_LONG))
     gate = JevEntryGate(model(t))

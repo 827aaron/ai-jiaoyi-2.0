@@ -7,7 +7,7 @@ import os
 import shutil
 import signal
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,7 @@ from jiaoyi.core.hotconfig import ConfigFiles
 from jiaoyi.panel import actions
 from jiaoyi.panel import pending_config as pc
 from jiaoyi.panel.actions import CHANGES_FILE, ConfigPaths
-from jiaoyi.slow.settings import load_slow_config
+from jiaoyi.slow.settings import SlowConfig, load_slow_config
 from tests.test_panel_actions import _client, _setup
 
 ROOT = Path(__file__).parent.parent
@@ -97,6 +97,21 @@ def test_success_archives_pending_backs_up_and_logs(tmp_path: Path) -> None:
     assert pc.apply_pending(paths, data, NOW).status == "none"
     assert paths.app.read_text(encoding="utf-8") == text
     assert len(_rows(data)) == 2
+
+
+def test_accepts_leverage_account_and_jev_switches(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(
+        paths,
+        "app",
+        "jev_shared_cooldown = false\naccount_read_retries = 1\n\n"
+        "[fast_loop]\nleverage_clamp_to_bracket = true\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert (cfg.jev_shared_cooldown, cfg.account_read_retries) == (False, 1)
+    assert cfg.fast_loop.leverage_clamp_to_bracket is True
 
 
 def test_no_pending_is_noop(tmp_path: Path) -> None:
@@ -621,6 +636,20 @@ def test_tiers_always_candidates_meet_is_pending_mergeable(tmp_path: Path) -> No
     assert slow.commander_kwargs()["tiers"].always_meet is True
 
 
+def test_predictor_keeper_snapshot_is_editable_and_pending_mergeable(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    assert actions.editable_fields("predictor")["keeper_snapshot"].choices == (
+        "direction",
+        "rank",
+        "off",
+    )
+    assert load_app_config(paths.app).predictor.keeper_snapshot == "direction"
+    _pending(paths, "app", '[predictor]\nkeeper_snapshot = "rank"\n')
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).predictor.keeper_snapshot == "rank"
+
+
 def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
     text = (
@@ -683,6 +712,62 @@ def test_pending_refuses_meeting_model_keys(tmp_path: Path) -> None:
     res = pc.apply_pending(paths, data, NOW)
     assert res.status != "applied" and p.exists()
     assert paths.slow.read_text(encoding="utf-8") == before
+
+
+def test_pending_accepts_reuse_expiry_and_regime_age_keys(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(
+        paths,
+        "slow",
+        "[schedule]\nreuse_extend_expiry = true\n"
+        "[meeting]\nregime_time_label = true\nregime_max_age_min = 120\npool_scope_label = true\n"
+        "[market_desk]\nrepublish_after_min = 60\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    slow = load_slow_config(paths.slow, "standard")
+    kw = slow.commander_kwargs()
+    assert kw["reuse_extend_expiry"] is True
+    assert (kw["regime_time_label"], kw["regime_max_age"], kw["pool_scope_label"]) == (
+        True,
+        timedelta(minutes=120),
+        True,
+    )
+    assert slow.market_desk.republish_after_min == 60.0
+    defaults = SlowConfig().commander_kwargs()
+    assert (defaults["reuse_extend_expiry"], defaults["regime_time_label"]) == (False, False)
+    assert (defaults["regime_max_age"], defaults["pool_scope_label"]) == (timedelta(0), False)
+    assert SlowConfig().market_desk.republish_after_min == 0.0
+
+
+def test_regime_max_age_requires_a_shorter_desk_republish(tmp_path: Path) -> None:
+    from jiaoyi.core.config import ConfigError
+
+    for again in (0, 120, 180):
+        p = tmp_path / f"slow{again}.toml"
+        p.write_text(
+            "[meeting]\nregime_max_age_min = 120\n"
+            f'[market_desk]\nmode = "replace"\nrepublish_after_min = {again}\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="republish_after_min"):
+            load_slow_config(p)
+    ok = tmp_path / "ok.toml"
+    ok.write_text(
+        '[meeting]\nregime_max_age_min = 120\n[market_desk]\nmode = "replace"\n'
+        "republish_after_min = 60\n",
+        encoding="utf-8",
+    )
+    assert load_slow_config(ok).market_desk.republish_after_min == 60.0
+
+
+def test_hosted_close_settings_merge_from_pending(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", 'hosted_close_mode = "direct"\nhb_stop_unknown_retries = 3\n')
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert (cfg.hosted_close_mode, cfg.hb_stop_unknown_retries) == ("direct", 3)
 
 
 def test_protection_tick_alert_after_merges_from_pending(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,7 +109,9 @@ def build_execution(
     protection_leg_order: LegOrder = "lifeboat_first",
     hosted_close_mode: HostedCloseMode = "hb_first",
     protection_tick_alert_after: int = 1,
+    hb_stop_unknown_retries: int = 0,
     position_mode_cache_s: float = 0.0,
+    leverage_brackets_wanted: Callable[[], bool] | None = None,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -145,7 +148,9 @@ def build_execution(
         return RoleRecorder(role, decision_log, day_reset_tz=tz)
 
     lifeboat = BinanceLifeboat(exchange, recorder=recorder(Role.LIFEBOAT))
-    lot_rules = ExchangeInfoLotRules(exchange, recorder=recorder(Role.EXECUTOR))
+    lot_rules = ExchangeInfoLotRules(
+        exchange, recorder=recorder(Role.EXECUTOR), brackets_wanted=leverage_brackets_wanted
+    )
 
     def tick_size(symbol: str) -> float | None:
         rules = lot_rules.lot_rules(symbol)
@@ -192,6 +197,7 @@ def build_execution(
         frozen_peak_exit_after_s=frozen_peak_exit_after_s,
         hosted_close_mode=hosted_close_mode,
         protection_tick_alert_after=protection_tick_alert_after,
+        hb_stop_unknown_retries=hb_stop_unknown_retries,
     )
     reconciler = ThreeWayReconciler(
         adapter,

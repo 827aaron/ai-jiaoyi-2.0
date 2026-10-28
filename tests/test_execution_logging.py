@@ -20,7 +20,7 @@ from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
 from jiaoyi.execution.reconciler import ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry
-from jiaoyi.risk.guard import LotRules
+from jiaoyi.risk.guard import LeverageBracket, LotRules
 from tests.conftest import load_example
 from tests.fakes import FakeExchange, FakeHbApi
 
@@ -94,6 +94,91 @@ async def test_refresh_picks_up_new_rules() -> None:
     ex.filters["BTCUSDT"] = LotFilter(0.01, 0.01, 50.0)
     await lots.refresh()
     assert lots.lot_rules("BTCUSDT") == LotRules(0.01, 0.01, 50.0)
+
+
+class BracketExchange(FakeExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bracket_calls = 0
+        self.brackets_down = False
+        self.tiers: dict[str, tuple[tuple[float, int], ...]] = {
+            "XPLUSDT": ((5_000.0, 10), (25_000.0, 5))
+        }
+
+    async def leverage_brackets(self) -> dict[str, tuple[tuple[float, int], ...]]:
+        self.bracket_calls += 1
+        if self.brackets_down:
+            raise ExchangeError("leverageBracket 不可用")
+        return dict(self.tiers)
+
+
+async def test_leverage_brackets_not_fetched_unless_wanted() -> None:
+    ex, clk = BracketExchange(), Clk()
+    for wanted in (None, lambda: False):
+        lots = ExchangeInfoLotRules(ex, clock=clk, brackets_wanted=wanted)
+        assert await lots.refresh()
+        assert lots.leverage_brackets("XPLUSDT") is None
+    assert ex.bracket_calls == 0
+
+
+async def test_leverage_brackets_refresh_daily_and_survive_failures(tmp_path: Path) -> None:
+    ex, clk = BracketExchange(), Clk()
+    log = JsonlDecisionLog(tmp_path)
+    rec = RoleRecorder(Role.EXECUTOR, log)
+    lots = ExchangeInfoLotRules(ex, clock=clk, recorder=rec, brackets_wanted=lambda: True)
+    await lots.refresh()
+    assert lots.leverage_brackets("XPLUSDT") == (
+        LeverageBracket(5_000.0, 10),
+        LeverageBracket(25_000.0, 5),
+    )
+    assert lots.leverage_brackets("BTCUSDT") is None
+    clk.t += timedelta(hours=23)
+    await lots.refresh()
+    assert ex.bracket_calls == 1  # still fresh
+    clk.t += timedelta(hours=2)
+    ex.brackets_down = True
+    assert await lots.refresh()  # lot filters still refresh fine
+    assert ex.bracket_calls == 2
+    assert lots.leverage_brackets("XPLUSDT") is not None  # old tiers kept
+    [r] = log.read_day(clk.t.date().isoformat())
+    assert r.outcome == Outcome.ERROR and "刷新杠杆分层失败" in r.summary
+    clk.t += timedelta(minutes=5)
+    await lots.refresh()
+    assert ex.bracket_calls == 2  # retry is spaced out
+    ex.brackets_down = False
+    ex.tiers = {"XPLUSDT": ((5_000.0, 20),)}
+    clk.t += timedelta(minutes=6)
+    await lots.refresh()
+    assert ex.bracket_calls == 3
+    assert lots.leverage_brackets("XPLUSDT") == (LeverageBracket(5_000.0, 20),)
+
+
+async def test_ccxt_leverage_brackets_parses_tiers() -> None:
+    class Fake:
+        async def fapiPrivateGetLeverageBracket(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "symbol": "XPLUSDT",
+                    "brackets": [
+                        {"bracket": 2, "initialLeverage": 5, "notionalCap": "25000"},
+                        {"bracket": 1, "initialLeverage": 10, "notionalCap": "5000"},
+                    ],
+                },
+                {"symbol": "BADUSDT", "brackets": [{"initialLeverage": "x"}]},
+                {"symbol": "EMPTYUSDT", "brackets": []},
+            ]
+
+    obj = CcxtBinanceFutures.__new__(CcxtBinanceFutures)
+    obj._ex = Fake()
+    assert await obj.leverage_brackets() == {"XPLUSDT": ((5000.0, 10), (25000.0, 5))}
+
+    class Down:
+        async def fapiPrivateGetLeverageBracket(self) -> list[dict[str, Any]]:
+            raise RuntimeError("-2015 Invalid API-key")
+
+    obj._ex = Down()
+    with pytest.raises(ExchangeError, match="读杠杆分层失败"):
+        await obj.leverage_brackets()
 
 
 class FakeCcxtMarkets:

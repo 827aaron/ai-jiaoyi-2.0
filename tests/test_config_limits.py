@@ -130,6 +130,7 @@ OPTIONAL_APP_FIELDS = {
     "protection_leg_order",
     "hosted_close_mode",  # 默认 hb_first，老配置文件没有这一行
     "protection_tick_alert_after",  # 默认 1
+    "hb_stop_unknown_retries",  # 默认 0
     "protection_trailing_book_mark_max_dev_bps",  # 默认 30，老配置文件没有这一行
     "protection_trailing_stop_mark_buffer_bps",  # 默认 5
     "protection_trailing_min_step_bps",  # 默认 5
@@ -142,6 +143,8 @@ OPTIONAL_APP_FIELDS = {
     "card_score_every_min",  # 默认 60，老配置文件没有这一行
     "card_score_window_days",  # 默认 30
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
+    "jev_shared_cooldown",  # 默认 true（原行为）
+    "account_read_retries",  # 默认 0（原行为）
     "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",

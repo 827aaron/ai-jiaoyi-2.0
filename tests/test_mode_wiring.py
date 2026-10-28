@@ -181,6 +181,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._protection.leg_order == "lifeboat_first"
     assert adapter._hosted_close_mode == "hb_first"
     assert adapter._tick_alert_after == 1
+    assert adapter._hb_stop_unknown_retries == 0
     app_cfg = _cfg(
         tmp_path,
         RunMode.PAPER,
@@ -195,6 +196,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
         protection_leg_order="stop_first",
         hosted_close_mode="direct",
         protection_tick_alert_after=5,
+        hb_stop_unknown_retries=3,
     )
     (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
     assert adapter._protection.readback_grace_s == 2.5
@@ -209,6 +211,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._protection.leg_order == "stop_first"
     assert adapter._hosted_close_mode == "direct"
     assert adapter._tick_alert_after == 5
+    assert adapter._hb_stop_unknown_retries == 3
 
 
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:
