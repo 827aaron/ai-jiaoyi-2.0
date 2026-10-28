@@ -49,7 +49,7 @@ try { if (localStorage.getItem("updown") === "red-up") document.documentElement.
 let data = null; // /api/overview
 let pageData = null; // 当前页自己的接口
 let pageKey = "";
-const pageCache = new Map(); // 页面 id → 上次拉到的数据：切回来先用它画，后台再刷新，不先出「正在读取」
+const pageCache = new Map(); // 数据 id → { d, at }：切回来先用它画，后台再刷新，不先出「正在读取」
 let pageErr = null; // [pageId, 出错说明]：读不出就显示错误，不能一直“正在读取…”
 const STALE_HINT = "多半是代码更新了、面板进程还是旧的：在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。";
 let lastOk = 0;
@@ -3651,6 +3651,23 @@ const PAGE_API = {
   settings: () => "/api/settings",
 };
 const pageId = (page, arg) => page + "/" + (arg || "") + (page === "history" ? "/" + S.hist + (S.tests ? "/t" : "") : "");
+// 同一个接口请求就是同一份数据：持仓页选中哪一笔不改请求，不能按选中项各存一份旧快照
+const dataId = (page, arg) => page + " " + PAGE_API[page](arg);
+// 持仓是活数据：存了几分钟的快照里有早就平掉的仓位，先画出来一秒后又被新数据抹掉，看着像仓位闪了一下
+const CACHE_MAX_AGE_MS = { positions: 10000 };
+function cachedPage(page, id, now) {
+  const hit = pageCache.get(id);
+  if (!hit) return null;
+  const max = CACHE_MAX_AGE_MS[page];
+  return max != null && now - hit.at > max ? null : hit.d;
+}
+// 换页时会多发一轮拉数，和定时那轮同时在路上：只认后发出的那轮，先发的晚到就丢掉，不拿旧数据盖新数据
+let pollSent = 0, pollShown = 0;
+function pollIsLatest(seq) {
+  if (seq < pollShown) return false;
+  pollShown = seq;
+  return true;
+}
 
 function render() {
   chrome();
@@ -3659,15 +3676,17 @@ function render() {
   // 搜索框里正在用输入法拼字：这次定时刷新先不重画，免得把拼到一半的字打断
   if (page === "settings" && S.stComposing) return;
   const needs = PAGE_API[page];
-  if (needs && pageErr && pageErr[0] === pageId(page, arg)) {
+  const did = needs ? dataId(page, arg) : null;
+  if (needs && pageErr && pageErr[0] === did) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>这一页读不出来</b><span>${esc(pageErr[1])}</span><span>${STALE_HINT}</span></div></div>`;
     return;
   }
-  if (needs && pageKey !== pageId(page, arg) && pageCache.has(pageId(page, arg))) {
-    pageData = pageCache.get(pageId(page, arg));
-    pageKey = pageId(page, arg);
+  const hit = needs && pageKey !== did ? cachedPage(page, did, Date.now()) : null;
+  if (hit) {
+    pageData = hit;
+    pageKey = did;
   }
-  if (!data || (needs && (!pageData || pageKey !== pageId(page, arg)))) {
+  if (!data || (needs && (!pageData || pageKey !== did))) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
   }
@@ -3791,29 +3810,31 @@ function tradeSounds(list) {
 
 async function poll() {
   const { page, arg } = route();
+  const seq = ++pollSent;
   try {
     // 总览和这一页自己的接口一起拉（原来是先等总览、再拉这一页，慢一点就多等一轮）
     const api = PAGE_API[page];
-    const id = api ? pageId(page, arg) : null;
+    const id = api ? dataId(page, arg) : null;
     const pageReq = api ? getJson(api(arg)).then((d) => [d, null], (e) => [null, e]) : null;
-    data = await getJson("/api/overview");
+    const ov = await getJson("/api/overview");
+    const [d, e] = pageReq ? await pageReq : [null, null];
+    if (!pollIsLatest(seq)) return;
+    data = ov;
     TZ = data.display_tz || TZ;
     tradeSounds(data.positions || []);
-    if (pageReq) {
-      const [d, e] = await pageReq;
-      if (e) pageErr = [id, e.message];
-      else {
-        pageData = d;
-        pageKey = id;
-        pageCache.set(id, d);
-        pageErr = null;
-      }
+    if (e) pageErr = [id, e.message];
+    else if (pageReq) {
+      pageData = d;
+      pageKey = id;
+      pageCache.set(id, { d, at: Date.now() });
+      pageErr = null;
     }
     lastOk = Date.now();
     $("#stale").innerHTML = "";
     render();
     loadKlines(false);
   } catch (e) {
+    if (seq < pollShown) return;
     const ago = lastOk ? Math.round((Date.now() - lastOk) / 1000) + " 秒前" : "从未";
     $("#stale").innerHTML = `<div class="stale">面板服务读不出（${esc(e.message)}；上次成功：${ago}）</div>`;
     if (!data) $("#page").innerHTML = `<div class="card"><div class="empty"><b>面板读不出数据</b><span>${esc(e.message)}</span><span>${STALE_HINT}</span></div></div>`;
