@@ -173,12 +173,19 @@ async def test_daily_cost_limit_counts_meetings_not_yet_charged(
     await drain(r)
 
 
+@pytest.mark.parametrize(
+    "slow",
+    [
+        {"BBUSDT": 3 * DELAY},  # 整轮先出一张卡，临时会开完后整轮最后一场才出卡
+        {"AAUSDT": 2 * DELAY, "BBUSDT": 3 * DELAY},  # 临时会在整轮第一张卡之前就开完
+    ],
+)
 async def test_events_during_round_skip_round_symbols_and_land_on_its_card(
-    tmp_path: Path, now: datetime
+    tmp_path: Path, now: datetime, slow: dict[str, float]
 ) -> None:
     c, eng, p, clock = await setup(tmp_path, now, event_concurrency=4)
     eng.picks = ["AAUSDT", "BBUSDT"]
-    eng.slow = {"BBUSDT": 3 * DELAY}  # 整轮最后一场在临时会都开完之后才出卡
+    eng.slow = slow
     base = c.current(clock[0])
     assert base is not None
     versions: list[int] = []
@@ -198,6 +205,52 @@ async def test_events_during_round_skip_round_symbols_and_land_on_its_card(
     distinct = list(dict.fromkeys(versions))
     assert distinct == list(range(base.version + 1, base.version + 5))  # 版本连续、不重号
     assert card.version == base.version + 4
+    assert all(card.for_symbol(s).expires_at == card.expires_at for s in SYMS)  # type: ignore[union-attr]
+    rounds = [
+        rec
+        for rec in JsonlDecisionLog(tmp_path).read_day(clock[0].date().isoformat())
+        if rec.summary.startswith("出作战卡") and rec.input.get("refresh_reason") == "manual"
+    ]
+    assert [rec.cost_usd for rec in rounds] == [pytest.approx(0.01)]  # 总盘会花费没被临时会清零
+
+
+async def test_round_does_not_remeet_a_symbol_already_claimed_for_an_event(
+    tmp_path: Path, now: datetime
+) -> None:
+    c, eng, p, clock = await setup(tmp_path, now, event_concurrency=4)
+    eng.picks = ["AAUSDT", "CCUSDT"]
+    c._pending = {"CCUSDT": c._pending["CCUSDT"]}
+    claimed = c.claim_event(clock[0], p)  # 派出了、还没开始
+    assert claimed == ("CCUSDT", "predictor_against_card")
+    round_task = asyncio.create_task(c.refresh(p, "manual"))
+    await asyncio.sleep(DELAY / 3)
+    assert c._round_meeting == {"AAUSDT"}
+    event = await c.refresh_symbol(p, *claimed)
+    await asyncio.wait_for(round_task, timeout=10)
+    assert event is not None and eng.symbol_peak["CCUSDT"] == 1
+    assert eng.analyzed[4:].count("CCUSDT") == 1
+    card = c.current(clock[0])
+    assert card is not None and int(card.for_symbol("CCUSDT").reason.split(" #")[1]) > 4  # type: ignore[union-attr]
+
+
+async def test_failed_bookkeeping_before_the_meeting_does_not_leave_symbol_in_flight(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c, _, p, _ = await setup(tmp_path, now, event_concurrency=4)
+    calls = 0
+    save = c._save_market
+
+    def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # 开会前最后一次落盘
+            raise OSError("disk full")
+        save()
+
+    monkeypatch.setattr(c, "_save_market", flaky)
+    with pytest.raises(OSError):
+        await c.refresh_symbol(p, "AAUSDT", "predictor_against_card")
+    assert c._symbol_inflight == set() and c._event_live == []
 
 
 async def test_round_pick_phase_blocks_events(tmp_path: Path, now: datetime) -> None:
@@ -231,13 +284,26 @@ def test_event_concurrency_setting_bounds() -> None:
         ScheduleConfig(concurrency=33)
 
 
-@pytest.mark.parametrize(("limit", "dispatched"), [(4, {"CCUSDT", "DDUSDT"}), (1, set())])
+@pytest.mark.parametrize(
+    ("limit", "round_on", "meeting", "dispatched"),
+    [
+        (4, True, {"AAUSDT", "BBUSDT"}, {"CCUSDT", "DDUSDT"}),
+        (1, True, {"AAUSDT", "BBUSDT"}, set()),
+        (4, False, None, set()),  # 主循环已进整轮（选币 / 拉简报中），commander 还没开始
+        (4, True, None, set()),  # 总盘会还在挑币
+    ],
+)
 async def test_runner_during_round_dispatches_only_symbols_outside_the_round(
-    tmp_path: Path, now: datetime, limit: int, dispatched: set[str]
+    tmp_path: Path,
+    now: datetime,
+    limit: int,
+    round_on: bool,
+    meeting: set[str] | None,
+    dispatched: set[str],
 ) -> None:
     c, _, p, clock = await setup(tmp_path, now, event_concurrency=limit)
     r = runner(tmp_path, c, p, clock)
-    c._round_on, c._round_meeting = True, {"AAUSDT", "BBUSDT"}
+    c._round_on, c._round_meeting = round_on, meeting
     r._refreshing = True
     await r.slow_tick()
     assert r._event_running == dispatched

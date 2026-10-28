@@ -2049,8 +2049,14 @@ class Runner:
         if limit == 1 and (self._refreshing or self._event_running):
             return  # 一场一场开：整轮或临时会在开，什么都不派
         if self._refreshing:
-            # 整轮在开：只给本轮不开的币派临时会（commander 挡掉本轮的币），和整轮共用并发名额
-            if events is not None and await self._may_meet(cards, now) and not is_stub(cards):
+            # 整轮在开：本轮开哪些币定了以后，只给本轮不开的币派临时会（commander 挡掉本轮的币），
+            # 和整轮共用并发名额；还在选币 / 挑币时不派
+            if (
+                events is not None
+                and getattr(cards, "round_symbols_known", False) is True
+                and await self._may_meet(cards, now)
+                and not is_stub(cards)
+            ):
                 self._dispatch_events(events, pool, now, limit)
             return
         reason: str | None = None

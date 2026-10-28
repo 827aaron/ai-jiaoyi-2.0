@@ -279,10 +279,12 @@ def binance_symbol(ticker: str) -> str:
     return f"{t}USDT"
 
 
-MEETING_THREADS = 32
-"""单币会议专用线程池的上限（= ``[schedule] concurrency`` 的上限）。会议同时开几场由指挥官的
-信号量管；不用 ``asyncio.to_thread`` 的默认线程池，它只有 min(32, CPU 数 + 4) 个线程（10 核
-Mac 上 14 个）：并发调到 16 时多出来的会议排在池里干等、照样计超时，还占满别处的 ``to_thread``。"""
+MEETING_THREADS = 64
+"""单币会议专用线程池的上限（线程用到才建）。会议同时开几场由指挥官的信号量管（最多 32）；
+超时取消的会议线程要等它在途的那个请求结束才退出，期间仍占一个线程，所以留到 2 倍，不让
+它们挤掉新开的会。不用 ``asyncio.to_thread`` 的默认线程池：它只有 min(32, CPU 数 + 4) 个线程
+（10 核 Mac 上 14 个），并发调到 16 时多出来的会议排在池里干等、照样计超时，还占满别处的
+``to_thread``。"""
 _MEETING_POOL = ThreadPoolExecutor(max_workers=MEETING_THREADS, thread_name_prefix="meeting")
 
 # ---------------------------------------------------------------- 币安数据源
