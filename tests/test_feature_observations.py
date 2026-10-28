@@ -77,9 +77,7 @@ def test_bootstrap_and_unknown_source_are_not_fabricated_as_trades() -> None:
     engine = warm()
     captured = engine.diagnostic_observation(SYMBOL, T0)
     assert captured["price"]["source"] == "kline_close_bootstrap"
-    assert (
-        captured["price"]["source_ts"] == (T0 - timedelta(minutes=14, milliseconds=1)).isoformat()
-    )
+    assert captured["price"]["source_ts"] == (T0 - timedelta(milliseconds=1)).isoformat()
     assert captured["returns"]["ret5m"]["coverage_status"] == "no_trade_price_history"
     before = len(engine._s)
     missing = engine.diagnostic_observation("ETHUSDT", T0)

@@ -51,6 +51,7 @@ def features(
         "taker_buy_ratio_1m": 0.65,
         "cvd_30s_usdt": 30_000.0,
         "realized_vol_5m": 0.0004,
+        "live_s": 3600.0,
     }
     base.update(values)
     return c.FeatureSnapshot(

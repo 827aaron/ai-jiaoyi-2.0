@@ -973,7 +973,7 @@ const FIELD = {
   hold_min: ["最长持仓", "min"], time_limit_s: ["最长持仓", "s"], atr_bps: ["波动幅度 ATR", "bps"], atr: ["波动幅度 ATR", "px"], atr_period_min: ["ATR 用几分钟 K 线", "min"],
   ret1m_bps: ["1 分钟涨跌", "bps"], ret5m_bps: ["5 分钟涨跌", "bps"], ret_1m: ["1 分钟涨跌", "frac"], ret_5m: ["5 分钟涨跌", "frac"],
   vol_x: ["1 分钟量 / 平时", "x"], vol_ratio_1m: ["1 分钟量 / 平时", "x"], buy: ["主动买占比", "ratio"], taker_buy_ratio: ["主动买占比", "ratio"], taker_buy_ratio_1m: ["主动买占比", "ratio"],
-  cvd30_k: ["30 秒净主动买", "k"], cvd: ["净主动买"], rv5m_bps: ["5 分钟实际波动", "bps"], realized_vol_5m: ["5 分钟实际波动", "frac"],
+  live_s: ["实时行情已连续", "s"], cvd30_k: ["30 秒净主动买", "k"], cvd: ["净主动买"], rv5m_bps: ["5 分钟实际波动", "bps"], realized_vol_5m: ["5 分钟实际波动", "frac"],
   liq_long_k: ["1 分钟多头强平", "k"], liq_short_k: ["1 分钟空头强平", "k"], fund_bps: ["资金费率", "bps"], funding_rate: ["资金费率", "frac"],
   book: ["盘口"], spread_bps: ["买卖价差", "bps"], imb: ["买卖挂单失衡", "ratio"], imbalance: ["买卖挂单失衡", "ratio"], micro_bps: ["微观价偏离", "bps"], microprice: ["微观价", "px"], mid: ["中间价", "px"],
   ofi_k: ["订单流失衡", "k"], ofi: ["订单流失衡"], depth_k: ["盘口深度", "k"], depth_usdt: ["盘口深度", "usdt"],

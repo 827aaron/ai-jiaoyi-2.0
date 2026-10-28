@@ -40,6 +40,9 @@ DEFAULT_ATR_MINUTES = 15
 VOL_AVG_KLINES = 20
 TRADE_WINDOW_S = 300.0
 LIQ_WINDOW_S = 1800.0
+STREAM_GAP_S = 300.0
+"""这么久没收到这个币的成交 / 盘口 / 标记价就算断过（重启、重新订阅、断线），``live_s`` 从下一条
+重新计时：断档前的成交已被 5 分钟窗口裁掉，``ret_5m`` 只剩断档后的几笔，读出来是 0。"""
 FLOW_WINDOW_S = 60.0
 BURST_WINDOW_S = 10.0
 """放量提前发现：最近这么多秒的成交额折算成每分钟，和 1 分钟均量比。"""
@@ -107,6 +110,8 @@ class _SymbolState:
     mark_observed_ts: float | None = None
     book: BookTop | None = None
     mark: MarkPrice | None = None
+    live_since: float | None = None  # 这一段连续实时行情从哪一秒开始
+    live_last: float | None = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +285,12 @@ def _vol_24h(st: _SymbolState) -> float | None:
     return st.vol_24h
 
 
+def _mark_live(st: _SymbolState, t: float) -> None:
+    if st.live_last is None or t - st.live_last > STREAM_GAP_S:
+        st.live_since = t
+    st.live_last = t if st.live_last is None else max(st.live_last, t)
+
+
 def wilder_atr(bars: Iterable[tuple[float, float, float]]) -> float | None:
     """完整 N 分钟线 ``(高, 低, 收)``（升序）→ 同实时引擎算法的 ATR；不够 15 根为 None。"""
     tr = _AtrTrack()
@@ -338,6 +349,8 @@ class RollingFeatureEngine:
 
     def update(self, event: MarketEvent) -> None:
         st = self._state(event.symbol)
+        if isinstance(event, Trade | BookTop | MarkPrice):
+            _mark_live(st, _ts(event.ts))
         if isinstance(event, Trade):
             self._on_trade(st, event)
             st.last_price_source = "trade"
@@ -355,9 +368,7 @@ class RollingFeatureEngine:
             st.last_ts = max(st.last_ts, _ts(event.ts))
             st.mark_observed_ts = self._observation_update_ts()
         elif isinstance(event, Kline):
-            had_price = st.last_price is not None
-            self._on_kline(st, event)
-            if not had_price and st.last_price is not None:
+            if self._on_kline(st, event) and st.last_price_source != "trade":
                 st.last_price_source = "kline_close_bootstrap"
                 st.last_price_source_ts = _ts(event.close_time)
                 st.last_price_observed_ts = self._observation_update_ts()
@@ -403,11 +414,12 @@ class RollingFeatureEngine:
             st.imbs.append((float(sec), bk.imbalance(ev, self._levels)))
         st.last_ts = max(st.last_ts, t)
 
-    def _on_kline(self, st: _SymbolState, k: Kline) -> None:
+    def _on_kline(self, st: _SymbolState, k: Kline) -> bool:
+        """收下返回 True；别的周期、重复或乱序的返回 False。"""
         if k.interval != Interval.M1:
-            return
+            return False
         if st.klines and k.open_time <= st.klines[-1].open_time:
-            return  # 重复或乱序（例如回填和推送重叠）
+            return False  # 重复或乱序（例如回填和推送重叠）
         st.klines.append(k)
         minute = int(k.open_time.timestamp() // 60)
         st.closes.append((minute, k.close))
@@ -418,9 +430,11 @@ class RollingFeatureEngine:
             st.atr_hist.append((end, st.short.atr))
         if self._long_min:
             self._aggregate(st.long, k, self._long_min)
-        if st.last_price is None:
+        # 还没来过成交就跟最新收盘价：回填从 24 小时前往后喂，只取第一根会把一天前的价当现价
+        if st.last_price_source != "trade":
             st.last_price = k.close
         st.last_ts = max(st.last_ts, _ts(k.close_time))
+        return True
 
     @staticmethod
     def _aggregate(tr: _AtrTrack, k: Kline, n: int) -> float | None:
@@ -707,6 +721,8 @@ class RollingFeatureEngine:
                     sell_10 += usdt
         v["vol_1m_usdt"] = buy + sell
         v["trades_1m"] = float(n)
+        if st.live_since is not None:
+            v["live_s"] = max(now - st.live_since, 0.0)
         v["taker_buy_ratio_1m"] = buy / (buy + sell) if buy + sell > 0 else 0.5
         v["cvd_1m_usdt"] = buy - sell
         v["cvd_30s_usdt"] = cvd_30
