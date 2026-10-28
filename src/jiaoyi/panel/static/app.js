@@ -1394,13 +1394,18 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
-let lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
+let entryIdx = null, lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
 try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
 // KLINE-SCALE-BEGIN
-const DEFAULT_BARS = 120, RIGHT_BARS = 5;
-// 默认视图：最近 120 根，最新一根后面留 5 根的空位（像 TradingView / 币安）
-function defaultRange(n) {
-  return { from: Math.max(0, n - DEFAULT_BARS), to: Math.max(n - 1, 0) + RIGHT_BARS };
+const DEFAULT_BARS = 120, RIGHT_BARS = 5, ENTRY_LEAD_BARS = 10, MAX_SPAN_BARS = 600;
+// 默认视图：从开仓那根前 10 根看到最新一根后 5 根的空位，这段超过 600 根或没有开仓点就退回最近 120 根
+function defaultRange(n, entryIdx) {
+  const to = Math.max(n - 1, 0) + RIGHT_BARS;
+  if (entryIdx != null && entryIdx >= 0) {
+    const from = Math.max(0, entryIdx - ENTRY_LEAD_BARS);
+    if (to - from <= MAX_SPAN_BARS) return { from, to };
+  }
+  return { from: Math.max(0, n - DEFAULT_BARS), to };
 }
 // 价格轴只认看得见的 K 线（+ 开仓价）；开了「显示全部价位」才把所有线算进去。返回 {min, max} 或 null
 function scaleRange(bars, range, lines, entry, all) {
@@ -1426,11 +1431,20 @@ function limitNote(openedMs, limitS, bars, fmt) {
   const end = openedMs + limitS * 1000;
   return end > bars[bars.length - 1].time * 1000 ? `到时 ${fmt(end)} →` : "";
 }
+// 开仓那根 K 线的下标；开仓早于第一根 / 没有开仓时间 → null
+function entryBarIndex(p, bars) {
+  if (!bars.length || !p.opened_at) return null;
+  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
+  if (at < bars[0].time) return null;
+  let k = 0;
+  for (let i = 0; i < bars.length && bars[i].time <= at; i++) k = i;
+  return k;
+}
 // KLINE-SCALE-END
 const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
-    c.timeScale().setVisibleLogicalRange(defaultRange(barCount));
+    c.timeScale().setVisibleLogicalRange(defaultRange(barCount, entryIdx));
     c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
@@ -1557,6 +1571,7 @@ async function loadKlines(force) {
     linePrices = [];
     lineDefs = [];
     lastBars = [];
+    entryIdx = null;
     limitAt = "";
     updateEdges();
     chart.priceScale("right").applyOptions({ autoScale: true });
@@ -1572,6 +1587,7 @@ async function loadKlines(force) {
     series.setData(bars);
     barCount = bars.length;
     lastBars = bars;
+    entryIdx = entryBarIndex(p, bars);
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1602,11 +1618,10 @@ async function loadKlines(force) {
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
 // 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
 function entryMarkers(p, bars) {
-  if (!bars.length || p.entry_price == null || !p.opened_at) return [];
-  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
-  if (at < bars[0].time) return [];
-  let bar = bars[0];
-  for (const b of bars) { if (b.time <= at) bar = b; else break; }
+  if (p.entry_price == null) return [];
+  const k = entryBarIndex(p, bars);
+  if (k == null) return [];
+  const bar = bars[k];
   const long = p.side === "long";
   const css = getComputedStyle(document.documentElement);
   return [{

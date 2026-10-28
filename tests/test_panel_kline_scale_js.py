@@ -17,6 +17,16 @@ const lines = [194.74, 199.5, 202.75, 203.49, 195.12];
 
 // 默认视图：最近 120 根 + 右侧 5 根空位；根数不够 120 就从 0 开始
 assert.deepEqual(defaultRange(300), { from: 180, to: 304 });
+assert.deepEqual(defaultRange(300, null), { from: 180, to: 304 });
+// 开仓在 70 根前：从开仓前 10 根开始，看到最新 + 5
+assert.deepEqual(defaultRange(300, 229), { from: 219, to: 304 });
+// 开仓很早但整段不超过 600 根：照样包进来；刚好 600 算在内
+assert.deepEqual(defaultRange(500, 100), { from: 90, to: 504 });
+assert.deepEqual(defaultRange(600, 15), { from: 5, to: 604 });
+// 开仓太早（整段超过 600 根）：退回最近 120 根
+assert.deepEqual(defaultRange(2100, 100), { from: 1980, to: 2104 });
+// 开仓就在前几根：from 不小于 0
+assert.deepEqual(defaultRange(300, 3), { from: 0, to: 304 });
 assert.deepEqual(defaultRange(50), { from: 0, to: 54 });
 assert.deepEqual(defaultRange(0), { from: 0, to: 5 });
 
@@ -47,6 +57,13 @@ assert.deepEqual(edgeLabels(defs.slice(0, 3), all, 0.09), []);
 assert(Math.abs(padFrac(0.09) - 0.09 / 0.82) < 1e-12);
 assert.deepEqual(edgeLabels([{ price: 203.38, title: '图内' }, { price: 203.42, title: '图外' }], r, padFrac(0.09)).map((d) => d.title), ['图外']);
 
+// 开仓那根：最后一个不晚于开仓时间的 K 线；早于第一根 / 没时间 → null
+const at = (i) => new Date((bars[i].time + 20) * 1000).toISOString();
+assert.equal(entryBarIndex({ opened_at: at(229) }, bars), 229);
+assert.equal(entryBarIndex({ opened_at: new Date(500 * 1000).toISOString() }, bars), null);
+assert.equal(entryBarIndex({ opened_at: null }, bars), null);
+assert.equal(entryBarIndex({ opened_at: at(10) }, []), null);
+
 // 到时点：在最后一根之后才写，格式由调用方给
 const fmt = (ms) => 'T' + (ms / 1000);
 const lastMs = bars[bars.length - 1].time * 1000;
@@ -74,4 +91,4 @@ def test_toggle_is_remembered_and_wired() -> None:
         'localStorage.getItem("kline-scale")' in source
         and 'localStorage.setItem("kline-scale"' in source
     )
-    assert "defaultRange(barCount)" in source  # 双击复位走默认范围
+    assert "defaultRange(barCount, entryIdx)" in source  # 双击复位走默认范围
