@@ -106,6 +106,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_assistant_flip_confirm",
         "keeper_assistant_flip_neutral",
         "card_flip_confirm_by",
+        "card_neutral_flip",
         "keeper_assistant_concurrency",
         "frozen_peak_exit_on",
         "frozen_peak_exit_after_s",

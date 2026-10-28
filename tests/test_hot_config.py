@@ -167,6 +167,7 @@ def test_keeper_assistant_settings_edit_on_panel_and_apply_without_restart(
         "keeper_assistant_flip_confirm": True,
         "keeper_assistant_flip_neutral": True,
         "card_flip_confirm_by": "assistant",
+        "card_neutral_flip": "ignore",
         "keeper_assistant_b_model": "microsoft/decision-1",
         "keeper_assistant_gap_s": 60,
         "keeper_assistant_horizon": "1 小时",

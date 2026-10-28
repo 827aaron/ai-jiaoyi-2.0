@@ -265,6 +265,10 @@ class FlipCards(Protocol):
         self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
     ) -> bool: ...
 
+    def sweep_flips(self) -> None: ...
+
+    def clear_neutral_flips(self) -> None: ...
+
 
 @dataclass
 class _Shadow:
@@ -319,6 +323,8 @@ class KeeperAssistant:
         self._deferred: dict[str, FlipCandidate] = {}
         self._last: dict[str, datetime] = {}
         self._flip_last: dict[str, datetime] = {}
+        self._swept = False
+        self._neutral_cleared = False
         self._last_px: dict[str, float] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._error: str | None = None
@@ -416,6 +422,8 @@ class KeeperAssistant:
                     why = "keeper_assistant_on 关着" if only_us else None
                 elif kind == "flip_confirm":
                     why = "keeper_assistant_flip_confirm 关着" if only_us else None
+                elif cfg.card_neutral_flip == "ignore":
+                    why = None  # the commander clears neutral candidates in this mode
                 elif only_us or cfg.keeper_assistant_flip_confirm:
                     why = "keeper_assistant_flip_neutral 关着"
                 if why is None:
@@ -791,7 +799,20 @@ class KeeperAssistant:
         )
 
     def tick(self, now: datetime) -> None:
-        """心跳时调：影子仓按最新价看止损 / 止盈 / 到时有没有到；跨天发前一天的汇总。不抛。"""
+        """心跳时调：影子仓按最新价看止损 / 止盈 / 到时有没有到；跨天发前一天的汇总；刚启动或刚
+        切到只由管家助手确认翻转时，把现有的待确认翻转都要过来问。不抛。"""
+        try:
+            cfg = self._cfg()
+            ignore = cfg.card_neutral_flip == "ignore"
+            if ignore and not self._neutral_cleared and self._cards is not None:
+                self._cards.clear_neutral_flips()
+            self._neutral_cleared = ignore
+            only_us = cfg.card_flip_confirm_by == "assistant"
+            if only_us and not self._swept and self._cards is not None:
+                self._cards.sweep_flips()
+            self._swept = only_us
+        except Exception:
+            logger.exception("管家助手要现有的待确认翻转失败")
         try:
             for pid, sh in list(self._shadows.items()):
                 f = self._features(sh.symbol)
@@ -952,6 +973,8 @@ def _flip_purpose(cand: FlipCandidate, cfg: FastLoopConfig) -> str | None:
         return None
     if cand.candidate in MOVE:
         return "flip" if cfg.keeper_assistant_flip_confirm else None
+    if cfg.card_neutral_flip == "ignore":
+        return None
     return FLIP_NEUTRAL if cfg.keeper_assistant_flip_neutral else None
 
 

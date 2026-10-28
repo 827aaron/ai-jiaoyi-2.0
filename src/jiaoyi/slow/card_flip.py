@@ -13,6 +13,9 @@
 作用）：会只提候选，场数够了也不确认；同样的结论再来一场只是刷新候选、重新交给管家助手问，
 确认只经 ``BattleCardCommander.confirm_flip``。会回到原方向照样取消。
 
+``[fast_loop] card_neutral_flip = "ignore"``（热生效）：会判不做（中性）不算翻转，卡上留着
+确认过的做多 / 做空那条、照常能开仓（有效期跟新结论走），不记候选；做多 ↔ 做空照旧。
+
 状态存在 ``data/card_flip.json``（不进作战卡存档：契约禁止多余字段，回滚的旧代码要能读卡）。
 每条候选记着它留在卡上的那条指令的身份；卡上那条没了（没有持仓的币过了有效期被拿掉）或
 被换掉（旧代码回滚后开过会、手工改卡）就作废，记一条 ``dropped``。
@@ -72,9 +75,12 @@ class FlipCandidate:
     last_seen: datetime
     held: str
     """``held_key`` of the instruction left on the card while the flip is pending."""
+    signals: tuple[str, ...] | None = None
+    """``allowed_signals`` of that instruction before the candidate emptied them; None for
+    candidates written by older code."""
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "confirmed": self.confirmed,
             "candidate": self.candidate,
             "count": self.count,
@@ -82,6 +88,9 @@ class FlipCandidate:
             "last_seen": self.last_seen.isoformat(),
             "held": self.held,
         }
+        if self.signals is not None:
+            out["signals"] = list(self.signals)
+        return out
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> FlipCandidate:
@@ -94,7 +103,16 @@ class FlipCandidate:
             raise ValueError("方向不对")
         if candidate == confirmed or int(raw["count"]) < 1:
             raise ValueError("候选不成立")
-        return cls(confirmed, candidate, int(raw["count"]), first, last, str(raw["held"]))
+        signals = raw.get("signals")
+        return cls(
+            confirmed,
+            candidate,
+            int(raw["count"]),
+            first,
+            last,
+            str(raw["held"]),
+            tuple(str(s) for s in signals) if isinstance(signals, list) else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -121,6 +139,7 @@ class FlipBook:
         self._path = path
         self._flips: dict[str, FlipCandidate] = {}
         self.by_assistant: Callable[[], bool] = lambda: False
+        self.neutral_ignored: Callable[[], bool] = lambda: False
 
     @property
     def on(self) -> bool:
@@ -137,6 +156,13 @@ class FlipBook:
     ) -> FlipOutcome:
         """新结论 ``fresh`` 要换掉卡上的 ``in_force``（没有 = None）时，决定上卡的是哪条。"""
         if not self.on:
+            if (
+                in_force is not None
+                and card_direction(in_force) != "neutral"
+                and card_direction(fresh) == "neutral"
+                and self.neutral_ignored()
+            ):
+                return self._ignore(symbol, in_force, fresh, card_direction(in_force), None)
             return FlipOutcome(fresh)
         prior = self._flips.get(symbol)
         dropped: FlipCandidate | None = None
@@ -165,6 +191,8 @@ class FlipBook:
                 f"（{self.progress(prior.count, prior.first_seen, now)}）",
             )
         assert in_force is not None
+        if new == "neutral" and self.neutral_ignored():
+            return self._ignore(symbol, in_force, fresh, confirmed, dropped)
         count = prior.count + 1 if prior is not None else 1
         first = prior.first_seen if prior is not None else now
         age = now - first
@@ -189,7 +217,12 @@ class FlipBook:
                 dropped,
             )
         interim = self._interim(in_force, fresh, confirmed, new, count, first, now)
-        self._flips[symbol] = FlipCandidate(confirmed, new, count, first, now, held_key(interim))
+        signals = (
+            prior.signals if prior is not None else tuple(s.value for s in in_force.allowed_signals)
+        )
+        self._flips[symbol] = FlipCandidate(
+            confirmed, new, count, first, now, held_key(interim), signals
+        )
         self.save()
         return FlipOutcome(
             interim,
@@ -197,6 +230,27 @@ class FlipBook:
             detail,
             f"{symbol} 待确认翻转 {self.progress(count, first, now)}：会议改判{DIR_TEXT[new]}，"
             f"卡上仍按{DIR_TEXT[confirmed]}只看不做，持仓不按卡规则平",
+            dropped,
+        )
+
+    @staticmethod
+    def _ignore(
+        symbol: str,
+        in_force: CardSymbol,
+        fresh: CardSymbol,
+        confirmed: FlipDir,
+        dropped: FlipCandidate | None,
+    ) -> FlipOutcome:
+        """会判不做、设置不翻转：卡上那条原样留着（候选期的那条也是，候选不动），有效期跟新结论走，
+        免得过期从卡上掉下去。"""
+        expires = fresh.expires_at
+        if in_force.expires_at is not None and (expires is None or in_force.expires_at > expires):
+            expires = in_force.expires_at
+        return FlipOutcome(
+            in_force.model_copy(update={"expires_at": expires}),
+            "ignored",
+            {"confirmed": confirmed, "candidate": "neutral"},
+            f"{symbol} 会议判不做，按设置不翻转，保留原方向（{DIR_TEXT[confirmed]}）",
             dropped,
         )
 

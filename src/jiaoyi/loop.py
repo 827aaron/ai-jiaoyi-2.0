@@ -786,6 +786,9 @@ class Runner:
             cards.set_flip_by_assistant(
                 lambda: self.app.app_cfg.fast_loop.card_flip_confirm_by == "assistant"
             )
+            cards.set_neutral_flip_ignored(
+                lambda: self.app.app_cfg.fast_loop.card_neutral_flip == "ignore"
+            )
         return assistant
 
     def _assistant_close(self, pos: PositionRecord, reason: str) -> str | None:

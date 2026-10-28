@@ -638,6 +638,12 @@ class FastLoopConfig(Contract):
         "管家助手关着、B 不可用、两个没答一致时候选一直只看不做。"
         "card_flip_confirm = 1 时不起作用。",
     )
+    card_neutral_flip: Literal["flip", "ignore"] = Field(
+        default="flip",
+        description="会把做多 / 做空的币判成不做（中性）时：flip = 和反向一样算待确认翻转"
+        "（现状）；ignore = 不算翻转，卡上留确认过的方向、照常能开仓，不记候选。切到 ignore 时"
+        "（含启动）已有的转中性候选作废，那个币恢复候选前的方向和信号。做多 ↔ 做空不受影响。",
+    )
     keeper_assistant_concurrency: int = Field(
         default=2,
         ge=1,

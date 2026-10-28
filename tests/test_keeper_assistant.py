@@ -71,12 +71,19 @@ class Cards:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.confirmed: list[tuple[str, FlipCandidate]] = []
+        self.calls: list[str] = []
 
     def confirm_flip(
         self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
     ) -> bool:
         self.confirmed.append((symbol, expected))
         return self.ok
+
+    def sweep_flips(self) -> None:
+        self.calls.append("sweep")
+
+    def clear_neutral_flips(self) -> None:
+        self.calls.append("clear_neutral")
 
 
 class Harness:
@@ -480,6 +487,48 @@ async def test_KeeperAssistant_on_flip_pending_asks_again_only_after_the_gap(
         "not_agreed",
     ]
     assert recs[0]["why"].endswith("候选照旧只看不做，下一场会同样结论时再问")
+
+
+async def test_KeeperAssistant_tick_hands_over_pending_flips_once_per_switch(
+    tmp_path: Path, now: datetime
+) -> None:
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.1), Scorer(0.1), cards=cards)
+    h.a.tick(now)
+    assert cards.calls == []
+    h.cfg = h.cfg.model_copy(
+        update={"card_flip_confirm_by": "assistant", "card_neutral_flip": "ignore"}
+    )
+    h.a.tick(now)
+    h.a.tick(now)
+    assert cards.calls == ["clear_neutral", "sweep"]
+    h.cfg = h.cfg.model_copy(
+        update={"card_flip_confirm_by": "meeting", "card_neutral_flip": "flip"}
+    )
+    h.a.tick(now)
+    h.cfg = h.cfg.model_copy(
+        update={"card_flip_confirm_by": "assistant", "card_neutral_flip": "ignore"}
+    )
+    h.a.tick(now)
+    assert cards.calls == ["clear_neutral", "sweep"] * 2
+
+
+async def test_KeeperAssistant_on_flip_pending_neutral_not_asked_when_neutral_flips_are_ignored(
+    tmp_path: Path, now: datetime
+) -> None:
+    a = Scorer(0.1)
+    h = Harness(
+        tmp_path,
+        now,
+        a,
+        Scorer(0.1),
+        cards=Cards(),
+        keeper_assistant_flip_neutral=True,
+        card_neutral_flip="ignore",
+    )
+    h.a.on_flip_pending("BTCUSDT", neutral_cand(now))
+    await h.settle()
+    assert a.calls == [] and h.records() == []
 
 
 async def test_KeeperAssistant_on_flip_pending_while_position_check_runs_is_deferred_not_dropped(

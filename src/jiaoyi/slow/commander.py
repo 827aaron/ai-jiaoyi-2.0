@@ -45,6 +45,7 @@ from jiaoyi.contracts import (
     RiskConfig,
     Role,
     Side,
+    SignalKind,
     SizeTier,
     SymbolPool,
     SymbolPoolEntry,
@@ -55,7 +56,14 @@ from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.brief import MarketBriefService
-from jiaoyi.slow.card_flip import FlipBook, FlipCandidate, held_key
+from jiaoyi.slow.card_flip import (
+    DIR_TEXT,
+    REASON_MARK,
+    REASON_MAX,
+    FlipBook,
+    FlipCandidate,
+    held_key,
+)
 from jiaoyi.slow.card_outlook import with_board
 from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.market_audit import CURRENT_AUDIT, MarketAudit
@@ -64,6 +72,7 @@ from jiaoyi.slow.meeting_live import MeetingLive
 from jiaoyi.slow.review import CardJournal
 
 logger = logging.getLogger(__name__)
+_MEETING_NEAR = timedelta(minutes=10)
 
 
 class MeetingError(RuntimeError):
@@ -656,11 +665,10 @@ class BattleCardCommander:
     ) -> CardSymbol:
         if not self._flips.on:
             self._flips.clear()  # switched back to 1: leftover candidates must not resurface
-            return fresh
         out = self._flips.gate(symbol, fresh, in_force, now)
         if out.event == "pending":
             self._flip_fresh[symbol] = fresh
-        else:
+        elif out.event != "ignored":  # an ignored neutral meeting leaves a pending flip alone
             self._flip_fresh.pop(symbol, None)
         if out.dropped is not None:
             why = "卡上留着的那条指令已到期被拿掉" if in_force is None else "卡上那条指令已被换掉"
@@ -692,6 +700,10 @@ class BattleCardCommander:
         """翻转候选刚记下（还没确认）时同步回调（币, 那一刻的候选）；回调方不能在这里等。"""
         self._on_flip_pending = callback
 
+    def set_neutral_flip_ignored(self, ignored: Callable[[], bool]) -> None:
+        """返回 True 时会判不做不算翻转，卡上留原方向（每次调用时读，热生效）。"""
+        self._flips.neutral_ignored = ignored
+
     def set_flip_by_assistant(self, by_assistant: Callable[[], bool]) -> None:
         """返回 True 时会只提候选，不按场数确认（每次调用时读，热生效）。"""
         self._flips.by_assistant = by_assistant
@@ -705,6 +717,13 @@ class BattleCardCommander:
         cand, fresh, card = self._flips.get(symbol), self._flip_fresh.get(symbol), self._card
         in_force = card.for_symbol(symbol) if card is not None else None
         if (
+            fresh is None
+            and in_force is not None
+            and cand is not None
+            and cand.candidate == "neutral"
+        ):
+            fresh = self._neutral_body(in_force)
+        if (
             cand is None
             or fresh is None
             or card is None
@@ -716,21 +735,7 @@ class BattleCardCommander:
             return False
         self._flips.discard(symbol)
         self._flip_fresh.pop(symbol, None)
-        symbols = [fresh if s.symbol == symbol else s for s in card.symbols]
-        card = card.model_copy(
-            update={
-                "version": card.version + 1,
-                "symbols": symbols,
-                "refresh_reason": "event:keeper_assistant_flip",
-            }
-        )
-        if self._round_symbols is not None:
-            self._round_symbols[symbol] = fresh
-            self._round_event_merges += 1
-        self._card = card
-        self._notify_card()
-        self._save_card()
-        self._record_card(card, time.monotonic())
+        self._merge_symbol(card, fresh, "event:keeper_assistant_flip")
         self._write(
             symbol=symbol,
             outcome=Outcome.INFO,
@@ -738,6 +743,128 @@ class BattleCardCommander:
             output={"card_flip": "confirmed", "by": "keeper_assistant", **detail},
         )
         return True
+
+    def _merge_symbol(self, card: BattleCard, cs: CardSymbol, reason: str) -> None:
+        """一步同步换掉卡上一个币的指令（中间没有 await），和临时会出卡一样上卡、唤醒管家。"""
+        symbols = [cs if s.symbol == cs.symbol else s for s in card.symbols]
+        card = card.model_copy(
+            update={"version": card.version + 1, "symbols": symbols, "refresh_reason": reason}
+        )
+        if self._round_symbols is not None:
+            self._round_symbols[cs.symbol] = cs
+            self._round_event_merges += 1
+        self._card = card
+        self._notify_card()
+        self._save_card()
+        self._record_card(card, time.monotonic())
+
+    def clear_neutral_flips(self) -> None:
+        """``card_neutral_flip = "ignore"`` 刚生效（启动或切过来）：转中性的候选都作废，卡上那条
+        恢复成候选前的样子（原方向、原来的信号）。找不到原来的信号就留着候选，记一条。"""
+        if not self._flips.neutral_ignored():
+            return
+        for symbol, cand in self._flips.items().items():
+            card = self._card
+            if cand.candidate != "neutral" or card is None:
+                continue
+            held = card.for_symbol(symbol)
+            if held is None or held_key(held) != cand.held:
+                continue  # the next meeting drops it as today
+            signals = cand.signals if cand.signals is not None else self._signals_of(held)
+            if signals is None:
+                self._write(
+                    symbol=symbol,
+                    outcome=Outcome.INFO,
+                    summary=f"{symbol} 转中性的待确认翻转没清：找不到候选前的信号，等下一场会"[
+                        :200
+                    ],
+                    output={"card_flip": "kept", "why": "找不到候选前的信号", **cand.to_json()},
+                )
+                continue
+            base = held.reason.split(REASON_MARK, 1)[-1]
+            restored = held.model_copy(
+                update={"allowed_signals": [SignalKind(s) for s in signals], "reason": base}
+            )
+            self._flips.discard(symbol)
+            self._flip_fresh.pop(symbol, None)
+            self._merge_symbol(card, restored, "event:card_neutral_flip_ignore")
+            self._write(
+                symbol=symbol,
+                outcome=Outcome.INFO,
+                summary=f"{symbol} 会议判不做，按设置不翻转，保留原方向"
+                f"（{DIR_TEXT[cand.confirmed]}），恢复开仓"[:200],
+                output={"card_flip": "ignored", **cand.to_json()},
+            )
+
+    def _signals_of(self, held: CardSymbol) -> tuple[str, ...] | None:
+        """候选是旧代码记的、没存信号：从出这条指令的那场会的决策记录里找。会议记录里的结论还没
+        盖 meeting_id，只能按币、方向和开会时刻（前后 10 分钟内最近的一条）认。"""
+        scan = getattr(self._log, "scan_day", None)
+        if scan is None or held.issued_at is None:
+            return None
+        issued = held.issued_at.astimezone(UTC)
+        best: tuple[timedelta, tuple[str, ...]] | None = None
+        for day in {
+            issued.date(),
+            (issued - _MEETING_NEAR).date(),
+            (issued + _MEETING_NEAR).date(),
+        }:
+            for raw in scan(day.isoformat(), held.symbol):
+                out = raw.get("output")
+                try:
+                    ts = datetime.fromisoformat(str(raw.get("ts")))
+                except ValueError:
+                    continue
+                gap = abs(ts - issued)
+                if (
+                    raw.get("role") == Role.COMMANDER.value
+                    and raw.get("symbol") == held.symbol
+                    and isinstance(out, dict)
+                    and out.get("bias") == held.bias.value
+                    and isinstance(out.get("allowed_signals"), list)
+                    and gap <= _MEETING_NEAR
+                    and (best is None or gap < best[0])
+                ):
+                    best = (gap, tuple(str(x) for x in out["allowed_signals"]))
+        return best[1] if best is not None else None
+
+    @staticmethod
+    def _neutral_body(held: CardSymbol) -> CardSymbol:
+        """重启后手上没有那场转中性的会的结论：拿卡上留着的那条改成中性。不开新仓、关键位和
+        止损区间都不再用来开仓，所以沿用它是安全的；做多 ↔ 做空不能这么拼（关键位是反方向的）。"""
+        base = held.reason.split(REASON_MARK, 1)[-1]
+        head = "管家助手确认转中性（没有那场会的卡面，沿用卡上那条）"
+        return held.model_copy(
+            update={
+                "bias": Bias.NO_TRADE,
+                "no_trade_from": None,
+                "allowed_signals": [],
+                "reason": f"{head}{REASON_MARK}{base}"[:REASON_MAX],
+            }
+        )
+
+    def sweep_flips(self) -> None:
+        """把翻转簿里现有的候选都交给管家助手（启动时、切到只由管家助手确认时）。做多 ↔ 做空的
+        候选要那场会的卡面才能上卡，重启后没有就不交，记一条，等下一场会。"""
+        if self._on_flip_pending is None:
+            return
+        for symbol, cand in self._flips.items().items():
+            if cand.candidate == "neutral" and self._flips.neutral_ignored():
+                continue
+            if cand.candidate != "neutral" and symbol not in self._flip_fresh:
+                why = "需要下一场会的卡面"
+                self._write(
+                    symbol=symbol,
+                    outcome=Outcome.INFO,
+                    summary=f"{symbol} 待确认翻转（{DIR_TEXT[cand.candidate]}）没交给管家助手："
+                    f"{why}（重启后没有那场会的结论），卡上照旧只看不做"[:200],
+                    output={"card_flip": "unasked", "why": why, **cand.to_json()},
+                )
+                continue
+            try:
+                self._on_flip_pending(symbol, cand)
+            except Exception:
+                logger.exception("%s 待确认翻转交给管家助手失败", symbol)
 
     def _flip_dropped(self, symbol: str, lost: FlipCandidate, why: str) -> None:
         self._write(
