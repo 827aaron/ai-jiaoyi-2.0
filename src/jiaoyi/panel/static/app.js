@@ -49,7 +49,7 @@ try { if (localStorage.getItem("updown") === "red-up") document.documentElement.
 let data = null; // /api/overview
 let pageData = null; // 当前页自己的接口
 let pageKey = "";
-const pageCache = new Map(); // 页面 id → 上次拉到的数据：切回来先用它画，后台再刷新，不先出「正在读取」
+const pageCache = new Map(); // 数据 id → { d, at }：切回来先用它画，后台再刷新，不先出「正在读取」
 let pageErr = null; // [pageId, 出错说明]：读不出就显示错误，不能一直“正在读取…”
 const STALE_HINT = "多半是代码更新了、面板进程还是旧的：在 Mac 终端按 Ctrl+C 停掉面板，再运行 <code>jiaoyi panel</code>。";
 let lastOk = 0;
@@ -1382,7 +1382,7 @@ P.positions = (arg) => {
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
-          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只贴合 K 线，超出的价位线贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "贴合K线" : "显示全部价位"}</button>
+          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只装 K 线和开仓 / 止损 / 止盈线，保命、启动线超出时贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "只看止损止盈" : "显示全部价位"}</button>
           <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${trailLegend(sel)}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
@@ -1394,21 +1394,38 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
-let lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
+let entryIdx = null, lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
 try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
 // KLINE-SCALE-BEGIN
-const DEFAULT_BARS = 120, RIGHT_BARS = 5;
-// 默认视图：最近 120 根，最新一根后面留 5 根的空位（像 TradingView / 币安）
-function defaultRange(n) {
-  return { from: Math.max(0, n - DEFAULT_BARS), to: Math.max(n - 1, 0) + RIGHT_BARS };
+const DEFAULT_BARS = 120, RIGHT_BARS = 5, ENTRY_LEAD_BARS = 10, ENTRY_LEAD_PX = 110, MAX_SPAN_BARS = 600;
+// 默认视图：从开仓那根前 10 根看到最新一根后 5 根的空位，这段超过 600 根或没有开仓点就退回最近 120 根
+// 开仓前留白：至少 10 根，窄屏再多留，让「开仓 价格」整句放得下（留白像素 = lead × 宽 / (lead + 开仓后的根数)）
+function leadBars(width, barsAfter) {
+  if (!(width > 2 * ENTRY_LEAD_PX)) return ENTRY_LEAD_BARS;
+  return Math.max(ENTRY_LEAD_BARS, Math.ceil((ENTRY_LEAD_PX * barsAfter) / (width - ENTRY_LEAD_PX)));
 }
-// 价格轴只认看得见的 K 线（+ 开仓价）；开了「显示全部价位」才把所有线算进去。返回 {min, max} 或 null
-function scaleRange(bars, range, lines, entry, all) {
+// 至少铺多少根：宽屏 120，窄屏按每根约 7px 算（宽度未知按 120）
+function minBars(width) {
+  return width > 0 ? Math.min(DEFAULT_BARS, Math.max(40, Math.round(width / 7))) : DEFAULT_BARS;
+}
+function defaultRange(n, entryIdx, width) {
+  const to = Math.max(n - 1, 0) + RIGHT_BARS;
+  if (entryIdx != null && entryIdx >= 0) {
+    const min = minBars(width);
+    // 开仓很新也至少铺 min 根（不然几根蜡烛撑满全图）；K 线不够 min 根时 from 取负，左边留空而不是拉宽
+    const from = Math.max(Math.min(0, n - min), Math.min(entryIdx - leadBars(width, to - entryIdx), n - min));
+    if (to - from <= MAX_SPAN_BARS) return { from, to };
+  }
+  return { from: Math.max(0, n - DEFAULT_BARS), to };
+}
+// 价格轴认看得见的 K 线 + 开仓 / 止盈 / 止损（含移动止损）线；保命、启动线超出就贴边；开了「显示全部价位」才把所有线算进去。
+// core 是那几条线的价格数组。返回 {min, max} 或 null
+function scaleRange(bars, range, lines, core, all) {
   const lo = Math.max(0, Math.floor(range.from)), hi = Math.min(bars.length - 1, Math.ceil(range.to));
   let min = Infinity, max = -Infinity;
   for (let i = lo; i <= hi; i++) { min = Math.min(min, bars[i].low); max = Math.max(max, bars[i].high); }
   if (!(min <= max)) return null;
-  for (const v of all ? lines : [entry]) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
+  for (const v of all ? lines : core) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
   return { min, max };
 }
 // scaleMargins 是占图高的比例，换成占价格范围的比例：数据只占 1 - 2·pad 的高度
@@ -1426,11 +1443,20 @@ function limitNote(openedMs, limitS, bars, fmt) {
   const end = openedMs + limitS * 1000;
   return end > bars[bars.length - 1].time * 1000 ? `到时 ${fmt(end)} →` : "";
 }
+// 开仓那根 K 线的下标；开仓早于第一根 / 没有开仓时间 → null
+function entryBarIndex(p, bars) {
+  if (!bars.length || !p.opened_at) return null;
+  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
+  if (at < bars[0].time) return null;
+  let k = 0;
+  for (let i = 0; i < bars.length && bars[i].time <= at; i++) k = i;
+  return k;
+}
 // KLINE-SCALE-END
 const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
-    c.timeScale().setVisibleLogicalRange(defaultRange(barCount));
+    c.timeScale().setVisibleLogicalRange(defaultRange(barCount, entryIdx, c.timeScale().width()));
     c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
@@ -1445,8 +1471,7 @@ function updateEdges() {
     chartEl.appendChild(edgeEl);
   }
   const vr = chart.timeScale().getVisibleLogicalRange();
-  const entry = lineDefs.find((d) => d.entry);
-  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), entry && entry.price, S.scaleAll) : null;
+  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), lineDefs.filter((d) => d.core).map((d) => d.price), S.scaleAll) : null;
   const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, padFrac(SCALE_PAD)) : [];
   let nTop = 0, nBot = 0;
   const html = out.map((d) => {
@@ -1527,7 +1552,7 @@ function mountChart() {
       autoscaleInfoProvider: (orig) => {
         const r = orig();
         if (!r) return r;
-        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.entry).map((d) => d.price);
+        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.core).map((d) => d.price);
         const vals = extra.filter((v) => v != null);
         if (!vals.length) return r;
         return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...vals), maxValue: Math.max(r.priceRange.maxValue, ...vals) } };
@@ -1557,6 +1582,7 @@ async function loadKlines(force) {
     linePrices = [];
     lineDefs = [];
     lastBars = [];
+    entryIdx = null;
     limitAt = "";
     updateEdges();
     chart.priceScale("right").applyOptions({ autoScale: true });
@@ -1572,6 +1598,7 @@ async function loadKlines(force) {
     series.setData(bars);
     barCount = bars.length;
     lastBars = bars;
+    entryIdx = entryBarIndex(p, bars);
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1592,7 +1619,7 @@ async function loadKlines(force) {
     tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
   ].filter(([v]) => v != null);
   priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
-  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, entry: title === "开仓" }));
+  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, core: title !== "保命" && !title.startsWith("赚") }));
   limitAt = limitNote(p.opened_at ? new Date(p.opened_at).getTime() : null, p.time_limit_s, bars, hm);
   series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) fitView(chart);
@@ -1602,11 +1629,10 @@ async function loadKlines(force) {
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
 // 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
 function entryMarkers(p, bars) {
-  if (!bars.length || p.entry_price == null || !p.opened_at) return [];
-  const at = Math.floor(new Date(p.opened_at).getTime() / 1000);
-  if (at < bars[0].time) return [];
-  let bar = bars[0];
-  for (const b of bars) { if (b.time <= at) bar = b; else break; }
+  if (p.entry_price == null) return [];
+  const k = entryBarIndex(p, bars);
+  if (k == null) return [];
+  const bar = bars[k];
   const long = p.side === "long";
   const css = getComputedStyle(document.documentElement);
   return [{
@@ -2369,6 +2395,7 @@ const PLAIN = {
   protection_readback_grace_s: "条件单回执后查不到，最多等几秒再算没挂上（0 = 不等）",
   position_mode_cache_s: "持仓模式查一次后几秒内不再查（0 = 每次都查）",
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
+  protection_unknown_submit_grace_s: "条件单提交结果未知时，按原单号只查不重发最多几秒（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_leg_order: "新仓三条腿先挂哪条：lifeboat_first 保命单在前（原行为）/ stop_first 止损在前，止损确认后保命单挂失败在未托管宽限内重试、不立即平仓",
@@ -2422,6 +2449,9 @@ const PLAIN = {
   opposite_tighten_mark_gap_bps: "反向卡收紧止损：离标记价不到这么多基点就不挂、直接平（0 = 只要在安全一侧）",
   opposite_profit_mode: "反向卡没确认、赚得够时：trail 在现价强制启动移动止损 / breakeven 止损挪到扣费保本",
   opposite_trail_distance_mult: "trail 模式：锚定的移动止损距离 = 开仓带的移动止损距离 × 几倍",
+  card_neutral_action: "开仓后新作战卡把这个币改成中性时：hold 不管 / tighten 亏的平、赚的锚定移动止损 / close 直接平",
+  card_neutral_on_absent: "新作战卡里没有这个币也算中性",
+  card_neutral_trail_distance_mult: "中性卡锚定的移动止损距离 = 开仓带的移动止损距离 × 几倍",
   patrol_shock_pct_1m: "1 分钟内往亏的方向走了百分之几就全平",
   patrol_alert_pct_1m: "1 分钟内往亏的方向走了百分之几就叫管家马上看",
   breakout_vol_ratio: "成交量是平时几倍算放量突破",
@@ -2829,6 +2859,7 @@ const ROLES = [
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
+    { g: "新作战卡把这个币改成中性", hint: "代码规则，不问模型，不做价格确认（中性不是反向）。只看开仓之后发布的新卡：这个币改成 no_trade，或到手即作废（stale_on_arrival）成只看不做，都算中性；别的原因的只看不做不算；卡里没有这个币只在打开「没有也算」时算。hold = 不管（现状）。tighten = 和「新作战卡方向反了」没确认时同一套：亏着或赚得不够照旧全平，赚得够的在第一次看到时的现价强制启动移动止损（只锚一次，重启、换卡都不重锚，不会比正在挂的止损松），保本缓冲、离标记价多远、插针重试秒数都用上面那组。close = 直接全平。管家行情没有或过旧（「管家复查时行情最多旧几秒」）时一律不平：tighten 只收紧，close 等新行情。之后卡转成反向，交给上面那条规则。", keys: ["fast_loop.card_neutral_action", "fast_loop.card_neutral_on_absent", "fast_loop.card_neutral_trail_distance_mult"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
   ] },
   { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
@@ -2865,7 +2896,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "r
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
@@ -3622,6 +3653,23 @@ const PAGE_API = {
   settings: () => "/api/settings",
 };
 const pageId = (page, arg) => page + "/" + (arg || "") + (page === "history" ? "/" + S.hist + (S.tests ? "/t" : "") : "");
+// 同一个接口请求就是同一份数据：持仓页选中哪一笔不改请求，不能按选中项各存一份旧快照
+const dataId = (page, arg) => page + " " + PAGE_API[page](arg);
+// 持仓是活数据：存了几分钟的快照里有早就平掉的仓位，先画出来一秒后又被新数据抹掉，看着像仓位闪了一下
+const CACHE_MAX_AGE_MS = { positions: 10000 };
+function cachedPage(page, id, now) {
+  const hit = pageCache.get(id);
+  if (!hit) return null;
+  const max = CACHE_MAX_AGE_MS[page];
+  return max != null && now - hit.at > max ? null : hit.d;
+}
+// 换页时会多发一轮拉数，和定时那轮同时在路上：只认后发出的那轮，先发的晚到就丢掉，不拿旧数据盖新数据
+let pollSent = 0, pollShown = 0;
+function pollIsLatest(seq) {
+  if (seq < pollShown) return false;
+  pollShown = seq;
+  return true;
+}
 
 function render() {
   chrome();
@@ -3630,15 +3678,17 @@ function render() {
   // 搜索框里正在用输入法拼字：这次定时刷新先不重画，免得把拼到一半的字打断
   if (page === "settings" && S.stComposing) return;
   const needs = PAGE_API[page];
-  if (needs && pageErr && pageErr[0] === pageId(page, arg)) {
+  const did = needs ? dataId(page, arg) : null;
+  if (needs && pageErr && pageErr[0] === did) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>这一页读不出来</b><span>${esc(pageErr[1])}</span><span>${STALE_HINT}</span></div></div>`;
     return;
   }
-  if (needs && pageKey !== pageId(page, arg) && pageCache.has(pageId(page, arg))) {
-    pageData = pageCache.get(pageId(page, arg));
-    pageKey = pageId(page, arg);
+  const hit = needs && pageKey !== did ? cachedPage(page, did, Date.now()) : null;
+  if (hit) {
+    pageData = hit;
+    pageKey = did;
   }
-  if (!data || (needs && (!pageData || pageKey !== pageId(page, arg)))) {
+  if (!data || (needs && (!pageData || pageKey !== did))) {
     $("#page").innerHTML = `<div class="card"><div class="empty"><b>正在读取…</b></div></div>`;
     return;
   }
@@ -3762,29 +3812,31 @@ function tradeSounds(list) {
 
 async function poll() {
   const { page, arg } = route();
+  const seq = ++pollSent;
   try {
     // 总览和这一页自己的接口一起拉（原来是先等总览、再拉这一页，慢一点就多等一轮）
     const api = PAGE_API[page];
-    const id = api ? pageId(page, arg) : null;
+    const id = api ? dataId(page, arg) : null;
     const pageReq = api ? getJson(api(arg)).then((d) => [d, null], (e) => [null, e]) : null;
-    data = await getJson("/api/overview");
+    const ov = await getJson("/api/overview");
+    const [d, e] = pageReq ? await pageReq : [null, null];
+    if (!pollIsLatest(seq)) return;
+    data = ov;
     TZ = data.display_tz || TZ;
     tradeSounds(data.positions || []);
-    if (pageReq) {
-      const [d, e] = await pageReq;
-      if (e) pageErr = [id, e.message];
-      else {
-        pageData = d;
-        pageKey = id;
-        pageCache.set(id, d);
-        pageErr = null;
-      }
+    if (e) pageErr = [id, e.message];
+    else if (pageReq) {
+      pageData = d;
+      pageKey = id;
+      pageCache.set(id, { d, at: Date.now() });
+      pageErr = null;
     }
     lastOk = Date.now();
     $("#stale").innerHTML = "";
     render();
     loadKlines(false);
   } catch (e) {
+    if (seq < pollShown) return;
     const ago = lastOk ? Math.round((Date.now() - lastOk) / 1000) + " 秒前" : "从未";
     $("#stale").innerHTML = `<div class="stale">面板服务读不出（${esc(e.message)}；上次成功：${ago}）</div>`;
     if (!data) $("#page").innerHTML = `<div class="card"><div class="empty"><b>面板读不出数据</b><span>${esc(e.message)}</span><span>${STALE_HINT}</span></div></div>`;

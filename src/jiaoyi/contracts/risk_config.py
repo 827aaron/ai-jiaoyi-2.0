@@ -547,6 +547,25 @@ class FastLoopConfig(Contract):
         description="trail 模式锚定时盘口疑似插针（盘口价偏离标记价太多）：这么多秒内每轮再试、"
         "不告警，过了按原规则全平并告警。0 = 立刻平。",
     )
+    # ---- 新作战卡把持仓的币改成中性
+    card_neutral_action: Literal["hold", "tighten", "close"] = Field(
+        default="hold",
+        description="持仓开仓之后发布的有效新卡把这个币改成中性（no_trade，或 stale_on_arrival "
+        "作废成只看不做）时怎么办。hold = 不管（现状）；tighten = 和反向卡没确认时同一套："
+        "亏着或赚得不够就全平，赚得够就在第一次看到时的可成交价锚定移动止损（只锚一次）；"
+        "close = 直接全平。方向反了的卡归 opposite_card_action 管。",
+    )
+    card_neutral_on_absent: bool = Field(
+        default=False,
+        description="新卡里干脆没有这个币也算中性（按 card_neutral_action 处理）。false = 不算。",
+    )
+    card_neutral_trail_distance_mult: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=5.0,
+        description="card_neutral_action = tighten 锚定的移动止损回撤距离 = 开仓时带的移动止损距离"
+        " × 这个倍数。1 = 和平常一样。",
+    )
     # ---- 巡逻兵
     patrol_shock_pct_1m: float = Field(
         default=2.0, ge=0.2, le=20.0, description="1 分钟内对持仓不利的波动达到这个百分比就全平。"
@@ -1148,6 +1167,17 @@ class AppConfig(Contract):
         "同步失败最多连续容忍这么多秒（从第一次失败算）再按对账原因平仓。只宽限交易所读延迟和"
         "网络一时失败，且必须仍有已确认的保命单或止损、没有提交/撤销未知或已触发的腿、不在退出中；"
         "其余错误照旧立即平仓。宽限内照样告警并下一轮重试。0 = 不容忍（原行为）。改后重启生效。",
+    )
+    protection_unknown_submit_grace_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=10.0,
+        description="Demo 托管保护：条件单提交结果未知（超时、5xx、回执解析不了）时，当场按原 CID "
+        "只读重查最多这么多秒，查到就当已挂上、接着挂下一条腿；绝不重发、不换新 CID。"
+        "等待期间这个币的平仓和整个托管保护轮询都暂停。仍查不到时，若有已确认的保命单或止损，"
+        "这笔提交未知也按未托管宽限保留仓位、每轮只查原 CID，宽限用完照旧平仓；"
+        "需要 protection_prearm_grace_s > 0 才会在之后每轮重查原单。"
+        "0 = 提交未知立即平仓（原行为）。改后重启生效。",
     )
     position_mode_cache_s: float = Field(
         default=0.0,

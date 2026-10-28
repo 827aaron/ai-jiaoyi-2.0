@@ -231,6 +231,7 @@ class BracketManager:
         readback_grace_s: float = 0.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         prearm_grace_s: float = 0.0,
+        unknown_submit_grace_s: float = 0.0,
         stop_working_type: WorkingType = "CONTRACT_PRICE",
         take_profit_working_type: WorkingType = "CONTRACT_PRICE",
         trailing_book_mark_max_dev_bps: float = 30.0,
@@ -242,6 +243,9 @@ class BracketManager:
         """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
 
         ``prearm_grace_s``：从未完整托管时，可重试的同步失败最多连续容忍几秒；0 = 不容忍。
+
+        ``unknown_submit_grace_s``：条件单提交结果未知时，锁内按原 CID 只读重查最多几秒（不重发），
+        查到就当回执接着挂下一条腿；仍查不到的提交未知也交给 ``prearm_grace_s`` 宽限。0 = 原行为。
 
         ``stop_working_type`` / ``take_profit_working_type``：之后新建的止损（含移动止损新一代）/
         止盈腿用哪个触发价格源，建腿时写进账本；已有的腿一直按自己记下的核对，保命单固定标记价。
@@ -264,6 +268,7 @@ class BracketManager:
         self.account, self.connector, self.clock = account_name, connector_name, clock
         self.readback_grace_s, self._sleep = readback_grace_s, sleep
         self.prearm_grace_s = prearm_grace_s
+        self.unknown_submit_grace_s = unknown_submit_grace_s
         self.stop_working_type = stop_working_type
         self.take_profit_working_type = take_profit_working_type
         self.trailing_book_mark_max_dev_bps = trailing_book_mark_max_dev_bps
@@ -421,8 +426,10 @@ class BracketManager:
         backup = self._backup_gap(state)
         if not any(_live(leg) and _role(leg) in {"lifeboat", "stop_loss"} for leg in state.legs):
             return None
+        unknown_ok = self.unknown_submit_grace_s > 0
         if not all(
             leg.state in {"planned", "superseded"}
+            or (unknown_ok and leg.state == "submit_pending")
             or _live(leg)
             or (leg.state == "cancelled" and _settled(leg) and not _triggered(leg))
             or (backup and _role(leg) == "lifeboat" and leg.state in {"submit_pending", "rejected"})
@@ -690,7 +697,8 @@ class BracketManager:
             if order is None:
                 raise ProtectionIncomplete(
                     "已提交条件单暂时不可查，不能再次创建或当作已撤",
-                    read_lag=old.state == "confirmed" and old.acked_at is not None,
+                    read_lag=(old.state == "confirmed" and old.acked_at is not None)
+                    or (old.state == "submit_pending" and self.unknown_submit_grace_s > 0),
                 )
             leg = self._leg(pid, old.client_order_id)
             self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
@@ -725,6 +733,32 @@ class BracketManager:
                 order = await self.exchange.get_bracket(tracked.record.symbol, algo_id=leg.algo_id)
             if order is not None:
                 return order
+        return None
+
+    async def _await_unknown_submit(
+        self, pid: str, cid: str, unknown: BracketSubmissionUnknown
+    ) -> ExchangeBracket | None:
+        """提交结果未知：先用交易所层当场查到的，再按原 CID 只读重查到宽限用完；从不重发。"""
+        grace = self.unknown_submit_grace_s
+        if grace <= 0:
+            return None
+        if unknown.observed is not None:
+            return unknown.observed
+        tracked, _ = self._current(pid)
+        leg = self._leg(pid, cid)
+        read = (
+            self.exchange.get_lifeboat if leg.purpose == "lifeboat" else self.exchange.get_bracket
+        )
+        deadline = self.clock() + timedelta(seconds=grace)
+        for _ in range(math.ceil(grace / _READBACK_POLL_S)):  # 时钟异常也不会无限等。
+            remaining = (deadline - self.clock()).total_seconds()
+            if remaining <= 0:
+                return None
+            await self._sleep(min(_READBACK_POLL_S, remaining))
+            with contextlib.suppress(ExchangeError):
+                order = await read(tracked.record.symbol, client_order_id=cid)
+                if order is not None:
+                    return order
         return None
 
     async def _cancel(self, pid: str, cid: str) -> None:
@@ -987,12 +1021,16 @@ class BracketManager:
                     raise ProtectionIncomplete(
                         "交易所明确拒绝普通保护，保留已有保护并退出"
                     ) from None
-                except BracketSubmissionUnknown:
-                    raise ProtectionIncomplete(
-                        "普通保护提交结果未知，只查原CID",
-                        backup_only=leg.purpose == "lifeboat"
-                        and self._backup_gap(self._current(pid)[1]),
-                    ) from None
+                except BracketSubmissionUnknown as unknown:
+                    found = await self._await_unknown_submit(pid, leg.client_order_id, unknown)
+                    if found is None:
+                        raise ProtectionIncomplete(
+                            "普通保护提交结果未知，只查原CID",
+                            read_lag=self.unknown_submit_grace_s > 0,
+                            backup_only=leg.purpose == "lifeboat"
+                            and self._backup_gap(self._current(pid)[1]),
+                        ) from (unknown.__cause__ or unknown)
+                    order = found
                 acked = self._leg(pid, leg.client_order_id)
                 self._accept(pid, acked.model_copy(update={"acked_at": self.clock()}), order)
                 await self._checkpoint(pid, evidence)

@@ -122,6 +122,7 @@ OPTIONAL_APP_FIELDS = {
     "reconciler_executor_stop_retry_rounds",  # 默认 0（永不重发），老配置文件没有这一行
     "protection_readback_grace_s",
     "protection_prearm_grace_s",
+    "protection_unknown_submit_grace_s",
     "protection_stop_working_type",
     "protection_take_profit_working_type",
     "protection_leg_order",

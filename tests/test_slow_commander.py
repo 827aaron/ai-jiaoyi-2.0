@@ -274,6 +274,11 @@ def test_clamp_zero_category_cap_forces_no_trade() -> None:
     )
     out = clamp_to_risk(card_symbol("AAUSDT"), risk)
     assert out.bias is Bias.NO_TRADE and out.allowed_signals == []
+    assert out.no_trade_from is Bias.LONG  # 会议方向留着，管家不把同方向持仓当中性
+    plain = clamp_to_risk(card_symbol("AAUSDT", bias=Bias.NO_TRADE, allowed_signals=[]), RISK)
+    assert plain.no_trade_from is None
+    kept = card_symbol("AAUSDT", bias=Bias.NO_TRADE, allowed_signals=[], no_trade_from=Bias.SHORT)
+    assert clamp_to_risk(kept, RISK).no_trade_from is Bias.SHORT
 
 
 async def test_refresh_reasons(tmp_path: Path, now: datetime) -> None:

@@ -13,7 +13,13 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from jiaoyi.contracts.common import (
     Bias,
@@ -162,6 +168,22 @@ class CardSymbol(Contract):
     outlook: CardOutlook | None = Field(
         default=None, description="只记录的结构化判断（见 CardOutlook）；旧卡没有。"
     )
+    no_trade_from: Bias | None = Field(
+        default=None,
+        description="会议本来给的方向（long / short），被闸门改成 no_trade 时记下：没给进场区间、"
+        "评级只是偏向要等区间、类别敞口上限为 0。None = 不是闸门改的（会议本身观望等）。"
+        "持仓管家据此不把「方向同持仓、只是先别开」当成中性。",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_no_trade_from(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        # 为空不落盘：旧卡 / 旧代码读写一字不差，research_token 也不变
+        data: dict[str, object] = handler(self)
+        if data.get("no_trade_from") is None:
+            data.pop("no_trade_from", None)
+        return data
 
     def research_token(self) -> str:
         """仅按本币研究内容签名，无关币换卡或市场版本刷新不使它失效。
