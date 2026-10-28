@@ -56,6 +56,8 @@ backfill_bars = 400               # 启动时回填多少根预测员周期的 K
 # temperature = 0.6                 # 采样温度（官方 0.6）
 # rank_band = 0.1667                # 全池排名前 / 后多少算看好 / 看坏（和卡一致才加分）
 # rank_min_peers = 6                # 至少几个币一起预测才排名
+# keeper_snapshot = "direction"     # 管家快照怎么带预测员：direction = 平均路径终点同向给 kronos.agree 1 / 0 + 全池名次（默认，原行为；p_up 只有 0 / 1 且多数是 0，做多多半 0、做空多半 1）/ rank = 只带名次 top / mid / bottom（和拍板加分同一个排名，多空对称）/ off = 不带；网页「设置」也能改；改后重启
+#   回滚到没有 keeper_snapshot 的旧版本前，先删掉这一行：旧版配置不认识的键（extra=forbid）会拒绝启动
 against_card_meeting = false      # 预测员连续看反作战卡时申请单币临时会；false = 只记录（预测员还在观察）
 
 # 快环门槛（策略参数，不是硬上限；整段可省略，省略就用默认值；注释掉的是档位给的 2h 档旧默认，见 core/profiles.py）

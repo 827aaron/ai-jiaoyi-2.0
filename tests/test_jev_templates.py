@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from jiaoyi import contracts as c
 from jiaoyi.core.recorder import RoleRecorder
@@ -13,8 +16,10 @@ from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
 from jiaoyi.gate.questions import (
     KNOWN_TEMPLATES,
     TEMPLATE_VERSION,
+    KronosSnapshot,
     template_dump,
     template_fingerprint,
+    template_version,
 )
 from jiaoyi.gate.review import iter_jev_calls
 from jiaoyi.keeper.keeper import JevKeeper
@@ -81,3 +86,39 @@ async def test_every_call_logged_with_template_and_reviewable(
     assert calls[1].answers == {}
     assert calls[2].p("action", "close") == 0.3
     assert calls[0].record.input["jev"]["snapshot"]  # 完整快照可以重放
+    assert "kronos_snapshot" not in calls[0].record.input["jev"]  # entry gate: plain template
+    assert calls[2].record.input["jev"]["kronos_snapshot"] == "direction"
+
+
+def test_keeper_kronos_variants_are_registered_and_distinct() -> None:
+    assert template_version("direction") == TEMPLATE_VERSION
+    assert template_fingerprint("direction") == template_fingerprint()
+    variants: tuple[KronosSnapshot, ...] = ("rank", "off")
+    for mode in variants:
+        v = template_version(mode)
+        assert v != TEMPLATE_VERSION
+        assert KNOWN_TEMPLATES.get(v) == template_fingerprint(mode)
+        assert template_dump(mode)["version"] == v
+    assert len({template_fingerprint(m) for m in ("direction", *variants)}) == 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "version"), [("direction", "q9"), ("rank", "q9-krank"), ("off", "q9-koff")]
+)
+async def test_keeper_record_carries_kronos_mode_and_template_variant(
+    tmp_path: Path, now: datetime, mode: Any, version: str
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    keeper = JevKeeper(
+        JevDecisionModel(MockJevTransport(answer=close_p(0.3)), FAST, timeout_ms=200),
+        FAST,
+        lambda s: features(now),
+        lambda n: card(now),
+        RoleRecorder(c.Role.KEEPER, log),
+        kronos_snapshot=mode,
+    )
+    await keeper.review(position(now), now)
+    (rec,) = log.read_day(now.date().isoformat())
+    jev = rec.input["jev"]
+    assert jev["kronos_snapshot"] == mode and jev["template"] == version
+    assert jev["template_fp"] == KNOWN_TEMPLATES[version]

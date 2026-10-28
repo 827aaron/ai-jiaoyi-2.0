@@ -1074,6 +1074,13 @@ class PredictorConfig(Contract):
         le=200,
         description="一起排名的新鲜预测至少几个币才算名次；不够就当预测员不表态。",
     )
+    keeper_snapshot: Literal["direction", "rank", "off"] = Field(
+        default="direction",
+        description="管家（持仓复查）快照里怎么带预测员。direction = 照旧：kronos.agree 按平均路径"
+        "终点在现价哪一侧给 1 / 0，再带全池名次（p_up 只有 0 / 1，实测多数是 0，做多多半是 0、"
+        "做空多半是 1，多空不对称）；rank = 只带全池名次 top / mid / bottom（和拍板加分同一个"
+        "排名，多空镜像对称），排不出名次就不写；off = 快照不带预测员。改后重启。",
+    )
     against_card_meeting: bool = Field(
         default=False,
         description="预测员连续几次看反作战卡时申请单币临时会。默认关（Aaron 2026-10-24：预测员还要"

@@ -941,18 +941,16 @@ function keyFacts(s) {
   return facts.length ? `<div class="facts">${facts.map((f) => `<span class="pill">${f}</span>`).join(" ")}</div>` : "";
 }
 
-// 预测员一条记录 → 大白话：未来多久、价格范围、几条模拟向上 / 向下；原始 JSON 折叠
+// 预测员一条记录 → 大白话：未来多久、价格范围、平均路径终点在现价哪一侧；原始 JSON 折叠
+// p_up is only the side of the averaged path's endpoint (0 / 0.5 / 1), not a share of paths
 const pxFmt = (v, sym) => price(v, sym);
 const spanOf = (min) => (min % 60 ? `${min} 分钟` : `${min / 60} 小时`);
 function predictorView(s) {
   const o = s.output || {};
   const inp = s.input || {};
   const n = Number.isInteger(inp.paths) ? inp.paths : null;
-  const up = n ? Math.round(o.p_up * n) : null;
   const lean = o.p_up > 0.5 ? "偏多" : o.p_up < 0.5 ? "偏空" : "分歧";
-  const votes = n
-    ? (up === 0 ? `${n} 条模拟全部向下` : up === n ? `${n} 条模拟全部向上` : `${n} 条模拟里 ${up} 条向上、${n - up} 条向下`)
-    : (o.p_up === 0 ? "模拟全部向下" : o.p_up === 1 ? "模拟全部向上" : `${Math.round(o.p_up * 100)}% 的模拟向上`);
+  const votes = o.p_up === 0 ? "平均路径终点在现价下方" : o.p_up === 1 ? "平均路径终点在现价上方" : o.p_up === 0.5 ? "平均路径终点和现价持平" : `${Math.round(o.p_up * 100)}% 的模拟向上`;
   const title = `${coin(s.symbol || o.symbol)} 未来 ${spanOf(o.horizon_min)}：预计 ${pxFmt(o.price_low, s.symbol || o.symbol)}–${pxFmt(o.price_high, s.symbol || o.symbol)}，${votes}，${lean}`;
   const bar = o.ts ? `${hm(o.ts)} 那根 K 线收盘` : "最新一根 K 线";
   const seen = [
@@ -982,8 +980,8 @@ const FIELD = {
   card: ["作战卡"], status: ["状态"], bias: ["方向"], levels_bps: ["关键价位离现价", "bpslist"], stop_atr: ["止损（ATR 倍数）", "range"], tp_r: ["止盈（止损的倍数）", "range"], size_max: ["最大仓位档"], regime: ["大盘判断"],
   pos: ["持仓"], pnl_bps: ["浮盈", "bps"], age_min: ["已持仓", "min"], to_stop_bps: ["离止损", "bps"], to_tp_bps: ["离止盈", "bps"], time_left_min: ["离最长持仓还剩", "min"],
   entry_px: ["进场价", "px"], peak_bps: ["开仓以来最高浮盈", "bps"], giveback_bps: ["从最高回吐", "bps"], pnl_r: ["浮盈（止损的倍数）"], peak_r: ["最高浮盈（止损的倍数）"], be_bps: ["扣来回手续费后浮盈", "bps"], path_bps: ["之前几次复查的浮盈", "bpslist"],
-  entry: ["进场理由"], p_real: ["进场时「是真信号」", "p"], p_take: ["进场时「值得做」", "p"], trail: ["移动止损"], on: ["这笔带了移动止损"], active: ["已经启动"], stop_bps: ["现价离移动止损", "bps"], agree: ["4 条模拟里和持仓同方向的条数"],
-  kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["向上的模拟占比", "p"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
+  entry: ["进场理由"], p_real: ["进场时「是真信号」", "p"], p_take: ["进场时「值得做」", "p"], trail: ["移动止损"], on: ["这笔带了移动止损"], active: ["已经启动"], stop_bps: ["现价离移动止损", "bps"], agree: ["平均路径终点是否在持仓方向"],
+  kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["平均路径终点在现价哪一侧（0 / 0.5 / 1）"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
   approved: ["结论"], reasons: ["原因"], detail: ["细节"], day_pnl_pct: ["今天盈亏", "pct"], slippage_bps: ["预计滑点", "bps"], predictor: ["预测员"], predictor_p_up: ["预测员看涨概率", "p"], predictor_nudge: ["预测员把“做”挪了"], take_raw: ["“做”概率（拍板人原话）"], take_adj: ["“做”概率（加上预测员）"],
   quantity: ["数量"], notional_usdt: ["名义仓位（含杠杆）", "usdt"], leverage: ["杠杆", "x"], risk_usdt: ["这笔最多亏", "usdt"], stop_loss_pct: ["止损距离", "pct"], take_profit_pct: ["止盈距离", "pct"],
   trailing_stop_pct: ["移动止损", "pct"], stop_widened: ["止损拉宽"], trailing_activation_pct: ["移动止损启动", "pct"], lifeboat_stop_pct: ["保命止损距离", "pct"], order_type: ["下单方式"], category: ["分组"],
@@ -2361,6 +2359,7 @@ const MEETING_CHOICE = {
   snapshot_label: { legacy: "叫“权威”（现状）", neutral: "写明最后收盘时间和距现在几分钟" },
   stale_on_arrival_action: { watch: "只盯不开", no_trade: "改成观望" },
   input_time_labels: { legacy: "不标（现状）", explicit: "写明已收盘小时 / 上次结算时间" },
+  keeper_snapshot: { direction: "方向 + 名次（原行为）", rank: "只带名次（多空对称）", off: "不带预测员" },
 };
 const choiceLabel = (k, v) => (MEETING_CHOICE[k] && MEETING_CHOICE[k][v]) || (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -2444,6 +2443,7 @@ const PLAIN = {
   "predictor.rank_band": "排名前 / 后多少算看好 / 看坏",
   "predictor.rank_min_peers": "至少几个币一起预测才排名",
   "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
+  "predictor.keeper_snapshot": "管家复查时怎么带预测员",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
   "tiers.head": "头部几个币（开放交易）",
   "tiers.mid": "中部几个币",
@@ -2740,6 +2740,7 @@ const HINT = {
   paths: "官方用法：一次模拟这么多条走势，模型自己平均成一条，用平均走势的终点打分。多 = 更稳，但更慢。官方和档位默认都是 10",
   temperature: "模拟走势时的随机程度：小 = 每条更像，大 = 更分散。官方回测用 0.6，档位默认 0.6",
   rank_band: "所有一起预测的币按分数排队：排在最前这么多算看好（做多加分），最后这么多算看坏（做空加分），中间不加。1/6 ≈ 0.17 = 前六分之一 / 后六分之一。看坏这一头是我们为做空加的，官方只做多",
+  keeper_snapshot: "方向（原行为）= 按平均路径终点在现价哪一侧告诉管家同向 / 反向，再带名次；预测员的方向只有涨 / 跌两档、实测多数是跌，做多的仓多半被说成反向、做空的多半同向。名次 = 只带全池排名（和拍板加分同一个排名，多空对称）；不带 = 管家看不到预测员。改后重启",
   rank_min_peers: "一起预测的币少于这个数就不排名、不加分（按需模式只算卡上和持仓的币，币少时名次没意义）。想币多一点，可把预测范围改成「全算」",
   model_size: "标准 / 最大：最大更准，但每个币算得慢 3–4 倍（Mac mini 每币约 3.5 秒，标准约 1 秒）；加载失败会自动改用标准（选“固定”时用这个）",
   adaptive_base_max_queue: "选“自适应”时生效",

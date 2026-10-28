@@ -621,6 +621,20 @@ def test_tiers_always_candidates_meet_is_pending_mergeable(tmp_path: Path) -> No
     assert slow.commander_kwargs()["tiers"].always_meet is True
 
 
+def test_predictor_keeper_snapshot_is_editable_and_pending_mergeable(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    assert actions.editable_fields("predictor")["keeper_snapshot"].choices == (
+        "direction",
+        "rank",
+        "off",
+    )
+    assert load_app_config(paths.app).predictor.keeper_snapshot == "direction"
+    _pending(paths, "app", '[predictor]\nkeeper_snapshot = "rank"\n')
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).predictor.keeper_snapshot == "rank"
+
+
 def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
     text = (

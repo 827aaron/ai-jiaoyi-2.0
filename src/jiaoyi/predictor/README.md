@@ -8,7 +8,7 @@
 - 开关：`config/app.toml` 的 `predictor_enabled`。关闭时 `latest()` 返回 `None`，不加载模型、不报错；运行中可调 `set_enabled()`。
 - 每根已收盘的 5 分钟线触发一次后台推理（独立任务 + 单线程池，`on_kline` 立即返回，不卡行情循环；退出时 `close()` 取消）；攒够 `min_bars` 根才开始，K 线有缺口则重新攒。
 - 实时只有 1 分钟线：预测员自己按 UTC 整 5 分钟聚合；启动时主循环用 REST 回填 5 分钟线（`backfill`，只补不算）。默认按需模式（`[predictor] mode = "on_demand"`）只算作战卡里的币和有持仓的币（主循环 `set_wanted`），哨兵出信号缺预测时 `request` 后台补算；模型尺寸 fixed / adaptive 见 docs/fast_loop.md。
-- 一次 `predict(sample_count=paths, T=temperature, top_p=0.9)`，返回平均路径；范围 = 平均路径的高低；`score` = 终点 ÷ 现价 − 1；`p_up` = 终点在现价之上 1 / 之下 0 / 持平 0.5。两个收盘周期后过期，过期等于没有预测。
+- 一次 `predict(sample_count=paths, T=temperature, top_p=0.9)`，返回平均路径；范围 = 平均路径的高低；`score` = 终点 ÷ 现价 − 1；`p_up` = 终点在现价之上 1 / 之下 0 / 持平 0.5（二值，不是「几成路径向上」；10-27 / 28 实测 77% 是 0，管家快照用它会多空不对称，见 docs/fast_loop.md 的 `keeper_snapshot`）。两个收盘周期后过期，过期等于没有预测。
 - 名次：同一时刻所有没过期、有分数的预测里比它低的占几成（并列取中间）；不到 `rank_min_peers` 个币为 `None`；前 / 后 `rank_band` 为 `top` / `bottom`。
 - 推理失败、超时、模型输出异常：只记状态，`latest()` 返回 `None`。连续 3 次失败上报 `down`。
 - MPS/CUDA 推理报错自动退回 CPU 重试。
