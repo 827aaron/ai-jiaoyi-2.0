@@ -2314,9 +2314,9 @@ class TradingAgentsEngine:
         """叫停一场会议：它的后台线程里不再发新的模型请求（已发出的那一个照常结束）。"""
         with self._inflight_lock:
             meter = self._inflight.get(key)
+            live = self._live.get(key)
         if meter:
             meter.abort()
-        live = self._live.get(key)
         if live:
             live.fail(
                 "超时取消，会议没有结论",
@@ -2805,7 +2805,8 @@ class TradingAgentsEngine:
         self._setups().pop(entry.symbol, None)  # 上一场的不算；这场定下设置时再写
         live = MeetingLive(Path(self._s.live_dir), entry.symbol) if self._s.live_dir else None
         if live:
-            self._live[entry.symbol] = live
+            with self._inflight_lock:
+                self._live[entry.symbol] = live
             meter.on_call = live.note_call
             meter.on_usage = live.note_usage
             meter.on_model = live.note_model
@@ -2825,7 +2826,10 @@ class TradingAgentsEngine:
             return res
         finally:
             self._done(entry.symbol, meter)
-            self._live.pop(entry.symbol, None)
+            # 超时取消的上一场线程晚结束时，这个币可能已经开了下一场：只摘自己的
+            with self._inflight_lock:
+                if live is not None and self._live.get(entry.symbol) is live:
+                    del self._live[entry.symbol]
 
     def _analyze_run(
         self,
