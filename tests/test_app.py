@@ -286,6 +286,54 @@ async def test_start_warms_up_decision_model(tmp_path: Path, now: datetime) -> N
     await app.stop()
 
 
+@pytest.mark.parametrize("shared", [True, False])
+async def test_keeper_jev_cooldown_follows_switch(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch, shared: bool
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+
+    t = MockJevTransport()
+    built = JevDecisionModel(t, c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    app = _app(tmp_path, now, jev_shared_cooldown=shared)
+    keeper_model = app.m.keeper._model  # type: ignore[attr-defined]
+    assert app.m.decision_model is built and app.m.gate._model is built  # type: ignore[attr-defined]
+    assert (keeper_model is built) is shared
+    assert isinstance(keeper_model, JevDecisionModel) and keeper_model._t is t
+    assert (app.keeper_jev is None) is shared
+    await app.stop()
+
+
+async def test_keeper_lamp_shows_its_own_jev_cooldown(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from tests.test_gate import entry_request
+
+    t = MockJevTransport(fail=RuntimeError("x"))
+    built = JevDecisionModel(t, c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    app = _app(tmp_path, now, jev_shared_cooldown=False)
+    assert app.keeper_jev is not None
+
+    def lamps() -> tuple[c.ModuleStatus, c.ModuleStatus]:
+        app.heartbeat_all()
+        st = app.log.read_status()
+        return st[c.Role.KEEPER.value], st[c.Role.GATE.value]
+
+    keeper, gate = lamps()
+    assert keeper.health == c.Health.OK and "Jev" not in keeper.headline
+    await app.keeper_jev.ask(entry_request(now))
+    keeper, gate = lamps()
+    assert keeper.health == c.Health.DEGRADED and "管家的 Jev 连续出错 1 次" in keeper.headline
+    for _ in range(c.FastLoopConfig().jev_max_consecutive_errors):
+        await app.keeper_jev.ask(entry_request(now))
+    keeper, gate = lamps()
+    assert keeper.health == c.Health.DOWN and "冷却中" in keeper.headline
+    assert gate.health == c.Health.OK  # the gate lamp stays on the gate's own counter
+    await app.stop()
+
+
 async def test_start_refuses_on_account_mismatch_and_alerts(tmp_path: Path, now: datetime) -> None:
     from jiaoyi.execution.account_check import AccountMismatch
 

@@ -6,6 +6,11 @@
   - 缓存超过 ``max_age_s`` 没刷新成功 → 返回 None（交易所改了精度我们不知道，宁可不下单）
   - 某个合约不在列表里（下架、暂停交易）→ 返回 None
 刷新失败保留旧缓存，只要没过期就继续用。
+
+Leverage brackets ride on the same refresh but only while ``brackets_wanted()`` is true: fetched
+on the first refresh and again once the cache is a day old, at most one attempt per
+``BRACKET_RETRY`` after a failure. A failed fetch keeps the old tiers, which never expire: they
+change rarely and an unknown tier only means the guard keeps its unclamped leverage.
 """
 
 from __future__ import annotations
@@ -13,15 +18,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import ExchangeClient
-from jiaoyi.risk.guard import LotRules
+from jiaoyi.risk.guard import LeverageBracket, LotRules
 
 log = logging.getLogger(__name__)
+
+BRACKET_MAX_AGE = timedelta(days=1)
+BRACKET_RETRY = timedelta(minutes=10)
 
 
 class ExchangeInfoLotRules:
@@ -32,8 +40,13 @@ class ExchangeInfoLotRules:
         max_age_s: float = 6 * 3600.0,
         clock: Clock = utc_now,
         recorder: RoleRecorder | None = None,
+        brackets_wanted: Callable[[], bool] | None = None,
     ) -> None:
         self._exchange = exchange
+        self._brackets_wanted = brackets_wanted
+        self._brackets: dict[str, tuple[LeverageBracket, ...]] = {}
+        self._brackets_at: datetime | None = None
+        self._brackets_tried: datetime | None = None
         self._max_age = timedelta(seconds=max_age_s)
         self._clock = clock
         self._rec = recorder
@@ -42,7 +55,12 @@ class ExchangeInfoLotRules:
         self._status: dict[str, str] = {}
 
     async def refresh(self) -> bool:
-        """拉一次。成功返回 True；失败保留旧缓存并返回 False。"""
+        """拉一次。成功返回 True；失败保留旧缓存并返回 False（杠杆分层成败不影响返回值）。"""
+        ok = await self._refresh_filters()
+        await self._refresh_brackets()
+        return ok
+
+    async def _refresh_filters(self) -> bool:
         now = self._clock()
         try:
             filters = await self._exchange.lot_filters()
@@ -72,6 +90,36 @@ class ExchangeInfoLotRules:
         self._status = dict(status) if isinstance(status, dict) else {}
         self._loaded_at = now
         return True
+
+    async def _refresh_brackets(self) -> None:
+        fetch = getattr(self._exchange, "leverage_brackets", None)
+        if self._brackets_wanted is None or not self._brackets_wanted() or not callable(fetch):
+            return
+        now = self._clock()
+        if self._brackets_at is not None and now - self._brackets_at < BRACKET_MAX_AGE:
+            return
+        if self._brackets_tried is not None and now - self._brackets_tried < BRACKET_RETRY:
+            return
+        self._brackets_tried = now
+        try:
+            raw = await fetch()
+            if not raw:
+                raise ValueError("返回空列表")
+        except Exception as e:
+            log.warning("刷新杠杆分层失败，沿用旧缓存：%r", e)
+            if self._rec is not None:
+                from jiaoyi.contracts import Outcome
+
+                self._rec.record(now, Outcome.ERROR, f"刷新杠杆分层失败，沿用旧缓存：{e!r}")
+            return
+        self._brackets = {
+            sym: tuple(LeverageBracket(cap, lev) for cap, lev in tiers)
+            for sym, tiers in raw.items()
+        }
+        self._brackets_at = now
+
+    def leverage_brackets(self, symbol: str) -> tuple[LeverageBracket, ...] | None:
+        return self._brackets.get(symbol)
 
     def unavailable(self, symbols: Iterable[str]) -> dict[str, str] | None:
         """这些币里交易所现在不能交易的（币 → 交易所状态，没有精度的写「无下单精度」）。
