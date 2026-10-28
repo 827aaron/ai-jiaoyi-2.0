@@ -438,6 +438,9 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tf-node .now { color: var(--accent); font-weight: 600; }
 .tf-node.wait .nm { color: var(--dim); }
 .tf-node.err { border-color: var(--down); }
+.tf-node.desk { padding: 6px 9px; gap: 1px; }
+.tf-node.desk small { font-size: 11px; line-height: 14px; }
+.tf-node.desk.doing { padding: 5px 8px; }
 .tf-node.doc { border-style: dashed; background: var(--fill); }
 .hb { margin-left: auto; font-style: normal; font-weight: 500; font-size: 10.5px; line-height: 16px; padding: 0 6px; border-radius: 8px; white-space: nowrap; color: var(--dim); background: var(--fill); }
 .hb.ok { color: color-mix(in srgb, var(--ok-lamp) 75%, var(--hi)); background: color-mix(in srgb, var(--ok-lamp) 14%, transparent); }
