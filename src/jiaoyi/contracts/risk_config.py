@@ -430,6 +430,82 @@ class FastLoopConfig(Contract):
         description="管家复查时这个币的行情最多旧几秒（时钟同开仓检查）；超过就这一轮跳过、"
         "维持现状，不平仓、不问模型，连续计数不变。0 = 不查（现状）。",
     )
+    keeper_model_mode: Literal["act", "record"] = Field(
+        default="act",
+        description="act = 按 Jev 的平仓概率平（现状）；record = 每次照常问 Jev、全部记下，"
+        "但不按平仓概率平（反向信号急查「过线即平」也不平），代码规则和 Jev 盈利门控照常。",
+    )
+    keeper_price_source: Literal["mainnet", "venue"] = Field(
+        default="mainnet",
+        description="管家算浮盈 / 最高浮盈 / 回吐 / 盈利门控和快照用哪个价：mainnet = 行情快照的"
+        "最新成交价（现状）；venue = 执行所的标记价（Demo 上是 Demo 标记价；模拟盘和实盘就是"
+        "主网行情）。读不到执行所标记价时这次退回主网价并记下。",
+    )
+    keeper_thesis_take_on: bool = Field(
+        default=False,
+        description="Jev 盈利门控：浮盈至少 keeper_thesis_take_min_r R，且 Jev 最近一次（不超过 "
+        "keeper_thesis_take_max_age_s 秒）答「进场理由不成立」的概率至少 keeper_thesis_take_p，"
+        "就全平。只平不放宽。",
+    )
+    keeper_thesis_take_min_r: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=10.0,
+        allow_inf_nan=False,
+        description="盈利门控：浮盈至少几倍止损距离（R = 开仓价到止损价，未扣手续费，"
+        "和回吐保护同口径）。",
+    )
+    keeper_thesis_take_p: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="盈利门控：Jev「开仓理由还成立吗」答 no 的概率至少这么多。",
+    )
+    keeper_close_guard: bool = Field(
+        default=False,
+        description="管家发平仓前先看：交易所保护腿已触发 / 正在退出（最多等 "
+        "keeper_close_guard_exiting_max_s 秒）、正在换代（最多等 "
+        "keeper_close_guard_replacing_max_s 秒）、或同一笔仓半个复查间隔内已发过一次平仓，"
+        "就这次不发。关 = 现状（不看）。",
+    )
+    keeper_close_guard_replacing_max_s: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="平仓前检查：同一次保护腿换代最多让管家等几秒，过了照常平（0 = 不等）。",
+    )
+    keeper_close_guard_exiting_max_s: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=3600.0,
+        allow_inf_nan=False,
+        description="平仓前检查：交易所保护腿已触发 / 正在退出时最多让管家等几秒，过了照常平"
+        "并记下（0 = 不等）。",
+    )
+    keeper_close_guard_total_max_s: float = Field(
+        default=180.0,
+        ge=0.0,
+        le=3600.0,
+        allow_inf_nan=False,
+        description="平仓前检查：保护腿连续在途（接连换代、换代接退出）合计最多让管家等几秒，"
+        "过了照常平（0 = 不等）。",
+    )
+    keeper_venue_alert_reviews: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        description="keeper_price_source = venue 时执行所标记价连续这么多次复查读不到或过旧就告警"
+        "（同一段只告一次；不退回主网价）。0 = 不告警。",
+    )
+    keeper_thesis_take_max_age_s: float = Field(
+        default=180.0,
+        ge=1.0,
+        le=3600.0,
+        allow_inf_nan=False,
+        description="盈利门控：Jev 那次回答最多是多少秒之前的（按那次复查的时刻算）。",
+    )
     frozen_peak_exit_on: bool = Field(
         default=True,
         description="Enable observed profit target freezing for new Demo positions only.",

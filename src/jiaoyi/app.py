@@ -722,6 +722,12 @@ def build_modules(
             observation_sink=observations.offer if observations else None,
             opposite_state_path=Path(app_cfg.data_dir) / "keeper_opposite.json",
             review_interval_s=float(app_cfg.keeper_interval_s),
+            # 实盘的执行所就是主网行情，不另读；模拟盘 / 测试网读同环境标记价（Demo）
+            venue_price=getattr(executor, "venue_mark", None)
+            if RunMode(app_cfg.mode) is not RunMode.LIVE
+            else None,
+            exit_in_flight=getattr(executor, "protection_exit_in_flight", None),
+            alerter=alerter,
         )
 
     modules = Modules(
