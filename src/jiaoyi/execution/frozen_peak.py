@@ -167,3 +167,45 @@ def frozen_peak_update(
     if book.source_at > state.frozen_at and crossed and net > 0:
         updates["status"] = "triggered"
     return state.model_copy(update=updates)
+
+
+def frozen_peak_evidence(
+    state: FrozenPeakExit,
+    side: Side,
+    stop_loss_pct: float,
+    trigger_price: float | None = None,
+) -> dict[str, float]:
+    """Record-only size of a frozen peak, kept to judge a possible minimum-peak threshold.
+
+    R is the gross executable move from the actual fill VWAP over the initial stop distance
+    (``stop_loss_pct`` of that entry price, as the server stop is placed). ``peak_net_bps`` is
+    the rule's own net profit at the peak (actual entry fee plus estimated exit taker fee) over
+    the entry quote. Empty until a positive peak has been frozen; the exit decision never
+    reads it.
+    """
+    if (
+        state.frozen_at is None
+        or state.peak_price is None
+        or state.peak_net_usdt is None
+        or state.peak_source_at is None
+        or state.first_fill_at is None
+        or not state.entry_quote
+        or not state.entry_quantity
+    ):
+        return {}
+    entry = state.entry_quote / state.entry_quantity
+    sign = 1 if side is Side.LONG else -1
+    out = {
+        "peak_net_bps": round(float(state.peak_net_usdt) / state.entry_quote * 1e4, 2),
+        "peak_after_min": round(
+            (state.peak_source_at - state.first_fill_at).total_seconds() / 60, 2
+        ),
+    }
+    if not (math.isfinite(stop_loss_pct) and stop_loss_pct > 0):
+        return out
+    risk = entry * stop_loss_pct / 100
+    out["peak_gain_r"] = round(sign * (state.peak_price - entry) / risk, 4)
+    if trigger_price is not None:
+        out["trigger_price"] = trigger_price
+        out["trigger_gain_r"] = round(sign * (trigger_price - entry) / risk, 4)
+    return out

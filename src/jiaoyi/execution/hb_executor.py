@@ -67,7 +67,11 @@ from jiaoyi.execution.fills import (
     no_open_fill,
 )
 from jiaoyi.execution.frozen_peak import BOOK_MAX_AGE_S as FROZEN_BOOK_MAX_AGE_S
-from jiaoyi.execution.frozen_peak import FrozenPeakExit, frozen_peak_update
+from jiaoyi.execution.frozen_peak import (
+    FrozenPeakExit,
+    frozen_peak_evidence,
+    frozen_peak_update,
+)
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.lifeboat import lifeboat_price
 from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
@@ -1893,6 +1897,9 @@ class HbExecutorAdapter:
                     return None
                 return {
                     **initial.frozen_peak_exit.model_dump(mode="json"),
+                    **frozen_peak_evidence(
+                        initial.frozen_peak_exit, initial.record.side, initial.stop_loss_pct
+                    ),
                     "triggered": True,
                     "detail": "pending_exit",
                 }
@@ -1981,9 +1988,25 @@ class HbExecutorAdapter:
                     )
                     state = state.model_copy(update={"detail": detail})
                     self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
-                    return {**state.model_dump(mode="json"), "triggered": False}
+                    return {
+                        **state.model_dump(mode="json"),
+                        **frozen_peak_evidence(state, tracked.record.side, tracked.stop_loss_pct),
+                        "triggered": False,
+                    }
                 self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
-                return {**state.model_dump(mode="json"), "triggered": state.status == "triggered"}
+                triggered = state.status == "triggered"
+                assert book is not None
+                at = book.bid if tracked.record.side is Side.LONG else book.ask
+                return {
+                    **state.model_dump(mode="json"),
+                    **frozen_peak_evidence(
+                        state,
+                        tracked.record.side,
+                        tracked.stop_loss_pct,
+                        at if triggered else None,
+                    ),
+                    "triggered": triggered,
+                }
         return None  # 不会到这里：第二次一定在锁内返回。
 
     async def _update_server_trailing(self, position_id: str) -> None:
