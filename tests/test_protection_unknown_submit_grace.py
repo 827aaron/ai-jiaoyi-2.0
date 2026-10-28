@@ -163,3 +163,22 @@ async def test_inline_reread_without_prearm_grace_closes_after_the_wait(tmp_path
     assert raised.value.read_lag and sum(h.slept) == pytest.approx(1.0)
     await h.adapter.protection_tick()
     assert h.closing()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_armed_tightened_generation_found_by_cid_replaces_the_old_stop_once(
+    tmp_path: Path, side: Side
+):
+    h = UnknownSubmitHarness(tmp_path, side, unknown=3.0, unknown_prefix="br-sl-pos-1-2")
+    assert await h.manager.sync("pos-1") == "armed" and not h.slept
+    tightened = 99.5 if side is Side.LONG else 100.5
+    assert h.manager.set_tightened_stop("pos-1", tightened, "synthetic opposite card")
+    assert await h.manager.sync("pos-1") == "armed"
+    assert sorted(h.creates()) == sorted(
+        ["lb-pos-1-1", "br-sl-pos-1-1", "br-tp-pos-1-1", "br-sl-pos-1-2"]
+    )  # 每个 CID 只 POST 一次。
+    assert h.cancels() == ["br-sl-pos-1-1"]
+    assert h.slept == [0.5, 0.5]
+    assert h.manager.live_stop_price("pos-1") == tightened
+    assert h.leg("br-sl-pos-1-1").state == "cancelled"
+    assert not h.closing()

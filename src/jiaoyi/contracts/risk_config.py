@@ -1152,11 +1152,13 @@ class AppConfig(Contract):
     protection_unknown_submit_grace_s: float = Field(
         default=0.0,
         ge=0.0,
-        le=30.0,
+        le=10.0,
         description="Demo 托管保护：条件单提交结果未知（超时、5xx、回执解析不了）时，当场按原 CID "
-        "只读重查最多这么多秒，查到就当已挂上、接着挂下一条腿；绝不重发、不换新 CID。仍查不到时，"
-        "若有已确认的保命单或止损，这笔提交未知也按未托管宽限（protection_prearm_grace_s）保留仓位、"
-        "每轮只查原 CID，宽限用完照旧平仓。0 = 提交未知立即平仓（原行为）。改后重启生效。",
+        "只读重查最多这么多秒，查到就当已挂上、接着挂下一条腿；绝不重发、不换新 CID。"
+        "等待期间这个币的平仓和整个托管保护轮询都暂停。仍查不到时，若有已确认的保命单或止损，"
+        "这笔提交未知也按未托管宽限保留仓位、每轮只查原 CID，宽限用完照旧平仓；"
+        "需要 protection_prearm_grace_s > 0 才会在之后每轮重查原单。"
+        "0 = 提交未知立即平仓（原行为）。改后重启生效。",
     )
     position_mode_cache_s: float = Field(
         default=0.0,
