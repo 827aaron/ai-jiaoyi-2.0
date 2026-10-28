@@ -768,3 +768,11 @@ def test_hosted_close_settings_merge_from_pending(tmp_path: Path) -> None:
     assert res.status == "applied", res.error
     cfg = load_app_config(paths.app)
     assert (cfg.hosted_close_mode, cfg.hb_stop_unknown_retries) == ("direct", 3)
+
+
+def test_protection_tick_alert_after_merges_from_pending(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", "protection_tick_alert_after = 3\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).protection_tick_alert_after == 3
