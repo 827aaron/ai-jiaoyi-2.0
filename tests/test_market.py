@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -366,6 +367,27 @@ def test_live_s_counts_continuous_stream_and_restarts_after_gap() -> None:
     eng.update(c.Trade(symbol="BTCUSDT", ts=gap, price=68100.0, qty=1.0, taker_side=c.Side.LONG))
     snap = eng.snapshot("BTCUSDT")
     assert snap is not None and snap.values["live_s"] == 0.0
+
+
+def test_live_s_kept_by_book_or_mark_between_sparse_trades() -> None:
+    t = T0 + timedelta(minutes=21)
+    quiet: list[Callable[[datetime], c.MarketEvent]] = [
+        lambda at: _book(at, 67999.5, 1.0, 68000.5, 1.0),
+        lambda at: c.MarkPrice(
+            symbol="BTCUSDT", ts=at, mark_price=68000.0, index_price=68000.0, funding_rate=0.0
+        ),
+    ]
+    for event in quiet:
+        eng = warm_engine()
+        eng.update(c.Trade(symbol="BTCUSDT", ts=t, price=68000.0, qty=1.0, taker_side=c.Side.LONG))
+        for s in range(60, 361, 60):
+            eng.update(event(t + timedelta(seconds=s)))
+        last = t + timedelta(seconds=400)  # 两笔成交隔 400 秒，中间行情一直在推
+        eng.update(
+            c.Trade(symbol="BTCUSDT", ts=last, price=68010.0, qty=1.0, taker_side=c.Side.LONG)
+        )
+        snap = eng.snapshot("BTCUSDT")
+        assert snap is not None and snap.values["live_s"] == 400.0
 
 
 def test_streams_without_per_symbol_liquidations() -> None:

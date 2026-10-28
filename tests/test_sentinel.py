@@ -167,6 +167,16 @@ def test_detail_lines_flag_card_symbols_without_trades(now: datetime) -> None:
     assert any(x.startswith("BTCUSDT 没收到行情（最后一笔") for x in t.detail_lines(stale))
 
 
+def test_detail_lines_warmup_keeps_watch_only_reason(now: datetime) -> None:
+    t = trig()
+    t.check(features(now, live_s=10.0), card(now, allowed_signals=[]), now)
+    btc = next(x for x in t.detail_lines(now) if x.startswith("BTCUSDT"))
+    assert "卡上是只看不做" in btc and "行情预热中" not in btc
+    t.check(features(now, live_s=10.0), card(now), now)
+    btc = next(x for x in t.detail_lines(now) if x.startswith("BTCUSDT"))
+    assert "行情预热中：实时行情才 10 秒" in btc
+
+
 def test_detail_lines_cooldown_reason(now: datetime) -> None:
     t = trig()
     cd = card(now, allowed_signals=["volume_surge"])

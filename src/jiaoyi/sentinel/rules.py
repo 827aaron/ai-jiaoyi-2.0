@@ -224,7 +224,7 @@ class RuleTrigger:
             return []
         if not cs.allowed_signals:
             self._note_skip(w, "卡上是只看不做", now)  # 方向还在：下面照样判反向
-        self._note_warmup(features, w, now)
+        self._note_warmup(features, w, now, note=bool(cs.allowed_signals))
 
         out: list[CandidateSignal] = []
         for kind, side, desc in self._rules(
@@ -288,8 +288,9 @@ class RuleTrigger:
                 )
         return out
 
-    def _note_warmup(self, f: FeatureSnapshot, w: _Watch, now: datetime) -> None:
-        """没预热完的币每段只记一行 INFO（不是每笔成交一行）。"""
+    def _note_warmup(self, f: FeatureSnapshot, w: _Watch, now: datetime, *, note: bool) -> None:
+        """没预热完的币每段只记一行 INFO（不是每笔成交一行）。``note``：写进「上次跳过」，
+        卡上只看不做时不写，免得盖掉那个原因。"""
         live = f.values.get("live_s")
         parts = []
         if live is None or live < WARM_5M_S:
@@ -300,7 +301,8 @@ class RuleTrigger:
             self._cold.discard(f.symbol)
             return
         reason = "，".join(parts)
-        self._note_skip(w, f"行情预热中：{reason}", now)
+        if note:
+            self._note_skip(w, f"行情预热中：{reason}", now)
         if f.symbol not in self._cold:
             self._cold.add(f.symbol)
             log.info(
