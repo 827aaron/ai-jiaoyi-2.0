@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -331,6 +333,53 @@ def test_engine_reports_partial_cost_and_aborts() -> None:
         meter.check()
     eng._done("SOLUSDT", meter)
     assert eng.partial_cost("SOLUSDT") is None
+
+
+def test_engine_late_finishing_timed_out_meeting_keeps_the_next_meetings_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import threading
+
+    import jiaoyi.slow.tradingagents_engine as te
+
+    monkeypatch.setattr(te, "cost_handler", lambda meter: None)  # CI 不装 LangChain
+    eng = te.TradingAgentsEngine.__new__(te.TradingAgentsEngine)
+    eng._s = TradingAgentsSettings(live_dir=str(tmp_path))
+    eng._inflight, eng._live = {}, {}
+    eng._inflight_lock = threading.Lock()
+    release = {1: threading.Event(), 2: threading.Event()}
+    started = {1: threading.Event(), 2: threading.Event()}
+    turn = iter([1, 2])
+
+    def run(*args: Any) -> Any:
+        n = next(turn)
+        started[n].set()
+        assert release[n].wait(timeout=5)
+        raise RuntimeError(f"第 {n} 场的线程结束")
+
+    eng._analyze_run = run  # type: ignore[method-assign]
+
+    def meeting() -> None:
+        with pytest.raises(te.MeetingError):
+            eng._analyze_sync(entry("SOLUSDT", Category.MAJOR), "震荡")
+
+    first = threading.Thread(target=meeting)
+    first.start()
+    assert started[1].wait(timeout=5)
+    eng.abort("SOLUSDT")  # 第一场超时取消，后台线程还在跑
+    second = threading.Thread(target=meeting)
+    second.start()
+    assert started[2].wait(timeout=5)
+    release[1].set()
+    first.join(timeout=5)
+    eng.abort("SOLUSDT")  # 第二场也超时：实况要标成失败，不能停在「正在开」
+    doc = json.loads((tmp_path / "SOLUSDT.json").read_text(encoding="utf-8"))
+    assert doc["status"] == "failed" and doc["error"] == "超时取消，会议没有结论"
+    release[2].set()
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert eng._live == {}
 
 
 def test_empty_speeches_detects_label_only_debate() -> None:
