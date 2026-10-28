@@ -340,6 +340,16 @@ class LoggedRun:
     published: str | None
     """这一轮发布了的方向（没发布是 None）。"""
     settings: Mapping[str, Any]
+    prompt_version: str = ""
+
+    @property
+    def band_sigma(self) -> float:
+        return _num(self.settings.get("band_sigma")) or DEFAULT_BAND
+
+    @property
+    def group(self) -> str:
+        """口径：提示词版本 + 平的带宽。换了口径的轮次不和之前的混在一起算。"""
+        return f"{self.prompt_version or '?'} · band {self.band_sigma:g}σ"
 
 
 @dataclass
@@ -445,6 +455,7 @@ def _desk_run(r: Mapping[str, Any], t0: datetime) -> LoggedRun | None:
         mirror_probs=_probs(mirror.get("probs_4h")) if isinstance(mirror, Mapping) else None,
         published=str(published) if isinstance(published, str) else None,
         settings=settings if isinstance(settings, Mapping) else {},
+        prompt_version=str(r.get("prompt_version") or ""),
     )
 
 
@@ -888,7 +899,11 @@ def sweep(rows: Sequence[Scored], flash_at: Sequence[datetime]) -> list[dict[str
 
 
 def score_flash(
-    rounds: Sequence[FlashRound], px: Price, hours: HourCloses, now: datetime, band: float
+    rounds: Sequence[FlashRound],
+    px: Price,
+    hours: HourCloses,
+    now: datetime,
+    band_at: Callable[[datetime], float],
 ) -> dict[str, Any]:
     res: dict[str, Any] = {}
     span: dict[str, tuple[int, int]] = {}
@@ -918,7 +933,7 @@ def score_flash(
             if sigma is None or r is None or got < max(1, math.ceil(MIN_COVERAGE * len(f.basket))):
                 unpriced += 1
                 continue
-            y = classify(r, sigma, band)
+            y = classify(r, sigma, band_at(f.t))
             c = DIR_CLASS[f.direction]
             pairs.append((c, y))
             sharp_b.append(brier(sharp(c), y))
@@ -935,14 +950,33 @@ def score_flash(
 # ------------------------------------------------------------------ 汇总
 
 
+def band_in_force(runs: Sequence[LoggedRun]) -> Callable[[datetime], float]:
+    """t 时刻生效的带宽：t 之前最近一轮大盘台的设置；比第一轮还早就用第一轮的（没有大盘台时
+    用默认 0.5σ）。Flash 轮次按它自己那时的带宽归类，不拿最后一轮的。"""
+    ordered = sorted(runs, key=lambda r: r.t0)
+
+    def at(t: datetime) -> float:
+        cur = ordered[0].band_sigma if ordered else DEFAULT_BAND
+        for r in ordered:
+            if r.t0 > t:
+                break
+            cur = r.band_sigma
+        return cur
+
+    return at
+
+
 def _window(rows: Sequence[Scored], since: datetime) -> list[Scored]:
     return [s for s in rows if s.run.t0 >= since]
 
 
 def panel_summary(
-    rows: Sequence[Scored], timeline: Sequence[tuple[datetime, str | None]], now: datetime
+    rows: Sequence[Scored],
+    timeline: Sequence[tuple[datetime, str | None]],
+    now: datetime,
+    group: str | None = None,
 ) -> dict[str, Any]:
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"group": group}
     parts = []
     for name, span in (("24h", timedelta(hours=24)), ("7d", timedelta(days=7))):
         w = [s for s in _window(rows, now - span) if not s.run.prior_missing]
@@ -968,23 +1002,20 @@ def panel_summary(
             + " · ".join(x for x in (hit, ph) if x)
             + f"（n {o['n']}）"
         )
-    out["text"] = "；".join(parts)
+    out["text"] = (f"口径 {group}：" if group else "") + "；".join(parts)
     return out
 
 
-def summarize(
-    log: DeskLog,
+def _section(
+    runs: Sequence[LoggedRun],
     rows: Sequence[Scored],
-    counts: Mapping[str, int],
-    flash: Mapping[str, Any] | None,
+    timeline: Sequence[tuple[datetime, str | None]],
+    flash_at: Sequence[datetime],
     now: datetime,
-    since: datetime,
 ) -> dict[str, Any]:
+    """一个口径内的全部指标。发布时间线用全部轮次（t0 时生效的是哪一版是事实），其余只看本口径。"""
     usable = [s for s in rows if not s.run.prior_missing]
-    timeline = published_in_force(log.runs, log.owner_flash_at)
-    for s in rows:
-        s.in_force = in_force_at(timeline, s.run.t0)
-    replay = replay_publishes(log.runs, [r.direction for r in log.runs], log.owner_flash_at)
+    replay = replay_publishes(runs, [r.direction for r in runs], flash_at)
     eps = episodes(rows)
     last = rows[-1].run.t0 if rows else None
     mirror_rows = [s for s in usable if s.run.mirror_test and "4h" in s.out]
@@ -994,26 +1025,11 @@ def summarize(
         for s in mirror_rows
         if (m := s.run.mirror_probs) is not None
     ]
+    own = {r.completed for r in runs}
     return {
-        "generated_at": now.isoformat(),
-        "since": since.isoformat(),
-        "definition": (
-            "每轮 t0 起 1h / 4h：t0 时那一池（basket）各币 1 分钟线收盘价简单收益的等权平均，"
-            "落在 ±flat_band_pct 以内为平；按轮记分，不按发布"
-        ),
-        "counts": {
-            "runs_ok": len(log.runs),
-            "runs_failed": log.failed,
-            "runs_skipped": log.skipped,
-            "prior_missing": sum(1 for r in log.runs if r.prior_missing),
-            "mirror_test_runs": sum(1 for r in log.runs if r.mirror_test),
-            "scored_1h": sum(1 for s in usable if "1h" in s.out),
-            "scored_4h": sum(1 for s in usable if "4h" in s.out),
-            **counts,
-        },
         "desk": {h: prob_metrics(usable, h) for h in ("4h", "1h")},
         "published": {
-            "publishes": sum(1 for _, d in timeline if d is not None),
+            "publishes": sum(1 for at, d in timeline if d is not None and at in own),
             "replay_publishes": sum(1 for _, d in replay if d is not None),
             "4h": published_hits(usable, timeline, "4h"),
             "1h": published_hits(usable, timeline, "1h"),
@@ -1032,9 +1048,78 @@ def summarize(
             "brier_mirror_swapped": _r(_mean(mirror_swap)),
             "n_mirror": len(mirror_swap),
         },
+        "sweep": sweep(rows, flash_at),
+    }
+
+
+def _brief(rows: Sequence[Scored], h: str) -> dict[str, Any]:
+    m = prob_metrics([s for s in rows if not s.run.prior_missing], h)
+    if not m["n"]:
+        return {"n": 0}
+    return {
+        "n": m["n"],
+        "brier": m["brier"]["desk"],
+        "brier_base": m["brier"]["base"],
+        "hit": m["direction"]["hit"],
+    }
+
+
+def summarize(
+    log: DeskLog,
+    rows: Sequence[Scored],
+    counts: Mapping[str, int],
+    flash: Mapping[str, Any] | None,
+    now: datetime,
+    since: datetime,
+) -> dict[str, Any]:
+    """顶层的指标、扫描和面板一行都只算当前口径（最后一轮的提示词版本 + 带宽）；
+    每个口径的简表在 ``groups``。"""
+    timeline = published_in_force(log.runs, log.owner_flash_at)
+    for s in rows:
+        s.in_force = in_force_at(timeline, s.run.t0)
+    current = log.runs[-1].group if log.runs else None
+    cur_runs = [r for r in log.runs if r.group == current]
+    cur_rows = [s for s in rows if s.run.group == current]
+    groups = []
+    for key in dict.fromkeys(r.group for r in log.runs):
+        g_runs = [r for r in log.runs if r.group == key]
+        g_rows = [s for s in rows if s.run.group == key]
+        groups.append(
+            {
+                "group": key,
+                "prompt_version": g_runs[0].prompt_version,
+                "band_sigma": g_runs[0].band_sigma,
+                "first_t0": g_runs[0].t0.isoformat(),
+                "last_t0": g_runs[-1].t0.isoformat(),
+                "runs": len(g_runs),
+                "4h": _brief(g_rows, "4h"),
+                "1h": _brief(g_rows, "1h"),
+            }
+        )
+    usable = [s for s in cur_rows if not s.run.prior_missing]
+    return {
+        "generated_at": now.isoformat(),
+        "since": since.isoformat(),
+        "definition": (
+            "每轮 t0 起 1h / 4h：t0 时那一池（basket）各币 1 分钟线收盘价简单收益的等权平均，"
+            "落在 ±flat_band_pct 以内为平；按轮记分，不按发布；只汇总当前口径"
+        ),
+        "group": current,
+        "groups": groups,
+        "counts": {
+            "runs_ok": len(log.runs),
+            "runs_current_group": len(cur_runs),
+            "runs_failed": log.failed,
+            "runs_skipped": log.skipped,
+            "prior_missing": sum(1 for r in cur_runs if r.prior_missing),
+            "mirror_test_runs": sum(1 for r in cur_runs if r.mirror_test),
+            "scored_1h": sum(1 for s in usable if "1h" in s.out),
+            "scored_4h": sum(1 for s in usable if "4h" in s.out),
+            **counts,
+        },
+        **_section(cur_runs, cur_rows, timeline, log.owner_flash_at, now),
         "flash": flash,
-        "sweep": sweep(rows, log.owner_flash_at),
-        "panel": panel_summary(rows, timeline, now),
+        "panel": panel_summary(cur_rows, timeline, now, current),
         "runs": [_row_json(s) for s in rows if s.run.t0 >= now - RUNS_KEPT],
     }
 
@@ -1045,6 +1130,7 @@ def _row_json(s: Scored) -> dict[str, Any]:
         "cycle_id": r.cycle_id,
         "t0": r.t0.isoformat(),
         "reason": r.reason,
+        "group": r.group,
         "direction": r.direction,
         "in_force": s.in_force,
         "published": r.published,
@@ -1118,10 +1204,10 @@ def update(
     flash_res = None
     if flash:
         latest = log.runs[-1].settings if log.runs else {}
-        band = _num(latest.get("band_sigma")) or DEFAULT_BAND
         exclude = latest.get("exclude_symbols") or DEFAULT_EXCLUDE
         rounds = read_flash(root, since, now, exclude)
-        flash_res = score_flash(rounds, closes.px, HourCloses(cache, now, get), now, band)
+        hours = HourCloses(cache, now, get)
+        flash_res = score_flash(rounds, closes.px, hours, now, band_in_force(log.runs))
         flash_res["paired"] = _paired(rows, rounds)
     report = summarize(log, rows, counts, flash_res, now, since)
     report["fetch"] = {
@@ -1165,12 +1251,21 @@ def _f(v: Any, fmt: str = ".3f") -> str:
 def render(rep: Mapping[str, Any]) -> list[str]:
     c = rep["counts"]
     lines = [
-        f"大盘台记分（{rep['since'][:16]} 起）：成功 {c['runs_ok']} 轮"
+        f"大盘台记分（{rep['since'][:16]} 起，当前口径 {rep['group']}，"
+        f"{c['runs_current_group']} 轮）：成功 {c['runs_ok']} 轮"
         f"（没先验 {c['prior_missing']}、"
         f"镜像测试 {c['mirror_test_runs']}），失败 {c['runs_failed']}，跳过 {c['runs_skipped']}；"
         f"已结算 1h {c['scored_1h']} / 4h {c['scored_4h']}，未到点 1h {c['pending_1h']} / "
         f"4h {c['pending_4h']}，缺价 1h {c['unpriced_1h']} / 4h {c['unpriced_4h']}",
     ]
+    for g in rep["groups"]:
+        g4, g1 = g["4h"], g["1h"]
+        lines.append(
+            f"  口径 {g['group']}（{g['first_t0'][:16]} – {g['last_t0'][:16]}，{g['runs']} 轮）："
+            f"4h Brier {_f(g4.get('brier'))} vs 先验 {_f(g4.get('brier_base'))}（n {g4['n']}），"
+            f"1h {_f(g1.get('brier'))} vs {_f(g1.get('brier_base'))}（n {g1['n']}）"
+        )
+    lines.append("以下只算当前口径：")
     for h in ("4h", "1h"):
         m = rep["desk"][h]
         if not m.get("n"):

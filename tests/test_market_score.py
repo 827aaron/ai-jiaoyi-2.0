@@ -104,6 +104,7 @@ def desk_row(
         "t0": t0.isoformat(),
         "reason": reason,
         "settings": SETTINGS,
+        "prompt_version": "desk-v1",
         "mirror_test": False,
         "status": "ok",
         "probs_4h": probs(p4),
@@ -515,6 +516,67 @@ def test_flash_rounds_scored_with_own_pool_excluding_gold_and_desk_sigma_method(
     assert rep["flash"]["4h"]["pending"] == 2
 
 
+def test_flash_uses_band_in_force_at_each_round(tmp_path: Path) -> None:
+    tf = T0 + timedelta(days=8)
+
+    def price(sym: str, t: int) -> float:
+        wiggle = 0.01 if (t // HOUR) % 2 else 0.0  # σ_1h 约 1%
+        jump = min(max((t - ms_of(tf)) / HOUR, 0.0), 1.0) * 0.05  # 之后 1 小时 +5%
+        return 100.0 * (1 + wiggle + jump)
+
+    d = tmp_path / "market_meeting"
+    d.mkdir()
+    pool_rows = [{"symbol": "AAUSDT"}, {"symbol": "BBUSDT"}]
+    rounds = [
+        {"ts": tf.isoformat(), "regime_direction": "看涨", "pool": pool_rows},
+        {"ts": (tf + timedelta(seconds=2)).isoformat(), "regime_direction": "看涨",
+         "pool": pool_rows},
+    ]  # fmt: skip
+    (d / f"{tf.date().isoformat()}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rounds), "utf-8"
+    )
+    wide = {**SETTINGS, "band_sigma": 20.0}  # 第一轮时生效：±20σ，+5% 算平
+    write_log(
+        tmp_path,
+        [
+            desk_row(tf - timedelta(minutes=10), basket=("AAUSDT", "BBUSDT"), settings=wide),
+            desk_row(tf + timedelta(seconds=1), basket=("AAUSDT", "BBUSDT")),  # 之后 0.5σ
+        ],
+    )
+    now = tf + timedelta(hours=1, minutes=5)
+    rep = run(tmp_path, now, FakeKlines(price, now), days=1)
+    assert rep["flash"]["1h"]["confusion"]["up"] == {"up": 1, "flat": 1, "down": 0}
+    at = ms.band_in_force(ms.read_desk_log(tmp_path, tf - timedelta(days=1), now).runs)
+    assert at(tf - timedelta(hours=5)) == 20.0  # 比第一轮还早：用第一轮的
+    assert at(tf + timedelta(hours=1)) == 0.5
+
+
+def test_summary_groups_by_prompt_version_and_band(tmp_path: Path) -> None:
+    now = T0 + timedelta(hours=6)
+    new = {**SETTINGS, "band_sigma": 0.3}
+    write_log(
+        tmp_path,
+        [
+            desk_row(T0, (0.1, 0.3, 0.6), direction="看跌"),
+            desk_row(T0 + timedelta(minutes=15), (0.1, 0.3, 0.6), direction="看跌"),
+            desk_row(T0 + timedelta(minutes=30), (0.6, 0.3, 0.1), direction="看涨",
+                     settings=new, prompt_version="desk-v1+prior-context+momentum"),
+        ],
+    )  # fmt: skip
+    rep = run(tmp_path, now, FakeKlines(ramp(T0, {"AAUSDT": 9.0}, hours=8), now), flash=False)
+    cur = "desk-v1+prior-context+momentum · band 0.3σ"
+    assert rep["group"] == cur and rep["counts"]["runs_current_group"] == 1
+    assert [(g["group"], g["runs"], g["4h"]["n"]) for g in rep["groups"]] == [
+        ("desk-v1 · band 0.5σ", 2, 2),
+        (cur, 1, 1),
+    ]
+    # 顶层只算新口径：一轮、叫涨、命中；旧口径两轮叫跌不算进来
+    assert rep["desk"]["4h"]["n"] == 1 and rep["desk"]["4h"]["direction"]["hit"] == 1.0
+    assert rep["groups"][0]["4h"]["hit"] == 0.0
+    assert all(r["call_4h"]["n"] == 1 for r in rep["sweep"])
+    assert rep["panel"]["7d"]["n"] == 1 and rep["panel"]["text"].startswith(f"口径 {cur}：")
+
+
 # ------------------------------------------------------------------ 面板
 
 
@@ -527,7 +589,9 @@ def test_panel_line_and_desk_node_accuracy(tmp_path: Path) -> None:
     rep = run(tmp_path, now, FakeKlines(ramp(T0, {"AAUSDT": 3.0}), now), flash=False)
     p = rep["panel"]
     assert p["24h"]["n"] == 1 and p["24h"]["hit"] == 1.0
-    assert p["text"].startswith("近 24 小时：4h Brier 0.260 vs 先验 0.875")
+    assert p["text"].startswith(
+        "口径 desk-v1 · band 0.5σ：近 24 小时：4h Brier 0.260 vs 先验 0.875"
+    )
     files = PanelFiles(tmp_path, "Asia/Bangkok")
     desk = build_team(files, now, None, desk_schedule=("replace", 15, 2)).desk
     assert desk is not None and desk.accuracy is not None
