@@ -411,7 +411,8 @@ class FastLoopConfig(Contract):
         le=20.0,
         description="下单用的止盈倍数最多几倍止损距离（0 = 不封顶，现状）。在作战卡范围和 "
         "min_tp_r / max_tp_r 取交集之后再往下截，从不因此拒单；截到比手续费下限"
-        "（min_tp_fee_multiple）还近时只截到手续费下限。只对之后新开的仓生效。",
+        "（min_tp_fee_multiple）还近时只截到手续费下限。比 min_tp_r 小时以它为准。"
+        "只对之后新开的仓生效。",
     )
     time_limit_s: int = Field(default=7200, ge=60, le=86400, description="单笔最长持仓时间。")
     us_hours_gate: bool = Field(
