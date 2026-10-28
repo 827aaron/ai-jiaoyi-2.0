@@ -299,3 +299,15 @@ def test_gate_honours_a_ban_another_process_recorded(
             binance_gate.get("https://fapi.binance.com/x")
     finally:
         binance_gate.reset()
+
+
+def test_gate_reset_forgets_the_shared_ban_file(tmp_path: Path) -> None:
+    from jiaoyi.market import rest
+    from jiaoyi.slow import binance_gate
+
+    rest.use_shared_ban(tmp_path)
+    rest.mark_blocked(418, {"Retry-After": "600"})
+    binance_gate.reset()
+    assert rest._ban_path is None and rest.blocked() is None
+    assert binance_gate.banned_until() == 0.0
+    rest.check_blocked()

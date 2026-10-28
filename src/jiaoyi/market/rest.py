@@ -335,6 +335,17 @@ def mark_blocked(status: int, headers: Any, body: str | bytes | None = None) -> 
     return _blocked
 
 
+def reset_ban_state() -> None:
+    """Forget every ban, the shared file path and its cache in this process (tests, ``reset``)."""
+    global _blocked, _own, _used_weight, _ban_path
+    with _ban_lock:
+        _blocked = _own = None
+        _used_weight = None
+        _ban_path = None
+        _seen.clear()
+        _warned.clear()
+
+
 def note_used_weight(header: str | None) -> None:
     """记下响应头 ``X-MBX-USED-WEIGHT-1M``（本 IP 这一分钟已用权重，含同机其他程序）。"""
     global _used_weight

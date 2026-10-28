@@ -33,9 +33,7 @@ def reset() -> None:
     global _next_at
     with _lock:
         _next_at = 0.0
-    rest._blocked = None
-    rest._own = None
-    rest._used_weight = None
+    rest.reset_ban_state()
 
 
 def get(url: str, params: dict[str, Any] | None = None, timeout: float = 10.0) -> httpx.Response:
