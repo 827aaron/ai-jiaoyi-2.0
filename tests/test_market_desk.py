@@ -1912,6 +1912,7 @@ async def test_meeting_note_gets_intra_through_the_engine(
 
     eng._liq, eng._inflight, eng._inflight_lock = None, {}, threading.Lock()
     eng._live = {}
+    monkeypatch.setattr(te, "cost_handler", lambda meter: object())  # CI 不装 LangChain
     notes: list[str] = []
     eng._graph = lambda *a, **k: notes.append(a[2]) or graph  # type: ignore[method-assign]
     await eng.analyze_with_context(card_entry("AAUSDT"), regime, "why", **kw)
