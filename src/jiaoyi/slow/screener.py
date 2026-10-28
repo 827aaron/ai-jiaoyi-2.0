@@ -27,6 +27,7 @@ from jiaoyi.contracts import (
     SymbolPool,
     SymbolPoolEntry,
 )
+from jiaoyi.contracts.symbol_pool import NO_VENUE_LOT
 from jiaoyi.core.pool_overrides import PoolOverrides
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.us_hours import us_session
@@ -121,6 +122,33 @@ class SymbolStats:
     bars: tuple[tuple[int, float, float, float, float], ...] = ()
     source_metadata: dict[str, Any] = field(default_factory=dict)
     """1 小时 K 线 (开盘毫秒, 开, 高, 低, 收)，最后一根是还没走完的小时；事后回填用。"""
+
+
+def trusted_venue_off(
+    off: Mapping[str, str] | None, judged: Iterable[str], label: str, where: str
+) -> dict[str, str]:
+    """The part of a venue's ``unavailable`` answer that is safe to act on; the screener and
+    the card's watch-only marking both go through here so they never disagree.
+
+    Fails open: ``off`` None (lot rules never loaded or stale) drops nothing. When more than
+    ``VENUE_MAX_EXCLUDED_FRAC`` of ``judged`` lack lot rules, the lot-rules part is taken for a
+    partial exchangeInfo and dropped, while status-based entries (SETTLING etc., read from the
+    same successful fetch) are kept. Both cases log a warning."""
+    if off is None:
+        logger.warning("%s下单精度没拉到或已过期，%s不按交易所可交易名单剔币", label, where)
+        return {}
+    seen = list(dict.fromkeys(judged))
+    no_lot = [x for x in seen if off.get(x) == NO_VENUE_LOT]
+    if seen and len(no_lot) > VENUE_MAX_EXCLUDED_FRAC * len(seen):
+        logger.warning(
+            "%s下单精度里没有 %d / %d 个币，像是没拉全，%s只按交易所状态剔币",
+            label,
+            len(no_lot),
+            len(seen),
+            where,
+        )
+        return {k: v for k, v in off.items() if v != NO_VENUE_LOT}
+    return dict(off)
 
 
 class VenueTradability(Protocol):
@@ -434,32 +462,11 @@ class CodeSymbolScreener:
         self._venue, self._venue_label = venue, label
 
     def _venue_off(self, stats: list[SymbolStats], cfg: ScreenerConfig) -> dict[str, str]:
-        """Symbols to drop because the execution venue cannot trade them (no lot rules, or a
-        status other than TRADING).
-
-        Fails open: when the venue's lot rules are not loaded or stale, or the venue would drop
-        more than ``VENUE_MAX_EXCLUDED_FRAC`` of the coins that pass the other hard filters
-        (a partial exchangeInfo, not a real delisting wave), nothing is dropped and a warning is
-        logged, so a lot-rules outage cannot empty the pool."""
         if not cfg.exclude_untradeable or self._venue is None:
             return {}
         off = self._venue.unavailable([s.symbol for s in stats])
-        if off is None:
-            logger.warning(
-                "%s下单精度没拉到或已过期，这轮选币不按交易所可交易名单剔币", self._venue_label
-            )
-            return {}
         passing = [s.symbol for s in stats if _hard_filters(s, cfg).passed]
-        hit = [x for x in passing if x in off]
-        if passing and len(hit) > VENUE_MAX_EXCLUDED_FRAC * len(passing):
-            logger.warning(
-                "%s下单精度里没有 %d / %d 个过了门槛的币，像是没拉全，这轮选币不按它剔币",
-                self._venue_label,
-                len(hit),
-                len(passing),
-            )
-            return {}
-        return off
+        return trusted_venue_off(off, passing, self._venue_label, "这轮选币")
 
     def heartbeat(self, now: datetime) -> None:
         """上报选币状态：从没跑过 / 正常（上次时间、币数、下次时间）/ 失败（原因）。"""

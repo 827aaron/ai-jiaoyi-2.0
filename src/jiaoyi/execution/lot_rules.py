@@ -21,6 +21,7 @@ import logging
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 
+from jiaoyi.contracts.symbol_pool import NO_VENUE_LOT
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import ExchangeClient
@@ -127,7 +128,7 @@ class ExchangeInfoLotRules:
         缓存没拉到或已过期返回 None：此时 ``lot_rules`` 对所有币都是 None，不能据此剔币。"""
         if self._loaded_at is None or self._clock() - self._loaded_at > self._max_age:
             return None
-        return {s: self._status.get(s, "无下单精度") for s in symbols if self._rules.get(s) is None}
+        return {s: self._status.get(s, NO_VENUE_LOT) for s in symbols if self._rules.get(s) is None}
 
     def lot_rules(self, symbol: str) -> LotRules | None:
         if self._loaded_at is None or self._clock() - self._loaded_at > self._max_age:

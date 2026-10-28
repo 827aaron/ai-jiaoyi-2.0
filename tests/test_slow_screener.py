@@ -354,18 +354,20 @@ async def test_screen_ignores_venue_list_missing_most_passing_symbols(
     now: datetime, caplog: pytest.LogCaptureFixture
 ) -> None:
     syms = ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]
-    src = FakeSource([stat(x) for x in syms])
-    _, partial = _venue_lots(now, ["AAAUSDT"])
+    src = FakeSource([stat(x) for x in [*syms, "PUMPUSDT"]])
+    ex, partial = _venue_lots(now, ["AAAUSDT"])
+    ex.untradeable_status = {"PUMPUSDT": "SETTLING"}  # type: ignore[attr-defined]
     assert await partial.refresh()
     scr = CodeSymbolScreener(src, ScreenerConfig())
     scr.set_venue(partial, "Demo")
     with caplog.at_level("WARNING"):
         pool = await scr.screen(now)
     assert sorted(e.symbol for e in pool.in_pool) == syms
-    assert pool.venue_excluded == {}
-    assert "Demo下单精度里没有 3 / 4 个过了门槛的币，像是没拉全" in caplog.text
-    _, half = _venue_lots(now, ["AAAUSDT", "BBBUSDT"])
-    assert await half.refresh()
-    scr.set_venue(half, "Demo")
+    assert pool.venue_excluded == {"PUMPUSDT": "SETTLING"}
+    assert "Demo下单精度里没有 3 / 5 个币，像是没拉全，这轮选币只按交易所状态剔币" in caplog.text
+    _, most = _venue_lots(now, ["AAAUSDT", "BBBUSDT", "PUMPUSDT"])
+    assert await most.refresh()
+    scr.set_venue(most, "Demo")
     pool = await scr.screen(now)
-    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT"]
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT", "PUMPUSDT"]
+    assert pool.venue_excluded == {"CCCUSDT": "无下单精度", "DDDUSDT": "无下单精度"}
