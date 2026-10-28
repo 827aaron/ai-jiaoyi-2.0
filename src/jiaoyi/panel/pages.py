@@ -166,6 +166,8 @@ class DeskInfo(BaseModel):
     runs_today: int = 0
     cost_today_usd: float = 0.0
     error: str | None = None
+    stopped: str | None = None
+    """自停原因（日预算 / 余额不足）；不算故障。"""
     summary: str | None = None
 
 
@@ -209,13 +211,21 @@ def build_desk(
             if k in ("up", "flat", "down") and isinstance(v, int | float)
         }
     version = latest_run.get("published_version") if latest_run else None
-    err = st.get("stopped") or st.get("last_error")
+    stopped = st.get("stopped")
+    stopped = stopped if isinstance(stopped, str) and stopped else None
+    err = st.get("last_error")
     err = err if isinstance(err, str) and err else None
     today = local_day(now, files.tz).isoformat()
     fresh = st.get("cost_day") == today
     state: LampState
-    if mode == "off":
+    if schedule is None and last is None:
         state, text = "off", "未启用"
+    elif schedule is None:
+        state, text = "slow", "读不到配置"
+    elif mode == "off":
+        state, text = "off", "未启用"
+    elif stopped:
+        state, text = "slow", f"自停：{stopped}"
     elif err:
         state, text = "bad", f"失败：{err}"
     elif last is None:
@@ -238,6 +248,7 @@ def build_desk(
         runs_today=int(st.get("runs_today", 0)) if fresh else 0,
         cost_today_usd=float(st.get("cost_today_usd", 0.0)) if fresh else 0.0,
         error=err,
+        stopped=stopped,
         summary=summary,
     )
 

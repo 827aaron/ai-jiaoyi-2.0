@@ -1677,6 +1677,15 @@ def test_team_market_desk_node_off_and_failing(tmp_path: Path) -> None:
     bad = build_team(files, NOW, None, desk_schedule=("shadow", 60, 2)).desk
     assert bad is not None and bad.state == "bad" and bad.status == "失败：超时"
     assert bad.owner == "flash" and bad.runs_today == 0  # 昨天的计数不算今天
+    (tmp_path / "market_desk_state.json").write_text(json.dumps({
+        "last_run_at": (NOW - timedelta(minutes=5)).isoformat(),
+        "stopped": "今日花费已到上限", "last_error": None, "owner": "flash",
+    }))  # fmt: skip
+    capped = build_team(files, NOW, None, desk_schedule=("replace", 60, 2)).desk
+    assert capped is not None and capped.state == "slow"
+    assert capped.status == "自停：今日花费已到上限" and capped.error is None
+    no_cfg = build_team(files, NOW, None, desk_schedule=None).desk
+    assert no_cfg is not None and no_cfg.state == "slow" and no_cfg.status == "读不到配置"
 
 
 def test_team_api_accepts_desk_role(tmp_path: Path) -> None:

@@ -437,7 +437,7 @@ def test_panel_card_rows_show_outlook_and_tolerate_legacy_and_bad_records(
     from tests.test_panel import HB, _cfg
 
     log = JsonlDecisionLog(tmp_path)
-    now = datetime.now(UTC)
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
     _symbol_records(log, now)
     log.write(
         c.DecisionRecord(
@@ -460,7 +460,7 @@ def test_card_history_keeps_cards_whose_outlook_is_bad(tmp_path: Path) -> None:
     from jiaoyi.panel.card_history import _conclusion
 
     log = JsonlDecisionLog(tmp_path)
-    now = datetime.now(UTC)
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
     _symbol_records(log, now)
     recs = log.read_day(now.date().isoformat())
     for sym, want in (("AAUSDT", "down"), ("BBUSDT", None), ("CCUSDT", None)):
