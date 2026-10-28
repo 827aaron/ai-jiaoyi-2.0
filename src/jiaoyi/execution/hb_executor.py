@@ -1563,17 +1563,23 @@ class HbExecutorAdapter:
 
         A manual close takes this path whatever ``hosted_close_mode`` and
         ``hosted_close_direct_when_exiting`` say: the person clicked to be flat now, and the
-        conditions below are what make direct-first safe, not the mode."""
+        conditions below are what make direct-first safe, not the mode. Only once, though: an
+        ``exiting`` stage left by an earlier direct-first attempt (``direct_first``) means that
+        attempt failed, and the background tick must fall back to hb_first instead of repeating
+        it on every round."""
         state, manager = tracked.server_protection, self._protection
         rec = tracked.record
+        # Only a person's click in the panel is MANUAL; automated closers (keeper, its
+        # assistant, patrol, reconciler) must use their own reasons or they bypass the mode.
         manual = reason is CloseReason.MANUAL
+        manual_exiting = manual and not tracked.direct_first
         if (
             (self._hosted_close_mode != "direct" and not manual)
             or state is None
             or manager is None
             or self._exchange is None
             or state.stage in {"cleanup", "done"}
-            or (state.stage == "exiting" and not (self._direct_when_exiting or manual))
+            or (state.stage == "exiting" and not (self._direct_when_exiting or manual_exiting))
             or not state.entry_terminal
             or tracked.direct_close_pending
             or tracked.hb_close_pending

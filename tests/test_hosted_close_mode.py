@@ -25,6 +25,7 @@ from jiaoyi.execution.brackets import BracketManager, CloseInProgress, Protectio
 from jiaoyi.execution.exchange import (
     CloseFill,
     ExchangeEntryOrder,
+    ExchangeError,
     IdentifiedCloseCancelledBeforeSend,
     IdentifiedCloseNotSent,
     IdentifiedCloseOrder,
@@ -1013,3 +1014,43 @@ async def test_close_order_is_sized_on_the_close_lane_read(tmp_path: Path, side:
     names = [n for _, n in h.calls]
     assert "positions_evidence" not in names[: names.index("place_close")]
     assert lane and h.exchange.direct == [("dc-pos-1-1", 2.0)]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_manual_close_whose_direct_first_fails_falls_back_to_hb_first(
+    tmp_path: Path, side: Side
+):
+    h = await armed(tmp_path, side)
+    h.api.auto_terminate_on_stop = True
+
+    async def close_lane_down():
+        raise ExchangeError("synthetic close-lane read failed")
+
+    h.exchange.close_positions_evidence = close_lane_down  # type: ignore[attr-defined]
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.MANUAL)
+    assert not h.exchange.direct and h.tracked().direct_first and h.live_stop()
+    await h.adapter.protection_tick()
+    names = [n for _, n in h.calls]
+    assert names.index("stop_executor") < names.index("place_close")
+    done = h.tracked()
+    assert done.record.status is PositionStatus.CLOSED
+    assert done.record.close_reason is CloseReason.MANUAL
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_manual_close_beaten_by_a_stop_fill_is_booked_as_the_stop(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+
+    async def stop_triggers() -> None:
+        trigger_stop(h, 2.0)
+
+    h.exchange.before_place = stop_triggers
+    await h.adapter.close("pos-1", CloseReason.MANUAL)
+    assert h.exchange.held == 0 and len(h.exchange.direct) == 1
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.settled == [(CloseReason.STOP_LOSS, CloseFill())]
+    assert h.exit_alerts()[0].body.endswith("我方成交 0；交易所 stop_loss 腿成交 2")

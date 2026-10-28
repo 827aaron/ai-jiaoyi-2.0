@@ -742,7 +742,7 @@ class CcxtBinanceFutures:
         # positions open, so a close queued there waited seconds per request before it was sent.
         # Closes are rare and light, well inside Binance's own per-account limit.
         self._close_ex: Any = client()
-        self._close_markets = False
+        self._close_markets: object = None
         self._markets_loaded = False
         self.untradeable_status: dict[str, str] = {}
         self._bracket_submit_locks: dict[str, asyncio.Lock] = {}
@@ -769,12 +769,23 @@ class CcxtBinanceFutures:
         return self.__dict__.get("_close_ex") or self._ex
 
     async def _close_ready(self) -> Any:
-        """The close lane with the main client's markets: copied, not loaded a second time."""
+        """The close lane with the main client's markets: copied, not loaded a second time.
+
+        Copied again whenever the main client holds a different markets object (``lot_filters``
+        reloads them), else a symbol listed since the last copy fails the close lane's parse."""
         await self._ready()
         lane = self._close_lane()
-        if lane is not self._ex and not self.__dict__.get("_close_markets"):
-            lane.set_markets(self._ex.markets, self._ex.currencies)
-            self._close_markets = True
+        markets = self._ex.markets
+        if lane is not self._ex and self.__dict__.get("_close_markets") is not markets:
+            lane.set_markets(markets, self._ex.currencies)
+            self._close_markets = markets
+        if lane is not self._ex:
+            # ccxt's position read loads leverage brackets first; share the main client's so the
+            # close lane does not spend an extra request on them.
+            options = getattr(self._ex, "options", None)
+            brackets = options.get("leverageBrackets") if isinstance(options, dict) else None
+            if brackets is not None and isinstance(lane.options, dict):
+                lane.options["leverageBrackets"] = brackets
         return lane
 
     async def _close_position_mode(self, lane: Any) -> Literal["one_way", "hedge"]:

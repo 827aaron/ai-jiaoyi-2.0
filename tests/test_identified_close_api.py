@@ -369,3 +369,68 @@ async def test_close_lane_has_its_own_bucket_and_same_environment() -> None:
         assert obj._close_ex.urls["api"] == obj._ex.urls["api"]
     finally:
         await obj.close()
+
+
+def synthetic_market(base: str) -> dict[str, Any]:
+    return {
+        "id": f"{base}USDT",
+        "symbol": f"{base}/USDT:USDT",
+        "type": "swap",
+        "spot": False,
+        "swap": True,
+        "future": False,
+        "option": False,
+        "contract": True,
+        "linear": True,
+        "inverse": False,
+        "contractSize": 1,
+        "info": {},
+        "precision": {"amount": 0.01, "price": 0.0001},
+        "base": base,
+        "quote": "USDT",
+        "settle": "USDT",
+    }
+
+
+@pytest.mark.asyncio
+async def test_close_lane_reads_a_symbol_listed_after_its_first_copy() -> None:
+    obj = CcxtBinanceFutures("k", "s", testnet=True)
+    try:
+        obj._ex.set_markets([synthetic_market("SYNTH")])
+        obj._ex.options["leverageBrackets"] = {}
+        obj._markets_loaded = True
+        lane = obj._close_ex
+        rows: list[dict[str, Any]] = []
+
+        async def mode(params: Any = None) -> dict[str, Any]:
+            return {"dualSidePosition": False}
+
+        async def risk(params: Any = None) -> list[dict[str, Any]]:
+            return rows
+
+        lane.fapiPrivateGetPositionSideDual = mode
+        lane.fapiPrivateV3GetPositionRisk = risk
+
+        def row(symbol: str) -> dict[str, Any]:
+            return {
+                "symbol": symbol,
+                "positionSide": "BOTH",
+                "positionAmt": "-3",
+                "entryPrice": "1.5",
+                "markPrice": "1.4",
+                "unRealizedProfit": "0.3",
+                "notional": "-4.2",
+                "isolatedMargin": "0",
+                "updateTime": 1,
+            }
+
+        rows[:] = [row("SYNTHUSDT")]
+        [first] = await obj.close_positions_evidence()
+        assert (first.symbol, first.quantity) == ("SYNTHUSDT", 3)
+        # lot_filters reloads the main client's markets; a newly listed symbol must parse.
+        obj._ex.set_markets([synthetic_market("SYNTH"), synthetic_market("NEW")])
+        rows[:] = [row("NEWUSDT")]
+        [listed] = await obj.close_positions_evidence()
+        assert (listed.symbol, listed.side.value, listed.quantity) == ("NEWUSDT", "short", 3)
+    finally:
+        await obj.close()
