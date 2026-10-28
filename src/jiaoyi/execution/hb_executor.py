@@ -82,6 +82,18 @@ from jiaoyi.interfaces import Alerter, LifeboatStop
 
 log = logging.getLogger(__name__)
 
+
+def _frozen_peak_size(
+    state: FrozenPeakExit, side: Side, stop_loss_pct: float, trigger_price: float | None = None
+) -> dict[str, float]:
+    # Record-only: a bad persisted value must never turn a latched trigger into an error.
+    try:
+        return frozen_peak_evidence(state, side, stop_loss_pct, trigger_price)
+    except Exception as error:
+        log.warning("Frozen peak size not recorded: %s: %s", type(error).__name__, error)
+        return {}
+
+
 # hummingbot 的 OrderType 枚举值
 _ORDER_MARKET = 1
 HostedCloseMode = Literal["hb_first", "direct"]
@@ -1897,7 +1909,7 @@ class HbExecutorAdapter:
                     return None
                 return {
                     **initial.frozen_peak_exit.model_dump(mode="json"),
-                    **frozen_peak_evidence(
+                    **_frozen_peak_size(
                         initial.frozen_peak_exit, initial.record.side, initial.stop_loss_pct
                     ),
                     "triggered": True,
@@ -1990,7 +2002,7 @@ class HbExecutorAdapter:
                     self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
                     return {
                         **state.model_dump(mode="json"),
-                        **frozen_peak_evidence(state, tracked.record.side, tracked.stop_loss_pct),
+                        **_frozen_peak_size(state, tracked.record.side, tracked.stop_loss_pct),
                         "triggered": False,
                     }
                 self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
@@ -1999,7 +2011,7 @@ class HbExecutorAdapter:
                 at = book.bid if tracked.record.side is Side.LONG else book.ask
                 return {
                     **state.model_dump(mode="json"),
-                    **frozen_peak_evidence(
+                    **_frozen_peak_size(
                         state,
                         tracked.record.side,
                         tracked.stop_loss_pct,

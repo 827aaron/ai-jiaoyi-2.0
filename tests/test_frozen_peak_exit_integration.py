@@ -154,6 +154,64 @@ async def test_executor_records_frozen_peak_size_at_freeze_and_trigger(
     assert not (PEAK_KEYS | TRIGGER_KEYS) & stored.keys()
 
 
+async def review_at(rig, rec, seconds, price):
+    rig.t = START + timedelta(seconds=seconds)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, price, price, rig.t, rig.t
+    )
+    return await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+
+
+@pytest.mark.parametrize("side,peak,touch", [("long", 102, 102.5), ("short", 98, 97.5)])
+async def test_executor_keeps_latched_trigger_when_recorded_size_is_corrupt(
+    tmp_path, side, peak, touch
+):
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+    await review_at(rig, rec, 30, peak)
+    await review_at(rig, rec, 60, peak)
+    assert (await review_at(rig, rec, 61, touch))["triggered"]
+    tracked = rig.registry.get(rec.position_id)
+    corrupt = tracked.frozen_peak_exit.model_copy(update={"peak_net_usdt": "corrupt"})
+    rig.registry.put(tracked.model_copy(update={"frozen_peak_exit": corrupt}))
+    result = await review_at(rig, rec, 70, peak)
+    assert result["triggered"] is True and result["detail"] == "pending_exit"
+    assert not (PEAK_KEYS | TRIGGER_KEYS) & result.keys()
+
+
+@pytest.mark.parametrize("side,peak,touch", [("long", 102, 102.5), ("short", 98, 97.5)])
+async def test_executor_triggers_when_recording_the_size_fails(
+    tmp_path, monkeypatch, caplog, side, peak, touch
+):
+    def broken(*_args):
+        raise ValueError("bad size")
+
+    monkeypatch.setattr("jiaoyi.execution.hb_executor.frozen_peak_evidence", broken)
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+    await review_at(rig, rec, 30, peak)
+    await review_at(rig, rec, 60, peak)
+    result = await review_at(rig, rec, 61, touch)
+    assert result["triggered"] is True and not TRIGGER_KEYS & result.keys()
+    assert rig.registry.get(rec.position_id).frozen_peak_exit.status == "triggered"
+    assert "Frozen peak size not recorded: ValueError: bad size" in caplog.text
+
+
+@pytest.mark.parametrize("side,peak,touch", [("long", 102, 102.5), ("short", 98, 97.5)])
+async def test_executor_keeps_trigger_price_without_a_usable_stop_distance(
+    tmp_path, side, peak, touch
+):
+    rig = Rig(tmp_path)
+    rec = install(rig, side)
+    tracked = rig.registry.get(rec.position_id)
+    rig.registry.put(tracked.model_copy(update={"stop_loss_pct": 0.0}))
+    await review_at(rig, rec, 30, peak)
+    await review_at(rig, rec, 60, peak)
+    result = await review_at(rig, rec, 61, touch)
+    assert result["triggered"] and result["trigger_price"] == touch
+    assert not {"peak_gain_r", "trigger_gain_r"} & result.keys()
+
+
 @pytest.mark.parametrize("quantity,side", [(0.5, "long"), (1, "short")])
 async def test_executor_rejects_changed_actual_position(tmp_path, quantity, side):
     rig = Rig(tmp_path)

@@ -201,11 +201,12 @@ def frozen_peak_evidence(
             (state.peak_source_at - state.first_fill_at).total_seconds() / 60, 2
         ),
     }
+    if trigger_price is not None:
+        out["trigger_price"] = trigger_price
     if not (math.isfinite(stop_loss_pct) and stop_loss_pct > 0):
         return out
     risk = entry * stop_loss_pct / 100
     out["peak_gain_r"] = round(sign * (state.peak_price - entry) / risk, 4)
     if trigger_price is not None:
-        out["trigger_price"] = trigger_price
         out["trigger_gain_r"] = round(sign * (trigger_price - entry) / risk, 4)
     return out
