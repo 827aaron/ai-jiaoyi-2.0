@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 SCREEN_EVERY = timedelta(hours=1)
 """主循环每隔多久重新选币一次；选币器据此报告「下次选币时间」。"""
+VENUE_MAX_EXCLUDED_FRAC = 0.5
+"""More than this share of passing coins missing from the venue = a broken lot-rules fetch."""
 
 FALLBACK_MAJORS = frozenset({"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA"})
 """拿不到市值排名（没缓存、接口失败、major_top_n = 0）时的主流币名单。"""
@@ -431,6 +433,34 @@ class CodeSymbolScreener:
         """接上执行交易所的可交易名单；每次选币前主循环已刷新过它。"""
         self._venue, self._venue_label = venue, label
 
+    def _venue_off(self, stats: list[SymbolStats], cfg: ScreenerConfig) -> dict[str, str]:
+        """Symbols to drop because the execution venue cannot trade them (no lot rules, or a
+        status other than TRADING).
+
+        Fails open: when the venue's lot rules are not loaded or stale, or the venue would drop
+        more than ``VENUE_MAX_EXCLUDED_FRAC`` of the coins that pass the other hard filters
+        (a partial exchangeInfo, not a real delisting wave), nothing is dropped and a warning is
+        logged, so a lot-rules outage cannot empty the pool."""
+        if not cfg.exclude_untradeable or self._venue is None:
+            return {}
+        off = self._venue.unavailable([s.symbol for s in stats])
+        if off is None:
+            logger.warning(
+                "%s下单精度没拉到或已过期，这轮选币不按交易所可交易名单剔币", self._venue_label
+            )
+            return {}
+        passing = [s.symbol for s in stats if _hard_filters(s, cfg).passed]
+        hit = [x for x in passing if x in off]
+        if passing and len(hit) > VENUE_MAX_EXCLUDED_FRAC * len(passing):
+            logger.warning(
+                "%s下单精度里没有 %d / %d 个过了门槛的币，像是没拉全，这轮选币不按它剔币",
+                self._venue_label,
+                len(hit),
+                len(passing),
+            )
+            return {}
+        return off
+
     def heartbeat(self, now: datetime) -> None:
         """上报选币状态：从没跑过 / 正常（上次时间、币数、下次时间）/ 失败（原因）。"""
         if self._rec is None:
@@ -580,9 +610,7 @@ class CodeSymbolScreener:
             # 币安没有永续的（只在市值榜上）不占名额：往下补满 major_top_n 个
             ranks = self._majors.ranks(cfg.major_top_n, {base_of(s.symbol) for s in stats})
             self._majors.set_effective(ranks, cfg.major_top_n, now)
-        off: dict[str, str] = {}
-        if cfg.exclude_untradeable and self._venue is not None:
-            off = self._venue.unavailable([s.symbol for s in stats]) or {}
+        off = self._venue_off(stats, cfg)
         gone: dict[str, str] = {}
         entries: dict[str, SymbolPoolEntry] = {}
         ranked: list[SymbolPoolEntry] = []

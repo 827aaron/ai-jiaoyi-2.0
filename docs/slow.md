@@ -322,6 +322,16 @@ Mac 实测（#96 把 `max_tokens` 降到 4096 后）：思考模型的思考也�
 
 没通过硬门槛的币在选币页显示原因（成交额不足 / 点差过大 / 盘口深度不足 / 上线不满 N 天 / 24 小时波动太小 / 24 小时波动过大）。
 
+### 执行所上做不了的币（`exclude_untradeable`，默认 `true`）
+
+选币用主网数据，下单在执行所（Demo / 实盘）。`exclude_untradeable = true` 时，执行所上状态不是 TRADING（如 `PUMPUSDT` 结算中 `SETTLING`）**或没有下单精度**（exchangeInfo 里没有这个合约的 lot 规则，`无下单精度`）的币当成没过硬门槛：不进池、不上会、不占卡位，名额给下一个币；固定 / 手动加入的币也一样。原因写在选币页（`Demo不可交易（无下单精度）`），候选池文件记 `venue_excluded`，作战卡上已有的这类币读成只看不做（持仓币不动）。面板设置页能改，也能写进 `config/slow.pending.toml`。
+
+为什么默认开：`PUMPUSDT` 曾在卡上 61 小时（能交易的 22.8 小时），出了 18 个信号，Jev 问了 18 次，全部被风控员以「没有这个合约的交易所精度」拒掉，按主网模拟是 −0.39R。
+
+拉不到下单精度时**不剔币**（失败安全，不会把池子清空）：执行所下单精度从没拉到或已过期（`lot_rules` 缓存超过有效期），或者过了其余硬门槛的币里超过一半（`VENUE_MAX_EXCLUDED_FRAC = 0.5`）在执行所查不到（像是 exchangeInfo 没拉全，不像真下架），这一轮就不按执行所名单剔，日志记一条 WARNING（「Demo下单精度没拉到或已过期 …」/「Demo下单精度里没有 N / M 个过了门槛的币，像是没拉全 …」）。这种时候风控员照旧对没有精度的币拒单。
+
+回滚：`[screener] exclude_untradeable = false`（面板「选币」里能改），选币不再管执行所状态，回到 #355 之前。
+
 ## 推理长度（`[meeting] reasoning_effort`，默认 `low`）
 
 Mac 实测（#98 把 `max_tokens` 改回 8192 后）：deepseek-v4.1-flash 是推理模型，推理 token 也算在输出额度里，个别币（ADA / BTC / TIA）的辩论回答只有几千字却用满 8192，`finish_reason=length`，整场失败；加长度治标不治本。所以走 OpenRouter 时，所有会议对话步都带 `reasoning` 参数限制推理：`low`（默认）/ `medium` / `high` 对应 OpenRouter 的 `reasoning.effort`，`none` 对应 `reasoning.enabled=false`（关掉推理）。参数直接设到 TradingAgents 建好的模型对象的 `extra_body`（`apply_openrouter_options`，请求体里还有 `usage.include` 取真实花费），单元测试验证了请求体。直连 DeepSeek（`provider = "deepseek"`）这个参数不生效。推理变短可能略降分析深度；觉得质量不够再调成 `medium`，截断仍然会让整场失败（#98 的兜底）。
