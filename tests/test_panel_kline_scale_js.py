@@ -27,6 +27,13 @@ assert.deepEqual(defaultRange(600, 15), { from: 5, to: 604 });
 assert.deepEqual(defaultRange(2100, 100), { from: 1980, to: 2104 });
 // 开仓就在前几根：from 不小于 0
 assert.deepEqual(defaultRange(300, 3), { from: 0, to: 304 });
+// 窄屏：宽 300px、开仓后 75 根 → 留白至少 110px，约 ceil(110*75/190)=44 根
+assert.equal(leadBars(300, 75), 44);
+assert.equal(leadBars(1000, 75), 10);  // 宽屏 10 根就够
+assert.equal(leadBars(0, 75), 10);  // 宽度未知 / 太窄：退回 10 根
+assert.deepEqual(defaultRange(300, 229, 300), { from: 185, to: 304 });
+// 留白放大后超过 600 根上限：仍退回最近 120 根
+assert.deepEqual(defaultRange(2100, 1600, 300), { from: 1980, to: 2104 });
 assert.deepEqual(defaultRange(50), { from: 0, to: 54 });
 assert.deepEqual(defaultRange(0), { from: 0, to: 5 });
 
@@ -91,4 +98,4 @@ def test_toggle_is_remembered_and_wired() -> None:
         'localStorage.getItem("kline-scale")' in source
         and 'localStorage.setItem("kline-scale"' in source
     )
-    assert "defaultRange(barCount, entryIdx)" in source  # 双击复位走默认范围
+    assert "defaultRange(barCount, entryIdx, c.timeScale().width())" in source  # 双击复位走默认范围

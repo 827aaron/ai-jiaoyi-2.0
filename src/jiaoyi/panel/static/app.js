@@ -1397,12 +1397,17 @@ let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [],
 let entryIdx = null, lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
 try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
 // KLINE-SCALE-BEGIN
-const DEFAULT_BARS = 120, RIGHT_BARS = 5, ENTRY_LEAD_BARS = 10, MAX_SPAN_BARS = 600;
+const DEFAULT_BARS = 120, RIGHT_BARS = 5, ENTRY_LEAD_BARS = 10, ENTRY_LEAD_PX = 110, MAX_SPAN_BARS = 600;
 // 默认视图：从开仓那根前 10 根看到最新一根后 5 根的空位，这段超过 600 根或没有开仓点就退回最近 120 根
-function defaultRange(n, entryIdx) {
+// 开仓前留白：至少 10 根，窄屏再多留，让「开仓 价格」整句放得下（留白像素 = lead × 宽 / (lead + 开仓后的根数)）
+function leadBars(width, barsAfter) {
+  if (!(width > 2 * ENTRY_LEAD_PX)) return ENTRY_LEAD_BARS;
+  return Math.max(ENTRY_LEAD_BARS, Math.ceil((ENTRY_LEAD_PX * barsAfter) / (width - ENTRY_LEAD_PX)));
+}
+function defaultRange(n, entryIdx, width) {
   const to = Math.max(n - 1, 0) + RIGHT_BARS;
   if (entryIdx != null && entryIdx >= 0) {
-    const from = Math.max(0, entryIdx - ENTRY_LEAD_BARS);
+    const from = Math.max(0, entryIdx - leadBars(width, to - entryIdx));
     if (to - from <= MAX_SPAN_BARS) return { from, to };
   }
   return { from: Math.max(0, n - DEFAULT_BARS), to };
@@ -1444,7 +1449,7 @@ function entryBarIndex(p, bars) {
 const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
-    c.timeScale().setVisibleLogicalRange(defaultRange(barCount, entryIdx));
+    c.timeScale().setVisibleLogicalRange(defaultRange(barCount, entryIdx, c.timeScale().width()));
     c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
