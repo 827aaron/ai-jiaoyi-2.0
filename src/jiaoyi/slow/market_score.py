@@ -2,9 +2,11 @@
 
 按每轮运行记分，不按发布时刻（CONFLICTS #13）：每轮 t0 起 1h / 4h 的结局，口径和大盘台被问的一样
 （``market_desk.score_targets``）——t0 时那一池（日志里的 ``basket``）各币简单收益的等权平均，
-价格取 t0 / t0 + h 时刻最后一根已收盘的 1 分钟线（主网），落在 ±band·σ（日志里的 ``flat_band_pct``）
-以内为平。K 线经 ``binance_gate`` 拉（和数据包同源、共用封禁与权重闸），按 币 / UTC 日缓存在
-``data/market_desk/score_cache/``，重算只补新的分钟。
+价格取主网 1 分钟线收盘价，落在 ±band·σ（日志里的 ``flat_band_pct``）
+以内为平。结局起点 / 终点都取「收盘时间不晚于该时刻的最后一根」1 分钟线，不看 t0 之后的价。K 线经
+``binance_gate`` 拉（和数据包同源）；面板和主程序是两个进程，只共用 IP 权重（响应头里的已用权重），
+封禁状态各记各的。按 币 / UTC 日缓存在 ``data/market_desk/score_cache/``，重算只补新的分钟，
+超过窗口 + 2 天的缓存删掉。
 
 报告（``data/market_desk/score.json``）：
 - 概率：Brier（三类求和）、log loss、RPS，对照先验（日志里的基础率）和「延续」（近 1 小时等权池
@@ -21,6 +23,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -30,7 +33,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -88,7 +91,26 @@ def _limit(span_ms: int, step_ms: int) -> int:
     return max(1, min(1000, -(-span_ms // step_ms)))
 
 
-def paced(get: Getter, gap_s: float, sleep: Callable[[float], None] = time.sleep) -> Getter:
+class Stopped(Exception):
+    """要求停下（面板关闭 / 重启）：这一轮作罢，不写结果。"""
+
+
+class StopFlag(Protocol):
+    def is_set(self) -> bool: ...
+
+
+def stoppable(get: Getter, stop: StopFlag) -> Getter:
+    """每次请求前看一眼 ``stop``，已设就抛 ``Stopped``（不吞进「拉不到」的分支）。"""
+
+    def run(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        if stop.is_set():
+            raise Stopped
+        return get(url, params)
+
+    return run
+
+
+def paced(get: Getter, gap_s: float, sleep: Callable[[float], object] = time.sleep) -> Getter:
     """每次请求之间至少隔 ``gap_s`` 秒（面板后台跑时压低权重，大头留给交易程序）。"""
     last = [0.0]
 
@@ -176,12 +198,12 @@ class MinuteCloses:
         self._save(sym, day0, entry)
 
     def px(self, sym: str, t: datetime) -> float | None:
-        """t 时刻的价 = 收盘时间在 t 或 t 之后最近的那根 1 分钟线的收盘价（``card_score.bar_open``
-        同一口径；t 正好整分钟时就是刚收盘那根）。"""
+        """t 时刻的价 = 收盘时间不晚于 t 的最后一根 1 分钟线的收盘价（t 正好整分钟时就是刚收盘
+        那根；t 在分钟中间时是上一根，不用 t 之后才收盘的那根）。"""
         if sym in self.gone or sym in self.failed:
             return None
         t_ms = int(t.timestamp() * 1000)
-        ot = -(-t_ms // MINUTE_MS) * MINUTE_MS - MINUTE_MS
+        ot = (t_ms - MINUTE_MS) // MINUTE_MS * MINUTE_MS
         if ot + MINUTE_MS > self._now_ms:
             return None
         day0 = ot // DAY_MS * DAY_MS
@@ -1039,6 +1061,39 @@ def _row_json(s: Scored) -> dict[str, Any]:
     }  # fmt: skip
 
 
+def prune_cache(cache: Path, now: datetime, days: float) -> int:
+    """删掉窗口 + 2 天以前的缓存：1 分钟线按日文件删；1h 线删掉更早的根（σ 还要往前 175 小时）。
+    返回删掉的日文件数。"""
+    keep_from = now - timedelta(days=days + 2)
+    cut_day = keep_from.astimezone(UTC).date().isoformat()
+    n = 0
+    for sym_dir in (cache / "1m").glob("*"):
+        if not sym_dir.is_dir():
+            continue
+        for f in sym_dir.glob("????-??-??.json"):
+            if f.stem < cut_day:
+                f.unlink(missing_ok=True)
+                n += 1
+        with contextlib.suppress(OSError):
+            sym_dir.rmdir()  # 空了才删得掉
+    cut_ms = ms_of(keep_from) - (SIGMA_LOOKBACK_H + 5) * HOUR_MS
+    for f in (cache / "1h").glob("*.json"):
+        try:
+            raw = json.loads(f.read_text(encoding="utf-8"))
+            if int(raw["from_ms"]) >= cut_ms:
+                continue
+            raw["c"] = {k: v for k, v in raw["c"].items() if int(k) >= cut_ms}
+            raw["from_ms"] = min(max(cut_ms, int(raw["from_ms"])), int(raw["to_ms"]))
+            f.write_text(json.dumps(raw), "utf-8")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            f.unlink(missing_ok=True)
+    return n
+
+
+def ms_of(t: datetime) -> int:
+    return int(t.timestamp() * 1000)
+
+
 def update(
     data_dir: str | Path,
     now: datetime,
@@ -1048,12 +1103,15 @@ def update(
     cache_dir: Path | None = None,
     get: Getter | None = None,
     flash: bool = True,
+    stop: StopFlag | None = None,
 ) -> dict[str, Any]:
     """读日志、拉缺的 K 线、算分，写 ``score.json``（``out_path`` 给了就写那里）。同步；限流时
-    抛 ``binance_gate.RateLimited``，这一次作罢。"""
+    抛 ``binance_gate.RateLimited``，``stop`` 设了就在下一次请求前抛 ``Stopped``，都不写结果。"""
     root = Path(data_dir)
     since = now - timedelta(days=days)
     cache = cache_dir or root / LOG_DIR / CACHE_DIR
+    if stop is not None:
+        get = stoppable(get or binance_gate.get, stop)
     log = read_desk_log(root, since, now)
     closes = MinuteCloses(cache, now, get)
     rows, counts = resolve_runs(log.runs, closes.px, now)
@@ -1067,6 +1125,7 @@ def update(
         flash_res["paired"] = _paired(rows, rounds)
     report = summarize(log, rows, counts, flash_res, now, since)
     report["fetch"] = {
+        "pruned_files": prune_cache(cache, now, days),
         "requests_1m": closes.requests,
         "failed": sorted(closes.failed),
         "gone": sorted(closes.gone),

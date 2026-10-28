@@ -154,10 +154,11 @@ def test_outcome_is_equal_weight_pool_at_t0_against_logged_band(tmp_path: Path) 
     assert rep["counts"]["scored_4h"] == 2 and rep["counts"]["pending_4h"] == 0
 
 
-def test_price_is_close_of_the_minute_bar_ending_at_or_after_t(tmp_path: Path) -> None:
-    # t0 = 10:02:30：用 10:02 开盘、10:03 收盘那根的收盘价（和 card_score.bar_open 一样）
+def test_prices_use_last_bar_closed_at_or_before_t_no_look_ahead(tmp_path: Path) -> None:
+    # t0 = 10:02:30；10:02 那根（10:03 收盘）收在 t0 之后，不能当起点。价格在 10:03 跳 +1%：
+    # 起点取 10:02:00 收盘的 100，终点 14:02:30 取 14:02:00 收盘的 101 → +1%
     t0 = T0 + timedelta(seconds=30)
-    jump = ms_of(T0) + MIN  # 10:03 起价格跳 +1%
+    jump = ms_of(T0) + MIN
 
     def price(sym: str, t: int) -> float:
         return 101.0 if t >= jump else 100.0
@@ -165,7 +166,9 @@ def test_price_is_close_of_the_minute_bar_ending_at_or_after_t(tmp_path: Path) -
     now = t0 + timedelta(hours=5)
     write_log(tmp_path, [desk_row(t0, band4=0.4)])
     rep = run(tmp_path, now, FakeKlines(price, now))
-    assert rep["runs"][0]["out"]["4h"]["ret_pct"] == pytest.approx(0.0, abs=1e-12)
+    row = rep["runs"][0]
+    assert row["out"]["4h"]["ret_pct"] == pytest.approx(1.0, abs=1e-9)
+    assert row["trail_1h_pct"] == 0.0  # 近 1 小时基线也只看 t0 之前收盘的价
 
 
 def test_runs_wait_until_horizon_plus_settle(tmp_path: Path) -> None:
@@ -384,6 +387,35 @@ async def test_replay_reproduces_real_market_desk_log(tmp_path: Path) -> None:
     assert len(real) >= 3
 
 
+def test_replay_clears_candidate_when_direction_returns_to_published() -> None:
+    q = timedelta(minutes=15)
+    dirs = ["看涨", "看涨", "看跌", "看涨", "看跌", "看跌", "看跌"]
+    runs = [lite(T0 + k * q, d) for k, d in enumerate(dirs)]
+    got = ms.replay_publishes(runs, dirs, [])
+    # 10:32 的看跌被 10:47 的看涨打断：从 11:02 重新数，11:32 才满 3 轮 / 30 分钟
+    assert [(at - T0, d) for at, d in got] == [
+        (timedelta(seconds=1), "看涨"),
+        (6 * q + timedelta(seconds=1), "看跌"),
+    ]
+
+
+def test_replay_skips_prior_missing_runs_for_confirmation() -> None:
+    q = timedelta(minutes=15)
+    runs = [
+        lite(T0, "看涨"),
+        lite(T0 + q, "看跌"),
+        lite(T0 + 2 * q, "看跌", prior_missing=True),  # 不计确认
+        lite(T0 + 3 * q, "看涨", prior_missing=True),  # 也不打断候选
+        lite(T0 + 4 * q, "看跌"),
+        lite(T0 + 5 * q, "看跌"),
+    ]
+    got = ms.replay_publishes(runs, [r.direction for r in runs], [], confirm=3)
+    assert [(at - T0, d) for at, d in got] == [
+        (timedelta(seconds=1), "看涨"),
+        (5 * q + timedelta(seconds=1), "看跌"),
+    ]
+
+
 def test_latency_counts_minutes_from_sustained_move_to_same_direction_publish() -> None:
     q = timedelta(minutes=15)
     rows = []
@@ -494,6 +526,80 @@ def test_panel_line_and_desk_node_accuracy(tmp_path: Path) -> None:
     (tmp_path / "market_desk" / "score.json").unlink()
     desk = build_team(files, now, None, desk_schedule=("replace", 15, 2)).desk
     assert desk is not None and desk.accuracy is None
+
+
+def test_stop_flag_stops_before_next_request_and_writes_nothing(tmp_path: Path) -> None:
+    import threading
+
+    now = T0 + timedelta(hours=5)
+    basket = tuple(f"S{i}USDT" for i in range(10))
+    write_log(tmp_path, [desk_row(T0, basket=basket)])
+    stop = threading.Event()
+    fake = FakeKlines(ramp(T0, {}), now)
+
+    def get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        r = fake(url, params)
+        if len(fake.calls) == 2:
+            stop.set()  # 第二个请求之后要求停下：第三个请求不该发出去
+        return r
+
+    with pytest.raises(ms.Stopped):
+        ms.update(tmp_path, now, get=get, stop=stop)
+    assert len(fake.calls) == 2
+    assert not (tmp_path / "market_desk" / "score.json").exists()
+
+
+def test_panel_shutdown_does_not_wait_for_running_desk_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    import time
+
+    from jiaoyi.panel import server
+    from tests.test_panel import _client, _seed
+
+    _seed(tmp_path)
+    (tmp_path / "market_desk").mkdir()
+    entered = threading.Event()
+    saw_stop: list[bool] = []
+
+    def slow_update(data_dir: Any, now: datetime, **kw: Any) -> dict[str, Any]:
+        entered.set()
+        saw_stop.append(kw["stop"].wait(30))  # 卡在请求上，直到面板关闭设 stop
+        raise ms.Stopped
+
+    monkeypatch.setattr(server, "MARKET_SCORE_FIRST_S", 0.0)
+    monkeypatch.setattr(ms, "update", slow_update)
+    with _client(tmp_path, "192.168.1.20"):
+        assert entered.wait(5), "后台记分没开始"
+        started = time.monotonic()
+    assert time.monotonic() - started < 5
+    deadline = time.monotonic() + 5
+    while not saw_stop and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert saw_stop == [True]
+
+
+def test_cache_pruned_to_window_plus_two_days(tmp_path: Path) -> None:
+    now = T0 + timedelta(hours=5)
+    write_log(tmp_path, [desk_row(T0)])
+    cache = tmp_path / "market_desk" / "score_cache"
+    old = cache / "1m" / "AAUSDT" / "2026-10-18.json"  # 10-28 − (7 + 2) 天 = 10-19 之前
+    keep = cache / "1m" / "AAUSDT" / "2026-10-19.json"
+    gone_dir = cache / "1m" / "OLDUSDT" / "2026-10-01.json"
+    for f in (old, keep, gone_dir):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"end_ms": 0, "c": [None] * 1440}))
+    hour = cache / "1h" / "AAUSDT.json"
+    hour.parent.mkdir(parents=True)
+    cut = ms_of(now - timedelta(days=9)) - 173 * HOUR
+    hour.write_text(json.dumps({"from_ms": cut - 10 * HOUR, "to_ms": cut + 2 * HOUR,
+                                "c": {str(cut - HOUR): 1.0, str(cut): 2.0}}))  # fmt: skip
+    rep = run(tmp_path, now, FakeKlines(ramp(T0, {}), now), flash=False)
+    assert rep["fetch"]["pruned_files"] == 2
+    assert keep.exists() and not old.exists() and not gone_dir.parent.exists()
+    h = json.loads(hour.read_text())
+    assert h["c"] == {str(cut): 2.0} and h["from_ms"] == cut
 
 
 def test_paced_getter_spaces_requests() -> None:
