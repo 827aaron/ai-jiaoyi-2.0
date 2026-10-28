@@ -373,13 +373,17 @@ def test_prior_modes_change_only_the_prior_wording() -> None:
 @pytest.mark.parametrize("order", ["up_first", "down_first"])
 def test_momentum_guidance_is_symmetric_and_ordered(order: Any) -> None:
     lines = instruction_lines(order, 0.3, momentum_guidance=True)
-    up = next(s for s in lines if "both above zero" in s)
-    down = next(s for s in lines if "both below zero" in s)
+    up = next(s for s in lines if "return is above zero" in s)
+    down = next(s for s in lines if "return is below zero" in s)
     assert swap_words(up) == down and swap_words(down) == up
-    assert "raise p_up and reduce p_flat" in up and "raise p_down and reduce p_flat" in down
+    assert "evidence for p_up; when it is fading, it is evidence for p_flat or p_down" in up
+    assert "evidence for p_down; when it is fading, it is evidence for p_flat or p_up" in down
     assert (lines.index(up) < lines.index(down)) == (order == "up_first")
+    assert any("can continue or revert" in s for s in lines)
     assert any("pool_ret_*" in s and "btc_ret_*" in s for s in lines)
-    assert not any("both above zero" in s for s in instruction_lines(order, 0.3))
+    for s in lines:
+        assert "more likely than" not in s and "raise p_" not in s
+    assert not any("return is above zero" in s for s in instruction_lines(order, 0.3))
 
 
 async def test_desk_passes_wording_to_main_and_mirror_prompts(tmp_path: Path) -> None:
@@ -397,11 +401,14 @@ async def test_desk_passes_wording_to_main_and_mirror_prompts(tmp_path: Path) ->
     run = await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
     assert run.status == "ok" and len(model.prompts) == 10
     for p in model.prompts:
-        assert "base_rate" not in p and "both below zero" in p and "+0.3 sigma" in p
+        assert "base_rate" not in p and "return is below zero" in p and "+0.3 sigma" in p
     row = log_rows(tmp_path)[-1]
     assert row["prompt_version"] == "desk-v1+prior-off+momentum"
     assert row["score_targets"]["4h"]["flat_band_pct"] == pytest.approx(0.24)
     assert row["score_targets"]["4h"]["base_rate"]["flat"] == pytest.approx(0.47)
+    assert "（平 = ±0.24%）" in row["regime"]
+    assert desk.state.latest is not None
+    assert desk.state.latest["flat_band_pct"] == pytest.approx({"4h": 0.24, "1h": 0.12})
 
 
 def test_band_sigma_reaches_base_rates() -> None:
@@ -596,20 +603,35 @@ def test_aggregation_methods() -> None:
 
 
 async def test_desk_uses_configured_aggregation(tmp_path: Path) -> None:
-    replies = iter(
-        [
-            answer(0.7, 0.2, 0.1),
-            answer(0.3, 0.4, 0.3),
-            answer(0.3, 0.4, 0.3),
-            answer(0.3, 0.4, 0.3),
-            answer(0.3, 0.4, 0.3),
-        ]
-    )
+    """每次回答里有一个离群：中位数下 4h、1h 和镜像的概率都不受它影响（平均会被拉走）。"""
+    calls: Counter[str] = Counter()
+
+    def script(prompt: str) -> str:
+        kind = "mirror" if "pool_ret_4h_pct = 0.500" in prompt else "main"
+        calls[kind] += 1
+        first = calls[kind] == 1
+        if kind == "mirror":
+            return answer(*((0.1, 0.2, 0.7) if first else (0.3, 0.4, 0.3)))
+        return answer(
+            *((0.7, 0.2, 0.1) if first else (0.3, 0.4, 0.3)),
+            h1=(0.8, 0.1, 0.1) if first else (0.3, 0.4, 0.3),
+        )
+
     desk = make_desk(
-        tmp_path, FakePublisher(), FakeModel(lambda _: next(replies)), [T0], aggregation="median"
+        tmp_path,
+        FakePublisher(),
+        FakeModel(script),
+        [T0],
+        aggregation="median",
+        mirror_test_rate=1.0,
     )
     run = await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    assert calls == Counter({"main": 5, "mirror": 5})
     assert run.probs is not None and run.probs.up == pytest.approx(0.3)
+    row = log_rows(tmp_path)[-1]
+    assert row["probs_1h"]["up"] == pytest.approx(0.3)
+    assert row["mirror"]["probs_4h"]["down"] == pytest.approx(0.3)
+    assert row["mirror"]["gap_up_vs_mirror_down"] == pytest.approx(0.0)
 
 
 def test_compose_regime_alternates_and_cites_numbers() -> None:
@@ -622,6 +644,9 @@ def test_compose_regime_alternates_and_cites_numbers() -> None:
     assert up.index("涨 50%") < up.index("跌 20%") and down.index("跌 20%") < down.index("涨 50%")
     plain = compose_regime(None, Probs(0.3, 0.4, 0.3), d, "up_first")
     assert "等权池近 4 小时 -0.50%" in plain
+    assert "未来 4 小时概率：" in plain  # 不给宽度就不写
+    banded = compose_regime(None, Probs(0.3, 0.4, 0.3), d, "up_first", 0.3)
+    assert "未来 4 小时概率（平 = ±0.24%）：涨 30% / 平 40% / 跌 30%。" in banded
 
 
 async def test_samples_are_averaged_and_failures_tolerated(tmp_path: Path) -> None:

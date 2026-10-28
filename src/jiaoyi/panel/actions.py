@@ -98,8 +98,18 @@ Section = Literal[
     "market_desk",
 ]
 _SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk")
-# [market_desk] 其余项（模式、模型、节奏、门槛）改了要重启、影响大盘方向，只在终端改
-DESK_EDITABLE = frozenset({"band_sigma", "prior_mode", "momentum_guidance", "aggregation"})
+# [market_desk] 其余项（模式、模型、节奏、采样）改了要重启、影响大盘方向，只在终端改
+DESK_EDITABLE = frozenset(
+    {
+        "band_sigma",
+        "prior_mode",
+        "momentum_guidance",
+        "aggregation",
+        "call_p_min",
+        "call_edge_min",
+        "publish_min_gap_min",
+    }
+)
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {

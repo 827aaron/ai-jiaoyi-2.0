@@ -166,24 +166,27 @@ def _prior_lines(prior_mode: PriorMode) -> list[str]:
 
 
 def _momentum_lines(order: Order) -> list[str]:
-    """怎样按近 15 分钟 / 1 / 4 小时的等权收益、涨跌家数和 BTC 更新判断。偏向一边的两句成对、
-    先后按本轮顺序。"""
+    """怎样按近 15 分钟 / 1 / 4 小时的等权收益、涨跌家数和 BTC 更新判断。不断言动量：延续和回落
+    两种都点名，由数据判断。偏向一边的两句成对、先后按本轮顺序。"""
     up = (
-        "When the 1h and 4h basket returns are both above zero, most symbols are rising and BTC "
-        "moves the same way, raise p_up and reduce p_flat."
+        "When the 4h basket return is above zero and the move is extending (broad participation, "
+        "BTC agreeing, 15m and 1h with the same sign), that is evidence for p_up; when it is "
+        "fading, it is evidence for p_flat or p_down."
     )
     down = (
-        "When the 1h and 4h basket returns are both below zero, most symbols are falling and BTC "
-        "moves the same way, raise p_down and reduce p_flat."
+        "When the 4h basket return is below zero and the move is extending (broad participation, "
+        "BTC agreeing, 15m and 1h with the same sign), that is evidence for p_down; when it is "
+        "fading, it is evidence for p_flat or p_up."
     )
     return [
         "Update from what the market is doing now: the rolling 15m, 1h and 4h basket returns "
         "(pool_ret_*), the up and down counts, and the BTC returns (btc_ret_*).",
-        "Measure each move in sigma: a 4h basket return beyond the FLAT band with broad "
-        "participation makes an outcome of the same sign more likely than usual.",
+        "Measure each move in sigma: a move beyond the FLAT band can continue or revert; judge "
+        "from breadth, BTC agreement and the 15m vs 1h vs 4h pattern whether it is extending or "
+        "fading.",
         *_ordered(order, up, down),
-        "The shift should grow with the size of the move in sigma and with the agreement across "
-        "the 15m, 1h and 4h windows, breadth and BTC.",
+        "Any shift in the probabilities should grow with the size of the move in sigma and with "
+        "how clearly the windows, breadth and BTC agree.",
         "When the windows, breadth and BTC disagree, or the move is small in sigma, shift only "
         "a little.",
     ]
@@ -491,7 +494,19 @@ def derive_direction(p: Probs, p_min: float, edge_min: float) -> Direction:
     return "中性"
 
 
-def compose_regime(sample: Sample | None, avg: Probs, dossier: Dossier, order: Order) -> str:
+def flat_band_pct(dossier: Dossier, band: float, horizon: str) -> float | None:
+    """「平」的宽度（%）= band × 这一档的 σ；σ 缺就是 None。记分、发布的话、状态文件都用它。"""
+    sigma = dossier.value(f"sigma_{horizon}_pct")
+    return band * sigma if sigma is not None else None
+
+
+def compose_regime(
+    sample: Sample | None,
+    avg: Probs,
+    dossier: Dossier,
+    order: Order,
+    band: float | None = None,
+) -> str:
     """发布给各币会议看的一句话：中立的中文判断（至少两个数）+ 三项概率 + 两边理由。
     涨 / 跌的先后按本轮顺序交替。没有合格的句子就由代码用数据包里的数写一句。"""
     sentence = sample.regime if sample is not None else ""
@@ -506,7 +521,9 @@ def compose_regime(sample: Sample | None, avg: Probs, dossier: Dossier, order: O
         sentence = "，".join(bits) or "数据不足"
     pu, pd = f"涨 {avg.up:.0%}", f"跌 {avg.down:.0%}"
     a, b = (pu, pd) if order == "up_first" else (pd, pu)
-    text = f"{sentence.rstrip('。')}。未来 4 小时概率：{a} / 平 {avg.flat:.0%} / {b}。"
+    width = flat_band_pct(dossier, band, "4h") if band is not None else None
+    tag = f"（平 = ±{width:.2f}%）" if width is not None else ""
+    text = f"{sentence.rstrip('。')}。未来 4 小时概率{tag}：{a} / 平 {avg.flat:.0%} / {b}。"
     if sample is not None and sample.bull_case and sample.bear_case:
         bull = f"看涨理由：{sample.bull_case.rstrip('。')}。"
         bear = f"看跌理由：{sample.bear_case.rstrip('。')}。"
@@ -1019,7 +1036,7 @@ class MarketDesk:
                 key=lambda s: _l1(s.probs, avg),
                 default=None,
             )
-            regime = compose_regime(pick, avg, dossier, order)
+            regime = compose_regime(pick, avg, dossier, order, self.cfg.band_sigma)
             if not dossier.has_prior:
                 # 没有先验（重启后长历史还在回填）：只记录，不发布、不接管、不当成「可用」结果
                 self.state.fails, self.state.last_error = 0, None
@@ -1048,6 +1065,9 @@ class MarketDesk:
                 "valid_samples": len(valid),
                 "samples": self.cfg.samples,
                 "sigma_4h_pct": dossier.sigma_4h_pct,
+                "flat_band_pct": {
+                    h: flat_band_pct(dossier, self.cfg.band_sigma, h) for h in ("4h", "1h")
+                },
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
@@ -1346,11 +1366,10 @@ def score_targets(t0: datetime, dossier: Dossier, band: float) -> dict[str, Any]
     「平」的宽度，以及等权池成员。结算价取 t0 / t0 + h 的已收盘 1 分钟线（和设计 §1.1 一致）。"""
     out: dict[str, Any] = {"t0": t0.isoformat(), "basket": list(dossier.symbols)}
     for h in (1, 4):
-        sigma = dossier.value(f"sigma_{h}h_pct")
         out[f"{h}h"] = {
             "resolve_at": (t0 + timedelta(hours=h)).isoformat(),
-            "sigma_pct": sigma,
-            "flat_band_pct": band * sigma if sigma is not None else None,
+            "sigma_pct": dossier.value(f"sigma_{h}h_pct"),
+            "flat_band_pct": flat_band_pct(dossier, band, f"{h}h"),
             "base_rate": {k: dossier.value(f"base_rate_{k}_{h}h") for k in ("up", "flat", "down")},
         }
     return out

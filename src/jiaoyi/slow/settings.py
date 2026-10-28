@@ -693,6 +693,9 @@ class MarketDeskSection(_Strict):
     和开会同一个模型），每轮独立问 ``samples`` 次，按 ``aggregation`` 合并。
 
     回滚注意：旧版本代码不认识这一段，会拒绝启动；回滚到没有大盘台的版本前先删掉整段。
+    回滚到没有 ``prior_mode`` / ``momentum_guidance`` / ``aggregation`` 的版本前，先删掉这三行；
+    面板改过的 ``band_sigma`` / ``call_p_min`` / ``call_edge_min`` / ``publish_min_gap_min`` 旧代码
+    认识，但留着会按改过的值跑，要回到原值就一起删掉。
     改这一段要重启才生效。"""
 
     mode: Literal["off", "replace"] = Field(

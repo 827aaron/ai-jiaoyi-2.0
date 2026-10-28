@@ -568,7 +568,11 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
   等权收益、涨跌家数和 BTC 是否同向来更新，走出「平」的宽度且同向越多、移动越大。改了这两项
   `prompt_version` 带后缀（如 `desk-v1+prior-context+momentum`），默认设置下提示词逐字节不变。
   `band_sigma` 同时决定数据包里的基础率、日志 `score_targets` 的 `flat_band_pct` 和提示词里的分类，改了
-  下一轮全部按新宽度重算。这四项可以经面板的待生效配置（`config/slow.pending.toml` 的 `[market_desk]`）改。
+  下一轮全部按新宽度重算；发布的话里写「未来 4 小时概率（平 = ±x%）」，状态文件 `latest.flat_band_pct`
+  记 4h / 1h 两档宽度。这四项和 `call_p_min`、`call_edge_min`、`publish_min_gap_min` 可以经面板的待生效配置
+  （`config/slow.pending.toml` 的 `[market_desk]`）改。**回滚**到没有 `prior_mode` / `momentum_guidance` /
+  `aggregation` 的旧版本前先删掉这三行（旧代码不认识会拒绝启动）；面板改过的另外几项旧代码认识，但会照改过的
+  值跑，要回到原值也一起删掉。
 - **数据包**（`market_dossier.py`）：只放池级 / 大盘级数字，每项带来源和 as_of。**不能有延后信息**：
   所有「近 15 / 30 分钟、近 1 / 4 / 12 / 24 / 72 小时」的收益、上涨下跌家数、离散度、主动买卖占比、
   24h 区间位置、BTC / ETH 涨跌，都是截止到运行时刻的滚动窗口——终点价是 15 分钟线里正在走的那一根的现价，

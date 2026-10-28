@@ -615,8 +615,17 @@ def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:
         True,
         "median",
     )
-    _pending(paths, "slow", "[market_desk]\ncall_p_min = 0.3\n")
+    _pending(
+        paths,
+        "slow",
+        "[market_desk]\ncall_p_min = 0.4\ncall_edge_min = 0.1\npublish_min_gap_min = 30\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    desk = load_slow_config(paths.slow, "standard").market_desk
+    assert (desk.call_p_min, desk.call_edge_min, desk.publish_min_gap_min) == (0.4, 0.1, 30.0)
+    _pending(paths, "slow", '[market_desk]\nmode = "replace"\n')
     res = pc.apply_pending(paths, data, NOW, check=lambda p: None)
-    assert res.status == "failed" and res.offending == ["slow.toml market_desk.call_p_min"]
+    assert res.status == "failed" and res.offending == ["slow.toml market_desk.mode"]
     _pending(paths, "slow", '[market_desk]\nprior_mode = "start"\n')
     assert pc.apply_pending(paths, data, NOW).status == "failed"
