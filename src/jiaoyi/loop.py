@@ -85,6 +85,7 @@ from jiaoyi.sentinel.regime_flip import (
 )
 from jiaoyi.slow import binance_gate
 from jiaoyi.slow.commander import MARKET_SNAPSHOT_FRESH, BattleCardCommander
+from jiaoyi.slow.meeting_live import interrupt_open
 
 log = logging.getLogger(__name__)
 
@@ -565,6 +566,8 @@ class Runner:
                 self._restart_exit()
 
     async def shutdown(self) -> None:
+        # 会议跑在线程池里取消不掉：先把它们的实况标成中断，线程之后写的会被忽略
+        interrupt_open()
         tasks = [*self._loops, *self._tasks]
         for t in tasks:
             t.cancel()
@@ -2213,7 +2216,9 @@ class Runner:
                 self._refreshing = False
         return card, err
 
-    async def _refresh_chain(self, cmd: PanelCommand, path: Path | None) -> None:
+    async def _refresh_chain(
+        self, cmd: PanelCommand, path: Path | None, *, wait_events: bool = False
+    ) -> None:
         """面板「重新开会」：整条链真跑一遍——按同一套筛选重新选币（写 symbol_pool.json）→ 总盘会 →
         每个币完整分析会 → 新卡；不沿用上一轮结论。跑完才写回执：选了几个、上会几个、用时、花费。"""
         t0 = time.monotonic()
@@ -2221,6 +2226,8 @@ class Runner:
         status: Literal["done", "failed"] = "failed"
         detail = ""
         try:
+            if wait_events:
+                await self._wait_events_done()
             try:
                 await self.app.refresh_lot_rules()
                 await self._rescreen(self.app.clock())
@@ -2262,6 +2269,16 @@ class Runner:
                 )
             except OSError:
                 log.exception("写重新开会回执失败")
+
+    async def _wait_events_done(self) -> None:
+        """排队的整轮重开：等在开的临时会开完，最多等一场会的超时；超时了照样开。"""
+        timeout = float(getattr(self.m.cards, "symbol_timeout_s", 900.0))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._event_running and loop.time() < deadline:
+            await asyncio.sleep(0.5)
+        if self._event_running:
+            log.warning("等临时会开完超过 %.0f 秒，照样开始重新开会", timeout)
 
     async def _refresh_event(
         self, events: _EventMeetings, pool: SymbolPool, symbol: str, trigger: str
@@ -2335,7 +2352,7 @@ class Runner:
                     self._spawn(self._manual_chain(cmd, path))
                     continue
             else:
-                status: Literal["done", "rejected", "failed"]
+                status: Literal["done", "queued", "rejected", "failed"]
                 self._cmd_path = path
                 try:
                     status, detail = await self._run_command(cmd)
@@ -2345,7 +2362,7 @@ class Runner:
                 result = CommandResult(
                     id=cmd.id, kind=cmd.kind, status=status, detail=detail, ts=now
                 )
-                outcome = Outcome.ACTION if status == "done" else Outcome.REJECT
+                outcome = Outcome.ACTION if status in ("done", "queued") else Outcome.REJECT
                 self._guard_note(outcome, f"面板指令 {cmd.kind}（{status}）：{detail}"[:200], now)
                 if cmd.kind == "restart" and status == "done":
                     self._restart_receipt = (inbox, path, result)
@@ -2380,7 +2397,9 @@ class Runner:
         await self.app._alert(AlertLevel.INFO, "主程序重启", "面板指令：重新加载配置", "control")
         return "done", "在途动作已做完，主程序已退出，launchd 会自动拉起"
 
-    async def _run_command(self, cmd: PanelCommand) -> tuple[Literal["done", "rejected"], str]:
+    async def _run_command(
+        self, cmd: PanelCommand
+    ) -> tuple[Literal["done", "queued", "rejected"], str]:
         if cmd.kind == "pause":
             self.app.set_paused(True, reason=cmd.params.get("reason", ""), command_id=cmd.id)
             await self.app._alert(
@@ -2444,11 +2463,16 @@ class Runner:
         # refresh_cards：整条链重跑 选币 → 总盘会 → 军师团
         if is_stub(self.m.cards):
             return "rejected", "军师团未接入"
-        if self._refreshing or self._event_running:
+        if self._refreshing:
             return "rejected", "军师团正在开会"
+        queued = len(self._event_running)
+        # 先占住整轮：慢环不再派新的临时会，在开的开完后链条才开始
         self._refreshing = True
         now = self.app.clock()
         self._last_card_at = self._last_screen = now
         self._inflight.add(cmd.id)
+        if queued:
+            self._spawn(self._refresh_chain(cmd, None, wait_events=True))
+            return "queued", f"等 {queued} 场临时会开完后开始：选币 → 总盘会 → 军师团"
         self._spawn(self._refresh_chain(cmd, self._cmd_path))
         return "done", "已开始：选币 → 总盘会 → 军师团"

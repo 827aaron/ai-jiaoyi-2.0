@@ -219,7 +219,7 @@ class SetupCheckBody(BaseModel):
 
 class CommandState(BaseModel):
     id: str
-    status: Literal["pending", "done", "rejected", "expired", "failed"]
+    status: Literal["pending", "done", "queued", "rejected", "expired", "failed"]
     detail: str = ""
 
 

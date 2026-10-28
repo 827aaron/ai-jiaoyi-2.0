@@ -24,9 +24,9 @@ STAGES = ("analysts", "debate", "trader", "risk", "decision")
 MAX_TEXT = 8000
 """单条发言最多给前端这么多字，后面截断。"""
 STALE_S = 15 * 60
-"""标着“正在开”却这么久没更新：多半是主程序重启打断了，按“中断”显示。"""
+"""标着“正在开”却这么久没更新：按“中断”显示（兜底；正常重启由启动清理直接标 interrupted）。"""
 
-MeetingStatus = Literal["running", "done", "failed", "stale"]
+MeetingStatus = Literal["running", "done", "failed", "interrupted", "stale"]
 
 
 class MeetingStep(BaseModel):
@@ -89,7 +89,7 @@ def _parse(symbol: str, raw: Any, now: datetime) -> Meeting | None:
                 )
             )
     status = raw.get("status")
-    if status not in ("running", "done", "failed"):
+    if status not in ("running", "done", "failed", "interrupted"):
         status = "failed"
     updated = _time(raw.get("updated_at")) or _time(raw.get("started_at"))
     if status == "running" and (updated is None or (now - updated).total_seconds() > STALE_S):

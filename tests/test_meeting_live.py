@@ -149,3 +149,55 @@ def test_note_model_marks_the_last_call(tmp_path: Path) -> None:
     live.note_call("stop", 100)
     live.note_model("deepseek/deepseek-v4.1-flash-1017")
     assert read(tmp_path)["llm_calls"][0]["model"] == "deepseek/deepseek-v4.1-flash-1017"
+
+
+def _write(folder: Path, name: str, **doc: Any) -> None:
+    folder.mkdir(exist_ok=True)
+    (folder / f"{name}.json").write_text(json.dumps({"symbol": name, **doc}), encoding="utf-8")
+
+
+def test_sweep_marks_previous_process_running_meetings_interrupted(tmp_path: Path) -> None:
+    from jiaoyi.slow.meeting_live import PROCESS_ID, sweep_interrupted
+
+    folder = tmp_path / "meeting_live"
+    old = {"started_at": T0.isoformat(), "updated_at": T0.isoformat(), "finished_at": None}
+    _write(folder, "HYPEUSDT", status="running", process="dead-process", **old)
+    _write(folder, "ZECUSDT", status="running", **old)  # 旧格式没有 process 字段
+    _write(folder, "DONEUSDT", status="done", process="dead-process", **old)
+    _write(folder, "MINEUSDT", status="running", process=PROCESS_ID, **old)
+    (folder / "BAD.json").write_text("{broken")
+    swept = sweep_interrupted(folder, now=lambda: T0 + timedelta(minutes=6))
+    assert swept == ["HYPEUSDT", "ZECUSDT"]
+    now = T0 + timedelta(minutes=7)  # 离开始才 7 分钟，还没到 15 分钟的兜底
+    m = read_meeting(tmp_path, "HYPEUSDT", now)
+    assert m and m.status == "interrupted" and m.error == "主程序重启，会议中断"
+    assert m.finished_at == T0 + timedelta(minutes=6)
+    m = read_meeting(tmp_path, "ZECUSDT", now)
+    assert m and m.status == "interrupted"
+    m = read_meeting(tmp_path, "DONEUSDT", now)
+    assert m and m.status == "done"
+    m = read_meeting(tmp_path, "MINEUSDT", now)
+    assert m and m.status == "running"
+    assert (folder / "BAD.json").read_text() == "{broken"
+    assert sweep_interrupted(folder) == []  # 再扫一遍没有可改的
+
+
+def test_sweep_missing_directory_is_noop(tmp_path: Path) -> None:
+    from jiaoyi.slow.meeting_live import sweep_interrupted
+
+    assert sweep_interrupted(tmp_path / "nope") == []
+
+
+def test_interrupt_open_stops_later_writes_from_reviving_the_meeting(tmp_path: Path) -> None:
+    from jiaoyi.slow.meeting_live import interrupt_open
+
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    assert interrupt_open() >= 1
+    doc = read(tmp_path)
+    assert doc["status"] == "interrupted" and doc["error"] == "主程序重启，会议中断"
+    assert doc["finished_at"] is not None
+    live.step("analysts", "market", "线程取消不掉，之后还会写")
+    live.fail("超时", 0.1)
+    live.finish("long", "r", "t", 0.1)
+    assert read(tmp_path)["status"] == "interrupted" and read(tmp_path)["steps"] == []
+    assert interrupt_open() == 0  # 已收尾的不再算

@@ -310,3 +310,27 @@ async def test_unreadable_account_check_only_warns_outside_live(
     await app.start()
     assert app.started
     await app.stop()
+
+
+async def test_start_marks_previous_process_meetings_interrupted(
+    tmp_path: Path, now: datetime
+) -> None:
+    import json
+
+    from jiaoyi.panel.meetings import read_meeting
+
+    folder = tmp_path / "meeting_live"
+    folder.mkdir()
+    doc = {
+        "symbol": "ZECUSDT",
+        "status": "running",
+        "process": "previous-process",
+        "started_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+    (folder / "ZECUSDT.json").write_text(json.dumps(doc))
+    app = _app(tmp_path, now, predictor_enabled=False)
+    await app.start()
+    m = read_meeting(tmp_path, "ZECUSDT", now)
+    assert m and m.status == "interrupted" and m.error == "主程序重启，会议中断"
+    assert m.finished_at is not None

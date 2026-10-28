@@ -1188,6 +1188,10 @@ class BattleCardCommander:
         return None
 
     @property
+    def symbol_timeout_s(self) -> float:
+        return self._symbol_timeout_s
+
+    @property
     def event_concurrency(self) -> int:
         return max(1, self._events.concurrency)
 

@@ -93,7 +93,7 @@ class CommandResult(BaseModel):
 
     id: str
     kind: str
-    status: Literal["done", "rejected", "expired", "failed"]
+    status: Literal["done", "queued", "rejected", "expired", "failed"]
     detail: str = ""
     ts: AwareDatetime
 

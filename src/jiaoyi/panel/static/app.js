@@ -176,7 +176,7 @@ const CMD = {
   release_signal: { title: "人工放行", text: "按现在的价格、作战卡上的仓位和止损止盈，跳过拒绝它的那条过滤，立刻开仓；币安的硬限制（最小下单量、杠杆上限等）照旧。开仓会写进记录并推 Telegram，记为「人工放行」。", ok: "放行开仓", danger: true, pw: true },
   refresh_cards: { title: "重新开会出卡", text: "从选币开始把整条链重跑一遍：选币 → 总盘会 → 军师团 → 写新作战卡，不沿用上一轮结论（会花一次大模型费用，要几分钟）。", ok: "开会" },
 };
-const STATUS = { done: ["已执行", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
+const STATUS = { done: ["已执行", "up"], queued: ["已排队", "up"], rejected: ["主程序拒绝了", "down"], expired: ["过期没执行（主程序没在跑？）", "down"], failed: ["执行失败", "down"] };
 let onOk = null;
 
 // 面板密码只记在这个变量里：刷新页面就没了，不进 localStorage / sessionStorage
@@ -1145,7 +1145,7 @@ const WHO = {
   bull: "多头研究员", bear: "空头研究员", research_manager: "研究主管", trader: "交易员",
   aggressive: "激进派风控", conservative: "保守派风控", neutral: "中立派风控", risk_manager: "风控主管", convert: "出作战卡",
 };
-const MEET_STATUS = { running: ["正在开", "p-accent"], done: ["开完了", "p-long"], failed: ["没开成", "p-short"], stale: ["中断了", "p-warn"] };
+const MEET_STATUS = { running: ["正在开", "p-accent"], done: ["开完了", "p-long"], failed: ["没开成", "p-short"], interrupted: ["中断了", "p-warn"], stale: ["中断了", "p-warn"] };
 const meetPill = (s) => { const [t, k] = MEET_STATUS[s] || [s, ""]; return `<span class="pill ${k}">${t}</span>`; };
 const stageNo = (s) => Object.keys(STAGE).indexOf(s) + 1;
 // 开会用时：不到 1 分钟写秒，1 小时内写「X 分 Y 秒」，再长同 dur；花费不到 1 分钱写到 4 位小数
@@ -1211,7 +1211,7 @@ function meetingHtml(m) {
   return `<p class="dim">${meetPill(m.status)} ${meetBias(m)} ${meetTime(m)}${m.cost_usd ? ` · 花费 ${meetCost(m.cost_usd)}` : ""}${m.status === "running" ? " · 自动刷新" : ""}</p>
     ${isMkt ? "" : `<div class="stgs">${chips}</div>`}
     ${m.status === "stale" ? '<div class="note warn">标着“正在开”，但 15 分钟没有新进展：多半是主程序重启把会打断了，下一轮会重开。</div>' : ""}
-    ${m.error ? `<div class="note warn">出错：${esc(m.error)}</div>` : ""}
+    ${m.status === "interrupted" ? `<div class="note warn">${esc(m.error || "会议中断")}，下一轮会重开。</div>` : m.error ? `<div class="note warn">出错：${esc(m.error)}</div>` : ""}
     ${m.reason ? `<div class="note"><b>结论</b>　${esc(m.reason)}</div>` : ""}
     ${groups || '<div class="dim">还没有人发言。</div>'}`;
 }
@@ -1753,7 +1753,7 @@ function tfCardNode() {
 function tfMarketNode(m, p, mr) {
   if (mr && mr.state !== "ok") return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会${hbBadge(mr)}</span><small>${esc(mr.status)}</small><small class="cnt">挑上会的币、要盯的币</small>`;
   const line = runLine(mr);
-  const st = line ? line : !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
+  const st = line ? line : !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "interrupted" ? `中断了：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
   const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
 }
