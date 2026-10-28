@@ -77,6 +77,7 @@ from jiaoyi.core.stop_quotes import StopQuoteRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.account_check import AccountMismatch
 from jiaoyi.execution.factory import MissingSecret, build_execution
+from jiaoyi.execution.hb_executor import HOSTED_CLOSE_SLOW_ALERT_S
 from jiaoyi.execution.income_daily import IncomeDaily
 from jiaoyi.execution.ledger_sync import LedgerSync
 from jiaoyi.execution.live_gate import LiveGate
@@ -495,6 +496,10 @@ def _build_execution(
             hosted_close_mode=app_cfg.hosted_close_mode,
             protection_tick_alert_after=app_cfg.protection_tick_alert_after,
             hb_stop_unknown_retries=app_cfg.hb_stop_unknown_retries,
+            hosted_close_direct_when_exiting=app_cfg.hosted_close_direct_when_exiting,
+            hosted_close_slow_alert_s=max(
+                float(app_cfg.reconcile_closing_grace_s), HOSTED_CLOSE_SLOW_ALERT_S
+            ),
             position_mode_cache_s=app_cfg.position_mode_cache_s,
             leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
         )
@@ -718,7 +723,11 @@ def build_modules(
         )
         keeper_model: DecisionModel = model
         if not app_cfg.jev_shared_cooldown and isinstance(model, JevDecisionModel):
-            keeper_model = keeper_jev = model.with_own_errors()
+            keeper_model = keeper_jev = model.with_own_errors(
+                timeout_ms=app_cfg.keeper_jev_timeout_ms or None
+            )
+        elif app_cfg.keeper_jev_timeout_ms and isinstance(model, JevDecisionModel):
+            keeper_model = model.with_timeout(app_cfg.keeper_jev_timeout_ms)
         keeper = JevKeeper(
             keeper_model,
             fast,

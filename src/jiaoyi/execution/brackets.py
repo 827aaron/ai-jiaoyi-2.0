@@ -106,6 +106,11 @@ class ProtectionIncomplete(ExchangeError):
         """``stop_first`` 下只差保命单（被拒或提交未知），已确认止损在挂；可交给未托管宽限。"""
 
 
+class CloseInProgress(ProtectionIncomplete):
+    """The close was accepted and an exit is already working (a reduce-only order, an HB stop or
+    a triggered leg); protection stays and the background tick finishes it. Not a failure."""
+
+
 class _PositionChanged(ProtectionIncomplete):
     """网络等待期间正常入场量变化；先保留已有保护，下一次用新证据继续。"""
 
@@ -1272,6 +1277,11 @@ class BracketManager:
             or (leg.state == "cancelled" and not _triggered(leg) and _settled(leg))
             for leg in state.legs
         )
+
+    def exit_leg_working(self, pid: str) -> bool:
+        """A leg has triggered and its child order has not been read back terminal yet."""
+        _, state = self._current(pid)
+        return any(_triggered(leg) and not _settled(leg) for leg in state.legs)
 
     def leg_fills(self, pid: str) -> list[tuple[CloseReason, float]]:
         """已触发且子单有成交的腿：(按哪条腿退出, 成交量)；只看最后回读，不发网络请求。"""

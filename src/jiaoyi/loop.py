@@ -63,6 +63,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core import paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
+from jiaoyi.execution.brackets import CloseInProgress
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.keeper.keeper import close_blocked
@@ -1566,6 +1567,12 @@ class Runner:
         self._closing.add(pos.position_id)
         try:
             await self.m.executor.close(pos.position_id, reason)
+        except CloseInProgress as e:
+            # The exit is already working and the executor's background tick settles it; the
+            # reconciler's closing grace still escalates one that never completes.
+            log.warning("%s 平仓进行中（%s）：%s", pos.symbol, reason.value, e)
+            if not isinstance(executor, _LedgerPositions):
+                return
         except Exception as e:
             log.exception("平仓失败")
             await self.app._alert(

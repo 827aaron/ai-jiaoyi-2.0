@@ -21,7 +21,7 @@ import pytest
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.module_status import Alert, AlertLevel
 from jiaoyi.contracts.position import CloseReason, PositionStatus
-from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
+from jiaoyi.execution.brackets import BracketManager, CloseInProgress, ProtectionIncomplete
 from jiaoyi.execution.exchange import (
     CloseFill,
     ExchangeEntryOrder,
@@ -31,6 +31,7 @@ from jiaoyi.execution.exchange import (
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
 )
+from jiaoyi.execution.exit_fills import ExitFills, read_exit_fills
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from tests.test_execution import START
@@ -77,6 +78,20 @@ class RaceExchange(AdapterExchange):
         self.hidden_direct: set[str] = set()
         self.legs_at_place: list[dict[str, str | None]] = []
         self.not_sent_once = False
+        self.ack_only = False
+
+    def fill_acked(self, client_order_id: str, at: datetime) -> None:
+        order = self.direct_orders[client_order_id]
+        self.held -= order.quantity
+        self.direct_orders[client_order_id] = replace(
+            order,
+            filled_quantity=order.quantity,
+            remaining_quantity=0.0,
+            average_price=100,
+            status="FILLED",
+            is_terminal=True,
+            update_time=at,
+        )
 
     async def place_close(self, symbol, close_side, quantity, client_order_id):
         self.legs_at_place.append({c: o.algo_status for c, o in self.orders.items()})
@@ -86,6 +101,23 @@ class RaceExchange(AdapterExchange):
         if self.before_place is not None:
             await self.before_place()
         self.direct.append((client_order_id, quantity))
+        if self.ack_only:
+            order = IdentifiedCloseOrder(
+                symbol=symbol,
+                client_order_id=client_order_id,
+                order_id=f"direct-{len(self.direct)}",
+                close_side=close_side,
+                quantity=quantity,
+                filled_quantity=0.0,
+                remaining_quantity=quantity,
+                average_price=None,
+                status="NEW",
+                position_side="BOTH",
+                reduce_only=True,
+                is_terminal=False,
+            )
+            self.direct_orders[client_order_id] = order
+            return order
         if self.direct_unknown and not self.unknown_fills:
             raise IdentifiedCloseUnknown(client_order_id)  # 请求没到交易所，查也查不到
         filled = min(quantity, self.held, math.inf if self.fill_cap is None else self.fill_cap)
@@ -451,8 +483,9 @@ async def test_submit_failing_before_request_retries_with_next_generation(
     h.exchange.not_sent_once = True
     if mode == "hb_first":
         h.api.auto_terminate_on_stop = True
-    with pytest.raises(ProtectionIncomplete):
+    with pytest.raises(ProtectionIncomplete) as failed:
         await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert not isinstance(failed.value, CloseInProgress)  # a definite non-send stays loud
     current = h.tracked()
     assert not current.direct_close_pending
     assert current.direct_close_order_status == "NOT_SENT"
@@ -550,6 +583,119 @@ async def test_unclear_leg_falls_back_to_hb_first(tmp_path: Path, side: Side):
     with pytest.raises(ProtectionIncomplete):
         await h.adapter.close("pos-1", CloseReason.KEEPER)
     assert not h.exchange.direct and h.live_stop()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_direct_order_acked_but_not_filled_is_in_progress_and_settles_once(
+    tmp_path: Path, side: Side
+):
+    h = await armed(tmp_path, side)
+    h.adapter._exit_fills = ExitFills(tmp_path / "exit_fills.json")
+    h.exchange.ack_only = True
+    with pytest.raises(CloseInProgress):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.tracked().direct_close_pending and h.live_stop()
+    await h.adapter.protection_tick()
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    filled_at = h.clock.now
+    h.exchange.fill_acked("dc-pos-1-1", filled_at)
+    h.clock.advance(20)
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    done = h.tracked().record
+    assert done.status is PositionStatus.CLOSED
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert done.closed_at is not None and (done.closed_at - filled_at).total_seconds() >= 20
+    assert read_exit_fills(tmp_path / "exit_fills.json") == {"pos-1": filled_at}
+    assert not h.failure_alerts()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("when_exiting", [False, True])
+async def test_triggered_leg_with_working_child_is_in_progress_without_direct_order(
+    tmp_path: Path, side: Side, when_exiting: bool
+):
+    h = await armed(tmp_path, side)
+    h.adapter._direct_when_exiting = when_exiting
+    sl = next(cid for cid in h.exchange.orders if cid.startswith("br-sl-"))
+    working = {
+        "algo_status": "TRIGGERED",
+        "child_state": "identified",
+        "actual_order_id": "child-sl",
+        "actual_order_status": "NEW",
+        "filled_quantity": 0.0,
+        "triggered_at": h.clock.now,
+    }
+    h.exchange.orders[sl] = replace(h.exchange.orders[sl], **working)
+    state = h.state()
+    legs = [
+        leg.model_copy(update=working) if leg.client_order_id == sl else leg for leg in state.legs
+    ]
+    h.registry.put(
+        h.tracked().model_copy(
+            update={"server_protection": state.model_copy(update={"legs": legs})}
+        )
+    )
+    with pytest.raises(CloseInProgress):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert not h.exchange.direct
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("when_exiting", [False, True])
+async def test_direct_when_exiting_places_the_order_before_stopping_hb(
+    tmp_path: Path, side: Side, when_exiting: bool
+):
+    h = await armed(tmp_path, side)
+    h.adapter._direct_when_exiting = when_exiting
+    h.manager.mark_exiting("pos-1")
+    if when_exiting:
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+        assert h.at("place_close")[0] < h.at("stop_executor")[0]
+        assert h.tracked().direct_first
+    else:
+        with pytest.raises(CloseInProgress):
+            await h.adapter.close("pos-1", CloseReason.KEEPER)
+        assert not h.exchange.direct
+    assert h.live_stop()
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert not h.failure_alerts()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_hb_stop_that_never_terminates_warns_once_after_the_grace(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side, "hb_first")
+    with pytest.raises(CloseInProgress):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+
+    def slow() -> list[Alert]:
+        return [a for a in h.alerter.sent if a.dedup_key == "close_slow:pos-1"]
+
+    h.clock.advance(119)
+    await h.adapter.protection_tick()
+    assert not slow()
+    h.clock.advance(2)
+    await h.adapter.protection_tick()
+    await h.adapter.protection_tick()
+    [alert] = slow()
+    assert alert.level is AlertLevel.WARN and "pos-1" in alert.body
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert "pos-1" not in h.adapter._exit_started
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_unknown_hb_stop_result_stays_a_loud_failure(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side, "hb_first")
+    h.api.stop_error = HbApiError("synthetic stop timeout")
+    with pytest.raises(ProtectionIncomplete) as failed:
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.tracked().hb_close_pending and h.tracked().hb_close_unknown
+    assert not isinstance(failed.value, CloseInProgress)
 
 
 def test_unknown_hosted_close_mode_is_refused(tmp_path: Path):

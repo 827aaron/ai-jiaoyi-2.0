@@ -1184,6 +1184,15 @@ class AppConfig(Contract):
     predictor_enabled: bool = Field(description="预测员（Kronos）开关。")
     signal_dedup_s: int = Field(ge=5, le=600, description="同一去重键的冷却时间。")
     jev_timeout_ms: int = Field(ge=100, le=5000, description="超时即放弃本次开仓。")
+    keeper_jev_timeout_ms: int = Field(
+        default=0,
+        ge=0,
+        le=15000,
+        description="持仓管家问 Jev 的超时（毫秒），和开仓拍板的 jev_timeout_ms 分开："
+        "管家超时只是本轮维持现状、还会重试 1 次，网络切换一下多等几秒不误事；开仓信号有时效，"
+        "拍板超时不放宽。0 = 和 jev_timeout_ms 一样（原行为）；不是 0 就至少 100。建议 6000。"
+        "共用冷却（jev_shared_cooldown）时错误计数仍共用。改后重启生效。",
+    )
     jev_max_concurrent: int = Field(
         default=4,
         ge=1,
@@ -1407,6 +1416,13 @@ class AppConfig(Contract):
         "下只减仓市价单，再只停不平 HB；交易所止损一直挂到确认零仓后才撤。"
         "不满足条件的照旧走 hb_first；提交结果未知照旧只查不重发。改后重启生效。",
     )
+    hosted_close_direct_when_exiting: bool = Field(
+        default=False,
+        description="Demo 托管仓、hosted_close_mode = direct 时：保护已进入退出（exiting）但没有"
+        "任何腿触发、没有在途的直连单或 HB 停止、HB 执行器仍在跑且只有入场单，也照样先下只减仓"
+        "市价单。全部单子都是单向只减仓，重复不会反向开仓。关 = 进入退出就改走 hb_first"
+        "（原行为）。改后重启生效。",
+    )
     protection_tick_alert_after: int = Field(
         default=1,
         ge=1,
@@ -1525,6 +1541,10 @@ class AppConfig(Contract):
     def _check(self) -> AppConfig:
         if self.card_pick_max > self.pool_size:
             raise ValueError("card_pick_max 不能大于 pool_size")
+        if 0 < self.keeper_jev_timeout_ms < 100:
+            raise ValueError(
+                "keeper_jev_timeout_ms 要么是 0（跟 jev_timeout_ms 一样），要么至少 100"
+            )
         if self.hold in PAPER_ONLY_HOLDS and self.mode != RunMode.PAPER:
             raise ValueError(
                 f"最长持仓档 {self.hold} 只能在 paper 模式用（费用占止损太高），"

@@ -39,6 +39,7 @@ from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import (
     AnchorBookSpike,
     BracketManager,
+    CloseInProgress,
     ProtectionIncomplete,
     describe_error,
     live_leg,
@@ -59,6 +60,7 @@ from jiaoyi.execution.exchange import (
     IdentifiedCloseUnknown,
     MarkEvidence,
 )
+from jiaoyi.execution.exit_fills import ExitFills
 from jiaoyi.execution.fills import (
     LOOKBACK,
     OPEN_SLACK,
@@ -100,6 +102,11 @@ def _frozen_peak_size(
 _ORDER_MARKET = 1
 HostedCloseMode = Literal["hb_first", "direct"]
 _HB_FAILED_TITLE = "hummingbot 没能平掉仓位，已直连币安平仓"
+HOSTED_CLOSE_SLOW_ALERT_S = 120.0
+"""Floor for the slow hosted close alert: hb_first closes take 15-110 s from decision to fill."""
+_DIRECT_CLOSE_FAILED = frozenset(
+    {"REJECTED", "NOT_SENT", "EXPIRED", "EXPIRED_IN_MATCH", "CANCELED"}
+)
 _HB_STOP_RETRY_BASE_S = 5.0  # 结果未知的只停不平：第 n 次补发至少隔 5×2^n 秒
 _ORDER_LIMIT = 2
 _ORDER_LIMIT_MAKER = 3
@@ -391,11 +398,23 @@ class HbExecutorAdapter:
         hosted_close_mode: HostedCloseMode = "hb_first",
         protection_tick_alert_after: int = 1,
         hb_stop_unknown_retries: int = 0,
+        hosted_close_direct_when_exiting: bool = False,
+        exit_fills: ExitFills | None = None,
+        hosted_close_slow_alert_s: float = HOSTED_CLOSE_SLOW_ALERT_S,
     ) -> None:
         """``hosted_close_mode``：交易所托管仓的平仓顺序。``hb_first`` = 先停 HB 执行器、等它终态并
         核完条件单再下直连平仓（原行为）；``direct`` = 我方决定平仓、HB 执行器仍在跑且没有自己的
         平仓单、保护腿状态都明确时，先按持久化的直连 CID 下只减仓市价单，再只停不平 HB，交易所止损
         一直挂到确认零仓后才撤。其余情况照旧走 ``hb_first``。
+        ``hosted_close_direct_when_exiting``: under ``direct``, still go direct-first once the
+        protection is already ``exiting`` (an earlier attempt could not read the position, or an
+        hb_first exit preparation ran) as long as every other direct-first condition holds; False
+        sends an exiting position to hb_first.
+
+        ``hosted_close_slow_alert_s``: a hosted close still CLOSING this many seconds after it was
+        first seen in progress gets one WARN alert.
+
+        ``exit_fills``: side file for the exchange exit fill time (panel display); None = not kept.
 
         ``protection_tick_alert_after``：同一仓的后台保护轮连续失败几轮才发紧急告警，之前只记
         日志；1 = 每轮失败都发（原行为）。
@@ -414,6 +433,11 @@ class HbExecutorAdapter:
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
+        self._direct_when_exiting = hosted_close_direct_when_exiting
+        self._exit_fills = exit_fills
+        self._close_slow_after_s = hosted_close_slow_alert_s
+        self._exit_started: dict[str, datetime] = {}
+        self._close_slow_alerted: set[str] = set()
         self._flat_awaiting_cleanup: set[str] = set()
         self._hb_stop_sent: set[str] = set()
         if protection_tick_alert_after < 1:
@@ -994,6 +1018,9 @@ class HbExecutorAdapter:
             if not await self._close_directly(tracked, tracked.requested_close or reason, None):
                 if position_id in self._flat_awaiting_cleanup:
                     return  # 直连平仓已确认零仓，只差收尾核验；后台每秒一轮接着做，不算平仓失败。
+                if self._hosted_exit_working(position_id):
+                    self._exit_started.setdefault(position_id, self._clock())
+                    raise CloseInProgress("托管退出进行中，已有保护保留，后台每秒接着核验")
                 raise ProtectionIncomplete("托管退出尚未确认，已有保护保留")
             return
         # 已有直连意图时先恢复同一订单，不能再让 HB 另外下平仓单。
@@ -1502,6 +1529,29 @@ class HbExecutorAdapter:
             )
         )
 
+    def _hosted_exit_working(self, position_id: str) -> bool:
+        """An exit is already working and the background tick will finish it: a reduce-only order
+        still open or filled awaiting the flat read, a keep-position HB stop whose request was
+        accepted, or a triggered leg whose child order is not terminal yet. A definitely failed
+        direct order (rejected, never sent, expired or cancelled) or an HB stop with an unknown
+        result is not, so those stay loud failures."""
+        tracked = self._registry.get(position_id)
+        if (
+            tracked is None
+            or tracked.server_protection is None
+            or tracked.record.status is not PositionStatus.CLOSING
+            or tracked.direct_close_order_status in _DIRECT_CLOSE_FAILED
+        ):
+            return False
+        if tracked.direct_close_pending or tracked.direct_close_order_status == "FILLED":
+            return True
+        if tracked.hb_close_pending and not tracked.hb_close_unknown:
+            return True
+        try:
+            return self._protection is not None and self._protection.exit_leg_working(position_id)
+        except ProtectionIncomplete:
+            return False
+
     async def _direct_first_ready(self, tracked: TrackedPosition) -> bool:
         """``direct`` 模式下这次能否先下直连：只在一切都明确时，否则走 ``hb_first``。
 
@@ -1514,7 +1564,8 @@ class HbExecutorAdapter:
             or state is None
             or manager is None
             or self._exchange is None
-            or state.stage in {"exiting", "cleanup", "done"}
+            or state.stage in {"cleanup", "done"}
+            or (state.stage == "exiting" and not self._direct_when_exiting)
             or not state.entry_terminal
             or tracked.direct_close_pending
             or tracked.hb_close_pending
@@ -1743,11 +1794,21 @@ class HbExecutorAdapter:
         if ours == 0 and legs:
             reason = legs[0][0]  # 我方一笔没成交，是交易所的腿平掉的
         self.mark_closed_directly(rec.position_id, reason, self._close_fill(tracked, order))
+        if (
+            self._exit_fills is not None
+            and order is not None
+            and order.is_terminal is True
+            and order.filled_quantity > 0
+            and order.update_time is not None
+        ):
+            self._exit_fills.record(rec.position_id, order.update_time, "order")
         closed = self._registry.get(rec.position_id)
         hosted_normal = (
             tracked.server_protection is not None and via_hb is None and title == _HB_FAILED_TITLE
         )
         self._flat_awaiting_cleanup.discard(rec.position_id)
+        self._exit_started.pop(rec.position_id, None)
+        self._close_slow_alerted.discard(rec.position_id)
         if closed is not None:
             body = _close_text(closed.record)
             if (shown := _shown_detail(closed, closed.record.close_reason)) is not None:
@@ -1812,6 +1873,9 @@ class HbExecutorAdapter:
             ended = initial.record.status in {PositionStatus.CLOSED, PositionStatus.FAILED}
             if ended:
                 self._hb_stop_retries.pop(pid, None)
+            if initial.record.status is not PositionStatus.CLOSING:
+                self._exit_started.pop(pid, None)
+                self._close_slow_alerted.discard(pid)
             # 同步和收尾分开计数：进了收尾，同步阶段的失败不再累计；结束的仓不留计数。
             key = (pid, "cleanup" if initial.exit_cleanup_pending else "sync")
             if ended or initial.exit_cleanup_pending:
@@ -1821,6 +1885,8 @@ class HbExecutorAdapter:
             if initial.server_protection is None or initial.server_protection.stage == "done":
                 self._tick_failures.pop((pid, "cleanup"), None)
                 continue
+            if initial.record.status is PositionStatus.CLOSING:
+                await self._alert_hosted_close_slow(initial)
             try:
                 if initial.exit_cleanup_pending:
                     await self._finish_exit_cleanup(pid)
@@ -1838,6 +1904,28 @@ class HbExecutorAdapter:
                 await self._protection_tick_failed(key, initial.record.symbol, error)
             else:
                 self._tick_failures.pop(key, None)
+
+    async def _alert_hosted_close_slow(self, tracked: TrackedPosition) -> None:
+        """A quiet in-progress close (CloseInProgress) must still surface if it never settles,
+        e.g. an accepted HB stop whose executor never reaches terminal: warn once per close."""
+        pid = tracked.record.position_id
+        started = self._exit_started.setdefault(pid, self._clock())
+        waited = (self._clock() - started).total_seconds()
+        if waited < self._close_slow_after_s or pid in self._close_slow_alerted:
+            return
+        self._close_slow_alerted.add(pid)
+        state = tracked.server_protection
+        stage = state.stage if state is not None else "?"
+        await self._alert(
+            AlertLevel.WARN,
+            "平仓后迟迟没结束",
+            f"{tracked.record.symbol} {pid}：平仓进行中已 {waited:.0f} 秒（托管阶段 {stage}，"
+            f"HB 停止待终态 {'是' if tracked.hb_close_pending else '否'}，"
+            f"直连单 {tracked.direct_close_order_status or '无'}），保护保留，同币不能新开；请核实",
+            tracked.record.symbol,
+            f"close_slow:{pid}",
+            kind="order_failed",
+        )
 
     async def _protection_tick_failed(
         self, key: tuple[str, str], symbol: str, error: Exception
@@ -3009,6 +3097,8 @@ class HbExecutorAdapter:
                     )
                 exit_ = exit_fill(rec, rows, entry) if need_exit else None
                 lifeboat_hit = exit_ is not None and _lifeboat_hit(rec, exit_.price)
+                if exit_ is not None and self._exit_fills is not None:
+                    self._exit_fills.record(rec.position_id, exit_.last, "trades")
                 if exit_ is not None:
                     changes["exit_price"] = exit_.price
                     if lifeboat_hit:

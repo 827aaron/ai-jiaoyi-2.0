@@ -7,6 +7,7 @@
     positions.json                  执行层账本（持仓 + 当天起始权益）
     risk_state.json                 日亏熔断状态（日期、日初权益、是否已触发）
     blocked_symbols.json            被下架公告封掉新开仓的币
+    exit_fills.json                 exit fill time per position (jiaoyi.execution.exit_fills)
     paper_stops.json                模拟盘按主网止损记的模拟成交（jiaoyi.core.paper_stop）
 """
 
@@ -299,6 +300,22 @@ class PanelFiles:
             last_equity=_float(raw.get("last_equity_usdt")),
             protection=protection,
         )
+
+    def exit_fills(self) -> dict[str, datetime]:
+        """Position id -> time of its last exchange exit fill; empty when missing or unreadable,
+        bad rows skipped. Same format as ``jiaoyi.execution.exit_fills``, parsed here because the
+        panel must not import the execution layer."""
+        raw = self._json("exit_fills.json")
+        out: dict[str, datetime] = {}
+        for pid, row in raw.items() if isinstance(raw, dict) else ():
+            at = row.get("at") if isinstance(row, dict) else None
+            try:
+                when = datetime.fromisoformat(at) if isinstance(at, str) else None
+            except ValueError:
+                continue
+            if when is not None and when.tzinfo is not None:
+                out[str(pid)] = when
+        return out
 
     def breaker(self) -> BreakerState | None:
         raw = self._json("risk_state.json")

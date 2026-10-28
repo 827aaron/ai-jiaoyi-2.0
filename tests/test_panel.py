@@ -664,6 +664,20 @@ def test_history_page(tmp_path: Path) -> None:
     assert (st.wins, st.losses) == (1, 0) and st.avg_r is not None and st.avg_r > 0
     assert {(g.by, g.key) for g in st.splits} == {("side", ex["side"]), ("kind", "volume_breakout")}
     assert build_history(files, RISK, NOW, "all").by_symbol == page.by_symbol
+    assert row.exit_filled_at is None
+
+
+def test_history_row_carries_the_exchange_exit_fill_time(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_history
+
+    _seed(tmp_path)
+    filled = NOW - timedelta(hours=1, seconds=25)
+    (tmp_path / "exit_fills.json").write_text(
+        json.dumps({"pos-0000": {"at": filled.isoformat(), "source": "order"}})
+    )
+    [row] = build_history(PanelFiles(tmp_path, RISK.day_reset_tz), RISK, NOW, "today", True).rows
+    assert row.exit_filled_at == filled
+    assert row.closed_at == NOW - timedelta(hours=1)
 
 
 def test_history_sampled_peak_only_uses_own_position_while_open(tmp_path: Path) -> None:

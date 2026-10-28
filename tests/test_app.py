@@ -304,6 +304,23 @@ async def test_keeper_jev_cooldown_follows_switch(
     await app.stop()
 
 
+@pytest.mark.parametrize("shared", [True, False])
+async def test_keeper_jev_timeout_is_separate_from_the_gate(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch, shared: bool
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+
+    built = JevDecisionModel(MockJevTransport(), c.FastLoopConfig(), timeout_ms=3000)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    app = _app(tmp_path, now, jev_shared_cooldown=shared, keeper_jev_timeout_ms=6000)
+    keeper_model = app.m.keeper._model  # type: ignore[attr-defined]
+    assert app.m.gate._model is built and built._timeout_s == 3.0  # type: ignore[attr-defined]
+    assert keeper_model is not built and keeper_model._timeout_s == 6.0
+    assert (getattr(keeper_model, "_base", None) is built) is shared
+    assert (app.keeper_jev is keeper_model) is not shared
+    await app.stop()
+
+
 async def test_keeper_lamp_shows_its_own_jev_cooldown(
     tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
