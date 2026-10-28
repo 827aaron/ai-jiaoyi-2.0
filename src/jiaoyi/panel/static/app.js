@@ -1248,7 +1248,7 @@ function cardSection(c) {
     <div class="row">${pills || '<span class="dim">这一轮没有要做的币</span>'}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
     ${idle.length ? `<div class="dim small">${idleLine(idle)}（不开仓）</div>` : ""}
     ${cardEffective(c)}
-    ${c.current_market ? `<div class="note"><b>最新大盘判断</b>　${esc(c.current_market.regime)}<div class="dim small">${hms(c.current_market.observed_at)} 更新${c.current_market.source_ts ? ` · 行情 ${hms(c.current_market.source_ts)}` : ""} · 大盘 v${c.current_market.version}；各币研究按原有效期执行</div></div>` : ""}
+    ${c.current_market ? `<div class="note"><b>最新大盘判断</b>　${esc(c.current_market.regime)}${deskLatestLine(c.desk_latest)}<div class="dim small">${hms(c.current_market.observed_at)} 更新${c.current_market.source_ts ? ` · 行情 ${hms(c.current_market.source_ts)}` : ""} · 大盘 v${c.current_market.version}；各币研究按原有效期执行</div></div>` : ""}
     ${c.regime ? `<div class="note"><b>出卡时大盘</b>　${esc(c.regime)}</div>` : ""}
     <div class="foot">点开看每个币的方向、止损、杠杆和理由 ›</div>
   </section>`;
@@ -1757,6 +1757,40 @@ function tfMarketNode(m, p, mr) {
   const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
 }
+// 大盘台最近一轮（不是上次发布的那版）：4h / 1h 概率和「短线现状」，和各币会议看到的同一段字
+function deskLatestLine(d) {
+  if (!d) return "";
+  const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+  const tri = (t, q) => (q ? `${t} 涨 ${pct(q.up)} / 平 ${pct(q.flat)} / 跌 ${pct(q.down)}` : "");
+  const probs = [tri("4 小时", d.probs_4h), tri("1 小时", d.probs_1h)].filter(Boolean).join(" · ");
+  return `<div class="small" style="margin-top:4px"><b>大盘台 ${hms(d.run_at)} 一轮</b>　${esc(probs)}<br>${esc(d.intra)}</div>`;
+}
+// 团队页点大盘台：最近两轮并排（窄屏上下叠），标出和上一轮比变了什么
+const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑" };
+function deskRunCard(title, r, prev) {
+  const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+  const delta = (q, p, k) => {
+    if (!prev || !q || !p || q[k] == null || p[k] == null) return "";
+    const pp = Math.round((q[k] - p[k]) * 100);
+    return pp ? ` <mark class="chg">${pp > 0 ? "+" : ""}${pp}pp</mark>` : "";
+  };
+  const tri = (q, p) => (q ? ["up", "flat", "down"].map((k) => `${{ up: "涨", flat: "平", down: "跌" }[k]} ${pct(q[k])}${delta(q, p, k)}`).join(" / ") : "—");
+  const ago = Math.max(0, Math.round((Date.now() - new Date(r.run_at).getTime()) / 60000));
+  const dirChg = prev && prev.direction && r.direction !== prev.direction ? ` <mark class="chg">上一轮 ${esc(prev.direction)}</mark>` : "";
+  const pub = r.published_version != null ? `已发布 · 大盘 v${r.published_version}` : "没发布（方向没变、在等确认或没有先验）";
+  return `<div class="desk-run"><h3>${title}</h3>
+    <div class="dim small">${hm(r.run_at)} · ${ago} 分钟前 · ${esc(DESK_REASON[r.reason] || r.reason)}</div>
+    <div>4 小时 <b>${esc(r.direction || "—")}</b>${dirChg}：${tri(r.probs_4h, prev && prev.probs_4h)}</div>
+    <div>1 小时：${tri(r.probs_1h, prev && prev.probs_1h)}</div>
+    ${r.intra ? `<div class="small">${esc(r.intra)}</div>` : ""}
+    <div class="small">${pub}</div>
+    ${r.regime ? `<details class="small"><summary>模型的判断原文</summary>${esc(r.regime)}</details>` : ""}</div>`;
+}
+function deskRunsCard(runs) {
+  if (!runs || !runs.length) return "";
+  const [a, b] = runs;
+  return `<section class="card mt"><div class="desk-runs" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px">${deskRunCard("最新大盘情况", a, b)}${b ? deskRunCard("上一次大盘情况", b, null) : ""}</div></section>`;
+}
 // 大盘台：独立判断候选池未来 4 小时的涨 / 平 / 跌，管着大盘方向（接管）或退回 Flash
 function deskProgress(k) {
   if (!k || k.state === "off") return "wait";
@@ -1769,11 +1803,13 @@ function tfDeskNode(k) {
   const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
   const owner = k.owner === "desk" ? "大盘台接管" : k.owner === "flash" ? "回退 Flash" : "";
   const dir = k.direction ? `${k.direction}${k.published_version != null ? " v" + k.published_version : ""}` : "";
-  const probs = k.probs ? `涨 ${pct(k.probs.up)} 平 ${pct(k.probs.flat)} 跌 ${pct(k.probs.down)}` : "";
+  const tri = (t, q) => (q ? `${t} 涨 ${pct(q.up)} 平 ${pct(q.flat)} 跌 ${pct(q.down)}` : "");
+  const probs = tri("4h", k.probs);
+  const probs1h = tri("1h", k.probs_1h);
   const when = k.state === "off" ? "" : [k.last_run_at ? `上次 ${hm(k.last_run_at)}` : "", k.next_run_at ? `下次 ${hm(k.next_run_at)}` : ""].filter(Boolean).join(" · ");
   const head = [owner, dir].filter(Boolean).join(" · ");
   const line = (t, cls) => (t ? `<small${cls ? ` class="${cls}"` : ""} title="${esc(t)}">${esc(t)}</small>` : "");
-  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
+  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(probs1h) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
 }
 // 统一的「上次 hh:mm · 下次 hh:mm · 刚刚：…」；模块没报的字段就不写（不猜）
 function runLine(r) {
@@ -2005,6 +2041,7 @@ P.team = () => {
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
+    ${sel.role === "desk" ? deskRunsCard(d.desk_runs) : ""}
     ${sel.role === "desk" && k ? `<section class="card mt"><div class="small">准确度：${esc(k.accuracy || "还没算过（jiaoyi market-score，面板每 30 分钟算一次）")}</div></section>` : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>

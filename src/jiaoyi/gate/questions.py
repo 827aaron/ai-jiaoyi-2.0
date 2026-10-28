@@ -295,20 +295,25 @@ def _card_block(card: BattleCard | None, symbol: str, px: float) -> dict[str, An
     }
 
 
-def _current_market(card: BattleCard | None, view: MarketView | None = None) -> dict[str, Any]:
+def _current_market(
+    card: BattleCard | None, view: MarketView | None = None, intra: str | None = None
+) -> dict[str, Any]:
+    """``intra``：大盘台最近一轮的「未来 1 小时概率 + 短线现状」（只在持仓复查里给，
+    没有就不写这个键）。"""
     view = view or (card.current_market if card else None)
     if view is None:
         return {}
-    return {
-        "current_market": {
-            "market_view_id": view.market_view_id,
-            "version": view.version,
-            "observed_at": view.observed_at.isoformat(),
-            "source_ts": view.source_ts.isoformat() if view.source_ts else None,
-            "regime": view.regime[:200],
-            "regime_direction": view.regime_direction,
-        }
+    out: dict[str, Any] = {
+        "market_view_id": view.market_view_id,
+        "version": view.version,
+        "observed_at": view.observed_at.isoformat(),
+        "source_ts": view.source_ts.isoformat() if view.source_ts else None,
+        "regime": view.regime[:200],
+        "regime_direction": view.regime_direction,
     }
+    if intra:
+        out["within_4h"] = intra[:400]
+    return {"current_market": out}
 
 
 def _js(d: dict[str, Any]) -> str:
@@ -464,6 +469,7 @@ def hold_snapshot(
     forecast: Forecast | None = None,
     fee_bps: float = 5.0,
     current_market: MarketView | None = None,
+    market_intra: str | None = None,
 ) -> str:
     """``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
 
@@ -516,7 +522,7 @@ def hold_snapshot(
         book.pop("micro_bps", None)
     d.update(mkt)
     d["card"] = _card_block(card, pos.symbol, px)
-    d.update(_current_market(card, current_market))
+    d.update(_current_market(card, current_market, market_intra))
     if forecast is not None and forecast.stale_after > now:
         up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
         kr: dict[str, Any] = {"agree": 1 if up > 0.5 else 0}

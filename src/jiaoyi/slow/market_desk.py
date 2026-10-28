@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import json
 import logging
@@ -42,7 +43,8 @@ from jiaoyi.contracts import DecisionRecord, MarketView, Outcome, Role, SymbolPo
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.credits import is_credit_error
-from jiaoyi.slow.market_dossier import Dossier, DossierBuilder
+from jiaoyi.slow.desk_intra import INTRA_FIELDS, compose_intra
+from jiaoyi.slow.market_dossier import BTC, Dossier, DossierBuilder
 from jiaoyi.slow.settings import MarketDeskSection
 from jiaoyi.slow.tradingagents_engine import openrouter_body
 
@@ -94,6 +96,7 @@ SWAP_PAIRS: tuple[tuple[str, str], ...] = (
     ("上涨", "下跌"),
     ("多头", "空头"),
     ("做多", "做空"),
+    ("买入", "卖出"),
     ("反弹", "回落"),
     ("支撑", "阻力"),
     ("涨", "跌"),
@@ -531,6 +534,44 @@ def compose_regime(
     return text
 
 
+# ------------------------------------------------------------------ 4 小时之内（publish_intra）
+
+
+def intra_block(dossier: Dossier, probs_1h: Probs, order: Order, cycle_id: str) -> dict[str, Any]:
+    """一轮的「4 小时之内」：1 小时概率 + 短线现状要用的数（只取数据包里的值，不取模型的话）。
+    存进 ``market_desk_state.json`` 的 ``latest.intra``；``as_of`` 是这些数里最旧的那个。"""
+    got = {n: f for n in INTRA_FIELDS if (f := dossier.get(n)) is not None}
+    as_of = min((f.source_ts for f in got.values()), default=dossier.t0)
+    return {
+        "cycle_id": cycle_id,
+        "t0": dossier.t0.isoformat(),
+        "as_of": as_of.isoformat(),
+        "order": order,
+        "probs_1h": probs_1h.as_dict(),
+        "values": {n: f.value for n, f in got.items()},
+    }
+
+
+def intra_status(
+    symbols: Sequence[str],
+    exclude: Sequence[str],
+    rets_15m: Mapping[str, float],
+    rets_1h: Mapping[str, float],
+) -> dict[str, float]:
+    """池（等权平均、涨跌家数，至少 5 个币才给）和 BTC 的 15 分钟 / 1 小时涨跌，字段名同数据包。"""
+    basket = [s for s in dict.fromkeys(symbols) if s not in set(exclude)]
+    out: dict[str, float] = {}
+    for tag, rets in (("15m", rets_15m), ("1h", rets_1h)):
+        xs = [rets[s] for s in basket if s in rets]
+        if len(xs) >= 5:
+            out[f"pool_ret_{tag}_pct"] = statistics.fmean(xs)
+            out[f"pool_up_count_{tag}"] = float(sum(x > 0 for x in xs))
+            out[f"pool_down_count_{tag}"] = float(sum(x < 0 for x in xs))
+        if BTC in rets:
+            out[f"btc_ret_{tag}_pct"] = rets[BTC]
+    return out
+
+
 # ------------------------------------------------------------------ 模型
 
 
@@ -854,6 +895,62 @@ class MarketDesk:
         )
         self._save()
 
+    @property
+    def _intra_on(self) -> bool:
+        return self.cfg.publish_intra or self.cfg.keeper_intra
+
+    def intra_text(self, now: datetime) -> str | None:
+        """最近一轮（不是上次发布）的「1 小时概率 + 短线现状」，接在大盘台观点后面给各币会议。
+        方向只在滞回确认后才发布，这一段每轮都换。``publish_intra`` 关着、没有大盘台的结果、或
+        结果已超过 ``max_age_min``（这时大盘方向也不归它管）返回 None。"""
+        return self._intra(now) if self.cfg.publish_intra else None
+
+    def keeper_intra_text(self, now: datetime) -> str | None:
+        """同一段给管家复查快照，只看 ``keeper_intra``。"""
+        return self._intra(now) if self.cfg.keeper_intra else None
+
+    def _intra(self, now: datetime) -> str | None:
+        if not self.available(now):
+            return None
+        latest = self.state.latest
+        block = latest.get("intra") if latest is not None else None
+        if not isinstance(block, dict):
+            return None
+        try:
+            return compose_intra(block, now, self.cfg.max_input_age_min)
+        except (KeyError, TypeError, ValueError):
+            logger.exception("大盘台短线现状读不了，这次不带")
+            return None
+
+    def observe_breadth(
+        self,
+        at: datetime,
+        symbols: Sequence[str],
+        rets_15m: Mapping[str, float],
+        rets_1h: Mapping[str, float],
+    ) -> bool:
+        """两轮之间刷新「短线现状」：大盘翻转检查每分钟取到的 1 分钟收盘价算出的涨跌（``at`` =
+        那根线的收盘时刻），按大盘台同一个篮子（剔除 ``exclude_symbols``）重算池和 BTC 的数，
+        写进 ``latest.intra.status``。不发请求、不调模型；离上次刷新不到 ``intra_refresh_s``、
+        不比这一轮数据包新、或大盘台还没有结果都不动。返回是否刷新了。"""
+        cfg = self.cfg
+        latest = self.state.latest
+        block = latest.get("intra") if latest is not None else None
+        if not self._intra_on or cfg.intra_refresh_s <= 0 or not isinstance(block, dict):
+            return False
+        status = block.get("status")
+        prev = datetime.fromisoformat(str(status["as_of"])) if isinstance(status, dict) else None
+        if at <= datetime.fromisoformat(str(block["as_of"])):
+            return False
+        if prev is not None and (at - prev).total_seconds() < cfg.intra_refresh_s - 1:
+            return False
+        block["status"] = {
+            "as_of": at.isoformat(),
+            "values": intra_status(symbols, cfg.exclude_symbols, rets_15m, rets_1h),
+        }
+        self._save()
+        return True
+
     def request_run(self, reason: str = "regime_flip") -> None:
         """翻转确认 / 急动后要求立即加跑一轮（不占定时的格子；离上一轮开跑不到
         ``min_run_gap_min`` 就等到点）。"""
@@ -1071,6 +1168,15 @@ class MarketDesk:
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
+            if self._intra_on:
+                intra = {
+                    **intra_block(dossier, avg_1h, order, cycle_id),
+                    "max_age_min": self.cfg.max_input_age_min,
+                    "panel": self.cfg.publish_intra,
+                    "flat_band_1h_pct": self.state.latest["flat_band_pct"]["1h"],
+                }
+                self.state.latest["intra"] = intra
+                row["intra"] = copy.deepcopy(intra)  # 之后的刷新改的是状态里那份，日志不跟着变
             if self.cfg.mode == "replace":
                 self._set_owner(completed, "desk", f"第 {cycle_id} 轮结果合格")
             published = self._maybe_publish(
