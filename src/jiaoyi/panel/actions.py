@@ -153,6 +153,7 @@ APP_EDITABLE = frozenset(
         "jev_max_concurrent",
         "jev_shared_cooldown",
         "account_read_retries",
+        "mainnet_shadow_on",
         "keeper_interval_s",
         "reconcile_interval_s",
         "reconcile_opening_grace_s",
