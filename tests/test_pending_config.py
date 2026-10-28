@@ -610,6 +610,17 @@ def test_market_desk_publish_intra_is_pending_mergeable_but_mode_is_not(tmp_path
     assert load_slow_config(paths.slow, "standard").market_desk.publish_intra is True
 
 
+def test_tiers_always_candidates_meet_is_pending_mergeable(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    assert load_slow_config(paths.slow, "standard").commander_kwargs()["tiers"].always_meet is False
+    _pending(paths, "slow", "[screener.tiers]\nalways_candidates_meet = true\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    slow = load_slow_config(paths.slow, "standard")
+    assert slow.screener.tiers.always_candidates_meet is True
+    assert slow.commander_kwargs()["tiers"].always_meet is True
+
+
 def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
     text = (

@@ -223,6 +223,9 @@ DESK_SOURCE = "market_desk"
 """大盘台发布的 ``MarketView.source``（不往契约加字段，概率等放 market_desk_state.json）。"""
 
 
+DIRECT_MEET_REASON = "每轮直接开会（设置）"
+
+
 @dataclass(frozen=True)
 class TierRules:
     """分档交易（设计文档 §六「头部档先开放，中间档由军师每天挑，尾部只看不做」）怎么落到开会。
@@ -237,6 +240,9 @@ class TierRules:
     enabled: bool = False
     mid_daily_pick: int = 5
     mid_size_max: SizeTier = SizeTier.S
+    always_meet: bool = False
+    """Always-candidate coins skip the pick and get a per-coin meeting every scheduled round,
+    on top of the ``pick_max`` slots (Flash keeps its full room). Works with tiers off too."""
 
 
 @dataclass(frozen=True)
@@ -407,6 +413,7 @@ class BattleCardCommander:
         self._market_log = market_log
         self._log_meta: dict[str, Any] = dict(log_meta or {})
         self._always: set[str] = set()  # 设置里「每轮进总盘会」的币（本轮池子里的）
+        self._direct_n = 0  # 上一轮不经挑选直接开会的币数（心跳文字用）
         self._tiers = tiers or TierRules()
         self._tier_path = tier_path
         self._tier_of: dict[str, str] = {}
@@ -2249,6 +2256,7 @@ class BattleCardCommander:
         forced: list[SymbolPoolEntry],
         free: list[SymbolPoolEntry],
         room: int,
+        direct: Sequence[SymbolPoolEntry] = (),
     ) -> MeetingLive | None:
         """总盘会（大盘基调 + 挑币）的实况，写进 meeting_live/_MARKET.json，格式同单币会议。"""
         if self._live_dir is None:
@@ -2261,11 +2269,12 @@ class BattleCardCommander:
             + "\n".join(market_table.format_row(e, hold) for e in free)
         )
         prev = f"上一张卡的大盘判断：{self._card.regime}\n" if self._card is not None else ""
+        also = f"；{DIRECT_MEET_REASON} {len(direct)} 个（不占名额）" if direct else ""
         live.step(
             "input",
             "input",
             f"{prev}候选池 {len(candidates)} 个；固定 / 持仓强制开会 {len(forced)} 个"
-            f"（不占名额）；军师最多再挑 {room} 个。\n{table}",
+            f"（不占名额）{also}；军师最多再挑 {room} 个。\n{table}",
         )
         return live
 
@@ -2278,6 +2287,7 @@ class BattleCardCommander:
         forced: list[SymbolPoolEntry],
         reused: Mapping[str, CardSymbol],
         now: datetime,
+        direct: Sequence[SymbolPoolEntry] = (),
     ) -> None:
         by_pick = {p.symbol: p.reason for p in picked.picks}
         out = [f"大盘判断：{picked.regime}"]
@@ -2287,7 +2297,11 @@ class BattleCardCommander:
                 f"{d.symbol}：{'挑' if d.pick else '不挑'}：{d.reason}" for d in picked.decisions
             ]
         out.append("挑中：")
-        out += [f"{e.symbol}：{by_pick.get(e.symbol, '')}" for e in chosen if e not in forced]
+        out += [
+            f"{e.symbol}：{DIRECT_MEET_REASON if e in direct else by_pick.get(e.symbol, '')}"
+            for e in chosen
+            if e not in forced
+        ]
         live.step("pick", "market", "\n".join(out))
         if "rolling_60m" in picked.table or "_closedHour[" in picked.table:
             # 会前那一步是按现状格式先显示的；开了新标签 / 滚动涨跌家数时，补上模型实际收到的
@@ -2296,6 +2310,7 @@ class BattleCardCommander:
         said = {r.symbol: r.reason for r in picked.rejections}
         why: list[str] = []
         why += [f"{e.symbol}：固定 / 持仓强制开会" for e in forced]
+        why += [f"{e.symbol}：{DIRECT_MEET_REASON}，不经挑选" for e in direct]
         rank = {e.symbol: i + 1 for i, e in enumerate(sorted(candidates, key=lambda e: -e.score))}
         for e in candidates:
             if e.symbol in keep:
@@ -2333,12 +2348,14 @@ class BattleCardCommander:
         publish_accepted: bool | None = None,
         *,
         record_only: MarketView | None = None,
+        direct: Sequence[SymbolPoolEntry] = (),
     ) -> None:
         """每轮总盘会写一行记录（data/market_meeting/）：池子里每个币的分数和数字、候选的结论。
         ``record_only``：大盘台接管时 Flash 自己的大盘判断（只记录、没发布）。"""
         if self._market_log is None:
             return
         decided = {d.symbol: (d.pick, d.reason) for d in picked.decisions}
+        decided.update({e.symbol: (True, DIRECT_MEET_REASON) for e in direct})
         try:
             self._market_log.write_round(
                 {
@@ -2372,6 +2389,7 @@ class BattleCardCommander:
                     "refresh_reason": reason,
                     "breadth": picked.breadth,
                     "picked": [p.symbol for p in picked.picks],
+                    "direct_meet": [e.symbol for e in direct],
                     "chosen": [e.symbol for e in chosen],
                     "cost_usd": picked.cost_usd,
                     "elapsed_s": round(elapsed_s, 1),
@@ -2483,11 +2501,21 @@ class BattleCardCommander:
         held_in = [e for e in candidates if e.symbol in self._held and e not in pinned]
         pinned = [*pinned, *held_in]
         room = max(self._pick_max - len(pinned), 0)
-        free = [e for e in candidates if e not in pinned]
+        # 每轮直接开会（设置）：不经挑选、不占名额；执行交易所上不在交易的币不白开
+        direct = [
+            e
+            for e in candidates
+            if self._tiers.always_meet
+            and e.always_candidate
+            and e not in pinned
+            and e.symbol not in self._untradeable
+        ]
+        free = [e for e in candidates if e not in pinned and e not in direct]
+        self._direct_n = len(direct)
         pick_started = time.monotonic()
         est = self._estimate(self._pick_costs)
         self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
-        live = self._market_live(pool.in_pool, candidates, pinned, free, max(room, 0))
+        live = self._market_live(pool.in_pool, candidates, pinned, free, max(room, 0), direct)
         card_context = (
             self.market_review_context(pool) if self.accepts_event("market_review") else []
         )
@@ -2582,10 +2610,11 @@ class BattleCardCommander:
                 outcome=Outcome.ERROR,
                 summary=f"总盘会回答有问题（挑中的币照用）：{'；'.join(picked.errors)}"[:200],
             )
-        chosen = list(pinned)
+        chosen = [*pinned, *direct]
+        cap = self._pick_max + len(direct)
         for p in picked.picks:
             e = by_symbol.get(p.symbol)
-            if e is None or e.pinned or len(chosen) >= self._pick_max:
+            if e is None or e.pinned or e in direct or len(chosen) >= cap:
                 continue  # 军师只能从池里挑，池外的丢掉
             chosen.append(e)
         if self._expand_mid:
@@ -2659,7 +2688,7 @@ class BattleCardCommander:
                 market_view,
             )
         if live is not None:
-            self._market_done(live, picked, chosen, candidates, pinned, reused, now)
+            self._market_done(live, picked, chosen, candidates, pinned, reused, now, direct)
         else:
             self._market_summary(
                 picked, chosen, candidates, {p.symbol: p.reason for p in picked.picks}
@@ -2680,6 +2709,7 @@ class BattleCardCommander:
             audit.trace_id,
             None if desk_owned else accepted,
             record_only=flash_view,
+            direct=direct,
         )
         # 本轮各币会议看的大盘：平时是总盘会刚发布的，大盘台接管时是大盘台当前生效的
         round_regime, round_direction = market_view.regime, market_view.regime_direction
@@ -3236,9 +3266,10 @@ class BattleCardCommander:
         self._bump(
             ok=True, cost=0.0, ms=(time.monotonic() - started) * 1000
         )  # 选币花费已在开会时计入
+        also = f" + {self._direct_n} 个直接开会" if self._direct_n else ""
         self._heartbeat(
             Health.OK,
-            f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张）",
+            f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张{also}）",
             None,
         )
 

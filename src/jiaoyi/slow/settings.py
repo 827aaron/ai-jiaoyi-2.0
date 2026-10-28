@@ -108,6 +108,12 @@ class TiersSection(_Strict):
         description="每轮都进总盘会候选的币：过了硬门槛就进池，不算头部、不占中间档每天的名额。"
         "总盘会照样按数字决定挑不挑；写币名，不带 USDT。",
     )
+    always_candidates_meet: bool = Field(
+        default=False,
+        description="打开 = 上面这些币每轮不经总盘会挑选，直接开单币会议"
+        "（会议自己定做多 / 做空 / 不做），"
+        "不占每轮的挑币名额；执行交易所上不在交易的币照样不开。关掉 = 照旧由总盘会决定挑不挑。",
+    )
 
     @field_validator("always_candidates", mode="before")
     @classmethod
@@ -631,9 +637,10 @@ class ScheduleConfig(_Strict):
             )
         return self
 
-    def caution(self, pick_max: int | None = None) -> str | None:
+    def caution(self, pick_max: int | None = None, direct: int = 0) -> str | None:
         """只提示不拒绝：①单币超时 + 5 分钟余量比提前量长，个别币拖到超时时旧卡过期后到新卡出来
-        之间不开新仓；②最坏一轮（每波都拖到超时）跑不完开会间隔，下一轮会晚开 / 与上一轮重叠。"""
+        之间不开新仓；②最坏一轮（每波都拖到超时）跑不完开会间隔，下一轮会晚开 / 与上一轮重叠；
+        ③每轮直接开会的币（``direct`` 个，不占挑币名额）把一轮的场数推过 ``concurrency``。"""
         notes: list[str] = []
         need = self.symbol_timeout_s / 60 + 5
         if need > self.refresh_lead_min:
@@ -643,7 +650,13 @@ class ScheduleConfig(_Strict):
                 "到新卡出来之间可能不开新仓"
             )
         # 每轮实际开会的个数：max_cards_per_round（0 / 不写 = 不另设）与 card_pick_max 取小
-        cards = min(self.max_cards_per_round or pick_max or self.concurrency, pick_max or 10**6)
+        picked = min(self.max_cards_per_round or pick_max or self.concurrency, pick_max or 10**6)
+        cards = picked + direct
+        if direct and cards > self.concurrency >= picked:
+            notes.append(
+                f"每轮挑 {picked} 个币，再加每轮直接开会的 {direct} 个，共 {cards} 场，"
+                f"超过同时开会上限 concurrency（{self.concurrency}），要多排一波，整轮会变长"
+            )
         waves = math.ceil(cards / self.concurrency)
         worst = waves * self.symbol_timeout_s / 60
         if worst >= self.min_refresh_gap_min:
@@ -1018,6 +1031,12 @@ class SlowConfig(_Strict):
             },
         )
 
+    def direct_meet_count(self) -> int:
+        """Upper bound on coins met each round outside the pick slots (``always_candidates_meet``);
+        the real count is lower when some of them miss the pool."""
+        tiers = self.screener.tiers
+        return len(tiers.always_candidates) if tiers.always_candidates_meet else 0
+
     def effective_pick_max(self, app_pick_max: int) -> int:
         """每轮最多出几张卡：``max_cards_per_round`` 与 ``card_pick_max`` 取小。"""
         n = self.schedule.max_cards_per_round
@@ -1065,6 +1084,7 @@ class SlowConfig(_Strict):
                 enabled=self.screener.tiers.enabled,
                 mid_daily_pick=self.screener.tiers.mid_daily_pick,
                 mid_size_max=SizeTier(self.screener.tiers.mid_size_max),
+                always_meet=self.screener.tiers.always_candidates_meet,
             ),
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
             "latest_market_regime": self.meeting.latest_market_regime,

@@ -122,7 +122,7 @@ def _check_config(args: argparse.Namespace) -> int:
     print(_profile_line(args, app))
     if caution := _caution_line(risk):
         print(caution)
-    if gap := slow.schedule.caution(app.card_pick_max):
+    if gap := slow.schedule.caution(app.card_pick_max, slow.direct_meet_count()):
         print(f"注意：{gap}")
     for note in slow.screener.cautions(risk.max_spread_bps):
         print(f"注意：选币门槛——{note}")
@@ -243,7 +243,7 @@ def _status(args: argparse.Namespace) -> int:
     print(_profile_line(args, app.app_cfg))
     if caution := _caution_line(risk):
         print(caution)
-    if gap := slow.schedule.caution(app.app_cfg.card_pick_max):
+    if gap := slow.schedule.caution(app.app_cfg.card_pick_max, slow.direct_meet_count()):
         print(f"注意：{gap}")
     for role, st in app.status().items():
         print(f"{role.value:<12} {st.health.value:<9} {st.headline}")
@@ -606,7 +606,7 @@ def _run(args: argparse.Namespace) -> int:
     print(_profile_line(args, app.app_cfg))
     if caution := _caution_line(risk):
         print(caution)
-    if gap := slow.schedule.caution(app.app_cfg.card_pick_max):
+    if gap := slow.schedule.caution(app.app_cfg.card_pick_max, slow.direct_meet_count()):
         print(f"注意：{gap}")
     runner = Runner(app, restart_check=lambda: _restart_blocker(args), restart_exit=_restart_exit)
     with contextlib.suppress(KeyboardInterrupt):
