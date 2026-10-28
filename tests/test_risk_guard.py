@@ -906,3 +906,78 @@ def test_fast_loop_open_by_kind_rejects_unknown_kind_and_negative() -> None:
             c.FastLoopConfig.model_validate(
                 {**FAST.model_dump(mode="json"), "max_open_by_kind": caps}
             )
+
+
+def _dust_review(
+    tmp_path: Path, now: datetime, side: c.Side, release: bool | None = None, **fast: object
+) -> tuple[c.RiskVerdict, dict[str, object]]:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update=fast)
+    g = _Guard(RISK, cfg, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    # Margin nearly used up by other positions: 100 * 0.95 / (1/5 + 5bp) = 474 U, i.e. 0.006
+    # BTC risking 0.72 U against a planned 10000 * 1% * 0.75 (M) = 75 U.
+    acc = account(now, available_usdt=100.0)
+    if release is None:
+        v = g.review(sig, j, cd, acc, now)
+    else:
+        v = g.review_manual(sig, j, cd, acc, now, market=sig.features, release=release)
+    [rec] = log.read_day(now.date().isoformat())
+    return v, rec.output.get("detail", {})
+
+
+@_SIDES
+def test_review_min_size_ratio_rejects_margin_squeezed_dust(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _dust_review(tmp_path, now, side, min_size_ratio=0.25)
+    assert not v.approved
+    assert v.reasons == ["仓位被可用保证金压到计划的 1.0%（风险 0.72U），低于下限 25%，不开"]
+    assert detail["planned_risk_usdt"] == 75.0
+    assert detail["size_ratio"] == 0.0096
+
+
+@_SIDES
+def test_review_min_size_ratio_zero_keeps_dust_trade(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _dust_review(tmp_path, now, side)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.quantity == pytest.approx(0.006)
+    assert detail["binding"] == "可用保证金"
+    assert "size_ratio" not in detail
+
+
+@_SIDES
+def test_review_manual_release_waives_min_size_ratio(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _dust_review(tmp_path, now, side, release=True, min_size_ratio=0.25)
+    assert v.approved, v.reasons
+    assert detail["waived"] == "仓位被可用保证金压到计划的 1.0%（风险 0.72U），低于下限 25%，不开"
+
+
+@_SIDES
+def test_review_min_size_ratio_leaves_full_size_trade(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update={"min_size_ratio": 0.25})
+    g = _Guard(RISK, cfg, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    sig = signal(now, side=side, kind=c.SignalKind.BTC_LEAD, f=features(now, atr=4000.0))
+    cd = card(now, bias="both", allowed_signals=[k.value for k in c.SignalKind])
+    v = g.review(sig, jev(size={"S": 0.1, "M": 0.1, "L": 0.8}), cd, account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.quantity == pytest.approx(0.016)
+    [rec] = log.read_day(now.date().isoformat())
+    detail = rec.output.get("detail", {})
+    assert detail["binding"] == "风险金额"
+    assert (detail["planned_risk_usdt"], detail["size_ratio"]) == (100.0, 0.96)
+
+
+@_SIDES
+def test_review_respect_card_notional_min(tmp_path: Path, now: datetime, side: c.Side) -> None:
+    v, _ = _dust_review(tmp_path / "on", now, side, respect_card_notional_min=True)
+    assert v.reasons == ["按可用保证金只能开 408U，低于作战卡名义下限 500U"]
+    v, _ = _dust_review(tmp_path / "off", now, side)
+    assert v.approved, v.reasons

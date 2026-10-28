@@ -319,6 +319,20 @@ class FastLoopConfig(Contract):
         "超了缩单不拒。留的余量给下单前的价格变动和币安市价单的开仓损失，"
         "否则 hummingbot 会报「Not enough budget」不下单。",
     )
+    min_size_ratio: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="缩单下限：各项上限（可用保证金、盘口深度、敞口余量等）把这笔压到计划风险"
+        "（本金 × 每笔风险 × 仓位档）的这个比例以下就不开，免得付手续费、占持仓名额去开一笔"
+        "赚不到钱的小仓。0 = 关（默认，原行为：压到多小都开）。Demo 推荐 0.25。",
+    )
+    respect_card_notional_min: bool = Field(
+        default=False,
+        description="作战卡不当硬约束（card_caps_binding 关）时，仍然守卡上的名义价值下限："
+        "取整后的名义价值低于它就不开。默认关 = 原行为（卡上的名义范围只当建议记下）。"
+        "card_caps_binding 开着时这条本来就生效。",
+    )
     limit_take_profit: bool = Field(
         default=True,
         description="paper：开仓成交后挂只减仓限价止盈（挂单费 2bp，碰到价位就成交）。改了要重启。",

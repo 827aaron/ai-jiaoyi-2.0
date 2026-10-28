@@ -204,6 +204,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
   硬上限（`config/risk.toml`、`RiskConfig`）一项都没有开关，测试守着；超时、调度间隔、打分满分线、并发数这类 0 没有意义的项也不在表里。
 - 「拍板人 Jev → 按信号类型限制同时持仓」：同样每类一格（`/api/settings` 的 `open_by_kind`，`null` = 不单独限），段 `open_by_kind` → `[fast_loop.max_open_by_kind]`，热生效（`open_by_kind.*`）。
 - 「拍板人 Jev → 按信号类型单独定门槛」：每个信号类型一格（`/api/settings` 的 `take_by_kind`，`null` = 跟 `min_p_take`），保存走段 `take_by_kind`，写进 `app.toml` 的 `[fast_loop.min_p_take_by_kind]`，留空删掉这一行；热生效（`hot_keys` 里的 `take_by_kind.*`）。待更新文件写法同正式文件：`[fast_loop.min_p_take_by_kind]` 下一行 `btc_lead = 0.0`。拍板记录详情优先用记录里的 `input.take_floor`（或 `output.detail.take_floor`），没有时才用 `/api/team` 的 `gate_take_by_kind` 按类型标门槛。细节见 `docs/fast_loop.md`「拍板人：一道「做不做」」。
+- 「风控员 → 仓位太大时缩单」还有 `min_size_ratio`（缩单后风险不到计划的几成就不开，默认 0 = 关，Demo 推荐 0.25）和 `respect_card_notional_min`（作战卡不当硬约束时仍守卡上的名义下限，默认关），都热生效，也能写进 `config/app.pending.toml`；细节见 `docs/fast_loop.md` 接线要点。
 - 三个开关网页能改（也能写进 `config/app.pending.toml` 随更新生效，见 `docs/fast_loop.md` 接线要点）：「风控员 → 仓位太大时缩单」的 `leverage_clamp_to_bracket`（杠杆按币安这个币的上限封顶，默认关，热生效）；「拍板人 Jev → 超时、出错和同时判几个」的 `jev_shared_cooldown`（开仓拍板和管家共用连错冷却，默认开 = 原行为，改后重启）；「执行 → 开仓前读账户」的 `account_read_retries`（读账户失败再读几次，默认 0，热生效）。
 - 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
   持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）
