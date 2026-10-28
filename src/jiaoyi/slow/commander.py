@@ -1600,6 +1600,21 @@ class BattleCardCommander:
     def set_market_desk(self, desk: MarketDeskOwner | None) -> None:
         self._desk = desk
 
+    def market_intra(self, now: datetime, view: MarketView | None) -> str | None:
+        """大盘台观点后面接的「4 小时之内」（``[market_desk] publish_intra``）：只接在大盘台发布的
+        观点后面，读大盘台最近一轮。没开、观点不是大盘台的、读不到都返回 None。"""
+        if view is None or view.source != DESK_SOURCE or self._desk is None:
+            return None
+        fn = getattr(self._desk, "intra_text", None)
+        if not callable(fn):
+            return None
+        try:
+            text = fn(now)
+        except Exception:
+            logger.exception("读大盘台短线现状失败，这次不带")
+            return None
+        return text if isinstance(text, str) and text else None
+
     def _flash_previous(self) -> BattleCard | None:
         """总盘会（Flash）看到的「上一轮」：大盘台接管时卡上的大盘是大盘台的，换回 Flash 自己上一轮
         的判断，免得 Flash 被大盘台锚定（CONFLICTS #14）。"""
@@ -2779,15 +2794,21 @@ class BattleCardCommander:
         async with self._sem:
             started = time.monotonic()
             regime, market_view, regime_note = self._regime_at_start(regime, market_view)
+            intra = self.market_intra(self._clock(), market_view)
+            if intra:
+                regime_note = {**regime_note, "market_intra": intra}
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             self._event_uncharged.discard(entry.symbol)
             try:
                 contextual_analyze = getattr(self._engine, "analyze_with_context", None)
+                extra = {"market_intra": intra} if intra else {}
                 meeting = (
-                    contextual_analyze(entry, regime, pick_reason, brief_text=brief_text)
+                    contextual_analyze(entry, regime, pick_reason, brief_text=brief_text, **extra)
                     if callable(contextual_analyze)
-                    else self._engine.analyze(entry, regime, pick_reason)
+                    else self._engine.analyze(
+                        entry, f"{regime} {intra}" if intra else regime, pick_reason
+                    )
                 )
                 res = cast(Analysis, await asyncio.wait_for(meeting, self._symbol_timeout_s))
                 cs = res.card_symbol

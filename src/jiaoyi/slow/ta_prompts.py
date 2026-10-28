@@ -254,9 +254,11 @@ def meeting_note(
     tick: str | None = None,
     start: str = "",
     end: str = "",
+    intra: str = "",
 ) -> str:
     """这一场会的说明：币安代码、价格精度、开会时间和窗口结束时间、总盘会的判断和挑这个币的理由
-    （只作背景）。"""
+    （只作背景）。``intra``：大盘台最近一轮的「未来 1 小时概率 + 短线现状」，接在大盘判断后面，
+    不跟大盘判断一起截断；空 = 和以前一字不差。"""
     tick_part = ""
     if tick:
         from jiaoyi.core.ticks import tick_decimals
@@ -270,13 +272,18 @@ def meeting_note(
     text = fill(
         f"In this system `{ticker}` is the Binance USDT-M perpetual {symbol};{tick_part}"
         f"{time_part} "
-        "This round's market meeting said: {regime}. This coin was picked because: "
+        "This round's market meeting said: {regime}.{intra} This coin was picked because: "
         "{pick_reason}. Treat both as context, not as an order; your own evidence for the next "
         "{H} decides.",
         p,
     )
-    return text.replace("{regime}", _clip(regime, 400) or "(not available)").replace(
-        "{pick_reason}", _clip(pick_reason, 300) or FORCED_REASON
+    intra_part = (
+        f" Market desk, within 4 hours (latest desk run): {_clip(intra, 400)}" if intra else ""
+    )
+    return (
+        text.replace("{regime}", _clip(regime, 400) or "(not available)")
+        .replace("{intra}", intra_part)
+        .replace("{pick_reason}", _clip(pick_reason, 300) or FORCED_REASON)
     )
 
 

@@ -704,6 +704,7 @@ def build_modules(
             current_market=(lambda: cards.latest_market_view)
             if isinstance(cards, BattleCardCommander)
             else None,
+            market_intra=cards.market_intra if isinstance(cards, BattleCardCommander) else None,
             observation_source=features.diagnostic_observation if observations else None,
             observation_sink=observations.offer if observations else None,
             opposite_state_path=Path(app_cfg.data_dir) / "keeper_opposite.json",

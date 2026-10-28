@@ -149,4 +149,6 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # max_tokens = 4096
 # timeout_s = 120
 # max_input_age_min = 5      # 不能有延后信息：实时字段 as_of 比运行时刻旧过这么多分钟就不给模型；0 = 不查
+# publish_intra = false      # true = 大盘说明里再带最近一轮的「未来 1 小时概率」和代码写的「短线现状」（不多调模型）
+# intra_max_age_min = 5      # 「短线现状」数据旧过这么多分钟就写缺失；不写 = 用 max_input_age_min；0 = 不查
 # exclude_symbols = ["PAXGUSDT", "XAUTUSDT"]

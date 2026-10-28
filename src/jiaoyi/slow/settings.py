@@ -839,6 +839,22 @@ class MarketDeskSection(_Strict):
         "运行时刻旧过这么多分钟就不给模型（写进缺失原因）；5 分钟统计的数再多给 5 分钟。0 = 不查。"
         "σ、基础率（已收盘 1h 线上的统计量）和恐慌贪婪（日值）不按这个拦。",
     )
+    publish_intra: bool = Field(
+        default=False,
+        description="大盘也告诉各币会议 4 小时之内的行情：开着时，各币会议的大盘说明、"
+        "管家复查快照、面板「最新大盘判断」在 4 小时判断后面再带两段——大盘台最近一轮的"
+        "「未来 1 小时概率」和代码按数据包写的「短线现状」（池 15 分钟 / 1 小时等权涨跌和"
+        "涨跌家数、BTC 15 分钟 / 1 小时、1 小时主动买卖占比）。读的是最近一轮的结果（不是上次"
+        "发布的观点），超过 intra_max_age_min 就写「缺失」。不多调模型、不改 4 小时方向和"
+        "发布节奏。false = 和以前一样。",
+    )
+    intra_max_age_min: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=240.0,
+        description="「短线现状」多旧就不给（分钟，按数据的 as_of 算）；"
+        "不写 = 用 max_input_age_min；0 = 不查。",
+    )
     exclude_symbols: tuple[str, ...] = Field(
         default=("PAXGUSDT", "XAUTUSDT"),
         description="不进等权池的币（贵金属等，和大盘无关）。",

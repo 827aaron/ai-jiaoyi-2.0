@@ -2769,10 +2769,11 @@ class TradingAgentsEngine:
         pick_reason: str = "",
         *,
         brief_text: str,
+        market_intra: str = "",
     ) -> Analysis:
         self._snapshot_liquidations([entry.symbol])
         return await self._in_meeting_thread(
-            self._analyze_sync, entry, regime, pick_reason, brief_text
+            self._analyze_sync, entry, regime, pick_reason, brief_text, market_intra
         )
 
     async def _in_meeting_thread(self, fn: Callable[..., Analysis], *args: Any) -> Analysis:
@@ -2795,6 +2796,7 @@ class TradingAgentsEngine:
         regime: str,
         pick_reason: str = "",
         brief_text: str | None = None,
+        market_intra: str = "",
     ) -> Analysis:
         meter = self._meter(entry.symbol)
         handler = cost_handler(meter)
@@ -2807,7 +2809,9 @@ class TradingAgentsEngine:
             meter.on_model = live.note_model
             meter.on_retry = live.note_retry
         try:
-            res = self._analyze_run(entry, regime, handler, meter, live, pick_reason, brief_text)
+            res = self._analyze_run(
+                entry, regime, handler, meter, live, pick_reason, brief_text, market_intra
+            )
         except Exception as exc:  # 同上：失败也带上真实花费
             if live:
                 live.fail(str(exc) or type(exc).__name__, meter.cost)
@@ -2830,6 +2834,7 @@ class TradingAgentsEngine:
         live: MeetingLive | None = None,
         pick_reason: str = "",
         brief_text: str | None = None,
+        market_intra: str = "",
     ) -> Analysis:
         ticker, asset_type = ta_ticker(entry)
         analysts = self._s.analysts_stock if asset_type == "stock" else self._s.analysts_crypto
@@ -2850,6 +2855,7 @@ class TradingAgentsEngine:
             tick,
             f"{now:%Y-%m-%d %H:%M}",
             f"{now + timedelta(minutes=params.hold_minutes):%Y-%m-%d %H:%M}",
+            intra=market_intra,
         )
         fmt = price_formatter(tick)
         start_quote = (

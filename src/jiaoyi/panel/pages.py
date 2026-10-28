@@ -162,6 +162,8 @@ class DeskInfo(BaseModel):
     direction: str | None = None
     probs: dict[str, float] | None = None
     """最新结果 4 小时涨 / 平 / 跌的概率（up / flat / down）。"""
+    probs_1h: dict[str, float] | None = None
+    """同一轮的 1 小时涨 / 平 / 跌概率。"""
     published_version: int | None = None
     runs_today: int = 0
     cost_today_usd: float = 0.0
@@ -203,13 +205,18 @@ def build_desk(
         if nxt < now:
             nxt = now
     latest_run = st.get("latest") if isinstance(st.get("latest"), dict) else None
-    probs = None
-    if latest_run is not None and isinstance(latest_run.get("probs_4h"), dict):
-        probs = {
+
+    def triple(key: str) -> dict[str, float] | None:
+        raw = latest_run.get(key) if latest_run is not None else None
+        if not isinstance(raw, dict):
+            return None
+        return {
             k: float(v)
-            for k, v in latest_run["probs_4h"].items()
+            for k, v in raw.items()
             if k in ("up", "flat", "down") and isinstance(v, int | float)
         }
+
+    probs = triple("probs_4h")
     version = latest_run.get("published_version") if latest_run else None
     stopped = st.get("stopped")
     stopped = stopped if isinstance(stopped, str) and stopped else None
@@ -244,6 +251,7 @@ def build_desk(
         next_run_at=nxt,
         direction=latest_run.get("direction") if latest_run else None,
         probs=probs,
+        probs_1h=triple("probs_1h"),
         published_version=version if isinstance(version, int) else None,
         runs_today=int(st.get("runs_today", 0)) if fresh else 0,
         cost_today_usd=float(st.get("cost_today_usd", 0.0)) if fresh else 0.0,

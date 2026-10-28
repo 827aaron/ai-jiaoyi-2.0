@@ -41,6 +41,7 @@ from jiaoyi.contracts import DecisionRecord, MarketView, Outcome, Role, SymbolPo
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.credits import is_credit_error
+from jiaoyi.slow.desk_intra import INTRA_FIELDS, compose_intra
 from jiaoyi.slow.market_dossier import Dossier, DossierBuilder
 from jiaoyi.slow.settings import MarketDeskSection
 from jiaoyi.slow.tradingagents_engine import openrouter_body
@@ -93,6 +94,7 @@ SWAP_PAIRS: tuple[tuple[str, str], ...] = (
     ("上涨", "下跌"),
     ("多头", "空头"),
     ("做多", "做空"),
+    ("买入", "卖出"),
     ("反弹", "回落"),
     ("支撑", "阻力"),
     ("涨", "跌"),
@@ -415,6 +417,24 @@ def compose_regime(sample: Sample | None, avg: Probs, dossier: Dossier, order: O
         bear = f"看跌理由：{sample.bear_case.rstrip('。')}。"
         text += bull + bear if order == "up_first" else bear + bull
     return text
+
+
+# ------------------------------------------------------------------ 4 小时之内（publish_intra）
+
+
+def intra_block(dossier: Dossier, probs_1h: Probs, order: Order, cycle_id: str) -> dict[str, Any]:
+    """一轮的「4 小时之内」：1 小时概率 + 短线现状要用的数（只取数据包里的值，不取模型的话）。
+    存进 ``market_desk_state.json`` 的 ``latest.intra``；``as_of`` 是这些数里最旧的那个。"""
+    got = {n: f for n in INTRA_FIELDS if (f := dossier.get(n)) is not None}
+    as_of = min((f.source_ts for f in got.values()), default=dossier.t0)
+    return {
+        "cycle_id": cycle_id,
+        "t0": dossier.t0.isoformat(),
+        "as_of": as_of.isoformat(),
+        "order": order,
+        "probs_1h": probs_1h.as_dict(),
+        "values": {n: f.value for n, f in got.items()},
+    }
 
 
 # ------------------------------------------------------------------ 模型
@@ -740,6 +760,27 @@ class MarketDesk:
         )
         self._save()
 
+    @property
+    def intra_max_age_min(self) -> float:
+        c = self.cfg
+        return c.intra_max_age_min if c.intra_max_age_min is not None else c.max_input_age_min
+
+    def intra_text(self, now: datetime) -> str | None:
+        """最近一轮（不是上次发布）的「未来 1 小时概率 + 短线现状」，接在大盘台观点后面给各币会议、
+        管家和面板。方向只在滞回确认后才发布，这一段每轮都换。``publish_intra`` 关着、没有大盘台
+        的结果、或结果已超过 ``max_age_min``（这时大盘方向也不归它管）返回 None。"""
+        if not self.cfg.publish_intra or not self.available(now):
+            return None
+        latest = self.state.latest
+        block = latest.get("intra") if latest is not None else None
+        if not isinstance(block, dict):
+            return None
+        try:
+            return compose_intra(block, now, self.intra_max_age_min)
+        except (KeyError, TypeError, ValueError):
+            logger.exception("大盘台短线现状读不了，这次不带")
+            return None
+
     def request_run(self, reason: str = "regime_flip") -> None:
         """翻转确认 / 急动后要求立即加跑一轮（不占定时的格子；离上一轮开跑不到
         ``min_run_gap_min`` 就等到点）。"""
@@ -953,6 +994,13 @@ class MarketDesk:
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
+            if self.cfg.publish_intra:
+                intra = {
+                    **intra_block(dossier, avg_1h, order, cycle_id),
+                    "max_age_min": self.intra_max_age_min,
+                }
+                self.state.latest["intra"] = intra
+                row["intra"] = intra
             if self.cfg.mode == "replace":
                 self._set_owner(completed, "desk", f"第 {cycle_id} 轮结果合格")
             published = self._maybe_publish(
