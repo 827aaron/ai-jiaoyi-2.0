@@ -16,7 +16,11 @@ from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.exit_fills import FILE_NAME as EXIT_FILLS_FILE
 from jiaoyi.execution.exit_fills import ExitFills
 from jiaoyi.execution.hb_client import HttpHummingbotApi
-from jiaoyi.execution.hb_executor import HbExecutorAdapter, HostedCloseMode
+from jiaoyi.execution.hb_executor import (
+    HOSTED_CLOSE_SLOW_ALERT_S,
+    HbExecutorAdapter,
+    HostedCloseMode,
+)
 from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError
 from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
@@ -113,6 +117,7 @@ def build_execution(
     protection_tick_alert_after: int = 1,
     hb_stop_unknown_retries: int = 0,
     hosted_close_direct_when_exiting: bool = False,
+    hosted_close_slow_alert_s: float = HOSTED_CLOSE_SLOW_ALERT_S,
     position_mode_cache_s: float = 0.0,
     leverage_brackets_wanted: Callable[[], bool] | None = None,
     hb_url: str = "http://127.0.0.1:8000",
@@ -202,6 +207,7 @@ def build_execution(
         protection_tick_alert_after=protection_tick_alert_after,
         hb_stop_unknown_retries=hb_stop_unknown_retries,
         hosted_close_direct_when_exiting=hosted_close_direct_when_exiting,
+        hosted_close_slow_alert_s=hosted_close_slow_alert_s,
         exit_fills=ExitFills(Path(data_dir) / EXIT_FILLS_FILE),
     )
     reconciler = ThreeWayReconciler(

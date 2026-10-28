@@ -77,6 +77,7 @@ from jiaoyi.core.stop_quotes import StopQuoteRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.account_check import AccountMismatch
 from jiaoyi.execution.factory import MissingSecret, build_execution
+from jiaoyi.execution.hb_executor import HOSTED_CLOSE_SLOW_ALERT_S
 from jiaoyi.execution.income_daily import IncomeDaily
 from jiaoyi.execution.ledger_sync import LedgerSync
 from jiaoyi.execution.live_gate import LiveGate
@@ -496,6 +497,9 @@ def _build_execution(
             protection_tick_alert_after=app_cfg.protection_tick_alert_after,
             hb_stop_unknown_retries=app_cfg.hb_stop_unknown_retries,
             hosted_close_direct_when_exiting=app_cfg.hosted_close_direct_when_exiting,
+            hosted_close_slow_alert_s=max(
+                float(app_cfg.reconcile_closing_grace_s), HOSTED_CLOSE_SLOW_ALERT_S
+            ),
             position_mode_cache_s=app_cfg.position_mode_cache_s,
             leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
         )

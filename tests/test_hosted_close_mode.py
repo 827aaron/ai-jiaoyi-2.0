@@ -665,6 +665,39 @@ async def test_direct_when_exiting_places_the_order_before_stopping_hb(
     assert not h.failure_alerts()
 
 
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_hb_stop_that_never_terminates_warns_once_after_the_grace(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side, "hb_first")
+    with pytest.raises(CloseInProgress):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+
+    def slow() -> list[Alert]:
+        return [a for a in h.alerter.sent if a.dedup_key == "close_slow:pos-1"]
+
+    h.clock.advance(119)
+    await h.adapter.protection_tick()
+    assert not slow()
+    h.clock.advance(2)
+    await h.adapter.protection_tick()
+    await h.adapter.protection_tick()
+    [alert] = slow()
+    assert alert.level is AlertLevel.WARN and "pos-1" in alert.body
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert "pos-1" not in h.adapter._exit_started
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_unknown_hb_stop_result_stays_a_loud_failure(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side, "hb_first")
+    h.api.stop_error = HbApiError("synthetic stop timeout")
+    with pytest.raises(ProtectionIncomplete) as failed:
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert h.tracked().hb_close_pending and h.tracked().hb_close_unknown
+    assert not isinstance(failed.value, CloseInProgress)
+
+
 def test_unknown_hosted_close_mode_is_refused(tmp_path: Path):
     h = LatencyHarness(tmp_path, Side.LONG)
     with pytest.raises(ValueError):
