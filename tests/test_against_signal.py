@@ -803,3 +803,56 @@ async def test_runner_shutdown_stops_the_assistant_before_cancelling_its_own_tas
     await r.shutdown()
     assert seen == [(False, "主程序正在重启或退出")]
     assert r.app.m.executor.closed == []  # type: ignore[attr-defined]
+
+
+class InProgressExecutor(LedgerExecutor):
+    """Hosted exit sent, not flat yet: the ledger shows CLOSING after the call."""
+
+    async def close(self, position_id: str, reason: CloseReason) -> None:
+        from jiaoyi.execution.brackets import CloseInProgress
+
+        self.closed.append((position_id, reason))
+        self.live = [p.model_copy(update={"status": "closing"}) for p in self.live]
+        raise CloseInProgress("托管退出进行中")
+
+
+async def test_runner_close_in_progress_still_records_the_assistant_and_counts_it_later(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+    from jiaoyi.keeper import assistant as ka
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    ex = InProgressExecutor([p])
+    r.m.executor = ex  # type: ignore[misc]
+    r.positions = [p]
+    _assistant_on(r, 0.9, 0.9)
+    await r.on_event(_trade(now))
+    await _settle(r)
+    assert ex.closed == [("pos-1", CloseReason.KEEPER)]
+    assert close_sources.read(tmp_path)["pos-1"]["source"] == "keeper_assistant"
+    done = p.model_copy(update={"status": "closed", "exit_price": 67900.0})
+    r._assistant_ended({"pos-1"}, [done], {})
+    assert r.assistant._closes == 1
+    ended = ka.read_rows(tmp_path / "keeper_assistant")[-1]
+    assert ended["kind"] == "closed" and ended["closed_by_assistant"] is True
+
+
+async def test_runner_close_in_progress_without_a_ledger_check_is_not_labelled(
+    tmp_path: Path, now: datetime
+) -> None:
+    from jiaoyi.core import close_sources
+    from jiaoyi.execution.brackets import CloseInProgress
+
+    class Blind(FakeExecutor):
+        """No ledger to confirm nobody else had asked to close first."""
+
+        async def close(self, position_id: str, reason: CloseReason) -> None:
+            raise CloseInProgress("托管退出进行中")
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.m.executor = Blind()  # type: ignore[misc]
+    await r.close(p, CloseReason.KEEPER, source="keeper_assistant", detail="x")
+    assert close_sources.read(tmp_path) == {}

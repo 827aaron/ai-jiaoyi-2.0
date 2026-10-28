@@ -809,6 +809,12 @@ class Runner:
         )
         return None
 
+    def _record_source(self, pos: PositionRecord, source: str | None, detail: str) -> None:
+        if source is not None:
+            close_sources.record(
+                self.app.app_cfg.data_dir, pos.position_id, source, detail, self.app.clock()
+            )
+
     def _assistant_alert(self, title: str, text: str) -> None:
         if not self._leaving:
             self._spawn(self.app._alert(AlertLevel.INFO, title, text, "system"))
@@ -1688,6 +1694,8 @@ class Runner:
             )
             return
         executor = self.m.executor
+        # 账本确认这一刻没有别的平仓申请在途：执行器说「退出进行中」时，那是这次申请的退出
+        first_request = False
         if isinstance(executor, _LedgerPositions):
             try:
                 current = next(
@@ -1698,17 +1706,17 @@ class Runner:
                 return
             if current is None or current.status is PositionStatus.CLOSING:
                 return  # 已结束或已有平仓申请，不能重复发单。
+            first_request = True
         self._closing.add(pos.position_id)
         try:
             await self.m.executor.close(pos.position_id, reason)
-            if source is not None:
-                close_sources.record(
-                    self.app.app_cfg.data_dir, pos.position_id, source, detail, self.app.clock()
-                )
+            self._record_source(pos, source, detail)
         except CloseInProgress as e:
             # The exit is already working and the executor's background tick settles it; the
             # reconciler's closing grace still escalates one that never completes.
             log.warning("%s 平仓进行中（%s）：%s", pos.symbol, reason.value, e)
+            if first_request:
+                self._record_source(pos, source, detail)
             if not isinstance(executor, _LedgerPositions):
                 return
         except Exception as e:
