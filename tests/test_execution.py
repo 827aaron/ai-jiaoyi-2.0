@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -410,6 +411,72 @@ async def test_account_includes_unrealized_and_day_start(rig: Rig) -> None:
     assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(1015.0)
     rig.t = datetime(2026, 10, 22, 17, 5, tzinfo=UTC)
     assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(900.0)
+
+
+async def test_account_counts_open_positions_by_signal_kind(rig: Rig) -> None:
+    await open_filled(rig, signal_kind="btc_lead")
+    await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT", signal_kind="btc_lead")
+    await open_filled(rig, intent_id="int-0003", symbol="SOLUSDT")
+    rig.api.pos = []
+    acc = await rig.adapter.account()
+    assert acc.open_positions == 3
+    assert acc.open_by_kind == {"btc_lead": 2}
+    rec = rig.registry.by_intent("int-0002")
+    assert rec is not None and rec.record.signal_kind == "btc_lead"
+
+
+def _dump(rig: Rig, pid: str) -> dict:  # type: ignore[type-arg]
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    return json.loads(tracked.model_dump_json())  # type: ignore[no-any-return]
+
+
+async def test_registry_writes_signal_kind_only_on_live_positions(rig: Rig) -> None:
+    lead = await open_filled(rig, signal_kind="btc_lead")
+    plain = await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT")
+    assert _dump(rig, lead)["record"]["signal_kind"] == "btc_lead"
+    assert "signal_kind" not in _dump(rig, plain)["record"]
+    tracked = rig.registry.get(lead)
+    assert tracked is not None
+    with_chase = tracked.model_copy(
+        update={"chase": intent(intent_id="int-c1", signal_kind="btc_lead")}
+    )
+    rig.registry.put(with_chase)
+    assert _dump(rig, lead)["chase"]["signal_kind"] == "btc_lead"
+    rig.registry.put(with_chase.model_copy(update={"chase": intent(intent_id="int-c2")}))
+    assert "signal_kind" not in _dump(rig, lead)["chase"]
+    closed = with_chase.record.model_copy(update={"status": PositionStatus.CLOSED})
+    rig.registry.put(with_chase.model_copy(update={"record": closed}))
+    d = _dump(rig, lead)
+    assert "signal_kind" not in d["record"] and "signal_kind" not in d["chase"]
+    again = PositionRegistry(rig.registry.path).get(lead)
+    assert again is not None and again.record.signal_kind is None
+
+
+async def test_signal_kind_rollback_script_strips_live_positions(rig: Rig) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "signal_kind_rollback", Path(__file__).parent.parent / "scripts" / "signal_kind_rollback.py"
+    )
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    pid = await open_filled(rig, signal_kind="btc_lead")
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    rig.registry.put(
+        tracked.model_copy(update={"chase": intent(intent_id="int-c1", signal_kind="btc_lead")})
+    )
+    path = rig.registry.path
+    before = path.read_text()
+    assert before.count('"signal_kind"') == 2
+    assert script.main([str(path)]) == 0
+    assert path.read_text() == before  # dry run
+    assert script.main([str(path), "--write"]) == 0
+    assert path.with_name("positions.json.bak-signal-kind").read_text() == before
+    assert '"signal_kind"' not in path.read_text()
+    assert script.main([str(path)]) == 0
 
 
 async def test_account_fails_closed_without_balance(rig: Rig) -> None:

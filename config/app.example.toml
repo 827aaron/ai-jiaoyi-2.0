@@ -80,6 +80,7 @@ jev_error_cooldown_s = 60         # 暂停 60 秒后再试
 # stop_floor_widen = true          # 止损离手续费太近：开 = 拉宽到下限、仓位按新止损重算；关 = 不开（不写 = 开）
 # gate_questions = "one"            # 拍板人怎么问：one = 只问一道「做不做」（不写 = one）；six = 旧 6 道题（回放对照）
 # min_p_take = 0.55                 # 拍板：“做”概率 ≥ 0.55（不写 = 0.55；想多做可放 0.50）
+#                                   # 按信号类型单独定“做”门槛：见文件末尾的 [fast_loop.min_p_take_by_kind]
 # min_p_direction = 0.45            # 拍板：信号方向概率 ≥ 0.45 且高于反方向（不写 = 0.45；只在 six 生效）
 # max_p_toxic = 0.5                 # 拍板：订单流有毒概率 ≤ 0.5（paper 不写 = 0.60；只在 six 生效）
 # predictor_weight = 0.2            # 预测员意见占几成：只有报 100% 才算看涨，与卡方向一致把“做”加 权重×0.5（0.2 → +0.10），相反不扣；0 = 不听
@@ -193,3 +194,14 @@ against_loss_stop_frac = 0.5      # 已亏到 0.5 倍止损时也判 1 次就平
 against_meeting_count = 2         # 30 分钟内 2 次反向信号 → 申请单币临时会
 against_meeting_window_s = 1800
 against_meeting_gap_s = 3600      # 同一个币 60 分钟内最多申请 1 次
+
+# 按信号类型单独定“做”的门槛（不写 = 所有类型都用上面的 min_p_take）。这一段要放在 fast_loop 那段的键后面。
+# 填 0 = 这类信号拍板人照常问、照常记，“做”概率不再拦；其余风控（持仓笔数、同币持仓、敞口和每类币合计上限、
+# 每笔风险、止损、信号过期、作战卡、日亏熔断）照旧。类型名只能是哨兵的信号类型，写错拒绝启动。网页能改，热生效。
+# [fast_loop.min_p_take_by_kind]
+# btc_lead = 0.0
+
+# 按信号类型限制同时持仓笔数（不写 = 不单独限，只受 max_open_positions 和敞口上限约束）。
+# 这类信号开的在管持仓到了这个数，同类新信号就拒绝；0 = 这类信号不开仓。网页能改，热生效。
+# [fast_loop.max_open_by_kind]
+# btc_lead = 3

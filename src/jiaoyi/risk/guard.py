@@ -46,6 +46,7 @@ from jiaoyi.contracts import (
     RiskConfig,
     RiskVerdict,
     Side,
+    SignalKind,
     SizeTier,
 )
 from jiaoyi.contracts.common import Category
@@ -62,6 +63,14 @@ ENTRY_ZONE_SLACK_R = 0.1
 
 
 BANGKOK = ZoneInfo("Asia/Bangkok")
+
+
+def _kind_cap_reason(fast: FastLoopConfig, account: AccountState, kind: SignalKind) -> str | None:
+    cap = fast.max_open_by_kind.get(kind)
+    held = account.open_by_kind.get(kind, 0)
+    if cap is None or held < cap:
+        return None
+    return f"{kind.value} 信号开的仓已有 {held} 笔，达到这类上限 {cap} 笔"
 
 
 def session_factor(fast: FastLoopConfig, now: datetime) -> float:
@@ -437,6 +446,8 @@ class RiskGuardImpl:
             reasons.append("面板已暂停开新仓")
         if account.open_positions >= risk.max_open_positions:
             reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
+        if why := _kind_cap_reason(fast, account, signal.kind):
+            reasons.append(why)
         if signal.symbol in account.open_symbols:
             reasons.append(f"{signal.symbol} 已有在管持仓，不开第二笔（含反向）")
         if account.equity_usdt <= 0:
@@ -526,7 +537,10 @@ class RiskGuardImpl:
         """（回答不全 / 不对，概率没过门槛）。前者永远拦，后者「只记不拦」时只记。
 
         “做”概率和门槛比之前先按预测员挪一点（``predictor_weight``），原始值和挪后的值写进
-        ``detail``。"""
+        ``detail``。
+
+        The take floor is ``min_p_take_by_kind[signal.kind]`` when set, else ``min_p_take``;
+        a per-kind floor is recorded as ``take_floor_kind`` / ``take_floor`` in ``detail``."""
         fast = self._fast
         out: list[str] = []
         # 契约不保证 ok=True 的回复答全了：按配置的问法，该答的题必须都在，选项必须一模一样。
@@ -547,8 +561,17 @@ class RiskGuardImpl:
             a = jev.answer(q.value)
             return None if a is None else a.probs.get(choice)
 
+        take_floor = fast.min_p_take_by_kind.get(signal.kind)
+        take_note = ""
+        if take_floor is None:
+            take_floor = fast.min_p_take
+        else:
+            take_note = f"（{signal.kind.value} 单独门槛）"
+            if detail is not None:
+                detail["take_floor_kind"] = signal.kind.value
+                detail["take_floor"] = take_floor
         checks: tuple[tuple[EntryQuestion, str, float, str], ...] = (
-            (EntryQuestion.TAKE, "take", fast.min_p_take, "做"),
+            (EntryQuestion.TAKE, "take", take_floor, "做"),
         )
         if not one:
             checks = ((EntryQuestion.GENUINE, "real", fast.min_p_genuine, "真信号"), *checks)
@@ -566,7 +589,8 @@ class RiskGuardImpl:
             if v is None:
                 out.append(f"拍板人没回答“{q.value}”")
             elif v < floor:
-                out.append(f"“{cn}”概率 {v:.2f}{note} 低于门槛 {floor}")
+                kind_note = take_note if q == EntryQuestion.TAKE else ""
+                out.append(f"“{cn}”概率 {v:.2f}{note} 低于门槛 {floor}{kind_note}")
         if not one:
             tox = p(EntryQuestion.TOXICITY, "high")
             if tox is None:
@@ -640,6 +664,10 @@ class RiskGuardImpl:
             reasons.append(f"持仓已有 {account.open_positions} 笔，达到上限")
         if sym in account.open_symbols:
             reasons.append(f"{sym} 已有在管持仓")
+        if intent.signal_kind is not None and (
+            why := _kind_cap_reason(self._fast, account, intent.signal_kind)
+        ):
+            reasons.append(why)
         self._symbol_filters(sym, now, reasons)
         cs = card.for_symbol(sym) if card is not None and card.is_valid(now) else None
         why_blocked = self._blocked().get(sym) if self._blocked is not None else None
@@ -961,6 +989,7 @@ class RiskGuardImpl:
             limit_chase=limit is not None and fast.entry_limit_chase,
             intent_id=f"int-{uuid.uuid4().hex[:16]}",
             signal_id=signal.signal_id,
+            signal_kind=signal.kind,
             card_id=card.card_id,
             source_market_direction=(
                 card.current_market.regime_direction if card.current_market else None

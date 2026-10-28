@@ -302,7 +302,7 @@ def _jev_backtest(args: argparse.Namespace) -> int:
     )
     _say_rate_limited()
     rows = [r for r in outcomes.read_results(data_dir) if r.get("ts", "") >= since.isoformat()]
-    rep = outcomes.report(rows)
+    rep = outcomes.report(rows, [k.value for k in app_cfg.fast_loop.min_p_take_by_kind])
     path = outcomes.write_report(
         data_dir,
         rep,
@@ -420,7 +420,12 @@ def _gate_calibrate(args: argparse.Namespace) -> int:
         _say_rate_limited()
     rows = calibrate.load_rows(data_dir, calibrate.hold_minutes(hold), replay=not args.no_replay)
     result = calibrate.calibrate(
-        rows, hold=hold, now=now, min_above=args.min_above, min_samples=args.min_samples
+        rows,
+        hold=hold,
+        now=now,
+        min_above=args.min_above,
+        min_samples=args.min_samples,
+        own_floor_kinds=[k.value for k in app_cfg.fast_loop.min_p_take_by_kind],
     )
     path = calibrate.write(data_dir, result)
     for line in calibrate.render(result):

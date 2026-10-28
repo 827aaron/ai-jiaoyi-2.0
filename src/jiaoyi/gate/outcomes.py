@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,6 +65,8 @@ class Candidate:
     """信号种类（breakout / volume_surge…），校准分组用。"""
     stop_tier: str | None = None
     size_tier: str | None = None
+    take_floor_kind: str | None = None
+    """The signal kind whose own take floor judged this signal (``min_p_take_by_kind``)."""
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,17 @@ class Result:
     stop_tier: str | None = None
     """拍板人选的止损宽窄（narrow / mid / wide），校准分组用。"""
     size_tier: str | None = None
+    take_floor_kind: str | None = None
+
+
+def global_floor_rows(
+    rows: list[dict[str, Any]], own_floor_kinds: Iterable[str] = ()
+) -> list[dict[str, Any]]:
+    """Rows that speak for the global ``min_p_take``: a signal judged by its kind's own floor,
+    or of a kind that has one now, is left out, so a kind let through at low p does not drag
+    the global recommendation."""
+    own = set(own_floor_kinds)
+    return [r for r in rows if not r.get("take_floor_kind") and r.get("sig") not in own]
 
 
 def _num(x: Any) -> float | None:
@@ -188,6 +201,10 @@ def candidates(data_dir: str | Path, since: datetime, default_hold_min: int) -> 
                 sig=str(snap.get("sig") or "") or None,
                 stop_tier=str(detail["stop_tier"]) if detail.get("stop_tier") else None,
                 size_tier=str(detail["size_tier"]) if detail.get("size_tier") else None,
+                take_floor_kind=(
+                    str(rec.input.get("take_floor_kind") or detail.get("take_floor_kind") or "")
+                    or None
+                ),
             )
         )
     return res
@@ -246,6 +263,7 @@ def simulate(c: Candidate, bars: list[Kline], fee_bps: float) -> Result | None:
         stop_tier=c.stop_tier
         or (c.stop_src.split(":", 1)[1] if c.stop_src.startswith("jev:") else None),
         size_tier=c.size_tier,
+        take_floor_kind=c.take_floor_kind,
     )
 
 
@@ -348,8 +366,10 @@ def _best_threshold(rows: list[dict[str, Any]], key: str, above: bool) -> dict[s
     return best
 
 
-def report(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """按模板版本分开：做概率分桶 × 真信号 × 毒性（高/低）→ 笔数 / 胜率 / 平均 R，加门槛推荐。"""
+def report(rows: list[dict[str, Any]], own_floor_kinds: Iterable[str] = ()) -> dict[str, Any]:
+    """按模板版本分开：做概率分桶 × 真信号 × 毒性（高/低）→ 笔数 / 胜率 / 平均 R，加门槛推荐。
+
+    The threshold recommendation only uses ``global_floor_rows``; the tables keep every row."""
     out: dict[str, Any] = {}
     for tpl in sorted({str(r.get("template")) for r in rows}):
         sel = [r for r in rows if str(r.get("template")) == tpl]
@@ -360,7 +380,7 @@ def report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         by_take: dict[str, list[dict[str, Any]]] = {}
         for r in sel:
             by_take.setdefault(_bucket(r.get("p_take")), []).append(r)
-        all_r = [r for r in sel if r.get("r") is not None]
+        all_r = [r for r in global_floor_rows(sel, own_floor_kinds) if r.get("r") is not None]
         base = stats(all_r)
         take = _best_threshold(all_r, "p_take", above=True)
         real = _best_threshold(all_r, "p_real", above=True)
@@ -377,6 +397,7 @@ def report(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ],
             "recommend": {
                 "baseline_sum_r": base["sum_r"],
+                "own_floor_excluded": len(sel) - len(global_floor_rows(sel, own_floor_kinds)),
                 "min_p_take": take,
                 "min_p_real": real,
                 "toxicity_below": toxic,

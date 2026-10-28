@@ -765,3 +765,144 @@ def test_bracket_below_binding_card_leverage_rejects(now: datetime) -> None:
     v = g.review(signal(now), jev(), card(now, leverage={"min": 3, "max": 3}), account(now), now)
     assert not v.approved
     assert "币安 BTCUSDT 杠杆上限 2x 低于作战卡杠杆下限 3.0" in v.reasons
+
+
+def _kind_guard(by_kind: dict[str, float], log: JsonlDecisionLog | None = None) -> _Guard:
+    cfg = c.FastLoopConfig.model_validate(
+        {**FAST.model_dump(mode="json"), "min_p_take_by_kind": by_kind}
+    )
+    rec = RoleRecorder(c.Role.RISK_GUARD, log) if log is not None else None
+    return _Guard(RISK, cfg, Lots(), rec)
+
+
+def _kind_case(
+    now: datetime, side: c.Side, kind: c.SignalKind, p: float
+) -> tuple[c.CandidateSignal, c.JevResponse, c.BattleCard]:
+    sig = signal(now, side=side, kind=kind)
+    j = jev(take={"take": p, "skip": round(1 - p, 4)})
+    return sig, j, card(now, bias="both", allowed_signals=[k.value for k in c.SignalKind])
+
+
+_SIDES = pytest.mark.parametrize("side", [c.Side.LONG, c.Side.SHORT])
+
+
+@_SIDES
+def test_review_take_by_kind_default_uses_global_floor(now: datetime, side: c.Side) -> None:
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.2)
+    v = guard().review(sig, j, cd, account(now), now)
+    assert not v.approved
+    assert v.reasons == ["“做”概率 0.20 低于门槛 0.55"]
+
+
+@_SIDES
+def test_review_take_by_kind_zero_lets_low_p_through_and_records_it(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.2)
+    v = _kind_guard({"btc_lead": 0.0}, log).review(sig, j, cd, account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.side == side
+    (rec,) = log.read_day(now.date().isoformat())
+    assert rec.input["kind"] == "btc_lead"
+    assert rec.output["detail"]["take_floor_kind"] == "btc_lead"
+    assert rec.output["detail"]["take_floor"] == 0.0
+
+
+@_SIDES
+def test_review_take_by_kind_keeps_other_guard_checks(now: datetime, side: c.Side) -> None:
+    g = _kind_guard({"btc_lead": 0.0})
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.2)
+    held = account(now, open_positions=1, open_symbols=[sig.symbol])
+    full = account(now, open_positions=RISK.max_open_positions)
+    stale = sig.model_copy(update={"ts": now - timedelta(seconds=60)})
+    no_kind = card(now, bias="both", allowed_signals=["volume_breakout"])
+    assert g.review(sig, j, cd, held, now).reasons == ["BTCUSDT 已有在管持仓，不开第二笔（含反向）"]
+    assert g.review(sig, j, cd, full, now).reasons == [
+        f"持仓已有 {RISK.max_open_positions} 笔，达到上限"
+    ]
+    assert any("秒作废" in r for r in g.review(stale, j, cd, account(now), now).reasons)
+    assert g.review(sig, j, no_kind, account(now), now).reasons == ["作战卡不允许 btc_lead 信号"]
+    assert g.review(sig, jev(ok=False), cd, account(now), now).reasons == ["拍板人不可用：超时"]
+
+
+@_SIDES
+def test_review_take_by_kind_leaves_other_kinds_on_global_floor(
+    now: datetime, side: c.Side
+) -> None:
+    sig, j, cd = _kind_case(now, side, c.SignalKind.VOLUME_BREAKOUT, 0.2)
+    v = _kind_guard({"btc_lead": 0.0}).review(sig, j, cd, account(now), now)
+    assert v.reasons == ["“做”概率 0.20 低于门槛 0.55"]
+
+
+@_SIDES
+def test_review_take_by_kind_can_be_stricter(now: datetime, side: c.Side) -> None:
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.6)
+    v = _kind_guard({"btc_lead": 0.7}).review(sig, j, cd, account(now), now)
+    assert v.reasons == ["“做”概率 0.60 低于门槛 0.7（btc_lead 单独门槛）"]
+
+
+@pytest.mark.parametrize(
+    ("by_kind", "msg"), [({"not_a_kind": 0.0}, "not_a_kind"), ({"btc_lead": 1.5}, "less than")]
+)
+def test_fast_loop_take_by_kind_rejects_unknown_kind_and_bad_p(
+    by_kind: dict[str, float], msg: str
+) -> None:
+    with pytest.raises(ValueError, match=msg):
+        c.FastLoopConfig.model_validate(
+            {**FAST.model_dump(mode="json"), "min_p_take_by_kind": by_kind}
+        )
+
+
+def _cap_guard(caps: dict[str, int]) -> _Guard:
+    cfg = c.FastLoopConfig.model_validate(
+        {**FAST.model_dump(mode="json"), "max_open_by_kind": caps}
+    )
+    return _Guard(RISK, cfg, Lots())
+
+
+@_SIDES
+def test_review_open_by_kind_caps_concurrent_positions_of_that_kind(
+    now: datetime, side: c.Side
+) -> None:
+    g = _cap_guard({"btc_lead": 2})
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    one = account(now, open_positions=1, open_by_kind={"btc_lead": 1})
+    two = account(now, open_positions=2, open_by_kind={"btc_lead": 2, "oi_follow": 3})
+    v = g.review(sig, j, cd, one, now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.signal_kind is c.SignalKind.BTC_LEAD
+    assert g.review(sig, j, cd, two, now).reasons == [
+        "btc_lead 信号开的仓已有 2 笔，达到这类上限 2 笔"
+    ]
+    other, j2, _ = _kind_case(now, side, c.SignalKind.VOLUME_BREAKOUT, 0.8)
+    assert g.review(other, j2, cd, two, now).approved
+    assert guard().review(sig, j, cd, two, now).approved  # default: no per-kind cap
+
+
+@_SIDES
+def test_review_open_by_kind_zero_blocks_kind(now: datetime, side: c.Side) -> None:
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    v = _cap_guard({"btc_lead": 0}).review(sig, j, cd, account(now), now)
+    assert v.reasons == ["btc_lead 信号开的仓已有 0 笔，达到这类上限 0 笔"]
+
+
+@_SIDES
+def test_recheck_chase_applies_open_by_kind(now: datetime, side: c.Side) -> None:
+    g = _cap_guard({"btc_lead": 1})
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    v = g.review(sig, j, cd, account(now), now)
+    assert v.intent is not None
+    held = account(now, open_positions=1, open_by_kind={"btc_lead": 1})
+    assert g.recheck_chase(v.intent, cd, held, now) == [
+        "btc_lead 信号开的仓已有 1 笔，达到这类上限 1 笔"
+    ]
+    assert g.recheck_chase(v.intent, cd, account(now), now) == []
+
+
+def test_fast_loop_open_by_kind_rejects_unknown_kind_and_negative() -> None:
+    for caps in ({"nope": 1}, {"btc_lead": -1}):
+        with pytest.raises(ValueError):
+            c.FastLoopConfig.model_validate(
+                {**FAST.model_dump(mode="json"), "max_open_by_kind": caps}
+            )

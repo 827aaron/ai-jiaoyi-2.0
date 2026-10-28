@@ -55,6 +55,21 @@ def test_recommends_threshold_that_clears_cost_line() -> None:
     assert "不自动套用" in res["note"]
 
 
+def test_calibrate_leaves_own_floor_kinds_out_of_the_scan() -> None:
+    base = _rows()
+    # low-p signals that win: counted, they would pull the take floor down
+    lead = [_row(1000 + i, 0.1, 0.5, 1.5, source="live", sig="btc_lead") for i in range(300)]
+    tagged = [{**r, "sig": "oi_follow", "take_floor_kind": "oi_follow"} for r in lead[:100]]
+    mixed = calibrate.calibrate(base + lead, hold="2h", now=NOW)
+    assert mixed["recommended"]["p_take"] < 0.3
+    res = calibrate.calibrate(
+        base + lead + tagged, hold="2h", now=NOW, own_floor_kinds=["btc_lead"]
+    )
+    assert res["samples"] == 600 and res["own_floor_excluded"] == 400
+    assert 0.3 <= res["recommended"]["p_take"] <= 0.5
+    assert "没算进总门槛" in "\n".join(calibrate.render(res))
+
+
 def test_too_few_samples_gives_table_only() -> None:
     res = calibrate.calibrate(_rows(200), hold="2h", now=NOW, min_above=50)
     assert res["recommended"] is None and "样本不足" in res["note"]

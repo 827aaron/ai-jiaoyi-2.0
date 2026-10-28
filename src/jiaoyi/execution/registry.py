@@ -225,6 +225,17 @@ class TrackedPosition(BaseModel):
             data.pop("close_detail", None)  # 已写进平仓记录和推送
         if not self.direct_close_outcomes or ended:
             data.pop("direct_close_outcomes", None)
+        # signal_kind (per-kind open caps) is only written where it is still counted, so a
+        # ledger is readable by older code unless a live position carries it; see
+        # scripts/signal_kind_rollback.py.
+        record = data.get("record")
+        if isinstance(record, dict) and (self.record.signal_kind is None or ended):
+            record.pop("signal_kind", None)
+        chase = data.get("chase")
+        if isinstance(chase, dict) and (
+            self.chase is None or self.chase.signal_kind is None or ended
+        ):
+            chase.pop("signal_kind", None)
         return data
 
 

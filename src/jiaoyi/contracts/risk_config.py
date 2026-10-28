@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 
 from pydantic import Field, model_validator
 
 from jiaoyi.alerting.kinds import KINDS, field_of
-from jiaoyi.contracts.common import Category, Contract, RunMode
+from jiaoyi.contracts.common import Category, Contract, Probability, RunMode, SignalKind
 
 # 两套各选各的档位，各档的跨模块默认值见 ``jiaoyi.core.profiles``
 MeetingInterval = Literal["15m", "30m", "1h", "2h", "6h", "12h", "24h"]  # 军师团开会间隔
@@ -222,6 +222,21 @@ class FastLoopConfig(Contract):
         le=1.0,
         description="拍板人：做的把握至少多少。一道题问法下这是唯一的放行门槛"
         "（Aaron 10-24 定 0.55），预测员的加减分加在这个概率上。",
+    )
+    min_p_take_by_kind: dict[SignalKind, Probability] = Field(
+        default_factory=dict,
+        description="按信号类型单独定“做”的门槛，例如 btc_lead = 0.0：这类信号拍板人照常问、"
+        "照常记，“做”概率不再拦，其余风控（持仓笔数、同币持仓、敞口和分组上限、每笔风险、止损、信号过期、"
+        "作战卡、日亏熔断）照旧。没写的类型用 min_p_take。不写 = 全部用 min_p_take。"
+        "同一次 BTC 大动会在多个小币上同时触发 btc_lead，这些仓由持仓笔数、总敞口和 "
+        "max_open_by_kind 封顶。",
+    )
+    max_open_by_kind: dict[SignalKind, Annotated[int, Field(ge=0, le=100)]] = Field(
+        default_factory=dict,
+        description="按信号类型限制同时持仓笔数，例如 btc_lead = 3：这类信号开的在管持仓"
+        "（含开仓中、平仓中）到了这个数，同类新信号就拒绝；0 = 这类信号不开仓。"
+        "没写的类型不单独限，仍受 max_open_positions 和各项敞口上限约束。"
+        "升级前开的仓记不得类型，不计入。",
     )
     predictor_nudge_mode: Literal["card_agree", "symmetric"] = Field(
         default="card_agree",

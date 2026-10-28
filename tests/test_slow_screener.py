@@ -371,3 +371,27 @@ async def test_screen_ignores_venue_list_missing_most_passing_symbols(
     pool = await scr.screen(now)
     assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT", "PUMPUSDT"]
     assert pool.venue_excluded == {"CCCUSDT": "无下单精度", "DDDUSDT": "无下单精度"}
+
+
+async def test_screen_still_excludes_at_exactly_half_without_lot_rules(now: datetime) -> None:
+    syms = ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]
+    _, lots = _venue_lots(now, ["AAAUSDT", "BBBUSDT"])
+    assert await lots.refresh()
+    scr = CodeSymbolScreener(FakeSource([stat(x) for x in syms]), ScreenerConfig())
+    scr.set_venue(lots, "Demo")
+    pool = await scr.screen(now)
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "BBBUSDT"]
+    assert pool.venue_excluded == {"CCCUSDT": "无下单精度", "DDDUSDT": "无下单精度"}
+
+
+async def test_screen_venue_ratio_counts_only_hard_filter_passing_symbols(now: datetime) -> None:
+    thin = [stat(f"THIN{i}USDT", quote_volume_24h_usdt=1e6) for i in range(3)]
+    src = FakeSource([stat("AAAUSDT"), stat("CCCUSDT"), stat("DDDUSDT"), *thin])
+    _, lots = _venue_lots(now, ["AAAUSDT", *(s.symbol for s in thin)])
+    assert await lots.refresh()
+    scr = CodeSymbolScreener(src, ScreenerConfig())
+    scr.set_venue(lots, "Demo")
+    pool = await scr.screen(now)
+    # 2 / 3 passing coins lack lot rules (2 / 6 if the thin ones counted): treated as partial
+    assert sorted(e.symbol for e in pool.in_pool) == ["AAAUSDT", "CCCUSDT", "DDDUSDT"]
+    assert pool.venue_excluded == {}

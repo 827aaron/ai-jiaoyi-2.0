@@ -516,6 +516,7 @@ def create_app(
         page = build_team(
             files, clock(), picked, ac.predictor.mode, th,
             desk_schedule=schedule, desk_selected=desk_selected,
+            gate_take_by_kind={k.value: v for k, v in fl.min_p_take_by_kind.items()},
         )  # fmt: skip
         return page.model_copy(update={"prompts": prompts_info(files)})
 

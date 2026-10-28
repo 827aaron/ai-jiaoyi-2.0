@@ -278,7 +278,9 @@ def candidate(
     p_take = p(EntryQuestion.TAKE, "take")
     p_real = p(EntryQuestion.GENUINE, "real")
     p_toxic = p(EntryQuestion.TOXICITY, "high")
-    passes = (p_take or 0.0) >= fast.min_p_take
+    own_floor = fast.min_p_take_by_kind.get(sig.kind)
+    floor = fast.min_p_take if own_floor is None else own_floor
+    passes = (p_take or 0.0) >= floor
     if resp.answer(EntryQuestion.GENUINE.value) is not None:  # 旧 6 道题：真 / 毒门槛也看
         passes = (
             passes
@@ -304,6 +306,7 @@ def candidate(
         template_fp=template_fingerprint(),
         model=resp.model_version,
         sig=sig.kind.value,
+        take_floor_kind=sig.kind.value if own_floor is not None else None,
     )
 
 
@@ -395,7 +398,8 @@ async def run(
     with (out / "outcomes.jsonl").open("w", encoding="utf-8") as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-    rep = outcomes.report(rows)
+    own = [k.value for k in fast.min_p_take_by_kind]
+    rep = outcomes.report(rows, own)
     passed = [r for r in rows if not r["gate_would_block"]]
     meta: dict[str, Any] = {
         "generated_at": now.isoformat(),
@@ -403,7 +407,7 @@ async def run(
         "symbols": [s for s, _ in symbols],
         "hold_min": hold_min,
         "hold": hold,
-        "grid": grid(rows),
+        "grid": grid(outcomes.global_floor_rows(rows, own)),
         "signals_found": len(found),
         "asked": len(answered),
         "jev_calls": calls_n,

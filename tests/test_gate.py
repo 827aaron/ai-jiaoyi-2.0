@@ -242,14 +242,27 @@ async def test_entry_gate_logs(tmp_path: Path, now: datetime) -> None:
     log = JsonlDecisionLog(tmp_path)
     t = MockJevTransport(answer=answer_with(GOOD_LONG))
     gate = JevEntryGate(model(t), RoleRecorder(c.Role.GATE, log))
-    await gate.evaluate(signal(now), card(now), now)
+    await gate.evaluate(signal(now, kind=c.SignalKind.BTC_LEAD), card(now), now)
     t.fail = RuntimeError("down")
     await gate.evaluate(signal(now), card(now), now)
     recs = log.read_day(now.date().isoformat())
     assert [r.outcome for r in recs] == [c.Outcome.INFO, c.Outcome.ERROR]
+    assert [r.input["signal_kind"] for r in recs] == ["btc_lead", "volume_breakout"]
     assert "门槛由风控员判定" in recs[0].summary
     assert recs[0].cost_usd > 0 and recs[0].input["jev"]["snapshot"]
     assert recs[1].output["jev"]["answers"] == {}
+
+
+async def test_entry_gate_records_per_kind_take_floor(tmp_path: Path, now: datetime) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    t = MockJevTransport(answer=answer_with(GOOD_LONG))
+    floors = {c.SignalKind.BTC_LEAD: 0.0}
+    gate = JevEntryGate(model(t), RoleRecorder(c.Role.GATE, log), take_floor=floors.get)
+    await gate.evaluate(signal(now, kind=c.SignalKind.BTC_LEAD), card(now), now)
+    await gate.evaluate(signal(now), card(now), now)
+    a, b = log.read_day(now.date().isoformat())
+    assert (a.input["take_floor_kind"], a.input["take_floor"]) == ("btc_lead", 0.0)
+    assert "take_floor" not in b.input and "take_floor_kind" not in b.input
 
 
 def test_snapshot_is_compact_json(now: datetime) -> None:
