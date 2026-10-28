@@ -74,6 +74,9 @@ from jiaoyi.keeper.assistant import (
     TransportScorer,
     ws_snapshot_provider,
 )
+from jiaoyi.keeper.assistant import (
+    SnapshotProvider as AssistantSnapshot,
+)
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -377,6 +380,17 @@ ATR_INTERVAL = {
     240: Interval.H4,
 }
 MAX_REST_KLINES = 1500
+ASSISTANT_SNAPSHOT_WAIT_S = 2.0
+ASSISTANT_NEED = (
+    "ret_1m",
+    "ret_5m",
+    "realized_vol_5m",
+    "taker_buy_ratio_1m",
+    "cvd_30s_usdt",
+    "vol_ratio_1m",
+    "vol_ratio_10s",
+)
+"""管家助手快照里用到的成交窗口字段；爆仓类不要（REST 补不出来，要了就永远没预热）。"""
 
 
 def _direct_klines(
@@ -538,7 +552,11 @@ class Runner:
         self._last_screen = self.app.clock()
         await self.refresh_positions()
         self._card_published()  # 启动已恢复的有效反向卡不等第一轮30秒巡检。
-        await self.sync_watch()
+        if self._rest_warm_on():
+            # 回填进了共用预算会排队：放后台，保护 / 对账 / 管家这些循环马上起来
+            self._spawn(self.sync_watch())
+        else:
+            await self.sync_watch()
         # 重启后先拉一轮公告，下架封禁在第一个信号之前就生效
         try:
             await self.news_tick()
@@ -801,7 +819,7 @@ class Runner:
             close_source=lambda pid: (
                 close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
             ).get("source"),
-            snapshot_provider=ws_snapshot_provider(self.m.features.snapshot, app.clock),
+            snapshot_provider=self._assistant_snapshot(),
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
@@ -818,6 +836,37 @@ class Runner:
                 ),
             )
         return assistant
+
+    def _assistant_snapshot(self) -> AssistantSnapshot:
+        """管家助手的行情：``rest_warm_start`` 开着时找行情层拿（旧了 / 没预热先从 REST 补，最多等
+        ``ASSISTANT_SNAPSHOT_WAIT_S``），关着照旧只读实时流。"""
+        ws = ws_snapshot_provider(self.m.features.snapshot, self.app.clock)
+        market = self.market
+        if market is None:
+            return ws
+
+        async def provide(
+            symbol: str, max_age_s: float
+        ) -> tuple[FeatureSnapshot | None, str, float | None]:
+            if not market.on:
+                return await ws(symbol, max_age_s)
+            try:
+                read = await asyncio.wait_for(
+                    market.snapshot(symbol, max_age_s=max_age_s, need=ASSISTANT_NEED),
+                    ASSISTANT_SNAPSHOT_WAIT_S,
+                )
+            except TimeoutError:
+                f = self.m.features.snapshot(symbol)
+                age = (self.app.clock() - f.ts).total_seconds() if f is not None else None
+                return None, "stale", age
+            if read.source != "stale":
+                return read.snapshot, read.source, read.age_s
+            if read.snapshot is None:
+                return None, "没有这个币的行情快照", None
+            old = read.age_s is not None and read.age_s > max_age_s
+            return None, "stale" if old else "cold", read.age_s
+
+        return provide
 
     def _assistant_close(self, pos: PositionRecord, reason: str) -> str | None:
         """管家助手要平：过管家同一道平仓前检查，经正常平仓路径另起任务去平（同一笔在平 / 已平
@@ -1232,14 +1281,23 @@ class Runner:
             if watch == self._watched:
                 return
             added = sorted(watch - (self._watched or set()))
-            await self.backfill(added)
+            warm = self._rest_warm_on()
+            first = [s for s in (BTC, *sorted(held)) if s in added] if warm else []
+            if first and len(first) < len(added):
+                # 开着时回填排在共用预算里，几十个币要一两分钟：BTC 和持仓币先回填先订上，
+                # 管家和巡逻兵不用等其余的币
+                await self.backfill(first)
+                await feed.subscribe(sorted((watch & (self._watched or set())) | set(first)))
+            await self.backfill([s for s in added if s not in first])
             # 空集也订一次：全市场强平那条连接要开着（选币用）
             await feed.subscribe(sorted(watch))
             self._watched = watch
-            if added and self.market is not None and self.market.on and not is_stub(feed):
+            if added and warm and self.market is not None:
                 # 订上之后再补成交：实时流先开始收，REST 补的那段才接得上，不留空档
-                first = [s for s in (BTC, *sorted(held)) if s in added]
                 self._spawn(self.market.warm([*first, *added]))
+
+    def _rest_warm_on(self) -> bool:
+        return self.market is not None and self.market.on and not is_stub(self.m.feed)
 
     def on_contract_info(self, info: ContractInfo) -> None:
         """币安合约信息推送：盯着的币 / 候选池的币 / 持仓的币。
@@ -1288,6 +1346,11 @@ class Runner:
         executor = self.m.executor
         if not isinstance(executor, _ChaseHook):
             return
+        if self.market is not None:
+            # 锁外补：补拉最多等几秒，不能让别的信号跟着排在开仓锁后面
+            await self.market.refresh(
+                intent.symbol, self.app.app_cfg.fast_loop.chase_price_max_age_s or None
+            )
         async with self._open_lock:
             now = self.app.clock()
             try:
@@ -1328,10 +1391,6 @@ class Runner:
         if not isinstance(self.m.risk, _ChaseRecheck):
             return [*why, "风控员不支持追单复核"]
         account = await self.m.executor.account()
-        if self.market is not None:
-            await self.market.refresh(
-                intent.symbol, self.app.app_cfg.fast_loop.chase_price_max_age_s or None
-            )
         now = self.app.clock()
         card = self.m.cards.current(now)
         direction = card.current_market.regime_direction if card and card.current_market else None

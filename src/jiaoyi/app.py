@@ -775,6 +775,7 @@ def build_modules(
                 if market is not None
                 else None
             ),
+            clock=clock,
         )
 
     modules = Modules(
@@ -1277,6 +1278,10 @@ class App:
             m.risk.set_record_only(cfg.gate_record_only)
         if "fast_loop.book_depth_levels" in changed and hasattr(m.features, "set_depth_levels"):
             m.features.set_depth_levels(fast.book_depth_levels)
+        if "fast_loop.rest_warm_start" in changed and not fast.rest_warm_start:
+            forget = getattr(m.features, "forget_rest", None)
+            if callable(forget):
+                forget()
         if hasattr(m.trigger, "refresh"):
             m.trigger.refresh(cfg.signal_dedup_s)
         if hasattr(m.gate, "reconfigure"):

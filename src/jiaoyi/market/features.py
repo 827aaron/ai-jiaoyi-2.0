@@ -539,6 +539,7 @@ class RollingFeatureEngine:
         才换。爆仓没有 REST 历史，这里不碰。"""
         st = self._state(symbol)
         rows = sorted(((_ts(tr.ts), tr) for tr in trades if tr.symbol == symbol), key=_first)
+        self._drop_before_segment(st)
         # 成交 5 分钟、逐秒价 301 秒、成交流 1 小时各留各的：边界按三者里最早 / 最晚的算，免得补进
         # 成交流已有的秒（重复记）或插到比它新的秒前面（乱序）。逐秒的桶只知道是哪一秒，同一秒的不补
         heads = [d[0][0] for d in (st.trades, st.prices, st.flow) if d]
@@ -569,6 +570,23 @@ class RollingFeatureEngine:
             st.rest_last = max(st.rest_last or -math.inf, _ts(mark.ts))
         self._cover(st, covered_from, fetched_at)
         self._prune(st)
+
+    def _drop_before_segment(self, st: _SymbolState) -> None:
+        """丢掉当前这段连续行情（实时流 + 接得上的 REST 覆盖）之前的成交、逐秒价和成交流。
+
+        币退订后一小时内又订上（或断流 5 分钟以上重连）：成交流还留着上一段的秒，拿它当已有
+        数据的起点，最近 5 分钟的 REST 成交会被当成「中间那段」整段丢掉，覆盖却照样接上，
+        ``ret_5m`` 读 0（#390 同一类假信号）。"""
+        span = self._span(st)
+        start = span[0] if span is not None else st.live_since
+        if start is None:
+            return
+        sec = math.floor(start)
+        while st.trades and st.trades[0][0] < start:
+            st.trades.popleft()
+        for dq in (st.prices, st.flow):
+            while dq and dq[0][0] < sec:
+                dq.popleft()
 
     @staticmethod
     def _prepend(st: _SymbolState, trades: list[Trade]) -> None:
@@ -620,6 +638,12 @@ class RollingFeatureEngine:
             else:
                 merged.append((a, b))
         st.cov_since, st.cov_last = merged[-1]
+
+    def forget_rest(self) -> None:
+        """``rest_warm_start`` 热关掉时调：已补的覆盖不再算预热（``trade_s`` 消失），回到只看
+        ``live_s``；已经并进来的成交本身是真的，留着。"""
+        for st in self._s.values():
+            st.cov_since = st.cov_last = st.rest_until = st.rest_last = None
 
     def trade_cover(self, symbol: str) -> tuple[float, float] | None:
         """(起, 止)：这个币的成交窗口从哪一秒到哪一秒是全的；什么都没有返回 None。"""

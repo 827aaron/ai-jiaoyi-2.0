@@ -27,6 +27,7 @@ from tests.fastloop_helpers import FakeMarketRest
 def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rest, "_own", None)
     monkeypatch.setattr(rest, "_used_weight", None)
+    monkeypatch.setattr(rest, "_used_minute", None)
 
 
 def _http_error(code: int, retry_after: str | None, body: bytes = b"") -> urllib.error.HTTPError:
@@ -286,9 +287,14 @@ def test_budget_backs_off_when_ip_is_busy(monkeypatch: pytest.MonkeyPatch) -> No
     async def sleep(s: float) -> None:
         slept.append(s)
 
-    monkeypatch.setattr(rest, "_used_weight", 1500)  # 同机交易程序已用了一大半
-    asyncio.run(rest.WeightBudget(100, sleep=sleep).take(2))
-    assert len(slept) == 1 and rest._used_weight is None
+    rest.note_used_weight("1500")  # 同机交易程序已用了一大半
+    budget = rest.WeightBudget(100, sleep=sleep)
+    asyncio.run(budget.take(2))
+    assert len(slept) == 1
+    # 读数不清掉：同一分钟里这份预算不再等，慢环的闸也还看得到
+    asyncio.run(budget.take(2))
+    assert len(slept) == 1 and rest.used_weight_now() is not None
+    assert rest.ip_busy(None) is not None
 
 
 def test_klines_limit_sized_to_window(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -433,7 +439,7 @@ async def test_market_data_startup_stagger_respects_the_weight_cap(
     md, fake, _ = _market(
         symbols, now, budget=budget, on_call=lambda p, q, w: sent.append((t[0], w))
     )
-    monkeypatch.setattr(rest, "_used_weight", 1500)  # 同 IP 别的程序这一分钟已用过半：先等
+    rest.note_used_weight("1500")  # 同 IP 别的程序这一分钟已用过半：先等
     await md.warm(symbols)
     assert fake.agg_calls() == 60 and sum(w for _, w in sent) == 60 * 21
     assert sent[0][0] > 0

@@ -146,6 +146,7 @@ class JevKeeper:
         alerter: Alerter | None = None,
         kronos_snapshot: KronosSnapshot = "direction",
         refresh: Callable[[str], Awaitable[None]] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -162,7 +163,8 @@ class JevKeeper:
         （``"replacing"``）时返回（种类, 身份, 说明），身份用来起算等待（换代 = 保护代数），
         这时管家不发平仓请求。``alerter``：执行所标记价连续读不到时告警。
         ``refresh(币)``：复查读行情前先让行情层把旧了的快照从 REST 补新（``rest_warm_start``）；
-        补不上照旧按「行情已旧」处理。None = 不补。"""
+        补不上照旧按「行情已旧」处理。None = 不补。``clock``：补完再读一次「现在」（补拉最多等
+        几秒，按进来时的时间算行情年龄会偏小）；None = 用调用方给的时间。"""
         self._frozen_peak_review = frozen_peak_review
         self._model = model
         self._sleep = sleep
@@ -202,6 +204,7 @@ class JevKeeper:
         self._stale_logged: set[str] = set()  # 这段断流已记过「行情已旧」的持仓，不刷屏
         self._venue_price = venue_price
         self._refresh = refresh
+        self._clock = clock
         self._exit_in_flight = exit_in_flight
         self._thesis: dict[str, tuple[datetime, float]] = {}  # 最近一次 Jev thesis_intact 的 no
         self._close_sent: dict[str, datetime] = {}  # 上一次发出平仓请求的时刻
@@ -461,6 +464,8 @@ class JevKeeper:
                 await self._refresh(position.symbol)
             except Exception:
                 log.warning("%s 复查前补行情失败，按手上的行情判", position.symbol, exc_info=True)
+            if self._clock is not None:
+                now = max(now, self._clock())
         f = self._features(position.symbol)
         price = await self._price_inputs(position, f, now)
         votes.append({"rule": "price", "vote": price["vote"]})

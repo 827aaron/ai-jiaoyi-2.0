@@ -119,6 +119,8 @@ _own: RateLimited | None = None
 the file is never written back, so deleting a bad file clears it everywhere."""
 _used_weight: int | None = None
 """最近一次响应头里本 IP 这一分钟已用的权重（含同机交易程序）。"""
+_used_minute: int | None = None
+"""那次读数是哪一分钟（Unix 分钟）：币安按自然分钟清零，过了这一分钟读数就不算数。"""
 _ban_path: Path | None = None
 """Ban file shared across processes; None keeps the ban in this process only."""
 _FileKey = tuple[int, int, int]
@@ -337,35 +339,45 @@ def mark_blocked(status: int, headers: Any, body: str | bytes | None = None) -> 
 
 def reset_ban_state() -> None:
     """Forget every ban, the shared file path and its cache in this process (tests, ``reset``)."""
-    global _blocked, _own, _used_weight, _ban_path
+    global _blocked, _own, _used_weight, _used_minute, _ban_path
     with _ban_lock:
         _blocked = _own = None
-        _used_weight = None
+        _used_weight = _used_minute = None
         _ban_path = None
         _seen.clear()
         _warned.clear()
 
 
-def note_used_weight(header: str | None) -> None:
+def note_used_weight(header: str | None, now: float | None = None) -> None:
     """记下响应头 ``X-MBX-USED-WEIGHT-1M``（本 IP 这一分钟已用权重，含同机其他程序）。"""
-    global _used_weight
+    global _used_weight, _used_minute
     _used_weight = int(header) if header and header.isdigit() else None
+    _used_minute = int((time.time() if now is None else now) // 60)
 
 
-def take_used_weight() -> int | None:
-    """取走并清掉最近的已用权重读数（清掉是为了等过一个窗口后不再重复等）。"""
-    global _used_weight
-    used, _used_weight = _used_weight, None
-    return used
+def used_weight_now(now: float | None = None) -> tuple[int, int] | None:
+    """（本 IP 这一分钟已用权重，那一分钟）；读数不是这一分钟的返回 None。
+
+    只读不清：慢环的闸和快环的预算都要看到同一个读数，各自记下「这一分钟已经等过」。"""
+    minute = int((time.time() if now is None else now) // 60)
+    if _used_weight is None or _used_minute != minute:
+        return None
+    return _used_weight, minute
+
+
+def ip_busy(waited: int | None, now: float | None = None) -> int | None:
+    """本 IP 这一分钟已用过半、而且这一分钟还没等过：返回该记下的分钟（调用方等到下一分钟）。"""
+    reading = used_weight_now(now)
+    if reading is None or reading[0] <= IP_WEIGHT_PER_MIN // 2 or reading[1] == waited:
+        return None
+    return reading[1]
 
 
 def _get(url: str, timeout_s: float) -> list[list[Any]]:
-    global _used_weight
     check_blocked()
     try:
         with urllib.request.urlopen(url, timeout=timeout_s) as resp:
-            used = resp.headers.get("X-MBX-USED-WEIGHT-1M")
-            _used_weight = int(used) if used and used.isdigit() else None
+            note_used_weight(resp.headers.get("X-MBX-USED-WEIGHT-1M"))
             data: list[list[Any]] = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code in DEFAULT_RETRY_AFTER_S:
@@ -401,14 +413,15 @@ class WeightBudget:
         self._sleep = sleep
         self._spent: deque[tuple[float, int]] = deque()
         self._lock = asyncio.Lock()
+        self._waited: int | None = None  # 已为哪一分钟的「本 IP 过半」等过
 
     async def take(self, weight: int) -> None:
-        global _used_weight
         async with self._lock:
             if self._check_ban:
                 check_blocked()
-            if _used_weight is not None and _used_weight > IP_WEIGHT_PER_MIN // 2:
-                _used_weight = None
+            busy = ip_busy(self._waited)
+            if busy is not None:
+                self._waited = busy
                 await self._sleep(60.0 - time.time() % 60.0 + 1.0)  # 等到币安下一分钟窗口
             while True:
                 now = self._clock()

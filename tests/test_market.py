@@ -516,6 +516,70 @@ async def test_rest_refresh_after_a_stall_counts_each_trade_once_in_the_hour_flo
     assert {b[1] + b[2] for b in flow} == {1000.0}  # 每秒一笔 1000 U，没有记两遍的秒
 
 
+@pytest.mark.parametrize(
+    ("first_s", "gap_min"),
+    [(120, 22), (600, 6)],
+    ids=["re-added symbol, old 1h flow still held", "reconnect after a gap over 5 minutes"],
+)
+def test_rest_seed_after_a_new_segment_reads_the_real_5m_move(first_s: int, gap_min: int) -> None:
+    eng = _engine(["SOLUSDT"])
+    t = T0 + timedelta(minutes=20)
+
+    def tr(at: datetime, px: float) -> c.Trade:
+        return c.Trade(symbol="SOLUSDT", ts=at, price=px, qty=1.0, taker_side=c.Side.LONG)
+
+    for s in range(first_s):
+        eng.update(tr(t + timedelta(seconds=s), 100.0))
+    back = t + timedelta(seconds=first_s, minutes=gap_min)
+    for s in range(5):  # 重新订上 / 重连：价格这 5 分钟已经从 100 走到 110
+        eng.update(tr(back + timedelta(seconds=s), 110.0))
+    fetched = back + timedelta(seconds=5)
+    rows = [tr(back + timedelta(seconds=s), 100.0 + 10.0 * (s + 301) / 306) for s in range(-301, 6)]
+    eng.seed_rest(
+        "SOLUSDT",
+        rows,
+        None,
+        covered_from=(fetched - timedelta(seconds=302)).timestamp(),
+        fetched_at=fetched.timestamp(),
+    )
+    snap = eng.snapshot("SOLUSDT")
+    assert snap is not None
+    assert snap.values["trade_s"] >= 300 and snap.values["ret_5m"] > 0.09
+    secs = [b[0] for b in eng._s["SOLUSDT"].flow]
+    assert secs == sorted(set(secs)) and secs[0] >= (back - timedelta(seconds=302)).timestamp()
+
+
+def test_forget_rest_drops_trade_s_but_keeps_the_trades() -> None:
+    eng = _engine(["SOLUSDT"])
+    t = T0 + timedelta(minutes=21)
+    rows = [
+        c.Trade(symbol="SOLUSDT", ts=t + timedelta(seconds=s), price=100.0, qty=1.0,
+                taker_side=c.Side.LONG)
+        for s in range(0, 300, 5)
+    ]  # fmt: skip
+    end = rows[-1].ts.timestamp()
+    eng.seed_rest("SOLUSDT", rows, None, covered_from=t.timestamp(), fetched_at=end)
+    snap = eng.snapshot("SOLUSDT")
+    assert snap is not None and snap.values["trade_s"] >= 295
+    eng.forget_rest()
+    snap = eng.snapshot("SOLUSDT")
+    assert snap is not None and "trade_s" not in snap.values and snap.values["trades_1m"] > 0
+
+
+async def test_market_data_trims_rest_trades_older_than_the_window() -> None:
+    """冷门币一页逐笔成交跨了几小时：只留 5 分钟窗口里的，覆盖也只从窗口起算。"""
+    now = T0 + timedelta(minutes=21)
+    eng = _engine(["FILUSDT"])
+    rows = _rest_trades("FILUSDT", now - timedelta(hours=3), now - timedelta(seconds=1), 60)
+    fake = FakeMarketRest({"FILUSDT": rows}, now=now)
+    md = MarketData(eng, enabled=lambda: True, clock=lambda: now, fetch=fake)
+    await md.seed("FILUSDT")
+    flow = list(eng._s["FILUSDT"].flow)
+    assert flow and flow[0][0] >= now.timestamp() - 302
+    snap = eng.snapshot("FILUSDT")
+    assert snap is not None and 300 <= snap.values["trade_s"] <= 302
+
+
 async def test_market_data_refresh_gives_up_waiting_for_a_busy_budget() -> None:
     now = T0 + timedelta(minutes=21)
     eng = _engine(["BTCUSDT"])

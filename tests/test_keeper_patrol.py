@@ -378,6 +378,16 @@ async def test_stale_price_is_refreshed_before_the_review(now: datetime) -> None
     v = await k.review(position(now), later)
     assert asked == ["BTCUSDT"] and "行情已旧" not in v.reason and len(t.calls) == 1
 
+    # 补拉要等几秒：行情年龄按补完以后的「现在」算，不按进来时的
+    slow = {"f": features(now)}
+
+    async def nothing(sym: str) -> None: ...
+
+    k2, _ = _stale_keeper(now, MockJevTransport(answer=close_p(0.7)), slow)
+    k2._refresh, k2._clock = nothing, lambda: now + timedelta(seconds=25)
+    v2 = await k2.review(position(now), now + timedelta(seconds=10))
+    assert "行情已旧 25 秒" in v2.reason
+
 
 async def test_stale_price_check_is_off_by_default(now: datetime) -> None:
     assert c.FastLoopConfig().keeper_price_max_age_s == 0
