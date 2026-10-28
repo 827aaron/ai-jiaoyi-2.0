@@ -59,9 +59,10 @@ def test_js_market_node_selects_market_role() -> None:
 const assert = require('node:assert/strict');
 const esc = String, clickable = (a, g = '') => `data-act="${a}" data-arg="${g}"`;
 const MARKET = '_MARKET', hms = () => '', hm = () => '', PROG_LABEL = {}, P = {};
-const TF_POS = { market: [1, 2] }, TF_LANES = [], TF_EDGES = [], TF_W = 1, TF_H = 1;
+const TF_POS = { market: [1, 2], desk: [3, 4] }, TF_LANES = [], TF_EDGES = [], TF_W = 1, TF_H = 1;
 const FLOW_ORDER = [], ROLES = [], QUIET_ROLE = {};
 let tfNowItems = [], data = null, pageData = null, window = {};
+const deskProgress = () => 'wait', tfDeskNode = () => 'D';
 const tfMarketNode = () => 'M', tfNowHtml = () => '', tfEdge = () => '';
 const againstEdges = () => [], predictorMeetingEdges = () => [], regimeFlipEdges = () => [];
 const promptLine = () => '', meetingsCard = () => '', quietHead = () => '', pill = () => '';
@@ -79,6 +80,12 @@ assert(/<a class="tf-node done on" href="#team\\/market"/.test(html), html);
 assert(html.includes('总盘会 · 最近做了什么') && html.includes('出作战卡 v3'), html);
 assert(html.includes('平均 1200 ms'), html);
 assert(html.includes('data-act="meeting" data-arg="_MARKET"'), html);  // 开会过程入口还在
+pageData = { ...pageData, selected: 'commander', selected_desk: true,
+  desk: { last_run_at: 5, error: null },
+  records: [{ ts: 0, outcome: 'action', text: '大盘台：看跌' }] };
+const dh = P.team();
+assert(/<a class="tf-node desk wait on" href="#team\\/desk"/.test(dh), dh);
+assert(dh.includes('大盘台 · 最近做了什么') && dh.includes('大盘台：看跌'), dh);
 """
     )
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)

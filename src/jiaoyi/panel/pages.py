@@ -148,6 +148,111 @@ class RoleCard(BaseModel):
     """哨兵：掉出作战卡、也没持仓、所以没显示的币数。"""
 
 
+class DeskInfo(BaseModel):
+    """大盘台（#336）的节点数据：``data/market_desk_state.json`` 加最近一条大盘台记录，只读。"""
+
+    mode: str
+    """``[market_desk] mode``：off / shadow / replace。"""
+    state: LampState
+    status: str
+    owner: Literal["desk", "flash"] | None = None
+    """现在谁管大盘方向；从没写过状态文件就是 None。"""
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    direction: str | None = None
+    probs: dict[str, float] | None = None
+    """最新结果 4 小时涨 / 平 / 跌的概率（up / flat / down）。"""
+    published_version: int | None = None
+    runs_today: int = 0
+    cost_today_usd: float = 0.0
+    error: str | None = None
+    stopped: str | None = None
+    """自停原因（日预算 / 余额不足）；不算故障。"""
+    summary: str | None = None
+
+
+def _aware(v: object) -> datetime | None:
+    if not isinstance(v, str):
+        return None
+    try:
+        t = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def build_desk(
+    files: PanelFiles,
+    now: datetime,
+    schedule: tuple[str, int, int] | None,
+    summary: str | None = None,
+) -> DeskInfo:
+    """``schedule`` = (mode, cadence_min, offset_min)，读不到配置就是 None（不显示下次）。
+    mode 为 off 且没有状态文件时返回 None 的话流程图没有这个节点，所以这里照样给一张 off 的卡。"""
+    raw = files._json(DESK_STATE_FILE)
+    st: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    mode = schedule[0] if schedule else "off"
+    last = _aware(st.get("last_run_at"))
+    nxt = None
+    if schedule and mode != "off":
+        _, cadence, offset = schedule
+        slot = int(now.timestamp() // 60 - offset) // cadence
+        if isinstance(st.get("last_slot"), int) and st["last_slot"] >= slot:
+            slot = st["last_slot"] + 1
+        nxt = datetime.fromtimestamp((slot * cadence + offset) * 60, tz=UTC)
+        if nxt < now:
+            nxt = now
+    latest_run = st.get("latest") if isinstance(st.get("latest"), dict) else None
+    probs = None
+    if latest_run is not None and isinstance(latest_run.get("probs_4h"), dict):
+        probs = {
+            k: float(v)
+            for k, v in latest_run["probs_4h"].items()
+            if k in ("up", "flat", "down") and isinstance(v, int | float)
+        }
+    version = latest_run.get("published_version") if latest_run else None
+    stopped = st.get("stopped")
+    stopped = stopped if isinstance(stopped, str) and stopped else None
+    err = st.get("last_error")
+    err = err if isinstance(err, str) and err else None
+    today = local_day(now, files.tz).isoformat()
+    fresh = st.get("cost_day") == today
+    state: LampState
+    if schedule is None and last is None:
+        state, text = "off", "未启用"
+    elif schedule is None:
+        state, text = "slow", "读不到配置"
+    elif mode == "off":
+        state, text = "off", "未启用"
+    elif stopped:
+        state, text = "slow", f"自停：{stopped}"
+    elif err:
+        state, text = "bad", f"失败：{err}"
+    elif last is None:
+        state, text = "slow", "等待首次运行"
+    elif schedule and now - last > timedelta(minutes=2 * schedule[1] + schedule[2]):
+        state, text = "bad", f"超过 {int((now - last).total_seconds() // 60)} 分钟没跑"
+    else:
+        state, text = "ok", f"正常（上次 {last.astimezone(ZoneInfo(files.tz)):%H:%M}）"
+    owner = st.get("owner")
+    return DeskInfo(
+        mode=mode,
+        state=state,
+        status=text,
+        owner=owner if owner in ("desk", "flash") else None,
+        last_run_at=last,
+        next_run_at=nxt,
+        direction=latest_run.get("direction") if latest_run else None,
+        probs=probs,
+        published_version=version if isinstance(version, int) else None,
+        runs_today=int(st.get("runs_today", 0)) if fresh else 0,
+        cost_today_usd=float(st.get("cost_today_usd", 0.0)) if fresh else 0.0,
+        error=err,
+        stopped=stopped,
+        summary=summary,
+    )
+
+
 class AgainstCheck(BaseModel):
     """一次反向信号急查：哨兵哪个时候看到什么，管家怎么判的（团队页管家卡固定显示 30 分钟）。"""
 
@@ -201,6 +306,8 @@ def prompts_info(files: PanelFiles) -> PromptsInfo | None:
 class TeamPage(BaseModel):
     roles: list[RoleCard]
     selected: Role
+    selected_desk: bool = False
+    """选中的是大盘台节点（``?role=desk``）：``selected`` 只是占位，``records`` 是大盘台的记录。"""
     records: list[TrailItem]
     """所选角色最新的记录（不分哪天），最新在前。"""
     meetings: list[MeetingSummary] = []
@@ -226,6 +333,8 @@ class TeamPage(BaseModel):
     """当前日志中最近一次已启动的大盘翻转整轮会；疑似、被拦不会画触发连线。"""
     against_checks: list[AgainstCheck] = []
     """最近 30 分钟叫管家急查的反向信号和管家的判断（新的在前），不被例行复查冲掉。"""
+    desk: DeskInfo | None = None
+    """大盘台节点；主程序没给配置也照给（mode = off 时是「未启用」）。"""
     prompts: PromptsInfo | None = None
     """军师团现在用的提示词档（团队页军师团 / 总盘会显示）。"""
 
@@ -500,6 +609,8 @@ def build_team(
     selected: Role | None,
     predictor_mode: Literal["on_demand", "all_symbols"] | None = None,
     gate_thresholds: dict[str, float] | None = None,
+    desk_schedule: tuple[str, int, int] | None = None,
+    desk_selected: bool = False,
 ) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -526,7 +637,11 @@ def build_team(
             card.detail = shown
         cards.append(card)
     chosen = selected or Role.GATE
-    if chosen is Role.MARKET:
+    desk_items = _desk_records(files, now)
+    if desk_selected:
+        chosen = Role.COMMANDER
+        mine = desk_items
+    elif chosen is Role.MARKET:
         mine = _market_records(files, now)
     else:
         got, _ = files.role_records(chosen, TEAM_RECORD_LIMIT, now)  # 最新 N 条，不分哪天
@@ -538,6 +653,7 @@ def build_team(
     return TeamPage(
         roles=cards,
         selected=chosen,
+        selected_desk=desk_selected,
         records=mine,
         meetings=meets,
         predictor_mode=predictor_mode,
@@ -549,6 +665,7 @@ def build_team(
         against=against,
         against_checks=_against_checks(against, records),
         predictor_meetings=_predictor_meetings(files, now),
+        desk=build_desk(files, now, desk_schedule, desk_items[0].text if desk_items else None),
         regime_flip=next(
             (
                 _item(r)
@@ -565,6 +682,15 @@ def build_team(
 
 
 _MARKET_SCAN = 2000
+
+
+DESK_STATE_FILE = "market_desk_state.json"
+
+
+def _desk_records(files: PanelFiles, now: datetime) -> list[TrailItem]:
+    """大盘台自己的记录：commander 下带 ``output.market_desk`` 的那几条（总盘会那边排除它们）。"""
+    got, _ = files.role_records(Role.COMMANDER, _MARKET_SCAN, now)
+    return [_item(r) for r in got if "market_desk" in r.output][:TEAM_RECORD_LIMIT]
 
 
 def _market_records(files: PanelFiles, now: datetime) -> list[TrailItem]:

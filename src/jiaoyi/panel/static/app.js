@@ -1548,12 +1548,12 @@ function entryMarkers(p, bars) {
    宽度不够整体缩放，手机上改成按泳道竖排。点 = 进度 + 健康：出错 > 正在做 > 这一轮做完 > 等待 */
 const TF_W = 1180, TF_H = 570, NODE_W = 168, NODE_H = 92;
 const TF_POS = {
-  screener: [10, 34], market: [250, 34], commander: [490, 34], card: [730, 34],
+  screener: [10, 34], market: [250, 34], desk: [490, 34], commander: [730, 34], card: [970, 34],
   book_reader: [10, 214], predictor: [250, 290], sentinel: [490, 214], gate: [730, 214], risk_guard: [970, 186], executor: [970, 300],
   alerting: [10, 446], reconciler: [250, 446], patrol: [490, 446], keeper: [730, 446], lifeboat: [970, 446],
 };
 const TF_LANES = [
-  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "market", "commander", "card"]],
+  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "market", "desk", "commander", "card"]],
   ["② 发现信号 → 下单", "几秒内走完", 166, 230, ["book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor"]],
   ["③ 看着持仓", "有仓位就一直盯", 412, 150, ["lifeboat", "keeper", "patrol", "reconciler", "alerting"]],
 ];
@@ -1564,11 +1564,13 @@ const tfB = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1] + NODE_H];
 // [起点, 终点, 终点角色（连线颜色跟它）, 标签, 弯法]
 const TF_EDGES = [
   [tfR("screener"), tfL("market"), "market", "候选池"],
-  [tfR("market"), tfL("commander"), "commander", "上会名单"],
+  [tfT("market"), tfT("commander"), "commander", "上会名单", "over"],
+  [tfR("desk"), tfL("commander"), "commander", "大盘方向"],
+  [[TF_POS.desk[0] + 40, TF_POS.desk[1] + NODE_H], [TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], "sentinel", "大盘方向"],
   [tfB("market"), tfT("book_reader"), "book_reader", "要盯的币", "gap"],
   [tfR("commander"), tfL("card"), "card", "写卡"],
   [tfB("card"), tfT("sentinel"), "sentinel", "关键价位", "gap"],
-  [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
+  [[TF_POS.card[0] + 120, TF_POS.card[1] + NODE_H], [TF_POS.risk_guard[0] + 120, TF_POS.risk_guard[1]], "risk_guard", "止损范围", "v-top", "side"],
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
   [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
@@ -1613,8 +1615,10 @@ function predictorMeetingEdges(list) {
 function regimeFlipEdges(event) {
   if (!event) return [];
   const flip = (event.output && event.output.regime_flip) || {};
-  const target = flip.scope === "market_desk" ? "大盘台" : "独立更新";
-  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS.market[0] + 140, TF_POS.market[1] + NODE_H], "market", `${hm(event.ts)} 大盘变化 → ${target} ${edgeAgeTxt(event.ts)}`, "flip", "against", event.ts]];
+  const desk = flip.scope === "market_desk";
+  const target = desk ? "大盘台" : "独立更新";
+  const to = desk ? "desk" : "market";
+  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS[to][0] + 140, TF_POS[to][1] + NODE_H], to, `${hm(event.ts)} 大盘变化 → ${target} ${edgeAgeTxt(event.ts)}`, "flip", "against", event.ts]];
 }
 function tfEdge([a, b, to, label, how, extra, ts], prog) {
   const [x1, y1] = a, [x2, y2] = b;
@@ -1626,6 +1630,8 @@ function tfEdge([a, b, to, label, how, extra, ts], prog) {
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
   // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
   else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
+  // 绕过中间的节点：从起点顶上抬到泳道上沿，横过去，再落到终点顶上
+  else if (how === "over") { const yy = 14; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = yy - 3; dir = "d"; }
   else if (how === "drop") { const yy = 402; d = `M${x1},${y1} V${yy} H${x2} V${y2 - 1}`; lx = x1 + 8; ly = yy - 5; dir = "d"; }
   // 从下面的节点顶上往上，在第一、二泳道之间横过去，再往上进目标节点底
   else if (how === "climb") { const yy = 182; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x1 - 140; ly = yy - 5; dir = "u"; }
@@ -1652,6 +1658,24 @@ function tfMarketNode(m, p, mr) {
   const st = line ? line : !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
   const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
+}
+// 大盘台：独立判断候选池未来 4 小时的涨 / 平 / 跌，管着大盘方向（接管）或退回 Flash
+function deskProgress(k) {
+  if (!k || k.state === "off") return "wait";
+  if (k.state === "bad" || k.error) return "err";
+  return k.runs_today > 0 ? "done" : "wait";
+}
+function tfDeskNode(k) {
+  if (!k) return `<span class="nm"><i class="dot wait"></i>大盘台</span><small>还没有数据</small>`;
+  const p = deskProgress(k);
+  const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+  const owner = k.owner === "desk" ? "大盘台接管" : k.owner === "flash" ? "回退 Flash" : "";
+  const dir = k.direction ? `${k.direction}${k.published_version != null ? " v" + k.published_version : ""}` : "";
+  const probs = k.probs ? `涨 ${pct(k.probs.up)} 平 ${pct(k.probs.flat)} 跌 ${pct(k.probs.down)}` : "";
+  const when = k.state === "off" ? "" : [k.last_run_at ? `上次 ${hm(k.last_run_at)}` : "", k.next_run_at ? `下次 ${hm(k.next_run_at)}` : ""].filter(Boolean).join(" · ");
+  const head = [owner, dir].filter(Boolean).join(" · ");
+  const line = (t, cls) => (t ? `<small${cls ? ` class="${cls}"` : ""} title="${esc(t)}">${esc(t)}</small>` : "");
+  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
 }
 // 统一的「上次 hh:mm · 下次 hh:mm · 刚刚：…」；模块没报的字段就不写（不猜）
 function runLine(r) {
@@ -1711,12 +1735,14 @@ function teamFlow(d) {
   const prog = Object.fromEntries(d.roles.map((r) => [r.role, r.progress]));
   prog.card = data && data.card && data.card.valid ? "done" : "wait";
   prog.market = d.market_progress;
+  prog.desk = deskProgress(d.desk);
   const node = (k, inCanvas) => {
     if (k === "market") return `<a class="tf-node ${d.market_progress} ${d.selected === "market" ? "on" : ""}" href="#team/market" style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress, d.market_role)}</a>`;
+    if (k === "desk") return `<a class="tf-node desk ${deskProgress(d.desk)} ${d.selected_desk ? "on" : ""}" href="#team/desk" style="${inCanvas ? `left:${TF_POS.desk[0]}px;top:${TF_POS.desk[1]}px` : ""}">${tfDeskNode(d.desk)}</a>`;
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
-    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
+    return `<a class="tf-node ${r.progress} ${r.role === d.selected && !d.selected_desk ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
   };
   // 盯持仓是常态，放最后说；其余按流程顺序，每处一条，轮播着看全
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
@@ -1869,7 +1895,10 @@ async function showPrompts() {
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
-  const sel = d.roles.find((r) => r.role === d.selected) || d.market_role;
+  const k = d.desk;
+  const sel = d.selected_desk && k
+    ? { role: "desk", name: "大盘台", last_beat: k.last_run_at, last_error: k.error, avg_latency_ms: 0 }
+    : d.roles.find((r) => r.role === d.selected) || d.market_role;
   window.__recs = d.records;
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
@@ -1881,7 +1910,7 @@ P.team = () => {
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
-      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "market" ? "最近没有总盘会的记录（出作战卡、大盘更新、开会失败都记在这里）。" : sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
+      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "desk" ? "大盘台还没有记录（每一轮的方向、发布、失败都记在这里）。" : sel.role === "market" ? "最近没有总盘会的记录（出作战卡、大盘更新、开会失败都记在这里）。" : sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
       <div class="foot">最新 200 条（跨天），框里往下滚看更早的 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 
