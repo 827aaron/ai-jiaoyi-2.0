@@ -436,7 +436,7 @@ def create_app(
         return page.model_copy(update={"price_env": quote_env(), "positions": views})
 
     @api.get("/api/team")
-    async def team(role: Role | None = None) -> TeamPage:
+    async def team(role: str | None = None) -> TeamPage:
         ac = cfg()[1]
         fl = ac.fast_loop
         th = {
@@ -445,7 +445,20 @@ def create_app(
             "min_p_direction": fl.min_p_direction,
             "max_p_toxic": fl.max_p_toxic,
         }
-        page = build_team(files, clock(), role, ac.predictor.mode, th)
+        schedule = None
+        with suppress(Exception):
+            assert config_paths is not None
+            desk = actions.load_configs(config_paths)[2].market_desk
+            schedule = (desk.mode, desk.cadence_min, desk.offset_min)
+        desk_selected = role == "desk"
+        try:
+            picked = None if desk_selected or role is None else Role(role)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="未知角色") from None
+        page = build_team(
+            files, clock(), picked, ac.predictor.mode, th,
+            desk_schedule=schedule, desk_selected=desk_selected,
+        )  # fmt: skip
         return page.model_copy(update={"prompts": prompts_info(files)})
 
     @api.get("/api/prompts")

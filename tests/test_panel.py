@@ -1634,6 +1634,59 @@ def test_team_regime_flip_edge_only_within_event_window(tmp_path: Path) -> None:
     assert got.output["regime_flip"]["scope"] == "market_desk"
 
 
+def test_team_market_desk_node_payload_and_records(tmp_path: Path) -> None:
+    """大盘台节点：状态文件 + 下次格子 + 自己的记录；总盘会的记录里没有它。"""
+    from jiaoyi.panel.pages import build_team
+
+    done = NOW - timedelta(minutes=28)
+    (tmp_path / "market_desk_state.json").write_text(json.dumps({
+        "latest": {"direction": "看跌", "completed_at": done.isoformat(),
+                   "probs_4h": {"up": 0.2, "flat": 0.25, "down": 0.55}, "published_version": 21},
+        "last_run_at": done.isoformat(), "last_slot": int((done.timestamp() // 60 - 2) // 60),
+        "runs_today": 3, "cost_day": "2026-10-22", "cost_today_usd": 0.0123, "owner": "desk",
+    }))  # fmt: skip
+    log = JsonlDecisionLog(tmp_path)
+    log.write(_rec(c.Role.COMMANDER, c.Outcome.ACTION, "大盘台：看跌", ts=done,
+                   output={"market_desk": {"direction": "看跌"}}))  # fmt: skip
+    log.write(_rec(c.Role.COMMANDER, c.Outcome.ACTION, "总盘会出卡", ts=done,
+                   output={"x": 1}))  # fmt: skip
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    team = build_team(files, NOW, None, desk_schedule=("replace", 60, 2))
+    d = team.desk
+    assert d is not None and d.state == "ok" and d.owner == "desk"
+    assert d.direction == "看跌" and d.probs == {"up": 0.2, "flat": 0.25, "down": 0.55}
+    assert d.published_version == 21 and d.runs_today == 3 and d.cost_today_usd == 0.0123
+    assert d.last_run_at == done and d.next_run_at == datetime(2026, 10, 22, 7, 2, tzinfo=UTC)
+    assert d.summary == "大盘台：看跌"
+    desk_page = build_team(files, NOW, None, desk_schedule=("replace", 60, 2), desk_selected=True)
+    assert desk_page.selected_desk and [r.text for r in desk_page.records] == ["大盘台：看跌"]
+    market_page = build_team(files, NOW, c.Role.MARKET)
+    assert all("market_desk" not in r.output for r in market_page.records)
+
+
+def test_team_market_desk_node_off_and_failing(tmp_path: Path) -> None:
+    from jiaoyi.panel.pages import build_team
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    off = build_team(files, NOW, None).desk
+    assert off is not None and off.state == "off" and off.next_run_at is None
+    (tmp_path / "market_desk_state.json").write_text(json.dumps({
+        "last_run_at": (NOW - timedelta(minutes=5)).isoformat(), "last_error": "超时",
+        "cost_day": "2026-10-21", "runs_today": 9, "owner": "flash",
+    }))  # fmt: skip
+    bad = build_team(files, NOW, None, desk_schedule=("shadow", 60, 2)).desk
+    assert bad is not None and bad.state == "bad" and bad.status == "失败：超时"
+    assert bad.owner == "flash" and bad.runs_today == 0  # 昨天的计数不算今天
+
+
+def test_team_api_accepts_desk_role(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    with _client(tmp_path, "127.0.0.1") as client:
+        body = client.get("/api/team?role=desk").json()
+        assert body["selected_desk"] is True and body["desk"]["state"] != "ok"
+        assert client.get("/api/team?role=nonsense").status_code == 422
+
+
 def test_team_against_checks_pinned_and_tagged(tmp_path: Path) -> None:
     """管家卡的反向急查：配上信号之后同一笔仓的那次急查判断，例行复查冲不掉；日志里标「反向急查」。"""
     from jiaoyi.panel.pages import build_team
