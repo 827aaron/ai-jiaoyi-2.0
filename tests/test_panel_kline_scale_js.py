@@ -19,7 +19,22 @@ const lines = [194.74, 199.5, 202.75, 203.49, 195.12];
 assert.deepEqual(defaultRange(300), { from: 180, to: 304 });
 assert.deepEqual(defaultRange(300, null), { from: 180, to: 304 });
 // 开仓在 70 根前：从开仓前 10 根开始，看到最新 + 5
-assert.deepEqual(defaultRange(300, 229), { from: 219, to: 304 });
+assert.deepEqual(defaultRange(300, 229), { from: 180, to: 304 });  // 开仓 70 根前：不够 120 根就补到 120
+// 开仓只有 25 根前：至少铺 120 根，开仓那根仍在里面
+const fresh = defaultRange(300, 274);
+assert.deepEqual(fresh, { from: 180, to: 304 });
+assert(fresh.to - fresh.from >= 120 && fresh.from <= 274);
+// 窄屏按约 7px 一根：宽 300 → 43 根
+assert.equal(minBars(300), 43);
+assert.equal(minBars(1000), 120);
+assert.equal(minBars(100), 40);
+assert.equal(minBars(undefined), 120);
+assert.deepEqual(defaultRange(300, 274, 300), { from: 256, to: 304 });
+// 一共才拉到 50 根：from 取负，左边留空，不把 50 根拉满全图
+assert.deepEqual(defaultRange(50, 40), { from: -70, to: 54 });
+assert.deepEqual(defaultRange(50, 2), { from: -70, to: 54 });
+// 开仓比 120 根更早：从开仓前 10 根开始（不是 120）
+assert.deepEqual(defaultRange(300, 100), { from: 90, to: 304 });
 // 开仓很早但整段不超过 600 根：照样包进来；刚好 600 算在内
 assert.deepEqual(defaultRange(500, 100), { from: 90, to: 504 });
 assert.deepEqual(defaultRange(600, 15), { from: 5, to: 604 });
