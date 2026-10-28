@@ -61,6 +61,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
+from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -487,6 +488,7 @@ class Runner:
             self._every(CREDIT_CHECK_EVERY_S, self.app.credit_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
             self._every(CONFIG_WATCH_EVERY_S, self.config_tick),
+            self._every(SHADOW_EVERY_S, self.app.mainnet_shadow_tick),
             # 有交易所连接时账本回填和收入流水由 LedgerSync 管（成交回报叫醒，60 秒兜底）
             (
                 asyncio.create_task(self.app.ledger.run())

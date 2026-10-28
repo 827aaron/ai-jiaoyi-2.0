@@ -142,6 +142,7 @@ OPTIONAL_APP_FIELDS = {
     "credit_resend_hours",
     "card_score_every_min",  # 默认 60，老配置文件没有这一行
     "card_score_window_days",  # 默认 30
+    "mainnet_shadow_on",  # default false
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
     "jev_shared_cooldown",  # 默认 true（原行为）
     "account_read_retries",  # 默认 0（原行为）

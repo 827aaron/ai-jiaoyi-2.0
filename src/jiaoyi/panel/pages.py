@@ -33,6 +33,7 @@ from jiaoyi.core import profiles
 from jiaoyi.core.pool_overrides import PoolOverrides, read_pool_overrides
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.secrets import KeyNeed, key_needs
+from jiaoyi.core.shadow_ledger import DayTotals, by_day
 from jiaoyi.panel.actions import (
     MEETING_EDITABLE,
     PAPER_ONLY_SWITCHES,
@@ -1008,6 +1009,12 @@ class TradeRow(BaseModel):
     """没有哨兵 / 拍板 / 风控员记录的单：冒烟测试或手动下的，不是机器人自己的交易。"""
     unfilled: bool = False
     """开仓没成交（账本 FAILED，如保证金不够 hummingbot 没下单）：只列出来，不算进任何统计。"""
+    mainnet_net_usdt: float | None = None
+    """Net at mainnet prices at the fill moments (data/mainnet_shadow.jsonl); None = not
+    computed."""
+    mainnet_gap_bp: float | None = None
+    """Demo net minus mainnet net, in bp of entry notional (positive = Demo flatters)."""
+    mainnet_gap_r: float | None = None
 
 
 class KindStats(BaseModel):
@@ -1101,6 +1108,87 @@ def _symbol_stats(sym: str, ts: list[TradeRow]) -> SymbolStats:
     )
 
 
+class MainnetDay(BaseModel):
+    day: str
+    trades: int
+    demo_net_usdt: float
+    mainnet_net_usdt: float
+    gap_usdt: float
+    gap_bp: float | None
+    gap_r: float | None
+    """Average per trade, over trades with a stop distance."""
+    cum_demo_usdt: float
+    cum_mainnet_usdt: float
+
+
+class MainnetCompare(BaseModel):
+    """Demo net vs net at mainnet prices, over the trades that have a shadow row."""
+
+    covered: int
+    trades: int
+    demo_net_usdt: float
+    mainnet_net_usdt: float
+    gap_usdt: float
+    gap_bp: float | None
+    demo_r: float | None
+    mainnet_r: float | None
+    gap_r: float | None
+    days: list[MainnetDay]
+    """Oldest first."""
+
+
+def _mainnet_compare(
+    rows: list[TradeRow], shadow: dict[str, dict[str, Any]], tz: str
+) -> MainnetCompare | None:
+    real = [t for t in rows if not t.unfilled and not t.pnl_missing]
+    got = [shadow[t.position_id] for t in real if t.position_id in shadow]
+    if not got:
+        return None
+    days = by_day(got, tz)
+    out: list[MainnetDay] = []
+    cum_d = cum_m = 0.0
+    total = DayTotals("all")
+    for d in days:
+        cum_d += d.demo_net_usdt
+        cum_m += d.mainnet_net_usdt
+        for k in (
+            "trades",
+            "demo_net_usdt",
+            "mainnet_net_usdt",
+            "notional_usdt",
+            "gap_r_sum",
+            "r_trades",
+            "demo_r_sum",
+            "mainnet_r_sum",
+        ):
+            setattr(total, k, getattr(total, k) + getattr(d, k))
+        out.append(
+            MainnetDay(
+                day=d.day,
+                trades=d.trades,
+                demo_net_usdt=d.demo_net_usdt,
+                mainnet_net_usdt=d.mainnet_net_usdt,
+                gap_usdt=d.gap_usdt,
+                gap_bp=d.gap_bp,
+                gap_r=d.avg(d.gap_r_sum),
+                cum_demo_usdt=cum_d,
+                cum_mainnet_usdt=cum_m,
+            )
+        )
+    return MainnetCompare(
+        covered=total.trades,
+        trades=len(real),
+        demo_net_usdt=total.demo_net_usdt,
+        mainnet_net_usdt=total.mainnet_net_usdt,
+        gap_usdt=total.gap_usdt,
+        gap_bp=total.gap_bp,
+        demo_r=total.avg(total.demo_r_sum),
+        mainnet_r=total.avg(total.mainnet_r_sum),
+        gap_r=total.avg(total.gap_r_sum),
+        days=out,
+    )
+
+
 class CurvePoint(BaseModel):
     ts: datetime
     cum_pnl_usdt: float
@@ -1125,12 +1213,27 @@ class HistoryPage(BaseModel):
     """范围内的测试单笔数；``include_tests`` 为假时它们不在 rows 和各项统计里。"""
     rejected: list[TrailItem]
     """范围内被拍板放弃 / 风控员拒绝的信号，最新在前，最多 ``REJECT_LIMIT`` 条。"""
+    mainnet: MainnetCompare | None = None
 
 
 def _range_start(now: datetime, tz: str, rng: HistoryRange) -> datetime:
     day0 = datetime.combine(local_day(now, tz), time(), tzinfo=ZoneInfo(tz))
     days = {"today": 0, "7d": 6, "30d": 29, "all": 0}[rng]
     return (day0 - timedelta(days=days)).astimezone(UTC)
+
+
+def _shadow_fields(row: dict[str, Any] | None) -> dict[str, float | None]:
+    if row is None:
+        return {}
+    out: dict[str, float | None] = {}
+    for key, src in (
+        ("mainnet_net_usdt", "mainnet_net_usdt"),
+        ("mainnet_gap_bp", "gap_bp"),
+        ("mainnet_gap_r", "gap_r"),
+    ):
+        v = row.get(src)
+        out[key] = float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+    return out
 
 
 def build_history(
@@ -1234,6 +1337,7 @@ def build_history(
             if math.isfinite(estimate):
                 peak_of[p.position_id] = max(peak_of.get(p.position_id, estimate), estimate)
 
+    shadow = files.mainnet_shadow()
     rows: list[TradeRow] = []
     cum = peak = dd = 0.0
     curve: list[CurvePoint] = []
@@ -1277,6 +1381,7 @@ def build_history(
                 signal_kind=kind_of.get(p.signal_id),
                 test=test,
                 unfilled=unfilled,
+                **_shadow_fields(None if unfilled else shadow.get(p.position_id)),
             )
         )
     real = [t for t in rows if not t.unfilled]
@@ -1323,6 +1428,7 @@ def build_history(
         rows=list(reversed(rows)),
         test_trades=tests,
         rejected=rejected,
+        mainnet=_mainnet_compare(rows, shadow, risk.day_reset_tz),
     )
 
 

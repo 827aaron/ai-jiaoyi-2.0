@@ -640,6 +640,26 @@ class RollingFeatureEngine:
     def symbols(self) -> list[str]:
         return sorted(self._s)
 
+    def price_at(self, symbol: str, t: datetime) -> tuple[float, datetime, str] | None:
+        """Mainnet price at ``t`` from what the stream holds: the last trade of that second
+        while the five-minute trade window covers it (``ws_trade``), else open-to-close
+        interpolation inside the closed 1-minute bar (``ws_kline_1m``); None if neither."""
+        st = self._s.get(symbol)
+        if st is None:
+            return None
+        ts = _ts(t)
+        if st.prices and st.prices[0][0] <= ts <= st.last_ts + 1.0:
+            sec, px = st.prices[max(bisect.bisect_right(st.prices, (ts, math.inf)) - 1, 0)]
+            return px, datetime.fromtimestamp(sec, UTC), "ws_trade"
+        minute = int(ts // 60)
+        for m, o, _h, _l, c, _v in reversed(st.bars):
+            if m < minute:
+                break
+            if m == minute:
+                frac = min(max(ts / 60.0 - minute, 0.0), 1.0)
+                return o + (c - o) * frac, datetime.fromtimestamp(minute * 60, UTC), "ws_kline_1m"
+        return None
+
     def _price_at(self, st: _SymbolState, t: float) -> float | None:
         if not st.prices:
             return None

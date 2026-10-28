@@ -358,6 +358,81 @@ def _card_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mainnet_shadow(args: argparse.Namespace) -> int:
+    """按主网价格算：补算历史平仓（只追加，算过的跳过），按天打印 Demo 净盈亏和主网等价净盈亏。"""
+    from jiaoyi.core import shadow_ledger as sl
+    from jiaoyi.execution import mainnet_shadow as ms
+    from jiaoyi.market.rest import RateLimited, WeightBudget
+
+    try:
+        app_cfg = load_app_config(Path(args.app))
+        risk_cfg = load_risk_config(Path(args.risk))
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    data_dir = args.data_dir or app_cfg.data_dir
+    fee = risk_cfg.taker_fee_bps if args.taker_bps is None else args.taker_bps
+    since = datetime.fromisoformat(args.since)
+    if since.tzinfo is None:
+        from zoneinfo import ZoneInfo
+
+        since = since.replace(tzinfo=ZoneInfo(risk_cfg.day_reset_tz))
+    sources: list[ms.MainnetPrices] = [ms.CachedKlinePrices(ms.disk_day_bars(data_dir))]
+    if args.source == "rest":
+        sources = [ms.RestMainnetPrices(WeightBudget(args.weight_per_min)), *sources]
+    exchange: Any = None
+    if args.fill_times:
+        try:
+            exchange = _strict_exchange(app_cfg)
+        except MissingSecret as e:
+            print(e, file=sys.stderr)
+            return 2
+    shadow = ms.MainnetShadow(
+        data_dir,
+        ms.ChainPrices(sources),
+        lambda: fee,
+        exchange.user_trades if exchange is not None else None,
+    )
+
+    async def run() -> ms.UpdateResult:
+        try:
+            return await shadow.update(ms.read_ledger(data_dir), datetime.now(UTC), since=since)
+        finally:
+            if exchange is not None:
+                await exchange.close()
+
+    try:
+        res = asyncio.run(run())
+    except RateLimited:
+        _say_rate_limited()
+        return 1
+    print(
+        f"新算 {res.added} 笔，已有 {res.skipped} 笔，找不到主网价 {res.failed} 笔"
+        f"（价格来源 {res.sources or {}}）"
+    )
+    rows = [
+        r
+        for r in sl.read_shadow(data_dir).values()
+        if r.get("closed_at", "") >= since.astimezone(UTC).isoformat()
+    ]
+    cum_demo = cum_main = 0.0
+    print("日期        笔数   Demo净U   按主网价格算U   差U      差bp   差R/笔")
+    for d in sl.by_day(rows, risk_cfg.day_reset_tz):
+        cum_demo += d.demo_net_usdt
+        cum_main += d.mainnet_net_usdt
+        gap_r = d.avg(d.gap_r_sum)
+        print(
+            f"{d.day}  {d.trades:4d}  {d.demo_net_usdt:9.2f}  {d.mainnet_net_usdt:12.2f}  "
+            f"{d.gap_usdt:8.2f}  {d.gap_bp if d.gap_bp is not None else float('nan'):6.1f}  "
+            f"{gap_r if gap_r is not None else float('nan'):6.3f}"
+        )
+    print(
+        f"累计：Demo {cum_demo:.2f}U，按主网价格算 {cum_main:.2f}U，差 {cum_demo - cum_main:.2f}U"
+    )
+    print(f"明细：{Path(data_dir) / sl.SHADOW_FILE}")
+    return 0
+
+
 def _market_score(args: argparse.Namespace) -> int:
     """大盘台记分：每轮 1h / 4h 结局、Brier / log loss 对照先验和延续、发布命中和延迟、门槛扫描。"""
     from jiaoyi.market.rest import RateLimited
@@ -940,6 +1015,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--hb-url", default="http://127.0.0.1:8000")
     p.set_defaults(func=_panel)
+
+    p = sub.add_parser(
+        "mainnet-shadow",
+        help="按主网价格算：补算历史平仓的主网等价盈亏并按天打印（默认只用本机 K 线，不联网）",
+    )
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
+    p.add_argument("--since", required=True, help="从哪天的平仓算起，如 2026-10-23（按日切时区）")
+    p.add_argument("--data-dir", default="", help="默认用 app.toml 的 data_dir")
+    p.add_argument(
+        "--source",
+        choices=("cache", "rest"),
+        default="cache",
+        help="cache = 只读本机已有的 1 分钟 K 线（data/history 日包、大盘台记分缓存），插值到秒；"
+        "rest = 先查币安主网公开逐笔成交（每笔 2 次，限速），查不到再用本机 K 线",
+    )
+    p.add_argument("--weight-per-min", type=int, default=240, help="rest 每分钟最多用多少权重")
+    p.add_argument(
+        "--fill-times", action="store_true", help="用 Demo 成交明细的准确成交时间（要密钥，只读）"
+    )
+    p.add_argument(
+        "--taker-bps", type=float, default=None, help="默认用 risk.toml 的 taker_fee_bps"
+    )
+    p.set_defaults(func=_mainnet_shadow)
 
     p = sub.add_parser(
         "resolve-exit",
