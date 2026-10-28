@@ -29,7 +29,7 @@ const shown = [];
 const render = () => shown.push([data.positions.length, pageData && pageData.positions.length]);
 // 每个请求一个可以手动放行的 promise
 const pending = [];
-const getJson = (url) => new Promise((resolve) => pending.push({ url, resolve }));
+const getJson = (url) => new Promise((resolve, reject) => pending.push({ url, resolve, reject }));
 const flush = () => new Promise((r) => setImmediate(r));
 const pos = (n) => ({ positions: Array.from({ length: n }, (_, i) => ({ position_id: 'p' + i, status: 'open' })) });
 """
@@ -67,6 +67,15 @@ CASES = r"""
   const c = poll(); await flush();
   pending[0].resolve(pos(3)); pending[1].resolve(pos(3)); await c;
   assert.deepEqual(shown, [[2, 2], [3, 3]]);
+
+  // 先发的那轮失败、晚到：不在新数据上面挂「读不出」
+  pending.length = 0;
+  const f = poll(); await flush();
+  const g = poll(); await flush();
+  pending[2].resolve(pos(3)); pending[3].resolve(pos(3)); await g;
+  pending[1].reject(new Error('5 秒没有回应')); pending[0].resolve(pos(4)); await f;
+  assert.equal(els['#stale'].innerHTML, '');
+  assert.equal(pageData.positions.length, 3);
 })().catch((e) => { console.error(e); process.exit(1); });
 """
 
