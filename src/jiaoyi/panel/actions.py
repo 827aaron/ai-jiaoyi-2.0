@@ -110,6 +110,7 @@ DESK_EDITABLE = frozenset(
         "call_p_min",
         "call_edge_min",
         "publish_min_gap_min",
+        "republish_after_min",
         "publish_intra",
         "keeper_intra",
         "intra_refresh_s",
@@ -134,6 +135,9 @@ MEETING_EDITABLE = (
     "market_table_rolling",
     "latest_market_regime",
     "event_brief_refresh",
+    "regime_time_label",
+    "regime_max_age_min",
+    "pool_scope_label",
 )
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(

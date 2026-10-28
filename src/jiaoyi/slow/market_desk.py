@@ -665,6 +665,7 @@ class MarketPublisher(Protocol):
         generation: int,
         desk_id: str,
         probs: Mapping[str, float],
+        republish: bool = False,
     ) -> MarketView | None: ...
 
     def set_market_desk(self, desk: MarketDeskOwner) -> None: ...
@@ -689,6 +690,7 @@ class DeskState:
     last_run_at: datetime | None = None
     last_publish_at: datetime | None = None
     last_publish_view_id: str | None = None
+    last_republish_at: datetime | None = None
     last_slot: int | None = None
     cost_day: str = ""
     cost_today_usd: float = 0.0
@@ -725,6 +727,11 @@ class DeskState:
             "fails": self.fails,
             "owner": self.owner,
             "owner_since": _iso(self.owner_since),
+            **(
+                {"last_republish_at": _iso(self.last_republish_at)}
+                if self.last_republish_at is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -746,6 +753,7 @@ class DeskState:
             last_run_at=_parse_at(raw.get("last_run_at")),
             last_publish_at=_parse_at(raw.get("last_publish_at")),
             last_publish_view_id=raw.get("last_publish_view_id"),
+            last_republish_at=_parse_at(raw.get("last_republish_at")),
             last_slot=int(slot) if slot is not None else None,
             cost_day=str(raw.get("cost_day", "")),
             cost_today_usd=float(raw.get("cost_today_usd", 0.0)),
@@ -1197,6 +1205,10 @@ class MarketDesk:
                 },
                 published_view=published.model_dump(mode="json") if published else None,
             )
+            if published is not None and (self.state.latest or {}).get(
+                "republished_same_direction"
+            ):
+                row["republished_same_direction"] = True  # market_score leaves it out of publishes
             return DeskRun(cycle_id, "ok", direction, avg, published, cost)
         except binance_gate.RateLimited as exc:
             self.state.last_slot = None if reason == "scheduled" else self.state.last_slot
@@ -1285,18 +1297,23 @@ class MarketDesk:
     ) -> MarketView | None:
         """滞回：大盘台第一次接管立即发布；之后新方向要连续 ``publish_confirm`` 轮一致，并且从第一次
         出现起持续 ``publish_confirm_min`` 分钟（这几轮里有急动 / 翻转加跑的轮时只看轮数），还要离
-        上次发布够 ``publish_min_gap_min``。方向没变不发（每发一版所有持仓都要排队复核）。"""
+        上次发布够 ``publish_min_gap_min``。方向没变不发（每发一版所有持仓都要排队复核），除非
+        ``republish_after_min`` 开着、当前观点已经旧过它：同方向重发这一轮的话和数字。"""
         if self.cfg.mode != "replace":
             return None
         view = self._pub.latest_market_view
         # 当前观点不是大盘台发的（第一次接管、Flash 回退期间发过、或上次接管被取代）：立即发布
         takeover = view is None or view.source != DESK_SOURCE
         st = self.state
+        refresh = False
         if not takeover and view is not None and direction == view.regime_direction:
             st.candidate, st.candidate_count = None, 0
             st.candidate_since, st.candidate_event = None, False
-            return None
-        if not takeover:
+            after = self.cfg.republish_after_min
+            if after <= 0 or completed - view.observed_at < timedelta(minutes=after):
+                return None
+            refresh = True
+        if not takeover and not refresh:
             event = reason != "scheduled"
             if direction == st.candidate and st.candidate_since is not None:
                 st.candidate_count += 1
@@ -1327,16 +1344,23 @@ class MarketDesk:
             generation=generation,
             desk_id=desk_id,
             probs=avg.as_dict(),
+            **({"republish": True} if refresh else {}),
         )
         if published is None:  # 已被更新的发布取代
             return None
-        st.candidate, st.candidate_count = None, 0
-        st.candidate_since, st.candidate_event = None, False
-        st.last_publish_at = completed
+        if refresh:
+            # publish_min_gap_min counts from the last direction publish, not from a refresh
+            st.last_republish_at = completed
+        else:
+            st.candidate, st.candidate_count = None, 0
+            st.candidate_since, st.candidate_event = None, False
+            st.last_publish_at = completed
         st.last_publish_view_id = published.market_view_id
         if st.latest is not None:
             st.latest["published_view_id"] = published.market_view_id
             st.latest["published_version"] = published.version
+            if refresh:
+                st.latest["republished_same_direction"] = True
         return published
 
     # ---------------------------------------------------------- 记录
