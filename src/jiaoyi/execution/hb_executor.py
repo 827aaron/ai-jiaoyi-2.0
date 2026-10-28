@@ -53,6 +53,7 @@ from jiaoyi.execution.exchange import (
     IdentifiedCloseOrder,
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
+    MarkEvidence,
 )
 from jiaoyi.execution.fills import (
     LOOKBACK,
@@ -84,6 +85,11 @@ _ORDER_LIMIT_MAKER = 3
 MARKER_PREFIX = "jy-"
 """写进 hummingbot ``controller_id`` 的认领标记前缀：``jy-<position_id>``。"""
 DAY_START_TOLERANCE_S = 300.0
+VENUE_MARK_REUSE_S = 2.0
+"""管家读执行所标记价：同一个币这么多秒内复用上一次读到的（标记价本身每秒才更新一次）。"""
+VENUE_MARK_READ_MAX_AGE_S = 600.0
+"""管家读标记价时交给 ``execution_mark`` 的新鲜度上限（``keeper_price_max_age_s`` 的上限）：
+旧到多少算过旧由管家按自己的设置判，这里只挡更离谱的，免得过旧被当成读不到。"""
 
 IncomeSince = Callable[[datetime], Awaitable[float]]
 
@@ -366,6 +372,8 @@ class HbExecutorAdapter:
         self.fills_note: str | None = None
         """成交回报通道的状态（「成交回报实时」/「只走 60 秒轮询」），由 LedgerSync 写。"""
         self._exchange = exchange
+        self._venue_marks: dict[str, tuple[datetime, MarkEvidence]] = {}
+        self._venue_reads: dict[str, asyncio.Task[MarkEvidence]] = {}
         self._rec = recorder
         self._clock = clock
         self._sleep = sleep
@@ -1487,6 +1495,54 @@ class HbExecutorAdapter:
             f"server_trailing_book:{pid}",
             kind="order_failed",
         )
+
+    async def venue_mark(self, symbol: str) -> tuple[float, datetime] | None:
+        """持仓管家用的执行所标记价（和保护状态机同一个读法 ``execution_mark``）和它的交易所时间。
+
+        同一个币 ``VENUE_MARK_REUSE_S`` 秒内只读一次、并发的复查共用一次读，免得每笔复查各打一次
+        REST；读不到返回 None（管家这轮不按价判）。"""
+        read = getattr(self._exchange, "execution_mark", None)
+        if read is None:
+            return None
+        cached = self._venue_marks.get(symbol)
+        now = self._clock()
+        if cached is not None and 0 <= (now - cached[0]).total_seconds() < VENUE_MARK_REUSE_S:
+            return cached[1].mark, cached[1].source_at
+        task = self._venue_reads.get(symbol)
+        if task is None:
+            task = asyncio.ensure_future(read(symbol, max_age_s=VENUE_MARK_READ_MAX_AGE_S))
+            self._venue_reads[symbol] = task
+            task.add_done_callback(lambda _t: self._venue_reads.pop(symbol, None))
+        try:
+            ev = await asyncio.shield(task)
+        except Exception:
+            log.debug("执行所标记价读不到 %s", symbol, exc_info=True)
+            return None
+        if not isinstance(ev, MarkEvidence) or ev.symbol != symbol or not ev.mark > 0:
+            return None
+        self._venue_marks[symbol] = (now, ev)
+        return ev.mark, ev.source_at
+
+    def protection_exit_in_flight(self, position_id: str) -> tuple[str, str, str] | None:
+        """交易所保护腿在途（种类, 身份, 说明）：``exiting`` 已触发 / 正在退出收尾（身份就是
+        ``exiting``，触发 → 退出 → 收尾算同一次）；``replacing`` 托管过的仓正在换代（有腿在提交
+        或撤单中，身份是保护代数）。都不是返回 None。"""
+        tracked = self._registry.get(position_id)
+        state = tracked.server_protection if tracked is not None else None
+        if state is None:
+            return None
+        if state.stage in ("exiting", "cleanup"):
+            return "exiting", "exiting", state.stage
+        if any(leg.triggered_at is not None and leg.state == "confirmed" for leg in state.legs):
+            return "exiting", "exiting", "leg_triggered"
+        moving = [leg for leg in state.legs if leg.state in ("submit_pending", "cancel_pending")]
+        if state.ever_armed and moving:
+            return (
+                "replacing",
+                f"gen-{state.generation}",
+                f"第 {state.generation} 代 {moving[0].kind} {moving[0].state}",
+            )
+        return None
 
     def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:
         self._frozen_peak_on = enabled

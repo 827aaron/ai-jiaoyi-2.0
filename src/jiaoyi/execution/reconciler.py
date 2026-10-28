@@ -146,7 +146,16 @@ class ThreeWayReconciler:
         close_unknown_positions: bool = False,
         retry_delays_s: Sequence[float] = RETRY_DELAYS_S,
         executor_stop_retry_rounds: int = 0,
+        opening_grace_s: float = 0.0,
+        closing_grace_s: float = 0.0,
     ) -> None:
+        self._opening_grace_s = opening_grace_s
+        self._closing_grace_s = closing_grace_s
+        self._closing_now: set[str] = set()
+        self._closing_since: dict[str, datetime] = {}
+        """First round that saw each position's close in flight, kept until the position leaves
+        the live set so a close that fails and is retried does not restart its window. In memory
+        only: it drives a label, so a restart restarting the window is harmless."""
         self._stop_retry_rounds = executor_stop_retry_rounds
         """停执行器结果未知后再过几轮仍没终止，就再发一次 keep_position=True 停止；0 = 永不。"""
         self._retry_delays = tuple(retry_delays_s)
@@ -211,6 +220,45 @@ class ThreeWayReconciler:
             self._rec.record(now, Outcome.ERROR, f"对账失败{rounds}：{e!r}")
             self._rec.heartbeat(now, Health.DOWN, "连不上 hummingbot-api 或币安")
 
+    def configure_issue_grace(self, opening_s: float, closing_s: float) -> None:
+        """Hot reload of ``reconcile_opening_grace_s`` / ``reconcile_closing_grace_s``."""
+        self._opening_grace_s = opening_s
+        self._closing_grace_s = closing_s
+
+    def _opening_hint(self, rec: PositionRecord, now: datetime) -> str | None:
+        grace = self._opening_grace_s
+        if grace <= 0:
+            return None
+        # A round is stamped with its start time, so a position created mid-round is "negative";
+        # beyond the grace in either direction is a clock jump, not an opening.
+        elapsed = (now - rec.opened_at).total_seconds()
+        if abs(elapsed) > grace:
+            return None
+        return f"开仓后 {max(elapsed, 0.0):.0f} 秒，在开仓宽限 {grace:g} 秒内，记为信息"
+
+    def _closing_hint(self, position_id: str, now: datetime) -> str | None:
+        grace = self._closing_grace_s
+        since = self._closing_since.get(position_id)
+        if grace <= 0 or since is None or position_id not in self._closing_now:
+            return None
+        elapsed = (now - since).total_seconds()
+        if elapsed > grace:
+            return None
+        return f"平仓进行中 {elapsed:.0f} 秒，在平仓宽限 {grace:g} 秒内，记为信息"
+
+    @staticmethod
+    def _transitional(
+        symbol: str, position_id: str, detail: str, hint: str | None
+    ) -> ReconcileIssue:
+        return ReconcileIssue(
+            kind=ReconcileIssueKind.EXECUTOR_FAILED,
+            symbol=symbol,
+            position_id=position_id,
+            detail=f"{detail}（{hint}）" if hint else detail,
+            fixed=False,
+            informational=hint is not None,
+        )
+
     def set_next_run(self, at: datetime | None) -> None:
         """主循环按 ``reconcile_interval_s`` 排下一轮，团队页显示「下次对账」。"""
         if self._rec is not None:
@@ -253,15 +301,32 @@ class ThreeWayReconciler:
         settling = {
             pid for pid, n in self._closing_rounds.items() if n < 2 and pid not in pending_direct
         }
+        closing_now = {
+            t.record.position_id
+            for t in live
+            if t.record.status is PositionStatus.CLOSING
+            or t.record.position_id in pending_direct
+            or t.hb_close_pending
+            or (
+                t.server_protection is not None
+                and t.server_protection.stage in ("exiting", "cleanup")
+            )
+        }
+        live_pids = {t.record.position_id for t in live}
+        self._closing_since = {
+            pid: since for pid, since in self._closing_since.items() if pid in live_pids
+        }
+        for pid in closing_now:
+            self._closing_since.setdefault(pid, now)
+        self._closing_now = closing_now
         for t in live:
             if t.record.position_id in pending_direct:
                 issues.append(
-                    ReconcileIssue(
-                        kind=ReconcileIssueKind.EXECUTOR_FAILED,
-                        symbol=t.record.symbol,
-                        position_id=t.record.position_id,
-                        detail="平仓结果尚未确认，余仓与保护保留；禁止未知结果重复下单",
-                        fixed=False,
+                    self._transitional(
+                        t.record.symbol,
+                        t.record.position_id,
+                        "平仓结果尚未确认，余仓与保护保留；禁止未知结果重复下单",
+                        self._closing_hint(t.record.position_id, now),
                     )
                 )
         stops_by_cid = {s.client_order_id: s for s in stops}
@@ -315,12 +380,12 @@ class ThreeWayReconciler:
                 )
                 if protection_state.stage != "armed":
                     issues.append(
-                        ReconcileIssue(
-                            kind=ReconcileIssueKind.EXECUTOR_FAILED,
-                            symbol=rec.symbol,
-                            position_id=rec.position_id,
-                            detail=f"交易所托管仍在{protection_state.stage}阶段；保留已确认保护，由持久订单状态核验，未宣称已平",
-                            fixed=False,
+                        self._transitional(
+                            rec.symbol,
+                            rec.position_id,
+                            f"交易所托管仍在{protection_state.stage}阶段；保留已确认保护，由持久订单状态核验，未宣称已平",
+                            self._closing_hint(rec.position_id, now)
+                            or self._opening_hint(rec, now),
                         )
                     )
                 continue  # 所有代的 MARK/普通腿由同一协调器管理，不能走旧两CID补挂/删多单。
@@ -454,6 +519,7 @@ class ThreeWayReconciler:
                 continue
             if t.record.executor_id and t.record.executor_id not in running_ids:
                 rec = t.record
+                absent_hint: str | None = None
                 if (
                     rec.status is PositionStatus.OPEN
                     and rec.symbol not in flattened
@@ -479,13 +545,13 @@ class ThreeWayReconciler:
                             else f"{unknown}（unknown）"
                         )
                         issues.append(
-                            ReconcileIssue(
-                                kind=ReconcileIssueKind.EXECUTOR_FAILED,
-                                symbol=rec.symbol,
-                                position_id=rec.position_id,
-                                detail=f"运行列表未返回执行器，但{evidence}；"
+                            self._transitional(
+                                rec.symbol,
+                                rec.position_id,
+                                f"运行列表未返回执行器，但{evidence}；"
                                 "已清零终止计数，不按执行器消失平仓，继续原保命止损处理",
-                                fixed=False,
+                                self._closing_hint(rec.position_id, now)
+                                or self._opening_hint(rec, now),
                             )
                         )
                         continue
@@ -527,13 +593,17 @@ class ThreeWayReconciler:
                         continue
                 else:
                     self._gone_rounds.pop(rec.position_id, None)
+                    absent_hint = self._closing_hint(rec.position_id, now) or (
+                        self._opening_hint(rec, now)
+                        if rec.status is PositionStatus.OPENING
+                        else None
+                    )
                 issues.append(
-                    ReconcileIssue(
-                        kind=ReconcileIssueKind.EXECUTOR_FAILED,
-                        symbol=t.record.symbol,
-                        position_id=t.record.position_id,
-                        detail="账本里还在持仓，但运行列表未返回执行器；列表缺席不等于已终止",
-                        fixed=False,
+                    self._transitional(
+                        t.record.symbol,
+                        t.record.position_id,
+                        "账本里还在持仓，但运行列表未返回执行器；列表缺席不等于已终止",
+                        absent_hint,
                     )
                 )
         for ex in running:
@@ -571,25 +641,38 @@ class ThreeWayReconciler:
 
         report = ReconcileReport(ts=now, checked_positions=len(live), issues=issues)
         for issue in issues:
-            await self._send_issue(now, issue)
+            # Telegram dedups by kind and position, whatever the level: a hint sent here would
+            # swallow the real warning for the same position for the whole cooldown.
+            if not issue.informational:
+                await self._send_issue(now, issue)
             self._record_issue(now, issue)
-        open_ = sum(not i.fixed for i in issues)
-        self._beat(now, healthy=open_ == 0, count=open_, fixed=len(issues) - open_)
+        hints = sum(i.informational for i in issues)
+        open_ = sum(not i.fixed and not i.informational for i in issues)
+        self._beat(
+            now, healthy=open_ == 0, count=open_, fixed=len(issues) - open_ - hints, hints=hints
+        )
         return report
 
     def _record_issue(self, now: datetime, issue: ReconcileIssue) -> None:
         """按验收约定：没修好的问题 = error，修好的 = action。"""
         if self._rec is not None:
+            if issue.informational:
+                outcome = Outcome.INFO
+            else:
+                outcome = Outcome.ACTION if issue.fixed else Outcome.ERROR
             self._rec.record(
                 now,
-                Outcome.ACTION if issue.fixed else Outcome.ERROR,
+                outcome,
                 f"{_TITLES[issue.kind]}{'，已处理' if issue.fixed else ''}：{issue.detail}",
                 symbol=issue.symbol,
                 position_id=issue.position_id,
-                output={"kind": issue.kind.value, "fixed": issue.fixed},
+                output={"kind": issue.kind.value, "fixed": issue.fixed}
+                | ({"informational": True} if issue.informational else {}),
             )
 
-    def _beat(self, now: datetime, *, healthy: bool, count: int, fixed: int = 0) -> None:
+    def _beat(
+        self, now: datetime, *, healthy: bool, count: int, fixed: int = 0, hints: int = 0
+    ) -> None:
         """``count`` 只算没处理好的问题；已自动处理的（例如手动平仓已同步）不让对账灯继续报问题。"""
         health = Health.OK if healthy else Health.DEGRADED
         if count:
@@ -598,6 +681,8 @@ class ThreeWayReconciler:
             headline = f"三方一致（本轮已处理 {fixed} 项）"
         else:
             headline = "三方一致"
+        if hints and not count:
+            headline += f"（开平仓过渡 {hints} 项提示）"
         n = len(self._registry.live())
         if self._rec is not None:
             self._rec.note(now, f"对账：{headline}（在管 {n} 笔）", count=True)

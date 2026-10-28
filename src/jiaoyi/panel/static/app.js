@@ -55,10 +55,20 @@ const STALE_HINT = "多半是代码更新了、面板进程还是旧的：在 Ma
 let lastOk = 0;
 const S = { tf: "1m" };
 
-const hm = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(ts));
-const hms = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(ts));
-const md = (ts) => new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, month: "numeric", day: "numeric" }).format(new Date(ts));
-const money = (x, d = 1) => (x == null ? "—" : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
+// 建一个 Intl.DateTimeFormat 要零点几毫秒，K 线拖动时刻度每帧要格式化几十次：按时区缓存，时区变了才重建
+const DTF = new Map();
+const dtf = (kind, opts) => {
+  const k = kind + "|" + TZ;
+  let f = DTF.get(k);
+  if (!f) DTF.set(k, (f = new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, ...opts })));
+  return f;
+};
+const hm = (ts) => dtf("hm", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(ts));
+const hms = (ts) => dtf("hms", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(ts));
+const md = (ts) => dtf("md", { month: "numeric", day: "numeric" }).format(new Date(ts));
+const NF = new Map();
+const nf = (d) => NF.get(d) || NF.set(d, new Intl.NumberFormat("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })).get(d);
+const money = (x, d = 1) => (x == null ? "—" : typeof x === "number" ? nf(d).format(x) : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 // U 本位合约的数量按币计；旁边折算成 USDT 名义金额（数量 × 开仓价），一眼看出这单多大
 const qtyFmt = (q) => (q == null ? "—" : q.toLocaleString("en-US", { maximumFractionDigits: 6 }));
 const qty = (q, px) => `<span class="dim small">数量</span> ${qtyFmt(q)}${px ? ` <span class="dim small">· 名义 ${money(q * px, 0)} U</span>` : ""}`;
@@ -78,7 +88,7 @@ async function loadPrecision() {
 const range = (r, unit = "", d) => (r ? `${money(r[0], d ?? (r[0] < 10 ? 1 : 0))}–${money(r[1], d ?? (r[1] < 10 ? 1 : 0))}${unit}` : "—");
 const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 时 ${m % 60} 分`; };
 // 图表坐标轴按曼谷时间显示：跨天的刻度显示日期，其余显示时分
-const tick = (t) => { const d = new Date(t * 1000); const s = hm(d); return s === "00:00" ? new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, month: "numeric", day: "numeric" }).format(d) : s; };
+const tick = (t) => { const d = new Date(t * 1000); const s = hm(d); return s === "00:00" ? md(d) : s; };
 const pill = (o) => { const [t, k] = OUTCOME[o] || [o, ""]; return `<span class="pill ${k}">${t}</span>`; };
 
 function route() {
@@ -89,9 +99,9 @@ function route() {
 /* ---------- 外壳 */
 function chrome() {
   const r = route().page;
-  $("#tabs").innerHTML = PAGES.map(
+  setHtml($("#tabs"), PAGES.map(
     ([k, n]) => `<a href="#${k}" class="${k === r ? "on" : ""}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICON[k]}</svg>${n}</a>`,
-  ).join("");
+  ).join(""));
   const pg = PAGES.find((p) => p[0] === r);
   const mode = data ? MODE[data.mode] || data.mode : "…";
   const now = data ? hm(data.now) : "--:--";
@@ -99,8 +109,8 @@ function chrome() {
   const pauseBtn = c && c.paused
     ? `<button class="btn b-pause" ${clickable("cmd", "resume")}>恢复开新仓</button>`
     : `<button class="btn b-pause" ${clickable("cmd", "pause")}>暂停开新仓</button>`;
-  $("#pghead").innerHTML = `<h1>${pg[1]}</h1><span class="sub">${esc(mode)} · 曼谷 ${now} · ${pg[2]}</span>
-    <div class="acts">${data && r === "team" ? `<button class="btn b-pause" ${clickable("cmd", "refresh_cards")} title="从选币开始重跑：选币 → 总盘会 → 军师团 → 写卡">重新开会</button>` : ""}${data ? pauseBtn : ""}${data ? `<button class="btn b-kill" ${clickable("cmd", "close_all")}>全部平仓</button>` : ""}</div>`;
+  setHtml($("#pghead"), `<h1>${pg[1]}</h1><span class="sub">${esc(mode)} · 曼谷 ${now} · ${pg[2]}</span>
+    <div class="acts">${data && r === "team" ? `<button class="btn b-pause" ${clickable("cmd", "refresh_cards")} title="从选币开始重跑：选币 → 总盘会 → 军师团 → 写卡">重新开会</button>` : ""}${data ? pauseBtn : ""}${data ? `<button class="btn b-kill" ${clickable("cmd", "close_all")}>全部平仓</button>` : ""}</div>`);
 
   let b = "";
   if (data && data.mode !== "live") {
@@ -135,7 +145,7 @@ function chrome() {
   if (data && data.kpis.halted) {
     b += `<div class="banner bn-bad"><b>⚠ 已熔断</b><span>今日亏损达到 ${data.kpis.halt_pct}%，停开新仓，曼谷 00:00 自动恢复。持仓照常盯。</span></div>`;
   }
-  $("#banners").innerHTML = b;
+  setHtml($("#banners"), b);
 }
 
 function statusBar() {
@@ -1394,7 +1404,7 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
-let entryIdx = null, lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
+let entryIdx = null, lineDefs = [], lastBars = [], edgeEl = null, limitAt = "", lineSig = "", markSig = "", pxSig = "";
 try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
 // KLINE-SCALE-BEGIN
 const DEFAULT_BARS = 120, RIGHT_BARS = 5, ENTRY_LEAD_BARS = 10, ENTRY_LEAD_PX = 110, MAX_SPAN_BARS = 600;
@@ -1478,7 +1488,13 @@ function updateEdges() {
     const n = d.edge === "top" ? nTop++ : nBot++;
     return `<span class="ke" style="${d.edge}:${n * 18 + (d.edge === "bottom" ? 28 : 4)}px;color:${d.color}">${d.edge === "top" ? "▲" : "▼"} ${esc(d.title)} ${esc(price(d.price, d.symbol))}</span>`;
   }).join("");
-  edgeEl.innerHTML = html + (limitAt ? `<span class="ke kl">${esc(limitAt)}</span>` : "");
+  const next = html + (limitAt ? `<span class="ke kl">${esc(limitAt)}</span>` : "");
+  if (edgeEl.__html !== next) edgeEl.innerHTML = edgeEl.__html = next;
+}
+// 拖动 / 缩放时可见范围一帧变好几次：边上标签一帧只算一次
+let edgesFrame = 0;
+function updateEdgesSoon() {
+  if (!edgesFrame) edgesFrame = requestAnimationFrame(() => { edgesFrame = 0; updateEdges(); });
 }
 // 图和页面抢手势：照地图控件（Google Maps / Mapbox 的 cooperative gestures）的通行做法——
 // 电脑：普通滚轮留给页面滚动，按住 Ctrl / ⌘ 再滚轮才缩放，鼠标拖动平移，双击复位；
@@ -1543,7 +1559,7 @@ function mountChart() {
       rightPriceScale: { borderVisible: false, scaleMargins: { top: SCALE_PAD, bottom: SCALE_PAD } },
       localization: { timeFormatter: (t) => hm(t * 1000) },
     }), chartEl);
-    chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateEdges());
+    chart.timeScale().subscribeVisibleLogicalRangeChange(updateEdgesSoon);
     const css = getComputedStyle(document.documentElement);
     const up = css.getPropertyValue("--up").trim(), down = css.getPropertyValue("--down").trim();
     series = chart.addCandlestickSeries({
@@ -1558,14 +1574,15 @@ function mountChart() {
         return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...vals), maxValue: Math.max(r.priceRange.maxValue, ...vals) } };
       },
     });
-  } else {
+  } else if (chartEl.parentNode !== host) {
     host.appendChild(chartEl);
   }
 }
 
 async function loadKlines(force) {
   const { page, arg } = route();
-  if (page !== "positions" || !pageData || !pageData.positions.length) return;
+  // 别的页的拉数刚好在换到持仓页之后才回来：pageData 还是那一页的，没有 positions
+  if (page !== "positions" || !pageData || pageKey !== dataId("positions", arg) || !(pageData.positions || []).length) return;
   mountChart();
   if (!series) return;
   const p = pageData.positions.find((x) => x.position_id === arg) || pageData.positions[0];
@@ -1579,6 +1596,7 @@ async function loadKlines(force) {
     series.setMarkers([]);
     priceLines.forEach((l) => series.removePriceLine(l));
     priceLines = [];
+    lineSig = markSig = "";
     linePrices = [];
     lineDefs = [];
     lastBars = [];
@@ -1595,16 +1613,18 @@ async function loadKlines(force) {
     if (!r.ok) throw new Error(String(r.status));
     bars = await r.json();
     if (seq !== klineSeq || key !== chartKey) return; // 等的时候又换了：这份是旧币的，不画
-    series.setData(bars);
+    // 每 2 秒一轮多半只是最后一根在动 / 多出一根：只补这一两根，不整批重灌
+    if (barsExtend(lastBars, bars)) bars.slice(lastBars.length - 1).forEach((b) => series.update(b));
+    else series.setData(bars);
     barCount = bars.length;
     lastBars = bars;
     entryIdx = entryBarIndex(p, bars);
     const dg = pxDigits(p.entry_price || 1, p.symbol);
-    series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
+    if (pxSig !== `${key}|${dg}`) series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
+    pxSig = `${key}|${dg}`;
   } catch (e) {
     return;
   }
-  priceLines.forEach((l) => series.removePriceLine(l));
   const tl = trailLines(p) || {};
   linePrices = [p.take_profit_price, p.entry_price, p.stop_loss_price, p.lifeboat_price, tl.start, tl.stop];
   const css = getComputedStyle(document.documentElement);
@@ -1618,13 +1638,27 @@ async function loadKlines(force) {
     [tl.start, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
     tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
   ].filter(([v]) => v != null);
-  priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+  const sig = JSON.stringify(defs);
+  if (sig !== lineSig) {
+    priceLines.forEach((l) => series.removePriceLine(l));
+    priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+    lineSig = sig;
+  }
   lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, core: title !== "保命" && !title.startsWith("赚") }));
   limitAt = limitNote(p.opened_at ? new Date(p.opened_at).getTime() : null, p.time_limit_s, bars, hm);
-  series.setMarkers(entryMarkers(p, bars));
+  const marks = entryMarkers(p, bars);
+  if (JSON.stringify(marks) !== markSig) series.setMarkers(marks);
+  markSig = JSON.stringify(marks);
   if (force || needFit) fitView(chart);
   needFit = false;
   updateEdges();
+}
+// 新一批 K 线是上一批的延续：第一根同一时刻，根数一样或多一根，倒数第二根往前都没变
+function barsExtend(prev, bars) {
+  const n = prev.length;
+  if (n < 2 || bars.length < n || bars.length > n + 1 || bars[0].time !== prev[0].time) return false;
+  const a = prev[n - 2], b = bars[n - 2];
+  return a.time === b.time && a.open === b.open && a.high === b.high && a.low === b.low && a.close === b.close;
 }
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
 // 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
@@ -2460,6 +2494,8 @@ const PLAIN = {
   jev_max_concurrent: "拍板人同时最多判几个",
   keeper_interval_s: "管家每隔几秒看一次持仓",
   reconcile_interval_s: "每隔几秒和交易所对一次账",
+  reconcile_opening_grace_s: "新仓建账后几秒内，托管还没到位、运行列表暂时没返回执行器只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
+  reconcile_closing_grace_s: "平仓进行中几秒内，平仓结果待确认、托管在退出、运行列表没返回执行器只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
   protection_stale_s: "交易所保护单的观测超过几秒就标“数据过期”（0 = 不标）",
   slow_loop_interval_min: "军师团每隔几分钟开一次会（档位 = 开会间隔）",
   screener_interval_min: "选币每隔几分钟跑一次（默认跟开会间隔档位走，最少 15 分钟）",
@@ -2505,6 +2541,17 @@ const PLAIN = {
   keeper_close_p_strong: "把握过多少不用再确认直接平（0–1）",
   keeper_confirmations: "管家连续几次都说平才平",
   keeper_price_max_age_s: "管家复查时行情最多旧几秒",
+  keeper_model_mode: "Jev 的平仓概率：act 按它平 / record 只记录不平",
+  keeper_price_source: "管家算浮盈用哪个价：mainnet 主网成交价 / venue 执行所标记价",
+  keeper_thesis_take_on: "Jev 盈利门控：赚着且 Jev 说进场理由不成立就平",
+  keeper_thesis_take_min_r: "盈利门控：浮盈至少几倍止损距离",
+  keeper_thesis_take_p: "盈利门控：Jev 说理由不成立的把握至少多少（0–1）",
+  keeper_thesis_take_max_age_s: "盈利门控：Jev 那次回答最多几秒前",
+  keeper_close_guard: "平仓前检查：交易所保护腿在途 / 本轮已发过就不再发",
+  keeper_close_guard_replacing_max_s: "平仓前检查：保护腿换代最多等几秒",
+  keeper_close_guard_exiting_max_s: "平仓前检查：保护腿已触发 / 退出中最多等几秒",
+  keeper_close_guard_total_max_s: "平仓前检查：保护腿连续在途合计最多等几秒",
+  keeper_venue_alert_reviews: "执行所标记价连续几次读不到就告警（0 = 不告警）",
   frozen_peak_exit_on: "冻结盈利价回访（仅之后新开的 Demo 仓）",
   frozen_peak_exit_after_s: "从真实首笔成交起几分钟后冻结盈利价",
   frozen_peak_evidence_mode: "冻结盈利价的交易所证据怎么读",
@@ -2642,6 +2689,10 @@ const HINT = {
   entry_limit_wait_min: "从下单开始算；最长持仓按成交那一刻算，不会因为等挂单少拿",
   entry_limit_chase: "开 = 等到时没成交就撤单改市价进；关 = 撤单不开。档位默认 8 小时以上开",
   chase_price_max_age_s: "改市价追进前按现价复查进场区间，这个币的行情超过这么多秒没更新就这次不追（和开仓检查同一个时钟）。0 = 不查（现状）",
+  keeper_model_mode: "act = 现状：Jev 的平仓概率过线（连续确认 / 明显过线 / 反向急查过线即平）就平。record = 每次照常问 Jev、照常记下，但不按平仓概率平；回吐保护、作战卡、冻结盈利价、盈利门控照常，被封的币直接平。决策记录里每条规则的票都写着",
+  keeper_price_source: "mainnet = 现状：行情快照的主网最新成交价。venue = 执行所的标记价（Demo 上是 Demo 标记价，实盘就是主网）：浮盈、最高浮盈、回吐保护、盈利门控和给 Jev 的快照都用它；「行情最多旧几秒」按这个价查（填 0 时按 5 秒）；读不到或过旧这轮不按价判、维持现状，不拿主网价凑。最高浮盈两种价分开记，中途切换不会混着比。两种价都写进决策记录",
+  keeper_close_guard: "开 = 管家每次要平之前先看：交易所的保护腿已经触发或正在退出（交给保护轮询收尾）、正在换代，或这笔仓半个复查间隔内已经发过一次平仓，就这次不发（作战卡硬规则也一样，也不收紧）；等过下面的秒数照常平并记下。关 = 现状（不看）",
+  keeper_thesis_take_on: "三条同时成立就全平：浮盈（未扣手续费，和回吐保护同口径）至少下面那么多倍止损距离；Jev 最近一次答「进场理由还成立吗」是 no 的把握至少下面那个数；那次回答不超过下面那么多秒。排在回吐保护之后、平仓概率之前，只平不放宽。默认关",
   keeper_price_max_age_s: "管家复查时这个币的行情超过这么多秒没更新：这一轮跳过、维持现状，不平仓也不问模型，连续计数不变。0 = 不查（现状）",
   entry_zone_only: "开 = 卡上这个币写了进场区间（例如反抽做空区、回调做多区），触发价在区间外就不开，连拍板人都不问，团队页风控员那一行写「没到区间」；往交易方向最多放宽 0.1R（做多可以比区间上沿高一点，做空可以比下沿低一点）。卡上没写区间照旧不限。关 = 不看区间。默认关（10-24 的数据显示开着会挡掉好信号）",
   stop_floor_widen: "开 = 止损离手续费太近（不到上面那个倍数）时，把止损拉宽到这条线再下单：每笔最多亏的钱不变，所以仓位会小一些，止盈也按新止损重算。关 = 这一单不做。默认开",
@@ -2931,7 +2982,8 @@ const ROLES = [
     { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first = 原行为。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
-    { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s"] },
+    { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },
+    { g: "Jev 盈利门控", hint: "代码规则 + Jev 的一道题：赚到一定倍数止损距离、Jev 又说进场理由不成立（回答够新），就全平。只平不放宽。", keys: ["fast_loop.keeper_thesis_take_on", "fast_loop.keeper_thesis_take_min_r", "fast_loop.keeper_thesis_take_p", "fast_loop.keeper_thesis_take_max_age_s"] },
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
@@ -2942,7 +2994,7 @@ const ROLES = [
     { g: "", keys: ["fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "fast_loop.patrol_alert_stop_mult", "fast_loop.patrol_shock_stop_mult"] },
   ] },
   { id: "reconciler", t: "对账员", strip: ["对账员"], what: "定时和交易所对账，账本和币安对不上时处理", groups: [
-    { g: "", keys: ["app.reconcile_interval_s", "app.protection_stale_s", "app.reconciler_close_unknown_positions"] },
+    { g: "", keys: ["app.reconcile_interval_s", "app.reconcile_opening_grace_s", "app.reconcile_closing_grace_s", "app.protection_stale_s", "app.reconciler_close_unknown_positions"] },
   ] },
   { id: "lifeboat", t: "保命止损", what: "在交易所挂的兜底止损，程序挂了也能止损", groups: [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
@@ -2972,7 +3024,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "r
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
@@ -3714,7 +3766,7 @@ function mountHistoryChart() {
     }), hEl);
     hseries = hchart.addBaselineSeries({ baseValue: { type: "price", price: 0 } });
   }
-  host.appendChild(hEl);
+  if (hEl.parentNode !== host) host.appendChild(hEl);
   const css = getComputedStyle(document.documentElement);
   hseries.applyOptions({ topLineColor: css.getPropertyValue("--up").trim(), bottomLineColor: css.getPropertyValue("--down").trim(), topFillColor1: "rgba(26,127,55,0.15)", topFillColor2: "rgba(26,127,55,0.02)", bottomFillColor1: "rgba(215,0,21,0.02)", bottomFillColor2: "rgba(215,0,21,0.15)" });
   // 时间要严格递增：同一秒平了几笔就往后挪一秒
@@ -3758,9 +3810,55 @@ function pollIsLatest(seq) {
   return true;
 }
 
+// 每轮拉数（持仓页 2 秒、别的页 5 秒）整块重写 innerHTML：几十 KB 重新解析、CSS 动画从头放、:hover 丢掉，
+// 按下鼠标时正好赶上重画，按下的那个按钮被换掉，这一下点击就没了。多数轮次内容一字不差，直接跳过；
+// 有变化就把新标记逐个节点补到现有节点上，没变的节点原样留着
+const sameHtml = (el, html) => el.__html === html && el.__first === el.firstChild;
+function setHtml(el, html, patch = true) {
+  if (sameHtml(el, html)) return false;
+  if (patch && el.firstChild) {
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    morph(el, t.content);
+  } else {
+    el.innerHTML = html;
+  }
+  el.__html = html;
+  el.__first = el.firstChild;
+  return true;
+}
+// 走势图的画布是代码挂进去的，标记里那一格是空的：不能按标记把它清掉
+const MORPH_KEEP = new Set(["kchart-host", "hchart-host"]);
+const MORPH_FORM = new Set(["INPUT", "SELECT", "TEXTAREA"]);
+function morph(from, to) {
+  const a = [...from.childNodes], b = [...to.childNodes];
+  for (let i = 0; i < b.length; i++) {
+    const o = a[i], n = b[i];
+    if (!o) from.appendChild(n);
+    else if (o.nodeType !== n.nodeType || o.nodeName !== n.nodeName) from.replaceChild(n, o);
+    // 图表格子和别的块互换（历史页「没有平仓」↔ 资金曲线）：整个换，不能把格子 id 补到别的块上
+    else if ((MORPH_KEEP.has(o.id) || MORPH_KEEP.has(n.id)) && o.id !== n.id) from.replaceChild(n, o);
+    else if (o.nodeType !== 1) { if (o.nodeValue !== n.nodeValue) o.nodeValue = n.nodeValue; }
+    // 输入框标记没变就整个留着（打到一半的字、焦点、光标都在）；变了照旧换新的
+    else if (MORPH_FORM.has(o.nodeName)) { if (o.outerHTML !== n.outerHTML) from.replaceChild(n, o); }
+    // 展开的折叠块留着展开；标题换了说明已经是另一条记录，换新的（收起）
+    else if (o.nodeName === "DETAILS" && summaryText(o) !== summaryText(n)) from.replaceChild(n, o);
+    else {
+      morphAttrs(o, n);
+      if (!MORPH_KEEP.has(o.id)) morph(o, n);
+    }
+  }
+  for (let i = b.length; i < a.length; i++) from.removeChild(a[i]);
+}
+const summaryText = (d) => { const s = d.firstElementChild; return s && s.nodeName === "SUMMARY" ? s.textContent : ""; };
+function morphAttrs(o, n) {
+  for (const { name, value } of n.attributes) if (o.getAttribute(name) !== value) o.setAttribute(name, value);
+  for (const { name } of [...o.attributes]) if (!n.hasAttribute(name) && !(name === "open" && o.nodeName === "DETAILS")) o.removeAttribute(name);
+}
+
 function render() {
   chrome();
-  $("#status").innerHTML = statusBar();
+  setHtml($("#status"), statusBar());
   const { page, arg } = route();
   // 搜索框里正在用输入法拼字：这次定时刷新先不重画，免得把拼到一半的字打断
   if (page === "settings" && S.stComposing) return;
@@ -3790,10 +3888,12 @@ function render() {
   const q = qid ? [$(`#${qid}`).selectionStart, $(`#${qid}`).selectionEnd] : null;
   // 定时刷新整页重画：先用旧高度撑住页面，免得重画中途变矮把滚动位置夹回顶部（团队页尤其明显）
   const pg = $("#page"), y = window.scrollY, same = pg.dataset.key === pageId(page, arg), samePage = pg.dataset.page === page;
-  pg.style.minHeight = same ? pg.offsetHeight + "px" : "";
+  const html = (P[page] || placeholder)(arg);
+  const fresh = !sameHtml(pg, html);
+  if (fresh || !same) pg.style.minHeight = same ? pg.offsetHeight + "px" : "";
   pg.dataset.key = pageId(page, arg);
   pg.dataset.page = page;
-  pg.innerHTML = (P[page] || placeholder)(arg);
+  setHtml(pg, html, samePage);
   if (samePage) boxes().forEach((e, i) => { if (scrolls[i]) [e.scrollTop, e.scrollLeft] = scrolls[i]; });
   const box = $("#pool-add");
   if (box && typed) box.value = typed;
@@ -3813,7 +3913,7 @@ function render() {
     const sc = $("#page .tiers-scroll"), cur = $("#page .tier.cur");
     if (sc && cur && cur.offsetLeft + cur.offsetWidth > sc.clientWidth) sc.scrollLeft = cur.offsetLeft - 16;
   }
-  if (same) {
+  if (same && fresh) {
     if (window.scrollY !== y) window.scrollTo(0, y);
     // 新内容够高就放开；不够高（比如列表变短了）留着撑住，换页时再放开
     requestAnimationFrame(() => {
@@ -3920,6 +4020,8 @@ async function poll() {
     }
     lastOk = Date.now();
     $("#stale").innerHTML = "";
+    // 标签页在后台：照常拉数（成交提示音靠它），不重画，切回来时补画一次
+    if (document.hidden) return;
     render();
     loadKlines(false);
   } catch (e) {
@@ -3932,6 +4034,7 @@ async function poll() {
 
 if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
   window.addEventListener("hashchange", () => { closeDlg(); render(); poll(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && data) { render(); loadKlines(false); } });
   render();
   loadPrecision();
   // 持仓页 2 秒一轮（现价、浮盈、K 线要跟得上），其它页 5 秒
