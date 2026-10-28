@@ -2994,7 +2994,7 @@ const ROLES = [
   ] },
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.reuse_extend_expiry", "schedule.card_flip_confirm", "schedule.card_flip_confirm_min", "schedule.symbol_timeout_s"] },
-    { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
+    { g: "方向记分", hint: "只记分、不影响交易：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
     { g: "会议输入和偏空整改（改了要重启主程序）", hint: "默认都是现状，提示词和原来一字不差。偏空整改四项可以用“对照比例”让一部分会议用新写法，另一部分照旧，对比效果（先把下面四项改掉至少一项，再开对照，否则会被拒绝）；输入新鲜度几项让会议材料写明时间、加实时价。教训口径只影响之后的汇总。", keys: ["meeting.lessons_scoring", "meeting.debate_first", "meeting.funding_label", "meeting.bear_bull_symmetry", "meeting.crowd_ratio_mode", "meeting.bias_fix_ab", "meeting.snapshot_interval", "meeting.snapshot_label", "meeting.live_price_line", "meeting.stale_on_arrival", "meeting.stale_on_arrival_action", "meeting.input_time_labels", "meeting.market_table_rolling", "meeting.latest_market_regime", "meeting.event_brief_refresh", "meeting.regime_time_label", "meeting.regime_max_age_min", "meeting.pool_scope_label"] },
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.event_concurrency", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
@@ -3289,7 +3289,7 @@ function editOne(id, useRec) {
     $("#layer [data-ok]").remove();
     $("#layer [data-close].btn").textContent = "关闭";
     const x = res.changed[0];
-    dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。"}`);
+    dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${SAVED_NOTE[`${i.sec}.${i.key}`] || (isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。")}`);
     poll();
   });
   offBind(i);
@@ -3321,6 +3321,11 @@ function editOne(id, useRec) {
 
 // 主程序这次启动以后的改动 = 还没生效的
 // 这项设置改了不用重启（主程序几秒内自己换上）？名单来自后端 core/hotconfig.py
+// 面板自己按轮读的项：生效时刻跟面板那一轮走，不是主程序几秒内换上
+const SAVED_NOTE = {
+  "app.card_score_every_min": "下一轮记分时生效，不用重启。",
+  "app.card_score_window_days": "下一轮记分时生效，不用重启。",
+};
 function isHot(sec, key) {
   const hot = new Set(data.control.hot_keys || []);
   return hot.has(`${sec}.${key}`) || hot.has(`${sec}.*`);

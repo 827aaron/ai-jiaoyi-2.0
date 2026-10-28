@@ -185,6 +185,18 @@ def test_every_app_key_in_panel_groups_is_editable() -> None:
     assert sorted(shown - set(actions.editable_fields("app"))) == []
 
 
+def test_card_score_save_note_names_editable_keys() -> None:
+    src = (ROOT / "src/jiaoyi/panel/static/app.js").read_text(encoding="utf-8")
+    block = re.search(r"const SAVED_NOTE = \{([^}]*)\}", src)
+    assert block is not None
+    notes = dict(re.findall(r'"app\.([A-Za-z0-9_]+)": "([^"]*)"', block.group(1)))
+    assert notes == {
+        "card_score_every_min": "下一轮记分时生效，不用重启。",
+        "card_score_window_days": "下一轮记分时生效，不用重启。",
+    }
+    assert set(notes) <= set(actions.editable_fields("app"))
+
+
 def test_tonights_keys_are_editable() -> None:
     app = set(actions.editable_fields("app"))
     fast = set(actions.editable_fields("fast_loop"))
