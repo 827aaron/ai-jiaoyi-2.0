@@ -361,7 +361,8 @@ class FastLoopConfig(Contract):
         description="模拟盘（paper / testnet，实盘永远不用）按主网价格判止损：Demo 的止损按 Demo "
         "标记价触发，主网插针越过止损时 Demo 常常不触发、仓还拿着。off = 现状；mark = 主网标记价"
         "（每秒一次）越过止损；last = 主网逐笔成交价越过止损。越过时马上要求平 Demo 仓（平仓原因"
-        "止损），并按止损价（加 paper_stop_slippage_bps）记这笔的模拟成交，Demo 实际成交另记。",
+        "止损），并按止损价（加 paper_stop_slippage_bps，越过价更差时按越过价）记这笔的模拟成交，"
+        "Demo 实际成交另记。只在 sim_environment = demo；要先看到主网价在止损安全一侧才算越过。",
     )
     paper_stop_slippage_bps: float = Field(
         default=2.0,
