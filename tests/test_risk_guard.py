@@ -1028,6 +1028,62 @@ def test_review_tp_r_cap_notes_trailing_that_cannot_start(
     assert "不会启动" in rec.output["detail"]["trailing_vs_tp"]
 
 
+@_SIDES
+def test_review_tp_r_cap_no_trailing_note_when_trailing_starts_before_tp(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    sig, cd = _tp_case(now, side)
+    g = _tp_guard(log, tp_r_cap=1.0, trailing_on=True, trail_distance_r=0.3)
+    v = g.review(sig, jev(), cd, account(now, equity=10_000.0), now)
+    assert v.approved and v.intent is not None, v.reasons
+    assert v.intent.trailing_activation_pct is not None
+    (rec,) = log.read_day(now.date().isoformat())
+    assert "trailing_vs_tp" not in rec.output["detail"]
+
+
+@_SIDES
+@pytest.mark.parametrize(("trigger_r", "noted"), [(0.75, True), (0.74, False)])
+def test_review_tp_r_cap_trailing_note_counts_entry_fee(
+    tmp_path: Path, now: datetime, side: c.Side, trigger_r: float, noted: bool
+) -> None:
+    """Stop 120/60000 = 0.2% = TP at 1.0R; breakeven 0.75R = 0.15% plus the 0.05% entry fee
+    reaches the TP exactly, 0.74R stops 0.002% short of it."""
+    log = JsonlDecisionLog(tmp_path)
+    sig = signal(now, side=side, f=features(now, price=60_000.0, atr=80.0))
+    cd = card(
+        now,
+        bias="both",
+        take_profit_r={"min": 1.5, "max": 3},
+        notional_usdt={"min": 10, "max": 100_000},
+    )
+    loose_fee = RISK.model_copy(update={"min_tp_fee_multiple": 1.0})
+    g = _tp_guard(
+        log,
+        risk=loose_fee,
+        tp_r_cap=1.0,
+        breakeven_on=True,
+        breakeven_trigger_r=trigger_r,
+        trailing_on=False,
+    )
+    v = g.review(sig, jev(), cd, account(now), now)
+    assert v.approved and v.intent is not None, v.reasons
+    assert v.intent.take_profit_pct == 0.2
+    act = v.intent.trailing_activation_pct
+    assert act is not None and act < v.intent.take_profit_pct
+    (rec,) = log.read_day(now.date().isoformat())
+    assert ("trailing_vs_tp" in rec.output["detail"]) is noted
+
+
+@_SIDES
+def test_review_tp_r_cap_below_min_tp_r_wins(now: datetime, side: c.Side) -> None:
+    sig, cd = _tp_case(now, side)
+    g = _tp_guard(tp_r_cap=0.8, min_tp_r=1.0)
+    v = g.review(sig, jev(), cd, account(now, equity=10_000.0), now)
+    assert v.approved and v.intent is not None, v.reasons
+    assert v.intent.take_profit_pct == pytest.approx(v.intent.stop_loss_pct * 0.8)
+
+
 def test_tp_r_cap_config_bounds() -> None:
     assert c.FastLoopConfig().tp_r_cap == 0.0
     assert c.FastLoopConfig(tp_r_cap=1.0).tp_r_cap == 1.0

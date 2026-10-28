@@ -1033,9 +1033,13 @@ class RiskGuardImpl:
         trail_act, trail_delta, trail_note = self._trailing(stop_pct)
         if trail_note:
             detail["trailing"] = trail_note
-        if fast.tp_r_cap > 0 and trail_act is not None and trail_act >= tp_pct:
+        # hummingbot arms trailing on PnL net of the entry fee, so the price has to travel
+        # activation + fee before trailing can start
+        trail_px = None if trail_act is None else trail_act + risk.taker_fee_bps / 100.0
+        if fast.tp_r_cap > 0 and trail_px is not None and trail_px >= tp_pct:
             detail["trailing_vs_tp"] = (
-                f"移动止损 / 保本启动线 {trail_act:.3f}% 不近于止盈 {tp_pct:.3f}%，到止盈前不会启动"
+                f"移动止损 / 保本启动线 {trail_act:.3f}%（加开仓手续费价格要走 {trail_px:.3f}%）"
+                f"不近于止盈 {tp_pct:.3f}%，到止盈前不会启动"
             )
         return OrderIntent(
             order_type="limit" if limit is not None else "market",
