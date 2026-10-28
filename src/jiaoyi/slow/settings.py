@@ -495,7 +495,13 @@ class ScheduleConfig(_Strict):
         description="每轮最多出几张作战卡（几个标的开会）。不写 = 用 app.toml 的 card_pick_max；"
         "写了取两者较小值，不会超过 card_pick_max。0 = 不限（只受 card_pick_max 管）。",
     )
-    concurrency: int = Field(default=8, ge=1, le=8, description="同时开几个标的的会议。")
+    concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="同时开几个标的的会议（整轮各币会 + 临时会合计不超过它）。"
+        "16 起留意 OpenRouter 的同时请求数和币安 REST 权重（见 docs/slow.md）。",
+    )
     card_ttl_min: float = Field(
         default=140.0,
         ge=10.0,
@@ -541,6 +547,14 @@ class ScheduleConfig(_Strict):
         le=1440.0,
         description="同一个币两场临时会（含正式会）至少隔多久。0 = 不限（内部仍隔 5 分钟，"
         "免得关键位一直被穿时同一个币连着开）。",
+    )
+    event_concurrency: int = Field(
+        default=1,
+        ge=0,
+        le=32,
+        description="同时最多开几场临时会（不同币）。1 = 一场一场排队；0 = 跟 concurrency 一样。"
+        "大于 1 时整轮开会期间也能给本轮不开的币开临时会，和整轮共用 concurrency 的名额；"
+        "同一个币不会同时开两场。不能大于 concurrency。",
     )
     event_max_per_day: int = Field(
         default=12,
@@ -599,6 +613,11 @@ class ScheduleConfig(_Strict):
             raise ValueError("refresh_lead_min 必须小于作战卡有效期（card_ttl_min）")
         if self.min_refresh_gap_min >= self.card_ttl_min:
             raise ValueError("min_refresh_gap_min 必须小于作战卡有效期，否则卡会过期断档")
+        if self.event_concurrency > self.concurrency:
+            raise ValueError(
+                f"event_concurrency（{self.event_concurrency}）不能大于 concurrency"
+                f"（{self.concurrency}）：临时会和整轮共用这些名额"
+            )
         return self
 
     def caution(self, pick_max: int | None = None) -> str | None:
@@ -980,6 +999,7 @@ class SlowConfig(_Strict):
                 move_atr=s.move_since_card_atr,
                 entry_max_age=timedelta(minutes=s.entry_max_card_age_min),
                 key_level_trigger=s.key_level_trigger,
+                concurrency=s.event_concurrency or s.concurrency,  # 0 = 跟整轮一样
             ),
             "schedule_at": s.schedule_at,
             "slowdown": self._slowdown(),

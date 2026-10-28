@@ -89,7 +89,7 @@ max_retries = 6
 [schedule]
 # 这一段不写的键取 app.toml 所选持仓档位的默认（core/profiles.py）；写了就覆盖档位。下面注释里是 2h 档的值
 # max_cards_per_round = 10         # 每轮最多出几张作战卡（几个标的开会）；不超过 app.toml 的 card_pick_max；0 = 不限（只受 card_pick_max 管）
-# concurrency = 8                  # 同时开几个标的的会议 1–8
+# concurrency = 8                  # 同时开几个标的的会议 1–32（整轮各币会 + 临时会合计）；16 起注意 OpenRouter 同时请求数和币安权重（docs/slow.md）
 # card_ttl_min = 140              # 作战卡有效期（分钟）= 开会间隔 + 提前量（2h 140 / 60m 80 / 30m 50 / 15m 35）
 # symbol_min_interval_min = 115   # 同一个币两次会议的最小间隔 5–720 分钟（≤ 开会间隔）
 # refresh_lead_min = 20            # 卡到期前多久开会换卡 5–60 分钟，要大于一轮会议耗时（不写也不在档位里时 20）
@@ -99,6 +99,8 @@ max_retries = 6
 # event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / signal_against_card / news_high_impact / stale_card_on_entry
 # event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久；0 = 不限（内部仍隔 5 分钟，失败的会这个币另隔 15 分钟）
 # event_max_per_day = 12          # 每个交易日最多几场临时会；0 = 不限
+# event_concurrency = 1           # 同时最多开几场临时会（不同币）；1 = 排队一场一场开（默认）；0 = 跟 concurrency 一样；不能大于 concurrency
+#                                  大于 1 时整轮开会期间也给本轮不开的币开临时会，和整轮共用 concurrency 的名额。推荐 Demo：0（= concurrency）
 # key_level_trigger = "outside"  # key_level_break 怎么算：outside = 价格在关键位外侧就算（还在外面就隔够间隔再开）；cross = 出卡后价格从里侧穿到外侧那一下才算，出卡时已在外侧的位要等回到里侧再穿
 # move_since_card_atr = 3.0       # 离上次开会的价格走了几倍 ATR 算 move_since_card
 # predictor_against_runs = 2      # 预测员连续几次看反作战卡才算

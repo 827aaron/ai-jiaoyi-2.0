@@ -453,6 +453,12 @@ document.addEventListener("click", async (e) => {
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
+  else if (act === "kscale") {
+    S.scaleAll = !S.scaleAll;
+    try { localStorage.setItem("kline-scale", S.scaleAll ? "all" : "fit"); } catch (err) { /* 记不住就只对这次生效 */ }
+    render();
+    if (chart) { chart.priceScale("right").applyOptions({ autoScale: true }); updateEdges(); }
+  }
   else if (act === "chartfull") setChartFull(!S.chartFull);
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "ai") { S.ai = arg; render(); poll(); }
@@ -1376,6 +1382,7 @@ P.positions = (arg) => {
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
+          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只贴合 K 线，超出的价位线贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "贴合K线" : "显示全部价位"}</button>
           <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${trailLegend(sel)}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
@@ -1387,14 +1394,66 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
-// 默认视图：全部 K 线铺开，最新一根停在图宽 2/3 处，右边留 1/3 空白（像 TradingView 的右侧留白）
+let lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
+try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
+// KLINE-SCALE-BEGIN
+const DEFAULT_BARS = 120, RIGHT_BARS = 5;
+// 默认视图：最近 120 根，最新一根后面留 5 根的空位（像 TradingView / 币安）
+function defaultRange(n) {
+  return { from: Math.max(0, n - DEFAULT_BARS), to: Math.max(n - 1, 0) + RIGHT_BARS };
+}
+// 价格轴只认看得见的 K 线（+ 开仓价）；开了「显示全部价位」才把所有线算进去。返回 {min, max} 或 null
+function scaleRange(bars, range, lines, entry, all) {
+  const lo = Math.max(0, Math.floor(range.from)), hi = Math.min(bars.length - 1, Math.ceil(range.to));
+  let min = Infinity, max = -Infinity;
+  for (let i = lo; i <= hi; i++) { min = Math.min(min, bars[i].low); max = Math.max(max, bars[i].high); }
+  if (!(min <= max)) return null;
+  for (const v of all ? lines : [entry]) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
+  return { min, max };
+}
+// scaleMargins 是占图高的比例，换成占价格范围的比例：数据只占 1 - 2·pad 的高度
+const padFrac = (pad) => pad / (1 - 2 * pad);
+// 超出价格轴（含上下 pad 边距）的线：贴在上沿 / 下沿，留名字和价格
+function edgeLabels(defs, r, pad) {
+  const h = r.max - r.min;
+  const lo = r.min - h * pad, hi = r.max + h * pad;
+  return defs.filter((d) => d.price != null && (d.price > hi || d.price < lo)).map((d) => ({ ...d, edge: d.price > hi ? "top" : "bottom" }))
+    .sort((a, b) => (a.edge !== b.edge ? (a.edge === "top" ? -1 : 1) : a.edge === "top" ? b.price - a.price : a.price - b.price));
+}
+// 到时点在最后一根 K 线之后：不撑大时间轴，在图边上写一句
+function limitNote(openedMs, limitS, bars, fmt) {
+  if (openedMs == null || !limitS || !bars.length) return "";
+  const end = openedMs + limitS * 1000;
+  return end > bars[bars.length - 1].time * 1000 ? `到时 ${fmt(end)} →` : "";
+}
+// KLINE-SCALE-END
+const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
-    const last = barCount - 1;
-    c.timeScale().setVisibleLogicalRange({ from: 0, to: last + last / 2 });
+    c.timeScale().setVisibleLogicalRange(defaultRange(barCount));
+    c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
   }
+}
+// 超出价格轴的线以及「到时」说明：盖在图上的小标签，不挡鼠标
+function updateEdges() {
+  if (!chartEl || !series) return;
+  if (!edgeEl) {
+    edgeEl = document.createElement("div");
+    edgeEl.className = "kedge";
+    chartEl.appendChild(edgeEl);
+  }
+  const vr = chart.timeScale().getVisibleLogicalRange();
+  const entry = lineDefs.find((d) => d.entry);
+  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), entry && entry.price, S.scaleAll) : null;
+  const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, padFrac(SCALE_PAD)) : [];
+  let nTop = 0, nBot = 0;
+  const html = out.map((d) => {
+    const n = d.edge === "top" ? nTop++ : nBot++;
+    return `<span class="ke" style="${d.edge}:${n * 18 + (d.edge === "bottom" ? 28 : 4)}px;color:${d.color}">${d.edge === "top" ? "▲" : "▼"} ${esc(d.title)} ${esc(price(d.price, d.symbol))}</span>`;
+  }).join("");
+  edgeEl.innerHTML = html + (limitAt ? `<span class="ke kl">${esc(limitAt)}</span>` : "");
 }
 // 图和页面抢手势：照地图控件（Google Maps / Mapbox 的 cooperative gestures）的通行做法——
 // 电脑：普通滚轮留给页面滚动，按住 Ctrl / ⌘ 再滚轮才缩放，鼠标拖动平移，双击复位；
@@ -1448,6 +1507,7 @@ function mountChart() {
   if (!chartEl) {
     chartEl = document.createElement("div");
     chartEl.style.height = "100%";
+    chartEl.style.position = "relative";
     host.appendChild(chartEl);
     chart = lockChart(LightweightCharts.createChart(chartEl, {
       ...CHART_COOP,
@@ -1455,19 +1515,22 @@ function mountChart() {
       layout: { background: { color: "transparent" }, textColor: getComputedStyle(document.body).getPropertyValue("--dim"), fontFamily: getComputedStyle(document.body).fontFamily },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(0,0,0,0.05)" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderVisible: false, tickMarkFormatter: (t) => tick(t) },
-      rightPriceScale: { borderVisible: false },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: SCALE_PAD, bottom: SCALE_PAD } },
       localization: { timeFormatter: (t) => hm(t * 1000) },
     }), chartEl);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateEdges());
     const css = getComputedStyle(document.documentElement);
     const up = css.getPropertyValue("--up").trim(), down = css.getPropertyValue("--down").trim();
     series = chart.addCandlestickSeries({
       upColor: up, downColor: down, borderVisible: false, wickUpColor: up, wickDownColor: down,
-      // 止盈、保命这些线可能在 K 线范围外，把它们也包进可视范围
+      // 默认只贴合看得见的 K 线 + 开仓价；「显示全部价位」时把止盈、保命这些线也包进来
       autoscaleInfoProvider: (orig) => {
         const r = orig();
-        const lines = linePrices.filter((v) => v != null);
-        if (!r || !lines.length) return r;
-        return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...lines), maxValue: Math.max(r.priceRange.maxValue, ...lines) } };
+        if (!r) return r;
+        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.entry).map((d) => d.price);
+        const vals = extra.filter((v) => v != null);
+        if (!vals.length) return r;
+        return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...vals), maxValue: Math.max(r.priceRange.maxValue, ...vals) } };
       },
     });
   } else {
@@ -1492,6 +1555,10 @@ async function loadKlines(force) {
     priceLines.forEach((l) => series.removePriceLine(l));
     priceLines = [];
     linePrices = [];
+    lineDefs = [];
+    lastBars = [];
+    limitAt = "";
+    updateEdges();
     chart.priceScale("right").applyOptions({ autoScale: true });
     needFit = true;
   }
@@ -1504,6 +1571,7 @@ async function loadKlines(force) {
     if (seq !== klineSeq || key !== chartKey) return; // 等的时候又换了：这份是旧币的，不画
     series.setData(bars);
     barCount = bars.length;
+    lastBars = bars;
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1515,17 +1583,21 @@ async function loadKlines(force) {
   const css = getComputedStyle(document.documentElement);
   const c = (v) => css.getPropertyValue(v).trim();
   const L = LightweightCharts.LineStyle;
-  priceLines = [
+  const defs = [
     [p.take_profit_price, "止盈", c("--up"), L.Dashed],
     [p.entry_price, "开仓", c("--faint"), L.Solid],
     [p.stop_loss_price, "固定止损计划", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
     [tl.start, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
     tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
-  ].filter(([v]) => v != null).map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+  ].filter(([v]) => v != null);
+  priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, entry: title === "开仓" }));
+  limitAt = limitNote(p.opened_at ? new Date(p.opened_at).getTime() : null, p.time_limit_s, bars, hm);
   series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) fitView(chart);
   needFit = false;
+  updateEdges();
 }
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
 // 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
@@ -1548,12 +1620,12 @@ function entryMarkers(p, bars) {
    宽度不够整体缩放，手机上改成按泳道竖排。点 = 进度 + 健康：出错 > 正在做 > 这一轮做完 > 等待 */
 const TF_W = 1180, TF_H = 570, NODE_W = 168, NODE_H = 92;
 const TF_POS = {
-  screener: [10, 34], market: [250, 34], commander: [490, 34], card: [730, 34],
+  screener: [10, 34], market: [250, 34], desk: [490, 34], commander: [730, 34], card: [970, 34],
   book_reader: [10, 214], predictor: [250, 290], sentinel: [490, 214], gate: [730, 214], risk_guard: [970, 186], executor: [970, 300],
   alerting: [10, 446], reconciler: [250, 446], patrol: [490, 446], keeper: [730, 446], lifeboat: [970, 446],
 };
 const TF_LANES = [
-  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "market", "commander", "card"]],
+  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "market", "desk", "commander", "card"]],
   ["② 发现信号 → 下单", "几秒内走完", 166, 230, ["book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor"]],
   ["③ 看着持仓", "有仓位就一直盯", 412, 150, ["lifeboat", "keeper", "patrol", "reconciler", "alerting"]],
 ];
@@ -1564,11 +1636,13 @@ const tfB = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1] + NODE_H];
 // [起点, 终点, 终点角色（连线颜色跟它）, 标签, 弯法]
 const TF_EDGES = [
   [tfR("screener"), tfL("market"), "market", "候选池"],
-  [tfR("market"), tfL("commander"), "commander", "上会名单"],
+  [tfT("market"), tfT("commander"), "commander", "上会名单", "over"],
+  [tfR("desk"), tfL("commander"), "commander", "大盘方向"],
+  [[TF_POS.desk[0] + 40, TF_POS.desk[1] + NODE_H], [TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], "sentinel", "大盘方向"],
   [tfB("market"), tfT("book_reader"), "book_reader", "要盯的币", "gap"],
   [tfR("commander"), tfL("card"), "card", "写卡"],
   [tfB("card"), tfT("sentinel"), "sentinel", "关键价位", "gap"],
-  [tfR("card"), tfT("risk_guard"), "risk_guard", "止损范围", "elbow", "side"],
+  [[TF_POS.card[0] + 120, TF_POS.card[1] + NODE_H], [TF_POS.risk_guard[0] + 120, TF_POS.risk_guard[1]], "risk_guard", "止损范围", "v-top", "side"],
   [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
   [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
   [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
@@ -1613,8 +1687,10 @@ function predictorMeetingEdges(list) {
 function regimeFlipEdges(event) {
   if (!event) return [];
   const flip = (event.output && event.output.regime_flip) || {};
-  const target = flip.scope === "market_desk" ? "大盘台" : "独立更新";
-  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS.market[0] + 140, TF_POS.market[1] + NODE_H], "market", `${hm(event.ts)} 大盘变化 → ${target} ${edgeAgeTxt(event.ts)}`, "flip", "against", event.ts]];
+  const desk = flip.scope === "market_desk";
+  const target = desk ? "大盘台" : "独立更新";
+  const to = desk ? "desk" : "market";
+  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS[to][0] + 140, TF_POS[to][1] + NODE_H], to, `${hm(event.ts)} 大盘变化 → ${target} ${edgeAgeTxt(event.ts)}`, "flip", "against", event.ts]];
 }
 function tfEdge([a, b, to, label, how, extra, ts], prog) {
   const [x1, y1] = a, [x2, y2] = b;
@@ -1626,6 +1702,8 @@ function tfEdge([a, b, to, label, how, extra, ts], prog) {
   else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
   // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
   else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
+  // 绕过中间的节点：从起点顶上抬到泳道上沿，横过去，再落到终点顶上
+  else if (how === "over") { const yy = 14; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = yy - 3; dir = "d"; }
   else if (how === "drop") { const yy = 402; d = `M${x1},${y1} V${yy} H${x2} V${y2 - 1}`; lx = x1 + 8; ly = yy - 5; dir = "d"; }
   // 从下面的节点顶上往上，在第一、二泳道之间横过去，再往上进目标节点底
   else if (how === "climb") { const yy = 182; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x1 - 140; ly = yy - 5; dir = "u"; }
@@ -1652,6 +1730,24 @@ function tfMarketNode(m, p, mr) {
   const st = line ? line : !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
   const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
   return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
+}
+// 大盘台：独立判断候选池未来 4 小时的涨 / 平 / 跌，管着大盘方向（接管）或退回 Flash
+function deskProgress(k) {
+  if (!k || k.state === "off") return "wait";
+  if (k.state === "bad" || k.error) return "err";
+  return k.runs_today > 0 ? "done" : "wait";
+}
+function tfDeskNode(k) {
+  if (!k) return `<span class="nm"><i class="dot wait"></i>大盘台</span><small>还没有数据</small>`;
+  const p = deskProgress(k);
+  const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+  const owner = k.owner === "desk" ? "大盘台接管" : k.owner === "flash" ? "回退 Flash" : "";
+  const dir = k.direction ? `${k.direction}${k.published_version != null ? " v" + k.published_version : ""}` : "";
+  const probs = k.probs ? `涨 ${pct(k.probs.up)} 平 ${pct(k.probs.flat)} 跌 ${pct(k.probs.down)}` : "";
+  const when = k.state === "off" ? "" : [k.last_run_at ? `上次 ${hm(k.last_run_at)}` : "", k.next_run_at ? `下次 ${hm(k.next_run_at)}` : ""].filter(Boolean).join(" · ");
+  const head = [owner, dir].filter(Boolean).join(" · ");
+  const line = (t, cls) => (t ? `<small${cls ? ` class="${cls}"` : ""} title="${esc(t)}">${esc(t)}</small>` : "");
+  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
 }
 // 统一的「上次 hh:mm · 下次 hh:mm · 刚刚：…」；模块没报的字段就不写（不猜）
 function runLine(r) {
@@ -1711,12 +1807,14 @@ function teamFlow(d) {
   const prog = Object.fromEntries(d.roles.map((r) => [r.role, r.progress]));
   prog.card = data && data.card && data.card.valid ? "done" : "wait";
   prog.market = d.market_progress;
+  prog.desk = deskProgress(d.desk);
   const node = (k, inCanvas) => {
     if (k === "market") return `<a class="tf-node ${d.market_progress} ${d.selected === "market" ? "on" : ""}" href="#team/market" style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress, d.market_role)}</a>`;
+    if (k === "desk") return `<a class="tf-node desk ${deskProgress(d.desk)} ${d.selected_desk ? "on" : ""}" href="#team/desk" style="${inCanvas ? `left:${TF_POS.desk[0]}px;top:${TF_POS.desk[1]}px` : ""}">${tfDeskNode(d.desk)}</a>`;
     if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
     const r = by[k];
     if (!r) return "";
-    return `<a class="tf-node ${r.progress} ${r.role === d.selected ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
+    return `<a class="tf-node ${r.progress} ${r.role === d.selected && !d.selected_desk ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
   };
   // 盯持仓是常态，放最后说；其余按流程顺序，每处一条，轮播着看全
   const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
@@ -1869,7 +1967,10 @@ async function showPrompts() {
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
-  const sel = d.roles.find((r) => r.role === d.selected) || d.market_role;
+  const k = d.desk;
+  const sel = d.selected_desk && k
+    ? { role: "desk", name: "大盘台", last_beat: k.last_run_at, last_error: k.error, avg_latency_ms: 0 }
+    : d.roles.find((r) => r.role === d.selected) || d.market_role;
   window.__recs = d.records;
   const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${esc(s.text)}</span></div>`).join("");
   return `${cards}
@@ -1881,7 +1982,7 @@ P.team = () => {
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
-      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "market" ? "最近没有总盘会的记录（出作战卡、大盘更新、开会失败都记在这里）。" : sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
+      <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "desk" ? "大盘台还没有记录（每一轮的方向、发布、失败都记在这里）。" : sel.role === "market" ? "最近没有总盘会的记录（出作战卡、大盘更新、开会失败都记在这里）。" : sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
       <div class="foot">最新 200 条（跨天），框里往下滚看更早的 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
 
@@ -2391,6 +2492,7 @@ const PLAIN = {
   event_triggers: "哪些事算“出事”",
   event_symbol_gap_min: "同一个币两场会至少隔几分钟（0 = 不限）",
   event_max_per_day: "一天最多开几场临时会（0 = 不限）",
+  event_concurrency: "同时最多开几场临时会（不同币；1 = 排队一场一场开，0 = 跟「同时开几个会」一样）",
   key_level_trigger: "怎样算“突破关键价位”",
   move_since_card_atr: "价格离上次开会走了几个波动幅度算“走远了”",
   predictor_against_runs: "预测员连续几次看反才算",
@@ -2683,7 +2785,7 @@ const ROLES = [
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
     { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
-    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
+    { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.event_concurrency", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
   { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [
     { g: "", hint: "曼谷 0 点清零；花到 80% 按下面放慢或停，花到 100% 当天停开会，持仓照常管。", keys: ["budget.daily_cost_limit_usd", "schedule.over_budget", "schedule.slowdown_interval_min", "budget.*"] },
@@ -2768,7 +2870,7 @@ const UNIT = {
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
   min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
-  liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个",
+  liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
   min_quote_volume_usdt: " U", min_depth_usdt: " U", min_listed_days: " 天", min_range_24h_pct: "%", max_range_24h_pct: "%",
   head: " 个", mid: " 个", mid_daily_pick: " 个", daily_cost_limit_usd: " 美元",
