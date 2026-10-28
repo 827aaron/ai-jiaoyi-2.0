@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -426,3 +429,171 @@ def test_cli_commit_and_rollback_exit_codes(
     assert cli.main(["apply-pending-config", "--commit", *args]) == 0
     assert cli.main(["apply-pending-config", "--rollback", *args]) == 1
     assert pc.read_status(data)["status"] == "committed"  # type: ignore[index]
+
+
+class _Killed(BaseException):
+    pass
+
+
+def _kill_after_first_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """模拟进程在两次写之间被 SIGKILL：第二次写时死掉，退回和写状态都来不及跑。"""
+    real_write, real_status = pc._atomic_write, pc._write_status
+    writes: list[Path] = []
+
+    def write(path: Path, text: str) -> None:
+        if writes:
+            raise _Killed
+        writes.append(path)
+        real_write(path, text)
+
+    def dead(*_: object) -> list[str]:
+        raise _Killed
+
+    def status(data: Path, rec: dict[str, object]) -> None:
+        if rec.get("status") != "failed":  # 进程已死，失败状态写不出来
+            real_status(data, rec)
+
+    monkeypatch.setattr(pc, "_atomic_write", write)
+    monkeypatch.setattr(pc, "_restore_entries", dead)
+    monkeypatch.setattr(pc, "_write_status", status)
+
+
+def test_status_applying_is_on_disk_before_any_real_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before = paths.app.read_text(encoding="utf-8")
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    seen: list[dict[str, object]] = []
+    real_write = pc._atomic_write
+
+    def write(path: Path, text: str) -> None:
+        seen.append(pc.read_status(data) or {})
+        real_write(path, text)
+
+    monkeypatch.setattr(pc, "_atomic_write", write)
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "applied"
+    first = seen[0]
+    assert first["status"] == "applying" and first["rows_logged"] is False
+    files = first["files"]
+    assert isinstance(files, dict) and set(files) == {str(paths.app), str(paths.slow)}
+    app = files[str(paths.app)]
+    assert Path(app["backup"]).read_text(encoding="utf-8") == app_before
+    assert app["pre"] == pc._text_sha(app_before)
+    assert app["post"] == pc._sha(paths.app)
+    assert len(first["archived"]) == 2 and len(first["rows"]) == 2  # type: ignore[arg-type]
+
+
+def test_kill_between_writes_then_rollback_restores_exactly_that_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before, slow_before = paths.app.read_bytes(), paths.slow.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    _kill_after_first_write(monkeypatch)
+    with pytest.raises(_Killed):
+        pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    monkeypatch.undo()
+    assert pc.read_status(data)["status"] == "applying"  # type: ignore[index]
+    assert paths.app.read_bytes() != app_before and paths.slow.read_bytes() == slow_before
+    res = pc.rollback(data, NOW, "check-config 没过")
+    assert res is not None and res.status == "rolled_back"
+    assert (paths.app.read_bytes(), paths.slow.read_bytes()) == (app_before, slow_before)
+    assert pc.read_status(data)["restore_failed"] == []  # type: ignore[index]
+    assert pc.pending_path(paths.app).is_file() and pc.pending_path(paths.slow).is_file()
+    assert _rows(data) == []  # 被杀时还没记修改记录，退回也不补
+
+
+def test_rerun_after_kill_backs_up_the_original_not_the_merged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before = paths.app.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    _kill_after_first_write(monkeypatch)
+    with pytest.raises(_Killed):
+        pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    monkeypatch.undo()
+    later = NOW.replace(minute=45)
+    assert pc.apply_pending(paths, data, later, check=lambda p: None).status == "applied"
+    rec = pc.read_status(data)
+    assert rec is not None
+    assert Path(rec["files"][str(paths.app)]["backup"]).read_bytes() == app_before
+    assert [r["old"] for r in _rows(data)] == [None, 7]  # 修改记录的旧值也是合并前的
+    assert pc.rollback(data, later, "x") is not None
+    assert paths.app.read_bytes() == app_before
+
+
+def test_applying_left_without_pending_files_is_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before = paths.app.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    _kill_after_first_write(monkeypatch)
+    calls: list[int] = []
+
+    def check(p: ConfigPaths) -> str | None:  # 只有一个文件：死在写完后的正式校验里
+        calls.append(1)
+        if len(calls) == 2:
+            raise _Killed
+        return None
+
+    with pytest.raises(_Killed):
+        pc.apply_pending(paths, data, NOW, check=check)
+    monkeypatch.undo()
+    assert paths.app.read_bytes() != app_before
+    pc.pending_path(paths.app).unlink()
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "none"
+    assert paths.app.read_bytes() == app_before
+    assert pc.read_status(data)["status"] == "rolled_back"  # type: ignore[index]
+
+
+def test_old_uncommitted_merge_is_committed_before_the_next_update(tmp_path: Path) -> None:
+    """上次合并过、正式文件也校验过，但没走到 --commit：这次更新先定下它，与它无关的
+    check-config 失败不会把它退掉。"""
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "applied"
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "none"
+    assert pc.read_status(data)["status"] == "committed"  # type: ignore[index]
+    assert pc.rollback(data, NOW, "x") is None
+    assert load_app_config(paths.app).fast_loop.surge_vol_ratio == 6.0
+
+
+def test_commit_accepts_an_applying_merge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    _kill_after_first_write(monkeypatch)
+    with pytest.raises(_Killed):
+        pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    monkeypatch.undo()
+    assert pc.commit(data, NOW) is True
+    assert pc.rollback(data, NOW, "x") is None
+
+
+def test_sigterm_during_write_phase_restores_then_exits(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before, slow_before = paths.app.read_bytes(), paths.slow.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    calls: list[int] = []
+    before_handler = signal.getsignal(signal.SIGTERM)
+
+    def check(p: ConfigPaths) -> str | None:
+        calls.append(1)
+        if len(calls) == 2:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(1)  # 信号在这里送达，处理函数抛出
+        return None
+
+    with pytest.raises(BaseException, match="SIGTERM"):
+        pc.apply_pending(paths, data, NOW, check=check)
+    assert (paths.app.read_bytes(), paths.slow.read_bytes()) == (app_before, slow_before)
+    status = pc.read_status(data)
+    assert status is not None and status["status"] == "failed" and status["restored"] is True
+    assert signal.getsignal(signal.SIGTERM) == before_handler
