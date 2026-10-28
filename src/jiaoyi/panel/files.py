@@ -269,6 +269,7 @@ class PanelFiles:
         positions: list[PositionRecord] = []
         notional: dict[str, float] = {}
         protection: dict[str, object] = {}
+        filled: set[str] = set()
         for t in (raw.get("positions") or {}).values():
             try:
                 rec = PositionRecord.model_validate(t["record"])
@@ -278,6 +279,8 @@ class PanelFiles:
             notional[rec.position_id] = float(t.get("notional_usdt") or 0.0)
             if t.get("server_protection"):
                 protection[rec.position_id] = t["server_protection"]
+            if _exit_filled(t):
+                filled.add(rec.position_id)
         paper = self._paper.get()
         actual: dict[str, PositionRecord] = {}
         if paper and self.paper_book_pnl():
@@ -292,6 +295,7 @@ class PanelFiles:
         ds = raw.get("day_start") or {}
         return Ledger(
             positions=positions,
+            exit_filled=filled,
             paper=paper,
             actual=actual,
             planned_notional=notional,
@@ -340,6 +344,21 @@ class PanelFiles:
         return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
 
+def _exit_filled(tracked: dict[str, object]) -> bool:
+    """A closing position whose direct close order, or a triggered protection leg's child
+    order, reads back FILLED."""
+    record = tracked.get("record")
+    if not isinstance(record, dict) or record.get("status") != "closing":
+        return False
+    if tracked.get("direct_close_order_status") == "FILLED":
+        return True
+    state = tracked.get("server_protection")
+    legs = state.get("legs") if isinstance(state, dict) else None
+    return isinstance(legs, list) and any(
+        isinstance(leg, dict) and leg.get("actual_order_status") == "FILLED" for leg in legs
+    )
+
+
 @dataclass
 class Ledger:
     positions: list[PositionRecord] = field(default_factory=list)
@@ -352,6 +371,9 @@ class Ledger:
     last_equity: float | None = None
     protection: dict[str, object] = field(default_factory=dict)
     """持仓号 → positions.json 里 server_protection 的原始 JSON（旧仓位没有）。"""
+    exit_filled: set[str] = field(default_factory=set)
+    """Position ids whose exit order has filled on the exchange; the ledger still says closing
+    until the protection legs are cancelled and zero is verified."""
     paper: dict[str, PaperStop] = field(default_factory=dict)
     """Position id -> its paper stop booking, whether or not ``positions`` uses it."""
     actual: dict[str, PositionRecord] = field(default_factory=dict)

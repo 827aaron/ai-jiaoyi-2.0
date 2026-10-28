@@ -578,3 +578,29 @@ assert(trailNote(C.tightened).includes('比在挂的收紧止损 66800 松，未
 """
     )
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize(
+    ("status", "direct", "child", "note"),
+    [
+        ("closing", "FILLED", None, "已成交，收尾中"),
+        ("closing", None, "FILLED", "已成交，收尾中"),
+        ("closing", "NEW", None, None),
+        ("closing", None, None, None),
+        ("open", "FILLED", None, None),
+    ],
+)
+def test_exit_fill_shows_before_cleanup_finishes(
+    tmp_path: Path, status: str, direct: str | None, child: str | None, note: str | None
+) -> None:
+    legs = _armed(stage="exiting")
+    legs["legs"][1].update(actual_order_status=child)
+    pos = _position(status=status)
+    pos["server_protection"] = legs
+    pos["direct_close_order_status"] = direct
+    (tmp_path / "positions.json").write_text(json.dumps({"positions": {"pos-0001": pos}}))
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    [v] = build_positions(files, HB, RISK, NOW, None, 120).positions
+    assert v.close_note == note
+    [v] = build_overview(files, HB, RISK, _cfg(tmp_path), NOW).positions
+    assert v.close_note == note

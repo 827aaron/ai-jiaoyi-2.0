@@ -959,3 +959,57 @@ async def test_generation_without_a_recorded_outcome_counts_as_unknown(tmp_path:
     assert h.tracked().record.status is PositionStatus.CLOSED
     assert h.settled == [(CloseReason.KEEPER, CloseFill())]
     assert "直连只减仓单 2 代，成交量未知" in h.exit_alerts()[0].body
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize(
+    ("mode", "exiting"), [("hb_first", False), ("hb_first", True), ("direct", True)]
+)
+async def test_manual_close_sends_the_order_before_any_leg_cancel_or_hb_stop(
+    tmp_path: Path, side: Side, mode: str, exiting: bool
+):
+    h = await armed(tmp_path, side, mode)
+    assert not h.adapter._direct_when_exiting
+    if exiting:
+        h.manager.mark_exiting("pos-1")
+    h.api.auto_terminate_on_stop = True
+    await h.adapter.close("pos-1", CloseReason.MANUAL)
+    names = [n for _, n in h.calls]
+    first_order = names.index("place_close")
+    assert "stop_executor" not in names[:first_order]
+    assert not any(n.startswith("cancel_") for n in names[:first_order])
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert all(status == "NEW" for status in h.exchange.legs_at_place[0].values())
+    await h.adapter.close("pos-1", CloseReason.MANUAL)  # 再点一次不再下单
+    await h.adapter.protection_tick()
+    done = h.tracked()
+    assert done.record.status is PositionStatus.CLOSED
+    assert done.record.close_reason is CloseReason.MANUAL
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert not h.backups() and not h.live_stop() and len(h.cancels()) == 3
+    assert not h.failure_alerts()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_keeper_close_in_hb_first_mode_still_stops_hb_first(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side, "hb_first")
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert not h.exchange.direct and h.api.stopped == [("owned-executor", True)]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_close_order_is_sized_on_the_close_lane_read(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+    lane: list[str] = []
+    shared = type(h.exchange).positions_evidence.__get__(h.exchange)
+
+    async def close_lane():
+        lane.append("close_positions_evidence")
+        return await shared()
+
+    h.exchange.close_positions_evidence = close_lane  # type: ignore[attr-defined]
+    await h.adapter.close("pos-1", CloseReason.MANUAL)
+    names = [n for _, n in h.calls]
+    assert "positions_evidence" not in names[: names.index("place_close")]
+    assert lane and h.exchange.direct == [("dc-pos-1-1", 2.0)]

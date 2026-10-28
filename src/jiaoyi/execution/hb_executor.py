@@ -1442,7 +1442,7 @@ class HbExecutorAdapter:
             status=PositionStatus.CLOSING,
             requested_close=tracked.requested_close or reason,
         )
-        if await self._direct_first_ready(tracked):
+        if await self._direct_first_ready(tracked, reason):
             return await self._close_hosted_direct_first(tracked, reason, via_hb, title=title)
         if tracked.server_protection is not None and not await self._prepare_server_exit(tracked):
             return False
@@ -1555,20 +1555,25 @@ class HbExecutorAdapter:
         except ProtectionIncomplete:
             return False
 
-    async def _direct_first_ready(self, tracked: TrackedPosition) -> bool:
+    async def _direct_first_ready(self, tracked: TrackedPosition, reason: CloseReason) -> bool:
         """``direct`` 模式下这次能否先下直连：只在一切都明确时，否则走 ``hb_first``。
 
         HB 已在自己平仓（时限到、SHUTTING_DOWN、有入场单以外的订单）、任何一条腿提交 / 撤单 /
-        触发状态不明、入场未终态、已有未决的停止或直连请求，都不先下单。"""
+        触发状态不明、入场未终态、已有未决的停止或直连请求，都不先下单。
+
+        A manual close takes this path whatever ``hosted_close_mode`` and
+        ``hosted_close_direct_when_exiting`` say: the person clicked to be flat now, and the
+        conditions below are what make direct-first safe, not the mode."""
         state, manager = tracked.server_protection, self._protection
         rec = tracked.record
+        manual = reason is CloseReason.MANUAL
         if (
-            self._hosted_close_mode != "direct"
+            (self._hosted_close_mode != "direct" and not manual)
             or state is None
             or manager is None
             or self._exchange is None
             or state.stage in {"cleanup", "done"}
-            or (state.stage == "exiting" and not self._direct_when_exiting)
+            or (state.stage == "exiting" and not (self._direct_when_exiting or manual))
             or not state.entry_terminal
             or tracked.direct_close_pending
             or tracked.hb_close_pending
@@ -1608,16 +1613,16 @@ class HbExecutorAdapter:
         self._protection.mark_exiting(pid)
         tracked = (self._registry.get(pid) or tracked).model_copy(update={"direct_first": True})
         self._registry.put(tracked)
-        held = await self._held_quantity(rec.symbol)
+        held = await self._held_quantity(rec.symbol, urgent=True)
         if held is None or held > (tracked.entry_original_quantity or rec.quantity) * (1 + 1e-10):
             return False
         order = await self._submit_direct_close(tracked, held) if held > 0 else None
         await self._stop_hb_keep_position(pid)
         if held > 0 and (order is None or order.is_terminal is not True):
-            if order is None and await self._held_quantity(rec.symbol) == 0:
+            if order is None and await self._held_quantity(rec.symbol, urgent=True) == 0:
                 self._flat_awaiting_cleanup.add(pid)  # 被拒但已零仓：多半止损或 HB 先平了
             return False
-        held = await self._held_quantity(rec.symbol)
+        held = await self._held_quantity(rec.symbol, urgent=True)
         if held is None or held > 0:
             return False  # 终态部分成交；下一轮按真实余仓走原流程补下一代
         self._flat_awaiting_cleanup.add(pid)
@@ -2849,11 +2854,16 @@ class HbExecutorAdapter:
             log.warning("开仓残单终态未确认，保留保护 %s", position_id, exc_info=True)
             return False
 
-    async def _held_quantity(self, symbol: str) -> float | None:
-        """币安上该币的持仓数量；读不到返回 None。"""
+    async def _held_quantity(self, symbol: str, *, urgent: bool = False) -> float | None:
+        """币安上该币的持仓数量；读不到返回 None。
+
+        ``urgent``: the read that sizes a close order goes through the exchange client's close
+        lane when it has one, so it does not wait behind the shared rate-limit queue."""
         assert self._exchange is not None
         try:
-            read = getattr(self._exchange, "positions_evidence", None)
+            read = (urgent and getattr(self._exchange, "close_positions_evidence", None)) or (
+                getattr(self._exchange, "positions_evidence", None)
+            )
             if read is None:
                 return None
             positions = await read()
