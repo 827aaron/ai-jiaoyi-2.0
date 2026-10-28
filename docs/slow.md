@@ -636,6 +636,7 @@ card_flip_confirm_min = 0
   时翻转确认会立即加跑一轮；`move_trigger_pct` > 0 时，`move_trigger_window_min` 内（只算上一轮开跑之后）
   |BTC| 或 |池内涨跌中位数| 走到这么多就加跑。加跑离上一轮开跑至少隔 `min_run_gap_min`。
   自己的定时器，不占 `_slow_lock` / `_refreshing`，开始时取代数，发布那一下同步完成。
+  `trigger_mode = "event"` 时不按格子跑，见下一节「只在行情变了才跑」。
 - **接管（`mode = "replace"`）= 唯一发布者**：经指挥官 `_publish_view`（和总盘会 / 独立刷新共用版本号、
   翻转参照、管家复核通知），`MarketView.source = "market_desk"`，契约不加字段；概率、desk_id 等在
   `data/market_desk_state.json`。第一次接管立即发布；之后新方向要连续 `publish_confirm` 轮一致，并且从第一次
@@ -665,6 +666,28 @@ card_flip_confirm_min = 0
 - **回滚**：旧代码不认识 `[market_desk]`，会拒绝启动。回滚前先删掉 slow.toml 里整段 `[market_desk]`，
   并把 `regime_flip_target` 删掉或改回 `flash_market_only`（旧代码同样不认识这个键）。
   `market_desk_state.json` 和 `market_view.json` 里新加的 `flash_regime` 旧代码会忽略。
+
+### 只在行情变了才跑（`trigger_mode = "event"`）
+
+`trigger_mode = "clock"`（默认）和以前一样按格子定时跑。`"event"` 不再定时，下面任一条成立就跑一轮，都和**上一轮开跑时**的行情比（参照存在 `market_desk_state.json` 的 `event_ref`：BTC 价、池内各币价、近 1 小时涨跌家数）：
+
+| 触发 | 键（默认） | 条件 |
+|---|---|---|
+| BTC | `event_btc_sigma`（1.5） | \|BTC 自上轮涨跌\| ≥ 1.5 × BTC 15 分钟 σ |
+| 池中位数 | `event_pool_sigma`（1.5） | \|池内各币自上轮涨跌的中位数\| ≥ 1.5 × 等权池 15 分钟 σ（两边都有价的币 ≥ 5 个） |
+| 涨跌家数 | `event_breadth_shift`（15） | \|（涨 − 跌）此刻 − （涨 − 跌）上轮\| ≥ 15，按 40 个币折算（池里 20 个币时相当于 7.5） |
+| 翻转确认 | app.toml `regime_flip_target = "desk"` | 原来的路径不变；和上面的触发合并成一轮（同一分钟都成立只跑一轮；一轮正在跑或刚开跑不到 `min_run_gap_min` 时，翻转并入那一轮，不再排一轮，翻转日志写 `desk_merged`，大盘台日志写一行 `event = trigger_merged`） |
+| 兜底 | `event_max_interval_min`（60） | 离上一轮开跑这么多分钟还没触发（重启后从没跑过也立即跑） |
+
+除兜底外，两轮之间至少隔 `min_run_gap_min`（5）；没到就等到点再跑。每个键填 0 关掉那一条。
+
+- **数据从哪来**：行情就是大盘翻转检查（`regime_flip_check_min`，默认每分钟）已经取到的 1 分钟收盘价，主循环顺手交给大盘台判断，不另发请求；翻转检查没开时只剩兜底。σ 每轮从数据包已缓存的 1h 线算：等权池用数据包的 `sigma_1h_pct`，BTC 用同一方法（过去 `sigma_lookback_h` 个滚动 1 小时收益的 RMS），再 × √(15/60) 折成 15 分钟；算不出沿用上一次的（存在 `event_sigma`），一次都没算出时只看涨跌家数、翻转和兜底。
+- **不再起作用**：`cadence_min`、`offset_min`、`move_trigger_pct`（急动加跑被按 σ 的触发替代）。`max_age_min` 必须大于 `event_max_interval_min`，否则行情不动时两轮之间大盘台会算不可用（启动和面板保存都拦）。
+- **记录为什么跑**：每轮在日志行、决策记录（`output.market_desk.trigger`，摘要末尾带一句）和状态文件 `latest.trigger` 写：`reason`（`event` / `regime_flip` / `event_fallback`）、`items`（每个触发的种类、数值、门槛，例如 BTC 的 `move_pct`、`sigma_15m_pct`、`sigma_mult`、`threshold_sigma`）、当时的门槛、参照和 σ，以及一句中文，比如「行情触发：BTC 自上轮 +0.62%（1.7σ）」。面板团队页大盘台节点显示这句和「有变化就跑，最迟 HH:MM」（超过两倍 `event_max_interval_min` 没跑算异常），点开大盘台的两张卡也写各自那一轮的原因。
+- **滞回**：行情触发和翻转的轮算加跑（确认只看轮数，轮与轮至少隔 max(`publish_confirm_min` / 2, `cadence_min`)）；兜底轮和定时轮一样要满 `publish_confirm_min`。
+- **记分**：轮次时密时疏，逐轮记分会偏向行情剧烈的时段。`data/market_desk/score.json` 多一节 `hourly`：每个 UTC 整点取那一刻生效的最近一轮（已完成、没超过它自己的 `max_age_min`），当成整点开跑再记一遍 1h / 4h，另有 `runs_by_reason`、`runs_per_day`、没有生效结果 / 过期的整点数。逐轮的字段一个不变；切换前后比较看 `hourly`。
+- **面板改**：这五个键可以在面板设置页（大盘台）或 `config/slow.pending.toml` 的 `[market_desk]` 改，和这一段其余的键一样改了要重启（slow.toml 不热生效）。
+- **回滚**：旧代码不认识 `trigger_mode` / `event_*`，会拒绝启动；回滚前从 `slow.toml` 和 `slow.pending.toml` 删掉这五行。状态文件里的 `event_ref` / `event_sigma` 旧代码会忽略。
 
 Demo 接管的推荐配置：
 

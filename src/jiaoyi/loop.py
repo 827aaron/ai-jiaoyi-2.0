@@ -2302,6 +2302,9 @@ class Runner:
                     self._regime_journal.audit_check(check_diagnostics(row))
                 except Exception:
                     log.warning("翻转完整检查轨迹不可用，原判断不变", exc_info=True)
+            # event 模式的行情触发刚在上面判过；不等下一次 30 秒的大盘台检查
+            if getattr(getattr(self.app, "desk", None), "event_mode", False):
+                self._start_desk_if_due()
             # 回填失败不改变本轮判断或连续确认次数。
             if self._regime_enabled() and not binance_gate.banned_until():
                 try:
@@ -2383,13 +2386,16 @@ class Runner:
             return
         cards.mark_regime_flip(self.app.clock())
         self._regime.last_rerun = cards.last_regime_flip_at
+        merged = desk.request_run("regime_flip")
+        row = {**flip, "ts": self.app.clock().isoformat(), "rerun": True, "scope": "market_desk"}
+        if merged:
+            row["desk_merged"] = merged
         self._regime_journal.emit(
-            {**flip, "ts": self.app.clock().isoformat(), "rerun": True, "scope": "market_desk"},
+            row,
             f"大盘方向变化：{flip['up_1h']} 涨/{flip['down_1h']} 跌，"
             f"BTC {flip['btc_ret_since_round_pct']:+.2f}%"
-            f"（连续 {flip['confirm_count']} 次）→ 大盘台加跑",
+            f"（连续 {flip['confirm_count']} 次）→ " + (merged or "大盘台加跑"),
         )
-        desk.request_run("regime_flip")
         self._start_desk_if_due()
 
     async def desk_tick(self) -> None:
@@ -2414,13 +2420,19 @@ class Runner:
         """大盘翻转检查刚取到的 1 分钟线顺手给大盘台刷新「短线现状」（不另发请求）；
         出错不影响翻转判断。"""
         desk = getattr(self.app, "desk", None)
+        symbols = [e.symbol for e in pool.in_pool]
         observe = getattr(desk, "observe_breadth", None)
-        if not callable(observe):
-            return
-        try:
-            observe(sample.ts, [e.symbol for e in pool.in_pool], sample.rets_15m, sample.rets_1h)
-        except Exception:
-            log.exception("大盘台刷新短线现状失败")
+        if callable(observe):
+            try:
+                observe(sample.ts, symbols, sample.rets_15m, sample.rets_1h)
+            except Exception:
+                log.exception("大盘台刷新短线现状失败")
+        market = getattr(desk, "observe_market", None)
+        if callable(market):
+            try:
+                market(sample.ts, symbols, sample.prices, sample.btc_px, sample.rets_1h)
+            except Exception:
+                log.exception("大盘台行情触发检查失败")
 
     def _start_desk_if_due(self) -> None:
         desk = getattr(self.app, "desk", None)

@@ -327,6 +327,32 @@ def test_published_direction_scored_per_run_by_what_was_in_force(tmp_path: Path)
     assert p["n"] == 2 and p["hit"] == 0.5  # 10:17 起 +2.25%（剩下的半程）算涨，10:32 起不动算平
 
 
+def test_hourly_grid_scores_the_view_in_force_once_per_hour() -> None:
+    dense = [T0 + timedelta(minutes=m) for m in (0, 8, 18, 38)]  # 10:02 / :10 / :20 / :40
+    runs = [lite(t, "看涨", reason="event") for t in dense]
+    runs.append(lite(T0 + timedelta(minutes=208), "看跌", reason="event_fallback"))  # 13:30
+    grid, counts = ms.hourly_grid(runs, T0, T0 + timedelta(hours=5))
+    # 11:00 用 10:40 那轮；12:00 / 13:00 / 15:00 时生效的那轮已超过 max_age_min（75）
+    assert [(r.t0.strftime("%H:%M"), r.cycle_id) for r in grid] == [
+        ("11:00", "2026-10-28T10:40Z@2026-10-28T11Z"),
+        ("14:00", "2026-10-28T13:30Z@2026-10-28T14Z"),
+    ]
+    assert counts == {"grid_points": 5, "no_view": 0, "stale_view": 3}
+
+
+def test_hourly_section_scores_from_the_hour_not_the_run(tmp_path: Path) -> None:
+    # 10:02 一轮，AAUSDT 在 10:02–10:32 涨 9%：逐轮算 4h 是涨，11:00 整点起是平
+    write_log(tmp_path, [desk_row(T0)])
+    now = T0 + timedelta(hours=6)
+    rep = run(tmp_path, now, FakeKlines(ramp(T0, {"AAUSDT": 9.0}, hours=0.5), now), flash=False)
+    assert rep["desk"]["4h"]["brier"]["desk"] == pytest.approx(0.74)  # 逐轮字段照旧
+    assert [r["t0"] for r in rep["runs"]] == [T0.isoformat()]
+    hr = rep["hourly"]
+    assert hr["4h"]["n"] == 1 and hr["4h"]["brier"] == pytest.approx(0.54)
+    assert hr["runs_by_reason"] == {"scheduled": 1} and hr["runs_per_day"] == 0.14
+    assert any(line.startswith("整点格子") for line in ms.render(rep))
+
+
 def test_replay_publishes_matches_market_desk_hysteresis() -> None:
     q = timedelta(minutes=15)
     runs = [

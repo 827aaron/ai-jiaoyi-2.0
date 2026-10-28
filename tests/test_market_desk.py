@@ -49,6 +49,7 @@ from jiaoyi.slow.market_desk import (
     instruction_lines,
     intra_block,
     intra_status,
+    market_sample,
     mirror_bias,
     mirror_selected,
     normalize_probs,
@@ -235,6 +236,8 @@ def test_defaults_are_today() -> None:
     )
     assert FastLoopConfig().regime_flip_target == "flash_market_only"
     assert "regime_flip_target" in HOT_FAST
+    assert (d.trigger_mode, d.event_btc_sigma, d.event_pool_sigma) == ("clock", 1.5, 1.5)
+    assert (d.event_breadth_shift, d.event_max_interval_min, d.min_run_gap_min) == (15, 60.0, 5.0)
 
 
 def test_config_validation(tmp_path: Path) -> None:
@@ -250,12 +253,15 @@ def test_config_validation(tmp_path: Path) -> None:
         is None
     )
     MarketDeskSection(cadence_min=5, offset_min=2)
+    MarketDeskSection(trigger_mode="event", event_max_interval_min=60, max_age_min=75)
     for bad in (
         {"cadence_min": 4},
         {"cadence_min": 15, "offset_min": 15},
         {"cadence_min": 60, "max_age_min": 60},
         {"samples": 2, "min_valid_samples": 3},
         {"mode": "supplement"},
+        {"trigger_mode": "event", "event_max_interval_min": 75, "max_age_min": 75},
+        {"trigger_mode": "sometimes"},
     ):
         with pytest.raises(ValueError):
             MarketDeskSection(**bad)
@@ -785,6 +791,201 @@ def test_move_trigger_counts_only_after_last_run(tmp_path: Path) -> None:
     drop = {s: 9.8 for s in syms}  # 池中位数 -2%
     desk.observe_prices(T0 + timedelta(minutes=12), 101.3, drop)
     assert desk.due(T0 + timedelta(minutes=12)) == "move"
+
+
+# ------------------------------------------------------------------ 只在行情变了才跑（event）
+
+EV_SYMS = [f"E{i}USDT" for i in range(10)]
+
+
+def ev_sample(at: datetime, btc: float = 100.0, px: float = 10.0, up: int = 5) -> tuple[Any, ...]:
+    """observe_market 的参数：池内 10 个币同价 px，近 1 小时 up 个涨、其余跌。"""
+    rets = {s: (1.0 if i < up else -1.0) for i, s in enumerate(EV_SYMS)}
+    return at, EV_SYMS, {s: px for s in EV_SYMS}, btc, rets
+
+
+def event_desk(tmp: Path, clock: list[datetime], **kw: Any) -> MarketDesk:
+    """event 模式、上一轮在 T0 开跑；参照 = T0 的行情，BTC / 池 15 分钟 σ 各 0.4%。"""
+    desk = make_desk(
+        tmp, FakePublisher(), FakeModel(answer(0.6, 0.2, 0.2)), clock,
+        trigger_mode="event", **kw,
+    )  # fmt: skip
+    desk.state.last_run_at = T0
+    desk.state.event_ref = market_sample(*ev_sample(T0)[:2], (), *ev_sample(T0)[2:])
+    desk.state.event_sigma = {"btc_15m_pct": 0.4, "pool_15m_pct": 0.4}
+    return desk
+
+
+def test_clock_mode_ignores_market_samples(tmp_path: Path) -> None:
+    clock = [T0]
+    desk = make_desk(tmp_path, FakePublisher(), FakeModel("x"), clock, min_run_gap_min=5)
+    desk.state.last_slot, desk.state.last_run_at = desk.slot(T0), T0
+    assert desk.observe_market(*ev_sample(T0 + timedelta(minutes=6), btc=110.0, up=10)) == []
+    assert desk.due(T0 + timedelta(minutes=6)) is None
+    assert desk.due(T0 + timedelta(minutes=15)) == "scheduled"
+    assert desk.state.event_ref is None
+    assert desk.request_run("regime_flip") is None
+    assert desk.due(T0 + timedelta(minutes=6)) == "regime_flip"
+
+
+@pytest.mark.parametrize(
+    ("sample", "kind", "text"),
+    [
+        ({"btc": 100.7}, "btc", "BTC 自上轮 +0.70%（1.8σ）"),
+        ({"btc": 99.3}, "btc", "BTC 自上轮 -0.70%（1.8σ）"),
+        ({"px": 9.92}, "pool", "池中位数自上轮 -0.80%（2.0σ）"),
+        ({"up": 9}, "breadth", "涨跌家数差自上轮 +0/10 → +8/10（折合 40 个币 +32，门槛 15）"),
+    ],
+)
+def test_event_each_trigger_kind_fires(
+    tmp_path: Path, sample: dict[str, Any], kind: str, text: str
+) -> None:
+    clock = [T0 + timedelta(minutes=10)]
+    desk = event_desk(tmp_path, clock)
+    quiet = {"btc": 100.5, "px": 10.05, "up": 6}  # 1.25σ / 1.25σ / 折合 +8：都不够
+    assert desk.observe_market(*ev_sample(clock[0], **quiet)) == []
+    assert desk.due(clock[0]) is None
+    fired = desk.observe_market(*ev_sample(clock[0], **sample))
+    assert [f["kind"] for f in fired] == [kind] and fired[0]["text"] == text
+    assert fired[0]["since"] == T0.isoformat()
+    assert desk.due(clock[0]) == "event"
+
+
+def test_event_gap_guard_and_fallback(tmp_path: Path) -> None:
+    clock = [T0 + timedelta(minutes=2)]
+    desk = event_desk(tmp_path, clock, min_run_gap_min=5, event_max_interval_min=60)
+    assert desk.observe_market(*ev_sample(clock[0], btc=101.0))  # 2.5σ，但离上一轮才 2 分钟
+    assert desk.due(T0 + timedelta(minutes=4)) is None
+    assert desk.due(T0 + timedelta(minutes=5)) == "event"
+    quiet = event_desk(tmp_path / "q", clock, event_max_interval_min=60)
+    assert quiet.due(T0 + timedelta(minutes=59)) is None
+    assert quiet.due(T0 + timedelta(minutes=60)) == "event_fallback"
+    quiet._consume(T0 + timedelta(minutes=60), "event_fallback")
+    assert quiet._trigger is not None
+    assert quiet._trigger["items"] == [
+        {
+            "kind": "fallback",
+            "since_last_min": 60.0,
+            "threshold_min": 60.0,
+            "text": "兜底：距上轮 60 分钟（≥ 60）",
+        }
+    ]
+    first = make_desk(tmp_path / "f", FakePublisher(), FakeModel("x"), clock, trigger_mode="event")
+    assert first.due(T0) == "event_fallback"
+
+
+@pytest.mark.parametrize("flip_first", [False, True])
+async def test_event_flip_is_deduped_with_market_triggers(tmp_path: Path, flip_first: bool) -> None:
+    clock = [T0 + timedelta(minutes=20)]
+    desk = event_desk(tmp_path, clock)
+    if flip_first:
+        assert desk.request_run("regime_flip") is None
+    assert desk.observe_market(*ev_sample(clock[0], btc=101.0))
+    if not flip_first:
+        assert desk.request_run("regime_flip") is None  # 同时到：并成一轮
+    assert desk.due(clock[0]) == "regime_flip"
+    await desk.run(pool(clock[0], *(entry(s) for s in EV_SYMS)), "regime_flip")
+    (row,) = [r for r in log_rows(tmp_path) if "cycle_id" in r]
+    kinds = ["regime_flip", "btc"] if flip_first else ["btc", "regime_flip"]
+    assert [t["kind"] for t in row["trigger"]["items"]] == kinds
+    assert row["trigger"]["text"] == "行情触发：BTC 自上轮 +1.00%（2.5σ）；翻转确认"
+    assert desk.due(clock[0] + timedelta(minutes=6)) is None  # 两个触发都被这一轮吃掉
+    # 刚开跑 3 分钟又确认翻转：不再排一轮
+    clock[0] += timedelta(minutes=3)
+    note = desk.request_run("regime_flip")
+    assert note == "并入大盘台 10:22 UTC 开跑的一轮（3.0 分钟前，< min_run_gap_min 5）"
+    assert desk.due(clock[0] + timedelta(minutes=10)) is None
+    merged = [r for r in log_rows(tmp_path) if r.get("event") == "trigger_merged"]
+    assert [(r["kind"], r["into_run_at"]) for r in merged] == [
+        ("regime_flip", (T0 + timedelta(minutes=20)).isoformat())
+    ]
+
+
+async def test_event_run_records_trigger_sigma_and_new_reference(tmp_path: Path) -> None:
+    clock = [T0 + timedelta(minutes=20)]
+
+    class SigmaBuilder(FakeBuilder):
+        def btc_sigma_1h(self, now: datetime) -> float:
+            return 0.6
+
+    log = JsonlDecisionLog(tmp_path / "desk_log")
+    desk = make_desk(
+        tmp_path, FakePublisher(), FakeModel(answer(0.6, 0.2, 0.2)), clock,
+        builder=SigmaBuilder(), log=log, trigger_mode="event",
+    )  # fmt: skip
+    desk.state.last_run_at = T0
+    desk.state.event_ref = market_sample(*ev_sample(T0)[:2], (), *ev_sample(T0)[2:])
+    desk.state.event_sigma = {"btc_15m_pct": 0.4, "pool_15m_pct": 0.4}
+    desk.observe_market(*ev_sample(clock[0], btc=99.3))
+    await desk.run(pool(clock[0], *(entry(s) for s in EV_SYMS)), desk.due(clock[0]) or "")
+    text = "行情触发：BTC 自上轮 -0.70%（1.8σ）"
+    (row,) = [r for r in log_rows(tmp_path) if "cycle_id" in r]
+    trig = row["trigger"]
+    assert row["reason"] == "event" and row["cycle_id"].endswith("-event")
+    assert trig["text"] == text and trig["items"][0]["move_pct"] == pytest.approx(-0.7)
+    assert trig["items"][0]["threshold_sigma"] == 1.5 and trig["thresholds"]["min_run_gap_min"] == 5
+    assert trig["reference"]["at"] == T0.isoformat()
+    assert desk.state.latest is not None and desk.state.latest["trigger"]["text"] == text
+    rec = next(
+        r for r in desk_records(tmp_path / "desk_log") if "trigger" in r["output"]["market_desk"]
+    )
+    assert rec["output"]["market_desk"]["trigger"]["text"] == text and text in rec["summary"]
+    # σ 换成这一轮的：等权池来自数据包 sigma_1h_pct 0.4，BTC 来自 1h 线 0.6，都 × √(15/60)
+    sig = desk.state.event_sigma
+    assert sig is not None and (sig["pool_15m_pct"], sig["btc_15m_pct"]) == (0.2, 0.3)
+    ref = desk.state.event_ref
+    assert ref is not None and ref["at"] == clock[0].isoformat() and ref["btc_px"] == 99.3
+    restored = make_desk(tmp_path, FakePublisher(), FakeModel("x"), clock, trigger_mode="event")
+    assert (restored.state.event_ref, restored.state.event_sigma) == (ref, sig)
+    from jiaoyi.panel.files import PanelFiles
+    from jiaoyi.panel.pages import desk_runs
+
+    assert desk_runs(PanelFiles(tmp_path, "UTC"), clock[0])[0].trigger == text
+
+
+async def test_event_mode_loop_merges_flip_and_market_trigger_into_one_run(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path, T0)
+    commander, _engine, clock, candidates, _ = await research(tmp_path / "research", T0)
+    app.clock = lambda: clock[0]
+    app.pool = candidates
+    app.m = dataclasses.replace(app.m, cards=commander)
+
+    async def fetch(symbol: str, start: datetime, end: datetime) -> Any:
+        return [bar(symbol, end - timedelta(hours=1), 100), bar(symbol, end, 102)]
+
+    fl = app.app_cfg.fast_loop
+    patch_inplace(
+        fl,
+        fl.model_copy(
+            update={
+                "regime_flip_confirm": 1,
+                "regime_flip_min_symbols": 1,
+                "regime_flip_target": "desk",
+            }
+        ),
+        HOT_FAST,
+    )
+    runner = Runner(app, fetch_regime_klines=fetch)
+    commander.set_regime_price(lambda: 102.0)
+    clock[0] += timedelta(minutes=5)
+    desk = make_desk(
+        tmp_path / "desk", commander, FakeModel(answer(0.6, 0.2, 0.2)), clock, trigger_mode="event"
+    )
+    desk.state.last_run_at = clock[0] - timedelta(minutes=30)
+    symbols = [e.symbol for e in candidates.in_pool]
+    desk.state.event_ref = market_sample(
+        clock[0] - timedelta(minutes=30), symbols, (), dict.fromkeys(symbols, 102.0), 100.0, {}
+    )
+    desk.state.event_sigma = {"btc_15m_pct": 0.4, "pool_15m_pct": 0.4}
+    app.desk = desk  # type: ignore[attr-defined]
+    await runner.regime_flip_tick()
+    if runner._tasks:
+        await asyncio.gather(*tuple(runner._tasks))
+    rows = [r for r in log_rows(tmp_path / "desk") if "cycle_id" in r]
+    assert len(rows) == 1 and rows[0]["reason"] == "regime_flip"
+    assert [t["kind"] for t in rows[0]["trigger"]["items"]] == ["btc", "regime_flip"]
 
 
 # ------------------------------------------------------------------ 接管发布

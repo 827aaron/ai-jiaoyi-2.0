@@ -1806,6 +1806,26 @@ def test_team_market_desk_node_payload_and_records(tmp_path: Path) -> None:
     assert desk_page.selected_desk and [r.text for r in desk_page.records] == ["大盘台：看跌"]
     market_page = build_team(files, NOW, c.Role.MARKET)
     assert all("market_desk" not in r.output for r in market_page.records)
+    assert d.trigger_mode == "clock" and d.trigger is None
+    raw = json.loads((tmp_path / "market_desk_state.json").read_text())
+    raw["latest"]["trigger"] = {"text": "行情触发：BTC 自上轮 +0.62%（1.7σ）"}
+    raw["last_run_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(raw))
+    ev = build_team(
+        files, NOW, None, desk_schedule=("replace", 60, 2), desk_event_max_min=60.0
+    ).desk
+    assert ev is not None and ev.trigger_mode == "event" and ev.state == "ok"
+    assert ev.trigger == "行情触发：BTC 自上轮 +0.62%（1.7σ）"
+    assert ev.next_run_at == NOW + timedelta(minutes=50)  # 最迟兜底，不是定时格子
+    late = build_team(
+        files, NOW + timedelta(minutes=130), None, desk_schedule=("replace", 60, 2),
+        desk_event_max_min=60.0,
+    ).desk  # fmt: skip
+    assert (
+        late is not None
+        and late.state == "bad"
+        and late.next_run_at == NOW + timedelta(minutes=130)
+    )
 
 
 def test_team_market_desk_node_off_and_failing(tmp_path: Path) -> None:

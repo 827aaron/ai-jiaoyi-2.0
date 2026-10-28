@@ -185,6 +185,9 @@ class DeskInfo(BaseModel):
     summary: str | None = None
     accuracy: str | None = None
     """``data/market_desk/score.json`` 的一行准确度（近 24h / 7 天 4h Brier 对先验、命中、n）。"""
+    trigger_mode: Literal["clock", "event"] = "clock"
+    trigger: str | None = None
+    """event：最新一轮为什么跑（「行情触发：BTC 自上轮 +0.62%（1.7σ）」）；clock 是 None。"""
 
 
 def _desk_accuracy(files: PanelFiles) -> str | None:
@@ -203,7 +206,9 @@ class DeskRunCard(BaseModel):
     cycle_id: str
     run_at: datetime
     reason: str
-    """scheduled / move / regime_flip。"""
+    """scheduled / move / regime_flip / event / event_fallback。"""
+    trigger: str | None = None
+    """event 模式这一轮为什么跑（日志里 ``trigger.text``）。"""
     direction: str | None = None
     probs_4h: dict[str, float] | None = None
     probs_1h: dict[str, float] | None = None
@@ -262,10 +267,12 @@ def _desk_run(row: dict[str, Any]) -> DeskRunCard:
     intra = None
     if isinstance(block, dict) and block.get("panel", True):
         intra = compose_intra(block, datetime.fromisoformat(str(block["t0"])), 0.0)
+    trigger = row.get("trigger")
     return DeskRunCard(
         cycle_id=str(row["cycle_id"]),
         run_at=datetime.fromisoformat(str(row["t0"])),
         reason=str(row.get("reason") or "scheduled"),
+        trigger=str(trigger.get("text") or "") or None if isinstance(trigger, dict) else None,
         direction=row.get("direction"),
         probs_4h=row.get("probs_4h"),
         probs_1h=row.get("probs_1h"),
@@ -290,15 +297,20 @@ def build_desk(
     now: datetime,
     schedule: tuple[str, int, int] | None,
     summary: str | None = None,
+    event_max_min: float | None = None,
 ) -> DeskInfo:
     """``schedule`` = (mode, cadence_min, offset_min)，读不到配置就是 None（不显示下次）。
-    mode 为 off 且没有状态文件时返回 None 的话流程图没有这个节点，所以这里照样给一张 off 的卡。"""
+    mode 为 off 且没有状态文件时返回 None 的话流程图没有这个节点，所以这里照样给一张 off 的卡。
+    ``event_max_min``：``trigger_mode = "event"`` 时的 ``event_max_interval_min``，下次 = 最迟
+    什么时候兜底跑，过了两倍还没跑才算异常。"""
     raw = files._json(DESK_STATE_FILE)
     st: dict[str, Any] = raw if isinstance(raw, dict) else {}
     mode = schedule[0] if schedule else "off"
     last = _aware(st.get("last_run_at"))
     nxt = None
-    if schedule and mode != "off":
+    if schedule and mode != "off" and event_max_min is not None:
+        nxt = max(last + timedelta(minutes=event_max_min), now) if last is not None else now
+    elif schedule and mode != "off":
         _, cadence, offset = schedule
         slot = int(now.timestamp() // 60 - offset) // cadence
         if isinstance(st.get("last_slot"), int) and st["last_slot"] >= slot:
@@ -339,7 +351,11 @@ def build_desk(
         state, text = "bad", f"失败：{err}"
     elif last is None:
         state, text = "slow", "等待首次运行"
-    elif schedule and now - last > timedelta(minutes=2 * schedule[1] + schedule[2]):
+    elif schedule and now - last > (
+        timedelta(minutes=2 * event_max_min)
+        if event_max_min is not None
+        else timedelta(minutes=2 * schedule[1] + schedule[2])
+    ):
         state, text = "bad", f"超过 {int((now - last).total_seconds() // 60)} 分钟没跑"
     else:
         state, text = "ok", f"正常（上次 {last.astimezone(ZoneInfo(files.tz)):%H:%M}）"
@@ -361,7 +377,15 @@ def build_desk(
         stopped=stopped,
         summary=summary,
         accuracy=_desk_accuracy(files),
+        trigger_mode="event" if event_max_min is not None else "clock",
+        trigger=_trigger_text(latest_run) if event_max_min is not None else None,
     )
+
+
+def _trigger_text(latest: dict[str, Any] | None) -> str | None:
+    trigger = latest.get("trigger") if latest is not None else None
+    text = trigger.get("text") if isinstance(trigger, dict) else None
+    return text if isinstance(text, str) and text else None
 
 
 class AgainstCheck(BaseModel):
@@ -729,6 +753,7 @@ def build_team(
     desk_schedule: tuple[str, int, int] | None = None,
     desk_selected: bool = False,
     gate_take_by_kind: dict[str, float] | None = None,
+    desk_event_max_min: float | None = None,
 ) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -784,7 +809,13 @@ def build_team(
         against=against,
         against_checks=_against_checks(against, records),
         predictor_meetings=_predictor_meetings(files, now),
-        desk=build_desk(files, now, desk_schedule, desk_items[0].text if desk_items else None),
+        desk=build_desk(
+            files,
+            now,
+            desk_schedule,
+            desk_items[0].text if desk_items else None,
+            desk_event_max_min,
+        ),
         desk_runs=desk_runs(files, now) if desk_selected else [],
         regime_flip=next(
             (

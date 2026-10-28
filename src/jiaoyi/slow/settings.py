@@ -756,6 +756,7 @@ class MarketDeskSection(_Strict):
 
     回滚注意：旧版本代码不认识这一段，会拒绝启动；回滚到没有大盘台的版本前先删掉整段。
     回滚到没有 ``prior_mode`` / ``momentum_guidance`` / ``aggregation`` 的版本前，先删掉这三行；
+    回滚到没有 ``trigger_mode`` 的版本前，先删掉 ``trigger_mode`` 和 ``event_*`` 几行；
     面板改过的 ``band_sigma`` / ``call_p_min`` / ``call_edge_min`` / ``publish_min_gap_min`` 旧代码
     认识，但留着会按改过的值跑，要回到原值就一起删掉。
     改这一段要重启才生效。"""
@@ -808,7 +809,44 @@ class MarketDeskSection(_Strict):
         default=5.0,
         ge=0.0,
         le=240.0,
-        description="加跑（急动 / 翻转）离上一轮开跑至少隔几分钟；没到就等到点再跑。定时轮不受限。",
+        description="加跑（急动 / 翻转）离上一轮开跑至少隔几分钟；没到就等到点再跑。定时轮不受限。"
+        'trigger_mode = "event" 时每一轮（兜底轮除外）都受它限。',
+    )
+    trigger_mode: Literal["clock", "event"] = Field(
+        default="clock",
+        description="什么时候跑一轮：clock = 按 cadence_min 定时跑，急动（move_trigger_pct）/ "
+        "翻转确认另外加跑（和以前一样）；event = 不定时，只在行情相对上一轮变了才跑："
+        "BTC 或池中位数自上一轮走了 event_btc_sigma / event_pool_sigma 个 15 分钟 σ、"
+        "涨跌家数差变了 event_breadth_shift、翻转确认，或离上一轮 event_max_interval_min "
+        "分钟兜底。event 用大盘翻转检查每分钟已取的 1 分钟线（不另发请求），翻转检查没开时"
+        "只剩翻转之外的兜底；cadence_min、offset_min、move_trigger_pct 不再起作用。",
+    )
+    event_btc_sigma: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=10.0,
+        description="event：BTC 自上一轮开跑走了 ≥ 这么多个 BTC 15 分钟 σ 就跑（σ = 过去 "
+        "sigma_lookback_h 个滚动 1 小时收益的 RMS × √(15/60)，每轮从已缓存的 1h 线算）；0 = 不看。",
+    )
+    event_pool_sigma: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=10.0,
+        description="event：池内各币自上一轮开跑涨跌的中位数 ≥ 这么多个等权池 15 分钟 σ 就跑"
+        "（σ 同上，用等权池的 1h σ）；0 = 不看。",
+    )
+    event_breadth_shift: int = Field(
+        default=15,
+        ge=0,
+        le=40,
+        description="event：近 1 小时（涨家数 − 跌家数）和上一轮开跑时比变了 ≥ 这么多就跑；"
+        "按 40 个币折算（池里 20 个币时门槛相当于 7.5）。0 = 不看。",
+    )
+    event_max_interval_min: float = Field(
+        default=60.0,
+        ge=5.0,
+        le=1440.0,
+        description="event：离上一轮开跑这么多分钟还没有触发就兜底跑一轮。要小于 max_age_min。",
     )
     samples: int = Field(
         default=5, ge=1, le=10, description="每轮独立问几次（自洽投票），概率取平均；花费 × 次数。"
@@ -985,6 +1023,11 @@ class MarketDeskSection(_Strict):
             raise ValueError("offset_min 必须小于 cadence_min")
         if self.max_age_min <= self.cadence_min:
             raise ValueError("max_age_min 必须大于 cadence_min，否则两轮之间就算不可用")
+        if self.trigger_mode == "event" and self.max_age_min <= self.event_max_interval_min:
+            raise ValueError(
+                "trigger_mode = event 时 max_age_min 必须大于 event_max_interval_min，"
+                "否则行情不动的时候两轮之间就算不可用"
+            )
         return self
 
     def daily_calls(self) -> float:

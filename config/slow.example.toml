@@ -141,7 +141,12 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # min_valid_samples = 3      # 合格回答少于这么多这一轮作废
 # move_trigger_pct = 0       # 急动加跑：窗口内 |BTC| 或 |池涨跌中位数| ≥ 这么多 % 就加跑；0 = 关
 # move_trigger_window_min = 15
-# min_run_gap_min = 5        # 加跑（急动 / 翻转）离上一轮开跑至少几分钟
+# min_run_gap_min = 5        # 加跑（急动 / 翻转）离上一轮开跑至少几分钟；event 模式每轮（兜底除外）都受它限
+# trigger_mode = "clock"     # clock = 按 cadence_min 定时跑（现状）；event = 只在行情相对上一轮变了才跑（不看 cadence_min / move_trigger_pct）
+# event_btc_sigma = 1.5      # event：BTC 自上轮走了 ≥ 这么多个 15 分钟 σ 就跑；0 = 不看
+# event_pool_sigma = 1.5     # event：池内各币自上轮涨跌中位数 ≥ 这么多个等权池 15 分钟 σ 就跑；0 = 不看
+# event_breadth_shift = 15   # event：近 1 小时（涨 − 跌）家数比上轮变了 ≥ 这么多（按 40 个币折算）就跑；0 = 不看
+# event_max_interval_min = 60  # event：离上轮这么多分钟没触发就兜底跑一轮；要小于 max_age_min
 # mirror_test_rate = 0.1667  # 镜像测试轮次比例（数据涨跌取反再问，量方向偏置）；0 = 不做
 # mirror_alert_gap = 0.05    # 最近几次 |p_up(原) − p_down(镜像)| 平均超过它就告警
 # band_sigma = 0.5           # 「平」= |等权收益| ≤ 0.5σ（基础率、记分、提示词都按它）；Demo 推荐 0.3

@@ -1811,7 +1811,7 @@ function deskLatestLine(d) {
   return `<div class="small" style="margin-top:4px"><b>大盘台 ${hms(d.run_at)} 一轮</b>　${esc(probs)}<br>${esc(d.intra)}</div>`;
 }
 // 团队页点大盘台：最近两轮并排（窄屏上下叠），标出和上一轮比变了什么
-const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑" };
+const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑", event: "行情触发", event_fallback: "兜底" };
 function deskRunCard(title, r, prev) {
   const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
   const delta = (q, p, k) => {
@@ -1825,6 +1825,7 @@ function deskRunCard(title, r, prev) {
   const pub = r.published_version != null ? `已发布 · 大盘 v${r.published_version}` : "没发布（方向没变、在等确认或没有先验）";
   return `<div class="desk-run"><h3>${title}</h3>
     <div class="dim small">${hm(r.run_at)} · ${ago} 分钟前 · ${esc(DESK_REASON[r.reason] || r.reason)}</div>
+    ${r.trigger ? `<div class="small">${esc(r.trigger)}</div>` : ""}
     <div>4 小时 <b>${esc(r.direction || "—")}</b>${dirChg}：${tri(r.probs_4h, prev && prev.probs_4h)}</div>
     <div>1 小时：${tri(r.probs_1h, prev && prev.probs_1h)}</div>
     ${r.intra ? `<div class="small">${esc(r.intra)}</div>` : ""}
@@ -1851,10 +1852,11 @@ function tfDeskNode(k) {
   const tri = (t, q) => (q ? `${t} 涨 ${pct(q.up)} 平 ${pct(q.flat)} 跌 ${pct(q.down)}` : "");
   const probs = tri("4h", k.probs);
   const probs1h = tri("1h", k.probs_1h);
-  const when = k.state === "off" ? "" : [k.last_run_at ? `上次 ${hm(k.last_run_at)}` : "", k.next_run_at ? `下次 ${hm(k.next_run_at)}` : ""].filter(Boolean).join(" · ");
+  const nextLabel = k.trigger_mode === "event" ? "有变化就跑，最迟" : "下次";
+  const when = k.state === "off" ? "" : [k.last_run_at ? `上次 ${hm(k.last_run_at)}` : "", k.next_run_at ? `${nextLabel} ${hm(k.next_run_at)}` : ""].filter(Boolean).join(" · ");
   const head = [owner, dir].filter(Boolean).join(" · ");
   const line = (t, cls) => (t ? `<small${cls ? ` class="${cls}"` : ""} title="${esc(t)}">${esc(t)}</small>` : "");
-  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(probs1h) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
+  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(probs1h) + line(k.trigger) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
 }
 // 统一的「上次 hh:mm · 下次 hh:mm · 刚刚：…」；模块没报的字段就不写（不猜）
 function runLine(r) {

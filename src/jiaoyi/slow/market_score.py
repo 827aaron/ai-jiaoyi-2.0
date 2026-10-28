@@ -17,6 +17,8 @@
   方法算）的命中和尖锐版 Brier。
 - 门槛扫描：用日志里的概率重新派生方向（θ / δ），按大盘台的发布滞回规则重放发布（确认 1 / 2 轮），
   看准确度和延迟怎么换。不调模型。
+- 整点格子（``hourly``）：每个 UTC 整点取那一刻生效的最近一轮当成整点开跑再记一遍，和逐轮记分
+  并列。``trigger_mode = "event"`` 时轮次时密时疏，逐轮记分偏向行情剧烈的时段；前后对比看这一节。
 
 只读日志和公开行情，不下单、不改设置。
 """
@@ -24,6 +26,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import math
@@ -1066,6 +1069,57 @@ def _brief(rows: Sequence[Scored], h: str) -> dict[str, Any]:
     }
 
 
+def hourly_grid(
+    runs: Sequence[LoggedRun], since: datetime, now: datetime
+) -> tuple[list[LoggedRun], dict[str, int]]:
+    """每个 UTC 整点取那一刻生效的大盘台结果（已完成的最近一轮，没超过它自己的
+    ``max_age_min``），当成一轮在整点开跑。轮次时密时疏（event 模式）时，逐轮记分会让行情
+    剧烈的时段占更多权重；整点格子每小时正好一次，前后两种节奏才能公平比较。"""
+    usable = sorted((r for r in runs if not r.prior_missing), key=lambda r: r.completed)
+    t = since.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    if t < since:
+        t += timedelta(hours=1)
+    out: list[LoggedRun] = []
+    counts = {"grid_points": 0, "no_view": 0, "stale_view": 0}
+    i, cur = 0, None
+    while t <= now:
+        counts["grid_points"] += 1
+        while i < len(usable) and usable[i].completed <= t:
+            cur, i = usable[i], i + 1
+        max_age = _num(cur.settings.get("max_age_min")) if cur is not None else None
+        if cur is None:
+            counts["no_view"] += 1
+        elif t - cur.completed > timedelta(minutes=max_age or 75.0):
+            counts["stale_view"] += 1
+        else:
+            out.append(dataclasses.replace(cur, t0=t, cycle_id=f"{cur.cycle_id}@{t:%Y-%m-%dT%H}Z"))
+        t += timedelta(hours=1)
+    return out, counts
+
+
+def hourly_section(
+    runs: Sequence[LoggedRun], px: Price, since: datetime, now: datetime
+) -> dict[str, Any]:
+    grid, counts = hourly_grid(runs, since, now)
+    rows, pending = resolve_runs(grid, px, now)
+    days = max((now - since).total_seconds() / 86400, 1e-9)
+    by_reason: dict[str, int] = {}
+    for r in runs:
+        by_reason[r.reason] = by_reason.get(r.reason, 0) + 1
+    return {
+        "definition": (
+            "每个 UTC 整点取那一刻生效的最近一轮（已完成、未超过 max_age_min），当成整点开跑记分；"
+            "每小时一次，不随轮次疏密变权重"
+        ),
+        **counts,
+        **{f"grid_{k}": v for k, v in pending.items()},
+        "4h": _brief(rows, "4h"),
+        "1h": _brief(rows, "1h"),
+        "runs_by_reason": by_reason,
+        "runs_per_day": _r(len(runs) / days, 2),
+    }
+
+
 def summarize(
     log: DeskLog,
     rows: Sequence[Scored],
@@ -1212,6 +1266,10 @@ def update(
         flash_res = score_flash(rounds, closes.px, hours, now, band_in_force(log.runs))
         flash_res["paired"] = _paired(rows, rounds)
     report = summarize(log, rows, counts, flash_res, now, since)
+    group = report["group"]
+    report["hourly"] = hourly_section(
+        [r for r in log.runs if r.group == group], closes.px, since, now
+    )
     report["fetch"] = {
         "pruned_files": prune_cache(cache, now, days),
         "requests_1m": closes.requests,
@@ -1292,6 +1350,15 @@ def render(rep: Mapping[str, Any]) -> list[str]:
         f"发布：{p['publishes']} 次（按规则重放 {p['replay_publishes']} 次）；生效方向 4h 命中 "
         f"{_f(p4['hit'], '.0%')}（n {p4['n']}），1h 命中 {_f(p['1h']['hit'], '.0%')}"
     )
+    hr = rep.get("hourly")
+    if hr:
+        h4, h1 = hr["4h"], hr["1h"]
+        lines.append(
+            f"整点格子（{hr['grid_points']} 个整点，没有生效结果 {hr['no_view']}、过期 "
+            f"{hr['stale_view']}；每天 {_f(hr['runs_per_day'], '.1f')} 轮）：4h Brier "
+            f"{_f(h4.get('brier'))} vs 先验 {_f(h4.get('brier_base'))}（n {h4['n']}），1h "
+            f"{_f(h1.get('brier'))} vs {_f(h1.get('brier_base'))}（n {h1['n']}）"
+        )
     lp, lc = rep["latency"]["publish"], rep["latency"]["call"]
     lines.append(
         f"延迟：{lp['episodes']} 段行情，发布同向 {lp['caught']}（已生效 {lp['already']}）、没跟上 "

@@ -102,7 +102,7 @@ Section = Literal[
     "meeting",
 ]
 _SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk", "meeting")
-# [market_desk] 其余项（模式、模型、节奏、采样）改了要重启、影响大盘方向，只在终端改
+# [market_desk] 其余项（模式、模型、定时节奏、采样）改了要重启、影响大盘方向，只在终端改
 DESK_EDITABLE = frozenset(
     {
         "band_sigma",
@@ -116,6 +116,11 @@ DESK_EDITABLE = frozenset(
         "publish_intra",
         "keeper_intra",
         "intra_refresh_s",
+        "trigger_mode",
+        "event_btc_sigma",
+        "event_pool_sigma",
+        "event_breadth_shift",
+        "event_max_interval_min",
     }
 )
 # [meeting] 里网页上能改的开关（偏空整改、输入新鲜度、教训口径）；模型 / 通道 / 分析师名单 /

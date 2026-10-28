@@ -508,10 +508,13 @@ def create_app(
             "max_p_toxic": fl.max_p_toxic,
         }
         schedule = None
+        event_max = None
         with suppress(Exception):
             assert config_paths is not None
             desk = actions.load_configs(config_paths)[2].market_desk
             schedule = (desk.mode, desk.cadence_min, desk.offset_min)
+            if desk.trigger_mode == "event":
+                event_max = desk.event_max_interval_min
         desk_selected = role == "desk"
         try:
             picked = None if desk_selected or role is None else Role(role)
@@ -521,6 +524,7 @@ def create_app(
             files, clock(), picked, ac.predictor.mode, th,
             desk_schedule=schedule, desk_selected=desk_selected,
             gate_take_by_kind={k.value: v for k, v in fl.min_p_take_by_kind.items()},
+            desk_event_max_min=event_max,
         )  # fmt: skip
         return page.model_copy(update={"prompts": prompts_info(files)})
 

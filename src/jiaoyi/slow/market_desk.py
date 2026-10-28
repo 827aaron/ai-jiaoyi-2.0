@@ -64,6 +64,10 @@ RAW_KEEP = 8000
 """日志里每次回答原文最多留多少字。"""
 FLASH_PRICE_PER_MTOK = (0.15, 0.60)
 """通道没报 usage.cost 时的估算价（OpenRouter deepseek-v4.1-flash，2026-10-28 核对）。"""
+EVENT_SAMPLE_MAX_AGE = timedelta(minutes=3)
+"""event：开跑时最近一份翻转检查行情不比这旧，才拿它当这一轮的参照；否则等下一份。"""
+SIGMA_15M_OF_1H = 0.5
+"""15 分钟 σ = 1 小时 σ × √(15/60)：缓存里只有已收盘 1h 线，不为 15 分钟 σ 另发请求。"""
 
 Direction = Literal["看涨", "看跌", "中性"]
 Order = Literal["up_first", "down_first"]
@@ -703,6 +707,10 @@ class DeskState:
     owner_since: datetime | None = None
     last_error: str | None = None
     fails: int = 0
+    event_ref: dict[str, Any] | None = None
+    """event：上一轮开跑时的行情（BTC、池内各币价、近 1 小时涨跌家数），触发都和它比。"""
+    event_sigma: dict[str, Any] | None = None
+    """event：BTC 和等权池的 15 分钟 σ（%），每轮算完数据包更新，算不出沿用上一次。"""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -732,6 +740,8 @@ class DeskState:
                 if self.last_republish_at is not None
                 else {}
             ),
+            **({"event_ref": self.event_ref} if self.event_ref is not None else {}),
+            **({"event_sigma": self.event_sigma} if self.event_sigma is not None else {}),
         }
 
     @classmethod
@@ -766,6 +776,8 @@ class DeskState:
             fails=int(raw.get("fails", 0)),
             owner="desk" if raw.get("owner") == "desk" else "flash",
             owner_since=_parse_at(raw.get("owner_since")),
+            event_ref=raw["event_ref"] if isinstance(raw.get("event_ref"), dict) else None,
+            event_sigma=raw["event_sigma"] if isinstance(raw.get("event_sigma"), dict) else None,
         )
 
 
@@ -830,6 +842,9 @@ class MarketDesk:
         self._requested: str | None = None
         self._prices: list[tuple[datetime, float | None, dict[str, float]]] = []
         self._last_move: dict[str, Any] | None = None
+        self._sample: dict[str, Any] | None = None
+        self._triggers: list[dict[str, Any]] = []
+        self._trigger: dict[str, Any] | None = None
         self._running = False
         self._notices: list[str] = []
         self._restore()
@@ -959,17 +974,85 @@ class MarketDesk:
         self._save()
         return True
 
-    def request_run(self, reason: str = "regime_flip") -> None:
+    @property
+    def event_mode(self) -> bool:
+        return self.cfg.mode != "off" and self.cfg.trigger_mode == "event"
+
+    def request_run(self, reason: str = "regime_flip") -> str | None:
         """翻转确认 / 急动后要求立即加跑一轮（不占定时的格子；离上一轮开跑不到
-        ``min_run_gap_min`` 就等到点）。"""
-        if self.cfg.mode != "off":
+        ``min_run_gap_min`` 就等到点）。
+
+        event 模式下一轮正在跑、或刚开跑不到 ``min_run_gap_min`` 时不再排一轮：那一轮用的就是
+        让翻转成立的行情。返回并入的说明（排上了返回 None）。"""
+        if self.cfg.mode == "off":
+            return None
+        if not self.event_mode:
             self._requested = reason
+            return None
+        now = self._clock()
+        last = self.state.last_run_at
+        if self._running or (
+            last is not None and now - last < timedelta(minutes=self.cfg.min_run_gap_min)
+        ):
+            note = "并入大盘台正在跑的一轮"
+            if last is not None and not self._running:
+                ago = (now - last).total_seconds() / 60
+                note = (
+                    f"并入大盘台 {last:%H:%M} UTC 开跑的一轮（{ago:.1f} 分钟前，"
+                    f"< min_run_gap_min {self.cfg.min_run_gap_min:g}）"
+                )
+            self._append_log(
+                now,
+                {
+                    "event": "trigger_merged",
+                    "at": now.isoformat(),
+                    "kind": reason,
+                    "into_run_at": _iso(last),
+                    "note": note,
+                },
+            )
+            return note
+        item = {"kind": reason, "at": now.isoformat(), "text": TRIGGER_WORDS.get(reason, reason)}
+        self._triggers = [t for t in self._triggers if t.get("kind") != reason] + [item]
+        self._requested = reason
+        return None
+
+    def observe_market(
+        self,
+        at: datetime,
+        symbols: Sequence[str],
+        prices: Mapping[str, float],
+        btc_px: float | None,
+        rets_1h: Mapping[str, float],
+    ) -> list[dict[str, Any]]:
+        """event：大盘翻转检查每分钟取到的 1 分钟收盘价（``at`` = 那根线收盘时刻）和上一轮开跑
+        时比，够门槛就要求跑一轮；返回这一份满足的触发。clock 模式什么都不做。"""
+        if not self.event_mode:
+            return []
+        sample = market_sample(at, symbols, self.cfg.exclude_symbols, prices, btc_px, rets_1h)
+        self._sample = sample
+        st = self.state
+        if self._running:
+            return []  # 开跑时会换参照，拿旧参照比会把同一段行情再算一次
+        if st.event_ref is None:
+            if st.last_run_at is not None:
+                st.event_ref = {**sample, "taken": "after_run"}
+                self._save()
+            return []
+        fired = event_triggers(st.event_ref, sample, st.event_sigma or {}, self.cfg)
+        if fired:
+            keep = [t for t in self._triggers if t.get("kind") not in MARKET_KINDS]
+            self._triggers = keep + fired
+            if self._requested is None:
+                self._requested = "event"
+        return fired
 
     def observe_prices(self, now: datetime, btc: float | None, pool: Mapping[str, float]) -> None:
         """主循环每 30 秒喂一次此刻的 BTC 和池内各币价（快环行情，不另发请求）。时间窗内（只算
-        上一轮开跑之后）|BTC| 或 |池内涨跌中位数| ≥ ``move_trigger_pct`` 就要求加跑。"""
+        上一轮开跑之后）|BTC| 或 |池内涨跌中位数| ≥ ``move_trigger_pct`` 就要求加跑。
+        event 模式由 ``observe_market`` 按 σ 判断，这里不再按固定百分比加跑。"""
         pct = self.cfg.move_trigger_pct
-        if pct <= 0 or self.cfg.mode == "off":
+        if pct <= 0 or self.cfg.mode == "off" or self.event_mode:
             return
         window = timedelta(minutes=self.cfg.move_trigger_window_min)
         since = now - window
@@ -1008,6 +1091,8 @@ class MarketDesk:
         ``min_run_gap_min`` → 请求的原因；否则 None。"""
         if self.cfg.mode == "off" or self._running:
             return None
+        if self.event_mode:
+            return self._due_event(now)
         last = self.state.last_slot
         if last is None or self.slot(now) > last:
             return "scheduled"
@@ -1017,6 +1102,69 @@ class MarketDesk:
             if prev is None or now - prev >= gap:
                 return self._requested
         return None
+
+    def _due_event(self, now: datetime) -> str | None:
+        """event：有触发且离上一轮开跑够 ``min_run_gap_min`` → 触发的原因；离上一轮够
+        ``event_max_interval_min``（或从没跑过）→ "event_fallback"；否则 None。"""
+        last = self.state.last_run_at
+        if last is None:
+            return "event_fallback"
+        gap = timedelta(minutes=self.cfg.min_run_gap_min)
+        if self._requested is not None and now - last >= gap:
+            return self._requested
+        if now - last >= timedelta(minutes=self.cfg.event_max_interval_min):
+            return "event_fallback"
+        return None
+
+    def _take_trigger(self, now: datetime, reason: str) -> dict[str, Any]:
+        """这一轮为什么跑：待办的触发（行情 / 翻转）全部并进这一轮；兜底轮写离上一轮多久。"""
+        cfg = self.cfg
+        items = list(self._triggers)
+        if not items:
+            last = self.state.last_run_at
+            if last is None:
+                items = [{"kind": "first", "text": "首轮：没有上一轮"}]
+            else:
+                ago = (now - last).total_seconds() / 60
+                items = [
+                    {
+                        "kind": "fallback",
+                        "since_last_min": round(ago, 1),
+                        "threshold_min": cfg.event_max_interval_min,
+                        "text": f"兜底：距上轮 {ago:.0f} 分钟（≥ {cfg.event_max_interval_min:g}）",
+                    }
+                ]
+        return {
+            "reason": reason,
+            "at": now.isoformat(),
+            "items": items,
+            "text": trigger_text(items),
+            "thresholds": {
+                "event_btc_sigma": cfg.event_btc_sigma,
+                "event_pool_sigma": cfg.event_pool_sigma,
+                "event_breadth_shift": cfg.event_breadth_shift,
+                "event_max_interval_min": cfg.event_max_interval_min,
+                "min_run_gap_min": cfg.min_run_gap_min,
+            },
+            "reference": self.state.event_ref,
+            "sigma": self.state.event_sigma,
+        }
+
+    def _update_sigma(self, dossier: Dossier, now: datetime) -> None:
+        """数据包已经算了等权池的 1h σ；BTC 的用同一批缓存的 1h 线按同一方法算。哪个算不出
+        就沿用上一次的。"""
+        out = dict(self.state.event_sigma or {})
+        btc_fn = getattr(self._builder, "btc_sigma_1h", None)
+        btc_1h = btc_fn(now) if callable(btc_fn) else None
+        pool_1h = dossier.value("sigma_1h_pct")
+        if btc_1h is not None and btc_1h > 0:
+            out["btc_15m_pct"] = btc_1h * SIGMA_15M_OF_1H
+            out["btc_as_of"] = now.isoformat()
+        if pool_1h is not None and pool_1h > 0:
+            out["pool_15m_pct"] = pool_1h * SIGMA_15M_OF_1H
+            out["pool_as_of"] = now.isoformat()
+        if out:
+            self.state.event_sigma = out
 
     # ---------------------------------------------------------- 一轮
     async def run(self, pool: SymbolPool | None, reason: str = "scheduled") -> DeskRun:
@@ -1050,9 +1198,17 @@ class MarketDesk:
             self._save()
 
     def _consume(self, now: datetime, reason: str) -> None:
-        """开跑：定时轮占掉当前格子；任何一轮都满足了待办的加跑请求（刚跑过就不用再加跑）。"""
+        """开跑：定时轮占掉当前格子；任何一轮都满足了待办的加跑请求（刚跑过就不用再加跑）。
+        event：记下为什么跑，并把此刻的行情换成之后比较的参照。"""
         if reason == "scheduled":
             self.state.last_slot = self.slot(now)
+        if self.event_mode:
+            self._trigger = self._take_trigger(now, reason)
+            self._triggers = []
+            sample = self._sample
+            at = _parse_at(sample["at"]) if sample is not None else None
+            fresh = at is not None and timedelta(0) <= now - at <= EVENT_SAMPLE_MAX_AGE
+            self.state.event_ref = {**sample, "taken": "run_start"} if sample and fresh else None
         self._requested = None
         self.state.last_run_at = now
         self._prices = [p for p in self._prices if p[0] >= now]
@@ -1103,9 +1259,15 @@ class MarketDesk:
             "mirror_test": mirror,
             "move_trigger": self._last_move if reason == "move" else None,
         }
+        trigger = self._trigger if self.event_mode else None
+        if trigger is not None:
+            row["trigger"] = trigger
         cost = 0.0
         try:
             dossier = await asyncio.to_thread(self._builder.build, pool, now)
+            if trigger is not None:
+                self._update_sigma(dossier, now)
+                row["event_sigma"] = self.state.event_sigma
             row["dossier"] = dossier.to_json()
             row["dossier_sha256"] = dossier.sha256()
             prompt = self._prompt(dossier, order, cycle_id)
@@ -1176,6 +1338,8 @@ class MarketDesk:
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
+            if trigger is not None:
+                self.state.latest["trigger"] = trigger
             if self._intra_on:
                 intra = {
                     **intra_block(dossier, avg_1h, order, cycle_id),
@@ -1212,6 +1376,9 @@ class MarketDesk:
             return DeskRun(cycle_id, "ok", direction, avg, published, cost)
         except binance_gate.RateLimited as exc:
             self.state.last_slot = None if reason == "scheduled" else self.state.last_slot
+            if trigger is not None:  # 限流不吃掉触发：解封、隔够间隔后照样跑
+                self._requested = reason
+                self._triggers = list(trigger["items"])
             row.update(status="skipped", error=f"币安限流：{exc}")
             return DeskRun(cycle_id, "skipped", cost_usd=cost, reason="币安限流")
         except Exception as exc:
@@ -1314,7 +1481,8 @@ class MarketDesk:
                 return None
             refresh = True
         if not takeover and not refresh:
-            event = reason != "scheduled"
+            # 兜底轮和定时轮一样按时间来，不靠行情，确认照样要满 publish_confirm_min
+            event = reason not in ("scheduled", "event_fallback")
             if direction == st.candidate and st.candidate_since is not None:
                 st.candidate_count += 1
                 st.candidate_event = st.candidate_event or event
@@ -1432,6 +1600,10 @@ class MarketDesk:
         pub = row.get("published_view")
         out["published_view_id"] = pub.get("market_view_id") if isinstance(pub, dict) else None
         out["cost_today_usd"] = round(self.state.cost_today_usd, 6)
+        trigger = row.get("trigger")
+        if isinstance(trigger, dict):
+            out["trigger"] = trigger
+            summary = f"{summary}；{trigger.get('text', '')}"
         self._record(outcome, summary, out, cost, ms)
 
     def _append_log(self, now: datetime, row: Mapping[str, Any]) -> None:
@@ -1476,6 +1648,7 @@ class MarketDesk:
             "last_error": self.state.last_error,
             "cost_today_usd": self.state.cost_today_usd,
             "mirror_flag": self.state.mirror_flag,
+            "trigger_mode": self.cfg.trigger_mode,
         }
 
 
@@ -1518,6 +1691,115 @@ def price_move(
     if btc is None and med is None:
         return None
     return (btc or 0.0, med or 0.0)
+
+
+MARKET_KINDS = frozenset({"btc", "pool", "breadth"})
+TRIGGER_WORDS = {"regime_flip": "翻转确认", "move": "急动加跑"}
+
+
+def market_sample(
+    at: datetime,
+    symbols: Sequence[str],
+    exclude: Sequence[str],
+    prices: Mapping[str, float],
+    btc_px: float | None,
+    rets_1h: Mapping[str, float],
+) -> dict[str, Any]:
+    """翻转检查的一份行情按大盘台的篮子（剔除 ``exclude``）整理成可落盘的参照。"""
+    skip = set(exclude)
+    basket = [s for s in dict.fromkeys(symbols) if s not in skip]
+    rets = [rets_1h[s] for s in basket if s in rets_1h and math.isfinite(rets_1h[s])]
+    up, down = sum(r > 0 for r in rets), sum(r < 0 for r in rets)
+    return {
+        "at": at.isoformat(),
+        "btc_px": _pos(btc_px),
+        "prices": {s: prices[s] for s in basket if (_pos(prices.get(s)) is not None)},
+        "up": up,
+        "down": down,
+        "n": up + down,
+    }
+
+
+def event_triggers(
+    ref: Mapping[str, Any],
+    cur: Mapping[str, Any],
+    sigma: Mapping[str, Any],
+    cfg: MarketDeskSection,
+) -> list[dict[str, Any]]:
+    """这一份行情和上一轮开跑时比，满足了哪些触发（各带数值和门槛）。σ 缺了那一项就不判。"""
+    out: list[dict[str, Any]] = []
+    since = ref.get("at")
+    k, sb = cfg.event_btc_sigma, _pos(sigma.get("btc_15m_pct"))
+    b0, b1 = _pos(ref.get("btc_px")), _pos(cur.get("btc_px"))
+    if k > 0 and sb is not None and b0 is not None and b1 is not None:
+        move = (b1 / b0 - 1) * 100
+        if abs(move) >= k * sb:
+            out.append(
+                {
+                    "kind": "btc",
+                    "since": since,
+                    "move_pct": round(move, 4),
+                    "sigma_15m_pct": round(sb, 4),
+                    "sigma_mult": round(move / sb, 2),
+                    "threshold_sigma": k,
+                    "text": f"BTC 自上轮 {move:+.2f}%（{abs(move) / sb:.1f}σ）",
+                }
+            )
+    k, sp = cfg.event_pool_sigma, _pos(sigma.get("pool_15m_pct"))
+    p0, p1 = ref.get("prices") or {}, cur.get("prices") or {}
+    rets = [(p1[s] / p - 1) * 100 for s, p in p0.items() if p > 0 and p1.get(s, 0) > 0]
+    if k > 0 and sp is not None and len(rets) >= 5:
+        med = statistics.median(rets)
+        if abs(med) >= k * sp:
+            out.append(
+                {
+                    "kind": "pool",
+                    "since": since,
+                    "median_move_pct": round(med, 4),
+                    "symbols": len(rets),
+                    "sigma_15m_pct": round(sp, 4),
+                    "sigma_mult": round(med / sp, 2),
+                    "threshold_sigma": k,
+                    "text": f"池中位数自上轮 {med:+.2f}%（{abs(med) / sp:.1f}σ）",
+                }
+            )
+    shift = cfg.event_breadth_shift
+    n0, n1 = int(ref.get("n") or 0), int(cur.get("n") or 0)
+    if shift > 0 and n0 >= 5 and n1 >= 5:
+        net0 = int(ref.get("up", 0)) - int(ref.get("down", 0))
+        net1 = int(cur.get("up", 0)) - int(cur.get("down", 0))
+        # 按 40 个币折算：池子换了大小，门槛还是同一把尺
+        moved = net1 * 40 / n1 - net0 * 40 / n0
+        if abs(moved) >= shift:
+            out.append(
+                {
+                    "kind": "breadth",
+                    "since": since,
+                    "net_before": net0,
+                    "n_before": n0,
+                    "net_now": net1,
+                    "n_now": n1,
+                    "shift_per_40": round(moved, 1),
+                    "threshold": shift,
+                    "text": f"涨跌家数差自上轮 {net0:+d}/{n0} → {net1:+d}/{n1}"
+                    f"（折合 40 个币 {moved:+.0f}，门槛 {shift}）",
+                }
+            )
+    return out
+
+
+def trigger_text(items: Sequence[Mapping[str, Any]]) -> str:
+    """面板和决策记录的一句话，例如「行情触发：BTC 自上轮 +0.62%（1.7σ）；翻转确认」。"""
+    market = [str(t["text"]) for t in items if t.get("kind") in MARKET_KINDS]
+    other = [str(t["text"]) for t in items if t.get("kind") not in MARKET_KINDS]
+    return "；".join((["行情触发：" + "，".join(market)] if market else []) + other)
+
+
+def _pos(v: Any) -> float | None:
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) and f > 0 else None
 
 
 def mirror_bias(gaps: Sequence[Mapping[str, Any]], threshold: float) -> tuple[bool, float]:

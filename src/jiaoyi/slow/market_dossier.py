@@ -759,6 +759,15 @@ class DossierBuilder:
             )
         return sigma4
 
+    def btc_sigma_1h(self, now: datetime) -> float | None:
+        """BTC 自己的 1h σ，和等权池的 ``sigma_1h_pct`` 同一方法、同一批已缓存的 1h 线（不发请求）。
+        不进数据包，只给大盘台 event 模式判断「走了几个 σ」。"""
+        bars = self._bars.get(BTC)
+        if not bars:
+            return None
+        t0_ms = int(now.timestamp() * 1000) // HOUR_MS * HOUR_MS
+        return sigma_at({BTC: bars}, t0_ms, 1, self._lookback)
+
     def deep_basket(
         self, basket: Mapping[str, Mapping[int, Bar]]
     ) -> dict[str, Mapping[int, Bar]] | None:
