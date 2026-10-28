@@ -1619,9 +1619,16 @@ class BattleCardCommander:
     def market_intra(self, now: datetime, view: MarketView | None) -> str | None:
         """大盘台观点后面接的「4 小时之内」（``[market_desk] publish_intra``）：只接在大盘台发布的
         观点后面，读大盘台最近一轮。没开、观点不是大盘台的、读不到都返回 None。"""
+        return self._desk_text("intra_text", now, view)
+
+    def keeper_intra(self, now: datetime, view: MarketView | None) -> str | None:
+        """同一段给管家复查快照（``[market_desk] keeper_intra``，和 publish_intra 分开）。"""
+        return self._desk_text("keeper_intra_text", now, view)
+
+    def _desk_text(self, name: str, now: datetime, view: MarketView | None) -> str | None:
         if view is None or view.source != DESK_SOURCE or self._desk is None:
             return None
-        fn = getattr(self._desk, "intra_text", None)
+        fn = getattr(self._desk, name, None)
         if not callable(fn):
             return None
         try:
@@ -2811,8 +2818,10 @@ class BattleCardCommander:
             started = time.monotonic()
             regime, market_view, regime_note = self._regime_at_start(regime, market_view)
             intra = self.market_intra(self._clock(), market_view)
-            if intra:
+            if intra and market_view is not None:
                 regime_note = {**regime_note, "market_intra": intra}
+                # 4 小时判断只在方向变了才发新版：标上发布时刻，免得当成此刻的
+                regime = f"（大盘台 {market_view.observed_at:%H:%M} UTC 发布的 4 小时判断）{regime}"
             est = self._estimate(self._meeting_costs)
             self._charge(est)  # 预记：被强退打断的会议（重启）也算花过钱；正常结束时在下面退回估算
             self._event_uncharged.discard(entry.symbol)

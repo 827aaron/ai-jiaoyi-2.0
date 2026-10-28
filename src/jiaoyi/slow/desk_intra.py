@@ -33,8 +33,8 @@ def _pair(order: Order, up: str, down: str) -> tuple[str, str]:
 
 
 def compose_intra(block: Mapping[str, Any], now: datetime, max_age_min: float) -> str:
-    """「未来 1 小时概率（那一轮的时间）」+「短线现状（截至 HH:MM UTC）」，全是代码按数写的、成对
-    的话；涨 / 跌（买入 / 卖出）谁先按那一轮的顺序交替。
+    """「HH:MM UTC 起 1 小时概率」（那一轮开跑时刻起）+「短线现状（截至 HH:MM UTC）」，全是代码
+    按数写的、成对的话；涨 / 跌（买入 / 卖出）谁先按那一轮的顺序交替。
 
     短线现状优先用两轮之间刷新的 ``status``（比这一轮数据包新时），主动买卖占比只有每轮的那份，
     和现状不是同一时刻就标上自己的时间。数据旧过 ``max_age_min``（0 = 不查）写缺失。"""
@@ -44,10 +44,10 @@ def compose_intra(block: Mapping[str, Any], now: datetime, max_age_min: float) -
     p = block.get("probs_1h") or {}
     run = f"{t0.astimezone(UTC):%H:%M} UTC"
     if now - t0 > PROBS_1H_HORIZON:
-        head = f"未来 1 小时概率：缺失（{run} 那一轮已过 1 小时）。"
+        head = f"{run} 起 1 小时概率：缺失（已过 1 小时）。"
     else:
         a, b = _pair(order, f"涨 {float(p['up']):.0%}", f"跌 {float(p['down']):.0%}")
-        head = f"未来 1 小时概率（大盘台 {run} 一轮）：{a} / 平 {float(p['flat']):.0%} / {b}。"
+        head = f"{run} 起 1 小时概率：{a} / 平 {float(p['flat']):.0%} / {b}。"
     run_values: Mapping[str, float] = block.get("values") or {}
     status = block.get("status")
     as_of, v = run_as_of, run_values

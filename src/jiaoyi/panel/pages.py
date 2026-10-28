@@ -210,6 +210,8 @@ def desk_runs(files: PanelFiles, now: datetime) -> list[DeskRunCard]:
                 continue
             try:
                 row = json.loads(line)
+                if not isinstance(row, dict) or row.get("status") != "ok":
+                    continue
                 out.append(_desk_run(row))
             except (ValueError, KeyError, TypeError):
                 continue
@@ -222,7 +224,11 @@ def desk_runs(files: PanelFiles, now: datetime) -> list[DeskRunCard]:
         latest = st.get("latest") if isinstance(st, dict) else None
         latest = latest if isinstance(latest, dict) else {}
         block = latest.get("intra")
-        if isinstance(block, dict) and latest.get("cycle_id") == out[0].cycle_id:
+        if (
+            isinstance(block, dict)
+            and block.get("panel", True)
+            and latest.get("cycle_id") == out[0].cycle_id
+        ):
             with contextlib.suppress(KeyError, TypeError, ValueError):
                 out[0].intra = compose_intra(block, now, float(block.get("max_age_min", 0.0)))
     return out
@@ -232,7 +238,7 @@ def _desk_run(row: dict[str, Any]) -> DeskRunCard:
     pub = row.get("published_view")
     block = row.get("intra")
     intra = None
-    if isinstance(block, dict):
+    if isinstance(block, dict) and block.get("panel", True):
         intra = compose_intra(block, datetime.fromisoformat(str(block["t0"])), 0.0)
     return DeskRunCard(
         cycle_id=str(row["cycle_id"]),

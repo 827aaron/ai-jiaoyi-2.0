@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import json
 import logging
@@ -780,11 +781,22 @@ class MarketDesk:
         )
         self._save()
 
+    @property
+    def _intra_on(self) -> bool:
+        return self.cfg.publish_intra or self.cfg.keeper_intra
+
     def intra_text(self, now: datetime) -> str | None:
-        """最近一轮（不是上次发布）的「未来 1 小时概率 + 短线现状」，接在大盘台观点后面给各币会议、
-        管家和面板。方向只在滞回确认后才发布，这一段每轮都换。``publish_intra`` 关着、没有大盘台
-        的结果、或结果已超过 ``max_age_min``（这时大盘方向也不归它管）返回 None。"""
-        if not self.cfg.publish_intra or not self.available(now):
+        """最近一轮（不是上次发布）的「1 小时概率 + 短线现状」，接在大盘台观点后面给各币会议。
+        方向只在滞回确认后才发布，这一段每轮都换。``publish_intra`` 关着、没有大盘台的结果、或
+        结果已超过 ``max_age_min``（这时大盘方向也不归它管）返回 None。"""
+        return self._intra(now) if self.cfg.publish_intra else None
+
+    def keeper_intra_text(self, now: datetime) -> str | None:
+        """同一段给管家复查快照，只看 ``keeper_intra``。"""
+        return self._intra(now) if self.cfg.keeper_intra else None
+
+    def _intra(self, now: datetime) -> str | None:
+        if not self.available(now):
             return None
         latest = self.state.latest
         block = latest.get("intra") if latest is not None else None
@@ -810,7 +822,7 @@ class MarketDesk:
         cfg = self.cfg
         latest = self.state.latest
         block = latest.get("intra") if latest is not None else None
-        if not cfg.publish_intra or cfg.intra_refresh_s <= 0 or not isinstance(block, dict):
+        if not self._intra_on or cfg.intra_refresh_s <= 0 or not isinstance(block, dict):
             return False
         status = block.get("status")
         prev = datetime.fromisoformat(str(status["as_of"])) if isinstance(status, dict) else None
@@ -1038,13 +1050,14 @@ class MarketDesk:
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
-            if self.cfg.publish_intra:
+            if self._intra_on:
                 intra = {
                     **intra_block(dossier, avg_1h, order, cycle_id),
                     "max_age_min": self.cfg.max_input_age_min,
+                    "panel": self.cfg.publish_intra,
                 }
                 self.state.latest["intra"] = intra
-                row["intra"] = intra
+                row["intra"] = copy.deepcopy(intra)  # 之后的刷新改的是状态里那份，日志不跟着变
             if self.cfg.mode == "replace":
                 self._set_owner(completed, "desk", f"第 {cycle_id} 轮结果合格")
             published = self._maybe_publish(

@@ -928,6 +928,8 @@ def _desk_latest(root: Path, now: datetime) -> DeskLatest | None:
     try:
         latest = json.loads((root / DESK_STATE_FILE).read_text(encoding="utf-8"))["latest"]
         block = latest["intra"]
+        if not block.get("panel", True):  # 只开了 keeper_intra
+            return None
         return DeskLatest(
             run_at=datetime.fromisoformat(str(latest["t0"])),
             probs_4h=latest.get("probs_4h"),

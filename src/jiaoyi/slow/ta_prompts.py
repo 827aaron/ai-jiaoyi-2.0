@@ -280,6 +280,8 @@ def meeting_note(
     intra_part = (
         f" Market desk, within 4 hours (latest desk run): {_clip(intra, 400)}" if intra else ""
     )
+    if intra:  # 三段背景：大盘判断、4 小时之内、挑币理由
+        text = text.replace("Treat both as context", "Treat all as context")
     return (
         text.replace("{regime}", _clip(regime, 400) or "(not available)")
         .replace("{intra}", intra_part)

@@ -1485,7 +1485,7 @@ class IntraBuilder:
 
 H1 = Probs(0.312, 0.459, 0.229)
 UP_TEXT = (
-    "未来 1 小时概率（大盘台 10:02 UTC 一轮）：涨 31% / 平 46% / 跌 23%。"
+    "10:02 UTC 起 1 小时概率：涨 31% / 平 46% / 跌 23%。"
     "短线现状（截至 10:01 UTC）："
     "等权池 15 分钟 +0.02%（涨 19 / 跌 19 个），1 小时 +0.77%（涨 34 / 跌 5 个）；"
     "BTC 15 分钟 +0.05%，1 小时 +0.38%；1 小时成交里主动买入 47.0% / 主动卖出 53.0%。"
@@ -1503,7 +1503,7 @@ def test_intra_text_has_1h_probs_and_short_term_numbers() -> None:
     assert compose_intra(block, T0 + timedelta(minutes=1), 5.0) == UP_TEXT
     down = compose_intra(intra_block(intra_dossier(), H1, "down_first", "c"), T0, 5.0)
     assert down == (
-        "未来 1 小时概率（大盘台 10:02 UTC 一轮）：跌 23% / 平 46% / 涨 31%。"
+        "10:02 UTC 起 1 小时概率：跌 23% / 平 46% / 涨 31%。"
         "短线现状（截至 10:01 UTC）："
         "等权池 15 分钟 +0.02%（跌 19 / 涨 19 个），1 小时 +0.77%（跌 5 / 涨 34 个）；"
         "BTC 15 分钟 +0.05%，1 小时 +0.38%；1 小时成交里主动卖出 53.0% / 主动买入 47.0%。"
@@ -1525,12 +1525,12 @@ def test_intra_short_term_line_is_refused_when_stale() -> None:
     block = intra_block(intra_dossier(), H1, "up_first", "c")
     stale = compose_intra(block, T0 + timedelta(minutes=5), 5.0)  # as_of 早 1 分钟：已 6 分钟
     assert stale == (
-        "未来 1 小时概率（大盘台 10:02 UTC 一轮）：涨 31% / 平 46% / 跌 23%。"
+        "10:02 UTC 起 1 小时概率：涨 31% / 平 46% / 跌 23%。"
         "短线现状：缺失（截至 10:01 UTC 的数据已过 6 分钟，上限 5 分钟）。"
     )
     assert "等权池" in compose_intra(block, T0 + timedelta(minutes=5), 0.0)  # 0 = 不查
     late = compose_intra(block, T0 + timedelta(minutes=61), 0.0)
-    assert late.startswith("未来 1 小时概率：缺失（10:02 UTC 那一轮已过 1 小时）。")
+    assert late.startswith("10:02 UTC 起 1 小时概率：缺失（已过 1 小时）。")
     missing = dict(block, values={k: v for k, v in block["values"].items() if "btc" not in k})
     assert "BTC 15 分钟 缺失，1 小时 缺失" in compose_intra(missing, T0, 5.0)
 
@@ -1559,7 +1559,8 @@ async def test_publish_intra_reads_latest_run_not_last_published_view(tmp_path: 
     flash_view = view.model_copy(update={"source": "scheduled_market"})
     assert commander.market_intra(clock[0], flash_view) is None  # 只接在大盘台观点后面
     await commander._analyze_one(entry("AAUSDT"), view.regime, market_view=view)
-    assert engine.symbol_calls[-1] == ("AAUSDT", f"{view.regime} {text}")
+    label = "（大盘台 10:02 UTC 发布的 4 小时判断）"  # 发布时刻，免得当成此刻的
+    assert engine.symbol_calls[-1] == ("AAUSDT", f"{label}{view.regime} {text}")
 
     # 下一轮方向没变不发布，但短线现状换成这一轮的数
     clock[0] += timedelta(minutes=15)
@@ -1687,7 +1688,7 @@ async def test_short_term_line_refreshes_every_minute_between_runs(tmp_path: Pat
     text = desk.intra_text(clock[0])
     # 这一轮（10:02Z）的顺序是 down_first：刷新后的现状也照这一轮的顺序
     assert text == (
-        "未来 1 小时概率（大盘台 10:02 UTC 一轮）：跌 23% / 平 46% / 涨 31%。"
+        "10:02 UTC 起 1 小时概率：跌 23% / 平 46% / 涨 31%。"
         "短线现状（截至 10:05 UTC）：等权池 15 分钟 +0.06%（跌 2 / 涨 3 个），"
         "1 小时 -0.24%（跌 4 / 涨 1 个）；BTC 15 分钟 +0.12%，1 小时 -0.25%；"
         "1 小时成交里主动卖出 53.0% / 主动买入 47.0%（截至 10:01 UTC）。"
@@ -1846,5 +1847,137 @@ def test_kline_cache_keeps_only_recent_pool_and_majors(tmp_path: Path) -> None:
     b = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
     b.build(pool(much_later, *(entry(s) for s in SYMS[:6])), much_later)
     raw = json.loads(cache.read_text())
+    # BTC / ETH 从没进过池也一直留着（每轮都要它们）
+    assert {"BTCUSDT", "ETHUSDT"} <= set(raw["bars"]) and "BTCUSDT" not in SYMS
     assert set(raw["bars"]) == {*SYMS[:6], "BTCUSDT", "ETHUSDT"}
     assert set(raw["seen"]) == set(raw["bars"]) and not gone & set(raw["deep"])
+
+
+# ------------------------------------------------------------------ 接线（会议 / 管家）
+
+
+class ContextEngine:
+    """有 analyze_with_context 的引擎替身：记下指挥官交过来的参数。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def analyze_with_context(
+        self, e: SymbolPoolEntry, regime: str, pick_reason: str = "", **kw: Any
+    ) -> Any:
+        from tests.test_market_refresh_independent import Analysis, card_symbol
+
+        self.calls.append((regime, kw))
+        return Analysis(card_symbol(e.symbol), 0.02)
+
+
+async def _desk_commander(
+    tmp_path: Path, **kw: Any
+) -> tuple[BattleCardCommander, MarketDesk, list[datetime], Any]:
+    commander, _engine, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=IntraBuilder(),  # type: ignore[arg-type]
+        **kw,
+    )
+    await desk.run(candidates, "scheduled")
+    view = commander.latest_market_view
+    assert view is not None and view.source == DESK_SOURCE
+    return commander, desk, clock, view
+
+
+@pytest.mark.parametrize("on", [True, False])
+async def test_meeting_note_gets_intra_through_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    """指挥官 → analyze_with_context(market_intra=…) → 引擎真正拼出来的会议说明。"""
+    from jiaoyi.slow import tradingagents_engine as te
+    from tests.test_card_outlook import DRAFT, OUTLOOK, _engine, _Graph, _Llm
+    from tests.test_card_outlook import entry as card_entry
+
+    commander, _desk, _clock, view = await _desk_commander(tmp_path, publish_intra=on)
+    fake = ContextEngine()
+    commander._engine = fake  # type: ignore[assignment]
+    await commander._analyze_one(entry("AAUSDT"), view.regime, market_view=view)
+    regime, kw = fake.calls[-1]
+    assert ("market_intra" in kw) is on
+
+    draft = te._CardSymbolDraft.model_validate({**DRAFT, **OUTLOOK})
+    graph = _Graph(_Llm(draft), "Underweight", "Sell", "SELL")
+    eng = _engine(monkeypatch, graph)
+    import threading
+
+    eng._liq, eng._inflight, eng._inflight_lock = None, {}, threading.Lock()
+    eng._live = {}
+    notes: list[str] = []
+    eng._graph = lambda *a, **k: notes.append(a[2]) or graph  # type: ignore[method-assign]
+    await eng.analyze_with_context(card_entry("AAUSDT"), regime, "why", **kw)
+    note = notes[-1]
+    assert ("Market desk, within 4 hours (latest desk run): 10:02 UTC 起 1 小时概率" in note) is on
+    assert ("短线现状（截至 10:01 UTC）" in note) is on
+    assert ("Treat all as context" in note) is on and ("Treat both as context" in note) is not on
+    assert ("（大盘台 10:02 UTC 发布的 4 小时判断）" in note) is on
+
+
+@pytest.mark.parametrize(("publish", "keeper"), [(True, False), (False, True), (False, False)])
+async def test_keeper_review_gets_within_4h_only_with_keeper_intra(
+    tmp_path: Path, publish: bool, keeper: bool
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from jiaoyi.keeper.keeper import JevKeeper
+    from tests.fastloop_helpers import FAST, card, features
+    from tests.test_keeper_patrol import close_p, position
+
+    commander, desk, clock, view = await _desk_commander(
+        tmp_path, publish_intra=publish, keeper_intra=keeper
+    )
+    cfg = FAST.model_copy(update={"giveback_on": False})
+    t = MockJevTransport(answer=close_p(0.1))
+    k = JevKeeper(
+        JevDecisionModel(t, cfg, timeout_ms=200),
+        cfg,
+        lambda s: features(clock[0]),
+        lambda n: card(clock[0]),
+        current_market=lambda: view,
+        market_intra=commander.keeper_intra,
+    )
+    await k.review(position(clock[0]), clock[0])
+    snap = json.loads(t.calls[-1])
+    assert snap["current_market"]["market_view_id"] == view.market_view_id
+    got = snap["current_market"].get("within_4h")
+    if keeper:
+        assert got is not None and got == desk.keeper_intra_text(clock[0])
+        assert "短线现状（截至 10:01 UTC）" in got
+    else:
+        assert got is None
+    # 面板只跟 publish_intra
+    from jiaoyi.panel.overview import _desk_latest
+
+    assert (_desk_latest(tmp_path, clock[0]) is not None) is publish
+
+
+def test_desk_runs_latest_card_uses_stored_line_when_state_is_another_run(
+    tmp_path: Path,
+) -> None:
+    from jiaoyi.panel.files import PanelFiles
+    from jiaoyi.panel.pages import desk_runs
+
+    block = {**intra_block(intra_dossier(), H1, "up_first", "c"), "max_age_min": 5.0}
+    refreshed = {**block, "status": {"as_of": (T0 + timedelta(minutes=3)).isoformat(),
+                                     "values": {"btc_ret_15m_pct": -0.9}}}  # fmt: skip
+    row = {"cycle_id": "run-a", "t0": T0.isoformat(), "status": "ok", "intra": block}
+    (tmp_path / "market_desk").mkdir()
+    (tmp_path / "market_desk" / "2026-10-28.jsonl").write_text(json.dumps(row) + "\n")
+    state = {"latest": {"cycle_id": "run-b", "intra": refreshed}}  # 状态已经是另一轮了
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(state))
+    got = desk_runs(PanelFiles(tmp_path, "UTC"), T0 + timedelta(minutes=4))
+    assert len(got) == 1 and got[0].intra is not None
+    assert "BTC 15 分钟 +0.05%" in got[0].intra and "-0.90%" not in got[0].intra
+    # 状态是同一轮时用刷新过的那份
+    state["latest"]["cycle_id"] = "run-a"
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(state))
+    got = desk_runs(PanelFiles(tmp_path, "UTC"), T0 + timedelta(minutes=4))
+    assert got[0].intra is not None and "BTC 15 分钟 -0.90%" in got[0].intra
