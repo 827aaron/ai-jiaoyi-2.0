@@ -2119,6 +2119,37 @@ function symbolCard(d) {
     ${rows ? `<div class="tw scroll tall"><table class="symtab"><thead><tr><th>币种</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th><th class="r" title="平均每笔赚几个止损距离：+1 R = 赚了一个止损那么多">平均每笔</th><th class="r" title="手续费 ÷ 毛利">手续费占毛利</th><th class="r">平均拿多久</th><th>看法</th><th>主要信号 · 多空</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="foot">只算成交了、有盈亏数的单，时间范围跟上面一样${S.tests ? "，含测试单" : "，不含测试单"}。净盈亏已扣开平手续费，不含资金费和 AI 费。R = 开仓时的止损距离，按 R 比只看金额公平（仓位大小不同）。不满 ${SYM_MIN} 笔不下结论；满 ${SYM_MIN} 笔平均每笔是亏的标「一直在亏」。只提示，拉黑 / 加白你自己定。</div>` : '<div class="dim">没有。</div>'}</section>`;
 }
+// 按主网价格算：Demo 成交价比同一时刻的主网价好，Demo 盈亏偏乐观；这里并排给出按主网价格重算的净盈亏
+const bpTxt = (v) => (v == null ? "—" : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)} bp`);
+const rTxt = (v) => (v == null ? "—" : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(3)} R`);
+const LEG = { market: "市价", limit: "限价", stop: "止损单" };
+const legTag = (t) => ((t.mainnet_legs || []).includes("limit") ? ` <span class="pill p-warn" title="限价成交的腿按它自己的限价算（假设主网也能在这个价成交），这条腿不计价差">限价</span>` : "");
+// 三格：按主网价格算的净利、价差（Demo 成交价占的便宜）、费率差（全按吃单比 Demo 实际费率多付，不在差里）
+function mainnetCells(t) {
+  const none = '<td class="r num dim">—</td>';
+  if (t.unfilled || t.pnl_missing) return none + none + none;
+  if (t.mainnet_net_usdt == null) return '<td class="r num dim" title="还没按主网价格算（设置里打开「按主网价格算」，更早的单用 jiaoyi mainnet-shadow 补算）">—</td>' + none + none;
+  const legs = (t.mainnet_legs || []).map((k) => LEG[k] || k).join(" → ");
+  return `<td class="r num ${cls(t.mainnet_net_usdt)}" title="按同一时刻的币安主网成交价重算的净利，手续费按 Demo 实际费率；开 → 平：${esc(legs)}；Demo 比它多 ${bpTxt(t.mainnet_gap_bp)}（${rTxt(t.mainnet_gap_r)}）">${signed(t.mainnet_net_usdt, 2)}${legTag(t)}<div class="dim small">差 ${bpTxt(t.mainnet_gap_bp)}</div></td>`
+    + `<td class="r num">${t.mainnet_price_gap_usdt == null ? "—" : signed(t.mainnet_price_gap_usdt, 2)}</td>`
+    + `<td class="r num dim">${t.mainnet_fee_gap_usdt == null ? "—" : signed(t.mainnet_fee_gap_usdt, 2)}</td>`;
+}
+function mainnetCard(d) {
+  const m = d.mainnet;
+  const head = '<div class="ch"><h2>按主网价格算</h2><span class="r">Demo 成交价比同一时刻的主网价好，Demo 盈亏偏乐观；这里按主网价格重算</span></div>';
+  if (!m) return `<section class="card mt">${head}<div class="dim">这段时间还没有按主网价格算过的单。设置 → 执行 → 按主网价格算 打开后新平仓自动算；更早的单用 jiaoyi mainnet-shadow --since 日期 补算。</div></section>`;
+  const days = [...m.days].reverse().map((x) => `<tr><td class="num nowrap">${esc(x.day)}</td><td class="r num">${x.trades}</td><td class="r num ${cls(x.demo_net_usdt)}">${signed(x.demo_net_usdt, 2)}</td><td class="r num ${cls(x.mainnet_net_usdt)}"><b>${signed(x.mainnet_net_usdt, 2)}</b></td><td class="r num">${signed(x.gap_usdt, 2)}</td><td class="r num">${signed(x.price_gap_usdt, 2)}</td><td class="r num dim">${signed(x.fee_gap_usdt, 2)}</td><td class="r num">${bpTxt(x.gap_bp)}</td><td class="r num">${rTxt(x.gap_r)}</td><td class="r num ${cls(x.cum_demo_usdt)}">${signed(x.cum_demo_usdt, 2)}</td><td class="r num ${cls(x.cum_mainnet_usdt)}">${signed(x.cum_mainnet_usdt, 2)}</td><td class="r num dim">${x.limit_legs || ""}</td></tr>`).join("");
+  return `<section class="card mt">${head}
+    <div class="tiles t5">
+      <div class="tile"><small>Demo 净盈亏</small><b class="${cls(m.demo_net_usdt)}">${signed(m.demo_net_usdt, 2)}U</b></div>
+      <div class="tile"><small>按主网价格算</small><b class="${cls(m.mainnet_net_usdt)}">${signed(m.mainnet_net_usdt, 2)}U</b></div>
+      <div class="tile"><small>价差（Demo 成交占的便宜）</small><b>${signed(m.price_gap_usdt, 2)}U · ${bpTxt(m.price_gap_bp)}</b></div>
+      <div class="tile"><small>费率差（全按吃单多付，未计入）</small><b>${signed(m.fee_gap_usdt, 2)}U · ${bpTxt(m.fee_gap_bp)}</b></div>
+      <div class="tile"><small>每笔 R：Demo → 主网</small><b>${rTxt(m.demo_r)} → <span class="${m.mainnet_r == null ? "" : cls(m.mainnet_r)}">${rTxt(m.mainnet_r)}</span></b></div>
+    </div>
+    <div class="tw scroll mt"><table><thead><tr><th>日期</th><th class="r">笔数</th><th class="r">Demo 净盈亏</th><th class="r">按主网价格算</th><th class="r">差</th><th class="r">价差</th><th class="r">费率差</th><th class="r">差 bp</th><th class="r">差 R / 笔</th><th class="r">累计 Demo</th><th class="r">累计按主网</th><th class="r">限价腿</th></tr></thead><tbody>${days}</tbody></table></div>
+    <div class="foot">算了 ${m.covered} / ${m.trades} 笔（没算的不在这张表里）。按主网价格算 = 同数量、开平两边按同一时刻的币安主网成交价，手续费按这笔在 Demo 实际被收的费率乘主网名义金额，不算资金费；Demo 净盈亏是账本里币安实扣的。差 = Demo 净盈亏 − 按主网价格算，基本就是价差（Demo 成交价占的便宜）。费率差 = 两边全按吃单费率比按 Demo 实际费率多付多少，单列，不在差里。限价成交的腿（标「限价」，共 ${m.limit_legs} 条）按它自己的限价算，假设主网也能在这个价成交，不计价差。差 bp = 差 ÷ 开仓名义金额；R = 开仓时的止损距离 × 数量。日期按日切时区。</div></section>`;
+}
 P.history = () => {
   const d = pageData;
   const tiles = [
@@ -2138,13 +2169,13 @@ P.history = () => {
     if (t.unfilled) {
       return `<tr class="click dim" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
       <td>${t.test ? '<span class="pill p-warn">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="num">—</td><td class="num">—</td><td><span class="pill p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>
-      <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td></tr>`;
+      <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>${mainnetCells(t)}</tr>`;
     }
     const exit = t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>';
     const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
     return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
       <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(REASON[t.close_reason] || t.close_reason || "—")}</td>
-      <td class="num nowrap">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}</tr>`;
+      <td class="num nowrap">${dur(new Date(t.closed_at) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}${mainnetCells(t)}</tr>`;
   }).join("");
   window.__recs = d.rejected;
   const rej = S.rej
@@ -2158,9 +2189,10 @@ P.history = () => {
     <div class="tiles t5">${tiles.map(([v, l, c]) => `<div class="tile"><small>${l}</small><b class="${c || ""}">${v}</b></div>`).join("")}</div>
     <section class="card mt"><div class="ch"><h2>资金曲线</h2><span class="r">累计净盈亏，每个点是一笔平仓</span></div>
       ${d.curve.length ? '<div class="chart sm" id="hchart-host"></div>' : '<div class="empty"><b>这段时间没有平仓</b></div>'}</section>
+    ${mainnetCard(d)}
     ${symbolCard(d)}
     <section class="card mt"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链 · 窄屏左右滑</span></div>
-      ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">最高浮盈</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">最高浮盈按管家采样收益率和最终账本仓位估算，未扣手续费，可能遗漏最高点；缺少可用记录显示 —。止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
+      ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">最高浮盈</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th><th class="r" title="按同一时刻的币安主网成交价重算的净利">按主网价格算</th><th class="r" title="Demo 毛利 − 主网毛利：Demo 成交价占的便宜">价差</th><th class="r" title="两边全按吃单费率比按 Demo 实际费率多付多少，不在差里">费率差</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">最高浮盈按管家采样收益率和最终账本仓位估算，未扣手续费，可能遗漏最高点；缺少可用记录显示 —。止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
     <section class="card mt"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
       ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>${rej}`;
 };
@@ -2168,10 +2200,10 @@ P.history = () => {
 function exportCsv() {
   const d = pageData;
   if (!d || !d.rows) return;
-  const head = ["平仓时间", "开仓时间", "币种", "类型", "方向", "数量", "名义金额U", "杠杆", "开仓价", "平仓价", "止损价", "止盈价", "信号", "平仓原因", "最高浮盈采样估算U（未扣费）", "毛利U", "手续费U", "净盈亏U", "position_id"];
+  const head = ["平仓时间", "开仓时间", "币种", "类型", "方向", "数量", "名义金额U", "杠杆", "开仓价", "平仓价", "止损价", "止盈价", "信号", "平仓原因", "最高浮盈采样估算U（未扣费）", "毛利U", "手续费U", "净盈亏U", "按主网价格算净盈亏U", "主网差bp", "主网差R", "价差U", "费率差U", "开平单类型", "position_id"];
   // 文字字段以 = + - @ 开头时加 ' 前缀，免得表格软件当公式执行（数字照常）
   const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
-  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.unfilled ? "未成交" : t.close_reason, t.keeper_peak_usdt ?? "", t.pnl_missing || t.unfilled ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing || t.unfilled ? "" : t.fees_usdt, t.pnl_missing || t.unfilled ? "" : t.pnl_usdt, t.position_id].map(q).join(","));
+  const lines = d.rows.map((t) => [t.closed_at, t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.unfilled ? "未成交" : t.close_reason, t.keeper_peak_usdt ?? "", t.pnl_missing || t.unfilled ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing || t.unfilled ? "" : t.fees_usdt, t.pnl_missing || t.unfilled ? "" : t.pnl_usdt, t.mainnet_net_usdt ?? "", t.mainnet_gap_bp ?? "", t.mainnet_gap_r ?? "", t.mainnet_price_gap_usdt ?? "", t.mainnet_fee_gap_usdt ?? "", (t.mainnet_legs || []).join("/"), t.position_id].map(q).join(","));
   const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -2384,6 +2416,7 @@ const PLAIN = {
   credit_resend_hours: "额度提醒多久重复一次（小时）",
   card_score_every_min: "方向记分多久补算一次（分钟）",
   card_score_window_days: "方向记分汇总最近几天",
+  mainnet_shadow_on: "按主网价格算",
   notify_meeting_paused: "军师团暂停开会",
   notify_spend_alert: "AI 花费过线提醒（日上限不限时）",
   notify_control: "面板操作",
@@ -2691,6 +2724,7 @@ const HINT = {
   credit_resend_hours: "同一条额度提醒（快用完 / 被拒）每隔多少小时重复推一次，充值后自动停。默认 6。保存后几秒内生效",
   card_score_every_min: "面板每隔多少分钟给 4 小时窗口走完的作战卡补算一次方向记分（只读币安主网公开 K 线，过去的整天用历史日包）。0 = 不算。默认 60。只有面板用，不用重启主循环：面板等完这一轮（最多一个间隔）后按新值算",
   card_score_window_days: "「历史卡」顶上的方向记分只汇总最近多少天出的卡（逐卡结果照样全留）。0 = 全部。默认 30。下一轮记分时生效",
+  mainnet_shadow_on: "Demo 成交价比同一时刻的主网价好几个基点，Demo 盈亏偏乐观。打开后每笔平仓按同一时刻的币安主网成交价重算开平价和净盈亏（同数量、手续费按 Demo 实际费率，限价成交的腿按限价，不算资金费），「历史」页和 Demo 净盈亏并排显示。只用主程序已有的主网行情推送，不额外请求币安，不影响任何交易。更早的平仓用 jiaoyi mainnet-shadow 补算。默认关，保存后几秒内生效",
   notify_meeting_paused: "开会连续失败或当日花费超限，暂停开会时推。保存后几秒内生效",
   notify_spend_alert: "每日 AI 费用上限设为不限时，当天花费超过本档默认上限推一条（只提醒，不停会）。保存后几秒内生效",
   notify_control: "你在面板暂停 / 恢复开新仓、全部平仓、重新加载配置时推。保存后几秒内生效",
@@ -3004,6 +3038,7 @@ const ROLES = [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
     { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
     { g: "开仓前读账户", hint: "拍板通过后读 hummingbot 账户失败：再读几次都不行就放弃这个信号，风控员记一条拒绝。热生效。", keys: ["app.account_read_retries"] },
+    { g: "按主网价格算", hint: "只算账不下单：每笔平仓按主网价格重算一遍盈亏，看去掉 Demo 成交优势后还赚不赚。", keys: ["app.mainnet_shadow_on"] },
     { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序、平仓顺序、停止补发次数和告警轮数外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [

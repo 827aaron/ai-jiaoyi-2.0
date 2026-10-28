@@ -1977,6 +1977,7 @@ class CcxtBinanceFutures:
                     qty=float(r["qty"]),
                     commission_usdt=abs(float(r.get("commission") or 0.0)) if usdt else None,
                     realized_pnl=float(r.get("realizedPnl") or 0.0),
+                    maker=r["maker"] if isinstance(r.get("maker"), bool) else None,
                 )
             )
         return sorted(out, key=lambda t: t.time)

@@ -45,6 +45,10 @@ class LedgerSync:
     def income(self) -> IncomeDaily | None:
         return self._income
 
+    @property
+    def trades(self) -> UserTrades:
+        return self._trades
+
     def attach(self, stream: UserStream) -> None:
         self._stream = stream
 

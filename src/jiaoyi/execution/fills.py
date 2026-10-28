@@ -43,6 +43,8 @@ class TradeFill:
     """USDT 计价的手续费（正数）；用 BNB 等抵扣时是 None。"""
     realized_pnl: float
     """币安算的这笔成交的已实现盈亏（不含手续费），开仓成交为 0。"""
+    maker: bool | None = None
+    """Binance's ``maker`` flag (a resting limit order filled); None = not reported."""
 
 
 UserTrades = Callable[[str, datetime], Awaitable[list[TradeFill]]]

@@ -61,6 +61,7 @@ from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
+from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -70,7 +71,13 @@ from jiaoyi.market.features import (
     VOL_24H_MINUTES,
     backfill_minutes,
 )
-from jiaoyi.market.rest import RateLimited, WeightBudget, fetch_klines_between, fetch_recent_klines
+from jiaoyi.market.rest import (
+    RateLimited,
+    WeightBudget,
+    fetch_klines_between,
+    fetch_recent_klines,
+    save_ban,
+)
 from jiaoyi.market.snapshot_file import WRITE_EVERY_S as SNAPSHOT_WRITE_EVERY_S
 from jiaoyi.market.snapshot_file import MarketSnapshotFile
 from jiaoyi.risk.guard import DELIST_WINDOW, entry_zone_miss, entry_zone_miss_at
@@ -487,6 +494,7 @@ class Runner:
             self._every(CREDIT_CHECK_EVERY_S, self.app.credit_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
             self._every(CONFIG_WATCH_EVERY_S, self.config_tick),
+            self._every(SHADOW_EVERY_S, self.app.mainnet_shadow_tick),
             # 有交易所连接时账本回填和收入流水由 LedgerSync 管（成交回报叫醒，60 秒兜底）
             (
                 asyncio.create_task(self.app.ledger.run())
@@ -622,6 +630,7 @@ class Runner:
 
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
+        save_ban(self.app.app_cfg.data_dir)
 
     async def market_snapshot_tick(self) -> None:
         """面板「盘口员」读的 data/market_snapshot.json：正在盯的币此刻的行情和各路推送计数。"""
