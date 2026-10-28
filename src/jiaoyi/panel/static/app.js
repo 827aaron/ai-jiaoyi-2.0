@@ -289,12 +289,17 @@ const pxHeadTip = (d) => d.price_env
   : "这个模式没有实时行情源，按 hummingbot 的浮盈（标记价）倒推";
 const pxSrc = (p) => (PX_SRC[p.price_src] ? ` <span class="dim small" title="${PX_SRC[p.price_src][1]}">${PX_SRC[p.price_src][0]}</span>` : "");
 const feeTip = (p) => (p.fees_est_usdt == null || p.unrealized_usdt == null ? "" : `浮动 ${signed(p.unrealized_usdt, 2)} U − 手续费 ${money(p.fees_est_usdt, 2)} U（开仓 + 平仓各一次，${feeSrc(p)}）`);
-// 今日盈亏直接拆一行：已平（净，同历史页交易净盈亏）+ 浮动（没平的单现在的浮盈）+ 其它（资金费、0 点前已有持仓的浮盈等）
+// 今日盈亏拆三项（同券商 App）：隔夜仓从 0 点参考价算起，今天开的从开仓价；三项和今日盈亏的差额只放提示里
 function dayParts(k) {
-  if (k.day_pnl_usdt == null || k.day_closed_usdt == null || k.day_floating_usdt == null) return "";
-  const rest = k.day_pnl_usdt - k.day_closed_usdt - k.day_floating_usdt;
-  return `<small class="dim num" title="浮动按币安标记价算（和账户总资产同一口径），持仓页按最新成交价算，会差一点">已平 ${signed(k.day_closed_usdt, 1)} · 浮动 ${signed(k.day_floating_usdt, 1)} · 其它 ${signed(rest, 1)}</small>`;
+  if (k.day_pnl_usdt == null || k.day_closes_usdt == null || k.day_holding_usdt == null || k.day_costs_usdt == null) return "";
+  const tip = [`对账差 ${signed(k.day_residual_usdt ?? 0, 2)} U（今日盈亏 − 三项之和：标记价和参考价来源不同、收入流水还没拉到等）`];
+  if (!k.day_funding_known) tip.push("币安收入流水还没拿到：手续费只按今天开仓的估，资金费没算");
+  const miss = k.day_refs_missing || [];
+  const hint = miss.length ? ` <span class="warn" title="${esc(`0 点时大脑没在跑，没记下 ${miss.join("、")} 的 0 点参考价：这几笔按开仓价算，0 点前的盈亏混在今日里`)}">⚠ 缺参考价</span>` : "";
+  return `<small class="dim num" title="${esc(tip.join("；"))}">今日平仓 ${signed(k.day_closes_usdt, 1)} · 持仓今日变动 ${signed(k.day_holding_usdt, 1)} · 手续费·资金费 ${signed(k.day_costs_usdt, 1)}${hint}</small>`;
 }
+const TODAY_TIP = { ref: "从当地 0 点参考价算起（未扣费）", entry: "今天开的，同浮盈（未扣费）", missing: "0 点时大脑没在跑，没有参考价：按开仓价算，含 0 点前的盈亏" };
+const todayCell = (p) => (p.today_usdt == null ? "—" : `${signed(p.today_usdt, 2)}${p.today_from === "missing" ? ' <span class="warn">⚠</span>' : ""}`);
 // 今日盈亏曲线（面板每分钟记一个点，按现在的 0 点基准算）：标最高、最低和现在
 function pnlChart(c) {
   const pts = (c && c.points) || [];
@@ -1366,6 +1371,7 @@ P.positions = (arg) => {
       <td class="r num">${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)}</td>
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
+      <td class="r num ${cls(p.today_usdt)}" title="${esc(TODAY_TIP[p.today_from] || "")}">${todayCell(p)}</td>
       <td class="r num">${slCell(p)}${trailTag(p)}</td><td class="r num">${tpCell(p)}</td>
       <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "还没看")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
@@ -1377,7 +1383,7 @@ P.positions = (arg) => {
     const lbOk = p.lifeboat_status === "active";
     return `<div class="pm ${on ? "sel" : ""}"><a href="#positions/${encodeURIComponent(p.position_id)}">
       <div class="l1"><b>${coin(p.symbol)}</b>${catTag(p.category)} <span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>
-        <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span></span></div>
+        <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span>${p.today_usdt == null ? "" : ` <span class="dim">· 今日</span> ${todayCell(p)}`}</span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
         开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${slCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 盈 ${tpCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
       <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) + " " + lvlEst(p, p.lifeboat_price) : ""}${protBrief(p)}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
@@ -1392,7 +1398,7 @@ P.positions = (arg) => {
       <div class="bars">${groups}</div>
     </div>
     <section class="card mt"><div class="tw pos-wide"><table>
-      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
+      <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r" title="今天这笔赚亏了多少：0 点前开的从当地 0 点参考价算起，今天开的从开仓价（未扣费）">今日（U）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -17,7 +18,7 @@ from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, SymbolAlreadyHeld
 from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.reconciler import ReconcileError, ThreeWayReconciler
-from jiaoyi.execution.registry import PositionRegistry
+from jiaoyi.execution.registry import DayStart, PositionRegistry
 from tests.conftest import load_example
 from tests.fakes import FakeExchange, FakeHbApi
 
@@ -1074,6 +1075,98 @@ async def test_day_base_stays_through_the_day_and_across_restart(rig: Rig, tmp_p
     rig.registry = again
     rig.adapter = rig._adapter()
     assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(1000.0)
+
+
+BKK_MIDNIGHT = datetime(2026, 10, 23, tzinfo=ZoneInfo("Asia/Bangkok"))
+
+
+def _price_at_midnight(price: float):  # type: ignore[no-untyped-def]
+    return lambda _sym, t: price if t == BKK_MIDNIGHT else None
+
+
+async def test_day_start_taken_on_time_includes_floating_loss(rig: Rig) -> None:
+    rig.registry.data.day_start = DayStart(day="2026-10-22", equity_usdt=1000.0)
+    rig.t = BKK_MIDNIGHT - timedelta(minutes=30)
+    await open_filled(rig)
+    rig.api.pos = [{"unrealized_pnl": -124.0}]
+    rig.ex.income = -999.0
+    rig.adapter.set_price_source(_price_at_midnight(59800.0))
+    assert not rig.adapter.day_start_due(BKK_MIDNIGHT - timedelta(minutes=6))
+    assert rig.adapter.day_start_due(BKK_MIDNIGHT - timedelta(minutes=4))
+    rig.t = BKK_MIDNIGHT + timedelta(seconds=40)
+    assert rig.adapter.day_start_due(rig.t)
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(876.0)
+    assert acc.day_pnl_pct == pytest.approx(0.0)
+    assert rig.registry.data.day_start == DayStart(
+        day="2026-10-23", equity_usdt=876.0, refs={"BTCUSDT": 59800.0}
+    )
+    assert not rig.adapter.day_start_due(rig.t + timedelta(minutes=1))
+    assert [a.title for a in rig.alerts.sent if "日亏基准" in a.title] == []
+
+
+async def test_late_start_adds_midnight_floating_pnl_from_local_prices(rig: Rig) -> None:
+    rig.t = BKK_MIDNIGHT - timedelta(hours=2)
+    await open_filled(rig, price=68000.0)
+    rig.adapter.set_price_source(_price_at_midnight(67000.0))
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=16)
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    rig.api.pos = [{"unrealized_pnl": -20.0}]
+    rig.ex.income = -20.0
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(985.0)
+    assert [a.title for a in rig.alerts.sent if "日亏基准" in a.title] == []
+
+
+async def test_late_start_leaves_out_positions_opened_after_midnight(rig: Rig) -> None:
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=5)
+    await open_filled(rig, price=68000.0)
+    rig.adapter.set_price_source(lambda _sym, _t: 60000.0)
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=16)
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    rig.api.pos = [{"unrealized_pnl": -20.0}]
+    rig.ex.income = -20.0
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(1000.0)
+    assert rig.registry.data.day_start is not None and rig.registry.data.day_start.refs == {}
+    assert [a.title for a in rig.alerts.sent if "日亏基准" in a.title] == []
+
+
+async def test_late_start_without_midnight_price_uses_wallet_and_warns(rig: Rig) -> None:
+    rig.t = BKK_MIDNIGHT - timedelta(hours=2)
+    await open_filled(rig, price=68000.0)
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=16)
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    rig.api.pos = [{"unrealized_pnl": -20.0}]
+    rig.ex.income = -20.0
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(1000.0)
+    [warn] = [a for a in rig.alerts.sent if "日亏基准" in a.title]
+    assert warn.level is AlertLevel.WARN and "不含当时浮动盈亏" in warn.title
+    assert "BTCUSDT" in warn.body and "0 点前的浮盈浮亏会算进今日盈亏" in warn.body
+    assert "本地主网行情" in warn.body
+
+
+async def test_late_start_uses_equity_read_just_before_midnight(rig: Rig) -> None:
+    rig.registry.data.day_start = DayStart(day="2026-10-22", equity_usdt=1000.0)
+    rig.api.pos = [{"unrealized_pnl": -30.0}]
+    rig.t = BKK_MIDNIGHT - timedelta(minutes=2)
+    await rig.adapter.account()
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=16)
+    rig.api.pos = [{"unrealized_pnl": -50.0}]
+    rig.ex.income = 0.0
+    assert (await rig.adapter.account()).day_start_equity_usdt == pytest.approx(970.0)
+
+
+async def test_override_day_start_replaces_base_and_refs(rig: Rig, tmp_path: Path) -> None:
+    rig.t = BKK_MIDNIGHT + timedelta(hours=1)
+    await rig.adapter.account()
+    old = rig.adapter.override_day_start("2026-10-23", 950.0, {"BTCUSDT": 67000.0})
+    assert old == pytest.approx(1000.0)
+    again = PositionRegistry(tmp_path / "positions.json")
+    assert again.data.day_start == DayStart(
+        day="2026-10-23", equity_usdt=950.0, refs={"BTCUSDT": 67000.0}
+    )
 
 
 async def test_unfilled_position_counts_toward_exposure(rig: Rig) -> None:

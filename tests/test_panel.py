@@ -141,6 +141,112 @@ HB = HbSnapshot(
 )
 
 
+def _seed_overnight(tmp_path: Path, refs: dict[str, float] | None, *, income: bool = True) -> None:
+    """曼谷 0 点 = UTC 10-21 17:00。BTC 多单 0 点前开、还拿着；ETH 空单 0 点前开、今天平；
+    SOL 今天开今天平；XRP 今天开还拿着。"""
+    yesterday = "2026-10-21T15:30:00Z"  # 曼谷 22:30
+    today = "2026-10-22T02:00:00Z"
+    closed = {
+        "status": "closed",
+        "close_reason": "take_profit",
+        "closed_at": "2026-10-22T05:00:00Z",
+    }
+    positions = {
+        "btc": _position(position_id="btc", opened_at=yesterday),
+        "eth": _position(
+            position_id="eth", symbol="ETHUSDT", side="short", quantity=1.0, entry_price=2500.0,
+            exit_price=2450.0, opened_at=yesterday, realized_pnl_usdt=48.0, fees_usdt=2.0,
+            **closed,
+        ),
+        "sol": _position(
+            position_id="sol", symbol="SOLUSDT", quantity=10.0, entry_price=150.0,
+            exit_price=150.56, opened_at=today, realized_pnl_usdt=5.0, fees_usdt=0.6, **closed,
+        ),
+        "xrp": _position(
+            position_id="xrp", symbol="XRPUSDT", quantity=100.0, entry_price=2.0,
+            opened_at=today, fees_usdt=0.3,
+        ),
+    }  # fmt: skip
+    day_start: dict[str, Any] = {"day": "2026-10-22", "equity_usdt": 10_000.0}
+    if refs is not None:
+        day_start["refs"] = refs
+    (tmp_path / "positions.json").write_text(
+        json.dumps({"positions": positions, "day_start": day_start})
+    )
+    (tmp_path / "risk_state.json").write_text(
+        json.dumps({"day": "2026-10-22", "start_equity": 10_000.0, "tripped": False})
+    )
+    if income:
+        days = {"2026-10-22": {"realized_pnl": 0.0, "commission": -1.8899, "funding_fee": -0.5}}
+        (tmp_path / "income_daily.json").write_text(
+            json.dumps({"tz": "Asia/Bangkok", "days": days})
+        )
+
+
+HB_OVERNIGHT = HbSnapshot(
+    ok=True,
+    wallet_usdt=10_050.0,
+    positions=[
+        {"trading_pair": "BTC-USDT", "unrealized_pnl": -20.0},
+        {"trading_pair": "XRP-USDT", "unrealized_pnl": 3.0},
+    ],
+)
+
+
+def test_overview_day_pnl_splits_into_closes_holdings_and_costs_from_day_refs(
+    tmp_path: Path,
+) -> None:
+    _seed_overnight(tmp_path, {"BTCUSDT": 67000.0, "ETHUSDT": 2480.0})
+    ov = build_overview(
+        PanelFiles(tmp_path, RISK.day_reset_tz), HB_OVERNIGHT, RISK, _cfg(tmp_path), NOW
+    )
+    k = ov.kpis
+    assert k.day_pnl_usdt == pytest.approx(33.0)
+    # ETH：从参考价 2480 到 2450 赚 30，扣今天的平仓费 0.9899；SOL 今天开今天平，净 5
+    assert k.day_closes_usdt == pytest.approx(30.0 - 0.9899 + 5.0, abs=1e-4)
+    # BTC：浮亏 -20 里有 0 点前的 -15.66；XRP 今天开，从开仓价算 +3
+    assert k.day_holding_usdt == pytest.approx(-20.0 + 15.66 + 3.0)
+    # 今天的手续费里只剩 XRP 开仓那 0.3 没算进平仓，加资金费 -0.5
+    assert k.day_costs_usdt == pytest.approx(-0.8, abs=1e-4)
+    assert k.day_funding_known and k.day_refs_missing == []
+    parts = [k.day_closes_usdt, k.day_holding_usdt, k.day_costs_usdt, k.day_residual_usdt]
+    assert sum(p for p in parts if p is not None) == pytest.approx(33.0)
+    assert k.day_residual_usdt == pytest.approx(33.0 - 31.8701, abs=1e-4)
+    rows = {p.position_id: p for p in ov.positions}
+    assert rows["btc"].today_from == "ref" and rows["btc"].today_usdt == pytest.approx(-4.34)
+    assert rows["btc"].unrealized_usdt == pytest.approx(-20.0)
+    assert rows["xrp"].today_from == "entry" and rows["xrp"].today_usdt == pytest.approx(3.0)
+
+
+def test_overview_day_costs_without_income_estimate_todays_open_fees(tmp_path: Path) -> None:
+    _seed_overnight(tmp_path, {"BTCUSDT": 67000.0, "ETHUSDT": 2480.0}, income=False)
+    ov = build_overview(
+        PanelFiles(tmp_path, RISK.day_reset_tz), HB_OVERNIGHT, RISK, _cfg(tmp_path), NOW
+    )
+    k = ov.kpis
+    # 只有 XRP 今天开、还拿着：它的开仓费 0.3；资金费不知道
+    assert k.day_costs_usdt == pytest.approx(-0.3) and not k.day_funding_known
+    assert k.day_closes_usdt + k.day_holding_usdt + k.day_costs_usdt + k.day_residual_usdt == (  # type: ignore[operator]
+        pytest.approx(33.0)
+    )
+
+
+def test_overview_day_pnl_without_day_refs_falls_back_to_entry_and_flags(tmp_path: Path) -> None:
+    _seed_overnight(tmp_path, None)
+    ov = build_overview(
+        PanelFiles(tmp_path, RISK.day_reset_tz), HB_OVERNIGHT, RISK, _cfg(tmp_path), NOW
+    )
+    k = ov.kpis
+    assert k.day_refs_missing == ["BTCUSDT", "ETHUSDT"]
+    assert k.day_closes_usdt == pytest.approx(48.0 + 5.0)
+    assert k.day_holding_usdt == pytest.approx(-17.0)
+    assert k.day_closes_usdt + k.day_holding_usdt + k.day_costs_usdt + k.day_residual_usdt == (  # type: ignore[operator]
+        pytest.approx(33.0)
+    )
+    rows = {p.position_id: p for p in ov.positions}
+    assert rows["btc"].today_from == "missing" and rows["btc"].today_usdt == pytest.approx(-20.0)
+
+
 def test_overview_numbers(tmp_path: Path) -> None:
     _seed(tmp_path)
     ov = build_overview(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, _cfg(tmp_path), NOW)

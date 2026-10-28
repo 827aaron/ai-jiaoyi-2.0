@@ -122,6 +122,8 @@ VENUE_MARK_READ_MAX_AGE_S = 600.0
 旧到多少算过旧由管家按自己的设置判，这里只挡更离谱的，免得过旧被当成读不到。"""
 
 IncomeSince = Callable[[datetime], Awaitable[float]]
+PriceAt = Callable[[str, datetime], float | None]
+"""币在某一时刻的价格，只读本地行情（不打 REST）；没有返回 None。"""
 
 
 class ChaseRequest(Protocol):
@@ -462,6 +464,7 @@ class HbExecutorAdapter:
         self._poll_s = poll_s
         self._lifeboat_attempts = lifeboat_attempts
         self._income_since = income_since
+        self._price_at: PriceAt | None = None
         self._unknown_executor_rounds: dict[str, int] = {}
         self._finalizing: set[str] = set()
         self._direct_locks: dict[str, asyncio.Lock] = {}
@@ -3349,14 +3352,72 @@ class HbExecutorAdapter:
             open_by_kind=by_kind,
         )
 
-    async def _day_start(self, now: datetime, wallet: float, equity: float) -> float:
-        """日亏熔断的当天基准，必须是 0 点时的权益，不能是“0 点后第一次读到的权益”。
+    def set_price_source(self, price_at: PriceAt) -> None:
+        """当日参考价和晚到的日亏基准用的 0 点价格从这里取（主循环接上本地行情）。"""
+        self._price_at = price_at
 
-        大脑 0 点前后没在跑（崩溃、重启）时，第一次读取距 0 点已经很久，当时的权益里
-        可能已经亏掉一部分，直接拿来当基准会放宽熔断。所以：
-          - 距 0 点不超过几分钟：当前权益就是基准
-          - 否则用币安收入流水（已实现盈亏 + 手续费 + 资金费）倒推 0 点的钱包余额
-          - 拿不到流水：取“当前权益”和“上次落盘权益”里更大的（更严格），并发 warn
+    def day_start_now(self, day: str) -> tuple[float | None, float | None]:
+        """(这一天已定的日亏基准, 上一次读到的权益)；基准不是这一天的为 None。"""
+        current = self._registry.data.day_start
+        base = current.equity_usdt if current is not None and current.day == day else None
+        return base, self._registry.data.last_equity_usdt
+
+    def override_day_start(self, day: str, equity: float, refs: dict[str, float]) -> float | None:
+        """启动时人工改当天日亏基准（见 ``jiaoyi.execution.day_override``）；返回原来这一天的基准，
+        原来记的不是这一天返回 None。"""
+        current = self._registry.data.day_start
+        old = current.equity_usdt if current is not None and current.day == day else None
+        self._registry.data.day_start = DayStart(day=day, equity_usdt=equity, refs=dict(refs))
+        self._registry.save()
+        return old
+
+    def day_start_due(self, now: datetime) -> bool:
+        """主循环每分钟问一次：该不该读一次账户，好让日亏基准在 0 点后几分钟内按含浮盈亏的
+        权益定下来，而不是拖到第一个信号。0 点前最后几分钟也读，留一份紧挨 0 点的权益，
+        0 点后读不到账户时拿它当基准。"""
+        local = now.astimezone(self._tz)
+        current = self._registry.data.day_start
+        if current is None or current.day != local.date().isoformat():
+            return True
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        to_midnight = (midnight + timedelta(days=1) - now).total_seconds()
+        return to_midnight <= DAY_START_TOLERANCE_S
+
+    def _held_at(self, midnight: datetime) -> list[PositionRecord]:
+        return [
+            t.record
+            for t in self._registry.data.positions.values()
+            if t.record.entry_price
+            and t.record.opened_at < midnight
+            and t.record.status
+            in (PositionStatus.OPEN, PositionStatus.CLOSING, PositionStatus.CLOSED)
+            and (
+                t.record.closed_at >= midnight
+                if t.record.closed_at is not None
+                else t.record.status is not PositionStatus.CLOSED
+            )
+        ]
+
+    def _midnight_refs(self, midnight: datetime) -> dict[str, float]:
+        if self._price_at is None:
+            return {}
+        refs: dict[str, float] = {}
+        for sym in sorted({r.symbol for r in self._held_at(midnight)}):
+            try:
+                px = self._price_at(sym, midnight)
+            except Exception:
+                log.warning("%s 取 0 点价格失败", sym, exc_info=True)
+                continue
+            if px is not None and px > 0:
+                refs[sym] = px
+        return refs
+
+    async def _day_start(self, now: datetime, wallet: float, equity: float) -> float:
+        """日亏熔断的当天基准 = 0 点时的权益（钱包 + 浮动盈亏），不能是“0 点后第一次读到的权益”。
+
+        主循环每分钟按 ``day_start_due`` 读账户，大脑在跑时 0 点后几分钟内就定下来：
+          - 距 0 点不超过 ``DAY_START_TOLERANCE_S``：当前权益就是基准
+          - 否则（0 点前后没在跑、读不到账户）见 ``_late_day_base``
         """
         local = now.astimezone(self._tz)
         today = local.date().isoformat()
@@ -3365,36 +3426,81 @@ class HbExecutorAdapter:
         if current is None or current.day != today:
             midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
             late_s = (now - midnight).total_seconds()
+            refs = self._midnight_refs(midnight)
             if late_s <= DAY_START_TOLERANCE_S:
                 base = equity
             else:
-                base = await self._late_day_base(midnight, now, wallet, equity)
-            current = DayStart(day=today, equity_usdt=base)
+                base = await self._late_day_base(midnight, now, wallet, equity, refs)
+            current = DayStart(day=today, equity_usdt=base, refs=refs)
             registry.data.day_start = current
         registry.data.last_equity_usdt = equity
+        registry.data.last_equity_at = now
         registry.save()
         return current.equity_usdt
 
     async def _late_day_base(
-        self, midnight: datetime, now: datetime, wallet: float, equity: float
+        self,
+        midnight: datetime,
+        now: datetime,
+        wallet: float,
+        equity: float,
+        refs: dict[str, float],
     ) -> float:
+        """晚于 0 点才读到账户时倒推 0 点权益，依次：
+        1. 0 点前 ``DAY_START_TOLERANCE_S`` 内落盘过的权益（含当时浮盈亏）
+        2. 钱包余额 − 0 点以来收入流水 = 0 点的钱包余额，再加上按本地行情 0 点价格算的
+           当时浮盈亏；0 点还持有的币有一个取不到 0 点价格，就只用钱包余额（不含当时浮盈亏，
+           跨 0 点持仓 0 点前的浮盈亏会算进今日盈亏），发 warn 说明
+        3. 拿不到流水：取“当前权益”和“上次落盘权益”里更大的（更严格），发 warn
+        """
+        data = self._registry.data
+        at, previous = data.last_equity_at, data.last_equity_usdt
+        if (
+            at is not None
+            and previous is not None
+            and timedelta(0) <= midnight - at <= timedelta(seconds=DAY_START_TOLERANCE_S)
+        ):
+            return previous
+        day = midnight.date().isoformat()
+        late_min = (now - midnight).total_seconds() / 60.0
         if self._income_since is not None:
             try:
                 income = await self._income_since(midnight)
             except Exception as e:
                 log.warning("查收入流水失败，日亏基准改用保守估计：%r", e)
             else:
-                base = wallet - income
-                if base > 0:
-                    return base
-        previous = self._registry.data.last_equity_usdt
+                wallet0 = wallet - income
+                held = self._held_at(midnight)
+                if wallet0 > 0 and all(r.symbol in refs for r in held):
+                    return wallet0 + sum(
+                        (1.0 if r.side is Side.LONG else -1.0)
+                        * r.quantity
+                        * (refs[r.symbol] - (r.entry_price or 0.0))
+                        for r in held
+                    )
+                if wallet0 > 0:
+                    missing = sorted({r.symbol for r in held} - refs.keys())
+                    await self._alert(
+                        AlertLevel.WARN,
+                        "日亏基准按 0 点钱包余额估算，不含当时浮动盈亏",
+                        f"0 点后 {late_min:.0f} 分钟才读到账户，本地行情没有 "
+                        f"{'、'.join(missing)} 的 0 点价格；基准取 0 点钱包余额 {wallet0:.2f} USDT"
+                        f"（现钱包 {wallet:.2f} − 0 点以来收入 {income:.2f}）。"
+                        "这些仓位 0 点前的浮盈浮亏会算进今日盈亏和日亏熔断。"
+                        "0 点价格取的是本地主网行情（不是 Demo 标记价），会差一点",
+                        None,
+                        f"day_start_wallet:{day}",
+                        kind="system",
+                    )
+                    return wallet0
         base = max(equity, previous) if previous is not None else equity
         await self._alert(
             AlertLevel.WARN,
             "日亏基准无法从 0 点倒推，已取保守值",
-            f"晚于 0 点才读到账户；基准取 {base:.2f} USDT（当前 {equity:.2f}，上次 {previous}）",
+            f"0 点后 {late_min:.0f} 分钟才读到账户，收入流水也拿不到；基准取 {base:.2f} USDT"
+            f"（当前 {equity:.2f}，上次 {previous}）",
             None,
-            f"day_start_fallback:{midnight.date().isoformat()}",
+            f"day_start_fallback:{day}",
             kind="system",
         )
         return base

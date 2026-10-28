@@ -290,6 +290,9 @@ class DayStart(BaseModel):
 
     day: str
     equity_usdt: float
+    refs: dict[str, float] = {}
+    """币 → 当地 0 点的价格（当日参考价）：面板把隔夜仓的今日盈亏从它算起，不从开仓价。
+    取不到 0 点价格的币不在里面。"""
 
 
 class RegistryData(BaseModel):
@@ -299,6 +302,8 @@ class RegistryData(BaseModel):
     day_start: DayStart | None = None
     last_equity_usdt: float | None = None
     """上一次读到的权益，晚启动又拿不到收入流水时用它给日亏基准兜底。"""
+    last_equity_at: datetime | None = None
+    """``last_equity_usdt`` 是什么时候读到的；紧挨 0 点前的那次可直接当晚到的日亏基准。"""
     emergency_exits: dict[str, EmergencyExit] = {}
     """按币种，最多一个未完成的对账员退出意图；未完成时同币禁止新开。"""
     foreign_executor_stops: dict[str, ForeignExecutorStop] = {}
