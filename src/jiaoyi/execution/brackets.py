@@ -1268,6 +1268,15 @@ class BracketManager:
             for leg in state.legs
         )
 
+    def leg_fills(self, pid: str) -> list[tuple[CloseReason, float]]:
+        """已触发且子单有成交的腿：(按哪条腿退出, 成交量)；只看最后回读，不发网络请求。"""
+        _, state = self._current(pid)
+        return [
+            (_reason(leg), leg.filled_quantity)
+            for leg in state.legs
+            if _triggered(leg) and leg.filled_quantity is not None and leg.filled_quantity > 0
+        ]
+
     def mark_exiting(self, pid: str) -> None:
         """进入退出：之后不再换代、不再观测移动止损；已挂的腿原样保留。"""
         self._save(pid, stage="exiting", trailing_last_error=None, trailing_failing_since=None)

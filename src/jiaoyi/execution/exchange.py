@@ -240,6 +240,10 @@ class IdentifiedCloseRejected(ExchangeError):
     """明确业务拒绝；本请求无有效订单，仍不能据此认定仓位已平。"""
 
 
+class IdentifiedCloseNotSent(ExchangeError):
+    """下单请求还没发出就失败（模式 / 市场 / 原 CID 预查出错）；这个 CID 从没到过交易所。"""
+
+
 def _close_decimal(value: object, *, zero: bool = False) -> Decimal:
     if isinstance(value, bool):
         raise ValueError("订单数值不能为布尔值")
@@ -1690,17 +1694,18 @@ class CcxtBinanceFutures:
         if close_side not in {"buy", "sell"}:
             raise ValueError("直连平仓方向非法")
         qty = _close_decimal(quantity)
-        await self._ready()
         try:
+            await self._ready()
             mode = await self._ex.fapiPrivateGetPositionSideDual()
             if _close_bool(mode.get("dualSidePosition")):
                 raise ValueError("不支持双向持仓模式")
+            ccxt_symbol = to_ccxt_symbol(symbol)
+            amount = self._ex.amount_to_precision(ccxt_symbol, float(qty))
+            requested = _close_decimal(amount)
+            existing = await self.close_order(symbol, client_order_id)
         except Exception as error:
-            raise ExchangeError("未能确认单向持仓模式，禁止提交直连平仓") from error
-        ccxt_symbol = to_ccxt_symbol(symbol)
-        amount = self._ex.amount_to_precision(ccxt_symbol, float(qty))
-        requested = _close_decimal(amount)
-        existing = await self.close_order(symbol, client_order_id)
+            # 这几步都在下单请求之前；调用方保证这个 CID 是新一代、此前从没发过。
+            raise IdentifiedCloseNotSent("直连平仓下单前检查失败，请求没有发出") from error
 
         def matches(order: IdentifiedCloseOrder) -> bool:
             return order.close_side == close_side and order.quantity == float(requested)

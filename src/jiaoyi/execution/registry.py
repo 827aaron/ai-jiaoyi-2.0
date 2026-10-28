@@ -199,10 +199,26 @@ class TrackedPosition(BaseModel):
     """直连市价平仓提交意图已落盘；未知/部分成交只核对，不盲目发送第二张。"""
     direct_close_price: float | None = None
     direct_close_fee: float | None = None
+    direct_first: bool = False
+    """这次平仓走了 ``direct``：先下直连、后停 HB。"""
     chase: OrderIntent | None = None
     """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
     server_protection: ServerProtection | None = None
     frozen_peak_exit: FrozenPeakExit | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_direct_first(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        # 只在平仓进行中落盘：没走过 direct 的仓和已结束的仓与加字段之前一致，
+        # 回退旧代码（extra="forbid"）仍能读。
+        data: dict[str, object] = handler(self)
+        if not self.direct_first or self.record.status in (
+            PositionStatus.CLOSED,
+            PositionStatus.FAILED,
+        ):
+            data.pop("direct_first", None)
+        return data
 
 
 class EmergencyExit(BaseModel):

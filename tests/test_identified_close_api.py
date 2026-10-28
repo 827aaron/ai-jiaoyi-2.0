@@ -11,6 +11,7 @@ import pytest
 from jiaoyi.execution.exchange import (
     CcxtBinanceFutures,
     ExchangeError,
+    IdentifiedCloseNotSent,
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
 )
@@ -245,3 +246,27 @@ async def test_real_ccxt_market_request_is_intercepted_without_network() -> None
         assert ex.urls["api"]["fapiPrivate"] == "https://demo-fapi.binance.com/fapi/v1"
     finally:
         await ex.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["markets", "mode", "precheck"])
+async def test_failure_before_create_is_definitely_not_sent(step: str) -> None:
+    obj, ex = client()
+    if step == "markets":
+        obj._markets_loaded = False
+        ex.load_markets.side_effect = ccxt.RequestTimeout("synthetic")
+    elif step == "mode":
+        ex.fapiPrivateGetPositionSideDual.side_effect = ccxt.RequestTimeout("synthetic")
+    else:
+        ex.fapiPrivateGetOrder.side_effect = ccxt.RequestTimeout("synthetic")
+    with pytest.raises(IdentifiedCloseNotSent):
+        await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+    ex.create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_timeout_stays_unknown_not_not_sent() -> None:
+    obj, ex = client()
+    ex.create_order.side_effect = ccxt.RequestTimeout("synthetic")
+    with pytest.raises(IdentifiedCloseUnknown):
+        await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
