@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1145,25 +1146,51 @@ async def _second_round(c: BattleCardCommander) -> CardSymbol:
     return xrp
 
 
-@pytest.mark.parametrize("drop_view_id", [False, True])
-async def test_commander_refresh_after_restart_keeps_expiry_of_unknown_direction(
-    tmp_path: Path, drop_view_id: bool
+def _edit_json(path: Path, edit: Callable[[dict[str, Any]], None]) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    edit(data)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("flip", [False, True])
+async def test_commander_refresh_after_restart_restores_view_directions(
+    tmp_path: Path, flip: bool
 ) -> None:
-    """After a restart the view history is empty: an entry whose market view is unknown, or that
-    names none (a card saved before entries carried one), keeps its expiry."""
+    eng = _Directed(["XRPUSDT", "LINKUSDT"])
+    _c, _clock, kw = await _xrp_event_card(tmp_path, eng)
+    saved = json.loads((tmp_path / "market_view.json").read_text(encoding="utf-8"))
+    assert set(saved["view_dirs"].values()) == {"中性"}
+    c2, _, _ = make(tmp_path, eng, R2, **kw)  # restart (every update restarts the process)
+    eng.direction = "看跌" if flip else "中性"
+    card = await c2.refresh(pool(R2, entry("XRPUSDT"), entry("LINKUSDT")), "scheduled")
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None and xrp.issued_at == XRP_EVENT
+    expected = "2026-10-28T04:07:17+00:00" if flip else "2026-10-28T06:03:24+00:00"
+    assert xrp.expires_at == datetime.fromisoformat(expected)
+
+
+@pytest.mark.parametrize("missing", ["view_dirs", "source_market_view_id"])
+async def test_commander_refresh_after_restart_keeps_expiry_of_unknown_direction(
+    tmp_path: Path, missing: str
+) -> None:
+    """Files written before the view directions were saved, or a card from before entries named
+    their market view: the direction is unknown and the entry keeps its expiry."""
     eng = FakeEngine(["XRPUSDT", "LINKUSDT"])
     _c, _clock, kw = await _xrp_event_card(tmp_path, eng)
-    if drop_view_id:
-        path = tmp_path / "battle_card.json"
-        saved = json.loads(path.read_text(encoding="utf-8"))
-        for s in saved["card"]["symbols"]:
-            s["source_market_view_id"] = None
-        path.write_text(json.dumps(saved), encoding="utf-8")
+    if missing == "view_dirs":
+        _edit_json(tmp_path / "market_view.json", lambda d: d.pop("view_dirs"))
+    else:
+
+        def drop(d: dict[str, Any]) -> None:
+            for s in d["card"]["symbols"]:
+                s["source_market_view_id"] = None
+
+        _edit_json(tmp_path / "battle_card.json", drop)
     c2, _, _ = make(tmp_path, eng, R2, **kw)
     restored = c2.current(R2)
     xrp_before = restored.for_symbol("XRPUSDT") if restored is not None else None
     assert xrp_before is not None
-    assert (xrp_before.source_market_view_id is None) is drop_view_id
+    assert (xrp_before.source_market_view_id is None) is (missing == "source_market_view_id")
     xrp = await _second_round(c2)
     assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
 
@@ -1173,7 +1200,8 @@ async def test_commander_refresh_reads_direction_from_outlook_when_history_is_em
     tmp_path: Path, outlook: bool
 ) -> None:
     """The battle card file drops outlook, so this fallback only serves a process whose view
-    history no longer holds the entry's view; simulated by emptying it."""
+    history no longer holds the entry's view (evicted past VIEW_DIRS_MAX); simulated by emptying
+    it."""
     eng = _WithOutlook(["XRPUSDT", "LINKUSDT"]) if outlook else FakeEngine(["XRPUSDT", "LINKUSDT"])
     c, clock, _kw = await _xrp_event_card(tmp_path, eng)
     c._view_dirs.clear()
@@ -1181,3 +1209,13 @@ async def test_commander_refresh_reads_direction_from_outlook_when_history_is_em
     xrp = await _second_round(c)
     expected = "2026-10-28T06:03:24+00:00" if outlook else "2026-10-28T04:07:17+00:00"
     assert xrp.expires_at == datetime.fromisoformat(expected)
+
+
+def test_commander_restore_keeps_last_512_valid_view_directions(tmp_path: Path) -> None:
+    dirs: dict[str, object] = {f"v{i}": "看涨" for i in range(600)}
+    dirs["bad"] = "up"
+    (tmp_path / "market_view.json").write_text(
+        json.dumps({"latest_market_view": None, "view_dirs": dirs}), encoding="utf-8"
+    )
+    c, _, _ = make(tmp_path, FakeEngine([]), R1, card_path=tmp_path / "battle_card.json")
+    assert list(c._view_dirs) == [f"v{i}" for i in range(88, 600)]
