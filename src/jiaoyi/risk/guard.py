@@ -157,6 +157,18 @@ def stop_atr(
     return atr * k
 
 
+def capped_tp_r(raw: float, cap: float, floor_r: float = 0.0) -> float:
+    """Take-profit R multiple actually ordered: ``raw`` clipped down to ``cap`` (0 = no cap).
+
+    The cap never turns a trade the fee floor accepts into a rejection: it clips no lower than
+    ``floor_r`` (the fee-floor R, nudged up so the float product stays on the passing side).
+    When ``raw`` itself is under the floor it is returned unchanged and the fee check rejects it
+    exactly as without a cap."""
+    if cap <= 0 or raw <= cap:
+        return raw
+    return min(raw, max(cap, floor_r * (1.0 + 1e-9)))
+
+
 @dataclass(frozen=True)
 class LotRules:
     """交易所对某个合约的下单精度（来自币安 exchangeInfo，由执行层提供）。"""
@@ -847,9 +859,17 @@ class RiskGuardImpl:
             dist = entry * stop_pct / 100.0
             detail["stop_pct"] = round(stop_pct, 4)
             detail["stop_atr"] = round(dist / stop.dist * float(detail.get("stop_atr", 0.0)), 3)
-        tp_pct = stop_pct * cs.take_profit_r.min
-
         fee_floor_bps = risk.min_tp_fee_multiple * 2.0 * risk.taker_fee_bps
+        tp_r_raw = cs.take_profit_r.min
+        tp_r = capped_tp_r(tp_r_raw, fast.tp_r_cap, fee_floor_bps / (stop_pct * 100.0))
+        if fast.tp_r_cap > 0:
+            detail.update(tp_r_raw=round(tp_r_raw, 6), tp_r_capped=round(tp_r, 6))
+            if tp_r_raw > tp_r > fast.tp_r_cap:
+                detail["tp_r_cap_note"] = (
+                    f"止盈封顶 {fast.tp_r_cap:g} 倍会低于手续费下限，只截到 {tp_r:.3f} 倍"
+                )
+        tp_pct = stop_pct * tp_r
+
         if tp_pct * 100.0 < fee_floor_bps:
             reasons.append(f"止盈 {tp_pct * 100:.1f}bp 不够付手续费（至少 {fee_floor_bps:.1f}bp）")
             return None
@@ -911,11 +931,9 @@ class RiskGuardImpl:
             **({"币安杠杆分层名义上限": tier_cap} if tier_cap is not None else {}),
             "单笔名义上限": risk.notional_cap(equity),
         }
+        # The total exposure cap is left out: RiskConfig keeps every category cap at or below it.
         planned_notional = min(
-            notional,
-            *static_caps.values(),
-            risk.max_total_exposure_x * equity,
-            risk.category_exposure_x[cs.category] * equity,
+            notional, *static_caps.values(), risk.category_exposure_x[cs.category] * equity
         )
         caps = {
             **static_caps,
@@ -1015,6 +1033,10 @@ class RiskGuardImpl:
         trail_act, trail_delta, trail_note = self._trailing(stop_pct)
         if trail_note:
             detail["trailing"] = trail_note
+        if fast.tp_r_cap > 0 and trail_act is not None and trail_act >= tp_pct:
+            detail["trailing_vs_tp"] = (
+                f"移动止损 / 保本启动线 {trail_act:.3f}% 不近于止盈 {tp_pct:.3f}%，到止盈前不会启动"
+            )
         return OrderIntent(
             order_type="limit" if limit is not None else "market",
             limit_price=limit,

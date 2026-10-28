@@ -61,6 +61,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "card_caps_binding",
         "leverage_clamp_to_bracket",
         "card_range_clamp",
+        "tp_r_cap",
         "max_notional_book_frac",
         "book_depth_levels",
         "margin_safety_pct",

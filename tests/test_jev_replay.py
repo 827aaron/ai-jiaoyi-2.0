@@ -117,6 +117,8 @@ def test_candidate_uses_jev_stop_tier_and_guard_atr() -> None:
     atr = stop_atr(f.signal.features, FAST, f.signal.ts, {})
     assert c.stop_bps == pytest.approx(FAST.max_stop_atr * atr / 100.0 * 1e4)
     assert c.tp_bps == pytest.approx(c.stop_bps * FAST.min_tp_r)
+    capped = replay.candidate(f, resp, FAST.model_copy(update={"tp_r_cap": 0.8}), 120)
+    assert capped is not None and capped.tp_bps == pytest.approx(c.stop_bps * 0.8)
     assert c.stop_src == "jev:wide" and c.verdict == "volume_breakout"
     assert not c.gate_would_block  # 做 0.8 / 真 0.8 / 毒 0.2 都过 paper 门槛
     low = b.jev_ok({"take": "skip"}, confidence=0.8)

@@ -85,6 +85,14 @@ def test_hot_edit_is_applied_in_place(tmp_path: Path) -> None:
     assert app.reload_config() == {}  # 同一份文件不重复换
 
 
+def test_tp_r_cap_reaches_the_running_guard(tmp_path: Path) -> None:
+    app, paths, data = _running(tmp_path)
+    assert app.m.risk._fast.tp_r_cap == 0.0  # type: ignore[attr-defined]
+    _edit(paths, data, "fast_loop", {"tp_r_cap": 1.0})
+    assert "fast_loop.tp_r_cap" in app.reload_config()
+    assert app.m.risk._fast.tp_r_cap == 1.0  # type: ignore[attr-defined]
+
+
 def test_restart_only_keys_are_not_applied(tmp_path: Path) -> None:
     app, paths, data = _running(tmp_path)
     before = app.app_cfg.pool_size

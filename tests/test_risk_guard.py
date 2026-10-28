@@ -908,6 +908,133 @@ def test_fast_loop_open_by_kind_rejects_unknown_kind_and_negative() -> None:
             )
 
 
+# ---------------------------------------------------------------- 止盈封顶 tp_r_cap
+def _tp_case(
+    now: datetime, side: c.Side, atr: float = 4000.0
+) -> tuple[c.CandidateSignal, c.BattleCard]:
+    sig = signal(now, side=side, f=features(now, atr=atr))
+    cd = card(
+        now,
+        bias="both",
+        take_profit_r={"min": 1.5, "max": 3},
+        notional_usdt={"min": 10, "max": 100_000},
+    )
+    return sig, cd
+
+
+def _tp_guard(
+    log: JsonlDecisionLog | None = None, risk: c.RiskConfig = RISK, **fast: object
+) -> _Guard:
+    cfg = FAST.model_copy(update=fast)
+    rec = RoleRecorder(c.Role.RISK_GUARD, log) if log is not None else None
+    return _Guard(risk, cfg, Lots(), rec)
+
+
+@_SIDES
+def test_review_tp_r_cap_default_keeps_card_tp(tmp_path: Path, now: datetime, side: c.Side) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    sig, cd = _tp_case(now, side)
+    v = _tp_guard(log).review(sig, jev(), cd, account(now, equity=10_000.0), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.side == side
+    assert v.intent.take_profit_pct == pytest.approx(v.intent.stop_loss_pct * 1.5)
+    (rec,) = log.read_day(now.date().isoformat())
+    assert "tp_r_raw" not in rec.output["detail"] and "tp_r_capped" not in rec.output["detail"]
+
+
+@_SIDES
+def test_review_tp_r_cap_clips_card_tp_and_records_both(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    sig, cd = _tp_case(now, side)
+    acct = account(now, equity=10_000.0)
+    base = _tp_guard().review(sig, jev(), cd, acct, now)
+    v = _tp_guard(log, tp_r_cap=1.0).review(sig, jev(), cd, acct, now)
+    assert base.approved and v.approved, v.reasons
+    a, b = base.intent, v.intent
+    assert a is not None and b is not None and b.side == side
+    assert b.take_profit_pct == pytest.approx(b.stop_loss_pct * 1.0)
+    # only the take-profit moves: stop, size, lifeboat and trailing are as without the cap
+    assert b.stop_loss_pct == pytest.approx(a.stop_loss_pct)
+    assert (b.quantity, b.notional_usdt, b.risk_usdt) == (a.quantity, a.notional_usdt, a.risk_usdt)
+    assert b.lifeboat_stop_pct == pytest.approx(a.lifeboat_stop_pct)
+    assert (b.trailing_activation_pct, b.trailing_stop_pct) == (
+        a.trailing_activation_pct,
+        a.trailing_stop_pct,
+    )
+    (rec,) = log.read_day(now.date().isoformat())
+    d = rec.output["detail"]
+    assert (d["tp_r_raw"], d["tp_r_capped"]) == (1.5, 1.0)
+    assert "tp_r_cap_note" not in d
+
+
+@_SIDES
+def test_review_tp_r_cap_below_card_minimum_never_rejects(now: datetime, side: c.Side) -> None:
+    """max_tp_r = 1.0 rejects a card whose minimum is 1.5; tp_r_cap = 1.0 must not."""
+    sig, cd = _tp_case(now, side)
+    acct = account(now, equity=10_000.0)
+    by_max = _tp_guard(min_tp_r=1.0, max_tp_r=1.0).review(sig, jev(), cd, acct, now)
+    assert not by_max.approved and any("止盈" in r for r in by_max.reasons)
+    v = _tp_guard(tp_r_cap=1.0).review(sig, jev(), cd, acct, now)
+    assert v.approved, v.reasons
+
+
+@_SIDES
+def test_review_tp_r_cap_above_card_tp_changes_nothing(now: datetime, side: c.Side) -> None:
+    sig, cd = _tp_case(now, side)
+    v = _tp_guard(tp_r_cap=2.0).review(sig, jev(), cd, account(now, equity=10_000.0), now)
+    assert v.approved and v.intent is not None
+    assert v.intent.take_profit_pct == pytest.approx(v.intent.stop_loss_pct * 1.5)
+
+
+@_SIDES
+def test_review_tp_r_cap_stops_at_fee_floor(tmp_path: Path, now: datetime, side: c.Side) -> None:
+    """Stop 120/68000 ≈ 17.6bp, fee floor 2 × 2 × 5bp = 20bp ≈ 1.133R: the cap clips to 1.133R."""
+    log = JsonlDecisionLog(tmp_path)
+    sig, cd = _tp_case(now, side, atr=80.0)
+    v = _tp_guard(log, tp_r_cap=1.0).review(sig, jev(), cd, account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None
+    assert v.intent.take_profit_pct * 100 >= 20.0
+    assert v.intent.take_profit_pct == pytest.approx(0.20)
+    (rec,) = log.read_day(now.date().isoformat())
+    d = rec.output["detail"]
+    assert d["tp_r_raw"] == 1.5 and d["tp_r_capped"] == pytest.approx(20 / (120 / 68000 * 1e4))
+    assert "手续费下限" in d["tp_r_cap_note"]
+
+
+@_SIDES
+def test_review_tp_r_cap_keeps_fee_rejection_of_card_tp(now: datetime, side: c.Side) -> None:
+    """A card TP that already fails the fee floor is rejected with the same reason, cap or not."""
+    sig, cd = _tp_case(now, side, atr=80.0)
+    strict = RISK.model_copy(update={"min_tp_fee_multiple": 3.0})  # 30bp > 1.5R ≈ 26.5bp
+    plain = _tp_guard(risk=strict).review(sig, jev(), cd, account(now), now)
+    capped = _tp_guard(risk=strict, tp_r_cap=1.0).review(sig, jev(), cd, account(now), now)
+    assert not plain.approved and capped.reasons == plain.reasons
+    assert any("不够付手续费" in r for r in capped.reasons)
+
+
+@_SIDES
+def test_review_tp_r_cap_notes_trailing_that_cannot_start(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    sig, cd = _tp_case(now, side)
+    g = _tp_guard(log, tp_r_cap=1.0, trailing_on=True, trail_distance_r=1.0)
+    v = g.review(sig, jev(), cd, account(now, equity=10_000.0), now)
+    assert v.approved, v.reasons
+    (rec,) = log.read_day(now.date().isoformat())
+    assert "不会启动" in rec.output["detail"]["trailing_vs_tp"]
+
+
+def test_tp_r_cap_config_bounds() -> None:
+    assert c.FastLoopConfig().tp_r_cap == 0.0
+    assert c.FastLoopConfig(tp_r_cap=1.0).tp_r_cap == 1.0
+    with pytest.raises(ValueError, match="tp_r_cap"):
+        c.FastLoopConfig(tp_r_cap=0.3)
+
+
 _MAX_QTY_LOT = LotRules(step_size=0.001, min_qty=0.001, min_notional=5.0, max_qty=0.01)
 
 
@@ -918,11 +1045,12 @@ def _size_review(
     available: float | None = 100.0,
     release: bool | None = None,
     lots: Lots | None = None,
+    risk: c.RiskConfig = RISK,
     **fast: object,
 ) -> tuple[c.RiskVerdict, dict[str, object]]:
     log = JsonlDecisionLog(tmp_path)
     cfg = FAST.model_copy(update=fast)
-    g = _Guard(RISK, cfg, lots or Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    g = _Guard(risk, cfg, lots or Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
     sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
     acc = account(now) if available is None else account(now, available_usdt=available)
     if release is None:
@@ -1053,3 +1181,15 @@ def test_review_respect_card_notional_min_noop_when_card_binding(
     )
     off, _ = _size_review(tmp_path / "off", now, side, card_caps_binding=True)
     assert on.reasons == off.reasons == ["按可用保证金只能开 285U，低于作战卡下限 500U"]
+
+
+@_SIDES
+def test_review_min_size_ratio_plans_against_category_cap(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    # major at 1x equity (10000 U) is the single smallest static cap: planned 17.65 U, not 35.29 U.
+    caps = {**RISK.category_exposure_x, c.Category.MAJOR: 1.0}
+    risk = c.RiskConfig.model_validate({**RISK.model_dump(), "category_exposure_x": caps})
+    v, detail = _size_review(tmp_path, now, side, risk=risk, min_size_ratio=0.25)
+    assert v.reasons == ["仓位被可用保证金压到计划的 4.1%（风险 0.72U），低于下限 25%，不开"]
+    assert (detail["planned_risk_usdt"], detail["size_ratio"]) == (17.6471, 0.0408)

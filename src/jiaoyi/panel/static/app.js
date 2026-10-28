@@ -663,7 +663,7 @@ function cardLevels(s) {
   // 风控员开着「夹到推荐范围」时，越界的那截不要（没交集时风控员会拒单，这里照原样显示）
   const clamp = (r, c) => (c && Math.max(r[0], c[0]) <= Math.min(r[1], c[1]) ? [Math.max(r[0], c[0]), Math.min(r[1], c[1])] : r);
   const sa = clamp(s.stop_atr, a.stop_atr_clamp), tr = clamp(s.take_profit_r, a.tp_r_clamp);
-  const R = tr[0], d = sa.map((m) => m * a.atr), dm = (d[0] + d[1]) / 2;
+  const R = a.tp_r_cap ? Math.min(tr[0], a.tp_r_cap) : tr[0], d = sa.map((m) => m * a.atr), dm = (d[0] + d[1]) / 2;
   const L = { entry: a.price, px: a.price, r: R, distPct: dm / a.price * 100, tpPct: dm * R / a.price * 100 };
   if (s.bias !== "long" && s.bias !== "short") return L;
   const sg = s.bias === "short" ? 1 : -1;
@@ -2553,6 +2553,7 @@ const PLAIN = {
   stop_level_buffer_atr: "止损放在关键价位外面多远（波动幅度的几倍）",
   min_tp_r: "止盈至少是止损的几倍",
   max_tp_r: "止盈最多是止损的几倍",
+  tp_r_cap: "下单的止盈最多几倍止损（0 = 不封顶）：卡上的止盈更远就截到这里，从不因此拒单",
   time_limit_s: "一笔最多拿几秒，到时就平",
   keeper_close_p: "管家觉得该平的把握过多少就平（0–1）",
   keeper_close_p_strong: "把握过多少不用再确认直接平（0–1）",
@@ -2994,7 +2995,7 @@ const ROLES = [
     { g: "仓位太大时缩单", keys: ["fast_loop.book_depth_levels", "fast_loop.max_notional_book_frac", "fast_loop.margin_safety_pct", "fast_loop.min_size_ratio", "fast_loop.card_caps_binding", "fast_loop.respect_card_notional_min", "fast_loop.leverage_clamp_to_bracket"] },
     { g: "哪些币先不做", keys: ["fast_loop.us_hours_gate", "fast_loop.us_open_delay_min", "fast_loop.us_close_lead_min", "fast_loop.new_listing_*", "fast_loop.adl_*"] },
     { g: "止损放多远", hint: "带「跟最长持仓走」的改单笔最长持仓时自动换。", keys: ["fast_loop.atr_period_min", "fast_loop.atr_long_period_min", "fast_loop.atr_floor_7d", "fast_loop.session_factor", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_snap", "fast_loop.stop_level_buffer_atr"] },
-    { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp"] },
+    { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp", "fast_loop.tp_r_cap"] },
     { g: "一笔最多拿多久", keys: ["fast_loop.time_limit_s"] },
   ] },
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
@@ -3046,7 +3047,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", take_by_kind:
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", tp_r_cap: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", account_read_retries: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
