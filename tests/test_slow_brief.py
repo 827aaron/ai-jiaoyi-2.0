@@ -4,11 +4,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 
 from jiaoyi.slow.brief import MarketBriefService, describe_trend
+from jiaoyi.slow.ticks import TICKS
 from tests.test_slow_commander import FakeEngine, entry, make, pool
 
 NOW = datetime(2026, 10, 23, 9, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _offline_ticks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 简报每行要价格精度，TICKS 默认去币安 exchangeInfo 取；这里的 MockTransport 管不到它
+    monkeypatch.setattr(TICKS, "get", lambda symbol: None)
 
 
 def bars(n: int, last: float = 129.0, step: float = 1.0, vol: float = 10.0) -> list[list[object]]:
