@@ -68,7 +68,12 @@ from jiaoyi.execution.brackets import CloseInProgress
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.gate.jev import JevDecisionModel
-from jiaoyi.keeper.assistant import CLOSE_SOURCE, KeeperAssistant, TransportScorer
+from jiaoyi.keeper.assistant import (
+    CLOSE_SOURCE,
+    KeeperAssistant,
+    TransportScorer,
+    ws_snapshot_provider,
+)
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -776,13 +781,27 @@ class Runner:
             b_scorer=getattr(app, "assistant_b", None),
             cards=cards,
             alert=self._assistant_alert,
+            warn=self._assistant_warn,
             day_reset_tz=app.risk_cfg.day_reset_tz,
             close_source=lambda pid: (
                 close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
             ).get("source"),
+            snapshot_provider=ws_snapshot_provider(self.m.features.snapshot, app.clock),
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
+            cards.set_flip_by_assistant(
+                lambda: self.app.app_cfg.fast_loop.card_flip_confirm_by == "assistant"
+            )
+            cards.set_neutral_flip_ignored(
+                lambda: self.app.app_cfg.fast_loop.card_neutral_flip == "ignore"
+            )
+            cards.set_flip_limits(
+                lambda: timedelta(minutes=self.app.app_cfg.fast_loop.card_ignore_max_age_min),
+                lambda: timedelta(
+                    minutes=self.app.app_cfg.fast_loop.card_flip_assistant_fallback_min
+                ),
+            )
         return assistant
 
     def _assistant_close(self, pos: PositionRecord, reason: str) -> str | None:
@@ -818,6 +837,10 @@ class Runner:
     def _assistant_alert(self, title: str, text: str) -> None:
         if not self._leaving:
             self._spawn(self.app._alert(AlertLevel.INFO, title, text, "system"))
+
+    def _assistant_warn(self, title: str, text: str) -> None:
+        if not self._leaving:
+            self._spawn(self.app._alert(AlertLevel.WARN, title, text, "system"))
 
     async def _close_targets(self) -> list[PositionRecord]:
         """Positions a panel close may target. With a ledger this is a local read: a full

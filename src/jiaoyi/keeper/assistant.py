@@ -16,6 +16,10 @@ A 平仓。
 另一件事（``keeper_assistant_flip_confirm``）：军师团的会给出待确认翻转（1/N）时，出卡路径照旧
 同步记下候选、不等任何东西，只把候选交过来；这里另起一件事问两个模型「会上涨 / 下跌吗」，都答
 「是」就请军师团一步同步确认（候选和卡上那条指令都没变才换，变了就作罢）；否则候选照旧等下一场会。
+转中性的候选另有开关（``keeper_assistant_flip_neutral``）：问的是原方向（原来做多问「会上涨吗」），
+两个都答「否」（p(是) ≤ 1 − min_p）才确认转中性。``card_flip_confirm_by = "assistant"`` 时会
+不再按场数确认，只有这里能确认：同样的结论再来一场就再问一次（同一个币隔
+``keeper_assistant_gap_s``），没问成、没答一致的原因每次都记。
 
 同一个币按「币 + 哪件事」去重：持仓的事在问时，这个币的翻转确认推后（问完再问，不丢）；名额上
 持仓的事排在翻转确认前面。
@@ -35,7 +39,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -58,7 +62,7 @@ from jiaoyi.contracts import (
 from jiaoyi.core.recorder import RoleRecorder, local_day
 from jiaoyi.gate.jev import JevTransport, OpenRouterDecisionsTransport, RawJevResult
 from jiaoyi.gate.questions import direction_snapshot
-from jiaoyi.slow.card_flip import FlipCandidate
+from jiaoyi.slow.card_flip import DIR_TEXT, FlipCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +72,48 @@ YES, NO = "是", "否"
 OPTIONS: tuple[str, ...] = (YES, NO)
 MOVE = {"long": "上涨", "short": "下跌"}
 QUESTION_ID = "move"
+FLIP_NEUTRAL = "flip_neutral"
 REASONS = {
     "reverse_signal": "管家助手：反向信号，两个模型一致",
     "key_level": "管家助手：价格穿过关键位，两个模型一致",
 }
 TRIGGER_TEXT = {"reverse_signal": "反向信号", "key_level": "价格穿过关键位"}
 SKIP_B = "跳过：B 不可用"
+STALE = "行情快照过旧/未预热，不问"
+STALE_REASONS = ("stale", "cold")
+WARM_S = 300.0
+"""``live_s`` 不满这些秒，窗口特征只是重新订阅后那几笔（和哨兵同一口径，缺了按没预热算）。"""
+
+SnapshotProvider = Callable[
+    [str, float], Awaitable[tuple[FeatureSnapshot | None, str, float | None]]
+]
+"""``(币, 最多几秒前) → (快照, 来源, 快照多少秒前)``。快照为 None 时「来源」是原因：``stale`` /
+``cold`` 按过旧 / 未预热记（每个币每分钟一条），别的原样当跳过原因。管家助手自己不取行情。"""
+
+
+def ws_snapshot_provider(
+    features: Callable[[str], FeatureSnapshot | None], clock: Callable[[], datetime]
+) -> SnapshotProvider:
+    """快环行情流的快照：够新（不超过 ``max_age_s``）、已预热才给，来源 ``ws``。"""
+
+    async def provide(
+        symbol: str, max_age_s: float
+    ) -> tuple[FeatureSnapshot | None, str, float | None]:
+        f = features(symbol)
+        if f is None:
+            return None, "没有这个币的行情快照", None
+        age = (clock() - f.ts).total_seconds()
+        if age > max_age_s:
+            return None, "stale", age
+        if f.values.get("live_s", 0.0) < WARM_S:
+            return None, "cold", age
+        return f, "ws", age
+
+    return provide
+
+
+STALE_LOG_EVERY = timedelta(minutes=1)
+STUCK_AFTER = timedelta(hours=2)
 SKIP_LOG_EVERY = timedelta(hours=1)
 REOPEN_DAYS = 7
 SUMMARY_EVERY = 10
@@ -110,6 +150,10 @@ class Verdict:
 
     def yes(self, min_p: float) -> bool:
         return self.p_yes is not None and self.p_yes > 0.5 and self.p_yes >= min_p
+
+    def no(self, min_p: float) -> bool:
+        # rounded: 1 - 0.9 is 0.0999… in floats, which would refuse p(是) of exactly 0.1
+        return self.p_yes is not None and self.p_yes < 0.5 and self.p_yes <= round(1 - min_p, 9)
 
     @property
     def text(self) -> str:
@@ -256,6 +300,16 @@ class FlipCards(Protocol):
         self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
     ) -> bool: ...
 
+    def sweep_flips(self) -> None: ...
+
+    def clear_neutral_flips(self) -> None: ...
+
+    def flip_answered(self, symbol: str, cand: FlipCandidate) -> None: ...
+
+    def stuck_held_flips(
+        self, now: datetime, older: timedelta
+    ) -> list[tuple[str, FlipCandidate]]: ...
+
 
 @dataclass
 class _Shadow:
@@ -286,8 +340,10 @@ class KeeperAssistant:
         b_scorer: Callable[[str], Scorer | None] | None = None,
         cards: FlipCards | None = None,
         alert: Callable[[str, str], None] | None = None,
+        warn: Callable[[str, str], None] | None = None,
         day_reset_tz: str = "Asia/Bangkok",
         close_source: Callable[[str], str | None] | None = None,
+        snapshot_provider: SnapshotProvider | None = None,
     ) -> None:
         """``close(仓, 原因)``：过平仓前检查、登记平仓任务（主循环正常路径）；返回 None = 已交出去，
         否则是没平的原因（已在平、平仓前检查拦下）。``jev``：A；``b_scorer(模型 id)``：给 B；
@@ -296,6 +352,7 @@ class KeeperAssistant:
         self._cfg = cfg
         self._rec = recorder
         self._features = features
+        self._snapshot = snapshot_provider or ws_snapshot_provider(features, clock)
         self._close = close
         self._clock = clock
         self._dir = data_dir / JOURNAL_DIR if data_dir is not None else None
@@ -304,11 +361,16 @@ class KeeperAssistant:
         self._b: tuple[str, Scorer | None] | None = None
         self._cards = cards
         self._alert = alert
+        self._warn = warn
+        self._stuck_warned: set[tuple[str, str]] = set()
         self._tz = day_reset_tz
         self._slots = Slots(lambda: self._cfg().keeper_assistant_concurrency)
         self._busy: set[tuple[str, str]] = set()
         self._deferred: dict[str, FlipCandidate] = {}
         self._last: dict[str, datetime] = {}
+        self._flip_last: dict[str, datetime] = {}
+        self._swept = False
+        self._neutral_cleared = False
         self._last_px: dict[str, float] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._error: str | None = None
@@ -318,6 +380,7 @@ class KeeperAssistant:
         self._close_source = close_source
         self._handed_off: set[str] = set()
         self._skip_logged: dict[str, datetime] = {}
+        self._stale_logged: dict[str, datetime] = {}
         self._summary_day = local_day(self._clock(), self._tz)
         self._restore()
 
@@ -397,16 +460,34 @@ class KeeperAssistant:
     def on_flip_pending(self, symbol: str, cand: FlipCandidate) -> None:
         """军师团刚记下待确认翻转（出卡路径里同步调，这里只登记、另起任务，不等）。"""
         try:
-            cfg = self._cfg()
-            if not (cfg.keeper_assistant_on and cfg.keeper_assistant_flip_confirm):
-                return
-            if cand.candidate not in MOVE:
+            cfg, now = self._cfg(), self._clock()
+            kind = "flip_confirm" if cand.candidate in MOVE else FLIP_NEUTRAL
+            only_us = cfg.card_flip_confirm_by == "assistant"
+            why: str | None = None
+            if _flip_purpose(cand, cfg) is None:
+                if not cfg.keeper_assistant_on:
+                    why = "keeper_assistant_on 关着" if only_us else None
+                elif kind == "flip_confirm":
+                    why = "keeper_assistant_flip_confirm 关着" if only_us else None
+                elif cfg.card_neutral_flip == "ignore":
+                    why = None  # the commander clears neutral candidates in this mode
+                elif only_us or cfg.keeper_assistant_flip_confirm:
+                    why = "keeper_assistant_flip_neutral 关着"
+                if why is None:
+                    return
+            else:
+                last = self._flip_last.get(symbol)
+                gap = timedelta(seconds=cfg.keeper_assistant_gap_s)
+                if last is not None and now - last < gap:
+                    why = f"离上次问不到 {cfg.keeper_assistant_gap_s} 秒"
+            if why is not None:
                 self._rec.record(
-                    self._clock(),
+                    now,
                     Outcome.INFO,
-                    f"{symbol} 待确认翻转转中性：是非题只问涨跌，不判，候选照旧等下一场会",
+                    f"{symbol} 待确认翻转（{DIR_TEXT[cand.candidate]}）没问：{why}，"
+                    f"{_flip_waits(cfg)}"[:200],
                     symbol=symbol,
-                    output={"keeper_assistant": {"kind": "flip_confirm", "skipped": "neutral"}},
+                    output={"keeper_assistant": {"kind": kind, "skipped": why}},
                 )
                 return
             if any(sym == symbol for sym, _ in self._busy):
@@ -414,11 +495,13 @@ class KeeperAssistant:
                 return
             self._start_flip(symbol, cand)
         except Exception:
-            logger.exception("管家助手接翻转确认失败，候选照旧等下一场会")
+            logger.exception("管家助手接翻转确认失败，候选照旧只看不做")
 
     def _start_flip(self, symbol: str, cand: FlipCandidate) -> None:
-        self._busy.add((symbol, "flip"))
-        self._spawn((symbol, "flip"), self._flip_confirm(symbol, cand, self._clock()))
+        key = (symbol, "flip" if cand.candidate in MOVE else FLIP_NEUTRAL)
+        self._busy.add(key)
+        self._flip_last[symbol] = self._clock()
+        self._spawn(key, self._flip_confirm(symbol, cand, self._clock()))
 
     def _trigger(self, pos: PositionRecord, trigger: str, detail: str) -> None:
         try:
@@ -481,8 +564,7 @@ class KeeperAssistant:
         if any(sym == symbol for sym, _ in self._busy):
             return
         cand = self._deferred.pop(symbol, None)
-        cfg = self._cfg()
-        if cand is not None and cfg.keeper_assistant_on and cfg.keeper_assistant_flip_confirm:
+        if cand is not None and _flip_purpose(cand, self._cfg()) is not None:
             self._start_flip(symbol, cand)
 
     @property
@@ -555,7 +637,7 @@ class KeeperAssistant:
 
     async def _judges(
         self, symbol: str, want: str, first: bool = True
-    ) -> tuple[Verdict, Verdict] | str:
+    ) -> tuple[Verdict, Verdict, str] | str:
         """A、B 同时问「会不会往 ``want`` 走」，两个合起来最多等 ``keeper_assistant_timeout_s``；
         超时两个都算没答上。返回字符串 = 问不了的原因。"""
         cfg = self._cfg()
@@ -570,9 +652,29 @@ class KeeperAssistant:
                 else f"{b_model} 连续出错，冷却中"
             )
             return f"{SKIP_B}（{why}）"
-        f = self._features(symbol)
+        f, source, age = await self._snapshot(symbol, cfg.keeper_assistant_snapshot_max_age_s)
+        if f is None and source not in STALE_REASONS:
+            return source
         if f is None:
-            return "没有这个币的行情快照"
+            now = self._clock()
+            last = self._stale_logged.get(symbol)
+            if last is None or now - last >= STALE_LOG_EVERY:
+                self._stale_logged[symbol] = now
+                ago = "不知道" if age is None else f"{age:.0f} 秒前"
+                self._rec.record(
+                    now,
+                    Outcome.INFO,
+                    f"{symbol} {STALE}（{source}，快照 {ago}）",
+                    symbol=symbol,
+                    output={
+                        "keeper_assistant": {
+                            "skipped": STALE,
+                            "reason": source,
+                            "snapshot_age_s": None if age is None else round(age, 1),
+                        }
+                    },
+                )
+            return STALE
         state = direction_snapshot(symbol, f)
         mirrored = tuple(reversed(OPTIONS))
         started = time.perf_counter()
@@ -599,8 +701,9 @@ class KeeperAssistant:
             return (
                 Verdict("A", None, None, OPTIONS, why, ms),
                 Verdict("B", None, None, mirrored, why, ms),
+                source,
             )
-        return a, b
+        return a, b, source
 
     # ------------------------------------------------------------ 判断
     async def _check(self, pos: PositionRecord, trigger: str, detail: str, now: datetime) -> None:
@@ -610,6 +713,8 @@ class KeeperAssistant:
         snap = self._features(sym)
         px = snap.last_price if snap is not None else None
         got = await self._judges(sym, want)
+        if got == STALE:
+            return
         if isinstance(got, str):
             if self._skip_due(got, now):
                 self._rec.record(
@@ -621,7 +726,7 @@ class KeeperAssistant:
                     output={"keeper_assistant": {"trigger": trigger, "skipped": got}},
                 )
             return
-        a, b = got
+        a, b, source = got
         cfg = self._cfg()
         would = a.yes(cfg.keeper_assistant_min_p) and b.yes(cfg.keeper_assistant_min_p)
         act = (
@@ -671,6 +776,7 @@ class KeeperAssistant:
                 "r_at_signal": position_r(pos, px),
                 "asked": MOVE[want],
                 "would_close": would,
+                "snapshot_source": source,
                 "handed_off": handed,
                 "why": why,
             },
@@ -688,26 +794,32 @@ class KeeperAssistant:
 
     async def _flip_confirm(self, symbol: str, cand: FlipCandidate, now: datetime) -> None:
         started = time.monotonic()
-        want = cand.candidate
+        neutral = cand.candidate not in MOVE
+        # 转中性问的是原方向还走不走，两个都答「否」才算同意不做
+        want = cand.confirmed if neutral else cand.candidate
+        kind = FLIP_NEUTRAL if neutral else "flip_confirm"
         got = await self._judges(symbol, want, first=False)
-        if isinstance(got, str):
-            if self._skip_due(got, now):
-                self._rec.record(
-                    now,
-                    Outcome.INFO,
-                    f"{symbol} 待确认翻转（{MOVE[want]}）没问成：{got}，照旧等下一场会"[:200],
-                    symbol=symbol,
-                    output={"keeper_assistant": {"kind": "flip_confirm", "skipped": got}},
-                )
-            return
-        a, b = got
         cfg = self._cfg()
-        both = (
-            cfg.keeper_assistant_on
-            and cfg.keeper_assistant_flip_confirm
-            and a.yes(cfg.keeper_assistant_min_p)
-            and b.yes(cfg.keeper_assistant_min_p)
-        )
+        waits = _flip_waits(cfg)
+        if got == STALE:
+            return
+        if isinstance(got, str):
+            # 每场会最多一次，不按小时压：只由管家助手确认时每次没问成都要看得到原因
+            self._rec.record(
+                now,
+                Outcome.INFO,
+                f"{symbol} 待确认翻转（{DIR_TEXT[cand.candidate]}）没问成：{got}，{waits}"[:200],
+                symbol=symbol,
+                output={"keeper_assistant": {"kind": kind, "skipped": got}},
+            )
+            return
+        a, b, source = got
+        if a.p_yes is not None and b.p_yes is not None and self._cards is not None:
+            self._cards.flip_answered(symbol, cand)
+        min_p = cfg.keeper_assistant_min_p
+        agreed = a.no(min_p) and b.no(min_p) if neutral else a.yes(min_p) and b.yes(min_p)
+        both = agreed and _flip_purpose(cand, cfg) is not None
+        answer = NO if neutral else YES
         result = "not_agreed"
         if both and cfg.keeper_assistant_b_record_only:
             result = "b_record_only"
@@ -715,28 +827,31 @@ class KeeperAssistant:
             ok = self._cards.confirm_flip(
                 symbol,
                 cand,
-                f"管家助手两个模型都答会{MOVE[want]}",
+                f"管家助手两个模型都答{'不' if neutral else ''}会{MOVE[want]}",
                 {"judges": [a.row(), b.row()]},
             )
             result = "confirmed" if ok else "stale"
         why = {
             "confirmed": "确认，卡上换成那场会的结论",
             "stale": "候选已变或卡上那条指令已换掉，作罢",
-            "not_agreed": "两个模型没有都答是（或 p(是) 不够 / 有一个没答上），候选照旧等下一场会",
-            "b_record_only": "B 只记录，候选照旧等下一场会",
+            "not_agreed": f"两个模型没有都答{answer}（或 p(是) 不够 / 有一个没答上），{waits}",
+            "b_record_only": f"B 只记录，{waits}",
         }[result]
         self._log(
             now,
             started,
             symbol,
             Outcome.ACTION if result == "confirmed" else Outcome.INFO,
-            f"{symbol} 待确认翻转，问会不会{MOVE[want]}：A {a.text} / B {b.text}，{why}",
+            f"{symbol} 待确认翻转{'转中性' if neutral else ''}，问会不会{MOVE[want]}："
+            f"A {a.text} / B {b.text}，{why}",
             {
-                "kind": "flip_confirm",
+                "kind": kind,
                 "position_id": f"flip:{symbol}:{cand.first_seen.isoformat()}",
-                "candidate": want,
+                "candidate": cand.candidate,
+                "asked": MOVE[want],
                 "count": cand.count,
-                "both_yes": both,
+                "both_no" if neutral else "both_yes": both,
+                "snapshot_source": source,
                 "result": result,
                 "why": why,
             },
@@ -744,6 +859,29 @@ class KeeperAssistant:
         )
 
     # ------------------------------------------------------------ 平掉之后：影子出场、汇总
+    def _warn_stuck(self, now: datetime) -> None:
+        """有持仓的币，待确认翻转卡了超过 2 小时：每个候选只告警一次（决策日志 + Telegram）。"""
+        assert self._cards is not None
+        for symbol, cand in self._cards.stuck_held_flips(now, STUCK_AFTER):
+            key = (symbol, cand.first_seen.isoformat())
+            if key in self._stuck_warned:
+                continue
+            self._stuck_warned.add(key)
+            hours = (now - cand.first_seen).total_seconds() / 3600
+            text = (
+                f"{symbol} 持仓中，待确认翻转（{DIR_TEXT[cand.confirmed]} → "
+                f"{DIR_TEXT[cand.candidate]}）已卡 {hours:.1f} 小时，卡上一直只看不做"
+            )
+            self._rec.record(
+                now,
+                Outcome.ERROR,
+                text,
+                symbol=symbol,
+                output={"keeper_assistant": {"kind": "flip_stuck", **cand.to_json()}},
+            )
+            if self._warn is not None:
+                self._warn("待确认翻转卡住", text)
+
     def _start_shadow(self, pos: PositionRecord, now: datetime) -> None:
         if not pos.entry_price or not pos.stop_loss_price:
             return
@@ -760,7 +898,22 @@ class KeeperAssistant:
         )
 
     def tick(self, now: datetime) -> None:
-        """心跳时调：影子仓按最新价看止损 / 止盈 / 到时有没有到；跨天发前一天的汇总。不抛。"""
+        """心跳时调：影子仓按最新价看止损 / 止盈 / 到时有没有到；跨天发前一天的汇总；刚启动或刚
+        切到只由管家助手确认翻转时，把现有的待确认翻转都要过来问。不抛。"""
+        try:
+            cfg = self._cfg()
+            ignore = cfg.card_neutral_flip == "ignore"
+            if ignore and not self._neutral_cleared and self._cards is not None:
+                self._cards.clear_neutral_flips()
+            self._neutral_cleared = ignore
+            only_us = cfg.card_flip_confirm_by == "assistant"
+            if only_us and not self._swept and self._cards is not None:
+                self._cards.sweep_flips()
+            self._swept = only_us
+            if self._cards is not None:
+                self._warn_stuck(now)
+        except Exception:
+            logger.exception("管家助手要现有的待确认翻转失败")
         try:
             for pid, sh in list(self._shadows.items()):
                 f = self._features(sh.symbol)
@@ -913,6 +1066,23 @@ class KeeperAssistant:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
+
+
+def _flip_purpose(cand: FlipCandidate, cfg: FastLoopConfig) -> str | None:
+    """这个候选按哪件事问（去重用的键）；None = 开关关着，不问。"""
+    if not cfg.keeper_assistant_on:
+        return None
+    if cand.candidate in MOVE:
+        return "flip" if cfg.keeper_assistant_flip_confirm else None
+    if cfg.card_neutral_flip == "ignore":
+        return None
+    return FLIP_NEUTRAL if cfg.keeper_assistant_flip_neutral else None
+
+
+def _flip_waits(cfg: FastLoopConfig) -> str:
+    if cfg.card_flip_confirm_by == "assistant":
+        return "候选照旧只看不做，下一场会同样结论时再问"
+    return "候选照旧等下一场会"
 
 
 async def _close_scorer(scorer: Scorer) -> None:

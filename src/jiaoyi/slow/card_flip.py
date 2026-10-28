@@ -9,6 +9,14 @@
 信号），只是持仓管家的卡规则（反向卡 / 中性卡）看的是确认过的方向，确认前不因它平仓。
 从中性转出一个方向不算翻转，立即生效。
 
+``[fast_loop] card_flip_confirm_by = "assistant"``（热生效，只在 ``card_flip_confirm`` ≥ 2 时起
+作用）：会只提候选，场数够了也不确认；同样的结论再来一场只是刷新候选、重新交给管家助手问，
+确认只经 ``BattleCardCommander.confirm_flip``。会回到原方向照样取消。
+
+``[fast_loop] card_neutral_flip = "ignore"``（热生效）：会真判不做（no_trade / both，不是闸门
+改的、也不是到手即作废）不算翻转，卡上留着确认过的做多 / 做空那条、照常能开仓（有效期跟新结论
+走），不记候选；做多 ↔ 做空、到手即作废照旧。
+
 状态存在 ``data/card_flip.json``（不进作战卡存档：契约禁止多余字段，回滚的旧代码要能读卡）。
 每条候选记着它留在卡上的那条指令的身份；卡上那条没了（没有持仓的币过了有效期被拿掉）或
 被换掉（旧代码回滚后开过会、手工改卡）就作废，记一条 ``dropped``。
@@ -20,7 +28,8 @@ import contextlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -51,6 +60,16 @@ def card_direction(cs: CardSymbol) -> FlipDir:
     return "neutral"
 
 
+def genuine_neutral(cs: CardSymbol) -> bool:
+    """会议自己判的不做：闸门改的（``no_trade_from``）和到手即作废都不算——它们说的是这条指令
+    这一刻不能用，不是方向不对，留着原方向照常开仓就等于绕过了它们。"""
+    return (
+        cs.bias in (Bias.NO_TRADE, Bias.BOTH)
+        and cs.no_trade_from is None
+        and "stale_on_arrival" not in cs.reason
+    )
+
+
 def held_key(cs: CardSymbol) -> str:
     # bias and research_token are left out: clamp_to_risk on restart may turn the held
     # instruction into NO_TRADE (category cap now 0) or change its ranges
@@ -67,9 +86,14 @@ class FlipCandidate:
     last_seen: datetime
     held: str
     """``held_key`` of the instruction left on the card while the flip is pending."""
+    signals: tuple[str, ...] | None = None
+    """``allowed_signals`` of that instruction before the candidate emptied them; None for
+    candidates written by older code."""
+    answered: bool = False
+    """Both keeper-assistant judges have answered for this candidate at least once."""
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "confirmed": self.confirmed,
             "candidate": self.candidate,
             "count": self.count,
@@ -77,6 +101,11 @@ class FlipCandidate:
             "last_seen": self.last_seen.isoformat(),
             "held": self.held,
         }
+        if self.signals is not None:
+            out["signals"] = list(self.signals)
+        if self.answered:
+            out["answered"] = True
+        return out
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> FlipCandidate:
@@ -89,7 +118,17 @@ class FlipCandidate:
             raise ValueError("方向不对")
         if candidate == confirmed or int(raw["count"]) < 1:
             raise ValueError("候选不成立")
-        return cls(confirmed, candidate, int(raw["count"]), first, last, str(raw["held"]))
+        signals = raw.get("signals")
+        return cls(
+            confirmed,
+            candidate,
+            int(raw["count"]),
+            first,
+            last,
+            str(raw["held"]),
+            tuple(str(s) for s in signals) if isinstance(signals, list) else None,
+            raw.get("answered") is True,
+        )
 
 
 @dataclass(frozen=True)
@@ -115,6 +154,12 @@ class FlipBook:
         self.min_age = min_age
         self._path = path
         self._flips: dict[str, FlipCandidate] = {}
+        self.by_assistant: Callable[[], bool] = lambda: False
+        self.neutral_ignored: Callable[[], bool] = lambda: False
+        self.ignore_max_age: Callable[[], timedelta] = lambda: timedelta(0)
+        self.fallback_after: Callable[[], timedelta] = lambda: timedelta(0)
+        """Only-assistant mode: a candidate the judges never answered for this long is confirmed by
+        the next agreeing meeting again; zero = never."""
 
     @property
     def on(self) -> bool:
@@ -131,6 +176,12 @@ class FlipBook:
     ) -> FlipOutcome:
         """新结论 ``fresh`` 要换掉卡上的 ``in_force``（没有 = None）时，决定上卡的是哪条。"""
         if not self.on:
+            if (
+                in_force is not None
+                and card_direction(in_force) != "neutral"
+                and self._ignorable(in_force, fresh, now)
+            ):
+                return self._ignore(symbol, in_force, fresh, card_direction(in_force), None)
             return FlipOutcome(fresh)
         prior = self._flips.get(symbol)
         dropped: FlipCandidate | None = None
@@ -159,6 +210,8 @@ class FlipBook:
                 f"（{self.progress(prior.count, prior.first_seen, now)}）",
             )
         assert in_force is not None
+        if self._ignorable(in_force, fresh, now):
+            return self._ignore(symbol, in_force, fresh, confirmed, dropped)
         count = prior.count + 1 if prior is not None else 1
         first = prior.first_seen if prior is not None else now
         age = now - first
@@ -171,19 +224,44 @@ class FlipBook:
             "age_min": round(age.total_seconds() / 60, 1),
             "min_age_min": round(self.min_age.total_seconds() / 60, 1),
         }
-        if count >= self.need and age >= self.min_age:
+        fallback = self.fallback_after()
+        unasked_too_long = (
+            fallback > timedelta(0) and prior is not None and not prior.answered and age >= fallback
+        )
+        if (
+            count >= self.need
+            and age >= self.min_age
+            and (not self.by_assistant() or unasked_too_long)
+        ):
             self._flips.pop(symbol, None)
             self.save()
+            why = (
+                f"管家助手问不了超过 {fallback.total_seconds() / 60:g} 分钟，按会议确认："
+                if self.by_assistant()
+                else ""
+            )
             return FlipOutcome(
                 fresh,
                 "confirmed",
-                detail,
-                f"{symbol} 翻转确认：连续 {count} 场会都不是{DIR_TEXT[confirmed]}，"
+                {**detail, "by": "meeting_fallback"} if why else detail,
+                f"{symbol} 翻转确认：{why}连续 {count} 场会都不是{DIR_TEXT[confirmed]}，"
                 f"卡上换成最新这场的结论（{DIR_TEXT[new]}）",
                 dropped,
             )
         interim = self._interim(in_force, fresh, confirmed, new, count, first, now)
-        self._flips[symbol] = FlipCandidate(confirmed, new, count, first, now, held_key(interim))
+        signals = (
+            prior.signals if prior is not None else tuple(s.value for s in in_force.allowed_signals)
+        )
+        self._flips[symbol] = FlipCandidate(
+            confirmed,
+            new,
+            count,
+            first,
+            now,
+            held_key(interim),
+            signals,
+            prior.answered if prior is not None else False,
+        )
         self.save()
         return FlipOutcome(
             interim,
@@ -194,8 +272,51 @@ class FlipBook:
             dropped,
         )
 
+    def _ignorable(self, in_force: CardSymbol, fresh: CardSymbol, now: datetime) -> bool:
+        if not (self.neutral_ignored() and genuine_neutral(fresh)):
+            return False
+        cap = self.ignore_max_age()
+        if cap <= timedelta(0):
+            return True
+        return in_force.issued_at is not None and now - in_force.issued_at <= cap
+
+    def mark_answered(self, symbol: str, cand: FlipCandidate) -> None:
+        cur = self._flips.get(symbol)
+        if (
+            cur is None
+            or cur.answered
+            or (cur.first_seen, cur.held) != (cand.first_seen, cand.held)
+        ):
+            return
+        self._flips[symbol] = replace(cur, answered=True)
+        self.save()
+
+    @staticmethod
+    def _ignore(
+        symbol: str,
+        in_force: CardSymbol,
+        fresh: CardSymbol,
+        confirmed: FlipDir,
+        dropped: FlipCandidate | None,
+    ) -> FlipOutcome:
+        """会判不做、设置不翻转：卡上那条原样留着（候选期的那条也是，候选不动），有效期跟新结论走，
+        免得过期从卡上掉下去。"""
+        expires = fresh.expires_at
+        if in_force.expires_at is not None and (expires is None or in_force.expires_at > expires):
+            expires = in_force.expires_at
+        return FlipOutcome(
+            in_force.model_copy(update={"expires_at": expires}),
+            "ignored",
+            {"confirmed": confirmed, "candidate": "neutral"},
+            f"{symbol} 会议判不做，按设置不翻转，保留原方向（{DIR_TEXT[confirmed]}）",
+            dropped,
+        )
+
     def progress(self, count: int, first: datetime, now: datetime) -> str:
-        """「k/N」，候选时长还没到 ``min_age`` 时加「，等满 X 分钟」。"""
+        """「k/N」，候选时长还没到 ``min_age`` 时加「，等满 X 分钟」；只由管家助手确认时是
+        「第 k 场改判，等管家助手确认」。"""
+        if self.by_assistant():
+            return f"第 {count} 场改判，等管家助手确认"
         text = f"{min(count, self.need)}/{self.need}"
         if self.min_age > timedelta(0) and now - first < self.min_age:
             text += f"，等满 {self.min_age.total_seconds() / 60:g} 分钟"
