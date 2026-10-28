@@ -317,8 +317,9 @@ async def test_quiet_audit_preserves_confirmation_reset_and_one_model_call(
         await runner.regime_flip_tick()
         counts.append(runner._regime.count)
     await finish(runner)
-    assert counts == [1, 0, 1, 2]
+    assert counts == [1, 0, 1, 0]
     assert len(checks) == 4
+    assert checks[3]["result_kind"] == "confirmed" and checks[3]["confirm_count"] == 2
     assert checks[1]["result_kind"] == ("quiet" if reset_kind == "quiet" else "blocked")
     if reset_kind == "missing":
         assert checks[1]["blocked_reason"] == "数据不足"

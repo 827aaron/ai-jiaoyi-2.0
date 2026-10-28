@@ -173,6 +173,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "regime_flip_check_min",
         "regime_flip_suspect_log_min",
         "regime_flip_price_max_age_min",
+        "regime_flip_ref_max_age_min",
         # 反向信号
         "against_signal_on",
         "against_dedup_s",

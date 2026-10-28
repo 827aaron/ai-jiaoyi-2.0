@@ -143,6 +143,7 @@ async def test_gates_block_without_duplicate_round(
     patch_inplace(
         r.app.app_cfg.fast_loop, FastLoopConfig(regime_flip_confirm=1), {"regime_flip_confirm"}
     )
+    budget = c._cost_limit
     if block == "market_busy":
         r._market_refreshing = True
     elif block == "budget":
@@ -168,6 +169,15 @@ async def test_gates_block_without_duplicate_round(
     }
     assert latest["blocked_reason"] == expected[block]
     assert c.last_regime_flip_at is None
+    if block == "missing":
+        return
+    # 闸门拦下的确认不消耗这段行情：闸门一开，条件仍成立就再确认
+    r._market_refreshing, c._cost_limit, c._retry_at = False, budget, None
+    monkeypatch.setattr("jiaoyi.loop.binance_gate.banned_until", lambda: 0.0)
+    clock[0] += timedelta(minutes=5)
+    await r.regime_flip_tick()
+    await finish(r)
+    assert eng.market_calls == 1 and c.last_regime_flip_at == clock[0]
 
 
 async def test_rate_limit_during_fetch_is_logged_not_raised(tmp_path: Path, now: datetime) -> None:
@@ -396,3 +406,49 @@ async def test_reference_price_freshness_can_be_disabled(tmp_path: Path, now: da
     cfg = r.app.app_cfg.fast_loop
     patch_inplace(cfg, cfg.model_copy(update={"regime_flip_price_max_age_min": 0}), HOT_FAST)
     assert r._regime_btc_price() == 100
+
+
+async def test_stale_reference_journals_a_fresh_btc_baseline(tmp_path: Path, now: datetime) -> None:
+    r, c, eng, clock, px = await setup(tmp_path, now)
+    cfg = r.app.app_cfg.fast_loop
+    patch_inplace(cfg, cfg.model_copy(update={"regime_flip_ref_max_age_min": 120}), HOT_FAST)
+    px[0] = 102
+    clock[0] += timedelta(minutes=600)
+    await r.regime_flip_tick()
+    await finish(r)
+    row = records(tmp_path / "regime_flip")[-1]
+    assert row["kind"] == "suspect_breadth" and row["btc_ret_since_round_pct"] == 0
+    assert row["reference_at"] == now.isoformat() and row["reference_btc_px"] == 100
+    assert row["baseline_at"] == clock[0].isoformat() and row["baseline_btc_px"] == 102
+    assert eng.market_calls == 0 and c.regime_reference.btc_px == 100
+
+
+async def test_desk_target_requests_one_run_per_episode(tmp_path: Path, now: datetime) -> None:
+    r, _, _, clock, px = await setup(tmp_path, now)
+    cfg = r.app.app_cfg.fast_loop
+    patch_inplace(
+        cfg,
+        cfg.model_copy(update={"regime_flip_target": "desk", "regime_flip_min_gap_min": 0}),
+        HOT_FAST,
+    )
+
+    class Desk:
+        calls = 0
+
+        def request_run(self, reason: str = "regime_flip") -> None:
+            self.calls += 1
+
+        def due(self, now: datetime) -> None:
+            return None
+
+        def observe_breadth(self, *args: object) -> None:
+            pass
+
+    desk = Desk()
+    r.app.desk = desk
+    px[0] = 102
+    for _ in range(8):
+        clock[0] += timedelta(minutes=5)
+        await r.regime_flip_tick()
+    await finish(r)
+    assert desk.calls == 1
