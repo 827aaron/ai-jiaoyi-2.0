@@ -218,6 +218,8 @@ class _PaperStopLevels(Protocol):
 
     def paper_stop_levels(self, position_id: str) -> list[tuple[str, float | None]]: ...
 
+    def paper_stop_since(self, position_id: str) -> datetime | None: ...
+
     def note_close_detail(self, position_id: str, detail: str) -> None: ...
 
 
@@ -454,6 +456,9 @@ class Runner:
             Path(app.app_cfg.data_dir) / paper_stop.PAPER_STOP_FILE
         )
         self._paper_close_at: dict[str, datetime] = {}  # last Demo close asked for a paper stop
+        self._paper_safe: dict[str, float] = {}
+        """Position -> the stop level the mainnet price was last seen on the safe side of."""
+        self._paper_load_alerted = False
         self._tp_past: dict[str, datetime] = {}
         """限价止盈：价格第一次穿过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
         self._last_prune: datetime | None = None
@@ -775,9 +780,12 @@ class Runner:
                 self._spawn(self._tp_market(pos, t.price, wait))
 
     def _paper_stop_mode(self) -> paper_stop.PriceSource | None:
-        """None = off. Live never runs it: there the exchange stop is the real one."""
-        mode = self.app.app_cfg.fast_loop.paper_stop_on_mainnet
-        if mode == "off" or self.app.app_cfg.mode == RunMode.LIVE:
+        """None = off. Live never runs it: there the exchange stop is the real one. Only Demo
+        Trading: the legacy testnet prices drift too far from mainnet for its stops to be
+        compared with mainnet prices."""
+        cfg = self.app.app_cfg
+        mode = cfg.fast_loop.paper_stop_on_mainnet
+        if mode == "off" or cfg.mode == RunMode.LIVE or cfg.sim_environment != "demo":
             return None
         return mode
 
@@ -803,10 +811,44 @@ class Runner:
                 or self._paper_stops.get(pos.position_id) is not None
             ):
                 continue
-            stop = self._paper_stop_level(pos)
-            if stop is None or not paper_stop.crossed(pos.side, price, stop[1]):
-                continue
-            self._paper_stop_hit(pos, stop, price, event.ts, mode)
+            try:
+                self._paper_stop_one(pos, price, event.ts, mode)
+            except Exception:
+                # Patrol and entry triggers run after this on the same event.
+                log.exception("主网止损检查出错 %s", pos.position_id)
+
+    def _paper_stop_one(
+        self, pos: PositionRecord, price: float, ts: datetime, mode: paper_stop.PriceSource
+    ) -> None:
+        pid = pos.position_id
+        since = self._paper_stop_since(pos)
+        if ts < since:
+            return  # a price from before the position existed (buffered or replayed)
+        stop = self._paper_stop_level(pos)
+        if stop is None:
+            return
+        if not paper_stop.crossed(pos.side, price, stop[1]):
+            self._paper_safe[pid] = stop[1]
+            return
+        # A cross counts only against a stop level the price was first seen safely beyond:
+        # a leg placed off Demo's mark can sit past mainnet's price from the moment it is set
+        # (the Demo-mainnet basis), and after a restart, a hot enable or a fresh fill we have
+        # not yet seen where the price stood.
+        if self._paper_safe.get(pid) != stop[1]:
+            return
+        self._paper_stop_hit(pos, stop, price, ts, mode)
+
+    def _paper_stop_since(self, pos: PositionRecord) -> datetime:
+        ex = self.m.executor
+        if isinstance(ex, _PaperStopLevels):
+            try:
+                since = ex.paper_stop_since(pos.position_id)
+            except Exception:
+                log.exception("读不到 %s 的成交时间，按开仓时间算", pos.position_id)
+            else:
+                if since is not None:
+                    return since
+        return pos.opened_at
 
     def _paper_stop_level(self, pos: PositionRecord) -> tuple[str, float] | None:
         ex = self.m.executor
@@ -907,6 +949,19 @@ class Runner:
         before it went through) is asked to close again; the cross itself is never re-booked."""
         if self._paper_stop_mode() is None:
             return
+        book = self._paper_stops
+        if book.load_error is not None and not self._paper_load_alerted:
+            self._paper_load_alerted = True
+            self._spawn(
+                self.app._alert(
+                    AlertLevel.WARN,
+                    "模拟止损记账文件读不懂",
+                    f"{book.load_error}；这些仓按 Demo 实际成交算，原文件下次写入前另存为 .bad-*",
+                    "system",
+                ),
+                Role.PATROL,
+            )
+        book.flush()
         now = self.app.clock()
         for pos in self.positions:
             pid = pos.position_id
@@ -1414,6 +1469,8 @@ class Runner:
         live = {p.position_id for p in self.positions}
         for pid in set(self._paper_close_at) - live:
             self._paper_close_at.pop(pid, None)
+        for pid in set(self._paper_safe) - live:
+            self._paper_safe.pop(pid, None)
         self._paper_stop_retry()
 
     def _contract_halt(self, info: ContractInfo) -> None:

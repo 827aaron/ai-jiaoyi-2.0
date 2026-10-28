@@ -26,7 +26,7 @@ from pydantic import ValidationError
 
 from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role, SymbolPool
 from jiaoyi.contracts.position import PositionStatus
-from jiaoyi.core.paper_stop import PAPER_STOP_FILE, PaperStop, booked_record, read_paper_stops
+from jiaoyi.core.paper_stop import PAPER_STOP_FILE, PaperStop, PaperStopCache, booked_record
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.shadow_ledger import read_shadow
 
@@ -87,6 +87,7 @@ class PanelFiles:
         self.tz = tz
         self._decisions = DecisionTail(self.root / "decision_log")
         self._old: dict[tuple[date, frozenset[Role]], tuple[int, list[DecisionRecord]]] = {}
+        self._paper = PaperStopCache(self.root / PAPER_STOP_FILE)
         self.paper_book_pnl: Callable[[], bool] = lambda: True
         """``[fast_loop] paper_stop_book_pnl``, read on every ``ledger()``."""
 
@@ -276,7 +277,7 @@ class PanelFiles:
             notional[rec.position_id] = float(t.get("notional_usdt") or 0.0)
             if t.get("server_protection"):
                 protection[rec.position_id] = t["server_protection"]
-        paper = read_paper_stops(self.root / PAPER_STOP_FILE)
+        paper = self._paper.get()
         actual: dict[str, PositionRecord] = {}
         if paper and self.paper_book_pnl():
             booked = []

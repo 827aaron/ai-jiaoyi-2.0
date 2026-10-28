@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -78,9 +79,20 @@ def crossed(side: Side, price: float, stop: float) -> bool:
     return price <= stop if side is Side.LONG else price >= stop
 
 
-def paper_exit_price(side: Side, stop: float, slippage_bps: float) -> float:
+def paper_exit_price(
+    side: Side, stop: float, slippage_bps: float, cross: float | None = None
+) -> float:
+    """The stop with slippage, or the crossing price when that is worse.
+
+    A stop-market order fills at the market: when the first price we see is already past the
+    stop (a gap, a reconnect, the rule switched on mid-move), mainnet would have filled there.
+    """
     frac = slippage_bps / 1e4
-    return stop * (1.0 - frac) if side is Side.LONG else stop * (1.0 + frac)
+    if side is Side.LONG:
+        fill = stop * (1.0 - frac)
+        return fill if cross is None else min(fill, cross)
+    fill = stop * (1.0 + frac)
+    return fill if cross is None else max(fill, cross)
 
 
 def booked_record(rec: PositionRecord, stop: PaperStop) -> PositionRecord:
@@ -103,24 +115,53 @@ def booked_record(rec: PositionRecord, stop: PaperStop) -> PositionRecord:
     return rec.model_copy(update={"exit_price": paper, "realized_pnl_usdt": pnl})
 
 
-def read_paper_stops(path: Path) -> dict[str, PaperStop]:
-    """Every readable booking; a missing or unreadable file or entry is skipped, not raised."""
+def load_paper_stops(path: Path) -> tuple[dict[str, PaperStop], str | None]:
+    """Every readable booking, and what could not be read (None = all of it). Never raises."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
-    except (OSError, ValueError):
-        log.warning("读不懂 %s，按没有模拟止损记账处理", path)
-        return {}
-    out: dict[str, PaperStop] = {}
+        return {}, None
+    except (OSError, ValueError) as e:
+        return {}, f"{path.name} 读不懂（{type(e).__name__}）"
     if not isinstance(raw, dict):
-        return out
+        return {}, f"{path.name} 不是对象"
+    out: dict[str, PaperStop] = {}
+    bad: list[str] = []
     for pid, item in raw.items():
         try:
             out[str(pid)] = PaperStop.model_validate(item)
         except ValidationError:
-            log.warning("跳过读不懂的模拟止损记账：%s", pid)
-    return out
+            bad.append(str(pid))
+    return out, (f"{path.name} 有 {len(bad)} 条读不懂：{', '.join(bad[:5])}" if bad else None)
+
+
+def read_paper_stops(path: Path) -> dict[str, PaperStop]:
+    items, error = load_paper_stops(path)
+    if error is not None:
+        log.warning("%s，这些按没有模拟止损记账处理", error)
+    return items
+
+
+class PaperStopCache:
+    """Panel read side: re-parses the file only when its mtime or size changes."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._stamp: tuple[int, int] | None = None
+        self._items: dict[str, PaperStop] = {}
+        self._lock = threading.Lock()
+
+    def get(self) -> dict[str, PaperStop]:
+        try:
+            st = self._path.stat()
+            stamp: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = None
+        with self._lock:
+            if stamp != self._stamp:
+                self._items = read_paper_stops(self._path) if stamp is not None else {}
+                self._stamp = stamp
+            return self._items
 
 
 class PaperStopBook:
@@ -129,7 +170,11 @@ class PaperStopBook:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._lock = threading.Lock()
-        self._items = read_paper_stops(self._path)
+        self._items, self.load_error = load_paper_stops(self._path)
+        """What could not be read at start (None = all of it); the loop alerts on it once."""
+        self._set_aside = self.load_error is None
+        self.dirty = False
+        """A booking is in memory but the last write failed; ``flush`` retries it."""
 
     @property
     def path(self) -> Path:
@@ -142,19 +187,48 @@ class PaperStopBook:
         return dict(self._items)
 
     def add(self, stop: PaperStop) -> bool:
-        """False when the position already has a booking (the first cross wins)."""
+        """False when the position already has a booking (the first cross wins).
+
+        The booking counts from here even when the write fails: ``dirty`` stays set and
+        ``flush`` retries, so a full disk does not undo a cross already acted on.
+        """
         with self._lock:
             if stop.position_id in self._items:
                 return False
             self._items[stop.position_id] = stop
-            self._save()
+            self.dirty = True
+            self._try_save()
             return True
+
+    def flush(self) -> bool:
+        """Retry a failed write; True when nothing is left unwritten."""
+        with self._lock:
+            if self.dirty:
+                self._try_save()
+            return not self.dirty
+
+    def _try_save(self) -> None:
+        try:
+            self._save()
+            self.dirty = False
+        except OSError:
+            log.exception("模拟止损记账写盘失败，稍后重试：%s", self._path)
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._set_aside:
+            # Keep the unreadable file for inspection instead of overwriting it.
+            if self._path.exists():
+                os.replace(
+                    self._path, self._path.with_name(f"{self._path.name}.bad-{int(time.time())}")
+                )
+            self._set_aside = True
         tmp = self._path.with_suffix(".tmp")
         data = {pid: s.model_dump(mode="json") for pid, s in self._items.items()}
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self._path)
 
 
@@ -184,6 +258,6 @@ def book_stop(
         crossed_at=crossed_at,
         booked_at=now,
         slippage_bps=slippage_bps,
-        paper_exit_price=paper_exit_price(rec.side, level, slippage_bps),
+        paper_exit_price=paper_exit_price(rec.side, level, slippage_bps, price),
         close_requested=close_requested,
     )

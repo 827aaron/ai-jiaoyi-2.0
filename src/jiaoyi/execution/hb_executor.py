@@ -925,6 +925,14 @@ class HbExecutorAdapter:
             out.append(("trailing", state.trailing_stop_price))
         return out
 
+    def paper_stop_since(self, position_id: str) -> datetime | None:
+        """When the position started to exist on the exchange: the fill of a limit entry, else
+        the open; None for an unknown position."""
+        tracked = self._registry.get(position_id)
+        if tracked is None:
+            return None
+        return tracked.filled_at or tracked.record.opened_at
+
     def take_profit_exiting(self, position_id: str) -> bool:
         """A hosted take-profit leg has triggered: Demo is exiting at its target, not a stop."""
         tracked = self._registry.get(position_id)

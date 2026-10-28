@@ -60,6 +60,7 @@ class LedgerExecutor(FakeExecutor):
         self.details: list[tuple[str, str]] = []
         self.exiting: set[str] = set()
         self.tp_exiting: set[str] = set()
+        self.since: dict[str, datetime] = {}
         self.keep_open = False
 
     def live_positions(self) -> list[c.PositionRecord]:
@@ -84,6 +85,9 @@ class LedgerExecutor(FakeExecutor):
     def note_close_detail(self, position_id: str, detail: str) -> None:
         self.details.append((position_id, detail))
 
+    def paper_stop_since(self, position_id: str) -> datetime | None:
+        return self.since.get(position_id)
+
     def protection_exit_in_flight(self, position_id: str) -> tuple[str, str, str] | None:
         exiting = position_id in self.exiting | self.tp_exiting
         return ("exiting", "exiting", "leg_triggered") if exiting else None
@@ -104,12 +108,18 @@ def _runner(
     app = _app(tmp_path, now)
     ex = LedgerExecutor([pos])
     alerts = StubAlerter()
-    app.m = dataclasses.replace(app.m, executor=ex, alerter=alerts)
+    # The real patrol would close on the same moves (its shock line is one stop distance).
+    app.m = dataclasses.replace(app.m, executor=ex, alerter=alerts, patrol=_Patrol())
     fl = app.app_cfg.fast_loop.model_copy(update={"paper_stop_on_mainnet": mode, **fast})
     app.app_cfg = app.app_cfg.model_copy(update={"fast_loop": fl, "mode": run_mode})
     runner = Runner(app)
     runner.positions = [pos]
     return runner, ex, alerts
+
+
+async def _arm(runner: Runner, now: datetime, mark: bool = False) -> None:
+    """A mainnet price on the safe side, which a cross needs to have been preceded by."""
+    await runner.on_event(_mark(now, ENTRY) if mark else _trade(now, ENTRY))
 
 
 def _trade(now: datetime, price: float) -> c.Trade:
@@ -158,6 +168,13 @@ def test_paper_stop_exit_price_slips_against_the_position() -> None:
     assert ps.paper_exit_price(LONG, 100.0, 0.0) == 100.0
 
 
+def test_paper_stop_exit_price_takes_the_worse_of_slipped_stop_and_cross() -> None:
+    assert ps.paper_exit_price(LONG, 100.0, 2.0, 99.99) == pytest.approx(99.98)
+    assert ps.paper_exit_price(LONG, 100.0, 2.0, 99.5) == 99.5  # gapped through
+    assert ps.paper_exit_price(SHORT, 100.0, 2.0, 100.01) == pytest.approx(100.02)
+    assert ps.paper_exit_price(SHORT, 100.0, 2.0, 100.5) == 100.5
+
+
 # ---------------------------------------------------------------- main loop
 
 
@@ -167,6 +184,7 @@ async def test_paper_stop_last_cross_closes_demo_and_books_stop(
 ) -> None:
     pos = _pos(side)
     runner, ex, alerts = _runner(tmp_path, now, pos, mode="last")
+    await _arm(runner, now)
     await runner.on_event(_trade(now, _beyond(side, -1)))  # 1 bp short of the stop
     await _settle(runner)
     assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
@@ -180,7 +198,7 @@ async def test_paper_stop_last_cross_closes_demo_and_books_stop(
     assert booked is not None
     assert booked.stop_price == STOP[side] and booked.stop_source == "ledger"
     assert booked.cross_price == wick and booked.price_source == "last"
-    assert booked.paper_exit_price == pytest.approx(STOP[side] * (1 - SIGN[side] * 2e-4))
+    assert booked.paper_exit_price == wick  # 30 bp past the stop: worse than stop - 2 bp
     assert booked.close_requested is True
     on_disk = json.loads((tmp_path / "paper_stops.json").read_text(encoding="utf-8"))
     assert on_disk[pos.position_id]["paper_exit_price"] == booked.paper_exit_price
@@ -194,7 +212,10 @@ async def test_paper_stop_mark_mode_ignores_trades_and_uses_mark(
 ) -> None:
     pos = _pos(side)
     runner, ex, _ = _runner(tmp_path, now, pos, mode="mark", run_mode=run_mode)
+    await _arm(runner, now)  # a trade does not arm mark mode
     await runner.on_event(_trade(now, _beyond(side, 50)))
+    await _settle(runner)
+    await _arm(runner, now, mark=True)
     await _settle(runner)
     assert ex.closed == []
     await runner.on_event(_mark(now, _beyond(side, 1)))
@@ -202,6 +223,8 @@ async def test_paper_stop_mark_mode_ignores_trades_and_uses_mark(
     assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
     booked = runner._paper_stops.get(pos.position_id)
     assert booked is not None and booked.price_source == "mark"
+    # 1 bp past is better than stop - 2 bp: the slipped stop is booked.
+    assert booked.paper_exit_price == pytest.approx(STOP[side] * (1 - SIGN[side] * 2e-4))
 
 
 @pytest.mark.parametrize("side", [LONG, SHORT])
@@ -210,6 +233,8 @@ async def test_paper_stop_last_mode_ignores_mark(
 ) -> None:
     pos = _pos(side)
     runner, ex, _ = _runner(tmp_path, now, pos, mode="last")
+    await _arm(runner, now, mark=True)
+    await _arm(runner, now)
     await runner.on_event(_mark(now, _beyond(side, 50)))
     await _settle(runner)
     assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
@@ -223,7 +248,7 @@ async def test_paper_stop_uses_tightest_executor_level(
     runner, ex, _ = _runner(tmp_path, now, pos, paper_stop_slippage_bps=0.0)
     trailing = ENTRY + SIGN[side] * 20.0
     ex.levels[pos.position_id] = [("ledger", STOP[side]), ("trailing", trailing)]
-    await runner.on_event(_trade(now, ENTRY + SIGN[side] * 40.0))  # still past the trailing
+    await runner.on_event(_trade(now, ENTRY + SIGN[side] * 40.0))  # safe side of the trailing
     await _settle(runner)
     assert ex.closed == []
     await runner.on_event(_trade(now, trailing))
@@ -237,6 +262,7 @@ async def test_paper_stop_uses_tightest_executor_level(
 async def test_paper_stop_never_acts_in_live(tmp_path: Path, now: datetime, side: c.Side) -> None:
     pos = _pos(side)
     runner, ex, alerts = _runner(tmp_path, now, pos, mode="last", run_mode=c.RunMode.LIVE)
+    await _arm(runner, now)
     await runner.on_event(_trade(now, _beyond(side, 100)))
     runner._paper_stop_retry()
     await _settle(runner)
@@ -252,9 +278,11 @@ async def test_paper_stop_default_off_changes_nothing(
     pos = _pos(side)
     app = _app(tmp_path, now)
     ex = LedgerExecutor([pos])
-    app.m = dataclasses.replace(app.m, executor=ex)
+    app.m = dataclasses.replace(app.m, executor=ex, patrol=_Patrol())
     runner = Runner(app)
     runner.positions = [pos]
+    await _arm(runner, now)
+    await _arm(runner, now, mark=True)
     await runner.on_event(_trade(now, _beyond(side, 100)))
     await runner.on_event(_mark(now, _beyond(side, 100)))
     await _settle(runner)
@@ -269,6 +297,7 @@ async def test_paper_stop_books_once_and_closes_once(
     runner, ex, alerts = _runner(tmp_path, now, pos)
     ex.keep_open = True  # Demo close not filled yet: the ledger still says OPEN
     first = _beyond(side, 10)
+    await _arm(runner, now)
     await runner.on_event(_trade(now, first))
     await runner.on_event(_trade(now, _beyond(side, 40)))
     await _settle(runner)
@@ -289,6 +318,7 @@ async def test_paper_stop_retries_close_after_restart(
     pos = _pos(side)
     runner, ex, _ = _runner(tmp_path, now, pos)
     ex.keep_open = True
+    await _arm(runner, now)
     await runner.on_event(_trade(now, _beyond(side, 10)))
     await _settle(runner)
     later = now + timedelta(seconds=31)
@@ -308,6 +338,7 @@ async def test_paper_stop_hosted_exit_in_flight_only_books(
     pos = _pos(side)
     runner, ex, _ = _runner(tmp_path, now, pos)
     ex.exiting.add(pos.position_id)
+    await _arm(runner, now)
     await runner.on_event(_trade(now, _beyond(side, 10)))
     runner._paper_stop_retry()
     await _settle(runner)
@@ -323,6 +354,7 @@ async def test_paper_stop_take_profit_leg_exiting_books_nothing(
     pos = _pos(side)
     runner, ex, alerts = _runner(tmp_path, now, pos)
     ex.tp_exiting.add(pos.position_id)
+    await _arm(runner, now)
     await runner.on_event(_trade(now, _beyond(side, 10)))
     await _settle(runner)
     assert ex.closed == [] and alerts.sent == []
@@ -336,14 +368,159 @@ async def test_paper_stop_skips_position_already_closing(
     pos = _pos(side)
     runner, ex, _ = _runner(tmp_path, now, pos)
     ex.held = [pos.model_copy(update={"status": PositionStatus.CLOSING})]
+    await _arm(runner, now)
     await runner.on_event(_trade(now, _beyond(side, 10)))
     await _settle(runner)
     assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
     runner2, ex2, _ = _runner(tmp_path / "b", now, pos)
     runner2._closing.add(pos.position_id)
+    await _arm(runner2, now)
     await runner2.on_event(_trade(now, _beyond(side, 10)))
     await _settle(runner2)
     assert ex2.closed == [] and runner2._paper_stops.get(pos.position_id) is None
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_needs_safe_side_before_cross(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos)
+    # Restart / hot enable / fresh fill with the price already past the stop: not a cross.
+    await runner.on_event(_trade(now, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
+    await _arm(runner, now)
+    await runner.on_event(_trade(now, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+@pytest.mark.parametrize("source", ["trailing", "hosted"])
+async def test_paper_stop_new_level_placed_past_price_waits_for_safe_side(
+    tmp_path: Path, now: datetime, side: c.Side, source: str
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos, paper_stop_slippage_bps=0.0)
+    price = ENTRY + SIGN[side] * 30.0
+    await runner.on_event(_trade(now, price))  # safe against the ledger stop
+    # A leg placed off Demo's mark lands 2 past mainnet's price (the basis).
+    leg = price + SIGN[side] * 2.0
+    ex.levels[pos.position_id] = [("ledger", STOP[side]), (source, leg)]
+    await runner.on_event(_trade(now, price))
+    await _settle(runner)
+    assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
+    await runner.on_event(_trade(now, leg + SIGN[side] * 1.0))  # mainnet clears the leg
+    await runner.on_event(_trade(now, leg - SIGN[side] * 1.0))  # then crosses it
+    await _settle(runner)
+    booked = runner._paper_stops.get(pos.position_id)
+    assert booked is not None and (booked.stop_source, booked.stop_price) == (source, leg)
+    assert booked.paper_exit_price == leg - SIGN[side] * 1.0
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_ignores_prices_before_the_position_existed(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos)
+    before = pos.opened_at - timedelta(seconds=1)
+    await runner.on_event(_trade(before, ENTRY))
+    await runner.on_event(_trade(before, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [] and pos.position_id not in runner._paper_safe
+    filled = now - timedelta(seconds=5)
+    ex.since[pos.position_id] = filled  # limit entry filled later than it was opened
+    await runner.on_event(_trade(filled - timedelta(seconds=1), ENTRY))
+    assert pos.position_id not in runner._paper_safe
+    await runner.on_event(_trade(filled, ENTRY))
+    await runner.on_event(_trade(now, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
+
+
+class _Patrol:
+    def __init__(self) -> None:
+        self.seen = 0
+        self.urgent: set[str] = set()
+
+    def check(self, event: object, positions: object) -> None:
+        self.seen += 1
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_error_does_not_stop_patrol(
+    tmp_path: Path, now: datetime, side: c.Side, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pos = _pos(side)
+    runner, _, _ = _runner(tmp_path, now, pos)
+    patrol = _Patrol()
+    runner.m = runner.app.m = dataclasses.replace(runner.m, patrol=patrol)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr(runner, "_paper_stop_hit", boom)
+    await _arm(runner, now)
+    await runner.on_event(_trade(now, _beyond(side, 10)))
+    assert patrol.seen == 2
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_write_failure_still_closes_and_retries_write(
+    tmp_path: Path, now: datetime, side: c.Side, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pos = _pos(side)
+    runner, ex, _ = _runner(tmp_path, now, pos)
+    book = runner._paper_stops
+    real_save = book._save
+    fail = [True]
+
+    def flaky() -> None:
+        if fail[0]:
+            raise OSError("disk full")
+        real_save()
+
+    monkeypatch.setattr(book, "_save", flaky)
+    await _arm(runner, now)
+    await runner.on_event(_trade(now, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
+    assert book.dirty and not (tmp_path / "paper_stops.json").exists()
+    runner._paper_stop_retry()
+    assert book.dirty
+    fail[0] = False
+    runner._paper_stop_retry()
+    assert not book.dirty
+    on_disk = json.loads((tmp_path / "paper_stops.json").read_text(encoding="utf-8"))
+    assert pos.position_id in on_disk
+
+
+async def test_paper_stop_only_on_demo(tmp_path: Path, now: datetime) -> None:
+    pos = _pos(LONG)
+    runner, ex, _ = _runner(tmp_path, now, pos)
+    cfg = runner.app.app_cfg
+    runner.app.app_cfg = cfg.model_copy(update={"sim_environment": "legacy_testnet"})
+    await _arm(runner, now)
+    await runner.on_event(_trade(now, _beyond(LONG, 10)))
+    await _settle(runner)
+    assert ex.closed == [] and runner._paper_stops.get(pos.position_id) is None
+
+
+async def test_paper_stop_unreadable_file_alerts_and_is_kept(tmp_path: Path, now: datetime) -> None:
+    (tmp_path / "paper_stops.json").write_text("{not json", encoding="utf-8")
+    pos = _pos(LONG)
+    runner, _, alerts = _runner(tmp_path, now, pos)
+    runner._paper_stop_retry()
+    runner._paper_stop_retry()
+    await _settle(runner)
+    assert [a.title for a in alerts.sent] == ["模拟止损记账文件读不懂"]
+    await _arm(runner, now)
+    await runner.on_event(_trade(now, _beyond(LONG, 10)))
+    await _settle(runner)
+    assert [p.read_text() for p in tmp_path.glob("paper_stops.json.bad-*")] == ["{not json"]
+    assert pos.position_id in json.loads((tmp_path / "paper_stops.json").read_text())
 
 
 # ---------------------------------------------------------------- executor
@@ -470,7 +647,7 @@ def _book(root: Path, rec: c.PositionRecord, now: datetime) -> ps.PaperStop:
     stop = ps.book_stop(
         rec,
         ("ledger", STOP[rec.side]),
-        price=_beyond(rec.side, 30),
+        price=_beyond(rec.side, 1),
         price_source="last",
         crossed_at=now,
         now=now,
