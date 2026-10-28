@@ -356,6 +356,25 @@ class FastLoopConfig(Contract):
         description="限价止盈：价格要越过止盈价这么多 bp（0.01%）才开始算「没成交」。只碰到止盈价时"
         "限价单还在排队，不算；穿过去还没成交才改市价。0 = 碰到就算（旧行为）。",
     )
+    paper_stop_on_mainnet: Literal["off", "mark", "last"] = Field(
+        default="off",
+        description="模拟盘（paper / testnet，实盘永远不用）按主网价格判止损：Demo 的止损按 Demo "
+        "标记价触发，主网插针越过止损时 Demo 常常不触发、仓还拿着。off = 现状；mark = 主网标记价"
+        "（每秒一次）越过止损；last = 主网逐笔成交价越过止损。越过时马上要求平 Demo 仓（平仓原因"
+        "止损），并按止损价（加 paper_stop_slippage_bps）记这笔的模拟成交，Demo 实际成交另记。",
+    )
+    paper_stop_slippage_bps: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=100.0,
+        description="按主网止损记账时的模拟滑点（bp，按不利方向）：多单按 止损价 ×（1 − 它），"
+        "空单按 止损价 ×（1 + 它）。",
+    )
+    paper_stop_book_pnl: bool = Field(
+        default=True,
+        description="面板的已实现盈亏（今日、历史、走势、按卡成绩）对按主网止损记过账的仓用模拟"
+        "成交价算；关 = 一律用 Demo 实际成交。资金页（币安流水）和日亏熔断始终按 Demo 实际。",
+    )
     signal_max_age_s: float = Field(
         default=5.0, ge=0.5, le=60.0, description="信号从触发到风控员审核超过这么久就作废。"
     )

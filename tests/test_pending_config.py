@@ -127,6 +127,21 @@ def test_accepts_min_size_ratio_and_card_notional_min(tmp_path: Path) -> None:
     assert (fl.min_size_ratio, fl.respect_card_notional_min) == (0.25, True)
 
 
+def test_accepts_paper_stop_on_mainnet(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(
+        paths,
+        "app",
+        '[fast_loop]\npaper_stop_on_mainnet = "last"\npaper_stop_slippage_bps = 3.0\n'
+        "paper_stop_book_pnl = false\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    fl = load_app_config(paths.app).fast_loop
+    assert (fl.paper_stop_on_mainnet, fl.paper_stop_slippage_bps) == ("last", 3.0)
+    assert fl.paper_stop_book_pnl is False
+
+
 def test_accepts_tp_r_cap(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
     _pending(paths, "app", "[fast_loop]\ntp_r_cap = 1.0\n")

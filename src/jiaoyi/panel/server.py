@@ -291,6 +291,8 @@ def create_app(
     history_files = PanelFiles(data_dir, risk.day_reset_tz)
     history_lock = threading.Lock()
     live = actions.LiveConfigs(risk, app_cfg, config_paths)
+    for f in (files, history_files):
+        f.paper_book_pnl = lambda: live.get()[1].fast_loop.paper_stop_book_pnl
 
     def cfg() -> tuple[RiskConfig, AppConfig]:
         """配置文件改了就用新的（data_dir 例外：换目录要重启面板）。"""

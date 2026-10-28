@@ -47,17 +47,20 @@ from jiaoyi.contracts import (
     Kline,
     MarketEvent,
     MarketView,
+    MarkPrice,
     OrderIntent,
     Outcome,
     PositionRecord,
     PositionStatus,
     RiskVerdict,
     Role,
+    RunMode,
     Side,
     SymbolPool,
     Trade,
 )
 from jiaoyi.contracts.position import CloseReason
+from jiaoyi.core import paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
@@ -111,6 +114,8 @@ DESK_CHECK_EVERY_S = 30.0
 KEEPER_CONCURRENCY = 5
 ACCOUNT_RETRY_S = 1.0
 FROZEN_PEAK_CHECK_EVERY_S = 1.0  # 后台模式下多久看一眼哪笔仓该重读冻结盈利价证据
+PAPER_STOP_RETRY_S = 30.0
+"""A booked paper stop whose Demo position is still open asks for the close again this often."""
 SIGNAL_CACHE = 200  # 记住最近这么多条处理过的信号（面板重新检查 / 放行用）
 """持仓管家一轮里最多几笔一起问 Jev。"""
 RESTART_WAIT_CLOSE_S = 60.0
@@ -205,6 +210,20 @@ class _LedgerPositions(Protocol):
     """执行器：账本里此刻还没结束的持仓，不查 hummingbot（HbExecutorAdapter）。"""
 
     def live_positions(self) -> list[PositionRecord]: ...
+
+
+@runtime_checkable
+class _PaperStopLevels(Protocol):
+    """Executor: the stops a position holds and the close detail (HbExecutorAdapter)."""
+
+    def paper_stop_levels(self, position_id: str) -> list[tuple[str, float | None]]: ...
+
+    def note_close_detail(self, position_id: str, detail: str) -> None: ...
+
+
+@runtime_checkable
+class _ExitInFlight(Protocol):
+    def protection_exit_in_flight(self, position_id: str) -> tuple[str, str, str] | None: ...
 
 
 @runtime_checkable
@@ -429,6 +448,10 @@ class Runner:
         self._closing: set[str] = set()
         self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
         self._reviewing: set[str] = set()  # 管家正在问 Jev 的持仓：同一笔不同时问两次
+        self._paper_stops = paper_stop.PaperStopBook(
+            Path(app.app_cfg.data_dir) / paper_stop.PAPER_STOP_FILE
+        )
+        self._paper_close_at: dict[str, datetime] = {}  # last Demo close asked for a paper stop
         self._tp_past: dict[str, datetime] = {}
         """限价止盈：价格第一次穿过止盈价的时间（按仓位），待满 tp_limit_fallback_s 改市价平。"""
         self._last_prune: datetime | None = None
@@ -659,6 +682,9 @@ class Runner:
             for sym in self.m.predictor.take_gaps() - self._predictor_refilling:
                 self._predictor_refilling.add(sym)
                 self._spawn(self._refill_predictor(sym))
+        if isinstance(event, Trade | MarkPrice):
+            # Before the patrol: on mainnet the stop fills before any market close it sends.
+            self._paper_stop_check(event)
         action = self.m.patrol.check(event, self.positions)
         if action is not None:
             targets = [
@@ -666,7 +692,10 @@ class Runner:
             ]
             for pos in targets:
                 # 平仓要等执行器结束（最长十几秒），放后台并行，行情和其它标的不能停
-                if pos.position_id not in self._closing:
+                if (
+                    pos.position_id not in self._closing
+                    and self._paper_stops.get(pos.position_id) is None
+                ):
                     self._spawn(self._patrol_close(pos, action.reason), Role.PATROL)
         if isinstance(event, Trade) and self.app.app_cfg.limit_take_profit_on:
             self._tp_fallback(event)
@@ -745,6 +774,145 @@ class Runner:
             if (now - first).total_seconds() >= wait and pid not in self._closing:
                 self._tp_past.pop(pid, None)
                 self._spawn(self._tp_market(pos, t.price, wait))
+
+    def _paper_stop_mode(self) -> paper_stop.PriceSource | None:
+        """None = off. Live never runs it: there the exchange stop is the real one."""
+        mode = self.app.app_cfg.fast_loop.paper_stop_on_mainnet
+        if mode == "off" or self.app.app_cfg.mode == RunMode.LIVE:
+            return None
+        return mode
+
+    def _paper_stop_check(self, event: Trade | MarkPrice) -> None:
+        """First mainnet cross of a position's tightest stop: book the paper exit at the stop
+        and ask for the Demo close (``[fast_loop] paper_stop_on_mainnet``)."""
+        mode = self._paper_stop_mode()
+        if mode is None:
+            return
+        if isinstance(event, Trade):
+            if mode != "last":
+                return
+            price = event.price
+        else:
+            if mode != "mark":
+                return
+            price = event.mark_price
+        for pos in self.positions:
+            if (
+                pos.symbol != event.symbol
+                or pos.status is not PositionStatus.OPEN
+                or pos.entry_price is None
+                or self._paper_stops.get(pos.position_id) is not None
+            ):
+                continue
+            stop = self._paper_stop_level(pos)
+            if stop is None or not paper_stop.crossed(pos.side, price, stop[1]):
+                continue
+            self._paper_stop_hit(pos, stop, price, event.ts, mode)
+
+    def _paper_stop_level(self, pos: PositionRecord) -> tuple[str, float] | None:
+        ex = self.m.executor
+        candidates: list[tuple[str, float | None]] = [("ledger", pos.stop_loss_price)]
+        if isinstance(ex, _PaperStopLevels):
+            try:
+                candidates = ex.paper_stop_levels(pos.position_id) or candidates
+            except Exception:
+                log.exception("读不到 %s 的止损，主网止损这次只按账本止损判", pos.position_id)
+        return paper_stop.tightest_stop(pos.side, candidates)
+
+    def _exit_in_flight(self, position_id: str) -> bool:
+        ex = self.m.executor
+        if not isinstance(ex, _ExitInFlight):
+            return False
+        try:
+            found = ex.protection_exit_in_flight(position_id)
+        except Exception:
+            log.exception("读不到 %s 的托管保护状态，按没在退出处理", position_id)
+            return False
+        return found is not None and found[0] == "exiting"
+
+    def _paper_stop_hit(
+        self,
+        pos: PositionRecord,
+        stop: tuple[str, float],
+        price: float,
+        crossed_at: datetime,
+        mode: paper_stop.PriceSource,
+    ) -> None:
+        pid = pos.position_id
+        if pid in self._closing:
+            return  # a close decided before the cross would have filled before it on mainnet
+        current = next((p for p in self._ledger_positions() if p.position_id == pid), None)
+        if current is None or current.status is not PositionStatus.OPEN:
+            return
+        if current.entry_price is None:
+            return
+        now = self.app.clock()
+        exiting = self._exit_in_flight(pid)
+        fl = self.app.app_cfg.fast_loop
+        booked = paper_stop.book_stop(
+            current,
+            stop,
+            price=price,
+            price_source=mode,
+            crossed_at=crossed_at,
+            now=now,
+            slippage_bps=fl.paper_stop_slippage_bps,
+            close_requested=not exiting,
+        )
+        if not self._paper_stops.add(booked):
+            return
+        source_cn = "标记价" if mode == "mark" else "成交价"
+        sign = 1.0 if current.side is Side.LONG else -1.0
+        gross = sign * current.quantity * (booked.paper_exit_price - current.entry_price)
+        then = "Demo 的止损已在退出，只记账" if exiting else "已要求平 Demo 仓"
+        summary = (
+            f"{current.symbol} 主网{source_cn} {price:g} 越过止损 {stop[1]:g}，"
+            f"模拟按 {booked.paper_exit_price:g} 平（毛利 {gross:+.2f}U），{then}"
+        )
+        rec = self.app.recorders.get(Role.PATROL)
+        if rec is not None:
+            rec.record(
+                now,
+                Outcome.CLOSE,
+                summary,
+                symbol=current.symbol,
+                position_id=pid,
+                output={"paper_stop": booked.model_dump(mode="json"), "gross_usdt": gross},
+            )
+        log.warning("%s", summary)
+        self._spawn(
+            self.app._alert(AlertLevel.INFO, "主网价格越过止损", summary, "close_done"),
+            Role.PATROL,
+        )
+        if not exiting:
+            self._paper_stop_close(current, now)
+
+    def _paper_stop_close(self, pos: PositionRecord, now: datetime) -> None:
+        self._paper_close_at[pos.position_id] = now
+        ex = self.m.executor
+        if isinstance(ex, _PaperStopLevels):
+            try:
+                ex.note_close_detail(pos.position_id, paper_stop.PAPER_STOP_DETAIL)
+            except Exception:
+                log.exception("记平仓原因失败 %s", pos.position_id)
+        self._spawn(self.close(pos, CloseReason.STOP_LOSS), Role.PATROL)
+
+    def _paper_stop_retry(self) -> None:
+        """A booked position still open on Demo (the close failed, or the process restarted
+        before it went through) is asked to close again; the cross itself is never re-booked."""
+        if self._paper_stop_mode() is None:
+            return
+        now = self.app.clock()
+        for pos in self.positions:
+            pid = pos.position_id
+            if pos.status is not PositionStatus.OPEN or pid in self._closing:
+                continue
+            if self._paper_stops.get(pid) is None or self._exit_in_flight(pid):
+                continue
+            last = self._paper_close_at.get(pid)
+            if last is not None and (now - last).total_seconds() < PAPER_STOP_RETRY_S:
+                continue
+            self._paper_stop_close(pos, now)
 
     async def _tp_market(self, pos: PositionRecord, price: float, wait: float) -> None:
         log.warning(
@@ -1238,6 +1406,10 @@ class Runner:
             self._card_published()  # 异步入场由OPENING真正变OPEN时补查。
         if before - {p.position_id for p in self.positions}:
             self._reconcile_soon()  # 有仓刚结束（止损 / 止盈 / 到时平）：马上核对币安是不是 0
+        live = {p.position_id for p in self.positions}
+        for pid in set(self._paper_close_at) - live:
+            self._paper_close_at.pop(pid, None)
+        self._paper_stop_retry()
 
     def _contract_halt(self, info: ContractInfo) -> None:
         """临时不在交易 → 记进 ``app.halted``（只挡新开仓）；回到 TRADING → 放开。都只记日志。"""

@@ -119,6 +119,9 @@ HOT_FAST: frozenset[str] = frozenset(
         "patrol_alert_pct_1m",
         "patrol_shock_stop_mult",
         "patrol_alert_stop_mult",
+        "paper_stop_on_mainnet",
+        "paper_stop_slippage_bps",
+        "paper_stop_book_pnl",
         # 移动止损 / 保本 / 挂单回踩
         "breakeven_on",
         "breakeven_trigger_r",

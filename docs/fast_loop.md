@@ -379,3 +379,30 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 2. 账本没有新字段：锚定 / 收紧用的就是上面反向卡那 7 个字段，按上面反向卡的回滚步骤做；
 3. 作战卡契约多了 `CardSymbol.no_trade_from`，为空时不落盘（和以前一字不差，`research_token` 也不变）；只要 `data/battle_card.json` 或 `data/card_review/cards.jsonl` 里有这个键（闸门改过观望的卡），回退前停主程序把这些 `no_trade_from` 键删掉，或等下一轮开会出新卡再回退；
 4. 管家的 `data/keeper_opposite.json` 不记中性卡的东西。
+
+## 模拟盘按主网价格判止损（`paper_stop_on_mainnet`，默认关）
+
+问题：Demo 的止损（托管止损腿、保命单）按 **Demo 的标记价**触发，下单信号用的是**主网**行情。主网插针越过我们的止损时，Demo 标记价常常没跟着到，Demo 上的止损不触发、仓还拿着（「插针都过了止损线，我们的模拟还拿着」）；放到主网，这笔早被止损了。程序自己反应不够快、抓不住插针，所以记账不能靠反应速度。
+
+设置（`[fast_loop]`，热生效，面板「执行 → 模拟盘按主网止损」可改，也能写进 `config/app.pending.toml`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `paper_stop_on_mainnet` | `"off"` | `off` = 现状；`mark` = 主网标记价（`markPrice@1s`）越过止损；`last` = 主网逐笔成交价（`aggTrade`）越过止损，插针更容易碰到 |
+| `paper_stop_slippage_bps` | `2.0` | 按止损价记模拟成交时的滑点，按不利方向：多 = 止损价 ×（1 − bp），空 = 止损价 ×（1 + bp） |
+| `paper_stop_book_pnl` | `true` | 面板已实现盈亏对记过账的仓用模拟成交价；`false` = 一律 Demo 实际成交 |
+
+只对 `paper` / `testnet`；`live` 不管开关一律不做（实盘的交易所止损就是真的）。不加任何请求：用的就是主循环本来就订着的主网行情（持仓的币一直在订阅集里）。
+
+**哪个止损**（`HbExecutorAdapter.paper_stop_levels`，多空对称，取价格先碰到的那个 = 多取最高、空取最低）：账本止损 `stop_loss_price`；交易所上在挂的每条止损侧托管腿（固定 / 移动 / 收紧 / 保命腿，`brackets.live_leg`：已确认、NEW、没触发）；已启动的移动止损价 `trailing_stop_price`（还没换上新腿也算）；反向卡收紧价 `tightened_stop_price`；旧通道仓在挂的保命单。碰到即算越过（多：价 ≤ 止损；空：价 ≥ 止损）。
+
+**越过时**（`Runner._paper_stop_check`，在巡逻兵之前跑：主网上止损先于巡逻兵的市价平成交）：
+
+1. 再查一次账本，这笔仍是 `open` 才算；正在平（`closing`，或本进程已在平）不记——平仓决定在越过之前，主网上那张市价单早成交了。
+2. 记账（每笔仓只记第一次，写 `data/paper_stops.json`）：止损价、来源、越过的主网价和交易所时间、滑点、`paper_exit_price`、是否要求了平仓。决策记录（巡逻兵，`output.paper_stop`）+ 一条 INFO 推送「主网价格越过止损」。
+3. Demo 自己的止损已在退出（`protection_exit_in_flight` = `exiting`）：只记账，不再下平仓单。否则在账本上记 `close_detail`「主网价格越过止损」，走原来的平仓入口 `Runner.close(…, stop_loss)`：同一笔正在平就不重复提交，执行器的每仓退出锁、托管直连平仓的去重和对账员的宽限都照旧。平仓记录和「平仓完成」推送写「原因：主网价格越过止损」（只在平仓原因是止损时显示，别的原因平掉的不挂这句）。
+4. 记了账的仓巡逻兵不再另发平仓。平仓没成功或进程重启时，每次刷新持仓（管家每轮）对还开着的、记过账的仓再要求平一次（同一笔 30 秒内最多一次）；不会重新记账。
+
+**怎么算钱**：`data/paper_stops.json` 只存模拟成交；Demo 实际成交照旧在 `positions.json`（`exit_price` / `realized_pnl_usdt`）。面板 `PanelFiles.ledger()` 在 `paper_stop_book_pnl` 开着时把记过账、已平、净盈亏已知的仓换成模拟成交：出场价 = `paper_exit_price`；净盈亏 = Demo 净盈亏 + 方向 × 数量 ×（模拟出场 − Demo 出场）（手续费仍是 Demo 实扣；Demo 出场价还没回填时按 方向 × 数量 ×（模拟出场 − 入场）− 手续费）。用到它的：首页今日已平盈亏 / 胜率 / 手续费、历史页（出场价下面小字写 Demo 实际出场，悬停看 Demo 实际净盈亏）、今日盈亏曲线、作战卡历史的已平盈亏。**不改**的：资金页（币安收入流水，没有流水时按账本的 Demo 实际成交）、日亏熔断和账户权益（执行层 `account()` 按 Demo 账本 / 余额）——这些是 Demo 账户里真实动的钱。
+
+**回滚**：`positions.json` 没有新字段（`close_detail` 只在平仓进行中落盘，平完就不写，原本就是这样），旧代码直接能读。回退到没有这三个键的旧代码前，先从 `config/app.toml` 的 `[fast_loop]` 删掉 `paper_stop_on_mainnet` / `paper_stop_slippage_bps` / `paper_stop_book_pnl`（旧代码按未知字段拒绝启动）。`data/paper_stops.json` 旧代码不读，可留可删；删了面板就回到 Demo 实际成交。
