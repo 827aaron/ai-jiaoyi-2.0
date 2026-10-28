@@ -180,6 +180,19 @@ class JevDecisionModel:
         self._cooldown_until: float | None = None
         self._served_model: str | None = None
 
+    def with_own_errors(self) -> JevDecisionModel:
+        """Same transport, config and clocks, but its own error counter and cooldown, so one
+        caller's failures cannot put the other into cooldown. Closing the transport stays with
+        the original instance."""
+        return JevDecisionModel(
+            self._t,
+            self._cfg,
+            timeout_ms=round(self._timeout_s * 1000),
+            day_reset_tz=self._tz,
+            clock=self._clock,
+            wall=self._wall,
+        )
+
     @property
     def health(self) -> Health:
         if self._cooldown_until is not None and self._clock() < self._cooldown_until:

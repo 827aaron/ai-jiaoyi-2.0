@@ -57,6 +57,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "max_slippage_stop_frac",
         "max_spread_stop_frac",
         "card_caps_binding",
+        "leverage_clamp_to_bracket",
         "card_range_clamp",
         "max_notional_book_frac",
         "book_depth_levels",
@@ -188,6 +189,7 @@ HOT_APP: frozenset[str] = frozenset(
         "card_score_window_days",
         "reconcile_opening_grace_s",
         "reconcile_closing_grace_s",
+        "account_read_retries",
         *(field_of(k) for k in KINDS),  # Telegram 告警类别开关
     }
 )

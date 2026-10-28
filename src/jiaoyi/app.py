@@ -94,7 +94,7 @@ from jiaoyi.execution.user_stream import (
 )
 from jiaoyi.gate.context import EntryContextSource
 from jiaoyi.gate.entry import JevEntryGate
-from jiaoyi.gate.jev import decision_model_from_config
+from jiaoyi.gate.jev import JevDecisionModel, decision_model_from_config
 from jiaoyi.gate.rule_model import RuleDecisionModel
 from jiaoyi.gate.stub import StubDecisionModel, StubEntryGate
 from jiaoyi.interfaces import (
@@ -490,6 +490,7 @@ def _build_execution(
             protection_leg_order=app_cfg.protection_leg_order,
             hosted_close_mode=app_cfg.hosted_close_mode,
             position_mode_cache_s=app_cfg.position_mode_cache_s,
+            leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:
@@ -706,8 +707,11 @@ def build_modules(
                 ),
             ),
         )
+        keeper_model: DecisionModel = model
+        if not app_cfg.jev_shared_cooldown and isinstance(model, JevDecisionModel):
+            keeper_model = model.with_own_errors()
         keeper = JevKeeper(
-            model,
+            keeper_model,
             fast,
             features.snapshot,
             cards.current,

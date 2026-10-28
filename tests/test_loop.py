@@ -767,3 +767,75 @@ async def test_spend_alert_has_its_own_title_and_kind(tmp_path: Path, now: datet
     assert "只提醒" in spend.body and "暂停" not in spend.title
     # 单独一类：静音「暂停开会」不影响它，反过来也一样
     assert "spend_alert" in KINDS and "notify_spend_alert" in type(app.app_cfg).model_fields
+
+
+class FlakyAccount(FakeExecutor):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+        self.reads = 0
+
+    async def account(self) -> c.AccountState:
+        self.reads += 1
+        if self.reads <= self.failures:
+            raise RuntimeError("HbApiError(POST /portfolio/state)")
+        return await super().account()
+
+
+def _account_wire(tmp_path: Path, now: datetime, ex: FakeExecutor, retries: int) -> Runner:
+    app = _app(tmp_path, now)
+    app.app_cfg = app.app_cfg.model_copy(update={"account_read_retries": retries})
+    app.m = dataclasses.replace(
+        app.m, executor=ex, gate=FakeGate(), risk=FakeRisk(True), cards=FakeCards(h.card(now))
+    )
+    return Runner(app)
+
+
+def _guard_records(r: Runner, now: datetime) -> list[c.DecisionRecord]:
+    day = now.date().isoformat()
+    return [x for x in r.app.log.read_day(day) if x.role == c.Role.RISK_GUARD]
+
+
+async def test_account_read_failure_records_reject(tmp_path: Path, now: datetime) -> None:
+    ex = FlakyAccount(failures=1)
+    r = _account_wire(tmp_path, now, ex, retries=0)
+    await r.handle_signal(h.signal(now))
+    assert ex.opened == [] and ex.reads == 1
+    [rec] = _guard_records(r, now)
+    assert rec.outcome == c.Outcome.REJECT and rec.signal_id == h.signal(now).signal_id
+    assert "读账户失败，本信号放弃" in rec.summary and "portfolio/state" in rec.summary
+    assert rec.output["detail"]["by"] == "account_read"
+
+
+async def test_account_read_retries_then_opens(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("jiaoyi.loop.ACCOUNT_RETRY_S", 0.0)
+    ex = FlakyAccount(failures=2)
+    r = _account_wire(tmp_path, now, ex, retries=2)
+    await r.handle_signal(h.signal(now))
+    assert ex.reads == 3 and ex.opened == ["int-0001"]
+    assert _guard_records(r, now) == []
+    ex = FlakyAccount(failures=3)
+    r = _account_wire(tmp_path / "exhausted", now, ex, retries=2)
+    await r.handle_signal(h.signal(now))
+    assert ex.reads == 3 and ex.opened == []
+    assert [x.output["detail"]["retries"] for x in _guard_records(r, now)] == [2]
+
+
+async def test_spawned_task_exception_is_recorded(tmp_path: Path, now: datetime) -> None:
+    r = Runner(_app(tmp_path, now))
+
+    async def boom() -> None:
+        raise ValueError("lost")
+
+    async def quiet() -> None:
+        raise ValueError("no role")
+
+    r._spawn(boom(), c.Role.RISK_GUARD)
+    r._spawn(quiet())
+    await asyncio.gather(*r._tasks, return_exceptions=True)
+    await asyncio.sleep(0)
+    [rec] = _guard_records(r, now)
+    assert rec.outcome == c.Outcome.ERROR and "ValueError: lost" in rec.summary
+    assert rec.output["task"].endswith("boom")

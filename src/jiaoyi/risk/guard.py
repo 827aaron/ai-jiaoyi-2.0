@@ -169,8 +169,23 @@ DELIST_WINDOW = timedelta(days=7)
 """排了下架、离下架不到这么久就不开新仓（新信号研究 10-24「不做」过滤）。"""
 
 
+@dataclass(frozen=True)
+class LeverageBracket:
+    """One tier of Binance's per-symbol leverage brackets (/fapi/v1/leverageBracket)."""
+
+    notional_cap: float
+    """Largest position notional (USDT) allowed at ``initial_leverage``."""
+    initial_leverage: int
+
+
 class LotRulesProvider(Protocol):
     def lot_rules(self, symbol: str) -> LotRules | None: ...
+
+
+class LeverageBracketProvider(Protocol):
+    def leverage_brackets(self, symbol: str) -> tuple[LeverageBracket, ...] | None:
+        """Tiers ascending by notional cap; None = unknown (the guard then keeps its leverage)."""
+        ...
 
 
 class DayLossBreaker:
@@ -846,9 +861,18 @@ class RiskGuardImpl:
                 card_notional_max=cs.notional_usdt.max,
                 card_leverage_max=cs.leverage.max,
             )
+        tier_cap: float | None = None
+        if fast.leverage_clamp_to_bracket:
+            lev, tier_cap = self._bracket_clamp(signal.symbol, lev, detail)
+            if binding_card and lev < cs.leverage.min:
+                reasons.append(
+                    f"币安 {signal.symbol} 杠杆上限 {lev}x 低于作战卡杠杆下限 {cs.leverage.min}"
+                )
+                return None
 
         caps = {
             **({"作战卡名义上限": cs.notional_usdt.max} if binding_card else {}),
+            **({"币安杠杆分层名义上限": tier_cap} if tier_cap is not None else {}),
             "单笔名义上限": risk.notional_cap(equity),
             "总敞口余量": risk.max_total_exposure_x * equity - account.open_notional_usdt,
             "相关组敞口余量": risk.category_exposure_x[cs.category] * equity
@@ -952,6 +976,24 @@ class RiskGuardImpl:
             trailing_stop_pct=trail_delta,
             approved_at=now,
         )
+
+    def _bracket_clamp(
+        self, symbol: str, lev: int, detail: dict[str, float | str]
+    ) -> tuple[int, float | None]:
+        """(leverage clamped to the symbol's Binance maximum, the notional cap of the highest tier
+        that still allows it). Unknown tiers keep ``lev`` and add no cap, as with the switch off."""
+        get = getattr(self._lots, "leverage_brackets", None)
+        tiers = get(symbol) if callable(get) else None
+        if not tiers:
+            detail["leverage_bracket"] = "没拿到币安杠杆分层，杠杆按原值"
+            return lev, None
+        top = max(t.initial_leverage for t in tiers)
+        detail["bracket_max_leverage"] = top
+        if lev > top:
+            detail["leverage_clamped"] = f"杠杆 {lev}x 超过币安 {symbol} 上限 {top}x，按 {top}x 算"
+            lev = top
+        cap = max(t.notional_cap for t in tiers if t.initial_leverage >= lev)
+        return lev, cap
 
     def _trailing(self, stop_pct: float) -> tuple[float | None, float | None, str]:
         """保本 / 移动止损（持仓管家的开关，默认关）→ hummingbot trailing_stop（启动线, 回撤距离）。

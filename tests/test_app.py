@@ -286,6 +286,23 @@ async def test_start_warms_up_decision_model(tmp_path: Path, now: datetime) -> N
     await app.stop()
 
 
+@pytest.mark.parametrize("shared", [True, False])
+async def test_keeper_jev_cooldown_follows_switch(
+    tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch, shared: bool
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+
+    t = MockJevTransport()
+    built = JevDecisionModel(t, c.FastLoopConfig(), timeout_ms=1500)
+    monkeypatch.setattr(app_mod, "decision_model_from_config", lambda *a, **kw: built)
+    app = _app(tmp_path, now, jev_shared_cooldown=shared)
+    keeper_model = app.m.keeper._model  # type: ignore[attr-defined]
+    assert app.m.decision_model is built and app.m.gate._model is built  # type: ignore[attr-defined]
+    assert (keeper_model is built) is shared
+    assert isinstance(keeper_model, JevDecisionModel) and keeper_model._t is t
+    await app.stop()
+
+
 async def test_start_refuses_on_account_mismatch_and_alerts(tmp_path: Path, now: datetime) -> None:
     from jiaoyi.execution.account_check import AccountMismatch
 

@@ -270,6 +270,13 @@ class FastLoopConfig(Contract):
         description="作战卡上的名义价值 / 杠杆范围当硬约束。默认关：只当军师建议记下来，"
         "仓位按风险金额和你的硬上限算，杠杆用 max_leverage。",
     )
+    leverage_clamp_to_bracket: bool = Field(
+        default=False,
+        description="杠杆按币安这个币的上限封顶（执行所的 /fapi/v1/leverageBracket，启动时和之后"
+        "每天拉一次）：超过上限的按上限开，保证金按封顶后的杠杆重算，名义价值再不超过该杠杆那档"
+        "的名义上限；每笔风险金额和各项敞口上限不变。默认关 = 原行为（杠杆超过上限时币安拒绝"
+        "设杠杆，这笔不开）。分层没拉到时按原杠杆。",
+    )
     card_range_clamp: bool = Field(
         default=True,
         description="作战卡的止损 ATR / 止盈 R 范围超出档位范围时取交集，交集为空才不做；"
@@ -1115,6 +1122,19 @@ class AppConfig(Contract):
         le=8,
         description="拍板人同时最多判几个信号（不同的币并行；同一个币一次只判一个，"
         "后来的排队、只留最新一条）。OpenRouter 和开会共用并发，别开太大。",
+    )
+    jev_shared_cooldown: bool = Field(
+        default=True,
+        description="开仓拍板和持仓管家共用一份 Jev 连续出错计数和冷却（原行为）：管家连错几次"
+        "也会让开仓拍板进冷却。关掉 = 两边各数各的、各冷却各的（通道、模型、超时照旧共用）。"
+        "改后重启生效。",
+    )
+    account_read_retries: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="拍板通过后开仓前读账户（hummingbot 的账户状态）失败时，隔 1 秒再读几次；"
+        "都失败就记一条风控员拒绝「读账户失败，本信号放弃」。0 = 不重读（原行为）。热生效。",
     )
     keeper_interval_s: int = Field(ge=5, le=120)
     reconcile_interval_s: int = Field(ge=10, le=300)

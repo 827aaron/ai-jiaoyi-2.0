@@ -102,6 +102,7 @@ CONFIG_WATCH_EVERY_S = 3.0  # 看设置文件变没变（热生效，core/hotcon
 DESK_CHECK_EVERY_S = 30.0
 """大盘台：多久看一次该不该跑（定时格子 / 翻转 / 急动），顺便喂一次价给急动检测。"""
 KEEPER_CONCURRENCY = 5
+ACCOUNT_RETRY_S = 1.0
 FROZEN_PEAK_CHECK_EVERY_S = 1.0  # 后台模式下多久看一眼哪笔仓该重读冻结盈利价证据
 SIGNAL_CACHE = 200  # 记住最近这么多条处理过的信号（面板重新检查 / 放行用）
 """持仓管家一轮里最多几笔一起问 Jev。"""
@@ -596,10 +597,28 @@ class Runner:
 
         return asyncio.create_task(loop())
 
-    def _spawn(self, coro: Awaitable[None]) -> None:
+    def _spawn(self, coro: Awaitable[None], role: Role | None = None) -> None:
+        """``role``: whose decision log gets an ERROR record if the task dies with an exception;
+        without one the failure is only logged."""
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda t: self._task_failed(t, role))
+
+    def _task_failed(self, task: asyncio.Future[None], role: Role | None) -> None:
+        if task.cancelled() or (exc := task.exception()) is None:
+            return
+        coro = task.get_coro() if isinstance(task, asyncio.Task) else None
+        what = getattr(coro, "__qualname__", None) or repr(task)
+        log.error("后台任务 %s 出错", what, exc_info=(type(exc), exc, exc.__traceback__))
+        rec = self.app.recorders.get(role) if role is not None else None
+        if rec is not None:
+            rec.record(
+                self.app.clock(),
+                Outcome.ERROR,
+                f"后台任务 {what} 出错：{type(exc).__name__}: {exc}"[:300],
+                output={"task": what, "error": repr(exc)[:500]},
+            )
 
     async def _heartbeat_tick(self) -> None:
         self.app.heartbeat_all()
@@ -639,7 +658,7 @@ class Runner:
             for pos in targets:
                 # 平仓要等执行器结束（最长十几秒），放后台并行，行情和其它标的不能停
                 if pos.position_id not in self._closing:
-                    self._spawn(self._patrol_close(pos, action.reason))
+                    self._spawn(self._patrol_close(pos, action.reason), Role.PATROL)
         if isinstance(event, Trade) and self.app.app_cfg.limit_take_profit_on:
             self._tp_fallback(event)
         if isinstance(event, Trade):
@@ -649,7 +668,7 @@ class Runner:
             now = self.app.clock()
             for signal in self.m.trigger.check(snap, self.m.cards.current(now), now):
                 # 拍板要几百毫秒，放后台，不卡行情
-                self._spawn(self.handle_signal(signal))
+                self._spawn(self.handle_signal(signal), Role.RISK_GUARD)
             if isinstance(self.m.trigger, _AgainstAware):
                 for sig in self.m.trigger.pop_against():
                     self._route_against(self.m.trigger, sig, now)
@@ -679,7 +698,7 @@ class Runner:
             if isinstance(self.m.patrol, _HasUrgent):
                 self.m.patrol.urgent.add(pos.position_id)  # 和巡逻兵报警线同一条急查通道
             else:
-                self._spawn(self._review(pos))
+                self._spawn(self._review(pos), Role.KEEPER)
 
     def _tp_fallback(self, t: Trade) -> None:
         """限价止盈挂着却没成交：价格穿过止盈价 ``tp_limit_fallback_through_bps`` 以上、
@@ -816,7 +835,7 @@ class Runner:
 
     def _request_chase(self, intent: OrderIntent) -> None:
         """执行层：挂单没成交要追。另起任务，别在执行层巡检里拿开仓锁（全平时持锁会调巡检）。"""
-        self._spawn(self._chase(intent))
+        self._spawn(self._chase(intent), Role.RISK_GUARD)
 
     async def _chase(self, intent: OrderIntent) -> None:
         """和 handle_signal 一样在开仓锁里读账户 → 复核 → 下单，笔数 / 敞口不会多算。"""
@@ -943,7 +962,11 @@ class Runner:
                     Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡或大盘方向已变，重新等信号", now
                 )
                 return
-            account = await self.m.executor.account()
+            try:
+                account = await self._read_account()
+            except Exception as e:
+                self._account_read_failed(signal, card, e)
+                return
             now = self.app.clock()
             fresh = self.m.cards.current(now)
             if not self._same_decision_context(card, fresh):
@@ -971,6 +994,49 @@ class Runner:
             # 执行器等成交后自己挂保命止损，挂不上就立即平掉（不留裸仓），这里不用再管
             self.positions = [*self.positions, pos]
             self._card_published()  # 开仓在途期间卡可能更新，立即按当前卡复核。
+
+    async def _read_account(self) -> AccountState:
+        retries = self.app.app_cfg.account_read_retries
+        for attempt in range(retries + 1):
+            try:
+                return await self.m.executor.account()
+            except Exception as e:
+                if attempt == retries:
+                    raise
+                log.warning(
+                    "读账户失败（第 %d 次），%g 秒后重读：%r", attempt + 1, ACCOUNT_RETRY_S, e
+                )
+                await asyncio.sleep(ACCOUNT_RETRY_S)
+        raise AssertionError("unreachable")
+
+    def _account_read_failed(
+        self, signal: CandidateSignal, card: BattleCard, error: BaseException
+    ) -> None:
+        """The gate has already been paid for this signal, so the loss is recorded where the
+        panel shows rejects instead of vanishing with the task."""
+        log.warning("%s 读账户失败，本信号放弃：%r", signal.symbol, error)
+        rec = self.app.recorders.get(Role.RISK_GUARD)
+        if rec is None:
+            return
+        why = f"读账户失败，本信号放弃：{type(error).__name__}: {error}"[:300]
+        side = "多" if signal.side_hint == Side.LONG else "空"
+        rec.record(
+            self.app.clock(),
+            Outcome.REJECT,
+            f"{signal.symbol} {side}：{why}",
+            symbol=signal.symbol,
+            signal_id=signal.signal_id,
+            card_id=card.card_id,
+            output={
+                "approved": False,
+                "reasons": [why],
+                "detail": {
+                    "by": "account_read",
+                    "error": repr(error)[:500],
+                    "retries": self.app.app_cfg.account_read_retries,
+                },
+            },
+        )
 
     async def _manual_chain(self, cmd: PanelCommand, path: Path) -> None:
         """后台跑重新检查 / 放行，跑完写回执（文字和同步时一样）。"""
@@ -1153,7 +1219,7 @@ class Runner:
     def _reconcile_soon(self) -> None:
         """平仓后立刻对一次账：万一平仓单在保命止损之后又成交开出反手仓，不等下一个 30 秒。"""
         if not self._reconciling and not self._leaving:
-            self._spawn(self.reconcile_tick())
+            self._spawn(self.reconcile_tick(), Role.RECONCILER)
         if self.app.ledger is not None:
             self.app.ledger.poke()  # 出场均价、手续费、今日盈亏马上按币安成交回填
 
@@ -1469,7 +1535,7 @@ class Runner:
             and self._keeper_market[p.position_id].pending_market_view_id is not None
         ]
         if held and not self._leaving:
-            self._spawn(self._review_all(held))
+            self._spawn(self._review_all(held), Role.KEEPER)
 
     async def _review(self, pos: PositionRecord, *, urgent: bool = False) -> None:
         """同一笔仓同一时间只问一次 Jev：例行复查还在问时来了急查，等它问完下一秒再查
@@ -1577,7 +1643,7 @@ class Runner:
         if self._frozen_peak_background():
             # 一笔仓慢（交易所证据、Jev 重试）不推迟别的仓下一轮：不等这一轮问完；
             # 还在问的仓下一轮由 _review_all 跳过，不会重叠。
-            self._spawn(self._review_all(held))
+            self._spawn(self._review_all(held), Role.KEEPER)
         else:
             await self._review_all(held)
         if keeper is not None and not self.positions:
@@ -2440,7 +2506,7 @@ class Runner:
                 await self.refresh_positions()
                 targets = list(self.positions)
             for p in targets:
-                self._spawn(self.close(p, CloseReason.MANUAL))
+                self._spawn(self.close(p, CloseReason.MANUAL), Role.EXECUTOR)
             await self.app._alert(
                 AlertLevel.WARN, "面板全部平仓", "已同时暂停开新仓，恢复需另发指令", "control"
             )
@@ -2451,7 +2517,7 @@ class Runner:
             pos = next((p for p in self.positions if p.position_id == pid), None)
             if pos is None:
                 return "rejected", f"没有持仓 {pid}"
-            self._spawn(self.close(pos, CloseReason.MANUAL))
+            self._spawn(self.close(pos, CloseReason.MANUAL), Role.EXECUTOR)
             return "done", f"已提交平仓 {pos.symbol} {pid}"
         if cmd.kind in POOL_ACTIONS:
             sym = cmd.params.get("symbol", "")
