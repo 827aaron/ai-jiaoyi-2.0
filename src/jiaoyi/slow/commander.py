@@ -413,6 +413,7 @@ class BattleCardCommander:
         self._market_log = market_log
         self._log_meta: dict[str, Any] = dict(log_meta or {})
         self._always: set[str] = set()  # 设置里「每轮进总盘会」的币（本轮池子里的）
+        self._direct_n = 0  # 上一轮不经挑选直接开会的币数（心跳文字用）
         self._tiers = tiers or TierRules()
         self._tier_path = tier_path
         self._tier_of: dict[str, str] = {}
@@ -2510,6 +2511,7 @@ class BattleCardCommander:
             and e.symbol not in self._untradeable
         ]
         free = [e for e in candidates if e not in pinned and e not in direct]
+        self._direct_n = len(direct)
         pick_started = time.monotonic()
         est = self._estimate(self._pick_costs)
         self._charge(est)  # 开会前先按估算预记并落盘：开到一半被强退，这笔钱也不会漏
@@ -3264,9 +3266,10 @@ class BattleCardCommander:
         self._bump(
             ok=True, cost=0.0, ms=(time.monotonic() - started) * 1000
         )  # 选币花费已在开会时计入
+        also = f" + {self._direct_n} 个直接开会" if self._direct_n else ""
         self._heartbeat(
             Health.OK,
-            f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张）",
+            f"当前卡 v{card.version}，{tradable} 个可做（每轮最多 {self._pick_max} 张{also}）",
             None,
         )
 

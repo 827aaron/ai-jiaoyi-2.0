@@ -2085,7 +2085,7 @@ def build_settings(
         fast_loop=_items(app.fast_loop, "fast_loop"),
         predictor=_items(app.predictor, "predictor"),
         schedule=_items(slow.schedule, "schedule"),
-        schedule_caution=slow.schedule.caution(app.card_pick_max),
+        schedule_caution=slow.schedule.caution(app.card_pick_max, slow.direct_meet_count()),
         budget=_items(
             slow.budget, "budget", frozenset(BudgetConfig.model_fields) - {"daily_cost_limit_usd"}
         ),

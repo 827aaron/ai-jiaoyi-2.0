@@ -249,6 +249,19 @@ def test_tier_is_meeting_interval() -> None:
         assert sched["min_refresh_gap_min"] <= mins
 
 
+def test_schedule_caution_counts_direct_meet_coins_against_concurrency() -> None:
+    from jiaoyi.slow.settings import ScheduleConfig
+
+    cfg = ScheduleConfig(concurrency=16)
+    assert cfg.caution(15) is None
+    hint = cfg.caution(15, 2)
+    assert hint is not None and "共 17 场" in hint and "concurrency（16）" in hint
+    assert cfg.caution(14, 2) is None
+    slow = SlowConfig.model_validate({"screener": {"tiers": {"always_candidates_meet": True}}})
+    assert slow.direct_meet_count() == 2
+    assert SlowConfig().direct_meet_count() == 0
+
+
 def test_15m_tier_warns_instead_of_stretching() -> None:
     from jiaoyi.core import profiles
     from jiaoyi.slow.settings import ScheduleConfig

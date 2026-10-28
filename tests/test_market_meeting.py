@@ -11,10 +11,10 @@ from typing import Any
 import httpx
 import pytest
 
-from jiaoyi.contracts import BattleCard, SizeTier, SymbolPoolEntry
+from jiaoyi.contracts import BattleCard, Side, SizeTier, SymbolPoolEntry
 from jiaoyi.slow import market_table
 from jiaoyi.slow.binance_stats import BinanceStatsSource
-from jiaoyi.slow.commander import PickResult, TierRules
+from jiaoyi.slow.commander import Pick, PickResult, TierRules
 from jiaoyi.slow.market_log import MarketLog, pool_rows, round_id
 from jiaoyi.slow.screener import (
     CodeSymbolScreener,
@@ -397,6 +397,46 @@ async def test_always_candidates_meet_skips_a_coin_the_venue_cannot_trade(
     await c.refresh(_majors_pool(now), "scheduled")
     assert eng.offered == [["AAUSDT", "BBUSDT", "CCUSDT", "ETHUSDT"]]
     assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT", "BTCUSDT"]
+
+
+@pytest.mark.parametrize("how", ["held", "pinned"])
+async def test_always_candidates_meet_forced_major_meets_once_and_is_not_direct(
+    tmp_path: Path, now: datetime, how: str
+) -> None:
+    mm = MarketLog(tmp_path / "mm")
+    eng, c, _ = _meet_round(tmp_path, now, meet=True, market_log=mm)
+    btc = _always(centry("BTCUSDT", tier="mid", pinned=how == "pinned"))
+    if how == "held":
+        c.set_held({"BTCUSDT": Side.LONG})
+    p = cpool(now, centry("AAUSDT", tier="head"), centry("BBUSDT", tier="head"), btc)
+    await c.refresh(p, "scheduled")
+    assert eng.analyzed.count("BTCUSDT") == 1
+    assert sorted(eng.analyzed) == ["AAUSDT", "BTCUSDT"]  # a forced coin takes a pick slot
+    row = json.loads((tmp_path / "mm" / f"{now:%Y-%m-%d}.jsonl").read_text("utf-8"))
+    assert row["direct_meet"] == []
+
+
+async def test_always_candidates_meet_ignores_flash_picking_a_direct_coin(
+    tmp_path: Path, now: datetime
+) -> None:
+    class OffList(_SeenEngine):
+        async def pick(
+            self,
+            candidates: Sequence[SymbolPoolEntry],
+            max_n: int,
+            previous: BattleCard | None,
+            pool: Sequence[SymbolPoolEntry] = (),
+        ) -> PickResult:
+            await super().pick(candidates, max_n, previous, pool)
+            return PickResult("区间震荡", [Pick(s, "r") for s in self.picks], 0.01)
+
+    eng = OffList(["BTCUSDT", "AAUSDT", "BBUSDT", "CCUSDT"])
+    rules = TierRules(enabled=True, always_meet=True)
+    c, log, _ = make(tmp_path, eng, now, tiers=rules, pick_max=2)
+    await c.refresh(_majors_pool(now), "scheduled")
+    assert eng.analyzed.count("BTCUSDT") == 1
+    assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT", "BTCUSDT", "ETHUSDT"]
+    assert log.read_status()["commander"].headline.endswith("（每轮最多 2 张 + 2 个直接开会）")
 
 
 # ---------------------------------------------------------------- 候选表和池子概况

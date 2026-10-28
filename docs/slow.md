@@ -340,7 +340,7 @@ Mac 实测（#98 把 `max_tokens` 改回 8192 后）：deepseek-v4.1-flash 是�
 - 档位写在候选池每个币的 `tier` 字段（面板选币页可显示）。
 - 当天的中间档挑选结果存 `data/mid_tier.json`，重启不重挑；换日后的第一轮会议重新挑。
 - 分档靠池里的分数排序，所以打分 / 类别开关 / 池子大小的设置都会影响谁在头部。
-- `always_candidates`（默认 BTC、ETH）：每轮都进候选池，但挑不挑仍由总盘会决定。`always_candidates_meet = true`（默认 false）时，这些币每轮整轮会都**不经挑选**直接开单币会议（会议自己定做多 / 做空 / 不做），不占 `max_cards_per_round` / `card_pick_max` 的挑币名额，军师照样挑满原来的个数；分档关了也一样。仍受这些限制：要过硬门槛和拉黑（不在池里就不开）、执行交易所上不在交易的币不开（交给总盘会照常挑）、同币最小间隔内没有大消息沿用上一张卡、会议并发、日花费上限、类别敞口；临时会不受影响。总盘会实况的 `filter` 一步、`data/market_meeting/` 记录里的 `direct_meet` 和这些币的 `reason` 写「每轮直接开会（设置）」。改了要重启。
+- `always_candidates`（默认 BTC、ETH）：每轮都进候选池，但挑不挑仍由总盘会决定。`always_candidates_meet = true`（默认 false）时，这些币每轮整轮会都**不经挑选**直接开单币会议（会议自己定做多 / 做空 / 不做），不占 `max_cards_per_round` / `card_pick_max` 的挑币名额，军师照样挑满原来的个数；分档关了也一样。仍受这些限制：要过硬门槛和拉黑（不在池里就不开）、执行交易所上不在交易的币不开（交给总盘会照常挑）、同币最小间隔内没有大消息沿用上一张卡、会议并发、日花费上限、类别敞口；临时会不受影响。总盘会实况的 `filter` 一步、`data/market_meeting/` 记录里的 `direct_meet` 和这些币的 `reason` 写「每轮直接开会（设置）」。这些币在记录的 `pool` 行里是 `pick = true`，但不是 Flash 挑的：离线统计总盘会挑得准不准时，要先剔掉当轮 `direct_meet` 里的币。每轮场数 = 挑的个数 + 直接开会的个数，超过 `concurrency` 时设置页和 `check-config` 会提示；军师团心跳写「每轮最多 N 张 + M 个直接开会」。改了要重启。
 
 ### 美股开盘和财报（`us_events` / `us_open_bonus`）
 
