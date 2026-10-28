@@ -1765,6 +1765,32 @@ function deskLatestLine(d) {
   const probs = [tri("4 小时", d.probs_4h), tri("1 小时", d.probs_1h)].filter(Boolean).join(" · ");
   return `<div class="small" style="margin-top:4px"><b>大盘台 ${hms(d.run_at)} 一轮</b>　${esc(probs)}<br>${esc(d.intra)}</div>`;
 }
+// 团队页点大盘台：最近两轮并排（窄屏上下叠），标出和上一轮比变了什么
+const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑" };
+function deskRunCard(title, r, prev) {
+  const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+  const delta = (q, p, k) => {
+    if (!prev || !q || !p || q[k] == null || p[k] == null) return "";
+    const pp = Math.round((q[k] - p[k]) * 100);
+    return pp ? ` <mark class="chg">${pp > 0 ? "+" : ""}${pp}pp</mark>` : "";
+  };
+  const tri = (q, p) => (q ? ["up", "flat", "down"].map((k) => `${{ up: "涨", flat: "平", down: "跌" }[k]} ${pct(q[k])}${delta(q, p, k)}`).join(" / ") : "—");
+  const ago = Math.max(0, Math.round((Date.now() - new Date(r.run_at).getTime()) / 60000));
+  const dirChg = prev && prev.direction && r.direction !== prev.direction ? ` <mark class="chg">上一轮 ${esc(prev.direction)}</mark>` : "";
+  const pub = r.published_version != null ? `已发布 · 大盘 v${r.published_version}` : "没发布（方向没变、在等确认或没有先验）";
+  return `<div class="desk-run"><h3>${title}</h3>
+    <div class="dim small">${hm(r.run_at)} · ${ago} 分钟前 · ${esc(DESK_REASON[r.reason] || r.reason)}</div>
+    <div>4 小时 <b>${esc(r.direction || "—")}</b>${dirChg}：${tri(r.probs_4h, prev && prev.probs_4h)}</div>
+    <div>1 小时：${tri(r.probs_1h, prev && prev.probs_1h)}</div>
+    ${r.intra ? `<div class="small">${esc(r.intra)}</div>` : ""}
+    <div class="small">${pub}</div>
+    ${r.regime ? `<details class="small"><summary>模型的判断原文</summary>${esc(r.regime)}</details>` : ""}</div>`;
+}
+function deskRunsCard(runs) {
+  if (!runs || !runs.length) return "";
+  const [a, b] = runs;
+  return `<section class="card mt"><div class="desk-runs" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px">${deskRunCard("最新大盘情况", a, b)}${b ? deskRunCard("上一次大盘情况", b, null) : ""}</div></section>`;
+}
 // 大盘台：独立判断候选池未来 4 小时的涨 / 平 / 跌，管着大盘方向（接管）或退回 Flash
 function deskProgress(k) {
   if (!k || k.state === "off") return "wait";
@@ -2015,6 +2041,7 @@ P.team = () => {
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
+    ${sel.role === "desk" ? deskRunsCard(d.desk_runs) : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}

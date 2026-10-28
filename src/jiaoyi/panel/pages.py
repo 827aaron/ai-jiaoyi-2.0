@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 from collections import Counter
@@ -46,6 +47,7 @@ from jiaoyi.panel.overview import (
     fee_rate_bps,
     position_views,
 )
+from jiaoyi.slow.desk_intra import compose_intra
 from jiaoyi.slow.review import CardJournal, JournalRow
 from jiaoyi.slow.screener import FALLBACK_MAJORS
 from jiaoyi.slow.settings import BudgetConfig, ScreenerSection, SlowConfig, slow_defaults
@@ -171,6 +173,78 @@ class DeskInfo(BaseModel):
     stopped: str | None = None
     """自停原因（日预算 / 余额不足）；不算故障。"""
     summary: str | None = None
+
+
+class DeskRunCard(BaseModel):
+    """大盘台一轮（``data/market_desk/*.jsonl`` 里合格的一行）：团队页点大盘台时上面的两张卡。"""
+
+    cycle_id: str
+    run_at: datetime
+    reason: str
+    """scheduled / move / regime_flip。"""
+    direction: str | None = None
+    probs_4h: dict[str, float] | None = None
+    probs_1h: dict[str, float] | None = None
+    intra: str | None = None
+    """最新一轮：两轮之间刷新过的短线现状（过旧写缺失）；上一轮：那一轮存下的。没开就 None。"""
+    published_version: int | None = None
+    """这一轮发布了大盘第几版；None = 没发布（方向没变 / 在等确认 / 没有先验）。"""
+    regime: str = ""
+
+
+DESK_RUN_FILES = 2
+"""最多往回读几天的大盘台日志找最近两轮（每天一个文件）。"""
+
+
+def desk_runs(files: PanelFiles, now: datetime) -> list[DeskRunCard]:
+    """最近两轮合格的大盘台结果，新的在前（只读）。"""
+    out: list[DeskRunCard] = []
+    paths = sorted((files.root / "market_desk").glob("*.jsonl"), reverse=True)
+    for path in paths[:DESK_RUN_FILES]:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            if '"status": "ok"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+                out.append(_desk_run(row))
+            except (ValueError, KeyError, TypeError):
+                continue
+            if len(out) == 2:
+                break
+        if len(out) == 2:
+            break
+    if out:
+        st = files._json(DESK_STATE_FILE)
+        latest = st.get("latest") if isinstance(st, dict) else None
+        latest = latest if isinstance(latest, dict) else {}
+        block = latest.get("intra")
+        if isinstance(block, dict) and latest.get("cycle_id") == out[0].cycle_id:
+            with contextlib.suppress(KeyError, TypeError, ValueError):
+                out[0].intra = compose_intra(block, now, float(block.get("max_age_min", 0.0)))
+    return out
+
+
+def _desk_run(row: dict[str, Any]) -> DeskRunCard:
+    pub = row.get("published_view")
+    block = row.get("intra")
+    intra = None
+    if isinstance(block, dict):
+        intra = compose_intra(block, datetime.fromisoformat(str(block["t0"])), 0.0)
+    return DeskRunCard(
+        cycle_id=str(row["cycle_id"]),
+        run_at=datetime.fromisoformat(str(row["t0"])),
+        reason=str(row.get("reason") or "scheduled"),
+        direction=row.get("direction"),
+        probs_4h=row.get("probs_4h"),
+        probs_1h=row.get("probs_1h"),
+        intra=intra,
+        published_version=pub.get("version") if isinstance(pub, dict) else None,
+        regime=str(row.get("regime") or ""),
+    )
 
 
 def _aware(v: object) -> datetime | None:
@@ -343,6 +417,8 @@ class TeamPage(BaseModel):
     """最近 30 分钟叫管家急查的反向信号和管家的判断（新的在前），不被例行复查冲掉。"""
     desk: DeskInfo | None = None
     """大盘台节点；主程序没给配置也照给（mode = off 时是「未启用」）。"""
+    desk_runs: list[DeskRunCard] = []
+    """选中大盘台时：最近两轮（新的在前），记录列表上面并排两张卡。"""
     prompts: PromptsInfo | None = None
     """军师团现在用的提示词档（团队页军师团 / 总盘会显示）。"""
 
@@ -674,6 +750,7 @@ def build_team(
         against_checks=_against_checks(against, records),
         predictor_meetings=_predictor_meetings(files, now),
         desk=build_desk(files, now, desk_schedule, desk_items[0].text if desk_items else None),
+        desk_runs=desk_runs(files, now) if desk_selected else [],
         regime_flip=next(
             (
                 _item(r)
