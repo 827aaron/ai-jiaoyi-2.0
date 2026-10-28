@@ -25,6 +25,7 @@ const $ = (sel) => els[sel];
 const sounds = [];
 const tradeSounds = (list) => sounds.push(list.length);
 const loadKlines = () => {};
+const document = { hidden: false };
 const shown = [];
 const render = () => shown.push([data.positions.length, pageData && pageData.positions.length]);
 // 每个请求一个可以手动放行的 promise
@@ -76,6 +77,16 @@ CASES = r"""
   pending[1].reject(new Error('5 秒没有回应')); pending[0].resolve(pos(4)); await f;
   assert.equal(els['#stale'].innerHTML, '');
   assert.equal(pageData.positions.length, 3);
+
+  // 标签页在后台：照常拉数、照常响提示音，不重画
+  pending.length = 0;
+  document.hidden = true;
+  const n = shown.length, rang = sounds.length;
+  const h = poll(); await flush();
+  pending[0].resolve(pos(5)); pending[1].resolve(pos(5)); await h;
+  assert.equal(shown.length, n);
+  assert.equal(sounds.length, rang + 1);
+  assert.equal(pageData.positions.length, 5);
 })().catch((e) => { console.error(e); process.exit(1); });
 """
 
