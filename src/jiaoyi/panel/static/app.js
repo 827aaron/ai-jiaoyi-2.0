@@ -453,6 +453,12 @@ document.addEventListener("click", async (e) => {
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
+  else if (act === "kscale") {
+    S.scaleAll = !S.scaleAll;
+    try { localStorage.setItem("kline-scale", S.scaleAll ? "all" : "fit"); } catch (err) { /* 记不住就只对这次生效 */ }
+    render();
+    if (chart) { chart.priceScale("right").applyOptions({ autoScale: true }); updateEdges(); }
+  }
   else if (act === "chartfull") setChartFull(!S.chartFull);
   else if (act === "hist") { S.hist = arg; render(); poll(); }
   else if (act === "ai") { S.ai = arg; render(); poll(); }
@@ -1376,6 +1382,7 @@ P.positions = (arg) => {
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
+          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只贴合 K 线，超出的价位线贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "贴合K线" : "显示全部价位"}</button>
           <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${trailLegend(sel)}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
@@ -1387,14 +1394,66 @@ P.positions = (arg) => {
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */
 let chart = null, series = null, chartEl = null, chartKey = "", priceLines = [], linePrices = [], klineSeq = 0, needFit = false, barCount = 0;
-// 默认视图：全部 K 线铺开，最新一根停在图宽 2/3 处，右边留 1/3 空白（像 TradingView 的右侧留白）
+let lineDefs = [], lastBars = [], edgeEl = null, limitAt = "";
+try { S.scaleAll = localStorage.getItem("kline-scale") === "all"; } catch (err) { S.scaleAll = false; /* 读不了就用默认：贴合 K 线 */ }
+// KLINE-SCALE-BEGIN
+const DEFAULT_BARS = 120, RIGHT_BARS = 5;
+// 默认视图：最近 120 根，最新一根后面留 5 根的空位（像 TradingView / 币安）
+function defaultRange(n) {
+  return { from: Math.max(0, n - DEFAULT_BARS), to: Math.max(n - 1, 0) + RIGHT_BARS };
+}
+// 价格轴只认看得见的 K 线（+ 开仓价）；开了「显示全部价位」才把所有线算进去。返回 {min, max} 或 null
+function scaleRange(bars, range, lines, entry, all) {
+  const lo = Math.max(0, Math.floor(range.from)), hi = Math.min(bars.length - 1, Math.ceil(range.to));
+  let min = Infinity, max = -Infinity;
+  for (let i = lo; i <= hi; i++) { min = Math.min(min, bars[i].low); max = Math.max(max, bars[i].high); }
+  if (!(min <= max)) return null;
+  for (const v of all ? lines : [entry]) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
+  return { min, max };
+}
+// scaleMargins 是占图高的比例，换成占价格范围的比例：数据只占 1 - 2·pad 的高度
+const padFrac = (pad) => pad / (1 - 2 * pad);
+// 超出价格轴（含上下 pad 边距）的线：贴在上沿 / 下沿，留名字和价格
+function edgeLabels(defs, r, pad) {
+  const h = r.max - r.min;
+  const lo = r.min - h * pad, hi = r.max + h * pad;
+  return defs.filter((d) => d.price != null && (d.price > hi || d.price < lo)).map((d) => ({ ...d, edge: d.price > hi ? "top" : "bottom" }))
+    .sort((a, b) => (a.edge !== b.edge ? (a.edge === "top" ? -1 : 1) : a.edge === "top" ? b.price - a.price : a.price - b.price));
+}
+// 到时点在最后一根 K 线之后：不撑大时间轴，在图边上写一句
+function limitNote(openedMs, limitS, bars, fmt) {
+  if (openedMs == null || !limitS || !bars.length) return "";
+  const end = openedMs + limitS * 1000;
+  return end > bars[bars.length - 1].time * 1000 ? `到时 ${fmt(end)} →` : "";
+}
+// KLINE-SCALE-END
+const SCALE_PAD = 0.09;
 function fitView(c) {
   if (c === chart && barCount > 1) {
-    const last = barCount - 1;
-    c.timeScale().setVisibleLogicalRange({ from: 0, to: last + last / 2 });
+    c.timeScale().setVisibleLogicalRange(defaultRange(barCount));
+    c.priceScale("right").applyOptions({ autoScale: true });
   } else {
     c.timeScale().fitContent();
   }
+}
+// 超出价格轴的线以及「到时」说明：盖在图上的小标签，不挡鼠标
+function updateEdges() {
+  if (!chartEl || !series) return;
+  if (!edgeEl) {
+    edgeEl = document.createElement("div");
+    edgeEl.className = "kedge";
+    chartEl.appendChild(edgeEl);
+  }
+  const vr = chart.timeScale().getVisibleLogicalRange();
+  const entry = lineDefs.find((d) => d.entry);
+  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), entry && entry.price, S.scaleAll) : null;
+  const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, padFrac(SCALE_PAD)) : [];
+  let nTop = 0, nBot = 0;
+  const html = out.map((d) => {
+    const n = d.edge === "top" ? nTop++ : nBot++;
+    return `<span class="ke" style="${d.edge}:${n * 18 + (d.edge === "bottom" ? 28 : 4)}px;color:${d.color}">${d.edge === "top" ? "▲" : "▼"} ${esc(d.title)} ${esc(price(d.price, d.symbol))}</span>`;
+  }).join("");
+  edgeEl.innerHTML = html + (limitAt ? `<span class="ke kl">${esc(limitAt)}</span>` : "");
 }
 // 图和页面抢手势：照地图控件（Google Maps / Mapbox 的 cooperative gestures）的通行做法——
 // 电脑：普通滚轮留给页面滚动，按住 Ctrl / ⌘ 再滚轮才缩放，鼠标拖动平移，双击复位；
@@ -1448,6 +1507,7 @@ function mountChart() {
   if (!chartEl) {
     chartEl = document.createElement("div");
     chartEl.style.height = "100%";
+    chartEl.style.position = "relative";
     host.appendChild(chartEl);
     chart = lockChart(LightweightCharts.createChart(chartEl, {
       ...CHART_COOP,
@@ -1455,19 +1515,22 @@ function mountChart() {
       layout: { background: { color: "transparent" }, textColor: getComputedStyle(document.body).getPropertyValue("--dim"), fontFamily: getComputedStyle(document.body).fontFamily },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(0,0,0,0.05)" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderVisible: false, tickMarkFormatter: (t) => tick(t) },
-      rightPriceScale: { borderVisible: false },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: SCALE_PAD, bottom: SCALE_PAD } },
       localization: { timeFormatter: (t) => hm(t * 1000) },
     }), chartEl);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateEdges());
     const css = getComputedStyle(document.documentElement);
     const up = css.getPropertyValue("--up").trim(), down = css.getPropertyValue("--down").trim();
     series = chart.addCandlestickSeries({
       upColor: up, downColor: down, borderVisible: false, wickUpColor: up, wickDownColor: down,
-      // 止盈、保命这些线可能在 K 线范围外，把它们也包进可视范围
+      // 默认只贴合看得见的 K 线 + 开仓价；「显示全部价位」时把止盈、保命这些线也包进来
       autoscaleInfoProvider: (orig) => {
         const r = orig();
-        const lines = linePrices.filter((v) => v != null);
-        if (!r || !lines.length) return r;
-        return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...lines), maxValue: Math.max(r.priceRange.maxValue, ...lines) } };
+        if (!r) return r;
+        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.entry).map((d) => d.price);
+        const vals = extra.filter((v) => v != null);
+        if (!vals.length) return r;
+        return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...vals), maxValue: Math.max(r.priceRange.maxValue, ...vals) } };
       },
     });
   } else {
@@ -1492,6 +1555,10 @@ async function loadKlines(force) {
     priceLines.forEach((l) => series.removePriceLine(l));
     priceLines = [];
     linePrices = [];
+    lineDefs = [];
+    lastBars = [];
+    limitAt = "";
+    updateEdges();
     chart.priceScale("right").applyOptions({ autoScale: true });
     needFit = true;
   }
@@ -1504,6 +1571,7 @@ async function loadKlines(force) {
     if (seq !== klineSeq || key !== chartKey) return; // 等的时候又换了：这份是旧币的，不画
     series.setData(bars);
     barCount = bars.length;
+    lastBars = bars;
     const dg = pxDigits(p.entry_price || 1, p.symbol);
     series.applyOptions({ priceFormat: { type: "price", precision: dg, minMove: 10 ** -dg } });
   } catch (e) {
@@ -1515,17 +1583,21 @@ async function loadKlines(force) {
   const css = getComputedStyle(document.documentElement);
   const c = (v) => css.getPropertyValue(v).trim();
   const L = LightweightCharts.LineStyle;
-  priceLines = [
+  const defs = [
     [p.take_profit_price, "止盈", c("--up"), L.Dashed],
     [p.entry_price, "开仓", c("--faint"), L.Solid],
     [p.stop_loss_price, "固定止损计划", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
     [tl.start, `赚${(+p.trailing_activation_pct).toFixed(2)}%开始跟`, c("--accent") + "73", L.LargeDashed],
     tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
-  ].filter(([v]) => v != null).map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+  ].filter(([v]) => v != null);
+  priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
+  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, entry: title === "开仓" }));
+  limitAt = limitNote(p.opened_at ? new Date(p.opened_at).getTime() : null, p.time_limit_s, bars, hm);
   series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) fitView(chart);
   needFit = false;
+  updateEdges();
 }
 // 开仓点：标在开仓那根 K 线上（多 = 绿箭头在下方，空 = 红箭头在上方），带开仓价；
 // 开仓时间早于这批 K 线的第一根（周期太小、看不到那么久以前）就不标，价格线还在
