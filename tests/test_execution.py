@@ -451,7 +451,7 @@ async def test_reconcile_round_updates_team_page_activity(tmp_path: Path, rig: R
     log = JsonlDecisionLog(tmp_path)
     rec = ThreeWayReconciler(
         rig.adapter, rig.api, rig.ex, rig.lifeboat, rig.registry, rig.alerts,
-        account_name="acct", recorder=RoleRecorder(Role.RECONCILER, log),
+        account_name="acct", recorder=RoleRecorder(Role.RECONCILER, log), clock=rig.clock,
     )  # fmt: skip
     rec.set_next_run(rig.t + timedelta(seconds=30))
     await rec.reconcile(rig.t)

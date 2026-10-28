@@ -326,10 +326,13 @@ def _card_block(card: BattleCard | None, symbol: str, px: float) -> dict[str, An
 
 
 def _current_market(
-    card: BattleCard | None, view: MarketView | None = None, intra: str | None = None
+    card: BattleCard | None,
+    view: MarketView | None = None,
+    intra: str | None = None,
+    age: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``intra``：大盘台最近一轮的「未来 1 小时概率 + 短线现状」（只在持仓复查里给，
-    没有就不写这个键）。"""
+    没有就不写这个键）。``age``：``age_min`` / ``stale``（指挥官 ``market_age``，没开就不写）。"""
     view = view or (card.current_market if card else None)
     if view is None:
         return {}
@@ -343,6 +346,8 @@ def _current_market(
     }
     if intra:
         out["within_4h"] = intra[:400]
+    if age:
+        out.update(age)
     return {"current_market": out}
 
 
@@ -416,6 +421,7 @@ def entry_snapshot_one(
     card: BattleCard,
     hold_min: int = DEFAULT_HOLD_MIN,
     extras: EntryExtras | None = None,
+    market_age: Mapping[str, Any] | None = None,
 ) -> str:
     """一道题问法的进场快照：市场块 + 完整作战卡 + 技术面 / 成交流 / 衍生品 / 24 小时行情。
 
@@ -440,12 +446,15 @@ def entry_snapshot_one(
         if blocks.get(key):
             d[key] = json.loads(json.dumps(blocks[key]))  # 拷一份：超长删键不动日志里的原值
     d["card"] = _card_full(card, signal.symbol, f.last_price, hold_min, signal.ts)
-    d.update(_current_market(card))
+    d.update(_current_market(card, age=market_age))
     return _dump(d)
 
 
 def entry_snapshot(
-    signal: CandidateSignal, card: BattleCard, hold_min: int = DEFAULT_HOLD_MIN
+    signal: CandidateSignal,
+    card: BattleCard,
+    hold_min: int = DEFAULT_HOLD_MIN,
+    market_age: Mapping[str, Any] | None = None,
 ) -> str:
     """旧的 6 道题问法的进场快照（``gate_questions = "six"``，回放对照用）。
 
@@ -459,7 +468,7 @@ def entry_snapshot(
         "hold_min": hold_min,
         **market_block(f),
         "card": _card_block(card, signal.symbol, f.last_price),
-        **_current_market(card),
+        **_current_market(card, age=market_age),
     }
     fc = signal.forecast
     if fc is not None and fc.stale_after > signal.ts:
@@ -500,6 +509,7 @@ def hold_snapshot(
     fee_bps: float = 5.0,
     current_market: MarketView | None = None,
     market_intra: str | None = None,
+    market_age: Mapping[str, Any] | None = None,
     kronos: KronosSnapshot = "direction",
 ) -> str:
     """``kronos`` is ``[predictor] keeper_snapshot``: "direction" = agree from p_up + rank,
@@ -556,7 +566,7 @@ def hold_snapshot(
         book.pop("micro_bps", None)
     d.update(mkt)
     d["card"] = _card_block(card, pos.symbol, px)
-    d.update(_current_market(card, current_market, market_intra))
+    d.update(_current_market(card, current_market, market_intra, market_age))
     if kronos != "off" and forecast is not None and forecast.stale_after > now:
         kr: dict[str, Any] = {}
         if kronos == "direction":
@@ -616,6 +626,18 @@ def template_dump(kronos: KronosSnapshot = "direction") -> dict[str, Any]:
     }
 
 
+def _snapshot_market_age(snapshot: str) -> dict[str, Any] | None:
+    """``{age_min, stale}`` when the snapshot's ``current_market`` carries an age (only with
+    ``regime_time_label`` / ``regime_max_age_min`` on), else None."""
+    try:
+        market = json.loads(snapshot).get("current_market")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(market, dict) or "age_min" not in market:
+        return None
+    return {"age_min": market["age_min"], "stale": "stale" in market}
+
+
 def jev_log_fields(
     request: JevRequest | None,
     resp: JevResponse,
@@ -648,6 +670,8 @@ def jev_log_fields(
             questions=[q.id for q in request.questions],
             snapshot=request.snapshot,
         )
+        if age := _snapshot_market_age(request.snapshot):
+            inp["market_age"] = age  # grouping key for keeper observation analysis
     if extra is not None:
         inp["extra"] = dict(extra)  # 一道题问法的额外原始值（含快照超长删掉的），上线后逐项验证
     out: dict[str, Any] = {

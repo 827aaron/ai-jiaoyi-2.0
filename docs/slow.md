@@ -450,6 +450,7 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 - 新一轮只替换这轮开过会的币；没开会的币原样留着，到各自的点自动消失（观望指令也一样）。
 - 持仓币的指令不因到期消失，只清空信号（不再开新仓），直到被新结论替换。
 - 临时会只更新那一个币，到期时间跟当前这一轮走。
+- `[schedule] reuse_extend_expiry`（默认 `false` = 现状）：整轮里因为 `symbol_min_interval_min` 没重开会、沿用上一张卡的币，现状保留原到期时间——它若是上一张卡快到期前开的临时会，会在新卡出来后不久就消失（2026-10-28 03:48 的卡：XRP 03:43 的结论 04:07 就到期，8 个币 04:07–05:48 没有可交易的指令）。打开后沿用的指令顺延到新卡的到期时间，但从它自己的 `issued_at` 算最多活一个卡有效期（`issued_at + card_ttl_min`，放慢时按放慢后的有效期），永不缩短；没有 `issued_at` 的旧指令不动。这条规则作用于新卡上每一条没到期的旧指令，不只是本轮挑中的币：没被挑中的币（比如上一张卡快到期前开过临时会、这轮没进名单的）同样顺延，整轮选币期间并进卡的临时会也一样；本轮开会的币本来就是新到期时间，上一轮正常开会的指令已经是 `issued_at + 有效期`，不受影响。研究时的大盘方向（指令的 `source_market_view_id` 对应的那一版）和此刻生效的方向不同、或查不到的不顺延（最近 512 次发布的「版本 → 方向」存在 `data/market_view.json` 的 `view_dirs`，重启后照样查得到；这个键之前的旧文件、或没写研究版本的旧卡查不到。旧代码读这个文件时忽略这个键，回滚安全）——大盘已经翻转，旧结论按原到期时间消失。选的是封顶而不是「剩余太短就重开会」：重开要多花一场会，而且违背同币最小间隔；封顶保证沿用的结论不会比当场开会得到的结论活得更久，下一轮到点时它早已过了最小间隔，会正常重开。推荐 Demo：`true`。
 - `commander.current()` 返回的是过滤后的视图（快环 / 风控员 / 持仓管家都读它），池空了返回 None。
 - 落盘：`data/battle_card.json`（原子写）带各币时间戳，重启按原到期时间恢复；复盘流水 `card_review/cards.jsonl` 每条指令的窗口用币自己的出会 / 到期时间。
 - 面板每行显示「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟变灰，过期的币不显示（持仓币标「已到期，持仓中，不再开新仓」）。
@@ -662,6 +663,23 @@ regime_flip_target = "desk"
 开了任何一个开关时，启动会自检：在一场假的按场配置里读回设置，读不回（TradingAgents 改版、找不到 `_run_config`）就拒绝启动；会议中途找不到也直接报错。不会出现记录写着 mirror / neutral、提示词却没用上的情况。
 
 回退到这个功能之前的版本：先把这五个键从 `config/slow.toml` 删掉（旧代码的配置禁止多余字段，留着会拒绝启动）。
+
+## 大盘判断的时间和口径（`[meeting]` + `[market_desk] republish_after_min`）
+
+依据 2026-10-28 审计：大盘台方向没变就不发新版，01:47–04:09 的各币会议拿到的都是 23:32 发布的那段话，而且没有时间（只有 `publish_intra` 开着时才标发布时刻）；大盘判断和「4 小时之内」里的主动买卖占比是全池的，分析师当成了本币的。四个键都不写 = 现状，提示词一字不差；都中立（只写时间、年龄和口径，不带方向）。`[meeting]` 三项改了要重启，可以在面板设置页「军师团」或 `config/slow.pending.toml` 的 `[meeting]` 改；`republish_after_min` 经 `config/slow.pending.toml` 的 `[market_desk]` 改。
+
+| 键 | 取值（默认在前） | 作用 |
+|---|---|---|
+| `[meeting] regime_time_label` | `false` / `true` | 各币会议的大盘判断前写「（大盘判断 HH:MM UTC 发布，距此刻 N 分钟）」（`publish_intra` 开着、观点是大盘台的时候写「大盘台 HH:MM UTC 发布的 4 小时判断，距此刻 N 分钟」），`meeting_setup` 记 `regime_age_min`；持仓管家复查快照和拍板人进场快照的 `current_market` 加 `age_min` |
+| `[meeting] regime_max_age_min` | `0` / 分钟 | 大盘判断发布超过这么多分钟：会议里那段前缀加「已过期，仅作参考」（不开 `regime_time_label` 也加，带时间），`meeting_setup` 记 `regime_stale`；快照的 `current_market` 加 `age_min` 和 `stale = "已过期，仅作参考"`。0 = 不标 |
+| `[meeting] pool_scope_label` | `false` / `true` | 大盘判断前缀加「其中的涨跌、主动买卖占比等数字是全池口径，不是这个币自己的」，「4 小时之内」那段前面加「全池口径：」 |
+| `[market_desk] republish_after_min` | `0` / 分钟 | 大盘台接管时，方向没变、当前生效的大盘台观点发布超过这么多分钟，就按同一方向把这一轮的话、概率和数字重发一版（版本号 +1，`market_desk_state.json` 的 `latest.republished_same_direction = true`）。方向和翻转参照不变；**不唤醒持仓复核**（只有方向真的变了才排队复核），也不重置 `publish_min_gap_min` 的计时（从上一次方向发布算，重发时刻另记 `last_republish_at`），所以不会推迟真正的翻转。大盘台日志那一行带 `republished_same_direction = true`，方向记分（`market_score`）不把它算作一次发布。0 = 方向没变不发 |
+
+大盘台接管（`mode = "replace"`）时，`regime_max_age_min` > 0 要求 `republish_after_min` 大于 0 且小于它，否则方向不变时每份大盘判断都会过期；启动、面板保存和待生效配置都按这条拦（报错写明两个值）。Flash 管大盘时每轮都发布，不查这一条。管家和拍板人的 Jev 记录（`input.jev.market_age`）写快照里的 `age_min` 和是否 `stale`，没开就没有这个键，方便按它分组分析。
+
+推荐的 Demo 配置：`regime_time_label = true`、`regime_max_age_min = 120`、`pool_scope_label = true`、`republish_after_min = 60`（大盘台 15 分钟一轮时，各币会议看到的大盘话最旧约 75 分钟）。
+
+回退到这个功能之前的版本：先把这四个键和 `[schedule] reuse_extend_expiry` 从 `config/slow.toml`（和 `slow.pending.toml`）删掉（旧代码的配置禁止多余字段，留着会拒绝启动）。
 
 ## 会议输入的新鲜度（`[meeting]`，不能有延后信息）
 

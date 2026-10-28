@@ -168,6 +168,8 @@ class RoleRecorder:
 
     def _roll(self, now: datetime) -> None:
         day = local_day(now, self._tz)
+        if self._day is not None and day < self._day:
+            return  # 调用方给的时刻可能比上一次早（一轮开始时刻 vs 写入时刻）：日期只往前走
         if day != self._day:
             first = self._day is None
             self._day = day

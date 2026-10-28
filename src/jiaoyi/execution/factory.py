@@ -11,6 +11,7 @@ from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.brackets import BracketManager, LegOrder
+from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, HostedCloseMode
@@ -91,6 +92,7 @@ def build_execution(
     executor_stop_retry_rounds: int = 0,
     reconcile_opening_grace_s: float = 0.0,
     reconcile_closing_grace_s: float = 0.0,
+    clock: Clock = utc_now,
     demo_trading: bool = True,
     limit_take_profit: bool = False,
     frozen_peak_exit_on: bool = True,
@@ -106,6 +108,8 @@ def build_execution(
     protection_trailing_book_critical_after_s: float = 300.0,
     protection_leg_order: LegOrder = "lifeboat_first",
     hosted_close_mode: HostedCloseMode = "hb_first",
+    protection_tick_alert_after: int = 1,
+    hb_stop_unknown_retries: int = 0,
     position_mode_cache_s: float = 0.0,
     leverage_brackets_wanted: Callable[[], bool] | None = None,
     hb_url: str = "http://127.0.0.1:8000",
@@ -192,6 +196,8 @@ def build_execution(
         frozen_peak_exit_on=frozen_peak_exit_on and mode is not RunMode.LIVE and demo_trading,
         frozen_peak_exit_after_s=frozen_peak_exit_after_s,
         hosted_close_mode=hosted_close_mode,
+        protection_tick_alert_after=protection_tick_alert_after,
+        hb_stop_unknown_retries=hb_stop_unknown_retries,
     )
     reconciler = ThreeWayReconciler(
         adapter,
@@ -207,6 +213,7 @@ def build_execution(
         opening_grace_s=reconcile_opening_grace_s,
         closing_grace_s=reconcile_closing_grace_s,
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
+        clock=clock,
     )
     return ExecutionStack(
         adapter,

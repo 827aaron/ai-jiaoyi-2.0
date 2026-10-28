@@ -436,6 +436,8 @@ def _desk_run(r: Mapping[str, Any], t0: datetime) -> LoggedRun | None:
         base[h] = _probs(t.get("base_rate"))
     pub = r.get("published_view")
     published = pub.get("regime_direction") if isinstance(pub, Mapping) else None
+    if r.get("republished_same_direction"):
+        published = None  # same-direction refresh: not a direction publish
     mirror = r.get("mirror")
     ms = r.get("latency_ms")
     completed = t0 + timedelta(milliseconds=float(ms) if isinstance(ms, int | float) else 0.0)

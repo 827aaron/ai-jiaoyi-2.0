@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -935,3 +937,285 @@ async def test_untradeable_symbol_goes_watch_only_except_when_held(
     again = c.current(now)
     assert again is not None
     assert again.for_symbol("AAUSDT").allowed_signals == [SignalKind.VOLUME_BREAKOUT]  # type: ignore[union-attr]
+
+
+# 2026-10-28: the 03:48 card expired 06:08, but XRP's 03:43:24 event conclusion was carried over
+# with the old card's 04:07:17 expiry, leaving no tradable entry until the 05:48 round
+R1 = datetime.fromisoformat("2026-10-28T01:47:17+00:00")
+XRP_EVENT = datetime.fromisoformat("2026-10-28T03:43:24+00:00")
+R2 = datetime.fromisoformat("2026-10-28T03:48:00+00:00")
+
+
+class _Directed(FakeEngine):
+    def __init__(self, picks: list[str]) -> None:
+        super().__init__(picks)
+        self.direction = "中性"
+
+    async def pick(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
+    ) -> PickResult:
+        got = await super().pick(candidates, max_n, previous, pool)
+        return dataclasses.replace(got, regime_direction=self.direction)
+
+
+async def _xrp_case(
+    tmp_path: Path, on: bool, *, picked: bool = True, flip: bool = False
+) -> tuple[BattleCardCommander, BattleCard]:
+    from jiaoyi.slow.commander import EventRules
+
+    eng = _Directed(["XRPUSDT", "LINKUSDT"])
+    eng.direction = "看涨"
+    c, _, clock = make(
+        tmp_path,
+        eng,
+        R1,
+        ttl=timedelta(minutes=140),
+        expiry_lead=timedelta(minutes=20),
+        symbol_min_interval=timedelta(minutes=115),
+        events=EventRules(enabled=True, triggers=frozenset({"key_level_break"})),
+        reuse_extend_expiry=on,
+    )
+    p = pool(R1, entry("XRPUSDT"), entry("LINKUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = XRP_EVENT
+    assert await c.refresh_symbol(p, "XRPUSDT", "key_level_break") is not None
+    clock[0] = R2
+    if not picked:
+        eng.picks = ["LINKUSDT"]
+    if flip:
+        eng.direction = "看跌"
+    card = await c.refresh(pool(R2, entry("XRPUSDT"), entry("LINKUSDT")), "scheduled")
+    assert eng.analyzed == ["XRPUSDT", "LINKUSDT", "XRPUSDT", "LINKUSDT"]
+    return c, card
+
+
+@pytest.mark.parametrize("picked", [True, False])
+@pytest.mark.parametrize("on", [False, True])
+async def test_commander_refresh_reused_entry_keeps_or_extends_expiry(
+    tmp_path: Path, on: bool, picked: bool
+) -> None:
+    c, card = await _xrp_case(tmp_path, on, picked=picked)
+    assert card.expires_at == datetime.fromisoformat("2026-10-28T06:08:00+00:00")
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None and xrp.issued_at == XRP_EVENT
+    seen = c.current(datetime.fromisoformat("2026-10-28T04:30:00+00:00"))
+    syms = {s.symbol for s in seen.symbols} if seen is not None else set()
+    if on:
+        # capped at issued_at + ttl (06:03:24), not stretched to the round's 06:08
+        assert xrp.expires_at == datetime.fromisoformat("2026-10-28T06:03:24+00:00")
+        assert syms == {"XRPUSDT", "LINKUSDT"}
+    else:
+        assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
+        assert syms == {"LINKUSDT"}
+
+
+@pytest.mark.parametrize("picked", [True, False])
+async def test_commander_refresh_does_not_extend_entry_from_a_flipped_regime(
+    tmp_path: Path, picked: bool
+) -> None:
+    _c, card = await _xrp_case(tmp_path, True, picked=picked, flip=True)
+    assert card.regime_direction == "看跌"
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None
+    assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
+
+
+async def test_commander_refresh_reuse_extension_is_capped_by_conclusion_age(
+    tmp_path: Path,
+) -> None:
+    eng = FakeEngine(["AAUSDT"])
+    c, _, clock = make(
+        tmp_path,
+        eng,
+        R1,
+        ttl=timedelta(minutes=140),
+        symbol_min_interval=timedelta(minutes=150),
+        reuse_extend_expiry=True,
+    )
+    p = pool(R1, entry("AAUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = R2
+    card = await c.refresh(p, "scheduled")
+    assert eng.analyzed == ["AAUSDT"]
+    aa = card.for_symbol("AAUSDT")
+    assert aa is not None and aa.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
+
+
+class _EventDuringPick(FakeEngine):
+    """BB's event meeting finishes while the round is still picking."""
+
+    def __init__(self) -> None:
+        super().__init__(["AAUSDT", "BBUSDT"])
+        self.release = asyncio.Event()
+        self.merged = asyncio.Event()
+        self.hold = False
+
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+        if e.symbol == "BBUSDT" and self.hold:
+            await self.release.wait()
+        return await super().analyze(e, regime, pick_reason)
+
+    async def pick(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
+    ) -> PickResult:
+        if self.hold:
+            self.release.set()
+            await asyncio.wait_for(self.merged.wait(), 5)
+        return await super().pick(candidates, max_n, previous, pool)
+
+
+@pytest.mark.parametrize("on", [False, True])
+async def test_commander_refresh_extends_event_merged_while_picking(
+    tmp_path: Path, on: bool
+) -> None:
+    from jiaoyi.slow.commander import EventRules
+
+    eng = _EventDuringPick()
+    c, _, clock = make(
+        tmp_path,
+        eng,
+        R1,
+        ttl=timedelta(minutes=140),
+        events=EventRules(enabled=True, triggers=frozenset({"key_level_break"})),
+        reuse_extend_expiry=on,
+    )
+    p = pool(R1, entry("AAUSDT"), entry("BBUSDT"))
+    await c.refresh(p, "scheduled")
+    eng.picks, eng.hold = ["AAUSDT"], True
+    clock[0] = XRP_EVENT
+    event = asyncio.create_task(c.refresh_symbol(p, "BBUSDT", "key_level_break"))
+    await asyncio.sleep(0)
+    clock[0] = R2
+
+    async def merged() -> None:
+        await event
+        eng.merged.set()
+
+    watcher = asyncio.create_task(merged())
+    card = await asyncio.wait_for(c.refresh(p, "scheduled"), 5)
+    await asyncio.wait_for(watcher, 5)
+    bb = card.for_symbol("BBUSDT")
+    assert bb is not None and bb.issued_at == XRP_EVENT
+    expected = "2026-10-28T06:03:24+00:00" if on else "2026-10-28T04:07:17+00:00"
+    assert bb.expires_at == datetime.fromisoformat(expected)
+
+
+class _WithOutlook(FakeEngine):
+    async def analyze(self, e: SymbolPoolEntry, regime: str, pick_reason: str = "") -> Analysis:
+        from jiaoyi.contracts import CardOutlook
+
+        res = await super().analyze(e, regime, pick_reason)
+        cs = res.card_symbol.model_copy(update={"outlook": CardOutlook(market_dir="flat")})
+        return dataclasses.replace(res, card_symbol=cs)
+
+
+async def _xrp_event_card(
+    tmp_path: Path, eng: FakeEngine
+) -> tuple[BattleCardCommander, list[datetime], dict[str, object]]:
+    from jiaoyi.slow.commander import EventRules
+
+    kw: dict[str, object] = {
+        "ttl": timedelta(minutes=140),
+        "symbol_min_interval": timedelta(minutes=115),
+        "events": EventRules(enabled=True, triggers=frozenset({"key_level_break"})),
+        "reuse_extend_expiry": True,
+        "card_path": tmp_path / "battle_card.json",
+    }
+    c, _, clock = make(tmp_path, eng, R1, **kw)
+    p = pool(R1, entry("XRPUSDT"), entry("LINKUSDT"))
+    await c.refresh(p, "scheduled")
+    clock[0] = XRP_EVENT
+    assert await c.refresh_symbol(p, "XRPUSDT", "key_level_break") is not None
+    eng.picks = ["LINKUSDT"]  # XRP is carried over unpicked
+    return c, clock, kw
+
+
+async def _second_round(c: BattleCardCommander) -> CardSymbol:
+    card = await c.refresh(pool(R2, entry("XRPUSDT"), entry("LINKUSDT")), "scheduled")
+    assert card.regime_direction == "中性"
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None and xrp.issued_at == XRP_EVENT
+    return xrp
+
+
+def _edit_json(path: Path, edit: Callable[[dict[str, Any]], None]) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    edit(data)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("flip", [False, True])
+async def test_commander_refresh_after_restart_restores_view_directions(
+    tmp_path: Path, flip: bool
+) -> None:
+    eng = _Directed(["XRPUSDT", "LINKUSDT"])
+    _c, _clock, kw = await _xrp_event_card(tmp_path, eng)
+    saved = json.loads((tmp_path / "market_view.json").read_text(encoding="utf-8"))
+    assert set(saved["view_dirs"].values()) == {"中性"}
+    c2, _, _ = make(tmp_path, eng, R2, **kw)  # restart (every update restarts the process)
+    eng.direction = "看跌" if flip else "中性"
+    card = await c2.refresh(pool(R2, entry("XRPUSDT"), entry("LINKUSDT")), "scheduled")
+    xrp = card.for_symbol("XRPUSDT")
+    assert xrp is not None and xrp.issued_at == XRP_EVENT
+    expected = "2026-10-28T04:07:17+00:00" if flip else "2026-10-28T06:03:24+00:00"
+    assert xrp.expires_at == datetime.fromisoformat(expected)
+
+
+@pytest.mark.parametrize("missing", ["view_dirs", "source_market_view_id"])
+async def test_commander_refresh_after_restart_keeps_expiry_of_unknown_direction(
+    tmp_path: Path, missing: str
+) -> None:
+    """Files written before the view directions were saved, or a card from before entries named
+    their market view: the direction is unknown and the entry keeps its expiry."""
+    eng = FakeEngine(["XRPUSDT", "LINKUSDT"])
+    _c, _clock, kw = await _xrp_event_card(tmp_path, eng)
+    if missing == "view_dirs":
+        _edit_json(tmp_path / "market_view.json", lambda d: d.pop("view_dirs"))
+    else:
+
+        def drop(d: dict[str, Any]) -> None:
+            for s in d["card"]["symbols"]:
+                s["source_market_view_id"] = None
+
+        _edit_json(tmp_path / "battle_card.json", drop)
+    c2, _, _ = make(tmp_path, eng, R2, **kw)
+    restored = c2.current(R2)
+    xrp_before = restored.for_symbol("XRPUSDT") if restored is not None else None
+    assert xrp_before is not None
+    assert (xrp_before.source_market_view_id is None) is (missing == "source_market_view_id")
+    xrp = await _second_round(c2)
+    assert xrp.expires_at == datetime.fromisoformat("2026-10-28T04:07:17+00:00")
+
+
+@pytest.mark.parametrize("outlook", [False, True])
+async def test_commander_refresh_reads_direction_from_outlook_when_history_is_empty(
+    tmp_path: Path, outlook: bool
+) -> None:
+    """The battle card file drops outlook, so this fallback only serves a process whose view
+    history no longer holds the entry's view (evicted past VIEW_DIRS_MAX); simulated by emptying
+    it."""
+    eng = _WithOutlook(["XRPUSDT", "LINKUSDT"]) if outlook else FakeEngine(["XRPUSDT", "LINKUSDT"])
+    c, clock, _kw = await _xrp_event_card(tmp_path, eng)
+    c._view_dirs.clear()
+    clock[0] = R2
+    xrp = await _second_round(c)
+    expected = "2026-10-28T06:03:24+00:00" if outlook else "2026-10-28T04:07:17+00:00"
+    assert xrp.expires_at == datetime.fromisoformat(expected)
+
+
+def test_commander_restore_keeps_last_512_valid_view_directions(tmp_path: Path) -> None:
+    dirs: dict[str, object] = {f"v{i}": "看涨" for i in range(600)}
+    dirs["bad"] = "up"
+    (tmp_path / "market_view.json").write_text(
+        json.dumps({"latest_market_view": None, "view_dirs": dirs}), encoding="utf-8"
+    )
+    c, _, _ = make(tmp_path, FakeEngine([]), R1, card_path=tmp_path / "battle_card.json")
+    assert list(c._view_dirs) == [f"v{i}" for i in range(88, 600)]

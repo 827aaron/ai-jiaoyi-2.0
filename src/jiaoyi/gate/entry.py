@@ -20,8 +20,9 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
+from typing import Any
 
 from jiaoyi.contracts import (
     BattleCard,
@@ -29,6 +30,7 @@ from jiaoyi.contracts import (
     EntryQuestion,
     JevRequest,
     JevResponse,
+    MarketView,
     Outcome,
     Side,
     SignalKind,
@@ -87,6 +89,7 @@ class JevEntryGate:
         max_wait_s: float = 10.0,
         questions: str = "one",
         context: EntryContextSource | None = None,
+        market_age: Callable[[datetime, MarketView | None], Mapping[str, Any]] | None = None,
         take_floor: Callable[[SignalKind], float | None] | None = None,
     ) -> None:
         """``take_floor``: the per-signal-kind take floor in force, None = the global one; a
@@ -98,7 +101,9 @@ class JevEntryGate:
         （信号有效期 − 拍板超时，从信号触发算起）。
 
         ``questions``：``"one"`` 一道题 / ``"six"`` 旧 6 道题；``context``：一道题问法的额外快照
-        数据（None = 只用信号自带的特征）。"""
+        数据（None = 只用信号自带的特征）。``market_age``：快照 ``current_market`` 的
+        ``age_min`` / ``stale``（指挥官 ``market_age``）。"""
+        self._market_age = market_age
         self._questions = questions
         self._context = context
         self._take_floor = take_floor
@@ -207,6 +212,7 @@ class JevEntryGate:
     ) -> JevResponse:
         sym = signal.symbol
         ex: EntryExtras | None = None
+        age = self._market_age(now, card.current_market) if self._market_age else None
         if self._questions == "one":
             if extras is not None:
                 try:
@@ -215,9 +221,9 @@ class JevEntryGate:
                     raise
                 except Exception:  # 额外数据只是参考：出错就按没有，照常问
                     log.exception("%s 拍板人额外快照数据出错，这次不带", sym)
-            snapshot = entry_snapshot_one(signal, card, self._hold_min, ex)
+            snapshot = entry_snapshot_one(signal, card, self._hold_min, ex, age)
         else:
-            snapshot = entry_snapshot(signal, card, self._hold_min)
+            snapshot = entry_snapshot(signal, card, self._hold_min, age)
         request = JevRequest(
             request_id=rid,
             kind="entry",
