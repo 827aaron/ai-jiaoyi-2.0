@@ -272,6 +272,13 @@ input[type="password"], .su-narrow input[type="number"], .su-narrow select { fon
 /* 选币页：手动加币输入框、行尾操作按钮 */
 .inp { font: 14px var(--font); padding: 6px 10px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--hi); }
 td.nowrap { white-space: nowrap; }
+/* 持仓页一屏要放下 3 笔持仓和十来笔今天的交易：行距收紧，格子里的附注接在主值后面 */
+table.dense th, table.dense td { padding: 3px 8px; }
+table.dense td { font-size: 12.5px; line-height: 1.35; }
+table.dense td .small { font-size: 11px; }
+.recent table.dense td div { display: inline; margin-left: 4px; }
+.card.recent .ch { margin-bottom: 4px; }
+.trail-mini.pill { padding: 0 5px; }
 
 /* ---- 设置页 v2：单列（最宽 760），每项一行可展开 */
 .st-col { max-width: 760px; display: flex; flex-direction: column; gap: 16px; }

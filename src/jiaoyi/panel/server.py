@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import logging
 import threading
+import time as time_mod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, time, timedelta
@@ -60,6 +61,7 @@ from jiaoyi.panel.pages import (
     PositionsPage,
     SettingsPage,
     TeamPage,
+    TradeRow,
     TrailItem,
     build_funds,
     build_history,
@@ -69,6 +71,7 @@ from jiaoyi.panel.pages import (
     build_signal,
     build_team,
     prompts_info,
+    recent_trades,
 )
 from jiaoyi.panel.stop_diagnostics import parse_diagnostics
 from jiaoyi.panel.updater import UpdateInfo, Updater
@@ -81,6 +84,7 @@ from jiaoyi.watchdog import send as send_telegram
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
+RECENT_TTL_S = 10.0
 PACKAGE = Path(__file__).parent.parent
 CARD_SCORE_FIRST_S = 120.0
 """面板启动后多久第一次算方向记分（别和启动时的其他读取挤在一起）。"""
@@ -468,16 +472,41 @@ def create_app(
         ctl.llm_credit = credit_banner(files.llm_credits(), clock())
         return ov.model_copy(update={"control": ctl})
 
+    # 持仓页 2 秒拉一次，最近交易要按历史页口径读管家采样，每轮都读太重：有仓位平掉（持仓集合变了）
+    # 或换了日子马上重算，否则最多旧 RECENT_TTL_S 秒（平仓价、手续费回填会晚一点到）
+    recent_cache: list[tuple[tuple[frozenset[str], date], float, tuple[list[TradeRow], int]]] = []
+
+    async def recent_for(live_ids: frozenset[str], now: datetime) -> tuple[list[TradeRow], int]:
+        r = cfg()[0]
+        key = (live_ids, local_day(now, r.day_reset_tz))
+        at = time_mod.monotonic()
+        if recent_cache and recent_cache[0][0] == key and at - recent_cache[0][1] < RECENT_TTL_S:
+            return recent_cache[0][2]
+
+        def read() -> tuple[list[TradeRow], int]:
+            with history_lock:
+                return recent_trades(history_files, r, now)
+
+        value = await asyncio.to_thread(read)
+        recent_cache[:] = [(key, at, value)]
+        return value
+
     @api.get("/api/positions")
     async def positions() -> PositionsPage:
+        now = clock()
         page = build_positions(
             files,
             await hb.snapshot(),
             cfg()[0],
-            clock(),
+            now,
             await last_prices(),
             cfg()[1].protection_stale_s,
+            with_recent=False,
         )
+        recent, recent_total = await recent_for(
+            frozenset(v.position_id for v in page.positions), now
+        )
+        page = page.model_copy(update={"recent": recent, "recent_total": recent_total})
         quote_source = quotes()
 
         async def with_trail(v: PositionView) -> PositionView:

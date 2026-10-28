@@ -565,6 +565,24 @@ function trailTag(p, brief) {
   if (t.trailing_active) return `<div class="small" title="${tip}"><span class="pill p-accent">跟踪中 · 执行器确认</span>${brief || t.actual_trailing_trigger_net_pnl_pct == null ? "" : ` 净收益阈值 ${signed(t.actual_trailing_trigger_net_pnl_pct, 4)}%`}</div>`;
   return `<div class="small dim" title="${tip}"><span class="pill">本轮未激活${t.coverage_complete ? "" : "（此前记录不完整）"}</span></div>`;
 }
+// 宽表格里移动止损只占止损价后面一个小标签，整句状态和配置放在悬停提示里
+const plain = (h) => String(h).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+function trailMini(p) {
+  const full = plain(trailTag(p)), tip = esc(p.trailing_stop_pct == null ? full : `${full}\n${plain(trailNote(p))}`);
+  if (p.trailing_stop_pct == null) return ` <span class="small dim trail-mini" title="${tip}">无移动止损</span>`;
+  let on, label;
+  if (p.protection) {
+    const tl = trailLines(p);
+    on = p.protection.trailing_activated;
+    label = on ? `移动 ${tl && tl.stop != null ? price(tl.stop, p.symbol) : "跟踪中"}${tl && tl.confirmed ? "" : "（未确认）"}` : "移动未激活";
+  } else {
+    const t = p.stop_diagnostics;
+    if (!t || t.status !== "current" || t.trailing_active == null) return ` <span class="small warn trail-mini" title="${tip}">移动·状态未知</span>`;
+    on = t.trailing_active;
+    label = on ? "移动跟踪中" : "移动未激活";
+  }
+  return ` <span class="small trail-mini ${on ? "pill p-accent" : "dim"}" title="${tip}">${label}</span>`;
+}
 function stopDiagnostics(p) {
   const t = p.stop_diagnostics, b = p.book_quote;
   const stamp = ts => ts ? esc(new Date(ts).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })) : "未知";
@@ -642,17 +660,19 @@ function lvlPnl(p, lvl) {
 const lvlEst = (p, lvl) => { const v = lvlPnl(p, lvl); return v == null ? "" : `<span class="num ${cls(v)}">${signed(v, 0)} U</span>`; };
 const LVL_TIP = "到这个价成交时预估的净盈亏：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次的吃单手续费。滑点、资金费没算。";
 // 止损格只显示账本固定计划价；没有可信动态触发价就不计算其预估收益。
-function slCell(p) {
+// inline：持仓宽表格要一行一笔，预估盈亏跟在价后面，不另起一行
+const estBox = (p, lvl, inline) => inline ? ` <span class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</span>` : `<div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
+function slCell(p, inline = false) {
   const l = protLeg(p, "stop_loss");
-  if (l) { const s = legShown(l); return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${legName(s)}·${LEG_ST[s.state]}</span>${legNewer(p, l)}<div class="small" title="${LVL_TIP}">${lvlEst(p, s.trigger_price)}</div>`; }
+  if (l) { const s = legShown(l); return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${legName(s)}·${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`; }
   const lvl = p.stop_loss_price;
-  return `${price(lvl, p.symbol)} <span class="dim small">固定计划</span><div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
+  return `${price(lvl, p.symbol)} <span class="dim small">固定计划</span>${estBox(p, lvl, inline)}`;
 }
-function tpCell(p) {
+function tpCell(p, inline = false) {
   const l = protLeg(p, "take_profit");
-  if (!l) return `${price(p.take_profit_price, p.symbol)}<div class="small" title="${LVL_TIP}">${lvlEst(p, p.take_profit_price)}</div>`;
+  if (!l) return `${price(p.take_profit_price, p.symbol)}${estBox(p, p.take_profit_price, inline)}`;
   const s = legShown(l);
-  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}<div class="small" title="${LVL_TIP}">${lvlEst(p, s.trigger_price)}</div>`;
+  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`;
 }
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
@@ -1349,10 +1369,23 @@ function blockedSection(map) {
 }
 
 /* ---------- 持仓 */
+// 持仓下面紧跟今天平掉的单：持仓和刚做完的交易一屏看完，不用切去历史页
+function recentSection(d) {
+  const list = d.recent || [], total = d.recent_total || list.length;
+  const today = md(data.now);
+  const when = (ts) => (md(ts) === today ? hm(ts) : `<span class="dim small">${md(ts)}</span> ${hm(ts)}`);
+  const net = list.filter((t) => !t.unfilled && !t.pnl_missing).reduce((a, t) => a + t.pnl_usdt, 0);
+  const more = total > list.length ? ` · 只列最近 ${list.length} 笔` : "";
+  const sum = list.length ? ` · 列出的净利 <b class="num ${cls(net)}">${signed(net, 2)}U</b>` : "";
+  const body = list.length
+    ? `<div class="tw"><table class="dense"><thead><tr>${TRADE_HEAD}</tr></thead><tbody>${list.map((t) => tradeRow(t, when)).join("")}</tbody></table></div>`
+    : '<div class="dim small">今天还没有平仓。</div>';
+  return `<section class="card mt recent"><div class="ch"><h2>最近交易</h2><span class="r">今天 ${total} 笔${more}${sum} · 最新在上 · 点一笔看整条链 · <a href="#history">全部记录 →</a></span></div>${body}</section>`;
+}
 P.positions = (arg) => {
   const d = pageData;
   if (!d.positions.length) {
-    return `<div class="card"><div class="empty"><b>现在没有持仓</b>开仓后这里每笔一行，点开能看走势图、止损止盈和每一步判断。<a href="#overview">看信号与决策流 ›</a></div></div>`;
+    return `<div class="card"><div class="empty"><b>现在没有持仓</b>开仓后这里每笔一行，点开能看走势图、止损止盈和每一步判断。<a href="#overview">看信号与决策流 ›</a></div></div>${recentSection(d)}`;
   }
   const sel = d.positions.find((p) => p.position_id === arg) || d.positions[0];
   const groups = d.groups.filter((g) => g.cap_x > 0 || g.exposure_x > 0).map((g) => {
@@ -1366,9 +1399,9 @@ P.positions = (arg) => {
     const held = now - new Date(p.opened_at).getTime();
     const go = `onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'"`;
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
-    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}</div>` : "";
-    const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
-    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? `<div class="small" title="${LVL_TIP}">${lvlEst(p, p.lifeboat_price)}</div>` : ""}${protBrief(p)}`;
+    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}` : "";
+    const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split ? ` <span class="dim small">${split}</span>` : ""}`;
+    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? estBox(p, p.lifeboat_price, true) : ""}${protBrief(p)}`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = closeCell(p);
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
@@ -1378,8 +1411,8 @@ P.positions = (arg) => {
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
       <td class="r num ${cls(p.today_usdt)}" title="${esc(TODAY_TIP[p.today_from] || "")}">${todayCell(p)}</td>
-      <td class="r num">${slCell(p)}${trailTag(p)}</td><td class="r num">${tpCell(p)}</td>
-      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "还没看")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
+      <td class="r num">${slCell(p, true)}${trailMini(p)}</td><td class="r num">${tpCell(p, true)}</td>
+      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "还没看")}${keeperPeak(p) ? ` <span class="small dim">${esc(keeperPeak(p))}</span>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
   // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
   const cards = d.positions.map((p) => {
@@ -1403,9 +1436,10 @@ P.positions = (arg) => {
       <span>保命止损 <b class="num ${d.lifeboats_ok === d.positions.length ? "up" : "warn"}">${d.lifeboats_ok} / ${d.positions.length} 在位</b></span>
       <div class="bars">${groups}</div>
     </div>
-    <section class="card mt"><div class="tw pos-wide"><table>
+    <section class="card mt"><div class="tw pos-wide"><table class="dense">
       <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r" title="今天这笔赚亏了多少：0 点前开的从当地 0 点参考价算起，今天开的从开仓价（未扣费）">今日（U）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
+    ${recentSection(d)}
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
@@ -2163,6 +2197,28 @@ function mainnetCard(d) {
     <div class="tw scroll mt"><table><thead><tr><th>日期</th><th class="r">笔数</th><th class="r">Demo 净盈亏</th><th class="r">按主网价格算</th><th class="r">差</th><th class="r">价差</th><th class="r">费率差</th><th class="r">差 bp</th><th class="r">差 R / 笔</th><th class="r">累计 Demo</th><th class="r">累计按主网</th><th class="r">限价腿</th></tr></thead><tbody>${days}</tbody></table></div>
     <div class="foot">算了 ${m.covered} / ${m.trades} 笔（没算的不在这张表里）。按主网价格算 = 同数量、开平两边按同一时刻的币安主网成交价，手续费按这笔在 Demo 实际被收的费率乘主网名义金额，不算资金费；Demo 净盈亏是账本里币安实扣的。差 = Demo 净盈亏 − 按主网价格算，基本就是价差（Demo 成交价占的便宜）。费率差 = 两边全按吃单费率比按 Demo 实际费率多付多少，单列，不在差里。限价成交的腿（标「限价」，共 ${m.limit_legs} 条）按它自己的限价算，假设主网也能在这个价成交，不计价差。差 bp = 差 ÷ 开仓名义金额；R = 开仓时的止损距离 × 数量。日期按日切时区。</div></section>`;
 }
+const TRADE_HEAD = '<th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">最高浮盈</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th>';
+// 交易记录一行：历史页和持仓页「最近交易」共用，tail = 历史页右边的主网对照几格
+function tradeRow(t, when, tail = "") {
+  const [s, sc] = SIDE[t.side] || [t.side, ""];
+  const gross = t.pnl_usdt + t.fees_usdt;
+  const miss = '<span class="warn" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到</span>';
+  if (t.unfilled) {
+    return `<tr class="click dim" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
+    <td>${t.test ? '<span class="pill p-warn">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="num">—</td><td class="num">—</td><td><span class="pill p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>
+    <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>${tail}</tr>`;
+  }
+  const paperNote = t.paper_stop_price != null ? `<div class="dim small" title="主网${t.paper_price_source === "mark" ? "标记价" : "成交价"}越过止损 ${t.paper_stop_price}，按止损价记模拟成交；Demo 实际净盈亏 ${t.demo_pnl_usdt == null ? "—" : signed(t.demo_pnl_usdt, 2) + "U"}">Demo ${t.demo_exit_price != null ? price(t.demo_exit_price, t.symbol) : "—"}</div>` : "";
+  const exit = (t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>') + paperNote;
+  const shut = closeTime(t);
+  const lag = t.exit_filled_at ? Math.round((new Date(t.closed_at) - new Date(t.exit_filled_at)) / 1000) : 0;
+  const shutTip = t.exit_filled_at ? ` title="币安成交 ${hms(t.exit_filled_at)}；程序结账 ${hms(t.closed_at)}${lag > 0 ? `（晚 ${lag} 秒）` : ""}"` : "";
+  const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
+  return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap"${shutTip}>${when(shut)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
+    <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(t.close_source === "keeper_assistant" ? "管家助手" : REASON[t.close_reason] || t.close_reason || "—")}</td>
+    <td class="num nowrap">${dur(new Date(shut) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}${tail}</tr>`;
+}
+
 P.history = () => {
   const d = pageData;
   const tiles = [
@@ -2175,25 +2231,7 @@ P.history = () => {
   const kinds = d.by_kind.map((k) => `<tr><td class="hi">${esc(SIGNAL[k.kind] || ({ unknown: "未知", test: "测试单" })[k.kind] || k.kind)}</td><td class="r num">${k.trades}</td><td class="r num">${k.win_rate == null ? "—" : Math.round(k.win_rate * 100) + "%"}</td><td class="r num ${cls(k.pnl_usdt)}">${signed(k.pnl_usdt, 2)}</td></tr>`).join("");
   const today = md(data.now);
   const when = (ts) => (md(ts) === today ? hm(ts) : `<span class="dim small">${md(ts)}</span> ${hm(ts)}`);
-  const rows = d.rows.map((t) => {
-    const [s, sc] = SIDE[t.side] || [t.side, ""];
-    const gross = t.pnl_usdt + t.fees_usdt;
-    const miss = '<span class="warn" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到</span>';
-    if (t.unfilled) {
-      return `<tr class="click dim" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="num">—</td><td class="num">—</td><td><span class="pill p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>
-      <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>${mainnetCells(t)}</tr>`;
-    }
-    const paperNote = t.paper_stop_price != null ? `<div class="dim small" title="主网${t.paper_price_source === "mark" ? "标记价" : "成交价"}越过止损 ${t.paper_stop_price}，按止损价记模拟成交；Demo 实际净盈亏 ${t.demo_pnl_usdt == null ? "—" : signed(t.demo_pnl_usdt, 2) + "U"}">Demo ${t.demo_exit_price != null ? price(t.demo_exit_price, t.symbol) : "—"}</div>` : "";
-    const exit = (t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>') + paperNote;
-    const shut = closeTime(t);
-    const lag = t.exit_filled_at ? Math.round((new Date(t.closed_at) - new Date(t.exit_filled_at)) / 1000) : 0;
-    const shutTip = t.exit_filled_at ? ` title="币安成交 ${hms(t.exit_filled_at)}；程序结账 ${hms(t.closed_at)}${lag > 0 ? `（晚 ${lag} 秒）` : ""}"` : "";
-    const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
-    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap"${shutTip}>${when(shut)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(t.close_source === "keeper_assistant" ? "管家助手" : REASON[t.close_reason] || t.close_reason || "—")}</td>
-      <td class="num nowrap">${dur(new Date(shut) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}${mainnetCells(t)}</tr>`;
-  }).join("");
+  const rows = d.rows.map((t) => tradeRow(t, when, mainnetCells(t))).join("");
   window.__recs = d.rejected;
   const rej = S.rej
     ? `<section class="card mt"><div class="ch"><h2>被拒的信号</h2><span class="r">${d.rejected.length} 条 · 拍板放弃和风控员拒绝 · 点一条看快照</span></div>
@@ -2209,7 +2247,7 @@ P.history = () => {
     ${mainnetCard(d)}
     ${symbolCard(d)}
     <section class="card mt"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链 · 窄屏左右滑</span></div>
-      ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">最高浮盈</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th><th class="r" title="按同一时刻的币安主网成交价重算的净利">按主网价格算</th><th class="r" title="Demo 毛利 − 主网毛利：Demo 成交价占的便宜">价差</th><th class="r" title="两边全按吃单费率比按 Demo 实际费率多付多少，不在差里">费率差</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">最高浮盈按管家采样收益率和最终账本仓位估算，未扣手续费，可能遗漏最高点；缺少可用记录显示 —。止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
+      ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr>${TRADE_HEAD}<th class="r" title="按同一时刻的币安主网成交价重算的净利">按主网价格算</th><th class="r" title="Demo 毛利 − 主网毛利：Demo 成交价占的便宜">价差</th><th class="r" title="两边全按吃单费率比按 Demo 实际费率多付多少，不在差里">费率差</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">最高浮盈按管家采样收益率和最终账本仓位估算，未扣手续费，可能遗漏最高点；缺少可用记录显示 —。止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
     <section class="card mt"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
       ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>${rej}`;
 };
