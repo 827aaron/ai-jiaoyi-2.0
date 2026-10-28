@@ -773,11 +773,13 @@ def episodes(rows: Sequence[Scored]) -> list[tuple[datetime, datetime, str]]:
 def latency(
     eps: Sequence[tuple[datetime, datetime, str]],
     events: Sequence[tuple[datetime, str | None]],
+    last: datetime | None = None,
 ) -> dict[str, Any]:
     """每段行情：开始时已经同向生效记 0（already）；段内发布了同向记分钟数；到段结束都没有记
-    missed。    ``events`` = (时刻, 方向)，发布时间线或每轮叫的方向都行。"""
+    missed；段落还没结束（最后一轮 ``last`` 还在段里）又还没跟上记 open，不算 missed。
+    ``events`` = (时刻, 方向)，发布时间线或每轮叫的方向都行。"""
     lat: list[float] = []
-    already = missed = 0
+    already = missed = still = 0
     detail = []
     for start, end, c in eps:
         want = {"up": "看涨", "down": "看跌"}[c]
@@ -788,8 +790,12 @@ def latency(
             continue
         hit = next((at for at, d in events if start <= at and d == want), None)
         if hit is None or hit > end + timedelta(minutes=5):
-            missed += 1
-            detail.append({"start": start.isoformat(), "dir": c, "latency_min": None})
+            ongoing = last is not None and end >= last
+            still += ongoing
+            missed += not ongoing
+            detail.append(
+                {"start": start.isoformat(), "dir": c, "latency_min": None, "open": ongoing}
+            )
             continue
         m = (hit - start).total_seconds() / 60
         lat.append(m)
@@ -799,6 +805,7 @@ def latency(
         "caught": len(lat),
         "already": already,
         "missed": missed,
+        "open": still,
         "median_min": _r(statistics.median(lat), 1) if lat else None,
         "mean_min": _r(_mean(lat), 1),
         "detail": detail[-20:],
@@ -815,6 +822,7 @@ KEYS = ("n", "hit", "coverage", "precision")
 
 def sweep(rows: Sequence[Scored], flash_at: Sequence[datetime]) -> list[dict[str, Any]]:
     eps = episodes(rows)
+    last = rows[-1].run.t0 if rows else None
     out = []
     usable = [s for s in rows if not s.run.prior_missing]
     for theta in THETAS:
@@ -830,11 +838,11 @@ def sweep(rows: Sequence[Scored], flash_at: Sequence[datetime]) -> list[dict[str
                 )
                 for h in HORIZONS
             }
-            call_lat = latency(eps, call_events(rows, dirs))
+            call_lat = latency(eps, call_events(rows, dirs), last)
             for k in CONFIRMS:
                 tl = replay_publishes([s.run for s in rows], dirs, flash_at, confirm=k)
                 pub = published_hits(usable, tl, "4h")
-                lat = latency(eps, tl)
+                lat = latency(eps, tl, last)
                 out.append(
                     {
                         "theta": theta,
@@ -846,6 +854,7 @@ def sweep(rows: Sequence[Scored], flash_at: Sequence[datetime]) -> list[dict[str
                         "publishes": sum(1 for _, d in tl if d is not None),
                         "latency_median_min": lat["median_min"],
                         "missed": lat["missed"],
+                        "open": lat["open"],
                         "episodes": lat["episodes"],
                         "call_latency_median_min": call_lat["median_min"],
                     }
@@ -955,6 +964,7 @@ def summarize(
         s.in_force = in_force_at(timeline, s.run.t0)
     replay = replay_publishes(log.runs, [r.direction for r in log.runs], log.owner_flash_at)
     eps = episodes(rows)
+    last = rows[-1].run.t0 if rows else None
     mirror_rows = [s for s in usable if s.run.mirror_test and "4h" in s.out]
     mirror_main = [brier(s.run.probs["4h"], s.out["4h"].cls) for s in mirror_rows]
     mirror_swap = [
@@ -991,8 +1001,8 @@ def summarize(
                 "行情 = 近 4 小时等权池收益连续 ≥ 30 分钟停在 ±flat_band_pct 外；"
                 "publish = 多久后发布同向，call = 多久后某一轮叫出同向"
             ),
-            "publish": latency(eps, timeline),
-            "call": latency(eps, call_events(rows, [r.run.direction for r in rows])),
+            "publish": latency(eps, timeline, last),
+            "call": latency(eps, call_events(rows, [r.run.direction for r in rows]), last),
         },
         "mirror": {
             "n": len(mirror_rows),
@@ -1129,8 +1139,8 @@ def render(rep: Mapping[str, Any]) -> list[str]:
     lp, lc = rep["latency"]["publish"], rep["latency"]["call"]
     lines.append(
         f"延迟：{lp['episodes']} 段行情，发布同向 {lp['caught']}（已生效 {lp['already']}）、没跟上 "
-        f"{lp['missed']}，中位 {_f(lp['median_min'], '.0f')} 分钟；单轮叫出中位 "
-        f"{_f(lc['median_min'], '.0f')} 分钟"
+        f"{lp['missed']}、还在走没跟上 {lp['open']}，中位 {_f(lp['median_min'], '.0f')} 分钟；"
+        f"单轮叫出中位 {_f(lc['median_min'], '.0f')} 分钟"
     )
     fl = rep.get("flash")
     if fl:

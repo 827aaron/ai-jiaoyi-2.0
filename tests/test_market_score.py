@@ -398,6 +398,9 @@ def test_latency_counts_minutes_from_sustained_move_to_same_direction_publish() 
     assert got["caught"] == 1 and got["median_min"] == 30.0 and got["missed"] == 0
     assert ms.latency(eps, [(T0, "看涨")])["already"] == 1
     assert ms.latency(eps, [(T0 + 6 * q, "看涨")])["missed"] == 1
+    # 段落还没走完（最后一轮还在段里）：没跟上算「还在走」，不算 missed
+    still = ms.latency(eps, [], last=T0 + 3 * q)
+    assert still["open"] == 1 and still["missed"] == 0
 
 
 def test_sweep_rederives_directions_without_model_calls(tmp_path: Path) -> None:
