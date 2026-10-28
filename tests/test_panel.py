@@ -141,7 +141,7 @@ HB = HbSnapshot(
 )
 
 
-def _seed_overnight(tmp_path: Path, refs: dict[str, float] | None) -> None:
+def _seed_overnight(tmp_path: Path, refs: dict[str, float] | None, *, income: bool = True) -> None:
     """曼谷 0 点 = UTC 10-21 17:00。BTC 多单 0 点前开、还拿着；ETH 空单 0 点前开、今天平；
     SOL 今天开今天平；XRP 今天开还拿着。"""
     yesterday = "2026-10-21T15:30:00Z"  # 曼谷 22:30
@@ -176,8 +176,11 @@ def _seed_overnight(tmp_path: Path, refs: dict[str, float] | None) -> None:
     (tmp_path / "risk_state.json").write_text(
         json.dumps({"day": "2026-10-22", "start_equity": 10_000.0, "tripped": False})
     )
-    days = {"2026-10-22": {"realized_pnl": 0.0, "commission": -1.8899, "funding_fee": -0.5}}
-    (tmp_path / "income_daily.json").write_text(json.dumps({"tz": "Asia/Bangkok", "days": days}))
+    if income:
+        days = {"2026-10-22": {"realized_pnl": 0.0, "commission": -1.8899, "funding_fee": -0.5}}
+        (tmp_path / "income_daily.json").write_text(
+            json.dumps({"tz": "Asia/Bangkok", "days": days})
+        )
 
 
 HB_OVERNIGHT = HbSnapshot(
@@ -213,6 +216,19 @@ def test_overview_day_pnl_splits_into_closes_holdings_and_costs_from_day_refs(
     assert rows["btc"].today_from == "ref" and rows["btc"].today_usdt == pytest.approx(-4.34)
     assert rows["btc"].unrealized_usdt == pytest.approx(-20.0)
     assert rows["xrp"].today_from == "entry" and rows["xrp"].today_usdt == pytest.approx(3.0)
+
+
+def test_overview_day_costs_without_income_estimate_todays_open_fees(tmp_path: Path) -> None:
+    _seed_overnight(tmp_path, {"BTCUSDT": 67000.0, "ETHUSDT": 2480.0}, income=False)
+    ov = build_overview(
+        PanelFiles(tmp_path, RISK.day_reset_tz), HB_OVERNIGHT, RISK, _cfg(tmp_path), NOW
+    )
+    k = ov.kpis
+    # 只有 XRP 今天开、还拿着：它的开仓费 0.3；资金费不知道
+    assert k.day_costs_usdt == pytest.approx(-0.3) and not k.day_funding_known
+    assert k.day_closes_usdt + k.day_holding_usdt + k.day_costs_usdt + k.day_residual_usdt == (  # type: ignore[operator]
+        pytest.approx(33.0)
+    )
 
 
 def test_overview_day_pnl_without_day_refs_falls_back_to_entry_and_flags(tmp_path: Path) -> None:

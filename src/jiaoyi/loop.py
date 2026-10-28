@@ -481,6 +481,7 @@ class Runner:
         # 重启已定：不再发起新的平仓 / 对账（交给重启后的进程，期间靠币安上的保命止损）
         self._leaving = False
         self._reconciling = False
+        self._day_start_failing = False
         self._restart = asyncio.Event()
         self.restart_requested = False
         self._restart_exit = restart_exit
@@ -2035,8 +2036,19 @@ class Runner:
 
     async def day_start_tick(self) -> None:
         executor = self.m.executor
-        if isinstance(executor, _DayStartAware) and executor.day_start_due(self.app.clock()):
+        if not isinstance(executor, _DayStartAware) or not executor.day_start_due(self.app.clock()):
+            return
+        try:
             await executor.account()
+        except Exception as e:
+            # hummingbot-api down around midnight would otherwise dump a stack trace every minute
+            if self._day_start_failing:
+                log.warning("0 点定日亏基准读账户又失败，下分钟再试：%r", e)
+            else:
+                log.exception("0 点定日亏基准读账户失败，下分钟再试")
+            self._day_start_failing = True
+        else:
+            self._day_start_failing = False
 
     async def reconcile_tick(self) -> None:
         # 对账员自己发告警（带去重），连不上时抛异常，由 _every 记日志后下一轮再试

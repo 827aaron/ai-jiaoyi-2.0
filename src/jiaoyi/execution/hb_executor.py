@@ -3356,6 +3356,12 @@ class HbExecutorAdapter:
         """当日参考价和晚到的日亏基准用的 0 点价格从这里取（主循环接上本地行情）。"""
         self._price_at = price_at
 
+    def day_start_now(self, day: str) -> tuple[float | None, float | None]:
+        """(这一天已定的日亏基准, 上一次读到的权益)；基准不是这一天的为 None。"""
+        current = self._registry.data.day_start
+        base = current.equity_usdt if current is not None and current.day == day else None
+        return base, self._registry.data.last_equity_usdt
+
     def override_day_start(self, day: str, equity: float, refs: dict[str, float]) -> float | None:
         """启动时人工改当天日亏基准（见 ``jiaoyi.execution.day_override``）；返回原来这一天的基准，
         原来记的不是这一天返回 None。"""
@@ -3480,7 +3486,8 @@ class HbExecutorAdapter:
                         f"0 点后 {late_min:.0f} 分钟才读到账户，本地行情没有 "
                         f"{'、'.join(missing)} 的 0 点价格；基准取 0 点钱包余额 {wallet0:.2f} USDT"
                         f"（现钱包 {wallet:.2f} − 0 点以来收入 {income:.2f}）。"
-                        "这些仓位 0 点前的浮盈浮亏会算进今日盈亏和日亏熔断",
+                        "这些仓位 0 点前的浮盈浮亏会算进今日盈亏和日亏熔断。"
+                        "0 点价格取的是本地主网行情（不是 Demo 标记价），会差一点",
                         None,
                         f"day_start_wallet:{day}",
                         kind="system",

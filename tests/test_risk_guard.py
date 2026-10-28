@@ -370,7 +370,8 @@ def test_breaker_override_start_keeps_a_trip(tmp_path: Path) -> None:
     down = account(t, equity=9_650.0, day_start_equity_usdt=10_000.0)
     assert not g.review(signal(t), jev(), card(t), down, t).approved
     g.breaker.override_start(datetime(2026, 10, 22, tzinfo=UTC).date(), 9_000.0)
-    v = g.review(signal(t), jev(), card(t), down, t)
+    after = account(t, equity=9_650.0, day_start_equity_usdt=9_000.0)
+    v = g.review(signal(t), jev(), card(t), after, t)
     assert not v.approved and any("熔断" in r for r in v.reasons)
 
 

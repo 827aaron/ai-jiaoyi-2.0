@@ -266,6 +266,10 @@ class DayLossBreaker:
         except OSError:
             logger.exception("写日亏熔断状态失败")
 
+    def start_of(self, day: date) -> float | None:
+        """这一天记下的日初权益；记的不是这一天、还没记或状态文件读不懂为 None。"""
+        return self._start_equity if self._day == day and not self._corrupt else None
+
     def override_start(self, day: date, equity: float) -> float | None:
         """启动时人工改当天日初权益；返回原来这一天的日初权益（原来记的不是这一天为 None）。
         当天已触发的熔断不解锁；状态文件读不懂时照旧按已触发处理。"""

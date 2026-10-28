@@ -15,9 +15,13 @@ TZ = "Asia/Bangkok"
 
 
 class FakeExecutor:
-    def __init__(self, old: float | None) -> None:
+    def __init__(self, old: float | None, last: float | None = None) -> None:
         self.old = old
+        self.last = last
         self.calls: list[tuple[str, float, dict[str, float]]] = []
+
+    def day_start_now(self, day: str) -> tuple[float | None, float | None]:
+        return (self.old if day == "2026-10-29" else None), self.last
 
     def override_day_start(self, day: str, equity: float, refs: dict[str, float]) -> float | None:
         self.calls.append((day, equity, refs))
@@ -44,6 +48,7 @@ def test_apply_day_override_sets_both_bases_audits_and_never_reapplies(
         equity_usdt=5751.86,
         refs={"BTCUSDT": 68000.5},
         reason="0 点基准取了钱包余额",
+        loosen=True,
     )
     ex, breaker = FakeExecutor(5970.98), _breaker(tmp_path, 5970.98)
     with caplog.at_level(logging.WARNING):
@@ -82,10 +87,14 @@ def test_apply_day_override_says_when_the_breaker_gets_stricter(
 @pytest.mark.parametrize(
     "doc",
     [
-        {"day": "2026-10-28", "equity_usdt": 5751.86},
+        {"day": "2026-10-28", "equity_usdt": 6100.0},
         {"day": "2026-10-29", "equity_usdt": 0},
         {"day": "2026-10-29", "equity_usdt": "5751.86"},
-        {"day": "2026-10-29", "equity_usdt": 5751.86, "refs": {"BTCUSDT": -1}},
+        {"day": "2026-10-29", "equity_usdt": 5751.86, "loosen": True, "refs": {"BTCUSDT": -1}},
+        {"day": "2026-10-29", "equity_usdt": 5751.86},
+        {"day": "2026-10-29", "equity_usdt": 5751.86, "loosen": "true"},
+        {"day": "2026-10-29", "equity_usdt": 575.186, "loosen": True},
+        {"day": "2026-10-29", "equity_usdt": 5373.0, "loosen": True},
         [],
     ],
 )
@@ -110,3 +119,34 @@ def test_apply_day_override_without_file_does_nothing(tmp_path: Path) -> None:
     ex = FakeExecutor(None)
     assert not apply_day_override(tmp_path, NOW, TZ, ex, None)
     assert ex.calls == [] and list(tmp_path.iterdir()) == []
+
+
+def test_apply_day_override_loosen_needs_the_flag_and_stays_within_ten_percent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write(tmp_path, day="2026-10-29", equity_usdt=5751.86)
+    with caplog.at_level(logging.WARNING):
+        assert not apply_day_override(tmp_path, NOW, TZ, FakeExecutor(5970.98), None)
+    assert '没写 "loosen": true' in caplog.text
+    caplog.clear()
+    _write(tmp_path, day="2026-10-29", equity_usdt=575.186, loosen=True)
+    with caplog.at_level(logging.WARNING):
+        assert not apply_day_override(tmp_path, NOW, TZ, FakeExecutor(5970.98), None)
+    assert "低了 90.4%" in caplog.text and "超过 10% 上限" in caplog.text
+
+
+def test_apply_day_override_loosen_is_measured_against_the_higher_base(tmp_path: Path) -> None:
+    _write(tmp_path, day="2026-10-29", equity_usdt=5900.0, loosen=True)
+    breaker = _breaker(tmp_path, 6600.0)
+    assert not apply_day_override(tmp_path, NOW, TZ, FakeExecutor(5970.98), breaker)
+
+
+def test_apply_day_override_without_base_checks_loosen_against_last_equity(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, day="2026-10-29", equity_usdt=5000.0, loosen=True)
+    ex = FakeExecutor(None, last=6000.0)
+    assert not apply_day_override(tmp_path, NOW, TZ, ex, None)
+    _write(tmp_path, day="2026-10-29", equity_usdt=5500.0, loosen=True)
+    assert apply_day_override(tmp_path, NOW, TZ, ex, None)
+    assert ex.calls == [("2026-10-29", 5500.0, {})]

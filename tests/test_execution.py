@@ -1118,6 +1118,20 @@ async def test_late_start_adds_midnight_floating_pnl_from_local_prices(rig: Rig)
     assert [a.title for a in rig.alerts.sent if "日亏基准" in a.title] == []
 
 
+async def test_late_start_leaves_out_positions_opened_after_midnight(rig: Rig) -> None:
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=5)
+    await open_filled(rig, price=68000.0)
+    rig.adapter.set_price_source(lambda _sym, _t: 60000.0)
+    rig.t = BKK_MIDNIGHT + timedelta(minutes=16)
+    rig.api.balances = [{"token": "USDT", "units": 980.0, "available_units": 900.0}]
+    rig.api.pos = [{"unrealized_pnl": -20.0}]
+    rig.ex.income = -20.0
+    acc = await rig.adapter.account()
+    assert acc.day_start_equity_usdt == pytest.approx(1000.0)
+    assert rig.registry.data.day_start is not None and rig.registry.data.day_start.refs == {}
+    assert [a.title for a in rig.alerts.sent if "日亏基准" in a.title] == []
+
+
 async def test_late_start_without_midnight_price_uses_wallet_and_warns(rig: Rig) -> None:
     rig.t = BKK_MIDNIGHT - timedelta(hours=2)
     await open_filled(rig, price=68000.0)
@@ -1130,6 +1144,7 @@ async def test_late_start_without_midnight_price_uses_wallet_and_warns(rig: Rig)
     [warn] = [a for a in rig.alerts.sent if "日亏基准" in a.title]
     assert warn.level is AlertLevel.WARN and "不含当时浮动盈亏" in warn.title
     assert "BTCUSDT" in warn.body and "0 点前的浮盈浮亏会算进今日盈亏" in warn.body
+    assert "本地主网行情" in warn.body
 
 
 async def test_late_start_uses_equity_read_just_before_midnight(rig: Rig) -> None:

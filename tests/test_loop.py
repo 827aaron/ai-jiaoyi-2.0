@@ -1005,3 +1005,30 @@ async def test_day_start_tick_reads_account_only_when_due(
     app.m = dataclasses.replace(app.m, executor=ex)
     await Runner(app).day_start_tick()
     assert ex.asked == [now] and ex.reads == (1 if due else 0)
+
+
+async def test_day_start_tick_logs_one_stack_trace_per_outage(
+    tmp_path: Path, now: datetime, caplog: pytest.LogCaptureFixture
+) -> None:
+    class Down(DayStartExecutor):
+        failing = True
+
+        async def account(self) -> c.AccountState:
+            self.reads += 1
+            if self.failing:
+                raise RuntimeError("hummingbot-api 503")
+            return await FakeExecutor.account(self)
+
+    ex = Down(True)
+    app = _app(tmp_path, now)
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    with caplog.at_level("WARNING", logger="jiaoyi.loop"):
+        for _ in range(3):
+            await r.day_start_tick()
+        ex.failing = False
+        await r.day_start_tick()
+        ex.failing = True
+        await r.day_start_tick()
+    traced = [x.exc_info is not None for x in caplog.records if "日亏基准读账户" in x.getMessage()]
+    assert ex.reads == 5 and traced == [True, False, False, True]
