@@ -231,6 +231,26 @@ def test_long_stop_loss_and_fees() -> None:
     assert abs(closed.gross_pnl) == pytest.approx(intent.risk_usdt, rel=0.1)
 
 
+def test_paper_account_counts_open_positions_by_signal_kind() -> None:
+    from tests.conftest import load_example
+
+    acct = PaperAccount(10_000.0, fee_bps=0.0, slippage_bps=0.0)
+    for i, (sym, kind) in enumerate(
+        [
+            ("BTCUSDT", "btc_lead"),
+            ("ETHUSDT", "btc_lead"),
+            ("SOLUSDT", "oi_follow"),
+            ("XRPUSDT", None),
+        ]
+    ):
+        it = OrderIntent.model_validate(
+            load_example("order_intent")
+            | {"intent_id": f"int-{i}", "symbol": sym, "signal_kind": kind}
+        )
+        acct.open_position(it, 100.0, b.T0)
+    assert acct.state(b.T0).open_by_kind == {"btc_lead": 2, "oi_follow": 1}
+
+
 def test_short_take_profit() -> None:
     acct = PaperAccount(10_000.0, fee_bps=0.0, slippage_bps=0.0)
     intent = _intent(Side.SHORT)

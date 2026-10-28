@@ -208,6 +208,7 @@
   - 校准不被拖偏：`jev-backtest` / `gate-calibrate` / `jev-replay` 给总门槛 `min_p_take` 的推荐时，不算记录里有 `take_floor_kind` 的信号，也不算现在配了单独门槛的类型（`outcomes.global_floor_rows`，报告里写 `own_floor_excluded`）；分桶表照旧全算。`jev-replay` 判「会不会被拍板拦」时按这类的单独门槛。
 - 按信号类型限制同时持仓：`[fast_loop.max_open_by_kind]`（`dict[信号类型, 0–100]`，默认空 = 不另外限，即原行为）。某类信号开的在管持仓（含开仓中、平仓中）到了这个数，同类新信号风控员就拒绝「btc_lead 信号开的仓已有 3 笔，达到这类上限 3 笔」；挂单没成交改市价追进前也查一遍。0 = 这类信号不开仓。面板「拍板人 Jev → 按信号类型限制同时持仓」每类一格，留空 = 不单独限；能写进 `config/app.pending.toml`；热生效。Demo 建议 `btc_lead = 3`。
   - 开仓指令 `OrderIntent` 和持仓记录 `PositionRecord` 新增 `signal_kind`，账户状态 `AccountState.open_by_kind` 按它数；升级前开的仓没有这一项，不计入（升级后第一批新仓开始算）。
+  - 账本 `data/positions.json` 只在还在管的仓上写 `record.signal_kind`（为空、已平、开仓失败的不写），追单指令 `chase.signal_kind` 同样为空不写，所以没有在管持仓带类型时旧代码能直接读。回退代码前：先停主程序，跑 `python scripts/signal_kind_rollback.py data/positions.json` 看要删什么，再加 `--write`（先备份成 `positions.json.bak-signal-kind`），删掉在管持仓里的 `record.signal_kind` / `chase.signal_kind`。只关功能（清空 `max_open_by_kind`）不用跑。
   - 回滚：面板把这一格清空，或删掉 `[fast_loop.min_p_take_by_kind]` / `[fast_loop.max_open_by_kind]` 这一段，几秒内回到原行为；不用重启。
   `min_p_genuine` / `min_p_direction` / `max_p_toxic` 只在 `"six"` 下生效，设置页不显示，配置里写了也不报错。
 - 题目里点名 `tech` 那句、`flow` / `deriv` / `day` 的说明还没在本地记录上测过，上线后用 `ab/run_ab.py` 重跑验证。
