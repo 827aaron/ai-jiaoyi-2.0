@@ -205,6 +205,11 @@ def _live(leg: ProtectiveLeg) -> bool:
     )
 
 
+def live_leg(leg: ProtectiveLeg) -> bool:
+    """Confirmed on the exchange, still NEW and not triggered."""
+    return _live(leg)
+
+
 def _role(leg: ProtectiveLeg) -> str:
     return "lifeboat" if leg.purpose == "lifeboat" else leg.kind
 

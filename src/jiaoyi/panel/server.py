@@ -291,6 +291,8 @@ def create_app(
     history_files = PanelFiles(data_dir, risk.day_reset_tz)
     history_lock = threading.Lock()
     live = actions.LiveConfigs(risk, app_cfg, config_paths)
+    for f in (files, history_files):
+        f.paper_book_pnl = lambda: live.get()[1].fast_loop.paper_stop_book_pnl
 
     def cfg() -> tuple[RiskConfig, AppConfig]:
         """配置文件改了就用新的（data_dir 例外：换目录要重启面板）。"""
@@ -584,8 +586,12 @@ def create_app(
         if first - since <= pnl_curve.EST_STEP * 2:
             return None
         try:
+            ledger = files.ledger()  # Demo's fills: the recorded points are Demo equity
             est = await pnl_curve.backfill(
-                files.ledger().positions, since, first, lambda s: market.klines(s, "5m", 300)
+                [ledger.demo(p) for p in ledger.positions],
+                since,
+                first,
+                lambda s: market.klines(s, "5m", 300),
             )
         except KlineError as e:
             log.info("今日盈亏曲线回填拿不到 K 线：%s", e)
