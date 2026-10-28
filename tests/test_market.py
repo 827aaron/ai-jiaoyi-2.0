@@ -496,6 +496,43 @@ async def test_market_data_flags_source_and_age() -> None:
     assert r.snapshot is not None and r.snapshot.last_price == 68100.0
 
 
+async def test_rest_refresh_after_a_stall_counts_each_trade_once_in_the_hour_flow() -> None:
+    """冷门币断流 400 秒后补：REST 一页跨了一个多小时，成交流（留 1 小时）里实时流已经记过的
+    秒不能再记一遍，也不能插到比它新的秒前面。"""
+    t0 = T0 + timedelta(minutes=21)
+    eng = _engine(["FILUSDT"])
+    for at, px, u, buy in _rest_trades("FILUSDT", t0, t0 + timedelta(seconds=600)):
+        side = c.Side.LONG if buy else c.Side.SHORT
+        eng.update(c.Trade(symbol="FILUSDT", ts=at, price=px, qty=u / px, taker_side=side))
+    now = t0 + timedelta(seconds=1000)
+    rows = _rest_trades("FILUSDT", t0 - timedelta(hours=1), now - timedelta(seconds=5))
+    fake = FakeMarketRest({"FILUSDT": rows}, now=now)
+    md = MarketData(eng, enabled=lambda: True, clock=lambda: now, fetch=fake)
+    r = await md.snapshot("FILUSDT", max_age_s=5)
+    assert r.source == "rest" and fake.agg_calls() == 1
+    flow = list(eng._s["FILUSDT"].flow)
+    secs = [b[0] for b in flow]
+    assert secs == sorted(set(secs))
+    assert {b[1] + b[2] for b in flow} == {1000.0}  # 每秒一笔 1000 U，没有记两遍的秒
+
+
+async def test_market_data_refresh_gives_up_waiting_for_a_busy_budget() -> None:
+    now = T0 + timedelta(minutes=21)
+    eng = _engine(["BTCUSDT"])
+    fake = FakeMarketRest({"BTCUSDT": _rest_trades("BTCUSDT", now, now)}, now=now)
+
+    class Busy(WeightBudget):
+        async def take(self, weight: int) -> None:
+            await asyncio.Event().wait()  # 启动补行情排着队
+
+    md = MarketData(
+        eng, enabled=lambda: True, clock=lambda: now + timedelta(minutes=5), fetch=fake,
+        budget=Busy(),
+    )  # fmt: skip
+    await asyncio.wait_for(md.refresh("BTCUSDT", 5, timeout_s=0.05), 1.0)
+    assert fake.calls == []
+
+
 async def test_market_data_off_reads_memory_only_and_fetches_without_the_queue() -> None:
     now = T0 + timedelta(minutes=21)
     eng = _engine(["BTCUSDT"])

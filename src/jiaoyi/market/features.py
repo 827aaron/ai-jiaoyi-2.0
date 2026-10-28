@@ -539,9 +539,14 @@ class RollingFeatureEngine:
         才换。爆仓没有 REST 历史，这里不碰。"""
         st = self._state(symbol)
         rows = sorted(((_ts(tr.ts), tr) for tr in trades if tr.symbol == symbol), key=_first)
-        had = bool(st.trades)
-        first = st.trades[0][0] if had else math.inf
-        last = st.trades[-1][0] if had else -math.inf
+        # 成交 5 分钟、逐秒价 301 秒、成交流 1 小时各留各的：边界按三者里最早 / 最晚的算，免得补进
+        # 成交流已有的秒（重复记）或插到比它新的秒前面（乱序）。逐秒的桶只知道是哪一秒，同一秒的不补
+        heads = [d[0][0] for d in (st.trades, st.prices, st.flow) if d]
+        tails = [st.trades[-1][0]] if st.trades else []
+        tails += [d[-1][0] + 1.0 for d in (st.prices, st.flow) if d]
+        had = bool(heads)
+        first = min(heads, default=math.inf)
+        last = max(tails, default=-math.inf)
         before = [tr for t, tr in rows if t < first]
         after = [tr for t, tr in rows if t > last] if had else []
         self._prepend(st, before)

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable
@@ -58,6 +59,7 @@ AGG_WEIGHT = 20
 MAX_AGG_PAGES = 3
 """一个币最多往回翻几页逐笔成交（每页权重 20）；BTC 3 页通常够 5 分钟，不够 5 分钟的字段接着等。"""
 PREMIUM_WEIGHT = 1
+REFRESH_WAIT_S = 2.0
 
 TRADE_1M_FIELDS = frozenset(
     {
@@ -225,10 +227,22 @@ class MarketData:
             return self._read(symbol, snap, None)
         return MarketRead(snap, "stale", self._age(snap), failed or why)
 
-    async def refresh(self, symbol: str, max_age_s: float | None = None) -> None:
-        """决策前调用：快照旧了 / 还没有就从 REST 补一次（开关关着什么都不做）。"""
+    async def refresh(
+        self, symbol: str, max_age_s: float | None = None, *, timeout_s: float = REFRESH_WAIT_S
+    ) -> None:
+        """决策前调用：快照旧了 / 还没有就从 REST 补一次（开关关着什么都不做）。
+
+        最多等 ``timeout_s``：启动时预算可能排着一两分钟，管家 / 追单不能跟着干等；补拉在后台
+        接着跑，下一轮就用上。"""
         if self.on:
-            await self.snapshot(symbol, max_age_s=max_age_s)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.snapshot(symbol, max_age_s=max_age_s), timeout_s)
+
+    async def fetch_now(self, path: str, params: dict[str, Any], weight: int) -> Any:
+        """不排预算、只查封禁的公开 GET：拍板人快照补拉只等 1 秒，排在启动补行情后面就全超时。
+        权重 0–1 的几项，不会把 IP 打满。"""
+        check_blocked()
+        return await self._fetch(path, params, weight)
 
     def _read(self, symbol: str, snap: FeatureSnapshot | None, why: str | None) -> MarketRead:
         src: Source = "rest" if self._engine.data_source(symbol) == "rest" else "ws"
@@ -348,8 +362,11 @@ class MarketData:
                 exhausted = True  # 上市以来的成交全在这里了
                 break
             from_id = max(first_id - AGG_LIMIT, 0)
-        trades = parse_agg_trades(symbol, rows)
         if not rows:
-            return trades, target if exhausted else fetched_at
+            return [], target if exhausted else fetched_at
         first_t = int(rows[0]["T"]) / 1000.0
-        return trades, min(first_t, target) if exhausted else first_t
+        if first_t <= target or exhausted:
+            # 比要的更早的不要：冷门币一页能跨几小时，补进去只会和已有的成交流重叠
+            rows = [r for r in rows if int(r["T"]) / 1000.0 >= target]
+            return parse_agg_trades(symbol, rows), target
+        return parse_agg_trades(symbol, rows), first_t
