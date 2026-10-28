@@ -1405,6 +1405,18 @@ def test_card_pool_rows_show_source_and_hide_expired(tmp_path: Path) -> None:
     )
 
 
+def test_flip_text_says_who_confirms() -> None:
+    from jiaoyi.panel.overview import _flip_text
+
+    raw = {"confirmed": "long", "candidate": "neutral", "count": 2, "need": 2}
+    assert str(_flip_text(raw)).endswith("连续够场数的会都不是原方向才换成最新结论")
+    by_assistant = _flip_text({**raw, "by": "assistant", "progress": "第 2 场改判，等管家助手确认"})
+    assert by_assistant == (
+        "待确认翻转 第 2 场改判，等管家助手确认：会议改判中性，卡上仍按做多只看不做"
+        "（不开新仓，持仓不按卡规则平）；只由管家助手的两个模型确认，会回到原方向就取消"
+    )
+
+
 def test_card_history_lists_past_orders(tmp_path: Path) -> None:
     """历史卡：按日期列出过去的指令，写明到期 / 被替换 / 还在用，带当时参数和开过的仓。"""
     from jiaoyi.panel.card_history import build_card_history

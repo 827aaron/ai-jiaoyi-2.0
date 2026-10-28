@@ -485,6 +485,7 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
 - 大盘台翻转后：N ≥ 2 时各币的新方向同样要等确认，持仓管家的反向卡 / 中性卡规则因此比现在晚一场会（中位约 1 小时）才对大盘翻转后的新方向起作用。
 - 落盘：`data/card_flip.json`（原子写），重启后读回；每条候选记着留在卡上那条指令的身份（`meeting_id|issued_at`，不含方向：重启时按新的类别上限夹卡可能把它改成 no_trade），卡上那条对不上（被换掉、旧代码开过会）就作废、记 `dropped`，从下一场会重新数。改回 `1`（要重启）时启动就清掉所有候选，每条记一条 `dropped`（理由「设置改回 1」），留在卡上的那些候选期指令等各自的下一场会照常换掉。
 - 这几项在面板「军师团 → 每个币的会」里改，也能写进 `slow.pending.toml`；改了要重启 `jiaoyi run`（作战卡调度在启动时读配置）。
+- **谁来确认**（`app.toml [fast_loop] card_flip_confirm_by`，默认 `"meeting"`，热生效，面板「管家助手」组）：`"meeting"` = 上面这套按场数确认，管家助手也可以提前确认（现状）。`"assistant"` = 会只提候选：场数够了也不确认，同样的结论再来一场只是刷新候选（场数照加，理由写「待确认翻转（第 k 场改判，等管家助手确认）」），并重新交给管家助手用新快照再问一次；只有管家助手的两个模型一致才经 `confirm_flip` 确认（做多 ↔ 做空看 `keeper_assistant_flip_confirm`，转中性看 `keeper_assistant_flip_neutral`，见 `docs/fast_loop.md`「管家助手」）。会回到原方向照样取消。管家助手关着、对应开关关着、B 不可用、两个没答一致时候选一直只看不做，每次都记原因（管家助手的决策记录；管家助手没接上时军师团记一条 `card_flip = unasked`）。改回 `"meeting"` 后下一场同样结论的会就按场数确认。`card_flip_confirm = 1` 时不起作用（没有候选）。
 
 推荐的 Demo 配置（`config/slow.pending.toml`）：
 

@@ -783,6 +783,9 @@ class Runner:
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
+            cards.set_flip_by_assistant(
+                lambda: self.app.app_cfg.fast_loop.card_flip_confirm_by == "assistant"
+            )
         return assistant
 
     def _assistant_close(self, pos: PositionRecord, reason: str) -> str | None:

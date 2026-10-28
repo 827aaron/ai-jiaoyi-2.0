@@ -678,12 +678,23 @@ class BattleCardCommander:
                 self._on_flip_pending(symbol, cand)
             except Exception:
                 logger.exception("%s 待确认翻转交给管家助手失败，照旧等下一场会", symbol)
+        elif cand is not None and self._flips.by_assistant():
+            self._write(
+                symbol=symbol,
+                outcome=Outcome.INFO,
+                summary=f"{symbol} 待确认翻转没人确认：管家助手没接上，卡上照旧只看不做",
+                output={"card_flip": "unasked", "why": "管家助手没接上"},
+            )
         return out.card_symbol
 
     # ------------------------------------------------------------ 管家助手
     def set_on_flip_pending(self, callback: Callable[[str, FlipCandidate], None] | None) -> None:
         """翻转候选刚记下（还没确认）时同步回调（币, 那一刻的候选）；回调方不能在这里等。"""
         self._on_flip_pending = callback
+
+    def set_flip_by_assistant(self, by_assistant: Callable[[], bool]) -> None:
+        """返回 True 时会只提候选，不按场数确认（每次调用时读，热生效）。"""
+        self._flips.by_assistant = by_assistant
 
     def confirm_flip(
         self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
@@ -3511,6 +3522,7 @@ class BattleCardCommander:
                 "candidate": f.candidate,
                 "count": f.count,
                 "need": self._flips.need,
+                "by": "assistant" if self._flips.by_assistant() else "meeting",
                 "since": f.first_seen.isoformat(),
                 "progress": self._flips.progress(f.count, f.first_seen, self._clock()),
             }

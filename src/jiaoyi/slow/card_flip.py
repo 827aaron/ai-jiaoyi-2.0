@@ -9,6 +9,10 @@
 信号），只是持仓管家的卡规则（反向卡 / 中性卡）看的是确认过的方向，确认前不因它平仓。
 从中性转出一个方向不算翻转，立即生效。
 
+``[fast_loop] card_flip_confirm_by = "assistant"``（热生效，只在 ``card_flip_confirm`` ≥ 2 时起
+作用）：会只提候选，场数够了也不确认；同样的结论再来一场只是刷新候选、重新交给管家助手问，
+确认只经 ``BattleCardCommander.confirm_flip``。会回到原方向照样取消。
+
 状态存在 ``data/card_flip.json``（不进作战卡存档：契约禁止多余字段，回滚的旧代码要能读卡）。
 每条候选记着它留在卡上的那条指令的身份；卡上那条没了（没有持仓的币过了有效期被拿掉）或
 被换掉（旧代码回滚后开过会、手工改卡）就作废，记一条 ``dropped``。
@@ -20,6 +24,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -115,6 +120,7 @@ class FlipBook:
         self.min_age = min_age
         self._path = path
         self._flips: dict[str, FlipCandidate] = {}
+        self.by_assistant: Callable[[], bool] = lambda: False
 
     @property
     def on(self) -> bool:
@@ -171,7 +177,7 @@ class FlipBook:
             "age_min": round(age.total_seconds() / 60, 1),
             "min_age_min": round(self.min_age.total_seconds() / 60, 1),
         }
-        if count >= self.need and age >= self.min_age:
+        if count >= self.need and age >= self.min_age and not self.by_assistant():
             self._flips.pop(symbol, None)
             self.save()
             return FlipOutcome(
@@ -195,7 +201,10 @@ class FlipBook:
         )
 
     def progress(self, count: int, first: datetime, now: datetime) -> str:
-        """「k/N」，候选时长还没到 ``min_age`` 时加「，等满 X 分钟」。"""
+        """「k/N」，候选时长还没到 ``min_age`` 时加「，等满 X 分钟」；只由管家助手确认时是
+        「第 k 场改判，等管家助手确认」。"""
+        if self.by_assistant():
+            return f"第 {count} 场改判，等管家助手确认"
         text = f"{min(count, self.need)}/{self.need}"
         if self.min_age > timedelta(0) and now - first < self.min_age:
             text += f"，等满 {self.min_age.total_seconds() / 60:g} 分钟"

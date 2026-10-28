@@ -620,7 +620,23 @@ class FastLoopConfig(Contract):
         description="开 = 军师团的会给出待确认翻转（card_flip_confirm ≥ 2 时的 1/N）后另起一件事"
         "问两个模型「会上涨 / 下跌吗」（持有、没持有的币都算）；都答「是」、候选和卡上那条指令"
         "都没变，就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等"
-        "下一场会。转中性的候选不问。",
+        "下一场会。转中性的候选看 keeper_assistant_flip_neutral。",
+    )
+    keeper_assistant_flip_neutral: bool = Field(
+        default=False,
+        description="开 = 做多 / 做空转中性（不做）的待确认翻转也马上问两个模型，问的是原方向"
+        "（原来做多问「会上涨吗」、做空问「会下跌吗」）；两个都答「否」（p(是) ≤ 1 − "
+        "keeper_assistant_min_p）、候选和卡上那条指令都没变，就确认转中性，中性卡规则照常；"
+        "否则候选照旧等下一场会。和 keeper_assistant_flip_confirm 各管各的。",
+    )
+    card_flip_confirm_by: Literal["meeting", "assistant"] = Field(
+        default="meeting",
+        description="待确认翻转（slow.toml card_flip_confirm ≥ 2 时）谁来确认。meeting = 连续够场数"
+        "的会确认，管家助手也可以提前确认（现状）。assistant = 会只提候选，场数够了也不确认，只有"
+        "管家助手的两个模型能确认（做多 / 做空的翻转看 keeper_assistant_flip_confirm，转中性看 "
+        "keeper_assistant_flip_neutral）；同样的结论再来一场就再问一次，会回到原方向照样取消；"
+        "管家助手关着、B 不可用、两个没答一致时候选一直只看不做。"
+        "card_flip_confirm = 1 时不起作用。",
     )
     keeper_assistant_concurrency: int = Field(
         default=2,

@@ -935,9 +935,14 @@ def _flip_text(raw: object) -> str | None:
     if not isinstance(progress, str):
         need = raw.get("need")
         progress = f"{min(int(raw.get('count') or 0), int(need or 0))}/{need}"
+    rule = (
+        "只由管家助手的两个模型确认，会回到原方向就取消"
+        if raw.get("by") == "assistant"
+        else "连续够场数的会都不是原方向才换成最新结论"
+    )
     return (
         f"待确认翻转 {progress}：会议改判{to}，卡上仍按{was}只看不做"
-        "（不开新仓，持仓不按卡规则平）；连续够场数的会都不是原方向才换成最新结论"
+        f"（不开新仓，持仓不按卡规则平）；{rule}"
     )
 
 

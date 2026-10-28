@@ -219,6 +219,8 @@ keeper_assistant_key_level = false  # true = 价格朝不利方向穿过卡上�
 keeper_assistant_close = false    # true = 两个都答「是」就平仓（先过管家的平仓前检查）
 keeper_assistant_b_record_only = true  # true = B 只记录，不平仓、不确认翻转
 keeper_assistant_flip_confirm = false  # true = 军师团出待确认翻转时另起一件事问两个模型，都答「是」就确认
+card_flip_confirm_by = "meeting"  # 待确认翻转谁来确认：meeting = 连续够场数的会（现状）；assistant = 会只提候选，只有管家助手的两个模型能确认
+keeper_assistant_flip_neutral = false  # true = 做多 / 做空转中性的待确认翻转也马上问原方向，两个都答「否」（p(是) ≤ 1 − min_p）就确认转中性
 keeper_assistant_concurrency = 2  # 最多 2；持仓的事排在翻转确认前面
 
 # 按信号类型单独定“做”的门槛（不写 = 所有类型都用上面的 min_p_take）。这一段要放在 fast_loop 那段的键后面。

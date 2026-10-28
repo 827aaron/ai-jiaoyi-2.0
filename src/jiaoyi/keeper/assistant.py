@@ -16,6 +16,10 @@ A 平仓。
 另一件事（``keeper_assistant_flip_confirm``）：军师团的会给出待确认翻转（1/N）时，出卡路径照旧
 同步记下候选、不等任何东西，只把候选交过来；这里另起一件事问两个模型「会上涨 / 下跌吗」，都答
 「是」就请军师团一步同步确认（候选和卡上那条指令都没变才换，变了就作罢）；否则候选照旧等下一场会。
+转中性的候选另有开关（``keeper_assistant_flip_neutral``）：问的是原方向（原来做多问「会上涨吗」），
+两个都答「否」（p(是) ≤ 1 − min_p）才确认转中性。``card_flip_confirm_by = "assistant"`` 时会
+不再按场数确认，只有这里能确认：同样的结论再来一场就再问一次（同一个币隔
+``keeper_assistant_gap_s``），没问成、没答一致的原因每次都记。
 
 同一个币按「币 + 哪件事」去重：持仓的事在问时，这个币的翻转确认推后（问完再问，不丢）；名额上
 持仓的事排在翻转确认前面。
@@ -58,7 +62,7 @@ from jiaoyi.contracts import (
 from jiaoyi.core.recorder import RoleRecorder, local_day
 from jiaoyi.gate.jev import JevTransport, OpenRouterDecisionsTransport, RawJevResult
 from jiaoyi.gate.questions import direction_snapshot
-from jiaoyi.slow.card_flip import FlipCandidate
+from jiaoyi.slow.card_flip import DIR_TEXT, FlipCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,7 @@ YES, NO = "是", "否"
 OPTIONS: tuple[str, ...] = (YES, NO)
 MOVE = {"long": "上涨", "short": "下跌"}
 QUESTION_ID = "move"
+FLIP_NEUTRAL = "flip_neutral"
 REASONS = {
     "reverse_signal": "管家助手：反向信号，两个模型一致",
     "key_level": "管家助手：价格穿过关键位，两个模型一致",
@@ -110,6 +115,10 @@ class Verdict:
 
     def yes(self, min_p: float) -> bool:
         return self.p_yes is not None and self.p_yes > 0.5 and self.p_yes >= min_p
+
+    def no(self, min_p: float) -> bool:
+        # rounded so that min_p 0.6 accepts p(是) of exactly 0.4 (1 - 0.6 is not 0.4 in floats)
+        return self.p_yes is not None and self.p_yes < 0.5 and self.p_yes <= round(1 - min_p, 9)
 
     @property
     def text(self) -> str:
@@ -309,6 +318,7 @@ class KeeperAssistant:
         self._busy: set[tuple[str, str]] = set()
         self._deferred: dict[str, FlipCandidate] = {}
         self._last: dict[str, datetime] = {}
+        self._flip_last: dict[str, datetime] = {}
         self._last_px: dict[str, float] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._error: str | None = None
@@ -397,16 +407,32 @@ class KeeperAssistant:
     def on_flip_pending(self, symbol: str, cand: FlipCandidate) -> None:
         """军师团刚记下待确认翻转（出卡路径里同步调，这里只登记、另起任务，不等）。"""
         try:
-            cfg = self._cfg()
-            if not (cfg.keeper_assistant_on and cfg.keeper_assistant_flip_confirm):
-                return
-            if cand.candidate not in MOVE:
+            cfg, now = self._cfg(), self._clock()
+            kind = "flip_confirm" if cand.candidate in MOVE else FLIP_NEUTRAL
+            only_us = cfg.card_flip_confirm_by == "assistant"
+            why: str | None = None
+            if _flip_purpose(cand, cfg) is None:
+                if not cfg.keeper_assistant_on:
+                    why = "keeper_assistant_on 关着" if only_us else None
+                elif kind == "flip_confirm":
+                    why = "keeper_assistant_flip_confirm 关着" if only_us else None
+                elif only_us or cfg.keeper_assistant_flip_confirm:
+                    why = "keeper_assistant_flip_neutral 关着"
+                if why is None:
+                    return
+            else:
+                last = self._flip_last.get(symbol)
+                gap = timedelta(seconds=cfg.keeper_assistant_gap_s)
+                if last is not None and now - last < gap:
+                    why = f"离上次问不到 {cfg.keeper_assistant_gap_s} 秒"
+            if why is not None:
                 self._rec.record(
-                    self._clock(),
+                    now,
                     Outcome.INFO,
-                    f"{symbol} 待确认翻转转中性：是非题只问涨跌，不判，候选照旧等下一场会",
+                    f"{symbol} 待确认翻转（{DIR_TEXT[cand.candidate]}）没问：{why}，"
+                    f"{_flip_waits(cfg)}"[:200],
                     symbol=symbol,
-                    output={"keeper_assistant": {"kind": "flip_confirm", "skipped": "neutral"}},
+                    output={"keeper_assistant": {"kind": kind, "skipped": why}},
                 )
                 return
             if any(sym == symbol for sym, _ in self._busy):
@@ -414,11 +440,13 @@ class KeeperAssistant:
                 return
             self._start_flip(symbol, cand)
         except Exception:
-            logger.exception("管家助手接翻转确认失败，候选照旧等下一场会")
+            logger.exception("管家助手接翻转确认失败，候选照旧只看不做")
 
     def _start_flip(self, symbol: str, cand: FlipCandidate) -> None:
-        self._busy.add((symbol, "flip"))
-        self._spawn((symbol, "flip"), self._flip_confirm(symbol, cand, self._clock()))
+        key = (symbol, "flip" if cand.candidate in MOVE else FLIP_NEUTRAL)
+        self._busy.add(key)
+        self._flip_last[symbol] = self._clock()
+        self._spawn(key, self._flip_confirm(symbol, cand, self._clock()))
 
     def _trigger(self, pos: PositionRecord, trigger: str, detail: str) -> None:
         try:
@@ -481,8 +509,7 @@ class KeeperAssistant:
         if any(sym == symbol for sym, _ in self._busy):
             return
         cand = self._deferred.pop(symbol, None)
-        cfg = self._cfg()
-        if cand is not None and cfg.keeper_assistant_on and cfg.keeper_assistant_flip_confirm:
+        if cand is not None and _flip_purpose(cand, self._cfg()) is not None:
             self._start_flip(symbol, cand)
 
     @property
@@ -688,26 +715,28 @@ class KeeperAssistant:
 
     async def _flip_confirm(self, symbol: str, cand: FlipCandidate, now: datetime) -> None:
         started = time.monotonic()
-        want = cand.candidate
+        neutral = cand.candidate not in MOVE
+        # 转中性问的是原方向还走不走，两个都答「否」才算同意不做
+        want = cand.confirmed if neutral else cand.candidate
+        kind = FLIP_NEUTRAL if neutral else "flip_confirm"
         got = await self._judges(symbol, want, first=False)
+        cfg = self._cfg()
+        waits = _flip_waits(cfg)
         if isinstance(got, str):
-            if self._skip_due(got, now):
-                self._rec.record(
-                    now,
-                    Outcome.INFO,
-                    f"{symbol} 待确认翻转（{MOVE[want]}）没问成：{got}，照旧等下一场会"[:200],
-                    symbol=symbol,
-                    output={"keeper_assistant": {"kind": "flip_confirm", "skipped": got}},
-                )
+            # 每场会最多一次，不按小时压：只由管家助手确认时每次没问成都要看得到原因
+            self._rec.record(
+                now,
+                Outcome.INFO,
+                f"{symbol} 待确认翻转（{DIR_TEXT[cand.candidate]}）没问成：{got}，{waits}"[:200],
+                symbol=symbol,
+                output={"keeper_assistant": {"kind": kind, "skipped": got}},
+            )
             return
         a, b = got
-        cfg = self._cfg()
-        both = (
-            cfg.keeper_assistant_on
-            and cfg.keeper_assistant_flip_confirm
-            and a.yes(cfg.keeper_assistant_min_p)
-            and b.yes(cfg.keeper_assistant_min_p)
-        )
+        min_p = cfg.keeper_assistant_min_p
+        agreed = a.no(min_p) and b.no(min_p) if neutral else a.yes(min_p) and b.yes(min_p)
+        both = agreed and _flip_purpose(cand, cfg) is not None
+        answer = NO if neutral else YES
         result = "not_agreed"
         if both and cfg.keeper_assistant_b_record_only:
             result = "b_record_only"
@@ -715,28 +744,30 @@ class KeeperAssistant:
             ok = self._cards.confirm_flip(
                 symbol,
                 cand,
-                f"管家助手两个模型都答会{MOVE[want]}",
+                f"管家助手两个模型都答{'不' if neutral else ''}会{MOVE[want]}",
                 {"judges": [a.row(), b.row()]},
             )
             result = "confirmed" if ok else "stale"
         why = {
             "confirmed": "确认，卡上换成那场会的结论",
             "stale": "候选已变或卡上那条指令已换掉，作罢",
-            "not_agreed": "两个模型没有都答是（或 p(是) 不够 / 有一个没答上），候选照旧等下一场会",
-            "b_record_only": "B 只记录，候选照旧等下一场会",
+            "not_agreed": f"两个模型没有都答{answer}（或 p(是) 不够 / 有一个没答上），{waits}",
+            "b_record_only": f"B 只记录，{waits}",
         }[result]
         self._log(
             now,
             started,
             symbol,
             Outcome.ACTION if result == "confirmed" else Outcome.INFO,
-            f"{symbol} 待确认翻转，问会不会{MOVE[want]}：A {a.text} / B {b.text}，{why}",
+            f"{symbol} 待确认翻转{'转中性' if neutral else ''}，问会不会{MOVE[want]}："
+            f"A {a.text} / B {b.text}，{why}",
             {
-                "kind": "flip_confirm",
+                "kind": kind,
                 "position_id": f"flip:{symbol}:{cand.first_seen.isoformat()}",
-                "candidate": want,
+                "candidate": cand.candidate,
+                "asked": MOVE[want],
                 "count": cand.count,
-                "both_yes": both,
+                "both_no" if neutral else "both_yes": both,
                 "result": result,
                 "why": why,
             },
@@ -913,6 +944,21 @@ class KeeperAssistant:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
+
+
+def _flip_purpose(cand: FlipCandidate, cfg: FastLoopConfig) -> str | None:
+    """这个候选按哪件事问（去重用的键）；None = 开关关着，不问。"""
+    if not cfg.keeper_assistant_on:
+        return None
+    if cand.candidate in MOVE:
+        return "flip" if cfg.keeper_assistant_flip_confirm else None
+    return FLIP_NEUTRAL if cfg.keeper_assistant_flip_neutral else None
+
+
+def _flip_waits(cfg: FastLoopConfig) -> str:
+    if cfg.card_flip_confirm_by == "assistant":
+        return "候选照旧只看不做，下一场会同样结论时再问"
+    return "候选照旧等下一场会"
 
 
 async def _close_scorer(scorer: Scorer) -> None:
