@@ -35,7 +35,7 @@ from jiaoyi.core.recorder import local_day
 from jiaoyi.execution.live_gate import CONFIRM_WORD
 from jiaoyi.gate.bars import OutcomeBars
 from jiaoyi.market.rest import RateLimited, WeightBudget
-from jiaoyi.panel import actions, pnl_curve, setup
+from jiaoyi.panel import actions, pending_config, pnl_curve, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
@@ -562,6 +562,9 @@ def create_app(
                 "file_error": error,
                 "changes": actions.recent_changes(data_dir),
                 "prompts": prompts_info(files),
+                "pending_config": pending_config.notice(config_paths, data_dir)
+                if config_paths
+                else None,
             }
         )
 
