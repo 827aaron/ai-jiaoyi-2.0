@@ -56,11 +56,13 @@ from jiaoyi.slow.market_desk import (
 )
 from jiaoyi.slow.market_dossier import (
     BARS_15M,
+    CACHE_KEEP_DAYS,
     DEEP_PER_RUN,
     SHALLOW_BARS,
     Dossier,
     DossierBuilder,
     DossierField,
+    _period_as_of,
 )
 from jiaoyi.slow.settings import MarketDeskSection, load_slow_config, market_desk_conflict
 from tests.test_loop import _app
@@ -1102,7 +1104,7 @@ class FakeBinance:
         period = {"1h": 3_600_000, "5m": 300_000}.get((params or {}).get("period", ""), 0)
         if path in ("globalLongShortAccountRatio", "openInterestHist"):
             n = params["limit"]
-            last = now_ms // period * period - period  # 最新一段（已结束）的开始时间
+            last = now_ms // period * period - period  # 最新一条的时间戳：偏旧一段，测余量
             rows = []
             for i in range(n):
                 ts = last - (n - 1 - i) * period
@@ -1248,7 +1250,7 @@ def test_windows_roll_to_run_time_not_last_closed_hour() -> None:
 
     fake = FakeBinance(price=price)
     fake.now_ms = int(at.timestamp() * 1000)
-    d = DossierBuilder(get=fake.get, fng_get=fake.fng).build(
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, monotonic=lambda: 0.0).build(
         pool(at, *(entry(s) for s in SYMS)), at
     )
     assert d.value("pool_ret_1h_pct") == pytest.approx(2.0, abs=1e-6)  # 09:54 → 10:54
@@ -1760,3 +1762,89 @@ def test_refreshed_line_is_neutral_under_swap_and_mirror() -> None:
         text = compose_intra(block, at, 5.0)
         assert "截至 10:05 UTC" in text
         assert compose_intra(mirrored, at, 5.0) == _flip_signs(swap_words(text))
+
+
+# ------------------------------------------------------------------ 数据包（#336 复核）
+
+
+def slow_fetch(fake: FakeBinance, step_s: float) -> tuple[Any, Callable[[], float]]:
+    """每个请求花 ``step_s`` 秒：替身的「现在」和数据包的计时一起往前走。"""
+    t = [0.0]
+    base = fake.now_ms
+
+    def get(url: str, params: Any = None) -> Any:
+        t[0] += step_s
+        fake.now_ms = base + int(t[0] * 1000)
+        return fake.get(url, params)
+
+    return get, lambda: t[0]
+
+
+def test_window_as_of_is_each_request_fetch_time() -> None:
+    fake = FakeBinance()
+    get, mono = slow_fetch(fake, 1.0)
+    p = pool(T0, *(entry(s) for s in SYMS))
+    d = DossierBuilder(get=get, fng_get=fake.fng, monotonic=mono).build(p, T0)
+    f = d.get("pool_ret_15m_pct")
+    assert f is not None and f.source_ts > T0  # 不是开跑时刻
+    btc = d.get("btc_ret_1h_pct")
+    assert btc is not None and btc.source_ts > f.source_ts  # BTC 的 15 分钟线在池之后取
+    # 请求慢到前面取的数旧过上限：组好时拦下（as_of 用开跑时刻时永远拦不住）
+    fake = FakeBinance()
+    get, mono = slow_fetch(fake, 20.0)
+    slow = DossierBuilder(get=get, fng_get=fake.fng, monotonic=mono, max_input_age_min=5)
+    d = slow.build(p, T0)
+    assert d.get("pool_ret_15m_pct") is None and "旧" in d.missing["pool_ret_15m_pct"]
+
+
+def test_5m_stats_as_of_is_the_timestamp_never_after_fetch() -> None:
+    # 实测 02:49:01 取到的最新一条时间戳是 02:45：时间戳就是段尾，再 +5 分钟会落在未来
+    ts = int(datetime(2026, 10, 28, 2, 45, tzinfo=UTC).timestamp() * 1000)
+    fetched = datetime(2026, 10, 28, 2, 49, 1, tzinfo=UTC)
+    assert _period_as_of(ts, fetched) == datetime(2026, 10, 28, 2, 45, tzinfo=UTC)
+    assert _period_as_of(ts, datetime(2026, 10, 28, 2, 44, tzinfo=UTC)).minute == 44
+    fake = FakeBinance()
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, monotonic=lambda: 0.0).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    for name in ("btc_long_account_pct", "btc_oi_chg_4h_pct"):
+        f = d.get(name)
+        assert f is not None and f.source_ts <= T0
+
+
+def test_range_position_covers_the_full_24h() -> None:
+    """24 小时前那一刻落在 10:00 开盘的 1h 线里：这根线的高点也要算进区间。"""
+    spike = int((T0 - timedelta(hours=24, minutes=2)).timestamp() * 1000)  # 前一天 10:00
+
+    def price(sym: str, t_ms: int) -> float:
+        return 200.0 if t_ms == spike else 100.0
+
+    fake = FakeBinance(price=price)
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, monotonic=lambda: 0.0).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    pos = d.value("pool_range_position_24h_median_pct")
+    assert pos is not None and pos < 5  # 区间顶在 200 附近，现价 100 在底部
+    f = d.get("pool_range_position_24h_median_pct")
+    assert f is not None and "at least the last 24h" in f.note
+
+
+def test_kline_cache_keeps_only_recent_pool_and_majors(tmp_path: Path) -> None:
+    cache = tmp_path / "klines_1h.json"
+    fake = FakeBinance()
+    DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    gone = set(SYMS[6:])
+    later = T0 + timedelta(days=1)
+    fake.now_ms = int(later.timestamp() * 1000)
+    b = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
+    b.build(pool(later, *(entry(s) for s in SYMS[:6])), later)
+    assert gone <= set(json.loads(cache.read_text())["bars"])  # 一天没进池：还留着
+    much_later = T0 + timedelta(days=CACHE_KEEP_DAYS, hours=1)
+    fake.now_ms = int(much_later.timestamp() * 1000)
+    b = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
+    b.build(pool(much_later, *(entry(s) for s in SYMS[:6])), much_later)
+    raw = json.loads(cache.read_text())
+    assert set(raw["bars"]) == {*SYMS[:6], "BTCUSDT", "ETHUSDT"}
+    assert set(raw["seen"]) == set(raw["bars"]) and not gone & set(raw["deep"])
