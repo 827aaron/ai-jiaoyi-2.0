@@ -2005,6 +2005,7 @@ P.team = () => {
     ${sel.role === "commander" ? meetingsCard(d.meetings || []) : ""}
     ${sel.role === "book_reader" ? bookReaderCard(sel, d.snapshot) : ""}
     ${sel.role === "sentinel" ? sentinelCard(sel) : ""}
+    ${sel.role === "desk" && k ? `<section class="card mt"><div class="small">准确度：${esc(k.accuracy || "还没算过（jiaoyi market-score，面板每 30 分钟算一次）")}</div></section>` : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
       ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
@@ -2278,7 +2279,19 @@ const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安�
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
 const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", lifeboat_first: "保命单 → 止损 → 止盈（原行为）", stop_first: "止损 → 止盈 → 保命单", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
-const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
+// [meeting] 里同一个词（legacy / neutral …）在不同键下意思不同，按键查
+const MEETING_CHOICE = {
+  lessons_scoring: { raw: "原始涨跌（会后一个持仓期，山寨币另比 BTC）", excess: "超额（发布后 4 小时，扣掉同期币池）" },
+  debate_first: { bull: "多头先说（现状）", bear: "空头先说", alternate: "按会议交替" },
+  funding_label: { legacy: "写“多头拥挤”（现状）", neutral: "只写谁付谁和相对基准" },
+  bear_bull_symmetry: { legacy: "现状（多空写法不对称）", mirror: "多空逐句对称" },
+  crowd_ratio_mode: { raw: "只给原值（现状）", relative: "再给相对自身 30 天中位数的偏离" },
+  snapshot_interval: { "5m": "5 分钟", "15m": "15 分钟", "30m": "30 分钟", "1h": "1 小时", "4h": "4 小时" },
+  snapshot_label: { legacy: "叫“权威”（现状）", neutral: "写明最后收盘时间和距现在几分钟" },
+  stale_on_arrival_action: { watch: "只盯不开", no_trade: "改成观望" },
+  input_time_labels: { legacy: "不标（现状）", explicit: "写明已收盘小时 / 上次结算时间" },
+};
+const choiceLabel = (k, v) => (MEETING_CHOICE[k] && MEETING_CHOICE[k][v]) || (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
 const SHORT = { mode: "运行方式", size_policy: "模型尺寸怎么选" };
 // 设置项的大白话标题；原来的专业说明和英文键名降为灰色小字
@@ -2366,6 +2379,21 @@ const PLAIN = {
   "tiers.mid_daily_pick": "中部每天挑几个来做",
   "tiers.mid_size_max": "中部的币仓位最大到哪一档",
   "tiers.always_candidates": "固定进总盘会的币",
+  "meeting.lessons_scoring": "教训怎么给作战卡打分",
+  "meeting.debate_first": "多空辩论谁先说",
+  "meeting.funding_label": "资金费率怎么写进会议材料",
+  "meeting.bear_bull_symmetry": "多空提示词是否逐句对称",
+  "meeting.crowd_ratio_mode": "多空人数比怎么给",
+  "meeting.bias_fix_ab": "偏空整改对照：多大比例的会用新写法（0 = 都用）",
+  "meeting.snapshot_interval": "行情快照和指标用几分钟 K 线",
+  "meeting.snapshot_label": "快照怎么标时间",
+  "meeting.live_price_line": "会议说明里加实时价",
+  "meeting.stale_on_arrival": "转卡后现价已越过失效价就作废",
+  "meeting.stale_on_arrival_action": "作废后怎么处理",
+  "meeting.input_time_labels": "表格里的字段写明是哪一段时间",
+  "meeting.market_table_rolling": "总盘会加一行近 60 分钟涨跌家数",
+  "meeting.latest_market_regime": "每个币的会用开会那一刻最新的大盘判断",
+  "meeting.event_brief_refresh": "临时会开会前先刷新大盘简报",
   "screener.weight_volatility": "波动的权重",
   "screener.weight_volume_surge": "量能突增的权重",
   "screener.weight_funding": "资金费率的权重",
@@ -2821,6 +2849,7 @@ const ROLES = [
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.symbol_timeout_s"] },
     { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
+    { g: "会议输入和偏空整改（改了要重启主程序）", hint: "默认都是现状，提示词和原来一字不差。偏空整改四项可以用“对照比例”让一部分会议用新写法，另一部分照旧，对比效果（先把下面四项改掉至少一项，再开对照，否则会被拒绝）；输入新鲜度几项让会议材料写明时间、加实时价。教训口径只影响之后的汇总。", keys: ["meeting.lessons_scoring", "meeting.debate_first", "meeting.funding_label", "meeting.bear_bull_symmetry", "meeting.crowd_ratio_mode", "meeting.bias_fix_ab", "meeting.snapshot_interval", "meeting.snapshot_label", "meeting.live_price_line", "meeting.stale_on_arrival", "meeting.stale_on_arrival_action", "meeting.input_time_labels", "meeting.market_table_rolling", "meeting.latest_market_regime", "meeting.event_brief_refresh"] },
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.event_concurrency", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
   { id: "ai_cost", t: "AI 费用", what: "军师团每天最多花多少；花到 80% 放慢或停", groups: [
@@ -2900,7 +2929,7 @@ const PREFIX_ROLE = [
   ["fast_loop.limit_take_", "executor"], ["fast_loop.tp_limit_", "executor"], ["fast_loop.entry_limit_", "executor"],
   ["app.predictor_", "predictor"], ["app.screener_", "screener"],
 ];
-const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener" };
+const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "risk_guard", app: "executor", schedule: "commander", budget: "ai_cost", predictor: "predictor", screener: "screener", tiers: "screener", meeting: "commander" };
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
@@ -2926,7 +2955,7 @@ const hot = (i) => i.recommended != null && typeof i.value === "number" && (LOWE
 // 段.键 → 设置项（每类币上限拼成 category 段）
 function settingIndex(d) {
   const ix = {};
-  for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "budget", "screener", "tiers"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
+  for (const sec of ["risk", "app", "fast_loop", "predictor", "schedule", "budget", "screener", "tiers", "meeting"]) for (const i of d[sec] || []) ix[`${sec}.${i.key}`] = { ...i, sec };
   const tot = (d.risk.find((i) => i.key === "max_total_exposure_x") || {}).value;
   for (const [k, v] of Object.entries(d.category_caps)) ix[`category.${k}`] = { key: k, sec: "category", cat: true, label: `${CAT[k] || k}合计最多`, value: v, bounds: tot == null ? "" : `本金的 0–${tot} 倍（不超过所有仓位合计上限）`, editable: true, choices: [] };
   return ix;

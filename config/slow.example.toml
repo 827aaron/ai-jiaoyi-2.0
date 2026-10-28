@@ -83,6 +83,7 @@ max_retries = 6
 # stale_on_arrival_action = "watch"  # watch（只盯不开：方向不动，清信号和区间）/ no_trade（改成观望）
 # input_time_labels = "legacy"   # legacy / explicit（表格 takerBuy / OI 写明哪个已收盘小时，单币资金费率写「上次结算 HH:MM」+ 实时估算）
 # market_table_rolling = false   # 总盘会另给滚动 60 分钟涨跌家数（截到开会这一刻）
+# lessons_scoring = "raw"        # 教训给卡打分的口径：raw（会后一个持仓期的原始涨跌，山寨币另比 BTC）/ excess（和方向记分同口径：发布时刻起 4 小时，扣掉同期币池等权收益）
 # latest_market_regime = false   # 整轮里每个单币会开始时用最新发布的大盘判断（关 = 本轮开始时的）
 # event_brief_refresh = false    # 临时会开会前刷新大盘简报（10 分钟缓存）
 #                                  推荐 Demo：全部打开，snapshot_interval = "15m"
