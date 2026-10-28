@@ -56,6 +56,7 @@ from jiaoyi.slow.settings import (
     BudgetConfig,
     LlmConfig,
     MarketDeskSection,
+    MeetingConfig,
     ScheduleConfig,
     ScreenerSection,
     SlowConfig,
@@ -96,10 +97,44 @@ Section = Literal[
     "screener",
     "tiers",
     "market_desk",
+    "meeting",
 ]
-_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk")
-# [market_desk] 其余项（模式、模型、节奏、门槛）改了要重启、影响大盘方向，只在终端改
-DESK_EDITABLE = frozenset({"publish_intra", "keeper_intra", "intra_refresh_s"})
+_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk", "meeting")
+# [market_desk] 其余项（模式、模型、节奏、采样）改了要重启、影响大盘方向，只在终端改
+DESK_EDITABLE = frozenset(
+    {
+        "band_sigma",
+        "prior_mode",
+        "momentum_guidance",
+        "aggregation",
+        "call_p_min",
+        "call_edge_min",
+        "publish_min_gap_min",
+        "publish_intra",
+        "keeper_intra",
+        "intra_refresh_s",
+    }
+)
+# [meeting] 里网页上能改的开关（偏空整改、输入新鲜度、教训口径）；模型 / 通道 / 分析师名单 /
+# 辩论轮数 / 回答长度不在网页改。
+# analyst_klines 是 "周期 x 根数" 的字符串列表，网页没有对应的输入，也不放。
+MEETING_EDITABLE = (
+    "lessons_scoring",
+    "debate_first",
+    "funding_label",
+    "bear_bull_symmetry",
+    "crowd_ratio_mode",
+    "bias_fix_ab",
+    "snapshot_interval",
+    "snapshot_label",
+    "live_price_line",
+    "stale_on_arrival",
+    "stale_on_arrival_action",
+    "input_time_labels",
+    "market_table_rolling",
+    "latest_market_regime",
+    "event_brief_refresh",
+)
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
@@ -773,6 +808,7 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "screener": ("slow", "screener"),
     "tiers": ("slow", "screener.tiers"),
     "market_desk": ("slow", "market_desk"),
+    "meeting": ("slow", "meeting"),
 }
 
 
@@ -809,6 +845,15 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return scalar_fields(TiersSection, set())
     if section == "market_desk":
         return scalar_fields(MarketDeskSection, set(MarketDeskSection.model_fields) - DESK_EDITABLE)
+    if section == "meeting":
+        found = scalar_fields(
+            MeetingConfig, set(MeetingConfig.model_fields) - set(MEETING_EDITABLE)
+        )
+        # 不写 = 按最长持仓档，留空就是删掉这一行
+        found["snapshot_interval"] = FieldSpec(
+            str, choices=("5m", "15m", "30m", "1h", "4h"), nullable=True
+        )
+        return {k: found[k] for k in MEETING_EDITABLE}
     # jev_provider / jev_model 换通道和模型版本要重新校准，不在网页上改
     return scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
 

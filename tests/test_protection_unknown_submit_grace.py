@@ -6,19 +6,22 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from jiaoyi.contracts import Side
-from jiaoyi.contracts.position import PositionStatus
+from jiaoyi.contracts.module_status import AlertLevel
+from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import BracketSubmissionUnknown
 from tests.test_execution import START
 from tests.test_protection_readback_grace import GraceHarness
 
 TITLE = "普通托管保护未完整确认"
+EXIT_TITLE = "托管保护已触发，按原因退出"
 UNKNOWN = "ProtectionIncomplete: 普通保护提交结果未知，只查原CID"
 
 
@@ -182,3 +185,45 @@ async def test_armed_tightened_generation_found_by_cid_replaces_the_old_stop_onc
     assert h.manager.live_stop_price("pos-1") == tightened
     assert h.leg("br-sl-pos-1-1").state == "cancelled"
     assert not h.closing()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize(
+    ("order", "unknown_prefix"), [("stop_first", "lb-"), ("lifeboat_first", "br-tp-")]
+)
+async def test_stop_triggered_while_another_leg_is_unknown_exits_as_stop_loss(
+    tmp_path: Path, side: Side, order: str, unknown_prefix: str
+):
+    h = UnknownSubmitHarness(
+        tmp_path, side, unknown=2.0, unknown_prefix=unknown_prefix, visible_after=10**6
+    )
+    h.manager.leg_order = order
+    await h.adapter.protection_tick()
+    assert not h.closing() and h.leg(unknown_prefix).state == "submit_pending"
+    stop = h.leg("br-sl-").client_order_id
+    h.exchange.orders[stop] = replace(
+        h.exchange.orders[stop],
+        algo_status="FINISHED",
+        child_state="identified",
+        actual_order_id="201",
+        actual_order_status="FILLED",
+        filled_quantity=2.0,
+        triggered_at=START,
+    )
+    h.exchange.held = 0
+    before = len(h.alerts())
+    await h.adapter.protection_tick()
+    tracked = h.registry.get("pos-1")
+    assert h.state().exit_reason is CloseReason.STOP_LOSS
+    assert tracked.requested_close is CloseReason.STOP_LOSS
+    assert tracked.record.status is PositionStatus.CLOSING  # 未知腿查清前不记已平。
+    assert len(h.alerts()) == before
+    (info,) = [a for a in h.alerter.sent if a.title == EXIT_TITLE]
+    assert info.level is not AlertLevel.CRITICAL and "stop_loss" in info.body
+    h.exchange.hidden.clear()
+    await h.adapter.protection_tick()
+    tracked = h.registry.get("pos-1")
+    assert tracked.record.status is PositionStatus.CLOSED
+    assert tracked.record.close_reason is CloseReason.STOP_LOSS
+    assert not h.exchange.direct and len(h.alerts()) == before
+    assert len([a for a in h.alerter.sent if a.title == EXIT_TITLE]) == 1

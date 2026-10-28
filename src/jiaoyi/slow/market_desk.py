@@ -1,8 +1,9 @@
 """大盘台：独立判断「候选池等权组合未来 4 小时」涨 / 平 / 跌（设计 2026-10-28，CONFLICTS 复核）。
 
 每 ``cadence_min`` 分钟（默认 HH:02 UTC）组装一份数据包（``market_dossier``），用 DeepSeek V4.1
-Flash（经 OpenRouter，和开会同一个模型）独立问 ``samples`` 次，概率取平均；方向由代码按 θ / δ 派生，
-不让模型直接说方向。1/6 的轮次再把数据包涨跌取反问一遍（镜像测试），量方向偏置。
+Flash（经 OpenRouter，和开会同一个模型）独立问 ``samples`` 次，概率按 ``aggregation`` 合并；
+方向由代码按 θ / δ 派生，不让模型直接说方向。1/6 的轮次再把数据包涨跌取反问一遍（镜像测试），
+量方向偏置。
 
 ``mode = "replace"`` 时大盘台是唯一的大盘发布者：经指挥官的 ``_new_market_generation`` /
 ``_publish_market`` 同一条路发布 ``MarketView``（``source = "market_desk"``，共用版本号，管家复核和
@@ -137,7 +138,70 @@ def _ordered(order: Order, up: str, down: str) -> tuple[str, str]:
     return (up, down) if order == "up_first" else (down, up)
 
 
-def instruction_lines(order: Order, band: float) -> list[str]:
+PriorMode = Literal["anchor", "context", "off"]
+
+
+def _prior_lines(prior_mode: PriorMode) -> list[str]:
+    """先验怎么用。anchor = 从基础率出发（「平」多半是众数，回答容易贴着它）；context = 基础率只是
+    输入之一，明说不要默认它；off = 提示词里不给基础率。"""
+    if prior_mode == "anchor":
+        return [
+            "Start from the base rates in the data (the prior) and move away from them only as far "
+            "as the data justifies.",
+            "When the evidence is weak or mixed, stay close to the prior; FLAT is a valid outcome.",
+        ]
+    flat = (
+        "FLAT is a valid outcome when the data points to it, not a default for weak or mixed "
+        "evidence."
+    )
+    if prior_mode == "context":
+        return [
+            "The base rates in the data are historical frequencies of each outcome; use them as "
+            "one input among the others, not as a starting point.",
+            "Do not default to the base rates: the current data decides how far the probabilities "
+            "differ from them.",
+            flat,
+        ]
+    return [
+        "No historical base rates are given; judge the probabilities from the current data.",
+        flat,
+    ]
+
+
+def _momentum_lines(order: Order) -> list[str]:
+    """怎样按近 15 分钟 / 1 / 4 小时的等权收益、涨跌家数和 BTC 更新判断。不断言动量：延续和回落
+    两种都点名，由数据判断。偏向一边的两句成对、先后按本轮顺序。"""
+    up = (
+        "When the 4h basket return is above zero and the move is extending (broad participation, "
+        "BTC agreeing, 15m and 1h with the same sign), that is evidence for p_up; when it is "
+        "fading, it is evidence for p_flat or p_down."
+    )
+    down = (
+        "When the 4h basket return is below zero and the move is extending (broad participation, "
+        "BTC agreeing, 15m and 1h with the same sign), that is evidence for p_down; when it is "
+        "fading, it is evidence for p_flat or p_up."
+    )
+    return [
+        "Update from what the market is doing now: the rolling 15m, 1h and 4h basket returns "
+        "(pool_ret_*), the up and down counts, and the BTC returns (btc_ret_*).",
+        "Measure each move in sigma: a move beyond the FLAT band can continue or revert; judge "
+        "from breadth, BTC agreement and the 15m vs 1h vs 4h pattern whether it is extending or "
+        "fading.",
+        *_ordered(order, up, down),
+        "Any shift in the probabilities should grow with the size of the move in sigma and with "
+        "how clearly the windows, breadth and BTC agree.",
+        "When the windows, breadth and BTC disagree, or the move is small in sigma, shift only "
+        "a little.",
+    ]
+
+
+def instruction_lines(
+    order: Order,
+    band: float,
+    *,
+    prior_mode: PriorMode = "anchor",
+    momentum_guidance: bool = False,
+) -> list[str]:
     """提示词的说明部分（英文），每个元素是一句。偏向一边的句子成对出现、长度相当。"""
     p_a, p_b = _ordered(order, "p_up", "p_down")
     h_a, h_b = _ordered(order, "p1h_up", "p1h_down")
@@ -156,9 +220,8 @@ def instruction_lines(order: Order, band: float) -> list[str]:
         "Task: estimate probabilities for the equal-weight return of the listed perpetual "
         "futures basket over the next 4 hours and over the next 1 hour.",
         f"Outcome classes: {cls_a}, {cls_b}, FLAT otherwise; sigma is given in the data.",
-        "Start from the base rates in the data (the prior) and move away from them only as far "
-        "as the data justifies.",
-        "When the evidence is weak or mixed, stay close to the prior; FLAT is a valid outcome.",
+        *_prior_lines(prior_mode),
+        *(_momentum_lines(order) if momentum_guidance else []),
         "Evidence for a rise and evidence for a fall must be judged by the same standard.",
         "Every number is raw data with a unit, not a signal; the notes only explain units.",
         "No news, prior views, lessons or positions are provided on purpose.",
@@ -174,22 +237,32 @@ def instruction_lines(order: Order, band: float) -> list[str]:
     ]
 
 
-def render_prompt(dossier: Dossier, order: Order, band: float, cycle_id: str) -> str:
-    """数据包 → 提示词。不接任何锚：没有上一轮观点、教训、持仓、卡片倾斜、总盘会文字。"""
+def render_prompt(
+    dossier: Dossier,
+    order: Order,
+    band: float,
+    cycle_id: str,
+    *,
+    prior_mode: PriorMode = "anchor",
+    momentum_guidance: bool = False,
+) -> str:
+    """数据包 → 提示词。不接任何锚：没有上一轮观点、教训、持仓、卡片倾斜、总盘会文字。
+    ``prior_mode = "off"`` 只是不给模型看基础率；数据包里照样有（记分、``has_prior`` 用）。"""
+    stats = "sigma comes" if prior_mode == "off" else "sigma and base rates come"
     lines = [
-        *instruction_lines(order, band),
+        *instruction_lines(order, band, prior_mode=prior_mode, momentum_guidance=momentum_guidance),
         "",
         f"Cycle: {cycle_id}",
         f"Run time (as_of): {dossier.t0.astimezone(UTC):%Y-%m-%d %H:%M:%S}Z. Every window ends "
-        "at the run time unless its own as_of says otherwise; sigma and base rates come from "
-        "closed 1h bars.",
+        f"at the run time unless its own as_of says otherwise; {stats} from closed 1h bars.",
         "Data:",
     ]
+    hidden = (lambda n: n.startswith("base_rate_")) if prior_mode == "off" else (lambda n: False)
     names = {f.name for f in dossier.fields}
     done: set[str] = set()
     up_words = ("_up_", "_buy_", "_long_", "_above_")
     for f in dossier.fields:
-        if f.name in done:
+        if f.name in done or hidden(f.name):
             continue
         group = [f]
         if f.mirror == "pair" and f.partner in names:
@@ -204,8 +277,9 @@ def render_prompt(dossier: Dossier, order: Order, band: float, cycle_id: str) ->
                 f"- {g.name} = {g.shown()} [{g.unit}; source {g.source}; as_of "
                 f"{g.source_ts.astimezone(UTC):%Y-%m-%d %H:%M:%S}Z] {g.note_for(order)}"
             )
-    if dossier.missing:
-        lines.append("Unavailable this cycle: " + ", ".join(sorted(dossier.missing)))
+    missing = sorted(k for k in dossier.missing if not hidden(k))
+    if missing:
+        lines.append("Unavailable this cycle: " + ", ".join(missing))
     return "\n".join(lines)
 
 
@@ -378,14 +452,40 @@ def parse_sample(reply: ModelReply, index: int, dossier: Dossier, *, mirrored: b
     )
 
 
+Aggregation = Literal["mean", "median", "trimmed", "logodds"]
+
+
 def average(probs: Sequence[Probs]) -> Probs:
+    return aggregate(probs, "mean")
+
+
+def aggregate(probs: Sequence[Probs], method: Aggregation) -> Probs:
+    """几次回答 → 一组三项概率（每项分别合，再归一）。mean = 算术平均；median = 每项取中位数；
+    trimmed = 每项去掉最高、最低各一个再平均（不到 3 次同 mean）；logodds = 每项对数平均
+    （几何平均），等于在对数几率上平均，几次回答都同意的那一项被放大、只有一次给的高概率被压下。"""
     if not probs:
         raise ValueError("没有可平均的概率")
-    up = statistics.fmean(p.up for p in probs)
-    flat = statistics.fmean(p.flat for p in probs)
-    down = statistics.fmean(p.down for p in probs)
-    s = up + flat + down
-    return Probs(up / s, flat / s, down / s)
+    cols = [[p.up for p in probs], [p.flat for p in probs], [p.down for p in probs]]
+    if method == "median":
+        xs = [statistics.median(c) for c in cols]
+    elif method == "trimmed" and len(probs) >= 3:
+        xs = [statistics.fmean(sorted(c)[1:-1]) for c in cols]
+    elif method == "logodds":
+        xs = [math.exp(statistics.fmean(math.log(max(x, 1e-9)) for x in c)) for c in cols]
+    else:
+        xs = [statistics.fmean(c) for c in cols]
+    s = sum(xs)
+    return Probs(xs[0] / s, xs[1] / s, xs[2] / s)
+
+
+def prompt_version(cfg: MarketDeskSection) -> str:
+    """默认设置下就是 ``PROMPT_VERSION``（提示词和以前逐字节一样）；改了措辞相关的设置就带上后缀，
+    记分时按版本分开。"""
+    tags = [
+        *([f"prior-{cfg.prior_mode}"] if cfg.prior_mode != "anchor" else []),
+        *(["momentum"] if cfg.momentum_guidance else []),
+    ]
+    return "+".join([PROMPT_VERSION, *tags])
 
 
 def derive_direction(p: Probs, p_min: float, edge_min: float) -> Direction:
@@ -397,7 +497,19 @@ def derive_direction(p: Probs, p_min: float, edge_min: float) -> Direction:
     return "中性"
 
 
-def compose_regime(sample: Sample | None, avg: Probs, dossier: Dossier, order: Order) -> str:
+def flat_band_pct(dossier: Dossier, band: float, horizon: str) -> float | None:
+    """「平」的宽度（%）= band × 这一档的 σ；σ 缺就是 None。记分、发布的话、状态文件都用它。"""
+    sigma = dossier.value(f"sigma_{horizon}_pct")
+    return band * sigma if sigma is not None else None
+
+
+def compose_regime(
+    sample: Sample | None,
+    avg: Probs,
+    dossier: Dossier,
+    order: Order,
+    band: float | None = None,
+) -> str:
     """发布给各币会议看的一句话：中立的中文判断（至少两个数）+ 三项概率 + 两边理由。
     涨 / 跌的先后按本轮顺序交替。没有合格的句子就由代码用数据包里的数写一句。"""
     sentence = sample.regime if sample is not None else ""
@@ -412,7 +524,9 @@ def compose_regime(sample: Sample | None, avg: Probs, dossier: Dossier, order: O
         sentence = "，".join(bits) or "数据不足"
     pu, pd = f"涨 {avg.up:.0%}", f"跌 {avg.down:.0%}"
     a, b = (pu, pd) if order == "up_first" else (pd, pu)
-    text = f"{sentence.rstrip('。')}。未来 4 小时概率：{a} / 平 {avg.flat:.0%} / {b}。"
+    width = flat_band_pct(dossier, band, "4h") if band is not None else None
+    tag = f"（平 = ±{width:.2f}%）" if width is not None else ""
+    text = f"{sentence.rstrip('。')}。未来 4 小时概率{tag}：{a} / 平 {avg.flat:.0%} / {b}。"
     if sample is not None and sample.bull_case and sample.bear_case:
         bull = f"看涨理由：{sample.bull_case.rstrip('。')}。"
         bear = f"看跌理由：{sample.bear_case.rstrip('。')}。"
@@ -976,7 +1090,7 @@ class MarketDesk:
             "generation": generation,
             "settings": self.cfg.model_dump(mode="json"),
             "settings_sha256": _sha(self.cfg.model_dump(mode="json")),
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version(self.cfg),
             "order": order,
             "mirror_test": mirror,
             "move_trigger": self._last_move if reason == "move" else None,
@@ -986,12 +1100,12 @@ class MarketDesk:
             dossier = await asyncio.to_thread(self._builder.build, pool, now)
             row["dossier"] = dossier.to_json()
             row["dossier_sha256"] = dossier.sha256()
-            prompt = render_prompt(dossier, order, self.cfg.band_sigma, cycle_id)
+            prompt = self._prompt(dossier, order, cycle_id)
             row["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
             jobs = [self._ask(prompt, i, dossier, mirrored=False) for i in range(self.cfg.samples)]
             mirrored = dossier.mirror() if mirror else None
             if mirrored is not None:
-                mprompt = render_prompt(mirrored, order, self.cfg.band_sigma, cycle_id)
+                mprompt = self._prompt(mirrored, order, cycle_id)
                 row["mirror_dossier_sha256"] = mirrored.sha256()
                 jobs += [
                     self._ask(mprompt, i, mirrored, mirrored=True) for i in range(self.cfg.samples)
@@ -1007,8 +1121,9 @@ class MarketDesk:
                     f"{self.cfg.min_valid_samples}）："
                     + "；".join({s.error for s in main if s.error})
                 )
-            avg = average([s.probs for s in valid if s.probs is not None])
-            avg_1h = average([s.probs_1h for s in valid if s.probs_1h is not None])
+            how = self.cfg.aggregation
+            avg = aggregate([s.probs for s in valid if s.probs is not None], how)
+            avg_1h = aggregate([s.probs_1h for s in valid if s.probs_1h is not None], how)
             row["score_targets"] = score_targets(now, dossier, self.cfg.band_sigma)
             direction = derive_direction(avg, self.cfg.call_p_min, self.cfg.call_edge_min)
             if mirrored is not None:
@@ -1018,7 +1133,7 @@ class MarketDesk:
                 key=lambda s: _l1(s.probs, avg),
                 default=None,
             )
-            regime = compose_regime(pick, avg, dossier, order)
+            regime = compose_regime(pick, avg, dossier, order, self.cfg.band_sigma)
             if not dossier.has_prior:
                 # 没有先验（重启后长历史还在回填）：只记录，不发布、不接管、不当成「可用」结果
                 self.state.fails, self.state.last_error = 0, None
@@ -1047,6 +1162,9 @@ class MarketDesk:
                 "valid_samples": len(valid),
                 "samples": self.cfg.samples,
                 "sigma_4h_pct": dossier.sigma_4h_pct,
+                "flat_band_pct": {
+                    h: flat_band_pct(dossier, self.cfg.band_sigma, h) for h in ("4h", "1h")
+                },
                 "dossier_sha256": dossier.sha256(),
                 "published_view_id": None,
             }
@@ -1055,6 +1173,7 @@ class MarketDesk:
                     **intra_block(dossier, avg_1h, order, cycle_id),
                     "max_age_min": self.cfg.max_input_age_min,
                     "panel": self.cfg.publish_intra,
+                    "flat_band_1h_pct": self.state.latest["flat_band_pct"]["1h"],
                 }
                 self.state.latest["intra"] = intra
                 row["intra"] = copy.deepcopy(intra)  # 之后的刷新改的是状态里那份，日志不跟着变
@@ -1099,6 +1218,16 @@ class MarketDesk:
             if row.get("status") != "skipped" or cost > 0:
                 self._record_run(row, cost, ms)
 
+    def _prompt(self, dossier: Dossier, order: Order, cycle_id: str) -> str:
+        return render_prompt(
+            dossier,
+            order,
+            self.cfg.band_sigma,
+            cycle_id,
+            prior_mode=self.cfg.prior_mode,
+            momentum_guidance=self.cfg.momentum_guidance,
+        )
+
     async def _ask(self, prompt: str, index: int, dossier: Dossier, *, mirrored: bool) -> Sample:
         try:
             reply = await asyncio.wait_for(self._model.complete(prompt), self.cfg.timeout_s + 5)
@@ -1124,7 +1253,7 @@ class MarketDesk:
         if len(mv) < self.cfg.min_valid_samples:
             out["error"] = "镜像合格回答不够，这次不计"
             return out
-        m = average(mv)
+        m = aggregate(mv, self.cfg.aggregation)
         gap = abs(avg.up - m.down)
         gap_rev = abs(avg.down - m.up)
         out.update(probs_4h=m.as_dict(), gap_up_vs_mirror_down=gap, gap_down_vs_mirror_up=gap_rev)
@@ -1343,11 +1472,10 @@ def score_targets(t0: datetime, dossier: Dossier, band: float) -> dict[str, Any]
     「平」的宽度，以及等权池成员。结算价取 t0 / t0 + h 的已收盘 1 分钟线（和设计 §1.1 一致）。"""
     out: dict[str, Any] = {"t0": t0.isoformat(), "basket": list(dossier.symbols)}
     for h in (1, 4):
-        sigma = dossier.value(f"sigma_{h}h_pct")
         out[f"{h}h"] = {
             "resolve_at": (t0 + timedelta(hours=h)).isoformat(),
-            "sigma_pct": sigma,
-            "flat_band_pct": band * sigma if sigma is not None else None,
+            "sigma_pct": dossier.value(f"sigma_{h}h_pct"),
+            "flat_band_pct": flat_band_pct(dossier, band, f"{h}h"),
             "base_rate": {k: dossier.value(f"base_rate_{k}_{h}h") for k in ("up", "flat", "down")},
         }
     return out

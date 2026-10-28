@@ -47,7 +47,9 @@ def compose_intra(block: Mapping[str, Any], now: datetime, max_age_min: float) -
         head = f"{run} 起 1 小时概率：缺失（已过 1 小时）。"
     else:
         a, b = _pair(order, f"涨 {float(p['up']):.0%}", f"跌 {float(p['down']):.0%}")
-        head = f"{run} 起 1 小时概率：{a} / 平 {float(p['flat']):.0%} / {b}。"
+        width = block.get("flat_band_1h_pct")
+        tag = f"（平 = ±{float(width):.2f}%）" if isinstance(width, int | float) else ""
+        head = f"{run} 起 1 小时概率{tag}：{a} / 平 {float(p['flat']):.0%} / {b}。"
     run_values: Mapping[str, float] = block.get("values") or {}
     status = block.get("status")
     as_of, v = run_as_of, run_values

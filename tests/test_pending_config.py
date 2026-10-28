@@ -608,3 +608,67 @@ def test_market_desk_publish_intra_is_pending_mergeable_but_mode_is_not(tmp_path
     res = pc.apply_pending(paths, data, NOW)
     assert res.status == "applied", res.error
     assert load_slow_config(paths.slow, "standard").market_desk.publish_intra is True
+
+
+def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    text = (
+        '[market_desk]\nband_sigma = 0.3\nprior_mode = "context"\n'
+        'momentum_guidance = true\naggregation = "median"\n'
+    )
+    _pending(paths, "slow", text)
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    desk = load_slow_config(paths.slow, "standard").market_desk
+    assert (desk.band_sigma, desk.prior_mode, desk.momentum_guidance, desk.aggregation) == (
+        0.3,
+        "context",
+        True,
+        "median",
+    )
+    _pending(
+        paths,
+        "slow",
+        "[market_desk]\ncall_p_min = 0.4\ncall_edge_min = 0.1\npublish_min_gap_min = 30\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    desk = load_slow_config(paths.slow, "standard").market_desk
+    assert (desk.call_p_min, desk.call_edge_min, desk.publish_min_gap_min) == (0.4, 0.1, 30.0)
+    _pending(paths, "slow", '[market_desk]\nmode = "replace"\n')
+    res = pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    assert res.status == "failed" and res.offending == ["slow.toml market_desk.mode"]
+    _pending(paths, "slow", '[market_desk]\nprior_mode = "start"\n')
+    assert pc.apply_pending(paths, data, NOW).status == "failed"
+
+
+def test_meeting_switches_are_editable_and_models_are_not(tmp_path: Path) -> None:
+    fields = actions.editable_fields("meeting")
+    assert set(fields) == set(actions.MEETING_EDITABLE)
+    assert fields["lessons_scoring"].choices == ("raw", "excess")
+    assert fields["snapshot_interval"].nullable
+    for k in ("quick_model", "deep_model", "analyst_klines", "analysts_crypto", "max_tokens"):
+        assert k not in fields
+
+
+def test_pending_accepts_meeting_lessons_scoring(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(
+        paths,
+        "slow",
+        '[meeting]\nlessons_scoring = "excess"\ndebate_first = "bear"\nbias_fix_ab = 0.5\n',
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    m = load_slow_config(paths.slow, cfg.profile).meeting
+    assert (m.lessons_scoring, m.debate_first, m.bias_fix_ab) == ("excess", "bear", 0.5)
+
+
+def test_pending_refuses_meeting_model_keys(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    p = _pending(paths, "slow", '[meeting]\nquick_model = "x/y"\n')
+    before = paths.slow.read_text(encoding="utf-8")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status != "applied" and p.exists()
+    assert paths.slow.read_text(encoding="utf-8") == before

@@ -182,6 +182,7 @@ class TradingAgentsSettings:
     stale_on_arrival_action: str = "watch"  # watch / no_trade
     input_time_labels: str = "legacy"  # legacy / explicit
     market_table_rolling: bool = False
+    lessons_scoring: str = "raw"  # raw / excess
 
 
 def fresh_overrides(s: TradingAgentsSettings) -> dict[str, str]:
@@ -2258,6 +2259,7 @@ class TradingAgentsEngine:
                 hold_minutes=pp.hold_minutes,
                 horizon=pp.horizon,
                 fee_pct=risk.taker_fee_bps * 2 / 100,
+                scoring="excess" if settings.lessons_scoring == "excess" else "raw",
             )
             if risk is not None
             else None

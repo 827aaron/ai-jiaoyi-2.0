@@ -489,6 +489,10 @@ class BattleCardCommander:
         """执行交易所上不在交易的币（币 → 状态）：卡上读成只看不做，持仓币不动。"""
         self._untradeable = dict(untradeable)
 
+    def card_symbols(self) -> set[str]:
+        """卡上原始的币名单；不像 ``current`` 那样做卡龄检查，所以不会顺带排补会。"""
+        return {s.symbol for s in self._card.symbols} if self._card is not None else set()
+
     def set_held(self, held: Mapping[str, Side]) -> None:
         """有持仓的币（币 → 持仓方向）：必须强制入选本轮会议，并一直留在卡上继续盯。
 

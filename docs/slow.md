@@ -560,7 +560,19 @@ OpenRouter 上 `deepseek/deepseek-v4.1-flash` 标价 0.30 / 1.20（缓存读 0.0
   涨 / 平 / 跌三项概率；「平」= |收益| ≤ `band_sigma` × σ，σ 是过去 `sigma_lookback_h` 个滚动窗口的 RMS。
   方向由代码派生：p_up ≥ θ（`call_p_min`）且 p_up − p_down ≥ δ（`call_edge_min`）为看涨，看跌对称，其余中性。
 - **模型**：DeepSeek V4.1 Flash，经 OpenRouter（和开会同一个模型、同一套 usage / reasoning 参数），
-  每轮独立问 `samples` 次（默认 5）取平均；合格回答少于 `min_valid_samples` 这一轮作废（照样记账）。
+  每轮独立问 `samples` 次（默认 5），按 `aggregation` 合并（默认 `mean` 平均；`median`、`trimmed`
+  去掉最高最低各一个、`logodds` 对数平均）；合格回答少于 `min_valid_samples` 这一轮作废（照样记账）。
+- **先验和更新**：`prior_mode = "anchor"`（默认）让模型从基础率出发、证据弱就贴着它；0.5σ 时「平」的
+  基础率约 0.49，回答跟着一直中性。`context` 把基础率当成输入之一并明说不要默认它，`off` 提示词里不给
+  基础率（数据包、记分照样有）。`momentum_guidance = true` 加几句成对的说明：按近 15 分钟 / 1 / 4 小时
+  等权收益、涨跌家数和 BTC 是否同向来更新，走出「平」的宽度且同向越多、移动越大。改了这两项
+  `prompt_version` 带后缀（如 `desk-v1+prior-context+momentum`），默认设置下提示词逐字节不变。
+  `band_sigma` 同时决定数据包里的基础率、日志 `score_targets` 的 `flat_band_pct` 和提示词里的分类，改了
+  下一轮全部按新宽度重算；发布的话里写「未来 4 小时概率（平 = ±x%）」，状态文件 `latest.flat_band_pct`
+  记 4h / 1h 两档宽度。这四项和 `call_p_min`、`call_edge_min`、`publish_min_gap_min` 可以经面板的待生效配置
+  （`config/slow.pending.toml` 的 `[market_desk]`）改。**回滚**到没有 `prior_mode` / `momentum_guidance` /
+  `aggregation` 的旧版本前先删掉这三行（旧代码不认识会拒绝启动）；面板改过的另外几项旧代码认识，但会照改过的
+  值跑，要回到原值也一起删掉。
 - **数据包**（`market_dossier.py`）：只放池级 / 大盘级数字，每项带来源和 as_of。**不能有延后信息**：
   所有「近 15 / 30 分钟、近 1 / 4 / 12 / 24 / 72 小时」的收益、上涨下跌家数、离散度、主动买卖占比、
   24h 区间位置、BTC / ETH 涨跌，都是截止到运行时刻的滚动窗口——终点价是 15 分钟线里正在走的那一根的现价，
@@ -663,6 +675,7 @@ regime_flip_target = "desk"
 | `stale_on_arrival_action` | `"watch"` / `"no_trade"` | watch：只盯不开，方向不动，清掉信号和进场区间（和指挥官 `_watch_only` 一样），持仓的反向信号、方向记分照旧，管家的反向卡规则也不会因为它平仓；no_trade：改成观望 |
 | `input_time_labels` | `"legacy"` / `"explicit"` | 总盘会表格 `takerBuy1h` / `OI1h` 改成 `takerBuy_closedHour[09:00-10:00Z]` / `OI_closedHour[…]`（窗口来自选币来源元数据，不知道写 `time unknown`）；单币会议资金费率写「Last settled funding rate (settled at HH:MM UTC)」，再加 `premiumIndex` 的实时估算和下次结算时间，持仓量写明首尾两个整点 |
 | `market_table_rolling` | `false` / `true` | 整轮总盘会的池子概况多一行 `rolling_60m`：每个币 1 分钟 K 线，从「开会时刻取整到分钟 − 60 分钟」那一分钟的开盘价到此刻最新价（最后一分钟没走完），10:54 开会就是 09:54–10:54。起点那一分钟没有的币记缺失；整行取不到（含限流）写 `rolling_60m unavailable (…)`，总盘会照开。开会实况（面板「开会过程」）的输入在会前先显示，会后另加一步「模型实际收到的表」，开了这一项或 `input_time_labels = "explicit"` 时才有。原来的 `completed_hour` 一行不变。只改整轮总盘会，不改 Flash 只更新大盘（那一处归大盘台） |
+| `lessons_scoring` | `"raw"` / `"excess"` | 教训（下一节）怎么给卡打分。raw：会后一个持仓期的原始涨跌，山寨币另比同期 BTC。excess：和 `slow/card_score.py` 同口径，发布时刻起 4 小时、方向 ×（币 − 同期币池等权收益），读 `data/card_score/scored.jsonl` 已算好的结果、不另拉 K 线，不扣手续费，观望卡看相对币池走了多远；提示词多空写法对称。需要面板进程在跑方向记分（`card_score_every_min` ≠ 0），否则攒不到 30 张就不写。只影响之后的汇总，已写的教训不变。这一节下面列的开关（偏空整改、输入新鲜度、`lessons_scoring`）现在也能在面板设置页「军师团」里改，或写进 `config/slow.pending.toml`；改了要重启（模型 / 通道 / `analyst_klines` 仍只能改文件）|
 | `latest_market_regime` | `false` / `true` | 整轮里每个单币会拿到并发名额、真正开始时取当时最新发布的大盘判断（本轮中途 Flash 更新过就用新的），卡上该币的 `source_market_view_id` 跟着用那一版；`meeting_setup` 记 `regime_source`（round / latest）、`regime_market_view_id`、`regime_observed_at` |
 | `event_brief_refresh` | `false` / `true` | 临时会开会前刷新大盘简报（简报服务自己 10 分钟内不重复拉）；刷新失败记一条错误、用上一份 |
 
