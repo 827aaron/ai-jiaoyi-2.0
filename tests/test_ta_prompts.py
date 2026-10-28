@@ -181,6 +181,11 @@ def test_rating_guard_table() -> None:
     assert same_strong.size_tier_max is SizeTier.L
     # 要区间的档没有区间 → 观望
     assert g(_card(), "underweight", "sell", zone_ok=False).bias is Bias.NO_TRADE
+    # 闸门改的观望记下会议方向（管家不把同方向的仓当中性）；真观望 / 方向打架不记
+    assert g(_card(), "underweight", "sell", zone_ok=False).no_trade_from is Bias.SHORT
+    assert g(_card(Bias.LONG), "overweight", "buy", zone_ok=False).no_trade_from is Bias.LONG
+    assert g(_card(), "hold", "sell").no_trade_from is None
+    assert g(_card(), "overweight", "sell").no_trade_from is None
     assert g(_card(), "sell", "sell", zone_ok=False).bias is Bias.SHORT  # 两个都是 Sell：照转卡
     # 两个都是 Buy / Sell → 照转卡结果
     same = _card()

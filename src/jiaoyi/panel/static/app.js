@@ -2421,6 +2421,9 @@ const PLAIN = {
   opposite_tighten_mark_gap_bps: "反向卡收紧止损：离标记价不到这么多基点就不挂、直接平（0 = 只要在安全一侧）",
   opposite_profit_mode: "反向卡没确认、赚得够时：trail 在现价强制启动移动止损 / breakeven 止损挪到扣费保本",
   opposite_trail_distance_mult: "trail 模式：锚定的移动止损距离 = 开仓带的移动止损距离 × 几倍",
+  card_neutral_action: "开仓后新作战卡把这个币改成中性时：hold 不管 / tighten 亏的平、赚的锚定移动止损 / close 直接平",
+  card_neutral_on_absent: "新作战卡里没有这个币也算中性",
+  card_neutral_trail_distance_mult: "中性卡锚定的移动止损距离 = 开仓带的移动止损距离 × 几倍",
   patrol_shock_pct_1m: "1 分钟内往亏的方向走了百分之几就全平",
   patrol_alert_pct_1m: "1 分钟内往亏的方向走了百分之几就叫管家马上看",
   breakout_vol_ratio: "成交量是平时几倍算放量突破",
@@ -2828,6 +2831,7 @@ const ROLES = [
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
+    { g: "新作战卡把这个币改成中性", hint: "代码规则，不问模型，不做价格确认（中性不是反向）。只看开仓之后发布的新卡：这个币改成 no_trade，或到手即作废（stale_on_arrival）成只看不做，都算中性；别的原因的只看不做不算；卡里没有这个币只在打开「没有也算」时算。hold = 不管（现状）。tighten = 和「新作战卡方向反了」没确认时同一套：亏着或赚得不够照旧全平，赚得够的在第一次看到时的现价强制启动移动止损（只锚一次，重启、换卡都不重锚，不会比正在挂的止损松），保本缓冲、离标记价多远、插针重试秒数都用上面那组。close = 直接全平。管家行情没有或过旧（「管家复查时行情最多旧几秒」）时一律不平：tighten 只收紧，close 等新行情。之后卡转成反向，交给上面那条规则。", keys: ["fast_loop.card_neutral_action", "fast_loop.card_neutral_on_absent", "fast_loop.card_neutral_trail_distance_mult"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
   ] },
   { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
@@ -2864,7 +2868,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "r
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
