@@ -605,6 +605,15 @@ def call_stats(pairs: Sequence[tuple[str, str]]) -> dict[str, Any]:
     }
 
 
+def run_direction(run: LoggedRun, h: str) -> str:
+    """这一轮在 h 上叫的方向：4h 用日志里的（发布用的就是它）；1h 按当时的 θ / δ 从 1h 概率派生。"""
+    if h == "4h":
+        return run.direction if run.direction in DIR_CLASS else "中性"
+    theta = _num(run.settings.get("call_p_min"))
+    delta = _num(run.settings.get("call_edge_min"))
+    return derive_direction(run.probs[h], theta or 0.45, delta or 0.15)
+
+
 def prob_metrics(rows: Sequence[Scored], h: str) -> dict[str, Any]:
     """一个期限上大盘台概率 vs 先验 vs 延续。只算先验齐全的轮次（同一批比）。"""
     use = [s for s in rows if h in s.out and s.run.base[h] is not None]
@@ -640,7 +649,7 @@ def prob_metrics(rows: Sequence[Scored], h: str) -> dict[str, Any]:
         _mean([1.0 if CLASSES[max(range(3), key=lambda i: as_tuple(p)[i])] == y else 0.0
                for p, y in zip(desk, ys, strict=True)])
     )  # fmt: skip
-    calls = [(DIR_CLASS.get(s.run.direction, "flat"), y) for s, y in zip(use, ys, strict=True)]
+    calls = [(DIR_CLASS[run_direction(s.run, h)], y) for s, y in zip(use, ys, strict=True)]
     res["direction"] = call_stats(calls)
     res["confusion"] = confusion(calls)
     res["reliability"] = reliability(list(zip(desk, ys, strict=True)))
@@ -814,8 +823,8 @@ def sweep(rows: Sequence[Scored], flash_at: Sequence[datetime]) -> list[dict[str
             calls = {
                 h: call_stats(
                     [
-                        (DIR_CLASS[d], s.out[h].cls)
-                        for s, d in zip(rows, dirs, strict=True)
+                        (DIR_CLASS[derive_direction(s.run.probs[h], theta, delta)], s.out[h].cls)
+                        for s in rows
                         if h in s.out and not s.run.prior_missing
                     ]
                 )

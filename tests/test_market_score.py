@@ -402,7 +402,7 @@ def test_latency_counts_minutes_from_sustained_move_to_same_direction_publish() 
 
 def test_sweep_rederives_directions_without_model_calls(tmp_path: Path) -> None:
     now = T0 + timedelta(hours=5)
-    write_log(tmp_path, [desk_row(T0, (0.40, 0.35, 0.25), direction="中性")])
+    write_log(tmp_path, [desk_row(T0, (0.40, 0.35, 0.25), p1=(0.6, 0.3, 0.1), direction="中性")])
     rep = run(tmp_path, now, FakeKlines(ramp(T0, {"AAUSDT": 3.0}), now), flash=False)
     table = {(r["theta"], r["delta"], r["confirm"]): r for r in rep["sweep"]}
     assert len(table) == len(ms.THETAS) * len(ms.DELTAS) * len(ms.CONFIRMS)
@@ -412,6 +412,9 @@ def test_sweep_rederives_directions_without_model_calls(tmp_path: Path) -> None:
     assert table[(0.45, 0.15, 1)]["call_4h"]["hit"] == 0.0
     assert table[(0.35, 0.20, 2)]["call_4h"]["coverage"] == 0.0
     assert table[(0.35, 0.15, 2)]["publishes"] == 1  # 接管那一次
+    # 1h 用 1h 概率派生：θ 0.45 时 4h 叫平（不中），1h 叫涨，+0.25% > 0.2 命中
+    assert table[(0.45, 0.15, 1)]["call_1h"]["hit"] == 1.0
+    assert rep["desk"]["1h"]["direction"]["hit"] == 1.0
 
 
 def test_mirror_runs_reported_separately(tmp_path: Path) -> None:
