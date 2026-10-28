@@ -140,7 +140,9 @@ def test_news_analyst_crypto_has_no_macro_tool_and_stock_uses_the_original(
 def _graph(tmp_path: Path, **kw: Any) -> Any:
     import os
 
-    os.environ.setdefault("DEEPSEEK_API_KEY", "x" * 16)
+    # tradingagents 导入时 load_dotenv 往上找 .env，上层目录里空的 DEEPSEEK_API_KEY= 也会被读进来
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        os.environ["DEEPSEEK_API_KEY"] = "x" * 16
     cfg = _cfg(tmp_path)
     return ta_nodes.perp_graph_class()(
         selected_analysts=("market",), config=cfg, callbacks=[], **kw
