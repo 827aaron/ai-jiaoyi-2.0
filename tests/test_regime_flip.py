@@ -102,9 +102,16 @@ def test_zero_disables_each_threshold_and_hot_edit_resets(now: datetime) -> None
     assert r.count == 0
 
 
+def accepted(r: RegimeFlip, at: datetime, up: int, down: int, px: float) -> str:
+    check = r.step(at, up, down, up + down, px)
+    if check.kind == "confirmed" and check.candidate_direction is not None:
+        r.fired(check.candidate_direction)
+    return check.kind
+
+
 def test_one_confirmation_per_episode_until_the_condition_breaks(now: datetime) -> None:
     r = rule(now, regime_flip_confirm=3, regime_flip_min_gap_min=0.2)
-    kinds = [r.step(now + timedelta(minutes=i), 30, 10, 40, 101).kind for i in range(10)]
+    kinds = [accepted(r, now + timedelta(minutes=i), 30, 10, 101) for i in range(10)]
     assert kinds == ["blocked", "blocked", "confirmed", *["blocked"] * 7]
     assert (
         r.step(now + timedelta(minutes=10), 30, 10, 40, 101).reason
@@ -113,16 +120,62 @@ def test_one_confirmation_per_episode_until_the_condition_breaks(now: datetime) 
     r.step(now + timedelta(minutes=11), 40, 0, 40, None)  # 缺数据不算条件中断
     assert r.step(now + timedelta(minutes=12), 30, 10, 40, 101).count == 0
     assert r.step(now + timedelta(minutes=13), 20, 20, 40, 101).kind == "suspect_btc"
-    kinds = [r.step(now + timedelta(minutes=14 + i), 30, 10, 40, 101).kind for i in range(3)]
+    kinds = [accepted(r, now + timedelta(minutes=14 + i), 30, 10, 101) for i in range(3)]
     assert kinds == ["blocked", "blocked", "confirmed"]
 
 
+def test_confirmation_not_accepted_by_the_loop_confirms_again(now: datetime) -> None:
+    r = rule(now, regime_flip_confirm=2, regime_flip_min_gap_min=0)
+    kinds = [r.step(now + timedelta(minutes=i), 30, 10, 40, 101).kind for i in range(3)]
+    assert kinds == ["blocked", "confirmed", "confirmed"]
+
+
 def test_neutral_other_side_breaks_the_confirmed_side(now: datetime) -> None:
-    r = rule(now, "中性", regime_flip_confirm=1, regime_flip_min_gap_min=0)
-    assert r.step(now, 40, 0, 40, 102).kind == "confirmed"
-    assert r.step(now + timedelta(minutes=1), 40, 0, 40, 102).kind == "blocked"
-    assert r.step(now + timedelta(minutes=2), 0, 40, 40, 98).candidate_direction == "看跌"
-    assert r.step(now + timedelta(minutes=3), 40, 0, 40, 102).kind == "confirmed"
+    r = rule(now, "中性", regime_flip_confirm=2, regime_flip_min_gap_min=0)
+    assert [accepted(r, now + timedelta(minutes=i), 40, 0, 102) for i in range(3)] == [
+        "blocked",
+        "confirmed",
+        "blocked",
+    ]
+    down = r.step(now + timedelta(minutes=3), 0, 40, 40, 98)
+    assert (down.kind, down.count, down.candidate_direction) == ("blocked", 1, "看跌")
+    up = r.step(now + timedelta(minutes=4), 40, 0, 40, 102)
+    assert (up.kind, up.count) == ("blocked", 1)
+    assert accepted(r, now + timedelta(minutes=5), 40, 0, 102) == "confirmed"
+
+
+def test_new_same_direction_reference_allows_a_new_confirmation(now: datetime) -> None:
+    r = rule(now, regime_flip_confirm=1, regime_flip_min_gap_min=0)
+    assert accepted(r, now, 30, 10, 101) == "confirmed"
+    assert accepted(r, now + timedelta(minutes=1), 30, 10, 101) == "blocked"
+    r.arm(reference(now + timedelta(minutes=2)))
+    assert accepted(r, now + timedelta(minutes=3), 30, 10, 101) == "confirmed"
+
+
+def test_long_outage_does_not_join_two_episodes(now: datetime) -> None:
+    r = rule(now, regime_flip_confirm=1, regime_flip_min_gap_min=90)
+    assert accepted(r, now, 30, 10, 101) == "confirmed"
+    for minutes in range(1, 85):
+        r.step(now + timedelta(minutes=minutes), 30, 10, 40, None)
+    assert accepted(r, now + timedelta(minutes=85), 30, 10, 101) == "blocked"
+    for minutes in range(86, 176):
+        r.step(now + timedelta(minutes=minutes), 30, 10, 40, None)
+    assert accepted(r, now + timedelta(minutes=176), 30, 10, 101) == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "check_min,max_age,ok",
+    [(5, 0, True), (5, 29, False), (5, 30, True), (45, 40, False), (45, 45, True)],
+)
+def test_ref_max_age_is_zero_or_at_least_30_and_the_check_period(
+    check_min: float, max_age: float, ok: bool
+) -> None:
+    kw = {"regime_flip_check_min": check_min, "regime_flip_ref_max_age_min": max_age}
+    if ok:
+        assert FastLoopConfig.model_validate(kw).regime_flip_ref_max_age_min == max_age
+    else:
+        with pytest.raises(ValueError, match="regime_flip_ref_max_age_min"):
+            FastLoopConfig.model_validate(kw)
 
 
 def test_stale_reference_measures_btc_from_a_fresh_baseline(now: datetime) -> None:

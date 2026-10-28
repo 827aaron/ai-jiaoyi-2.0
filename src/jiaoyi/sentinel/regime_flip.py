@@ -61,8 +61,10 @@ class RegimeFlip:
         self.count = 0
         self._checked_at: datetime | None = None
         self._candidate: Direction | None = None
-        # 已确认过的方向：条件一直成立时不再重复确认；缺数据不算中断，只有看到条件不成立才解开
+        # 主循环已接受的方向：条件一直成立时不再重复确认。缺数据不算中断，只有看到条件不成立才解开；
+        # 但太久没有有效判断就解开，免得一次断线把前后两段行情连成一段
         self._fired: Direction | None = None
+        self._judged_at: datetime | None = None
         self._thresholds: dict[str, Any] = {}
         self._btc_seen: list[tuple[datetime, float]] = []
 
@@ -76,6 +78,10 @@ class RegimeFlip:
         self.count = 0
         self._checked_at = None
         self._candidate = None
+
+    def fired(self, direction: Direction) -> None:
+        """主循环真正放行开会时调用：被闸门拦下的确认不消耗这段行情，下一次检查还能再确认。"""
+        self.count, self._checked_at, self._fired = 0, None, direction
 
     def _baseline(
         self, now: datetime, ref: RegimeReference, btc_px: float
@@ -99,6 +105,9 @@ class RegimeFlip:
             self.reset()  # 改门槛后从新门槛下的第一次检查开始确认
             self._fired = None
             self._thresholds = settings
+        stale = timedelta(minutes=max(self.cfg.regime_flip_min_gap_min, 60))
+        if self._judged_at is not None and now - self._judged_at > stale:
+            self._fired = None
         max_age = self.cfg.regime_flip_ref_max_age_min
         self._btc_seen = [
             (t, px) for t, px in self._btc_seen if now - t <= timedelta(minutes=max_age)
@@ -147,6 +156,7 @@ class RegimeFlip:
             )
             checks.append((direction, breadth, btc))
         candidates = [d for d, breadth, btc in checks if breadth and btc]
+        self._judged_at = now
         if len(candidates) != 1:
             self.reset()
             self._fired = None
@@ -206,9 +216,7 @@ class RegimeFlip:
                     base_at,
                     base_px,
                 )
-        check = FlipCheck("confirmed", "", self.count, ret, candidate, base_at, base_px)
-        self.count, self._checked_at, self._fired = 0, None, candidate
-        return check
+        return FlipCheck("confirmed", "", self.count, ret, candidate, base_at, base_px)
 
 
 def minute(now: datetime) -> datetime:

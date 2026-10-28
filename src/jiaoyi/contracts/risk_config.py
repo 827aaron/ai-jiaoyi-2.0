@@ -989,7 +989,8 @@ class FastLoopConfig(Contract):
         ge=0,
         allow_inf_nan=False,
         description="市场参照比这更旧（分钟）时，BTC 涨跌改为和这段时间内检查记下的最早价比；"
-        "刚重启时从现在起重新量。默认 0 = 一直和参照价比。",
+        "刚重启时从现在起重新量。默认 0 = 一直和参照价比；不是 0 时至少 30 分钟，"
+        "且不短于 regime_flip_check_min。",
     )
     # ---- 和作战卡相反的信号（研究 2026-10-24：有仓交管家急查，反复出才开单币临时会）
     against_signal_on: bool = Field(
@@ -1049,6 +1050,12 @@ class FastLoopConfig(Contract):
                 "frozen_peak_evidence_max_age_s 要么填 0（不限），要么至少 "
                 "frozen_peak_evidence_interval_s + 30 秒（一次证据读最多十几秒），"
                 "否则正常节奏下缓存也会算过期"
+            )
+        floor = max(self.regime_flip_check_min, 30)
+        if 0 < self.regime_flip_ref_max_age_min < floor:
+            raise ValueError(
+                "regime_flip_ref_max_age_min 要么填 0（一直和参照比），要么至少 "
+                f"{floor:g} 分钟（30 分钟和检查间隔取大的）：窗口比检查间隔还短就量不出涨跌"
             )
         if 0 < self.atr_long_period_min <= self.atr_period_min:
             raise ValueError("atr_long_period_min 必须比 atr_period_min 长")

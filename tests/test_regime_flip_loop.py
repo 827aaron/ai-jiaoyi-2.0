@@ -143,6 +143,7 @@ async def test_gates_block_without_duplicate_round(
     patch_inplace(
         r.app.app_cfg.fast_loop, FastLoopConfig(regime_flip_confirm=1), {"regime_flip_confirm"}
     )
+    budget = c._cost_limit
     if block == "market_busy":
         r._market_refreshing = True
     elif block == "budget":
@@ -168,6 +169,15 @@ async def test_gates_block_without_duplicate_round(
     }
     assert latest["blocked_reason"] == expected[block]
     assert c.last_regime_flip_at is None
+    if block == "missing":
+        return
+    # 闸门拦下的确认不消耗这段行情：闸门一开，条件仍成立就再确认
+    r._market_refreshing, c._cost_limit, c._retry_at = False, budget, None
+    monkeypatch.setattr("jiaoyi.loop.binance_gate.banned_until", lambda: 0.0)
+    clock[0] += timedelta(minutes=5)
+    await r.regime_flip_tick()
+    await finish(r)
+    assert eng.market_calls == 1 and c.last_regime_flip_at == clock[0]
 
 
 async def test_rate_limit_during_fetch_is_logged_not_raised(tmp_path: Path, now: datetime) -> None:

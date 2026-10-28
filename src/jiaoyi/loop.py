@@ -2343,6 +2343,7 @@ class Runner:
             return
         cards.mark_regime_flip(self.app.clock())
         self._regime.last_rerun = cards.last_regime_flip_at
+        self._regime.fired(flip["candidate_direction"])
         flip = self._regime_journal.emit(
             {**flip, "ts": self.app.clock().isoformat(), "rerun": True, "scope": "market_only"},
             f"大盘方向变化：{flip['up_1h']} 涨/{flip['down_1h']} 跌，"
@@ -2383,6 +2384,7 @@ class Runner:
             return
         cards.mark_regime_flip(self.app.clock())
         self._regime.last_rerun = cards.last_regime_flip_at
+        self._regime.fired(flip["candidate_direction"])
         self._regime_journal.emit(
             {**flip, "ts": self.app.clock().isoformat(), "rerun": True, "scope": "market_desk"},
             f"大盘方向变化：{flip['up_1h']} 涨/{flip['down_1h']} 跌，"
