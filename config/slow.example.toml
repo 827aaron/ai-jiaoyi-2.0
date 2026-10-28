@@ -154,4 +154,7 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # max_tokens = 4096
 # timeout_s = 120
 # max_input_age_min = 5      # 不能有延后信息：实时字段 as_of 比运行时刻旧过这么多分钟就不给模型；0 = 不查
+# publish_intra = false      # true = 大盘说明里再带最近一轮的「未来 1 小时概率」和代码写的「短线现状」（不多调模型）
+# keeper_intra = false      # true = 管家复查快照也带这段（current_market.within_4h）；和 publish_intra 分开
+# intra_refresh_s = 60       # 两轮之间多久刷新一次短线现状（用大盘翻转检查已取的 1 分钟线，不另发请求）；0 = 只在每轮更新
 # exclude_symbols = ["PAXGUSDT", "XAUTUSDT"]

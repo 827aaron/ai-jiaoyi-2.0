@@ -872,6 +872,28 @@ class MarketDeskSection(_Strict):
         "运行时刻旧过这么多分钟就不给模型（写进缺失原因）；5 分钟统计的数再多给 5 分钟。0 = 不查。"
         "σ、基础率（已收盘 1h 线上的统计量）和恐慌贪婪（日值）不按这个拦。",
     )
+    publish_intra: bool = Field(
+        default=False,
+        description="大盘也告诉各币会议 4 小时之内的行情：开着时，各币会议的大盘说明和"
+        "面板「最新大盘判断」在 4 小时判断后面再带两段——大盘台最近一轮的"
+        "「未来 1 小时概率」和代码按行情写的「短线现状」（池 15 分钟 / 1 小时等权涨跌和"
+        "涨跌家数、BTC 15 分钟 / 1 小时、1 小时主动买卖占比）。短线现状按 intra_refresh_s "
+        "在两轮之间刷新，数据旧过 max_input_age_min 就写「缺失」。不多调模型、不改 4 小时"
+        "方向和发布节奏。false = 和以前一样。",
+    )
+    keeper_intra: bool = Field(
+        default=False,
+        description="管家复查快照也带同一段「4 小时之内」（current_market.within_4h）。和 "
+        "publish_intra 分开：管家的判断门槛是在没有这项输入时定的，打开前先单独验证。",
+    )
+    intra_refresh_s: float = Field(
+        default=60.0,
+        ge=0.0,
+        le=900.0,
+        description="两轮大盘台之间多久刷新一次「短线现状」（秒）：用大盘翻转检查每分钟已经取到"
+        "的 1 分钟收盘价重算池和 BTC 的涨跌，不另发请求、不调模型（大盘翻转检查没开时不刷新）。"
+        "主动买卖占比只在大盘台每轮取。0 = 只在大盘台每轮更新。",
+    )
     exclude_symbols: tuple[str, ...] = Field(
         default=("PAXGUSDT", "XAUTUSDT"),
         description="不进等权池的币（贵金属等，和大盘无关）。",

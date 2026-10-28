@@ -13,7 +13,7 @@ import math
 import statistics
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -202,6 +202,10 @@ class Breadth:
     flat: int = 0
     missing: int = 0
     requested: int = 0
+    rets_15m: dict[str, float] = field(default_factory=dict)
+    """每个币（含 BTC）截至 ``ts`` 的 15 分钟涨跌（%），同一批 1 分钟线算的；
+    大盘台刷新短线现状用。"""
+    rets_1h: dict[str, float] = field(default_factory=dict)
 
     @property
     def n(self) -> int:
@@ -213,6 +217,14 @@ async def snapshot(symbols: Sequence[str], now: datetime, source: KlineSource) -
     bars = await fetch_bars([*symbols, BTC], at - timedelta(minutes=61), at, source)
     prices: dict[str, float] = {}
     changes: list[float] = []
+    rets: dict[int, dict[str, float]] = {15: {}, 60: {}}
+    for sym in {*symbols, BTC}:
+        rows = bars.get(sym, [])
+        last = close_at(rows, at)
+        for minutes, out in rets.items():
+            start = close_at(rows, at - timedelta(minutes=minutes))
+            if last is not None and start is not None:
+                out[sym] = (last / start - 1) * 100
     for sym in set(symbols):
         rows = bars.get(sym, [])
         current, previous = close_at(rows, at), close_at(rows, at - timedelta(hours=1))
@@ -229,6 +241,8 @@ async def snapshot(symbols: Sequence[str], now: datetime, source: KlineSource) -
         sum(x == 0 for x in changes),
         len(set(symbols)) - len(changes),
         len(set(symbols)),
+        rets[15],
+        rets[60],
     )
 
 

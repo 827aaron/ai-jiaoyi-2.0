@@ -32,6 +32,7 @@ from jiaoyi.core.hotconfig import HOT_FAST, patch_inplace
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.loop import Runner
 from jiaoyi.slow.commander import BattleCardCommander, CardRefreshError, Pick, PickResult
+from jiaoyi.slow.desk_intra import INTRA_FIELDS, compose_intra
 from jiaoyi.slow.market_desk import (
     DESK_SOURCE,
     SWAP_PAIRS,
@@ -46,6 +47,8 @@ from jiaoyi.slow.market_desk import (
     derive_direction,
     extract_json,
     instruction_lines,
+    intra_block,
+    intra_status,
     mirror_bias,
     mirror_selected,
     normalize_probs,
@@ -56,11 +59,13 @@ from jiaoyi.slow.market_desk import (
 )
 from jiaoyi.slow.market_dossier import (
     BARS_15M,
+    CACHE_KEEP_DAYS,
     DEEP_PER_RUN,
     SHALLOW_BARS,
     Dossier,
     DossierBuilder,
     DossierField,
+    _period_as_of,
 )
 from jiaoyi.slow.settings import MarketDeskSection, load_slow_config, market_desk_conflict
 from tests.test_loop import _app
@@ -1143,6 +1148,7 @@ class LoopDesk:
         self.requests: list[str] = []
         self.runs: list[str] = []
         self.pending: str | None = None
+        self.breadth: list[tuple[Any, ...]] = []
 
     def request_run(self, reason: str = "regime_flip") -> None:
         self.requests.append(reason)
@@ -1160,6 +1166,10 @@ class LoopDesk:
 
     def observe_prices(self, *a: Any) -> None:
         return None
+
+    def observe_breadth(self, *a: Any) -> bool:
+        self.breadth.append(a)
+        return True
 
 
 @pytest.mark.parametrize("target", ["off", "desk"])
@@ -1194,6 +1204,8 @@ async def test_flip_target_off_and_desk_never_call_flash(tmp_path: Path, target:
     if runner._tasks:
         await asyncio.gather(*tuple(runner._tasks))
     assert engine.market_calls == 0  # 从不叫 Flash 独立刷新
+    # 翻转检查刚取到的 1 分钟线顺手交给大盘台刷新短线现状（不另发请求）
+    assert [(b[0], b[3]["BTCUSDT"]) for b in desk.breadth] == [(clock[0], pytest.approx(2.0))]
     rows = records(tmp_path / "regime_flip")
     if target == "off":
         assert desk.requests == [] and desk.runs == []
@@ -1271,7 +1283,7 @@ class FakeBinance:
         period = {"1h": 3_600_000, "5m": 300_000}.get((params or {}).get("period", ""), 0)
         if path in ("globalLongShortAccountRatio", "openInterestHist"):
             n = params["limit"]
-            last = now_ms // period * period - period  # 最新一段（已结束）的开始时间
+            last = now_ms // period * period - period  # 最新一条的时间戳：偏旧一段，测余量
             rows = []
             for i in range(n):
                 ts = last - (n - 1 - i) * period
@@ -1417,7 +1429,7 @@ def test_windows_roll_to_run_time_not_last_closed_hour() -> None:
 
     fake = FakeBinance(price=price)
     fake.now_ms = int(at.timestamp() * 1000)
-    d = DossierBuilder(get=fake.get, fng_get=fake.fng).build(
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, monotonic=lambda: 0.0).build(
         pool(at, *(entry(s) for s in SYMS)), at
     )
     assert d.value("pool_ret_1h_pct") == pytest.approx(2.0, abs=1e-6)  # 09:54 → 10:54
@@ -1612,3 +1624,563 @@ async def test_credit_error_raises_alarm(tmp_path: Path, caplog: pytest.LogCaptu
             builder=FakeBuilder(),  # type: ignore[arg-type]
         )
     assert "自停不生效" in caplog.text
+
+
+# ------------------------------------------------------------------ 4 小时之内（publish_intra）
+
+
+def intra_dossier(now: datetime = T0, ret1h: float = 0.768) -> Dossier:
+    """make_dossier 加上「短线现状」用的数；BTC 1h 的 as_of 早一分钟（as_of 取最旧的）。"""
+    d = make_dossier(now)
+
+    def f(
+        name: str, value: float, mirror: Any = "neg", partner: str | None = None, ago: int = 0
+    ) -> DossierField:
+        ts = now - timedelta(minutes=ago)
+        return DossierField(name, value, "%", "n", "klines_15m_live", ts, mirror, partner, 3)
+
+    extra = (
+        f("pool_ret_15m_pct", 0.0186),
+        f("pool_up_count_15m", 19.0, "pair", "pool_down_count_15m"),
+        f("pool_down_count_15m", 19.0, "pair", "pool_up_count_15m"),
+        f("pool_ret_1h_pct", ret1h),
+        f("pool_up_count_1h", 34.0, "pair", "pool_down_count_1h"),
+        f("pool_down_count_1h", 5.0, "pair", "pool_up_count_1h"),
+        f("btc_ret_15m_pct", 0.0486),
+        f("btc_ret_1h_pct", 0.383, ago=1),
+    )
+    return dataclasses.replace(d, fields=d.fields + extra)
+
+
+class IntraBuilder:
+    """每轮按开跑时刻造数据包（as_of 跟着走），``ret1h`` 可改。"""
+
+    def __init__(self) -> None:
+        self.ret1h = 0.768
+
+    def build(self, pool: SymbolPool, now: datetime) -> Dossier:
+        return intra_dossier(now, self.ret1h)
+
+
+H1 = Probs(0.312, 0.459, 0.229)
+UP_TEXT = (
+    "10:02 UTC 起 1 小时概率：涨 31% / 平 46% / 跌 23%。"
+    "短线现状（截至 10:01 UTC）："
+    "等权池 15 分钟 +0.02%（涨 19 / 跌 19 个），1 小时 +0.77%（涨 34 / 跌 5 个）；"
+    "BTC 15 分钟 +0.05%，1 小时 +0.38%；1 小时成交里主动买入 47.0% / 主动卖出 53.0%。"
+)
+
+
+def _flip_signs(text: str) -> str:
+    return re.sub(r"([+-])(?=\d)", lambda m: "-" if m.group(1) == "+" else "+", text)
+
+
+def test_intra_text_has_1h_probs_and_short_term_numbers() -> None:
+    block = intra_block(intra_dossier(), H1, "up_first", "c")
+    assert block["as_of"] == (T0 - timedelta(minutes=1)).isoformat()
+    assert set(block["values"]) == set(INTRA_FIELDS)
+    assert compose_intra(block, T0 + timedelta(minutes=1), 5.0) == UP_TEXT
+    down = compose_intra(intra_block(intra_dossier(), H1, "down_first", "c"), T0, 5.0)
+    assert down == (
+        "10:02 UTC 起 1 小时概率：跌 23% / 平 46% / 涨 31%。"
+        "短线现状（截至 10:01 UTC）："
+        "等权池 15 分钟 +0.02%（跌 19 / 涨 19 个），1 小时 +0.77%（跌 5 / 涨 34 个）；"
+        "BTC 15 分钟 +0.05%，1 小时 +0.38%；1 小时成交里主动卖出 53.0% / 主动买入 47.0%。"
+    )
+
+
+def test_intra_text_is_neutral_under_swap_and_mirror() -> None:
+    assert frozenset(("买入", "卖出")) in {frozenset(p) for p in SWAP_PAIRS}
+    d = intra_dossier()
+    for order, other in (("up_first", "down_first"), ("down_first", "up_first")):
+        text = compose_intra(intra_block(d, H1, order, "c"), T0, 5.0)
+        mirrored = intra_block(d.mirror(), Probs(H1.down, H1.flat, H1.up), other, "c")
+        # 数据涨跌取反、顺序对调后，文字正好是原文多空词对调、正负号对调
+        assert compose_intra(mirrored, T0, 5.0) == _flip_signs(swap_words(text))
+        assert_paired([s for s in re.split("[。；]", text) if s])
+
+
+def test_intra_short_term_line_is_refused_when_stale() -> None:
+    block = intra_block(intra_dossier(), H1, "up_first", "c")
+    stale = compose_intra(block, T0 + timedelta(minutes=5), 5.0)  # as_of 早 1 分钟：已 6 分钟
+    assert stale == (
+        "10:02 UTC 起 1 小时概率：涨 31% / 平 46% / 跌 23%。"
+        "短线现状：缺失（截至 10:01 UTC 的数据已过 6 分钟，上限 5 分钟）。"
+    )
+    assert "等权池" in compose_intra(block, T0 + timedelta(minutes=5), 0.0)  # 0 = 不查
+    late = compose_intra(block, T0 + timedelta(minutes=61), 0.0)
+    assert late.startswith("10:02 UTC 起 1 小时概率：缺失（已过 1 小时）。")
+    missing = dict(block, values={k: v for k, v in block["values"].items() if "btc" not in k})
+    assert "BTC 15 分钟 缺失，1 小时 缺失" in compose_intra(missing, T0, 5.0)
+
+
+async def test_publish_intra_reads_latest_run_not_last_published_view(tmp_path: Path) -> None:
+    commander, engine, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    builder = IntraBuilder()
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=builder,  # type: ignore[arg-type]
+        publish_intra=True,
+    )
+    await desk.run(candidates, "scheduled")
+    view = commander.latest_market_view
+    assert view is not None and view.source == DESK_SOURCE
+    assert "短线现状" not in view.regime and "1 小时概率" not in view.regime  # 发布的观点不动
+    latest = desk.state.latest
+    assert latest is not None and latest["intra"]["max_age_min"] == 5.0
+    text = desk.intra_text(clock[0])
+    assert text is not None and text.endswith("。") and "（截至 10:01 UTC）" in text
+    assert "涨 31%" in text and "+0.77%" in text
+    assert commander.market_intra(clock[0], view) == text
+    flash_view = view.model_copy(update={"source": "scheduled_market"})
+    assert commander.market_intra(clock[0], flash_view) is None  # 只接在大盘台观点后面
+    await commander._analyze_one(entry("AAUSDT"), view.regime, market_view=view)
+    label = "（大盘台 10:02 UTC 发布的 4 小时判断）"  # 发布时刻，免得当成此刻的
+    assert engine.symbol_calls[-1] == ("AAUSDT", f"{label}{view.regime} {text}")
+
+    # 下一轮方向没变不发布，但短线现状换成这一轮的数
+    clock[0] += timedelta(minutes=15)
+    builder.ret1h = -0.412
+    await desk.run(candidates, "scheduled")
+    assert commander.latest_market_view == view
+    newer = desk.intra_text(clock[0])
+    assert newer is not None and "-0.41%" in newer and "（截至 10:16 UTC）" in newer
+    clock[0] += timedelta(minutes=6)
+    stale = desk.intra_text(clock[0])
+    assert stale is not None and "短线现状：缺失" in stale and "-0.41%" not in stale
+    restored = make_desk(tmp_path, commander, FakeModel("x"), clock, publish_intra=True)
+    assert restored.intra_text(clock[0]) == stale  # 重启后从状态文件接着用
+
+
+async def test_publish_intra_off_is_byte_identical(tmp_path: Path) -> None:
+    assert MarketDeskSection().publish_intra is False
+    commander, engine, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    model = FakeModel(answer(0.6, 0.25, 0.15))
+    off_builder: Any = IntraBuilder()
+    desk = make_desk(tmp_path, commander, model, clock, builder=off_builder)
+    on_model = FakeModel(answer(0.6, 0.25, 0.15))
+    on_builder: Any = IntraBuilder()
+    on = make_desk(
+        tmp_path / "on", FakePublisher(), on_model, clock, builder=on_builder, publish_intra=True
+    )
+    await desk.run(candidates, "scheduled")
+    await on.run(candidates, "scheduled")
+    assert model.prompts == on_model.prompts  # 模型看到的提示词一字不差，也不多问
+    view = commander.latest_market_view
+    assert view is not None and desk.state.latest is not None
+    assert "intra" not in desk.state.latest and "intra" not in log_rows(tmp_path)[-1]
+    assert desk.intra_text(clock[0]) is None and commander.market_intra(clock[0], view) is None
+    await commander._analyze_one(entry("AAUSDT"), view.regime, market_view=view)
+    assert engine.symbol_calls[-1] == ("AAUSDT", view.regime)
+    from jiaoyi.slow import ta_prompts as tp
+
+    p = tp.PromptParams.for_hold("4h")
+    plain = tp.meeting_note(p, "AA-USD", "AAUSDT", "R", "why")
+    assert plain == tp.meeting_note(p, "AA-USD", "AAUSDT", "R", "why", intra="")
+    assert "said: R. This coin was picked because: why." in plain
+    long_regime = "大" * 1000
+    note = tp.meeting_note(p, "AA-USD", "AAUSDT", long_regime, "why", intra=UP_TEXT)
+    assert f"…. Market desk, within 4 hours (latest desk run): {UP_TEXT} This coin" in note
+
+
+def test_keeper_snapshot_and_panel_carry_intra(tmp_path: Path) -> None:
+    from jiaoyi.contracts import MarketView
+    from jiaoyi.gate.questions import hold_snapshot
+    from jiaoyi.panel.files import PanelFiles
+    from jiaoyi.panel.overview import _desk_latest
+    from jiaoyi.panel.pages import build_desk
+    from tests.fastloop_helpers import card, features
+    from tests.test_keeper_patrol import position
+
+    view = MarketView(
+        market_view_id="v",
+        version=3,
+        observed_at=T0,
+        regime="4h 中性",
+        regime_direction="中性",
+        source=DESK_SOURCE,
+    )
+    pos, feat, crd = position(T0), features(T0), card(T0)
+    snap = json.loads(hold_snapshot(pos, feat, crd, T0, current_market=view, market_intra=UP_TEXT))
+    assert snap["current_market"]["within_4h"] == UP_TEXT
+    plain = json.loads(hold_snapshot(pos, feat, crd, T0, current_market=view))
+    assert "within_4h" not in plain["current_market"]
+
+    block = {**intra_block(intra_dossier(), H1, "up_first", "c"), "max_age_min": 5.0}
+    state = {
+        "latest": {
+            "t0": T0.isoformat(),
+            "probs_4h": {"up": 0.32, "flat": 0.437, "down": 0.243},
+            "probs_1h": H1.as_dict(),
+            "intra": block,
+        },
+        "last_run_at": T0.isoformat(),
+    }
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(state), encoding="utf-8")
+    got = _desk_latest(tmp_path, T0 + timedelta(minutes=1))
+    assert got is not None and got.intra == UP_TEXT and got.probs_1h == H1.as_dict()
+    assert got.probs_4h is not None and got.probs_4h["up"] == 0.32
+    stale = _desk_latest(tmp_path, T0 + timedelta(minutes=10))
+    assert stale is not None and "短线现状：缺失" in stale.intra
+    info = build_desk(PanelFiles(tmp_path, "UTC"), T0, ("replace", 15, 2))
+    assert info.probs_1h == H1.as_dict() and info.probs is not None
+    del state["latest"]["intra"]
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert _desk_latest(tmp_path, T0) is None  # 没开 publish_intra：面板不多显示
+
+
+REFRESH_SYMS = ["AAUSDT", "BBUSDT", "CCUSDT", "DDUSDT", "EEUSDT", "PAXGUSDT"]
+
+
+def refresh_rets(sign: float = 1.0) -> tuple[dict[str, float], dict[str, float]]:
+    r15 = {"AAUSDT": 0.2, "BBUSDT": -0.1, "CCUSDT": 0.3, "DDUSDT": 0.1, "EEUSDT": -0.2}
+    r60 = {"AAUSDT": -0.5, "BBUSDT": -0.3, "CCUSDT": 0.4, "DDUSDT": -0.6, "EEUSDT": -0.2}
+    r15 |= {"PAXGUSDT": 9.0, "BTCUSDT": 0.12}  # PAXG 不在大盘台的篮子里
+    r60 |= {"PAXGUSDT": 9.0, "BTCUSDT": -0.25}
+    return (
+        {k: sign * v for k, v in r15.items()},
+        {k: sign * v for k, v in r60.items()},
+    )
+
+
+async def test_short_term_line_refreshes_every_minute_between_runs(tmp_path: Path) -> None:
+    clock = [T0]
+    desk = make_desk(
+        tmp_path,
+        FakePublisher(),
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=IntraBuilder(),  # type: ignore[arg-type]
+        publish_intra=True,
+    )
+    await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    r15, r60 = refresh_rets()
+    assert not desk.observe_breadth(
+        T0 - timedelta(minutes=2), REFRESH_SYMS, r15, r60
+    )  # 不比这一轮新
+    at = T0 + timedelta(minutes=3)  # 10:05
+    assert desk.observe_breadth(at, REFRESH_SYMS, r15, r60)
+    clock[0] = at + timedelta(seconds=20)
+    text = desk.intra_text(clock[0])
+    # 这一轮（10:02Z）的顺序是 down_first：刷新后的现状也照这一轮的顺序
+    assert text == (
+        "10:02 UTC 起 1 小时概率（平 = ±0.20%）：跌 23% / 平 46% / 涨 31%。"
+        "短线现状（截至 10:05 UTC）：等权池 15 分钟 +0.06%（跌 2 / 涨 3 个），"
+        "1 小时 -0.24%（跌 4 / 涨 1 个）；BTC 15 分钟 +0.12%，1 小时 -0.25%；"
+        "1 小时成交里主动卖出 53.0% / 主动买入 47.0%（截至 10:01 UTC）。"
+    )
+    # 不到 intra_refresh_s 不重算；到了就换
+    assert not desk.observe_breadth(at + timedelta(seconds=30), REFRESH_SYMS, r15, r60)
+    assert desk.observe_breadth(at + timedelta(minutes=1), REFRESH_SYMS, *refresh_rets(-1.0))
+    clock[0] = at + timedelta(minutes=1, seconds=10)
+    later = desk.intra_text(clock[0])
+    assert later is not None and "截至 10:06 UTC" in later and "+0.24%" in later
+    # 面板读的是落盘的同一份
+    from jiaoyi.panel.overview import _desk_latest
+
+    panel = _desk_latest(tmp_path, clock[0])
+    assert panel is not None and panel.intra == later
+    # 买卖占比只有每轮那份：旧过上限就单独写缺失，其余照常
+    clock[0] = T0 + timedelta(minutes=7)
+    assert desk.observe_breadth(T0 + timedelta(minutes=7), REFRESH_SYMS, r15, r60)
+    text = desk.intra_text(clock[0])
+    assert text is not None and "截至 10:09 UTC" in text
+    assert "1 小时主动买卖占比缺失（只在大盘台每轮取，上次截至 10:01 UTC）" in text
+    # 刷新停了（比如翻转检查关了）：过了上限照样写缺失
+    clock[0] = T0 + timedelta(minutes=13)
+    stale = desk.intra_text(clock[0])
+    assert stale is not None and "短线现状：缺失（截至 10:09 UTC 的数据已过 6 分钟" in stale
+    # 新一轮：用这一轮的数，旧的刷新作废
+    await desk.run(pool(clock[0], entry("AAUSDT")), "scheduled")
+    latest = desk.state.latest
+    assert latest is not None and "status" not in latest["intra"]
+
+
+async def test_refresh_zero_keeps_desk_run_only(tmp_path: Path) -> None:
+    clock = [T0]
+    builder: Any = IntraBuilder()
+    desk = make_desk(
+        tmp_path,
+        FakePublisher(),
+        FakeModel(answer(0.6, 0.25, 0.15)),
+        clock,
+        builder=builder,
+        publish_intra=True,
+        intra_refresh_s=0,
+    )
+    await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    before = desk.intra_text(T0)
+    assert not desk.observe_breadth(T0 + timedelta(minutes=1), REFRESH_SYMS, *refresh_rets())
+    assert desk.intra_text(T0) == before and "status" not in desk.state.latest["intra"]  # type: ignore[index]
+    off: Any = IntraBuilder()
+    plain = make_desk(
+        tmp_path / "off", FakePublisher(), FakeModel(answer(0.6, 0.25, 0.15)), clock, builder=off
+    )
+    await plain.run(pool(T0, entry("AAUSDT")), "scheduled")
+    assert not plain.observe_breadth(T0 + timedelta(minutes=1), REFRESH_SYMS, *refresh_rets())
+
+
+def test_refreshed_line_is_neutral_under_swap_and_mirror() -> None:
+    d = intra_dossier()
+    at = T0 + timedelta(minutes=3)
+    r15, r60 = refresh_rets()
+    m15, m60 = refresh_rets(-1.0)
+    for order, other in (("up_first", "down_first"), ("down_first", "up_first")):
+        block = intra_block(d, H1, order, "c")
+        block["status"] = {
+            "as_of": at.isoformat(),
+            "values": intra_status(REFRESH_SYMS, ("PAXGUSDT",), r15, r60),
+        }
+        mirrored = intra_block(d.mirror(), Probs(H1.down, H1.flat, H1.up), other, "c")
+        mirrored["status"] = {
+            "as_of": at.isoformat(),
+            "values": intra_status(REFRESH_SYMS, ("PAXGUSDT",), m15, m60),
+        }
+        text = compose_intra(block, at, 5.0)
+        assert "截至 10:05 UTC" in text
+        assert compose_intra(mirrored, at, 5.0) == _flip_signs(swap_words(text))
+
+
+# ------------------------------------------------------------------ 数据包（#336 复核）
+
+
+def slow_fetch(fake: FakeBinance, step_s: float) -> tuple[Any, Callable[[], float]]:
+    """每个请求花 ``step_s`` 秒：替身的「现在」和数据包的计时一起往前走。"""
+    t = [0.0]
+    base = fake.now_ms
+
+    def get(url: str, params: Any = None) -> Any:
+        t[0] += step_s
+        fake.now_ms = base + int(t[0] * 1000)
+        return fake.get(url, params)
+
+    return get, lambda: t[0]
+
+
+def test_window_as_of_is_each_request_fetch_time() -> None:
+    fake = FakeBinance()
+    get, mono = slow_fetch(fake, 1.0)
+    p = pool(T0, *(entry(s) for s in SYMS))
+    d = DossierBuilder(get=get, fng_get=fake.fng, monotonic=mono).build(p, T0)
+    f = d.get("pool_ret_15m_pct")
+    assert f is not None and f.source_ts > T0  # 不是开跑时刻
+    btc = d.get("btc_ret_1h_pct")
+    assert btc is not None and btc.source_ts > f.source_ts  # BTC 的 15 分钟线在池之后取
+    # 请求慢到前面取的数旧过上限：组好时拦下（as_of 用开跑时刻时永远拦不住）
+    fake = FakeBinance()
+    get, mono = slow_fetch(fake, 20.0)
+    slow = DossierBuilder(get=get, fng_get=fake.fng, monotonic=mono, max_input_age_min=5)
+    d = slow.build(p, T0)
+    assert d.get("pool_ret_15m_pct") is None and "旧" in d.missing["pool_ret_15m_pct"]
+
+
+def test_5m_stats_as_of_is_the_timestamp_never_after_fetch() -> None:
+    # 实测 02:49:01 取到的最新一条时间戳是 02:45：时间戳就是段尾，再 +5 分钟会落在未来
+    ts = int(datetime(2026, 10, 28, 2, 45, tzinfo=UTC).timestamp() * 1000)
+    fetched = datetime(2026, 10, 28, 2, 49, 1, tzinfo=UTC)
+    assert _period_as_of(ts, fetched) == datetime(2026, 10, 28, 2, 45, tzinfo=UTC)
+    assert _period_as_of(ts, datetime(2026, 10, 28, 2, 44, tzinfo=UTC)).minute == 44
+    fake = FakeBinance()
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, monotonic=lambda: 0.0).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    for name in ("btc_long_account_pct", "btc_oi_chg_4h_pct"):
+        f = d.get(name)
+        assert f is not None and f.source_ts <= T0
+
+
+def test_range_position_covers_the_full_24h() -> None:
+    """24 小时前那一刻落在 10:00 开盘的 1h 线里：这根线的高点也要算进区间。"""
+    spike = int((T0 - timedelta(hours=24, minutes=2)).timestamp() * 1000)  # 前一天 10:00
+
+    def price(sym: str, t_ms: int) -> float:
+        return 200.0 if t_ms == spike else 100.0
+
+    fake = FakeBinance(price=price)
+    d = DossierBuilder(get=fake.get, fng_get=fake.fng, monotonic=lambda: 0.0).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    pos = d.value("pool_range_position_24h_median_pct")
+    assert pos is not None and pos < 5  # 区间顶在 200 附近，现价 100 在底部
+    f = d.get("pool_range_position_24h_median_pct")
+    assert f is not None and "at least the last 24h" in f.note
+
+
+def test_kline_cache_keeps_only_recent_pool_and_majors(tmp_path: Path) -> None:
+    cache = tmp_path / "klines_1h.json"
+    fake = FakeBinance()
+    DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache).build(
+        pool(T0, *(entry(s) for s in SYMS)), T0
+    )
+    gone = set(SYMS[6:])
+    later = T0 + timedelta(days=1)
+    fake.now_ms = int(later.timestamp() * 1000)
+    b = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
+    b.build(pool(later, *(entry(s) for s in SYMS[:6])), later)
+    assert gone <= set(json.loads(cache.read_text())["bars"])  # 一天没进池：还留着
+    much_later = T0 + timedelta(days=CACHE_KEEP_DAYS, hours=1)
+    fake.now_ms = int(much_later.timestamp() * 1000)
+    b = DossierBuilder(get=fake.get, fng_get=fake.fng, cache_path=cache)
+    b.build(pool(much_later, *(entry(s) for s in SYMS[:6])), much_later)
+    raw = json.loads(cache.read_text())
+    # BTC / ETH 从没进过池也一直留着（每轮都要它们）
+    assert {"BTCUSDT", "ETHUSDT"} <= set(raw["bars"]) and "BTCUSDT" not in SYMS
+    assert set(raw["bars"]) == {*SYMS[:6], "BTCUSDT", "ETHUSDT"}
+    assert set(raw["seen"]) == set(raw["bars"]) and not gone & set(raw["deep"])
+
+
+# ------------------------------------------------------------------ 接线（会议 / 管家）
+
+
+class ContextEngine:
+    """有 analyze_with_context 的引擎替身：记下指挥官交过来的参数。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def analyze_with_context(
+        self, e: SymbolPoolEntry, regime: str, pick_reason: str = "", **kw: Any
+    ) -> Any:
+        from tests.test_market_refresh_independent import Analysis, card_symbol
+
+        self.calls.append((regime, kw))
+        return Analysis(card_symbol(e.symbol), 0.02)
+
+
+async def _desk_commander(
+    tmp_path: Path, **kw: Any
+) -> tuple[BattleCardCommander, MarketDesk, list[datetime], Any]:
+    commander, _engine, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=IntraBuilder(),  # type: ignore[arg-type]
+        **kw,
+    )
+    await desk.run(candidates, "scheduled")
+    view = commander.latest_market_view
+    assert view is not None and view.source == DESK_SOURCE
+    return commander, desk, clock, view
+
+
+@pytest.mark.parametrize("on", [True, False])
+async def test_meeting_note_gets_intra_through_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    """指挥官 → analyze_with_context(market_intra=…) → 引擎真正拼出来的会议说明。"""
+    from jiaoyi.slow import tradingagents_engine as te
+    from tests.test_card_outlook import DRAFT, OUTLOOK, _engine, _Graph, _Llm
+    from tests.test_card_outlook import entry as card_entry
+
+    commander, _desk, _clock, view = await _desk_commander(tmp_path, publish_intra=on)
+    fake = ContextEngine()
+    commander._engine = fake  # type: ignore[assignment]
+    await commander._analyze_one(entry("AAUSDT"), view.regime, market_view=view)
+    regime, kw = fake.calls[-1]
+    assert ("market_intra" in kw) is on
+
+    draft = te._CardSymbolDraft.model_validate({**DRAFT, **OUTLOOK})
+    graph = _Graph(_Llm(draft), "Underweight", "Sell", "SELL")
+    eng = _engine(monkeypatch, graph)
+    import threading
+
+    eng._liq, eng._inflight, eng._inflight_lock = None, {}, threading.Lock()
+    eng._live = {}
+    monkeypatch.setattr(te, "cost_handler", lambda meter: object())  # CI 不装 LangChain
+    notes: list[str] = []
+    eng._graph = lambda *a, **k: notes.append(a[2]) or graph  # type: ignore[method-assign]
+    await eng.analyze_with_context(card_entry("AAUSDT"), regime, "why", **kw)
+    note = notes[-1]
+    assert ("Market desk, within 4 hours (latest desk run): 10:02 UTC 起 1 小时概率" in note) is on
+    assert ("短线现状（截至 10:01 UTC）" in note) is on
+    assert ("Treat all as context" in note) is on and ("Treat both as context" in note) is not on
+    assert ("（大盘台 10:02 UTC 发布的 4 小时判断）" in note) is on
+
+
+@pytest.mark.parametrize(("publish", "keeper"), [(True, False), (False, True), (False, False)])
+async def test_keeper_review_gets_within_4h_only_with_keeper_intra(
+    tmp_path: Path, publish: bool, keeper: bool
+) -> None:
+    from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+    from jiaoyi.keeper.keeper import JevKeeper
+    from tests.fastloop_helpers import FAST, card, features
+    from tests.test_keeper_patrol import close_p, position
+
+    commander, desk, clock, view = await _desk_commander(
+        tmp_path, publish_intra=publish, keeper_intra=keeper
+    )
+    cfg = FAST.model_copy(update={"giveback_on": False})
+    t = MockJevTransport(answer=close_p(0.1))
+    k = JevKeeper(
+        JevDecisionModel(t, cfg, timeout_ms=200),
+        cfg,
+        lambda s: features(clock[0]),
+        lambda n: card(clock[0]),
+        current_market=lambda: view,
+        market_intra=commander.keeper_intra,
+    )
+    await k.review(position(clock[0]), clock[0])
+    snap = json.loads(t.calls[-1])
+    assert snap["current_market"]["market_view_id"] == view.market_view_id
+    got = snap["current_market"].get("within_4h")
+    if keeper:
+        assert got is not None and got == desk.keeper_intra_text(clock[0])
+        assert "短线现状（截至 10:01 UTC）" in got
+    else:
+        assert got is None
+    # 面板只跟 publish_intra
+    from jiaoyi.panel.overview import _desk_latest
+
+    assert (_desk_latest(tmp_path, clock[0]) is not None) is publish
+
+
+def test_desk_runs_latest_card_uses_stored_line_when_state_is_another_run(
+    tmp_path: Path,
+) -> None:
+    from jiaoyi.panel.files import PanelFiles
+    from jiaoyi.panel.pages import desk_runs
+
+    block = {**intra_block(intra_dossier(), H1, "up_first", "c"), "max_age_min": 5.0}
+    refreshed = {**block, "status": {"as_of": (T0 + timedelta(minutes=3)).isoformat(),
+                                     "values": {"btc_ret_15m_pct": -0.9}}}  # fmt: skip
+    row = {"cycle_id": "run-a", "t0": T0.isoformat(), "status": "ok", "intra": block}
+    (tmp_path / "market_desk").mkdir()
+    (tmp_path / "market_desk" / "2026-10-28.jsonl").write_text(json.dumps(row) + "\n")
+    state = {"latest": {"cycle_id": "run-b", "intra": refreshed}}  # 状态已经是另一轮了
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(state))
+    got = desk_runs(PanelFiles(tmp_path, "UTC"), T0 + timedelta(minutes=4))
+    assert len(got) == 1 and got[0].intra is not None
+    assert "BTC 15 分钟 +0.05%" in got[0].intra and "-0.90%" not in got[0].intra
+    # 状态是同一轮时用刷新过的那份
+    state["latest"]["cycle_id"] = "run-a"
+    (tmp_path / "market_desk_state.json").write_text(json.dumps(state))
+    got = desk_runs(PanelFiles(tmp_path, "UTC"), T0 + timedelta(minutes=4))
+    assert got[0].intra is not None and "BTC 15 分钟 -0.90%" in got[0].intra
+
+
+async def test_1h_probs_line_says_how_wide_flat_is(tmp_path: Path) -> None:
+    clock = [T0]
+    desk = make_desk(
+        tmp_path,
+        FakePublisher(),
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=IntraBuilder(),  # type: ignore[arg-type]
+        publish_intra=True,
+    )
+    await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    latest = desk.state.latest
+    assert latest is not None
+    assert latest["flat_band_pct"]["1h"] == pytest.approx(0.2)  # 0.5 × σ_1h 0.4
+    assert latest["intra"]["flat_band_1h_pct"] == latest["flat_band_pct"]["1h"]
+    text = desk.intra_text(T0)
+    assert text is not None
+    assert text.startswith("10:02 UTC 起 1 小时概率（平 = ±0.20%）：跌 23% / 平 46% / 涨 31%。")
+    # 旧状态里没有这个数：照旧不写宽度
+    old = {k: v for k, v in latest["intra"].items() if k != "flat_band_1h_pct"}
+    assert compose_intra(old, T0, 5.0).startswith("10:02 UTC 起 1 小时概率：跌 23%")

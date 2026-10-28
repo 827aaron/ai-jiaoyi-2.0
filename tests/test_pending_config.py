@@ -599,6 +599,17 @@ def test_sigterm_during_write_phase_restores_then_exits(tmp_path: Path) -> None:
     assert signal.getsignal(signal.SIGTERM) == before_handler
 
 
+def test_market_desk_publish_intra_is_pending_mergeable_but_mode_is_not(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(paths, "slow", '[market_desk]\nmode = "replace"\npublish_intra = true\n')
+    res = pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    assert res.status == "failed" and res.offending == ["slow.toml market_desk.mode"]
+    _pending(paths, "slow", "[market_desk]\npublish_intra = true\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_slow_config(paths.slow, "standard").market_desk.publish_intra is True
+
+
 def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:
     paths, data = _with_slow(tmp_path)
     text = (

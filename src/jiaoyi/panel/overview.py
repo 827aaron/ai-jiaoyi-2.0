@@ -41,6 +41,10 @@ from jiaoyi.panel.protection import ProtectionView, lifeboat_summary, parse_prot
 from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
 from jiaoyi.slow.card_outlook import card_from_output
+from jiaoyi.slow.desk_intra import compose_intra
+
+DESK_SOURCE = "market_desk"
+DESK_STATE_FILE = "market_desk_state.json"
 
 STALE_S = 120.0
 """主循环每 30 秒心跳一次；4 个周期没更新就当掉线。"""
@@ -120,6 +124,17 @@ class CardRow(BaseModel):
     """离到期不到 10 分钟（或已到期的持仓币）：显示成灰色。"""
 
 
+class DeskLatest(BaseModel):
+    """大盘台最近一轮（不是上次发布的那版）：「最新大盘判断」下面那一行，只在
+    ``[market_desk] publish_intra`` 开着、当前观点是大盘台发的时候有。"""
+
+    run_at: datetime
+    probs_4h: dict[str, float] | None = None
+    probs_1h: dict[str, float] | None = None
+    intra: str
+    """「未来 1 小时概率 + 短线现状（截至 HH:MM UTC）」，和各币会议看到的是同一段字；过旧写缺失。"""
+
+
 class CardView(BaseModel):
     card_id: str
     version: int | None
@@ -128,6 +143,7 @@ class CardView(BaseModel):
     valid: bool
     regime: str
     current_market: MarketView | None = None
+    desk_latest: DeskLatest | None = None
     symbols: list[CardRow]
     stop_atr: tuple[float, float] | None
     leverage_max: float | None
@@ -373,7 +389,7 @@ def build_overview(
             _with_pool_notes(
                 _with_pending(
                     _with_current_market(
-                        _card(records, now, {p.symbol for p in positions}), files.root
+                        _card(records, now, {p.symbol for p in positions}), files.root, now
                     ),
                     files.root,
                     now,
@@ -888,7 +904,7 @@ def _card(
     )
 
 
-def _with_current_market(card: CardView | None, root: Path) -> CardView | None:
+def _with_current_market(card: CardView | None, root: Path, now: datetime) -> CardView | None:
     """独立观点可能来自前一天；磁盘状态比仅查本日出卡记录更完整。"""
     if card is None:
         return None
@@ -896,10 +912,32 @@ def _with_current_market(card: CardView | None, root: Path) -> CardView | None:
         data = json.loads((root / "market_view.json").read_text(encoding="utf-8"))
         view = MarketView.model_validate(data["latest_market_view"])
     except (OSError, ValueError, KeyError, TypeError):
-        return card
-    if card.current_market is None or view.version >= card.current_market.version:
-        return card.model_copy(update={"current_market": view})
+        view = None
+    if view is not None and (
+        card.current_market is None or view.version >= card.current_market.version
+    ):
+        card = card.model_copy(update={"current_market": view})
+    if card.current_market is not None and card.current_market.source == DESK_SOURCE:
+        card = card.model_copy(update={"desk_latest": _desk_latest(root, now)})
     return card
+
+
+def _desk_latest(root: Path, now: datetime) -> DeskLatest | None:
+    """``market_desk_state.json`` 里最近一轮的概率和「4 小时之内」那段字（没开
+    publish_intra 就没有）。"""
+    try:
+        latest = json.loads((root / DESK_STATE_FILE).read_text(encoding="utf-8"))["latest"]
+        block = latest["intra"]
+        if not block.get("panel", True):  # 只开了 keeper_intra
+            return None
+        return DeskLatest(
+            run_at=datetime.fromisoformat(str(latest["t0"])),
+            probs_4h=latest.get("probs_4h"),
+            probs_1h=latest.get("probs_1h"),
+            intra=compose_intra(block, now, float(block.get("max_age_min", 0.0))),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _parse_ts(raw: object) -> datetime | None:

@@ -110,6 +110,9 @@ DESK_EDITABLE = frozenset(
         "call_p_min",
         "call_edge_min",
         "publish_min_gap_min",
+        "publish_intra",
+        "keeper_intra",
+        "intra_refresh_s",
     }
 )
 # [meeting] 里网页上能改的开关（偏空整改、输入新鲜度、教训口径）；模型 / 通道 / 分析师名单 /
