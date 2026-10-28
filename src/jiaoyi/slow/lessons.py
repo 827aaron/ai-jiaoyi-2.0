@@ -373,10 +373,11 @@ class LessonBook:
         return out
 
     def _scored(self, now: datetime, since: datetime) -> list[Scored]:
+        """每个币只拉一段覆盖全部卡的 5 分钟 K 线（BTC 也只拉一次），在本地按卡切片。
+        限流（RateLimited）不吞，直接抛出让这次汇总作罢；其他失败只丢掉那个币。
+        excess 口径不拉 K 线，读方向记分的结果。"""
         if self._scoring == "excess":
             return self._scored_excess(now, since)
-        """每个币只拉一段覆盖全部卡的 5 分钟 K 线（BTC 也只拉一次），在本地按卡切片。
-        限流（RateLimited）不吞，直接抛出让这次汇总作罢；其他失败只丢掉那个币。"""
         rows = sorted(
             (
                 r
