@@ -372,8 +372,8 @@ class FastLoopConfig(Contract):
     )
     paper_stop_book_pnl: bool = Field(
         default=True,
-        description="面板的已实现盈亏（今日、历史、走势、按卡成绩）对按主网止损记过账的仓用模拟"
-        "成交价算；关 = 一律用 Demo 实际成交。资金页（币安流水）和日亏熔断始终按 Demo 实际。",
+        description="面板的历史页、今日胜率、按卡成绩对按主网止损记过账的仓用模拟成交价算；"
+        "关 = 一律用 Demo 实际成交。状态栏 / 资金页的已平、盈亏曲线和日亏熔断始终按 Demo 实际。",
     )
     signal_max_age_s: float = Field(
         default=5.0, ge=0.5, le=60.0, description="信号从触发到风控员审核超过这么久就作废。"

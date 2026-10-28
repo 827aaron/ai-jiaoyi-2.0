@@ -225,9 +225,10 @@ def _shown_detail(tracked: TrackedPosition, reason: CloseReason | None) -> str |
     detail = tracked.close_detail
     if detail is None:
         return None
-    if reason is CloseReason.RECONCILER:
+    paper = detail.startswith(PAPER_STOP_DETAIL)
+    if reason is CloseReason.RECONCILER and not paper:
         return detail
-    if reason is CloseReason.STOP_LOSS and detail.startswith(PAPER_STOP_DETAIL):
+    if reason is CloseReason.STOP_LOSS and paper:
         return detail
     return None
 
@@ -861,7 +862,12 @@ class HbExecutorAdapter:
     def _note_close_detail(self, tracked: TrackedPosition, detail: str) -> TrackedPosition:
         """只记第一次的原因：之后几轮重试平仓不覆盖当初为什么要平。"""
         current = self._registry.get(tracked.record.position_id) or tracked
-        if current.close_detail is not None:
+        # A paper stop note only asks for a stop-loss close; the reconciler's own reason for
+        # closing replaces it, or its close would be labelled with the wrong cause.
+        if current.close_detail is not None and not (
+            current.close_detail.startswith(PAPER_STOP_DETAIL)
+            and not detail.startswith(PAPER_STOP_DETAIL)
+        ):
             return current
         current = current.model_copy(update={"close_detail": detail[:300]})
         self._registry.put(current)
@@ -877,8 +883,12 @@ class HbExecutorAdapter:
 
         ``ledger`` is the ledger stop, ``hosted`` every stop-side hosted leg live on the exchange
         (fixed, trailing, tightened or the lifeboat leg), ``trailing`` the program's activated
-        trailing stop even before its leg is replaced, ``tightened`` the opposite-card floor,
-        ``lifeboat`` the legacy lifeboat order while active. Empty for an unknown position.
+        trailing stop even before its leg is replaced, ``lifeboat`` the legacy lifeboat order
+        while active. Empty for an unknown position.
+
+        The opposite-card target (``tightened_stop_price``) counts only once its leg is live:
+        it is placed away from Demo's mark, not mainnet's, and as a bare target it could close a
+        position the moment it is set.
         """
         tracked = self._registry.get(position_id)
         if tracked is None:
@@ -897,8 +907,15 @@ class HbExecutorAdapter:
         ]
         if state.trailing_activated:
             out.append(("trailing", state.trailing_stop_price))
-        out.append(("tightened", state.tightened_stop_price))
         return out
+
+    def take_profit_exiting(self, position_id: str) -> bool:
+        """A hosted take-profit leg has triggered: Demo is exiting at its target, not a stop."""
+        tracked = self._registry.get(position_id)
+        state = tracked.server_protection if tracked is not None else None
+        if state is None:
+            return False
+        return any(leg.kind == "take_profit" and leg.triggered_at is not None for leg in state.legs)
 
     def mark_failed(self, position_id: str) -> None:
         tracked = self._registry.get(position_id)

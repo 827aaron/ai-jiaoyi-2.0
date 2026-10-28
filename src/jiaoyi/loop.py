@@ -225,6 +225,8 @@ class _PaperStopLevels(Protocol):
 class _ExitInFlight(Protocol):
     def protection_exit_in_flight(self, position_id: str) -> tuple[str, str, str] | None: ...
 
+    def take_profit_exiting(self, position_id: str) -> bool: ...
+
 
 @runtime_checkable
 class _ServerProtection(Protocol):
@@ -692,10 +694,7 @@ class Runner:
             ]
             for pos in targets:
                 # 平仓要等执行器结束（最长十几秒），放后台并行，行情和其它标的不能停
-                if (
-                    pos.position_id not in self._closing
-                    and self._paper_stops.get(pos.position_id) is None
-                ):
+                if pos.position_id not in self._closing:
                     self._spawn(self._patrol_close(pos, action.reason), Role.PATROL)
         if isinstance(event, Trade) and self.app.app_cfg.limit_take_profit_on:
             self._tp_fallback(event)
@@ -819,16 +818,19 @@ class Runner:
                 log.exception("读不到 %s 的止损，主网止损这次只按账本止损判", pos.position_id)
         return paper_stop.tightest_stop(pos.side, candidates)
 
-    def _exit_in_flight(self, position_id: str) -> bool:
+    def _exit_in_flight(self, position_id: str) -> Literal["stop", "take_profit"] | None:
+        """Demo's own hosted protection is already exiting, and through which side."""
         ex = self.m.executor
         if not isinstance(ex, _ExitInFlight):
-            return False
+            return None
         try:
             found = ex.protection_exit_in_flight(position_id)
+            if found is None or found[0] != "exiting":
+                return None
+            return "take_profit" if ex.take_profit_exiting(position_id) else "stop"
         except Exception:
             log.exception("读不到 %s 的托管保护状态，按没在退出处理", position_id)
-            return False
-        return found is not None and found[0] == "exiting"
+            return None
 
     def _paper_stop_hit(
         self,
@@ -847,7 +849,10 @@ class Runner:
         if current.entry_price is None:
             return
         now = self.app.clock()
-        exiting = self._exit_in_flight(pid)
+        exit_kind = self._exit_in_flight(pid)
+        if exit_kind == "take_profit":
+            return  # Demo filled its target first; booking a stop would turn a win into a loss
+        exiting = exit_kind is not None
         fl = self.app.app_cfg.fast_loop
         booked = paper_stop.book_stop(
             current,
@@ -907,7 +912,7 @@ class Runner:
             pid = pos.position_id
             if pos.status is not PositionStatus.OPEN or pid in self._closing:
                 continue
-            if self._paper_stops.get(pid) is None or self._exit_in_flight(pid):
+            if self._paper_stops.get(pid) is None or self._exit_in_flight(pid) is not None:
                 continue
             last = self._paper_close_at.get(pid)
             if last is not None and (now - last).total_seconds() < PAPER_STOP_RETRY_S:

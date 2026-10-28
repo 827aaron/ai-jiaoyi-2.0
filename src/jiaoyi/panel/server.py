@@ -586,8 +586,12 @@ def create_app(
         if first - since <= pnl_curve.EST_STEP * 2:
             return None
         try:
+            ledger = files.ledger()  # Demo's fills: the recorded points are Demo equity
             est = await pnl_curve.backfill(
-                files.ledger().positions, since, first, lambda s: market.klines(s, "5m", 300)
+                [ledger.demo(p) for p in ledger.positions],
+                since,
+                first,
+                lambda s: market.klines(s, "5m", 300),
             )
         except KlineError as e:
             log.info("今日盈亏曲线回填拿不到 K 线：%s", e)

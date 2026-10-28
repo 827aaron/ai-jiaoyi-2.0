@@ -19,7 +19,9 @@ from jiaoyi.core.config import load_risk_config
 from jiaoyi.execution.registry import ProtectiveLeg, ServerProtection
 from jiaoyi.loop import Runner
 from jiaoyi.panel.files import PanelFiles
-from jiaoyi.panel.pages import _pnl_periods, build_history
+from jiaoyi.panel.hb import HbSnapshot
+from jiaoyi.panel.overview import compute_kpis
+from jiaoyi.panel.pages import _pnl_periods, build_funds, build_history
 from tests.conftest import ROOT
 from tests.test_execution import Rig, open_filled
 from tests.test_loop import FakeExecutor, _app, _position
@@ -57,6 +59,7 @@ class LedgerExecutor(FakeExecutor):
         self.levels: dict[str, list[tuple[str, float | None]]] = {}
         self.details: list[tuple[str, str]] = []
         self.exiting: set[str] = set()
+        self.tp_exiting: set[str] = set()
         self.keep_open = False
 
     def live_positions(self) -> list[c.PositionRecord]:
@@ -64,7 +67,14 @@ class LedgerExecutor(FakeExecutor):
 
     async def close(self, position_id: str, reason: CloseReason) -> None:
         await super().close(position_id, reason)
-        if not self.keep_open:
+        if self.keep_open:  # close sent, not filled yet
+            self.held = [
+                p.model_copy(update={"status": PositionStatus.CLOSING})
+                if p.position_id == position_id
+                else p
+                for p in self.held
+            ]
+        else:
             self.held = [p for p in self.held if p.position_id != position_id]
 
     def paper_stop_levels(self, position_id: str) -> list[tuple[str, float | None]]:
@@ -75,7 +85,11 @@ class LedgerExecutor(FakeExecutor):
         self.details.append((position_id, detail))
 
     def protection_exit_in_flight(self, position_id: str) -> tuple[str, str, str] | None:
-        return ("exiting", "exiting", "leg_triggered") if position_id in self.exiting else None
+        exiting = position_id in self.exiting | self.tp_exiting
+        return ("exiting", "exiting", "leg_triggered") if exiting else None
+
+    def take_profit_exiting(self, position_id: str) -> bool:
+        return position_id in self.tp_exiting
 
 
 def _runner(
@@ -170,7 +184,7 @@ async def test_paper_stop_last_cross_closes_demo_and_books_stop(
     assert booked.close_requested is True
     on_disk = json.loads((tmp_path / "paper_stops.json").read_text(encoding="utf-8"))
     assert on_disk[pos.position_id]["paper_exit_price"] == booked.paper_exit_price
-    assert [a.title for a in alerts.sent] == ["主网价格越过止损"]
+    assert [a.title for a in alerts.sent].count("主网价格越过止损") == 1
 
 
 @pytest.mark.parametrize("side", [LONG, SHORT])
@@ -261,7 +275,7 @@ async def test_paper_stop_books_once_and_closes_once(
     assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
     booked = runner._paper_stops.get(pos.position_id)
     assert booked is not None and booked.cross_price == first
-    assert len(alerts.sent) == 1
+    assert [a.title for a in alerts.sent].count("主网价格越过止损") == 1
     # Within the retry window the periodic refresh does not ask again.
     runner._paper_stop_retry()
     await _settle(runner)
@@ -278,7 +292,7 @@ async def test_paper_stop_retries_close_after_restart(
     await runner.on_event(_trade(now, _beyond(side, 10)))
     await _settle(runner)
     later = now + timedelta(seconds=31)
-    restarted, ex2, alerts2 = _runner(tmp_path, later, pos)
+    restarted, ex2, alerts2 = _runner(tmp_path, later, pos)  # Demo still holds it OPEN
     assert restarted._paper_stops.get(pos.position_id) is not None
     await restarted.on_event(_trade(later, ENTRY))  # back inside: no new cross, no re-booking
     restarted._paper_stop_retry()
@@ -300,6 +314,19 @@ async def test_paper_stop_hosted_exit_in_flight_only_books(
     assert ex.closed == [] and ex.details == []
     booked = runner._paper_stops.get(pos.position_id)
     assert booked is not None and booked.close_requested is False
+
+
+@pytest.mark.parametrize("side", [LONG, SHORT])
+async def test_paper_stop_take_profit_leg_exiting_books_nothing(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    pos = _pos(side)
+    runner, ex, alerts = _runner(tmp_path, now, pos)
+    ex.tp_exiting.add(pos.position_id)
+    await runner.on_event(_trade(now, _beyond(side, 10)))
+    await _settle(runner)
+    assert ex.closed == [] and alerts.sent == []
+    assert runner._paper_stops.get(pos.position_id) is None
 
 
 @pytest.mark.parametrize("side", [LONG, SHORT])
@@ -374,12 +401,14 @@ async def test_paper_stop_levels_list_every_stop_and_detail_reaches_close(
         legs=legs,
         trailing_activated=True,
         trailing_stop_price=68020.0,
+        tightened_stop_price=68030.0,
     )
     hosted = tracked.model_copy(update={"server_protection": protection})
     rig.registry.put(hosted)
     got = rig.adapter.paper_stop_levels(pid)
     assert ("hosted", 68010.0) in got and ("trailing", 68020.0) in got
     assert ("hosted", 67873.9) not in got and ("hosted", 68384.2) not in got
+    assert all(src != "tightened" for src, _ in got)  # only once its leg is live
     assert ps.tightest_stop(LONG, got) == ("trailing", 68020.0)
     rig.registry.put(tracked)  # back to the HB-managed position for the close below
 
@@ -392,13 +421,26 @@ async def test_paper_stop_levels_list_every_stop_and_detail_reaches_close(
     assert "close_detail" not in json.loads(rig.registry.path.read_text())["positions"][pid]
 
 
-async def test_paper_stop_detail_not_shown_on_other_close_reason(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reason", [CloseReason.KEEPER, CloseReason.RECONCILER])
+async def test_paper_stop_detail_not_shown_on_other_close_reason(
+    tmp_path: Path, reason: CloseReason
+) -> None:
     rig = Rig(tmp_path, notices=True)
     pid = await open_filled(rig)
     rig.adapter.note_close_detail(pid, ps.PAPER_STOP_DETAIL)
-    await rig.adapter.close(pid, CloseReason.KEEPER)
+    await rig.adapter.close(pid, reason)
     notice = [a for a in rig.alerts.sent if a.title == "平仓完成"]
     assert notice and "主网价格越过止损" not in notice[-1].body
+
+
+async def test_paper_stop_detail_yields_to_reconciler_reason(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    pid = await open_filled(rig)
+    rig.adapter.note_close_detail(pid, ps.PAPER_STOP_DETAIL)
+    rig.adapter.note_close_detail(pid, "HB 报告了另一张开仓单")
+    rig.adapter.note_close_detail(pid, ps.PAPER_STOP_DETAIL)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None and tracked.close_detail == "HB 报告了另一张开仓单"
 
 
 # ---------------------------------------------------------------- panel accounting
@@ -513,3 +555,7 @@ def test_paper_stop_history_shows_both_fills_and_funds_stay_demo(
     assert source == "ledger"
     today = next(p for p in periods if p.key == "today")
     assert today.trading_usdt == pytest.approx(demo_pnl + 1.0)
+    kpis = compute_kpis(files, files.ledger(), HbSnapshot(ok=False), risk, later)
+    assert kpis.day_closed_usdt == pytest.approx(demo_pnl)
+    funds = build_funds(files, HbSnapshot(ok=False), risk, later)
+    assert funds.realized_today_usdt == pytest.approx(demo_pnl)

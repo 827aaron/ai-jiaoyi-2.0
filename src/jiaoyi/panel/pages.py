@@ -1592,7 +1592,7 @@ def build_funds(
     today = local_day(now, tz)
     closed_today = [
         p
-        for p in ledger.positions
+        for p in map(ledger.demo, ledger.positions)  # reconciled against Demo's equity below
         if p.closed_at is not None
         and p.realized_pnl_usdt is not None
         and local_day(p.closed_at, tz) == today

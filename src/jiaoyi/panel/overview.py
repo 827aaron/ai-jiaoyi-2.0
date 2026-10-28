@@ -455,9 +455,10 @@ def compute_kpis(
         exposure_x=exposure,
         max_exposure_x=risk.max_total_exposure_x,
         as_of=hb.fetched_at if source == "hummingbot" else None,
+        # Demo's fills: this sits next to equity-based day P&L, which is Demo's money.
         day_closed_usdt=sum(
             p.realized_pnl_usdt or 0.0
-            for p in ledger.positions
+            for p in map(ledger.demo, ledger.positions)
             if p.closed_at is not None
             and local_day(p.closed_at, risk.day_reset_tz).isoformat() == today
         ),
