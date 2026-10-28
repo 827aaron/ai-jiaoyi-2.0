@@ -217,10 +217,16 @@ keeper_assistant_min_p = 0.6
 keeper_assistant_horizon = "1–4 小时"
 keeper_assistant_timeout_s = 8.0  # 两个模型合起来最多等几秒，超时不平
 keeper_assistant_gap_s = 120      # 同一个币两次问至少隔 120 秒；0 = 只是同一个币在问时不重复
+keeper_assistant_snapshot_max_age_s = 30  # 行情快照超过 30 秒或刚订阅不满 5 分钟，不问
 keeper_assistant_key_level = false  # true = 价格朝不利方向穿过卡上关键位也问
 keeper_assistant_close = false    # true = 两个都答「是」就平仓（先过管家的平仓前检查）
 keeper_assistant_b_record_only = true  # true = B 只记录，不平仓、不确认翻转
 keeper_assistant_flip_confirm = false  # true = 军师团出待确认翻转时另起一件事问两个模型，都答「是」就确认
+card_neutral_flip = "flip"  # 会把做多 / 做空判成不做时：flip = 算待确认翻转（现状）；ignore = 不翻转，卡上留原方向照常开仓
+card_ignore_max_age_min = 0  # ignore 时卡上那条指令开会超过这么多分钟就不再留着开仓；0 = 不限
+card_flip_assistant_fallback_min = 0  # assistant 时候选超过这么多分钟管家助手一直问不了，就按会议场数确认；0 = 从不
+card_flip_confirm_by = "meeting"  # 待确认翻转谁来确认：meeting = 连续够场数的会（现状）；assistant = 会只提候选，只有管家助手的两个模型能确认
+keeper_assistant_flip_neutral = false  # true = 做多 / 做空转中性的待确认翻转也马上问原方向，两个都答「否」（p(是) ≤ 1 − min_p）就确认转中性
 keeper_assistant_concurrency = 2  # 最多 2；持仓的事排在翻转确认前面
 
 # 按信号类型单独定“做”的门槛（不写 = 所有类型都用上面的 min_p_take）。这一段要放在 fast_loop 那段的键后面。

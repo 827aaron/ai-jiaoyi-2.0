@@ -565,6 +565,24 @@ function trailTag(p, brief) {
   if (t.trailing_active) return `<div class="small" title="${tip}"><span class="pill p-accent">跟踪中 · 执行器确认</span>${brief || t.actual_trailing_trigger_net_pnl_pct == null ? "" : ` 净收益阈值 ${signed(t.actual_trailing_trigger_net_pnl_pct, 4)}%`}</div>`;
   return `<div class="small dim" title="${tip}"><span class="pill">本轮未激活${t.coverage_complete ? "" : "（此前记录不完整）"}</span></div>`;
 }
+// 宽表格里移动止损只占止损价后面一个小标签，整句状态和配置放在悬停提示里
+const plain = (h) => String(h).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+function trailMini(p) {
+  const full = plain(trailTag(p)), tip = esc(p.trailing_stop_pct == null ? full : `${full}\n${plain(trailNote(p))}`);
+  if (p.trailing_stop_pct == null) return ` <span class="small dim trail-mini" title="${tip}">无移动止损</span>`;
+  let on, label;
+  if (p.protection) {
+    const tl = trailLines(p);
+    on = p.protection.trailing_activated;
+    label = on ? `移动 ${tl && tl.stop != null ? price(tl.stop, p.symbol) : "跟踪中"}${tl && tl.confirmed ? "" : "（未确认）"}` : "移动未激活";
+  } else {
+    const t = p.stop_diagnostics;
+    if (!t || t.status !== "current" || t.trailing_active == null) return ` <span class="small warn trail-mini" title="${tip}">移动·状态未知</span>`;
+    on = t.trailing_active;
+    label = on ? "移动跟踪中" : "移动未激活";
+  }
+  return ` <span class="small trail-mini ${on ? "pill p-accent" : "dim"}" title="${tip}">${label}</span>`;
+}
 function stopDiagnostics(p) {
   const t = p.stop_diagnostics, b = p.book_quote;
   const stamp = ts => ts ? esc(new Date(ts).toLocaleString("zh-CN", { timeZone: TZ, hour12: false })) : "未知";
@@ -642,17 +660,19 @@ function lvlPnl(p, lvl) {
 const lvlEst = (p, lvl) => { const v = lvlPnl(p, lvl); return v == null ? "" : `<span class="num ${cls(v)}">${signed(v, 0)} U</span>`; };
 const LVL_TIP = "到这个价成交时预估的净盈亏：数量 ×（价 − 开仓价），再扣开仓 + 平仓各一次的吃单手续费。滑点、资金费没算。";
 // 止损格只显示账本固定计划价；没有可信动态触发价就不计算其预估收益。
-function slCell(p) {
+// inline：持仓宽表格要一行一笔，预估盈亏跟在价后面，不另起一行
+const estBox = (p, lvl, inline) => inline ? ` <span class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</span>` : `<div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
+function slCell(p, inline = false) {
   const l = protLeg(p, "stop_loss");
-  if (l) { const s = legShown(l); return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${legName(s)}·${LEG_ST[s.state]}</span>${legNewer(p, l)}<div class="small" title="${LVL_TIP}">${lvlEst(p, s.trigger_price)}</div>`; }
+  if (l) { const s = legShown(l); return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${legName(s)}·${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`; }
   const lvl = p.stop_loss_price;
-  return `${price(lvl, p.symbol)} <span class="dim small">固定计划</span><div class="small" title="${LVL_TIP}">${lvlEst(p, lvl)}</div>`;
+  return `${price(lvl, p.symbol)} <span class="dim small">固定计划</span>${estBox(p, lvl, inline)}`;
 }
-function tpCell(p) {
+function tpCell(p, inline = false) {
   const l = protLeg(p, "take_profit");
-  if (!l) return `${price(p.take_profit_price, p.symbol)}<div class="small" title="${LVL_TIP}">${lvlEst(p, p.take_profit_price)}</div>`;
+  if (!l) return `${price(p.take_profit_price, p.symbol)}${estBox(p, p.take_profit_price, inline)}`;
   const s = legShown(l);
-  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}<div class="small" title="${LVL_TIP}">${lvlEst(p, s.trigger_price)}</div>`;
+  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`;
 }
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
@@ -1349,10 +1369,23 @@ function blockedSection(map) {
 }
 
 /* ---------- 持仓 */
+// 持仓下面紧跟今天平掉的单：持仓和刚做完的交易一屏看完，不用切去历史页
+function recentSection(d) {
+  const list = d.recent || [], total = d.recent_total || list.length;
+  const today = md(data.now);
+  const when = (ts) => (md(ts) === today ? hm(ts) : `<span class="dim small">${md(ts)}</span> ${hm(ts)}`);
+  const net = list.filter((t) => !t.unfilled && !t.pnl_missing).reduce((a, t) => a + t.pnl_usdt, 0);
+  const more = total > list.length ? ` · 只列最近 ${list.length} 笔` : "";
+  const sum = list.length ? ` · 列出的净利 <b class="num ${cls(net)}">${signed(net, 2)}U</b>` : "";
+  const body = list.length
+    ? `<div class="tw"><table class="dense"><thead><tr>${TRADE_HEAD}</tr></thead><tbody>${list.map((t) => tradeRow(t, when)).join("")}</tbody></table></div>`
+    : '<div class="dim small">今天还没有平仓。</div>';
+  return `<section class="card mt recent"><div class="ch"><h2>最近交易</h2><span class="r">今天 ${total} 笔${more}${sum} · 最新在上 · 点一笔看整条链 · <a href="#history">全部记录 →</a></span></div>${body}</section>`;
+}
 P.positions = (arg) => {
   const d = pageData;
   if (!d.positions.length) {
-    return `<div class="card"><div class="empty"><b>现在没有持仓</b>开仓后这里每笔一行，点开能看走势图、止损止盈和每一步判断。<a href="#overview">看信号与决策流 ›</a></div></div>`;
+    return `<div class="card"><div class="empty"><b>现在没有持仓</b>开仓后这里每笔一行，点开能看走势图、止损止盈和每一步判断。<a href="#overview">看信号与决策流 ›</a></div></div>${recentSection(d)}`;
   }
   const sel = d.positions.find((p) => p.position_id === arg) || d.positions[0];
   const groups = d.groups.filter((g) => g.cap_x > 0 || g.exposure_x > 0).map((g) => {
@@ -1366,9 +1399,9 @@ P.positions = (arg) => {
     const held = now - new Date(p.opened_at).getTime();
     const go = `onclick="if (!event.target.closest('button')) location.hash='positions/${encodeURIComponent(p.position_id)}'"`;
     const side = `<span class="pill ${p.side === "long" ? "p-long" : "p-short"}">${s}</span>`;
-    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `<div class="dim small">浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}</div>` : "";
-    const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
-    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? `<div class="small" title="${LVL_TIP}">${lvlEst(p, p.lifeboat_price)}</div>` : ""}${protBrief(p)}`;
+    const split = p.fees_est_usdt != null && p.unrealized_usdt != null ? `浮动 ${signed(p.unrealized_usdt, 2)} · 费 −${money(p.fees_est_usdt, 2)}${p.fee_from_fills ? "" : "（估）"}` : "";
+    const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split ? ` <span class="dim small">${split}</span>` : ""}`;
+    const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? estBox(p, p.lifeboat_price, true) : ""}${protBrief(p)}`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
     const closeBtn = closeCell(p);
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
@@ -1378,8 +1411,8 @@ P.positions = (arg) => {
       <td class="r num">${price(p.entry_price, p.symbol)}</td><td class="r num">${price(p.mark_price, p.symbol)}${pxSrc(p)}</td>
       <td class="r num ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${pnl}</td>
       <td class="r num ${cls(p.today_usdt)}" title="${esc(TODAY_TIP[p.today_from] || "")}">${todayCell(p)}</td>
-      <td class="r num">${slCell(p)}${trailTag(p)}</td><td class="r num">${tpCell(p)}</td>
-      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "还没看")}${keeperPeak(p) ? `<div class="small dim">${esc(keeperPeak(p))}</div>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
+      <td class="r num">${slCell(p, true)}${trailMini(p)}</td><td class="r num">${tpCell(p, true)}</td>
+      <td class="r num">${hold}</td><td>${lb}</td><td>${esc(p.keeper || "还没看")}${keeperPeak(p) ? ` <span class="small dim">${esc(keeperPeak(p))}</span>` : ""}</td><td class="r">${closeBtn}</td></tr>`;
   }).join("");
   // 手机宽度：每笔两行，第一行 币种 方向 浮盈，第二行其余
   const cards = d.positions.map((p) => {
@@ -1403,9 +1436,10 @@ P.positions = (arg) => {
       <span>保命止损 <b class="num ${d.lifeboats_ok === d.positions.length ? "up" : "warn"}">${d.lifeboats_ok} / ${d.positions.length} 在位</b></span>
       <div class="bars">${groups}</div>
     </div>
-    <section class="card mt"><div class="tw pos-wide"><table>
+    <section class="card mt"><div class="tw pos-wide"><table class="dense">
       <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r" title="今天这笔赚亏了多少：0 点前开的从当地 0 点参考价算起，今天开的从开仓价（未扣费）">今日（U）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
+    ${recentSection(d)}
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
@@ -2163,6 +2197,28 @@ function mainnetCard(d) {
     <div class="tw scroll mt"><table><thead><tr><th>日期</th><th class="r">笔数</th><th class="r">Demo 净盈亏</th><th class="r">按主网价格算</th><th class="r">差</th><th class="r">价差</th><th class="r">费率差</th><th class="r">差 bp</th><th class="r">差 R / 笔</th><th class="r">累计 Demo</th><th class="r">累计按主网</th><th class="r">限价腿</th></tr></thead><tbody>${days}</tbody></table></div>
     <div class="foot">算了 ${m.covered} / ${m.trades} 笔（没算的不在这张表里）。按主网价格算 = 同数量、开平两边按同一时刻的币安主网成交价，手续费按这笔在 Demo 实际被收的费率乘主网名义金额，不算资金费；Demo 净盈亏是账本里币安实扣的。差 = Demo 净盈亏 − 按主网价格算，基本就是价差（Demo 成交价占的便宜）。费率差 = 两边全按吃单费率比按 Demo 实际费率多付多少，单列，不在差里。限价成交的腿（标「限价」，共 ${m.limit_legs} 条）按它自己的限价算，假设主网也能在这个价成交，不计价差。差 bp = 差 ÷ 开仓名义金额；R = 开仓时的止损距离 × 数量。日期按日切时区。</div></section>`;
 }
+const TRADE_HEAD = '<th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">最高浮盈</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th>';
+// 交易记录一行：历史页和持仓页「最近交易」共用，tail = 历史页右边的主网对照几格
+function tradeRow(t, when, tail = "") {
+  const [s, sc] = SIDE[t.side] || [t.side, ""];
+  const gross = t.pnl_usdt + t.fees_usdt;
+  const miss = '<span class="warn" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到</span>';
+  if (t.unfilled) {
+    return `<tr class="click dim" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
+    <td>${t.test ? '<span class="pill p-warn">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="num">—</td><td class="num">—</td><td><span class="pill p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>
+    <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>${tail}</tr>`;
+  }
+  const paperNote = t.paper_stop_price != null ? `<div class="dim small" title="主网${t.paper_price_source === "mark" ? "标记价" : "成交价"}越过止损 ${t.paper_stop_price}，按止损价记模拟成交；Demo 实际净盈亏 ${t.demo_pnl_usdt == null ? "—" : signed(t.demo_pnl_usdt, 2) + "U"}">Demo ${t.demo_exit_price != null ? price(t.demo_exit_price, t.symbol) : "—"}</div>` : "";
+  const exit = (t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>') + paperNote;
+  const shut = closeTime(t);
+  const lag = t.exit_filled_at ? Math.round((new Date(t.closed_at) - new Date(t.exit_filled_at)) / 1000) : 0;
+  const shutTip = t.exit_filled_at ? ` title="币安成交 ${hms(t.exit_filled_at)}；程序结账 ${hms(t.closed_at)}${lag > 0 ? `（晚 ${lag} 秒）` : ""}"` : "";
+  const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
+  return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap"${shutTip}>${when(shut)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
+    <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(t.close_source === "keeper_assistant" ? "管家助手" : REASON[t.close_reason] || t.close_reason || "—")}</td>
+    <td class="num nowrap">${dur(new Date(shut) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}${tail}</tr>`;
+}
+
 P.history = () => {
   const d = pageData;
   const tiles = [
@@ -2175,25 +2231,7 @@ P.history = () => {
   const kinds = d.by_kind.map((k) => `<tr><td class="hi">${esc(SIGNAL[k.kind] || ({ unknown: "未知", test: "测试单" })[k.kind] || k.kind)}</td><td class="r num">${k.trades}</td><td class="r num">${k.win_rate == null ? "—" : Math.round(k.win_rate * 100) + "%"}</td><td class="r num ${cls(k.pnl_usdt)}">${signed(k.pnl_usdt, 2)}</td></tr>`).join("");
   const today = md(data.now);
   const when = (ts) => (md(ts) === today ? hm(ts) : `<span class="dim small">${md(ts)}</span> ${hm(ts)}`);
-  const rows = d.rows.map((t) => {
-    const [s, sc] = SIDE[t.side] || [t.side, ""];
-    const gross = t.pnl_usdt + t.fees_usdt;
-    const miss = '<span class="warn" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到</span>';
-    if (t.unfilled) {
-      return `<tr class="click dim" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap">${when(t.closed_at)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="num">—</td><td class="num">—</td><td><span class="pill p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>
-      <td class="num">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>${mainnetCells(t)}</tr>`;
-    }
-    const paperNote = t.paper_stop_price != null ? `<div class="dim small" title="主网${t.paper_price_source === "mark" ? "标记价" : "成交价"}越过止损 ${t.paper_stop_price}，按止损价记模拟成交；Demo 实际净盈亏 ${t.demo_pnl_usdt == null ? "—" : signed(t.demo_pnl_usdt, 2) + "U"}">Demo ${t.demo_exit_price != null ? price(t.demo_exit_price, t.symbol) : "—"}</div>` : "";
-    const exit = (t.exit_price != null ? price(t.exit_price, t.symbol) : '<span class="dim" title="还没按币安成交回填平仓价">未回填</span>') + paperNote;
-    const shut = closeTime(t);
-    const lag = t.exit_filled_at ? Math.round((new Date(t.closed_at) - new Date(t.exit_filled_at)) / 1000) : 0;
-    const shutTip = t.exit_filled_at ? ` title="币安成交 ${hms(t.exit_filled_at)}；程序结账 ${hms(t.closed_at)}${lag > 0 ? `（晚 ${lag} 秒）` : ""}"` : "";
-    const sltp = `${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"}<div class="dim small">${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</div>`;
-    return `<tr class="click" ${clickable("signal", t.signal_id)}><td class="num nowrap">${when(t.opened_at)}</td><td class="num nowrap"${shutTip}>${when(shut)}</td><td class="hi nowrap">${coin(t.symbol)}${catTag(t.category)} <span class="${sc}">${s}</span> ${qty(t.quantity, t.entry_price)}</td>
-      <td>${t.test ? '<span class="pill p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : esc(SIGNAL[t.signal_kind] || "—")}</td><td class="r num">${t.leverage}x</td><td class="num">${price(t.entry_price, t.symbol)}</td><td class="num">${exit}</td><td class="num">${sltp}</td><td>${esc(t.close_source === "keeper_assistant" ? "管家助手" : REASON[t.close_reason] || t.close_reason || "—")}</td>
-      <td class="num nowrap">${dur(new Date(shut) - new Date(t.opened_at))}</td><td class="r num ${t.keeper_peak_usdt == null ? "dim" : cls(t.keeper_peak_usdt)}" title="管家采样的收益率按最终账本仓位估算，未扣手续费；采样不连续，可能遗漏最高点">${t.keeper_peak_usdt == null ? "—" : signed(t.keeper_peak_usdt, 2)}</td>${t.pnl_missing ? `<td class="r num">${miss}</td><td class="r num dim">—</td><td class="r num">${miss}</td>` : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`}${mainnetCells(t)}</tr>`;
-  }).join("");
+  const rows = d.rows.map((t) => tradeRow(t, when, mainnetCells(t))).join("");
   window.__recs = d.rejected;
   const rej = S.rej
     ? `<section class="card mt"><div class="ch"><h2>被拒的信号</h2><span class="r">${d.rejected.length} 条 · 拍板放弃和风控员拒绝 · 点一条看快照</span></div>
@@ -2209,7 +2247,7 @@ P.history = () => {
     ${mainnetCard(d)}
     ${symbolCard(d)}
     <section class="card mt"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一笔看整条链 · 窄屏左右滑</span></div>
-      ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr><th>开仓</th><th>平仓</th><th>币种</th><th>信号</th><th class="r">杠杆</th><th>开仓价</th><th>平仓价</th><th>止损 / 止盈</th><th>怎么平的</th><th>持有</th><th class="r">最高浮盈</th><th class="r">毛利</th><th class="r">手续费</th><th class="r">净利</th><th class="r" title="按同一时刻的币安主网成交价重算的净利">按主网价格算</th><th class="r" title="Demo 毛利 − 主网毛利：Demo 成交价占的便宜">价差</th><th class="r" title="两边全按吃单费率比按 Demo 实际费率多付多少，不在差里">费率差</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">最高浮盈按管家采样收益率和最终账本仓位估算，未扣手续费，可能遗漏最高点；缺少可用记录显示 —。止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
+      ${d.rows.length ? `<div class="tw scroll tall"><table><thead><tr>${TRADE_HEAD}<th class="r" title="按同一时刻的币安主网成交价重算的净利">按主网价格算</th><th class="r" title="Demo 毛利 − 主网毛利：Demo 成交价占的便宜">价差</th><th class="r" title="两边全按吃单费率比按 Demo 实际费率多付多少，不在差里">费率差</th></tr></thead><tbody>${rows}</tbody></table></div><div class="foot">最高浮盈按管家采样收益率和最终账本仓位估算，未扣手续费，可能遗漏最高点；缺少可用记录显示 —。止损 / 止盈是下单时挂的价。手续费 = 开 + 平，按币安成交回填后是币安实扣。净利 = 毛利 − 手续费；资金费币安不分到单笔，按天算在「资金」页，AI 费也在那里。</div>` : '<div class="dim">没有。</div>'}</section>
     <section class="card mt"><div class="ch"><h2>按信号类型</h2><span class="r">哪类赚钱、哪类该关</span></div>
       ${kinds ? `<div class="tw"><table><thead><tr><th>信号</th><th class="r">笔数</th><th class="r">胜率</th><th class="r">净盈亏</th></tr></thead><tbody>${kinds}</tbody></table></div>` : '<div class="dim">没有。</div>'}</section>${rej}`;
 };
@@ -2635,10 +2673,16 @@ const PLAIN = {
   keeper_assistant_horizon: "是非题问多长时间",
   keeper_assistant_timeout_s: "两个模型合起来最多等几秒",
   keeper_assistant_gap_s: "同一个币两次问至少隔几秒",
+  keeper_assistant_snapshot_max_age_s: "行情快照最多几秒前",
   keeper_assistant_key_level: "价格穿过关键位也问",
   keeper_assistant_close: "两个都答「是」就平仓",
   keeper_assistant_b_record_only: "模型 B 只记录",
   keeper_assistant_flip_confirm: "马上确认待确认翻转",
+  keeper_assistant_flip_neutral: "马上确认转中性的翻转",
+  card_flip_confirm_by: "待确认翻转谁来确认",
+  card_neutral_flip: "会判不做时翻不翻转",
+  card_ignore_max_age_min: "不翻转时指令最多留多久（分钟）",
+  card_flip_assistant_fallback_min: "管家助手问不了多久后按会议确认（分钟）",
   keeper_assistant_concurrency: "同时最多问几次模型",
   frozen_peak_exit_on: "冻结盈利价回访（仅之后新开的 Demo 仓）",
   frozen_peak_exit_after_s: "从真实首笔成交起几分钟后冻结盈利价",
@@ -2758,10 +2802,16 @@ const HINT = {
   keeper_assistant_horizon: "「<币> 接下来 <这里> 会上涨吗？」",
   keeper_assistant_timeout_s: "两个同时问、一起算，超时两个都算没答上、不平；连续出错后的冷却是管家助手自己的，不连累管家和拍板人",
   keeper_assistant_gap_s: "0 = 不隔，只是同一个币正在问时不重复问",
+  keeper_assistant_snapshot_max_age_s: "这个币的行情流停了、快照超过这么多秒，或刚订阅不满 5 分钟（还没预热），都不问两个模型，同一个币每分钟记一条「行情快照过旧/未预热，不问」。持仓判断、翻转确认都算",
   keeper_assistant_key_level: "持空时价格往上穿过卡上的关键位、持多时往下穿过，也问两个模型",
   keeper_assistant_close: "先过管家同一道平仓前检查，再走正常平仓路径，同一笔已在平就不重复；平仓原因记「持仓管家」，历史页显示「管家助手」。关 = 只记录（照样记「本来会平」，jiaoyi keeper-assistant-report 看对比）",
   keeper_assistant_b_record_only: "开着时两个回答都记下，但不平仓、不确认翻转。关掉后两个都答「是」才动手",
-  keeper_assistant_flip_confirm: "军师团的会改判方向、要等第二场会确认时，出卡照旧记下候选，另起一件事问两个模型会不会往新方向走；都答「是」、候选和卡上那条指令都没变，就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。这个币的持仓判断在问时推后再问。转中性的候选不问",
+  keeper_assistant_flip_confirm: "军师团的会改判方向、要等第二场会确认时，出卡照旧记下候选，另起一件事问两个模型会不会往新方向走；都答「是」、候选和卡上那条指令都没变，就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等下一场会。这个币的持仓判断在问时推后再问。转中性的候选看下一项",
+  keeper_assistant_flip_neutral: "做多 / 做空的币会议改判「不做」、要等第二场会确认时，也马上问两个模型原方向还走不走（原来做多问「会上涨吗」、做空问「会下跌吗」）；两个都答「否」（p(是) ≤ 1 − 上面那条线，线是 0.6 时就是 ≤ 0.4）、候选和卡上那条指令都没变，就确认转中性，中性卡规则照常起作用；否则候选照旧等下一场会。和上一项各管各的",
+  card_flip_confirm_by: "meeting = 连续够场数的会确认，管家助手也能提前确认（现状）；assistant = 会只提候选，场数够了也不确认，同样的结论再来一场就再问一次两个模型，只有它们一致才确认；会回到原方向照样取消。管家助手关着、B 不可用、两个没答一致时候选一直只看不做。军师团 card_flip_confirm = 1 时不起作用",
+  card_neutral_flip: "flip = 会把做多 / 做空的币判成不做（中性）也算待确认翻转（现状）；ignore = 不算翻转，卡上留确认过的方向、照常能开仓（有效期跟新结论走），记一条「会议判不做，按设置不翻转，保留原方向」。切到 ignore 时（含启动）已有的转中性候选作废，那个币恢复候选前的方向和信号。做多 ↔ 做空不受影响。闸门改的不做、到手即作废照旧按翻转处理",
+  card_ignore_max_age_min: "会判不做、按设置不翻转时，卡上那条指令自己开会超过这么多分钟就不再留着照常开仓，这场按翻转处理。0 = 不限",
+  card_flip_assistant_fallback_min: "只由管家助手确认时，候选从第一次出现起超过这么多分钟、两个模型一次都没真答过（管家助手关着、B 不可用、快照过旧或未预热、超时），下一场同样结论的会就按场数确认。答过但不同意不算。0 = 从不",
   keeper_assistant_concurrency: "最多 2：一次判断问两个模型，算两个；1 = 两个排队问。和军师团开会的名额分开，持仓的事排在翻转确认前面",
   notify_open_filled: "每笔开仓成交时推一条（含入场价、止损止盈）。保存后几秒内生效",
   notify_close_done: "每笔平仓完成时推一条（含止盈 / 止损 / 到时 / 管家平的原因和盈亏）。保存后几秒内生效",
@@ -3103,7 +3153,7 @@ const ROLES = [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },
     { g: "Jev 盈利门控", hint: "代码规则 + Jev 的一道题：赚到一定倍数止损距离、Jev 又说进场理由不成立（回答够新），就全平。只平不放宽。", keys: ["fast_loop.keeper_thesis_take_on", "fast_loop.keeper_thesis_take_min_r", "fast_loop.keeper_thesis_take_p", "fast_loop.keeper_thesis_take_max_age_s"] },
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
-    { g: "管家助手", hint: "持仓后的事归快环：反向信号（可选：价格穿过关键位）时同时问 Jev 和模型 B 同一道是非题，两个都答「是」才平仓；也能马上确认军师团的待确认翻转。改了热生效。", keys: ["fast_loop.keeper_assistant_on", "fast_loop.keeper_assistant_b_model", "fast_loop.keeper_assistant_min_p", "fast_loop.keeper_assistant_horizon", "fast_loop.keeper_assistant_timeout_s", "fast_loop.keeper_assistant_gap_s", "fast_loop.keeper_assistant_key_level", "fast_loop.keeper_assistant_close", "fast_loop.keeper_assistant_b_record_only", "fast_loop.keeper_assistant_flip_confirm", "fast_loop.keeper_assistant_concurrency"] },
+    { g: "管家助手", hint: "持仓后的事归快环：反向信号（可选：价格穿过关键位）时同时问 Jev 和模型 B 同一道是非题，两个都答「是」才平仓；也能马上确认军师团的待确认翻转。改了热生效。", keys: ["fast_loop.keeper_assistant_on", "fast_loop.keeper_assistant_b_model", "fast_loop.keeper_assistant_min_p", "fast_loop.keeper_assistant_horizon", "fast_loop.keeper_assistant_timeout_s", "fast_loop.keeper_assistant_gap_s", "fast_loop.keeper_assistant_snapshot_max_age_s", "fast_loop.keeper_assistant_key_level", "fast_loop.keeper_assistant_close", "fast_loop.keeper_assistant_b_record_only", "fast_loop.keeper_assistant_flip_confirm", "fast_loop.keeper_assistant_flip_neutral", "fast_loop.card_flip_confirm_by", "fast_loop.card_neutral_flip", "fast_loop.card_ignore_max_age_min", "fast_loop.card_flip_assistant_fallback_min", "fast_loop.keeper_assistant_concurrency"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
     { g: "新作战卡把这个币改成中性", hint: "代码规则，不问模型，不做价格确认（中性不是反向）。只看开仓之后发布的新卡：这个币改成 no_trade，或到手即作废（stale_on_arrival）成只看不做，都算中性；别的原因的只看不做不算；卡里没有这个币只在打开「没有也算」时算。hold = 不管（现状）。tighten = 和「新作战卡方向反了」没确认时同一套：亏着或赚得不够照旧全平，赚得够的在第一次看到时的现价强制启动移动止损（只锚一次，重启、换卡都不重锚，不会比正在挂的止损松），保本缓冲、离标记价多远、插针重试秒数都用上面那组。close = 直接全平。管家行情没有或过旧（「管家复查时行情最多旧几秒」）时一律不平：tighten 只收紧，close 等新行情。之后卡转成反向，交给上面那条规则。", keys: ["fast_loop.card_neutral_action", "fast_loop.card_neutral_on_absent", "fast_loop.card_neutral_trail_distance_mult"] },

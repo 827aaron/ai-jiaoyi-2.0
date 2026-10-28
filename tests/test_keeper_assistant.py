@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -70,12 +71,27 @@ class Cards:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.confirmed: list[tuple[str, FlipCandidate]] = []
+        self.calls: list[str] = []
+        self.answered: list[str] = []
+        self.stuck: list[tuple[str, FlipCandidate]] = []
 
     def confirm_flip(
         self, symbol: str, expected: FlipCandidate, why: str, detail: dict[str, Any]
     ) -> bool:
         self.confirmed.append((symbol, expected))
         return self.ok
+
+    def sweep_flips(self) -> None:
+        self.calls.append("sweep")
+
+    def clear_neutral_flips(self) -> None:
+        self.calls.append("clear_neutral")
+
+    def flip_answered(self, symbol: str, cand: FlipCandidate) -> None:
+        self.answered.append(symbol)
+
+    def stuck_held_flips(self, now: datetime, older: timedelta) -> list[tuple[str, FlipCandidate]]:
+        return [(s, f) for s, f in self.stuck if now - f.first_seen > older]
 
 
 class Harness:
@@ -96,7 +112,10 @@ class Harness:
         self.closed: list[tuple[str, str]] = []
         self.closing = closing
         self.price = [price]
+        self.snap_age = 0.0
+        self.live_s = 3600.0
         self.alerts: list[tuple[str, str]] = []
+        self.warns: list[tuple[str, str]] = []
         self.used_at_close: list[int] = []
         self.accepted: set[str] = set()
         """持仓 id：执行器真收下了平仓（主循环这时才记 close_sources）。"""
@@ -105,7 +124,11 @@ class Harness:
         self.a = KeeperAssistant(
             lambda: self.cfg,
             RoleRecorder(Role.KEEPER_ASSISTANT, self.log),
-            features=lambda sym: features(self.clock[0], price=self.price[0]),
+            features=lambda sym: features(
+                self.clock[0] - timedelta(seconds=self.snap_age),
+                price=self.price[0],
+                live_s=self.live_s,
+            ),
             close=self._close,
             clock=lambda: self.clock[0],
             data_dir=tmp_path,
@@ -113,6 +136,7 @@ class Harness:
             b_scorer=(lambda model: b) if b is not None else None,
             cards=cards,
             alert=lambda title, text: self.alerts.append((title, text)),
+            warn=lambda title, text: self.warns.append((title, text)),
             day_reset_tz="UTC",
             close_source=lambda pid: "keeper_assistant" if pid in self.accepted else None,
         )
@@ -208,6 +232,57 @@ async def test_KeeperAssistant_skips_without_asking_jev_when_b_is_unavailable(
     recs = h.records()
     assert len(recs) == 2  # once per hour per reason
     assert all(r["skipped"].startswith("跳过：B 不可用") for r in recs)
+
+
+@pytest.mark.parametrize(
+    ("age", "live", "asked"), [(31.0, 3600.0, False), (5.0, 299.0, False), (30.0, 300.0, True)]
+)
+async def test_KeeperAssistant_asks_only_on_a_fresh_warm_snapshot(
+    tmp_path: Path, now: datetime, age: float, live: float, asked: bool
+) -> None:
+    a = Scorer(0.9)
+    cards = Cards()
+    h = Harness(tmp_path, now, a, Scorer(0.9), cards=cards, keeper_assistant_gap_s=0)
+    h.snap_age, h.live_s = age, live
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    h.a.on_flip_pending("BTCUSDT", cand(now))
+    await h.settle()
+    assert (len(a.calls) == 2) is asked and (len(cards.confirmed) == 1) is asked
+    assert bool(h.closed) is asked
+    if asked:
+        assert [r["snapshot_source"] for r in ka.read_rows(tmp_path / "keeper_assistant")] == [
+            "ws",
+            "ws",
+        ]
+        return
+    assert a.calls == []
+    [rec] = h.records()  # once per coin per minute
+    assert rec["skipped"] == "行情快照过旧/未预热，不问"
+    assert (rec["reason"], rec["snapshot_age_s"]) == ("stale" if age > 30 else "cold", age)
+    h.clock[0] = now + timedelta(minutes=1)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    assert len(h.records()) == 2
+
+
+async def test_KeeperAssistant_asks_with_the_injected_snapshot_provider(
+    tmp_path: Path, now: datetime
+) -> None:
+    asked: list[tuple[str, float]] = []
+
+    async def provider(symbol: str, max_age_s: float) -> tuple[Any, str, float | None]:
+        asked.append((symbol, max_age_s))
+        return features(now - timedelta(minutes=10), live_s=0.0), "rest", 0.5
+
+    a = Scorer(0.9)
+    h = Harness(tmp_path, now, a, Scorer(0.9), keeper_assistant_snapshot_max_age_s=12)
+    h.a._snapshot = provider
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    assert asked == [("BTCUSDT", 12.0)] and len(a.calls) == 1
+    [row] = ka.read_rows(tmp_path / "keeper_assistant")
+    assert row["snapshot_source"] == "rest"
 
 
 async def test_KeeperAssistant_on_reverse_signal_ignores_signals_with_the_position_or_when_off(
@@ -349,6 +424,212 @@ async def test_KeeperAssistant_on_flip_pending_off_or_neutral_does_not_ask(
     await off.settle()
     await h.settle()
     assert a.calls == []
+
+
+def neutral_cand(now: datetime, confirmed: str = "long") -> FlipCandidate:
+    return FlipCandidate(confirmed, "neutral", 1, now, now, "m|t")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("confirmed", "a", "b", "agreed"),
+    [
+        ("long", 0.1, 0.4, True),
+        ("short", 0.3, 0.2, True),
+        ("long", 0.1, 0.7, False),
+        ("long", 0.45, 0.1, False),
+        ("long", 0.1, 0.55, False),
+        ("long", 0.1, None, False),
+    ],
+)
+async def test_KeeperAssistant_on_flip_pending_neutral_confirms_only_when_both_say_no(
+    tmp_path: Path, now: datetime, confirmed: str, a: float, b: float | None, agreed: bool
+) -> None:
+    sa, sb = Scorer(a), Scorer(b)
+    cards = Cards()
+    h = Harness(tmp_path, now, sa, sb, cards=cards, keeper_assistant_flip_neutral=True)
+    c0 = neutral_cand(now, confirmed)
+    h.a.on_flip_pending("BTCUSDT", c0)
+    await h.settle()
+    move = "上涨" if confirmed == "long" else "下跌"
+    assert sa.calls[0][1] == f"BTCUSDT 接下来 1–4 小时会{move}吗？（是 / 否）"
+    assert sb.calls[0][1] == f"BTCUSDT 接下来 1–4 小时会{move}吗？（否 / 是）"
+    assert sa.calls[0][0] == sb.calls[0][0]
+    assert cards.confirmed == ([("BTCUSDT", c0)] if agreed else [])
+    [rec] = h.records()
+    assert (rec["kind"], rec["candidate"], rec["asked"]) == ("flip_neutral", "neutral", move)
+    assert rec["both_no"] is agreed
+    assert rec["result"] == ("confirmed" if agreed else "not_agreed")
+    [row] = ka.read_rows(tmp_path / "keeper_assistant")
+    assert row["kind"] == "flip_neutral"
+
+
+@pytest.mark.parametrize(
+    ("min_p", "p", "no"),
+    [(0.7, 0.3, True), (0.9, 0.1, True), (0.6, 0.4, True), (0.7, 0.31, False), (0.6, 0.5, False)],
+)
+def test_Verdict_no_accepts_exactly_one_minus_min_p(min_p: float, p: float, no: bool) -> None:
+    assert Verdict("A", "m", p, ("是", "否"), None, 1.0).no(min_p) is no
+
+
+@pytest.mark.parametrize(("b", "answered"), [(0.9, True), (None, False)])
+async def test_KeeperAssistant_tells_the_commander_only_when_both_judges_answered(
+    tmp_path: Path, now: datetime, b: float | None, answered: bool
+) -> None:
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.2), Scorer(b), cards=cards)
+    h.a.on_flip_pending("BTCUSDT", cand(now))
+    await h.settle()
+    assert cards.answered == (["BTCUSDT"] if answered else [])
+
+
+async def test_KeeperAssistant_warns_once_when_a_held_coin_flip_is_stuck(
+    tmp_path: Path, now: datetime
+) -> None:
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.2), Scorer(0.2), cards=cards)
+    cards.stuck = [("BTCUSDT", cand(now))]
+    h.a.tick(now + timedelta(hours=2))
+    assert h.warns == []
+    h.a.tick(now + timedelta(hours=2, minutes=1))
+    h.a.tick(now + timedelta(hours=3))
+    assert len(h.warns) == 1 and "BTCUSDT 持仓中" in h.warns[0][1]
+    [rec] = h.log.read_day(now.date().isoformat())
+    assert rec.outcome is Outcome.ERROR and rec.output["keeper_assistant"]["kind"] == "flip_stuck"
+
+
+async def test_KeeperAssistant_on_flip_pending_neutral_off_does_not_ask(
+    tmp_path: Path, now: datetime
+) -> None:
+    a = Scorer(0.1)
+    cards = Cards()
+    off = Harness(tmp_path / "off", now, a, Scorer(0.1), cards=cards)
+    off.a.on_flip_pending("BTCUSDT", neutral_cand(now))
+    main_off = Harness(
+        tmp_path,
+        now,
+        a,
+        Scorer(0.1),
+        cards=cards,
+        keeper_assistant_flip_neutral=True,
+        keeper_assistant_on=False,
+    )
+    main_off.a.on_flip_pending("BTCUSDT", neutral_cand(now))
+    await off.settle()
+    await main_off.settle()
+    assert a.calls == [] and cards.confirmed == []
+
+
+async def test_KeeperAssistant_on_flip_pending_neutral_stale_candidate_is_dropped(
+    tmp_path: Path, now: datetime
+) -> None:
+    cards = Cards(ok=False)
+    h = Harness(
+        tmp_path, now, Scorer(0.1), Scorer(0.1), cards=cards, keeper_assistant_flip_neutral=True
+    )
+    h.a.on_flip_pending("BTCUSDT", neutral_cand(now))
+    await h.settle()
+    assert len(cards.confirmed) == 1
+    [rec] = h.records()
+    assert (rec["kind"], rec["result"]) == ("flip_neutral", "stale")
+
+
+async def test_KeeperAssistant_on_flip_pending_neutral_skips_when_b_is_unavailable(
+    tmp_path: Path, now: datetime
+) -> None:
+    a = Scorer(0.1)
+    cards = Cards()
+    h = Harness(tmp_path, now, a, None, cards=cards, keeper_assistant_flip_neutral=True)
+    h.a.on_flip_pending("BTCUSDT", neutral_cand(now))
+    await h.settle()
+    assert a.calls == [] and cards.confirmed == []
+    [rec] = h.records()
+    assert rec["kind"] == "flip_neutral" and rec["skipped"].startswith("跳过：B 不可用")
+
+
+@pytest.mark.parametrize(
+    ("kw", "candidate", "why"),
+    [
+        ({"keeper_assistant_on": False}, "long", "keeper_assistant_on 关着"),
+        ({"keeper_assistant_flip_confirm": False}, "long", "keeper_assistant_flip_confirm 关着"),
+        ({}, "neutral", "keeper_assistant_flip_neutral 关着"),
+    ],
+)
+async def test_KeeperAssistant_on_flip_pending_by_assistant_logs_why_it_did_not_ask(
+    tmp_path: Path, now: datetime, kw: dict[str, Any], candidate: str, why: str
+) -> None:
+    a = Scorer(0.9)
+    by = {"card_flip_confirm_by": "assistant"}
+    h = Harness(tmp_path, now, a, Scorer(0.9), cards=Cards(), **by, **kw)
+    h.a.on_flip_pending("BTCUSDT", cand(now, candidate))
+    h.a.on_flip_pending("BTCUSDT", cand(now, candidate))
+    await h.settle()
+    assert a.calls == []
+    assert [r["skipped"] for r in h.records()] == [why, why]
+
+
+async def test_KeeperAssistant_on_flip_pending_asks_again_only_after_the_gap(
+    tmp_path: Path, now: datetime
+) -> None:
+    a = Scorer(0.3)
+    h = Harness(tmp_path, now, a, Scorer(0.3), cards=Cards(), card_flip_confirm_by="assistant")
+    h.a.on_flip_pending("BTCUSDT", cand(now))
+    await h.settle()
+    h.clock[0] = now + timedelta(seconds=60)
+    h.a.on_flip_pending("BTCUSDT", replace(cand(now), count=2))
+    await h.settle()
+    h.clock[0] = now + timedelta(seconds=121)
+    h.a.on_flip_pending("BTCUSDT", replace(cand(now), count=3))
+    await h.settle()
+    assert len(a.calls) == 2
+    recs = h.records()
+    assert [r.get("result") or r["skipped"] for r in recs] == [
+        "not_agreed",
+        "离上次问不到 120 秒",
+        "not_agreed",
+    ]
+    assert recs[0]["why"].endswith("候选照旧只看不做，下一场会同样结论时再问")
+
+
+async def test_KeeperAssistant_tick_hands_over_pending_flips_once_per_switch(
+    tmp_path: Path, now: datetime
+) -> None:
+    cards = Cards()
+    h = Harness(tmp_path, now, Scorer(0.1), Scorer(0.1), cards=cards)
+    h.a.tick(now)
+    assert cards.calls == []
+    h.cfg = h.cfg.model_copy(
+        update={"card_flip_confirm_by": "assistant", "card_neutral_flip": "ignore"}
+    )
+    h.a.tick(now)
+    h.a.tick(now)
+    assert cards.calls == ["clear_neutral", "sweep"]
+    h.cfg = h.cfg.model_copy(
+        update={"card_flip_confirm_by": "meeting", "card_neutral_flip": "flip"}
+    )
+    h.a.tick(now)
+    h.cfg = h.cfg.model_copy(
+        update={"card_flip_confirm_by": "assistant", "card_neutral_flip": "ignore"}
+    )
+    h.a.tick(now)
+    assert cards.calls == ["clear_neutral", "sweep"] * 2
+
+
+async def test_KeeperAssistant_on_flip_pending_neutral_not_asked_when_neutral_flips_are_ignored(
+    tmp_path: Path, now: datetime
+) -> None:
+    a = Scorer(0.1)
+    h = Harness(
+        tmp_path,
+        now,
+        a,
+        Scorer(0.1),
+        cards=Cards(),
+        keeper_assistant_flip_neutral=True,
+        card_neutral_flip="ignore",
+    )
+    h.a.on_flip_pending("BTCUSDT", neutral_cand(now))
+    await h.settle()
+    assert a.calls == [] and h.records() == []
 
 
 async def test_KeeperAssistant_on_flip_pending_while_position_check_runs_is_deferred_not_dropped(

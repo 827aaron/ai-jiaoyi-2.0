@@ -606,6 +606,14 @@ class FastLoopConfig(Contract):
         default=False,
         description="价格朝持仓不利的方向穿过卡上的关键位（持空往上穿、持多往下穿）也问。",
     )
+    keeper_assistant_snapshot_max_age_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="行情快照最多是几秒前的才问两个模型；更旧（这个币的行情流停了）或刚订阅"
+        "不满 5 分钟（还没预热）都不问，同一个币每分钟记一条。持仓判断、翻转确认都算。",
+    )
     keeper_assistant_close: bool = Field(
         default=False,
         description="开 = 两个模型都答「是」就平仓（走正常平仓路径，同一笔在平就不重复）。"
@@ -620,7 +628,47 @@ class FastLoopConfig(Contract):
         description="开 = 军师团的会给出待确认翻转（card_flip_confirm ≥ 2 时的 1/N）后另起一件事"
         "问两个模型「会上涨 / 下跌吗」（持有、没持有的币都算）；都答「是」、候选和卡上那条指令"
         "都没变，就确认，卡上换成那场会的结论，反向卡 / 中性卡规则照常起作用；否则候选照旧等"
-        "下一场会。转中性的候选不问。",
+        "下一场会。转中性的候选看 keeper_assistant_flip_neutral。",
+    )
+    keeper_assistant_flip_neutral: bool = Field(
+        default=False,
+        description="开 = 做多 / 做空转中性（不做）的待确认翻转也马上问两个模型，问的是原方向"
+        "（原来做多问「会上涨吗」、做空问「会下跌吗」）；两个都答「否」（p(是) ≤ 1 − "
+        "keeper_assistant_min_p）、候选和卡上那条指令都没变，就确认转中性，中性卡规则照常；"
+        "否则候选照旧等下一场会。和 keeper_assistant_flip_confirm 各管各的。",
+    )
+    card_flip_confirm_by: Literal["meeting", "assistant"] = Field(
+        default="meeting",
+        description="待确认翻转（slow.toml card_flip_confirm ≥ 2 时）谁来确认。meeting = 连续够场数"
+        "的会确认，管家助手也可以提前确认（现状）。assistant = 会只提候选，场数够了也不确认，只有"
+        "管家助手的两个模型能确认（做多 / 做空的翻转看 keeper_assistant_flip_confirm，转中性看 "
+        "keeper_assistant_flip_neutral）；同样的结论再来一场就再问一次，会回到原方向照样取消；"
+        "管家助手关着、B 不可用、两个没答一致时候选一直只看不做。"
+        "card_flip_confirm = 1 时不起作用。",
+    )
+    card_neutral_flip: Literal["flip", "ignore"] = Field(
+        default="flip",
+        description="会把做多 / 做空的币判成不做（中性）时：flip = 和反向一样算待确认翻转"
+        "（现状）；ignore = 会议自己判的不做不算翻转（闸门改的、到手即作废照旧），"
+        "卡上留确认过的方向、照常能开仓，不记候选。切到 ignore 时"
+        "（含启动）已有的转中性候选作废，那个币恢复候选前的方向和信号。做多 ↔ 做空不受影响。",
+    )
+    card_ignore_max_age_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        allow_inf_nan=False,
+        description="card_neutral_flip = ignore 时，卡上那条指令自己开会的时刻超过这么多分钟就不再"
+        "留着照常开仓，这场判不做按 flip 处理。0 = 不限。",
+    )
+    card_flip_assistant_fallback_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        allow_inf_nan=False,
+        description="card_flip_confirm_by = assistant 时，候选从第一次出现起超过这么多分钟、"
+        "管家助手一直没问成（关着、B 不可用、快照过旧 / 未预热、超时），"
+        "下一场同样结论的会就按场数确认。两个模型真答过（不同意）不算。0 = 从不。",
     )
     keeper_assistant_concurrency: int = Field(
         default=2,

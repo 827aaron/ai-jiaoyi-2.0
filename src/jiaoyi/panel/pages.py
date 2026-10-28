@@ -126,6 +126,10 @@ class PositionsPage(BaseModel):
     """position_id → 这笔从信号到现在的每一步（今天的记录）。"""
     price_env: Literal["live", "demo"] | None = None
     """现价从哪个盘子来：live 主网；demo = paper / testnet 撮合的币安 Demo；None = 没接实时行情。"""
+    recent: list[TradeRow] = []
+    """今天（``day_reset_tz``）平掉的单，最新在前，最多 ``RECENT_LIMIT`` 笔；同历史页「今天」。"""
+    recent_total: int = 0
+    """今天一共平了几笔（recent 被截短时比它多）。"""
 
 
 Progress = Literal["err", "doing", "done", "wait"]
@@ -464,6 +468,7 @@ def build_positions(
     now: datetime,
     prices: dict[str, tuple[float, PriceSrc]] | None = None,
     protection_stale_s: int = 120,
+    with_recent: bool = True,
 ) -> PositionsPage:
     ledger = files.ledger()
     records = files.decisions_days(now)  # 昨天开的仓走势也要，不按曼谷日截断
@@ -483,6 +488,7 @@ def build_positions(
     )
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt
+    recent, recent_total = recent_trades(files, risk, now) if with_recent else ([], 0)
     groups = []
     for cat in Category:
         notional = sum(ledger.notional(p) for p in live if p.category is cat)
@@ -514,6 +520,8 @@ def build_positions(
         lifeboats_ok=sum(1 for v in views if v.lifeboat_status == "active"),
         groups=groups,
         trails=trails,
+        recent=recent,
+        recent_total=recent_total,
     )
 
 
@@ -1484,6 +1492,19 @@ def build_history(
         rejected=rejected,
         mainnet=_mainnet_compare(rows, shadow, risk.day_reset_tz),
     )
+
+
+RECENT_LIMIT = 12
+"""持仓页「最近交易」最多几笔：笔记本一屏（约 900 px）放得下 3 笔持仓再加这么多行。"""
+
+
+def recent_trades(files: PanelFiles, risk: RiskConfig, now: datetime) -> tuple[list[TradeRow], int]:
+    """持仓页下面的今天已平仓单（最新在前）和今天的总笔数；和历史页「今天」同一份数据。"""
+    rows = build_history(files, risk, now, "today").rows
+    return rows[:RECENT_LIMIT], len(rows)
+
+
+PositionsPage.model_rebuild()
 
 
 # ---------------------------------------------------------------- 资金

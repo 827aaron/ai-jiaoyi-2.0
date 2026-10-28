@@ -106,6 +106,9 @@ def test_keeper_assistant_defaults_off_and_rejects_bad_values() -> None:
     cfg = FastLoopConfig()
     assert (cfg.keeper_assistant_on, cfg.keeper_assistant_close) == (False, False)
     assert cfg.keeper_assistant_b_record_only and not cfg.keeper_assistant_flip_confirm
+    assert not cfg.keeper_assistant_flip_neutral and cfg.card_flip_confirm_by == "meeting"
+    assert cfg.card_neutral_flip == "flip"
+    assert (cfg.card_ignore_max_age_min, cfg.card_flip_assistant_fallback_min) == (0.0, 0.0)
     assert (cfg.keeper_assistant_b_model, cfg.keeper_assistant_min_p) == (None, 0.6)
     assert (cfg.keeper_assistant_gap_s, cfg.keeper_assistant_horizon) == (120, "1–4 小时")
     assert (cfg.keeper_assistant_concurrency, cfg.keeper_assistant_key_level) == (2, False)
