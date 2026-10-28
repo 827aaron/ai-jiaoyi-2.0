@@ -775,3 +775,41 @@ async def test_earlier_generation_that_reached_the_exchange_but_reads_absent_is_
     assert h.tracked().record.status is PositionStatus.CLOSED
     assert h.settled == [(CloseReason.KEEPER, CloseFill())]
     assert "直连只减仓单 2 代，成交量未知" in h.exit_alerts()[0].body
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_generation_outcomes_are_dropped_from_the_ledger_once_closed(
+    tmp_path: Path, side: Side
+):
+    h = await armed(tmp_path, side)
+    h.exchange.fill_cap = 1.5
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    assert "direct_close_outcomes" in h.path.read_text()
+    h.exchange.fill_cap = None
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert "direct_close_outcomes" not in h.path.read_text()  # 结束后账本与旧版一致
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_generation_without_a_recorded_outcome_counts_as_unknown(tmp_path: Path, side: Side):
+    h = await armed(tmp_path, side)
+    h.exchange.not_sent_once = True
+    with pytest.raises(ProtectionIncomplete):
+        await h.adapter.close("pos-1", CloseReason.KEEPER)
+    # 升级时正在平仓的仓：前一代没有落盘结果。
+    h.registry.put(h.tracked().model_copy(update={"direct_close_outcomes": {}}))
+
+    async def stop_takes_everything() -> None:
+        trigger_stop(h, 2.0)
+
+    h.exchange.before_place = stop_takes_everything
+    h.hb_terminates()
+    await h.adapter.protection_tick()
+    h.exchange.before_place = None
+    await h.adapter.protection_tick()
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert h.settled == [(CloseReason.KEEPER, CloseFill())]
+    assert "直连只减仓单 2 代，成交量未知" in h.exit_alerts()[0].body
