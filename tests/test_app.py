@@ -12,6 +12,7 @@ from jiaoyi import contracts as c
 from jiaoyi.app import App, Modules, is_stub
 from jiaoyi.cli import main
 from jiaoyi.core.config import ConfigError, load_app_config, load_risk_config
+from jiaoyi.core.secrets import ChainedSecretStore
 from jiaoyi.interfaces import Predictor
 from jiaoyi.market.binance_ws import BinanceFuturesFeed
 from jiaoyi.predictor import KronosForecaster
@@ -77,7 +78,8 @@ def test_modules_cover_every_role_field() -> None:
 
 
 def test_cli_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    # 本机钥匙串里的测试网 key 会让 status 去建真执行层；和 CI 一样当作一把 key 都没有
+    monkeypatch.setattr(ChainedSecretStore, "get", lambda self, name: None)
     app_toml = tmp_path / "app.toml"
     app_toml.write_text(
         APP.read_text(encoding="utf-8").replace('data_dir = "data"', f'data_dir = "{tmp_path}"'),
