@@ -13,8 +13,13 @@ import pytest
 
 from jiaoyi.acceptance import read_records
 from jiaoyi.alerting.telegram import TelegramAlerter
-from jiaoyi.contracts import AlertLevel, Outcome, Role
-from jiaoyi.contracts.position import CloseReason, ReconcileIssue, ReconcileIssueKind
+from jiaoyi.contracts import AlertLevel, Outcome, Role, Side
+from jiaoyi.contracts.position import (
+    CloseReason,
+    PositionStatus,
+    ReconcileIssue,
+    ReconcileIssueKind,
+)
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.hb_client import HbApiError
@@ -27,6 +32,7 @@ ARMED_PENDING = "交易所托管仍在"
 LIST_ABSENT_ACTIVE = "运行列表未返回执行器，但"
 LIST_ABSENT = "账本里还在持仓，但运行列表未返回执行器"
 CLOSE_UNCONFIRMED = "平仓结果尚未确认"
+QTY = "账本 "
 
 
 def _wire(
@@ -239,6 +245,73 @@ async def test_failed_terminated_flatten_stays_error_inside_both_graces(tmp_path
     assert all(not i.informational for i in second.issues)
 
 
+def _closing_on_exchange(rig: Rig, pid: str, qty: float, side: Side = Side.LONG) -> None:
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    _set(
+        rig,
+        pid,
+        record=tracked.record.model_copy(update={"status": PositionStatus.CLOSING}),
+        direct_close_pending=True,
+        server_protection=_protection("exiting"),
+    )
+    rig.ex.set_position("BTCUSDT", side, qty)
+
+
+def _qty_issue(issues: list[ReconcileIssue]) -> ReconcileIssue:
+    return next(i for i in issues if i.kind is ReconcileIssueKind.QTY_MISMATCH)
+
+
+@pytest.mark.parametrize(
+    "closing,after_s,exchange_qty,informational",
+    [
+        (60.0, 0, 0.0, True),
+        (60.0, 30, 0.005, True),
+        (60.0, 61, 0.0, False),
+        (60.0, 0, 0.03, False),
+        (0.0, 0, 0.0, False),
+    ],
+    ids=["inside_grace", "inside_grace_partial", "after_grace", "exchange_larger", "grace_off"],
+)
+async def test_closing_qty_mismatch_label(
+    tmp_path: Path, closing: float, after_s: int, exchange_qty: float, informational: bool
+) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, closing=closing)
+    pid = await open_filled(rig)
+    _closing_on_exchange(rig, pid, exchange_qty)
+    first = await rig.rec.reconcile(rig.t)
+    report = await rig.rec.reconcile(rig.t + timedelta(seconds=after_s)) if after_s else first
+    issue = _qty_issue(report.issues)
+    assert issue.detail.startswith(f"账本 0.015，币安 {exchange_qty}") and not issue.fixed
+    assert issue.informational is informational
+    expected = Outcome.INFO if informational else Outcome.ERROR
+    assert _outcome(tmp_path, QTY) is expected
+    levels = [a.level for a in rig.alerts.sent if "持仓数量对不上" in a.title + a.body]
+    assert (levels == []) is informational
+
+
+async def test_closing_grace_does_not_cover_qty_mismatch_on_an_open_position(
+    tmp_path: Path,
+) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, closing=600.0)
+    await open_filled(rig)
+    rig.ex.set_position("BTCUSDT", Side.LONG, 0.005)
+    report = await rig.rec.reconcile(rig.t)
+    assert not _qty_issue(report.issues).informational
+
+
+async def test_closing_grace_does_not_cover_a_reversed_exchange_position(tmp_path: Path) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, closing=600.0)
+    pid = await open_filled(rig)
+    _closing_on_exchange(rig, pid, 0.005, side=Side.SHORT)
+    report = await rig.rec.reconcile(rig.t)
+    reversed_ = [i for i in report.issues if i.kind is ReconcileIssueKind.SIDE_MISMATCH]
+    assert reversed_ and not any(i.informational for i in reversed_)
+    assert not any(
+        i.informational for i in report.issues if i.kind is ReconcileIssueKind.QTY_MISMATCH
+    )
+
+
 async def _always_down(executor_id: str, *, keep_position: bool) -> None:
     raise HbApiError("hummingbot-api 不可达")
 
@@ -271,6 +344,8 @@ async def _scenario(rig: Rig, monkeypatch: pytest.MonkeyPatch, name: str) -> Hoo
         _hide_from_running_list(rig, monkeypatch)
     elif name == "missing_lifeboat":
         rig.ex.stops.clear()
+    elif name in ("closing_exchange_flat", "closing_exchange_larger"):
+        _closing_on_exchange(rig, pid, 0.0 if name == "closing_exchange_flat" else 0.03)
     else:
         _set(rig, pid, direct_close_pending=True, server_protection=_protection("exiting"))
     return nothing
@@ -285,6 +360,8 @@ async def _scenario(rig: Rig, monkeypatch: pytest.MonkeyPatch, name: str) -> Hoo
         "closing",
         "missing_lifeboat",
         "unconfirmed",
+        "closing_exchange_flat",
+        "closing_exchange_larger",
     ],
 )
 async def test_graces_change_no_close_flatten_or_protection_decision(
