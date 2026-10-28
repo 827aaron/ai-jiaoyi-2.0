@@ -1404,10 +1404,16 @@ function leadBars(width, barsAfter) {
   if (!(width > 2 * ENTRY_LEAD_PX)) return ENTRY_LEAD_BARS;
   return Math.max(ENTRY_LEAD_BARS, Math.ceil((ENTRY_LEAD_PX * barsAfter) / (width - ENTRY_LEAD_PX)));
 }
+// 至少铺多少根：宽屏 120，窄屏按每根约 7px 算（宽度未知按 120）
+function minBars(width) {
+  return width > 0 ? Math.min(DEFAULT_BARS, Math.max(40, Math.round(width / 7))) : DEFAULT_BARS;
+}
 function defaultRange(n, entryIdx, width) {
   const to = Math.max(n - 1, 0) + RIGHT_BARS;
   if (entryIdx != null && entryIdx >= 0) {
-    const from = Math.max(0, entryIdx - leadBars(width, to - entryIdx));
+    const min = minBars(width);
+    // 开仓很新也至少铺 min 根（不然几根蜡烛撑满全图）；K 线不够 min 根时 from 取负，左边留空而不是拉宽
+    const from = Math.max(Math.min(0, n - min), Math.min(entryIdx - leadBars(width, to - entryIdx), n - min));
     if (to - from <= MAX_SPAN_BARS) return { from, to };
   }
   return { from: Math.max(0, n - DEFAULT_BARS), to };
