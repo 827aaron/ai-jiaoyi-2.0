@@ -1597,6 +1597,8 @@ class PoolPage(BaseModel):
     categories: list[PoolCategory] = []
     """每类币的开关和进池上限，固定顺序（``Category``）。"""
     default_category_cap: int = 30
+    venue_excluded: dict[str, str] = {}
+    """上次选币因交易所上不能交易（币 → 状态，如 SETTLING）剔掉的币。"""
     slow_error: str | None = None
     """slow.toml 读不出：“slow.toml 的值”按默认显示，以这句为准。"""
 
@@ -1656,6 +1658,7 @@ def build_pool(
         overrides_error=ov is None,
         categories=_pool_categories(entries, ov, scr),
         default_category_cap=scr.default_category_cap,
+        venue_excluded=dict(pool.venue_excluded) if pool else {},
         slow_error=slow_error,
     )
 

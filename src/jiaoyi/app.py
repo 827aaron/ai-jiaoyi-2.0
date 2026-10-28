@@ -187,6 +187,18 @@ class _TakesOverrides(Protocol):
 
 
 @runtime_checkable
+class _TakesVenue(Protocol):
+    """选币器接受执行交易所的可交易名单（桩选币器没有）。"""
+
+    def set_venue(self, venue: Any, label: str = ...) -> None: ...
+
+
+@runtime_checkable
+class _TakesUntradeable(Protocol):
+    def set_untradeable(self, untradeable: Mapping[str, str]) -> None: ...
+
+
+@runtime_checkable
 class _Refreshable(Protocol):
     async def refresh(self) -> bool: ...
 
@@ -903,11 +915,15 @@ class App:
             # 对账员已发告警；照常启动，主循环里每轮再对
             log.exception("启动对账失败")
         await self.refresh_lot_rules()
+        if isinstance(self.m.screener, _TakesVenue):
+            label = "实盘" if self.app_cfg.mode == RunMode.LIVE else "Demo"
+            self.m.screener.set_venue(self.lot_rules, label)
         try:
             self.set_pool(await self.m.screener.screen(now))
         except Exception:
             # 选币失败不阻止启动：没有池子军师不开会，快环自然不开新仓
             log.exception("启动选币失败，下一轮选币再试")
+        self.sync_untradeable(now)
         # 行情只订要盯的币（总盘会挑中 + 作战卡 + 持仓），由主循环 Runner.sync_watch 订
         self.save_blocked()  # 封禁只在内存里，重启后清掉旧文件，由新闻源重新补上
         self._write_runtime(now)
@@ -982,6 +998,21 @@ class App:
         """拉一次交易所精度。失败沿用旧缓存，过期后风控员自动拒单。"""
         if isinstance(self.lot_rules, _Refreshable) and not await self.lot_rules.refresh():
             log.warning("下单精度刷新失败")
+
+    def sync_untradeable(self, now: datetime) -> None:
+        """卡上已有、但交易所现在不能交易的币，让作战卡读成只看不做（持仓币不动）。
+
+        交易所名单没拉到或开关关着时清空，不误伤。"""
+        cards = self.m.cards
+        if not isinstance(cards, _TakesUntradeable):
+            return
+        gone: dict[str, str] = {}
+        unavailable = getattr(self.lot_rules, "unavailable", None)
+        if self.slow_cfg.screener.exclude_untradeable and callable(unavailable):
+            card = cards.current(now) if hasattr(cards, "current") else None
+            syms = {s.symbol for s in card.symbols} if card is not None else set()
+            gone = unavailable(syms) or {} if syms else {}
+        cards.set_untradeable(gone)
 
     async def credit_tick(self) -> None:
         """模型额度看护：每小时只读查一次 OpenRouter 余额，快用完或会议撞 402 就推 Telegram。"""

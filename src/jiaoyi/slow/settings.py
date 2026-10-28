@@ -193,6 +193,11 @@ class ScreenerSection(_Strict):
         description="让币安 TRADIFI_PERPETUAL（美股 / 金属等传统资产永续）进池。"
         "默认关：等在 Demo 上把开平仓、保命止损、行情流整条链验证完再开。",
     )
+    exclude_untradeable: bool = Field(
+        default=True,
+        description="剔掉执行交易所（Demo / 实盘）上不在交易的币（状态不是 TRADING，如结算中，"
+        "或没有下单精度）：选币用主网数据，这类币进池会白占会议和卡位。关掉 = 不管交易所状态。",
+    )
     us_events: bool = Field(
         default=True,
         description="美股类别（加密概念股 / 美股科技）用美股开盘时段和财报日历：开盘期间加分，"
@@ -941,6 +946,7 @@ class SlowConfig(_Strict):
             major_exclude=frozenset(x.strip().upper() for x in s.major_exclude),
             always_candidates=frozenset(s.tiers.always_candidates),
             allow_tradfi=s.allow_tradfi,
+            exclude_untradeable=s.exclude_untradeable,
             us_events=s.us_events,
             us_open_bonus=s.us_open_bonus,
             category_caps={c: r.cap for c, r in s.categories.items() if r.cap is not None},

@@ -2298,8 +2298,10 @@ class Runner:
             pool = await self.m.screener.screen(now)
         except Exception:
             log.exception("选币失败，沿用上一份候选池")
+            self.app.sync_untradeable(now)
             return
         self.app.set_pool(pool)
+        self.app.sync_untradeable(now)
 
     # ------------------------------------------------------------ 面板指令
     def _guard_note(self, outcome: Outcome, summary: str, now: datetime) -> None:

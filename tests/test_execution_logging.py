@@ -52,6 +52,20 @@ async def test_lot_rules_fail_closed_until_loaded_and_when_stale() -> None:
     assert lots.lot_rules("BTCUSDT") is None  # 过期
 
 
+async def test_unavailable_reports_status_and_fails_open_when_stale() -> None:
+    ex, clk = FakeExchange(), Clk()
+    ex.untradeable_status = {"PUMPUSDT": "SETTLING"}  # type: ignore[attr-defined]
+    lots = ExchangeInfoLotRules(ex, max_age_s=3600, clock=clk)
+    assert lots.unavailable(["BTCUSDT"]) is None  # 从没拉过：不能据此剔币
+    await lots.refresh()
+    assert lots.unavailable(["BTCUSDT", "PUMPUSDT", "NEWUSDT"]) == {
+        "PUMPUSDT": "SETTLING",
+        "NEWUSDT": "无下单精度",
+    }
+    clk.t += timedelta(seconds=3601)
+    assert lots.unavailable(["PUMPUSDT"]) is None
+
+
 async def test_failed_refresh_keeps_cache_until_it_expires() -> None:
     ex, clk = FakeExchange(), Clk()
     lots = ExchangeInfoLotRules(ex, max_age_s=3600, clock=clk)
@@ -107,7 +121,10 @@ class FakeCcxtMarkets:
         return {
             "a": market("BTC/USDT:USDT"),
             "b": market("BTC/USDT:USDT-261225"),  # 交割合约，跳过
-            "c": market("ETH/USDT:USDT", info={"contractType": "PERPETUAL", "status": "BREAK"}),
+            "c": market(
+                "ETH/USDT:USDT",
+                info={"contractType": "PERPETUAL", "status": "BREAK", "symbol": "ETHUSDT"},
+            ),
             "d": market("SOL/USDT", swap=False),  # 现货，跳过
             "e": market("XRP/USDT:USDT", info={"contractType": "PERPETUAL", "status": "TRADING"}),
             "f": market(  # 美股永续：ccxt 不一定标成 swap，按 exchangeInfo 的字段认
@@ -132,6 +149,7 @@ async def test_ccxt_lot_filters_mapping() -> None:
         "BTCUSDT": LotFilter(0.001, 0.002, 100.0, max_qty=120.0, tick_size=0.1),
         "TSLAUSDT": LotFilter(0.01, 0.01, 0.0),
     }
+    assert ex.untradeable_status == {"ETHUSDT": "BREAK"}
 
 
 async def test_max_qty_flows_through_provider() -> None:

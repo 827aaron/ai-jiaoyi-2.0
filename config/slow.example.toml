@@ -36,6 +36,7 @@ major_top_n = 20                   # 主流币 = 市值前几名（每天自动�
 # major_include = ["LINK"]        # 手动加入主流币的币名
 # major_exclude = ["DOGE"]        # 手动排除出主流币的币名（按山寨币算）
 allow_tradfi = false               # 美股 / 金属永续（TRADIFI_PERPETUAL）是否进池：默认关，Demo 上验证完整条链再开
+exclude_untradeable = true         # 剔掉交易所上不在交易（如结算中）或没有下单精度的币；选币用主网数据，Demo 上这类币进池只会白占名额
 us_events = true                   # 美股类别（币股 / 美股科技）：开盘期间加分、财报日前后标注，军师团新闻带上财报日
 us_open_bonus = 0.08               # 美股常规盘开盘期间加多少分（总分满分约 1；0 = 不加）
 vol_full_multiple = 30             # 打分：按每小时折算的正常波动是来回手续费的几倍算满分（30 = 每小时 3%）

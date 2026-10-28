@@ -714,6 +714,7 @@ class CcxtBinanceFutures:
             else:
                 self._ex.set_sandbox_mode(True)
         self._markets_loaded = False
+        self.untradeable_status: dict[str, str] = {}
         self._bracket_submit_locks: dict[str, asyncio.Lock] = {}
         self._bracket_submitted: set[str] = set()
         self.position_mode_cache_s = position_mode_cache_s
@@ -1859,6 +1860,7 @@ class CcxtBinanceFutures:
             raise ExchangeError(f"读 exchangeInfo 失败：{e}") from e
         self._markets_loaded = True
         out: dict[str, LotFilter] = {}
+        off: dict[str, str] = {}
         for m in markets.values():
             info = m.get("info") or {}
             if info.get("contractType") not in PERPETUAL_CONTRACT_TYPES:
@@ -1872,6 +1874,8 @@ class CcxtBinanceFutures:
             elif not (m.get("swap") and m.get("linear") and m.get("settle") == "USDT"):
                 continue
             if info.get("status") != "TRADING":
+                if info.get("symbol"):
+                    off[str(info["symbol"])] = str(info.get("status") or "UNKNOWN")
                 continue
             try:
                 symbol = str(info["symbol"]) if tradfi else from_ccxt_symbol(str(m["symbol"]))
@@ -1891,6 +1895,7 @@ class CcxtBinanceFutures:
                 )
             except (KeyError, ValueError):
                 continue  # 缺字段的合约不给精度，风控员会对它拒单
+        self.untradeable_status = off
         return out
 
     async def income_since(self, since: datetime) -> float:

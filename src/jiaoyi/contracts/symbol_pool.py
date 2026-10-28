@@ -73,6 +73,10 @@ class SymbolPool(Contract):
     pool_id: str = Field(min_length=1)
     ts: AwareDatetime
     entries: list[SymbolPoolEntry]
+    venue_excluded: dict[str, str] = Field(
+        default_factory=dict,
+        description="执行交易所上不能交易而被剔掉的币（币 → 交易所状态，如 SETTLING）。",
+    )
     source_metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="本次池统计的来源/实际窗口旁路元数据；旧池缺失即未知，不改变原metrics。",
