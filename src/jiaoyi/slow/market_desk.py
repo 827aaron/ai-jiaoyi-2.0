@@ -42,7 +42,7 @@ from jiaoyi.interfaces import DecisionLog
 from jiaoyi.slow import binance_gate, market_table
 from jiaoyi.slow.credits import is_credit_error
 from jiaoyi.slow.desk_intra import INTRA_FIELDS, compose_intra
-from jiaoyi.slow.market_dossier import Dossier, DossierBuilder
+from jiaoyi.slow.market_dossier import BTC, Dossier, DossierBuilder
 from jiaoyi.slow.settings import MarketDeskSection
 from jiaoyi.slow.tradingagents_engine import openrouter_body
 
@@ -437,6 +437,26 @@ def intra_block(dossier: Dossier, probs_1h: Probs, order: Order, cycle_id: str) 
     }
 
 
+def intra_status(
+    symbols: Sequence[str],
+    exclude: Sequence[str],
+    rets_15m: Mapping[str, float],
+    rets_1h: Mapping[str, float],
+) -> dict[str, float]:
+    """池（等权平均、涨跌家数，至少 5 个币才给）和 BTC 的 15 分钟 / 1 小时涨跌，字段名同数据包。"""
+    basket = [s for s in dict.fromkeys(symbols) if s not in set(exclude)]
+    out: dict[str, float] = {}
+    for tag, rets in (("15m", rets_15m), ("1h", rets_1h)):
+        xs = [rets[s] for s in basket if s in rets]
+        if len(xs) >= 5:
+            out[f"pool_ret_{tag}_pct"] = statistics.fmean(xs)
+            out[f"pool_up_count_{tag}"] = float(sum(x > 0 for x in xs))
+            out[f"pool_down_count_{tag}"] = float(sum(x < 0 for x in xs))
+        if BTC in rets:
+            out[f"btc_ret_{tag}_pct"] = rets[BTC]
+    return out
+
+
 # ------------------------------------------------------------------ 模型
 
 
@@ -760,11 +780,6 @@ class MarketDesk:
         )
         self._save()
 
-    @property
-    def intra_max_age_min(self) -> float:
-        c = self.cfg
-        return c.intra_max_age_min if c.intra_max_age_min is not None else c.max_input_age_min
-
     def intra_text(self, now: datetime) -> str | None:
         """最近一轮（不是上次发布）的「未来 1 小时概率 + 短线现状」，接在大盘台观点后面给各币会议、
         管家和面板。方向只在滞回确认后才发布，这一段每轮都换。``publish_intra`` 关着、没有大盘台
@@ -776,10 +791,39 @@ class MarketDesk:
         if not isinstance(block, dict):
             return None
         try:
-            return compose_intra(block, now, self.intra_max_age_min)
+            return compose_intra(block, now, self.cfg.max_input_age_min)
         except (KeyError, TypeError, ValueError):
             logger.exception("大盘台短线现状读不了，这次不带")
             return None
+
+    def observe_breadth(
+        self,
+        at: datetime,
+        symbols: Sequence[str],
+        rets_15m: Mapping[str, float],
+        rets_1h: Mapping[str, float],
+    ) -> bool:
+        """两轮之间刷新「短线现状」：大盘翻转检查每分钟取到的 1 分钟收盘价算出的涨跌（``at`` =
+        那根线的收盘时刻），按大盘台同一个篮子（剔除 ``exclude_symbols``）重算池和 BTC 的数，
+        写进 ``latest.intra.status``。不发请求、不调模型；离上次刷新不到 ``intra_refresh_s``、
+        不比这一轮数据包新、或大盘台还没有结果都不动。返回是否刷新了。"""
+        cfg = self.cfg
+        latest = self.state.latest
+        block = latest.get("intra") if latest is not None else None
+        if not cfg.publish_intra or cfg.intra_refresh_s <= 0 or not isinstance(block, dict):
+            return False
+        status = block.get("status")
+        prev = datetime.fromisoformat(str(status["as_of"])) if isinstance(status, dict) else None
+        if at <= datetime.fromisoformat(str(block["as_of"])):
+            return False
+        if prev is not None and (at - prev).total_seconds() < cfg.intra_refresh_s - 1:
+            return False
+        block["status"] = {
+            "as_of": at.isoformat(),
+            "values": intra_status(symbols, cfg.exclude_symbols, rets_15m, rets_1h),
+        }
+        self._save()
+        return True
 
     def request_run(self, reason: str = "regime_flip") -> None:
         """翻转确认 / 急动后要求立即加跑一轮（不占定时的格子；离上一轮开跑不到
@@ -997,7 +1041,7 @@ class MarketDesk:
             if self.cfg.publish_intra:
                 intra = {
                     **intra_block(dossier, avg_1h, order, cycle_id),
-                    "max_age_min": self.intra_max_age_min,
+                    "max_age_min": self.cfg.max_input_age_min,
                 }
                 self.state.latest["intra"] = intra
                 row["intra"] = intra

@@ -1825,6 +1825,7 @@ class Runner:
                         [e.symbol for e in pool.in_pool], now, self._fetch_regime
                     )
                     row = self._flip_row(now, sample)
+                    self._feed_desk_intra(sample, pool)
                     if not self._regime_enabled():
                         self._regime.reset()
                         return
@@ -1981,6 +1982,18 @@ class Runner:
                 self.app.clock(), btc.last_price if btc is not None else None, self._prices(pool)
             )
         self._start_desk_if_due()
+
+    def _feed_desk_intra(self, sample: Breadth, pool: SymbolPool) -> None:
+        """大盘翻转检查刚取到的 1 分钟线顺手给大盘台刷新「短线现状」（不另发请求）；
+        出错不影响翻转判断。"""
+        desk = getattr(self.app, "desk", None)
+        observe = getattr(desk, "observe_breadth", None)
+        if not callable(observe):
+            return
+        try:
+            observe(sample.ts, [e.symbol for e in pool.in_pool], sample.rets_15m, sample.rets_1h)
+        except Exception:
+            log.exception("大盘台刷新短线现状失败")
 
     def _start_desk_if_due(self) -> None:
         desk = getattr(self.app, "desk", None)

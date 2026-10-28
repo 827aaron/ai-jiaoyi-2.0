@@ -33,23 +33,37 @@ def _pair(order: Order, up: str, down: str) -> tuple[str, str]:
 
 
 def compose_intra(block: Mapping[str, Any], now: datetime, max_age_min: float) -> str:
-    """「未来 1 小时概率」+「短线现状（截至 HH:MM UTC）」，全是代码按数写的、成对的话；涨 / 跌
-    （买入 / 卖出）谁先按那一轮的顺序交替。数据旧过 ``max_age_min``（0 = 不查）就写缺失。"""
+    """「未来 1 小时概率（那一轮的时间）」+「短线现状（截至 HH:MM UTC）」，全是代码按数写的、成对
+    的话；涨 / 跌（买入 / 卖出）谁先按那一轮的顺序交替。
+
+    短线现状优先用两轮之间刷新的 ``status``（比这一轮数据包新时），主动买卖占比只有每轮的那份，
+    和现状不是同一时刻就标上自己的时间。数据旧过 ``max_age_min``（0 = 不查）写缺失。"""
     order: Order = "down_first" if block.get("order") == "down_first" else "up_first"
     t0 = datetime.fromisoformat(str(block["t0"]))
-    as_of = datetime.fromisoformat(str(block["as_of"]))
+    run_as_of = datetime.fromisoformat(str(block["as_of"]))
     p = block.get("probs_1h") or {}
+    run = f"{t0.astimezone(UTC):%H:%M} UTC"
     if now - t0 > PROBS_1H_HORIZON:
-        head = f"未来 1 小时概率：缺失（{t0.astimezone(UTC):%H:%M} UTC 那一轮已过 1 小时）。"
+        head = f"未来 1 小时概率：缺失（{run} 那一轮已过 1 小时）。"
     else:
         a, b = _pair(order, f"涨 {float(p['up']):.0%}", f"跌 {float(p['down']):.0%}")
-        head = f"未来 1 小时概率：{a} / 平 {float(p['flat']):.0%} / {b}。"
+        head = f"未来 1 小时概率（大盘台 {run} 一轮）：{a} / 平 {float(p['flat']):.0%} / {b}。"
+    run_values: Mapping[str, float] = block.get("values") or {}
+    status = block.get("status")
+    as_of, v = run_as_of, run_values
+    if isinstance(status, dict):
+        at = datetime.fromisoformat(str(status["as_of"]))
+        if at > run_as_of:
+            as_of, v = at, status.get("values") or {}
+
+    def fresh(at: datetime) -> bool:
+        return max_age_min <= 0 or (now - at).total_seconds() / 60 <= max_age_min
+
     stamp = f"{as_of.astimezone(UTC):%H:%M} UTC"
-    age = (now - as_of).total_seconds() / 60
-    if max_age_min > 0 and age > max_age_min:
+    if not fresh(as_of):
+        age = (now - as_of).total_seconds() / 60
         why = f"截至 {stamp} 的数据已过 {age:.0f} 分钟，上限 {max_age_min:g} 分钟"
         return head + f"短线现状：缺失（{why}）。"
-    v: Mapping[str, float] = block.get("values") or {}
 
     def pct(name: str) -> str:
         return f"{v[name]:+.2f}%" if name in v else "缺失"
@@ -66,8 +80,15 @@ def compose_intra(block: Mapping[str, Any], now: datetime, max_age_min: float) -
         "等权池 " + "，".join(pool_bits),
         f"BTC 15 分钟 {pct('btc_ret_15m_pct')}，1 小时 {pct('btc_ret_1h_pct')}",
     ]
-    buy, sell = v.get("pool_taker_buy_share_1h"), v.get("pool_taker_sell_share_1h")
+    buy = run_values.get("pool_taker_buy_share_1h")
+    sell = run_values.get("pool_taker_sell_share_1h")
     if buy is not None and sell is not None:
         x, y = _pair(order, f"主动买入 {buy:.1f}%", f"主动卖出 {sell:.1f}%")
-        parts.append(f"1 小时成交里{x} / {y}")
+        own = f"{run_as_of.astimezone(UTC):%H:%M} UTC"
+        if not fresh(run_as_of):
+            parts.append(f"1 小时主动买卖占比缺失（只在大盘台每轮取，上次截至 {own}）")
+        elif as_of != run_as_of:
+            parts.append(f"1 小时成交里{x} / {y}（截至 {own}）")
+        else:
+            parts.append(f"1 小时成交里{x} / {y}")
     return head + f"短线现状（截至 {stamp}）：" + "；".join(parts) + "。"

@@ -99,7 +99,7 @@ Section = Literal[
 ]
 _SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk")
 # [market_desk] 其余项（模式、模型、节奏、门槛）改了要重启、影响大盘方向，只在终端改
-DESK_EDITABLE = frozenset({"publish_intra", "intra_max_age_min"})
+DESK_EDITABLE = frozenset({"publish_intra", "intra_refresh_s"})
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {

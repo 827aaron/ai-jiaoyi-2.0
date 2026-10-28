@@ -46,6 +46,7 @@ from jiaoyi.slow.market_desk import (
     extract_json,
     instruction_lines,
     intra_block,
+    intra_status,
     mirror_bias,
     mirror_selected,
     normalize_probs,
@@ -966,6 +967,7 @@ class LoopDesk:
         self.requests: list[str] = []
         self.runs: list[str] = []
         self.pending: str | None = None
+        self.breadth: list[tuple[Any, ...]] = []
 
     def request_run(self, reason: str = "regime_flip") -> None:
         self.requests.append(reason)
@@ -983,6 +985,10 @@ class LoopDesk:
 
     def observe_prices(self, *a: Any) -> None:
         return None
+
+    def observe_breadth(self, *a: Any) -> bool:
+        self.breadth.append(a)
+        return True
 
 
 @pytest.mark.parametrize("target", ["off", "desk"])
@@ -1017,6 +1023,8 @@ async def test_flip_target_off_and_desk_never_call_flash(tmp_path: Path, target:
     if runner._tasks:
         await asyncio.gather(*tuple(runner._tasks))
     assert engine.market_calls == 0  # 从不叫 Flash 独立刷新
+    # 翻转检查刚取到的 1 分钟线顺手交给大盘台刷新短线现状（不另发请求）
+    assert [(b[0], b[3]["BTCUSDT"]) for b in desk.breadth] == [(clock[0], pytest.approx(2.0))]
     rows = records(tmp_path / "regime_flip")
     if target == "off":
         assert desk.requests == [] and desk.runs == []
@@ -1475,7 +1483,8 @@ class IntraBuilder:
 
 H1 = Probs(0.312, 0.459, 0.229)
 UP_TEXT = (
-    "未来 1 小时概率：涨 31% / 平 46% / 跌 23%。短线现状（截至 10:01 UTC）："
+    "未来 1 小时概率（大盘台 10:02 UTC 一轮）：涨 31% / 平 46% / 跌 23%。"
+    "短线现状（截至 10:01 UTC）："
     "等权池 15 分钟 +0.02%（涨 19 / 跌 19 个），1 小时 +0.77%（涨 34 / 跌 5 个）；"
     "BTC 15 分钟 +0.05%，1 小时 +0.38%；1 小时成交里主动买入 47.0% / 主动卖出 53.0%。"
 )
@@ -1492,7 +1501,8 @@ def test_intra_text_has_1h_probs_and_short_term_numbers() -> None:
     assert compose_intra(block, T0 + timedelta(minutes=1), 5.0) == UP_TEXT
     down = compose_intra(intra_block(intra_dossier(), H1, "down_first", "c"), T0, 5.0)
     assert down == (
-        "未来 1 小时概率：跌 23% / 平 46% / 涨 31%。短线现状（截至 10:01 UTC）："
+        "未来 1 小时概率（大盘台 10:02 UTC 一轮）：跌 23% / 平 46% / 涨 31%。"
+        "短线现状（截至 10:01 UTC）："
         "等权池 15 分钟 +0.02%（跌 19 / 涨 19 个），1 小时 +0.77%（跌 5 / 涨 34 个）；"
         "BTC 15 分钟 +0.05%，1 小时 +0.38%；1 小时成交里主动卖出 53.0% / 主动买入 47.0%。"
     )
@@ -1513,7 +1523,7 @@ def test_intra_short_term_line_is_refused_when_stale() -> None:
     block = intra_block(intra_dossier(), H1, "up_first", "c")
     stale = compose_intra(block, T0 + timedelta(minutes=5), 5.0)  # as_of 早 1 分钟：已 6 分钟
     assert stale == (
-        "未来 1 小时概率：涨 31% / 平 46% / 跌 23%。"
+        "未来 1 小时概率（大盘台 10:02 UTC 一轮）：涨 31% / 平 46% / 跌 23%。"
         "短线现状：缺失（截至 10:01 UTC 的数据已过 6 分钟，上限 5 分钟）。"
     )
     assert "等权池" in compose_intra(block, T0 + timedelta(minutes=5), 0.0)  # 0 = 不查
@@ -1638,3 +1648,115 @@ def test_keeper_snapshot_and_panel_carry_intra(tmp_path: Path) -> None:
     del state["latest"]["intra"]
     (tmp_path / "market_desk_state.json").write_text(json.dumps(state), encoding="utf-8")
     assert _desk_latest(tmp_path, T0) is None  # 没开 publish_intra：面板不多显示
+
+
+REFRESH_SYMS = ["AAUSDT", "BBUSDT", "CCUSDT", "DDUSDT", "EEUSDT", "PAXGUSDT"]
+
+
+def refresh_rets(sign: float = 1.0) -> tuple[dict[str, float], dict[str, float]]:
+    r15 = {"AAUSDT": 0.2, "BBUSDT": -0.1, "CCUSDT": 0.3, "DDUSDT": 0.1, "EEUSDT": -0.2}
+    r60 = {"AAUSDT": -0.5, "BBUSDT": -0.3, "CCUSDT": 0.4, "DDUSDT": -0.6, "EEUSDT": -0.2}
+    r15 |= {"PAXGUSDT": 9.0, "BTCUSDT": 0.12}  # PAXG 不在大盘台的篮子里
+    r60 |= {"PAXGUSDT": 9.0, "BTCUSDT": -0.25}
+    return (
+        {k: sign * v for k, v in r15.items()},
+        {k: sign * v for k, v in r60.items()},
+    )
+
+
+async def test_short_term_line_refreshes_every_minute_between_runs(tmp_path: Path) -> None:
+    clock = [T0]
+    desk = make_desk(
+        tmp_path,
+        FakePublisher(),
+        FakeModel(answer(0.6, 0.25, 0.15, h1=(0.312, 0.459, 0.229))),
+        clock,
+        builder=IntraBuilder(),  # type: ignore[arg-type]
+        publish_intra=True,
+    )
+    await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    r15, r60 = refresh_rets()
+    assert not desk.observe_breadth(
+        T0 - timedelta(minutes=2), REFRESH_SYMS, r15, r60
+    )  # 不比这一轮新
+    at = T0 + timedelta(minutes=3)  # 10:05
+    assert desk.observe_breadth(at, REFRESH_SYMS, r15, r60)
+    clock[0] = at + timedelta(seconds=20)
+    text = desk.intra_text(clock[0])
+    # 这一轮（10:02Z）的顺序是 down_first：刷新后的现状也照这一轮的顺序
+    assert text == (
+        "未来 1 小时概率（大盘台 10:02 UTC 一轮）：跌 23% / 平 46% / 涨 31%。"
+        "短线现状（截至 10:05 UTC）：等权池 15 分钟 +0.06%（跌 2 / 涨 3 个），"
+        "1 小时 -0.24%（跌 4 / 涨 1 个）；BTC 15 分钟 +0.12%，1 小时 -0.25%；"
+        "1 小时成交里主动卖出 53.0% / 主动买入 47.0%（截至 10:01 UTC）。"
+    )
+    # 不到 intra_refresh_s 不重算；到了就换
+    assert not desk.observe_breadth(at + timedelta(seconds=30), REFRESH_SYMS, r15, r60)
+    assert desk.observe_breadth(at + timedelta(minutes=1), REFRESH_SYMS, *refresh_rets(-1.0))
+    clock[0] = at + timedelta(minutes=1, seconds=10)
+    later = desk.intra_text(clock[0])
+    assert later is not None and "截至 10:06 UTC" in later and "+0.24%" in later
+    # 面板读的是落盘的同一份
+    from jiaoyi.panel.overview import _desk_latest
+
+    panel = _desk_latest(tmp_path, clock[0])
+    assert panel is not None and panel.intra == later
+    # 买卖占比只有每轮那份：旧过上限就单独写缺失，其余照常
+    clock[0] = T0 + timedelta(minutes=7)
+    assert desk.observe_breadth(T0 + timedelta(minutes=7), REFRESH_SYMS, r15, r60)
+    text = desk.intra_text(clock[0])
+    assert text is not None and "截至 10:09 UTC" in text
+    assert "1 小时主动买卖占比缺失（只在大盘台每轮取，上次截至 10:01 UTC）" in text
+    # 刷新停了（比如翻转检查关了）：过了上限照样写缺失
+    clock[0] = T0 + timedelta(minutes=13)
+    stale = desk.intra_text(clock[0])
+    assert stale is not None and "短线现状：缺失（截至 10:09 UTC 的数据已过 6 分钟" in stale
+    # 新一轮：用这一轮的数，旧的刷新作废
+    await desk.run(pool(clock[0], entry("AAUSDT")), "scheduled")
+    latest = desk.state.latest
+    assert latest is not None and "status" not in latest["intra"]
+
+
+async def test_refresh_zero_keeps_desk_run_only(tmp_path: Path) -> None:
+    clock = [T0]
+    builder: Any = IntraBuilder()
+    desk = make_desk(
+        tmp_path,
+        FakePublisher(),
+        FakeModel(answer(0.6, 0.25, 0.15)),
+        clock,
+        builder=builder,
+        publish_intra=True,
+        intra_refresh_s=0,
+    )
+    await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    before = desk.intra_text(T0)
+    assert not desk.observe_breadth(T0 + timedelta(minutes=1), REFRESH_SYMS, *refresh_rets())
+    assert desk.intra_text(T0) == before and "status" not in desk.state.latest["intra"]  # type: ignore[index]
+    off: Any = IntraBuilder()
+    plain = make_desk(
+        tmp_path / "off", FakePublisher(), FakeModel(answer(0.6, 0.25, 0.15)), clock, builder=off
+    )
+    await plain.run(pool(T0, entry("AAUSDT")), "scheduled")
+    assert not plain.observe_breadth(T0 + timedelta(minutes=1), REFRESH_SYMS, *refresh_rets())
+
+
+def test_refreshed_line_is_neutral_under_swap_and_mirror() -> None:
+    d = intra_dossier()
+    at = T0 + timedelta(minutes=3)
+    r15, r60 = refresh_rets()
+    m15, m60 = refresh_rets(-1.0)
+    for order, other in (("up_first", "down_first"), ("down_first", "up_first")):
+        block = intra_block(d, H1, order, "c")
+        block["status"] = {
+            "as_of": at.isoformat(),
+            "values": intra_status(REFRESH_SYMS, ("PAXGUSDT",), r15, r60),
+        }
+        mirrored = intra_block(d.mirror(), Probs(H1.down, H1.flat, H1.up), other, "c")
+        mirrored["status"] = {
+            "as_of": at.isoformat(),
+            "values": intra_status(REFRESH_SYMS, ("PAXGUSDT",), m15, m60),
+        }
+        text = compose_intra(block, at, 5.0)
+        assert "截至 10:05 UTC" in text
+        assert compose_intra(mirrored, at, 5.0) == _flip_signs(swap_words(text))
