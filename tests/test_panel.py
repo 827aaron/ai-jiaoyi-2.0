@@ -532,6 +532,60 @@ def test_positions_page_groups_and_trail(tmp_path: Path) -> None:
     assert q.unrealized_usdt == pytest.approx(sign * 0.015 * (68_100.0 - 68_044.0))
 
 
+def test_positions_page_lists_todays_closed_trades_newest_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi.panel import pages
+    from jiaoyi.panel.pages import build_positions
+
+    _seed(tmp_path)
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    # 种子里唯一的平仓没有哨兵记录，是测试单：和历史页一样不列
+    page = build_positions(files, HB, RISK, NOW)
+    assert (page.recent, page.recent_total) == ([], 0)
+    with _client(tmp_path, "10.0.0.2") as client:
+        got = client.get("/api/positions").json()
+        assert (got["recent"], got["recent_total"]) == ([], 0)
+
+    book = json.loads((tmp_path / "positions.json").read_text())
+    log = JsonlDecisionLog(tmp_path)
+    for pid, closed_h in (("pos-a", 3.0), ("pos-b", 0.5), ("pos-old", 14.0)):
+        book["positions"][pid] = _position(
+            position_id=pid,
+            signal_id=f"sig-{pid}",
+            status="closed",
+            opened_at=(NOW - timedelta(hours=closed_h + 1)).isoformat(),
+            closed_at=(NOW - timedelta(hours=closed_h)).isoformat(),
+            realized_pnl_usdt=-3.0 if pid == "pos-b" else 5.0,
+            fees_usdt=0.2,
+        )
+        log.write(
+            _rec(c.Role.SENTINEL, c.Outcome.ACTION, f"信号 {pid}",
+                 NOW - timedelta(hours=closed_h + 1), signal_id=f"sig-{pid}",
+                 output={"kind": "volume_breakout"})
+        )  # fmt: skip
+    (tmp_path / "positions.json").write_text(json.dumps(book))
+
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    page = build_positions(files, HB, RISK, NOW)
+    # 曼谷今天 13:30：14 小时前平的是昨天的单，不列
+    assert [t.position_id for t in page.recent] == ["pos-b", "pos-a"]
+    assert page.recent_total == 2
+    assert [t.pnl_usdt for t in page.recent] == [-3.0, 5.0]
+    assert page.recent[0].signal_kind == "volume_breakout"
+    assert len(page.positions) == 1
+
+    monkeypatch.setattr(pages, "RECENT_LIMIT", 1)
+    page = build_positions(files, HB, RISK, NOW)
+    assert ([t.position_id for t in page.recent], page.recent_total) == (["pos-b"], 2)
+    monkeypatch.undo()
+
+    with _client(tmp_path, "10.0.0.2") as client:
+        got = client.get("/api/positions").json()
+        assert [t["position_id"] for t in got["recent"]] == ["pos-b", "pos-a"]
+        assert got["recent_total"] == 2
+
+
 def test_team_page_and_signal_chain(tmp_path: Path) -> None:
     from jiaoyi.panel.pages import build_signal, build_team
 
