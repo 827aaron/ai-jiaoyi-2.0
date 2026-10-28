@@ -573,8 +573,9 @@ class FastLoopConfig(Contract):
     )
     keeper_assistant_b_model: str | None = Field(
         default=None,
-        description="模型 B 的 id（经 OpenRouter 的 SystemOne 接口，和 Jev 走 OpenRouter 时一样）；"
-        "A 固定是 Jev。不写或调不通 = 没有 B，算两个不一致，只记录，从不只凭 A 平仓或确认。",
+        description="模型 B 的 id（经 OpenRouter 的 Decisions 接口，"
+        "如 microsoft/microsoft-decision-1）；A 固定是 Jev。"
+        "不写或调不通 = 没有 B，算两个不一致，只记录，从不只凭 A 平仓或确认。",
     )
     keeper_assistant_min_p: float = Field(
         default=0.6,

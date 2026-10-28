@@ -2751,7 +2751,7 @@ const label = (i) => plainOf(i) || (SHORT[i.key] && i.label.length > 30 ? SHORT[
 // 合约里的说明带英文选项名的，换一句中文
 const HINT = {
   keeper_assistant_on: "有持仓的币出了反向信号（或价格朝不利方向穿过关键位，见下面的开关），赚钱亏钱都算，就同时问 Jev（A）和模型 B 同一道是非题：持空问「会上涨吗」、持多问「会下跌吗」。题目和行情快照里没有仓位、开仓价、盈亏，也不说为什么问；B 的选项倒过来列。两个都答「是」才算一致。关 = 不问、不记录",
-  keeper_assistant_b_model: "经 OpenRouter 的 SystemOne 接口调（和 Jev 走 OpenRouter 时一样）。留空或调不通 = 没有 B，一律算不一致，只记录，从不只凭 Jev 平仓或确认",
+  keeper_assistant_b_model: "经 OpenRouter 的 Decisions 接口调，填 microsoft/microsoft-decision-1。留空或调不通 = 没有 B，一律算不一致，只记录，从不只凭 Jev 平仓或确认",
   keeper_assistant_min_p: "两个模型各自都要过这条线",
   keeper_assistant_horizon: "「<币> 接下来 <这里> 会上涨吗？」",
   keeper_assistant_timeout_s: "两个同时问、一起算，超时两个都算没答上、不平；连续出错后的冷却是管家助手自己的，不连累管家和拍板人",

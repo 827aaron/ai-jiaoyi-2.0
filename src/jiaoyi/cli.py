@@ -344,6 +344,70 @@ def _keeper_assistant_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _keeper_assistant_probe(args: argparse.Namespace) -> int:
+    """部署后开平仓前，确认模型 B 真能答。只建两条模型通道，不建主程序、执行器和账本。"""
+    import json
+
+    from jiaoyi.gate.jev import (
+        OPENROUTER_BASE_URL,
+        OPENROUTER_KEY_NAME,
+        PROVIDER_KEYS,
+        JevTransport,
+        OpenRouterDecisionsTransport,
+        TypeSafeTransport,
+    )
+    from jiaoyi.keeper import assistant
+
+    try:
+        fl = load_app_config(Path(args.app)).fast_loop
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    model = args.model or fl.keeper_assistant_b_model
+    if not model:
+        print("没有模型 B：app.toml 没写 keeper_assistant_b_model，也没给 --model", file=sys.stderr)
+        return 2
+    store = ChainedSecretStore()
+    key = store.get(OPENROUTER_KEY_NAME)
+    if not key:
+        print(f"缺少 {OPENROUTER_KEY_NAME}", file=sys.stderr)
+        return 2
+    judges: list[tuple[str, JevTransport]] = [("B", OpenRouterDecisionsTransport(key, model))]
+    if args.with_a:
+        a_key = store.get(PROVIDER_KEYS[fl.jev_provider])
+        if not a_key or not fl.jev_model:
+            print(
+                f"问不了 A：缺少 {PROVIDER_KEYS[fl.jev_provider]} 或没锁 jev_model", file=sys.stderr
+            )
+            return 2
+        base = OPENROUTER_BASE_URL if fl.jev_provider == "openrouter" else None
+        judges.append(("A", TypeSafeTransport(a_key, fl.jev_model, base_url=base)))
+    state = assistant.probe_snapshot(args.symbol, datetime.now(UTC))
+    want = "long" if args.side == "short" else "short"
+
+    async def run() -> list[dict[str, Any]]:
+        try:
+            return await assistant.probe(judges, fl, symbol=args.symbol, want=want, state=state)
+        finally:
+            for _, t in judges:
+                close = getattr(t, "aclose", None)
+                if callable(close):
+                    await close()
+
+    rows = asyncio.run(run())
+    print(f"快照（假的）：{state}")
+    for r in rows:
+        print(f"\n{r['judge']}：{r['model'] or model}")
+        print(f"  题目：{r['question']}")
+        p_yes = "没答上" if r["p_yes"] is None else f"{r['p_yes']:.4f}"
+        print(f"  p(是)：{p_yes}")
+        print(f"  原始概率：{json.dumps(r['raw_probs'], ensure_ascii=False)}")
+        print(f"  延迟：{r['latency_ms']:.0f} ms  花费：${r['cost_usd']:.6f}  token：{r['usage']}")
+        if r["error"]:
+            print(f"  出错：{r['error']}")
+    return 0 if all(r["p_yes"] is not None for r in rows) else 1
+
+
 def _card_score(args: argparse.Namespace) -> int:
     """作战卡方向记分：补算窗口走完的卡（只追加），重写汇总，打印主指标、基线和分组。"""
     from datetime import timedelta
@@ -1015,6 +1079,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.set_defaults(func=_keeper_assistant_report)
+
+    p = sub.add_parser(
+        "keeper-assistant-probe",
+        help="管家助手：拿一份假行情真问一次模型 B（可加 A），打印 p(是)、原始概率和延迟；不下单",
+    )
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument(
+        "--model", default="", help="模型 B 的 id；默认 app.toml 的 keeper_assistant_b_model"
+    )
+    p.add_argument("--symbol", default="BTCUSDT")
+    p.add_argument(
+        "--side", choices=("short", "long"), default="short",
+        help="假设持哪边：short 问「会上涨吗」，long 问「会下跌吗」",
+    )  # fmt: skip
+    p.add_argument("--with-a", action="store_true", help="也真问一次 A（Jev，按 jev_provider）")
+    p.set_defaults(func=_keeper_assistant_probe)
 
     p = sub.add_parser(
         "card-score", help="作战卡方向记分：发布时刻起算、扣掉同期币池，补算并打印（只读行情）"

@@ -41,7 +41,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+import httpx
+
 from jiaoyi.contracts import (
+    BookMetrics,
     FastLoopConfig,
     FeatureSnapshot,
     Health,
@@ -53,7 +56,7 @@ from jiaoyi.contracts import (
     Side,
 )
 from jiaoyi.core.recorder import RoleRecorder, local_day
-from jiaoyi.gate.jev import OPENROUTER_BASE_URL, JevTransport, TypeSafeTransport
+from jiaoyi.gate.jev import JevTransport, OpenRouterDecisionsTransport, RawJevResult
 from jiaoyi.gate.questions import direction_snapshot
 from jiaoyi.slow.card_flip import FlipCandidate
 
@@ -140,7 +143,7 @@ class Scorer(Protocol):
 
 
 class TransportScorer:
-    """打分模型裁判：经 ``JevTransport``（TypeSafe SystemOne 接口）问一道是非题。
+    """打分模型裁判：经 ``JevTransport``（A 是 SystemOne，B 是 OpenRouter Decisions）问一道是非题。
 
     这是管家助手自己的一份：自己的超时、连续错误计数和冷却，只借底层通道。拍板人 / 管家的
     ``JevDecisionModel`` 只收合同里的 entry / hold 题，问不了这道是非题；它的错误计数也只在它
@@ -1094,21 +1097,93 @@ def report_text(pairs: Sequence[Pair], open_n: int, *, live: bool = False) -> st
 
 
 def openrouter_scorer(
-    api_key: str, cfg: Callable[[], FastLoopConfig]
+    api_key: str,
+    cfg: Callable[[], FastLoopConfig],
+    http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> Callable[[str], Scorer | None]:
-    """模型 B 的通道：OpenRouter 的 SystemOne 接口（TypeSafe SDK 换 base URL，和 Jev 走 OpenRouter
-    时同一种请求），模型 id 由设置给。
-    TODO: Microsoft-Decision-1 的 OpenRouter 调用方式还没在文档里核实（今天的 /models 目录里
-    也查不到它）；如果它不走 SystemOne 接口，只换这一个工厂。调不通时每次都算「B 没答上」，
-    不平仓。"""
+    """模型 B 的通道：OpenRouter 的 Decisions 路由，模型 id 由设置给（如
+    ``microsoft/microsoft-decision-1``）。调不通时每次都算「B 没答上」，不平仓。"""
 
     def make(model: str) -> Scorer | None:
         fl = cfg()
         return TransportScorer(
-            TypeSafeTransport(api_key, model, base_url=OPENROUTER_BASE_URL),
+            OpenRouterDecisionsTransport(api_key, model, http_transport=http_transport),
             usd_per_mtok=fl.jev_usd_per_mtok,
             max_errors=fl.jev_max_consecutive_errors,
             cooldown_s=fl.jev_error_cooldown_s,
         )
 
     return make
+
+
+def probe_snapshot(symbol: str, now: datetime, price: float = 68000.0) -> str:
+    """``jiaoyi keeper-assistant-probe`` 用的假快照：形状和真快照一样，数是编的。"""
+    f = FeatureSnapshot(
+        symbol=symbol,
+        ts=now,
+        last_price=price,
+        atr=price * 0.002,
+        values={
+            "ret_1m": 0.0015,
+            "ret_5m": 0.004,
+            "vol_ratio_1m": 2.5,
+            "taker_buy_ratio_1m": 0.62,
+            "cvd_30s_usdt": 25_000.0,
+            "realized_vol_5m": 0.0005,
+        },
+        book=BookMetrics(
+            mid=price,
+            microprice=price + 0.1,
+            spread_bps=0.1,
+            depth_usdt=2_000_000.0,
+            imbalance=0.2,
+            ofi=8_000.0,
+            cvd=40_000.0,
+            taker_buy_ratio=0.62,
+        ),
+    )
+    return direction_snapshot(symbol, f)
+
+
+class _Recording:
+    """记下通道原样返回的概率，探针打印用。"""
+
+    def __init__(self, inner: JevTransport) -> None:
+        self.inner = inner
+        self.last: RawJevResult | None = None
+
+    async def evaluate(
+        self, state: str, questions: Sequence[JevQuestion], timeout_s: float
+    ) -> RawJevResult:
+        self.last = await self.inner.evaluate(state, questions, timeout_s)
+        return self.last
+
+
+async def probe(
+    judges: Sequence[tuple[str, JevTransport]],
+    cfg: FastLoopConfig,
+    *,
+    symbol: str,
+    want: str,
+    state: str,
+) -> list[dict[str, Any]]:
+    """每个裁判真问一次：和运行时同一道题、同样的选项顺序（B 倒序）和超时。只问，不碰仓位。"""
+    out: list[dict[str, Any]] = []
+    for judge, transport in judges:
+        opts = tuple(reversed(OPTIONS)) if judge == "B" else OPTIONS
+        rec = _Recording(transport)
+        scorer = TransportScorer(
+            rec, usd_per_mtok=cfg.jev_usd_per_mtok, max_errors=1_000, cooldown_s=0.0
+        )
+        question = move_question(symbol, want, cfg.keeper_assistant_horizon, opts)
+        v = await scorer.ask(judge, symbol, state, question, opts, cfg.keeper_assistant_timeout_s)
+        raw = rec.last
+        out.append(
+            {
+                **v.row(),
+                "question": question,
+                "raw_probs": dict(raw.probs.get(QUESTION_ID, {})) if raw is not None else None,
+                "request_id": raw.request_id if raw is not None else None,
+            }
+        )
+    return out

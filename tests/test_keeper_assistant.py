@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from jiaoyi import contracts as c
@@ -672,3 +673,142 @@ async def test_KeeperAssistant_closes_model_b_when_it_changes_and_on_shutdown(
     assert closed == ["microsoft/decision-1"]
     await h.a.aclose()
     assert closed == ["microsoft/decision-1", "other/model"]
+
+
+DECISION_1 = "microsoft/microsoft-decision-1"
+
+
+class Decisions:
+    """Fake OpenRouter Decisions route: records each request, answers from ``reply``."""
+
+    def __init__(self, reply: Any) -> None:
+        self.reply = reply
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if isinstance(self.reply, int):
+            return httpx.Response(self.reply, text="upstream down")
+        return httpx.Response(200, json=self.reply)
+
+    def body(self, i: int = -1) -> dict[str, Any]:
+        return json.loads(self.requests[i].content)
+
+
+def decisions_reply(probs: Mapping[str, float]) -> dict[str, Any]:
+    return {
+        "id": "gen-dec-1",
+        "model": "microsoft/microsoft-decision-1-20261020",
+        "provider": "Microsoft",
+        "answers": {QUESTION_ID: {"type": "choice", "choice": "否", "probabilities": probs}},
+        "usage": {"input_tokens": 300, "output_tokens": 0, "cost": 0.0000126},
+    }
+
+
+def model_b(fake: Decisions, **cfg: Any) -> Any:
+    fl = FastLoopConfig(**cfg)
+    return ka.openrouter_scorer("sk-or-test", lambda: fl, httpx.MockTransport(fake))(DECISION_1)
+
+
+async def test_openrouter_scorer_asks_decisions_route_blind_with_reversed_options(
+    tmp_path: Path, now: datetime
+) -> None:
+    fake = Decisions(decisions_reply({"否": 0.2, "是": 0.8}))
+    h = Harness(tmp_path, now, Scorer(0.9), model_b(fake))
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    req = fake.requests[0]
+    assert (req.method, str(req.url)) == ("POST", "https://openrouter.ai/api/alpha/decisions")
+    assert req.headers["Authorization"] == "Bearer sk-or-test"
+    body = fake.body()
+    assert body["model"] == DECISION_1
+    q = body["questions"][QUESTION_ID]
+    assert q["type"] == "choice" and list(q["criteria"]) == ["否", "是"]
+    assert q["instructions"] == "BTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
+    state = json.loads(body["state"])
+    assert state["sym"] == "BTCUSDT" and state["px"] == 103.7
+    assert set(state) == {
+        "sym", "px", "atr_bps", "ret1m_bps", "ret5m_bps", "vol_x", "buy", "cvd30_k",
+        "rv5m_bps", "liq_long_k", "liq_short_k", "book",
+    }  # fmt: skip
+    for word in ("entry", "stop", "pnl", "side", "持", "仓", "反向", "110", "100.0"):
+        assert word not in body["state"] + q["instructions"], word
+    b = h.records()[0]["judges"][1]
+    assert (b["model"], b["p_yes"], b["options"]) == (
+        "microsoft/microsoft-decision-1-20261020",
+        0.8,
+        ["否", "是"],
+    )
+    assert b["cost_usd"] == 0.0000126 and b["usage"] == {"input_tokens": 300, "output_tokens": 0}
+    assert len(h.closed) == 1
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"model": DECISION_1, "usage": {}},
+        decisions_reply({"Yes": 0.8, "No": 0.2}),
+        {**decisions_reply({}), "answers": {QUESTION_ID: {"type": "choice", "choice": "是"}}},
+    ],
+    ids=["no-answers", "other-labels", "no-probabilities"],
+)
+async def test_openrouter_scorer_treats_malformed_answer_as_no_answer(
+    tmp_path: Path, now: datetime, reply: dict[str, Any]
+) -> None:
+    h = Harness(tmp_path, now, Scorer(0.9), model_b(Decisions(reply)))
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    b = h.records()[0]["judges"][1]
+    assert b["p_yes"] is None and b["error"]
+    assert h.closed == []
+
+
+async def test_openrouter_scorer_counts_http_errors_and_cools_down() -> None:
+    fake = Decisions(503)
+    b = model_b(fake, jev_max_consecutive_errors=2, jev_error_cooldown_s=300)
+    for _ in range(2):
+        v = await b.ask("B", "BTCUSDT", "{}", "q", ("否", "是"), 1.0)
+        assert v.p_yes is None and "HTTP 503" in (v.error or "")
+    v = await b.ask("B", "BTCUSDT", "{}", "q", ("否", "是"), 1.0)
+    assert "冷却" in (v.error or "") and len(fake.requests) == 2 and b.cooling()
+    await b.aclose()
+
+
+async def test_probe_asks_each_judge_once_and_reports_raw_probabilities(now: datetime) -> None:
+    fake = Decisions(decisions_reply({"否": 0.35, "是": 0.65}))
+    jev = MockJevTransport(answer=lambda s, qs: {QUESTION_ID: {"是": 0.3, "否": 0.7}}, model="jev")
+    b = ka.OpenRouterDecisionsTransport("k", DECISION_1, http_transport=httpx.MockTransport(fake))
+    state = ka.probe_snapshot("ETHUSDT", now)
+    rows = await ka.probe(
+        [("B", b), ("A", jev)], FastLoopConfig(), symbol="ETHUSDT", want="short", state=state
+    )
+    assert [(r["judge"], r["p_yes"]) for r in rows] == [("B", 0.65), ("A", 0.3)]
+    assert rows[0]["raw_probs"] == {"否": 0.35, "是": 0.65}
+    assert rows[0]["question"] == "ETHUSDT 接下来 1–4 小时会下跌吗？（否 / 是）"
+    assert rows[1]["question"] == "ETHUSDT 接下来 1–4 小时会下跌吗？（是 / 否）"
+    assert rows[0]["request_id"] == "gen-dec-1" and rows[0]["latency_ms"] >= 0
+    assert fake.body()["state"] == state and jev.calls == [state]
+
+
+def test_keeper_assistant_probe_cli_prints_p_yes_for_model_b(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jiaoyi import cli
+    from jiaoyi.gate import jev
+    from tests.conftest import ROOT
+
+    fake = Decisions(decisions_reply({"否": 0.1, "是": 0.9}))
+    real = jev.OpenRouterDecisionsTransport
+
+    def with_fake(key: str, model: str, **kw: Any) -> Any:
+        return real(key, model, http_transport=httpx.MockTransport(fake))
+
+    monkeypatch.setattr(jev, "OpenRouterDecisionsTransport", with_fake)
+    monkeypatch.setattr(cli.ChainedSecretStore, "get", lambda self, k: "sk-or-test")
+    app = ROOT / "config" / "app.example.toml"
+    args = ["keeper-assistant-probe", "--app", str(app), "--model", DECISION_1]
+    assert cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "p(是)：0.9000" in out and '"是": 0.9' in out
+    assert "BTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）" in out
+    assert len(fake.requests) == 1
