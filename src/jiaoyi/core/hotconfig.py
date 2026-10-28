@@ -101,6 +101,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_assistant_timeout_s",
         "keeper_assistant_gap_s",
         "keeper_assistant_key_level",
+        "keeper_assistant_snapshot_max_age_s",
         "keeper_assistant_close",
         "keeper_assistant_b_record_only",
         "keeper_assistant_flip_confirm",

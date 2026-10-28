@@ -68,7 +68,12 @@ from jiaoyi.execution.brackets import CloseInProgress
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.gate.jev import JevDecisionModel
-from jiaoyi.keeper.assistant import CLOSE_SOURCE, KeeperAssistant, TransportScorer
+from jiaoyi.keeper.assistant import (
+    CLOSE_SOURCE,
+    KeeperAssistant,
+    TransportScorer,
+    ws_snapshot_provider,
+)
 from jiaoyi.keeper.keeper import close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
@@ -780,6 +785,7 @@ class Runner:
             close_source=lambda pid: (
                 close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
             ).get("source"),
+            snapshot_provider=ws_snapshot_provider(self.m.features.snapshot, app.clock),
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)

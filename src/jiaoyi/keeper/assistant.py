@@ -39,7 +39,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -79,6 +79,40 @@ REASONS = {
 }
 TRIGGER_TEXT = {"reverse_signal": "反向信号", "key_level": "价格穿过关键位"}
 SKIP_B = "跳过：B 不可用"
+STALE = "行情快照过旧/未预热，不问"
+STALE_REASONS = ("stale", "cold")
+WARM_S = 300.0
+"""``live_s`` 不满这些秒，窗口特征只是重新订阅后那几笔（和哨兵同一口径，缺了按没预热算）。"""
+
+SnapshotProvider = Callable[
+    [str, float], Awaitable[tuple[FeatureSnapshot | None, str, float | None]]
+]
+"""``(币, 最多几秒前) → (快照, 来源, 快照多少秒前)``。快照为 None 时「来源」是原因：``stale`` /
+``cold`` 按过旧 / 未预热记（每个币每分钟一条），别的原样当跳过原因。管家助手自己不取行情。"""
+
+
+def ws_snapshot_provider(
+    features: Callable[[str], FeatureSnapshot | None], clock: Callable[[], datetime]
+) -> SnapshotProvider:
+    """快环行情流的快照：够新（不超过 ``max_age_s``）、已预热才给，来源 ``ws``。"""
+
+    async def provide(
+        symbol: str, max_age_s: float
+    ) -> tuple[FeatureSnapshot | None, str, float | None]:
+        f = features(symbol)
+        if f is None:
+            return None, "没有这个币的行情快照", None
+        age = (clock() - f.ts).total_seconds()
+        if age > max_age_s:
+            return None, "stale", age
+        if f.values.get("live_s", 0.0) < WARM_S:
+            return None, "cold", age
+        return f, "ws", age
+
+    return provide
+
+
+STALE_LOG_EVERY = timedelta(minutes=1)
 SKIP_LOG_EVERY = timedelta(hours=1)
 REOPEN_DAYS = 7
 SUMMARY_EVERY = 10
@@ -301,6 +335,7 @@ class KeeperAssistant:
         alert: Callable[[str, str], None] | None = None,
         day_reset_tz: str = "Asia/Bangkok",
         close_source: Callable[[str], str | None] | None = None,
+        snapshot_provider: SnapshotProvider | None = None,
     ) -> None:
         """``close(仓, 原因)``：过平仓前检查、登记平仓任务（主循环正常路径）；返回 None = 已交出去，
         否则是没平的原因（已在平、平仓前检查拦下）。``jev``：A；``b_scorer(模型 id)``：给 B；
@@ -309,6 +344,7 @@ class KeeperAssistant:
         self._cfg = cfg
         self._rec = recorder
         self._features = features
+        self._snapshot = snapshot_provider or ws_snapshot_provider(features, clock)
         self._close = close
         self._clock = clock
         self._dir = data_dir / JOURNAL_DIR if data_dir is not None else None
@@ -334,6 +370,7 @@ class KeeperAssistant:
         self._close_source = close_source
         self._handed_off: set[str] = set()
         self._skip_logged: dict[str, datetime] = {}
+        self._stale_logged: dict[str, datetime] = {}
         self._summary_day = local_day(self._clock(), self._tz)
         self._restore()
 
@@ -590,7 +627,7 @@ class KeeperAssistant:
 
     async def _judges(
         self, symbol: str, want: str, first: bool = True
-    ) -> tuple[Verdict, Verdict] | str:
+    ) -> tuple[Verdict, Verdict, str] | str:
         """A、B 同时问「会不会往 ``want`` 走」，两个合起来最多等 ``keeper_assistant_timeout_s``；
         超时两个都算没答上。返回字符串 = 问不了的原因。"""
         cfg = self._cfg()
@@ -605,9 +642,29 @@ class KeeperAssistant:
                 else f"{b_model} 连续出错，冷却中"
             )
             return f"{SKIP_B}（{why}）"
-        f = self._features(symbol)
+        f, source, age = await self._snapshot(symbol, cfg.keeper_assistant_snapshot_max_age_s)
+        if f is None and source not in STALE_REASONS:
+            return source
         if f is None:
-            return "没有这个币的行情快照"
+            now = self._clock()
+            last = self._stale_logged.get(symbol)
+            if last is None or now - last >= STALE_LOG_EVERY:
+                self._stale_logged[symbol] = now
+                ago = "不知道" if age is None else f"{age:.0f} 秒前"
+                self._rec.record(
+                    now,
+                    Outcome.INFO,
+                    f"{symbol} {STALE}（{source}，快照 {ago}）",
+                    symbol=symbol,
+                    output={
+                        "keeper_assistant": {
+                            "skipped": STALE,
+                            "reason": source,
+                            "snapshot_age_s": None if age is None else round(age, 1),
+                        }
+                    },
+                )
+            return STALE
         state = direction_snapshot(symbol, f)
         mirrored = tuple(reversed(OPTIONS))
         started = time.perf_counter()
@@ -634,8 +691,9 @@ class KeeperAssistant:
             return (
                 Verdict("A", None, None, OPTIONS, why, ms),
                 Verdict("B", None, None, mirrored, why, ms),
+                source,
             )
-        return a, b
+        return a, b, source
 
     # ------------------------------------------------------------ 判断
     async def _check(self, pos: PositionRecord, trigger: str, detail: str, now: datetime) -> None:
@@ -645,6 +703,8 @@ class KeeperAssistant:
         snap = self._features(sym)
         px = snap.last_price if snap is not None else None
         got = await self._judges(sym, want)
+        if got == STALE:
+            return
         if isinstance(got, str):
             if self._skip_due(got, now):
                 self._rec.record(
@@ -656,7 +716,7 @@ class KeeperAssistant:
                     output={"keeper_assistant": {"trigger": trigger, "skipped": got}},
                 )
             return
-        a, b = got
+        a, b, source = got
         cfg = self._cfg()
         would = a.yes(cfg.keeper_assistant_min_p) and b.yes(cfg.keeper_assistant_min_p)
         act = (
@@ -706,6 +766,7 @@ class KeeperAssistant:
                 "r_at_signal": position_r(pos, px),
                 "asked": MOVE[want],
                 "would_close": would,
+                "snapshot_source": source,
                 "handed_off": handed,
                 "why": why,
             },
@@ -730,6 +791,8 @@ class KeeperAssistant:
         got = await self._judges(symbol, want, first=False)
         cfg = self._cfg()
         waits = _flip_waits(cfg)
+        if got == STALE:
+            return
         if isinstance(got, str):
             # 每场会最多一次，不按小时压：只由管家助手确认时每次没问成都要看得到原因
             self._rec.record(
@@ -740,7 +803,7 @@ class KeeperAssistant:
                 output={"keeper_assistant": {"kind": kind, "skipped": got}},
             )
             return
-        a, b = got
+        a, b, source = got
         min_p = cfg.keeper_assistant_min_p
         agreed = a.no(min_p) and b.no(min_p) if neutral else a.yes(min_p) and b.yes(min_p)
         both = agreed and _flip_purpose(cand, cfg) is not None
@@ -776,6 +839,7 @@ class KeeperAssistant:
                 "asked": MOVE[want],
                 "count": cand.count,
                 "both_no" if neutral else "both_yes": both,
+                "snapshot_source": source,
                 "result": result,
                 "why": why,
             },

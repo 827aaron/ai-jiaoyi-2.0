@@ -215,6 +215,7 @@ keeper_assistant_min_p = 0.6
 keeper_assistant_horizon = "1–4 小时"
 keeper_assistant_timeout_s = 8.0  # 两个模型合起来最多等几秒，超时不平
 keeper_assistant_gap_s = 120      # 同一个币两次问至少隔 120 秒；0 = 只是同一个币在问时不重复
+keeper_assistant_snapshot_max_age_s = 30  # 行情快照超过 30 秒或刚订阅不满 5 分钟，不问
 keeper_assistant_key_level = false  # true = 价格朝不利方向穿过卡上关键位也问
 keeper_assistant_close = false    # true = 两个都答「是」就平仓（先过管家的平仓前检查）
 keeper_assistant_b_record_only = true  # true = B 只记录，不平仓、不确认翻转

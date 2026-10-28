@@ -104,6 +104,8 @@ class Harness:
         self.closed: list[tuple[str, str]] = []
         self.closing = closing
         self.price = [price]
+        self.snap_age = 0.0
+        self.live_s = 3600.0
         self.alerts: list[tuple[str, str]] = []
         self.used_at_close: list[int] = []
         self.accepted: set[str] = set()
@@ -113,7 +115,11 @@ class Harness:
         self.a = KeeperAssistant(
             lambda: self.cfg,
             RoleRecorder(Role.KEEPER_ASSISTANT, self.log),
-            features=lambda sym: features(self.clock[0], price=self.price[0]),
+            features=lambda sym: features(
+                self.clock[0] - timedelta(seconds=self.snap_age),
+                price=self.price[0],
+                live_s=self.live_s,
+            ),
             close=self._close,
             clock=lambda: self.clock[0],
             data_dir=tmp_path,
@@ -216,6 +222,57 @@ async def test_KeeperAssistant_skips_without_asking_jev_when_b_is_unavailable(
     recs = h.records()
     assert len(recs) == 2  # once per hour per reason
     assert all(r["skipped"].startswith("跳过：B 不可用") for r in recs)
+
+
+@pytest.mark.parametrize(
+    ("age", "live", "asked"), [(31.0, 3600.0, False), (5.0, 299.0, False), (30.0, 300.0, True)]
+)
+async def test_KeeperAssistant_asks_only_on_a_fresh_warm_snapshot(
+    tmp_path: Path, now: datetime, age: float, live: float, asked: bool
+) -> None:
+    a = Scorer(0.9)
+    cards = Cards()
+    h = Harness(tmp_path, now, a, Scorer(0.9), cards=cards, keeper_assistant_gap_s=0)
+    h.snap_age, h.live_s = age, live
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    h.a.on_flip_pending("BTCUSDT", cand(now))
+    await h.settle()
+    assert (len(a.calls) == 2) is asked and (len(cards.confirmed) == 1) is asked
+    assert bool(h.closed) is asked
+    if asked:
+        assert [r["snapshot_source"] for r in ka.read_rows(tmp_path / "keeper_assistant")] == [
+            "ws",
+            "ws",
+        ]
+        return
+    assert a.calls == []
+    [rec] = h.records()  # once per coin per minute
+    assert rec["skipped"] == "行情快照过旧/未预热，不问"
+    assert (rec["reason"], rec["snapshot_age_s"]) == ("stale" if age > 30 else "cold", age)
+    h.clock[0] = now + timedelta(minutes=1)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    assert len(h.records()) == 2
+
+
+async def test_KeeperAssistant_asks_with_the_injected_snapshot_provider(
+    tmp_path: Path, now: datetime
+) -> None:
+    asked: list[tuple[str, float]] = []
+
+    async def provider(symbol: str, max_age_s: float) -> tuple[Any, str, float | None]:
+        asked.append((symbol, max_age_s))
+        return features(now - timedelta(minutes=10), live_s=0.0), "rest", 0.5
+
+    a = Scorer(0.9)
+    h = Harness(tmp_path, now, a, Scorer(0.9), keeper_assistant_snapshot_max_age_s=12)
+    h.a._snapshot = provider
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x")
+    await h.settle()
+    assert asked == [("BTCUSDT", 12.0)] and len(a.calls) == 1
+    [row] = ka.read_rows(tmp_path / "keeper_assistant")
+    assert row["snapshot_source"] == "rest"
 
 
 async def test_KeeperAssistant_on_reverse_signal_ignores_signals_with_the_position_or_when_off(

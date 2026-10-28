@@ -606,6 +606,14 @@ class FastLoopConfig(Contract):
         default=False,
         description="价格朝持仓不利的方向穿过卡上的关键位（持空往上穿、持多往下穿）也问。",
     )
+    keeper_assistant_snapshot_max_age_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="行情快照最多是几秒前的才问两个模型；更旧（这个币的行情流停了）或刚订阅"
+        "不满 5 分钟（还没预热）都不问，同一个币每分钟记一条。持仓判断、翻转确认都算。",
+    )
     keeper_assistant_close: bool = Field(
         default=False,
         description="开 = 两个模型都答「是」就平仓（走正常平仓路径，同一笔在平就不重复）。"
