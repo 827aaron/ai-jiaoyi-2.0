@@ -35,6 +35,9 @@
 - 持仓平掉后调 `keeper.forget(position_id)`。
 - 风控员构造时传 `state_dir=AppConfig.data_dir`，日亏熔断状态落盘在 `data/risk_state.json`，重启后当天仍锁住。
 - 风控员需要 `LotRulesProvider`（币安 exchangeInfo 的 stepSize / minQty / minNotional），由执行层提供；拿不到就拒单。
+- 杠杆按币安分层封顶（`[fast_loop] leverage_clamp_to_bracket`，默认关 = 原行为，热生效，面板「风控员 → 仓位太大时缩单」可改）：风控员原来的杠杆是 `max_leverage`（或作战卡约束时和卡上限取小），超过币安这个币的上限时币安拒绝设杠杆（XPLUSDT 10-26/27 六次 `-4028 Leverage 15 is not valid`），这笔开不了。打开后执行层的 `ExchangeInfoLotRules` 跟着下单精度一起拉执行所（Demo 就是 Demo）的 `/fapi/v1/leverageBracket`（签名只读 GET）：启动时一次，之后每天一次，失败 10 分钟后再试、沿用旧分层；从没拉到就按原杠杆（和关着一样）。风控员在不超过原杠杆的各档杠杆里挑能开最大仓位的那个：每个候选按 min(按风险算的名义, 该杠杆下的保证金上限, 该杠杆的分层名义上限) 打分，一样大取杠杆高的（例如分层 5k 10x / 25k 5x、按风险能开 20k：10x 只能开 5k，选 5x）；作战卡约束时不选低于卡杠杆下限的档。保证金上限按选中的杠杆算，名义价值再加一条上限「币安杠杆分层名义上限」（选中杠杆还允许的最高一档的名义上限 × 0.98：币安按标记价或空单回踩挂单价核，可能高于这里用的最新成交价，留 2% 免得 -2027）；每笔风险金额、单笔名义、总敞口和相关组敞口上限都不变，只会让名义更小。作战卡约束时降后的杠杆低于卡的杠杆下限就拒。决策记录 `detail`：`bracket_max_leverage`、`leverage_clamped`（降了才有）、没拉到分层写 `leverage_bracket`。开关在运行中打开，分层在下一次刷新下单精度（选币时）才拉。
+- 开仓前读账户（`handle_signal` 拍板通过、拿开仓锁后的 `executor.account()`）失败：记一条风控员拒绝「读账户失败，本信号放弃：…」（`output.detail.by = "account_read"`，带错误），不再让任务带着异常消失；`app.toml account_read_retries`（默认 0 = 不重读，最多 3，热生效）> 0 时隔 1 秒再读这么多次：只对很快就失败的（连不上、5xx）有用，hummingbot 请求超时 5 秒，一次超时基本就把 `signal_max_age_s` 用完了；每次重读前看信号剩下的有效期，不到 1 秒就直接放弃（记拒绝）；重读成功后再查暂停 / 重启和信号是否已过期，任一成立都记拒绝不开仓。主循环 `_spawn` 起的后台任务出异常一律记日志（带调用栈）；开仓 / 追单任务记风控员、管家复查记管家、巡逻兵平仓记巡逻兵、对账记对账员、面板平仓记执行的「出错」（团队页今天的出错数）。
+- 开仓拍板和持仓管家默认共用同一个 Jev 实例，所以共用一份连续出错计数和冷却（`jev_max_consecutive_errors` 次连错暂停 `jev_error_cooldown_s` 秒）：管家每轮问每笔持仓，它连错会让开仓拍板也进冷却。`app.toml jev_shared_cooldown = false`（改后重启）时管家拿 `JevDecisionModel.with_own_errors()`：同一条通道、同一份配置和超时，计数和冷却各算各的；这时拍板人的灯只反映开仓拍板，管家自己的 Jev 连错 / 冷却并进管家的灯（变黄 / 变红，标题写「管家的 Jev 连续出错 N 次」或「冷却中（还剩 N 秒）」）。默认 `true` = 原行为。
 - 拍板模型用 `gate.jev.decision_model_from_config(...)` 选：有所选通道的 key（`JEV_API_KEY` 或 `OPENROUTER_API_KEY`，见下文“Jev 通道”）且 `[fast_loop] jev_model` 锁了具体版本 → Jev；
   否则只有 paper 模式且 `rule_gate_without_jev = true` 才用规则版（testnet / live 构造规则版直接报错），默认返回 None（用桩，不开仓）。
   这是启动时的一次性选择，Jev 运行中出错只返回 `ok=False`，不会切到规则版。
@@ -108,10 +111,12 @@
 | `adaptive_base_max_queue` | 0 | 0–20，且 < 下一项 | 自适应：排队 ≤ 它用 base |
 | `adaptive_mini_min_queue` | 3 | 1–50 | 自适应：排队 ≥ 它用 mini，中间用 small |
 | `backfill_bars` | 400 | 64–1500 | 启动回填多少根 5 分钟线 |
+| `keeper_snapshot` | `direction` | `direction` / `rank` / `off` | 管家复查快照里怎么带预测员（改后重启）。`direction`（原行为）：`kronos.agree` = 平均路径终点在持仓方向一侧给 1、否则 0，排得出名次再带 `kronos.rank`；`rank`：只带 `kronos.rank`（top / mid / bottom，和拍板加分同一个全池排名），排不出名次就不写 `kronos`；`off`：不带。持仓第一题里描述预测员的那句跟着换（rank：「top 利多不利空，bottom 反之」，off：不提），rank / off 各有模板版本 `q9-krank` / `q9-koff`（direction 仍是 `q9`，逐字节不变），管家决策记录 `input.jev.kronos_snapshot` 记用的哪种 |
 
 - 三个模型都钉了 Hugging Face 提交（见 `predictor/kronos.py` 的 `MODEL_SPECS`）：mini 配 Tokenizer-2k（上下文 2048），small / base 配 Tokenizer-base（上下文 512）。用到哪个才加载哪个，加载后常驻。
 - 实测 small：约 3.0 秒 / 币，5 个币排队约 14.9 秒；按需模式下一般只有卡里的几个币，排得开。`Forecast.model` 记着这次用的是哪个。
 - 开关仍是 `predictor_enabled`；运行中关掉会丢掉已有预测。
+- `p_up` 是二值的：平均路径终点高于现价 = 1、低于 = 0、持平 = 0.5，不是「几成路径向上」。10-27 / 28 的 1927 条预测里 77% 是 0；主网 15 分钟线回测 4 小时方向准确率 49%，喊「跌」的只对 43%。所以拍板加分只看全池名次；管家快照默认的 `kronos.agree` 由它算，做多的仓多半拿到 0、做空的多半拿到 1，多空不对称，`keeper_snapshot = "rank"` 改成只给名次。面板预测员卡片写「平均路径终点在现价下方 / 上方」。
 
 ## ATR 周期和止损倍数（设置页可调）
 

@@ -142,6 +142,8 @@ OPTIONAL_APP_FIELDS = {
     "card_score_every_min",  # 默认 60，老配置文件没有这一行
     "card_score_window_days",  # 默认 30
     "jev_max_concurrent",  # 默认 4，老配置文件没有这一行
+    "jev_shared_cooldown",  # 默认 true（原行为）
+    "account_read_retries",  # 默认 0（原行为）
     "protection_stale_s",  # 默认 120，老配置文件没有这一行
     "sim_environment",
     "meeting_interval",

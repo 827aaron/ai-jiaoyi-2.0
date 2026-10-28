@@ -658,20 +658,36 @@ def _startup_problem(args: argparse.Namespace) -> str | None:
 
 def _watchdog(args: argparse.Namespace) -> int:
     """主进程外的心跳检查，由 launchd 每分钟跑一次（com.jiaoyi.watchdog）。"""
-    from jiaoyi.watchdog import run_once
+    from jiaoyi.watchdog import config_state_path, run_once
 
+    config_error: str | None = None
     try:
         data_dir = load_app_config(Path(args.app)).data_dir
     except ConfigError as e:
+        # A config ahead of the code must not blind the heartbeat check: keep watching the
+        # data dir the file names (or the default) and alert about the config itself.
         print(e, file=sys.stderr)
-        return 2
+        config_error = str(e)
+        data_dir = _fallback_data_dir(Path(args.app))
     store = ChainedSecretStore()
-    return run_once(
+    rc = run_once(
         data_dir,
         store.get("TELEGRAM_BOT_TOKEN"),
         store.get("TELEGRAM_CHAT_ID"),
         datetime.now(UTC),
+        config_error=config_error,
+        config_state=config_state_path(Path(args.app)),
     )
+    return rc or (2 if config_error else 0)
+
+
+def _fallback_data_dir(app_path: Path) -> str:
+    try:
+        with app_path.open("rb") as f:
+            raw = tomllib.load(f).get("data_dir")
+    except (OSError, tomllib.TOMLDecodeError):
+        raw = None
+    return raw if isinstance(raw, str) and raw else "data"
 
 
 def _panel(args: argparse.Namespace) -> int:

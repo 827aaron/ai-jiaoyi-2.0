@@ -1909,6 +1909,29 @@ class CcxtBinanceFutures:
         self.untradeable_status = off
         return out
 
+    async def leverage_brackets(self) -> dict[str, tuple[tuple[float, int], ...]]:
+        """Per-symbol ``(notionalCap, initialLeverage)`` tiers of this account on the execution
+        venue (signed read-only GET /fapi/v1/leverageBracket), ascending by notional cap, so the
+        first tier carries the symbol's maximum leverage. Symbols with unreadable tiers are left
+        out."""
+        try:
+            rows = await self._ex.fapiPrivateGetLeverageBracket()
+        except Exception as e:
+            raise ExchangeError(f"读杠杆分层失败：{e}") from e
+        out: dict[str, tuple[tuple[float, int], ...]] = {}
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                tiers = sorted(
+                    (float(b["notionalCap"]), int(float(b["initialLeverage"])))
+                    for b in row["brackets"]
+                )
+                symbol = str(row["symbol"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tiers and all(cap > 0 and lev >= 1 for cap, lev in tiers):
+                out[symbol] = tuple(tiers)
+        return out
+
     async def income_since(self, since: datetime) -> float:
         return sum(r.income for r in await self.income_rows(since))
 
