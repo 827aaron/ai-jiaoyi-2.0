@@ -383,8 +383,9 @@ class RiskGuardImpl:
 
         ``release=False`` = 重新检查：完整再审一遍，不放行任何规则，决策记录标 ``by=recheck``，
         调用方不下单。``release=True`` = 人工放行：软规则（自动减仓风险高 / 刚上线 / 价差 / 滑点 /
-        盘口深度上限 / 拍板人概率门槛）不拦，被跳过的原因写进记录的 ``waived``；暂停 / 熔断 /
-        要下架 / 封币 / 作战卡 / 笔数和敞口上限 / 交易所最小下单量 / 保证金 / 总风险额度照旧。"""
+        盘口深度上限 / 缩单下限 / 拍板人概率门槛）不拦，被跳过的原因写进记录的 ``waived``；
+        暂停 / 熔断 / 要下架 / 封币 / 作战卡 / 笔数和敞口上限 / 交易所最小下单量 / 保证金 /
+        总风险额度照旧。"""
         return self._run_review(
             signal, jev, card, account, now, market, "release" if release else "recheck"
         )
@@ -924,10 +925,18 @@ class RiskGuardImpl:
                 )
                 return None
 
-        caps = {
+        # Caps an empty account would also hit; the size floor measures squeezes beyond these.
+        static_caps = {
             **({"作战卡名义上限": cs.notional_usdt.max} if binding_card else {}),
             **({"币安杠杆分层名义上限": tier_cap} if tier_cap is not None else {}),
             "单笔名义上限": risk.notional_cap(equity),
+        }
+        # The total exposure cap is left out: RiskConfig keeps every category cap at or below it.
+        planned_notional = min(
+            notional, *static_caps.values(), risk.category_exposure_x[cs.category] * equity
+        )
+        caps = {
+            **static_caps,
             "总敞口余量": risk.max_total_exposure_x * equity - account.open_notional_usdt,
             "相关组敞口余量": risk.category_exposure_x[cs.category] * equity
             - account.open_notional_by_category.get(cs.category, 0.0),
@@ -962,7 +971,10 @@ class RiskGuardImpl:
         qty = _floor_step(notional / entry, lot.step_size)
         if lot.max_qty is not None and qty > lot.max_qty:
             qty = _floor_step(lot.max_qty, lot.step_size)
-            detail["capped_by_max_qty"] = qty
+            binding = "交易所单笔最大数量"
+            detail.update(capped_by_max_qty=qty, binding=binding)
+        if lot.max_qty is not None:
+            planned_notional = min(planned_notional, lot.max_qty * entry)
         if qty < lot.min_qty or qty <= 0:
             reasons.append(f"数量 {qty} 低于交易所最小下单量 {lot.min_qty}")
             return None
@@ -975,6 +987,25 @@ class RiskGuardImpl:
             return None
         risk_usdt = qty * dist
         detail.update(qty=qty, notional=round(notional, 2), risk_usdt=round(risk_usdt, 4))
+        if fast.respect_card_notional_min and not binding_card and notional < cs.notional_usdt.min:
+            reasons.append(
+                f"按{binding}只能开 {notional:.0f}U，低于作战卡名义下限 {cs.notional_usdt.min:.0f}U"
+            )
+            return None
+        planned_risk = planned_notional / entry * dist
+        if fast.min_size_ratio > 0 and planned_risk > 0:
+            # A cap that shrinks the trade to dust still costs fees and a position slot.
+            ratio = risk_usdt / planned_risk
+            detail.update(planned_risk_usdt=round(planned_risk, 4), size_ratio=round(ratio, 4))
+            if ratio < fast.min_size_ratio:
+                why = (
+                    f"仓位被{binding}压到计划的 {ratio * 100:.1f}%（风险 {risk_usdt:.2f}U），"
+                    f"低于下限 {fast.min_size_ratio * 100:g}%，不开"
+                )
+                if waived is None:
+                    reasons.append(why)
+                    return None
+                waived.append(why)
 
         # ---- 总持仓风险：全部按保命止损算，加上这笔不能超过当天还能亏的额度，否则几笔一起打到
         # 保命止损会穿过日亏熔断线。只扣已实现亏损：浮亏已经算在各笔的保命止损风险里，不重复扣。

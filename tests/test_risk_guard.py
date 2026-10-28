@@ -1033,3 +1033,163 @@ def test_tp_r_cap_config_bounds() -> None:
     assert c.FastLoopConfig(tp_r_cap=1.0).tp_r_cap == 1.0
     with pytest.raises(ValueError, match="tp_r_cap"):
         c.FastLoopConfig(tp_r_cap=0.3)
+
+
+_MAX_QTY_LOT = LotRules(step_size=0.001, min_qty=0.001, min_notional=5.0, max_qty=0.01)
+
+
+def _size_review(
+    tmp_path: Path,
+    now: datetime,
+    side: c.Side,
+    available: float | None = 100.0,
+    release: bool | None = None,
+    lots: Lots | None = None,
+    risk: c.RiskConfig = RISK,
+    **fast: object,
+) -> tuple[c.RiskVerdict, dict[str, object]]:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update=fast)
+    g = _Guard(risk, cfg, lots or Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    sig, j, cd = _kind_case(now, side, c.SignalKind.BTC_LEAD, 0.8)
+    acc = account(now) if available is None else account(now, available_usdt=available)
+    if release is None:
+        v = g.review(sig, j, cd, acc, now)
+    else:
+        v = g.review_manual(sig, j, cd, acc, now, market=sig.features, release=release)
+    [rec] = log.read_day(now.date().isoformat())
+    return v, rec.output.get("detail", {})
+
+
+# Equity 10000, M tier: risk notional 42500 U is cut to the 20000 U per-trade cap even on an
+# empty account, so the planned risk is 20000 / 68000 * 120 = 35.29 U. available 100 leaves a
+# margin cap of 100 * 0.95 / (1/5 + 5bp) = 474 U, i.e. 0.006 BTC risking 0.72 U.
+_DUST_REASON = "仓位被可用保证金压到计划的 2.0%（风险 0.72U），低于下限 25%，不开"
+
+
+@_SIDES
+def test_review_min_size_ratio_rejects_margin_squeezed_dust(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _size_review(tmp_path, now, side, min_size_ratio=0.25)
+    assert v.reasons == [_DUST_REASON]
+    assert detail["planned_risk_usdt"] == 35.2941
+    assert detail["size_ratio"] == 0.0204
+
+
+@_SIDES
+def test_review_min_size_ratio_zero_keeps_dust_trade(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _size_review(tmp_path, now, side)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.quantity == pytest.approx(0.006)
+    assert detail["binding"] == "可用保证金"
+    assert "size_ratio" not in detail
+
+
+@_SIDES
+def test_review_manual_release_waives_min_size_ratio(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _size_review(tmp_path, now, side, release=True, min_size_ratio=0.25)
+    assert v.approved, v.reasons
+    assert detail["waived"] == _DUST_REASON
+
+
+@_SIDES
+def test_review_min_size_ratio_ignores_static_per_trade_cap(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _size_review(tmp_path, now, side, available=None, min_size_ratio=0.99)
+    assert v.approved, v.reasons
+    assert detail["binding"] == "单笔名义上限"
+    assert detail["size_ratio"] == 0.9996
+
+
+@_SIDES
+def test_review_min_size_ratio_leaves_full_size_trade(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update={"min_size_ratio": 0.25})
+    g = _Guard(RISK, cfg, Lots(), RoleRecorder(c.Role.RISK_GUARD, log))
+    sig = signal(now, side=side, kind=c.SignalKind.BTC_LEAD, f=features(now, atr=4000.0))
+    cd = card(now, bias="both", allowed_signals=[k.value for k in c.SignalKind])
+    v = g.review(sig, jev(size={"S": 0.1, "M": 0.1, "L": 0.8}), cd, account(now), now)
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.quantity == pytest.approx(0.016)
+    [rec] = log.read_day(now.date().isoformat())
+    detail = rec.output.get("detail", {})
+    assert detail["binding"] == "风险金额"
+    assert (detail["planned_risk_usdt"], detail["size_ratio"]) == (100.0, 0.96)
+
+
+@_SIDES
+def test_review_max_qty_truncation_is_binding_and_static(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, detail = _size_review(
+        tmp_path, now, side, available=None, lots=Lots(_MAX_QTY_LOT), min_size_ratio=0.99
+    )
+    assert v.approved, v.reasons
+    assert v.intent is not None and v.intent.quantity == pytest.approx(0.01)
+    assert detail["binding"] == "交易所单笔最大数量"
+    assert detail["capped_by_max_qty"] == 0.01
+    assert (detail["planned_risk_usdt"], detail["size_ratio"]) == (1.2, 1.0)
+
+
+@_SIDES
+def test_review_min_size_ratio_boundary_is_strict(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    # Planned 0.01 BTC (max_qty); margin 80 * 0.95 / 0.2005 = 379 U gives 0.005 BTC: exactly 50%.
+    lots = Lots(_MAX_QTY_LOT)
+    v, detail = _size_review(
+        tmp_path / "eq", now, side, available=80.0, lots=lots, min_size_ratio=0.5
+    )
+    assert v.approved, v.reasons
+    assert detail["size_ratio"] == 0.5
+    v, _ = _size_review(
+        tmp_path / "over", now, side, available=80.0, lots=lots, min_size_ratio=0.5001
+    )
+    assert v.reasons == ["仓位被可用保证金压到计划的 50.0%（风险 0.60U），低于下限 50.01%，不开"]
+
+
+@_SIDES
+def test_review_respect_card_notional_min(tmp_path: Path, now: datetime, side: c.Side) -> None:
+    v, _ = _size_review(tmp_path / "on", now, side, respect_card_notional_min=True)
+    assert v.reasons == ["按可用保证金只能开 408U，低于作战卡名义下限 500U"]
+    v, _ = _size_review(tmp_path / "off", now, side)
+    assert v.approved, v.reasons
+
+
+@_SIDES
+def test_review_manual_release_keeps_card_notional_min(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    v, _ = _size_review(tmp_path, now, side, release=True, respect_card_notional_min=True)
+    assert v.reasons == ["按可用保证金只能开 408U，低于作战卡名义下限 500U"]
+
+
+@_SIDES
+def test_review_respect_card_notional_min_noop_when_card_binding(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    on, _ = _size_review(
+        tmp_path / "on", now, side, card_caps_binding=True, respect_card_notional_min=True
+    )
+    off, _ = _size_review(tmp_path / "off", now, side, card_caps_binding=True)
+    assert on.reasons == off.reasons == ["按可用保证金只能开 285U，低于作战卡下限 500U"]
+
+
+@_SIDES
+def test_review_min_size_ratio_plans_against_category_cap(
+    tmp_path: Path, now: datetime, side: c.Side
+) -> None:
+    # major at 1x equity (10000 U) is the single smallest static cap: planned 17.65 U, not 35.29 U.
+    caps = {**RISK.category_exposure_x, c.Category.MAJOR: 1.0}
+    risk = c.RiskConfig.model_validate({**RISK.model_dump(), "category_exposure_x": caps})
+    v, detail = _size_review(tmp_path, now, side, risk=risk, min_size_ratio=0.25)
+    assert v.reasons == ["仓位被可用保证金压到计划的 4.1%（风险 0.72U），低于下限 25%，不开"]
+    assert (detail["planned_risk_usdt"], detail["size_ratio"]) == (17.6471, 0.0408)
