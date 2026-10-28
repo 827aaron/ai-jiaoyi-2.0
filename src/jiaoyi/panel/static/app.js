@@ -2688,6 +2688,7 @@ const PLAIN = {
   regime_flip_check_min: "每隔多久检查（分钟）",
   regime_flip_suspect_log_min: "同类疑似隔多久记文件（分钟）",
   regime_flip_price_max_age_min: "BTC 参照行情最多旧多久（分钟）",
+  regime_flip_ref_max_age_min: "参照太旧就改看最近多久的 BTC（分钟）",
   liq_min_usdt_1m: "1 分钟爆仓至少多少 USDT 才算",
   liq_ratio: "爆仓额是平时几倍才算",
   liq_drop_pct_5m: "爆仓砸出的 5 分钟跌幅至少百分之几",
@@ -2800,12 +2801,13 @@ const HINT = {
   regime_flip_live: "开 = 测试网 / 实盘也启用。默认关，仅模拟盘开启；总开关关闭时所有模式都停用",
   regime_flip_breadth: "默认 30：40 个有效币里至少 30 个，也就是四分之三，过去一小时往旧判断的反方向走。不是 40 个时按比例算；持平和缺数据的币不计入。填 0 不要求池面条件",
   regime_flip_btc_pct: "BTC 比市场参照价至少反向走百分之几；中性检查上下两个方向。同方向刷新保留参照，只有观点方向改变或定期整轮成功才推进参照。默认 1 表示 1%；填 0 不要求 BTC 幅度条件",
-  regime_flip_confirm: "默认连续 2 次同方向检查都满足才更新大盘。填 1 是满足一次即更新，填 0 不等连续确认；次数不设上限，改门槛后重新累计",
+  regime_flip_confirm: "默认连续 2 次同方向检查都满足才更新大盘。填 1 是满足一次即更新，填 0 不等连续确认；确认一次后要等条件中断、再连续满足才会再确认，改门槛后重新累计",
   regime_flip_min_gap_min: "默认 60 分钟内不因方向变化再次更新大盘，减少来回震荡时的 AI 花费。填 0 不限制；仍遵守已有日预算、限流和失败退避",
   regime_flip_min_symbols: "默认至少 10 个币有可用的一小时涨跌。持平和缺数据的币不算；填 0 不限制个数，但启用池面条件时仍需有数据才能计算比例",
   regime_flip_check_min: "默认 5 分钟检查一次，可填任意正数或小数；填 0 停止定时检查。改后按新周期重新计时，无需重启",
   regime_flip_suspect_log_min: "连续同类疑似在独立观测文件里默认每 30 分钟再记一次，填 0 每次都记。面板和决策日志始终记录每次检查发现的疑似",
   regime_flip_price_max_age_min: "取上次总盘会 BTC 参照价时，行情最多允许旧几分钟。默认 5，填 0 不限制新鲜程度；没有价格仍不能建立参照",
+  regime_flip_ref_max_age_min: "市场参照只在大盘方向改变时更新，同方向可以几小时不动，拿它比 BTC 涨跌会一直满足。填 120：参照超过 120 分钟后，BTC 改为和最近 120 分钟内检查记下的最早价比；刚重启时从现在起重新量。默认 0 = 一直和参照价比",
   jev_provider: "官方直连要 Jev 的 key；OpenRouter 和军师团共用一把 key",
   jev_model: "锁死一个版本，门槛按它调过；不在网页上改",
   jev_usd_per_mtok: "按用量算钱，用来统计花费",
@@ -2860,7 +2862,7 @@ function offBind(i) {
 const MOOT = {
   "schedule.over_budget": ["budget.daily_cost_limit_usd", "日上限已关闭，用不上"],
   "schedule.slowdown_interval_min": ["budget.daily_cost_limit_usd", "日上限已关闭，用不上"],
-  ...Object.fromEntries(["on", "live", "breadth", "btc_pct", "confirm", "min_gap_min", "min_symbols", "suspect_log_min", "price_max_age_min"].map((k) => [`fast_loop.regime_flip_${k}`, ["fast_loop.regime_flip_check_min", "定时检查已关闭，用不上"]])),
+  ...Object.fromEntries(["on", "live", "breadth", "btc_pct", "confirm", "min_gap_min", "min_symbols", "suspect_log_min", "price_max_age_min", "ref_max_age_min"].map((k) => [`fast_loop.regime_flip_${k}`, ["fast_loop.regime_flip_check_min", "定时检查已关闭，用不上"]])),
 };
 const mootOf = (i, ix) => {
   const m = MOOT[`${i.sec}.${i.key}`];
@@ -3028,7 +3030,7 @@ const ROLES = [
     { g: "", keys: ["app.predictor_enabled", "predictor.*", "schedule.predictor_against_runs"] },
   ] },
   { id: "sentinel", t: "哨兵", strip: ["哨兵"], what: "盯行情，发现信号就交给拍板人", groups: [
-    { g: "大盘翻转", hint: "默认值是观察起点，尚无数据支持。满足条件时只调用一次市场模型，更新当前大盘背景；定时整轮和单币临时会仍按原节奏执行。门槛和间隔填 0 可关闭对应限制。", keys: ["fast_loop.regime_flip_on", "fast_loop.regime_flip_live", "fast_loop.regime_flip_breadth", "fast_loop.regime_flip_btc_pct", "fast_loop.regime_flip_confirm", "fast_loop.regime_flip_min_gap_min", "fast_loop.regime_flip_min_symbols", "fast_loop.regime_flip_check_min", "fast_loop.regime_flip_suspect_log_min", "fast_loop.regime_flip_price_max_age_min"] },
+    { g: "大盘翻转", hint: "默认值是观察起点，尚无数据支持。满足条件时只调用一次市场模型，更新当前大盘背景；定时整轮和单币临时会仍按原节奏执行。门槛和间隔填 0 可关闭对应限制。", keys: ["fast_loop.regime_flip_on", "fast_loop.regime_flip_live", "fast_loop.regime_flip_breadth", "fast_loop.regime_flip_btc_pct", "fast_loop.regime_flip_confirm", "fast_loop.regime_flip_min_gap_min", "fast_loop.regime_flip_min_symbols", "fast_loop.regime_flip_check_min", "fast_loop.regime_flip_suspect_log_min", "fast_loop.regime_flip_price_max_age_min", "fast_loop.regime_flip_ref_max_age_min"] },
     { g: "信号识别", keys: ["fast_loop.volume_surge_live", "fast_loop.breakout_vol_ratio", "fast_loop.surge_vol_ratio", "fast_loop.surge_taker_ratio", "fast_loop.liq_min_usdt_1m", "fast_loop.liq_ratio", "fast_loop.liq_drop_pct_5m", "fast_loop.crowded_funding_rate", "fast_loop.session_window_min", "fast_loop.session_vol_ratio", "fast_loop.session_cme_open", "fast_loop.session_cme_open_live"] },
     { g: "持仓量变化", keys: ["fast_loop.oi_follow_on", "fast_loop.oi_follow_live", "fast_loop.oi_window_min", "fast_loop.oi_min_pct", "fast_loop.oi_price_z", "fast_loop.oi_*"] },
     { g: "大户散户分歧（反着大户）", keys: ["fast_loop.top_crowd_on", "fast_loop.top_crowd_live", "fast_loop.top_crowd_window_min", "fast_loop.top_crowd_min_pct", "fast_loop.top_crowd_*"] },

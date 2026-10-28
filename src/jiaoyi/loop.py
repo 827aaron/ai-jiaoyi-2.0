@@ -2265,6 +2265,10 @@ class Runner:
                             btc_ret_since_round_pct=check.btc_ret,
                             confirm_count=check.count,
                             candidate_direction=check.candidate_direction,
+                            baseline_at=check.baseline_at.isoformat()
+                            if check.baseline_at
+                            else None,
+                            baseline_btc_px=check.baseline_btc_px,
                         )
                         if check.kind == "confirmed":
                             await self.slow_tick(flip=row)

@@ -196,6 +196,7 @@ regime_flip_min_symbols = 10      # 最少有效涨跌币数；持平、缺数�
 regime_flip_check_min = 5         # 每隔几分钟检查；可填小数；0 = 停止定时检查
 regime_flip_suspect_log_min = 30  # 连续同类疑似的文件记录间隔；0 = 每次记；面板始终每次记
 regime_flip_price_max_age_min = 5 # BTC 参照行情最多旧几分钟；0 = 不限制（仍需有价格）
+regime_flip_ref_max_age_min = 0   # 参照比这更旧（分钟）就改和这段时间内最早的 BTC 价比；0 = 一直和参照比
 # 和作战卡相反的信号：有仓叫管家急查，同一个币反复出就申请单币临时会；不会开反方向的仓
 against_signal_on = true          # false = 只记录（和以前一样）
 against_dedup_s = 300             # 同一个币同一种反向信号 5 分钟内只算 1 次

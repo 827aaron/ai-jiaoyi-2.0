@@ -396,3 +396,18 @@ async def test_reference_price_freshness_can_be_disabled(tmp_path: Path, now: da
     cfg = r.app.app_cfg.fast_loop
     patch_inplace(cfg, cfg.model_copy(update={"regime_flip_price_max_age_min": 0}), HOT_FAST)
     assert r._regime_btc_price() == 100
+
+
+async def test_stale_reference_journals_a_fresh_btc_baseline(tmp_path: Path, now: datetime) -> None:
+    r, c, eng, clock, px = await setup(tmp_path, now)
+    cfg = r.app.app_cfg.fast_loop
+    patch_inplace(cfg, cfg.model_copy(update={"regime_flip_ref_max_age_min": 120}), HOT_FAST)
+    px[0] = 102
+    clock[0] += timedelta(minutes=600)
+    await r.regime_flip_tick()
+    await finish(r)
+    row = records(tmp_path / "regime_flip")[-1]
+    assert row["kind"] == "suspect_breadth" and row["btc_ret_since_round_pct"] == 0
+    assert row["reference_at"] == now.isoformat() and row["reference_btc_px"] == 100
+    assert row["baseline_at"] == clock[0].isoformat() and row["baseline_btc_px"] == 102
+    assert eng.market_calls == 0 and c.regime_reference.btc_px == 100

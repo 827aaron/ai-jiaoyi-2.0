@@ -77,6 +77,7 @@ def test_pool_proportion_and_no_implicit_maximum(now: datetime) -> None:
     r = rule(now, regime_flip_confirm=1, regime_flip_min_gap_min=10000.25)
     assert r.step(now, 15, 5, 20, 102).kind == "confirmed"
     r.last_rerun = now
+    assert r.step(now + timedelta(minutes=1), 10, 10, 20, 102).kind == "suspect_btc"
     assert "间隔内" in r.step(now + timedelta(minutes=10000), 15, 5, 20, 102).reason
     assert r.step(now + timedelta(minutes=10000.25), 15, 5, 20, 102).kind == "confirmed"
     assert FastLoopConfig(regime_flip_confirm=1000, regime_flip_min_symbols=1000)
@@ -99,6 +100,54 @@ def test_zero_disables_each_threshold_and_hot_edit_resets(now: datetime) -> None
     assert r.step(now + timedelta(minutes=2), 0, 0, 0, 100).kind == "confirmed"
     r.arm(reference(now + timedelta(minutes=2), "看涨"))
     assert r.count == 0
+
+
+def test_one_confirmation_per_episode_until_the_condition_breaks(now: datetime) -> None:
+    r = rule(now, regime_flip_confirm=3, regime_flip_min_gap_min=0.2)
+    kinds = [r.step(now + timedelta(minutes=i), 30, 10, 40, 101).kind for i in range(10)]
+    assert kinds == ["blocked", "blocked", "confirmed", *["blocked"] * 7]
+    assert (
+        r.step(now + timedelta(minutes=10), 30, 10, 40, 101).reason
+        == "已确认过，条件中断后再重新累计"
+    )
+    r.step(now + timedelta(minutes=11), 40, 0, 40, None)  # 缺数据不算条件中断
+    assert r.step(now + timedelta(minutes=12), 30, 10, 40, 101).count == 0
+    assert r.step(now + timedelta(minutes=13), 20, 20, 40, 101).kind == "suspect_btc"
+    kinds = [r.step(now + timedelta(minutes=14 + i), 30, 10, 40, 101).kind for i in range(3)]
+    assert kinds == ["blocked", "blocked", "confirmed"]
+
+
+def test_neutral_other_side_breaks_the_confirmed_side(now: datetime) -> None:
+    r = rule(now, "中性", regime_flip_confirm=1, regime_flip_min_gap_min=0)
+    assert r.step(now, 40, 0, 40, 102).kind == "confirmed"
+    assert r.step(now + timedelta(minutes=1), 40, 0, 40, 102).kind == "blocked"
+    assert r.step(now + timedelta(minutes=2), 0, 40, 40, 98).candidate_direction == "看跌"
+    assert r.step(now + timedelta(minutes=3), 40, 0, 40, 102).kind == "confirmed"
+
+
+def test_stale_reference_measures_btc_from_a_fresh_baseline(now: datetime) -> None:
+    r = rule(now, regime_flip_confirm=1, regime_flip_ref_max_age_min=120)
+    at = now + timedelta(minutes=600)
+    first = r.step(at, 20, 20, 40, 105)
+    assert (first.kind, first.btc_ret, first.baseline_at) == ("quiet", 0, at)
+    for i in range(1, 120):
+        r.step(at + timedelta(minutes=i), 20, 20, 40, 105)
+    check = r.step(at + timedelta(minutes=120), 30, 10, 40, 105.5)
+    assert check.kind == "suspect_breadth"
+    assert check.baseline_at == at and check.btc_ret == pytest.approx(0.5 / 105 * 100)
+    check = r.step(at + timedelta(minutes=121), 30, 10, 40, 106.1)
+    assert check.kind == "confirmed"
+    assert check.baseline_at == at + timedelta(minutes=1) and check.baseline_btc_px == 105
+    young = rule(now, regime_flip_ref_max_age_min=120).step(
+        now + timedelta(minutes=60), 20, 20, 40, 105
+    )
+    assert young.kind == "suspect_btc" and young.baseline_btc_px == 100
+
+
+def test_ref_max_age_zero_keeps_comparing_with_the_reference(now: datetime) -> None:
+    r = rule(now, regime_flip_confirm=1)
+    check = r.step(now + timedelta(minutes=600), 30, 10, 40, 101)
+    assert check.kind == "confirmed" and check.baseline_btc_px == 100
 
 
 def bar(symbol: str, at: datetime, px: float) -> Kline:

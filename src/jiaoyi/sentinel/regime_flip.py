@@ -47,6 +47,8 @@ class FlipCheck:
     count: int = 0
     btc_ret: float | None = None
     candidate_direction: Direction | None = None
+    baseline_at: datetime | None = None
+    baseline_btc_px: float | None = None
 
 
 class RegimeFlip:
@@ -59,17 +61,34 @@ class RegimeFlip:
         self.count = 0
         self._checked_at: datetime | None = None
         self._candidate: Direction | None = None
+        # 已确认过的方向：条件一直成立时不再重复确认；缺数据不算中断，只有看到条件不成立才解开
+        self._fired: Direction | None = None
         self._thresholds: dict[str, Any] = {}
+        self._btc_seen: list[tuple[datetime, float]] = []
 
     def arm(self, reference: RegimeReference | None) -> None:
         if reference != self.reference:
             self.reset()
+            self._fired = None
             self.reference = reference
 
     def reset(self) -> None:
         self.count = 0
         self._checked_at = None
         self._candidate = None
+
+    def _baseline(
+        self, now: datetime, ref: RegimeReference, btc_px: float
+    ) -> tuple[datetime, float]:
+        """参照比 ``regime_flip_ref_max_age_min`` 旧时，改用自己记下的、窗口内最早的 BTC 价。
+
+        参照只在发布方向改变时更新，同方向几小时不动，拿它比 BTC 涨跌会一直满足。刚重启、窗口里
+        只有本次价时涨跌为 0：宁可从现在起重新量，也不拿旧参照凑数。"""
+        max_age = self.cfg.regime_flip_ref_max_age_min
+        start = now - timedelta(minutes=max_age)
+        if max_age <= 0 or ref.ts >= start:
+            return ref.ts, ref.btc_px
+        return next(((t, px) for t, px in self._btc_seen if start <= t <= now), (now, btc_px))
 
     def thresholds(self) -> dict[str, Any]:
         return {k: v for k, v in self.cfg.model_dump().items() if k.startswith("regime_flip_")}
@@ -78,7 +97,20 @@ class RegimeFlip:
         settings = self.thresholds()
         if settings != self._thresholds:
             self.reset()  # 改门槛后从新门槛下的第一次检查开始确认
+            self._fired = None
             self._thresholds = settings
+        max_age = self.cfg.regime_flip_ref_max_age_min
+        self._btc_seen = [
+            (t, px) for t, px in self._btc_seen if now - t <= timedelta(minutes=max_age)
+        ]
+        if (
+            max_age > 0
+            and btc_px is not None
+            and math.isfinite(btc_px)
+            and btc_px > 0
+            and (not self._btc_seen or now > self._btc_seen[-1][0])
+        ):
+            self._btc_seen.append((now, btc_px))
         ref = self.reference
         if ref is None:
             self.reset()
@@ -95,7 +127,8 @@ class RegimeFlip:
         ):
             self.reset()
             return FlipCheck("blocked", "数据不足")
-        ret = (btc_px / ref.btc_px - 1) * 100
+        base_at, base_px = self._baseline(now, ref, btc_px)
+        ret = (btc_px / base_px - 1) * 100
         directions: tuple[Direction, ...] = (
             ("看涨", "看跌")
             if ref.direction == "中性"
@@ -116,18 +149,37 @@ class RegimeFlip:
         candidates = [d for d, breadth, btc in checks if breadth and btc]
         if len(candidates) != 1:
             self.reset()
+            self._fired = None
             if len(candidates) > 1:
-                return FlipCheck("blocked", "上下候选同时满足，方向有歧义", btc_ret=ret)
+                return FlipCheck(
+                    "blocked",
+                    "上下候选同时满足，方向有歧义",
+                    btc_ret=ret,
+                    baseline_at=base_at,
+                    baseline_btc_px=base_px,
+                )
             kind = "quiet"
             if any(b for _, b, _ in checks) and self.cfg.regime_flip_breadth > 0:
                 kind = "suspect_breadth"
             elif any(b for _, _, b in checks) and self.cfg.regime_flip_btc_pct > 0:
                 kind = "suspect_btc"
-            return FlipCheck(kind, btc_ret=ret)
+            return FlipCheck(kind, btc_ret=ret, baseline_at=base_at, baseline_btc_px=base_px)
         candidate = candidates[0]
         if candidate != self._candidate:
             self.reset()  # 中性向上、向下分别确认，不能把两边次数拼在一起
             self._candidate = candidate
+        if self._fired is not None and self._fired != candidate:
+            self._fired = None  # 中性时另一边成立，说明原方向的条件已经中断
+        if candidate == self._fired:
+            return FlipCheck(
+                "blocked",
+                "已确认过，条件中断后再重新累计",
+                0,
+                ret,
+                candidate,
+                base_at,
+                base_px,
+            )
         if self._checked_at is None or now > self._checked_at:
             self.count += 1
             self._checked_at = now
@@ -138,6 +190,8 @@ class RegimeFlip:
                 self.count,
                 ret,
                 candidate,
+                base_at,
+                base_px,
             )
         if self.last_rerun is not None and self.cfg.regime_flip_min_gap_min > 0:
             age = (now - self.last_rerun).total_seconds() / 60
@@ -149,8 +203,12 @@ class RegimeFlip:
                     self.count,
                     ret,
                     candidate,
+                    base_at,
+                    base_px,
                 )
-        return FlipCheck("confirmed", count=self.count, btc_ret=ret, candidate_direction=candidate)
+        check = FlipCheck("confirmed", "", self.count, ret, candidate, base_at, base_px)
+        self.count, self._checked_at, self._fired = 0, None, candidate
+        return check
 
 
 def minute(now: datetime) -> datetime:
