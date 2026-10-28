@@ -479,6 +479,7 @@ def build_positions(
         now,
         protection_stale_s,
         *day_refs_at(ledger, risk.day_reset_tz, now),
+        exit_filled=ledger.exit_filled,
     )
     kpis = compute_kpis(files, ledger, hb, risk, now)
     equity = kpis.equity_usdt

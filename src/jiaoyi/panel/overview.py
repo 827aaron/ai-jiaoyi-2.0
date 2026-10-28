@@ -180,6 +180,9 @@ class FeedItem(BaseModel):
     """点开时按它取这个信号从哨兵到执行的整条链。"""
 
 
+EXIT_FILLED_NOTE = "已成交，收尾中"
+
+
 class PositionView(BaseModel):
     position_id: str
     executor_id: str | None = None
@@ -187,6 +190,8 @@ class PositionView(BaseModel):
     category: str
     side: str
     status: str
+    close_note: str | None = None
+    """「已成交，收尾中」 once the exit order has filled while the ledger still says closing."""
     quantity: float
     leverage: int
     entry_price: float | None
@@ -361,6 +366,7 @@ def build_overview(
         now,
         app.protection_stale_s,
         *day_refs_at(ledger, risk.day_reset_tz, now),
+        exit_filled=ledger.exit_filled,
     )
 
     # ---- 今日统计
@@ -601,6 +607,8 @@ def position_views(
     protection_stale_s: int = 120,
     day_refs: dict[str, float] | None = None,
     midnight: datetime | None = None,
+    *,
+    exit_filled: set[str] | None = None,
 ) -> list[PositionView]:
     """未结束的持仓，最新开的在前；附上浮盈浮亏和管家最新判断。
 
@@ -699,6 +707,12 @@ def position_views(
                 category=p.category.value,
                 side=p.side.value,
                 status=p.status.value,
+                close_note=(
+                    EXIT_FILLED_NOTE
+                    if p.status is PositionStatus.CLOSING
+                    and p.position_id in (exit_filled or set())
+                    else None
+                ),
                 quantity=p.quantity,
                 leverage=p.leverage,
                 entry_price=p.entry_price,

@@ -819,6 +819,16 @@ class Runner:
         if not self._leaving:
             self._spawn(self.app._alert(AlertLevel.INFO, title, text, "system"))
 
+    async def _close_targets(self) -> list[PositionRecord]:
+        """Positions a panel close may target. With a ledger this is a local read: a full
+        ``refresh_positions`` syncs every position under its exit lock and queues behind the
+        exchange rate limiter and any other close in flight, which delayed a click by up to
+        20 s before the close even started. ``close`` re-checks the ledger itself."""
+        if isinstance(self.m.executor, _LedgerPositions):
+            return self._ledger_positions()
+        await self.refresh_positions()
+        return list(self.positions)
+
     def _ledger_positions(self) -> list[PositionRecord]:
         """账本里此刻的持仓（含正在开 / 正在平），读不到才用上一轮刷新的列表。"""
         ex = self.m.executor
@@ -2996,8 +3006,7 @@ class Runner:
             # 先暂停再平：否则平的同时可能又开新仓。拿开仓锁等在途开仓做完，再读持仓
             self.app.set_paused(True, reason="面板全部平仓", command_id=cmd.id)
             async with self._open_lock:
-                await self.refresh_positions()
-                targets = list(self.positions)
+                targets = await self._close_targets()
             for p in targets:
                 self._spawn(self.close(p, CloseReason.MANUAL), Role.EXECUTOR)
             await self.app._alert(
@@ -3006,8 +3015,7 @@ class Runner:
             return "done", f"已暂停开新仓并提交平仓 {len(targets)} 笔"
         if cmd.kind == "close_position":
             pid = cmd.params.get("position_id", "")
-            await self.refresh_positions()
-            pos = next((p for p in self.positions if p.position_id == pid), None)
+            pos = next((p for p in await self._close_targets() if p.position_id == pid), None)
             if pos is None:
                 return "rejected", f"没有持仓 {pid}"
             self._spawn(self.close(pos, CloseReason.MANUAL), Role.EXECUTOR)

@@ -320,3 +320,117 @@ async def test_cancel_during_create_stays_unknown() -> None:
     with pytest.raises(asyncio.CancelledError) as caught:
         await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
     assert not isinstance(caught.value, IdentifiedCloseCancelledBeforeSend)
+
+
+def with_close_lane() -> tuple[CcxtBinanceFutures, Any, Any]:
+    obj, main = client()
+    lane = AsyncMock()
+    lane.fapiPrivateGetPositionSideDual.return_value = {"dualSidePosition": False}
+    lane.fapiPrivateGetOrder.side_effect = ccxt.OrderNotFound("synthetic absent")
+    lane.create_order.return_value = {"info": raw()}
+    lane.set_markets = lambda markets, currencies=None: None
+    obj._close_ex = lane
+    return obj, main, lane
+
+
+@pytest.mark.asyncio
+async def test_close_requests_bypass_the_shared_rate_limit_queue() -> None:
+    obj, main, lane = with_close_lane()
+    await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+    lane.create_order.assert_awaited_once()
+    lane.fapiPrivateGetOrder.assert_awaited_once()
+    main.create_order.assert_not_awaited()
+    main.fapiPrivateGetOrder.assert_not_awaited()
+    main.fapiPrivateGetPositionSideDual.assert_not_awaited()
+    lane.fetch_positions.return_value = []
+    assert await obj.close_positions_evidence() == []
+    lane.fetch_positions.assert_awaited_once()
+    main.fetch_positions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ttl", "reads"), [(0.0, 2), (300.0, 1)])
+async def test_close_mode_check_reuses_a_cached_one_way_answer(ttl: float, reads: int) -> None:
+    obj, _, lane = with_close_lane()
+    obj.position_mode_cache_s = ttl
+    obj._mode_clock = lambda: 1000.0
+    obj.forget_position_mode()
+    await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+    await obj.place_close("SYNTHUSDT", "sell", 10, "dc-synthetic")
+    assert lane.fapiPrivateGetPositionSideDual.await_count == reads
+
+
+@pytest.mark.asyncio
+async def test_close_lane_has_its_own_bucket_and_same_environment() -> None:
+    obj = CcxtBinanceFutures("k", "s", testnet=True)
+    try:
+        assert obj._close_ex is not obj._ex
+        assert obj._close_ex.throttler is not obj._ex.throttler
+        assert obj._close_ex.urls["api"] == obj._ex.urls["api"]
+    finally:
+        await obj.close()
+
+
+def synthetic_market(base: str) -> dict[str, Any]:
+    return {
+        "id": f"{base}USDT",
+        "symbol": f"{base}/USDT:USDT",
+        "type": "swap",
+        "spot": False,
+        "swap": True,
+        "future": False,
+        "option": False,
+        "contract": True,
+        "linear": True,
+        "inverse": False,
+        "contractSize": 1,
+        "info": {},
+        "precision": {"amount": 0.01, "price": 0.0001},
+        "base": base,
+        "quote": "USDT",
+        "settle": "USDT",
+    }
+
+
+@pytest.mark.asyncio
+async def test_close_lane_reads_a_symbol_listed_after_its_first_copy() -> None:
+    obj = CcxtBinanceFutures("k", "s", testnet=True)
+    try:
+        obj._ex.set_markets([synthetic_market("SYNTH")])
+        obj._ex.options["leverageBrackets"] = {}
+        obj._markets_loaded = True
+        lane = obj._close_ex
+        rows: list[dict[str, Any]] = []
+
+        async def mode(params: Any = None) -> dict[str, Any]:
+            return {"dualSidePosition": False}
+
+        async def risk(params: Any = None) -> list[dict[str, Any]]:
+            return rows
+
+        lane.fapiPrivateGetPositionSideDual = mode
+        lane.fapiPrivateV3GetPositionRisk = risk
+
+        def row(symbol: str) -> dict[str, Any]:
+            return {
+                "symbol": symbol,
+                "positionSide": "BOTH",
+                "positionAmt": "-3",
+                "entryPrice": "1.5",
+                "markPrice": "1.4",
+                "unRealizedProfit": "0.3",
+                "notional": "-4.2",
+                "isolatedMargin": "0",
+                "updateTime": 1,
+            }
+
+        rows[:] = [row("SYNTHUSDT")]
+        [first] = await obj.close_positions_evidence()
+        assert (first.symbol, first.quantity) == ("SYNTHUSDT", 3)
+        # lot_filters reloads the main client's markets; a newly listed symbol must parse.
+        obj._ex.set_markets([synthetic_market("SYNTH"), synthetic_market("NEW")])
+        rows[:] = [row("NEWUSDT")]
+        [listed] = await obj.close_positions_evidence()
+        assert (listed.symbol, listed.side.value, listed.quantity) == ("NEWUSDT", "short", 3)
+    finally:
+        await obj.close()

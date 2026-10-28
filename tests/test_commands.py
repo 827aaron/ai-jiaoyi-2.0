@@ -630,3 +630,29 @@ async def test_refresh_cards_rejected_while_a_round_is_running(
     res = _result(tmp_path, "cmd-refresh_cards-0001")
     assert res["status"] == "rejected" and res["detail"] == "军师团正在开会"
     assert cards.refreshed == []
+
+
+async def test_close_commands_take_targets_from_the_ledger_without_syncing(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+
+    class LedgerExecutor(FakeExecutor):
+        def live_positions(self):  # type: ignore[no-untyped-def]
+            return self.held
+
+        async def positions(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("a panel close must not wait for a full position sync")
+
+    ex = LedgerExecutor()
+    ex.held = [_position(), _position(position_id="pos-0002", symbol="ETHUSDT")]
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    write_command(tmp_path, _cmd(now, "close_position", position_id="pos-0002"))
+    await r.command_tick()
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == [("pos-0002", CloseReason.MANUAL)]
+    write_command(tmp_path, _cmd(now, "close_all"))
+    await r.command_tick()
+    await asyncio.gather(*r._tasks)
+    assert sorted(p for p, _ in ex.closed) == ["pos-0001", "pos-0002", "pos-0002"]

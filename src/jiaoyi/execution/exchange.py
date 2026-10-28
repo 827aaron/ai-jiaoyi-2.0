@@ -714,30 +714,45 @@ class CcxtBinanceFutures:
     ):
         import ccxt.async_support as ccxt
 
-        self._ex: Any = ccxt.binanceusdm(
-            {
-                "apiKey": api_key,
-                "secret": api_secret,
-                "timeout": timeout_ms,
-                "enableRateLimit": True,
-                # 不带 symbol 查全部挂单是对账员的正常用法，别让 ccxt 为此抛警告异常
-                "options": {
-                    "defaultType": "future",
-                    "fetchOpenOrders": {"warnWithoutSymbol": False},
-                },
-            }
-        )
-        if testnet:
-            if demo:
-                self._ex.enable_demo_trading(True)
-            else:
-                self._ex.set_sandbox_mode(True)
+        def client() -> Any:
+            ex = ccxt.binanceusdm(
+                {
+                    "apiKey": api_key,
+                    "secret": api_secret,
+                    "timeout": timeout_ms,
+                    "enableRateLimit": True,
+                    # 不带 symbol 查全部挂单是对账员的正常用法，别让 ccxt 为此抛警告异常
+                    "options": {
+                        "defaultType": "future",
+                        "fetchOpenOrders": {"warnWithoutSymbol": False},
+                    },
+                }
+            )
+            if testnet:
+                if demo:
+                    ex.enable_demo_trading(True)
+                else:
+                    ex.set_sandbox_mode(True)
+            return ex
+
+        self._ex: Any = client()
+        # The close lane: a second client with its own leaky bucket, used only by the direct
+        # close (its position read, mode check, CID read and order). Every other call shares the
+        # first bucket (20 weight/s), which the protection tick alone keeps full with a few
+        # positions open, so a close queued there waited seconds per request before it was sent.
+        # Closes are rare and light, well inside Binance's own per-account limit.
+        self._close_ex: Any = client()
+        self._close_markets: object = None
         self._markets_loaded = False
         self.untradeable_status: dict[str, str] = {}
         self._bracket_submit_locks: dict[str, asyncio.Lock] = {}
         self._bracket_submitted: set[str] = set()
         self.position_mode_cache_s = position_mode_cache_s
-        inner = self._ex.handle_errors
+        for lane in (self._ex, self._close_ex):
+            self._watch_mode_errors(lane)
+
+    def _watch_mode_errors(self, lane: Any) -> None:
+        inner = lane.handle_errors
 
         def handle_errors(code: Any, reason: Any, url: Any, method: Any, *rest: Any) -> Any:
             # Every HTTP response passes here, so a -4061 from any call site drops the cache.
@@ -745,10 +760,49 @@ class CcxtBinanceFutures:
                 self.forget_position_mode()
             return inner(code, reason, url, method, *rest)
 
-        self._ex.handle_errors = handle_errors
+        lane.handle_errors = handle_errors
 
     def forget_position_mode(self) -> None:
         self._position_mode_cached: tuple[float, Literal["one_way", "hedge"]] | None = None
+
+    def _close_lane(self) -> Any:
+        return self.__dict__.get("_close_ex") or self._ex
+
+    async def _close_ready(self) -> Any:
+        """The close lane with the main client's markets: copied, not loaded a second time.
+
+        Copied again whenever the main client holds a different markets object (``lot_filters``
+        reloads them), else a symbol listed since the last copy fails the close lane's parse."""
+        await self._ready()
+        lane = self._close_lane()
+        markets = self._ex.markets
+        if lane is not self._ex and self.__dict__.get("_close_markets") is not markets:
+            lane.set_markets(markets, self._ex.currencies)
+            self._close_markets = markets
+        if lane is not self._ex:
+            # ccxt's position read loads leverage brackets first; share the main client's so the
+            # close lane does not spend an extra request on them.
+            options = getattr(self._ex, "options", None)
+            brackets = options.get("leverageBrackets") if isinstance(options, dict) else None
+            if brackets is not None and isinstance(lane.options, dict):
+                lane.options["leverageBrackets"] = brackets
+        return lane
+
+    async def _close_position_mode(self, lane: Any) -> Literal["one_way", "hedge"]:
+        """Position mode for a close: the cached answer when ``position_mode_cache_s`` allows
+        one (it cannot change while the position exists), else a fresh read on the close lane."""
+        ttl = getattr(self, "position_mode_cache_s", 0.0)
+        hit = self._cached_position_mode(ttl) if ttl > 0 else None
+        if hit is not None:
+            return hit
+        clock: Callable[[], float] = getattr(self, "_mode_clock", time.monotonic)
+        raw = await lane.fapiPrivateGetPositionSideDual()
+        mode: Literal["one_way", "hedge"] = (
+            "hedge" if _close_bool((raw or {}).get("dualSidePosition")) else "one_way"
+        )
+        if ttl > 0:
+            self._position_mode_cached = (clock(), mode)
+        return mode
 
     async def _ready(self) -> None:
         if not self._markets_loaded:
@@ -795,11 +849,24 @@ class CcxtBinanceFutures:
 
     async def positions_evidence(self) -> list[ExchangePosition]:
         """平仓结算用严格证据。缺量/未知方向/模式不能伪装成零仓。"""
+        return await self._positions_evidence(urgent=False)
+
+    async def close_positions_evidence(self) -> list[ExchangePosition]:
+        """The same evidence read on the close lane, for sizing a close order."""
+        return await self._positions_evidence(urgent=True)
+
+    async def _positions_evidence(self, *, urgent: bool) -> list[ExchangePosition]:
         try:
-            if await self.position_mode() != "one_way":
+            if urgent:
+                lane = await self._close_ready()
+                mode = await self._close_position_mode(lane)
+            else:
+                mode = await self.position_mode()
+                await self._ready()
+                lane = self._ex
+            if mode != "one_way":
                 raise ValueError("只支持已确认的单向持仓")
-            await self._ready()
-            raw = await self._ex.fetch_positions()
+            raw = await lane.fetch_positions()
             if not isinstance(raw, list):
                 raise ValueError("持仓响应不是列表")
             out: list[ExchangePosition] = []
@@ -1673,7 +1740,7 @@ class CcxtBinanceFutures:
         self._close_cid(client_order_id)
         to_ccxt_symbol(symbol)  # 请求前验证U本位标的格式。
         try:
-            raw = await self._ex.fapiPrivateGetOrder(
+            raw = await self._close_lane().fapiPrivateGetOrder(
                 {"symbol": symbol, "origClientOrderId": client_order_id}
             )
         except ccxt.OrderNotFound:
@@ -1710,9 +1777,8 @@ class CcxtBinanceFutures:
             raise ValueError("直连平仓方向非法")
         qty = _close_decimal(quantity)
         try:
-            await self._ready()
-            mode = await self._ex.fapiPrivateGetPositionSideDual()
-            if _close_bool(mode.get("dualSidePosition")):
+            lane = await self._close_ready()
+            if await self._close_position_mode(lane) != "one_way":
                 raise ValueError("不支持双向持仓模式")
             ccxt_symbol = to_ccxt_symbol(symbol)
             amount = self._ex.amount_to_precision(ccxt_symbol, float(qty))
@@ -1732,7 +1798,7 @@ class CcxtBinanceFutures:
                 raise ExchangeError("原直连平仓CID对应不同方向或数量，禁止复用")
             return existing  # 包括终态部分成交；绝不自动创建下一代。
         try:
-            response = await self._ex.create_order(
+            response = await lane.create_order(
                 ccxt_symbol,
                 "market",
                 close_side,
@@ -2010,6 +2076,9 @@ class CcxtBinanceFutures:
 
     async def close(self) -> None:
         await self._ex.close()
+        lane = self.__dict__.get("_close_ex")
+        if lane is not None and lane is not self._ex:
+            await lane.close()
 
 
 def _fee_usdt(fee: dict[str, Any] | None) -> float | None:

@@ -1299,6 +1299,12 @@ function keeperPeak(p) {
   return `最高浮盈 ${signed(p.keeper_peak_usdt, 2)}U${r}${give}`;
 }
 
+// 平仓单已成交、账本还在撤保护腿和核零仓：显示进度，不再给按钮
+function closeCell(p) {
+  if (p.close_note) return `<span class="pill p-warn">${esc(p.close_note)}</span>`;
+  return `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
+}
+
 function posSection(list) {
   const body = list.length
     ? list.map((p) => {
@@ -1308,7 +1314,7 @@ function posSection(list) {
         return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)}${catTag(p.category)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
           <span class="pnl ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${netPnl(p) == null ? "—" : signed(netPnl(p), 2) + "U"}</span></div>
           <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
-          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${keeperPeak(p) ? `<span>${esc(keeperPeak(p))}</span>` : ""}${p.status !== "open" ? `<span class="pill p-warn">${esc(p.status)}</span>` : ""}</div></a>`;
+          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${keeperPeak(p) ? `<span>${esc(keeperPeak(p))}</span>` : ""}${p.status !== "open" ? `<span class="pill p-warn">${esc(p.close_note || p.status)}</span>` : ""}</div></a>`;
       }).join("")
     : `<div class="empty"><b>没有持仓</b>开仓后这里显示盈亏、保命单和管家判断。</div>`;
   return `<section class="card"><div class="ch"><h2>当前持仓</h2><span class="r">${list.length} 笔 · <a href="#positions">全部 ›</a></span></div><div class="scroll">${body}</div></section>`;
@@ -1364,7 +1370,7 @@ P.positions = (arg) => {
     const pnl = netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U${netPct(p) == null ? "" : ` <span class="small">${signed(netPct(p), 2)}%</span>`}${split}`;
     const lb = `<span class="${p.lifeboat_status === "active" ? "" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) : ""}</span>${p.lifeboat_price ? `<div class="small" title="${LVL_TIP}">${lvlEst(p, p.lifeboat_price)}</div>` : ""}${protBrief(p)}`;
     const hold = `${dur(held)} / ${dur(p.time_limit_s * 1000)}`;
-    const closeBtn = `<button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button>`;
+    const closeBtn = closeCell(p);
     return `<tr class="click ${on ? "sel" : ""}" ${go}>
       <td class="hi nowrap">${coin(p.symbol)}${catTag(p.category)}</td><td>${side}</td><td class="r num">${qtyFmt(p.quantity)}</td>
       <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td><td class="r num">${p.leverage}x</td>
@@ -1386,7 +1392,7 @@ P.positions = (arg) => {
         <span class="r num ${cls(netPnl(p))}">${netPnl(p) == null ? "—" : `${signed(netPnl(p), 2)} U`}${netPct(p) == null ? "" : ` · ${signed(netPct(p), 2)}%`} <span class="dim">扣费后</span>${p.today_usdt == null ? "" : ` <span class="dim">· 今日</span> ${todayCell(p)}`}</span></div>
       <div class="l2 small dim">数量 ${qtyFmt(p.quantity)} · 名义 ${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)} U · ${p.leverage}x · 占用 ${p.margin_usdt == null ? "—" : money(p.margin_usdt, 0)} U<br>
         开 ${price(p.entry_price, p.symbol)} · 现 ${price(p.mark_price, p.symbol)}${pxSrc(p)} · 损 ${slCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 盈 ${tpCell(p).replace(/<div[^>]*>/, " ").replace("</div>", "")} · 拿了 ${dur(held)} / ${dur(p.time_limit_s * 1000)}${trailTag(p)}</div></a>
-      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) + " " + lvlEst(p, p.lifeboat_price) : ""}${protBrief(p)}</span><button class="btn b-sm b-danger" ${clickable("close1", p.position_id)}>平仓</button></div></div>`;
+      <div class="pm-act small"><span class="${lbOk ? "dim" : "warn"}">${LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单"} ${p.lifeboat_price ? price(p.lifeboat_price, p.symbol) + lbPct(p) + " " + lvlEst(p, p.lifeboat_price) : ""}${protBrief(p)}</span>${closeCell(p)}</div></div>`;
   }).join("");
   window.__recs = d.trails[sel.position_id] || [];
   const trail = window.__recs.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`).join("");
