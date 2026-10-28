@@ -12,6 +12,7 @@ from typing import Any, Literal
 import httpx
 
 from jiaoyi.core.ticks import tick_decimals
+from jiaoyi.market import rest
 from jiaoyi.market.features import wilder_atr
 
 Interval = Literal["1m", "5m", "15m", "30m", "1h", "4h"]
@@ -42,6 +43,8 @@ class KlineSource:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._http = httpx.AsyncClient(base_url=base_url, timeout=4.0, transport=transport)
+        # Mainnet shares the trading program's IP and so its ban; demo-fapi is limited apart.
+        self._shared_ban = base_url == BASE
         self._cache_s = cache_s
         self._cache: dict[tuple[str, str], tuple[float, list[dict[str, float]]]] = {}
         self._decimals: tuple[float, dict[str, int]] | None = None
@@ -58,6 +61,11 @@ class KlineSource:
         left = self._blocked_until - time.monotonic()
         if left > 0:
             raise KlineError(f"币安限流中，{left:.0f} 秒后再试")
+        if self._shared_ban:
+            try:
+                rest.check_blocked()
+            except rest.RateLimited as e:
+                raise KlineError(str(e)) from None
         try:
             resp = await self._http.get(path, params=params)
         except httpx.HTTPError as e:
@@ -68,6 +76,8 @@ class KlineSource:
             except ValueError:
                 wait = DEFAULT_RETRY_AFTER_S[resp.status_code]
             self._blocked_until = time.monotonic() + wait
+            if self._shared_ban:
+                rest.mark_blocked(resp.status_code, resp.headers, resp.text)
             raise KlineError(f"币安限流（{resp.status_code}），{wait:.0f} 秒内不再请求")
         if resp.status_code != 200:
             raise KlineError(f"币安行情返回 {resp.status_code}")

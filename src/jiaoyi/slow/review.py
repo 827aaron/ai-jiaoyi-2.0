@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import logging
+import sys
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -31,6 +32,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from jiaoyi.contracts import BattleCard, Bias
+from jiaoyi.logsetup import configure_logging
+from jiaoyi.market import rest
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +194,7 @@ def summarize(outcomes: Iterable[Outcome], by: Callable[[Outcome], str]) -> list
 async def binance_bars(
     client: httpx.AsyncClient, symbol: str, start: datetime, end: datetime
 ) -> list[Bar]:
+    rest.check_blocked()
     r = await client.get(
         "/fapi/v1/klines",
         params={
@@ -201,6 +205,8 @@ async def binance_bars(
             "limit": 1000,
         },
     )
+    if r.status_code in (418, 429):
+        raise rest.mark_blocked(r.status_code, r.headers, r.text)
     r.raise_for_status()
     return [
         Bar(
@@ -297,7 +303,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--data-dir", default="data")
     p.add_argument("--days", type=float, default=7.0, help="只看最近几天的卡")
     p.add_argument("--json", action="store_true", help="输出逐条 JSON")
-    return asyncio.run(_run(p.parse_args(argv)))
+    args = p.parse_args(argv)
+    configure_logging()
+    rest.use_shared_ban(args.data_dir)
+    try:
+        return asyncio.run(_run(args))
+    except rest.RateLimited as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
