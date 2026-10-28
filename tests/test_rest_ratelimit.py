@@ -22,7 +22,7 @@ from jiaoyi.market import rest
 
 @pytest.fixture(autouse=True)
 def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rest, "_blocked", None)
+    monkeypatch.setattr(rest, "_own", None)
     monkeypatch.setattr(rest, "_used_weight", None)
 
 
@@ -68,7 +68,7 @@ def test_shared_ban_is_honoured_by_another_process(
     assert saved["status"] == 418 and saved["until"] > time.time() + 590
     assert not list(tmp_path.glob(".*.tmp"))
 
-    monkeypatch.setattr(rest, "_blocked", None)  # a fresh process: nothing in memory
+    monkeypatch.setattr(rest, "_own", None)  # a fresh process: nothing in memory
     monkeypatch.setattr(rest, "_own", None)
     rest.use_shared_ban(tmp_path)
     monkeypatch.setattr(
@@ -84,10 +84,10 @@ def test_shared_ban_is_honoured_by_another_process(
 def test_shared_ban_expires(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rest.use_shared_ban(tmp_path)
     rest.mark_blocked(429, {"Retry-After": "30"})
-    monkeypatch.setattr(rest, "_blocked", None)
+    monkeypatch.setattr(rest, "_own", None)
     with pytest.raises(rest.RateLimited):
         rest.check_blocked()
-    monkeypatch.setattr(rest, "_blocked", None)
+    monkeypatch.setattr(rest, "_own", None)
     rest.check_blocked(now=time.time() + 31)
     assert rest.active_ban(now=time.time() + 31) is None
 
@@ -133,7 +133,7 @@ def _write_ban(path: Path, until: float, status: int = 418) -> None:
     path.write_text(json.dumps({"status": status, "until": until}), encoding="utf-8")
 
 
-def test_adopted_ban_is_not_written_back(tmp_path: Path) -> None:
+def test_deleting_the_ban_file_lifts_an_adopted_ban(tmp_path: Path) -> None:
     path = tmp_path / rest.BAN_FILE
     _write_ban(path, time.time() + 600)
     rest.use_shared_ban(tmp_path)
@@ -141,6 +141,8 @@ def test_adopted_ban_is_not_written_back(tmp_path: Path) -> None:
         rest.check_blocked()
     assert rest.load_ban(tmp_path) is not None
     path.unlink()  # the operator clears a bad ban
+    rest.check_blocked()
+    assert rest.active_ban() is None
     rest.save_ban(tmp_path)
     assert not path.exists()
 
@@ -224,7 +226,7 @@ def test_missing_data_dir_is_not_created(tmp_path: Path, caplog: pytest.LogCaptu
 
 
 def test_demo_budget_ignores_the_mainnet_ban(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rest, "_blocked", rest.RateLimited(418, time.time() + 600))
+    monkeypatch.setattr(rest, "_own", rest.RateLimited(418, time.time() + 600))
     asyncio.run(rest.WeightBudget(100, check_ban=False).take(1))
     with pytest.raises(rest.RateLimited):
         asyncio.run(rest.WeightBudget(100).take(1))

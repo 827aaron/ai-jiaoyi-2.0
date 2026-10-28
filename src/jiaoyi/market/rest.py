@@ -113,7 +113,7 @@ def _clock_label(until: float) -> str:
 
 
 _blocked: RateLimited | None = None
-"""本进程最近一次被限流；到期前所有请求直接抛它（到期后留着当记录，不再拦）。"""
+"""本进程最近见过的限流（自己收到的或从文件读到的），只用来在命令行收尾时报告，不拦请求。"""
 _own: RateLimited | None = None
 """The latest ban this process itself received. Only this one is persisted: a ban adopted from
 the file is never written back, so deleting a bad file clears it everywhere."""
@@ -289,14 +289,14 @@ def save_ban(data_dir: str | Path, now: float | None = None) -> None:
 
 
 def active_ban(now: float | None = None) -> RateLimited | None:
-    """The running ban from this process or the shared file, whichever ends later."""
+    """The running ban this process received or the shared file holds, whichever ends later."""
     t = time.time() if now is None else now
-    live = [b for b in (_blocked, _read_shared(t)) if b is not None and t < b.until]
+    live = [b for b in (_own, _read_shared(t)) if b is not None and t < b.until]
     return max(live, key=lambda b: b.until) if live else None
 
 
 def check_blocked(now: float | None = None) -> None:
-    """Raise a ``refused`` :class:`RateLimited` while a ban runs, adopting it in this process."""
+    """Raise a ``refused`` :class:`RateLimited` while a ban runs."""
     global _blocked
     ban = active_ban(now)
     if ban is None:
