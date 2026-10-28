@@ -1696,6 +1696,8 @@ OFF_SWITCHES: dict[str, OffSwitch] = {
         ("screener", "max_range_24h_pct", "关闭", "已关闭", 30),
         ("screener", "major_top_n", "关闭", "已关闭（只用固定 7 个）", 20),
         ("app", "protection_stale_s", "关闭", "已关闭", 120),
+        ("app", "reconcile_opening_grace_s", "关闭", "已关闭（一律记出错）", 60),
+        ("app", "reconcile_closing_grace_s", "关闭", "已关闭（一律记出错）", 60),
         ("app", "protection_readback_grace_s", "关闭", "已关闭", 5),
         ("app", "protection_prearm_grace_s", "关闭", "已关闭", 30),
         ("app", "protection_unknown_submit_grace_s", "关闭", "已关闭", 5),

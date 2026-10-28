@@ -144,6 +144,8 @@ APP_EDITABLE = frozenset(
         "jev_max_concurrent",
         "keeper_interval_s",
         "reconcile_interval_s",
+        "reconcile_opening_grace_s",
+        "reconcile_closing_grace_s",
         "protection_stale_s",
         "protection_leg_order",
         "slow_loop_interval_min",

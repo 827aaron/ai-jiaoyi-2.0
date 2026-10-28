@@ -21,6 +21,9 @@ data_dir = "data"            # 决策日志、模块状态写在这里
 # notify_open_filled = true    # Telegram 各类告警的开关（默认都开）：notify_close_done / notify_lifeboat_hit / notify_order_failed 等，见网页「设置 → 告警推送」
 # reconciler_close_unknown_positions = false  # 对账员遇到“不认识的仓位”：false = 只告警（默认）；true = 直接平掉。M4 前由你决定
 # reconciler_executor_stop_retry_rounds = 0  # 对账员停执行器（只停不平）结果不明后，再过几轮仍没终止就再发一次停止；0 = 永不重发（默认）
+# reconcile_opening_grace_s = 0   # 对账员：新仓建账后几秒内，「托管还没到 armed」「运行列表暂时没返回执行器（逐项查询仍 active / 查不清）」记「信息」不记「出错」；只改标注，不改平仓 / 补挂；0 = 一律记出错（默认，原行为），最多 600，Demo 建议 60，热生效
+# reconcile_closing_grace_s = 0   # 对账员：第一次看到这笔在平仓起几秒内，「平仓结果尚未确认」「托管在退出阶段」「运行列表没返回执行器」记「信息」不记「出错」；只改标注；0 = 一律记出错（默认，原行为），最多 600，Demo 建议 60，热生效
+#   回滚到没有这两项的旧版本前，先删掉这两行：旧版配置不认识的键（extra=forbid）会拒绝启动
 # protection_readback_grace_s = 0  # Demo 托管保护：刚提交、交易所已回执接受的条件单，回执后几秒内查不到只重读不报错（不重发）；0 = 不等（默认，原行为），最多 30，改后重启
 # protection_prearm_grace_s = 0    # Demo 托管保护：新仓还没完整托管时，同步失败（只限读延迟 / 网络一时失败，且已有确认的保命单或止损）最多连续容忍几秒再平仓，宽限内照样告警、下一轮重试；0 = 不容忍（默认，原行为），最多 600，改后重启
 # protection_unknown_submit_grace_s = 0  # Demo 托管保护：条件单提交结果未知（超时 / 5xx）时，当场按原单号只查不重发最多几秒，查到就接着挂；等待期间这个币的平仓和整个托管保护轮询都暂停；仍查不到且已有确认的保命单或止损时，交给上一行的未托管宽限每轮再查（需要 protection_prearm_grace_s > 0 才会在之后每轮重查原单）；0 = 立即平仓（默认，原行为），最多 10，改后重启

@@ -88,6 +88,8 @@ def build_execution(
     decision_log: DecisionLog | None = None,
     close_unknown_positions: bool = False,
     executor_stop_retry_rounds: int = 0,
+    reconcile_opening_grace_s: float = 0.0,
+    reconcile_closing_grace_s: float = 0.0,
     demo_trading: bool = True,
     limit_take_profit: bool = False,
     frozen_peak_exit_on: bool = True,
@@ -196,6 +198,8 @@ def build_execution(
         recorder=recorder(Role.RECONCILER),
         close_unknown_positions=close_unknown_positions,
         executor_stop_retry_rounds=executor_stop_retry_rounds,
+        opening_grace_s=reconcile_opening_grace_s,
+        closing_grace_s=reconcile_closing_grace_s,
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
     )
     return ExecutionStack(

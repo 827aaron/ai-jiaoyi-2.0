@@ -197,9 +197,10 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 - 「关闭 / 不限」开关：软上限填 0 = 关。哪些项有开关由 `panel/pages.py` 的 `OFF_SWITCHES` 一张表定（键 = 段.键，写开关上的字、只读时 0 显示成什么、关回去先填多少），
   每项带 `off` 给前端：编辑框旁边出「不限」/「关闭」勾选，勾上保存就写 0，只读（不在网页上改的）项直接显示「不限」/「已关闭」。
   现在有：`daily_cost_limit_usd`（日 AI 费用）、`max_cards_per_round`、`event_symbol_gap_min`、`event_max_per_day`、`entry_max_card_age_min`、`default_category_cap`、
-  `min_range_24h_pct` / `max_range_24h_pct` / `major_top_n`、`protection_stale_s` / `protection_readback_grace_s` / `protection_prearm_grace_s`、`regime_flip_min_gap_min` /
+  `min_range_24h_pct` / `max_range_24h_pct` / `major_top_n`、`protection_stale_s` / `protection_readback_grace_s` / `protection_prearm_grace_s`、`reconcile_opening_grace_s` / `reconcile_closing_grace_s`（关了显示「已关闭（一律记出错）」）、`regime_flip_min_gap_min` /
   `regime_flip_check_min`，以及只读的 `reconciler_executor_stop_retry_rounds`（0 显示「已关闭（只查不重发）」）。同币临时会间隔的开关写明「不限（仍隔 5 分钟）」；`regime_flip_check_min` 关了，其余 `regime_flip_*` 行写「定时检查已关闭，用不上」；日上限关了，「花到 80% 时」「放慢成多久开一次」两行写「日上限已关闭，用不上」，档位卡的费用条满格写「不限」。
   「执行 → 托管保护」里只有 `protection_leg_order`（挂单顺序，下拉选 `lifeboat_first` 保命单 → 止损 → 止盈 = 原行为 / `stop_first` 止损 → 止盈 → 保命单）能在网页上改，改后重启；其余 `protection_*` 只读。`stop_first` 下交易所止损确认后就算有最低保护：之后只差保命单（被拒、提交结果未知）的同步失败交给 `protection_prearm_grace_s`，宽限内告警（`lifeboat_missing` 类）、下一轮重试——被拒的换新一代、新单号重挂，未知的只按原单号查——宽限用完仍没挂上照旧平仓；止损或止盈本身挂失败照旧立即平仓。开仓等成交那一步看到「已确认止损、还没保命单」也不平。旧接口（非托管）的仓不受影响。
+- 对账员的开平仓过渡（`reconcile_opening_grace_s` / `reconcile_closing_grace_s`，「执行」里和对账间隔放一起，网页能改、热生效）：新仓建账后、或对账员第一次看到这笔在平仓后的这么多秒内，「交易所托管仍在 provisional / exiting 阶段」「运行列表未返回执行器（逐项查询仍 active / 查不清，或列表缺席）」「平仓结果尚未确认」这几条执行器异常记成灰色「信息」、对账灯不变红、Telegram 按「通知」级；过了宽限照旧记「出错」。只改标注：平仓、补挂、终止计数、托管处理一概不变，逐项确认 TERMINATED 的两轮失管平仓不受影响。0 = 关（原行为），Demo 建议 60。
   硬上限（`config/risk.toml`、`RiskConfig`）一项都没有开关，测试守着；超时、调度间隔、打分满分线、并发数这类 0 没有意义的项也不在表里。
 - 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
   持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）

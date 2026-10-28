@@ -468,6 +468,8 @@ def _build_execution(
             decision_log=decision_log,
             close_unknown_positions=app_cfg.reconciler_close_unknown_positions,
             executor_stop_retry_rounds=app_cfg.reconciler_executor_stop_retry_rounds,
+            reconcile_opening_grace_s=app_cfg.reconcile_opening_grace_s,
+            reconcile_closing_grace_s=app_cfg.reconcile_closing_grace_s,
             demo_trading=app_cfg.sim_environment == "demo",
             limit_take_profit=app_cfg.limit_take_profit_on,
             frozen_peak_exit_on=app_cfg.fast_loop.frozen_peak_exit_on,
@@ -1173,6 +1175,10 @@ class App:
         if hasattr(m.executor, "configure_frozen_peak_exit"):
             m.executor.configure_frozen_peak_exit(
                 fast.frozen_peak_exit_on, fast.frozen_peak_exit_after_s
+            )
+        if hasattr(m.reconciler, "configure_issue_grace"):
+            m.reconciler.configure_issue_grace(
+                cfg.reconcile_opening_grace_s, cfg.reconcile_closing_grace_s
             )
         telegram = getattr(m.alerter, "inner", m.alerter)
         if hasattr(telegram, "set_muted"):

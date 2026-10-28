@@ -2422,6 +2422,8 @@ const PLAIN = {
   jev_max_concurrent: "拍板人同时最多判几个",
   keeper_interval_s: "管家每隔几秒看一次持仓",
   reconcile_interval_s: "每隔几秒和交易所对一次账",
+  reconcile_opening_grace_s: "新仓建账后几秒内，托管还没到位、运行列表暂时没返回执行器只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
+  reconcile_closing_grace_s: "平仓进行中几秒内，平仓结果待确认、托管在退出、运行列表没返回执行器只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
   protection_stale_s: "交易所保护单的观测超过几秒就标“数据过期”（0 = 不标）",
   slow_loop_interval_min: "军师团每隔几分钟开一次会（档位 = 开会间隔）",
   screener_interval_min: "选币每隔几分钟跑一次（默认跟开会间隔档位走，最少 15 分钟）",
@@ -2903,7 +2905,7 @@ const ROLES = [
     { g: "", keys: ["fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "fast_loop.patrol_alert_stop_mult", "fast_loop.patrol_shock_stop_mult"] },
   ] },
   { id: "reconciler", t: "对账员", strip: ["对账员"], what: "定时和交易所对账，账本和币安对不上时处理", groups: [
-    { g: "", keys: ["app.reconcile_interval_s", "app.protection_stale_s", "app.reconciler_close_unknown_positions"] },
+    { g: "", keys: ["app.reconcile_interval_s", "app.reconcile_opening_grace_s", "app.reconcile_closing_grace_s", "app.protection_stale_s", "app.reconciler_close_unknown_positions"] },
   ] },
   { id: "lifeboat", t: "保命止损", what: "在交易所挂的兜底止损，程序挂了也能止损", groups: [
     { g: "", keys: ["risk.lifeboat_stop_multiplier"] },
