@@ -89,6 +89,12 @@ keeper_close_p = 0.6              # 管家：平仓概率 ≥ 0.6 且连续 2 �
 keeper_close_p_strong = 0.85      # 管家：≥ 0.85 一次就平
 keeper_confirmations = 2
 # keeper_price_max_age_s = 0       # 管家复查时这个币的行情最多旧几秒，超过这一轮跳过、维持现状（不平仓）；0 = 不查。推荐 Demo 30
+# keeper_model_mode = "act"        # act = 按 Jev 平仓概率平（现状）；record = 照常问、照常记，不按平仓概率平（被封的币直接平）
+# keeper_price_source = "mainnet"  # 管家算浮盈 / 回吐 / 盈利门控用哪个价：mainnet 主网成交价（现状）；venue 执行所标记价（Demo 标记价）
+# keeper_thesis_take_on = false    # Jev 盈利门控：浮盈 ≥ min_r R 且 Jev 答「进场理由不成立」≥ p（回答不超过 max_age_s 秒）就全平
+# keeper_thesis_take_min_r = 0.5
+# keeper_thesis_take_p = 0.5
+# keeper_thesis_take_max_age_s = 180
 # frozen_peak_exit_on = true       # New Demo positions only; existing positions are never migrated
 # frozen_peak_exit_after_s = 3600  # Freeze the observed executable profit target after one hour
 # frozen_peak_evidence_mode = "sync"     # sync = 每次复查等交易所证据（最多 12 秒）；background = 后台按仓读、复查只用新鲜缓存，读到触发马上复查，例行一轮不等最慢那笔。Demo 建议 background

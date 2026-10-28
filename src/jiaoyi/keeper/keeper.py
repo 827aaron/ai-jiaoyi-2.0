@@ -28,6 +28,12 @@
 - 和卡相反的信号（``note_against``，主循环按账本持仓判断后叫来的急查）：信号写进这次的快照
   （``against``）；强反向信号或已亏到一定倍数止损时，这次过线（``keeper_close_p``）就平，
   不等连续确认。查成了只用一次；没查成（没行情 / Jev 出错）留给下一次复查，不算查过。
+- 每轮的规则顺序见 ``RULE_ORDER``，决策记录写每条的票和生效的那条。
+  ``keeper_model_mode = "record"``：照常问 Jev、照常记，但不按平仓概率平（含反向急查的
+  「过线即平」），被封的币改成硬规则直接平。
+  ``keeper_price_source = "venue"``：浮盈、最高浮盈、回吐、盈利门控和快照都用执行所标记价。
+  Jev 盈利门控（``keeper_thesis_take_on``）排在回吐保护之后、平仓概率之前。
+  交易所保护腿已触发 / 在换代时、或这一轮已发过平仓请求时，管家不再发（``_close_blocker``）。
 """
 
 from __future__ import annotations
@@ -73,6 +79,21 @@ from jiaoyi.interfaces import DecisionModel
 log = logging.getLogger(__name__)
 
 RETRY_AFTER_S = 1.0
+RULE_ORDER = (
+    "card",
+    "blocked",
+    "frozen_peak",
+    "price",
+    "giveback",
+    "thesis_take",
+    "p_close",
+)
+"""每轮复查的规则顺序：作战卡（硬平 / 收紧）→ 被封的币 → 冻结盈利价 → 价格新鲜度和来源 →
+回吐保护 → Jev 盈利门控 → 平仓概率。前三条不读管家的价；第一条投「close」的生效，
+每轮每仓最多一个平仓请求。"""
+THESIS_TAKE_LABEL = "盈利且进场理由不成立，止盈"
+REPLACING_MAX_WAIT_S = 30.0
+_BLOCKED_PREFIX = "不发平仓："
 MAX_HISTORY = 400  # 每笔仓最多记这么多次复查的浮盈（20 秒一次 ≈ 2 小时多）
 _LOOKBACK_DAYS = 3  # 找回历史最多往前翻几天的决策日志
 _FAIL_TEXT = {
@@ -107,6 +128,8 @@ class JevKeeper:
         observation_wall: Callable[[], datetime] = lambda: datetime.now(UTC),
         opposite_state_path: Path | None = None,
         review_interval_s: float | None = None,
+        venue_price: Callable[[str], Awaitable[tuple[float, datetime] | None]] | None = None,
+        exit_in_flight: Callable[[str], tuple[str, str] | None] | None = None,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -115,7 +138,12 @@ class JevKeeper:
         ``opposite_state_path``：反向卡确认的起点（每条指令第一次看到时的价和时间、这笔仓第一次
         碰到反向卡的时间和价）落盘的位置，重启后接着用；None = 只在内存。
         ``review_interval_s``：例行复查间隔（app.toml ``keeper_interval_s``）。行情过旧超过它的
-        2 倍就丢掉断流前的连续「该平」计数；None = 一遇到过旧就丢。"""
+        2 倍就丢掉断流前的连续「该平」计数；None = 一遇到过旧就丢；它的一半也是「每轮每仓最多
+        一个平仓请求」的窗口（None = 不限）。
+        ``venue_price(币)``：执行所标记价和它的交易所时间（``keeper_price_source = "venue"`` 才读；
+        None = 执行所就是主网行情，比如模拟盘、实盘）。
+        ``exit_in_flight(持仓号)``：交易所保护腿已触发 / 正在退出（``"exiting"``）或正在换代
+        （``"replacing"``）时返回（种类, 说明），这时管家不发平仓请求。"""
         self._frozen_peak_review = frozen_peak_review
         self._model = model
         self._sleep = sleep
@@ -149,6 +177,11 @@ class JevKeeper:
         self._opposite_path = opposite_state_path
         self._review_interval_s = review_interval_s
         self._stale_logged: set[str] = set()  # 这段断流已记过「行情已旧」的持仓，不刷屏
+        self._venue_price = venue_price
+        self._exit_in_flight = exit_in_flight
+        self._thesis: dict[str, tuple[datetime, float]] = {}  # 最近一次 Jev thesis_intact 的 no
+        self._close_sent: dict[str, datetime] = {}  # 上一次发出平仓请求的时刻
+        self._replacing_since: dict[str, datetime] = {}
         self._load_opposite_state()
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
@@ -159,6 +192,9 @@ class JevKeeper:
         """持仓平掉后调用，清掉它的计数。"""
         self._streak.pop(position_id, None)
         self._stale_logged.discard(position_id)
+        self._thesis.pop(position_id, None)
+        self._close_sent.pop(position_id, None)
+        self._replacing_since.pop(position_id, None)
         self._against.pop(position_id, None)
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
@@ -338,10 +374,35 @@ class JevKeeper:
         return {"triggered": False, "detail": "evidence_stale", "evidence_as_of": as_of}
 
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
-        direct = self.review_card_rule(position, now)
-        if direct is not None and direct.action == "close":
-            return direct  # 「拿住 + 收紧」只交给作战卡规则通道，这里照常问模型
+        """一轮复查。规则按 ``RULE_ORDER`` 投票，第一条判平的生效；决策记录 ``rules`` 记每条的票，
+        ``rule_fired`` 记生效的那条，``price`` 记两种价。
+
+        价格检查排在作战卡、被封的币、冻结盈利价之后：这三条不读管家的价（卡规则自己按行情核
+        确认、旧价只收紧，冻结盈利价读执行所自己的证据），价格过旧也照常判；之后读价的规则都要
+        先过价格检查。"""
         pid = position.position_id
+        votes: list[dict[str, Any]] = []
+        direct = self.review_card_rule(position, now, votes=votes)
+        if direct is not None and (direct.action == "close" or _is_blocked(direct)):
+            return direct  # 「拿住 + 收紧」只交给作战卡规则通道，这里照常问模型
+        votes.append(
+            {"rule": "card", "vote": "none"}
+            if direct is None
+            else {"rule": "card", "vote": "tighten", "why": direct.reason}
+        )
+        record_mode = self._cfg.keeper_model_mode == "record"
+        why_blocked = self._blocked().get(position.symbol)
+        if why_blocked is not None and record_mode:
+            # record 模式不按平仓概率平，被封的币就不能再搭平仓概率的车：直接当硬规则
+            self._streak.pop(pid, None)
+            votes.append({"rule": "blocked", "vote": "close", "why": why_blocked})
+            text = f"已禁止新开仓（{why_blocked}），硬规则全平"
+            return self._verdict(position, now, "close", 1.0, 1, text, None, None, rules=votes)
+        votes.append(
+            {"rule": "blocked", "vote": "none"}
+            if why_blocked is None
+            else {"rule": "blocked", "vote": "via_p_close", "why": why_blocked}
+        )
         frozen_peak = None
         if self.frozen_peak_background():
             frozen_peak = self._cached_frozen_peak(pid, now)
@@ -349,6 +410,7 @@ class JevKeeper:
             frozen_peak = await self._read_frozen_peak(pid, now)
         if frozen_peak and frozen_peak.get("triggered") is True:
             self._streak.pop(pid, None)
+            votes.append({"rule": "frozen_peak", "vote": "close"})
             return self._verdict(
                 position,
                 now,
@@ -359,39 +421,51 @@ class JevKeeper:
                 None,
                 None,
                 frozen_peak_rule=frozen_peak,
+                rules=votes,
             )
-        against = self._against.pop(pid, None)
+        votes.append({"rule": "frozen_peak", "vote": "hold" if frozen_peak else "off"})
         f = self._features(position.symbol)
+        price = await self._price_inputs(position, f, now)
+        votes.append({"rule": "price", "vote": price["vote"]})
+        against = self._against.pop(pid, None)
         observation = self._observation_start(position, now, f)
         verdict = partial(
-            self._verdict, against=against, observation=observation, frozen_peak_rule=frozen_peak
+            self._verdict,
+            against=against,
+            observation=observation,
+            frozen_peak_rule=frozen_peak,
+            rules=votes,
+            price=price,
         )
         if f is None:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             return verdict(position, now, "hold", 0.0, 1, "没有行情数据，维持现状", None, None)
-        age = self._stale_age(f, now)
-        if age is not None:
+        if price["vote"] == "stale":
             # 短暂断流：这一轮当没复查，连续计数不动；断得久了，断流前那一票不能和恢复后的
             # 一票凑成「连续两次」
+            age = float(price["stale_s"])
             limit = self._review_interval_s
             if limit is None or age > 2 * limit:
                 self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             first = pid not in self._stale_logged
             self._stale_logged.add(pid)
+            src = "执行所标记价" if price["used"] == "venue" else "行情"
             return verdict(
                 position,
                 now,
                 "hold",
                 0.0,
                 1,
-                f"行情已旧 {age:.0f} 秒，这轮跳过、维持现状",
+                f"{src}已旧 {age:.0f} 秒，这轮跳过、维持现状",
                 None,
                 None,
                 record=first,
             )
         self._stale_logged.discard(pid)
+        px = float(price["price"])
+        fv = f if px == f.last_price else f.model_copy(update={"last_price": px})
         card = self._card(now)
         market = (
             self._market_source()
@@ -401,7 +475,7 @@ class JevKeeper:
         if pid not in self._history:
             await self._recall(position, now)
         history = self._history.setdefault(pid, [])
-        pnl = hold_pnl_bps(position, f.last_price)
+        pnl = hold_pnl_bps(position, px)
         peak = max(self._peak.get(pid, pnl), pnl)
         self._peak[pid] = peak
         guard = self._giveback_guard(position, pnl, peak)
@@ -411,7 +485,9 @@ class JevKeeper:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
             text, detail = guard
+            votes.append({"rule": "giveback", "vote": "close"})
             return verdict(position, now, "close", 1.0, 1, text, None, None, extra=detail)
+        votes.append({"rule": "giveback", "vote": "hold" if self._cfg.giveback_on else "off"})
         fc = self._forecast(position.symbol, now) if self._forecast is not None else None
         request = JevRequest(
             request_id=f"hold-{pid}-{uuid.uuid4().hex[:6]}",
@@ -421,7 +497,7 @@ class JevKeeper:
             position_id=pid,
             snapshot=hold_snapshot(
                 position,
-                f,
+                fv,
                 card,
                 now,
                 against=against[0] if against is not None else None,
@@ -433,7 +509,7 @@ class JevKeeper:
             ),
             questions=hold_questions(),
         )
-        history.append(hold_pnl_bps(position, f.last_price))
+        history.append(pnl)
         del history[:-MAX_HISTORY]
         resp = await self._model.ask(request)
         attempts = 1
@@ -443,6 +519,16 @@ class JevKeeper:
             resp = await self._model.ask(request)
             attempts = 2
         self._observation_response(observation, position.symbol, request, resp, attempts)
+        thesis = resp.answer(HoldQuestion.THESIS_INTACT.value) if resp.ok else None
+        if thesis is not None:
+            self._thesis[pid] = (now, thesis.probs.get("no", 0.0))
+        ans = resp.answer(HoldQuestion.ACTION.value) if resp.ok else None
+        model_p = ans.probs.get("close", 0.0) if ans is not None else 0.0
+        gate_vote, gate_text = self._thesis_gate(position, pnl, now)
+        votes.append(gate_vote)
+        if gate_text is not None:
+            self._streak.pop(pid, None)
+            return verdict(position, now, "close", model_p, 1, gate_text, request, resp)
         if not resp.ok:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
@@ -456,7 +542,6 @@ class JevKeeper:
                 request,
                 resp,
             )
-        ans = resp.answer(HoldQuestion.ACTION.value)
         if ans is None:
             self._streak.pop(pid, None)
             self._keep_against(pid, against, now)
@@ -464,17 +549,18 @@ class JevKeeper:
                 position, now, "hold", 0.0, 1, "决策模型没回答 action，维持现状", request, resp
             )
 
-        p_close = ans.probs.get("close", 0.0)
+        p_close = model_p
         why = [f"平仓概率 {p_close:.2f}"]
-        why_blocked = self._blocked().get(position.symbol)
-        rule = f"已禁止新开仓（{why_blocked}）" if why_blocked is not None else None
-        if rule is not None:
+        if why_blocked is not None:
             p_close = max(p_close, self._cfg.keeper_close_p)
-            why.append(rule)
+            why.append(f"已禁止新开仓（{why_blocked}）")
         one_shot = against is not None and against[1]
         if against is not None:
             why.append(f"反向信号急查（{against[0].desc}）" + ("，过线即平" if one_shot else ""))
 
+        vote: dict[str, Any] = {"rule": "p_close", "p_close": round(p_close, 4)}
+        votes.append(vote)
+        idle = "record" if record_mode else "hold"
         if p_close >= self._cfg.keeper_close_p:
             n = self._streak.get(pid, 0) + 1
             self._streak[pid] = n
@@ -483,11 +569,122 @@ class JevKeeper:
                 or p_close >= self._cfg.keeper_close_p_strong
                 or n >= self._cfg.keeper_confirmations
             ):
+                if record_mode:
+                    vote.update(vote=idle, would_close=True)
+                    why.append("只记录，不按平仓概率平")
+                    text = "，".join(why)
+                    return verdict(position, now, "hold", p_close, n, text, request, resp)
+                vote.update(vote="close", would_close=True)
                 return verdict(position, now, "close", p_close, n, "，".join(why), request, resp)
+            vote.update(vote=idle, would_close=False)
             why.append(f"第 {n} 次，等确认")
             return verdict(position, now, "hold", p_close, n, "，".join(why), request, resp)
         self._streak.pop(pid, None)
+        vote.update(vote=idle, would_close=False)
         return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+
+    async def _price_inputs(
+        self, position: PositionRecord, f: FeatureSnapshot | None, now: datetime
+    ) -> dict[str, Any]:
+        """这次复查用哪个价（``keeper_price_source``），以及两种价各是多少、多旧。
+
+        ``vote``：ok / stale（按选中的价查 ``keeper_price_max_age_s``）/ missing（没有行情快照）。
+        选 venue 但读不到执行所标记价：退回主网价，``note`` 写明。"""
+        source = self._cfg.keeper_price_source
+        out: dict[str, Any] = {
+            "source": source,
+            "used": "mainnet",
+            "price": None,
+            "mainnet": f.last_price if f is not None else None,
+            "mainnet_age_s": round((now - f.ts).total_seconds(), 1) if f is not None else None,
+            "venue": None,
+            "venue_age_s": None,
+        }
+        if f is None:
+            return {**out, "vote": "missing"}
+        read = self._venue_price
+        if source == "venue" and read is None:
+            out["note"] = "venue_is_mainnet"
+        elif source == "venue" and read is not None:
+            got: tuple[float, datetime] | None = None
+            try:
+                got = await read(position.symbol)
+            except Exception:
+                log.warning("执行所标记价读不到 %s，这次用主网价", position.symbol, exc_info=True)
+            if got is not None:
+                venue, at = got
+                age = (now - at).total_seconds()
+                out.update(used="venue", venue=venue, venue_age_s=round(age, 1))
+                limit = self._cfg.keeper_price_max_age_s
+                if limit > 0 and age > limit:
+                    return {**out, "vote": "stale", "stale_s": age}
+                return {**out, "vote": "ok", "price": venue}
+            out["note"] = "venue_unavailable_fallback_mainnet"
+        stale = self._stale_age(f, now)
+        if stale is not None:
+            return {**out, "vote": "stale", "stale_s": stale}
+        return {**out, "vote": "ok", "price": f.last_price}
+
+    def _thesis_gate(
+        self, position: PositionRecord, pnl: float, now: datetime
+    ) -> tuple[dict[str, Any], str | None]:
+        """Jev 盈利门控：三条同时成立才平——浮盈（这次复查的价，未扣手续费）为正且至少
+        ``keeper_thesis_take_min_r`` R；最近一次 Jev 答 thesis_intact = no 的概率至少
+        ``keeper_thesis_take_p``；那次回答不超过 ``keeper_thesis_take_max_age_s`` 秒。"""
+        cfg = self._cfg
+        vote: dict[str, Any] = {"rule": "thesis_take"}
+        if not cfg.keeper_thesis_take_on:
+            return {**vote, "vote": "off"}, None
+        stop_bps = _stop_bps(position)
+        last = self._thesis.get(position.position_id)
+        pnl_r = pnl / stop_bps if stop_bps else None
+        age = (now - last[0]).total_seconds() if last is not None else None
+        p_no = last[1] if last is not None else None
+        r_ok = pnl_r is not None and pnl_r > 0 and pnl_r >= cfg.keeper_thesis_take_min_r
+        p_ok = p_no is not None and p_no >= cfg.keeper_thesis_take_p
+        age_ok = age is not None and 0 <= age <= cfg.keeper_thesis_take_max_age_s
+        vote.update(
+            pnl_r=None if pnl_r is None else round(pnl_r, 3),
+            min_r=cfg.keeper_thesis_take_min_r,
+            p_no=None if p_no is None else round(p_no, 4),
+            min_p=cfg.keeper_thesis_take_p,
+            answer_age_s=None if age is None else round(age, 1),
+            max_age_s=cfg.keeper_thesis_take_max_age_s,
+            r_ok=r_ok,
+            p_ok=p_ok,
+            age_ok=age_ok,
+        )
+        if not (r_ok and p_ok and age_ok):
+            return {**vote, "vote": "hold"}, None
+        assert pnl_r is not None and p_no is not None and age is not None
+        text = (
+            f"{THESIS_TAKE_LABEL}：浮盈 {pnl_r:.2f}R ≥ {cfg.keeper_thesis_take_min_r:g}R，"
+            f"Jev 答理由不成立 {p_no:.2f} ≥ {cfg.keeper_thesis_take_p:g}（{age:.0f} 秒前）"
+        )
+        return {**vote, "vote": "close"}, text
+
+    def _close_blocker(self, pid: str, now: datetime) -> str | None:
+        """平仓请求发不发：交易所保护腿已触发 / 正在退出（交给保护轮询收尾）、正在换代（最多等
+        ``REPLACING_MAX_WAIT_S``，换代卡住不能让管家永远平不了），或这一轮已经发过一次。"""
+        inflight: tuple[str, str] | None = None
+        if self._exit_in_flight is not None:
+            try:
+                inflight = self._exit_in_flight(pid)
+            except Exception:
+                log.warning("保护腿状态读不到 %s，按没有在途处理", pid, exc_info=True)
+        if inflight is not None and inflight[0] == "exiting":
+            return f"交易所保护腿已触发或正在退出（{inflight[1]}），管家不再发平仓"
+        if inflight is not None:
+            since = self._replacing_since.setdefault(pid, now)
+            if (now - since).total_seconds() <= REPLACING_MAX_WAIT_S:
+                return f"交易所保护腿正在换代（{inflight[1]}），这轮不发平仓"
+        else:
+            self._replacing_since.pop(pid, None)
+        last = self._close_sent.get(pid)
+        window = 0.5 * self._review_interval_s if self._review_interval_s else 0.0
+        if last is not None and 0 <= (now - last).total_seconds() < window:
+            return f"这一轮已发过平仓请求（{last:%H:%M:%S}），不重复发"
+        return None
 
     def card_rule_applies(self, position: PositionRecord, now: datetime) -> bool:
         """只读预检供调度去重；真正执行时仍需再次读取最新卡，不在预检记判定日志。"""
@@ -547,18 +744,26 @@ class JevKeeper:
         draw = opposite_ab_draw(position.position_id, key)
         return ("confirm_or_tighten" if ab <= 0 or draw < ab else "close"), draw
 
-    def review_card_rule(self, position: PositionRecord, now: datetime) -> KeeperVerdict | None:
+    def review_card_rule(
+        self,
+        position: PositionRecord,
+        now: datetime,
+        *,
+        votes: list[dict[str, Any]] | None = None,
+    ) -> KeeperVerdict | None:
         """最新有效卡明确反向时直接交执行器全平；无行情/模型故障不构成关卡。
 
         ``opposite_card_action = "confirm_or_tighten"``：价格确认才返回全平；没确认返回「拿住」，
-        理由交给接线代码收紧托管止损（每次都重新判，卡还有效时之后确认了就平）。"""
+        理由交给接线代码收紧托管止损（每次都重新判，卡还有效时之后确认了就平）。
+        ``votes``：``review`` 在这之前已投的票，一并写进决策记录。"""
+        rules = list(votes) if votes is not None else []
         card = self._card(now)
         reason = self._card_rule(position, card, now)
         if reason is None or card is None:
             neutral = self._neutral_rule(position, card, now)
             if neutral is None or card is None:
                 return None
-            return self._neutral_review(position, card, *neutral, now)
+            return self._neutral_review(position, card, *neutral, now, rules=rules)
         cs = card.for_symbol(position.symbol)
         assert cs is not None
         rule: dict[str, Any] = {
@@ -574,10 +779,12 @@ class JevKeeper:
             "requires_confirmation": False,
         }
         if self._cfg.opposite_card_action == "confirm_or_tighten":
-            return self._opposite_review(position, card, cs, reason, rule, now)
+            return self._opposite_review(position, card, cs, reason, rule, now, rules=rules)
         self._streak.pop(position.position_id, None)
         text = f"作战卡反向硬规则：{reason}，不等模型或确认"
-        return self._verdict(position, now, "close", 1.0, 1, text, None, None, card_rule=rule)
+        return self._verdict(
+            position, now, "close", 1.0, 1, text, None, None, card_rule=rule, rules=rules
+        )
 
     def _opposite_review(
         self,
@@ -587,6 +794,8 @@ class JevKeeper:
         reason: str,
         rule: dict[str, Any],
         now: datetime,
+        *,
+        rules: list[dict[str, Any]],
     ) -> KeeperVerdict:
         """#314 新规则：记下抽签、价格确认的每一条输入和走了哪支，反事实一并记。
 
@@ -650,7 +859,9 @@ class JevKeeper:
             self._streak.pop(pid, None)
             self._opposite_logged.pop(pid, None)
             text = f"作战卡反向硬规则：{reason}，不等模型或确认{tag}"
-            return self._verdict(position, now, "close", 1.0, 1, text, None, None, card_rule=rule)
+            return self._verdict(
+                position, now, "close", 1.0, 1, text, None, None, card_rule=rule, rules=rules
+            )
         rule["requires_confirmation"] = True
         rule["counterfactual"] = {
             "legacy_action": "close",
@@ -667,7 +878,17 @@ class JevKeeper:
         log_first = self._opposite_logged.get(pid) != (key, branch)
         self._opposite_logged[pid] = (key, branch)
         return self._verdict(
-            position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=log_first
+            position,
+            now,
+            "hold",
+            0.0,
+            1,
+            text,
+            None,
+            None,
+            card_rule=rule,
+            record=log_first,
+            rules=rules,
         )
 
     def _neutral_rule(
@@ -716,6 +937,8 @@ class JevKeeper:
         reason: str,
         key: str,
         now: datetime,
+        *,
+        rules: list[dict[str, Any]],
     ) -> KeeperVerdict:
         """中性卡：``close`` 直接平；``tighten`` 返回「拿住」，由接线代码让执行器走反向卡
         同一套收紧（亏 / 赚得不够平，赚得够锚定移动止损）。没有 / 过旧的行情一律不平：
@@ -751,7 +974,9 @@ class JevKeeper:
             self._streak.pop(pid, None)
             self._opposite_logged.pop(pid, None)
             text = f"作战卡转中性：{reason}，直接全平"
-            return self._verdict(position, now, "close", 1.0, 1, text, None, None, card_rule=rule)
+            return self._verdict(
+                position, now, "close", 1.0, 1, text, None, None, card_rule=rule, rules=rules
+            )
         if action == "close":
             branch = "no_market_data_hold"
             text = f"作战卡转中性（{reason}）但行情没有或过旧：这轮先不平，等新行情"
@@ -768,7 +993,17 @@ class JevKeeper:
         log_first = self._opposite_logged.get(pid) != (key, branch)
         self._opposite_logged[pid] = (key, branch)
         return self._verdict(
-            position, now, "hold", 0.0, 1, text, None, None, card_rule=rule, record=log_first
+            position,
+            now,
+            "hold",
+            0.0,
+            1,
+            text,
+            None,
+            None,
+            card_rule=rule,
+            record=log_first,
+            rules=rules,
         )
 
     def _stale_age(self, f: FeatureSnapshot, now: datetime) -> float | None:
@@ -783,10 +1018,10 @@ class JevKeeper:
         """回吐保护：最高浮盈到过 ``giveback_arm_r`` R，且已从最高点吐掉 ``giveback_close_pct`` %。
         返回（理由, 决策记录里的数字）；没触发、关了、算不出 R 返回 None。"""
         pct = self._cfg.giveback_close_pct
-        if not self._cfg.giveback_on or not position.entry_price or not position.stop_loss_price:
+        if not self._cfg.giveback_on:
             return None
-        stop_bps = abs(position.entry_price / position.stop_loss_price - 1.0) * 1e4
-        if stop_bps <= 0 or peak <= 0:
+        stop_bps = _stop_bps(position)
+        if stop_bps is None or peak <= 0:
             return None
         peak_r = peak / stop_bps
         if peak_r < self._cfg.giveback_arm_r:
@@ -840,11 +1075,34 @@ class JevKeeper:
         card_rule: Mapping[str, Any] | None = None,
         frozen_peak_rule: Mapping[str, Any] | None = None,
         record: bool = True,
+        rules: list[dict[str, Any]] | None = None,
+        price: Mapping[str, Any] | None = None,
     ) -> KeeperVerdict:
         """``record=False``：不写决策记录（反向卡收紧同一张卡只记第一次）。
 
         ``against``：反向信号叫来的急查，决策记录 output 里写 ``against``（不是就不写）；
-        ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``。"""
+        ``extra``：回吐保护的数字，写进 output 的 ``giveback_guard``；``rules``：已投的票，
+        没走到的规则补 ``not_reached``；``price``：``_price_inputs`` 的结果。
+
+        所有平仓都从这里出去，``_close_blocker`` 拦下的改成「拿住」，原理由留在 reason 里。"""
+        blocker = self._close_blocker(position.position_id, now) if action == "close" else None
+        if blocker is not None:
+            action, reason = "hold", f"{_BLOCKED_PREFIX}{blocker}；本来要平：{reason}"
+        elif action == "close":
+            self._close_sent[position.position_id] = now
+        if rules is not None:
+            rules = [dict(r) for r in rules]
+            if card_rule is not None and not any(r["rule"] == "card" for r in rules):
+                rules.append(
+                    {
+                        "rule": "card",
+                        "vote": "close" if blocker is not None or action == "close" else "tighten",
+                        "kind": card_rule.get("kind"),
+                        "branch": card_rule.get("branch"),
+                    }
+                )
+            seen = {r["rule"] for r in rules}
+            rules += [{"rule": n, "vote": "not_reached"} for n in RULE_ORDER if n not in seen]
         actual_market: dict[str, Any] = {}
         if request is not None:
             try:
@@ -874,7 +1132,9 @@ class JevKeeper:
                 now,
                 outcome,
                 (
-                    f"{position.symbol} 规则判平，等待执行：{reason}"
+                    f"{position.symbol} {reason}"
+                    if blocker is not None
+                    else f"{position.symbol} 规则判平，等待执行：{reason}"
                     if card_rule and v.action == "close"
                     else f"{position.symbol} 作战卡转中性，拿住：{reason}"
                     if card_rule and card_rule.get("kind") == "neutral_card"
@@ -899,6 +1159,19 @@ class JevKeeper:
                     **({"giveback_guard": dict(extra)} if extra else {}),
                     **({"card_rule": dict(card_rule)} if card_rule else {}),
                     **({"frozen_peak_exit": dict(frozen_peak_rule)} if frozen_peak_rule else {}),
+                    **(
+                        {
+                            "rules": rules,
+                            "rule_fired": next(
+                                (r["rule"] for r in rules if r.get("vote") == "close"), None
+                            ),
+                            "keeper_model_mode": self._cfg.keeper_model_mode,
+                        }
+                        if rules is not None
+                        else {}
+                    ),
+                    **({"price": dict(price)} if price is not None else {}),
+                    **({"close_blocked": blocker} if blocker is not None else {}),
                     **(
                         {
                             "against": {
@@ -1102,6 +1375,18 @@ def opposite_confirmation(
         },
         "key_level": {"on": level_on, "level": level, "hit": bool(level_hit)},
     }
+
+
+def _stop_bps(position: PositionRecord) -> float | None:
+    """1R：账本开仓价到账本止损价（基点）；算不出返回 None。"""
+    if not position.entry_price or not position.stop_loss_price:
+        return None
+    stop = abs(position.entry_price / position.stop_loss_price - 1.0) * 1e4
+    return stop if stop > 0 else None
+
+
+def _is_blocked(v: KeeperVerdict) -> bool:
+    return v.reason.startswith(_BLOCKED_PREFIX)
 
 
 def _snapshot_pnl(rec: Mapping[str, Any]) -> float | None:
