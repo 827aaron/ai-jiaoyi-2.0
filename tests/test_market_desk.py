@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import math
 import re
@@ -37,6 +38,7 @@ from jiaoyi.slow.market_desk import (
     MarketDesk,
     ModelReply,
     Probs,
+    aggregate,
     average,
     check_drivers,
     compose_regime,
@@ -48,6 +50,7 @@ from jiaoyi.slow.market_desk import (
     mirror_selected,
     normalize_probs,
     parse_sample,
+    prompt_version,
     render_prompt,
     swap_words,
 )
@@ -218,6 +221,13 @@ async def commander_with_flash(
 
 def test_defaults_are_today() -> None:
     assert MarketDeskSection().mode == "off"
+    d = MarketDeskSection()
+    assert (d.band_sigma, d.prior_mode, d.momentum_guidance, d.aggregation) == (
+        0.5,
+        "anchor",
+        False,
+        "mean",
+    )
     assert FastLoopConfig().regime_flip_target == "flash_market_only"
     assert "regime_flip_target" in HOT_FAST
 
@@ -302,6 +312,106 @@ def test_swap_table_covers_required_pairs() -> None:
 @pytest.mark.parametrize("order", ["up_first", "down_first"])
 def test_instruction_wording_is_paired(order: Any) -> None:
     assert_paired(instruction_lines(order, 0.5))
+
+
+WORDINGS = [
+    {"prior_mode": m, "momentum_guidance": g}
+    for m in ("anchor", "context", "off")
+    for g in (False, True)
+]
+
+
+@pytest.mark.parametrize("order", ["up_first", "down_first"])
+@pytest.mark.parametrize("wording", WORDINGS)
+def test_every_wording_is_paired(order: Any, wording: dict[str, Any]) -> None:
+    lines = instruction_lines(order, 0.3, **wording)
+    assert_paired(lines)
+    other = instruction_lines("down_first" if order == "up_first" else "up_first", 0.3, **wording)
+    # 镜像：每句对调后的词袋，和另一种顺序下的那组句子的词袋一一对上
+    assert Counter(frozenset(_bag(swap_words(s)).items()) for s in lines) == Counter(
+        frozenset(_bag(s).items()) for s in other
+    )
+
+
+def test_default_prompt_is_byte_identical() -> None:
+    d = make_dossier()
+    for order, digest in (
+        ("up_first", "1f97df6fed351550e135e5825864361f534e2342c35c4d8f71e9773307c3c568"),
+        ("down_first", "e5174d7d6681cc409f3496f8c98cc1126a10e80292aab077d32d16332c60337e"),
+    ):
+        text = render_prompt(d, order, 0.5, "c")
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == digest
+        assert render_prompt(d, order, 0.5, "c", prior_mode="anchor") == text
+    assert prompt_version(MarketDeskSection()) == "desk-v1"
+    assert (
+        prompt_version(MarketDeskSection(prior_mode="context", momentum_guidance=True))
+        == "desk-v1+prior-context+momentum"
+    )
+    assert prompt_version(MarketDeskSection(aggregation="median", band_sigma=0.3)) == "desk-v1"
+
+
+def test_prior_modes_change_only_the_prior_wording() -> None:
+    d = make_dossier()
+    anchor = render_prompt(d, "up_first", 0.3, "c")
+    context = render_prompt(d, "up_first", 0.3, "c", prior_mode="context")
+    off = render_prompt(d, "up_first", 0.3, "c", prior_mode="off")
+    assert "Start from the base rates" in anchor and "stay close to the prior" in anchor
+    for text in (context, off):
+        assert "Start from" not in text and "stay close to the prior" not in text
+        assert "not a default for weak or mixed evidence" in text
+    assert "Do not default to the base rates" in context
+    assert "base_rate_flat_4h = 0.470" in anchor and "base_rate_flat_4h = 0.470" in context
+    assert "base_rate" not in off and "base rates come" not in off
+    assert "No historical base rates are given" in off
+    assert "UP when the return is above +0.3 sigma" in off
+    hidden = dataclasses.replace(d, missing={"base_rate_1h": "x", "news": "y"})
+    assert render_prompt(hidden, "up_first", 0.3, "c", prior_mode="off").endswith(
+        "Unavailable this cycle: news"
+    )
+
+
+@pytest.mark.parametrize("order", ["up_first", "down_first"])
+def test_momentum_guidance_is_symmetric_and_ordered(order: Any) -> None:
+    lines = instruction_lines(order, 0.3, momentum_guidance=True)
+    up = next(s for s in lines if "both above zero" in s)
+    down = next(s for s in lines if "both below zero" in s)
+    assert swap_words(up) == down and swap_words(down) == up
+    assert "raise p_up and reduce p_flat" in up and "raise p_down and reduce p_flat" in down
+    assert (lines.index(up) < lines.index(down)) == (order == "up_first")
+    assert any("pool_ret_*" in s and "btc_ret_*" in s for s in lines)
+    assert not any("both above zero" in s for s in instruction_lines(order, 0.3))
+
+
+async def test_desk_passes_wording_to_main_and_mirror_prompts(tmp_path: Path) -> None:
+    model = FakeModel(symmetric)
+    desk = make_desk(
+        tmp_path,
+        FakePublisher(),
+        model,
+        [T0],
+        prior_mode="off",
+        momentum_guidance=True,
+        mirror_test_rate=1.0,
+        band_sigma=0.3,
+    )
+    run = await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    assert run.status == "ok" and len(model.prompts) == 10
+    for p in model.prompts:
+        assert "base_rate" not in p and "both below zero" in p and "+0.3 sigma" in p
+    row = log_rows(tmp_path)[-1]
+    assert row["prompt_version"] == "desk-v1+prior-off+momentum"
+    assert row["score_targets"]["4h"]["flat_band_pct"] == pytest.approx(0.24)
+    assert row["score_targets"]["4h"]["base_rate"]["flat"] == pytest.approx(0.47)
+
+
+def test_band_sigma_reaches_base_rates() -> None:
+    fake = FakeBinance()
+    p = pool(T0, *(entry(s) for s in SYMS))
+    wide = DossierBuilder(get=fake.get, fng_get=fake.fng, band_sigma=0.5).build(p, T0)
+    narrow = DossierBuilder(get=FakeBinance().get, fng_get=fake.fng, band_sigma=0.3).build(p, T0)
+    assert wide.method["band_sigma"] == 0.5 and narrow.method["band_sigma"] == 0.3
+    flat_wide, flat_narrow = wide.value("base_rate_flat_4h"), narrow.value("base_rate_flat_4h")
+    assert flat_wide is not None and flat_narrow is not None and flat_narrow < flat_wide
 
 
 def test_dossier_notes_are_paired() -> None:
@@ -456,6 +566,50 @@ def test_average_and_derived_direction() -> None:
     assert derive_direction(Probs(0.2, 0.3, 0.5), 0.45, 0.15) == "看跌"
     assert derive_direction(Probs(0.44, 0.36, 0.2), 0.45, 0.15) == "中性"  # 不到 θ
     assert derive_direction(Probs(0.46, 0.14, 0.4), 0.45, 0.15) == "中性"  # 不到 δ
+
+
+def test_aggregation_methods() -> None:
+    ps = [
+        Probs(0.6, 0.2, 0.2),
+        Probs(0.4, 0.4, 0.2),
+        Probs(0.3, 0.4, 0.3),
+        Probs(0.5, 0.3, 0.2),
+        Probs(0.2, 0.5, 0.3),
+    ]
+    m = aggregate(ps, "mean")
+    assert (m.up, m.flat, m.down) == pytest.approx((0.4, 0.36, 0.24))
+    assert average(ps) == m
+    med = aggregate(ps, "median")  # 0.4 / 0.4 / 0.2，和 1.0
+    assert (med.up, med.flat, med.down) == pytest.approx((0.4, 0.4, 0.2))
+    tr = aggregate(ps, "trimmed")  # 每项去掉最高最低：0.4 / 0.3667 / 0.2333
+    assert (tr.up, tr.flat, tr.down) == pytest.approx((0.4, 0.36667, 0.23333), abs=1e-4)
+    lo = aggregate([Probs(0.6, 0.3, 0.1), Probs(0.1, 0.3, 0.6)], "logodds")
+    # 几何平均 0.2449 / 0.3 / 0.2449，归一后两次都同意的「平」被放大
+    assert (lo.up, lo.flat, lo.down) == pytest.approx((0.31010, 0.37980, 0.31010), abs=1e-4)
+    two = [Probs(0.6, 0.2, 0.2), Probs(0.4, 0.4, 0.2)]
+    assert aggregate(two, "trimmed") == aggregate(two, "mean")  # 不到 3 次不去头尾
+    for how in ("mean", "median", "trimmed", "logodds"):
+        same = aggregate([Probs(0.5, 0.3, 0.2)] * 4, how)  # type: ignore[arg-type]
+        assert (same.up, same.flat, same.down) == pytest.approx((0.5, 0.3, 0.2))
+    with pytest.raises(ValueError):
+        aggregate([], "median")
+
+
+async def test_desk_uses_configured_aggregation(tmp_path: Path) -> None:
+    replies = iter(
+        [
+            answer(0.7, 0.2, 0.1),
+            answer(0.3, 0.4, 0.3),
+            answer(0.3, 0.4, 0.3),
+            answer(0.3, 0.4, 0.3),
+            answer(0.3, 0.4, 0.3),
+        ]
+    )
+    desk = make_desk(
+        tmp_path, FakePublisher(), FakeModel(lambda _: next(replies)), [T0], aggregation="median"
+    )
+    run = await desk.run(pool(T0, entry("AAUSDT")), "scheduled")
+    assert run.probs is not None and run.probs.up == pytest.approx(0.3)
 
 
 def test_compose_regime_alternates_and_cites_numbers() -> None:

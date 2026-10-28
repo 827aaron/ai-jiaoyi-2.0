@@ -55,6 +55,7 @@ from jiaoyi.panel.overview import Control
 from jiaoyi.slow.settings import (
     BudgetConfig,
     LlmConfig,
+    MarketDeskSection,
     ScheduleConfig,
     ScreenerSection,
     SlowConfig,
@@ -94,8 +95,11 @@ Section = Literal[
     "budget",
     "screener",
     "tiers",
+    "market_desk",
 ]
-_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers")
+_SLOW_SECTIONS = ("schedule", "llm", "budget", "screener", "tiers", "market_desk")
+# [market_desk] 其余项（模式、模型、节奏、门槛）改了要重启、影响大盘方向，只在终端改
+DESK_EDITABLE = frozenset({"band_sigma", "prior_mode", "momentum_guidance", "aggregation"})
 # 网页上能改的运行配置；mode（走 go-live）、data_dir、模拟环境、Jev 通道和模型版本不在网页改
 APP_EDITABLE = frozenset(
     {
@@ -768,6 +772,7 @@ _WHERE: dict[Section, tuple[str, str | None]] = {
     "budget": ("slow", "budget"),
     "screener": ("slow", "screener"),
     "tiers": ("slow", "screener.tiers"),
+    "market_desk": ("slow", "market_desk"),
 }
 
 
@@ -802,6 +807,8 @@ def _base_fields(section: Section) -> dict[str, FieldSpec]:
         return scalar_fields(ScreenerSection, set())
     if section == "tiers":
         return scalar_fields(TiersSection, set())
+    if section == "market_desk":
+        return scalar_fields(MarketDeskSection, set(MarketDeskSection.model_fields) - DESK_EDITABLE)
     # jev_provider / jev_model 换通道和模型版本要重新校准，不在网页上改
     return scalar_fields(FastLoopConfig, {"jev_provider", "jev_model"})
 

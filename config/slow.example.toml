@@ -134,7 +134,10 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # min_run_gap_min = 5        # 加跑（急动 / 翻转）离上一轮开跑至少几分钟
 # mirror_test_rate = 0.1667  # 镜像测试轮次比例（数据涨跌取反再问，量方向偏置）；0 = 不做
 # mirror_alert_gap = 0.05    # 最近几次 |p_up(原) − p_down(镜像)| 平均超过它就告警
-# band_sigma = 0.5           # 「平」= |4h 等权收益| ≤ 0.5σ
+# band_sigma = 0.5           # 「平」= |等权收益| ≤ 0.5σ（基础率、记分、提示词都按它）；Demo 推荐 0.3
+# prior_mode = "anchor"      # anchor = 从基础率出发；context = 基础率只是输入之一、不默认它（Demo 推荐）；off = 不给模型看
+# momentum_guidance = false  # 提示词里加成对的「按近 15m/1h/4h 收益、家数、BTC 更新」说明；Demo 推荐 true
+# aggregation = "mean"       # 几次回答怎么合并：mean / median / trimmed / logodds
 # sigma_lookback_h = 168
 # base_rate_days = 30        # 先验：过去 30 天涨 / 平 / 跌频率
 # call_p_min = 0.45          # 方向门槛 θ
