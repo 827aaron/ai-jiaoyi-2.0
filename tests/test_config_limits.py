@@ -125,6 +125,7 @@ OPTIONAL_APP_FIELDS = {
     "protection_unknown_submit_grace_s",
     "protection_stop_working_type",
     "protection_take_profit_working_type",
+    "protection_leg_order",
     "protection_trailing_book_mark_max_dev_bps",  # 默认 30，老配置文件没有这一行
     "protection_trailing_stop_mark_buffer_bps",  # 默认 5
     "protection_trailing_min_step_bps",  # 默认 5

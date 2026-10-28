@@ -555,7 +555,11 @@ class HbExecutorAdapter:
                 break
             await self._sleep(self._poll_s)
 
-        if tracked.record.status is PositionStatus.OPEN and tracked.record.lifeboat is None:
+        if (
+            tracked.record.status is PositionStatus.OPEN
+            and tracked.record.lifeboat is None
+            and not self._stop_first_covered(tracked)
+        ):
             # 已成交但保命止损没挂上：不留裸仓，立即平掉
             await self._alert(
                 AlertLevel.CRITICAL,
@@ -1717,6 +1721,18 @@ class HbExecutorAdapter:
             self._set(current, quantity=state.entry_filled_quantity)
         return True
 
+    def _stop_first_covered(self, tracked: TrackedPosition) -> bool:
+        """``stop_first`` 托管仓、交易所止损已确认：缺保命单交给保护状态机的宽限，开仓时不平。"""
+        manager = self._protection
+        state = tracked.server_protection
+        return bool(
+            manager is not None
+            and state is not None
+            and manager.leg_order == "stop_first"
+            and state.stage not in {"exiting", "cleanup", "done"}
+            and manager.retains_confirmed_stop(tracked.record.position_id)
+        )
+
     async def _sync_server(
         self, tracked: TrackedPosition, detail: dict[str, Any]
     ) -> TrackedPosition:
@@ -1777,7 +1793,9 @@ class HbExecutorAdapter:
                     "保留已确认保命单/止损，暂不平仓，下一轮重试；超时仍未确认就平仓",
                     rec.symbol,
                     f"server_prearm_grace:{rec.position_id}",
-                    kind="order_failed",
+                    kind="lifeboat_missing"
+                    if isinstance(error, ProtectionIncomplete) and error.backup_only
+                    else "order_failed",
                 )
                 return current
             await self._alert(

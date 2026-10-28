@@ -2269,7 +2269,7 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
-const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", lifeboat_first: "保命单 → 止损 → 止盈（原行为）", stop_first: "止损 → 止盈 → 保命单", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 const choiceLabel = (k, v) => (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -2398,6 +2398,7 @@ const PLAIN = {
   protection_unknown_submit_grace_s: "条件单提交结果未知时，按原单号只查不重发最多几秒（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
+  protection_leg_order: "新仓三条腿先挂哪条：lifeboat_first 保命单在前（原行为）/ stop_first 止损在前，止损确认后保命单挂失败在未托管宽限内重试、不立即平仓",
   protection_trailing_book_mark_max_dev_bps: "移动止损：买一高过（空仓：卖一低过）标记价几基点当插针，不更新峰值（0 = 不比对，不建议）",
   protection_trailing_stop_mark_buffer_bps: "移动止损：新止损至少离标记价几基点（在正确一侧）才挂，否则这轮不换",
   protection_trailing_min_step_bps: "移动止损：至少收紧几基点才撤旧挂新（0 = 一变就换）",
@@ -2851,7 +2852,7 @@ const ROLES = [
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
     { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
-    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。只在配置文件改，改后重启；秒数 0、触发价 CONTRACT_PRICE = 原行为。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.position_mode_cache_s"] },
+    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first = 原行为。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s"] },
