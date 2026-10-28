@@ -24,17 +24,16 @@ _next_at = 0.0
 
 
 def banned_until() -> float:
-    """还在封禁期返回解封 unix 时间，否则 0。"""
-    b = rest.blocked()
-    return b.until if b is not None and b.until > time.time() else 0.0
+    """Unix time the running ban ends, recorded by this process or another one; 0 if none."""
+    b = rest.active_ban()
+    return b.until if b is not None else 0.0
 
 
 def reset() -> None:
     global _next_at
     with _lock:
         _next_at = 0.0
-    rest._blocked = None
-    rest._used_weight = None
+    rest.reset_ban_state()
 
 
 def get(url: str, params: dict[str, Any] | None = None, timeout: float = 10.0) -> httpx.Response:
@@ -53,6 +52,6 @@ def get(url: str, params: dict[str, Any] | None = None, timeout: float = 10.0) -
     rest.check_blocked()  # 排队期间别的线程可能刚被封
     r = httpx.get(url, params=params, timeout=timeout)
     if r.status_code in (418, 429):
-        raise rest.mark_blocked(r.status_code, r.headers)
+        raise rest.mark_blocked(r.status_code, r.headers, r.text)
     rest.note_used_weight(r.headers.get("X-MBX-USED-WEIGHT-1M"))
     return r

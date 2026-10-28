@@ -3002,7 +3002,7 @@ const ROLES = [
   ] },
   { id: "commander", t: "军师团", strip: ["军师团"], what: "给上会的币一个个开会，写作战卡", prompts: true, groups: [
     { g: "每个币的会", keys: ["schedule.concurrency", "schedule.symbol_min_interval_min", "schedule.reuse_extend_expiry", "schedule.card_flip_confirm", "schedule.card_flip_confirm_min", "schedule.symbol_timeout_s"] },
-    { g: "方向记分", hint: "只看不改：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
+    { g: "方向记分", hint: "只记分、不影响交易：面板定时给窗口走完的作战卡记分（卡真正发出的时刻起算、扣掉同期币池），结果在「历史卡」顶上。不影响开会和交易。", keys: ["app.card_score_every_min", "app.card_score_window_days"] },
     { g: "会议输入和偏空整改（改了要重启主程序）", hint: "默认都是现状，提示词和原来一字不差。偏空整改四项可以用“对照比例”让一部分会议用新写法，另一部分照旧，对比效果（先把下面四项改掉至少一项，再开对照，否则会被拒绝）；输入新鲜度几项让会议材料写明时间、加实时价。教训口径只影响之后的汇总。", keys: ["meeting.lessons_scoring", "meeting.debate_first", "meeting.funding_label", "meeting.bear_bull_symmetry", "meeting.crowd_ratio_mode", "meeting.bias_fix_ab", "meeting.snapshot_interval", "meeting.snapshot_label", "meeting.live_price_line", "meeting.stale_on_arrival", "meeting.stale_on_arrival_action", "meeting.input_time_labels", "meeting.market_table_rolling", "meeting.latest_market_regime", "meeting.event_brief_refresh", "meeting.regime_time_label", "meeting.regime_max_age_min", "meeting.pool_scope_label"] },
     { g: "临时会", hint: "作战卡有效期里出了事，只给那一个币补开一场。开会间隔 2 小时起默认开。", keys: ["schedule.event_meeting_enabled", "fast_loop.market_review_on", "schedule.event_triggers", "schedule.event_symbol_gap_min", "schedule.event_max_per_day", "schedule.event_concurrency", "schedule.key_level_trigger", "schedule.move_since_card_atr", "schedule.entry_max_card_age_min"] },
   ] },
@@ -3048,7 +3048,7 @@ const ROLES = [
     { g: "模拟盘按主网止损", hint: "默认关 = 现状。只对 paper / testnet：主网价格越过止损就平 Demo 仓，并按止损价记模拟成交（Demo 实际成交另记）。热生效。", keys: ["fast_loop.paper_stop_on_mainnet", "fast_loop.paper_stop_slippage_bps", "fast_loop.paper_stop_book_pnl"] },
     { g: "开仓前读账户", hint: "拍板通过后读 hummingbot 账户失败：再读几次都不行就放弃这个信号，风控员记一条拒绝。热生效。", keys: ["app.account_read_retries"] },
     { g: "按主网价格算", hint: "只算账不下单：每笔平仓按主网价格重算一遍盈亏，看去掉 Demo 成交优势后还赚不赚。", keys: ["app.mainnet_shadow_on"] },
-    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序、平仓顺序、停止补发次数和告警轮数外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
+    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序、平仓顺序、停止补发次数、告警轮数和持仓模式缓存外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },
@@ -3298,7 +3298,7 @@ function editOne(id, useRec) {
     $("#layer [data-ok]").remove();
     $("#layer [data-close].btn").textContent = "关闭";
     const x = res.changed[0];
-    dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。"}`);
+    dlgMsg(`<b class="up">已保存</b>${x ? `：${valOf(i, x.old)} → ${valOf(i, x.new)}` : ""}。${SAVED_NOTE[`${i.sec}.${i.key}`] || (isHot(i.sec, i.key) ? "几秒内生效，不用重启。" : "点「重启生效」后用上。")}`);
     poll();
   });
   offBind(i);
@@ -3330,6 +3330,11 @@ function editOne(id, useRec) {
 
 // 主程序这次启动以后的改动 = 还没生效的
 // 这项设置改了不用重启（主程序几秒内自己换上）？名单来自后端 core/hotconfig.py
+// 面板自己按轮读的项：生效时刻跟面板那一轮走，不是主程序几秒内换上
+const SAVED_NOTE = {
+  "app.card_score_every_min": "下一轮记分时生效，不用重启。",
+  "app.card_score_window_days": "下一轮记分时生效，不用重启。",
+};
 function isHot(sec, key) {
   const hot = new Set(data.control.hot_keys || []);
   return hot.has(`${sec}.${key}`) || hot.has(`${sec}.*`);
