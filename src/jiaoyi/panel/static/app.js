@@ -1382,7 +1382,7 @@ P.positions = (arg) => {
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
-          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只贴合 K 线，超出的价位线贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "贴合K线" : "显示全部价位"}</button>
+          <button class="btn b-sm" ${clickable("kscale")} title="${S.scaleAll ? "价格轴只装 K 线和开仓 / 止损 / 止盈线，保命、启动线超出时贴在边上" : "价格轴把所有价位线都装进来"}">${S.scaleAll ? "只看止损止盈" : "显示全部价位"}</button>
           <button class="btn b-sm chart-fs-btn" ${clickable("chartfull")} title="${S.chartFull ? "退出全屏（Esc）" : "全屏看图"}" aria-label="${S.chartFull ? "退出全屏" : "全屏看图"}">${S.chartFull ? "✕" : "⤢"}</button></span></div>
       <div class="chart" id="kchart-host"></div>
       <div class="legend small dim"><span><i style="border-color:var(--up)"></i>止盈</span><span><i style="border-color:var(--faint);border-style:solid"></i>开仓</span><span><i style="border-color:var(--sl)"></i>固定止损计划价（账本）</span><span><i style="border-color:var(--down);border-style:dotted"></i>保命</span>${trailLegend(sel)}<span class="chart-hint"><span class="h-pc">⌘/Ctrl+滚轮缩放 · 拖动平移 · 双击复位</span><span class="h-touch">双指捏合缩放 · 单指上下滑动页面</span></span></div>
@@ -1412,13 +1412,14 @@ function defaultRange(n, entryIdx, width) {
   }
   return { from: Math.max(0, n - DEFAULT_BARS), to };
 }
-// 价格轴只认看得见的 K 线（+ 开仓价）；开了「显示全部价位」才把所有线算进去。返回 {min, max} 或 null
-function scaleRange(bars, range, lines, entry, all) {
+// 价格轴认看得见的 K 线 + 开仓 / 止盈 / 止损（含移动止损）线；保命、启动线超出就贴边；开了「显示全部价位」才把所有线算进去。
+// core 是那几条线的价格数组。返回 {min, max} 或 null
+function scaleRange(bars, range, lines, core, all) {
   const lo = Math.max(0, Math.floor(range.from)), hi = Math.min(bars.length - 1, Math.ceil(range.to));
   let min = Infinity, max = -Infinity;
   for (let i = lo; i <= hi; i++) { min = Math.min(min, bars[i].low); max = Math.max(max, bars[i].high); }
   if (!(min <= max)) return null;
-  for (const v of all ? lines : [entry]) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
+  for (const v of all ? lines : core) if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
   return { min, max };
 }
 // scaleMargins 是占图高的比例，换成占价格范围的比例：数据只占 1 - 2·pad 的高度
@@ -1464,8 +1465,7 @@ function updateEdges() {
     chartEl.appendChild(edgeEl);
   }
   const vr = chart.timeScale().getVisibleLogicalRange();
-  const entry = lineDefs.find((d) => d.entry);
-  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), entry && entry.price, S.scaleAll) : null;
+  const r = vr && lastBars.length ? scaleRange(lastBars, vr, lineDefs.map((d) => d.price), lineDefs.filter((d) => d.core).map((d) => d.price), S.scaleAll) : null;
   const out = r && !S.scaleAll ? edgeLabels(lineDefs, r, padFrac(SCALE_PAD)) : [];
   let nTop = 0, nBot = 0;
   const html = out.map((d) => {
@@ -1546,7 +1546,7 @@ function mountChart() {
       autoscaleInfoProvider: (orig) => {
         const r = orig();
         if (!r) return r;
-        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.entry).map((d) => d.price);
+        const extra = S.scaleAll ? linePrices : lineDefs.filter((d) => d.core).map((d) => d.price);
         const vals = extra.filter((v) => v != null);
         if (!vals.length) return r;
         return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...vals), maxValue: Math.max(r.priceRange.maxValue, ...vals) } };
@@ -1613,7 +1613,7 @@ async function loadKlines(force) {
     tl.confirmed ? [tl.stop, "移动止损", c("--accent"), L.Solid, 2] : [tl.stop, tl.held ? "移动止损·未换挂" : "移动止损·程序记录（未确认）", c("--accent") + "73", L.Dashed],
   ].filter(([v]) => v != null);
   priceLines = defs.map(([v, title, color, lineStyle, lineWidth = 1]) => series.createPriceLine({ price: v, title, color, lineStyle, lineWidth, axisLabelVisible: true }));
-  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, entry: title === "开仓" }));
+  lineDefs = defs.map(([v, title, color]) => ({ price: v, title, color, symbol: p.symbol, core: title !== "保命" && !title.startsWith("赚") }));
   limitAt = limitNote(p.opened_at ? new Date(p.opened_at).getTime() : null, p.time_limit_s, bars, hm);
   series.setMarkers(entryMarkers(p, bars));
   if (force || needFit) fitView(chart);
