@@ -281,6 +281,8 @@ MARKET_SNAPSHOT_FRESH = timedelta(minutes=2)
 
 
 REGIME_STALE = "已过期，仅作参考"
+VIEW_DIRS_MAX = 512
+DIRECTIONS: frozenset[str] = frozenset({"看涨", "看跌", "中性"})
 POOL_SCOPE = "其中的涨跌、主动买卖占比等数字是全池口径，不是这个币自己的"
 
 
@@ -454,7 +456,8 @@ class BattleCardCommander:
         self._round_meeting: set[str] | None = None
         self._round_symbols: dict[str, CardSymbol] | None = None
         self._round_expiry: datetime | None = None
-        self._view_dirs: dict[str, Direction] = {}  # market_view_id -> direction, this process
+        # market_view_id -> direction of the last VIEW_DIRS_MAX publishes, kept in market_view.json
+        self._view_dirs: dict[str, Direction] = {}
         self._round_event_merges = 0
         self._round_event_cost = 0.0
         self._ref: dict[str, tuple[datetime, float]] = {}
@@ -1897,7 +1900,7 @@ class BattleCardCommander:
             source_ts=source_ts,
         )
         self._view_dirs[view.market_view_id] = direction
-        while len(self._view_dirs) > 512:
+        while len(self._view_dirs) > VIEW_DIRS_MAX:
             del self._view_dirs[next(iter(self._view_dirs))]
         if generation < self._market_published_generation:
             return view  # 仍是这一场币研究的历史来源，但不能覆盖更晚的当前观点
@@ -2150,6 +2153,7 @@ class BattleCardCommander:
             "market_retry_at": self._market_retry_at.isoformat() if self._market_retry_at else None,
             # 旧代码按键读、不认识的键忽略：回滚安全
             "flash_regime": self._flash_regime,
+            "view_dirs": dict(self._view_dirs),
         }
         tmp = self._market_path.with_suffix(".tmp")
         try:
@@ -2202,6 +2206,10 @@ class BattleCardCommander:
         self._market_error = data.get("market_error")
         flash = data.get("flash_regime")
         self._flash_regime = flash if isinstance(flash, str) else ""
+        dirs = data.get("view_dirs")
+        if isinstance(dirs, dict):  # older files have none: those entries stay unknown
+            known = [(k, v) for k, v in dirs.items() if isinstance(k, str) and v in DIRECTIONS]
+            self._view_dirs = dict(known[-VIEW_DIRS_MAX:])
         if view is not None:
             self.last_regime_direction = view.regime_direction
         try:
