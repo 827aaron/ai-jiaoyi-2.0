@@ -421,3 +421,34 @@ async def test_stale_reference_journals_a_fresh_btc_baseline(tmp_path: Path, now
     assert row["reference_at"] == now.isoformat() and row["reference_btc_px"] == 100
     assert row["baseline_at"] == clock[0].isoformat() and row["baseline_btc_px"] == 102
     assert eng.market_calls == 0 and c.regime_reference.btc_px == 100
+
+
+async def test_desk_target_requests_one_run_per_episode(tmp_path: Path, now: datetime) -> None:
+    r, _, _, clock, px = await setup(tmp_path, now)
+    cfg = r.app.app_cfg.fast_loop
+    patch_inplace(
+        cfg,
+        cfg.model_copy(update={"regime_flip_target": "desk", "regime_flip_min_gap_min": 0}),
+        HOT_FAST,
+    )
+
+    class Desk:
+        calls = 0
+
+        def request_run(self, reason: str = "regime_flip") -> None:
+            self.calls += 1
+
+        def due(self, now: datetime) -> None:
+            return None
+
+        def observe_breadth(self, *args: object) -> None:
+            pass
+
+    desk = Desk()
+    r.app.desk = desk
+    px[0] = 102
+    for _ in range(8):
+        clock[0] += timedelta(minutes=5)
+        await r.regime_flip_tick()
+    await finish(r)
+    assert desk.calls == 1
