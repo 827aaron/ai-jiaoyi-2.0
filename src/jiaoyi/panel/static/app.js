@@ -941,18 +941,16 @@ function keyFacts(s) {
   return facts.length ? `<div class="facts">${facts.map((f) => `<span class="pill">${f}</span>`).join(" ")}</div>` : "";
 }
 
-// 预测员一条记录 → 大白话：未来多久、价格范围、几条模拟向上 / 向下；原始 JSON 折叠
+// 预测员一条记录 → 大白话：未来多久、价格范围、平均路径终点在现价哪一侧；原始 JSON 折叠
+// p_up is only the side of the averaged path's endpoint (0 / 0.5 / 1), not a share of paths
 const pxFmt = (v, sym) => price(v, sym);
 const spanOf = (min) => (min % 60 ? `${min} 分钟` : `${min / 60} 小时`);
 function predictorView(s) {
   const o = s.output || {};
   const inp = s.input || {};
   const n = Number.isInteger(inp.paths) ? inp.paths : null;
-  const up = n ? Math.round(o.p_up * n) : null;
   const lean = o.p_up > 0.5 ? "偏多" : o.p_up < 0.5 ? "偏空" : "分歧";
-  const votes = n
-    ? (up === 0 ? `${n} 条模拟全部向下` : up === n ? `${n} 条模拟全部向上` : `${n} 条模拟里 ${up} 条向上、${n - up} 条向下`)
-    : (o.p_up === 0 ? "模拟全部向下" : o.p_up === 1 ? "模拟全部向上" : `${Math.round(o.p_up * 100)}% 的模拟向上`);
+  const votes = o.p_up === 0 ? "平均路径终点在现价下方" : o.p_up === 1 ? "平均路径终点在现价上方" : o.p_up === 0.5 ? "平均路径终点和现价持平" : `${Math.round(o.p_up * 100)}% 的模拟向上`;
   const title = `${coin(s.symbol || o.symbol)} 未来 ${spanOf(o.horizon_min)}：预计 ${pxFmt(o.price_low, s.symbol || o.symbol)}–${pxFmt(o.price_high, s.symbol || o.symbol)}，${votes}，${lean}`;
   const bar = o.ts ? `${hm(o.ts)} 那根 K 线收盘` : "最新一根 K 线";
   const seen = [
@@ -982,8 +980,8 @@ const FIELD = {
   card: ["作战卡"], status: ["状态"], bias: ["方向"], levels_bps: ["关键价位离现价", "bpslist"], stop_atr: ["止损（ATR 倍数）", "range"], tp_r: ["止盈（止损的倍数）", "range"], size_max: ["最大仓位档"], regime: ["大盘判断"],
   pos: ["持仓"], pnl_bps: ["浮盈", "bps"], age_min: ["已持仓", "min"], to_stop_bps: ["离止损", "bps"], to_tp_bps: ["离止盈", "bps"], time_left_min: ["离最长持仓还剩", "min"],
   entry_px: ["进场价", "px"], peak_bps: ["开仓以来最高浮盈", "bps"], giveback_bps: ["从最高回吐", "bps"], pnl_r: ["浮盈（止损的倍数）"], peak_r: ["最高浮盈（止损的倍数）"], be_bps: ["扣来回手续费后浮盈", "bps"], path_bps: ["之前几次复查的浮盈", "bpslist"],
-  entry: ["进场理由"], p_real: ["进场时「是真信号」", "p"], p_take: ["进场时「值得做」", "p"], trail: ["移动止损"], on: ["这笔带了移动止损"], active: ["已经启动"], stop_bps: ["现价离移动止损", "bps"], agree: ["4 条模拟里和持仓同方向的条数"],
-  kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["向上的模拟占比", "p"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
+  entry: ["进场理由"], p_real: ["进场时「是真信号」", "p"], p_take: ["进场时「值得做」", "p"], trail: ["移动止损"], on: ["这笔带了移动止损"], active: ["已经启动"], stop_bps: ["现价离移动止损", "bps"], agree: ["平均路径终点是否在持仓方向"],
+  kronos: ["预测员"], h_min: ["预测多久", "min"], p_up: ["平均路径终点在现价哪一侧（0 / 0.5 / 1）"], lo_bps: ["预测下沿离现价", "bps"], hi_bps: ["预测上沿离现价", "bps"],
   approved: ["结论"], reasons: ["原因"], detail: ["细节"], day_pnl_pct: ["今天盈亏", "pct"], slippage_bps: ["预计滑点", "bps"], predictor: ["预测员"], predictor_p_up: ["预测员看涨概率", "p"], predictor_nudge: ["预测员把“做”挪了"], take_raw: ["“做”概率（拍板人原话）"], take_adj: ["“做”概率（加上预测员）"],
   quantity: ["数量"], notional_usdt: ["名义仓位（含杠杆）", "usdt"], leverage: ["杠杆", "x"], risk_usdt: ["这笔最多亏", "usdt"], stop_loss_pct: ["止损距离", "pct"], take_profit_pct: ["止盈距离", "pct"],
   trailing_stop_pct: ["移动止损", "pct"], stop_widened: ["止损拉宽"], trailing_activation_pct: ["移动止损启动", "pct"], lifeboat_stop_pct: ["保命止损距离", "pct"], order_type: ["下单方式"], category: ["分组"],
@@ -2361,6 +2359,7 @@ const MEETING_CHOICE = {
   snapshot_label: { legacy: "叫“权威”（现状）", neutral: "写明最后收盘时间和距现在几分钟" },
   stale_on_arrival_action: { watch: "只盯不开", no_trade: "改成观望" },
   input_time_labels: { legacy: "不标（现状）", explicit: "写明已收盘小时 / 上次结算时间" },
+  keeper_snapshot: { direction: "方向 + 名次（原行为）", rank: "只带名次（多空对称）", off: "不带预测员" },
 };
 const choiceLabel = (k, v) => (MEETING_CHOICE[k] && MEETING_CHOICE[k][v]) || (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
 // 描述太长的项给个短名字（完整说明仍在契约里）
@@ -2417,6 +2416,7 @@ const PLAIN = {
   book_depth_levels: "看吃单那一侧前几档挂单（1–20）",
   max_notional_book_frac: "单笔最多等于这几档总额的几倍（超了缩单，0 = 不看）",
   card_caps_binding: "作战卡上的仓位、杠杆范围当硬约束",
+  leverage_clamp_to_bracket: "杠杆按币安这个币的上限封顶（关 = 超过上限这笔开不了，原行为）",
   max_slippage_stop_frac: "滑点最多是止损距离的几成",
   max_spread_stop_frac: "价差最多是止损距离的几成",
   min_stop_fee_multiple: "止损至少是来回手续费的几倍（0 = 不查）",
@@ -2444,6 +2444,7 @@ const PLAIN = {
   "predictor.rank_band": "排名前 / 后多少算看好 / 看坏",
   "predictor.rank_min_peers": "至少几个币一起预测才排名",
   "predictor.against_card_meeting": "连续几次看反作战卡就申请临时会",
+  "predictor.keeper_snapshot": "管家复查时怎么带预测员",
   "tiers.enabled": "分档交易（头部做、中部挑着做、尾部只看）",
   "tiers.head": "头部几个币（开放交易）",
   "tiers.mid": "中部几个币",
@@ -2522,6 +2523,8 @@ const PLAIN = {
   jev_usd_per_mtok: "拍板人价格（每百万字美元）",
   jev_max_consecutive_errors: "拍板人连错几次就先歇一会",
   jev_error_cooldown_s: "拍板人连错后歇几秒",
+  jev_shared_cooldown: "开仓拍板和持仓管家共用一份连错计数和冷却（关 = 各算各的）",
+  account_read_retries: "开仓前读账户失败再读几次（隔 1 秒；0 = 不重读）",
   min_p_genuine: "信号至少多大把握是真的（0–1）",
   min_p_take: "拍板人：做的把握至少（0–1）",
   gate_questions: "拍板人怎么问",
@@ -2744,6 +2747,7 @@ const HINT = {
   paths: "官方用法：一次模拟这么多条走势，模型自己平均成一条，用平均走势的终点打分。多 = 更稳，但更慢。官方和档位默认都是 10",
   temperature: "模拟走势时的随机程度：小 = 每条更像，大 = 更分散。官方回测用 0.6，档位默认 0.6",
   rank_band: "所有一起预测的币按分数排队：排在最前这么多算看好（做多加分），最后这么多算看坏（做空加分），中间不加。1/6 ≈ 0.17 = 前六分之一 / 后六分之一。看坏这一头是我们为做空加的，官方只做多",
+  keeper_snapshot: "方向（原行为）= 按平均路径终点在现价哪一侧告诉管家同向 / 反向，再带名次；预测员的方向只有涨 / 跌两档、实测多数是跌，做多的仓多半被说成反向、做空的多半同向。名次 = 只带全池排名（和拍板加分同一个排名，多空对称）；不带 = 管家看不到预测员。改后重启",
   rank_min_peers: "一起预测的币少于这个数就不排名、不加分（按需模式只算卡上和持仓的币，币少时名次没意义）。想币多一点，可把预测范围改成「全算」",
   model_size: "标准 / 最大：最大更准，但每个币算得慢 3–4 倍（Mac mini 每币约 3.5 秒，标准约 1 秒）；加载失败会自动改用标准（选“固定”时用这个）",
   adaptive_base_max_queue: "选“自适应”时生效",
@@ -2965,7 +2969,7 @@ const ROLES = [
   ] },
   { id: "gate", t: "拍板人 Jev", strip: ["拍板人"], what: "每个信号问一遍：做不做", groups: [
     { g: "门槛", warn: "gate_cautions", keys: ["fast_loop.min_p_take", "fast_loop.predictor_weight", "fast_loop.gate_record_only", "fast_loop.gate_questions", "fast_loop.entry_zone_only"] },
-    { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "fast_loop.rule_gate_without_jev"] },
+    { g: "超时、出错和同时判几个", keys: ["app.jev_timeout_ms", "app.jev_max_concurrent", "fast_loop.jev_max_consecutive_errors", "fast_loop.jev_error_cooldown_s", "app.jev_shared_cooldown", "fast_loop.rule_gate_without_jev"] },
     { g: "通道和价格", keys: ["fast_loop.jev_usd_per_mtok", "fast_loop.jev_provider", "fast_loop.jev_model"] },
   ] },
   { id: "risk_guard", t: "风控员", strip: ["风控员", "保镖"], what: "下单前最后一道关：仓位多大、门槛、止损止盈放哪。上限都是你定的，AI 改不了", groups: [
@@ -2975,7 +2979,7 @@ const ROLES = [
     { g: "每类币合计仓位上限（这一类所有仓位的名义价值加起来，含杠杆）", cat: true, hint: "不是杠杆：每笔杠杆统一用「最多开几倍杠杆」那一项。金额按现在的本金实时折算，设置里填的是本金的几倍，本金变了金额跟着变。同一类币常常一起涨跌，这样一类出事不会亏太多。每类不能超过上面的所有仓位合计上限。" },
     { g: "下单门槛", keys: ["risk.max_spread_bps", "risk.max_slippage_bps", "risk.taker_fee_bps", "risk.min_tp_fee_multiple", "fast_loop.max_spread_stop_frac", "fast_loop.max_slippage_stop_frac", "fast_loop.min_stop_fee_multiple", "fast_loop.stop_floor_widen", "fast_loop.funding_against_max_bp", "fast_loop.new_listing_block_h", "fast_loop.adl_high_block"] },
     { g: "进场方式", keys: ["fast_loop.entry_limit_pullback", "fast_loop.entry_limit_pullback_live", "fast_loop.entry_limit_offset_stop", "fast_loop.entry_limit_wait_min", "fast_loop.entry_limit_chase", "fast_loop.chase_price_max_age_s"] },
-    { g: "仓位太大时缩单", keys: ["fast_loop.book_depth_levels", "fast_loop.max_notional_book_frac", "fast_loop.margin_safety_pct", "fast_loop.card_caps_binding"] },
+    { g: "仓位太大时缩单", keys: ["fast_loop.book_depth_levels", "fast_loop.max_notional_book_frac", "fast_loop.margin_safety_pct", "fast_loop.card_caps_binding", "fast_loop.leverage_clamp_to_bracket"] },
     { g: "哪些币先不做", keys: ["fast_loop.us_hours_gate", "fast_loop.us_open_delay_min", "fast_loop.us_close_lead_min", "fast_loop.new_listing_*", "fast_loop.adl_*"] },
     { g: "止损放多远", hint: "带「跟最长持仓走」的改单笔最长持仓时自动换。", keys: ["fast_loop.atr_period_min", "fast_loop.atr_long_period_min", "fast_loop.atr_floor_7d", "fast_loop.session_factor", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_snap", "fast_loop.stop_level_buffer_atr"] },
     { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp"] },
@@ -2984,6 +2988,7 @@ const ROLES = [
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
     { g: "进场挂单", keys: ["fast_loop.entry_limit_*"] },
+    { g: "开仓前读账户", hint: "拍板通过后读 hummingbot 账户失败：再读几次都不行就放弃这个信号，风控员记一条拒绝。热生效。", keys: ["app.account_read_retries"] },
     { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序和平仓顺序外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
@@ -3030,7 +3035,7 @@ const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
   min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
-  jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
+  jev_max_consecutive_errors: " 次", account_read_retries: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
   min_quote_volume_usdt: " U", min_depth_usdt: " U", min_listed_days: " 天", min_range_24h_pct: "%", max_range_24h_pct: "%",

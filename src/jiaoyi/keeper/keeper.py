@@ -76,7 +76,13 @@ from jiaoyi.contracts import (
 from jiaoyi.core.observations import aware, freeze_values
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.jev import error_kind
-from jiaoyi.gate.questions import hold_pnl_bps, hold_questions, hold_snapshot, jev_log_fields
+from jiaoyi.gate.questions import (
+    KronosSnapshot,
+    hold_pnl_bps,
+    hold_questions,
+    hold_snapshot,
+    jev_log_fields,
+)
 from jiaoyi.interfaces import Alerter, DecisionModel
 
 log = logging.getLogger(__name__)
@@ -138,6 +144,7 @@ class JevKeeper:
         venue_price: Callable[[str], Awaitable[tuple[float, datetime] | None]] | None = None,
         exit_in_flight: Callable[[str], tuple[str, str, str] | None] | None = None,
         alerter: Alerter | None = None,
+        kronos_snapshot: KronosSnapshot = "direction",
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -171,6 +178,7 @@ class JevKeeper:
         self._against: dict[str, tuple[AgainstSignalEvent, bool]] = {}
         self._fee_bps = fee_bps
         self._forecast = forecast
+        self._kronos_snapshot = kronos_snapshot
         self._scan_day = scan_day
         self._history: dict[str, list[float]] = {}  # 每个持仓之前历次复查的浮盈（基点）
         # 每个持仓复查到过的最高浮盈（基点），按价格来源（mainnet / venue）分开记，不被历史截断
@@ -534,8 +542,9 @@ class JevKeeper:
                 current_market=market,
                 market_intra=self._intra(now, market),
                 market_age=self._market_age(now, market) if self._market_age else None,
+                kronos=self._kronos_snapshot,
             ),
-            questions=hold_questions(),
+            questions=hold_questions(self._kronos_snapshot),
         )
         history.append(pnl)
         del history[:-MAX_HISTORY]
@@ -1241,7 +1250,11 @@ class JevKeeper:
             outcome = Outcome.CLOSE if v.action == "close" else Outcome.HOLD
             if r is not None and not r.ok:
                 outcome = Outcome.ERROR
-            jev_in, jev_out = jev_log_fields(request, r) if r is not None else ({}, {})
+            jev_in, jev_out = (
+                jev_log_fields(request, r, kronos=self._kronos_snapshot)
+                if r is not None
+                else ({}, {})
+            )
             self._rec.record(
                 now,
                 outcome,

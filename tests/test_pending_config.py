@@ -99,6 +99,21 @@ def test_success_archives_pending_backs_up_and_logs(tmp_path: Path) -> None:
     assert len(_rows(data)) == 2
 
 
+def test_accepts_leverage_account_and_jev_switches(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(
+        paths,
+        "app",
+        "jev_shared_cooldown = false\naccount_read_retries = 1\n\n"
+        "[fast_loop]\nleverage_clamp_to_bracket = true\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert (cfg.jev_shared_cooldown, cfg.account_read_retries) == (False, 1)
+    assert cfg.fast_loop.leverage_clamp_to_bracket is True
+
+
 def test_no_pending_is_noop(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     text = paths.app.read_text(encoding="utf-8")
@@ -619,6 +634,20 @@ def test_tiers_always_candidates_meet_is_pending_mergeable(tmp_path: Path) -> No
     slow = load_slow_config(paths.slow, "standard")
     assert slow.screener.tiers.always_candidates_meet is True
     assert slow.commander_kwargs()["tiers"].always_meet is True
+
+
+def test_predictor_keeper_snapshot_is_editable_and_pending_mergeable(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    assert actions.editable_fields("predictor")["keeper_snapshot"].choices == (
+        "direction",
+        "rank",
+        "off",
+    )
+    assert load_app_config(paths.app).predictor.keeper_snapshot == "direction"
+    _pending(paths, "app", '[predictor]\nkeeper_snapshot = "rank"\n')
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).predictor.keeper_snapshot == "rank"
 
 
 def test_market_desk_wording_keys_are_pending_mergeable(tmp_path: Path) -> None:

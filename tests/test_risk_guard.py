@@ -11,7 +11,7 @@ from jiaoyi import contracts as c
 from jiaoyi import interfaces as i
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
-from jiaoyi.risk.guard import LotRules, RiskGuardImpl
+from jiaoyi.risk.guard import LeverageBracket, LotRules, RiskGuardImpl
 from tests.fastloop_helpers import FAST, RISK, Lots, account, card, features, jev, signal
 
 _SAME = c.FeatureSnapshot.__new__(c.FeatureSnapshot)  # 哨兵值：没传 market 时用信号自带的快照
@@ -676,3 +676,92 @@ def test_us_hours_gate_blocks_equity_entries_outside_window() -> None:
     assert verdict(
         datetime(2026, 10, 23, 13, 40, tzinfo=UTC), "us_tech", us_open_delay_min=0
     ).approved
+
+
+class _BracketLots(Lots):
+    def __init__(self, tiers: tuple[LeverageBracket, ...] | None) -> None:
+        super().__init__()
+        self.tiers = tiers
+
+    def leverage_brackets(self, symbol: str) -> tuple[LeverageBracket, ...] | None:
+        return self.tiers
+
+
+_MAX_2X = (LeverageBracket(5_000.0, 2), LeverageBracket(50_000.0, 1))
+
+
+def _bracket_review(
+    tmp_path: Path, now: datetime, tiers: tuple[LeverageBracket, ...] | None, **fast: object
+) -> tuple[c.RiskVerdict, dict[str, object]]:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(update=fast)
+    g = _Guard(RISK, cfg, _BracketLots(tiers), RoleRecorder(c.Role.RISK_GUARD, log))
+    # Little free margin, so the margin cap (which depends on leverage) binds the size.
+    v = g.review(signal(now), jev(), card(now), account(now, available_usdt=500.0), now)
+    [rec] = log.read_day(now.date().isoformat())
+    return v, rec.output.get("detail", {})
+
+
+def test_leverage_bracket_ignored_when_switch_is_off(tmp_path: Path, now: datetime) -> None:
+    v, detail = _bracket_review(tmp_path, now, _MAX_2X)
+    assert v.intent is not None and v.intent.leverage == 5
+    assert v.intent.quantity == pytest.approx(0.034)  # 500 * 0.95 / (1/5 + 5bp) = 2369 U
+    assert "bracket_max_leverage" not in detail and "leverage_clamped" not in detail
+
+
+def test_leverage_clamped_to_bracket_resizes_by_margin(tmp_path: Path, now: datetime) -> None:
+    v, detail = _bracket_review(tmp_path, now, _MAX_2X, leverage_clamp_to_bracket=True)
+    assert v.intent is not None, v.reasons
+    it = v.intent
+    assert it.leverage == 2
+    assert detail["bracket_max_leverage"] == 2
+    assert detail["leverage_clamped"] == (
+        "杠杆 5x 超过币安 BTCUSDT 能开这么大仓位的上限，按 2x 算（最高档 2x）"
+    )
+    # 500 * 0.95 / (1/2 + 5bp) = 949.05 U, floored to the 0.001 lot; risk shrinks, never grows.
+    assert detail["binding"] == "可用保证金"
+    assert it.quantity == pytest.approx(0.013)
+    assert it.risk_usdt == pytest.approx(0.013 * 120)
+
+
+def test_leverage_bracket_notional_cap_binds(tmp_path: Path, now: datetime) -> None:
+    tiers = (LeverageBracket(500.0, 20), LeverageBracket(1_020.0, 5), LeverageBracket(9e9, 1))
+    v, detail = _bracket_review(tmp_path, now, tiers, leverage_clamp_to_bracket=True)
+    assert v.intent is not None and v.intent.leverage == 5
+    assert "leverage_clamped" not in detail
+    assert detail["binding"] == "币安杠杆分层名义上限"
+    # 0.98 * 1020 = 999.6 U -> 0.014 (the full 1020 U would have allowed 0.015).
+    assert v.intent.quantity == pytest.approx(0.014)
+
+
+def test_bracket_choice_prefers_lower_leverage_with_larger_tier(now: datetime) -> None:
+    """At 10x the 5k tier would cap the trade; 5x allows 25k, so the guard picks 5x."""
+    tiers = (LeverageBracket(5_000.0, 10), LeverageBracket(25_000.0, 5))
+    cfg = FAST.model_copy(update={"leverage_clamp_to_bracket": True})
+    g = _Guard(RISK.model_copy(update={"max_leverage": 15}), cfg, _BracketLots(tiers))
+    v = g.review(signal(now), jev(), card(now), account(now), now)
+    assert v.intent is not None, v.reasons
+    # Risk notional 75 U / 120 * 68000 = 42.5k, single-trade cap 20k binds at 5x.
+    assert v.intent.leverage == 5
+    assert v.intent.quantity == pytest.approx(0.294)
+    assert v.intent.risk_usdt <= 75.0
+    small = (LeverageBracket(50_000.0, 10), LeverageBracket(250_000.0, 5))
+    v = _Guard(RISK.model_copy(update={"max_leverage": 15}), cfg, _BracketLots(small)).review(
+        signal(now), jev(), card(now), account(now), now
+    )
+    assert v.intent is not None and v.intent.leverage == 10  # tie on size keeps more leverage
+
+
+def test_unknown_bracket_keeps_leverage(tmp_path: Path, now: datetime) -> None:
+    v, detail = _bracket_review(tmp_path, now, None, leverage_clamp_to_bracket=True)
+    assert v.intent is not None and v.intent.leverage == 5
+    assert v.intent.quantity == pytest.approx(0.034)
+    assert detail["leverage_bracket"] == "没拿到币安杠杆分层，杠杆按原值"
+
+
+def test_bracket_below_binding_card_leverage_rejects(now: datetime) -> None:
+    cfg = FAST.model_copy(update={"leverage_clamp_to_bracket": True, "card_caps_binding": True})
+    g = _Guard(RISK, cfg, _BracketLots(_MAX_2X))
+    v = g.review(signal(now), jev(), card(now, leverage={"min": 3, "max": 3}), account(now), now)
+    assert not v.approved
+    assert "币安 BTCUSDT 杠杆上限 2x 低于作战卡杠杆下限 3.0" in v.reasons

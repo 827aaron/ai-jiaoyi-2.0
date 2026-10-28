@@ -202,6 +202,7 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
   「执行 → 托管保护」里只有 `protection_leg_order`、`hosted_close_mode`（挂单顺序，下拉选 `lifeboat_first` 保命单 → 止损 → 止盈 = 原行为 / `stop_first` 止损 → 止盈 → 保命单）能在网页上改，改后重启；`hosted_close_mode` 下拉选 `hb_first`（先停 HB、等它结束再直连平仓 = 原行为）/ `direct`（先下只减仓市价单再只停不平 HB，交易所止损留到确认零仓）；其余 `protection_*` 只读。`stop_first` 下交易所止损确认后就算有最低保护：之后只差保命单（被拒、提交结果未知）的同步失败交给 `protection_prearm_grace_s`，宽限内告警（`lifeboat_missing` 类）、下一轮重试——被拒的换新一代、新单号重挂，未知的只按原单号查——宽限用完仍没挂上照旧平仓；止损或止盈本身挂失败照旧立即平仓。开仓等成交那一步看到「已确认止损、还没保命单」也不平。旧接口（非托管）的仓不受影响。
 - 对账员的开平仓过渡（`reconcile_opening_grace_s` / `reconcile_closing_grace_s`，「执行」里和对账间隔放一起，网页能改、热生效）：新仓建账后、或对账员第一次看到这笔在平仓后的这么多秒内，「交易所托管仍在 provisional / exiting 阶段」「运行列表未返回执行器（逐项查询仍 active / 查不清，或列表缺席）」「平仓结果尚未确认」这几条执行器异常记成灰色「信息」、对账灯不变红、不推 Telegram（Telegram 按类别 + 仓位去重，提示先发会把宽限过后的真告警压掉 5 分钟）；平仓宽限从第一次看到在平仓算起，平仓失败、重试也不重新计时，直到这笔不在管为止；过了宽限照旧记「出错」。只改标注：平仓、补挂、终止计数、托管处理一概不变，逐项确认 TERMINATED 的两轮失管平仓不受影响。0 = 关（原行为），Demo 建议 60。
   硬上限（`config/risk.toml`、`RiskConfig`）一项都没有开关，测试守着；超时、调度间隔、打分满分线、并发数这类 0 没有意义的项也不在表里。
+- 三个开关网页能改（也能写进 `config/app.pending.toml` 随更新生效，见 `docs/fast_loop.md` 接线要点）：「风控员 → 仓位太大时缩单」的 `leverage_clamp_to_bracket`（杠杆按币安这个币的上限封顶，默认关，热生效）；「拍板人 Jev → 超时、出错和同时判几个」的 `jev_shared_cooldown`（开仓拍板和管家共用连错冷却，默认开 = 原行为，改后重启）；「执行 → 开仓前读账户」的 `account_read_retries`（读账户失败再读几次，默认 0，热生效）。
 - 作战卡（卡池，#145）：每行写「来自 hh:mm 的会 · hh:mm 到期」，离到期不到 10 分钟整行变灰；过期的币不显示，
   持仓币到期后留着并写「已到期，持仓中，不再开新仓」。弹窗里「看历史卡」（`GET /api/card-history?day=&symbol=`）
   从 `data/card_review/cards.jsonl` 按天列出过去的指令：出会 → 失效时间、方向、当时的止损 / 止盈 / 杠杆 / 仓位和理由
