@@ -400,7 +400,7 @@ def _mainnet_shadow(args: argparse.Namespace) -> int:
         except MissingSecret as e:
             print(e, file=sys.stderr)
             return 2
-        demo_budget = WeightBudget(args.demo_weight_per_min)
+        demo_budget = WeightBudget(args.demo_weight_per_min, check_ban=False)
 
         async def throttled(symbol: str, start: datetime) -> list[TradeFill]:
             await demo_budget.take(ms.USER_TRADES_WEIGHT)

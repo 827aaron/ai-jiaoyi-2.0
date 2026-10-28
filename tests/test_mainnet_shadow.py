@@ -527,7 +527,7 @@ def test_cli_mainnet_shadow_rest_refuses_while_main_process_is_banned(
 ) -> None:
     from jiaoyi.cli import main
 
-    monkeypatch.setattr(rest, "_blocked", rest.RateLimited(418, time.time() + 600))
+    monkeypatch.setattr(rest, "_own", rest.RateLimited(418, time.time() + 600))
     rest.save_ban(tmp_path)
     monkeypatch.setattr(rest, "_blocked", None)
 
@@ -544,7 +544,7 @@ def test_cli_mainnet_shadow_rest_refuses_while_main_process_is_banned(
 def test_rest_save_ban_writes_live_ban_and_removes_expired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(rest, "_blocked", rest.RateLimited(418, 2_000.0))
+    monkeypatch.setattr(rest, "_own", rest.RateLimited(418, 2_000.0))
     rest.save_ban(tmp_path, now=1_000.0)
     monkeypatch.setattr(rest, "_blocked", None)
     ban = rest.load_ban(tmp_path, now=1_500.0)

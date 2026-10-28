@@ -34,6 +34,7 @@ def reset() -> None:
     with _lock:
         _next_at = 0.0
     rest._blocked = None
+    rest._own = None
     rest._used_weight = None
 
 
