@@ -63,7 +63,12 @@ from jiaoyi.execution.exit_resolution import (
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.hb_executor import MARKER_PREFIX, HbExecutorAdapter
 from jiaoyi.execution.lifeboat import lifeboat_cids, lifeboat_price
-from jiaoyi.execution.registry import EmergencyExit, ForeignExecutorStop, PositionRegistry
+from jiaoyi.execution.registry import (
+    EmergencyExit,
+    ForeignExecutorStop,
+    PositionRegistry,
+    TrackedPosition,
+)
 from jiaoyi.execution.symbols import from_hb_pair
 from jiaoyi.interfaces import Alerter, LifeboatStop
 
@@ -260,6 +265,17 @@ class ThreeWayReconciler:
             return None
         return f"平仓进行中 {elapsed:.0f} 秒，在平仓宽限 {grace:g} 秒内，记为信息"
 
+    def _shrinking_close_hint(
+        self, tracked: list[TrackedPosition], actual: float, ledger_qty: float, now: datetime
+    ) -> str | None:
+        # The exchange fills a close before the ledger settles it, so a smaller (or zero)
+        # quantity is the normal close transition; a larger one never is. No side check here:
+        # a position whose exchange side is reversed already left as a side mismatch.
+        if actual > ledger_qty:
+            return None
+        hints = [self._closing_hint(t.record.position_id, now) for t in tracked]
+        return None if None in hints else hints[0]
+
     @staticmethod
     def _transitional(
         symbol: str, position_id: str, detail: str, hint: str | None
@@ -372,6 +388,7 @@ class ThreeWayReconciler:
         # 1. 我们以为开着的仓：方向对不对、保命止损在不在、数量对不对
         extra_now: set[str] = set()
         tracked_qty: dict[str, float] = {}
+        tracked_by: dict[str, list[TrackedPosition]] = {}
         flattened: set[str] = set()
         reversed_: set[str] = set()
         for t in live:
@@ -386,6 +403,7 @@ class ThreeWayReconciler:
                 continue
             if rec.position_id in settling:
                 continue
+            tracked_by.setdefault(rec.symbol, []).append(t)
             if t.server_protection is not None:
                 protection_state = t.server_protection
                 observed = protection_state.observed_quantity
@@ -435,12 +453,15 @@ class ThreeWayReconciler:
                 continue
             actual = exchange_qty.get(symbol, 0.0)
             if abs(actual - qty) > qty * self._tol:
+                qty_hint = self._shrinking_close_hint(tracked_by[symbol], actual, qty, now)
+                qty_detail = f"账本 {qty}，币安 {actual}"
                 issues.append(
                     ReconcileIssue(
                         kind=ReconcileIssueKind.QTY_MISMATCH,
                         symbol=symbol,
-                        detail=f"账本 {qty}，币安 {actual}",
+                        detail=f"{qty_detail}（{qty_hint}）" if qty_hint else qty_detail,
                         fixed=False,
+                        informational=qty_hint is not None,
                     )
                 )
 

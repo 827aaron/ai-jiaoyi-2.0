@@ -554,6 +554,23 @@ class ScheduleConfig(_Strict):
         "没被挑中、还没到期的旧指令（含整轮选币期间开完的临时会）同样顺延；研究时的大盘方向和"
         "此刻不同的不顺延。关 = 沿用的指令保留原到期时间（现状，可能在下一轮之前就消失）。",
     )
+    card_flip_confirm: int = Field(
+        default=1,
+        ge=1,
+        le=6,
+        description="单币方向翻转要几场会确认。1 = 新结论立即生效（现状）。2 起：一个币的新结论"
+        "和卡上生效的方向（做多 / 做空）不同（反向或转中性）时先不换，卡上留原方向、只看不做"
+        "（不开新仓，持仓也不按反向卡 / 中性卡规则平），同一个币连续这么多场会（整轮和临时会"
+        "都算）都和生效方向不同（反向、中性交替也算）才换成最新那场的结论；中途回到原方向就取消。"
+        "从中性转出方向不用确认。",
+    )
+    card_flip_confirm_min: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1440.0,
+        description="翻转候选从第一次出现起至少过几分钟才确认，和 card_flip_confirm 同时满足。"
+        "0 = 只看场数。card_flip_confirm = 1 时不起作用。",
+    )
     refresh_lead_min: float = Field(
         default=20.0,
         ge=5.0,
@@ -1141,6 +1158,8 @@ class SlowConfig(_Strict):
             "regime_time_label": self.meeting.regime_time_label,
             "regime_max_age": timedelta(minutes=self.meeting.regime_max_age_min),
             "pool_scope_label": self.meeting.pool_scope_label,
+            "flip_confirm": s.card_flip_confirm,
+            "flip_confirm_min": timedelta(minutes=s.card_flip_confirm_min),
         }
 
 
