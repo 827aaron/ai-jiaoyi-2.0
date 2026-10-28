@@ -108,12 +108,12 @@ def test_no_pending_is_noop(tmp_path: Path) -> None:
 def test_failing_check_keeps_real_files_and_pending(tmp_path: Path) -> None:
     paths, data = _setup(tmp_path)
     before = paths.app.read_bytes()
-    p = _pending(paths, "app", "pool_size = 45\n\n[fast_loop]\nnot_a_real_key = 1\n")
+    p = _pending(paths, "app", "pool_size = 1000\n")
     p_slow = _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
     sent: list[tuple[str, str]] = []
     res = pc.apply_pending(paths, data, NOW, notify=lambda t, b: sent.append((t, b)))
     assert res.status == "failed"
-    assert res.offending == ["app.toml fast_loop.not_a_real_key"]
+    assert res.offending == ["app.toml pool_size"]
     assert "config/app.toml" in res.error and str(tmp_path) not in res.error
     assert paths.app.read_bytes() == before
     assert not paths.slow.exists()  # 没有的正式文件也不会被建出来
@@ -123,8 +123,8 @@ def test_failing_check_keeps_real_files_and_pending(tmp_path: Path) -> None:
     assert not list(paths.app.parent.glob("*.bak-*"))
     status = pc.read_status(data)
     assert status is not None and status["status"] == "failed"
-    assert status["offending"] == ["app.toml fast_loop.not_a_real_key"]
-    assert len(sent) == 1 and "fast_loop.not_a_real_key" in sent[0][1]
+    assert status["offending"] == ["app.toml pool_size"] and status["restored"] is False
+    assert len(sent) == 1 and "app.toml pool_size" in sent[0][1]
 
 
 def test_check_failing_on_real_files_restores_backups(tmp_path: Path) -> None:
@@ -215,8 +215,15 @@ def test_makefile_merges_pending_after_install_before_check_config() -> None:
     mk = (ROOT / "Makefile").read_text(encoding="utf-8")
     body = mk[mk.index("\nupdate:") : mk.index("\ninit-config:")]
     assert "$(MAKE) update-after-pull" in body
-    step = "-$(BIN)/jiaoyi apply-pending-config"
+    step = "-$(BIN)/jiaoyi apply-pending-config\n"
     assert body.index("$(MAKE) install") < body.index(step) < body.index("$(MAKE) check-config")
+    gate = (
+        "@if $(MAKE) check-config; then $(BIN)/jiaoyi apply-pending-config --commit || true; \\\n"
+        "\telif $(BIN)/jiaoyi apply-pending-config --rollback; then $(MAKE) check-config; \\\n"
+        "\telse exit 1; fi\n"
+    )
+    assert gate in body
+    assert body.index(gate) < body.index("com.jiaoyi.run")
 
 
 def test_cli_never_blocks_the_update(
@@ -239,3 +246,183 @@ def test_cli_never_blocks_the_update(
     assert "已合并 1 项" in capsys.readouterr().out
     assert cli.main(["apply-pending-config", *args]) == 0
     assert "没有待更新配置" in capsys.readouterr().out
+
+
+def test_refuses_keys_the_panel_cannot_edit(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before, slow_before = paths.app.read_bytes(), paths.slow.read_bytes()
+    _pending(
+        paths,
+        "app",
+        'mode = "live"\ndata_dir = "/tmp/x"\npool_size = 45\n\n'
+        '[fast_loop]\njev_model = "x"\nnot_a_real_key = 1\n',
+    )
+    _pending(paths, "slow", '[llm]\nprovider = "openrouter"\n\n[levels]\nspan_sigma = 2.0\n')
+    res = pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    assert res.status == "failed" and res.error.startswith(pc.REFUSED_PREFIX)
+    assert res.offending == [
+        "app.toml mode",
+        "app.toml data_dir",
+        "app.toml fast_loop.jev_model",
+        "app.toml fast_loop.not_a_real_key",
+        "slow.toml llm.provider",
+        "slow.toml levels.span_sigma",
+    ]
+    assert (paths.app.read_bytes(), paths.slow.read_bytes()) == (app_before, slow_before)
+
+
+def test_check_is_the_full_check_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiaoyi import cli
+
+    paths, data = _setup(tmp_path)
+    assert pc.check_configs(paths) is None
+    monkeypatch.setattr(cli, "missing_slow_stack", lambda slow, store: "没装 tradingagents")
+    assert pc.check_configs(paths) == "没装 tradingagents"
+    before = paths.app.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    assert pc.apply_pending(paths, data, NOW).error == "没装 tradingagents"
+    assert paths.app.read_bytes() == before
+
+
+def test_interrupt_during_second_check_restores_and_reraises(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    before = paths.app.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    calls: list[int] = []
+
+    def check(p: ConfigPaths) -> str | None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return None
+
+    sent: list[str] = []
+    with pytest.raises(KeyboardInterrupt):
+        pc.apply_pending(paths, data, NOW, check=check, notify=lambda t, b: sent.append(b))
+    assert paths.app.read_bytes() == before and not paths.slow.exists()
+    assert pc.pending_path(paths.app).is_file()
+    status = pc.read_status(data)
+    assert status is not None and status["status"] == "failed"
+    assert status["restored"] is True and status["restore_failed"] == []
+    assert len(sent) == 1 and "正式配置是原样的" in sent[0]
+
+
+def test_write_error_on_second_file_restores_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, data = _with_slow(tmp_path)
+    app_before, slow_before = paths.app.read_bytes(), paths.slow.read_bytes()
+    _pending(paths, "app", "pool_size = 45\n")
+    _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    real_write = pc._atomic_write
+
+    def flaky(path: Path, text: str) -> None:
+        if path.name == "slow.toml":
+            raise OSError("disk full")
+        real_write(path, text)
+
+    monkeypatch.setattr(pc, "_atomic_write", flaky)
+    res = pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    assert res.status == "failed" and "disk full" in res.error
+    assert (paths.app.read_bytes(), paths.slow.read_bytes()) == (app_before, slow_before)
+    assert pc.read_status(data)["restored"] is True  # type: ignore[index]
+
+
+def test_wrong_line_edit_is_caught_by_read_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, data = _setup(tmp_path)
+    before = paths.app.read_bytes()
+    _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    monkeypatch.setattr(pc, "set_toml_value", lambda text, table, key, value: text)
+    res = pc.apply_pending(paths, data, NOW, check=lambda p: None)
+    assert res.status == "failed" and "读回来的值不对" in res.error
+    assert res.offending == ["app.toml fast_loop.surge_vol_ratio"]
+    assert paths.app.read_bytes() == before
+
+
+def test_file_saved_between_merge_and_write_is_merged_again(tmp_path: Path) -> None:
+    """合并后、写之前面板存了一次：重读重合并，两边的改动都在。"""
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    calls: list[int] = []
+
+    def check(p: ConfigPaths) -> str | None:
+        calls.append(1)
+        if len(calls) == 1:
+            text = actions.set_toml_value(
+                paths.app.read_text(encoding="utf-8"), None, "pool_size", 45
+            )
+            paths.app.write_text(text, encoding="utf-8")
+        return None
+
+    assert pc.apply_pending(paths, data, NOW, check=check).status == "applied"
+    cfg = load_app_config(paths.app)
+    assert (cfg.pool_size, cfg.fast_loop.surge_vol_ratio) == (45, 6.0)
+    assert len(calls) == 3  # 临时校验 → 写前发现被改 → 重合并后临时校验 + 正式校验
+
+
+def test_rollback_after_failed_check_config_restores_everything(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    before = paths.app.read_bytes()
+    p_app = _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    p_slow = _pending(paths, "slow", "[screener]\nmin_listed_days = 10\n")
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "applied"
+    assert paths.slow.exists() and not p_app.exists()
+    sent: list[str] = []
+    res = pc.rollback(data, NOW, "check-config 没过", notify=lambda t, b: sent.append(t))
+    assert res is not None and res.status == "rolled_back"
+    assert paths.app.read_bytes() == before and not paths.slow.exists()
+    assert p_app.is_file() and p_slow.is_file()
+    rows = _rows(data)
+    assert [(r["key"], r["old"], r["new"]) for r in rows[-2:]] == [
+        ("surge_vol_ratio", 6.0, 5.0),
+        ("min_listed_days", 10, None),
+    ]
+    assert sent == ["待更新配置已退回"]
+    assert pc.notice(paths, data)["failed"]["status"] == "rolled_back"
+    assert pc.rollback(data, NOW, "again") is None  # 退过一次就不再退
+
+
+def test_commit_stops_a_later_rollback(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "applied"
+    assert pc.commit(data, NOW) is True
+    assert pc.rollback(data, NOW, "x") is None
+    assert load_app_config(paths.app).fast_loop.surge_vol_ratio == 6.0
+    assert pc.commit(data, NOW) is False
+
+
+def test_rollback_skips_a_file_edited_after_the_merge(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    assert pc.apply_pending(paths, data, NOW, check=lambda p: None).status == "applied"
+    text = actions.set_toml_value(paths.app.read_text(encoding="utf-8"), None, "pool_size", 45)
+    paths.app.write_text(text, encoding="utf-8")
+    res = pc.rollback(data, NOW, "x")
+    assert res is not None
+    assert paths.app.read_text(encoding="utf-8") == text
+    status = pc.read_status(data)
+    assert status is not None and status["restore_failed"] == ["app.toml（合并后又被改过）"]
+
+
+def test_cli_commit_and_rollback_exit_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiaoyi import cli
+
+    monkeypatch.setattr(cli, "_notify_telegram", lambda title, body: None)
+    paths, data = _setup(tmp_path)
+    before = paths.app.read_bytes()
+    args = ["--risk", str(paths.risk), "--app", str(paths.app), "--slow", str(paths.slow)]
+    assert cli.main(["apply-pending-config", "--rollback", *args]) == 1
+    _pending(paths, "app", "[fast_loop]\nsurge_vol_ratio = 6.0\n")
+    assert cli.main(["apply-pending-config", *args]) == 0
+    assert cli.main(["apply-pending-config", "--rollback", *args]) == 0
+    assert paths.app.read_bytes() == before
+    assert cli.main(["apply-pending-config", *args]) == 0
+    assert cli.main(["apply-pending-config", "--commit", *args]) == 0
+    assert cli.main(["apply-pending-config", "--rollback", *args]) == 1
+    assert pc.read_status(data)["status"] == "committed"  # type: ignore[index]

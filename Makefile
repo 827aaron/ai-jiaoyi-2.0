@@ -48,7 +48,10 @@ update-after-pull:
 	-@if [ -d vendor/Kronos ]; then $(BIN)/python -m jiaoyi.predictor.fetch_weights; fi
 	@# 待更新配置（config/*.pending.toml）用新代码合并、校验；不合格就不动正式配置，不挡更新
 	-$(BIN)/jiaoyi apply-pending-config
-	$(MAKE) check-config
+	@# check-config 不过：退回刚合并的待更新配置（旧程序还在跑，不能让它面对不认识的键），退了再查一次
+	@if $(MAKE) check-config; then $(BIN)/jiaoyi apply-pending-config --commit || true; \
+	elif $(BIN)/jiaoyi apply-pending-config --rollback; then $(MAKE) check-config; \
+	else exit 1; fi
 	@# 面板放最后重启：面板里的「更新到最新版」按钮就是它拉起的 make，先重启面板会把自己杀掉
 	@if launchctl print gui/$$(id -u)/com.jiaoyi.run >/dev/null 2>&1; then \
 		launchctl kickstart -k gui/$$(id -u)/com.jiaoyi.run && echo "已重启 com.jiaoyi.run"; \

@@ -159,17 +159,20 @@ POST 照样过 Host 白名单和 Origin / `X-Jiaoyi-Panel` 校验。不是 macOS
 
 运维流程（合并后把新设置写进 `*.pending.toml`，用户点一次更新即可）：
 
-1. PR 合并后，在 Mac 的源码目录里新建 `config/app.pending.toml` 和 / 或 `config/slow.pending.toml`（硬上限是 `config/risk.pending.toml`），段落写法和正式文件一样，只写要设的键，可以带注释。例：`[fast_loop]` 下一行 `new_key = 3`。
+1. PR 合并后，在 Mac 的源码目录里新建 `config/app.pending.toml` 和 / 或 `config/slow.pending.toml`（硬上限是 `config/risk.pending.toml`），段落写法和正式文件一样，只写要设的键，可以带注释。例：`[fast_loop]` 下一行 `new_key = 3`。只收面板设置页能改的键（`actions.editable_fields`，按新代码算）：模式、数据目录、模拟环境、拍板人通道和模型版本、军师团通道 `[llm]`、面板没有的段（例如 `[levels]`）一律不收，报错里点名是哪一项，这些照旧在终端手改。
 2. 面板设置页顶部出现「有 N 项待更新时生效」，只读列出每一项（`/api/settings` 的 `pending_config.items`）。正在跑的主程序、面板和热生效都不读待更新文件。
-3. 用户点「更新到最新版」（或终端 `make update`）：拉代码 → 装依赖 → 拉权重 → `jiaoyi apply-pending-config` → `check-config` → 重启主程序和面板，只重启一次。
+3. 用户点「更新到最新版」（或终端 `make update`）：拉代码 → 装依赖 → 拉权重 → `jiaoyi apply-pending-config` → `check-config`（过了 `--commit`，不过 `--rollback` 再查一次）→ 重启主程序和面板，只重启一次。
+4. 中途被打断（断电、关掉终端、面板被杀）：再点一次更新即可。合并是幂等的，同样的值再写一遍不变，待更新文件只在合并成功后才挪走。
 
 `apply-pending-config` 做的事：
 
 - 没有待更新文件：什么都不做。重复跑结果一样。
-- 把每一项合进正式文件（只换 / 加那一行，其余行和注释原样留着；段没有就在文件末尾新开），先在临时目录里用新代码和 `check-config` 同一套读法校验，过了才写正式文件；写前留 `<文件>.bak-<时间>-pending` 备份，写完对正式文件再校验一次，不过就从备份恢复。
-- 成功：待更新文件挪到 `data/config_pending_applied/<时间>-<文件名>`，每项记一行 `data/config_changes.jsonl`（`source` 为 `"pending"`，面板「修改记录」能看到），状态写 `data/config_pending_status.json`。
-- 失败（待更新文件不是合法 TOML、新代码也不认这个键、值超范围、实盘时改硬上限）：正式文件不动，待更新文件留着，**代码照常更新、按原配置重启**；原因和有问题的项写进 `data/panel_update.log`、`data/config_pending_status.json`（面板设置页横幅「上次更新时没生效」），并发一条 Telegram。改好待更新文件后再点一次更新。
-- 实盘（`mode = "live"`）时不合并 `risk.pending.toml`：实盘解锁绑定 risk.toml 的指纹，改了主程序会拒绝按实盘启动。
+- 把每一项合进正式文件（只换 / 加那一行，其余行和注释原样留着；段没有就在文件末尾新开），合并后逐项读回来核对值；先在临时目录里用新代码、和 `jiaoyi check-config` 完全同一套校验（含配了军师团 key 时 tradingagents 装没装），过了才写正式文件。
+- 写之前再读一次正式文件，和合并时不一样（面板正好存了一次）就按新内容重新合并、重新校验，最多三次。写前留 `<文件>.bak-<时间>-pending` 备份，写完对正式文件再校验一次；写的过程中出任何错（包括被中断），已写的文件都从备份退回（原来没有的删掉），状态文件和 Telegram 写明退没退回去。
+- 成功：待更新文件挪到 `data/config_pending_applied/<时间>-<文件名>`，每项记一行 `data/config_changes.jsonl`（`source` 为 `"pending"`，面板「修改记录」能看到），状态写 `data/config_pending_status.json`（`applied`，记着备份和写进去的内容指纹）。
+- 之后的 `check-config` 没过：`apply-pending-config --rollback` 按状态文件里的备份退回正式文件、把待更新文件放回 `config/`、修改记录里记一行退回，然后再跑一次 `check-config`，过了照常重启（旧程序不会面对它不认识的键）。合并之后又被改过的文件（指纹对不上）不退，免得冲掉那次修改，状态和 Telegram 里点名。`check-config` 过了就 `--commit`，之后不再退。
+- 失败（待更新文件不是合法 TOML、面板不让改的键、新代码也不认这个值、值超范围）：正式文件是原样的，待更新文件留着，**代码照常更新、按原配置重启**；原因和有问题的项写进 `data/panel_update.log`、`data/config_pending_status.json`（面板设置页横幅「上次更新时没生效」），并发一条 Telegram。改好待更新文件后再点一次更新。
+- 实盘（`mode = "live"`）时只要有 `risk.pending.toml`，**整批都不合并**（app / slow 的待更新也一起等着）：实盘解锁绑定 risk.toml 的指纹，改了主程序会拒绝按实盘启动。先切回模拟盘，或在面板里用密码改硬上限、把 `risk.pending.toml` 删掉。
 - 待更新文件在 `.gitignore` 里（`config/*.pending.toml`），不会让工作区变脏、挡住 `git pull`。
 
 `make update` 拉完代码后由子 make 跑剩下的步骤（`update-after-pull`），所以 Makefile 里更新步骤的改动在拉下来的那一次就生效。这一套本身合并后的第一次更新还按旧 Makefile 跑（没有合并这一步），从第二次起生效。

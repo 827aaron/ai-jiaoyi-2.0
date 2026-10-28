@@ -92,14 +92,28 @@ def _caution_line(risk: RiskConfig) -> str | None:
     )
 
 
+def _load_checked(args: argparse.Namespace) -> tuple[RiskConfig, AppConfig, SlowConfig]:
+    """``check-config`` 的全部校验：三份配置 + 配了军师团 key 时 tradingagents 装没装。"""
+    risk, app, slow = _load(args)
+    if problem := missing_slow_stack(slow, ChainedSecretStore()):
+        raise ConfigError(problem)
+    return risk, app, slow
+
+
+def config_problem(risk: Path, app: Path, slow: Path) -> str | None:
+    """``jiaoyi check-config`` 不合格的原因（合格返回 None）；待更新配置合并时用同一套。"""
+    try:
+        _load_checked(argparse.Namespace(risk=str(risk), app=str(app), slow=str(slow)))
+    except ConfigError as e:
+        return str(e)
+    return None
+
+
 def _check_config(args: argparse.Namespace) -> int:
     try:
-        risk, app, slow = _load(args)
+        risk, app, slow = _load_checked(args)
     except ConfigError as e:
         print(e, file=sys.stderr)
-        return 2
-    if problem := missing_slow_stack(slow, ChainedSecretStore()):
-        print(problem, file=sys.stderr)
         return 2
     print(
         f"配置合格。模式 {app.mode}，每笔风险 {risk.risk_per_trade_pct}%，"
@@ -499,9 +513,11 @@ def _notify_telegram(title: str, body: str) -> None:
 def _apply_pending_config(args: argparse.Namespace) -> int:
     """``make update`` 装完新代码后跑：合并 ``config/*.pending.toml``（见 ``pending_config.py``）。
 
-    总是返回 0：合并失败时正式文件不动，代码照常更新、按原配置重启。"""
+    合并总是返回 0：失败时正式文件是原样的，代码照常更新、按原配置重启。``--commit`` /
+    ``--rollback`` 在之后的 ``check-config`` 过 / 不过时跑；``--rollback`` 真退了才返回 0
+    （Makefile 据此再跑一次 check-config），没什么可退返回 1。"""
     from jiaoyi.panel.actions import ConfigPaths
-    from jiaoyi.panel.pending_config import apply_pending
+    from jiaoyi.panel.pending_config import apply_pending, commit, rollback
 
     paths = ConfigPaths(risk=Path(args.risk), app=Path(args.app), slow=Path(args.slow))
     try:
@@ -509,6 +525,17 @@ def _apply_pending_config(args: argparse.Namespace) -> int:
         data_dir = str(raw.get("data_dir") or "data")
     except (OSError, tomllib.TOMLDecodeError):
         data_dir = "data"
+    if args.commit:
+        commit(data_dir, datetime.now(UTC))
+        return 0
+    if args.rollback:
+        why = "合并后 check-config 没过（原因见上面 check-config 的输出）"
+        back = rollback(data_dir, datetime.now(UTC), why, notify=_notify_telegram)
+        if back is None:
+            print("没有待定的待更新配置合并，不用退")
+            return 1
+        print(f"check-config 没过：已把待更新配置的 {len(back.items)} 项退回，待更新文件放回原处")
+        return 0
     res = apply_pending(paths, data_dir, datetime.now(UTC), notify=_notify_telegram)
     if res.status == "none":
         print("没有待更新配置（config/*.pending.toml）")
@@ -518,7 +545,7 @@ def _apply_pending_config(args: argparse.Namespace) -> int:
             name = f"{it.table}.{it.key}" if it.table else it.key
             print(f"  {it.file} {name} = {it.value!r}")
     else:
-        print("待更新配置没生效（正式配置没动，代码照常更新）：")
+        print("待更新配置没生效（正式配置是原样的，代码照常更新）：")
         print(f"  有问题的项：{'、'.join(res.offending) or '（读不出待更新文件）'}")
         for line in res.error.splitlines():
             print(f"  {line}")
@@ -766,6 +793,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--risk", default=str(DEFAULT_RISK_PATH))
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--slow", default=str(DEFAULT_SLOW_PATH))
+    once = p.add_mutually_exclusive_group()
+    once.add_argument("--commit", action="store_true", help="check-config 过了：定下这次合并")
+    once.add_argument("--rollback", action="store_true", help="check-config 没过：退回这次合并")
     p.set_defaults(func=_apply_pending_config)
 
     p = sub.add_parser("status", help="团队页的文字版：每个角色的状态")
