@@ -175,6 +175,18 @@ class DeskInfo(BaseModel):
     stopped: str | None = None
     """自停原因（日预算 / 余额不足）；不算故障。"""
     summary: str | None = None
+    accuracy: str | None = None
+    """``data/market_desk/score.json`` 的一行准确度（近 24h / 7 天 4h Brier 对先验、命中、n）。"""
+
+
+def _desk_accuracy(files: PanelFiles) -> str | None:
+    raw = files._json(DESK_SCORE_FILE)
+    panel = raw.get("panel") if isinstance(raw, dict) else None
+    text = panel.get("text") if isinstance(panel, dict) else None
+    if not isinstance(text, str) or not text:
+        return None
+    at = _aware(raw.get("generated_at"))
+    return text + (f"（算于 {at.astimezone(ZoneInfo(files.tz)):%m-%d %H:%M}）" if at else "")
 
 
 def _aware(v: object) -> datetime | None:
@@ -256,6 +268,7 @@ def build_desk(
         error=err,
         stopped=stopped,
         summary=summary,
+        accuracy=_desk_accuracy(files),
     )
 
 
@@ -691,6 +704,7 @@ _MARKET_SCAN = 2000
 
 
 DESK_STATE_FILE = "market_desk_state.json"
+DESK_SCORE_FILE = "market_desk/score.json"
 
 
 def _desk_records(files: PanelFiles, now: datetime) -> list[TrailItem]:
