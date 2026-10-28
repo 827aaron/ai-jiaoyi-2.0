@@ -2448,6 +2448,8 @@ const PLAIN = {
   keeper_close_guard: "平仓前检查：交易所保护腿在途 / 本轮已发过就不再发",
   keeper_close_guard_replacing_max_s: "平仓前检查：保护腿换代最多等几秒",
   keeper_close_guard_exiting_max_s: "平仓前检查：保护腿已触发 / 退出中最多等几秒",
+  keeper_close_guard_total_max_s: "平仓前检查：保护腿连续在途合计最多等几秒",
+  keeper_venue_alert_reviews: "执行所标记价连续几次读不到就告警（0 = 不告警）",
   frozen_peak_exit_on: "冻结盈利价回访（仅之后新开的 Demo 仓）",
   frozen_peak_exit_after_s: "从真实首笔成交起几分钟后冻结盈利价",
   frozen_peak_evidence_mode: "冻结盈利价的交易所证据怎么读",
@@ -2876,7 +2878,7 @@ const ROLES = [
     { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first = 原行为。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
-    { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s"] },
+    { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },
     { g: "Jev 盈利门控", hint: "代码规则 + Jev 的一道题：赚到一定倍数止损距离、Jev 又说进场理由不成立（回答够新），就全平。只平不放宽。", keys: ["fast_loop.keeper_thesis_take_on", "fast_loop.keeper_thesis_take_min_r", "fast_loop.keeper_thesis_take_p", "fast_loop.keeper_thesis_take_max_age_s"] },
     { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
@@ -2918,7 +2920,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", fast_loop: "r
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  min_tp_r: " 倍", max_tp_r: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",

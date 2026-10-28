@@ -98,6 +98,8 @@ keeper_confirmations = 2
 # keeper_close_guard = false       # 平仓前检查：交易所保护腿已触发 / 退出中、正在换代、或本轮已发过平仓就不再发；false = 现状
 # keeper_close_guard_replacing_max_s = 30   # 换代最多等几秒，过了照常平
 # keeper_close_guard_exiting_max_s = 120    # 已触发 / 退出中最多等几秒，过了照常平并记下
+# keeper_close_guard_total_max_s = 180      # 连续在途（接连换代、换代接退出）合计最多等几秒
+# keeper_venue_alert_reviews = 3            # venue 时执行所标记价连续几次读不到 / 过旧就告警；0 = 不告警
 # frozen_peak_exit_on = true       # New Demo positions only; existing positions are never migrated
 # frozen_peak_exit_after_s = 3600  # Freeze the observed executable profit target after one hour
 # frozen_peak_evidence_mode = "sync"     # sync = 每次复查等交易所证据（最多 12 秒）；background = 后台按仓读、复查只用新鲜缓存，读到触发马上复查，例行一轮不等最慢那笔。Demo 建议 background

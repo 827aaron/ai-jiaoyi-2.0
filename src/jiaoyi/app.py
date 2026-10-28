@@ -725,6 +725,7 @@ def build_modules(
             if RunMode(app_cfg.mode) is not RunMode.LIVE
             else None,
             exit_in_flight=getattr(executor, "protection_exit_in_flight", None),
+            alerter=alerter,
         )
 
     modules = Modules(

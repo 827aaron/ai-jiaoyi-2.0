@@ -50,10 +50,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from jiaoyi.contracts import (
     AgainstSignalEvent,
+    Alert,
+    AlertLevel,
     BattleCard,
     Bias,
     CardSymbol,
@@ -75,7 +77,7 @@ from jiaoyi.core.observations import aware, freeze_values
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.jev import error_kind
 from jiaoyi.gate.questions import hold_pnl_bps, hold_questions, hold_snapshot, jev_log_fields
-from jiaoyi.interfaces import DecisionModel
+from jiaoyi.interfaces import Alerter, DecisionModel
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +134,8 @@ class JevKeeper:
         opposite_state_path: Path | None = None,
         review_interval_s: float | None = None,
         venue_price: Callable[[str], Awaitable[tuple[float, datetime] | None]] | None = None,
-        exit_in_flight: Callable[[str], tuple[str, str] | None] | None = None,
+        exit_in_flight: Callable[[str], tuple[str, str, str] | None] | None = None,
+        alerter: Alerter | None = None,
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -146,7 +149,8 @@ class JevKeeper:
         ``venue_price(币)``：执行所标记价和它的交易所时间（``keeper_price_source = "venue"`` 才读；
         None = 执行所就是主网行情，比如模拟盘、实盘）。
         ``exit_in_flight(持仓号)``：交易所保护腿已触发 / 正在退出（``"exiting"``）或正在换代
-        （``"replacing"``）时返回（种类, 说明），这时管家不发平仓请求。"""
+        （``"replacing"``）时返回（种类, 身份, 说明），身份用来起算等待（换代 = 保护代数），
+        这时管家不发平仓请求。``alerter``：执行所标记价连续读不到时告警。"""
         self._frozen_peak_review = frozen_peak_review
         self._model = model
         self._sleep = sleep
@@ -185,7 +189,9 @@ class JevKeeper:
         self._exit_in_flight = exit_in_flight
         self._thesis: dict[str, tuple[datetime, float]] = {}  # 最近一次 Jev thesis_intact 的 no
         self._close_sent: dict[str, datetime] = {}  # 上一次发出平仓请求的时刻
-        self._inflight: dict[str, tuple[str, str, datetime]] = {}  # 保护腿在途（种类, 说明, 起）
+        self._inflight: dict[str, _Inflight] = {}
+        self._venue_misses: dict[str, int] = {}  # 执行所标记价连续读不到 / 过旧的复查次数
+        self._alerter = alerter
         self._load_opposite_state()
 
     def set_market_source(self, source: Callable[[], MarketView | None]) -> None:
@@ -199,6 +205,7 @@ class JevKeeper:
         self._thesis.pop(position_id, None)
         self._close_sent.pop(position_id, None)
         self._inflight.pop(position_id, None)
+        self._venue_misses.pop(position_id, None)
         self._against.pop(position_id, None)
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
@@ -468,8 +475,12 @@ class JevKeeper:
                 else ("执行所标记价" if price["used"] == "venue" else "行情")
                 + f"已旧 {age:.0f} 秒，这轮跳过、维持现状"
             )
+            if price["used"] == "venue":
+                alerted, text = await self._venue_miss(position, price, text, now)
+                first = first or alerted
             return verdict(position, now, "hold", 0.0, 1, text, None, None, record=first)
         self._stale_logged.discard(pid)
+        self._venue_misses.pop(pid, None)
         px = float(price["price"])
         fv = f if px == f.last_price else f.model_copy(update={"last_price": px})
         card = self._card(now)
@@ -676,10 +687,45 @@ class JevKeeper:
         )
         return {**vote, "vote": "close"}, text
 
-    def _observe_inflight(self, pid: str, now: datetime) -> tuple[str, str, datetime] | None:
-        """交易所保护腿在途状态（种类, 说明, 从何时起）。每次复查都刷新：不在途就清掉，换了一次
-        换代（说明里带保护代数）或种类变了就重新起算，后来的换代各有自己的等待时间。"""
-        inflight: tuple[str, str] | None = None
+    async def _venue_miss(
+        self, position: PositionRecord, price: dict[str, Any], text: str, now: datetime
+    ) -> tuple[bool, str]:
+        """执行所标记价又一次读不到 / 过旧：记次数（写进 ``price.venue_misses``），连续到
+        ``keeper_venue_alert_reviews`` 次告警一次（同一段只告一次），不退回主网价。
+        返回（这次刚告警, 理由）。"""
+        pid = position.position_id
+        n = self._venue_misses.get(pid, 0) + 1
+        self._venue_misses[pid] = n
+        price["venue_misses"] = n
+        limit = self._cfg.keeper_venue_alert_reviews
+        if limit <= 0 or n < limit:
+            return False, text
+        price["venue_alert"] = True
+        text = f"{text}（执行所标记价已连续 {n} 次读不到或过旧，已告警）"
+        if n != limit:
+            return False, text
+        if self._alerter is not None:
+            try:
+                await self._alerter.send(
+                    Alert(
+                        ts=now,
+                        level=AlertLevel.WARN,
+                        role=Role.KEEPER,
+                        title=f"{position.symbol} 管家读不到执行所标记价",
+                        body=f"已连续 {n} 次复查读不到或过旧，回吐保护 / 盈利门控 / 平仓概率"
+                        "这期间都不判（不退回主网价）；作战卡、冻结盈利价和交易所止损照常",
+                        kind="system",
+                    )
+                )
+            except Exception:
+                log.exception("管家告警发送失败")
+        return True, text
+
+    def _observe_inflight(self, pid: str, now: datetime) -> _Inflight | None:
+        """交易所保护腿在途状态。每次复查都刷新：不在途就清掉。等待按（种类, 身份）起算——
+        退出只按种类（触发 → 退出 → 收尾是同一次退出），换代按保护代数（同一代里腿一步步走
+        不重新起算，新一代才重新起算）；``total_since`` 是这段连续在途从何时起，不论换了几代。"""
+        inflight: tuple[str, str, str] | None = None
         if self._exit_in_flight is not None and self._cfg.keeper_close_guard:
             try:
                 inflight = self._exit_in_flight(pid)
@@ -688,37 +734,47 @@ class JevKeeper:
         if inflight is None:
             self._inflight.pop(pid, None)
             return None
+        kind, key, detail = inflight
         seen = self._inflight.get(pid)
-        if seen is None or seen[:2] != inflight:
-            seen = (inflight[0], inflight[1], now)
-            self._inflight[pid] = seen
+        if seen is None:
+            seen = _Inflight(kind, key, detail, now, now)
+        elif (seen.kind, seen.key) != (kind, key):
+            seen = _Inflight(kind, key, detail, now, seen.total_since)
+        else:
+            seen = seen._replace(detail=detail)
+        self._inflight[pid] = seen
         return seen
 
     def _close_blocker(self, pid: str, now: datetime) -> tuple[str | None, str | None]:
         """（不发平仓的原因, 等过头照常平时的说明）。``keeper_close_guard`` 关着一律照常发。
 
         交易所保护腿已触发 / 正在退出：交给保护轮询收尾，最多等
-        ``keeper_close_guard_exiting_max_s``；
-        正在换代：最多等 ``keeper_close_guard_replacing_max_s``；卡住不能让管家永远平不了。
-        同一笔仓半个复查间隔内已发过一次平仓请求：不重复发。"""
+        ``keeper_close_guard_exiting_max_s``；同一代换代最多等
+        ``keeper_close_guard_replacing_max_s``；
+        连续在途（接连换代、换代接退出）合计最多等 ``keeper_close_guard_total_max_s``。
+        卡住不能让管家永远平不了。同一笔仓半个复查间隔内已发过一次平仓请求：不重复发。"""
         cfg = self._cfg
         if not cfg.keeper_close_guard:
             return None, None
         note: str | None = None
         seen = self._observe_inflight(pid, now)
         if seen is not None:
-            kind, detail, since = seen
-            waited = (now - since).total_seconds()
-            exiting = kind == "exiting"
+            waited = (now - seen.since).total_seconds()
+            total = (now - seen.total_since).total_seconds()
+            exiting = seen.kind == "exiting"
             limit = (
                 cfg.keeper_close_guard_exiting_max_s
                 if exiting
                 else cfg.keeper_close_guard_replacing_max_s
             )
             what = "已触发或正在退出" if exiting else "正在换代"
-            if waited <= limit:
-                return f"交易所保护腿{what}（{detail}），这轮不发平仓", None
-            note = f"交易所保护腿{what}（{detail}）已 {waited:.0f} 秒，超过 {limit:g} 秒，照常平"
+            if waited <= limit and total <= cfg.keeper_close_guard_total_max_s:
+                return f"交易所保护腿{what}（{seen.detail}），这轮不发平仓", None
+            note = (
+                f"交易所保护腿{what}（{seen.detail}）已 {waited:.0f} 秒"
+                f"（连续在途 {total:.0f} 秒），"
+                f"超过 {limit:g} / {cfg.keeper_close_guard_total_max_s:g} 秒，照常平"
+            )
         last = self._close_sent.get(pid)
         window = 0.5 * self._review_interval_s if self._review_interval_s else 0.0
         if last is not None and 0 <= (now - last).total_seconds() < window:
@@ -1417,6 +1473,16 @@ def opposite_confirmation(
         },
         "key_level": {"on": level_on, "level": level, "hit": bool(level_hit)},
     }
+
+
+class _Inflight(NamedTuple):
+    kind: str
+    key: str
+    detail: str
+    since: datetime
+    """这一次（同一种类、同一身份）从何时起。"""
+    total_since: datetime
+    """这段连续在途从何时起。"""
 
 
 def _stop_bps(position: PositionRecord) -> float | None:

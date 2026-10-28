@@ -484,6 +484,21 @@ class FastLoopConfig(Contract):
         description="平仓前检查：交易所保护腿已触发 / 正在退出时最多让管家等几秒，过了照常平"
         "并记下（0 = 不等）。",
     )
+    keeper_close_guard_total_max_s: float = Field(
+        default=180.0,
+        ge=0.0,
+        le=3600.0,
+        allow_inf_nan=False,
+        description="平仓前检查：保护腿连续在途（接连换代、换代接退出）合计最多让管家等几秒，"
+        "过了照常平（0 = 不等）。",
+    )
+    keeper_venue_alert_reviews: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        description="keeper_price_source = venue 时执行所标记价连续这么多次复查读不到或过旧就告警"
+        "（同一段只告一次；不退回主网价）。0 = 不告警。",
+    )
     keeper_thesis_take_max_age_s: float = Field(
         default=180.0,
         ge=1.0,

@@ -1521,20 +1521,25 @@ class HbExecutorAdapter:
         self._venue_marks[symbol] = (now, ev)
         return ev.mark, ev.source_at
 
-    def protection_exit_in_flight(self, position_id: str) -> tuple[str, str] | None:
-        """交易所保护腿在途：``("exiting", 阶段)`` 已触发 / 正在退出收尾；``("replacing", …)``
-        托管过的仓正在换代（有腿在提交或撤单中）。都不是返回 None。"""
+    def protection_exit_in_flight(self, position_id: str) -> tuple[str, str, str] | None:
+        """交易所保护腿在途（种类, 身份, 说明）：``exiting`` 已触发 / 正在退出收尾（身份就是
+        ``exiting``，触发 → 退出 → 收尾算同一次）；``replacing`` 托管过的仓正在换代（有腿在提交
+        或撤单中，身份是保护代数）。都不是返回 None。"""
         tracked = self._registry.get(position_id)
         state = tracked.server_protection if tracked is not None else None
         if state is None:
             return None
         if state.stage in ("exiting", "cleanup"):
-            return "exiting", state.stage
+            return "exiting", "exiting", state.stage
         if any(leg.triggered_at is not None and leg.state == "confirmed" for leg in state.legs):
-            return "exiting", "leg_triggered"
+            return "exiting", "exiting", "leg_triggered"
         moving = [leg for leg in state.legs if leg.state in ("submit_pending", "cancel_pending")]
         if state.ever_armed and moving:
-            return "replacing", f"第 {state.generation} 代 {moving[0].kind} {moving[0].state}"
+            return (
+                "replacing",
+                f"gen-{state.generation}",
+                f"第 {state.generation} 代 {moving[0].kind} {moving[0].state}",
+            )
         return None
 
     def configure_frozen_peak_exit(self, enabled: bool, after_s: int) -> None:

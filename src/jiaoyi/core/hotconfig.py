@@ -86,6 +86,8 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_close_guard",
         "keeper_close_guard_replacing_max_s",
         "keeper_close_guard_exiting_max_s",
+        "keeper_close_guard_total_max_s",
+        "keeper_venue_alert_reviews",
         "frozen_peak_exit_on",
         "frozen_peak_exit_after_s",
         "frozen_peak_evidence_mode",

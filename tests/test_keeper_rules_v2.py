@@ -37,6 +37,8 @@ NEW_KEYS = {
     "keeper_close_guard",
     "keeper_close_guard_replacing_max_s",
     "keeper_close_guard_exiting_max_s",
+    "keeper_close_guard_total_max_s",
+    "keeper_venue_alert_reviews",
 }
 RECORD = FAST.model_copy(update={"keeper_model_mode": "record"})
 GATE = FAST.model_copy(update={"keeper_thesis_take_on": True, "giveback_on": False})
@@ -215,6 +217,50 @@ async def test_venue_unavailable_holds_without_falling_back_to_mainnet(
     assert votes["price"]["vote"] == "venue_unavailable"
     assert votes["giveback"]["vote"] == "hold" and votes["thesis_take"]["vote"] == "hold"
     assert out["price"]["used"] == "venue" and out["price"]["venue"] is None
+
+
+class _Alerts:
+    def __init__(self) -> None:
+        self.sent: list[c.Alert] = []
+
+    async def send(self, alert: c.Alert) -> None:
+        self.sent.append(alert)
+
+
+@pytest.mark.parametrize(("every", "alerts"), [(3, 1), (0, 0)])
+async def test_venue_misses_raise_one_alert_and_show_in_the_record(
+    now: datetime, tmp_path: Path, every: int, alerts: int
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    cfg = FAST.model_copy(
+        update={"keeper_price_source": "venue", "keeper_venue_alert_reviews": every}
+    )
+    ok: dict[str, Any] = {"v": False, "at": now}
+
+    async def read(symbol: str) -> tuple[float, datetime] | None:
+        return (68000.0, ok["at"]) if ok["v"] else None
+
+    al = _Alerts()
+    t = MockJevTransport(answer=answer(0.0))
+    k = make(t, now, cfg, log=log, venue_price=read, alerter=al)
+    pos = position(now)
+    for i in range(5):
+        v = await k.review(pos, now + timedelta(seconds=20 * i))
+        assert v.action == "hold" and t.calls == []  # 不退回主网价
+    assert len(al.sent) == alerts
+    out = keeper_records(log, now)[-1].output
+    if every:
+        assert al.sent[0].kind == "system" and "读不到执行所标记价" in al.sent[0].title
+        assert out["price"]["venue_misses"] == 3 and out["price"]["venue_alert"] is True
+        assert "已连续 3 次" in keeper_records(log, now)[-1].summary
+    ok.update(v=True, at=now + timedelta(seconds=200))
+    assert len(t.calls) == 0
+    await k.review(pos, now + timedelta(seconds=200))
+    assert len(t.calls) == 1  # 读到了：照常判
+    ok["v"] = False
+    for i in range(3):
+        await k.review(pos, now + timedelta(seconds=220 + 20 * i))
+    assert len(al.sent) == 2 * alerts  # 恢复后再断一段，重新计数、再告一次
 
 
 async def test_hot_switch_of_price_source_keeps_peaks_apart(now: datetime) -> None:
@@ -404,7 +450,9 @@ GUARD = FAST.model_copy(update={"keeper_close_guard": True})
 
 async def test_close_guard_off_by_default_closes_like_today(now: datetime) -> None:
     t = MockJevTransport(answer=answer(0.99))
-    k = make(t, now, FAST, review_interval_s=20.0, exit_in_flight=lambda pid: ("exiting", "x"))
+    k = make(
+        t, now, FAST, review_interval_s=20.0, exit_in_flight=lambda pid: ("exiting", "exiting", "x")
+    )
     pos = position(now)
     assert (await k.review(pos, now)).action == "close"
     assert (await k.review(pos, now + timedelta(seconds=1))).action == "close"
@@ -428,17 +476,18 @@ async def test_exiting_leg_defers_close_then_closes_with_note(
 ) -> None:
     log = JsonlDecisionLog(tmp_path)
     t = MockJevTransport(answer=answer(0.99))
-    k = make(t, now, GUARD, log=log, exit_in_flight=lambda pid: ("exiting", "exiting"))
+    k = make(t, now, GUARD, log=log, exit_in_flight=lambda pid: ("exiting", "exiting", "exiting"))
     pos = position(now)
     v = await k.review(pos, now)
     assert v.action == "hold" and "交易所保护腿已触发或正在退出" in v.reason
     assert (await k.review(pos, now + timedelta(seconds=120))).action == "hold"
     assert (await k.review(pos, now + timedelta(seconds=121))).action == "close"
-    assert "超过 120 秒" in keeper_records(log, now)[-1].output["close_guard_note"]
+    note = keeper_records(log, now)[-1].output["close_guard_note"]
+    assert "已 121 秒" in note and "超过 120 / 180 秒" in note
 
 
 async def test_exiting_cleared_lets_the_next_close_through(now: datetime) -> None:
-    state: dict[str, tuple[str, str] | None] = {"v": ("exiting", "exiting")}
+    state: dict[str, tuple[str, str, str] | None] = {"v": ("exiting", "exiting", "exiting")}
     t = MockJevTransport(answer=answer(0.99))
     k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
     pos = position(now)
@@ -449,7 +498,7 @@ async def test_exiting_cleared_lets_the_next_close_through(now: datetime) -> Non
 
 async def test_replacing_leg_defers_close_at_most_30s(now: datetime) -> None:
     t = MockJevTransport(answer=answer(0.99))
-    k = make(t, now, GUARD, exit_in_flight=lambda pid: ("replacing", "第 2 代 stop_loss"))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: ("replacing", "gen-2", "第 2 代 stop_loss"))
     pos = position(now)
     assert (await k.review(pos, now)).action == "hold"
     assert (await k.review(pos, now + timedelta(seconds=30))).action == "hold"
@@ -458,7 +507,7 @@ async def test_replacing_leg_defers_close_at_most_30s(now: datetime) -> None:
 
 async def test_each_replacement_gets_its_own_wait(now: datetime) -> None:
     """换代时拦过一次；之后几轮不在途、模型说拿住；很久以后又在换代，照样要等。"""
-    state: dict[str, Any] = {"v": ("replacing", "第 2 代 stop_loss"), "p": 0.99}
+    state: dict[str, Any] = {"v": ("replacing", "gen-2", "第 2 代 stop_loss"), "p": 0.99}
     t = MockJevTransport(answer=lambda s, q: answer(state["p"])(s, q))
     k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
     pos = position(now)
@@ -466,21 +515,60 @@ async def test_each_replacement_gets_its_own_wait(now: datetime) -> None:
     state.update(v=None, p=0.1)
     for i in range(1, 4):
         assert (await k.review(pos, now + timedelta(seconds=30 * i))).action == "hold"
-    state.update(v=("replacing", "第 2 代 stop_loss"), p=0.99)  # 同样的说明，也要重新等
+    state.update(v=("replacing", "gen-2", "第 2 代 stop_loss"), p=0.99)  # 同样的说明，也要重新等
     v = await k.review(pos, now + timedelta(seconds=200))
     assert v.action == "hold" and "正在换代" in v.reason
 
 
 async def test_new_generation_restarts_the_replacing_wait(now: datetime) -> None:
-    state: dict[str, Any] = {"v": ("replacing", "第 2 代 stop_loss")}
+    state: dict[str, Any] = {"v": ("replacing", "gen-2", "第 2 代 stop_loss")}
     t = MockJevTransport(answer=answer(0.99))
     k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
     pos = position(now)
     assert (await k.review(pos, now)).action == "hold"
-    state["v"] = ("replacing", "第 3 代 stop_loss")
+    state["v"] = ("replacing", "gen-3", "第 3 代 stop_loss")
     assert (await k.review(pos, now + timedelta(seconds=25))).action == "hold"
     assert (await k.review(pos, now + timedelta(seconds=50))).action == "hold"
     assert (await k.review(pos, now + timedelta(seconds=56))).action == "close"
+
+
+async def test_leg_steps_within_one_generation_do_not_restart_the_wait(now: datetime) -> None:
+    state: dict[str, Any] = {"v": ("replacing", "gen-2", "第 2 代 stop_loss submit_pending")}
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
+    state["v"] = ("replacing", "gen-2", "第 2 代 stop_loss cancel_pending")
+    assert (await k.review(pos, now + timedelta(seconds=20))).action == "hold"
+    assert (await k.review(pos, now + timedelta(seconds=31))).action == "close"
+
+
+async def test_exit_stages_count_as_one_exit(now: datetime) -> None:
+    """触发 → 退出 → 收尾：说明变了，等待不重新起算。"""
+    state: dict[str, Any] = {"v": ("exiting", "exiting", "leg_triggered")}
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, GUARD, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    assert (await k.review(pos, now)).action == "hold"
+    state["v"] = ("exiting", "exiting", "exiting")
+    assert (await k.review(pos, now + timedelta(seconds=60))).action == "hold"
+    state["v"] = ("exiting", "exiting", "cleanup")
+    assert (await k.review(pos, now + timedelta(seconds=121))).action == "close"
+
+
+async def test_back_to_back_replacements_are_capped_in_total(now: datetime, tmp_path: Path) -> None:
+    """每 25 秒换一代（每代都没到 30 秒），连续在途合计超过 180 秒就照常平。"""
+    log = JsonlDecisionLog(tmp_path)
+    state: dict[str, Any] = {"v": None}
+    t = MockJevTransport(answer=answer(0.99))
+    k = make(t, now, GUARD, log=log, exit_in_flight=lambda pid: state["v"])
+    pos = position(now)
+    for i in range(8):  # 0、25 … 175 秒
+        state["v"] = ("replacing", f"gen-{i}", f"第 {i} 代 stop_loss")
+        assert (await k.review(pos, now + timedelta(seconds=25 * i))).action == "hold"
+    state["v"] = ("replacing", "gen-8", "第 8 代 stop_loss")
+    assert (await k.review(pos, now + timedelta(seconds=181))).action == "close"
+    assert "连续在途 181 秒" in keeper_records(log, now)[-1].output["close_guard_note"]
 
 
 async def test_card_hard_close_is_also_blocked_while_exiting(now: datetime) -> None:
@@ -490,7 +578,7 @@ async def test_card_hard_close_is_also_blocked_while_exiting(now: datetime) -> N
         GUARD,
         lambda s: features(now),
         lambda n: card(now, bias="short"),
-        exit_in_flight=lambda pid: ("exiting", "cleanup"),
+        exit_in_flight=lambda pid: ("exiting", "exiting", "cleanup"),
     )
     v = await k.review(position(now), now)
     assert v.action == "hold" and "反向硬规则" in v.reason and t.calls == []
@@ -509,7 +597,7 @@ async def test_loop_card_channel_does_not_tighten_a_blocked_close(
         cfg,
         lambda s: features(now, price=67900.0),  # 亏 0.92R：确认
         lambda n: card(now, bias="short"),
-        exit_in_flight=lambda pid: ("replacing", "第 2 代 stop_loss submit_pending"),
+        exit_in_flight=lambda pid: ("replacing", "gen-2", "第 2 代 stop_loss submit_pending"),
     )
     ex = TightenExecutor(position(now), {"action": "close", "why": "not_armed"})
     runner = _runner(tmp_path, now, k, ex)
@@ -589,3 +677,24 @@ def test_protection_exit_in_flight(
     a._registry = _protection(stage, armed, *legs)
     got = a.protection_exit_in_flight("pos-1")
     assert (got[0] if got else None) == want
+
+
+def test_protection_exit_in_flight_identity_ignores_leg_steps() -> None:
+    a = _adapter(None, lambda: START)
+    a._registry = _protection("provisional", True, _leg("submit_pending"))
+    first = a.protection_exit_in_flight("pos-1")
+    a._registry = _protection("provisional", True, _leg("cancel_pending"))
+    second = a.protection_exit_in_flight("pos-1")
+    assert first is not None and second is not None
+    assert first[:2] == second[:2] == ("replacing", "gen-0") and first[2] != second[2]
+    keys = set()
+    for stage, legs in (
+        ("armed", [_leg("confirmed", triggered=True)]),
+        ("exiting", []),
+        ("cleanup", []),
+    ):
+        a._registry = _protection(stage, True, *legs)
+        got = a.protection_exit_in_flight("pos-1")
+        assert got is not None
+        keys.add(got[:2])
+    assert keys == {("exiting", "exiting")}
