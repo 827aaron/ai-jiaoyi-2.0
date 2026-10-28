@@ -17,13 +17,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from jiaoyi.contracts import Bias
 from jiaoyi.slow import binance_gate
+from jiaoyi.slow.card_score import PRIMARY as EXCESS_HORIZON
+from jiaoyi.slow.card_score import CardScore, ScoreStore
 from jiaoyi.slow.review import Bar, CardJournal, JournalRow
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,10 @@ _BAR = timedelta(minutes=5)
 BTC = "BTCUSDT"
 _DIRECTION = {Bias.LONG.value: 1.0, Bias.SHORT.value: -1.0}
 
+
+Scoring = Literal["raw", "excess"]
+"""raw = 持仓期原始涨跌（山寨币另比 BTC）；excess = 复用方向记分（``card_score``）：
+发布时刻起 4 小时、扣掉同期币池等权收益。"""
 
 RangeFetcher = Callable[[str, datetime, datetime], list[Bar]]
 """(币, 起, 止) → 这段时间的 5 分钟 K 线（升序）。限流抛 ``binance_gate.RateLimited``。"""
@@ -138,9 +144,43 @@ def group_stats(scored: Sequence[Scored]) -> list[Group]:
     return out
 
 
-def render_stats(groups: Sequence[Group]) -> str:
+def score_excess(cs: CardScore) -> Scored | None:
+    """``card_score`` 里一张卡的超额结果：方向 ×（币 − 币池等权）；币或币池没价格返回 None。
+    观望卡的 ``missed_pct`` 取币相对币池走了多远（不分涨跌）。"""
+    coin, pool = cs.coin.at(EXCESS_HORIZON), cs.pool.at(EXCESS_HORIZON)
+    if coin is None or pool is None:
+        return None
+    row = JournalRow(
+        card_id=cs.card_id,
+        version=cs.version,
+        created_at=cs.t0,
+        expires_at=cs.expires_at,
+        regime="",
+        refresh_reason=cs.refresh_reason,
+        symbol=cs.symbol,
+        category=cs.category,
+        bias=cs.bias,
+    )
+    sign = _DIRECTION.get(cs.bias)
+    excess = (coin - pool) * 100
+    return Scored(row, None if sign is None else excess * sign, None, abs(excess))
+
+
+def render_stats(groups: Sequence[Group], scoring: Scoring = "raw") -> str:
     lines = []
     for g in groups:
+        if scoring == "excess":
+            if g.hit_rate is None:
+                lines.append(
+                    f"- {g.key}: {g.n} cards; average absolute move relative to the coin pool over "
+                    f"the following {EXCESS_HORIZON} {g.mean_missed_pct:.2f}%"
+                )
+            else:
+                lines.append(
+                    f"- {g.key}: {g.n} cards; beat the coin pool in the card's direction "
+                    f"{g.hit_rate:.0%}; average excess return {g.mean_net_pct:+.2f}%"
+                )
+            continue
         if g.hit_rate is None:
             lines.append(
                 f"- {g.key}: {g.n} cards; average largest one-sided move over the following "
@@ -159,13 +199,27 @@ def render_stats(groups: Sequence[Group]) -> str:
     return "\n".join(lines)
 
 
-def lessons_prompt(stats: str, n: int, days: int, horizon: str) -> str:
+def lessons_prompt(stats: str, n: int, days: int, horizon: str, scoring: Scoring = "raw") -> str:
+    if scoring == "excess":
+        head = (
+            f"Below are {n} operations cards from the last {days} days, each scored from the "
+            f"moment the card was published over the next {EXCESS_HORIZON} on Binance perpetual "
+            "1-minute closes. A result is the coin's return minus the equal-weighted return of "
+            "the tracked coin pool over the same period, taken in the card's direction, so a "
+            "market-wide move that lifts or sinks every coin counts for neither side. Fees are "
+            "not deducted:\n"
+            f"{stats}\n\n"
+        )
+    else:
+        head = (
+            f"Below are {n} operations cards from the last {days} days, each scored over the "
+            f"holding period after the meeting ({horizon}) on Binance perpetual 5-minute klines. "
+            "Long and short results are net of the round-trip fee; 'more than BTC' is computed for "
+            f"non-BTC coins only:\n{stats}\n\n"
+        )
     return (
-        f"Below are {n} operations cards from the last {days} days, each scored over the holding "
-        f"period after the meeting ({horizon}) on Binance perpetual 5-minute klines. Long and "
-        "short results are net of the round-trip fee; 'more than BTC' is computed for "
-        f"non-BTC coins only:\n{stats}\n\n"
-        f"Condense this into at most {MAX_LESSONS} lessons for the portfolio manager of future "
+        head
+        + f"Condense this into at most {MAX_LESSONS} lessons for the portfolio manager of future "
         "meetings. Rules:\n"
         "1. Every lesson needs its evidence: which kind of card, how many, the average result. "
         "Use only the numbers above; do not invent any.\n"
@@ -240,13 +294,16 @@ class LessonBook:
         horizon: str,
         fee_pct: float,
         fetch: RangeFetcher | None = None,
+        scoring: Scoring = "raw",
     ) -> None:
         self._dir = Path(data_dir) / "memory"
         self._journal = CardJournal(data_dir)
         self._tz = ZoneInfo(tz)
         self._hold = timedelta(minutes=hold_minutes)
         self._horizon = horizon
-        self._hold_label = f"{hold_minutes}m"
+        self._hold_label = EXCESS_HORIZON if scoring == "excess" else f"{hold_minutes}m"
+        self._scoring: Scoring = scoring
+        self._scores = ScoreStore(data_dir)
         self._fee = fee_pct
         self._fetch: RangeFetcher = fetch or gate_bars
 
@@ -303,7 +360,21 @@ class LessonBook:
         return (today - anchor).days >= EVERY_DAYS
 
     # ---- 写
+    def _scored_excess(self, now: datetime, since: datetime) -> list[Scored]:
+        """读方向记分已经算好的逐卡结果，不请求 K 线；窗口没走完或没价格的卡不在里面。"""
+        cards = sorted(
+            (c for c in self._scores.read() if c.created_at >= since and c.t0 <= now),
+            key=lambda c: c.t0,
+        )
+        out = [sc for c in cards if (sc := score_excess(c)) is not None]
+        if len(out) > MAX_CARDS:
+            step = len(out) / MAX_CARDS
+            out = [out[int(i * step)] for i in range(MAX_CARDS)]
+        return out
+
     def _scored(self, now: datetime, since: datetime) -> list[Scored]:
+        if self._scoring == "excess":
+            return self._scored_excess(now, since)
         """每个币只拉一段覆盖全部卡的 5 分钟 K 线（BTC 也只拉一次），在本地按卡切片。
         限流（RateLimited）不吞，直接抛出让这次汇总作罢；其他失败只丢掉那个币。"""
         rows = sorted(
@@ -365,9 +436,9 @@ class LessonBook:
                 "教训本：打完分的卡只有 %d 张（要 %d 张），这次不写", len(scored), MIN_CARDS
             )
             return None
-        stats = render_stats(group_stats(scored))
+        stats = render_stats(group_stats(scored), self._scoring)
         days = max(1, (now - since).days)
-        lessons = ask(lessons_prompt(stats, len(scored), days, self._horizon))
+        lessons = ask(lessons_prompt(stats, len(scored), days, self._horizon, self._scoring))
         lessons = [x for x in lessons if x.text.strip() and x.evidence.strip()][:MAX_LESSONS]
         if not lessons:
             return None

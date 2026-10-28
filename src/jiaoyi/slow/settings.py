@@ -355,6 +355,12 @@ class MeetingConfig(_Strict):
         description="开 = 总盘会的池子概况另给一行滚动 60 分钟涨跌家数（1 分钟 K 线，截到开会"
         "这一刻，例如 10:54 开会就是 09:54–10:54）；池里每个币多 1 个公开请求。",
     )
+    lessons_scoring: Literal["raw", "excess"] = Field(
+        default="raw",
+        description="喂给会议的教训怎么给卡打分：raw = 会后一个持仓期的原始涨跌（山寨币另比 BTC，"
+        "现状）；excess = 和方向记分同口径，发布时刻起 4 小时、扣掉同期币池等权收益（读 "
+        "data/card_score/，不另拉 K 线）。",
+    )
     latest_market_regime: bool = Field(
         default=False,
         description="开 = 整轮里每个单币会开始时取当时最新发布的大盘判断（本轮中途 Flash 更新过"
@@ -922,6 +928,7 @@ class SlowConfig(_Strict):
             stale_on_arrival_action=m.stale_on_arrival_action,
             input_time_labels=m.input_time_labels,
             market_table_rolling=m.market_table_rolling,
+            lessons_scoring=m.lessons_scoring,
         )
 
     def screener_config(
