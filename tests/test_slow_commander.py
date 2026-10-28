@@ -1497,3 +1497,75 @@ async def test_commander_flip_restore_drops_candidate_whose_held_instruction_cha
     assert c2._flips.items() == {}
     assert json.loads(path.read_text())["flips"] == {}
     assert _flip_records(log2, now) == ["dropped"]
+
+
+async def test_commander_flip_progress_stays_capped_while_waiting_for_minimum_age(
+    tmp_path: Path, now: datetime
+) -> None:
+    _c, log, _clock, cards = await _flip_rounds(
+        tmp_path,
+        now,
+        [Bias.LONG, Bias.SHORT, Bias.SHORT, Bias.SHORT, Bias.SHORT],
+        flip_confirm=2,
+        flip_confirm_min=timedelta(minutes=150),
+    )
+    held = cards[3].for_symbol("AAUSDT")
+    assert held is not None and held.bias is Bias.LONG
+    assert held.reason.startswith("待确认翻转（2/2，等满 150 分钟）")
+    pending = [
+        r
+        for r in log.read_day(now.date().isoformat())
+        if r.output and r.output.get("card_flip") == "pending"
+    ]
+    assert "待确认翻转 2/2，等满 150 分钟" in pending[-1].summary
+    issued = [
+        r
+        for r in log.read_day(now.date().isoformat())
+        if r.card_id and r.outcome is Outcome.ACTION and not r.symbol
+    ]
+    note = [r.output["pool"]["AAUSDT"].get("flip_pending") for r in issued]
+    assert [n["progress"] for n in note if n is not None][-1] == "2/2，等满 150 分钟"
+    final = cards[4].for_symbol("AAUSDT")
+    assert final is not None and final.bias is Bias.SHORT
+
+
+async def test_commander_flip_candidate_survives_restart_that_gates_category(
+    tmp_path: Path, now: datetime
+) -> None:
+    _c, _log, clock, _cards = await _flip_rounds(
+        tmp_path, now, [Bias.LONG, Bias.SHORT], flip_confirm=2
+    )
+    closed = RISK.model_copy(
+        update={"category_exposure_x": {**RISK.category_exposure_x, Category.ALT: 0.0}}
+    )
+    c2 = BattleCardCommander(
+        FakeEngine([]),
+        closed,
+        JsonlDecisionLog(tmp_path / "after"),
+        clock=lambda: clock[0],
+        card_path=tmp_path / "battle_card.json",
+        flip_confirm=2,
+    )
+    back = c2.current(clock[0])
+    held = back.for_symbol("AAUSDT") if back is not None else None
+    assert held is not None and held.bias is Bias.NO_TRADE and held.no_trade_from is Bias.LONG
+    got = c2._flips.get("AAUSDT")
+    assert got is not None and (got.confirmed, got.candidate) == ("long", "short")
+
+
+async def test_commander_flip_restore_with_setting_back_to_one_says_so(
+    tmp_path: Path, now: datetime
+) -> None:
+    _c, _log, clock, _cards = await _flip_rounds(
+        tmp_path, now, [Bias.LONG, Bias.SHORT], flip_confirm=2
+    )
+    c2, log2, _ = make(
+        tmp_path / "after", FakeEngine([]), clock[0], card_path=tmp_path / "battle_card.json"
+    )
+    assert c2._flips.items() == {}
+    dropped = [
+        r
+        for r in log2.read_day(now.date().isoformat())
+        if r.output and r.output.get("card_flip") == "dropped"
+    ]
+    assert len(dropped) == 1 and "设置改回 1" in dropped[0].summary

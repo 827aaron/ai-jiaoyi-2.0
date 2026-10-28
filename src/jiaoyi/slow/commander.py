@@ -481,7 +481,12 @@ class BattleCardCommander:
         for sym, lost in self._flips.restore(
             {s.symbol: s for s in self._card.symbols} if self._card is not None else {}
         ).items():
-            self._flip_dropped(sym, lost, "重启后卡上留着的那条指令对不上")
+            why = (
+                "重启后卡上留着的那条指令对不上"
+                if self._flips.on
+                else "设置改回 1（card_flip_confirm = 1），新结论立即生效"
+            )
+            self._flip_dropped(sym, lost, why)
 
     # ------------------------------------------------------------ 快环读
     def current(self, now: datetime) -> BattleCard | None:
