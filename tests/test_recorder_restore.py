@@ -26,3 +26,17 @@ def test_today_stats_survive_restart(tmp_path: Path) -> None:
     assert s.cost_usd == pytest.approx(0.03) and s.avg_latency_ms == pytest.approx(20)
     r2.record(t0 + timedelta(hours=9), Outcome.PASS, "c")
     assert r2.today(t0 + timedelta(hours=9)).calls == 3  # 新记录不重复计
+
+
+def test_an_earlier_timestamp_never_rolls_the_day_back() -> None:
+    from datetime import UTC, datetime
+
+    from jiaoyi.contracts import Outcome, Role
+    from jiaoyi.core.recorder import RoleRecorder
+
+    r = RoleRecorder(Role.RECONCILER, None, day_reset_tz="Asia/Bangkok")
+    after = datetime(2026, 10, 28, 17, 0, 5, tzinfo=UTC)  # 曼谷 10-29 00:00:05
+    before = datetime(2026, 10, 28, 16, 59, 50, tzinfo=UTC)  # 曼谷 10-28 23:59:50
+    r.record(after, Outcome.INFO, "written after midnight")
+    r.note(before, "tick that started before midnight", count=True)
+    assert r.today(after).calls == 2

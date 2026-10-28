@@ -152,6 +152,7 @@ APP_EDITABLE = frozenset(
         "protection_stale_s",
         "protection_leg_order",
         "hosted_close_mode",
+        "protection_tick_alert_after",
         "slow_loop_interval_min",
         "screener_interval_min",
         "pool_size",

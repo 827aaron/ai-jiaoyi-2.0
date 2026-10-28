@@ -10,6 +10,7 @@ from jiaoyi.core.commands import config_fingerprint
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.brackets import BracketManager, LegOrder
+from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import HbExecutorAdapter, HostedCloseMode
@@ -90,6 +91,7 @@ def build_execution(
     executor_stop_retry_rounds: int = 0,
     reconcile_opening_grace_s: float = 0.0,
     reconcile_closing_grace_s: float = 0.0,
+    clock: Clock = utc_now,
     demo_trading: bool = True,
     limit_take_profit: bool = False,
     frozen_peak_exit_on: bool = True,
@@ -205,6 +207,7 @@ def build_execution(
         opening_grace_s=reconcile_opening_grace_s,
         closing_grace_s=reconcile_closing_grace_s,
         heartbeats=(adapter.heartbeat, lifeboat.heartbeat),
+        clock=clock,
     )
     return ExecutionStack(
         adapter,

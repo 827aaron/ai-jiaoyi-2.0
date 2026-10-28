@@ -683,3 +683,11 @@ def test_pending_refuses_meeting_model_keys(tmp_path: Path) -> None:
     res = pc.apply_pending(paths, data, NOW)
     assert res.status != "applied" and p.exists()
     assert paths.slow.read_text(encoding="utf-8") == before
+
+
+def test_protection_tick_alert_after_merges_from_pending(tmp_path: Path) -> None:
+    paths, data = _setup(tmp_path)
+    _pending(paths, "app", "protection_tick_alert_after = 3\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).protection_tick_alert_after == 3

@@ -379,7 +379,8 @@ class HbExecutorAdapter:
         if protection_tick_alert_after < 1:
             raise ValueError("protection_tick_alert_after 至少为 1")
         self._tick_alert_after = protection_tick_alert_after
-        self._tick_failures: dict[str, int] = {}
+        self._tick_failures: dict[tuple[str, str], int] = {}
+        """(仓, 同步 / 收尾) → 连续失败轮数。"""
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -1637,30 +1638,42 @@ class HbExecutorAdapter:
     async def protection_tick(self) -> None:
         """后台单轮，仅维护已持久托管仓；逐仓故障隔离，不开仓、不补造丢失峰值。"""
         for initial in list(self._registry.data.positions.values()):
-            if initial.server_protection is None or initial.server_protection.stage == "done":
-                continue
             pid = initial.record.position_id
+            ended = initial.record.status in {PositionStatus.CLOSED, PositionStatus.FAILED}
+            # 同步和收尾分开计数：进了收尾，同步阶段的失败不再累计；结束的仓不留计数。
+            key = (pid, "cleanup" if initial.exit_cleanup_pending else "sync")
+            if ended or initial.exit_cleanup_pending:
+                self._tick_failures.pop((pid, "sync"), None)
+            if ended and not initial.exit_cleanup_pending:
+                self._tick_failures.pop((pid, "cleanup"), None)
+            if initial.server_protection is None or initial.server_protection.stage == "done":
+                self._tick_failures.pop((pid, "cleanup"), None)
+                continue
             try:
                 if initial.exit_cleanup_pending:
                     await self._finish_exit_cleanup(pid)
+                    self._tick_failures.pop(key, None)
                     continue
-                if initial.record.status in {PositionStatus.CLOSED, PositionStatus.FAILED}:
+                if ended:
                     continue  # 未明 create 的 FAILED 仍阻同币；不能在后台把未知归为没提交。
                 current = await self._sync_one(initial)
                 if current.record.status is PositionStatus.OPEN:
                     await self._update_server_trailing(pid)
             except TrailingBookUnavailable as error:
-                self._tick_failures.pop(pid, None)  # 同步已成功，只是盘口不可用；另有告警
+                self._tick_failures.pop(key, None)  # 同步已成功，只是盘口不可用；另有告警
                 await self._alert_trailing_book(pid, initial.record.symbol, error)
             except Exception as error:
-                await self._protection_tick_failed(pid, initial.record.symbol, error)
+                await self._protection_tick_failed(key, initial.record.symbol, error)
             else:
-                self._tick_failures.pop(pid, None)
+                self._tick_failures.pop(key, None)
 
-    async def _protection_tick_failed(self, pid: str, symbol: str, error: Exception) -> None:
+    async def _protection_tick_failed(
+        self, key: tuple[str, str], symbol: str, error: Exception
+    ) -> None:
         """连续失败到 ``protection_tick_alert_after`` 轮才发紧急告警，之前只记日志。"""
-        rounds = self._tick_failures.get(pid, 0) + 1
-        self._tick_failures[pid] = rounds
+        pid = key[0]
+        rounds = self._tick_failures.get(key, 0) + 1
+        self._tick_failures[key] = rounds
         detail = _tick_error_detail(error)
         if rounds < self._tick_alert_after:
             log.warning("托管保护本轮未确认（第 %d 轮）%s：%s", rounds, pid, detail)

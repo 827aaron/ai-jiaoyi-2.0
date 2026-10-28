@@ -209,8 +209,10 @@ class ThreeWayReconciler:
         if transient and self._unreachable_rounds < UNREACHABLE_ALERT_ROUNDS:
             log.warning("对账这轮没对成（%r），重试过了，下轮再对", e)
             if self._rec is not None:
-                self._rec.note(now, "这轮查持仓超时，重试过还不行，下轮再对（连续 2 轮才告警）")
-                self._rec.heartbeat(now, Health.DEGRADED, "上轮查持仓超时，下轮再对")
+                self._rec.note(
+                    self._clock(), "这轮查持仓超时，重试过还不行，下轮再对（连续 2 轮才告警）"
+                )
+                self._rec.heartbeat(self._clock(), Health.DEGRADED, "上轮查持仓超时，下轮再对")
             return
         rounds = f"（连续 {self._unreachable_rounds} 轮）" if transient else ""
         await self._send(
@@ -229,7 +231,7 @@ class ThreeWayReconciler:
                 f"对账失败{rounds}：{e!r}",
                 output={"tick_at": now.isoformat()},
             )
-            self._rec.heartbeat(now, Health.DOWN, "连不上 hummingbot-api 或币安")
+            self._rec.heartbeat(self._clock(), Health.DOWN, "连不上 hummingbot-api 或币安")
 
     def configure_issue_grace(self, opening_s: float, closing_s: float) -> None:
         """Hot reload of ``reconcile_opening_grace_s`` / ``reconcile_closing_grace_s``."""
@@ -696,8 +698,8 @@ class ThreeWayReconciler:
             headline += f"（开平仓过渡 {hints} 项提示）"
         n = len(self._registry.live())
         if self._rec is not None:
-            self._rec.note(now, f"对账：{headline}（在管 {n} 笔）", count=True)
-            self._rec.heartbeat(now, health, headline)
+            self._rec.note(self._clock(), f"对账：{headline}（在管 {n} 笔）", count=True)
+            self._rec.heartbeat(self._clock(), health, headline)
         checked = getattr(self._lifeboat, "checked", None)
         if callable(checked):
             checked(now, f"对账员核对了 {n} 笔的保命止损：{headline}")
