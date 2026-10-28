@@ -2507,7 +2507,7 @@ const PLAIN = {
   keeper_interval_s: "管家每隔几秒看一次持仓",
   reconcile_interval_s: "每隔几秒和交易所对一次账",
   reconcile_opening_grace_s: "新仓建账后几秒内，托管还没到位、运行列表暂时没返回执行器只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
-  reconcile_closing_grace_s: "平仓进行中几秒内，平仓结果待确认、托管在退出、运行列表没返回执行器只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
+  reconcile_closing_grace_s: "平仓进行中几秒内，平仓结果待确认、托管在退出、运行列表没返回执行器、「持仓数量对不上（币安已缩小或归零、方向一致）」只记「信息」不记「出错」（只改标注；0 = 一律记出错）",
   protection_stale_s: "交易所保护单的观测超过几秒就标“数据过期”（0 = 不标）",
   slow_loop_interval_min: "军师团每隔几分钟开一次会（档位 = 开会间隔）",
   screener_interval_min: "选币每隔几分钟跑一次（默认跟开会间隔档位走，最少 15 分钟）",

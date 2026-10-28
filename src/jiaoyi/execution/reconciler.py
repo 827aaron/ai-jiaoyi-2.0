@@ -266,15 +266,12 @@ class ThreeWayReconciler:
         return f"平仓进行中 {elapsed:.0f} 秒，在平仓宽限 {grace:g} 秒内，记为信息"
 
     def _shrinking_close_hint(
-        self, tracked: list[TrackedPosition], actual_signed: float, ledger_qty: float, now: datetime
+        self, tracked: list[TrackedPosition], actual: float, ledger_qty: float, now: datetime
     ) -> str | None:
-        # The exchange fills a close before the ledger settles it, so a smaller same-side (or
-        # zero) quantity is the normal close transition; a larger or reversed one never is.
-        if not tracked or abs(actual_signed) > ledger_qty:
-            return None
-        if actual_signed != 0.0 and any(
-            (actual_signed > 0) != (t.record.side is Side.LONG) for t in tracked
-        ):
+        # The exchange fills a close before the ledger settles it, so a smaller (or zero)
+        # quantity is the normal close transition; a larger one never is. No side check here:
+        # a position whose exchange side is reversed already left as a side mismatch.
+        if actual > ledger_qty:
             return None
         hints = [self._closing_hint(t.record.position_id, now) for t in tracked]
         return None if None in hints else hints[0]
@@ -456,9 +453,7 @@ class ThreeWayReconciler:
                 continue
             actual = exchange_qty.get(symbol, 0.0)
             if abs(actual - qty) > qty * self._tol:
-                qty_hint = self._shrinking_close_hint(
-                    tracked_by.get(symbol, []), signed.get(symbol, 0.0), qty, now
-                )
+                qty_hint = self._shrinking_close_hint(tracked_by[symbol], actual, qty, now)
                 qty_detail = f"账本 {qty}，币安 {actual}"
                 issues.append(
                     ReconcileIssue(

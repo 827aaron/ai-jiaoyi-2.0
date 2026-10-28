@@ -312,6 +312,51 @@ async def test_closing_grace_does_not_cover_a_reversed_exchange_position(tmp_pat
     )
 
 
+def _second_position(rig: Rig, pid: str, *, side: Side, closing: bool) -> str:
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    other = f"{pid}-b"
+    status = PositionStatus.CLOSING if closing else PositionStatus.OPEN
+    record = tracked.record.model_copy(
+        update={"position_id": other, "side": side, "status": status}
+    )
+    rig.registry.put(
+        tracked.model_copy(
+            update={
+                "record": record,
+                "direct_close_pending": closing,
+                "server_protection": _protection("exiting" if closing else "armed"),
+            }
+        )
+    )
+    return other
+
+
+async def test_qty_mismatch_stays_error_when_another_position_on_the_symbol_is_open(
+    tmp_path: Path,
+) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, closing=600.0)
+    pid = await open_filled(rig)
+    _closing_on_exchange(rig, pid, 0.005)
+    _second_position(rig, pid, side=Side.LONG, closing=False)
+    report = await rig.rec.reconcile(rig.t)
+    issue = _qty_issue(report.issues)
+    assert issue.detail == "账本 0.03，币安 0.005" and not issue.informational
+
+
+async def test_reversed_second_position_is_a_side_mismatch_error_not_a_hint(
+    tmp_path: Path,
+) -> None:
+    _wire(rig := Rig(tmp_path), tmp_path, closing=600.0)
+    pid = await open_filled(rig)
+    _closing_on_exchange(rig, pid, 0.005)
+    short = _second_position(rig, pid, side=Side.SHORT, closing=True)
+    report = await rig.rec.reconcile(rig.t)
+    reversed_ = [i for i in report.issues if i.kind is ReconcileIssueKind.SIDE_MISMATCH]
+    assert [i.position_id for i in reversed_] == [short]
+    assert not reversed_[0].informational
+
+
 async def _always_down(executor_id: str, *, keep_position: bool) -> None:
     raise HbApiError("hummingbot-api 不可达")
 
