@@ -399,6 +399,15 @@ def test_replay_clears_candidate_when_direction_returns_to_published() -> None:
     ]
 
 
+def test_replay_direction_back_to_published_resets_and_never_republishes() -> None:
+    q = timedelta(minutes=15)
+    dirs = ["看涨", "看跌", "看涨", "看涨", "看涨", "看跌", "看跌"]
+    runs = [lite(T0 + k * q, d) for k, d in enumerate(dirs)]
+    got = ms.replay_publishes(runs, dirs, [])
+    # 回到已发布的看涨：不当候选、不重发；10:17 的看跌被清掉，11:17 起重数，到最后也不够 30 分钟
+    assert [(at - T0, d) for at, d in got] == [(timedelta(seconds=1), "看涨")]
+
+
 def test_replay_skips_prior_missing_runs_for_confirmation() -> None:
     q = timedelta(minutes=15)
     runs = [
