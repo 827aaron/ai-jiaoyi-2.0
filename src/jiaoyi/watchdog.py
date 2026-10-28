@@ -8,7 +8,8 @@
   主循环每 30 秒写一次心跳，所以 2 分钟没动就是挂了、卡死了或被停了。
 - 每次掉线只发一次，恢复后再发一条 INFO。状态记在 ``data/watchdog_state.json``。
 - ``app.toml`` 校验不过（例如待更新配置比程序新）时照样查心跳：按文件里写的 ``data_dir``
-  或默认 ``data``，另发一条 WARN「配置不合格」，每次不合格只发一次，恢复后发一条 INFO。
+  或默认 ``data``，另发一条 WARN「配置不合格」，每次不合格只发一次，恢复后发一条 INFO；
+  这段记在 app.toml 旁边的 ``.watchdog_config_state.json``（读哪个数据目录取决于配置能不能读）。
 
 整台 Mac mini 断电或断网时这里也一起停了，那种情况要靠机器外面的检查（见 docs/M0-setup.md）。
 """
@@ -33,6 +34,7 @@ log = logging.getLogger(__name__)
 
 STATUS_FILE = "module_status.json"
 STATE_FILE = "watchdog_state.json"
+CONFIG_STATE_FILE = ".watchdog_config_state.json"
 STALE_AFTER = timedelta(minutes=2)
 
 
@@ -82,14 +84,21 @@ def _alert(now: datetime, level: AlertLevel, title: str, body: str) -> Alert:
     return Alert(ts=now, level=level, role=Role.RECONCILER, title=title, body=body)
 
 
-def save(data_dir: str | Path, down: bool, now: datetime, config_bad: bool = False) -> None:
-    path = Path(data_dir) / STATE_FILE
-    tmp = path.with_name(f".{path.name}.tmp")
-    state: dict[str, object] = {"down": down, "checked_at": now.isoformat()}
-    if config_bad:
-        state["config_bad"] = True
-    tmp.write_text(json.dumps(state), encoding="utf-8")
-    tmp.replace(path)
+def _write_state(path: Path, state: dict[str, object]) -> bool:
+    """Atomic write; a failure is logged, not raised, so the other state and alerts still go."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        log.error("看门狗：状态写不进 %s（%s）", path, type(e).__name__)
+        return False
+    return True
+
+
+def save(data_dir: str | Path, down: bool, now: datetime) -> None:
+    _write_state(Path(data_dir) / STATE_FILE, {"down": down, "checked_at": now.isoformat()})
 
 
 def send(
@@ -114,29 +123,34 @@ def send(
     return True
 
 
-def _config_was_bad(data_dir: Path) -> bool:
+def config_state_path(app_path: str | Path) -> Path:
+    """Where the "config is bad" episode is remembered: beside app.toml, not in the data dir,
+    because which data dir is read depends on whether the config parses."""
+    return Path(app_path).with_name(CONFIG_STATE_FILE)
+
+
+def _config_was_bad(path: Path) -> bool:
     try:
-        raw = json.loads((data_dir / STATE_FILE).read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return isinstance(raw, dict) and raw.get("config_bad") is True
+    return isinstance(raw, dict) and raw.get("bad") is True
 
 
 def config_alert(
-    data_dir: str | Path, config_error: str | None, now: datetime
-) -> tuple[Alert | None, bool]:
+    state_path: Path, config_error: str | None, data_dir: str | Path, now: datetime
+) -> Alert | None:
     """Alert for a config that stopped (or resumed) passing validation, once per episode."""
-    was_bad = _config_was_bad(Path(data_dir))
-    bad = config_error is not None
-    if bad and not was_bad:
+    was_bad = _config_was_bad(state_path)
+    if config_error is not None and not was_bad:
         body = (
-            f"{(config_error or '')[:600]}\n看门狗改按 {data_dir} 继续查心跳。"
+            f"{config_error[:600]}\n看门狗改按 {data_dir} 继续查心跳。"
             "主程序重启会被拒绝：请改好配置（make check-config）或更新到最新版。"
         )
-        return _alert(now, AlertLevel.WARN, "配置不合格", body), True
-    if not bad and was_bad:
-        return _alert(now, AlertLevel.INFO, "配置已恢复合格", ""), False
-    return None, bad
+        return _alert(now, AlertLevel.WARN, "配置不合格", body)
+    if config_error is None and was_bad:
+        return _alert(now, AlertLevel.INFO, "配置已恢复合格", "")
+    return None
 
 
 def run_once(
@@ -146,35 +160,39 @@ def run_once(
     now: datetime,
     transport: httpx.BaseTransport | None = None,
     config_error: str | None = None,
+    config_state: Path | None = None,
 ) -> int:
     """``jiaoyi watchdog`` 的主体。返回进程退出码：0 正常，1 没配 Telegram 或发送失败。
 
     ``config_error`` is why app.toml failed validation (None = valid); ``data_dir`` is then the
-    fallback directory, so the heartbeat is still checked alongside the config alert."""
+    fallback directory, so the heartbeat is still checked. ``config_state`` (see
+    ``config_state_path``) remembers the bad-config episode; None = config alerts are off.
+    Each state is saved only after its own alert went out, so an unsent one is retried."""
     result = check(data_dir, now)
-    cfg_alert, cfg_bad = config_alert(data_dir, config_error, now)
-    # (alert, state after a successful send) -- each part of the state is saved only once its
-    # alert went out, so an unsent alert is retried next minute
-    pending = [(a, kind) for a, kind in ((cfg_alert, "config"), (result.alert, "beat")) if a]
+    cfg = (
+        config_alert(config_state, config_error, data_dir, now)
+        if config_state is not None
+        else None
+    )
+    pending = [a for a in (cfg, result.alert) if a is not None]
     if not pending:
         return 0
     if not (token and chat_id):
-        for a, _ in pending:
+        for a in pending:
             log.error(
                 "看门狗：没配 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，告警发不出去：%s", a.title
             )
         return 1
-    down, config_bad = _was_down(Path(data_dir)), _config_was_bad(Path(data_dir))
-    rc, sent = 0, False
-    for a, kind in pending:
-        if not send(token, chat_id, a, transport):
-            rc = 1
-            continue
-        sent = True
-        if kind == "config":
-            config_bad = cfg_bad
+    rc = 0
+    if cfg is not None and config_state is not None:
+        if send(token, chat_id, cfg, transport):
+            state = {"bad": config_error is not None, "checked_at": now.isoformat()}
+            _write_state(config_state, state)
         else:
-            down = result.down
-    if sent:
-        save(data_dir, down, now, config_bad)
+            rc = 1
+    if result.alert is not None:
+        if send(token, chat_id, result.alert, transport):
+            save(data_dir, result.down, now)
+        else:
+            rc = 1
     return rc

@@ -108,7 +108,7 @@
 | `adaptive_base_max_queue` | 0 | 0–20，且 < 下一项 | 自适应：排队 ≤ 它用 base |
 | `adaptive_mini_min_queue` | 3 | 1–50 | 自适应：排队 ≥ 它用 mini，中间用 small |
 | `backfill_bars` | 400 | 64–1500 | 启动回填多少根 5 分钟线 |
-| `keeper_snapshot` | `direction` | `direction` / `rank` / `off` | 管家复查快照里怎么带预测员（改后重启）。`direction`（原行为）：`kronos.agree` = 平均路径终点在持仓方向一侧给 1、否则 0，排得出名次再带 `kronos.rank`；`rank`：只带 `kronos.rank`（top / mid / bottom，和拍板加分同一个全池排名），排不出名次就不写 `kronos`；`off`：不带 |
+| `keeper_snapshot` | `direction` | `direction` / `rank` / `off` | 管家复查快照里怎么带预测员（改后重启）。`direction`（原行为）：`kronos.agree` = 平均路径终点在持仓方向一侧给 1、否则 0，排得出名次再带 `kronos.rank`；`rank`：只带 `kronos.rank`（top / mid / bottom，和拍板加分同一个全池排名），排不出名次就不写 `kronos`；`off`：不带。持仓第一题里描述预测员的那句跟着换（rank：「top 利多不利空，bottom 反之」，off：不提），rank / off 各有模板版本 `q9-krank` / `q9-koff`（direction 仍是 `q9`，逐字节不变），管家决策记录 `input.jev.kronos_snapshot` 记用的哪种 |
 
 - 三个模型都钉了 Hugging Face 提交（见 `predictor/kronos.py` 的 `MODEL_SPECS`）：mini 配 Tokenizer-2k（上下文 2048），small / base 配 Tokenizer-base（上下文 512）。用到哪个才加载哪个，加载后常驻。
 - 实测 small：约 3.0 秒 / 币，5 个币排队约 14.9 秒；按需模式下一般只有卡里的几个币，排得开。`Forecast.model` 记着这次用的是哪个。

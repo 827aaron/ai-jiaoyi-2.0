@@ -69,6 +69,9 @@ KNOWN_TEMPLATES: dict[str, str] = {
     "q8": "7309175f24c4",
     # 独立大盘：当前市场背景与每币原研究来源分列，字段结构 s6。
     "q9": "11822a6e9146",
+    # keeper_snapshot variants of q9 (entry prompts identical): rank = pool rank only, off = none
+    "q9-krank": "34da870456b4",
+    "q9-koff": "87187a5598c6",
 }
 
 _ENTRY_GOAL = (
@@ -88,25 +91,44 @@ _ENTRY_GOAL = (
     "(bias, key levels as bps from price); `kronos` is an optional price-range forecast."
 )
 
-_HOLD_GOAL = (
-    "Goal: we hold an open position (`pos`). Decide whether to keep holding or close it now. "
-    "You can only hold or close the whole position; the stop is never widened and size is "
-    "never added. A wrong close costs fees and the remaining move; a wrong hold can cost up "
-    "to the stop. Inputs: `pnl_bps`, `age_min`, distance to stop and take-profit in bps, "
-    "recent returns, taker flow (`buy`, `cvd30_k`), liquidations, funding, the book, and "
-    "whether today's strategist card still supports the trade (`card`)."
-    " New inputs: `pos.entry_px`; `pos.peak_bps` = best unrealized PnL so far, "
-    "`pos.giveback_bps` = how much of that peak is gone; `pos.pnl_r`/`pos.peak_r` = the same "
-    "in units of the initial stop distance; `pos.be_bps` = PnL after round-trip fees; "
-    "`pos.path_bps` = unrealized PnL at earlier checks, oldest first; `entry` = why we entered "
-    "(signal type, trigger text, entry-time genuine/take probabilities); `trail` = trailing "
-    "stop: on, active, and bps from price to the trailing stop; `kronos.agree` = 1 if the "
-    "forecast model's averaged path ends in the position's direction, else 0; `kronos.rank` = "
-    "where this coin's forecast return ranks among all coins forecast now (top/mid/bottom); "
-    "`against` (only on urgent checks) = a "
-    "rule trigger just fired in the OPPOSITE direction of our position: its type, side, volume "
-    "multiple, taker buy share, whether it is a strong type, seconds ago."
-)
+KronosSnapshot = Literal["direction", "rank", "off"]
+"""``[predictor] keeper_snapshot``: how the forecast enters the hold snapshot and prompt."""
+
+_HOLD_KRONOS: dict[KronosSnapshot, str] = {
+    "direction": (
+        "`kronos.agree` = 1 if the "
+        "forecast model's averaged path ends in the position's direction, else 0; `kronos.rank` = "
+        "where this coin's forecast return ranks among all coins forecast now (top/mid/bottom); "
+    ),
+    "rank": (
+        "`kronos.rank` = where this coin's forecast return ranks among all coins forecast now "
+        "(top/mid/bottom): top favours a long and disfavours a short, bottom the reverse, mid "
+        "favours neither; "
+    ),
+    "off": "",
+}
+
+
+def _hold_goal(kronos: KronosSnapshot) -> str:
+    return (
+        "Goal: we hold an open position (`pos`). Decide whether to keep holding or close it now. "
+        "You can only hold or close the whole position; the stop is never widened and size is "
+        "never added. A wrong close costs fees and the remaining move; a wrong hold can cost up "
+        "to the stop. Inputs: `pnl_bps`, `age_min`, distance to stop and take-profit in bps, "
+        "recent returns, taker flow (`buy`, `cvd30_k`), liquidations, funding, the book, and "
+        "whether today's strategist card still supports the trade (`card`)."
+        " New inputs: `pos.entry_px`; `pos.peak_bps` = best unrealized PnL so far, "
+        "`pos.giveback_bps` = how much of that peak is gone; `pos.pnl_r`/`pos.peak_r` = the same "
+        "in units of the initial stop distance; `pos.be_bps` = PnL after round-trip fees; "
+        "`pos.path_bps` = unrealized PnL at earlier checks, oldest first; `entry` = why we entered "
+        "(signal type, trigger text, entry-time genuine/take probabilities); `trail` = trailing "
+        "stop: on, active, and bps from price to the trailing stop; "
+        + _HOLD_KRONOS[kronos]
+        + "`against` (only on urgent checks) = a "
+        "rule trigger just fired in the OPPOSITE direction of our position: its type, side, volume "
+        "multiple, taker buy share, whether it is a strong type, seconds ago."
+    )
+
 
 ENTRY_PROMPTS: dict[EntryQuestion, str] = {
     EntryQuestion.GENUINE: (
@@ -136,11 +158,19 @@ trade」+ 目标说明。10-25 线上 45 条快照 A/B（/mnt/project-files/gate
 这句 + 精简的卡、技术面等数据块照留，中位 0.59（54/90）。预测员不进快照。"""
 
 
-HOLD_PROMPTS: dict[HoldQuestion, str] = {
-    HoldQuestion.THESIS_INTACT: (
+def hold_prompts(kronos: KronosSnapshot = "direction") -> dict[HoldQuestion, str]:
+    return {**HOLD_PROMPTS, HoldQuestion.THESIS_INTACT: _thesis(kronos)}
+
+
+def _thesis(kronos: KronosSnapshot) -> str:
+    return (
         "Is the reason we entered this position (`entry.sig`, `entry.why`) still valid? "
-        + _HOLD_GOAL
-    ),
+        + _hold_goal(kronos)
+    )
+
+
+HOLD_PROMPTS: dict[HoldQuestion, str] = {
+    HoldQuestion.THESIS_INTACT: _thesis("direction"),
     HoldQuestion.ADVERSE_RISK: (
         "How likely is a sharp move against the position in the next few minutes?"
     ),
@@ -209,10 +239,10 @@ def entry_questions(mode: GateQuestions = "six", hold_min: int = 120) -> list[Je
     ]
 
 
-def hold_questions() -> list[JevQuestion]:
+def hold_questions(kronos: KronosSnapshot = "direction") -> list[JevQuestion]:
+    prompts = hold_prompts(kronos)
     return [
-        JevQuestion(id=q.value, prompt=HOLD_PROMPTS[q], choices=HOLD_CHOICES[q])
-        for q in HoldQuestion
+        JevQuestion(id=q.value, prompt=prompts[q], choices=HOLD_CHOICES[q]) for q in HoldQuestion
     ]
 
 
@@ -470,7 +500,7 @@ def hold_snapshot(
     fee_bps: float = 5.0,
     current_market: MarketView | None = None,
     market_intra: str | None = None,
-    kronos: Literal["direction", "rank", "off"] = "direction",
+    kronos: KronosSnapshot = "direction",
 ) -> str:
     """``kronos`` is ``[predictor] keeper_snapshot``: "direction" = agree from p_up + rank,
     "rank" = pool rank only (p_up is 0/1 and skews to 0, so agree favours shorts), "off" = none.
@@ -551,35 +581,47 @@ def hold_snapshot(
 # ---------------------------------------------------------------------- 版本和日志
 
 
-def template_fingerprint() -> str:
+def template_version(kronos: KronosSnapshot = "direction") -> str:
+    """The direction keeper template is ``TEMPLATE_VERSION`` itself; rank / off are variants of it
+    with their own fingerprints, so keeper records of the three modes can be told apart."""
+    return TEMPLATE_VERSION if kronos == "direction" else f"{TEMPLATE_VERSION}-k{kronos}"
+
+
+def template_fingerprint(kronos: KronosSnapshot = "direction") -> str:
     """问题措辞、选项说明和快照格式的哈希（前 12 位）。"""
-    payload = {
+    payload: dict[str, Any] = {
         "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
         "entry_one": ONE_TAKE_PROMPT,
-        "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
+        "hold": {q.value: p for q, p in hold_prompts(kronos).items()},
         "criteria": CRITERIA,
         "snapshot": SNAPSHOT_SCHEMA,
         "max_chars": MAX_SNAPSHOT_CHARS,
     }
+    if kronos != "direction":  # direction keeps the registered q9 payload byte-for-byte
+        payload["keeper_kronos"] = kronos
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:12]
 
 
-def template_dump() -> dict[str, Any]:
+def template_dump(kronos: KronosSnapshot = "direction") -> dict[str, Any]:
     """当前模板全文，复盘时对照用（可以写成 data/jev_templates/<版本>.json）。"""
     return {
-        "version": TEMPLATE_VERSION,
-        "fingerprint": template_fingerprint(),
+        "version": template_version(kronos),
+        "fingerprint": template_fingerprint(kronos),
         "snapshot_schema": SNAPSHOT_SCHEMA,
         "entry": {q.value: ENTRY_PROMPTS[q] for q in EntryQuestion},
         "entry_one": ONE_TAKE_PROMPT,
-        "hold": {q.value: HOLD_PROMPTS[q] for q in HoldQuestion},
+        "hold": {q.value: p for q, p in hold_prompts(kronos).items()},
         "criteria": CRITERIA,
     }
 
 
 def jev_log_fields(
-    request: JevRequest | None, resp: JevResponse, extra: Mapping[str, Any] | None = None
+    request: JevRequest | None,
+    resp: JevResponse,
+    extra: Mapping[str, Any] | None = None,
+    *,
+    kronos: KronosSnapshot | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """一次 Jev 调用写进 ``DecisionRecord`` 的 ``input`` / ``output``（拍板人和管家共用同一格式）。
 
@@ -588,12 +630,17 @@ def jev_log_fields(
     ``output.usage``：token 用量 ``{input_tokens, output_tokens, reasoning_tokens}``（面板 AI
     费用详情读这里）；没真正调用时为 None。
     没有真正调用（例如没有作战卡被拦下）时 ``request`` 为 None，``input.jev.called`` 为 False。
+
+    ``kronos``: the keeper's ``keeper_snapshot`` mode; it picks the template variant and is
+    written as ``input.jev.kronos_snapshot``. None (the entry gate) = the plain template.
     """
     inp: dict[str, Any] = {
-        "template": TEMPLATE_VERSION,
-        "template_fp": template_fingerprint(),
+        "template": template_version(kronos or "direction"),
+        "template_fp": template_fingerprint(kronos or "direction"),
         "called": request is not None,
     }
+    if kronos is not None:
+        inp["kronos_snapshot"] = kronos
     if request is not None:
         inp.update(
             request_id=request.request_id,

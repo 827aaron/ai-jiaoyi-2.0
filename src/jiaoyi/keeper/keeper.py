@@ -50,7 +50,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, NamedTuple
 
 from jiaoyi.contracts import (
     AgainstSignalEvent,
@@ -76,7 +76,13 @@ from jiaoyi.contracts import (
 from jiaoyi.core.observations import aware, freeze_values
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.jev import error_kind
-from jiaoyi.gate.questions import hold_pnl_bps, hold_questions, hold_snapshot, jev_log_fields
+from jiaoyi.gate.questions import (
+    KronosSnapshot,
+    hold_pnl_bps,
+    hold_questions,
+    hold_snapshot,
+    jev_log_fields,
+)
 from jiaoyi.interfaces import Alerter, DecisionModel
 
 log = logging.getLogger(__name__)
@@ -137,7 +143,7 @@ class JevKeeper:
         venue_price: Callable[[str], Awaitable[tuple[float, datetime] | None]] | None = None,
         exit_in_flight: Callable[[str], tuple[str, str, str] | None] | None = None,
         alerter: Alerter | None = None,
-        kronos_snapshot: Literal["direction", "rank", "off"] = "direction",
+        kronos_snapshot: KronosSnapshot = "direction",
     ) -> None:
         """``blocked``：被封禁新开仓的币 → 原因（军师团 ``blocked_symbols``），这些币的持仓要平。
 
@@ -535,7 +541,7 @@ class JevKeeper:
                 market_intra=self._intra(now, market),
                 kronos=self._kronos_snapshot,
             ),
-            questions=hold_questions(),
+            questions=hold_questions(self._kronos_snapshot),
         )
         history.append(pnl)
         del history[:-MAX_HISTORY]
@@ -1241,7 +1247,11 @@ class JevKeeper:
             outcome = Outcome.CLOSE if v.action == "close" else Outcome.HOLD
             if r is not None and not r.ok:
                 outcome = Outcome.ERROR
-            jev_in, jev_out = jev_log_fields(request, r) if r is not None else ({}, {})
+            jev_in, jev_out = (
+                jev_log_fields(request, r, kronos=self._kronos_snapshot)
+                if r is not None
+                else ({}, {})
+            )
             self._rec.record(
                 now,
                 outcome,

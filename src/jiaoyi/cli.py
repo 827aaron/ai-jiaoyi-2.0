@@ -658,7 +658,7 @@ def _startup_problem(args: argparse.Namespace) -> str | None:
 
 def _watchdog(args: argparse.Namespace) -> int:
     """主进程外的心跳检查，由 launchd 每分钟跑一次（com.jiaoyi.watchdog）。"""
-    from jiaoyi.watchdog import run_once
+    from jiaoyi.watchdog import config_state_path, run_once
 
     config_error: str | None = None
     try:
@@ -676,6 +676,7 @@ def _watchdog(args: argparse.Namespace) -> int:
         store.get("TELEGRAM_CHAT_ID"),
         datetime.now(UTC),
         config_error=config_error,
+        config_state=config_state_path(Path(args.app)),
     )
     return rc or (2 if config_error else 0)
 

@@ -17,6 +17,7 @@ config/app.toml
 config/slow.toml
 config/*.bak-*
 config/*.pending.toml
+config/.watchdog_config_state.json
 
 # 上游仓库（make hb-fetch 拉取）
 vendor/

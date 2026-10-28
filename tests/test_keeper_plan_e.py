@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
 from jiaoyi.gate.questions import (
     HOLD_PROMPTS,
     MAX_SNAPSHOT_CHARS,
+    hold_prompts,
     hold_snapshot,
 )
 from jiaoyi.keeper.keeper import JevKeeper
@@ -279,6 +280,58 @@ async def test_keeper_passes_kronos_snapshot_mode(now: datetime) -> None:
     k2 = _keeper(t2, now, [68068.0], forecast=lambda s, n: fc)
     await k2.review(position(now), now)
     assert _snap(t2.calls[0])["kronos"] == {"agree": 0, "rank": "top"}
+
+
+# hold_snapshot output of d3283a2 (before keeper_snapshot existed) for the input below
+_PRE_PR_LONG = (
+    '{"sym":"BTCUSDT","pos":{"side":"long","pnl_bps":30.0,"age_min":5.0,"to_stop_bps":47.7,'
+    '"to_tp_bps":3.5,"time_left_min":55.0,"entry_px":68000.0,"peak_bps":35.0,'
+    '"giveback_bps":5.0,"pnl_r":1.7,"peak_r":1.98,"be_bps":20.0,"path_bps":[0,10,35]},'
+    '"trail":{"on":true,"active":true,"stop_bps":5.0},"px":68204.0,"atr_bps":11.7,'
+    '"ret1m_bps":20.0,"ret5m_bps":40.0,"vol_x":4.0,"buy":0.65,"cvd30_k":30.0,"rv5m_bps":4.0,'
+    '"liq_long_k":0.0,"liq_short_k":0.0,"book":{"spread_bps":0.07,"ofi_k":10.0,'
+    '"depth_k":2000.0},"card":{"bias":"long","levels_bps":[-29.9,-249.8],"stop_atr":[1.0,2.0],'
+    '"tp_r":[1.5,3.0],"size_max":"L","regime":"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，'
+    '不追高。"},"kronos":{"agree":0,"rank":"bottom"}}'
+)
+
+
+def test_keeper_snapshot_direction_mode_is_byte_identical_to_pre_pr() -> None:
+    now = datetime(2026, 10, 28, 9, 30, tzinfo=UTC)
+    fc = _ranked(now, 0.0, "bottom")
+    pos = position(now, trailing_activation_pct=0.2, trailing_stop_pct=0.1)
+    args = (pos, features(now, price=68204.0), card(now), now)
+    kw: dict[str, Any] = {"history": [0.0, 10.0, 35.0], "forecast": fc, "fee_bps": 5.0}
+    assert hold_snapshot(*args, **kw) == _PRE_PR_LONG
+    assert hold_snapshot(*args, **kw, kronos="direction") == _PRE_PR_LONG
+
+
+def test_hold_prompt_describes_kronos_per_mode() -> None:
+    def thesis(mode: Any) -> str:
+        return hold_prompts(mode)[c.HoldQuestion.THESIS_INTACT]
+
+    assert thesis("direction") == HOLD_PROMPTS[c.HoldQuestion.THESIS_INTACT]
+    assert "`kronos.agree`" in thesis("direction")
+    rank = thesis("rank")
+    assert "`kronos.agree`" not in rank and "`kronos.rank`" in rank
+    assert "top favours a long and disfavours a short, bottom the reverse" in rank
+    assert "kronos" not in thesis("off")
+    for mode in ("rank", "off"):  # only the kronos sentence differs; the other questions match
+        other = {q: p for q, p in hold_prompts(mode).items() if q != c.HoldQuestion.THESIS_INTACT}
+        assert other == {q: p for q, p in HOLD_PROMPTS.items() if q != c.HoldQuestion.THESIS_INTACT}
+
+
+@pytest.mark.parametrize("mode", ["direction", "rank", "off"])
+async def test_keeper_asks_with_the_mode_prompt(now: datetime, mode: Any) -> None:
+    seen: list[str] = []
+
+    def answer(state: str, qs: Any) -> Any:
+        seen.extend(q.prompt for q in qs if q.id == c.HoldQuestion.THESIS_INTACT.value)
+        return close_p(0.1)(state, qs)
+
+    k = _keeper(MockJevTransport(answer=answer), now, [68068.0], kronos_snapshot=mode)
+    await k.review(position(now), now)
+    assert seen == [hold_prompts(mode)[c.HoldQuestion.THESIS_INTACT]]
 
 
 def test_positions_page_shows_keeper_peak_and_giveback(now: datetime) -> None:
