@@ -11,7 +11,7 @@ import copy
 import logging
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -121,6 +121,10 @@ class SymbolStats:
     """1 小时 K 线 (开盘毫秒, 开, 高, 低, 收)，最后一根是还没走完的小时；事后回填用。"""
 
 
+class VenueTradability(Protocol):
+    def unavailable(self, symbols: Iterable[str]) -> dict[str, str] | None: ...
+
+
 class MarketStatsSource(Protocol):
     async def fetch(self, now: datetime) -> list[SymbolStats]: ...
 
@@ -182,6 +186,9 @@ class ScreenerConfig:
     """slow.toml ``[screener.categories]`` 里各类的上限；选币页的设置优先。"""
     category_enabled: Mapping[Category, bool] = field(default_factory=dict)
     """slow.toml 里各类的开关；选币页的设置优先。"""
+    exclude_untradeable: bool = True
+    """剔掉执行交易所上不在交易（状态不是 TRADING，或没有下单精度）的币；选币用主网数据，Demo 上
+    结算中 / 暂停的合约会白占会议和卡位。关掉 = 不管交易所状态。"""
     min_range_24h_pct: float = 0.0
     """24 小时波动下限（%）；0 = 不设。波动太小的币赚不回手续费。"""
     max_range_24h_pct: float = 0.0
@@ -301,8 +308,12 @@ def tradfi_block(s: SymbolStats, cfg: ScreenerConfig) -> str | None:
     return None
 
 
-def _hard_filters(s: SymbolStats, cfg: ScreenerConfig) -> HardFilters:
+def _hard_filters(
+    s: SymbolStats, cfg: ScreenerConfig, venue_block: str | None = None
+) -> HardFilters:
     reasons: list[str] = []
+    if venue_block is not None:
+        reasons.append(venue_block)
     if s.quote_volume_24h_usdt < cfg.min_quote_volume_usdt:
         reasons.append("24 小时成交额不足")
     if s.spread_bps > cfg.max_spread_bps:
@@ -413,6 +424,12 @@ class CodeSymbolScreener:
         self._last_run: datetime | None = None
         self._count = 0
         self._error: str | None = None
+        self._venue: VenueTradability | None = None
+        self._venue_label = "交易所"
+
+    def set_venue(self, venue: VenueTradability, label: str = "交易所") -> None:
+        """接上执行交易所的可交易名单；每次选币前主循环已刷新过它。"""
+        self._venue, self._venue_label = venue, label
 
     def heartbeat(self, now: datetime) -> None:
         """上报选币状态：从没跑过 / 正常（上次时间、币数、下次时间）/ 失败（原因）。"""
@@ -563,10 +580,17 @@ class CodeSymbolScreener:
             # 币安没有永续的（只在市值榜上）不占名额：往下补满 major_top_n 个
             ranks = self._majors.ranks(cfg.major_top_n, {base_of(s.symbol) for s in stats})
             self._majors.set_effective(ranks, cfg.major_top_n, now)
+        off: dict[str, str] = {}
+        if cfg.exclude_untradeable and self._venue is not None:
+            off = self._venue.unavailable([s.symbol for s in stats]) or {}
+        gone: dict[str, str] = {}
         entries: dict[str, SymbolPoolEntry] = {}
         ranked: list[SymbolPoolEntry] = []
         for s in stats:
             f = _hard_filters(s, cfg)
+            if s.symbol in off and f.passed:  # 本来就过不了门槛的币不用再报
+                gone[s.symbol] = off[s.symbol]
+                f = _hard_filters(s, cfg, f"{self._venue_label}不可交易（{off[s.symbol]}）")
             total, parts, reasons = score(s, cfg)
             category = classify(
                 s.symbol, s.kind, ranks or None, cfg.major_include, cfg.major_exclude
@@ -627,6 +651,12 @@ class CodeSymbolScreener:
             chosen.add(e.symbol)
             counts[e.category] = counts.get(e.category, 0) + 1
 
+        if gone:
+            logger.info(
+                "%s 不可交易，已剔除：%s",
+                self._venue_label,
+                "、".join(f"{k}({v})" for k, v in sorted(gone.items())),
+            )
         final = [e.model_copy(update={"in_pool": e.symbol in chosen}) for e in entries.values()]
         final.sort(key=lambda e: (not e.in_pool, -e.score, e.symbol))
         if cfg.tiers:
@@ -641,5 +671,6 @@ class CodeSymbolScreener:
             pool_id=f"pool-{now:%Y%m%dT%H%M}",
             ts=now,
             entries=final,
+            venue_excluded=gone,
             source_metadata={s.symbol: _source_copy(s.source_metadata) for s in stats},
         )

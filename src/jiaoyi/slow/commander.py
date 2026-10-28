@@ -391,6 +391,7 @@ class BattleCardCommander:
         self._last_px: dict[str, tuple[float, datetime]] = {}
         self._meet_px: dict[str, float] = {}  # 开会开始时的价：新结论的关键位按它定在哪一侧
         self._blocked: dict[str, str] = {}
+        self._untradeable: dict[str, str] = {}
         self._symbol_timeout_s = symbol_timeout_s
         self._min_gap = min_refresh_gap
         self._lead = expiry_lead
@@ -458,6 +459,17 @@ class BattleCardCommander:
             return None
         c = self._mask_us_closed(self._mask_stale(c, now), now)
         c = c.model_copy(update={"current_market": self.latest_market_view})
+        if self._untradeable:
+            c = c.model_copy(
+                update={
+                    "symbols": [
+                        self._watch_only(s)
+                        if s.symbol in self._untradeable and s.symbol not in self._held
+                        else s
+                        for s in c.symbols
+                    ]
+                }
+            )
         if not self._blocked:
             return c
         # 被封的币在读取时改成“只看不做”：立刻生效，不等下一次开会；
@@ -472,6 +484,10 @@ class BattleCardCommander:
                 ]
             }
         )
+
+    def set_untradeable(self, untradeable: Mapping[str, str]) -> None:
+        """执行交易所上不在交易的币（币 → 状态）：卡上读成只看不做，持仓币不动。"""
+        self._untradeable = dict(untradeable)
 
     def set_held(self, held: Mapping[str, Side]) -> None:
         """有持仓的币（币 → 持仓方向）：必须强制入选本轮会议，并一直留在卡上继续盯。
