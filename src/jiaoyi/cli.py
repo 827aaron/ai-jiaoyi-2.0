@@ -358,6 +358,37 @@ def _card_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _market_score(args: argparse.Namespace) -> int:
+    """大盘台记分：每轮 1h / 4h 结局、Brier / log loss 对照先验和延续、发布命中和延迟、门槛扫描。"""
+    from jiaoyi.market.rest import RateLimited
+    from jiaoyi.slow import market_score
+
+    if args.data_dir:
+        data_dir = args.data_dir
+    else:
+        try:
+            data_dir = load_app_config(Path(args.app)).data_dir
+        except ConfigError as e:
+            print(e, file=sys.stderr)
+            return 2
+    out = Path(args.out) if args.out else None
+    try:
+        rep = market_score.update(
+            data_dir,
+            datetime.now(UTC),
+            days=args.days,
+            out_path=out,
+            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        )
+    except RateLimited:
+        _say_rate_limited()
+        return 1
+    for line in market_score.render(rep):
+        print(line)
+    print(f"结果：{out or Path(data_dir) / 'market_desk' / market_score.SCORE_FILE}")
+    return 0
+
+
 def _gate_calibrate(args: argparse.Namespace) -> int:
     """影子结果（实盘拍板 + 回放）扫拍板门槛 → data/gate_calibration/<hold>.json，不自动套用。"""
     from datetime import timedelta
@@ -844,6 +875,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--app", default=str(DEFAULT_APP_PATH))
     p.add_argument("--days", type=float, default=30.0, help="补算最近几天出的卡")
     p.set_defaults(func=_card_score)
+
+    p = sub.add_parser(
+        "market-score", help="大盘台记分：每轮概率准不准、发布延迟、门槛扫描（只读日志和公开行情）"
+    )
+    p.add_argument("--app", default=str(DEFAULT_APP_PATH))
+    p.add_argument("--days", type=float, default=7.0, help="算最近几天的轮次")
+    p.add_argument("--data-dir", default="", help="读哪个数据目录；默认 app.toml 的 data_dir")
+    p.add_argument("--out", default="", help="结果写到哪；默认 <data_dir>/market_desk/score.json")
+    p.add_argument(
+        "--cache-dir", default="", help="K 线缓存目录；默认 <data_dir>/market_desk/score_cache"
+    )
+    p.set_defaults(func=_market_score)
 
     p = sub.add_parser(
         "gate-calibrate", help="拿影子结果扫拍板门槛，给推荐值（写 data/gate_calibration/）"
