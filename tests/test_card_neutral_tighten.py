@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -136,7 +137,12 @@ def test_absent_symbol_counts_only_when_switched_on(now: datetime) -> None:
     k, rec, _, _ = make_keeper(now, cfg, cd=cd)
     v = k.review_card_rule(short_pos(now), now)
     assert v is not None and v.action == "hold" and "没有这个币" in v.reason
-    assert k.card_rule_key(short_pos(now), now) == f"BTCUSDT|{now.isoformat()}|absent"
+    assert k.card_rule_key(short_pos(now), now) == "BTCUSDT|absent|neutral"
+    bumped = cd.model_copy(
+        update={"version": cd.version + 5, "created_at": now + timedelta(minutes=1)}
+    )
+    k._card = lambda _: bumped
+    assert k.card_rule_key(short_pos(now), now + timedelta(minutes=2)) == "BTCUSDT|absent|neutral"
     assert rec.rows[0]["output"]["card_rule"]["card_bias"] is None
 
 
@@ -228,6 +234,33 @@ async def test_loop_profitable_anchors_once_per_instruction(tmp_path: Path, now:
         await drain(runner)
     assert ex.closed == [] and len(ex.tighten_calls) == 1
     assert ex.extra == [("trail", 0.5, KEY)]
+
+
+async def test_loop_card_version_burst_acts_once(tmp_path: Path, now: datetime) -> None:
+    """并发会议合并卡：整卡换版本（别的币变了）不是这个币的新研究，不再进执行器。"""
+    holder = [neutral_card(now)]
+    k, rec, _, _ = make_keeper(now, NEUTRAL)
+    k._card = lambda _: holder[0]
+    ex = TightenExecutor(short_pos(now), {"action": "pending", "why": "sync_unconfirmed"})
+    runner = _runner(tmp_path, now, k, ex)
+    runner.positions = [short_pos(now)]
+    await runner._review_card_rules()
+    await drain(runner)
+    ex.result = {"action": "tightened", "why": "sync_armed"}
+    for v in range(2, 8):
+        base = holder[0]
+        holder[0] = base.model_copy(
+            update={
+                "card_id": f"card-v{v}",
+                "version": v,
+                "created_at": now - timedelta(seconds=60 - v),
+            }
+        )
+        await asyncio.gather(runner._review_card_rules(), runner._review_card_rules())
+        await drain(runner)
+    assert ex.closed == [] and len(ex.tighten_calls) == 2  # pending 重试一次，之后按指令缓存
+    assert {x[2] for x in ex.extra} == {KEY}
+    assert len([r for r in rec.rows if "card_rule" in r["output"]]) == 1
 
 
 async def test_loop_stale_price_tightens_without_closing(tmp_path: Path, now: datetime) -> None:

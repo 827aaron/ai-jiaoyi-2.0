@@ -339,7 +339,7 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 | `card_neutral_on_absent` | `false` | 卡里没有这个币也算中性 |
 | `card_neutral_trail_distance_mult` | `1.0` | `tighten` 锚定的移动止损回撤距离 = 开仓带的移动止损距离 × 这个倍数 |
 
-`tighten` 走 `HbExecutorAdapter.tighten_stop`，和反向卡没确认时完全同一条路，固定 `trail` 模式（开仓没带移动止损的仓退回 breakeven）：保本 / 可挂判定（`opposite_tighten_buffer_bps`、`opposite_tighten_mark_gap_bps`）、锚定（只锚一次，落盘在 `server_protection` 的 `opposite_anchor_price` / `opposite_card_key`，换卡、重启都不重锚，永远不比正在挂的止损松）、插针重试窗口（`opposite_anchor_retry_s`）、旧通道 / 从没完整托管照旧全平、证据读不到 CRITICAL、换代先确认新代，都和上面一样。指令身份 = 反向卡的 `币|issued_at|方向` 后面加 `|neutral`（卡里没有这个币：`币|created_at|absent`），主循环按它缓存「已收紧 / 已够紧」。模型复查照常进行；`close` 立刻平的不再排模型复查。
+`tighten` 走 `HbExecutorAdapter.tighten_stop`，和反向卡没确认时完全同一条路，固定 `trail` 模式（开仓没带移动止损的仓退回 breakeven）：保本 / 可挂判定（`opposite_tighten_buffer_bps`、`opposite_tighten_mark_gap_bps`）、锚定（只锚一次，落盘在 `server_protection` 的 `opposite_anchor_price` / `opposite_card_key`，换卡、重启都不重锚，永远不比正在挂的止损松）、插针重试窗口（`opposite_anchor_retry_s`）、旧通道 / 从没完整托管照旧全平、证据读不到 CRITICAL、换代先确认新代，都和上面一样。指令身份 = 反向卡的 `币|issued_at|方向` 后面加 `|neutral`（卡里没有这个币：`币|absent|neutral`），按这个币的研究、不按整卡版本：别的币开会、并发会议合并卡只换版本，同一条中性指令不会再动一次；主循环按它缓存「已收紧 / 已够紧」，同一笔仓同一时间只排一次（`_card_rule_queued`），决策记录同一条指令同一支只记一次。模型复查照常进行；`close` 立刻平的不再排模型复查。
 
 **不做价格确认**：中性不是反向，没有「新方向」可确认；亏的本来就按可挂判定直接平，赚的只是锚住利润，不需要再等价格。
 

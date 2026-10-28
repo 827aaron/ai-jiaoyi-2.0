@@ -669,7 +669,10 @@ class JevKeeper:
         中性 = 这个币的指令是 no_trade，或被 stale_on_arrival 作废成只看不做（不论方向：
         作废的指令不算数）；卡里没有这个币只在 ``card_neutral_on_absent`` 时算。别的原因的
         只看不做不算（研究 v2：只看不做本来就是常见的「方向对、先别追」）。方向反了归反向卡规则。
-        指令发布在开仓之前（例如照旧卡手动开的仓）不算「被换掉」。"""
+        指令发布在开仓之前（例如照旧卡手动开的仓）不算「被换掉」。
+
+        身份按这个币的研究（``币|issued_at|方向|neutral``，同反向卡），不按整卡版本：
+        别的币开会、并发合并卡只换版本，不会让同一条中性指令再动一次。"""
         if self._cfg.card_neutral_action == "hold" or card is None or not card.is_valid(now):
             return None
         if self._card_rule(position, card, now) is not None:
@@ -678,7 +681,8 @@ class JevKeeper:
         if cs is None:
             if not self._cfg.card_neutral_on_absent or card.created_at <= position.opened_at:
                 return None
-            return "新作战卡里没有这个币", f"{position.symbol}|{card.created_at.isoformat()}|absent"
+            # 没有这个币的研究可认：身份不带卡版本 / 时间，换版本不算新指令
+            return "新作战卡里没有这个币", f"{position.symbol}|absent|neutral"
         issued = cs.issued_at or card.created_at
         if not issued <= now < (cs.expires_at or card.expires_at) or issued <= position.opened_at:
             return None
