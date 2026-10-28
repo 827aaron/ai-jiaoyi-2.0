@@ -100,6 +100,7 @@ class JevKeeper:
         forecast: Callable[[str, datetime], Forecast | None] | None = None,
         scan_day: Callable[[str, str], list[dict[str, Any]]] | None = None,
         current_market: Callable[[], MarketView | None] | None = None,
+        market_intra: Callable[[datetime, MarketView | None], str | None] | None = None,
         frozen_peak_review: Callable[[str, datetime], Awaitable[dict[str, Any] | None]]
         | None = None,
         observation_source: Callable[[str, datetime], Mapping[str, Any] | None] | None = None,
@@ -124,6 +125,7 @@ class JevKeeper:
         self._features = features
         self._card = card
         self._market_source = current_market
+        self._market_intra = market_intra
         self._observation_source = observation_source
         self._observation_sink = observation_sink
         self._observation_wall = observation_wall
@@ -430,6 +432,7 @@ class JevKeeper:
                 forecast=fc,
                 fee_bps=self._fee_bps,
                 current_market=market,
+                market_intra=self._intra(now, market),
             ),
             questions=hold_questions(),
         )
@@ -776,6 +779,17 @@ class JevKeeper:
         limit = self._cfg.keeper_price_max_age_s
         age = (now - f.ts).total_seconds()
         return age if limit > 0 and age > limit else None
+
+    def _intra(self, now: datetime, market: MarketView | None) -> str | None:
+        """大盘台最近一轮的「未来 1 小时概率 + 短线现状」（``market_intra``，没开就 None）；
+        出错不带。"""
+        if self._market_intra is None:
+            return None
+        try:
+            return self._market_intra(now, market)
+        except Exception:
+            log.exception("读大盘台短线现状失败，这次复查不带")
+            return None
 
     def _giveback_guard(
         self, position: PositionRecord, pnl: float, peak: float

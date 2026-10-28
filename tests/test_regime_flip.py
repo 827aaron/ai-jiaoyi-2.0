@@ -131,6 +131,17 @@ async def test_rolling_hour_uses_exact_closed_endpoints(now: datetime) -> None:
     assert s.prices == {"AAUSDT": 102, "CCUSDT": 100}
     assert s.btc_px == 101
     assert close_at([bar("AAUSDT", now + timedelta(minutes=1), 900)], now) is None
+    # 大盘台刷新短线现状用的同一批线算出的涨跌（含 BTC）；没有 15 分钟前那根就不给
+    assert s.rets_1h == pytest.approx({"AAUSDT": 2, "CCUSDT": 0, "BTCUSDT": 1})
+    assert s.rets_15m == {}
+
+
+async def test_snapshot_gives_15m_returns_from_the_same_bars(now: datetime) -> None:
+    async def fetch(sym: str, start: datetime, end: datetime) -> list[Kline]:
+        return [bar(sym, now - timedelta(minutes=15), 100), bar(sym, now, 99)]
+
+    s = await snapshot(["AAUSDT"], now, fetch)
+    assert s.rets_15m == pytest.approx({"AAUSDT": -1, "BTCUSDT": -1})
 
 
 async def test_snapshot_propagates_rate_limit(now: datetime) -> None:

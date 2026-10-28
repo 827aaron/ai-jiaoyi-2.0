@@ -56,10 +56,12 @@ SHALLOW_BARS = 200
 DEEP_PER_RUN = 8
 """每轮最多给几个币补全 30 天以上的 1h 历史（limit≈900，权重 5）：启动时分几轮补完，
 不一口气打几十个大请求（防 418）。补过的落盘，重启不用重来。"""
+CACHE_KEEP_DAYS = 7
+"""1h 线缓存只留当前池、BTC / ETH 和最近这么多天在池里出现过的币，其余的删掉（缓存不无限长）。"""
 DEEP_MIN_SHARE = 0.8
 """等权池里补全历史的币占到这个比例才给基础率（先验），之前写「回填中」。"""
 PERIOD_5M = timedelta(minutes=5)
-"""futures/data 的 5 分钟统计：时间戳是这一段的开始，as_of = 开始 + 5 分钟。"""
+"""futures/data 的 5 分钟统计每 5 分钟出一条：新鲜度检查对它多给一段的余量。"""
 
 Mirror = Literal["neg", "comp100", "inv", "same", "pair"]
 Kind = Literal["live", "stat", "daily"]
@@ -362,7 +364,9 @@ class DossierBuilder:
         cache_path: Path | None = None,
         get: Getter | None = None,
         fng_get: Getter | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        """``monotonic``：量开跑以来过了多久（请求的 as_of = 运行时刻 + 这段时间），测试可换。"""
         self._band = band_sigma
         self._lookback = sigma_lookback_h
         self._days = base_rate_days
@@ -377,6 +381,11 @@ class DossierBuilder:
         self._funding_hours: dict[str, float] = {}
         self._funding_info_at: datetime | None = None
         self._fng: tuple[datetime, float, datetime] | None = None  # (取到时间, 值, 源时间)
+        self._seen: dict[str, int] = {}
+        """币 → 最后一次在池里（或是 BTC / ETH）的时刻（毫秒），缓存修剪用。"""
+        self._run_at = datetime.fromtimestamp(0, UTC)
+        self._monotonic = monotonic
+        self._run_mono = monotonic()
         self._load_cache()
 
     @property
@@ -391,8 +400,10 @@ class DossierBuilder:
         missing: dict[str, str] = {}
         fields: list[DossierField] = []
         syms = self.symbols(pool)
+        self._run_at, self._run_mono = now, self._monotonic()
         now_ms = int(now.timestamp() * 1000)
         t0_ms = now_ms // HOUR_MS * HOUR_MS  # 最后一根已收盘 1h 线的收盘整点（统计量用）
+        self._prune_cache([*syms, BTC, ETH], now_ms)
         self._refresh_bars([*syms, BTC, ETH], now, missing)
         self._refresh_live([*syms, BTC, ETH], now, missing)
         basket = {s: self._bars[s] for s in syms if self._bars.get(s)}
@@ -429,7 +440,7 @@ class DossierBuilder:
             "选币时的池统计（持仓量 1h、量比、强平）是选币时刻 / 已收盘小时的值，不用",
         )
         missing.setdefault("news", "第一阶段不接新闻（不可复现、有注入风险）")
-        fields = self._drop_stale(fields, now, missing)
+        fields = self._drop_stale(fields, self._fetched_at(), missing)
         return Dossier(
             t0=now,
             fields=tuple(fields),
@@ -452,10 +463,15 @@ class DossierBuilder:
             },
         )
 
+    def _fetched_at(self) -> datetime:
+        """此刻（运行时刻 + 开跑以来真实流逝的时间）：每个请求取回来的时刻就是它的 as_of。"""
+        return self._run_at + timedelta(seconds=self._monotonic() - self._run_mono)
+
     def _drop_stale(
         self, fields: list[DossierField], now: datetime, missing: dict[str, str]
     ) -> list[DossierField]:
-        """实时类字段 as_of 比运行时刻旧过 ``max_input_age_min`` 就不给（5 分钟统计多给一段）。"""
+        """实时类字段 as_of 比数据包组好的时刻（``now``）旧过 ``max_input_age_min`` 就不给（5 分钟
+        统计多给一段）。请求慢、限流等太久时，先取到的数会在这里被拦下。"""
         if self._max_age <= 0:
             return fields
         out: list[DossierField] = []
@@ -534,7 +550,6 @@ class DossierBuilder:
         """15 分钟线每轮重拉（含正在走的一根）：现价和滚动窗口的起点都从这里来。"""
         self._live = {}
         failed: list[str] = []
-        now_ms = int(now.timestamp() * 1000)  # 现价按运行时刻算 as_of（请求就在开跑后几秒内）
         for sym in dict.fromkeys(symbols):
             try:
                 rows = self._fetch(sym, "15m", BARS_15M)
@@ -543,7 +558,8 @@ class DossierBuilder:
             except Exception as exc:
                 failed.append(f"{sym}:{type(exc).__name__}")
                 continue
-            live = parse_live(rows, now_ms)
+            # 现价的 as_of = 这个请求取回来的时刻（不是开跑时刻），新鲜度检查才拦得住慢请求
+            live = parse_live(rows, int(self._fetched_at().timestamp() * 1000))
             if live is None:
                 failed.append(f"{sym}:no_forming_bar")
                 continue
@@ -655,7 +671,8 @@ class DossierBuilder:
         pos: list[float] = []
         for sym, v in live.items():
             start = v.now_ms - 24 * HOUR_MS
-            hist = [b for b in self._bars.get(sym, {}).values() if b.open_ms >= start]
+            # 含起点所在的那根 1h 线：区间覆盖完整 24 小时（最多多出不到 1 小时）
+            hist = [b for b in self._bars.get(sym, {}).values() if b.open_ms + HOUR_MS > start]
             if len(hist) < 20:
                 continue
             covered = max(b.open_ms for b in hist) + HOUR_MS  # 已收盘 1h 线覆盖到哪
@@ -667,8 +684,9 @@ class DossierBuilder:
             "pool_range_position_24h_median_pct",
             statistics.median(pos) if pos else None,
             "%",
-            "Median position of the current price inside each symbol's last-24h low-high range "
-            "(0 = at the low, 100 = at the high).",
+            "Median position of the current price inside each symbol's low-high range over at "
+            "least the last 24h (from the 1h bar containing the start; 0 = at the low, 100 = at "
+            "the high).",
             mirror="comp100",
             digits=1,
         )
@@ -925,7 +943,7 @@ class DossierBuilder:
     def _crowd_fields(
         self, sym: str, tag: str, out: list[DossierField], missing: dict[str, str]
     ) -> None:
-        """最新值取 5 分钟统计（as_of = 这一段结束）；z 值相对自身 7 天（1h 统计）的历史。"""
+        """最新值取 5 分钟统计（as_of = 时间戳，即段尾）；z 值相对自身 7 天（1h 统计）。"""
         name = f"{tag}_long_short_account"
         try:
             hist = self._series("globalLongShortAccountRatio", sym, "1h", 168)
@@ -934,7 +952,7 @@ class DossierBuilder:
             shorts = float(last["shortAccount"]) * 100
             ratios = [math.log(float(x["longShortRatio"])) for x in hist]
             ratios.append(math.log(float(last["longShortRatio"])))
-            ts = datetime.fromtimestamp(int(last["timestamp"]) / 1000, UTC) + PERIOD_5M
+            ts = _period_as_of(int(last["timestamp"]), self._fetched_at())
         except binance_gate.RateLimited:
             raise
         except Exception as exc:
@@ -991,7 +1009,7 @@ class DossierBuilder:
         try:
             rows = self._series("openInterestHist", sym, "5m", 289)
             vals = [float(x["sumOpenInterestValue"]) for x in rows]
-            ts = datetime.fromtimestamp(int(rows[-1]["timestamp"]) / 1000, UTC) + PERIOD_5M
+            ts = _period_as_of(int(rows[-1]["timestamp"]), self._fetched_at())
         except binance_gate.RateLimited:
             raise
         except Exception as exc:
@@ -1052,10 +1070,28 @@ class DossierBuilder:
                 for sym, rows in raw["bars"].items()
             }
             deep = {str(s) for s in raw.get("deep", [])}
+            seen = {str(s): int(t) for s, t in (raw.get("seen") or {}).items()}
         except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
             logger.warning("大盘台 1h K 线缓存读不了，重新回填：%s", exc)
             return
-        self._bars, self._deep = bars, deep & set(bars)
+        self._bars, self._deep, self._seen = bars, deep & set(bars), seen
+
+    def _prune_cache(self, keep: Sequence[str], now_ms: int) -> None:
+        """记下这一轮要的币；最近 ``CACHE_KEEP_DAYS`` 天都没要过的币从缓存删掉（旧缓存没有记录的
+        币从这一轮起算）。删了就落盘。"""
+        for sym in keep:
+            self._seen[sym] = now_ms
+        for sym in self._bars:
+            self._seen.setdefault(sym, now_ms)
+        cutoff = now_ms - CACHE_KEEP_DAYS * 24 * HOUR_MS
+        drop = [s for s, t in self._seen.items() if t < cutoff]
+        if not drop:
+            return
+        for sym in drop:
+            self._seen.pop(sym, None)
+            self._bars.pop(sym, None)
+            self._deep.discard(sym)
+        self._save_cache()
 
     def _save_cache(self) -> None:
         path = self._cache_path
@@ -1069,6 +1105,7 @@ class DossierBuilder:
                     s: [b.row() for _, b in sorted(bars.items())] for s, bars in self._bars.items()
                 },
                 "deep": sorted(self._deep),
+                "seen": dict(sorted(self._seen.items())),
             }
             tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
             os.replace(tmp, path)
@@ -1083,6 +1120,14 @@ def _plain_get(url: str, params: Mapping[str, Any] | None = None) -> httpx.Respo
     r = httpx.get(url, params=dict(params or {}), timeout=10.0)
     logger.debug("GET %s %.0fms", url, (time.monotonic() - started) * 1000)
     return r
+
+
+def _period_as_of(ts_ms: int, fetched: datetime) -> datetime:
+    """futures/data 5 分钟统计的 as_of：时间戳本身就是这一段的结束（快照时刻），不晚于取到的时刻。
+
+    实测（2026-10-28）：02:49:01 取到的最新一条是 02:45，02:51:54 取到的是 02:50——每条在时间戳
+    之后一两分钟就有了，不可能是一段的开始；以前按开始 + 5 分钟算，as_of 会落在未来。"""
+    return min(datetime.fromtimestamp(ts_ms / 1000, UTC), fetched)
 
 
 def _next_settlement(now: datetime) -> datetime:

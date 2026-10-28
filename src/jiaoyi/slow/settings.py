@@ -355,6 +355,12 @@ class MeetingConfig(_Strict):
         description="开 = 总盘会的池子概况另给一行滚动 60 分钟涨跌家数（1 分钟 K 线，截到开会"
         "这一刻，例如 10:54 开会就是 09:54–10:54）；池里每个币多 1 个公开请求。",
     )
+    lessons_scoring: Literal["raw", "excess"] = Field(
+        default="raw",
+        description="喂给会议的教训怎么给卡打分：raw = 会后一个持仓期的原始涨跌（山寨币另比 BTC，"
+        "现状）；excess = 和方向记分同口径，发布时刻起 4 小时、扣掉同期币池等权收益（读 "
+        "data/card_score/，不另拉 K 线）。",
+    )
     latest_market_regime: bool = Field(
         default=False,
         description="开 = 整轮里每个单币会开始时取当时最新发布的大盘判断（本轮中途 Flash 更新过"
@@ -690,9 +696,12 @@ class PricesConfig(_Strict):
 class MarketDeskSection(_Strict):
     """大盘台（``[market_desk]``，设计 2026-10-28）：独立判断「候选池等权组合未来 4 小时」
     涨 / 平 / 跌三项概率，方向由代码按门槛派生。模型 = DeepSeek V4.1 Flash（经 OpenRouter，
-    和开会同一个模型），每轮独立问 ``samples`` 次取平均。
+    和开会同一个模型），每轮独立问 ``samples`` 次，按 ``aggregation`` 合并。
 
     回滚注意：旧版本代码不认识这一段，会拒绝启动；回滚到没有大盘台的版本前先删掉整段。
+    回滚到没有 ``prior_mode`` / ``momentum_guidance`` / ``aggregation`` 的版本前，先删掉这三行；
+    面板改过的 ``band_sigma`` / ``call_p_min`` / ``call_edge_min`` / ``publish_min_gap_min`` 旧代码
+    认识，但留着会按改过的值跑，要回到原值就一起删掉。
     改这一段要重启才生效。"""
 
     mode: Literal["off", "replace"] = Field(
@@ -771,8 +780,27 @@ class MarketDeskSection(_Strict):
         default=0.5,
         gt=0.0,
         le=3.0,
-        description="「平」的宽度：|4 小时等权收益| ≤ 这个系数 × σ 算平。σ 由过去 sigma_lookback_h "
-        "个滚动 4 小时窗口算。实测期内不调。",
+        description="「平」的宽度：|等权收益| ≤ 这个系数 × σ 算平（4h、1h 各用自己的 σ，"
+        "σ 由过去 sigma_lookback_h 个滚动窗口算）。数据包里的基础率、日志里记分用的 "
+        "flat_band_pct、提示词里的分类都按它，改了下一轮全部按新宽度重算。"
+        "0.5σ 时 30 天基础率「平」约占一半；Demo 推荐 0.3（三类约各占三分之一）。",
+    )
+    prior_mode: Literal["anchor", "context", "off"] = Field(
+        default="anchor",
+        description="提示词怎么用先验（基础率）：anchor = 从基础率出发、证据弱就贴着它"
+        "（「平」常是众数，回答容易一直中性）；context = 基础率只是输入之一，"
+        "明说不要默认它；off = 提示词里不给基础率（数据包和记分照样有）。Demo 推荐 context。",
+    )
+    momentum_guidance: bool = Field(
+        default=False,
+        description="提示词里加几句（涨跌成对、中立）：怎样按近 15 分钟 / 1 / 4 小时等权收益、"
+        "涨跌家数和 BTC 的同向程度更新概率。Demo 推荐开。",
+    )
+    aggregation: Literal["mean", "median", "trimmed", "logodds"] = Field(
+        default="mean",
+        description="几次回答怎么合成一组概率（每项分别合再归一）：mean = 平均；median = 中位数；"
+        "trimmed = 去掉最高、最低各一个再平均；logodds = 对数平均（几次都同意的一项被放大）。"
+        "平均本身不往「平」收：每项的平均就是各次的平均，涨跌差也是各次的平均。",
     )
     sigma_lookback_h: int = Field(
         default=168, ge=24, le=336, description="算 σ 用过去多少个滚动窗口（小时）。"
@@ -843,6 +871,28 @@ class MarketDeskSection(_Strict):
         "as_of 比"
         "运行时刻旧过这么多分钟就不给模型（写进缺失原因）；5 分钟统计的数再多给 5 分钟。0 = 不查。"
         "σ、基础率（已收盘 1h 线上的统计量）和恐慌贪婪（日值）不按这个拦。",
+    )
+    publish_intra: bool = Field(
+        default=False,
+        description="大盘也告诉各币会议 4 小时之内的行情：开着时，各币会议的大盘说明和"
+        "面板「最新大盘判断」在 4 小时判断后面再带两段——大盘台最近一轮的"
+        "「未来 1 小时概率」和代码按行情写的「短线现状」（池 15 分钟 / 1 小时等权涨跌和"
+        "涨跌家数、BTC 15 分钟 / 1 小时、1 小时主动买卖占比）。短线现状按 intra_refresh_s "
+        "在两轮之间刷新，数据旧过 max_input_age_min 就写「缺失」。不多调模型、不改 4 小时"
+        "方向和发布节奏。false = 和以前一样。",
+    )
+    keeper_intra: bool = Field(
+        default=False,
+        description="管家复查快照也带同一段「4 小时之内」（current_market.within_4h）。和 "
+        "publish_intra 分开：管家的判断门槛是在没有这项输入时定的，打开前先单独验证。",
+    )
+    intra_refresh_s: float = Field(
+        default=60.0,
+        ge=0.0,
+        le=900.0,
+        description="两轮大盘台之间多久刷新一次「短线现状」（秒）：用大盘翻转检查每分钟已经取到"
+        "的 1 分钟收盘价重算池和 BTC 的涨跌，不另发请求、不调模型（大盘翻转检查没开时不刷新）。"
+        "主动买卖占比只在大盘台每轮取。0 = 只在大盘台每轮更新。",
     )
     exclude_symbols: tuple[str, ...] = Field(
         default=("PAXGUSDT", "XAUTUSDT"),
@@ -922,6 +972,7 @@ class SlowConfig(_Strict):
             stale_on_arrival_action=m.stale_on_arrival_action,
             input_time_labels=m.input_time_labels,
             market_table_rolling=m.market_table_rolling,
+            lessons_scoring=m.lessons_scoring,
         )
 
     def screener_config(

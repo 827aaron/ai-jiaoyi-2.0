@@ -15,6 +15,8 @@ from jiaoyi.contracts import Alert, AlertLevel, Health, Role
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.execution.fills import TradeFill
+from jiaoyi.execution.hb_executor import _open_text
+from jiaoyi.execution.registry import ServerProtection
 from jiaoyi.execution.user_stream import mask
 from jiaoyi.patrol.rules import RulePatrol
 from tests.fastloop_helpers import FAST
@@ -77,6 +79,25 @@ async def test_open_and_close_push_plain_text(tmp_path: Path) -> None:
     assert closed.title == "平仓完成" and "止盈" in closed.body
     assert "毛利 +2.50 U，手续费 0.50 U，净利 +2.00 U" in closed.body
     assert "持仓 1 小时 15 分" in closed.body
+
+
+async def test_open_text_names_who_places_a_missing_lifeboat(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, notices=True)
+    pid = await open_filled(rig)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    bare = tracked.model_copy(
+        update={"record": tracked.record.model_copy(update={"lifeboat": None})}
+    )
+    assert _open_text(bare).endswith("保命止损还没挂上，对账员会补挂")
+    hosted = bare.model_copy(
+        update={
+            "server_protection": ServerProtection(
+                account_name="a", connector_name="c", intended_quantity=1.0
+            )
+        }
+    )
+    assert _open_text(hosted).endswith("保命单稍后由托管保护补挂")
 
 
 async def test_notices_carry_their_kind(tmp_path: Path) -> None:

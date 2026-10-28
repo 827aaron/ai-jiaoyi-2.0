@@ -196,6 +196,7 @@ class _TakesVenue(Protocol):
 @runtime_checkable
 class _TakesUntradeable(Protocol):
     def set_untradeable(self, untradeable: Mapping[str, str]) -> None: ...
+    def card_symbols(self) -> set[str]: ...
 
 
 @runtime_checkable
@@ -717,6 +718,7 @@ def build_modules(
             current_market=(lambda: cards.latest_market_view)
             if isinstance(cards, BattleCardCommander)
             else None,
+            market_intra=cards.keeper_intra if isinstance(cards, BattleCardCommander) else None,
             observation_source=features.diagnostic_observation if observations else None,
             observation_sink=observations.offer if observations else None,
             opposite_state_path=Path(app_cfg.data_dir) / "keeper_opposite.json",
@@ -1010,8 +1012,7 @@ class App:
         gone: dict[str, str] = {}
         unavailable = getattr(self.lot_rules, "unavailable", None)
         if self.slow_cfg.screener.exclude_untradeable and callable(unavailable):
-            card = cards.current(now) if hasattr(cards, "current") else None
-            syms = {s.symbol for s in card.symbols} if card is not None else set()
+            syms = cards.card_symbols()
             gone = unavailable(syms) or {} if syms else {}
         cards.set_untradeable(gone)
 
