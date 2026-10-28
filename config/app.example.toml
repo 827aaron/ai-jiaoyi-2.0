@@ -210,7 +210,7 @@ against_meeting_gap_s = 3600      # 同一个币 60 分钟内最多申请 1 次
 # 管家助手：有持仓的币出了反向信号（可选：价格朝不利方向穿过关键位），赚钱亏钱都算，同时问 Jev（A）和模型 B
 # 同一道是非题（持空「会上涨吗」、持多「会下跌吗」，不提仓位和原因），两个都答「是」且 p(是) ≥ min_p 才平仓。以下均可热更新
 keeper_assistant_on = false
-# keeper_assistant_b_model = "…"  # 模型 B 的 id（经 OpenRouter）；不写 = 没有 B，一律不平
+# keeper_assistant_b_model = "microsoft/microsoft-decision-1"  # 模型 B（经 OpenRouter Decisions 接口）；不写 = 没有 B，一律不平
 keeper_assistant_min_p = 0.6
 keeper_assistant_horizon = "1–4 小时"
 keeper_assistant_timeout_s = 8.0  # 两个模型合起来最多等几秒，超时不平

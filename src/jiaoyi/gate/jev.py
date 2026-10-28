@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any, Literal, Protocol
 
+import httpx
+
 from jiaoyi.contracts import (
     FastLoopConfig,
     Health,
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 JEV_KEY_NAME = "JEV_API_KEY"
 OPENROUTER_KEY_NAME = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"  # SDK 自己拼 /v1/systemone
+OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 PROVIDER_KEYS = {"typesafe": JEV_KEY_NAME, "openrouter": OPENROUTER_KEY_NAME}
 
 
@@ -129,6 +132,79 @@ class TypeSafeTransport:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class OpenRouterDecisionsTransport:
+    """经 OpenRouter 的 Decisions 路由（``POST /api/alpha/decisions``）问 choice 题。
+
+    微软的 Microsoft-Decision-1 挂在这条路由上；TypeSafe SDK 只会拼 ``/v1/systemone``。请求和
+    回答的形状和 SystemOne 一样（state + 带 type/criteria 的题目，回答在
+    ``answers[题号].probabilities``）。SDK 的路径写死了，所以这里直接用 httpx。"""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        url: str = OPENROUTER_DECISIONS_URL,
+        http_transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._key = api_key
+        self._model = model
+        self._url = url
+        self._http = httpx.AsyncClient(transport=http_transport)
+
+    async def evaluate(
+        self, state: str, questions: Sequence[JevQuestion], timeout_s: float
+    ) -> RawJevResult:
+        body = {
+            "model": self._model,
+            "state": state,
+            "questions": {
+                q.id: {
+                    "type": "choice",
+                    "instructions": q.prompt,
+                    # 选项按 q.choices 的顺序写进 JSON：模型 B 的倒序选项靠它
+                    "criteria": {c: CRITERIA.get(q.id, {}).get(c) for c in q.choices},
+                }
+                for q in questions
+            },
+        }
+        r = await self._http.post(
+            self._url,
+            json=body,
+            headers={"Authorization": f"Bearer {self._key}"},
+            timeout=timeout_s,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"OpenRouter Decisions HTTP {r.status_code}: {r.text[:200]}")
+        data = r.json()
+        answers = data.get("answers") if isinstance(data, dict) else None
+        if not isinstance(answers, dict):
+            raise ValueError(f"回答里没有 answers：{str(data)[:200]}")
+        probs: dict[str, dict[str, float]] = {}
+        for q in questions:
+            a = answers.get(q.id)
+            p = a.get("probabilities") if isinstance(a, dict) else None
+            if not isinstance(p, dict):
+                raise ValueError(f"题目 {q.id} 没有 probabilities：{str(a)[:200]}")
+            probs[q.id] = {str(k): float(v) for k, v in p.items()}
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        cost = usage.get("cost")
+        tin, tout = usage.get("input_tokens"), usage.get("output_tokens")
+        rid = data.get("id")
+        return RawJevResult(
+            model=str(data.get("model") or self._model),
+            probs=probs,
+            input_tokens=tin if isinstance(tin, int) else 0,
+            output_tokens=tout if isinstance(tout, int) else 0,
+            reasoning_tokens=_reasoning_tokens(usage),
+            request_id=rid if isinstance(rid, str) else None,
+            cost_usd=float(cost) if isinstance(cost, int | float) and cost >= 0 else None,
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
 
 @dataclass
