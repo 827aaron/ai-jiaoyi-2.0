@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,10 @@ from typing import Any
 import httpx
 import pytest
 
-from jiaoyi.contracts import SizeTier, SymbolPoolEntry
+from jiaoyi.contracts import BattleCard, SizeTier, SymbolPoolEntry
 from jiaoyi.slow import market_table
 from jiaoyi.slow.binance_stats import BinanceStatsSource
-from jiaoyi.slow.commander import TierRules
+from jiaoyi.slow.commander import PickResult, TierRules
 from jiaoyi.slow.market_log import MarketLog, pool_rows, round_id
 from jiaoyi.slow.screener import (
     CodeSymbolScreener,
@@ -309,6 +310,93 @@ async def test_always_candidate_joins_candidates_and_does_not_use_mid_slots(
     assert sizes["BBUSDT"] is SizeTier.S
     saved = json.loads((tmp_path / "mid.json").read_text(encoding="utf-8"))
     assert saved["mid"] == ["BBUSDT", "CCUSDT"]  # 固定币不在中间档当天名单里
+
+
+class _SeenEngine(FakeEngine):
+    """Flash never picks BTC / ETH; records what it was offered."""
+
+    def __init__(self, picks: list[str]) -> None:
+        super().__init__(picks)
+        self.offered: list[list[str]] = []
+        self.rooms: list[int] = []
+
+    async def pick(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
+    ) -> PickResult:
+        self.offered.append([e.symbol for e in candidates])
+        self.rooms.append(max_n)
+        return await super().pick(candidates, max_n, previous, pool)
+
+
+def _majors_pool(now: datetime) -> Any:
+    return cpool(
+        now,
+        centry("AAUSDT", tier="head"),
+        centry("BBUSDT", tier="head"),
+        centry("CCUSDT", tier="head"),
+        _always(centry("BTCUSDT", tier="mid")),
+        _always(centry("ETHUSDT", tier="tail")),
+    )
+
+
+def _meet_round(
+    tmp_path: Path, now: datetime, *, meet: bool, **kw: Any
+) -> tuple[_SeenEngine, Any, list[datetime]]:
+    eng = _SeenEngine(["AAUSDT", "BBUSDT", "CCUSDT"])
+    rules = TierRules(enabled=True, always_meet=meet)
+    c, _, clock = make(tmp_path, eng, now, tiers=rules, pick_max=2, **kw)
+    return eng, c, clock
+
+
+async def test_always_candidates_meet_off_leaves_unpicked_majors_without_a_meeting(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng, c, _ = _meet_round(tmp_path, now, meet=False)
+    card = await c.refresh(_majors_pool(now), "scheduled")
+    assert eng.offered == [["AAUSDT", "BBUSDT", "CCUSDT", "BTCUSDT", "ETHUSDT"]]
+    assert eng.rooms == [2]
+    assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT"]
+    assert {s.symbol for s in card.symbols} == {"AAUSDT", "BBUSDT"}
+
+
+async def test_always_candidates_meet_on_meets_majors_every_round_outside_the_pick_slots(
+    tmp_path: Path, now: datetime
+) -> None:
+    live, mm = tmp_path / "live", MarketLog(tmp_path / "mm")
+    eng, c, clock = _meet_round(tmp_path, now, meet=True, live_dir=live, market_log=mm)
+    card = await c.refresh(_majors_pool(now), "scheduled")
+    assert eng.offered == [["AAUSDT", "BBUSDT", "CCUSDT"]]
+    assert eng.rooms == [2]
+    assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT", "BTCUSDT", "ETHUSDT"]
+    assert {s.symbol for s in card.symbols} == {"AAUSDT", "BBUSDT", "BTCUSDT", "ETHUSDT"}
+    assert eng.briefs["BTCUSDT"] == ("区间震荡", "")
+    doc = json.loads((live / "_MARKET.json").read_text(encoding="utf-8"))
+    assert "BTCUSDT：每轮直接开会（设置），不经挑选" in doc["steps"][2]["text"]
+    assert "ETHUSDT：每轮直接开会（设置）" in doc["steps"][1]["text"]
+    row = json.loads((tmp_path / "mm" / f"{now:%Y-%m-%d}.jsonl").read_text("utf-8"))
+    assert row["direct_meet"] == ["BTCUSDT", "ETHUSDT"]
+    assert row["picked"] == ["AAUSDT", "BBUSDT"]
+    btc = next(x for x in row["pool"] if x["symbol"] == "BTCUSDT")
+    assert (btc["pick"], btc["reason"]) == (True, "每轮直接开会（设置）")
+
+    clock[0] = now + timedelta(hours=3)
+    eng.analyzed.clear()
+    await c.refresh(_majors_pool(clock[0]), "scheduled")
+    assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT", "BTCUSDT", "ETHUSDT"]
+
+
+async def test_always_candidates_meet_skips_a_coin_the_venue_cannot_trade(
+    tmp_path: Path, now: datetime
+) -> None:
+    eng, c, _ = _meet_round(tmp_path, now, meet=True)
+    c.set_untradeable({"ETHUSDT": "SETTLING"})
+    await c.refresh(_majors_pool(now), "scheduled")
+    assert eng.offered == [["AAUSDT", "BBUSDT", "CCUSDT", "ETHUSDT"]]
+    assert sorted(eng.analyzed) == ["AAUSDT", "BBUSDT", "BTCUSDT"]
 
 
 # ---------------------------------------------------------------- 候选表和池子概况

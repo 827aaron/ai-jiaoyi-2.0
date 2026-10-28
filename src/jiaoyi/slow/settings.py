@@ -108,6 +108,12 @@ class TiersSection(_Strict):
         description="每轮都进总盘会候选的币：过了硬门槛就进池，不算头部、不占中间档每天的名额。"
         "总盘会照样按数字决定挑不挑；写币名，不带 USDT。",
     )
+    always_candidates_meet: bool = Field(
+        default=False,
+        description="打开 = 上面这些币每轮不经总盘会挑选，直接开单币会议"
+        "（会议自己定做多 / 做空 / 不做），"
+        "不占每轮的挑币名额；执行交易所上不在交易的币照样不开。关掉 = 照旧由总盘会决定挑不挑。",
+    )
 
     @field_validator("always_candidates", mode="before")
     @classmethod
@@ -1065,6 +1071,7 @@ class SlowConfig(_Strict):
                 enabled=self.screener.tiers.enabled,
                 mid_daily_pick=self.screener.tiers.mid_daily_pick,
                 mid_size_max=SizeTier(self.screener.tiers.mid_size_max),
+                always_meet=self.screener.tiers.always_candidates_meet,
             ),
             "fail_backoff": tuple(timedelta(minutes=m) for m in self.budget.fail_backoff_minutes),
             "latest_market_regime": self.meeting.latest_market_regime,

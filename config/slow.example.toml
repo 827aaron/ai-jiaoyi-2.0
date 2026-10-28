@@ -18,6 +18,7 @@ span_sigma = 1.5      # 关键位范围 = 系数 × 该币 ATR × √(持仓时�
 # mid_daily_pick = 5               # 中间档每天（曼谷日）最多挑几个交易
 # mid_size_max = "S"               # 中间档仓位档位最大封到哪一档
 # always_candidates = ["BTC", "ETH"]  # 每轮都进总盘会候选的币（过了硬门槛就进池，不算头部、不占中间档名额）
+# always_candidates_meet = false   # true = 上面这些币每轮不经挑选直接开单币会议（不占挑币名额）；false = 由总盘会决定挑不挑
 # 美股类别（us_events / us_open_bonus 写在下面 [screener] 里）：开盘期间加分，财报日前后标注
 # 按类别开关和每类上限（选币页上的设置优先于这里）：
 # [screener.categories.us_tech]
