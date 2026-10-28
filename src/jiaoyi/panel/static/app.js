@@ -2510,6 +2510,7 @@ const PLAIN = {
   protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
   protection_leg_order: "新仓三条腿先挂哪条：lifeboat_first 保命单在前（原行为）/ stop_first 止损在前，止损确认后保命单挂失败在未托管宽限内重试、不立即平仓",
   hosted_close_mode: "托管仓平仓顺序：hb_first 先停 HB、等它结束再直连平仓（原行为）/ direct 先按持久化单号下只减仓市价单再只停不平 HB，止损挂到确认零仓；状态不明照旧 hb_first",
+  protection_tick_alert_after: "后台保护轮同一笔仓连续失败几轮才发紧急告警（1 = 每轮都发）",
   protection_trailing_book_mark_max_dev_bps: "移动止损：买一高过（空仓：卖一低过）标记价几基点当插针，不更新峰值（0 = 不比对，不建议）",
   protection_trailing_stop_mark_buffer_bps: "移动止损：新止损至少离标记价几基点（在正确一侧）才挂，否则这轮不换",
   protection_trailing_min_step_bps: "移动止损：至少收紧几基点才撤旧挂新（0 = 一变就换）",

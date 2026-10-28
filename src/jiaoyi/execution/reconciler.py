@@ -40,6 +40,7 @@ from jiaoyi.contracts.position import (
     ReconcileIssueKind,
 )
 from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
     STOP_PREFIX,
     CloseFill,
@@ -149,7 +150,11 @@ class ThreeWayReconciler:
         executor_stop_retry_rounds: int = 0,
         opening_grace_s: float = 0.0,
         closing_grace_s: float = 0.0,
+        clock: Clock = utc_now,
     ) -> None:
+        """``clock``：决策记录的写入时刻。一轮对账要几十秒，记录按写入时刻排进时间线，
+        这一轮开始的时刻另记在 ``output.tick_at``。"""
+        self._clock = clock
         self._opening_grace_s = opening_grace_s
         self._closing_grace_s = closing_grace_s
         self._closing_now: set[str] = set()
@@ -218,7 +223,12 @@ class ThreeWayReconciler:
             "reconcile",
         )
         if self._rec is not None:
-            self._rec.record(now, Outcome.ERROR, f"对账失败{rounds}：{e!r}")
+            self._rec.record(
+                self._clock(),
+                Outcome.ERROR,
+                f"对账失败{rounds}：{e!r}",
+                output={"tick_at": now.isoformat()},
+            )
             self._rec.heartbeat(now, Health.DOWN, "连不上 hummingbot-api 或币安")
 
     def configure_issue_grace(self, opening_s: float, closing_s: float) -> None:
@@ -662,12 +672,12 @@ class ThreeWayReconciler:
             else:
                 outcome = Outcome.ACTION if issue.fixed else Outcome.ERROR
             self._rec.record(
-                now,
+                self._clock(),
                 outcome,
                 f"{_TITLES[issue.kind]}{'，已处理' if issue.fixed else ''}：{issue.detail}",
                 symbol=issue.symbol,
                 position_id=issue.position_id,
-                output={"kind": issue.kind.value, "fixed": issue.fixed}
+                output={"kind": issue.kind.value, "fixed": issue.fixed, "tick_at": now.isoformat()}
                 | ({"informational": True} if issue.informational else {}),
             )
 
@@ -942,12 +952,12 @@ class ThreeWayReconciler:
             finish_resolution(root, path, req, applied, text, removed)
             if self._rec is not None:
                 self._rec.record(
-                    now,
+                    self._clock(),
                     Outcome.ACTION if applied else Outcome.ERROR,
                     f"人工结束平仓意图{'已执行' if applied else '未执行'}：{text}",
                     symbol=req.symbol,
                     input=req.model_dump(mode="json"),
-                    output={"applied": applied, "removed": removed},
+                    output={"applied": applied, "removed": removed, "tick_at": now.isoformat()},
                 )
             await self._send(
                 now,

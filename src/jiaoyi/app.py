@@ -489,6 +489,7 @@ def _build_execution(
             ),
             protection_leg_order=app_cfg.protection_leg_order,
             hosted_close_mode=app_cfg.hosted_close_mode,
+            protection_tick_alert_after=app_cfg.protection_tick_alert_after,
             position_mode_cache_s=app_cfg.position_mode_cache_s,
         )
     except MissingSecret:

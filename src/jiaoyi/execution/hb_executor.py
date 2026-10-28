@@ -174,6 +174,15 @@ def _open_text(tracked: TrackedPosition) -> str:
     return "\n".join(lines)
 
 
+def _tick_error_detail(error: BaseException) -> str:
+    """异常本身没有文字时（ccxt / httpx 包装常见），补上触发它的那个异常。"""
+    detail = describe_error(error)
+    context = error.__context__
+    if error.__cause__ is None and context is not None and not error.__suppress_context__:
+        detail = f"{detail} <- {type(context).__name__}: {context}"[:300]
+    return detail
+
+
 def _close_text(r: PositionRecord) -> str:
     """平仓完成的推送：原因、毛利 / 手续费 / 净利、持仓时长。"""
     reason = _REASON_CN.get(r.close_reason, "未知") if r.close_reason else "未知"
@@ -343,11 +352,15 @@ class HbExecutorAdapter:
         frozen_peak_exit_on: bool = False,
         frozen_peak_exit_after_s: int = 3600,
         hosted_close_mode: HostedCloseMode = "hb_first",
+        protection_tick_alert_after: int = 1,
     ) -> None:
         """``hosted_close_mode``：交易所托管仓的平仓顺序。``hb_first`` = 先停 HB 执行器、等它终态并
         核完条件单再下直连平仓（原行为）；``direct`` = 我方决定平仓、HB 执行器仍在跑且没有自己的
         平仓单、保护腿状态都明确时，先按持久化的直连 CID 下只减仓市价单，再只停不平 HB，交易所止损
         一直挂到确认零仓后才撤。其余情况照旧走 ``hb_first``。
+
+        ``protection_tick_alert_after``：同一仓的后台保护轮连续失败几轮才发紧急告警，之前只记
+        日志；1 = 每轮失败都发（原行为）。
 
         ``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
 
@@ -363,6 +376,10 @@ class HbExecutorAdapter:
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
         self._flat_awaiting_cleanup: set[str] = set()
         self._hb_stop_sent: set[str] = set()
+        if protection_tick_alert_after < 1:
+            raise ValueError("protection_tick_alert_after 至少为 1")
+        self._tick_alert_after = protection_tick_alert_after
+        self._tick_failures: dict[str, int] = {}
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -793,9 +810,12 @@ class HbExecutorAdapter:
             realized_pnl_usdt=pnl,
             fees_usdt=fee,
         )
+        detail = tracked.close_detail if reason is CloseReason.RECONCILER else None
         self._record(
             Outcome.CLOSE,
-            f"{rec.symbol} 直连平仓（{reason.value}），净盈亏 "
+            f"{rec.symbol} 直连平仓（{reason.value}"
+            + (f"：{detail}" if detail else "")
+            + "），净盈亏 "
             + (f"{pnl:+.2f}U" if pnl is not None else "未知")
             + ("（平仓价为估算）" if fill is not None and fill.estimated else ""),
             tracked.record,
@@ -805,8 +825,18 @@ class HbExecutorAdapter:
                 "direct": True,
                 "fees_known": fill is not None and fill.fee_usdt is not None,
                 "estimated": bool(fill is not None and fill.estimated),
-            },
+            }
+            | ({"detail": detail} if detail else {}),
         )
+
+    def _note_close_detail(self, tracked: TrackedPosition, detail: str) -> TrackedPosition:
+        """只记第一次的原因：之后几轮重试平仓不覆盖当初为什么要平。"""
+        current = self._registry.get(tracked.record.position_id) or tracked
+        if current.close_detail is not None:
+            return current
+        current = current.model_copy(update={"close_detail": detail[:300]})
+        self._registry.put(current)
+        return current
 
     def mark_failed(self, position_id: str) -> None:
         tracked = self._registry.get(position_id)
@@ -1549,6 +1579,8 @@ class HbExecutorAdapter:
         self._flat_awaiting_cleanup.discard(rec.position_id)
         if closed is not None:
             body = _close_text(closed.record)
+            if closed.record.close_reason is CloseReason.RECONCILER and closed.close_detail:
+                body += f"\n原因：{closed.close_detail}"
             if hosted_normal:
                 body += "\n" + self._hosted_close_cause(tracked, ours, legs)
             await self._notice("平仓完成", body, closed.record, "closed")
@@ -1618,17 +1650,30 @@ class HbExecutorAdapter:
                 if current.record.status is PositionStatus.OPEN:
                     await self._update_server_trailing(pid)
             except TrailingBookUnavailable as error:
+                self._tick_failures.pop(pid, None)  # 同步已成功，只是盘口不可用；另有告警
                 await self._alert_trailing_book(pid, initial.record.symbol, error)
             except Exception as error:
-                await self._alert(
-                    AlertLevel.CRITICAL,
-                    "托管保护本轮未确认",
-                    f"{initial.record.symbol} {pid}：{describe_error(error)}；"
-                    "保留最后确认保护并等待核验",
-                    initial.record.symbol,
-                    f"server_tick:{pid}",
-                    kind="order_failed",
-                )
+                await self._protection_tick_failed(pid, initial.record.symbol, error)
+            else:
+                self._tick_failures.pop(pid, None)
+
+    async def _protection_tick_failed(self, pid: str, symbol: str, error: Exception) -> None:
+        """连续失败到 ``protection_tick_alert_after`` 轮才发紧急告警，之前只记日志。"""
+        rounds = self._tick_failures.get(pid, 0) + 1
+        self._tick_failures[pid] = rounds
+        detail = _tick_error_detail(error)
+        if rounds < self._tick_alert_after:
+            log.warning("托管保护本轮未确认（第 %d 轮）%s：%s", rounds, pid, detail)
+            return
+        streak = f"连续 {rounds} 轮，" if self._tick_alert_after > 1 else ""
+        await self._alert(
+            AlertLevel.CRITICAL,
+            "托管保护本轮未确认",
+            f"{symbol} {pid}：{streak}{detail}；保留最后确认保护并等待核验",
+            symbol,
+            f"server_tick:{pid}",
+            kind="order_failed",
+        )
 
     async def _alert_stop_clamped(self, pid: str, symbol: str, text: str) -> None:
         """止损目标已越过标记价：被夹到可挂的最紧价，或本轮没换。价格已经穿过想要的止损位。"""
@@ -2072,6 +2117,9 @@ class HbExecutorAdapter:
                 status=PositionStatus.CLOSING,
                 requested_close=CloseReason.RECONCILER,
             )
+            tracked = self._note_close_detail(
+                tracked, f"托管保护未完整确认，不在未托管宽限内：{describe_error(error)}"
+            )
             await self._close_directly(tracked, CloseReason.RECONCILER, None)
             return self._registry.get(rec.position_id) or tracked
         if result in {"exit", "flat"}:
@@ -2363,6 +2411,7 @@ class HbExecutorAdapter:
             tracked = self._set(
                 tracked, status=PositionStatus.CLOSING, requested_close=CloseReason.RECONCILER
             )
+            tracked = self._note_close_detail(tracked, "HB 报告了另一张开仓单")
             await self._close_directly(tracked, CloseReason.RECONCILER, None)
             return self._registry.get(rec.position_id) or tracked
         if (

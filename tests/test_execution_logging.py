@@ -273,3 +273,31 @@ async def test_unfixed_reconcile_issue_is_logged_as_error(tmp_path: Path) -> Non
     assert r.outcome is Outcome.ERROR and r.symbol == "ETHUSDT"
     status = read_statuses(tmp_path / "data")["reconciler"]
     assert status.health.value == "degraded"
+
+
+async def test_reconcile_record_uses_write_time_and_keeps_tick_start(tmp_path: Path) -> None:
+    clk, api, ex = Clk(), FakeHbApi(), FakeExchange()
+    log = JsonlDecisionLog(tmp_path / "data")
+    registry = PositionRegistry(tmp_path / "positions.json")
+    lifeboat = BinanceLifeboat(ex, clock=clk)
+    adapter = HbExecutorAdapter(
+        api, lifeboat, registry, StubAlerter(), account_name="acct", connector_name="c", clock=clk
+    )
+    reconciler = ThreeWayReconciler(
+        adapter,
+        api,
+        ex,
+        lifeboat,
+        registry,
+        StubAlerter(),
+        account_name="acct",
+        recorder=RoleRecorder(Role.RECONCILER, log),
+    )
+    from jiaoyi.contracts import Side
+
+    ex.set_position("ETHUSDT", Side.LONG, 2.0)
+    tick = clk.t
+    await reconciler.reconcile(tick)  # 一轮对账很慢：记录按写入时刻排进时间线
+    (r,) = [x for x in read_records(tmp_path / "data") if x.role is Role.RECONCILER]
+    assert r.ts > tick
+    assert r.output["tick_at"] == tick.isoformat()

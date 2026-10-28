@@ -1305,6 +1305,14 @@ class AppConfig(Contract):
         "下只减仓市价单，再只停不平 HB；交易所止损一直挂到确认零仓后才撤。"
         "不满足条件的照旧走 hb_first；提交结果未知照旧只查不重发。改后重启生效。",
     )
+    protection_tick_alert_after: int = Field(
+        default=1,
+        ge=1,
+        le=100,
+        description="Demo 托管保护：后台每秒一轮的保护核验，同一笔仓连续失败这么多轮才发紧急告警"
+        "「托管保护本轮未确认」，之前只记日志；成功一轮就重新计数。1 = 每轮失败都发（原行为）。"
+        "改后重启生效。",
+    )
     protection_stop_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
         description="Demo 托管保护：止损（含移动止损）按什么价触发。CONTRACT_PRICE = 最新成交价"

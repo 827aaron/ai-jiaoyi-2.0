@@ -201,23 +201,25 @@ class TrackedPosition(BaseModel):
     direct_close_fee: float | None = None
     direct_first: bool = False
     """这次平仓走了 ``direct``：先下直连、后停 HB。"""
+    close_detail: str | None = None
+    """程序自己决定平仓（reconciler 等）的具体原因，写进平仓记录和推送；None = 只有平仓原因。"""
     chase: OrderIntent | None = None
     """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
     server_protection: ServerProtection | None = None
     frozen_peak_exit: FrozenPeakExit | None = None
 
     @model_serializer(mode="wrap")
-    def _omit_unused_direct_first(
+    def _omit_in_flight_close_fields(
         self, handler: SerializerFunctionWrapHandler
     ) -> dict[str, object]:
-        # 只在平仓进行中落盘：没走过 direct 的仓和已结束的仓与加字段之前一致，
+        # 只在平仓进行中落盘：没用到这两项的仓和已结束的仓与加字段之前一致，
         # 回退旧代码（extra="forbid"）仍能读。
         data: dict[str, object] = handler(self)
-        if not self.direct_first or self.record.status in (
-            PositionStatus.CLOSED,
-            PositionStatus.FAILED,
-        ):
+        ended = self.record.status in (PositionStatus.CLOSED, PositionStatus.FAILED)
+        if not self.direct_first or ended:
             data.pop("direct_first", None)
+        if self.close_detail is None or ended:
+            data.pop("close_detail", None)  # 已写进平仓记录和推送
         return data
 
 
