@@ -1258,6 +1258,29 @@ class BracketManager:
         )
         return changed
 
+    def legs_quiet(self, pid: str) -> bool:
+        """每条腿都是最后回读明确在挂（NEW、未触发）或从未生效；不发网络请求。"""
+        _, state = self._current(pid)
+        return all(
+            _live(leg)
+            or leg.state in {"planned", "superseded", "rejected"}
+            or (leg.state == "cancelled" and not _triggered(leg) and _settled(leg))
+            for leg in state.legs
+        )
+
+    def leg_fills(self, pid: str) -> list[tuple[CloseReason, float]]:
+        """已触发且子单有成交的腿：(按哪条腿退出, 成交量)；只看最后回读，不发网络请求。"""
+        _, state = self._current(pid)
+        return [
+            (_reason(leg), leg.filled_quantity)
+            for leg in state.legs
+            if _triggered(leg) and leg.filled_quantity is not None and leg.filled_quantity > 0
+        ]
+
+    def mark_exiting(self, pid: str) -> None:
+        """进入退出：之后不再换代、不再观测移动止损；已挂的腿原样保留。"""
+        self._save(pid, stage="exiting", trailing_last_error=None, trailing_failing_since=None)
+
     async def prepare_exit(self, pid: str) -> bool:
         tracked, _ = self._current(pid)
         try:

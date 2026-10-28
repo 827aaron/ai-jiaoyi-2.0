@@ -50,6 +50,7 @@ from jiaoyi.execution.exchange import (
     ExchangeError,
     ExchangePosition,
     ExecutionBook,
+    IdentifiedCloseNotSent,
     IdentifiedCloseOrder,
     IdentifiedCloseRejected,
     IdentifiedCloseUnknown,
@@ -78,6 +79,8 @@ log = logging.getLogger(__name__)
 
 # hummingbot 的 OrderType 枚举值
 _ORDER_MARKET = 1
+HostedCloseMode = Literal["hb_first", "direct"]
+_HB_FAILED_TITLE = "hummingbot 没能平掉仓位，已直连币安平仓"
 _ORDER_LIMIT = 2
 _ORDER_LIMIT_MAKER = 3
 """hummingbot OrderType.LIMIT_MAKER：只挂单（post-only），挂单等回踩进场用。"""
@@ -339,8 +342,14 @@ class HbExecutorAdapter:
         protection: BracketManager | None = None,
         frozen_peak_exit_on: bool = False,
         frozen_peak_exit_after_s: int = 3600,
+        hosted_close_mode: HostedCloseMode = "hb_first",
     ) -> None:
-        """``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
+        """``hosted_close_mode``：交易所托管仓的平仓顺序。``hb_first`` = 先停 HB 执行器、等它终态并
+        核完条件单再下直连平仓（原行为）；``direct`` = 我方决定平仓、HB 执行器仍在跑且没有自己的
+        平仓单、保护腿状态都明确时，先按持久化的直连 CID 下只减仓市价单，再只停不平 HB，交易所止损
+        一直挂到确认零仓后才撤。其余情况照旧走 ``hb_first``。
+
+        ``tick_size``：合约的价格最小变动（限价止盈取整用），拿不到返回 None。
 
         ``open_fee_bps``：开仓手续费（单边吃单费）。hummingbot 按「扣了开仓手续费的净盈亏」
         触发止损止盈，传过去时补上这一截，让实际触发价离开仓价的距离 = 风控算的止损 / 止盈距离。"""
@@ -349,6 +358,11 @@ class HbExecutorAdapter:
         if protection is not None:
             protection.notify_stop_clamped = self._alert_stop_clamped
             protection.notify_trigger_rejected = self._alert_trigger_rejected
+        if hosted_close_mode not in ("hb_first", "direct"):
+            raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
+        self._hosted_close_mode: HostedCloseMode = hosted_close_mode
+        self._flat_awaiting_cleanup: set[str] = set()
+        self._hb_stop_sent: set[str] = set()
         self._frozen_peak_on = frozen_peak_exit_on
         self._frozen_peak_after_s = frozen_peak_exit_after_s
         self._api = api
@@ -726,20 +740,10 @@ class HbExecutorAdapter:
                 order = await self._recover_direct_order(tracked)
                 if order is None or order.is_terminal is not True:
                     return False
-            if not tracked.hb_close_pending and rec.executor_id is not None:
-                tracked = (self._registry.get(position_id) or tracked).model_copy(
-                    update={
-                        "hb_close_pending": True,
-                    }
-                )
-                self._registry.put(tracked)
-                try:
-                    await self._api.stop_executor(rec.executor_id, keep_position=True)
-                except Exception:
-                    current = self._registry.get(position_id) or tracked
-                    self._registry.put(current.model_copy(update={"hb_close_unknown": True}))
-                    return False
-            if not await self._hb_exit_finished(tracked):
+            if not await self._hb_exit_finished(tracked) and not (
+                await self._stop_hb_keep_position(position_id)
+                and await self._hb_exit_finished(tracked)
+            ):
                 return False
             if tracked.server_protection is not None and (
                 not await self._server_flat_ready(position_id)
@@ -855,6 +859,8 @@ class HbExecutorAdapter:
                 requested_close=tracked.requested_close or reason,
             )
             if not await self._close_directly(tracked, tracked.requested_close or reason, None):
+                if position_id in self._flat_awaiting_cleanup:
+                    return  # 直连平仓已确认零仓，只差收尾核验；后台每秒一轮接着做，不算平仓失败。
                 raise ProtectionIncomplete("托管退出尚未确认，已有保护保留")
             return
         # 已有直连意图时先恢复同一订单，不能再让 HB 另外下平仓单。
@@ -1239,7 +1245,7 @@ class HbExecutorAdapter:
         reason: CloseReason,
         via_hb: Exception | None,
         *,
-        title: str = "hummingbot 没能平掉仓位，已直连币安平仓",
+        title: str = _HB_FAILED_TITLE,
     ) -> bool:
         async with self._exit_lock(tracked.record.position_id):
             current = self._registry.get(tracked.record.position_id) or tracked
@@ -1273,6 +1279,8 @@ class HbExecutorAdapter:
             status=PositionStatus.CLOSING,
             requested_close=tracked.requested_close or reason,
         )
+        if await self._direct_first_ready(tracked):
+            return await self._close_hosted_direct_first(tracked, reason, via_hb, title=title)
         if tracked.server_protection is not None and not await self._prepare_server_exit(tracked):
             return False
         tracked = self._registry.get(rec.position_id) or tracked
@@ -1291,58 +1299,230 @@ class HbExecutorAdapter:
             held = await self._held_quantity(rec.symbol)
             if held is None:
                 return False
-        fill = CloseFill(tracked.direct_close_price, tracked.direct_close_fee)
         if held > 0:
-            place = getattr(self._exchange, "place_close", None)
-            if place is None:
-                return False  # 缺身份可恢复的能力，不能偷偷降级成无 CID 下单
-            generation = tracked.direct_close_generation + 1
-            cid = f"dc-{rec.position_id}-{generation}"
-            if len(cid) > 36:
-                return False
-            quantity = min(rec.quantity, held)
-            tracked = tracked.model_copy(
-                update={
-                    "direct_close_pending": True,
-                    "direct_close_client_order_id": cid,
-                    "direct_close_generation": generation,
-                    "direct_close_quantity": quantity,
-                    "direct_close_order_status": "SUBMIT_PENDING",
-                    "direct_close_order_id": None,
-                }
-            )
-            self._registry.put(tracked)
-            close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
-            try:
-                order = await place(rec.symbol, close_side, quantity, cid)
-            except IdentifiedCloseRejected:
-                current = self._registry.get(rec.position_id) or tracked
-                self._registry.put(
-                    current.model_copy(
-                        update={
-                            "direct_close_pending": False,
-                            "direct_close_order_status": "REJECTED",
-                        }
-                    )
-                )
-                return False  # 明确本请求未接收；下轮仅依据新鲜余仓生成下一代
-            except IdentifiedCloseUnknown as error:
-                order = error.observed
-                if order is None:
-                    return False
-            except Exception:
-                return False  # 保留原 CID / pending，禁止暂时查无结果后重发
-            if not self._accept_direct_order(tracked, order):
-                return False
-            if order.is_terminal is not True:
+            order = await self._submit_direct_close(tracked, held)
+            if order is None or order.is_terminal is not True:
                 return False
             tracked = self._registry.get(rec.position_id) or tracked
             held = await self._held_quantity(rec.symbol)
             if held is None or held > 0:
                 return False  # 终态部分成交；下一轮确认真实残量后才允许下一代
-            fill = CloseFill(order.average_price, None)
-        if tracked.direct_close_generation > 1:
-            fill = CloseFill()  # 多代成交均价交成交明细回填，不拿最后一笔冒充总均价
+        return await self._settle_direct_close(tracked, reason, via_hb, title=title)
+
+    async def _submit_direct_close(
+        self, tracked: TrackedPosition, held: float
+    ) -> IdentifiedCloseOrder | None:
+        """按新鲜余仓提交下一代只减仓市价单；CID 与数量先落盘，结果未知不重发。
+
+        返回已核对身份的订单（可能尚未终态），被拒、未知或无法核对返回 None。"""
+        rec = tracked.record
+        place = getattr(self._exchange, "place_close", None)
+        if place is None:
+            return None  # 缺身份可恢复的能力，不能偷偷降级成无 CID 下单
+        generation = tracked.direct_close_generation + 1
+        cid = f"dc-{rec.position_id}-{generation}"
+        if len(cid) > 36:
+            return None
+        quantity = min(rec.quantity, held)
+        tracked = tracked.model_copy(
+            update={
+                "direct_close_pending": True,
+                "direct_close_client_order_id": cid,
+                "direct_close_generation": generation,
+                "direct_close_quantity": quantity,
+                "direct_close_order_status": "SUBMIT_PENDING",
+                "direct_close_order_id": None,
+            }
+        )
+        self._registry.put(tracked)
+        close_side: Literal["buy", "sell"] = "sell" if rec.side is Side.LONG else "buy"
+        order: IdentifiedCloseOrder | None
+        try:
+            order = await place(rec.symbol, close_side, quantity, cid)
+        except (IdentifiedCloseRejected, IdentifiedCloseNotSent) as error:
+            current = self._registry.get(rec.position_id) or tracked
+            status = "REJECTED" if isinstance(error, IdentifiedCloseRejected) else "NOT_SENT"
+            self._registry.put(
+                current.model_copy(
+                    update={"direct_close_pending": False, "direct_close_order_status": status}
+                )
+            )
+            return None  # 明确本请求未生效；下轮仅依据新鲜余仓生成下一代
+        except IdentifiedCloseUnknown as error:
+            order = error.observed
+            if order is None:
+                return None
+        except Exception:
+            return None  # 保留原 CID / pending，禁止暂时查无结果后重发
+        if order is None or not self._accept_direct_order(tracked, order):
+            return None
+        return order
+
+    async def _direct_first_ready(self, tracked: TrackedPosition) -> bool:
+        """``direct`` 模式下这次能否先下直连：只在一切都明确时，否则走 ``hb_first``。
+
+        HB 已在自己平仓（时限到、SHUTTING_DOWN、有入场单以外的订单）、任何一条腿提交 / 撤单 /
+        触发状态不明、入场未终态、已有未决的停止或直连请求，都不先下单。"""
+        state, manager = tracked.server_protection, self._protection
+        rec = tracked.record
+        if (
+            self._hosted_close_mode != "direct"
+            or state is None
+            or manager is None
+            or self._exchange is None
+            or state.stage in {"exiting", "cleanup", "done"}
+            or not state.entry_terminal
+            or tracked.direct_close_pending
+            or tracked.hb_close_pending
+            or tracked.hb_close_unknown
+            or rec.executor_id is None
+            or tracked.entry_client_order_id is None
+            or not manager.legs_quiet(rec.position_id)
+        ):
+            return False
+        try:
+            detail = await self._api.get_executor(rec.executor_id)
+        except Exception:
+            return False
+        info = (detail or {}).get("custom_info")
+        return bool(
+            executor_query_state(detail, rec.executor_id) == "active"
+            and (detail or {}).get("status") == "RUNNING"
+            and isinstance(info, dict)
+            and info.get("order_ids") == [tracked.entry_client_order_id]
+        )
+
+    async def _close_hosted_direct_first(
+        self,
+        tracked: TrackedPosition,
+        reason: CloseReason,
+        via_hb: Exception | None,
+        *,
+        title: str,
+    ) -> bool:
+        """先下只减仓市价单，再只停不平 HB；交易所止损腿保留到核实零仓后由收尾撤掉。
+
+        HB 的平仓单在单向模式也是只减仓，止损子单同样只减仓：任何一路先成交，其余只会被拒或
+        少成交，不会反向开仓。下单后的结果未知仍按原 CID 只查不重发。"""
+        rec = tracked.record
+        pid = rec.position_id
+        assert self._protection is not None
+        self._protection.mark_exiting(pid)
+        tracked = (self._registry.get(pid) or tracked).model_copy(update={"direct_first": True})
+        self._registry.put(tracked)
+        held = await self._held_quantity(rec.symbol)
+        if held is None or held > (tracked.entry_original_quantity or rec.quantity) * (1 + 1e-10):
+            return False
+        order = await self._submit_direct_close(tracked, held) if held > 0 else None
+        await self._stop_hb_keep_position(pid)
+        if held > 0 and (order is None or order.is_terminal is not True):
+            if order is None and await self._held_quantity(rec.symbol) == 0:
+                self._flat_awaiting_cleanup.add(pid)  # 被拒但已零仓：多半止损或 HB 先平了
+            return False
+        held = await self._held_quantity(rec.symbol)
+        if held is None or held > 0:
+            return False  # 终态部分成交；下一轮按真实余仓走原流程补下一代
+        self._flat_awaiting_cleanup.add(pid)
+        if not await self._prepare_server_exit(self._registry.get(pid) or tracked):
+            return False
+        return await self._settle_direct_close(
+            self._registry.get(pid) or tracked, reason, via_hb, title=title
+        )
+
+    async def _stop_hb_keep_position(self, position_id: str) -> bool:
+        """只停不平：HB 不再动这笔仓。请求前落盘；返回 False = 结果未知或已发过、还在等终态。
+
+        已落盘待停、但不是本进程发的（落盘后、请求前崩溃，或请求丢了），且 HB 仍报 RUNNING：
+        再发一次。keep_position=True 的停止从不卖出，重发无害；结果未知（hb_close_unknown）的
+        照旧不重发，交对账员按轮数重试。"""
+        current = self._registry.get(position_id)
+        if current is None or current.record.executor_id is None:
+            return False
+        eid = current.record.executor_id
+        if current.hb_close_pending:
+            if current.hb_close_unknown or position_id in self._hb_stop_sent:
+                return False
+            try:
+                detail = await self._api.get_executor(eid)
+            except Exception:
+                return False
+            if not (
+                executor_query_state(detail, eid) == "active"
+                and (detail or {}).get("status") == "RUNNING"
+            ):
+                return False
+        else:
+            self._registry.put(current.model_copy(update={"hb_close_pending": True}))
+        self._hb_stop_sent.add(position_id)
+        try:
+            await self._api.stop_executor(eid, keep_position=True)
+        except Exception:
+            latest = self._registry.get(position_id) or current
+            self._registry.put(latest.model_copy(update={"hb_close_unknown": True}))
+            return False
+        return True
+
+    async def _close_evidence(
+        self, tracked: TrackedPosition
+    ) -> tuple[float | None, IdentifiedCloseOrder | None]:
+        """我方直连单一共成交多少（None = 说不清）和唯一一代的订单回读。"""
+        generation = tracked.direct_close_generation
+        if generation == 0:
+            return 0.0, None
+        order = await self._recover_direct_order(tracked)
+        if generation > 1:
+            return None, order  # 前几代的成交量没落盘
+        if order is not None and order.is_terminal is True:
+            return order.filled_quantity, order
+        if tracked.direct_close_order_status in {"REJECTED", "NOT_SENT"}:
+            return 0.0, None
+        return None, order
+
+    def _close_fill(
+        self, tracked: TrackedPosition, order: IdentifiedCloseOrder | None
+    ) -> CloseFill:
+        """只有唯一一代、它独自全额平掉整笔入场量时，它的均价才是出场价；否则交成交明细回填。"""
+        state = tracked.server_protection
+        entry = (
+            state.entry_filled_quantity
+            if state is not None and state.entry_filled_quantity
+            else tracked.record.quantity
+        )
+        if (
+            tracked.direct_close_generation == 1
+            and order is not None
+            and order.is_terminal is True
+            and math.isclose(order.filled_quantity, order.quantity, rel_tol=1e-10)
+            and math.isclose(order.quantity, entry, rel_tol=1e-10)
+        ):
+            return CloseFill(order.average_price, tracked.direct_close_fee)
+        return CloseFill()
+
+    def _hosted_close_cause(
+        self, tracked: TrackedPosition, ours: float | None, legs: list[tuple[CloseReason, float]]
+    ) -> str:
+        path = (
+            "先直连、后停 HB（direct）" if tracked.direct_first else "先停 HB、后直连（hb_first）"
+        )
+        generation = tracked.direct_close_generation
+        if generation == 0:
+            ours_text = "没有下直连单"
+        else:
+            filled = "成交量未知" if ours is None else f"我方成交 {ours:g}"
+            ours_text = f"直连只减仓单 {generation} 代，{filled}"
+        parts = [path, ours_text]
+        parts += [f"交易所 {reason.value} 腿成交 {qty:g}" for reason, qty in legs]
+        return "；".join(parts)
+
+    async def _settle_direct_close(
+        self,
+        tracked: TrackedPosition,
+        reason: CloseReason,
+        via_hb: Exception | None,
+        *,
+        title: str,
+    ) -> bool:
+        rec = tracked.record
         if not await self.entry_finished(rec.position_id):
             return False
         if await self._held_quantity(rec.symbol) != 0:
@@ -1351,19 +1531,37 @@ class HbExecutorAdapter:
             rec.position_id
         ):
             return False
-        self.mark_closed_directly(rec.position_id, reason, fill)
-        closed = self._registry.get(rec.position_id)
-        if closed is not None:
-            await self._notice("平仓完成", _close_text(closed.record), closed.record, "closed")
-        cause = repr(via_hb) if via_hb is not None else "执行器已结束但币安仍有仓"
-        await self._alert(
-            AlertLevel.WARN,
-            title,
-            f"{rec.symbol} {rec.position_id}：{cause}",
-            rec.symbol,
-            f"closed_directly:{rec.position_id}",
-            kind="order_failed",
+        tracked = self._registry.get(rec.position_id) or tracked
+        ours, order = await self._close_evidence(tracked)
+        tracked = self._registry.get(rec.position_id) or tracked
+        legs = (
+            self._protection.leg_fills(rec.position_id)
+            if tracked.server_protection is not None and self._protection is not None
+            else []
         )
+        if ours == 0 and legs:
+            reason = legs[0][0]  # 我方一笔没成交，是交易所的腿平掉的
+        self.mark_closed_directly(rec.position_id, reason, self._close_fill(tracked, order))
+        closed = self._registry.get(rec.position_id)
+        hosted_normal = (
+            tracked.server_protection is not None and via_hb is None and title == _HB_FAILED_TITLE
+        )
+        self._flat_awaiting_cleanup.discard(rec.position_id)
+        if closed is not None:
+            body = _close_text(closed.record)
+            if hosted_normal:
+                body += "\n" + self._hosted_close_cause(tracked, ours, legs)
+            await self._notice("平仓完成", body, closed.record, "closed")
+        if not hosted_normal:
+            cause = repr(via_hb) if via_hb is not None else "执行器已结束但币安仍有仓"
+            await self._alert(
+                AlertLevel.WARN,
+                title,
+                f"{rec.symbol} {rec.position_id}：{cause}",
+                rec.symbol,
+                f"closed_directly:{rec.position_id}",
+                kind="order_failed",
+            )
         await self._finish_exit_cleanup(rec.position_id)
         return True
 
@@ -1380,16 +1578,7 @@ class HbExecutorAdapter:
             ):
                 return False
             if not await self._hb_exit_finished(tracked):
-                tracked = self._registry.get(position_id) or tracked
-                if tracked.hb_close_pending or rec.executor_id is None:
-                    return False
-                tracked = tracked.model_copy(update={"hb_close_pending": True})
-                self._registry.put(tracked)
-                try:
-                    await self._api.stop_executor(rec.executor_id, keep_position=True)
-                except Exception:
-                    current = self._registry.get(position_id) or tracked
-                    self._registry.put(current.model_copy(update={"hb_close_unknown": True}))
+                if rec.executor_id is None or not await self._stop_hb_keep_position(position_id):
                     return False
                 if not await self._hb_exit_finished(tracked):
                     return False
@@ -1751,18 +1940,9 @@ class HbExecutorAdapter:
             return False  # 重启后缺能力不能退回旧流程，留下真实保护等待处理。
         rec = tracked.record
         if not await self._hb_exit_finished(tracked):
-            current = self._registry.get(rec.position_id) or tracked
-            if current.hb_close_pending or rec.executor_id is None:
+            if rec.executor_id is None or not await self._stop_hb_keep_position(rec.position_id):
                 return False
-            current = current.model_copy(update={"hb_close_pending": True})
-            self._registry.put(current)
-            try:
-                await self._api.stop_executor(rec.executor_id, keep_position=True)
-            except Exception:
-                current = self._registry.get(rec.position_id) or current
-                self._registry.put(current.model_copy(update={"hb_close_unknown": True}))
-                return False
-            if not await self._hb_exit_finished(current):
+            if not await self._hb_exit_finished(tracked):
                 return False
         if not await self._protection.prepare_exit(rec.position_id):
             return False

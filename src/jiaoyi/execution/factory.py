@@ -12,7 +12,7 @@ from jiaoyi.execution.account_check import verify_same_account
 from jiaoyi.execution.brackets import BracketManager, LegOrder
 from jiaoyi.execution.exchange import CcxtBinanceFutures, WorkingType
 from jiaoyi.execution.hb_client import HttpHummingbotApi
-from jiaoyi.execution.hb_executor import HbExecutorAdapter
+from jiaoyi.execution.hb_executor import HbExecutorAdapter, HostedCloseMode
 from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError
 from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
@@ -104,6 +104,7 @@ def build_execution(
     protection_trailing_min_step_bps: float = 5.0,
     protection_trailing_book_critical_after_s: float = 300.0,
     protection_leg_order: LegOrder = "lifeboat_first",
+    hosted_close_mode: HostedCloseMode = "hb_first",
     position_mode_cache_s: float = 0.0,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
@@ -186,6 +187,7 @@ def build_execution(
         protection=protection,
         frozen_peak_exit_on=frozen_peak_exit_on and mode is not RunMode.LIVE and demo_trading,
         frozen_peak_exit_after_s=frozen_peak_exit_after_s,
+        hosted_close_mode=hosted_close_mode,
     )
     reconciler = ThreeWayReconciler(
         adapter,
