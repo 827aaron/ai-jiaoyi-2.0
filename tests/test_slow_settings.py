@@ -117,6 +117,10 @@ def test_engine_reads_key_for_its_provider(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     # CI 没装 tradingagents（可选依赖），只测密钥选择
     monkeypatch.setattr("jiaoyi.slow.tradingagents_engine.register_binance_vendor", lambda: None)
+    # 没写 max_tokens 时引擎会去 openrouter.ai 读模型信息
+    monkeypatch.setattr(
+        "jiaoyi.slow.tradingagents_engine.default_max_tokens", lambda *a, **k: 16384
+    )
 
     class S:
         def __init__(self, d: dict[str, str]) -> None:

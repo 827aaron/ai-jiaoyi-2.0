@@ -80,6 +80,7 @@ from jiaoyi.execution.factory import MissingSecret, build_execution
 from jiaoyi.execution.income_daily import IncomeDaily
 from jiaoyi.execution.ledger_sync import LedgerSync
 from jiaoyi.execution.live_gate import LiveGate
+from jiaoyi.execution.mainnet_shadow import LiveShadow, RecentTrades, load_ledger
 from jiaoyi.execution.stub import (
     StubExecutorAdapter,
     StubLifeboatStop,
@@ -513,7 +514,7 @@ def _build_execution(
         ws_base = LIVE_WS_BASE
     else:
         ws_base = DEMO_WS_BASE if app_cfg.sim_environment == "demo" else LEGACY_TESTNET_WS_BASE
-    ledger = LedgerSync(stack.adapter, ex.user_trades, income, clock=clock)
+    ledger = LedgerSync(stack.adapter, RecentTrades(ex.user_trades), income, clock=clock)
     ledger.attach(
         UserStream(ex.new_listen_key, ex.keepalive_listen_key, ledger.on_fill, ws_base=ws_base)
     )
@@ -835,6 +836,7 @@ class App:
         self.lot_rules: LotRulesProvider = StubLotRules()
         self.income: IncomeDaily | None = None
         self.ledger: LedgerSync | None = None
+        self.mainnet_shadow: LiveShadow | None = None
         self.news: NewsHub | None = None
         self.against: AgainstCardWatch | None = None
         self.derivs: DerivsFeed | None = None
@@ -1074,6 +1076,35 @@ class App:
         """刷新 data/income_daily.json（面板的盈利口径）。拉不到沿用文件里的旧数。"""
         if self.income is not None:
             await self.income.refresh(self.clock())
+
+    async def mainnet_shadow_tick(self) -> None:
+        """Re-price settled closes at mainnet prices (data/mainnet_shadow.jsonl) from the
+        stream this process already holds; makes no Binance request and never raises."""
+        if not self.app_cfg.mainnet_shadow_on:
+            return
+        feed = getattr(self.m.features, "price_at", None)
+        span = getattr(self.m.features, "prices_between", None)
+        if feed is None or span is None:
+            return
+        if self.mainnet_shadow is None:
+            trades = self.ledger.trades if self.ledger is not None else None
+            self.mainnet_shadow = LiveShadow(
+                self.app_cfg.data_dir,
+                feed,
+                span,
+                lambda: self.risk_cfg.taker_fee_bps,
+                trades.cached if isinstance(trades, RecentTrades) else None,
+            )
+        try:
+            records, hints = await asyncio.to_thread(load_ledger, self.app_cfg.data_dir)
+            res = await self.mainnet_shadow.tick(records, hints, self.clock())
+        except Exception as e:
+            log.warning("按主网价格复算这轮跳过：%r", e)
+            return
+        if res.added or res.upgraded:
+            log.info(
+                "按主网价格复算：新算 %d 笔、改进 %d 笔（%s）", res.added, res.upgraded, res.sources
+            )
 
     def blocked_symbols(self) -> dict[str, str]:
         """当前禁止新开仓的币 → 原因（来自币安下架公告）。"""

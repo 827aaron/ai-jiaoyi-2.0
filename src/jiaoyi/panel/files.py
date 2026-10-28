@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role, SymbolPool
 from jiaoyi.contracts.position import PositionStatus
 from jiaoyi.core.recorder import local_day
+from jiaoyi.core.shadow_ledger import read_shadow
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +191,10 @@ class PanelFiles:
     def income_daily(self) -> Any:
         """主程序每 5 分钟从币安收入流水汇总的按日盈亏（data/income_daily.json）；没有就是 None。"""
         return self._json("income_daily.json")
+
+    def mainnet_shadow(self) -> dict[str, dict[str, Any]]:
+        """position_id -> mainnet-equivalent row (data/mainnet_shadow.jsonl); empty if none."""
+        return read_shadow(self.root)
 
     def slow_budget_cost(self, day: date) -> float | None:
         """军师团今天已花的钱（data/slow_budget.json，开会前就预记、失败也算，和日上限同一个数）。

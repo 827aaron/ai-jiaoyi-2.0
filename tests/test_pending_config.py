@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import time
@@ -136,6 +137,83 @@ def test_accepts_tp_r_cap(tmp_path: Path) -> None:
     assert [(r["section"], r["key"], r["new"]) for r in _rows(data)] == [
         ("fast_loop", "tp_r_cap", 1.0)
     ]
+
+
+def test_accepts_mainnet_shadow_on(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(paths, "app", "mainnet_shadow_on = true\n")
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    assert load_app_config(paths.app).mainnet_shadow_on is True
+    assert [(r["section"], r["key"], r["new"]) for r in _rows(data)] == [
+        ("app", "mainnet_shadow_on", True)
+    ]
+
+
+def test_accepts_card_score_and_position_mode_cache(tmp_path: Path) -> None:
+    paths, data = _with_slow(tmp_path)
+    _pending(
+        paths,
+        "app",
+        "card_score_every_min = 30\ncard_score_window_days = 14\nposition_mode_cache_s = 300\n",
+    )
+    res = pc.apply_pending(paths, data, NOW)
+    assert res.status == "applied", res.error
+    cfg = load_app_config(paths.app)
+    assert (cfg.card_score_every_min, cfg.card_score_window_days) == (30, 14)
+    assert cfg.position_mode_cache_s == 300.0
+
+
+def _panel_group_keys(section: str) -> set[str]:
+    src = (ROOT / "src/jiaoyi/panel/static/app.js").read_text(encoding="utf-8")
+    keys: set[str] = set()
+    for block in re.findall(r"keys:\s*\[([^\]]*)\]", src):
+        keys |= set(re.findall(rf'"{section}\.([A-Za-z0-9_]+)"', block))
+    return keys
+
+
+def test_every_app_key_in_panel_groups_is_editable() -> None:
+    shown = _panel_group_keys("app")
+    assert {
+        "mainnet_shadow_on",
+        "account_read_retries",
+        "jev_shared_cooldown",
+        "card_score_every_min",
+        "card_score_window_days",
+        "position_mode_cache_s",
+    } <= shown
+    assert sorted(shown - set(actions.editable_fields("app"))) == []
+
+
+def test_card_score_save_note_names_editable_keys() -> None:
+    src = (ROOT / "src/jiaoyi/panel/static/app.js").read_text(encoding="utf-8")
+    block = re.search(r"const SAVED_NOTE = \{([^}]*)\}", src)
+    assert block is not None
+    notes = dict(re.findall(r'"app\.([A-Za-z0-9_]+)": "([^"]*)"', block.group(1)))
+    assert notes == {
+        "card_score_every_min": "下一轮记分时生效，不用重启。",
+        "card_score_window_days": "下一轮记分时生效，不用重启。",
+    }
+    assert set(notes) <= set(actions.editable_fields("app"))
+
+
+def test_tonights_keys_are_editable() -> None:
+    app = set(actions.editable_fields("app"))
+    fast = set(actions.editable_fields("fast_loop"))
+    for k in (
+        "mainnet_shadow_on",
+        "hb_stop_unknown_retries",
+        "protection_tick_alert_after",
+        "hosted_close_mode",
+        "account_read_retries",
+        "jev_shared_cooldown",
+        "card_score_every_min",
+        "card_score_window_days",
+        "position_mode_cache_s",
+    ):
+        assert k in app, k
+    for k in ("tp_r_cap", "min_size_ratio", "respect_card_notional_min"):
+        assert k in fast, k
 
 
 def test_accepts_take_by_kind_subtable(tmp_path: Path) -> None:

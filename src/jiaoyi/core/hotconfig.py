@@ -192,6 +192,7 @@ HOT_APP: frozenset[str] = frozenset(
         # 方向记分只有面板用（面板每轮现读），主循环不看：改了不该提示重启
         "card_score_every_min",
         "card_score_window_days",
+        "mainnet_shadow_on",
         "reconcile_opening_grace_s",
         "reconcile_closing_grace_s",
         "account_read_retries",
