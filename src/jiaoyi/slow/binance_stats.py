@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from jiaoyi.contracts.common import PERPETUAL_CONTRACT_TYPES
+from jiaoyi.market import rest
 from jiaoyi.slow.liquidations import LiquidationSource
 from jiaoyi.slow.screener import SymbolStats
 
@@ -146,7 +147,10 @@ class BinanceStatsSource:
 
     async def _get(self, path: str, **params: Any) -> Any:
         async with self._sem:
+            rest.check_blocked()
             r = await self._client.get(path, params=params)
+        if r.status_code in (418, 429):
+            rest.mark_blocked(r.status_code, r.headers, r.text)
         r.raise_for_status()
         return r.json()
 

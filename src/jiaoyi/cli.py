@@ -38,6 +38,7 @@ from jiaoyi.core.secrets import (
 )
 from jiaoyi.execution.factory import MissingSecret
 from jiaoyi.execution.live_gate import CONFIRM_WORD, LiveGate, LiveGateError
+from jiaoyi.logsetup import configure_logging
 from jiaoyi.slow.settings import (
     DEFAULT_SLOW_PATH,
     SlowConfig,
@@ -838,7 +839,8 @@ def _panel(args: argparse.Namespace) -> int:
         secret_reader=store.get,
         update_repo=Path(__file__).resolve().parents[2],
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    # log_config=None: uvicorn's records propagate to the stamped root handler instead of its own.
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", log_config=None)
     return 0
 
 
@@ -1109,8 +1111,20 @@ def main(argv: list[str] | None = None) -> int:
         p.set_defaults(func=func)
 
     args = parser.parse_args(argv)
+    configure_logging()
+    _share_ban_state(args)
     code: int = args.func(args)
     return code
+
+
+def _share_ban_state(args: argparse.Namespace) -> None:
+    """Binance bans the IP, not the process: every command shares the ban file in its data dir."""
+    from jiaoyi.market import rest
+
+    data_dir = getattr(args, "data_dir", "") or (
+        _fallback_data_dir(Path(args.app)) if getattr(args, "app", "") else ""
+    )
+    rest.use_shared_ban(data_dir or None)
 
 
 if __name__ == "__main__":

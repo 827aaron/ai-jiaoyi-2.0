@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import email.message
 import io
+import json
 import time
 import urllib.error
 from datetime import UTC, date, datetime, timedelta
@@ -25,11 +26,120 @@ def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rest, "_used_weight", None)
 
 
-def _http_error(code: int, retry_after: str | None) -> urllib.error.HTTPError:
+def _http_error(code: int, retry_after: str | None, body: bytes = b"") -> urllib.error.HTTPError:
     h = email.message.Message()
     if retry_after is not None:
         h["Retry-After"] = retry_after
-    return urllib.error.HTTPError("u", code, "teapot", h, io.BytesIO(b""))
+    return urllib.error.HTTPError("u", code, "teapot", h, io.BytesIO(body))
+
+
+BAN_BODY = (
+    b'{"code":-1003,"msg":"Way too many requests; IP(203.0.113.7) banned until 1761660000000. '
+    b'Please use the websocket for live updates to avoid bans."}'
+)
+
+
+def test_parse_banned_until_reads_the_1003_message() -> None:
+    assert rest.parse_banned_until(BAN_BODY) == 1761660000.0
+    assert rest.parse_banned_until(BAN_BODY.decode()) == 1761660000.0
+    assert rest.parse_banned_until('{"code":-1003,"msg":"Too many requests."}') is None
+    assert rest.parse_banned_until(None) is None
+
+
+def test_1003_ban_until_outlasts_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    until_ms = int((time.time() + 3 * 3600) * 1000)
+    body = BAN_BODY.replace(b"1761660000000", str(until_ms).encode())
+
+    def urlopen(url: str, timeout: float) -> Any:
+        raise _http_error(418, "120", body)
+
+    monkeypatch.setattr(rest.urllib.request, "urlopen", urlopen)
+    with pytest.raises(rest.RateLimited) as e:
+        rest._get("https://x", 1.0)
+    assert e.value.until == until_ms / 1000 and e.value.wait_min() >= 179
+
+
+def test_shared_ban_is_honoured_by_another_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rest.use_shared_ban(tmp_path)
+    rest.mark_blocked(418, {"Retry-After": "600"})
+    saved = json.loads((tmp_path / rest.BAN_FILE).read_text(encoding="utf-8"))
+    assert saved["status"] == 418 and saved["until"] > time.time() + 590
+    assert not list(tmp_path.glob(".*.tmp"))
+
+    monkeypatch.setattr(rest, "_blocked", None)  # a fresh process: nothing in memory
+    rest.use_shared_ban(tmp_path)
+    monkeypatch.setattr(
+        rest.urllib.request, "urlopen", lambda *a, **k: pytest.fail("封禁期内不该发请求")
+    )
+    with pytest.raises(rest.RateLimited) as e:
+        rest._get("https://x", 1.0)
+    assert e.value.refused and e.value.status == 418
+    assert str(e.value).startswith("币安限流中，至 ") and str(e.value).endswith(" 解除，本次不请求")
+    assert rest.blocked() is not None  # adopted, so the CLI still reports it at the end
+
+
+def test_shared_ban_expires(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rest.use_shared_ban(tmp_path)
+    rest.mark_blocked(429, {"Retry-After": "30"})
+    monkeypatch.setattr(rest, "_blocked", None)
+    with pytest.raises(rest.RateLimited):
+        rest.check_blocked()
+    monkeypatch.setattr(rest, "_blocked", None)
+    rest.check_blocked(now=time.time() + 31)
+    assert rest.active_ban(now=time.time() + 31) is None
+
+
+def test_shorter_ban_does_not_shorten_the_shared_one(tmp_path: Path) -> None:
+    other = tmp_path / rest.BAN_FILE
+    until = time.time() + 3600
+    other.write_text(json.dumps({"status": 418, "until": until}), encoding="utf-8")
+    rest.use_shared_ban(tmp_path)
+    rest.mark_blocked(429, {"Retry-After": "60"})
+    assert json.loads(other.read_text(encoding="utf-8"))["until"] == until
+    ban = rest.active_ban()
+    assert ban is not None and ban.until == until
+
+
+def test_corrupt_ban_file_does_not_block(tmp_path: Path) -> None:
+    (tmp_path / rest.BAN_FILE).write_text("{not json", encoding="utf-8")
+    rest.use_shared_ban(tmp_path)
+    rest.check_blocked()
+
+
+def test_without_shared_dir_nothing_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    rest.use_shared_ban(None)
+    rest.mark_blocked(418, {"Retry-After": "60"})
+    assert not list(tmp_path.rglob(rest.BAN_FILE))
+
+
+def test_save_ban_writes_live_ban_and_removes_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rest, "_blocked", rest.RateLimited(418, 2_000.0))
+    rest.save_ban(tmp_path, now=1_000.0)
+    monkeypatch.setattr(rest, "_blocked", None)
+    ban = rest.load_ban(tmp_path, now=1_500.0)
+    assert ban is not None and (ban.status, ban.until) == (418, 2_000.0)
+    assert rest.blocked() is ban
+    assert rest.load_ban(tmp_path, now=2_500.0) is None
+    rest.save_ban(tmp_path, now=2_500.0)
+    assert not (tmp_path / rest.BAN_FILE).exists()
+
+
+def test_save_ban_keeps_a_longer_ban_another_process_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / rest.BAN_FILE
+    path.write_text(json.dumps({"status": 418, "until": 9_000.0}), encoding="utf-8")
+    rest.save_ban(tmp_path, now=1_000.0)  # nothing live in this process
+    monkeypatch.setattr(rest, "_blocked", rest.RateLimited(429, 1_100.0))
+    rest.save_ban(tmp_path, now=1_000.0)
+    assert json.loads(path.read_text(encoding="utf-8"))["until"] == 9_000.0
 
 
 def test_418_blocks_every_later_request(monkeypatch: pytest.MonkeyPatch) -> None:

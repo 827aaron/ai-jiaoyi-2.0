@@ -273,3 +273,29 @@ async def test_card_marks_us_symbols_closed_but_not_metals(tmp_path: Path) -> No
     by = {s.symbol: s for s in c.current(clock[0]).symbols}  # type: ignore[union-attr]
     assert by["TSLAUSDT"].allowed_signals == [] and by["TSLAUSDT"].reason.startswith("休市不可做")
     assert by["XAUUSDT"].allowed_signals and by["AAUSDT"].allowed_signals
+
+
+def test_gate_honours_a_ban_another_process_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import json
+    import time
+
+    import httpx
+
+    from jiaoyi.market import rest
+    from jiaoyi.slow import binance_gate
+
+    binance_gate.reset()
+    try:
+        until = time.time() + 600
+        (tmp_path / rest.BAN_FILE).write_text(
+            json.dumps({"status": 418, "until": until}), encoding="utf-8"
+        )
+        rest.use_shared_ban(tmp_path)
+        monkeypatch.setattr(httpx, "get", lambda *a, **k: pytest.fail("封禁期内不该发请求"))
+        assert binance_gate.banned_until() == until
+        with pytest.raises(rest.RateLimited, match="本次不请求"):
+            binance_gate.get("https://fapi.binance.com/x")
+    finally:
+        binance_gate.reset()

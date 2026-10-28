@@ -7,6 +7,11 @@
 
 - 遇到 429 / 418 读 ``Retry-After``，抛 :class:`RateLimited`，并且记住到期时间：这之前本进程
   所有请求直接抛同一个错，不再去敲币安；
+
+Binance bans the IP, not the process, and every request sent during a ban extends it. After
+``use_shared_ban(data_dir)`` the ban-until time also goes to ``data_dir/rest_ban.json``, which
+the main loop, the panel and the CLI tools all check before sending. A -1003 body's
+``banned until <ms>`` wins over a shorter ``Retry-After``.
 - 离线工具（复盘、回放、校准）传一个 :class:`WeightBudget`：按每分钟权重预算排队（默认只用
   300，大头留给交易程序），响应头里本 IP 已用权重过半也先等到下一分钟。
 """
@@ -14,8 +19,12 @@
 from __future__ import annotations
 
 import asyncio
-import email.message
+import contextlib
 import json
+import logging
+import os
+import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +38,9 @@ from typing import Any
 from jiaoyi.contracts import Interval, Kline
 
 DEFAULT_REST_URL = "https://fapi.binance.com"
+BAN_FILE = "rest_ban.json"
+
+log = logging.getLogger(__name__)
 
 
 def parse_klines(
@@ -64,25 +76,43 @@ DEFAULT_RETRY_AFTER_S = {429: 60, 418: 120}
 
 
 class RateLimited(Exception):
-    """被币安限流（429）或封 IP（418）。``until`` 之前别再请求。"""
+    """被币安限流（429）或封 IP（418）。``until`` 之前别再请求。
 
-    def __init__(self, status: int, until: float) -> None:
+    ``refused=True``: no request was sent because a known ban is still running."""
+
+    def __init__(self, status: int, until: float, *, refused: bool = False) -> None:
         self.status = status
         self.until = until
-        super().__init__(f"HTTP {status}：被币安限流，{self.wait_min()} 分钟后再试")
+        self.refused = refused
+        if refused:
+            msg = f"币安限流中，至 {_clock_label(until)} 解除，本次不请求"
+        else:
+            msg = f"HTTP {status}：被币安限流，{self.wait_min()} 分钟后再试"
+        super().__init__(msg)
 
     def wait_min(self, now: float | None = None) -> int:
         left = self.until - (time.time() if now is None else now)
         return max(1, -(-int(left) // 60))
 
 
+def _clock_label(until: float) -> str:
+    """Local wall-clock time; the date too when the ban outlives today (418 bans run to days)."""
+    at = datetime.fromtimestamp(until)
+    return at.strftime("%H:%M" if at.date() == datetime.now().date() else "%m-%d %H:%M")
+
+
 _blocked: RateLimited | None = None
 """本进程最近一次被限流；到期前所有请求直接抛它（到期后留着当记录，不再拦）。"""
 _used_weight: int | None = None
 """最近一次响应头里本 IP 这一分钟已用的权重（含同机交易程序）。"""
+_ban_path: Path | None = None
+"""Ban file shared across processes; None keeps the ban in this process only."""
+_ban_seen: tuple[tuple[int, int], RateLimited | None] | None = None
+_ban_lock = threading.Lock()
+_BANNED_UNTIL = re.compile(r"banned until (\d{10,14})")
 
 
-def _retry_after(headers: email.message.Message | None, status: int) -> float:
+def _retry_after(headers: Any, status: int) -> float:
     raw = headers.get("Retry-After") if headers is not None else None
     try:
         return max(float(raw), 1.0) if raw else float(DEFAULT_RETRY_AFTER_S[status])
@@ -90,10 +120,131 @@ def _retry_after(headers: email.message.Message | None, status: int) -> float:
         return float(DEFAULT_RETRY_AFTER_S[status])
 
 
+def parse_banned_until(body: str | bytes | None) -> float | None:
+    """Unix seconds from a -1003 body (``... IP(x) banned until 1730123456789 ...``), else None."""
+    if not body:
+        return None
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+    m = _BANNED_UNTIL.search(text)
+    if m is None:
+        return None
+    raw = int(m.group(1))
+    return raw / 1000.0 if raw > 10**11 else float(raw)
+
+
+def use_shared_ban(data_dir: str | Path | None) -> None:
+    """Share the ban with every process using ``data_dir``; ``None`` keeps it in-process."""
+    global _ban_path, _ban_seen
+    with _ban_lock:
+        _ban_path = Path(data_dir) / BAN_FILE if data_dir else None
+        _ban_seen = None
+
+
+def _load_file(path: Path) -> RateLimited | None:
+    """``{"status": 418, "until": <unix s>}`` on file; extra keys are diagnostics only.
+
+    An unreadable file counts as no ban: a corrupt file must not stop market data for good."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return RateLimited(int(raw["status"]), float(raw["until"]))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        log.warning("币安封禁文件 %s 读不了，当作没有封禁", path, exc_info=True)
+        return None
+
+
+def _atomic_write(path: Path, lim: RateLimited) -> None:
+    record = {
+        "status": lim.status,
+        "until": lim.until,
+        "until_iso": datetime.fromtimestamp(lim.until, UTC).isoformat(timespec="seconds"),
+        "seen_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "pid": os.getpid(),
+    }
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        log.warning("币安封禁写不进 %s，别的进程看不到这次限流", path, exc_info=True)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def _read_shared() -> RateLimited | None:
+    """The ban on the shared file, cached by mtime so a request costs one stat."""
+    global _ban_seen
+    path = _ban_path
+    if path is None:
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    seen = _ban_seen
+    if seen is not None and seen[0] == key:
+        return seen[1]
+    lim = _load_file(path)
+    _ban_seen = (key, lim)
+    return lim
+
+
+def _write_shared(lim: RateLimited) -> None:
+    path = _ban_path
+    if path is None:
+        return
+    with _ban_lock:
+        cur = _read_shared()
+        if cur is None or lim.until > cur.until:
+            _atomic_write(path, lim)
+
+
+def load_ban(data_dir: str | Path, now: float | None = None) -> RateLimited | None:
+    """A ban persisted under ``data_dir`` that has not expired, adopted into this process."""
+    global _blocked
+    ban = _load_file(Path(data_dir) / BAN_FILE)
+    if ban is None or ban.until <= (time.time() if now is None else now):
+        return None
+    if _blocked is None or ban.until > _blocked.until:
+        _blocked = ban
+    return ban
+
+
+def save_ban(data_dir: str | Path, now: float | None = None) -> None:
+    """Persist this process's live ban under ``data_dir`` and drop an expired file.
+
+    A live ban another process wrote that ends later is never shortened or removed."""
+    path = Path(data_dir) / BAN_FILE
+    t = time.time() if now is None else now
+    live = _blocked if _blocked is not None and _blocked.until > t else None
+    with _ban_lock:
+        cur = _load_file(path)
+        if live is not None and (cur is None or live.until > cur.until):
+            _atomic_write(path, live)
+        elif live is None and cur is not None and cur.until <= t:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+
+def active_ban(now: float | None = None) -> RateLimited | None:
+    """The running ban from this process or the shared file, whichever ends later."""
+    t = time.time() if now is None else now
+    live = [b for b in (_blocked, _read_shared()) if b is not None and t < b.until]
+    return max(live, key=lambda b: b.until) if live else None
+
+
 def check_blocked(now: float | None = None) -> None:
-    """还在限流期内就抛 :class:`RateLimited`。"""
-    if _blocked is not None and (time.time() if now is None else now) < _blocked.until:
-        raise _blocked
+    """Raise a ``refused`` :class:`RateLimited` while a ban runs, adopting it in this process."""
+    global _blocked
+    ban = active_ban(now)
+    if ban is None:
+        return
+    if _blocked is None or ban.until > _blocked.until:
+        _blocked = ban
+    raise RateLimited(ban.status, ban.until, refused=True)
 
 
 def blocked() -> RateLimited | None:
@@ -101,12 +252,18 @@ def blocked() -> RateLimited | None:
     return _blocked
 
 
-def mark_blocked(status: int, headers: Any) -> RateLimited:
-    """别的请求通道（慢环分析师的 httpx）收到 429 / 418 时登记，全进程共用同一个封禁状态。"""
+def mark_blocked(status: int, headers: Any, body: str | bytes | None = None) -> RateLimited:
+    """Record a 429 / 418 from any request path and return the :class:`RateLimited` to raise.
+
+    Only a later end than the one already known replaces it, so a short 429 never shortens a 418."""
     global _blocked
     until = time.time() + _retry_after(headers, status)
+    banned = parse_banned_until(body)
+    if banned is not None and banned > until:
+        until = banned
     if _blocked is None or until > _blocked.until:
         _blocked = RateLimited(status, until)
+        _write_shared(_blocked)
     return _blocked
 
 
@@ -159,7 +316,7 @@ def take_used_weight() -> int | None:
 
 
 def _get(url: str, timeout_s: float) -> list[list[Any]]:
-    global _blocked, _used_weight
+    global _used_weight
     check_blocked()
     try:
         with urllib.request.urlopen(url, timeout=timeout_s) as resp:
@@ -168,8 +325,10 @@ def _get(url: str, timeout_s: float) -> list[list[Any]]:
             data: list[list[Any]] = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code in DEFAULT_RETRY_AFTER_S:
-            _blocked = RateLimited(e.code, time.time() + _retry_after(e.headers, e.code))
-            raise _blocked from None
+            body: bytes | None = None
+            with contextlib.suppress(Exception):
+                body = e.read()
+            raise mark_blocked(e.code, e.headers, body) from None
         raise
     return data
 
