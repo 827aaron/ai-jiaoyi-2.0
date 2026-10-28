@@ -48,6 +48,7 @@ def _write_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
+        os.fchmod(fd, 0o644)  # mkstemp 建的是 0600；面板等别的用户也要能读
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
@@ -281,6 +282,9 @@ class MeetingLive:
         now = self._now().isoformat()
         self._doc["finished_at"] = self._doc["updated_at"] = now
         self._flush()
+        with _OPEN_LOCK:  # 开完了不再占着文件；还在跑的旧会照样写不进（它早已不是归属者）
+            if _OWNERS.get(self._path) is self:
+                del _OWNERS[self._path]
 
     def _flush(self) -> None:
         try:
@@ -317,23 +321,37 @@ def sweep_interrupted(
 ) -> list[str]:
     """启动时：目录里还标着正在开、却不是本进程写的实况，说明上一个进程死在会议中途，标成中断。
 
+    顺带删掉上一个进程死在写盘中途留下的临时文件。本进程正在开的会的文件不碰。
     返回被改的文件名（不含扩展名）。读不出或格式不对的文件原样不动。
     """
     swept: list[str] = []
     if not directory.is_dir():
         return swept
+    for tmp in sorted({*directory.glob(".*.json.*.tmp"), *directory.glob("*.json.tmp")}):
+        symbol = tmp.name.lstrip(".").split(".json.", 1)[0]
+        with _OPEN_LOCK:
+            busy = (tmp.parent / f"{symbol}.json").absolute() in _OWNERS
+        if not busy:
+            try:
+                tmp.unlink()
+            except OSError:
+                logger.warning("删不掉残留的临时文件（%s）", tmp, exc_info=True)
     for path in sorted(directory.glob("*.json")):
+        key = path.absolute()
         try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                not isinstance(doc, dict)
-                or doc.get("status") != "running"
-                or doc.get("process") == PROCESS_ID
-            ):
-                continue
-            stamp = now().isoformat()
-            doc.update(status="interrupted", error=reason, finished_at=stamp, updated_at=stamp)
-            with _path_lock(path.absolute()):
+            with _path_lock(key):
+                with _OPEN_LOCK:
+                    if key in _OWNERS:
+                        continue
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(doc, dict)
+                    or doc.get("status") != "running"
+                    or doc.get("process") == PROCESS_ID
+                ):
+                    continue
+                stamp = now().isoformat()
+                doc.update(status="interrupted", error=reason, finished_at=stamp, updated_at=stamp)
                 _write_atomic(path, json.dumps(doc, ensure_ascii=False))
             swept.append(path.stem)
         except (OSError, ValueError):

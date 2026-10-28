@@ -283,3 +283,76 @@ def test_a_leftover_meeting_thread_cannot_overwrite_the_newer_meeting(tmp_path: 
     new.finish("short", "新结论", "新结论", 0.3)
     doc = read(tmp_path)
     assert doc["status"] == "done" and doc["result"] == {"bias": "short", "reason": "新结论"}
+
+
+def test_serialization_and_write_of_one_flush_are_not_split_by_another_thread(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    import threading
+
+    import jiaoyi.slow.meeting_live as ml
+
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    real = json.dumps
+    paused = threading.Event()
+    other_serialized = threading.Event()
+
+    def dumps(obj: Any, **kw: Any) -> str:
+        text = real(obj, **kw)
+        if threading.current_thread().name == "first":
+            paused.set()  # 序列化完、还没写盘：另一线程这时记一次调用
+            other_serialized.wait(timeout=0.5)
+        else:
+            other_serialized.set()
+        return text
+
+    monkeypatch.setattr(ml.json, "dumps", dumps)
+    first = threading.Thread(target=live.note_call, args=("stop", 1), name="first")
+    first.start()
+    assert paused.wait(timeout=5)
+    second = threading.Thread(target=live.note_call, args=("stop", 2), name="second")
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert "会议实况写盘失败" not in caplog.text
+    assert [c["output_tokens"] for c in read(tmp_path)["llm_calls"]] == [1, 2]
+
+
+def test_live_file_is_world_readable_and_closed_meeting_releases_it(tmp_path: Path) -> None:
+    import jiaoyi.slow.meeting_live as ml
+
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    assert (tmp_path / "SOLUSDT.json").stat().st_mode & 0o777 == 0o644
+    assert ml._OWNERS.get((tmp_path / "SOLUSDT.json").absolute()) is live
+    live.finish("long", "r", "t", 0.1)
+    assert (tmp_path / "SOLUSDT.json").absolute() not in ml._OWNERS
+    live.step("analysts", "market", "收尾后再写")
+    assert read(tmp_path)["status"] == "done" and read(tmp_path)["steps"][-1]["who"] == "convert"
+
+
+def test_sweep_removes_leftover_temp_files_but_not_an_open_meetings(tmp_path: Path) -> None:
+    from jiaoyi.slow.meeting_live import sweep_interrupted
+
+    folder = tmp_path / "meeting_live"
+    folder.mkdir()
+    (folder / ".HYPEUSDT.json.k3j2x9.tmp").write_text("{半截")
+    (folder / "ZECUSDT.json.tmp").write_text("{旧版本留下的")
+    live = MeetingLive(folder, "SOLUSDT", now=Clock())
+    (folder / ".SOLUSDT.json.a1b2c3.tmp").write_text("{正在写")
+    assert sweep_interrupted(folder) == []
+    assert sorted(p.name for p in folder.iterdir()) == [".SOLUSDT.json.a1b2c3.tmp", "SOLUSDT.json"]
+    assert read(folder)["status"] == "running"
+    live.fail("x", 0.0)
+
+
+def test_sweep_leaves_an_open_meeting_of_this_process_alone(tmp_path: Path) -> None:
+    from jiaoyi.slow.meeting_live import sweep_interrupted
+
+    live = MeetingLive(tmp_path, "SOLUSDT", now=Clock())
+    doc = read(tmp_path)
+    doc["process"] = "dead-process"  # 哪怕文件看着像上个进程的，归属者还在开就不碰
+    (tmp_path / "SOLUSDT.json").write_text(json.dumps(doc), encoding="utf-8")
+    assert sweep_interrupted(tmp_path) == []
+    assert read(tmp_path)["status"] == "running"
+    live.fail("x", 0.0)
+    assert read(tmp_path)["status"] == "failed"
