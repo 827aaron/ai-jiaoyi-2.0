@@ -114,6 +114,8 @@
 - WebSocket 没有持仓量：持仓量和多空比由 `market.derivs.DerivsFeed` 轮询 REST（只查总盘会 / 作战卡上的币；查失败跳过不刷屏），拥挤交易信号仍只看资金费率；CPI / 议息日历未接入。
 - BTCUSDT 一直订（不在卡上也订）：「BTC 先动」信号和每个币快照里的 `btc5z` 要它。启动回填至少 1441 根 1 分钟线（24 小时波动）。
 - 这台云端开发机访问币安返回 451（地区限制），实时连通性需要在 Mac mini 上验证。
+- 行情、下单、Telegram 共用一个事件循环，每条行情的处理必须摊下来 O(1)：特征引擎的 60 / 30 / 10 秒成交额和 OFI 是增量维护的精确和（`_ExactSum`，和直接对窗口 `math.fsum` 逐位相同，和逐个累加差 1e-12 量级），巡逻兵的 1 分钟最高 / 最低是单调队列，7 天 ATR 中位数缓存到 `atr_hist` 变。压测：`PYTHONPATH=src .venv/bin/python scripts/bench_on_event.py`（合成行情，不连网）。
+- 事件循环延迟：`LoopLagMonitor` 每秒量一次，每分钟汇总写进 `data/market_snapshot.json` 的 `loop_lag`，最大延迟到 1 秒记一条警告「事件循环被卡」。卡住时 `kill -USR1 <jiaoyi run 的 pid>`，所有线程的栈追加写进 `data/logs/faulthandler.log`，不用停进程。
 
 ## 预测员（Kronos）实测
 

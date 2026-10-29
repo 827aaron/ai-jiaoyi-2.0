@@ -62,6 +62,7 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core import close_sources, paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
+from jiaoyi.core.loop_lag import LoopLagMonitor, register_stack_dump
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import CloseInProgress
@@ -441,6 +442,7 @@ class Runner:
             lambda sym: klines(sym, limit=hist, interval=ATR_INTERVAL[period])
         )
         self.positions: list[PositionRecord] = []
+        self.loop_lag = LoopLagMonitor()
         self._tasks: set[asyncio.Task[None]] = set()
         self._loops: list[asyncio.Task[None]] = []
         self._last_screen: datetime | None = None
@@ -548,6 +550,7 @@ class Runner:
     async def run(self) -> None:
         """启动并一直跑，直到被取消，或面板发来 restart（之后 ``restart_requested`` 为 True）。"""
         self._started_at = self.app.clock()
+        self._stacks_file = register_stack_dump(Path(self.app.app_cfg.data_dir) / "logs")
         await self.app.start()
         self._last_screen = self.app.clock()
         await self.refresh_positions()
@@ -569,6 +572,7 @@ class Runner:
         cfg = self.app.app_cfg
         self._loops = [
             asyncio.create_task(self._market_loop()),
+            asyncio.create_task(self.loop_lag.run()),
             self._every(cfg.keeper_interval_s, self.keeper_tick),
             self._every(URGENT_CHECK_EVERY_S, self.urgent_tick),
             self._every(FROZEN_PEAK_CHECK_EVERY_S, self.frozen_peak_tick),
@@ -733,7 +737,9 @@ class Runner:
     async def market_snapshot_tick(self) -> None:
         """面板「盘口员」读的 data/market_snapshot.json：正在盯的币此刻的行情和各路推送计数。"""
         symbols = sorted(self._watched or set())
-        self._market_file.write(self.m.features, symbols, self.app.clock())
+        self._market_file.write(
+            self.m.features, symbols, self.app.clock(), loop_lag=self.loop_lag.status()
+        )
 
     # ------------------------------------------------------------ 行情 → 信号
     async def _market_loop(self) -> None:

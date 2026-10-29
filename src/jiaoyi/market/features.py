@@ -68,6 +68,131 @@ ExtraValues = Callable[[str, datetime], Mapping[str, float]]
 """快照的额外键（持仓量、多空比等，来自 REST 轮询）：(币, 现在) → 键值。"""
 
 
+class _ExactSum:
+    """可加可减的精确和（Shewchuk 部分和，``math.fsum`` 同一算法）：读出的是窗口里各数真实和
+    舍入一次的结果，跟加减的先后无关，进出多少次也不累积误差，窗口清空时正好是 0.0。
+    非有限数单独计数，读出时按 IEEE 加法的规矩给 inf / nan。"""
+
+    __slots__ = ("_bad", "_p")
+
+    def __init__(self) -> None:
+        self._p: list[float] = []
+        self._bad: list[int] = [0, 0, 0]  # +inf、-inf、nan 的个数
+
+    def add(self, x: float, sign: int = 1) -> None:
+        if not math.isfinite(x):
+            self._bad[0 if x > 0 else 1 if x < 0 else 2] += sign
+            return
+        if sign < 0:
+            x = -x
+        p = self._p
+        i = 0
+        for y in p:
+            if abs(x) < abs(y):
+                x, y = y, x
+            hi = x + y
+            lo = y - (hi - x)
+            if lo:
+                p[i] = lo
+                i += 1
+            x = hi
+        p[i:] = [x]
+
+    def value(self) -> float:
+        pinf, ninf, nan = self._bad
+        if nan or (pinf and ninf):
+            return math.nan
+        if pinf or ninf:
+            return math.inf if pinf else -math.inf
+        return math.fsum(self._p)
+
+
+class _FlowWindow:
+    """最近 ``span`` 秒的主动买 / 卖成交额（精确和）和笔数。
+
+    行按成交时间排着进来，``now`` 只增不减（``last_ts`` 取的是最大值），所以过期的总在左头。"""
+
+    __slots__ = ("buy", "rows", "sell", "span")
+
+    def __init__(self, span: float) -> None:
+        self.span = span
+        self.rows: deque[tuple[float, float, bool]] = deque()
+        self.buy = _ExactSum()
+        self.sell = _ExactSum()
+
+    def push(self, row: tuple[float, float, bool]) -> None:
+        self.rows.append(row)
+        (self.buy if row[2] else self.sell).add(row[1])
+
+    def expire(self, now: float) -> None:
+        rows, cut = self.rows, now - self.span
+        while rows and rows[0][0] < cut:
+            _, usdt, is_buy = rows.popleft()
+            (self.buy if is_buy else self.sell).add(usdt, -1)
+
+
+@dataclass
+class _Flows:
+    """``st.trades`` 的 60 / 30 / 10 秒窗口，增量维护。成交乱序到达、或 ``st.trades`` 被
+    REST 补数改过时作废（置 None），下次读从 ``st.trades`` 重建。"""
+
+    m1: _FlowWindow = field(default_factory=lambda: _FlowWindow(FLOW_WINDOW_S))
+    s30: _FlowWindow = field(default_factory=lambda: _FlowWindow(30.0))
+    s10: _FlowWindow = field(default_factory=lambda: _FlowWindow(BURST_WINDOW_S))
+    last_t: float = -math.inf
+
+    def push(self, row: tuple[float, float, bool]) -> bool:
+        """接一笔；比上一笔早（乱序）返回 False，调用方作废整个窗口。"""
+        if row[0] < self.last_t:
+            return False
+        self.last_t = row[0]
+        for w in (self.m1, self.s30, self.s10):
+            w.push(row)
+        return True
+
+    def expire(self, now: float) -> None:
+        for w in (self.m1, self.s30, self.s10):
+            w.expire(now)
+
+
+@dataclass(frozen=True)
+class _FlowSums:
+    """``now`` 时刻 60 秒买 / 卖 / 笔数、30 秒 CVD（买和 − 卖和）、10 秒买 / 卖。"""
+
+    buy: float
+    sell: float
+    n: int
+    cvd_30: float
+    buy_10: float
+    sell_10: float
+
+    @classmethod
+    def of(cls, m1: _FlowWindow, s30: _FlowWindow, s10: _FlowWindow) -> _FlowSums:
+        return cls(
+            m1.buy.value(),
+            m1.sell.value(),
+            len(m1.rows),
+            s30.buy.value() - s30.sell.value(),
+            s10.buy.value(),
+            s10.sell.value(),
+        )
+
+
+def _flow_sums_scan(trades: Iterable[tuple[float, float, bool]], now: float) -> _FlowSums:
+    """不靠增量窗口、直接扫一遍算（成交乱序时用）；同样的成交和增量结果逐位相同。"""
+    m1, s30, s10 = _FlowWindow(FLOW_WINDOW_S), _FlowWindow(30.0), _FlowWindow(BURST_WINDOW_S)
+    for row in trades:
+        t = row[0]
+        if t < now - FLOW_WINDOW_S:
+            continue
+        m1.push(row)
+        if t >= now - 30.0:
+            s30.push(row)
+        if t >= now - BURST_WINDOW_S:
+            s10.push(row)
+    return _FlowSums.of(m1, s30, s10)
+
+
 @dataclass
 class _AtrTrack:
     """一个周期的 ATR：1 分钟 K 线聚合成 N 分钟，每收完一根算一个 TR，Wilder 14。"""
@@ -87,8 +212,10 @@ class _SymbolState:
     trades: deque[tuple[float, float, bool]] = field(default_factory=deque)
     # (时间戳, 名义价值 USDT, 被强平的是多头吗)
     liqs: deque[tuple[float, float, bool]] = field(default_factory=deque)
+    flows: _Flows | None = field(default_factory=_Flows)
     # (时间戳, OFI 名义价值)
     ofi: deque[tuple[float, float]] = field(default_factory=deque)
+    ofi_sum: _ExactSum = field(default_factory=_ExactSum)
     klines: deque[Kline] = field(default_factory=lambda: deque(maxlen=60))
     # (开盘分钟, 开, 高, 低, 收, 成交量)：拍板人快照的技术面块（涨跌、RSI、区间、VWAP）
     bars: deque[tuple[int, float, float, float, float, float]] = field(
@@ -106,6 +233,7 @@ class _SymbolState:
     long: _AtrTrack = field(default_factory=_AtrTrack)  # 没配长周期就一直空着
     # 最近 7 天每根 N 分钟线收完时的 (收盘时间戳, ATR)（求中位数给止损 ATR 当下限）
     atr_hist: deque[tuple[float, float]] = field(default_factory=deque)
+    atr_med: float | None = None  # atr_hist 的中位数缓存，atr_hist 一变就清
     last_price: float | None = None
     last_ts: float = 0.0
     last_price_source: str | None = None
@@ -425,7 +553,10 @@ class RollingFeatureEngine:
         else:
             st.prices.append((sec, ev.price))
         usdt, is_buy = ev.price * ev.qty, ev.taker_side == Side.LONG
-        st.trades.append((t, usdt, is_buy))
+        row = (t, usdt, is_buy)
+        st.trades.append(row)
+        if st.flows is not None and not st.flows.push(row):
+            st.flows = None
         if not st.flow or st.flow[-1][0] != sec:
             st.flow.append([float(sec), 0.0, 0.0, 0.0, 0.0, 0.0])
         b = st.flow[-1]
@@ -440,7 +571,9 @@ class RollingFeatureEngine:
     def _on_book(self, st: _SymbolState, ev: BookTop) -> None:
         t = _ts(ev.ts)
         if st.book is not None:
-            st.ofi.append((t, bk.ofi_event(st.book, ev) * bk.mid(ev)))
+            e = bk.ofi_event(st.book, ev) * bk.mid(ev)
+            st.ofi.append((t, e))
+            st.ofi_sum.add(e)
         st.book = ev
         sec = math.floor(t)
         if not st.imbs or st.imbs[-1][0] != sec:
@@ -461,6 +594,7 @@ class RollingFeatureEngine:
         end = self._aggregate(st.short, k, self._atr_min)
         if end is not None and st.short.atr is not None:
             st.atr_hist.append((end, st.short.atr))
+            st.atr_med = None
         if self._long_min:
             self._aggregate(st.long, k, self._long_min)
         # 还没来过成交就跟最新收盘价：回填从 24 小时前往后喂，只取第一根会把一天前的价当现价
@@ -520,6 +654,7 @@ class RollingFeatureEngine:
         live = [p for p in st.atr_hist if p[0] > last]
         st.atr_hist.clear()
         st.atr_hist.extend(series + live)  # maxlen 自动丢掉最老的
+        st.atr_med = None
         return len(series)
 
     def seed_rest(
@@ -584,6 +719,7 @@ class RollingFeatureEngine:
         sec = math.floor(start)
         while st.trades and st.trades[0][0] < start:
             st.trades.popleft()
+            st.flows = None
         for dq in (st.prices, st.flow):
             while dq and dq[0][0] < sec:
                 dq.popleft()
@@ -621,6 +757,7 @@ class RollingFeatureEngine:
         st.prices.extendleft(reversed(prices))
         st.flow.extendleft(reversed(flow))
         st.trades.extendleft(reversed(rows))
+        st.flows = None
 
     @staticmethod
     def _cover(st: _SymbolState, since: float, last: float) -> None:
@@ -691,7 +828,9 @@ class RollingFeatureEngine:
         st = self._s.get(symbol)
         if st is None or len(st.atr_hist) < 1440 // self._atr_min:
             return None
-        return statistics.median(a for _, a in st.atr_hist)
+        if st.atr_med is None:
+            st.atr_med = statistics.median(a for _, a in st.atr_hist)
+        return st.atr_med
 
     def _prune(self, st: _SymbolState) -> None:
         now = st.last_ts
@@ -699,12 +838,26 @@ class RollingFeatureEngine:
             (st.prices, TRADE_WINDOW_S + 1),
             (st.trades, TRADE_WINDOW_S),
             (st.liqs, LIQ_WINDOW_S),
-            (st.ofi, FLOW_WINDOW_S),
             (st.flow, FLOW_LONG_S),
             (st.imbs, IMB_WINDOW_S),
         ):
             while dq and dq[0][0] < now - window:
                 dq.popleft()
+        while st.ofi and st.ofi[0][0] < now - FLOW_WINDOW_S:
+            st.ofi_sum.add(st.ofi.popleft()[1], -1)
+
+    @staticmethod
+    def _flow_sums(st: _SymbolState, now: float) -> _FlowSums:
+        if st.flows is None:
+            rows = [r for r in st.trades if r[0] >= now - FLOW_WINDOW_S]
+            if any(a[0] > b[0] for a, b in itertools.pairwise(rows)):
+                return _flow_sums_scan(rows, now)  # 窗口里还有乱序的成交：这次照扫
+            st.flows = _Flows()
+            for r in rows:
+                st.flows.push(r)
+        f = st.flows
+        f.expire(now)
+        return _FlowSums.of(f.m1, f.s30, f.s10)
 
     # ------------------------------------------------------------------ 输出
 
@@ -897,27 +1050,10 @@ class RollingFeatureEngine:
             if past:
                 v[name] = st.last_price / past - 1.0
 
-        buy = sell = 0.0
-        buy_10 = sell_10 = 0.0
-        cvd_30 = 0.0
-        n = 0
-        for t, usdt, is_buy in st.trades:
-            if t < now - FLOW_WINDOW_S:
-                continue
-            n += 1
-            if is_buy:
-                buy += usdt
-            else:
-                sell += usdt
-            if t >= now - 30.0:
-                cvd_30 += usdt if is_buy else -usdt
-            if t >= now - BURST_WINDOW_S:
-                if is_buy:
-                    buy_10 += usdt
-                else:
-                    sell_10 += usdt
+        f = self._flow_sums(st, now)
+        buy, sell, buy_10, sell_10 = f.buy, f.sell, f.buy_10, f.sell_10
         v["vol_1m_usdt"] = buy + sell
-        v["trades_1m"] = float(n)
+        v["trades_1m"] = float(f.n)
         if st.live_since is not None:
             v["live_s"] = max(now - st.live_since, 0.0)
         trade_s = self._trade_s(st, now)
@@ -925,7 +1061,7 @@ class RollingFeatureEngine:
             v["trade_s"] = trade_s
         v["taker_buy_ratio_1m"] = buy / (buy + sell) if buy + sell > 0 else 0.5
         v["cvd_1m_usdt"] = buy - sell
-        v["cvd_30s_usdt"] = cvd_30
+        v["cvd_30s_usdt"] = f.cvd_30
 
         recent = list(st.klines)[-VOL_AVG_KLINES:]
         if len(recent) >= 5:
@@ -988,9 +1124,11 @@ class RollingFeatureEngine:
     ) -> float | None:
         """每 ``step`` 秒取一个价格，算对数收益的标准差（不年化）。"""
         pts: list[float] = []
+        # 和 _price_at 同一个查法；先拷成列表，31 次二分不用每次在 deque 里按下标找
+        prices = list(st.prices)
         t = now - window
-        while t <= now:
-            p = self._price_at(st, t)
+        while prices and t <= now:
+            p = prices[max(bisect.bisect_right(prices, (t, math.inf)) - 1, 0)][1]
             if p:
                 pts.append(p)
             t += step
@@ -1005,13 +1143,8 @@ class RollingFeatureEngine:
         if b is None or now - _ts(b.ts) > 10.0:
             return None  # 盘口太旧就当没有，风控员看到没有盘口会拒单
         bid, ask = bk.depth_usdt(b, self._levels)
-        buy = sell = 0.0
-        for t, usdt, is_buy in st.trades:
-            if t >= now - FLOW_WINDOW_S:
-                if is_buy:
-                    buy += usdt
-                else:
-                    sell += usdt
+        f = self._flow_sums(st, now)
+        buy, sell = f.buy, f.sell
         return BookMetrics(
             mid=bk.mid(b),
             microprice=bk.microprice(b),
@@ -1020,7 +1153,7 @@ class RollingFeatureEngine:
             bid_depth_usdt=bid,
             ask_depth_usdt=ask,
             imbalance=bk.imbalance(b, self._levels),
-            ofi=sum(e for _, e in st.ofi),
+            ofi=st.ofi_sum.value(),
             cvd=buy - sell,
             taker_buy_ratio=buy / (buy + sell) if buy + sell > 0 else 0.5,
         )
