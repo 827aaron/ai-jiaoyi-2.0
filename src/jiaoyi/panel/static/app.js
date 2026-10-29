@@ -671,6 +671,8 @@ function slCell(p, inline = false) {
 }
 function tpCell(p, inline = false) {
   const l = protLeg(p, "take_profit");
+  // 托管仓不挂止盈单（盈利靠移动止损出场）：账本止盈价只是参考目标
+  if (!l && p.protection) return `${price(p.take_profit_price, p.symbol)} <span class="dim small">目标·不挂单</span>${estBox(p, p.take_profit_price, inline)}`;
   if (!l) return `${price(p.take_profit_price, p.symbol)}${estBox(p, p.take_profit_price, inline)}`;
   const s = legShown(l);
   return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`;
@@ -2669,7 +2671,7 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
-const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", lifeboat_first: "保命单 → 止损 → 止盈（原行为）", stop_first: "止损 → 止盈 → 保命单", hb_first: "先停 HB 再直连平仓（原行为）", direct: "先直连只减仓平仓，再只停不平 HB", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
+const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", lifeboat_first: "保命单 → 止损（原行为）", stop_first: "止损 → 保命单", hb_first: "先停 HB 再直连平仓（原行为）", direct: "先直连只减仓平仓，再只停不平 HB", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 // [meeting] 里同一个词（legacy / neutral …）在不同键下意思不同，按键查
 const MEETING_CHOICE = {
@@ -2842,8 +2844,8 @@ const PLAIN = {
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
   protection_unknown_submit_grace_s: "条件单提交结果未知时，按原单号只查不重发最多几秒（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
-  protection_take_profit_working_type: "止盈按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
-  protection_leg_order: "新仓三条腿先挂哪条：lifeboat_first 保命单在前（原行为）/ stop_first 止损在前，止损确认后保命单挂失败在未托管宽限内重试、不立即平仓",
+  protection_take_profit_working_type: "不再生效：托管保护不挂止盈单，盈利出场只靠移动止损",
+  protection_leg_order: "新仓两条腿先挂哪条：lifeboat_first 保命单在前（原行为）/ stop_first 止损在前，止损确认后保命单挂失败在未托管宽限内重试、不立即平仓",
   hosted_close_mode: "托管仓平仓顺序：hb_first 先停 HB、等它结束再直连平仓（原行为）/ direct 先按持久化单号下只减仓市价单再只停不平 HB，止损挂到确认零仓；状态不明照旧 hb_first",
   hosted_close_direct_when_exiting: "平仓顺序 direct 时，保护已进入退出、但没有腿触发、没有在途平仓单，也照样先直连只减仓（关 = 改走 hb_first，原行为）",
   protection_tick_alert_after: "后台保护轮同一笔仓连续失败几轮才发紧急告警（1 = 每轮都发）",
@@ -3382,7 +3384,7 @@ const ROLES = [
     { g: "模拟盘按主网止损", hint: "默认关 = 现状。只对 paper / testnet：主网价格越过止损就平 Demo 仓，并按止损价记模拟成交（Demo 实际成交另记）。热生效。", keys: ["fast_loop.paper_stop_on_mainnet", "fast_loop.paper_stop_slippage_bps", "fast_loop.paper_stop_book_pnl"] },
     { g: "开仓前读账户", hint: "拍板通过后读 hummingbot 账户失败：再读几次都不行就放弃这个信号，风控员记一条拒绝。热生效。", keys: ["app.account_read_retries"] },
     { g: "按主网价格算", hint: "只算账不下单：每笔平仓按主网价格重算一遍盈亏，看去掉 Demo 成交优势后还赚不赚。", keys: ["app.mainnet_shadow_on"] },
-    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止盈止损。除挂单顺序、平仓顺序、退出中仍先直连、停止补发次数、告警轮数和持仓模式缓存外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。退出中仍先直连（默认关）：保护已进入退出但没有腿触发、没有在途平仓单时也照样先直连。挂单顺序 stop_first：先挂交易所止损和止盈、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损 / 止盈，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hosted_close_direct_when_exiting", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
+    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止损（不挂止盈单，盈利靠移动止损出场）。除挂单顺序、平仓顺序、退出中仍先直连、停止补发次数、告警轮数和持仓模式缓存外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。退出中仍先直连（默认关）：保护已进入退出但没有腿触发、没有在途平仓单时也照样先直连。挂单顺序 stop_first：先挂交易所止损、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hosted_close_direct_when_exiting", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },

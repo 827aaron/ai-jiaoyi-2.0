@@ -1565,13 +1565,13 @@ class AppConfig(Contract):
     )
     protection_leg_order: Literal["lifeboat_first", "stop_first"] = Field(
         default="lifeboat_first",
-        description="Demo 托管保护：新仓的三条腿按什么顺序挂。"
-        "lifeboat_first = 保命单 → 止损 → 止盈（原行为）；stop_first = 止损 → 止盈 → 保命单："
+        description="Demo 托管保护：新仓的两条腿按什么顺序挂（不挂止盈单）。"
+        "lifeboat_first = 保命单 → 止损（原行为）；stop_first = 止损 → 保命单："
         "交易所托管的止损已经能保护仓位，保命单只是更宽的后备。"
         "stop_first 下止损确认后保命单挂失败（被拒、提交结果未知）不立即平仓："
         "在未托管宽限（protection_prearm_grace_s）内告警、下一轮重试"
         "（被拒的换新单号重挂，未知的只查原单号），宽限用完仍没挂上照旧平仓；"
-        "止损、止盈挂失败照旧立即平仓。只影响之后新挂的一代，旧接口的仓不变。改后重启生效。",
+        "止损挂失败照旧立即平仓。只影响之后新挂的一代，旧接口的仓不变。改后重启生效。",
     )
     hosted_close_mode: Literal["hb_first", "direct"] = Field(
         default="hb_first",
@@ -1616,8 +1616,8 @@ class AppConfig(Contract):
     )
     protection_take_profit_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
-        description="Demo 托管保护：止盈按什么价触发。CONTRACT_PRICE = 最新成交价（原行为）；"
-        "MARK_PRICE = 标记价。只影响之后新挂的止盈，已挂的单照旧按挂单时的核对。改后重启生效。",
+        description="不再生效：托管保护不挂止盈单，盈利出场只靠移动止损。"
+        "留着只为已有配置文件照常能读。",
     )
     protection_trailing_book_mark_max_dev_bps: float = Field(
         default=30.0,

@@ -1,4 +1,7 @@
-"""普通止盈/止损的可恢复编排：真实保护回读完成前不宣称已托管。
+"""交易所托管保护（保命单 + 普通止损）的可恢复编排：真实保护回读完成前不宣称已托管。
+
+不挂止盈单：盈利出场只靠移动止损换代止损腿。旧版本挂下的 br-tp- 腿照常回读，仓位还在时
+入场结束后的下一轮同步把它当非保留腿撤掉；它若先触发，仍按止盈退出。
 
 程序锁只能串行本程序；HB 时限单和交易所条件子单仍能独立触发。未知提交只查原 CID，
 任何一代触发/子单未知都会停止改价；保护撤清且开仓残单终态后才允许程序另发市价退出。
@@ -63,7 +66,7 @@ class BracketExchange(Protocol):
         trigger_price: float,
         client_order_id: str,
         *,
-        kind: Literal["stop_loss", "take_profit"],
+        kind: Literal["stop_loss"],
         working_type: WorkingType,
     ) -> ExchangeBracket: ...
     async def get_bracket(
@@ -157,8 +160,8 @@ _TRIGGERED = {"TRIGGERING", "TRIGGERED", "FINISHED"}
 _READBACK_POLL_S = 0.5  # 回读宽限内的重读间隔；总等待由 readback_grace_s 封顶。
 LegOrder = Literal["lifeboat_first", "stop_first"]
 _LEG_ORDER: dict[LegOrder, tuple[str, ...]] = {
-    "lifeboat_first": ("lifeboat", "stop_loss", "take_profit"),
-    "stop_first": ("stop_loss", "take_profit", "lifeboat"),
+    "lifeboat_first": ("lifeboat", "stop_loss"),
+    "stop_first": ("stop_loss", "lifeboat"),
 }
 
 
@@ -243,7 +246,6 @@ class BracketManager:
         prearm_grace_s: float = 0.0,
         unknown_submit_grace_s: float = 0.0,
         stop_working_type: WorkingType = "CONTRACT_PRICE",
-        take_profit_working_type: WorkingType = "CONTRACT_PRICE",
         trailing_book_mark_max_dev_bps: float = 30.0,
         trailing_stop_mark_buffer_bps: float = 5.0,
         trailing_min_step_bps: float = 5.0,
@@ -257,8 +259,8 @@ class BracketManager:
         ``unknown_submit_grace_s``：条件单提交结果未知时，锁内按原 CID 只读重查最多几秒（不重发），
         查到就当回执接着挂下一条腿；仍查不到的提交未知也交给 ``prearm_grace_s`` 宽限。0 = 原行为。
 
-        ``stop_working_type`` / ``take_profit_working_type``：之后新建的止损（含移动止损新一代）/
-        止盈腿用哪个触发价格源，建腿时写进账本；已有的腿一直按自己记下的核对，保命单固定标记价。
+        ``stop_working_type``：之后新建的止损（含移动止损新一代）用哪个触发价格源，建腿时写进账本；
+        已有的腿一直按自己记下的核对，保命单固定标记价。
 
         ``trailing_book_mark_max_dev_bps``：算峰值的盘口价往抬高峰值的方向偏离标记价超过
         这么多基点当插针，本轮不更新；0 = 不比对。
@@ -272,7 +274,7 @@ class BracketManager:
         0 = 不升级。
 
         ``leg_order``：一代里几条腿的提交顺序。``stop_first`` 时已确认的止损就是最低保护，之后只差
-        保命单的失败交给 ``prearm_grace``（被拒的下一轮换新代重挂）；止损、止盈失败照旧。
+        保命单的失败交给 ``prearm_grace``（被拒的下一轮换新代重挂）；止损失败照旧。
         """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
@@ -280,7 +282,6 @@ class BracketManager:
         self.prearm_grace_s = prearm_grace_s
         self.unknown_submit_grace_s = unknown_submit_grace_s
         self.stop_working_type = stop_working_type
-        self.take_profit_working_type = take_profit_working_type
         self.trailing_book_mark_max_dev_bps = trailing_book_mark_max_dev_bps
         self.trailing_stop_mark_buffer_bps = trailing_stop_mark_buffer_bps
         self.trailing_min_step_bps = trailing_min_step_bps
@@ -650,7 +651,7 @@ class BracketManager:
         return updated
 
     def _on_trigger_failed(self, pid: str, old: ProtectiveLeg, leg: ProtectiveLeg) -> None:
-        """仓位还在时只有止盈补挂；止损/保命单被拒说明价格已越过止损线，同角色第二次被拒也退出。"""
+        """止损/保命单被拒说明价格已越过止损线，同角色第二次被拒也退出；旧止盈腿被拒不退出、不补挂。"""
         _, state = self._current(pid)
         role = _role(leg)
         head = (
@@ -673,8 +674,8 @@ class BracketManager:
             x.client_order_id != leg.client_order_id and _role(x) == role and _trigger_failed(x)
             for x in state.legs
         )
-        if role == "take_profit" and not repeated:
-            text = f"{head}；仓位不当作已平，按现有仓位补挂止盈"
+        if role == "take_profit":
+            text = f"{head}；仓位不当作已平，不再挂止盈单，止损照常"
         else:
             reason = _reason(leg)
             self._save(pid, stage="exiting", exit_reason=reason)
@@ -870,10 +871,10 @@ class BracketManager:
         sign = 1 if tracked.record.side is Side.LONG else -1
         stop = await self._stop_target(tracked, state, self._extra_stop_candidates(tracked, state))
         hold = stop.hold
+        # 旧版本挂的止盈腿不在这里：仓位入场结束后，下面按非保留腿撤掉。
         desired = {
             "lifeboat": tracked.record.entry_price * (1 - sign * tracked.lifeboat_stop_pct / 100),
             "stop_loss": stop.price,
-            "take_profit": tracked.record.take_profit_price,
         }
         specs: dict[str, NormalizedBracketSpec] = {}
         for kind, price in desired.items():
@@ -904,7 +905,7 @@ class BracketManager:
         if all(len(legs) == 1 for legs in matching.values()):
             current_cids = {legs[0].client_order_id for legs in matching.values()}
             if all(leg.client_order_id in current_cids or _settled(leg) for leg in state.legs):
-                # 无改单：一轮完整三腿回读 + 前后开仓/净仓一致即可；不重复跑提交专用检查点。
+                # 无改单：一轮完整回读 + 前后开仓/净仓一致即可；不重复跑提交专用检查点。
                 self._save(
                     pid,
                     stage="armed" if evidence.terminal else "provisional",
@@ -944,36 +945,21 @@ class BracketManager:
             generation = state.generation + 1
             legs = list(state.legs)
             for kind in needed:
-                role = "sl" if kind == "stop_loss" else "tp"
-                cid = (
-                    f"lb-{pid}-{generation}"
-                    if kind == "lifeboat"
-                    else f"br-{role}-{pid}-{generation}"
-                )
+                lifeboat = kind == "lifeboat"
+                cid = f"lb-{pid}-{generation}" if lifeboat else f"br-sl-{pid}-{generation}"
                 if len(cid) > 36:
                     raise ProtectionIncomplete("条件单身份超过交易所长度限制")
                 spec = specs[kind]
                 # 新一代（含移动止损换价）按现在的设置；旧腿照自己记下的核对，新腿确认后才撤旧腿。
-                working_type: WorkingType = (
-                    "MARK_PRICE"
-                    if kind == "lifeboat"
-                    else (
-                        self.stop_working_type
-                        if kind == "stop_loss"
-                        else self.take_profit_working_type
-                    )
-                )
                 legs.append(
                     ProtectiveLeg(
-                        kind="take_profit" if kind == "take_profit" else "stop_loss",
+                        kind="stop_loss",
                         generation=generation,
                         client_order_id=cid,
                         quantity=spec.quantity,
                         trigger_price=spec.trigger_price,
-                        purpose="lifeboat"
-                        if kind == "lifeboat"
-                        else (stop.purpose if kind == "stop_loss" else "fixed"),
-                        working_type=working_type,
+                        purpose="lifeboat" if lifeboat else stop.purpose,
+                        working_type="MARK_PRICE" if lifeboat else self.stop_working_type,
                     )
                 )
             self._save(pid, legs=legs, generation=generation, stage="provisional")
@@ -1005,7 +991,7 @@ class BracketManager:
                             leg.quantity,
                             leg.trigger_price,
                             leg.client_order_id,
-                            kind=leg.kind,
+                            kind="stop_loss",
                             working_type=leg.working_type,
                         )
                 except BracketSubmissionRejected as rejected:
@@ -1185,9 +1171,9 @@ class BracketManager:
         basis: EntryBasis,
         read_book: Callable[[str], Awaitable[ExecutionBook]],
     ) -> bool:
-        """锁内先核入场 / 实际仓 / 三腿回读，最后才读盘口并立刻判断。
+        """锁内先核入场 / 实际仓 / 保护腿回读，最后才读盘口并立刻判断。
 
-        盘口不能在这些查询之前读：入场 2 次 + 三腿 3 次 + 检查点 2 次（回读宽限时再多等几秒），
+        盘口不能在这些查询之前读：入场 2 次 + 每条腿 1 次 + 检查点 2 次（回读宽限时再多等几秒），
         Demo 上常超过 5 秒，判断时必然“过期”。5 秒新鲜度、未来时刻和源时钟回退的检查一条不放松。
         失败原因记 ``trailing_last_error``，完成一轮清空；异常照常抛给调用方告警。
         """

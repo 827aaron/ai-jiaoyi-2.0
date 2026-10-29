@@ -79,7 +79,7 @@ async def test_alert_waits_for_consecutive_failures_and_success_resets(
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
 async def test_non_retryable_protection_failure_close_records_the_cause(tmp_path: Path, side: Side):
     h = AdapterHarness(tmp_path, side)
-    h.exchange.reject_kind = "take_profit"  # 止盈被明确拒绝：不属于未托管宽限
+    h.exchange.reject_kind = "stop_loss"  # 保护腿被明确拒绝：不属于未托管宽限
     for _ in range(2):
         await h.adapter.protection_tick()
     done = h.registry.get("pos-1")
@@ -148,7 +148,7 @@ def recorded(h: AdapterHarness, tmp_path: Path) -> JsonlDecisionLog:
 async def test_close_record_carries_the_cause_in_summary_and_output(tmp_path: Path, side: Side):
     h = AdapterHarness(tmp_path, side)
     recorded(h, tmp_path)
-    h.exchange.reject_kind = "take_profit"
+    h.exchange.reject_kind = "stop_loss"
     for _ in range(2):
         await h.adapter.protection_tick()
     detail = h.registry.get("pos-1").close_detail
@@ -162,7 +162,7 @@ async def test_only_the_first_cause_is_kept(tmp_path: Path, side: Side):
     h = AdapterHarness(tmp_path, side)
     tracked = h.registry.get("pos-1")
     h.registry.put(tracked.model_copy(update={"close_detail": "synthetic first cause"}))
-    h.exchange.reject_kind = "take_profit"
+    h.exchange.reject_kind = "stop_loss"
     for _ in range(2):
         await h.adapter.protection_tick()
     done = h.registry.get("pos-1")
@@ -174,7 +174,7 @@ async def test_only_the_first_cause_is_kept(tmp_path: Path, side: Side):
 async def test_cause_is_persisted_while_closing_and_survives_restart(tmp_path: Path, side: Side):
     h = AdapterHarness(tmp_path, side)
     h.api.auto_terminate_on_stop = False  # HB 还没结束：平仓停在半路
-    h.exchange.reject_kind = "take_profit"
+    h.exchange.reject_kind = "stop_loss"
     for _ in range(2):
         await h.adapter.protection_tick()
     closing = h.registry.get("pos-1")

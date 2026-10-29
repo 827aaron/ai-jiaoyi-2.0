@@ -134,7 +134,7 @@ async def test_target_beyond_mark_is_clamped_to_tightest_placeable_price_with_cr
     h.exchange.mark = 101.38 if long else 98.62
     assert await h.manager.sync("pos-1") == "armed"
     assert (
-        len(h.creates()) == 4
+        len(h.creates()) == 3
         and h.manager.live_stop_price("pos-1") == h.exchange.orders[clamped].trigger_price
     )
     assert "保留正在挂的止损" in (h.state().last_error or "") and len(clamp_alerts()) == 2
@@ -192,7 +192,7 @@ async def test_unreadable_mark_keeps_the_live_stop(tmp_path: Path) -> None:
 
     h.exchange.execution_mark = unknown
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and "标记价不可用" in (h.state().last_error or "")
+    assert len(h.creates()) == 2 and "标记价不可用" in (h.state().last_error or "")
 
 
 # --- 最小换代步长 ------------------------------------------------------------------------
@@ -207,10 +207,10 @@ async def test_tiny_trailing_improvement_does_not_replace_the_stop(
     assert await h.manager.sync("pos-1") == "armed"  # 固定止损 99 / 101
     _trail(h, 99.03 if long else 100.97)  # 只收紧 3 基点 < 默认 5
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and not h.cancels() and h.exchange.mark_reads == 0
+    assert len(h.creates()) == 2 and not h.cancels() and h.exchange.mark_reads == 0
     _trail(h, 99.06 if long else 100.94)  # 6 基点
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 4
+    assert len(h.creates()) == 3
     assert h.exchange.orders[h.creates()[-1]].trigger_price == (99.06 if long else 100.94)
 
 
@@ -227,7 +227,7 @@ async def test_min_step_zero_replaces_on_any_change(tmp_path: Path) -> None:
     assert await h.manager.sync("pos-1") == "armed"
     _trail(h, 99.01)
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 4  # 旧行为：一变就换
+    assert len(h.creates()) == 3  # 旧行为：一变就换
 
 
 # --- 持续缺盘口升级告警 ------------------------------------------------------------------

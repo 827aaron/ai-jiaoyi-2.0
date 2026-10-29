@@ -192,7 +192,8 @@ def _open_text(tracked: TrackedPosition) -> str:
         f"{r.symbol} 做{_SIDE_CN[r.side]}，名义 {entry * r.quantity:.0f} U，杠杆 {r.leverage} 倍",
         f"入场价 {entry:g}，数量 {r.quantity:g}",
         f"止损 {r.stop_loss_price:.6g}（距离 {tracked.stop_loss_pct:.2f}%），"
-        f"止盈 {r.take_profit_price:.6g}",
+        f"止盈 {r.take_profit_price:.6g}"
+        + ("（只是目标，不挂单，盈利靠移动止损出场）" if tracked.server_protection else ""),
     ]
     if r.lifeboat is not None:
         lines.append(f"保命止损 {r.lifeboat.stop_price:.6g}（已挂在币安）")
@@ -961,7 +962,8 @@ class HbExecutorAdapter:
         return tracked.filled_at or tracked.record.opened_at
 
     def take_profit_exiting(self, position_id: str) -> bool:
-        """A hosted take-profit leg has triggered: Demo is exiting at its target, not a stop."""
+        """A take-profit leg placed by an older version has triggered: Demo is exiting at its
+        target, not a stop. New positions carry no take-profit leg."""
         tracked = self._registry.get(position_id)
         state = tracked.server_protection if tracked is not None else None
         if state is None:
@@ -2001,7 +2003,7 @@ class HbExecutorAdapter:
                 "移动止损长时间没有有效盘口",
                 f"{symbol} {pid}：已激活的移动止损连续 {held_s / 60:.0f} 分钟没有有效盘口，"
                 f"最后一次成功观测 {last_text}；最近原因：{describe_error(error)}。"
-                "峰值和止损价停在最后一次成功观测，已挂的止损 / 止盈 / 保命单不变",
+                "峰值和止损价停在最后一次成功观测，已挂的止损 / 保命单不变",
                 symbol,
                 f"server_trailing_book_stuck:{pid}",
                 kind="order_failed",
@@ -2011,7 +2013,7 @@ class HbExecutorAdapter:
             AlertLevel.WARN,
             "移动止损本轮缺有效盘口",
             f"{symbol} {pid}：{describe_error(error)}；"
-            "本轮不更新移动止损，已确认的止损 / 止盈 / 保命单不变",
+            "本轮不更新移动止损，已确认的止损 / 保命单不变",
             symbol,
             f"server_trailing_book:{pid}",
             kind="order_failed",
@@ -2281,7 +2283,7 @@ class HbExecutorAdapter:
                 missing = ProtectionIncomplete("缺同交易所盘口源时钟，保持最后确认保护")
                 self._protection.record_trailing_error(position_id, missing)
                 raise missing
-            # 盘口交给 observe_trailing 在三腿回读之后再读：在这里先读，回读完常已超过 5 秒。
+            # 盘口交给 observe_trailing 在保护腿回读之后再读：在这里先读，回读完常已超过 5 秒。
             if await self._protection.observe_trailing(position_id, basis, read_book):
                 await self._protection.sync(position_id)
 

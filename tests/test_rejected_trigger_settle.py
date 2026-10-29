@@ -381,7 +381,7 @@ def live_algo(leg: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-async def test_rejected_tp_while_position_open_rearms_and_alerts(tmp_path: Path) -> None:
+async def test_rejected_tp_while_position_open_is_not_rearmed(tmp_path: Path) -> None:
     ledger = open_ledger()
     legs = ledger["server_protection"]["legs"]
     algo = {leg["client_order_id"]: live_algo(leg) for leg in legs[:2]}
@@ -393,16 +393,15 @@ async def test_rejected_tp_while_position_open_rearms_and_alerts(tmp_path: Path)
     assert final.record.status is PositionStatus.OPEN
     assert final.server_protection.stage == "armed"
     assert final.server_protection.exit_reason is None
-    assert exchange.creates() == ["br-tp-pos-42600c953a4c-2"]
+    assert not exchange.creates()
     assert not exchange.actions("cancel") and not exchange.actions("direct")
-    new_tp = registry.get(PID).server_protection.legs[-1]
-    assert (new_tp.kind, new_tp.trigger_price, new_tp.algo_status) == (
+    assert [leg.kind for leg in final.server_protection.legs] == [
+        "stop_loss",
+        "stop_loss",
         "take_profit",
-        7.923,
-        "NEW",
-    )
+    ]
     assert [a.title for a in alerter.sent] == ["条件单触发后子单被交易所拒绝"]
-    assert TP_CID in alerter.sent[0].body
+    assert TP_CID in alerter.sent[0].body and "不再挂止盈单" in alerter.sent[0].body
     old_tp = final.server_protection.legs[2]
     assert (old_tp.state, old_tp.algo_status, old_tp.child_state) == (
         "cancelled",
@@ -451,25 +450,6 @@ async def test_rejected_stop_while_position_open_exits_without_rearm(
     assert not exchange.creates() and not exchange.actions("cancel")
     assert [a.title for a in alerter.sent] == ["条件单触发后子单被交易所拒绝"]
     assert "不再补挂" in alerter.sent[0].body
-
-
-async def test_take_profit_rejected_twice_exits_instead_of_rearming_again(tmp_path: Path) -> None:
-    ledger, exchange = open_case(2, algo_status="NEW")
-    exchange.algo[TP_CID].update(algoStatus="REJECTED", triggerTime=1793141024459)
-    registry, manager, _, alerter = build(tmp_path, ledger, exchange)
-    assert await manager.sync(PID) == "armed"
-    second = "br-tp-pos-42600c953a4c-2"
-    assert exchange.creates() == [second]
-    exchange.algo[second].update(algoStatus="REJECTED", triggerTime=1793141100000)
-    assert await manager.sync(PID) == "exit"
-    state = registry.get(PID).server_protection
-    assert (state.stage, state.exit_reason) == ("exiting", CloseReason.TAKE_PROFIT)
-    assert exchange.creates() == [second]
-    assert [a.dedup_key for a in alerter.sent] == [
-        f"server_trigger_rejected:{PID}:take_profit-1",
-        f"server_trigger_rejected:{PID}:take_profit-2",
-    ]
-    assert "第二次" in alerter.sent[1].body
 
 
 async def test_triggering_then_rejected_reports_the_exit_as_rejected_after_trigger(

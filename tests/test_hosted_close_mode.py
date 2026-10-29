@@ -267,7 +267,7 @@ async def test_direct_mode_fills_inside_budget_with_stop_still_live(tmp_path: Pa
     assert done.record.close_reason is CloseReason.KEEPER
     assert h.settled == [(CloseReason.KEEPER, CloseFill(100, None))]
     assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
-    assert not h.backups() and not h.live_stop() and len(h.cancels()) == 3
+    assert not h.backups() and not h.live_stop() and len(h.cancels()) == 2
     [notice] = h.exit_alerts()
     assert (notice.level, notice.kind) == (AlertLevel.INFO, "close_done")
     assert notice.body.endswith("先直连、后停 HB（direct）；直连只减仓单 1 代，我方成交 2")
@@ -549,13 +549,13 @@ async def test_triggered_then_cancelled_leg_is_not_quiet(tmp_path: Path, side: S
                 "state": "cancelled",
                 "algo_status": "CANCELED",
                 "child_state": "identified",
-                "actual_order_id": "child-tp",
+                "actual_order_id": "child-lb",
                 "actual_order_status": "CANCELED",
                 "filled_quantity": 0.5,
                 "triggered_at": START,
             }
         )
-        if leg.kind == "take_profit"
+        if leg.purpose == "lifeboat"
         else leg
         for leg in state.legs
     ]
@@ -574,7 +574,7 @@ async def test_unclear_leg_falls_back_to_hb_first(tmp_path: Path, side: Side):
     h = await armed(tmp_path, side)
     state = h.state()
     legs = [
-        leg.model_copy(update={"state": "submit_pending"}) if leg.kind == "take_profit" else leg
+        leg.model_copy(update={"state": "submit_pending"}) if leg.purpose == "lifeboat" else leg
         for leg in state.legs
     ]
     tracked = h.tracked()
@@ -987,7 +987,7 @@ async def test_manual_close_sends_the_order_before_any_leg_cancel_or_hb_stop(
     assert done.record.status is PositionStatus.CLOSED
     assert done.record.close_reason is CloseReason.MANUAL
     assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
-    assert not h.backups() and not h.live_stop() and len(h.cancels()) == 3
+    assert not h.backups() and not h.live_stop() and len(h.cancels()) == 2
     assert not h.failure_alerts()
 
 

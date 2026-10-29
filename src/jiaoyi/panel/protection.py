@@ -200,6 +200,10 @@ def parse_protection(
     legs: list[LegView] = []
     for role in _ROLE_ORDER:
         mine = [x for x in legs_raw if _role_of(x) == role]
+        if role == "take_profit" and all(
+            leg_state(x) == "cancelled" and not _trigger_failed(x) for x in mine
+        ):
+            continue  # 不挂止盈单；旧版本挂的止盈腿撤掉后也不再显示（触发后被拒的照旧亮出来）
         # 任何一代被触发都要亮出来（迟到触发）；否则看最新一代
         hit = [x for x in mine if _triggered(x)]
         pick = hit[-1] if hit else max(mine, key=_gen, default=None)

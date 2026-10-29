@@ -249,13 +249,13 @@ class Harness:
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_fully_identified_three_legs_arm_once_and_survive_restart(tmp_path: Path, side: Side):
+async def test_fully_identified_legs_arm_once_and_survive_restart(tmp_path: Path, side: Side):
     h = Harness(tmp_path, side)
     assert await h.manager.sync("pos-1") == "armed"
     h.restart()
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and not h.cancels()
-    assert {leg.kind for leg in h.state().legs} == {"stop_loss", "take_profit"}
+    assert len(h.creates()) == 2 and not h.cancels()
+    assert {leg.kind for leg in h.state().legs} == {"stop_loss"}
     assert {leg.purpose for leg in h.state().legs} == {"fixed", "lifeboat"}
 
 
@@ -296,7 +296,7 @@ async def test_unknown_submit_keeps_original_cid_across_retries_and_restart(
     h.exchange.hidden.clear()
     h.exchange.unknown_submit = False
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and h.creates().count(original_cid) == 1
+    assert len(h.creates()) == 2 and h.creates().count(original_cid) == 1
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -308,22 +308,10 @@ async def test_restart_rejects_wrong_trigger_price_without_rebuilding(tmp_path: 
     h.restart()
     with pytest.raises(ProtectionIncomplete):
         await h.manager.sync("pos-1")
-    assert len(h.creates()) == 3 and not h.cancels()
+    assert len(h.creates()) == 2 and not h.cancels()
     assert (
         h.state().last_error == "ProtectionIncomplete: 条件单身份、触发价、数量或只减仓参数不匹配"
     )
-
-
-@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_rejected_tp_keeps_confirmed_sl(tmp_path: Path, side: Side):
-    h = Harness(tmp_path, side)
-    h.exchange.reject_kind = "take_profit"
-    with pytest.raises(ProtectionIncomplete):
-        await h.manager.sync("pos-1")
-    assert len(h.exchange.orders) == 2
-    assert all(o.kind == "stop_loss" for o in h.exchange.orders.values())
-    assert {o.working_type for o in h.exchange.orders.values()} == {"MARK_PRICE", "CONTRACT_PRICE"}
-    assert not h.cancels() and h.state().stage != "armed"
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -341,7 +329,7 @@ async def test_entry_grows_during_create_without_false_armed(tmp_path: Path, sid
     assert await h.manager.sync("pos-1") == "provisional"
     assert len(h.creates()) == 1 and not h.cancels()
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 4
+    assert len(h.creates()) == 3
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -368,7 +356,7 @@ async def test_old_generation_trigger_unknown_blocks_new_generation_and_direct(
     h.exchange.on_place = old_trigger
     assert await h.manager.sync("pos-1") == "exit"
     assert h.state().stage == "exiting"
-    assert len(h.creates()) == 4 and not h.cancels()
+    assert len(h.creates()) == 3 and not h.cancels()
     assert await h.manager.prepare_exit("pos-1") is False
     assert not h.cancels()
 
@@ -392,7 +380,7 @@ async def test_cancel_unknown_does_not_resend_and_later_confirmation_recovers(
     h.exchange.orders[cid] = replace(h.exchange.orders[cid], algo_status="CANCELED")
     h.exchange.cancel_unknown = False
     assert await h.manager.flat_cleanup("pos-1") is True
-    assert len(h.cancels()) == 3
+    assert len(h.cancels()) == 2
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -431,7 +419,7 @@ async def test_concurrent_sync_uses_one_pair_and_reentrant_cleanup_does_not_dead
     result = await asyncio.wait_for(
         asyncio.gather(h.manager.sync("pos-1"), h.manager.sync("pos-1")), 1
     )
-    assert result == ["armed", "armed"] and len(h.creates()) == 3
+    assert result == ["armed", "armed"] and len(h.creates()) == 2
     h.exchange.held = 0
     assert await asyncio.wait_for(h.manager.flat_cleanup("pos-1"), 1) is True
     assert h.state().stage == "done"
@@ -469,7 +457,7 @@ async def test_old_leg_fills_while_replacement_cancel_cannot_revert_exit_to_prov
     monkeypatch.setattr(h.exchange, "cancel_bracket", triggered_instead_of_cancel)
     assert await h.manager.sync("pos-1") == "exit"
     assert h.state().stage == "exiting"
-    assert len(h.creates()) == 4  # 旧 SL 已触发，不能继续创建又一代。
+    assert len(h.creates()) == 3  # 旧 SL 已触发，不能继续创建又一代。
 
 
 class AdapterExchange(EvidenceExchange):
@@ -869,7 +857,7 @@ async def test_trailing_replacement_unknown_preserves_old_sl_and_recovers_same_c
     h.restart()
     with pytest.raises(ProtectionIncomplete):
         await h.manager.sync("pos-1")
-    assert len(h.creates()) == 4 and h.state().trailing_peak_net_exact == exact_peak
+    assert len(h.creates()) == 3 and h.state().trailing_peak_net_exact == exact_peak
     h.exchange.hidden.clear()
     h.exchange.unknown_submit = False
     assert await h.manager.sync("pos-1") == "armed"
@@ -906,7 +894,7 @@ async def test_restart_lower_quote_preserves_peak_stop_and_marks_observation_gap
     assert h.state().trailing_peak_net_exact == peak
     assert h.state().trailing_stop_price == stop and h.state().trailing_observation_gap
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 4
+    assert len(h.creates()) == 3
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
