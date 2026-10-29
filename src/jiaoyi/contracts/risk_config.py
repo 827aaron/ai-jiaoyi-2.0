@@ -589,6 +589,32 @@ class FastLoopConfig(Contract):
         max_length=20,
         description="是非题里的时间范围：「<币> 接下来 <这里> 会上涨吗？」。",
     )
+    keeper_assistant_question: Literal["blind_move", "hold"] = Field(
+        default="blind_move",
+        description="反向信号时问什么。blind_move = 两个模型问不带仓位的是非题「会上涨 / 下跌吗」"
+        "（现状）；hold = 管家问：管家复查那道持仓题（拿住 / 全平）、同一份完整持仓快照和字段"
+        "说明，同时问助手 1（Jev）和助手 2（keeper_assistant_b_model，选项倒序），两个都答「平」"
+        "且 p(平) ≥ keeper_assistant_min_p 才平。翻转确认不受影响。",
+    )
+    keeper_assistant_blind_glossary: bool = Field(
+        default=False,
+        description="blind_move 时是非题前面带上英文的行情字段说明（和管家持仓题里讲行情字段的"
+        "那几句一样）。关 = 题目和现在一字不差。",
+    )
+    keeper_assistant_b_action_only: bool = Field(
+        default=False,
+        description="hold 时助手 2 只收一道 action 题（说明 = 进场理由那题的说明 + action 的说明，"
+        "字段说明还在）。只在助手 2 的接口不收多道题时打开（先跑 keeper-assistant-probe --hold）。",
+    )
+    keeper_assistant_reuse_s: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=60.0,
+        allow_inf_nan=False,
+        description="hold 时：同一个反向信号也叫了管家急查，就最多等这么多秒等急查问 Jev，拿它那次"
+        "的快照问助手 2、它的回答当助手 1（Jev 不问两遍）；急查这么多秒内已问过也一样。等不到"
+        "（没排急查、急查没问 Jev）就自己按管家的快照问两个。0 = 不等，一律自己问。",
+    )
     keeper_assistant_timeout_s: float = Field(
         default=8.0,
         ge=0.2,
@@ -1283,10 +1309,10 @@ class PredictorConfig(Contract):
     )
     keeper_snapshot: Literal["direction", "rank", "off"] = Field(
         default="direction",
-        description="管家（持仓复查）快照里怎么带预测员。direction = 照旧：kronos.agree 按平均路径"
-        "终点在现价哪一侧给 1 / 0，再带全池名次（p_up 只有 0 / 1，实测多数是 0，做多多半是 0、"
-        "做空多半是 1，多空不对称）；rank = 只带全池名次 top / mid / bottom（和拍板加分同一个"
-        "排名，多空镜像对称），排不出名次就不写；off = 快照不带预测员。改后重启。",
+        description="管家（持仓复查）快照里怎么带预测员。direction = 预测员的原值 kronos.p_up"
+        "（平均路径终点高于现价 = 1、低于 = 0，实测多数是 0）再带全池名次；rank = 只带全池名次"
+        " top / mid / bottom（和拍板加分同一个排名），排不出名次就不写；off = 快照不带预测员。"
+        "都只给原值，不替模型判断和持仓同不同向。改后重启。",
     )
     against_card_meeting: bool = Field(
         default=False,

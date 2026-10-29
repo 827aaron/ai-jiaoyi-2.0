@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from jiaoyi import contracts as c
-from jiaoyi.gate.questions import template_dump
+from jiaoyi.gate.questions import hold_questions, template_dump
 from jiaoyi.keeper.keeper import JevKeeper
 from tests.fastloop_helpers import FAST, card, features
 from tests.test_keeper_patrol import position
@@ -228,7 +228,8 @@ async def test_every_observed_path_matches_original_keeper(now: datetime, case: 
     baseline: dict[str, Any] = json.loads(BASELINE.read_text())
     expected = baseline["cases"][case]
     for request in expected["requests"]:
-        request["questions"] = baseline["request"]["questions"]
+        seeded = hold_questions("direction", request["snapshot"])  # choice order follows it
+        request["questions"] = [q.model_dump(mode="json") for q in seeded]
     current, _ = await _run_case(now, case, "healthy")
     assert current == expected
 

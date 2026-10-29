@@ -42,9 +42,9 @@ from jiaoyi.contracts import (
 )
 from jiaoyi.gate.context import EntryExtras
 
-TEMPLATE_VERSION = "q9"
+TEMPLATE_VERSION = "q11"
 PROMPT_VERSION = TEMPLATE_VERSION  # 旧名字，保留兼容
-SNAPSHOT_SCHEMA = "s6"
+SNAPSHOT_SCHEMA = "s7"
 """快照字段（``market_block`` / ``entry_snapshot`` / ``hold_snapshot`` 的键）变了也要升模板版本。"""
 MAX_SNAPSHOT_CHARS = 3200
 """一道题问法加了技术面、成交流、衍生品、完整作战卡，中位约 1750 字，最长约 2600（spec §3e）。"""
@@ -72,6 +72,16 @@ KNOWN_TEMPLATES: dict[str, str] = {
     # keeper_snapshot variants of q9 (entry prompts identical): rank = pool rank only, off = none
     "q9-krank": "34da870456b4",
     "q9-koff": "87187a5598c6",
+    # hold prompt glossary explains every hold_snapshot key (units, sign); entry prompts unchanged
+    "q10": "18821af0e159",
+    "q10-krank": "ae7139fbea1c",
+    "q10-koff": "c6d9cf4c3dd1",
+    # neutral hold question (no hold / close advice, no "OPPOSITE"), kronos raw p_up instead of
+    # agree, entry probabilities out of the snapshot (s7), choice order seeded per snapshot,
+    # order-neutral goal sentence, PnL sign stated per field group
+    "q11": "cb411fdf296f",
+    "q11-krank": "eeed63421caf",
+    "q11-koff": "9d39a39e5964",
 }
 
 _ENTRY_GOAL = (
@@ -96,37 +106,74 @@ KronosSnapshot = Literal["direction", "rank", "off"]
 
 _HOLD_KRONOS: dict[KronosSnapshot, str] = {
     "direction": (
-        "`kronos.agree` = 1 if the "
-        "forecast model's averaged path ends in the position's direction, else 0; `kronos.rank` = "
-        "where this coin's forecast return ranks among all coins forecast now (top/mid/bottom); "
+        "`kronos.p_up` = the forecast model's probability (0-1) that price is higher at the end "
+        "of its horizon; `kronos.rank` = where this coin's forecast return ranks among all coins "
+        "forecast now (top/mid/bottom); "
     ),
     "rank": (
         "`kronos.rank` = where this coin's forecast return ranks among all coins forecast now "
-        "(top/mid/bottom): top favours a long and disfavours a short, bottom the reverse, mid "
-        "favours neither; "
+        "(top/mid/bottom); "
     ),
     "off": "",
 }
 
 
+MARKET_GLOSSARY = (
+    "Field glossary. Units: `*_bps` = basis points (1 bp = 0.01%), `*_k` = thousand USDT, "
+    "`*_x` = multiple of the recent average; signed market values are positive for a price rise "
+    "or net taker buying. "
+    "`sym` = the coin; `px` = last price (USDT); `atr_bps` = ATR in bps; `ret1m_bps`"
+    "/`ret5m_bps` = price change over 1/5 minutes; `rv5m_bps` = 5-minute realized "
+    "volatility; `vol_x` = 1-minute volume, `vol10_x` = last 10s volume scaled to 1 minute; "
+    "`buy` = taker buy share of 1-minute volume (0-1, 0.5 = equal buy and sell); `cvd30_k` = "
+    "taker buy minus sell over the last 30s; `liq_long_k`/`liq_short_k` = long / short "
+    "liquidations in the last minute; `fund_bps` = funding rate (positive = longs pay shorts). "
+    "Derivatives, when present: `oi15`/`oi60`/`oi4h` = open interest change % over 15m/60m/4h; "
+    "`top_ls`/`crowd_ls` = top-trader position and all-account long/short ratios (above 1 = "
+    "more long); `div4h` = top minus crowd 4h change %; `btc5z` = BTC 5-minute move in noise "
+    "units (positive = BTC up). `book` = order book: `spread_bps` = bid-ask spread, "
+    "`ofi_k` = order-flow imbalance (positive = net buying), `depth_k` = resting depth near "
+    "the price."
+)
+"""The glossary lines that apply to market fields: the keeper's hold prompt carries them, and
+the keeper assistant prepends them to its blind question, so the two models read the same
+explanation of the same keys."""
+
+_HOLD_GLOSSARY = (
+    "`pos` = our position, its PnL fields signed by profit (positive = profit for either side): "
+    "`side` long/short; `entry_px` = entry price; `pnl_bps` = unrealized PnL before fees; "
+    "`age_min` = minutes held; `time_left_min` = minutes "
+    "until the time-limit close; `to_stop_bps`/`to_tp_bps` = distance from price to the stop / "
+    "take-profit; `peak_bps` = best unrealized PnL so far, `giveback_bps` = how much of that "
+    "peak is gone; `pnl_r`/`peak_r` = the same in units of the initial stop distance (-1 = at "
+    "the stop); `be_bps` = PnL after round-trip taker fees (about 10 bps); `path_bps` = "
+    "unrealized PnL at earlier checks, oldest first. "
+    "`entry` = why we entered: `sig` = signal type, `why` = trigger text. "
+    "`trail` = trailing stop: `on` = configured, `active` = armed, `stop_bps` = PnL bps left "
+    "before it is hit. "
+    "`card` = today's strategist plan for this coin: `bias` long/short/both/no_trade; "
+    "`levels_bps` = key levels as bps from price (negative = below); `stop_atr` = stop range in "
+    "`atr_bps` multiples; `tp_r` = take-profit range in stop distances; `size_max` = largest "
+    "size tier (S/M/L); `regime` = the strategist's market notes; `source_market_view_id` = the "
+    "market view it was built on; `status` none / symbol_not_in_card = no plan for this coin. "
+    "`current_market` = the latest market-wide view: `regime` text, `regime_direction` "
+    "(看涨 bullish / 看跌 bearish / 中性 neutral), `market_view_id`/`version`, "
+    "`observed_at`/`source_ts` = UTC times, `within_4h` = short-term outlook text, `age_min` = "
+    "minutes since published, `stale` = present when older than the configured maximum age. "
+)
+
+
 def _hold_goal(kronos: KronosSnapshot) -> str:
     return (
-        "Goal: we hold an open position (`pos`). Decide whether to keep holding or close it now. "
-        "You can only hold or close the whole position; the stop is never widened and size is "
-        "never added. A wrong close costs fees and the remaining move; a wrong hold can cost up "
-        "to the stop. Inputs: `pnl_bps`, `age_min`, distance to stop and take-profit in bps, "
-        "recent returns, taker flow (`buy`, `cvd30_k`), liquidations, funding, the book, and "
-        "whether today's strategist card still supports the trade (`card`)."
-        " New inputs: `pos.entry_px`; `pos.peak_bps` = best unrealized PnL so far, "
-        "`pos.giveback_bps` = how much of that peak is gone; `pos.pnl_r`/`pos.peak_r` = the same "
-        "in units of the initial stop distance; `pos.be_bps` = PnL after round-trip fees; "
-        "`pos.path_bps` = unrealized PnL at earlier checks, oldest first; `entry` = why we entered "
-        "(signal type, trigger text, entry-time genuine/take probabilities); `trail` = trailing "
-        "stop: on, active, and bps from price to the trailing stop; "
+        "Goal: we hold an open position (`pos`); choose between the two options of the `action` "
+        "question, for the whole position. The stop is never widened and size is never added. "
+        + MARKET_GLOSSARY
+        + " "
+        + _HOLD_GLOSSARY
         + _HOLD_KRONOS[kronos]
-        + "`against` (only on urgent checks) = a "
-        "rule trigger just fired in the OPPOSITE direction of our position: its type, side, volume "
-        "multiple, taker buy share, whether it is a strong type, seconds ago."
+        + "`against` (only on urgent checks) = a rule trigger whose side differs from "
+        "`pos.side`: `sig` = its type, `side`, `vol_x` = volume multiple, `buy` = taker buy "
+        "share, `strong` = one of the strong trigger types, `age_s` = seconds ago."
     )
 
 
@@ -175,11 +222,8 @@ HOLD_PROMPTS: dict[HoldQuestion, str] = {
         "How likely is a sharp move against the position in the next few minutes?"
     ),
     HoldQuestion.ACTION: (
-        "Should we keep holding the whole position or close all of it now? If the position is "
-        "in profit after fees (`pos.be_bps` > 0), weigh how much of the peak profit "
-        "(`pos.peak_bps`, `pos.giveback_bps`) has already been given back and whether the "
-        "trailing stop (`trail`) already protects it. A position that is losing but still "
-        "inside its stop is not by itself a reason to close: the stop already limits that loss."
+        "Hold the whole position or close all of it now? A wrong close costs fees plus the move "
+        "we miss; a wrong hold costs the adverse move up to the stop."
     ),
 }
 
@@ -239,10 +283,29 @@ def entry_questions(mode: GateQuestions = "six", hold_min: int = 120) -> list[Je
     ]
 
 
-def hold_questions(kronos: KronosSnapshot = "direction") -> list[JevQuestion]:
+HOLD_TWO = (HoldQuestion.THESIS_INTACT, HoldQuestion.ACTION)
+"""管家助手 hold 题时管家和两个助手问的两道：``action`` 定拿平，``thesis_intact`` 管家的盈利门控
+要读、字段说明也在它的说明里；``adverse_risk`` 没人读，只会把回答往「有风险」上引。"""
+
+
+def hold_questions(
+    kronos: KronosSnapshot = "direction",
+    order_seed: str | None = None,
+    only: Sequence[HoldQuestion] | None = None,
+) -> list[JevQuestion]:
+    """``order_seed``（这次的快照）：选项按它的哈希正序或倒序列，同一份快照总是同一顺序，
+    换一份快照各占一半，模型不会总先看到 hold；None = 契约里的顺序。``only``：只问这几道
+    （按 ``HoldQuestion`` 的顺序）；None = 三道都问。"""
+    flip = order_seed is not None and hashlib.sha256(order_seed.encode()).digest()[0] & 1
     prompts = hold_prompts(kronos)
     return [
-        JevQuestion(id=q.value, prompt=prompts[q], choices=HOLD_CHOICES[q]) for q in HoldQuestion
+        JevQuestion(
+            id=q.value,
+            prompt=prompts[q],
+            choices=tuple(reversed(HOLD_CHOICES[q])) if flip else HOLD_CHOICES[q],
+        )
+        for q in HoldQuestion
+        if only is None or q in only
     ]
 
 
@@ -402,6 +465,7 @@ def _card_full(
 
 
 DEFAULT_HOLD_MIN = 120
+ENTRY_FACTS = ("sig", "why")
 
 
 def entry_levels_bps(signal: CandidateSignal, card: BattleCard) -> list[float]:
@@ -512,13 +576,14 @@ def hold_snapshot(
     market_age: Mapping[str, Any] | None = None,
     kronos: KronosSnapshot = "direction",
 ) -> str:
-    """``kronos`` is ``[predictor] keeper_snapshot``: "direction" = agree from p_up + rank,
-    "rank" = pool rank only (p_up is 0/1 and skews to 0, so agree favours shorts), "off" = none.
+    """``kronos`` is ``[predictor] keeper_snapshot``: "direction" = raw p_up + rank, "rank" =
+    pool rank only, "off" = none.
 
     ``against``：主循环因「和卡相反的信号」叫的急查，带上那个信号（只这一次有这个键）。
 
     ``history``：这笔仓之前历次复查的浮盈（基点，从早到晚），算最高浮盈、回吐和走势；
-    ``entry``：进场理由（拍板记录里的信号种类、触发说明、「真」「做」概率），拿不到不写；
+    ``entry``：进场理由，只写 ``ENTRY_FACTS``（拍板时的「真」「做」概率是上一个模型自己的
+    结论，会把回答往它那边拽），拿不到不写；
     ``forecast``：这个币最新一条没过期的预测，拿不到不写；``fee_bps``：单边吃单手续费。
     进场快照和进场题目不变（方案 E 只改管家）。"""
     px = f.last_price
@@ -549,8 +614,9 @@ def hold_snapshot(
     if history:
         p["path_bps"] = _path(history)
     d: dict[str, Any] = {"sym": pos.symbol, "pos": p}
-    if entry:
-        d["entry"] = dict(entry)
+    facts = {k: entry[k] for k in ENTRY_FACTS if k in entry} if entry else {}
+    if facts:
+        d["entry"] = facts
     on = pos.trailing_activation_pct is not None and pos.trailing_stop_pct is not None
     trail: dict[str, Any] = {"on": on, "active": False}
     if on and pos.trailing_activation_pct is not None and pos.trailing_stop_pct is not None:
@@ -570,8 +636,7 @@ def hold_snapshot(
     if kronos != "off" and forecast is not None and forecast.stale_after > now:
         kr: dict[str, Any] = {}
         if kronos == "direction":
-            up = forecast.p_up if pos.side == Side.LONG else 1.0 - forecast.p_up
-            kr["agree"] = 1 if up > 0.5 else 0
+            kr["p_up"] = _r(forecast.p_up, 2)
         if forecast.rank_view is not None:
             kr["rank"] = forecast.rank_view
         if kr:
@@ -621,7 +686,7 @@ def template_fingerprint(kronos: KronosSnapshot = "direction") -> str:
         "snapshot": SNAPSHOT_SCHEMA,
         "max_chars": MAX_SNAPSHOT_CHARS,
     }
-    if kronos != "direction":  # direction keeps the registered q9 payload byte-for-byte
+    if kronos != "direction":  # direction keeps the plain payload, as registered since q9
         payload["keeper_kronos"] = kronos
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:12]

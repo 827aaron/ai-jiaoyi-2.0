@@ -77,7 +77,7 @@ from jiaoyi.keeper.assistant import (
 from jiaoyi.keeper.assistant import (
     SnapshotProvider as AssistantSnapshot,
 )
-from jiaoyi.keeper.keeper import close_blocked
+from jiaoyi.keeper.keeper import JevKeeper, close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
     ATR_PERIOD,
@@ -789,16 +789,17 @@ class Runner:
     def _build_assistant(self) -> KeeperAssistant:
         app, fl = self.app, self.app.app_cfg.fast_loop
         model = app.keeper_jev or self.m.decision_model
-        jev = (
-            TransportScorer(
+
+        def scorer() -> TransportScorer | None:
+            if not isinstance(model, JevDecisionModel):
+                return None
+            return TransportScorer(
                 model.transport,
                 usd_per_mtok=fl.jev_usd_per_mtok,
                 max_errors=fl.jev_max_consecutive_errors,
                 cooldown_s=fl.jev_error_cooldown_s,
             )
-            if isinstance(model, JevDecisionModel)
-            else None
-        )
+
         cards = self.m.cards if isinstance(self.m.cards, BattleCardCommander) else None
         rec = app.recorders.get(Role.KEEPER_ASSISTANT) or RoleRecorder(
             Role.KEEPER_ASSISTANT, app.log, day_reset_tz=app.risk_cfg.day_reset_tz
@@ -810,7 +811,8 @@ class Runner:
             close=self._assistant_close,
             clock=app.clock,
             data_dir=Path(app.app_cfg.data_dir),
-            jev=jev,
+            jev=scorer(),
+            jev_hold=scorer(),
             b_scorer=getattr(app, "assistant_b", None),
             cards=cards,
             alert=self._assistant_alert,
@@ -820,6 +822,8 @@ class Runner:
                 close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
             ).get("source"),
             snapshot_provider=self._assistant_snapshot(),
+            hold=self.m.keeper if isinstance(self.m.keeper, JevKeeper) else None,
+            still_open=self._assistant_still_open,
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
@@ -836,6 +840,14 @@ class Runner:
                 ),
             )
         return assistant
+
+    def _assistant_still_open(self, position_id: str) -> bool:
+        if position_id in self._closing:
+            return False
+        return any(
+            p.position_id == position_id and p.status is PositionStatus.OPEN
+            for p in self._ledger_positions()
+        )
 
     def _assistant_snapshot(self) -> AssistantSnapshot:
         """管家助手的行情：``rest_warm_start`` 开着时找行情层拿（旧了 / 没预热先从 REST 补，最多等
@@ -937,7 +949,9 @@ class Runner:
         # 管家助手和管家急查各走各的，谁先平谁算（平仓去重在 close 里）
         for pos in self._ledger_positions():
             if pos.symbol == sig.symbol:
-                self.assistant.on_reverse_signal(pos, sig.side, f"{sig.kind.value}：{sig.desc}")
+                self.assistant.on_reverse_signal(
+                    pos, sig.side, f"{sig.kind.value}：{sig.desc}", sig
+                )
         for pos, one_shot in rechecks:
             if isinstance(self.m.keeper, _NotesAgainst):
                 self.m.keeper.note_against(pos.position_id, sig, one_shot)

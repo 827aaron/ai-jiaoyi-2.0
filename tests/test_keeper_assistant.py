@@ -15,7 +15,8 @@ from jiaoyi import contracts as c
 from jiaoyi.contracts import FastLoopConfig, KeyLevel, LevelKind, Outcome, Role, Side
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
-from jiaoyi.gate.jev import MockJevTransport
+from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+from jiaoyi.gate.questions import HOLD_TWO, MARKET_GLOSSARY, hold_questions
 from jiaoyi.keeper import assistant as ka
 from jiaoyi.keeper.assistant import (
     QUESTION_ID,
@@ -23,9 +24,10 @@ from jiaoyi.keeper.assistant import (
     TransportScorer,
     Verdict,
 )
+from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.slow.card_flip import FlipCandidate
-from tests.fastloop_helpers import features
-from tests.test_keeper_patrol import position
+from tests.fastloop_helpers import FAST, card, features
+from tests.test_keeper_patrol import close_p, position
 
 ON = {
     "keeper_assistant_on": True,
@@ -43,6 +45,7 @@ class Scorer:
         self.p_yes = p_yes
         self.gate = gate
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
+        self.hold_calls: list[tuple[str, tuple[c.JevQuestion, ...]]] = []
         self.started = asyncio.Event()
 
     async def ask(
@@ -61,6 +64,23 @@ class Scorer:
         if self.p_yes is None:
             return Verdict(judge, None, None, tuple(options), "超时", 1.0)
         return Verdict(judge, "m", self.p_yes, tuple(options), None, 1.0, 0.001)
+
+    async def ask_hold(
+        self,
+        judge: str,
+        symbol: str,
+        state: str,
+        questions: Sequence[c.JevQuestion],
+        timeout_s: float,
+    ) -> Verdict:
+        self.hold_calls.append((state, tuple(questions)))
+        self.started.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        opts = next(q.choices for q in questions if q.id == "action")
+        if self.p_yes is None:
+            return Verdict(judge, None, None, opts, "超时", 1.0, question="hold")
+        return Verdict(judge, "m", self.p_yes, opts, None, 1.0, 0.001, question="hold")
 
 
 def cand(now: datetime, direction: str = "long") -> FlipCandidate:
@@ -105,6 +125,7 @@ class Harness:
         cards: Cards | None = None,
         closing: bool = False,
         price: float = 103.7,
+        hold: Any = None,
         **cfg: Any,
     ) -> None:
         self.cfg = FastLoopConfig(**{**ON, **cfg})
@@ -139,6 +160,14 @@ class Harness:
             warn=lambda title, text: self.warns.append((title, text)),
             day_reset_tz="UTC",
             close_source=lambda pid: "keeper_assistant" if pid in self.accepted else None,
+            hold=hold,
+        )
+
+    def features(self, sym: str) -> c.FeatureSnapshot:
+        return features(
+            self.clock[0] - timedelta(seconds=self.snap_age),
+            price=self.price[0],
+            live_s=self.live_s,
         )
 
     def _close(self, pos: c.PositionRecord, reason: str) -> str | None:
@@ -298,20 +327,24 @@ async def test_KeeperAssistant_on_reverse_signal_ignores_signals_with_the_positi
     assert a.calls == [] and h.closed == [] and off.closed == []
 
 
+@pytest.mark.parametrize("glossary", [False, True])
 async def test_KeeperAssistant_on_reverse_signal_asks_both_at_once_blind_and_mirrored(
-    tmp_path: Path, now: datetime
+    tmp_path: Path, now: datetime, glossary: bool
 ) -> None:
     gate = asyncio.Event()
     a, b = Scorer(0.9, gate), Scorer(0.9, gate)
-    h = Harness(tmp_path, now, a, b)
+    h = Harness(tmp_path, now, a, b, keeper_assistant_blind_glossary=glossary)
     h.a.on_reverse_signal(short_pos(now), Side.LONG, "强平反弹")
     await asyncio.wait_for(asyncio.gather(a.started.wait(), b.started.wait()), 1.0)
     gate.set()
     await h.settle()
     (state_a, q_a, opts_a), (state_b, q_b, opts_b) = a.calls[0], b.calls[0]
     assert opts_a == ("是", "否") and opts_b == ("否", "是")
-    assert q_a == "BTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）"
-    assert q_b == "BTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
+    lead = MARKET_GLOSSARY + "\n" if glossary else ""
+    assert q_a == lead + "BTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）"
+    assert q_b == lead + "BTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
+    assert a.hold_calls == [] and b.hold_calls == []
+    q_a = q_a.splitlines()[-1]
     assert state_a == state_b
     snapshot = json.loads(state_a)
     assert snapshot["sym"] == "BTCUSDT"
@@ -322,6 +355,292 @@ async def test_KeeperAssistant_on_reverse_signal_asks_both_at_once_blind_and_mir
     for word in ("short", "空", "持仓", "仓位", "反向", "信号", "强平反弹", "100", "110"):
         assert word not in q_a
     assert h.closed
+
+
+HOLD = {"keeper_assistant_question": "hold"}
+
+
+class Jev:
+    """The keeper's Jev: answers p(close) and keeps every (state, questions) it was sent."""
+
+    def __init__(self, p: float) -> None:
+        self.seen: list[tuple[str, tuple[c.JevQuestion, ...]]] = []
+        self.p = p
+        self.t = MockJevTransport(answer=self.answer)
+
+    def answer(self, state: str, qs: Sequence[c.JevQuestion]) -> Mapping[str, Mapping[str, float]]:
+        self.seen.append((state, tuple(qs)))
+        return close_p(self.p)(state, qs)  # type: ignore[no-any-return]
+
+
+def against(now: datetime) -> c.AgainstSignalEvent:
+    return c.AgainstSignalEvent(
+        symbol="BTCUSDT", ts=now, kind=c.SignalKind.VOLUME_BREAKOUT, side=Side.LONG, desc="反向"
+    )
+
+
+def hold_harness(
+    tmp_path: Path, now: datetime, a: Scorer, b: Scorer, jev: Jev, **cfg: Any
+) -> tuple[Harness, JevKeeper]:
+    keeper: list[JevKeeper] = []
+
+    class Late:
+        """The keeper reads the harness's clock-bound features, so it is built after it."""
+
+        async def hold_request(self, *args: Any) -> Any:
+            return await keeper[0].hold_request(*args)
+
+        async def wait_hold(self, *args: Any) -> Any:
+            return await keeper[0].wait_hold(*args)
+
+    h = Harness(tmp_path, now, a, b, hold=Late(), **{**HOLD, **cfg})
+    keeper.append(
+        JevKeeper(
+            JevDecisionModel(jev.t, FAST, timeout_ms=200),
+            h.cfg,
+            h.features,
+            lambda n: card(now, bias="short"),
+            RoleRecorder(Role.KEEPER, h.log),
+        )
+    )
+    return h, keeper[0]
+
+
+async def test_KeeperAssistant_hold_asks_both_judges_the_keepers_question_and_snapshot(
+    tmp_path: Path, now: datetime
+) -> None:
+    a, b, jev = Scorer(0.8), Scorer(0.7), Jev(0.1)
+    h, keeper = hold_harness(tmp_path, now, a, b, jev)
+    pos, sig = short_pos(now), against(now)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig)
+    await h.settle()
+    keeper.note_against(pos.position_id, sig, False)
+    await keeper.review(pos, now)
+    [(keeper_state, keeper_qs)] = jev.seen
+    [(state_a, qs_a)], [(state_b, qs_b)] = a.hold_calls, b.hold_calls
+    assert [q.id for q in keeper_qs] == ["thesis_intact", "action"]  # no adverse_risk
+    assert a.calls == [] and b.calls == []
+    assert state_a == state_b == keeper_state
+    assert qs_a == keeper_qs
+    assert [(q.id, q.prompt) for q in qs_b] == [(q.id, q.prompt) for q in keeper_qs]
+    assert [q.choices for q in qs_b] == [tuple(reversed(q.choices)) for q in keeper_qs]
+    snapshot = json.loads(state_a)
+    assert {"pos", "card", "against", "trail"} <= set(snapshot)
+    assert MARKET_GLOSSARY in "".join(q.prompt for q in qs_a)
+    [rec] = h.records()
+    assert rec["question"] == "hold" and rec["a_reused"] is False
+    assert rec["snapshot_hash"] == ka.snapshot_hash(keeper_state)
+    assert rec["p_close"] == [0.8, 0.7]
+    assert [j["p_close"] for j in rec["judges"]] == [0.8, 0.7]
+
+
+@pytest.mark.parametrize(
+    ("pa", "pb", "closed"),
+    [
+        (0.8, 0.6, True),
+        (0.8, 0.4, False),
+        (0.4, 0.8, False),
+        (0.8, 0.59, False),
+        (None, 0.9, False),
+    ],
+)
+async def test_KeeperAssistant_hold_closes_only_when_both_say_close(
+    tmp_path: Path, now: datetime, pa: float | None, pb: float | None, closed: bool
+) -> None:
+    h, _ = hold_harness(tmp_path, now, Scorer(pa), Scorer(pb), Jev(0.1))
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x", against(now))
+    await h.settle()
+    assert bool(h.closed) is closed
+    [rec] = h.records()
+    assert (rec["would_close"], rec["p_close"]) == (closed, [pa, pb])
+
+
+@pytest.mark.parametrize(
+    ("after_s", "same_signal", "reuse_s", "reused"),
+    [(5, True, 10, True), (11, True, 10, False), (5, False, 10, False), (5, True, 0, False)],
+)
+async def test_KeeperAssistant_hold_reuses_the_keepers_fresh_answer_to_the_same_signal(
+    tmp_path: Path, now: datetime, after_s: int, same_signal: bool, reuse_s: int, reused: bool
+) -> None:
+    a, b, jev = Scorer(0.1), Scorer(0.9), Jev(0.8)
+    h, keeper = hold_harness(tmp_path, now, a, b, jev, keeper_assistant_reuse_s=reuse_s)
+    pos, sig = short_pos(now), against(now)
+    keeper.note_against(pos.position_id, sig, False)
+    await keeper.review(pos, now)
+    [(keeper_state, _)] = jev.seen
+    h.clock[0] = now + timedelta(seconds=after_s)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig if same_signal else against(h.clock[0]))
+    await h.settle()
+    [(state_b, _)] = b.hold_calls
+    [rec] = h.records()
+    assert len(jev.seen) == 1
+    assert rec["a_reused"] is reused
+    if reused:
+        assert a.hold_calls == [] and state_b == keeper_state
+        assert rec["judges"][0]["reused"] is True and rec["p_close"] == [0.8, 0.9]
+        assert rec["a_reused_age_s"] == after_s and bool(h.closed)
+    else:
+        [(state_a, _)] = a.hold_calls
+        assert state_a == state_b != keeper_state
+        assert rec["p_close"] == [0.1, 0.9] and not h.closed
+
+
+async def test_KeeperAssistant_hold_takes_assistant_1_from_the_keepers_urgent_check(
+    tmp_path: Path, now: datetime
+) -> None:
+    a, b, jev = Scorer(0.1), Scorer(0.9), Jev(0.8)
+    h, keeper = hold_harness(tmp_path, now, a, b, jev)
+    pos, sig = short_pos(now), against(now)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig)
+    keeper.note_against(pos.position_id, sig, False)  # the main loop's order
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert keeper._ask_waiters.get(pos.position_id)  # waiting for the keeper, not asking Jev
+    await keeper.review(pos, now)
+    await h.settle()
+    [(keeper_state, _)] = jev.seen
+    [(state_b, _)] = b.hold_calls
+    assert a.hold_calls == [] and state_b == keeper_state
+    [rec] = h.records()
+    assert rec["a_reused"] is True and rec["p_close"] == [0.8, 0.9] and h.closed
+    assert rec["chain"] == (
+        "管家问 → 助手 1（Jev）p(平) 0.80（管家急查那次） / 助手 2（m）p(平) 0.90 → 平"
+    )
+
+
+async def test_KeeperAssistant_hold_asks_assistant_1_itself_when_the_keepers_jev_fails(
+    tmp_path: Path, now: datetime
+) -> None:
+    a, b, jev = Scorer(0.8), Scorer(0.9), Jev(0.8)
+    jev.t.fail = RuntimeError("down")
+    h, keeper = hold_harness(tmp_path, now, a, b, jev)
+    pos, sig = short_pos(now), against(now)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig)
+    keeper.note_against(pos.position_id, sig, False)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await keeper.review(pos, now)
+    await h.settle()
+    [(state_a, _)] = a.hold_calls
+    [(state_b, _)] = b.hold_calls
+    assert state_a == state_b
+    [rec] = h.records()
+    assert rec["a_reused"] is False and rec["p_close"] == [0.8, 0.9] and h.closed
+    assert "管家急查的 Jev 没答上" in rec["a_keeper_error"]
+
+
+async def test_KeeperAssistant_hold_does_not_ask_once_the_position_is_gone(
+    tmp_path: Path, now: datetime
+) -> None:
+    a, b = Scorer(0.9), Scorer(0.9)
+    h, _ = hold_harness(tmp_path, now, a, b, Jev(0.1))
+    h.a._still_open = lambda pid: False
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x", against(now))
+    await h.settle()
+    assert a.hold_calls == b.hold_calls == [] and not h.closed
+    [rec] = h.records()
+    assert rec["skipped"] == ka.CLOSED_MEANWHILE
+
+
+async def test_KeeperAssistant_hold_errors_never_cool_down_the_flip_confirmation(
+    tmp_path: Path, now: datetime
+) -> None:
+    made: list[MockJevTransport] = []
+
+    def factory(model: str) -> TransportScorer:
+        made.append(MockJevTransport(fail=RuntimeError("503")))
+        return TransportScorer(made[-1], usd_per_mtok=0, max_errors=1, cooldown_s=600)
+
+    cards = Cards()
+    h, _ = hold_harness(tmp_path, now, Scorer(0.9), Scorer(0.9), Jev(0.1), cards=cards)
+    h.a._b_factory = factory
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x", against(now))
+    await h.settle()
+    [hold_lane] = made
+    assert len(hold_lane.calls) == 1 and h.a._b["hold"][1].cooling()  # type: ignore[union-attr]
+    h.a.on_flip_pending("BTCUSDT", cand(now))
+    await h.settle()
+    assert len(made) == 2 and len(made[1].calls) == 1  # the flip lane still asks B
+
+
+def test_b_questions_reverses_every_option_and_can_fold_into_one_action_question() -> None:
+    qs = hold_questions("direction", None, HOLD_TWO)
+    both = ka.b_questions(qs, False)
+    assert [(q.id, q.prompt, q.choices) for q in both] == [
+        (q.id, q.prompt, tuple(reversed(q.choices))) for q in qs
+    ]
+    [one] = ka.b_questions(qs, True)
+    assert one.id == "action" and one.choices == ("close", "hold")
+    assert one.prompt == qs[0].prompt + " " + qs[1].prompt and MARKET_GLOSSARY in one.prompt
+
+
+async def test_probe_hold_retries_b_with_action_only_when_several_questions_fail(
+    now: datetime,
+) -> None:
+    def b_answer(state: str, qs: Sequence[c.JevQuestion]) -> Mapping[str, Mapping[str, float]]:
+        if len(qs) > 1:
+            raise RuntimeError("only one question per request")
+        return {"action": {"close": 0.7, "hold": 0.3}}
+
+    a = MockJevTransport(answer=close_p(0.4), model="jev")
+    b = MockJevTransport(answer=b_answer, model="ms")
+    state = ka.probe_hold_snapshot("ETHUSDT", Side.SHORT, now, "direction")
+    qs = hold_questions("direction", state, HOLD_TWO)
+    rows = await ka.probe_hold([("B", b), ("A", a)], FastLoopConfig(), symbol="ETHUSDT",
+                               state=state, questions=qs)  # fmt: skip
+    assert [(r["judge"], r["action_only"], r["p_close"]) for r in rows] == [
+        ("B", False, None),
+        ("B", True, 0.7),
+        ("A", False, 0.4),
+    ]
+    assert rows[2]["questions"] == ["thesis_intact", "action"]
+    assert {"pos", "against", "trail"} <= set(json.loads(state))
+
+
+def test_keeper_assistant_probe_cli_hold_sends_the_two_hold_questions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jiaoyi import cli
+    from jiaoyi.gate import jev
+    from tests.conftest import ROOT
+
+    reply = {
+        "id": "gen-dec-2",
+        "model": "microsoft/microsoft-decision-1-20261020",
+        "answers": {
+            "thesis_intact": {"probabilities": {"yes": 0.4, "no": 0.6}},
+            "action": {"probabilities": {"hold": 0.25, "close": 0.75}},
+        },
+        "usage": {"input_tokens": 900, "output_tokens": 0, "cost": 0.00004},
+    }
+    fake = Decisions(reply)
+    real = jev.OpenRouterDecisionsTransport
+
+    def with_fake(key: str, model: str, **kw: Any) -> Any:
+        return real(key, model, http_transport=httpx.MockTransport(fake))
+
+    monkeypatch.setattr(jev, "OpenRouterDecisionsTransport", with_fake)
+    monkeypatch.setattr(cli.ChainedSecretStore, "get", lambda self, k: "sk-or-test")
+    app = ROOT / "config" / "app.example.toml"
+    assert cli.main(["keeper-assistant-probe", "--app", str(app), "--model", DECISION_1,
+                     "--hold"]) == 0  # fmt: skip
+    out = capsys.readouterr().out
+    assert "p(平)：0.7500" in out and "2 道题一起" in out
+    [req] = fake.requests
+    body = json.loads(req.content)
+    assert list(body["questions"]) == ["thesis_intact", "action"]
+    assert MARKET_GLOSSARY in body["questions"]["thesis_intact"]["instructions"]
+    assert "pos" in json.loads(body["state"])
+
+
+async def test_KeeperAssistant_hold_skips_without_the_keeper(tmp_path: Path, now: datetime) -> None:
+    a, b = Scorer(0.9), Scorer(0.9)
+    h = Harness(tmp_path, now, a, b, **HOLD)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x", against(now))
+    await h.settle()
+    assert a.hold_calls == a.calls == b.hold_calls == [] and not h.closed
+    [rec] = h.records()
+    assert rec["question"] == "hold" and "管家没接上" in rec["skipped"]
 
 
 async def test_KeeperAssistant_gap_and_in_flight_dedup(tmp_path: Path, now: datetime) -> None:
@@ -859,6 +1178,23 @@ async def test_TransportScorer_ask_sends_one_yes_no_question_and_reads_p_yes(
     s = TransportScorer(t, usd_per_mtok=0.042, max_errors=2, cooldown_s=60)
     v = await s.ask("B", "BTCUSDT", "{}", "q", ("否", "是"), 1.0)
     assert (v.model, v.p_yes, v.error) == ("ms-decision", 0.7, None)
+
+
+async def test_TransportScorer_ask_hold_sends_every_question_and_reads_p_close() -> None:
+    qs = tuple(hold_questions())
+    sent: list[tuple[c.JevQuestion, ...]] = []
+
+    def answer(state: str, got: Sequence[c.JevQuestion]) -> Mapping[str, Mapping[str, float]]:
+        sent.append(tuple(got))
+        return close_p(0.7)(state, got)  # type: ignore[no-any-return]
+
+    s = TransportScorer(
+        MockJevTransport(answer=answer), usd_per_mtok=0, max_errors=2, cooldown_s=60
+    )
+    v = await s.ask_hold("A", "BTCUSDT", "{}", qs, 1.0)
+    assert sent == [qs]
+    assert (v.p_yes, v.options, v.question, v.error) == (0.7, ("hold", "close"), "hold", None)
+    assert v.row()["p_close"] == 0.7 and v.text == "p(平) 0.70"
 
 
 async def test_TransportScorer_ask_counts_errors_and_cools_down() -> None:

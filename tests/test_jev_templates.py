@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import json
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +16,14 @@ from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.gate.entry import JevEntryGate
 from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
 from jiaoyi.gate.questions import (
+    CRITERIA,
     KNOWN_TEMPLATES,
+    MARKET_GLOSSARY,
     TEMPLATE_VERSION,
     KronosSnapshot,
+    direction_snapshot,
+    hold_questions,
+    hold_snapshot,
     template_dump,
     template_fingerprint,
     template_version,
@@ -103,7 +110,7 @@ def test_keeper_kronos_variants_are_registered_and_distinct() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "version"), [("direction", "q9"), ("rank", "q9-krank"), ("off", "q9-koff")]
+    ("mode", "version"), [("direction", "q11"), ("rank", "q11-krank"), ("off", "q11-koff")]
 )
 async def test_keeper_record_carries_kronos_mode_and_template_variant(
     tmp_path: Path, now: datetime, mode: Any, version: str
@@ -122,3 +129,142 @@ async def test_keeper_record_carries_kronos_mode_and_template_variant(
     jev = rec.input["jev"]
     assert jev["kronos_snapshot"] == mode and jev["template"] == version
     assert jev["template_fp"] == KNOWN_TEMPLATES[version]
+
+
+def _keys(d: Any) -> set[str]:
+    if not isinstance(d, dict):
+        return set()
+    return set(d) | {k for v in d.values() for k in _keys(v)}
+
+
+def _covered(key: str, text: str) -> bool:
+    """``key`` is named in backticks, alone or as a dotted part (`kronos.rank`, `*_bps`)."""
+    return re.search(rf"[`.]{re.escape(key)}[`.]", text) is not None
+
+
+def _fullest_hold_snapshots(now: datetime, kronos: KronosSnapshot) -> list[dict[str, Any]]:
+    pos = position(now, trailing_activation_pct=0.2, trailing_stop_pct=0.1)
+    f = features(
+        now,
+        price=68204.0,
+        funding_rate=0.0001,
+        vol_ratio_10s=3.0,
+        oi15=0.5,
+        oi60=1.0,
+        oi4h=2.0,
+        top_ls=1.2,
+        crowd_ls=0.9,
+        div4h=0.3,
+        btc5z=1.5,
+        liq_long_usdt_1m=1000.0,
+        liq_short_usdt_1m=2000.0,
+    )
+    view = c.MarketView(
+        market_view_id="v",
+        version=3,
+        observed_at=now,
+        source_ts=now,
+        regime="4h 中性",
+        regime_direction="中性",
+        source="market_desk",
+    )
+    fc = c.Forecast(
+        symbol="BTCUSDT",
+        ts=now,
+        horizon_min=60,
+        price_low=67000.0,
+        price_high=69000.0,
+        p_up=0.7,
+        rank_pct=0.9,
+        rank_n=21,
+        rank_view="top",
+        model="Kronos-small",
+        stale_after=now + timedelta(minutes=5),
+    )
+    sig = c.AgainstSignalEvent(
+        symbol="BTCUSDT", ts=now, kind=c.SignalKind.VOLUME_BREAKOUT, side=c.Side.SHORT,
+        vol_ratio=4.0, strong=True,
+    )  # fmt: skip
+    full_card = card(now, source_market_view_id="v", source_regime="r")
+    other_card = full_card.model_copy(update={"symbols": full_card.symbols[1:]})
+    return [
+        json.loads(
+            hold_snapshot(
+                pos,
+                f,
+                crd,
+                now,
+                against=sig,
+                history=[0.0, 10.0, 35.0, 30.0],
+                entry={"sig": "volume_surge", "why": "x", "p_real": 0.4, "p_take": 0.3},
+                forecast=fc,
+                current_market=view,
+                market_intra="up",
+                market_age={"age_min": 12.0, "stale": "stale"},
+                kronos=kronos,
+            )
+        )
+        for crd in (full_card, other_card, None)
+    ]
+
+
+@pytest.mark.parametrize("kronos", ["direction", "rank", "off"])
+def test_hold_prompt_glossary_explains_every_hold_snapshot_key(
+    now: datetime, kronos: KronosSnapshot
+) -> None:
+    text = " ".join(q.prompt for q in hold_questions(kronos))
+    snaps = _fullest_hold_snapshots(now, kronos)
+    keys = set().union(*(_keys(s) for s in snaps))
+    assert {"against", "trail", "path_bps", "oi4h", "within_4h", "age_min", "status"} <= keys
+    if kronos != "off":
+        assert "kronos" in keys
+    assert sorted(k for k in keys if not _covered(k, text)) == []
+
+
+def test_market_glossary_explains_every_direction_snapshot_key(now: datetime) -> None:
+    f = features(now, funding_rate=0.0001, vol_ratio_10s=3.0, oi15=0.5, top_ls=1.2, btc5z=1.5)
+    keys = _keys(json.loads(direction_snapshot("BTCUSDT", f)))
+    assert {"book", "fund_bps", "vol10_x", "btc5z"} <= keys
+    assert sorted(k for k in keys if not _covered(k, MARKET_GLOSSARY)) == []
+
+
+NUDGES = (
+    "agree",
+    "p_real",
+    "p_take",
+    "not by itself a reason",
+    "favours",
+    "OPPOSITE",
+    "supports the trade",
+    "weigh",
+    "rely on",
+    "keep holding or close",
+    "positive when up",
+)
+
+
+@pytest.mark.parametrize("kronos", ["direction", "rank", "off"])
+def test_hold_question_and_snapshot_carry_no_nudges(now: datetime, kronos: KronosSnapshot) -> None:
+    qs = hold_questions(kronos)
+    text = " ".join(q.prompt for q in qs) + json.dumps([CRITERIA[q.id] for q in qs])
+    snaps = [json.dumps(s) for s in _fullest_hold_snapshots(now, kronos)]
+    assert [w for w in NUDGES if w in text or any(w in s for s in snaps)] == []
+    if kronos == "direction":
+        assert json.loads(snaps[0])["kronos"] == {"p_up": 0.7, "rank": "top"}
+    assert json.loads(snaps[0])["entry"] == {"sig": "volume_surge", "why": "x"}
+
+
+def test_hold_questions_choice_order_is_seeded_by_the_snapshot() -> None:
+    def order(seed: str | None) -> tuple[str, ...]:
+        return {q.id: q.choices for q in hold_questions("direction", seed)}["action"]
+
+    assert order(None) == ("hold", "close")
+    orders = {order(f"snapshot-{i}") for i in range(20)}
+    assert orders == {("hold", "close"), ("close", "hold")}
+    assert all(order(f"snapshot-{i}") == order(f"snapshot-{i}") for i in range(20))
+    flipped = next(f"snapshot-{i}" for i in range(20) if order(f"snapshot-{i}")[0] == "close")
+    assert [q.choices for q in hold_questions("direction", flipped)] == [
+        ("no", "yes"),
+        ("high", "low"),
+        ("close", "hold"),
+    ]
