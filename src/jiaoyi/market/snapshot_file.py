@@ -7,7 +7,8 @@
  "symbols": {"BTCUSDT": {"price": 68000.0, "chg_1m_pct": 0.12, "chg_5m_pct": -0.3,
                           "taker_buy_ratio_1m": 0.55, "spread_bps": 0.2,
                           "liq_long_usdt_1m": 0.0, "liq_short_usdt_1m": 1.2e4, "book_age_s": 0.4}},
- "streams": {"trade": {"count_today": 123456, "last_at": "..."}, "book": {...}, ...}}
+ "streams": {"trade": {"count_today": 123456, "last_at": "..."}, "book": {...}, ...},
+ "loop_lag": {"last_ms": 0.4, "last_minute": {"max_ms": 3.1, "avg_ms": 0.6, "samples": 60}}}
 ```
 
 ``count_today`` 按日切时区（``risk.day_reset_tz``）的当天计数，过了 0 点清零。拿不到的值写 null
@@ -81,8 +82,18 @@ class MarketSnapshotFile:
         }
         return {"ts": now.isoformat(), "symbols": out, "streams": streams}
 
-    def write(self, features: FeatureEngine, symbols: list[str], now: datetime) -> None:
+    def write(
+        self,
+        features: FeatureEngine,
+        symbols: list[str],
+        now: datetime,
+        *,
+        loop_lag: dict[str, Any] | None = None,
+    ) -> None:
+        """``loop_lag``：主循环事件循环延迟（``LoopLagMonitor.status``），有就原样写进去。"""
         data = self.build(features, symbols, now)
+        if loop_lag is not None:
+            data["loop_lag"] = loop_lag
         tmp = self._path.with_suffix(".tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)

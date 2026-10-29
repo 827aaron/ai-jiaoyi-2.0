@@ -41,6 +41,43 @@ ROUND = timedelta(seconds=10)
 """团队页「刚刚：…」每 10 秒汇总一次（逐笔成交都在查，每笔都写会刷屏）；今日次数 = 巡检轮数。"""
 
 
+class _Window:
+    """1 分钟价格窗口（先进先出），另用两条单调队列随时给出窗口内最高 / 最低价，每个事件均摊 O(1)。
+
+    只认进出顺序、不看时间戳：事件时间乱序时窗口的裁剪规则不变，最高 / 最低就和直接对窗口求
+    max / min 一样。"""
+
+    __slots__ = ("head", "hi", "lo", "px", "tail")
+
+    def __init__(self) -> None:
+        self.px: deque[tuple[datetime, float]] = deque()
+        self.hi: deque[tuple[int, float]] = deque()  # (序号, 价)，价从高到低
+        self.lo: deque[tuple[int, float]] = deque()  # (序号, 价)，价从低到高
+        self.head = 0  # px[0] 的序号
+        self.tail = 0  # 下一个进来的序号
+
+    def push(self, ts: datetime, price: float) -> None:
+        self.px.append((ts, price))
+        seq, self.tail = self.tail, self.tail + 1
+        hi, lo = self.hi, self.lo
+        while hi and hi[-1][1] <= price:
+            hi.pop()
+        hi.append((seq, price))
+        while lo and lo[-1][1] >= price:
+            lo.pop()
+        lo.append((seq, price))
+
+    def prune(self, cut: datetime) -> None:
+        px = self.px
+        while px and px[0][0] < cut:
+            px.popleft()
+            if self.hi[0][0] == self.head:
+                self.hi.popleft()
+            if self.lo[0][0] == self.head:
+                self.lo.popleft()
+            self.head += 1
+
+
 def _stop_pct(pos: PositionRecord) -> float:
     """这笔的止损距离（%）；没有止损价是 0。"""
     if pos.entry_price and pos.stop_loss_price:
@@ -59,7 +96,7 @@ class RulePatrol:
         self._rec = recorder
         self._fee_pct = 2.0 * fee_bps / 100.0
         self._skip_logged: dict[str, datetime] = {}
-        self._px: dict[str, deque[tuple[datetime, float]]] = {}
+        self._px: dict[str, _Window] = {}
         self._last_action: dict[str, datetime] = {}
         self._round_at: datetime | None = None
         self._seen: dict[str, tuple[int, float, float, float]] = {}
@@ -120,10 +157,11 @@ class RulePatrol:
         else:
             return None
         sym, now = event.symbol, event.ts
-        dq = self._px.setdefault(sym, deque())
-        dq.append((now, price))
-        while dq and dq[0][0] < now - WINDOW:
-            dq.popleft()
+        win = self._px.get(sym)
+        if win is None:
+            win = self._px[sym] = _Window()
+        win.push(now, price)
+        win.prune(now - WINDOW)
 
         mine = [
             p
@@ -132,8 +170,7 @@ class RulePatrol:
         ]
         if not mine:
             return None
-        hi = max(p for _, p in dq)
-        lo = min(p for _, p in dq)
+        hi, lo = win.hi[0][1], win.lo[0][1]
         hit: list[tuple[float, float]] = []  # (逆向波动, 这笔的冲击线)
         for pos in mine:
             # 多单怕从 1 分钟高点跌下来，空单怕从低点涨上去
