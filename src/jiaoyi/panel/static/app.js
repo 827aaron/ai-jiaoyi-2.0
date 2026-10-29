@@ -1439,7 +1439,6 @@ P.positions = (arg) => {
     <section class="card mt"><div class="tw pos-wide"><table class="dense">
       <thead><tr><th>币种</th><th>方向</th><th class="r">数量</th><th class="r">名义（U）</th><th class="r">杠杆</th><th class="r" title="名义 ÷ 杠杆">本金占用（U）</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按吃单费率估）；百分比按名义算，不乘杠杆">浮盈·扣费后（U / %）</th><th class="r" title="今天这笔赚亏了多少：0 点前开的从当地 0 点参考价算起，今天开的从开仓价（未扣费）">今日（U）</th><th class="r">止损价</th><th class="r">止盈价</th><th class="r">拿了多久 / 最长</th><th>保命单</th><th>管家</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div></section>
-    ${recentSection(d)}
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> ${qty(sel.quantity, sel.mark_price || sel.entry_price)} · 详情</h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
@@ -1450,7 +1449,8 @@ P.positions = (arg) => {
       ${sel.trailing_stop_pct != null ? `<div class="small dim trail-note">${trailNote(sel)}</div>` : ""}
       ${sel.protection ? protBlock(sel) : stopDiagnostics(sel)}
       <div><div class="lbl">从信号到现在的每一步（今天）· 点一条看快照</div><div class="log trail">${trail || '<div class="dim">今天的日志里没有这笔的记录。</div>'}</div></div>
-    </section>`;
+    </section>
+    ${recentSection(d)}`;
 };
 
 /* K 线图：图表 DOM 常驻，页面重画时搬回新的容器，免得每 5 秒闪一次 */

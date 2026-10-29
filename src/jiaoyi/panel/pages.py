@@ -1495,7 +1495,7 @@ def build_history(
 
 
 RECENT_LIMIT = 12
-"""持仓页「最近交易」最多几笔：笔记本一屏（约 900 px）放得下 3 笔持仓再加这么多行。"""
+"""持仓页「最近交易」最多几笔（排在持仓详情下面）。"""
 
 
 def recent_trades(files: PanelFiles, risk: RiskConfig, now: datetime) -> tuple[list[TradeRow], int]:
