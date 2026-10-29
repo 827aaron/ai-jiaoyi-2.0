@@ -359,10 +359,11 @@ def _keeper_assistant_probe(args: argparse.Namespace) -> int:
     from jiaoyi.keeper import assistant
 
     try:
-        fl = load_app_config(Path(args.app)).fast_loop
+        app_cfg = load_app_config(Path(args.app))
     except ConfigError as e:
         print(e, file=sys.stderr)
         return 2
+    fl = app_cfg.fast_loop
     model = args.model or fl.keeper_assistant_b_model
     if not model:
         print("没有模型 B：app.toml 没写 keeper_assistant_b_model，也没给 --model", file=sys.stderr)
@@ -382,11 +383,24 @@ def _keeper_assistant_probe(args: argparse.Namespace) -> int:
             return 2
         base = OPENROUTER_BASE_URL if fl.jev_provider == "openrouter" else None
         judges.append(("A", TypeSafeTransport(a_key, fl.jev_model, base_url=base)))
-    state = assistant.probe_snapshot(args.symbol, datetime.now(UTC))
+    if args.hold:
+        from jiaoyi.contracts import Side
+        from jiaoyi.gate.questions import HOLD_TWO, hold_questions
+
+        kronos = app_cfg.predictor.keeper_snapshot
+        side = Side.SHORT if args.side == "short" else Side.LONG
+        state = assistant.probe_hold_snapshot(args.symbol, side, datetime.now(UTC), kronos)
+        questions = hold_questions(kronos, state, HOLD_TWO)
+    else:
+        state = assistant.probe_snapshot(args.symbol, datetime.now(UTC))
     want = "long" if args.side == "short" else "short"
 
     async def run() -> list[dict[str, Any]]:
         try:
+            if args.hold:
+                return await assistant.probe_hold(
+                    judges, fl, symbol=args.symbol, state=state, questions=questions
+                )
             return await assistant.probe(judges, fl, symbol=args.symbol, want=want, state=state)
         finally:
             for _, t in judges:
@@ -396,6 +410,23 @@ def _keeper_assistant_probe(args: argparse.Namespace) -> int:
 
     rows = asyncio.run(run())
     print(f"快照（假的）：{state}")
+    if args.hold:
+        for q in questions:
+            print(f"\n题目 {q.id}（A 的选项顺序 {' / '.join(q.choices)}）：{q.prompt}")
+        for r in rows:
+            print(f"\n{r['judge']}：{r['model'] or model}")
+            how = "只发 action 一道" if r["action_only"] else f"{len(r['questions'])} 道题一起"
+            print(f"  请求：{how}（{', '.join(r['questions'])}），选项顺序 {r['options']}")
+            p_close = "没答上" if r["p_close"] is None else f"{r['p_close']:.4f}"
+            print(f"  p(平)：{p_close}")
+            print(f"  原始概率：{json.dumps(r['raw_probs'], ensure_ascii=False)}")
+            print(
+                f"  延迟：{r['latency_ms']:.0f} ms  花费：${r['cost_usd']:.6f}  token：{r['usage']}"
+            )
+            if r["error"]:
+                print(f"  出错：{r['error']}")
+        answered = {r["judge"] for r in rows if r["p_close"] is not None}
+        return 0 if answered == {j for j, _ in judges} else 1
     for r in rows:
         print(f"\n{r['judge']}：{r['model'] or model}")
         print(f"  题目：{r['question']}")
@@ -1094,6 +1125,11 @@ def main(argv: list[str] | None = None) -> int:
         help="假设持哪边：short 问「会上涨吗」，long 问「会下跌吗」",
     )  # fmt: skip
     p.add_argument("--with-a", action="store_true", help="也真问一次 A（Jev，按 jev_provider）")
+    p.add_argument(
+        "--hold", action="store_true",
+        help="问 hold 题：管家同一组持仓题（进场理由 + action，带全部字段说明）和一份假的持仓快照，"
+        "打印 p(平)；B 没答上再只发 action 一道试一次",
+    )  # fmt: skip
     p.set_defaults(func=_keeper_assistant_probe)
 
     p = sub.add_parser(

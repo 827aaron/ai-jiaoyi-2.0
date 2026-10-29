@@ -78,6 +78,7 @@ from jiaoyi.core.observations import aware, freeze_values
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.gate.jev import error_kind
 from jiaoyi.gate.questions import (
+    HOLD_TWO,
     KronosSnapshot,
     hold_pnl_bps,
     hold_questions,
@@ -568,7 +569,7 @@ class JevKeeper:
             ts=now,
             position_id=pid,
             snapshot=snapshot,
-            questions=hold_questions(self._kronos_snapshot, snapshot),
+            questions=self._hold_questions(snapshot),
         )
         history.append(pnl)
         del history[:-MAX_HISTORY]
@@ -659,6 +660,11 @@ class JevKeeper:
         vote.update(vote=idle, would_close=False)
         return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
 
+    def _hold_questions(self, snapshot: str) -> list[JevQuestion]:
+        """管家助手问 hold 题时，管家自己也只问那两道（``HOLD_TWO``），三方的题目才一样。"""
+        only = HOLD_TWO if self._cfg.keeper_assistant_question == "hold" else None
+        return hold_questions(self._kronos_snapshot, snapshot, only)
+
     def _snapshot(
         self,
         position: PositionRecord,
@@ -709,7 +715,7 @@ class JevKeeper:
             await self._recall(position, now)
         history = list(self._history.get(position.position_id, ()))
         snapshot = self._snapshot(position, fv, now, against, history)
-        return snapshot, tuple(hold_questions(self._kronos_snapshot, snapshot))
+        return snapshot, tuple(self._hold_questions(snapshot))
 
     async def wait_hold(
         self, position_id: str, against: AgainstSignalEvent, now: datetime, wait_s: float
@@ -724,7 +730,7 @@ class JevKeeper:
                 ask is not None
                 and ask.against == against
                 and (now - ask.at).total_seconds() <= wait_s
-                and ask.questions == tuple(hold_questions(self._kronos_snapshot, ask.snapshot))
+                and ask.questions == tuple(self._hold_questions(ask.snapshot))
             ):
                 return ask
             queued = self._against.get(position_id)

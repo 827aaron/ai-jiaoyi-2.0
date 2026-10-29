@@ -77,10 +77,11 @@ KNOWN_TEMPLATES: dict[str, str] = {
     "q10-krank": "ae7139fbea1c",
     "q10-koff": "c6d9cf4c3dd1",
     # neutral hold question (no hold / close advice, no "OPPOSITE"), kronos raw p_up instead of
-    # agree, entry probabilities out of the snapshot (s7), choice order seeded per snapshot
-    "q11": "bad69d87af34",
-    "q11-krank": "5fe0450b0bb2",
-    "q11-koff": "d7ef57f34e4a",
+    # agree, entry probabilities out of the snapshot (s7), choice order seeded per snapshot,
+    # order-neutral goal sentence, PnL sign stated per field group
+    "q11": "cb411fdf296f",
+    "q11-krank": "eeed63421caf",
+    "q11-koff": "9d39a39e5964",
 }
 
 _ENTRY_GOAL = (
@@ -119,7 +120,8 @@ _HOLD_KRONOS: dict[KronosSnapshot, str] = {
 
 MARKET_GLOSSARY = (
     "Field glossary. Units: `*_bps` = basis points (1 bp = 0.01%), `*_k` = thousand USDT, "
-    "`*_x` = multiple of the recent average; signed values are positive when up / buying. "
+    "`*_x` = multiple of the recent average; signed market values are positive for a price rise "
+    "or net taker buying. "
     "`sym` = the coin; `px` = last price (USDT); `atr_bps` = ATR in bps; `ret1m_bps`"
     "/`ret5m_bps` = price change over 1/5 minutes; `rv5m_bps` = 5-minute realized "
     "volatility; `vol_x` = 1-minute volume, `vol10_x` = last 10s volume scaled to 1 minute; "
@@ -138,8 +140,9 @@ the keeper assistant prepends them to its blind question, so the two models read
 explanation of the same keys."""
 
 _HOLD_GLOSSARY = (
-    "`pos` = our position: `side` long/short; `entry_px` = entry price; `pnl_bps` = unrealized "
-    "PnL before fees (positive = profit); `age_min` = minutes held; `time_left_min` = minutes "
+    "`pos` = our position, its PnL fields signed by profit (positive = profit for either side): "
+    "`side` long/short; `entry_px` = entry price; `pnl_bps` = unrealized PnL before fees; "
+    "`age_min` = minutes held; `time_left_min` = minutes "
     "until the time-limit close; `to_stop_bps`/`to_tp_bps` = distance from price to the stop / "
     "take-profit; `peak_bps` = best unrealized PnL so far, `giveback_bps` = how much of that "
     "peak is gone; `pnl_r`/`peak_r` = the same in units of the initial stop distance (-1 = at "
@@ -162,10 +165,8 @@ _HOLD_GLOSSARY = (
 
 def _hold_goal(kronos: KronosSnapshot) -> str:
     return (
-        "Goal: we hold an open position (`pos`). Decide whether to keep holding or close it now. "
-        "You can only hold or close the whole position; the stop is never widened and size is "
-        "never added. A wrong close costs fees and the remaining move; a wrong hold can cost up "
-        "to the stop. "
+        "Goal: we hold an open position (`pos`); choose between the two options of the `action` "
+        "question, for the whole position. The stop is never widened and size is never added. "
         + MARKET_GLOSSARY
         + " "
         + _HOLD_GLOSSARY
@@ -282,11 +283,19 @@ def entry_questions(mode: GateQuestions = "six", hold_min: int = 120) -> list[Je
     ]
 
 
+HOLD_TWO = (HoldQuestion.THESIS_INTACT, HoldQuestion.ACTION)
+"""管家助手 hold 题时管家和两个助手问的两道：``action`` 定拿平，``thesis_intact`` 管家的盈利门控
+要读、字段说明也在它的说明里；``adverse_risk`` 没人读，只会把回答往「有风险」上引。"""
+
+
 def hold_questions(
-    kronos: KronosSnapshot = "direction", order_seed: str | None = None
+    kronos: KronosSnapshot = "direction",
+    order_seed: str | None = None,
+    only: Sequence[HoldQuestion] | None = None,
 ) -> list[JevQuestion]:
     """``order_seed``（这次的快照）：选项按它的哈希正序或倒序列，同一份快照总是同一顺序，
-    换一份快照各占一半，模型不会总先看到 hold；None = 契约里的顺序。"""
+    换一份快照各占一半，模型不会总先看到 hold；None = 契约里的顺序。``only``：只问这几道
+    （按 ``HoldQuestion`` 的顺序）；None = 三道都问。"""
     flip = order_seed is not None and hashlib.sha256(order_seed.encode()).digest()[0] & 1
     prompts = hold_prompts(kronos)
     return [
@@ -296,6 +305,7 @@ def hold_questions(
             choices=tuple(reversed(HOLD_CHOICES[q])) if flip else HOLD_CHOICES[q],
         )
         for q in HoldQuestion
+        if only is None or q in only
     ]
 
 

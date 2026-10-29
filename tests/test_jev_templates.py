@@ -238,6 +238,8 @@ NUDGES = (
     "supports the trade",
     "weigh",
     "rely on",
+    "keep holding or close",
+    "positive when up",
 )
 
 

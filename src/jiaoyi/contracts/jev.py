@@ -104,7 +104,12 @@ class JevRequest(Contract):
         if self.kind == "hold":
             expected = {k: tuple(sorted(v)) for k, v in expected.items()}
         one = {q.value: ENTRY_CHOICES[q] for q in ENTRY_ONE}
-        if got != expected and not (self.kind == "entry" and got == one):
+        two = {k: v for k, v in expected.items() if k != HoldQuestion.ADVERSE_RISK.value}
+        if (
+            got != expected
+            and not (self.kind == "entry" and got == one)
+            and not (self.kind == "hold" and got == two)
+        ):
             raise ValueError(f"{self.kind} 请求的问题和选项必须正好是 {expected}")
         if self.kind == "entry" and not self.signal_id:
             raise ValueError("开仓请求必须带 signal_id")

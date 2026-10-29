@@ -8,16 +8,17 @@
 
 题目（``keeper_assistant_question``）：
 
-- ``blind_move``：持空问「<币> 接下来 <horizon> 会上涨吗？」，持多问「……会下跌吗？」，题目前面
-  带管家持仓题里讲行情字段的那几句说明（``MARKET_GLOSSARY``）。题目和快照都只有行情：不提有没有仓、
-  仓位方向、开仓价、盈亏和为什么问。两个都答「是」且 p(是) ≥ ``keeper_assistant_min_p`` 就是
-  「本来会平」。
-- ``hold``：管家问，两个助手答。题目和快照都是管家的：管家复查那组持仓题、同一份完整持仓快照
-  （带上这个反向信号）和字段说明，只看 ``action``。助手 1 = Jev，助手 2 = B（选项倒序）；两个都答
-  close 且 p(close) ≥ ``keeper_assistant_min_p`` 才是「本来会平」。信息一样，独立性只来自模型不同。
-  同一个信号也叫了管家急查时，助手 1 的回答就是急查那次 Jev 的回答（最多等
-  ``keeper_assistant_reuse_s`` 秒等它开始问，拿它的快照问助手 2），Jev 不问两遍；等不到才按管家
-  的快照自己问两个。
+- ``blind_move``：持空问「<币> 接下来 <horizon> 会上涨吗？」，持多问「……会下跌吗？」
+  （``keeper_assistant_blind_glossary`` 开着时题目前面带 ``MARKET_GLOSSARY``）。题目和快照都只有
+  行情：不提有没有仓、仓位方向、开仓价、盈亏和为什么问。两个都答「是」且 p(是) ≥
+  ``keeper_assistant_min_p`` 就是「本来会平」。
+- ``hold``：管家问，两个助手答。题目和快照都是管家的：管家复查那两道持仓题（``HOLD_TWO``）、同一份
+  完整持仓快照（带上这个反向信号）和字段说明，只看 ``action``。助手 1 = Jev，助手 2 = B（倒序）；
+  两个都答 close 且 p(close) ≥ ``keeper_assistant_min_p`` 才是「本来会平」。信息一样，独立性只来自
+  模型不同。同一个信号也叫了管家急查时，助手 1 的回答就是急查那次 Jev 的回答（最多等
+  ``keeper_assistant_reuse_s`` 秒等它开始问，拿它的快照问助手 2），Jev 不问两遍；那次没答上就在剩下
+  的时间里自己问，等不到才按管家的快照自己问两个。问之前再看一眼仓还在不在。hold 题的 A、B 有自己
+  一份错误计数和冷却，不连累翻转确认。
 
 A 是 Jev（同一条通道，管家助手自己的超时和错误计数），B 是 ``keeper_assistant_b_model``；B 的选项
 和 A 那份倒过来列（是非题是 否 / 是；hold 题 A 的顺序按快照哈希定），其余一字不差。平仓开着、
@@ -62,20 +63,28 @@ import httpx
 from jiaoyi.contracts import (
     AgainstSignalEvent,
     BookMetrics,
+    Category,
     FastLoopConfig,
     FeatureSnapshot,
     Health,
     HoldQuestion,
     JevQuestion,
+    JevResponse,
     KeyLevel,
     Outcome,
     PositionRecord,
     PositionStatus,
     Side,
+    SignalKind,
 )
 from jiaoyi.core.recorder import RoleRecorder, local_day
 from jiaoyi.gate.jev import JevTransport, OpenRouterDecisionsTransport, RawJevResult
-from jiaoyi.gate.questions import MARKET_GLOSSARY, direction_snapshot
+from jiaoyi.gate.questions import (
+    MARKET_GLOSSARY,
+    KronosSnapshot,
+    direction_snapshot,
+    hold_snapshot,
+)
 from jiaoyi.slow.card_flip import DIR_TEXT, FlipCandidate
 
 if TYPE_CHECKING:
@@ -89,6 +98,9 @@ YES, NO = "是", "否"
 OPTIONS: tuple[str, ...] = (YES, NO)
 MOVE = {"long": "上涨", "short": "下跌"}
 QUESTION_ID = "move"
+MOVE_LANE, HOLD_LANE = "move", "hold"
+LANE_TEXT = {MOVE_LANE: "是非题", HOLD_LANE: "持仓题"}
+CLOSED_MEANWHILE = "仓位已经不在持仓中（等管家急查时平掉了），不问"
 ACTION, CLOSE = HoldQuestion.ACTION.value, "close"
 FLIP_NEUTRAL = "flip_neutral"
 REASONS = {
@@ -431,12 +443,17 @@ class KeeperAssistant:
         close_source: Callable[[str], str | None] | None = None,
         snapshot_provider: SnapshotProvider | None = None,
         hold: HoldSource | None = None,
+        jev_hold: Scorer | None = None,
+        still_open: Callable[[str], bool] | None = None,
     ) -> None:
         """``close(仓, 原因)``：过平仓前检查、登记平仓任务（主循环正常路径）；返回 None = 已交出去，
         否则是没平的原因（已在平、平仓前检查拦下）。``jev``：A；``b_scorer(模型 id)``：给 B；
         ``alert(标题, 正文)``：汇总的 Telegram；``close_source(持仓 id)``：这笔是谁平的（平仓真的
         交给执行器之后才记），用来认出哪些仓真是管家助手平的。``hold``：管家，hold 题要它的
-        持仓快照和急查的回答；没有时 hold 题一律跳过。"""
+        持仓快照和急查的回答；没有时 hold 题一律跳过。``jev_hold``：hold 题的 A，自己一份错误
+        计数和冷却（None = 和 ``jev`` 共用）；B 也按 hold 题 / 是非题各建一份（``b_scorer`` 每份
+        调一次），hold 题出错永远不让翻转确认进冷却。``still_open(持仓 id)``：等完管家、问模型
+        之前再看一眼这笔仓还在不在。"""
         self._cfg = cfg
         self._rec = recorder
         self._features = features
@@ -446,8 +463,10 @@ class KeeperAssistant:
         self._clock = clock
         self._dir = data_dir / JOURNAL_DIR if data_dir is not None else None
         self._jev = jev
+        self._jev_hold = jev_hold if jev_hold is not None else jev
+        self._still_open = still_open
         self._b_factory = b_scorer
-        self._b: tuple[str, Scorer | None] | None = None
+        self._b: dict[str, tuple[str, Scorer | None]] = {}
         self._cards = cards
         self._alert = alert
         self._warn = warn
@@ -657,9 +676,10 @@ class KeeperAssistant:
         self._tasks.clear()
         self._busy.clear()  # 还没开始跑就被取消的任务进不了自己的 finally
         self._deferred.clear()
-        if self._b is not None and self._b[1] is not None:
-            await _close_scorer(self._b[1])
-        self._b = None
+        for _, scorer in self._b.values():
+            if scorer is not None:
+                await _close_scorer(scorer)
+        self._b.clear()
 
     def _resume(self, symbol: str) -> None:
         """这个币的事都问完了：推后的翻转确认现在问（候选变没变由军师团确认时再查）。"""
@@ -692,13 +712,16 @@ class KeeperAssistant:
         notes: list[str] = []
         if self._jev is None:
             notes.append("Jev 没接上")
-        scorer = self._b_scorer(cfg.keeper_assistant_b_model)
-        if scorer is None:
-            notes.append("模型 B 不可用，一律不平")
-        elif isinstance(scorer, TransportScorer) and scorer.cooling():
-            notes.append("模型 B 连续出错，冷却中，一律不平")
-        elif isinstance(scorer, TransportScorer) and scorer.consecutive_errors:
-            notes.append(f"模型 B 连续出错 {scorer.consecutive_errors} 次")
+        lanes = [HOLD_LANE, MOVE_LANE] if cfg.keeper_assistant_question == "hold" else [MOVE_LANE]
+        for lane in lanes:
+            scorer = self._b_scorer(cfg.keeper_assistant_b_model, lane)
+            name = f"模型 B（{LANE_TEXT[lane]}）" if len(lanes) > 1 else "模型 B "
+            if scorer is None:
+                notes.append(f"{name}不可用，一律不平")
+            elif isinstance(scorer, TransportScorer) and scorer.cooling():
+                notes.append(f"{name}连续出错，冷却中，一律不平")
+            elif isinstance(scorer, TransportScorer) and scorer.consecutive_errors:
+                notes.append(f"{name}连续出错 {scorer.consecutive_errors} 次")
         if notes:
             head = f"{'；'.join(notes)}；{head}"
         health = Health.DEGRADED if self._error or notes else Health.OK
@@ -706,21 +729,21 @@ class KeeperAssistant:
         self._error = None
 
     # ------------------------------------------------------------ 两个模型
-    def _b_scorer(self, model: str | None) -> Scorer | None:
+    def _b_scorer(self, model: str | None, lane: str = MOVE_LANE) -> Scorer | None:
         if not model or self._b_factory is None:
             return None
-        if self._b is None or self._b[0] != model:
-            old = self._b[1] if self._b is not None else None
-            if old is not None:
-                task = asyncio.ensure_future(_close_scorer(old))
+        held = self._b.get(lane)
+        if held is None or held[0] != model:
+            if held is not None and held[1] is not None:
+                task = asyncio.ensure_future(_close_scorer(held[1]))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
             try:
-                self._b = (model, self._b_factory(model))
+                self._b[lane] = (model, self._b_factory(model))
             except Exception:
                 logger.exception("管家助手建模型 B（%s）失败，按没配置处理", model)
-                self._b = (model, None)
-        return self._b[1]
+                self._b[lane] = (model, None)
+        return self._b[lane][1]
 
     async def _slot(self, first: bool, coro: Awaitable[Verdict]) -> Verdict:
         await self._slots.acquire(first)
@@ -729,11 +752,13 @@ class KeeperAssistant:
         finally:
             await self._slots.release()
 
-    async def _ready(self, symbol: str) -> tuple[Scorer, FeatureSnapshot, str] | str:
+    async def _ready(
+        self, symbol: str, lane: str = MOVE_LANE
+    ) -> tuple[Scorer, FeatureSnapshot, str] | str:
         """B 能问、行情快照够新：（B, 快照, 来源）；否则问不了的原因（``STALE`` 已自己记过）。"""
         cfg = self._cfg()
         b_model = cfg.keeper_assistant_b_model
-        b_scorer = self._b_scorer(b_model)
+        b_scorer = self._b_scorer(b_model, lane)
         if b_scorer is None or (isinstance(b_scorer, TransportScorer) and b_scorer.cooling()):
             why = (
                 "keeper_assistant_b_model 没配置"
@@ -815,7 +840,7 @@ class KeeperAssistant:
     ) -> tuple[Verdict, Verdict, str, dict[str, Any]] | str:
         """A、B 同时问管家那组持仓题（同一份快照）。管家急查不久前为同一个信号问过同一组题，
         就拿它的快照和回答当 A，只问 B。返回字符串 = 问不了的原因。"""
-        ready = await self._ready(pos.symbol)
+        ready = await self._ready(pos.symbol, HOLD_LANE)
         if isinstance(ready, str):
             return ready
         b_scorer, f, source = ready
@@ -834,29 +859,67 @@ class KeeperAssistant:
             if isinstance(built, str):
                 return built
             state, questions = built
-        mirrored = tuple(
-            q.model_copy(update={"choices": tuple(reversed(q.choices))}) for q in questions
-        )
+        if self._still_open is not None and not self._still_open(pos.position_id):
+            return CLOSED_MEANWHILE
+        mirrored = b_questions(questions, cfg.keeper_assistant_b_action_only)
         a_opts = next(q.choices for q in questions if q.id == ACTION)
         b_opts = tuple(reversed(a_opts))
         timeout = cfg.keeper_assistant_timeout_s
+        deadline = time.perf_counter() + timeout
+        fallback: dict[str, str] = {}
         a_ask: Awaitable[Verdict]
         if recent is not None:
-            a_ask = _from_keeper(recent, a_opts)
-        elif self._jev is None:
+            a_ask = self._a_from_keeper(
+                recent, a_opts, pos.symbol, state, questions, deadline, fallback
+            )
+        elif self._jev_hold is None:
             a_ask = _done(Verdict("A", None, None, a_opts, "Jev 没接上", 0.0, question="hold"))
         else:
-            a_ask = self._slot(True, self._jev.ask_hold("A", pos.symbol, state, questions, timeout))
+            a_ask = self._slot(
+                True, self._jev_hold.ask_hold("A", pos.symbol, state, questions, timeout)
+            )
         b_ask = self._slot(True, b_scorer.ask_hold("B", pos.symbol, state, mirrored, timeout))
         a, b = await self._both(a_ask, b_ask, a_opts, b_opts, "hold")
         extra: dict[str, Any] = {
             "snapshot_hash": snapshot_hash(state),
-            "a_reused": recent is not None,
+            "a_reused": a.reused,
             "p_close": [a.p_yes, b.p_yes],
+            "questions": [q.id for q in questions],
+            "b_questions": [q.id for q in mirrored],
         }
         if recent is not None:
             extra["a_reused_age_s"] = round(max((now - recent.at).total_seconds(), 0.0), 1)
+        if fallback:
+            extra["a_keeper_error"] = fallback["why"]
         return a, b, source, extra
+
+    async def _a_from_keeper(
+        self, ask: HoldAsk, opts: tuple[str, ...], symbol: str, state: str,
+        questions: Sequence[JevQuestion], deadline: float, fallback: dict[str, str],
+    ) -> Verdict:  # fmt: skip
+        """助手 1 = 管家急查那次 Jev 的回答（花费记 0：管家自己的记录已经算过）。那次没答上，
+        就在剩下的时间里自己问一次。"""
+        started = time.perf_counter()
+        resp: JevResponse | None = None
+        try:
+            # shielded: the joint timeout must not cancel the keeper's own future
+            resp = await asyncio.shield(ask.answer)
+        except asyncio.CancelledError:
+            if not ask.answer.cancelled():
+                raise
+        ms = (time.perf_counter() - started) * 1000
+        ans = resp.answer(ACTION) if resp is not None and resp.ok else None
+        model = resp.model_version if resp is not None else None
+        if ans is not None and CLOSE in ans.probs:
+            return Verdict(
+                "A", model, ans.probs[CLOSE], opts, None, ms, question="hold", reused=True
+            )
+        why = "没问成" if resp is None else resp.error or "没回答 action"
+        fallback["why"] = f"管家急查的 Jev 没答上（{why}）"[:200]
+        left = deadline - time.perf_counter()
+        if self._jev_hold is None or left <= 0:
+            return Verdict("A", model, None, opts, fallback["why"], ms, question="hold")
+        return await self._slot(True, self._jev_hold.ask_hold("A", symbol, state, questions, left))
 
     # ------------------------------------------------------------ 判断
     async def _check(
@@ -877,7 +940,7 @@ class KeeperAssistant:
         got = (
             await self._hold_judges(pos, against)
             if hold
-            else await self._judges(sym, want, glossary=True)
+            else await self._judges(sym, want, glossary=self._cfg().keeper_assistant_blind_glossary)
         )
         if got == STALE:
             return
@@ -1273,19 +1336,18 @@ async def _done(v: Verdict) -> Verdict:
     return v
 
 
-async def _from_keeper(ask: HoldAsk, opts: tuple[str, ...]) -> Verdict:
-    """管家急查那次 Jev 的回答当助手 1。花费记 0：管家自己的记录已经算过。"""
-    started = time.perf_counter()
-    # shielded: the joint timeout must not cancel the keeper's own future
-    resp = await asyncio.shield(ask.answer)
-    ms = (time.perf_counter() - started) * 1000
-    ans = resp.answer(ACTION) if resp is not None and resp.ok else None
-    model = resp.model_version if resp is not None else None
-    if ans is None or CLOSE not in ans.probs:
-        why = "没问成" if resp is None else resp.error or "没回答 action"
-        msg = f"管家急查的 Jev 没答上（{why}）"[:200]
-        return Verdict("A", model, None, opts, msg, ms, question="hold", reused=True)
-    return Verdict("A", model, ans.probs[CLOSE], opts, None, ms, question="hold", reused=True)
+def b_questions(questions: Sequence[JevQuestion], action_only: bool) -> tuple[JevQuestion, ...]:
+    """助手 2 的那份：每道题选项倒过来。``action_only``：只发 action 一道，说明前面接上其他题的
+    说明（字段说明在进场理由那题里，不能丢）。"""
+    mirrored = tuple(
+        q.model_copy(update={"choices": tuple(reversed(q.choices))}) for q in questions
+    )
+    if not action_only:
+        return mirrored
+    action = next(q for q in mirrored if q.id == ACTION)
+    lead = " ".join(q.prompt for q in mirrored if q.id != ACTION)
+    prompt = f"{lead} {action.prompt}" if lead else action.prompt
+    return (action.model_copy(update={"prompt": prompt}),)
 
 
 async def _close_scorer(scorer: Scorer) -> None:
@@ -1491,7 +1553,56 @@ def openrouter_scorer(
 
 def probe_snapshot(symbol: str, now: datetime, price: float = 68000.0) -> str:
     """``jiaoyi keeper-assistant-probe`` 用的假快照：形状和真快照一样，数是编的。"""
-    f = FeatureSnapshot(
+    return direction_snapshot(symbol, _probe_features(symbol, now, price))
+
+
+def probe_hold_snapshot(
+    symbol: str, side: Side, now: datetime, kronos: KronosSnapshot, price: float = 68000.0
+) -> str:
+    """``--hold`` 用的假持仓快照（管家同一个 ``hold_snapshot``，带一个反向信号）：数是编的。"""
+    sign = 1.0 if side is Side.LONG else -1.0
+    entry = price * (1 - sign * 0.002)
+    pos = PositionRecord(
+        position_id="probe",
+        group_id="probe",
+        intent_id="probe",
+        signal_id="probe",
+        card_id="probe",
+        symbol=symbol,
+        category=Category.MAJOR,
+        side=side,
+        status=PositionStatus.OPEN,
+        quantity=0.01,
+        leverage=1,
+        entry_price=entry,
+        stop_loss_price=entry * (1 - sign * 0.006),
+        take_profit_price=entry * (1 + sign * 0.012),
+        time_limit_s=14_400,
+        opened_at=now - timedelta(minutes=40),
+    )
+    against = AgainstSignalEvent(
+        symbol=symbol,
+        ts=now,
+        kind=SignalKind.VOLUME_BREAKOUT,
+        side=Side.SHORT if side is Side.LONG else Side.LONG,
+        desc="probe",
+        vol_ratio=4.0,
+        buy_ratio=0.4,
+    )
+    return hold_snapshot(
+        pos,
+        _probe_features(symbol, now, price),
+        None,
+        now,
+        against=against,
+        history=[0.0, 12.0, 25.0, 20.0],
+        entry={"sig": "volume_breakout", "why": "probe"},
+        kronos=kronos,
+    )
+
+
+def _probe_features(symbol: str, now: datetime, price: float) -> FeatureSnapshot:
+    return FeatureSnapshot(
         symbol=symbol,
         ts=now,
         last_price=price,
@@ -1515,7 +1626,6 @@ def probe_snapshot(symbol: str, now: datetime, price: float = 68000.0) -> str:
             taker_buy_ratio=0.62,
         ),
     )
-    return direction_snapshot(symbol, f)
 
 
 class _Recording:
@@ -1548,7 +1658,9 @@ async def probe(
         scorer = TransportScorer(
             rec, usd_per_mtok=cfg.jev_usd_per_mtok, max_errors=1_000, cooldown_s=0.0
         )
-        question = move_question(symbol, want, cfg.keeper_assistant_horizon, opts, True)
+        question = move_question(
+            symbol, want, cfg.keeper_assistant_horizon, opts, cfg.keeper_assistant_blind_glossary
+        )
         v = await scorer.ask(judge, symbol, state, question, opts, cfg.keeper_assistant_timeout_s)
         raw = rec.last
         out.append(
@@ -1559,4 +1671,44 @@ async def probe(
                 "request_id": raw.request_id if raw is not None else None,
             }
         )
+    return out
+
+
+async def probe_hold(
+    judges: Sequence[tuple[str, JevTransport]],
+    cfg: FastLoopConfig,
+    *,
+    symbol: str,
+    state: str,
+    questions: Sequence[JevQuestion],
+) -> list[dict[str, Any]]:
+    """每个裁判真问一次 hold 题：和运行时同一组题（B 每道倒序）和超时，打印 p(close)。B 没答上
+    再只发 action 一道试一次（``keeper_assistant_b_action_only`` 要不要开就看这一行）。"""
+    out: list[dict[str, Any]] = []
+    for judge, transport in judges:
+        tries = (
+            [(False, b_questions(questions, False))]
+            if judge == "B"
+            else [(False, tuple(questions))]
+        )
+        if judge == "B":
+            tries.append((True, b_questions(questions, True)))
+        for action_only, qs in tries:
+            rec = _Recording(transport)
+            scorer = TransportScorer(
+                rec, usd_per_mtok=cfg.jev_usd_per_mtok, max_errors=1_000, cooldown_s=0.0
+            )
+            v = await scorer.ask_hold(judge, symbol, state, qs, cfg.keeper_assistant_timeout_s)
+            raw = rec.last
+            out.append(
+                {
+                    **v.row(),
+                    "questions": [q.id for q in qs],
+                    "action_only": action_only,
+                    "raw_probs": {k: dict(p) for k, p in raw.probs.items()} if raw else None,
+                    "request_id": raw.request_id if raw is not None else None,
+                }
+            )
+            if v.p_yes is not None:
+                break
     return out

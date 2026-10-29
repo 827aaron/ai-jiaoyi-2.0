@@ -596,6 +596,16 @@ class FastLoopConfig(Contract):
         "说明，同时问助手 1（Jev）和助手 2（keeper_assistant_b_model，选项倒序），两个都答「平」"
         "且 p(平) ≥ keeper_assistant_min_p 才平。翻转确认不受影响。",
     )
+    keeper_assistant_blind_glossary: bool = Field(
+        default=False,
+        description="blind_move 时是非题前面带上英文的行情字段说明（和管家持仓题里讲行情字段的"
+        "那几句一样）。关 = 题目和现在一字不差。",
+    )
+    keeper_assistant_b_action_only: bool = Field(
+        default=False,
+        description="hold 时助手 2 只收一道 action 题（说明 = 进场理由那题的说明 + action 的说明，"
+        "字段说明还在）。只在助手 2 的接口不收多道题时打开（先跑 keeper-assistant-probe --hold）。",
+    )
     keeper_assistant_reuse_s: float = Field(
         default=10.0,
         ge=0.0,
@@ -1299,10 +1309,10 @@ class PredictorConfig(Contract):
     )
     keeper_snapshot: Literal["direction", "rank", "off"] = Field(
         default="direction",
-        description="管家（持仓复查）快照里怎么带预测员。direction = 照旧：kronos.agree 按平均路径"
-        "终点在现价哪一侧给 1 / 0，再带全池名次（p_up 只有 0 / 1，实测多数是 0，做多多半是 0、"
-        "做空多半是 1，多空不对称）；rank = 只带全池名次 top / mid / bottom（和拍板加分同一个"
-        "排名，多空镜像对称），排不出名次就不写；off = 快照不带预测员。改后重启。",
+        description="管家（持仓复查）快照里怎么带预测员。direction = 预测员的原值 kronos.p_up"
+        "（平均路径终点高于现价 = 1、低于 = 0，实测多数是 0）再带全池名次；rank = 只带全池名次"
+        " top / mid / bottom（和拍板加分同一个排名），排不出名次就不写；off = 快照不带预测员。"
+        "都只给原值，不替模型判断和持仓同不同向。改后重启。",
     )
     against_card_meeting: bool = Field(
         default=False,

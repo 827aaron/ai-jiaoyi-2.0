@@ -643,7 +643,7 @@ async def test_runner_reverse_signal_goes_to_keeper_and_assistant_and_closes_onc
     r.app.m.trigger.events.append(sig(now))  # type: ignore[attr-defined]
     await r.on_event(_trade(now))
     await _settle(r)
-    assert sa.calls[0][1].endswith("\nBTCUSDT 接下来 1–4 小时会下跌吗？（是 / 否）")
+    assert sa.calls[0][1] == "BTCUSDT 接下来 1–4 小时会下跌吗？（是 / 否）"
     assert len(sa.calls) == len(sb.calls) == 1
     assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
 
