@@ -215,6 +215,8 @@ keeper_assistant_on = false
 # keeper_assistant_b_model = "microsoft/microsoft-decision-1"  # 模型 B（经 OpenRouter Decisions 接口）；不写 = 没有 B，一律不平
 keeper_assistant_min_p = 0.6
 keeper_assistant_horizon = "1–4 小时"
+keeper_assistant_question = "blind_move"  # 问什么：blind_move = 不带仓位的是非题（现状）；hold = 管家同一道持仓题 + 同一份持仓快照
+keeper_assistant_reuse_s = 10     # hold 时管家急查 10 秒内为同一个反向信号问过同一道题，就借它当 A；0 = 不借
 keeper_assistant_timeout_s = 8.0  # 两个模型合起来最多等几秒，超时不平
 keeper_assistant_gap_s = 120      # 同一个币两次问至少隔 120 秒；0 = 只是同一个币在问时不重复
 keeper_assistant_snapshot_max_age_s = 30  # 行情快照超过 30 秒或刚订阅不满 5 分钟，不问

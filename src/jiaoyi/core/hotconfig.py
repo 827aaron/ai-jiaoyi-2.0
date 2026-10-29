@@ -98,6 +98,8 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_assistant_b_model",
         "keeper_assistant_min_p",
         "keeper_assistant_horizon",
+        "keeper_assistant_question",
+        "keeper_assistant_reuse_s",
         "keeper_assistant_timeout_s",
         "keeper_assistant_gap_s",
         "keeper_assistant_key_level",

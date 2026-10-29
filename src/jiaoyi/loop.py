@@ -77,7 +77,7 @@ from jiaoyi.keeper.assistant import (
 from jiaoyi.keeper.assistant import (
     SnapshotProvider as AssistantSnapshot,
 )
-from jiaoyi.keeper.keeper import close_blocked
+from jiaoyi.keeper.keeper import JevKeeper, close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
     ATR_PERIOD,
@@ -820,6 +820,7 @@ class Runner:
                 close_sources.read(self.app.app_cfg.data_dir).get(pid) or {}
             ).get("source"),
             snapshot_provider=self._assistant_snapshot(),
+            hold=self.m.keeper if isinstance(self.m.keeper, JevKeeper) else None,
         )
         if cards is not None:
             cards.set_on_flip_pending(assistant.on_flip_pending)
@@ -937,7 +938,9 @@ class Runner:
         # 管家助手和管家急查各走各的，谁先平谁算（平仓去重在 close 里）
         for pos in self._ledger_positions():
             if pos.symbol == sig.symbol:
-                self.assistant.on_reverse_signal(pos, sig.side, f"{sig.kind.value}：{sig.desc}")
+                self.assistant.on_reverse_signal(
+                    pos, sig.side, f"{sig.kind.value}：{sig.desc}", sig
+                )
         for pos, one_shot in rechecks:
             if isinstance(self.m.keeper, _NotesAgainst):
                 self.m.keeper.note_against(pos.position_id, sig, one_shot)

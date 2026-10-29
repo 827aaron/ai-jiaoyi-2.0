@@ -589,6 +589,22 @@ class FastLoopConfig(Contract):
         max_length=20,
         description="是非题里的时间范围：「<币> 接下来 <这里> 会上涨吗？」。",
     )
+    keeper_assistant_question: Literal["blind_move", "hold"] = Field(
+        default="blind_move",
+        description="反向信号时问什么。blind_move = 两个模型问不带仓位的是非题「会上涨 / 下跌吗」"
+        "（现状）；hold = 管家问：管家复查那道持仓题（拿住 / 全平）、同一份完整持仓快照和字段"
+        "说明，同时问助手 1（Jev）和助手 2（keeper_assistant_b_model，选项倒序），两个都答「平」"
+        "且 p(平) ≥ keeper_assistant_min_p 才平。翻转确认不受影响。",
+    )
+    keeper_assistant_reuse_s: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=60.0,
+        allow_inf_nan=False,
+        description="hold 时：同一个反向信号也叫了管家急查，就最多等这么多秒等急查问 Jev，拿它那次"
+        "的快照问助手 2、它的回答当助手 1（Jev 不问两遍）；急查这么多秒内已问过也一样。等不到"
+        "（没排急查、急查没问 Jev）就自己按管家的快照问两个。0 = 不等，一律自己问。",
+    )
     keeper_assistant_timeout_s: float = Field(
         default=8.0,
         ge=0.2,

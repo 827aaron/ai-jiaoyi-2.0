@@ -15,17 +15,20 @@ from jiaoyi import contracts as c
 from jiaoyi.contracts import FastLoopConfig, KeyLevel, LevelKind, Outcome, Role, Side
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
-from jiaoyi.gate.jev import MockJevTransport
+from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
+from jiaoyi.gate.questions import MARKET_GLOSSARY, hold_questions
 from jiaoyi.keeper import assistant as ka
 from jiaoyi.keeper.assistant import (
+    ACTION,
     QUESTION_ID,
     KeeperAssistant,
     TransportScorer,
     Verdict,
 )
+from jiaoyi.keeper.keeper import JevKeeper
 from jiaoyi.slow.card_flip import FlipCandidate
-from tests.fastloop_helpers import features
-from tests.test_keeper_patrol import position
+from tests.fastloop_helpers import FAST, card, features
+from tests.test_keeper_patrol import close_p, position
 
 ON = {
     "keeper_assistant_on": True,
@@ -43,6 +46,7 @@ class Scorer:
         self.p_yes = p_yes
         self.gate = gate
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
+        self.hold_calls: list[tuple[str, tuple[c.JevQuestion, ...]]] = []
         self.started = asyncio.Event()
 
     async def ask(
@@ -61,6 +65,23 @@ class Scorer:
         if self.p_yes is None:
             return Verdict(judge, None, None, tuple(options), "超时", 1.0)
         return Verdict(judge, "m", self.p_yes, tuple(options), None, 1.0, 0.001)
+
+    async def ask_hold(
+        self,
+        judge: str,
+        symbol: str,
+        state: str,
+        questions: Sequence[c.JevQuestion],
+        timeout_s: float,
+    ) -> Verdict:
+        self.hold_calls.append((state, tuple(questions)))
+        self.started.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        opts = next(q.choices for q in questions if q.id == "action")
+        if self.p_yes is None:
+            return Verdict(judge, None, None, opts, "超时", 1.0, question="hold")
+        return Verdict(judge, "m", self.p_yes, opts, None, 1.0, 0.001, question="hold")
 
 
 def cand(now: datetime, direction: str = "long") -> FlipCandidate:
@@ -105,6 +126,7 @@ class Harness:
         cards: Cards | None = None,
         closing: bool = False,
         price: float = 103.7,
+        hold: Any = None,
         **cfg: Any,
     ) -> None:
         self.cfg = FastLoopConfig(**{**ON, **cfg})
@@ -139,6 +161,14 @@ class Harness:
             warn=lambda title, text: self.warns.append((title, text)),
             day_reset_tz="UTC",
             close_source=lambda pid: "keeper_assistant" if pid in self.accepted else None,
+            hold=hold,
+        )
+
+    def features(self, sym: str) -> c.FeatureSnapshot:
+        return features(
+            self.clock[0] - timedelta(seconds=self.snap_age),
+            price=self.price[0],
+            live_s=self.live_s,
         )
 
     def _close(self, pos: c.PositionRecord, reason: str) -> str | None:
@@ -310,8 +340,10 @@ async def test_KeeperAssistant_on_reverse_signal_asks_both_at_once_blind_and_mir
     await h.settle()
     (state_a, q_a, opts_a), (state_b, q_b, opts_b) = a.calls[0], b.calls[0]
     assert opts_a == ("是", "否") and opts_b == ("否", "是")
-    assert q_a == "BTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）"
-    assert q_b == "BTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
+    assert q_a == MARKET_GLOSSARY + "\nBTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）"
+    assert q_b == MARKET_GLOSSARY + "\nBTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
+    assert a.hold_calls == [] and b.hold_calls == []
+    q_a = q_a.splitlines()[-1]
     assert state_a == state_b
     snapshot = json.loads(state_a)
     assert snapshot["sym"] == "BTCUSDT"
@@ -322,6 +354,167 @@ async def test_KeeperAssistant_on_reverse_signal_asks_both_at_once_blind_and_mir
     for word in ("short", "空", "持仓", "仓位", "反向", "信号", "强平反弹", "100", "110"):
         assert word not in q_a
     assert h.closed
+
+
+HOLD = {"keeper_assistant_question": "hold"}
+
+
+class Jev:
+    """The keeper's Jev: answers p(close) and keeps every (state, questions) it was sent."""
+
+    def __init__(self, p: float) -> None:
+        self.seen: list[tuple[str, tuple[c.JevQuestion, ...]]] = []
+        self.p = p
+        self.t = MockJevTransport(answer=self.answer)
+
+    def answer(self, state: str, qs: Sequence[c.JevQuestion]) -> Mapping[str, Mapping[str, float]]:
+        self.seen.append((state, tuple(qs)))
+        return close_p(self.p)(state, qs)  # type: ignore[no-any-return]
+
+
+def against(now: datetime) -> c.AgainstSignalEvent:
+    return c.AgainstSignalEvent(
+        symbol="BTCUSDT", ts=now, kind=c.SignalKind.VOLUME_BREAKOUT, side=Side.LONG, desc="反向"
+    )
+
+
+def hold_harness(
+    tmp_path: Path, now: datetime, a: Scorer, b: Scorer, jev: Jev, **cfg: Any
+) -> tuple[Harness, JevKeeper]:
+    keeper: list[JevKeeper] = []
+
+    class Late:
+        """The keeper reads the harness's clock-bound features, so it is built after it."""
+
+        async def hold_request(self, *args: Any) -> Any:
+            return await keeper[0].hold_request(*args)
+
+        async def wait_hold(self, *args: Any) -> Any:
+            return await keeper[0].wait_hold(*args)
+
+    h = Harness(tmp_path, now, a, b, hold=Late(), **{**HOLD, **cfg})
+    keeper.append(
+        JevKeeper(
+            JevDecisionModel(jev.t, FAST, timeout_ms=200),
+            FAST,
+            h.features,
+            lambda n: card(now, bias="short"),
+            RoleRecorder(Role.KEEPER, h.log),
+        )
+    )
+    return h, keeper[0]
+
+
+async def test_KeeperAssistant_hold_asks_both_judges_the_keepers_question_and_snapshot(
+    tmp_path: Path, now: datetime
+) -> None:
+    a, b, jev = Scorer(0.8), Scorer(0.7), Jev(0.1)
+    h, keeper = hold_harness(tmp_path, now, a, b, jev)
+    pos, sig = short_pos(now), against(now)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig)
+    await h.settle()
+    keeper.note_against(pos.position_id, sig, False)
+    await keeper.review(pos, now)
+    [(keeper_state, keeper_qs)] = jev.seen
+    [(state_a, qs_a)], [(state_b, qs_b)] = a.hold_calls, b.hold_calls
+    assert a.calls == [] and b.calls == []
+    assert state_a == state_b == keeper_state
+    assert qs_a == keeper_qs
+    assert [(q.id, q.prompt) for q in qs_b] == [(q.id, q.prompt) for q in keeper_qs]
+    assert [q.choices for q in qs_b] == [tuple(reversed(q.choices)) for q in keeper_qs]
+    assert {q.id: q.choices for q in qs_b}[ACTION] == ("close", "hold")
+    snapshot = json.loads(state_a)
+    assert {"pos", "card", "against", "trail"} <= set(snapshot)
+    assert MARKET_GLOSSARY in "".join(q.prompt for q in qs_a)
+    [rec] = h.records()
+    assert rec["question"] == "hold" and rec["a_reused"] is False
+    assert rec["snapshot_hash"] == ka.snapshot_hash(keeper_state)
+    assert rec["p_close"] == [0.8, 0.7]
+    assert [j["p_close"] for j in rec["judges"]] == [0.8, 0.7]
+
+
+@pytest.mark.parametrize(
+    ("pa", "pb", "closed"),
+    [
+        (0.8, 0.6, True),
+        (0.8, 0.4, False),
+        (0.4, 0.8, False),
+        (0.8, 0.59, False),
+        (None, 0.9, False),
+    ],
+)
+async def test_KeeperAssistant_hold_closes_only_when_both_say_close(
+    tmp_path: Path, now: datetime, pa: float | None, pb: float | None, closed: bool
+) -> None:
+    h, _ = hold_harness(tmp_path, now, Scorer(pa), Scorer(pb), Jev(0.1))
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x", against(now))
+    await h.settle()
+    assert bool(h.closed) is closed
+    [rec] = h.records()
+    assert (rec["would_close"], rec["p_close"]) == (closed, [pa, pb])
+
+
+@pytest.mark.parametrize(
+    ("after_s", "same_signal", "reuse_s", "reused"),
+    [(5, True, 10, True), (11, True, 10, False), (5, False, 10, False), (5, True, 0, False)],
+)
+async def test_KeeperAssistant_hold_reuses_the_keepers_fresh_answer_to_the_same_signal(
+    tmp_path: Path, now: datetime, after_s: int, same_signal: bool, reuse_s: int, reused: bool
+) -> None:
+    a, b, jev = Scorer(0.1), Scorer(0.9), Jev(0.8)
+    h, keeper = hold_harness(tmp_path, now, a, b, jev, keeper_assistant_reuse_s=reuse_s)
+    pos, sig = short_pos(now), against(now)
+    keeper.note_against(pos.position_id, sig, False)
+    await keeper.review(pos, now)
+    [(keeper_state, _)] = jev.seen
+    h.clock[0] = now + timedelta(seconds=after_s)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig if same_signal else against(h.clock[0]))
+    await h.settle()
+    [(state_b, _)] = b.hold_calls
+    [rec] = h.records()
+    assert len(jev.seen) == 1
+    assert rec["a_reused"] is reused
+    if reused:
+        assert a.hold_calls == [] and state_b == keeper_state
+        assert rec["judges"][0]["reused"] is True and rec["p_close"] == [0.8, 0.9]
+        assert rec["a_reused_age_s"] == after_s and bool(h.closed)
+    else:
+        [(state_a, _)] = a.hold_calls
+        assert state_a == state_b != keeper_state
+        assert rec["p_close"] == [0.1, 0.9] and not h.closed
+
+
+async def test_KeeperAssistant_hold_takes_assistant_1_from_the_keepers_urgent_check(
+    tmp_path: Path, now: datetime
+) -> None:
+    a, b, jev = Scorer(0.1), Scorer(0.9), Jev(0.8)
+    h, keeper = hold_harness(tmp_path, now, a, b, jev)
+    pos, sig = short_pos(now), against(now)
+    h.a.on_reverse_signal(pos, Side.LONG, "x", sig)
+    keeper.note_against(pos.position_id, sig, False)  # the main loop's order
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert keeper._ask_waiters.get(pos.position_id)  # waiting for the keeper, not asking Jev
+    await keeper.review(pos, now)
+    await h.settle()
+    [(keeper_state, _)] = jev.seen
+    [(state_b, _)] = b.hold_calls
+    assert a.hold_calls == [] and state_b == keeper_state
+    [rec] = h.records()
+    assert rec["a_reused"] is True and rec["p_close"] == [0.8, 0.9] and h.closed
+    assert rec["chain"] == (
+        "管家问 → 助手 1（Jev）p(平) 0.80（管家急查那次） / 助手 2（m）p(平) 0.90 → 平"
+    )
+
+
+async def test_KeeperAssistant_hold_skips_without_the_keeper(tmp_path: Path, now: datetime) -> None:
+    a, b = Scorer(0.9), Scorer(0.9)
+    h = Harness(tmp_path, now, a, b, **HOLD)
+    h.a.on_reverse_signal(short_pos(now), Side.LONG, "x", against(now))
+    await h.settle()
+    assert a.hold_calls == a.calls == b.hold_calls == [] and not h.closed
+    [rec] = h.records()
+    assert rec["question"] == "hold" and "管家没接上" in rec["skipped"]
 
 
 async def test_KeeperAssistant_gap_and_in_flight_dedup(tmp_path: Path, now: datetime) -> None:
@@ -647,10 +840,8 @@ async def test_KeeperAssistant_on_flip_pending_while_position_check_runs_is_defe
     gate.set()
     await h.settle()
     questions = [q for _, q, _ in a.calls]
-    assert questions == [
-        "BTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）",
-        "BTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）",
-    ]
+    asked = "BTCUSDT 接下来 1–4 小时会上涨吗？（是 / 否）"
+    assert questions == [MARKET_GLOSSARY + "\n" + asked, asked]  # the flip question has none
     assert len(cards.confirmed) == 1
 
 
@@ -861,6 +1052,23 @@ async def test_TransportScorer_ask_sends_one_yes_no_question_and_reads_p_yes(
     assert (v.model, v.p_yes, v.error) == ("ms-decision", 0.7, None)
 
 
+async def test_TransportScorer_ask_hold_sends_every_question_and_reads_p_close() -> None:
+    qs = tuple(hold_questions())
+    sent: list[tuple[c.JevQuestion, ...]] = []
+
+    def answer(state: str, got: Sequence[c.JevQuestion]) -> Mapping[str, Mapping[str, float]]:
+        sent.append(tuple(got))
+        return close_p(0.7)(state, got)  # type: ignore[no-any-return]
+
+    s = TransportScorer(
+        MockJevTransport(answer=answer), usd_per_mtok=0, max_errors=2, cooldown_s=60
+    )
+    v = await s.ask_hold("A", "BTCUSDT", "{}", qs, 1.0)
+    assert sent == [qs]
+    assert (v.p_yes, v.options, v.question, v.error) == (0.7, ("hold", "close"), "hold", None)
+    assert v.row()["p_close"] == 0.7 and v.text == "p(平) 0.70"
+
+
 async def test_TransportScorer_ask_counts_errors_and_cools_down() -> None:
     t = MockJevTransport(fail=RuntimeError("503"))
     clock = [0.0]
@@ -1005,7 +1213,7 @@ async def test_openrouter_scorer_asks_decisions_route_blind_with_reversed_option
     assert body["model"] == DECISION_1
     q = body["questions"][QUESTION_ID]
     assert q["type"] == "choice" and list(q["criteria"]) == ["否", "是"]
-    assert q["instructions"] == "BTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
+    assert q["instructions"] == MARKET_GLOSSARY + "\nBTCUSDT 接下来 1–4 小时会上涨吗？（否 / 是）"
     state = json.loads(body["state"])
     assert state["sym"] == "BTCUSDT" and state["px"] == 103.7
     assert set(state) == {
@@ -1065,8 +1273,8 @@ async def test_probe_asks_each_judge_once_and_reports_raw_probabilities(now: dat
     )
     assert [(r["judge"], r["p_yes"]) for r in rows] == [("B", 0.65), ("A", 0.3)]
     assert rows[0]["raw_probs"] == {"否": 0.35, "是": 0.65}
-    assert rows[0]["question"] == "ETHUSDT 接下来 1–4 小时会下跌吗？（否 / 是）"
-    assert rows[1]["question"] == "ETHUSDT 接下来 1–4 小时会下跌吗？（是 / 否）"
+    assert rows[0]["question"] == MARKET_GLOSSARY + "\nETHUSDT 接下来 1–4 小时会下跌吗？（否 / 是）"
+    assert rows[1]["question"] == MARKET_GLOSSARY + "\nETHUSDT 接下来 1–4 小时会下跌吗？（是 / 否）"
     assert rows[0]["request_id"] == "gen-dec-1" and rows[0]["latency_ms"] >= 0
     assert fake.body()["state"] == state and jev.calls == [state]
 

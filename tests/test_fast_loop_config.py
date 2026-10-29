@@ -113,7 +113,10 @@ def test_keeper_assistant_defaults_off_and_rejects_bad_values() -> None:
     assert (cfg.keeper_assistant_gap_s, cfg.keeper_assistant_horizon) == (120, "1–4 小时")
     assert (cfg.keeper_assistant_concurrency, cfg.keeper_assistant_key_level) == (2, False)
     assert cfg.keeper_assistant_timeout_s == 8.0
+    assert (cfg.keeper_assistant_question, cfg.keeper_assistant_reuse_s) == ("blind_move", 10.0)
     for bad in (
+        {"keeper_assistant_question": "move"},
+        {"keeper_assistant_reuse_s": -1},
         {"keeper_assistant_min_p": 0.4},
         {"keeper_assistant_gap_s": -1},
         {"keeper_assistant_concurrency": 3},

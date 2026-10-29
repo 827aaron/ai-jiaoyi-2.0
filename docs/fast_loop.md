@@ -136,7 +136,7 @@
 | `adaptive_base_max_queue` | 0 | 0–20，且 < 下一项 | 自适应：排队 ≤ 它用 base |
 | `adaptive_mini_min_queue` | 3 | 1–50 | 自适应：排队 ≥ 它用 mini，中间用 small |
 | `backfill_bars` | 400 | 64–1500 | 启动回填多少根 5 分钟线 |
-| `keeper_snapshot` | `direction` | `direction` / `rank` / `off` | 管家复查快照里怎么带预测员（改后重启）。`direction`（原行为）：`kronos.agree` = 平均路径终点在持仓方向一侧给 1、否则 0，排得出名次再带 `kronos.rank`；`rank`：只带 `kronos.rank`（top / mid / bottom，和拍板加分同一个全池排名），排不出名次就不写 `kronos`；`off`：不带。持仓第一题里描述预测员的那句跟着换（rank：「top 利多不利空，bottom 反之」，off：不提），rank / off 各有模板版本 `q9-krank` / `q9-koff`（direction 仍是 `q9`，逐字节不变），管家决策记录 `input.jev.kronos_snapshot` 记用的哪种 |
+| `keeper_snapshot` | `direction` | `direction` / `rank` / `off` | 管家复查快照里怎么带预测员（改后重启）。`direction`（原行为）：`kronos.agree` = 平均路径终点在持仓方向一侧给 1、否则 0，排得出名次再带 `kronos.rank`；`rank`：只带 `kronos.rank`（top / mid / bottom，和拍板加分同一个全池排名），排不出名次就不写 `kronos`；`off`：不带。持仓第一题里描述预测员的那句跟着换（rank：「top 利多不利空，bottom 反之」，off：不提），rank / off 各有模板版本 `q10-krank` / `q10-koff`（direction 是 `q10`；q9 时是 `q9` / `q9-krank` / `q9-koff`），管家决策记录 `input.jev.kronos_snapshot` 记用的哪种 |
 
 - 三个模型都钉了 Hugging Face 提交（见 `predictor/kronos.py` 的 `MODEL_SPECS`）：mini 配 Tokenizer-2k（上下文 2048），small / base 配 Tokenizer-base（上下文 512）。用到哪个才加载哪个，加载后常驻。
 - 实测 small：约 3.0 秒 / 币，5 个币排队约 14.9 秒；按需模式下一般只有卡里的几个币，排得开。`Forecast.model` 记着这次用的是哪个。
@@ -206,6 +206,7 @@
   换模板版本和换 Jev 模型版本一样，门槛要重新校准。
 - 拍板人和持仓管家的每条决策记录都带 `input.jev`（模板版本、指纹、请求号、类型、问题、完整快照）和
   `output.jev`（是否成功、错误、模型版本、延迟、花费、每个选项的概率）。被作战卡拦下、没真正调用的记录 `input.jev.called = false`。
+- **字段说明（q10）**：持仓第一题（`thesis_intact`）的说明里逐个讲清快照的每个键：是什么、单位（`*_bps` 基点、`*_k` 千 USDT、`*_x` 相对近期平均的倍数）、正负号的意思，按组一句：`pos.*`、`entry.*`、`trail.*`、行情（`px`、`atr_bps`、`ret*_bps`、`rv5m_bps`、`vol_x`、`buy`、`cvd30_k`、`liq_*_k`、`fund_bps`、持仓量 / 多空比 / `btc5z`）、`book.*`、`card.*`（关键位是离现价多少基点、`stop_atr`、`tp_r`、`size_max`）、`current_market.*`、`kronos.*`、`against.*`。讲行情的那几句是 `gate.questions.MARKET_GLOSSARY`，管家助手的是非题前面带的就是这一段。`tests/test_jev_templates.py` 把 `hold_snapshot` 能写出的每个键（三种 `keeper_snapshot` 都算）都对一遍说明，新加字段没写说明就失败。q10 只改了这一题的说明，快照和其余题目、进场题目不变；说明从约 1900 字符长到约 4000 字符，每次管家复查多约 500 token 输入。
 - 复盘用 `jiaoyi.gate.review.iter_jev_calls(data_dir)`，把每次真正的调用摊平成一行，可按 `template` / `model` 分组；
   `template_dump()` 给出当前模板全文。
 
@@ -441,7 +442,9 @@ hummingbot 的 `trailing_stop`：盈利过启动线后止损线定在「当时�
 持仓后的事归快环。有持仓的币出了对持仓不利的快环事件，赚钱亏钱都算，管家助手就同时问两个互相独立的打分模型同一道是非题，两个都答「是」才动手。它有自己的名额（`keeper_assistant_concurrency`，最多 2）、自己的超时和连续错误冷却，不占军师团开会的名额，也不连累管家和拍板人的 Jev 计数；出任何错只记录，不影响管家复查和主循环。决策日志角色 `keeper_assistant`（面板「管家助手」），`module_status.json` 里有它的一行。
 
 - **触发**：哨兵的反向信号（信号方向和持仓相反），和管家急查同时交出去，各走各的；管家急查不变（照旧按 `keeper_model_mode`）。`keeper_assistant_key_level` 开着时，价格朝持仓不利的方向穿过卡上的关键位（持空往上、持多往下，每笔仓记上一次看到的成交价，第一次只记不判）也问。同一个币 `keeper_assistant_gap_s`（默认 120 秒）内只问一次，正在问时不重复问。没有持仓的币不问；大盘台的方向不参与。
-- **题目**：持空问「<币> 接下来 <horizon> 会上涨吗？（是 / 否）」，持多问「……会下跌吗？」；`horizon` 默认「1–4 小时」。A 是 Jev（同一条通道），B 是 `keeper_assistant_b_model`，B 的选项倒过来列（否 / 是），题目一字不差。快照是管家快照里的行情部分（`gate/questions.direction_snapshot`），不带仓位、开仓价、盈亏、作战卡、大盘判断、预测员和反向信号本身。管家急查问的是持仓题，不是这道题，所以没有可以省掉的重复调用，A 一律单独问。
+- **题目**（`keeper_assistant_question`，默认 `"blind_move"`，热生效）：
+  - `"blind_move"`（现状）：持空问「<币> 接下来 <horizon> 会上涨吗？（是 / 否）」，持多问「……会下跌吗？」；`horizon` 默认「1–4 小时」。题目前面带一段英文的行情字段说明（`MARKET_GLOSSARY`，和管家持仓题里讲行情字段的那几句一字不差），模型 B 没见过我们的字段名也看得懂。A 是 Jev（同一条通道），B 是 `keeper_assistant_b_model`，B 的选项倒过来列（否 / 是），其余一字不差。快照是管家快照里的行情部分（`gate/questions.direction_snapshot`），不带仓位、开仓价、盈亏、作战卡、大盘判断、预测员和反向信号本身。A 一律单独问。
+  - `"hold"`：**管家问，两个助手答。** 题目和快照都是管家的：管家复查问 Jev 的那一组持仓题（同样的措辞、字段说明和选项说明，`JevKeeper.hold_request` 用复查同一套价、历史、进场拍板、作战卡、大盘、预测员拼出来，带上这个反向信号 `against`），只看 `action`（hold / close）。助手 1 = Jev，助手 2 = `keeper_assistant_b_model`（每道题的选项都倒过来列，close / hold）。两个都答 close 且各自 p(close) ≥ `keeper_assistant_min_p` 才是「本来会平」，其余一律拿住。两个助手拿到的信息一样，独立性只来自模型不同。这个反向信号同时叫了管家急查时，助手 1 的回答就是急查那次 Jev 的回答：管家助手最多等 `keeper_assistant_reuse_s`（默认 10 秒）等急查开始问 Jev（急查这么多秒内已经问过也算），拿急查那份快照问助手 2，两边同时进行，Jev 不问两遍（借来的这一份花费记 0，管家自己的记录里已经算过）。没排急查（比如同一笔仓 5 分钟内已急查过）、急查没走到问 Jev（行情旧、回吐保护先平等）、或等不到时，按 `hold_request` 这一刻的快照自己问两个助手。急查的 Jev 没答上，助手 1 就算没答上，拿住。决策记录摘要写成「管家问 → 助手 1（Jev）p(平) 0.80 / 助手 2（microsoft-decision-1）p(平) 0.70 → 平」，流水同一行还记 `question`（`hold` / `blind_move`）、`snapshot_hash`（快照 sha256 前 16 位）、`p_close`（[助手 1, 助手 2]）、`a_reused`（助手 1 是不是借的急查那次）、`chain`（上面那句）。翻转确认、转中性确认不受这个设置影响，照旧问是非题（不带字段说明）。
 - **Jev 隔离**：A 用管家助手自己的一份打分器（`TransportScorer`）：只借 Jev 的底层通道，自己的超时、连续错误计数和冷却。拍板人 / 管家的 `JevDecisionModel` 只收合同里的 entry / hold 题，它的错误计数也只在它自己的 `ask` 里动，所以管家助手出错永远不会让它们进冷却。
 - **超时**：两个模型同时问，合起来最多等 `keeper_assistant_timeout_s`（默认 8 秒），超时两个都算没答上、不平。
 - **快照要新**：管家助手自己不取行情，快照由注入的 `snapshot_provider(币, 最多几秒前)` 给（返回快照、来源、快照多少秒前）。现在接的是快环行情流（`RollingFeatureEngine`）上的一层薄适配（`ws_snapshot_provider`）：超过 `keeper_assistant_snapshot_max_age_s`（默认 30 秒，这个币的行情流停了）报 `stale`，连续行情 `live_s` 不满 300 秒（刚订阅、还没预热，缺了按没预热算）报 `cold`，这两种都不问，A、B 都不调；同一个币每分钟最多记一条「行情快照过旧/未预热，不问」（带原因、快照多少秒前）。判断那一行记 `snapshot_source`（现在都是 `ws`）。以后换成哨兵统一取数的提供方（带 REST 补数），管家助手不用改。持仓判断、翻转确认、转中性确认、启动和切换时的清扫都走这一道。

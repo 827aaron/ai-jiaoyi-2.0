@@ -63,6 +63,7 @@ from jiaoyi.contracts import (
     FeatureSnapshot,
     Forecast,
     HoldQuestion,
+    JevQuestion,
     JevRequest,
     JevResponse,
     KeeperVerdict,
@@ -113,6 +114,17 @@ _FAIL_TEXT = {
     "cooldown": "Jev 连续出错在冷却，本轮维持现状",
     "other": "Jev 调用出错，本轮维持现状",
 }
+
+
+class HoldAsk(NamedTuple):
+    """管家最近一次问 Jev 持仓题（发出去那一刻就登记）。管家助手为同一个反向信号拿它的快照
+    问助手 2，``answer`` 就是助手 1 的回答：Jev 答完（含重试）才有结果，没问成是 None。"""
+
+    at: datetime
+    snapshot: str
+    questions: tuple[JevQuestion, ...]
+    against: AgainstSignalEvent | None
+    answer: asyncio.Future[JevResponse | None]
 
 
 class JevKeeper:
@@ -210,6 +222,9 @@ class JevKeeper:
         self._close_sent: dict[str, datetime] = {}  # 上一次发出平仓请求的时刻
         self._inflight: dict[str, _Inflight] = {}
         self._venue_misses: dict[str, int] = {}  # 执行所标记价连续读不到 / 过旧的复查次数
+        self._asked: dict[str, HoldAsk] = {}
+        self._reviewing: dict[str, AgainstSignalEvent] = {}
+        self._ask_waiters: dict[str, list[asyncio.Future[None]]] = {}
         self._alerter = alerter
         self._load_opposite_state()
 
@@ -225,6 +240,8 @@ class JevKeeper:
         self._close_sent.pop(position_id, None)
         self._inflight.pop(position_id, None)
         self._venue_misses.pop(position_id, None)
+        self._asked.pop(position_id, None)
+        self._wake(position_id)
         self._against.pop(position_id, None)
         self._history.pop(position_id, None)
         self._peak.pop(position_id, None)
@@ -296,6 +313,8 @@ class JevKeeper:
                 checks, entry = await asyncio.to_thread(self._read_log, pos, now)
             except Exception:  # 日志读不了就从这次开始记，不影响复查
                 log.warning("管家找回 %s 的复查历史失败", pid, exc_info=True)
+        if pid in self._history:
+            return  # recalled by a concurrent caller, whose list may already have new entries
         self._history[pid] = [pnl for pnl, _ in checks][-MAX_HISTORY:]
         peaks: dict[str, float] = {}
         for pnl, used in checks:
@@ -408,6 +427,13 @@ class JevKeeper:
         return {"triggered": False, "detail": "evidence_stale", "evidence_as_of": as_of}
 
     async def review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
+        try:
+            return await self._review(position, now)
+        finally:
+            self._reviewing.pop(position.position_id, None)
+            self._wake(position.position_id)
+
+    async def _review(self, position: PositionRecord, now: datetime) -> KeeperVerdict:
         """一轮复查。规则按 ``RULE_ORDER`` 投票，第一条判平的生效；决策记录 ``rules`` 记每条的票，
         ``rule_fired`` 记生效的那条，``price`` 记两种价。
 
@@ -470,6 +496,8 @@ class JevKeeper:
         price = await self._price_inputs(position, f, now)
         votes.append({"rule": "price", "vote": price["vote"]})
         against = self._against.pop(pid, None)
+        if against is not None:
+            self._reviewing[pid] = against[0]
         observation = self._observation_start(position, now, f)
         verdict = partial(
             self._verdict,
@@ -509,12 +537,6 @@ class JevKeeper:
         self._venue_misses.pop(pid, None)
         px = float(price["price"])
         fv = f if px == f.last_price else f.model_copy(update={"last_price": px})
-        card = self._card(now)
-        market = (
-            self._market_source()
-            if self._market_source is not None
-            else (card.current_market if card else None)
-        )
         if pid not in self._history:
             await self._recall(position, now)
         history = self._history.setdefault(pid, [])
@@ -536,39 +558,41 @@ class JevKeeper:
             votes.append({"rule": "giveback", "vote": "close"})
             return verdict(position, now, "close", 1.0, 1, text, None, None, extra=detail)
         votes.append({"rule": "giveback", "vote": "hold" if self._cfg.giveback_on else "off"})
-        fc = self._forecast(position.symbol, now) if self._forecast is not None else None
         request = JevRequest(
             request_id=f"hold-{pid}-{uuid.uuid4().hex[:6]}",
             kind="hold",
             symbol=position.symbol,
             ts=now,
             position_id=pid,
-            snapshot=hold_snapshot(
-                position,
-                fv,
-                card,
-                now,
-                against=against[0] if against is not None else None,
-                history=history,
-                entry=self._entry.get(pid),
-                forecast=fc,
-                fee_bps=self._fee_bps,
-                current_market=market,
-                market_intra=self._intra(now, market),
-                market_age=self._market_age(now, market) if self._market_age else None,
-                kronos=self._kronos_snapshot,
+            snapshot=self._snapshot(
+                position, fv, now, against[0] if against is not None else None, history
             ),
             questions=hold_questions(self._kronos_snapshot),
         )
         history.append(pnl)
         del history[:-MAX_HISTORY]
-        resp = await self._model.ask(request)
-        attempts = 1
-        if not resp.ok and error_kind(resp.error) in ("busy", "timeout"):
-            await self._sleep(RETRY_AFTER_S)  # 服务方一时过载 / 超时：本轮再问一次
-            request = request.model_copy(update={"request_id": f"{request.request_id}-r"})
+        answer: asyncio.Future[JevResponse | None] = asyncio.get_running_loop().create_future()
+        self._asked[pid] = HoldAsk(
+            now,
+            request.snapshot,
+            tuple(request.questions),
+            against[0] if against is not None else None,
+            answer,
+        )
+        self._wake(pid)
+        final: JevResponse | None = None
+        try:
             resp = await self._model.ask(request)
-            attempts = 2
+            attempts = 1
+            if not resp.ok and error_kind(resp.error) in ("busy", "timeout"):
+                await self._sleep(RETRY_AFTER_S)  # 服务方一时过载 / 超时：本轮再问一次
+                request = request.model_copy(update={"request_id": f"{request.request_id}-r"})
+                resp = await self._model.ask(request)
+                attempts = 2
+            final = resp
+        finally:
+            if not answer.done():
+                answer.set_result(final)
         self._observation_response(observation, position.symbol, request, resp, attempts)
         thesis = resp.answer(HoldQuestion.THESIS_INTACT.value) if resp.ok else None
         if thesis is not None:
@@ -633,6 +657,93 @@ class JevKeeper:
         self._streak.pop(pid, None)
         vote.update(vote=idle, would_close=False)
         return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+
+    def _snapshot(
+        self,
+        position: PositionRecord,
+        fv: FeatureSnapshot,
+        now: datetime,
+        against: AgainstSignalEvent | None,
+        history: list[float],
+    ) -> str:
+        card = self._card(now)
+        market = (
+            self._market_source()
+            if self._market_source is not None
+            else (card.current_market if card else None)
+        )
+        fc = self._forecast(position.symbol, now) if self._forecast is not None else None
+        return hold_snapshot(
+            position,
+            fv,
+            card,
+            now,
+            against=against,
+            history=history,
+            entry=self._entry.get(position.position_id),
+            forecast=fc,
+            fee_bps=self._fee_bps,
+            current_market=market,
+            market_intra=self._intra(now, market),
+            market_age=self._market_age(now, market) if self._market_age else None,
+            kronos=self._kronos_snapshot,
+        )
+
+    async def hold_request(
+        self,
+        position: PositionRecord,
+        f: FeatureSnapshot,
+        now: datetime,
+        against: AgainstSignalEvent | None = None,
+    ) -> tuple[str, tuple[JevQuestion, ...]] | str:
+        """这一刻这笔仓的持仓题和快照，和复查问 Jev 的一字不差（同一套价、历史、进场、卡、
+        大盘、预测员）；不动连续计数，也不把这一次记进历史。返回字符串 = 管家这一刻自己也
+        不会问的原因。"""
+        price = await self._price_inputs(position, f, now)
+        if price["vote"] != "ok":
+            return f"管家的价不可用（{price['vote']}）"
+        px = float(price["price"])
+        fv = f if px == f.last_price else f.model_copy(update={"last_price": px})
+        if position.position_id not in self._history:
+            await self._recall(position, now)
+        history = list(self._history.get(position.position_id, ()))
+        snapshot = self._snapshot(position, fv, now, against, history)
+        return snapshot, tuple(hold_questions(self._kronos_snapshot))
+
+    async def wait_hold(
+        self, position_id: str, against: AgainstSignalEvent, now: datetime, wait_s: float
+    ) -> HoldAsk | None:
+        """急查为同一个反向信号问 Jev 的那一次（题目和现在一样）：``wait_s`` 秒内问过就直接给；
+        信号还排着等急查、或急查正在算，就最多等 ``wait_s`` 秒等它开始问。都不是为 None。"""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_s
+        while True:
+            ask = self._asked.get(position_id)
+            if (
+                ask is not None
+                and ask.against == against
+                and (now - ask.at).total_seconds() <= wait_s
+                and ask.questions == tuple(hold_questions(self._kronos_snapshot))
+            ):
+                return ask
+            queued = self._against.get(position_id)
+            coming = (queued is not None and queued[0] == against) or self._reviewing.get(
+                position_id
+            ) == against
+            left = deadline - loop.time()
+            if not coming or left <= 0:
+                return None
+            woken: asyncio.Future[None] = loop.create_future()
+            self._ask_waiters.setdefault(position_id, []).append(woken)
+            try:
+                await asyncio.wait_for(woken, left)
+            except TimeoutError:
+                return None
+
+    def _wake(self, position_id: str) -> None:
+        for woken in self._ask_waiters.pop(position_id, []):
+            if not woken.done():
+                woken.set_result(None)
 
     async def _price_inputs(
         self, position: PositionRecord, f: FeatureSnapshot | None, now: datetime
