@@ -73,7 +73,8 @@ def test_every_setting_belongs_to_a_role(tmp_path: Path) -> None:
 def test_role_ids_match_team_page() -> None:
     js = APP_JS.read_text(encoding="utf-8")
     ids = re.findall(r'\{ id: "([a-z_]+)", t: "', _roles_block())
-    team = set(re.findall(r"\b([a-z_]+): \[\d+, \d+\]", js[js.index("const TF_POS") :]))
+    pos = js[js.index("const TL_POS") : js.index("const TL_LANES")]
+    team = set(re.findall(r"\b([a-z_]+): \[\d+, \d+\]", pos))
     # 团队页的角色点「它的设置」跳 #settings/<同一个 id>
     assert {"screener", "market", "commander", "predictor", "sentinel", "gate"} <= set(ids)
     assert {"risk_guard", "executor", "keeper", "patrol", "reconciler", "lifeboat"} <= set(ids)

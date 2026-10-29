@@ -42,6 +42,7 @@ from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
 from jiaoyi.panel.files import PanelFiles, read_live_gate
 from jiaoyi.panel.hb import HbReader
+from jiaoyi.panel.live import LiveFeed, LiveSource
 from jiaoyi.panel.live_price import DEMO_WS_BASE, WS_BASE, LivePrices, merge_live
 from jiaoyi.panel.market import BASE, DEMO_BASE, Interval, KlineError, KlineSource
 from jiaoyi.panel.meetings import Meeting, read_meeting
@@ -552,6 +553,13 @@ def create_app(
             gate_take_by_kind={k.value: v for k, v in fl.min_p_take_by_kind.items()},
         )  # fmt: skip
         return page.model_copy(update={"prompts": prompts_info(files)})
+
+    live_src = LiveSource(files)
+
+    @api.get("/api/team/live")
+    async def team_live(cursor: str | None = None) -> LiveFeed:
+        """团队页每 1–2 秒问一次：游标之后新写的决策记录（翻成动作）+ 在管的持仓。"""
+        return await asyncio.to_thread(live_src.feed, clock(), cursor)
 
     @api.get("/api/prompts")
     async def prompts() -> dict[str, Any]:

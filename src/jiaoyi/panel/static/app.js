@@ -467,6 +467,7 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
+  else if (act === "liveev") liveFocus(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
   else if (act === "kscale") {
     S.scaleAll = !S.scaleAll;
@@ -1727,120 +1728,319 @@ function entryMarkers(p, bars) {
 }
 
 /* ---------- 团队 */
-/* 流程图（设计稿 /mnt/project-files/design/team-flow/handoff.md）：三条泳道，节点固定坐标，连线 SVG；
-   宽度不够整体缩放，手机上改成按泳道竖排。点 = 进度 + 健康：出错 > 正在做 > 这一轮做完 > 等待 */
-const TF_W = 1180, TF_H = 570, NODE_W = 168, NODE_H = 92;
-const TF_POS = {
-  screener: [10, 34], market: [250, 34], desk: [490, 34], commander: [730, 34], card: [970, 34],
-  book_reader: [10, 214], predictor: [250, 290], sentinel: [490, 214], gate: [730, 214], risk_guard: [970, 186], executor: [970, 300],
-  alerting: [10, 446], reconciler: [250, 446], patrol: [490, 446], keeper: [730, 446], lifeboat: [970, 446],
+/* 团队页是一张活的流程图：三条线按真实的数据流摆，决策日志里每写一条新记录，就在它走的那段路上放一个光点。
+   ① 慢环一条地铁线：选币 → 总盘会 → 大盘台 → 军师团 → 作战卡（作战卡往下发给哨兵、风控员、持仓管家）。
+   ② 开仓一条地铁线：盘口员 → 哨兵 → 拍板人 → 风控员 → 执行器；预测员挂在拍板人上方。
+   盘口员是全队的行情源，哨兵是唯一的取数出口：底下那条行情总线从盘口员出发、经过哨兵、通到持仓圈。
+   ③ 持仓圈：中间是真在管的仓位，持仓管家 + 管家助手、巡逻兵、保命止损、对账员围一圈。
+   画布用逻辑坐标 TL_W × TL_H，宽度不够整体缩放；窄屏改成按泳道竖排。 */
+const TL_W = 960, TL_H = 600, TL_NW = 112, TL_NH = 80;
+// 每个角色的站点（节点卡挂在站点下方，中心对齐）
+const TL_POS = {
+  screener: [70, 46], market: [190, 46], desk: [310, 46], commander: [430, 46],
+  book_reader: [70, 300], sentinel: [190, 300], gate: [310, 300], risk_guard: [430, 300], executor: [550, 300],
+  predictor: [310, 232],
+  keeper: [735, 236], keeper_assistant: [865, 236], patrol: [900, 350], lifeboat: [680, 500], reconciler: [800, 555],
+  alerting: [80, 572],
 };
-const TF_LANES = [
-  ["① 准备作战卡", "每轮开会出一张", 0, 150, ["screener", "market", "desk", "commander", "card"]],
-  ["② 发现信号 → 下单", "几秒内走完", 166, 230, ["book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor"]],
-  ["③ 看着持仓", "有仓位就一直盯", 412, 150, ["lifeboat", "keeper", "patrol", "reconciler", "alerting"]],
+const TL_LANES = [
+  ["① 慢环 · 定方向", "每轮开会出一张作战卡", ["screener", "market", "desk", "commander", "card"]],
+  ["② 开仓 · 几秒内", "按作战卡等信号", ["book_reader", "sentinel", "predictor", "gate", "risk_guard", "executor"]],
+  ["③ 快环 · 持仓到撤离", "守着在管的仓位", ["keeper", "keeper_assistant", "patrol", "lifeboat", "reconciler", "alerting"]],
 ];
-const tfR = (k) => [TF_POS[k][0] + NODE_W, TF_POS[k][1] + NODE_H / 2];
-const tfL = (k) => [TF_POS[k][0], TF_POS[k][1] + NODE_H / 2];
-const tfT = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1]];
-const tfB = (k) => [TF_POS[k][0] + NODE_W / 2, TF_POS[k][1] + NODE_H];
-// [起点, 终点, 终点角色（连线颜色跟它）, 标签, 弯法]
-const TF_EDGES = [
-  [tfR("screener"), tfL("market"), "market", "候选池"],
-  [tfT("market"), tfT("commander"), "commander", "上会名单", "over"],
-  [tfR("desk"), tfL("commander"), "commander", "大盘方向"],
-  [[TF_POS.desk[0] + 40, TF_POS.desk[1] + NODE_H], [TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], "sentinel", "大盘方向"],
-  [tfB("market"), tfT("book_reader"), "book_reader", "要盯的币", "gap"],
-  [tfR("commander"), tfL("card"), "card", "写卡"],
-  [tfB("card"), tfT("sentinel"), "sentinel", "关键价位", "gap"],
-  [[TF_POS.card[0] + 120, TF_POS.card[1] + NODE_H], [TF_POS.risk_guard[0] + 120, TF_POS.risk_guard[1]], "risk_guard", "止损范围", "v-top", "side"],
-  [tfR("book_reader"), tfL("sentinel"), "sentinel", "盘口 · 成交"],
-  [tfB("book_reader"), tfL("predictor"), "predictor", "K 线", "down-right"],
-  [tfR("predictor"), [TF_POS.sentinel[0], TF_POS.sentinel[1] + NODE_H - 16], "sentinel", "预测", "s"],
-  [tfR("sentinel"), tfL("gate"), "gate", "信号"],
-  [tfR("gate"), tfL("risk_guard"), "risk_guard", "做不做"],
-  [tfB("risk_guard"), tfT("executor"), "executor", "仓位"],
-  [tfB("executor"), tfT("lifeboat"), "lifeboat", "同时挂"],
-  [tfL("executor"), tfT("keeper"), "keeper", "开出的仓位", "tree"],
-  [tfL("executor"), tfT("patrol"), "patrol", "", "tree"],
-  [tfL("executor"), tfT("reconciler"), "reconciler", "", "tree"],
-];
-// 和卡相反的信号（主程序按有没有仓分流）：平时不画，最近 30 分钟真交出去过才亮，标最近一次的币、时间、结果
-// 事件虚线随时间变淡：10 分钟内不透明，到 30 分钟线性降到 0.35；标签尾巴带相对时间
-const EDGE_FADE_FROM = 10, EDGE_SHOW_MIN = 30, EDGE_FADE_TO = 0.35;
-const edgeAgeMin = (ts) => Math.max(0, (Date.now() - new Date(ts).getTime()) / 60000);
-const edgeOpacity = (ts) => {
-  const m = edgeAgeMin(ts);
-  if (m <= EDGE_FADE_FROM) return 1;
-  return Math.max(EDGE_FADE_TO, 1 - ((1 - EDGE_FADE_TO) * (m - EDGE_FADE_FROM)) / (EDGE_SHOW_MIN - EDGE_FADE_FROM));
+const TL_NAME = { screener: "选币", market: "总盘会", desk: "大盘台", commander: "军师团", card: "作战卡", book_reader: "盘口员", sentinel: "哨兵", predictor: "预测员", gate: "拍板人", risk_guard: "风控员", executor: "执行器", keeper: "持仓管家", keeper_assistant: "管家助手", patrol: "巡逻兵", lifeboat: "保命止损", reconciler: "对账员", alerting: "告警" };
+const TL_RING = [800, 395], TL_RING_R = 118;
+const TL_CARD = [500, 18, 190, 112]; // 作战卡：左、上、宽、高
+// 动画路线上的点（逻辑坐标）
+const TP = {
+  ...TL_POS, card: [500, 46], cardOut: [540, 130], cardBus: [540, 168], busSentinel: [190, 168], busRisk: [430, 168], commanderB: [430, 124],
+  execOut: [600, 300], ringIn: [687, 360], busBook: [70, 410], busSentinelB: [190, 410], ringBus: [683, 410], ring: TL_RING,
+  predictorB: [310, 265], keeperB: [735, 276], assistantB: [865, 276], patrolL: [848, 350], lifeboatR: [732, 500], reconcilerT: [800, 518],
+  exitA: [890, 470], exitB: [952, 522], alerting: [80, 572],
 };
-const edgeAgeTxt = (ts) => { const m = Math.floor(edgeAgeMin(ts)); return m < 1 ? "· 刚刚" : `· ${m} 分钟前`; };
-const VERDICT = { close: "管家判平", hold: "管家判继续拿" };
-function againstEdges(list) {
-  const out = [];
-  const pick = (act) => (list || []).filter((e) => e.actions.includes(act));
-  const tag = (hits, tail) => `${hits[0].symbol.replace(/USDT$/, "")} ${hm(hits[0].ts)} ${tail}${hits.length > 1 ? `（30 分钟内 ${hits.length} 次）` : ""} ${edgeAgeTxt(hits[0].ts)}`;
-  const k = pick("keeper_recheck");
-  if (k.length) out.push([[TF_POS.sentinel[0] + 130, TF_POS.sentinel[1] + NODE_H], [TF_POS.keeper[0] + 40, TF_POS.keeper[1]], "keeper", tag(k, `反向 → ${VERDICT[k[0].keeper_verdict] || "管家急查中"}`), "drop", "against", k[0].ts]);
-  const m = pick("meeting");
-  if (m.length) out.push([[TF_POS.sentinel[0] + 40, TF_POS.sentinel[1]], [TF_POS.commander[0] + 40, TF_POS.commander[1] + NODE_H], "commander", tag(m, "反向 → 临时会"), "up", "against", m[0].ts]);
-  return out;
+// 每种动作走哪条路（kind 和后端 jiaoyi.panel.live.KINDS 一一对应）。"@pos" = 这笔仓位在圈里的位置；
+// 只有一个点的是原地闪一下。stop = 走到头停下挂红标（被拒）
+const LIVE_PATHS = {
+  screen: ["screener", "market"],
+  meeting: ["commander", "card"],
+  card: ["screener", "market", "desk", "commander", "card"],
+  desk: ["desk"],
+  key_level: ["commander"],
+  commander: ["commander"],
+  signal: ["sentinel", "gate"],
+  against_keeper: ["sentinel", "busSentinelB", "ringBus", "assistantB"],
+  against_meeting: ["sentinel", "busSentinel", "busRisk", "commanderB"],
+  against_log: ["sentinel"],
+  regime: ["desk"],
+  regime_market: ["market"],
+  regime_watch: ["sentinel"],
+  sentinel: ["sentinel"],
+  predict: ["predictorB", "gate"],
+  verdict: ["gate"],
+  gate: ["gate"],
+  risk_pass: ["risk_guard", "executor"],
+  risk_reject: ["gate", "risk_guard", "stop"],
+  risk: ["risk_guard"],
+  fill: ["executor", "execOut", "ringIn", "@pos"],
+  close: ["@pos", "exitA", "exitB"],
+  backfill: ["exitB"],
+  executor: ["executor"],
+  keeper_check: ["keeperB", "@pos"],
+  keeper_close: ["keeperB", "@pos"],
+  keeper: ["keeperB", "@pos"],
+  assistant: ["assistantB", "@pos"],
+  patrol: ["patrolL", "@pos"],
+  patrol_close: ["patrolL", "@pos"],
+  paper_stop: ["patrolL", "@pos"],
+  lifeboat: ["lifeboatR", "@pos"],
+  reconcile: ["reconcilerT", "@pos"],
+  alert: ["alerting"],
+  book: ["book_reader", "sentinel"],
+};
+// 动作落在哪个角色上（列表里显示谁、点一条高亮谁）
+const LIVE_ROLE = { screen: "screener", meeting: "commander", card: "card", desk: "desk", regime: "desk", regime_market: "market", book: "book_reader" };
+// 执行器平仓从促成它的角色出发（后端 live.CLOSE_BY）：管家、巡逻兵、交易所托管的止损 / 止盈 / 到时（保命止损）、对账员
+const VIA_PT = { keeper: "keeperB", patrol: "patrolL", lifeboat: "lifeboatR", reconciler: "reconcilerT" };
+const liveRole = (ev) => LIVE_ROLE[ev.kind] || ev.role;
+const LIVE_GAP_MS = 350;   // 两个光点至少隔这么久（每秒最多 3 个左右）
+const LIVE_QUEUE_MAX = 8;  // 排队上限：再多就先丢常规动作，再丢最旧的
+const LIVE_FEED_MAX = 20;
+const LIVE_POLL_MS = 1500;
+// 持仓圈里每笔仓位的位置：1 笔居中大圆，2–4 笔小圆，再多叠成一张列表
+function ringSlots(n) {
+  const [cx, cy] = TL_RING;
+  if (n <= 0) return [];
+  if (n === 1) return [[cx, cy, 64]];
+  if (n === 2) return [[cx - 44, cy, 42], [cx + 44, cy, 42]];
+  if (n === 3) return [[cx, cy - 42, 38], [cx - 44, cy + 30, 38], [cx + 44, cy + 30, 38]];
+  if (n === 4) return [[cx - 42, cy - 40, 36], [cx + 42, cy - 40, 36], [cx - 42, cy + 40, 36], [cx + 42, cy + 40, 36]];
+  return Array.from({ length: n }, () => [cx, cy, 86]);
 }
-// 预测员连续看反作战卡 → 单币临时会：同样平时不画，最近 30 分钟开过才亮
-const BIAS_WORD = { long: "改做多", short: "改做空", both: "两边都可", no_trade: "改不做" };
-function predictorMeetingEdges(list) {
-  if (!list || !list.length) return [];
-  const p = list[0];
-  const label = `${p.symbol.replace(/USDT$/, "")} ${hm(p.ts)} 预测看反 → 临时会${BIAS_WORD[p.bias] ? "：" + BIAS_WORD[p.bias] : ""}${list.length > 1 ? `（30 分钟内 ${list.length} 次）` : ""} ${edgeAgeTxt(p.ts)}`;
-  return [[[TF_POS.predictor[0] + 150, TF_POS.predictor[1]], [TF_POS.commander[0] + 14, TF_POS.commander[1] + NODE_H], "commander", label, "climb", "against", p.ts]];
+function posPoint(ring, pid) {
+  const i = ring.findIndex((p) => p.position_id === pid);
+  const s = ringSlots(ring.length);
+  return i >= 0 && s.length <= 4 ? [s[i][0], s[i][1]] : TL_RING;
 }
-// 只在真正启动大盘独立更新后画虚线，疑似 / 被拦仍进哨兵日志，不冒充已触发。
-function regimeFlipEdges(event) {
-  if (!event) return [];
-  const flip = (event.output && event.output.regime_flip) || {};
-  const desk = flip.scope === "market_desk";
-  const target = desk ? "大盘台" : "独立更新";
-  const to = desk ? "desk" : "market";
-  return [[[TF_POS.sentinel[0] + 100, TF_POS.sentinel[1]], [TF_POS[to][0] + 140, TF_POS[to][1] + NODE_H], to, `${hm(event.ts)} 大盘变化 → ${target} ${edgeAgeTxt(event.ts)}`, "flip", "against", event.ts]];
+// 一个动作的路线：点列表 + 是不是停在半路（被拒）
+function livePath(ev, ring) {
+  let keys = LIVE_PATHS[ev.kind] || [liveRole(ev)];
+  if (ev.kind === "close" && VIA_PT[ev.via]) keys = [VIA_PT[ev.via], ...keys];
+  const stop = keys[keys.length - 1] === "stop";
+  const pts = keys.filter((k) => k !== "stop").map((k) => (k === "@pos" ? posPoint(ring || [], ev.position_id) : TP[k])).filter(Boolean);
+  return { pts: pts.length ? pts : [TL_RING], stop };
 }
-function tfEdge([a, b, to, label, how, extra, ts], prog) {
-  const [x1, y1] = a, [x2, y2] = b;
-  const st = prog[to] === "doing" ? "doing" : prog[to] === "done" ? "done" : "";
-  const cls = `e ${st} ${extra || ""}`;
-  let d, lx, ly, dir;
-  if (how === "elbow") { d = `M${x1},${y1} H${x2 - 12} Q${x2},${y1} ${x2},${y1 + 12} V${y2 - 1}`; lx = x2 - 70; ly = y1 - 6; dir = "d"; }
-  else if (how === "down-right") { d = `M${x1},${y1} V${y2 - 10} Q${x1},${y2} ${x1 + 10},${y2} H${x2 - 1}`; lx = x1 + 14; ly = y2 - 6; dir = "r"; }
-  else if (how === "tree") { const yy = 428; d = `M${x1},${y1} H${x1 - 22} V${yy} H${x2} V${y2 - 1}`; lx = x1 - 120; ly = yy - 6; dir = "d"; }
-  // 从上一条泳道的节点底下，沿泳道之间的空隙横过去，再落到下一条泳道的节点顶上
-  else if (how === "gap") { const ym = 158, k = x2 < x1 ? -10 : 10; d = `M${x1},${y1} V${ym - 10} Q${x1},${ym} ${x1 + k},${ym} H${x2 - k} Q${x2},${ym} ${x2},${ym + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = ym - 4; dir = "d"; }
-  // 绕过中间的节点：从起点顶上抬到泳道上沿，横过去，再落到终点顶上
-  else if (how === "over") { const yy = 14; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy + 10} V${y2 - 1}`; lx = Math.min(x1, x2) + 16; ly = yy - 3; dir = "d"; }
-  else if (how === "drop") { const yy = 402; d = `M${x1},${y1} V${yy} H${x2} V${y2 - 1}`; lx = x1 + 8; ly = yy - 5; dir = "d"; }
-  // 从下面的节点顶上往上，在第一、二泳道之间横过去，再往上进目标节点底
-  else if (how === "climb") { const yy = 182; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 + 10},${yy} H${x2 - 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x1 - 140; ly = yy - 5; dir = "u"; }
-  else if (how === "up") { d = `M${x1},${y1} V${y2 + 1}`; lx = x1 - 8; ly = (y1 + y2) / 2 + 22; dir = "u"; }
-  else if (how === "flip") { const yy = 172; d = `M${x1},${y1} V${yy + 10} Q${x1},${yy} ${x1 - 10},${yy} H${x2 + 10} Q${x2},${yy} ${x2},${yy - 10} V${y2 + 1}`; lx = x2 - 10; ly = yy - 6; dir = "u"; }
-  else if (how === "s") { const mx = (x1 + x2) / 2; d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 1},${y2}`; lx = x1 + 8; ly = y1 - 6; dir = "r"; }
-  else if (x1 === x2) { d = `M${x1},${y1} V${y2 - 1}`; lx = x1 + 8; ly = how === "v-top" ? y1 + 18 : (y1 + y2) / 2 + 4; dir = "d"; }
-  else { d = `M${x1},${y1} H${x2 - 1}`; lx = (x1 + x2) / 2 - label.length * 5.5; ly = y1 - 6; dir = "r"; }
-  const ah = dir === "r" ? `M${x2},${y2} l-7,-4 v8 z` : dir === "u" ? `M${x2},${y2} l-4,7 h8 z` : `M${x2},${y2} l-4,-7 h8 z`;
-  const body = `<path class="${cls}" d="${d}"/><path class="ah ${st} ${extra || ""}" d="${ah}"/>${label ? `<text class="${extra || ""}" x="${lx}" y="${ly}"${how === "up" ? ' text-anchor="end"' : ""}>${esc(label)}</text>` : ""}`;
-  return ts ? `<g class="aged" style="opacity:${edgeOpacity(ts).toFixed(2)}">${body}</g>` : body;
+// 进队：常规动作（例行复查、预测、盘口计数）和队里同种的合并成一个，记次数
+function liveEnqueue(queue, ev) {
+  const n = ev.count || 1;
+  if (ev.routine) {
+    const same = queue.find((q) => q.routine && q.kind === ev.kind);
+    if (same) { same.count = (same.count || 1) + n; return queue; }
+  }
+  queue.push({ ...ev, count: n });
+  while (queue.length > LIVE_QUEUE_MAX) {
+    const i = queue.findIndex((q) => q.routine);
+    queue.splice(i >= 0 ? i : 0, 1);
+  }
+  return queue;
 }
-const PROG_LABEL = { err: "出错", doing: "正在做", done: "这一轮做完", wait: "等待" };
-function tfCardNode() {
-  const c = data && data.card;
-  const tradable = c ? c.symbols.filter((x) => x.bias === "long" || x.bias === "short").length : 0;
-  const a = !c ? "还没有作战卡" : c.valid ? `${tradable} 个可做 · ${c.expires_at ? "有效到 " + hm(c.expires_at) : "有效期未知"}` : `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）`;
-  return { key: "card", html: `<span class="nm">作战卡${c && c.version ? " v" + c.version : ""}</span><small>${esc(a)}</small><small class="cnt">关键价位、止损范围</small>`, cls: "doc", act: c ? clickable("card") : "" };
+// 该不该放下一个光点：离上一个够久、同时在飞的不多
+function liveReady(state, now) {
+  return state.queue.length > 0 && now - state.lastFire >= LIVE_GAP_MS && state.flying < 4;
 }
-// 总盘会：军师团先开的那场，挑哪些币上会（给军师团）、哪些币要盯（给盘口员）
-function tfMarketNode(m, p, mr) {
-  if (mr && mr.state !== "ok") return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会${hbBadge(mr)}</span><small>${esc(mr.status)}</small><small class="cnt">挑上会的币、要盯的币</small>`;
-  const line = runLine(mr);
-  const st = line ? line : !m ? "还没有记录" : m.status === "running" ? "" : m.status === "failed" ? `失败：${m.error || "没写原因"}` : m.status === "interrupted" ? `中断了：${m.error || "没写原因"}` : m.status === "stale" ? "中断了（超过 15 分钟没更新）" : `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}`;
-  const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
-  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>总盘会</span>${now ? `<small class="now">${esc(now)}</small>` : ""}${st ? `<small>${esc(st)}</small>` : ""}<small class="cnt">挑上会的币、要盯的币</small>`;
+const sideWord = (s) => (s === "long" ? "多" : s === "short" ? "空" : "");
+function liveLabel(ev) {
+  const c = ev.symbol ? ev.symbol.replace(/USDT$/, "") : "";
+  const times = ev.count > 1 ? ` ×${ev.count}` : "";
+  if (ev.kind === "book") return `+${(ev.count || 0).toLocaleString()} 条行情`;
+  if (ev.routine && ev.count > 1) return `${TL_NAME[liveRole(ev)] || ""}${times}`;
+  if (ev.kind === "signal") return `${c} ${sideWord(ev.side)} ${SIGNAL[ev.signal_kind] || "信号"}`.trim();
+  if (ev.kind === "backfill") return `${c} 净 ${signed(ev.pnl_usdt, 2)}U`;
+  if (ev.kind === "meeting" && ev.badge) return `${c} ${(BIAS[ev.badge] || [ev.badge])[0]}`;
+  if (ev.badge) return `${c} ${ev.badge}`.trim() + times;
+  return `${c} ${ev.text.slice(0, 12)}`.trim() + times;
+}
+const LIVE = { cursor: null, ring: [], feed: [], book: null, queue: [], lastFire: 0, flying: 0, cardV: null, exit: null, sel: null, started: false };
+const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+// 进「实时动作」列表：常规动作和最上面那条同种的合并（例行复查一天几千次，不刷屏）
+function liveFeedAdd(ev) {
+  const top = LIVE.feed[0];
+  if (ev.routine && top && top.routine && top.kind === ev.kind && top.role === ev.role) {
+    top.count = (top.count || 1) + (ev.count || 1);
+    top.ts = ev.ts;
+    return;
+  }
+  LIVE.feed.unshift({ ...ev, count: ev.count || 1 });
+  LIVE.feed.length = Math.min(LIVE.feed.length, LIVE_FEED_MAX);
+}
+async function livePoll() {
+  const r = await getJson(`/api/team/live${LIVE.cursor ? "?cursor=" + encodeURIComponent(LIVE.cursor) : ""}`);
+  LIVE.cursor = r.cursor;
+  LIVE.ring = r.ring || [];
+  const animate = !r.reset && !document.hidden;
+  if (r.reset) LIVE.feed = [];
+  for (const ev of r.events) {
+    liveFeedAdd(ev);
+    if (ev.kind === "card" && ev.badge) LIVE.cardV = +ev.badge.slice(1) || LIVE.cardV;
+    if (animate) liveEnqueue(LIVE.queue, ev);
+  }
+  for (const c of r.coalesced || []) {
+    const ev = { id: `c-${c.role}-${c.kind}-${Date.now()}`, ts: new Date().toISOString(), role: c.role, kind: c.kind, tone: "info", routine: true, text: `另有 ${c.count} 条，合并显示`, count: c.count };
+    liveFeedAdd(ev);
+    if (animate) liveEnqueue(LIVE.queue, ev);
+  }
+  if (r.book_calls != null) {
+    const d = LIVE.book == null ? 0 : r.book_calls - LIVE.book;
+    LIVE.book = r.book_calls;
+    if (d > 0 && animate) liveEnqueue(LIVE.queue, { kind: "book", role: "book_reader", routine: true, tone: "info", count: d, text: "" });
+  }
+  liveDraw();
+}
+function liveLoop() {
+  const on = route().page === "team" && !document.hidden;
+  // 离开团队页或切到后台就丢掉游标：回来时从最近几条重新开始，不把攒下的一堆一口气补画出来
+  if (!on && !LIVE.busy) LIVE.cursor = null;
+  if (on && !LIVE.busy) {
+    LIVE.busy = true;
+    livePoll().catch(() => {}).finally(() => { LIVE.busy = false; });
+  }
+  setTimeout(liveLoop, LIVE_POLL_MS);
+}
+function liveTick() {
+  if (document.hidden || route().page !== "team") { LIVE.queue.length = 0; return; }
+  const fx = $("#tl-fx");
+  if (!fx || !fx.isConnected) return;
+  const now = performance.now();
+  if (liveReady(LIVE, now)) { LIVE.lastFire = now; liveFire(fx, LIVE.queue.shift()); }
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+// 标签不叠：新标签出现时，和它挡在一起的、还在走的旧标签先藏起来（让给新的）；停着的标签往上排成一摞
+const TAGS = new Set();
+const clash = (o, x, y, w) => o.x < x + w && x < o.x + o.w && Math.abs(o.y - y) < 20;
+function liveTag(fx, [x, y], text, tone, ms, moving = false) {
+  const g = svgEl("g", { class: `tl-tag ${tone}` }, fx);
+  const t = svgEl("text", { x: x + 9, y: y - 9 }, g);
+  t.textContent = text;
+  let w = text.length * 11 + 10;
+  try { w = t.getComputedTextLength() + 12; } catch (e) { /* 没排版（测试 / 隐藏）就按字数估 */ }
+  for (const o of TAGS) if (o.moving && clash(o, x, y, w)) o.g.classList.add("hide");
+  let ty = y;
+  while ([...TAGS].some((o) => !o.moving && clash(o, x, ty, w))) ty -= 21;
+  t.setAttribute("y", ty - 9);
+  g.insertBefore(svgEl("rect", { x: x + 4, y: ty - 23, width: w, height: 19, rx: 6 }), t);
+  const rec = { g, x, y: ty, w, x0: x, moving };
+  TAGS.add(rec);
+  setTimeout(() => { g.remove(); TAGS.delete(rec); }, ms);
+  return rec;
+}
+function liveHalo(fx, [x, y], tone) {
+  const c = svgEl("circle", { cx: x, cy: y, r: 8, class: `tl-halo ${tone}` }, fx);
+  setTimeout(() => c.remove(), 900);
+}
+// 放一个光点：沿路线匀速走，走到头闪一下、挂标签；减少动态效果时只在终点闪一下
+function liveFire(fx, ev) {
+  const { pts, stop } = livePath(ev, LIVE.ring);
+  const tone = ev.tone || "info";
+  const label = liveLabel(ev);
+  const end = pts[pts.length - 1];
+  const finish = () => {
+    LIVE.flying = Math.max(0, LIVE.flying - 1);
+    liveHalo(fx, end, stop ? "reject" : tone);
+    if (ev.kind === "backfill") LIVE.exit = { text: label, tone: ev.pnl_usdt < 0 ? "down" : "up", until: Date.now() + 8000 };
+    if (stop || ev.badge || ev.kind === "backfill" || pts.length === 1) liveTag(fx, end, label, stop ? "reject" : tone, stop ? 2600 : 1800);
+  };
+  LIVE.flying++;
+  if (pts.length === 1 || reducedMotion()) return finish();
+  const segs = [];
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); segs.push(d); total += d; }
+  const dur = Math.max(600, Math.min(1600, total / 0.38));
+  const dot = svgEl("circle", { r: ev.routine ? 4 : 6, class: `tl-dot ${tone}` }, fx);
+  const tag = ev.routine && !(ev.count > 1) ? null : liveTag(fx, pts[0], label, tone, dur + 200, true);
+  const t0 = performance.now();
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / dur);
+    let dist = k * total, i = 0;
+    while (i < segs.length - 1 && dist > segs[i]) { dist -= segs[i]; i++; }
+    const f = segs[i] ? dist / segs[i] : 1;
+    const x = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f, y = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f;
+    dot.setAttribute("cx", x);
+    dot.setAttribute("cy", y);
+    if (tag) { tag.x = x; tag.y = y; tag.g.setAttribute("transform", `translate(${x - tag.x0},${y - pts[0][1]})`); }
+    if (k < 1 && !document.hidden) requestAnimationFrame(step);
+    else { dot.remove(); finish(); }
+  };
+  requestAnimationFrame(step);
+}
+// 点「实时动作」里的一条：把它走的那段路描粗、终点那个角色圈出来，3 秒后消失
+function liveFocus(i) {
+  const ev = LIVE.feed[i];
+  const fx = $("#tl-fx");
+  if (!ev || !fx) return;
+  LIVE.sel = ev.id;
+  const { pts } = livePath(ev, LIVE.ring);
+  const g = svgEl("g", { class: "tl-focus" }, fx);
+  if (pts.length > 1) svgEl("polyline", { points: pts.map((p) => p.join(",")).join(" ") }, g);
+  for (const p of [pts[0], pts[pts.length - 1]]) svgEl("circle", { cx: p[0], cy: p[1], r: 14 }, g);
+  setTimeout(() => { g.remove(); if (LIVE.sel === ev.id) { LIVE.sel = null; liveDrawFeed(); } }, 3000);
+  liveDrawFeed();
+}
+const TONE_WORD = { open: "开", close: "平", reject: "拒", error: "错", info: "" };
+function liveFeedHtml(feed, sel) {
+  if (!feed.length) return '<div class="dim small tl-empty">等新动作…（每 1.5 秒看一次决策日志）</div>';
+  return feed.map((ev, i) => {
+    const c = ev.symbol ? `<b class="sym">${coin(ev.symbol)}</b>` : "";
+    const w = TONE_WORD[ev.tone] ? `<em class="tl-tw ${ev.tone}">${TONE_WORD[ev.tone]}</em>` : "";
+    const n = ev.count > 1 ? `<span class="n">×${ev.count}</span>` : "";
+    const txt = ev.kind === "backfill" && ev.pnl_usdt != null ? `回填 净 ${signed(ev.pnl_usdt, 2)}U` : ev.badge && ev.kind !== "signal" ? `${ev.kind === "meeting" && BIAS[ev.badge] ? BIAS[ev.badge][0] : ev.badge} · ${ev.text}` : ev.text;
+    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${clickable("liveev", i)} title="${esc(ev.text)}"><span class="t">${hms(ev.ts)}</span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span>${w}${c}<span class="x">${esc(txt)}</span>${n}</div>`;
+  }).join("");
+}
+function liveDrawFeed() {
+  const el = $("#tl-feed");
+  if (el) el.innerHTML = liveFeedHtml(LIVE.feed, LIVE.sel);
+}
+// 持仓圈中间：真在管的仓位（币、方向、按止损距离算的 R，颜色跟盈亏）。浮盈取总览里同一笔的数
+function ringPnl(p) {
+  const v = ((data && data.positions) || []).find((x) => x.position_id === p.position_id);
+  const u = v ? (v.net_unrealized_usdt ?? v.unrealized_usdt) : null;
+  const risk = p.entry_price && p.stop_loss_price ? Math.abs(p.entry_price - p.stop_loss_price) * p.quantity : null;
+  return { u, r: u != null && risk ? u / risk : null };
+}
+function ringHtml(ring) {
+  if (!ring.length) return `<div class="tl-core empty" style="left:${TL_RING[0]}px;top:${TL_RING[1]}px"><span class="k">守着的持仓</span><b>空仓</b><small>有新仓位会从执行器飞进来</small></div>`;
+  const slots = ringSlots(ring.length);
+  const val = (p) => { const { u, r } = ringPnl(p); return { cls: cls(u), txt: r != null ? `${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(2)}R` : u != null ? `${signed(u, 1)}U` : "—" }; };
+  if (ring.length > 4) {
+    const rows = ring.slice(0, 6).map((p) => { const v = val(p); return `<div><b>${coin(p.symbol)}</b> <span class="${(SIDE[p.side] || ["", ""])[1]}">${sideWord(p.side)}</span> <span class="${v.cls}">${v.txt}</span></div>`; }).join("");
+    return `<div class="tl-core stack" style="left:${TL_RING[0]}px;top:${TL_RING[1]}px"><span class="k">守着 ${ring.length} 笔</span>${rows}${ring.length > 6 ? `<small>还有 ${ring.length - 6} 笔</small>` : ""}</div>`;
+  }
+  return ring.map((p, i) => {
+    const [x, y, r] = slots[i], v = val(p);
+    return `<a class="tl-core ${v.cls} ${ring.length > 1 ? "small" : ""}" href="#positions/${esc(p.position_id)}" style="left:${x}px;top:${y}px;width:${r * 2}px;height:${r * 2}px" title="${esc(p.symbol)} ${sideWord(p.side)} · ${esc(p.status)}">${ring.length === 1 ? '<span class="k">守着的持仓</span>' : ""}<b>${coin(p.symbol)}</b><small><span class="${(SIDE[p.side] || ["", ""])[1]}">${sideWord(p.side)}</span> <span class="${v.cls}">${v.txt}</span></small></a>`;
+  }).join("");
+}
+function liveDraw() {
+  const ring = $("#tl-ring");
+  if (ring) ring.innerHTML = ringHtml(LIVE.ring);
+  const ex = $("#tl-exit");
+  if (ex) {
+    const on = LIVE.exit && LIVE.exit.until > Date.now();
+    ex.innerHTML = `平仓 · 撤离${on ? `<b class="${LIVE.exit.tone}">${esc(LIVE.exit.text)}</b>` : ""}`;
+  }
+  liveDrawFeed();
+}
+function liveStart() {
+  if (LIVE.started) return;
+  LIVE.started = true;
+  liveLoop();
+  setInterval(liveTick, 120);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) LIVE.queue.length = 0; });
 }
 // 大盘台最近一轮（不是上次发布的那版）：4h / 1h 概率和「短线现状」，和各币会议看到的同一段字
 function deskLatestLine(d) {
@@ -1882,34 +2082,10 @@ function deskProgress(k) {
   if (k.state === "bad" || k.error) return "err";
   return k.runs_today > 0 ? "done" : "wait";
 }
-function tfDeskNode(k) {
-  if (!k) return `<span class="nm"><i class="dot wait"></i>大盘台</span><small>还没有数据</small>`;
-  const p = deskProgress(k);
-  const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
-  const owner = k.owner === "desk" ? "大盘台接管" : k.owner === "flash" ? "回退 Flash" : "";
-  const dir = k.direction ? `${k.direction}${k.published_version != null ? " v" + k.published_version : ""}` : "";
-  const tri = (t, q) => (q ? `${t} 涨 ${pct(q.up)} 平 ${pct(q.flat)} 跌 ${pct(q.down)}` : "");
-  const probs = tri("4h", k.probs);
-  const probs1h = tri("1h", k.probs_1h);
-  const when = k.state === "off" ? "" : [k.last_run_at ? `上次 ${hm(k.last_run_at)}` : "", k.next_run_at ? `下次 ${hm(k.next_run_at)}` : ""].filter(Boolean).join(" · ");
-  const head = [owner, dir].filter(Boolean).join(" · ");
-  const line = (t, cls) => (t ? `<small${cls ? ` class="${cls}"` : ""} title="${esc(t)}">${esc(t)}</small>` : "");
-  return `<span class="nm"><i class="dot ${p}" title="${PROG_LABEL[p]}"></i>大盘台${hbBadge(k)}</span>${k.state === "off" ? line("没开（slow.toml [market_desk]）") : line(head, "now") + line(probs) + line(probs1h) + line(when) + `<small class="cnt">今日 ${k.runs_today} 次 · $${k.cost_today_usd.toFixed(3)}</small>`}`;
-}
 // 统一的「上次 hh:mm · 下次 hh:mm · 刚刚：…」；模块没报的字段就不写（不猜）
 function runLine(r) {
   if (!r) return "";
   return [r.last_run_at ? `上次 ${hm(r.last_run_at)}` : "", r.next_run_at ? `下次 ${hm(r.next_run_at)}` : "", r.summary ? `刚刚：${r.summary}` : ""].filter(Boolean).join(" · ");
-}
-// 心跳好坏单独用角标（点只表示流程走到哪）
-function hbBadge(r) {
-  const label = {
-    ok: "心跳正常",
-    slow: r.status.startsWith("等待首次") ? "等待首次运行" : r.status.startsWith("准备中") ? "准备中" : "降级运行",
-    bad: r.status.startsWith("无心跳") ? "无心跳" : "失败",
-    off: "未启用",
-  }[r.state];
-  return label ? `<em class="hb ${r.state}" title="${esc(r.status)}">${label}</em>` : "";
 }
 // 预测员：正常时用它自己报的「已算 N/M 个币，上次 hh:mm」，M = 盯着的币（总盘会挑中 + 作战卡 + 持仓）
 function predictorText(r) {
@@ -1923,74 +2099,125 @@ function againstLine(c) {
   const v = c.failed ? "没问成" : c.verdict ? (c.verdict === "close" ? "平仓" : "拿住") : "查着";
   return `急查 ${coin(c.symbol)} ${hm(c.ts)} → ${v}`;
 }
-function tfNode(r, checks) {
-  const line = r.state === "ok" ? runLine(r) : "";
-  const ag = r.role === "keeper" && checks && checks.length ? checks[0] : null;
-  const status = r.role === "alerting" && r.progress !== "err" ? "任何一步出事都推给你" : line || (r.role === "predictor" ? predictorText(r) : r.status);
-  return `<span class="nm"><i class="dot ${r.progress}" title="${PROG_LABEL[r.progress]}"></i>${esc(r.name)}${hbBadge(r)}</span>
-    ${ag ? `<small class="now against" title="${esc(ag.reason || ag.desc || "")}">${esc(againstLine(ag))}</small>` : r.doing ? `<small class="now">${esc(r.doing)}</small>` : ""}<small title="${esc(r.headline || r.status)}">${esc(status)}</small>
-    <small class="cnt">今日 ${r.calls} 次${r.rejected ? ` · 拒 ${r.rejected}` : ""}${r.errors ? ` · <span class="down">错 ${r.errors}</span>` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(3)}` : ""}</small>`;
+// 健康点：模块心跳的状态（正常 / 降级 / 出错 / 未启用）
+const HEALTH = { ok: ["ok", "正常"], slow: ["warn", "降级或准备中"], bad: ["err", "出错或没心跳"], off: ["off", "未启用"] };
+const hdot = (state, status) => { const [c, t] = HEALTH[state] || HEALTH.off; return `<i class="hs ${c}" title="${esc(status || t)}"></i>`; };
+// 一行计数：错只在 > 0 时出现（红）；拒、花费是 0 就不写
+function tlCount(calls, rejected, errors, cost) {
+  return `今日 ${Number(calls || 0).toLocaleString()}${rejected ? ` · 拒 ${rejected}` : ""}${errors > 0 ? ` · <span class="err">错 ${errors}</span>` : ""}${cost ? ` · $${cost.toFixed(3)}` : ""}`;
 }
-/* 「现在走到」轮播：每处一条，4 秒换一条；鼠标放上去停住，点一下看下一条。
-   页面每 5 秒重画不打断（第几条记在 tfNowI） */
-let tfNowItems = [], tfNowI = 0, tfNowHold = false;
-function tfNowHtml() {
-  const n = tfNowItems.length;
-  if (!n) return "";
-  const i = tfNowI % n;
-  return `<b>现在走到：</b><span class="t">${esc(tfNowItems[i])}</span>${n > 1 ? `<span class="k">${i + 1}/${n}</span>` : ""}`;
+// 依赖要跨很远的，不画长线，在收件卡上挂一个小标
+const TL_CHIP = {
+  book_reader: "盯的币 ← 总盘会",
+  desk: "→ 管家 · 拍板快照",
+  predictor: "→ 管家快照（名次）",
+  keeper_assistant: "只接哨兵对持仓币的反向信号",
+};
+function tlRoleLine(r, d) {
+  if (r.role === "keeper" && d.against_checks && d.against_checks.length) return [againstLine(d.against_checks[0]), "against"];
+  if (r.state !== "ok") return [r.status, r.state === "bad" ? "err" : ""];
+  if (r.doing) return [r.doing, "now"];
+  if (r.role === "predictor") return [predictorText(r), ""];
+  if (r.role === "alerting") return ["收所有角色的事，推给你", ""];
+  return [r.summary || runLine({ last_run_at: r.last_run_at, next_run_at: r.next_run_at }) || r.headline || r.status, ""];
 }
-function tfNowStep() {
-  const el = $(".tf-now");
-  if (!el || tfNowItems.length < 2) return;
-  tfNowI = (tfNowI + 1) % tfNowItems.length;
-  el.innerHTML = tfNowHtml();
+function tlBox(k, inner, cls, href, title) {
+  return `<a class="tl-node ${cls}" data-k="${k}" href="${href}" title="${esc(title || "")}">${inner}</a>`;
 }
-setInterval(() => { if (!tfNowHold) tfNowStep(); }, 4000);
-document.addEventListener("mouseover", (e) => { tfNowHold = !!(e.target.closest && e.target.closest(".tf-now")); });
-document.addEventListener("click", (e) => { if (e.target.closest && e.target.closest(".tf-now")) tfNowStep(); });
+function tlNodeHtml(k, d, by) {
+  const sel = (k === "desk" ? d.selected_desk : !d.selected_desk && d.selected === k) ? " on" : "";
+  if (k === "market") {
+    const m = d.market, mr = d.market_role;
+    const now = m && m.status === "running" ? `开会中：${MARKET_DOING[m.stage] || m.stage || "开始"}` : "";
+    const line = now || (mr && mr.state !== "ok" ? mr.status : runLine(mr ? { last_run_at: mr.last_run_at, next_run_at: mr.next_run_at } : null) || (m ? `上次 ${hm(m.finished_at || m.updated_at || m.started_at)}` : "还没有记录"));
+    const cnt = (mr && mr.headline) || "挑上会的币";
+    return tlBox(k, `<span class="nm">${hdot(mr ? mr.state : "off", mr && mr.status)}总盘会</span><small class="${now ? "now" : ""}">${esc(line)}</small><small class="cnt">${esc(cnt)}</small>`, `${d.market_progress}${sel}`, "#team/market", mr && mr.status);
+  }
+  if (k === "desk") {
+    const x = d.desk;
+    if (!x) return tlBox(k, `<span class="nm">${hdot("off")}大盘台</span><small>还没有数据</small>`, `wait${sel}`, "#team/desk");
+    const head = x.state === "off" ? "没开" : [x.direction, x.published_version != null ? `v${x.published_version}` : ""].filter(Boolean).join(" ") || x.status;
+    const chip = `<em class="tl-chip">${TL_CHIP.desk}</em>`;
+    return tlBox(k, `<span class="nm">${hdot(x.state, x.status)}大盘台${x.owner === "flash" ? '<em class="tg">Flash</em>' : ""}</span><small>${esc(x.error ? "出错：" + x.error : head)}</small><small class="cnt">${tlCount(x.runs_today, 0, 0, x.cost_today_usd)}</small>${chip}`, `${deskProgress(x)}${sel}`, "#team/desk", x.status);
+  }
+  const r = by[k];
+  if (!r) return "";
+  const [line, lc] = tlRoleLine(r, d);
+  const tag = { gate: "Jev", predictor: "Kronos" }[k];
+  const chip = TL_CHIP[k] ? `<em class="tl-chip">${TL_CHIP[k]}</em>` : "";
+  return tlBox(k, `<span class="nm">${hdot(r.state, r.status)}${esc(TL_NAME[k] || r.name)}${tag ? `<em class="tg">${tag}</em>` : ""}</span><small class="ln ${lc}">${esc(line)}</small><small class="cnt">${tlCount(r.calls, r.rejected, r.errors, r.cost_usd)}</small>${chip}`, `${r.progress}${sel}`, `#team/${k}`, [line, r.status, r.headline, r.summary ? "刚刚：" + r.summary : ""].filter(Boolean).join("\n"));
+}
+// 作战卡票根：版本号（实时动作里刚出的卡会先把号顶上去）、几个可做、离过期还有多久
+function tlCardHtml() {
+  const c = data && data.card;
+  const v = Math.max((c && c.version) || 0, LIVE.cardV || 0);
+  const n = c ? c.symbols.filter((x) => x.bias === "long" || x.bias === "short").length : 0;
+  const left = c && c.expires_at ? Math.round((new Date(c.expires_at) - Date.now()) / 60000) : null;
+  const exp = !c ? "还没有作战卡" : !c.valid ? `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）` : left != null ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
+  return `<div class="tl-ticket${c && !c.valid ? " stale" : ""}" ${c ? clickable("card") : ""} style="left:${TL_CARD[0]}px;top:${TL_CARD[1]}px;width:${TL_CARD[2]}px;height:${TL_CARD[3]}px">
+    <div class="k"><span>作战卡</span><span>${esc(exp)}</span></div>
+    <div class="v">${v ? "v" + v : "—"}<small>${n} 个可做</small></div>
+    <div class="bt"><span>发给 哨兵 · 风控员 · 管家</span><span>${left != null && left > 0 ? `${left >= 60 ? Math.floor(left / 60) + "h" : ""}${left % 60}m` : ""}</span></div></div>`;
+}
+// 静态的线：两条地铁线、作战卡往下的分发线、行情总线、持仓圈
+function tlWires() {
+  const lane = (y, x0, x1, c) => `<path class="metro ${c}" d="M${x0},${y} H${x1}"/>`;
+  const st = (k, c) => `<circle class="st ${c}" cx="${TL_POS[k][0]}" cy="${TL_POS[k][1]}" r="7"/>`;
+  const lbl = (x, y, t, c = "") => `<text class="${c}" x="${x}" y="${y}">${t}</text>`;
+  const [cx, cy] = TL_RING;
+  return `<svg class="tl-wires" viewBox="0 0 ${TL_W} ${TL_H}" width="${TL_W}" height="${TL_H}" aria-hidden="true">
+    <defs><marker id="tl-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="ar"/></marker></defs>
+    ${lane(46, 30, 500, "slow")}${["screener", "market", "desk", "commander"].map((k) => st(k, "slow")).join("")}
+    ${lbl(98, 38, "候选池")}${lbl(214, 38, "上会名单")}${lbl(334, 38, "大盘背景")}${lbl(452, 38, "写卡")}
+    <path class="feed slow" d="M540,130 V168 H190 V291"/><path class="feed slow" d="M430,168 V291"/>
+    ${lbl(196, 186, "方向 · 关键价位", "slow")}${lbl(436, 186, "止损范围 · 仓位上限", "slow")}
+    <path class="feed slow" d="M690,96 C728,104 735,150 735,196"/>${lbl(742, 190, "反向 / 中性卡规则", "slow")}
+    ${lane(300, 30, 600, "entry")}<path class="metro entry" d="M600,300 C640,300 662,330 687,360"/>
+    ${["book_reader", "sentinel", "gate", "risk_guard", "executor"].map((k) => st(k, "entry")).join("")}
+    ${lbl(92, 292, "盘口 · 成交")}${lbl(232, 292, "信号")}${lbl(380, 292, "做不做")}${lbl(470, 292, "放行")}${lbl(604, 290, "成交 → 快环", "entry")}
+    <path class="feed thin" d="M200,292 Q226,240 254,236"/>${lbl(206, 250, "K 线")}
+    <path class="feed thin" d="M310,265 V291"/>${lbl(316, 282, "名次加分")}
+    <path class="bus" d="M70,392 V410 H683"/><path class="bus" d="M190,392 V410"/><circle class="junc" cx="190" cy="410" r="4"/>
+    ${lbl(200, 428, "行情总线：盘口员推送 → 哨兵统一取数 → 管家 · 巡逻兵 · 预测员 · 大盘检查", "bus")}
+    <circle class="ring-band" cx="${cx}" cy="${cy}" r="${TL_RING_R}"/><circle class="ring-dash" cx="${cx}" cy="${cy}" r="${TL_RING_R}"/><circle class="ring-in" cx="${cx}" cy="${cy}" r="88"/>
+    <path class="spoke" d="M735,276 L772,290 M865,276 L828,290 M848,350 L912,372 M732,500 L712,470 M800,518 V513"/>
+    <path class="exit" d="M890,470 C915,490 930,505 952,522" marker-end="url(#tl-ar)"/>
+  </svg>`;
+}
 function teamFlow(d) {
   const by = Object.fromEntries(d.roles.map((r) => [r.role, r]));
-  const prog = Object.fromEntries(d.roles.map((r) => [r.role, r.progress]));
-  prog.card = data && data.card && data.card.valid ? "done" : "wait";
-  prog.market = d.market_progress;
-  prog.desk = deskProgress(d.desk);
-  const node = (k, inCanvas) => {
-    if (k === "market") return `<a class="tf-node ${d.market_progress} ${d.selected === "market" ? "on" : ""}" href="#team/market" style="${inCanvas ? `left:${TF_POS.market[0]}px;top:${TF_POS.market[1]}px` : ""}">${tfMarketNode(d.market, d.market_progress, d.market_role)}</a>`;
-    if (k === "desk") return `<a class="tf-node desk ${deskProgress(d.desk)} ${d.selected_desk ? "on" : ""}" href="#team/desk" style="${inCanvas ? `left:${TF_POS.desk[0]}px;top:${TF_POS.desk[1]}px` : ""}">${tfDeskNode(d.desk)}</a>`;
-    if (k === "card") { const n = tfCardNode(); return `<div class="tf-node doc" ${n.act} style="${inCanvas ? `left:${TF_POS.card[0]}px;top:${TF_POS.card[1]}px` : ""}">${n.html}</div>`; }
-    const r = by[k];
-    if (!r) return "";
-    return `<a class="tf-node ${r.progress} ${r.role === d.selected && !d.selected_desk ? "on" : ""}" href="#team/${r.role}" style="${inCanvas ? `left:${TF_POS[k][0]}px;top:${TF_POS[k][1]}px` : ""}">${tfNode(r, d.against_checks)}</a>`;
-  };
-  // 盯持仓是常态，放最后说；其余按流程顺序，每处一条，轮播着看全
-  const busy = FLOW_ORDER.map((k) => by[k]).filter((r) => r && r.doing);
-  const main = busy.filter((r) => !r.doing.startsWith("盯着"));
-  const watching = busy.find((r) => r.doing.endsWith("笔持仓"));
-  tfNowItems = main.length
-    ? main.map((r) => `${r.name} ${r.doing}`)
-    : [watching ? `看着持仓（${watching.doing}）` : "哨兵盯着信号，等下一个机会"];
-  const legend = `<div class="tf-legend" aria-label="图例">${["done", "doing", "wait", "err"].map((p) => `<span class="lg"><i class="dot ${p}"></i>${{ done: "这一轮已完成", doing: "正在做", wait: "等待（还没轮到 / 没活）", err: "出错或没心跳" }[p]}</span>`).join("")}<span class="lg"><em class="hb ok">心跳正常</em>右上角 = 模块心跳</span><div class="tf-now" title="鼠标放上去停住，点一下看下一条" aria-live="polite">${tfNowHtml()}</div></div>`;
-  const known = new Set([...Object.keys(TF_POS)]);
-  const extra = d.roles.filter((r) => !known.has(r.role));
-  const lanes = TF_LANES.map(([t, sub, y, h]) => `<div class="tf-band" style="top:${y}px;height:${h}px"><b>${t}<span>${sub}</span></b></div>`).join("");
-  const edges = `<svg class="tf-edges" width="${TF_W}" height="${TF_H}" viewBox="0 0 ${TF_W} ${TF_H}" aria-hidden="true">${[...TF_EDGES, ...againstEdges(d.against), ...predictorMeetingEdges(d.predictor_meetings), ...regimeFlipEdges(d.regime_flip)].map((e) => tfEdge(e, prog)).join("")}</svg>`;
-  const canvas = `<div class="tf-fit"><div class="tf-canvas" style="width:${TF_W}px;height:${TF_H}px">${lanes}${edges}${Object.keys(TF_POS).map((k) => node(k, true)).join("")}
-    <div class="tf-watch"><span>看门狗在外面守着：主程序卡住或退出就自动拉起</span></div></div></div>`;
-  // 手机：按泳道竖排，不画线
-  const stack = `<div class="tf-stack">${TF_LANES.map(([t, sub, , , ks]) => `<div class="tf-lane"><b>${t}<span>${sub}</span></b>${ks.map((k) => node(k, false)).join("")}</div>`).join("")}</div>`;
-  const rest = extra.length ? `<div class="tf-stack tf-extra">${extra.map((r) => node(r.role, false)).join("")}</div>` : "";
-  const flipLog = d.regime_flip ? `<div class="note mt">最近一次：${hms(d.regime_flip.ts)} ${esc(d.regime_flip.text)} · <a href="#team/sentinel">查看哨兵日志 ›</a></div>` : "";
-  return `${legend}<section class="card tf">${canvas}${stack}${rest}</section>${flipLog}`;
+  const at = (k, h = TL_NH) => `left:${TL_POS[k][0] - TL_NW / 2}px;top:${k === "predictor" ? TL_POS[k][1] - 33 : TL_POS[k][1] + 12}px${h !== TL_NH ? `;height:${h}px` : ""}`;
+  const placed = (k) => tlNodeHtml(k, d, by).replace('<a class="tl-node', `<a style="${at(k)}" class="tl-node${k === "predictor" ? " side" : ""}`);
+  const guard = (k) => tlNodeHtml(k, d, by).replace('<a class="tl-node', `<a style="left:${TL_POS[k][0]}px;top:${TL_POS[k][1]}px" class="tl-node g`);
+  const al = by.alerting;
+  const tags = TL_LANES.map(([t, sub], i) => `<div class="tl-lane l${i + 1}" style="${["left:14px;top:4px", "left:14px;top:262px", "left:716px;top:140px"][i]}"><b>${t}</b><span>${sub}</span></div>`).join("");
+  const stage = `<div class="tl-fit"><div class="tl-stage" style="width:${TL_W}px;height:${TL_H}px">${tlWires()}${tags}
+    ${["screener", "market", "desk", "commander", "book_reader", "sentinel", "predictor", "gate", "risk_guard", "executor"].map(placed).join("")}
+    ${tlCardHtml()}
+    <div class="tl-pair" style="left:800px;top:236px">${tlNodeHtml("keeper", d, by)}<span class="lk">+</span>${tlNodeHtml("keeper_assistant", d, by)}</div>
+    ${["patrol", "lifeboat", "reconciler"].map(guard).join("")}
+    <div id="tl-ring" class="tl-ring"></div><div id="tl-exit" class="tl-exit"></div>
+    <div class="tl-foot"><a class="tl-pill${d.selected === "alerting" ? " on" : ""}" href="#team/alerting">${al ? hdot(al.state, al.status) : ""}<b>告警</b>收所有角色的事 · ${al ? tlCount(al.calls, 0, al.errors, 0) : "—"}</a>
+      <span class="tl-pill dash"><b>看门狗</b>在主程序外面：主程序卡住或退出就自动拉起</span></div>
+    <svg id="tl-fx" class="tl-fx" viewBox="0 0 ${TL_W} ${TL_H}" width="${TL_W}" height="${TL_H}" aria-hidden="true"></svg></div></div>`;
+  const legend = `<span class="tl-legend">${Object.values(HEALTH).map(([c, t]) => `<span><i class="hs ${c}"></i>${t.slice(0, 2)}</span>`).join("")}</span>`;
+  const side = `<aside class="tl-side"><div class="ch"><h2>实时动作</h2>${legend}</div><div id="tl-feed" class="tl-feed" aria-live="polite"></div>
+    <div class="foot">决策日志里新写的每一条，最新在上；例行复查、预测这类常规动作合并计数。点一条看它走的路。</div></aside>`;
+  // 窄屏：按泳道竖排（不画线、不放动画），持仓直接列出来
+  const pos = ((data && data.positions) || []).map((p) => `<div class="tl-node"><span class="nm">${coin(p.symbol)} <span class="${(SIDE[p.side] || ["", ""])[1]}">${sideWord(p.side)}</span></span><small class="${cls(p.net_unrealized_usdt ?? p.unrealized_usdt)}">${signed(p.net_unrealized_usdt ?? p.unrealized_usdt, 2)}U</small></div>`).join("") || '<div class="tl-node"><small>空仓</small></div>';
+  const stack = `<div class="tl-stack">${TL_LANES.map(([t, sub, ks], i) => `<div class="tl-col"><b>${t}<span>${sub}</span></b>${ks.map((k) => (k === "card" ? `<div class="tl-node" ${clickable("card")}><span class="nm">作战卡 ${data && data.card && data.card.version ? "v" + data.card.version : ""}</span></div>` : tlNodeHtml(k, d, by))).join("")}${i === 2 ? `<b>在管的仓位</b>${pos}` : ""}</div>`).join("")}</div>`;
+  return `<section class="card tl"><div class="tl-grid">${stage}${side}</div>${stack}</section>`;
 }
-const FLOW_ORDER = ["screener", "commander", "book_reader", "predictor", "sentinel", "gate", "risk_guard", "executor", "lifeboat", "keeper", "patrol", "reconciler", "alerting"];
+// 画布按容器宽度整体缩放；动画层、持仓圈、实时动作列表是代码挂的，重画不清空（MORPH_KEEP），这里补画一次
 function fitTeamFlow() {
-  const f = $(".tf-fit");
+  const f = $(".tl-fit");
   if (!f) return;
   const c = f.firstElementChild;
-  const k = Math.min(1, f.clientWidth / TF_W);
+  const k = Math.min(1.15, f.clientWidth / TL_W);
   c.style.transform = `scale(${k})`;
-  f.style.height = `${(TF_H + 6) * k}px`;
+  f.style.height = `${TL_H * k}px`;
+  liveDraw();
+  liveStart();
 }
 addEventListener("resize", fitTeamFlow);
 addEventListener("resize", () => layoutLadders($("#layer")));
@@ -4005,7 +4232,7 @@ function setHtml(el, html, patch = true) {
   return true;
 }
 // 走势图的画布是代码挂进去的，标记里那一格是空的：不能按标记把它清掉
-const MORPH_KEEP = new Set(["kchart-host", "hchart-host"]);
+const MORPH_KEEP = new Set(["kchart-host", "hchart-host", "tl-fx", "tl-ring", "tl-feed", "tl-exit"]);
 const MORPH_FORM = new Set(["INPUT", "SELECT", "TEXTAREA"]);
 function morph(from, to) {
   const a = [...from.childNodes], b = [...to.childNodes];

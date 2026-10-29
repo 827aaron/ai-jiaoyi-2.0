@@ -56,30 +56,41 @@ class DecisionTail:
         self._lock = threading.Lock()
 
     def read_day(self, utc_day: date) -> list[DecisionRecord]:
-        path = self._dir / f"{utc_day.isoformat()}.jsonl"
         with self._lock:
-            tail = self._tails.setdefault(path.name, _Tail())
-            try:
-                size = path.stat().st_size
-            except OSError:
-                self._tails.pop(path.name, None)
-                return []
-            if size < tail.offset:
-                tail.offset, tail.records = 0, []
-            if size > tail.offset:
-                with path.open("rb") as f:
-                    f.seek(tail.offset)
-                    chunk = f.read(size - tail.offset)
-                end = chunk.rfind(b"\n") + 1  # 只吃整行；正在写的半行留到下次
-                for line in chunk[:end].splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        tail.records.append(DecisionRecord.model_validate_json(line))
-                    except ValidationError:
-                        log.warning("跳过读不懂的决策日志行：%.80r", line)
-                tail.offset += end
-            return list(tail.records)
+            return list(self._records(utc_day))
+
+    def read_from(self, utc_day: date, start: int) -> tuple[list[DecisionRecord], int]:
+        """Records of that day's file from position ``start`` on (file order), and how many the
+        file holds now. Only the slice is copied, so polling it every second stays cheap."""
+        with self._lock:
+            recs = self._records(utc_day)
+            return recs[max(0, start) :], len(recs)
+
+    def _records(self, utc_day: date) -> list[DecisionRecord]:
+        """Caller holds ``_lock``; the list returned is the cache itself."""
+        path = self._dir / f"{utc_day.isoformat()}.jsonl"
+        tail = self._tails.setdefault(path.name, _Tail())
+        try:
+            size = path.stat().st_size
+        except OSError:
+            self._tails.pop(path.name, None)
+            return []
+        if size < tail.offset:
+            tail.offset, tail.records = 0, []
+        if size > tail.offset:
+            with path.open("rb") as f:
+                f.seek(tail.offset)
+                chunk = f.read(size - tail.offset)
+            end = chunk.rfind(b"\n") + 1  # 只吃整行；正在写的半行留到下次
+            for line in chunk[:end].splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    tail.records.append(DecisionRecord.model_validate_json(line))
+                except ValidationError:
+                    log.warning("跳过读不懂的决策日志行：%.80r", line)
+            tail.offset += end
+        return tail.records
 
 
 class PanelFiles:
@@ -107,6 +118,10 @@ class PanelFiles:
             out += [r for r in self._decisions.read_day(d) if local_day(r.ts, self.tz) == today]
         out.sort(key=lambda r: r.ts)
         return out
+
+    def decisions_from(self, utc_day: date, start: int) -> tuple[list[DecisionRecord], int]:
+        """Parsed records of one UTC day's log from index ``start`` on, and how many it holds."""
+        return self._decisions.read_from(utc_day, start)
 
     def decisions_days(self, now: datetime) -> list[DecisionRecord]:
         """昨天和今天两个 UTC 日的全部记录（不按曼谷日截断），时间升序。
