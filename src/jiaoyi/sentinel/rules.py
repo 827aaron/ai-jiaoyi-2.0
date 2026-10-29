@@ -505,7 +505,7 @@ class RuleTrigger:
                         SignalKind.LIQUIDATION_REBOUND,
                         Side.LONG,
                         f"1 分钟多头爆仓 {long_liq / 1e4:.0f} 万 U，"
-                        f"5 分钟跌 {ret_5m:.2%}，主动买已掉头",
+                        f"5 分钟 {ret_5m:+.2%}，30 秒净主动买 {cvd_30s / 1e3:+.0f}k U",
                     )
                 )
             elif short_liq >= c.liq_min_usdt_1m and ret_5m >= drop and cvd_30s < 0:
@@ -514,7 +514,7 @@ class RuleTrigger:
                         SignalKind.LIQUIDATION_REBOUND,
                         Side.SHORT,
                         f"1 分钟空头爆仓 {short_liq / 1e4:.0f} 万 U，"
-                        f"5 分钟涨 {ret_5m:.2%}，主动卖已掉头",
+                        f"5 分钟 {ret_5m:+.2%}，30 秒净主动买 {cvd_30s / 1e3:+.0f}k U",
                     )
                 )
 
@@ -526,7 +526,7 @@ class RuleTrigger:
                     (
                         SignalKind.CROWDED_REVERSAL,
                         Side.SHORT,
-                        f"资金费率 {funding:.4%} 拥挤做多，开始回落",
+                        f"资金费率 {funding:+.4%}，1 分钟 {ret_1m:+.2%}，主动买 {buy_ratio:.0%}",
                     )
                 )
             elif funding <= -c.crowded_funding_rate and ret_1m > 0 and buy_ratio > 0.5:
@@ -534,7 +534,7 @@ class RuleTrigger:
                     (
                         SignalKind.CROWDED_REVERSAL,
                         Side.LONG,
-                        f"资金费率 {funding:.4%} 拥挤做空，开始回升",
+                        f"资金费率 {funding:+.4%}，1 分钟 {ret_1m:+.2%}，主动买 {buy_ratio:.0%}",
                     )
                 )
 
@@ -571,11 +571,7 @@ class RuleTrigger:
         if z < c.oi_price_z:
             return []
         side = Side.LONG if ret > 0 else Side.SHORT
-        who = "新多头" if side == Side.LONG else "新空头"
-        desc = (
-            f"{c.oi_window_min} 分钟持仓量涨 {oi:.1f}%，价格 {ret:+.2%}"
-            f"（{z:.1f} 倍平时波动），{who}进场"
-        )
+        desc = f"{c.oi_window_min} 分钟持仓量 {oi:+.1f}%，价格 {ret:+.2%}（{z:.1f} 倍平时波动）"
         return [(SignalKind.OI_FOLLOW, side, desc)]
 
     def _crowd_rule(self, v: dict[str, float]) -> list[tuple[SignalKind, Side, str]]:
@@ -586,15 +582,12 @@ class RuleTrigger:
             return []
         th = c.top_crowd_min_pct
         if top >= th and crowd <= -th:
-            side, act = Side.SHORT, "大户加多、散户减多"
+            side = Side.SHORT
         elif top <= -th and crowd >= th:
-            side, act = Side.LONG, "大户减多、散户加多"
+            side = Side.LONG
         else:
             return []
-        desc = (
-            f"{c.top_crowd_window_min} 分钟大户多空比 {top:+.1f}%、"
-            f"散户多空比 {crowd:+.1f}%，{act}，反着大户做"
-        )
+        desc = f"{c.top_crowd_window_min} 分钟大户多空比 {top:+.1f}%、散户多空比 {crowd:+.1f}%"
         return [(SignalKind.TOP_VS_CROWD, side, desc)]
 
     def _btc_rule(self, v: dict[str, float]) -> list[tuple[SignalKind, Side, str]]:
@@ -608,7 +601,7 @@ class RuleTrigger:
             side = Side.SHORT
         else:
             return []
-        desc = f"BTC 5 分钟走了 {z:+.1f} 倍平时波动，这个币 5 分钟 {ret:+.2%} 还没跟"
+        desc = f"BTC 5 分钟 {z:+.1f} 倍平时波动，这个币 5 分钟 {ret:+.2%}"
         return [(SignalKind.BTC_LEAD, side, desc)]
 
 

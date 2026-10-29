@@ -198,7 +198,7 @@ def test_oi_follow(now: datetime) -> None:
     t = RuleTrigger(cfg)
     [s] = t.check(up, cd, now)
     assert s.kind is c.SignalKind.OI_FOLLOW and s.side_hint is c.Side.LONG
-    assert "新多头" in s.trigger_desc
+    assert s.trigger_desc == "30 分钟持仓量 +1.5%，价格 +1.20%（4.4 倍平时波动）"
     # 窗口内只出一次（比 signal_dedup_s 长）
     assert t.check(up, cd, now + timedelta(minutes=29)) == []
     assert len(t.check(up, cd, now + timedelta(minutes=31))) == 1
@@ -229,7 +229,7 @@ def test_top_vs_crowd_fades_top_traders(now: datetime) -> None:
     # 大户加多、散户减多 → 做空（反着大户）
     [s] = RuleTrigger(cfg).check(_quiet(now, top_w_pct=6.0, crowd_w_pct=-5.5), both, now)
     assert s.kind is c.SignalKind.TOP_VS_CROWD and s.side_hint is c.Side.SHORT
-    assert "反着大户" in s.trigger_desc
+    assert s.trigger_desc == "240 分钟大户多空比 +6.0%、散户多空比 -5.5%"
     [s] = RuleTrigger(cfg).check(_quiet(now, top_w_pct=-6.0, crowd_w_pct=5.5), both, now)
     assert s.side_hint is c.Side.LONG
     assert RuleTrigger(cfg).check(_quiet(now, top_w_pct=6.0, crowd_w_pct=-2.0), both, now) == []
@@ -251,6 +251,7 @@ def test_btc_lead(now: datetime) -> None:
     eth = _quiet(now, btc5z=3.5, ret_5m=-0.001).model_copy(update={"symbol": "ETHUSDT"})
     [s] = RuleTrigger(cfg).check(eth, cd, now)
     assert s.kind is c.SignalKind.BTC_LEAD and s.side_hint is c.Side.LONG
+    assert s.trigger_desc == "BTC 5 分钟 +3.5 倍平时波动，这个币 5 分钟 -0.10%"
     moved = _quiet(now, btc5z=3.5, ret_5m=0.004).model_copy(update={"symbol": "ETHUSDT"})
     assert RuleTrigger(cfg).check(moved, cd, now) == []  # 已经跟了
     btc = _quiet(now, btc5z=3.5, ret_5m=-0.001)
