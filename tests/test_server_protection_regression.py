@@ -16,6 +16,7 @@ from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.core.trailing_price import activation_price
+from jiaoyi.execution import shared_reads
 from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import (
     BracketSubmissionRejected,
@@ -257,6 +258,28 @@ async def test_fully_identified_legs_arm_once_and_survive_restart(tmp_path: Path
     assert len(h.creates()) == 2 and not h.cancels()
     assert {leg.kind for leg in h.state().legs} == {"stop_loss"}
     assert {leg.purpose for leg in h.state().legs} == {"fixed", "lifeboat"}
+
+
+async def test_steady_sync_reuses_a_terminal_entry_and_reads_positions_through_the_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    h = Harness(tmp_path, Side.LONG)
+    assert await h.manager.sync("pos-1") == "armed"
+    calls: list[str] = []
+    for name in ("entry_order", "positions_evidence"):
+        original = getattr(h.exchange, name)
+
+        async def counted(*args, _name=name, _original=original):
+            calls.append(_name)
+            return await _original(*args)
+
+        monkeypatch.setattr(h.exchange, name, counted)
+    shared = h.manager.shared_positions(max_wait_s=1.0)
+    shared.join()
+    with shared_reads.attached(shared):
+        assert await h.manager.sync("pos-1") == "armed"
+    assert calls == ["positions_evidence", "positions_evidence"]
+    assert shared.reads == 2
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])

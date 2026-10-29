@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -1014,6 +1015,40 @@ async def test_close_order_is_sized_on_the_close_lane_read(tmp_path: Path, side:
     names = [n for _, n in h.calls]
     assert "positions_evidence" not in names[: names.index("place_close")]
     assert lane and h.exchange.direct == [("dc-pos-1-1", 2.0)]
+
+
+async def test_direct_close_leaves_the_exit_lock_once_flat_and_sync_skips_the_cleanup(
+    tmp_path: Path,
+):
+    h = await armed(tmp_path, Side.LONG)
+    h.api.auto_terminate_on_stop = True  # HB 当场终态：收尾马上就能做，看它在不在平仓调用里做
+
+    def slow(name: str) -> None:
+        original = getattr(h.exchange, name)
+
+        async def call(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return await original(*args, **kwargs)
+
+        setattr(h.exchange, name, call)
+
+    slow("cancel_bracket")
+    slow("cancel_lifeboat")
+    started = time.perf_counter()
+    await asyncio.wait_for(h.adapter.close("pos-1", CloseReason.KEEPER), 5)
+    assert time.perf_counter() - started < 0.25
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)] and not h.cancels()
+    assert h.tracked().record.status is PositionStatus.CLOSING
+    assert not h.adapter._exit_busy("pos-1")
+    tick = asyncio.create_task(h.adapter.protection_tick())
+    await asyncio.sleep(0.1)
+    assert h.adapter._exit_busy("pos-1")  # 保护轮正在锁里撤腿
+    started = time.perf_counter()
+    await asyncio.wait_for(h.adapter.positions(), 0.2)
+    assert time.perf_counter() - started < 0.2
+    await asyncio.wait_for(tick, 10)
+    assert h.tracked().record.status is PositionStatus.CLOSED
+    assert len(h.cancels()) == 3 and not h.live_stop()
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])

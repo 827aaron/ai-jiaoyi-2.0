@@ -815,6 +815,10 @@ def build_modules(
         cards=cards,
         alerter=alerter,
     )
+    if isinstance(alerter, RecordedAlerter):
+        # 告警是后台队列发的：放到最后关，前面各模块关闭时发的告警也能发出去；它会顺带关 Telegram。
+        closers[:] = [fn for fn in closers if fn != getattr(alerter.inner, "close", None)]
+        closers.append(alerter.close)
     return Built(
         modules,
         closers,

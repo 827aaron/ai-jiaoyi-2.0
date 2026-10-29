@@ -14,11 +14,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from functools import partial
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -36,6 +38,7 @@ from jiaoyi.contracts.module_status import AlertLevel, Health
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus, PositionStatus
 from jiaoyi.core.paper_stop import PAPER_STOP_DETAIL
 from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.execution import shared_reads
 from jiaoyi.execution.brackets import (
     AnchorBookSpike,
     BracketManager,
@@ -104,6 +107,11 @@ HostedCloseMode = Literal["hb_first", "direct"]
 _HB_FAILED_TITLE = "hummingbot 没能平掉仓位，已直连币安平仓"
 HOSTED_CLOSE_SLOW_ALERT_S = 120.0
 """Floor for the slow hosted close alert: hb_first closes take 15-110 s from decision to fill."""
+PROTECTION_ROUND_BUDGET_S = 5.0
+# 8 笔仓时一轮约 3 秒的主桶权重；按笔数歇，保护轮平均只占主桶一半左右。
+PROTECTION_GAP_PER_POSITION_S = 0.4
+# 等得再久也不影响正确性，只是少合并一次读取；一秒够多数仓读完三条腿。
+_SHARED_READ_MAX_WAIT_S = 1.0
 _DIRECT_CLOSE_FAILED = frozenset(
     {"REJECTED", "NOT_SENT", "EXPIRED", "EXPIRED_IN_MATCH", "CANCELED"}
 )
@@ -404,6 +412,8 @@ class HbExecutorAdapter:
         hosted_close_direct_when_exiting: bool = False,
         exit_fills: ExitFills | None = None,
         hosted_close_slow_alert_s: float = HOSTED_CLOSE_SLOW_ALERT_S,
+        protection_round_budget_s: float = PROTECTION_ROUND_BUDGET_S,
+        protection_gap_per_position_s: float = 0.0,
     ) -> None:
         """``hosted_close_mode``：交易所托管仓的平仓顺序。``hb_first`` = 先停 HB 执行器、等它终态并
         核完条件单再下直连平仓（原行为）；``direct`` = 我方决定平仓、HB 执行器仍在跑且没有自己的
@@ -416,6 +426,10 @@ class HbExecutorAdapter:
 
         ``hosted_close_slow_alert_s``: a hosted close still CLOSING this many seconds after it was
         first seen in progress gets one WARN alert.
+
+        ``protection_round_budget_s``：后台保护一轮最多等几秒；没做完的仓留在后台接着做，本轮先结束。
+        ``protection_gap_per_position_s``：一轮结束后按本轮做了几笔仓再歇这么多秒 × 笔数才进下一轮；
+        0 = 不歇（只靠调用方的轮距）。
 
         ``exit_fills``: side file for the exchange exit fill time (panel display); None = not kept.
 
@@ -443,6 +457,10 @@ class HbExecutorAdapter:
         self._close_slow_alerted: set[str] = set()
         self._flat_awaiting_cleanup: set[str] = set()
         self._hb_stop_sent: set[str] = set()
+        self._tick_tasks: dict[str, asyncio.Task[None]] = {}
+        self._round_budget_s = protection_round_budget_s
+        self._gap_per_position_s = protection_gap_per_position_s
+        self._tick_rest_until = 0.0
         if protection_tick_alert_after < 1:
             raise ValueError("protection_tick_alert_after 至少为 1")
         self._tick_alert_after = protection_tick_alert_after
@@ -1633,12 +1651,10 @@ class HbExecutorAdapter:
         held = await self._held_quantity(rec.symbol, urgent=True)
         if held is None or held > 0:
             return False  # 终态部分成交；下一轮按真实余仓走原流程补下一代
+        # 已确认零仓：撤腿、回读、结账要十几秒，留在退出锁里会让保护轮、管家、对账员都排队等这笔仓。
+        # 交给后台保护轮按 hb_first 收尾（HB 停止已发，下一轮不会再走直连）。
         self._flat_awaiting_cleanup.add(pid)
-        if not await self._prepare_server_exit(self._registry.get(pid) or tracked):
-            return False
-        return await self._settle_direct_close(
-            self._registry.get(pid) or tracked, reason, via_hb, title=title
-        )
+        return False
 
     async def _stop_hb_keep_position(self, position_id: str) -> bool:
         """只停不平：HB 不再动这笔仓。请求前落盘；返回 False = 没发、结果未知或已发过还在等终态。
@@ -1883,7 +1899,14 @@ class HbExecutorAdapter:
         return tracked is not None and tracked.server_protection is not None
 
     async def protection_tick(self) -> None:
-        """后台单轮，仅维护已持久托管仓；逐仓故障隔离，不开仓、不补造丢失峰值。"""
+        """后台单轮，仅维护已持久托管仓；逐仓故障隔离，不开仓、不补造丢失峰值。
+
+        各仓并发跑、共用一次持仓读取（``shared_reads``）。正被别的任务占着锁的仓、上一轮还没
+        做完的仓本轮跳过，不排队等。一轮最多等 ``protection_round_budget_s`` 秒，没做完的
+        （例如零仓后的收尾）留在后台接着做，其余仓照常进下一轮。"""
+        if time.monotonic() < self._tick_rest_until:
+            return
+        work: list[TrackedPosition] = []
         for initial in list(self._registry.data.positions.values()):
             pid = initial.record.position_id
             ended = initial.record.status in {PositionStatus.CLOSED, PositionStatus.FAILED}
@@ -1893,7 +1916,6 @@ class HbExecutorAdapter:
                 self._exit_started.pop(pid, None)
                 self._close_slow_alerted.discard(pid)
             # 同步和收尾分开计数：进了收尾，同步阶段的失败不再累计；结束的仓不留计数。
-            key = (pid, "cleanup" if initial.exit_cleanup_pending else "sync")
             if ended or initial.exit_cleanup_pending:
                 self._tick_failures.pop((pid, "sync"), None)
             if ended and not initial.exit_cleanup_pending:
@@ -1901,25 +1923,70 @@ class HbExecutorAdapter:
             if initial.server_protection is None or initial.server_protection.stage == "done":
                 self._tick_failures.pop((pid, "cleanup"), None)
                 continue
-            if initial.record.status is PositionStatus.CLOSING:
-                await self._alert_hosted_close_slow(initial)
-            try:
-                if initial.exit_cleanup_pending:
-                    await self._finish_exit_cleanup(pid)
-                    self._tick_failures.pop(key, None)
-                    continue
-                if ended:
-                    continue  # 未明 create 的 FAILED 仍阻同币；不能在后台把未知归为没提交。
-                current = await self._sync_one(initial)
-                if current.record.status is PositionStatus.OPEN:
-                    await self._update_server_trailing(pid)
-            except TrailingBookUnavailable as error:
-                self._tick_failures.pop(key, None)  # 同步已成功，只是盘口不可用；另有告警
-                await self._alert_trailing_book(pid, initial.record.symbol, error)
-            except Exception as error:
-                await self._protection_tick_failed(key, initial.record.symbol, error)
-            else:
+            if pid in self._tick_tasks or self._exit_busy(pid):
+                continue
+            work.append(initial)
+        if not work:
+            return
+        shared = (
+            self._protection.shared_positions(max_wait_s=_SHARED_READ_MAX_WAIT_S)
+            if self._protection is not None
+            else None
+        )
+        tasks: list[asyncio.Task[None]] = []
+        for initial in work:
+            pid = initial.record.position_id
+            if shared is not None:
+                shared.join()
+            task = asyncio.create_task(self._protect_one(initial, shared))
+            self._tick_tasks[pid] = task
+            task.add_done_callback(partial(self._tick_task_done, pid))
+            tasks.append(task)
+        try:
+            await asyncio.wait(tasks, timeout=self._round_budget_s)
+        except asyncio.CancelledError:
+            for task in list(self._tick_tasks.values()):
+                task.cancel()
+            raise
+        # 仓多时每轮读取多，拉开轮距，给管家读价、开仓留出主限速桶的余量。
+        self._tick_rest_until = time.monotonic() + self._gap_per_position_s * len(work)
+
+    def _tick_task_done(self, pid: str, task: asyncio.Task[None]) -> None:
+        if self._tick_tasks.get(pid) is task:
+            del self._tick_tasks[pid]
+
+    async def _protect_one(
+        self, initial: TrackedPosition, shared: shared_reads.SharedRead[Any] | None
+    ) -> None:
+        if shared is None:
+            await self._protect_position(initial)
+            return
+        with shared_reads.attached(shared):
+            await self._protect_position(initial)
+
+    async def _protect_position(self, initial: TrackedPosition) -> None:
+        pid = initial.record.position_id
+        ended = initial.record.status in {PositionStatus.CLOSED, PositionStatus.FAILED}
+        key = (pid, "cleanup" if initial.exit_cleanup_pending else "sync")
+        if initial.record.status is PositionStatus.CLOSING:
+            await self._alert_hosted_close_slow(initial)
+        try:
+            if initial.exit_cleanup_pending:
+                await self._finish_exit_cleanup(pid)
                 self._tick_failures.pop(key, None)
+                return
+            if ended:
+                return  # 未明 create 的 FAILED 仍阻同币；不能在后台把未知归为没提交。
+            current = await self._sync_one(initial)
+            if current.record.status is PositionStatus.OPEN:
+                await self._update_server_trailing(pid)
+        except TrailingBookUnavailable as error:
+            self._tick_failures.pop(key, None)  # 同步已成功，只是盘口不可用；另有告警
+            await self._alert_trailing_book(pid, initial.record.symbol, error)
+        except Exception as error:
+            await self._protection_tick_failed(key, initial.record.symbol, error)
+        else:
+            self._tick_failures.pop(key, None)
 
     async def _alert_hosted_close_slow(self, tracked: TrackedPosition) -> None:
         """A quiet in-progress close (CloseInProgress) must still surface if it never settles,
@@ -2535,11 +2602,12 @@ class HbExecutorAdapter:
     # ------------------------------------------------------------------ 查询与同步
 
     async def positions(self) -> list[PositionRecord]:
+        """正被别的任务占着退出锁的仓本次跳过、按账本现状返回：占锁的那边会把它同步完。"""
         for tracked in list(self._registry.data.positions.values()):
-            if tracked.exit_cleanup_pending:
+            if tracked.exit_cleanup_pending and not self._exit_busy(tracked.record.position_id):
                 await self._finish_exit_cleanup(tracked.record.position_id)
         for tracked in self._registry.live():
-            tracked = await self._sync_one(tracked)
+            tracked = await self._sync_one(tracked, skip_busy=True)
             if tracked.limit_wait_s:
                 await self._limit_housekeeping(tracked)
         return [t.record for t in self._registry.live()]
@@ -2651,12 +2719,26 @@ class HbExecutorAdapter:
         ):
             self._set(tracked, lifeboat=order)
 
-    async def _sync_one(self, tracked: TrackedPosition) -> TrackedPosition:
+    def _exit_busy(self, position_id: str) -> bool:
+        """另一个任务正占着这笔仓的退出锁或它的同币锁（本任务重入不算）。"""
+        task = asyncio.current_task()
+        lock = self._direct_locks.get(position_id)
+        if lock is not None and lock.locked() and self._exit_owners.get(position_id) is not task:
+            return True
+        tracked = self._registry.get(position_id)
+        return tracked is not None and self._registry.symbol_busy(tracked.record.symbol)
+
+    async def _sync_one(
+        self, tracked: TrackedPosition, *, skip_busy: bool = False
+    ) -> TrackedPosition:
+        """``skip_busy``：锁被别人占着就不等，按账本现状返回。"""
         rec = tracked.record
-        if rec.executor_id is None:
+        if rec.executor_id is None or (skip_busy and self._exit_busy(rec.position_id)):
             return self._registry.get(rec.position_id) or tracked
         # 慢查询不占退出锁。返回后重新读取账本，不能把查询前的 OPEN 快照覆盖已提交的平仓。
         detail = await self._api.get_executor(rec.executor_id)
+        if skip_busy and self._exit_busy(rec.position_id):
+            return self._registry.get(rec.position_id) or tracked
         async with self._exit_lock(rec.position_id):
             current = self._registry.get(rec.position_id) or tracked
             if current.record.executor_id != rec.executor_id or current.record.status in (
@@ -2870,7 +2952,8 @@ class HbExecutorAdapter:
         assert self._exchange is not None
         try:
             read = (urgent and getattr(self._exchange, "close_positions_evidence", None)) or (
-                getattr(self._exchange, "positions_evidence", None)
+                (not urgent and shared_reads.current())
+                or getattr(self._exchange, "positions_evidence", None)
             )
             if read is None:
                 return None
