@@ -540,6 +540,8 @@ class Runner:
         self._watched: set[str] | None = None  # 上一次订阅的集合；None = 还没订过
         if hasattr(self.m.feed, "contract_listener"):
             self.m.feed.contract_listener = self.on_contract_info  # 币安行情层：下架推送
+        if hasattr(self.m.executor, "on_position_closed"):
+            self.m.executor.on_position_closed = self.on_position_closed  # 成交推送记平
         self._market_file = MarketSnapshotFile(app.app_cfg.data_dir, app.risk_cfg.day_reset_tz)
         if isinstance(self.m.cards, _PicksAware):
             self.m.cards.set_on_picks(self.set_meeting_picks)
@@ -1762,6 +1764,15 @@ class Runner:
             self._paper_safe.pop(pid, None)
         self._paper_unseen_logged = {k for k in self._paper_unseen_logged if k[0] in live}
         self._paper_stop_retry()
+
+    def on_position_closed(self, rec: PositionRecord) -> None:
+        """执行器按成交推送记平了一笔：马上移出持仓列表，不等下一轮读持仓（那要等 HB / REST）。"""
+        previous = {p.position_id: p for p in self.positions}
+        if rec.position_id not in previous:
+            return
+        self.positions = [p for p in self.positions if p.position_id != rec.position_id]
+        self._reconcile_soon()
+        self._assistant_ended({rec.position_id}, [rec], previous)
 
     def _assistant_ended(
         self,

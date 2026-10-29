@@ -4,7 +4,9 @@
   拆路由后的私有流地址），连不上再试老地址 ``<ws_base>/ws/<key>``。
 - 每 ``KEEPALIVE_S``（30 分钟）续期一次；断线按 1、2、4…最多 60 秒退避重连，重连前重新拿 key。
 - 只关心 ``ORDER_TRADE_UPDATE``（有成交：x = TRADE）和 ``ACCOUNT_UPDATE``（余额 / 持仓变了），
-  收到就调 ``on_fill``；``listenKeyExpired`` 立刻换 key 重连。别的事件忽略。
+  收到就调 ``on_fill``；``listenKeyExpired`` 立刻换 key 重连。
+- ``on_event``（可选）先于 ``on_fill`` 同步拿到每条订单 / 条件单 / 账户推送原文
+  （``ORDER_TRADE_UPDATE`` / ``ALGO_UPDATE`` / ``ACCOUNT_UPDATE``），执行器按它当场认出托管腿平仓。
 - Demo 环境的私有流域名币安文档没写清（``demo-fstream.binance.com`` 待在 Mac 上实测），
   连不上时主循环照样每 60 秒轮询兜底，``status()`` 里写明「只走 60 秒轮询」。
 """
@@ -30,6 +32,7 @@ LEGACY_TESTNET_WS_BASE = "wss://stream.binancefuture.com"
 KEEPALIVE_S = 30 * 60.0
 MAX_BACKOFF_S = 60.0
 FILL_EVENTS = ("ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE")
+EVIDENCE_EVENTS = frozenset({"ORDER_TRADE_UPDATE", "ALGO_UPDATE", "ACCOUNT_UPDATE"})
 
 
 def ws_urls(base: str, key: str) -> list[str]:
@@ -74,7 +77,9 @@ class UserStream:
         ws_base: str,
         connector: Callable[[str], Any] = connect,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        self._on_event = on_event
         self._new_key = new_key
         self._keepalive = keepalive
         self._on_fill = on_fill
@@ -135,6 +140,11 @@ class UserStream:
             if msg.get("e") == "listenKeyExpired":
                 self.status.last_error = "listenKey 过期，换新的"
                 return got
+            if self._on_event is not None and msg.get("e") in EVIDENCE_EVENTS:
+                try:
+                    self._on_event(msg)
+                except Exception:
+                    log.exception("成交推送处理失败（轮询会补上）")
             if is_fill(msg):
                 got = True
                 self.status.last_event_at = datetime.now(UTC)

@@ -1282,6 +1282,17 @@ class BracketManager:
         """进入退出：之后不再换代、不再观测移动止损；已挂的腿原样保留。"""
         self._save(pid, stage="exiting", trailing_last_error=None, trailing_failing_since=None)
 
+    async def cancel_after_flat(self, pid: str) -> None:
+        """成交推送已证实净仓为 0（``stream_close``）：马上撤还明确在挂的腿，不等同币锁、不先读
+        持仓。撤不掉的抛出，留给 ``flat_cleanup`` 照常核验后再撤。"""
+        tracked, state = self._current(pid)
+        try:
+            for leg in state.legs:
+                if _live(leg):
+                    await self._cancel(pid, leg.client_order_id)
+        finally:
+            await self._flush_notes(pid, tracked.record.symbol)
+
     async def prepare_exit(self, pid: str) -> bool:
         tracked, _ = self._current(pid)
         try:

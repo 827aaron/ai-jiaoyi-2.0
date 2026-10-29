@@ -1205,3 +1205,23 @@ async def test_runner_keeper_assistant_reports_status_and_stops_with_the_runner(
     await r.shutdown()
     unstarted.close()
     assert r.assistant.busy == frozenset() and not r.assistant._tasks
+
+
+class _StreamExecutor(FakeExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_position_closed: Callable[[c.PositionRecord], None] | None = None
+
+
+async def test_on_position_closed_drops_the_position_without_reading_positions(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    ex = _StreamExecutor()
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    held = _position()
+    r.positions = [held]
+    assert ex.on_position_closed == r.on_position_closed
+    ex.on_position_closed(held.model_copy(update={"status": c.PositionStatus.CLOSED}))
+    assert r.positions == []

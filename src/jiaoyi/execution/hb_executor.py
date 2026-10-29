@@ -78,13 +78,21 @@ from jiaoyi.execution.frozen_peak import (
 )
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.lifeboat import lifeboat_price
-from jiaoyi.execution.registry import DayStart, PositionRegistry, TrackedPosition
+from jiaoyi.execution.registry import (
+    DayStart,
+    PositionRegistry,
+    ProtectiveLeg,
+    TrackedPosition,
+)
+from jiaoyi.execution.stream_close import OrderFills, StreamBook, Verdict, evaluate, ms_time
 from jiaoyi.execution.symbols import to_hb_pair
 from jiaoyi.execution.tighten import breakeven_stop_price
 from jiaoyi.execution.trailing import TrailingBookUnavailable
 from jiaoyi.interfaces import Alerter, LifeboatStop
 
 log = logging.getLogger(__name__)
+
+_LEG_TRIGGERED = frozenset({"TRIGGERING", "TRIGGERED", "FINISHED"})
 
 
 def _frozen_peak_size(
@@ -480,6 +488,16 @@ class HbExecutorAdapter:
         self._rec = recorder
         self._clock = clock
         self._sleep = sleep
+        self._stream = StreamBook()
+        self._stream_tried: set[tuple[str, str]] = set()
+        """(仓, 订单号 / flat:订单号)：推送对不上号或缺零仓时，每张单只按 REST 补查一次。"""
+        self._stream_closed: set[str] = set()
+        """本进程按成交推送记平的仓：在途的旧流程不能把它改回平仓中。"""
+        self._stream_refine: set[str] = set()
+        """按推送记平、但手续费不全（开仓手续费不知道或不是 USDT）的仓：成交明细回填再核一遍。"""
+        self._stream_tasks: set[asyncio.Task[None]] = set()
+        self.on_position_closed: Callable[[PositionRecord], None] | None = None
+        """主循环接上：按成交推送记平一笔仓后马上调（同步，不等下一轮读持仓）。"""
 
     # ------------------------------------------------------------------ 开仓
 
@@ -854,8 +872,8 @@ class HbExecutorAdapter:
         没有成交价就记 None，并留一条日志，当日统计会漏这一笔。
         """
         tracked = self._registry.get(position_id)
-        if tracked is None:
-            return
+        if tracked is None or tracked.record.status is PositionStatus.CLOSED:
+            return  # 已按成交推送记平：不再用（可能更缺数的）直连回读覆盖
         if tracked.server_protection is not None and tracked.server_protection.stage != "done":
             # 同步记账函数不能自行核查交易所；托管仓必须先经锁内完整收尾，禁止旧入口绕过。
             log.error("托管仓尚未完整核验收尾，拒绝记为已平 %s", position_id)
@@ -1809,6 +1827,10 @@ class HbExecutorAdapter:
         )
         if ours == 0 and legs:
             reason = legs[0][0]  # 我方一笔没成交，是交易所的腿平掉的
+        if tracked.record.status is PositionStatus.CLOSED:
+            # 等回读的这段时间里已按成交推送记平、发过通知：这里只把收尾做完
+            await self._finish_exit_cleanup(rec.position_id)
+            return True
         self.mark_closed_directly(rec.position_id, reason, self._close_fill(tracked, order))
         if (
             self._exit_fills is not None
@@ -1877,6 +1899,260 @@ class HbExecutorAdapter:
             current = self._registry.get(position_id) or tracked
             self._registry.put(current.model_copy(update={"exit_cleanup_pending": False}))
             return True
+
+    # ------------------------------------------------------------------ 成交推送
+
+    def on_stream_event(self, msg: dict[str, Any]) -> None:
+        """用户数据流的一条推送：记下证据，涉及的托管仓证据齐了就马上记平（不发请求、不等锁）。
+
+        hummingbot-api 或币安 REST 卡住时，轮询收尾要等它们恢复；推送 100 毫秒内就到。记平之后
+        ``exit_cleanup_pending`` 保持为真：停 HB 执行器、撤余下的腿、复核零仓仍由收尾流程做完，
+        做完之前同币不能新开。"""
+        try:
+            symbol = self._stream.ingest(msg)
+        except Exception:
+            log.exception("用户数据流推送解析失败")
+            return
+        if symbol is None:
+            return
+        for tracked in list(self._registry.data.positions.values()):
+            if tracked.record.symbol == symbol and tracked.server_protection is not None:
+                self._stream_check(tracked.record.position_id)
+
+    def _stream_check(self, pid: str, *, rest_flat: bool = False) -> None:
+        tracked = self._registry.get(pid)
+        if tracked is None or self._protection is None:
+            return
+        try:
+            verdict = evaluate(tracked, self._stream)
+        except Exception:
+            log.exception("按成交推送判断平仓失败 %s", pid)
+            return
+        if verdict is None:
+            return
+        if verdict.kind == "need_link":
+            fresh = [oid for oid in verdict.unknown if (pid, oid) not in self._stream_tried]
+            if fresh:
+                self._stream_tried.update((pid, oid) for oid in fresh)
+                self._stream_spawn(self._stream_link(pid))
+            return
+        fills = verdict.fills
+        assert fills is not None
+        if verdict.leg is not None:
+            self._stream_leg(pid, verdict.leg, fills, verdict.reason)
+        if verdict.kind == "partial":
+            return
+        if verdict.kind == "need_flat" and not rest_flat:
+            key = (pid, f"flat:{fills.order_id}")
+            if key not in self._stream_tried:
+                self._stream_tried.add(key)
+                self._stream_spawn(self._stream_flat(pid))
+            return
+        self._close_from_stream(pid, verdict)
+
+    def _stream_spawn(self, coro: Awaitable[None]) -> None:
+        task: asyncio.Task[None] = asyncio.ensure_future(coro)
+        self._stream_tasks.add(task)
+        task.add_done_callback(self._stream_tasks.discard)
+
+    def _stream_leg(
+        self, pid: str, leg: ProtectiveLeg, fills: OrderFills, reason: CloseReason | None
+    ) -> None:
+        """腿的子单有成交：按推送记上已触发和成交量（同 REST 回读到时记的），进入退出。"""
+        tracked = self._registry.get(pid)
+        state = tracked.server_protection if tracked is not None else None
+        if tracked is None or state is None or state.stage == "done":
+            return
+        if leg.actual_order_id is not None and leg.actual_order_id != fills.order_id:
+            return
+        algo = self._stream.algo(leg.client_order_id)
+        status = leg.algo_status if leg.algo_status in _LEG_TRIGGERED else "TRIGGERED"
+        if algo is not None and algo.status in _LEG_TRIGGERED:
+            status = algo.status
+        first = fills.first_fill_ms or (algo.event_ms if algo is not None else None)
+        updated = leg.model_copy(
+            update={
+                "algo_status": status,
+                "actual_order_id": fills.order_id,
+                "actual_order_status": fills.status,
+                "filled_quantity": fills.filled,
+                "triggered_at": leg.triggered_at or (ms_time(first) if first else self._clock()),
+                "child_state": "identified",
+            }
+        )
+        changes: dict[str, Any] = {}
+        if updated != leg:
+            changes["legs"] = [
+                updated if x.client_order_id == leg.client_order_id else x for x in state.legs
+            ]
+        if state.stage not in ("exiting", "cleanup"):
+            changes.update(stage="exiting", trailing_last_error=None, trailing_failing_since=None)
+        if state.exit_reason is None and reason is not None:
+            changes["exit_reason"] = reason
+        if changes:
+            self._registry.put(
+                tracked.model_copy(update={"server_protection": state.model_copy(update=changes)})
+            )
+
+    def _entry_fee(self, tracked: TrackedPosition) -> float | None:
+        """开仓手续费（USDT）：移动止损记下的入场成交账，或推送里收全的开仓单；都没有是 None。"""
+        state = tracked.server_protection
+        if (
+            state is not None
+            and state.trailing_fees_quote is not None
+            and state.trailing_entry_quantity is not None
+            and state.entry_filled_quantity is not None
+            and math.isclose(
+                state.trailing_entry_quantity, state.entry_filled_quantity, rel_tol=1e-9
+            )
+        ):
+            return state.trailing_fees_quote
+        cid = tracked.entry_client_order_id
+        entry = self._stream.by_client_id(cid) if cid is not None else None
+        if entry is not None and entry.status == "FILLED":
+            return entry.fee_usdt
+        return None
+
+    def _close_from_stream(self, pid: str, verdict: Verdict) -> None:
+        tracked = self._registry.get(pid)
+        fills, reason = verdict.fills, verdict.reason
+        if tracked is None or fills is None or reason is None:
+            return
+        rec = tracked.record
+        if rec.status not in (PositionStatus.OPEN, PositionStatus.CLOSING):
+            return
+        assert rec.entry_price is not None
+        price = fills.price
+        sign = 1.0 if rec.side is Side.LONG else -1.0
+        gross = fills.realized
+        if gross is None and price is not None:
+            gross = sign * fills.filled * (price - rec.entry_price)
+        exit_fee, entry_fee = fills.fee_usdt, self._entry_fee(tracked)
+        fees = (exit_fee or 0.0) + (entry_fee or 0.0)
+        pnl = gross - fees if gross is not None else None
+        if exit_fee is None or entry_fee is None or fills.realized is None or price is None:
+            self._stream_refine.add(pid)
+        filled_at = ms_time(fills.last_fill_ms) if fills.last_fill_ms else None
+        now = self._clock()
+        self._stream_closed.add(pid)
+        record = rec.model_copy(
+            update={
+                "status": PositionStatus.CLOSED,
+                "closed_at": now,
+                "close_reason": reason,
+                "exit_price": price,
+                "realized_pnl_usdt": pnl,
+                "fees_usdt": fees,
+            }
+        )
+        closed = tracked.model_copy(
+            update={
+                "record": record,
+                "exit_cleanup_pending": True,
+                "requested_close": tracked.requested_close or reason,
+            }
+        )
+        self._registry.put(closed)  # 一次落盘：账本整份重写，别为一笔平仓写好几遍
+        if self._exit_fills is not None and filled_at is not None:
+            self._exit_fills.record(pid, filled_at, "order")
+        self._hb_stop_retries.pop(pid, None)
+        self._flat_awaiting_cleanup.discard(pid)
+        self._exit_started.pop(pid, None)
+        self._close_slow_alerted.discard(pid)
+        lag_ms = (now - filled_at).total_seconds() * 1000 if filled_at is not None else None
+        log.info(
+            "%s %s 按成交推送记平（%s，成交 %g @ %s），成交到记平 %s 毫秒",
+            rec.symbol,
+            pid,
+            reason.value,
+            fills.filled,
+            price,
+            f"{lag_ms:.0f}" if lag_ms is not None else "?",
+        )
+        detail = _shown_detail(closed, reason)
+        self._record(
+            Outcome.CLOSE,
+            f"{rec.symbol} 交易所成交推送平仓（{reason.value}"
+            + (f"：{detail}" if detail else "")
+            + "），净盈亏 "
+            + (f"{pnl:+.2f}U" if pnl is not None else "未知"),
+            closed.record,
+            output={
+                "net": pnl,
+                "reason": reason.value,
+                "stream": True,
+                "order_id": fills.order_id,
+                "fees_known": pid not in self._stream_refine,
+                "filled_at": filled_at.isoformat() if filled_at is not None else None,
+                "fill_to_closed_ms": lag_ms,
+            }
+            | ({"detail": detail} if detail else {}),
+        )
+        if self.on_position_closed is not None:
+            try:
+                self.on_position_closed(closed.record)
+            except Exception:
+                log.exception("通知主循环平仓失败 %s", pid)
+        self._stream_spawn(self._stream_after_close(pid))
+
+    async def _stream_after_close(self, pid: str) -> None:
+        """推送记平之后：马上撤还挂着的腿（保命单等），发平仓通知；其余收尾交给后台保护轮。"""
+        tracked = self._registry.get(pid)
+        if tracked is None:
+            return
+        if self._protection is not None:
+            try:
+                await self._protection.cancel_after_flat(pid)
+            except Exception as error:
+                log.warning(
+                    "推送平仓后撤余下的腿没做完 %s（%s），收尾流程会接着撤",
+                    pid,
+                    describe_error(error),
+                )
+        closed = self._registry.get(pid) or tracked
+        body = _close_text(closed.record)
+        if (shown := _shown_detail(closed, closed.record.close_reason)) is not None:
+            body += f"\n原因：{shown}"
+        await self._notice("平仓完成", body, closed.record, "closed")
+
+    async def _stream_link(self, pid: str) -> None:
+        """推送里有对不上号的只减仓成交：按 REST 读一次各腿的子单号再判（只读，不改账本）。"""
+        tracked = self._registry.get(pid)
+        state = tracked.server_protection if tracked is not None else None
+        if tracked is None or state is None or self._protection is None:
+            return
+        venue = self._protection.exchange
+        for leg in state.legs:
+            if (
+                leg.state in ("planned", "superseded", "rejected")
+                or leg.actual_order_id is not None
+                or leg.algo_id is None
+                or (leg.state == "cancelled" and leg.child_state == "absent")
+            ):
+                continue
+            try:
+                if leg.purpose == "lifeboat":
+                    order = await venue.get_lifeboat(
+                        tracked.record.symbol, client_order_id=leg.client_order_id
+                    )
+                else:
+                    order = await venue.get_bracket(
+                        tracked.record.symbol, client_order_id=leg.client_order_id
+                    )
+            except Exception:
+                log.warning("按 REST 补对应推送成交失败 %s %s", pid, leg.client_order_id)
+                continue
+            if order is not None and order.actual_order_id is not None:
+                self._stream.link(leg.client_order_id, order.actual_order_id)
+        self._stream_check(pid)
+
+    async def _stream_flat(self, pid: str) -> None:
+        """成交全了但还没收到净仓为 0 的推送：按 REST 查一次持仓。"""
+        tracked = self._registry.get(pid)
+        if tracked is None or self._exchange is None:
+            return
+        if await self._held_quantity(tracked.record.symbol, urgent=True) == 0:
+            self._stream_check(pid, rest_flat=True)
 
     def server_managed(self, position_id: str) -> bool:
         tracked = self._registry.get(position_id)
@@ -3080,7 +3356,9 @@ class HbExecutorAdapter:
                 continue
             need_entry = rec.intended_price is None
             need_exit = rec.status is PositionStatus.CLOSED and (
-                rec.exit_price is None or rec.realized_pnl_usdt is None
+                rec.exit_price is None
+                or rec.realized_pnl_usdt is None
+                or rec.position_id in self._stream_refine
             )
             if not (need_entry or need_exit) or (rec.closed_at or now) < now - LOOKBACK:
                 continue
@@ -3099,7 +3377,9 @@ class HbExecutorAdapter:
                     continue
                 need_entry = rec.intended_price is None
                 need_exit = rec.status is PositionStatus.CLOSED and (
-                    rec.exit_price is None or rec.realized_pnl_usdt is None
+                    rec.exit_price is None
+                    or rec.realized_pnl_usdt is None
+                    or rec.position_id in self._stream_refine
                 )
                 entry = entry_fill(rec, rows)
                 if entry is None:
@@ -3127,6 +3407,7 @@ class HbExecutorAdapter:
                     if entry.commission_usdt is not None and exit_.commission_usdt is not None:
                         fees = entry.commission_usdt + exit_.commission_usdt
                         changes.update(fees_usdt=fees, realized_pnl_usdt=exit_.realized_pnl - fees)
+                        self._stream_refine.discard(rec.position_id)
                     else:
                         log.info(
                             "%s 手续费不是 USDT 计价（BNB 抵扣等），手续费沿用执行器报的",
@@ -3297,6 +3578,15 @@ class HbExecutorAdapter:
 
     def _set(self, tracked: TrackedPosition, **changes: Any) -> TrackedPosition:
         tracked = self._registry.get(tracked.record.position_id) or tracked
+        pid = tracked.record.position_id
+        if (
+            pid in self._stream_closed
+            and tracked.record.status is PositionStatus.CLOSED
+            and changes.get("status", PositionStatus.CLOSED) is not PositionStatus.CLOSED
+        ):
+            # 推送记平之前就开始的平仓流程还在跑：它的「平仓中」不能盖掉已证实的平仓
+            changes.pop("status")
+            changes.pop("requested_close", None)
         requested = changes.pop("requested_close", tracked.requested_close)
         filled_at = changes.pop("filled_at", tracked.filled_at)
         record = tracked.record.model_copy(update=changes)

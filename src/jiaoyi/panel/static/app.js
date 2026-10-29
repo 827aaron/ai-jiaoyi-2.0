@@ -4451,7 +4451,8 @@ if (location.pathname !== "/setup") { // 首次设置向导在 setup.js
   document.addEventListener("visibilitychange", () => { if (!document.hidden && data) { render(); loadKlines(false); } });
   render();
   loadPrecision();
-  // 持仓页 2 秒一轮（现价、浮盈、K 线要跟得上），其它页 5 秒
-  const loop = async () => { await poll(); setTimeout(loop, route().page === "positions" ? 2000 : 5000); };
+  // 持仓页、历史页 2 秒一轮（现价、浮盈、刚平的单要跟得上），其它页 5 秒
+  const FAST_PAGES = new Set(["positions", "history"]);
+  const loop = async () => { await poll(); setTimeout(loop, FAST_PAGES.has(route().page) ? 2000 : 5000); };
   loop();
 }

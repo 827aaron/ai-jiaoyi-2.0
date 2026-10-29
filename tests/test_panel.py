@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import UTC, date, datetime, timedelta
@@ -382,6 +383,38 @@ async def test_hb_reader_parses_and_caches() -> None:
     assert snap.unrealized_of("BTCUSDT") is None
     await hb.snapshot()
     assert len(calls) == 2  # 第二次走缓存
+    await hb.close()
+
+
+async def test_hb_reader_serves_the_stale_snapshot_while_a_slow_refresh_runs() -> None:
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req.url.path)
+        if len(calls) > 2:
+            await gate.wait()  # hummingbot-api 卡住
+        if req.url.path == "/portfolio/state":
+            return httpx.Response(200, json={"a": {"c": [{"token": "USDT", "units": 7}]}})
+        return httpx.Response(200, json={"data": []})
+
+    hb = HbReader(
+        "http://hb",
+        "admin",
+        "pw",
+        account_name="a",
+        connector_name="c",
+        cache_s=0.0,
+        transport=httpx.MockTransport(handler),
+    )
+    first = await hb.snapshot()
+    assert first.wallet_usdt == 7.0
+    for _ in range(3):
+        got = await asyncio.wait_for(hb.snapshot(), 0.5)
+        assert got is first
+        await asyncio.sleep(0.01)
+    assert calls.count("/portfolio/state") == 2  # 卡住的那次刷新只发一次
+    gate.set()
     await hb.close()
 
 
