@@ -558,16 +558,17 @@ class JevKeeper:
             votes.append({"rule": "giveback", "vote": "close"})
             return verdict(position, now, "close", 1.0, 1, text, None, None, extra=detail)
         votes.append({"rule": "giveback", "vote": "hold" if self._cfg.giveback_on else "off"})
+        snapshot = self._snapshot(
+            position, fv, now, against[0] if against is not None else None, history
+        )
         request = JevRequest(
             request_id=f"hold-{pid}-{uuid.uuid4().hex[:6]}",
             kind="hold",
             symbol=position.symbol,
             ts=now,
             position_id=pid,
-            snapshot=self._snapshot(
-                position, fv, now, against[0] if against is not None else None, history
-            ),
-            questions=hold_questions(self._kronos_snapshot),
+            snapshot=snapshot,
+            questions=hold_questions(self._kronos_snapshot, snapshot),
         )
         history.append(pnl)
         del history[:-MAX_HISTORY]
@@ -708,7 +709,7 @@ class JevKeeper:
             await self._recall(position, now)
         history = list(self._history.get(position.position_id, ()))
         snapshot = self._snapshot(position, fv, now, against, history)
-        return snapshot, tuple(hold_questions(self._kronos_snapshot))
+        return snapshot, tuple(hold_questions(self._kronos_snapshot, snapshot))
 
     async def wait_hold(
         self, position_id: str, against: AgainstSignalEvent, now: datetime, wait_s: float
@@ -723,7 +724,7 @@ class JevKeeper:
                 ask is not None
                 and ask.against == against
                 and (now - ask.at).total_seconds() <= wait_s
-                and ask.questions == tuple(hold_questions(self._kronos_snapshot))
+                and ask.questions == tuple(hold_questions(self._kronos_snapshot, ask.snapshot))
             ):
                 return ask
             queued = self._against.get(position_id)

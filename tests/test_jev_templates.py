@@ -16,6 +16,7 @@ from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.gate.entry import JevEntryGate
 from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
 from jiaoyi.gate.questions import (
+    CRITERIA,
     KNOWN_TEMPLATES,
     MARKET_GLOSSARY,
     TEMPLATE_VERSION,
@@ -109,7 +110,7 @@ def test_keeper_kronos_variants_are_registered_and_distinct() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "version"), [("direction", "q10"), ("rank", "q10-krank"), ("off", "q10-koff")]
+    ("mode", "version"), [("direction", "q11"), ("rank", "q11-krank"), ("off", "q11-koff")]
 )
 async def test_keeper_record_carries_kronos_mode_and_template_variant(
     tmp_path: Path, now: datetime, mode: Any, version: str
@@ -225,3 +226,43 @@ def test_market_glossary_explains_every_direction_snapshot_key(now: datetime) ->
     keys = _keys(json.loads(direction_snapshot("BTCUSDT", f)))
     assert {"book", "fund_bps", "vol10_x", "btc5z"} <= keys
     assert sorted(k for k in keys if not _covered(k, MARKET_GLOSSARY)) == []
+
+
+NUDGES = (
+    "agree",
+    "p_real",
+    "p_take",
+    "not by itself a reason",
+    "favours",
+    "OPPOSITE",
+    "supports the trade",
+    "weigh",
+    "rely on",
+)
+
+
+@pytest.mark.parametrize("kronos", ["direction", "rank", "off"])
+def test_hold_question_and_snapshot_carry_no_nudges(now: datetime, kronos: KronosSnapshot) -> None:
+    qs = hold_questions(kronos)
+    text = " ".join(q.prompt for q in qs) + json.dumps([CRITERIA[q.id] for q in qs])
+    snaps = [json.dumps(s) for s in _fullest_hold_snapshots(now, kronos)]
+    assert [w for w in NUDGES if w in text or any(w in s for s in snaps)] == []
+    if kronos == "direction":
+        assert json.loads(snaps[0])["kronos"] == {"p_up": 0.7, "rank": "top"}
+    assert json.loads(snaps[0])["entry"] == {"sig": "volume_surge", "why": "x"}
+
+
+def test_hold_questions_choice_order_is_seeded_by_the_snapshot() -> None:
+    def order(seed: str | None) -> tuple[str, ...]:
+        return {q.id: q.choices for q in hold_questions("direction", seed)}["action"]
+
+    assert order(None) == ("hold", "close")
+    orders = {order(f"snapshot-{i}") for i in range(20)}
+    assert orders == {("hold", "close"), ("close", "hold")}
+    assert all(order(f"snapshot-{i}") == order(f"snapshot-{i}") for i in range(20))
+    flipped = next(f"snapshot-{i}" for i in range(20) if order(f"snapshot-{i}")[0] == "close")
+    assert [q.choices for q in hold_questions("direction", flipped)] == [
+        ("no", "yes"),
+        ("high", "low"),
+        ("close", "hold"),
+    ]

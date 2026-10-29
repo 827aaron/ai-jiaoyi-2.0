@@ -96,7 +96,13 @@ class JevRequest(Contract):
             if self.kind == "entry"
             else {q.value: c for q, c in HOLD_CHOICES.items()}
         )
-        got = {q.id: q.choices for q in self.questions}
+        # hold choices may come in either order (the order is seeded per snapshot)
+        got = {
+            q.id: tuple(sorted(q.choices)) if self.kind == "hold" else q.choices
+            for q in self.questions
+        }
+        if self.kind == "hold":
+            expected = {k: tuple(sorted(v)) for k, v in expected.items()}
         one = {q.value: ENTRY_CHOICES[q] for q in ENTRY_ONE}
         if got != expected and not (self.kind == "entry" and got == one):
             raise ValueError(f"{self.kind} 请求的问题和选项必须正好是 {expected}")

@@ -64,9 +64,9 @@ def test_snapshot_new_fields_with_stop_trailing_entry_and_kronos(now: datetime) 
     stop = abs(68000 / 67880 - 1) * 1e4  # ≈ 17.7bp
     assert p["pnl_r"] == round(30 / stop, 2) and p["peak_r"] == round(35 / stop, 2)
     assert p["be_bps"] == 20.0 and p["path_bps"] == [0, 10, 35, 30]
-    assert d["entry"] == entry
+    assert d["entry"] == {"sig": "volume_surge", "why": "量能突增"}  # no entry-time p_real / p_take
     assert d["trail"] == {"on": True, "active": True, "stop_bps": 5.0}  # 30 −（35 − 10）
-    assert d["kronos"] == {"agree": 1}  # 平均路径收在现价之上，做多同向
+    assert d["kronos"] == {"p_up": 0.75}
     assert "imb" not in d["book"] and "micro_bps" not in d["book"] and "spread_bps" in d["book"]
 
 
@@ -115,9 +115,10 @@ def test_snapshot_stays_valid_json_under_limit(now: datetime) -> None:
 
 
 def test_prompts_use_spec_wording() -> None:
-    action = HOLD_PROMPTS[c.HoldQuestion.ACTION]
-    assert "If the position is in profit after fees (`pos.be_bps` > 0)" in action
-    assert "is not by itself a reason to close: the stop already limits that loss." in action
+    assert HOLD_PROMPTS[c.HoldQuestion.ACTION] == (
+        "Hold the whole position or close all of it now? A wrong close costs fees plus the move "
+        "we miss; a wrong hold costs the adverse move up to the stop."
+    )
     thesis = HOLD_PROMPTS[c.HoldQuestion.THESIS_INTACT]
     assert thesis.startswith("Is the reason we entered this position (`entry.sig`, `entry.why`)")
     assert "`against` (only on urgent checks)" in thesis
@@ -181,8 +182,7 @@ async def test_keeper_recalls_history_and_entry_after_restart(
     await k2.review(pos, now)
     d = _snap(t2.calls[0])
     assert d["pos"]["peak_bps"] == 30.0 and d["pos"]["path_bps"] == [30, 15]
-    assert d["entry"] == {"sig": "volume_surge", "why": "量能突增 5 倍", "p_real": 0.41,
-                          "p_take": 0.33}  # fmt: skip
+    assert d["entry"] == {"sig": "volume_surge", "why": "量能突增 5 倍"}
 
 
 async def test_keeper_passes_forecast_and_fee(now: datetime) -> None:
@@ -190,16 +190,16 @@ async def test_keeper_passes_forecast_and_fee(now: datetime) -> None:
     k = _keeper(t, now, [68068.0], forecast=lambda s, n: _fc(now, 0.0), fee_bps=2.0)
     await k.review(position(now), now)
     d = _snap(t.calls[0])
-    assert d["kronos"] == {"agree": 0} and d["pos"]["be_bps"] == 6.0
+    assert d["kronos"] == {"p_up": 0.0} and d["pos"]["be_bps"] == 6.0
 
 
 def test_keeper_sees_forecast_rank(now: datetime) -> None:
-    """官方用法：管家看到平均路径是否同向 + 全池名次（做空碰上看坏 = 同向）。"""
+    """管家看到预测员的原值 p_up 和全池名次，不替它判断和持仓同不同向。"""
     fc = _fc(now, 0.0).model_copy(update={"score": -0.01, "rank_pct": 0.0, "rank_n": 12,
                                           "rank_view": "bottom"})  # fmt: skip
     pos = position(now, side=c.Side.SHORT)
     d = _snap(hold_snapshot(pos, features(now), card(now), now, forecast=fc))
-    assert d["kronos"] == {"agree": 1, "rank": "bottom"}
+    assert d["kronos"] == {"p_up": 0.0, "rank": "bottom"}
 
 
 def _ranked(now: datetime, p_up: float, view: str) -> c.Forecast:
@@ -232,15 +232,15 @@ def test_keeper_snapshot_off_mode_omits_kronos(now: datetime) -> None:
     assert "kronos" not in d
 
 
-def test_keeper_snapshot_direction_mode_is_skewed_by_binary_p_up(now: datetime) -> None:
-    """Default: with the observed p_up = 0 skew, a long reads "against" and a short "with"."""
+def test_keeper_snapshot_direction_mode_carries_the_same_raw_p_up_for_either_side(
+    now: datetime,
+) -> None:
     fc = _ranked(now, 0.0, "mid")
     long_d = _snap(hold_snapshot(position(now), features(now), card(now), now, forecast=fc))
     short_d = _snap(
         hold_snapshot(position(now, side="short"), features(now), card(now), now, forecast=fc)
     )
-    assert long_d["kronos"] == {"agree": 0, "rank": "mid"}
-    assert short_d["kronos"] == {"agree": 1, "rank": "mid"}
+    assert long_d["kronos"] == short_d["kronos"] == {"p_up": 0.0, "rank": "mid"}
 
 
 @pytest.mark.parametrize("mode", ["direction", "rank", "off"])
@@ -264,9 +264,10 @@ def test_keeper_snapshot_kronos_is_long_short_mirrored(
             continue
         assert long_k is not None and short_k is not None
         assert (
-            set(long_k) == set(short_k) == ({"agree", "rank"} if mode == "direction" else {"rank"})
+            set(long_k) == set(short_k) == ({"p_up", "rank"} if mode == "direction" else {"rank"})
         )
-        assert long_k.get("agree") == short_k.get("agree")
+        if mode == "direction":
+            assert (long_k["p_up"], short_k["p_up"]) == (p_up, 1.0 - p_up)
         assert long_k["rank"] == view and short_k["rank"] == flip[view]
 
 
@@ -279,11 +280,11 @@ async def test_keeper_passes_kronos_snapshot_mode(now: datetime) -> None:
     t2 = MockJevTransport(answer=close_p(0.1))
     k2 = _keeper(t2, now, [68068.0], forecast=lambda s, n: fc)
     await k2.review(position(now), now)
-    assert _snap(t2.calls[0])["kronos"] == {"agree": 0, "rank": "top"}
+    assert _snap(t2.calls[0])["kronos"] == {"p_up": 0.0, "rank": "top"}
 
 
-# hold_snapshot output of d3283a2 (before keeper_snapshot existed) for the input below
-_PRE_PR_LONG = (
+# hold_snapshot output for the input below: a byte change to the snapshot must be deliberate
+_DIRECTION_LONG = (
     '{"sym":"BTCUSDT","pos":{"side":"long","pnl_bps":30.0,"age_min":5.0,"to_stop_bps":47.7,'
     '"to_tp_bps":3.5,"time_left_min":55.0,"entry_px":68000.0,"peak_bps":35.0,'
     '"giveback_bps":5.0,"pnl_r":1.7,"peak_r":1.98,"be_bps":20.0,"path_bps":[0,10,35]},'
@@ -292,18 +293,18 @@ _PRE_PR_LONG = (
     '"liq_long_k":0.0,"liq_short_k":0.0,"book":{"spread_bps":0.07,"ofi_k":10.0,'
     '"depth_k":2000.0},"card":{"bias":"long","levels_bps":[-29.9,-249.8],"stop_atr":[1.0,2.0],'
     '"tp_r":[1.5,3.0],"size_max":"L","regime":"BTC 区间震荡偏强，美股盘前科技股走弱；只做突破，'
-    '不追高。"},"kronos":{"agree":0,"rank":"bottom"}}'
+    '不追高。"},"kronos":{"p_up":0.0,"rank":"bottom"}}'
 )
 
 
-def test_keeper_snapshot_direction_mode_is_byte_identical_to_pre_pr() -> None:
+def test_keeper_snapshot_direction_mode_bytes() -> None:
     now = datetime(2026, 10, 28, 9, 30, tzinfo=UTC)
     fc = _ranked(now, 0.0, "bottom")
     pos = position(now, trailing_activation_pct=0.2, trailing_stop_pct=0.1)
     args = (pos, features(now, price=68204.0), card(now), now)
     kw: dict[str, Any] = {"history": [0.0, 10.0, 35.0], "forecast": fc, "fee_bps": 5.0}
-    assert hold_snapshot(*args, **kw) == _PRE_PR_LONG
-    assert hold_snapshot(*args, **kw, kronos="direction") == _PRE_PR_LONG
+    assert hold_snapshot(*args, **kw) == _DIRECTION_LONG
+    assert hold_snapshot(*args, **kw, kronos="direction") == _DIRECTION_LONG
 
 
 def test_hold_prompt_describes_kronos_per_mode() -> None:
@@ -311,10 +312,9 @@ def test_hold_prompt_describes_kronos_per_mode() -> None:
         return hold_prompts(mode)[c.HoldQuestion.THESIS_INTACT]
 
     assert thesis("direction") == HOLD_PROMPTS[c.HoldQuestion.THESIS_INTACT]
-    assert "`kronos.agree`" in thesis("direction")
+    assert "`kronos.p_up`" in thesis("direction")
     rank = thesis("rank")
-    assert "`kronos.agree`" not in rank and "`kronos.rank`" in rank
-    assert "top favours a long and disfavours a short, bottom the reverse" in rank
+    assert "`kronos.p_up`" not in rank and "`kronos.rank`" in rank
     assert "kronos" not in thesis("off")
     for mode in ("rank", "off"):  # only the kronos sentence differs; the other questions match
         other = {q: p for q, p in hold_prompts(mode).items() if q != c.HoldQuestion.THESIS_INTACT}

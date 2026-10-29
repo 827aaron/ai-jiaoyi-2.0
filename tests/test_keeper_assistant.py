@@ -19,7 +19,6 @@ from jiaoyi.gate.jev import JevDecisionModel, MockJevTransport
 from jiaoyi.gate.questions import MARKET_GLOSSARY, hold_questions
 from jiaoyi.keeper import assistant as ka
 from jiaoyi.keeper.assistant import (
-    ACTION,
     QUESTION_ID,
     KeeperAssistant,
     TransportScorer,
@@ -422,7 +421,6 @@ async def test_KeeperAssistant_hold_asks_both_judges_the_keepers_question_and_sn
     assert qs_a == keeper_qs
     assert [(q.id, q.prompt) for q in qs_b] == [(q.id, q.prompt) for q in keeper_qs]
     assert [q.choices for q in qs_b] == [tuple(reversed(q.choices)) for q in keeper_qs]
-    assert {q.id: q.choices for q in qs_b}[ACTION] == ("close", "hold")
     snapshot = json.loads(state_a)
     assert {"pos", "card", "against", "trail"} <= set(snapshot)
     assert MARKET_GLOSSARY in "".join(q.prompt for q in qs_a)
