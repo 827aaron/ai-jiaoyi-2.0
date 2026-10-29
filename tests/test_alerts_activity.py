@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -48,19 +50,23 @@ async def test_alert_card_counts_pushes_and_reports_failures(tmp_path: Path) -> 
     a.heartbeat(START)
     assert log.read_status()["alerting"].headline == "待命 · Telegram 已配置"
     await a.send(_alert("开仓成交"))
+    await a.flush()
     a.heartbeat(START)
     st = log.read_status()["alerting"]
     assert st.today.calls == 1 and st.summary == "开仓成交（APTUSDT）：已发 Telegram"
     assert st.headline == "正常 · 今日推了 1 条"
     tg.last_skipped = True
     await a.send(_alert("开仓成交"))  # 冷却期内同一件事：不算一条
+    await a.flush()
     tg.last_skipped, tg.last_error = False, "HTTP 401"
     await a.send(_alert("平仓完成"))
+    await a.flush()
     a.heartbeat(START)
     st = log.read_status()["alerting"]
     assert st.today.calls == 2 and st.health is Health.DEGRADED and "HTTP 401" in st.headline
     no_tg = RecordedAlerter(_Tg(), RoleRecorder(Role.ALERTING, log), telegram=False)
     await no_tg.send(_alert("开仓成交"))
+    await no_tg.flush()
     no_tg.heartbeat(START)
     assert "未配置" in log.read_status()["alerting"].headline
 
@@ -280,6 +286,7 @@ async def test_alert_record_shows_event_and_sent_text(tmp_path: Path) -> None:
     a = RecordedAlerter(tg, RoleRecorder(Role.ALERTING, log), telegram=True)
     alert = _alert("平仓完成").model_copy(update={"body": "管家平 · 净利 +1.20 U · 持仓 9 分"})
     await a.send(alert)
+    await a.flush()
     (rec,) = [r for r in log.read_day(START.date().isoformat()) if r.role is Role.ALERTING]
     assert rec.input == {
         "事件": "平仓完成",
@@ -289,6 +296,59 @@ async def test_alert_record_shows_event_and_sent_text(tmp_path: Path) -> None:
     }
     assert rec.output["Telegram 正文"].endswith("管家平 · 净利 +1.20 U · 持仓 9 分")
     assert rec.output["结果"] == "已发送" and rec.output["耗时"].endswith("ms")
+
+
+class _GatedTransport(httpx.AsyncBaseTransport):
+    """Telegram 接口：放行前每个请求都卡住，记下发出的正文顺序。"""
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.texts: list[str] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await self.gate.wait()
+        self.texts.append(json.loads(request.content)["text"])
+        return httpx.Response(200, json={"ok": True})
+
+
+async def test_recorded_alerter_send_returns_before_telegram_answers(tmp_path: Path) -> None:
+    transport = _GatedTransport()
+    tg = TelegramAlerter("t", "c", transport=transport)
+    a = RecordedAlerter(tg, RoleRecorder(Role.ALERTING, JsonlDecisionLog(tmp_path)), telegram=True)
+    first = _alert("一").model_copy(update={"dedup_key": "k"})
+    started = time.perf_counter()
+    for alert in (first, _alert("二"), first, _alert("三")):
+        await asyncio.wait_for(a.send(alert), 0.5)
+    assert time.perf_counter() - started < 0.5
+    assert transport.texts == []
+    transport.gate.set()
+    assert await a.flush(5.0)
+    assert [t.split("\n")[0].split(" ", 1)[1] for t in transport.texts] == [
+        "一 [APTUSDT]",
+        "二 [APTUSDT]",
+        "三 [APTUSDT]",
+    ]
+    await a.close()
+
+
+async def test_recorded_alerter_close_flushes_within_its_bound(tmp_path: Path) -> None:
+    transport = _GatedTransport()
+    tg = TelegramAlerter("t", "c", transport=transport)
+    log = JsonlDecisionLog(tmp_path)
+    a = RecordedAlerter(tg, RoleRecorder(Role.ALERTING, log), telegram=True, flush_s=0.2)
+    await asyncio.wait_for(a.send(_alert("卡住")), 0.5)
+    started = time.perf_counter()
+    await asyncio.wait_for(a.close(), 2.0)
+    assert 0.2 <= time.perf_counter() - started < 2.0
+    sent = RecordedAlerter(
+        TelegramAlerter("t", "c", transport=(ok := _GatedTransport())),
+        RoleRecorder(Role.ALERTING, log),
+        telegram=True,
+    )
+    ok.gate.set()
+    await sent.send(_alert("关前入队"))
+    await sent.close()
+    assert len(ok.texts) == 1 and "关前入队" in ok.texts[0]
 
 
 async def test_reconciler_waits_one_round_for_a_closing_position(tmp_path: Path) -> None:

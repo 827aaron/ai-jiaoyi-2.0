@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from jiaoyi.contracts.module_status import AlertLevel
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.execution import shared_reads
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.trailing import TrailingBookUnavailable
 from tests.test_server_protection_regression import AdapterHarness
@@ -188,3 +191,94 @@ async def test_cause_is_persisted_while_closing_and_survives_restart(tmp_path: P
     assert done.record.status is PositionStatus.CLOSED
     [notice] = [a for a in h.alerter.sent if a.dedup_key == "closed:pos-1"]
     assert f"原因：{closing.close_detail}" in notice.body
+
+
+def three_positions(
+    h: AdapterHarness, monkeypatch: pytest.MonkeyPatch, slow: str | None = None
+) -> tuple[list[int], list[str]]:
+    """pos-1..3 三个币；同步换成「读持仓、读三条腿、再读持仓」，``slow`` 那笔在锁里卡 30 秒。"""
+    base = h.registry.get("pos-1")
+    assert base is not None
+    for n, symbol in ((2, "ETHUSDT"), (3, "SOLUSDT")):
+        pid, eid = f"pos-{n}", f"ex-{n}"
+        rec = base.record.model_copy(
+            update={"position_id": pid, "symbol": symbol, "executor_id": eid}
+        )
+        h.registry.put(base.model_copy(update={"record": rec, "entry_client_order_id": f"e-{n}"}))
+        h.api.executors[eid] = {
+            **h.api.executors["owned-executor"],
+            "executor_id": eid,
+            "controller_id": f"jy-{pid}",
+            "custom_info": {"current_position_average_price": 100, "order_ids": [f"e-{n}"]},
+        }
+    reads = [0]
+    synced: list[str] = []
+
+    async def positions_evidence():
+        reads[0] += 1
+        await asyncio.sleep(0.05)
+        return []
+
+    async def sync_server(tracked, detail):
+        pid = tracked.record.position_id
+        read = shared_reads.current() or positions_evidence
+        await read()
+        await asyncio.sleep(30 if pid == slow else 0.09)
+        await read()
+        synced.append(pid)
+        return h.registry.get(pid) or tracked
+
+    async def no_trailing(pid):
+        return None
+
+    monkeypatch.setattr(h.exchange, "positions_evidence", positions_evidence)
+    monkeypatch.setattr(h.adapter, "_sync_server", sync_server)
+    monkeypatch.setattr(h.adapter, "_update_server_trailing", no_trailing)
+    return reads, synced
+
+
+async def test_one_round_shares_the_positions_read_across_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    h = AdapterHarness(tmp_path, Side.LONG)
+    reads, synced = three_positions(h, monkeypatch)
+    await asyncio.wait_for(h.adapter.protection_tick(), 5)
+    assert sorted(synced) == ["pos-1", "pos-2", "pos-3"]
+    assert reads[0] == 2  # 同步前一次、改单后核对一次，三笔仓共用
+
+
+async def test_a_slow_position_does_not_starve_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    h = AdapterHarness(tmp_path, Side.LONG)
+    h.adapter._round_budget_s = 2.0
+    _, synced = three_positions(h, monkeypatch, slow="pos-1")
+    try:
+        await asyncio.wait_for(h.adapter.protection_tick(), 4)
+        assert sorted(synced) == ["pos-2", "pos-3"]
+        assert h.adapter._exit_busy("pos-1")
+        started = time.perf_counter()
+        await asyncio.wait_for(h.adapter.protection_tick(), 1)
+        assert time.perf_counter() - started < 0.5
+        assert sorted(synced) == ["pos-2", "pos-2", "pos-3", "pos-3"]
+        started = time.perf_counter()
+        await asyncio.wait_for(h.adapter.positions(), 2)
+        assert time.perf_counter() - started < 1.0
+        assert "pos-1" not in synced
+    finally:
+        for task in list(h.adapter._tick_tasks.values()):
+            task.cancel()
+
+
+async def test_more_positions_space_the_rounds_further_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    h = AdapterHarness(tmp_path, Side.LONG)
+    h.adapter._gap_per_position_s = 0.2
+    _, synced = three_positions(h, monkeypatch)
+    await h.adapter.protection_tick()
+    await h.adapter.protection_tick()  # 三笔仓：本轮结束后歇 0.6 秒
+    assert len(synced) == 3
+    await asyncio.sleep(0.7)
+    await h.adapter.protection_tick()
+    assert len(synced) == 6

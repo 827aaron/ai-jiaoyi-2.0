@@ -17,6 +17,7 @@ from typing import Literal, Protocol
 
 from jiaoyi.contracts import LifeboatOrder, Side
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus
+from jiaoyi.execution import shared_reads
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
     BracketSubmissionRejected,
@@ -155,6 +156,7 @@ _CHILD_TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTE
 _ALGO_CLOSED = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 _TRIGGERED = {"TRIGGERING", "TRIGGERED", "FINISHED"}
 _READBACK_POLL_S = 0.5  # 回读宽限内的重读间隔；总等待由 readback_grace_s 封顶。
+_TERMINAL_ENTRIES_MAX = 1000
 LegOrder = Literal["lifeboat_first", "stop_first"]
 _LEG_ORDER: dict[LegOrder, tuple[str, ...]] = {
     "lifeboat_first": ("lifeboat", "stop_loss", "take_profit"),
@@ -294,6 +296,8 @@ class BracketManager:
         """某条腿触发后子单被交易所拒绝时调用；执行器接上告警。"""
         self._pending_notes: dict[str, list[str]] = {}
         self._pending_rejections: dict[str, list[tuple[str, str]]] = {}
+        self._terminal_entries: dict[tuple[str, str], ExchangeEntryOrder] = {}
+        """已终态的开仓订单：交易所上不会再变，每轮不必重读。"""
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -522,7 +526,7 @@ class BracketManager:
         rec, cid = tracked.record, tracked.entry_client_order_id
         if cid is None:
             raise ProtectionIncomplete("开仓订单身份未知")
-        order = await self.exchange.entry_order(rec.symbol, cid)
+        order = await self._entry_order(rec.symbol, cid)
         if (
             not isinstance(order, ExchangeEntryOrder)
             or order.client_order_id != cid
@@ -537,11 +541,9 @@ class BracketManager:
             or (state.entry_order_id is not None and state.entry_order_id != order.order_id)
         ):
             raise ProtectionIncomplete("开仓订单身份、状态或实际成交量不一致")
-        rows = [
-            p
-            for p in self._positions(await self.exchange.positions_evidence())
-            if p.symbol == rec.symbol
-        ]
+        shared = shared_reads.current()
+        read = shared if shared is not None else self.exchange.positions_evidence
+        rows = [p for p in self._positions(await read()) if p.symbol == rec.symbol]
         if len(rows) > 1 or any(p.side is not rec.side for p in rows):
             raise ProtectionIncomplete("真实仓位方向或唯一归属不一致")
         quantity = sum(p.quantity for p in rows)
@@ -562,6 +564,23 @@ class BracketManager:
         return EntryEvidence(
             order.order_id, order.status, order.filled_quantity, quantity, order.terminal
         )
+
+    async def _entry_order(self, symbol: str, cid: str) -> ExchangeEntryOrder | None:
+        key = (symbol, cid)
+        if (known := self._terminal_entries.get(key)) is not None:
+            return known
+        order = await self.exchange.entry_order(symbol, cid)
+        if isinstance(order, ExchangeEntryOrder) and order.terminal:
+            if len(self._terminal_entries) >= _TERMINAL_ENTRIES_MAX:
+                self._terminal_entries.clear()
+            self._terminal_entries[key] = order
+        return order
+
+    def shared_positions(
+        self, *, max_wait_s: float
+    ) -> shared_reads.SharedRead[list[ExchangePosition]]:
+        """一轮保护共用的持仓读取（见 ``shared_reads``）。"""
+        return shared_reads.SharedRead(self.exchange.positions_evidence, max_wait_s=max_wait_s)
 
     async def _checkpoint(self, pid: str, before: EntryEvidence) -> None:
         if await self._evidence(pid) != before:

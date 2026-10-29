@@ -337,6 +337,12 @@ class PositionRegistry:
             finally:
                 self._symbol_owners.pop(symbol, None)
 
+    def symbol_busy(self, symbol: str) -> bool:
+        """另一个任务正占着这个币的同币锁（本任务重入不算）。"""
+        lock = self._symbol_locks.get(symbol)
+        owner = self._symbol_owners.get(symbol)
+        return lock is not None and lock.locked() and owner is not asyncio.current_task()
+
     def _load(self) -> RegistryData:
         if not self._path.is_file():
             return RegistryData()

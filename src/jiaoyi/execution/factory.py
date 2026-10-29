@@ -18,6 +18,7 @@ from jiaoyi.execution.exit_fills import ExitFills
 from jiaoyi.execution.hb_client import HttpHummingbotApi
 from jiaoyi.execution.hb_executor import (
     HOSTED_CLOSE_SLOW_ALERT_S,
+    PROTECTION_GAP_PER_POSITION_S,
     HbExecutorAdapter,
     HostedCloseMode,
 )
@@ -208,6 +209,7 @@ def build_execution(
         hb_stop_unknown_retries=hb_stop_unknown_retries,
         hosted_close_direct_when_exiting=hosted_close_direct_when_exiting,
         hosted_close_slow_alert_s=hosted_close_slow_alert_s,
+        protection_gap_per_position_s=PROTECTION_GAP_PER_POSITION_S,
         exit_fills=ExitFills(Path(data_dir) / EXIT_FILLS_FILE),
     )
     reconciler = ThreeWayReconciler(

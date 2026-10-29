@@ -243,6 +243,9 @@ async def test_execution_with_testnet_keys_is_real(tmp_path: Path, now: datetime
     assert isinstance(app.m.reconciler, ThreeWayReconciler)
     assert isinstance(app.m.alerter.inner, TelegramAlerter)  # type: ignore[attr-defined]
     assert isinstance(app.lot_rules, ExchangeInfoLotRules)
+    # 告警后台发：最后关、由它顺带关 Telegram，前面各模块关闭时的告警才发得出去
+    assert app._closers[-1] == app.m.alerter.close  # type: ignore[attr-defined]
+    assert app.m.alerter.inner.close not in app._closers  # type: ignore[attr-defined]
     await app.stop()
 
 
