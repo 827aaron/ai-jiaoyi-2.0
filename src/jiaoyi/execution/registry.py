@@ -1,20 +1,22 @@
 """执行层自己的小账本：哪些持仓是我们开的、执行器 id 是什么、当天起始权益是多少。
 
 重启后靠它认回自己的持仓和保命止损；对账员也拿它当“我们以为有什么”。
-单文件 JSON，整文件原子替换（先写临时文件再改名），不会写一半。
+单文件 JSON，整文件原子替换（先写临时文件再改名），不会写一半。已结束够久的仓移到
+``positions_archive/``（``jiaoyi.core.position_archive``），账本只留还用得上的。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -27,8 +29,12 @@ from pydantic import (
 
 from jiaoyi.contracts import OrderIntent, PositionRecord, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.core.position_archive import write_archive
 from jiaoyi.execution.exchange import WorkingType
+from jiaoyi.execution.fills import LOOKBACK as FILLS_LOOKBACK
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
+
+log = logging.getLogger(__name__)
 
 LegPurpose = Literal["fixed", "trailing", "lifeboat", "tightened"]
 """条件单腿的来源；新的收紧来源在这里加自己的取值（tightened = 反向作战卡保本收紧价，#314）。"""
@@ -310,14 +316,50 @@ class RegistryData(BaseModel):
     """按执行器 id。"""
 
 
+ARCHIVE_AFTER = timedelta(hours=48)
+"""已结束多久移出账本。至少要盖住成交回填的回看窗口（``fills.LOOKBACK``，24 小时）和
+今日已实现盈亏（曼谷 0 点起，最多 24 小时），这两处只读内存里的账本。"""
+ARCHIVE_EVERY = timedelta(hours=1)
+VOLATILE_SAVE = timedelta(seconds=5)
+"""只有观测时刻变了的写入最多隔这么久落一次盘：保护每秒一轮都会刷新这几个时刻，内存里一直是
+最新的；重启后读到旧几秒只会让移动止损按「漏看」处理，本来重启就会漏看。"""
+_VOLATILE = ("observed_at", "trailing_observed_at", "trailing_source_at")
+
+
+def _stable(dumped: dict[str, Any]) -> dict[str, Any]:
+    state = dumped.get("server_protection")
+    if not isinstance(state, dict):
+        return dumped
+    return {**dumped, "server_protection": {k: v for k, v in state.items() if k not in _VOLATILE}}
+
+
 class PositionRegistry:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        archive_after: timedelta | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        """``archive_after``：已结束多久移到归档（生产用 ``ARCHIVE_AFTER``）；None = 不归档。
+        ``clock`` 要和写进账本的时刻同一个时钟，否则会按错的年龄归档。"""
+        if archive_after is not None and archive_after < FILLS_LOOKBACK:
+            raise ValueError("archive_after 不能短于成交回填的回看窗口")
         self._path = Path(path)
         self._lock = threading.Lock()
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._symbol_owners: dict[str, asyncio.Task[object] | None] = {}
+        self._archive_after = archive_after
+        self._clock = clock
+        self._saved: dict[str, dict[str, Any]] = {}
+        self._saved_rest: dict[str, Any] | None = None
+        self._saved_at: datetime | None = None
+        self._archived_at: datetime | None = None
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
+        if self.data.positions:
+            self._saved = {pid: t.model_dump(mode="json") for pid, t in self.data.positions.items()}
+            self.archive_closed()
 
     @property
     def path(self) -> Path:
@@ -344,10 +386,69 @@ class PositionRegistry:
         return RegistryData.model_validate(json.loads(self._path.read_text(encoding="utf-8")))
 
     def save(self) -> None:
+        now = self._clock()
+        due = self._archived_at is None or now - self._archived_at >= ARCHIVE_EVERY
+        if self._archive_after is not None and due and self.archive_closed():
+            return  # 归档已经改写过账本
+        self._write(now)
+
+    def _write(self, now: datetime) -> None:
         with self._lock:
+            dumped = self.data.model_dump(mode="json")
             tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(self.data.model_dump_json(indent=2), encoding="utf-8")
+            tmp.write_text(json.dumps(dumped, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self._path)
+            self._saved = dumped["positions"]
+            self._saved_rest = {k: v for k, v in dumped.items() if k != "positions"}
+            self._saved_at = now
+
+    def _archivable(self, t: TrackedPosition, cutoff: datetime, referenced: set[str]) -> bool:
+        rec = t.record
+        return (
+            rec.status in (PositionStatus.CLOSED, PositionStatus.FAILED)
+            and rec.closed_at is not None
+            and rec.closed_at < cutoff
+            and not t.exit_cleanup_pending
+            and (t.server_protection is None or t.server_protection.stage == "done")
+            and rec.position_id not in referenced
+        )
+
+    def archive_closed(self) -> int:
+        """把已结束超过 ``archive_after`` 的仓移到归档，返回移了几笔。
+
+        清理没确认、托管保护没结束、对账员的退出 / 停止还指着的仓不移。在管持仓开仓之后平掉的仓
+        也不移：对账员核反手仓时要认出这段时间里的每一笔我方订单。归档落盘后才改写账本。"""
+        if self._archive_after is None:
+            return 0
+        now = self._clock()
+        self._archived_at = now
+        cutoff = now - self._archive_after
+        live = self.live()
+        if live:
+            cutoff = min(cutoff, min(t.record.opened_at for t in live) - timedelta(hours=1))
+        referenced = {e.position_id for e in self.data.emergency_exits.values() if e.position_id}
+        referenced |= {
+            s.position_id for s in self.data.foreign_executor_stops.values() if s.position_id
+        }
+        out = [t for t in self.data.positions.values() if self._archivable(t, cutoff, referenced)]
+        if not out:
+            return 0
+        rows = []
+        for t in out:
+            closed = t.record.closed_at
+            assert closed is not None
+            day = closed.astimezone(UTC).date().isoformat()
+            rows.append((day, t.record.position_id, t.model_dump_json()))
+        try:
+            write_archive(self._path.parent, rows)
+        except OSError:
+            log.warning("账本归档写不进去，这次不归档", exc_info=True)
+            return 0
+        gone = {t.record.position_id for t in out}
+        # 换一个新 dict，不在原 dict 上删：别处可能正在 await 中途遍历它。
+        self.data.positions = {k: v for k, v in self.data.positions.items() if k not in gone}
+        self._write(now)
+        return len(out)
 
     def get(self, position_id: str) -> TrackedPosition | None:
         return self.data.positions.get(position_id)
@@ -359,7 +460,22 @@ class PositionRegistry:
         return None
 
     def put(self, tracked: TrackedPosition) -> None:
-        self.data.positions[tracked.record.position_id] = tracked
+        pid = tracked.record.position_id
+        self.data.positions[pid] = tracked
+        old = self._saved.get(pid)
+        if old is not None and self._saved_rest is not None:
+            new = tracked.model_dump(mode="json")
+            rest = self.data.model_dump(mode="json", exclude={"positions"})
+            if rest == self._saved_rest:
+                if new == old:
+                    return
+                now = self._clock()
+                if (
+                    self._saved_at is not None
+                    and now - self._saved_at < VOLATILE_SAVE
+                    and _stable(new) == _stable(old)
+                ):
+                    return
         self.save()
 
     def live(self) -> list[TrackedPosition]:

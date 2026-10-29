@@ -152,7 +152,7 @@ mode = "off"                 # off = 不跑、零调用（默认）；replace = 
 # base_rate_days = 30        # 先验：过去 30 天涨 / 平 / 跌频率
 # call_p_min = 0.45          # 方向门槛 θ
 # call_edge_min = 0.15       # 方向门槛 δ
-# max_age_min = 75           # 最新结果多久内算可用
+# max_age_min = 75           # 最新结果多久内算可用；mode = "replace" 时要大于 2 × cadence_min + timeout_s / 60（失败一轮不重跑，等下一格），不写时自动取够用的值（cadence_min = 60 时是 123）
 # fallback = "flash"         # 不可用时：flash = 整轮总盘会的 Flash 判断恢复发布；hold = 沿用大盘台最后一版
 # publish_confirm = 2        # 滞回：新方向连续几轮一致才发布
 # publish_confirm_min = 30   # 且至少持续几分钟（其中有加跑轮时只看轮数）

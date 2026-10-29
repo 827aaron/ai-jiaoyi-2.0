@@ -312,6 +312,32 @@ def test_overview_without_main_loop_or_hb(tmp_path: Path) -> None:
     assert ov.card is None and ov.feed == [] and ov.positions == []
 
 
+def test_ledger_includes_archived_positions(tmp_path: Path) -> None:
+    from jiaoyi.core.position_archive import write_archive
+
+    old = _position(
+        position_id="pos-0009",
+        status="closed",
+        closed_at=(NOW - timedelta(days=5)).isoformat(),
+        realized_pnl_usdt=-3.0,
+    )
+    both = _position(position_id="pos-0000", status="closed", realized_pnl_usdt=1.0)
+    write_archive(
+        tmp_path,
+        [("2026-10-17", "pos-0009", json.dumps(old)), ("2026-10-17", "pos-0000", json.dumps(both))],
+    )
+    _seed(tmp_path)  # 账本里也有 pos-0000（归档写好、账本还没改写时崩溃）
+    ledger = PanelFiles(tmp_path, "Asia/Bangkok").ledger()
+    by_id = {p.position_id: p for p in ledger.positions}
+    assert set(by_id) == {"pos-0000", "pos-0001", "pos-0009"}
+    assert by_id["pos-0009"].realized_pnl_usdt == -3.0
+    assert by_id["pos-0000"].realized_pnl_usdt == 12.5  # 账本优先
+    assert ledger.notional(by_id["pos-0009"]) > 0
+    (tmp_path / "positions.json").unlink()
+    gone = PanelFiles(tmp_path, "Asia/Bangkok").ledger()  # 账本文件没了也照样读归档
+    assert sorted(p.position_id for p in gone.positions) == ["pos-0000", "pos-0009"]
+
+
 def test_halted_breaker_and_ledger_fallback(tmp_path: Path) -> None:
     _seed(tmp_path)
     (tmp_path / "risk_state.json").write_text(

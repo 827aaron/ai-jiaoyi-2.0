@@ -877,7 +877,9 @@ class MarketDeskSection(_Strict):
         default=75.0,
         ge=10.0,
         le=1440.0,
-        description="最新一轮结果多久内算「可用」；超过（或重启后没有）按 fallback 处理。",
+        description="最新一轮结果多久内算「可用」；超过（或重启后没有）按 fallback 处理。"
+        "replace 时必须大于 2 × cadence_min + timeout_s / 60（失败一轮不重跑，要等下一格）；"
+        "不写时默认 75，不够这个下限就取下限之上的整数分钟。",
     )
     fallback: Literal["flash", "hold"] = Field(
         default="flash",
@@ -977,6 +979,22 @@ class MarketDeskSection(_Strict):
                 out.append(name)
         return tuple(out)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_max_age(cls, data: Any) -> Any:
+        """没写 max_age_min 时默认 75 分钟，但不短于 :meth:`_sane` 要求的下限（cadence_min = 60
+        时默认就不够）；写了的照写的校验。"""
+        if not isinstance(data, dict) or "max_age_min" in data or data.get("mode") != "replace":
+            return data
+        fields = cls.model_fields
+        try:
+            cadence = float(data.get("cadence_min", fields["cadence_min"].default))
+            timeout = float(data.get("timeout_s", fields["timeout_s"].default))
+        except (TypeError, ValueError):
+            return data  # 交给字段校验报错
+        floor = math.floor(2 * cadence + timeout / 60) + 1
+        return {**data, "max_age_min": max(float(fields["max_age_min"].default), float(floor))}
+
     @model_validator(mode="after")
     def _sane(self) -> MarketDeskSection:
         if self.min_valid_samples > self.samples:
@@ -985,6 +1003,15 @@ class MarketDeskSection(_Strict):
             raise ValueError("offset_min 必须小于 cadence_min")
         if self.max_age_min <= self.cadence_min:
             raise ValueError("max_age_min 必须大于 cadence_min，否则两轮之间就算不可用")
+        # 失败的一轮照样占掉格子、不重跑，下一次结果最早在下一格：只要错过一轮，结果就旧到
+        # 两个 cadence 再加一轮的耗时。max_age_min 不盖住这段，失败一次发布权就切回 Flash，
+        # 下一轮成功又切回来。
+        worst = 2 * self.cadence_min + self.timeout_s / 60
+        if self.mode == "replace" and self.max_age_min <= worst:
+            raise ValueError(
+                f"max_age_min = {self.max_age_min:g} 太短：cadence_min = {self.cadence_min} 时"
+                f"失败一轮后最长要等约 {worst:g} 分钟（两轮 + 单次超时），要大于它"
+            )
         return self
 
     def daily_calls(self) -> float:

@@ -321,8 +321,8 @@ def _jev_backtest(args: argparse.Namespace) -> int:
 
 
 def _keeper_assistant_report(args: argparse.Namespace) -> int:
-    """读 data/keeper_assistant/*.jsonl 和账本 positions.json，打印两段对比：只记录时「本来会平」
-    对比实际出场；真平了的对比按原规则拿着的影子出场。"""
+    """读 data/keeper_assistant/*.jsonl 和账本 positions.json（含归档），打印两段对比：
+    只记录时「本来会平」对比实际出场；真平了的对比按原规则拿着的影子出场。"""
     from jiaoyi.keeper import assistant
     from jiaoyi.panel.files import PanelFiles
 

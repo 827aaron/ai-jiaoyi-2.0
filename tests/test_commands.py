@@ -290,6 +290,33 @@ async def test_restart_rolls_back_when_close_does_not_finish(
     assert ex.opened == ["int-0001"]
 
 
+async def test_restart_in_same_batch_runs_close_first(tmp_path: Path, now: datetime) -> None:
+    r, ex = _restart_runner(tmp_path, now, lambda: None)
+    ex.held = [_position()]
+    # 文件名排在平仓前面的重启指令
+    write_command(tmp_path, _cmd(now, "restart").model_copy(update={"id": "cmd-0001-restart"}))
+    write_command(tmp_path, _cmd(now, "close_position", position_id="pos-0001"))
+    await r.command_tick()
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == [("pos-0001", CloseReason.MANUAL)]
+    assert _result(tmp_path, "cmd-close_position-0001")["status"] == "done"
+    assert r._restart.is_set()
+
+
+async def test_close_command_rejected_while_leaving(tmp_path: Path, now: datetime) -> None:
+    r, ex = _restart_runner(tmp_path, now, lambda: None)
+    ex.held = [_position()]
+    r._leaving = True
+    write_command(tmp_path, _cmd(now, "close_position", position_id="pos-0001"))
+    write_command(tmp_path, _cmd(now, "close_all"))
+    await r.command_tick()
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == []
+    for cid in ("cmd-close_position-0001", "cmd-close_all-0001"):
+        res = _result(tmp_path, cid)
+        assert res["status"] == "rejected" and "重启" in res["detail"]
+
+
 async def test_run_returns_cleanly_on_restart(
     tmp_path: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
 ) -> None:

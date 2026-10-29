@@ -9,6 +9,7 @@ ccxt 换成 FakeExchange（记下 key 和模式）。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,7 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._direct_when_exiting is False
     assert adapter._close_slow_after_s == 120
     assert adapter._exit_fills is not None and adapter._exit_fills.path.name == "exit_fills.json"
+    assert adapter._registry._archive_after == timedelta(hours=48)  # 生产账本归档已结束的仓
     app_cfg = _cfg(
         tmp_path,
         RunMode.PAPER,

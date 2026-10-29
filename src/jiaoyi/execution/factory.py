@@ -25,7 +25,7 @@ from jiaoyi.execution.lifeboat import BinanceLifeboat
 from jiaoyi.execution.live_gate import LiveGate, LiveGateError
 from jiaoyi.execution.lot_rules import ExchangeInfoLotRules
 from jiaoyi.execution.reconciler import ThreeWayReconciler
-from jiaoyi.execution.registry import PositionRegistry
+from jiaoyi.execution.registry import ARCHIVE_AFTER, PositionRegistry
 from jiaoyi.interfaces import Alerter, DecisionLog, SecretStore
 
 CONNECTOR_BY_MODE: dict[RunMode, str] = {
@@ -164,7 +164,9 @@ def build_execution(
         rules = lot_rules.lot_rules(symbol)
         return rules.tick_size if rules is not None else None
 
-    registry = PositionRegistry(Path(data_dir) / "positions.json")
+    registry = PositionRegistry(
+        Path(data_dir) / "positions.json", archive_after=ARCHIVE_AFTER, clock=clock
+    )
     # 当前只批准 Demo 新仓托管。实盘和旧测试网不因更新代码切换出场策略。
     protection = (
         BracketManager(

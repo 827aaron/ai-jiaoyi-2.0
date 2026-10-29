@@ -299,6 +299,11 @@ class _ChaseHook(Protocol):
     async def open_chase(self, intent: OrderIntent) -> PositionRecord: ...
 
 
+@runtime_checkable
+class _CloseHook(Protocol):
+    def set_close_request(self, request: Callable[[str, CloseReason], None]) -> None: ...
+
+
 SPEND_ALERT_TITLE = "AI 花费超过本档默认日上限（不限模式，只提醒）"
 
 
@@ -498,6 +503,8 @@ class Runner:
         self._signals: OrderedDict[str, CandidateSignal] = OrderedDict()
         if isinstance(self.m.executor, _ChaseHook):
             self.m.executor.set_chase_request(self._request_chase)
+        if isinstance(self.m.executor, _CloseHook):
+            self.m.executor.set_close_request(self._request_close)
         self._closing: set[str] = set()
         self._against_pending: set[str] = set()  # 因反向信号叫了急查、管家还没给结论的持仓
         self._reviewing: set[str] = set()  # 管家正在问 Jev 的持仓：同一笔不同时问两次
@@ -1336,6 +1343,16 @@ class Runner:
                 "news_block",
             )
         )
+
+    def _request_close(self, position_id: str, reason: CloseReason) -> None:
+        """执行层自己到点要平（挂单进场的最长持仓）：走 ``close`` 去重，另起任务。"""
+        executor = self.m.executor
+        live = executor.live_positions() if isinstance(executor, _LedgerPositions) else []
+        pos = next((p for p in [*live, *self.positions] if p.position_id == position_id), None)
+        if pos is None:
+            log.warning("执行层要平 %s（%s），但持仓里找不到", position_id, reason.value)
+            return
+        self._spawn(self.close(pos, reason), Role.EXECUTOR)
 
     def _request_chase(self, intent: OrderIntent) -> None:
         """执行层：挂单没成交要追。另起任务，别在执行层巡检里拿开仓锁（全平时持锁会调巡检）。"""
@@ -3008,7 +3025,10 @@ class Runner:
         if self._last_prune is None or now - self._last_prune >= PRUNE_EVERY:
             self._last_prune = now
             inbox.prune(now)
-        for path, cmd, error in inbox.pending():
+        # 重启排在同一批的最后：重启一旦定下，后面的平仓只会被 close() 交给重启后的进程，
+        # 回执却已写「已提交平仓」。
+        batch = sorted(inbox.pending(), key=lambda p: p[1] is not None and p[1].kind == "restart")
+        for path, cmd, error in batch:
             now = self.app.clock()
             if cmd is not None and cmd.id in self._inflight:
                 continue
@@ -3081,6 +3101,8 @@ class Runner:
         self._restarting = True  # 只拦新开仓；管家、巡逻兵、对账、平仓照常跑
         async with self._open_lock:
             pass
+        # 同一批里先处理的平仓指令只是另起了任务：让它们先进 _closing，下面才会等它们做完。
+        await asyncio.sleep(0)
         deadline = asyncio.get_running_loop().time() + RESTART_WAIT_CLOSE_S
         while self._closing and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
@@ -3108,6 +3130,8 @@ class Runner:
             return "done", "已恢复开新仓"
         if cmd.kind == "restart":
             return await self._prepare_restart()
+        if cmd.kind in ("close_all", "close_position") and self._leaving:
+            return "rejected", "主程序正在重启，这次没有平仓；重启后再点（期间靠保命止损）"
         if cmd.kind == "close_all":
             # 先暂停再平：否则平的同时可能又开新仓。拿开仓锁等在途开仓做完，再读持仓
             self.app.set_paused(True, reason="面板全部平仓", command_id=cmd.id)

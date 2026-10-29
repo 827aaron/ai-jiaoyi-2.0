@@ -151,6 +151,58 @@ async def test_hold_counted_from_fill(tmp_path: Path) -> None:
     assert closed.close_reason is CloseReason.TIME_LIMIT
 
 
+async def test_hold_limit_close_goes_through_main_loop(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    asked: list[tuple[str, CloseReason]] = []
+    rig.adapter.set_close_request(lambda pid, reason: asked.append((pid, reason)))
+    it = _limit()
+    rec = await rig.adapter.open(it)
+    eid = rig.registry.get(rec.position_id).record.executor_id  # type: ignore[union-attr]
+    assert eid is not None
+    rig.t = START + timedelta(minutes=30)
+    rig.api.fill(eid, 67900.0)
+    rig.ex.set_position(rec.symbol, rec.side, rec.quantity)
+    await rig.adapter.positions()
+    rig.t = START + timedelta(minutes=30, seconds=it.time_limit_s + 1)
+    await rig.adapter.positions()
+    assert asked == [(rec.position_id, CloseReason.TIME_LIMIT)]
+    assert rig.api.stopped == []  # 执行层自己不平
+
+
+async def test_runner_dispatches_executor_close_request(tmp_path: Path, now: datetime) -> None:
+    from jiaoyi.app import App
+    from jiaoyi.core.config import load_app_config, load_risk_config
+    from jiaoyi.loop import Runner
+    from tests.test_loop import FakeExecutor, _position
+
+    class _Hooked(FakeExecutor):
+        request: Any = None
+
+        def set_close_request(self, request: Any) -> None:
+            self.request = request
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = load_app_config(root / "config" / "app.example.toml").model_copy(
+        update={"data_dir": str(tmp_path)}
+    )
+    app = App(
+        load_risk_config(root / "config" / "risk.example.toml"),
+        cfg,
+        clock=lambda: now,
+        offline=True,
+    )
+    ex = _Hooked()
+    ex.held = [_position()]
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    r.positions = list(ex.held)
+    assert ex.request is not None
+    ex.request("pos-0001", CloseReason.TIME_LIMIT)
+    ex.request("pos-nope", CloseReason.TIME_LIMIT)  # 不在持仓里：不平
+    await asyncio.gather(*r._tasks)
+    assert ex.closed == [("pos-0001", CloseReason.TIME_LIMIT)]
+
+
 class _Cards:
     def __init__(self, c: object) -> None:
         self.c = c
