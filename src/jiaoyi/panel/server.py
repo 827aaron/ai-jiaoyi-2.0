@@ -86,6 +86,7 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 RECENT_TTL_S = 10.0
+BOOK_QUOTE_WAIT_S = 1.0
 PACKAGE = Path(__file__).parent.parent
 CARD_SCORE_FIRST_S = 120.0
 """面板启动后多久第一次算方向记分（别和启动时的其他读取挤在一起）。"""
@@ -519,7 +520,10 @@ def create_app(
             book = None
             if quote_source:
                 with suppress(KlineError, TimeoutError, ValueError):
-                    book = await quote_source[0].book_quote(v.symbol)
+                    # 参考盘口慢了就这一轮不带，别让整页（平仓、现价）跟着等 REST 超时
+                    book = await asyncio.wait_for(
+                        quote_source[0].book_quote(v.symbol), BOOK_QUOTE_WAIT_S
+                    )
             return v.model_copy(
                 update={"trail": None, "stop_diagnostics": diag, "book_quote": book}
             )

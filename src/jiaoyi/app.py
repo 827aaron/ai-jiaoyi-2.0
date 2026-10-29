@@ -523,7 +523,13 @@ def _build_execution(
         ws_base = DEMO_WS_BASE if app_cfg.sim_environment == "demo" else LEGACY_TESTNET_WS_BASE
     ledger = LedgerSync(stack.adapter, RecentTrades(ex.user_trades), income, clock=clock)
     ledger.attach(
-        UserStream(ex.new_listen_key, ex.keepalive_listen_key, ledger.on_fill, ws_base=ws_base)
+        UserStream(
+            ex.new_listen_key,
+            ex.keepalive_listen_key,
+            ledger.on_fill,
+            ws_base=ws_base,
+            on_event=stack.adapter.on_stream_event,
+        )
     )
     return stack.adapter, stack.lifeboat, stack.reconciler, stack.lot_rules, ledger
 

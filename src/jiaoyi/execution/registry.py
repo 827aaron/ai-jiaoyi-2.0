@@ -210,6 +210,9 @@ class TrackedPosition(BaseModel):
     """挂单到时没成交改市价追进用的指令（8h 以上档）；None = 撤单不开。"""
     server_protection: ServerProtection | None = None
     frozen_peak_exit: FrozenPeakExit | None = None
+    stream_refine: bool = False
+    """按成交推送记平时手续费或已实现盈亏不全：净盈亏先按已知部分记，成交明细回填后再核一遍
+    并清掉。为 False 时不落盘。"""
 
     @model_serializer(mode="wrap")
     def _omit_in_flight_close_fields(
@@ -225,6 +228,8 @@ class TrackedPosition(BaseModel):
             data.pop("close_detail", None)  # 已写进平仓记录和推送
         if not self.direct_close_outcomes or ended:
             data.pop("direct_close_outcomes", None)
+        if not self.stream_refine:
+            data.pop("stream_refine", None)
         # signal_kind (per-kind open caps) is only written where it is still counted, so a
         # ledger is readable by older code unless a live position carries it; see
         # scripts/signal_kind_rollback.py.
@@ -336,6 +341,11 @@ class PositionRegistry:
                 yield
             finally:
                 self._symbol_owners.pop(symbol, None)
+
+    def symbol_busy(self, symbol: str) -> bool:
+        """同币锁此刻有人拿着（不等待，只看）。"""
+        lock = self._symbol_locks.get(symbol)
+        return lock is not None and lock.locked()
 
     def _load(self) -> RegistryData:
         if not self._path.is_file():

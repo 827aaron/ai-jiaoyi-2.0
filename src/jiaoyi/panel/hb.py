@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -70,6 +71,7 @@ class HbReader:
         self._connector = connector_name
         self._cache_s = cache_s
         self._cached: tuple[float, HbSnapshot] | None = None
+        self._refresh: asyncio.Future[HbSnapshot] | None = None
         self._stop_cached: dict[str, tuple[float, object]] = {}
 
     def update_password(self, password: str) -> None:
@@ -77,11 +79,23 @@ class HbReader:
         self._password = password
         self._http.auth = httpx.BasicAuth(self._username, password)
         self._cached = None
+        self._refresh = None
         self._stop_cached.clear()
 
     async def snapshot(self) -> HbSnapshot:
-        if self._cached and time.monotonic() - self._cached[0] < self._cache_s:
-            return self._cached[1]
+        """有缓存就马上返回它，过期了在后台刷新（同一时刻只刷一次）：hummingbot-api 慢或连不上
+        （每次最多等 ``timeout_s`` × 2）不能拖住面板的每一轮刷新，持仓页的平仓、现价不等它。
+        还没有缓存时等第一次拉完。"""
+        cached = self._cached
+        if cached and time.monotonic() - cached[0] < self._cache_s:
+            return cached[1]
+        if self._refresh is None or self._refresh.done():
+            self._refresh = asyncio.ensure_future(self._fetch_and_cache())
+        if cached is not None:
+            return cached[1]
+        return await asyncio.shield(self._refresh)
+
+    async def _fetch_and_cache(self) -> HbSnapshot:
         snap = await self._fetch()
         self._cached = (time.monotonic(), snap)
         return snap
@@ -121,6 +135,8 @@ class HbReader:
             raise _HbError(f"hummingbot-api {path} 返回了非 JSON") from e
 
     async def close(self) -> None:
+        if self._refresh is not None and not self._refresh.done():
+            self._refresh.cancel()
         await self._http.aclose()
 
     async def stop_diagnostics(self, executor_id: str | None) -> object:

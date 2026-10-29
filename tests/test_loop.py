@@ -15,7 +15,11 @@ from jiaoyi.alerting.kinds import KINDS
 from jiaoyi.app import App, read_blocked
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.config import load_app_config, load_risk_config
-from jiaoyi.execution.brackets import CloseInProgress, ProtectionIncomplete
+from jiaoyi.execution.brackets import (
+    CloseInProgress,
+    ExitCleanupPending,
+    ProtectionIncomplete,
+)
 from jiaoyi.loop import Runner
 from tests import fastloop_helpers as h
 from tests.conftest import ROOT, load_example
@@ -1205,3 +1209,134 @@ async def test_runner_keeper_assistant_reports_status_and_stops_with_the_runner(
     await r.shutdown()
     unstarted.close()
     assert r.assistant.busy == frozenset() and not r.assistant._tasks
+
+
+class _StreamExecutor(FakeExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_position_closed: Callable[[c.PositionRecord], None] | None = None
+
+
+async def test_on_position_closed_drops_the_position_without_reading_positions(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    ex = _StreamExecutor()
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    held = _position()
+    r.positions = [held]
+    assert ex.on_position_closed == r.on_position_closed
+    ex.on_position_closed(held.model_copy(update={"status": c.PositionStatus.CLOSED}))
+    assert r.positions == []
+
+
+async def test_on_position_closed_leaves_our_own_close_to_finish_attribution(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    ex = _StreamExecutor()
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    held = _position()
+    r.positions = [held]
+    r._closing.add(held.position_id)
+    ended: list[set[str]] = []
+    r._assistant_ended = lambda ids, *_: ended.append(ids)  # type: ignore[method-assign]
+    r.on_position_closed(held.model_copy(update={"status": c.PositionStatus.CLOSED}))
+    assert r.positions == [] and ended == []
+
+
+class _CleanupExecutor(FakeExecutor):
+    def __init__(self, pending: set[str], *, raise_on_open: bool = False) -> None:
+        super().__init__()
+        self.pending = pending
+        self.raise_on_open = raise_on_open
+
+    def exit_pending_symbols(self) -> set[str]:
+        return self.pending
+
+    async def open(self, intent: c.OrderIntent) -> c.PositionRecord:
+        if self.raise_on_open:
+            raise ExitCleanupPending(f"{intent.symbol} 上一笔退出清理未确认，拒绝新开")
+        return await super().open(intent)
+
+
+def _guarded(
+    app: App, now: datetime, ex: FakeExecutor, gate: FakeGate, sent: list[c.Alert]
+) -> Runner:
+    class Alerter:
+        async def send(self, alert: c.Alert) -> None:
+            sent.append(alert)
+
+    app.m = dataclasses.replace(
+        app.m,
+        executor=ex,
+        gate=gate,
+        risk=FakeRisk(True),
+        cards=FakeCards(h.card(now)),
+        alerter=Alerter(),
+    )
+    return Runner(app)
+
+
+async def test_signal_on_a_symbol_still_in_exit_cleanup_never_asks_the_gate(
+    tmp_path: Path, now: datetime
+) -> None:
+    sent: list[c.Alert] = []
+    gate = FakeGate()
+    sig = h.signal(now)
+    r = _guarded(_app(tmp_path, now), now, _CleanupExecutor({sig.symbol}), gate, sent)
+    notes: list[str] = []
+    r._guard_note = lambda outcome, summary, at: notes.append(summary)  # type: ignore[method-assign]
+    await r.handle_signal(sig)
+    assert gate.asked == 0 and sent == []
+    assert any("收尾中" in n for n in notes)
+
+
+async def test_cleanup_pending_at_open_is_a_reject_not_an_alert(
+    tmp_path: Path, now: datetime
+) -> None:
+    sent: list[c.Alert] = []
+    gate = FakeGate()
+    ex = _CleanupExecutor(set(), raise_on_open=True)
+    r = _guarded(_app(tmp_path, now), now, ex, gate, sent)
+    notes: list[str] = []
+    r._guard_note = lambda outcome, summary, at: notes.append(summary)  # type: ignore[method-assign]
+    await r.handle_signal(h.signal(now))
+    assert gate.asked == 1 and sent == [] and r.positions == []
+    assert any("退出清理未确认" in n for n in notes)
+
+
+class _ClosedMeanwhile(FakeExecutor):
+    """平仓调用途中交易所的腿成交、推送先记平，调用本身却因 hummingbot-api 超时报错。"""
+
+    def live_positions(self) -> list[c.PositionRecord]:
+        return self.held
+
+    async def close(self, position_id: str, reason: CloseReason) -> None:
+        self.held = []
+        raise RuntimeError("hummingbot-api 不可达")
+
+
+async def test_close_error_after_the_ledger_already_closed_is_not_a_failure(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    sent: list[c.Alert] = []
+
+    class Alerter:
+        async def send(self, alert: c.Alert) -> None:
+            sent.append(alert)
+
+    ex = _ClosedMeanwhile()
+    app.m = dataclasses.replace(app.m, executor=ex, alerter=Alerter())
+    r = Runner(app)
+    held = _position()
+    ex.held = [held]
+    r.positions = [held]
+    ended: list[set[str]] = []
+    r._assistant_ended = lambda ids, *_: ended.append(ids)  # type: ignore[method-assign]
+    await r.close(held, CloseReason.KEEPER)
+    assert r.positions == [] and ended == [{held.position_id}]
+    assert not any("平仓失败" in a.title for a in sent)
