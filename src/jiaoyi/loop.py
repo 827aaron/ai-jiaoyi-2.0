@@ -64,7 +64,7 @@ from jiaoyi.core import close_sources, paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.core.recorder import RoleRecorder
-from jiaoyi.execution.brackets import CloseInProgress
+from jiaoyi.execution.brackets import CloseInProgress, ExitCleanupPending
 from jiaoyi.execution.income_daily import INCOME_REFRESH_S
 from jiaoyi.execution.mainnet_shadow import SHADOW_EVERY_S
 from jiaoyi.gate.jev import JevDecisionModel
@@ -218,6 +218,11 @@ class _TightensStop(Protocol):
         allow_close: bool,
         label: str,
     ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class _ExitPending(Protocol):
+    def exit_pending_symbols(self) -> set[str]: ...
 
 
 @runtime_checkable
@@ -930,6 +935,16 @@ class Runner:
         await self.refresh_positions()
         return list(self.positions)
 
+    def _exit_pending_symbols(self) -> set[str]:
+        ex = self.m.executor
+        if not isinstance(ex, _ExitPending):
+            return set()
+        try:
+            return ex.exit_pending_symbols()
+        except Exception:
+            log.exception("读收尾中的币失败，交给执行层兜底")
+            return set()
+
     def _ledger_positions(self) -> list[PositionRecord]:
         """账本里此刻的持仓（含正在开 / 正在平），读不到才用上一轮刷新的列表。"""
         ex = self.m.executor
@@ -1473,6 +1488,10 @@ class Runner:
                     output={"approved": False, "reasons": [miss], "detail": {"by": "entry_zone"}},
                 )
             return
+        if signal.symbol in self._exit_pending_symbols():
+            # 同币上一笔刚平、收尾还没核完：执行层反正不开，连 Jev 都不问
+            self._guard_note(Outcome.REJECT, f"{signal.symbol} 同币上一笔收尾中，先不开新仓", now)
+            return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:
             if self.app.paused is not None or self._restarting:
@@ -1508,6 +1527,10 @@ class Runner:
             intent = verdict.intent
             try:
                 pos = await self.m.executor.open(intent)
+            except ExitCleanupPending as e:
+                # 拍板期间同币刚平、收尾没核完：不是下单失败
+                self._guard_note(Outcome.REJECT, str(e), self.app.clock())
+                return
             except Exception as e:
                 log.exception("开仓失败")
                 await self.app._alert(
@@ -1765,6 +1788,16 @@ class Runner:
         self._paper_unseen_logged = {k for k in self._paper_unseen_logged if k[0] in live}
         self._paper_stop_retry()
 
+    def _closed_meanwhile(self, pos: PositionRecord) -> bool:
+        """账本里这笔已不在途（平了）；读不到账本按没平算。"""
+        ex = self.m.executor
+        if not isinstance(ex, _LedgerPositions):
+            return False
+        try:
+            return all(p.position_id != pos.position_id for p in ex.live_positions())
+        except Exception:
+            return False
+
     def on_position_closed(self, rec: PositionRecord) -> None:
         """执行器按成交推送记平了一笔：马上移出持仓列表，不等下一轮读持仓（那要等 HB / REST）。"""
         previous = {p.position_id: p for p in self.positions}
@@ -1863,6 +1896,14 @@ class Runner:
             if not isinstance(executor, _LedgerPositions):
                 return
         except Exception as e:
+            if self._closed_meanwhile(pos):
+                # 执行器报错，但账本里这笔已经平了（交易所的腿成交、推送先记平）：不是平仓失败
+                log.warning("%s 平仓调用出错（%s），但账本已记平", pos.symbol, e)
+                self._closing.discard(pos.position_id)
+                self.positions = [p for p in self.positions if p.position_id != pos.position_id]
+                self._reconcile_soon()
+                self._assistant_ended({pos.position_id}, [], {pos.position_id: pos})
+                return
             log.exception("平仓失败")
             await self.app._alert(
                 AlertLevel.CRITICAL, f"{pos.symbol} 平仓失败", str(e)[:200], "order_failed"

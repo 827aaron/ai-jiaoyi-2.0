@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -22,8 +23,14 @@ from jiaoyi.alerting.stub import StubAlerter
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.brackets import BracketManager
-from jiaoyi.execution.exchange import ExchangeBracket, ExchangeError, ExchangePosition
+from jiaoyi.execution.exchange import (
+    ExchangeBracket,
+    ExchangeError,
+    ExchangePosition,
+    IdentifiedCloseOrder,
+)
 from jiaoyi.execution.exit_fills import ExitFills
+from jiaoyi.execution.fills import TradeFill
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.lifeboat import BinanceLifeboat
@@ -211,9 +218,19 @@ class SlowVenue:
         return [key for action, key in self.calls if action == what]
 
 
-def build(tmp_path: Path, data: dict[str, Any] | None = None):
-    registry = PositionRegistry(tmp_path / "positions.json")
-    registry.put(TrackedPosition.model_validate(data or ledger()))
+def build_on(tmp_path: Path, *, registry: PositionRegistry) -> HbExecutorAdapter:
+    return build(tmp_path, registry=registry)[2]
+
+
+def build(
+    tmp_path: Path,
+    data: dict[str, Any] | None = None,
+    *,
+    registry: PositionRegistry | None = None,
+):
+    if registry is None:
+        registry = PositionRegistry(tmp_path / "positions.json")
+        registry.put(TrackedPosition.model_validate(data or ledger()))
     venue = SlowVenue()
     manager = BracketManager(
         venue,  # type: ignore[arg-type]
@@ -470,7 +487,115 @@ async def test_entry_fee_unknown_still_closes_and_asks_backfill_to_refine(tmp_pa
     rec = registry.get(PID).record
     assert rec.status is PositionStatus.CLOSED
     assert rec.realized_pnl_usdt == pytest.approx(GROSS - EXIT_FEE, abs=1e-6)
-    assert PID in adapter._stream_refine
+    # 落盘：重启之后回填照样会再核
+    assert PositionRegistry(tmp_path / "positions.json").get(PID).stream_refine is True
+
+    async def trades(symbol: str, since: datetime) -> list[TradeFill]:
+        return [
+            TradeFill(
+                datetime(2026, 10, 29, 21, 47, 27, tzinfo=UTC),
+                "904770017",
+                "sell",
+                float(ENTRY),
+                QTY,
+                ENTRY_FEE,
+                0.0,
+            ),
+            TradeFill(
+                datetime(2026, 10, 29, 22, 11, 55, 80000, tzinfo=UTC),
+                CHILD,
+                "buy",
+                float(EXIT),
+                QTY,
+                EXIT_FEE,
+                GROSS,
+            ),
+        ]
+
+    restarted = build_on(tmp_path, registry=PositionRegistry(tmp_path / "positions.json"))
+    assert await restarted.backfill_fills(trades) == 1
+    tracked = PositionRegistry(tmp_path / "positions.json").get(PID)
+    assert tracked.stream_refine is False
+    assert tracked.record.realized_pnl_usdt == pytest.approx(98.96295767, abs=1e-6)
+    assert await restarted.backfill_fills(trades) == 0  # 只再核一次
+
+
+async def test_complete_fees_are_not_marked_for_refine(tmp_path: Path) -> None:
+    registry, _, adapter, _, _ = build(tmp_path)
+    for msg in (algo(), trade(), account()):
+        adapter.on_stream_event(msg)
+    assert registry.get(PID).stream_refine is False
+    assert "stream_refine" not in (tmp_path / "positions.json").read_text()
+
+
+async def test_cleanup_waits_for_an_unverified_direct_close_order(tmp_path: Path) -> None:
+    data = ledger()
+    data.update(
+        direct_close_pending=True,
+        direct_close_client_order_id="dc-pos-44fb94e7e407-1",
+        direct_close_generation=1,
+        direct_close_quantity=QTY,
+        direct_close_order_status="SUBMIT_PENDING",
+    )
+    registry, venue, adapter, _, _ = build(tmp_path, data)
+    for msg in (algo(), trade(), account()):
+        adapter.on_stream_event(msg)
+    assert registry.get(PID).record.status is PositionStatus.CLOSED
+    ok = AsyncMock(return_value=True)
+    adapter.entry_finished = ok  # type: ignore[method-assign]
+    adapter._hb_exit_finished = ok  # type: ignore[method-assign]
+    adapter._protection.flat_cleanup = ok  # type: ignore[method-assign]
+    venue.down = False
+    assert await adapter._finish_exit_cleanup(PID) is False  # 直连单结果未明
+    assert registry.get(PID).exit_cleanup_pending is True
+    assert adapter.exit_pending_symbols() == {SYMBOL}
+
+    async def close_order(symbol: str, cid: str) -> IdentifiedCloseOrder:
+        return IdentifiedCloseOrder(
+            symbol=SYMBOL,
+            client_order_id=cid,
+            order_id="904783700",
+            close_side="buy",
+            quantity=QTY,
+            filled_quantity=0.0,
+            remaining_quantity=QTY,
+            average_price=None,
+            status="EXPIRED",
+            position_side="BOTH",
+            reduce_only=True,
+            is_terminal=True,
+        )
+
+    venue.close_order = close_order  # type: ignore[attr-defined]
+    assert await adapter._finish_exit_cleanup(PID) is True
+    assert registry.get(PID).exit_cleanup_pending is False
+    assert adapter.exit_pending_symbols() == set()
+
+
+async def test_cancel_after_flat_leaves_legs_to_cleanup_while_the_symbol_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    registry, venue, adapter, _, _ = build(tmp_path)
+    venue.down = False
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def rearm() -> None:
+        async with registry.symbol_lock(SYMBOL):
+            held.set()
+            await release.wait()
+
+    task = asyncio.create_task(rearm())
+    await held.wait()
+    for msg in (algo(), trade(), account()):
+        adapter.on_stream_event(msg)
+    await settle()
+    assert registry.get(PID).record.status is PositionStatus.CLOSED
+    assert venue.did("cancel") == []
+    assert not adapter._stream_tasks  # 没在等锁：直接让给收尾
+    release.set()
+    await task
+    await adapter._protection.cancel_after_flat(PID)
+    assert venue.did("cancel") == [LB]
 
 
 def test_stream_book_ignores_stale_order_updates() -> None:

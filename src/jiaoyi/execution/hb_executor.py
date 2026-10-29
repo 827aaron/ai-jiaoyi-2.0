@@ -40,6 +40,7 @@ from jiaoyi.execution.brackets import (
     AnchorBookSpike,
     BracketManager,
     CloseInProgress,
+    ExitCleanupPending,
     ProtectionIncomplete,
     describe_error,
     live_leg,
@@ -157,6 +158,10 @@ _NOT_FILLED_CN = {
 
 class SymbolAlreadyHeld(RuntimeError):
     """同一个币已有在管持仓，执行层拒绝再开。"""
+
+
+class _CleanupHeld(SymbolAlreadyHeld, ExitCleanupPending):
+    """同币上一笔收尾未核完 / 对账员退出在途。"""
 
 
 _UNKNOWN_EXECUTOR_ROUNDS_BEFORE_SETTLE = 2
@@ -493,8 +498,6 @@ class HbExecutorAdapter:
         """(仓, 订单号 / flat:订单号)：推送对不上号或缺零仓时，每张单只按 REST 补查一次。"""
         self._stream_closed: set[str] = set()
         """本进程按成交推送记平的仓：在途的旧流程不能把它改回平仓中。"""
-        self._stream_refine: set[str] = set()
-        """按推送记平、但手续费不全（开仓手续费不知道或不是 USDT）的仓：成交明细回填再核一遍。"""
         self._stream_tasks: set[asyncio.Task[None]] = set()
         self.on_position_closed: Callable[[PositionRecord], None] | None = None
         """主循环接上：按成交推送记平一笔仓后马上调（同步，不等下一轮读持仓）。"""
@@ -578,9 +581,9 @@ class HbExecutorAdapter:
             t.record.symbol == intent.symbol and t.exit_cleanup_pending
             for t in self._registry.data.positions.values()
         ):
-            raise SymbolAlreadyHeld(f"{intent.symbol} 上一笔退出清理未确认，拒绝新开")
+            raise _CleanupHeld(f"{intent.symbol} 上一笔退出清理未确认，拒绝新开")
         if intent.symbol in self._registry.data.emergency_exits:
-            raise SymbolAlreadyHeld(f"{intent.symbol} 对账员的无主/反手仓平仓尚未确认，拒绝新开")
+            raise _CleanupHeld(f"{intent.symbol} 对账员的无主/反手仓平仓尚未确认，拒绝新开")
         if self._protection is not None:
             await self._protection.preflight(intent.symbol)
         now = self._clock()
@@ -1886,6 +1889,12 @@ class HbExecutorAdapter:
                 or await self._held_quantity(rec.symbol) != 0
             ):
                 return False
+            if tracked.direct_close_pending:
+                # 我方的只减仓直连单结果未明：查到终态前不算收尾完，同币不能新开
+                order = await self._recover_direct_order(tracked)
+                if order is None or order.is_terminal is not True:
+                    return False
+                tracked = self._registry.get(position_id) or tracked
             if not await self._hb_exit_finished(tracked):
                 if rec.executor_id is None or not await self._stop_hb_keep_position(position_id):
                     return False
@@ -2037,8 +2046,7 @@ class HbExecutorAdapter:
         exit_fee, entry_fee = fills.fee_usdt, self._entry_fee(tracked)
         fees = (exit_fee or 0.0) + (entry_fee or 0.0)
         pnl = gross - fees if gross is not None else None
-        if exit_fee is None or entry_fee is None or fills.realized is None or price is None:
-            self._stream_refine.add(pid)
+        refine = exit_fee is None or entry_fee is None or fills.realized is None or price is None
         filled_at = ms_time(fills.last_fill_ms) if fills.last_fill_ms else None
         now = self._clock()
         self._stream_closed.add(pid)
@@ -2057,6 +2065,7 @@ class HbExecutorAdapter:
                 "record": record,
                 "exit_cleanup_pending": True,
                 "requested_close": tracked.requested_close or reason,
+                "stream_refine": refine,
             }
         )
         self._registry.put(closed)  # 一次落盘：账本整份重写，别为一笔平仓写好几遍
@@ -2089,7 +2098,7 @@ class HbExecutorAdapter:
                 "reason": reason.value,
                 "stream": True,
                 "order_id": fills.order_id,
-                "fees_known": pid not in self._stream_refine,
+                "fees_known": not refine,
                 "filled_at": filled_at.isoformat() if filled_at is not None else None,
                 "fill_to_closed_ms": lag_ms,
             }
@@ -2919,6 +2928,12 @@ class HbExecutorAdapter:
         """按同一份风控员指令下市价单追进（主循环复核过才调）；账本里另记一笔，指令号带 -chase。"""
         return await self._open(intent, chase=True)
 
+    def exit_pending_symbols(self) -> set[str]:
+        """同币不能新开的币：上一笔平了但收尾没核完，或对账员的退出在途（同 ``_open_locked``）。"""
+        data = self._registry.data
+        pending = {t.record.symbol for t in data.positions.values() if t.exit_cleanup_pending}
+        return pending | set(data.emergency_exits)
+
     def live_positions(self) -> list[PositionRecord]:
         """账本里此刻还没结束的持仓（开仓中 / 持有中 / 平仓中），不查 hummingbot，马上返回。"""
         return [t.record for t in self._registry.live()]
@@ -3365,9 +3380,7 @@ class HbExecutorAdapter:
                 continue
             need_entry = rec.intended_price is None
             need_exit = rec.status is PositionStatus.CLOSED and (
-                rec.exit_price is None
-                or rec.realized_pnl_usdt is None
-                or rec.position_id in self._stream_refine
+                rec.exit_price is None or rec.realized_pnl_usdt is None or tracked.stream_refine
             )
             if not (need_entry or need_exit) or (rec.closed_at or now) < now - LOOKBACK:
                 continue
@@ -3386,9 +3399,7 @@ class HbExecutorAdapter:
                     continue
                 need_entry = rec.intended_price is None
                 need_exit = rec.status is PositionStatus.CLOSED and (
-                    rec.exit_price is None
-                    or rec.realized_pnl_usdt is None
-                    or rec.position_id in self._stream_refine
+                    rec.exit_price is None or rec.realized_pnl_usdt is None or tracked.stream_refine
                 )
                 entry = entry_fill(rec, rows)
                 if entry is None:
@@ -3406,8 +3417,10 @@ class HbExecutorAdapter:
                         take_profit_price=tp_price(tracked, entry.price),
                     )
                 exit_ = exit_fill(rec, rows, entry) if need_exit else None
-                if exit_ is not None:
-                    self._stream_refine.discard(rec.position_id)  # 只再核一次，手续费币种不论
+                if exit_ is not None and tracked.stream_refine:
+                    # 只再核一次，手续费币种不论
+                    tracked = tracked.model_copy(update={"stream_refine": False})
+                    self._registry.put(tracked)
                 lifeboat_hit = exit_ is not None and _lifeboat_hit(rec, exit_.price)
                 if exit_ is not None and self._exit_fills is not None:
                     self._exit_fills.record(rec.position_id, exit_.last, "trades")

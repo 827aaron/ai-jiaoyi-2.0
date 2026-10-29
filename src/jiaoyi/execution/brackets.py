@@ -109,6 +109,10 @@ class ProtectionIncomplete(ExchangeError):
         """``stop_first`` 下只差保命单（被拒或提交未知），已确认止损在挂；可交给未托管宽限。"""
 
 
+class ExitCleanupPending(RuntimeError):
+    """同币上一笔仓已平但收尾还没核完（或对账员的退出在途），执行层拒绝新开。不是下单失败。"""
+
+
 class CloseInProgress(ProtectionIncomplete):
     """The close was accepted and an exit is already working (a reduce-only order, an HB stop or
     a triggered leg); protection stays and the background tick finishes it. Not a failure."""
@@ -1285,13 +1289,19 @@ class BracketManager:
     async def cancel_after_flat(self, pid: str) -> None:
         """成交推送已证实净仓为 0（``stream_close``）：马上撤还明确在挂的腿，不等同币锁、不先读
         持仓。撤不掉的抛出，留给 ``flat_cleanup`` 照常核验后再撤。"""
-        tracked, state = self._current(pid)
-        try:
-            for leg in state.legs:
-                if _live(leg):
-                    await self._cancel(pid, leg.client_order_id)
-        finally:
-            await self._flush_notes(pid, tracked.record.symbol)
+        tracked, _ = self._current(pid)
+        symbol = tracked.record.symbol
+        if self.registry.symbol_busy(symbol):
+            # 同币锁有人拿着（换代、准备退出）：不跟它抢着撤，交给持锁的 flat_cleanup
+            log.info("%s 同币锁在用，推送平仓后的撤腿留给收尾 %s", symbol, pid)
+            return
+        async with self.registry.symbol_lock(symbol):
+            try:
+                for leg in self._current(pid)[1].legs:
+                    if _live(leg):
+                        await self._cancel(pid, leg.client_order_id)
+            finally:
+                await self._flush_notes(pid, symbol)
 
     async def prepare_exit(self, pid: str) -> bool:
         tracked, _ = self._current(pid)
