@@ -1225,3 +1225,19 @@ async def test_on_position_closed_drops_the_position_without_reading_positions(
     assert ex.on_position_closed == r.on_position_closed
     ex.on_position_closed(held.model_copy(update={"status": c.PositionStatus.CLOSED}))
     assert r.positions == []
+
+
+async def test_on_position_closed_leaves_our_own_close_to_finish_attribution(
+    tmp_path: Path, now: datetime
+) -> None:
+    app = _app(tmp_path, now)
+    ex = _StreamExecutor()
+    app.m = dataclasses.replace(app.m, executor=ex)
+    r = Runner(app)
+    held = _position()
+    r.positions = [held]
+    r._closing.add(held.position_id)
+    ended: list[set[str]] = []
+    r._assistant_ended = lambda ids, *_: ended.append(ids)  # type: ignore[method-assign]
+    r.on_position_closed(held.model_copy(update={"status": c.PositionStatus.CLOSED}))
+    assert r.positions == [] and ended == []

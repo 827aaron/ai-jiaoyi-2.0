@@ -1771,6 +1771,8 @@ class Runner:
         if rec.position_id not in previous:
             return
         self.positions = [p for p in self.positions if p.position_id != rec.position_id]
+        if rec.position_id in self._closing:
+            return  # 我方的平仓还在返回途中：记完平仓来源后由 close 收尾（管家助手认领要先有来源）
         self._reconcile_soon()
         self._assistant_ended({rec.position_id}, [rec], previous)
 

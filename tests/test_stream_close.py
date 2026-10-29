@@ -199,6 +199,10 @@ class SlowVenue:
     async def close_positions_evidence(self) -> list[ExchangePosition]:
         return await self.positions_evidence()
 
+    async def place_close(self, symbol, close_side, quantity, client_order_id):
+        self._gate("direct", client_order_id)
+        return None
+
     async def entry_order(self, symbol: str, client_order_id: str):
         self._gate("entry_order", client_order_id)
         raise AssertionError("not reached while down")
@@ -543,3 +547,30 @@ async def test_hb_api_down_does_not_block_the_stream_close(tmp_path: Path) -> No
     await adapter.protection_tick()  # 收尾照旧在后台重试，不改已记的平仓
     assert registry.get(PID).record.status is PositionStatus.CLOSED
     assert registry.get(PID).exit_cleanup_pending is True
+
+
+async def test_close_in_flight_when_the_stream_closes_reports_success(tmp_path: Path) -> None:
+    registry, _, adapter, _, _ = build(tmp_path)
+
+    async def stream_closes_meanwhile(*args: Any, **kwargs: Any) -> bool:
+        for msg in (algo(), trade(), account()):
+            adapter.on_stream_event(msg)
+        return False  # 那一轮的 REST 都超时了
+
+    adapter._close_directly_locked = stream_closes_meanwhile  # type: ignore[method-assign]
+    assert await adapter._close_directly(registry.get(PID), CloseReason.KEEPER, None) is True
+
+
+async def test_direct_close_submit_with_a_stale_copy_neither_sends_nor_overwrites(
+    tmp_path: Path,
+) -> None:
+    registry, venue, adapter, _, _ = build(tmp_path)
+    stale = registry.get(PID)
+    for msg in (algo(), trade(), account()):
+        adapter.on_stream_event(msg)
+    assert await adapter._submit_direct_close(stale, QTY) is None
+    assert venue.did("direct") == []
+    tracked = registry.get(PID)
+    assert tracked.record.status is PositionStatus.CLOSED
+    assert tracked.exit_cleanup_pending is True
+    assert tracked.direct_close_generation == 0

@@ -1434,7 +1434,11 @@ class HbExecutorAdapter:
             current = self._registry.get(tracked.record.position_id) or tracked
             if current.record.status is PositionStatus.CLOSED:
                 return True
-            return await self._close_directly_locked(current, reason, via_hb, title=title)
+            if await self._close_directly_locked(current, reason, via_hb, title=title):
+                return True
+            latest = self._registry.get(tracked.record.position_id)
+            # 途中已按成交推送记平：仓平了，余下收尾交给后台保护轮，不报平仓失败
+            return latest is not None and latest.record.status is PositionStatus.CLOSED
 
     async def _close_directly_locked(
         self,
@@ -1498,7 +1502,10 @@ class HbExecutorAdapter:
         """按新鲜余仓提交下一代只减仓市价单；CID 与数量先落盘，结果未知不重发。
 
         返回已核对身份的订单（可能尚未终态），被拒、未知或无法核对返回 None。"""
+        tracked = self._registry.get(tracked.record.position_id) or tracked
         rec = tracked.record
+        if rec.status is PositionStatus.CLOSED:
+            return None  # 读余仓期间已按成交推送记平：不再下单，也不用旧副本盖回账本
         place = getattr(self._exchange, "place_close", None)
         if place is None:
             return None  # 缺身份可恢复的能力，不能偷偷降级成无 CID 下单
@@ -2642,6 +2649,8 @@ class HbExecutorAdapter:
             result = await manager.sync(rec.position_id)
         except Exception as error:
             current = self._registry.get(rec.position_id) or tracked
+            if current.record.status is PositionStatus.CLOSED:
+                return current  # 同步途中已按成交推送记平，收尾流程接着做
             state = current.server_protection
             if state is not None and state.stage == "exiting" and state.exit_reason is not None:
                 # 另一条腿已触发：没查清的腿只影响退出核验（prepare_exit 仍会等它），
@@ -3397,6 +3406,8 @@ class HbExecutorAdapter:
                         take_profit_price=tp_price(tracked, entry.price),
                     )
                 exit_ = exit_fill(rec, rows, entry) if need_exit else None
+                if exit_ is not None:
+                    self._stream_refine.discard(rec.position_id)  # 只再核一次，手续费币种不论
                 lifeboat_hit = exit_ is not None and _lifeboat_hit(rec, exit_.price)
                 if exit_ is not None and self._exit_fills is not None:
                     self._exit_fills.record(rec.position_id, exit_.last, "trades")
@@ -3407,7 +3418,6 @@ class HbExecutorAdapter:
                     if entry.commission_usdt is not None and exit_.commission_usdt is not None:
                         fees = entry.commission_usdt + exit_.commission_usdt
                         changes.update(fees_usdt=fees, realized_pnl_usdt=exit_.realized_pnl - fees)
-                        self._stream_refine.discard(rec.position_id)
                     else:
                         log.info(
                             "%s 手续费不是 USDT 计价（BNB 抵扣等），手续费沿用执行器报的",
