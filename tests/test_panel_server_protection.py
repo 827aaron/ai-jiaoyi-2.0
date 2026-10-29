@@ -148,7 +148,7 @@ def test_exiting_triggered_leg_and_late_trigger_on_old_generation(tmp_path: Path
     legs = _legs(v)
     assert legs["stop_loss"].state == "triggered"  # 旧一代的触发不被新一代盖掉
     assert legs["stop_loss"].trigger_price == 66_500.0
-    assert legs["take_profit"].state == "cancelled"
+    assert "take_profit" not in legs  # 旧版本的止盈腿已撤：不再显示
     assert v.protection.stage == "exiting"
 
 
@@ -190,7 +190,7 @@ def test_trailing_leg_state_and_missing_legs(tmp_path: Path) -> None:
     _, v = _view(tmp_path, sp)
     legs = _legs(v)
     assert legs["stop_loss"].purpose == "trailing" and legs["stop_loss"].trigger_price == 67_200.0
-    assert legs["take_profit"].state == "none"
+    assert "take_profit" not in legs  # 不挂止盈单：没有止盈腿就不显示这一行
     assert v.protection.trailing_activated and v.protection.trailing_stop_price == 67_200.0
 
 

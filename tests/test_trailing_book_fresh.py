@@ -191,9 +191,9 @@ async def test_book_alert_has_its_own_key_and_does_not_hide_real_protection_fail
     assert book_alert.dedup_key == "server_trailing_book:pos-1"
     assert "同环境执行盘口证据未知" in book_alert.body
     h.book_error = None
-    # 冷却期内紧接着出真问题：止盈腿查无（不在回执宽限内）。它必须用自己的键推出去。
-    tp = next(cid for cid in h.exchange.orders if cid.startswith("br-tp-"))
-    h.exchange.hidden.add(tp)
+    # 冷却期内紧接着出真问题：保命单查无（不在回执宽限内）。它必须用自己的键推出去。
+    lb = next(cid for cid in h.exchange.orders if cid.startswith("lb-"))
+    h.exchange.hidden.add(lb)
     await h.adapter.protection_tick()
     real = [a for a in h.alerter.sent if a.title == "托管保护本轮未确认"]
     assert len(real) == 1 and real[0].level is AlertLevel.CRITICAL

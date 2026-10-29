@@ -66,13 +66,13 @@ class GraceHarness(AdapterHarness):
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-@pytest.mark.parametrize("prefix", ["lb-", "br-sl-", "br-tp-"])
-async def test_leg_briefly_unreadable_after_ack_arms_all_three_legs(
+@pytest.mark.parametrize("prefix", ["lb-", "br-sl-"])
+async def test_leg_briefly_unreadable_after_ack_arms_every_leg(
     tmp_path: Path, side: Side, prefix: str
 ):
     h = GraceHarness(tmp_path, side, grace=3.0, prefix=prefix)
     await h.adapter.protection_tick()
-    assert sorted(c[:3] for c in h.creates()) == ["br-", "br-", "lb-"]  # 每腿只提交一次。
+    assert sorted(c[:3] for c in h.creates()) == ["br-", "lb-"]  # 每腿只提交一次。
     assert not h.cancels() and not h.closing() and not h.exchange.direct
     state = h.state()
     assert state.stage == "armed" and state.ever_armed and state.last_error is None
@@ -142,4 +142,4 @@ async def test_leg_that_was_read_back_once_gets_no_grace_when_it_disappears(
     h.visible_after = 10**6
     with pytest.raises(ProtectionIncomplete, match="暂时不可查"):
         await h.manager.sync("pos-1")
-    assert not h.slept and len(h.creates()) == 3
+    assert not h.slept and len(h.creates()) == 2

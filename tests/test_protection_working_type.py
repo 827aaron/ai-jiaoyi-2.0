@@ -1,4 +1,6 @@
-"""止损 / 止盈触发价格源可配：默认原行为，按腿持久化，改设置只影响之后新建的腿。"""
+"""止损触发价格源可配：默认原行为，按腿持久化，改设置只影响之后新建的腿。
+
+止盈不挂单，``protection_take_profit_working_type`` 只为旧配置照常能读。"""
 
 from __future__ import annotations
 
@@ -25,9 +27,8 @@ from tests.test_server_protection_regression import Harness, reads, trailing_inp
 MARK, LAST = "MARK_PRICE", "CONTRACT_PRICE"
 
 
-def _set(h: Harness, stop: str, take_profit: str) -> None:
+def _set(h: Harness, stop: str) -> None:
     h.manager.stop_working_type = stop  # type: ignore[assignment]
-    h.manager.take_profit_working_type = take_profit  # type: ignore[assignment]
 
 
 def _types(h: Harness) -> dict[str, str]:
@@ -151,22 +152,20 @@ async def test_unknown_working_type_is_rejected_before_any_request() -> None:
 async def test_default_manager_keeps_todays_types(tmp_path: Path, side: Side) -> None:
     h = Harness(tmp_path, side)
     assert await h.manager.sync("pos-1") == "armed"
-    assert _types(h) == {"lb": MARK, "br-sl": LAST, "br-tp": LAST}
+    assert _types(h) == {"lb": MARK, "br-sl": LAST}
     persisted = {leg.client_order_id[:5]: leg.working_type for leg in h.state().legs}
-    assert persisted == {"lb-po": MARK, "br-sl": LAST, "br-tp": LAST}
+    assert persisted == {"lb-po": MARK, "br-sl": LAST}
 
 
-@pytest.mark.parametrize("stop,take_profit", [(MARK, LAST), (LAST, MARK), (MARK, MARK)])
-async def test_configured_types_are_submitted_and_persisted(
-    tmp_path: Path, stop: str, take_profit: str
-) -> None:
+@pytest.mark.parametrize("stop", [MARK, LAST])
+async def test_configured_types_are_submitted_and_persisted(tmp_path: Path, stop: str) -> None:
     h = Harness(tmp_path, Side.LONG)
-    _set(h, stop, take_profit)
+    _set(h, stop)
     assert await h.manager.sync("pos-1") == "armed"
-    assert _types(h) == {"lb": MARK, "br-sl": stop, "br-tp": take_profit}
+    assert _types(h) == {"lb": MARK, "br-sl": stop}
     h.restart()  # 重启回到默认设置：已挂的腿按记下的核对，不算不符。
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and not h.cancels()
+    assert len(h.creates()) == 2 and not h.cancels()
 
 
 @pytest.mark.parametrize("before,after", [(LAST, MARK), (MARK, LAST)])
@@ -174,30 +173,30 @@ async def test_restart_with_changed_setting_keeps_existing_legs(
     tmp_path: Path, before: str, after: str
 ) -> None:
     h = Harness(tmp_path, Side.LONG)
-    _set(h, before, before)
+    _set(h, before)
     assert await h.manager.sync("pos-1") == "armed"
     h.restart()
-    _set(h, after, after)
+    _set(h, after)
     for _ in range(2):
         assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and not h.cancels()
+    assert len(h.creates()) == 2 and not h.cancels()
     assert h.state().last_error is None
-    assert _types(h) == {"lb": MARK, "br-sl": before, "br-tp": before}
+    assert _types(h) == {"lb": MARK, "br-sl": before}
     assert {leg.working_type for leg in h.state().legs if leg.purpose != "lifeboat"} == {before}
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
 async def test_order_disagreeing_with_persisted_leg_is_rejected(tmp_path: Path, side: Side) -> None:
     h = Harness(tmp_path, side)
-    _set(h, MARK, MARK)
+    _set(h, MARK)
     await h.manager.sync("pos-1")
     sl = next(cid for cid in h.exchange.orders if cid.startswith("br-sl-"))
     h.exchange.orders[sl] = replace(h.exchange.orders[sl], working_type=LAST)
     h.restart()
-    _set(h, LAST, LAST)  # 当前设置恰好和交易所上的值一样，也不能代替腿自己记下的值。
+    _set(h, LAST)  # 当前设置恰好和交易所上的值一样，也不能代替腿自己记下的值。
     with pytest.raises(ProtectionIncomplete):
         await h.manager.sync("pos-1")
-    assert len(h.creates()) == 3 and not h.cancels()
+    assert len(h.creates()) == 2 and not h.cancels()
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -206,15 +205,14 @@ async def test_trailing_generation_uses_current_setting_and_cancels_old_after(
     tmp_path: Path, side: Side, before: str, after: str
 ) -> None:
     h = Harness(tmp_path, side)
-    _set(h, before, before)
+    _set(h, before)
     bid, ask = (102.0, 103.0) if side is Side.LONG else (97.0, 98.0)
     rec, _, basis, book = trailing_inputs(tmp_path / "math", side, bid, ask)
     h.registry.put(h.registry.get("pos-1").model_copy(update={"record": rec}))
     assert await h.manager.sync("pos-1") == "armed"
     old_sl = next(cid for cid in h.exchange.orders if cid.startswith("br-sl-"))
-    tp = next(cid for cid in h.exchange.orders if cid.startswith("br-tp-"))
     h.restart()
-    _set(h, after, after)
+    _set(h, after)
     assert await h.manager.observe_trailing("pos-1", basis, reads(book))
     assert await h.manager.sync("pos-1") == "armed"
     new_sl = h.creates()[-1]
@@ -226,7 +224,6 @@ async def test_trailing_generation_uses_current_setting_and_cancels_old_after(
     legs = {leg.client_order_id: leg for leg in h.state().legs}
     assert legs[new_sl].purpose == "trailing" and legs[new_sl].working_type == after
     assert legs[old_sl].state == "cancelled" and legs[old_sl].working_type == before
-    assert legs[tp].working_type == before and h.exchange.orders[tp].algo_status == "NEW"
 
 
 # ---------------------------------------------------------------- 旧账本
@@ -240,11 +237,11 @@ async def test_old_positions_json_without_field_loads_as_legacy_types(tmp_path: 
         del leg["working_type"]
     h.path.write_text(json.dumps(data), encoding="utf-8")
     h.restart()
-    _set(h, MARK, MARK)  # 新设置不改旧腿的含义。
+    _set(h, MARK)  # 新设置不改旧腿的含义。
     persisted = {leg.purpose: leg.working_type for leg in h.state().legs}
     assert persisted == {"lifeboat": MARK, "fixed": LAST}
     assert await h.manager.sync("pos-1") == "armed"
-    assert len(h.creates()) == 3 and not h.cancels()
+    assert len(h.creates()) == 2 and not h.cancels()
     reloaded = PositionRegistry(h.path).get("pos-1")
     assert reloaded is not None and reloaded.server_protection is not None
     assert {leg.purpose: leg.working_type for leg in reloaded.server_protection.legs} == persisted

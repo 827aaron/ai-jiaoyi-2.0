@@ -98,6 +98,8 @@ async def test_open_text_names_who_places_a_missing_lifeboat(tmp_path: Path) -> 
         }
     )
     assert _open_text(hosted).endswith("保命单稍后由托管保护补挂")
+    assert "（只是目标，不挂单，盈利靠移动止损出场）" in _open_text(hosted)
+    assert "不挂单" not in _open_text(bare)
 
 
 async def test_notices_carry_their_kind(tmp_path: Path) -> None:

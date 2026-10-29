@@ -1,7 +1,7 @@
 """托管保护的挂腿顺序（protection_leg_order）；只有合成订单，不连接任何服务。
 
-stop_first：止损 → 止盈 → 保命单。止损确认后保命单挂失败只差后备，交给未托管宽限重试；
-止损、止盈失败和 lifeboat_first（默认）照旧。
+stop_first：止损 → 保命单。止损确认后保命单挂失败只差后备，交给未托管宽限重试；
+止损失败和 lifeboat_first（默认）照旧。
 """
 
 from __future__ import annotations
@@ -100,9 +100,9 @@ class OrderHarness(GraceHarness):
 @pytest.mark.parametrize(
     ("order", "roles"),
     [
-        (None, ["lb", "br-sl", "br-tp"]),
-        ("lifeboat_first", ["lb", "br-sl", "br-tp"]),
-        ("stop_first", ["br-sl", "br-tp", "lb"]),
+        (None, ["lb", "br-sl"]),
+        ("lifeboat_first", ["lb", "br-sl"]),
+        ("stop_first", ["br-sl", "lb"]),
     ],
 )
 async def test_new_position_places_legs_in_the_configured_order(
@@ -134,7 +134,7 @@ async def test_stop_first_rejected_lifeboat_keeps_position_and_retries_with_new_
     h = OrderHarness(tmp_path, side, order="stop_first")
     h.lifeboat_fail = "reject"
     await h.adapter.protection_tick()
-    assert h.roles() == ["br-sl", "br-tp", "lb"]
+    assert h.roles() == ["br-sl", "lb"]
     assert not h.closing() and not h.exchange.direct
     assert h.registry.get("pos-1").record.status is PositionStatus.OPEN
     assert h.leg("lb-pos-1-1").state == "rejected"
@@ -144,13 +144,13 @@ async def test_stop_first_rejected_lifeboat_keeps_position_and_retries_with_new_
     assert alert.kind == "lifeboat_missing"
     assert "保命单被交易所明确拒绝" in alert.body and "已 0 / 60 秒" in alert.body
     h.now += timedelta(seconds=10)
-    await h.adapter.protection_tick()  # 仍被拒：换新 CID 再试，止损止盈不重挂。
-    assert h.creates()[3:] == ["lb-pos-1-2"]
+    await h.adapter.protection_tick()  # 仍被拒：换新 CID 再试，止损不重挂。
+    assert h.creates()[2:] == ["lb-pos-1-2"]
     assert not h.closing() and "已 10 / 60 秒" in h.alerts()[-1].body
     h.lifeboat_fail = None
     h.now += timedelta(seconds=10)
     await h.adapter.protection_tick()
-    assert h.creates()[4:] == ["lb-pos-1-3"]
+    assert h.creates()[3:] == ["lb-pos-1-3"]
     state = h.state()
     assert state.stage == "armed" and state.ever_armed and state.prearm_failing_since is None
     assert not h.closing() and not h.cancels()
@@ -174,7 +174,7 @@ async def test_stop_first_unknown_lifeboat_only_rechecks_original_cid_within_gra
     assert "保命单提交结果仍未知" in h.alerts()[-1].body
     h.exchange.hidden.clear()  # 交易所其实收下了。
     await h.adapter.protection_tick()
-    assert h.roles() == ["br-sl", "br-tp", "lb"]  # 每个 CID 只提交一次。
+    assert h.roles() == ["br-sl", "lb"]  # 每个 CID 只提交一次。
     assert h.state().stage == "armed" and not h.closing()
 
 
@@ -252,7 +252,7 @@ async def test_lifeboat_first_rejected_lifeboat_is_never_retried(tmp_path: Path,
     h.lifeboat_fail = None
     with pytest.raises(ProtectionIncomplete, match="已有提交或撤销未确认"):
         await h.manager.sync("pos-1")
-    assert h.creates()[3:] == ["lb-pos-1-2"]
+    assert h.creates()[2:] == ["lb-pos-1-2"]
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -265,16 +265,16 @@ async def test_stop_first_replacement_generation_retries_rejected_lifeboat(
     with pytest.raises(ProtectionIncomplete) as raised:
         await h.manager.sync("pos-1")
     assert raised.value.backup_only
-    assert h.creates()[3:] == ["br-sl-pos-1-2", "br-tp-pos-1-2", "lb-pos-1-2"]
-    assert not h.cancels()  # 新一代没挂齐，旧一代三条腿都留着。
+    assert h.creates()[2:] == ["br-sl-pos-1-2", "lb-pos-1-2"]
+    assert not h.cancels()  # 新一代没挂齐，旧一代的腿都留着。
     h.lifeboat_fail = None
     assert await h.manager.sync("pos-1") == "armed"
-    assert h.creates()[6:] == ["lb-pos-1-3"]
-    assert sorted(h.cancels()) == ["br-sl-pos-1-1", "br-tp-pos-1-1", "lb-pos-1-1"]
+    assert h.creates()[4:] == ["lb-pos-1-3"]
+    assert sorted(h.cancels()) == ["br-sl-pos-1-1", "lb-pos-1-1"]
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_restart_with_stop_and_tp_placed_resumes_only_the_planned_lifeboat(
+async def test_restart_with_stop_placed_resumes_only_the_planned_lifeboat(
     tmp_path: Path, side: Side
 ):
     h = OrderHarness(tmp_path, side, order="stop_first")
@@ -302,8 +302,8 @@ async def test_restart_with_stop_and_tp_placed_resumes_only_the_planned_lifeboat
     )
     h.restart()
     assert await h.manager.sync("pos-1") == "armed"
-    assert h.roles() == ["br-sl", "br-tp", "lb"]
-    assert h.creates()[2] == "lb-pos-1-2"
+    assert h.roles() == ["br-sl", "lb"]
+    assert h.creates()[1] == "lb-pos-1-2"
     assert h.leg("lb-pos-1-1").state == "superseded"
 
 
@@ -333,15 +333,6 @@ async def test_backup_only_failure_needs_stop_first_and_a_confirmed_stop(
         tracked.model_copy(update={"server_protection": state.model_copy(update={"legs": legs})})
     )
     assert h.manager.prearm_grace("pos-1", error) is None  # 止损也不在了：照旧平。
-
-
-@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_stop_first_rejected_take_profit_still_closes(tmp_path: Path, side: Side):
-    h = OrderHarness(tmp_path, side, order="stop_first")
-    h.exchange.reject_kind = "take_profit"
-    await h.adapter.protection_tick()
-    assert h.closing()
-    assert h.roles() == ["br-sl", "br-tp"]
 
 
 @pytest.mark.parametrize(
@@ -383,5 +374,5 @@ async def test_stop_first_does_not_resend_rejected_lifeboat_once_ever_armed(
     h.lifeboat_fail = None
     with pytest.raises(ProtectionIncomplete, match="已有提交或撤销未确认"):
         await h.manager.sync("pos-1")
-    assert h.creates()[3:] == ["br-sl-pos-1-2", "br-tp-pos-1-2", "lb-pos-1-2"]
+    assert h.creates()[2:] == ["br-sl-pos-1-2", "lb-pos-1-2"]
     assert not h.cancels()

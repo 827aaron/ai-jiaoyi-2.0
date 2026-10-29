@@ -22,7 +22,7 @@ BOOK_MAX_AGE_S = 5.0
 
 class TrailingBookUnavailable(ExchangeError):
     """本轮没有可用的盘口证据（读不到、过期、来自未来或源时钟回退）：只是不更新移动止损，
-    已确认的止损 / 止盈 / 保命单不受影响；和真正的保护失败分开告警。"""
+    已确认的止损 / 保命单不受影响；和真正的保护失败分开告警。"""
 
 
 @dataclass(frozen=True)

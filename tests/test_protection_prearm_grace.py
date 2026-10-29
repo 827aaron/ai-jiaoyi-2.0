@@ -55,7 +55,7 @@ async def test_within_grace_keeps_position_and_next_tick_arms(tmp_path: Path, si
     h.exchange.hidden.clear()  # 交易所读延迟结束。
     h.now += timedelta(seconds=10)
     await h.adapter.protection_tick()
-    assert sorted(c[:3] for c in h.creates()) == ["br-", "br-", "lb-"]  # 没有重复提交。
+    assert sorted(c[:3] for c in h.creates()) == ["br-", "lb-"]  # 没有重复提交。
     state = h.state()
     assert state.stage == "armed" and state.prearm_failing_since is None
     assert not h.closing() and len(h.alerts()) == 2
@@ -102,7 +102,7 @@ async def test_transient_network_failure_with_confirmed_lifeboat_is_tolerated(
     tmp_path: Path, side: Side
 ):
     h = PrearmHarness(tmp_path, side, prearm=60.0)
-    await h.adapter.protection_tick()  # lb 已回执确认，SL/TP 尚未提交。
+    await h.adapter.protection_tick()  # lb 已回执确认，SL 尚未提交。
     h.exchange.hidden.clear()
     original = h.exchange.positions_evidence
 
@@ -164,10 +164,16 @@ def _edit_state(h: PrearmHarness, **changes) -> None:
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_eligible_read_lag_is_tolerated(tmp_path: Path, side: Side):
+@pytest.mark.parametrize(
+    "stop",
+    [
+        {**LIVE, "algo_id": "8"},
+        {**LIVE, "algo_id": "8", "algo_status": "CANCELED", "state": "cancelled"},
+    ],
+)
+async def test_eligible_read_lag_is_tolerated(tmp_path: Path, side: Side, stop: dict):
     h = await _lb_acked(tmp_path, side)
-    _edit_leg(h, "br-sl-", **{**LIVE, "algo_id": "8"})  # 其他腿明确 NEW 或已明确撤销也可宽限
-    _edit_leg(h, "br-tp-", **{**LIVE, "algo_status": "CANCELED", "state": "cancelled"})
+    _edit_leg(h, "br-sl-", **stop)  # 其他腿明确 NEW 或已明确撤销也可宽限
     assert h.manager.prearm_grace("pos-1", _read_lag()) == 0
     assert h.manager.prearm_grace("pos-1", ExchangeError("x", transient=True)) == 0
 
@@ -195,13 +201,13 @@ async def test_other_errors_are_never_tolerated(tmp_path: Path, error: Exception
         ("lb-", {"algo_status": "TRIGGERED"}),
         ("lb-", {"algo_status": "CANCELED", "state": "cancelled"}),
         # 保命单仍在，但另一腿提交/撤销未知、被拒、子单未知或已触发
-        ("br-tp-", {"state": "submit_pending"}),
-        ("br-tp-", {**LIVE, "state": "cancel_pending"}),
-        ("br-tp-", {"state": "rejected"}),
-        ("br-tp-", {**LIVE, "child_state": "unknown"}),
-        ("br-tp-", {**LIVE, "algo_status": "TRIGGERED"}),
-        ("br-tp-", {**LIVE, "filled_quantity": 0.5}),
-        ("br-tp-", {**LIVE, "algo_status": "FINISHED", "state": "cancelled"}),
+        ("br-sl-", {"state": "submit_pending"}),
+        ("br-sl-", {**LIVE, "state": "cancel_pending"}),
+        ("br-sl-", {"state": "rejected"}),
+        ("br-sl-", {**LIVE, "child_state": "unknown"}),
+        ("br-sl-", {**LIVE, "algo_status": "TRIGGERED"}),
+        ("br-sl-", {**LIVE, "filled_quantity": 0.5}),
+        ("br-sl-", {**LIVE, "algo_status": "FINISHED", "state": "cancelled"}),
         # 已在退出或曾经完整托管（后者走原“保留最后确认止损”分支）
         ("state", {"stage": "exiting"}),
         ("state", {"ever_armed": True}),

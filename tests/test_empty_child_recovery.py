@@ -80,7 +80,7 @@ async def test_persisted_exit_automatically_closes_fresh_residual_without_removi
         assert h.registry.get("pos-1").requested_close is CloseReason.RECONCILER
         assert close_side == ("buy" if side is Side.SHORT else "sell")
         assert quantity == 1.25
-        assert len(h.exchange.orders) == 3
+        assert len(h.exchange.orders) == 2
         assert all(order.algo_status == "NEW" for order in h.exchange.orders.values())
         assert not h.cancels()
         return await original_place(symbol, close_side, quantity, client_order_id)
@@ -96,7 +96,7 @@ async def test_persisted_exit_automatically_closes_fresh_residual_without_removi
     assert final.record.status is PositionStatus.CLOSED
     assert final.record.close_reason is CloseReason.RECONCILER
     assert final.server_protection.stage == "done"
-    assert len(h.cancels()) == 3
+    assert len(h.cancels()) == 2
     assert not h.creates() and not h.api.stopped
 
 

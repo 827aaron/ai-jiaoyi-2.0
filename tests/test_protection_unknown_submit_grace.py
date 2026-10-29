@@ -1,6 +1,6 @@
 """条件单提交结果未知时按原 CID 只读重查的宽限（INJUSDT 2026-10-28 复现）；只有合成订单。
 
-时间线：保命单回执确认 → 固定止损 POST 结果未知（交易所其实已收下）→ 止盈还没提交。
+时间线：保命单回执确认 → 固定止损 POST 结果未知（交易所其实已收下）。
 原行为立即按对账原因平仓；打开 protection_unknown_submit_grace_s 后先按原 CID 只读重查。
 """
 
@@ -78,30 +78,27 @@ class UnknownSubmitHarness(GraceHarness):
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_zero_setting_closes_with_tp_never_submitted_as_in_the_incident(
-    tmp_path: Path, side: Side
-):
+async def test_zero_setting_closes_as_in_the_incident(tmp_path: Path, side: Side):
     h = UnknownSubmitHarness(tmp_path, side, unknown=0.0)
     await h.adapter.protection_tick()
     assert h.closing()
-    assert [c[:6] for c in h.creates()] == ["lb-pos", "br-sl-"]  # 止盈从没提交。
+    assert [c[:6] for c in h.creates()] == ["lb-pos", "br-sl-"]
     (body,) = h.alerts()
     assert body.startswith(f"BTCUSDT pos-1：{UNKNOWN} <- BracketSubmissionUnknown")
     assert body.endswith("保留已确认保护，停止入场并核验退出")
     assert h.leg("lb-").state == "confirmed" and h.leg("lb-").algo_status == "NEW"
     assert h.leg("br-sl-").state == "submit_pending"
-    assert h.leg("br-tp-").algo_id is None and h.leg("br-tp-").state in {"planned", "superseded"}
     assert not h.slept
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_stop_found_by_original_cid_arms_all_three_legs_in_the_same_tick(
+async def test_stop_found_by_original_cid_arms_every_leg_in_the_same_tick(
     tmp_path: Path, side: Side
 ):
     h = UnknownSubmitHarness(tmp_path, side, unknown=3.0)
     await h.adapter.protection_tick()
     assert not h.closing() and not h.exchange.direct and not h.alerts()
-    assert sorted(c[:6] for c in h.creates()) == ["br-sl-", "br-tp-", "lb-pos"]  # 每腿一次。
+    assert sorted(c[:6] for c in h.creates()) == ["br-sl-", "lb-pos"]  # 每腿一次。
     state = h.state()
     assert state.stage == "armed" and state.ever_armed and state.generation == 1
     assert all(leg.state == "confirmed" and leg.algo_status == "NEW" for leg in state.legs)
@@ -114,7 +111,7 @@ async def test_order_seen_by_the_exchange_layer_is_accepted_without_waiting(tmp_
     h = UnknownSubmitHarness(tmp_path, Side.SHORT, unknown=3.0, observed=True)
     await h.adapter.protection_tick()
     assert h.state().stage == "armed" and not h.closing()
-    assert not h.slept and len(h.creates()) == 3
+    assert not h.slept and len(h.creates()) == 2
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
@@ -134,7 +131,7 @@ async def test_still_unknown_keeps_position_in_prearm_grace_and_only_rereads_the
     assert [c[:6] for c in h.creates()] == ["lb-pos", "br-sl-"] and h.state().generation == 1
     h.exchange.hidden.clear()
     await h.adapter.protection_tick()
-    assert sorted(c[:6] for c in h.creates()) == ["br-sl-", "br-tp-", "lb-pos"]
+    assert sorted(c[:6] for c in h.creates()) == ["br-sl-", "lb-pos"]
     state = h.state()
     assert state.stage == "armed" and state.prearm_failing_since is None
     assert not h.closing()
@@ -178,7 +175,7 @@ async def test_armed_tightened_generation_found_by_cid_replaces_the_old_stop_onc
     assert h.manager.set_tightened_stop("pos-1", tightened, "synthetic opposite card")
     assert await h.manager.sync("pos-1") == "armed"
     assert sorted(h.creates()) == sorted(
-        ["lb-pos-1-1", "br-sl-pos-1-1", "br-tp-pos-1-1", "br-sl-pos-1-2"]
+        ["lb-pos-1-1", "br-sl-pos-1-1", "br-sl-pos-1-2"]
     )  # 每个 CID 只 POST 一次。
     assert h.cancels() == ["br-sl-pos-1-1"]
     assert h.slept == [0.5, 0.5]
@@ -188,16 +185,14 @@ async def test_armed_tightened_generation_found_by_cid_replaces_the_old_stop_onc
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-@pytest.mark.parametrize(
-    ("order", "unknown_prefix"), [("stop_first", "lb-"), ("lifeboat_first", "br-tp-")]
-)
 async def test_stop_triggered_while_another_leg_is_unknown_exits_as_stop_loss(
-    tmp_path: Path, side: Side, order: str, unknown_prefix: str
+    tmp_path: Path, side: Side
 ):
+    unknown_prefix = "lb-"
     h = UnknownSubmitHarness(
         tmp_path, side, unknown=2.0, unknown_prefix=unknown_prefix, visible_after=10**6
     )
-    h.manager.leg_order = order
+    h.manager.leg_order = "stop_first"
     await h.adapter.protection_tick()
     assert not h.closing() and h.leg(unknown_prefix).state == "submit_pending"
     stop = h.leg("br-sl-").client_order_id
