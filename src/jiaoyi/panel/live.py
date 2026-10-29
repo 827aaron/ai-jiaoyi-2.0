@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -24,6 +23,13 @@ LIVE_TAIL = 30
 """没带游标（刚打开页面）时给最近几条，只填「实时动作」列表，不画动画。"""
 LIVE_MAX = 60
 """一次最多给几条；更多的按角色和种类只给条数（``coalesced``），免得一阵爆发把页面淹了。"""
+LIVE_BEHIND_MAX = 2000
+"""游标落后这么多条以上（电脑睡醒、标签页放了很久）就不补了，重新从最近几条开始。"""
+LIVE_STALE_S = 600
+"""游标是这么多秒以前发的，同上：几小时前的动作不当新动作画。"""
+LIVE_ROLLOVER_S = 600
+"""UTC 换日后这么久里，游标继续带昨天那份文件的位置：写日志按记录自己的 ts 选文件，
+ts 可能是换日前取的，晚到的几行会落进昨天的文件。"""
 
 Tone = Literal["open", "close", "reject", "error", "info"]
 
@@ -39,6 +45,8 @@ KINDS: tuple[str, ...] = (
     "against_meeting",
     "against_log",
     "regime",
+    "regime_market",
+    "regime_watch",
     "sentinel",
     "predict",
     "verdict",
@@ -64,7 +72,24 @@ KINDS: tuple[str, ...] = (
 )
 """页面认识的全部动作种类（JS 那边每一种都有动画路线，测试对着这个表查）。"""
 
-ROUTINE: frozenset[str] = frozenset({"key_level", "predict", "keeper_check", "against_log", "book"})
+ROUTINE: frozenset[str] = frozenset(
+    {"key_level", "predict", "keeper_check", "against_log", "regime_watch", "book"}
+)
+
+CLOSE_BY: dict[str, tuple[str | None, str]] = {
+    "keeper": ("keeper", "管家平"),
+    "patrol": ("patrol", "巡逻兵平"),
+    "stop_loss": ("lifeboat", "止损（交易所）"),
+    "take_profit": ("lifeboat", "止盈（交易所）"),
+    "trailing_stop": ("lifeboat", "移动止损（交易所）"),
+    "tightened_stop": ("lifeboat", "收紧止损（交易所）"),
+    "time_limit": ("lifeboat", "到时（交易所）"),
+    "lifeboat": ("lifeboat", "保命止损"),
+    "reconciler": ("reconciler", "对账平"),
+    "manual": (None, "手动平"),
+}
+"""执行器平仓记录的 ``output.reason`` → (光点从哪个角色出发, 标签)。交易所托管的止损 / 止盈 /
+到时记在保命止损那边，不算管家平的。None = 从仓位直接撤离（手动）。"""
 
 
 class LiveEvent(BaseModel):
@@ -85,6 +110,8 @@ class LiveEvent(BaseModel):
     signal_kind: str | None = None
     pnl_usdt: float | None = None
     """平仓回填的净盈亏（U），撤离箭头上标。"""
+    via: str | None = None
+    """平仓是谁促成的（角色 id，见 ``CLOSE_BY``）；光点从它出发打到仓位再撤离。"""
 
 
 class LiveCount(BaseModel):
@@ -107,7 +134,8 @@ class RingPosition(BaseModel):
 class LiveFeed(BaseModel):
     cursor: str
     reset: bool
-    """True = 没带游标或游标对不上（换日太久、文件被换）：``events`` 是最近几条，页面不补画动画。"""
+    """True = 没带游标、游标对不上（文件被换短、日期不对）或落后太多（``LIVE_BEHIND_MAX`` /
+    ``LIVE_STALE_S``）：``events`` 是最近几条，页面不补画动画。"""
     events: list[LiveEvent]
     """时间先后（旧的在前）。"""
     coalesced: list[LiveCount] = []
@@ -156,7 +184,11 @@ def _judges(out: dict[str, Any]) -> str | None:
     return " / ".join(parts) or None
 
 
-_CARD_V = re.compile(r"作战卡 v(\d+)")
+def _close_by(out: dict[str, Any]) -> tuple[str | None, str]:
+    reason = str(out.get("reason") or "")
+    if reason == "stop_loss" and "主网价格" in str(out.get("detail") or ""):
+        return "patrol", "模拟止损"  # 模拟盘按主网价格越过止损平，是巡逻兵记的
+    return CLOSE_BY.get(reason, (None, "平仓"))
 
 
 def classify(r: DecisionRecord) -> tuple[str, Tone, str | None]:
@@ -175,8 +207,9 @@ def classify(r: DecisionRecord) -> tuple[str, Tone, str | None]:
                 return "key_level", tone, None
             if "bias" in out and r.symbol:
                 return "meeting", tone, str(out.get("bias"))
-            if m := _CARD_V.search(r.summary):
-                return "card", tone, f"v{m.group(1)}"
+            v = out.get("version")
+            if isinstance(v, int) and not isinstance(v, bool) and "symbols" in out:
+                return "card", tone, f"v{v}"
             return "commander", tone, None
         case Role.SENTINEL:
             ag = out.get("against_signal")
@@ -187,8 +220,13 @@ def classify(r: DecisionRecord) -> tuple[str, Tone, str | None]:
                 if "meeting" in acts:
                     return "against_meeting", "info", "反向 → 临时会"
                 return "against_log", "info", None
-            if "regime_flip" in out:
-                return "regime", tone, None
+            flip = out.get("regime_flip")
+            if isinstance(flip, dict):
+                if r.outcome is not Outcome.ACTION:  # 疑似 / 被拦：只是哨兵在看，不算大盘更新
+                    return "regime_watch", "info", None
+                if flip.get("scope") == "market_desk":
+                    return "regime", tone, "大盘变化 → 大盘台"
+                return "regime_market", tone, "大盘变化 → 独立更新"
             if r.outcome is Outcome.ACTION and "kind" in out:
                 return "signal", "info", None
             return "sentinel", "reject" if r.outcome is Outcome.REJECT else tone, None
@@ -213,7 +251,7 @@ def classify(r: DecisionRecord) -> tuple[str, Tone, str | None]:
             if r.outcome is Outcome.ACTION and "entry_price" in out:
                 return "fill", "open", "成交"
             if r.outcome is Outcome.CLOSE:
-                return "close", "close", "平仓"
+                return "close", "close", _close_by(out)[1]
             bf = out.get("backfill")
             if isinstance(bf, dict) and _num(bf.get("realized_pnl_usdt")) is not None:
                 return "backfill", "close", None
@@ -270,15 +308,21 @@ def to_event(r: DecisionRecord) -> LiveEvent:
         badge=badge,
         signal_kind=sig,
         pnl_usdt=pnl,
+        via=_close_by(out)[0] if kind == "close" else None,
     )
 
 
-def parse_cursor(cursor: str | None) -> tuple[date, int] | None:
-    if not cursor or ":" not in cursor:
+def parse_cursor(cursor: str | None) -> tuple[dict[date, int], float] | None:
+    """``<日期>:<条数>[|<日期>:<条数>]@<发出时的 unix 秒>`` → ({日期: 条数}, 发出时间)。"""
+    if not cursor or "@" not in cursor:
         return None
-    day, _, n = cursor.partition(":")
+    body, _, at = cursor.rpartition("@")
+    out: dict[date, int] = {}
     try:
-        return date.fromisoformat(day), int(n)
+        for part in body.split("|"):
+            day, _, n = part.partition(":")
+            out[date.fromisoformat(day)] = int(n)
+        return out, float(at)
     except ValueError:
         return None
 
@@ -331,33 +375,49 @@ class LiveSource:
 
     def feed(self, now: datetime, cursor: str | None) -> LiveFeed:
         today = now.date()
-        pos = parse_cursor(cursor)
+        yday = today - timedelta(days=1)
+        got = parse_cursor(cursor)
         records: list[DecisionRecord] = []
-        total_today = 0
-        reset = pos is None or pos[0] not in (today, today - timedelta(days=1))
-        if pos is not None and not reset:
-            day, n = pos
-            got, total = self.files.decisions_from(day, n)
-            if total < n:  # 文件变短了（被换掉）：当作没游标
-                reset = True
-            elif day == today:
-                records, total_today = got, total
-            else:
-                rest, total_today = self.files.decisions_from(today, 0)
-                records = got + rest
+        counts: dict[date, int] = {}
+        reset = (
+            got is None
+            or not got[0]
+            or any(n < 0 or d not in (today, yday) for d, n in got[0].items())
+            or now.timestamp() - got[1] > LIVE_STALE_S
+        )
+        if got is not None and not reset:
+            pos = got[0]
+            for day in (yday, today):
+                start = pos.get(day, 0 if day == today else None)
+                if start is None:
+                    continue
+                recs, total = self.files.decisions_from(day, start)
+                if total < start:  # 文件变短了（被换掉）
+                    reset = True
+                    break
+                records += recs
+                counts[day] = total
+            reset = reset or len(records) > LIVE_BEHIND_MAX
         if reset:
             _, total = self.files.decisions_from(today, 1 << 62)
-            records, total_today = self.files.decisions_from(today, max(0, total - LIVE_TAIL))
+            records, counts[today] = self.files.decisions_from(today, max(0, total - LIVE_TAIL))
             if len(records) < LIVE_TAIL:
-                y, ny = self.files.decisions_from(today - timedelta(days=1), 0)
+                y, ny = self.files.decisions_from(yday, 0)
                 records = y[max(0, ny - (LIVE_TAIL - len(records))) :] + records
-        events, counts = coalesce([to_event(r) for r in records])
+                counts[yday] = ny
+        midnight = datetime.combine(today, datetime.min.time(), tzinfo=now.tzinfo)
+        rollover = (now - midnight).total_seconds() < LIVE_ROLLOVER_S
+        if rollover and yday not in counts:
+            counts[yday] = self.files.decisions_from(yday, 1 << 62)[1]
+        days = [yday, today] if rollover else [today]
+        cur = "|".join(f"{d.isoformat()}:{counts[d]}" for d in days)
+        events, dropped = coalesce([to_event(r) for r in records])
         st = self.files.module_status().get(Role.BOOK_READER.value)
         return LiveFeed(
-            cursor=f"{today.isoformat()}:{total_today}",
+            cursor=f"{cur}@{int(now.timestamp())}",
             reset=reset,
             events=events,
-            coalesced=counts,
+            coalesced=dropped,
             ring=self.ring(),
             book_calls=st.today.calls if st else None,
         )

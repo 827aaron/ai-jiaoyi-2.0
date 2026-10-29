@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,8 +14,9 @@ import pytest
 
 from jiaoyi import contracts as c
 from jiaoyi.core.store import JsonlDecisionLog
+from jiaoyi.panel import live
 from jiaoyi.panel.files import PanelFiles
-from jiaoyi.panel.live import KINDS, LIVE_MAX, LiveSource, classify
+from jiaoyi.panel.live import KINDS, LIVE_MAX, LIVE_STALE_S, LiveSource, classify, to_event
 from jiaoyi.panel.pages import build_team
 from tests.conftest import ROOT
 from tests.test_panel import NOW, RISK, _client, _rec, _seed
@@ -290,6 +291,9 @@ assert(one.includes('最新大盘情况') && !one.includes('上一次') && !one.
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
 
+AT = int(NOW.timestamp())
+
+
 def _live(client: Any, cursor: str | None = None) -> dict[str, Any]:
     params = {"cursor": cursor} if cursor else {}
     r = client.get("/api/team/live", params=params)
@@ -303,7 +307,7 @@ def test_team_live_returns_events_after_cursor_in_order(tmp_path: Path) -> None:
     with _client(tmp_path, "127.0.0.1") as client:
         first = _live(client)
         assert first["reset"] is True
-        assert first["cursor"] == "2026-10-22:9"
+        assert first["cursor"] == f"2026-10-22:9@{AT}"
         # 没带游标：给最近几条（今天 9 条 + 昨天 1 条），旧的在前
         assert [e["text"] for e in first["events"]][:2] == ["昨天的信号", "BTC 放量突破"]
         assert [p["position_id"] for p in first["ring"]] == ["pos-0001"]
@@ -326,11 +330,12 @@ def test_team_live_returns_events_after_cursor_in_order(tmp_path: Path) -> None:
                  output={"backfill": {"realized_pnl_usdt": -18.51}}),
             _rec(c.Role.KEEPER_ASSISTANT, c.Outcome.INFO, "LTCUSDT 待确认翻转", t,
                  symbol="LTCUSDT", output=assistant),
-            _rec(c.Role.COMMANDER, c.Outcome.ACTION, "出作战卡 v4：2 个标的，1 个可做", t),
+            _rec(c.Role.COMMANDER, c.Outcome.ACTION, "出作战卡 v4：2 个标的，1 个可做", t,
+                 output={"version": 4, "symbols": []}),
         ]:  # fmt: skip
             log.write(r)
         nxt = _live(client, first["cursor"])
-        assert nxt["reset"] is False and nxt["cursor"] == "2026-10-22:16"
+        assert nxt["reset"] is False and nxt["cursor"] == f"2026-10-22:16@{AT}"
         got = [(e["role"], e["kind"], e["tone"], e["badge"]) for e in nxt["events"]]
         assert got == [
             ("sentinel", "signal", "info", None),
@@ -351,8 +356,14 @@ def test_team_live_returns_events_after_cursor_in_order(tmp_path: Path) -> None:
         assert nxt["events"][4]["pnl_usdt"] == -18.51
         assert _live(client, nxt["cursor"])["events"] == []
         # 游标对不上（文件被换短了 / 太旧）：当作没游标，给最近几条
-        assert _live(client, "2026-10-22:999")["reset"] is True
-        assert _live(client, "2026-10-01:3")["reset"] is True
+        for bad in (
+            f"2026-10-22:999@{AT}",  # 文件变短了
+            f"2026-10-22:-1@{AT}",
+            f"2026-10-01:3@{AT}",  # 太旧的日期
+            f"2026-10-22:16@{AT - LIVE_STALE_S - 1}",  # 发出太久（电脑睡醒）
+            "2026-10-22:16",  # 没有发出时间
+        ):
+            assert _live(client, bad)["reset"] is True, bad
 
 
 def test_team_live_coalesces_bursts_keeping_real_actions(tmp_path: Path) -> None:
@@ -436,6 +447,10 @@ assert.deepEqual(fill[fill.length - 1], ringSlots(2)[1].slice(0, 2));
 const out = livePath({ kind: 'close', position_id: 'a' }, ring).pts;
 assert.deepEqual(out[0], ringSlots(2)[0].slice(0, 2));
 assert.deepEqual(out[out.length - 1], TP.exitB);
+// 平仓从促成它的角色出发：交易所止损从保命止损、管家判平从管家
+assert.deepEqual(livePath({ kind: 'close', position_id: 'a', via: 'lifeboat' }, ring).pts[0], TP.lifeboatR);
+assert.deepEqual(livePath({ kind: 'close', position_id: 'a', via: 'keeper' }, ring).pts.slice(0, 2), [TP.keeperB, ringSlots(2)[0].slice(0, 2)]);
+assert.deepEqual(livePath({ kind: 'close', position_id: 'a', via: null }, ring).pts[0], ringSlots(2)[0].slice(0, 2));
 assert.deepEqual(livePath({ kind: 'keeper', position_id: 'gone' }, ring).pts[1], TL_RING);
 assert.equal(ringSlots(0).length, 0);
 assert.equal(ringSlots(7).length, 7);
@@ -463,3 +478,83 @@ assert.ok(1000 / LIVE_GAP_MS <= 3);
     )
     done = subprocess.run([node, "-e", script], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-2000:]
+
+
+def test_team_live_far_behind_cursor_resets_instead_of_replaying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(tmp_path)
+    src = LiveSource(PanelFiles(tmp_path, RISK.day_reset_tz))
+    cur = src.feed(NOW, None).cursor
+    log = JsonlDecisionLog(tmp_path)
+    for i in range(6):
+        log.write(_rec(c.Role.SENTINEL, c.Outcome.INFO, f"BTCUSDT 看 {i}", NOW, symbol="BTCUSDT"))
+    monkeypatch.setattr(live, "LIVE_BEHIND_MAX", 5)
+    body = src.feed(NOW, cur)
+    assert body.reset is True
+    assert body.events[-1].text == "看 5"  # 从最近几条重新开始
+    monkeypatch.setattr(live, "LIVE_BEHIND_MAX", 6)
+    assert src.feed(NOW, cur).reset is False
+
+
+def test_team_live_reads_late_lines_of_yesterday_after_utc_rollover(tmp_path: Path) -> None:
+    files = PanelFiles(tmp_path, RISK.day_reset_tz)
+    log = JsonlDecisionLog(tmp_path)
+    src = LiveSource(files)
+    eve = datetime(2026, 10, 22, 23, 59, 50, tzinfo=UTC)
+    log.write(_rec(c.Role.GATE, c.Outcome.INFO, "BTC 前一条", eve - timedelta(seconds=5)))
+    cur = src.feed(eve, None).cursor
+    assert cur.split("@")[0] == "2026-10-22:1"
+    # 换日后：主循环拿着换日前取的 now 写的那行落进昨天的文件，今天的文件也开始有了
+    log.write(_rec(c.Role.RISK_GUARD, c.Outcome.PASS, "BTC 晚到", eve + timedelta(seconds=5)))
+    log.write(_rec(c.Role.EXECUTOR, c.Outcome.ACTION, "BTC 成交", eve + timedelta(seconds=15)))
+    after = eve + timedelta(seconds=20)
+    body = src.feed(after, cur)
+    assert body.reset is False
+    assert [e.text for e in body.events] == ["BTC 晚到", "BTC 成交"]
+    assert body.cursor.split("@")[0] == "2026-10-22:2|2026-10-23:1"
+    log.write(_rec(c.Role.KEEPER, c.Outcome.HOLD, "BTC 又晚到", eve + timedelta(seconds=8)))
+    body = src.feed(after + timedelta(minutes=2), body.cursor)
+    assert [e.text for e in body.events] == ["BTC 又晚到"]
+    body = src.feed(after + timedelta(minutes=7), body.cursor)
+    assert body.events == [] and "2026-10-22:3|" in body.cursor
+    later = src.feed(after + timedelta(minutes=11), body.cursor)
+    assert later.reset is False and later.cursor.split("@")[0] == "2026-10-23:1"
+
+
+def test_live_card_version_comes_from_the_record_not_the_text() -> None:
+    def card(summary: str, **out: object) -> tuple[str, object, object]:
+        return classify(_rec(c.Role.COMMANDER, c.Outcome.ACTION, summary, NOW, output=out))
+
+    stub = card("作战卡更新 v1：12 个标的（这一轮还在开会）", version=1, symbols=[])
+    assert stub == ("card", "info", "v1")
+    assert card("出作战卡 v399：11 个标的，7 个可做", version=399, symbols=[])[2] == "v399"
+    assert card("出作战卡 v9：没有版本号字段")[0] == "commander"
+
+
+def test_live_regime_only_confirmed_flips_pulse_the_market_side() -> None:
+    def flip(outcome: c.Outcome, **f: object) -> tuple[str, bool]:
+        ev = to_event(_rec(c.Role.SENTINEL, outcome, "大盘", NOW, output={"regime_flip": f}))
+        return ev.kind, ev.routine
+
+    assert flip(c.Outcome.ACTION, kind="confirmed", scope="market_desk") == ("regime", False)
+    assert flip(c.Outcome.ACTION, kind="confirmed", scope="market_only") == ("regime_market", False)
+    assert flip(c.Outcome.INFO, kind="suspect_breadth") == ("regime_watch", True)
+    assert flip(c.Outcome.REJECT, kind="blocked") == ("regime_watch", True)
+
+
+def test_live_executor_close_credits_whoever_caused_it() -> None:
+    def close(**out: object) -> tuple[object, object]:
+        ev = to_event(_rec(c.Role.EXECUTOR, c.Outcome.CLOSE, "BTCUSDT 直连平仓", NOW, output=out))
+        assert ev.kind == "close"
+        return ev.via, ev.badge
+
+    assert close(reason="keeper") == ("keeper", "管家平")
+    assert close(reason="stop_loss") == ("lifeboat", "止损（交易所）")
+    assert close(reason="take_profit") == ("lifeboat", "止盈（交易所）")
+    assert close(reason="time_limit") == ("lifeboat", "到时（交易所）")
+    assert close(reason="stop_loss", detail="主网价格越过止损") == ("patrol", "模拟止损")
+    assert close(reason="reconciler") == ("reconciler", "对账平")
+    assert close(reason="patrol") == ("patrol", "巡逻兵平")
+    assert close(reason="manual") == (None, "手动平")
+    assert close() == (None, "平仓")

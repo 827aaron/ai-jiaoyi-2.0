@@ -27,10 +27,15 @@ def _rec(role: c.Role, outcome: c.Outcome, output: dict[str, object]) -> c.Decis
     )
 
 
-def test_regime_flip_and_desk_records_pulse_the_desk() -> None:
-    flip = {"regime_flip": {"kind": "confirmed"}}
-    assert classify(_rec(c.Role.SENTINEL, c.Outcome.ACTION, flip))[0] == "regime"
-    assert classify(_rec(c.Role.SENTINEL, c.Outcome.REJECT, flip))[0] == "regime"
+def test_only_confirmed_regime_flips_and_desk_records_pulse_the_market_side() -> None:
+    desk_flip = {"regime_flip": {"kind": "confirmed", "scope": "market_desk"}}
+    assert classify(_rec(c.Role.SENTINEL, c.Outcome.ACTION, desk_flip))[0] == "regime"
+    own = {"regime_flip": {"kind": "confirmed", "scope": "market_only"}}
+    assert classify(_rec(c.Role.SENTINEL, c.Outcome.ACTION, own))[0] == "regime_market"
+    # 疑似 / 被拦只是哨兵在看，落在哨兵上，不闪大盘台
+    for outcome, kind in ((c.Outcome.INFO, "suspect_btc"), (c.Outcome.REJECT, "blocked")):
+        watch = {"regime_flip": {"kind": kind}}
+        assert classify(_rec(c.Role.SENTINEL, outcome, watch))[0] == "regime_watch"
     desk = {"market_desk": {"direction": "看跌"}}
     assert classify(_rec(c.Role.COMMANDER, c.Outcome.ACTION, desk))[0] == "desk"
     assert classify(_rec(c.Role.COMMANDER, c.Outcome.ERROR, desk))[1] == "error"
@@ -60,6 +65,8 @@ assert.ok(bad.includes('class="hs err"') && bad.includes("出错：超时"));
 assert.ok(tlNodeHtml("desk", { ...d, desk: { ...desk, state: "off", status: "未启用" } }, {}).includes("没开"));
 assert.ok(tlNodeHtml("desk", { ...d, desk: null }, {}).includes("还没有数据"));
 assert.deepEqual(livePath({ kind: "regime" }, []).pts, [TL_POS.desk]);
+assert.deepEqual(livePath({ kind: "regime_market" }, []).pts, [TL_POS.market]);
+assert.deepEqual(livePath({ kind: "regime_watch" }, []).pts, [TL_POS.sentinel]);
 assert.deepEqual(livePath({ kind: "desk" }, []).pts, [TL_POS.desk]);
 assert.equal(liveRole({ kind: "regime", role: "sentinel" }), "desk");
 // 大盘台在慢环上，排在总盘会和军师团之间（给军师团当背景）

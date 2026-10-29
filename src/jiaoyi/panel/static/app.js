@@ -1734,7 +1734,7 @@ function entryMarkers(p, bars) {
    盘口员是全队的行情源，哨兵是唯一的取数出口：底下那条行情总线从盘口员出发、经过哨兵、通到持仓圈。
    ③ 持仓圈：中间是真在管的仓位，持仓管家 + 管家助手、巡逻兵、保命止损、对账员围一圈。
    画布用逻辑坐标 TL_W × TL_H，宽度不够整体缩放；窄屏改成按泳道竖排。 */
-const TL_W = 960, TL_H = 600, TL_NW = 112, TL_NH = 66;
+const TL_W = 960, TL_H = 600, TL_NW = 112, TL_NH = 80;
 // 每个角色的站点（节点卡挂在站点下方，中心对齐）
 const TL_POS = {
   screener: [70, 46], market: [190, 46], desk: [310, 46], commander: [430, 46],
@@ -1755,7 +1755,7 @@ const TL_CARD = [500, 18, 190, 112]; // 作战卡：左、上、宽、高
 const TP = {
   ...TL_POS, card: [500, 46], cardOut: [540, 130], cardBus: [540, 168], busSentinel: [190, 168], busRisk: [430, 168], commanderB: [430, 124],
   execOut: [600, 300], ringIn: [687, 360], busBook: [70, 410], busSentinelB: [190, 410], ringBus: [683, 410], ring: TL_RING,
-  predictorB: [310, 265], keeperB: [735, 269], assistantB: [865, 269], patrolL: [848, 350], lifeboatR: [732, 500], reconcilerT: [800, 522],
+  predictorB: [310, 265], keeperB: [735, 276], assistantB: [865, 276], patrolL: [848, 350], lifeboatR: [732, 500], reconcilerT: [800, 518],
   exitA: [890, 470], exitB: [952, 522], alerting: [80, 572],
 };
 // 每种动作走哪条路（kind 和后端 jiaoyi.panel.live.KINDS 一一对应）。"@pos" = 这笔仓位在圈里的位置；
@@ -1772,6 +1772,8 @@ const LIVE_PATHS = {
   against_meeting: ["sentinel", "busSentinel", "busRisk", "commanderB"],
   against_log: ["sentinel"],
   regime: ["desk"],
+  regime_market: ["market"],
+  regime_watch: ["sentinel"],
   sentinel: ["sentinel"],
   predict: ["predictorB", "gate"],
   verdict: ["gate"],
@@ -1796,7 +1798,9 @@ const LIVE_PATHS = {
   book: ["book_reader", "sentinel"],
 };
 // 动作落在哪个角色上（列表里显示谁、点一条高亮谁）
-const LIVE_ROLE = { screen: "screener", meeting: "commander", card: "card", desk: "desk", regime: "desk", book: "book_reader" };
+const LIVE_ROLE = { screen: "screener", meeting: "commander", card: "card", desk: "desk", regime: "desk", regime_market: "market", book: "book_reader" };
+// 执行器平仓从促成它的角色出发（后端 live.CLOSE_BY）：管家、巡逻兵、交易所托管的止损 / 止盈 / 到时（保命止损）、对账员
+const VIA_PT = { keeper: "keeperB", patrol: "patrolL", lifeboat: "lifeboatR", reconciler: "reconcilerT" };
 const liveRole = (ev) => LIVE_ROLE[ev.kind] || ev.role;
 const LIVE_GAP_MS = 350;   // 两个光点至少隔这么久（每秒最多 3 个左右）
 const LIVE_QUEUE_MAX = 8;  // 排队上限：再多就先丢常规动作，再丢最旧的
@@ -1819,7 +1823,8 @@ function posPoint(ring, pid) {
 }
 // 一个动作的路线：点列表 + 是不是停在半路（被拒）
 function livePath(ev, ring) {
-  const keys = LIVE_PATHS[ev.kind] || [liveRole(ev)];
+  let keys = LIVE_PATHS[ev.kind] || [liveRole(ev)];
+  if (ev.kind === "close" && VIA_PT[ev.via]) keys = [VIA_PT[ev.via], ...keys];
   const stop = keys[keys.length - 1] === "stop";
   const pts = keys.filter((k) => k !== "stop").map((k) => (k === "@pos" ? posPoint(ring || [], ev.position_id) : TP[k])).filter(Boolean);
   return { pts: pts.length ? pts : [TL_RING], stop };
@@ -1914,14 +1919,24 @@ function svgEl(tag, attrs, parent) {
   if (parent) parent.appendChild(e);
   return e;
 }
-function liveTag(fx, [x, y], text, tone, ms) {
+// 标签不叠：新标签出现时，和它挡在一起的、还在走的旧标签先藏起来（让给新的）；停着的标签往上排成一摞
+const TAGS = new Set();
+const clash = (o, x, y, w) => o.x < x + w && x < o.x + o.w && Math.abs(o.y - y) < 20;
+function liveTag(fx, [x, y], text, tone, ms, moving = false) {
   const g = svgEl("g", { class: `tl-tag ${tone}` }, fx);
   const t = svgEl("text", { x: x + 9, y: y - 9 }, g);
   t.textContent = text;
-  const w = Math.min(220, text.length * 11 + 10);
-  g.insertBefore(svgEl("rect", { x: x + 4, y: y - 23, width: w, height: 19, rx: 6 }), t);
-  setTimeout(() => g.remove(), ms);
-  return g;
+  let w = text.length * 11 + 10;
+  try { w = t.getComputedTextLength() + 12; } catch (e) { /* 没排版（测试 / 隐藏）就按字数估 */ }
+  for (const o of TAGS) if (o.moving && clash(o, x, y, w)) o.g.classList.add("hide");
+  let ty = y;
+  while ([...TAGS].some((o) => !o.moving && clash(o, x, ty, w))) ty -= 21;
+  t.setAttribute("y", ty - 9);
+  g.insertBefore(svgEl("rect", { x: x + 4, y: ty - 23, width: w, height: 19, rx: 6 }), t);
+  const rec = { g, x, y: ty, w, x0: x, moving };
+  TAGS.add(rec);
+  setTimeout(() => { g.remove(); TAGS.delete(rec); }, ms);
+  return rec;
 }
 function liveHalo(fx, [x, y], tone) {
   const c = svgEl("circle", { cx: x, cy: y, r: 8, class: `tl-halo ${tone}` }, fx);
@@ -1946,7 +1961,7 @@ function liveFire(fx, ev) {
   for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); segs.push(d); total += d; }
   const dur = Math.max(600, Math.min(1600, total / 0.38));
   const dot = svgEl("circle", { r: ev.routine ? 4 : 6, class: `tl-dot ${tone}` }, fx);
-  const tag = ev.routine && !(ev.count > 1) ? null : liveTag(fx, pts[0], label, tone, dur + 200);
+  const tag = ev.routine && !(ev.count > 1) ? null : liveTag(fx, pts[0], label, tone, dur + 200, true);
   const t0 = performance.now();
   const step = (now) => {
     const k = Math.min(1, (now - t0) / dur);
@@ -1956,7 +1971,7 @@ function liveFire(fx, ev) {
     const x = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f, y = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f;
     dot.setAttribute("cx", x);
     dot.setAttribute("cy", y);
-    if (tag) tag.setAttribute("transform", `translate(${x - pts[0][0]},${y - pts[0][1]})`);
+    if (tag) { tag.x = x; tag.y = y; tag.g.setAttribute("transform", `translate(${x - tag.x0},${y - pts[0][1]})`); }
     if (k < 1 && !document.hidden) requestAnimationFrame(step);
     else { dot.remove(); finish(); }
   };
@@ -2130,7 +2145,7 @@ function tlNodeHtml(k, d, by) {
   const [line, lc] = tlRoleLine(r, d);
   const tag = { gate: "Jev", predictor: "Kronos" }[k];
   const chip = TL_CHIP[k] ? `<em class="tl-chip">${TL_CHIP[k]}</em>` : "";
-  return tlBox(k, `<span class="nm">${hdot(r.state, r.status)}${esc(TL_NAME[k] || r.name)}${tag ? `<em class="tg">${tag}</em>` : ""}</span><small class="${lc}">${esc(line)}</small><small class="cnt">${tlCount(r.calls, r.rejected, r.errors, r.cost_usd)}</small>${chip}`, `${r.progress}${sel}`, `#team/${k}`, [r.status, r.headline, r.summary ? "刚刚：" + r.summary : ""].filter(Boolean).join("\n"));
+  return tlBox(k, `<span class="nm">${hdot(r.state, r.status)}${esc(TL_NAME[k] || r.name)}${tag ? `<em class="tg">${tag}</em>` : ""}</span><small class="ln ${lc}">${esc(line)}</small><small class="cnt">${tlCount(r.calls, r.rejected, r.errors, r.cost_usd)}</small>${chip}`, `${r.progress}${sel}`, `#team/${k}`, [line, r.status, r.headline, r.summary ? "刚刚：" + r.summary : ""].filter(Boolean).join("\n"));
 }
 // 作战卡票根：版本号（实时动作里刚出的卡会先把号顶上去）、几个可做、离过期还有多久
 function tlCardHtml() {
@@ -2156,16 +2171,16 @@ function tlWires() {
     ${lbl(98, 38, "候选池")}${lbl(214, 38, "上会名单")}${lbl(334, 38, "大盘背景")}${lbl(452, 38, "写卡")}
     <path class="feed slow" d="M540,130 V168 H190 V291"/><path class="feed slow" d="M430,168 V291"/>
     ${lbl(196, 186, "方向 · 关键价位", "slow")}${lbl(436, 186, "止损范围 · 仓位上限", "slow")}
-    <path class="feed slow" d="M690,96 C728,104 735,150 735,203"/>${lbl(742, 190, "反向 / 中性卡规则", "slow")}
+    <path class="feed slow" d="M690,96 C728,104 735,150 735,196"/>${lbl(742, 190, "反向 / 中性卡规则", "slow")}
     ${lane(300, 30, 600, "entry")}<path class="metro entry" d="M600,300 C640,300 662,330 687,360"/>
     ${["book_reader", "sentinel", "gate", "risk_guard", "executor"].map((k) => st(k, "entry")).join("")}
     ${lbl(92, 292, "盘口 · 成交")}${lbl(232, 292, "信号")}${lbl(380, 292, "做不做")}${lbl(470, 292, "放行")}${lbl(604, 290, "成交 → 快环", "entry")}
     <path class="feed thin" d="M200,292 Q226,240 254,236"/>${lbl(206, 250, "K 线")}
     <path class="feed thin" d="M310,265 V291"/>${lbl(316, 282, "名次加分")}
-    <path class="bus" d="M70,378 V410 H683"/><path class="bus" d="M190,378 V410"/><circle class="junc" cx="190" cy="410" r="4"/>
+    <path class="bus" d="M70,392 V410 H683"/><path class="bus" d="M190,392 V410"/><circle class="junc" cx="190" cy="410" r="4"/>
     ${lbl(200, 428, "行情总线：盘口员推送 → 哨兵统一取数 → 管家 · 巡逻兵 · 预测员 · 大盘检查", "bus")}
     <circle class="ring-band" cx="${cx}" cy="${cy}" r="${TL_RING_R}"/><circle class="ring-dash" cx="${cx}" cy="${cy}" r="${TL_RING_R}"/><circle class="ring-in" cx="${cx}" cy="${cy}" r="88"/>
-    <path class="spoke" d="M735,269 L772,285 M865,269 L828,285 M848,350 L912,372 M732,500 L712,470 M800,522 V513"/>
+    <path class="spoke" d="M735,276 L772,290 M865,276 L828,290 M848,350 L912,372 M732,500 L712,470 M800,518 V513"/>
     <path class="exit" d="M890,470 C915,490 930,505 952,522" marker-end="url(#tl-ar)"/>
   </svg>`;
 }

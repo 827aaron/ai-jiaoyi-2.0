@@ -436,11 +436,14 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tl-lane.l2 b { color: var(--lane-entry); }
 .tl-lane.l3 b { color: var(--lane-fast); }
 .tl-lane.l2 span, .tl-lane.l3 span { display: none; }
-.tl-node { position: absolute; width: 112px; height: 66px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; display: flex; flex-direction: column; gap: 1px; color: inherit; text-decoration: none; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 16px -12px rgba(0, 0, 0, 0.25); transition: transform 0.15s, box-shadow 0.15s; }
+.tl-node { position: absolute; width: 112px; height: 80px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; display: flex; flex-direction: column; gap: 1px; color: inherit; text-decoration: none; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 16px -12px rgba(0, 0, 0, 0.25); transition: transform 0.15s, box-shadow 0.15s; }
 .tl-node:hover { transform: translateY(-2px); box-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.35); }
 .tl-node .nm { display: flex; align-items: center; gap: 5px; font-weight: 600; font-size: 12.5px; color: var(--hi); white-space: nowrap; }
 .tl-node .tg { margin-left: auto; font-style: normal; font-weight: 500; font-size: 10px; color: var(--dim); }
 .tl-node small { font-size: 11px; line-height: 15px; color: var(--tx); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-node small.ln { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
+.tl-node.side { height: 66px; }
+.tl-node.side small.ln { -webkit-line-clamp: 1; line-clamp: 1; }
 .tl-node small.cnt { color: var(--dim); font-variant-numeric: tabular-nums; }
 .tl-node small.now { color: var(--accent); font-weight: 600; }
 .tl-node small.against { color: var(--warn); font-weight: 600; }
@@ -450,13 +453,13 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tl-node.err { border-color: color-mix(in srgb, var(--err) 50%, var(--line)); }
 .tl-node.on { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; }
 .tl-node.side { border-style: dashed; background: color-mix(in srgb, var(--card) 75%, transparent); }
-.tl-node.g { transform: translate(-50%, -50%); width: 104px; height: 62px; }
+.tl-node.g { transform: translate(-50%, -50%); width: 108px; height: 76px; }
 .tl-node.g:hover { transform: translate(-50%, -50%) translateY(-2px); }
 .hs { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; background: var(--ok-lamp); }
 .hs.warn { background: var(--amber); }
 .hs.err { background: var(--err); }
 .hs.off { background: var(--off); }
-.tl-pair { position: absolute; width: 262px; height: 66px; transform: translate(-50%, -50%); display: flex; background: var(--card); border: 1px solid color-mix(in srgb, var(--lane-fast) 40%, var(--line)); border-radius: 12px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane-fast) 9%, transparent); }
+.tl-pair { position: absolute; width: 262px; height: 80px; transform: translate(-50%, -50%); display: flex; background: var(--card); border: 1px solid color-mix(in srgb, var(--lane-fast) 40%, var(--line)); border-radius: 12px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane-fast) 9%, transparent); }
 .tl-pair .tl-node { position: relative; flex: 1; width: auto; height: 100%; border: 0; box-shadow: none; background: none; min-width: 0; }
 .tl-pair .tl-node:hover { transform: none; }
 .tl-pair .lk + .tl-node { border-left: 1px solid var(--line); border-radius: 0 12px 12px 0; }
@@ -503,6 +506,8 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tl-fx .tl-halo.reject, .tl-fx .tl-halo.error { stroke: var(--err); }
 @keyframes tl-halo { from { r: 8; opacity: 0.9; } to { r: 26; opacity: 0; } }
 .tl-fx .tl-tag rect { fill: var(--card); stroke: var(--line2); }
+.tl-fx .tl-tag { transition: opacity 0.2s; }
+.tl-fx .tl-tag.hide { opacity: 0; }
 .tl-fx .tl-tag text { font: 600 11.5px var(--font); fill: var(--hi); stroke: none; }
 .tl-fx .tl-tag.reject rect, .tl-fx .tl-tag.error rect { fill: var(--down-soft); stroke: var(--err); }
 .tl-fx .tl-tag.reject text, .tl-fx .tl-tag.error text { fill: var(--err); }
