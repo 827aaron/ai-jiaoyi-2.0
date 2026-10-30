@@ -285,6 +285,7 @@ class PanelFiles:
         notional: dict[str, float] = {}
         protection: dict[str, object] = {}
         filled: set[str] = set()
+        frozen: dict[str, str] = {}
         for t in (raw.get("positions") or {}).values():
             try:
                 rec = PositionRecord.model_validate(t["record"])
@@ -296,6 +297,9 @@ class PanelFiles:
                 protection[rec.position_id] = t["server_protection"]
             if _exit_filled(t):
                 filled.add(rec.position_id)
+            fp = t.get("frozen_peak_exit")
+            if isinstance(fp, dict) and isinstance(fp.get("status"), str):
+                frozen[rec.position_id] = fp["status"]
         paper = self._paper.get()
         actual: dict[str, PositionRecord] = {}
         if paper and self.paper_book_pnl():
@@ -325,6 +329,7 @@ class PanelFiles:
             else {},
             last_equity=_float(raw.get("last_equity_usdt")),
             protection=protection,
+            frozen_peak=frozen,
         )
 
     def exit_fills(self) -> dict[str, datetime]:
@@ -389,6 +394,8 @@ class Ledger:
     exit_filled: set[str] = field(default_factory=set)
     """Position ids whose exit order has filled on the exchange; the ledger still says closing
     until the protection legs are cancelled and zero is verified."""
+    frozen_peak: dict[str, str] = field(default_factory=dict)
+    """持仓号 → 冻结盈利价回访的状态（collecting / frozen / triggered …）；没开这条的仓没有。"""
     paper: dict[str, PaperStop] = field(default_factory=dict)
     """Position id -> its paper stop booking, whether or not ``positions`` uses it."""
     actual: dict[str, PositionRecord] = field(default_factory=dict)

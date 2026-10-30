@@ -845,3 +845,34 @@ tr.fade td { opacity: 0.55; }
 .pnl-curve circle { vector-effect: non-scaling-stroke; stroke: var(--card); stroke-width: 2; }
 .pnl-curve circle.hi { fill: var(--up); } .pnl-curve circle.lo { fill: var(--down); } .pnl-curve circle.now { fill: var(--hi); }
 .pc-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
+
+/* ---- 总览：防线状态 */
+.df-list { display: flex; flex-direction: column; }
+.df-row { display: grid; grid-template-columns: minmax(120px, .9fr) minmax(0, 1.2fr) minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 1.9fr); gap: 12px; align-items: baseline; padding: 6px 4px; font-size: 13px; border-top: 1px solid var(--line); color: var(--tx); text-decoration: none; }
+.df-row > * { min-width: 0; }
+.df-row.df-head { border-top: 0; padding-top: 0; font-size: 12px; color: var(--dim); }
+a.df-row:hover { background: var(--bg); }
+.df-row.off .df-n { color: var(--dim); }
+.df-n { font-weight: 600; color: var(--hi); white-space: nowrap; }
+.df-last { display: flex; gap: 6px; align-items: baseline; }
+.df-last .num { flex: none; color: var(--dim); font-size: 12px; }
+.df-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; background: var(--faint); }
+.df-dot.ok { background: var(--up); }
+.df-dot.active { background: var(--accent); }
+.df-dot.warn { background: var(--warn); }
+.df-dot.off { background: transparent; box-shadow: inset 0 0 0 1px var(--faint); }
+@media (max-width: 900px) {
+  .df-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "n sw" "now now" "day day" "last last"; row-gap: 2px; padding: 8px 2px; }
+  .df-row.df-head { display: none; }
+  .df-row.off { grid-template-areas: "n sw"; }
+  .df-row.off .df-now, .df-row.off .df-day, .df-row.off .df-last { display: none; }
+  .df-sw .small { display: none; }
+  .df-n { grid-area: n; } .df-sw { grid-area: sw; text-align: right; } .df-now { grid-area: now; } .df-day { grid-area: day; color: var(--dim); font-size: 12px; } .df-last { grid-area: last; font-size: 12px; }
+}
+.entry-why { line-height: 1.6; overflow-wrap: anywhere; }
+.entry-why > b { color: var(--hi); margin-right: 4px; }
+.tl-node small.ln.one { -webkit-line-clamp: 1; line-clamp: 1; }
+.tl-stage .tl-node.gate2 { height: 94px; }
+.tl-node small.gate { color: var(--dim); white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
+.tl-node small.gate.against { color: var(--warn); font-weight: 600; }
+.trail-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between; }

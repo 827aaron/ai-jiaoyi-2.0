@@ -114,3 +114,18 @@ def test_tier_rows_use_the_same_role_registry(tmp_path: Path) -> None:
         if k not in named and not any(k.startswith(g) for g in [*globs, *prefixes])
     )
     assert loose == [], f"这些档位参数没分到角色：{loose}"
+
+
+def test_market_trail_settings_sit_with_risk_guard_not_sentinel() -> None:
+    """``signal_market_trail_*`` 按前缀会归哨兵；它拦的是开仓，点名放在风控员。"""
+    block = _roles_block()
+    guard = block[block.index('{ id: "risk_guard"') : block.index('{ id: "executor"')]
+    sentinel = block[block.index('{ id: "sentinel"') : block.index('{ id: "risk_guard"')]
+    keys = [
+        "fast_loop.signal_market_trail_on",
+        "fast_loop.signal_market_trail_k",
+        "fast_loop.signal_market_trail_ref",
+        "fast_loop.signal_market_trail_shadow",
+    ]
+    assert [k for k in keys if f'"{k}"' in guard] == keys
+    assert [k for k in keys if k in sentinel] == []

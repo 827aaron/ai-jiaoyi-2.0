@@ -44,6 +44,8 @@ from jiaoyi.panel.actions import (
     editable_fields,
 )
 from jiaoyi.panel.card_dir import HoldCard, commander_steps, hold_card
+from jiaoyi.panel.defences import MarketTrailView
+from jiaoyi.panel.entry_reason import EntryReason, entry_facts, entry_reason
 from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meaning import SettingsMeaning, build_meaning
@@ -58,6 +60,7 @@ from jiaoyi.panel.overview import (
     day_refs_at,
     fee_rate_bps,
     position_views,
+    symbol_live,
 )
 from jiaoyi.slow.desk_intra import compose_intra
 from jiaoyi.slow.review import CardJournal, JournalRow
@@ -469,6 +472,8 @@ class TeamPage(BaseModel):
     """选中大盘台时：最近两轮（新的在前），记录列表上面并排两张卡。"""
     prompts: PromptsInfo | None = None
     """军师团现在用的提示词档（团队页军师团 / 总盘会显示）。"""
+    market_trail: MarketTrailView | None = None
+    """风控员节点的大盘闸门一行、选中风控员时详情顶上的状态条。"""
 
 
 def build_positions(
@@ -776,7 +781,12 @@ def build_team(
         if role is Role.SENTINEL and card.detail:
             held = {p.symbol for p in live}
             cv = _card(records, now, held)
-            keep = held | ({r.symbol for r in cv.symbols} if cv is not None and cv.valid else set())
+            on_card = (
+                {r.symbol for r in cv.symbols if symbol_live(r, cv.expires_at, now)}
+                if cv is not None
+                else set()
+            )
+            keep = held | on_card
             shown = [ln for ln in card.detail if ln.split(" ", 1)[0] in keep]
             card.detail_hidden = len(card.detail) - len(shown)
             card.detail = shown
@@ -1078,6 +1088,7 @@ class TradeRow(BaseModel):
     demo_exit_price: float | None = None
     demo_pnl_usdt: float | None = None
     hold_card: HoldCard | None = None
+    entry: EntryReason | None = None
     """持有期间作战卡上这个币的方向和管家卡规则的处理；``closed_by`` 说管家平仓是不是卡规则。"""
 
 
@@ -1354,6 +1365,7 @@ def build_history(
         frozenset({Role.SENTINEL, Role.GATE, Role.RISK_GUARD, Role.KEEPER, Role.COMMANDER}),
     )
     dir_steps = commander_steps(recs, now)
+    facts = entry_facts(recs)
     keeper_of: dict[str, list[DecisionRecord]] = {}
     for r in recs:
         if r.role is Role.KEEPER and r.position_id:
@@ -1491,6 +1503,9 @@ def build_history(
                     keeper_of.get(p.position_id, []),
                     keeper_closed=p.close_reason is CloseReason.KEEPER,
                 ),
+                entry=None
+                if unfilled
+                else entry_reason(p, dir_steps.get(p.symbol), facts, kind_of.get(p.signal_id)),
             )
         )
     real = [t for t in rows if not t.unfilled]
