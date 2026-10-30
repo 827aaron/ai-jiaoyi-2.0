@@ -1203,7 +1203,8 @@ class Runner:
         gross = sign * current.quantity * (booked.paper_exit_price - current.entry_price)
         then = "Demo 的止损已在退出，只记账" if exiting else "已要求平 Demo 仓"
         summary = (
-            f"{current.symbol} 主网{source_cn} {price:g} 越过止损 {stop[1]:g}，"
+            f"{current.symbol} 主网{source_cn} {price:g} 碰到{paper_stop.stop_source_cn(stop[0])} "
+            f"{stop[1]:g}，"
             f"模拟按 {booked.paper_exit_price:g} 平（毛利 {gross:+.2f}U），{then}"
         )
         rec = self.app.recorders.get(Role.PATROL)
@@ -1229,7 +1230,13 @@ class Runner:
         ex = self.m.executor
         if isinstance(ex, _PaperStopLevels):
             try:
-                ex.note_close_detail(pos.position_id, paper_stop.PAPER_STOP_DETAIL)
+                booked = self._paper_stops.get(pos.position_id)
+                detail = (
+                    paper_stop.close_detail(booked)
+                    if booked is not None
+                    else paper_stop.PAPER_STOP_DETAIL
+                )
+                ex.note_close_detail(pos.position_id, detail)
             except Exception:
                 log.exception("记平仓原因失败 %s", pos.position_id)
         self._spawn(self.close(pos, CloseReason.STOP_LOSS), Role.PATROL)

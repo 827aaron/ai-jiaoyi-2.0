@@ -35,6 +35,14 @@ PAPER_STOP_DETAIL = "主网价格越过止损"
 
 PriceSource = Literal["mark", "last"]
 
+_STOP_SOURCE_CN = {
+    "ledger": "固定止损",
+    "hosted": "交易所止损单",
+    "trailing": "移动止损",
+    "tightened": "反向卡收紧止损",
+    "lifeboat": "保命单",
+}
+
 
 class PaperStop(BaseModel):
     """One booked paper exit. ``paper_exit_price`` replaces Demo's fill in panel accounting."""
@@ -260,4 +268,20 @@ def book_stop(
         slippage_bps=slippage_bps,
         paper_exit_price=paper_exit_price(rec.side, level, slippage_bps, price),
         close_requested=close_requested,
+    )
+
+
+def stop_source_cn(source: str) -> str:
+    return _STOP_SOURCE_CN.get(source, source)
+
+
+def close_detail(booked: PaperStop) -> str:
+    """The noted close detail: which stop the mainnet price crossed, and at what price.
+
+    Starts with ``PAPER_STOP_DETAIL`` because the executor recognises the note by that prefix.
+    """
+    src = stop_source_cn(booked.stop_source)
+    price = "标记价" if booked.price_source == "mark" else "成交价"
+    return (
+        f"{PAPER_STOP_DETAIL}：主网{price} {booked.cross_price:g} 碰到{src} {booked.stop_price:g}"
     )
