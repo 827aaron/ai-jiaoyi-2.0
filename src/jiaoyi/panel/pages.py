@@ -1532,6 +1532,8 @@ class PnlPeriod(BaseModel):
     """AI 调用花费（美元，按 1 U 算）。"""
     net_usdt: float
     """交易盈亏 + 手续费 + 资金费 − AI 费（资金费拿不到时不算它）。"""
+    since: date | None = None
+    """这一段从哪天（当地日，含）算起；到今天为止。"""
 
 
 AiRange = Literal["today", "7d", "all"]
@@ -1835,7 +1837,7 @@ def _pnl_periods(
             funding = None
         net = trading + fees + (funding or 0.0) - ai
         out.append(PnlPeriod(key=key, label=label, trading_usdt=trading, fees_usdt=fees,
-                             funding_usdt=funding, ai_usd=ai, net_usdt=net))  # fmt: skip
+                             funding_usdt=funding, ai_usd=ai, net_usdt=net, since=lo))  # fmt: skip
     return out, ("exchange" if income else "ledger"), since
 
 
