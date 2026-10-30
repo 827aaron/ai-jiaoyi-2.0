@@ -40,6 +40,7 @@ from jiaoyi.market.rest import RateLimited, WeightBudget
 from jiaoyi.panel import actions, pending_config, pnl_curve, setup
 from jiaoyi.panel.actions import ActionError, ConfigPaths, Section
 from jiaoyi.panel.card_history import CardHistoryPage, build_card_history
+from jiaoyi.panel.defences import market_trail_view
 from jiaoyi.panel.files import PanelFiles, read_live_gate
 from jiaoyi.panel.hb import HbReader
 from jiaoyi.panel.live import LiveFeed, LiveSource
@@ -534,7 +535,8 @@ def create_app(
 
     @api.get("/api/team")
     async def team(role: str | None = None) -> TeamPage:
-        ac = cfg()[1]
+        rc, ac = cfg()
+        now = clock()
         fl = ac.fast_loop
         th = {
             "min_p_genuine": fl.min_p_genuine,
@@ -553,12 +555,13 @@ def create_app(
         except ValueError:
             raise HTTPException(status_code=422, detail="未知角色") from None
         page = build_team(
-            files, clock(), picked, ac.predictor.mode, th,
+            files, now, picked, ac.predictor.mode, th,
             desk_schedule=schedule, desk_selected=desk_selected,
             gate_take_by_kind={k.value: v for k, v in fl.min_p_take_by_kind.items()},
             switched_off=switched_off_roles(ac),
         )  # fmt: skip
-        return page.model_copy(update={"prompts": prompts_info(files)})
+        trail = market_trail_view(files.root, ac, files.decisions_today(now), now, rc.day_reset_tz)
+        return page.model_copy(update={"prompts": prompts_info(files), "market_trail": trail})
 
     live_src = LiveSource(files)
 

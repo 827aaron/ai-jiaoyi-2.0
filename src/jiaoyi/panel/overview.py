@@ -42,6 +42,8 @@ from jiaoyi.panel.card_dir import (
     replay,
     window,
 )
+from jiaoyi.panel.defences import DefenceRow, defence_rows
+from jiaoyi.panel.entry_reason import EntryReason, entry_facts, entry_reason
 from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meetings import STAGES, read_meeting
@@ -183,6 +185,7 @@ class CardView(BaseModel):
     created_at: datetime
     expires_at: datetime | None
     valid: bool
+    """还有币在自己的到期时间之内（每个币按自己那场会到期，翻转后可能比整张卡晚）。"""
     regime: str
     current_market: MarketView | None = None
     desk_latest: DeskLatest | None = None
@@ -196,6 +199,17 @@ class CardView(BaseModel):
     """风控员下单实际用的杠杆：作战卡不约束（默认）时就是硬上限；约束时为 None（按各币卡上的）。"""
     risk_per_trade_usdt: float | None = None
     """L 档每笔风险 = 总资产 × 每笔风险%；S / M 再乘 ``size_fractions``。拿不到总资产时 None。"""
+    card_expired: bool = False
+    """整张卡的 ``expires_at`` 已过；``valid`` 仍可能是 True（还有币没到自己的期）。"""
+    live_symbols: int = 0
+    live_until: datetime | None = None
+    """还有效的币里最晚到期的那个时间。"""
+
+
+def symbol_live(row: CardRow, card_expires: datetime | None, now: datetime) -> bool:
+    """这个币在卡上还有效：按它自己的到期时间，没有就按整张卡的。"""
+    exp = row.expires_at or card_expires
+    return exp is None or now < exp
 
 
 class FeedItem(BaseModel):
@@ -282,6 +296,7 @@ class PositionView(BaseModel):
     fee_from_fills: bool = False
     """费率是从最近平掉的单实收倒推的（True），还是配置里的 ``taker_fee_bps``（False，只是估）。"""
     hold_card: HoldCard | None = None
+    entry: EntryReason | None = None
     """持有期间作战卡上这个币的方向和管家卡规则的处理（军师团记录只读昨天和今天）。"""
 
 
@@ -353,6 +368,9 @@ class Overview(BaseModel):
     alerts: list[AlertItem]
     blocked: dict[str, str]
     control: Control = Control()
+    defences: list[DefenceRow] = []
+    held_loss_r: float = 0.0
+    """``fast_loop.patrol_held_event_loss_r``：开会原因 held_reverse_loss 写成「亏损 ≥xR」用。"""
 
 
 _HEALTH_LAMP: dict[Health, LampState] = {
@@ -469,6 +487,8 @@ def build_overview(
         tiles=tiles,
         alerts=_alerts(records, halted, halt_pct),
         blocked=files.blocked(),
+        defences=defence_rows(files.root, app, risk, ledger, positions, kpis, records, recent, now),
+        held_loss_r=app.fast_loop.patrol_held_event_loss_r,
     )
 
 
@@ -702,6 +722,7 @@ def position_views(
                 trail_of[str(o["intent_id"])] = (float(act), float(delta))
     at = now or datetime.now(UTC)
     dir_steps = commander_steps(records, at)
+    facts = entry_facts(records)
     keeper_of: dict[str, list[DecisionRecord]] = {}
     for r in records:
         if r.role is Role.KEEPER and r.position_id:
@@ -829,6 +850,7 @@ def position_views(
                     at,
                     keeper_of.get(p.position_id, []),
                 ),
+                entry=entry_reason(p, dir_steps.get(p.symbol), facts),
             )
         )
     return out
@@ -1141,12 +1163,17 @@ def _card(
     tradable = [s for s in syms if s.bias.value != "no_trade"]
     version = last.output.get("version")
     expires = _parse_ts(last.output.get("expires_at"))
+    live = [r for r in rows if r.bias != "unknown" and symbol_live(r, expires, now)]
+    ends = [e for r in live if (e := r.expires_at or expires) is not None]
     return CardView(
         card_id=last.card_id or "",
         version=version if isinstance(version, int) else None,
         created_at=last.ts,
         expires_at=expires,
-        valid=expires is None or now < expires,
+        valid=bool(live) if rows else expires is None or now < expires,
+        card_expired=expires is not None and now >= expires,
+        live_symbols=len(live),
+        live_until=max(ends, default=None),
         regime=str(last.output.get("regime", "")),
         current_market=latest_market,
         symbols=rows,

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from jiaoyi.contracts import DecisionRecord, Outcome, Role
 from jiaoyi.contracts.battle_card import CardSymbol
@@ -29,6 +29,10 @@ class DirStep(BaseModel):
     """这之后卡上生效的方向（交易系统真正用的，含翻转滞回）：long / short / neutral。"""
     event: str | None = None
     """``card_flip`` 记录：ignored（会判观望、按设置保留原方向）/ pending / confirmed / …。"""
+    since: datetime | None = None
+    """卡上生效的那条来自哪场会（会判观望被忽略时是更早那场）；没读到那场会是 None。"""
+    reason: str = Field(default="", exclude=True)
+    """卡上生效的那条的理由（只给开仓理由用，不进接口：每行每步都带会把作战卡数据撑大）。"""
 
 
 @dataclass
@@ -39,6 +43,10 @@ class _Track:
     fresh: CardSymbol | None = None
     stash: CardSymbol | None = None
     """待确认翻转期间被换成只看不做之前的那条（恢复原方向时用）。"""
+    eff_at: datetime | None = None
+    before_at: datetime | None = None
+    fresh_at: datetime | None = None
+    stash_at: datetime | None = None
     after_meeting: bool = False
     steps: list[DirStep] = field(default_factory=list)
 
@@ -68,12 +76,14 @@ def replay(cmd: list[DecisionRecord]) -> dict[str, _Track]:
         cs = _meeting_cs(r)
         if cs is not None:
             t.before, t.fresh, t.eff, t.after_meeting = t.eff, cs, cs, True
-            t.steps.append(DirStep(ts=r.ts, meeting=card_direction(cs), card=card_direction(cs)))
+            t.before_at, t.fresh_at, t.eff_at = t.eff_at, r.ts, r.ts
+            d = card_direction(cs)
+            t.steps.append(DirStep(ts=r.ts, meeting=d, card=d, since=r.ts, reason=cs.reason))
             continue
         if r.outcome is Outcome.INFO and r.output.get("market_review") == "superseded":
             # 临时会开完时卡上这个币已换成别的研究：这场结论没上卡
             if t.after_meeting and t.steps:
-                t.eff, t.after_meeting = t.before, False
+                t.eff, t.eff_at, t.after_meeting = t.before, t.before_at, False
                 t.steps.pop()
             continue
         ev = r.output.get("card_flip") if r.outcome is Outcome.INFO else None
@@ -82,23 +92,44 @@ def replay(cmd: list[DecisionRecord]) -> dict[str, _Track]:
         right_after, t.after_meeting = t.after_meeting, False
         if ev == "ignored" and right_after and t.before is not None:
             t.eff = t.before.model_copy(update={"expires_at": t.eff.expires_at if t.eff else None})
+            t.eff_at = t.before_at
         elif ev == "ignored" and not right_after and t.stash is not None:
-            t.eff, t.stash = t.stash, None  # 切到 ignore 时把转观望的候选恢复成原方向
+            t.eff, t.eff_at, t.stash = (
+                t.stash,
+                t.stash_at,
+                None,
+            )  # 切到 ignore 时把转观望的候选恢复成原方向
         elif ev == "pending" and t.before is not None:
-            t.stash = t.stash or t.before
+            if t.stash is None:
+                t.stash, t.stash_at = t.before, t.before_at
             t.eff = t.before.model_copy(update={"allowed_signals": []})
+            t.eff_at = t.before_at
         elif ev == "confirmed" and t.fresh is not None:
-            t.eff, t.stash = t.fresh, None
+            t.eff, t.eff_at, t.stash = t.fresh, t.fresh_at, None
         elif ev in ("cancelled", "dropped"):
             t.stash = None
         if t.eff is None:
             continue
         if right_after and t.steps:
             t.steps[-1] = t.steps[-1].model_copy(
-                update={"card": card_direction(t.eff), "event": ev}
+                update={
+                    "card": card_direction(t.eff),
+                    "event": ev,
+                    "since": t.eff_at,
+                    "reason": t.eff.reason,
+                }
             )
         elif ev in ("ignored", "confirmed"):
-            t.steps.append(DirStep(ts=r.ts, meeting=None, card=card_direction(t.eff), event=ev))
+            t.steps.append(
+                DirStep(
+                    ts=r.ts,
+                    meeting=None,
+                    card=card_direction(t.eff),
+                    event=ev,
+                    since=t.eff_at,
+                    reason=t.eff.reason,
+                )
+            )
     return tracks
 
 
@@ -188,7 +219,7 @@ class HoldCard(BaseModel):
     """管家平仓（close_reason = keeper）时，最后一次判平是不是卡规则：反向卡 / 观望卡。"""
 
 
-_CARD_CLOSE: dict[str, Literal["opposite_card", "neutral_card"]] = {
+CARD_CLOSE: dict[str, Literal["opposite_card", "neutral_card"]] = {
     "close": "opposite_card",
     "confirmed_close": "opposite_card",
     "tighten_close": "opposite_card",
@@ -206,7 +237,7 @@ _PRIORITY: dict[str, HoldState] = {
 """同一笔仓碰到几件事时小标写哪件：先反向，再待确认反向、转观望、待确认转观望、会判观望。"""
 
 
-def _action_kind(r: DecisionRecord) -> ActionKind | None:
+def action_kind(r: DecisionRecord) -> ActionKind | None:
     o = r.output
     rule = o.get("card_rule")
     if isinstance(rule, dict) and rule.get("kind") in ("opposite_card", "neutral_card"):
@@ -243,7 +274,7 @@ def hold_card(
     mine = [r for r in keeper if r.role is Role.KEEPER and opened_at <= r.ts <= end]
     actions: list[HoldAction] = []
     for r in mine:
-        kind = _action_kind(r)
+        kind = action_kind(r)
         if kind is None:
             continue
         if actions and actions[-1].kind == kind:
@@ -269,9 +300,9 @@ def hold_card(
         if st.event == "ignored" and st.meeting == "neutral" and st.card == side:
             found.setdefault("neutral_kept", (st.ts, st.card, "neutral"))
         prev = st.card
-    if "against" not in found and any(_CARD_CLOSE.get(a.kind) == "opposite_card" for a in actions):
+    if "against" not in found and any(CARD_CLOSE.get(a.kind) == "opposite_card" for a in actions):
         # 开仓那会儿卡已经反了（会的记录早于开仓几秒）：按管家第一次处理的时间算
-        first = next(a for a in actions if _CARD_CLOSE.get(a.kind) == "opposite_card")
+        first = next(a for a in actions if CARD_CLOSE.get(a.kind) == "opposite_card")
         found["against"] = (first.ts, start, opp)
     key = next((k for k in _PRIORITY if k in found), None)
     state = _PRIORITY[key] if key is not None else None
@@ -285,8 +316,8 @@ def hold_card(
     closed_by = None
     if keeper_closed:
         last_close = next((r for r in reversed(mine) if r.outcome is Outcome.CLOSE), None)
-        kind = _action_kind(last_close) if last_close is not None else None
-        closed_by = _CARD_CLOSE.get(kind) if kind is not None else None
+        kind = action_kind(last_close) if last_close is not None else None
+        closed_by = CARD_CLOSE.get(kind) if kind is not None else None
 
     hit: tuple[datetime | None, str | None, str | None] = (
         found[key] if key is not None else (None, None, None)

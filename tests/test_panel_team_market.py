@@ -65,6 +65,7 @@ const promptLine = () => '', meetingsCard = () => '', quietHead = () => '', pill
 const againstCard = () => '', bookReaderCard = () => '', sentinelCard = () => '';
 const deskRunsCard = (runs) => (runs && runs.length ? 'RUNS' : '');
 const $ = () => null, document = { hidden: false }, addEventListener = () => {};
+const tapx = (k) => `data-tk="${k}"`;
 """
 
 
@@ -181,6 +182,10 @@ const feed = liveFeedHtml(LIVE.feed, 'c');
 assert(feed.indexOf('风控员') < feed.indexOf('持仓管家'), feed);
 assert(feed.includes('class="tl-ev reject on"') && feed.includes('data-act="liveev" data-arg="0"'), feed);
 assert(feed.includes('<em class="tl-tw reject">拒</em>') && feed.includes('×2'), feed);
+// 点行展开全文，「看它走的路」在行尾的 ›；币名后接冒号再接理由
+assert(feed.includes('data-tk="ev:c"') && feed.includes('class="go" data-act="liveev"'), feed);
+// 拒绝：服务端已把理由放在最前，不再叠一个截短的「拒：…」
+assert(feed.includes('<span class="sym">ARB</span>：空 拍板放弃') && !feed.includes('拒：低于门槛'), feed);
 """
     )
     done = subprocess.run([node, "-e", script], capture_output=True, text=True)
@@ -578,3 +583,26 @@ assert.equal(human('Jev 超时（>3000ms）'), 'Jev 超时（>3000ms）');
     )
     done = subprocess.run([node, "-e", script], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-3000:]
+
+
+def test_live_text_puts_the_informative_part_first() -> None:
+    def text(role: c.Role, outcome: c.Outcome, summary: str) -> str:
+        return to_event(_rec(role, outcome, summary, NOW, symbol="AEROUSDT")).text
+
+    rg, rej = c.Role.RISK_GUARD, c.Outcome.REJECT
+    assert text(
+        rg, rej, "AEROUSDT 大盘移动止损：BTC 从涨段高点回落 0.6 ATR，暂停新多单（锁住 3 分钟）"
+    ) == ("大盘移动止损，多单锁住（BTC 回落 0.6 ATR · 已锁 3 分钟）")
+    assert text(rg, rej, "AEROUSDT 多 拒绝：AEROUSDT 已有在管持仓，不开第二笔") == (
+        "已有在管持仓，不开第二笔（多）"
+    )
+    assert text(c.Role.GATE, rej, "AEROUSDT 空 拍板放弃：“做”概率 0.47 低于门槛 0.6") == (
+        "“做”概率 0.47 低于门槛 0.6（空）"
+    )
+    kp, hold = c.Role.KEEPER, c.Outcome.HOLD
+    assert text(kp, hold, "AEROUSDT 拿住：平仓概率 0.77，只记录，不按平仓概率平") == (
+        "拿住 · 平仓概率 0.77（只记录）"
+    )
+    assert text(kp, hold, "AEROUSDT 拿住：平仓概率 0.71") == "拿住 · 平仓概率 0.71"
+    assert text(c.Role.SENTINEL, c.Outcome.ACTION, "AEROUSDT 量能突增（空）") == "量能突增（空）"
+    assert len(text(kp, c.Outcome.INFO, "x" * 400)) == 300

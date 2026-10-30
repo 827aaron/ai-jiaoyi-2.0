@@ -2392,3 +2392,39 @@ def test_feed_shows_risk_guard_notes_as_info() -> None:
         c.Role.RISK_GUARD, c.Outcome.REJECT, "BTCUSDT 大盘移动止损：…", NOW, symbol="BTCUSDT"
     )
     assert [i.kind for i in _feed([note, rej])] == ["block", "info"]
+
+
+@pytest.mark.parametrize(
+    ("aa_until", "want"),
+    [
+        # 整张卡 06:00 到期，AA 自己到 08:00（翻转重置了有效期）：卡还能用
+        (
+            datetime(2026, 10, 22, 8, 0, tzinfo=UTC),
+            (True, True, 1, datetime(2026, 10, 22, 8, 0, tzinfo=UTC)),
+        ),
+        (datetime(2026, 10, 22, 6, 10, tzinfo=UTC), (False, True, 0, None)),
+    ],
+)
+def test_card_valid_judged_per_symbol_expiry(
+    tmp_path: Path, aa_until: datetime, want: tuple[Any, ...]
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    t = lambda h, m=0: datetime(2026, 10, 22, h, m, tzinfo=UTC)  # noqa: E731
+    pool = {
+        "AAUSDT": {"issued_at": t(5).isoformat(), "expires_at": aa_until.isoformat()},
+        "BBUSDT": {"issued_at": t(4).isoformat(), "expires_at": t(6).isoformat()},
+    }
+    for r in [
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "AA", t(5), symbol="AAUSDT",
+             output=_card_cs("AAUSDT", "long", "a")),
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "BB", t(4), symbol="BBUSDT",
+             output=_card_cs("BBUSDT", "short", "b")),
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "出卡", t(5, 1), card_id="card-1",
+             output={"symbols": ["AAUSDT", "BBUSDT"], "expires_at": t(6).isoformat(),
+                     "pool": pool}),
+    ]:  # fmt: skip
+        log.write(r)
+    ov = build_overview(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, _cfg(tmp_path), NOW)
+    card = ov.card
+    assert card is not None
+    assert (card.valid, card.card_expired, card.live_symbols, card.live_until) == want

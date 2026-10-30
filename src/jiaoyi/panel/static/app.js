@@ -503,7 +503,9 @@ document.addEventListener("click", async (e) => {
     try { await onOk(); } catch (err) { dlgMsg(esc(err.message), "down"); } finally { btn.disabled = false; }
     return;
   }
-  const el = e.target.closest("[data-act]");
+  const tk = e.target.closest("[data-tk]"), hit = e.target.closest("[data-act]");
+  if (tk && (!hit || hit.contains(tk))) return toggleTap(tk);
+  const el = hit;
   if (!el) return;
   const { act, arg } = el.dataset;
   if (act === "card") showCard();
@@ -515,6 +517,7 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "meeting") showMeeting(arg);
   else if (act === "record") showRecord(+arg);
+  else if (act === "mtonly") { S.mtOnly = !S.mtOnly; render(); }
   else if (act === "precord") { const [pid, i] = arg.split("|"); window.__recs = ((pageData && pageData.trails) || {})[pid] || []; showRecord(+i); }
   else if (act === "trow") { if (S.tradeOpen.has(arg)) S.tradeOpen.delete(arg); else S.tradeOpen.add(arg); render(); }
   else if (act === "posrow") {
@@ -592,6 +595,14 @@ const human = (t) => {
   return out.replace(/(不?做（\d[\d.]*)(\s*\/)/, "$1）$2");
 };
 const tx = (t) => esc(human(t));
+// 手机没有悬停：截成一两行的文字点一下展开全文，再点收起；记住展开了哪些，定时重画不收起
+S.tapOpen = new Set();
+const tapx = (key) => `data-tk="${esc(key)}" tabindex="0"${S.tapOpen.has(key) ? " data-open" : ""}`;
+function toggleTap(el) {
+  const k = el.dataset.tk;
+  if (S.tapOpen.has(k)) { S.tapOpen.delete(k); el.removeAttribute("data-open"); }
+  else { S.tapOpen.add(k); el.setAttribute("data-open", ""); }
+}
 const clickable = (act, arg = "") => `data-act="${act}" data-arg="${esc(arg)}" tabindex="0" role="button"`;
 const json = (o) => (o && Object.keys(o).length ? `<pre class="json">${esc(JSON.stringify(o, null, 2))}</pre>` : `<span class="dim">（空）</span>`);
 
@@ -850,7 +861,6 @@ function cardWhen(s, now) {
 
 // 卡上方向今天怎么变的（服务端按军师团记录重放，含「会判观望、按设置保留原方向」）
 const DIRW = { long: "多", short: "空", neutral: "观望" };
-const FRESH_FLIP_MS = 60 * 60000;
 function dirChanges(s) {
   const out = [];
   let prev = s.dir_start;
@@ -860,19 +870,8 @@ function dirChanges(s) {
   }
   return out;
 }
-// 行内小标：最近一次变动；最新那场会判观望而卡保留原方向时另标一句
-function dirChips(s, now) {
-  const ch = dirChanges(s), last = ch[ch.length - 1], steps = s.dir_steps || [], tail = steps[steps.length - 1];
-  let out = "";
-  if (last) {
-    const fresh = last.kind === "flip" && now - new Date(last.ts) < FRESH_FLIP_MS;
-    const word = last.kind === "flip" ? (fresh ? "刚翻转" : "翻转") : last.kind === "calm" ? "转观望" : "转向";
-    const tip = `今天卡上方向变过 ${ch.length} 次，其中做多↔做空 ${s.flips_today} 次（点开看经过）`;
-    out += `<span class="pill ${last.kind === "flip" ? "flip" : "calm"}${fresh ? " fresh" : ""}" title="${esc(tip)}">${word} ${DIRW[last.from]}→${DIRW[last.to]} <span class="num">${hm(last.ts)}</span></span>`;
-  }
-  if (tail && tail.event === "ignored" && tail.meeting === "neutral" && tail.card !== "neutral") out += `<span class="pill calm" title="${esc(`${hm(tail.ts)} 那场会判观望，设置是会判观望不翻转，卡上照旧${DIRW[tail.card]}`)}">会判观望·卡保留${DIRW[tail.card]}</span>`;
-  return out;
-}
+// 行内小标只看持卡期间：没持仓的币不标今天的翻转（点开看经过），持仓中的币标持有期里卡上最要紧的那件事
+const cardChip = (s) => { const p = cardPos(s.symbol); return p ? holdChip(p.hold_card) : ""; };
 // 点开后一行：0 点时的方向 → 每次变动（时间 + 方向），今天翻转几次、几场会判观望被忽略
 function dirHistory(s) {
   const steps = s.dir_steps || [];
@@ -963,7 +962,7 @@ function cardRow(s, now) {
   const size = s.size_tier_max ? `${esc(TIER[s.size_tier_max] || s.size_tier_max)}档` : "—";
   const sum = `<summary class="bc-row">
     <span class="bc-sym"><b>${coin(sym)}</b> <span class="dim small">${esc(CAT[s.category] || s.category)}</span></span>
-    <span class="bc-dir"><span class="pill ${dk}">${esc(dt)}</span>${pnl}${fade}${dirChips(s, now)}</span>
+    <span class="bc-dir"><span class="pill ${dk}">${esc(dt)}</span>${pnl}${fade}${cardChip(s)}</span>
     <span class="bc-c sl" data-k="止损">${stop}</span><span class="bc-c tp" data-k="止盈">${tp}</span>
     <span class="bc-c" data-k="杠杆">${lev}</span><span class="bc-c" data-k="仓位">${size}</span>
     <span class="bc-c bc-when" data-k="到期">${cardWhen(s, now)}</span><span class="bc-chev" aria-hidden="true">›</span></summary>`;
@@ -1042,8 +1041,8 @@ function showCard(fetch = true) {
   const sum = `<div class="bc-sum"><span><b>${wait.length}</b> 个币等信号</span><span><b>${held.length}</b> 个持仓中</span><span><b>${idle.length}</b> 个观望</span><span class="dim">点一行展开</span></div>`;
   const head = `<div class="bc-row bc-head" aria-hidden="true"><span>币种</span><span>方向</span><span>止损</span><span>止盈</span><span>杠杆</span><span title="${esc(tierTip(c))}">仓位</span><span>到期</span><span></span></div>`;
   const list = [...held, ...wait];
-  const idleHtml = idle.length ? `<details class="bc-idle"><summary class="dim">${idleLine(idle)}（这一轮不开仓）· 点开看理由</summary><ul>${idle.map((s) => `<li><b>${coin(s.symbol)}</b>${dirChips(s, now)}${esc(s.reason || s.pending || "")} <a class="small" ${clickable("meeting", s.symbol)}>开会过程 ›</a></li>`).join("")}</ul></details>` : "";
-  dlg(`<div class="bc-top"><h3>作战卡</h3><span class="dim small">${hm(c.created_at)} 更新 · 每个币按自己那场会到期${c.valid ? "" : " · <span class='down'>已过期</span>"}</span><a class="small" ${clickable("cardhist")}>看历史卡 ›</a></div>
+  const idleHtml = idle.length ? `<details class="bc-idle"><summary class="dim">${idleLine(idle)}（这一轮不开仓）· 点开看理由</summary><ul>${idle.map((s) => `<li><b>${coin(s.symbol)}</b>${cardChip(s)}${esc(s.reason || s.pending || "")} <a class="small" ${clickable("meeting", s.symbol)}>开会过程 ›</a></li>`).join("")}</ul></details>` : "";
+  dlg(`<div class="bc-top"><h3>作战卡</h3><span class="dim small">${hm(c.created_at)} 更新 · 每个币按自己那场会到期${c.valid && !c.card_expired ? "" : ` · ${cardUntil(c)}`}</span><a class="small" ${clickable("cardhist")}>看历史卡 ›</a></div>
     ${regime}${sum}
     ${list.length ? `<div class="bc-list">${head}${list.map((s) => cardRow(s, now)).join("")}</div>` : '<div class="dim">这一轮没有要做的币，全部观望。</div>'}
     ${idleHtml}`);
@@ -1077,7 +1076,7 @@ function cardScoreBlock(r) {
   const noPool = r.n_no_pool ? ` ${r.n_no_pool} 张方向卡出在有币池记录之前，只算原始、不进超额。` : "";
   const hz = Object.entries(r.horizons).map(([k, v]) => `<tr><td>${SC_H[k] || esc(k)}</td><td class="num">${stat(v.excess)}</td><td class="num">${stat(v.raw)}</td><td class="num">${scBp(v.market.mean_bp)}</td><td class="num">${v.excess.n} / ${v.excess.blocks}</td></tr>`).join("");
   const bl = ((r.baselines || {})["4h"] || []).map((b) => `<tr><td>${esc(b.label)}</td><td class="num">${stat(b.raw)}</td><td class="num">${scPct(b.excess.hit)}</td><td class="num">${b.raw.n}</td></tr>`).join("");
-  const grp = (title, gs) => (gs || []).length ? `<div class="st-sub">${title}</div><div class="tw"><table><thead><tr><th></th><th>卡数（观望）</th><th>超额命中</th><th>平均超额</th><th>原始命中</th><th>一律做空 / 做多</th><th>时段</th></tr></thead><tbody>${gs.map((g) => `<tr><td>${esc(g.key)}</td><td class="num">${g.n_cards}（${g.n_neutral}）</td><td class="num">${scPct(g.excess.hit)}${scCiP(g.excess.hit_ci)}</td><td class="num">${scBp(g.excess.mean_bp)}</td><td class="num">${scPct(g.raw.hit)}</td><td class="num">${scPct(g.always_short.hit)} / ${scPct(g.always_long.hit)}</td><td class="num">${g.excess.blocks}</td></tr>`).join("")}</tbody></table></div>` : "";
+  const grp = (title, gs, reason) => (gs || []).length ? `<div class="st-sub">${title}</div><div class="tw"><table><thead><tr><th></th><th>卡数（观望）</th><th>超额命中</th><th>平均超额</th><th>原始命中</th><th>一律做空 / 做多</th><th>时段</th></tr></thead><tbody>${gs.map((g) => `<tr><td>${esc((reason && meetReason(g.key)) || g.key)}</td><td class="num">${g.n_cards}（${g.n_neutral}）</td><td class="num">${scPct(g.excess.hit)}${scCiP(g.excess.hit_ci)}</td><td class="num">${scBp(g.excess.mean_bp)}</td><td class="num">${scPct(g.raw.hit)}</td><td class="num">${scPct(g.always_short.hit)} / ${scPct(g.always_long.hit)}</td><td class="num">${g.excess.blocks}</td></tr>`).join("")}</tbody></table></div>` : "";
   return `<div class="note">
     <div><b>方向记分</b>（4 小时，扣掉同期币池等权${days ? `，最近 ${days} 天出的卡` : ""}）：超额命中 <b>${scPct(x.hit)}</b>${scCiP(x.hit_ci)} · 平均超额 <b>${scBp(x.mean_bp)}</b>${scCiB(x.mean_bp_ci)} · ${x.n} 张方向卡 / ${x.blocks} 个时段</div>
     <div>原始命中（没扣大盘）${scPct(raw.hit)}${scCiP(raw.hit_ci)}，同一批卡：一律做空 ${scPct(sh.hit)}、一律做多 ${scPct(lg.hit)}。观望 ${r.n_neutral} 张只计数。${noPool}</div>
@@ -1086,7 +1085,7 @@ function cardScoreBlock(r) {
       <div class="tw mt"><table><thead><tr><th>期限</th><th>超额命中</th><th>平均超额</th><th>原始命中</th><th>平均原始</th><th>大盘分量</th><th>张 / 时段</th></tr></thead><tbody>${hz}</tbody></table></div>
       <div class="st-sub">同一批样本的基线（4 小时）</div>
       <div class="tw"><table><thead><tr><th></th><th>原始命中</th><th>平均原始</th><th>超额命中</th><th>张</th></tr></thead><tbody>${bl}</tbody></table></div>
-      ${grp("分期（按合并时间）", r.periods)}${grp("方向", r.by_direction)}${grp("出卡原因", r.by_refresh_reason)}
+      ${grp("分期（按合并时间）", r.periods)}${grp("方向", r.by_direction)}${grp("出卡原因", r.by_refresh_reason, true)}
       <div class="dim small mt">口径：起点 = 这一版卡第一次发布的时刻；价格 = 主网最后一根已收盘 1 分钟线；超额 = 方向 ×（币 − 卡发出时那一份币池的等权，和复盘用的 59 币池不同，数字不会完全一样）；区间 = 按 4 小时 UTC 时段聚类 bootstrap 的 95%。
       老口径（未扣大盘，整轮起点 → 到期的原始涨跌）：命中 ${scPct(r.legacy.hit)}（${r.legacy.n} 张），只作对照。${md(r.generated_at)} ${hm(r.generated_at)} 算的。</div>
     </details>
@@ -1214,6 +1213,7 @@ const FIELD = {
   day: ["24 小时"], chg_pct: ["24 小时涨跌", "pct"], qv_m: ["24 小时成交额（百万 U）"],
   peak_gain_r: ["冻结的最高盈利价（止损的倍数）"], peak_net_bps: ["冻结的最高盈利（扣开平手续费）", "bps"], peak_after_min: ["成交后几分钟到最高（分钟）"], trigger_gain_r: ["回访触发价（止损的倍数）"],
   reason: ["理由"], entry_zone_bps: ["进场区间离现价", "bpslist"], in_zone: ["现价在进场区间里"], levels: ["关键价位（离现价 bp，类型）", "lvlist"], signals: ["允许的信号"], left_min: ["离卡到期", "min"],
+  trigger: ["开会原因"], refresh_reason: ["出卡原因"], held_event: ["持仓币加开临时会"], queued: ["排进临时会"], loss_r: ["已亏（几倍 R）"],
 };
 // 技术面、成交流的键带周期（chg_1h_bps、rsi14_5m……），按模式认
 const FIELD_DYN = [
@@ -1230,7 +1230,7 @@ const fmtNum = (v) => (Math.abs(v) >= 1000 ? money(v, 0) : Math.abs(v) >= 1 ? mo
 function fieldVal(k, v) {
   const unit = fieldOf(k)[1];
   if (typeof v === "boolean") return k === "approved" ? (v ? "通过" : "拒绝") : v ? "是" : "否";
-  if (typeof v === "string") return unit === "ts" ? hms(v) : esc(VALUE[v] || v);
+  if (typeof v === "string") return unit === "ts" ? hms(v) : esc(((k === "trigger" || k === "refresh_reason") && meetReason(v)) || VALUE[v] || v);
   if (typeof v !== "number") return esc(String(v));
   switch (unit) {
     case "px": return pxFmt(v);
@@ -1459,9 +1459,32 @@ P.overview = () => {
   const d = data;
   return `<div class="grid g3">${cardSection(d.card)}${feedSection(d.feed, d.tiles.signals)}${posSection(d.positions)}</div>
   ${tilesSection(d.tiles, d.gate_label)}
+  ${defenceSection(d.defences)}
   <div class="grid g2 mt">${alertsSection(d.alerts)}${blockedSection(d.blocked)}</div>`;
 };
 
+// 防线状态：每条止损 / 退出防线一行（服务端按现行配置、决策日志、positions.json 算好）；关着的灰色「未启用」，悬停看配置键
+function defenceSection(rows) {
+  if (!rows || !rows.length) return "";
+  const when = (ts) => (md(ts) === md(data.now) ? hm(ts) : `${md(ts)} ${hm(ts)}`);
+  const row = (r) => {
+    const name = `<span class="df-n"><i class="df-dot ${r.level}"></i>${esc(r.name)}</span>`;
+    const tag = r.link ? `a class="df-row click${r.on ? "" : " off"}" href="${esc(r.link)}"` : `div class="df-row${r.on ? "" : " off"}"`;
+    const end = r.link ? "a" : "div";
+    if (!r.on) return `<${tag}>${name}<span class="df-sw"><span class="pill" title="${esc(`配置 ${r.config_key} 关着`)}">未启用</span></span><span class="df-now dim">—</span><span class="df-day dim">—</span><span class="df-last dim">—</span></${end}>`;
+    const last = r.last_ts ? `<span class="num">${when(r.last_ts)}</span> <span class="clamp2" ${tapx("df:" + r.key)}>${esc(r.last_text || "")}</span>` : '<span class="dim">今天没有</span>';
+    return `<${tag}>${name}<span class="df-sw" title="${esc(`${r.setting}（配置 ${r.config_key}）`)}"><span class="pill p-long">开</span> <span class="dim small">${esc(r.setting)}</span></span><span class="df-now ${r.level === "warn" ? "warn" : ""}">${esc(r.now)}</span><span class="df-day">${esc(r.today)}</span><span class="df-last">${last}</span></${end}>`;
+  };
+  const head = '<div class="df-row df-head" aria-hidden="true"><span>防线</span><span>开关</span><span>此刻</span><span>今天</span><span>最近一次</span></div>';
+  return `<section class="card mt"><div class="ch"><h2>防线状态</h2><span class="r">今天 = ${esc(data.display_tz === "Asia/Bangkok" ? "曼谷" : data.display_tz)} 0 点起 · 点一行看对应页面</span></div><div class="df-list">${head}${rows.map(row).join("")}</div></section>`;
+}
+
+// 每个币按自己的到期时间算：整张卡到期后，翻转过的币可能还有效
+function cardUntil(c) {
+  if (!c.valid) return '<span class="down">已过期，不开新仓</span>';
+  if (c.card_expired) return `<span class="warn">整张卡已到期，仍有 ${c.live_symbols} 个币有效到 ${c.live_until ? hm(c.live_until) : "—"}</span>`;
+  return c.expires_at ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
+}
 function cardSection(c) {
   if (!c) {
     return `<section class="card"><div class="ch"><h2>作战卡</h2><span class="pill">军师团</span></div>
@@ -1471,10 +1494,10 @@ function cardSection(c) {
   const shown = act.slice(0, 8);
   const more = act.length - shown.length;
   const pills = shown.map((s) => { const [t, k] = s.pending_label ? [s.pending_label, ""] : BIAS[s.bias] || [s.bias, ""]; return `<span class="pill ${k}">${coin(s.symbol)} ${t}</span>`; }).join("");
-  const until = c.expires_at ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
+  const until = cardUntil(c);
   return `<section class="card click" ${clickable("card")}>
     <div class="ch"><h2>作战卡</h2><span class="pill">军师团${c.version ? " v" + c.version : ""}</span>
-      <span class="r">${hm(c.created_at)} 更新 · ${c.valid ? until : '<span class="down">已过期，不开新仓</span>'} <button class="btn b-sm" ${clickable("cmd", "refresh_cards")}>重新开会</button></span></div>
+      <span class="r">${hm(c.created_at)} 更新 · ${until} <button class="btn b-sm" ${clickable("cmd", "refresh_cards")}>重新开会</button></span></div>
     <div class="row">${pills || '<span class="dim">这一轮没有要做的币</span>'}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
     ${idle.length ? `<div class="dim small">${idleLine(idle)}（不开仓）</div>` : ""}
     ${cardEffective(c)}
@@ -1545,7 +1568,7 @@ function tilesSection(t, gateLabel) {
 function alertsSection(list) {
   const crit = list.some((a) => a.level === "critical");
   const body = list.length
-    ? `<div class="log scroll">${list.map((a) => `<div title="${tx(a.text)}"><span class="n">${hm(a.ts)}</span><span class="clamp1"><span class="chip-s ${a.level === "critical" ? "p-short" : "p-warn"}">${esc(ROLE[a.role] || "其他")}</span> ${tx(a.text)}</span></div>`).join("")}</div>`
+    ? `<div class="log scroll">${list.map((a) => `<div><span class="n">${hm(a.ts)}</span><span class="clamp2" ${tapx(`al:${a.ts}:${a.text.slice(0, 40)}`)}><span class="chip-s ${a.level === "critical" ? "p-short" : "p-warn"}">${esc(ROLE[a.role] || "其他")}</span> ${tx(a.text)}</span></div>`).join("")}</div>`
     : `<div class="dim">今天没有告警。</div>`;
   return `<section class="card ${crit ? "alert" : ""}"><div class="ch"><h2>告警</h2><span class="r">同时推到 Telegram</span></div>${body}</section>`;
 }
@@ -1671,6 +1694,16 @@ function nativeDetail(p) {
   const now = q.native_stop_price != null ? ` · 现在约 <span class="num">${price(q.native_stop_price, p.symbol)}</span>（程序推算，币安不报）` : " · 还没激活";
   return `<span class="pill ${q.native_activated ? "p-accent" : ""}">${NATIVE_TRAIL}</span> ${act} · 回撤 ${l && l.callback_rate != null ? l.callback_rate : "?"}%${now}${l ? ` · <span class="dim">${esc(l.state === "live" ? "交易所已挂" : LEG_ST[l.state])}</span>` : ""}`;
 }
+// 展开明细第一行：为什么开的这笔（信号、开仓时卡上方向和那场会的理由、拍板人做这笔的概率、风控员给的仓位档）
+function entryLine(e) {
+  if (!e) return "";
+  const sig = `${esc(SIGNAL[e.signal_kind] || e.signal_kind || "信号不明")}（${e.side === "long" ? "多" : "空"}）`;
+  const why = e.card_reason ? e.card_reason.replace(/\s+/g, " ") : "";
+  const brief = why.length > 40 ? why.slice(0, 40) + "…" : why;
+  const card = e.card ? `卡 ${e.card_at ? holdWhen(e.card_at) + " 那场会" : ""}${DIRF[e.card]}${brief ? `<span class="dim" title="${esc(why)}">（${esc(brief)}）</span>` : ""}` : '<span class="dim">开仓前读不到这个币的会</span>';
+  const bits = [sig, card, e.jev_take != null ? `${esc((data && data.gate_label) || "拍板人")} 做这笔 <span class="num">${e.jev_take.toFixed(2)}</span>` : "", e.size_tier ? `风控按${esc(TIER[e.size_tier] || e.size_tier)}档` : ""].filter(Boolean);
+  return `<div class="entry-why small"><b>开仓理由</b> ${bits.join(' <span class="dim">·</span> ')}</div>`;
+}
 function posDetail(p) {
   const tl = trailLines(p);
   const q = p.protection;
@@ -1698,7 +1731,7 @@ function posDetail(p) {
   ]);
   const prot = q ? protBlock(p) : stopDiagnostics(p);
   const links = `<div class="row small">${p.signal_id ? `<a href="javascript:void 0" ${clickable("signal", p.signal_id)}>开仓那条信号链 ›</a>` : ""}<a href="javascript:void 0" ${clickable("card")}>作战卡 ›</a>${p.position_id ? `<span class="dim">编号 ${esc(p.position_id)}</span>` : ""}</div>`;
-  return `${warns.length ? `<div class="note warn small">${warns.map((w) => esc(w)).join("<br>")}</div>` : ""}
+  return `${entryLine(p.entry)}${warns.length ? `<div class="note warn small">${warns.map((w) => esc(w)).join("<br>")}</div>` : ""}
     <div class="pgrid"><div><div class="lbl">仓位</div>${pos}</div><div><div class="lbl">盈亏</div>${pnl}</div><div><div class="lbl">价位</div>${lv}</div></div>
     <details class="more" ${q && (q.stale || q.last_error || q.trailing_error) ? "open" : ""}><summary>${q ? "交易所保护单" : "执行器止损检查"}</summary>${prot}${p.trailing_stop_pct != null ? `<div class="small dim">${trailNote(p)}</div>` : ""}</details>
     ${holdHistory(p.hold_card, p.side, p.opened_at, null)}
@@ -2295,11 +2328,11 @@ const TONE_WORD = { open: "开", close: "平", reject: "拒", error: "错", info
 function liveFeedHtml(feed, sel) {
   if (!feed.length) return '<div class="dim small tl-empty">等新动作…（每 1.5 秒看一次决策日志）</div>';
   return feed.map((ev, i) => {
-    const c = ev.symbol ? `<b class="sym">${coin(ev.symbol)}</b>` : "";
+    const c = ev.symbol ? `<span class="sym">${coin(ev.symbol)}</span>` : "";
     const w = TONE_WORD[ev.tone] ? `<em class="tl-tw ${ev.tone}">${TONE_WORD[ev.tone]}</em>` : "";
     const n = ev.count > 1 ? `<span class="n">×${ev.count}</span>` : "";
-    const txt = ev.kind === "backfill" && ev.pnl_usdt != null ? `回填 净 ${signed(ev.pnl_usdt, 2)}U` : ev.badge && ev.kind !== "signal" ? `${ev.kind === "meeting" && BIAS[ev.badge] ? BIAS[ev.badge][0] : ev.badge} · ${ev.text}` : ev.text;
-    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${clickable("liveev", i)} title="${tx(ev.text)}"><span class="t">${hms(ev.ts)}</span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span>${w}${c}<span class="x">${esc(txt)}</span>${n}</div>`;
+    const txt = ev.kind === "backfill" && ev.pnl_usdt != null ? `回填 净 ${signed(ev.pnl_usdt, 2)}U` : ev.badge && ev.kind !== "signal" && ev.kind !== "risk_reject" ? `${ev.kind === "meeting" && BIAS[ev.badge] ? BIAS[ev.badge][0] : ev.badge} · ${ev.text}` : ev.text;
+    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${tapx("ev:" + ev.id)}><span class="t">${hms(ev.ts)}</span><span class="x"><span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span> ${w}${c ? `${c}${txt ? "：" : ""}` : ""}${esc(txt)}${n}</span></span><button class="go" ${clickable("liveev", i)} title="看它走的路" aria-label="看它走的路">›</button></div>`;
   }).join("");
 }
 function liveDrawFeed() {
@@ -2419,7 +2452,6 @@ function tlRoleLine(r, d) {
   if (r.role === "keeper" && d.against_checks && d.against_checks.length) return [againstLine(d.against_checks[0]), "against"];
   if (r.state !== "ok") return [r.status, r.state === "bad" ? "err" : ""];
   if (r.doing) return [r.doing, "now"];
-  if (r.role === "risk_guard" && /^大盘移动止损：.+锁住中/.test(r.headline || "")) return [r.headline.replace(/^大盘移动止损：/, ""), "against"];
   if (r.role === "predictor") return [predictorText(r), ""];
   if (r.role === "alerting") return ["收所有角色的事，推给你", ""];
   return [r.summary || runLine({ last_run_at: r.last_run_at, next_run_at: r.next_run_at }) || r.headline || r.status, ""];
@@ -2448,7 +2480,10 @@ function tlNodeHtml(k, d, by) {
   const [line, lc] = tlRoleLine(r, d);
   const tag = { gate: "Jev", predictor: "Kronos" }[k];
   const chip = TL_CHIP[k] ? `<em class="tl-chip">${TL_CHIP[k]}</em>` : "";
-  return tlBox(k, `<span class="nm">${hdot(r.state, r.status)}${esc(TL_NAME[k] || r.name)}${tag ? `<em class="tg">${tag}</em>` : ""}</span><small class="ln ${lc}">${esc(line)}</small><small class="cnt">${tlCount(r.calls, r.rejected, r.off_by ? 0 : r.errors, r.cost_usd)}</small>${chip}`, `${r.progress}${r.off_by ? " off" : ""}${sel}`, `#team/${k}`, r.off_by ? `未启用：配置 ${r.off_by} = false（在设置里打开）` : [line, r.status, r.headline, r.summary ? "刚刚：" + r.summary : ""].filter(Boolean).join("\n"));
+  // 风控员：大盘闸门固定占一行，最新动作只留一行，不互相顶掉
+  const mt = k === "risk_guard" && d.market_trail;
+  const gate = mt ? `<small class="gate ${mt.state === "locked" ? "against" : mt.on ? "" : "off"}">${esc(mt.line)}</small>` : "";
+  return tlBox(k, `<span class="nm">${hdot(r.state, r.status)}${esc(TL_NAME[k] || r.name)}${tag ? `<em class="tg">${tag}</em>` : ""}</span><small class="ln ${lc}${mt ? " one" : ""}">${esc(line)}</small>${gate}<small class="cnt">${tlCount(r.calls, r.rejected, r.off_by ? 0 : r.errors, r.cost_usd)}</small>${chip}`, `${r.progress}${r.off_by ? " off" : ""}${mt ? " gate2" : ""}${sel}`, `#team/${k}`, r.off_by ? `未启用：配置 ${r.off_by} = false（在设置里打开）` : [line, r.status, r.headline, r.summary ? "刚刚：" + r.summary : ""].filter(Boolean).join("\n"));
 }
 // 作战卡票根：版本号（实时动作里刚出的卡会先把号顶上去）、几个可做、离过期还有多久
 function tlCardHtml() {
@@ -2456,7 +2491,7 @@ function tlCardHtml() {
   const v = Math.max((c && c.version) || 0, LIVE.cardV || 0);
   const n = c ? c.symbols.filter((x) => x.bias === "long" || x.bias === "short").length : 0;
   const left = c && c.expires_at ? Math.round((new Date(c.expires_at) - Date.now()) / 60000) : null;
-  const exp = !c ? "还没有作战卡" : !c.valid ? `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）` : left != null ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
+  const exp = !c ? "还没有作战卡" : !c.valid ? `已过期（${c.expires_at ? hm(c.expires_at) : "—"}）` : c.card_expired ? `${c.live_symbols} 个币有效到 ${c.live_until ? hm(c.live_until) : "—"}` : left != null ? `有效到 ${hm(c.expires_at)}` : "有效期未知";
   return `<div class="tl-ticket${c && !c.valid ? " stale" : ""}" ${c ? clickable("card") : ""} style="left:${TL_CARD[0]}px;top:${TL_CARD[1]}px;width:${TL_CARD[2]}px;height:${TL_CARD[3]}px">
     <div class="k"><span>作战卡</span><span>${esc(exp)}</span></div>
     <div class="v">${v ? "v" + v : "—"}<small>${n} 个可做</small></div>
@@ -2641,6 +2676,16 @@ async function showPrompts() {
     ${Object.keys(p).filter((k) => !known.has(k)).map((k) => block(k, p[k])).join("")}`);
   $("#layer .dlg").classList.add("wide");
 }
+// 风控员详情顶上：大盘闸门（大盘移动止损）此刻的完整状态 + 只看它的锁住 / 放行 / 拦下记录
+function trailBar(m) {
+  const chip = `<button class="btn b-sm${S.mtOnly ? " on" : ""}" ${clickable("mtonly")} aria-pressed="${S.mtOnly ? "true" : "false"}">${S.mtOnly ? "看全部记录" : "只看大盘闸门的记录"}</button>`;
+  if (!m.on) return `<div class="note small trail-bar"><span><b>大盘闸门</b> 未启用（配置 fast_loop.signal_market_trail_on = false）</span>${chip}</div>`;
+  const px = m.extreme_price != null ? ` ${m.ref} ${m.leg === "跌段" ? "低点" : "高点"} <span class="num">${fmtNum(m.extreme_price)}</span>` : "";
+  const st = m.state === "locked" ? `<b class="warn">${esc(m.guards)}锁住 ${m.locked_min} 分钟</b>` : m.state === "open" ? `<b>${esc(m.guards)}放行</b>` : `<b>${esc(m.now)}</b>`;
+  const leg = m.leg ? ` · ${esc(m.ref)} ${esc(m.leg)}（管${esc(m.guards)}）${px} · 离极值 <span class="num">${m.retrace_atr.toFixed(2)}</span> / ${m.k} ATR 锁` : "";
+  const stale = m.stale_at ? ` · <span class="warn">数据停在 ${hm(m.stale_at)}</span>` : "";
+  return `<div class="note small trail-bar"><span><b>大盘闸门</b> ${st}${leg}${stale} · 今天锁 ${m.locks_today} 次、拦下开仓 ${m.blocked_today} 笔</span>${chip}</div>`;
+}
 P.team = () => {
   const d = pageData;
   const cards = teamFlow(d);
@@ -2649,7 +2694,9 @@ P.team = () => {
     ? { role: "desk", name: "大盘台", last_beat: k.last_run_at, last_error: k.error, avg_latency_ms: 0 }
     : d.roles.find((r) => r.role === d.selected) || d.market_role;
   window.__recs = d.records;
-  const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${tx(s.text)}</span></div>`).join("");
+  const mt = sel.role === "risk_guard" ? d.market_trail : null;
+  const onlyMt = mt && S.mtOnly;
+  const recs = d.records.map((s, i) => (onlyMt && !/大盘移动止损/.test(s.text) ? "" : `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${tx(s.text)}</span></div>`)).join("");
   return `${cards}
     ${sel.role === "keeper" ? againstCard(d.against_checks || []) : ""}
     ${sel.role === "commander" || sel.role === "market" ? `<section class="card mt">${promptLine(d.prompts)}</section>` : ""}
@@ -2660,7 +2707,7 @@ P.team = () => {
     ${sel.role === "desk" && k ? `<section class="card mt"><div class="small">准确度：${esc(k.accuracy || "还没算过（jiaoyi market-score，面板每 30 分钟算一次）")}</div></section>` : ""}
     <section class="card mt"><div class="ch"><h2>${esc(sel.name)} · 最近做了什么</h2>
       <span class="r">${sel.role === "market" ? `<a ${clickable("meeting", MARKET)}>看开会过程 ›</a> · ` : ""}${ROLES.some((r) => r.id === sel.role && r.groups && r.groups.length) ? `<a href="#settings/${esc(sel.role)}">它的设置 ›</a> · ` : ""}${sel.off_by ? `未启用（配置 ${esc(sel.off_by)} = false）` : sel.last_beat ? "最后心跳 " + hms(sel.last_beat) : "没有心跳"}${sel.avg_latency_ms ? ` · 平均 ${Math.round(sel.avg_latency_ms)} ms` : ""}</span></div>
-      ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}
+      ${sel.last_error ? `<div class="note warn">最近出错：${esc(sel.last_error)}</div>` : ""}${quietHead(sel)}${mt ? trailBar(mt) : ""}
       <div class="log trail scroll tall">${recs || `<div class="dim">${sel.role === "desk" ? "大盘台还没有记录（每一轮的方向、发布、失败都记在这里）。" : sel.role === "market" ? "最近没有总盘会的记录（出作战卡、大盘更新、开会失败都记在这里）。" : sel.role === "book_reader" ? "盘口员不写逐条记录，状态见上面。" : QUIET_ROLE[sel.role] ? "今天还没出过要单独记的事。" : "还没有记录。"}</div>`}</div>
       <div class="foot">最新 200 条（跨天），框里往下滚看更早的 · 点一条看它看到了什么、怎么判断的</div></section>`;
 };
@@ -2778,7 +2825,7 @@ function tradeDetail(t) {
     ["最高浮盈（采样）", t.keeper_peak_usdt == null ? "—" : `<span class="num ${cls(t.keeper_peak_usdt)}">${signed(t.keeper_peak_usdt, 2)} U</span> <span class="dim small">管家采样估算，未扣费，可能漏掉最高点</span>`],
     t.mainnet_net_usdt != null ? ["按主网价格算", `<span class="num ${cls(t.mainnet_net_usdt)}">${signed(t.mainnet_net_usdt, 2)} U</span> <span class="dim small">价差 ${t.mainnet_price_gap_usdt == null ? "—" : signed(t.mainnet_price_gap_usdt, 2)} · 费率差 ${t.mainnet_fee_gap_usdt == null ? "—" : signed(t.mainnet_fee_gap_usdt, 2)} · 差 ${bpTxt(t.mainnet_gap_bp)}</span>`] : null,
   ]);
-  return `<div class="pgrid"><div><div class="lbl">时间</div>${a}</div><div><div class="lbl">价格</div>${b}</div><div><div class="lbl">盈亏</div>${c}</div></div>
+  return `${entryLine(t.entry)}<div class="pgrid"><div><div class="lbl">时间</div>${a}</div><div><div class="lbl">价格</div>${b}</div><div><div class="lbl">盈亏</div>${c}</div></div>
     ${t.unfilled ? "" : holdHistory(t.hold_card, t.side, t.opened_at, shut, reasonOf(t))}
     <div class="row small">${t.signal_id ? `<button class="btn b-sm" ${clickable("signal", t.signal_id)}>看整条链：信号 → 拍板 → 风控 → 开平仓</button>` : ""}${t.position_id ? `<span class="dim">编号 ${esc(t.position_id)}</span>` : ""}</div>`;
 }
@@ -2979,7 +3026,7 @@ P.pool = () => {
   const rows = shown.map((e) => `<tr class="${e.in_pool ? "" : "dimrow"}">
       <td class="hi nowrap">${coin(e.symbol)} ${flag(e.symbol)}</td><td class="nowrap">${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
       <td>${e.in_pool ? (e.picked_by_card ? '<span class="chip-s p-long">军师选中</span>' : '<span class="chip-s">在池里</span>') : '<span class="chip-s">没进池</span>'}</td>
-      <td class="clip" title="${esc(why(e))}">${esc(why(e).split("\n")[0])}</td>
+      <td class="clip"><span class="clamp2" ${tapx("pool:" + e.symbol)}>${esc(why(e)).replace(/\n/g, "<br>")}</span></td>
       <td class="r num dim">${money(e.filters.quote_volume_24h_usdt / 1e6, 0)}M</td><td class="r num dim">${e.filters.spread_bps.toFixed(2)}</td><td class="r nowrap">${ops(e.symbol)}</td></tr>`).join("");
   const nIn = d.entries.filter((e) => e.in_pool).length;
   const seg = `<span class="seg">${[["in", `在池里 ${nIn}`], ["out", `没进池 ${d.entries.length - nIn}`], ["all", `全部 ${d.entries.length}`]].map(([k, t]) => `<button class="${view === k ? "on" : ""}" ${clickable("poolview", k)}>${t}</button>`).join("")}</span>`;
@@ -3036,6 +3083,13 @@ document.addEventListener("compositionend", (e) => {
 const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安实盘", BINANCE_TESTNET_API_KEY: "币安 Demo", BINANCE_TESTNET_API_SECRET: "币安 Demo", JEV_API_KEY: "拍板人", DEEPSEEK_API_KEY: "军师团", TELEGRAM_BOT_TOKEN: "告警", TELEGRAM_CHAT_ID: "告警", FRED_API_KEY: "宏观数据（可选）", HUMMINGBOT_API_PASSWORD: "hummingbot-api" };
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
+// 临时会 / 出卡的原因码（决策记录的 trigger、作战卡的 refresh_reason = 「event:原因」、出卡原因分组）；不在 event_triggers 里、按持仓和大盘台另开的也在这
+const MEET_REASON = { ...TRIGGER, held_desk_flip: "大盘台转向 · 持仓在亏", desk_turn: "大盘台转向 · 有信号待确认", market_review: "大盘新判断后复核", scheduled: "定时整轮", regime_flip: "大盘翻转", market_desk: "大盘台", manual: "手动开会" };
+function meetReason(v) {
+  const k = String(v || "").replace(/^event:/, "");
+  if (k === "held_reverse_loss") return `亏损 ≥${data && data.held_loss_r ? +data.held_loss_r.toFixed(2) : "?"}R + 反向信号`;
+  return MEET_REASON[k] || null;
+}
 const CHOICE = { ...TRIGGER, outside: "价格在关键位外面就算", cross: "价格穿过关键位那一下才算", slow: "放慢一档", stop: "不放慢", card_agree: "只有 100% 看涨算看涨，其余算看跌", symmetric: "做多要 100% 看涨、做空要 100% 看跌", sync: "每次复查当场读（复查要等它）", lifeboat_first: "保命单 → 止损（原行为）", stop_first: "止损 → 保命单", hb_first: "先停 HB 再直连平仓（原行为）", direct: "先直连只减仓平仓，再只停不平 HB", background: "后台按仓读，复查只用新鲜结果", one: "一道题（只问做不做）", six: "6 道题（旧问法，回放对照）", on_demand: "按需（作战卡和持仓的币）", all_symbols: "候选池全算", fixed: "固定", adaptive: "按排队自适应", mini: "小模型（最快）", small: "中模型", base: "大模型（最准）", demo: "Demo Trading", legacy_testnet: "旧测试网", typesafe: "Jev 官方直连", openrouter: "OpenRouter", "Asia/Bangkok": "曼谷时间", "Asia/Shanghai": "北京时间", UTC: "世界标准时间（UTC）", "24h": "24 小时", "12h": "12 小时", "6h": "6 小时", "8h": "8 小时", "4h": "4 小时", "2h": "2 小时", "1h": "1 小时", "60m": "1 小时", "30m": "30 分钟", "15m": "15 分钟" };
 const MODEL = { base: "最大（更准，每币约 3.5 秒）", small: "标准（每币约 1 秒）", mini: "最快（最粗）" };
 // [meeting] 里同一个词（legacy / neutral …）在不同键下意思不同，按键查
@@ -3050,6 +3104,7 @@ const MEETING_CHOICE = {
   stale_on_arrival_action: { watch: "只盯不开", no_trade: "改成观望" },
   input_time_labels: { legacy: "不标（现状）", explicit: "写明已收盘小时 / 上次结算时间" },
   keeper_snapshot: { direction: "原值 p_up + 名次", rank: "只带名次", off: "不带预测员" },
+  signal_market_trail_ref: { btc: "BTC", eth: "ETH", btc_eth: "BTC 和 ETH 平均" },
   paper_stop_on_mainnet: { off: "关（现状）", mark: "主网标记价越过止损", last: "主网成交价越过止损" },
 };
 const choiceLabel = (k, v) => (MEETING_CHOICE[k] && MEETING_CHOICE[k][v]) || (k === "atr_period_min" ? `${v} 分钟` : k === "model_size" ? MODEL[v] || String(v) : k === "mid_size_max" ? { S: "小", M: "中", L: "大" }[v] || String(v) : CHOICE[v] || String(v));
@@ -3745,6 +3800,8 @@ const ROLES = [
     { g: "止损放多远", hint: "带「跟最长持仓走」的改单笔最长持仓时自动换。", keys: ["fast_loop.atr_period_min", "fast_loop.atr_long_period_min", "fast_loop.atr_floor_7d", "fast_loop.session_factor", "fast_loop.session_factor_weekday", "fast_loop.session_factor_weekend", "fast_loop.min_stop_atr", "fast_loop.max_stop_atr", "fast_loop.stop_level_snap", "fast_loop.stop_level_buffer_atr"] },
     { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp", "fast_loop.tp_r_cap"] },
     { g: "一笔最多拿多久", keys: ["fast_loop.time_limit_s"] },
+    // 键名是 signal_ 开头（按前缀会归哨兵），但它拦的是开仓、归风控员；点名放这里，不改键名
+    { g: "大盘移动止损", hint: "参照（BTC 等）从跌段 / 涨段的极值反向走了几倍 15 分钟 ATR，就暂停这个方向的所有新仓；同方向再创新极值或开了新段就放行。持仓不动。", keys: ["fast_loop.signal_market_trail_on", "fast_loop.signal_market_trail_k", "fast_loop.signal_market_trail_ref", "fast_loop.signal_market_trail_shadow"] },
   ] },
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
@@ -4271,7 +4328,7 @@ const TIER_WHO = {
   "12h": "不常看盘，拿得住单子。",
   "24h": "一天开一次会，做趋势单，最省钱。",
 };
-const EV_SHORT = { key_level_break: "破关键位", move_since_card: "出卡后价格走远", new_head_symbol: "冒出新热门币", signal_against_card: "哨兵看到反向信号", predictor_against_card: "预测员唱反调", news_high_impact: "重大新闻", stale_card_on_entry: "入场时卡太旧" };
+const EV_SHORT = { held_reverse_loss: "持仓亏损+反向信号", held_desk_flip: "大盘台转向·持仓在亏", desk_turn: "大盘台转向", key_level_break: "破关键位", move_since_card: "出卡后价格走远", new_head_symbol: "冒出新热门币", signal_against_card: "哨兵看到反向信号", predictor_against_card: "预测员唱反调", news_high_impact: "重大新闻", stale_card_on_entry: "入场时卡太旧" };
 const minDur = (m) => humanDur(m * 60);
 const TF = {
   min: (v) => (v == null ? "—" : minDur(v)), sec: (v) => humanDur(v), usd: (v) => `$${v}`, x: (v) => `${v} 倍`, r: (v) => `${v} R`,
