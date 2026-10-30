@@ -276,7 +276,6 @@ td.nowrap { white-space: nowrap; }
 table.dense th, table.dense td { padding: 3px 8px; }
 table.dense td { font-size: 12.5px; line-height: 1.35; }
 table.dense td .small { font-size: 11px; }
-.recent table.dense td div { display: inline; margin-left: 4px; }
 .card.recent .ch { margin-bottom: 4px; }
 .trail-mini.pill { padding: 0 5px; }
 
@@ -669,3 +668,67 @@ section.card > .prompt-line { padding: 2px 0; }
 .kedge .ke { position: absolute; right: 64px; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--bg, #fff) 80%, transparent); white-space: nowrap; }
 .kedge .ke.kl { right: auto; left: 6px; top: 4px; color: var(--dim); }
 @media (max-width: 640px) { .kedge { font-size: 10px; } .kedge .ke { right: 52px; } .kedge .ke.kl { right: auto; } }
+
+/* ---- 一行一笔、点开看明细（持仓、历史共用） */
+.pos-narrow { display: none; }
+.ptab td { vertical-align: middle; padding-top: 6px; padding-bottom: 6px; }
+.ptab th.c, .ptab td.c { text-align: center; }
+.ptab tr.open td { background: var(--bg); border-bottom-color: transparent; }
+.ptab tr.pdet-row td { background: var(--bg); white-space: normal; padding: 0 8px 12px; }
+.ptab tr.pdet-row:hover td { background: var(--bg); }
+.sbar { display: inline-block; width: 3px; height: 14px; border-radius: 2px; vertical-align: -2px; margin-right: 4px; }
+.sbar.b-long { background: var(--up); }
+.sbar.b-short { background: var(--down); }
+.chip-s { display: inline-block; font-size: 11px; line-height: 16px; padding: 0 5px; border-radius: 5px; background: var(--fill); color: var(--tx); white-space: nowrap; vertical-align: 1px; font-weight: 500; }
+.chip-s.p-long { background: var(--up-soft); color: var(--up); }
+.chip-s.p-short { background: var(--down-soft); color: var(--down); }
+.chip-s.p-warn { background: var(--warn-soft); color: var(--warn); }
+.chip-s.p-accent { background: var(--accent-soft); color: var(--accent); }
+.tbar { height: 2px; background: var(--fill2); border-radius: 1px; margin-top: 3px; overflow: hidden; }
+.tbar span { display: block; height: 100%; background: var(--faint); }
+.tbar span.hot { background: var(--amber); }
+.pdet { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--card); border-radius: 10px; border: 1px solid var(--line); font-size: 12.5px; }
+.pgrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 24px; }
+.pgrid .lbl { margin: 0 0 4px; font-weight: 600; }
+.kv2 { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; margin: 0; }
+.kv2 dt { color: var(--dim); white-space: nowrap; }
+.kv2 dd { margin: 0; color: var(--hi); min-width: 0; overflow-wrap: anywhere; }
+details.more > summary { cursor: pointer; color: var(--accent); font-size: 12px; padding: 2px 0; list-style: none; }
+details.more > summary::before { content: "▸ "; color: var(--faint); }
+details.more[open] > summary::before { content: "▾ "; }
+details.more > summary::-webkit-details-marker { display: none; }
+.pdet .log { font-size: 12px; gap: 2px; }
+.pdet .note { background: var(--bg); }
+.pdet .note.warn { background: var(--warn-soft); }
+.pm { border-bottom: 1px solid var(--line); }
+.pm:last-child { border-bottom: 0; }
+.pm-h { padding: 8px 4px; }
+.pm .l1 { display: flex; align-items: center; gap: 6px; }
+.pm .l1 .r { margin-left: auto; }
+.pm .l2 { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin-top: 2px; }
+.pm.open .pm-h, .pm.sel .pm-h { background: var(--bg); border-radius: 8px; }
+.pm .pdet { margin-bottom: 8px; }
+.strip > span b { margin-left: 4px; }
+@media (max-width: 1100px) { .pgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) {
+  .pos-wide { display: none; }
+  .pos-narrow { display: block; }
+  .pgrid { grid-template-columns: minmax(0, 1fr); }
+  .strip { gap: 8px 16px; }
+}
+
+/* ---- 资金页对账表：小计、合计、差额一眼分得开 */
+table.recon td { white-space: normal; padding: 5px 8px; }
+table.recon td.r { white-space: nowrap; width: 1%; }
+table.recon tr.sub td, table.ptable tr.sub td { border-top: 1px solid var(--line2); font-weight: 600; color: var(--hi); }
+table.recon tr.total td { border-top: 2px solid var(--line2); font-weight: 600; color: var(--hi); }
+table.recon tr.resid td { background: var(--warn-soft); }
+table.recon tr.base td { color: var(--dim); }
+table.ptable th .small { font-weight: 400; }
+tfoot tr.total td { position: sticky; bottom: 0; background: var(--card); border-top: 1px solid var(--line2); border-bottom: 0; }
+.strip .bars { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 16px; }
+.strip .bar .lab { white-space: nowrap; }
+.strip .bar .lab span:first-child { color: var(--dim); }
+table.recon td div.small { display: inline; margin-left: 8px; }
+.chev-s { color: var(--dim); font-size: 12px; display: inline-block; width: 10px; }
+table.ptable td div.small { display: inline; margin-left: 8px; }

@@ -95,6 +95,20 @@ class Kpis(BaseModel):
     """对账差：今日盈亏 −（上面三项）。标记价和参考价的来源不同、流水还没拉到等，只在提示里显示。"""
     day_refs_missing: list[str] = []
     """0 点前开的、没有当日参考价的币（0 点时大脑没在跑）：这些按开仓价算，今日数不准。"""
+    day_trading_usdt: float | None = None
+    """币安收入流水今天的平仓盈亏（从开仓价算，手续费前）；没有流水 None。资金页的主口径从它起。"""
+    day_fees_usdt: float | None = None
+    """币安收入流水今天的手续费（负数）；没有流水 None。"""
+    day_funding_usdt: float | None = None
+    """币安收入流水今天的资金费；没有流水 None。"""
+    day_overnight_usdt: float | None = None
+    """今天平掉的隔夜仓在 0 点前已有的盈亏：流水按开仓价算进了今天，但它已经在日初权益里。"""
+    day_recon_residual_usdt: float | None = None
+    """账户今日变动 −（流水已实现净额 − 隔夜部分 + 持仓今日变动）。
+
+    来源：流水没拉到、标记价口径、转账等。"""
+    income_updated_at: datetime | None = None
+    """币安收入流水最后一次汇总的时间（主程序每 5 分钟写一次）。"""
 
 
 class LevelView(BaseModel):
@@ -500,12 +514,25 @@ def _sign(p: PositionRecord) -> float:
     return 1.0 if p.side is Side.LONG else -1.0
 
 
-def _income_today(raw: object, today: str) -> tuple[float, float] | None:
+def _income_today(raw: object, today: str) -> tuple[float, float, float] | None:
+    """(realized_pnl, commission, funding_fee) of the local day; None when the file lacks it."""
     days = raw.get("days") if isinstance(raw, dict) else None
     row = days.get(today) if isinstance(days, dict) else None
     try:
-        return float(row["commission"]), float(row["funding_fee"])  # type: ignore[index]
+        return (
+            float(row["realized_pnl"]),  # type: ignore[index]
+            float(row["commission"]),  # type: ignore[index]
+            float(row["funding_fee"]),  # type: ignore[index]
+        )
     except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _income_updated_at(raw: object) -> datetime | None:
+    ts = raw.get("updated_at") if isinstance(raw, dict) else None
+    try:
+        return datetime.fromisoformat(ts) if isinstance(ts, str) else None
+    except ValueError:
         return None
 
 
@@ -524,6 +551,7 @@ def _day_breakdown(
     refs = ledger.day_refs if ledger.day_start_day == today else {}
     missing: set[str] = set()
     closes = 0.0
+    overnight = 0.0
     charged = 0.0  # 今天收的、已经扣在「今日平仓」里的手续费
     for p in map(ledger.demo, ledger.positions):
         if p.closed_at is None or p.closed_at < midnight or p.realized_pnl_usdt is None:
@@ -540,7 +568,9 @@ def _day_breakdown(
         if ref is None:
             missing.add(p.symbol)
             continue
-        closes += open_fee - _sign(p) * p.quantity * (ref - p.entry_price)
+        before = _sign(p) * p.quantity * (ref - p.entry_price)
+        overnight += before
+        closes += open_fee - before
     holding: float | None = None
     live = ledger.live()
     if hb.ok:
@@ -553,15 +583,27 @@ def _day_breakdown(
                 missing.add(p.symbol)
             else:
                 holding -= _sign(p) * p.quantity * (ref - p.entry_price)
-    income = _income_today(files.income_daily(), today)
+    raw = files.income_daily()
+    income = _income_today(raw, today)
     if income is not None:
-        costs = income[0] + income[1] + charged
+        costs = income[1] + income[2] + charged
     else:
         costs = -sum(p.fees_usdt for p in live if p.opened_at >= midnight)
     residual = (
         day_pnl - closes - holding - costs if day_pnl is not None and holding is not None else None
     )
+    recon = (
+        day_pnl - (sum(income) - overnight + holding)
+        if income is not None and day_pnl is not None and holding is not None
+        else None
+    )
     return {
+        "day_trading_usdt": income[0] if income else None,
+        "day_fees_usdt": income[1] if income else None,
+        "day_funding_usdt": income[2] if income else None,
+        "day_overnight_usdt": overnight,
+        "day_recon_residual_usdt": recon,
+        "income_updated_at": _income_updated_at(raw),
         "day_closes_usdt": closes,
         "day_holding_usdt": holding,
         "day_costs_usdt": costs,
