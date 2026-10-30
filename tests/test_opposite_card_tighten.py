@@ -26,7 +26,6 @@ from jiaoyi.core.config import load_app_config
 from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import EntryBasis, ExecutionBook
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
-from jiaoyi.execution.registry import ProtectiveLeg
 from jiaoyi.execution.tighten import breakeven_stop_price
 from jiaoyi.keeper.keeper import JevKeeper, opposite_ab_draw, opposite_instruction_key
 from jiaoyi.loop import Runner
@@ -1411,7 +1410,7 @@ async def test_profit_lock_replaces_the_stop_new_first_and_keeps_the_ledger_stop
     )
     assert h.registry.get("pos-1").record.stop_loss_price == (99.0 if side is Side.LONG else 101.0)
     assert (h.state().profit_lock_done, h.state().profit_lock_at) == ("locked", START)
-    assert h.adapter.profit_lock_pending() == [] and h.critical() == []
+    assert _criticals(h) == []
 
 
 async def test_profit_lock_too_close_to_the_mark_waits_without_clamping_or_closing(
@@ -1425,7 +1424,7 @@ async def test_profit_lock_too_close_to_the_mark_waits_without_clamping_or_closi
     result = await h.adapter.lock_profit_stop("pos-1")
     assert (result["action"], result["why"]) == ("retry", "not_placeable")
     assert h.stop_prices() == before and h.state().stage == "armed"
-    assert h.state().profit_lock_done is None and h.adapter.profit_lock_pending() == ["pos-1"]
+    assert h.state().profit_lock_done is None
     assert h.registry.get("pos-1").record.status is PositionStatus.OPEN
     assert h.critical() == []
     h.mark = 100.26  # 过了但离标记价不到 5 基点
@@ -1445,7 +1444,6 @@ async def test_profit_lock_rejected_leg_is_abandoned_and_protection_stays_armed(
     await h.adapter.lock_profit_stop("pos-1")
     assert h.state().profit_lock_done == "abandoned_rejected"
     assert h.state().stage == "armed" and h.stop_prices() == before
-    assert h.adapter.profit_lock_pending() == []
     assert ("profit_lock", h.state().profit_lock_price) not in h.adapter.paper_stop_levels("pos-1")
     h.exchange.reject_kind = None
     assert await h.manager.sync("pos-1") == "armed"
@@ -1537,31 +1535,160 @@ async def test_profit_lock_rollback_script_makes_the_ledger_loadable_by_the_old_
     assert "profit_lock" not in {x["purpose"] for x in tracked["server_protection"]["legs"]}
 
 
-async def test_profit_lock_unknown_submit_gives_up_after_the_timeout(tmp_path: Path) -> None:
+def _criticals(h: LockHarness) -> list[Any]:
+    return [a for a in h.alerter.sent if a.level is c.AlertLevel.CRITICAL]
+
+
+@pytest.mark.parametrize(
+    ("side", "raw", "near"), [(Side.LONG, 100.2501, 100.28), (Side.SHORT, 99.7499, 99.72)]
+)
+async def test_profit_lock_confirmed_leg_is_not_replaced_when_the_mark_comes_back(
+    tmp_path: Path, side: Side, raw: float, near: float
+) -> None:
+    h = LockHarness(tmp_path, side)
+    await h.ready()
+    h.reach(_REACHED[side])
+    h.manager._save("pos-1", profit_lock_price=raw)  # 量化后的腿比原始目标松不到一格
+    assert (await h.adapter.lock_profit_stop("pos-1"))["action"] == "locked"
+    leg = next(x for x in h.stop_legs() if x.purpose == "profit_lock")
+    h.mark = near
+    assert await h.manager.sync("pos-1") == "armed"
+    live = [x for x in h.stop_legs() if x.state == "confirmed"]
+    assert [(x.client_order_id, x.purpose) for x in live] == [(leg.client_order_id, "profit_lock")]
+    assert h.exchange.orders[leg.client_order_id].algo_status == "NEW"
+
+
+@pytest.mark.parametrize(
+    ("side", "held", "lock", "near"),
+    [(Side.LONG, 100.1, 100.45, 100.46), (Side.SHORT, 99.9, 99.55, 99.54)],
+)
+async def test_profit_lock_unplaceable_never_falls_back_to_a_looser_stop(
+    tmp_path: Path, side: Side, held: float, lock: float, near: float
+) -> None:
+    h = LockHarness(tmp_path, side)
+    await h.ready()
+    h.manager._save("pos-1", trailing_stop_price=held)
+    assert await h.manager.sync("pos-1") == "armed"
+    h.manager._save(
+        "pos-1", trailing_stop_price=None, profit_lock_price=lock, profit_lock_reached_at=START
+    )
+    h.mark = near
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.stop_prices() == [held]
+
+
+async def test_profit_lock_same_quantised_price_as_the_live_stop_is_done(tmp_path: Path) -> None:
+    h = LockHarness(tmp_path, Side.LONG)
+    await h.ready()
+    h.manager._save("pos-1", trailing_stop_price=100.25)
+    assert await h.manager.sync("pos-1") == "armed"
+    h.manager._save("pos-1", profit_lock_price=100.2501, profit_lock_reached_at=START)
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.state().profit_lock_done == "tight_enough"
+
+
+async def test_profit_lock_unknown_submit_stays_armed_and_keeps_retrying(tmp_path: Path) -> None:
+    h = LockHarness(tmp_path, Side.LONG)
+    await h.ready()
+    now = [START]
+    h.manager.clock = lambda: now[0]
+    h.reach(_REACHED[Side.LONG])
+    h.exchange.unknown_submit = True
+    await h.adapter.lock_profit_stop("pos-1")
+    assert h.state().stage == "armed" and h.state().last_error is None
+    assert h.state().profit_lock_unknown_since == START and h.state().profit_lock_done is None
+    pending = [x for x in h.stop_legs() if x.state == "submit_pending"]
+    assert len(pending) == 1
+    h.exchange.unknown_submit = False
+    assert await h.manager.sync("pos-1") == "armed"
+    assert len(h.stop_legs()) == 2  # 窗口内不重发
+    h.manager._save("pos-1", trailing_stop_price=99.5)  # 未知的腿不挡别的换代
+    assert await h.manager.sync("pos-1") == "armed"
+    assert 99.5 in h.stop_prices()
+    now[0] = h.exchange.mark_at = START + timedelta(minutes=5)
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.state().profit_lock_done == "locked"  # 过了窗口换新单号再挂
+    assert _criticals(h) == []
+    assert h.exchange.orders[pending[0].client_order_id].algo_status == "NEW"  # 原单号还留着查
+
+
+async def test_profit_lock_unknown_leg_found_later_clears_the_timer(tmp_path: Path) -> None:
     h = LockHarness(tmp_path, Side.LONG)
     await h.ready()
     h.reach(_REACHED[Side.LONG])
-    old = h.stop_legs()[0]
-    now = [START]
-    h.manager.clock = lambda: now[0]
-    leg = ProtectiveLeg(
-        kind="stop_loss",
-        purpose="profit_lock",
-        generation=9,
-        client_order_id="br-sl-pos-1-9",
-        quantity=old.quantity,
-        trigger_price=100.25,
-        state="submit_pending",
-        working_type="MARK_PRICE",
-    )
-    h.manager._save("pos-1", legs=[*h.state().legs, leg], generation=9, stage="provisional")
-    with pytest.raises(ProtectionIncomplete):
-        await h.manager.sync("pos-1")
-    assert h.state().profit_lock_unknown_since == START and h.state().profit_lock_done is None
-    now[0] = START + timedelta(minutes=5)
+    h.exchange.unknown_submit = True
+    await h.adapter.lock_profit_stop("pos-1")
+    h.exchange.unknown_submit = False
+    cid = next(x.client_order_id for x in h.stop_legs() if x.state == "submit_pending")
+    h.exchange.hidden.discard(cid)
     assert await h.manager.sync("pos-1") == "armed"
-    assert h.state().profit_lock_done == "abandoned_unknown"
-    assert [x.purpose for x in h.stop_legs() if x.state == "confirmed"] == ["fixed"]
+    assert h.state().profit_lock_unknown_since is None
+    assert h.state().profit_lock_done == "locked"
+
+
+async def test_profit_lock_unknown_leg_is_settled_at_flat_cleanup(tmp_path: Path) -> None:
+    h = LockHarness(tmp_path, Side.LONG)
+    await h.ready()
+    h.reach(_REACHED[Side.LONG])
+    h.exchange.unknown_submit = True
+    await h.adapter.lock_profit_stop("pos-1")
+    h.exchange.unknown_submit = False
+    cid = next(x.client_order_id for x in h.stop_legs() if x.state == "submit_pending")
+    h.exchange.hidden.discard(cid)  # 那张单其实挂上了
+    h.exchange.held = 0
+    await h.manager.flat_cleanup("pos-1")
+    assert h.exchange.orders[cid].algo_status != "NEW"
+
+
+async def test_profit_lock_abandon_sends_one_warning_and_no_critical(tmp_path: Path) -> None:
+    h = LockHarness(tmp_path, Side.LONG)
+    await h.ready()
+    h.reach(_REACHED[Side.LONG])
+    h.exchange.reject_kind = "stop_loss"
+    await h.adapter.lock_profit_stop("pos-1")
+    assert _criticals(h) == []
+    warned = [a for a in h.alerter.sent if a.level is c.AlertLevel.WARN]
+    assert [a.title for a in warned] == ["锁利止损没挂成"]
+
+
+async def test_profit_lock_tight_enough_is_final(tmp_path: Path) -> None:
+    h = LockHarness(tmp_path, Side.LONG)
+    await h.ready()
+    h.reach(_REACHED[Side.LONG])
+    h.manager._save("pos-1", profit_lock_done="tight_enough")
+    tracked, state = h.manager._current("pos-1")
+    assert h.manager._extra_stop_candidates(tracked, state) == []
+    assert "profit_lock" not in [s for s, _ in h.adapter.paper_stop_levels("pos-1")]
+
+
+async def test_profit_lock_rollback_rewrites_requested_close_and_keeps_the_stop_tight(
+    tmp_path: Path,
+) -> None:
+    import importlib.util
+
+    from jiaoyi.execution.registry import RegistryData
+
+    spec = importlib.util.spec_from_file_location(
+        "profit_lock_rollback", ROOT / "scripts" / "profit_lock_rollback.py"
+    )
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    h = LockHarness(tmp_path, Side.LONG)
+    await h.ready()
+    h.reach(_REACHED[Side.LONG])
+    await h.adapter.lock_profit_stop("pos-1")
+    price = h.state().profit_lock_price
+    data = json.loads(h.path.read_text())
+    tracked = data["positions"]["pos-1"]
+    tracked["requested_close"] = "profit_lock"
+    script.clean(data)
+    assert "profit_lock" not in json.dumps(data)
+    assert tracked["requested_close"] == "trailing_stop"
+    protection = tracked["server_protection"]
+    assert protection["tightened_stop_price"] == price
+    assert "tightened" in {x["purpose"] for x in protection["legs"]}
+    RegistryData.model_validate(data)
 
 
 def test_profit_lock_panel_state_says_locked_only_with_a_live_leg() -> None:

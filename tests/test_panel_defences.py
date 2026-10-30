@@ -8,6 +8,7 @@ from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from jiaoyi import contracts as c
 from jiaoyi.core.market_trail import Leg, TrailSeries
@@ -301,3 +302,22 @@ def test_market_trail_view_counts_by_gate_and_reason_and_reads_old_records(tmp_p
         "拦下开仓 4 笔（均线 2 · 移动止损 1 · 两者 1）"
         " · 临时会申请 1 场、开成 0 场 · 两边都不开 25% 的时间"
     )
+
+
+def test_market_trail_view_duplicate_request_is_not_a_separate_meeting(tmp_path: Path) -> None:
+    def ask(at: datetime, **extra: Any) -> c.DecisionRecord:
+        held = {"trigger": "held_market_trail", "queued": True, **extra}
+        return _rec(c.Role.PATROL, c.Outcome.ACTION, "XRPUSDT 大盘闸门锁住且持仓在亏", at,
+                    symbol="XRPUSDT", output={"held_event": held})  # fmt: skip
+
+    v = _view(tmp_path, [ask(T(6, 1)), ask(T(6, 2), duplicate=True)], _ema_above())
+    assert v.meetings_asked == 1
+
+
+def test_market_trail_view_says_when_the_lock_expires(tmp_path: Path) -> None:
+    s = _ema_above()
+    t = int(NOW.timestamp())
+    s.count, s.leg = 2000, Leg(-1, 4.0, t, True, t)
+    v = _view(tmp_path, [], s)
+    at = datetime.fromtimestamp(t + 7200, UTC).astimezone(ZoneInfo("Asia/Bangkok"))
+    assert v.until == f"创新低或 {at:%H:%M} 作废"

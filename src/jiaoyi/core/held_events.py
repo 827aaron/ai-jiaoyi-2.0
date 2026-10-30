@@ -83,6 +83,7 @@ class HeldEventDesk:
         request_event: Callable[[str, str], None] | None = None,
         meeting_ok: Callable[[str], bool] | None = None,
         met_since: Callable[[str, datetime], bool] | None = None,
+        pending: Callable[[str], bool] | None = None,
         recorder: RoleRecorder | None = None,
     ) -> None:
         """``cfg`` 是热生效时就地改的那个对象；``meeting_ok(trigger)``：军师团此刻收不收这类
@@ -94,6 +95,7 @@ class HeldEventDesk:
         self._request_event = request_event
         self._meeting_ok = meeting_ok
         self._met_since = met_since
+        self._pending = pending
         self._rec = recorder
         self._desk_dir: str | None = None
         self._desk_since: datetime | None = None
@@ -216,6 +218,9 @@ class HeldEventDesk:
             ok = self._ok(TRAIL_TRIGGER)
             capped = self._trail_count >= cap
             detail: dict[str, object] = {"loss_r": round(r, 4), "price": px, "meeting_ok": ok}
+            if self._pending is not None and self._pending(pos.symbol):
+                self._log_duplicate(pos, now, r, detail)
+                continue
             if capped:
                 self._log_capped(pos, now, r, detail)
                 continue
@@ -225,6 +230,27 @@ class HeldEventDesk:
             if ok:
                 self._trail_count += 1
         self._save()
+
+    def _log_duplicate(
+        self, pos: PositionRecord, now: datetime, r: float, detail: dict[str, object]
+    ) -> None:
+        """这个币的会已在排或在开：一场会顶掉所有原因，不再申请、不占上限。"""
+        if self._rec is not None:
+            self._rec.record(
+                now,
+                Outcome.INFO,
+                f"{pos.symbol} 大盘闸门锁住且持仓在亏 {r:.2f}R；这个币的会已在排，不重复申请",
+                symbol=pos.symbol,
+                position_id=pos.position_id,
+                output={
+                    "held_event": {
+                        "trigger": TRAIL_TRIGGER,
+                        "queued": False,
+                        "duplicate": True,
+                        **detail,
+                    }
+                },
+            )
 
     def _log_capped(
         self, pos: PositionRecord, now: datetime, r: float, detail: dict[str, object]

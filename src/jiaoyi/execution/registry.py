@@ -230,9 +230,9 @@ class ServerProtection(BaseModel):
     """锁利止损腿确认在挂的时刻。"""
     profit_lock_done: str | None = None
     """None = 还要试；locked = 腿已挂上；tight_enough = 现有止损已同样紧，没换单；
-    abandoned_rejected / abandoned_unknown = 这笔放弃（被明确拒绝 / 提交结果一直未知）。"""
+    abandoned_rejected = 交易所明确拒绝，这笔放弃。``tight_enough`` 和放弃是定论，之后不再换单。"""
     profit_lock_unknown_since: datetime | None = None
-    """锁利腿提交结果未知、回读不到，从何时起（落盘，重启不重新计时）。"""
+    """锁利腿提交结果未知，从何时起（落盘）；这段时间不再挂新单号，查到就清空。"""
 
     @model_serializer(mode="wrap")
     def _omit_unused_opposite_fields(

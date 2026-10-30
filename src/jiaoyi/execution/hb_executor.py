@@ -474,6 +474,7 @@ class HbExecutorAdapter:
             protection.notify_native_fallback = self._alert_native_fallback
             protection.notify_trigger_rejected = self._alert_trigger_rejected
             protection.notify_take_profit = self._alert_take_profit
+            protection.notify_profit_lock = self._alert_profit_lock
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
@@ -1001,9 +1002,7 @@ class HbExecutorAdapter:
             if leg.kind == "stop_loss" and live_leg(leg)
         ]
         # 目标价是主网价赚到触发线时定的，主网价已在它有利一侧看到过；Demo 那边挂不上也要认
-        if state.profit_lock_price is not None and not (state.profit_lock_done or "").startswith(
-            "abandon"
-        ):
+        if state.profit_lock_price is not None and state.profit_lock_done in (None, "locked"):
             out.append(("profit_lock", state.profit_lock_price))
         if state.trailing_activated:
             out.append(("trailing", state.trailing_stop_price))
@@ -1110,17 +1109,6 @@ class HbExecutorAdapter:
         )
         return {"target": target, "reached_r": reached, "price": price, "source": source}
 
-    def profit_lock_pending(self) -> list[str]:
-        """已赚到触发线、锁利止损还没落定的仓。"""
-        return [
-            pid
-            for pid, t in self._registry.data.positions.items()
-            if t.record.status is PositionStatus.OPEN
-            and t.server_protection is not None
-            and t.server_protection.profit_lock_price is not None
-            and t.server_protection.profit_lock_done is None
-        ]
-
     def set_profit_lock_gap(self, gap_bps: float) -> None:
         if self._protection is not None:
             self._protection.profit_lock_gap_bps = gap_bps
@@ -1129,8 +1117,9 @@ class HbExecutorAdapter:
         return self._protection.last_marks.get(position_id) if self._protection else None
 
     async def lock_profit_stop(self, position_id: str) -> dict[str, Any]:
-        """把落盘的锁利目标换上交易所。任何情况都不平仓、不发 CRITICAL：挂不上就返回 ``retry``，
-        主循环下一轮再来；旧止损一直留着，换代先确认新腿再撤旧腿。``locked`` 腿已挂上；
+        """第一次赚到触发线时马上换一次，不等下一轮保护同步。任何情况都不平仓、不发 CRITICAL：
+        挂不上就返回 ``retry``，目标价已落盘，``protection_tick`` 每轮同步时接着挂；旧止损一直留着，
+        换代先确认新腿再撤旧腿。``locked`` 腿已挂上；
         ``kept`` 不用换（现有止损够紧）或已放弃；``skip`` 仓不在 / 已在退出。"""
         tracked = self._registry.get(position_id)
         manager = self._protection
@@ -2459,6 +2448,16 @@ class HbExecutorAdapter:
             f"{symbol} {pid}：{text}",
             symbol,
             f"server_stop_clamped:{pid}",
+            kind="order_failed",
+        )
+
+    async def _alert_profit_lock(self, pid: str, symbol: str, text: str) -> None:
+        await self._alert(
+            AlertLevel.WARN,
+            "锁利止损没挂成",
+            f"{symbol} {pid}：{text}",
+            symbol,
+            f"profit_lock:{pid}",
             kind="order_failed",
         )
 

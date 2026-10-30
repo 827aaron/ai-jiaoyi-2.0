@@ -163,6 +163,14 @@ def ema_line(r: EmaRead, label: str, n: int, tz: ZoneInfo) -> str:
     return f"大盘均线：数据不满 {n} 分钟，暂不拦"
 
 
+def until_text(leg: Leg, age_min: int, tz: ZoneInfo) -> str:
+    """锁住要到什么时候：创新极值，或开了过期就到极值作废那一刻。"""
+    if age_min <= 0:
+        return _NEW_CN[leg.side]
+    at = datetime.fromtimestamp(leg.extreme_at + age_min * 60, UTC).astimezone(tz)
+    return f"{_NEW_CN[leg.side]}或 {at:%H:%M} 作废"
+
+
 def verdict_cn(sides: Iterable[int]) -> str:
     """此刻拦的方向（+1 多单、−1 空单）合起来怎么说。"""
     both = set(sides) - {0}
@@ -724,12 +732,7 @@ class MarketTrail:
         return self.blocks(side, now)[0]
 
     def _until(self, leg: Leg) -> str:
-        """锁住要到什么时候：创新极值，或开了过期就到极值作废那一刻。"""
-        age = self._cfg.signal_market_trail_max_extreme_age_min
-        if age <= 0:
-            return _NEW_CN[leg.side]
-        at = datetime.fromtimestamp(leg.extreme_at + age * 60, UTC).astimezone(self._tz)
-        return f"{_NEW_CN[leg.side]}或 {at:%H:%M} 作废"
+        return until_text(leg, self._cfg.signal_market_trail_max_extreme_age_min, self._tz)
 
     def _trail_reason(self, s: TrailSeries, name: str, now: datetime) -> str:
         assert s.leg is not None

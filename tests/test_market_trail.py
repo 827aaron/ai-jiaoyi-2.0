@@ -1106,18 +1106,15 @@ class _LockEx:
 
     def __init__(self, hit: dict[str, Any] | None) -> None:
         self.hit, self.locked, self.seen = hit, [], []  # type: ignore[var-annotated]
-        self.pending: list[str] = []
         self.mark: float | None = None
         self.gap = 0.0
+        self.result: dict[str, Any] = {"action": "locked"}
 
     def note_profit_reached(
         self, position_id: str, price: float, *, trigger_r: float, lock_r: float, source: str
     ) -> dict[str, Any] | None:
         self.seen.append((position_id, price, trigger_r, lock_r, source))
         return self.hit
-
-    def profit_lock_pending(self) -> list[str]:
-        return self.pending
 
     def set_profit_lock_gap(self, gap_bps: float) -> None:
         self.gap = gap_bps
@@ -1127,7 +1124,7 @@ class _LockEx:
 
     async def lock_profit_stop(self, position_id: str) -> dict[str, Any]:
         self.locked.append(position_id)
-        return {"action": "locked"}
+        return self.result
 
 
 def _lock_runner(tmp_path: Path, ex: _LockEx, **fast: Any) -> tuple[Runner, Log]:
@@ -1167,12 +1164,22 @@ def test_runner_profit_lock_off_switch_stops_new_triggers(tmp_path: Path) -> Non
     assert ex.seen == [] and log.records == []
 
 
-async def test_runner_profit_lock_tick_retries_pending_and_uses_the_config_gap(
-    tmp_path: Path,
-) -> None:
+async def test_runner_profit_lock_tick_only_judges_and_sets_the_gap(tmp_path: Path) -> None:
     ex = _LockEx(None)
-    ex.pending = ["pos-9"]
+    ex.mark = 100.5
     r, _ = _lock_runner(tmp_path, ex, profit_lock_mark_gap_bps=8.0)
     await r.profit_lock_tick()
     await asyncio.gather(*r._tasks)
-    assert ex.locked == ["pos-9"] and ex.gap == 8.0
+    assert ex.locked == [] and ex.gap == 8.0  # 换单归 protection_tick 的同步，这里不再派
+
+
+@pytest.mark.parametrize("why", ["not_placeable", "sync_failed"])
+async def test_runner_profit_lock_records_a_failed_round(tmp_path: Path, why: str) -> None:
+    ex = _LockEx(None)
+    ex.result = {"action": "retry", "why": why}
+    r, log = _lock_runner(tmp_path, ex)
+    r._spawn_profit_lock("pos-1")
+    await asyncio.gather(*r._tasks)
+    rec = log.records[-1]
+    assert rec.summary == f"pos-1 锁利止损这一轮没挂上（{why}），之后每轮接着试"
+    assert rec.output["profit_lock_round"] == ex.result

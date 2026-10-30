@@ -285,8 +285,13 @@ def _tp(leg: ProtectiveLeg) -> bool:
 
 
 def _side_leg(leg: ProtectiveLeg) -> bool:
-    """独立于止损 / 保命单的腿（交易所移动止损、后备止盈）：它的问题不挡止损和保命单。"""
-    return _native(leg) or _tp(leg)
+    """独立于止损 / 保命单的腿（交易所移动止损、后备止盈、提交结果未知的锁利腿）：它的问题不挡
+    止损和保命单。"""
+    return _native(leg) or _tp(leg) or _lock_unknown(leg)
+
+
+def _lock_unknown(leg: ProtectiveLeg) -> bool:
+    return leg.purpose == "profit_lock" and leg.state == "submit_pending"
 
 
 def _side_idle(leg: ProtectiveLeg) -> bool:
@@ -297,6 +302,7 @@ def _side_idle(leg: ProtectiveLeg) -> bool:
 PROFIT_LOCK_RETRY = timedelta(seconds=30)
 """锁利腿被交易所说已越触发价：隔这么久再试，不每秒撞一次。"""
 PROFIT_LOCK_UNKNOWN_MAX = timedelta(minutes=5)
+"""锁利腿提交结果未知：隔这么久没查到就换新单号再挂；旧单号接着查，零仓时收拾。"""
 
 
 def _role(leg: ProtectiveLeg) -> str:
@@ -394,6 +400,9 @@ class BracketManager:
         self.last_marks: dict[str, float] = {}
         """移动止损观测刚读到的同环境价，锁利不用另发请求。"""
         self._lock_retry_at: dict[str, datetime] = {}
+        self._lock_quantised: dict[str, float] = {}  # 这一轮锁利目标量化后的价
+        self._pending_lock_notes: dict[str, list[str]] = {}
+        self.notify_profit_lock: StopNotify | None = None
         """某条腿触发后子单被交易所拒绝时调用；执行器接上告警。"""
         self.notify_take_profit: StopNotify | None = None
         """后备止盈单挂不上 / 撤不掉时调用；执行器接上告警。"""
@@ -824,10 +833,10 @@ class BracketManager:
                 else self.exchange.get_bracket
             )
             order = await read(tracked.record.symbol, client_order_id=old.client_order_id)
+            if order is None and _lock_unknown(old):
+                continue  # 独立腿：查不到不挡这一轮，下一轮接着按原单号查
             if order is None:
                 order = await self._await_readback(pid, old.client_order_id)
-            if order is None and self._lock_unknown_expired(pid, old):
-                continue
             if (
                 order is None
                 and old.purpose == "lifeboat"
@@ -846,6 +855,10 @@ class BracketManager:
             leg = self._leg(pid, old.client_order_id)
             self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
         _, state = self._current(pid)
+        if state.profit_lock_unknown_since is not None and not any(
+            _lock_unknown(leg) for leg in state.legs
+        ):
+            state = self._save(pid, profit_lock_unknown_since=None)
         hit = next((leg for leg in state.legs if _triggered(leg)), None)
         if hit is not None:
             reason = _reason(hit)
@@ -1048,26 +1061,6 @@ class BracketManager:
         if not _settled(final):
             raise ProtectionIncomplete("撤单或触发子单仍未终态")
 
-    def _lock_unknown_expired(self, pid: str, leg: ProtectiveLeg) -> bool:
-        """锁利腿提交结果一直未知：等 ``PROFIT_LOCK_UNKNOWN_MAX`` 后放弃，免得换代一直卡住。"""
-        if leg.purpose != "profit_lock" or leg.state != "submit_pending":
-            return False
-        now = self.clock()
-        since = self._current(pid)[1].profit_lock_unknown_since
-        if since is None:
-            self._save(pid, profit_lock_unknown_since=now)
-            return False
-        if now - since < PROFIT_LOCK_UNKNOWN_MAX:
-            return False
-        self._save_leg(pid, leg.model_copy(update={"state": "superseded"}))
-        self._abandon_lock(
-            pid,
-            "abandoned_unknown",
-            f"锁利止损 {leg.trigger_price:g} 提交结果一直未知（{leg.client_order_id}），"
-            "这笔不再挂，原止损不变",
-        )
-        return True
-
     async def sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         tracked, _ = self._current(pid)
         try:
@@ -1093,7 +1086,10 @@ class BracketManager:
         rejections, rejected = self._pending_rejections.pop(pid, []), self.notify_trigger_rejected
         fallbacks, fell_back = self._pending_fallbacks.pop(pid, []), self.notify_native_fallback
         tp_notes, tp_notify = self._pending_tp_notes.pop(pid, []), self.notify_take_profit
+        lock_notes, lock_notify = self._pending_lock_notes.pop(pid, []), self.notify_profit_lock
         sends: list[Awaitable[None]] = []
+        if lock_notify is not None:
+            sends += [lock_notify(pid, symbol, text) for text in lock_notes]
         if tp_notify is not None:
             sends += [tp_notify(pid, symbol, text) for text in tp_notes]
         if fell_back is not None:
@@ -1141,15 +1137,20 @@ class BracketManager:
         return out
 
     def _lock_wanted(self, pid: str, state: ServerProtection) -> bool:
-        if state.profit_lock_price is None or (state.profit_lock_done or "").startswith("abandon"):
+        """``tight_enough`` 和放弃都是定论，不再当候选；``locked`` 留着当下限。"""
+        if state.profit_lock_price is None or state.profit_lock_done not in (None, "locked"):
+            return False
+        now = self.clock()
+        since = state.profit_lock_unknown_since
+        if since is not None and now - since < PROFIT_LOCK_UNKNOWN_MAX:
             return False
         at = self._lock_retry_at.get(pid)
-        return at is None or self.clock() >= at
+        return at is None or now >= at
 
     def _settle_profit_lock(self, pid: str) -> None:
         """换代确认后认账：腿真的挂上了，或现有止损（含交易所移动止损）已同样紧。"""
         tracked, state = self._current(pid)
-        target = state.profit_lock_price
+        target = self._lock_quantised.pop(pid, state.profit_lock_price)
         if target is None or state.profit_lock_done is not None:
             return
         live, purpose = self._live_stop(state)
@@ -1163,7 +1164,7 @@ class BracketManager:
 
     def _abandon_lock(self, pid: str, why: str, note: str) -> None:
         self._save(pid, profit_lock_done=why, profit_lock_unknown_since=None)
-        self._pending_notes.setdefault(pid, []).append(note)
+        self._pending_lock_notes.setdefault(pid, []).append(note)
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         result, evidence = await self._sync_core(pid)
@@ -1233,6 +1234,8 @@ class BracketManager:
             if not math.isclose(spec.quantity, evidence.quantity, rel_tol=1e-10):
                 raise ProtectionIncomplete("实际仓量无法完整量化，不能宣称无残量")
             specs[kind] = spec
+        if stop.purpose == "profit_lock":
+            self._lock_quantised[pid] = specs["stop_loss"].trigger_price
         specs = {kind: specs[kind] for kind in _LEG_ORDER[self.leg_order] if kind in specs}
         await self._checkpoint(pid, evidence)
         _, state = self._current(pid)
@@ -1385,6 +1388,10 @@ class BracketManager:
                     ) from None
                 except BracketSubmissionUnknown as unknown:
                     found = await self._await_unknown_submit(pid, leg.client_order_id, unknown)
+                    if found is None and leg.purpose == "profit_lock":
+                        # 旧止损还在：不退回 provisional，这张单当独立腿，到点再挂新单号
+                        self._save(pid, profit_lock_unknown_since=self.clock())
+                        return await self._sync_core(pid)
                     if found is None:
                         raise ProtectionIncomplete(
                             "普通保护提交结果未知，只查原CID",
@@ -1667,6 +1674,8 @@ class BracketManager:
         ):
             return keep  # 收紧太少，不值得撤旧挂新（这两种收紧价只换一次，不受最小步长限制）
         lock = purpose == "profit_lock"
+        if lock and current_purpose == "profit_lock":
+            return keep  # 已挂上：量化后可能比原始目标松不到一格，不算没到
         buffer = self.trailing_stop_mark_buffer_bps
         if lock:
             buffer = max(buffer, self.profit_lock_gap_bps)
@@ -1684,7 +1693,13 @@ class BracketManager:
         if lock:
             # 不夹：夹到标记价旁边既不是约定的价，还可能低于 +0.1R。这一轮只看别的来源，下轮再试。
             others = [c for c in candidates or [] if c[0] != "profit_lock"]
-            return await self._stop_target(tracked, state, others)
+            other = await self._stop_target(tracked, state, others)
+            looser = (
+                current is not None
+                and other.price is not None
+                and sign * (other.price - current) < 0
+            )
+            return keep if looser else other
         clamped = limit if fixed is None else tighter(limit, fixed)
         if gain(clamped) >= max(self.trailing_min_step_bps, 1e-9):
             note = (

@@ -560,7 +560,7 @@ Demo 托管保护的移动止损原本由程序每秒算（`BracketManager.obser
 
 **判。** 费用 = 实际开仓费 + 吃单平仓费，开仓成本读第一轮保护观测落盘的 `trailing_entry_*` / `trailing_fees_quote`。主网止损规则开着时在行情事件里按主网价判（`_paper_stop_check` 里，不发请求、不等锁；价要晚于成交、不超过 10 秒旧）；没开时（`paper_stop_on_mainnet = off`、实盘）用移动止损观测刚读到的同环境价，不另发请求，所以没带移动止损配置的仓不会触发。第一次赚到就把 `profit_lock_reached_at`、`profit_lock_price` 落盘，之后价格回落也接着挂，重启接着来。
 
-**挂。** 目标价是 `_stop_target` 的一个候选（腿的用途 `profit_lock`），换代先确认新腿再撤旧腿。离标记价不到 `profit_lock_mark_gap_bps`（默认 5 基点）就这一轮不换、下一轮再试，不夹到标记价旁边，也不平仓。入口是执行器的 `lock_profit_stop`，没有平仓分支、不发 CRITICAL。交易所明确拒绝：这笔放弃（`abandoned_rejected`），回到 armed，发一条提醒，交易所移动止损的观测不停。交易所说已越触发价：隔 30 秒再试，不进退出。提交结果未知：按原单号查 5 分钟，还查不到就放弃（`abandoned_unknown`）。现有止损（含交易所移动止损算出来的价）已同样紧：记 `tight_enough`，不换单。
+**挂。** 第一次赚到触发线时派一次 `lock_profit_stop`，没挂上的之后由每秒的保护同步接着挂（目标价是 `_stop_target` 的一个候选，腿的用途 `profit_lock`），换代先确认新腿再撤旧腿。离标记价不到 `profit_lock_mark_gap_bps`（默认 5 基点）就这一轮不换、下一轮再试，不夹到标记价旁边，也不平仓。入口是执行器的 `lock_profit_stop`，没有平仓分支、不发 CRITICAL。已经挂上的腿不会因为标记价回到附近被换掉（量化后可能比原始目标松不到一格），挂不上时也不会退到比在挂止损更松的价。交易所明确拒绝：这笔放弃（`abandoned_rejected`），回到 armed，发一条 WARN，交易所移动止损的观测不停。交易所说已越触发价：隔 30 秒再试，不进退出。提交结果未知：这张单当独立腿，不退回 provisional、不挡换代，5 分钟内不重发，之后换新单号再挂，直到挂上；旧单号接着查，零仓收尾时查清撤掉。现有止损（含交易所移动止损算出来的价）已同样紧：记 `tight_enough`，这是定论，之后这笔不再换单，主网止损规则也不再认这个价。
 
 **并存。** 币安移动止损、后备止盈、冻结峰值、反向卡收紧都不动，谁先到谁平。关掉开关只停新的触发，已经锁上的不动。
 
@@ -568,7 +568,7 @@ Demo 托管保护的移动止损原本由程序每秒算（`BracketManager.obser
 
 **面板。** 持仓显示「已锁利 约 +0.1R（未含滑点）」和止损价，只有真的有在挂的止损在这个价时才这么写；否则写「锁利等挂上」。防线卡片：今天触发几笔、被打掉几笔，按实际净盈亏分赚 / 亏，按主网价 / Demo 分（Demo 成交可能比触发价差二十几个基点）。平仓记录带 `trigger = mainnet | demo`。
 
-代码回滚前先跑 `scripts/profit_lock_rollback.py`，再从 `config/app.toml` 删掉新键。
+代码回滚前先跑 `scripts/profit_lock_rollback.py`（在挂的锁利腿改记成反向卡收紧，旧代码不会把止损换回去），再从 `config/app.toml` 删掉新键。
 
 ## 模拟盘按主网价格判止损（`paper_stop_on_mainnet`，默认关）
 

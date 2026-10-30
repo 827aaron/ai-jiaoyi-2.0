@@ -236,8 +236,6 @@ class _LocksProfit(Protocol):
         self, position_id: str, price: float, *, trigger_r: float, lock_r: float, source: str
     ) -> dict[str, Any] | None: ...
 
-    def profit_lock_pending(self) -> list[str]: ...
-
     def set_profit_lock_gap(self, gap_bps: float) -> None: ...
 
     def last_mark(self, position_id: str) -> float | None: ...
@@ -1185,12 +1183,28 @@ class Runner:
         ex = self.m.executor
         try:
             if isinstance(ex, _LocksProfit):
-                await ex.lock_profit_stop(pid)
+                self._note_lock_round(pid, await ex.lock_profit_stop(pid))
         finally:
             self._lock_queued.discard(pid)
 
+    def _note_lock_round(self, pid: str, result: dict[str, Any]) -> None:
+        if result.get("action") != "retry":
+            return
+        rec = self.app.recorders.get(Role.KEEPER)
+        if rec is not None:
+            pos = next((p for p in self._ledger_positions() if p.position_id == pid), None)
+            rec.record(
+                self.app.clock(),
+                Outcome.INFO,
+                f"{pos.symbol if pos else pid} 锁利止损这一轮没挂上（{result.get('why')}），"
+                "之后每轮接着试",
+                symbol=pos.symbol if pos else None,
+                position_id=pid,
+                output={"profit_lock_round": result},
+            )
+
     async def profit_lock_tick(self) -> None:
-        """每秒：没走主网价判的运行模式用同环境标记价判，已赚到触发线的接着挂到挂上为止。"""
+        """每秒：没走主网价判的运行模式用同环境标记价判。换单归 ``protection_tick`` 的同步。"""
         ex, fl = self.m.executor, self.app.app_cfg.fast_loop
         if not fl.profit_lock_on or not isinstance(ex, _LocksProfit):
             return
@@ -1200,8 +1214,6 @@ class Runner:
             for pos in self._ledger_positions():
                 if pos.status is PositionStatus.OPEN and (px := ex.last_mark(pos.position_id)):
                     self._profit_lock_cross(pos, px, source)
-        for pid in ex.profit_lock_pending():
-            self._spawn_profit_lock(pid)
 
     def _paper_stop_since(self, pos: PositionRecord) -> datetime:
         ex = self.m.executor

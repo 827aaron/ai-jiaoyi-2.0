@@ -484,3 +484,17 @@ def test_held_events_trail_trigger_is_accepted_by_the_commander() -> None:
     from jiaoyi.slow.commander import HELD_TRIGGERS
 
     assert "held_market_trail" in HELD_TRIGGERS
+
+
+def test_held_events_trail_lock_already_queued_symbol_is_not_counted(tmp_path: Path) -> None:
+    now = datetime.fromisoformat("2026-10-30T06:00:00+00:00")
+    cfg = LOSS.model_copy(update={"signal_market_trail_meetings_per_day": 1})
+    desk, asked, records = _trail_desk(tmp_path, cfg)
+    desk._pending = lambda sym: True
+    p, px = _marked(now, p_loss(_short(now)))
+    desk.on_trail_lock(c.Side.SHORT, [p], now, lambda sym: px)
+    assert asked == []
+    assert records[-1].output["held_event"]["duplicate"] is True
+    desk._pending = lambda sym: False
+    desk.on_trail_lock(c.Side.SHORT, [p], now, lambda sym: px)
+    assert asked == [(p.symbol, TRAIL_TRIGGER)]

@@ -2463,7 +2463,8 @@ function tlRoleLine(r, d) {
   if (r.doing) return [r.doing, "now"];
   if (r.role === "predictor") return [predictorText(r), ""];
   if (r.role === "alerting") return ["收所有角色的事，推给你", ""];
-  return [r.summary || runLine({ last_run_at: r.last_run_at, next_run_at: r.next_run_at }) || r.headline || r.status, ""];
+  // 风控员的状态三行拆在节点下面的闸门行和详情的状态条里，这里只留第一行
+  return [String(r.summary || runLine({ last_run_at: r.last_run_at, next_run_at: r.next_run_at }) || r.headline || r.status).split("\n")[0], ""];
 }
 function tlBox(k, inner, cls, href, title) {
   return `<a class="tl-node ${cls}" data-k="${k}" href="${href}" title="${esc(title || "")}">${inner}</a>`;
@@ -2693,7 +2694,7 @@ function trailBar(m) {
   const st = m.state === "locked" ? `<b class="warn">${esc(m.guards)}锁住 ${m.locked_min} 分钟</b>` : m.state === "open" ? `<b>${esc(m.guards)}放行</b>` : `<b>${esc(m.now)}</b>`;
   const ema = m.ema_on ? `<br><b>${esc(m.ema_block ? m.ema_block + "暂停" : "均线")}</b> ${esc(m.ema_text)}` : "";
   const ext = m.leg === "跌段" ? "低点" : "高点";
-  const leg = m.leg ? ` · ${esc(m.ref)} ${esc(m.leg)}（管${esc(m.guards)}）${px} · 现在离${ext} <span class="num">${m.retrace_atr.toFixed(2)}</span> / 门槛 ${Number(m.k).toFixed(1)} ATR${m.state === "locked" ? `（${m.leg === "跌段" ? "创新低" : "创新高"}才解锁）` : ""}` : "";
+  const leg = m.leg ? ` · ${esc(m.ref)} ${esc(m.leg)}（管${esc(m.guards)}）${px} · 现在离${ext} <span class="num">${m.retrace_atr.toFixed(2)}</span> / 门槛 ${Number(m.k).toFixed(1)} ATR${m.state === "locked" ? `（${esc(m.until)}才解锁）` : ""}` : "";
   const stale = m.stale_at ? ` · <span class="warn">数据停在 ${hm(m.stale_at)}</span>` : "";
   return `<div class="note small trail-bar"><span><b>大盘闸门：${esc(m.verdict)}</b><br>移动止损 ${st}${leg}${stale}${ema}<br>今天 ${esc(m.today_text)}</span>${chip}</div>`;
 }

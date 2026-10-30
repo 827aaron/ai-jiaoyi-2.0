@@ -26,6 +26,7 @@ from jiaoyi.core.market_trail import (
     ema_line,
     ema_value,
     read_ema,
+    until_text,
     verdict_cn,
 )
 from jiaoyi.core.paper_stop import PaperStop
@@ -133,6 +134,8 @@ class MarketTrailView(BaseModel):
     ema_block: str | None = None
     """均线闸此刻拦的方向：多单 / 空单。"""
     ema_text: str = ""
+    until: str = ""
+    """锁住时写什么才解锁：创新低，或创新低或 HH:MM 作废。"""
     trail_text: str = ""
     today_text: str = ""
     line: str = "大盘闸门：未启用"
@@ -169,14 +172,16 @@ def _meetings(today: list[DecisionRecord], now: datetime) -> tuple[int, int]:
         if r.role is Role.PATROL
         and (r.output.get("held_event") or {}).get("trigger") == "held_market_trail"
         and r.output["held_event"].get("queued")
+        and not r.output["held_event"].get("duplicate")
     ]
     steps = commander_steps(today, now)
-    held = sum(
-        1
-        for r in asks
-        if any(s.ts > r.ts and s.meeting is not None for s in steps.get(r.symbol or "", []))
-    )
-    return len(asks), held
+    held: set[tuple[str, datetime]] = set()
+    for r in asks:
+        sym = r.symbol or ""
+        first = next((s for s in steps.get(sym, []) if s.ts > r.ts and s.meeting is not None), None)
+        if first is not None:
+            held.add((sym, first.ts))  # 一场会顶掉这段时间里所有申请
+    return len(asks), len(held)
 
 
 def _today_text(v: MarketTrailView) -> str:
@@ -255,6 +260,9 @@ def market_trail_view(
         v.state, v.now, v.line = "none", "还没有状态（主程序没跑过这一版）", "大盘闸门：还没有状态"
         return v
     _trail_part(v, s, k, label, now, tz)
+    if s.leg is not None:
+        age = fl.signal_market_trail_max_extreme_age_min
+        v.until = until_text(s.leg, age, ZoneInfo(tz))
     v.trail_text = v.now
     _ema_part(v, s, app, now, tz)
     return v
