@@ -446,6 +446,7 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tl-node small.cnt { color: var(--dim); font-variant-numeric: tabular-nums; }
 .tl-node small.now { color: var(--accent); font-weight: 600; }
 .tl-node small.against { color: var(--warn); font-weight: 600; }
+.tl-node small.off, .tl-node.off .nm { color: var(--dim); }
 .tl-node small.err, .tl-node .err, .tl-pill .err { color: var(--err); font-weight: 600; }
 .tl-node .tl-chip { position: absolute; left: 6px; bottom: -10px; max-width: 150px; font-style: normal; font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 6px; background: var(--card); border: 1px solid var(--line); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tl-node.doing { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -739,3 +740,102 @@ table.sticky thead th { position: sticky; top: 0; background: var(--card); z-ind
 .log .clamp1 { min-width: 0; }
 .pos .top .pnl .small { font-size: 11px; font-weight: 500; }
 details.st-more > summary { padding: 8px 18px 12px; }
+
+/* 作战卡：每个币一行，点开看计划、价格刻度和军师原话；历史卡的日期 / 币筛选 */
+tr.fade td { opacity: 0.55; }
+.row-pick { display: flex; gap: 8px; flex-wrap: wrap; }
+.cautions { margin: 6px 0 0; padding-left: 18px; } .cautions li { margin: 4px 0; } .cautions label { display: inline; font-weight: normal; }
+.cautions.acks { list-style: none; padding-left: 0; }
+.bc-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.bc-top h3 { margin: 0; }
+.bc-top a { margin-left: auto; }
+.bc-regime { background: var(--bg); border-radius: 10px; padding: 7px 12px; font-size: 13px; }
+.bc-regime summary { list-style: none; cursor: pointer; display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.bc-regime summary::-webkit-details-marker { display: none; }
+.bc-regime b { color: var(--hi); flex: none; }
+.bc-regime .more { color: var(--accent); font-size: 12px; margin-left: auto; flex: none; }
+.bc-regime[open] .more { display: none; }
+.bc-regime > div { margin-top: 6px; }
+.bc-sum { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--dim); }
+.bc-sum b { color: var(--hi); font-size: 13px; margin-right: 2px; }
+.bc-list { border-top: 1px solid var(--line); }
+.bc-row { display: grid; grid-template-columns: minmax(96px, 1fr) minmax(0, 2fr) minmax(0, 1.25fr) minmax(0, 1.25fr) minmax(0, .7fr) minmax(0, .6fr) minmax(0, 1.2fr) 14px; gap: 10px; align-items: center; padding: 8px 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.bc-row > * { min-width: 0; }
+.bc-head { font-size: 11px; color: var(--dim); padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.bc { border-bottom: 1px solid var(--line); }
+.bc > summary { list-style: none; cursor: pointer; }
+.bc > summary::-webkit-details-marker { display: none; }
+.bc > summary:hover { background: var(--fill); }
+.bc.fade > summary { opacity: .55; }
+.bc-sym { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bc-sym b { color: var(--hi); font-size: 14px; }
+.bc-dir { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.bc-c { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--hi); }
+.bc-c.sl { color: var(--sl); } .bc-c.tp { color: var(--up); }
+.bc-chev { color: var(--faint); transition: transform .15s; }
+.bc[open] .bc-chev { transform: rotate(90deg); }
+.bc-body { container-type: inline-size; padding: 4px 4px 12px; display: flex; flex-direction: column; gap: 8px; }
+.bc-body .plan { font-size: 14px; color: var(--hi); font-weight: 500; }
+.bc-foot { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: flex-start; }
+.bc-foot details.raw { flex: 1 1 320px; font-size: 12px; }
+.bc-foot details.raw summary { cursor: pointer; color: var(--accent); list-style: none; }
+.bc-foot details.raw summary::-webkit-details-marker { display: none; }
+.rawbox { margin-top: 6px; background: var(--bg); border-radius: 10px; padding: 9px 11px; display: grid; gap: 8px; }
+.bc-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; }
+.bc-kv dt { color: var(--dim); } .bc-kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.tag-ref { font-size: 10px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-right: 6px; }
+.bc-idle summary { cursor: pointer; font-size: 12px; }
+.bc-idle ul { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.bc-idle li { background: var(--bg); border-radius: 10px; padding: 7px 11px; font-size: 12px; }
+.bc-idle li b { color: var(--hi); margin-right: 8px; }
+.bc-idle li .pill { margin-right: 6px; }
+/* 方向变化：做多 ↔ 做空 用强调色（一小时内实底），转观望 / 会判观望卡保留原方向用灰底 */
+.pill.flip { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.pill.flip.fresh { background: var(--accent); color: #fff; box-shadow: none; }
+.pill.calm { background: var(--fill); color: var(--dim); }
+.bc-hist { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; font-size: 12px; }
+.dlg.wide.bc-dlg { width: min(1040px, 100%); }
+.bc-hist .dh { white-space: nowrap; }
+.bc-hist .dh .t { color: var(--dim); margin-right: 3px; font-variant-numeric: tabular-nums; }
+.bc-hist .dh.flip b { color: var(--accent); }
+.bc-hist .arr { color: var(--faint); }
+/* 价格刻度线 */
+.lad { position: relative; height: 74px; margin: 2px 4px 0; }
+.lad .base { position: absolute; left: 0; right: 0; top: 37px; height: 2px; background: var(--line2); border-radius: 1px; }
+.lad .tick { position: absolute; top: 32px; width: 1px; height: 12px; background: var(--faint); }
+.lad .tick.s { background: var(--up); opacity: .55; } .lad .tick.r { background: var(--down); opacity: .55; }
+.lad .ln { position: absolute; top: 25px; height: 26px; width: 0; border-left: 2px dashed; }
+.lad .ln.sl { border-color: var(--sl); } .lad .ln.tp { border-color: var(--up); }
+.lad .px { position: absolute; top: 32px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--hi); border: 2px solid var(--card); box-shadow: 0 0 0 1px var(--hi); }
+.lad .zone { position: absolute; top: 30px; height: 16px; border-radius: 4px; }
+.lad .zone.sl { background: color-mix(in srgb, var(--sl) 22%, transparent); border: 1px dashed var(--sl); }
+.lad .zone.tp { background: var(--up-soft); border: 1px dashed var(--up); }
+.lad .open { position: absolute; top: 31px; width: 3px; height: 14px; margin-left: -1px; background: var(--accent); border-radius: 2px; }
+.lad .lb { position: absolute; font-size: 11px; line-height: 13px; white-space: nowrap; transform: translateX(-50%); font-variant-numeric: tabular-nums; color: var(--tx); }
+.lad .lb.t0 { top: 10px; } .lad .lb.t1 { top: -4px; } .lad .lb.b0 { top: 51px; } .lad .lb.b1 { top: 64px; }
+.lad .lb.sl { color: var(--sl); } .lad .lb.tp { color: var(--up); } .lad .lb.en { color: var(--accent); } .lad .lb.pxl { color: var(--hi); font-weight: 600; }
+.bc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--dim); }
+.bc-legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+/* 手机：每个币四行：币种 + 方向；止损 / 止盈；杠杆 / 仓位；到期，数字前带小标题 */
+@media (max-width: 720px) {
+  .bc-head, .bc-chev { display: none; }
+  .bc > summary.bc-row { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 3px; }
+  .bc > summary .bc-dir { justify-content: flex-end; }
+  .bc > summary .bc-when { grid-column: span 2; }
+  .bc-c { font-size: 12px; }
+  .bc-c::before { content: attr(data-k) " "; color: var(--dim); font-size: 11px; }
+}
+.card-eff { margin: 6px 0 2px; line-height: 1.5; }
+
+/* 今日盈亏曲线（总览「今日盈亏」点开） */
+.pnl-curve { margin: 4px 0 14px; }
+.pnl-curve svg { display: block; width: 100%; height: auto; touch-action: pan-y; cursor: crosshair; }
+.pc-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; margin-bottom: 6px; }
+.pc-line { fill: none; stroke: var(--hi); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.pc-fill { stroke: none; opacity: 0.14; }
+.pc-fill.up { fill: var(--up); } .pc-fill.dn { fill: var(--down); }
+.pc-zero { stroke: var(--dim); stroke-dasharray: 4 4; stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.6; }
+.pc-cur { stroke: var(--dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.pnl-curve circle { vector-effect: non-scaling-stroke; stroke: var(--card); stroke-width: 2; }
+.pnl-curve circle.hi { fill: var(--up); } .pnl-curve circle.lo { fill: var(--down); } .pnl-curve circle.now { fill: var(--hi); }
+.pc-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }

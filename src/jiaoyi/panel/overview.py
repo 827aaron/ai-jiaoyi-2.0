@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -40,6 +41,7 @@ from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
 from jiaoyi.panel.protection import ProtectionView, lifeboat_summary, parse_protection
 from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
+from jiaoyi.slow.card_flip import card_direction
 from jiaoyi.slow.card_outlook import card_from_output
 from jiaoyi.slow.desk_intra import compose_intra
 
@@ -117,6 +119,18 @@ class LevelView(BaseModel):
     """support / resistance / pivot；页面按现价上下重新分支撑、压力（同慢环落卡的口径）。"""
 
 
+class DirStep(BaseModel):
+    """一个币卡上方向的一次变动机会：一场会，或不跟会的翻转确认 / 恢复。"""
+
+    ts: datetime
+    meeting: str | None
+    """这场会自己的结论 long / short / neutral；不是会（管家助手确认、恢复原方向）是 None。"""
+    card: str
+    """这之后卡上生效的方向（交易系统真正用的，含翻转滞回）：long / short / neutral。"""
+    event: str | None = None
+    """``card_flip`` 记录：ignored（会判观望、按设置保留原方向）/ pending / confirmed / …。"""
+
+
 class CardRow(BaseModel):
     """作战卡里一个标的；点开作战卡时整张表显示。旧记录读不到会议结论时只有币名。"""
 
@@ -150,6 +164,12 @@ class CardRow(BaseModel):
     """只记录的判断（CardOutlook）：会议看未来 4 小时大盘 / 相对大盘，及总盘会方向；旧卡没有。"""
     fading: bool = False
     """离到期不到 10 分钟（或已到期的持仓币）：显示成灰色。"""
+    dir_start: str | None = None
+    """今天（本地时区）0 点时卡上这个币的方向；前一天没开过会是 None。"""
+    dir_steps: list[DirStep] = []
+    """今天的方向变动机会，旧的在前。"""
+    flips_today: int = 0
+    """今天卡上做多 ↔ 做空 换了几次（转观望、从观望转出不算）。"""
 
 
 class DeskLatest(BaseModel):
@@ -425,15 +445,22 @@ def build_overview(
         lamps=_lamps(status, hb, now, running),
         kpis=kpis,
         card=_with_fractions(
-            _with_pool_notes(
-                _with_pending(
-                    _with_current_market(
-                        _card(records, now, {p.symbol for p in positions}), files.root, now
+            _with_dir_history(
+                _with_pool_notes(
+                    _with_pending(
+                        _with_current_market(
+                            _card(records, now, {p.symbol for p in positions}, recent),
+                            files.root,
+                            now,
+                        ),
+                        files.root,
+                        now,
+                        files.tz,
                     ),
-                    files.root,
                     now,
                     files.tz,
                 ),
+                recent,
                 now,
                 files.tz,
             ),
@@ -988,10 +1015,118 @@ def _flip_text(raw: object) -> str | None:
     )
 
 
-def _card(
-    records: list[DecisionRecord], now: datetime, held: set[str] | None = None
+@dataclass
+class _Track:
+    eff: CardSymbol | None = None
+    before: CardSymbol | None = None
+    """最近一场会之前卡上的那条：会判观望被忽略、或改判进了待确认时，卡上留的是它。"""
+    fresh: CardSymbol | None = None
+    stash: CardSymbol | None = None
+    """待确认翻转期间被换成只看不做之前的那条（恢复原方向时用）。"""
+    after_meeting: bool = False
+    steps: list[DirStep] = field(default_factory=list)
+
+
+def _meeting_cs(r: DecisionRecord) -> CardSymbol | None:
+    if not (r.symbol and r.output and r.outcome is Outcome.ACTION):
+        return None
+    try:
+        # 记录里还夹着 usage（token 用量）、meeting_setup（偏空整改的分组）等不属于作战指令
+        # 的键：契约禁止多余字段，不去掉的话校验会整条丢掉；只记录的 outlook 单独校验，
+        # 坏了不连累卡
+        return card_from_output({k: v for k, v in r.output.items() if k in CardSymbol.model_fields})
+    except ValueError:
+        return None
+
+
+def _replay(cmd: list[DecisionRecord]) -> dict[str, _Track]:
+    """按时间重放军师团记录，得到每个币卡上生效的那条指令（同 ``slow/card_flip.py`` 的滞回）。
+
+    会议结论记录写的是会自己的结论；之后紧跟的 ``card_flip`` 记录说明卡上实际怎么处理：
+    ignored = 卡上留着会前那条，pending = 会前那条只看不做，confirmed = 换成待确认的那场结论。"""
+    tracks: dict[str, _Track] = {}
+    for r in cmd:
+        if not r.symbol:
+            continue
+        t = tracks.setdefault(r.symbol, _Track())
+        cs = _meeting_cs(r)
+        if cs is not None:
+            t.before, t.fresh, t.eff, t.after_meeting = t.eff, cs, cs, True
+            t.steps.append(DirStep(ts=r.ts, meeting=card_direction(cs), card=card_direction(cs)))
+            continue
+        ev = r.output.get("card_flip") if r.outcome is Outcome.INFO else None
+        if ev not in ("ignored", "pending", "confirmed", "cancelled", "dropped"):
+            continue
+        right_after, t.after_meeting = t.after_meeting, False
+        if ev == "ignored" and right_after and t.before is not None:
+            t.eff = t.before.model_copy(update={"expires_at": t.eff.expires_at if t.eff else None})
+        elif ev == "ignored" and not right_after and t.stash is not None:
+            t.eff, t.stash = t.stash, None  # 切到 ignore 时把转观望的候选恢复成原方向
+        elif ev == "pending" and t.before is not None:
+            t.stash = t.stash or t.before
+            t.eff = t.before.model_copy(update={"allowed_signals": []})
+        elif ev == "confirmed" and t.fresh is not None:
+            t.eff, t.stash = t.fresh, None
+        elif ev in ("cancelled", "dropped"):
+            t.stash = None
+        if t.eff is None:
+            continue
+        if right_after and t.steps:
+            t.steps[-1] = t.steps[-1].model_copy(
+                update={"card": card_direction(t.eff), "event": ev}
+            )
+        elif ev in ("ignored", "confirmed"):
+            t.steps.append(DirStep(ts=r.ts, meeting=None, card=card_direction(t.eff), event=ev))
+    return tracks
+
+
+_LS = frozenset({"long", "short"})
+
+
+def _flips(start: str | None, steps: list[DirStep]) -> int:
+    n, prev = 0, start
+    for st in steps:
+        if prev in _LS and st.card in _LS and st.card != prev:
+            n += 1
+        prev = st.card
+    return n
+
+
+def _with_dir_history(
+    card: CardView | None, recent: list[DecisionRecord], now: datetime, tz: str
 ) -> CardView | None:
-    """今天最新一张作战卡：军师出卡记录 + 每个标的最新的会议结论（output 就是 CardSymbol）。"""
+    """每行附上今天卡上方向怎么变过。用两天的记录重放，今天第一场会之前的方向才有着落。"""
+    if card is None:
+        return None
+    day0 = datetime.combine(local_day(now, tz), datetime.min.time(), ZoneInfo(tz))
+    tracks = _replay([r for r in recent if r.role is Role.COMMANDER and r.ts <= now])
+    rows = []
+    for row in card.symbols:
+        t = tracks.get(row.symbol)
+        if t is None:
+            rows.append(row)
+            continue
+        old = [st for st in t.steps if st.ts < day0]
+        today = [st for st in t.steps if st.ts >= day0]
+        start = old[-1].card if old else None
+        rows.append(
+            row.model_copy(
+                update={"dir_start": start, "dir_steps": today, "flips_today": _flips(start, today)}
+            )
+        )
+    return card.model_copy(update={"symbols": rows})
+
+
+def _card(
+    records: list[DecisionRecord],
+    now: datetime,
+    held: set[str] | None = None,
+    history: list[DecisionRecord] | None = None,
+) -> CardView | None:
+    """今天最新一张作战卡：军师出卡记录 + 每个标的卡上生效的那条会议结论（output 就是 CardSymbol）。
+
+    ``history``：重放结论用的更长一段记录（今天第一场会判观望被忽略时，卡上留的是昨天那条）；
+    不给就只用 ``records``。"""
     cmd = [r for r in records if r.role is Role.COMMANDER]
     issued = [r for r in cmd if r.card_id and r.outcome is Outcome.ACTION]
     if not issued:
@@ -1018,18 +1153,14 @@ def _card(
         for n in names
         if n not in stamps or stamps[n][1] is None or now < (stamps[n][1] or now) or stamps[n][2]
     ]
-    per: dict[str, CardSymbol] = {}
-    for r in cmd:
-        if r.symbol and r.output and r.outcome is Outcome.ACTION and r.ts <= last.ts:
-            try:
-                # 记录里还夹着 usage（token 用量）、meeting_setup（偏空整改的分组）等不属于作战指令
-                # 的键：契约禁止多余字段，不去掉的话校验会整条丢掉；只记录的 outlook 单独校验，
-                # 坏了不连累卡
-                per[r.symbol] = card_from_output(
-                    {k: v for k, v in r.output.items() if k in CardSymbol.model_fields}
-                )
-            except ValueError:
-                continue
+    # 卡上生效的那条，不是最新那场会的原话：会判观望而设置不翻转时卡上还是原方向
+    per = {
+        sym: t.eff
+        for sym, t in _replay(
+            [r for r in (history or records) if r.role is Role.COMMANDER and r.ts <= last.ts]
+        ).items()
+        if t.eff is not None
+    }
     rows: list[CardRow] = []
     syms = [per[n] for n in names if n in per]
     for n in names:

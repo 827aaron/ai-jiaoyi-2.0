@@ -80,6 +80,12 @@ ROLE_NAMES: dict[Role, str] = {
     Role.RECONCILER: "对账员",
     Role.ALERTING: "告警",
 }
+# 角色的总开关在配置里（点号路径，从 AppConfig 往下找）：关着就是「未启用」，不按断心跳报错。
+# 大盘台按 [market_desk] mode 判断，在 build_desk 里。
+ROLE_SWITCHES: dict[Role, str] = {
+    Role.PREDICTOR: "predictor_enabled",
+    Role.KEEPER_ASSISTANT: "fast_loop.keeper_assistant_on",
+}
 TEAM_RECORD_LIMIT = 200
 TRAIL_LIMIT = 100
 """持仓页每笔持仓的走势里，管家记录最多给这么多条（最新的）；其它角色的都给。"""
@@ -165,6 +171,8 @@ class RoleCard(BaseModel):
     哨兵只留现在作战卡上的币和持仓币（它会列启动以来看过的所有币）。"""
     detail_hidden: int = 0
     """哨兵：掉出作战卡、也没持仓、所以没显示的币数。"""
+    off_by: str | None = None
+    """配置里把这个角色关掉的那个键（``ROLE_SWITCHES``）；开着是 None。"""
 
 
 class DeskInfo(BaseModel):
@@ -741,6 +749,7 @@ def build_team(
     desk_schedule: tuple[str, int, int] | None = None,
     desk_selected: bool = False,
     gate_take_by_kind: dict[str, float] | None = None,
+    switched_off: dict[Role, str] | None = None,
 ) -> TeamPage:
     status = files.module_status()
     records = files.decisions_today(now)
@@ -754,6 +763,11 @@ def build_team(
     for role in ROLE_NAMES:
         st = status.get(role.value)
         card = _role_card(role, st, now, run)
+        if key := (switched_off or {}).get(role):
+            # 关掉的角色停发心跳，留下的旧心跳不能算「无心跳」出错
+            card.state, card.status, card.off_by = "off", f"未启用（配置 {key} = false）", key
+            cards.append(card)
+            continue
         card.doing = _doing(role, records, meetings, holding, now)
         if card.doing is None and role in _WATCHERS and run.running and _healthy(card, st):
             card.doing = _WATCHERS[role]
@@ -811,6 +825,18 @@ def build_team(
             None,
         ),
     )
+
+
+def switched_off_roles(app: AppConfig) -> dict[Role, str]:
+    """``ROLE_SWITCHES`` 里在这份配置中关着的角色 → 键。键找不到（改名了）当开着。"""
+    out: dict[Role, str] = {}
+    for role, key in ROLE_SWITCHES.items():
+        v: object = app
+        for part in key.split("."):
+            v = getattr(v, part, None)
+        if v is False:
+            out[role] = key
+    return out
 
 
 _MARKET_SCAN = 2000

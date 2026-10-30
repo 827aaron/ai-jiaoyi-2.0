@@ -2130,3 +2130,101 @@ def test_history_shows_who_closed_from_close_sources(tmp_path: Path) -> None:
     after = build_history(files, RISK, NOW, "today", include_tests=True)
     assert after.rows[0].close_reason == "keeper"
     assert after.rows[0].close_source == "keeper_assistant"
+
+
+def test_team_role_switched_off_in_config_shows_off_not_missing_heartbeat(tmp_path: Path) -> None:
+    """配置里关掉的角色停发心跳：显示灰色「未启用」带配置键，不报无心跳、不算出错。"""
+    _seed(tmp_path)
+    old = NOW - timedelta(hours=13)
+    status = json.loads((tmp_path / "module_status.json").read_text())
+    for role in (c.Role.PREDICTOR, c.Role.KEEPER_ASSISTANT):
+        status[role.value] = c.ModuleStatus(role=role, health=c.Health.OK, ts=old).model_dump(
+            mode="json"
+        )
+    (tmp_path / "module_status.json").write_text(json.dumps(status))
+    base = _cfg(tmp_path)
+    off = base.model_copy(
+        update={
+            "predictor_enabled": False,
+            "fast_loop": base.fast_loop.model_copy(update={"keeper_assistant_on": False}),
+        }
+    )
+    with _client(tmp_path, "10.0.0.2", cfg=off) as client:
+        roles = {r["role"]: r for r in client.get("/api/team").json()["roles"]}
+    pred, ka = roles["predictor"], roles["keeper_assistant"]
+    assert (pred["state"], pred["status"], pred["off_by"], pred["progress"]) == (
+        "off", "未启用（配置 predictor_enabled = false）", "predictor_enabled", "wait",
+    )  # fmt: skip
+    assert (ka["state"], ka["status"], ka["off_by"]) == (
+        "off", "未启用（配置 fast_loop.keeper_assistant_on = false）",
+        "fast_loop.keeper_assistant_on",
+    )  # fmt: skip
+    assert roles["reconciler"]["state"] == "bad" and roles["reconciler"]["off_by"] is None
+
+    on = base.model_copy(
+        update={
+            "predictor_enabled": True,
+            "fast_loop": base.fast_loop.model_copy(update={"keeper_assistant_on": True}),
+        }
+    )
+    with _client(tmp_path, "10.0.0.2", cfg=on) as client:
+        roles = {r["role"]: r for r in client.get("/api/team").json()["roles"]}
+    assert roles["predictor"]["state"] == "bad" and roles["predictor"]["off_by"] is None
+    assert roles["predictor"]["status"].startswith("无心跳超过 780 分钟")
+    assert roles["keeper_assistant"]["state"] == "bad"
+
+
+def _card_cs(sym: str, bias: str, reason: str) -> dict[str, Any]:
+    return {
+        "symbol": sym, "category": "alt", "bias": bias, "key_levels": [],
+        "allowed_signals": [] if bias == "no_trade" else ["volume_breakout"], "size_tier_max": "S",
+        "notional_usdt": {"min": 10, "max": 20}, "leverage": {"min": 1, "max": 2},
+        "stop_atr": {"min": 1, "max": 2}, "take_profit_r": {"min": 1, "max": 2}, "reason": reason,
+    }  # fmt: skip
+
+
+def test_card_rows_show_effective_direction_and_todays_flips(tmp_path: Path) -> None:
+    """作战卡每行：卡上生效的方向（会判观望、设置不翻转时保留原方向），今天的变动和翻转次数。"""
+    log = JsonlDecisionLog(tmp_path)
+    y = lambda h, m=0: datetime(2026, 10, 21, h, m, tzinfo=UTC)  # noqa: E731
+    t = lambda h, m=0: datetime(2026, 10, 22, h, m, tzinfo=UTC)  # noqa: E731
+
+    def meet(sym: str, ts: datetime, bias: str, reason: str) -> c.DecisionRecord:
+        return _rec(c.Role.COMMANDER, c.Outcome.ACTION, f"{sym} 开会结论：{bias}", ts,
+                    symbol=sym, output=_card_cs(sym, bias, reason))  # fmt: skip
+
+    def ignored(sym: str, ts: datetime, kept: str) -> c.DecisionRecord:
+        return _rec(c.Role.COMMANDER, c.Outcome.INFO, f"{sym} 会议判不做，按设置不翻转", ts,
+                    symbol=sym, output={"card_flip": "ignored", "confirmed": kept,
+                                        "candidate": "neutral"})  # fmt: skip
+
+    for r in [
+        # 曼谷 10-22 从 UTC 10-21 17:00 开始：16:00 那场是昨天的，给出 0 点时的方向
+        meet("AAUSDT", y(16), "short", "a1"),
+        meet("AAUSDT", y(18), "long", "a2"),
+        meet("AAUSDT", y(20), "no_trade", "a3"),
+        ignored("AAUSDT", y(20, 1), "long"),
+        meet("AAUSDT", t(5), "short", "a4"),
+        meet("BBUSDT", t(5, 30), "long", "b1"),
+        meet("BBUSDT", t(6, 10), "no_trade", "b2"),
+        ignored("BBUSDT", t(6, 11), "long"),
+        _rec(c.Role.COMMANDER, c.Outcome.ACTION, "出卡", t(6, 15), card_id="card-1",
+             output={"symbols": ["AAUSDT", "BBUSDT"], "expires_at": t(8).isoformat()}),
+    ]:  # fmt: skip
+        log.write(r)
+    ov = build_overview(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, _cfg(tmp_path), NOW)
+    assert ov.card is not None
+    by = {r.symbol: r for r in ov.card.symbols}
+    aa, bb = by["AAUSDT"], by["BBUSDT"]
+    assert (aa.bias, aa.reason, aa.dir_start, aa.flips_today) == ("short", "a4", "short", 2)
+    assert [(s.ts, s.meeting, s.card, s.event) for s in aa.dir_steps] == [
+        (y(18), "long", "long", None),
+        (y(20), "neutral", "long", "ignored"),
+        (t(5), "short", "short", None),
+    ]
+    # 最新一场会判观望被忽略：卡上（交易系统）还是做多，理由是做多那场的
+    assert (bb.bias, bb.reason, bb.dir_start, bb.flips_today) == ("long", "b1", None, 0)
+    assert [(s.meeting, s.card, s.event) for s in bb.dir_steps] == [
+        ("long", "long", None),
+        ("neutral", "long", "ignored"),
+    ]
