@@ -1,6 +1,9 @@
 """交易所托管保护（保命单 + 普通止损）的可恢复编排：真实保护回读完成前不宣称已托管。
 
-不挂止盈单：盈利出场只靠移动止损换代止损腿。旧版本挂下的 br-tp- 腿照常回读，仓位还在时
+不挂止盈单：盈利出场只靠移动止损。``[fast_loop] trailing_native`` 开着时，带移动止损的仓在
+交易所只挂两条腿：固定止损 + 币安自己跟价的 TRAILING_STOP_MARKET（``br-ts-``），不挂保命单，
+程序也不再每秒换代止损腿；那张单被拒、提交结果未知、回读不了时这笔仓放弃它，照旧挂保命单、
+程序自己跟（换代止损腿）。旧版本挂下的 br-tp- 腿照常回读，仓位还在时
 入场结束后的下一轮同步把它当非保留腿撤掉；它若先触发，仍按止盈退出。
 
 程序锁只能串行本程序；HB 时限单和交易所条件子单仍能独立触发。未知提交只查原 CID，
@@ -16,10 +19,12 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Literal, Protocol
 
 from jiaoyi.contracts import LifeboatOrder, Side
 from jiaoyi.contracts.position import CloseReason, LifeboatStatus
+from jiaoyi.core.trailing_price import activation_price
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
     BracketSubmissionRejected,
@@ -33,6 +38,7 @@ from jiaoyi.execution.exchange import (
     MarkEvidence,
     NormalizedBracketSpec,
     WorkingType,
+    callback_rate,
 )
 from jiaoyi.execution.registry import (
     LegPurpose,
@@ -92,6 +98,26 @@ class BracketExchange(Protocol):
         self, symbol: str, algo_id: str, *, expected_client_order_id: str
     ) -> None: ...
     async def execution_mark(self, symbol: str) -> MarkEvidence: ...
+    async def place_trailing(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        callback_rate: float,
+        client_order_id: str,
+        *,
+        activate_price: float | None,
+        working_type: WorkingType,
+    ) -> ExchangeBracket: ...
+
+
+NATIVE_CALLBACK_MAX = Decimal("10")
+"""交易所移动止损回撤比例上限（%）。币安 algo 文档写 0.1–20，旧下单接口是 0.1–10，取窄的；
+超过就这笔仓不用交易所移动止损。"""
+NATIVE_PENDING_MAX_S = 30.0
+"""开着 ``trailing_native`` 的仓武装后这么多秒还没挂上交易所移动止损（入场成本或标记价一直读
+不到）就放弃，照旧挂保命单、程序自己跟：等的这段只有固定止损。"""
+NativeMode = Literal["off", "pending", "confirmed"]
 
 
 class AnchorBookSpike(ExchangeError):
@@ -222,6 +248,17 @@ def live_leg(leg: ProtectiveLeg) -> bool:
     return _live(leg)
 
 
+def _native(leg: ProtectiveLeg) -> bool:
+    return leg.kind == "trailing_stop"
+
+
+def _native_stop(long: bool, extreme: float, rate_pct: float) -> float:
+    """币安 TRAILING_STOP_MARKET 的触发线：多仓最高价 ×（1 − 回撤比例），空仓最低价 ×（1 + 它）。"""
+    sign = Decimal(-1) if long else Decimal(1)
+    value = Decimal(str(extreme)) * (1 + sign * Decimal(str(rate_pct)) / 100)
+    return float(value)
+
+
 def _role(leg: ProtectiveLeg) -> str:
     return "lifeboat" if leg.purpose == "lifeboat" else leg.kind
 
@@ -255,6 +292,7 @@ class BracketManager:
         trailing_min_step_bps: float = 5.0,
         trailing_book_critical_after_s: float = 300.0,
         leg_order: LegOrder = "lifeboat_first",
+        native_trailing: Callable[[], bool] | bool = False,
     ) -> None:
         """``readback_grace_s``：本程序刚收到回执的条件单，回执后几秒内查无只重读；0 = 不等。
 
@@ -279,6 +317,9 @@ class BracketManager:
 
         ``leg_order``：一代里几条腿的提交顺序。``stop_first`` 时已确认的止损就是最低保护，之后只差
         保命单的失败交给 ``prearm_grace``（被拒的下一轮换新代重挂）；止损失败照旧。
+
+        ``native_trailing``：``[fast_loop] trailing_native``，每次现读（可传函数，热生效）。关掉后
+        已挂的交易所移动止损在保命单确认后撤掉，程序接着自己跟。
         """
         self.exchange, self.registry = exchange, registry
         self.account, self.connector, self.clock = account_name, connector_name, clock
@@ -293,12 +334,16 @@ class BracketManager:
         if leg_order not in _LEG_ORDER:
             raise ValueError(f"未知的保护腿顺序：{leg_order}")
         self.leg_order: LegOrder = leg_order
+        self._native_flag = native_trailing
+        self.notify_native_fallback: StopNotify | None = None
+        """某笔仓放弃交易所移动止损（改挂保命单、程序自己跟）时调用；执行器接上告警。"""
         self.notify_stop_clamped: StopNotify | None = None
         """移动止损目标已越过标记价（被夹到可挂的最紧价，或本轮没换）时调用；执行器接上告警。"""
         self.notify_trigger_rejected: TriggerNotify | None = None
         """某条腿触发后子单被交易所拒绝时调用；执行器接上告警。"""
         self._pending_notes: dict[str, list[str]] = {}
         self._pending_rejections: dict[str, list[tuple[str, str]]] = {}
+        self._pending_fallbacks: dict[str, list[str]] = {}
 
     def initial(self, quantity: float, deadline_at: datetime | None = None) -> ServerProtection:
         return ServerProtection(
@@ -443,7 +488,8 @@ class BracketManager:
             return None
         unknown_ok = self.unknown_submit_grace_s > 0
         if not all(
-            leg.state in {"planned", "superseded"}
+            _native(leg)
+            or leg.state in {"planned", "superseded"}
             or (unknown_ok and leg.state == "submit_pending")
             or _live(leg)
             or (leg.state == "cancelled" and _settled(leg) and not _triggered(leg))
@@ -585,7 +631,17 @@ class BracketManager:
             or order.price_protect
             or order.close_position
             or order.quantity != leg.quantity
-            or order.trigger_price != leg.trigger_price
+            or (
+                (
+                    order.callback_rate != leg.callback_rate
+                    or (
+                        leg.activate_price is not None
+                        and order.activate_price != leg.activate_price
+                    )
+                )
+                if _native(leg)
+                else order.trigger_price != leg.trigger_price
+            )
             or (leg.algo_id is not None and leg.algo_id != order.algo_id)
             or (leg.actual_order_id is not None and leg.actual_order_id != order.actual_order_id)
             or (
@@ -692,6 +748,9 @@ class BracketManager:
         for old in state.legs:
             if old.state in {"planned", "superseded", "rejected", "cancelled"}:
                 continue
+            if _native(old):
+                await self._refresh_native(pid, old)
+                continue
             read = (
                 self.exchange.get_lifeboat
                 if old.purpose == "lifeboat"
@@ -723,6 +782,54 @@ class BracketManager:
             reason = _reason(hit)
             state = self._save(pid, stage="exiting", exit_reason=state.exit_reason or reason)
         return state
+
+    async def _refresh_native(self, pid: str, old: ProtectiveLeg) -> None:
+        """交易所移动止损腿的回读：读不了、查不到、对不上都不让整轮同步失败（另有固定止损），
+        只让这笔仓放弃它（照旧挂保命单、程序自己跟），下一轮照样再读、撤。"""
+        tracked, _ = self._current(pid)
+        cid = old.client_order_id
+        try:
+            order = await self.exchange.get_bracket(tracked.record.symbol, client_order_id=cid)
+            if order is None:
+                order = await self._await_readback(pid, cid)
+            if order is None:
+                self._native_give_up(pid, f"交易所移动止损 {cid} 查不到（提交结果未知或已不在）")
+                return
+            leg = self._leg(pid, cid)
+            self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
+        except Exception as error:
+            self._native_give_up(pid, f"交易所移动止损 {cid} 回读失败：{describe_error(error)}")
+
+    def _native_give_up(self, pid: str, reason: str) -> None:
+        _, state = self._current(pid)
+        if state.native_fallback is not None:
+            return
+        log.warning("%s 放弃交易所移动止损：%s", pid, reason)
+        self._save(pid, native_fallback=reason[:300], native_pending_since=None)
+        self._pending_fallbacks.setdefault(pid, []).append(reason)
+
+    def _native_on(self) -> bool:
+        flag = self._native_flag
+        return bool(flag() if callable(flag) else flag)
+
+    def _native_mode(self, tracked: TrackedPosition, state: ServerProtection) -> NativeMode:
+        """``confirmed``：交易所移动止损在挂（或已触发），不挂保命单、程序不换代止损腿；
+        ``pending``：该挂还没挂上，先不挂新保命单（已有的留着）、程序也不跟；``off``：照旧。"""
+        rec = tracked.record
+        if (
+            not self._native_on()
+            or rec.trailing_activation_pct is None
+            or rec.trailing_stop_pct is None
+            or state.native_fallback is not None
+        ):
+            return "off"
+        if any(_native(leg) and (_live(leg) or _triggered(leg)) for leg in state.legs):
+            return "confirmed"
+        return "pending"
+
+    def native_mode(self, pid: str) -> NativeMode:
+        tracked, state = self._current(pid)
+        return self._native_mode(tracked, state)
 
     async def _await_readback(self, pid: str, cid: str) -> ExchangeBracket | None:
         """回执已接受的 NEW 腿在宽限内查无：按 algoId 只读重试，不重发、不当已撤、不建新代。
@@ -828,7 +935,10 @@ class BracketManager:
     async def _flush_notes(self, pid: str, symbol: str) -> None:
         notes, clamped = self._pending_notes.pop(pid, []), self.notify_stop_clamped
         rejections, rejected = self._pending_rejections.pop(pid, []), self.notify_trigger_rejected
+        fallbacks, fell_back = self._pending_fallbacks.pop(pid, []), self.notify_native_fallback
         sends: list[Awaitable[None]] = []
+        if fell_back is not None:
+            sends += [fell_back(pid, symbol, text) for text in fallbacks]
         if clamped is not None:
             sends += [clamped(pid, symbol, text) for text in notes]
         if rejected is not None:
@@ -857,10 +967,16 @@ class BracketManager:
         """固定止损和移动止损以外的收紧候选（来源, 价格）。新的收紧来源从这里接入。
 
         反向卡收紧价（#314）：只从落盘的 ``tightened_stop_price`` 读，落了就每轮都给（卡变了也给），
-        这样它一直是下限——非固定来源不会把在挂的止损换松，只有账本固定止损比它还紧时才轮到固定止损。"""
-        if state.tightened_stop_price is None:
-            return []
-        return [("tightened", state.tightened_stop_price)]
+        这样它一直是下限——非固定来源不会把在挂的止损换松，只有账本固定止损比它还紧时才轮到固定止损。
+
+        交易所移动止损不再用（开关关了、这笔放弃了）：本地推算的它的当前价当移动止损候选，换回
+        程序自己跟时止损腿先收到那里再撤它，不比它在时松。"""
+        out: list[tuple[LegPurpose, float]] = []
+        if state.tightened_stop_price is not None:
+            out.append(("tightened", state.tightened_stop_price))
+        if state.native_stop_price is not None and self._native_mode(tracked, state) == "off":
+            out.append(("trailing", state.native_stop_price))
+        return out
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         evidence = await self._evidence(pid)
@@ -870,15 +986,37 @@ class BracketManager:
         if evidence.quantity == 0:
             return "flat" if evidence.terminal else "waiting"
         tracked, state = self._current(pid)
-        if tracked.record.entry_price is None:
+        entry = tracked.record.entry_price
+        if entry is None:
             raise ProtectionIncomplete("实际入场价尚不可证")
         sign = 1 if tracked.record.side is Side.LONG else -1
+        native = self._native_mode(tracked, state)
+        if native == "pending" and state.ever_armed and evidence.terminal:
+            now = self.clock()
+            since = state.native_pending_since
+            if since is None:
+                self._save(pid, native_pending_since=now)
+            elif (now - since).total_seconds() > NATIVE_PENDING_MAX_S:
+                self._native_give_up(
+                    pid, f"武装后 {NATIVE_PENDING_MAX_S:g} 秒还没挂上交易所移动止损"
+                )
+            tracked, state = self._current(pid)
+            native = self._native_mode(tracked, state)
         stop = await self._stop_target(tracked, state, self._extra_stop_candidates(tracked, state))
         hold = stop.hold
         # 旧版本挂的止盈腿不在这里：仓位入场结束后，下面按非保留腿撤掉。
-        desired = {
-            "lifeboat": tracked.record.entry_price * (1 - sign * tracked.lifeboat_stop_pct / 100),
-            "stop_loss": stop.price,
+        desired: dict[str, float | None] = {"stop_loss": stop.price}
+        if native == "off":
+            desired["lifeboat"] = entry * (1 - sign * tracked.lifeboat_stop_pct / 100)
+        # 交易所移动止损在挂：留着它；还没挂上：已有的保命单先留着，确认挂上后才撤。
+        extra_keep = {
+            leg.client_order_id
+            for leg in state.legs
+            if _live(leg)
+            and (
+                (native == "confirmed" and _native(leg))
+                or (native == "pending" and leg.purpose == "lifeboat")
+            )
         }
         specs: dict[str, NormalizedBracketSpec] = {}
         for kind, price in desired.items():
@@ -892,7 +1030,7 @@ class BracketManager:
             if not math.isclose(spec.quantity, evidence.quantity, rel_tol=1e-10):
                 raise ProtectionIncomplete("实际仓量无法完整量化，不能宣称无残量")
             specs[kind] = spec
-        specs = {kind: specs[kind] for kind in _LEG_ORDER[self.leg_order]}
+        specs = {kind: specs[kind] for kind in _LEG_ORDER[self.leg_order] if kind in specs}
         await self._checkpoint(pid, evidence)
         _, state = self._current(pid)
         matching = {
@@ -907,7 +1045,7 @@ class BracketManager:
             for kind, spec in specs.items()
         }
         if all(len(legs) == 1 for legs in matching.values()):
-            current_cids = {legs[0].client_order_id for legs in matching.values()}
+            current_cids = {legs[0].client_order_id for legs in matching.values()} | extra_keep
             if all(leg.client_order_id in current_cids or _settled(leg) for leg in state.legs):
                 # 无改单：一轮完整回读 + 前后开仓/净仓一致即可；不重复跑提交专用检查点。
                 self._save(
@@ -920,6 +1058,8 @@ class BracketManager:
         for leg in state.legs:
             if leg.state == "planned":
                 self._save_leg(pid, leg.model_copy(update={"state": "superseded"}))
+            elif _native(leg):
+                continue  # 独立的一条腿：它的提交 / 撤销未知不挡固定止损和保命单换代
             elif (
                 leg.state == "rejected"
                 and _role(leg) == "lifeboat"
@@ -968,7 +1108,7 @@ class BracketManager:
                 )
             self._save(pid, legs=legs, generation=generation, stage="provisional")
             for old in legs:
-                if old.generation != generation:
+                if old.generation != generation or _native(old):
                     continue
                 await self._checkpoint(pid, evidence)
                 await self._refresh(pid)
@@ -1054,6 +1194,7 @@ class BracketManager:
             if not matches:
                 raise ProtectionIncomplete("两侧普通保护尚未完整确认")
             keep.add(matches[-1].client_order_id)
+        keep |= extra_keep
         if not evidence.terminal:
             self._save(pid, stage="provisional")
             return "provisional"  # 开仓残单可能继续填入，不能把此刻量当最终量，也不撤旧保护。
@@ -1063,6 +1204,18 @@ class BracketManager:
                 await self._refresh(pid)
                 if self._current(pid)[1].stage == "exiting":
                     return "exit"
+                if _native(leg):
+                    try:
+                        await self._cancel(pid, leg.client_order_id)
+                    except Exception as error:
+                        # 多出来的只减仓单，要留的腿已确认；下一轮再撤，零仓清理照样要撤清
+                        log.warning(
+                            "%s 撤交易所移动止损 %s 没成：%s",
+                            pid,
+                            leg.client_order_id,
+                            describe_error(error),
+                        )
+                    continue
                 await self._cancel(pid, leg.client_order_id)
                 await self._checkpoint(pid, evidence)
         final = await self._refresh(pid)
@@ -1192,6 +1345,181 @@ class BracketManager:
             if state.trailing_last_error is not None or state.trailing_failing_since is not None:
                 self._save(pid, trailing_last_error=None, trailing_failing_since=None)
             return changed
+
+    async def place_native_trailing(self, pid: str, basis: EntryBasis) -> bool:
+        """武装后挂交易所移动止损（这笔仓 ``native_mode`` 为 ``pending`` 时）；返回是否已确认在挂。
+
+        激活价 = 净收益（扣实际开仓手续费）到启动线 ``trailing_activation_pct`` 的价格，和程序自己
+        跟时的激活判断同一公式；标记价已越过它（或程序自己跟已激活）就不带激活价、下单即激活。
+        回撤比例 = 回撤距离（``trailing_distance_pct`` 或开仓带的 ``trailing_stop_pct``）按 0.1
+        四舍五入，至少 0.1，超过 ``NATIVE_CALLBACK_MAX`` 不挂。被拒、提交结果未知就放弃这笔
+        （第一次因激活价已被越过被拒的，下一轮不带激活价再试一次）。调用方随后 ``sync``。
+        """
+        tracked, _ = self._current(pid)
+        symbol = tracked.record.symbol
+        async with self.registry.symbol_lock(symbol):
+            try:
+                return await self._place_native(pid, basis)
+            except Exception as error:
+                self.record_trailing_error(pid, error)
+                raise
+            finally:
+                await self._flush_notes(pid, symbol)
+
+    async def _place_native(self, pid: str, basis: EntryBasis) -> bool:
+        evidence = await self._evidence(pid)
+        await self._refresh(pid)
+        tracked, state = self._current(pid)
+        rec = tracked.record
+        if (
+            state.stage != "armed"
+            or not evidence.terminal
+            or evidence.quantity <= 0
+            or self._native_mode(tracked, state) != "pending"
+            or any(_native(leg) and not _settled(leg) for leg in state.legs)
+        ):
+            return False
+        if basis.client_order_id != tracked.entry_client_order_id or basis.symbol != rec.symbol:
+            raise ProtectionIncomplete("交易所移动止损的入场身份不一致")
+        assert rec.trailing_activation_pct is not None and rec.trailing_stop_pct is not None
+        distance = state.trailing_distance_pct or rec.trailing_stop_pct
+        rate = callback_rate(distance)
+        if rate > NATIVE_CALLBACK_MAX:
+            self._native_give_up(
+                pid, f"回撤距离 {distance:g}% 超过交易所移动止损上限 {NATIVE_CALLBACK_MAX}%"
+            )
+            return False
+        long = rec.side is Side.LONG
+        act = activation_price(
+            long,
+            basis.filled_quote,
+            basis.filled_quantity,
+            basis.fee_usdt,
+            rec.trailing_activation_pct,
+        )
+        if act is None:
+            self._native_give_up(pid, "交易所移动止损激活价算不出来")
+            return False
+        try:
+            mark = await self._fresh_mark(rec.symbol)
+        except Exception as error:
+            raise TrailingBookUnavailable("挂交易所移动止损前标记价不可用") from error
+        passed = state.trailing_activated or (mark >= act if long else mark <= act)
+        spec = await self.exchange.normalized_bracket_spec(
+            rec.symbol, evidence.quantity, mark if passed else act
+        )
+        if not math.isclose(spec.quantity, evidence.quantity, rel_tol=1e-10):
+            raise ProtectionIncomplete("实际仓量无法完整量化，不能宣称无残量")
+        activate = None if passed else spec.trigger_price
+        attempt = sum(1 for leg in state.legs if _native(leg)) + 1
+        cid = f"br-ts-{pid}-{attempt}"
+        if len(cid) > 36:
+            raise ProtectionIncomplete("条件单身份超过交易所长度限制")
+        leg = ProtectiveLeg(
+            kind="trailing_stop",
+            purpose="trailing",
+            generation=attempt,
+            client_order_id=cid,
+            quantity=spec.quantity,
+            trigger_price=spec.trigger_price,
+            activate_price=activate,
+            callback_rate=float(rate),
+            working_type=self.stop_working_type,
+        )
+        self._save(pid, legs=[*state.legs, leg])
+        await self._checkpoint(pid, evidence)
+        self._save_leg(pid, leg.model_copy(update={"state": "submit_pending"}))
+        try:
+            order = await self.exchange.place_trailing(
+                rec.symbol,
+                "sell" if long else "buy",
+                leg.quantity,
+                float(rate),
+                cid,
+                activate_price=activate,
+                working_type=leg.working_type,
+            )
+        except BracketSubmissionRejected as rejected:
+            self._save_leg(pid, self._leg(pid, cid).model_copy(update={"state": "rejected"}))
+            if rejected.immediate_trigger and activate is not None and attempt == 1:
+                log.info("%s 交易所移动止损激活价已被越过，下一轮不带激活价再挂", pid)
+                return False
+            cause = rejected.__cause__ or rejected
+            self._native_give_up(pid, f"交易所拒绝交易所移动止损：{describe_error(cause)}")
+            return False
+        except BracketSubmissionUnknown as unknown:
+            found = await self._await_unknown_submit(pid, cid, unknown)
+            if found is None:
+                self._native_give_up(pid, "交易所移动止损提交结果未知，只查原CID")
+                return False
+            order = found
+        now = self.clock()
+        try:
+            self._accept(pid, self._leg(pid, cid).model_copy(update={"acked_at": now}), order)
+        except ProtectionIncomplete as error:
+            self._native_give_up(pid, f"交易所移动止损回执对不上：{describe_error(error)}")
+            return False
+        if not _live(self._leg(pid, cid)):
+            return False
+        self._save(
+            pid,
+            native_pending_since=None,
+            native_extreme=mark,
+            native_activated=activate is None,
+            native_stop_price=_native_stop(long, mark, float(rate)) if activate is None else None,
+            native_observed_at=now,
+        )
+        return True
+
+    async def observe_native(self, pid: str) -> bool:
+        """交易所移动止损在挂时，按币安同一规则本地推算它现在的止损价（币安不报）：记下挂单后
+        看到的最有利标记价，标记价越过激活价（或下单即激活）后止损价 = 它 ×（1 ∓ 回撤比例）。
+
+        只读一次标记价，不回读腿、不改交易所上的任何单；返回推算价是否变了。程序每秒采样一次，
+        币安按每次标记价更新跟，两次采样之间的极值看不到，推算价可能比真实的略松。"""
+        tracked, _ = self._current(pid)
+        async with self.registry.symbol_lock(tracked.record.symbol):
+            try:
+                changed = self._observe_native(pid, await self._fresh_mark(tracked.record.symbol))
+            except Exception as error:
+                wrapped = TrailingBookUnavailable("交易所移动止损推算用的标记价不可用")
+                wrapped.__cause__ = error
+                self.record_trailing_error(pid, wrapped)
+                raise wrapped from error
+            state = self._current(pid)[1]
+            if state.trailing_last_error is not None or state.trailing_failing_since is not None:
+                self._save(pid, trailing_last_error=None, trailing_failing_since=None)
+            return changed
+
+    def _observe_native(self, pid: str, mark: float) -> bool:
+        tracked, state = self._current(pid)
+        if self._native_mode(tracked, state) != "confirmed":
+            return False
+        leg = max(
+            (x for x in state.legs if _native(x) and _live(x)),
+            key=lambda x: x.generation,
+            default=None,
+        )
+        if leg is None or leg.callback_rate is None:
+            return False
+        long = tracked.record.side is Side.LONG
+        best = max if long else min
+        extreme = mark if state.native_extreme is None else best(state.native_extreme, mark)
+        activated = (
+            state.native_activated
+            or leg.activate_price is None
+            or (extreme >= leg.activate_price if long else extreme <= leg.activate_price)
+        )
+        stop = _native_stop(long, extreme, leg.callback_rate) if activated else None
+        changed = stop != state.native_stop_price
+        self._save(
+            pid,
+            native_extreme=extreme,
+            native_activated=activated,
+            native_stop_price=stop,
+            native_observed_at=self.clock(),
+        )
+        return changed
 
     def record_trailing_error(self, pid: str, error: BaseException) -> None:
         """移动止损这一轮没做成：只记原因给面板看，不改任何保护状态。"""
@@ -1337,7 +1665,10 @@ class BracketManager:
                 for leg in state.legs:
                     if leg.state == "planned":
                         self._save_leg(pid, leg.model_copy(update={"state": "superseded"}))
-                    elif not (_live(leg) or _settled(leg)):
+                    elif not (_live(leg) or _settled(leg)) and not (
+                        _native(leg) and not _triggered(leg)
+                    ):
+                        # 没触发的交易所移动止损（提交 / 撤销未知）只是多一张只减仓单，不挡退出
                         return False
                 await self._checkpoint(pid, evidence)
                 return True

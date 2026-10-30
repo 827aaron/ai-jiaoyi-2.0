@@ -163,6 +163,7 @@ entry_limit_wait_min = 60         # 挂单最多等 60 分钟，没成交就撤�
 # rest_warm_start = false          # 行情不等预热：刚订上 / 断流的币马上从 REST 补成交和资金费率（共用权重预算，被封照旧等）
 # market_rest_concurrency = 4      # 从 REST 补行情时最多同时补几个币（改了要重启）
 # trailing_on = true               # 移动止损（持仓管家）：赚到 trail_start_r 后止损跟着最高盈利收紧，只收紧不放松（不写 = 开）
+# trailing_native = false          # 交易所移动止损（Demo 托管）：币安按标记价实时跟 TRAILING_STOP_MARKET，交易所只挂它 + 固定止损，不挂保命单、程序不每秒换代；挂不上的仓照旧挂保命单、程序自己跟；热生效（关掉后在保命单确认后撤掉它）；不写 = 关；回滚前先关掉、等撤完再跑 scripts/native_trailing_rollback.py
 # trail_start_r = 0.7              # 赚到几个止损距离后开始跟（1 = 一个止损距离；不写 = 跟档位 0.7）
 # trail_distance_r = 1.0           # 止损跟在最高价后面几个止损距离（不写 = 跟档位：30m–2h 0.7、4h 以上 1.0）
 # breakeven_on = false             # 保本：赚到 breakeven_trigger_r 后最坏按保本价平（不写 = 关）

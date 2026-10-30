@@ -959,6 +959,14 @@ class FastLoopConfig(Contract):
         description="赚到几倍止损距离（R）才开始移动止损，刚开的仓不碰。档位推荐都是 0.7"
         "（止盈多在 1.1–1.5R，要在止盈前就开始跟）。",
     )
+    trailing_native: bool = Field(
+        default=False,
+        description="交易所移动止损（Demo 托管保护）：带移动止损的仓在币安挂 TRAILING_STOP_MARKET，"
+        "由币安按标记价实时跟，激活价 = 净收益到 trail_start_r 启动线的价格（扣实际开仓手续费），"
+        "回撤比例 = 回撤距离按 0.1% 取整；这时交易所只挂它和固定止损两条腿，不挂保命单，程序也不"
+        "每秒换代止损腿。挂不上（被拒、提交结果未知、回读不了）的仓照旧挂保命单、程序自己跟。"
+        "热生效：关掉后已挂的交易所移动止损在保命单确认后撤掉、换回程序自己跟。默认关（现状）。",
+    )
     trail_distance_r: float = Field(
         default=1.0,
         ge=0.1,

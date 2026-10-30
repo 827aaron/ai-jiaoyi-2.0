@@ -46,13 +46,26 @@ OPPOSITE_CARD_FIELDS = (
 加字段之前一字不差，回退到旧代码（``extra="forbid"``）也能读。用过之后回退先跑
 ``scripts/opposite_card_rollback.py``。"""
 
+NATIVE_TRAILING_FIELDS = (
+    "native_fallback",
+    "native_pending_since",
+    "native_extreme",
+    "native_activated",
+    "native_stop_price",
+    "native_observed_at",
+)
+"""交易所移动止损（``[fast_loop] trailing_native``）加在 ``ServerProtection`` 上的字段，为空 /
+False 时不落盘；腿上的 ``activate_price`` / ``callback_rate`` 同样。没用过的账本旧代码照常能读，
+用过之后回退先跑 ``scripts/native_trailing_rollback.py``。"""
+
 
 class ProtectiveLeg(BaseModel):
     """每次提交/撤销前持久化的条件单身份；旧代也保留以核对迟到触发。"""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    kind: Literal["stop_loss", "take_profit"]
+    kind: Literal["stop_loss", "take_profit", "trailing_stop"]
+    """``trailing_stop`` = 交易所移动止损单（TRAILING_STOP_MARKET，用途 ``trailing``）。"""
     purpose: LegPurpose = "fixed"
     generation: int
     client_order_id: str
@@ -79,6 +92,19 @@ class ProtectiveLeg(BaseModel):
     working_type: WorkingType = "CONTRACT_PRICE"
     """创建这条腿时定下的触发价格源，提交和每次回读都按它核对；改配置只影响之后新建的腿。
     旧账本没有这一项：保命单按 MARK_PRICE、普通止盈止损按 CONTRACT_PRICE（当时的固定行为）。"""
+    activate_price: float | None = None
+    """交易所移动止损的激活价（None = 下单即激活）；这种腿的 ``trigger_price`` 记的是激活价，
+    没激活价时是下单前读到的标记价，都不是触发价。"""
+    callback_rate: float | None = None
+    """交易所移动止损的回撤比例（百分比，1 = 1%）。"""
+
+    @model_serializer(mode="wrap")
+    def _omit_native_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data: dict[str, object] = handler(self)
+        for name in ("activate_price", "callback_rate"):
+            if data.get(name) is None:
+                data.pop(name, None)
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -92,6 +118,10 @@ class ProtectiveLeg(BaseModel):
     def _lifeboat_mark_price(self) -> ProtectiveLeg:
         if self.purpose == "lifeboat" and self.working_type != "MARK_PRICE":
             raise ValueError("保命单只按标记价触发")
+        if (self.kind == "trailing_stop") != (self.callback_rate is not None):
+            raise ValueError("只有交易所移动止损腿带回撤比例，而且必须带")
+        if self.kind == "trailing_stop" and self.purpose != "trailing":
+            raise ValueError("交易所移动止损腿的用途只能是 trailing")
         return self
 
 
@@ -152,6 +182,19 @@ class ServerProtection(BaseModel):
     None = 用开仓指令里的 ``trailing_stop_pct``。"""
     opposite_anchor_retry_since: datetime | None = None
     """锚定移动止损因盘口疑似插针没做成，从何时起连续重试（落盘，重启不重新计时）。"""
+    native_fallback: str | None = None
+    """这笔仓不再尝试交易所移动止损的原因（被拒、提交结果未知、回读失败、回撤比例超范围、
+    等太久）：照旧挂保命单、程序自己每秒跟。None = 没放弃。"""
+    native_pending_since: datetime | None = None
+    """第一次尝试挂交易所移动止损的时刻；一直没挂上，超过时限就放弃（重启不重新计时）。"""
+    native_extreme: float | None = None
+    """交易所移动止损挂上后程序看到的最有利标记价（多仓最高、空仓最低），按币安同一规则本地
+    推算当前止损价用；币安不报这个价。"""
+    native_activated: bool = False
+    """本地推算：标记价已越过激活价（或下单即激活）。"""
+    native_stop_price: float | None = None
+    """本地推算的交易所移动止损当前价：最有利标记价 ×（1 ∓ 回撤比例）；未激活为 None。"""
+    native_observed_at: datetime | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unused_opposite_fields(
@@ -160,6 +203,9 @@ class ServerProtection(BaseModel):
         data: dict[str, object] = handler(self)
         for name in OPPOSITE_CARD_FIELDS:
             if data.get(name) is None:
+                data.pop(name, None)
+        for name in NATIVE_TRAILING_FIELDS:
+            if data.get(name) is None or data.get(name) is False:
                 data.pop(name, None)
         return data
 

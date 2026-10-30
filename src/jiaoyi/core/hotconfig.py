@@ -147,6 +147,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "breakeven_on",
         "breakeven_trigger_r",
         "trailing_on",
+        "trailing_native",
         "trail_start_r",
         "trail_distance_r",
         "entry_zone_only",

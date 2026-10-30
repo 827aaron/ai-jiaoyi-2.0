@@ -445,6 +445,7 @@ class HbExecutorAdapter:
         self._protection = protection
         if protection is not None:
             protection.notify_stop_clamped = self._alert_stop_clamped
+            protection.notify_native_fallback = self._alert_native_fallback
             protection.notify_trigger_rejected = self._alert_trigger_rejected
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
@@ -972,6 +973,11 @@ class HbExecutorAdapter:
         ]
         if state.trailing_activated:
             out.append(("trailing", state.trailing_stop_price))
+        if state.native_activated and any(
+            leg.kind == "trailing_stop" and live_leg(leg) for leg in state.legs
+        ):
+            # 币安不报交易所移动止损的当前价：用本地按同一规则推算的
+            out.append(("trailing", state.native_stop_price))
         return out
 
     def paper_stop_since(self, position_id: str) -> datetime | None:
@@ -2267,6 +2273,16 @@ class HbExecutorAdapter:
             kind="order_failed",
         )
 
+    async def _alert_native_fallback(self, pid: str, symbol: str, text: str) -> None:
+        await self._alert(
+            AlertLevel.WARN,
+            "交易所移动止损没用上，改回程序自己跟",
+            f"{symbol} {pid}：{text}；这笔照旧挂保命单、程序每秒换代止损腿",
+            symbol,
+            f"server_native_fallback:{pid}",
+            kind="order_failed",
+        )
+
     async def _alert_trigger_rejected(self, pid: str, symbol: str, tag: str, text: str) -> None:
         await self._alert(
             AlertLevel.CRITICAL,
@@ -2571,6 +2587,17 @@ class HbExecutorAdapter:
                 await self._protection.sync(position_id)
             if rec.trailing_activation_pct is None or rec.trailing_stop_pct is None:
                 return
+            native = self._protection.native_mode(position_id)
+            if native == "confirmed":
+                # 币安自己跟价：程序只按同一规则本地推算当前止损价，不换代止损腿
+                await self._protection.observe_native(position_id)
+                return
+            if native == "pending":
+                await self._protection.place_native_trailing(position_id, basis)
+                if self._protection.native_mode(position_id) != "pending":
+                    # 挂上了：撤掉部署前留下的保命单；放弃了：马上补挂保命单
+                    await self._protection.sync(position_id)
+                return
             if read_book is None:
                 missing = ProtectionIncomplete("缺同交易所盘口源时钟，保持最后确认保护")
                 self._protection.record_trailing_error(position_id, missing)
@@ -2605,15 +2632,17 @@ class HbExecutorAdapter:
         return True
 
     def _stop_first_covered(self, tracked: TrackedPosition) -> bool:
-        """``stop_first`` 托管仓、交易所止损已确认：缺保命单交给保护状态机的宽限，开仓时不平。"""
+        """托管仓交易所止损已确认、按设计还没有保命单：``stop_first``（缺的保命单交给保护状态机
+        的宽限），或这笔用交易所移动止损（本来就不挂保命单）。开仓时不平。"""
         manager = self._protection
         state = tracked.server_protection
+        pid = tracked.record.position_id
         return bool(
             manager is not None
             and state is not None
-            and manager.leg_order == "stop_first"
+            and (manager.leg_order == "stop_first" or manager.native_mode(pid) != "off")
             and state.stage not in {"exiting", "cleanup", "done"}
-            and manager.retains_confirmed_stop(tracked.record.position_id)
+            and manager.retains_confirmed_stop(pid)
         )
 
     async def _sync_server(

@@ -13,12 +13,12 @@ from pydantic import BaseModel
 from jiaoyi.core.trailing_price import activation_price
 
 LegState = Literal["live", "triggered", "cancelled", "rejected", "pending", "unknown", "none"]
-LegRole = Literal["lifeboat", "stop_loss", "take_profit"]
+LegRole = Literal["lifeboat", "stop_loss", "take_profit", "trailing_native"]
 
 _TRIGGERED_ALGO = {"TRIGGERING", "TRIGGERED", "FINISHED"}
 _CLOSED_ALGO = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 _PENDING = {"planned", "submit_pending", "cancel_pending"}
-_ROLE_ORDER: tuple[LegRole, ...] = ("lifeboat", "stop_loss", "take_profit")
+_ROLE_ORDER: tuple[LegRole, ...] = ("lifeboat", "stop_loss", "take_profit", "trailing_native")
 _WORKING_TYPES = {"MARK_PRICE", "CONTRACT_PRICE"}
 _TRAIL_BASIS = ("trailing_entry_quote", "trailing_entry_quantity", "trailing_fees_quote")
 
@@ -42,6 +42,11 @@ class LegView(BaseModel):
     previous: LegView | None = None
     """最新一代还没在挂（计划 / 提交中 / 被拒 / 状态不明）时，同一角色仍在挂的上一代。
     换移动止损价时旧单要等新单确认才撤，这段时间真正在保护的是它；没有就是 None。"""
+    activate_price: float | None = None
+    """交易所移动止损（``trailing_native``）的激活价；None = 下单即激活。这种腿的
+    ``trigger_price`` 不是触发价，面板不该当触发价画。"""
+    callback_rate: float | None = None
+    """交易所移动止损的回撤比例（%）。"""
 
 
 class ProtectionView(BaseModel):
@@ -61,6 +66,13 @@ class ProtectionView(BaseModel):
     """反向作战卡（trail 模式）强制启动移动止损时锚定的可成交价（#314）。"""
     trailing_distance_pct: float | None = None
     """锚定后这笔仓移动止损用的回撤距离（净收益百分点）。"""
+    native_trailing: bool = False
+    """交易所移动止损（币安跟价）在挂或已触发：这笔仓按设计不挂保命单，程序也不换代止损腿。"""
+    native_activated: bool = False
+    native_stop_price: float | None = None
+    """本地按币安同一规则推算的交易所移动止损当前价（币安不报）；未激活为 None。"""
+    native_fallback: str | None = None
+    """这笔仓为什么没用上交易所移动止损（照旧保命单 + 程序自己跟）。"""
     observed_at: datetime | None = None
     age_s: float | None = None
     stale: bool = False
@@ -136,6 +148,8 @@ def _role_of(leg: dict[str, object]) -> LegRole | None:
     kind = leg.get("kind")
     if kind == "stop_loss":
         return "stop_loss"
+    if kind == "trailing_stop":
+        return "trailing_native"
     return "take_profit" if kind == "take_profit" else None
 
 
@@ -178,6 +192,8 @@ def _leg_view(
         detail=detail,
         working_type=_working_type(leg),
         previous=previous,
+        activate_price=_num(leg.get("activate_price")),
+        callback_rate=_num(leg.get("callback_rate")),
     )
 
 
@@ -200,10 +216,12 @@ def parse_protection(
     legs: list[LegView] = []
     for role in _ROLE_ORDER:
         mine = [x for x in legs_raw if _role_of(x) == role]
-        if role == "take_profit" and all(
-            leg_state(x) == "cancelled" and not _trigger_failed(x) for x in mine
+        if role in ("take_profit", "trailing_native") and all(
+            leg_state(x) in {"cancelled", "rejected"} and not _trigger_failed(x) for x in mine
         ):
-            continue  # 不挂止盈单；旧版本挂的止盈腿撤掉后也不再显示（触发后被拒的照旧亮出来）
+            # 不挂止盈单，旧版本挂的撤掉后不再显示；交易所移动止损没用上（被拒 / 已撤）也不显示，
+            # 原因见 ``native_fallback``。触发后被拒的照旧亮出来。
+            continue
         # 任何一代被触发都要亮出来（迟到触发）；否则看最新一代
         hit = [x for x in mine if _triggered(x)]
         pick = hit[-1] if hit else max(mine, key=_gen, default=None)
@@ -219,6 +237,8 @@ def parse_protection(
     err = raw.get("last_error")
     # 只在已武装时显示：进入退出 / 清理后移动止损不再观测，旧原因没有意义。
     trailing_err = raw.get("trailing_last_error") if raw.get("stage") == "armed" else None
+    native_leg = next((x for x in legs if x.role == "trailing_native"), None)
+    native_on = native_leg is not None and native_leg.state in {"live", "triggered"}
     return ProtectionView(
         stage=str(raw.get("stage") or "entry"),
         ever_armed=bool(raw.get("ever_armed")),
@@ -231,6 +251,10 @@ def parse_protection(
         tightened_at=_time(raw.get("tightened_at")),
         opposite_anchor_price=_num(raw.get("opposite_anchor_price")),
         trailing_distance_pct=_num(raw.get("trailing_distance_pct")),
+        native_trailing=native_on,
+        native_activated=native_on and bool(raw.get("native_activated")),
+        native_stop_price=_num(raw.get("native_stop_price")) if native_on else None,
+        native_fallback=str(raw["native_fallback"]) if raw.get("native_fallback") else None,
         observed_at=observed.astimezone(UTC) if observed else None,
         age_s=age,
         stale=bool(stale_s > 0 and (age is None or age > stale_s)),
@@ -243,12 +267,16 @@ def parse_protection(
 
 
 def lifeboat_summary(p: ProtectionView) -> tuple[str, float | None]:
-    """并进旧的 ``lifeboat_status`` / ``lifeboat_price``：已挂但数据过期单独标出，不当作在位。"""
+    """并进旧的 ``lifeboat_status`` / ``lifeboat_price``：已挂但数据过期单独标出，不当作在位。
+
+    交易所移动止损在挂时按设计不挂保命单：没有在挂的保命单就是 ``native``（不算缺）。"""
     leg = next(x for x in p.legs if x.role == "lifeboat")
     if leg.state != "live" and leg.previous is not None:
         leg = leg.previous  # 新一代保命单还没挂上，旧一代仍在挂
     if leg.state == "live":
         return ("stale" if p.stale else "active"), leg.trigger_price
+    if p.native_trailing and leg.state in {"none", "cancelled"}:
+        return "native", None
     status = {
         "triggered": "triggered",
         "cancelled": "cancelled",

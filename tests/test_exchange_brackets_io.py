@@ -819,3 +819,102 @@ async def test_lifeboat_trigger_failed_without_child_is_absent_only_after_cid_lo
     )
     with pytest.raises(ExchangeError, match="证据不完整"):
         await obj.get_lifeboat("SYNTHUSDT", client_order_id="lb-position")
+
+
+def trailing_raw(**changes: Any) -> dict[str, Any]:
+    item = raw(
+        clientAlgoId="br-ts-synthetic",
+        orderType="TRAILING_STOP_MARKET",
+        triggerPrice="",
+        workingType="MARK_PRICE",
+        activatePrice="1.1",
+        callbackRate="0.5",
+    )
+    item.update(changes)
+    return item
+
+
+async def place_trailing(obj: CcxtBinanceFutures, rate: float = 0.5, activate: Any = 1.1) -> Any:
+    return await obj.place_trailing(
+        "SYNTHUSDT",
+        "sell",
+        10,
+        rate,
+        "br-ts-synthetic",
+        activate_price=activate,
+        working_type="MARK_PRICE",
+    )
+
+
+@pytest.mark.parametrize(
+    ("activate", "params", "response"),
+    [
+        (1.1, {"trailingTriggerPrice": 1.1}, {"activatePrice": "1.1"}),
+        (None, {}, {"activatePrice": ""}),
+    ],
+)
+async def test_trailing_stop_goes_through_the_algo_order_with_rate_and_activation(
+    activate: float | None, params: dict[str, Any], response: dict[str, Any]
+) -> None:
+    obj, ex = client()
+    ex.create_order.return_value = {"info": trailing_raw(**response)}
+    order = await place_trailing(obj, activate=activate)
+    ex.create_order.assert_awaited_once_with(
+        "SYNTH/USDT:USDT",
+        "market",
+        "sell",
+        "10",
+        None,
+        {
+            "trailingPercent": "0.5",
+            "reduceOnly": True,
+            "workingType": "MARK_PRICE",
+            "positionSide": "BOTH",
+            "newClientOrderId": "br-ts-synthetic",
+            **params,
+        },
+    )
+    assert (order.kind, order.callback_rate, order.activate_price) == (
+        "trailing_stop",
+        0.5,
+        activate,
+    )
+    assert order.trigger_price == (activate or 0.0)
+    assert order.client_order_id == "br-ts-synthetic"
+
+
+@pytest.mark.parametrize("echo", [{"callbackRate": "0.6"}, {"activatePrice": "1.2"}])
+async def test_trailing_stop_echo_with_other_parameters_is_not_accepted(
+    echo: dict[str, Any],
+) -> None:
+    obj, ex = client()
+    ex.create_order.return_value = {"info": trailing_raw(**echo)}
+    with pytest.raises(BracketSubmissionUnknown):
+        await place_trailing(obj)
+
+
+@pytest.mark.parametrize(("code", "immediate"), [("-2021", True), ("-4005", False)])
+async def test_trailing_stop_rejection_says_whether_it_would_trigger_at_once(
+    code: str, immediate: bool
+) -> None:
+    obj, ex = client()
+    ex.create_order.side_effect = ccxt.InvalidOrder(f"{code} synthetic")
+    with pytest.raises(BracketSubmissionRejected) as caught:
+        await place_trailing(obj)
+    assert caught.value.immediate_trigger is immediate
+
+
+@pytest.mark.parametrize("rate", [0.25, 0.0])
+async def test_trailing_stop_rate_off_the_exchange_step_is_never_sent(rate: float) -> None:
+    obj, ex = client()
+    with pytest.raises(ValueError):
+        await place_trailing(obj, rate=rate, activate=None)
+    ex.create_order.assert_not_awaited()
+
+
+async def test_trailing_stop_without_a_rate_in_the_readback_is_unknown_evidence() -> None:
+    obj, ex = client()
+    ex.fapiPrivateGetAlgoOrder.side_effect = None
+    ex.fapiPrivateGetAlgoOrder.return_value = trailing_raw(callbackRate="")
+    with pytest.raises(ExchangeError):
+        await obj.get_bracket("SYNTHUSDT", client_order_id="br-ts-synthetic")
