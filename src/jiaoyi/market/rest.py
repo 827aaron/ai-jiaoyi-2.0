@@ -210,7 +210,8 @@ def _read(path: Path, now: float) -> tuple[_FileKey | None, RateLimited | None, 
 
 @contextlib.contextmanager
 def _file_lock(path: Path) -> Iterator[bool]:
-    """Exclusive flock on a sibling ``.lock`` across processes; False when the dir is missing."""
+    """Exclusive flock on a sibling ``.lock`` across processes; False when the dir is missing
+    or another process holds it."""
     if not path.parent.is_dir():
         _warn_once(("no-dir", path.parent), "数据目录 %s 不存在，币安封禁不写盘", path.parent)
         yield False
@@ -222,7 +223,13 @@ def _file_lock(path: Path) -> Iterator[bool]:
         yield False
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        # 不等锁：这里在事件循环里跑（心跳、限流回调），别的进程卡住会拖住整个主循环。
+        # 这次没写成的本进程封禁，下一次心跳的 save_ban 会再写。
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
         yield True
     finally:
         os.close(fd)

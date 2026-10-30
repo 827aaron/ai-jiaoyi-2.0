@@ -655,6 +655,10 @@ card_flip_confirm_min = 0
   自停后不再出结果，也走这条）才切回 Flash，整轮总盘会的 Flash 判断恢复发布。大盘台恢复后第一轮
   就切回大盘台并立即接管发布；哪怕这次接管发布被更晚的发布取代，归属也已经是大盘台，Flash 不会紧接着
   再发一版（不来回抢），下一轮大盘台再发。`fallback = "hold"` 一直归大盘台，沿用它最后一次发布的观点。
+  失败的一轮也占掉格子、不重跑，下一个结果最早在下一格，所以 `mode = "replace"` 时 `max_age_min` 必须大于
+  2 × `cadence_min` + `timeout_s` / 60，否则失败一轮归属就切回 Flash、下一轮成功又切回来；不合格拒绝启动
+  （报错写明下限）。没写 `max_age_min` 时默认 75，不够这个下限就取下限之上的整数分钟（`cadence_min = 60`
+  时是 123，15 时仍是 75）。
 - **花费**：单独记账（`daily_cost_limit_usd`，0 = 不限），不占军师团日上限；每轮一条 COMMANDER 决策记录
   （symbol 空，output 带 `market_desk` 键）带 `cost_usd`，面板总 AI 费照算（资金页记为「大盘台」）。
   OpenRouter 余额低于 `balance_floor_usd` 自停，余额留给开会和 Jev（没有额度看护时启动日志警告这条不生效）；

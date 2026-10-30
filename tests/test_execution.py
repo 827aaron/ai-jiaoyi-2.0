@@ -426,6 +426,128 @@ async def test_registry_survives_restart(rig: Rig, tmp_path: Path) -> None:
     assert reopened.by_intent("int-0001") is not None
 
 
+def _archived_lines(tmp_path: Path) -> list[str]:
+    from jiaoyi.core.position_archive import archive_dir
+
+    return [
+        line
+        for f in sorted(archive_dir(tmp_path).glob("*.jsonl"))
+        for line in f.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+async def test_registry_archives_positions_closed_long_ago(rig: Rig, tmp_path: Path) -> None:
+    from jiaoyi.core.position_archive import read_archive
+    from jiaoyi.execution.registry import ARCHIVE_AFTER
+
+    pid = await open_filled(rig)
+    rig.api.terminate("ex1", "STOP_LOSS")
+    await rig.adapter.positions()
+    closed_at = rig.registry.get(pid).record.closed_at  # type: ignore[union-attr]
+    assert closed_at is not None
+    path = rig.registry.path
+    before = path.read_text(encoding="utf-8")
+
+    def reopen(age: timedelta) -> PositionRegistry:
+        return PositionRegistry(path, archive_after=ARCHIVE_AFTER, clock=lambda: closed_at + age)
+
+    assert reopen(timedelta(hours=47)).get(pid) is not None
+    assert not _archived_lines(tmp_path)
+    assert reopen(timedelta(hours=49)).get(pid) is None
+    assert pid not in json.loads(path.read_text(encoding="utf-8"))["positions"]
+    assert "\n" not in path.read_text(encoding="utf-8")  # 不再缩进排版
+    assert read_archive(tmp_path)[pid]["record"]["status"] == "closed"
+    assert (tmp_path / "positions_archive" / f"{closed_at.date().isoformat()}.jsonl").is_file()
+    # 归档写好、账本还没改写就崩溃：再归档一次也不重复
+    path.write_text(before, encoding="utf-8")
+    assert reopen(timedelta(hours=49)).get(pid) is None
+    assert len(_archived_lines(tmp_path)) == 1
+
+
+async def test_registry_keeps_positions_still_needed(rig: Rig, tmp_path: Path) -> None:
+    from jiaoyi.execution.registry import ARCHIVE_AFTER
+
+    live = await open_filled(rig, intent_id="int-0002", symbol="ETHUSDT")  # ex1，一直开着
+    rig.t += timedelta(minutes=10)
+    pid = await open_filled(rig)  # ex2
+    rig.api.terminate("ex2", "STOP_LOSS")
+    await rig.adapter.positions()
+    closed_at = rig.registry.get(pid).record.closed_at  # type: ignore[union-attr]
+    assert closed_at is not None
+    later = closed_at + timedelta(hours=49)
+    path = rig.registry.path
+    # 在管持仓开仓之后平掉的：对账员核反手仓时还要认出它的订单
+    reg = PositionRegistry(path, archive_after=ARCHIVE_AFTER, clock=lambda: later)
+    assert reg.get(pid) is not None and reg.get(live) is not None
+    gone = reg.get(live)
+    assert gone is not None
+    reg.put(
+        gone.model_copy(
+            update={
+                "record": gone.record.model_copy(
+                    update={"status": PositionStatus.CLOSED, "closed_at": closed_at}
+                )
+            }
+        )
+    )
+    cleanup = reg.get(pid)
+    assert cleanup is not None
+    reg.put(cleanup.model_copy(update={"exit_cleanup_pending": True}))
+    reg = PositionRegistry(path, archive_after=ARCHIVE_AFTER, clock=lambda: later)
+    assert reg.get(pid) is not None  # 清理没确认的不移
+    assert reg.get(live) is None
+    assert len(_archived_lines(tmp_path)) == 1
+
+
+async def test_registry_throttles_observation_only_writes(rig: Rig, tmp_path: Path) -> None:
+    from jiaoyi.execution.registry import ServerProtection
+
+    pid = await open_filled(rig)
+    tracked = rig.registry.get(pid)
+    assert tracked is not None
+    now = [START]
+    reg = PositionRegistry(tmp_path / "other.json", clock=lambda: now[0])
+    writes: list[datetime] = []
+    write = reg._write
+
+    def counted(at: datetime) -> None:
+        writes.append(at)
+        write(at)
+
+    reg._write = counted  # type: ignore[method-assign]
+    state = ServerProtection(
+        account_name="a", connector_name="c", intended_quantity=1.0, observed_at=START
+    )
+
+    def put(**changes: object) -> None:
+        nonlocal state
+        state = state.model_copy(update=changes)
+        reg.put(tracked.model_copy(update={"server_protection": state}))
+
+    put()
+    put()  # 什么都没变：不写
+    assert len(writes) == 1
+    now[0] = START + timedelta(seconds=1)
+    put(observed_at=now[0], trailing_observed_at=now[0], trailing_source_at=now[0])
+    assert len(writes) == 1  # 只有观测时刻变了：内存更新，先不落盘
+    assert reg.get(pid).server_protection.observed_at == now[0]  # type: ignore[union-attr]
+    put(trailing_peak_net=0.01)
+    assert len(writes) == 2  # 别的字段变了马上写
+    now[0] = START + timedelta(seconds=3)
+    put(observed_at=now[0])
+    assert len(writes) == 2
+    now[0] = START + timedelta(seconds=7)
+    put(observed_at=now[0])
+    assert len(writes) == 3  # 隔够了照样落盘
+    saved = json.loads((tmp_path / "other.json").read_text(encoding="utf-8"))
+    assert saved["positions"][pid]["server_protection"]["observed_at"].startswith(
+        "2026-10-22T06:17:07"
+    )
+    reg.data.day_start = DayStart(day="2026-10-22", equity_usdt=1.0)
+    put()  # 仓没变、账本别处变了：照写
+    assert len(writes) == 4
+
+
 # ---------------------------------------------------------------- 账户
 
 

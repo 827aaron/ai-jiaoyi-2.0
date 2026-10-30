@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import email.message
+import fcntl
 import io
 import json
+import os
+import threading
 import time
 import urllib.error
 from datetime import UTC, date, datetime, timedelta
@@ -131,6 +134,26 @@ def test_save_ban_keeps_a_longer_ban_another_process_wrote(
     monkeypatch.setattr(rest, "_own", rest.RateLimited(429, 1_100.0))
     rest.save_ban(tmp_path, now=1_000.0)
     assert json.loads(path.read_text(encoding="utf-8"))["until"] == 9_000.0
+
+
+def test_save_ban_does_not_wait_for_another_process_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / rest.BAN_FILE
+    fd = os.open(path.with_name(f".{path.name}.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)  # 别的进程拿着锁不放
+    monkeypatch.setattr(rest, "_own", rest.RateLimited(418, 2_000.0))
+    worker = threading.Thread(target=rest.save_ban, args=(tmp_path,), kwargs={"now": 1_000.0})
+    try:
+        worker.start()
+        worker.join(2.0)
+        assert not worker.is_alive()  # 心跳不等锁
+        assert not path.exists()
+    finally:
+        os.close(fd)
+        worker.join(5.0)
+    rest.save_ban(tmp_path, now=1_000.0)  # 下一次心跳锁空了就写上
+    assert json.loads(path.read_text(encoding="utf-8"))["until"] == 2_000.0
 
 
 def _write_ban(path: Path, until: float, status: int = 418) -> None:

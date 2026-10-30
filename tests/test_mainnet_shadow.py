@@ -462,6 +462,17 @@ def test_load_ledger_reads_order_hints(tmp_path: Path) -> None:
     assert hints["pos-1"] == ms.LegHints(limit_entry=True, limit_take_profit=True)
 
 
+def test_load_ledger_reads_archive(tmp_path: Path) -> None:
+    from jiaoyi.core.position_archive import write_archive
+
+    _write_ledger(tmp_path, [_rec(c.Side.LONG)])
+    old = {"record": _rec(c.Side.SHORT, "pos-0").model_dump(mode="json"), "tp_tick": 0.1}
+    write_archive(tmp_path, [("2026-10-01", "pos-0", json.dumps(old))])
+    recs, hints = ms.load_ledger(tmp_path)
+    assert sorted(r.position_id for r in recs) == ["pos-0", "pos-1"]
+    assert hints["pos-0"].limit_take_profit
+
+
 @pytest.mark.parametrize("on", [False, True])
 async def test_app_mainnet_shadow_tick_follows_switch(tmp_path: Path, on: bool) -> None:
     from jiaoyi.app import App

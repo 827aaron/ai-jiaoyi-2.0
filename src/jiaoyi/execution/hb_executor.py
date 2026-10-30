@@ -2924,12 +2924,22 @@ class HbExecutorAdapter:
             and tracked.filled_at is not None
             and (now - tracked.filled_at).total_seconds() >= tracked.hold_s
         ):
+            if self._close_request is not None:
+                # 交给主循环的平仓入口：和管家、面板的平仓同一处去重，也不在同步轮里等平仓做完。
+                self._close_request(rec.position_id, CloseReason.TIME_LIMIT)
+                return
             try:
                 await self.close(rec.position_id, CloseReason.TIME_LIMIT)
             except Exception:
                 log.warning(
                     "挂单进场的仓到时平仓失败 %s，下一轮再试", rec.position_id, exc_info=True
                 )
+
+    _close_request: Callable[[str, CloseReason], None] | None = None
+
+    def set_close_request(self, request: Callable[[str, CloseReason], None]) -> None:
+        """主循环接上平仓入口（``Runner.close``，另起任务）。没接 = 执行层自己平。"""
+        self._close_request = request
 
     async def _cancel_unfilled_limit(self, tracked: TrackedPosition) -> None:
         async with self._exit_lock(tracked.record.position_id):

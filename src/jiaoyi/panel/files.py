@@ -5,6 +5,7 @@
     decision_log/YYYY-MM-DD.jsonl   决策日志（jiaoyi.core.store），按 UTC 日期分文件
     module_status.json              每个角色最新一条 ModuleStatus
     positions.json                  执行层账本（持仓 + 当天起始权益）
+    positions_archive/*.jsonl       移出账本的已结束持仓（jiaoyi.core.position_archive）
     risk_state.json                 日亏熔断状态（日期、日初权益、是否已触发）
     blocked_symbols.json            被下架公告封掉新开仓的币
     exit_fills.json                 exit fill time per position (jiaoyi.execution.exit_fills)
@@ -28,6 +29,7 @@ from pydantic import ValidationError
 from jiaoyi.contracts import DecisionRecord, ModuleStatus, PositionRecord, Role, SymbolPool
 from jiaoyi.contracts.position import PositionStatus
 from jiaoyi.core.paper_stop import PAPER_STOP_FILE, PaperStop, PaperStopCache, booked_record
+from jiaoyi.core.position_archive import read_archive
 from jiaoyi.core.recorder import local_day
 from jiaoyi.core.shadow_ledger import read_shadow
 
@@ -100,6 +102,7 @@ class PanelFiles:
         self._decisions = DecisionTail(self.root / "decision_log")
         self._old: dict[tuple[date, frozenset[Role]], tuple[int, list[DecisionRecord]]] = {}
         self._paper = PaperStopCache(self.root / PAPER_STOP_FILE)
+        self._archived: dict[str, tuple[object, PositionRecord | None]] = {}
         self.paper_book_pnl: Callable[[], bool] = lambda: True
         """``[fast_loop] paper_stop_book_pnl``, read on every ``ledger()``."""
 
@@ -277,15 +280,40 @@ class PanelFiles:
                     log.warning("module_status.json 里 %s 读不懂", k)
         return out
 
+    def _archived_records(
+        self, live: dict[str, Any]
+    ) -> list[tuple[dict[str, Any], PositionRecord]]:
+        """归档里账本没有的那些仓；按原始行缓存校验结果，归档文件没变就不重新校验。"""
+        out: list[tuple[dict[str, Any], PositionRecord]] = []
+        seen: dict[str, tuple[object, PositionRecord | None]] = {}
+        for pid, t in read_archive(self.root).items():
+            hit = self._archived.get(pid)
+            if hit is not None and hit[0] is t:
+                rec = hit[1]
+            else:
+                try:
+                    rec = PositionRecord.model_validate(t["record"])
+                except (ValidationError, KeyError, TypeError):
+                    rec = None
+            seen[pid] = (t, rec)
+            if rec is not None and pid not in live:
+                out.append((t, rec))
+        self._archived = seen
+        return out
+
     def ledger(self) -> Ledger:
         raw = self._json("positions.json")
         if not isinstance(raw, dict):
-            return Ledger()
+            raw = {}
         positions: list[PositionRecord] = []
         notional: dict[str, float] = {}
         protection: dict[str, object] = {}
         filled: set[str] = set()
-        for t in (raw.get("positions") or {}).values():
+        live = raw.get("positions") or {}
+        for t, rec in self._archived_records(live):
+            positions.append(rec)
+            notional[rec.position_id] = float(t.get("notional_usdt") or 0.0)
+        for t in live.values():
             try:
                 rec = PositionRecord.model_validate(t["record"])
             except (ValidationError, KeyError, TypeError):

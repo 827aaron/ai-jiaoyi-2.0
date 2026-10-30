@@ -250,10 +250,16 @@ def test_config_validation(tmp_path: Path) -> None:
         is None
     )
     MarketDeskSection(cadence_min=5, offset_min=2)
+    assert MarketDeskSection(mode="replace", cadence_min=15, max_age_min=33).max_age_min == 33
+    assert MarketDeskSection(mode="replace", cadence_min=15).max_age_min == 75
+    assert MarketDeskSection(mode="replace").max_age_min == 123  # 没写：默认抬到够用
     for bad in (
         {"cadence_min": 4},
         {"cadence_min": 15, "offset_min": 15},
         {"cadence_min": 60, "max_age_min": 60},
+        # 失败一轮不重跑：结果最长旧到两格 + 一次超时（122 分钟），75 盖不住
+        {"mode": "replace", "cadence_min": 60, "max_age_min": 75},
+        {"mode": "replace", "cadence_min": 15, "max_age_min": 32},
         {"samples": 2, "min_valid_samples": 3},
         {"mode": "supplement"},
     ):

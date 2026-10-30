@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from jiaoyi.contracts import CloseReason, Interval, PositionRecord, PositionStatus, Side
+from jiaoyi.core.position_archive import with_archive
 from jiaoyi.core.shadow_ledger import (
     SHADOW_FILE,
     SHADOW_VERSION,
@@ -469,15 +470,16 @@ def shadow_row(
 
 
 def load_ledger(data_dir: str | Path) -> tuple[list[PositionRecord], dict[str, LegHints]]:
-    """Records from ``positions.json`` plus the order hints from their wrappers; a
-    malformed record is skipped, not fatal."""
+    """Records from ``positions.json`` and its archive plus the order hints from their
+    wrappers; a malformed record is skipped, not fatal."""
     try:
         raw = json.loads((Path(data_dir) / "positions.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return [], {}
+        raw = {}
+    live = (raw if isinstance(raw, dict) else {}).get("positions") or {}
     recs: list[PositionRecord] = []
     hints: dict[str, LegHints] = {}
-    for t in ((raw or {}).get("positions") or {}).values():
+    for t in with_archive(data_dir, live).values():
         try:
             rec = PositionRecord.model_validate(t["record"])
         except (ValueError, KeyError, TypeError):

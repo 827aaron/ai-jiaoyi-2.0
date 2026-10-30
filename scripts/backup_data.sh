@@ -9,7 +9,7 @@ DEST="data/backups/$(date +%Y-%m-%d)"
 mkdir -p "$DEST"
 
 paths=()
-for p in data/decision_log data/module_status.json data/positions.json; do
+for p in data/decision_log data/module_status.json data/positions.json data/positions_archive; do
   [ -e "$p" ] && paths+=("$p")
 done
 [ "${#paths[@]}" -gt 0 ] || { echo "nothing to back up"; exit 0; }
