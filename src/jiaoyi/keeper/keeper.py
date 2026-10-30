@@ -87,6 +87,8 @@ from jiaoyi.gate.questions import (
 )
 from jiaoyi.interfaces import Alerter, DecisionModel
 
+FROZEN_PEAK_REASON = "冻结盈利价回访"
+"""冻结盈利价规则平仓的理由开头；主循环按它把平仓来源记成 ``frozen_peak``。"""
 log = logging.getLogger(__name__)
 
 RETRY_AFTER_S = 1.0
@@ -479,13 +481,18 @@ class JevKeeper:
                 "close",
                 1.0,
                 1,
-                f"冻结盈利价回访：同环境可成交价再次到达 {frozen_peak['target_price']:g}",
+                f"{FROZEN_PEAK_REASON}：同环境可成交价再次到达 {frozen_peak['target_price']:g}",
                 None,
                 None,
                 frozen_peak_rule=frozen_peak,
                 rules=votes,
             )
-        votes.append({"rule": "frozen_peak", "vote": "hold" if frozen_peak else "off"})
+        if frozen_peak and frozen_peak.get("detail") == "trailing_activated":
+            votes.append(
+                {"rule": "frozen_peak", "vote": "off", "why": "移动止损已激活，不按冻结盈利价平"}
+            )
+        else:
+            votes.append({"rule": "frozen_peak", "vote": "hold" if frozen_peak else "off"})
         if self._refresh is not None:
             try:
                 await self._refresh(position.symbol)

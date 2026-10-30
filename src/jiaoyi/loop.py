@@ -81,7 +81,7 @@ from jiaoyi.keeper.assistant import (
 from jiaoyi.keeper.assistant import (
     SnapshotProvider as AssistantSnapshot,
 )
-from jiaoyi.keeper.keeper import JevKeeper, close_blocked
+from jiaoyi.keeper.keeper import FROZEN_PEAK_REASON, JevKeeper, close_blocked
 from jiaoyi.market.binance_ws import FINAL_STATUSES, ContractInfo
 from jiaoyi.market.features import (
     ATR_PERIOD,
@@ -1087,6 +1087,12 @@ class Runner:
         since = self._paper_stop_since(pos)
         if ts < since:
             return  # a price from before the position existed (buffered or replayed)
+        observe = getattr(self.m.executor, "observe_mainnet_price", None)
+        if observe is not None:
+            try:
+                observe(pid, price)  # 交易所移动止损按主网价的极值推算，先记下这个价
+            except Exception:
+                log.exception("记主网价极值失败 %s", pid)
         levels = self._paper_stop_levels(pos)
         if not levels:
             return
@@ -2372,7 +2378,12 @@ class Runner:
                 self._against_pending.discard(pid)
                 self.app.against_desk.settle(pid, verdict.action)
         if verdict.action == "close":
-            await self.close(pos, CloseReason.KEEPER)
+            if verdict.reason.startswith(FROZEN_PEAK_REASON):
+                await self.close(
+                    pos, CloseReason.KEEPER, source="frozen_peak", detail=verdict.reason
+                )
+            else:
+                await self.close(pos, CloseReason.KEEPER)
 
     async def _review_all(self, positions: list[PositionRecord]) -> None:
         """并发审（最多 ``KEEPER_CONCURRENCY`` 笔一起）：Jev 繁忙重试时每笔多等几秒，

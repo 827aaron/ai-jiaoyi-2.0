@@ -241,6 +241,28 @@ async def test_keeper_rule_uses_execution_evidence_without_model_or_mainnet_feat
     assert rows[-1]["output"]["frozen_peak_exit"]["target_price"] == 102
 
 
+async def test_keeper_records_why_the_rule_is_off_for_an_activated_trailing(tmp_path):
+    log = JsonlDecisionLog(tmp_path / "decisions")
+    keeper = JevKeeper(
+        JevDecisionModel(MockJevTransport(answer=close_p(0.1)), FAST, timeout_ms=200),
+        FAST,
+        lambda _: None,
+        lambda _: None,
+        RoleRecorder(Role.KEEPER, log),
+        frozen_peak_review=AsyncMock(
+            return_value={"triggered": False, "status": "unknown", "detail": "trailing_activated"}
+        ),
+    )
+    verdict = await keeper.review(position(START), START)
+    assert verdict.action != "close"
+    rules = log.scan_day(START.date().isoformat(), "")[-1]["output"]["rules"]
+    assert {
+        "rule": "frozen_peak",
+        "vote": "off",
+        "why": "移动止损已激活，不按冻结盈利价平",
+    } in rules
+
+
 async def test_existing_position_is_never_migrated(tmp_path):
     rig = Rig(tmp_path)
     rec = install(rig)
@@ -250,3 +272,98 @@ async def test_existing_position_is_never_migrated(tmp_path):
     assert await rig.adapter.frozen_peak_review(rec.position_id, START) is None
     rig.adapter._exchange.entry_basis.assert_not_awaited()
     assert "frozen_peak_exit_on" in HOT_FAST and "frozen_peak_exit_after_s" in HOT_FAST
+
+
+def activate_trailing(rig, pid, field="trailing_activated"):
+    tracked = rig.registry.get(pid)
+    protection = tracked.server_protection.model_copy(update={field: True})
+    rig.registry.put(tracked.model_copy(update={"server_protection": protection}))
+
+
+@pytest.mark.parametrize("field", ["trailing_activated", "native_activated"])
+async def test_trailing_activated_before_freeze_never_freezes(tmp_path, field):
+    rig = Rig(tmp_path)
+    rec = install(rig)
+    await rig.adapter.frozen_peak_review(rec.position_id, START)
+    activate_trailing(rig, rec.position_id, field)
+    rig.t = START + timedelta(seconds=60)
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert (result["status"], result["detail"]) == ("unknown", "trailing_activated")
+    assert not result["triggered"]
+    assert result["frozen_at"] is None and result["target_price"] is None
+    rig.t += timedelta(seconds=1)
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert (result["status"], result["detail"]) == ("unknown", "trailing_activated")
+    assert not result["triggered"]
+    assert rig.adapter._exchange.execution_book.await_count == 1
+    stored = rig.registry.get(rec.position_id).frozen_peak_exit
+    assert (stored.status, stored.peak_price, stored.detail) == (
+        "unknown",
+        102,
+        "trailing_activated",
+    )
+
+
+async def test_trailing_activated_after_freeze_drops_the_target_and_never_exits(tmp_path):
+    rig = Rig(tmp_path)
+    rec = install(rig)
+    await rig.adapter.frozen_peak_review(rec.position_id, START)
+    rig.t = START + timedelta(seconds=60)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, 103, 103.1, rig.t, rig.t
+    )
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["status"] == "frozen" and result["target_price"] == 102
+    activate_trailing(rig, rec.position_id)
+    rig.t += timedelta(seconds=1)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, 102, 102.1, rig.t, rig.t
+    )
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert (result["status"], result["detail"]) == ("unknown", "trailing_activated")
+    assert not result["triggered"]
+    assert result["target_price"] is None and result["peak_price"] == 102
+    assert result["frozen_at"] == "2026-10-22T06:18:00Z"
+
+
+async def test_quiet_position_without_trailing_still_freezes_and_exits(tmp_path):
+    rig = Rig(tmp_path)
+    rec = install(rig)
+    await rig.adapter.frozen_peak_review(rec.position_id, START)
+    rig.t = START + timedelta(seconds=60)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, 101, 101.1, rig.t, rig.t
+    )
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["status"] == "frozen" and result["target_price"] == 102
+    rig.t += timedelta(seconds=1)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, 102, 102.1, rig.t, rig.t
+    )
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert result["status"] == "triggered" and result["triggered"]
+
+
+async def test_trailing_activating_during_the_evidence_read_is_rechecked_under_the_lock(tmp_path):
+    rig = Rig(tmp_path)
+    rec = install(rig)
+    await rig.adapter.frozen_peak_review(rec.position_id, START)
+    rig.t = START + timedelta(seconds=60)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, 103, 103.1, rig.t, rig.t
+    )
+    await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    rig.t += timedelta(seconds=1)
+
+    async def book(_symbol):
+        activate_trailing(rig, rec.position_id)  # 价格回到峰值的同一刻移动止损激活
+        return ExecutionBook(rec.symbol, 102, 102.1, rig.t, rig.t)
+
+    rig.adapter._exchange.execution_book.side_effect = book
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert (result["status"], result["detail"], result["triggered"]) == (
+        "unknown",
+        "trailing_activated",
+        False,
+    )
+    assert rig.registry.get(rec.position_id).frozen_peak_exit.target_price is None

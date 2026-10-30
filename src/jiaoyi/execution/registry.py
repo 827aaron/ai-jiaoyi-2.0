@@ -53,10 +53,13 @@ NATIVE_TRAILING_FIELDS = (
     "native_activated",
     "native_stop_price",
     "native_observed_at",
+    "native_mainnet_extreme",
+    "native_mainnet_activated",
 )
 """交易所移动止损（``[fast_loop] trailing_native``）加在 ``ServerProtection`` 上的字段，为空 /
 False 时不落盘；腿上的 ``activate_price`` / ``callback_rate`` 同样。没用过的账本旧代码照常能读，
-用过之后回退先跑 ``scripts/native_trailing_rollback.py``。"""
+用过之后回退先跑 ``scripts/native_trailing_rollback.py``；只回退到还没有 ``native_mainnet_*`` 的
+版本时跑它的 ``--mainnet-extreme-only``（只删这两个字段，随时能跑）。"""
 
 
 class ProtectiveLeg(BaseModel):
@@ -195,6 +198,11 @@ class ServerProtection(BaseModel):
     native_stop_price: float | None = None
     """本地推算的交易所移动止损当前价：最有利标记价 ×（1 ∓ 回撤比例）；未激活为 None。"""
     native_observed_at: datetime | None = None
+    native_mainnet_extreme: float | None = None
+    """交易所移动止损确认在挂后主循环看到的最有利主网价（主网止损规则用的那种价），只给
+    「主网价格越过止损」推算这张单在主网上的止损线；``native_extreme`` 是 Demo 标记价，两者不混。"""
+    native_mainnet_activated: bool = False
+    """主网价已越过这张单的激活价（或下单即激活）。"""
 
     @model_serializer(mode="wrap")
     def _omit_unused_opposite_fields(

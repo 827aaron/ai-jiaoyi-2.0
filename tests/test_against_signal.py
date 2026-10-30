@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jiaoyi import contracts as c
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core.against import KEEP, MEETING_TRIGGER, AgainstSignalDesk
@@ -707,6 +709,39 @@ async def test_runner_assistant_close_passes_the_keeper_close_guard_and_records_
     assert k.asked == ["pos-1", "pos-1"]
     assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
     assert close_sources.read(tmp_path)["pos-1"]["source"] == "keeper_assistant"
+
+
+class ReasonKeeper(NotingKeeper):
+    def __init__(self, reason: str) -> None:
+        super().__init__("close")
+        self.reason = reason
+
+    async def review(self, position: c.PositionRecord, now: datetime) -> c.KeeperVerdict:
+        verdict = await super().review(position, now)
+        return verdict.model_copy(update={"reason": self.reason})
+
+
+@pytest.mark.parametrize(
+    ("reason", "source"),
+    [
+        ("冻结盈利价回访：同环境可成交价再次到达 102", "frozen_peak"),
+        ("Jev 平仓概率 0.90 连续 2 次过线", None),
+    ],
+)
+async def test_runner_keeper_close_records_frozen_peak_as_its_source(
+    tmp_path: Path, now: datetime, reason: str, source: str | None
+) -> None:
+    from jiaoyi.core import close_sources
+
+    p = _position_now(now)
+    r, _, _, _ = _runner(tmp_path, now, [p])
+    r.positions = [p]
+    r.m.keeper = ReasonKeeper(reason)  # type: ignore[misc]
+    await r._review(p)
+    await _settle(r)
+    assert r.app.m.executor.closed == [("pos-1", CloseReason.KEEPER)]  # type: ignore[attr-defined]
+    got = close_sources.read(tmp_path).get("pos-1") or {}
+    assert (got.get("source"), got.get("detail")) == ((source, reason) if source else (None, None))
 
 
 async def test_runner_assistant_jev_errors_never_touch_the_gate_jev(

@@ -713,9 +713,10 @@ function trailLines(p) {
 // 交易所托管保护单（positions.json 的 server_protection，只读）：每条腿的真实状态，价格只用交易所确认过的
 const LEG_ST = { live: "已挂", triggered: "已触发", cancelled: "已撤", rejected: "被拒", pending: "提交中·未确认", unknown: "状态未知", none: "无记录" };
 const PROT_STAGE = { entry: "入场中", provisional: "临时保护", armed: "已武装", exiting: "平仓中", cleanup: "清理中", done: "已结束" };
+const TP_FALLBACK = "交易所止盈单（后备）";
 const protLeg = (p, role) => p.protection && p.protection.legs.find((l) => l.role === role);
 const STOP_PURPOSE = { fixed: "固定止损", trailing: "移动止损", tightened: "收紧止损" };
-const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? "止盈" : l.role === "trailing_native" ? NATIVE_TRAIL : STOP_PURPOSE[l.purpose] || "其他止损";
+const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? TP_FALLBACK : l.role === "trailing_native" ? NATIVE_TRAIL : STOP_PURPOSE[l.purpose] || "其他止损";
 const legBad = (l) => l.state !== "live";
 // 触发价格源：每条腿建单时记下，旧腿和新腿可能不同（改设置只影响之后新挂的）
 const WT_CN = { MARK_PRICE: "标记价", CONTRACT_PRICE: "成交价" };
@@ -771,7 +772,7 @@ function tpCell(p, inline = false) {
   if (!l && p.protection) return `${price(p.take_profit_price, p.symbol)} <span class="dim small">目标·不挂单</span>${estBox(p, p.take_profit_price, inline)}`;
   if (!l) return `${price(p.take_profit_price, p.symbol)}${estBox(p, p.take_profit_price, inline)}`;
   const s = legShown(l);
-  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`;
+  return `${legPrice(p, s)} <span class="${legBad(s) ? "warn" : "dim"} small">后备·${LEG_ST[s.state]}</span>${legNewer(p, l)}${estBox(p, s.trigger_price, inline)}`;
 }
 const cardPos = (sym) => ((data && data.positions) || []).find((p) => p.symbol === sym && p.entry_price);
 
@@ -1971,15 +1972,19 @@ async function loadKlines(force) {
     return;
   }
   const tl = trailLines(p) || {};
-  // 移动止损已激活后止盈目标不再起作用（交易所不挂止盈单），线也不画
+  // 移动止损已激活后止盈目标不再起作用，线也不画；交易所挂着后备止盈单时画它的触发价
   const q = p.protection || {};
-  const tp = q.native_activated || q.trailing_activated ? null : p.take_profit_price;
+  // 在挂的后备止盈腿（最新一代没挂上时看仍在挂的上一代）
+  const tpl = (q.legs || []).find((l) => l.role === "take_profit");
+  const tps = tpl && (tpl.previous && tpl.state !== "live" ? tpl.previous : tpl);
+  const tpLeg = tps && tps.state === "live" && tps.trigger_price != null ? tps : null;
+  const tp = q.native_activated || q.trailing_activated ? null : tpLeg ? tpLeg.trigger_price : p.take_profit_price;
   linePrices = [tp, p.entry_price, p.stop_loss_price, p.lifeboat_price, tl.start, tl.stop];
   const css = getComputedStyle(document.documentElement);
   const c = (v) => css.getPropertyValue(v).trim();
   const L = LightweightCharts.LineStyle;
   const defs = [
-    [tp, "止盈", c("--up"), L.Dashed],
+    tpLeg ? [tp, "交易所止盈单（后备）", c("--up"), L.Solid] : [tp, "止盈", c("--up"), L.Dashed],
     [p.entry_price, "开仓", c("--faint"), L.Solid],
     [p.stop_loss_price, "固定止损计划", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
@@ -2725,9 +2730,9 @@ const TRADE_COLS = 20;  // 展开行跨满整行；浏览器按实际列数截
 const TRADE_HEAD = '<th>平仓时间</th><th>合约</th><th class="r">开仓价</th><th class="r">平仓价</th><th>怎么平的</th><th class="r">持有</th><th class="r" title="平仓价 − 开仓价 带来的盈亏，扣手续费前">毛利</th><th class="r">手续费</th><th class="r">净利 U</th>';
 const REASON_KIND = { stop_loss: "p-short", lifeboat: "p-short", take_profit: "p-long", trailing_stop: "p-accent", tightened_stop: "p-accent" };
 const CARD_CLOSE = { opposite_card: "反向卡平", neutral_card: "观望卡平" };
-const reasonOf = (t) => (t.close_source === "keeper_assistant" ? "管家助手" : (t.hold_card && CARD_CLOSE[t.hold_card.closed_by]) || REASON[t.close_reason] || (t.close_reason ? "其他" : "—"));
-const reasonTip = (t) => (t.close_source !== "keeper_assistant" && t.hold_card && t.hold_card.closed_by ? `管家平仓（账本记 keeper），最后一次判平是${t.hold_card.closed_by === "opposite_card" ? "作战卡转成和持仓相反方向的规则" : "作战卡转观望的规则"}` : "");
-const reasonKind = (t) => (t.hold_card && t.hold_card.closed_by && t.close_source !== "keeper_assistant" ? "p-warn" : REASON_KIND[t.close_reason] || "");
+const reasonOf = (t) => (t.close_source === "keeper_assistant" ? "管家助手" : t.close_source === "frozen_peak" ? "冻结峰值平" : (t.hold_card && CARD_CLOSE[t.hold_card.closed_by]) || REASON[t.close_reason] || (t.close_reason ? "其他" : "—"));
+const reasonTip = (t) => (t.close_source === "frozen_peak" ? "管家按冻结盈利价回访平仓（账本记 keeper）：持仓满冻结时长时冻结的盈利价，价格再次回到它" : t.close_source !== "keeper_assistant" && t.hold_card && t.hold_card.closed_by ? `管家平仓（账本记 keeper），最后一次判平是${t.hold_card.closed_by === "opposite_card" ? "作战卡转成和持仓相反方向的规则" : "作战卡转观望的规则"}` : "");
+const reasonKind = (t) => (t.hold_card && t.hold_card.closed_by && t.close_source !== "keeper_assistant" && t.close_source !== "frozen_peak" ? "p-warn" : REASON_KIND[t.close_reason] || "");
 function tradeRow(t, when, tail = "") {
   const [s] = SIDE[t.side] || [t.side, ""];
   const id = t.position_id || t.signal_id || "";
@@ -2827,7 +2832,7 @@ function exportCsv() {
   const head = ["平仓时间", "开仓时间", "币种", "类型", "方向", "数量", "名义金额U", "杠杆", "开仓价", "平仓价", "止损价", "止盈价", "信号", "平仓原因", "最高浮盈采样估算U（未扣费）", "毛利U", "手续费U", "净盈亏U", "按主网价格算净盈亏U", "主网差bp", "主网差R", "价差U", "费率差U", "开平单类型", "position_id", "程序结账时间"];
   // 文字字段以 = + - @ 开头时加 ' 前缀，免得表格软件当公式执行（数字照常）
   const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
-  const lines = d.rows.map((t) => [closeTime(t), t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.unfilled ? "未成交" : t.close_source === "keeper_assistant" ? "keeper_assistant" : t.close_reason, t.keeper_peak_usdt ?? "", t.pnl_missing || t.unfilled ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing || t.unfilled ? "" : t.fees_usdt, t.pnl_missing || t.unfilled ? "" : t.pnl_usdt, t.mainnet_net_usdt ?? "", t.mainnet_gap_bp ?? "", t.mainnet_gap_r ?? "", t.mainnet_price_gap_usdt ?? "", t.mainnet_fee_gap_usdt ?? "", (t.mainnet_legs || []).join("/"), t.position_id, t.closed_at].map(q).join(","));
+  const lines = d.rows.map((t) => [closeTime(t), t.opened_at, t.symbol, CAT[t.category] || t.category, t.side, t.quantity, t.entry_price ? +(t.quantity * t.entry_price).toFixed(2) : "", t.leverage, t.entry_price, t.exit_price, t.stop_loss_price, t.take_profit_price, t.test ? "测试" : t.signal_kind, t.unfilled ? "未成交" : t.close_source === "keeper_assistant" || t.close_source === "frozen_peak" ? t.close_source : t.close_reason, t.keeper_peak_usdt ?? "", t.pnl_missing || t.unfilled ? "" : +(t.pnl_usdt + t.fees_usdt).toFixed(4), t.pnl_missing || t.unfilled ? "" : t.fees_usdt, t.pnl_missing || t.unfilled ? "" : t.pnl_usdt, t.mainnet_net_usdt ?? "", t.mainnet_gap_bp ?? "", t.mainnet_gap_r ?? "", t.mainnet_price_gap_usdt ?? "", t.mainnet_fee_gap_usdt ?? "", (t.mainnet_legs || []).join("/"), t.position_id, t.closed_at].map(q).join(","));
   const blob = new Blob(["﻿" + [head.map(q).join(","), ...lines].join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -3204,7 +3209,8 @@ const PLAIN = {
   protection_prearm_grace_s: "新仓还没完整托管时，同步失败最多忍几秒再平仓（0 = 立即平）",
   protection_unknown_submit_grace_s: "条件单提交结果未知时，按原单号只查不重发最多几秒（0 = 立即平）",
   protection_stop_working_type: "止损（含移动止损）按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
-  protection_take_profit_working_type: "不再生效：托管保护不挂止盈单，盈利出场只靠移动止损",
+  protection_take_profit_working_type: "后备止盈单按什么价触发：CONTRACT_PRICE 最新成交价 / MARK_PRICE 标记价",
+  protection_fallback_take_profit: "没有币安移动止损在保护、程序的移动止损也没激活时，在止损和保命单之后补挂交易所止盈单；移动止损一激活就撤（关 = 不挂，原行为）",
   protection_leg_order: "新仓两条腿先挂哪条：lifeboat_first 保命单在前（原行为）/ stop_first 止损在前，止损确认后保命单挂失败在未托管宽限内重试、不立即平仓",
   hosted_close_mode: "托管仓平仓顺序：hb_first 先停 HB、等它结束再直连平仓（原行为）/ direct 先按持久化单号下只减仓市价单再只停不平 HB，止损挂到确认零仓；状态不明照旧 hb_first",
   hosted_close_direct_when_exiting: "平仓顺序 direct 时，保护已进入退出、但没有腿触发、没有在途平仓单，也照样先直连只减仓（关 = 改走 hb_first，原行为）",
@@ -3746,12 +3752,12 @@ const ROLES = [
     { g: "模拟盘按主网止损", hint: "默认关 = 现状。只对 paper / testnet：主网价格越过止损就平 Demo 仓，并按止损价记模拟成交（Demo 实际成交另记）。热生效。", keys: ["fast_loop.paper_stop_on_mainnet", "fast_loop.paper_stop_slippage_bps", "fast_loop.paper_stop_book_pnl"] },
     { g: "开仓前读账户", hint: "拍板通过后读 hummingbot 账户失败：再读几次都不行就放弃这个信号，风控员记一条拒绝。热生效。", keys: ["app.account_read_retries"] },
     { g: "按主网价格算", hint: "只算账不下单：每笔平仓按主网价格重算一遍盈亏，看去掉 Demo 成交优势后还赚不赚。", keys: ["app.mainnet_shadow_on"] },
-    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止损（不挂止盈单，盈利靠移动止损出场）。除挂单顺序、平仓顺序、退出中仍先直连、停止补发次数、告警轮数和持仓模式缓存外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。退出中仍先直连（默认关）：保护已进入退出但没有腿触发、没有在途平仓单时也照样先直连。挂单顺序 stop_first：先挂交易所止损、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hosted_close_direct_when_exiting", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
+    { g: "托管保护", hint: "Demo 新仓在币安挂的保命单和止损（盈利靠移动止损出场；开了后备止盈单时，币安移动止损没挂上、程序的移动止损还没激活的仓，在止损和保命单之后补挂一张止盈单，移动止损一激活就撤）。除挂单顺序、平仓顺序、退出中仍先直连、停止补发次数、告警轮数和持仓模式缓存外只在配置文件改；都要重启才生效；秒数 0、触发价 CONTRACT_PRICE、顺序 lifeboat_first、平仓 hb_first = 原行为。平仓顺序 direct：决定平仓时先直连只减仓市价单、再只停不平 HB，交易所止损挂到确认零仓后才撤。退出中仍先直连（默认关）：保护已进入退出但没有腿触发、没有在途平仓单时也照样先直连。挂单顺序 stop_first：先挂交易所止损、最后挂保命单，止损确认后保命单挂失败不立即平仓，在未托管宽限内告警并重试（宽限 0 就照旧平仓）。保命单固定按标记价触发；改触发价只影响之后新挂的止损，已挂的单不动。", keys: ["app.protection_*", "app.hosted_close_mode", "app.hosted_close_direct_when_exiting", "app.hb_stop_unknown_retries", "app.position_mode_cache_s"] },
   ] },
   { id: "keeper", t: "持仓管家", strip: ["管家"], what: "隔一会儿看一次持仓，该平就平", groups: [
     { g: "", keys: ["app.keeper_interval_s", "fast_loop.keeper_close_p", "fast_loop.keeper_confirmations", "fast_loop.keeper_close_p_strong", "fast_loop.keeper_price_max_age_s", "fast_loop.keeper_model_mode", "fast_loop.keeper_price_source", "fast_loop.keeper_close_guard", "fast_loop.keeper_close_guard_replacing_max_s", "fast_loop.keeper_close_guard_exiting_max_s", "fast_loop.keeper_close_guard_total_max_s", "fast_loop.keeper_venue_alert_reviews"] },
     { g: "Jev 盈利门控", hint: "代码规则 + Jev 的一道题：赚到一定倍数止损距离、Jev 又说进场理由不成立（回答够新），就全平。只平不放宽。", keys: ["fast_loop.keeper_thesis_take_on", "fast_loop.keeper_thesis_take_min_r", "fast_loop.keeper_thesis_take_p", "fast_loop.keeper_thesis_take_max_age_s"] },
-    { g: "冻结盈利价回访", hint: "默认开启，满 60 分钟冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
+    { g: "冻结盈利价回访", hint: "开关和冻结时长以下面两行的当前值为准（没写进配置时：开、60 分钟）。持仓从真实首笔成交起满冻结时长，冻结此前同 Demo 可成交报价中已观察到的最高盈利价；之后再次到价或穿过时管家请求全平。只管移动止损一直没激活的平静仓：移动止损（程序自己跟的，或币安移动止损推算已过激活价）激活过的仓不冻结、已冻结的目标价丢掉，不按它平（决策记录里写原因）。仅指管家实际采样看到的最高盈利价；断线或采样间隔可能漏掉更高点。冻结时间需短于该仓最长持仓，否则通常在冻结前已退出。扣实际开仓费和预计平仓费后须盈利；证据缺失不触发。开关和时间只影响之后新开的 Demo 仓，已有仓保留原设置，实盘和旧测试网不启用。证据读法默认「每次复查当场读」：复查要等交易所（最多 12 秒），一轮复查也要等最慢那笔。改成「后台按仓读」后，每笔仓按间隔在后台读，复查只用不超过「不算」秒数的结果，太旧这次就不看这条规则；一轮复查也不再等最慢那笔。", keys: ["fast_loop.frozen_peak_exit_on", "fast_loop.frozen_peak_exit_after_s", "fast_loop.frozen_peak_evidence_mode", "fast_loop.frozen_peak_evidence_interval_s", "fast_loop.frozen_peak_evidence_max_age_s"] },
     { g: "管家助手", hint: "持仓后的事归快环：反向信号（可选：价格穿过关键位）时同时问 Jev 和模型 B 同一道是非题，两个都答「是」才平仓；也能马上确认军师团的待确认翻转。改了热生效。", keys: ["fast_loop.keeper_assistant_on", "fast_loop.keeper_assistant_b_model", "fast_loop.keeper_assistant_min_p", "fast_loop.keeper_assistant_horizon", "fast_loop.keeper_assistant_question", "fast_loop.keeper_assistant_reuse_s", "fast_loop.keeper_assistant_blind_glossary", "fast_loop.keeper_assistant_b_action_only", "fast_loop.keeper_assistant_timeout_s", "fast_loop.keeper_assistant_gap_s", "fast_loop.keeper_assistant_snapshot_max_age_s", "fast_loop.keeper_assistant_key_level", "fast_loop.keeper_assistant_close", "fast_loop.keeper_assistant_b_record_only", "fast_loop.keeper_assistant_flip_confirm", "fast_loop.keeper_assistant_flip_neutral", "fast_loop.card_flip_confirm_by", "fast_loop.card_neutral_flip", "fast_loop.card_ignore_max_age_min", "fast_loop.card_flip_assistant_fallback_min", "fast_loop.keeper_assistant_concurrency"] },
     { g: "回吐保护", hint: "代码规则，不问模型：最高浮盈到过「开始看」那么多之后，从最高点吐掉这个比例就全平。", keys: ["fast_loop.giveback_on", "fast_loop.giveback_close_pct", "fast_loop.giveback_arm_r"] },
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },

@@ -44,6 +44,8 @@ from jiaoyi.execution.brackets import (
     ProtectionIncomplete,
     describe_error,
     live_leg,
+    native_stop,
+    trigger_failed,
 )
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
@@ -74,8 +76,11 @@ from jiaoyi.execution.fills import (
 from jiaoyi.execution.frozen_peak import BOOK_MAX_AGE_S as FROZEN_BOOK_MAX_AGE_S
 from jiaoyi.execution.frozen_peak import (
     FrozenPeakExit,
+    drop_for_trailing,
+    dropped_for_trailing,
     frozen_peak_evidence,
     frozen_peak_update,
+    trailing_active,
 )
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.lifeboat import lifeboat_price
@@ -83,6 +88,7 @@ from jiaoyi.execution.registry import (
     DayStart,
     PositionRegistry,
     ProtectiveLeg,
+    ServerProtection,
     TrackedPosition,
 )
 from jiaoyi.execution.stream_close import OrderFills, StreamBook, Verdict, evaluate, ms_time
@@ -458,6 +464,7 @@ class HbExecutorAdapter:
             protection.notify_stop_clamped = self._alert_stop_clamped
             protection.notify_native_fallback = self._alert_native_fallback
             protection.notify_trigger_rejected = self._alert_trigger_rejected
+            protection.notify_take_profit = self._alert_take_profit
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
@@ -985,12 +992,64 @@ class HbExecutorAdapter:
         ]
         if state.trailing_activated:
             out.append(("trailing", state.trailing_stop_price))
-        if state.native_activated and any(
-            leg.kind == "trailing_stop" and live_leg(leg) for leg in state.legs
+        native = self._live_native_leg(state)
+        if (
+            native is not None
+            and native.callback_rate is not None
+            and state.native_mainnet_activated
+            and state.native_mainnet_extreme is not None
         ):
-            # 币安不报交易所移动止损的当前价：用本地按同一规则推算的
-            out.append(("native_trailing", state.native_stop_price))
+            # 币安不报这张单的当前价；规则问的是「主网上这张单会不会触发」，所以按主网价的极值
+            # 推算（observe_mainnet_price），不用 Demo 标记价推出来的 native_stop_price
+            long = rec.side is Side.LONG
+            out.append(
+                (
+                    "native_trailing",
+                    native_stop(long, state.native_mainnet_extreme, native.callback_rate),
+                )
+            )
         return out
+
+    @staticmethod
+    def _live_native_leg(state: ServerProtection) -> ProtectiveLeg | None:
+        return max(
+            (leg for leg in state.legs if leg.kind == "trailing_stop" and live_leg(leg)),
+            key=lambda leg: leg.generation,
+            default=None,
+        )
+
+    def observe_mainnet_price(self, position_id: str, price: float) -> None:
+        """主网止损规则每看到一个主网价调用：交易所移动止损在挂时记下挂单后最有利的主网价和
+        是否已越过激活价，落盘（只在变了时写）。只给 ``paper_stop_levels`` 用，不碰交易所。"""
+        tracked = self._registry.get(position_id)
+        state = tracked.server_protection if tracked is not None else None
+        if tracked is None or state is None or not math.isfinite(price) or price <= 0:
+            return
+        leg = self._live_native_leg(state)
+        if leg is None:
+            return
+        long = tracked.record.side is Side.LONG
+        old = state.native_mainnet_extreme
+        extreme = price if old is None else (max if long else min)(old, price)
+        activated = (
+            state.native_mainnet_activated
+            or leg.activate_price is None
+            or (extreme >= leg.activate_price if long else extreme <= leg.activate_price)
+        )
+        if extreme == old and activated == state.native_mainnet_activated:
+            return
+        self._registry.put(
+            tracked.model_copy(
+                update={
+                    "server_protection": state.model_copy(
+                        update={
+                            "native_mainnet_extreme": extreme,
+                            "native_mainnet_activated": activated,
+                        }
+                    )
+                }
+            )
+        )
 
     def paper_stop_since(self, position_id: str) -> datetime | None:
         """When the position started to exist on the exchange: the fill of a limit entry, else
@@ -1001,13 +1060,17 @@ class HbExecutorAdapter:
         return tracked.filled_at or tracked.record.opened_at
 
     def take_profit_exiting(self, position_id: str) -> bool:
-        """A take-profit leg placed by an older version has triggered: Demo is exiting at its
-        target, not a stop. New positions carry no take-profit leg."""
+        """A take-profit leg (the fallback one, or one an older version placed) has triggered:
+        Demo is exiting at its target, not a stop."""
         tracked = self._registry.get(position_id)
         state = tracked.server_protection if tracked is not None else None
         if state is None:
             return False
-        return any(leg.kind == "take_profit" and leg.triggered_at is not None for leg in state.legs)
+        # 触发后被拒（没有子单、没成交）不算：之后这笔照常可能按止损退出
+        return any(
+            leg.kind == "take_profit" and leg.triggered_at is not None and not trigger_failed(leg)
+            for leg in state.legs
+        )
 
     def mark_failed(self, position_id: str) -> None:
         tracked = self._registry.get(position_id)
@@ -2295,6 +2358,16 @@ class HbExecutorAdapter:
             kind="order_failed",
         )
 
+    async def _alert_take_profit(self, pid: str, symbol: str, text: str) -> None:
+        await self._alert(
+            AlertLevel.WARN,
+            "后备止盈单没挂好",
+            f"{symbol} {pid}：{text}；止损和保命单照常在挂",
+            symbol,
+            f"server_take_profit:{pid}",
+            kind="order_failed",
+        )
+
     async def _alert_trigger_rejected(self, pid: str, symbol: str, tag: str, text: str) -> None:
         await self._alert(
             AlertLevel.CRITICAL,
@@ -2398,8 +2471,10 @@ class HbExecutorAdapter:
             leg
             for leg in state.legs
             if leg.state in ("submit_pending", "cancel_pending")
-            # 放弃了的交易所移动止损（提交结果未知）不是换代，留给零仓收尾核清
+            # 放弃了的交易所移动止损（提交结果未知）不是换代，留给零仓收尾核清；后备止盈腿
+            # 独立于止损和保命单，它在提交 / 撤销中也不是换代
             and not (leg.kind == "trailing_stop" and state.native_fallback is not None)
+            and leg.kind != "take_profit"
         ]
         if state.ever_armed and moving:
             return (
@@ -2413,12 +2488,43 @@ class HbExecutorAdapter:
         self._frozen_peak_on = enabled
         self._frozen_peak_after_s = after_s
 
+    async def _frozen_peak_drop(
+        self, position_id: str, initial: TrackedPosition
+    ) -> dict[str, Any] | None:
+        """移动止损激活过：不读证据，落盘 ``trailing_active``（丢掉冻结目标价），不触发。"""
+        async with self._registry.symbol_lock(initial.record.symbol):
+            tracked = self._registry.get(position_id)
+            if (
+                tracked is None
+                or tracked.record.status is not PositionStatus.OPEN
+                or tracked.frozen_peak_exit is None
+                or tracked.entry_client_order_id != initial.entry_client_order_id
+            ):
+                return None
+            state = drop_for_trailing(tracked.frozen_peak_exit)
+            if not dropped_for_trailing(state):
+                return None  # 等锁期间刚触发：下一次复查走触发分支
+            if state != tracked.frozen_peak_exit:
+                self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
+                log.info(
+                    "%s %s 移动止损已激活，冻结盈利价回访不再适用（%s）",
+                    tracked.record.symbol,
+                    position_id,
+                    "已冻结的目标价丢掉" if state.frozen_at is not None else "还没冻结",
+                )
+            return {**state.model_dump(mode="json"), "triggered": False}
+
     async def frozen_peak_review(self, position_id: str, now: datetime) -> dict[str, Any] | None:
         initial = self._registry.get(position_id)
         if self._protection is None or initial is None or initial.frozen_peak_exit is None:
             return None
         if initial.record.status is not PositionStatus.OPEN:
             return None
+        if dropped_for_trailing(initial.frozen_peak_exit) or (
+            initial.frozen_peak_exit.status not in ("triggered", "unknown")
+            and trailing_active(initial.server_protection)
+        ):
+            return await self._frozen_peak_drop(position_id, initial)
         if initial.frozen_peak_exit.status == "triggered":
             async with self._registry.symbol_lock(initial.record.symbol):
                 current = self._registry.get(position_id)
@@ -2491,6 +2597,11 @@ class HbExecutorAdapter:
                     continue
                 state, protection = tracked.frozen_peak_exit, tracked.server_protection
                 assert state is not None
+                if state.status != "triggered" and trailing_active(protection):
+                    # 读证据（最长十几秒）期间移动止损刚激活：创新高的时刻正是激活的时刻
+                    dropped = drop_for_trailing(state)
+                    self._registry.put(tracked.model_copy(update={"frozen_peak_exit": dropped}))
+                    return {**dropped.model_dump(mode="json"), "triggered": False}
                 try:
                     if error_detail:
                         raise ExchangeError(error_detail)
