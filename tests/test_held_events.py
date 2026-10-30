@@ -96,10 +96,15 @@ class Met:
         return symbol in self.at and self.at[symbol] >= since
 
 
+ON = h.FAST.model_copy(
+    update={"patrol_held_event_loss_r": 0.5, "patrol_held_event_on_desk_flip": True}
+)
+
+
 def desk(
     tmp_path: Path, asked: Asked, met: Met | None = None, **cfg: Any
 ) -> tuple[HeldEventDesk, c.FastLoopConfig, Log]:
-    fast = h.FAST.model_copy(update=cfg)
+    fast = ON.model_copy(update=cfg)
     log = Log()
     d = HeldEventDesk(
         fast,
@@ -181,13 +186,18 @@ def test_reverse_signal_asks_again_on_each_later_signal(tmp_path: Path, now: dat
     assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)] * 2  # 一个信号一个币只申请一次
 
 
+def test_defaults_are_off() -> None:
+    assert h.FAST.patrol_held_event_loss_r == 0.0
+    assert h.FAST.patrol_held_event_on_desk_flip is False
+
+
 def test_reverse_loss_off_and_meeting_closed(tmp_path: Path, now: datetime) -> None:
     asked = Asked()
     d, fast, _ = desk(tmp_path, asked, patrol_held_event_loss_r=0.0)
     d.on_mark("AAUSDT", 90.0, [], now)
     d.on_reverse(sig(now), [pos(now)], now)
     assert asked.calls == []
-    patch_inplace(fast, h.FAST, HOT_FAST)  # 热生效：就地改的对象
+    patch_inplace(fast, ON, HOT_FAST)  # 热生效：就地改的对象
     d.on_reverse(sig(now), [pos(now)], now)
     assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
 
@@ -288,7 +298,7 @@ def test_desk_flip_off_and_other_sources(tmp_path: Path, now: datetime) -> None:
     p = pos(now)
     d.on_market(view(now, "看跌"), [p], now, price=lambda s: 99.0)
     assert asked.calls == []
-    patch_inplace(fast, h.FAST, HOT_FAST)
+    patch_inplace(fast, ON, HOT_FAST)
     other, _, _ = desk(tmp_path / "b", asked)
     other.on_market(view(now, "看跌", source="market_only"), [p], now, price=lambda s: 99.0)
     assert asked.calls == []
@@ -366,6 +376,7 @@ async def test_runner_feeds_marks_reverse_signals_and_desk_views(
     tmp_path: Path, now: datetime
 ) -> None:
     app = _app(tmp_path, now)
+    patch_inplace(app.app_cfg.fast_loop, ON, HOT_FAST)
     asked = Asked()
     app.held_events = HeldEventDesk(
         app.app_cfg.fast_loop, tmp_path / HELD_EVENTS_FILE, fee_bps=lambda: 5.0, request_event=asked

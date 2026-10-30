@@ -403,11 +403,11 @@ Demo 托管保护的移动止损原本由程序每秒算（`BracketManager.obser
 
 总开关仍是 `slow.toml [schedule] event_meeting_enabled`。这两类不用写进 `event_triggers`，军师团总是收 `held_reverse_loss` / `held_desk_flip`。开关在 `app.toml [fast_loop]`，可热更新。
 
-- **`patrol_held_event_loss_r`**（默认 0.5，0 = 关），触发名 `held_reverse_loss`。条件是两条同时成立：
+- **`patrol_held_event_loss_r`**（代码默认 0 = 关，推荐 0.5），触发名 `held_reverse_loss`。条件是两条同时成立：
   - 哨兵报了一个和持仓方向相反的信号。不管 `against_signal_on` 开没开，原来的管家 / 助手那条路不变。
   - 这笔仓此刻已亏到这么多倍 R。R = 开仓时定的止损距离 `stop_loss_pct`，移动止损收紧后不变；没有这个字段的旧记录不触发。亏损按标记价（`markPrice@1s`，还没收到时用信号里的价）算，扣来回吃单费（`risk.taker_fee_bps` × 2）。
   - 亏不到 0.5R 或在赚，照旧只记录。每个反向信号都可以再申请；重复申请由军师团的限流挡住（哨兵同一种信号 5 分钟内只报 1 次）。
-- **`patrol_held_event_on_desk_flip`**（默认开），触发名 `held_desk_flip`。条件是三条同时成立，赚钱的仓不加会，交给移动止损：
+- **`patrol_held_event_on_desk_flip`**（代码默认关，推荐开），触发名 `held_desk_flip`。条件是三条同时成立，赚钱的仓不加会，交给移动止损：
   - 大盘台（`source = market_desk`）此刻的方向和持仓相反：多单遇看跌，空单遇看涨。
   - 这笔仓按标记价扣来回吃单费后在亏。
   - 这个币从大盘台翻到这个方向以来，还没开始过会，也没在开或已派出（`BattleCardCommander.met_since`；开失败的临时会也算开过）。
