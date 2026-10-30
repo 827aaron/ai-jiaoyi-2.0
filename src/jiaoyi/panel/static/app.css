@@ -799,6 +799,12 @@ tr.fade td { opacity: 0.55; }
 .bc-hist .dh .t { color: var(--dim); margin-right: 3px; font-variant-numeric: tabular-nums; }
 .bc-hist .dh.flip b { color: var(--accent); }
 .bc-hist .arr { color: var(--faint); }
+/* 持仓 / 交易行：持有期间卡上方向的小标在币名下一行；展开里的经过一行一件事 */
+.hold-chip { margin-top: 2px; line-height: 1; }
+.hold-chip .pill, .pm .l3 .pill { font-size: 11px; white-space: nowrap; }
+.pm .l3 { margin-top: 3px; }
+.hold-hist div > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.hold-hist b { color: var(--hi); }
 /* 价格刻度线 */
 .lad { position: relative; height: 74px; margin: 2px 4px 0; }
 .lad .base { position: absolute; left: 0; right: 0; top: 37px; height: 2px; background: var(--line2); border-radius: 1px; }

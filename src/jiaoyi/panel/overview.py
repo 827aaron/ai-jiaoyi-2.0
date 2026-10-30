@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -32,8 +31,17 @@ from jiaoyi.contracts import (
     Role,
     Side,
 )
-from jiaoyi.contracts.battle_card import CardSymbol, MarketView
+from jiaoyi.contracts.battle_card import MarketView
 from jiaoyi.core.recorder import local_day
+from jiaoyi.panel.card_dir import (
+    DirStep,
+    HoldCard,
+    commander_steps,
+    flips,
+    hold_card,
+    replay,
+    window,
+)
 from jiaoyi.panel.files import Ledger, PanelFiles
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meetings import STAGES, read_meeting
@@ -41,8 +49,6 @@ from jiaoyi.panel.meetings import STALE_S as MEETING_STALE_S
 from jiaoyi.panel.protection import ProtectionView, lifeboat_summary, parse_protection
 from jiaoyi.panel.stop_diagnostics import StopDiagnostics
 from jiaoyi.panel.trailing import TrailEstimate
-from jiaoyi.slow.card_flip import card_direction
-from jiaoyi.slow.card_outlook import card_from_output
 from jiaoyi.slow.desk_intra import compose_intra
 
 DESK_SOURCE = "market_desk"
@@ -117,18 +123,6 @@ class LevelView(BaseModel):
     price: float
     kind: str
     """support / resistance / pivot；页面按现价上下重新分支撑、压力（同慢环落卡的口径）。"""
-
-
-class DirStep(BaseModel):
-    """一个币卡上方向的一次变动机会：一场会，或不跟会的翻转确认 / 恢复。"""
-
-    ts: datetime
-    meeting: str | None
-    """这场会自己的结论 long / short / neutral；不是会（管家助手确认、恢复原方向）是 None。"""
-    card: str
-    """这之后卡上生效的方向（交易系统真正用的，含翻转滞回）：long / short / neutral。"""
-    event: str | None = None
-    """``card_flip`` 记录：ignored（会判观望、按设置保留原方向）/ pending / confirmed / …。"""
 
 
 class CardRow(BaseModel):
@@ -287,6 +281,8 @@ class PositionView(BaseModel):
     """估手续费用的单边费率（bp）。"""
     fee_from_fills: bool = False
     """费率是从最近平掉的单实收倒推的（True），还是配置里的 ``taker_fee_bps``（False，只是估）。"""
+    hold_card: HoldCard | None = None
+    """持有期间作战卡上这个币的方向和管家卡规则的处理（军师团记录只读昨天和今天）。"""
 
 
 class Tiles(BaseModel):
@@ -704,6 +700,12 @@ def position_views(
             act, delta = o.get("trailing_activation_pct"), o.get("trailing_stop_pct")
             if isinstance(act, int | float) and isinstance(delta, int | float):
                 trail_of[str(o["intent_id"])] = (float(act), float(delta))
+    at = now or datetime.now(UTC)
+    dir_steps = commander_steps(records, at)
+    keeper_of: dict[str, list[DecisionRecord]] = {}
+    for r in records:
+        if r.role is Role.KEEPER and r.position_id:
+            keeper_of.setdefault(r.position_id, []).append(r)
     out = []
     for p in sorted(live, key=lambda p: p.opened_at, reverse=True):
         sign = 1 if p.side.value == "long" else -1
@@ -820,6 +822,13 @@ def position_views(
                 net_pnl_pct=net / notional * 100 if net is not None and notional else None,
                 fee_bps=bps,
                 fee_from_fills=fills_fee_bps is not None,
+                hold_card=hold_card(
+                    dir_steps.get(p.symbol),
+                    p.side.value,
+                    p.opened_at,
+                    at,
+                    keeper_of.get(p.position_id, []),
+                ),
             )
         )
     return out
@@ -1015,83 +1024,6 @@ def _flip_text(raw: object) -> str | None:
     )
 
 
-@dataclass
-class _Track:
-    eff: CardSymbol | None = None
-    before: CardSymbol | None = None
-    """最近一场会之前卡上的那条：会判观望被忽略、或改判进了待确认时，卡上留的是它。"""
-    fresh: CardSymbol | None = None
-    stash: CardSymbol | None = None
-    """待确认翻转期间被换成只看不做之前的那条（恢复原方向时用）。"""
-    after_meeting: bool = False
-    steps: list[DirStep] = field(default_factory=list)
-
-
-def _meeting_cs(r: DecisionRecord) -> CardSymbol | None:
-    if not (r.symbol and r.output and r.outcome is Outcome.ACTION):
-        return None
-    try:
-        # 记录里还夹着 usage（token 用量）、meeting_setup（偏空整改的分组）等不属于作战指令
-        # 的键：契约禁止多余字段，不去掉的话校验会整条丢掉；只记录的 outlook 单独校验，
-        # 坏了不连累卡
-        return card_from_output({k: v for k, v in r.output.items() if k in CardSymbol.model_fields})
-    except ValueError:
-        return None
-
-
-def _replay(cmd: list[DecisionRecord]) -> dict[str, _Track]:
-    """按时间重放军师团记录，得到每个币卡上生效的那条指令（同 ``slow/card_flip.py`` 的滞回）。
-
-    会议结论记录写的是会自己的结论；之后紧跟的 ``card_flip`` 记录说明卡上实际怎么处理：
-    ignored = 卡上留着会前那条，pending = 会前那条只看不做，confirmed = 换成待确认的那场结论。"""
-    tracks: dict[str, _Track] = {}
-    for r in cmd:
-        if not r.symbol:
-            continue
-        t = tracks.setdefault(r.symbol, _Track())
-        cs = _meeting_cs(r)
-        if cs is not None:
-            t.before, t.fresh, t.eff, t.after_meeting = t.eff, cs, cs, True
-            t.steps.append(DirStep(ts=r.ts, meeting=card_direction(cs), card=card_direction(cs)))
-            continue
-        ev = r.output.get("card_flip") if r.outcome is Outcome.INFO else None
-        if ev not in ("ignored", "pending", "confirmed", "cancelled", "dropped"):
-            continue
-        right_after, t.after_meeting = t.after_meeting, False
-        if ev == "ignored" and right_after and t.before is not None:
-            t.eff = t.before.model_copy(update={"expires_at": t.eff.expires_at if t.eff else None})
-        elif ev == "ignored" and not right_after and t.stash is not None:
-            t.eff, t.stash = t.stash, None  # 切到 ignore 时把转观望的候选恢复成原方向
-        elif ev == "pending" and t.before is not None:
-            t.stash = t.stash or t.before
-            t.eff = t.before.model_copy(update={"allowed_signals": []})
-        elif ev == "confirmed" and t.fresh is not None:
-            t.eff, t.stash = t.fresh, None
-        elif ev in ("cancelled", "dropped"):
-            t.stash = None
-        if t.eff is None:
-            continue
-        if right_after and t.steps:
-            t.steps[-1] = t.steps[-1].model_copy(
-                update={"card": card_direction(t.eff), "event": ev}
-            )
-        elif ev in ("ignored", "confirmed"):
-            t.steps.append(DirStep(ts=r.ts, meeting=None, card=card_direction(t.eff), event=ev))
-    return tracks
-
-
-_LS = frozenset({"long", "short"})
-
-
-def _flips(start: str | None, steps: list[DirStep]) -> int:
-    n, prev = 0, start
-    for st in steps:
-        if prev in _LS and st.card in _LS and st.card != prev:
-            n += 1
-        prev = st.card
-    return n
-
-
 def _with_dir_history(
     card: CardView | None, recent: list[DecisionRecord], now: datetime, tz: str
 ) -> CardView | None:
@@ -1099,19 +1031,17 @@ def _with_dir_history(
     if card is None:
         return None
     day0 = datetime.combine(local_day(now, tz), datetime.min.time(), ZoneInfo(tz))
-    tracks = _replay([r for r in recent if r.role is Role.COMMANDER and r.ts <= now])
+    per = commander_steps(recent, now)
     rows = []
     for row in card.symbols:
-        t = tracks.get(row.symbol)
-        if t is None:
+        steps = per.get(row.symbol)
+        if steps is None:
             rows.append(row)
             continue
-        old = [st for st in t.steps if st.ts < day0]
-        today = [st for st in t.steps if st.ts >= day0]
-        start = old[-1].card if old else None
+        (start, _), today = window(steps, day0, now)
         rows.append(
             row.model_copy(
-                update={"dir_start": start, "dir_steps": today, "flips_today": _flips(start, today)}
+                update={"dir_start": start, "dir_steps": today, "flips_today": flips(start, today)}
             )
         )
     return card.model_copy(update={"symbols": rows})
@@ -1156,7 +1086,7 @@ def _card(
     # 卡上生效的那条，不是最新那场会的原话：会判观望而设置不翻转时卡上还是原方向
     per = {
         sym: t.eff
-        for sym, t in _replay(
+        for sym, t in replay(
             [r for r in (history or records) if r.role is Role.COMMANDER and r.ts <= last.ts]
         ).items()
         if t.eff is not None
