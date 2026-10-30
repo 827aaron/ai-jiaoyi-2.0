@@ -193,7 +193,9 @@ async def test_paper_stop_last_cross_closes_demo_and_books_stop(
     await runner.on_event(_trade(now, wick))
     await _settle(runner)
     assert ex.closed == [(pos.position_id, CloseReason.STOP_LOSS)]
-    assert ex.details == [(pos.position_id, "主网价格越过止损")]
+    assert ex.details == [
+        (pos.position_id, f"主网价格越过止损：主网成交价 {wick:g} 碰到固定止损 {STOP[side]:g}")
+    ]
     booked = runner._paper_stops.get(pos.position_id)
     assert booked is not None
     assert booked.stop_price == STOP[side] and booked.stop_source == "ledger"
@@ -256,6 +258,9 @@ async def test_paper_stop_uses_tightest_executor_level(
     booked = runner._paper_stops.get(pos.position_id)
     assert booked is not None and (booked.stop_source, booked.stop_price) == ("trailing", trailing)
     assert booked.paper_exit_price == trailing
+    assert ex.details == [
+        (pos.position_id, f"主网价格越过止损：主网成交价 {trailing:g} 碰到移动止损 {trailing:g}")
+    ]
 
 
 @pytest.mark.parametrize("side", [LONG, SHORT])

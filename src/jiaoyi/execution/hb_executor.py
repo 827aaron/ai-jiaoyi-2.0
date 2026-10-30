@@ -909,7 +909,7 @@ class HbExecutorAdapter:
         detail = _shown_detail(tracked, reason)
         self._record(
             Outcome.CLOSE,
-            f"{rec.symbol} 直连平仓（{reason.value}"
+            f"{rec.symbol} 直连平仓（{_REASON_CN.get(reason, reason.value)}"
             + (f"：{detail}" if detail else "")
             + "），净盈亏 "
             + (f"{pnl:+.2f}U" if pnl is not None else "未知")
@@ -2094,7 +2094,7 @@ class HbExecutorAdapter:
         detail = _shown_detail(closed, reason)
         self._record(
             Outcome.CLOSE,
-            f"{rec.symbol} 交易所成交推送平仓（{reason.value}"
+            f"{rec.symbol} 交易所成交推送平仓（{_REASON_CN.get(reason, reason.value)}"
             + (f"：{detail}" if detail else "")
             + "），净盈亏 "
             + (f"{pnl:+.2f}U" if pnl is not None else "未知"),
@@ -3382,7 +3382,7 @@ class HbExecutorAdapter:
             shown = _shown_detail(tracked, reason)
             self._record(
                 Outcome.CLOSE,
-                f"{rec.symbol} 平仓（{reason.value if reason else '未知'}"
+                f"{rec.symbol} 平仓（{_REASON_CN.get(reason, reason.value) if reason else '未知'}"
                 + (f"：{shown}" if shown else "")
                 + f"），净盈亏 {net:+.2f}U",
                 closed,
