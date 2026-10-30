@@ -2588,6 +2588,8 @@ class HbExecutorAdapter:
             # 独立于止损和保命单，它在提交 / 撤销中也不是换代
             and not (leg.kind == "trailing_stop" and state.native_fallback is not None)
             and leg.kind != "take_profit"
+            # 提交结果未知的锁利腿是独立腿，旧止损还在，不挡管家平仓
+            and not (leg.purpose == "profit_lock" and leg.state == "submit_pending")
         ]
         if state.ever_armed and moving:
             return (
