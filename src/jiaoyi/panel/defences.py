@@ -18,7 +18,16 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 from jiaoyi.contracts import AppConfig, DecisionRecord, Outcome, RiskConfig, Role
-from jiaoyi.core.market_trail import LABEL, STALE_S, STATE_FILE, TrailSeries
+from jiaoyi.core.market_trail import (
+    LABEL,
+    STALE_S,
+    STATE_FILE,
+    TrailSeries,
+    ema_line,
+    ema_value,
+    read_ema,
+    verdict_cn,
+)
 from jiaoyi.core.paper_stop import PaperStop
 from jiaoyi.core.recorder import local_day
 from jiaoyi.panel.card_dir import CARD_CLOSE, action_kind, commander_steps
@@ -52,7 +61,11 @@ _SIDE_CN = {-1: "空单", 1: "多单"}
 _LEG_CN = {-1: "跌段", 1: "涨段"}
 _EXT_CN = {-1: "低点", 1: "高点"}
 _OPP = {"long": "short", "short": "long"}
-_TRIGGER_CN = {"held_reverse_loss": "反向信号", "held_desk_flip": "大盘台转向"}
+_TRIGGER_CN = {
+    "held_reverse_loss": "反向信号",
+    "held_desk_flip": "大盘台转向",
+    "held_market_trail": "大盘闸门锁住且持仓在亏",
+}
 
 
 def _last(recs: Sequence[DecisionRecord]) -> tuple[datetime | None, str | None]:
@@ -66,6 +79,17 @@ def _off(key: str, name: str, config_key: str, link: str | None) -> DefenceRow:
     return DefenceRow(key=key, name=name, on=False, config_key=config_key, level="off", link=link)
 
 
+def _trail_today(root: Path, day: str) -> tuple[int, int]:
+    """今天的（算过的分钟数，两边都不开的分钟数）；旧文件没有就是 (0, 0)。"""
+    try:
+        today = json.loads((root / STATE_FILE).read_text(encoding="utf-8")).get("today") or {}
+        if today.get("day") != day:
+            return 0, 0
+        return int(today["minutes"]), int(today["both"])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return 0, 0
+
+
 def _trail_series(root: Path, ref: str) -> TrailSeries | None:
     try:
         raw = json.loads((root / STATE_FILE).read_text(encoding="utf-8"))
@@ -76,7 +100,8 @@ def _trail_series(root: Path, ref: str) -> TrailSeries | None:
 
 
 class MarketTrailView(BaseModel):
-    """团队页风控员节点的大盘闸门一行、详情顶上的状态条（总览那一行用同一份）。"""
+    """团队页风控员节点的大盘闸门一行、详情顶上的状态条（总览那一行用同一份）。``state`` 等字段
+    说的是移动止损这道闸，``ema_*`` 说的是均线闸，``verdict`` 是两道合起来。"""
 
     on: bool
     ref: str = ""
@@ -94,6 +119,22 @@ class MarketTrailView(BaseModel):
     """参照的数据停在这一分钟（超过 5 分钟没更新）；正常是 None。"""
     locks_today: int = 0
     blocked_today: int = 0
+    unlocks_today: dict[str, int] = {}
+    """extreme 新极值 / expire 作废 / leg 新段。"""
+    blocked_ema: int = 0
+    blocked_trail: int = 0
+    blocked_both: int = 0
+    meetings_asked: int = 0
+    meetings_held: int = 0
+    both_pct: float | None = None
+    """今天两边都不开的时间占比（%）。"""
+    verdict: str = "不拦"
+    ema_on: bool = False
+    ema_block: str | None = None
+    """均线闸此刻拦的方向：多单 / 空单。"""
+    ema_text: str = ""
+    trail_text: str = ""
+    today_text: str = ""
     line: str = "大盘闸门：未启用"
     """节点上那一行。"""
     now: str = ""
@@ -105,8 +146,73 @@ class MarketTrailView(BaseModel):
 def is_trail_block(r: DecisionRecord) -> bool:
     return r.outcome is Outcome.REJECT and (
         (r.output.get("detail") or {}).get("by") == "market_trail"
-        or any(str(x).startswith("大盘移动止损") for x in r.output.get("reasons") or [])
+        or any(
+            str(x).startswith(("大盘移动止损", "大盘均线")) for x in r.output.get("reasons") or []
+        )
     )
+
+
+def _gates(r: DecisionRecord) -> set[str]:
+    """拦这条信号的闸；旧记录没有 ``gates``，从理由文字认。"""
+    gates = (r.output.get("detail") or {}).get("gates")
+    if gates:
+        return {str(g) for g in gates}
+    ema = any(str(x).startswith("大盘均线") for x in r.output.get("reasons") or [])
+    return {"ema"} if ema else {"trail"}
+
+
+def _meetings(today: list[DecisionRecord], now: datetime) -> tuple[int, int]:
+    """大盘闸门锁住申请的临时会：真排进队的，和其中这个币之后确实开了会的。"""
+    asks = [
+        r
+        for r in today
+        if r.role is Role.PATROL
+        and (r.output.get("held_event") or {}).get("trigger") == "held_market_trail"
+        and r.output["held_event"].get("queued")
+    ]
+    steps = commander_steps(today, now)
+    held = sum(
+        1
+        for r in asks
+        if any(s.ts > r.ts and s.meeting is not None for s in steps.get(r.symbol or "", []))
+    )
+    return len(asks), held
+
+
+def _today_text(v: MarketTrailView) -> str:
+    u = v.unlocks_today
+    parts = [
+        f"锁 {v.locks_today} 次（解锁：新极值 {u.get('extreme', 0)} · 作废 {u.get('expire', 0)}"
+        f" · 新段 {u.get('leg', 0)}）",
+        f"拦下开仓 {v.blocked_today} 笔（均线 {v.blocked_ema} · 移动止损 {v.blocked_trail}"
+        f" · 两者 {v.blocked_both}）",
+    ]
+    if v.meetings_asked:
+        parts.append(f"临时会申请 {v.meetings_asked} 场、开成 {v.meetings_held} 场")
+    if v.both_pct is not None:
+        parts.append(f"两边都不开 {v.both_pct:.0f}% 的时间")
+    return " · ".join(parts)
+
+
+def _ema_part(v: MarketTrailView, s: TrailSeries, app: AppConfig, now: datetime, tz: str) -> None:
+    fl = app.fast_loop
+    n = fl.signal_market_ma_minutes
+    sides = [s.locked] if s.warm and s.locked is not None else []
+    if fl.signal_market_ma_on:
+        e = read_ema(s, n, now.timestamp(), ema_value(s.xs, n))
+        v.ema_on = True
+        v.ema_text = ema_line(e, v.ref, n, ZoneInfo(tz))
+        if e.side:
+            v.ema_block = _SIDE_CN[e.side]
+            sides.append(e.side)
+    v.verdict = verdict_cn(sides)
+    parts = []
+    if v.ema_block:
+        parts.append("均线")
+    if v.state == "locked":
+        parts.append(f"移动止损锁 {v.locked_min} 分钟")
+    if parts:
+        v.line = " · ".join([f"大盘闸门：{v.verdict}", *parts])
 
 
 def market_trail_view(
@@ -119,30 +225,55 @@ def market_trail_view(
     label = LABEL[ref]
     notes = [r for r in today if r.role is Role.RISK_GUARD and "market_trail" in r.output]
     blocked = [r for r in today if is_trail_block(r)]
+    gates = [_gates(r) for r in blocked]
+    unlocks = Counter(
+        str(r.output["market_trail"].get("why"))
+        for r in notes
+        if r.output["market_trail"].get("kind") == "unlock"
+    )
+    asked, held = _meetings(today, now)
+    minutes, both = _trail_today(root, local_day(now, tz).isoformat())
     v = MarketTrailView(
         on=True,
         ref=label,
         k=k,
         locks_today=sum(1 for r in notes if r.output["market_trail"].get("kind") == "lock"),
         blocked_today=len(blocked),
+        unlocks_today=dict(unlocks),
+        blocked_ema=sum(1 for g in gates if g == {"ema"}),
+        blocked_trail=sum(1 for g in gates if g == {"trail"}),
+        blocked_both=sum(1 for g in gates if len(g) == 2),
+        meetings_asked=asked,
+        meetings_held=held,
+        both_pct=both / minutes * 100 if minutes else None,
         level="idle",
     )
+    v.today_text = _today_text(v)
     v.last_ts, v.last_text = _last([*notes, *blocked])
     s = _trail_series(root, ref)
     if s is None:
         v.state, v.now, v.line = "none", "还没有状态（主程序没跑过这一版）", "大盘闸门：还没有状态"
         return v
+    _trail_part(v, s, k, label, now, tz)
+    v.trail_text = v.now
+    _ema_part(v, s, app, now, tz)
+    return v
+
+
+def _trail_part(
+    v: MarketTrailView, s: TrailSeries, k: float, label: str, now: datetime, tz: str
+) -> None:
     if not s.warm:
         v.state, v.line = "warmup", "大盘闸门：历史不足 24 小时"
         v.now = f"历史不足 24 小时（已有 {s.count / 60:.0f} 小时），暂不拦"
-        return v
+        return
     if s.leg is None:
         v.state, v.line = "no_leg", "大盘闸门：没有跌段 / 涨段，不拦"
         v.now = f"{label} 还没有跌段 / 涨段，不拦"
-        return v
+        return
     side, rt = s.leg.side, s.retrace_atr() or 0.0
     v.leg, v.guards, v.retrace_atr = _LEG_CN[side], _SIDE_CN[side], round(rt, 4)
-    if ref != "btc_eth":
+    if label != LABEL["btc_eth"]:
         v.extreme_price = math.exp(s.leg.extreme)
     if s.locked is not None:
         mins = max(0, int(now.timestamp() - (s.leg.stopped_at or now.timestamp())) // 60)
@@ -160,14 +291,13 @@ def market_trail_view(
     if s.last_t is not None and now.timestamp() - s.last_t > STALE_S:
         v.stale_at = datetime.fromtimestamp(s.last_t, UTC)
         v.now += f"；数据停在 {v.stale_at.astimezone(ZoneInfo(tz)):%H:%M}"
-    return v
 
 
 def market_trail_row(
     root: Path, app: AppConfig, today: list[DecisionRecord], now: datetime, tz: str
 ) -> DefenceRow:
     fl = app.fast_loop
-    key, name, link = "market_trail", "大盘移动止损", "#team/risk_guard"
+    key, name, link = "market_trail", "大盘闸门", "#team/risk_guard"
     if not fl.signal_market_trail_on:
         return _off(key, name, "fast_loop.signal_market_trail_on", link)
     v = market_trail_view(root, app, today, now, tz)
@@ -176,10 +306,11 @@ def market_trail_row(
         name=name,
         on=True,
         config_key="fast_loop.signal_market_trail_on",
-        setting=f"参照 {v.ref} · {v.k:g} 倍 ATR",
-        now=v.now,
+        setting=f"参照 {v.ref} · {v.k:g} 倍 ATR"
+        + (f" · {fl.signal_market_ma_minutes} 分钟均线" if fl.signal_market_ma_on else ""),
+        now="；".join(x for x in (v.ema_text, v.now) if x),
         level=v.level,
-        today=f"锁 {v.locks_today} 次 · 拦下开仓 {v.blocked_today} 笔",
+        today=v.today_text,
         last_ts=v.last_ts,
         last_text=v.last_text,
         link=link,
@@ -236,6 +367,55 @@ def native_trailing_row(
         today=f"挂上 {placed} · 没用上 {fell} · 移动止损平 {len(closes)} 笔",
         last_ts=last.closed_at if last else None,
         last_text=f"{last.symbol} 移动止损平仓" if last else None,
+        link=link,
+    )
+
+
+def profit_lock_row(
+    app: AppConfig,
+    ledger: Ledger,
+    positions: Sequence[PositionView],
+    today: list[DecisionRecord],
+    now: datetime,
+    tz: str,
+) -> DefenceRow:
+    fl = app.fast_loop
+    key, name, link = "profit_lock", "锁利止损", "#positions"
+    if not fl.profit_lock_on:
+        return _off(key, name, "fast_loop.profit_lock_on", link)
+    hits = [r for r in today if r.role is Role.KEEPER and "profit_lock" in r.output]
+    st = Counter(
+        p.protection.profit_lock_state
+        for p in positions
+        if p.protection is not None and p.protection.profit_lock_state
+    )
+    day = local_day(now, tz)
+    closes = [
+        p
+        for p in ledger.positions
+        if p.closed_at is not None
+        and local_day(p.closed_at, tz) == day
+        and p.close_reason is not None
+        and p.close_reason.value == "profit_lock"
+    ]
+    won = sum(1 for p in closes if (p.realized_pnl_usdt or 0.0) > 0)
+    main = sum(1 for p in closes if p.position_id in ledger.paper)
+    gone = f"被打掉 {len(closes)} 笔"
+    if closes:
+        gone += f"（赚 {won} · 亏 {len(closes) - won} · 主网价 {main} · Demo {len(closes) - main}）"
+    last = max(closes, key=lambda p: p.closed_at or now, default=None)
+    ts, text = _last(hits)
+    return DefenceRow(
+        key=key,
+        name=name,
+        on=True,
+        config_key="fast_loop.profit_lock_on",
+        setting=f"赚到 {fl.profit_lock_trigger_r:g}R 锁约 +{fl.profit_lock_r:g}R（未含滑点）",
+        now=f"已锁 {st['locked']} 笔 · 等挂上 {st['pending']} 笔",
+        level="warn" if st["abandoned"] else "ok" if st["locked"] else "idle",
+        today=f"触发 {len({r.position_id for r in hits})} 笔 · {gone}",
+        last_ts=last.closed_at if last else ts,
+        last_text=f"{last.symbol} 锁利止损平仓" if last else text,
         link=link,
     )
 
@@ -372,7 +552,8 @@ def paper_stop_row(app: AppConfig, ledger: Ledger, now: datetime, tz: str) -> De
     last = max(booked, key=lambda b: b.booked_at, default=None)
     text = None
     if last is not None:
-        where = "盈利侧（移动止损）" if profit(last) else "亏损侧（止损）"
+        side = "锁利止损" if last.stop_source == "profit_lock" else "移动止损"
+        where = f"盈利侧（{side}）" if profit(last) else "亏损侧（止损）"
         text = f"{last.symbol} 主网价 {last.cross_price:g} 碰到{where} {last.stop_price:g}"
     src = "标记价" if fl.paper_stop_on_mainnet == "mark" else "成交价"
     return DefenceRow(
@@ -430,6 +611,7 @@ def defence_rows(
     return [
         market_trail_row(root, app, today, now, tz),
         native_trailing_row(app, ledger, positions, now, tz),
+        profit_lock_row(app, ledger, positions, today, now, tz),
         frozen_peak_row(app, ledger, today, live_ids),
         opposite_card_row(app, positions, today),
         held_event_row(app, ledger, positions, today, recent, now),

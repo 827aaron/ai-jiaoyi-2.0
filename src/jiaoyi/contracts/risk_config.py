@@ -1222,11 +1222,18 @@ class FastLoopConfig(Contract):
         "极值或开了新段就放行。持仓不动，另一个方向不受影响。默认关。",
     )
     signal_market_trail_k: float = Field(
-        default=1.0,
+        default=0.5,
         ge=0.2,
         le=5.0,
         allow_inf_nan=False,
-        description="大盘移动止损：从段内极值反向走多少倍 15 分钟 ATR 就锁住。默认 1.0。",
+        description="大盘移动止损：从段内极值反向走多少倍 15 分钟 ATR 就锁住。默认 0.5。",
+    )
+    signal_market_trail_max_extreme_age_min: int = Field(
+        default=120,
+        ge=0,
+        le=10080,
+        description="大盘移动止损：段内极值多少分钟没刷新就作废，从现价重算并解锁；0 = 不作废。"
+        "默认 120。",
     )
     signal_market_trail_ref: Literal["btc", "eth", "btc_eth"] = Field(
         default="btc",
@@ -1238,9 +1245,63 @@ class FastLoopConfig(Contract):
         description="大盘移动止损的影子记录：btc / eth / btc_eth / 山寨篮子每分钟锁没锁写进 "
         "data/market_trail_shadow/<日期>.jsonl，不影响开仓。默认关。",
     )
+    signal_market_ma_on: bool = Field(
+        default=True,
+        description="大盘均线：参照的 1 分钟收盘在 EMA 下面不开新多单，上面不开新空单，每分钟重判、"
+        "不锁不解锁；和大盘移动止损任一拦就不开。数据不满、断了或最近有补出来的分钟时不拦。"
+        "总开关 signal_market_trail_on 关着时不起作用。默认开。",
+    )
+    signal_market_ma_minutes: int = Field(
+        default=30,
+        ge=2,
+        le=1440,
+        description="大盘均线：EMA 的长度（分钟）。默认 30。",
+    )
+    signal_market_trail_notify: bool = Field(
+        default=True,
+        description="大盘移动止损真的刚锁住时做配合动作：给锁住方向上扣费后亏损到 "
+        "patrol_held_event_loss_r 的持仓各申请一场临时会，并叫大盘台加跑一轮。不平仓、不改卡。"
+        "默认开。",
+    )
+    signal_market_trail_meetings_per_day: int = Field(
+        default=10,
+        ge=0,
+        le=100,
+        description="大盘移动止损锁住时申请的持仓币临时会每天最多几场（单独计数，仍走军师团的"
+        "队列和间隔）；0 = 不申请。默认 10。",
+    )
+    profit_lock_on: bool = Field(
+        default=True,
+        description="锁利：扣费后赚到过 profit_lock_trigger_r，把交易所固定止损换到扣费后还赚 "
+        "profit_lock_r 的价。只收紧不放松，每笔仓一次，账本止损价和 R 不变；和币安移动止损并存，"
+        "谁先到谁平。默认开。",
+    )
+    profit_lock_trigger_r: float = Field(
+        default=0.3,
+        gt=0.0,
+        le=10.0,
+        allow_inf_nan=False,
+        description="锁利：扣费后赚到几倍 R 触发（模拟盘按主网价判）。默认 0.3。",
+    )
+    profit_lock_mark_gap_bps: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=200.0,
+        allow_inf_nan=False,
+        description="锁利：目标价离标记价不到这么多基点就先不挂，下一轮再试，不平仓。默认 5。",
+    )
+    profit_lock_r: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=10.0,
+        allow_inf_nan=False,
+        description="锁利：止损挪到扣费后还赚几倍 R 的价，要小于 profit_lock_trigger_r。默认 0.1。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:
+        if self.profit_lock_r >= self.profit_lock_trigger_r:
+            raise ValueError("profit_lock_r 要小于 profit_lock_trigger_r")
         if self.jev_model is not None and "latest" in self.jev_model.lower():
             raise ValueError(
                 "jev_model 必须是具体版本号，不能用 latest 这类浮动别名（会让门槛悄悄失效）"

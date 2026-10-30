@@ -11,6 +11,7 @@ from jiaoyi.core.held_events import (
     DESK_TRIGGER,
     HELD_EVENTS_FILE,
     REVERSE_TRIGGER,
+    TRAIL_TRIGGER,
     HeldEventDesk,
 )
 from jiaoyi.core.hotconfig import HOT_FAST, patch_inplace
@@ -392,3 +393,94 @@ async def test_runner_feeds_marks_reverse_signals_and_desk_views(
     assert asked.calls[1:] == [("AAUSDT", DESK_TRIGGER), ("BBUSDT", DESK_TRIGGER)]
     await r.on_event(mark)
     assert asked.calls[3:] == [("AAUSDT", DESK_TRIGGER)]
+
+
+# ---------------------------------------------------------------- 大盘移动止损刚锁住
+LOSS = h.FAST.model_copy(update={"patrol_held_event_loss_r": 0.2})
+
+
+def _trail_desk(tmp_path: Path, cfg: Any, ok: bool = True) -> tuple[HeldEventDesk, list[Any], Any]:
+    asked: list[tuple[str, str]] = []
+    records: list[c.DecisionRecord] = []
+
+    class Log:
+        def write(self, record: c.DecisionRecord) -> None:
+            records.append(record)
+
+        def heartbeat(self, status: c.ModuleStatus) -> None:
+            pass
+
+    desk = HeldEventDesk(
+        cfg,
+        tmp_path / HELD_EVENTS_FILE,
+        fee_bps=lambda: 5.0,
+        request_event=lambda sym, trigger: asked.append((sym, trigger)),
+        meeting_ok=lambda trigger: ok,
+        recorder=RoleRecorder(c.Role.PATROL, Log()),
+    )
+    return desk, asked, records
+
+
+def _short(now: datetime, **over: Any) -> c.PositionRecord:
+    return pos(now, side="short", **over)
+
+
+def _marked(now: datetime, loss_pct: float) -> Any:
+    p = _short(now)
+    return p, (p.entry_price or 0.0) * (1 + loss_pct / 100)
+
+
+def test_held_events_trail_lock_asks_for_the_losing_position_on_the_locked_side(
+    tmp_path: Path,
+) -> None:
+    now = datetime.fromisoformat("2026-10-30T06:00:00+00:00")
+    desk, asked, records = _trail_desk(tmp_path, LOSS)
+    p, px = _marked(now, p_loss(_short(now)))
+    desk.on_trail_lock(c.Side.SHORT, [p], now, lambda sym: px)
+    assert asked == [(p.symbol, TRAIL_TRIGGER)]
+    out = records[-1].output["held_event"]
+    assert (out["trigger"], out["queued"], out["meeting_ok"]) == (TRAIL_TRIGGER, True, True)
+    assert "大盘闸门锁住且持仓在亏" in records[-1].summary
+
+
+def p_loss(p: c.PositionRecord) -> float:
+    return (p.stop_loss_pct or 0.0) * 0.5 + 0.1
+
+
+def test_held_events_trail_lock_ignores_other_side_and_small_losses(tmp_path: Path) -> None:
+    now = datetime.fromisoformat("2026-10-30T06:00:00+00:00")
+    desk, asked, _ = _trail_desk(tmp_path, LOSS)
+    p, px = _marked(now, p_loss(_short(now)))
+    desk.on_trail_lock(c.Side.LONG, [p], now, lambda sym: px)
+    desk.on_trail_lock(c.Side.SHORT, [p], now, lambda sym: p.entry_price)
+    assert asked == []
+
+
+def test_held_events_trail_lock_daily_cap_is_its_own_and_survives_restart(tmp_path: Path) -> None:
+    now = datetime.fromisoformat("2026-10-30T06:00:00+00:00")
+    cfg = LOSS.model_copy(update={"signal_market_trail_meetings_per_day": 1})
+    desk, asked, _ = _trail_desk(tmp_path, cfg)
+    p, px = _marked(now, p_loss(_short(now)))
+    desk.on_trail_lock(c.Side.SHORT, [p], now, lambda sym: px)
+    desk2, asked2, records2 = _trail_desk(tmp_path, cfg)
+    desk2.on_trail_lock(c.Side.SHORT, [p], now + timedelta(hours=1), lambda sym: px)
+    assert len(asked) == 1 and asked2 == []
+    assert records2[-1].output["held_event"]["capped"] is True
+    desk2.on_trail_lock(c.Side.SHORT, [p], now + timedelta(days=1), lambda sym: px)
+    assert asked2 == [(p.symbol, TRAIL_TRIGGER)]
+
+
+def test_held_events_trail_lock_records_when_the_meeting_is_refused(tmp_path: Path) -> None:
+    now = datetime.fromisoformat("2026-10-30T06:00:00+00:00")
+    desk, asked, records = _trail_desk(tmp_path, LOSS, ok=False)
+    p, px = _marked(now, p_loss(_short(now)))
+    desk.on_trail_lock(c.Side.SHORT, [p], now, lambda sym: px)
+    assert asked == []
+    out = records[-1].output["held_event"]
+    assert (out["queued"], out["meeting_ok"]) == (False, False)
+
+
+def test_held_events_trail_trigger_is_accepted_by_the_commander() -> None:
+    from jiaoyi.slow.commander import HELD_TRIGGERS
+
+    assert "held_market_trail" in HELD_TRIGGERS

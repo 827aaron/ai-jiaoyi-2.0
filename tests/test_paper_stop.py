@@ -854,6 +854,7 @@ def test_paper_stop_history_shows_both_fills_and_funds_stay_demo(
         (SHORT, "ledger", 68214.1, CloseReason.STOP_LOSS),
         (LONG, "lifeboat", 67788.8, CloseReason.LIFEBOAT),
         (SHORT, "tightened", 68100.0, CloseReason.TIGHTENED_STOP),
+        (SHORT, "profit_lock", 67900.0, CloseReason.PROFIT_LOCK),
         (LONG, "trailing", 68000.0, CloseReason.TRAILING_STOP),
     ],
 )

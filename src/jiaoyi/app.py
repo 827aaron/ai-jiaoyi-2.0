@@ -956,6 +956,7 @@ class App:
         self.held_events = HeldEventDesk(
             app_cfg.fast_loop,
             Path(app_cfg.data_dir) / HELD_EVENTS_FILE,
+            tz=risk_cfg.day_reset_tz,
             fee_bps=lambda: self.risk_cfg.taker_fee_bps,
             request_event=request_event if callable(request_event) else None,
             meeting_ok=(lambda t: bool(accepts(t))) if callable(accepts) else None,

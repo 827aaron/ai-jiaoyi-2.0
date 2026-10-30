@@ -223,9 +223,18 @@ signal_desk_turn_pause = false
 # 大盘移动止损（方向闸门）：参照 4 小时涨跌的 z 分数出了 ±1 开一段跌段 / 涨段，从段内极值反向走了 k 倍 15 分钟 ATR 就锁住
 # 这个方向的新仓（所有币；跌段锁空单、涨段锁多单），同方向再创新极值或开了新段就放行。持仓不动。以下均可热更新；默认关
 signal_market_trail_on = false      # 推荐 true
-signal_market_trail_k = 1.0         # 反向走几倍 ATR 锁住
+signal_market_trail_k = 0.5         # 反向走几倍 ATR 锁住
+signal_market_trail_max_extreme_age_min = 120  # 段内极值多少分钟没刷新就作废、解锁；0 = 不作废
 signal_market_trail_ref = "btc"     # btc / eth / btc_eth（两者对数价平均）；没选中的照样算，只写影子记录
 signal_market_trail_shadow = false  # 推荐 true：四条参照每分钟锁没锁写 data/market_trail_shadow/<日期>.jsonl，不影响开仓
+signal_market_ma_on = true          # 大盘均线：参照在 EMA 下面不开多、上面不开空，每分钟重判；和移动止损任一拦就不开
+signal_market_ma_minutes = 30       # EMA 长度（分钟）
+signal_market_trail_notify = true   # 刚锁住时：给锁住方向上在亏的持仓申请临时会 + 叫大盘台加跑
+signal_market_trail_meetings_per_day = 10  # 这类临时会每天上限；0 = 不申请
+profit_lock_on = true               # 锁利：扣费后赚到过 profit_lock_trigger_r 倍 R，止损挪到还赚 profit_lock_r 倍 R 的价
+profit_lock_trigger_r = 0.3
+profit_lock_r = 0.1
+profit_lock_mark_gap_bps = 5.0      # 目标价离标记价不到这么多基点就先不挂，下一轮再试
 # 管家助手：有持仓的币出了反向信号（可选：价格朝不利方向穿过关键位），赚钱亏钱都算，同时问 Jev（A）和模型 B
 # 同一道是非题（持空「会上涨吗」、持多「会下跌吗」，不提仓位和原因），两个都答「是」且 p(是) ≥ min_p 才平仓。以下均可热更新
 keeper_assistant_on = false

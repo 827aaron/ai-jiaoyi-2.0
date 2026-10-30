@@ -299,6 +299,7 @@ STOP_REASONS = frozenset(
         CloseReason.STOP_LOSS,
         CloseReason.TRAILING_STOP,
         CloseReason.TIGHTENED_STOP,
+        CloseReason.PROFIT_LOCK,
         CloseReason.LIFEBOAT,
     }
 )

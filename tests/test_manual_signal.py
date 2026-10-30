@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from jiaoyi import contracts as c
 from jiaoyi.core.commands import write_command
@@ -176,7 +177,15 @@ async def test_recheck_reports_the_desk_turn_pause(tmp_path: Path, now: datetime
 
 def _lock_longs(r: Runner, tmp_path: Path, since: datetime) -> None:
     patch_inplace(
-        r.app.app_cfg.fast_loop, FAST.model_copy(update={"signal_market_trail_on": True}), HOT_FAST
+        r.app.app_cfg.fast_loop,
+        FAST.model_copy(
+            update={
+                "signal_market_trail_on": True,
+                "signal_market_trail_k": 1.0,
+                "signal_market_ma_on": False,
+            }
+        ),
+        HOT_FAST,
     )
     trail = MarketTrail(r.app.app_cfg.fast_loop, tmp_path / "trail", seed=False)
     s = trail.state("btc")
@@ -190,9 +199,11 @@ async def test_recheck_reports_the_market_trail_lock(tmp_path: Path, now: dateti
     r, ex, risk, _ = await _runner(tmp_path, now)
     _lock_longs(r, tmp_path, now - timedelta(minutes=3))
     res = await _run(r, tmp_path, now, "recheck_signal")
+    at = now - timedelta(minutes=3) + timedelta(minutes=120)
+    until = f"{at.astimezone(ZoneInfo('Asia/Bangkok')):%H:%M}"
     assert res["detail"] == (
         "现在仍拒绝：大盘移动止损：多单锁住中（BTC 回落过 1.0 ATR 门槛，"
-        "现在离高点 1.1 ATR，已锁 3 分钟；创新高才解锁）"
+        f"现在离高点 1.1 ATR，已锁 3 分钟；创新高或 {until} 作废才解锁）"
     )
     assert ex.opened == [] and risk.manual == []
     res = await _run(r, tmp_path, now, "release_signal", 2)

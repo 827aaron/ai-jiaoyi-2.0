@@ -84,6 +84,7 @@ CLOSE_BY: dict[str, tuple[str | None, str]] = {
     "take_profit": ("lifeboat", "止盈（交易所）"),
     "trailing_stop": ("lifeboat", "移动止损（交易所）"),
     "tightened_stop": ("lifeboat", "收紧止损（交易所）"),
+    "profit_lock": ("lifeboat", "锁利止损"),
     "time_limit": ("lifeboat", "到时（交易所）"),
     "lifeboat": ("lifeboat", "保命止损"),
     "reconciler": ("reconciler", "对账平"),
@@ -92,7 +93,7 @@ CLOSE_BY: dict[str, tuple[str | None, str]] = {
 """执行器平仓记录的 ``output.reason`` → (光点从哪个角色出发, 标签)。交易所托管的止损 / 止盈 /
 到时记在保命止损那边，不算管家平的。None = 从仓位直接撤离（手动）。"""
 
-_STOP_KINDS = frozenset({"stop_loss", "trailing_stop", "tightened_stop", "lifeboat"})
+_STOP_KINDS = frozenset({"stop_loss", "trailing_stop", "tightened_stop", "profit_lock", "lifeboat"})
 
 
 class LiveEvent(BaseModel):
@@ -170,7 +171,8 @@ _TRAIL = re.compile(
 )
 # 10-30 改措辞前的拒绝理由 / 锁住记录：只有当前离极值几倍 ATR，没有门槛
 _TRAIL_OLD = re.compile(
-    r"^大盘移动止损：(?P<ref>\S+) 从.段(?P<ext>低|高)点(?:反弹|回落) (?P<atr>[\d.]+) ATR，"
+    r"^大盘移动止损：(?P<ref>\S+) 从.段(?P<ext>低|高)点(?:反弹|回落) (?P<atr>[\d.]+) ATR"
+    r"(?:（门槛 (?P<k>[\d.]+)）)?，"
     r"暂停新(?P<held>多|空)单(?:（锁住 (?P<mins>\d+) 分钟）)?"
 )
 _HOLD = re.compile(r"^拿住：平仓概率 ([\d.]+)(?:，(.*))?$", re.S)

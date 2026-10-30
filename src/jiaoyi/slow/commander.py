@@ -280,7 +280,7 @@ class EventRules:
 
 
 HELD_TRIGGERS: frozenset[str] = held_events.TRIGGERS | {desk_turn.TRIGGER}
-"""持仓币的两类临时会、大盘台转向暂停的补会不看 ``event_triggers``，开关在 app.toml
+"""持仓币的几类临时会、大盘台转向暂停的补会不看 ``event_triggers``，开关在 app.toml
 ``[fast_loop] patrol_held_event_*`` / ``signal_desk_turn_pause``（热生效）。"""
 
 PENDING_EXPIRY = timedelta(minutes=30)

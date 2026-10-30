@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 from jiaoyi import contracts as c
 from jiaoyi.core.market_trail import Leg, TrailSeries
+from jiaoyi.core.recorder import local_day
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.panel.defences import market_trail_view
 from jiaoyi.panel.files import PanelFiles
@@ -110,6 +112,7 @@ def _rows(tmp_path: Path, **fast: Any) -> dict[str, Any]:
 
 ON = {
     "signal_market_trail_on": True, "signal_market_trail_ref": "btc", "signal_market_trail_k": 1.0,
+    "signal_market_ma_on": False, "profit_lock_on": False,
     "trailing_on": True, "trailing_native": True, "trail_start_r": 0.5,
     "frozen_peak_exit_on": True, "frozen_peak_exit_after_s": 10800,
     "opposite_card_action": "close", "patrol_held_event_loss_r": 0.1,
@@ -120,7 +123,8 @@ ON = {
 def test_defences_count_todays_events_per_rule(tmp_path: Path) -> None:
     _seed(tmp_path)
     rows = _rows(tmp_path, **ON)
-    assert list(rows) == ["market_trail", "trailing_native", "frozen_peak", "opposite_card",
+    assert list(rows) == ["market_trail", "trailing_native", "profit_lock", "frozen_peak",
+                          "opposite_card",
                           "held_event", "paper_stop", "daily_halt"]  # fmt: skip
 
     def view(key: str) -> tuple[Any, ...]:
@@ -130,7 +134,9 @@ def test_defences_count_todays_events_per_rule(tmp_path: Path) -> None:
     assert view("market_trail") == (
         True, "参照 BTC · 1 倍 ATR",
         "空单锁住中 · 已锁 12 分钟 · BTC 现在离低点 1.2 / 门槛 1.0 ATR", "warn",
-        "锁 1 次 · 拦下开仓 1 笔", T(6, 20), "XRPUSDT 大盘移动止损：暂停新空单", "#team/risk_guard",
+        "锁 1 次（解锁：新极值 0 · 作废 0 · 新段 0） · "
+        "拦下开仓 1 笔（均线 0 · 移动止损 1 · 两者 0）",
+        T(6, 20), "XRPUSDT 大盘移动止损：暂停新空单", "#team/risk_guard",
     )  # fmt: skip
     assert view("trailing_native") == (
         True, "0.5R 启动", "币安跟着 1 笔；没用上、程序自己跟 1 笔", "warn",
@@ -176,6 +182,7 @@ def test_defences_switched_off_show_config_key_and_no_counts(tmp_path: Path) -> 
     assert off == {
         "market_trail": ("fast_loop.signal_market_trail_on", "off", "", "", None),
         "trailing_native": ("fast_loop.trailing_native", "off", "", "", None),
+        "profit_lock": ("fast_loop.profit_lock_on", "off", "", "", None),
         "frozen_peak": ("fast_loop.frozen_peak_exit_on", "off", "", "", None),
         "held_event": ("fast_loop.patrol_held_event_loss_r", "off", "", "", None),
         "paper_stop": ("fast_loop.paper_stop_on_mainnet", "off", "", "", None),
@@ -200,7 +207,7 @@ def test_team_page_gate_line_and_status_bar(tmp_path: Path) -> None:
     assert {k: mt[k] for k in ("on", "state", "leg", "guards", "locked_min", "line", "level",
                                "locks_today", "blocked_today", "stale_at")} == {
         "on": True, "state": "locked", "leg": "跌段", "guards": "空单", "locked_min": 12,
-        "line": "大盘闸门：空单锁住 12 分钟", "level": "warn", "locks_today": 1,
+        "line": "大盘闸门：空单暂停 · 移动止损锁 12 分钟", "level": "warn", "locks_today": 1,
         "blocked_today": 1, "stale_at": None,
     }  # fmt: skip
     assert round(mt["extreme_price"], 4) == 54.5982  # e^4.0
@@ -219,10 +226,78 @@ def test_market_trail_open_leg_line_and_stale_data(tmp_path: Path) -> None:
     )
     cfg = _cfg(tmp_path)
     on = cfg.model_copy(update={"fast_loop": cfg.fast_loop.model_copy(
-        update={"signal_market_trail_on": True, "signal_market_trail_ref": "eth"})})  # fmt: skip
+        update={"signal_market_trail_on": True, "signal_market_trail_ref": "eth",
+                    "signal_market_trail_k": 1.0, "signal_market_ma_on": False})})  # fmt: skip
     v = market_trail_view(tmp_path, on, [], NOW, "Asia/Bangkok")
     assert (v.state, v.line, v.now, v.level) == (
         "open", "大盘闸门：多单放行 0.7/1 ATR",
         "ETH 涨段，多单放行（离高点 0.7 / 1 ATR）；数据停在 13:00", "ok",
     )  # fmt: skip
     assert v.stale_at == T(6, 0)
+
+
+def _view(tmp_path: Path, records: list[c.DecisionRecord], series: TrailSeries) -> Any:
+    (tmp_path / "market_trail.json").write_text(
+        json.dumps({"version": 1, "series": {"btc": series.to_json()},
+                    "today": {"day": local_day(NOW, "Asia/Bangkok").isoformat(),
+                              "minutes": 100, "both": 25}})
+    )  # fmt: skip
+    cfg = _cfg(tmp_path)
+    fast = cfg.fast_loop.model_copy(update={"signal_market_trail_on": True})
+    return market_trail_view(
+        tmp_path, cfg.model_copy(update={"fast_loop": fast}), records, NOW, "Asia/Bangkok"
+    )
+
+
+def _ema_above() -> TrailSeries:
+    s = TrailSeries(atr=0.01, last_t=int(NOW.timestamp()), count=41)
+    s.xs.extend([math.log(100.0)] * 40 + [math.log(100.3)])
+    return s
+
+
+def test_market_trail_view_shows_the_ema_while_the_trail_warms_up(tmp_path: Path) -> None:
+    v = _view(tmp_path, [], _ema_above())
+    assert (v.state, v.verdict, v.ema_block) == ("warmup", "空单暂停", "空单")
+    assert v.line == "大盘闸门：空单暂停 · 均线"
+    assert v.ema_text == "大盘均线：BTC 在 30 分钟均线上方 0.3 ATR，暂停新空单"
+    assert v.both_pct == 25.0
+
+
+def test_market_trail_view_ema_stale_says_so(tmp_path: Path) -> None:
+    s = _ema_above()
+    s.last_t = int(NOW.timestamp()) - 600
+    v = _view(tmp_path, [], s)
+    assert (v.verdict, v.ema_block) == ("不拦", None)
+    assert v.ema_text.startswith("均线数据停在 ") and v.ema_text.endswith("，暂不拦")
+
+
+def test_market_trail_view_counts_by_gate_and_reason_and_reads_old_records(tmp_path: Path) -> None:
+    def block(reason: str, detail: dict[str, Any]) -> c.DecisionRecord:
+        return _rec(c.Role.RISK_GUARD, c.Outcome.REJECT, f"XRPUSDT {reason}", T(6, 20),
+                    symbol="XRPUSDT", output={"reasons": [reason], "detail": detail})  # fmt: skip
+
+    def unlock(why: str) -> c.DecisionRecord:
+        return _rec(c.Role.RISK_GUARD, c.Outcome.INFO, "大盘移动止损：解锁", T(6, 21),
+                    output={"market_trail": {"kind": "unlock", "why": why}})  # fmt: skip
+
+    records = [
+        block("大盘均线：BTC 在 30 分钟均线上方 0.3 ATR，暂停新空单", {}),
+        block("大盘均线：x", {"by": "market_trail", "gates": ["ema"]}),
+        block("大盘移动止损：x", {"by": "market_trail", "gates": ["ema", "trail"]}),
+        block("大盘移动止损：BTC 从跌段低点反弹 1.2 ATR，暂停新空单", {"by": "market_trail"}),
+        unlock("expire"), unlock("expire"), unlock("extreme"), unlock("leg"),
+        _rec(c.Role.PATROL, c.Outcome.ACTION, "XRPUSDT 大盘闸门锁住且持仓在亏", T(6, 22),
+             symbol="XRPUSDT",
+             output={"held_event": {"trigger": "held_market_trail", "queued": True}}),
+        _rec(c.Role.PATROL, c.Outcome.INFO, "XRPUSDT 只记录", T(6, 23), symbol="XRPUSDT",
+             output={"held_event": {"trigger": "held_market_trail", "queued": False}}),
+    ]  # fmt: skip
+    v = _view(tmp_path, records, _ema_above())
+    assert (v.blocked_today, v.blocked_ema, v.blocked_trail, v.blocked_both) == (4, 2, 1, 1)
+    assert v.unlocks_today == {"expire": 2, "extreme": 1, "leg": 1}
+    assert (v.meetings_asked, v.meetings_held) == (1, 0)
+    assert v.today_text == (
+        "锁 0 次（解锁：新极值 1 · 作废 2 · 新段 1） · "
+        "拦下开仓 4 笔（均线 2 · 移动止损 1 · 两者 1）"
+        " · 临时会申请 1 场、开成 0 场 · 两边都不开 25% 的时间"
+    )

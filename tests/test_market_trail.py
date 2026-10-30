@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
+import math
+import random
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
@@ -23,6 +26,8 @@ from jiaoyi.core.market_trail import (
     Leg,
     MarketTrail,
     TrailSeries,
+    ema_value,
+    read_ema,
 )
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.loop import Runner
@@ -31,7 +36,15 @@ from tests.conftest import ROOT, load_example
 from tests.test_loop import _app
 
 FIXTURE = ROOT / "tests" / "fixtures" / "market_trail_btc_eth_1m.json"
-ON = h.FAST.model_copy(update={"signal_market_trail_on": True})
+ON = h.FAST.model_copy(
+    update={
+        "signal_market_trail_on": True,
+        "signal_market_trail_k": 1.0,
+        "signal_market_trail_max_extreme_age_min": 0,
+        "signal_market_ma_on": False,
+    }
+)
+"""只开移动止损、不作废：下面老的用例钉这道闸自己的算法。"""
 SHORT, LONG = c.Side.SHORT, c.Side.LONG
 T0 = datetime(2026, 10, 30, 0, 0, tzinfo=UTC)
 
@@ -386,6 +399,7 @@ def test_market_trail_holds_only_the_locked_side_of_the_chosen_ref(tmp_path: Pat
     )
     assert tr.holds(LONG, later) is None
     assert tr.status_line(later) == (
+        "大盘闸门：空单暂停\n"
         "大盘移动止损：空单锁住中（BTC 现在离低点 1.1 ATR · 门槛 1.0 · 已锁 12 分钟）"
     )
     patch_inplace(fast, fast.model_copy(update={"signal_market_trail_ref": "eth"}), HOT_FAST)
@@ -402,7 +416,9 @@ def test_market_trail_short_history_never_holds(tmp_path: Path) -> None:
     tr = MarketTrail(ON, tmp_path, seed=False)
     _lock(tr, "btc", -1, T0, count=600)
     assert tr.holds(SHORT, T0) is None
-    assert tr.status_line(T0) == "大盘移动止损（BTC）：历史不足 24 小时（已有 10 小时），暂不拦"
+    assert tr.status_line(T0) == (
+        "大盘闸门：不拦\n大盘移动止损（BTC）：历史不足 24 小时（已有 10 小时），暂不拦"
+    )
 
 
 def test_market_trail_status_when_leg_is_open(tmp_path: Path) -> None:
@@ -411,11 +427,12 @@ def test_market_trail_status_when_leg_is_open(tmp_path: Path) -> None:
     leg = tr.state("btc").leg
     assert leg is not None
     leg.stopped, leg.stopped_at = False, None
-    assert tr.status_line(T0) == "大盘移动止损：BTC 跌段，空单放行（离低点 1.1 / 1 ATR）"
+    head = "大盘闸门：不拦\n"
+    assert tr.status_line(T0) == f"{head}大盘移动止损：BTC 跌段，空单放行（离低点 1.1 / 1 ATR）"
     tr.state("btc").leg = None
-    assert tr.status_line(T0) == "大盘移动止损（BTC）：还没有跌段 / 涨段，不拦"
+    assert tr.status_line(T0) == f"{head}大盘移动止损（BTC）：还没有跌段 / 涨段，不拦"
     tr.state("btc").last_t = int(T0.timestamp())
-    assert tr.status_line(T0 + timedelta(minutes=6)) == (
+    assert tr.status_line(T0 + timedelta(minutes=6)) == head + (
         "大盘移动止损（BTC）：还没有跌段 / 涨段，不拦；数据停在 07:00，状态不变"
     )
 
@@ -607,7 +624,17 @@ async def test_runner_rejects_locked_side_everywhere(tmp_path: Path) -> None:
     await r.handle_signal(h.signal(T0, side=SHORT))
     rej = log.records[-1]
     assert rej.outcome is c.Outcome.REJECT and rej.summary == f"BTCUSDT {why}"
-    assert rej.output["detail"] == {"by": "market_trail"}
+    market, cs = card.current_market, card.for_symbol("BTCUSDT")
+    assert cs is not None and cs.issued_at is not None
+    expires = card.symbol_expires_at("BTCUSDT")
+    assert expires is not None
+    assert rej.output["detail"] == {
+        "by": "market_trail",
+        "gates": ["trail"],
+        "card_issued_at": cs.issued_at.isoformat(),
+        "card_expires_at": expires.isoformat(),
+        "regime_direction": market.regime_direction if market else None,
+    }
     assert not r._trail_blocked(h.signal(T0, side=LONG), card, T0)
     intent = c.OrderIntent.model_validate(
         {**load_example("order_intent"), "symbol": "BTCUSDT", "side": "short"}
@@ -631,6 +658,7 @@ def test_heartbeat_puts_the_lock_on_the_risk_guard_line(tmp_path: Path) -> None:
     app.heartbeat_all()
     st = app.log.read_status()[c.Role.RISK_GUARD.value]
     assert st.headline == (
+        "大盘闸门：空单暂停\n"
         "大盘移动止损：空单锁住中（BTC 现在离低点 1.1 ATR · 门槛 1.0 · 已锁 12 分钟）"
     )
 
@@ -646,3 +674,505 @@ def test_runner_backfill_of_btc_releases_the_fill(tmp_path: Path) -> None:
     Runner._trail_backfilled(tr, BTC, [])  # 回填失败也算回填过
     tr.tick(T0 + timedelta(seconds=301))
     assert tr.state("btc").last_t == base + 180
+
+
+# ---------------------------------------------------------------- 大盘均线 + 极值作废
+GATE = ON.model_copy(
+    update={
+        "signal_market_trail_k": 0.5,
+        "signal_market_trail_max_extreme_age_min": 120,
+        "signal_market_ma_on": True,
+    }
+)
+BKK = "Asia/Bangkok"
+
+
+def test_market_trail_ema_value_is_on_closes_seeded_with_the_first_minute() -> None:
+    xs = [math.log(p) for p in (100.0, 130.0, 70.0)]
+    assert ema_value(xs[:2], 3) is None
+    # alpha = 2 / 4：100 → 115 → 92.5（对 ln 价做 EMA 再还原是 90.45…）
+    assert ema_value(xs, 3) == pytest.approx(92.5)
+
+
+def _ema_series(*, last_t: int, atr: float | None = 0.01, filled: int | None = None) -> TrailSeries:
+    s = TrailSeries()
+    s.xs.extend([math.log(100.0)] * 2 + [math.log(110.0)])
+    s.last_t, s.atr, s.filled_t = last_t, atr, filled
+    return s
+
+
+@pytest.mark.parametrize(
+    ("last_age", "atr", "filled_age", "ema", "state", "side"),
+    [
+        (60, 0.01, None, 105.0, "block", -1),
+        (60, 0.01, None, 115.0, "block", 1),
+        (60, 0.01, None, 110.0, "equal", 0),
+        (60, 0.01, None, None, "warmup", 0),
+        (60, None, None, 105.0, "warmup", 0),
+        (301, 0.01, None, 105.0, "stale", 0),
+        (300, 0.01, None, 105.0, "block", -1),
+        (60, 0.01, 60 * 29, 105.0, "filled", 0),
+        (60, 0.01, 60 * 30, 105.0, "block", -1),
+    ],
+)
+def test_market_trail_read_ema_when_it_blocks(
+    last_age: int, atr: float | None, filled_age: int | None, ema: float | None,
+    state: str, side: int,
+) -> None:  # fmt: skip
+    now = 1_000_000 * 60
+    last = now - last_age
+    filled = None if filled_age is None else last - filled_age
+    r = read_ema(_ema_series(last_t=last, atr=atr, filled=filled), 30, now, ema)
+    assert (r.state, r.side) == (state, side)
+
+
+def _gate(tmp_path: Path, fast: c.FastLoopConfig, *, last: datetime, price: float) -> MarketTrail:
+    """收盘 100 走 40 分钟后最后一分钟到 ``price``；ATR 固定 0.01。"""
+    tr = MarketTrail(fast, tmp_path, seed=False)
+    s = tr.state("btc")
+    s.xs.extend([math.log(100.0)] * 40 + [math.log(price)])
+    s.last_t, s.atr, s.count = int(last.timestamp()), 0.01, 41
+    return tr
+
+
+def test_market_trail_ema_alone_blocks_with_its_own_text(tmp_path: Path) -> None:
+    tr = _gate(tmp_path, GATE, last=T0, price=100.3)
+    assert tr.blocks(SHORT, T0) == (
+        "大盘均线：BTC 在 30 分钟均线上方 0.3 ATR，暂停新空单",
+        ["ema"],
+    )
+    assert tr.blocks(LONG, T0) == (None, [])
+    assert tr.status_line(T0).split("\n")[:2] == [
+        "大盘闸门：空单暂停",
+        "大盘均线：BTC 在 30 分钟均线上方 0.3 ATR，暂停新空单",
+    ]
+    down = _gate(tmp_path / "d", GATE, last=T0, price=99.7)
+    assert down.holds(LONG, T0) == "大盘均线：BTC 在 30 分钟均线下方 0.3 ATR，暂停新多单"
+
+
+def test_market_trail_ema_blocks_while_the_trail_is_still_warming_up(tmp_path: Path) -> None:
+    tr = _gate(tmp_path, GATE, last=T0, price=100.3)
+    assert not tr.state("btc").warm
+    assert tr.holds(SHORT, T0) is not None
+
+
+def test_market_trail_ema_stale_does_not_block_but_a_lock_stays(tmp_path: Path) -> None:
+    tr = _gate(tmp_path, GATE, last=T0, price=100.3)
+    s = tr.state("btc")
+    t = int(T0.timestamp())
+    s.count, s.leg = MIN_HISTORY + 1, Leg(-1, math.log(99.0), t, True, t)
+    later = T0 + timedelta(minutes=6)
+    assert tr.blocks(SHORT, later)[1] == ["trail"]
+    assert "均线数据停在 07:00，暂不拦" in tr.status_line(later)
+
+
+def test_market_trail_both_gates_keep_the_trail_text_and_report_both(tmp_path: Path) -> None:
+    tr = _gate(tmp_path, GATE, last=T0, price=100.3)
+    s = tr.state("btc")
+    t = int(T0.timestamp())
+    s.count, s.leg = MIN_HISTORY + 1, Leg(-1, math.log(99.0), t, True, t)
+    why, gates = tr.blocks(SHORT, T0)
+    assert gates == ["ema", "trail"]
+    assert why is not None
+    assert why.startswith("大盘移动止损：空单锁住中") and why.endswith(
+        "创新低或 09:00 作废才解锁）"
+    )
+
+
+def test_market_trail_ema_and_lock_on_opposite_sides_say_both_paused(tmp_path: Path) -> None:
+    tr = _gate(tmp_path, GATE, last=T0, price=100.3)
+    s = tr.state("btc")
+    t = int(T0.timestamp())
+    s.count, s.leg = MIN_HISTORY + 1, Leg(1, math.log(101.0), t, True, t)
+    assert tr.status_line(T0).split("\n")[0] == "大盘闸门：多空都暂停"
+
+
+@pytest.mark.parametrize(
+    ("update", "gates"),
+    [
+        ({"signal_market_trail_on": False}, []),
+        ({"signal_market_ma_on": False}, []),
+    ],
+)
+def test_market_trail_switches_turn_the_ema_off(
+    tmp_path: Path, update: dict[str, bool], gates: list[str]
+) -> None:
+    tr = _gate(tmp_path, GATE.model_copy(update=update), last=T0, price=100.3)
+    assert tr.blocks(SHORT, T0) == (None, gates)
+
+
+def test_market_trail_ema_needs_n_minutes(tmp_path: Path) -> None:
+    tr = MarketTrail(GATE, tmp_path, seed=False)
+    s = tr.state("btc")
+    s.xs.extend([math.log(100.0)] * 28 + [math.log(101.0)])
+    s.last_t, s.atr = int(T0.timestamp()), 0.01
+    assert tr.holds(SHORT, T0) is None
+    assert "大盘均线：数据不满 30 分钟，暂不拦" in tr.status_line(T0)
+
+
+def _locked_leg(s: TrailSeries, t: int, *, stopped: bool = True) -> Leg:
+    s.xs.append(4.0)
+    s.atr = 0.01
+    leg = Leg(-1, 3.99, t, stopped, t + 600 if stopped else None)
+    s.leg = leg
+    return leg
+
+
+@pytest.mark.parametrize(
+    ("age_min", "stopped", "expired", "kinds"),
+    [
+        (119, True, False, []),
+        (120, True, True, [("unlock", "expire")]),
+        (120, False, True, []),
+    ],
+)
+def test_market_trail_step_expires_a_stale_extreme(
+    age_min: int, stopped: bool, expired: bool, kinds: list[tuple[str, str]]
+) -> None:
+    s = TrailSeries()
+    t0 = 1_000_000 * 60
+    leg = _locked_leg(s, t0, stopped=stopped)
+    t = t0 + age_min * 60
+    events = s.step(t, 3.995, 0.5, 120)
+    assert [(e["kind"], e.get("why")) for e in events] == kinds
+    assert (leg.extreme, leg.extreme_at) == ((3.995, t) if expired else (3.99, t0))
+    assert leg.stopped is (stopped and not expired)
+
+
+def test_market_trail_step_expiry_runs_before_the_new_extreme_check() -> None:
+    s = TrailSeries()
+    t0 = 1_000_000 * 60
+    _locked_leg(s, t0)
+    events = s.step(t0 + 7200, 3.98, 0.5, 120)
+    assert [e.get("why") for e in events] == ["expire"]
+
+
+def test_market_trail_expired_extreme_can_lock_again() -> None:
+    s = TrailSeries()
+    t0 = 1_000_000 * 60
+    leg = _locked_leg(s, t0)
+    s.step(t0 + 7200, 3.995, 0.5, 120)
+    events = s.step(t0 + 7260, 4.1, 0.5, 120)
+    assert [e["kind"] for e in events] == ["lock"]
+    assert leg.stopped and leg.stopped_at == t0 + 7260
+
+
+def test_market_trail_zero_age_never_expires() -> None:
+    s = TrailSeries()
+    t0 = 1_000_000 * 60
+    leg = _locked_leg(s, t0)
+    assert s.step(t0 + 86_400, 3.995, 0.5, 0) == []
+    assert leg.stopped
+
+
+def _ref_gate(ts: list[int], xs: list[float], k: float, w: int, n: int) -> list[tuple[bool, bool]]:
+    """回放口径（gate.py 变体 f + ma_sim.py 的 EMA）：每分钟（拦多，拦空）。"""
+    out: list[tuple[bool, bool]] = []
+    bar: list[float] | None = None
+    pc = atr = m = None
+    zone = 0
+    leg: list[Any] | None = None
+    alpha = 2.0 / (n + 1)
+    for i, (t, x) in enumerate(zip(ts, xs, strict=True)):
+        start = (t - 60) // 900 * 900
+        if bar is None:
+            bar = [start, x, x, x]
+        else:
+            bar[1], bar[2], bar[3] = max(bar[1], x), min(bar[2], x), x
+        if t % 900 == 0:
+            tr = bar[1] - bar[2] if pc is None else max(bar[1], pc) - min(bar[2], pc)
+            atr = tr if atr is None else atr + (tr - atr) / 14
+            pc, bar = bar[3], None
+        z = None
+        if i + 1 > 1440:
+            win = [
+                xs[j] - xs[j - 240]
+                for j in range(i - 15, max(i - 4560 + 240, i - 4320, 240) - 1, -15)
+            ]
+            mean = sum(win) / len(win)
+            sd = math.sqrt(sum((v - mean) ** 2 for v in win) / len(win))
+            z = (x - xs[i - 240] - mean) / sd if sd > 0 else None
+        if z is not None:
+            zz = 1 if z > 1 else -1 if z < -1 else 0
+            if zz and zz != zone and (leg is None or leg[0] != zz or leg[3]):
+                leg = [zz, x, i, False]
+            zone = zz
+        lock = 0
+        if leg is not None:
+            s = leg[0]
+            if i - leg[2] >= w:
+                leg[1], leg[2], leg[3] = x, i, False
+            if s * (x - leg[1]) > 0:
+                leg[1], leg[2], leg[3] = x, i, False
+            elif not leg[3] and atr and s * (leg[1] - x) >= k * atr:
+                leg[3] = True
+            lock = s if leg[3] else 0
+        c_ = math.exp(x)
+        m = c_ if m is None else m + alpha * (c_ - m)
+        ema_side = 0
+        if i >= n - 1 and atr:
+            d = x - math.log(m)
+            ema_side = 1 if d < 0 else -1 if d > 0 else 0
+        out.append((1 in (lock, ema_side), -1 in (lock, ema_side)))
+    return out
+
+
+@pytest.mark.parametrize("seed", [7, 23])
+def test_market_trail_gate_matches_the_replay_rule_minute_by_minute(
+    tmp_path: Path, seed: int
+) -> None:
+    rng = random.Random(seed)
+    ts, xs = [], []
+    base = int(T0.timestamp())
+    x = math.log(70000.0)
+    for i in range(3600):
+        drift = 0.0004 * math.sin(i / 170.0)
+        x += drift + rng.gauss(0.0, 0.0006)
+        ts.append(base + 60 * (i + 1))
+        xs.append(x)
+    want = _ref_gate(ts, xs, 0.5, 120, 30)
+    now = [T0]
+    tr = MarketTrail(GATE.model_copy(), tmp_path, clock=lambda: now[0], seed=False)
+    tr.release_fill()
+    got, locks = [], 0
+    for t, x in zip(ts, xs, strict=True):
+        now[0] = datetime.fromtimestamp(t + 1, UTC)
+        tr.observe_close(BTC, t, math.exp(x))
+        tr.tick(now[0])
+        locks += len(tr.take_fresh_locks())
+        got.append((tr.holds(LONG, now[0]) is not None, tr.holds(SHORT, now[0]) is not None))
+    assert got == want
+    assert locks > 5 and sum(a and b for a, b in got) > 100  # 序列确实走到了锁和两边都拦
+
+
+def _fresh(tmp_path: Path, at: datetime) -> tuple[MarketTrail, Clock]:
+    clock = Clock(at)
+    tr = MarketTrail(ON.model_copy(), tmp_path, clock=clock, seed=False)
+    tr.release_fill()
+    s = tr.state("btc")
+    s.xs.extend([math.log(100.0)] * 5)
+    s.count, s.atr = MIN_HISTORY + 1, 0.001
+    t = int(at.timestamp())
+    s.last_t = t
+    s.leg = Leg(-1, math.log(100.0), t)
+    return tr, clock
+
+
+def _bounce(tr: MarketTrail, clock: Clock, at: datetime, px: float = 100.2) -> None:
+    tr.observe_close(BTC, int(at.timestamp()), px)
+    tr.tick(clock())
+
+
+def test_market_trail_fresh_lock_is_handed_over_once_and_survives_restart(tmp_path: Path) -> None:
+    at = T0 + timedelta(minutes=1)
+    tr, clock = _fresh(tmp_path, T0)
+    clock.at = at
+    _bounce(tr, clock, at)
+    assert [(e["ref"], e["side"]) for e in tr.take_fresh_locks()] == [("btc", -1)]
+    assert tr.take_fresh_locks() == []
+    raw = json.loads((tmp_path / mt.STATE_FILE).read_text(encoding="utf-8"))
+    assert raw["notified"] == [["btc", int(at.timestamp())]]
+    assert set(raw["series"]["btc"]["leg"]) == set(Leg.__dataclass_fields__)
+    again = MarketTrail(ON.model_copy(), tmp_path, clock=clock, seed=False)
+    again._fresh.append({"ref": "btc", "side": -1, "t": int(at.timestamp())})
+    again._settle_locks(at.timestamp())
+    assert again.take_fresh_locks() == []
+
+
+def test_market_trail_old_lock_recomputed_late_is_not_fresh(tmp_path: Path) -> None:
+    tr, clock = _fresh(tmp_path, T0)
+    at = T0 + timedelta(minutes=1)
+    clock.at = at + timedelta(seconds=121)
+    _bounce(tr, clock, at)
+    assert tr.state("btc").locked == -1
+    assert tr.take_fresh_locks() == []
+
+
+def test_market_trail_lock_undone_in_the_same_advance_is_not_fresh(tmp_path: Path) -> None:
+    tr, clock = _fresh(tmp_path, T0)
+    at = T0 + timedelta(minutes=2)
+    clock.at = at
+    tr.observe_close(BTC, int((T0 + timedelta(minutes=1)).timestamp()), 100.2)
+    tr.observe_close(BTC, int(at.timestamp()), 99.0)
+    tr.tick(clock())
+    assert tr.state("btc").locked is None
+    assert tr.take_fresh_locks() == []
+
+
+def test_market_trail_old_state_file_without_new_fields_loads(tmp_path: Path) -> None:
+    tr, clock = _fresh(tmp_path, T0)
+    tr.save()
+    path = tmp_path / mt.STATE_FILE
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    del raw["notified"], raw["today"]
+    for d in raw["series"].values():
+        d.pop("filled_t")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    back = MarketTrail(ON.model_copy(), tmp_path, clock=clock, seed=False)
+    assert back.state("btc").filled_t is None and back.state("btc").count == MIN_HISTORY + 1
+
+
+def test_market_trail_ema_after_restart_equals_the_running_one(tmp_path: Path) -> None:
+    tr = _gate(tmp_path, GATE.model_copy(), last=T0, price=100.3)
+    before = tr.blocks(SHORT, T0)
+    tr.save()
+    back = MarketTrail(GATE.model_copy(), tmp_path, clock=Clock(T0), seed=False)
+    assert back.blocks(SHORT, T0) == before
+
+
+def test_market_trail_filled_minute_is_marked_and_persisted(tmp_path: Path) -> None:
+    clock = Clock(T0)
+    tr = MarketTrail(GATE.model_copy(), tmp_path, clock=clock, seed=False)
+    tr.release_fill()
+    base = int(T0.timestamp())
+    tr.observe_close(BTC, base + 60, 100.0)
+    tr.observe_close(BTC, base + 180, 101.0)
+    clock.at = T0 + timedelta(minutes=5)
+    tr.tick(clock.at)
+    assert tr.state("btc").filled_t == base + 120
+    tr.save()
+    back = MarketTrail(GATE.model_copy(), tmp_path, clock=clock, seed=False)
+    assert back.state("btc").filled_t == base + 120
+
+
+def test_market_trail_shadow_row_carries_the_ema_state(tmp_path: Path) -> None:
+    fast = GATE.model_copy(update={"signal_market_trail_shadow": True})
+    tr = _gate(tmp_path, fast, last=T0, price=100.3)
+    at = T0 + timedelta(minutes=1)
+    tr._series["btc"].fill[BTC] = math.log(100.3)
+    tr.observe_close(BTC, int(at.timestamp()), 100.3)
+    tr.tick(at + timedelta(seconds=1))
+    path = tmp_path / SHADOW_DIR / f"{at.date().isoformat()}.jsonl"
+    row = next(r for r in map(json.loads, path.read_text().splitlines()) if r["ref"] == "btc")
+    assert (row["ma_block"], row["both"]) == ("short", False)
+    assert row["ma_dist_atr"] > 0 and row["ema"] > 100.0
+
+
+def test_market_trail_expire_record_has_its_own_text(tmp_path: Path) -> None:
+    log = Log()
+    fast = ON.model_copy(update={"signal_market_trail_max_extreme_age_min": 120})
+    clock = Clock(T0)
+    tr = MarketTrail(
+        fast, tmp_path, recorder=RoleRecorder(c.Role.RISK_GUARD, log), clock=clock, seed=False
+    )
+    tr.release_fill()
+    s = tr.state("btc")
+    s.xs.extend([math.log(100.0)] * 5)
+    s.count, s.atr = MIN_HISTORY + 1, 0.001
+    t = int(T0.timestamp())
+    s.last_t = t + 7140
+    s.leg = Leg(-1, math.log(99.0), t, True, t + 600)
+    at = T0 + timedelta(minutes=120)
+    clock.at = at
+    tr.observe_close(BTC, int(at.timestamp()), 100.0)
+    tr.tick(at)
+    rec = log.records[-1]
+    assert rec.summary == (
+        "大盘移动止损：BTC 跌段低点 120 分钟没刷新，作废、从现价重算，恢复新空单（锁了 110 分钟）"
+    )
+    assert rec.output["market_trail"]["why"] == "expire"
+
+
+class _Desk:
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def request_run(self, reason: str = "regime_flip") -> None:
+        self.asked.append(reason)
+
+    def due(self, now: datetime) -> None:
+        return None
+
+
+def _lock_event(side: int) -> dict[str, Any]:
+    return {"ref": "btc", "side": side, "t": int(T0.timestamp())}
+
+
+@pytest.mark.parametrize(("notify", "asked"), [(True, ["market_trail"]), (False, [])])
+def test_runner_fresh_lock_wakes_the_desk(tmp_path: Path, notify: bool, asked: list[str]) -> None:
+    app = _app(tmp_path, T0)
+    patch_inplace(
+        app.app_cfg.fast_loop,
+        ON.model_copy(update={"signal_market_trail_notify": notify}),
+        HOT_FAST,
+    )
+    app.desk = _Desk()
+    Runner(app)._trail_locked(_lock_event(-1))
+    assert app.desk.asked == asked
+
+
+class _LockEx:
+    """只有锁利这几个方法的执行器。"""
+
+    def __init__(self, hit: dict[str, Any] | None) -> None:
+        self.hit, self.locked, self.seen = hit, [], []  # type: ignore[var-annotated]
+        self.pending: list[str] = []
+        self.mark: float | None = None
+        self.gap = 0.0
+
+    def note_profit_reached(
+        self, position_id: str, price: float, *, trigger_r: float, lock_r: float, source: str
+    ) -> dict[str, Any] | None:
+        self.seen.append((position_id, price, trigger_r, lock_r, source))
+        return self.hit
+
+    def profit_lock_pending(self) -> list[str]:
+        return self.pending
+
+    def set_profit_lock_gap(self, gap_bps: float) -> None:
+        self.gap = gap_bps
+
+    def last_mark(self, position_id: str) -> float | None:
+        return self.mark
+
+    async def lock_profit_stop(self, position_id: str) -> dict[str, Any]:
+        self.locked.append(position_id)
+        return {"action": "locked"}
+
+
+def _lock_runner(tmp_path: Path, ex: _LockEx, **fast: Any) -> tuple[Runner, Log]:
+    app = _app(tmp_path, T0)
+    patch_inplace(app.app_cfg.fast_loop, h.FAST.model_copy(update=fast), HOT_FAST)
+    log = Log()
+    app.recorders[c.Role.KEEPER] = RoleRecorder(c.Role.KEEPER, log)
+    app.m = dataclasses.replace(app.m, executor=ex)
+    return Runner(app), log
+
+
+def _held(side: str = "long") -> c.PositionRecord:
+    data = load_example("position_record")
+    data.update(position_id="pos-1", symbol="BTCUSDT", side=side, status="open")
+    return c.PositionRecord.model_validate(data)
+
+
+async def test_runner_profit_lock_first_cross_records_and_spawns_once(tmp_path: Path) -> None:
+    ex = _LockEx({"target": 100.25, "reached_r": 0.31, "price": 100.5, "source": "mainnet"})
+    r, log = _lock_runner(tmp_path, ex)
+    r._profit_lock_cross(_held(), 100.5, "mainnet")
+    assert ex.seen == [("pos-1", 100.5, 0.3, 0.1, "mainnet")]
+    assert log.records[-1].output["profit_lock"]["target"] == 100.25
+    assert log.records[-1].summary == (
+        "BTCUSDT 扣费后赚到 0.31R，锁利止损定在 100.25（约 +0.1R，未含滑点）"
+    )
+    r._spawn_profit_lock("pos-1")  # 第一次还在跑：不重复派
+    assert r._lock_queued == {"pos-1"}
+    await asyncio.gather(*r._tasks)
+    assert ex.locked == ["pos-1"] and r._lock_queued == set()
+
+
+def test_runner_profit_lock_off_switch_stops_new_triggers(tmp_path: Path) -> None:
+    ex = _LockEx({"target": 1.0, "reached_r": 1.0, "price": 1.0, "source": "mainnet"})
+    r, log = _lock_runner(tmp_path, ex, profit_lock_on=False)
+    r._profit_lock_cross(_held(), 100.5, "mainnet")
+    assert ex.seen == [] and log.records == []
+
+
+async def test_runner_profit_lock_tick_retries_pending_and_uses_the_config_gap(
+    tmp_path: Path,
+) -> None:
+    ex = _LockEx(None)
+    ex.pending = ["pos-9"]
+    r, _ = _lock_runner(tmp_path, ex, profit_lock_mark_gap_bps=8.0)
+    await r.profit_lock_tick()
+    await asyncio.gather(*r._tasks)
+    assert ex.locked == ["pos-9"] and ex.gap == 8.0

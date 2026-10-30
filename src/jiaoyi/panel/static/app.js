@@ -714,7 +714,7 @@ function trailLines(p) {
   }
   if (!q.trailing_activated) return q.trailing_activation_price == null ? null : { start: q.trailing_activation_price };
   const l = protLeg(p, "stop_loss"), s = l && legShown(l);
-  if (s && s.purpose === "trailing" && s.state === "live" && s.trigger_price != null) return { stop: s.trigger_price, confirmed: true };
+  if (s && (s.purpose === "trailing" || s.purpose === "profit_lock") && s.state === "live" && s.trigger_price != null) return { stop: s.trigger_price, confirmed: true };
   if (q.trailing_stop_price == null) return null;
   const tsp = q.trailing_stop_price;
   // 执行层只在移动止损比在挂的止损紧够一步、且标记价可用时才换挂；在挂的是别的止损就是没换
@@ -726,7 +726,16 @@ const LEG_ST = { live: "已挂", triggered: "已触发", cancelled: "已撤", re
 const PROT_STAGE = { entry: "入场中", provisional: "临时保护", armed: "已武装", exiting: "平仓中", cleanup: "清理中", done: "已结束" };
 const TP_FALLBACK = "交易所止盈单（后备）";
 const protLeg = (p, role) => p.protection && p.protection.legs.find((l) => l.role === role);
-const STOP_PURPOSE = { fixed: "固定止损", trailing: "移动止损", tightened: "收紧止损" };
+const STOP_PURPOSE = { fixed: "固定止损", trailing: "移动止损", tightened: "收紧止损", profit_lock: "锁利止损" };
+const lockPill = (q, sym) => {
+  if (q.profit_lock_price == null) return "";
+  const r = q.profit_lock_r != null ? `+${(+q.profit_lock_r).toFixed(1)}R` : "";
+  const at = price(q.profit_lock_price, sym);
+  if (q.profit_lock_state === "locked") return ` · <span class="pill p-accent">已锁利 约 ${r}（未含滑点）${at}</span>`;
+  if (q.profit_lock_state === "pending") return ` · <span class="pill">锁利等挂上 ${at}</span>`;
+  if (q.profit_lock_state === "abandoned") return ` · <span class="pill warn">锁利没挂成 ${at}</span>`;
+  return ` · <span class="pill">锁利线 ${at}（现有止损更紧）</span>`;
+};
 const legName = (l) => l.role === "lifeboat" ? "保命" : l.role === "take_profit" ? TP_FALLBACK : l.role === "trailing_native" ? NATIVE_TRAIL : STOP_PURPOSE[l.purpose] || "其他止损";
 const legBad = (l) => l.state !== "live";
 // 触发价格源：每条腿建单时记下，旧腿和新腿可能不同（改设置只影响之后新挂的）
@@ -746,7 +755,7 @@ function protBrief(p) {
   if (!q) return "";
   const legs = q.legs.filter((l) => l.role !== "lifeboat").map((l) => { const s = legShown(l); return `<span class="${legBad(s) ? "warn" : ""}">${legName(s)}${LEG_ST[s.state]}${s !== l ? `（新一代${LEG_ST[l.state]}）` : ""}</span>`; }).join(" · ");
   const tight = q.tightened_stop_price != null ? ` · <span class="pill p-accent" title="${esc(q.tightened_reason || "")}">反向卡收紧止损 ${price(q.tightened_stop_price, p.symbol)}</span>` : q.opposite_anchor_price != null ? ` · <span class="pill p-accent" title="${esc(q.tightened_reason || "")}">反向卡锚定移动止损 ${price(q.opposite_anchor_price, p.symbol)}</span>` : "";
-  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${tight}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}${q.trailing_error ? ` · <span class="warn" title="${esc(q.trailing_error)}">移动止损本轮没更新</span>` : ""}</div>`;
+  return `<div class="small dim">${PROT_STAGE[q.stage] || esc(q.stage)} · ${legs}${tight}${lockPill(q, p.symbol)}${q.stale ? ` · <span class="warn">数据过期（${secText(q.age_s)}）</span>` : ""}${q.last_error ? ` · <span class="warn" title="${esc(q.last_error)}">有错误</span>` : ""}${q.trailing_error ? ` · <span class="warn" title="${esc(q.trailing_error)}">移动止损本轮没更新</span>` : ""}</div>`;
 }
 function protBlock(p) {
   const q = p.protection;
@@ -2385,7 +2394,7 @@ function deskLatestLine(d) {
   return `<div class="small" style="margin-top:4px"><b>大盘台 ${hms(d.run_at)} 一轮</b>　${esc(probs)}<div class="clamp2" title="${esc(d.intra)}">${esc(d.intra)}</div></div>`;
 }
 // 团队页点大盘台：最近两轮并排（窄屏上下叠），标出和上一轮比变了什么
-const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑" };
+const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑", market_trail: "大盘闸门锁住加跑" };
 function deskRunCard(title, r, prev) {
   const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
   const delta = (q, p, k) => {
@@ -2682,10 +2691,11 @@ function trailBar(m) {
   if (!m.on) return `<div class="note small trail-bar"><span><b>大盘闸门</b> 未启用（配置 fast_loop.signal_market_trail_on = false）</span>${chip}</div>`;
   const px = m.extreme_price != null ? ` ${m.ref} ${m.leg === "跌段" ? "低点" : "高点"} <span class="num">${fmtNum(m.extreme_price)}</span>` : "";
   const st = m.state === "locked" ? `<b class="warn">${esc(m.guards)}锁住 ${m.locked_min} 分钟</b>` : m.state === "open" ? `<b>${esc(m.guards)}放行</b>` : `<b>${esc(m.now)}</b>`;
+  const ema = m.ema_on ? `<br><b>${esc(m.ema_block ? m.ema_block + "暂停" : "均线")}</b> ${esc(m.ema_text)}` : "";
   const ext = m.leg === "跌段" ? "低点" : "高点";
   const leg = m.leg ? ` · ${esc(m.ref)} ${esc(m.leg)}（管${esc(m.guards)}）${px} · 现在离${ext} <span class="num">${m.retrace_atr.toFixed(2)}</span> / 门槛 ${Number(m.k).toFixed(1)} ATR${m.state === "locked" ? `（${m.leg === "跌段" ? "创新低" : "创新高"}才解锁）` : ""}` : "";
   const stale = m.stale_at ? ` · <span class="warn">数据停在 ${hm(m.stale_at)}</span>` : "";
-  return `<div class="note small trail-bar"><span><b>大盘闸门</b> ${st}${leg}${stale} · 今天锁 ${m.locks_today} 次、拦下开仓 ${m.blocked_today} 笔</span>${chip}</div>`;
+  return `<div class="note small trail-bar"><span><b>大盘闸门：${esc(m.verdict)}</b><br>移动止损 ${st}${leg}${stale}${ema}<br>今天 ${esc(m.today_text)}</span>${chip}</div>`;
 }
 P.team = () => {
   const d = pageData;
@@ -2697,7 +2707,7 @@ P.team = () => {
   window.__recs = d.records;
   const mt = sel.role === "risk_guard" ? d.market_trail : null;
   const onlyMt = mt && S.mtOnly;
-  const recs = d.records.map((s, i) => (onlyMt && !/大盘移动止损/.test(s.text) ? "" : `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${tx(s.text)}</span></div>`)).join("");
+  const recs = d.records.map((s, i) => (onlyMt && !/大盘(移动止损|均线)/.test(s.text) ? "" : `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${tx(s.text)}</span></div>`)).join("");
   return `${cards}
     ${sel.role === "keeper" ? againstCard(d.against_checks || []) : ""}
     ${sel.role === "commander" || sel.role === "market" ? `<section class="card mt">${promptLine(d.prompts)}</section>` : ""}
@@ -2715,7 +2725,7 @@ P.team = () => {
 
 /* ---------- 历史 */
 const RANGE = { today: "今天", "7d": "7 天", "30d": "30 天", all: "全部" };
-const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "保本 / 移动止损", tightened_stop: "反向卡收紧止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
+const REASON = { stop_loss: "止损", take_profit: "止盈", trailing_stop: "保本 / 移动止损", tightened_stop: "反向卡收紧止损", profit_lock: "锁利止损", time_limit: "到时", keeper: "管家平", patrol: "巡逻兵平", lifeboat: "保命触发", manual: "手动", reconciler: "对账平" };
 S.hist = "today";
 S.rej = false;
 S.tests = false;
@@ -2776,7 +2786,7 @@ function mainnetCard(d) {
 S.tradeOpen = new Set();
 const TRADE_COLS = 20;  // 展开行跨满整行；浏览器按实际列数截
 const TRADE_HEAD = '<th>平仓时间</th><th>合约</th><th class="r">开仓价</th><th class="r">平仓价</th><th>怎么平的</th><th class="r">持有</th><th class="r" title="平仓价 − 开仓价 带来的盈亏，扣手续费前">毛利</th><th class="r">手续费</th><th class="r">净利 U</th>';
-const REASON_KIND = { stop_loss: "p-short", lifeboat: "p-short", take_profit: "p-long", trailing_stop: "p-accent", tightened_stop: "p-accent" };
+const REASON_KIND = { stop_loss: "p-short", lifeboat: "p-short", take_profit: "p-long", trailing_stop: "p-accent", tightened_stop: "p-accent", profit_lock: "p-accent" };
 const CARD_CLOSE = { opposite_card: "反向卡平", neutral_card: "观望卡平" };
 const reasonOf = (t) => (t.close_source === "keeper_assistant" ? "管家助手" : t.close_source === "frozen_peak" ? "冻结峰值平" : (t.hold_card && CARD_CLOSE[t.hold_card.closed_by]) || REASON[t.close_reason] || (t.close_reason ? "其他" : "—"));
 const reasonTip = (t) => (t.close_source === "frozen_peak" ? "管家按冻结盈利价回访平仓（账本记 keeper）：持仓满冻结时长时冻结的盈利价，价格再次回到它" : t.close_source !== "keeper_assistant" && t.hold_card && t.hold_card.closed_by ? `管家平仓（账本记 keeper），最后一次判平是${t.hold_card.closed_by === "opposite_card" ? "作战卡转成和持仓相反方向的规则" : "作战卡转观望的规则"}` : "");
@@ -3085,7 +3095,7 @@ const KEY_NOTE = { BINANCE_API_KEY: "币安实盘", BINANCE_API_SECRET: "币安�
 // 临时会触发事件、花到日上限 80% 怎么办（slow.toml [schedule]）
 const TRIGGER = { key_level_break: "突破关键价位", move_since_card: "离上次开会价格走了好几个波动幅度", new_head_symbol: "头部新币进池", predictor_against_card: "预测员连续看反作战卡", signal_against_card: "哨兵反复看到和卡相反的信号", news_high_impact: "重大消息", stale_card_on_entry: "开仓时卡太旧" };
 // 临时会 / 出卡的原因码（决策记录的 trigger、作战卡的 refresh_reason = 「event:原因」、出卡原因分组）；不在 event_triggers 里、按持仓和大盘台另开的也在这
-const MEET_REASON = { ...TRIGGER, held_desk_flip: "大盘台转向 · 持仓在亏", desk_turn: "大盘台转向 · 有信号待确认", market_review: "大盘新判断后复核", scheduled: "定时整轮", regime_flip: "大盘翻转", market_desk: "大盘台", manual: "手动开会" };
+const MEET_REASON = { ...TRIGGER, held_desk_flip: "大盘台转向 · 持仓在亏", held_market_trail: "大盘闸门锁住且持仓在亏", desk_turn: "大盘台转向 · 有信号待确认", market_review: "大盘新判断后复核", scheduled: "定时整轮", regime_flip: "大盘翻转", market_desk: "大盘台", manual: "手动开会" };
 function meetReason(v) {
   const k = String(v || "").replace(/^event:/, "");
   if (k === "held_reverse_loss") return `亏损 ≥${data && data.held_loss_r ? +data.held_loss_r.toFixed(2) : "?"}R + 反向信号`;
@@ -3383,6 +3393,15 @@ const PLAIN = {
   trail_distance_r: "止损跟在最高价后面几个止损距离",
   breakeven_on: "保本",
   breakeven_trigger_r: "赚到几个止损距离后保本",
+  profit_lock_on: "锁利止损",
+  profit_lock_trigger_r: "赚到几 R 触发",
+  profit_lock_r: "止损挪到还赚几 R",
+  profit_lock_mark_gap_bps: "离标记价至少几个基点才挂",
+  signal_market_trail_max_extreme_age_min: "极值多久没刷新就作废",
+  signal_market_ma_on: "大盘均线闸",
+  signal_market_ma_minutes: "均线长度",
+  signal_market_trail_notify: "锁住时配合动作",
+  signal_market_trail_meetings_per_day: "锁住时临时会每天上限",
   adl_high_block: "自动减仓风险高时不开新仓",
   oi_follow_on: "持仓量变化：出这个信号",
   oi_window_min: "持仓量变化：看多长时间（分钟）",
@@ -3525,6 +3544,15 @@ const HINT = {
   trail_distance_r: "单位是止损距离：1 = 一个止损距离。例如止损离进场价 1%，填 1.2 就是止损一直跟在这笔最高价往回 1.2% 的地方；填大一点平时不碍事，只在大回撤时锁住利润。档位默认 30 分钟–2 小时 0.7、4 小时以上 1.0",
   breakeven_on: "开 = 赚到下面的线以后，最坏按保本价平（开平两次手续费扣完不亏）。和移动止损可以一起开：一起开时从保本线就开始跟。默认关，只对之后新开的仓生效",
   breakeven_trigger_r: "单位是止损距离：1 = 一个止损距离。例如止损离进场价 1%，填 0.8 就是赚到 0.8% 后止损挪到保本价。默认 0.8",
+  profit_lock_on: "开 = 扣费后赚到过触发线，把交易所固定止损换到扣费后约还赚下面那么多的价（未含滑点），只收紧不放松，每笔仓一次；账本止损价和 R 不变，币安移动止损照常，谁先到谁平。关掉只停新触发，已经锁上的不动。默认开",
+  profit_lock_trigger_r: "单位是 R，扣实际开仓费和吃单平仓费后算；模拟盘按主网价判。默认 0.3",
+  profit_lock_r: "单位是 R，要小于触发线。默认 0.1",
+  profit_lock_mark_gap_bps: "目标价离标记价不到这么多基点就先不挂，下一轮再试，不会平仓。默认 5",
+  signal_market_trail_max_extreme_age_min: "跌段低点 / 涨段高点这么多分钟没刷新就作废，从现价重算并解锁；之后再反向走过门槛会再锁。0 = 不作废。默认 120",
+  signal_market_ma_on: "开 = 均线闸和移动止损任一拦就不开：BTC 在均线下面不开多、上面不开空，每分钟重判，不锁不解锁。数据不满、断了或最近有补出来的分钟时不拦。默认开",
+  signal_market_ma_minutes: "指数均线（EMA）的长度，单位分钟。默认 30",
+  signal_market_trail_notify: "开 = 移动止损真的刚锁住时，给锁住方向上亏到「亏损持仓币开会」线的仓各申请一场临时会，并叫大盘台加跑一轮。不平仓、不改卡；均线切换不做这些。默认开",
+  signal_market_trail_meetings_per_day: "上面这类临时会每天最多几场，单独计数，军师团的队列和间隔照常。0 = 不申请。默认 10",
   new_listing_block_h: "按币安上线时间算，刚上线的币价格还不稳。填 0 = 不挡",
   adl_high_block: "币安每 30 分钟给每个币标一次自动减仓风险（高 / 中 / 低）。是「高」时赚钱的仓可能被强制减掉，开 = 不开新仓；已有持仓不管；查不到就照常开",
   oi_follow_on: "持仓量在涨、价格也在涨 = 新多头进场，跟着做多；价格在跌就是新空头，跟着做空。持仓量在跌不出信号。回测 2 小时到 24 小时这几档不比现有信号差，档位默认在这几档开",
@@ -3802,7 +3830,7 @@ const ROLES = [
     { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp", "fast_loop.tp_r_cap"] },
     { g: "一笔最多拿多久", keys: ["fast_loop.time_limit_s"] },
     // 键名是 signal_ 开头（按前缀会归哨兵），但它拦的是开仓、归风控员；点名放这里，不改键名
-    { g: "大盘移动止损", hint: "参照（BTC 等）从跌段 / 涨段的极值反向走到 k 倍 15 分钟 ATR（k 是门槛，默认 1.0），就暂停这个方向的所有新仓；锁住后参照往回走、离极值不到门槛也照样锁着，同方向再创新极值或开了新段才放行。持仓不动。", keys: ["fast_loop.signal_market_trail_on", "fast_loop.signal_market_trail_k", "fast_loop.signal_market_trail_ref", "fast_loop.signal_market_trail_shadow"] },
+    { g: "大盘闸门（均线 + 移动止损）", hint: "两道闸，任一拦就不开这个方向的新仓，总开关关掉两道一起关。均线：BTC 在均线下面不开多、上面不开空，每分钟重判。移动止损：参照（BTC 等）从跌段 / 涨段的极值反向走到 k 倍 15 分钟 ATR（k 是门槛，默认 0.5），就暂停这个方向的所有新仓；锁住后参照往回走、离极值不到门槛也照样锁着，同方向再创新极值、开了新段，或极值 N 分钟没刷新作废才放行。持仓不动。", keys: ["fast_loop.signal_market_trail_on", "fast_loop.signal_market_ma_on", "fast_loop.signal_market_ma_minutes", "fast_loop.signal_market_trail_k", "fast_loop.signal_market_trail_max_extreme_age_min", "fast_loop.signal_market_trail_ref", "fast_loop.signal_market_trail_notify", "fast_loop.signal_market_trail_meetings_per_day", "fast_loop.signal_market_trail_shadow"] },
   ] },
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },
@@ -3821,6 +3849,7 @@ const ROLES = [
     { g: "新作战卡方向反了", hint: "代码规则，不问模型（#314）。close = 立刻全平（原规则）。confirm_or_tighten = 价格确认（三条任一）才平；没确认时亏着或赚得不够（扣费保本价离标记价不够远，约要赚 25bp 以上）照旧全平，赚得够的按「怎么收紧」：trail 在现价强制启动移动止损（之后只收紧，可能低于开仓价）、breakeven 止损挪到扣费保本；都不会比正在挂的止损松。卡还有效时之后确认了再平；旧通道的仓、从没完整托管的仓照旧全平。收紧后卡转回来不会自动放松。", keys: ["fast_loop.opposite_card_action", "fast_loop.opposite_card_ab", "fast_loop.opposite_confirm_loss_r", "fast_loop.opposite_confirm_atr", "fast_loop.opposite_confirm_key_level", "fast_loop.opposite_tighten_buffer_bps", "fast_loop.opposite_tighten_mark_gap_bps", "fast_loop.opposite_profit_mode", "fast_loop.opposite_trail_distance_mult", "fast_loop.opposite_anchor_retry_s"] },
     { g: "新作战卡把这个币改成中性", hint: "代码规则，不问模型，不做价格确认（中性不是反向）。只看开仓之后发布的新卡：这个币改成 no_trade，或到手即作废（stale_on_arrival）成只看不做，都算中性；别的原因的只看不做不算；卡里没有这个币只在打开「没有也算」时算。hold = 不管（现状）。tighten = 和「新作战卡方向反了」没确认时同一套：亏着或赚得不够照旧全平，赚得够的在第一次看到时的现价强制启动移动止损（只锚一次，重启、换卡都不重锚，不会比正在挂的止损松），保本缓冲、离标记价多远、插针重试秒数都用上面那组。close = 直接全平。管家行情没有或过旧（「管家复查时行情最多旧几秒」）时一律不平：tighten 只收紧，close 等新行情。之后卡转成反向，交给上面那条规则。", keys: ["fast_loop.card_neutral_action", "fast_loop.card_neutral_on_absent", "fast_loop.card_neutral_trail_distance_mult"] },
     { g: "赚了之后别变亏", hint: "移动止损默认开，保本默认关。数字的单位是止损距离（1 = 一个止损距离），持仓页「止损价」离开仓价多远就是一个止损距离。", keys: ["fast_loop.trailing_on", "fast_loop.trailing_native", "fast_loop.trail_start_r", "fast_loop.trail_distance_r", "fast_loop.breakeven_on", "fast_loop.breakeven_trigger_r"] },
+    { g: "赚到一点先锁住", hint: "和上面的保本是两回事：不改移动止损的起跟线和回撤距离。这张止损离价格近，插针容易打掉。", keys: ["fast_loop.profit_lock_on", "fast_loop.profit_lock_trigger_r", "fast_loop.profit_lock_r", "fast_loop.profit_lock_mark_gap_bps"] },
   ] },
   { id: "patrol", t: "巡逻兵", strip: ["巡逻兵"], what: "每分钟看一眼，持仓被急拉急砸时报警或全平", groups: [
     { g: "", keys: ["fast_loop.patrol_alert_pct_1m", "fast_loop.patrol_shock_pct_1m", "fast_loop.patrol_alert_stop_mult", "fast_loop.patrol_shock_stop_mult"] },
@@ -3856,7 +3885,7 @@ const SECTION_ROLE = { risk: "risk_guard", category: "risk_guard", take_by_kind:
 const UNIT = {
   risk_per_trade_pct: "%", daily_loss_halt_pct: "%", max_leverage: " 倍", max_total_exposure_x: " 倍", max_notional_per_trade_x: " 倍",
   max_notional_per_trade_usdt: " U", max_open_positions: " 个", lifeboat_stop_multiplier: " 倍", min_tp_fee_multiple: " 倍",
-  min_tp_r: " 倍", max_tp_r: " 倍", tp_r_cap: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", paper_stop_slippage_bps: " bp", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
+  profit_lock_trigger_r: " R", profit_lock_r: " R", profit_lock_mark_gap_bps: " 基点", signal_market_trail_max_extreme_age_min: " 分钟", signal_market_ma_minutes: " 分钟", signal_market_trail_meetings_per_day: " 场", min_tp_r: " 倍", max_tp_r: " 倍", tp_r_cap: " 倍", keeper_confirmations: " 次", keeper_thesis_take_min_r: " R", keeper_thesis_take_max_age_s: " 秒", keeper_close_guard_replacing_max_s: " 秒", keeper_close_guard_exiting_max_s: " 秒", keeper_close_guard_total_max_s: " 秒", keeper_venue_alert_reviews: " 次", book_depth_levels: " 档", giveback_close_pct: "%", giveback_arm_r: " 倍", opposite_confirm_loss_r: " R", opposite_confirm_atr: " 倍 ATR", paper_stop_slippage_bps: " bp", opposite_tighten_buffer_bps: " bp", opposite_tighten_mark_gap_bps: " bp", opposite_trail_distance_mult: " 倍", card_neutral_trail_distance_mult: " 倍", opposite_anchor_retry_s: " 秒", patrol_alert_pct_1m: "%", patrol_shock_pct_1m: "%",
   jev_max_consecutive_errors: " 次", account_read_retries: " 次", breakout_vol_ratio: " 倍", surge_vol_ratio: " 倍", liq_min_usdt_1m: " U", liq_ratio: " 倍",
   liq_drop_pct_5m: "%", session_vol_ratio: " 倍", pool_size: " 个", card_pick_max: " 个", max_cards_per_round: " 个", concurrency: " 个", event_concurrency: " 场",
   adaptive_base_max_queue: " 个", adaptive_mini_min_queue: " 个", backfill_bars: " 根", lookback: " 根", paths: " 条",
@@ -4329,7 +4358,7 @@ const TIER_WHO = {
   "12h": "不常看盘，拿得住单子。",
   "24h": "一天开一次会，做趋势单，最省钱。",
 };
-const EV_SHORT = { held_reverse_loss: "持仓亏损+反向信号", held_desk_flip: "大盘台转向·持仓在亏", desk_turn: "大盘台转向", key_level_break: "破关键位", move_since_card: "出卡后价格走远", new_head_symbol: "冒出新热门币", signal_against_card: "哨兵看到反向信号", predictor_against_card: "预测员唱反调", news_high_impact: "重大新闻", stale_card_on_entry: "入场时卡太旧" };
+const EV_SHORT = { held_reverse_loss: "持仓亏损+反向信号", held_desk_flip: "大盘台转向·持仓在亏", held_market_trail: "大盘闸门锁住且持仓在亏", desk_turn: "大盘台转向", key_level_break: "破关键位", move_since_card: "出卡后价格走远", new_head_symbol: "冒出新热门币", signal_against_card: "哨兵看到反向信号", predictor_against_card: "预测员唱反调", news_high_impact: "重大新闻", stale_card_on_entry: "入场时卡太旧" };
 const minDur = (m) => humanDur(m * 60);
 const TF = {
   min: (v) => (v == null ? "—" : minDur(v)), sec: (v) => humanDur(v), usd: (v) => `$${v}`, x: (v) => `${v} 倍`, r: (v) => `${v} R`,

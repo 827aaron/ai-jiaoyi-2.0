@@ -62,6 +62,12 @@ class ProtectionView(BaseModel):
     """反向作战卡没经价格确认时程序收紧到的止损目标价（#314）；交易所是否已换上看止损腿。"""
     tightened_reason: str | None = None
     tightened_at: datetime | None = None
+    profit_lock_price: float | None = None
+    """锁利止损目标价（已赚到过触发线）。"""
+    profit_lock_r: float | None = None
+    profit_lock_state: str | None = None
+    """locked = 确实有在挂的止损到了锁利价；pending = 等挂上；tight = 现有止损已更紧；
+    abandoned = 这笔放弃了。"""
     opposite_anchor_price: float | None = None
     """反向作战卡（trail 模式）强制启动移动止损时锚定的可成交价（#314）。"""
     trailing_distance_pct: float | None = None
@@ -90,6 +96,20 @@ def _num(v: object) -> float | None:
     if isinstance(v, bool) or not isinstance(v, int | float):
         return None
     return float(v)
+
+
+def _lock_state(raw: dict[str, object], legs: list[LegView]) -> str | None:
+    if raw.get("profit_lock_price") is None:
+        return None
+    done = str(raw.get("profit_lock_done") or "")
+    if done.startswith("abandon"):
+        return "abandoned"
+    if done == "tight_enough":
+        return "tight"
+    live = {x.purpose for x in legs if x.role == "stop_loss" and x.state == "live"}
+    if "profit_lock" in live:
+        return "locked" if done == "locked" else "pending"
+    return "tight" if done == "locked" and live & {"trailing", "tightened"} else "pending"
 
 
 def _time(v: object) -> datetime | None:
@@ -251,6 +271,9 @@ def parse_protection(
         tightened_stop_price=_num(raw.get("tightened_stop_price")),
         tightened_reason=str(raw["tightened_reason"]) if raw.get("tightened_reason") else None,
         tightened_at=_time(raw.get("tightened_at")),
+        profit_lock_price=_num(raw.get("profit_lock_price")),
+        profit_lock_r=_num(raw.get("profit_lock_r")),
+        profit_lock_state=_lock_state(raw, legs),
         opposite_anchor_price=_num(raw.get("opposite_anchor_price")),
         trailing_distance_pct=_num(raw.get("trailing_distance_pct")),
         native_trailing=native_on,

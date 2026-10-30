@@ -41,6 +41,7 @@ _STOP_SOURCE_CN = {
     "trailing": "移动止损",
     "native_trailing": "交易所移动止损（推算）",
     "tightened": "反向卡收紧止损",
+    "profit_lock": "锁利止损",
     "lifeboat": "保命单",
 }
 
@@ -59,7 +60,7 @@ class PaperStop(BaseModel):
     stop_price: float
     stop_source: str
     """Which candidate was tightest: ledger / hosted / trailing / native_trailing / tightened /
-    lifeboat."""
+    profit_lock / lifeboat."""
     price_source: PriceSource
     cross_price: float
     """The mainnet price that crossed the stop (may be past it on a gap)."""
@@ -298,6 +299,8 @@ def close_reason(booked: PaperStop | None) -> CloseReason:
     """
     if booked is None:
         return CloseReason.STOP_LOSS
+    if booked.stop_source == "profit_lock":
+        return CloseReason.PROFIT_LOCK
     long = booked.side is Side.LONG
     if (
         (booked.stop_price > booked.entry_price)

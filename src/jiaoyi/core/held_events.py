@@ -10,6 +10,9 @@
   且这笔仓此刻已亏到 ``patrol_held_event_loss_r`` 倍 R（R = 开仓时定的止损距离
   ``stop_loss_pct``；亏损按标记价、扣来回吃单费）。每个反向信号都可以再申请，靠军师团的
   限流挡住重复。
+- ``held_market_trail``：大盘移动止损刚锁住（``core/market_trail.py`` 判「真的刚锁住」），锁住方向
+  上亏到 ``patrol_held_event_loss_r`` 倍 R 的仓每笔申请一场；这类会每天最多
+  ``signal_market_trail_meetings_per_day`` 场，单独计数（存盘），军师团的限流照常。
 - ``held_desk_flip``：大盘台此刻的方向（看涨 / 看跌）和持仓相反、这笔仓扣费后在亏、而且这个币
   从大盘台翻到这个方向以来还没开过会（也没在开）。会开过了就满足；没开上（排队过期、不在池里、
   重启丢了队列）就在下一个标记价时再申请，申请的决策记录每笔仓每次翻向只写一条。
@@ -25,6 +28,7 @@ import os
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import (
     AgainstSignalEvent,
@@ -42,7 +46,8 @@ logger = logging.getLogger(__name__)
 HELD_EVENTS_FILE = "held_events.json"
 REVERSE_TRIGGER = "held_reverse_loss"
 DESK_TRIGGER = "held_desk_flip"
-TRIGGERS: frozenset[str] = frozenset({REVERSE_TRIGGER, DESK_TRIGGER})
+TRAIL_TRIGGER = "held_market_trail"
+TRIGGERS: frozenset[str] = frozenset({REVERSE_TRIGGER, DESK_TRIGGER, TRAIL_TRIGGER})
 DESK_SOURCE = "market_desk"
 
 _AGAINST = {Side.LONG: "看跌", Side.SHORT: "看涨"}
@@ -73,6 +78,7 @@ class HeldEventDesk:
         cfg: FastLoopConfig,
         path: Path,
         *,
+        tz: str = "Asia/Bangkok",
         fee_bps: Callable[[], float],
         request_event: Callable[[str, str], None] | None = None,
         meeting_ok: Callable[[str], bool] | None = None,
@@ -83,6 +89,7 @@ class HeldEventDesk:
         临时会；``met_since(币, 时间)``：这个币在那之后开过会或正在开。"""
         self._cfg = cfg
         self._path = path
+        self._tz = ZoneInfo(tz)
         self._fee_bps = fee_bps
         self._request_event = request_event
         self._meeting_ok = meeting_ok
@@ -92,6 +99,8 @@ class HeldEventDesk:
         self._desk_since: datetime | None = None
         self._marks: dict[str, float] = {}
         self._logged: set[tuple[str, datetime]] = set()  # （持仓，翻向时间）已写过决策记录
+        self._trail_day: str | None = None
+        self._trail_count = 0
         self._load()
 
     # ------------------------------------------------------------ 反向信号且已亏
@@ -181,6 +190,62 @@ class HeldEventDesk:
                 {"direction": direction, "since": since.isoformat(), "net_pnl_pct": round(pnl, 4)},
             )
 
+    # ------------------------------------------------------------ 大盘移动止损刚锁住
+    def on_trail_lock(
+        self,
+        side: Side,
+        positions: Sequence[PositionRecord],
+        now: datetime,
+        price: Callable[[str], float | None] | None = None,
+    ) -> None:
+        """一次锁住调一次（去重在 ``MarketTrail``），所以每笔仓每次锁最多一场。"""
+        threshold = self._cfg.patrol_held_event_loss_r
+        if threshold <= 0:
+            return
+        day = now.astimezone(self._tz).date().isoformat()
+        if day != self._trail_day:
+            self._trail_day, self._trail_count = day, 0
+        cap = self._cfg.signal_market_trail_meetings_per_day
+        for pos in positions:
+            if pos.status is not PositionStatus.OPEN or pos.side is not side:
+                continue
+            px = self._marks.get(pos.symbol) or (price(pos.symbol) if price else None)
+            r = loss_r(pos, px, self._fee_bps()) if px else None
+            if r is None or r < threshold - 1e-9:
+                continue
+            ok = self._ok(TRAIL_TRIGGER)
+            capped = self._trail_count >= cap
+            detail: dict[str, object] = {"loss_r": round(r, 4), "price": px, "meeting_ok": ok}
+            if capped:
+                self._log_capped(pos, now, r, detail)
+                continue
+            self._ask(
+                pos, TRAIL_TRIGGER, now, f"大盘闸门锁住且持仓在亏 {r:.2f}R，加开临时会", detail
+            )
+            if ok:
+                self._trail_count += 1
+        self._save()
+
+    def _log_capped(
+        self, pos: PositionRecord, now: datetime, r: float, detail: dict[str, object]
+    ) -> None:
+        if self._rec is not None:
+            self._rec.record(
+                now,
+                Outcome.INFO,
+                f"{pos.symbol} 大盘闸门锁住且持仓在亏 {r:.2f}R；今天这类临时会已到上限，只记录",
+                symbol=pos.symbol,
+                position_id=pos.position_id,
+                output={
+                    "held_event": {
+                        "trigger": TRAIL_TRIGGER,
+                        "queued": False,
+                        "capped": True,
+                        **detail,
+                    }
+                },
+            )
+
     # ------------------------------------------------------------ 共用
     def _ok(self, trigger: str) -> bool:
         return self._request_event is not None and (
@@ -217,6 +282,8 @@ class HeldEventDesk:
             since = raw.get("desk_since")
             self._desk_dir = raw.get("desk_direction")
             self._desk_since = datetime.fromisoformat(since) if since else None
+            self._trail_day = raw.get("trail_day")
+            self._trail_count = int(raw.get("trail_count") or 0)
         except FileNotFoundError:
             return
         except (OSError, ValueError, TypeError, AttributeError):
@@ -227,6 +294,8 @@ class HeldEventDesk:
         data = {
             "desk_direction": self._desk_dir,
             "desk_since": self._desk_since.isoformat() if self._desk_since else None,
+            "trail_day": self._trail_day,
+            "trail_count": self._trail_count,
         }
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
