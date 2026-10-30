@@ -522,6 +522,8 @@ document.addEventListener("click", async (e) => {
     if (route().arg !== arg) location.hash = "positions/" + encodeURIComponent(arg);
     else render();
   }
+  // 点行里币名以外的地方：只把下面的走势图换成这个币，不展开明细
+  else if (act === "possel") { if (route().arg !== arg) location.hash = "positions/" + encodeURIComponent(arg); }
   else if (act === "liveev") liveFocus(+arg);
   else if (act === "tf") { S.tf = arg; loadKlines(true); render(); }
   else if (act === "kscale") {
@@ -1477,7 +1479,7 @@ function recentSection(d) {
     : '<div class="dim small">今天还没有平仓。</div>';
   return `<section class="card mt recent"><div class="ch"><h2>今天平掉的</h2><span class="r">今天 ${total} 笔${more} · 最新在上 · 点一行展开 · <a href="#history">全部记录 →</a></span></div>${body}</section>`;
 }
-// 持仓页按交易所「仓位」页的排法：一笔一行，点行在下面展开明细；展开了哪几笔记在这台浏览器里，2 秒刷新不收起
+// 持仓页按交易所「仓位」页的排法：一笔一行，点币名在下面展开明细（点行里别处只换走势图）；展开了哪几笔记在这台浏览器里，2 秒刷新不收起
 S.posOpen = new Set((() => { try { return JSON.parse(localStorage.getItem("pos-open") || "[]"); } catch (err) { return []; } })());
 function togglePos(id) {
   if (S.posOpen.has(id)) S.posOpen.delete(id); else S.posOpen.add(id);
@@ -1539,8 +1541,8 @@ function posRow(p, now, sel) {
   const { s, open, warns, pnl, held, left } = posCells(p, now);
   const id = esc(p.position_id);
   const coinCell = `<span class="chev-s">${open ? "▾" : "▸"}</span> <span class="sbar ${p.side === "long" ? "b-long" : "b-short"}"></span><b class="hi">${coin(p.symbol)}</b> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s} ${p.leverage}x</span>${warns.length ? ` <span class="warn" title="${esc(warns.join("\n"))}">⚠</span>` : ""}`;
-  return `<tr class="click prow ${open ? "open" : ""} ${p.position_id === sel ? "sel" : ""}" data-act="posrow" data-arg="${id}" aria-expanded="${open}">
-    <td class="nowrap">${coinCell}</td>
+  return `<tr class="click prow ${open ? "open" : ""} ${p.position_id === sel ? "sel" : ""}" data-act="possel" data-arg="${id}">
+    <td class="nowrap pos-toggle" data-act="posrow" data-arg="${id}" aria-expanded="${open}" title="点币名展开 / 收起明细">${coinCell}</td>
     <td class="r num">${qtyFmt(p.quantity)}</td>
     <td class="r num">${p.notional_usdt == null ? "—" : money(p.notional_usdt, 0)}</td>
     <td class="r num">${price(p.entry_price, p.symbol)}</td>
@@ -1552,11 +1554,11 @@ function posRow(p, now, sel) {
     <td class="r num nowrap" title="已持有 ${dur(held)}，最长 ${dur(p.time_limit_s * 1000)}，到时平仓">${durShort(held)}<span class="dim"> / ${durShort(p.time_limit_s * 1000)}</span><div class="tbar"><span style="width:${Math.round(left * 100)}%" class="${left >= 0.85 ? "hot" : ""}"></span></div></td>
     <td class="r">${closeCell(p)}</td></tr>`;
 }
-// 窄屏：同一笔两行卡片，点开同样在下面展开
+// 窄屏：同一笔两行卡片，点币名同样在下面展开
 function posCardC(p, now, sel) {
   const { s, open, warns, pnl, held } = posCells(p, now);
-  return `<div class="pm ${open ? "open" : ""} ${p.position_id === sel ? "sel" : ""}"><div class="pm-h click" data-act="posrow" data-arg="${esc(p.position_id)}" aria-expanded="${open}">
-      <div class="l1"><span class="chev-s">${open ? "▾" : "▸"}</span> <b class="hi">${coin(p.symbol)}</b> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s} ${p.leverage}x</span>${warns.length ? ' <span class="warn">⚠</span>' : ""}
+  return `<div class="pm ${open ? "open" : ""} ${p.position_id === sel ? "sel" : ""}"><div class="pm-h click" data-act="possel" data-arg="${esc(p.position_id)}">
+      <div class="l1"><span class="pos-toggle" data-act="posrow" data-arg="${esc(p.position_id)}" aria-expanded="${open}"><span class="chev-s">${open ? "▾" : "▸"}</span> <b class="hi">${coin(p.symbol)}</b></span> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s} ${p.leverage}x</span>${warns.length ? ' <span class="warn">⚠</span>' : ""}
         <span class="r num ${cls(pnl)}"><b>${pnl == null ? "—" : signed(pnl, 2)}</b> <span class="small">${netPct(p) == null ? "" : signed(netPct(p), 2) + "%"}</span></span></div>
       <div class="l2 small"><span class="dim">开</span> <span class="num">${price(p.entry_price, p.symbol)}</span> <span class="dim">现</span> <span class="num">${price(p.mark_price, p.symbol)}</span> <span class="dim">损</span> ${stopCellC(p)} ${lbChip(p)} <span class="dim num">${durShort(held)}</span></div></div>
     ${open ? `<div class="pdet">${posDetail(p)}</div>` : ""}</div>`;
@@ -1638,7 +1640,7 @@ P.positions = (arg) => {
     <section class="card mt pos-card"><div class="tw pos-wide"><table class="dense ptab">
       <thead><tr><th>合约</th><th class="r">数量</th><th class="r" title="数量 × 现价">名义 U</th><th class="r">开仓价</th><th class="r" title="${esc(pxHeadTip(d))}">现价</th><th class="r" title="浮动盈亏 − 开平两次手续费（按实收费率估）；百分比按名义算，不乘杠杆">浮盈 U（%）·扣费后</th><th class="r" title="0 点前开的从当地 0 点参考价算起，今天开的从开仓价（未扣费）">今日 U</th><th class="r" title="在挂的止损价 · 状态 · 到这个价出场的预估净盈亏 U">止损</th><th class="c">保命</th><th class="r">持有 / 最长</th><th class="r"></th></tr></thead>
       <tbody>${rows}</tbody></table></div><div class="pos-narrow">${cards}</div>
-      <div class="foot">点一行展开：保护单、移动止损、止盈目标、费用和这笔今天的每一步；再点收起。悬停数字看算法。</div></section>
+      <div class="foot">点币名展开：保护单、移动止损、止盈目标、费用和这笔今天的每一步；再点收起。点行里别处只把下面的走势图换成这个币。悬停数字看算法。</div></section>
     <section class="card mt ${S.chartFull ? "chart-full" : ""}">
       <div class="ch"><h2>${coin(sel.symbol)} <span class="${sc}">${s}</span> <span class="dim small">走势图 · 点上面一行换币</span></h2>
         <span class="r"><span class="seg">${["1m", "5m", "15m", "1h"].map((t) => `<button class="${S.tf === t ? "on" : ""}" ${clickable("tf", t)}>${t}</button>`).join("")}</span>
