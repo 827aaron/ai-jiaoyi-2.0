@@ -68,6 +68,8 @@ class ProtectionView(BaseModel):
     """锚定后这笔仓移动止损用的回撤距离（净收益百分点）。"""
     native_trailing: bool = False
     """交易所移动止损（币安跟价）在挂或已触发：这笔仓按设计不挂保命单，程序也不换代止损腿。"""
+    native_pending: bool = False
+    """该挂交易所移动止损、还没挂上（最多等 30 秒）：这段只有固定止损，按设计也不挂保命单。"""
     native_activated: bool = False
     native_stop_price: float | None = None
     """本地按币安同一规则推算的交易所移动止损当前价（币安不报）；未激活为 None。"""
@@ -252,6 +254,9 @@ def parse_protection(
         opposite_anchor_price=_num(raw.get("opposite_anchor_price")),
         trailing_distance_pct=_num(raw.get("trailing_distance_pct")),
         native_trailing=native_on,
+        native_pending=not native_on
+        and bool(raw.get("native_pending_since"))
+        and not raw.get("native_fallback"),
         native_activated=native_on and bool(raw.get("native_activated")),
         native_stop_price=_num(raw.get("native_stop_price")) if native_on else None,
         native_fallback=str(raw["native_fallback"]) if raw.get("native_fallback") else None,
@@ -275,7 +280,7 @@ def lifeboat_summary(p: ProtectionView) -> tuple[str, float | None]:
         leg = leg.previous  # 新一代保命单还没挂上，旧一代仍在挂
     if leg.state == "live":
         return ("stale" if p.stale else "active"), leg.trigger_price
-    if p.native_trailing and leg.state in {"none", "cancelled"}:
+    if (p.native_trailing or p.native_pending) and leg.state in {"none", "cancelled"}:
         return "native", None
     status = {
         "triggered": "triggered",

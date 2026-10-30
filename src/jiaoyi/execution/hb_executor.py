@@ -2303,6 +2303,22 @@ class HbExecutorAdapter:
         after = self._protection.trailing_book_critical_after_s if self._protection else 0.0
         since = state.trailing_failing_since if state is not None else None
         held_s = (self._clock() - since).total_seconds() if since is not None else 0.0
+        native = (
+            self._protection is not None
+            and state is not None
+            and self._protection.native_mode(pid) == "confirmed"
+        )
+        if native:
+            await self._alert(
+                AlertLevel.WARN,
+                "交易所移动止损推算缺标记价",
+                f"{symbol} {pid}：{describe_error(error)}；币安那张移动止损单照常在跟，"
+                "只是面板上的推算价本轮没更新",
+                symbol,
+                f"server_trailing_book:{pid}",
+                kind="order_failed",
+            )
+            return
         if state is not None and state.trailing_activated and after > 0 and held_s >= after:
             last = state.trailing_observed_at
             last_text = last.strftime("%m-%d %H:%M:%S UTC") if last is not None else "从没有"
@@ -2366,7 +2382,13 @@ class HbExecutorAdapter:
             return "exiting", "exiting", state.stage
         if any(leg.triggered_at is not None and leg.state == "confirmed" for leg in state.legs):
             return "exiting", "exiting", "leg_triggered"
-        moving = [leg for leg in state.legs if leg.state in ("submit_pending", "cancel_pending")]
+        moving = [
+            leg
+            for leg in state.legs
+            if leg.state in ("submit_pending", "cancel_pending")
+            # 放弃了的交易所移动止损（提交结果未知）不是换代，留给零仓收尾核清
+            and not (leg.kind == "trailing_stop" and state.native_fallback is not None)
+        ]
         if state.ever_armed and moving:
             return (
                 "replacing",

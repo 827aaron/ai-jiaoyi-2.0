@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -56,7 +57,7 @@ class NativeHarness(SlowHarness):
             connector_name="synthetic-demo",
             clock=lambda: self.now,
             sleep=self.sleep,
-            stop_working_type="MARK_PRICE",
+            stop_working_type="CONTRACT_PRICE",  # 交易所移动止损不跟它，固定按标记价
             native_trailing=lambda: self.native,
             unknown_submit_grace_s=0.0,
         )
@@ -266,6 +267,7 @@ async def test_native_stuck_pending_gives_up_and_places_the_lifeboat(
     h.mark_error = ExchangeError("synthetic mark down", transient=True)
     await native_armed(h)
     assert h.manager.native_mode("pos-1") == "pending" and h.live_cids() == ["br-sl-pos-1-1"]
+    assert lifeboat_summary(panel(h)) == ("native", None)  # 等着挂，按设计不挂保命单
     h.now += timedelta(seconds=31)
     await h.manager.sync("pos-1")
     assert h.state().native_fallback == "武装后 30 秒还没挂上交易所移动止损"
@@ -359,8 +361,113 @@ async def test_unreadable_native_leg_falls_back_without_failing_the_sync(
 
     h.exchange.get_bracket = broken
     assert await h.manager.sync("pos-1") == "armed"
+    assert h.state().native_fallback is None  # 一次读不好先不放弃（Demo 读延迟）
+    assert h.live_cids() == ["br-sl-pos-1-1", "br-ts-pos-1-1"]
+    h.now += timedelta(seconds=30)
+    assert await h.manager.sync("pos-1") == "armed"
     assert "回读失败" in (h.state().native_fallback or "")
     assert any(c.startswith("lb-") for c in h.live_cids()) and not h.closed()
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_abandoned_unknown_native_leg_is_settled_by_flat_cleanup(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side)
+    h.native_fail = "unknown"
+    await native_armed(h)
+    assert h.adapter.protection_exit_in_flight("pos-1") is None  # 不算「正在换代」
+    calls: list[str | None] = []
+    original = h.exchange._get
+
+    def counting(algo_id, client_order_id):
+        calls.append(client_order_id)
+        return original(algo_id, client_order_id)
+
+    h.exchange._get = counting
+    events = len(h.exchange.events)
+    await h.manager.sync("pos-1")
+    # 没改单的一轮：每条腿回读一次，不走换代、不去撤它
+    assert calls == ["br-sl-pos-1-1", "br-ts-pos-1-1", "lb-pos-1-2"]
+    assert h.exchange.events[events:] == []
+    h.exchange.held = 0.0
+    h.manager.mark_exiting("pos-1")
+    assert await h.manager.flat_cleanup("pos-1") is True
+    legs = {leg.client_order_id: leg.state for leg in h.state().legs}
+    assert legs["br-ts-pos-1-1"] == "rejected" and h.state().stage == "done"
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_unknown_native_leg_found_live_at_cleanup_is_cancelled(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side)
+    h.native_fail = "unknown"
+    await native_armed(h)
+    # 提交其实成功了，只是回执丢了，之后才查得到
+    order = ExchangeBracket(
+        symbol="BTCUSDT",
+        algo_id="99",
+        client_order_id="br-ts-pos-1-1",
+        kind="trailing_stop",
+        close_side="sell" if side is Side.LONG else "buy",
+        quantity=2.0,
+        trigger_price=1.0,
+        position_side="BOTH",
+        working_type="MARK_PRICE",
+        reduce_only=True,
+        price_protect=False,
+        close_position=False,
+        algo_status="NEW",
+        child_state="absent",
+        activate_price=1.0,
+        callback_rate=0.9,
+    )
+    h.exchange.orders["br-ts-pos-1-1"] = order
+    h.exchange.held = 0.0
+    h.manager.mark_exiting("pos-1")
+    assert await h.manager.flat_cleanup("pos-1") is True
+    assert "br-ts-pos-1-1" in h.cancels()
+    assert {leg.client_order_id: leg.state for leg in h.state().legs}["br-ts-pos-1-1"] == (
+        "cancelled"
+    )
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_limit_entry_still_filling_keeps_a_lifeboat_until_native_is_placed(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side)
+    h.exchange.entry = replace(h.exchange.entry, filled_quantity=1, status="PARTIALLY_FILLED")
+    h.exchange.held = 1
+    assert await h.manager.sync("pos-1") == "provisional"
+    assert sorted(c[:3] for c in h.live_cids()) == ["br-", "lb-"]
+    h.exchange.entry = replace(h.exchange.entry, filled_quantity=2, status="FILLED")
+    h.exchange.held = 2
+    await h.adapter.protection_tick()
+    assert h.manager.native_mode("pos-1") == "confirmed"
+    assert not [c for c in h.live_cids() if c.startswith("lb-")]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_opposite_card_anchor_hands_trailing_back_to_us(tmp_path: Path, side: Side) -> None:
+    h = NativeHarness(tmp_path, side)
+    await native_armed(h)
+    basis = await h.entry_basis("BTCUSDT", "entry-1")
+    h.mark_value = 100.25 if side is Side.LONG else 99.75
+    h.bid, h.ask = (100.2, 100.3) if side is Side.LONG else (99.7, 99.8)
+    async with h.registry.symbol_lock("BTCUSDT"):
+        await h.manager.anchor_trailing(
+            "pos-1", basis, h.execution_book, distance_mult=2.0, reason="反向卡"
+        )
+    assert h.state().native_fallback == "反向卡锚定移动止损，改回程序自己跟"
+    await h.manager.sync("pos-1")
+    assert "br-ts-pos-1-1" in h.cancels() and any(c.startswith("lb-") for c in h.live_cids())
+    h.bid, h.ask = (100.6, 100.7) if side is Side.LONG else (99.3, 99.4)
+    h.mark_value = 100.65 if side is Side.LONG else 99.35
+    reads = len(h.book_reads)
+    await h.adapter.protection_tick()
+    assert len(h.book_reads) > reads  # 程序接着自己跟
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
