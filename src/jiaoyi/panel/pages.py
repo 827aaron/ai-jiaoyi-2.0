@@ -121,6 +121,7 @@ class PositionsPage(BaseModel):
     positions: list[PositionView]
     unrealized_usdt: float | None
     lifeboats_ok: int
+    """保命单在挂的仓数；用交易所移动止损、按设计不挂保命单的仓也算在位。"""
     groups: list[GroupExposure]
     trails: dict[str, list[TrailItem]]
     """position_id → 这笔从信号到现在的每一步（今天的记录）。"""
@@ -517,7 +518,7 @@ def build_positions(
     return PositionsPage(
         positions=views,
         unrealized_usdt=sum(pnl) if pnl else None,
-        lifeboats_ok=sum(1 for v in views if v.lifeboat_status == "active"),
+        lifeboats_ok=sum(1 for v in views if v.lifeboat_status in ("active", "native")),
         groups=groups,
         trails=trails,
         recent=recent,

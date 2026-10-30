@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
@@ -79,11 +79,23 @@ class ExchangeStop:
     reduce_only: bool
 
 
-BracketKind = Literal["stop_loss", "take_profit"]
+BracketKind = Literal["stop_loss", "take_profit", "trailing_stop"]
 WorkingType = Literal["CONTRACT_PRICE", "MARK_PRICE"]
 """条件单触发价格源：合约最新成交价 / 标记价。"""
 WORKING_TYPES: tuple[WorkingType, ...] = ("CONTRACT_PRICE", "MARK_PRICE")
-BRACKET_PREFIXES: dict[BracketKind, str] = {"stop_loss": "br-sl-", "take_profit": "br-tp-"}
+BRACKET_PREFIXES: dict[BracketKind, str] = {
+    "stop_loss": "br-sl-",
+    "take_profit": "br-tp-",
+    "trailing_stop": "br-ts-",
+}
+_ALGO_TYPES: dict[str, BracketKind] = {
+    "STOP_MARKET": "stop_loss",
+    "TAKE_PROFIT_MARKET": "take_profit",
+    "TRAILING_STOP_MARKET": "trailing_stop",
+}
+_PARENT_TYPES: dict[BracketKind, str] = {kind: t for t, kind in _ALGO_TYPES.items()}
+CALLBACK_RATE_STEP = Decimal("0.1")
+"""币安 TRAILING_STOP_MARKET 的 callbackRate 单位是百分比（1 = 1%），步长 0.1。"""
 _CHILD_TERMINAL = frozenset({"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"})
 
 
@@ -157,6 +169,11 @@ class ExchangeBracket:
     updated_at: datetime | None = None
     triggered_at: datetime | None = None
     child_state: Literal["absent", "unknown", "identified"] = "unknown"
+    activate_price: float | None = None
+    """交易所移动止损单（``trailing_stop``）的激活价；没设（下单即激活）为 None。此时
+    ``trigger_price`` 为 0，不是触发价。"""
+    callback_rate: float | None = None
+    """交易所移动止损单的回撤比例（百分比，1 = 1%）；其它单为 None。"""
 
 
 class BracketSubmissionUnknown(ExchangeError):
@@ -318,9 +335,9 @@ def _bracket_from(raw: dict[str, Any], *, lifeboat: bool = False) -> ExchangeBra
     if not isinstance(raw, dict):
         raise ValueError("普通保护单响应不是对象")
     order_type = raw.get("orderType") or raw.get("type")
-    if order_type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}:
+    if order_type not in _ALGO_TYPES:
         raise ValueError("不是支持的条件市价保护单")
-    kind: BracketKind = "stop_loss" if order_type == "STOP_MARKET" else "take_profit"
+    kind = _ALGO_TYPES[order_type]
     side = raw.get("side")
     if side not in {"BUY", "SELL"}:
         raise ValueError("普通保护单方向未知")
@@ -346,6 +363,17 @@ def _bracket_from(raw: dict[str, Any], *, lifeboat: bool = False) -> ExchangeBra
     ):
         raise ValueError("普通保护单状态、模式或触发价格源未知")
     triggered_at = _bracket_time(raw.get("triggerTime"))
+    activate: float | None = None
+    rate: float | None = None
+    if kind == "trailing_stop":
+        # 激活价没设时交易所返回空串；回撤比例 algo 接口叫 callbackRate，旧接口叫 priceRate
+        activate = _optional_number(raw.get("activatePrice"))
+        rate = _optional_number(raw.get("callbackRate", raw.get("priceRate")))
+        if rate is None:
+            raise ValueError("交易所移动止损单缺回撤比例")
+        trigger = activate or 0.0
+    else:
+        trigger = _bracket_number(raw.get("triggerPrice"))
     actual = raw.get("actualOrderId")
     actual_id = None
     child_state: Literal["absent", "unknown", "identified"] = "unknown"
@@ -369,7 +397,7 @@ def _bracket_from(raw: dict[str, Any], *, lifeboat: bool = False) -> ExchangeBra
         kind=kind,
         close_side="buy" if side == "BUY" else "sell",
         quantity=_bracket_number(raw.get("quantity")),
-        trigger_price=_bracket_number(raw.get("triggerPrice")),
+        trigger_price=trigger,
         position_side=str(position_side),
         working_type=str(working_type),
         reduce_only=_close_bool(raw.get("reduceOnly")),
@@ -382,7 +410,22 @@ def _bracket_from(raw: dict[str, Any], *, lifeboat: bool = False) -> ExchangeBra
         updated_at=_bracket_time(raw.get("updateTime")),
         triggered_at=triggered_at,
         child_state=child_state,
+        activate_price=activate,
+        callback_rate=rate,
     )
+
+
+def _optional_number(value: object) -> float | None:
+    """可选的正数字段：缺、null、空串、0 都是 None；有值就必须能无损保存。"""
+    if value is None or (value in ("", 0, "0") and not isinstance(value, bool)):
+        return None
+    return _bracket_number(value)
+
+
+def callback_rate(distance_pct: float) -> Decimal:
+    """回撤距离（百分比）按交易所步长 0.1 向下取整：只会比程序的回撤距离紧，不会松。
+    不到 0.1 的得 0，范围由调用方核。"""
+    return Decimal(str(distance_pct)).quantize(CALLBACK_RATE_STEP, rounding=ROUND_DOWN)
 
 
 def _bracket_child(order: ExchangeBracket, raw: dict[str, Any]) -> ExchangeBracket:
@@ -394,7 +437,7 @@ def _bracket_child(order: ExchangeBracket, raw: dict[str, Any]) -> ExchangeBrack
         or not _close_bool(raw.get("reduceOnly"))
     ):
         raise ValueError("普通保护单实际子订单身份或只减仓语义不符")
-    parent_type = "STOP_MARKET" if order.kind == "stop_loss" else "TAKE_PROFIT_MARKET"
+    parent_type = _PARENT_TYPES[order.kind]
     if raw.get("type") not in {"MARKET", parent_type}:
         raise ValueError("普通保护单实际子订单类型不符")
     if raw.get("origType") is not None and raw["origType"] not in {"MARKET", parent_type}:
@@ -1153,6 +1196,151 @@ class CcxtBinanceFutures:
             working_type="MARK_PRICE",
         )
 
+    async def place_trailing(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        callback_rate: float,
+        client_order_id: str,
+        *,
+        activate_price: float | None,
+        working_type: WorkingType,
+    ) -> ExchangeBracket:
+        """交易所移动止损 TRAILING_STOP_MARKET（algo 接口，单向、只减仓、br-ts- CID）。
+
+        ``activate_price`` 为 None 时不带激活价，交易所按下单时的最新价（随 ``working_type``）
+        当场激活。和 ``place_bracket`` 同一套：先查原 CID、提交锁防重发、未知不重发。
+        """
+        _bracket_cid(client_order_id, "trailing_stop")
+        if close_side not in {"buy", "sell"} or working_type not in WORKING_TYPES:
+            raise ValueError("交易所移动止损方向或触发价格源不合法")
+        _bracket_symbol(symbol)
+        _bracket_number(quantity)
+        rate = _bracket_number(callback_rate)
+        if Decimal(str(rate)) % CALLBACK_RATE_STEP != 0:
+            raise ValueError("交易所移动止损回撤比例不是 0.1 的整数倍")
+        if activate_price is not None:
+            _bracket_number(activate_price)
+        if not hasattr(self, "_bracket_submit_locks"):
+            self._bracket_submit_locks = {}
+            self._bracket_submitted = set()
+        async with self._bracket_submit_locks.setdefault(client_order_id, asyncio.Lock()):
+            return await self._place_trailing_once(
+                symbol,
+                close_side,
+                quantity,
+                rate,
+                client_order_id,
+                activate_price=activate_price,
+                working_type=working_type,
+            )
+
+    async def _place_trailing_once(
+        self,
+        symbol: str,
+        close_side: Literal["buy", "sell"],
+        quantity: float,
+        rate: float,
+        client_order_id: str,
+        *,
+        activate_price: float | None,
+        working_type: WorkingType,
+    ) -> ExchangeBracket:
+        await self._ready()
+        ccxt_symbol = _bracket_symbol(symbol)
+        amount = self._ex.amount_to_precision(ccxt_symbol, quantity)
+        if _bracket_number(amount) != quantity:
+            raise ValueError("交易所移动止损数量须先按交易所精度量化")
+        activate = None
+        if activate_price is not None:
+            activate = self._ex.price_to_precision(ccxt_symbol, activate_price)
+            if _bracket_number(activate) != activate_price:
+                raise ValueError("交易所移动止损激活价须先按交易所精度量化")
+        if await self.position_mode() != "one_way":
+            raise ExchangeError("交易所移动止损只支持已确认的单向持仓模式")
+
+        def matches(order: ExchangeBracket) -> bool:
+            return (
+                order.symbol == symbol
+                and order.client_order_id == client_order_id
+                and order.kind == "trailing_stop"
+                and order.close_side == close_side
+                and order.quantity == quantity
+                and order.callback_rate == rate
+                and (activate_price is None or order.activate_price == activate_price)
+                and order.position_side == "BOTH"
+                and order.working_type == working_type
+                and order.reduce_only
+                and not order.close_position
+            )
+
+        async def query() -> ExchangeBracket | None:
+            return await self.get_bracket(symbol, client_order_id=client_order_id)
+
+        existing = await query()
+        if existing is not None:
+            self._bracket_submitted.add(client_order_id)
+            if not matches(existing):
+                raise ExchangeError("原CID交易所移动止损与本次请求不一致，禁止复用")
+            return existing
+        if client_order_id in self._bracket_submitted:
+            raise BracketSubmissionUnknown(client_order_id)
+        params: dict[str, Any] = {
+            "trailingPercent": str(Decimal(str(rate)).quantize(CALLBACK_RATE_STEP)),
+            "reduceOnly": True,
+            "workingType": working_type,
+            "positionSide": "BOTH",
+            "newClientOrderId": client_order_id,
+        }
+        if activate is not None:
+            params["trailingTriggerPrice"] = float(activate)
+        self._bracket_submitted.add(client_order_id)
+        try:
+            result = await self._ex.create_order(
+                ccxt_symbol, "market", close_side, amount, None, params
+            )
+        except Exception as error:
+            raise await self._submit_failure(symbol, client_order_id, error) from error
+        try:
+            order = _bracket_from(result["info"])
+            if not matches(order):
+                raise ValueError("响应身份或移动止损参数不符")
+            if order.child_state != "absent" or order.algo_status != "NEW":
+                observed = await query()
+                if observed is None or observed.algo_id != order.algo_id or not matches(observed):
+                    raise ValueError("交易所移动止损提交回读身份或参数不一致")
+                return observed
+            return order
+        except Exception as error:
+            raise await self._bracket_uncertain(symbol, client_order_id) from error
+
+    async def _submit_failure(
+        self, symbol: str, cid: str, error: Exception, *, lifeboat: bool = False
+    ) -> ExchangeError:
+        """下单请求抛错：明确业务拒绝 → Rejected（-2021/-4142 = 会立刻触发）；其余都按未知。"""
+        import ccxt.async_support as ccxt
+
+        rejected = isinstance(
+            error,
+            ccxt.InvalidOrder
+            | ccxt.AuthenticationError
+            | ccxt.PermissionDenied
+            | ccxt.InsufficientFunds
+            | ccxt.BadSymbol,
+        )
+        uncertain_code = re.search(
+            r"-(?:1000|1001|1006|1007|4111|4116)\b|\b(?:500|502|503|504)\b|5xx|duplicate",
+            str(error),
+            re.IGNORECASE,
+        )
+        if rejected and not uncertain_code:
+            return BracketSubmissionRejected(
+                "普通保护条件单被交易所明确拒绝",
+                immediate_trigger=bool(re.search(r"-(?:2021|4142)\b", str(error))),
+            )
+        return await self._bracket_uncertain(symbol, cid, lifeboat=lifeboat)
+
     async def _submit_protection(
         self,
         symbol: str,
@@ -1207,7 +1395,6 @@ class CcxtBinanceFutures:
         lifeboat: bool,
         working_type: WorkingType,
     ) -> ExchangeBracket:
-        import ccxt.async_support as ccxt
 
         spec = await self.normalized_bracket_spec(symbol, quantity, trigger_price)
         if await self.position_mode() != "one_way":
@@ -1267,26 +1454,8 @@ class CcxtBinanceFutures:
                 },
             )
         except Exception as error:
-            rejected = isinstance(
-                error,
-                ccxt.InvalidOrder
-                | ccxt.AuthenticationError
-                | ccxt.PermissionDenied
-                | ccxt.InsufficientFunds
-                | ccxt.BadSymbol,
-            )
-            uncertain_code = re.search(
-                r"-(?:1000|1001|1006|1007|4111|4116)\b|\b(?:500|502|503|504)\b|5xx|duplicate",
-                str(error),
-                re.IGNORECASE,
-            )
-            if rejected and not uncertain_code:
-                raise BracketSubmissionRejected(
-                    "普通保护条件单被交易所明确拒绝",
-                    immediate_trigger=bool(re.search(r"-(?:2021|4142)\b", str(error))),
-                ) from error
-            raise await self._bracket_uncertain(
-                symbol, client_order_id, lifeboat=lifeboat
+            raise await self._submit_failure(
+                symbol, client_order_id, error, lifeboat=lifeboat
             ) from error
         try:
             order = _bracket_from(result["info"], lifeboat=lifeboat)

@@ -505,6 +505,7 @@ def _build_execution(
             ),
             position_mode_cache_s=app_cfg.position_mode_cache_s,
             leverage_brackets_wanted=lambda: app_cfg.fast_loop.leverage_clamp_to_bracket,
+            trailing_native=lambda: app_cfg.fast_loop.trailing_native,
         )
     except MissingSecret:
         if mode is RunMode.LIVE:

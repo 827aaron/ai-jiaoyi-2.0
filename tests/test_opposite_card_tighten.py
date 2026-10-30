@@ -1260,12 +1260,16 @@ def test_keeper_confirmation_baseline_survives_restart(tmp_path: Path, now: date
 def test_unused_rule_ledger_loads_in_pre_314_model(tmp_path: Path) -> None:
     from pydantic import ConfigDict, create_model
 
-    from jiaoyi.execution.registry import OPPOSITE_CARD_FIELDS, ServerProtection
+    from jiaoyi.execution.registry import (
+        NATIVE_TRAILING_FIELDS,
+        OPPOSITE_CARD_FIELDS,
+        ServerProtection,
+    )
 
     old_fields = {
         name: (field.annotation, field)
         for name, field in ServerProtection.model_fields.items()
-        if name not in OPPOSITE_CARD_FIELDS
+        if name not in OPPOSITE_CARD_FIELDS + NATIVE_TRAILING_FIELDS
     }
     Old = create_model(
         "PreOppositeServerProtection", __config__=ConfigDict(extra="forbid"), **old_fields

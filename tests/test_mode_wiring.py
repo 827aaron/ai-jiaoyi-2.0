@@ -220,6 +220,20 @@ def test_protection_graces_reach_demo_bracket_manager(tmp_path: Path, spy: Spy) 
     assert adapter._close_slow_after_s == 300
 
 
+def test_trailing_native_switch_reaches_the_bracket_manager_hot(tmp_path: Path, spy: Spy) -> None:
+    from jiaoyi.core.hotconfig import HOT_FAST, patch_inplace
+
+    _mark_sim(tmp_path)
+    app_cfg = _cfg(tmp_path, RunMode.PAPER)
+    app_cfg = app_cfg.model_copy(update={"fast_loop": app_cfg.fast_loop.model_copy()})
+    (adapter, *_), _, _ = _build_cfg(app_cfg, None, RISK, tmp_path)
+    assert app_cfg.fast_loop.trailing_native is False  # 不写 = 关
+    assert adapter._protection._native_on() is False
+    on = app_cfg.fast_loop.model_copy(update={"trailing_native": True})
+    assert patch_inplace(app_cfg.fast_loop, on, HOT_FAST) == {"trailing_native": (False, True)}
+    assert adapter._protection._native_on() is True
+
+
 async def test_live_uses_mainnet_connector_url_and_mainnet_key(tmp_path: Path, spy: Spy) -> None:
     _unlock(tmp_path)
     (adapter, *_), _, _ = _build(tmp_path, RunMode.LIVE)

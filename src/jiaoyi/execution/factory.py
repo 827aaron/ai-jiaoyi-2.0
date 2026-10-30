@@ -119,6 +119,7 @@ def build_execution(
     hosted_close_slow_alert_s: float = HOSTED_CLOSE_SLOW_ALERT_S,
     position_mode_cache_s: float = 0.0,
     leverage_brackets_wanted: Callable[[], bool] | None = None,
+    trailing_native: Callable[[], bool] | bool = False,
     hb_url: str = "http://127.0.0.1:8000",
     hb_username: str = "admin",
     account_name: str = "master_account",
@@ -180,6 +181,7 @@ def build_execution(
             trailing_min_step_bps=protection_trailing_min_step_bps,
             trailing_book_critical_after_s=protection_trailing_book_critical_after_s,
             leg_order=protection_leg_order,
+            native_trailing=trailing_native,
         )
         if mode is not RunMode.LIVE and demo_trading
         else None

@@ -39,6 +39,7 @@ _STOP_SOURCE_CN = {
     "ledger": "固定止损",
     "hosted": "交易所止损单",
     "trailing": "移动止损",
+    "native_trailing": "交易所移动止损（推算）",
     "tightened": "反向卡收紧止损",
     "lifeboat": "保命单",
 }
@@ -57,7 +58,8 @@ class PaperStop(BaseModel):
     entry_price: float
     stop_price: float
     stop_source: str
-    """Which candidate was tightest: ledger / hosted / trailing / tightened / lifeboat."""
+    """Which candidate was tightest: ledger / hosted / trailing / native_trailing / tightened /
+    lifeboat."""
     price_source: PriceSource
     cross_price: float
     """The mainnet price that crossed the stop (may be past it on a gap)."""

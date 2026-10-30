@@ -99,7 +99,13 @@ def _accept_checks(tracked: dict, leg: dict, order) -> list[str]:
         fails.append("close_position is True")
     if order.quantity != leg["quantity"]:
         fails.append(f"quantity {order.quantity!r} != {leg['quantity']!r}")
-    if order.trigger_price != leg["trigger_price"]:
+    if leg["kind"] == "trailing_stop":
+        if order.callback_rate != leg.get("callback_rate"):
+            fails.append(f"callback_rate {order.callback_rate!r} != {leg.get('callback_rate')!r}")
+        want = leg.get("activate_price")
+        if want is not None and order.activate_price != want:
+            fails.append(f"activate_price {order.activate_price!r} != {want!r}")
+    elif order.trigger_price != leg["trigger_price"]:
         fails.append(f"trigger_price {order.trigger_price!r} != {leg['trigger_price']!r}")
     if leg.get("algo_id") is not None and leg["algo_id"] != order.algo_id:
         fails.append(f"algo_id {order.algo_id!r} != {leg['algo_id']!r}")
