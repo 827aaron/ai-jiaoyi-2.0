@@ -884,6 +884,59 @@ function dirHistory(s) {
   return `<div class="bc-hist"><span class="dim">今天卡上方向</span>${first}${rest}<span class="dim">· ${tally}</span></div>`;
 }
 
+// 持有期间卡上方向（服务端按军师团记录重放这笔仓的开仓 → 平仓 / 现在，可跨天）和管家卡规则做了什么（按管家决策记录）
+const DIRF = { long: "做多", short: "做空", neutral: "观望" };
+const HOLD_ACT = {
+  close: ["反向卡硬规则平仓", "已要求平仓"], confirmed_close: ["反向卡价格确认，平仓", "已要求平仓"],
+  tighten: ["反向卡未确认，收紧止损", "未确认·收紧止损"], tighten_hold: ["反向卡收紧止损", "收紧止损"], tighten_close: ["反向卡收紧不了，按原规则全平", "已要求平仓"],
+  blocked: ["卡规则要平，平仓前检查拦下", "平仓被拦下"],
+  neutral_close: ["观望卡平仓", "已要求平仓"], neutral_tighten: ["观望卡收紧止损", "收紧止损"], neutral_hold: ["观望卡：拿住", "拿住"],
+};
+const OPP_ACT = new Set(["close", "confirmed_close", "tighten", "tighten_hold", "tighten_close", "blocked"]);
+const holdWhen = (ts) => (md(ts) === md(data ? data.now : Date.now()) ? hm(ts) : `${md(ts)} ${hm(ts)}`);
+// 行内小标：持有期里卡上最要紧的那件事；closed = 已平的单（怎么平的另有一列，这里不再写平仓）
+function holdChip(h, closed) {
+  if (!h || !h.state) return "";
+  const t = holdWhen(h.state_ts), after = (h.actions || []).filter((a) => new Date(a.ts) >= new Date(h.state_ts) - 60000);
+  const tip = (x) => ` title="${esc(x + "（点币名看持有期间卡上方向的经过）")}"`;
+  if (h.state === "against") {
+    const a = [...after].reverse().find((x) => OPP_ACT.has(x.kind)), lab = a ? HOLD_ACT[a.kind][1] : "";
+    const tail = a && !(closed && lab === "已要求平仓") ? ` · ${lab}` : !a && !closed ? " · 还没有处理记录" : "";
+    return `<span class="pill flip"${tip(`持仓期间作战卡转成和持仓相反的方向：${holdWhen(h.state_ts)} 起卡上${DIRF[h.state_to]}`)}>持仓中卡翻转 ${DIRW[h.state_from] || "?"}→${DIRW[h.state_to]} <span class="num">${t}</span>${tail}</span>`;
+  }
+  if (h.state === "pending") return `<span class="pill p-warn"${tip(`会判${DIRF[h.state_to]}，卡上仍按${DIRF[h.state_from]}只看不做，等确认翻转；确认前持仓不按卡规则平`)}>会判${DIRW[h.state_to]} <span class="num">${t}</span> · ${h.pending_open ? "待确认" : "已取消"}</span>`;
+  if (h.state === "neutral") {
+    const a = [...after].reverse().find((x) => !OPP_ACT.has(x.kind)), lab = a ? HOLD_ACT[a.kind][1] : "拿住";
+    return `<span class="pill calm"${tip("持仓期间作战卡把这个币改成观望")}>持仓中卡转观望 <span class="num">${t}</span>${closed && lab === "已要求平仓" ? "" : ` · ${lab}`}</span>`;
+  }
+  return `<span class="pill calm"${tip(`会判观望，设置是会判观望不翻转，卡上照旧${DIRF[h.state_from]}`)}>会判观望·卡保留${DIRW[h.state_from]} <span class="num">${t}</span></span>`;
+}
+// 点开后：开仓时卡上的方向、持有期每场会的结论和卡上生效的方向、管家卡规则做的事、平仓 / 现在
+function holdHistory(h, side, opened, closed, how) {
+  if (!h) return "";
+  const opp = side === "long" ? "short" : "long", rows = [];
+  rows.push([opened, `开仓${side === "long" ? "做多" : "做空"} · 卡上${h.start ? `<b>${DIRF[h.start]}</b>` : "方向不明（读到的记录里开仓前没有这个币的会）"}${h.start_ts ? ` <span class="dim">（${holdWhen(h.start_ts)} 那场会）</span>` : ""}`]);
+  let prev = h.start;
+  for (const st of h.steps || []) {
+    const card = `卡上<b>${DIRF[st.card]}</b>`;
+    const mark = st.card === opp && prev !== opp ? ' <span class="pill flip">反着持仓</span>' : st.card === "neutral" && prev !== "neutral" ? ' <span class="pill calm">转观望</span>' : "";
+    let text;
+    if (!st.meeting) text = `${st.event === "confirmed" ? "确认翻转" : "恢复原方向"} · ${card}${mark}`;
+    else if (st.event === "ignored" && st.meeting === "neutral") text = `会判观望 · ${card}（会判观望不翻转，保留原方向）`;
+    else if (st.event === "pending") text = `会判${DIRF[st.meeting]} · ${card}，待确认翻转（只看不做，持仓不按卡规则平）`;
+    else if (st.event === "cancelled") text = `会判${DIRF[st.meeting]} · ${card}（回到原方向，取消待确认）`;
+    else text = `会判${DIRF[st.meeting]} · ${card}${st.event === "confirmed" ? "（确认翻转）" : ""}${mark}`;
+    rows.push([st.ts, text, st.meeting && st.meeting === st.card && st.card === prev && !st.event]);
+    prev = st.card;
+  }
+  for (const a of h.actions || []) rows.push([a.ts, `<span class="pill ${OPP_ACT.has(a.kind) ? "flip" : "calm"}">管家</span> ${esc(HOLD_ACT[a.kind][0])}${a.count > 1 ? ` <span class="dim">（连续 ${a.count} 次）</span>` : ""} <span class="dim small">${esc(a.text)}</span>`]);
+  rows.sort((x, y) => new Date(x[0]) - new Date(y[0]));
+  rows.push([closed || (data ? data.now : Date.now()), closed ? `平仓${how ? ` · ${esc(how)}` : ""}` : `现在 · 卡上<b>${DIRF[prev] || "方向不明"}</b>`]);
+  const line = ([ts, text, quiet]) => `<div class="${quiet ? "dim" : ""}"><span class="n">${holdWhen(ts)}</span><span>${text}</span></div>`;
+  const meets = (h.steps || []).filter((x) => x.meeting).length;
+  return `<div class="lbl">持有期间作战卡上的方向 <span class="dim small">· 开了 ${meets} 场会 · 方向按军师团记录重放，管家处理按管家记录</span></div><div class="log trail hold-hist">${rows.map(line).join("")}</div>`;
+}
+
 function cardRow(s, now) {
   const sym = s.symbol, L = cardLevels(s), p = L && L.held;
   const [dt, dk] = s.pending_label ? [s.pending_label, s.pending_label === "开会中" ? "p-accent" : ""] : DIR[s.bias] || BIAS[s.bias] || [s.bias, ""];
@@ -1577,7 +1630,7 @@ function posCells(p, now) {
 function posRow(p, now, sel) {
   const { s, open, warns, pnl, held, left } = posCells(p, now);
   const id = esc(p.position_id);
-  const coinCell = `<span class="chev-s">${open ? "▾" : "▸"}</span> <span class="sbar ${p.side === "long" ? "b-long" : "b-short"}"></span><b class="hi">${coin(p.symbol)}</b> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s} ${p.leverage}x</span>${warns.length ? ` <span class="warn" title="${esc(warns.join("\n"))}">⚠</span>` : ""}`;
+  const coinCell = `<span class="chev-s">${open ? "▾" : "▸"}</span> <span class="sbar ${p.side === "long" ? "b-long" : "b-short"}"></span><b class="hi">${coin(p.symbol)}</b> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s} ${p.leverage}x</span>${warns.length ? ` <span class="warn" title="${esc(warns.join("\n"))}">⚠</span>` : ""}${holdChip(p.hold_card) ? `<div class="hold-chip">${holdChip(p.hold_card)}</div>` : ""}`;
   return `<tr class="click prow ${open ? "open" : ""} ${p.position_id === sel ? "sel" : ""}" data-act="possel" data-arg="${id}">
     <td class="nowrap pos-toggle" data-act="posrow" data-arg="${id}" aria-expanded="${open}" title="点币名展开 / 收起明细">${coinCell}</td>
     <td class="r num">${qtyFmt(p.quantity)}</td>
@@ -1597,7 +1650,7 @@ function posCardC(p, now, sel) {
   return `<div class="pm ${open ? "open" : ""} ${p.position_id === sel ? "sel" : ""}"><div class="pm-h click" data-act="possel" data-arg="${esc(p.position_id)}">
       <div class="l1"><span class="pos-toggle" data-act="posrow" data-arg="${esc(p.position_id)}" aria-expanded="${open}"><span class="chev-s">${open ? "▾" : "▸"}</span> <b class="hi">${coin(p.symbol)}</b></span> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s} ${p.leverage}x</span>${warns.length ? ' <span class="warn">⚠</span>' : ""}
         <span class="r num ${cls(pnl)}"><b>${pnl == null ? "—" : signed(pnl, 2)}</b> <span class="small">${netPct(p) == null ? "" : signed(netPct(p), 2) + "%"}</span></span></div>
-      <div class="l2 small"><span class="dim">开</span> <span class="num">${price(p.entry_price, p.symbol)}</span> <span class="dim">现</span> <span class="num">${price(p.mark_price, p.symbol)}</span> <span class="dim">损</span> ${stopCellC(p)} ${lbChip(p)} <span class="dim num">${durShort(held)}</span></div></div>
+      <div class="l2 small"><span class="dim">开</span> <span class="num">${price(p.entry_price, p.symbol)}</span> <span class="dim">现</span> <span class="num">${price(p.mark_price, p.symbol)}</span> <span class="dim">损</span> ${stopCellC(p)} ${lbChip(p)} <span class="dim num">${durShort(held)}</span></div>${holdChip(p.hold_card) ? `<div class="l3">${holdChip(p.hold_card)}</div>` : ""}</div>
     ${open ? `<div class="pdet">${posDetail(p)}</div>` : ""}</div>`;
 }
 const dl = (rows) => `<dl class="kv2">${rows.filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
@@ -1647,6 +1700,7 @@ function posDetail(p) {
   return `${warns.length ? `<div class="note warn small">${warns.map((w) => esc(w)).join("<br>")}</div>` : ""}
     <div class="pgrid"><div><div class="lbl">仓位</div>${pos}</div><div><div class="lbl">盈亏</div>${pnl}</div><div><div class="lbl">价位</div>${lv}</div></div>
     <details class="more" ${q && (q.stale || q.last_error || q.trailing_error) ? "open" : ""}><summary>${q ? "交易所保护单" : "执行器止损检查"}</summary>${prot}${p.trailing_stop_pct != null ? `<div class="small dim">${trailNote(p)}</div>` : ""}</details>
+    ${holdHistory(p.hold_card, p.side, p.opened_at, null)}
     <div class="lbl">这笔今天的每一步 · 最新在上 · 点一条看快照</div>${posEvents(p)}
     ${links}`;
 }
@@ -2666,12 +2720,15 @@ S.tradeOpen = new Set();
 const TRADE_COLS = 20;  // 展开行跨满整行；浏览器按实际列数截
 const TRADE_HEAD = '<th>平仓时间</th><th>合约</th><th class="r">开仓价</th><th class="r">平仓价</th><th>怎么平的</th><th class="r">持有</th><th class="r" title="平仓价 − 开仓价 带来的盈亏，扣手续费前">毛利</th><th class="r">手续费</th><th class="r">净利 U</th>';
 const REASON_KIND = { stop_loss: "p-short", lifeboat: "p-short", take_profit: "p-long", trailing_stop: "p-accent", tightened_stop: "p-accent" };
-const reasonOf = (t) => (t.close_source === "keeper_assistant" ? "管家助手" : REASON[t.close_reason] || (t.close_reason ? "其他" : "—"));
+const CARD_CLOSE = { opposite_card: "反向卡平", neutral_card: "观望卡平" };
+const reasonOf = (t) => (t.close_source === "keeper_assistant" ? "管家助手" : (t.hold_card && CARD_CLOSE[t.hold_card.closed_by]) || REASON[t.close_reason] || (t.close_reason ? "其他" : "—"));
+const reasonTip = (t) => (t.close_source !== "keeper_assistant" && t.hold_card && t.hold_card.closed_by ? `管家平仓（账本记 keeper），最后一次判平是${t.hold_card.closed_by === "opposite_card" ? "作战卡转成和持仓相反方向的规则" : "作战卡转观望的规则"}` : "");
+const reasonKind = (t) => (t.hold_card && t.hold_card.closed_by && t.close_source !== "keeper_assistant" ? "p-warn" : REASON_KIND[t.close_reason] || "");
 function tradeRow(t, when, tail = "") {
   const [s] = SIDE[t.side] || [t.side, ""];
   const id = t.position_id || t.signal_id || "";
   const open = S.tradeOpen.has(id);
-  const sym = `<span class="chev-s">${open ? "▾" : "▸"}</span> <span class="sbar ${t.side === "long" ? "b-long" : "b-short"}"></span><b class="hi">${coin(t.symbol)}</b> <span class="chip-s ${t.side === "long" ? "p-long" : "p-short"}">${s} ${t.leverage}x</span>${t.test ? ' <span class="chip-s p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : ""}`;
+  const sym = `<span class="chev-s">${open ? "▾" : "▸"}</span> <span class="sbar ${t.side === "long" ? "b-long" : "b-short"}"></span><b class="hi">${coin(t.symbol)}</b> <span class="chip-s ${t.side === "long" ? "p-long" : "p-short"}">${s} ${t.leverage}x</span>${t.test ? ' <span class="chip-s p-warn" title="没有经过哨兵 / 拍板 / 风控员：冒烟测试或手动下的单">测试</span>' : ""}${holdChip(t.hold_card, true) ? `<div class="hold-chip">${holdChip(t.hold_card, true)}</div>` : ""}`;
   const act = `data-act="trow" data-arg="${esc(id)}" aria-expanded="${open}"`;
   const extra = (n) => '<td class="r num dim">—</td>'.repeat(n);
   let main;
@@ -2685,7 +2742,7 @@ function tradeRow(t, when, tail = "") {
       ? `<td class="r warn" colspan="3" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到盈亏</td>`
       : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`;
     main = `<tr class="${open ? "open" : ""}"><td class="num nowrap">${when(shut)}</td><td class="nowrap click pos-toggle" ${act} title="点币名展开 / 收起明细">${sym}</td><td class="r num">${price(t.entry_price, t.symbol)}</td><td class="r num">${exit}${t.paper_stop_price != null ? ' <span class="chip-s" title="按主网价越过止损记的模拟成交，展开看 Demo 实际成交">模拟</span>' : ""}</td>
-      <td><span class="chip-s ${REASON_KIND[t.close_reason] || ""}">${esc(reasonOf(t))}</span></td><td class="r num nowrap">${durShort(new Date(shut) - new Date(t.opened_at))}</td>${money3}${tail}</tr>`;
+      <td><span class="chip-s ${reasonKind(t)}" title="${esc(reasonTip(t))}">${esc(reasonOf(t))}</span></td><td class="r num nowrap">${durShort(new Date(shut) - new Date(t.opened_at))}</td>${money3}${tail}</tr>`;
   }
   return main + (open ? `<tr class="pdet-row"><td colspan="${TRADE_COLS}"><div class="pdet">${tradeDetail(t)}</div></td></tr>` : "");
 }
@@ -2703,7 +2760,7 @@ function tradeDetail(t) {
     ["开仓价", `<span class="num">${price(t.entry_price, t.symbol)}</span>`],
     ["平仓价", `<span class="num">${t.exit_price != null ? price(t.exit_price, t.symbol) : "未回填"}</span>${t.paper_stop_price != null ? ` <span class="dim small">主网${t.paper_price_source === "mark" ? "标记价" : "成交价"}越过止损 ${t.paper_stop_price}，按止损价记模拟成交；Demo 实际 ${t.demo_exit_price != null ? price(t.demo_exit_price, t.symbol) : "—"}，净 ${t.demo_pnl_usdt == null ? "—" : signed(t.demo_pnl_usdt, 2) + " U"}</span>` : ""}`],
     ["下单时止损 / 止盈", `<span class="num">${t.stop_loss_price != null ? price(t.stop_loss_price, t.symbol) : "—"} / ${t.take_profit_price != null ? price(t.take_profit_price, t.symbol) : "—"}</span>`],
-    ["怎么平的", esc(reasonOf(t))],
+    ["怎么平的", `${esc(reasonOf(t))}${reasonTip(t) ? ` <span class="dim small">${esc(reasonTip(t))}</span>` : ""}`],
   ]);
   const c = dl([
     ["毛利", t.unfilled || t.pnl_missing ? "—" : `<span class="num ${cls(t.pnl_usdt + t.fees_usdt)}">${signed(t.pnl_usdt + t.fees_usdt, 2)} U</span>`],
@@ -2713,6 +2770,7 @@ function tradeDetail(t) {
     t.mainnet_net_usdt != null ? ["按主网价格算", `<span class="num ${cls(t.mainnet_net_usdt)}">${signed(t.mainnet_net_usdt, 2)} U</span> <span class="dim small">价差 ${t.mainnet_price_gap_usdt == null ? "—" : signed(t.mainnet_price_gap_usdt, 2)} · 费率差 ${t.mainnet_fee_gap_usdt == null ? "—" : signed(t.mainnet_fee_gap_usdt, 2)} · 差 ${bpTxt(t.mainnet_gap_bp)}</span>`] : null,
   ]);
   return `<div class="pgrid"><div><div class="lbl">时间</div>${a}</div><div><div class="lbl">价格</div>${b}</div><div><div class="lbl">盈亏</div>${c}</div></div>
+    ${t.unfilled ? "" : holdHistory(t.hold_card, t.side, t.opened_at, shut, reasonOf(t))}
     <div class="row small">${t.signal_id ? `<button class="btn b-sm" ${clickable("signal", t.signal_id)}>看整条链：信号 → 拍板 → 风控 → 开平仓</button>` : ""}${t.position_id ? `<span class="dim">编号 ${esc(t.position_id)}</span>` : ""}</div>`;
 }
 // 表尾合计（同交易所历史表的汇总行）：只算成交了、有盈亏数的单
