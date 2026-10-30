@@ -9,6 +9,10 @@
 - 还可能在交易所上的（在挂、提交 / 撤销未知、已触发但仓位没收尾）一条也不删，整个脚本不写：
   旧代码看不到它，它会一直挡住这个币开新仓。
 
+``--mainnet-extreme-only``：只删 ``native_mainnet_extreme`` / ``native_mainnet_activated``
+（回退到有交易所移动止损、但还没有主网极值的版本用）。这两个字段只给主网止损规则的候选线，删了
+只是从下一个主网价重新记；不看腿，随时能跑。
+
 默认只列出要改的地方；``--write`` 才改，改前把原文件存成 ``positions.json.bak-native``。
 不联网、不读密钥。
 """
@@ -32,7 +36,21 @@ FIELDS = (
     "native_mainnet_extreme",
     "native_mainnet_activated",
 )
+MAINNET_FIELDS = ("native_mainnet_extreme", "native_mainnet_activated")
 _GONE = {"cancelled", "rejected", "superseded", "planned"}
+
+
+def clean_mainnet(data: dict[str, Any]) -> list[str]:
+    """只删主网极值两个字段，返回改了什么。"""
+    changes: list[str] = []
+    for pid, tracked in (data.get("positions") or {}).items():
+        protection = tracked.get("server_protection")
+        if not isinstance(protection, dict):
+            continue
+        for name in MAINNET_FIELDS:
+            if name in protection:
+                changes.append(f"{pid}: 删 {name}={protection.pop(name)!r}")
+    return changes
 
 
 def clean(data: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -69,9 +87,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("ledger", type=Path, help="data/positions.json")
     parser.add_argument("--write", action="store_true", help="真的改（先备份）")
+    parser.add_argument(
+        "--mainnet-extreme-only", action="store_true", help="只删主网极值两个字段，不动腿"
+    )
     args = parser.parse_args(argv)
     data = json.loads(args.ledger.read_text(encoding="utf-8"))
-    changes, blocked = clean(data)
+    if args.mainnet_extreme_only:
+        changes, blocked = clean_mainnet(data), []
+    else:
+        changes, blocked = clean(data)
     for line in changes:
         print(line)
     if blocked:

@@ -759,3 +759,19 @@ async def test_rollback_script_refuses_while_a_native_leg_may_be_on_the_exchange
     raw = json.loads(h.path.read_text())["positions"]["pos-1"]["server_protection"]
     assert not [x for x in raw["legs"] if x["kind"] == "trailing_stop"]
     assert not [k for k in raw if k.startswith("native_")]
+
+
+async def test_rollback_script_can_drop_only_the_mainnet_extreme_with_a_live_native_leg(
+    tmp_path: Path,
+) -> None:
+    h = NativeHarness(tmp_path, Side.LONG)
+    await native_armed(h)
+    h.adapter.observe_mainnet_price("pos-1", 100.8)
+    raw = json.loads(h.path.read_text())["positions"]["pos-1"]["server_protection"]
+    assert (raw["native_mainnet_extreme"], raw["native_mainnet_activated"]) == (100.8, True)
+    assert load_rollback().main([str(h.path), "--mainnet-extreme-only", "--write"]) == 0
+    raw = json.loads(h.path.read_text())["positions"]["pos-1"]["server_protection"]
+    assert "native_mainnet_extreme" not in raw and "native_mainnet_activated" not in raw
+    assert [x["client_order_id"] for x in raw["legs"] if x["kind"] == "trailing_stop"] == [
+        "br-ts-pos-1-1"
+    ]

@@ -58,7 +58,8 @@ NATIVE_TRAILING_FIELDS = (
 )
 """交易所移动止损（``[fast_loop] trailing_native``）加在 ``ServerProtection`` 上的字段，为空 /
 False 时不落盘；腿上的 ``activate_price`` / ``callback_rate`` 同样。没用过的账本旧代码照常能读，
-用过之后回退先跑 ``scripts/native_trailing_rollback.py``。"""
+用过之后回退先跑 ``scripts/native_trailing_rollback.py``；只回退到还没有 ``native_mainnet_*`` 的
+版本时跑它的 ``--mainnet-extreme-only``（只删这两个字段，随时能跑）。"""
 
 
 class ProtectiveLeg(BaseModel):

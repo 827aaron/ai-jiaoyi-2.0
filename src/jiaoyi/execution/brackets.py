@@ -1407,6 +1407,8 @@ class BracketManager:
         for leg in state.legs:
             if _tp(leg) and leg.state == "cancel_pending" and leg.algo_status == "NEW":
                 await self._retry_tp_cancel(pid, leg)
+                if self._current(pid)[1].stage == "exiting":
+                    return "exit"  # 再读时发现它已触发
                 continue
             if not (_tp(leg) and _live(leg)) or leg.client_order_id == target:
                 continue
