@@ -5,7 +5,7 @@ import dataclasses
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -2004,3 +2004,146 @@ async def test_commander_flip_restore_with_setting_back_to_one_says_so(
         if r.output and r.output.get("card_flip") == "dropped"
     ]
     assert len(dropped) == 1 and "设置改回 1" in dropped[0].summary
+
+
+_R0 = datetime(2026, 10, 30, 4, 25, tzinfo=UTC)  # the round whose card expires at 06:45
+
+
+async def _event_expiry_case(
+    tmp_path: Path, script: dict[str, list[Bias]], **kw: object
+) -> tuple[BattleCardCommander, list[datetime]]:
+    eng = _Directed2(script)
+    c, _log, clock = make(
+        tmp_path,
+        eng,
+        _R0,
+        ttl=timedelta(minutes=140),
+        symbol_min_interval=timedelta(minutes=5),
+        card_path=tmp_path / "battle_card.json",
+        **kw,
+    )
+    card = await c.refresh(pool(_R0, *(entry(s) for s in script)), "scheduled")
+    assert card.expires_at == datetime(2026, 10, 30, 6, 45, tzinfo=UTC)
+    return c, clock
+
+
+async def _event(
+    c: BattleCardCommander, clock: list[datetime], sym: str, at: datetime
+) -> CardSymbol:
+    clock[0] = at
+    card = await c.refresh_symbol(pool(at, entry(sym)), sym, "key_level_break")
+    assert card is not None
+    cs = card.for_symbol(sym)
+    assert cs is not None
+    return cs
+
+
+@pytest.mark.parametrize(
+    ("sym", "start", "flip", "at", "expires"),
+    [
+        ("ETHUSDT", Bias.SHORT, Bias.LONG, (5, 11), (7, 31)),
+        ("STRKUSDT", Bias.LONG, Bias.SHORT, (5, 42), (8, 2)),
+        ("QNTUSDT", Bias.NO_TRADE, Bias.LONG, (6, 12), (8, 32)),
+    ],
+)
+async def test_commander_refresh_symbol_flip_gets_full_validity_from_its_meeting(
+    tmp_path: Path,
+    sym: str,
+    start: Bias,
+    flip: Bias,
+    at: tuple[int, int],
+    expires: tuple[int, int],
+) -> None:
+    c, clock = await _event_expiry_case(tmp_path, {sym: [start, flip]})
+    t = datetime(2026, 10, 30, *at, tzinfo=UTC)
+    cs = await _event(c, clock, sym, t)
+    assert (cs.bias, cs.issued_at) == (flip, t)
+    assert cs.expires_at == datetime(2026, 10, 30, *expires, tzinfo=UTC)
+    assert c._card is not None
+    assert c._card.expires_at == datetime(2026, 10, 30, 6, 45, tzinfo=UTC)
+
+
+async def test_commander_refresh_symbol_new_symbol_gets_full_validity_from_its_meeting(
+    tmp_path: Path,
+) -> None:
+    eng = _Directed2({"SANDUSDT": [Bias.LONG], "QNTUSDT": [Bias.LONG]})
+    eng.picks = ["SANDUSDT"]
+    c, _log, clock = make(
+        tmp_path,
+        eng,
+        _R0,
+        ttl=timedelta(minutes=140),
+        symbol_min_interval=timedelta(minutes=5),
+    )
+    await c.refresh(pool(_R0, entry("SANDUSDT"), entry("QNTUSDT")), "scheduled")
+    assert c._card is not None and c._card.for_symbol("QNTUSDT") is None
+    cs = await _event(c, clock, "QNTUSDT", datetime(2026, 10, 30, 6, 12, tzinfo=UTC))
+    assert cs.expires_at == datetime(2026, 10, 30, 8, 32, tzinfo=UTC)
+
+
+async def test_commander_refresh_symbol_same_direction_keeps_card_expiry_and_never_shortens(
+    tmp_path: Path,
+) -> None:
+    c, clock = await _event_expiry_case(
+        tmp_path, {"ETHUSDT": [Bias.SHORT, Bias.LONG, Bias.LONG], "SANDUSDT": [Bias.LONG] * 2}
+    )
+    sand = await _event(c, clock, "SANDUSDT", datetime(2026, 10, 30, 5, 0, tzinfo=UTC))
+    assert sand.expires_at == datetime(2026, 10, 30, 6, 45, tzinfo=UTC)
+    await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 11, tzinfo=UTC))
+    again = await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 40, tzinfo=UTC))
+    assert again.issued_at == datetime(2026, 10, 30, 5, 40, tzinfo=UTC)
+    assert again.expires_at == datetime(2026, 10, 30, 7, 31, tzinfo=UTC)
+
+
+async def test_commander_refresh_symbol_neutral_kept_by_setting_does_not_reset_expiry(
+    tmp_path: Path,
+) -> None:
+    c, clock = await _event_expiry_case(tmp_path, {"ETHUSDT": [Bias.LONG, Bias.NO_TRADE]})
+    c.set_neutral_flip_ignored(lambda: True)
+    kept = await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 11, tzinfo=UTC))
+    assert (kept.bias, kept.issued_at) == (Bias.LONG, _R0)
+    assert kept.expires_at == datetime(2026, 10, 30, 6, 45, tzinfo=UTC)
+
+
+async def test_commander_flip_pending_keeps_expiry_and_confirm_flip_resets_it(
+    tmp_path: Path,
+) -> None:
+    c, clock = await _event_expiry_case(
+        tmp_path, {"ETHUSDT": [Bias.SHORT, Bias.LONG]}, flip_confirm=2
+    )
+    pending: list[tuple[str, Any]] = []
+    c.set_on_flip_pending(lambda sym, cand: pending.append((sym, cand)))
+    held = await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 11, tzinfo=UTC))
+    assert (held.bias, held.issued_at) == (Bias.SHORT, _R0)
+    assert held.expires_at == datetime(2026, 10, 30, 6, 45, tzinfo=UTC)
+    [(_sym, cand)] = pending
+    clock[0] = datetime(2026, 10, 30, 5, 20, tzinfo=UTC)
+    assert c.confirm_flip("ETHUSDT", cand, "两个模型都答是", {})
+    assert c._card is not None
+    cs = c._card.for_symbol("ETHUSDT")
+    assert cs is not None and cs.bias is Bias.LONG
+    assert cs.expires_at == datetime(2026, 10, 30, 7, 31, tzinfo=UTC)
+
+
+async def test_commander_current_keeps_a_flipped_symbol_past_the_card_expiry(
+    tmp_path: Path,
+) -> None:
+    c, clock = await _event_expiry_case(
+        tmp_path, {"ETHUSDT": [Bias.SHORT, Bias.LONG], "SANDUSDT": [Bias.LONG]}
+    )
+    await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 11, tzinfo=UTC))
+    late = datetime(2026, 10, 30, 6, 50, tzinfo=UTC)
+    clock[0] = late
+    view = c.current(late)
+    assert view is not None and view.is_valid(late)
+    assert [s.symbol for s in view.symbols] == ["ETHUSDT"]
+    eth = view.for_symbol("ETHUSDT")
+    assert eth is not None and eth.allowed_signals == [SignalKind.VOLUME_BREAKOUT]
+    pos = PositionRecord.model_construct(symbol="ETHUSDT", side=Side.SHORT)
+    assert JevKeeper._card_rule(pos, view, late) == "新作战卡方向改成 long"
+    assert c.refresh_reason(late, pool(late, entry("ETHUSDT")), {}) == "scheduled"
+    c2, _, _ = make(tmp_path, FakeEngine([]), late, card_path=tmp_path / "battle_card.json")
+    restored = c2.current(late)
+    assert restored is not None and [s.symbol for s in restored.symbols] == ["ETHUSDT"]
+    gone = datetime(2026, 10, 30, 7, 31, tzinfo=UTC)
+    assert c.current(gone) is None
