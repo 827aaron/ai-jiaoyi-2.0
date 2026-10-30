@@ -62,6 +62,7 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core import close_sources, paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
+from jiaoyi.core.desk_turn import DeskTurnPause
 from jiaoyi.core.held_events import HeldEventDesk
 from jiaoyi.core.loop_lag import LoopLagMonitor, register_stack_dump
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
@@ -1514,6 +1515,8 @@ class Runner:
             # 同币上一笔刚平、收尾还没核完：执行层反正不开，连 Jev 都不问
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 同币上一笔收尾中，先不开新仓", now)
             return
+        if self._desk_turn_blocked(signal, card, now):
+            return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:
             if self.app.paused is not None or self._restarting:
@@ -1528,6 +1531,8 @@ class Runner:
                     Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡或大盘方向已变，重新等信号", now
                 )
                 return
+            if self._desk_turn_blocked(signal, fresh, now):
+                return  # 问 Jev 期间大盘台转向了
             account = await self._read_account(signal, card)
             if account is None:
                 return
@@ -2044,6 +2049,12 @@ class Runner:
 
     def _card_published(self) -> None:
         """不带旧卡快照，不排Jev队列；实际运行时读取最新卡与账本。"""
+        if (turn := self._desk_turn()) is not None:
+            now = self.app.clock()
+            try:
+                turn.sweep(self.m.cards.current(now), now)
+            except Exception:
+                log.exception("大盘台转向暂停：新卡出来后恢复检查出错")
 
         async def check() -> None:
             await self._review_card_rules()
@@ -2198,6 +2209,29 @@ class Runner:
 
     def _held_events(self) -> HeldEventDesk | None:
         return getattr(self.app, "held_events", None)
+
+    def _desk_turn(self) -> DeskTurnPause | None:
+        return getattr(self.app, "desk_turn", None)
+
+    def _desk_turn_blocked(
+        self, signal: CandidateSignal, card: BattleCard | None, now: datetime
+    ) -> bool:
+        turn = self._desk_turn()
+        why = turn.blocked(signal.symbol, signal.side_hint, card, now) if turn else None
+        if why is None:
+            return False
+        rec = self.app.recorders.get(Role.RISK_GUARD)
+        if rec is not None:
+            rec.record(
+                now,
+                Outcome.REJECT,
+                f"{signal.symbol} {why}",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                card_id=card.card_id if card else None,
+                output={"approved": False, "reasons": [why], "detail": {"by": "desk_turn"}},
+            )
+        return True
 
     def _last_price(self, symbol: str) -> float | None:
         snap = self.m.features.snapshot(symbol)
@@ -2792,11 +2826,22 @@ class Runner:
 
     async def _desk_run(self, desk: Any, reason: str) -> None:
         try:
-            await desk.run(self.app.pool, reason)
+            res = await desk.run(self.app.pool, reason)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("大盘台这一轮出错")
+            return
+        turn = self._desk_turn()
+        direction = getattr(res, "direction", None)
+        if turn is not None and getattr(res, "status", None) == "ok" and direction:
+            now = self.app.clock()
+            try:
+                published = getattr(res, "published", None)
+                at = published.observed_at if published is not None else None
+                turn.on_desk_run(direction, now, at)
+            except Exception:
+                log.exception("大盘台转向暂停出错")
 
     def _market_finished(self, task: asyncio.Task[None]) -> None:
         if self._market_task is task:

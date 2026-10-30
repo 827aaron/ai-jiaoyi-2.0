@@ -210,6 +210,7 @@ HOT_FAST: frozenset[str] = frozenset(
         # 持仓币加开临时会（每次判断现读）
         "patrol_held_event_loss_r",
         "patrol_held_event_on_desk_flip",
+        "signal_desk_turn_pause",
     }
 )
 

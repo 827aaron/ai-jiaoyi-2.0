@@ -50,6 +50,7 @@ from jiaoyi.core import profiles
 from jiaoyi.core.against import MEETING_TRIGGER, AgainstSignalDesk
 from jiaoyi.core.commands import read_paused, update_runtime, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError, load_risk_config, read_toml, with_profile
+from jiaoyi.core.desk_turn import DESK_TURN_FILE, DeskTurnPause
 from jiaoyi.core.held_events import HELD_EVENTS_FILE, HeldEventDesk
 from jiaoyi.core.hotconfig import (
     HOT_APP,
@@ -957,6 +958,18 @@ class App:
             meeting_ok=(lambda t: bool(accepts(t))) if callable(accepts) else None,
             met_since=met_since if callable(met_since) else None,
             recorder=self.recorders.get(Role.PATROL),
+        )
+        # 大盘台转向：卡上旧方向的币暂停开旧方向的新仓，等这个币转向后第一场会（core/desk_turn.py）
+        latest = (self.desk.state.latest or {}) if self.desk is not None else {}
+        self.desk_turn = DeskTurnPause(
+            app_cfg.fast_loop,
+            Path(app_cfg.data_dir) / DESK_TURN_FILE,
+            tz=risk_cfg.day_reset_tz,
+            request_event=request_event if callable(request_event) else None,
+            meeting_ok=(lambda t: bool(accepts(t))) if callable(accepts) else None,
+            met_since=met_since if callable(met_since) else None,
+            recorder=self.recorders.get(Role.RISK_GUARD),
+            initial_direction=latest.get("direction"),
         )
         self.pool: SymbolPool | None = None
         self.started = False
