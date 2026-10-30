@@ -533,6 +533,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "rej") { S.rej = !S.rej; render(); }
   else if (act === "symsort") { S.symSort = arg; render(); }
   else if (act === "symopen") { if (S.symOpen.has(arg)) S.symOpen.delete(arg); else S.symOpen.add(arg); render(); }
+  else if (act === "poolview") { S.poolView = arg; render(); }
   else if (act === "tests") { S.tests = !S.tests; render(); poll(); }
   else if (act === "csv") exportCsv();
   else if (act === "cmd") askCommand(arg);
@@ -570,6 +571,22 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.dataset && e.target.dataset.act) { e.preventDefault(); e.target.click(); }
 });
+// 决策日志的一句话摘要是主程序写的，带英文枚举（拍板人的 take / skip、止损 wide、仓位 S）：显示前换成中文，原文在快照里
+const HUMAN = [
+  [/\b([A-Z0-9]{2,15})USDT\b/g, "$1"],
+  [/做 take (\d)/g, "做（$1"],
+  [/做 skip (\d)/g, "不做（$1"],
+  [/止损 wide\b/g, "止损宽"], [/止损 narrow\b/g, "止损窄"], [/止损 mid\b/g, "止损中"],
+  [/仓位 S\b/g, "仓位小"], [/仓位 M\b/g, "仓位中"], [/仓位 L\b/g, "仓位大"],
+  [/\bshort\b/g, "空"], [/\blong\b/g, "多"], [/\bstop_loss\b/g, "止损"], [/\btake_profit\b/g, "止盈"], [/\btrailing_stop\b/g, "移动止损"],
+];
+const human = (t) => {
+  let out = String(t ?? "");
+  for (const [re, to] of HUMAN) out = out.replace(re, to);
+  // 「做（0.67 / 止损宽 0.67 / 仓位小 0.84」补上括号：只在前面换出了左括号时
+  return out.replace(/(不?做（\d[\d.]*)(\s*\/)/, "$1）$2");
+};
+const tx = (t) => esc(human(t));
 const clickable = (act, arg = "") => `data-act="${act}" data-arg="${esc(arg)}" tabindex="0" role="button"`;
 const json = (o) => (o && Object.keys(o).length ? `<pre class="json">${esc(JSON.stringify(o, null, 2))}</pre>` : `<span class="dim">（空）</span>`);
 
@@ -1003,7 +1020,7 @@ async function showSignal(id) {
     const chain = await r.json();
     window.__recs = chain;
     const steps = chain.map((s, i) => `<div class="step"><div class="t"><span class="n">${hms(s.ts)}</span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)}${s.latency_ms ? `<span class="dim small">${Math.round(s.latency_ms)} ms</span>` : ""}</div>
-      <div>${esc(s.text)}</div>${keyFacts(s)}<details><summary>看到的和判断</summary>${recordBody(s)}</details></div>`).join("");
+      <div>${tx(s.text)}</div>${keyFacts(s)}<details><summary>看到的和判断</summary>${recordBody(s)}</details></div>`).join("");
     dlg(`<h3>信号详情</h3><p class="dim small">${esc(id)}</p><div class="steps">${steps || '<div class="dim">今天的日志里找不到这个信号。</div>'}</div>`);
   } catch (e) {
     dlg(`<h3>信号详情</h3><div class="down">读取失败</div>`);
@@ -1224,7 +1241,7 @@ function showRecord(i) {
     return;
   }
   const isJev = (s.input && s.input.jev) || (s.output && s.output.jev);
-  dlg(`<h3>${esc(ROLE[s.role] || s.role)} · ${hms(s.ts)} ${pill(s.outcome)}</h3><p>${esc(s.text)}</p>
+  dlg(`<h3>${esc(ROLE[s.role] || s.role)} · ${hms(s.ts)} ${pill(s.outcome)}</h3><p>${tx(s.text)}</p>
     ${recordBody(s)}
     ${isJev ? "" : `<p class="dim small">${s.latency_ms ? `耗时 ${Math.round(s.latency_ms)} ms · ` : ""}${s.cost_usd ? `花费 $${s.cost_usd.toFixed(4)}` : "不花钱"}</p>`}`);
 }
@@ -1301,7 +1318,7 @@ function meetingHtml(m) {
     const items = m.steps.map((s, i) => [s, i]).filter(([s]) => s.stage === st);
     if (!items.length) return "";
     return `<div class="lbl">${esc(stageName[st] || st || "其他")}</div>${items.map(([s, i]) => `<details class="say" data-step="${i}" ${S.meetOpen.has(i) ? "open" : ""}>
-      <summary><b>${esc(whoName[s.who] || s.who || "—")}</b><span class="dim small">${s.ts ? hms(s.ts) : ""}</span><span class="dim small one">${esc(s.text.slice(0, 80))}</span></summary><div class="txt">${esc(s.text)}</div></details>`).join("")}`;
+      <summary><b>${esc(whoName[s.who] || s.who || "—")}</b><span class="dim small">${s.ts ? hms(s.ts) : ""}</span><span class="dim small one">${esc(s.text.slice(0, 80))}</span></summary><div class="txt">${tx(s.text)}</div></details>`).join("")}`;
   }).join("");
   return `<p class="dim">${meetPill(m.status)} ${meetBias(m)} ${meetTime(m)}${m.cost_usd ? ` · 花费 ${meetCost(m.cost_usd)}` : ""}${m.status === "running" ? " · 自动刷新" : ""}</p>
     ${isMkt ? "" : `<div class="stgs">${chips}</div>`}
@@ -1343,8 +1360,8 @@ function cardSection(c) {
     <div class="row">${pills || '<span class="dim">这一轮没有要做的币</span>'}${more > 0 ? `<span class="dim small">+${more} 个</span>` : ""}</div>
     ${idle.length ? `<div class="dim small">${idleLine(idle)}（不开仓）</div>` : ""}
     ${cardEffective(c)}
-    ${c.current_market ? `<div class="note"><b>最新大盘判断</b>　${esc(c.current_market.regime)}${deskLatestLine(c.desk_latest)}<div class="dim small">${hms(c.current_market.observed_at)} 更新${c.current_market.source_ts ? ` · 行情 ${hms(c.current_market.source_ts)}` : ""} · 大盘 v${c.current_market.version}；各币研究按原有效期执行</div></div>` : ""}
-    ${c.regime ? `<div class="note"><b>出卡时大盘</b>　${esc(c.regime)}</div>` : ""}
+    ${c.current_market ? `<div class="note"><div class="clamp3" title="${esc(c.current_market.regime)}"><b>最新大盘判断</b>　${esc(c.current_market.regime)}</div>${deskLatestLine(c.desk_latest)}<div class="dim small">${hms(c.current_market.observed_at)} 更新${c.current_market.source_ts ? ` · 行情 ${hms(c.current_market.source_ts)}` : ""} · 大盘 v${c.current_market.version}；各币研究按原有效期执行</div></div>` : ""}
+    ${c.regime ? `<div class="note clamp2" title="${esc(c.regime)}"><b>出卡时大盘</b>　${esc(c.regime)}</div>` : ""}
     <div class="foot">点开看每个币的方向、止损、杠杆和理由 ›</div>
   </section>`;
 }
@@ -1360,7 +1377,7 @@ function cardEffective(c) {
 
 function feedSection(feed, signals) {
   const body = feed.length
-    ? `<div class="feed scroll">${feed.map((e) => `<div class="ev ${e.kind} ${e.signal_id ? "click" : ""}" ${e.signal_id ? clickable("signal", e.signal_id) : ""}><div class="t"><span class="n">${hm(e.ts)}</span>${esc(ROLE[e.role] || e.role)}${e.symbol ? " · " + coin(e.symbol) : ""}</div><div class="d">${esc(e.text)}</div></div>`).join("")}</div>`
+    ? `<div class="feed scroll">${feed.map((e) => `<div class="ev ${e.kind} ${e.signal_id ? "click" : ""}" ${e.signal_id ? clickable("signal", e.signal_id) : ""}><div class="t"><span class="n">${hm(e.ts)}</span>${esc(ROLE[e.role] || e.role)}${e.symbol ? " · " + coin(e.symbol) : ""}</div><div class="d">${tx(e.text)}</div></div>`).join("")}</div>`
     : `<div class="empty"><b>今天还没有决策</b>哨兵已触发 ${signals} 个信号。送拍板后会在这里出现。</div>`;
   return `<section class="card"><div class="ch"><h2>信号与决策流</h2><span class="r">最新在上 · 框里往下滚看更早的</span></div>${body}
     <div class="foot">绿 = 放行 / 开仓 · 黄 = 拍板放弃 · 红 = 风控员拒绝 · 蓝 = 平仓。点一条看整条链和快照。</div></section>`;
@@ -1381,15 +1398,15 @@ function closeCell(p) {
 }
 
 function posSection(list) {
+  const now = data ? new Date(data.now).getTime() : Date.now();
   const body = list.length
     ? list.map((p) => {
-        const [s, sc] = SIDE[p.side] || [p.side, ""];
-        const lb = LIFEBOAT[p.lifeboat_status] || "⚠ 没有保命单";
-        const lbBad = p.lifeboat_status !== "active";
-        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}"><div class="top"><b>${coin(p.symbol)}${catTag(p.category)} <span class="${sc}">${s}</span> ${qty(p.quantity, p.mark_price || p.entry_price)}</b>
-          <span class="pnl ${cls(netPnl(p))}" title="${esc(feeTip(p))}">${netPnl(p) == null ? "—" : signed(netPnl(p), 2) + "U"}</span></div>
-          <div class="meta"><span>开 ${price(p.entry_price, p.symbol)} · 损 ${price(p.stop_loss_price, p.symbol)} · 盈 ${price(p.take_profit_price, p.symbol)}</span></div>
-          <div class="meta"><span class="${lbBad ? "warn" : ""}">${lb}${p.lifeboat_price ? " " + price(p.lifeboat_price, p.symbol) : ""}</span><span>管家：${esc(p.keeper || "还没看")}</span>${keeperPeak(p) ? `<span>${esc(keeperPeak(p))}</span>` : ""}${p.status !== "open" ? `<span class="pill p-warn">${esc(p.close_note || p.status)}</span>` : ""}</div></a>`;
+        const [s] = SIDE[p.side] || [p.side, ""];
+        const pnl = netPnl(p);
+        const warn = p.status !== "open" ? `<span class="chip-s p-warn">${esc(p.close_note || "平仓中")}</span>` : "";
+        return `<a class="pos click" href="#positions/${encodeURIComponent(p.position_id)}" data-open="${esc(p.position_id)}"><div class="top"><span class="sbar ${p.side === "long" ? "b-long" : "b-short"}"></span><b>${coin(p.symbol)}</b> <span class="chip-s ${p.side === "long" ? "p-long" : "p-short"}">${s}${p.leverage ? " " + p.leverage + "x" : ""}</span>${warn}
+          <span class="pnl ${cls(pnl)}" title="${esc(feeTip(p))}">${pnl == null ? "—" : signed(pnl, 2)}<span class="small">${netPct(p) == null ? "" : " " + signed(netPct(p), 2) + "%"}</span></span></div>
+          <div class="meta"><span>开 <span class="num">${price(p.entry_price, p.symbol)}</span></span><span>损 <span class="num">${price(p.stop_loss_price, p.symbol)}</span></span>${lbChip(p)}<span>管家 ${esc(p.keeper || "还没看")}</span>${p.opened_at ? `<span class="num">${durShort(now - new Date(p.opened_at).getTime())}</span>` : ""}</div></a>`;
       }).join("")
     : `<div class="empty"><b>没有持仓</b>开仓后这里显示盈亏、保命单和管家判断。</div>`;
   return `<section class="card"><div class="ch"><h2>当前持仓</h2><span class="r">${list.length} 笔 · <a href="#positions">全部 ›</a></span></div><div class="scroll">${body}</div></section>`;
@@ -1410,7 +1427,7 @@ function tilesSection(t, gateLabel) {
 function alertsSection(list) {
   const crit = list.some((a) => a.level === "critical");
   const body = list.length
-    ? `<div class="log scroll">${list.map((a) => `<div><span class="n">${hm(a.ts)}</span><span><span class="pill ${a.level === "critical" ? "p-short" : "p-warn"}">${esc(ROLE[a.role] || a.role)}</span>　${esc(a.text)}</span></div>`).join("")}</div>`
+    ? `<div class="log scroll">${list.map((a) => `<div title="${tx(a.text)}"><span class="n">${hm(a.ts)}</span><span class="clamp1"><span class="chip-s ${a.level === "critical" ? "p-short" : "p-warn"}">${esc(ROLE[a.role] || "其他")}</span> ${tx(a.text)}</span></div>`).join("")}</div>`
     : `<div class="dim">今天没有告警。</div>`;
   return `<section class="card ${crit ? "alert" : ""}"><div class="ch"><h2>告警</h2><span class="r">同时推到 Telegram</span></div>${body}</section>`;
 }
@@ -1516,7 +1533,7 @@ function posCardC(p, now, sel) {
 const dl = (rows) => `<dl class="kv2">${rows.filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
 function posEvents(p) {
   const list = ((pageData && pageData.trails) || {})[p.position_id] || [];
-  const row = (s, i) => `<div class="click" ${clickable("precord", `${p.position_id}|${i}`)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${esc(s.text)}</span></div>`;
+  const row = (s, i) => `<div class="click" ${clickable("precord", `${p.position_id}|${i}`)}><span class="n">${hms(s.ts)}</span><span>${esc(ROLE[s.role] || s.role)} ${pill(s.outcome)} ${tx(s.text)}</span></div>`;
   const idx = list.map((s, i) => [s, i]).reverse();
   if (!idx.length) return '<div class="dim small">今天的日志里没有这笔的记录。</div>';
   const head = idx.slice(0, 8).map(([s, i]) => row(s, i)).join("");
@@ -2139,7 +2156,7 @@ function liveFeedHtml(feed, sel) {
     const w = TONE_WORD[ev.tone] ? `<em class="tl-tw ${ev.tone}">${TONE_WORD[ev.tone]}</em>` : "";
     const n = ev.count > 1 ? `<span class="n">×${ev.count}</span>` : "";
     const txt = ev.kind === "backfill" && ev.pnl_usdt != null ? `回填 净 ${signed(ev.pnl_usdt, 2)}U` : ev.badge && ev.kind !== "signal" ? `${ev.kind === "meeting" && BIAS[ev.badge] ? BIAS[ev.badge][0] : ev.badge} · ${ev.text}` : ev.text;
-    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${clickable("liveev", i)} title="${esc(ev.text)}"><span class="t">${hms(ev.ts)}</span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span>${w}${c}<span class="x">${esc(txt)}</span>${n}</div>`;
+    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${clickable("liveev", i)} title="${tx(ev.text)}"><span class="t">${hms(ev.ts)}</span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span>${w}${c}<span class="x">${esc(txt)}</span>${n}</div>`;
   }).join("");
 }
 function liveDrawFeed() {
@@ -2189,7 +2206,7 @@ function deskLatestLine(d) {
   const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
   const tri = (t, q) => (q ? `${t} 涨 ${pct(q.up)} / 平 ${pct(q.flat)} / 跌 ${pct(q.down)}` : "");
   const probs = [tri("4 小时", d.probs_4h), tri("1 小时", d.probs_1h)].filter(Boolean).join(" · ");
-  return `<div class="small" style="margin-top:4px"><b>大盘台 ${hms(d.run_at)} 一轮</b>　${esc(probs)}<br>${esc(d.intra)}</div>`;
+  return `<div class="small" style="margin-top:4px"><b>大盘台 ${hms(d.run_at)} 一轮</b>　${esc(probs)}<div class="clamp2" title="${esc(d.intra)}">${esc(d.intra)}</div></div>`;
 }
 // 团队页点大盘台：最近两轮并排（窄屏上下叠），标出和上一轮比变了什么
 const DESK_REASON = { scheduled: "定时", move: "急动加跑", regime_flip: "翻转加跑" };
@@ -2487,7 +2504,7 @@ P.team = () => {
     ? { role: "desk", name: "大盘台", last_beat: k.last_run_at, last_error: k.error, avg_latency_ms: 0 }
     : d.roles.find((r) => r.role === d.selected) || d.market_role;
   window.__recs = d.records;
-  const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${esc(s.text)}</span></div>`).join("");
+  const recs = d.records.map((s, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hms(s.ts)}</span><span>${pill(s.outcome)} ${s.tag ? `<span class="pill against">${esc(s.tag)}</span> ` : ""}${tx(s.text)}</span></div>`).join("");
   return `${cards}
     ${sel.role === "keeper" ? againstCard(d.against_checks || []) : ""}
     ${sel.role === "commander" || sel.role === "market" ? `<section class="card mt">${promptLine(d.prompts)}</section>` : ""}
@@ -2640,7 +2657,7 @@ P.history = () => {
   window.__recs = d.rejected;
   const rej = S.rej
     ? `<section class="card mt"><div class="ch"><h2>被拒的信号</h2><span class="r">${d.rejected.length} 条 · 拍板放弃和风控员拒绝 · 点一条看快照</span></div>
-      <div class="log trail scroll tall">${d.rejected.map((r, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hm(r.ts)}</span><span>${esc(ROLE[r.role] || r.role)} ${pill(r.outcome)} ${esc(r.text)}</span></div>`).join("") || '<div class="dim">没有。</div>'}</div></section>`
+      <div class="log trail scroll tall">${d.rejected.map((r, i) => `<div class="click" ${clickable("record", i)}><span class="n">${hm(r.ts)}</span><span>${esc(ROLE[r.role] || r.role)} ${pill(r.outcome)} ${tx(r.text)}</span></div>`).join("") || '<div class="dim">没有。</div>'}</div></section>`
     : "";
   return `<div class="toolbar"><span class="seg">${Object.entries(RANGE).map(([k, v]) => `<button class="${S.hist === k ? "on" : ""}" ${clickable("hist", k)}>${v}</button>`).join("")}</span>
       <button class="chip ${S.rej ? "on" : ""}" ${clickable("rej")}>${S.rej ? "☑" : "☐"} 含被拒的信号</button>
@@ -2807,24 +2824,30 @@ P.pool = () => {
   // 你设置过、但候选池文件里还没有的币（刚加的、早就拉黑的）：单列出来，也能撤销
   const extra = [...new Set([...d.pinned, ...d.manual, ...d.blacklist])].filter((s) => !listed.has(s)).sort();
   const extraRows = extra.map((sym) => `<tr class="dimrow"><td class="hi">${coin(sym)} ${flag(sym)}</td><td colspan="2" class="dim">${has(d.blacklist, sym) ? "你拉黑的" : "等下一次选币"}</td><td class="r">${ops(sym)}</td></tr>`).join("");
-  const rows = d.entries.map((e) => `<tr class="${e.in_pool ? "" : "dimrow"}">
-      <td class="hi">${coin(e.symbol)} ${flag(e.symbol)}</td><td>${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
-      <td>${e.in_pool ? (e.picked_by_card ? '<span class="pill p-long">军师选中</span>' : '<span class="pill">在池里</span>') : '<span class="pill">没进池</span>'}</td>
-      <td class="txt">${e.in_pool ? esc(e.reasons.join("；")) + (e.pick_reason ? `<div class="dim small">军师：${esc(e.pick_reason)}</div>` : "") : esc(e.filters.failed_reasons.join("；") || (e.blacklisted ? "你拉黑的" : ""))}</td>
+  const view = S.poolView || "in";
+  const shown = d.entries.filter((e) => view === "all" || (view === "in") === !!e.in_pool);
+  const why = (e) => (e.in_pool ? e.reasons.join("；") + (e.pick_reason ? `\n军师：${e.pick_reason}` : "") : e.filters.failed_reasons.join("；") || (e.blacklisted ? "你拉黑的" : ""));
+  const rows = shown.map((e) => `<tr class="${e.in_pool ? "" : "dimrow"}">
+      <td class="hi nowrap">${coin(e.symbol)} ${flag(e.symbol)}</td><td class="nowrap">${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
+      <td>${e.in_pool ? (e.picked_by_card ? '<span class="chip-s p-long">军师选中</span>' : '<span class="chip-s">在池里</span>') : '<span class="chip-s">没进池</span>'}</td>
+      <td class="clip" title="${esc(why(e))}">${esc(why(e).split("\n")[0])}</td>
       <td class="r num dim">${money(e.filters.quote_volume_24h_usdt / 1e6, 0)}M</td><td class="r num dim">${e.filters.spread_bps.toFixed(2)}</td><td class="r nowrap">${ops(e.symbol)}</td></tr>`).join("");
+  const nIn = d.entries.filter((e) => e.in_pool).length;
+  const seg = `<span class="seg">${[["in", `在池里 ${nIn}`], ["out", `没进池 ${d.entries.length - nIn}`], ["all", `全部 ${d.entries.length}`]].map(([k, t]) => `<button class="${view === k ? "on" : ""}" ${clickable("poolview", k)}>${t}</button>`).join("")}</span>`;
   const addBox = canEdit
     ? `<div class="toolbar"><input id="pool-add" class="inp" placeholder="币种，例如 SUI 或 SUIUSDT" autocomplete="off" spellcheck="false" style="max-width:240px"><button class="btn b-sm" ${clickable("pooladd")}>手动加币</button>
         <span class="dim small">固定、手动加币、取消拉黑要面板密码；拉黑、取消固定、移除只要确认。改完主程序马上重新选币。</span></div>`
     : '<div class="note warn">data/pool_overrides.json 读不出来：主程序沿用上一份设置。先在 Mac 上修好这个文件再在这里改。</div>';
   return `<div class="tiles t4"><div class="tile"><small>候选池</small><b>${d.in_pool}</b></div><div class="tile"><small>军师选中</small><b>${d.picked}</b></div>
       <div class="tile"><small>没进池</small><b>${d.rejected}</b></div><div class="tile"><small>上次选币</small><b>${d.ts ? hm(d.ts) : "—"}</b></div></div>
-    ${categoryCard(d)}
-    ${venueExcluded(d.venue_excluded)}
-    <section class="card mt"><div class="ch"><h2>候选池</h2><span class="r">代码每小时筛一次，军师只能从池里挑；固定、拉黑、手动加入优先</span></div>
+    <section class="card mt"><div class="ch"><h2>候选池</h2><span class="r">${seg}</span></div>
+      <div class="dim small">代码每小时筛一次，军师只能从池里挑；固定、拉黑、手动加入优先。理由悬停看全文。</div>
       ${addBox}
-      <div class="tw"><table><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="tw scroll tall"><table class="dense sticky"><thead><tr><th>币种</th><th>分组</th><th class="r">分数</th><th>状态</th><th>理由</th><th class="r">24h 成交</th><th class="r">价差 bp</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${extraRows ? `<div class="ch mt"><h2>你设置过、还不在候选池里的币</h2></div><div class="tw"><table><tbody>${extraRows}</tbody></table></div>` : ""}
       <div class="foot">固定：每次都进池（仍要过硬条件）；拉黑：永不进池、立刻不开新仓；手动加的：加进候选（仍要过硬条件），“移除”就撤掉。</div></section>
+    ${venueExcluded(d.venue_excluded)}
+    ${categoryCard(d)}
     <div class="mt">${blockedSection(d.blocked)}</div>`;
 };
 
@@ -4076,8 +4099,11 @@ function rolesCard(d, ix) {
 function meaningCard(d) {
   const m = d.meaning;
   if (!m || !m.lines.length) return "";
-  return `<section class="card st"><div class="ch"><h2>你的设置实际意味着</h2><span class="r">只提示，不拦</span></div>
-    ${m.lines.map((x) => `<div class="st-row"><div class="k">${esc(x.label)}<small>${x.warn ? `<span class="warn">${esc(x.text)}</span>` : esc(x.text)}</small></div></div>`).join("")}</section>`;
+  // 有提醒的几条一直露着，其余收进折叠
+  const line = (x) => `<div class="st-row"><div class="k">${esc(x.label)}<small>${x.warn ? `<span class="warn">${esc(x.text)}</span>` : esc(x.text)}</small></div></div>`;
+  const warn = m.lines.filter((x) => x.warn), rest = m.lines.filter((x) => !x.warn);
+  return `<section class="card st"><div class="ch"><h2>你的设置实际意味着</h2><span class="r">只提示，不拦${warn.length ? ` · <span class="warn">${warn.length} 条要留意</span>` : ""}</span></div>
+    ${warn.map(line).join("")}${rest.length ? `<details class="more st-more"><summary>展开全部换算（每笔风险、同时几笔、杠杆、滑点、AI 费…）</summary>${rest.map(line).join("")}</details>` : ""}</section>`;
 }
 
 /* 档位设置页（设计稿 design/tier-settings）：7 张档位卡 → 换档预览条 → 这一档的全部参数。

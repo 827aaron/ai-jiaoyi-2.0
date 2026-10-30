@@ -732,3 +732,10 @@ tfoot tr.total td { position: sticky; bottom: 0; background: var(--card); border
 table.recon td div.small { display: inline; margin-left: 8px; }
 .chev-s { color: var(--dim); font-size: 12px; display: inline-block; width: 10px; }
 table.ptable td div.small { display: inline; margin-left: 8px; }
+td.clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.sticky thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+.clamp1, .clamp2, .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.clamp1 { -webkit-line-clamp: 1; } .clamp2 { -webkit-line-clamp: 2; } .clamp3 { -webkit-line-clamp: 3; }
+.log .clamp1 { min-width: 0; }
+.pos .top .pnl .small { font-size: 11px; font-weight: 500; }
+details.st-more > summary { padding: 8px 18px 12px; }
