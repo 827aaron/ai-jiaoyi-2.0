@@ -51,7 +51,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
     TodayStats,
 )
-from jiaoyi.core import held_events
+from jiaoyi.core import desk_turn, held_events
 from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
@@ -278,9 +278,9 @@ class EventRules:
     """同时最多开几场临时会（≥ 1，1 = 一场一场排队）；和整轮共用会议并发的名额。"""
 
 
-HELD_TRIGGERS: frozenset[str] = held_events.TRIGGERS
-"""持仓币的两类临时会不看 ``event_triggers``，开关在 app.toml ``[fast_loop] patrol_held_event_*``
-（热生效）。"""
+HELD_TRIGGERS: frozenset[str] = held_events.TRIGGERS | {desk_turn.TRIGGER}
+"""持仓币的两类临时会、大盘台转向暂停的补会不看 ``event_triggers``，开关在 app.toml
+``[fast_loop] patrol_held_event_*`` / ``signal_desk_turn_pause``（热生效）。"""
 
 PENDING_EXPIRY = timedelta(minutes=30)
 LEVEL_PX_FRESH = timedelta(minutes=5)
@@ -1172,6 +1172,15 @@ class BattleCardCommander:
             return True
         starts = (self._last_meeting.get(symbol), self._event_last.get(symbol))
         return any(t is not None and t >= at for t in starts)
+
+    def meeting_pending(self, symbol: str) -> bool:
+        """这个币的单币会此刻在排队、已派出或在开（整轮本轮要开的也算）。"""
+        return symbol in (
+            self._pending.keys()
+            | self._symbol_inflight
+            | self._event_claimed
+            | (self._round_meeting or set())
+        )
 
     def set_market_review_enabled(self, enabled: Callable[[], bool]) -> None:
         self._market_review_enabled = enabled

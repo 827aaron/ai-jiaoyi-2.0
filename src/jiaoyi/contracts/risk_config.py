@@ -1208,6 +1208,12 @@ class FastLoopConfig(Contract):
         "手续费是亏的、且这个币从大盘台翻向以来还没开过会，就申请这个币的单币临时会；赚钱的仓"
         "不加会（交给移动止损）。默认关。",
     )
+    signal_desk_turn_pause: bool = Field(
+        default=False,
+        description="大盘台从看跌 / 看涨转走（按每一轮的方向，发布没发布都算）时，卡上是旧方向的币"
+        "立刻暂停开旧方向的新仓，大盘台回来就恢复；暂停期间这个币出了旧方向的信号就拒掉、给它"
+        "申请一场临时会，会上还是旧方向就放出来。持仓不动，另一个方向不受影响。默认关。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:
