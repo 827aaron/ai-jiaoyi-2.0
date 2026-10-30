@@ -1325,7 +1325,11 @@ class MarketDesk:
                 return None
             # 确认的几轮要在时间上分开：加跑紧挨着定时轮（:16 加跑、:17 定时）不算两次独立确认
             lasted = now - st.candidate_since
-            spread = timedelta(minutes=max(self.cfg.publish_confirm_min / 2, self.cfg.cadence_min))
+            spread = (
+                timedelta(minutes=max(self.cfg.publish_confirm_min / 2, self.cfg.cadence_min))
+                if self.cfg.publish_confirm > 1
+                else timedelta(0)
+            )
             need = (
                 spread
                 if st.candidate_event
