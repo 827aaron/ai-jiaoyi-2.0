@@ -73,6 +73,7 @@ from jiaoyi.panel.pages import (
     build_team,
     prompts_info,
     recent_trades,
+    switched_off_roles,
 )
 from jiaoyi.panel.stop_diagnostics import parse_diagnostics
 from jiaoyi.panel.updater import UpdateInfo, Updater
@@ -555,6 +556,7 @@ def create_app(
             files, clock(), picked, ac.predictor.mode, th,
             desk_schedule=schedule, desk_selected=desk_selected,
             gate_take_by_kind={k.value: v for k, v in fl.min_p_take_by_kind.items()},
+            switched_off=switched_off_roles(ac),
         )  # fmt: skip
         return page.model_copy(update={"prompts": prompts_info(files)})
 

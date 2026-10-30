@@ -15,42 +15,46 @@ const assert = require('node:assert/strict');
 const bars = Array.from({ length: 300 }, (_, i) => ({ time: 1000 + i * 60, low: 200 + (i % 3), high: 201 + (i % 3) }));
 const lines = [194.74, 199.5, 202.75, 203.49, 195.12];
 
-// 默认视图：最近 120 根 + 右侧 5 根空位；根数不够 120 就从 0 开始
-assert.deepEqual(defaultRange(300), { from: 180, to: 304 });
-assert.deepEqual(defaultRange(300, null), { from: 180, to: 304 });
-// 开仓在 70 根前：从开仓前 10 根开始，看到最新 + 5
-assert.deepEqual(defaultRange(300, 229), { from: 180, to: 304 });  // 开仓 70 根前：不够 120 根就补到 120
+// 默认视图：最近 120 根 + 右侧空位（根数的 20%、至少 12 根：119 根 → 24）；根数不够 120 就从 0 开始
+assert.deepEqual(defaultRange(300), { from: 180, to: 323 });
+assert.deepEqual(defaultRange(300, null), { from: 180, to: 323 });
+assert.equal(rightPad(119), 24);
+assert.equal(rightPad(30), 12);
+// 开仓在 70 根前：从开仓前 10 根开始，看到最新 + 空位
+assert.deepEqual(defaultRange(300, 229), { from: 180, to: 323 });  // 开仓 70 根前：不够 120 根就补到 120
 // 开仓只有 25 根前：至少铺 120 根，开仓那根仍在里面
 const fresh = defaultRange(300, 274);
-assert.deepEqual(fresh, { from: 180, to: 304 });
+assert.deepEqual(fresh, { from: 180, to: 323 });
 assert(fresh.to - fresh.from >= 120 && fresh.from <= 274);
 // 窄屏按约 7px 一根：宽 300 → 43 根
 assert.equal(minBars(300), 43);
 assert.equal(minBars(1000), 120);
 assert.equal(minBars(100), 40);
 assert.equal(minBars(undefined), 120);
-assert.deepEqual(defaultRange(300, 274, 300), { from: 256, to: 304 });
+assert.deepEqual(defaultRange(300, 274, 300), { from: 252, to: 311 });
 // 一共才拉到 50 根：from 取负，左边留空，不把 50 根拉满全图
-assert.deepEqual(defaultRange(50, 40), { from: -70, to: 54 });
-assert.deepEqual(defaultRange(50, 2), { from: -70, to: 54 });
+assert.deepEqual(defaultRange(50, 40), { from: -70, to: 73 });
+assert.deepEqual(defaultRange(50, 2), { from: -70, to: 73 });
 // 开仓比 120 根更早：从开仓前 10 根开始（不是 120）
-assert.deepEqual(defaultRange(300, 100), { from: 90, to: 304 });
-// 开仓很早但整段不超过 600 根：照样包进来；刚好 600 算在内
-assert.deepEqual(defaultRange(500, 100), { from: 90, to: 504 });
-assert.deepEqual(defaultRange(600, 15), { from: 5, to: 604 });
+assert.deepEqual(defaultRange(300, 100), { from: 90, to: 341 });
+// 开仓很早但 K 线不到 600 根：照样包进来（右边空位不算在 600 根里）
+assert.deepEqual(defaultRange(500, 100), { from: 90, to: 581 });
+assert.deepEqual(defaultRange(600, 15), { from: 5, to: 718 });
+assert.deepEqual(defaultRange(700, 110), { from: 100, to: 819 });
+assert.deepEqual(defaultRange(700, 109), { from: 580, to: 723 });
 // 开仓太早（整段超过 600 根）：退回最近 120 根
-assert.deepEqual(defaultRange(2100, 100), { from: 1980, to: 2104 });
+assert.deepEqual(defaultRange(2100, 100), { from: 1980, to: 2123 });
 // 开仓就在前几根：from 不小于 0
-assert.deepEqual(defaultRange(300, 3), { from: 0, to: 304 });
+assert.deepEqual(defaultRange(300, 3), { from: 0, to: 359 });
 // 窄屏：宽 300px、开仓后 75 根 → 留白至少 110px，约 ceil(110*75/190)=44 根
 assert.equal(leadBars(300, 75), 44);
 assert.equal(leadBars(1000, 75), 10);  // 宽屏 10 根就够
 assert.equal(leadBars(0, 75), 10);  // 宽度未知 / 太窄：退回 10 根
-assert.deepEqual(defaultRange(300, 229, 300), { from: 185, to: 304 });
+assert.deepEqual(defaultRange(300, 229, 300), { from: 181, to: 323 });
 // 留白放大后超过 600 根上限：仍退回最近 120 根
-assert.deepEqual(defaultRange(2100, 1600, 300), { from: 1980, to: 2104 });
-assert.deepEqual(defaultRange(50), { from: 0, to: 54 });
-assert.deepEqual(defaultRange(0), { from: 0, to: 5 });
+assert.deepEqual(defaultRange(2100, 1600, 300), { from: 1980, to: 2123 });
+assert.deepEqual(defaultRange(50), { from: 0, to: 61 });
+assert.deepEqual(defaultRange(0), { from: 0, to: 12 });
 
 // 默认：可见 K 线 + 开仓 / 止盈 / 止损（core），保命 / 启动线再远也不撑大
 const core = [194.74, 199.5, 202.75];  // 止盈、开仓、固定止损
@@ -127,3 +131,4 @@ def test_toggle_is_remembered_and_wired() -> None:
         and 'localStorage.setItem("kline-scale"' in source
     )
     assert "defaultRange(barCount, entryIdx, c.timeScale().width())" in source  # 双击复位走默认范围
+    assert "rightOffset: RIGHT_MIN_BARS" in source  # fitContent / 回到最新也留右边空位
