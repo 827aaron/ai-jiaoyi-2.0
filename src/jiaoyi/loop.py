@@ -1239,7 +1239,8 @@ class Runner:
                 ex.note_close_detail(pos.position_id, detail)
             except Exception:
                 log.exception("记平仓原因失败 %s", pos.position_id)
-        self._spawn(self.close(pos, CloseReason.STOP_LOSS), Role.PATROL)
+        reason = paper_stop.close_reason(self._paper_stops.get(pos.position_id))
+        self._spawn(self.close(pos, reason), Role.PATROL)
 
     def _paper_stop_retry(self) -> None:
         """A booked position still open on Demo (the close failed, or the process restarted

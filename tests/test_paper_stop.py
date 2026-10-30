@@ -261,6 +261,7 @@ async def test_paper_stop_uses_tightest_executor_level(
     booked = runner._paper_stops.get(pos.position_id)
     assert booked is not None and (booked.stop_source, booked.stop_price) == (source, trailing)
     assert booked.paper_exit_price == trailing
+    assert ex.closed == [(pos.position_id, CloseReason.TRAILING_STOP)]
     assert ex.details == [
         (pos.position_id, f"主网价格越过止损：主网成交价 {trailing:g} 碰到{label} {trailing:g}")
     ]
@@ -809,3 +810,38 @@ def test_paper_stop_history_shows_both_fills_and_funds_stay_demo(
     assert kpis.day_closed_usdt == pytest.approx(demo_pnl)
     funds = build_funds(files, HbSnapshot(ok=False), risk, later)
     assert funds.realized_today_usdt == pytest.approx(demo_pnl)
+
+
+@pytest.mark.parametrize(
+    ("side", "source", "stop", "reason"),
+    [
+        (LONG, "hosted", 68100.0, CloseReason.TRAILING_STOP),
+        (SHORT, "hosted", 68000.0, CloseReason.TRAILING_STOP),
+        (LONG, "hosted", 67873.9, CloseReason.STOP_LOSS),
+        (SHORT, "ledger", 68214.1, CloseReason.STOP_LOSS),
+        (LONG, "lifeboat", 67788.8, CloseReason.LIFEBOAT),
+        (SHORT, "tightened", 68100.0, CloseReason.TIGHTENED_STOP),
+        (LONG, "trailing", 68000.0, CloseReason.TRAILING_STOP),
+    ],
+)
+def test_paper_stop_close_reason_files_profit_side_exits_as_trailing(
+    now: datetime, side: c.Side, source: str, stop: float, reason: CloseReason
+) -> None:
+    booked = ps.PaperStop(
+        position_id="pos-0001",
+        symbol="BTCUSDT",
+        side=side,
+        quantity=0.01,
+        entry_price=68044.0,
+        stop_price=stop,
+        stop_source=source,
+        price_source="mark",
+        cross_price=stop,
+        crossed_at=now,
+        booked_at=now,
+        slippage_bps=0.0,
+        paper_exit_price=stop,
+        close_requested=True,
+    )
+    assert ps.close_reason(booked) is reason
+    assert ps.close_reason(None) is CloseReason.STOP_LOSS

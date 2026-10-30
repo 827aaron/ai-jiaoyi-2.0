@@ -25,7 +25,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
 
-from jiaoyi.contracts import PositionRecord, PositionStatus, Side
+from jiaoyi.contracts import CloseReason, PositionRecord, PositionStatus, Side
 
 log = logging.getLogger(__name__)
 
@@ -287,3 +287,27 @@ def close_detail(booked: PaperStop) -> str:
     return (
         f"{PAPER_STOP_DETAIL}：主网{price} {booked.cross_price:g} 碰到{src} {booked.stop_price:g}"
     )
+
+
+def close_reason(booked: PaperStop | None) -> CloseReason:
+    """The reason the Demo close is filed under.
+
+    A stop on the profit side of entry can only be a trailing / breakeven one, whichever level
+    carried it (an exchange stop leg that the trailing rule already moved shows up as
+    ``hosted``), so a winning exit is never filed as a stop loss.
+    """
+    if booked is None:
+        return CloseReason.STOP_LOSS
+    long = booked.side is Side.LONG
+    if (
+        (booked.stop_price > booked.entry_price)
+        if long
+        else (booked.stop_price < booked.entry_price)
+    ):
+        return CloseReason.TRAILING_STOP
+    return {
+        "trailing": CloseReason.TRAILING_STOP,
+        "native_trailing": CloseReason.TRAILING_STOP,
+        "tightened": CloseReason.TIGHTENED_STOP,
+        "lifeboat": CloseReason.LIFEBOAT,
+    }.get(booked.stop_source, CloseReason.STOP_LOSS)
