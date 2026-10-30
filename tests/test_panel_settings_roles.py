@@ -126,6 +126,11 @@ def test_market_trail_settings_sit_with_risk_guard_not_sentinel() -> None:
         "fast_loop.signal_market_trail_k",
         "fast_loop.signal_market_trail_ref",
         "fast_loop.signal_market_trail_shadow",
+        "fast_loop.signal_market_trail_max_extreme_age_min",
+        "fast_loop.signal_market_ma_on",
+        "fast_loop.signal_market_ma_minutes",
+        "fast_loop.signal_market_trail_notify",
+        "fast_loop.signal_market_trail_meetings_per_day",
     ]
     assert [k for k in keys if f'"{k}"' in guard] == keys
     assert [k for k in keys if k in sentinel] == []

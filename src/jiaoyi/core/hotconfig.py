@@ -216,6 +216,16 @@ HOT_FAST: frozenset[str] = frozenset(
         "signal_market_trail_k",
         "signal_market_trail_ref",
         "signal_market_trail_shadow",
+        "signal_market_trail_max_extreme_age_min",
+        "signal_market_ma_on",
+        "signal_market_ma_minutes",
+        "signal_market_trail_notify",
+        "signal_market_trail_meetings_per_day",
+        # 锁利（每个行情事件现读）
+        "profit_lock_on",
+        "profit_lock_trigger_r",
+        "profit_lock_r",
+        "profit_lock_mark_gap_bps",
     }
 )
 

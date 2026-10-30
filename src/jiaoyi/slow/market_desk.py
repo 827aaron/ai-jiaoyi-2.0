@@ -960,9 +960,9 @@ class MarketDesk:
         return True
 
     def request_run(self, reason: str = "regime_flip") -> None:
-        """翻转确认 / 急动后要求立即加跑一轮（不占定时的格子；离上一轮开跑不到
-        ``min_run_gap_min`` 就等到点）。"""
-        if self.cfg.mode != "off":
+        """翻转确认 / 急动 / 大盘移动止损刚锁住后要求立即加跑一轮（不占定时的格子；离上一轮开跑
+        不到 ``min_run_gap_min`` 就等到点）。已在排的原因不被盖掉，只有翻转能盖别的。"""
+        if self.cfg.mode != "off" and (self._requested is None or reason == "regime_flip"):
             self._requested = reason
 
     def observe_prices(self, now: datetime, btc: float | None, pool: Mapping[str, float]) -> None:

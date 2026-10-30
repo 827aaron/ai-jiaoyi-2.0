@@ -93,7 +93,7 @@ from jiaoyi.execution.registry import (
 )
 from jiaoyi.execution.stream_close import OrderFills, StreamBook, Verdict, evaluate, ms_time
 from jiaoyi.execution.symbols import to_hb_pair
-from jiaoyi.execution.tighten import breakeven_stop_price
+from jiaoyi.execution.tighten import breakeven_stop_price, net_profit_pct
 from jiaoyi.execution.trailing import TrailingBookUnavailable
 from jiaoyi.interfaces import Alerter, LifeboatStop
 
@@ -189,6 +189,7 @@ _REASON_CN = {
     CloseReason.TAKE_PROFIT: "止盈",
     CloseReason.TRAILING_STOP: "保本 / 移动止损",
     CloseReason.TIGHTENED_STOP: "反向卡收紧止损",
+    CloseReason.PROFIT_LOCK: "锁利止损",
     CloseReason.TIME_LIMIT: "到时平仓",
     CloseReason.KEEPER: "管家平仓",
     CloseReason.PATROL: "巡逻兵平仓",
@@ -232,6 +233,13 @@ def _tick_error_detail(error: BaseException) -> str:
     return detail
 
 
+def _lock_close_field(reason: CloseReason | None, detail: str | None) -> dict[str, str]:
+    """锁利止损平仓是主网价碰到的（模拟盘的规则）还是 Demo 交易所那张单自己触发的。"""
+    if reason is not CloseReason.PROFIT_LOCK:
+        return {}
+    return {"trigger": "mainnet" if detail and PAPER_STOP_DETAIL in detail else "demo"}
+
+
 def _close_text(r: PositionRecord) -> str:
     """平仓完成的推送：原因、毛利 / 手续费 / 净利、持仓时长。"""
     reason = _REASON_CN.get(r.close_reason, "未知") if r.close_reason else "未知"
@@ -266,6 +274,7 @@ _PAPER_STOP_REASONS = frozenset(
         CloseReason.STOP_LOSS,
         CloseReason.TRAILING_STOP,
         CloseReason.TIGHTENED_STOP,
+        CloseReason.PROFIT_LOCK,
         CloseReason.LIFEBOAT,
     }
 )
@@ -465,6 +474,7 @@ class HbExecutorAdapter:
             protection.notify_native_fallback = self._alert_native_fallback
             protection.notify_trigger_rejected = self._alert_trigger_rejected
             protection.notify_take_profit = self._alert_take_profit
+            protection.notify_profit_lock = self._alert_profit_lock
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
@@ -940,7 +950,8 @@ class HbExecutorAdapter:
                 "fees_known": fill is not None and fill.fee_usdt is not None,
                 "estimated": bool(fill is not None and fill.estimated),
             }
-            | ({"detail": detail} if detail else {}),
+            | ({"detail": detail} if detail else {})
+            | _lock_close_field(reason, detail),
         )
 
     def _note_close_detail(self, tracked: TrackedPosition, detail: str) -> TrackedPosition:
@@ -986,10 +997,13 @@ class HbExecutorAdapter:
         if state is None:
             return out
         out += [
-            ("hosted", leg.trigger_price)
+            ("profit_lock" if leg.purpose == "profit_lock" else "hosted", leg.trigger_price)
             for leg in state.legs
             if leg.kind == "stop_loss" and live_leg(leg)
         ]
+        # 目标价是主网价赚到触发线时定的，主网价已在它有利一侧看到过；Demo 那边挂不上也要认
+        if state.profit_lock_price is not None and state.profit_lock_done in (None, "locked"):
+            out.append(("profit_lock", state.profit_lock_price))
         if state.trailing_activated:
             out.append(("trailing", state.trailing_stop_price))
         native = self._live_native_leg(state)
@@ -1050,6 +1064,94 @@ class HbExecutorAdapter:
                 }
             )
         )
+
+    def note_profit_reached(
+        self, position_id: str, price: float, *, trigger_r: float, lock_r: float, source: str
+    ) -> dict[str, Any] | None:
+        """按 ``price`` 第一次扣费后赚到 ``trigger_r``：定下锁利目标价并落盘，返回这次的数。
+
+        行情事件里调用，只读内存和落盘字段，不发请求、不等锁；开仓成本用第一轮保护观测落盘的
+        ``trailing_*``（两种运行模式都写），还没有就等下一次。"""
+        tracked = self._registry.get(position_id)
+        manager = self._protection
+        if tracked is None or manager is None or not math.isfinite(price) or price <= 0:
+            return None
+        state, rec = tracked.server_protection, tracked.record
+        if (
+            state is None
+            or state.profit_lock_reached_at is not None
+            or state.stage in {"exiting", "cleanup", "done"}
+            or rec.status is not PositionStatus.OPEN
+            or tracked.requested_close is not None
+            or not rec.stop_loss_pct
+            or state.trailing_entry_quote is None
+            or state.trailing_entry_quantity is None
+            or state.trailing_fees_quote is None
+        ):
+            return None
+        q, quote, fee = (
+            state.trailing_entry_quantity,
+            state.trailing_entry_quote,
+            state.trailing_fees_quote,
+        )
+        reached = net_profit_pct(rec.side, q, quote, fee, self._open_fee, price) / rec.stop_loss_pct
+        if reached < trigger_r - 1e-9:
+            return None
+        target = breakeven_stop_price(
+            rec.side, q, quote, fee, self._open_fee, lock_r * rec.stop_loss_pct * 100
+        )
+        manager._save(
+            position_id,
+            profit_lock_reached_at=self._clock(),
+            profit_lock_price=target,
+            profit_lock_r=lock_r,
+            profit_lock_source=source,
+        )
+        return {"target": target, "reached_r": reached, "price": price, "source": source}
+
+    def set_profit_lock_gap(self, gap_bps: float) -> None:
+        if self._protection is not None:
+            self._protection.profit_lock_gap_bps = gap_bps
+
+    def last_mark(self, position_id: str) -> float | None:
+        return self._protection.last_marks.get(position_id) if self._protection else None
+
+    async def lock_profit_stop(self, position_id: str) -> dict[str, Any]:
+        """第一次赚到触发线时马上换一次，不等下一轮保护同步。任何情况都不平仓、不发 CRITICAL：
+        挂不上就返回 ``retry``，目标价已落盘，``protection_tick`` 每轮同步时接着挂；旧止损一直留着，
+        换代先确认新腿再撤旧腿。``locked`` 腿已挂上；
+        ``kept`` 不用换（现有止损够紧）或已放弃；``skip`` 仓不在 / 已在退出。"""
+        tracked = self._registry.get(position_id)
+        manager = self._protection
+        if tracked is None or manager is None or tracked.server_protection is None:
+            return {"action": "skip", "why": "not_server_managed"}
+        async with self._exit_lock(position_id):
+            tracked = self._registry.get(position_id)
+            state = tracked.server_protection if tracked is not None else None
+            if (
+                tracked is None
+                or state is None
+                or tracked.record.status is not PositionStatus.OPEN
+                or tracked.requested_close is not None
+                or state.stage in {"exiting", "cleanup", "done"}
+            ):
+                return {"action": "skip", "why": "not_open"}
+            if state.profit_lock_done is not None:
+                return {"action": "kept", "why": state.profit_lock_done}
+            if state.stage != "armed" or not state.entry_terminal:
+                return {"action": "retry", "why": "not_armed", "stage": state.stage}
+            if any(leg.state in {"submit_pending", "cancel_pending"} for leg in state.legs):
+                return {"action": "retry", "why": "waiting_previous_generation"}
+            try:
+                result = await manager.sync(position_id)
+            except Exception as error:
+                return {"action": "retry", "why": "sync_failed", "error": describe_error(error)}
+            done = manager._current(position_id)[1].profit_lock_done
+            if done == "locked":
+                return {"action": "locked", "why": f"sync_{result}"}
+            if done is not None:
+                return {"action": "kept", "why": done}
+            return {"action": "retry", "why": "not_placeable"}
 
     def paper_stop_since(self, position_id: str) -> datetime | None:
         """When the position started to exist on the exchange: the fill of a limit entry, else
@@ -2177,6 +2279,7 @@ class HbExecutorAdapter:
             output={
                 "net": pnl,
                 "reason": reason.value,
+                **_lock_close_field(reason, None),
                 "stream": True,
                 "order_id": fills.order_id,
                 "fees_known": not refine,
@@ -2348,6 +2451,16 @@ class HbExecutorAdapter:
             kind="order_failed",
         )
 
+    async def _alert_profit_lock(self, pid: str, symbol: str, text: str) -> None:
+        await self._alert(
+            AlertLevel.WARN,
+            "锁利止损没挂成",
+            f"{symbol} {pid}：{text}",
+            symbol,
+            f"profit_lock:{pid}",
+            kind="order_failed",
+        )
+
     async def _alert_native_fallback(self, pid: str, symbol: str, text: str) -> None:
         await self._alert(
             AlertLevel.WARN,
@@ -2475,6 +2588,8 @@ class HbExecutorAdapter:
             # 独立于止损和保命单，它在提交 / 撤销中也不是换代
             and not (leg.kind == "trailing_stop" and state.native_fallback is not None)
             and leg.kind != "take_profit"
+            # 提交结果未知的锁利腿是独立腿，旧止损还在，不挡管家平仓
+            and not (leg.purpose == "profit_lock" and leg.state == "submit_pending")
         ]
         if state.ever_armed and moving:
             return (
@@ -3519,6 +3634,7 @@ class HbExecutorAdapter:
                 output={
                     "net": net,
                     "reason": reason.value if reason else None,
+                    **_lock_close_field(reason, shown),
                     "fees": closed.fees_usdt,
                     **({"detail": shown} if shown else {}),
                     # 曾下令平仓的人（面板可以显示「巡逻兵曾下令」）；和 reason 一样就不重复写

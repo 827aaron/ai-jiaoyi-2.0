@@ -1353,7 +1353,7 @@ def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
     plain = c.ModuleStatus(**base, headline="池子 40 个")
     assert _role_card(c.Role.SCREENER, plain, NOW, run).headline == "池子 40 个"
     # 风控员的这一行是大盘移动止损的现状：有上次干活时间也照常显示
-    line = "大盘移动止损：空单锁住中（BTC 反弹 1.1 ATR，12 分钟）"
+    line = "大盘移动止损：空单锁住中（BTC 现在离低点 1.1 ATR · 门槛 1.0 · 已锁 12 分钟）"
     guard = c.ModuleStatus(role=c.Role.RISK_GUARD, health=c.Health.OK, ts=NOW, last_run_at=NOW,
                            headline=line)  # fmt: skip
     assert _role_card(c.Role.RISK_GUARD, guard, NOW, run).headline == guard.headline

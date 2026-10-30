@@ -11,6 +11,15 @@ from decimal import Decimal
 from jiaoyi.contracts import Side
 
 
+def net_profit_pct(
+    side: Side, quantity: float, entry_quote: float, entry_fee: float, rate: float, price: float
+) -> float:
+    """按 ``price`` 平仓扣掉实际开仓费和吃单平仓费后赚多少（开仓名义的百分比）。"""
+    value = price * quantity
+    gross = value - entry_quote if side is Side.LONG else entry_quote - value
+    return (gross - entry_fee - value * rate) / entry_quote * 100
+
+
 def breakeven_stop_price(
     side: Side,
     quantity: float,

@@ -285,13 +285,24 @@ def _tp(leg: ProtectiveLeg) -> bool:
 
 
 def _side_leg(leg: ProtectiveLeg) -> bool:
-    """独立于止损 / 保命单的腿（交易所移动止损、后备止盈）：它的问题不挡止损和保命单。"""
-    return _native(leg) or _tp(leg)
+    """独立于止损 / 保命单的腿（交易所移动止损、后备止盈、提交结果未知的锁利腿）：它的问题不挡
+    止损和保命单。"""
+    return _native(leg) or _tp(leg) or _lock_unknown(leg)
+
+
+def _lock_unknown(leg: ProtectiveLeg) -> bool:
+    return leg.purpose == "profit_lock" and leg.state == "submit_pending"
 
 
 def _side_idle(leg: ProtectiveLeg) -> bool:
     """独立腿提交 / 撤销结果未知、也没触发：既不算在挂，也没法撤，留给零仓收尾。"""
     return _side_leg(leg) and not _live(leg) and not _triggered(leg) and not _settled(leg)
+
+
+PROFIT_LOCK_RETRY = timedelta(seconds=30)
+"""锁利腿被交易所说已越触发价：隔这么久再试，不每秒撞一次。"""
+PROFIT_LOCK_UNKNOWN_MAX = timedelta(minutes=5)
+"""锁利腿提交结果未知：隔这么久没查到就换新单号再挂；旧单号接着查，零仓时收拾。"""
 
 
 def _role(leg: ProtectiveLeg) -> str:
@@ -305,6 +316,8 @@ def _reason(leg: ProtectiveLeg) -> CloseReason:
         return CloseReason.TRAILING_STOP
     if leg.purpose == "tightened":
         return CloseReason.TIGHTENED_STOP
+    if leg.purpose == "profit_lock":
+        return CloseReason.PROFIT_LOCK
     return CloseReason.STOP_LOSS if leg.kind == "stop_loss" else CloseReason.TAKE_PROFIT
 
 
@@ -382,6 +395,14 @@ class BracketManager:
         self.notify_stop_clamped: StopNotify | None = None
         """移动止损目标已越过标记价（被夹到可挂的最紧价，或本轮没换）时调用；执行器接上告警。"""
         self.notify_trigger_rejected: TriggerNotify | None = None
+        self.profit_lock_gap_bps = 5.0
+        """锁利止损离标记价至少这么多基点才挂（主循环按配置现改）。"""
+        self.last_marks: dict[str, float] = {}
+        """移动止损观测刚读到的同环境价，锁利不用另发请求。"""
+        self._lock_retry_at: dict[str, datetime] = {}
+        self._lock_quantised: dict[str, float] = {}  # 这一轮锁利目标量化后的价
+        self._pending_lock_notes: dict[str, list[str]] = {}
+        self.notify_profit_lock: StopNotify | None = None
         """某条腿触发后子单被交易所拒绝时调用；执行器接上告警。"""
         self.notify_take_profit: StopNotify | None = None
         """后备止盈单挂不上 / 撤不掉时调用；执行器接上告警。"""
@@ -812,6 +833,11 @@ class BracketManager:
                 else self.exchange.get_bracket
             )
             order = await read(tracked.record.symbol, client_order_id=old.client_order_id)
+            if order is None and _lock_unknown(old):
+                # 独立腿：查不到不挡这一轮，下一轮接着按原单号查。崩溃在记时间之前也要有计时。
+                if self._current(pid)[1].profit_lock_unknown_since is None:
+                    self._save(pid, profit_lock_unknown_since=self.clock())
+                continue
             if order is None:
                 order = await self._await_readback(pid, old.client_order_id)
             if (
@@ -832,6 +858,10 @@ class BracketManager:
             leg = self._leg(pid, old.client_order_id)
             self._accept(pid, leg.model_copy(update={"acked_at": None}), order)
         _, state = self._current(pid)
+        if state.profit_lock_unknown_since is not None and not any(
+            _lock_unknown(leg) for leg in state.legs
+        ):
+            state = self._save(pid, profit_lock_unknown_since=None)
         hit = next((leg for leg in state.legs if _triggered(leg)), None)
         if hit is not None:
             reason = _reason(hit)
@@ -1059,7 +1089,10 @@ class BracketManager:
         rejections, rejected = self._pending_rejections.pop(pid, []), self.notify_trigger_rejected
         fallbacks, fell_back = self._pending_fallbacks.pop(pid, []), self.notify_native_fallback
         tp_notes, tp_notify = self._pending_tp_notes.pop(pid, []), self.notify_take_profit
+        lock_notes, lock_notify = self._pending_lock_notes.pop(pid, []), self.notify_profit_lock
         sends: list[Awaitable[None]] = []
+        if lock_notify is not None:
+            sends += [lock_notify(pid, symbol, text) for text in lock_notes]
         if tp_notify is not None:
             sends += [tp_notify(pid, symbol, text) for text in tp_notes]
         if fell_back is not None:
@@ -1099,14 +1132,76 @@ class BracketManager:
         out: list[tuple[LegPurpose, float]] = []
         if state.tightened_stop_price is not None:
             out.append(("tightened", state.tightened_stop_price))
+        live = self._live_lock(state)
+        if live is not None:
+            out.append(("profit_lock", live.trigger_price))
+        elif self._lock_wanted(tracked.record.position_id, state):
+            assert state.profit_lock_price is not None
+            out.append(("profit_lock", state.profit_lock_price))
         if state.native_stop_price is not None and self._native_mode(tracked, state) == "off":
             out.append(("trailing", state.native_stop_price))
         return out
+
+    @staticmethod
+    def _live_lock(state: ServerProtection) -> ProtectiveLeg | None:
+        """交易所上确认在挂的锁利腿。只要有，它就是止损的下限：定时器和 ``profit_lock_done`` 都
+        管不到它，这样止损目标永远不会松过它。"""
+        return max(
+            (x for x in state.legs if _live(x) and x.purpose == "profit_lock"),
+            key=lambda x: x.generation,
+            default=None,
+        )
+
+    def _lock_replace_waits(self, pid: str, state: ServerProtection) -> bool:
+        """锁利腿在挂、要换（仓量变了）但上一次没换成：还在等，这一轮原样留着。"""
+        if self._live_lock(state) is None:
+            return False
+        now = self.clock()
+        since, at = state.profit_lock_unknown_since, self._lock_retry_at.get(pid)
+        return (since is not None and now - since < PROFIT_LOCK_UNKNOWN_MAX) or (
+            at is not None and now < at
+        )
+
+    def _lock_wanted(self, pid: str, state: ServerProtection) -> bool:
+        """还没有在挂的锁利腿时要不要挂。``tight_enough`` 和放弃都是定论。"""
+        if state.profit_lock_price is None or state.profit_lock_done not in (None, "locked"):
+            return False
+        now = self.clock()
+        since = state.profit_lock_unknown_since
+        if since is not None and now - since < PROFIT_LOCK_UNKNOWN_MAX:
+            return False
+        at = self._lock_retry_at.get(pid)
+        return at is None or now >= at
+
+    def _settle_profit_lock(self, pid: str) -> None:
+        """换代确认后认账：腿真的挂上了，或现有止损（含交易所移动止损）已同样紧。"""
+        tracked, state = self._current(pid)
+        target = self._lock_quantised.pop(pid, state.profit_lock_price)
+        if target is None or state.profit_lock_done is not None:
+            return
+        live, purpose = self._live_stop(state)
+        if purpose == "profit_lock":
+            self._save(pid, profit_lock_done="locked", profit_lock_at=self.clock())
+            return
+        native = state.native_stop_price if state.native_activated else None
+        long = tracked.record.side is Side.LONG
+        if any(p is not None and (p >= target if long else p <= target) for p in (live, native)):
+            self._save(pid, profit_lock_done="tight_enough")
+
+    def _abandon_lock(self, pid: str, why: str, note: str) -> None:
+        """这笔不再挂；已经锁上过的不放弃，隔一会儿再试。"""
+        state = self._current(pid)[1]
+        if state.profit_lock_done == "locked" or self._live_lock(state) is not None:
+            self._lock_retry_at[pid] = self.clock() + PROFIT_LOCK_RETRY
+        else:
+            self._save(pid, profit_lock_done=why, profit_lock_unknown_since=None)
+        self._pending_lock_notes.setdefault(pid, []).append(note)
 
     async def _sync(self, pid: str) -> Literal["waiting", "provisional", "armed", "exit", "flat"]:
         result, evidence = await self._sync_core(pid)
         if result != "armed":
             return result
+        self._settle_profit_lock(pid)
         return await self._sync_take_profit(pid, evidence)
 
     async def _sync_core(
@@ -1170,6 +1265,8 @@ class BracketManager:
             if not math.isclose(spec.quantity, evidence.quantity, rel_tol=1e-10):
                 raise ProtectionIncomplete("实际仓量无法完整量化，不能宣称无残量")
             specs[kind] = spec
+        if stop.purpose == "profit_lock":
+            self._lock_quantised[pid] = specs["stop_loss"].trigger_price
         specs = {kind: specs[kind] for kind in _LEG_ORDER[self.leg_order] if kind in specs}
         await self._checkpoint(pid, evidence)
         _, state = self._current(pid)
@@ -1198,6 +1295,11 @@ class BracketManager:
                     last_error=hold,
                 )
                 return ("armed" if evidence.terminal else "provisional"), evidence
+        if self._lock_replace_waits(pid, state):
+            # 也是上面两处重算的出口：有在挂的锁利腿时失败一次就停在这里，不再提交
+            stage: Literal["armed", "provisional"] = "armed" if evidence.terminal else "provisional"
+            self._save(pid, stage=stage, last_error=hold)
+            return stage, evidence
         for leg in state.legs:
             if leg.state == "planned":
                 self._save_leg(pid, leg.model_copy(update={"state": "superseded"}))
@@ -1212,6 +1314,8 @@ class BracketManager:
                 # 明确被拒、交易所上没有这张单：换新代、新 CID 重挂。只在从没完整托管时
                 # （未托管宽限内）重试；曾完整托管后旧代保护还在，照旧停在这里，不每轮重发。
                 continue
+            elif leg.state == "rejected" and leg.purpose == "profit_lock":
+                continue  # 锁利腿被拒不挡别的换代：这张单不在交易所上，旧止损还在
             elif leg.state in {"submit_pending", "cancel_pending", "rejected"}:
                 raise ProtectionIncomplete("已有提交或撤销未确认，不能创建新代")
             elif not _settled(leg) and not _live(leg):
@@ -1288,6 +1392,18 @@ class BracketManager:
                             update={"state": "rejected"}
                         ),
                     )
+                    if leg.purpose == "profit_lock":
+                        # 不走下面的退出：停在 provisional 会停掉交易所移动止损的观测，已越价也
+                        # 不该因为锁利平仓。旧止损还在，回到 armed。
+                        if rejected.immediate_trigger:
+                            self._lock_retry_at[pid] = self.clock() + PROFIT_LOCK_RETRY
+                        else:
+                            self._abandon_lock(
+                                pid,
+                                "abandoned_rejected",
+                                f"锁利止损 {leg.trigger_price:g} 被交易所拒绝，原止损不变",
+                            )
+                        return await self._sync_core(pid)
                     if rejected.immediate_trigger:
                         self._save(
                             pid,
@@ -1307,6 +1423,10 @@ class BracketManager:
                     ) from None
                 except BracketSubmissionUnknown as unknown:
                     found = await self._await_unknown_submit(pid, leg.client_order_id, unknown)
+                    if found is None and leg.purpose == "profit_lock":
+                        # 旧止损还在：不退回 provisional，这张单当独立腿，到点再挂新单号
+                        self._save(pid, profit_lock_unknown_since=self.clock())
+                        return await self._sync_core(pid)
                     if found is None:
                         raise ProtectionIncomplete(
                             "普通保护提交结果未知，只查原CID",
@@ -1583,9 +1703,15 @@ class BracketManager:
 
         if gain(target) <= 0:
             return keep  # 收紧来源不把正在挂的止损换松
-        if gain(target) < self.trailing_min_step_bps and purpose != "tightened":
-            return keep  # 收紧太少，不值得撤旧挂新（反向卡收紧价只换一次，不受最小步长限制）
+        if gain(target) < self.trailing_min_step_bps and purpose not in (
+            "tightened",
+            "profit_lock",
+        ):
+            return keep  # 收紧太少，不值得撤旧挂新（这两种收紧价只换一次，不受最小步长限制）
+        lock = purpose == "profit_lock"
         buffer = self.trailing_stop_mark_buffer_bps
+        if lock:
+            buffer = max(buffer, self.profit_lock_gap_bps)
         try:
             mark = await self._fresh_mark(tracked.record.symbol)
         except Exception as error:
@@ -1597,6 +1723,8 @@ class BracketManager:
         limit = mark * (1 - sign * buffer / 10_000)
         if (target < limit) if long else (target > limit):
             return StopTarget(target, purpose)
+        if lock:
+            return keep  # 不夹：夹到标记价旁边既不是约定的价，还可能低于 +0.1R。下轮再试
         clamped = limit if fixed is None else tighter(limit, fixed)
         if gain(clamped) >= max(self.trailing_min_step_bps, 1e-9):
             note = (
@@ -1817,6 +1945,7 @@ class BracketManager:
             return changed
 
     def _observe_native(self, pid: str, mark: float) -> bool:
+        self.last_marks[pid] = mark
         tracked, state = self._current(pid)
         if self._native_mode(tracked, state) != "confirmed":
             return False
@@ -1890,6 +2019,8 @@ class BracketManager:
                     f"{'高' if long else '低'} {dev:.1f} 基点（上限 {max_dev:g}），疑似插针，"
                     "本轮不更新峰值"
                 )
+        long = tracked.record.side is Side.LONG
+        self.last_marks[pid] = mark if mark is not None else book.bid if long else book.ask
         update = trailing_update(tracked.record, state, basis, book, self.clock())
         if update is None:
             return False

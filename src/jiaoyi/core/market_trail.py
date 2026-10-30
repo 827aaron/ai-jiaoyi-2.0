@@ -1,8 +1,8 @@
-"""大盘移动止损（方向闸门，2026-10-30，Aaron 批准）。
+"""大盘闸门（2026-10-30，Aaron 批准）：大盘移动止损 + 大盘均线，任一拦这个方向就不开新仓。
 
-参照序列 x 每根收盘的 1 分钟算一次：``btc`` = ln(BTC 永续收盘价)，``eth`` = ln(ETH)，``btc_eth`` =
-两者 ln 的平均（等权 2 币指数），``alts`` = 候选池山寨（去掉 BTC / ETH / BNB / 黄金）每分钟对数
-收益的等权累加，只做影子。
+**大盘移动止损**。参照序列 x 每根收盘的 1 分钟算一次：``btc`` = ln(BTC 永续收盘价)，
+``eth`` = ln(ETH)，``btc_eth`` = 两者 ln 的平均（等权 2 币指数），``alts`` = 候选池山寨（去掉
+BTC / ETH / BNB / 黄金）每分钟对数收益的等权累加，只做影子。
 
 1. z 分数：r4(t) = x(t) − x(t−240 分钟)；取过去 72 小时里每隔 15 分钟（t−15、t−30 …）的 r4，
    算均值 m、总体标准差 s，z = (r4(t) − m) / s。x 不满 24 小时不算 z，闸门不生效。
@@ -11,11 +11,22 @@
    z 回到 ±1 里面不结束这一段。
 3. ATR：用 1 分钟收盘拼 15 分钟 K 线（开盘 :00 / :15 / :30 / :45，最后一根 1 分钟线收盘时这根
    15 分钟线收盘），Wilder ATR(14)，只用最近一根已收盘的。
-4. 每分钟：跌段里 x 创新低 → 极值跟着走、放行；否则 x − 极值 ≥ k × ATR → 止损，锁住新空单。
-   涨段对称，锁新多单。锁住到：同方向再创新极值，或按第 2 条开了新段。
+4. 每分钟先看极值有没有过期：``signal_market_trail_max_extreme_age_min`` 分钟没刷新（0 = 不过期）
+   → 极值作废、从当前 x 重算、解锁；要在下面的判断之前，顺序和回放一样。然后跌段里 x 创新低 →
+   极值跟着走、放行；否则 x − 极值 ≥ k × ATR → 止损，锁住新空单。涨段对称，锁新多单。锁住到：
+   同方向再创新极值、极值作废，或按第 2 条开了新段。
 5. 锁住时：配置选中的参照（``signal_market_trail_ref``）锁住的方向，所有币都不开新仓（问 Jev 前、
    拿到开仓锁后、读完账户后、挂单改市价追进、面板「重新检查」都查）。另一个方向不受影响；持仓、
    止损、移动止损不动；面板「放行」照旧绕过。
+
+**大盘均线**（``signal_market_ma_on``）。同一条参照的收盘价的 EMA（``signal_market_ma_minutes``，
+起点是 ``xs`` 最早一分钟）：收盘在 EMA 下面不开多，上面不开空，相等都不拦。没有状态，每分钟重判，
+所以不写决策记录（一小时切换约 7 次），只进影子文件。数据不满 N 分钟、断了超过 ``STALE_S``、
+最近 N 分钟里有补出来的分钟时不拦（移动止损照旧保持原状态）。总开关
+``signal_market_trail_on`` 关掉时两道闸一起关。
+
+**配合动作**：真的刚锁住时（这轮算完还锁着、离锁住不超过 2 分钟）``take_fresh_locks`` 交给主循环
+一次，按（参照，锁住时刻）去重并存盘，重启、补算不重复。
 
 数据只用主循环已经在收的：实时流的 1 分钟 K 线（BTC 一直订，ETH 在盯的时候）、大盘翻转每分钟
 那次检查拿到的 1 分钟收盘（BTC、候选池里的币）、启动回填 K 线时顺带拿到的那段；不另外请求币安。
@@ -25,7 +36,8 @@
 四条序列一直在算（开关关着也算，打开时不用重攒 24 小时）。锁住 / 放行写风控员的决策记录
 （只写选中的参照、开关开着时）；``signal_market_trail_shadow`` 开着时，每条序列每分钟一行写进
 ``data/market_trail_shadow/<UTC 日期>.jsonl``，过几天比较换哪个参照会拦掉哪些真实开仓。
-状态存 ``data/market_trail.json``，重启接着算。
+状态存 ``data/market_trail.json``，重启接着算；顶层的 ``notified`` / ``today`` 是新增键，旧文件没有
+也能读，段（``Leg``）的字段不变，旧代码也还读得了新文件。
 """
 
 from __future__ import annotations
@@ -39,7 +51,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from jiaoyi.contracts import FastLoopConfig, Interval, Kline, Outcome, Side
@@ -79,15 +91,92 @@ MAX_FILL_MIN = 360
 SAVE_EVERY_S = 60
 STALE_S = 300
 SEED_HOURS = 80
+FRESH_LOCK_S = 120
+"""锁住超过这么久才算到的不是「刚锁住」，不做配合动作。"""
+NOTIFIED_KEEP = 64
 
 _SIDE = {-1: Side.SHORT, 1: Side.LONG}
 _SIDE_CN = {-1: "空单", 1: "多单"}
 _LEG_CN = {-1: "跌段", 1: "涨段"}
 _EXT_CN = {-1: "低点", 1: "高点"}
+_MOVE_CN = {-1: "反弹", 1: "回落"}
+_NEW_CN = {-1: "创新低", 1: "创新高"}
 
 
 def minute_end(k: Kline) -> int:
     return int(k.open_time.timestamp()) + 60
+
+
+def ema_value(xs: Iterable[float], n: int) -> float | None:
+    """收盘价（不是 ln 价）的 EMA，第一分钟的收盘当种子，满 n 分钟才有值。"""
+    alpha = 2.0 / (n + 1)
+    m: float | None = None
+    seen = 0
+    for x in xs:
+        c = math.exp(x)
+        m = c if m is None else m + alpha * (c - m)
+        seen += 1
+    return m if seen >= n else None
+
+
+@dataclass(frozen=True)
+class EmaRead:
+    """均线闸此刻怎么判。``side``：+1 拦多单，−1 拦空单，0 不拦（方向和 ``Leg.side`` 同一套）。"""
+
+    state: Literal["block", "equal", "warmup", "stale", "filled"]
+    side: int = 0
+    ema: float | None = None
+    dist_atr: float | None = None
+    last_t: int | None = None
+
+
+def read_ema(s: TrailSeries, n: int, now_s: float, ema: float | None) -> EmaRead:
+    """``ema`` 由调用方算好传进来（``ema_value(s.xs, n)``），每分钟只算一遍。"""
+    if s.last_t is None or ema is None:
+        return EmaRead("warmup", last_t=s.last_t)
+    if now_s - s.last_t > STALE_S:
+        return EmaRead("stale", last_t=s.last_t)
+    if s.filled_t is not None and s.last_t - s.filled_t < n * 60:
+        return EmaRead("filled", last_t=s.last_t)
+    if not s.atr:
+        return EmaRead("warmup", last_t=s.last_t)
+    d = s.xs[-1] - math.log(ema)
+    side = 1 if d < 0 else -1 if d > 0 else 0
+    state: Literal["block", "equal"] = "block" if side else "equal"
+    return EmaRead(state, side, ema, d / s.atr, s.last_t)
+
+
+def ema_line(r: EmaRead, label: str, n: int, tz: ZoneInfo) -> str:
+    if r.state == "block":
+        where = "下方" if r.side > 0 else "上方"
+        return (
+            f"大盘均线：{label} 在 {n} 分钟均线{where} {abs(r.dist_atr or 0.0):.1f} ATR，"
+            f"暂停新{_SIDE_CN[r.side]}"
+        )
+    if r.state == "equal":
+        return f"大盘均线：{label} 正好在 {n} 分钟均线上，不拦"
+    if r.state == "stale" and r.last_t is not None:
+        at = datetime.fromtimestamp(r.last_t, UTC).astimezone(tz)
+        return f"均线数据停在 {at:%H:%M}，暂不拦"
+    if r.state == "filled":
+        return f"大盘均线：最近 {n} 分钟有补出来的数据，暂不拦"
+    return f"大盘均线：数据不满 {n} 分钟，暂不拦"
+
+
+def until_text(leg: Leg, age_min: int, tz: ZoneInfo) -> str:
+    """锁住要到什么时候：创新极值，或开了过期就到极值作废那一刻。"""
+    if age_min <= 0:
+        return _NEW_CN[leg.side]
+    at = datetime.fromtimestamp(leg.extreme_at + age_min * 60, UTC).astimezone(tz)
+    return f"{_NEW_CN[leg.side]}或 {at:%H:%M} 作废"
+
+
+def verdict_cn(sides: Iterable[int]) -> str:
+    """此刻拦的方向（+1 多单、−1 空单）合起来怎么说。"""
+    both = set(sides) - {0}
+    if len(both) == 2:
+        return "多空都暂停"
+    return f"{_SIDE_CN[next(iter(both))]}暂停" if both else "不拦"
 
 
 @dataclass
@@ -117,6 +206,8 @@ class TrailSeries:
     leg: Leg | None = None
     fill: dict[str, float] = field(default_factory=dict)
     """补缺用的上一分钟值：btc / eth 是各币 ln 价，alts 是各币上一分钟价格。"""
+    filled_t: int | None = None
+    """最近一分钟靠上一分钟补出来的收盘时刻。"""
 
     @property
     def warm(self) -> bool:
@@ -131,7 +222,7 @@ class TrailSeries:
             return None
         return self.leg.side * (self.leg.extreme - self.xs[-1]) / self.atr
 
-    def step(self, t: int, x: float, k: float) -> list[dict[str, Any]]:
+    def step(self, t: int, x: float, k: float, max_age_min: int = 0) -> list[dict[str, Any]]:
         """收进 t 这一分钟的 x，返回这一分钟发生的事（开段 / 锁住 / 放行）。"""
         self.xs.append(x)
         self.last_t = t
@@ -151,6 +242,11 @@ class TrailSeries:
             self.zone = zone
         leg = self.leg
         if leg is not None:
+            if max_age_min > 0 and t - leg.extreme_at >= max_age_min * 60:
+                if leg.stopped:
+                    events.append(self._event("unlock", t, leg, why="expire"))
+                leg.extreme, leg.extreme_at = x, t
+                leg.stopped, leg.stopped_at = False, None
             if leg.side * (x - leg.extreme) > 0:
                 if leg.stopped:
                     events.append(self._event("unlock", t, leg, why="extreme"))
@@ -182,6 +278,8 @@ class TrailSeries:
         if kind == "unlock":
             out["why"] = why
             out["locked_min"] = (t - (leg.stopped_at or t)) // 60
+            if why == "expire":
+                out["age_min"] = (t - leg.extreme_at) // 60
         return out
 
     def _bar(self, t: int, x: float) -> None:
@@ -233,6 +331,7 @@ class TrailSeries:
             "z": self.z,
             "leg": None if leg is None else leg.__dict__,
             "fill": self.fill,
+            "filled_t": self.filled_t,
         }
 
     @classmethod
@@ -249,6 +348,7 @@ class TrailSeries:
             z=d["z"],
             leg=None if leg is None else Leg(**leg),
             fill={str(s): float(v) for s, v in d["fill"].items()},
+            filled_t=d.get("filled_t"),
         )
 
 
@@ -281,6 +381,11 @@ class MarketTrail:
         self._dirty = False
         self._active: tuple[bool, str] | None = None
         self._floor: dict[str, int] = {}  # 清空重攒的序列从这一分钟起
+        self._ema: dict[str, tuple[tuple[int | None, int], float | None]] = {}
+        self._fresh: list[dict[str, Any]] = []  # 这轮算出来的锁住，等算完看还锁不锁
+        self._ready: list[dict[str, Any]] = []  # 真的刚锁住，等主循环取走
+        self._notified: list[tuple[str, int]] = []
+        self._today: dict[str, Any] = {}
         self._load()
         if seed:
             self._seed_from_regime_checks()
@@ -320,6 +425,7 @@ class MarketTrail:
         now = now or self._clock()
         changed = self._advance(now.timestamp(), live=True)
         self._flush_shadow()
+        self._settle_locks(now.timestamp())
         self._note_switch(now)
         if changed:
             self._dirty = True
@@ -399,8 +505,11 @@ class MarketTrail:
             for sym in _INPUTS[name]:
                 if (px := self._obs[sym].get(t)) is not None:
                     s.fill[sym] = math.log(px)
+                else:
+                    s.filled_t = t
             x = sum(s.fill[sym] for sym in _INPUTS[name]) / len(_INPUTS[name])
-        return s.step(t, x, self._cfg.signal_market_trail_k)
+        cfg = self._cfg
+        return s.step(t, x, cfg.signal_market_trail_k, cfg.signal_market_trail_max_extreme_age_min)
 
     def _alts_value(self, s: TrailSeries, t: int) -> float:
         x = s.xs[-1] if s.xs else 0.0
@@ -452,6 +561,7 @@ class MarketTrail:
             self._shadow(name, s, t)
         if not self._is_active(name):
             return 1
+        self._count_minute(name, s, t)
         out = 1
         for ev in events:
             if ev["kind"] == "leg":
@@ -461,10 +571,18 @@ class MarketTrail:
             label = LABEL[name]
             at = datetime.fromtimestamp(ev["t"], UTC)
             if ev["kind"] == "lock":
+                self._fresh.append({**ev, "ref": name})
+                leg_now = s.leg if s.leg is not None else Leg(side, ev["extreme"], ev["t"])
                 summary = (
-                    f"大盘移动止损：{label} 从{_LEG_CN[side]}{_EXT_CN[side]}"
-                    f"{'反弹' if side < 0 else '回落'} {ev['retrace_atr']:.1f} ATR，"
-                    f"暂停新{_SIDE_CN[side]}"
+                    f"大盘移动止损：{label} 从{_LEG_CN[side]}{_EXT_CN[side]}{_MOVE_CN[side]} "
+                    f"{ev['retrace_atr']:.1f} ATR（门槛 {self._cfg.signal_market_trail_k:.1f}），"
+                    f"暂停新{_SIDE_CN[side]}，{self._until(leg_now)}才恢复"
+                )
+            elif ev["why"] == "expire":
+                summary = (
+                    f"大盘移动止损：{label} {_LEG_CN[side]}{_EXT_CN[side]} {ev['age_min']} 分钟"
+                    f"没刷新，作废、从现价重算，恢复新{_SIDE_CN[side]}"
+                    f"（锁了 {ev['locked_min']} 分钟）"
                 )
             else:
                 why = (
@@ -492,6 +610,7 @@ class MarketTrail:
 
     def _shadow(self, name: str, s: TrailSeries, t: int) -> None:
         at = datetime.fromtimestamp(t, UTC)
+        e = self._read_ema(name, t)
         row = {
             "t": at.strftime("%Y-%m-%dT%H:%MZ"),
             "ref": name,
@@ -499,9 +618,48 @@ class MarketTrail:
             "leg": _SIDE[s.leg.side].value if s.leg is not None else None,
             "z": round(s.z, 3) if s.z is not None else None,
             "rt": round(r, 3) if (r := s.retrace_atr()) is not None else None,
+            "ema": round(e.ema, 6) if e.ema is not None else None,
+            "ma_block": _SIDE[e.side].value if e.side else None,
+            "ma_dist_atr": round(e.dist_atr, 3) if e.dist_atr is not None else None,
+            "both": self._both(s, e),
         }
         path = self._dir / SHADOW_DIR / f"{at.date().isoformat()}.jsonl"
         self._shadow_rows.append((path, json.dumps(row, separators=(",", ":"))))
+
+    @staticmethod
+    def _both(s: TrailSeries, e: EmaRead) -> bool:
+        return bool(e.side and s.warm and s.locked is not None and s.locked != e.side)
+
+    def _count_minute(self, name: str, s: TrailSeries, t: int) -> None:
+        """今天多少分钟两个方向都不开：面板要占比，不用每次扫影子文件。"""
+        day = datetime.fromtimestamp(t, UTC).astimezone(self._tz).date().isoformat()
+        if self._today.get("day") != day:
+            self._today = {"day": day, "minutes": 0, "both": 0}
+        self._today["minutes"] += 1
+        if self._cfg.signal_market_ma_on and self._both(s, self._read_ema(name, t)):
+            self._today["both"] += 1
+
+    def _settle_locks(self, now_s: float) -> None:
+        fresh, self._fresh = self._fresh, []
+        for ev in fresh:
+            s = self._series[ev["ref"]]
+            key = (ev["ref"], ev["t"])
+            if (
+                s.locked != ev["side"]
+                or s.leg is None
+                or s.leg.stopped_at != ev["t"]
+                or now_s - ev["t"] > FRESH_LOCK_S
+                or key in self._notified
+            ):
+                continue
+            self._notified = [*self._notified, key][-NOTIFIED_KEEP:]
+            self._ready.append(ev)
+            self._dirty = True
+
+    def take_fresh_locks(self) -> list[dict[str, Any]]:
+        """取走真的刚锁住的事件（每次锁最多给一次）；主循环每次 ``tick`` 之后调。"""
+        out, self._ready = self._ready, []
+        return out
 
     def _flush_shadow(self) -> None:
         rows, self._shadow_rows = self._shadow_rows, []
@@ -523,7 +681,10 @@ class MarketTrail:
         first, self._active = self._active is None, active
         if active[0] and not first:
             self._note(
-                now, Outcome.INFO, f"{self.status_line(now)}（设置刚改）", {"kind": "switch"}
+                now,
+                Outcome.INFO,
+                f"{self.status_line(now).replace(chr(10), '；')}（设置刚改）",
+                {"kind": "switch"},
             )
 
     def _note(self, now: datetime, outcome: Outcome, summary: str, out: dict[str, Any]) -> None:
@@ -531,32 +692,77 @@ class MarketTrail:
             self._rec.record(now, outcome, summary, output={"market_trail": out})
 
     # ------------------------------------------------------------ 开仓前
-    def holds(self, side: Side, now: datetime | None = None) -> str | None:
-        """这个方向的新仓此刻锁不锁：锁就返回拒绝理由（只看不动）。"""
+    def _ema_of(self, name: str) -> float | None:
+        s, n = self._series[name], self._cfg.signal_market_ma_minutes
+        key = (s.last_t, n)
+        cached = self._ema.get(name)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        value = ema_value(s.xs, n)
+        self._ema[name] = (key, value)
+        return value
+
+    def _read_ema(self, name: str, now_s: float) -> EmaRead:
+        n = self._cfg.signal_market_ma_minutes
+        return read_ema(self._series[name], n, now_s, self._ema_of(name))
+
+    def blocks(self, side: Side, now: datetime | None = None) -> tuple[str | None, list[str]]:
+        """这个方向的新仓此刻开不开（只看不动）：拒绝理由和拦它的闸（``ema`` / ``trail``）。"""
         if not self._cfg.signal_market_trail_on:
-            return None
+            return None, []
+        now = now or self._clock()
         name = self._cfg.signal_market_trail_ref
         s = self._series[name]
-        if not s.warm or s.locked is None or _SIDE[s.locked] is not side or s.leg is None:
-            return None
-        now = now or self._clock()
+        d = 1 if side is Side.LONG else -1
+        gates: list[str] = []
+        ema: EmaRead | None = None
+        if self._cfg.signal_market_ma_on:
+            ema = self._read_ema(name, now.timestamp())
+            if ema.side == d:
+                gates.append("ema")
+        if s.warm and s.locked == d and s.leg is not None:
+            gates.append("trail")
+            return self._trail_reason(s, name, now), gates
+        if ema is not None and ema.side == d:
+            n = self._cfg.signal_market_ma_minutes
+            return ema_line(ema, LABEL[name], n, self._tz), gates
+        return None, []
+
+    def holds(self, side: Side, now: datetime | None = None) -> str | None:
+        return self.blocks(side, now)[0]
+
+    def _until(self, leg: Leg) -> str:
+        return until_text(leg, self._cfg.signal_market_trail_max_extreme_age_min, self._tz)
+
+    def _trail_reason(self, s: TrailSeries, name: str, now: datetime) -> str:
+        assert s.leg is not None
         mins = max(0, int(now.timestamp() - (s.leg.stopped_at or now.timestamp())) // 60)
         rt = s.retrace_atr() or 0.0
+        d, k = s.leg.side, self._cfg.signal_market_trail_k
         return (
-            f"大盘移动止损：{LABEL[name]} 从{_LEG_CN[s.locked]}{_EXT_CN[s.locked]}"
-            f"{'反弹' if s.locked < 0 else '回落'} {rt:.1f} ATR，暂停新{_SIDE_CN[s.locked]}"
-            f"（锁住 {mins} 分钟）"
+            f"大盘移动止损：{_SIDE_CN[d]}锁住中（{LABEL[name]} {_MOVE_CN[d]}过 {k:.1f} ATR 门槛，"
+            f"现在离{_EXT_CN[d]} {rt:.1f} ATR，已锁 {mins} 分钟；{self._until(s.leg)}才解锁）"
         )
 
     def status_line(self, now: datetime | None = None) -> str:
-        """团队页风控员一行：「大盘移动止损：空单锁住中（BTC 反弹 1.1 ATR，12 分钟）」。"""
+        """团队页风控员三行：结论、均线、移动止损（移动止损还在攒数据时均线行照样写在拦）。"""
         now = now or self._clock()
+        name = self._cfg.signal_market_trail_ref
+        s = self._series[name]
+        sides: list[int] = []
+        lines: list[str] = []
+        if self._cfg.signal_market_ma_on:
+            ema = self._read_ema(name, now.timestamp())
+            sides.append(ema.side)
+            n = self._cfg.signal_market_ma_minutes
+            lines.append(ema_line(ema, LABEL[name], n, self._tz))
+        if s.warm and s.locked is not None:
+            sides.append(s.locked)
         line = self._status(now)
-        last = self._series[self._cfg.signal_market_trail_ref].last_t
-        if last is not None and now.timestamp() - last > STALE_S:
-            at = datetime.fromtimestamp(last, UTC).astimezone(self._tz)
+        if s.last_t is not None and now.timestamp() - s.last_t > STALE_S:
+            at = datetime.fromtimestamp(s.last_t, UTC).astimezone(self._tz)
             line += f"；数据停在 {at:%H:%M}，状态不变"
-        return line
+        return "\n".join([f"大盘闸门：{verdict_cn(sides)}", *lines, line])
 
     def _status(self, now: datetime) -> str:
         name = self._cfg.signal_market_trail_ref
@@ -572,9 +778,9 @@ class MarketTrail:
         rt = s.retrace_atr() or 0.0
         if s.locked is not None:
             mins = max(0, int(now.timestamp() - (s.leg.stopped_at or now.timestamp())) // 60)
-            move = "反弹" if side < 0 else "回落"
             return (
-                f"大盘移动止损：{_SIDE_CN[side]}锁住中（{label} {move} {rt:.1f} ATR，{mins} 分钟）"
+                f"大盘移动止损：{_SIDE_CN[side]}锁住中（{label} 现在离{_EXT_CN[side]} {rt:.1f} ATR"
+                f" · 门槛 {self._cfg.signal_market_trail_k:.1f} · 已锁 {mins} 分钟）"
             )
         return (
             f"大盘移动止损：{label} {_LEG_CN[side]}，{_SIDE_CN[side]}放行"
@@ -628,6 +834,8 @@ class MarketTrail:
             for name in SERIES:
                 if (d := raw.get("series", {}).get(name)) is not None:
                     self._series[name] = TrailSeries.from_json(d)
+            self._notified = [(str(a), int(b)) for a, b in raw.get("notified") or []]
+            self._today = dict(raw.get("today") or {})
         except FileNotFoundError:
             return
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -638,7 +846,12 @@ class MarketTrail:
         self._save(self._clock().timestamp())
 
     def _save(self, now_s: float) -> None:
-        data = {"version": 1, "series": {n: s.to_json() for n, s in self._series.items()}}
+        data = {
+            "version": 1,
+            "series": {n: s.to_json() for n, s in self._series.items()},
+            "notified": self._notified,
+            "today": self._today,
+        }
         tmp = self._path.with_suffix(".tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)

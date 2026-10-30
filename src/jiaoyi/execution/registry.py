@@ -30,8 +30,9 @@ from jiaoyi.contracts.position import CloseReason, PositionStatus
 from jiaoyi.execution.exchange import WorkingType
 from jiaoyi.execution.frozen_peak import FrozenPeakExit
 
-LegPurpose = Literal["fixed", "trailing", "lifeboat", "tightened"]
-"""条件单腿的来源；新的收紧来源在这里加自己的取值（tightened = 反向作战卡保本收紧价，#314）。"""
+LegPurpose = Literal["fixed", "trailing", "lifeboat", "tightened", "profit_lock"]
+"""条件单腿的来源；新的收紧来源在这里加自己的取值（tightened = 反向作战卡保本收紧价，#314；
+profit_lock = 锁利止损）。"""
 
 OPPOSITE_CARD_FIELDS = (
     "tightened_stop_price",
@@ -60,6 +61,19 @@ NATIVE_TRAILING_FIELDS = (
 False 时不落盘；腿上的 ``activate_price`` / ``callback_rate`` 同样。没用过的账本旧代码照常能读，
 用过之后回退先跑 ``scripts/native_trailing_rollback.py``；只回退到还没有 ``native_mainnet_*`` 的
 版本时跑它的 ``--mainnet-extreme-only``（只删这两个字段，随时能跑）。"""
+
+
+PROFIT_LOCK_FIELDS = (
+    "profit_lock_reached_at",
+    "profit_lock_price",
+    "profit_lock_r",
+    "profit_lock_source",
+    "profit_lock_at",
+    "profit_lock_done",
+    "profit_lock_unknown_since",
+)
+"""锁利加在 ``ServerProtection`` 上的字段，为空时不落盘。用过之后回退先跑
+``scripts/profit_lock_rollback.py``（还要处理腿的用途和平仓原因 ``profit_lock``）。"""
 
 
 class ProtectiveLeg(BaseModel):
@@ -203,6 +217,23 @@ class ServerProtection(BaseModel):
     「主网价格越过止损」推算这张单在主网上的止损线；``native_extreme`` 是 Demo 标记价，两者不混。"""
     native_mainnet_activated: bool = False
     """主网价已越过这张单的激活价（或下单即激活）。"""
+    profit_lock_reached_at: datetime | None = None
+    """第一次扣费后赚到 ``profit_lock_trigger_r`` 的时刻。落了就不再判，之后价格回落也一直重试
+    挂单，重启接着来。"""
+    profit_lock_price: float | None = None
+    """锁利止损目标价，触发时按实际开仓费和吃单费率算定，不再改；账本止损价和 R 不变。"""
+    profit_lock_r: float | None = None
+    """触发时的 ``profit_lock_r``（配置之后改了也按这个显示）。"""
+    profit_lock_source: str | None = None
+    """按哪个价判的：mainnet（模拟盘的主网价 / 实盘）/ demo（同环境标记价）。"""
+    profit_lock_at: datetime | None = None
+    """锁利止损腿确认在挂的时刻。"""
+    profit_lock_done: str | None = None
+    """None = 还要试；locked = 腿已挂上；tight_enough = 现有止损已同样紧，没换单；
+    abandoned_rejected = 交易所明确拒绝，这笔放弃。``tight_enough`` 和放弃是定论；锁上过的不会
+    再变成放弃。交易所上有确认在挂的锁利腿时，它总是止损下限，不看这个字段。"""
+    profit_lock_unknown_since: datetime | None = None
+    """锁利腿提交结果未知，从何时起（落盘）；这段时间不再挂新单号，查到就清空。"""
 
     @model_serializer(mode="wrap")
     def _omit_unused_opposite_fields(
@@ -214,6 +245,9 @@ class ServerProtection(BaseModel):
                 data.pop(name, None)
         for name in NATIVE_TRAILING_FIELDS:
             if data.get(name) is None or data.get(name) is False:
+                data.pop(name, None)
+        for name in PROFIT_LOCK_FIELDS:
+            if data.get(name) is None:
                 data.pop(name, None)
         return data
 

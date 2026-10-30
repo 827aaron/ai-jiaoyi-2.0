@@ -953,13 +953,16 @@ class App:
         )
         # 持仓币在亏时遇反向信号 / 大盘台翻向：申请这个币的单币临时会（core/held_events.py）
         met_since = getattr(cards, "met_since", None)
+        meeting_pending = getattr(cards, "meeting_pending", None)
         self.held_events = HeldEventDesk(
             app_cfg.fast_loop,
             Path(app_cfg.data_dir) / HELD_EVENTS_FILE,
+            tz=risk_cfg.day_reset_tz,
             fee_bps=lambda: self.risk_cfg.taker_fee_bps,
             request_event=request_event if callable(request_event) else None,
             meeting_ok=(lambda t: bool(accepts(t))) if callable(accepts) else None,
             met_since=met_since if callable(met_since) else None,
+            pending=meeting_pending if callable(meeting_pending) else None,
             recorder=self.recorders.get(Role.PATROL),
         )
         # 大盘台转向：卡上旧方向的币暂停开旧方向的新仓，等这个币转向后第一场会（core/desk_turn.py）

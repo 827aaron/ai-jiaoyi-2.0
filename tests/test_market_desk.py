@@ -686,6 +686,24 @@ async def test_too_few_valid_samples_fails_without_publishing(tmp_path: Path) ->
 # ------------------------------------------------------------------ off / 花费 / 自停
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "pending"),
+    [
+        ("regime_flip", "market_trail", "regime_flip"),
+        ("move", "market_trail", "move"),
+        ("market_trail", "move", "market_trail"),
+        ("market_trail", "regime_flip", "regime_flip"),
+    ],
+)
+def test_request_run_keeps_the_reason_already_pending(
+    tmp_path: Path, first: str, second: str, pending: str
+) -> None:
+    desk = make_desk(tmp_path, FakePublisher(), FakeModel(answer(0.6, 0.2, 0.2)), [T0])
+    desk.request_run(first)
+    desk.request_run(second)
+    assert desk._requested == pending
+
+
 async def test_mode_off_makes_zero_model_calls(tmp_path: Path) -> None:
     model = FakeModel(answer(0.6, 0.2, 0.2))
     builder = FakeBuilder()

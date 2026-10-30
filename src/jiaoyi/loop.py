@@ -158,6 +158,10 @@ _POOL_DONE = {
 BACKFILL_CONCURRENCY = 5
 
 
+PROFIT_LOCK_FRESH_S = 10.0
+"""主网价离现在超过这么久（缓冲、重放）不拿来判锁利。"""
+
+
 @runtime_checkable
 class _Forgets(Protocol):
     def forget(self, position_id: str) -> None: ...
@@ -222,6 +226,21 @@ class _TightensStop(Protocol):
         allow_close: bool,
         label: str,
     ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class _LocksProfit(Protocol):
+    """执行器：锁利止损（HbExecutorAdapter）。"""
+
+    def note_profit_reached(
+        self, position_id: str, price: float, *, trigger_r: float, lock_r: float, source: str
+    ) -> dict[str, Any] | None: ...
+
+    def set_profit_lock_gap(self, gap_bps: float) -> None: ...
+
+    def last_mark(self, position_id: str) -> float | None: ...
+
+    async def lock_profit_stop(self, position_id: str) -> dict[str, Any]: ...
 
 
 @runtime_checkable
@@ -467,6 +486,7 @@ class Runner:
         self._keeper_slots = asyncio.Semaphore(KEEPER_CONCURRENCY)
         self._keeper_queued: set[str] = set()
         self._card_rule_queued: set[str] = set()
+        self._lock_queued: set[str] = set()  # 锁利换单已派出、还没回来的仓
         self._tighten_logged: dict[str, tuple[str, str, str]] = {}  # 每仓上次记下的收紧结果
         self._tighten_done: dict[str, str] = {}  # 每仓已收紧 / 已够紧的反向指令，不再进执行器锁
         self._restore_keeper_market()
@@ -610,6 +630,7 @@ class Runner:
         if isinstance(self.m.executor, _ServerProtection):
             # 每轮结束后再等待，避免慢交易所请求使保护轮询重叠。
             self._loops.append(self._every(1.0, self.m.executor.protection_tick))
+            self._loops.append(self._every(1.0, self.profit_lock_tick))
         if self.app.derivs is not None:
             # 持仓量每 60 秒、多空比每 5 分钟（盯着的币；查失败自己跳过）
             self._loops.append(asyncio.create_task(self.app.derivs.run(self._derivs_symbols)))
@@ -1076,6 +1097,10 @@ class Runner:
                 continue
             try:
                 self._paper_stop_one(pos, price, event.ts, mode)
+                if event.ts >= self._paper_stop_since(pos) and (
+                    (self.app.clock() - event.ts).total_seconds() <= PROFIT_LOCK_FRESH_S
+                ):
+                    self._profit_lock_cross(pos, price, "mainnet")
             except Exception:
                 # Patrol and entry triggers run after this on the same event.
                 log.exception("主网止损检查出错 %s", pos.position_id)
@@ -1119,6 +1144,76 @@ class Runner:
                 self._paper_unseen(pos, unseen, price)
             return
         self._paper_stop_hit(pos, stop, price, ts, mode)
+
+    def _profit_lock_cross(self, pos: PositionRecord, price: float, source: str) -> None:
+        """第一次扣费后赚到触发线：执行器定下目标价并落盘，换单放后台（这里在行情事件里）。"""
+        ex, fl = self.m.executor, self.app.app_cfg.fast_loop
+        if not fl.profit_lock_on or not isinstance(ex, _LocksProfit):
+            return
+        hit = ex.note_profit_reached(
+            pos.position_id,
+            price,
+            trigger_r=fl.profit_lock_trigger_r,
+            lock_r=fl.profit_lock_r,
+            source=source,
+        )
+        if hit is None:
+            return
+        rec = self.app.recorders.get(Role.KEEPER)
+        if rec is not None:
+            rec.record(
+                self.app.clock(),
+                Outcome.INFO,
+                f"{pos.symbol} 扣费后赚到 {hit['reached_r']:.2f}R，锁利止损定在 "
+                f"{hit['target']:g}（约 +{fl.profit_lock_r:g}R，未含滑点）",
+                symbol=pos.symbol,
+                signal_id=pos.signal_id,
+                position_id=pos.position_id,
+                output={"profit_lock": hit},
+            )
+        self._spawn_profit_lock(pos.position_id)
+
+    def _spawn_profit_lock(self, pid: str) -> None:
+        if pid in self._lock_queued:
+            return
+        self._lock_queued.add(pid)
+        self._spawn(self._profit_lock_one(pid), Role.KEEPER)
+
+    async def _profit_lock_one(self, pid: str) -> None:
+        ex = self.m.executor
+        try:
+            if isinstance(ex, _LocksProfit):
+                self._note_lock_round(pid, await ex.lock_profit_stop(pid))
+        finally:
+            self._lock_queued.discard(pid)
+
+    def _note_lock_round(self, pid: str, result: dict[str, Any]) -> None:
+        if result.get("action") != "retry":
+            return
+        rec = self.app.recorders.get(Role.KEEPER)
+        if rec is not None:
+            pos = next((p for p in self._ledger_positions() if p.position_id == pid), None)
+            rec.record(
+                self.app.clock(),
+                Outcome.INFO,
+                f"{pos.symbol if pos else pid} 锁利止损这一轮没挂上（{result.get('why')}），"
+                "之后每轮接着试",
+                symbol=pos.symbol if pos else None,
+                position_id=pid,
+                output={"profit_lock_round": result},
+            )
+
+    async def profit_lock_tick(self) -> None:
+        """每秒：没走主网价判的运行模式用同环境标记价判。换单归 ``protection_tick`` 的同步。"""
+        ex, fl = self.m.executor, self.app.app_cfg.fast_loop
+        if not fl.profit_lock_on or not isinstance(ex, _LocksProfit):
+            return
+        ex.set_profit_lock_gap(fl.profit_lock_mark_gap_bps)
+        if self._paper_stop_mode() is None:
+            source = "mainnet" if self.app.app_cfg.mode == RunMode.LIVE else "demo"
+            for pos in self._ledger_positions():
+                if pos.status is PositionStatus.OPEN and (px := ex.last_mark(pos.position_id)):
+                    self._profit_lock_cross(pos, px, source)
 
     def _paper_stop_since(self, pos: PositionRecord) -> datetime:
         ex = self.m.executor
@@ -2247,8 +2342,22 @@ class Runner:
         try:
             feed(trail)
             trail.tick(self.app.clock())
+            for ev in trail.take_fresh_locks():
+                self._trail_locked(ev)
         except Exception:
             log.exception("大盘移动止损收数据出错")
+
+    def _trail_locked(self, ev: dict[str, Any]) -> None:
+        """大盘移动止损真的刚锁住：亏着的同方向持仓申请临时会，叫大盘台加跑。不平仓、不改卡。"""
+        if not self.app.app_cfg.fast_loop.signal_market_trail_notify:
+            return
+        side = Side.LONG if ev["side"] > 0 else Side.SHORT
+        if (held := self._held_events()) is not None:
+            held.on_trail_lock(side, self._ledger_positions(), self.app.clock(), self._last_price)
+        desk = getattr(self.app, "desk", None)
+        if desk is not None:
+            desk.request_run("market_trail")
+            self._start_desk_if_due()
 
     @staticmethod
     def _trail_backfilled(trail: MarketTrail, symbol: str, minutes: list[Kline]) -> None:
@@ -2263,8 +2372,28 @@ class Runner:
         self, signal: CandidateSignal, card: BattleCard | None, now: datetime
     ) -> bool:
         trail = self._market_trail()
-        why = trail.holds(signal.side_hint, now) if trail is not None else None
-        return why is not None and self._reject_before_open(signal, card, now, why, "market_trail")
+        if trail is None:
+            return False
+        why, gates = trail.blocks(signal.side_hint, now)
+        if why is None:
+            return False
+        cs = card.for_symbol(signal.symbol) if card is not None else None
+        market = card.current_market if card is not None else None
+        issued = cs.issued_at if cs is not None else None
+        expires = card.symbol_expires_at(signal.symbol) if card is not None else None
+        return self._reject_before_open(
+            signal,
+            card,
+            now,
+            why,
+            "market_trail",
+            {
+                "gates": gates,
+                "card_issued_at": issued.isoformat() if issued else None,
+                "card_expires_at": expires.isoformat() if expires else None,
+                "regime_direction": market.regime_direction if market else None,
+            },
+        )
 
     def _desk_turn_blocked(
         self, signal: CandidateSignal, card: BattleCard | None, now: datetime
@@ -2276,7 +2405,13 @@ class Runner:
         return self._reject_before_open(signal, card, now, why, "desk_turn")
 
     def _reject_before_open(
-        self, signal: CandidateSignal, card: BattleCard | None, now: datetime, why: str, by: str
+        self,
+        signal: CandidateSignal,
+        card: BattleCard | None,
+        now: datetime,
+        why: str,
+        by: str,
+        detail: dict[str, Any] | None = None,
     ) -> bool:
         rec = self.app.recorders.get(Role.RISK_GUARD)
         if rec is not None:
@@ -2287,7 +2422,11 @@ class Runner:
                 symbol=signal.symbol,
                 signal_id=signal.signal_id,
                 card_id=card.card_id if card else None,
-                output={"approved": False, "reasons": [why], "detail": {"by": by}},
+                output={
+                    "approved": False,
+                    "reasons": [why],
+                    "detail": {"by": by, **(detail or {})},
+                },
             )
         return True
 

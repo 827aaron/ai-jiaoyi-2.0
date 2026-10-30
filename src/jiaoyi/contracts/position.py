@@ -59,6 +59,8 @@ class CloseReason(StrEnum):
     TRAILING_STOP = "trailing_stop"
     TIGHTENED_STOP = "tightened_stop"
     """反向作战卡没经价格确认时收紧的托管止损触发（#314）。"""
+    PROFIT_LOCK = "profit_lock"
+    """锁利止损触发：扣费后赚到过 ``profit_lock_trigger_r`` 后挪上去的那张止损。"""
     TIME_LIMIT = "time_limit"
     KEEPER = "keeper"
     PATROL = "patrol"

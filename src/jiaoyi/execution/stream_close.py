@@ -309,6 +309,8 @@ def _leg_reason(leg: ProtectiveLeg) -> CloseReason:
         return CloseReason.TRAILING_STOP
     if leg.purpose == "tightened":
         return CloseReason.TIGHTENED_STOP
+    if leg.purpose == "profit_lock":
+        return CloseReason.PROFIT_LOCK
     return CloseReason.STOP_LOSS if leg.kind == "stop_loss" else CloseReason.TAKE_PROFIT
 
 
