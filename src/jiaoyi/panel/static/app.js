@@ -1971,12 +1971,15 @@ async function loadKlines(force) {
     return;
   }
   const tl = trailLines(p) || {};
-  linePrices = [p.take_profit_price, p.entry_price, p.stop_loss_price, p.lifeboat_price, tl.start, tl.stop];
+  // 移动止损已激活后止盈目标不再起作用（交易所不挂止盈单），线也不画
+  const q = p.protection || {};
+  const tp = q.native_activated || q.trailing_activated ? null : p.take_profit_price;
+  linePrices = [tp, p.entry_price, p.stop_loss_price, p.lifeboat_price, tl.start, tl.stop];
   const css = getComputedStyle(document.documentElement);
   const c = (v) => css.getPropertyValue(v).trim();
   const L = LightweightCharts.LineStyle;
   const defs = [
-    [p.take_profit_price, "止盈", c("--up"), L.Dashed],
+    [tp, "止盈", c("--up"), L.Dashed],
     [p.entry_price, "开仓", c("--faint"), L.Solid],
     [p.stop_loss_price, "固定止损计划", c("--sl"), L.Dashed],
     [p.lifeboat_price, "保命", c("--down"), L.Dotted],
