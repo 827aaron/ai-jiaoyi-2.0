@@ -74,8 +74,10 @@ from jiaoyi.execution.fills import (
 from jiaoyi.execution.frozen_peak import BOOK_MAX_AGE_S as FROZEN_BOOK_MAX_AGE_S
 from jiaoyi.execution.frozen_peak import (
     FrozenPeakExit,
+    drop_for_trailing,
     frozen_peak_evidence,
     frozen_peak_update,
+    trailing_active,
 )
 from jiaoyi.execution.hb_client import HbApiError, HummingbotApi, executor_query_state
 from jiaoyi.execution.lifeboat import lifeboat_price
@@ -458,6 +460,7 @@ class HbExecutorAdapter:
             protection.notify_stop_clamped = self._alert_stop_clamped
             protection.notify_native_fallback = self._alert_native_fallback
             protection.notify_trigger_rejected = self._alert_trigger_rejected
+            protection.notify_take_profit = self._alert_take_profit
         if hosted_close_mode not in ("hb_first", "direct"):
             raise ValueError(f"未知的托管平仓顺序：{hosted_close_mode}")
         self._hosted_close_mode: HostedCloseMode = hosted_close_mode
@@ -1001,8 +1004,8 @@ class HbExecutorAdapter:
         return tracked.filled_at or tracked.record.opened_at
 
     def take_profit_exiting(self, position_id: str) -> bool:
-        """A take-profit leg placed by an older version has triggered: Demo is exiting at its
-        target, not a stop. New positions carry no take-profit leg."""
+        """A take-profit leg (the fallback one, or one an older version placed) has triggered:
+        Demo is exiting at its target, not a stop."""
         tracked = self._registry.get(position_id)
         state = tracked.server_protection if tracked is not None else None
         if state is None:
@@ -2295,6 +2298,16 @@ class HbExecutorAdapter:
             kind="order_failed",
         )
 
+    async def _alert_take_profit(self, pid: str, symbol: str, text: str) -> None:
+        await self._alert(
+            AlertLevel.WARN,
+            "后备止盈单没挂好",
+            f"{symbol} {pid}：{text}；止损和保命单照常在挂",
+            symbol,
+            f"server_take_profit:{pid}",
+            kind="order_failed",
+        )
+
     async def _alert_trigger_rejected(self, pid: str, symbol: str, tag: str, text: str) -> None:
         await self._alert(
             AlertLevel.CRITICAL,
@@ -2398,8 +2411,10 @@ class HbExecutorAdapter:
             leg
             for leg in state.legs
             if leg.state in ("submit_pending", "cancel_pending")
-            # 放弃了的交易所移动止损（提交结果未知）不是换代，留给零仓收尾核清
+            # 放弃了的交易所移动止损（提交结果未知）不是换代，留给零仓收尾核清；后备止盈腿
+            # 独立于止损和保命单，它在提交 / 撤销中也不是换代
             and not (leg.kind == "trailing_stop" and state.native_fallback is not None)
+            and leg.kind != "take_profit"
         ]
         if state.ever_armed and moving:
             return (
@@ -2413,12 +2428,43 @@ class HbExecutorAdapter:
         self._frozen_peak_on = enabled
         self._frozen_peak_after_s = after_s
 
+    async def _frozen_peak_drop(
+        self, position_id: str, initial: TrackedPosition
+    ) -> dict[str, Any] | None:
+        """移动止损激活过：不读证据，落盘 ``trailing_active``（丢掉冻结目标价），不触发。"""
+        async with self._registry.symbol_lock(initial.record.symbol):
+            tracked = self._registry.get(position_id)
+            if (
+                tracked is None
+                or tracked.record.status is not PositionStatus.OPEN
+                or tracked.frozen_peak_exit is None
+                or tracked.entry_client_order_id != initial.entry_client_order_id
+            ):
+                return None
+            state = drop_for_trailing(tracked.frozen_peak_exit)
+            if state.status == "triggered":
+                return None  # 等锁期间刚触发：下一次复查走触发分支
+            if state != tracked.frozen_peak_exit:
+                self._registry.put(tracked.model_copy(update={"frozen_peak_exit": state}))
+                log.info(
+                    "%s %s 移动止损已激活，冻结盈利价回访不再适用（%s）",
+                    tracked.record.symbol,
+                    position_id,
+                    "已冻结的目标价丢掉" if state.frozen_at is not None else "还没冻结",
+                )
+            return {**state.model_dump(mode="json"), "triggered": False}
+
     async def frozen_peak_review(self, position_id: str, now: datetime) -> dict[str, Any] | None:
         initial = self._registry.get(position_id)
         if self._protection is None or initial is None or initial.frozen_peak_exit is None:
             return None
         if initial.record.status is not PositionStatus.OPEN:
             return None
+        if initial.frozen_peak_exit.status != "triggered" and (
+            initial.frozen_peak_exit.status == "trailing_active"
+            or trailing_active(initial.server_protection)
+        ):
+            return await self._frozen_peak_drop(position_id, initial)
         if initial.frozen_peak_exit.status == "triggered":
             async with self._registry.symbol_lock(initial.record.symbol):
                 current = self._registry.get(position_id)

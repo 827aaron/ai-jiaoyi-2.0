@@ -485,7 +485,12 @@ class JevKeeper:
                 frozen_peak_rule=frozen_peak,
                 rules=votes,
             )
-        votes.append({"rule": "frozen_peak", "vote": "hold" if frozen_peak else "off"})
+        if frozen_peak and frozen_peak.get("status") == "trailing_active":
+            votes.append(
+                {"rule": "frozen_peak", "vote": "off", "why": "移动止损已激活，不按冻结盈利价平"}
+            )
+        else:
+            votes.append({"rule": "frozen_peak", "vote": "hold" if frozen_peak else "off"})
         if self._refresh is not None:
             try:
                 await self._refresh(position.symbol)

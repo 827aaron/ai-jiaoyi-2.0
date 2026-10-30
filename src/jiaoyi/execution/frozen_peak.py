@@ -35,10 +35,30 @@ class FrozenPeakExit(BaseModel):
     frozen_at: AwareDatetime | None = None
     target_price: float | None = None
     observation_gap: bool = False
-    status: Literal["collecting", "frozen", "no_positive_peak", "unknown", "triggered"] = (
-        "collecting"
-    )
+    status: Literal[
+        "collecting", "frozen", "no_positive_peak", "unknown", "triggered", "trailing_active"
+    ] = "collecting"
+    """``trailing_active``：移动止损激活过，这笔不是平静仓，规则对它永久不再起作用。"""
     detail: str = ""
+
+
+def trailing_active(protection: object) -> bool:
+    """程序自己跟的移动止损已激活，或交易所移动止损的本地推算已越过激活价。两者落盘后都不回退。"""
+    return bool(
+        getattr(protection, "trailing_activated", False)
+        or getattr(protection, "native_activated", False)
+    )
+
+
+def drop_for_trailing(state: FrozenPeakExit) -> FrozenPeakExit:
+    """这条规则只管移动止损一直没激活的平静仓：激活了的跑单在冻结时刻正贴着峰值，按冻结价
+    回访会马上把它平掉。冻结前激活就不再冻结，冻结后激活就丢掉目标价；峰值和冻结时刻留作记录。
+    已触发的不改（平仓已在请求）。"""
+    if state.status in ("triggered", "trailing_active"):
+        return state
+    return state.model_copy(
+        update={"status": "trailing_active", "target_price": None, "detail": "trailing_activated"}
+    )
 
 
 def frozen_peak_update(
@@ -48,7 +68,7 @@ def frozen_peak_update(
     book: ExecutionBook,
     now: datetime,
 ) -> FrozenPeakExit:
-    if state.status == "triggered":
+    if state.status in ("triggered", "trailing_active"):
         return state
     times = (basis.first_fill_at, basis.last_fill_at, book.source_at, book.observed_at, now)
     if any(t is None or t.tzinfo is None or t.utcoffset() is None for t in times):

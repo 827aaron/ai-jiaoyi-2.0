@@ -1645,8 +1645,17 @@ class AppConfig(Contract):
     )
     protection_take_profit_working_type: Literal["CONTRACT_PRICE", "MARK_PRICE"] = Field(
         default="CONTRACT_PRICE",
-        description="不再生效：托管保护不挂止盈单，盈利出场只靠移动止损。"
-        "留着只为已有配置文件照常能读。",
+        description="Demo 托管保护：后备止盈单（protection_fallback_take_profit）按什么价触发。"
+        "CONTRACT_PRICE = 最新成交价；MARK_PRICE = 标记价。只影响之后新挂的止盈，"
+        "已挂的单照旧按挂单时的核对。改后重启生效。",
+    )
+    protection_fallback_take_profit: bool = Field(
+        default=False,
+        description="Demo 托管保护：没有币安移动止损在保护盈利一侧（挂不上放弃了、trailing_native "
+        "关着、这笔没带移动止损），且程序自己跟的移动止损还没激活时，在止损和保命单确认在挂之后"
+        "再挂一张交易所止盈单（只减仓，价 = 账本止盈价）；移动止损一激活、或币安移动止损确认在挂，"
+        "就撤掉它。挂不上、查不到、撤不掉都只告警，不平仓；被拒后这笔不再挂。"
+        "false = 不挂（原行为），还在的止盈腿照样撤掉。改后重启生效。",
     )
     protection_trailing_book_mark_max_dev_bps: float = Field(
         default=30.0,

@@ -239,6 +239,20 @@ KLINE_CASES = r"""
   pageData = { positions: [pos('p1', 95), pos('p2', 95)] }; hash = 'positions/p2';
   await loadKlines(false);
   assert.deepEqual(take(), ['setData 0', 'remove 止盈', 'remove 开仓', 'remove 固定止损计划', 'setData 4', 'create 止盈 110', 'create 开仓 100', 'create 固定止损计划 95']);
+  // 后备止盈单在挂：按交易所触发价画它；移动止损激活后不画
+  const tpLeg = (state, price, extra = {}) => ({ role: 'take_profit', state, trigger_price: price, ...extra });
+  pageData = { positions: [pos('p1', 95), { ...pos('p2', 95), protection: { legs: [tpLeg('live', 109.5)] } }] };
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 240', 'remove 止盈', 'remove 开仓', 'remove 固定止损计划', 'create 交易所止盈单（后备） 109.5', 'create 开仓 100', 'create 固定止损计划 95']);
+  pageData = { positions: [pos('p1', 95), { ...pos('p2', 95), protection: { legs: [tpLeg('pending', null, { previous: tpLeg('live', 109.5) })] } }] };
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 240']);
+  pageData = { positions: [pos('p1', 95), { ...pos('p2', 95), protection: { legs: [tpLeg('cancelled', 109.5)] } }] };
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 240', 'remove 交易所止盈单（后备）', 'remove 开仓', 'remove 固定止损计划', 'create 止盈 110', 'create 开仓 100', 'create 固定止损计划 95']);
+  pageData = { positions: [pos('p1', 95), { ...pos('p2', 95), protection: { trailing_activated: true, legs: [tpLeg('live', 109.5)] } }] };
+  await loadKlines(false);
+  assert.deepEqual(take(), ['update 240', 'remove 止盈', 'remove 开仓', 'remove 固定止损计划', 'create 开仓 100', 'create 固定止损计划 95']);
 })().catch((e) => { console.error(e); process.exit(1); });
 """
 

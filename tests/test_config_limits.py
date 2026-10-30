@@ -127,6 +127,7 @@ OPTIONAL_APP_FIELDS = {
     "protection_unknown_submit_grace_s",
     "protection_stop_working_type",
     "protection_take_profit_working_type",
+    "protection_fallback_take_profit",  # 默认 false（不挂后备止盈单）
     "protection_leg_order",
     "hosted_close_mode",  # 默认 hb_first，老配置文件没有这一行
     "protection_tick_alert_after",  # 默认 1
