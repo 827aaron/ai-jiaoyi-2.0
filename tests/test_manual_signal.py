@@ -11,6 +11,8 @@ from typing import Any
 
 from jiaoyi import contracts as c
 from jiaoyi.core.commands import write_command
+from jiaoyi.core.desk_turn import DeskTurnPause
+from jiaoyi.core.hotconfig import HOT_FAST, patch_inplace
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.loop import Runner
@@ -154,6 +156,20 @@ async def test_recheck_still_rejected(tmp_path: Path, now: datetime) -> None:
     r, ex, _risk, _ = await _runner(tmp_path, now, approve=False)
     res = await _run(r, tmp_path, now, "recheck_signal")
     assert res["status"] == "done" and res["detail"].startswith("现在仍拒绝：")
+    assert ex.opened == []
+
+
+async def test_recheck_reports_the_desk_turn_pause(tmp_path: Path, now: datetime) -> None:
+    r, ex, _risk, _ = await _runner(tmp_path, now)
+    patch_inplace(
+        r.app.app_cfg.fast_loop, FAST.model_copy(update={"signal_desk_turn_pause": True}), HOT_FAST
+    )
+    r.app.desk_turn = DeskTurnPause(
+        r.app.app_cfg.fast_loop, tmp_path / "desk_turn_pause.json", initial_direction="看涨"
+    )
+    r.app.desk_turn.on_desk_run("中性", now)
+    res = await _run(r, tmp_path, now, "recheck_signal")
+    assert res["detail"] == "现在仍拒绝：大盘台 13:30 看涨→中性，暂停新多单"
     assert ex.opened == []
 
 

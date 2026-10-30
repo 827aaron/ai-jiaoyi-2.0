@@ -1453,6 +1453,10 @@ class Runner:
             and direction != intent.source_market_direction
         ):
             why.append("大盘方向已变，原拍板背景已过时，等新信号重新拍板")
+        if (turn := self._desk_turn()) is not None and (
+            held := turn.holds(intent.symbol, intent.side, card, now)
+        ):
+            why.append(held)
         return (
             why
             + self._chase_zone(intent, card, now)
@@ -1546,6 +1550,8 @@ class Runner:
                 )
                 return
             assert fresh is not None
+            if self._desk_turn_blocked(signal, fresh, now):
+                return  # 等账户期间大盘台转向了
             # 拍板要几百毫秒，滑点和价差按现在的行情算，不按触发时那份
             market = self.m.features.snapshot(signal.symbol)
             verdict = self.m.risk.review(signal, jev, fresh, account, now, market=market)
@@ -1700,7 +1706,9 @@ class Runner:
         )
         label = "人工放行" if release else "重新检查"
         if not release:
-            miss = entry_zone_miss(new, card, self.app.app_cfg.fast_loop, now)
+            turn = self._desk_turn()
+            held = turn.holds(sym, new.side_hint, card, now) if turn is not None else None
+            miss = held or entry_zone_miss(new, card, self.app.app_cfg.fast_loop, now)
             if miss is not None:
                 self._manual_note(new, card, now, f"重新检查：现在仍拒绝：{miss}", "recheck", miss)
                 return "done", f"现在仍拒绝：{miss}"
@@ -2834,7 +2842,12 @@ class Runner:
             return
         turn = self._desk_turn()
         direction = getattr(res, "direction", None)
-        if turn is not None and getattr(res, "status", None) == "ok" and direction:
+        if (
+            turn is not None
+            and getattr(res, "status", None) == "ok"
+            and getattr(res, "reason", "") != "prior_missing"  # 回填期的方向不算数
+            and direction
+        ):
             now = self.app.clock()
             try:
                 published = getattr(res, "published", None)

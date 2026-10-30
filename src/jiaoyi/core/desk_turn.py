@@ -50,18 +50,21 @@ class DeskTurnPause:
         tz: str = "Asia/Bangkok",
         request_event: Callable[[str, str], None] | None = None,
         meeting_ok: Callable[[str], bool] | None = None,
-        met_since: Callable[[str, datetime], bool] | None = None,
+        pending: Callable[[str], bool] | None = None,
+        active: Callable[[], bool] | None = None,
         recorder: RoleRecorder | None = None,
         initial_direction: str | None = None,
     ) -> None:
         """``initial_direction``：没有存档时用的上一轮方向（大盘台自己存的最新一轮）；
-        ``met_since(币, 时间)``：这个币在那之后开始过会或正在开 / 已派出。"""
+        ``pending(币)``：这个币的会此刻在排 / 已派出 / 在开；``active()``：大盘台此刻是大盘的
+        发布者（大盘台关了或由 Flash 接管时，存档里的暂停没人解，一律不拦）。"""
         self._cfg = cfg
         self._path = path
         self._tz = ZoneInfo(tz)
         self._request_event = request_event
         self._meeting_ok = meeting_ok
-        self._met_since = met_since
+        self._pending = pending
+        self._active = active
         self._rec = recorder
         self._last: str | None = initial_direction
         self._pauses: dict[str, tuple[datetime, str]] = {}  # 旧方向 → （转向时间，「看跌→中性」）
@@ -104,25 +107,34 @@ class DeskTurnPause:
         self._save()
 
     # ------------------------------------------------------------ 开仓前
+    def holds(self, symbol: str, side: Side, card: BattleCard | None, now: datetime) -> str | None:
+        """只看不动：这个方向的新仓此刻是不是暂停着，是就返回「大盘台 HH:MM 看跌→中性，
+        暂停新空单」。追单复核、面板重新检查用它（不申请会）。"""
+        if not self._cfg.signal_desk_turn_pause or (
+            self._active is not None and not self._active()
+        ):
+            return None
+        for old, (since, turn) in self._pauses.items():
+            if side is _SIDE[old] and self._in_pause(old, symbol, card, now):
+                return f"大盘台 {self._hm(since)} {turn}，暂停新{_SIDE_CN[side]}"
+        return None
+
     def blocked(
         self, symbol: str, side: Side, card: BattleCard | None, now: datetime
     ) -> str | None:
-        """这个信号要不要拦：拦就返回理由（并按需申请一场临时会）。"""
-        if not self._cfg.signal_desk_turn_pause:
+        """这个信号要不要拦：拦就返回理由，并按需申请一场临时会。会已在排 / 在开就不再申请；
+        开过了却没放出来（判不做被忽略、开失败、结论作废）可以再申请，由同币间隔限流。"""
+        head = self.holds(symbol, side, card, now)
+        if head is None:
             return None
-        for old, (since, turn) in self._pauses.items():
-            if side is not _SIDE[old] or not self._in_pause(old, symbol, card, now):
-                continue
-            head = f"大盘台 {self._hm(since)} {turn}，暂停新{_SIDE_CN[side]}"
-            if self._met_since is not None and self._met_since(symbol, self._ref(since)):
-                return f"{head}，{symbol} 转向后的会已在排 / 在开"
-            if self._request_event is None or (
-                self._meeting_ok is not None and not self._meeting_ok(TRIGGER)
-            ):
-                return f"{head}；临时会没开，等 {symbol} 下一轮开会"
-            self._request_event(symbol, TRIGGER)
-            return f"{head}，已给 {symbol} 加开临时会"
-        return None
+        if self._pending is not None and self._pending(symbol):
+            return f"{head}，{symbol} 的临时会已在排 / 在开"
+        if self._request_event is None or (
+            self._meeting_ok is not None and not self._meeting_ok(TRIGGER)
+        ):
+            return f"{head}；临时会没开，等 {symbol} 下一轮开会"
+        self._request_event(symbol, TRIGGER)
+        return f"{head}，已给 {symbol} 加开临时会"
 
     def sweep(self, card: BattleCard | None, now: datetime) -> None:
         """新卡出来时调：转向后开过会、还是旧方向的币放出来（记一条）。"""

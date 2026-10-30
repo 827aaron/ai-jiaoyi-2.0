@@ -1173,6 +1173,15 @@ class BattleCardCommander:
         starts = (self._last_meeting.get(symbol), self._event_last.get(symbol))
         return any(t is not None and t >= at for t in starts)
 
+    def meeting_pending(self, symbol: str) -> bool:
+        """这个币的单币会此刻在排队、已派出或在开（整轮本轮要开的也算）。"""
+        return symbol in (
+            self._pending.keys()
+            | self._symbol_inflight
+            | self._event_claimed
+            | (self._round_meeting or set())
+        )
+
     def set_market_review_enabled(self, enabled: Callable[[], bool]) -> None:
         self._market_review_enabled = enabled
 

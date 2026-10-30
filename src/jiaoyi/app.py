@@ -961,13 +961,15 @@ class App:
         )
         # 大盘台转向：卡上旧方向的币暂停开旧方向的新仓，等这个币转向后第一场会（core/desk_turn.py）
         latest = (self.desk.state.latest or {}) if self.desk is not None else {}
+        pending = getattr(cards, "meeting_pending", None)
         self.desk_turn = DeskTurnPause(
             app_cfg.fast_loop,
             Path(app_cfg.data_dir) / DESK_TURN_FILE,
             tz=risk_cfg.day_reset_tz,
             request_event=request_event if callable(request_event) else None,
             meeting_ok=(lambda t: bool(accepts(t))) if callable(accepts) else None,
-            met_since=met_since if callable(met_since) else None,
+            pending=pending if callable(pending) else None,
+            active=lambda: self.desk is not None and self.desk.owns_market(self.clock()),
             recorder=self.recorders.get(Role.RISK_GUARD),
             initial_direction=latest.get("direction"),
         )

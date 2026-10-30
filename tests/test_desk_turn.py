@@ -15,6 +15,7 @@ from jiaoyi.loop import Runner
 from jiaoyi.slow.commander import EventRules
 from jiaoyi.slow.market_desk import DeskRun
 from tests import fastloop_helpers as h
+from tests.conftest import load_example
 from tests.test_loop import _app
 from tests.test_slow_commander import FakeEngine, make
 
@@ -66,19 +67,21 @@ def pause(
     tmp_path: Path,
     asked: Asked,
     *,
-    seen: dict[str, datetime] | None = None,
+    busy: set[str] | None = None,
+    active: list[bool] | None = None,
     initial: str | None = "看跌",
     **cfg: Any,
 ) -> tuple[DeskTurnPause, c.FastLoopConfig, Log]:
     fast = ON.model_copy(update=cfg)
     log = Log()
-    starts = seen if seen is not None else {}
+    queued = busy if busy is not None else set()
     p = DeskTurnPause(
         fast,
         tmp_path / DESK_TURN_FILE,
         request_event=asked,
         meeting_ok=lambda t: asked.ok,
-        met_since=lambda s, at: s in starts and starts[s] >= at,
+        pending=lambda s: s in queued,
+        active=(lambda: active[0]) if active is not None else None,
         recorder=RoleRecorder(c.Role.RISK_GUARD, log),
         initial_direction=initial,
     )
@@ -152,16 +155,31 @@ def test_no_pause_while_neutral_or_turning_into_a_direction(tmp_path: Path) -> N
 
 def test_meeting_once_per_symbol_while_it_is_queued_or_running(tmp_path: Path) -> None:
     asked = Asked()
-    seen: dict[str, datetime] = {}
-    p, _, _ = pause(tmp_path, asked, seen=seen)
+    busy: set[str] = set()
+    p, _, _ = pause(tmp_path, asked, busy=busy)
     cd = card(AAUSDT="short")
     p.on_desk_run("中性", T)
     p.blocked("AAUSDT", SHORT, cd, T + timedelta(minutes=1))
-    seen["AAUSDT"] = T + timedelta(minutes=1)  # 已派出 / 在开
+    busy.add("AAUSDT")  # 在排 / 已派出 / 在开
     assert p.blocked("AAUSDT", SHORT, cd, T + timedelta(minutes=2)) == (
-        "大盘台 07:48 看跌→中性，暂停新空单，AAUSDT 转向后的会已在排 / 在开"
+        "大盘台 07:48 看跌→中性，暂停新空单，AAUSDT 的临时会已在排 / 在开"
     )
     assert asked.calls == [("AAUSDT", TRIGGER)]
+    busy.clear()  # 开完了却没放出来（判不做被忽略 / 开失败）：下一个信号再申请
+    assert p.blocked("AAUSDT", SHORT, cd, T + timedelta(minutes=70)) is not None
+    assert asked.calls == [("AAUSDT", TRIGGER)] * 2
+
+
+def test_no_pause_when_the_desk_is_not_the_market_publisher(tmp_path: Path) -> None:
+    asked = Asked()
+    active = [False]
+    p, _, _ = pause(tmp_path, asked, active=active)
+    cd = card(AAUSDT="short")
+    p.on_desk_run("中性", T)
+    assert p.blocked("AAUSDT", SHORT, cd, T) is None
+    active[0] = True
+    assert p.holds("AAUSDT", SHORT, cd, T) == "大盘台 07:48 看跌→中性，暂停新空单"
+    assert asked.calls == []  # holds 只看不申请
 
 
 def test_reconfirming_meeting_releases_the_symbol_until_the_next_turn(tmp_path: Path) -> None:
@@ -307,3 +325,34 @@ async def test_runner_pauses_on_desk_run_and_rejects_the_signal(tmp_path: Path) 
     r.m = dataclasses.replace(r.m, gate=gate)
     await r.handle_signal(h.signal(T, side=SHORT))
     assert gate.asked == [] and log.records[-1].summary == rej.summary
+
+
+async def test_runner_ignores_backfill_runs_and_rechecks_chases(tmp_path: Path) -> None:
+    app = _app(tmp_path, T)
+    patch_inplace(app.app_cfg.fast_loop, ON, HOT_FAST)
+    app.desk_turn = DeskTurnPause(
+        app.app_cfg.fast_loop, tmp_path / DESK_TURN_FILE, initial_direction="看跌"
+    )
+    cd = card(BTCUSDT="short")
+
+    class Cards:
+        def current(self, now: datetime) -> c.BattleCard:
+            return cd
+
+    class Desk:
+        def __init__(self, reason: str) -> None:
+            self.reason = reason
+
+        async def run(self, pool: object, reason: str) -> DeskRun:
+            return DeskRun("2026-10-30T00:47Z", "ok", "中性", reason=self.reason)
+
+    app.m = dataclasses.replace(app.m, cards=Cards())
+    r = Runner(app)
+    await r._desk_run(Desk("prior_missing"), "scheduled")  # 重启后回填期的方向不算
+    assert app.desk_turn.paused_sides() == {}
+    await r._desk_run(Desk(""), "scheduled")
+    intent = c.OrderIntent.model_validate(
+        {**load_example("order_intent"), "symbol": "BTCUSDT", "side": "short"}
+    )
+    why = await r._may_chase(intent)
+    assert "大盘台 07:48 看跌→中性，暂停新空单" in why
