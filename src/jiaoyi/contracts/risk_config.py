@@ -1193,6 +1193,26 @@ class FastLoopConfig(Contract):
         le=86400,
         description="同一个币因反向信号最多多久申请 1 次临时会（秒）。",
     )
+    # ---- 持仓币加开临时会（2026-10-30：卡只在整轮 / 穿关键位时换，急转时持仓币的卡可能旧 2 小时）
+    patrol_held_event_adverse_r: float = Field(
+        default=0.5,
+        ge=0.0,
+        lt=1.0,
+        description="持仓按标记价逆向走到这么多倍 R（R = 开仓时的止损距离）就申请这个币的"
+        "单币临时会，每笔仓只申请 1 次。0 = 关。还要开着 slow.toml event_meeting_enabled。",
+    )
+    patrol_held_event_adverse_r2: float = Field(
+        default=0.0,
+        ge=0.0,
+        lt=1.0,
+        description="逆向第二档（倍 R，要大于 patrol_held_event_adverse_r），每笔仓再申请 1 次。"
+        "0 = 不设。",
+    )
+    patrol_held_event_on_desk_flip: bool = Field(
+        default=True,
+        description="大盘台发布的方向和持仓相反（多单遇看跌、空单遇看涨）、且这笔仓此刻按标记价"
+        "扣来回手续费是亏的，就申请这个币的单币临时会；赚钱的仓不加会（交给移动止损）。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:
@@ -1233,6 +1253,10 @@ class FastLoopConfig(Contract):
         if self.opposite_card_ab > 0 and self.opposite_card_action != "confirm_or_tighten":
             raise ValueError(
                 "opposite_card_ab 只在 opposite_card_action = confirm_or_tighten 时能大于 0"
+            )
+        if 0 < self.patrol_held_event_adverse_r2 <= self.patrol_held_event_adverse_r:
+            raise ValueError(
+                "patrol_held_event_adverse_r2 要么 0（不设），要么大于 patrol_held_event_adverse_r"
             )
         return self
 

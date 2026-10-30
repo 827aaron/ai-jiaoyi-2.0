@@ -62,6 +62,7 @@ from jiaoyi.contracts import (
 from jiaoyi.contracts.position import CloseReason
 from jiaoyi.core import close_sources, paper_stop
 from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
+from jiaoyi.core.held_events import HeldEventDesk
 from jiaoyi.core.loop_lag import LoopLagMonitor, register_stack_dump
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.core.recorder import RoleRecorder
@@ -773,6 +774,11 @@ class Runner:
         if isinstance(event, Trade | MarkPrice):
             # Before the patrol: on mainnet the stop fills before any market close it sends.
             self._paper_stop_check(event)
+        if isinstance(event, MarkPrice) and (held := self._held_events()) is not None:
+            try:
+                held.on_mark(event.symbol, event.mark_price, self.positions, self.app.clock())
+            except Exception:
+                log.exception("持仓逆向检查出错 %s", event.symbol)
         action = self.m.patrol.check(event, self.positions)
         if action is not None:
             targets = [
@@ -1961,6 +1967,8 @@ class Runner:
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
+        if (held := self._held_events()) is not None:
+            held.forget(pos.position_id)
         self._assistant_ended({pos.position_id}, [], {pos.position_id: pos})
 
     def _restore_keeper_market(self) -> None:
@@ -2188,9 +2196,21 @@ class Runner:
         if action == "close":
             await self.close(pos, CloseReason.KEEPER)
 
+    def _held_events(self) -> HeldEventDesk | None:
+        return getattr(self.app, "held_events", None)
+
+    def _last_price(self, symbol: str) -> float | None:
+        snap = self.m.features.snapshot(symbol)
+        return snap.last_price if snap is not None else None
+
     def _market_published(self, view: MarketView) -> None:
         """只唤醒原管家通道；同仓在途不并行重问，旧回复仅确认实际使用的版本。"""
         self._sync_keeper_market(view)
+        if (held_desk := self._held_events()) is not None:
+            try:
+                held_desk.on_market(view, self.positions, self.app.clock(), self._last_price)
+            except Exception:
+                log.exception("大盘台翻向后给持仓币申请临时会出错")
         held = [
             p
             for p in self.positions

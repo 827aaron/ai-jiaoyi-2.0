@@ -51,6 +51,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
     TodayStats,
 )
+from jiaoyi.core import held_events
 from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
@@ -276,6 +277,10 @@ class EventRules:
     concurrency: int = 1
     """同时最多开几场临时会（≥ 1，1 = 一场一场排队）；和整轮共用会议并发的名额。"""
 
+
+HELD_TRIGGERS: frozenset[str] = held_events.TRIGGERS
+"""持仓币的两类临时会不看 ``event_triggers``，开关在 app.toml ``[fast_loop] patrol_held_event_*``
+（热生效）。"""
 
 PENDING_EXPIRY = timedelta(minutes=30)
 LEVEL_PX_FRESH = timedelta(minutes=5)
@@ -1134,7 +1139,7 @@ class BattleCardCommander:
             self._event_day, self._event_count = day, 0
 
     def _queue(self, symbol: str, trigger: str, now: datetime) -> None:
-        if trigger not in self._events.triggers:
+        if trigger not in self._events.triggers and trigger not in HELD_TRIGGERS:
             return
         if symbol not in self._pending:
             self._pending[symbol] = (trigger, now)
@@ -1153,7 +1158,7 @@ class BattleCardCommander:
         return self._events.enabled and (
             self._market_review_enabled()
             if trigger == "market_review"
-            else trigger in self._events.triggers
+            else trigger in self._events.triggers or trigger in HELD_TRIGGERS
         )
 
     def request_event(self, symbol: str, trigger: str) -> None:
