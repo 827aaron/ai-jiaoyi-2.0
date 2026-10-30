@@ -30,6 +30,7 @@ from jiaoyi.execution.exchange import (
     callback_rate,
 )
 from jiaoyi.panel.protection import lifeboat_summary, parse_protection
+from tests.test_execution import START
 from tests.test_trailing_book_fresh import SlowHarness
 
 NativeFail = Literal["reject", "immediate", "unknown"] | None
@@ -281,11 +282,96 @@ async def test_native_stuck_pending_gives_up_and_places_the_lifeboat(
     h.mark_error = ExchangeError("synthetic mark down", transient=True)
     await native_armed(h)
     assert h.manager.native_mode("pos-1") == "pending" and h.live_cids() == ["br-sl-pos-1-1"]
+    assert h.state().native_pending_since == START  # 从第一次去挂算
     assert lifeboat_summary(panel(h)) == ("native", None)  # 等着挂，按设计不挂保命单
+    h.now += timedelta(seconds=30)
+    await h.manager.sync("pos-1")
+    assert h.state().native_fallback is None  # 正好 30 秒还不算
+    h.now += timedelta(seconds=1)
+    await h.manager.sync("pos-1")
+    assert h.state().native_fallback == (
+        "开始挂交易所移动止损 30 秒后还没挂上，最近原因：TrailingBookUnavailable: "
+        "挂交易所移动止损前标记价不可用 <- ExchangeError: synthetic mark down"
+    )
+    assert h.live_cids() == ["br-sl-pos-1-1", "lb-pos-1-2"]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_entry_cost_never_readable_still_times_out_from_the_first_attempt(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side)
+
+    async def no_basis(symbol: str, client_order_id: str):
+        raise ExchangeError("synthetic entry cost unknown")
+
+    h.exchange.entry_basis = no_basis
+    await native_armed(h)
+    assert h.state().native_pending_since == START and h.trailing_calls == []
     h.now += timedelta(seconds=31)
     await h.manager.sync("pos-1")
+    assert (h.state().native_fallback or "").startswith("开始挂交易所移动止损 30 秒后还没挂上")
+    assert any(c.startswith("lb-") for c in h.live_cids())
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_syncs_from_other_paths_long_before_the_first_attempt_do_not_time_out(
+    tmp_path: Path, side: Side
+) -> None:
+    # 线上 10-30：持仓轮询的同步先开了计时，后台保护轮 30 秒后才轮到这笔，一次没挂就放弃了
+    h = NativeHarness(tmp_path, side)
+    await h.armed()
+    h.now += timedelta(seconds=45)
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.state().native_fallback is None and h.state().native_pending_since is None
+    await h.adapter.protection_tick()
+    assert [c["cid"] for c in h.trailing_calls] == ["br-ts-pos-1-1"]
+    assert h.manager.native_mode("pos-1") == "confirmed"
+    assert not any(c.startswith("lb-") for c in h.creates())
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_existing_position_at_enable_gets_native_even_if_the_tick_comes_late(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side, native=False)
+    await h.armed()
+    h.native = True
+    assert await h.manager.sync("pos-1") == "armed"
+    h.now += timedelta(seconds=45)
+    assert await h.manager.sync("pos-1") == "armed"
+    await h.adapter.protection_tick()
+    assert [c["cid"] for c in h.trailing_calls] == ["br-ts-pos-1-1"]
+    assert h.live_cids() == ["br-sl-pos-1-1", "br-ts-pos-1-1"]  # 保命单确认后撤
+    assert h.state().native_fallback is None
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_position_given_up_by_the_old_timer_without_any_attempt_retries(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side, native=False)
+    await h.armed()
+    h.native = True
+    h.manager._save("pos-1", native_fallback="武装后 30 秒还没挂上交易所移动止损")
+    h.restart_adapter()
+    await h.adapter.protection_tick()
+    assert h.state().native_fallback is None
+    assert [c["cid"] for c in h.trailing_calls] == ["br-ts-pos-1-1"]
+    assert h.live_cids() == ["br-sl-pos-1-1", "br-ts-pos-1-1"]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_old_timer_reason_after_a_real_attempt_is_not_retried(
+    tmp_path: Path, side: Side
+) -> None:
+    h = NativeHarness(tmp_path, side)
+    h.native_fail = "reject"
+    await native_armed(h)
+    h.manager._save("pos-1", native_fallback="武装后 30 秒还没挂上交易所移动止损")
+    await h.adapter.protection_tick()
     assert h.state().native_fallback == "武装后 30 秒还没挂上交易所移动止损"
-    assert h.live_cids() == ["br-sl-pos-1-1", "lb-pos-1-2"]
+    assert [c["cid"] for c in h.trailing_calls] == ["br-ts-pos-1-1"]
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])

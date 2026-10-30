@@ -116,8 +116,12 @@ NATIVE_CALLBACK_MAX = Decimal("10")
 """交易所移动止损回撤比例上限（%）。币安 algo 文档写 0.1–20，旧下单接口是 0.1–10，取窄的；
 超过就这笔仓不用交易所移动止损。"""
 NATIVE_PENDING_MAX_S = 30.0
-"""开着 ``trailing_native`` 的仓武装后这么多秒还没挂上交易所移动止损（入场成本或标记价一直读
-不到）就放弃，照旧挂保命单、程序自己跟：等的这段只有固定止损。"""
+"""从第一次真去挂交易所移动止损（后台保护轮走到挂单这一步）起，这么多秒还没挂上（入场成本或
+标记价一直读不到）就放弃，照旧挂保命单、程序自己跟：等的这段只有固定止损。不从武装或同步算：
+别的路径（持仓轮询、对账）也会同步，后台保护轮第一次走到挂单前可能已经过了几十秒。"""
+LEGACY_PENDING_FALLBACK = "武装后 30 秒还没挂上交易所移动止损"
+"""旧版本从同步就开始计时，挂单一次都没试就按这个原因放弃了；这种仓（没有任何交易所移动止损
+腿）下一轮同步时清掉原因，重新去挂。"""
 NATIVE_READ_GRACE_S = 30.0
 """在挂的交易所移动止损连续这么多秒回读不好才放弃它（只在内存里计时，重启重新算）。"""
 NativeMode = Literal["off", "pending", "confirmed"]
@@ -1046,16 +1050,22 @@ class BracketManager:
         if entry is None:
             raise ProtectionIncomplete("实际入场价尚不可证")
         sign = 1 if tracked.record.side is Side.LONG else -1
+        if state.native_fallback == LEGACY_PENDING_FALLBACK and not any(
+            _native(leg) for leg in state.legs
+        ):
+            log.warning("%s 旧版本没试挂就放弃了交易所移动止损，重新去挂", pid)
+            state = self._save(pid, native_fallback=None)
         native = self._native_mode(tracked, state)
-        if native == "pending" and state.ever_armed and evidence.terminal:
-            now = self.clock()
-            since = state.native_pending_since
-            if since is None:
-                self._save(pid, native_pending_since=now)
-            elif (now - since).total_seconds() > NATIVE_PENDING_MAX_S:
-                self._native_give_up(
-                    pid, f"武装后 {NATIVE_PENDING_MAX_S:g} 秒还没挂上交易所移动止损"
-                )
+        since = state.native_pending_since
+        if (
+            native == "pending"
+            and since is not None
+            and (self.clock() - since).total_seconds() > NATIVE_PENDING_MAX_S
+        ):
+            why = f"，最近原因：{state.trailing_last_error}" if state.trailing_last_error else ""
+            self._native_give_up(
+                pid, f"开始挂交易所移动止损 {NATIVE_PENDING_MAX_S:g} 秒后还没挂上{why}"
+            )
             tracked, state = self._current(pid)
             native = self._native_mode(tracked, state)
         stop = await self._stop_target(tracked, state, self._extra_stop_candidates(tracked, state))
@@ -1405,6 +1415,13 @@ class BracketManager:
             if state.trailing_last_error is not None or state.trailing_failing_since is not None:
                 self._save(pid, trailing_last_error=None, trailing_failing_since=None)
             return changed
+
+    def begin_native_attempt(self, pid: str) -> None:
+        """后台保护轮这一笔走到挂交易所移动止损这一步了（还没读入场成本）：从这一刻开始算
+        ``NATIVE_PENDING_MAX_S``，已在算就不动。只对 ``pending`` 的仓有效。"""
+        tracked, state = self._current(pid)
+        if self._native_mode(tracked, state) == "pending" and state.native_pending_since is None:
+            self._save(pid, native_pending_since=self.clock())
 
     async def place_native_trailing(self, pid: str, basis: EntryBasis) -> bool:
         """武装后挂交易所移动止损（这笔仓 ``native_mode`` 为 ``pending`` 时）；返回是否已确认在挂。
