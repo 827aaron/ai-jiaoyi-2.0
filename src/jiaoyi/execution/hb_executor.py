@@ -2544,6 +2544,13 @@ class HbExecutorAdapter:
             state, rec = tracked.server_protection, tracked.record
             if state is None or state.stage != "armed" or tracked.entry_client_order_id is None:
                 return
+            if (
+                rec.trailing_activation_pct is not None
+                and rec.trailing_stop_pct is not None
+                and self._protection.native_mode(position_id) == "pending"
+            ):
+                # 挂单超时从这里算：下面读入场成本失败也算在内
+                self._protection.begin_native_attempt(position_id)
             read_basis = getattr(self._exchange, "entry_basis", None)
             read_book = getattr(self._exchange, "execution_book", None)
             if read_basis is None:
