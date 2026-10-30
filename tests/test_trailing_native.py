@@ -21,6 +21,7 @@ import pytest
 
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.core import paper_stop
 from jiaoyi.execution.brackets import BracketManager
 from jiaoyi.execution.exchange import (
     BracketSubmissionRejected,
@@ -393,19 +394,69 @@ async def test_restart_mid_trail_keeps_the_leg_and_the_local_extreme(
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_paper_mainnet_rule_gets_the_local_native_price_as_its_own_source(
+async def test_paper_mainnet_rule_tracks_the_native_order_on_mainnet_prices(
     tmp_path: Path, side: Side
 ) -> None:
     h = NativeHarness(tmp_path, side)
     await native_armed(h)
-    assert "native_trailing" not in [s for s, _ in h.adapter.paper_stop_levels("pos-1")]
-    h.mark_value = 101.0 if side is Side.LONG else 99.0
+    long = side is Side.LONG
+
+    def native_levels() -> list[float]:
+        return [p for s, p in h.adapter.paper_stop_levels("pos-1") if s == "native_trailing"]
+
+    h.adapter.observe_mainnet_price("pos-1", 100.3 if long else 99.7)  # 激活价 100.4 / 99.6
+    assert native_levels() == []
+    h.mark_value = 101.0 if long else 99.0
     await h.adapter.protection_tick()
+    assert h.state().native_stop_price == pytest.approx(100.495 if long else 99.495)
+    assert native_levels() == []  # Demo 推算已激活，主网价还没过激活价
+    h.adapter.observe_mainnet_price("pos-1", 100.8 if long else 99.2)
+    h.adapter.observe_mainnet_price("pos-1", 100.6 if long else 99.4)
+    assert native_levels() == [pytest.approx(100.296 if long else 99.696)]
+    state = h.state()
+    assert (state.native_mainnet_extreme, state.native_mainnet_activated) == (
+        100.8 if long else 99.2,
+        True,
+    )
+    h.restart_adapter()
+    assert [p for s, p in h.adapter.paper_stop_levels("pos-1") if s == "native_trailing"] == [
+        pytest.approx(100.296 if long else 99.696)
+    ]
     levels = h.adapter.paper_stop_levels("pos-1")
-    want = 100.495 if side is Side.LONG else 99.495
-    assert [p for s, p in levels if s == "native_trailing"] == [pytest.approx(want)]
     assert "trailing" not in [s for s, _ in levels]  # 程序自己没激活过
     assert "lifeboat" not in [s for s, _ in levels]
+
+
+async def test_paper_mainnet_rule_does_not_cross_the_demo_native_estimate_qnt(
+    tmp_path: Path,
+) -> None:
+    """QNT 多 10-30 06:17Z：Demo 推算的交易所移动止损 194.85，主网标记价 194.845 就算越过、
+    提前平了；币安自己那张单晚 3 秒才触发。按主网价的极值推算，同一个主网价没越过。"""
+    h = NativeHarness(tmp_path, Side.LONG)
+    await native_armed(h)
+    tracked = h.registry.get("pos-1")
+    state = tracked.server_protection
+    legs = [
+        leg.model_copy(update={"callback_rate": 0.7, "activate_price": None})
+        if leg.kind == "trailing_stop"
+        else leg
+        for leg in state.legs
+    ]
+    state = state.model_copy(
+        update={
+            "legs": legs,
+            "native_extreme": 196.22,
+            "native_activated": True,
+            "native_stop_price": 194.84846,
+        }
+    )
+    h.registry.put(tracked.model_copy(update={"server_protection": state}))
+    for mainnet in (195.6, 196.0, 195.1):
+        h.adapter.observe_mainnet_price("pos-1", mainnet)
+    native = [p for s, p in h.adapter.paper_stop_levels("pos-1") if s == "native_trailing"]
+    assert native == [pytest.approx(194.628)]
+    assert paper_stop.crossed(Side.LONG, 194.845, 194.84846)
+    assert not paper_stop.crossed(Side.LONG, 194.845, native[0])
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])

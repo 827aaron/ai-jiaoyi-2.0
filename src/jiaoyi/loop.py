@@ -1084,6 +1084,12 @@ class Runner:
         since = self._paper_stop_since(pos)
         if ts < since:
             return  # a price from before the position existed (buffered or replayed)
+        observe = getattr(self.m.executor, "observe_mainnet_price", None)
+        if observe is not None:
+            try:
+                observe(pid, price)  # 交易所移动止损按主网价的极值推算，先记下这个价
+            except Exception:
+                log.exception("记主网价极值失败 %s", pid)
         levels = self._paper_stop_levels(pos)
         if not levels:
             return

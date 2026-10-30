@@ -485,7 +485,7 @@ class JevKeeper:
                 frozen_peak_rule=frozen_peak,
                 rules=votes,
             )
-        if frozen_peak and frozen_peak.get("status") == "trailing_active":
+        if frozen_peak and frozen_peak.get("detail") == "trailing_activated":
             votes.append(
                 {"rule": "frozen_peak", "vote": "off", "why": "移动止损已激活，不按冻结盈利价平"}
             )

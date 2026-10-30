@@ -29,6 +29,8 @@ FIELDS = (
     "native_activated",
     "native_stop_price",
     "native_observed_at",
+    "native_mainnet_extreme",
+    "native_mainnet_activated",
 )
 _GONE = {"cancelled", "rejected", "superseded", "planned"}
 

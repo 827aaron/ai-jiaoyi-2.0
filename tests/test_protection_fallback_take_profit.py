@@ -16,7 +16,9 @@ import pytest
 
 from jiaoyi.contracts import Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
-from jiaoyi.execution.brackets import BracketManager
+from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
+from jiaoyi.execution.registry import ProtectiveLeg
+from tests.test_execution import START
 from tests.test_trailing_native import NativeHarness, native_armed, stream_events
 
 
@@ -225,3 +227,68 @@ async def test_partial_entry_waits_for_the_final_quantity_before_the_take_profit
     assert await h.manager.sync("pos-1") == "armed"
     assert h.creates()[-1] == "br-tp-pos-1-3"
     assert h.exchange.orders["br-tp-pos-1-3"].quantity == 2.0
+
+
+def set_protection(h: TpHarness, **changes: object) -> None:
+    tracked = h.registry.get("pos-1")
+    state = tracked.server_protection.model_copy(update=changes)
+    h.registry.put(tracked.model_copy(update={"server_protection": state}))
+
+
+async def test_unknown_cancel_is_retried_while_the_exchange_still_shows_it_new(
+    tmp_path: Path,
+) -> None:
+    h = TpHarness(tmp_path, Side.LONG, native=False)
+    await h.armed()
+    set_protection(h, trailing_activated=True)
+    h.exchange.cancel_unknown = True
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.tp_legs() == [("br-tp-pos-1-2", "cancel_pending", 102.0)]
+    h.exchange.cancel_unknown = False
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.cancels() == ["br-tp-pos-1-2", "br-tp-pos-1-2"]
+    assert h.tp_legs() == [("br-tp-pos-1-2", "cancelled", 102.0)]
+    assert h.live_cids() == ["br-sl-pos-1-1", "lb-pos-1-1"]
+
+
+async def test_native_estimate_already_activated_places_no_take_profit(tmp_path: Path) -> None:
+    h = TpHarness(tmp_path, Side.SHORT, native=False)
+    set_protection(h, native_activated=True, native_fallback="交易所拒绝交易所移动止损")
+    assert await h.manager.sync("pos-1") == "armed"
+    assert h.creates() == ["lb-pos-1-1", "br-sl-pos-1-1"]
+
+
+async def test_stop_readback_failing_during_the_take_profit_step_fails_the_sync(
+    tmp_path: Path,
+) -> None:
+    h = TpHarness(tmp_path, Side.LONG, native=False)
+
+    async def hide_stop(order) -> None:
+        if order.kind == "take_profit":
+            h.exchange.hidden.add("br-sl-pos-1-1")
+
+    h.exchange.on_place = hide_stop
+    with pytest.raises(ProtectionIncomplete, match="已提交条件单暂时不可查"):
+        await h.manager.sync("pos-1")
+    assert h.state().last_error is not None and "已提交条件单暂时不可查" in h.state().last_error
+
+
+def test_take_profit_rejected_after_trigger_is_not_an_exit_at_target(tmp_path: Path) -> None:
+    h = TpHarness(tmp_path, Side.LONG, native=False)
+    leg = ProtectiveLeg(
+        kind="take_profit",
+        generation=2,
+        client_order_id="br-tp-pos-1-2",
+        quantity=2.0,
+        trigger_price=102.0,
+        state="cancelled",
+        algo_id="3",
+        algo_status="REJECTED",
+        triggered_at=START,
+        child_state="absent",
+    )
+    set_protection(h, legs=[leg])
+    assert h.adapter.take_profit_exiting("pos-1") is False
+    triggered = leg.model_copy(update={"algo_status": "TRIGGERED", "state": "confirmed"})
+    set_protection(h, legs=[triggered])
+    assert h.adapter.take_profit_exiting("pos-1") is True

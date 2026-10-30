@@ -250,7 +250,7 @@ async def test_keeper_records_why_the_rule_is_off_for_an_activated_trailing(tmp_
         lambda _: None,
         RoleRecorder(Role.KEEPER, log),
         frozen_peak_review=AsyncMock(
-            return_value={"triggered": False, "status": "trailing_active", "target_price": None}
+            return_value={"triggered": False, "status": "unknown", "detail": "trailing_activated"}
         ),
     )
     verdict = await keeper.review(position(START), START)
@@ -288,15 +288,17 @@ async def test_trailing_activated_before_freeze_never_freezes(tmp_path, field):
     activate_trailing(rig, rec.position_id, field)
     rig.t = START + timedelta(seconds=60)
     result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
-    assert result["status"] == "trailing_active" and not result["triggered"]
+    assert (result["status"], result["detail"]) == ("unknown", "trailing_activated")
+    assert not result["triggered"]
     assert result["frozen_at"] is None and result["target_price"] is None
     rig.t += timedelta(seconds=1)
     result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
-    assert result["status"] == "trailing_active" and not result["triggered"]
+    assert (result["status"], result["detail"]) == ("unknown", "trailing_activated")
+    assert not result["triggered"]
     assert rig.adapter._exchange.execution_book.await_count == 1
     stored = rig.registry.get(rec.position_id).frozen_peak_exit
     assert (stored.status, stored.peak_price, stored.detail) == (
-        "trailing_active",
+        "unknown",
         102,
         "trailing_activated",
     )
@@ -318,7 +320,8 @@ async def test_trailing_activated_after_freeze_drops_the_target_and_never_exits(
         rec.symbol, 102, 102.1, rig.t, rig.t
     )
     result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
-    assert result["status"] == "trailing_active" and not result["triggered"]
+    assert (result["status"], result["detail"]) == ("unknown", "trailing_activated")
+    assert not result["triggered"]
     assert result["target_price"] is None and result["peak_price"] == 102
     assert result["frozen_at"] == "2026-10-22T06:18:00Z"
 
@@ -339,3 +342,28 @@ async def test_quiet_position_without_trailing_still_freezes_and_exits(tmp_path)
     )
     result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
     assert result["status"] == "triggered" and result["triggered"]
+
+
+async def test_trailing_activating_during_the_evidence_read_is_rechecked_under_the_lock(tmp_path):
+    rig = Rig(tmp_path)
+    rec = install(rig)
+    await rig.adapter.frozen_peak_review(rec.position_id, START)
+    rig.t = START + timedelta(seconds=60)
+    rig.adapter._exchange.execution_book.return_value = ExecutionBook(
+        rec.symbol, 103, 103.1, rig.t, rig.t
+    )
+    await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    rig.t += timedelta(seconds=1)
+
+    async def book(_symbol):
+        activate_trailing(rig, rec.position_id)  # 价格回到峰值的同一刻移动止损激活
+        return ExecutionBook(rec.symbol, 102, 102.1, rig.t, rig.t)
+
+    rig.adapter._exchange.execution_book.side_effect = book
+    result = await rig.adapter.frozen_peak_review(rec.position_id, rig.t)
+    assert (result["status"], result["detail"], result["triggered"]) == (
+        "unknown",
+        "trailing_activated",
+        False,
+    )
+    assert rig.registry.get(rec.position_id).frozen_peak_exit.target_price is None

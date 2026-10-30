@@ -267,6 +267,39 @@ async def test_paper_stop_uses_tightest_executor_level(
     ]
 
 
+class MainnetSeeingExecutor(LedgerExecutor):
+    """记下每个主网价、价位里的交易所移动止损按这些价的极值算（像 HbExecutorAdapter）。"""
+
+    def __init__(self, held: list[c.PositionRecord]) -> None:
+        super().__init__(held)
+        self.seen: list[tuple[str, float]] = []
+
+    def observe_mainnet_price(self, position_id: str, price: float) -> None:
+        self.seen.append((position_id, price))
+
+    def paper_stop_levels(self, position_id: str) -> list[tuple[str, float | None]]:
+        prices = [p for pid, p in self.seen if pid == position_id]
+        return [("native_trailing", max(prices) - 30.0)] if prices else []
+
+
+async def test_paper_stop_feeds_each_mainnet_price_before_reading_levels(
+    tmp_path: Path, now: datetime
+) -> None:
+    pos = _pos(LONG)
+    runner, _, _ = _runner(tmp_path, now, pos, paper_stop_slippage_bps=0.0)
+    ex = MainnetSeeingExecutor([pos])
+    runner.m = runner.app.m = dataclasses.replace(runner.app.m, executor=ex)
+    await runner.on_event(_trade(now, ENTRY + 40.0))
+    await runner.on_event(_trade(now, ENTRY + 5.0))
+    await _settle(runner)
+    assert ex.seen == [(pos.position_id, ENTRY + 40.0), (pos.position_id, ENTRY + 5.0)]
+    booked = runner._paper_stops.get(pos.position_id)
+    assert booked is not None and (booked.stop_source, booked.stop_price) == (
+        "native_trailing",
+        ENTRY + 10.0,
+    )
+
+
 @pytest.mark.parametrize("side", [LONG, SHORT])
 async def test_paper_stop_never_acts_in_live(tmp_path: Path, now: datetime, side: c.Side) -> None:
     pos = _pos(side)
