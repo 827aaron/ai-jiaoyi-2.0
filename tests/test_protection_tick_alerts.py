@@ -154,7 +154,7 @@ async def test_close_record_carries_the_cause_in_summary_and_output(tmp_path: Pa
     detail = h.registry.get("pos-1").close_detail
     [close] = [r for r in read_records(tmp_path / "data") if r.outcome is Outcome.CLOSE]
     assert close.output["detail"] == detail
-    assert close.summary.startswith(f"BTCUSDT 直连平仓（reconciler：{detail}），净盈亏")
+    assert close.summary.startswith(f"BTCUSDT 直连平仓（对账员平仓：{detail}），净盈亏")
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
