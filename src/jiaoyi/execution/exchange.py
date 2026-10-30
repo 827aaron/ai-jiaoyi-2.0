@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from jiaoyi.contracts import Side
@@ -95,7 +95,7 @@ _ALGO_TYPES: dict[str, BracketKind] = {
 }
 _PARENT_TYPES: dict[BracketKind, str] = {kind: t for t, kind in _ALGO_TYPES.items()}
 CALLBACK_RATE_STEP = Decimal("0.1")
-"""币安 TRAILING_STOP_MARKET 的 callbackRate 单位是百分比（1 = 1%），按 0.1 取整。"""
+"""币安 TRAILING_STOP_MARKET 的 callbackRate 单位是百分比（1 = 1%），步长 0.1。"""
 _CHILD_TERMINAL = frozenset({"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"})
 
 
@@ -423,9 +423,9 @@ def _optional_number(value: object) -> float | None:
 
 
 def callback_rate(distance_pct: float) -> Decimal:
-    """回撤距离（百分比）按交易所步长 0.1 四舍五入，至少 0.1；范围由调用方核。"""
-    rate = Decimal(str(distance_pct)).quantize(CALLBACK_RATE_STEP, rounding=ROUND_HALF_UP)
-    return max(rate, CALLBACK_RATE_STEP)
+    """回撤距离（百分比）按交易所步长 0.1 向下取整：只会比程序的回撤距离紧，不会松。
+    不到 0.1 的得 0，范围由调用方核。"""
+    return Decimal(str(distance_pct)).quantize(CALLBACK_RATE_STEP, rounding=ROUND_DOWN)
 
 
 def _bracket_child(order: ExchangeBracket, raw: dict[str, Any]) -> ExchangeBracket:

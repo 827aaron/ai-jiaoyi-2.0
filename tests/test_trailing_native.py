@@ -163,23 +163,37 @@ async def test_native_leg_is_placed_with_fee_activation_and_no_lifeboat(
 
 
 @pytest.mark.parametrize(
-    ("distance", "rate"), [("0.04", "0.1"), ("0.05", "0.1"), ("0.25", "0.3"), ("0.34", "0.3")]
+    ("distance", "rate"),
+    [("0.45", "0.4"), ("1.57", "1.5"), ("0.24", "0.2"), ("0.1", "0.1"), ("0.09", "0.0")],
 )
-def test_callback_rate_rounds_to_the_exchange_step_and_never_below_it(
-    distance: str, rate: str
-) -> None:
+def test_callback_rate_floors_to_the_exchange_step(distance: str, rate: str) -> None:
     assert str(callback_rate(float(distance))) == rate
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_callback_rate_above_the_exchange_limit_keeps_our_own_trailing(
-    tmp_path: Path, side: Side
+async def test_floored_callback_rate_is_what_gets_placed(tmp_path: Path, side: Side) -> None:
+    h = NativeHarness(tmp_path, side)
+    h.set_trailing(0.6, 0.45)
+    await native_armed(h)
+    assert [c["callback_rate"] for c in h.trailing_calls] == [0.4]
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize(
+    ("distance", "reason"),
+    [
+        (10.15, "回撤距离 10.15% 不在交易所移动止损范围 0.1–10% 内"),  # 取整后 10.1
+        (0.08, "回撤距离 0.08% 不在交易所移动止损范围 0.1–10% 内"),  # 取整后 0，挂上会更松
+    ],
+)
+async def test_callback_rate_outside_the_exchange_range_keeps_our_own_trailing(
+    tmp_path: Path, side: Side, distance: float, reason: str
 ) -> None:
     h = NativeHarness(tmp_path, side)
-    h.set_trailing(12.0, 10.05)  # 10.05% → 10.1，超过 10
+    h.set_trailing(12.0, distance)
     await native_armed(h)
     assert h.trailing_calls == []
-    assert h.state().native_fallback == "回撤距离 10.05% 超过交易所移动止损上限 10%"
+    assert h.state().native_fallback == reason
     assert h.manager.native_mode("pos-1") == "off"
     assert h.live_cids() == ["br-sl-pos-1-1", "lb-pos-1-2"]  # 当轮补挂保命单
     assert [a.title for a in h.alerter.sent] == ["交易所移动止损没用上，改回程序自己跟"]

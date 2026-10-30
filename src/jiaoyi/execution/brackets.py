@@ -27,6 +27,7 @@ from jiaoyi.contracts.position import CloseReason, LifeboatStatus
 from jiaoyi.core.trailing_price import activation_price
 from jiaoyi.execution.clock import Clock, utc_now
 from jiaoyi.execution.exchange import (
+    CALLBACK_RATE_STEP,
     BracketSubmissionRejected,
     BracketSubmissionUnknown,
     EntryBasis,
@@ -1411,7 +1412,7 @@ class BracketManager:
         激活价 = 净收益（扣实际开仓手续费）到启动线 ``trailing_activation_pct`` 的价格，和程序自己
         跟时的激活判断同一公式；标记价已越过它（或程序自己跟已激活）就不带激活价、下单即激活。
         回撤比例 = 回撤距离（``trailing_distance_pct`` 或开仓带的 ``trailing_stop_pct``）按 0.1
-        四舍五入，至少 0.1，超过 ``NATIVE_CALLBACK_MAX`` 不挂。被拒、提交结果未知就放弃这笔
+        向下取整，不到 0.1 或超过 ``NATIVE_CALLBACK_MAX`` 不挂。被拒、提交结果未知就放弃这笔
         （第一次因激活价已被越过被拒的，下一轮不带激活价再试一次）。调用方随后 ``sync``。
         """
         tracked, _ = self._current(pid)
@@ -1443,9 +1444,12 @@ class BracketManager:
         assert rec.trailing_activation_pct is not None and rec.trailing_stop_pct is not None
         distance = state.trailing_distance_pct or rec.trailing_stop_pct
         rate = callback_rate(distance)
-        if rate > NATIVE_CALLBACK_MAX:
+        if not CALLBACK_RATE_STEP <= rate <= NATIVE_CALLBACK_MAX:
+            # 不到 0.1 的距离挂上去会比程序自己跟还松
             self._native_give_up(
-                pid, f"回撤距离 {distance:g}% 超过交易所移动止损上限 {NATIVE_CALLBACK_MAX}%"
+                pid,
+                f"回撤距离 {distance:g}% 不在交易所移动止损范围 "
+                f"{CALLBACK_RATE_STEP}–{NATIVE_CALLBACK_MAX}% 内",
             )
             return False
         long = rec.side is Side.LONG
