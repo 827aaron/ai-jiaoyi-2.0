@@ -43,6 +43,7 @@ from jiaoyi.panel.actions import (
     Section,
     editable_fields,
 )
+from jiaoyi.panel.card_dir import HoldCard, commander_steps, hold_card
 from jiaoyi.panel.files import Ledger, PanelFiles, read_live_gate, read_pool
 from jiaoyi.panel.hb import HbSnapshot
 from jiaoyi.panel.meaning import SettingsMeaning, build_meaning
@@ -1074,6 +1075,8 @@ class TradeRow(BaseModel):
     paper_price_source: str | None = None
     demo_exit_price: float | None = None
     demo_pnl_usdt: float | None = None
+    hold_card: HoldCard | None = None
+    """持有期间作战卡上这个币的方向和管家卡规则的处理；``closed_by`` 说管家平仓是不是卡规则。"""
 
 
 class KindStats(BaseModel):
@@ -1346,8 +1349,13 @@ def build_history(
     recs = files.decisions_since(
         min(first_open, start) - timedelta(days=1),
         now,
-        frozenset({Role.SENTINEL, Role.GATE, Role.RISK_GUARD, Role.KEEPER}),
+        frozenset({Role.SENTINEL, Role.GATE, Role.RISK_GUARD, Role.KEEPER, Role.COMMANDER}),
     )
+    dir_steps = commander_steps(recs, now)
+    keeper_of: dict[str, list[DecisionRecord]] = {}
+    for r in recs:
+        if r.role is Role.KEEPER and r.position_id:
+            keeper_of.setdefault(r.position_id, []).append(r)
     kind_of: dict[str, str] = {}
     closed_by_id = {p.position_id: p for p in closed}
     peak_of: dict[str, float] = {}
@@ -1471,6 +1479,16 @@ def build_history(
                 unfilled=unfilled,
                 **_shadow_fields(None if unfilled else shadow.get(p.position_id)),
                 **_paper_fields(ledger, p),
+                hold_card=None
+                if unfilled
+                else hold_card(
+                    dir_steps.get(p.symbol),
+                    p.side.value,
+                    p.opened_at,
+                    p.closed_at,
+                    keeper_of.get(p.position_id, []),
+                    keeper_closed=p.close_reason is CloseReason.KEEPER,
+                ),
             )
         )
     real = [t for t in rows if not t.unfilled]

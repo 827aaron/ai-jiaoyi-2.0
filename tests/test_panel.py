@@ -2228,3 +2228,151 @@ def test_card_rows_show_effective_direction_and_todays_flips(tmp_path: Path) -> 
         ("long", "long", None),
         ("neutral", "long", "ignored"),
     ]
+
+
+def _hold_meet(sym: str, ts: datetime, bias: str) -> c.DecisionRecord:
+    return _rec(c.Role.COMMANDER, c.Outcome.ACTION, f"{sym} 开会结论：{bias}", ts,
+                symbol=sym, output=_card_cs(sym, bias, bias))  # fmt: skip
+
+
+def _hold_flip(sym: str, ts: datetime, ev: str, kept: str, cand: str) -> c.DecisionRecord:
+    return _rec(c.Role.COMMANDER, c.Outcome.INFO, f"{sym} card_flip {ev}", ts, symbol=sym,
+                output={"card_flip": ev, "confirmed": kept, "candidate": cand})  # fmt: skip
+
+
+def _hold_keeper(
+    pid: str, sym: str, ts: datetime, outcome: c.Outcome, summary: str, output: dict[str, Any]
+) -> c.DecisionRecord:
+    return _rec(c.Role.KEEPER, outcome, f"{sym} {summary}", ts, symbol=sym, position_id=pid,
+                output=output)  # fmt: skip
+
+
+def _hold_book(tmp_path: Path, *positions: dict[str, Any]) -> None:
+    (tmp_path / "positions.json").write_text(json.dumps({
+        "positions": {p["record"]["position_id"]: p for p in positions},
+        "day_start": {"day": "2026-10-22", "equity_usdt": 9000.0}, "last_equity_usdt": 9950.0,
+    }))  # fmt: skip
+
+
+def test_history_hold_card_across_midnight_neutral_kept_then_opposite_card_close(
+    tmp_path: Path,
+) -> None:
+    """曼谷前一天 20:29 开空，21:27 会判观望卡保留空，过了 0 点 00:14 卡翻成多，管家按反向卡平。"""
+    from jiaoyi.panel.pages import build_history
+
+    log = JsonlDecisionLog(tmp_path)
+    u = lambda d, h, m=0: datetime(2026, 10, d, h, m, tzinfo=UTC)  # noqa: E731
+    pid = "pos-tia"
+    for r in [
+        _hold_meet("TIAUSDT", u(21, 13, 23), "short"),
+        _hold_meet("TIAUSDT", u(21, 14, 27), "no_trade"),
+        _hold_flip("TIAUSDT", u(21, 14, 28), "ignored", "short", "neutral"),
+        _hold_meet("TIAUSDT", u(21, 15, 27), "short"),
+        _hold_keeper(pid, "TIAUSDT", u(21, 16), c.Outcome.HOLD, "拿住", {"action": "hold"}),
+        _hold_meet("TIAUSDT", u(21, 17, 14), "long"),
+        _hold_keeper(pid, "TIAUSDT", u(21, 17, 15), c.Outcome.CLOSE,
+                     "规则判平，等待执行：作战卡反向硬规则：新作战卡方向改成 long，不等模型或确认",
+                     {"action": "close", "card_rule": {"kind": "opposite_card"},
+                      "rule_fired": "card"}),
+        # 平仓之后的会不算进持有期
+        _hold_meet("TIAUSDT", u(21, 18, 0), "short"),
+    ]:  # fmt: skip
+        log.write(r)
+    _hold_book(tmp_path, _position(
+        position_id=pid, symbol="TIAUSDT", side="short", status="closed", close_reason="keeper",
+        opened_at=u(21, 13, 29).isoformat(), closed_at=u(21, 17, 16).isoformat(),
+        realized_pnl_usdt=-23.7,
+    ))  # fmt: skip
+    row = build_history(PanelFiles(tmp_path, RISK.day_reset_tz), RISK, NOW, "today",
+                        include_tests=True).rows[0]  # fmt: skip
+    hc = row.hold_card
+    assert hc is not None
+    assert (hc.side, hc.start, hc.start_ts) == ("short", "short", u(21, 13, 23))
+    assert [(s.ts, s.meeting, s.card, s.event) for s in hc.steps] == [
+        (u(21, 14, 27), "neutral", "short", "ignored"),
+        (u(21, 15, 27), "short", "short", None),
+        (u(21, 17, 14), "long", "long", None),
+    ]
+    assert (hc.state, hc.state_ts, hc.state_from, hc.state_to) == (
+        "against", u(21, 17, 14), "short", "long",
+    )  # fmt: skip
+    assert [(a.ts, a.kind, a.count) for a in hc.actions] == [(u(21, 17, 15), "close", 1)]
+    assert hc.actions[0].text.startswith("规则判平，等待执行：作战卡反向硬规则")
+    assert (row.close_reason, hc.closed_by) == ("keeper", "opposite_card")
+
+
+def test_positions_hold_card_pending_flip_and_neutral_kept(tmp_path: Path) -> None:
+    """持仓中：会判反向进了待确认（卡上仍是多），另一笔只有会判观望卡保留原方向。"""
+    from jiaoyi.panel.pages import build_positions
+
+    log = JsonlDecisionLog(tmp_path)
+    u = lambda h, m=0: datetime(2026, 10, 22, h, m, tzinfo=UTC)  # noqa: E731
+    for r in [
+        _hold_meet("AAUSDT", u(4), "long"),
+        _hold_meet("AAUSDT", u(5), "short"),
+        _hold_flip("AAUSDT", u(5, 1), "pending", "long", "short"),
+        _hold_meet("BBUSDT", u(4), "short"),
+        _hold_meet("BBUSDT", u(5, 30), "no_trade"),
+        _hold_flip("BBUSDT", u(5, 31), "ignored", "short", "neutral"),
+        _hold_meet("CCUSDT", u(4), "long"),
+    ]:
+        log.write(r)
+    _hold_book(
+        tmp_path,
+        _position(position_id="pos-aa", symbol="AAUSDT", side="long",
+                  opened_at=u(4, 30).isoformat()),
+        _position(position_id="pos-bb", symbol="BBUSDT", side="short",
+                  opened_at=u(4, 40).isoformat()),
+        _position(position_id="pos-cc", symbol="CCUSDT", side="long",
+                  opened_at=u(4, 50).isoformat()),
+    )  # fmt: skip
+    page = build_positions(PanelFiles(tmp_path, RISK.day_reset_tz), HB, RISK, NOW,
+                           with_recent=False)  # fmt: skip
+    by = {p.position_id: p.hold_card for p in page.positions}
+    aa, bb, cc = by["pos-aa"], by["pos-bb"], by["pos-cc"]
+    assert aa is not None and bb is not None and cc is not None
+    assert [(s.meeting, s.card, s.event) for s in aa.steps] == [("short", "long", "pending")]
+    assert (aa.start, aa.state, aa.state_ts, aa.state_from, aa.state_to, aa.pending_open) == (
+        "long", "pending", u(5), "long", "short", True,
+    )  # fmt: skip
+    assert (bb.start, bb.state, bb.state_ts, bb.state_from, bb.state_to) == (
+        "short", "neutral_kept", u(5, 30), "short", "neutral",
+    )  # fmt: skip
+    assert (cc.start, cc.steps, cc.state, cc.actions) == ("long", [], None, [])
+
+
+def test_history_hold_card_tighten_then_close_and_superseded_meeting(tmp_path: Path) -> None:
+    """临时会结论被新研究替换没上卡；之后卡翻反向，反向卡未确认先收紧，收紧不了按原规则平。"""
+    from jiaoyi.panel.pages import build_history
+
+    log = JsonlDecisionLog(tmp_path)
+    u = lambda h, m=0, s=0: datetime(2026, 10, 22, h, m, s, tzinfo=UTC)  # noqa: E731
+    pid = "pos-grass"
+    tight = {"opposite_tighten": {"action": "close", "why": "target_crossed"}}
+    for r in [
+        _hold_meet("GRASSUSDT", u(4, 15), "long"),
+        _hold_meet("GRASSUSDT", u(5, 16), "short"),
+        _rec(c.Role.COMMANDER, c.Outcome.INFO, "GRASSUSDT 研究期间该币指令已替换",
+             u(5, 16), symbol="GRASSUSDT", output={"market_review": "superseded"}),
+        _hold_meet("GRASSUSDT", u(6, 19, 32), "short"),
+        _hold_keeper(pid, "GRASSUSDT", u(6, 19, 32), c.Outcome.HOLD, "反向卡未确认，收紧止损",
+                     {"action": "hold",
+                      "card_rule": {"kind": "opposite_card", "branch": "tighten"}}),
+        _hold_keeper(pid, "GRASSUSDT", u(6, 19, 33), c.Outcome.CLOSE,
+                     "反向卡未确认但收紧不了，按原规则全平（target_crossed）", tight),
+        _hold_keeper(pid, "GRASSUSDT", u(6, 19, 40), c.Outcome.CLOSE,
+                     "反向卡未确认但收紧不了，按原规则全平（target_crossed）", tight),
+    ]:  # fmt: skip
+        log.write(r)
+    _hold_book(tmp_path, _position(
+        position_id=pid, symbol="GRASSUSDT", side="long", status="closed", close_reason="keeper",
+        opened_at=u(5, 24).isoformat(), closed_at=u(6, 19, 53).isoformat(), realized_pnl_usdt=-16.6,
+    ))  # fmt: skip
+    hc = build_history(PanelFiles(tmp_path, RISK.day_reset_tz), RISK, NOW, "today",
+                       include_tests=True).rows[0].hold_card  # fmt: skip
+    assert hc is not None
+    assert (hc.start, hc.start_ts) == ("long", u(4, 15))
+    assert [(s.ts, s.meeting, s.card) for s in hc.steps] == [(u(6, 19, 32), "short", "short")]
+    assert (hc.state, hc.state_from, hc.state_to) == ("against", "long", "short")
+    assert [(a.kind, a.count) for a in hc.actions] == [("tighten", 1), ("tighten_close", 2)]
+    assert hc.closed_by == "opposite_card"
