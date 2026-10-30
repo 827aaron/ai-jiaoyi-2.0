@@ -255,11 +255,22 @@ def _lifeboat_hit(rec: PositionRecord, exit_price: float) -> bool:
     return beyond >= -0.1 * dist
 
 
+_PAPER_STOP_REASONS = frozenset(
+    {
+        CloseReason.STOP_LOSS,
+        CloseReason.TRAILING_STOP,
+        CloseReason.TIGHTENED_STOP,
+        CloseReason.LIFEBOAT,
+    }
+)
+"""Reasons a paper-stop close is filed under (``paper_stop.close_reason``)."""
+
+
 def _shown_detail(tracked: TrackedPosition, reason: CloseReason | None) -> str | None:
     """The noted close detail when it belongs to ``reason``.
 
     A detail noted by one rule must not label a close that something else caused: a paper
-    stop note only shows on a stop-loss close, a reconciler note only on a reconciler close.
+    stop note only shows on a stop close, a reconciler note only on a reconciler close.
     """
     detail = tracked.close_detail
     if detail is None:
@@ -267,7 +278,7 @@ def _shown_detail(tracked: TrackedPosition, reason: CloseReason | None) -> str |
     paper = detail.startswith(PAPER_STOP_DETAIL)
     if reason is CloseReason.RECONCILER and not paper:
         return detail
-    if reason is CloseReason.STOP_LOSS and paper:
+    if paper and reason in _PAPER_STOP_REASONS:
         return detail
     return None
 

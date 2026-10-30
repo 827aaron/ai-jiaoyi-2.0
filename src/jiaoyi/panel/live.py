@@ -91,6 +91,8 @@ CLOSE_BY: dict[str, tuple[str | None, str]] = {
 """执行器平仓记录的 ``output.reason`` → (光点从哪个角色出发, 标签)。交易所托管的止损 / 止盈 /
 到时记在保命止损那边，不算管家平的。None = 从仓位直接撤离（手动）。"""
 
+_STOP_KINDS = frozenset({"stop_loss", "trailing_stop", "tightened_stop", "lifeboat"})
+
 
 class LiveEvent(BaseModel):
     id: str
@@ -186,7 +188,7 @@ def _judges(out: dict[str, Any]) -> str | None:
 
 def _close_by(out: dict[str, Any]) -> tuple[str | None, str]:
     reason = str(out.get("reason") or "")
-    if reason == "stop_loss" and "主网价格" in str(out.get("detail") or ""):
+    if reason in _STOP_KINDS and "主网价格" in str(out.get("detail") or ""):
         return "patrol", "模拟止损"  # 模拟盘按主网价格越过止损平，是巡逻兵记的
     return CLOSE_BY.get(reason, (None, "平仓"))
 
