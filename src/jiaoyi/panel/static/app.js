@@ -503,7 +503,9 @@ document.addEventListener("click", async (e) => {
     try { await onOk(); } catch (err) { dlgMsg(esc(err.message), "down"); } finally { btn.disabled = false; }
     return;
   }
-  const el = e.target.closest("[data-act]");
+  const tk = e.target.closest("[data-tk]"), hit = e.target.closest("[data-act]");
+  if (tk && (!hit || hit.contains(tk))) return toggleTap(tk);
+  const el = hit;
   if (!el) return;
   const { act, arg } = el.dataset;
   if (act === "card") showCard();
@@ -593,6 +595,14 @@ const human = (t) => {
   return out.replace(/(不?做（\d[\d.]*)(\s*\/)/, "$1）$2");
 };
 const tx = (t) => esc(human(t));
+// 手机没有悬停：截成一两行的文字点一下展开全文，再点收起；记住展开了哪些，定时重画不收起
+S.tapOpen = new Set();
+const tapx = (key) => `data-tk="${esc(key)}" tabindex="0"${S.tapOpen.has(key) ? " data-open" : ""}`;
+function toggleTap(el) {
+  const k = el.dataset.tk;
+  if (S.tapOpen.has(k)) { S.tapOpen.delete(k); el.removeAttribute("data-open"); }
+  else { S.tapOpen.add(k); el.setAttribute("data-open", ""); }
+}
 const clickable = (act, arg = "") => `data-act="${act}" data-arg="${esc(arg)}" tabindex="0" role="button"`;
 const json = (o) => (o && Object.keys(o).length ? `<pre class="json">${esc(JSON.stringify(o, null, 2))}</pre>` : `<span class="dim">（空）</span>`);
 
@@ -1462,7 +1472,7 @@ function defenceSection(rows) {
     const tag = r.link ? `a class="df-row click${r.on ? "" : " off"}" href="${esc(r.link)}"` : `div class="df-row${r.on ? "" : " off"}"`;
     const end = r.link ? "a" : "div";
     if (!r.on) return `<${tag}>${name}<span class="df-sw"><span class="pill" title="${esc(`配置 ${r.config_key} 关着`)}">未启用</span></span><span class="df-now dim">—</span><span class="df-day dim">—</span><span class="df-last dim">—</span></${end}>`;
-    const last = r.last_ts ? `<span class="num">${when(r.last_ts)}</span> <span class="clamp1" title="${esc(r.last_text || "")}">${esc(r.last_text || "")}</span>` : '<span class="dim">今天没有</span>';
+    const last = r.last_ts ? `<span class="num">${when(r.last_ts)}</span> <span class="clamp2" ${tapx("df:" + r.key)}>${esc(r.last_text || "")}</span>` : '<span class="dim">今天没有</span>';
     return `<${tag}>${name}<span class="df-sw" title="${esc(`${r.setting}（配置 ${r.config_key}）`)}"><span class="pill p-long">开</span> <span class="dim small">${esc(r.setting)}</span></span><span class="df-now ${r.level === "warn" ? "warn" : ""}">${esc(r.now)}</span><span class="df-day">${esc(r.today)}</span><span class="df-last">${last}</span></${end}>`;
   };
   const head = '<div class="df-row df-head" aria-hidden="true"><span>防线</span><span>开关</span><span>此刻</span><span>今天</span><span>最近一次</span></div>';
@@ -1558,7 +1568,7 @@ function tilesSection(t, gateLabel) {
 function alertsSection(list) {
   const crit = list.some((a) => a.level === "critical");
   const body = list.length
-    ? `<div class="log scroll">${list.map((a) => `<div title="${tx(a.text)}"><span class="n">${hm(a.ts)}</span><span class="clamp1"><span class="chip-s ${a.level === "critical" ? "p-short" : "p-warn"}">${esc(ROLE[a.role] || "其他")}</span> ${tx(a.text)}</span></div>`).join("")}</div>`
+    ? `<div class="log scroll">${list.map((a) => `<div><span class="n">${hm(a.ts)}</span><span class="clamp2" ${tapx(`al:${a.ts}:${a.text.slice(0, 40)}`)}><span class="chip-s ${a.level === "critical" ? "p-short" : "p-warn"}">${esc(ROLE[a.role] || "其他")}</span> ${tx(a.text)}</span></div>`).join("")}</div>`
     : `<div class="dim">今天没有告警。</div>`;
   return `<section class="card ${crit ? "alert" : ""}"><div class="ch"><h2>告警</h2><span class="r">同时推到 Telegram</span></div>${body}</section>`;
 }
@@ -2318,11 +2328,11 @@ const TONE_WORD = { open: "开", close: "平", reject: "拒", error: "错", info
 function liveFeedHtml(feed, sel) {
   if (!feed.length) return '<div class="dim small tl-empty">等新动作…（每 1.5 秒看一次决策日志）</div>';
   return feed.map((ev, i) => {
-    const c = ev.symbol ? `<b class="sym">${coin(ev.symbol)}</b>` : "";
+    const c = ev.symbol ? `<span class="sym">${coin(ev.symbol)}</span>` : "";
     const w = TONE_WORD[ev.tone] ? `<em class="tl-tw ${ev.tone}">${TONE_WORD[ev.tone]}</em>` : "";
     const n = ev.count > 1 ? `<span class="n">×${ev.count}</span>` : "";
-    const txt = ev.kind === "backfill" && ev.pnl_usdt != null ? `回填 净 ${signed(ev.pnl_usdt, 2)}U` : ev.badge && ev.kind !== "signal" ? `${ev.kind === "meeting" && BIAS[ev.badge] ? BIAS[ev.badge][0] : ev.badge} · ${ev.text}` : ev.text;
-    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${clickable("liveev", i)} title="${tx(ev.text)}"><span class="t">${hms(ev.ts)}</span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span>${w}${c}<span class="x">${esc(txt)}</span>${n}</div>`;
+    const txt = ev.kind === "backfill" && ev.pnl_usdt != null ? `回填 净 ${signed(ev.pnl_usdt, 2)}U` : ev.badge && ev.kind !== "signal" && ev.kind !== "risk_reject" ? `${ev.kind === "meeting" && BIAS[ev.badge] ? BIAS[ev.badge][0] : ev.badge} · ${ev.text}` : ev.text;
+    return `<div class="tl-ev ${ev.tone}${ev.routine ? " routine" : ""}${sel === ev.id ? " on" : ""}" ${tapx("ev:" + ev.id)}><span class="t">${hms(ev.ts)}</span><span class="x"><span><span class="who">${esc(TL_NAME[liveRole(ev)] || ev.role)}</span> ${w}${c ? `${c}${txt ? "：" : ""}` : ""}${esc(txt)}${n}</span></span><button class="go" ${clickable("liveev", i)} title="看它走的路" aria-label="看它走的路">›</button></div>`;
   }).join("");
 }
 function liveDrawFeed() {
@@ -3016,7 +3026,7 @@ P.pool = () => {
   const rows = shown.map((e) => `<tr class="${e.in_pool ? "" : "dimrow"}">
       <td class="hi nowrap">${coin(e.symbol)} ${flag(e.symbol)}</td><td class="nowrap">${esc(CAT[e.category] || e.category)}</td><td class="r num">${e.score.toFixed(2)}</td>
       <td>${e.in_pool ? (e.picked_by_card ? '<span class="chip-s p-long">军师选中</span>' : '<span class="chip-s">在池里</span>') : '<span class="chip-s">没进池</span>'}</td>
-      <td class="clip" title="${esc(why(e))}">${esc(why(e).split("\n")[0])}</td>
+      <td class="clip"><span class="clamp2" ${tapx("pool:" + e.symbol)}>${esc(why(e)).replace(/\n/g, "<br>")}</span></td>
       <td class="r num dim">${money(e.filters.quote_volume_24h_usdt / 1e6, 0)}M</td><td class="r num dim">${e.filters.spread_bps.toFixed(2)}</td><td class="r nowrap">${ops(e.symbol)}</td></tr>`).join("");
   const nIn = d.entries.filter((e) => e.in_pool).length;
   const seg = `<span class="seg">${[["in", `在池里 ${nIn}`], ["out", `没进池 ${d.entries.length - nIn}`], ["all", `全部 ${d.entries.length}`]].map(([k, t]) => `<button class="${view === k ? "on" : ""}" ${clickable("poolview", k)}>${t}</button>`).join("")}</span>`;

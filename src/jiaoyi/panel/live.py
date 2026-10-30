@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -162,6 +163,32 @@ def _strip_symbol(r: DecisionRecord) -> str:
     return s or r.summary
 
 
+_REFUSED = re.compile(r"^(多|空) (?:拒绝|拍板放弃)：(.+)$", re.S)
+_TRAIL = re.compile(
+    r"^大盘移动止损：(\S+) 从.段.点(反弹|回落) ([\d.]+) ATR，"
+    r"暂停新(多|空)单(?:（锁住 (\d+) 分钟）)?"
+)
+_HOLD = re.compile(r"^拿住：平仓概率 ([\d.]+)(?:，(.*))?$", re.S)
+
+
+def _lead(r: DecisionRecord, text: str) -> str:
+    """把最有信息的部分放前面：拒绝写理由在前，管家拿住写平仓概率在前。"""
+    side = ""
+    if m := _REFUSED.match(text):
+        side, text = m.group(1), m.group(2)
+        if r.symbol and text.startswith(r.symbol):
+            text = text[len(r.symbol) :].lstrip(" ：:")
+    if m := _TRAIL.match(text):
+        ref, move, atr, held, mins = m.groups()
+        tail = f" · 已锁 {mins} 分钟" if mins else ""
+        return f"大盘移动止损，{held}单锁住（{ref} {move} {atr} ATR{tail}）"
+    if m := _HOLD.match(text):
+        p, rest = m.groups()
+        rest = "只记录" if rest and rest.startswith("只记录") else rest
+        return f"拿住 · 平仓概率 {p}" + (f"（{rest}）" if rest else "")
+    return f"{text}（{side}）" if side else text
+
+
 def _verdict(out: dict[str, Any]) -> str | None:
     jev = out.get("jev")
     take = jev.get("answers", {}).get("take") if isinstance(jev, dict) else None
@@ -306,7 +333,7 @@ def to_event(r: DecisionRecord) -> LiveEvent:
         side=side,
         position_id=r.position_id,
         signal_id=r.signal_id,
-        text=_short(_strip_symbol(r), 120),
+        text=_short(_lead(r, _strip_symbol(r)), 300),
         badge=badge,
         signal_kind=sig,
         pnl_usdt=pnl,

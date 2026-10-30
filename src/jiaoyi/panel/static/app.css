@@ -403,7 +403,7 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 
 /* 团队页：活的流程图（画布 960×600 逻辑坐标，宽度不够整体缩放）+ 右边「实时动作」；≤700px 按泳道竖排 */
 .card.tl { padding: 12px; overflow: hidden; }
-.tl-grid { display: grid; grid-template-columns: minmax(0, 1fr) 272px; gap: 14px; align-items: start; }
+.tl-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
 .tl-fit { position: relative; width: 100%; overflow: hidden; }
 .tl-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 12px;
   background-color: color-mix(in srgb, var(--bg) 70%, var(--card));
@@ -526,8 +526,12 @@ details.say .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13
 .tl-ev .t { flex: none; width: 52px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .tl-ev .who { font-weight: 600; color: var(--hi); white-space: nowrap; }
 .tl-ev .sym { white-space: nowrap; }
-.tl-ev .x { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--tx); }
-.tl-ev .n { color: var(--dim); font-variant-numeric: tabular-nums; }
+.tl-ev .x { flex: 1; min-width: 0; display: block; line-height: 1.45; max-height: 2.9em; overflow: hidden; overflow-wrap: anywhere; color: var(--tx); }
+.tl-ev .sym { font-weight: 600; color: var(--hi); }
+.tl-ev[data-open] .x { max-height: none; }
+.tl-ev .go { flex: none; align-self: center; border: 0; background: none; color: var(--dim); font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 5px; cursor: pointer; }
+.tl-ev .go:hover { color: var(--accent); background: var(--card); }
+.tl-ev .n { color: var(--dim); font-variant-numeric: tabular-nums; margin-left: 4px; }
 .tl-ev .tl-tw { flex: none; font-style: normal; font-size: 10px; font-weight: 700; padding: 0 4px; border-radius: 4px; }
 .tl-ev.open { border-left-color: var(--lane-entry); }
 .tl-ev .tl-tw.open { color: var(--lane-entry); background: color-mix(in srgb, var(--lane-entry) 12%, transparent); }
@@ -733,7 +737,7 @@ tfoot tr.total td { position: sticky; bottom: 0; background: var(--card); border
 table.recon td div.small { display: inline; margin-left: 8px; }
 .chev-s { color: var(--dim); font-size: 12px; display: inline-block; width: 10px; }
 table.ptable td div.small { display: inline; margin-left: 8px; }
-td.clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.clip { max-width: 420px; min-width: 200px; }
 table.sticky thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
 .clamp1, .clamp2, .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
 .clamp1 { -webkit-line-clamp: 1; } .clamp2 { -webkit-line-clamp: 2; } .clamp3 { -webkit-line-clamp: 3; }
@@ -876,3 +880,6 @@ a.df-row:hover { background: var(--bg); }
 .tl-node small.gate { color: var(--dim); white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
 .tl-node small.gate.against { color: var(--warn); font-weight: 600; }
 .trail-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+[data-tk] { cursor: pointer; }
+.clamp2[data-open], .clamp1[data-open] { -webkit-line-clamp: unset; line-clamp: none; }
+.log .clamp2 { min-width: 0; }
