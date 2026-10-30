@@ -1252,6 +1252,8 @@ def _kind(r: DecisionRecord) -> FeedKind | None:
     if r.role is Role.RISK_GUARD:
         if _gate_skip(r):
             return "skip"
+        if o is Outcome.INFO:  # 大盘台转向暂停 / 大盘移动止损的开关记录，不是拦了哪一笔
+            return "info"
         return "go" if o is Outcome.PASS else "block"
     if r.role is Role.EXECUTOR:
         exec_kinds: dict[Outcome, FeedKind] = {

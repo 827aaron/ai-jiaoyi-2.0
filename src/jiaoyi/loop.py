@@ -65,6 +65,7 @@ from jiaoyi.core.commands import CommandInbox, CommandResult, PanelCommand
 from jiaoyi.core.desk_turn import DeskTurnPause
 from jiaoyi.core.held_events import HeldEventDesk
 from jiaoyi.core.loop_lag import LoopLagMonitor, register_stack_dump
+from jiaoyi.core.market_trail import MarketTrail
 from jiaoyi.core.pool_overrides import CATEGORY_ACTIONS, POOL_ACTIONS, PoolAction
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.execution.brackets import CloseInProgress, ExitCleanupPending
@@ -594,6 +595,7 @@ class Runner:
             self._every(CREDIT_CHECK_EVERY_S, self.app.credit_tick),
             self._every(COMMAND_POLL_EVERY_S, self.command_tick),
             self._every(CONFIG_WATCH_EVERY_S, self.config_tick),
+            self._every(CONFIG_WATCH_EVERY_S, self.market_trail_tick),
             self._every(SHADOW_EVERY_S, self.app.mainnet_shadow_tick),
             # 有交易所连接时账本回填和收入流水由 LedgerSync 管（成交回报叫醒，60 秒兜底）
             (
@@ -767,6 +769,7 @@ class Runner:
                 self.app.observations.on_event(event)
         self._market_file.count(event, self.app.clock())
         if isinstance(event, Kline):
+            self._market_trail_feed(lambda t: t.observe_kline(event))
             self._sync_wanted()
             await self.m.predictor.on_kline(event)
             for sym in self.m.predictor.take_gaps() - self._predictor_refilling:
@@ -1463,6 +1466,8 @@ class Runner:
             held := turn.holds(intent.symbol, intent.side, card, now)
         ):
             why.append(held)
+        if (trail := self._market_trail()) is not None and (held := trail.holds(intent.side, now)):
+            why.append(held)
         return (
             why
             + self._chase_zone(intent, card, now)
@@ -1525,7 +1530,7 @@ class Runner:
             # 同币上一笔刚平、收尾还没核完：执行层反正不开，连 Jev 都不问
             self._guard_note(Outcome.REJECT, f"{signal.symbol} 同币上一笔收尾中，先不开新仓", now)
             return
-        if self._desk_turn_blocked(signal, card, now):
+        if self._trail_blocked(signal, card, now) or self._desk_turn_blocked(signal, card, now):
             return
         jev = await self.m.gate.evaluate(signal, card, now)  # 拍板可以并行
         async with self._open_lock:
@@ -1541,8 +1546,10 @@ class Runner:
                     Outcome.REJECT, f"{signal.symbol} 拍板期间作战卡或大盘方向已变，重新等信号", now
                 )
                 return
-            if self._desk_turn_blocked(signal, fresh, now):
-                return  # 问 Jev 期间大盘台转向了
+            if self._trail_blocked(signal, fresh, now) or self._desk_turn_blocked(
+                signal, fresh, now
+            ):
+                return  # 问 Jev 期间大盘台转向了 / 大盘移动止损锁住了
             account = await self._read_account(signal, card)
             if account is None:
                 return
@@ -1556,8 +1563,10 @@ class Runner:
                 )
                 return
             assert fresh is not None
-            if self._desk_turn_blocked(signal, fresh, now):
-                return  # 等账户期间大盘台转向了
+            if self._trail_blocked(signal, fresh, now) or self._desk_turn_blocked(
+                signal, fresh, now
+            ):
+                return  # 等账户期间大盘台转向了 / 大盘移动止损锁住了
             # 拍板要几百毫秒，滑点和价差按现在的行情算，不按触发时那份
             market = self.m.features.snapshot(signal.symbol)
             verdict = self.m.risk.review(signal, jev, fresh, account, now, market=market)
@@ -1714,6 +1723,8 @@ class Runner:
         if not release:
             turn = self._desk_turn()
             held = turn.holds(sym, new.side_hint, card, now) if turn is not None else None
+            if held is None and (trail := self._market_trail()) is not None:
+                held = trail.holds(new.side_hint, now)
             miss = held or entry_zone_miss(new, card, self.app.app_cfg.fast_loop, now)
             if miss is not None:
                 self._manual_note(new, card, now, f"重新检查：现在仍拒绝：{miss}", "recheck", miss)
@@ -2227,6 +2238,34 @@ class Runner:
     def _desk_turn(self) -> DeskTurnPause | None:
         return getattr(self.app, "desk_turn", None)
 
+    def _market_trail(self) -> MarketTrail | None:
+        return getattr(self.app, "market_trail", None)
+
+    def _market_trail_feed(self, feed: Callable[[MarketTrail], None]) -> None:
+        if (trail := self._market_trail()) is None:
+            return
+        try:
+            feed(trail)
+            trail.tick(self.app.clock())
+        except Exception:
+            log.exception("大盘移动止损收数据出错")
+
+    @staticmethod
+    def _trail_backfilled(trail: MarketTrail, symbol: str, minutes: list[Kline]) -> None:
+        trail.observe_klines(minutes)
+        if symbol == BTC:
+            trail.release_fill()  # 停机那段有真价了，之后再缺的才按上一分钟补
+
+    async def market_trail_tick(self) -> None:
+        self._market_trail_feed(lambda _t: None)
+
+    def _trail_blocked(
+        self, signal: CandidateSignal, card: BattleCard | None, now: datetime
+    ) -> bool:
+        trail = self._market_trail()
+        why = trail.holds(signal.side_hint, now) if trail is not None else None
+        return why is not None and self._reject_before_open(signal, card, now, why, "market_trail")
+
     def _desk_turn_blocked(
         self, signal: CandidateSignal, card: BattleCard | None, now: datetime
     ) -> bool:
@@ -2234,6 +2273,11 @@ class Runner:
         why = turn.blocked(signal.symbol, signal.side_hint, card, now) if turn else None
         if why is None:
             return False
+        return self._reject_before_open(signal, card, now, why, "desk_turn")
+
+    def _reject_before_open(
+        self, signal: CandidateSignal, card: BattleCard | None, now: datetime, why: str, by: str
+    ) -> bool:
         rec = self.app.recorders.get(Role.RISK_GUARD)
         if rec is not None:
             rec.record(
@@ -2243,7 +2287,7 @@ class Runner:
                 symbol=signal.symbol,
                 signal_id=signal.signal_id,
                 card_id=card.card_id if card else None,
-                output={"approved": False, "reasons": [why], "detail": {"by": "desk_turn"}},
+                output={"approved": False, "reasons": [why], "detail": {"by": by}},
             )
         return True
 
@@ -2485,6 +2529,7 @@ class Runner:
                         self.m.features.update(k)
                 except Exception:
                     log.warning("%s 回填 K 线失败，等实时数据攒够", sym, exc_info=True)
+                self._market_trail_feed(lambda t: self._trail_backfilled(t, sym, minutes))
                 if isinstance(self.m.features, _SeedsAtr):
                     try:
                         self.m.features.seed_atr_history(sym, await self._fetch_atr_history(sym))
@@ -2654,6 +2699,9 @@ class Runner:
                     )
                     row = self._flip_row(now, sample)
                     self._feed_desk_intra(sample, pool)
+                    self._market_trail_feed(
+                        lambda t: t.observe_sample(sample.ts, sample.btc_px, sample.prices)
+                    )
                     if not self._regime_enabled():
                         self._regime.reset()
                         return

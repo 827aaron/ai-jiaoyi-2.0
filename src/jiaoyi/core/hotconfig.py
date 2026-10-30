@@ -211,6 +211,11 @@ HOT_FAST: frozenset[str] = frozenset(
         "patrol_held_event_loss_r",
         "patrol_held_event_on_desk_flip",
         "signal_desk_turn_pause",
+        # 大盘移动止损（每分钟 / 每次开仓前现读）
+        "signal_market_trail_on",
+        "signal_market_trail_k",
+        "signal_market_trail_ref",
+        "signal_market_trail_shadow",
     }
 )
 

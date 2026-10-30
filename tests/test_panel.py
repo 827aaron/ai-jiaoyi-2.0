@@ -1352,6 +1352,11 @@ def test_role_state_reads_schedule_fields_when_present(tmp_path: Path) -> None:
                       run).headline == ""  # fmt: skip
     plain = c.ModuleStatus(**base, headline="池子 40 个")
     assert _role_card(c.Role.SCREENER, plain, NOW, run).headline == "池子 40 个"
+    # 风控员的这一行是大盘移动止损的现状：有上次干活时间也照常显示
+    line = "大盘移动止损：空单锁住中（BTC 反弹 1.1 ATR，12 分钟）"
+    guard = c.ModuleStatus(role=c.Role.RISK_GUARD, health=c.Health.OK, ts=NOW, last_run_at=NOW,
+                           headline=line)  # fmt: skip
+    assert _role_card(c.Role.RISK_GUARD, guard, NOW, run).headline == guard.headline
 
 
 def test_card_rows_without_conclusion_say_why(tmp_path: Path) -> None:
@@ -2376,3 +2381,14 @@ def test_history_hold_card_tighten_then_close_and_superseded_meeting(tmp_path: P
     assert (hc.state, hc.state_from, hc.state_to) == ("against", "long", "short")
     assert [(a.kind, a.count) for a in hc.actions] == [("tighten", 1), ("tighten_close", 2)]
     assert hc.closed_by == "opposite_card"
+
+
+def test_feed_shows_risk_guard_notes_as_info() -> None:
+    """风控员的开关记录（大盘移动止损锁住 / 放行）不是拦了哪一笔，动态里不标红。"""
+    from jiaoyi.panel.overview import _feed
+
+    note = _rec(c.Role.RISK_GUARD, c.Outcome.INFO, "大盘移动止损：BTC 创跌段新低，恢复新空单", NOW)
+    rej = _rec(
+        c.Role.RISK_GUARD, c.Outcome.REJECT, "BTCUSDT 大盘移动止损：…", NOW, symbol="BTCUSDT"
+    )
+    assert [i.kind for i in _feed([note, rej])] == ["block", "info"]
