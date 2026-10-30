@@ -50,6 +50,7 @@ from jiaoyi.core import profiles
 from jiaoyi.core.against import MEETING_TRIGGER, AgainstSignalDesk
 from jiaoyi.core.commands import read_paused, update_runtime, write_paused, write_runtime
 from jiaoyi.core.config import ConfigError, load_risk_config, read_toml, with_profile
+from jiaoyi.core.held_events import HELD_EVENTS_FILE, HeldEventDesk
 from jiaoyi.core.hotconfig import (
     HOT_APP,
     HOT_FAST,
@@ -945,6 +946,17 @@ class App:
             request_event=request_event if callable(request_event) else None,
             meeting_ok=(lambda: bool(accepts(MEETING_TRIGGER))) if callable(accepts) else None,
             recorder=self.recorders.get(Role.SENTINEL),
+        )
+        # 持仓币在亏时遇反向信号 / 大盘台翻向：申请这个币的单币临时会（core/held_events.py）
+        met_since = getattr(cards, "met_since", None)
+        self.held_events = HeldEventDesk(
+            app_cfg.fast_loop,
+            Path(app_cfg.data_dir) / HELD_EVENTS_FILE,
+            fee_bps=lambda: self.risk_cfg.taker_fee_bps,
+            request_event=request_event if callable(request_event) else None,
+            meeting_ok=(lambda t: bool(accepts(t))) if callable(accepts) else None,
+            met_since=met_since if callable(met_since) else None,
+            recorder=self.recorders.get(Role.PATROL),
         )
         self.pool: SymbolPool | None = None
         self.started = False

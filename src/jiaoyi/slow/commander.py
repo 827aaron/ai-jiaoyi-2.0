@@ -51,6 +51,7 @@ from jiaoyi.contracts import (
     SymbolPoolEntry,
     TodayStats,
 )
+from jiaoyi.core import held_events
 from jiaoyi.core.us_hours import us_entry_window
 from jiaoyi.interfaces import DecisionLog
 from jiaoyi.sentinel.regime_flip import Direction, RegimeReference
@@ -276,6 +277,10 @@ class EventRules:
     concurrency: int = 1
     """同时最多开几场临时会（≥ 1，1 = 一场一场排队）；和整轮共用会议并发的名额。"""
 
+
+HELD_TRIGGERS: frozenset[str] = held_events.TRIGGERS
+"""持仓币的两类临时会不看 ``event_triggers``，开关在 app.toml ``[fast_loop] patrol_held_event_*``
+（热生效）。"""
 
 PENDING_EXPIRY = timedelta(minutes=30)
 LEVEL_PX_FRESH = timedelta(minutes=5)
@@ -1134,7 +1139,7 @@ class BattleCardCommander:
             self._event_day, self._event_count = day, 0
 
     def _queue(self, symbol: str, trigger: str, now: datetime) -> None:
-        if trigger not in self._events.triggers:
+        if trigger not in self._events.triggers and trigger not in HELD_TRIGGERS:
             return
         if symbol not in self._pending:
             self._pending[symbol] = (trigger, now)
@@ -1153,13 +1158,20 @@ class BattleCardCommander:
         return self._events.enabled and (
             self._market_review_enabled()
             if trigger == "market_review"
-            else trigger in self._events.triggers
+            else trigger in self._events.triggers or trigger in HELD_TRIGGERS
         )
 
     def request_event(self, symbol: str, trigger: str) -> None:
         """外部事件（预测员连续看反作战卡等）：排进临时会队列，没开临时会 / 不在名单里就忽略。"""
         if self._events.enabled:
             self._queue(symbol, trigger, self._clock())
+
+    def met_since(self, symbol: str, at: datetime) -> bool:
+        """这个币在 ``at`` 之后开始过会（含开失败的临时会），或此刻正在开 / 已派出。"""
+        if symbol in self._symbol_inflight | self._event_claimed | (self._round_meeting or set()):
+            return True
+        starts = (self._last_meeting.get(symbol), self._event_last.get(symbol))
+        return any(t is not None and t >= at for t in starts)
 
     def set_market_review_enabled(self, enabled: Callable[[], bool]) -> None:
         self._market_review_enabled = enabled

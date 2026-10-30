@@ -207,6 +207,9 @@ HOT_FAST: frozenset[str] = frozenset(
         "against_meeting_count",
         "against_meeting_window_s",
         "against_meeting_gap_s",
+        # 持仓币加开临时会（每次判断现读）
+        "patrol_held_event_loss_r",
+        "patrol_held_event_on_desk_flip",
     }
 )
 

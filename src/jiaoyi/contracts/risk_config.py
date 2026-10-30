@@ -1193,6 +1193,21 @@ class FastLoopConfig(Contract):
         le=86400,
         description="同一个币因反向信号最多多久申请 1 次临时会（秒）。",
     )
+    # ---- 持仓币加开临时会（2026-10-30：卡只在整轮 / 穿关键位时换，急转时持仓币的卡可能旧 2 小时）
+    patrol_held_event_loss_r: float = Field(
+        default=0.0,
+        ge=0.0,
+        lt=1.0,
+        description="哨兵报了和持仓相反的信号、且这笔仓此刻已亏到这么多倍 R（R = 开仓时的止损"
+        "距离；按标记价、扣来回手续费），就申请这个币的单币临时会（不管 against_signal_on）。"
+        "0 = 关（默认）；推荐 0.5。还要开着 slow.toml event_meeting_enabled。",
+    )
+    patrol_held_event_on_desk_flip: bool = Field(
+        default=False,
+        description="大盘台此刻的方向和持仓相反（多单遇看跌、空单遇看涨）、这笔仓按标记价扣来回"
+        "手续费是亏的、且这个币从大盘台翻向以来还没开过会，就申请这个币的单币临时会；赚钱的仓"
+        "不加会（交给移动止损）。默认关。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:
