@@ -178,7 +178,8 @@ def _seed_overnight(tmp_path: Path, refs: dict[str, float] | None, *, income: bo
         json.dumps({"day": "2026-10-22", "start_equity": 10_000.0, "tripped": False})
     )
     if income:
-        days = {"2026-10-22": {"realized_pnl": 0.0, "commission": -1.8899, "funding_fee": -0.5}}
+        # 流水的平仓盈亏按开仓价算、手续费前：ETH 2500→2450 赚 50，SOL 150→150.56 赚 5.6
+        days = {"2026-10-22": {"realized_pnl": 55.6, "commission": -1.8899, "funding_fee": -0.5}}
         (tmp_path / "income_daily.json").write_text(
             json.dumps({"tz": "Asia/Bangkok", "days": days})
         )
@@ -213,6 +214,10 @@ def test_overview_day_pnl_splits_into_closes_holdings_and_costs_from_day_refs(
     parts = [k.day_closes_usdt, k.day_holding_usdt, k.day_costs_usdt, k.day_residual_usdt]
     assert sum(p for p in parts if p is not None) == pytest.approx(33.0)
     assert k.day_residual_usdt == pytest.approx(33.0 - 31.8701, abs=1e-4)
+    # 资金页主口径：流水已实现净额 − ETH 0 点前已赚的 20（已在日初权益里）+ 持仓今日变动 + 差额
+    assert (k.day_trading_usdt, k.day_fees_usdt, k.day_funding_usdt) == (55.6, -1.8899, -0.5)
+    assert k.day_overnight_usdt == pytest.approx(20.0)
+    assert k.day_recon_residual_usdt == pytest.approx(33.0 - 31.8701, abs=1e-4)
     rows = {p.position_id: p for p in ov.positions}
     assert rows["btc"].today_from == "ref" and rows["btc"].today_usdt == pytest.approx(-4.34)
     assert rows["btc"].unrealized_usdt == pytest.approx(-20.0)
@@ -1031,6 +1036,7 @@ def test_funds_pnl_from_exchange_income(tmp_path: Path) -> None:
     assert today.net_usdt == pytest.approx(27.5 - 0.21)
     assert week.trading_usdt == pytest.approx(20.0) and week.funding_usdt == pytest.approx(-0.3)
     assert total.trading_usdt == pytest.approx(120.0) and total.fees_usdt == pytest.approx(-8.0)
+    assert [str(x.since) for x in page.pnl] == ["2026-10-22", "2026-10-16", "2026-10-01"]
 
 
 def test_funds_total_counts_ai_cost_before_first_trade(tmp_path: Path) -> None:

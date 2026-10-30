@@ -243,23 +243,26 @@ async def test_paper_stop_last_mode_ignores_mark(
 
 
 @pytest.mark.parametrize("side", [LONG, SHORT])
+@pytest.mark.parametrize(
+    ("source", "label"), [("trailing", "移动止损"), ("native_trailing", "交易所移动止损（推算）")]
+)
 async def test_paper_stop_uses_tightest_executor_level(
-    tmp_path: Path, now: datetime, side: c.Side
+    tmp_path: Path, now: datetime, side: c.Side, source: str, label: str
 ) -> None:
     pos = _pos(side)
     runner, ex, _ = _runner(tmp_path, now, pos, paper_stop_slippage_bps=0.0)
     trailing = ENTRY + SIGN[side] * 20.0
-    ex.levels[pos.position_id] = [("ledger", STOP[side]), ("trailing", trailing)]
+    ex.levels[pos.position_id] = [("ledger", STOP[side]), (source, trailing)]
     await runner.on_event(_trade(now, ENTRY + SIGN[side] * 40.0))  # safe side of the trailing
     await _settle(runner)
     assert ex.closed == []
     await runner.on_event(_trade(now, trailing))
     await _settle(runner)
     booked = runner._paper_stops.get(pos.position_id)
-    assert booked is not None and (booked.stop_source, booked.stop_price) == ("trailing", trailing)
+    assert booked is not None and (booked.stop_source, booked.stop_price) == (source, trailing)
     assert booked.paper_exit_price == trailing
     assert ex.details == [
-        (pos.position_id, f"主网价格越过止损：主网成交价 {trailing:g} 碰到移动止损 {trailing:g}")
+        (pos.position_id, f"主网价格越过止损：主网成交价 {trailing:g} 碰到{label} {trailing:g}")
     ]
 
 

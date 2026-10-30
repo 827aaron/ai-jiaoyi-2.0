@@ -307,17 +307,18 @@ async def test_restart_mid_trail_keeps_the_leg_and_the_local_extreme(
 
 
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_paper_mainnet_rule_gets_the_local_native_price_as_trailing(
+async def test_paper_mainnet_rule_gets_the_local_native_price_as_its_own_source(
     tmp_path: Path, side: Side
 ) -> None:
     h = NativeHarness(tmp_path, side)
     await native_armed(h)
-    assert "trailing" not in [s for s, _ in h.adapter.paper_stop_levels("pos-1")]
+    assert "native_trailing" not in [s for s, _ in h.adapter.paper_stop_levels("pos-1")]
     h.mark_value = 101.0 if side is Side.LONG else 99.0
     await h.adapter.protection_tick()
     levels = h.adapter.paper_stop_levels("pos-1")
     want = 100.495 if side is Side.LONG else 99.495
-    assert [p for s, p in levels if s == "trailing"] == [pytest.approx(want)]
+    assert [p for s, p in levels if s == "native_trailing"] == [pytest.approx(want)]
+    assert "trailing" not in [s for s, _ in levels]  # 程序自己没激活过
     assert "lifeboat" not in [s for s, _ in levels]
 
 

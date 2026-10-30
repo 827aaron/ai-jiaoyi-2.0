@@ -54,7 +54,7 @@ def test_team_api_accepts_market_role(tmp_path: Path) -> None:
 
 TEAM_STUBS = """
 const assert = require('node:assert/strict');
-const esc = String, clickable = (a, g = '') => `data-act="${a}" data-arg="${g}"`;
+const esc = String, tx = String, clickable = (a, g = '') => `data-act="${a}" data-arg="${g}"`;
 const MARKET = '_MARKET', hms = () => '', hm = () => '07:30', P = {};
 const coin = (s) => String(s || '').replace(/USDT$/, ''), cls = () => '', signed = (x) => String(x);
 const SIDE = { long: ['多', 'up'], short: ['空', 'down'] }, SIGNAL = {}, BIAS = {};
@@ -558,3 +558,23 @@ def test_live_executor_close_credits_whoever_caused_it() -> None:
     assert close(reason="patrol") == ("patrol", "巡逻兵平")
     assert close(reason="manual") == (None, "手动平")
     assert close() == (None, "平仓")
+
+
+def test_js_human_turns_decision_log_enums_into_chinese() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("没有 node")
+    source = (ROOT / "src/jiaoyi/panel/static/app.js").read_text()
+    part = source[source.index("const HUMAN = [") : source.index("const tx = ")]
+    script = (
+        "const assert = require('node:assert/strict');\n"
+        + part
+        + """
+assert.equal(human('ZECUSDT 空：做 take 0.67 / 止损 wide 0.67 / 仓位 S 0.84（500ms）'), 'ZEC 空：做（0.67） / 止损宽 0.67 / 仓位小 0.84（500ms）');
+assert.equal(human('PENGUUSDT 多：做 skip 0.70 / 止损 narrow 0.83 / 仓位 L 0.99'), 'PENGU 多：不做（0.70） / 止损窄 0.83 / 仓位大 0.99');
+assert.equal(human('HYPEUSDT 平仓（stop_loss：越过止损）'), 'HYPE 平仓（止损：越过止损）');
+assert.equal(human('Jev 超时（>3000ms）'), 'Jev 超时（>3000ms）');
+"""
+    )
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[-3000:]

@@ -949,8 +949,9 @@ class HbExecutorAdapter:
 
         ``ledger`` is the ledger stop, ``hosted`` every stop-side hosted leg live on the exchange
         (fixed, trailing, tightened or the lifeboat leg), ``trailing`` the program's activated
-        trailing stop even before its leg is replaced, ``lifeboat`` the legacy lifeboat order
-        while active. Empty for an unknown position.
+        trailing stop even before its leg is replaced, ``native_trailing`` the locally computed
+        price of a live exchange trailing order once activated (Binance does not report it),
+        ``lifeboat`` the legacy lifeboat order while active. Empty for an unknown position.
 
         The opposite-card target (``tightened_stop_price``) counts only once its leg is live:
         it is placed away from Demo's mark, not mainnet's, and as a bare target it could close a
@@ -977,7 +978,7 @@ class HbExecutorAdapter:
             leg.kind == "trailing_stop" and live_leg(leg) for leg in state.legs
         ):
             # 币安不报交易所移动止损的当前价：用本地按同一规则推算的
-            out.append(("trailing", state.native_stop_price))
+            out.append(("native_trailing", state.native_stop_price))
         return out
 
     def paper_stop_since(self, position_id: str) -> datetime | None:
