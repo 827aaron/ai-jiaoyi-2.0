@@ -63,6 +63,7 @@ from jiaoyi.slow.card_flip import (
     REASON_MAX,
     FlipBook,
     FlipCandidate,
+    card_direction,
     held_key,
 )
 from jiaoyi.slow.card_outlook import with_board
@@ -510,8 +511,8 @@ class BattleCardCommander:
         c = self._card
         if c is None:
             return None
-        # 整张卡到期了：持仓币的指令还留着，只是不开新仓
-        c = self._pool_view(c, now) if c.is_valid(now) else self._held_view(c, now)
+        # 整张卡到期了：没到自己有效期的币（临时会翻了方向的）照常；持仓币的指令留着，只是不开新仓
+        c = self._pool_view(c, now) if self._alive(c, now) else self._held_view(c, now)
         if c is None:
             return None
         c = self._mask_us_closed(self._mask_stale(c, now), now)
@@ -562,9 +563,16 @@ class BattleCardCommander:
         让预测员先算，不用等十几分钟后作战卡出来。"""
         self._on_picks = callback
 
+    @staticmethod
+    def _alive(card: BattleCard, now: datetime) -> bool:
+        """卡上还有没到期的指令：翻了方向的币有效期从自己开会那一刻起算，可以比整张卡晚到期。"""
+        ends = [card.expires_at, *(s.expires_at for s in card.symbols if s.expires_at is not None)]
+        return card.created_at <= now < max(ends)
+
     def _pool_view(self, card: BattleCard, now: datetime) -> BattleCard | None:
         """指令池：每个币的指令按自己的有效期到点消失；持仓币的指令不消失，只是不再开新仓，
-        直到被新结论替换。池空了返回 None。"""
+        直到被新结论替换。池空了返回 None。整张卡已到期、还有币没到期时，有效期和 ``_held_view``
+        一样只往后顶一分钟：快环照常用这些币，整轮照样判「到点了」。"""
         kept: list[CardSymbol] = []
         for s in card.symbols:
             if now < (s.expires_at or card.expires_at):
@@ -573,6 +581,10 @@ class BattleCardCommander:
                 kept.append(self._watch_only(s))
         if not kept:
             return None
+        if now >= card.expires_at:
+            return card.model_copy(
+                update={"symbols": kept, "expires_at": now + timedelta(minutes=1)}
+            )
         if kept == card.symbols:
             return card
         return card.model_copy(update={"symbols": kept})
@@ -618,6 +630,33 @@ class BattleCardCommander:
         if target <= cs.expires_at:
             return cs
         return cs.model_copy(update={"expires_at": target})
+
+    def _flip_expiry(self, before: CardSymbol | None, after: CardSymbol) -> CardSymbol:
+        """临时会 / 管家助手换上的指令按卡的到期时间走（不改整轮节奏），但两种情况例外：
+        方向变了（做多 ↔ 做空、中性或卡上没有 → 做多 / 做空），从这场会的 ``issued_at`` 起给满一整轮
+        有效期，不然刚翻的方向几分钟后就随整张卡到期；方向没变（同向再确认、会判观望·卡保留、
+        候选期）不重置，只是不比卡上那条更早到期。转中性不重置：中性不开仓。"""
+        new = card_direction(after)
+        old = card_direction(before) if before is not None else "neutral"
+        if new != old and new != "neutral" and after.issued_at is not None:
+            target = after.issued_at + self._ttl_now()
+        elif new == old and before is not None and before.expires_at is not None:
+            target = before.expires_at
+        else:
+            return after
+        if after.expires_at is not None and target <= after.expires_at:
+            return after
+        return after.model_copy(update={"expires_at": target})
+
+    def _cap_to_regime(self, cs: CardSymbol, prev: BattleCard | None) -> CardSymbol:
+        """整轮沿用旧指令时：翻向后有效期超过上一张卡的那条，研究时的大盘方向和现在不同（或不知道）
+        就压回上一张卡的到期，和 ``_extend_reused`` 同一条规则：不能比它所针对的大盘方向活得久。"""
+        if prev is None or cs.expires_at is None or cs.expires_at <= prev.expires_at:
+            return cs
+        now_view = self.latest_market_view
+        if now_view is not None and self._source_direction(cs) == now_view.regime_direction:
+            return cs
+        return cs.model_copy(update={"expires_at": prev.expires_at})
 
     def _source_direction(self, cs: CardSymbol) -> Direction | None:
         vid = cs.source_market_view_id
@@ -753,7 +792,7 @@ class BattleCardCommander:
             return False
         self._flips.discard(symbol)
         self._flip_fresh.pop(symbol, None)
-        self._merge_symbol(card, fresh, "event:keeper_assistant_flip")
+        self._merge_symbol(card, self._flip_expiry(in_force, fresh), "event:keeper_assistant_flip")
         self._write(
             symbol=symbol,
             outcome=Outcome.INFO,
@@ -1750,7 +1789,7 @@ class BattleCardCommander:
             and now >= (in_force.expires_at or card.expires_at)
         ):
             in_force = None  # expired and unheld: _pool_view already hides it, as a round drops it
-        new = self._flip_gate(symbol, fresh, in_force, now)
+        new = self._flip_expiry(in_force, self._flip_gate(symbol, fresh, in_force, now))
         symbols = [new if s.symbol == symbol else s for s in card.symbols]
         if all(s.symbol != symbol for s in card.symbols):
             symbols.append(new)
@@ -1776,7 +1815,9 @@ class BattleCardCommander:
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
-            self._journal.record(self._raw_view(card, fresh), [symbol], {symbol: res.setup})
+            # 上卡的就是这场结论（不是候选期留着的那条）：按它的有效期复盘
+            raw = new if new.meeting_id == fresh.meeting_id else fresh
+            self._journal.record(self._raw_view(card, raw), [symbol], {symbol: res.setup})
         self._record_card(card, started, cost=0.0)  # 临时会没有总盘会这一份
         if nomination is not None:
             self._write(
@@ -3010,6 +3051,8 @@ class BattleCardCommander:
         for e in chosen:
             last = self._last_meeting.get(e.symbol)
             old = prev_card.for_symbol(e.symbol) if prev_card is not None else None
+            if old is not None:
+                old = self._cap_to_regime(old, prev_card)
             if (
                 prev_card is not None
                 and old is not None
@@ -3092,11 +3135,13 @@ class BattleCardCommander:
         round_expiry = now + self._ttl_now()
         symbols: dict[str, CardSymbol] = {}
         for old in prev.symbols if prev is not None else []:
+            old = self._cap_to_regime(old, prev)
             exp = old.expires_at or (prev.expires_at if prev is not None else now)
             if old.symbol not in in_pool and old.symbol not in self._held:
                 continue
             if now < exp:
-                # event conclusions carry the expiry of the card in force when they merged
+                # event conclusions carry the expiry of the card in force when they merged; a
+                # flipped one carries a full TTL from its own meeting (_flip_expiry)
                 kept = clamp_to_risk(old, self._risk, self._stop)
                 symbols[old.symbol] = self._extend_reused(kept, round_expiry)
             elif old.symbol in self._held:
@@ -3519,7 +3564,7 @@ class BattleCardCommander:
             logger.info("存档的作战卡档位 / ATR 周期与现在不一致，不恢复")
             return  # 出卡时的档位 / ATR 周期和现在不一致：卡里的止损倍数不能直接用，等下一轮会
         now = self._clock()
-        if not card.is_valid(now):
+        if not self._alive(card, now):
             logger.info("存档的作战卡已过期，不恢复")
             return
         # 重启前后可能改过硬上限或切了档位：按现在的配置再夹一遍，免得风控员整个拒掉
