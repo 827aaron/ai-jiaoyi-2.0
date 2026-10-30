@@ -1214,6 +1214,30 @@ class FastLoopConfig(Contract):
         "立刻暂停开旧方向的新仓，大盘台回来就恢复；暂停期间这个币出了旧方向的信号就拒掉、给它"
         "申请一场临时会，会上还是旧方向就放出来。持仓不动，另一个方向不受影响。默认关。",
     )
+    # ---- 大盘移动止损（方向闸门，2026-10-30，core/market_trail.py）
+    signal_market_trail_on: bool = Field(
+        default=False,
+        description="大盘移动止损：参照（BTC 等）4 小时涨跌的 z 分数出了 ±1 就开一段跌段 / 涨段，"
+        "从段内极值反向走了 k 倍 15 分钟 ATR 就锁住这个方向的新仓（所有币），同方向再创新"
+        "极值或开了新段就放行。持仓不动，另一个方向不受影响。默认关。",
+    )
+    signal_market_trail_k: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=5.0,
+        allow_inf_nan=False,
+        description="大盘移动止损：从段内极值反向走多少倍 15 分钟 ATR 就锁住。默认 1.0。",
+    )
+    signal_market_trail_ref: Literal["btc", "eth", "btc_eth"] = Field(
+        default="btc",
+        description="大盘移动止损看哪条参照：btc = BTC 永续；eth = ETH 永续；btc_eth = 两者对数价"
+        "的平均（等权 2 币指数）。没选中的两条和山寨篮子照样算，只写影子记录。",
+    )
+    signal_market_trail_shadow: bool = Field(
+        default=False,
+        description="大盘移动止损的影子记录：btc / eth / btc_eth / 山寨篮子每分钟锁没锁写进 "
+        "data/market_trail_shadow/<日期>.jsonl，不影响开仓。默认关。",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> FastLoopConfig:

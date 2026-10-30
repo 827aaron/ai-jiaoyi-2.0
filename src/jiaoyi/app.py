@@ -62,6 +62,7 @@ from jiaoyi.core.hotconfig import (
     patch_inplace,
     restart_fingerprint,
 )
+from jiaoyi.core.market_trail import MarketTrail
 from jiaoyi.core.observations import KeeperObservationCollector
 from jiaoyi.core.pool_overrides import (
     POOL_OVERRIDES_FILE,
@@ -973,6 +974,14 @@ class App:
             recorder=self.recorders.get(Role.RISK_GUARD),
             initial_direction=latest.get("direction"),
         )
+        # 大盘移动止损：参照从段内极值反向走 k 倍 ATR 就锁这个方向的新仓（core/market_trail.py）
+        self.market_trail = MarketTrail(
+            app_cfg.fast_loop,
+            Path(app_cfg.data_dir),
+            tz=risk_cfg.day_reset_tz,
+            recorder=self.recorders.get(Role.RISK_GUARD),
+            clock=self.clock,
+        )
         self.pool: SymbolPool | None = None
         self.started = False
         # 选币页的固定 / 拉黑 / 手动加入（data/pool_overrides.json）；读不出按没有覆盖项、启动时告警
@@ -1468,6 +1477,8 @@ class App:
             if role is Role.KEEPER and self.keeper_jev is not None:
                 health, headline = self._keeper_jev_lamp(health, headline)
             extra: dict[str, Any] | None = None
+            if role is Role.RISK_GUARD and self.app_cfg.fast_loop.signal_market_trail_on:
+                headline = self.market_trail.status_line(now)
             if isinstance(module, _SentinelDetail):  # 为什么没信号：每币一行
                 headline = module.brief(now)
                 extra = {
