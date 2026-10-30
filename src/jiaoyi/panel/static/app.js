@@ -1477,7 +1477,7 @@ function recentSection(d) {
   const body = list.length
     ? `<div class="tw"><table class="dense ptab"><thead><tr>${TRADE_HEAD}</tr></thead><tbody>${list.map((t) => tradeRow(t, when)).join("")}</tbody>${tradeTotals(list)}</table></div>`
     : '<div class="dim small">今天还没有平仓。</div>';
-  return `<section class="card mt recent"><div class="ch"><h2>今天平掉的</h2><span class="r">今天 ${total} 笔${more} · 最新在上 · 点一行展开 · <a href="#history">全部记录 →</a></span></div>${body}</section>`;
+  return `<section class="card mt recent"><div class="ch"><h2>今天平掉的</h2><span class="r">今天 ${total} 笔${more} · 最新在上 · 点币名展开 · <a href="#history">全部记录 →</a></span></div>${body}</section>`;
 }
 // 持仓页按交易所「仓位」页的排法：一笔一行，点币名在下面展开明细（点行里别处只换走势图）；展开了哪几笔记在这台浏览器里，2 秒刷新不收起
 S.posOpen = new Set((() => { try { return JSON.parse(localStorage.getItem("pos-open") || "[]"); } catch (err) { return []; } })());
@@ -2634,7 +2634,7 @@ function tradeRow(t, when, tail = "") {
   const extra = (n) => '<td class="r num dim">—</td>'.repeat(n);
   let main;
   if (t.unfilled) {
-    main = `<tr class="click dimrow ${open ? "open" : ""}" ${act}><td class="num nowrap">${when(t.closed_at)}</td><td class="nowrap">${sym}</td><td class="r num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="r num">—</td><td><span class="chip-s p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>${extra(4)}${tail}</tr>`;
+    main = `<tr class="dimrow ${open ? "open" : ""}"><td class="num nowrap">${when(t.closed_at)}</td><td class="nowrap click pos-toggle" ${act} title="点币名展开 / 收起明细">${sym}</td><td class="r num" title="计划价，没成交">${price(t.entry_price, t.symbol)}</td><td class="r num">—</td><td><span class="chip-s p-warn" title="币安上没有成交（比如保证金不够、hummingbot 没下单），不算进任何统计">未成交</span></td>${extra(4)}${tail}</tr>`;
   } else {
     const shut = closeTime(t);
     const gross = t.pnl_usdt + t.fees_usdt;
@@ -2642,7 +2642,7 @@ function tradeRow(t, when, tail = "") {
     const money3 = t.pnl_missing
       ? `<td class="r warn" colspan="3" title="平仓价还没按币安成交回填，执行器也没报盈亏和手续费：多半是没取到数，不是真的 0">没取到盈亏</td>`
       : `<td class="r num ${cls(gross)}">${signed(gross, 2)}</td><td class="r num dim">−${money(t.fees_usdt, 2)}</td><td class="r num ${cls(t.pnl_usdt)}"><b>${signed(t.pnl_usdt, 2)}</b></td>`;
-    main = `<tr class="click ${open ? "open" : ""}" ${act}><td class="num nowrap">${when(shut)}</td><td class="nowrap">${sym}</td><td class="r num">${price(t.entry_price, t.symbol)}</td><td class="r num">${exit}${t.paper_stop_price != null ? ' <span class="chip-s" title="按主网价越过止损记的模拟成交，展开看 Demo 实际成交">模拟</span>' : ""}</td>
+    main = `<tr class="${open ? "open" : ""}"><td class="num nowrap">${when(shut)}</td><td class="nowrap click pos-toggle" ${act} title="点币名展开 / 收起明细">${sym}</td><td class="r num">${price(t.entry_price, t.symbol)}</td><td class="r num">${exit}${t.paper_stop_price != null ? ' <span class="chip-s" title="按主网价越过止损记的模拟成交，展开看 Demo 实际成交">模拟</span>' : ""}</td>
       <td><span class="chip-s ${REASON_KIND[t.close_reason] || ""}">${esc(reasonOf(t))}</span></td><td class="r num nowrap">${durShort(new Date(shut) - new Date(t.opened_at))}</td>${money3}${tail}</tr>`;
   }
   return main + (open ? `<tr class="pdet-row"><td colspan="${TRADE_COLS}"><div class="pdet">${tradeDetail(t)}</div></td></tr>` : "");
@@ -2704,7 +2704,7 @@ P.history = () => {
       ${d.test_trades ? `<button class="chip ${S.tests ? "on" : ""}" ${clickable("tests")} title="冒烟测试、手动下的单，不是机器人自己的交易">${S.tests ? "☑" : "☐"} 含测试单（${d.test_trades} 笔）</button>` : ""}
       <button class="btn b-sm" ${clickable("csv")} ${d.rows.length ? "" : "disabled"}>导出 CSV</button></div>
     <div class="tiles t5">${tiles.map(([v, l, c]) => `<div class="tile"><small>${l}</small><b class="${c || ""}">${v}</b></div>`).join("")}</div>
-    <section class="card mt"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点一行展开开平时间、止损止盈、最高浮盈和整条链</span></div>
+    <section class="card mt"><div class="ch"><h2>交易记录</h2><span class="r">最新在上 · 点币名展开开平时间、止损止盈、最高浮盈和整条链</span></div>
       ${d.rows.length ? `<div class="tw scroll tall"><table class="dense ptab"><thead><tr>${TRADE_HEAD}<th class="r" title="按同一时刻的币安主网成交价重算的净利（Demo 成交价比主网好，Demo 盈亏偏乐观）">按主网价</th></tr></thead><tbody>${rows}</tbody>${tradeTotals(d.rows, 6, "<td></td>")}</table></div><div class="foot">手续费 = 开 + 平，按币安成交回填后是币安实扣；净利 = 毛利 − 手续费。资金费币安不分到单笔、AI 费也不在这里：都在「资金」页。</div>` : '<div class="dim">没有。</div>'}</section>
     <section class="card mt"><div class="ch"><h2>资金曲线</h2><span class="r">累计净盈亏，每个点是一笔平仓</span></div>
       ${d.curve.length ? '<div class="chart sm" id="hchart-host"></div>' : '<div class="empty"><b>这段时间没有平仓</b></div>'}</section>
