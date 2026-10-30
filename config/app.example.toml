@@ -218,6 +218,12 @@ patrol_held_event_on_desk_flip = false # 推荐 true：大盘台方向和持仓�
 # 大盘台从看跌 / 看涨转走（按每一轮的方向）：卡上旧方向的币立刻暂停开旧方向的新仓，大盘台回来就恢复；暂停期间出了旧方向的信号
 # 就拒掉并给那个币加开一场临时会，会上还是旧方向就放出来。持仓不动。可热更新；默认关
 signal_desk_turn_pause = false
+# 大盘移动止损（方向闸门）：参照 4 小时涨跌的 z 分数出了 ±1 开一段跌段 / 涨段，从段内极值反向走了 k 倍 15 分钟 ATR 就锁住
+# 这个方向的新仓（所有币；跌段锁空单、涨段锁多单），同方向再创新极值或开了新段就放行。持仓不动。以下均可热更新；默认关
+signal_market_trail_on = false      # 推荐 true
+signal_market_trail_k = 1.0         # 反向走几倍 ATR 锁住
+signal_market_trail_ref = "btc"     # btc / eth / btc_eth（两者对数价平均）；没选中的照样算，只写影子记录
+signal_market_trail_shadow = false  # 推荐 true：四条参照每分钟锁没锁写 data/market_trail_shadow/<日期>.jsonl，不影响开仓
 # 管家助手：有持仓的币出了反向信号（可选：价格朝不利方向穿过关键位），赚钱亏钱都算，同时问 Jev（A）和模型 B
 # 同一道是非题（持空「会上涨吗」、持多「会下跌吗」，不提仓位和原因），两个都答「是」且 p(是) ≥ min_p 才平仓。以下均可热更新
 keeper_assistant_on = false

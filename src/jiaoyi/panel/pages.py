@@ -978,9 +978,11 @@ def _role_card(role: Role, st: ModuleStatus | None, now: datetime, run: _RunInfo
         last_run_at=_opt_time(st, "last_run_at"),
         next_run_at=_opt_time(st, "next_run_at"),
         summary=_opt_str(st, "summary"),
-        # 定时任务（选币）的上次 / 下次 / 币数已经写进状态，摘要再写一遍就重复了
+        # 定时任务（选币）的上次 / 下次 / 币数已经写进状态，摘要再写一遍就重复了；风控员的
+        # 这一行是大盘移动止损的现状，不是摘要
         headline=""
-        if any(getattr(st, n, None) is not None for n in _SCHEDULE_FIELDS)
+        if role is not Role.RISK_GUARD
+        and any(getattr(st, n, None) is not None for n in _SCHEDULE_FIELDS)
         else st.headline,
         last_beat=st.ts,
         last_error=st.last_error,

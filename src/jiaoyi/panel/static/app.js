@@ -2411,6 +2411,7 @@ function tlRoleLine(r, d) {
   if (r.role === "keeper" && d.against_checks && d.against_checks.length) return [againstLine(d.against_checks[0]), "against"];
   if (r.state !== "ok") return [r.status, r.state === "bad" ? "err" : ""];
   if (r.doing) return [r.doing, "now"];
+  if (r.role === "risk_guard" && /^大盘移动止损：.+锁住中/.test(r.headline || "")) return [r.headline.replace(/^大盘移动止损：/, ""), "against"];
   if (r.role === "predictor") return [predictorText(r), ""];
   if (r.role === "alerting") return ["收所有角色的事，推给你", ""];
   return [r.summary || runLine({ last_run_at: r.last_run_at, next_run_at: r.next_run_at }) || r.headline || r.status, ""];

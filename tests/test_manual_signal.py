@@ -13,6 +13,7 @@ from jiaoyi import contracts as c
 from jiaoyi.core.commands import write_command
 from jiaoyi.core.desk_turn import DeskTurnPause
 from jiaoyi.core.hotconfig import HOT_FAST, patch_inplace
+from jiaoyi.core.market_trail import MIN_HISTORY, Leg, MarketTrail
 from jiaoyi.core.recorder import RoleRecorder
 from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.loop import Runner
@@ -171,6 +172,30 @@ async def test_recheck_reports_the_desk_turn_pause(tmp_path: Path, now: datetime
     res = await _run(r, tmp_path, now, "recheck_signal")
     assert res["detail"] == "现在仍拒绝：大盘台 13:30 看涨→中性，暂停新多单"
     assert ex.opened == []
+
+
+def _lock_longs(r: Runner, tmp_path: Path, since: datetime) -> None:
+    patch_inplace(
+        r.app.app_cfg.fast_loop, FAST.model_copy(update={"signal_market_trail_on": True}), HOT_FAST
+    )
+    trail = MarketTrail(r.app.app_cfg.fast_loop, tmp_path / "trail", seed=False)
+    s = trail.state("btc")
+    s.count, s.atr = MIN_HISTORY + 1, 0.001
+    s.xs.append(11.0011)
+    s.leg = Leg(1, 11.0022, int(since.timestamp()), True, int(since.timestamp()))
+    r.app.market_trail = trail
+
+
+async def test_recheck_reports_the_market_trail_lock(tmp_path: Path, now: datetime) -> None:
+    r, ex, risk, _ = await _runner(tmp_path, now)
+    _lock_longs(r, tmp_path, now - timedelta(minutes=3))
+    res = await _run(r, tmp_path, now, "recheck_signal")
+    assert res["detail"] == (
+        "现在仍拒绝：大盘移动止损：BTC 从涨段高点回落 1.1 ATR，暂停新多单（锁住 3 分钟）"
+    )
+    assert ex.opened == [] and risk.manual == []
+    res = await _run(r, tmp_path, now, "release_signal", 2)
+    assert "已人工放行开仓" in res["detail"] and len(ex.opened) == 1
 
 
 async def test_release_opens_and_alerts(tmp_path: Path, now: datetime) -> None:
