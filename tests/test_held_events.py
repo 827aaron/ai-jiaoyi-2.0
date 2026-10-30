@@ -1,4 +1,4 @@
-"""持仓币加开临时会：逆向到 0.5R、大盘台翻向且这笔仓在亏。"""
+"""持仓币加开临时会：反向信号且已亏 0.5R、大盘台翻向且这笔仓在亏。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from typing import Any
 
 from jiaoyi import contracts as c
 from jiaoyi.core.held_events import (
-    ADVERSE_TRIGGER,
     DESK_TRIGGER,
     HELD_EVENTS_FILE,
+    REVERSE_TRIGGER,
     HeldEventDesk,
 )
 from jiaoyi.core.hotconfig import HOT_FAST, patch_inplace
@@ -40,9 +40,24 @@ def pos(now: datetime, **over: Any) -> c.PositionRecord:
     return c.PositionRecord.model_validate(data)
 
 
+def sig(now: datetime, side: str = "short", symbol: str = "AAUSDT") -> c.AgainstSignalEvent:
+    return c.AgainstSignalEvent.model_validate(
+        {
+            "symbol": symbol,
+            "ts": now,
+            "kind": "volume_surge",
+            "side": side,
+            "desc": "1 分钟量 5.0 倍",
+            "price": 100.0,
+            "vol_ratio": 5.0,
+            "buy_ratio": 0.2,
+        }
+    )
+
+
 def view(now: datetime, direction: str, source: str = "market_desk") -> c.MarketView:
     return c.MarketView(
-        market_view_id=f"mv-{direction}",
+        market_view_id=f"mv-{direction}-{now:%H%M}",
         version=2,
         observed_at=now,
         regime="大盘",
@@ -71,7 +86,19 @@ class Log:
         pass
 
 
-def desk(tmp_path: Path, asked: Asked, **cfg: Any) -> tuple[HeldEventDesk, c.FastLoopConfig, Log]:
+class Met:
+    """``met_since``：哪些币在什么时间开过会。"""
+
+    def __init__(self) -> None:
+        self.at: dict[str, datetime] = {}
+
+    def __call__(self, symbol: str, since: datetime) -> bool:
+        return symbol in self.at and self.at[symbol] >= since
+
+
+def desk(
+    tmp_path: Path, asked: Asked, met: Met | None = None, **cfg: Any
+) -> tuple[HeldEventDesk, c.FastLoopConfig, Log]:
     fast = h.FAST.model_copy(update=cfg)
     log = Log()
     d = HeldEventDesk(
@@ -80,6 +107,7 @@ def desk(tmp_path: Path, asked: Asked, **cfg: Any) -> tuple[HeldEventDesk, c.Fas
         fee_bps=lambda: 5.0,
         request_event=asked,
         meeting_ok=lambda t: asked.ok,
+        met_since=met,
         recorder=RoleRecorder(c.Role.PATROL, log),
     )
     return d, fast, log
@@ -89,86 +117,87 @@ def summaries(log: Log) -> list[str]:
     return [r.summary for r in log.records]
 
 
-# ------------------------------------------------------------------ 逆向 R
+# ------------------------------------------------------------------ 反向信号且已亏
 
 
-def test_long_fires_at_exactly_half_r_once(tmp_path: Path, now: datetime) -> None:
+def test_reverse_signal_on_long_fires_at_exactly_half_r_net_of_fees(
+    tmp_path: Path, now: datetime
+) -> None:
     asked = Asked()
     d, _, log = desk(tmp_path, asked)
     p = pos(now)
-    d.on_mark("AAUSDT", 99.02, [p], now)  # 0.49R
+    d.on_mark("AAUSDT", 99.12, [], now)  # 毛 −0.88%，扣费 −0.98% = 0.49R
+    d.on_reverse(sig(now), [p], now)
     assert asked.calls == []
-    d.on_mark("AAUSDT", 99.0, [p], now)  # 0.5R
-    d.on_mark("AAUSDT", 98.5, [p], now)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER)]
-    assert summaries(log) == ["AAUSDT 持仓逆向 0.5R，加开临时会"]
+    d.on_mark("AAUSDT", 99.10000000000001, [], now)  # 扣费 −1.0% = 0.5R（浮点算出 0.49999…）
+    d.on_reverse(sig(now), [p], now)
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
+    assert summaries(log) == ["AAUSDT 反向信号且持仓已亏 0.50R，加开临时会"]
 
 
-def test_short_fires_at_exactly_half_r(tmp_path: Path, now: datetime) -> None:
+def test_reverse_signal_on_short_fires_at_half_r(tmp_path: Path, now: datetime) -> None:
     asked = Asked()
     d, _, _ = desk(tmp_path, asked)
     p = pos(now, side="short", stop_loss_price=102.0)
-    d.on_mark("AAUSDT", 100.98, [p], now)
+    d.on_mark("AAUSDT", 100.88, [], now)
+    d.on_reverse(sig(now, side="long"), [p], now)
     assert asked.calls == []
-    d.on_mark("AAUSDT", 101.0, [p], now)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER)]
+    d.on_mark("AAUSDT", 100.9, [], now)
+    d.on_reverse(sig(now, side="long"), [p], now)
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
 
 
-def test_r_is_the_stop_distance_fixed_at_open(tmp_path: Path, now: datetime) -> None:
+def test_reverse_signal_ignores_winning_same_side_and_unknown_r(
+    tmp_path: Path, now: datetime
+) -> None:
     asked = Asked()
     d, _, _ = desk(tmp_path, asked)
-    p = pos(now, stop_loss_price=99.9)  # 移动止损收紧过，R 仍按开仓时的 2%
-    d.on_mark("AAUSDT", 99.5, [p], now)
+    d.on_mark("AAUSDT", 101.0, [], now)
+    d.on_reverse(sig(now), [pos(now)], now)  # 在赚
+    d.on_mark("AAUSDT", 98.5, [], now)
+    d.on_reverse(sig(now, side="long"), [pos(now)], now)  # 信号和持仓同向
+    d.on_reverse(sig(now), [pos(now, stop_loss_pct=None)], now)  # 没有开仓时的 R
+    d.on_reverse(sig(now), [pos(now, status="closing")], now)
     assert asked.calls == []
-    d.on_mark("AAUSDT", 99.0, [p], now)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER)]
+    d.on_reverse(sig(now), [pos(now)], now)
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
 
 
-def test_adverse_does_not_refire_after_restart(tmp_path: Path, now: datetime) -> None:
+def test_reverse_signal_uses_signal_price_without_a_mark(tmp_path: Path, now: datetime) -> None:
     asked = Asked()
     d, _, _ = desk(tmp_path, asked)
-    p = pos(now)
-    d.on_mark("AAUSDT", 99.0, [p], now)
-    again, _, _ = desk(tmp_path, asked)
-    again.on_mark("AAUSDT", 98.9, [p], now)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER)]
-    other = pos(now, position_id="pos-2")
-    again.on_mark("AAUSDT", 98.9, [p, other], now)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER), ("AAUSDT", ADVERSE_TRIGGER)]
+    s = sig(now).model_copy(update={"price": 99.1})
+    d.on_reverse(s, [pos(now)], now)
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
 
 
-def test_second_level_fires_once_more(tmp_path: Path, now: datetime) -> None:
+def test_reverse_signal_asks_again_on_each_later_signal(tmp_path: Path, now: datetime) -> None:
     asked = Asked()
-    d, _, log = desk(tmp_path, asked, patrol_held_event_adverse_r2=0.75)
-    p = pos(now)
-    d.on_mark("AAUSDT", 99.0, [p], now)
-    d.on_mark("AAUSDT", 98.52, [p], now)  # 0.74R
-    assert len(asked.calls) == 1
-    d.on_mark("AAUSDT", 98.5, [p], now)
-    d.on_mark("AAUSDT", 98.4, [p], now)
-    assert len(asked.calls) == 2
-    assert summaries(log)[-1] == "AAUSDT 持仓逆向 0.75R，加开临时会"
+    d, _, _ = desk(tmp_path, asked)
+    d.on_mark("AAUSDT", 99.0, [], now)
+    two = [pos(now), pos(now, position_id="pos-2")]
+    d.on_reverse(sig(now), two, now)
+    d.on_reverse(sig(now + timedelta(minutes=5)), two, now + timedelta(minutes=5))
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)] * 2  # 一个信号一个币只申请一次
 
 
-def test_adverse_off_and_skips_unopened(tmp_path: Path, now: datetime) -> None:
+def test_reverse_loss_off_and_meeting_closed(tmp_path: Path, now: datetime) -> None:
     asked = Asked()
-    d, fast, _ = desk(tmp_path, asked, patrol_held_event_adverse_r=0.0)
-    d.on_mark("AAUSDT", 90.0, [pos(now)], now)
+    d, fast, _ = desk(tmp_path, asked, patrol_held_event_loss_r=0.0)
+    d.on_mark("AAUSDT", 90.0, [], now)
+    d.on_reverse(sig(now), [pos(now)], now)
     assert asked.calls == []
     patch_inplace(fast, h.FAST, HOT_FAST)  # 热生效：就地改的对象
-    d.on_mark("AAUSDT", 90.0, [pos(now, status="opening"), pos(now, symbol="BBUSDT")], now)
-    assert asked.calls == []
-    d.on_mark("AAUSDT", 90.0, [pos(now)], now)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER)]
+    d.on_reverse(sig(now), [pos(now)], now)
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
 
-
-def test_meeting_closed_only_records(tmp_path: Path, now: datetime) -> None:
-    asked = Asked(ok=False)
-    d, _, log = desk(tmp_path, asked)
-    d.on_mark("AAUSDT", 99.0, [pos(now)], now)
-    assert asked.calls == []
+    closed = Asked(ok=False)
+    d2, _, log = desk(tmp_path / "b", closed)
+    d2.on_mark("AAUSDT", 99.0, [], now)
+    d2.on_reverse(sig(now), [pos(now)], now)
+    assert closed.calls == []
     [rec] = log.records
-    assert rec.summary == "AAUSDT 持仓逆向 0.5R；临时会没开，只记录"
+    assert rec.summary == "AAUSDT 反向信号且持仓已亏 0.55R；临时会没开，只记录"
     assert rec.outcome is c.Outcome.INFO
 
 
@@ -192,28 +221,65 @@ def test_desk_flip_only_for_losing_disagreeing_coins(tmp_path: Path, now: dateti
 def test_desk_flip_counts_round_trip_fees(tmp_path: Path, now: datetime) -> None:
     asked = Asked()
     d, _, _ = desk(tmp_path, asked)
-    up_a_bit = pos(now, side="short", stop_loss_price=102.0)
-    d.on_market(view(now, "看涨"), [up_a_bit], now, price=lambda s: 99.95)  # 毛 +0.05%，净 −0.05%
+    short = pos(now, side="short", stop_loss_price=102.0)
+    d.on_market(view(now, "看涨"), [short], now, price=lambda s: 99.95)  # 毛 +0.05%，净 −0.05%
     assert asked.calls == [("AAUSDT", DESK_TRIGGER)]
-    d2, _, _ = desk(tmp_path / "b", Asked())
     ok = Asked()
-    d2._request_event = ok
-    d2.on_market(view(now, "看涨"), [up_a_bit], now, price=lambda s: 99.85)  # 净 +0.05%
+    d2, _, _ = desk(tmp_path / "b", ok)
+    d2.on_market(view(now, "看涨"), [short], now, price=lambda s: 99.85)  # 净 +0.05%
     assert ok.calls == []
 
 
-def test_desk_flip_once_per_direction_and_rearms(tmp_path: Path, now: datetime) -> None:
-    asked = Asked()
-    d, _, _ = desk(tmp_path, asked)
+def test_desk_flip_keeps_asking_until_the_coin_meets(tmp_path: Path, now: datetime) -> None:
+    asked, met = Asked(), Met()
+    d, _, log = desk(tmp_path, asked, met)
     p = pos(now)
-    px = lambda s: 99.0  # noqa: E731
-    d.on_market(view(now, "看跌"), [p], now, price=px)
-    restarted, _, _ = desk(tmp_path, asked)
-    restarted.on_market(view(now, "看跌"), [p], now, price=px)
-    assert len(asked.calls) == 1
-    restarted.on_market(view(now, "中性"), [p], now, price=px)
-    restarted.on_market(view(now, "看跌"), [p], now, price=px)
-    assert len(asked.calls) == 2
+    d.on_market(view(now, "看跌"), [], now)
+    d.on_mark("AAUSDT", 99.0, [p], now)
+    d.on_mark("AAUSDT", 99.0, [p], now + timedelta(minutes=31))  # 排队过期了也再申请
+    assert asked.calls == [("AAUSDT", DESK_TRIGGER)] * 2
+    assert len(log.records) == 1  # 决策记录只写一条
+    met.at["AAUSDT"] = now - timedelta(minutes=1)  # 翻向前开的会不算
+    d.on_mark("AAUSDT", 99.0, [p], now)
+    assert len(asked.calls) == 3
+    met.at["AAUSDT"] = now + timedelta(minutes=40)
+    d.on_mark("AAUSDT", 99.0, [p], now + timedelta(minutes=41))
+    assert len(asked.calls) == 3
+
+
+def test_desk_flip_turning_losing_later_still_asks(tmp_path: Path, now: datetime) -> None:
+    asked = Asked()
+    d, _, _ = desk(tmp_path, asked, Met())
+    p = pos(now)
+    d.on_mark("AAUSDT", 101.0, [p], now)
+    d.on_market(view(now, "看跌"), [p], now)
+    assert asked.calls == []
+    d.on_mark("AAUSDT", 99.5, [p], now + timedelta(minutes=10))
+    assert asked.calls == [("AAUSDT", DESK_TRIGGER)]
+
+
+def test_desk_direction_survives_restart_and_rearms_on_next_flip(
+    tmp_path: Path, now: datetime
+) -> None:
+    asked, met = Asked(), Met()
+    d, _, _ = desk(tmp_path, asked, met)
+    d.on_market(view(now, "看跌"), [], now)
+    met.at["AAUSDT"] = now + timedelta(minutes=5)
+    restarted, _, log = desk(tmp_path, asked, met)
+    p = pos(now)
+    restarted.on_mark("AAUSDT", 99.0, [p], now + timedelta(minutes=6))
+    assert asked.calls == []  # 翻向（重启前）以后已开过会
+    restarted.on_market(view(now + timedelta(minutes=7), "看跌"), [p], now)  # 同方向：不算翻向
+    assert asked.calls == []
+    later = now + timedelta(minutes=20)
+    restarted.on_market(view(later - timedelta(minutes=5), "中性"), [p], later)
+    restarted.on_market(view(later, "看跌"), [p], later)
+    assert asked.calls == [("AAUSDT", DESK_TRIGGER)]
+    assert len(log.records) == 1
+    again = later + timedelta(minutes=30)
+    restarted.on_market(view(again - timedelta(minutes=5), "中性"), [p], again)
+    restarted.on_market(view(again, "看跌"), [p], again)
+    assert len(log.records) == 2  # 新的一次翻向再写一条
 
 
 def test_desk_flip_off_and_other_sources(tmp_path: Path, now: datetime) -> None:
@@ -223,25 +289,11 @@ def test_desk_flip_off_and_other_sources(tmp_path: Path, now: datetime) -> None:
     d.on_market(view(now, "看跌"), [p], now, price=lambda s: 99.0)
     assert asked.calls == []
     patch_inplace(fast, h.FAST, HOT_FAST)
-    d.on_market(view(now, "看跌", source="market_only"), [p], now, price=lambda s: 99.0)
+    other, _, _ = desk(tmp_path / "b", asked)
+    other.on_market(view(now, "看跌", source="market_only"), [p], now, price=lambda s: 99.0)
     assert asked.calls == []
-    d.on_market(view(now, "看跌"), [p], now, price=lambda s: 99.0)
+    d.on_mark("AAUSDT", 99.0, [p], now)  # 开关打开后，已记下的翻向照样认
     assert asked.calls == [("AAUSDT", DESK_TRIGGER)]
-
-
-def test_closed_positions_are_dropped_from_state(tmp_path: Path, now: datetime) -> None:
-    asked = Asked()
-    d, _, _ = desk(tmp_path, asked)
-    p = pos(now)
-    d.on_mark("AAUSDT", 99.0, [p], now)
-    d.forget("pos-1")
-    restarted, _, _ = desk(tmp_path, asked)
-    restarted.on_mark("AAUSDT", 99.0, [p], now)
-    assert len(asked.calls) == 2
-    restarted.on_market(view(now, "看涨"), [pos(now, status="closed")], now)
-    assert (tmp_path / HELD_EVENTS_FILE).read_text(encoding="utf-8") == (
-        '{"adverse": {}, "desk": {}}'
-    )
 
 
 # ------------------------------------------------------------------ 军师团队列
@@ -262,58 +314,70 @@ async def test_commander_takes_held_triggers_without_listing_them(
     cmd, _, clock = make(tmp_path, FakeEngine(["AAUSDT"]), now, events=rules())
     p = pool(now, entry("AAUSDT"))
     await cmd.refresh(p, "scheduled")
-    assert cmd.accepts_event(ADVERSE_TRIGGER) and cmd.accepts_event(DESK_TRIGGER)
+    assert cmd.accepts_event(REVERSE_TRIGGER) and cmd.accepts_event(DESK_TRIGGER)
     clock[0] = t = now + timedelta(minutes=30)
-    cmd.request_event("AAUSDT", ADVERSE_TRIGGER)
+    cmd.request_event("AAUSDT", REVERSE_TRIGGER)
     assert cmd.pop_event(t, p) is None  # 同币 60 分钟间隔没到
     clock[0] = t = now + timedelta(minutes=60)
-    assert cmd.pop_event(t, p) == ("AAUSDT", ADVERSE_TRIGGER)
-
-
-async def test_commander_drops_held_request_that_waits_past_expiry(
-    tmp_path: Path, now: datetime
-) -> None:
-    cmd, _, clock = make(tmp_path, FakeEngine(["AAUSDT"]), now, events=rules())
-    p = pool(now, entry("AAUSDT"))
-    await cmd.refresh(p, "scheduled")
-    clock[0] = t = now + timedelta(minutes=20)
-    cmd.request_event("AAUSDT", DESK_TRIGGER)
-    assert cmd.pop_event(t, p) is None
-    clock[0] = t = now + timedelta(minutes=60)
-    assert cmd.pop_event(t, p) is None  # 排队 30 分钟没轮到就丢
+    assert cmd.pop_event(t, p) == ("AAUSDT", REVERSE_TRIGGER)
 
     off, _, _ = make(tmp_path / "off", FakeEngine(["AAUSDT"]), now, events=rules(enabled=False))
-    assert not off.accepts_event(ADVERSE_TRIGGER)
+    assert not off.accepts_event(REVERSE_TRIGGER)
 
 
-async def test_commander_dedupes_with_key_level_request(tmp_path: Path, now: datetime) -> None:
+async def test_commander_one_meeting_covers_all_held_reasons(tmp_path: Path, now: datetime) -> None:
     cmd, _, clock = make(tmp_path, FakeEngine(["AAUSDT"]), now, events=rules())
     p = pool(now, entry("AAUSDT"))
     await cmd.refresh(p, "scheduled")
     clock[0] = t = now + timedelta(minutes=70)
     assert cmd.refresh_reason(t, p, {"AAUSDT": 101.0}) is None  # 穿关键位排了一场
+    cmd.request_event("AAUSDT", REVERSE_TRIGGER)
     cmd.request_event("AAUSDT", DESK_TRIGGER)
     assert cmd.pop_event(t, p) == ("AAUSDT", "key_level_break")
     await cmd.refresh_symbol(p, "AAUSDT", "key_level_break")
     assert cmd.pop_event(t, p) is None  # 同一个币只开了一场
 
 
+async def test_commander_met_since(tmp_path: Path, now: datetime) -> None:
+    cmd, _, clock = make(tmp_path, FakeEngine(["AAUSDT"]), now, events=rules())
+    p = pool(now, entry("AAUSDT"))
+    await cmd.refresh(p, "scheduled")
+    assert cmd.met_since("AAUSDT", now)
+    assert not cmd.met_since("AAUSDT", now + timedelta(seconds=1))
+    assert not cmd.met_since("BBUSDT", now - timedelta(days=1))
+    clock[0] = t = now + timedelta(minutes=70)
+    cmd.request_event("AAUSDT", DESK_TRIGGER)
+    assert cmd.claim_event(t, p) == ("AAUSDT", DESK_TRIGGER)
+    assert cmd.met_since("AAUSDT", t)  # 已派出，还没开始
+
+
 # ------------------------------------------------------------------ 主循环
 
 
-async def test_runner_feeds_mark_prices_and_desk_views(tmp_path: Path, now: datetime) -> None:
+class _Trig:
+    def __init__(self) -> None:
+        self.results: list[str] = []
+
+    def note_against_result(self, s: c.AgainstSignalEvent, result: str) -> None:
+        self.results.append(result)
+
+
+async def test_runner_feeds_marks_reverse_signals_and_desk_views(
+    tmp_path: Path, now: datetime
+) -> None:
     app = _app(tmp_path, now)
     asked = Asked()
     app.held_events = HeldEventDesk(
         app.app_cfg.fast_loop, tmp_path / HELD_EVENTS_FILE, fee_bps=lambda: 5.0, request_event=asked
     )
     r = Runner(app)
-    long_aa = pos(now)
-    long_bb = pos(now, position_id="pos-2", symbol="BBUSDT")
-    r.positions = [long_aa, long_bb]
+    r.positions = [pos(now), pos(now, position_id="pos-2", symbol="BBUSDT")]
     mark = c.MarkPrice(symbol="AAUSDT", ts=now, mark_price=99.0, funding_rate=0.0)
     await r.on_event(mark)
-    assert asked.calls == [("AAUSDT", ADVERSE_TRIGGER)]
     await r.on_event(mark.model_copy(update={"symbol": "BBUSDT", "mark_price": 99.9}))
+    r._route_against(_Trig(), sig(now), now)  # type: ignore[arg-type]
+    assert asked.calls == [("AAUSDT", REVERSE_TRIGGER)]
     r._market_published(view(now, "看跌"))
     assert asked.calls[1:] == [("AAUSDT", DESK_TRIGGER), ("BBUSDT", DESK_TRIGGER)]
+    await r.on_event(mark)
+    assert asked.calls[3:] == [("AAUSDT", DESK_TRIGGER)]

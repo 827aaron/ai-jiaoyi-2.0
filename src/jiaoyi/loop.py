@@ -778,7 +778,7 @@ class Runner:
             try:
                 held.on_mark(event.symbol, event.mark_price, self.positions, self.app.clock())
             except Exception:
-                log.exception("持仓逆向检查出错 %s", event.symbol)
+                log.exception("大盘台翻向的持仓检查出错 %s", event.symbol)
         action = self.m.patrol.check(event, self.positions)
         if action is not None:
             targets = [
@@ -975,6 +975,8 @@ class Runner:
             sig, self._ledger_positions(), self._closing, now
         )
         trigger.note_against_result(sig, ev.result)
+        if (held := self._held_events()) is not None:
+            held.on_reverse(sig, self._ledger_positions(), now)
         # 管家助手和管家急查各走各的，谁先平谁算（平仓去重在 close 里）
         for pos in self._ledger_positions():
             if pos.symbol == sig.symbol:
@@ -1967,8 +1969,6 @@ class Runner:
         if isinstance(self.m.patrol, _HasUrgent):
             self.m.patrol.urgent.discard(pos.position_id)
         self.app.against_desk.forget(pos.position_id)
-        if (held := self._held_events()) is not None:
-            held.forget(pos.position_id)
         self._assistant_ended({pos.position_id}, [], {pos.position_id: pos})
 
     def _restore_keeper_market(self) -> None:

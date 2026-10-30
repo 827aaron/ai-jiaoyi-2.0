@@ -1166,6 +1166,13 @@ class BattleCardCommander:
         if self._events.enabled:
             self._queue(symbol, trigger, self._clock())
 
+    def met_since(self, symbol: str, at: datetime) -> bool:
+        """这个币在 ``at`` 之后开始过会（含开失败的临时会），或此刻正在开 / 已派出。"""
+        if symbol in self._symbol_inflight | self._event_claimed | (self._round_meeting or set()):
+            return True
+        starts = (self._last_meeting.get(symbol), self._event_last.get(symbol))
+        return any(t is not None and t >= at for t in starts)
+
     def set_market_review_enabled(self, enabled: Callable[[], bool]) -> None:
         self._market_review_enabled = enabled
 

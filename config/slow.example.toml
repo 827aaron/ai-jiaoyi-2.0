@@ -108,7 +108,7 @@ max_retries = 6
 # min_refresh_gap_min = 120       # 两轮开会的最小间隔（分钟），突破 / 新入池也要等；档位默认 = 档位分钟数（2h 档 120）
 # event_meeting_enabled = true    # 临时会：出了事件只给那一个币补开一场（2h 起默认开，15m–1h 关）
 # event_triggers = ["key_level_break", "move_since_card", "new_head_symbol"]  # 另有 predictor_against_card / signal_against_card / news_high_impact / stale_card_on_entry
-# 持仓币逆向 0.5R / 大盘台翻向的临时会不用写进 event_triggers：开关在 app.toml [fast_loop] patrol_held_event_*
+# 持仓币「反向信号且已亏 0.5R」/「大盘台翻向且在亏」的临时会不用写进 event_triggers：开关在 app.toml [fast_loop] patrol_held_event_*
 # event_symbol_gap_min = 60       # 同一个币两场会（含正式会）至少隔多久；0 = 不限（内部仍隔 5 分钟，失败的会这个币另隔 15 分钟）
 # event_max_per_day = 12          # 每个交易日最多几场临时会；0 = 不限
 # event_concurrency = 1           # 同时最多开几场临时会（不同币）；1 = 排队一场一场开（默认）；0 = 跟 concurrency 一样；不能大于 concurrency
