@@ -2682,7 +2682,8 @@ function trailBar(m) {
   if (!m.on) return `<div class="note small trail-bar"><span><b>大盘闸门</b> 未启用（配置 fast_loop.signal_market_trail_on = false）</span>${chip}</div>`;
   const px = m.extreme_price != null ? ` ${m.ref} ${m.leg === "跌段" ? "低点" : "高点"} <span class="num">${fmtNum(m.extreme_price)}</span>` : "";
   const st = m.state === "locked" ? `<b class="warn">${esc(m.guards)}锁住 ${m.locked_min} 分钟</b>` : m.state === "open" ? `<b>${esc(m.guards)}放行</b>` : `<b>${esc(m.now)}</b>`;
-  const leg = m.leg ? ` · ${esc(m.ref)} ${esc(m.leg)}（管${esc(m.guards)}）${px} · 离极值 <span class="num">${m.retrace_atr.toFixed(2)}</span> / ${m.k} ATR 锁` : "";
+  const ext = m.leg === "跌段" ? "低点" : "高点";
+  const leg = m.leg ? ` · ${esc(m.ref)} ${esc(m.leg)}（管${esc(m.guards)}）${px} · 现在离${ext} <span class="num">${m.retrace_atr.toFixed(2)}</span> / 门槛 ${Number(m.k).toFixed(1)} ATR${m.state === "locked" ? `（${m.leg === "跌段" ? "创新低" : "创新高"}才解锁）` : ""}` : "";
   const stale = m.stale_at ? ` · <span class="warn">数据停在 ${hm(m.stale_at)}</span>` : "";
   return `<div class="note small trail-bar"><span><b>大盘闸门</b> ${st}${leg}${stale} · 今天锁 ${m.locks_today} 次、拦下开仓 ${m.blocked_today} 笔</span>${chip}</div>`;
 }
@@ -3801,7 +3802,7 @@ const ROLES = [
     { g: "止盈放多远", keys: ["fast_loop.min_tp_r", "fast_loop.max_tp_r", "fast_loop.card_range_clamp", "fast_loop.tp_r_cap"] },
     { g: "一笔最多拿多久", keys: ["fast_loop.time_limit_s"] },
     // 键名是 signal_ 开头（按前缀会归哨兵），但它拦的是开仓、归风控员；点名放这里，不改键名
-    { g: "大盘移动止损", hint: "参照（BTC 等）从跌段 / 涨段的极值反向走了几倍 15 分钟 ATR，就暂停这个方向的所有新仓；同方向再创新极值或开了新段就放行。持仓不动。", keys: ["fast_loop.signal_market_trail_on", "fast_loop.signal_market_trail_k", "fast_loop.signal_market_trail_ref", "fast_loop.signal_market_trail_shadow"] },
+    { g: "大盘移动止损", hint: "参照（BTC 等）从跌段 / 涨段的极值反向走到 k 倍 15 分钟 ATR（k 是门槛，默认 1.0），就暂停这个方向的所有新仓；锁住后参照往回走、离极值不到门槛也照样锁着，同方向再创新极值或开了新段才放行。持仓不动。", keys: ["fast_loop.signal_market_trail_on", "fast_loop.signal_market_trail_k", "fast_loop.signal_market_trail_ref", "fast_loop.signal_market_trail_shadow"] },
   ] },
   { id: "executor", t: "执行", what: "下单、挂单、限价止盈", groups: [
     { g: "限价止盈", keys: ["fast_loop.limit_take_profit", "fast_loop.limit_take_profit_live", "fast_loop.tp_limit_fallback_s", "fast_loop.tp_limit_fallback_through_bps"] },

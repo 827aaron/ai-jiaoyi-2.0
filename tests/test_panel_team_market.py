@@ -590,9 +590,17 @@ def test_live_text_puts_the_informative_part_first() -> None:
         return to_event(_rec(role, outcome, summary, NOW, symbol="AEROUSDT")).text
 
     rg, rej = c.Role.RISK_GUARD, c.Outcome.REJECT
-    assert text(
-        rg, rej, "AEROUSDT 大盘移动止损：BTC 从涨段高点回落 0.6 ATR，暂停新多单（锁住 3 分钟）"
-    ) == ("大盘移动止损，多单锁住（BTC 回落 0.6 ATR · 已锁 3 分钟）")
+    for summary, shown in [
+        ("AEROUSDT 大盘移动止损：多单锁住中（BTC 回落过 1.0 ATR 门槛，现在离高点 0.6 ATR，"
+         "已锁 3 分钟；创新高才解锁）",
+         "大盘移动止损，多单锁住（已锁 3 分钟 · BTC 现在离高点 0.6 / 门槛 1.0 ATR）"),
+        # decision_log 里改措辞前的旧格式：没有门槛就不写门槛
+        ("AEROUSDT 大盘移动止损：BTC 从跌段低点反弹 0.1 ATR，暂停新空单（锁住 82 分钟）",
+         "大盘移动止损，空单锁住（已锁 82 分钟 · BTC 现在离低点 0.1 ATR）"),
+        ("大盘移动止损：BTC 从涨段高点回落 1.6 ATR，暂停新多单",
+         "大盘移动止损，多单锁住（BTC 现在离高点 1.6 ATR）"),
+    ]:  # fmt: skip
+        assert text(rg, rej, summary) == shown
     assert text(rg, rej, "AEROUSDT 多 拒绝：AEROUSDT 已有在管持仓，不开第二笔") == (
         "已有在管持仓，不开第二笔（多）"
     )

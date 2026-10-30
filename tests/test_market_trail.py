@@ -156,17 +156,17 @@ def test_market_trail_real_minutes_reproduce_the_replay_lock_windows(
     ]
     today = [r for r in log.records if r.ts >= T0]
     assert [f"{r.ts:%H:%M} {r.summary}" for r in today] == [
-        "00:07 大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单",
+        "00:07 大盘移动止损：BTC 从跌段低点反弹 1.1 ATR（门槛 1.0），暂停新空单，创新低才恢复",
         "00:11 大盘移动止损：BTC 创跌段新低，恢复新空单（锁了 4 分钟）",
-        "00:38 大盘移动止损：BTC 从跌段低点反弹 1.3 ATR，暂停新空单",
+        "00:38 大盘移动止损：BTC 从跌段低点反弹 1.3 ATR（门槛 1.0），暂停新空单，创新低才恢复",
         "00:42 大盘移动止损：BTC 创跌段新低，恢复新空单（锁了 4 分钟）",
-        "00:54 大盘移动止损：BTC 从跌段低点反弹 1.2 ATR，暂停新空单",
+        "00:54 大盘移动止损：BTC 从跌段低点反弹 1.2 ATR（门槛 1.0），暂停新空单，创新低才恢复",
         "01:31 大盘移动止损：BTC 创跌段新低，恢复新空单（锁了 37 分钟）",
-        "01:37 大盘移动止损：BTC 从跌段低点反弹 1.0 ATR，暂停新空单",
+        "01:37 大盘移动止损：BTC 从跌段低点反弹 1.0 ATR（门槛 1.0），暂停新空单，创新低才恢复",
         "01:57 大盘移动止损：BTC 创跌段新低，恢复新空单（锁了 20 分钟）",
-        "02:14 大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单",
+        "02:14 大盘移动止损：BTC 从跌段低点反弹 1.1 ATR（门槛 1.0），暂停新空单，创新低才恢复",
         "03:34 大盘移动止损：BTC 开了新的跌段（z -1.10），恢复新空单（锁了 80 分钟）",
-        "03:59 大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单",
+        "03:59 大盘移动止损：BTC 从跌段低点反弹 1.1 ATR（门槛 1.0），暂停新空单，创新低才恢复",
         "04:19 大盘移动止损：BTC 开了新的涨段（z +1.49），恢复新空单（锁了 20 分钟）",
     ]
     lock = today[2]
@@ -191,7 +191,8 @@ def test_market_trail_restart_continues_exactly(
     clock_b = Clock(clock_a.at)
     b = MarketTrail(ON, tmp_path / "b", clock=clock_b, seed=False)
     assert b.holds(SHORT, clock_b.at) == (
-        "大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单（锁住 2 分钟）"
+        "大盘移动止损：空单锁住中（BTC 反弹过 1.0 ATR 门槛，"
+        "现在离低点 1.1 ATR，已锁 2 分钟；创新低才解锁）"
     )
     assert b.holds(LONG, clock_b.at) is None
     _feed(a, clock_a, rows[cut + 1 :])
@@ -221,7 +222,8 @@ def test_market_trail_seeds_from_regime_checks_without_records(
     )
     assert log.records == []
     assert seeded.holds(SHORT, end) == (
-        "大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单（锁住 2 分钟）"
+        "大盘移动止损：空单锁住中（BTC 反弹过 1.0 ATR 门槛，"
+        "现在离低点 1.1 ATR，已锁 2 分钟；创新低才解锁）"
     )
     monkeypatch.setattr(mt, "SAVE_EVERY_S", 10**9)
     clock = Clock(rows[0][0])
@@ -379,14 +381,18 @@ def test_market_trail_holds_only_the_locked_side_of_the_chosen_ref(tmp_path: Pat
     _lock(tr, "eth", 1, T0)
     later = T0 + timedelta(minutes=12)
     assert tr.holds(SHORT, later) == (
-        "大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单（锁住 12 分钟）"
+        "大盘移动止损：空单锁住中（BTC 反弹过 1.0 ATR 门槛，"
+        "现在离低点 1.1 ATR，已锁 12 分钟；创新低才解锁）"
     )
     assert tr.holds(LONG, later) is None
-    assert tr.status_line(later) == "大盘移动止损：空单锁住中（BTC 反弹 1.1 ATR，12 分钟）"
+    assert tr.status_line(later) == (
+        "大盘移动止损：空单锁住中（BTC 现在离低点 1.1 ATR · 门槛 1.0 · 已锁 12 分钟）"
+    )
     patch_inplace(fast, fast.model_copy(update={"signal_market_trail_ref": "eth"}), HOT_FAST)
     assert tr.holds(SHORT, later) is None
     assert tr.holds(LONG, later) == (
-        "大盘移动止损：ETH 从涨段高点回落 1.1 ATR，暂停新多单（锁住 12 分钟）"
+        "大盘移动止损：多单锁住中（ETH 回落过 1.0 ATR 门槛，"
+        "现在离高点 1.1 ATR，已锁 12 分钟；创新高才解锁）"
     )
     patch_inplace(fast, fast.model_copy(update={"signal_market_trail_on": False}), HOT_FAST)
     assert tr.holds(LONG, later) is None
@@ -594,7 +600,10 @@ async def test_runner_rejects_locked_side_everywhere(tmp_path: Path) -> None:
 
     app.m = dataclasses.replace(app.m, cards=Cards(), gate=Gate())
     r = Runner(app)
-    why = "大盘移动止损：BTC 从跌段低点反弹 1.1 ATR，暂停新空单（锁住 3 分钟）"
+    why = (
+        "大盘移动止损：空单锁住中（BTC 反弹过 1.0 ATR 门槛，"
+        "现在离低点 1.1 ATR，已锁 3 分钟；创新低才解锁）"
+    )
     await r.handle_signal(h.signal(T0, side=SHORT))
     rej = log.records[-1]
     assert rej.outcome is c.Outcome.REJECT and rej.summary == f"BTCUSDT {why}"
@@ -621,7 +630,9 @@ def test_heartbeat_puts_the_lock_on_the_risk_guard_line(tmp_path: Path) -> None:
     _lock(app.market_trail, "btc", -1, T0 - timedelta(minutes=12))
     app.heartbeat_all()
     st = app.log.read_status()[c.Role.RISK_GUARD.value]
-    assert st.headline == "大盘移动止损：空单锁住中（BTC 反弹 1.1 ATR，12 分钟）"
+    assert st.headline == (
+        "大盘移动止损：空单锁住中（BTC 现在离低点 1.1 ATR · 门槛 1.0 · 已锁 12 分钟）"
+    )
 
 
 def test_runner_backfill_of_btc_releases_the_fill(tmp_path: Path) -> None:

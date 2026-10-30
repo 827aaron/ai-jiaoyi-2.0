@@ -146,9 +146,11 @@ def market_trail_view(
         v.extreme_price = math.exp(s.leg.extreme)
     if s.locked is not None:
         mins = max(0, int(now.timestamp() - (s.leg.stopped_at or now.timestamp())) // 60)
-        move = "反弹" if side < 0 else "回落"
         v.state, v.locked_min, v.level = "locked", mins, "warn"
-        v.now = f"{_SIDE_CN[side]}锁住中 · {label} {move} {rt:.1f} ATR · 锁了 {mins} 分钟"
+        v.now = (
+            f"{_SIDE_CN[side]}锁住中 · 已锁 {mins} 分钟 · {label} 现在离{_EXT_CN[side]} "
+            f"{rt:.1f} / 门槛 {k:.1f} ATR"
+        )
         v.line = f"大盘闸门：{_SIDE_CN[side]}锁住 {mins} 分钟"
     else:
         v.state, v.level = "open", "ok"

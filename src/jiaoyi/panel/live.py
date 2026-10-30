@@ -165,8 +165,13 @@ def _strip_symbol(r: DecisionRecord) -> str:
 
 _REFUSED = re.compile(r"^(多|空) (?:拒绝|拍板放弃)：(.+)$", re.S)
 _TRAIL = re.compile(
-    r"^大盘移动止损：(\S+) 从.段.点(反弹|回落) ([\d.]+) ATR，"
-    r"暂停新(多|空)单(?:（锁住 (\d+) 分钟）)?"
+    r"^大盘移动止损：(?P<held>多|空)单锁住中（(?P<ref>\S+) (?:反弹|回落)过 (?P<k>[\d.]+) ATR 门槛，"
+    r"现在离(?P<ext>低|高)点 (?P<atr>[\d.]+) ATR，已锁 (?P<mins>\d+) 分钟"
+)
+# 10-30 改措辞前的拒绝理由 / 锁住记录：只有当前离极值几倍 ATR，没有门槛
+_TRAIL_OLD = re.compile(
+    r"^大盘移动止损：(?P<ref>\S+) 从.段(?P<ext>低|高)点(?:反弹|回落) (?P<atr>[\d.]+) ATR，"
+    r"暂停新(?P<held>多|空)单(?:（锁住 (?P<mins>\d+) 分钟）)?"
 )
 _HOLD = re.compile(r"^拿住：平仓概率 ([\d.]+)(?:，(.*))?$", re.S)
 
@@ -178,10 +183,12 @@ def _lead(r: DecisionRecord, text: str) -> str:
         side, text = m.group(1), m.group(2)
         if r.symbol and text.startswith(r.symbol):
             text = text[len(r.symbol) :].lstrip(" ：:")
-    if m := _TRAIL.match(text):
-        ref, move, atr, held, mins = m.groups()
-        tail = f" · 已锁 {mins} 分钟" if mins else ""
-        return f"大盘移动止损，{held}单锁住（{ref} {move} {atr} ATR{tail}）"
+    if m := _TRAIL.match(text) or _TRAIL_OLD.match(text):
+        g = m.groupdict()
+        head = f"已锁 {g['mins']} 分钟 · " if g["mins"] else ""
+        k = f" / 门槛 {g['k']}" if g.get("k") else ""
+        now = f"{g['ref']} 现在离{g['ext']}点 {g['atr']}{k} ATR"
+        return f"大盘移动止损，{g['held']}单锁住（{head}{now}）"
     if m := _HOLD.match(text):
         p, rest = m.groups()
         rest = "只记录" if rest and rest.startswith("只记录") else rest

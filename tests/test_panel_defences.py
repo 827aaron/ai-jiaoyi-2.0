@@ -128,7 +128,8 @@ def test_defences_count_todays_events_per_rule(tmp_path: Path) -> None:
         return (r.on, r.setting, r.now, r.level, r.today, r.last_ts, r.last_text, r.link)
 
     assert view("market_trail") == (
-        True, "参照 BTC · 1 倍 ATR", "空单锁住中 · BTC 反弹 1.2 ATR · 锁了 12 分钟", "warn",
+        True, "参照 BTC · 1 倍 ATR",
+        "空单锁住中 · 已锁 12 分钟 · BTC 现在离低点 1.2 / 门槛 1.0 ATR", "warn",
         "锁 1 次 · 拦下开仓 1 笔", T(6, 20), "XRPUSDT 大盘移动止损：暂停新空单", "#team/risk_guard",
     )  # fmt: skip
     assert view("trailing_native") == (

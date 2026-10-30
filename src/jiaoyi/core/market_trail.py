@@ -84,6 +84,8 @@ _SIDE = {-1: Side.SHORT, 1: Side.LONG}
 _SIDE_CN = {-1: "空单", 1: "多单"}
 _LEG_CN = {-1: "跌段", 1: "涨段"}
 _EXT_CN = {-1: "低点", 1: "高点"}
+_MOVE_CN = {-1: "反弹", 1: "回落"}
+_NEW_CN = {-1: "创新低", 1: "创新高"}
 
 
 def minute_end(k: Kline) -> int:
@@ -462,9 +464,9 @@ class MarketTrail:
             at = datetime.fromtimestamp(ev["t"], UTC)
             if ev["kind"] == "lock":
                 summary = (
-                    f"大盘移动止损：{label} 从{_LEG_CN[side]}{_EXT_CN[side]}"
-                    f"{'反弹' if side < 0 else '回落'} {ev['retrace_atr']:.1f} ATR，"
-                    f"暂停新{_SIDE_CN[side]}"
+                    f"大盘移动止损：{label} 从{_LEG_CN[side]}{_EXT_CN[side]}{_MOVE_CN[side]} "
+                    f"{ev['retrace_atr']:.1f} ATR（门槛 {self._cfg.signal_market_trail_k:.1f}），"
+                    f"暂停新{_SIDE_CN[side]}，{_NEW_CN[side]}才恢复"
                 )
             else:
                 why = (
@@ -542,14 +544,15 @@ class MarketTrail:
         now = now or self._clock()
         mins = max(0, int(now.timestamp() - (s.leg.stopped_at or now.timestamp())) // 60)
         rt = s.retrace_atr() or 0.0
+        d, k = s.locked, self._cfg.signal_market_trail_k
         return (
-            f"大盘移动止损：{LABEL[name]} 从{_LEG_CN[s.locked]}{_EXT_CN[s.locked]}"
-            f"{'反弹' if s.locked < 0 else '回落'} {rt:.1f} ATR，暂停新{_SIDE_CN[s.locked]}"
-            f"（锁住 {mins} 分钟）"
+            f"大盘移动止损：{_SIDE_CN[d]}锁住中（{LABEL[name]} {_MOVE_CN[d]}过 {k:.1f} ATR 门槛，"
+            f"现在离{_EXT_CN[d]} {rt:.1f} ATR，已锁 {mins} 分钟；{_NEW_CN[d]}才解锁）"
         )
 
     def status_line(self, now: datetime | None = None) -> str:
-        """团队页风控员一行：「大盘移动止损：空单锁住中（BTC 反弹 1.1 ATR，12 分钟）」。"""
+        """团队页风控员一行，例「大盘移动止损：空单锁住中（BTC 现在离低点 0.5 ATR · 门槛 1.0 ·
+        已锁 45 分钟）」。"""
         now = now or self._clock()
         line = self._status(now)
         last = self._series[self._cfg.signal_market_trail_ref].last_t
@@ -572,9 +575,9 @@ class MarketTrail:
         rt = s.retrace_atr() or 0.0
         if s.locked is not None:
             mins = max(0, int(now.timestamp() - (s.leg.stopped_at or now.timestamp())) // 60)
-            move = "反弹" if side < 0 else "回落"
             return (
-                f"大盘移动止损：{_SIDE_CN[side]}锁住中（{label} {move} {rt:.1f} ATR，{mins} 分钟）"
+                f"大盘移动止损：{_SIDE_CN[side]}锁住中（{label} 现在离{_EXT_CN[side]} {rt:.1f} ATR"
+                f" · 门槛 {self._cfg.signal_market_trail_k:.1f} · 已锁 {mins} 分钟）"
             )
         return (
             f"大盘移动止损：{label} {_LEG_CN[side]}，{_SIDE_CN[side]}放行"

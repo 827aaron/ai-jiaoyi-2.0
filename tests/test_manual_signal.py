@@ -191,7 +191,8 @@ async def test_recheck_reports_the_market_trail_lock(tmp_path: Path, now: dateti
     _lock_longs(r, tmp_path, now - timedelta(minutes=3))
     res = await _run(r, tmp_path, now, "recheck_signal")
     assert res["detail"] == (
-        "现在仍拒绝：大盘移动止损：BTC 从涨段高点回落 1.1 ATR，暂停新多单（锁住 3 分钟）"
+        "现在仍拒绝：大盘移动止损：多单锁住中（BTC 回落过 1.0 ATR 门槛，"
+        "现在离高点 1.1 ATR，已锁 3 分钟；创新高才解锁）"
     )
     assert ex.opened == [] and risk.manual == []
     res = await _run(r, tmp_path, now, "release_signal", 2)
