@@ -2063,6 +2063,60 @@ async def test_commander_refresh_symbol_flip_gets_full_validity_from_its_meeting
     assert c._card.expires_at == datetime(2026, 10, 30, 6, 45, tzinfo=UTC)
 
 
+async def test_commander_refresh_symbol_flip_is_journaled_with_its_own_expiry(
+    tmp_path: Path,
+) -> None:
+    from jiaoyi.slow.review import CardJournal
+
+    journal = CardJournal(tmp_path / "journal")
+    c, clock = await _event_expiry_case(
+        tmp_path, {"ETHUSDT": [Bias.SHORT, Bias.LONG]}, journal=journal
+    )
+    await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 11, tzinfo=UTC))
+    assert [(r.bias, r.expires_at) for r in journal.read()] == [
+        ("short", datetime(2026, 10, 30, 6, 45, tzinfo=UTC)),
+        ("long", datetime(2026, 10, 30, 7, 31, tzinfo=UTC)),
+    ]
+
+
+class _DirectedRegime(_Directed2):
+    def __init__(self, script: dict[str, list[Bias]]) -> None:
+        super().__init__(script)
+        self.direction = "看涨"
+
+    async def pick(
+        self,
+        candidates: Sequence[SymbolPoolEntry],
+        max_n: int,
+        previous: BattleCard | None,
+        pool: Sequence[SymbolPoolEntry] = (),
+    ) -> PickResult:
+        got = await super().pick(candidates, max_n, previous, pool)
+        return dataclasses.replace(got, regime_direction=self.direction)
+
+
+@pytest.mark.parametrize("picked", [True, False])
+@pytest.mark.parametrize(("direction", "expires"), [("看涨", (7, 31)), ("看跌", (6, 45))])
+async def test_commander_refresh_carries_a_flip_past_the_old_card_only_under_its_regime(
+    tmp_path: Path, picked: bool, direction: str, expires: tuple[int, int]
+) -> None:
+    eng = _DirectedRegime({"ETHUSDT": [Bias.SHORT, Bias.LONG], "SANDUSDT": [Bias.LONG] * 2})
+    c, _log, clock = make(
+        tmp_path, eng, _R0, ttl=timedelta(minutes=140), symbol_min_interval=timedelta(hours=2)
+    )
+    p = pool(_R0, entry("ETHUSDT"), entry("SANDUSDT"))
+    await c.refresh(p, "scheduled")
+    await _event(c, clock, "ETHUSDT", datetime(2026, 10, 30, 5, 11, tzinfo=UTC))
+    clock[0] = datetime(2026, 10, 30, 6, 35, tzinfo=UTC)
+    eng.direction = direction
+    eng.picks = ["ETHUSDT", "SANDUSDT"] if picked else ["SANDUSDT"]
+    card = await c.refresh(pool(clock[0], entry("ETHUSDT"), entry("SANDUSDT")), "scheduled")
+    eth = card.for_symbol("ETHUSDT")
+    assert eth is not None and eth.bias is Bias.LONG
+    assert eth.issued_at == datetime(2026, 10, 30, 5, 11, tzinfo=UTC)
+    assert eth.expires_at == datetime(2026, 10, 30, *expires, tzinfo=UTC)
+
+
 async def test_commander_refresh_symbol_new_symbol_gets_full_validity_from_its_meeting(
     tmp_path: Path,
 ) -> None:

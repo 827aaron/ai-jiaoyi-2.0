@@ -648,6 +648,16 @@ class BattleCardCommander:
             return after
         return after.model_copy(update={"expires_at": target})
 
+    def _cap_to_regime(self, cs: CardSymbol, prev: BattleCard | None) -> CardSymbol:
+        """整轮沿用旧指令时：翻向后有效期超过上一张卡的那条，研究时的大盘方向和现在不同（或不知道）
+        就压回上一张卡的到期，和 ``_extend_reused`` 同一条规则：不能比它所针对的大盘方向活得久。"""
+        if prev is None or cs.expires_at is None or cs.expires_at <= prev.expires_at:
+            return cs
+        now_view = self.latest_market_view
+        if now_view is not None and self._source_direction(cs) == now_view.regime_direction:
+            return cs
+        return cs.model_copy(update={"expires_at": prev.expires_at})
+
     def _source_direction(self, cs: CardSymbol) -> Direction | None:
         vid = cs.source_market_view_id
         if vid is None:
@@ -1805,7 +1815,9 @@ class BattleCardCommander:
         self._news.discard(symbol)
         self._save_card()
         if self._journal is not None:
-            self._journal.record(self._raw_view(card, fresh), [symbol], {symbol: res.setup})
+            # 上卡的就是这场结论（不是候选期留着的那条）：按它的有效期复盘
+            raw = new if new.meeting_id == fresh.meeting_id else fresh
+            self._journal.record(self._raw_view(card, raw), [symbol], {symbol: res.setup})
         self._record_card(card, started, cost=0.0)  # 临时会没有总盘会这一份
         if nomination is not None:
             self._write(
@@ -3039,6 +3051,8 @@ class BattleCardCommander:
         for e in chosen:
             last = self._last_meeting.get(e.symbol)
             old = prev_card.for_symbol(e.symbol) if prev_card is not None else None
+            if old is not None:
+                old = self._cap_to_regime(old, prev_card)
             if (
                 prev_card is not None
                 and old is not None
@@ -3121,6 +3135,7 @@ class BattleCardCommander:
         round_expiry = now + self._ttl_now()
         symbols: dict[str, CardSymbol] = {}
         for old in prev.symbols if prev is not None else []:
+            old = self._cap_to_regime(old, prev)
             exp = old.expires_at or (prev.expires_at if prev is not None else now)
             if old.symbol not in in_pool and old.symbol not in self._held:
                 continue
