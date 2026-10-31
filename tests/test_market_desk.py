@@ -2271,6 +2271,26 @@ async def test_desk_run_republish_does_not_delay_the_next_flip(tmp_path: Path) -
     assert commander.regime_reference.direction == "看跌"
 
 
+async def test_desk_run_publishes_every_flip_when_confirm_is_one_round(tmp_path: Path) -> None:
+    commander, _, clock, candidates, _ = await commander_with_flash(tmp_path / "r", T0)
+    script = Switch(answer(0.6, 0.25, 0.15))
+    desk = make_desk(
+        tmp_path,
+        commander,
+        FakeModel(script),
+        clock,
+        publish_confirm=1,
+        publish_confirm_min=0,
+        publish_min_gap_min=0,
+    )
+    await desk.run(candidates, "scheduled")  # T0: takeover
+    script.text = answer(0.15, 0.25, 0.6)
+    clock[0] += timedelta(minutes=15)
+    flip = (await desk.run(candidates, "scheduled")).published
+    assert flip is not None and flip.regime_direction == "看跌"
+    assert flip.observed_at == T0 + timedelta(minutes=15)
+
+
 @pytest.mark.parametrize("scope", [False, True])
 async def test_meeting_regime_labels_with_desk_intra(tmp_path: Path, scope: bool) -> None:
     commander, _engine, clock, candidates, _ = await research(
