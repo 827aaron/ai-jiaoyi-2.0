@@ -698,6 +698,25 @@ async def test_system_cleanup_without_custom_info_closes_directly_and_clears_pro
     assert h.exchange.held == 0 and not h.backups()
 
 
+@pytest.mark.parametrize("entry_cid", [None, "entry-open"])
+async def test_system_cleanup_without_entry_evidence_keeps_position_and_protection(
+    tmp_path: Path, entry_cid: str | None
+):
+    h = AdapterHarness(tmp_path, Side.LONG)
+    await h.protect()
+    tracked = h.registry.get("pos-1")
+    h.registry.put(tracked.model_copy(update={"entry_client_order_id": entry_cid}))
+    hb = h.api.executors["owned-executor"]
+    hb.update(status="TERMINATED", is_active=False, close_type="SYSTEM_CLEANUP")
+    del hb["custom_info"]
+
+    await h.adapter.positions()
+
+    assert not h.exchange.direct and not h.cancels()
+    assert h.registry.get("pos-1").record.status is PositionStatus.CLOSING
+    assert any(o.algo_status == "NEW" for o in h.exchange.orders.values())
+
+
 def test_only_new_server_configuration_disables_hb_price_barriers_but_keeps_timer(tmp_path):
     h = AdapterHarness(tmp_path, Side.LONG)
     requested = intent(time_limit_s=14400, trailing_activation_pct=0.3, trailing_stop_pct=0.1)
