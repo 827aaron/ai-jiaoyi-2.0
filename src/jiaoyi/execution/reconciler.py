@@ -599,6 +599,9 @@ class ThreeWayReconciler:
                     ):
                         self._gone_rounds.pop(rec.position_id, None)
                         continue
+                    if self._adapter.held_after_hb_restart(current, detail):
+                        self._gone_rounds.pop(rec.position_id, None)
+                        continue
                     # 明确 TERMINATED/is_active=false 且币安仍有仓，保留原两轮失管保护。
                     rounds = self._gone_rounds.get(rec.position_id, 0) + 1
                     self._gone_rounds[rec.position_id] = rounds

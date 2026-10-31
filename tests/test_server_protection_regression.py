@@ -13,8 +13,10 @@ from typing import Literal
 import pytest
 
 from jiaoyi.alerting.stub import StubAlerter
-from jiaoyi.contracts import Side
+from jiaoyi.contracts import Role, Side
 from jiaoyi.contracts.position import CloseReason, PositionStatus
+from jiaoyi.core.recorder import RoleRecorder
+from jiaoyi.core.store import JsonlDecisionLog
 from jiaoyi.core.trailing_price import activation_price
 from jiaoyi.execution.brackets import BracketManager, ProtectionIncomplete
 from jiaoyi.execution.exchange import (
@@ -34,6 +36,7 @@ from jiaoyi.execution.exchange import (
 from jiaoyi.execution.hb_client import HbApiError
 from jiaoyi.execution.hb_executor import HbExecutorAdapter
 from jiaoyi.execution.lifeboat import BinanceLifeboat
+from jiaoyi.execution.reconciler import ThreeWayReconciler
 from jiaoyi.execution.registry import PositionRegistry, TrackedPosition
 from jiaoyi.execution.trailing import trailing_update
 from tests.fakes import FakeExchange, FakeHbApi
@@ -679,42 +682,135 @@ async def test_native_hb_timer_and_condition_child_must_both_finish_before_resid
     assert h.api.stopped == [("owned-executor", True)]
 
 
-@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
-async def test_system_cleanup_without_custom_info_closes_directly_and_clears_protection(
-    tmp_path: Path, side: Side
-):
-    h = AdapterHarness(tmp_path, side)
-    await h.protect()
-    tracked = h.registry.get("pos-1")
-    h.registry.put(tracked.model_copy(update={"entry_client_order_id": "entry-1"}))
-    hb = h.api.executors["owned-executor"]
-    hb.update(status="TERMINATED", is_active=False, close_type="SYSTEM_CLEANUP")
-    del hb["custom_info"]
-
-    await h.adapter.positions()
-
-    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
-    assert h.registry.get("pos-1").record.status is PositionStatus.CLOSED
-    assert h.exchange.held == 0 and not h.backups()
-
-
-@pytest.mark.parametrize("entry_cid", [None, "entry-open"])
-async def test_system_cleanup_without_entry_evidence_keeps_position_and_protection(
-    tmp_path: Path, entry_cid: str | None
-):
-    h = AdapterHarness(tmp_path, Side.LONG)
+async def hb_restarted(side: Side, root: Path, *, entry_cid: str | None = "entry-1"):
+    h = AdapterHarness(root, side)
     await h.protect()
     tracked = h.registry.get("pos-1")
     h.registry.put(tracked.model_copy(update={"entry_client_order_id": entry_cid}))
     hb = h.api.executors["owned-executor"]
     hb.update(status="TERMINATED", is_active=False, close_type="SYSTEM_CLEANUP")
     del hb["custom_info"]
+    return h
+
+
+def stop_alive(h: AdapterHarness) -> bool:
+    return any(o.kind == "stop_loss" and o.algo_status == "NEW" for o in h.exchange.orders.values())
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_hb_executor_sync_server_keeps_position_after_hb_restart(tmp_path: Path, side: Side):
+    h = await hb_restarted(side, tmp_path)
+
+    for _ in range(3):
+        await h.adapter.positions()
+        await h.adapter.protection_tick()
+
+    assert h.registry.get("pos-1").record.status is PositionStatus.OPEN
+    assert not h.exchange.direct and not h.cancels() and stop_alive(h)
+    assert [a.title for a in h.alerter.sent].count("hummingbot 重启，持仓转为接管") >= 1
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+async def test_hb_executor_close_flattens_adopted_position_directly(tmp_path: Path, side: Side):
+    h = await hb_restarted(side, tmp_path)
+    await h.adapter.positions()
+
+    await h.adapter.close("pos-1", CloseReason.KEEPER)
+
+    rec = h.registry.get("pos-1").record
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert rec.status is PositionStatus.CLOSED and rec.close_reason is CloseReason.KEEPER
+    assert h.exchange.held == 0 and not h.backups()
+
+
+async def test_hb_executor_sync_server_closes_adopted_position_at_hb_time_limit(tmp_path: Path):
+    h = await hb_restarted(Side.LONG, tmp_path)
+    rec = h.registry.get("pos-1").record
+    h.adapter._clock = lambda: rec.opened_at + timedelta(seconds=rec.time_limit_s - 1)
+    await h.adapter.positions()
+    assert not h.exchange.direct
+
+    h.adapter._clock = lambda: rec.opened_at + timedelta(seconds=rec.time_limit_s)
+    await h.adapter.positions()
+
+    rec = h.registry.get("pos-1").record
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert rec.status is PositionStatus.CLOSED and rec.close_reason is CloseReason.TIME_LIMIT
+
+
+async def test_hb_executor_sync_server_closes_after_hb_restart_when_stop_is_gone(tmp_path: Path):
+    h = await hb_restarted(Side.LONG, tmp_path)
+    h.manager.retains_confirmed_stop = lambda pid: False
 
     await h.adapter.positions()
 
-    assert not h.exchange.direct and not h.cancels()
+    rec = h.registry.get("pos-1").record
+    assert h.exchange.direct == [("dc-pos-1-1", 2.0)]
+    assert rec.status is PositionStatus.CLOSED and rec.close_reason is CloseReason.RECONCILER
+
+
+async def test_hb_executor_sync_server_rides_out_interrupted_stop_replacement_after_hb_restart(
+    tmp_path: Path,
+):
+    h = await hb_restarted(Side.LONG, tmp_path)
+    tracked = h.registry.get("pos-1")
+    state = tracked.server_protection.model_copy(update={"stage": "provisional"})
+    h.registry.put(tracked.model_copy(update={"server_protection": state}))
+
+    await h.adapter.positions()
+
+    current = h.registry.get("pos-1")
+    assert current.record.status is PositionStatus.OPEN and not h.exchange.direct
+    assert current.server_protection.stage == "armed"
+
+
+async def test_hb_executor_sync_server_keeps_trigger_reason_after_hb_restart(tmp_path: Path):
+    h = await hb_restarted(Side.LONG, tmp_path)
+    tracked = h.registry.get("pos-1")
+    state = tracked.server_protection.model_copy(
+        update={"stage": "exiting", "exit_reason": CloseReason.STOP_LOSS}
+    )
+    h.registry.put(tracked.model_copy(update={"server_protection": state}))
+
+    await h.adapter.positions()
+
+    assert h.registry.get("pos-1").record.close_reason is CloseReason.STOP_LOSS
+
+
+async def test_hb_executor_sync_server_keeps_stops_after_hb_restart_without_entry_id(
+    tmp_path: Path,
+):
+    h = await hb_restarted(Side.LONG, tmp_path, entry_cid=None)
+
+    await h.adapter.positions()
+
+    assert not h.exchange.direct and not h.cancels() and stop_alive(h)
     assert h.registry.get("pos-1").record.status is PositionStatus.CLOSING
-    assert any(o.algo_status == "NEW" for o in h.exchange.orders.values())
+
+
+async def test_reconciler_reconcile_leaves_adopted_position_alone(tmp_path: Path):
+    h = await hb_restarted(Side.LONG, tmp_path)
+
+    async def no_stops():
+        return []
+
+    h.exchange.open_stops = no_stops
+    reconciler = ThreeWayReconciler(
+        h.adapter,
+        h.api,
+        h.exchange,
+        h.lifeboat,
+        h.registry,
+        h.alerter,
+        account_name="synthetic-account",
+        recorder=RoleRecorder(Role.RECONCILER, JsonlDecisionLog(tmp_path / "data")),
+    )
+
+    for _ in range(3):
+        await reconciler.reconcile(START)
+
+    assert h.registry.get("pos-1").record.status is PositionStatus.OPEN
+    assert not h.exchange.direct and stop_alive(h)
 
 
 def test_only_new_server_configuration_disables_hb_price_barriers_but_keeps_timer(tmp_path):
