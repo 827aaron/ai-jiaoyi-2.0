@@ -641,6 +641,18 @@ class JevKeeper:
         one_shot = against is not None and against[1]
         if against is not None:
             why.append(f"反向信号急查（{against[0].desc}）" + ("，过线即平" if one_shot else ""))
+        min_loss_r = self._cfg.keeper_close_min_loss_r
+        if min_loss_r > 0 and why_blocked is None:
+            # 平仓概率只管亏损的仓：没亏到线一律不按概率平，亏到线过概率线一次就平
+            stop_bps = _stop_bps(position)
+            loss_r = -pnl / stop_bps if stop_bps else None
+            if loss_r is None or loss_r < min_loss_r:
+                self._streak.pop(pid, None)
+                votes.append({"rule": "p_close", "p_close": round(p_close, 4), "vote": "hold"})
+                why.append(f"没亏到 {min_loss_r:g}R，概率不平")
+                return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+            why.append(f"已亏 {loss_r:.2f}R")
+            one_shot = True
 
         vote: dict[str, Any] = {"rule": "p_close", "p_close": round(p_close, 4)}
         votes.append(vote)

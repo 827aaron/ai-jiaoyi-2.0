@@ -28,6 +28,7 @@ from tests.fastloop_helpers import FAST, card, features
 from tests.test_keeper_patrol import position
 
 NEW_KEYS = {
+    "keeper_close_min_loss_r",
     "keeper_model_mode",
     "keeper_price_source",
     "keeper_thesis_take_on",
@@ -368,6 +369,46 @@ async def test_thesis_gate_on_a_short(now: datetime, px: float, closes: bool) ->
     k = make(t, now, GATE, iter([px]), cd=card(now, bias="short"))
     v = await k.review(_short(now), now)
     assert (v.action == "close") is closes
+
+
+LOSS_ONLY = FAST.model_copy(update={"keeper_close_min_loss_r": 0.2, "giveback_on": False})
+
+
+@pytest.mark.parametrize(
+    ("px", "p_close", "closes"),
+    [
+        (68030.0, 0.6, True),  # 亏 0.25R，过线一次就平
+        (68030.0, 0.59, False),
+        (68020.0, 0.99, False),  # 只亏 0.17R，强概率也不平
+        (67900.0, 0.99, False),  # 赚钱不平
+    ],
+)
+async def test_keeper_review_p_close_only_acts_on_a_loss(
+    now: datetime, px: float, p_close: float, closes: bool
+) -> None:
+    """空单 1R = 120：68030 亏 0.25R，68020 亏 0.17R，67900 赚 0.83R。"""
+    t = MockJevTransport(answer=answer(p_close))
+    k = make(t, now, LOSS_ONLY, iter([px]), cd=card(now, bias="short"))
+    assert ((await k.review(_short(now), now)).action == "close") is closes
+
+
+async def test_keeper_review_loss_only_clears_the_streak_above_the_line(now: datetime) -> None:
+    t = MockJevTransport(answer=answer(0.7))
+    cfg = LOSS_ONLY.model_copy(update={"keeper_close_min_loss_r": 0.0})
+    k = make(t, now, cfg, iter([68030.0, 67900.0, 68030.0]), cd=card(now, bias="short"))
+    assert (await k.review(_short(now), now)).action == "hold"
+    k._cfg = LOSS_ONLY
+    assert (await k.review(_short(now), now + timedelta(seconds=30))).action == "hold"
+    k._cfg = cfg
+    v = await k.review(_short(now), now + timedelta(seconds=60))
+    assert v.action == "hold"  # 中间那轮赚钱清了计数，这是新的第 1 次
+
+
+async def test_keeper_review_loss_only_respects_record_mode(now: datetime) -> None:
+    t = MockJevTransport(answer=answer(0.99))
+    cfg = LOSS_ONLY.model_copy(update={"keeper_model_mode": "record"})
+    k = make(t, now, cfg, iter([68030.0]), cd=card(now, bias="short"))
+    assert (await k.review(_short(now), now)).action == "hold"
 
 
 # ---- 3. Jev 盈利门控

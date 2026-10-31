@@ -488,6 +488,14 @@ class FastLoopConfig(Contract):
         default=0.85, ge=0.5, le=1.0, description="概率明显过线时不用等第二次确认。"
     )
     keeper_confirmations: int = Field(default=2, ge=1, le=5, description="连续几次一致才平仓。")
+    keeper_close_min_loss_r: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+        allow_inf_nan=False,
+        description="平仓概率只管亏损的仓：亏到这么多 R 才按概率平，过 keeper_close_p 一次就平，"
+        "不等连续确认；没亏到线不按概率平。被封的币不受影响。0 = 关（现状）。",
+    )
     keeper_price_max_age_s: float = Field(
         default=0,
         ge=0,
