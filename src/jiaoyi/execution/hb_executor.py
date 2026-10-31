@@ -2907,6 +2907,7 @@ class HbExecutorAdapter:
         rec, state, manager = tracked.record, tracked.server_protection, self._protection
         if (
             detail is None
+            or rec.executor_id is None
             or manager is None
             or state is None
             or not state.ever_armed
