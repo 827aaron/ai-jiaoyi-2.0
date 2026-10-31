@@ -566,6 +566,13 @@ class JevKeeper:
             votes.append({"rule": "giveback", "vote": "close"})
             return verdict(position, now, "close", 1.0, 1, text, None, None, extra=detail)
         votes.append({"rule": "giveback", "vote": "hold" if self._cfg.giveback_on else "off"})
+        if self._skip_model(position, pnl, why_blocked, against):
+            history.append(pnl)
+            del history[:-MAX_HISTORY]
+            self._streak.pop(pid, None)
+            votes.append({"rule": "p_close", "vote": "skip"})
+            text = f"没亏到 {self._cfg.keeper_close_min_loss_r:g}R，不算平仓概率"
+            return verdict(position, now, "hold", 0.0, 1, text, None, None)
         snapshot = self._snapshot(
             position, fv, now, against[0] if against is not None else None, history
         )
@@ -641,6 +648,17 @@ class JevKeeper:
         one_shot = against is not None and against[1]
         if against is not None:
             why.append(f"反向信号急查（{against[0].desc}）" + ("，过线即平" if one_shot else ""))
+        min_loss_r = self._cfg.keeper_close_min_loss_r
+        if min_loss_r > 0 and why_blocked is None:
+            # 平仓概率只管亏损的仓：没亏到线一律不按概率平，亏到线过概率线一次就平
+            loss_r = _loss_r(position, pnl)
+            if loss_r is None or loss_r < min_loss_r:
+                self._streak.pop(pid, None)
+                votes.append({"rule": "p_close", "p_close": round(p_close, 4), "vote": "hold"})
+                why.append(f"没亏到 {min_loss_r:g}R，概率不平")
+                return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+            why.append(f"已亏 {loss_r:.2f}R")
+            one_shot = True
 
         vote: dict[str, Any] = {"rule": "p_close", "p_close": round(p_close, 4)}
         votes.append(vote)
@@ -666,6 +684,22 @@ class JevKeeper:
         self._streak.pop(pid, None)
         vote.update(vote=idle, would_close=False)
         return verdict(position, now, "hold", p_close, 1, "，".join(why), request, resp)
+
+    def _skip_model(
+        self,
+        position: PositionRecord,
+        pnl: float,
+        why_blocked: str | None,
+        against: tuple[AgainstSignalEvent, bool] | None,
+    ) -> bool:
+        """没亏到线不问 Jev。被封的币、反向急查和盈利门控要用这次回答，照常问。"""
+        min_loss_r = self._cfg.keeper_close_min_loss_r
+        if min_loss_r <= 0 or why_blocked is not None or against is not None:
+            return False
+        if self._cfg.keeper_thesis_take_on:
+            return False
+        loss_r = _loss_r(position, pnl)
+        return loss_r is None or loss_r < min_loss_r
 
     def _hold_questions(self, snapshot: str) -> list[JevQuestion]:
         """管家助手问 hold 题时，管家自己也只问那两道（``HOLD_TWO``），三方的题目才一样。"""
@@ -1660,6 +1694,11 @@ class _Inflight(NamedTuple):
     """这一次（同一种类、同一身份）从何时起。"""
     total_since: datetime
     """这段连续在途从何时起。"""
+
+
+def _loss_r(position: PositionRecord, pnl_bps: float) -> float | None:
+    stop_bps = _stop_bps(position)
+    return -pnl_bps / stop_bps if stop_bps else None
 
 
 def _stop_bps(position: PositionRecord) -> float | None:

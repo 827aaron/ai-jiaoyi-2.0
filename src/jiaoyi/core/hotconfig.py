@@ -82,6 +82,7 @@ HOT_FAST: frozenset[str] = frozenset(
         "keeper_close_p",
         "keeper_close_p_strong",
         "keeper_confirmations",
+        "keeper_close_min_loss_r",
         "keeper_price_max_age_s",
         "keeper_model_mode",
         "keeper_price_source",
