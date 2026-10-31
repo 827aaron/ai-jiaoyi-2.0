@@ -3106,6 +3106,11 @@ class HbExecutorAdapter:
                 return False
             info = (detail or {}).get("custom_info")
             ids = info.get("order_ids") if isinstance(info, dict) else None
+            close_type = str((detail or {}).get("close_type") or "").upper()
+            if not ids and close_type.removeprefix("CLOSETYPE.") == "SYSTEM_CLEANUP":
+                # An HB restart rewrites RUNNING rows with no final state, so custom_info is gone
+                # for good; waiting for it left the position stuck in CLOSING until its stop hit.
+                ids = [tracked.entry_client_order_id]
             if not isinstance(ids, list) or not ids:
                 return False
             for cid in ids:
