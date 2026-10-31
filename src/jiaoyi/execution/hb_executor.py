@@ -2898,6 +2898,44 @@ class HbExecutorAdapter:
             self._set(current, quantity=state.entry_filled_quantity)
         return True
 
+    def held_after_hb_restart(
+        self, tracked: TrackedPosition, detail: dict[str, Any] | None
+    ) -> bool:
+        """An HB restart ended the executor, not the trade: with the entry settled and the
+        exchange stop confirmed, the position needs nothing further from HB except its timer,
+        which ``_hb_deadline`` replaces. Anything less certain falls through to the close path."""
+        rec, state, manager = tracked.record, tracked.server_protection, self._protection
+        if (
+            detail is None
+            or manager is None
+            or state is None
+            or not state.ever_armed
+            or state.stage in {"exiting", "cleanup", "done"}
+            or not state.entry_terminal
+            or rec.status is not PositionStatus.OPEN
+            or rec.entry_price is None
+            or tracked.requested_close is not None
+            or tracked.entry_client_order_id is None
+            or tracked.hb_close_pending
+            or tracked.direct_close_pending
+        ):
+            return False
+        info = detail.get("custom_info")
+        close_type = str(detail.get("close_type") or "").upper().removeprefix("CLOSETYPE.")
+        return (
+            executor_query_state(detail, rec.executor_id) == "terminal"
+            and detail.get("status") == "TERMINATED"
+            and close_type == "SYSTEM_CLEANUP"
+            and not (isinstance(info, dict) and info.get("order_ids"))
+            and manager.retains_confirmed_stop(rec.position_id)
+        )
+
+    @staticmethod
+    def _hb_deadline(tracked: TrackedPosition) -> datetime:
+        """The moment HB's own time limit would have fired; see ``_executor_config``."""
+        rec = tracked.record
+        return rec.opened_at + timedelta(seconds=rec.time_limit_s + (tracked.limit_wait_s or 0))
+
     def _stop_first_covered(self, tracked: TrackedPosition) -> bool:
         """托管仓交易所止损已确认、按设计还没有保命单：``stop_first``（缺的保命单交给保护状态机
         的宽限），或这笔用交易所移动止损（本来就不挂保命单）。开仓时不平。"""
@@ -2938,12 +2976,28 @@ class HbExecutorAdapter:
                     )
             return self._registry.get(rec.position_id) or finalized
         close_type = str(detail.get("close_type") or "").upper().removeprefix("CLOSETYPE.")
-        if tracked.requested_close is not None or detail.get("status") in {
-            "SHUTTING_DOWN",
-            "TERMINATED",
-        }:
+        adopted = self.held_after_hb_restart(tracked, detail)
+        if adopted:
+            await self._alert(
+                AlertLevel.WARN,
+                "hummingbot 重启，持仓转为接管",
+                f"{rec.symbol} {rec.position_id}：执行器已被重启清理，交易所止损在位，"
+                "继续持仓；止损、管家和最长持仓照常，由本程序直连平仓",
+                rec.symbol,
+                f"server_adopted:{rec.position_id}",
+                kind="reconcile",
+            )
+            if self._clock() >= self._hb_deadline(tracked):
+                tracked = self._set(tracked, requested_close=CloseReason.TIME_LIMIT)
+        if tracked.requested_close is not None or (
+            not adopted and detail.get("status") in {"SHUTTING_DOWN", "TERMINATED"}
+        ):
+            state = tracked.server_protection
             reason = (
-                tracked.requested_close or _CLOSE_TYPE_MAP.get(close_type) or CloseReason.RECONCILER
+                tracked.requested_close
+                or (state.exit_reason if state else None)
+                or _CLOSE_TYPE_MAP.get(close_type)
+                or CloseReason.RECONCILER
             )
             tracked = self._set(tracked, status=PositionStatus.CLOSING, requested_close=reason)
             await self._close_directly(tracked, reason, None)
@@ -3106,6 +3160,11 @@ class HbExecutorAdapter:
                 return False
             info = (detail or {}).get("custom_info")
             ids = info.get("order_ids") if isinstance(info, dict) else None
+            close_type = str((detail or {}).get("close_type") or "").upper()
+            if not ids and close_type.removeprefix("CLOSETYPE.") == "SYSTEM_CLEANUP":
+                # An HB restart rewrites RUNNING rows with no final state, so custom_info is gone
+                # for good; waiting for it left the position stuck in CLOSING until its stop hit.
+                ids = [tracked.entry_client_order_id]
             if not isinstance(ids, list) or not ids:
                 return False
             for cid in ids:
