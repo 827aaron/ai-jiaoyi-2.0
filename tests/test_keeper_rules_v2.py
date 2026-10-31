@@ -404,6 +404,28 @@ async def test_keeper_review_loss_only_clears_the_streak_above_the_line(now: dat
     assert v.action == "hold"  # 中间那轮赚钱清了计数，这是新的第 1 次
 
 
+@pytest.mark.parametrize(("px", "calls"), [(67900.0, 0), (68020.0, 0), (68030.0, 1)])
+async def test_keeper_review_asks_the_model_only_on_a_loss(
+    now: datetime, tmp_path: Path, px: float, calls: int
+) -> None:
+    log = JsonlDecisionLog(tmp_path)
+    t = MockJevTransport(answer=answer(0.1))
+    k = make(t, now, LOSS_ONLY, iter([px]), log=log, cd=card(now, bias="short"))
+    assert (await k.review(_short(now), now)).action == "hold"
+    assert len(t.calls) == calls
+    assert keeper_records(log, now)[-1].summary
+
+
+async def test_keeper_review_blocked_symbol_still_asks_the_model(now: datetime) -> None:
+    t = MockJevTransport(answer=answer(0.1))
+    k = make(
+        t, now, LOSS_ONLY, iter([67900.0, 67900.0]), cd=card(now, bias="short"),
+        blocked=lambda: {"BTCUSDT": "测试"},
+    )  # fmt: skip
+    await k.review(_short(now), now)
+    assert len(t.calls) == 1
+
+
 async def test_keeper_review_loss_only_respects_record_mode(now: datetime) -> None:
     t = MockJevTransport(answer=answer(0.99))
     cfg = LOSS_ONLY.model_copy(update={"keeper_model_mode": "record"})
